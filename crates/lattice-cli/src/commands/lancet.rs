@@ -4,8 +4,8 @@
 //! `lattice lancet` — LANCET inspection and self-check subcommands.
 //!
 //! - `lancet status`: reads the project InvocationStore without composing a
-//!   CEP server and shows recent typed invocation states.
-//! - `lancet doctor`: catalog count, transport smoke, and invariant-card parse.
+//!   Tool runtime and shows recent typed invocation states.
+//! - `lancet doctor`: validates the workspace and generated closed catalog.
 
 use anyhow::{Context, Result};
 use clap::Subcommand;
@@ -211,7 +211,7 @@ mod tests {
     // -- Doctor tests --
 
     #[test]
-    fn cep_doctor_passes_on_repo_root() {
+    fn generated_catalog_doctor_passes_on_repo_root() {
         let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("crates/")

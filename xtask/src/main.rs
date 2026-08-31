@@ -6,7 +6,6 @@ mod output;
 mod path_norm;
 mod repo_root;
 mod rollout;
-mod scan_rs_tree;
 mod tool_build;
 mod tool_codegen;
 mod tui_mock;

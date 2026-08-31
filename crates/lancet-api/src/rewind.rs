@@ -3,11 +3,10 @@
 
 //! Workspace-side explicit Rewind (GitHub #64).
 //!
-//! Operator surface in the `query_audit` tradition: a direct composition of
-//! the private [`WorkspaceHistory`] and the lancet-native restore executor,
-//! never an Agent Tool and never a CEP method. The session-side half —
-//! resolving the target Turn and moving the Session History ref — lives
-//! above this crate (lancet-api does not see `lattice-session`).
+//! Operator surface over private [`WorkspaceHistory`] and the runtime restore
+//! executor. It is never an Agent Tool or Tool invocation path.
+//! Session-side target resolution and Session History movement live above this
+//! crate because this facade does not depend on `lattice-session`.
 //!
 //! Sequence, all under the history's recording lock: plan the reversal from
 //! `current` back to the target identity, preflight every affected path
@@ -19,7 +18,7 @@
 use std::cell::RefCell;
 use std::path::Path;
 
-use lancet_native::rewind::{
+use lancet_runtime::workspace::rewind::{
     RestoredPath, RewindPathConflict, RewindPathPreflight, RewindRestoreError,
     RewindRestoreOutcome, preflight_and_restore,
 };

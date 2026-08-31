@@ -484,9 +484,7 @@ fn direct_mutation_denials_have_no_side_effect() {
     let caps2 = server2.captured_requests();
     drop(server2);
 
-    // Legacy `[lancet.effects] deny = ["workspace_mutation"]` gates native
-    // catalog declared kinds. Component mutate.create is Cell-admitted (#31),
-    // so the equivalent pre-install refuse is `[lancet.capabilities] deny`.
+    // Capability denial must refuse before the Component reaches installation.
     let (world3, spec3) = direct_world(
         "direct-mut-deny-effect",
         "dl-deff",
@@ -522,9 +520,9 @@ fn direct_mutation_denials_have_no_side_effect() {
             "write-policy denial left a file",
         )?;
         require(
-            finished_with_code(&write_deny.parsed, "mutate.create", "EffectViolation"),
+            finished_with_code(&write_deny.parsed, "mutate.create", "CapabilityViolation"),
             format!(
-                "write-policy denial must be EffectViolation: {:?}",
+                "write-policy denial must be CapabilityViolation: {:?}",
                 write_deny.parsed.events
             ),
         )?;

@@ -11,10 +11,8 @@ async-trait = { workspace = true }
 lancet-api = { workspace = true }
 chrono = { workspace = true }
 lancet-protocol = { workspace = true }
-lancet-catalog = { workspace = true }
 lancet-audit = { workspace = true }
 lancet-authority = { workspace = true }
-lancet-native = { workspace = true }
 lattice-agent = { workspace = true }
 lattice-conversation = { workspace = true }
 lattice-llm = { workspace = true }
@@ -33,16 +31,12 @@ uuid = { workspace = true }
 libc = { workspace = true, optional = true }
 
 [dev-dependencies]
-# `test-method` provides the synthetic `TestEcho` typed method the turn/CEP tests
-# register in place of the migrated `session.todo_write`. Dev-only.
-lancet-catalog = { workspace = true, features = ["test-method"] }
 gix = { workspace = true }
 lattice-session = { workspace = true, features = ["test-utils"] }
 lattice-store = { workspace = true, features = ["test-fault-injection"] }
 tokio = { workspace = true }
 tempfile = { workspace = true }
 lancet-audit = { workspace = true, features = ["test-support"] }
-lancet-cep = { workspace = true }
 lancet-runtime = { workspace = true, features = ["test-utils"] }
 lattice-agent = { workspace = true, features = ["test-utils"] }
 lattice-profile = { workspace = true }
@@ -52,4 +46,4 @@ tokio-stream = { workspace = true }
 
 [features]
 default = []
-test-crash-barriers = ["dep:libc", "lancet-native/test-crash-barriers"]
+test-crash-barriers = ["dep:libc", "lancet-api/test-crash-barriers"]

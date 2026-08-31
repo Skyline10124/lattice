@@ -4,17 +4,17 @@
 //! Negative call tests: schema mismatch, fuel exhaustion, deadline, and
 //! survival proof (#27 slice C.7, Codeberg #5).
 //!
-//! After each failure, a normal no-op call proves the engine/server survives.
-//! Custom-component trap/effect-violation tests require a WIT-matching
-//! guest and are deferred to a dedicated test tool crate.
+//! After each failure, a normal no-op call proves the shared runtime remains
+//! usable. Custom-component trap/capability-violation cases require a
+//! WIT-matching guest and belong in a dedicated test Tool.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use lancet_dispatch::{Cancellation, EventSink};
 use lancet_protocol::cell::Trust;
 use lancet_protocol::evidence::CapabilityAdmissionPolicy;
 use lancet_protocol::{CepErrorCode, InvocationId};
+use lancet_runtime::{Cancellation, EventSink};
 use lancet_runtime::{CellEvidenceLedger, ComponentCallContext, ComponentRuntime, admit_tool};
 use tokio::sync::{mpsc, watch};
 
@@ -24,10 +24,10 @@ fn call_ctx(
     rt: &ComponentRuntime,
 ) -> (
     ComponentCallContext,
-    mpsc::Receiver<lancet_protocol::ToolEvent>,
+    mpsc::UnboundedReceiver<lancet_protocol::ToolEvent>,
     watch::Sender<bool>,
 ) {
-    let (tx, rx) = mpsc::channel(64);
+    let (tx, rx) = mpsc::unbounded_channel();
     let (cancel_tx, cancel_rx) = watch::channel(false);
     let descriptor = rt.descriptor("noop.echo").expect("fixture tool exists");
     let admitted = admit_tool(
@@ -233,7 +233,7 @@ async fn call_with_past_deadline_does_not_crash() {
 // ---------------------------------------------------------------------------
 // Resource-limit enforcement (#47): each configured limit must reject a real
 // Component instantiation/call with `ToolResourceExhausted` and an accurate,
-// non-leaking `resource` field, and the server must survive afterwards. These
+// non-leaking `resource` field, and the runtime must remain usable afterwards.
 // drive the enforcement + mapping end-to-end through the real noop Component,
 // not just the mapper helper.
 // ---------------------------------------------------------------------------
@@ -247,7 +247,7 @@ fn tool_resource(err: &lancet_protocol::CepError) -> Option<&str> {
 }
 
 /// Run one call under `limits`, asserting it fails with `ToolResourceExhausted`
-/// carrying `resource`, then prove the server survives with a normal call.
+/// carrying `resource`, then prove the runtime remains usable with a normal call.
 async fn assert_resource_exhausted_then_survives(
     limits: lancet_runtime::ExecutionLimits,
     resource: &str,
@@ -289,7 +289,7 @@ async fn assert_resource_exhausted_then_survives(
 /// is rejected by the limiter's `memory_growing` callback and maps to
 /// `resource = "memory"` (previously fell through to `ToolTrap`).
 #[tokio::test]
-async fn memory_bytes_limit_maps_to_resource_exhausted_and_server_survives() {
+async fn memory_bytes_limit_maps_to_resource_exhausted_and_runtime_survives() {
     assert_resource_exhausted_then_survives(
         lancet_runtime::ExecutionLimits {
             // One page — well below the guest module's initial memory.
@@ -305,7 +305,7 @@ async fn memory_bytes_limit_maps_to_resource_exhausted_and_server_survives() {
 /// `table_growing` callback and maps to `resource = "table"` (previously
 /// misclassified as `"instances"`, and it fell through to `ToolTrap`).
 #[tokio::test]
-async fn table_elements_limit_maps_to_resource_exhausted_and_server_survives() {
+async fn table_elements_limit_maps_to_resource_exhausted_and_runtime_survives() {
     assert_resource_exhausted_then_survives(
         lancet_runtime::ExecutionLimits {
             table_elements: 0,
@@ -321,7 +321,7 @@ async fn table_elements_limit_maps_to_resource_exhausted_and_server_survives() {
 /// callback, so this is classified from the static footprint as
 /// `resource = "instances"` — proving the configured count now takes effect.
 #[tokio::test]
-async fn instances_limit_maps_to_resource_exhausted_and_server_survives() {
+async fn instances_limit_maps_to_resource_exhausted_and_runtime_survives() {
     assert_resource_exhausted_then_survives(
         lancet_runtime::ExecutionLimits {
             instances: 1,
@@ -335,7 +335,7 @@ async fn instances_limit_maps_to_resource_exhausted_and_server_survives() {
 /// Memory-count limit: `memories = 0` rejects the guest module's linear memory
 /// during instantiation and is classified as `resource = "memories"`.
 #[tokio::test]
-async fn memories_limit_maps_to_resource_exhausted_and_server_survives() {
+async fn memories_limit_maps_to_resource_exhausted_and_runtime_survives() {
     assert_resource_exhausted_then_survives(
         lancet_runtime::ExecutionLimits {
             memories: 0,
@@ -350,7 +350,7 @@ async fn memories_limit_maps_to_resource_exhausted_and_server_survives() {
 /// exceeded during instantiation and is classified as `resource = "tables"`
 /// (distinct from the per-table `table_elements` limit above).
 #[tokio::test]
-async fn tables_limit_maps_to_resource_exhausted_and_server_survives() {
+async fn tables_limit_maps_to_resource_exhausted_and_runtime_survives() {
     assert_resource_exhausted_then_survives(
         lancet_runtime::ExecutionLimits {
             tables: 1,

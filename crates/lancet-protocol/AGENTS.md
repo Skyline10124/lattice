@@ -4,10 +4,10 @@ Crate-local guidance for `lancet-protocol`.
 
 ## Role
 
-This crate is the pure CEP wire/data contract layer. It defines JSON-RPC
-request/response shapes, CEP frame aliases, capability data, policy hook data,
-typed errors, and versioned Cell evidence types. It has no I/O and no Tokio
-dependency.
+This crate is the pure shared wire/data contract layer. It defines JSON-RPC
+envelopes and Tool frames, typed durable identities/bindings, Cell descriptors
+and capabilities, typed errors, and versioned evidence. It has no I/O or async
+runtime dependency.
 
 ## Sub-Architecture
 
@@ -17,8 +17,6 @@ dependency.
   (`CtxOp`/`ExtImpact`/`Trust`/`ScopeDecl`/`Cell`/`Capability`/
   `ToolDescriptor`) plus trust-free CellRef layering.
 - `src/capability.rs` owns required-capability patterns and resolution errors.
-- `src/effect_types.rs` owns legacy `ImpactKind`/`EffectDecl`/`EffectKindSet`,
-  retained for generic migration until ADR 0004 removes that vocabulary.
 - `src/evidence.rs` owns the versioned admission/effect evidence vocabulary:
   `AdmissionEvidence`, `ObservedEffectsRecord`, `DeniedOperationsRecord`,
   `ObservedScope`, `ObservedTarget`, and `CapabilityAdmissionPolicy`.
@@ -31,16 +29,14 @@ dependency.
 - `src/address.rs` owns the provider-neutral structured addresses:
   `ModelMessageAddress`, `ToolCallAddress`, `ModelAttemptKey`, `PlanKey`.
 - `src/error.rs` owns `CepError`, families, wire codes, and retriability.
-- `src/policy.rs` owns deterministic policy hook input/output data.
 - Public re-exports in `src/lib.rs` are the crate contract; keep them stable.
 
 ## Boundaries
 
-- No I/O, Tokio, native execution, or policy side effects.
+- No I/O, async runtime, execution engine, or policy side effects.
 - Serialized field changes are cross-crate changes, not local refactors.
 - Keep serde and schemars behavior explicit for new or renamed fields.
-- Do not encode concrete native handler, Component engine, or Tool Host
-  implementation assumptions. This crate owns only shared wire/data vocabulary.
+- Do not encode concrete Component-engine or Tool Host implementation assumptions.
 - ADR 0004 Cell vocabulary starts here before authority, audit, runtime, or
   generated-descriptor consumers change.
 - Turn/audit provenance and in-toto attestation wire types were retired by
@@ -50,7 +46,7 @@ dependency.
   GitHub #142 added strict lowercase hyphenated UUID-v4
   parse/display/serde/schema and tests; this crate validates but does not
   generate IDs. #139-B threads `InvocationId` through production JSON-RPC,
-  transport, events, evidence, and operator DTOs. Do not add a second
+  runtime calls, events, evidence, and operator DTOs. Do not add a second
   String/newtype identity.
 
 ## Recent Issues
@@ -73,17 +69,13 @@ dependency.
   JSON-RPC wire-code tests.
 - When adding evidence fields, update authority validation, durable storage,
   runtime production, and operator DTO tests in the same series.
-- ADR 0005/#139-B replaces the numeric JSON-RPC request `id` with the canonical
-  string form of an already-reserved InvocationId; it does not reintroduce the
-  deleted `session.envelope` Tool. Reservation creates the invocation and the
-  request dispatches it. Notification params may reference an existing
-  InvocationId for control, but cannot reserve or dispatch an effectful Tool.
-- Do not extend the legacy `ImpactKind` vocabulary. Its retirement still needs
-  the four preconditions in root `AGENTS.md`.
+- Runtime calls use the canonical string form of an already-reserved
+  `InvocationId`; reservation creates the invocation. Control notifications may
+  reference an existing InvocationId but cannot reserve or execute a Tool.
 
 ## Verification
 
 - Local: `cargo test -p lancet-protocol`.
 - Schema/wire changes: add serialization or schemars assertions where useful.
-- Cross-crate protocol changes: also test affected authority, audit, native,
+- Cross-crate protocol changes: also test affected authority, audit, runtime,
   API, and CLI surfaces.

@@ -12,7 +12,7 @@
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
-use lancet_dispatch::{Cancellation, EventSink};
+use crate::control::{Cancellation, EventSink};
 use lancet_protocol::canonical::canonical_json;
 use lancet_protocol::cell::{Cell, ChannelKind, ToolDescriptor, parse_cell_ref};
 use lancet_protocol::evidence::{EffectSource, ObservedTarget};
@@ -55,7 +55,7 @@ pub struct ComponentCallContext {
     /// a Tool that *does* import the interface gets a real one, and one that does
     /// not cannot reach the interface at all.
     ///
-    /// Shared per server run (`Arc`) because the concrete Local Workspace and the
+    /// Shared per Turn (`Arc`) because the concrete Local Workspace and the
     /// Turn's observation budget are both per-turn, not per-call: a per-call copy
     /// of the budget would silently reset the per-turn ceiling.
     pub workspace: Option<Arc<WorkspaceObservationHost>>,
@@ -98,7 +98,7 @@ pub(crate) struct StoreState {
 ///
 /// `call` takes `&self`: the epoch ticker is lazily spawned on the first
 /// call via a [`OnceLock`], so an `Arc<ComponentRuntime>` can be shared
-/// across the projection and server dispatch paths (D.2/D.3).
+/// across catalog projection and execution.
 pub struct ComponentRuntime {
     core: Arc<ComponentCallRuntime>,
     ticker: OnceLock<EpochTicker>,
@@ -248,12 +248,6 @@ impl ComponentRuntime {
             .map(|tool| tool.descriptor.clone())
     }
 
-    /// True if `name` is a Component method in the closed catalog.
-    /// D.3's dispatch split uses this to branch Component vs native.
-    pub fn contains(&self, name: &str) -> bool {
-        self.core.catalog.get(name).is_some()
-    }
-
     /// Override the per-call execution limits. Used by tests to exercise
     /// fuel/timeout/memory limits without composing a new runtime.
     pub fn set_limits(&mut self, limits: ExecutionLimits) {
@@ -293,16 +287,14 @@ impl ComponentRuntime {
             async_handle.block_on(core.call_async(&name, params, ctx))
         })
         .await
-        .map_err(|err| {
-            let mut cep_error = CepError::tool_execution(
-                CepErrorCode::ExecutionFailed,
+        .map_err(|_| {
+            CepError::tool_execution(
+                CepErrorCode::OutcomeIndeterminate,
                 &error_name,
-                "component_worker_failed",
+                "component_worker_failed_after_dispatch",
                 None,
                 Retriability::Permanent,
-            );
-            cep_error.message = format!("component worker failed: {err}");
-            cep_error
+            )
         })?
     }
 }
@@ -803,7 +795,7 @@ mod tests {
             &cell(CtxOp::Mutate),
         )
         .expect_err("undeclared result cell must fail");
-        assert_eq!(undeclared.code, CepErrorCode::EffectViolation);
+        assert_eq!(undeclared.code, CepErrorCode::CapabilityViolation);
         assert!(
             undeclared.message.contains("not in declared capabilities"),
             "{}",
@@ -826,7 +818,7 @@ mod tests {
             &cell(CtxOp::Alloc),
         )
         .expect_err("declared but not admitted must fail");
-        assert_eq!(not_admitted.code, CepErrorCode::EffectViolation);
+        assert_eq!(not_admitted.code, CepErrorCode::CapabilityViolation);
         assert!(
             not_admitted.message.contains("not in the admitted"),
             "{}",
@@ -853,7 +845,7 @@ mod tests {
             &scoped_cell(CtxOp::Alloc, "workspace"),
         )
         .expect_err("a declared cell on a denied scope must fail");
-        assert_eq!(err.code, CepErrorCode::EffectViolation);
+        assert_eq!(err.code, CepErrorCode::CapabilityViolation);
         assert!(
             err.message.contains("not in the admitted"),
             "{}",

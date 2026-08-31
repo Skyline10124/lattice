@@ -331,8 +331,8 @@ mod tests {
             ))
             .unwrap(),
             method: "session.todo_write".to_string(),
-            semantic_stage: "cep_native".to_string(),
-            guard_stage: "cep_policy_lifecycle".to_string(),
+            semantic_stage: "cell_component".to_string(),
+            guard_stage: "cell_admission".to_string(),
         }
     }
 
@@ -344,15 +344,15 @@ mod tests {
             .unwrap(),
             method: "session.todo_write".to_string(),
             ok: true,
-            semantic_stage: "cep_native".to_string(),
-            guard_stage: "cep_policy_lifecycle".to_string(),
+            semantic_stage: "cell_component".to_string(),
+            guard_stage: "cell_admission".to_string(),
             error_code: None,
         }
     }
 
     fn tool_finished() -> TurnEvent {
         TurnEvent::ToolCallFinished {
-            id: "c1".to_string(),
+            id: "00000000-0000-4000-8000-000000000001".to_string(),
             name: "session.todo_write".to_string(),
             ok: true,
             output_len: 2,
@@ -382,12 +382,12 @@ mod tests {
         ));
         assert!(matches!(
             rx.recv().await,
-            Some(TurnEvent::ToolCallFinished { id, .. }) if id == "c1"
+            Some(TurnEvent::ToolCallFinished { id, .. }) if id == "00000000-0000-4000-8000-000000000001"
         ));
     }
 
     #[tokio::test]
-    async fn cep_ordered_emitter_releases_deferred_tool_finish_before_next_plain_event() {
+    async fn cep_ordered_emitter_keeps_tool_finish_behind_late_lifecycle() {
         let (tx, mut rx) = mpsc::channel(8);
         let mut observer = ObserverSink::new(tx);
         let mut ordered = CepOrderedEmitter::default();
@@ -405,11 +405,24 @@ mod tests {
 
         assert!(matches!(
             rx.recv().await,
-            Some(TurnEvent::ToolCallFinished { id, .. }) if id == "c1"
+            Some(TurnEvent::ModelStarted { model, .. }) if model == "model"
+        ));
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+
+        ordered.emit(&mut observer, cep_started(1)).await;
+        ordered.emit(&mut observer, cep_finished(1)).await;
+        assert!(matches!(
+            rx.recv().await,
+            Some(TurnEvent::CepCallStarted { .. })
         ));
         assert!(matches!(
             rx.recv().await,
-            Some(TurnEvent::ModelStarted { model, .. }) if model == "model"
+            Some(TurnEvent::CepCallFinished { .. })
+        ));
+        assert!(matches!(
+            rx.recv().await,
+            Some(TurnEvent::ToolCallFinished { id, .. })
+                if id == "00000000-0000-4000-8000-000000000001"
         ));
     }
 }

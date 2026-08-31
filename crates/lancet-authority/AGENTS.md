@@ -4,9 +4,10 @@ Crate-local guidance for `lancet-authority`.
 
 ## Role
 
-This crate owns host-side policy semantics: capability matching, network and
-workspace policy, observation budgets, Guard L1, and effect regions/checking.
-It performs no Tool I/O.
+This crate owns deterministic host-side policy semantics: network and workspace
+policy, observation budgets, Guard L1, read visibility, and System Path
+Exclusion. Cell capability admission is owned by `lancet-runtime`; this crate
+performs no Tool I/O.
 
 ## Sub-architecture
 
@@ -15,16 +16,12 @@ It performs no Tool I/O.
   then independently validates every resolved address before connecting.
 - `src/policy/observation.rs` owns observation bounds and derives the shared
   per-Turn budget limits.
-- `src/policy/default.rs` holds profile/external-policy configuration plus the
-  residual legacy native decision hook. The production native catalog is empty
-  after #32, so built-in Tools do not resolve through this hook.
-- `src/policy/resolved.rs` resolves only generic native catalog methods. All five
-  built-ins are intentionally unknown to it.
+- `src/policy/default.rs` holds profile/external-policy configuration and
+  workspace deny/read-visibility policy.
 - `src/policy/visibility.rs` owns Policy-Visible Workspace read visibility decisions
   (ignored inclusion, read denial, system exclusion precedence) and System Path Exclusion
   semantics consumed by the runtime workspace host; read, list, grep, and find share the same decision.
 - `src/guard.rs` owns Guard L1 path and scope verdicts.
-- `src/effect/` owns the residual legacy effect region/checker/ledger types.
 
 ## Network policy
 
@@ -50,19 +47,16 @@ scope checks on this function.
 - Components declare requested Cells; host admission and each Tool Host import
   remain the authority.
 - Do not let LLM tool exposure grant authority.
-- Keep audit persistence in `lancet-audit` and server lifecycle in
-  `lancet-native`.
+- Keep audit persistence in `lancet-audit` and Component execution/lifecycle in
+  `lancet-runtime`.
 - Add policy readers with their config keys. Reject unsupported keys rather than
   accepting values that execution ignores.
-- Retire legacy envelope/base-authority/effect vocabulary only when the root
-  `AGENTS.md` preconditions all hold.
 
 ## Verification
 
 - Local: `cargo test -p lancet-authority`.
-- Network changes: also run `cargo test -p lancet-runtime --lib host_network::`
-  and the `lancet-native` `fetch_web` Component round trips.
-- Guard/effect changes: run both accepted and rejected integration cases.
+- Network changes: also run `cargo test -p lancet-runtime --lib host_network::`.
+- Guard changes: run accepted and rejected runtime integration cases.
 
 ## Record maintenance
 

@@ -5,9 +5,7 @@
 
 use std::path::PathBuf;
 
-use lancet_catalog::CATALOG_LEN;
-use lancet_catalog::catalog::catalog;
-use lancet_native::{MethodRegistry, register_production_method_registry};
+use lancet_runtime::ComponentRuntime;
 
 /// Request shape for LANCET doctor checks.
 #[derive(Clone, Debug)]
@@ -31,32 +29,26 @@ pub struct LancetDoctorOutput {
     pub issues: Vec<String>,
 }
 
-/// Run LANCET doctor checks and return structured frontend data.
+/// Validate the canonical workspace and generated closed Component catalog.
 pub fn run_doctor_checks(request: LancetDoctorRequest) -> LancetDoctorOutput {
-    let _ = &request.project_root;
-    let mut ok_items: Vec<String> = Vec::new();
-    let warnings: Vec<String> = Vec::new();
-    let mut issues: Vec<String> = Vec::new();
+    let mut ok_items = Vec::new();
+    let warnings = Vec::new();
+    let mut issues = Vec::new();
 
-    ok_items.push("doctor mode: informational (exit 0)".to_string());
-
-    let catalog_len = catalog().len();
-    if catalog_len == CATALOG_LEN {
-        ok_items.push(format!(
-            "catalog: {catalog_len} methods (expected {CATALOG_LEN})"
-        ));
-    } else {
-        issues.push(format!(
-            "catalog: expected {CATALOG_LEN} methods, got {catalog_len}"
-        ));
+    match std::fs::canonicalize(&request.project_root) {
+        Ok(root) => ok_items.push(format!("workspace: {}", root.display())),
+        Err(error) => issues.push(format!(
+            "workspace: cannot canonicalize '{}': {error}",
+            request.project_root.display()
+        )),
     }
 
-    {
-        let mut registry = MethodRegistry::new();
-        match register_production_method_registry(&mut registry) {
-            Ok(()) => ok_items.push("registry: production methods registered".to_string()),
-            Err(err) => issues.push(format!("registry: {}", err.message)),
-        }
+    match ComponentRuntime::shared() {
+        Ok(runtime) => ok_items.push(format!(
+            "component catalog: {} generated tools composed",
+            runtime.descriptors().count()
+        )),
+        Err(error) => issues.push(format!("component catalog: {error}")),
     }
 
     LancetDoctorOutput {

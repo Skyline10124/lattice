@@ -36,6 +36,24 @@ fn evidence_durability_failure_is_typed_on_the_wire() {
 }
 
 #[test]
+fn invocation_reconciliation_requirement_is_typed_on_the_wire() {
+    let invocation_id =
+        lancet_protocol::InvocationId::parse("00000000-0000-4000-8000-000000000001").unwrap();
+    let event = TurnEvent::RecoveryRequired {
+        reason: crate::session::RecoveryRequired::InvocationReconciliationRequired {
+            invocation_id,
+        },
+    };
+    let value = serde_json::to_value(&event).unwrap();
+    assert_eq!(value["type"], "recovery_required");
+    assert_eq!(
+        value["reason"]["InvocationReconciliationRequired"]["invocation_id"],
+        invocation_id.to_string()
+    );
+    assert_eq!(serde_json::from_value::<TurnEvent>(value).unwrap(), event);
+}
+
+#[test]
 fn usage_summary_preserves_totals() {
     let summary = TurnUsageSummary::from(lattice_session::TurnUsage {
         prompt_tokens: 1,

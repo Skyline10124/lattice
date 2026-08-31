@@ -13,55 +13,6 @@ use lattice_session::SessionGraphStore;
 use super::types::RunTurnRequest;
 use crate::session::SessionApi;
 
-pub(super) fn make_test_run_turn_request(
-    llm: Arc<dyn LlmClient>,
-    _in_memory_audit: bool,
-    enabled_tools: &[String],
-) -> RunTurnRequest {
-    RunTurnRequest {
-        input: "test".to_string(),
-        session_id: TEST_SESSION_ID.to_string(),
-        loaded_profile: Some(make_loaded_profile_with_tools(
-            "sonnet",
-            "System from profile.",
-            enabled_tools,
-        )),
-        cancel_flag: None,
-        test_llm: Some(llm),
-        test_project_root: None,
-    }
-}
-
-pub(super) async fn build_test_production_deps(
-    project_root: &str,
-    enabled_tools: &[String],
-    llm: Arc<dyn LlmClient>,
-    in_memory_audit: bool,
-    lancet: Option<&lattice_profile::LancetSection>,
-) -> super::cep::ProductionTurnDeps {
-    // Ensure a git repo exists so the canonical project root resolves and
-    // the project-shaped test fixtures match the suite's other fixtures.
-    let root = std::path::Path::new(project_root);
-    if !root.join(".git").exists() {
-        std::fs::write(root.join("README.md"), "init\n").expect("write README");
-        init_test_git_repo(root);
-    }
-    // Production composition always strictly opens both project stores.
-    ensure_project_stores(root);
-    let request = make_test_run_turn_request(llm.clone(), in_memory_audit, enabled_tools);
-    super::cep::build_production_turn_deps(super::cep::ProductionTurnDepsInput {
-        request: &request,
-        project_root,
-        project_store_key: None,
-        state_layout: None,
-        enabled_tools,
-        llm,
-        lancet,
-    })
-    .await
-    .expect("production deps")
-}
-
 pub(super) const TEST_SESSION_ID: &str = "0123456789abcdef0123456789abcdef";
 
 /// The store key binding test sessions to the fixture's project root.
@@ -69,16 +20,6 @@ pub(super) fn test_project_key(root: &std::path::Path) -> lattice_session::Proje
     crate::root::LocalWorkspaceRoot::from_path(root)
         .expect("resolve fixture workspace root")
         .store_key()
-}
-
-/// First-create the project's durable stores for `project_root`, the way
-/// `session new` does in production (#143 — a Turn never creates them).
-///
-/// Callers must already have `XDG_STATE_HOME` pointed at a test-owned root.
-pub(super) fn ensure_project_stores(project_root: &std::path::Path) {
-    let layout = lattice_session::StateLayout::resolve().expect("resolve state layout");
-    crate::stores::create_project_stores(&layout, test_project_key(project_root))
-        .expect("create fixture project stores");
 }
 
 pub(super) struct TestFixture {

@@ -21,20 +21,19 @@ LANCET profile sections, and pure lowering data consumed by API/authority.
 
 ## Boundaries
 
-- No runtime orchestration, session graph state, CLI UI, or native handler
-  execution.
+- No runtime orchestration, session graph state, CLI UI, or Tool execution.
 - Keep loading strict; unknown or unsupported fields should be intentional.
 - Keep LANCET policy/profile data compatible with protocol and authority types.
 - Do not silently normalize dangerous paths.
 
 ## Recent Issues
 
-- ADDED #28 (Codeberg #6): `[lancet.capabilities]` (`deny`, `max_boundary`,
-  default `in`) is a typed sub-table, so a Component Tool admission policy can
-  never fall into `extensions`. `AgentProfile::capability_admission_policy`
-  lowers it plus `[tools].enabled` into `CapabilityAdmissionPolicy`; unknown
-  `deny` names fail at server construction, not here. `[lancet.effects]` stays
-  native-path only.
+- `[lancet.capabilities]` (`deny`, `max_boundary`, default `in`) is typed.
+  `AgentProfile::capability_admission_policy` lowers it with `[tools].enabled`
+  into `CapabilityAdmissionPolicy`; runtime construction rejects unknown deny
+  names.
+- Retired `lancet.mode` and `[lancet.effects]` input is rejected during strict
+  deserialization; no compatibility semantics remain.
 - FIXED #62 (Codeberg #40): the Upper microVM `[workspace]` section
   (`WorkspaceSection`, `EgressPolicyConfig`, `CredentialRef`, lifecycle-limit
   constants) was removed. Legacy profiles declaring `[workspace]` now fail
@@ -44,9 +43,8 @@ LANCET profile sections, and pure lowering data consumed by API/authority.
   of silently accepting them.
 - FIXED M-13: profile canonicalization failures now return
   `ProfileError::SystemPathNotFound` instead of falling back to unsafe paths.
-- FIXED M-24-04: profile `tools.enabled` is the method exposure list. Base
-  authority requirements come from catalog descriptors for those methods, not
-  profile-specific branch logic in `lattice-api`.
+- `tools.enabled` is exposure/admission stage one; generated Component Cell
+  descriptors define required capabilities.
 - FIXED #46 (Codeberg #24): optional `[llm].timeout_secs` is validated as
   `1..=3600`; zero and upper-bound failures retain field-specific diagnostics.
 - WATCH: external policy file schema (`[lancet.policy].path`) is consumed by

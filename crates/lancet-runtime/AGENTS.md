@@ -4,10 +4,10 @@ Crate-local guidance for `lancet-runtime`.
 
 ## Role
 
-ADR 0004 Component engine, closed composition gate, Cell capability admission,
-and Tool Host for all five built-ins (#27/#28/#29/#30/#31/#32). Owns the
-wasmtime engine, generated inventory, fail-closed composition, per-call
-admission/authorization, concrete Local Workspace, GET-only network execution,
+ADR 0004's sole Component execution path. This crate owns the Wasmtime engine,
+generated closed catalog and provider projection, reservation-bound call
+controls/events, Cell capability admission, Tool Host enforcement for all five
+built-ins, the concrete Local Workspace, pinned GET-only network execution,
 Cell evidence, and Component result validation.
 
 ## Sub-Architecture
@@ -15,18 +15,22 @@ Cell evidence, and Component result validation.
 - `src/composition.rs` owns `EmbeddedTool`, `ExpectedToolIdentity`,
   `CompositionError`, `ClosedCatalog`, and the `compose` gate. The gate
   verifies descriptor digest, artifact digest, ABI, imports, and channel
-  adapters at startup, and refuses a catalog where one capability name maps
-  to different cells (#28 C2). It cannot see `lancet-catalog`: a Component
-  method name colliding with a native method would arm both vocabularies in
-  one call (#28 design §11 hazard) — migration order keeps this unreachable,
-  since a migrated method leaves the native catalog in the same patch that
-  embeds its Component (#29, #30). The catalog is immutable after `compose`.
+  adapters at startup, and rejects conflicting capability-to-Cell mappings.
+  The catalog is immutable after `compose`.
 - `src/admission.rs` owns `admit_tool` (the fixed enabled → deny → boundary
   stage order), `AdmittedTool`, `AdmissionDenial` (which always carries its
   `AdmissionEvidence`), the per-operation `authorize_operation`, host-owned
   `resolve_scope`, and `validate_policy_against_catalog` (unknown deny name
   = startup error). This is the only authorization authority for Component
-  Tools; `CepMode` never softens it.
+  Tools; admission is always enforced.
+- `src/catalog.rs` projects provider-visible Tool definitions directly from the
+  immutable generated catalog and rejects unknown enabled names.
+- `src/control.rs` owns call-scoped cancellation, ordered host-bound Tool events,
+  and execution receipts carrying typed Cell evidence.
+- `src/execution.rs` owns `RuntimeExecution`, the sole per-Turn composition of
+  Component runtime, admitted call context, hosts, budgets, Local Workspace, and
+  WorkspaceHistory. It checks request method/arguments against the binding, resolves
+  the current descriptor, performs Cell admission, and executes the Component.
 - `src/runtime.rs` owns `ComponentRuntime`, `ComponentCallContext`,
   `StoreState`, the engine/linker/ticker construction, and the `call`
   method (params validation, pre-cancel short-circuit, instantiation,
@@ -39,7 +43,7 @@ Cell evidence, and Component result validation.
   blocking worker, and drives async imports through the composed catalog's bounded
   process-level Tokio runtime (two async workers, at most eight blocking DNS tasks).
   The process-level epoch ticker is lazy and the `Arc<ComponentRuntime>` remains
-  shareable across projection and server dispatch.
+  shareable across catalog projection and `RuntimeExecution`.
 - `src/history.rs` owns `WorkspaceHistory`, `WorkspaceHistoryBacking`,
   `MutationRecord`, `RecordedMutation`, and `HistorySnapshot` — the private
   durable history of successfully installed Atomic Local Mutations (#63),
@@ -60,16 +64,12 @@ Cell evidence, and Component result validation.
   to its cell: `emit-event ⇒ Cell{Mutate, None, <session-channel scope>}`
   with target `Session{turn_id}`. `cancelled` is a pure control probe and is
   never gated.
-- `src/workspace/` owns the one concrete `LocalWorkspace` (#59/#60/#61,
-  Codeberg #37/#38/#39; plus #63; moved down from `lancet-native` in #30):
-  secure per-segment path resolution, Policy-Visible Workspace filtering
-  (gix Git facts + authority read policy), bounded read/list/grep/find,
-  content hashing (Local Revision), no-replace create, atomic edit install,
-  private mutation-history recording (`with_history` / `record_mutation`),
-  filesystem error normalization, and the Local operation vocabulary
-  (`WorkspacePath`, `PathFacts`, `PathIntent`, requests). The async mutation
-  primitives delegate to `*_blocking` synchronous cores so the sync host
-  imports and the async native handlers share one implementation.
+- `src/workspace/` owns the one concrete `LocalWorkspace`: secure per-segment
+  resolution, Policy-Visible Workspace filtering, bounded read/list/grep/find,
+  content hashing, no-replace create, atomic edit install, private mutation
+  history recording, error normalization, and the Local operation vocabulary.
+  Synchronous cores serve Wasmtime Tool Host imports without nesting a Tokio
+  runtime.
 - `src/host_workspace.rs` implements the `workspace-observe` WIT imports on
   `WorkspaceObservationHost` (#30): the four observation operations
   (read/list/grep/find) behind one visibility decision. Every call parses
@@ -116,6 +116,8 @@ Cell evidence, and Component result validation.
   `CallCancelled`) and owns the shared `cancelled_error` used by every
   cancellation observation point (#70). No guest backtrace/host path/secret
   is exposed.
+  `lancet-api` reuses that public constructor for the pre-admission cancellation
+  boundary, so the structured code/category is not duplicated above the runtime.
 - `src/generated/host_composition.rs` is **generated** by `cargo xtask
   tool-codegen` from the Tool manifests that declare `distribution = "builtin"`
   (#29). It carries their `inventory` registrations (`include_bytes!` of the
@@ -133,10 +135,9 @@ Cell evidence, and Component result validation.
 
 ## Boundaries
 
-- No `lancet-native`/`lancet-api`/LATTICE session/agent/profile dependency.
-  `lancet-authority` is a lower layer and a legitimate dependency (#30 reads
-  its read-visibility policy and system-exclusion matcher). The dependency
-  graph has no cycle.
+- No `lancet-api` or LATTICE session/agent/profile dependency.
+  `lancet-authority` is a lower layer and a legitimate dependency for network,
+  read-visibility, Guard L1, and System Path Exclusion policy.
 - No `wasmtime-wasi`/`wasi-common` dependency — no ambient WASI. Only
   versioned Tool Host WIT imports are linked.
 - `WorkspaceHistory` never touches the Local Workspace or the user's project
@@ -173,12 +174,11 @@ Cell evidence, and Component result validation.
   is never invoked, the call continues, and a `DeniedOperation` is recorded
   instead of an effect. Path targets require workspace scopes; host targets
   require network scopes. Other target kinds fail closed.
-- Admission runs per call, outside this crate (the transport), and is
-  handed in through `ComponentCallContext::admitted`. The runtime never
-  admits a tool itself, and no legacy effect type takes part in a decision
-  here — `error_map.rs` only fills the legacy `EffectErrorData` wire shape
-  (its `Vec<ImpactKind>` fields stay empty), which is a named error surface,
-  never an authorization input.
+- `lancet-api::LancetRuntime::dispatch` validates the exact durable reservation before
+  calling this crate. `RuntimeExecution` checks request/binding consistency, performs
+  Cell admission, and passes the resulting `AdmittedTool` through
+  `ComponentCallContext`. The current compiled descriptor-identity residual is tracked
+  as `H-GH34-03`; no legacy effect vocabulary participates in a decision.
 - `call` is `&self`: the epoch ticker is lazily spawned on first call via
   `OnceLock` (requires a tokio runtime context; composition does not).
   `set_limits` remains `&mut self` (tests only).
@@ -189,8 +189,8 @@ Cell evidence, and Component result validation.
 - Observation changes: `cargo test -p lancet-runtime --lib host_workspace::`
   plus `LATTICE_BIN=$PWD/target/debug/lattice cargo test -p
   lattice-system-harness --test direct_observation`.
-- Network changes: `cargo test -p lancet-runtime --lib host_network::` plus
-  `cargo test -p lancet-native --test cep_component_round_trip fetch_web`.
+- Network changes: `cargo test -p lancet-runtime --lib host_network::` plus the
+  relevant `lattice-system-harness` Tool round trips.
 - Mutation changes: `cargo test -p lancet-runtime --lib host_mutate::` plus
   `LATTICE_BIN=$PWD/target/debug/lattice cargo test -p lattice-system-harness
   --test direct_mutation --test direct_failures --test direct_rewind

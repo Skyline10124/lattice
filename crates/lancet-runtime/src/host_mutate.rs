@@ -17,14 +17,13 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use lancet_authority::effect::region::AuthorizedEffectRegion;
+use crate::control::Cancellation;
 use lancet_authority::guard::validate_path_facts;
 use lancet_authority::under_system_exclusion;
-use lancet_dispatch::Cancellation;
 use lancet_protocol::cell::{Cell, ChannelKind, CtxOp, ExtImpact};
 use lancet_protocol::error::{
-    CepError, CepErrorCode, CepErrorData, ExecutionErrorData, GuardErrorData, Retriability,
-    ValidationErrorData,
+    CapabilityErrorData, CepError, CepErrorCode, CepErrorData, ExecutionErrorData, GuardErrorData,
+    Retriability, ValidationErrorData,
 };
 use lancet_protocol::evidence::{
     MutationEvidence, MutationInstallation, MutationPrecondition, ObservedTarget,
@@ -215,21 +214,22 @@ pub fn mutate_cep_error(method: &str, err: &MutateError) -> CepError {
             Retriability::Permanent,
         ),
         MutateError::Denied { .. } => CepError::new(
-            CepErrorCode::EffectViolation,
+            CepErrorCode::CapabilityViolation,
             err.guest_message(),
-            CepErrorData::Validation(ValidationErrorData {
-                field: "path".into(),
-                reason: err.audit_label().into(),
-            }),
+            CepErrorData::Capability(Box::new(CapabilityErrorData {
+                method: method.into(),
+                violations: vec![err.audit_label().into()],
+                cell_ref: None,
+                capability: Some("mutate:write:workspace".into()),
+            })),
             Retriability::Permanent,
         ),
         MutateError::LimitExceeded { limit, actual, .. } => CepError::new(
             CepErrorCode::ToolResourceExhausted,
             err.guest_message(),
             CepErrorData::Execution(ExecutionErrorData {
-                command: method.into(),
-                exit_code: Some(1),
-                stderr: Some(format!("size limit exceeded: {actual} > {limit}")),
+                operation: method.into(),
+                detail: Some(format!("size limit exceeded: {actual} > {limit}")),
             }),
             Retriability::Permanent,
         ),
@@ -276,7 +276,7 @@ pub fn mutate_cep_error(method: &str, err: &MutateError) -> CepError {
 /// Host authority behind the `workspace-mutate` imports.
 pub struct WorkspaceMutationHost {
     workspace: Arc<LocalWorkspace>,
-    authorized_region: AuthorizedEffectRegion,
+    denied_write_patterns: Vec<String>,
     history: Option<Arc<WorkspaceHistory>>,
     scope_name: String,
     max_write_size: usize,
@@ -287,14 +287,14 @@ pub struct WorkspaceMutationHost {
 impl WorkspaceMutationHost {
     pub fn new(
         workspace: Arc<LocalWorkspace>,
-        authorized_region: AuthorizedEffectRegion,
+        denied_write_patterns: Vec<String>,
         history: Option<Arc<WorkspaceHistory>>,
         scope_name: impl Into<String>,
     ) -> Self {
         let mutation_gate = workspace.mutation_sequence_gate();
         Self {
             workspace,
-            authorized_region,
+            denied_write_patterns,
             history,
             scope_name: scope_name.into(),
             max_write_size: MAX_WRITE_SIZE,
@@ -450,7 +450,7 @@ impl WorkspaceMutationHost {
         } else {
             ws_path.as_str()
         };
-        validate_path_facts(guard_path, &facts.to_guard(), &self.authorized_region).map_err(
+        validate_path_facts(guard_path, &facts.to_guard(), &self.denied_write_patterns).map_err(
             |cep| MutateError::Denied {
                 requested: requested.to_string(),
                 reason: cep.message,
@@ -884,6 +884,7 @@ fn map_workspace_io(requested: &str, err: LocalWorkspaceError) -> MutateError {
         LocalWorkspaceError::TargetExists { .. } => MutateError::AlreadyExists {
             requested: requested.to_string(),
         },
+        LocalWorkspaceError::Cancelled => MutateError::Cancelled,
         LocalWorkspaceError::Io(err) => MutateError::Io {
             requested: requested.to_string(),
             detail: err.to_string(),
@@ -1067,7 +1068,7 @@ mod tests {
 
     use std::collections::BTreeSet;
     use std::fs;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     use lancet_protocol::cell::{ArtifactIdentity, Capability, ScopeDecl, ToolDescriptor, Trust};
     use lancet_protocol::evidence::CapabilityAdmissionPolicy;
@@ -1141,7 +1142,7 @@ mod tests {
 
     fn host_over(
         root: &Path,
-        region: AuthorizedEffectRegion,
+        denied_write_patterns: Vec<String>,
         history: Option<Arc<WorkspaceHistory>>,
     ) -> (
         WorkspaceMutationHost,
@@ -1150,7 +1151,12 @@ mod tests {
     ) {
         let workspace = Arc::new(LocalWorkspace::new(root));
         (
-            WorkspaceMutationHost::new(Arc::clone(&workspace), region, history, "workspace"),
+            WorkspaceMutationHost::new(
+                Arc::clone(&workspace),
+                denied_write_patterns,
+                history,
+                "workspace",
+            ),
             CellEvidenceLedger::new(),
             workspace,
         )
@@ -1163,7 +1169,7 @@ mod tests {
         CellEvidenceLedger,
         Arc<LocalWorkspace>,
     ) {
-        host_over(root, AuthorizedEffectRegion::empty(), None)
+        host_over(root, Vec::new(), None)
     }
 
     fn ctx<'a>(
@@ -1198,33 +1204,12 @@ mod tests {
         }
     }
 
-    fn deny_writes(root: &Path, patterns: &[&str]) -> AuthorizedEffectRegion {
-        let mut region = AuthorizedEffectRegion::empty();
-        for pattern in patterns {
-            let joined = root.join(pattern);
-            if pattern.ends_with("/**") {
-                region
-                    .denied_write_path_prefixes
-                    .push(joined.parent().unwrap_or(root).to_path_buf());
-            } else {
-                region.denied_write_paths.push(joined);
-            }
-        }
-        // validate_path_facts compares against facts.normalized_path which is
-        // project-relative. Mirror native mutation tests by also storing the
-        // relative form when the pattern is relative.
-        region.denied_write_paths = patterns
+    fn deny_writes(_root: &Path, patterns: &[&str]) -> Vec<String> {
+        patterns
             .iter()
-            .filter(|p| !p.ends_with("/**"))
-            .map(PathBuf::from)
-            .collect();
-        region.denied_write_path_prefixes = patterns
-            .iter()
-            .filter_map(|p| p.strip_suffix("/**").map(PathBuf::from))
-            .collect();
-        region
+            .map(|pattern| (*pattern).to_string())
+            .collect()
     }
-
     #[test]
     fn create_if_absent_installs_new_file_and_records_effect() {
         let dir = seeded_project();
@@ -1294,18 +1279,9 @@ mod tests {
     fn hosts_for_same_workspace_share_install_history_gate() {
         let dir = seeded_project();
         let workspace = Arc::new(LocalWorkspace::new(dir.path()));
-        let host_a = WorkspaceMutationHost::new(
-            Arc::clone(&workspace),
-            AuthorizedEffectRegion::empty(),
-            None,
-            "workspace",
-        );
-        let host_b = WorkspaceMutationHost::new(
-            workspace,
-            AuthorizedEffectRegion::empty(),
-            None,
-            "workspace",
-        );
+        let host_a =
+            WorkspaceMutationHost::new(Arc::clone(&workspace), Vec::new(), None, "workspace");
+        let host_b = WorkspaceMutationHost::new(workspace, Vec::new(), None, "workspace");
 
         let _guard = host_a.mutation_gate.lock().unwrap();
         assert!(
@@ -1318,18 +1294,9 @@ mod tests {
     fn concurrent_create_same_target_has_one_winner_and_one_replan() {
         let dir = seeded_project();
         let workspace = Arc::new(LocalWorkspace::new(dir.path()));
-        let host_a = WorkspaceMutationHost::new(
-            Arc::clone(&workspace),
-            AuthorizedEffectRegion::empty(),
-            None,
-            "workspace",
-        );
-        let host_b = WorkspaceMutationHost::new(
-            workspace,
-            AuthorizedEffectRegion::empty(),
-            None,
-            "workspace",
-        );
+        let host_a =
+            WorkspaceMutationHost::new(Arc::clone(&workspace), Vec::new(), None, "workspace");
+        let host_b = WorkspaceMutationHost::new(workspace, Vec::new(), None, "workspace");
         let tool = admitted();
         let evidence_a = CellEvidenceLedger::new();
         let evidence_b = CellEvidenceLedger::new();
@@ -1477,7 +1444,7 @@ mod tests {
             host.take_refusal(test_invocation_id(7))
                 .expect("structured refusal")
                 .code,
-            CepErrorCode::EffectViolation
+            CepErrorCode::CapabilityViolation
         );
     }
 
@@ -1577,11 +1544,7 @@ mod tests {
     fn successful_create_appends_private_history() {
         let dir = seeded_project();
         let (_state, history) = private_history();
-        let (host, evidence, _) = host_over(
-            dir.path(),
-            AuthorizedEffectRegion::empty(),
-            Some(history.clone()),
-        );
+        let (host, evidence, _) = host_over(dir.path(), Vec::new(), Some(history.clone()));
         let tool = admitted();
         let call = ctx(&tool, &evidence, "mutate.create");
 
@@ -1597,11 +1560,7 @@ mod tests {
         let dir = seeded_project();
         let (_state, history) = private_history();
         history.fail_next_record();
-        let (host, evidence, _) = host_over(
-            dir.path(),
-            AuthorizedEffectRegion::empty(),
-            Some(history.clone()),
-        );
+        let (host, evidence, _) = host_over(dir.path(), Vec::new(), Some(history.clone()));
         let tool = admitted();
         let call = ctx(&tool, &evidence, "mutate.create");
 
@@ -1645,11 +1604,7 @@ mod tests {
     fn create_parent_fsync_failure_keeps_installed_history_and_effect() {
         let dir = seeded_project();
         let (_state, history) = private_history();
-        let (host, evidence, workspace) = host_over(
-            dir.path(),
-            AuthorizedEffectRegion::empty(),
-            Some(history.clone()),
-        );
+        let (host, evidence, workspace) = host_over(dir.path(), Vec::new(), Some(history.clone()));
         let tool = admitted();
         let call = ctx(&tool, &evidence, "mutate.create");
         workspace.fail_next_parent_fsync();
@@ -1680,11 +1635,7 @@ mod tests {
     fn replace_parent_fsync_failure_keeps_installed_history_and_effect() {
         let dir = seeded_project();
         let (_state, history) = private_history();
-        let (host, evidence, workspace) = host_over(
-            dir.path(),
-            AuthorizedEffectRegion::empty(),
-            Some(history.clone()),
-        );
+        let (host, evidence, workspace) = host_over(dir.path(), Vec::new(), Some(history.clone()));
         let tool = admitted();
         let call = ctx(&tool, &evidence, "mutate.edit");
         workspace.fail_next_parent_fsync();

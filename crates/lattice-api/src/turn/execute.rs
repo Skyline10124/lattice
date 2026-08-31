@@ -133,8 +133,8 @@ pub async fn stream_turn(session: SessionApi, request: RunTurnRequest) -> Result
     let deps = build_production_turn_deps(ProductionTurnDepsInput {
         request: &request,
         project_root: &project_root,
-        project_store_key: Some(project_store_key),
-        state_layout: Some(layout),
+        project_store_key,
+        state_layout: layout,
         enabled_tools: &enabled_tools,
         llm: production_llm(&request),
         lancet: cep,

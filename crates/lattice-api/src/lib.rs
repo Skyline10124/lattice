@@ -45,8 +45,6 @@ pub use session::{
     ApiError, CreateSessionRequest, EvidenceDurabilityFailed, OpenSessionRequest, RecoveryRequired,
     SessionApi,
 };
-#[doc(hidden)]
-pub use turn::{CepErrorPayload, ToolExecutionError};
 pub use turn::{
     RunTurnRequest, RunTurnResult, RunTurnStage, STREAM_IDLE_TIMEOUT_SECS, ToolResultSummary,
     TurnEvent, TurnEventStream, TurnUsageSummary, collect_turn_result_from_events, run_turn,

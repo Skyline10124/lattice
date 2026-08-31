@@ -387,6 +387,12 @@ The lattice-api B11 leg follows the existing `cep_tests.rs` pattern
 
 ## 11. Legacy deletion gate (B9 / C7 / A4 — recorded, not executed)
 
+> **Closeout (GitHub #34, 2026-08-28):** all four preconditions below are
+> satisfied. The hard cut deleted native/CEP/catalog/dispatch authority, legacy
+> effect types, and `[lancet.effects]`. The remainder of this section is the
+> historical gate record that constrained #28; it no longer describes a shipped
+> production path.
+
 `ImpactKind`, `EffectScopeKind`, `OverlayBehavior`, `FailureSemantics`,
 `BaseAuthorityRequirement` are **not** deleted in #28. They sit on four
 serialized surfaces (JSON-RPC error wire, stored provenance/attestation v1,

@@ -39,11 +39,8 @@ type ReplaceBeforeCheck = Arc<Mutex<Option<(WorkspacePath, Vec<u8>)>>>;
 ///
 /// Internal deep module: secure path resolution, bounded read, atomic
 /// installation, mutation history, and error normalization all live behind
-/// this type. It is `pub` because two host callers live in different crates
-/// since #30 — this crate's `workspace-observe` Tool Host imports, and
-/// `lancet-native`'s still-native mutation handlers — but that is reach, not a
-/// seam: the type is concrete, has no trait behind it, and cannot be swapped
-/// or injected. There is no workspace-backend seam to implement.
+/// this type. All Tool Host observation/mutation paths use it directly; there
+/// is no workspace-backend trait or caller-supplied execution seam.
 pub struct LocalWorkspace {
     /// Canonical project root. Captured at construction time; never mutates.
     root: PathBuf,
@@ -137,13 +134,10 @@ impl From<std::io::Error> for ConditionalCreateError {
 impl LocalWorkspace {
     /// Construct from a project root with mutation history recording off.
     ///
-    /// Test-only: the production server always attaches the run's private
+    /// Test-only: the production runtime always attaches the Turn's private
     /// history through [`LocalWorkspace::with_history`], so an installation
     /// path that records nothing cannot exist in a real turn. Gated on the
-    /// `test-utils` feature rather than `#[cfg(test)]` since #30 moved the module
-    /// across a crate boundary — `lancet-native`'s tests are a different
-    /// compilation unit and `cfg(test)` does not reach them. Production binaries
-    /// do not enable the feature, so the constructor remains absent from them.
+    /// The feature keeps the constructor absent from production binaries.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn new(root: &Path) -> Self {
         Self::with_history(root, Arc::new(WorkspaceHistory::disabled()))
@@ -446,11 +440,8 @@ impl LocalWorkspace {
 
     /// Per-segment secure resolution returning only the observed facts.
     ///
-    /// The synchronous form. Every observation entry point — the async wrappers
-    /// the native handlers drive and the synchronous Tool Host imports in
-    /// [`crate::host_workspace`] — funnels through this one function, so path
-    /// safety has exactly one implementation rather than one per calling
-    /// convention (#30).
+    /// Every observation entry point and synchronous Tool Host import funnels
+    /// through this function, so path safety has one implementation.
     pub fn resolve_facts_blocking(
         &self,
         path: &WorkspacePath,
@@ -613,8 +604,21 @@ impl LocalWorkspace {
         &self,
         req: &GrepRequest,
         max_results: usize,
-        mut visibility: VisibilityEngine,
+        visibility: VisibilityEngine,
     ) -> Result<(Vec<GrepMatch>, VisibilityEvidence), LocalWorkspaceError> {
+        self.grep_blocking_cancellable(req, max_results, visibility, || false)
+    }
+
+    pub(crate) fn grep_blocking_cancellable(
+        &self,
+        req: &GrepRequest,
+        max_results: usize,
+        mut visibility: VisibilityEngine,
+        is_cancelled: impl Fn() -> bool,
+    ) -> Result<(Vec<GrepMatch>, VisibilityEvidence), LocalWorkspaceError> {
+        if is_cancelled() {
+            return Err(LocalWorkspaceError::Cancelled);
+        }
         let (full, facts) = self.resolve_secure(&req.path, PathIntent::ListDirectory)?;
         if !facts.exists {
             return Err(LocalWorkspaceError::NotFound {
@@ -630,7 +634,7 @@ impl LocalWorkspace {
         let re = Regex::new(&req.pattern)
             .map_err(std::io::Error::other)
             .map_err(LocalWorkspaceError::Io)?;
-        let mut out: Vec<GrepMatch> = Vec::new();
+        let mut out = Vec::new();
         let mut budget = GrepBudget::default();
         grep_walk(
             &self.root,
@@ -641,6 +645,7 @@ impl LocalWorkspace {
             &mut budget,
             &mut visibility,
             &mut out,
+            &is_cancelled,
         )?;
         Ok((out, visibility.evidence()))
     }
@@ -666,8 +671,21 @@ impl LocalWorkspace {
         &self,
         req: &FindRequest,
         max_results: usize,
-        mut visibility: VisibilityEngine,
+        visibility: VisibilityEngine,
     ) -> Result<(Vec<WorkspacePath>, VisibilityEvidence), LocalWorkspaceError> {
+        self.find_files_blocking_cancellable(req, max_results, visibility, || false)
+    }
+
+    pub(crate) fn find_files_blocking_cancellable(
+        &self,
+        req: &FindRequest,
+        max_results: usize,
+        mut visibility: VisibilityEngine,
+        is_cancelled: impl Fn() -> bool,
+    ) -> Result<(Vec<WorkspacePath>, VisibilityEvidence), LocalWorkspaceError> {
+        if is_cancelled() {
+            return Err(LocalWorkspaceError::Cancelled);
+        }
         let (full, facts) = self.resolve_secure(&req.path, PathIntent::ListDirectory)?;
         if !facts.exists {
             return Err(LocalWorkspaceError::NotFound {
@@ -680,7 +698,7 @@ impl LocalWorkspace {
                 "find root is not a directory",
             )));
         }
-        let mut out: Vec<WorkspacePath> = Vec::new();
+        let mut out = Vec::new();
         find_walk(
             &self.root,
             &full,
@@ -688,6 +706,7 @@ impl LocalWorkspace {
             max_results,
             &mut visibility,
             &mut out,
+            &is_cancelled,
         )?;
         Ok((out, visibility.evidence()))
     }
@@ -1297,11 +1316,18 @@ fn grep_walk(
     budget: &mut GrepBudget,
     visibility: &mut VisibilityEngine,
     out: &mut Vec<GrepMatch>,
+    is_cancelled: &impl Fn() -> bool,
 ) -> Result<(), LocalWorkspaceError> {
+    if is_cancelled() {
+        return Err(LocalWorkspaceError::Cancelled);
+    }
     if out.len() >= max_results || budget.exhausted() {
         return Ok(());
     }
     for entry in fs::read_dir(current)? {
+        if is_cancelled() {
+            return Err(LocalWorkspaceError::Cancelled);
+        }
         if out.len() >= max_results || budget.exhausted() {
             break;
         }
@@ -1320,6 +1346,7 @@ fn grep_walk(
                     budget,
                     visibility,
                     out,
+                    is_cancelled,
                 )?;
             }
         } else if meta.is_file() {
@@ -1337,7 +1364,7 @@ fn grep_walk(
             if meta.len() > budget.per_file_bytes {
                 continue;
             }
-            grep_file(&rel, &path, re, max_results, budget, out)?;
+            grep_file(&rel, &path, re, max_results, budget, out, is_cancelled)?;
         }
     }
     Ok(())
@@ -1361,6 +1388,7 @@ fn grep_file(
     max_results: usize,
     budget: &mut GrepBudget,
     out: &mut Vec<GrepMatch>,
+    is_cancelled: &impl Fn() -> bool,
 ) -> Result<(), LocalWorkspaceError> {
     // Unreadable files are silently skipped, preserving the old semantics.
     let file = match fs::File::open(path) {
@@ -1373,6 +1401,9 @@ fn grep_file(
     let mut consumed: u64 = 0;
     let mut line_number: u64 = 0;
     loop {
+        if is_cancelled() {
+            return Err(LocalWorkspaceError::Cancelled);
+        }
         if out.len() >= max_results {
             break;
         }
@@ -1422,11 +1453,18 @@ fn find_walk(
     max_results: usize,
     visibility: &mut VisibilityEngine,
     out: &mut Vec<WorkspacePath>,
+    is_cancelled: &impl Fn() -> bool,
 ) -> Result<(), LocalWorkspaceError> {
+    if is_cancelled() {
+        return Err(LocalWorkspaceError::Cancelled);
+    }
     if out.len() >= max_results {
         return Ok(());
     }
     for entry in fs::read_dir(current)? {
+        if is_cancelled() {
+            return Err(LocalWorkspaceError::Cancelled);
+        }
         if out.len() >= max_results {
             break;
         }
@@ -1441,7 +1479,15 @@ fn find_walk(
             out.push(WorkspacePath::parse(&rel).map_err(LocalWorkspaceError::Path)?);
         }
         if is_dir && assessment.should_descend() {
-            find_walk(workspace_root, &path, pattern, max_results, visibility, out)?;
+            find_walk(
+                workspace_root,
+                &path,
+                pattern,
+                max_results,
+                visibility,
+                out,
+                is_cancelled,
+            )?;
         }
     }
     Ok(())
@@ -1834,6 +1880,29 @@ mod tests {
         assert!(!strs.contains(&"b.txt".to_string()));
     }
 
+    #[test]
+    fn find_walk_observes_mid_traversal_cancellation() {
+        let dir = TempDir::new().unwrap();
+        for index in 0..32 {
+            let child = dir.path().join(format!("d{index}"));
+            std::fs::create_dir(&child).unwrap();
+            std::fs::write(child.join("file.txt"), b"").unwrap();
+        }
+        let ws = ws_at(&dir);
+        let request = FindRequest {
+            pattern: "*".into(),
+            path: WorkspacePath::project_root(),
+        };
+        let visibility = VisibilityEngine::load(dir.path(), Default::default());
+        let probes = std::sync::atomic::AtomicUsize::new(0);
+        let error = ws
+            .find_files_blocking_cancellable(&request, 100, visibility, || {
+                probes.fetch_add(1, Ordering::Relaxed) >= 3
+            })
+            .unwrap_err();
+        assert!(matches!(error, LocalWorkspaceError::Cancelled));
+    }
+
     #[tokio::test]
     async fn read_file_missing_returns_not_found() {
         let dir = TempDir::new().unwrap();
@@ -2083,6 +2152,7 @@ mod tests {
             &mut budget,
             &mut visibility,
             &mut out,
+            &|| false,
         )
         .unwrap();
         assert_eq!(out.len(), 1, "got {out:?}");
@@ -2111,6 +2181,7 @@ mod tests {
             &mut budget,
             &mut visibility,
             &mut out,
+            &|| false,
         )
         .unwrap();
         assert!(out.is_empty(), "exhausted budget must scan nothing");
@@ -2123,10 +2194,28 @@ mod tests {
         std::fs::write(&b, "needle b\n").unwrap();
         let mut budget = GrepBudget::new(64, 64);
         let mut out = Vec::new();
-        grep_file("a.txt", &a, &needle_re(), 100, &mut budget, &mut out).unwrap();
+        grep_file(
+            "a.txt",
+            &a,
+            &needle_re(),
+            100,
+            &mut budget,
+            &mut out,
+            &|| false,
+        )
+        .unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(budget.file_allowance(), 3, "61 of 64 total consumed");
-        grep_file("b.txt", &b, &needle_re(), 100, &mut budget, &mut out).unwrap();
+        grep_file(
+            "b.txt",
+            &b,
+            &needle_re(),
+            100,
+            &mut budget,
+            &mut out,
+            &|| false,
+        )
+        .unwrap();
         assert_eq!(out.len(), 1, "truncated allowance must not match: {out:?}");
     }
 
@@ -2142,7 +2231,16 @@ mod tests {
         std::fs::write(&path, content).unwrap();
         let mut budget = GrepBudget::new(32, 1024);
         let mut out = Vec::new();
-        grep_file("c.txt", &path, &needle_re(), 100, &mut budget, &mut out).unwrap();
+        grep_file(
+            "c.txt",
+            &path,
+            &needle_re(),
+            100,
+            &mut budget,
+            &mut out,
+            &|| false,
+        )
+        .unwrap();
         assert_eq!(out.len(), 1, "got {out:?}");
         assert_eq!(out[0].line_number, 1);
         assert_eq!(out[0].line, "needle one");

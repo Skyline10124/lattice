@@ -36,23 +36,21 @@
 //!   and the user's project `.git` (GitHub #63, migrated in #143).
 //! - **The concrete Local Workspace** — [`workspace::LocalWorkspace`] and the
 //!   [`workspace::VisibilityEngine`] moved down here in GitHub #30, because the
-//!   `workspace-observe` Tool Host imports execute observation and a host import
-//!   cannot reach up a layer into `lancet-native`. Secure per-segment path
-//!   resolution, System Path Exclusion, the Policy-Visible Workspace decision,
-//!   bounded reads, atomic installation, and mutation history now sit behind one
-//!   concrete host module in one crate. `lancet-native`'s still-native mutation
-//!   handlers consume it from here; they do not own a second copy, and there is
-//!   no execution-backend trait to implement.
+//!   `workspace-observe` and `workspace-mutate` Tool Host imports execute all
+//!   filesystem operations here. Secure per-segment path resolution, System Path
+//!   Exclusion, visibility, bounded reads, atomic installation, mutation history,
+//!   and Rewind share this one concrete module.
 //!
-//! `lancet-runtime` does **not** depend on `lancet-native`, `lancet-api`, or
-//! any LATTICE session/agent/profile crate. The dependency graph has no cycle:
-//! the `lancet-authority` edge #30 added points down to Layer 2.
-
+//! `lancet-runtime` does **not** depend on `lancet-api` or any LATTICE
+//! session/agent/profile crate. The `lancet-authority` edge points downward.
 pub mod admission;
 pub mod bindings;
+pub mod catalog;
 pub mod composition;
+pub mod control;
 pub mod error_map;
 pub mod evidence;
+pub mod execution;
 pub mod generated;
 pub mod history;
 pub mod host;
@@ -71,8 +69,11 @@ pub use admission::{
     AdmissionDenial, AdmissionDenialReason, AdmittedTool, OperationDenial, PolicyValidationError,
     admit_tool, authorize_operation, validate_policy_against_catalog,
 };
+pub use catalog::{CatalogSelectionError, ToolDefinition, enabled_tool_definitions};
 pub use composition::{ClosedCatalog, CompositionError, EmbeddedTool, ExpectedToolIdentity};
+pub use control::{Cancellation, CancellationSender, EventSink, ExecutionReceipt};
 pub use evidence::CellEvidenceLedger;
+pub use execution::RuntimeExecution;
 pub use history::{
     HistorySnapshot, MutationRecord, RecordedMutation, RewindError, RewindPathRestore, RewindPlan,
     RewindStep, WorkspaceHistory, WorkspaceHistoryBacking, WorkspaceHistoryError,

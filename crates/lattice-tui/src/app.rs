@@ -157,6 +157,11 @@ impl App {
                     ),
                 });
             }
+            TurnEvent::RecoveryRequired { reason } => {
+                self.push_status(StatusKind::CommitFailed {
+                    reason: format!("recovery required: {reason}"),
+                });
+            }
             TurnEvent::TurnFailed { reason } => {
                 self.push_status(StatusKind::TurnFailed { reason });
             }

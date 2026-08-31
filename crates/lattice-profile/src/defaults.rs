@@ -182,8 +182,7 @@ mod tests {
     use super::*;
 
     /// The five manifest-owned Components of the default distribution (ADR 0004
-    /// decision 1). This is the shipped-Tool set a profile template may name, not
-    /// the empty production `lancet_catalog::catalog()`.
+    /// decision 1). This is the shipped Tool set a profile template may name.
     fn is_default_distribution_tool(name: &str) -> bool {
         matches!(
             name,

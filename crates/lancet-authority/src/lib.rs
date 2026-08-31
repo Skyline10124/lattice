@@ -1,13 +1,12 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! CEP authority semantics.
+//! LANCET authority semantics.
 //!
-//! This crate owns policy evaluation, capability matching, Guard L1 write-scope
-//! checks, turn-scoped active envelopes, and effect-region checking. It does not
-//! own native handler I/O or server lifecycle wiring.
+//! This crate owns deterministic network, observation, workspace visibility,
+//! and Guard L1 policy. Component execution and Cell admission live in
+//! `lancet-runtime`.
 
-pub mod effect;
 pub mod guard;
 pub mod policy;
 

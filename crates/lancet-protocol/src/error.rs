@@ -6,7 +6,6 @@
 //! Error codes live in JSON-RPC reserved range `-32000..-32099`, segmented by
 //! family. Every error carries typed `data` and a mandatory `Retriability` hint.
 
-use crate::effect_types::ImpactKind;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -29,53 +28,35 @@ pub enum CepErrorFamily {
     Execution,
     State,
     Guard,
-    Effect,
+    Capability,
     Reserved,
 }
 
 /// Closed enum of CEP error codes within `-32000..-32099`.
 ///
-/// `CommandTimeout` (`-32021`) is reserved for execution deadline elapse
-/// scenarios, including cases where cleanup succeeds or the child has already
-/// exited. `ChildKillFailed` (`-32022`) is reserved for timeout cleanup
-/// failures, such as `Child::kill().await` returning an error or the OS
-/// reporting an unreaped child after the deadline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[repr(i32)]
 pub enum CepErrorCode {
-    // Validation (-32001..-32009)
-    SchemaMismatch,
-    PathContainment,
-    TypeError,
-    // Permission (-32010..-32019)
-    CapabilityNotGranted,
-    ProjectRootViolation,
-    AmbientAuthorityDenied,
-    // Execution (-32020..-32029)
-    ExecutionFailed,
-    CommandTimeout,
-    ChildKillFailed,
-    // Component Tool execution failures (#27, Codeberg #5, slice C).
-    ToolTrap,
-    ToolTimeout,
-    ToolResourceExhausted,
-    CallCancelled,
+    // Stable small codes embedded in model-visible ToolResult content.
+    SchemaMismatch = 0,
+    PathContainment = 1,
+    TypeError = 2,
+    CapabilityNotGranted = 3,
+    ProjectRootViolation = 4,
+    AmbientAuthorityDenied = 5,
+    ExecutionFailed = 6,
+    ToolTrap = 9,
+    ToolTimeout = 10,
+    ToolResourceExhausted = 11,
+    CallCancelled = 12,
     /// The effect may have occurred, but durable outcome evidence could not be completed.
-    OutcomeIndeterminate,
-    // State (-32030..-32039)
-    StaleContext,
-    ResourceConflict,
-    EnvelopeAlreadyActive,
-    DuplicateRegistration,
-    // Guard (-32040..-32049)
-    EnvelopeMissing,
-    OutOfScopeMutation,
-    GuardDenied,
-    ReplanRequired,
-    // Effect (-32050..-32059)
-    EffectViolation,
-    // Reserved (-32060..-32099)
-    Reserved,
+    OutcomeIndeterminate = 13,
+    ResourceConflict = 15,
+    GuardDenied = 20,
+    ReplanRequired = 21,
+    CapabilityViolation = 22,
+    Reserved = 23,
 }
 
 impl CepErrorCode {
@@ -88,22 +69,15 @@ impl CepErrorCode {
             Self::ProjectRootViolation => -32011,
             Self::AmbientAuthorityDenied => -32012,
             Self::ExecutionFailed => -32020,
-            Self::CommandTimeout => -32021,
-            Self::ChildKillFailed => -32022,
             Self::ToolTrap => -32023,
             Self::ToolTimeout => -32024,
             Self::ToolResourceExhausted => -32025,
             Self::CallCancelled => -32026,
             Self::OutcomeIndeterminate => -32027,
-            Self::StaleContext => -32030,
             Self::ResourceConflict => -32031,
-            Self::EnvelopeAlreadyActive => -32032,
-            Self::DuplicateRegistration => -32033,
-            Self::EnvelopeMissing => -32040,
-            Self::OutOfScopeMutation => -32041,
             Self::GuardDenied => -32042,
             Self::ReplanRequired => -32043,
-            Self::EffectViolation => -32050,
+            Self::CapabilityViolation => -32050,
             Self::Reserved => -32060,
         }
     }
@@ -117,22 +91,14 @@ impl CepErrorCode {
             | Self::ProjectRootViolation
             | Self::AmbientAuthorityDenied => CepErrorFamily::Permission,
             Self::ExecutionFailed
-            | Self::CommandTimeout
-            | Self::ChildKillFailed
             | Self::ToolTrap
             | Self::ToolTimeout
             | Self::ToolResourceExhausted
             | Self::CallCancelled
             | Self::OutcomeIndeterminate => CepErrorFamily::Execution,
-            Self::StaleContext
-            | Self::ResourceConflict
-            | Self::EnvelopeAlreadyActive
-            | Self::DuplicateRegistration => CepErrorFamily::State,
-            Self::EnvelopeMissing
-            | Self::OutOfScopeMutation
-            | Self::GuardDenied
-            | Self::ReplanRequired => CepErrorFamily::Guard,
-            Self::EffectViolation => CepErrorFamily::Effect,
+            Self::ResourceConflict => CepErrorFamily::State,
+            Self::GuardDenied | Self::ReplanRequired => CepErrorFamily::Guard,
+            Self::CapabilityViolation => CepErrorFamily::Capability,
             Self::Reserved => CepErrorFamily::Reserved,
         }
     }
@@ -146,22 +112,15 @@ impl CepErrorCode {
             -32011 => Self::ProjectRootViolation,
             -32012 => Self::AmbientAuthorityDenied,
             -32020 => Self::ExecutionFailed,
-            -32021 => Self::CommandTimeout,
-            -32022 => Self::ChildKillFailed,
             -32023 => Self::ToolTrap,
             -32024 => Self::ToolTimeout,
             -32025 => Self::ToolResourceExhausted,
             -32026 => Self::CallCancelled,
             -32027 => Self::OutcomeIndeterminate,
-            -32030 => Self::StaleContext,
             -32031 => Self::ResourceConflict,
-            -32032 => Self::EnvelopeAlreadyActive,
-            -32033 => Self::DuplicateRegistration,
-            -32040 => Self::EnvelopeMissing,
-            -32041 => Self::OutOfScopeMutation,
             -32042 => Self::GuardDenied,
             -32043 => Self::ReplanRequired,
-            -32050 => Self::EffectViolation,
+            -32050 => Self::CapabilityViolation,
             -32060 => Self::Reserved,
             _ => return None,
         })
@@ -182,9 +141,8 @@ pub struct PermissionErrorData {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ExecutionErrorData {
-    pub command: String,
-    pub exit_code: Option<i32>,
-    pub stderr: Option<String>,
+    pub operation: String,
+    pub detail: Option<String>,
 }
 
 /// Structured error data for Component Tool execution failures
@@ -213,16 +171,10 @@ pub struct GuardErrorData {
     pub reason: String,
 }
 
-/// Effect violation data. The `*_effect` vectors describe the legacy
-/// `ImpactKind` path; the Cell path (#28) adds the two optional fields
-/// below and carries its detail in `CepError::message`. Both are additive:
-/// payloads written before them parse with `None`.
+/// Component Cell/capability violation data.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct EffectErrorData {
+pub struct CapabilityErrorData {
     pub method: String,
-    pub declared_effect: Vec<ImpactKind>,
-    pub authorized_effect: Vec<ImpactKind>,
-    pub observed_effects: Vec<ImpactKind>,
     pub violations: Vec<String>,
     /// Trust-free CellRef (`ctx:ext:scope`) that failed the ceiling or
     /// admitted-set check.
@@ -249,7 +201,7 @@ pub enum CepErrorData {
     ToolExecution(ToolExecutionErrorData),
     State(StateErrorData),
     Guard(GuardErrorData),
-    Effect(Box<EffectErrorData>),
+    Capability(Box<CapabilityErrorData>),
     Reserved(ReservedErrorData),
 }
 
@@ -319,9 +271,8 @@ impl CepError {
             code: CepErrorCode::ExecutionFailed,
             message: message.into(),
             data: CepErrorData::Execution(ExecutionErrorData {
-                command: String::new(),
-                exit_code: None,
-                stderr: None,
+                operation: "internal".into(),
+                detail: None,
             }),
             retriability: Retriability::Transient,
         }
@@ -421,7 +372,7 @@ mod tests {
             CepErrorFamily::Execution => (-32029, -32020),
             CepErrorFamily::State => (-32039, -32030),
             CepErrorFamily::Guard => (-32049, -32040),
-            CepErrorFamily::Effect => (-32059, -32050),
+            CepErrorFamily::Capability => (-32059, -32050),
             CepErrorFamily::Reserved => (-32099, -32060),
         }
     }
@@ -436,9 +387,9 @@ mod tests {
             CepErrorCode::ToolTimeout,
             CepErrorCode::ToolResourceExhausted,
             CepErrorCode::CallCancelled,
-            CepErrorCode::StaleContext,
-            CepErrorCode::EnvelopeMissing,
-            CepErrorCode::EffectViolation,
+            CepErrorCode::ResourceConflict,
+            CepErrorCode::GuardDenied,
+            CepErrorCode::CapabilityViolation,
             CepErrorCode::Reserved,
         ];
         for code in codes {
@@ -472,35 +423,28 @@ mod tests {
             (
                 CepErrorCode::ExecutionFailed,
                 CepErrorData::Execution(ExecutionErrorData {
-                    command: "ls".into(),
-                    exit_code: Some(1),
-                    stderr: None,
+                    operation: "mutate.edit".into(),
+                    detail: Some("install failed".into()),
                 }),
             ),
             (
-                CepErrorCode::StaleContext,
+                CepErrorCode::ResourceConflict,
                 CepErrorData::State(StateErrorData {
-                    resource: "session".into(),
-                    reason: "stale".into(),
+                    resource: "workspace".into(),
+                    reason: "busy".into(),
                 }),
             ),
             (
-                CepErrorCode::EnvelopeMissing,
+                CepErrorCode::GuardDenied,
                 CepErrorData::Guard(GuardErrorData {
-                    method: "mutate.create".into(),
-                    reason: "no envelope".into(),
+                    method: "observe.workspace".into(),
+                    reason: "path denied".into(),
                 }),
             ),
             (
-                CepErrorCode::EffectViolation,
-                CepErrorData::Effect(Box::new(EffectErrorData {
+                CepErrorCode::CapabilityViolation,
+                CepErrorData::Capability(Box::new(CapabilityErrorData {
                     method: "observe.workspace".into(),
-                    declared_effect: vec![ImpactKind::WorkspaceObservation],
-                    authorized_effect: vec![ImpactKind::WorkspaceObservation],
-                    observed_effects: vec![
-                        ImpactKind::WorkspaceObservation,
-                        ImpactKind::WorkspaceMutation,
-                    ],
                     violations: vec![
                         "observed workspace_mutation not in declared effect ceiling".into(),
                     ],
@@ -561,50 +505,13 @@ mod tests {
     }
 
     #[test]
-    fn effect_error_data_cell_fields_are_additive() {
-        // A payload written before the Cell path must still parse, with the
-        // new fields absent == None.
-        let legacy = json!({
-            "kind": "effect",
-            "method": "observe.workspace",
-            "declared_effect": ["workspace_observation"],
-            "authorized_effect": ["workspace_observation"],
-            "observed_effects": ["workspace_observation"],
-            "violations": []
-        });
-        let parsed: CepErrorData = serde_json::from_value(legacy).unwrap();
-        let CepErrorData::Effect(data) = parsed else {
-            panic!("expected effect data");
-        };
-        assert_eq!(data.cell_ref, None);
-        assert_eq!(data.capability, None);
-
-        // Unset fields stay off the wire, so legacy-path errors serialize
-        // byte-identically to before.
-        let bare = serde_json::to_value(CepErrorData::Effect(data.clone())).unwrap();
-        assert!(bare.get("cell_ref").is_none());
-        assert!(bare.get("capability").is_none());
-
-        let mut filled = *data;
-        filled.cell_ref = Some("alloc:none:session".into());
-        filled.capability = Some("session.result".into());
-        let wrapped = CepErrorData::Effect(Box::new(filled));
-        let serialized = serde_json::to_string(&wrapped).unwrap();
-        assert_eq!(
-            serde_json::from_str::<CepErrorData>(&serialized).unwrap(),
-            wrapped
-        );
-    }
-
-    #[test]
     fn retriability_present_after_round_trip() {
         let err = CepError {
             code: CepErrorCode::ExecutionFailed,
             message: "fail".into(),
             data: CepErrorData::Execution(ExecutionErrorData {
-                command: "test".into(),
-                exit_code: None,
-                stderr: None,
+                operation: "test".into(),
+                detail: None,
             }),
             retriability: Retriability::RequiresReplan,
         };
@@ -660,21 +567,14 @@ mod tests {
             CepErrorCode::ProjectRootViolation,
             CepErrorCode::AmbientAuthorityDenied,
             CepErrorCode::ExecutionFailed,
-            CepErrorCode::CommandTimeout,
-            CepErrorCode::ChildKillFailed,
             CepErrorCode::ToolTrap,
             CepErrorCode::ToolTimeout,
             CepErrorCode::ToolResourceExhausted,
             CepErrorCode::CallCancelled,
-            CepErrorCode::StaleContext,
             CepErrorCode::ResourceConflict,
-            CepErrorCode::EnvelopeAlreadyActive,
-            CepErrorCode::DuplicateRegistration,
-            CepErrorCode::EnvelopeMissing,
-            CepErrorCode::OutOfScopeMutation,
             CepErrorCode::GuardDenied,
             CepErrorCode::ReplanRequired,
-            CepErrorCode::EffectViolation,
+            CepErrorCode::CapabilityViolation,
             CepErrorCode::Reserved,
         ];
         for code in all_codes {
@@ -682,6 +582,16 @@ mod tests {
             assert!((-32099..=-32001).contains(&i), "code {i} not in CEP range");
             assert!(i.abs() >= 32001, "no 1000-series codes: {i}");
         }
+    }
+
+    #[test]
+    fn model_visible_codes_keep_stable_holes_after_legacy_variant_removal() {
+        assert_eq!(CepErrorCode::SchemaMismatch as i32, 0);
+        assert_eq!(CepErrorCode::ToolTrap as i32, 9);
+        assert_eq!(CepErrorCode::ResourceConflict as i32, 15);
+        assert_eq!(CepErrorCode::GuardDenied as i32, 20);
+        assert_eq!(CepErrorCode::CapabilityViolation as i32, 22);
+        assert_eq!(CepErrorCode::Reserved as i32, 23);
     }
 
     #[test]
@@ -791,33 +701,22 @@ mod tests {
     }
 
     #[test]
-    fn effect_error_data_carries_rich_violation_evidence() {
-        use crate::effect_types::ImpactKind;
-
-        let data = EffectErrorData {
+    fn capability_error_data_carries_violation_evidence() {
+        let data = CapabilityErrorData {
             method: "observe.workspace".into(),
-            declared_effect: vec![ImpactKind::WorkspaceObservation],
-            authorized_effect: vec![ImpactKind::WorkspaceObservation],
-            observed_effects: vec![
-                ImpactKind::WorkspaceObservation,
-                ImpactKind::WorkspaceMutation,
-            ],
-            violations: vec!["observed workspace_mutation not in declared effect ceiling".into()],
+            violations: vec!["result cell exceeds admitted capability set".into()],
             cell_ref: None,
             capability: None,
         };
 
-        let wrapped = CepErrorData::Effect(Box::new(data.clone()));
+        let wrapped = CepErrorData::Capability(Box::new(data.clone()));
         let value = serde_json::to_value(&wrapped).unwrap();
-        assert_eq!(value["kind"], "effect");
+        assert_eq!(value["kind"], "capability");
         assert_eq!(value["method"], "observe.workspace");
-        assert!(value["declared_effect"].is_array());
-        assert!(value["authorized_effect"].is_array());
-        assert!(value["observed_effects"].is_array());
         assert!(value["violations"].is_array());
         assert_eq!(
             value["violations"][0],
-            "observed workspace_mutation not in declared effect ceiling"
+            "result cell exceeds admitted capability set"
         );
 
         let serialized = serde_json::to_string(&wrapped).unwrap();

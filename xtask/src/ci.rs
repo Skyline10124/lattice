@@ -515,7 +515,7 @@ mod tests {
         for expected in [
             "net-guard",
             "lancet-protocol",
-            "lancet-native",
+            "lancet-runtime",
             "lattice-api",
             "lattice-cli",
             "lattice-system-harness",
@@ -535,20 +535,19 @@ mod tests {
             .exec()
             .expect("workspace metadata");
         let order = ordered_test_crates(&metadata).unwrap();
-        // `lancet-protocol` is a leaf dependency of `lancet-catalog`, which in
-        // turn is a dependency of higher layers. It must appear before any of
-        // its known dependents.
+        // `lancet-protocol` is a leaf dependency of `lancet-runtime` and must
+        // appear first in the generated test order.
         let proto = order
             .iter()
             .position(|n| n == "lancet-protocol")
             .expect("lancet-protocol present");
-        let catalog = order
+        let runtime = order
             .iter()
-            .position(|n| n == "lancet-catalog")
-            .expect("lancet-catalog present");
+            .position(|n| n == "lancet-runtime")
+            .expect("lancet-runtime present");
         assert!(
-            proto < catalog,
-            "lancet-protocol must come before lancet-catalog: {order:?}"
+            proto < runtime,
+            "lancet-protocol must come before lancet-runtime: {order:?}"
         );
     }
 }

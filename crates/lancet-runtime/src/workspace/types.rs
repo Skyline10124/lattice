@@ -3,12 +3,11 @@
 
 //! Concrete Local Workspace vocabulary and error normalization.
 //!
-//! These are the Local operation types the one concrete
-//! [`super::LocalWorkspace`] and the native handlers/edit engine speak:
-//! normalized project-relative paths, observed path facts, and bounded
-//! observation requests. Errors raised by `LocalWorkspace` are normalized
-//! into a small vocabulary so native CEP handlers can map them to stable CEP
-//! error codes without leaking host paths or raw OS strings.
+//! These are the Local operation types shared by [`super::LocalWorkspace`] and
+//! the Tool Host: normalized project-relative paths, observed path facts, and
+//! bounded observation requests. Errors are normalized into a small vocabulary
+//! so the runtime can return stable typed errors without leaking host paths or
+//! raw OS strings.
 
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
@@ -145,7 +144,7 @@ pub enum WorkspacePathError {
     ProjectRootNotAllowedForFileIntent,
 }
 
-/// How a path will be used by native handlers.
+/// How a path will be used by a Tool Host operation.
 ///
 /// Resolution itself is intent-independent (per-segment symlink rejection +
 /// root containment always apply); the intent is carried as operation
@@ -255,6 +254,8 @@ pub enum LocalWorkspaceError {
     NotFound { normalized: String },
     #[error("target file already exists: {normalized}")]
     TargetExists { normalized: String },
+    #[error("workspace operation cancelled")]
+    Cancelled,
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
 }

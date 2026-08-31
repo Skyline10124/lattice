@@ -25,8 +25,8 @@
 //!    path one segment at a time with `openat`/`AT_SYMLINK_NOFOLLOW`, so a
 //!    symlink pointing outside the root fails as `RootEscape` instead of being
 //!    followed. System Path Exclusion is applied inside that walk.
-//! 4. **Guard L1** — `validate_path_facts` validates the *observed* facts (not
-//!    the requested string) against the empty effect region.
+//! 4. **Guard L1** — `validate_path_facts` validates the *observed* facts and
+//!    System Path Exclusions, not the requested string alone.
 //! 5. **Visibility** — one [`VisibilityEngine`], built from the turn's
 //!    `ReadVisibilityPolicy`, decides the root and every entry/match/path the
 //!    walk produces. This is the single decision the issue's fourth criterion
@@ -63,13 +63,11 @@
 //! The Tool Host linker is non-async (`build_linker` in [`crate::runtime`] uses
 //! the sync bindgen and the guest is invoked with async support disabled), so
 //! these functions are synchronous and call the Local Workspace's blocking
-//! primitives directly. Those primitives are the *same* resolver the async
-//! native wrappers drive through `spawn_blocking`; there is no second
-//! implementation of path safety.
+//! primitives directly. Every observation mode shares those cores, so path
+//! safety has one implementation.
 
 use std::sync::Arc;
 
-use lancet_authority::effect::region::AuthorizedEffectRegion;
 use lancet_authority::guard::validate_path_facts;
 use lancet_authority::{
     HiddenReason, ObservationPolicyConfig, ReadVisibility, ReadVisibilityPolicy,
@@ -81,6 +79,7 @@ use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability};
 
 use crate::admission::{AdmittedTool, authorize_operation, resolve_scope};
 use crate::bindings;
+use crate::control::Cancellation;
 use crate::evidence::CellEvidenceLedger;
 use crate::runtime::StoreState;
 use crate::workspace::{
@@ -129,8 +128,8 @@ pub enum ObservationError {
     /// resolution escaped the root.
     ///
     /// `reason` is the structured cause; the agent-facing sentence is derived
-    /// from it in [`ObservationError::guest_message`], because those sentences are
-    /// a product contract the model has been reading since the native handler.
+    /// from it in [`ObservationError::guest_message`], keeping the model-facing
+    /// contract centralized.
     PathRejected {
         requested: String,
         reason: PathRejection,
@@ -147,6 +146,8 @@ pub enum ObservationError {
     Denied { requested: String, reason: String },
     /// The caller's own input was malformed (an invalid regex, say).
     InvalidRequest { field: &'static str, reason: String },
+    /// The call was cancelled before or during the observation.
+    Cancelled,
     /// The filesystem failed in a way none of the above describes.
     Io { requested: String, reason: String },
 }
@@ -162,10 +163,8 @@ impl ObservationError {
 
     /// The stable audit label for this refusal.
     ///
-    /// These are the strings the native path already wrote into its rejection
-    /// records, so operator queries keep working across the migration: hidden
-    /// paths keep [`HiddenReason::as_audit_label`], containment failures keep
-    /// `path_guard`.
+    /// Operator queries depend on these stable labels: hidden paths keep
+    /// [`HiddenReason::as_audit_label`] and containment failures keep `path_guard`.
     pub fn audit_label(&self) -> &'static str {
         match self {
             Self::NotFound {
@@ -178,6 +177,7 @@ impl ObservationError {
             Self::BudgetExhausted(_) => "observation_budget",
             Self::Denied { .. } => "cell_denied",
             Self::InvalidRequest { .. } => "invalid_request",
+            Self::Cancelled => "cancelled",
             Self::Io { .. } => "io_error",
         }
     }
@@ -211,6 +211,7 @@ impl ObservationError {
                 format!("operation denied for '{requested}': {reason}")
             }
             Self::InvalidRequest { field, reason } => format!("invalid {field}: {reason}"),
+            Self::Cancelled => "call cancelled".into(),
             Self::Io { requested, reason } => format!("io error for '{requested}': {reason}"),
         }
     }
@@ -220,7 +221,7 @@ impl ObservationError {
 ///
 /// Structured rather than a free string so the agent-facing sentence is generated
 /// in one place and the audit label cannot drift from it. Each variant maps to a
-/// sentence the model already knows from the native handler.
+/// stable model-facing sentence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PathRejection {
     /// The path text contains a `..` component.
@@ -284,9 +285,8 @@ pub struct FindOutcome {
 ///
 /// Holds the concrete workspace, the resolved visibility policy, the
 /// per-operation limits, the turn budget sink, and the workspace scope name —
-/// everything the guest is not allowed to hold. Constructed by the transport
-/// once per server run and shared across the Turn's calls; the per-call facts
-/// (admission, evidence, turn id) arrive separately as
+/// everything the guest is not allowed to hold. `RuntimeExecution` constructs it
+/// for one call; admission, evidence, and Turn identity arrive through
 /// [`ObservationCallContext`].
 pub struct WorkspaceObservationHost {
     workspace: Arc<LocalWorkspace>,
@@ -296,6 +296,7 @@ pub struct WorkspaceObservationHost {
     /// The descriptor scope the observation cell roots in. Host-resolved from
     /// the admitted Tool's descriptor; a guest never names a scope.
     scope_name: String,
+    cancellation: Option<Cancellation>,
     /// The first refusal this call produced, as a typed [`CepError`].
     ///
     /// A guest can only return a string, so without this the runtime would wrap
@@ -329,8 +330,29 @@ impl WorkspaceObservationHost {
             observation,
             charge,
             scope_name: scope_name.into(),
+            cancellation: None,
             refusal: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Assemble a per-call host that observes the call cancellation signal.
+    pub fn new_cancellable(
+        workspace: Arc<LocalWorkspace>,
+        visibility_policy: ReadVisibilityPolicy,
+        observation: ObservationPolicyConfig,
+        charge: BudgetCharge,
+        scope_name: impl Into<String>,
+        cancellation: Cancellation,
+    ) -> Self {
+        let mut host = Self::new(
+            workspace,
+            visibility_policy,
+            observation,
+            charge,
+            scope_name,
+        );
+        host.cancellation = Some(cancellation);
+        host
     }
 
     /// Take the host's structured refusal for this call, if any.
@@ -346,6 +368,23 @@ impl WorkspaceObservationHost {
         if slot.is_none() {
             *slot = Some(observation_cep_error(err));
         }
+    }
+
+    fn check_cancelled(
+        &self,
+        ctx: &ObservationCallContext<'_>,
+        requested: &str,
+    ) -> Result<(), ObservationError> {
+        if self
+            .cancellation
+            .as_ref()
+            .is_some_and(Cancellation::is_cancelled)
+        {
+            let error = ObservationError::Cancelled;
+            self.record_refusal(ctx, requested, &error);
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// The observation Cell: `alloc:read:<workspace scope>`.
@@ -488,19 +527,28 @@ impl WorkspaceObservationHost {
         ctx: &ObservationCallContext<'_>,
         requested: &str,
     ) -> Result<Option<lattice_store::FlockGuard>, ObservationError> {
-        self.workspace
-            .lock_operation(
+        loop {
+            self.check_cancelled(ctx, requested)?;
+            match self.workspace.lock_operation(
                 lattice_store::LockMode::Shared,
-                lattice_store::Blocking::Block,
-            )
-            .map_err(|err| {
-                let e = ObservationError::Io {
-                    requested: requested.to_string(),
-                    reason: err.to_string(),
-                };
-                self.record_refusal(ctx, requested, &e);
-                e
-            })
+                lattice_store::Blocking::NonBlocking,
+            ) {
+                Ok(guard) => return Ok(guard),
+                Err(crate::WorkspaceHistoryError::Kernel(lattice_store::StoreError::Busy {
+                    ..
+                })) => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => {
+                    let error = ObservationError::Io {
+                        requested: requested.to_string(),
+                        reason: error.to_string(),
+                    };
+                    self.record_refusal(ctx, requested, &error);
+                    return Err(error);
+                }
+            }
+        }
     }
 
     fn open(
@@ -544,11 +592,7 @@ impl WorkspaceObservationHost {
                 return Err(e);
             }
         };
-        if let Err(err) = validate_path_facts(
-            ws_path.as_str(),
-            &facts.to_guard(),
-            &AuthorizedEffectRegion::empty(),
-        ) {
+        if let Err(err) = validate_path_facts(ws_path.as_str(), &facts.to_guard(), &[]) {
             // Guard L1 refused the *observed* facts. Its message describes host
             // structure, so the agent-facing sentence is derived from the
             // classification instead; the message reaches evidence, not the guest.
@@ -580,6 +624,7 @@ impl WorkspaceObservationHost {
         limit: Option<u64>,
         line_numbers: Option<bool>,
     ) -> Result<ReadOutcome, ObservationError> {
+        self.check_cancelled(ctx, requested)?;
         let _operation_guard = self.lock_observation(ctx, requested)?;
         let ws_path = self.open(ctx, requested, PathIntent::Read, PathKind::File)?;
 
@@ -616,6 +661,7 @@ impl WorkspaceObservationHost {
                 return Err(e);
             }
         };
+        self.check_cancelled(ctx, ws_path.as_str())?;
         let content = match String::from_utf8(bytes) {
             Ok(content) => content,
             Err(err) => {
@@ -657,6 +703,7 @@ impl WorkspaceObservationHost {
         limit: Option<u64>,
     ) -> Result<ListOutcome, ObservationError> {
         let requested = if requested.is_empty() { "." } else { requested };
+        self.check_cancelled(ctx, requested)?;
         let _operation_guard = self.lock_observation(ctx, requested)?;
         let ws_path = self.open(
             ctx,
@@ -675,6 +722,7 @@ impl WorkspaceObservationHost {
                 return Err(e);
             }
         };
+        self.check_cancelled(ctx, ws_path.as_str())?;
 
         // Filtered by the same engine that judged the root, so a hidden child
         // cannot appear in a listing the read mode would have refused.
@@ -711,6 +759,7 @@ impl WorkspaceObservationHost {
         max_results: Option<u64>,
     ) -> Result<GrepOutcome, ObservationError> {
         let requested = default_root(requested);
+        self.check_cancelled(ctx, requested)?;
         // A malformed regex is the caller's error and costs no traversal, so it
         // is refused before the path is even resolved.
         if let Err(err) = regex::Regex::new(pattern) {
@@ -739,10 +788,17 @@ impl WorkspaceObservationHost {
         // The walk carries the engine, so hidden files produce no match and are
         // not counted toward truncation.
         let probe_limit = effective.saturating_add(1);
-        let raw = match self
-            .workspace
-            .grep_blocking(&request, probe_limit, visibility)
-        {
+        let cancellation = self.cancellation.clone();
+        let raw = match self.workspace.grep_blocking_cancellable(
+            &request,
+            probe_limit,
+            visibility,
+            move || {
+                cancellation
+                    .as_ref()
+                    .is_some_and(Cancellation::is_cancelled)
+            },
+        ) {
             Ok((matches, evidence)) => (matches, evidence),
             Err(err) => {
                 let e = observation_io_error(requested, err);
@@ -750,6 +806,7 @@ impl WorkspaceObservationHost {
                 return Err(e);
             }
         };
+        self.check_cancelled(ctx, ws_path.as_str())?;
 
         let (raw, visibility_evidence) = raw;
         let truncated = raw.len() > effective;
@@ -782,6 +839,7 @@ impl WorkspaceObservationHost {
         limit: Option<u64>,
     ) -> Result<FindOutcome, ObservationError> {
         let requested = default_root(requested);
+        self.check_cancelled(ctx, requested)?;
         let _operation_guard = self.lock_observation(ctx, requested)?;
         let ws_path = self.open(
             ctx,
@@ -797,10 +855,17 @@ impl WorkspaceObservationHost {
             path: ws_path.clone(),
         };
         let probe_limit = effective.saturating_add(1);
-        let raw = match self
-            .workspace
-            .find_files_blocking(&request, probe_limit, visibility)
-        {
+        let cancellation = self.cancellation.clone();
+        let raw = match self.workspace.find_files_blocking_cancellable(
+            &request,
+            probe_limit,
+            visibility,
+            move || {
+                cancellation
+                    .as_ref()
+                    .is_some_and(Cancellation::is_cancelled)
+            },
+        ) {
             Ok((paths, evidence)) => (paths, evidence),
             Err(err) => {
                 let e = observation_io_error(requested, err);
@@ -808,6 +873,7 @@ impl WorkspaceObservationHost {
                 return Err(e);
             }
         };
+        self.check_cancelled(ctx, ws_path.as_str())?;
 
         let (raw, visibility_evidence) = raw;
         let truncated = raw.len() > effective;
@@ -955,6 +1021,7 @@ fn observation_io_error(requested: &str, err: LocalWorkspaceError) -> Observatio
             requested: requested.to_string(),
             reason: PathRejection::Malformed,
         },
+        LocalWorkspaceError::Cancelled => ObservationError::Cancelled,
         LocalWorkspaceError::Io(io) => ObservationError::Io {
             requested: requested.to_string(),
             reason: io.to_string(),
@@ -1110,6 +1177,7 @@ fn wit_error(err: ObservationError) -> WitObserveError {
         ObservationError::BudgetExhausted(_) => WitObserveError::BudgetExhausted(message),
         ObservationError::Denied { .. } => WitObserveError::Denied(message),
         ObservationError::InvalidRequest { .. } => WitObserveError::InvalidRequest(message),
+        ObservationError::Cancelled => WitObserveError::IoError(message),
         ObservationError::Io { .. } => WitObserveError::IoError(message),
     }
 }
@@ -1163,7 +1231,10 @@ pub fn observation_cep_error(err: &ObservationError) -> CepError {
         ObservationError::LimitExceeded { .. } | ObservationError::BudgetExhausted(_) => {
             (CepErrorCode::Reserved, Retriability::RequiresReplan)
         }
-        ObservationError::Denied { .. } => (CepErrorCode::EffectViolation, Retriability::Permanent),
+        ObservationError::Denied { .. } => {
+            (CepErrorCode::CapabilityViolation, Retriability::Permanent)
+        }
+        ObservationError::Cancelled => (CepErrorCode::CallCancelled, Retriability::Permanent),
         ObservationError::Io { .. } => (CepErrorCode::ExecutionFailed, Retriability::Permanent),
     };
     CepError::new(
@@ -1812,7 +1883,7 @@ mod tests {
         let refusal = host
             .take_refusal()
             .expect("an authorization denial remains a structured CEP refusal");
-        assert_eq!(refusal.code, CepErrorCode::EffectViolation);
+        assert_eq!(refusal.code, CepErrorCode::CapabilityViolation);
     }
 
     /// A grep over a subtree records the root it observed, so the effect is

@@ -4,9 +4,7 @@
 //! Cell effect model (ADR 0004 / spec 2026-07-01 §5).
 //!
 //! Closed core: `CtxOp` × `ExtImpact` over tool-declared scopes with
-//! fail-closed trust. This vocabulary is additive; the legacy
-//! `ImpactKind` machinery in `effect_types.rs` is retired by #28/#34
-//! (Codeberg #6/#12).
+//! fail-closed trust. This is the sole effect vocabulary for Tool descriptors.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

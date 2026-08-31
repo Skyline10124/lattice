@@ -4,21 +4,17 @@
 //! CEP CEP policy and budget configuration (immutable per turn).
 
 pub mod budget;
-pub mod capability;
 pub mod default;
 pub mod network;
 pub mod observation;
-pub mod resolved;
 pub mod visibility;
 
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 pub use budget::{
     BudgetExhausted, BudgetLimits, ObservationBudgetSnapshot, ObservationBudgetTracker,
 };
-use lancet_protocol::effect_types::ImpactKind;
 use lancet_protocol::evidence::CapabilityAdmissionPolicy;
 pub use network::{NetworkPolicyConfig, host_allowed_by_list, normalize_host_pattern};
 pub use observation::ObservationPolicyConfig;
@@ -33,10 +29,7 @@ pub struct CepPolicyConfig {
     /// second copy that has to be kept in sync.
     pub observation: ObservationPolicyConfig,
     pub network: NetworkPolicyConfig,
-    pub denied_effect_kinds: BTreeSet<ImpactKind>,
-    /// Component Tool admission inputs (#28). Carried here so the native
-    /// transport reaches one policy per turn; the legacy `denied_effect_kinds`
-    /// path above is untouched and stays native-only.
+    /// Generated Component capability admission, always enforced.
     pub capability_admission: CapabilityAdmissionPolicy,
 }
 
@@ -48,7 +41,6 @@ impl CepPolicyConfig {
             observation: ObservationPolicyConfig::defaults(),
             project_root,
             network: NetworkPolicyConfig::safe_defaults(),
-            denied_effect_kinds: BTreeSet::new(),
             // Fail closed: no tool is enabled until an operator policy says so.
             capability_admission: CapabilityAdmissionPolicy::default(),
         }

@@ -31,7 +31,7 @@ const UNBOUND_SCOPE: &str = "<unbound>";
 /// - `cancelled`: delegates to the call-scoped `Cancellation`.
 /// - `emit_event`: authorizes the operation's cell + concrete target against
 ///   the admitted capability set, then converts the guest payload to a CEP
-///   event and forwards it via `EventSink::emit_sync` (best-effort: a closed
+///   event and forwards it via `EventSink::emit` (best-effort: a closed
 ///   channel doesn't fail the handler). A denial rejects only this operation:
 ///   the sink is never reached and the call continues.
 impl bindings::lattice::tool_host::host_control::Host for StoreState {
@@ -95,7 +95,7 @@ impl bindings::lattice::tool_host::host_control::Host for StoreState {
         // does not fail the handler.
         let params: serde_json::Value =
             serde_json::from_str(&payload).unwrap_or(serde_json::Value::String(payload));
-        self.call.events.emit_sync("tool.event", params);
+        self.call.events.emit("tool.event", params);
         self.call.evidence.record_effect(
             cell,
             scope,
@@ -116,7 +116,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use lancet_dispatch::{Cancellation, EventSink};
+    use crate::{Cancellation, EventSink};
     use lancet_protocol::ToolEvent;
     use lancet_protocol::cell::{ArtifactIdentity, Capability, ToolDescriptor};
     use lancet_protocol::evidence::CapabilityAdmissionPolicy;
@@ -167,7 +167,7 @@ mod tests {
     /// return the call's evidence plus the client's event receiver.
     fn emit_event_on(
         descriptor: Arc<ToolDescriptor>,
-    ) -> (CellEvidenceLedger, mpsc::Receiver<ToolEvent>) {
+    ) -> (CellEvidenceLedger, mpsc::UnboundedReceiver<ToolEvent>) {
         let admitted = admit_tool(
             descriptor,
             &CapabilityAdmissionPolicy {
@@ -177,7 +177,7 @@ mod tests {
             },
         )
         .expect("the fixture capability is admitted");
-        let (tx, rx) = mpsc::channel(4);
+        let (tx, rx) = mpsc::unbounded_channel();
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let evidence = CellEvidenceLedger::new();
         let mut state = StoreState {
@@ -210,7 +210,7 @@ mod tests {
 
     fn assert_denied_unbound(
         evidence: &CellEvidenceLedger,
-        rx: &mut mpsc::Receiver<ToolEvent>,
+        rx: &mut mpsc::UnboundedReceiver<ToolEvent>,
         declared: usize,
     ) {
         assert!(

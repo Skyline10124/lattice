@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Turn-scoped observation budget tracking for CEP CEP handlers.
+//! Turn-scoped observation budget tracking.
 
 use lancet_protocol::error::ReservedErrorData;
 use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability};
@@ -10,15 +10,10 @@ use std::sync::{Arc, Mutex};
 /// Immutable per-turn budget limits, derived from the observation policy.
 ///
 /// This is a projection, not a configuration surface: build it with
-/// [`super::ObservationPolicyConfig::budget_limits`] rather than by hand. It
-/// carries exactly the two limits the turn-scoped tracker enforces; per-op caps
-/// live only in `ObservationPolicyConfig`, where the handlers read them. Six
-/// duplicated fields kept in sync by hand were how the external-policy-file
-/// path silently dropped half a configured limit set (#121).
+/// [`super::ObservationPolicyConfig::budget_limits`] rather than by hand.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BudgetLimits {
     pub max_turn_observation_bytes: usize,
-    pub max_todo_ops: usize,
 }
 
 impl BudgetLimits {
@@ -26,7 +21,6 @@ impl BudgetLimits {
     pub fn defaults() -> Self {
         Self {
             max_turn_observation_bytes: 10 * 1024 * 1024,
-            max_todo_ops: 100,
         }
     }
 }
@@ -36,8 +30,6 @@ impl BudgetLimits {
 pub struct ObservationBudgetSnapshot {
     pub turn_observation_bytes_used: usize,
     pub max_turn_observation_bytes: usize,
-    pub todo_ops_used: usize,
-    pub max_todo_ops: usize,
 }
 
 /// Error when a budget reservation would exceed a turn limit.
@@ -63,12 +55,11 @@ impl BudgetExhausted {
     }
 }
 
-/// Mutable per-turn observation and todo-op counters.
+/// Mutable per-turn observation counter.
 #[derive(Debug)]
 pub struct ObservationBudgetTracker {
     limits: BudgetLimits,
     turn_observation_bytes: Mutex<usize>,
-    todo_ops: Mutex<usize>,
 }
 
 impl ObservationBudgetTracker {
@@ -76,7 +67,6 @@ impl ObservationBudgetTracker {
         Arc::new(Self {
             limits,
             turn_observation_bytes: Mutex::new(0),
-            todo_ops: Mutex::new(0),
         })
     }
 
@@ -98,24 +88,6 @@ impl ObservationBudgetTracker {
         Ok(())
     }
 
-    /// Reserve `count` todo items for a single `session.todo_write` call this turn.
-    pub fn try_charge_todo_ops(&self, count: usize) -> Result<(), BudgetExhausted> {
-        if count == 0 {
-            return Ok(());
-        }
-        let mut ops = self.todo_ops.lock().expect("budget mutex poisoned");
-        let next = *ops + count;
-        if next > self.limits.max_todo_ops {
-            return Err(BudgetExhausted {
-                limit: "observation.max_todo_ops",
-                requested: count,
-                remaining: self.limits.max_todo_ops.saturating_sub(*ops),
-            });
-        }
-        *ops = next;
-        Ok(())
-    }
-
     pub fn limits(&self) -> &BudgetLimits {
         &self.limits
     }
@@ -125,12 +97,9 @@ impl ObservationBudgetTracker {
             .turn_observation_bytes
             .lock()
             .expect("budget mutex poisoned");
-        let todo_ops_used = *self.todo_ops.lock().expect("budget mutex poisoned");
         ObservationBudgetSnapshot {
             turn_observation_bytes_used,
             max_turn_observation_bytes: self.limits.max_turn_observation_bytes,
-            todo_ops_used,
-            max_todo_ops: self.limits.max_todo_ops,
         }
     }
 }
@@ -143,7 +112,6 @@ mod tests {
     fn cep_budget_rejects_aggregate_observation_exhaustion() {
         let limits = BudgetLimits {
             max_turn_observation_bytes: 100,
-            ..BudgetLimits::defaults()
         };
         let tracker = ObservationBudgetTracker::new(limits);
         tracker.try_charge_observation(60).unwrap();
@@ -156,39 +124,11 @@ mod tests {
     fn cep_budget_snapshot_without_audit_store() {
         let tracker = ObservationBudgetTracker::new(BudgetLimits::defaults());
         tracker.try_charge_observation(128).unwrap();
-        tracker.try_charge_todo_ops(1).unwrap();
         let snap = tracker.snapshot();
         assert_eq!(snap.turn_observation_bytes_used, 128);
-        assert_eq!(snap.todo_ops_used, 1);
         assert_eq!(
             snap.max_turn_observation_bytes,
             BudgetLimits::defaults().max_turn_observation_bytes
         );
-    }
-
-    #[test]
-    fn cep_budget_todo_op_cap() {
-        let limits = BudgetLimits {
-            max_todo_ops: 2,
-            ..BudgetLimits::defaults()
-        };
-        let tracker = ObservationBudgetTracker::new(limits);
-        tracker.try_charge_todo_ops(1).unwrap();
-        tracker.try_charge_todo_ops(1).unwrap();
-        let err = tracker.try_charge_todo_ops(1).unwrap_err();
-        assert_eq!(err.limit, "observation.max_todo_ops");
-        assert_eq!(err.remaining, 0);
-    }
-
-    #[test]
-    fn cep_budget_todo_ops_charge_by_item_count() {
-        let limits = BudgetLimits {
-            max_todo_ops: 1,
-            ..BudgetLimits::defaults()
-        };
-        let tracker = ObservationBudgetTracker::new(limits);
-        let err = tracker.try_charge_todo_ops(2).unwrap_err();
-        assert_eq!(err.requested, 2);
-        assert_eq!(err.remaining, 1);
     }
 }

@@ -12,10 +12,10 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use lancet_dispatch::{Cancellation, EventSink};
 use lancet_protocol::cell::{CtxOp, ExtImpact, Trust};
 use lancet_protocol::evidence::{CapabilityAdmissionPolicy, EffectSource};
 use lancet_protocol::{CepErrorCode, InvocationId};
+use lancet_runtime::{Cancellation, EventSink};
 use lancet_runtime::{
     CellEvidenceLedger, ComponentCallContext, ComponentRuntime, ExecutionLimits, admit_tool,
 };
@@ -45,7 +45,7 @@ fn call_ctx(
     CellEvidenceLedger,
     watch::Sender<bool>,
 ) {
-    let (tx, _rx) = mpsc::channel(64);
+    let (tx, _rx) = mpsc::unbounded_channel();
     let (cancel_tx, cancel_rx) = watch::channel(false);
     let descriptor = rt
         .descriptor("session.todo_write")
@@ -78,7 +78,7 @@ fn from_embedded_composes_the_default_tool_bundle() {
     let rt = ComponentRuntime::from_embedded().expect("production composition succeeds");
     let names: Vec<&str> = rt.descriptors().map(|d| d.name.as_str()).collect();
     assert_eq!(names, EXPECTED_BUILTIN_TOOLS);
-    assert!(rt.contains("session.todo_write"));
+    assert!(rt.descriptor("session.todo_write").is_some());
 }
 
 /// The embedded descriptor is the manifest's, in full: contract, description,
@@ -144,7 +144,7 @@ async fn embedded_tool_validates_and_echoes_the_plan() {
         .await
         .expect("a valid plan is accepted");
 
-    // Validate/echo behavior, unchanged from the native handler.
+    // The Tool returns its canonical validated plan.
     assert_eq!(result, params);
 
     let (admission, effects, denied) = evidence.snapshot();
@@ -165,8 +165,7 @@ async fn embedded_tool_validates_and_echoes_the_plan() {
     assert!(denied.denied.is_empty());
 }
 
-/// Every validation rule the native handler enforced is now a host-side schema
-/// refusal, and each one still fails closed (#29.3).
+/// Every validation rule is a host-side schema refusal and fails closed.
 #[tokio::test]
 async fn invalid_input_is_refused_before_the_component_runs() {
     let rt = ComponentRuntime::from_embedded().expect("composition");
@@ -223,14 +222,13 @@ async fn invalid_input_is_refused_before_the_component_runs() {
     }
 }
 
-/// The blank-content rule must be *exactly* the deleted native handler's
-/// `content.trim().is_empty()`, over the whole Unicode whitespace set.
+/// The blank-content rule is exactly `content.trim().is_empty()` over the
+/// complete Unicode whitespace set.
 ///
 /// This is a real regression, not a hypothetical: the first version of the
 /// manifest used `pattern: "\\S"`, and the regex `\s` class is narrower than
 /// Rust's `char::is_whitespace` (the `White_Space` property `trim` follows). That
-/// pattern accepted 16 whitespace-only strings the native handler rejected —
-/// U+0085, U+1680, U+2000..U+200A, U+2028, U+202F, U+205F, U+3000. Enumerating
+/// pattern accepted 16 whitespace-only strings that the intended rule rejects:
 /// the set here is what keeps the two definitions from drifting apart again.
 #[tokio::test]
 async fn blank_content_rejection_matches_trim_over_all_unicode_whitespace() {
@@ -256,8 +254,7 @@ async fn blank_content_rejection_matches_trim_over_all_unicode_whitespace() {
         let params = serde_json::json!({"todos": [{"content": content, "status": "pending"}]});
         let err = match rt.call("session.todo_write", params, ctx).await {
             Ok(value) => panic!(
-                "whitespace-only content U+{:04X} was accepted, but the native handler \
-                 rejected it: {value}",
+                "whitespace-only content U+{:04X} violated the descriptor rule: {value}",
                 c as u32
             ),
             Err(err) => err,

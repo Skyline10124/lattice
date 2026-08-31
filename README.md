@@ -5,9 +5,9 @@
 ![Platform: Linux only](https://img.shields.io/badge/platform-Linux%20only-informational.svg)
 
 A session-centric LLM runtime in Rust: every turn commits to a **git-backed
-session graph**, and all tool execution flows through **LANCET**, which uses
-CEP (Controlled Execution Protocol) — a typed JSON-RPC method protocol with
-policy gating, path guards, effect checks, and an audit trail.
+session graph**, and Tool execution flows through **LANCET**: a reservation-
+gated, manifest-generated WASM Component runtime with host-enforced Cell
+capabilities, path guards, evidence, and an audit trail.
 
 ## Platform support
 
@@ -23,52 +23,37 @@ deployment platform.
 
 ## Workspace
 
-LATTICE is a Cargo workspace of 21 crates, layered so dependencies always
+LATTICE is a Cargo workspace of 25 packages, layered so dependencies always
 point from higher layers down. See [AGENTS.md](AGENTS.md) for the authoritative
 graph with every edge spelled out.
 
 ```text
-Layer 0 (leaf):  lancet-protocol  lattice-store
-Layer 0.5:       net-guard
-                 lattice-conversation(->protocol)
-                 lattice-llm(->net-guard,conversation)
-Layer 1:         lancet-catalog(->protocol)
+Layer 0 (leaf):  lancet-protocol  lattice-store  net-guard
+Layer 1:         lattice-conversation(->protocol)
                  lattice-profile(->protocol)
+                 lancet-authority(->protocol,net-guard)
+                 lancet-audit(->protocol,lattice-store)
+Layer 2:         lattice-llm(->net-guard,conversation)
                  lattice-session(->protocol,conversation,lattice-store)
-                 lattice-agent(->llm,conversation)
-Layer 2:         lancet-dispatch(->protocol,catalog)
-                 lancet-audit(->protocol,catalog,lattice-store)
-                 lancet-authority(->protocol,catalog,net-guard)
-Layer 2.5:       lancet-cep(->protocol,catalog,dispatch)
-                 lancet-runtime(->protocol,dispatch,authority,net-guard,
-                                lattice-store)
-Layer 3:         lancet-native(->protocol,catalog,dispatch,audit,authority,
-                               runtime)
-Layer 3.5:       lancet-api(->protocol,catalog,dispatch,cep,audit,authority,
-                            native,runtime)
-Layer 4:         lattice-api(->lancet-api,lancet-protocol,lancet-catalog,
-                             lancet-audit,lancet-authority,lancet-native,
-                             lattice-agent,lattice-conversation,lattice-llm,
-                             lattice-profile,lattice-session)
-Layer 5:         lattice-tui(->lattice-api + presentation deps)
-                 lattice-cli(->lattice-api,lattice-session,lattice-tui,
-                              lancet-api + presentation deps)
+                 lancet-runtime(->protocol,authority,net-guard,lattice-store)
+Layer 3:         lattice-agent(->llm,conversation)
+                 lancet-api(->protocol,audit,authority,runtime)
+Layer 4:         lattice-api(->lancet-api,protocol,audit,authority,agent,
+                             conversation,llm,profile,session)
+Layer 5:         lattice-tui(->lattice-api)
+                 lattice-cli(->lancet-api,lattice-api,session,tui)
 
-Outside the graph: lattice-tool-prelude (guest SDK, wit-bindgen only) and
-lattice-system-harness (black-box tests; must not depend on product crates).
+Outside the product graph: lattice-tool-prelude and the five Source Tool
+packages, mutate-shared, xtask, and lattice-system-harness.
 ```
 
 | Crate | Role |
 |---|---|
-| `lancet-protocol` | Pure CEP wire/data contracts: JSON-RPC frames, errors, policy/effect and versioned Cell-evidence types. No I/O, no tokio. |
-| `lancet-catalog` | Transitional generic CEP method traits and dev-only scaffold catalog; production `catalog()` is empty after #32. |
-| `lancet-dispatch` | Method registry, typed CEP dispatch, in-process transport, cancellation. |
-| `lancet-cep` | Public CEP facade; projects LLM-facing tool schemas from the catalog. |
+| `lancet-protocol` | Pure wire/data contracts: durable identities and bindings, JSON-RPC frames, typed errors, Cell descriptors, and versioned evidence. No I/O or async runtime. |
 | `lancet-audit` | Authoritative project-keyed Git `InvocationStore` plus pinned-view operator query/tail/replay; terminal records carry typed Cell evidence under `InvocationId`. |
-| `lancet-authority` | Policy semantics, capability matching, Guard L1 path/scope checks, effect ledger. |
-| `lancet-native` | CEP server lifecycle, reservation-gated dispatch, and transitional Component/native routing; the production native registry is empty. |
-| `lancet-runtime` | WASM Component engine, closed composition, Tool Host enforcement, guarded Local Workspace/history, and pinned GET-only network execution. |
-| `lancet-api` | Unified LANCET facade for runtime composition and Git-ledger operator reads. |
+| `lancet-authority` | Cell capability admission support, Guard L1 path checks, network policy, and workspace visibility policy. |
+| `lancet-runtime` | Sole generated-Component execution path: closed catalog, reservation-bound call controls/events, Tool Host enforcement, Local Workspace/history, and pinned GET-only network execution. |
+| `lancet-api` | Thin Turn-runtime and operator facade over `lancet-runtime` and `lancet-audit`. |
 | `net-guard` | Neutral URL/DNS safety leaf: base-URL validation, private/reserved IP checks. |
 | `lattice-llm` | Provider adapters, SSE streaming, model routing, URL/DNS security, and provider replay/projection. |
 | `lattice-conversation` | Provider-neutral data-only conversation contract: ordered `NativeMessage` with bound/unbound ToolCall typestates, semantic/replay digests, per-attempt usage, and interruption records. No I/O, stores, or ID generators. |
@@ -82,20 +67,17 @@ lattice-system-harness (black-box tests; must not depend on product crates).
 | `lattice-tool-prelude` | ADR 0004 guest SDK for Source Tools: generated WIT bindings, descriptor helpers. |
 | `lattice-system-harness` | Black-box test harness driving the built binary via `LATTICE_BIN`; takes no product-crate dependency. |
 
-### CEP method catalog
+### Component Tool catalog
 
 The built runtime exposes exactly five manifest-owned Component Tools:
 `observe.workspace`, `mutate.create`, `mutate.edit`, `fetch.web`, and
-`session.todo_write`. `lancet-catalog::catalog()` is empty after #32.
+`session.todo_write`. Source Tool manifests and generated artifacts are the
+only descriptor and provider-projection authority.
 
 Audit query, tail, and replay are **operator-only** (`lattice audit` via
-`lancet-api::{query_audit, tail_audit, replay_audit}`); they are not CEP catalog
-methods and cannot be enabled in `[tools].enabled`.
-
-There is no `session.envelope` method (it was removed; the catalog and tests
-assert its absence). There is no `exec.command_run` method — it and
-post-mutation verify were permanently retired from the CEP layer (issue #26);
-command execution is not an agent-visible capability.
+`lancet-api::{query_audit, tail_audit, replay_audit}`); they are not Tools and
+cannot be enabled in `[tools].enabled`. Command execution is not an
+agent-visible capability.
 
 ## Installation
 
@@ -144,15 +126,16 @@ cargo run -p lattice-cli -- resolve sonnet
 cargo run -p lattice-cli -- session branch <session_id> experiment
 cargo run -p lattice-cli -- session log <session_id>
 
-# LANCET self-check and audit-derived CEP status
+# LANCET self-check and invocation-ledger status
 cargo run -p lattice-cli -- lancet status
-cargo run -p lattice-cli -- doctor
+cargo run -p lattice-cli -- lancet doctor
 ```
 
 Expected outcomes: `session new` prints the new session id; `session send`
 streams assistant tokens to stdout and tool/status lines to stderr, then
-records the turn as a commit; `lancet status` shows recent CEP calls and the
-last guard verdict; `doctor` runs diagnostics. Add `--json` (global flag) to
+records the turn as a commit; `lancet status` shows a pinned ledger view and
+recent typed invocation states; `lancet doctor` validates the workspace and
+generated closed catalog. Add `--json` (global flag) to
 emit one `TurnEvent` JSON object per line on stdout instead of human output.
 
 ## Build, test, lint

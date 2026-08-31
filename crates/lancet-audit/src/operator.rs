@@ -3,7 +3,7 @@
 
 //! Operator query, tail, and replay over the authoritative InvocationStore.
 //!
-//! Reads pin one immutable ledger commit and never compose a CEP server or take
+//! Reads pin one immutable ledger commit and never compose a Tool runtime or take
 //! a workspace operation lock. Operator DTOs expose only typed binding facts,
 //! lifecycle state, terminal material metadata, and content-free Cell evidence.
 

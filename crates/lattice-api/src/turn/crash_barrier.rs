@@ -6,6 +6,8 @@
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use lancet_audit::invocation_store::{InvocationRecord, PinnedLedgerView};
 use lancet_protocol::InvocationId;
@@ -16,6 +18,7 @@ use super::coordinator::{CoordinatorIoError, TurnCoordinator};
 
 pub(crate) const BARRIER_ENV: &str = "LATTICE_TEST_TURN_BARRIER";
 pub(crate) const ACK_ENV: &str = "LATTICE_TEST_TURN_BARRIER_ACK";
+const CANCEL_BEFORE_DISPATCH_STEP_CLOSED: &str = "cancel_before_dispatch_step_closed";
 
 #[derive(Serialize)]
 struct CrashBarrierFacts {
@@ -34,7 +37,11 @@ pub(crate) async fn hit(
     session_id: &str,
     barrier: &str,
 ) -> Result<(), CoordinatorIoError> {
-    if std::env::var(BARRIER_ENV).ok().as_deref() != Some(barrier) {
+    let configured = std::env::var(BARRIER_ENV).ok();
+    if configured.as_deref() != Some(barrier)
+        && !(configured.as_deref() == Some(CANCEL_BEFORE_DISPATCH_STEP_CLOSED)
+            && barrier == "step_closed")
+    {
         return Ok(());
     }
     let (tip, ledger, draft_classification) = coordinator
@@ -42,6 +49,14 @@ pub(crate) async fn hit(
         .crash_barrier_snapshot(session_id.to_string())
         .await?;
     stop_at_barrier(session_id, barrier, tip, ledger, draft_classification);
+}
+
+pub(crate) fn cancel_before_dispatch(cancel_flag: Option<&Arc<AtomicBool>>) {
+    if std::env::var(BARRIER_ENV).ok().as_deref() == Some(CANCEL_BEFORE_DISPATCH_STEP_CLOSED) {
+        cancel_flag
+            .expect("cancellation crash barrier requires the CLI cancel flag")
+            .store(true, Ordering::Relaxed);
+    }
 }
 
 pub(crate) async fn prepare_dispatch(

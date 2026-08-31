@@ -2895,12 +2895,10 @@ version = "0.1.0"
 dependencies = [
  "lancet-audit",
  "lancet-authority",
- "lancet-catalog",
- "lancet-cep",
- "lancet-dispatch",
- "lancet-native",
  "lancet-protocol",
  "lancet-runtime",
+ "lattice-store",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",
@@ -2931,7 +2929,6 @@ name = "lancet-authority"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "lancet-catalog",
  "lancet-protocol",
  "net-guard",
  "serde",
@@ -2941,67 +2938,6 @@ dependencies = [
  "toml",
  "tracing",
  "url",
-]
-
-[[package]]
-name = "lancet-catalog"
-version = "0.1.0"
-dependencies = [
- "lancet-protocol",
- "schemars",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "lancet-cep"
-version = "0.1.0"
-dependencies = [
- "lancet-catalog",
- "lancet-dispatch",
- "lancet-protocol",
- "serde",
- "serde_json",
- "sha2 0.11.0",
-]
-
-[[package]]
-name = "lancet-dispatch"
-version = "0.1.0"
-dependencies = [
- "lancet-catalog",
- "lancet-protocol",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "lancet-native"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "futures",
- "gix",
- "indexmap",
- "lancet-audit",
- "lancet-authority",
- "lancet-catalog",
- "lancet-dispatch",
- "lancet-protocol",
- "lancet-runtime",
- "libc",
- "regex",
- "rustix",
- "schemars",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "toml",
- "tracing",
- "uuid",
 ]
 
 [[package]]
@@ -3028,7 +2964,6 @@ dependencies = [
  "inventory",
  "jsonschema",
  "lancet-authority",
- "lancet-dispatch",
  "lancet-protocol",
  "lancet-runtime",
  "lattice-store",
@@ -3076,9 +3011,6 @@ dependencies = [
  "lancet-api",
  "lancet-audit",
  "lancet-authority",
- "lancet-catalog",
- "lancet-cep",
- "lancet-native",
  "lancet-protocol",
  "lancet-runtime",
  "lattice-agent",
@@ -3113,8 +3045,6 @@ dependencies = [
  "futures",
  "lancet-api",
  "lancet-audit",
- "lancet-catalog",
- "lancet-native",
  "lattice-agent",
  "lattice-api",
  "lattice-llm",

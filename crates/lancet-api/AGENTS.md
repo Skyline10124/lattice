@@ -4,19 +4,18 @@ Crate-local guidance for `lancet-api`.
 
 ## Role
 
-This crate is the LANCET-native facade for runtime composition and operator
-reads, independent of LATTICE session/agent/profile layers. It exposes
-`LancetRuntime`/`LancetServer` for the lower-level runtime and transport boundary;
-only `lattice-api` may initiate a production invocation. Lower-level entry points
-remain nameable for internal reservation-gated tests, not as a Standalone
-Tool-execution product contract. ADR 0004 moves the remaining concrete native
-composition into `lancet-runtime`.
+This crate is the thin LANCET facade for Component runtime composition and
+operator reads, independent of LATTICE session/agent/profile layers. It exposes
+`LancetRuntime`; only `lattice-api` may initiate a production invocation.
+Lower-level entry points exist for reservation-gated tests, not as a standalone
+Tool-execution product contract.
 
 ## Sub-Architecture
 
-- `src/runtime.rs` owns `LancetRuntime`, `LancetServer`, server lifecycle, and
-  production composition. `LancetRuntime::build` always uses the process-shared
-  generated inventory; `LancetRuntimeConfig` has no caller-supplied catalog seam.
+- `src/runtime.rs` owns `LancetRuntime` and delegates sole-path execution to
+  `lancet_runtime::RuntimeExecution`. `LancetRuntime::build` always uses the
+  process-shared generated inventory; configuration has no caller-supplied
+  catalog or transport seam.
 - `src/config.rs` owns `LancetRuntimeConfig` over policy, capability admission,
   the strict project `InvocationStore`, and WorkspaceHistory backing.
 - `src/audit.rs` is the thin delegating facade over `lancet_audit::operator`.
@@ -33,14 +32,13 @@ composition into `lancet-runtime`.
 
 - No dependency on `lattice-agent`, `lattice-session`, `lattice-profile`, or
   `lattice-cli`.
-- Inputs are LANCET-native types. Profile-to-policy translation belongs to the
-  host (`lattice-api::turn::cep`).
-- Native handler/transport implementation stays in `lancet-native` until its
-  ADR 0004 migration into `lancet-runtime`; do not add another production
-  assembly path.
-- Do not add a Standalone invocation context or advertise direct CEP execution
-  as a product. Production calls originate in `lattice-api`, carry an exact
-  durable `InvocationBinding`, and pass reservation-gated admission.
+- Inputs are LANCET types. Profile-to-policy translation belongs to the host
+  (`lattice-api::turn::cep`).
+- Component execution and Tool Host implementation stay in `lancet-runtime`;
+  this crate must not add another assembly path.
+- Do not add a standalone invocation context or advertise direct execution as a
+  product. Production calls originate in `lattice-api`, carry an exact durable
+  `InvocationBinding`, and pass reservation-gated admission.
 - Operator reads are direct `InvocationStore` APIs, never Agent Tools. Keep
   pinned-view pagination, filtering, Cell-evidence projection, and DTO behavior
   in `lancet-audit`; this facade stays thin.
@@ -65,6 +63,13 @@ composition into `lancet-runtime`.
 
 ## Recent Issues
 
+- FIXED #34 PR review: a failed durable admission is classified from a fresh
+  authoritative read of the same `InvocationId`. Return `NotExecuted` only while
+  the fact is still pre-dispatch; `DispatchStarted`, terminal, and unreadable
+  states return `ReconciliationRequired`, preserving original retriability.
+  Cancellation is checked synchronously before admission and synchronized again
+  into the call-scoped sender after `DispatchStarted`; polling covers only the
+  subsequent in-flight interval.
 - ADDED #63/#64: runtime composition owns private workspace history and public
   rewind, while session-graph movement stays above this crate.
 - FIXED #39: operator audit behavior and DTO ownership moved to `lancet-audit`;
@@ -77,6 +82,6 @@ composition into `lancet-runtime`.
 ## Verification
 
 - Local: `cargo test -p lancet-api`.
-- Runtime composition changes: also run affected native/API round trips.
+- Runtime composition changes: also run affected runtime/API Component tests.
 - Operator-read changes: also run `cargo test -p lancet-audit` and the exact
   Direct-Local operator matrix against a built binary.

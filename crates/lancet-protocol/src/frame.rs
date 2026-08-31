@@ -64,11 +64,10 @@ mod tests {
     fn tool_error_is_error_object_with_cep_data() {
         let cep_err = CepError {
             code: CepErrorCode::ExecutionFailed,
-            message: "command failed".into(),
+            message: "runtime operation failed".into(),
             data: CepErrorData::Execution(ExecutionErrorData {
-                command: "rm".into(),
-                exit_code: Some(1),
-                stderr: None,
+                operation: "mutate.edit".into(),
+                detail: Some("installation failed".into()),
             }),
             retriability: Retriability::Transient,
         };

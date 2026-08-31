@@ -8,25 +8,23 @@ description = "LANCET unified public API: CEP runtime composition and operator a
 
 [dependencies]
 lancet-protocol = { workspace = true }
-lancet-catalog = { workspace = true }
-lancet-dispatch = { workspace = true }
-lancet-cep = { workspace = true }
 lancet-audit = { workspace = true }
 lancet-authority = { workspace = true }
-lancet-native = { workspace = true }
 lancet-runtime = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+libc = { workspace = true, optional = true }
+
+[features]
+default = []
+test-crash-barriers = ["dep:libc"]
 
 [dev-dependencies]
 # Normal dependency above; the dev-entry adds the `test-support` feature so
 # test builds get `ScopedXdgStateHome` (shared XDG/env test isolation).
 lancet-audit = { workspace = true, features = ["test-support"] }
-lancet-catalog = { workspace = true }
-# `test-utils` exposes `ComponentRuntime::noop_fixture()` for Component
-# lifecycle tests.
-lancet-runtime = { workspace = true, features = ["test-utils"] }
 tempfile = { workspace = true }
+lattice-store = { workspace = true, features = ["test-fault-injection"] }

@@ -2,6 +2,207 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #34 PR #178 review: close pre-dispatch cancellation durably — 2026-08-29
+
+**Severity:** HIGH（durable cancellation / crash recovery correctness）
+
+**Problem:** runtime 已在 admission 前阻止 pre-dispatch cancellation 的 Tool 副作用，并把
+invocation 终结为 `NotExecuted(CancelledBeforeDispatch)`；但 saga 闭合该 binding 后直接
+`continue`，没有把取消传播到 `stop_batch`。单 ToolCall 因此持久化
+`StepClosed::ContinueModel`。若进程在下一轮 live cancellation check 前退出，reopen 会按
+契约闭合为 `Interrupted(WhileAwaitingModelContinuation)`，使同一 durable cancellation
+因崩溃时机不同得到 `Cancelled` 或 `Interrupted` 两种 Turn outcome。
+
+**Fix:** `DispatchOutcome::NotExecuted(CallCancelled)` 在完成当前 terminal、
+`ClosedBinding`、cursor 和事件后把 `CancelledBeforeDispatch` 写入 `stop_batch`。后续
+bindings 继续按既有顺序闭合为未执行，step 最终持久化 `StepClosed::CancelTurn`；普通
+`BeforeDispatch` 错误不受影响。新增 test-only saga hook，在循环顶部检查后、runtime
+admission 前置位真实 cancel flag，并由 external binary harness 在 durable `StepClosed`
+处 SIGSTOP/SIGKILL。回归同时验证真实 `mutate.create` 未写文件、未移动
+WorkspaceHistory、ledger reason、无下一次模型请求，以及 reopen 后
+`TurnOutcome::Cancelled`。同步更正 `lancet-runtime/AGENTS.md`：durable reservation
+校验属于 `lancet-api::LancetRuntime::dispatch`，`RuntimeExecution` 只负责
+request/binding consistency、descriptor resolution、Cell admission 与 Component execution。
+
+**Verification:**
+
+- RED：构建 `cargo build -p lattice-cli --features test-crash-barriers` 后，以该 binary
+  运行 focused `pre_dispatch_cancellation_step_closed_sigkill_reopens_cancelled`；snapshot
+  实际为 `StepClosed::ContinueModel`，测试按预期失败。
+- GREEN：同一 focused SIGKILL 测试 — PASS（1 passed）。
+- `env -u LATTICE_BIN cargo xtask ci` — PASS（toolchain、fmt、clippy、binary build、
+  boundaries、tool-codegen、24 crate tests、system harness 与 Tool artifact verify）。
+- `cargo test -p lattice-api --all-features` — PASS。
+- `cargo clippy -p lattice-api -p lattice-system-harness --all-targets --all-features
+  -- -D warnings` — PASS。
+- `cargo xtask lancet-boundary`、`cargo xtask harness-boundary` — PASS。
+- 三个改动 Rust 文件的 LSP diagnostics、`cargo fmt --all --check`、
+  `git diff --check` — PASS。
+- 完整 `direct_crash_barriers` target：7 passed / 1 pre-existing failure；失败的
+  `dispatch_started` case 使用两套不一致的 test-only env names，已记录为
+  `FINDINGS.md` `T-GH34-04`，不属于本次 cancellation closure。
+
+**Changed files:** `crates/lattice-api/src/turn/{saga,crash_barrier}.rs`、
+`crates/lattice-system-harness/tests/direct_crash_barriers.rs`、三份 crate-local
+`AGENTS.md`、`FINDINGS.md`、`FIX.md`。
+
+## GitHub #34 PR #178 review: close cancellation across the durable handoff — 2026-08-29
+
+**Severity:** HIGH（cancellation correctness / mutation safety）
+
+**Problem:** saga 在进入 dispatch 前只检查一次 request `cancel_flag`。runtime 随后先发布
+`DispatchStarted`，再创建初值为 false 的 call-scoped watch，并依赖每 10 ms 运行一次的
+异步 monitor 转发 flag。取消若在 saga 检查后到达，monitor 不保证先于 Component 的
+pre-cancel check 运行；真实 `mutate.create` 可先安装文件并写入 private history。
+
+**Fix:** `LancetRuntime::dispatch` 在 exact request check 后、durable admission 前同步读取
+flag；已取消则返回共享的 typed `CallCancelled`，保持 reservation 未 dispatch，
+`lattice-api` 以 `NotExecuted(CancelledBeforeDispatch)` 闭合。admission 成功后先建立
+call-scoped sender/receiver 和持续 monitor，再同步重读 flag；若此时已取消，立即调用
+sender，使 Component handoff 前的 authoritative pre-cancel check 必然看到取消。该路径
+已越过 `DispatchStarted`，因此仍返回 executed receipt，并由 saga 映射为 durable
+`TerminalOutcome::Cancelled` / conversation `Cancelled`；monitor 只负责后续 in-flight
+取消。`lancet-runtime::error_map::cancelled_error` 公开给薄门面复用，未复制错误码或
+category authority。
+
+**Verification:**
+
+- RED：`cargo test -p lancet-api cancel` — 2 failed；pre-cancelled case 越过
+  admission，admission-window case 实际返回已写入 22 bytes 的 `mutate.create` 结果。
+- GREEN：同一命令 — 2 passed；两条均使用真实 `mutate.create`，分别断言
+  `Reserved`/`DispatchStarted` 边界、零 workspace 文件、零 workspace history。
+- `cargo test -p lattice-api call_cancelled_maps_to_cancelled_terminal_and_conversation`
+  — PASS，锁定 durable/conversation `Cancelled` 映射及 `CancelledBeforeDispatch` reason。
+- `cargo test -p lancet-runtime -p lancet-api -p lattice-api` — PASS。
+- `cargo clippy -p lancet-runtime -p lancet-api -p lattice-api --all-targets
+  --all-features -- -D warnings` — PASS。
+- `cargo xtask lancet-boundary` — PASS。
+- 三个改动 Rust 文件的 LSP diagnostics、`cargo fmt --all --check`、
+  `git diff --check` — PASS。
+
+**Changed files:** `crates/lancet-runtime/src/error_map.rs`、
+`crates/lancet-api/src/runtime.rs`、`crates/lattice-api/src/turn/saga.rs`、
+三份 crate-local `AGENTS.md`、`FINDINGS.md`、`FIX.md`。
+
+## GitHub #34 PR #178 review: admission durability ambiguity fails into reconciliation — 2026-08-29
+
+**Severity:** HIGH（durable invocation lifecycle / correctness）
+
+**Problem:** `LancetRuntime::dispatch` 把 `InvocationStore::admit_reserved` 的所有错误和
+blocking worker 失败都包装为 `DispatchOutcome::NotExecuted`。但 admission 会先发布
+`DispatchStarted` ref、再执行 durability barrier；后置 fsync 失败时调用方拿到 `Err`，
+authoritative ledger 已经越过 dispatch boundary。`lattice-api` 随后补写
+`NotExecuted(BeforeDispatch)`，会与 durable fact 冲突，并把 may-have-executed 路径错误
+降级为确定未执行。
+
+**Fix:** admission 失败后按同一 typed `InvocationId` 重读 authoritative ledger。只有
+事实仍为 `Reserved` 时才返回 `NotExecuted`；观察到候选缺失、
+`DispatchStarted`/`Terminal` 或无法完成 authoritative read 时返回新的
+`DispatchOutcome::ReconciliationRequired`。durability 类原始错误保持 `Transient`，
+blocking worker 的未知状态保持 `Unknown`。`lattice-api` 在现有 `StepClosing` journal
+位置停止 live saga，发出 typed `TurnEvent::RecoveryRequired`；`run_turn` collector、CLI
+和 TUI 保留 typed recovery，而 reopen 继续使用既有 reducer 将裸
+`DispatchStarted` 闭合为 `Indeterminate(MayHaveOccurred)`，不重发 Tool，也不伪造
+`NotExecuted` terminal。
+
+**Verification:**
+
+- RED：`cargo test -p lancet-api published_dispatch_started_is_not_classified_not_executed`
+  在旧实现下失败，观测到 `DispatchStarted` 时仍返回 `NotExecuted`。
+- GREEN：`cargo test -p lancet-api` — 9 passed。
+- `cargo test -p lattice-api reconciliation_requirement` — 2 focused tests passed。
+- `cargo test -p lancet-api -p lattice-api -p lattice-cli -p lattice-tui` — PASS
+  （lancet-api 9、lattice-api 90 + integration matrices、lattice-cli 125、lattice-tui 24）。
+- `cargo clippy -p lancet-api -p lattice-api -p lattice-cli -p lattice-tui
+  --all-targets --all-features -- -D warnings` — PASS。
+- `cargo xtask lancet-boundary` — PASS。
+- `cargo fmt --all --check`、`git diff --check`、关键文件 LSP diagnostics — PASS。
+
+**Changed files:** `crates/lancet-api/src/runtime.rs`、
+`crates/lattice-api/src/{session.rs,turn/{types.rs,types_tests.rs,collector.rs,saga.rs}}`、
+`crates/lattice-api/tests/support/mod.rs`、`crates/lattice-cli/src/commands/run.rs`、
+`crates/lattice-tui/src/app.rs`、相关 `AGENTS.md`、`FINDINGS.md`、`FIX.md`。
+
+## GitHub #34 follow-up: 删除墓碑门禁与弱信号测试 — 2026-08-28
+
+**Severity:** LOW（测试债务 / hard-cut 收口）
+
+**Problem:** #34 首次提交后只读复核发现一条新增单测仅点名断言已删除 legacy
+effect 字段不存在；同时 `cargo xtask lancet-boundary` 仍永久扫描 #139-B 已删除符号，
+并由三条自测维护这份 tombstone needle 表。另有两条单测分别只断言 descriptor
+identity 字符串长度为 64、两个独立 `watch` channel 互不共享状态，未证明其测试名
+声称的 host pin 来源或 runtime 调用隔离。它们没有独立语义回归信号。
+
+**Fix:** 删除 `capability_error_data_round_trips_without_legacy_effect_fields`、
+`enabled_projection_uses_host_pinned_identity`、`cancellation_pairs_are_independent`，
+删除 `ISSUE139B_LEGACY_NEEDLES`、`issue139b_legacy_residue_hits` 及其三条自测，并从
+LANCET boundary runner 移除该永久 tombstone gate。删除只被该 gate 使用的
+`xtask/src/scan_rs_tree.rs`；保留真实依赖图、production/test feature 边界、当前
+catalog unknown-name、mid-traversal cancellation、typed event identity 与生命周期
+排序回归。
+
+**Verification:**
+- `env -u LATTICE_BIN cargo xtask ci` — PASS（完整 workspace 与 system harness）。
+- `cargo test -p lancet-protocol -p lancet-runtime -p xtask` — PASS（73 / 202 +
+  9 / 12 / 14 / 11 / 102）。
+- `cargo xtask lancet-boundary` — PASS，当前只检查仍存在的结构边界。
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings` — PASS。
+- `cargo fmt --all --check`、`git diff --check`、LSP diagnostics — PASS。
+
+**Changed files:** `crates/lancet-protocol/src/error.rs`、
+`crates/lancet-runtime/src/{catalog,control}.rs`、`xtask/src/{main,scan_rs_tree}.rs`、
+`xtask/src/lancet_boundary{,/check}.rs`、`FIX.md`。
+
+## GitHub #34: LANCET runtime convergence hard cut — 2026-08-28
+
+**Severity:** HIGH（架构 / 安全边界 / 删除迁移残留）
+
+**Problem:** 五个默认 Tool 已迁为 manifest-owned WASM Components，但生产 Turn 仍通过
+`lancet-native` → `lancet-dispatch` / `lancet-cep` / `lancet-catalog` 的兼容链执行，
+并保留 legacy effect policy/type、native registry、JSON-RPC client/server transport、
+独立 catalog authority 与多套调用/错误/证据语义。这使 closed catalog、typed
+`InvocationId`、durable reservation/admission、Cell evidence 与 cancellation 的唯一权威
+仍不成立，也阻塞 ADR 0004 的最终收敛。
+
+**Fix:**
+- 删除 `lancet-native`、`lancet-dispatch`、`lancet-cep`、`lancet-catalog` 四个 crate，
+  以及 `ImpactKind` / `EffectScopeKind` / `OverlayBehavior` /
+  `FailureSemantics` / `BaseAuthorityRequirement`、`ResolvedPolicy`、legacy effect
+  ledger/checker 与 `[lancet.effects]` 生产面。
+- 在 `lancet-runtime` 建立唯一 closed Component catalog、provider Tool projection、
+  reservation-bound `RuntimeExecution`、call-scoped cancellation、host-bound ordered
+  Tool events 与 typed `CellEvidenceTriple` receipt；workspace observation、mutation、
+  network fetch 统一复用同一 admitted descriptor、budget、Local Workspace 与 history。
+- 将 `lancet-api` 收窄为 runtime/audit/rewind 门面；`lattice-api::TurnCoordinator`
+  在 `DispatchStarted` 后直接调用该门面并以同一 typed `InvocationId` 发布 Tool
+  events、terminal material 与 evidence。修复异步转发竞争，使
+  `cep_call_started < cep_call_finished < ToolCallFinished` 对同一 invocation 恒成立。
+- 严格 profile 只接受 Cell capability/workspace/network/budget 配置；更新 CLI status/
+  doctor、rollout 顺序、README、LANCET/TESTING 文档与 crate-local `AGENTS.md`。
+  `cargo xtask lancet-boundary` 现在检查实际剩余依赖边界、legacy hard-cut residue
+  与 production/test feature reachability，不保留已删除名字的 tombstone deny-list。
+
+**Verification:**
+- `env -u LATTICE_BIN cargo xtask ci` — PASS（toolchain、fmt、clippy、binary build、
+  harness/LANCET boundaries、tool-codegen、24-crate tests、全部 system harness、
+  `cargo xtask tool-build --verify`）。
+- `LATTICE_BIN=$PWD/target/debug/lattice cargo test --workspace` — PASS。
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings` — PASS。
+- `cargo build --workspace --exclude noop-echo --exclude fetch-web --exclude observe-workspace
+  --exclude mutate-create --exclude mutate-edit --exclude session-todo_write` — PASS；
+  `cargo build -p noop-echo --target wasm32-unknown-unknown` — PASS。Issue 原列出的
+  `cargo build --workspace --exclude noop-echo` 会按预期 host-link 其余五个 wasm guest
+  cdylib 并失败；该既有 Cargo 目标隔离限制已在 `FINDINGS.md` `ENV-WASM-01` 更新，
+  真实 guest gate 由 `cargo xtask tool-build --verify` 覆盖。
+- `cargo test -p lancet-api -p lancet-runtime -p lattice-api -p lattice-profile
+  -p lattice-cli -p lattice-system-harness` — PASS。
+- `cargo xtask lancet-boundary`、`cargo fmt --all --check`、`git diff --check` — PASS。
+
+**Changed files:** 删除 `crates/{lancet-native,lancet-dispatch,lancet-cep,lancet-catalog}`；
+重构 `crates/lancet-{protocol,authority,runtime,api}`、`crates/lattice-{api,profile,cli}`
+及 system harness；更新 root manifests、`README.md`、`AGENTS.md`、`FINDINGS.md`、
+`docs/{LANCET,TESTING}.md`、issue #28 design closeout 与 `xtask` boundary/CI/rollout。
+
 ## 测试清理：删除不符合 YAGNI/KISS 的重复与无效测试 — 2026-08-28
 
 **Severity:** LOW（测试债务与维护成本；无生产行为变更）
