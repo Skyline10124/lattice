@@ -2,6 +2,38 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #179 review: make conservative terminal recovery repeatable — 2026-08-30
+
+**Severity:** HIGH（repeated-crash reconciliation correctness）
+
+**Problem:** 第一次 reopen 遇到 `DispatchStarted` 时，会把当前 invocation 保守终结为
+`Indeterminate(MayHaveOccurred) + Unavailable(DraftPublicationFailed, None, None)`。若进程在随后
+发布 `AdvanceStepClosing` 前再次退出，第二次 reopen 会把自己刚写入的 terminal 交给
+`validate_terminal_with_candidate` 或 `validate_terminal_without_candidate`；两者都拒绝这个 exact
+保守形状并误报 `JournalCorruption`。
+
+**Fix:** 两个 validator 现在只额外接受 exact
+`Indeterminate + DraftPublicationFailed(None, None)`。有无仍然 pinned 的 `ResultDraft` 都可恢复，
+其他 candidate/material mismatch 继续 fail closed。回归作为既有 StepClosing reducer table 的两行
+加入，没有新增 test function、PendingStage、schema version 或 wire 字段。`NotExecutedReason` 文档同时
+明确 ledger 边界：首个观察到 cancellation 的 invocation 记录 `CancelledBeforeDispatch`，后续仅因
+batch 已停止而闭合的 bindings 记录结构性 `BeforeDispatch`；live 与 reopen 因而写出相同证据。
+PendingStage 数量文档由错误的 thirteen 改回 twelve。
+
+**Verification:**
+
+- RED：`cargo test -p lattice-session step_closing_resumes_the_cursor_binding_from_its_terminal_fact -- --nocapture`
+  以 `terminal material does not match the pinned draft candidate` 失败。
+- GREEN：同一 focused reducer test — PASS。
+- `cargo test -p lattice-session` — PASS（152 passed）。
+- `cargo clippy -p lattice-session --all-targets -- -D warnings` — PASS。
+- 使用本工作树 feature binary 运行完整 `direct_crash_barriers` target — PASS（7 passed）。
+- `env -u LATTICE_BIN cargo xtask ci` — PASS（fmt、workspace clippy、boundary gates、
+  tool-codegen、24 crate tests、完整 system harness 与 Tool artifact verify）。
+
+**Changed files:** `crates/lattice-session/src/pending/{contract,facts,mod,reconcile}.rs`、
+`FINDINGS.md`、`FIX.md`。
+
 ## GitHub #179: make live and reopen Tool batches use one durable authority — 2026-08-30
 
 **Severity:** HIGH（durable Turn closure / crash recovery correctness）
