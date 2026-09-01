@@ -105,11 +105,13 @@ impl ProcessGroupCleanup {
     }
 }
 
-/// Lossless command bytes, direct-child observation, intervention, and cleanup.
+/// Captured command bytes with completeness, direct-child observation, intervention, and cleanup.
 #[derive(Clone, PartialEq, Eq)]
 pub struct CommandOutcome {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+    pub stdout_complete: bool,
+    pub stderr_complete: bool,
     /// `None` only when cleanup could not wait for the direct child.
     pub termination: Option<ProcessTermination>,
     pub interventions: Vec<HarnessIntervention>,
@@ -130,7 +132,9 @@ impl fmt::Display for CommandOutcomeSummary<'_> {
             .field("interventions", &self.outcome.interventions)
             .field("cleanup", &self.outcome.cleanup)
             .field("stdout_bytes", &self.outcome.stdout.len())
+            .field("stdout_complete", &self.outcome.stdout_complete)
             .field("stderr_bytes", &self.outcome.stderr.len())
+            .field("stderr_complete", &self.outcome.stderr_complete)
             .finish()
     }
 }
@@ -161,7 +165,12 @@ impl CommandOutcome {
     }
 
     pub fn clean_exit_code(&self) -> Option<i32> {
-        if self.interventions.is_empty() && !self.cleanup.forced && self.cleanup.succeeded() {
+        if self.stdout_complete
+            && self.stderr_complete
+            && self.interventions.is_empty()
+            && !self.cleanup.forced
+            && self.cleanup.succeeded()
+        {
             self.exit_code()
         } else {
             None
@@ -190,9 +199,14 @@ pub struct LatticeCommand {
 /// would hit the test process itself, killing the whole `cargo test` run
 /// (#105). Every group signal additionally refuses to fire when the target
 /// group is this process's own group.
+struct DrainResult {
+    bytes: Vec<u8>,
+    reached_eof: bool,
+}
+
 struct DrainHandle {
     stop: Arc<AtomicBool>,
-    thread: JoinHandle<std::io::Result<Vec<u8>>>,
+    thread: JoinHandle<std::io::Result<DrainResult>>,
 }
 
 pub struct RunningCommand {
@@ -254,10 +268,11 @@ impl RunningCommand {
             forced: true,
             ..ProcessGroupCleanup::default()
         };
-        record_cleanup_result(
+        record_process_group_signal_result(
             &mut cleanup,
             CleanupOperation::SignalProcessGroup(libc::SIGKILL),
             signal_process_group(self.pgid, libc::SIGKILL),
+            || processes_in_pgid(self.pgid),
         );
         let child = self.child.as_mut().expect("running child");
         record_cleanup_result(&mut cleanup, CleanupOperation::KillChild, child.kill());
@@ -283,10 +298,11 @@ impl RunningCommand {
                     forced: true,
                     ..ProcessGroupCleanup::default()
                 };
-                record_cleanup_result(
+                record_process_group_signal_result(
                     &mut cleanup,
                     CleanupOperation::SignalProcessGroup(libc::SIGKILL),
                     signal_process_group(self.pgid, libc::SIGKILL),
+                    || processes_in_pgid(self.pgid),
                 );
                 let child = self.child.as_mut().expect("running child");
                 record_cleanup_result(&mut cleanup, CleanupOperation::KillChild, child.kill());
@@ -309,10 +325,11 @@ impl RunningCommand {
         {
             self.interventions.push(HarnessIntervention::ForcedKill);
             cleanup.forced = true;
-            record_cleanup_result(
+            record_process_group_signal_result(
                 &mut cleanup,
                 CleanupOperation::SignalProcessGroup(libc::SIGKILL),
                 signal_process_group(self.pgid, libc::SIGKILL),
+                || processes_in_pgid(self.pgid),
             );
         }
         if cleanup.forced
@@ -321,11 +338,13 @@ impl RunningCommand {
         {
             cleanup.surviving_pids = survivors;
         }
-        let stdout = finish_drain(self.stdout.take())?;
-        let stderr = finish_drain(self.stderr.take())?;
+        let (stdout, stdout_complete) = finish_drain(self.stdout.take())?;
+        let (stderr, stderr_complete) = finish_drain(self.stderr.take())?;
         Ok(CommandOutcome {
             stdout,
             stderr,
+            stdout_complete,
+            stderr_complete,
             termination: status.as_ref().and_then(process_termination),
             interventions: std::mem::take(&mut self.interventions),
             cleanup,
@@ -427,41 +446,48 @@ fn drain_to_thread<R: Read + Send + 'static>(maybe: Option<R>) -> DrainHandle {
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
     let thread = std::thread::spawn(move || {
-        let mut output = Vec::new();
+        let mut bytes = Vec::new();
         let Some(mut stream) = maybe else {
-            return Ok(output);
+            return Ok(DrainResult {
+                bytes,
+                reached_eof: true,
+            });
         };
         let mut chunk = [0_u8; 8192];
-        while !thread_stop.load(Ordering::Acquire) {
+        let reached_eof = loop {
+            if thread_stop.load(Ordering::Acquire) {
+                break false;
+            }
             match stream.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(read) => output.extend_from_slice(&chunk[..read]),
+                Ok(0) => break true,
+                Ok(read) => bytes.extend_from_slice(&chunk[..read]),
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(TIMEOUT_POLL);
                 }
                 Err(error) => return Err(error),
             }
-        }
-        Ok(output)
+        };
+        Ok(DrainResult { bytes, reached_eof })
     });
     DrainHandle { stop, thread }
 }
 
-fn finish_drain(handle: Option<DrainHandle>) -> Result<Vec<u8>, DriverError> {
+fn finish_drain(handle: Option<DrainHandle>) -> Result<(Vec<u8>, bool), DriverError> {
     let Some(handle) = handle else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), true));
     };
     let deadline = Instant::now() + DRAIN_FINISH_GRACE;
     while !handle.thread.is_finished() && Instant::now() < deadline {
         std::thread::sleep(TIMEOUT_POLL);
     }
     handle.stop.store(true, Ordering::Release);
-    handle
+    let result = handle
         .thread
         .join()
         .map_err(|_| DriverError::DrainThreadPanicked)?
-        .map_err(DriverError::Io)
+        .map_err(DriverError::Io)?;
+    Ok((result.bytes, result.reached_eof))
 }
 
 fn record_cleanup_result<T>(
@@ -475,6 +501,31 @@ fn record_cleanup_result<T>(
             cleanup.errors.push(CleanupError::new(operation, error));
             None
         }
+    }
+}
+
+fn record_process_group_signal_result<F>(
+    cleanup: &mut ProcessGroupCleanup,
+    operation: CleanupOperation,
+    result: std::io::Result<()>,
+    recheck: F,
+) where
+    F: FnOnce() -> Result<Vec<u32>, CleanupError>,
+{
+    match result {
+        Ok(()) => {}
+        Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {
+            let signal_error = CleanupError::new(operation, error);
+            match recheck() {
+                Ok(pids) if pids.is_empty() => {}
+                Ok(_) => cleanup.errors.push(signal_error),
+                Err(inspection_error) => {
+                    cleanup.errors.push(signal_error);
+                    cleanup.errors.push(inspection_error);
+                }
+            }
+        }
+        Err(error) => cleanup.errors.push(CleanupError::new(operation, error)),
     }
 }
 
@@ -753,6 +804,36 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_output_drain_rejects_clean_exit() {
+        let (reader, mut writer) =
+            std::os::unix::net::UnixStream::pair().expect("create local pipe");
+        reader
+            .set_nonblocking(true)
+            .expect("set reader nonblocking");
+        let drain = drain_to_thread(Some(reader));
+        std::io::Write::write_all(&mut writer, b"prefix").expect("write prefix");
+
+        let (stdout, stdout_complete) = finish_drain(Some(drain)).expect("finish drain");
+        drop(writer);
+        let outcome = CommandOutcome {
+            stdout,
+            stderr: Vec::new(),
+            stdout_complete,
+            stderr_complete: true,
+            termination: Some(ProcessTermination::Exited(0)),
+            interventions: Vec::new(),
+            cleanup: ProcessGroupCleanup::default(),
+        };
+
+        assert_eq!(outcome.stdout, b"prefix");
+        assert!(!outcome.stdout_complete);
+        assert!(
+            !outcome.is_clean_exit(0),
+            "an interrupted output drain must contaminate exact exit"
+        );
+    }
+
+    #[test]
     fn interrupt_timeout_preserves_both_interventions_and_forced_kill() {
         let dir = tempfile::tempdir().expect("tempdir");
         let ready = dir.path().join("ready");
@@ -809,6 +890,29 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_sigkill_esrch_is_benign_only_when_group_is_empty() {
+        let operation = CleanupOperation::SignalProcessGroup(libc::SIGKILL);
+        let mut empty = ProcessGroupCleanup::default();
+        record_process_group_signal_result(
+            &mut empty,
+            operation,
+            Err(std::io::Error::from_raw_os_error(libc::ESRCH)),
+            || Ok(Vec::new()),
+        );
+        assert!(empty.errors.is_empty());
+
+        let mut occupied = ProcessGroupCleanup::default();
+        record_process_group_signal_result(
+            &mut occupied,
+            operation,
+            Err(std::io::Error::from_raw_os_error(libc::ESRCH)),
+            || Ok(vec![42]),
+        );
+        assert_eq!(occupied.errors.len(), 1);
+        assert_eq!(occupied.errors[0].raw_os_error, Some(libc::ESRCH));
+    }
+
+    #[test]
     fn cleanup_failures_are_retained_without_an_invented_process_status() {
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "exit 0"]);
@@ -834,11 +938,7 @@ mod tests {
                 .iter()
                 .map(|error| error.operation)
                 .collect::<Vec<_>>(),
-            vec![
-                CleanupOperation::SignalProcessGroup(libc::SIGKILL),
-                CleanupOperation::KillChild,
-                CleanupOperation::WaitChild,
-            ]
+            vec![CleanupOperation::KillChild, CleanupOperation::WaitChild]
         );
         assert!(outcome.cleanup.surviving_pids.is_empty());
     }

@@ -491,8 +491,8 @@ pub enum SessionSendError {
     Driver(#[from] DriverError),
     #[error("`session new --json` did not emit a session_id; stdout: {stdout}")]
     NoSessionId { stdout: String },
-    #[error("`session new --json` exited non-zero: {code:?}")]
-    NewSessionFailed { code: Option<i32> },
+    #[error("`session new --json` failed: {outcome:?}")]
+    NewSessionFailed { outcome: Box<CommandOutcome> },
 }
 
 fn create_session_with_timeout(
@@ -519,7 +519,7 @@ fn create_session_with_timeout(
     )?;
     if !output.is_clean_exit(0) {
         return Err(SessionSendError::NewSessionFailed {
-            code: output.exit_code(),
+            outcome: Box::new(output),
         });
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -779,6 +779,34 @@ mod tests {
         assert_eq!(SendExitCode::from_code(None), None);
         assert_eq!(classify_exit(None), SendExitCode::Failed);
         assert_eq!(classify_exit(Some(2)), SendExitCode::InputError);
+    }
+
+    #[test]
+    fn new_session_failure_retains_complete_command_outcome() {
+        let outcome = CommandOutcome {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            stdout_complete: true,
+            stderr_complete: true,
+            termination: Some(crate::driver::ProcessTermination::Signaled(libc::SIGTERM)),
+            interventions: vec![crate::driver::HarnessIntervention::InterruptRequested],
+            cleanup: crate::driver::ProcessGroupCleanup::default(),
+        };
+
+        let error = SessionSendError::NewSessionFailed {
+            outcome: Box::new(outcome),
+        };
+        let SessionSendError::NewSessionFailed { outcome } = error else {
+            panic!("wrong error variant");
+        };
+        assert_eq!(
+            outcome.termination,
+            Some(crate::driver::ProcessTermination::Signaled(libc::SIGTERM))
+        );
+        assert_eq!(
+            outcome.interventions,
+            vec![crate::driver::HarnessIntervention::InterruptRequested]
+        );
     }
 
     #[test]
