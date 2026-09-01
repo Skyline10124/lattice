@@ -317,16 +317,19 @@ fn direct_failure_sigint_while_stalled_commits_cancelled() {
     // Gated server holds the response so the provider is stalled (stream
     // opened, no events). The gate is never released; the SIGINT path must
     // terminate the turn.
-    let (server, _gate) =
-        wire_gated_fake_llm(&world, "dl-sigint", SseScript::plain("never-served"));
+    let (server, gate) = wire_gated_fake_llm(&world, "dl-sigint", SseScript::plain("never-served"));
     let scenario_evidence = evidence(&world, &spec);
     let send =
         SessionSendDriver::new(&driver, &world, &spec, "dl-sigint", "main").expect("session");
 
-    // Spawn the send so we can deliver SIGINT while it is stalled.
+    // Spawn the send, then prove the provider handler reached its intentional
+    // stall before delivering SIGINT.
     let mut running: RunningCommand = send.spawn("stall then cancel").expect("spawn send");
-    // Give the product time to open the provider stream and enter the stall.
-    std::thread::sleep(Duration::from_millis(400));
+    server
+        .wait_for_requests(1, Duration::from_secs(60))
+        .expect("provider request before SIGINT");
+    gate.wait_until_stalled(1, Duration::from_secs(2))
+        .expect("provider handler stalled before SIGINT");
     running.interrupt().expect("deliver SIGINT");
 
     let outcome = send.wait_spawned(running).expect("wait spawned");
@@ -605,6 +608,8 @@ fn direct_failure_session_lock_serializes_same_session_turns() {
     gated_server
         .wait_for_requests(1, Duration::from_secs(60))
         .expect("turn A must reach the gated fake LLM");
+    gate.wait_until_stalled(1, Duration::from_secs(2))
+        .expect("turn A handler must reach the response gate");
 
     // (3) Retarget world env to a second non-gated fake LLM and start turn B on
     // the same session. ScenarioWorld::command reads env at spawn time, so
@@ -625,7 +630,8 @@ fn direct_failure_session_lock_serializes_same_session_turns() {
 
     // (4) Release A. It commits first; B then acquires the session lock,
     // snapshots the new head, and commits against that head.
-    gate.release();
+    gate.release(Duration::from_secs(2))
+        .expect("turn A left the response gate");
     let stalled = send.wait_spawned(running_a).expect("wait A");
     let racer = send.wait_spawned(running_b).expect("wait B");
 

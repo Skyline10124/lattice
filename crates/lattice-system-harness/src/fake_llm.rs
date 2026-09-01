@@ -22,9 +22,8 @@
 //! stream produces: one `data: {chunk}\n\n` per chunk, terminated by
 //! `data: [DONE]\n\n`.
 
-use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::{Read, Write};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
@@ -112,30 +111,32 @@ impl SseScript {
     }
 }
 
-/// Internal error surfaced when the server cannot serve a request. The server
-/// thread logs these to stderr and closes the connection; they are not part
-/// of the public harness result type because a serving error manifests to the
-/// scenario as a product-side LLM failure (which is what the scenario asserts
-/// on).
+/// A bounded fake-provider protocol or lifecycle failure.
 #[derive(Debug, Error)]
 pub enum ServeError {
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
-    #[error("bad request: {0}")]
-    BadRequest(String),
-    #[error("timed out after {0:?} waiting for fake-provider requests")]
-    Timeout(Duration),
+    #[error("timed out after {timeout:?} waiting for {operation}")]
+    Timeout {
+        operation: &'static str,
+        timeout: Duration,
+    },
+    #[error("fake-provider server thread failed: {0}")]
+    ThreadFailure(String),
+}
+
+fn timeout_error(operation: &'static str, duration: Duration) -> ServeError {
+    ServeError::Timeout {
+        operation,
+        timeout: duration,
+    }
 }
 
 /// A running fake LLM server bound to a scenario-local port.
 ///
-/// `Drop` signals the serve loop to stop accepting, joins the serve thread,
-/// and drops the listener — so the bound port actually releases before
-/// `Drop` returns (the previous implementation set a `shutdown` flag the
-/// blocking `accept` could never observe, leaving the thread and port
-/// alive for the whole test process). Drop also cancels a response gate and
-/// joins every connection handler; socket I/O has finite deadlines, so teardown
-/// cannot leave a gated handler behind. Captures remain readable until drop.
+/// Explicit shutdown reports server failures and waits only to its deadline.
+/// `Drop` uses a fixed bounded fallback, cancels any response gate, and closes
+/// the listener. Captures remain readable until drop.
 #[derive(Clone)]
 pub struct ResponseGate {
     state: Arc<(Mutex<GateState>, Condvar)>,
@@ -145,13 +146,53 @@ pub struct ResponseGate {
 struct GateState {
     released: bool,
     cancelled: bool,
+    stalled: usize,
+    departed: usize,
 }
 
 impl ResponseGate {
-    pub fn release(&self) {
+    pub fn wait_until_stalled(&self, count: usize, timeout: Duration) -> Result<(), ServeError> {
+        let deadline = Instant::now() + timeout;
         let (lock, wake) = &*self.state;
-        lock.lock().unwrap().released = true;
+        let mut state = lock.lock().unwrap();
+        while state.stalled < count {
+            if state.cancelled {
+                return Err(ServeError::ThreadFailure(
+                    "response gate was cancelled before the requested stall".into(),
+                ));
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(timeout_error("fake-provider response stall", timeout));
+            }
+            let (next, result) = wake.wait_timeout(state, remaining).unwrap();
+            state = next;
+            if result.timed_out() && state.stalled < count {
+                return Err(timeout_error("fake-provider response stall", timeout));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn release(&self, timeout: Duration) -> Result<(), ServeError> {
+        let deadline = Instant::now() + timeout;
+        let (lock, wake) = &*self.state;
+        let mut state = lock.lock().unwrap();
+        let target = state.stalled;
+        state.released = true;
         wake.notify_all();
+        while state.departed < target {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(timeout_error("fake-provider response release", timeout));
+            }
+            let (next, result) = wake.wait_timeout(state, remaining).unwrap();
+            state = next;
+            if result.timed_out() && state.departed < target {
+                return Err(timeout_error("fake-provider response release", timeout));
+            }
+        }
+        Ok(())
     }
 
     fn cancel(&self) {
@@ -162,26 +203,35 @@ impl ResponseGate {
 
     fn wait(&self) -> bool {
         let (lock, wake) = &*self.state;
-        let state = wake
-            .wait_while(lock.lock().unwrap(), |state| {
-                !state.released && !state.cancelled
-            })
-            .unwrap();
-        state.released
+        let mut state = lock.lock().unwrap();
+        state.stalled += 1;
+        wake.notify_all();
+        while !state.released && !state.cancelled {
+            state = wake.wait(state).unwrap();
+        }
+        let released = state.released;
+        state.departed += 1;
+        wake.notify_all();
+        released
     }
 }
 
-#[derive(Default)]
-struct CaptureState {
+struct ServerState {
+    script: SseScript,
+    next: usize,
     requests: Vec<CapturedRequest>,
+    shutdown_requested: bool,
+    serve_exited: bool,
+    active_handlers: usize,
+    failures: Vec<String>,
 }
 
 pub struct FakeLlmServer {
-    listener: TcpListener,
-    captures: Arc<(Mutex<CaptureState>, Condvar)>,
+    listener: Option<TcpListener>,
+    addr: std::net::SocketAddr,
+    state: Arc<(Mutex<ServerState>, Condvar)>,
     serve_handle: Option<JoinHandle<()>>,
     handlers: Arc<Mutex<Vec<JoinHandle<()>>>>,
-    shutdown: Arc<Mutex<bool>>,
     gate: Option<ResponseGate>,
 }
 
@@ -190,10 +240,8 @@ impl FakeLlmServer {
     /// serving `script`. The bind address is the value to put into
     /// `OPENAI_COMPATIBLE_BASE_URL`.
     ///
-    /// The listener is put in **non-blocking** mode so the serve loop's
-    /// `WouldBlock` branch is reachable: the loop polls `accept` every ~5ms
-    /// and re-checks `shutdown`, so `Drop` setting the flag is observed
-    /// within that granularity and the thread can be joined promptly.
+    /// Shutdown wakes the blocking listener with one loopback connection;
+    /// request, gate, and thread completion waits all have explicit bounds.
     pub fn start(script: SseScript) -> Result<Self, ServeError> {
         Self::start_inner(script, None, None)
     }
@@ -217,37 +265,53 @@ impl FakeLlmServer {
         request_log: Option<Arc<PathBuf>>,
     ) -> Result<Self, ServeError> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
-        listener.set_nonblocking(true)?;
-        let state = Arc::new(Mutex::new(ScriptState { script, next: 0 }));
-        let captures = Arc::new((Mutex::new(CaptureState::default()), Condvar::new()));
+        let addr = listener.local_addr()?;
+        let state = Arc::new((
+            Mutex::new(ServerState {
+                script,
+                next: 0,
+                requests: Vec::new(),
+                shutdown_requested: false,
+                serve_exited: false,
+                active_handlers: 0,
+                failures: Vec::new(),
+            }),
+            Condvar::new(),
+        ));
         let handlers = Arc::new(Mutex::new(Vec::new()));
-        let shutdown = Arc::new(Mutex::new(false));
         let handle = {
             let listener_clone = listener.try_clone()?;
-            let state = Arc::clone(&state);
-            let captures = Arc::clone(&captures);
+            let thread_state = Arc::clone(&state);
             let handlers = Arc::clone(&handlers);
-            let shutdown = Arc::clone(&shutdown);
             let handler_gate = gate.clone();
             let request_log_for_thread = request_log.clone();
-            thread::spawn(move || {
-                serve_loop(
-                    listener_clone,
-                    state,
-                    captures,
-                    handlers,
-                    shutdown,
-                    handler_gate,
-                    request_log_for_thread,
-                )
-            })
+            thread::Builder::new()
+                .name("fake-llm-server".into())
+                .spawn(move || {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        serve_loop(
+                            listener_clone,
+                            Arc::clone(&thread_state),
+                            handlers,
+                            handler_gate,
+                            request_log_for_thread,
+                        )
+                    }));
+                    let (lock, wake) = &*thread_state;
+                    let mut state = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if result.is_err() {
+                        state.failures.push("serve thread panicked".into());
+                    }
+                    state.serve_exited = true;
+                    wake.notify_all();
+                })?
         };
         Ok(Self {
-            listener,
-            captures,
+            listener: Some(listener),
+            addr,
+            state,
             serve_handle: Some(handle),
             handlers,
-            shutdown,
             gate,
         })
     }
@@ -260,98 +324,196 @@ impl FakeLlmServer {
 
     /// A snapshot of every request captured so far, in arrival order.
     pub fn captured_requests(&self) -> Vec<CapturedRequest> {
-        self.captures.0.lock().unwrap().requests.clone()
+        self.state.0.lock().unwrap().requests.clone()
     }
 
     pub fn wait_for_requests(&self, count: usize, timeout: Duration) -> Result<(), ServeError> {
         let deadline = Instant::now() + timeout;
-        let (lock, wake) = &*self.captures;
-        let mut captures = lock.lock().unwrap();
-        while captures.requests.len() < count {
+        let (lock, wake) = &*self.state;
+        let mut state = lock.lock().unwrap();
+        while state.requests.len() < count {
+            if let Some(failure) = state.failures.first() {
+                return Err(ServeError::ThreadFailure(failure.clone()));
+            }
+            if state.serve_exited {
+                return Err(ServeError::ThreadFailure(
+                    "serve thread exited before the requested capture".into(),
+                ));
+            }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return Err(ServeError::Timeout(timeout));
+                return Err(timeout_error("fake-provider request", timeout));
             }
-            let (next, result) = wake.wait_timeout(captures, remaining).unwrap();
-            captures = next;
-            if result.timed_out() && captures.requests.len() < count {
-                return Err(ServeError::Timeout(timeout));
+            let (next, result) = wake.wait_timeout(state, remaining).unwrap();
+            state = next;
+            if result.timed_out() && state.requests.len() < count {
+                return Err(timeout_error("fake-provider request", timeout));
             }
         }
         Ok(())
     }
 
+    pub fn health(&self) -> Result<(), ServeError> {
+        let state = self.state.0.lock().unwrap();
+        match state.failures.first() {
+            Some(failure) => Err(ServeError::ThreadFailure(failure.clone())),
+            None => Ok(()),
+        }
+    }
+
+    pub fn wait_for_failure(&self, timeout: Duration) -> Result<String, ServeError> {
+        let deadline = Instant::now() + timeout;
+        let (lock, wake) = &*self.state;
+        let mut state = lock.lock().unwrap();
+        loop {
+            if let Some(failure) = state.failures.first() {
+                return Ok(failure.clone());
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(timeout_error("fake-provider thread failure", timeout));
+            }
+            let (next, result) = wake.wait_timeout(state, remaining).unwrap();
+            state = next;
+            if result.timed_out() && state.failures.is_empty() {
+                return Err(timeout_error("fake-provider thread failure", timeout));
+            }
+        }
+    }
+
+    pub fn shutdown(&mut self, timeout: Duration) -> Result<(), ServeError> {
+        if self.listener.is_none() {
+            return self.health();
+        }
+        let deadline = Instant::now() + timeout;
+        {
+            let (lock, wake) = &*self.state;
+            lock.lock().unwrap().shutdown_requested = true;
+            wake.notify_all();
+        }
+        if let Some(gate) = &self.gate {
+            gate.cancel();
+        }
+        if !timeout.is_zero() {
+            let _ = TcpStream::connect_timeout(&self.addr, timeout.min(Duration::from_millis(100)));
+        }
+
+        {
+            let (lock, wake) = &*self.state;
+            let mut state = lock.lock().unwrap();
+            while !state.serve_exited || state.active_handlers != 0 {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(timeout_error("fake-provider shutdown", timeout));
+                }
+                let (next, result) = wake.wait_timeout(state, remaining).unwrap();
+                state = next;
+                if result.timed_out() && (!state.serve_exited || state.active_handlers != 0) {
+                    return Err(timeout_error("fake-provider shutdown", timeout));
+                }
+            }
+        }
+
+        if let Some(handle) = self.serve_handle.take()
+            && handle.join().is_err()
+        {
+            self.state
+                .0
+                .lock()
+                .unwrap()
+                .failures
+                .push("serve thread join failed".into());
+        }
+        for handle in self.handlers.lock().unwrap().drain(..) {
+            if handle.join().is_err() {
+                self.state
+                    .0
+                    .lock()
+                    .unwrap()
+                    .failures
+                    .push("handler thread join failed".into());
+            }
+        }
+        self.listener.take();
+        self.health()
+    }
+
     fn local_addr(&self) -> std::net::SocketAddr {
-        self.listener.local_addr().expect("listener bound")
+        self.addr
     }
 }
 
 impl Drop for FakeLlmServer {
     fn drop(&mut self) {
-        // Signal the serve loop to stop accepting. Because the listener is
-        // non-blocking, the loop's `WouldBlock` branch polls this flag every
-        // ~5ms, so the thread observes the signal promptly.
-        *self.shutdown.lock().unwrap() = true;
-        if let Some(gate) = &self.gate {
-            gate.cancel();
-        }
-        // Join the serve thread so it has exited (and dropped its listener
-        // clone) before we drop our own listener — this is what actually
-        // closes the socket and releases the port. Join errors are swallowed:
-        // a panicked serve thread is not actionable from Drop, and the
-        // priority is releasing the port, not surfacing a thread bug.
-        if let Some(handle) = self.serve_handle.take() {
-            let _ = handle.join();
-        }
-        for handle in self.handlers.lock().unwrap().drain(..) {
-            let _ = handle.join();
-        }
+        // Drop cannot return lifecycle errors. The explicit `shutdown` and
+        // health APIs retain them; this fallback only guarantees a bounded wait.
+        let _ = self.shutdown(Duration::from_secs(3));
     }
-}
-
-/// Shared scripted state: the top-level script plus the index of the next
-/// sequence element to serve. Only [`SseScript::Sequence`] advances `next`.
-struct ScriptState {
-    script: SseScript,
-    next: usize,
 }
 
 fn serve_loop(
     listener: TcpListener,
-    state: Arc<Mutex<ScriptState>>,
-    captures: Arc<(Mutex<CaptureState>, Condvar)>,
+    state: Arc<(Mutex<ServerState>, Condvar)>,
     handlers: Arc<Mutex<Vec<JoinHandle<()>>>>,
-    shutdown: Arc<Mutex<bool>>,
     gate: Option<ResponseGate>,
     request_log: Option<Arc<PathBuf>>,
 ) {
-    while !*shutdown.lock().unwrap() {
+    loop {
         match listener.accept() {
             Ok((stream, _)) => {
-                let state = Arc::clone(&state);
-                let captures = Arc::clone(&captures);
+                {
+                    let (lock, _) = &*state;
+                    let mut server = lock.lock().unwrap();
+                    if server.shutdown_requested {
+                        break;
+                    }
+                    server.active_handlers += 1;
+                }
+                let handler_state = Arc::clone(&state);
                 let gate = gate.clone();
                 let request_log = request_log.clone();
-                let handle = thread::spawn(move || {
-                    if let Err(e) = handle_request(
-                        stream,
-                        &state,
-                        &captures,
-                        gate.as_ref(),
-                        request_log.as_deref().map(PathBuf::as_path),
-                    ) {
-                        eprintln!("fake_llm: serve error: {e}");
+                let spawn = thread::Builder::new()
+                    .name("fake-llm-handler".into())
+                    .spawn(move || {
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            handle_request(
+                                stream,
+                                &handler_state,
+                                gate.as_ref(),
+                                request_log.as_deref().map(PathBuf::as_path),
+                            )
+                        }));
+                        let (lock, wake) = &*handler_state;
+                        let mut server =
+                            lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                        match result {
+                            Ok(Ok(())) => {}
+                            Ok(Err(error)) => server.failures.push(error.to_string()),
+                            Err(_) => server.failures.push("handler thread panicked".into()),
+                        }
+                        server.active_handlers -= 1;
+                        wake.notify_all();
+                    });
+                match spawn {
+                    Ok(handle) => handlers.lock().unwrap().push(handle),
+                    Err(error) => {
+                        let (lock, wake) = &*state;
+                        let mut server = lock.lock().unwrap();
+                        server.active_handlers -= 1;
+                        server
+                            .failures
+                            .push(format!("failed to spawn handler thread: {error}"));
+                        wake.notify_all();
                     }
-                });
-                handlers.lock().unwrap().push(handle);
+                }
             }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // Non-blocking accept with no pending connection: poll the
-                // shutdown flag every 5ms so `Drop` is observed promptly.
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-            Err(e) => {
-                eprintln!("fake_llm: accept error: {e}");
+            Err(error) => {
+                let (lock, wake) = &*state;
+                lock.lock()
+                    .unwrap()
+                    .failures
+                    .push(format!("accept failed: {error}"));
+                wake.notify_all();
                 break;
             }
         }
@@ -368,46 +530,293 @@ fn append_fsynced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
+fn write_http_response(
+    stream: &mut TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+) -> std::io::Result<()> {
+    write!(
+        stream,
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    )?;
+    stream.write_all(body)?;
+    stream.flush()?;
+    stream.shutdown(Shutdown::Write)
+}
+
+const MAX_REQUEST_HEADER_BYTES: usize = 16 * 1024;
+const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
+
+#[derive(Clone, Copy)]
+struct HttpRejection {
+    status: &'static str,
+    body: &'static [u8],
+}
+
+impl HttpRejection {
+    const fn new(status: &'static str, body: &'static [u8]) -> Self {
+        Self { status, body }
+    }
+}
+
+enum RequestReadError {
+    Io(std::io::Error),
+    Reject(HttpRejection),
+}
+
+impl From<std::io::Error> for RequestReadError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+fn reject(status: &'static str, body: &'static [u8]) -> RequestReadError {
+    RequestReadError::Reject(HttpRejection::new(status, body))
+}
+
+fn read_request_header(stream: &mut TcpStream) -> Result<Vec<u8>, RequestReadError> {
+    let mut header = Vec::with_capacity(MAX_REQUEST_HEADER_BYTES);
+    let mut byte = [0_u8; 1];
+    loop {
+        if header.len() == MAX_REQUEST_HEADER_BYTES {
+            return Err(reject(
+                "431 Request Header Fields Too Large",
+                b"request headers too large\n",
+            ));
+        }
+        match stream.read(&mut byte) {
+            Ok(0) => {
+                return Err(reject("400 Bad Request", b"malformed http framing\n"));
+            }
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                return Err(reject("400 Bad Request", b"malformed http framing\n"));
+            }
+            Err(error) => return Err(RequestReadError::Io(error)),
+        }
+        if byte[0] == b'\n' && header.last() != Some(&b'\r') {
+            return Err(reject("400 Bad Request", b"malformed http framing\n"));
+        }
+        if header.last() == Some(&b'\r') && byte[0] != b'\n' {
+            return Err(reject("400 Bad Request", b"malformed http framing\n"));
+        }
+        header.push(byte[0]);
+        if header.ends_with(b"\r\n\r\n") {
+            return Ok(header);
+        }
+    }
+}
+
+fn is_header_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
+}
+
+fn trim_ascii_spaces(mut bytes: &[u8]) -> &[u8] {
+    while bytes.first() == Some(&b' ') {
+        bytes = &bytes[1..];
+    }
+    while bytes.last() == Some(&b' ') {
+        bytes = &bytes[..bytes.len() - 1];
+    }
+    bytes
+}
+
+fn parse_decimal_length(bytes: &[u8]) -> Option<usize> {
+    if bytes.is_empty() || !bytes.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    bytes.iter().try_fold(0_usize, |value, byte| {
+        value.checked_mul(10)?.checked_add(usize::from(byte - b'0'))
+    })
+}
+
+fn read_http_request(stream: &mut TcpStream) -> Result<String, RequestReadError> {
+    let header = read_request_header(stream)?;
+    let mut lines = header[..header.len() - 2].split(|byte| *byte == b'\n');
+    let request_line = lines
+        .next()
+        .and_then(|line| line.strip_suffix(b"\r"))
+        .ok_or_else(|| reject("400 Bad Request", b"malformed request line\n"))?;
+    let mut request_parts = request_line.split(|byte| *byte == b' ');
+    let (Some(method), Some(target), Some(version), None) = (
+        request_parts.next(),
+        request_parts.next(),
+        request_parts.next(),
+        request_parts.next(),
+    ) else {
+        return Err(reject("400 Bad Request", b"malformed request line\n"));
+    };
+    if method != b"POST" {
+        return Err(reject("405 Method Not Allowed", b"method not allowed\n"));
+    }
+    if target != b"/chat/completions" {
+        return Err(reject("404 Not Found", b"route not found\n"));
+    }
+    if version != b"HTTP/1.1" {
+        return Err(reject(
+            "505 HTTP Version Not Supported",
+            b"http version not supported\n",
+        ));
+    }
+
+    let mut host: Option<&[u8]> = None;
+    let mut content_type: Option<&[u8]> = None;
+    let mut content_length: Option<&[u8]> = None;
+    let mut transfer_encoding = false;
+    let mut connection: Option<&[u8]> = None;
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        let Some(line) = line.strip_suffix(b"\r") else {
+            return Err(reject("400 Bad Request", b"malformed headers\n"));
+        };
+        let Some(colon) = line.iter().position(|byte| *byte == b':') else {
+            return Err(reject("400 Bad Request", b"malformed headers\n"));
+        };
+        let (name, value) = (&line[..colon], trim_ascii_spaces(&line[colon + 1..]));
+        if name.is_empty()
+            || !name.iter().copied().all(is_header_name_byte)
+            || !value.iter().all(|byte| matches!(byte, 0x20..=0x7e))
+        {
+            return Err(reject("400 Bad Request", b"malformed headers\n"));
+        }
+        if name.eq_ignore_ascii_case(b"host") {
+            if host.replace(value).is_some() {
+                return Err(reject("400 Bad Request", b"invalid host header\n"));
+            }
+        } else if name.eq_ignore_ascii_case(b"content-type") {
+            if content_type.replace(value).is_some() {
+                return Err(reject("400 Bad Request", b"invalid content-type\n"));
+            }
+        } else if name.eq_ignore_ascii_case(b"content-length") {
+            if content_length.replace(value).is_some() {
+                return Err(reject("400 Bad Request", b"invalid content-length\n"));
+            }
+        } else if name.eq_ignore_ascii_case(b"transfer-encoding") {
+            transfer_encoding = true;
+        } else if name.eq_ignore_ascii_case(b"connection") && connection.replace(value).is_some() {
+            return Err(reject("400 Bad Request", b"unsupported connection\n"));
+        }
+    }
+
+    if transfer_encoding {
+        return Err(reject("400 Bad Request", b"unsupported framing\n"));
+    }
+    if host.is_none_or(<[u8]>::is_empty) {
+        return Err(reject("400 Bad Request", b"missing host header\n"));
+    }
+    if !content_type.is_some_and(|value| value.eq_ignore_ascii_case(b"application/json")) {
+        return Err(reject("400 Bad Request", b"invalid content-type\n"));
+    }
+    if connection.is_some_and(|value| !value.eq_ignore_ascii_case(b"close")) {
+        return Err(reject("400 Bad Request", b"unsupported connection\n"));
+    }
+    let Some(content_length) = content_length else {
+        return Err(reject("411 Length Required", b"content-length required\n"));
+    };
+    let Some(body_len) = parse_decimal_length(content_length) else {
+        return Err(reject("400 Bad Request", b"invalid content-length\n"));
+    };
+    if body_len > MAX_REQUEST_BODY_BYTES {
+        return Err(reject("413 Content Too Large", b"request body too large\n"));
+    }
+
+    let mut body = vec![0_u8; body_len];
+    if let Err(error) = stream.read_exact(&mut body) {
+        return match error.kind() {
+            std::io::ErrorKind::UnexpectedEof
+            | std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::WouldBlock => {
+                Err(reject("400 Bad Request", b"incomplete request body\n"))
+            }
+            _ => Err(RequestReadError::Io(error)),
+        };
+    }
+    stream.set_nonblocking(true)?;
+    let mut extra = [0_u8; 1];
+    let pipeline_result = stream.peek(&mut extra);
+    stream.set_nonblocking(false)?;
+    match pipeline_result {
+        Ok(0) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+        Ok(_) => {
+            return Err(reject("400 Bad Request", b"pipelining not supported\n"));
+        }
+        Err(error) => return Err(RequestReadError::Io(error)),
+    }
+    String::from_utf8(body).map_err(|_| reject("400 Bad Request", b"invalid utf-8 body\n"))
+}
+
 fn handle_request(
     mut stream: TcpStream,
-    state: &Mutex<ScriptState>,
-    captures: &(Mutex<CaptureState>, Condvar),
+    shared: &(Mutex<ServerState>, Condvar),
     gate: Option<&ResponseGate>,
     request_log: Option<&Path>,
 ) -> Result<(), ServeError> {
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
-    let mut reader = BufReader::new(stream.try_clone()?);
-    let mut request_line = String::new();
-    reader.read_line(&mut request_line)?;
-    if request_line.is_empty() {
-        return Err(ServeError::BadRequest("empty request line".into()));
-    }
-    let mut headers: HashMap<String, String> = HashMap::new();
-    loop {
-        let mut line = String::new();
-        let n = reader.read_line(&mut line)?;
-        if n == 0 || line.trim().is_empty() {
-            break;
+    let body = match read_http_request(&mut stream) {
+        Ok(body) => body,
+        Err(RequestReadError::Io(error)) => return Err(ServeError::Io(error)),
+        Err(RequestReadError::Reject(rejection)) => {
+            write_http_response(&mut stream, rejection.status, "text/plain", rejection.body)?;
+            return Ok(());
         }
-        if let Some((k, v)) = line.split_once(':') {
-            headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
-        }
-    }
-    let body = if let Some(len) = headers
-        .get("content-length")
-        .and_then(|v| v.parse::<usize>().ok())
-    {
-        let mut buf = vec![0u8; len];
-        reader.read_exact(&mut buf)?;
-        String::from_utf8_lossy(&buf).to_string()
-    } else {
-        String::new()
     };
 
     let captured = parse_chat_completions_body(&body);
-    captures.0.lock().unwrap().requests.push(captured);
-    captures.1.notify_all();
+    // Script assignment and capture publication are one transaction. Capture
+    // order is therefore the same order used to advance a Sequence, even if
+    // gated handlers resume in a different order.
+    let active = {
+        let (lock, wake) = shared;
+        let mut state = lock.lock().unwrap();
+        let (active, advance_sequence) = match &state.script {
+            SseScript::Sequence { scripts } => {
+                if scripts.is_empty() {
+                    (
+                        SseScript::IllegalResponse {
+                            body: "fake_llm: empty Sequence script".into(),
+                        },
+                        false,
+                    )
+                } else {
+                    let idx = state.next.min(scripts.len() - 1);
+                    (scripts[idx].clone(), true)
+                }
+            }
+            other => (other.clone(), false),
+        };
+        state.next += usize::from(advance_sequence);
+        state.requests.push(captured);
+        wake.notify_all();
+        active
+    };
     if let Some(path) = request_log {
         append_fsynced(path, b"request\n")?;
     }
@@ -416,42 +825,15 @@ fn handle_request(
     {
         return Ok(());
     }
-
-    // Resolve the active script for this request. A `Sequence` serves each
-    // inner script to exactly one request; out-of-range requests repeat the
-    // last one. Non-sequence scripts always serve as-is.
-    let active = {
-        let mut guard = state.lock().unwrap();
-        let state = &mut *guard;
-        match &state.script {
-            SseScript::Sequence { scripts } => {
-                if scripts.is_empty() {
-                    SseScript::IllegalResponse {
-                        body: "fake_llm: empty Sequence script".into(),
-                    }
-                } else {
-                    let idx = state.next.min(scripts.len() - 1);
-                    state.next += 1;
-                    scripts[idx].clone()
-                }
-            }
-            other => other.clone(),
-        }
-    };
     // HttpError short-circuits with a non-SSE HTTP error response.
     if let SseScript::HttpError { status, body } = &active {
-        let response = format!(
-            "HTTP/1.1 {status} Error\r\n
-             Content-Type: application/json\r\n
-             Content-Length: {}\r\n
-             Connection: close\r\n
-             \r\n
-             {body}",
-            body.len()
-        );
-        stream.write_all(response.as_bytes())?;
-        stream.flush()?;
-        return Ok(());
+        return write_http_response(
+            &mut stream,
+            &format!("{status} Error"),
+            "application/json",
+            body.as_bytes(),
+        )
+        .map_err(ServeError::Io);
     }
     let sse = render_script(&active);
     let response = format!(
@@ -705,6 +1087,8 @@ fn push_data(out: &mut String, value: &Value) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
 
     /// Render a plain-text script and verify the exact SSE shape the product
@@ -836,7 +1220,7 @@ mod tests {
                 Ok(buf)
             })
             .expect("connect + read");
-        let resp = String::from_utf8_lossy(&resp);
+        let resp = std::str::from_utf8(&resp).expect("response must be valid UTF-8");
 
         assert!(resp.starts_with("HTTP/1.1 200 OK"), "got: {resp}");
         assert!(resp.contains("text/event-stream"));
@@ -850,6 +1234,216 @@ mod tests {
         let _ = url;
     }
 
+    fn exchange_raw(addr: std::net::SocketAddr, request: &[u8]) -> Vec<u8> {
+        let mut stream = TcpStream::connect(addr).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("read timeout");
+        stream.write_all(request).expect("write request");
+        stream.flush().expect("flush request");
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).expect("read response");
+        response
+    }
+
+    #[test]
+    fn request_contract_accepts_only_post_chat_completions_http_1_1() {
+        let server = FakeLlmServer::start(SseScript::plain("unused")).expect("server");
+        let cases: &[(&[u8], &[u8])] = &[
+            (
+                b"GET /chat/completions HTTP/1.1",
+                b"HTTP/1.1 405 Method Not Allowed\r\nContent-Type: text/plain\r\nContent-Length: 19\r\nConnection: close\r\n\r\nmethod not allowed\n",
+            ),
+            (
+                b"POST /v1/chat/completions HTTP/1.1",
+                b"HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 16\r\nConnection: close\r\n\r\nroute not found\n",
+            ),
+            (
+                b"POST /chat/completions HTTP/1.0",
+                b"HTTP/1.1 505 HTTP Version Not Supported\r\nContent-Type: text/plain\r\nContent-Length: 27\r\nConnection: close\r\n\r\nhttp version not supported\n",
+            ),
+            (
+                b"POST  /chat/completions HTTP/1.1",
+                b"HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: 23\r\nConnection: close\r\n\r\nmalformed request line\n",
+            ),
+        ];
+
+        for (request_line, expected) in cases {
+            let mut request = request_line.to_vec();
+            request.extend_from_slice(
+                b"\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
+            );
+            assert_eq!(exchange_raw(server.local_addr(), &request), *expected);
+        }
+        assert!(server.captured_requests().is_empty());
+    }
+
+    #[test]
+    fn request_contract_requires_single_bounded_content_length() {
+        let server = FakeLlmServer::start(SseScript::plain("unused")).expect("server");
+        let bad_length = b"HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: 23\r\nConnection: close\r\n\r\ninvalid content-length\n";
+        let cases: &[(&[u8], &[u8])] = &[
+            (
+                b"POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\r\n",
+                b"HTTP/1.1 411 Length Required\r\nContent-Type: text/plain\r\nContent-Length: 24\r\nConnection: close\r\n\r\ncontent-length required\n",
+            ),
+            (
+                b"POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: -1\r\n\r\n",
+                bad_length,
+            ),
+            (
+                b"POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\nContent-Length: 2\r\n\r\n{}",
+                bad_length,
+            ),
+            (
+                b"POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\nContent-Length: 3\r\n\r\n{}",
+                bad_length,
+            ),
+            (
+                b"POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 1048577\r\n\r\n",
+                b"HTTP/1.1 413 Content Too Large\r\nContent-Type: text/plain\r\nContent-Length: 23\r\nConnection: close\r\n\r\nrequest body too large\n",
+            ),
+        ];
+
+        for (request, expected) in cases {
+            let started = Instant::now();
+            assert_eq!(exchange_raw(server.local_addr(), request), *expected);
+            assert!(started.elapsed() < Duration::from_secs(1));
+        }
+        assert!(server.captured_requests().is_empty());
+    }
+
+    #[test]
+    fn request_contract_rejects_unsupported_framing_and_invalid_utf8() {
+        let server = FakeLlmServer::start(SseScript::plain("unused")).expect("server");
+        let bad_framing = b"HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: 23\r\nConnection: close\r\n\r\nmalformed http framing\n";
+        let bad_headers = b"HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: 18\r\nConnection: close\r\n\r\nmalformed headers\n";
+        let cases: &[(&[u8], &[u8])] = &[
+            (
+                b"POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nContent-Length: 2\r\n\r\n{}",
+                b"HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: 20\r\nConnection: close\r\n\r\nunsupported framing\n",
+            ),
+            (
+                b"POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: 2\r\n\r\n{}",
+                b"HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: 23\r\nConnection: close\r\n\r\nunsupported connection\n",
+            ),
+            (
+                b"POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}POST /chat/completions HTTP/1.1\r\n",
+                b"HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: 25\r\nConnection: close\r\n\r\npipelining not supported\n",
+            ),
+            (
+                b"POST /chat/completions HTTP/1.1\nHost: localhost\nContent-Type: application/json\nContent-Length: 2\n\n{}",
+                bad_framing,
+            ),
+            (
+                b"POST /chat/completions HTTP/1.1\r\nHost: local\xffhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
+                bad_headers,
+            ),
+            (
+                b"POST /chat/completions HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
+                b"HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: 20\r\nConnection: close\r\n\r\nmissing host header\n",
+            ),
+            (
+                b"POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}",
+                b"HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: 21\r\nConnection: close\r\n\r\ninvalid content-type\n",
+            ),
+            (
+                b"POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 1\r\n\r\n\xff",
+                b"HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: 19\r\nConnection: close\r\n\r\ninvalid utf-8 body\n",
+            ),
+        ];
+
+        for (request, expected) in cases {
+            assert_eq!(exchange_raw(server.local_addr(), request), *expected);
+        }
+        assert!(server.captured_requests().is_empty());
+    }
+
+    #[test]
+    fn request_contract_rejects_oversize_headers_before_terminator() {
+        let server = FakeLlmServer::start(SseScript::plain("unused")).expect("server");
+        let mut request = b"POST /chat/completions HTTP/1.1\r\nX-Fill: ".to_vec();
+        request.extend(std::iter::repeat_n(b'a', MAX_REQUEST_HEADER_BYTES));
+        let started = Instant::now();
+        assert_eq!(
+            exchange_raw(server.local_addr(), &request),
+            b"HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Type: text/plain\r\nContent-Length: 26\r\nConnection: close\r\n\r\nrequest headers too large\n"
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(server.captured_requests().is_empty());
+    }
+
+    #[test]
+    fn http_error_responses_have_byte_exact_crlf_and_content_length() {
+        let body = r#"{"error":"请求失败"}"#;
+        let server = FakeLlmServer::start(SseScript::HttpError {
+            status: 429,
+            body: body.into(),
+        })
+        .expect("server");
+        let response = exchange_raw(
+            server.local_addr(),
+            b"POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
+        );
+        assert_eq!(
+            response,
+            concat!(
+                "HTTP/1.1 429 Error\r\n",
+                "Content-Type: application/json\r\n",
+                "Content-Length: 24\r\n",
+                "Connection: close\r\n",
+                "\r\n",
+                "{\"error\":\"请求失败\"}"
+            )
+            .as_bytes()
+        );
+    }
+
+    #[test]
+    fn concurrent_sequence_keeps_capture_and_response_assignment_paired() {
+        const REQUESTS: usize = 24;
+        let scripts = (0..REQUESTS)
+            .map(|index| SseScript::plain(format!("sequence-{index}")))
+            .collect();
+        let (server, gate) = FakeLlmServer::start_gated(SseScript::Sequence { scripts })
+            .expect("gated sequence server");
+        let mut clients = Vec::new();
+        for index in 0..REQUESTS {
+            let addr = server.local_addr();
+            clients.push(thread::spawn(move || {
+                let model = format!("request-{index}");
+                let body = format!(r#"{{"model":"{model}","messages":[],"stream":true}}"#);
+                let request = format!(
+                    "POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                (model, exchange_raw(addr, request.as_bytes()))
+            }));
+            server
+                .wait_for_requests(index + 1, Duration::from_secs(2))
+                .expect("capture in launch order");
+        }
+
+        let capture_order = server.captured_requests();
+        gate.release(Duration::from_secs(2))
+            .expect("bounded concurrent release");
+        let responses: HashMap<_, _> = clients
+            .into_iter()
+            .map(|client| client.join().expect("client thread"))
+            .collect();
+        for (sequence_index, captured) in capture_order.iter().enumerate() {
+            let response = responses.get(&captured.model).expect("response by model");
+            let expected = format!(r#""content":"sequence-{sequence_index}""#);
+            assert!(
+                response
+                    .windows(expected.len())
+                    .any(|bytes| bytes == expected.as_bytes()),
+                "capture position {sequence_index} ({}) received the wrong Sequence script",
+                captured.model
+            );
+        }
+    }
+
     fn request_in_thread(
         addr: std::net::SocketAddr,
     ) -> std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>> {
@@ -859,7 +1453,7 @@ mod tests {
                 let body = r#"{"model":"compat:test","messages":[],"stream":true}"#;
                 write!(
                     stream,
-                    "POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+                    "POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
                     body.len(),
                     body
                 )?;
@@ -880,29 +1474,69 @@ mod tests {
         server
             .wait_for_requests(1, Duration::from_secs(2))
             .expect("captured request");
+        gate.wait_until_stalled(1, Duration::from_secs(2))
+            .expect("handler reached gate");
         assert!(matches!(
-            response.recv_timeout(Duration::from_millis(50)),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            response.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
         ));
-        gate.release();
+        gate.release(Duration::from_secs(2))
+            .expect("bounded release acknowledgement");
         let bytes = response
             .recv_timeout(Duration::from_secs(2))
             .expect("bounded response")
             .expect("response io");
-        assert!(String::from_utf8_lossy(&bytes).contains("gated"));
+        assert!(
+            std::str::from_utf8(&bytes)
+                .expect("response utf-8")
+                .contains("gated")
+        );
 
-        let (server, _gate) =
+        let (mut server, gate) =
             FakeLlmServer::start_gated(SseScript::plain("cancelled")).expect("server");
-        let response = request_in_thread(server.local_addr());
+        let addr = server.local_addr();
+        let response = request_in_thread(addr);
         server
             .wait_for_requests(1, Duration::from_secs(2))
             .expect("captured request");
-        let start = Instant::now();
-        drop(server);
-        assert!(start.elapsed() < Duration::from_secs(3));
+        gate.wait_until_stalled(1, Duration::from_secs(2))
+            .expect("handler reached cancellable gate");
+        server
+            .shutdown(Duration::from_secs(2))
+            .expect("bounded shutdown");
         response
             .recv_timeout(Duration::from_secs(2))
             .expect("cancelled handler joined")
             .expect("client io");
+        TcpListener::bind(addr).expect("shutdown released listener");
+    }
+
+    #[test]
+    fn server_thread_failures_are_bounded_and_observable() {
+        let log_directory = tempfile::tempdir().expect("log directory");
+        let mut server =
+            FakeLlmServer::start_logged(SseScript::plain("unused"), log_directory.path())
+                .expect("server");
+        let response = exchange_raw(
+            server.local_addr(),
+            b"POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
+        );
+        assert!(
+            response.is_empty(),
+            "failed handler must not send a response"
+        );
+
+        let failure = server
+            .wait_for_failure(Duration::from_secs(2))
+            .expect("bounded handler failure");
+        assert!(failure.starts_with("io:"), "unexpected failure: {failure}");
+        assert!(matches!(
+            server.health(),
+            Err(ServeError::ThreadFailure(ref observed)) if observed == &failure
+        ));
+        assert!(matches!(
+            server.shutdown(Duration::from_secs(2)),
+            Err(ServeError::ThreadFailure(ref observed)) if observed == &failure
+        ));
     }
 }

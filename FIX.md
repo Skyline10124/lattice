@@ -75,6 +75,61 @@ rechecks retain the error. Requested `SIGINT` behavior is unchanged.
 **Changed files:** `crates/lattice-system-harness/src/{driver,session_send,assert,artifacts}.rs`,
 `docs/plans/2026-09-01-issue185-command-outcome-followup.md`, `FIX.md`, and `FINDINGS.md`.
 
+## GitHub #186: make fake-provider HTTP and Sequence assignment deterministic — 2026-09-01
+
+**Severity:** MEDIUM（system-harness false green / provider race / teardown hang）
+
+**Problem:** The shared localhost fake provider accepted unchecked methods, targets, versions, and
+framing; treated missing or malformed `Content-Length` as an empty body; allocated any declared
+body size; and converted invalid request bytes with lossy UTF-8. HTTP error literals mixed
+indentation with line endings and counted characters rather than sent bytes. Capture publication
+and `Sequence` script assignment used separate locks on opposite sides of a response gate, so
+concurrent handlers could swap the scripted response associated with capture order. Teardown
+polled with sleeps, swallowed thread failures, and exposed no bounded stall, release, or shutdown
+acknowledgement.
+
+**Fix:** Kept the fixture deliberately narrow and dependency-free. Its byte parser now accepts one
+`POST /chat/completions HTTP/1.1` request per connection with exact `Host`,
+`Content-Type: application/json`, and single decimal `Content-Length` rules. It caps headers at
+16,384 bytes and the body at 1,048,576 bytes before unbounded growth or body allocation, rejects
+unsupported transfer encoding, persistence, pipelining, routes, malformed CRLF, and invalid UTF-8,
+and emits fixed byte-exact rejection responses. Scripted HTTP errors use the same CRLF response
+writer and byte-counted length. One shared lock now assigns the next `Sequence` entry and appends
+the corresponding capture as one transaction.
+
+`wait_for_requests`, `wait_until_stalled`, bounded release acknowledgement, explicit bounded
+shutdown, health, and failure waits now use condition variables. Shutdown wakes blocking `accept`
+with a loopback connection, cancels stalled handlers, waits only to the caller's deadline, and
+retains serve/handler errors for assertions. The exact product tests
+`direct_failure_sigint_while_stalled_commits_cancelled`,
+`direct_failure_session_lock_serializes_same_session_turns`, and
+`direct_mutation_concurrent_same_target_create_has_one_winner` replaced only synchronization
+sleeps or ignored waits with these handshakes. Their existing exit, #185 outcome, event,
+cleanup, persistence, and workspace assertions remain unchanged, so the replacement is an
+assertion superset. #192 still owns combined assertion, leak, evidence, and cleanup failures.
+
+**Verification:**
+
+- `cargo test -p lattice-system-harness --lib fake_llm::tests -- --nocapture` — PASS（15 named
+  tests, including protocol, oversize, exact error bytes, lifecycle, thread failure, and
+  capture/Sequence pairing）。
+- Exact concurrent capture/Sequence regression — PASS（50/50 consecutive runs）。
+- `cargo test -p lattice-system-harness --all-features --no-run` — PASS（all targets compiled）。
+- `cargo build -p lattice-cli --bin lattice` — PASS。
+- `LATTICE_BIN="/home/astrin/Dev/lattice-worktrees/issue-186/target/debug/lattice" cargo test -p
+  lattice-system-harness --test direct_failures` — PASS（8/8）。
+- The full harness with the same absolute branch binary — PASS（83 library tests and every
+  ordinary fast, Direct-Local, and PTY target）。
+- `cargo xtask harness-boundary`, `cargo fmt --all --check`, and
+  `cargo clippy -p lattice-system-harness --all-targets -- -D warnings` — PASS。
+
+`FINDINGS.md` is unchanged because no #186-specific residual remains. GitHub #40 stays open for
+maintainer closeout.
+
+**Changed files:** `docs/plans/2026-09-01-issue186-fake-provider-determinism.md`,
+`crates/lattice-system-harness/src/fake_llm.rs`,
+`crates/lattice-system-harness/tests/{direct_failures.rs,direct_mutation.rs}`, and `FIX.md`.
+
 ## GitHub #185 PR #209 review: secure diagnostics and bounded cleanup — 2026-09-01
 
 **Severity:** HIGH（secret disclosure / system-harness hang / cleanup false green）
