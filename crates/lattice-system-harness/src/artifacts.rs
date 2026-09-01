@@ -186,10 +186,52 @@ pub fn write_failure_artifacts(artifacts: &FailureArtifacts) -> std::io::Result<
         std::fs::remove_dir_all(&artifacts.dir)?;
     }
     std::fs::create_dir_all(&artifacts.dir)?;
-    std::fs::write(artifacts.dir.join("stdout.txt"), &artifacts.stdout)?;
-    std::fs::write(artifacts.dir.join("stderr.txt"), &artifacts.stderr)?;
-    std::fs::write(artifacts.dir.join("command.txt"), &artifacts.command_text)?;
-    Ok(())
+    let mut report = FailureReport::new(None, &[]);
+    write_failure_artifacts_collecting(artifacts, &[], &mut report);
+    match report.evidence_errors.into_iter().next() {
+        Some(error) => Err(std::io::Error::other(error)),
+        None => Ok(()),
+    }
+}
+
+pub(crate) fn write_failure_artifacts_collecting(
+    artifacts: &FailureArtifacts,
+    secrets: &[&str],
+    report: &mut FailureReport,
+) {
+    attempt(
+        "write stdout.txt",
+        std::fs::write(artifacts.dir.join("stdout.txt"), &artifacts.stdout),
+        secrets,
+        &mut report.evidence_errors,
+    );
+    attempt(
+        "write stderr.txt",
+        std::fs::write(artifacts.dir.join("stderr.txt"), &artifacts.stderr),
+        secrets,
+        &mut report.evidence_errors,
+    );
+    attempt(
+        "write command.txt",
+        std::fs::write(artifacts.dir.join("command.txt"), &artifacts.command_text),
+        secrets,
+        &mut report.evidence_errors,
+    );
+}
+
+fn attempt<T>(
+    stage: &str,
+    result: std::io::Result<T>,
+    secrets: &[&str],
+    errors: &mut Vec<String>,
+) -> Option<T> {
+    match result {
+        Ok(value) => Some(value),
+        Err(error) => {
+            errors.push(redact(&format!("{stage}: {error}"), secrets));
+            None
+        }
+    }
 }
 
 /// Recursively scan persisted artifacts for byte-level secret sentinels.
@@ -201,73 +243,182 @@ pub struct ArtifactScanError {
     pub source: std::io::Error,
 }
 
+#[derive(Default)]
+struct ScanCollection {
+    leak_paths: Vec<PathBuf>,
+    errors: Vec<ArtifactScanError>,
+}
+
 /// Recursively scan regular files for byte-level sentinels. Any I/O failure is
 /// returned: a bundle that could not be completely inspected is not clean.
 pub fn scan_artifacts_for_secrets(
     dir: &Path,
     secrets: &[&str],
 ) -> Result<Vec<PathBuf>, ArtifactScanError> {
-    let secrets: Vec<&[u8]> = secrets
+    let mut collection = scan_artifacts_collecting(dir, secrets);
+    if collection.errors.is_empty() {
+        Ok(collection.leak_paths)
+    } else {
+        Err(collection.errors.remove(0))
+    }
+}
+
+fn scan_artifacts_collecting(dir: &Path, secrets: &[&str]) -> ScanCollection {
+    let secret_bytes: Vec<&[u8]> = secrets
         .iter()
         .filter(|secret| !secret.is_empty())
         .map(|secret| secret.as_bytes())
         .collect();
-    if secrets.is_empty() {
-        return Ok(Vec::new());
+    if secret_bytes.is_empty() {
+        return ScanCollection::default();
     }
-    let mut leaked = Vec::new();
-    scan_dir(dir, &secrets, &mut leaked)?;
-    Ok(leaked)
+
+    let mut collection = ScanCollection::default();
+    scan_dir_collecting(dir, dir, &secret_bytes, secrets, &mut collection);
+    collection.leak_paths.sort();
+    collection.leak_paths.dedup();
+    collection.errors.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.source.to_string().cmp(&right.source.to_string()))
+    });
+    collection
 }
 
-fn scan_dir(
+fn scan_dir_collecting(
+    root: &Path,
     dir: &Path,
-    secrets: &[&[u8]],
-    leaked: &mut Vec<PathBuf>,
-) -> Result<(), ArtifactScanError> {
-    let entries = std::fs::read_dir(dir).map_err(|source| ArtifactScanError {
-        path: dir.to_path_buf(),
-        source,
-    })?;
+    secret_bytes: &[&[u8]],
+    secrets: &[&str],
+    collection: &mut ScanCollection,
+) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(source) => {
+            collection
+                .errors
+                .push(scan_error(root, dir, source, secrets));
+            return;
+        }
+    };
+
+    let mut sorted_entries = Vec::new();
     for entry in entries {
-        let entry = entry.map_err(|source| ArtifactScanError {
-            path: dir.to_path_buf(),
-            source,
-        })?;
+        match entry {
+            Ok(entry) => sorted_entries.push(entry),
+            Err(source) => collection
+                .errors
+                .push(scan_error(root, dir, source, secrets)),
+        }
+    }
+    sorted_entries.sort_by_key(std::fs::DirEntry::path);
+
+    for entry in sorted_entries {
         let path = entry.path();
-        let file_type = entry.file_type().map_err(|source| ArtifactScanError {
-            path: path.clone(),
-            source,
-        })?;
-        if file_type.is_dir() {
-            scan_dir(&path, secrets, leaked)?;
-        } else if file_type.is_file() {
-            let bytes = std::fs::read(&path).map_err(|source| ArtifactScanError {
-                path: path.clone(),
-                source,
-            })?;
-            if secrets
-                .iter()
-                .any(|secret| bytes.windows(secret.len()).any(|window| window == *secret))
-            {
-                let redacted = redact_bytes(bytes, secrets);
-                std::fs::write(&path, redacted).map_err(|source| ArtifactScanError {
-                    path: path.clone(),
-                    source,
-                })?;
-                leaked.push(path);
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(source) => {
+                collection
+                    .errors
+                    .push(scan_error(root, &path, source, secrets));
+                continue;
             }
-        } else {
-            return Err(ArtifactScanError {
-                path,
-                source: std::io::Error::new(
+        };
+
+        if file_type.is_dir() {
+            scan_dir_collecting(root, &path, secret_bytes, secrets, collection);
+            continue;
+        }
+        if !file_type.is_file() {
+            collection.errors.push(scan_error(
+                root,
+                &path,
+                std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     "artifact is neither a regular file nor a directory",
                 ),
-            });
+                secrets,
+            ));
+            continue;
+        }
+
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(source) => {
+                collection
+                    .errors
+                    .push(scan_error(root, &path, source, secrets));
+                continue;
+            }
+        };
+        if secret_bytes
+            .iter()
+            .any(|secret| bytes.windows(secret.len()).any(|window| window == *secret))
+        {
+            collection.leak_paths.push(path.clone());
+            let redacted = redact_bytes(bytes, secret_bytes);
+            if let Err(source) = std::fs::write(&path, redacted) {
+                collection
+                    .errors
+                    .push(scan_error(root, &path, source, secrets));
+            }
         }
     }
-    Ok(())
+}
+
+fn scan_error(
+    root: &Path,
+    path: &Path,
+    source: std::io::Error,
+    secrets: &[&str],
+) -> ArtifactScanError {
+    let kind = source.kind();
+    let message = redact(&source.to_string(), secrets);
+    ArtifactScanError {
+        path: PathBuf::from(safe_artifact_location(root, path, secrets)),
+        source: std::io::Error::new(kind, message),
+    }
+}
+
+fn safe_artifact_location(root: &Path, path: &Path, secrets: &[&str]) -> String {
+    let location = match path.strip_prefix(root) {
+        Ok(relative) if relative.as_os_str().is_empty() => ".".to_string(),
+        Ok(relative) => relative.display().to_string(),
+        Err(_) => "<artifact>".to_string(),
+    };
+    redact(&location, secrets)
+}
+
+pub(crate) fn scan_bundle_into_report(dir: &Path, secrets: &[&str], report: &mut FailureReport) {
+    let collection = scan_artifacts_collecting(dir, secrets);
+    let locations: Vec<String> = collection
+        .leak_paths
+        .iter()
+        .map(|path| safe_artifact_location(dir, path, secrets))
+        .collect();
+    for location in &locations {
+        report.add_secret_location(location, secrets);
+    }
+    for error in collection.errors {
+        report.add_evidence_error("secret scan", error, secrets);
+    }
+    if !locations.is_empty() {
+        let text = format!(
+            "post-write sentinel scan redacted {} file(s):\n{}\n",
+            locations.len(),
+            locations
+                .iter()
+                .map(|location| format!("- {location}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        attempt(
+            "write sentinel_scan.txt",
+            std::fs::write(dir.join("sentinel_scan.txt"), text),
+            secrets,
+            &mut report.evidence_errors,
+        );
+    }
 }
 
 fn redact_bytes(mut bytes: Vec<u8>, secrets: &[&[u8]]) -> Vec<u8> {
@@ -299,7 +450,9 @@ pub enum EvidenceError {
     #[error(transparent)]
     Scan(#[from] ArtifactScanError),
     #[error("post-write sentinel found in: {0:?}")]
-    PostWriteSentinel(Vec<PathBuf>),
+    PostWriteSentinel(Vec<String>),
+    #[error("{0}")]
+    FailureReport(String),
 }
 
 pub(crate) fn validate_artifact_name(name: &OsStr) -> Result<(), EvidenceError> {
@@ -449,7 +602,12 @@ fn verify_persisted_bundle(dir: &Path, secrets: &[&str]) -> Result<(), EvidenceE
     if leaked.is_empty() {
         Ok(())
     } else {
-        Err(EvidenceError::PostWriteSentinel(leaked))
+        Err(EvidenceError::PostWriteSentinel(
+            leaked
+                .iter()
+                .map(|path| safe_artifact_location(dir, path, secrets))
+                .collect(),
+        ))
     }
 }
 
@@ -860,7 +1018,7 @@ mod tests {
     fn scan_artifacts_for_secrets_fails_closed_on_io_error() {
         let missing = TempDir::new().unwrap().path().join("gone");
         let error = scan_artifacts_for_secrets(&missing, &["secret"]).unwrap_err();
-        assert_eq!(error.path, missing);
+        assert_eq!(error.path, Path::new("."));
     }
 
     #[test]
@@ -1149,5 +1307,24 @@ mod tests {
         let second = ArtifactClaim::acquire(&target).unwrap();
         assert!(lock.is_file());
         drop(second);
+    }
+
+    #[test]
+    fn scan_collection_preserves_leak_and_later_scan_error() {
+        let dir = TempDir::new().unwrap();
+        let leaked_file = dir.path().join("leak.txt");
+        std::fs::write(&leaked_file, "value scan-secret").unwrap();
+        std::os::unix::fs::symlink(&leaked_file, dir.path().join("invalid-link")).unwrap();
+
+        let collection = scan_artifacts_collecting(dir.path(), &["scan-secret"]);
+        assert_eq!(collection.leak_paths, vec![leaked_file.clone()]);
+        assert!(
+            collection
+                .errors
+                .iter()
+                .any(|error| error.path == Path::new("invalid-link"))
+        );
+        let patched = std::fs::read_to_string(leaked_file).unwrap();
+        assert_eq!(patched, "value [REDACTED]");
     }
 }

@@ -8,8 +8,8 @@ use thiserror::Error;
 
 use crate::artifacts::{
     ArtifactClaim, EvidenceError, FailureReport, capture_from_output, clear_stale_bundle,
-    render_command_text, scan_artifacts_for_secrets, validate_artifact_name,
-    write_failure_artifacts, write_world_context,
+    render_command_text, scan_bundle_into_report, validate_artifact_name,
+    write_failure_artifacts_collecting, write_world_context,
 };
 use crate::driver::CommandOutcome;
 use crate::world::ScenarioWorld;
@@ -216,10 +216,7 @@ fn persist_fast_failure_bundle(
     secrets: &[&str],
     report: &mut FailureReport,
 ) {
-    if let Err(error) = write_failure_artifacts(artifacts) {
-        report.add_evidence_error("write failure artifacts", error, secrets);
-        return;
-    }
+    write_failure_artifacts_collecting(artifacts, secrets, report);
     if let Err(error) = write_world_context(
         &artifacts.dir,
         world,
@@ -228,32 +225,8 @@ fn persist_fast_failure_bundle(
         secrets,
     ) {
         report.add_evidence_error("write world.txt", error, secrets);
-        return;
     }
-    match scan_artifacts_for_secrets(&artifacts.dir, secrets) {
-        Err(error) => report.add_evidence_error("secret scan", error, secrets),
-        Ok(leaked) => {
-            let locations: Vec<String> = leaked
-                .iter()
-                .map(|path| {
-                    path.file_name()
-                        .map(|name| name.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| "<artifact>".into())
-                })
-                .collect();
-            for location in &locations {
-                report.add_secret_location(location, secrets);
-            }
-            if !locations.is_empty()
-                && let Err(error) = std::fs::write(
-                    artifacts.dir.join("sentinel_scan.txt"),
-                    format!("post-write sentinel scan redacted: {locations:?}\n"),
-                )
-            {
-                report.add_evidence_error("write sentinel_scan.txt", error, secrets);
-            }
-        }
-    }
+    scan_bundle_into_report(&artifacts.dir, secrets, report);
 }
 
 pub fn assert_with_failure_artifacts(
@@ -412,5 +385,53 @@ mod tests {
         assert!(!display.contains(secret));
         assert!(!debug.contains(secret));
         assert!(display.contains("command stdout/stderr"));
+    }
+
+    #[test]
+    fn fast_failure_report_preserves_primary_two_write_errors_and_scan_results() {
+        let secret = "fast-report-secret";
+        let world = ScenarioWorld::new("fast-report-errors").unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let dir = root.path().join("scenario");
+        let _claim = ArtifactClaim::acquire(&dir).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir(dir.join("stdout.txt")).unwrap();
+        std::fs::create_dir(dir.join("stderr.txt")).unwrap();
+        std::fs::write(dir.join("leak.txt"), format!("leak {secret}")).unwrap();
+        std::os::unix::fs::symlink(dir.join("leak.txt"), dir.join("invalid-link")).unwrap();
+
+        let mut value = outcome(ProcessTermination::Exited(1));
+        value.stdout = format!("stdout {secret}").into_bytes();
+        value.stderr = format!("stderr {secret}").into_bytes();
+        let command_summary = format!("lattice {secret}");
+        let artifacts = capture_from_output(dir, &value, &command_summary, &[secret]);
+        let mut report = FailureReport::new(Some(format!("primary {secret}")), &[secret]);
+        report.add_command_diagnostic(
+            render_command_text(&command_summary, &value, &[secret]),
+            &[secret],
+        );
+
+        persist_fast_failure_bundle(
+            &world,
+            "scenario",
+            &command_summary,
+            &artifacts,
+            &[secret],
+            &mut report,
+        );
+        let report = report.finish().unwrap_err();
+        let text = report.to_string();
+        assert!(!text.contains(secret));
+        assert!(text.contains("primary [REDACTED]"));
+        assert!(text.contains("leak.txt"));
+        assert!(text.contains("invalid-link"));
+        assert!(text.contains("command diagnostics:"));
+        let stdout_error = text.find("write stdout.txt").unwrap();
+        let stderr_error = text.find("write stderr.txt").unwrap();
+        assert!(stdout_error < stderr_error);
+        assert_eq!(
+            std::fs::read_to_string(artifacts.dir.join("leak.txt")).unwrap(),
+            "leak [REDACTED]"
+        );
     }
 }
