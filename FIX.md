@@ -75,6 +75,26 @@ rechecks retain the error. Requested `SIGINT` behavior is unchanged.
 **Changed files:** `crates/lattice-system-harness/src/{driver,session_send,assert,artifacts}.rs`,
 `docs/plans/2026-09-01-issue185-command-outcome-followup.md`, `FIX.md`, and `FINDINGS.md`.
 
+## GitHub #186 PR #210 final review wording cleanup — 2026-09-01
+
+**Severity:** LOW（documentation and test-name precision）
+
+**Problem:** The plan claimed that no lifecycle assertion used `thread::sleep`, although the deadline
+owner regression uses a bounded sleep to place process wait after the spawn deadline. The fixture
+failure test also said `first` despite constructing only one failure.
+
+**Fix:** The plan now limits the no-sleep claim to fake-provider external synchronization and names
+the deadline owner's local timing control. The test is now
+`shutdown_returns_fixture_failure`; its behavior and coverage are unchanged.
+
+**Verification:**
+
+- `cargo test -p lattice-system-harness --lib fake_llm::tests::shutdown_returns_fixture_failure -- --exact` — PASS（1/1）。
+- `cargo fmt --all --check` and `git diff --check` — PASS。
+
+**Changed files:** `crates/lattice-system-harness/src/fake_llm.rs`,
+`docs/plans/2026-09-01-issue186-fake-provider-determinism.md`, and `FIX.md`.
+
 ## GitHub #186 PR #210 scope reduction: keep bounded teardown, remove health polling — 2026-09-01
 
 **Severity:** MEDIUM（test-fixture overreach）

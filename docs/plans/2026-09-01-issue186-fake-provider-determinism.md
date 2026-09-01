@@ -177,9 +177,10 @@ dependency.
   the first fixture failure. A request wait returns it when the requested capture
   becomes impossible; explicit shutdown returns it after bounded teardown. There
   is no independent health query or failure subscription API.
-- No lifecycle assertion uses `thread::sleep`. Direct SIGINT, deadline, session
-  lock, and mutation concurrency callers wait for request or stall readiness
-  before interrupt or release.
+- Fake-provider external synchronization does not depend on fixed sleeps.
+  Direct SIGINT, session-lock, and mutation-concurrency callers wait for request
+  or stall readiness before interrupt or release. The deadline owner regression
+  uses local bounded timing only to place process wait after the spawn deadline.
 - `RunningCommand` measures its per-command timeout from process spawn. Provider
   request, stall, and release waits cap themselves to the same remaining budget;
   the final process wait cannot start a fresh timeout.

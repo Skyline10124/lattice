@@ -1508,7 +1508,7 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_returns_first_fixture_failure() {
+    fn shutdown_returns_fixture_failure() {
         let log_directory = tempfile::tempdir().expect("log directory");
         let mut server =
             FakeLlmServer::start_logged(SseScript::plain("unused"), log_directory.path())
