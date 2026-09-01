@@ -1,10 +1,14 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
+use std::fmt;
 use std::io::Read;
+use std::os::fd::AsRawFd;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -15,6 +19,7 @@ use crate::world::ScenarioWorld;
 
 const LATTICE_BIN_ENV: &str = "LATTICE_BIN";
 const TIMEOUT_POLL: Duration = Duration::from_millis(10);
+const DRAIN_FINISH_GRACE: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone)]
 pub struct LatticeDriver {
@@ -48,12 +53,22 @@ pub enum HarnessIntervention {
     ForcedKill,
 }
 
-/// A fallible operation used to force process-group cleanup.
+/// One stage of Linux `/proc` process-group inspection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessInspectionOperation {
+    ReadProc,
+    ReadProcEntry,
+    ReadStat(u32),
+    ParseStat(u32),
+}
+
+/// A fallible operation used to reconcile process-group cleanup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CleanupOperation {
     SignalProcessGroup(i32),
     KillChild,
     WaitChild,
+    InspectProcessGroup(ProcessInspectionOperation),
 }
 
 /// One cleanup failure with its operation and complete I/O diagnostics.
@@ -91,7 +106,7 @@ impl ProcessGroupCleanup {
 }
 
 /// Lossless command bytes, direct-child observation, intervention, and cleanup.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CommandOutcome {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
@@ -101,7 +116,36 @@ pub struct CommandOutcome {
     pub cleanup: ProcessGroupCleanup,
 }
 
+/// Metadata-only command diagnostic. It never renders stdout or stderr bytes.
+#[derive(Clone, Copy)]
+pub struct CommandOutcomeSummary<'a> {
+    outcome: &'a CommandOutcome,
+}
+
+impl fmt::Display for CommandOutcomeSummary<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CommandOutcome")
+            .field("termination", &self.outcome.termination)
+            .field("interventions", &self.outcome.interventions)
+            .field("cleanup", &self.outcome.cleanup)
+            .field("stdout_bytes", &self.outcome.stdout.len())
+            .field("stderr_bytes", &self.outcome.stderr.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for CommandOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.summary(), formatter)
+    }
+}
+
 impl CommandOutcome {
+    pub fn summary(&self) -> CommandOutcomeSummary<'_> {
+        CommandOutcomeSummary { outcome: self }
+    }
+
     pub fn exit_code(&self) -> Option<i32> {
         match self.termination {
             Some(ProcessTermination::Exited(code)) => Some(code),
@@ -146,11 +190,16 @@ pub struct LatticeCommand {
 /// would hit the test process itself, killing the whole `cargo test` run
 /// (#105). Every group signal additionally refuses to fire when the target
 /// group is this process's own group.
+struct DrainHandle {
+    stop: Arc<AtomicBool>,
+    thread: JoinHandle<std::io::Result<Vec<u8>>>,
+}
+
 pub struct RunningCommand {
     child: Option<Child>,
     pgid: u32,
-    stdout: Option<JoinHandle<std::io::Result<Vec<u8>>>>,
-    stderr: Option<JoinHandle<std::io::Result<Vec<u8>>>>,
+    stdout: Option<DrainHandle>,
+    stderr: Option<DrainHandle>,
     interventions: Vec<HarnessIntervention>,
 }
 
@@ -162,8 +211,21 @@ impl RunningCommand {
         set_new_process_group(&mut command);
         let mut child = command.spawn()?;
         let pgid = resolve_child_pgid(&child)?;
-        let stdout = Some(drain_to_thread(child.stdout.take()));
-        let stderr = Some(drain_to_thread(child.stderr.take()));
+        let stdout_stream = child.stdout.take();
+        let stderr_stream = child.stderr.take();
+        if let Err(error) = stdout_stream
+            .as_ref()
+            .map(set_nonblocking)
+            .transpose()
+            .and_then(|_| stderr_stream.as_ref().map(set_nonblocking).transpose())
+        {
+            kill_process_group(pgid);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+        let stdout = Some(drain_to_thread(stdout_stream));
+        let stderr = Some(drain_to_thread(stderr_stream));
         Ok(Self {
             child: Some(child),
             pgid,
@@ -209,21 +271,7 @@ impl RunningCommand {
         let start = Instant::now();
         loop {
             if let Some(status) = self.child.as_mut().expect("running child").try_wait()? {
-                let mut cleanup = ProcessGroupCleanup::default();
-                if self
-                    .interventions
-                    .contains(&HarnessIntervention::InterruptRequested)
-                    && !processes_in_pgid(self.pgid).is_empty()
-                {
-                    self.interventions.push(HarnessIntervention::ForcedKill);
-                    cleanup.forced = true;
-                    record_cleanup_result(
-                        &mut cleanup,
-                        CleanupOperation::SignalProcessGroup(libc::SIGKILL),
-                        signal_process_group(self.pgid, libc::SIGKILL),
-                    );
-                }
-                return self.finish(Some(status), cleanup);
+                return self.finish(Some(status), ProcessGroupCleanup::default());
             }
             if let Some(limit) = timeout
                 && start.elapsed() >= limit
@@ -256,13 +304,25 @@ impl RunningCommand {
         mut cleanup: ProcessGroupCleanup,
     ) -> Result<CommandOutcome, DriverError> {
         self.child.take();
-        let stdout = join_drain(self.stdout.take())?;
-        let stderr = join_drain(self.stderr.take())?;
-        cleanup.surviving_pids = if cleanup.forced {
-            wait_for_process_group_exit(self.pgid)
-        } else {
-            processes_in_pgid(self.pgid)
-        };
+        if !cleanup.forced
+            && process_group_requires_cleanup(&mut cleanup, processes_in_pgid(self.pgid))
+        {
+            self.interventions.push(HarnessIntervention::ForcedKill);
+            cleanup.forced = true;
+            record_cleanup_result(
+                &mut cleanup,
+                CleanupOperation::SignalProcessGroup(libc::SIGKILL),
+                signal_process_group(self.pgid, libc::SIGKILL),
+            );
+        }
+        if cleanup.forced
+            && let Some(survivors) =
+                record_inspection_result(&mut cleanup, wait_for_process_group_exit(self.pgid))
+        {
+            cleanup.surviving_pids = survivors;
+        }
+        let stdout = finish_drain(self.stdout.take())?;
+        let stderr = finish_drain(self.stderr.take())?;
         Ok(CommandOutcome {
             stdout,
             stderr,
@@ -281,12 +341,8 @@ impl Drop for RunningCommand {
             let _ = child.wait();
         }
         self.child.take();
-        if let Some(handle) = self.stdout.take() {
-            let _ = handle.join();
-        }
-        if let Some(handle) = self.stderr.take() {
-            let _ = handle.join();
-        }
+        let _ = finish_drain(self.stdout.take());
+        let _ = finish_drain(self.stderr.take());
     }
 }
 
@@ -353,28 +409,59 @@ impl LatticeDriver {
     }
 }
 
-fn drain_to_thread<R: Read + Send + 'static>(
-    maybe: Option<R>,
-) -> JoinHandle<std::io::Result<Vec<u8>>> {
-    std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut stream) = maybe {
-            stream.read_to_end(&mut buf)?;
-        }
-        Ok(buf)
-    })
+fn set_nonblocking(stream: &impl AsRawFd) -> std::io::Result<()> {
+    let fd = stream.as_raw_fd();
+    // SAFETY: `fd` is a live child-pipe descriptor. `fcntl` reads and updates
+    // only that descriptor's status flags and reports failure through errno.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
-fn join_drain(
-    handle: Option<JoinHandle<std::io::Result<Vec<u8>>>>,
-) -> Result<Vec<u8>, DriverError> {
-    match handle {
-        None => Ok(Vec::new()),
-        Some(handle) => handle
-            .join()
-            .map_err(|_| DriverError::DrainThreadPanicked)?
-            .map_err(DriverError::Io),
+fn drain_to_thread<R: Read + Send + 'static>(maybe: Option<R>) -> DrainHandle {
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+    let thread = std::thread::spawn(move || {
+        let mut output = Vec::new();
+        let Some(mut stream) = maybe else {
+            return Ok(output);
+        };
+        let mut chunk = [0_u8; 8192];
+        while !thread_stop.load(Ordering::Acquire) {
+            match stream.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => output.extend_from_slice(&chunk[..read]),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(TIMEOUT_POLL);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(output)
+    });
+    DrainHandle { stop, thread }
+}
+
+fn finish_drain(handle: Option<DrainHandle>) -> Result<Vec<u8>, DriverError> {
+    let Some(handle) = handle else {
+        return Ok(Vec::new());
+    };
+    let deadline = Instant::now() + DRAIN_FINISH_GRACE;
+    while !handle.thread.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(TIMEOUT_POLL);
     }
+    handle.stop.store(true, Ordering::Release);
+    handle
+        .thread
+        .join()
+        .map_err(|_| DriverError::DrainThreadPanicked)?
+        .map_err(DriverError::Io)
 }
 
 fn record_cleanup_result<T>(
@@ -391,6 +478,26 @@ fn record_cleanup_result<T>(
     }
 }
 
+fn process_group_requires_cleanup(
+    cleanup: &mut ProcessGroupCleanup,
+    result: Result<Vec<u32>, CleanupError>,
+) -> bool {
+    record_inspection_result(cleanup, result).is_none_or(|pids| !pids.is_empty())
+}
+
+fn record_inspection_result(
+    cleanup: &mut ProcessGroupCleanup,
+    result: Result<Vec<u32>, CleanupError>,
+) -> Option<Vec<u32>> {
+    match result {
+        Ok(pids) => Some(pids),
+        Err(error) => {
+            cleanup.errors.push(error);
+            None
+        }
+    }
+}
+
 fn process_termination(status: &ExitStatus) -> Option<ProcessTermination> {
     status
         .code()
@@ -398,12 +505,12 @@ fn process_termination(status: &ExitStatus) -> Option<ProcessTermination> {
         .or_else(|| status.signal().map(ProcessTermination::Signaled))
 }
 
-fn wait_for_process_group_exit(pgid: u32) -> Vec<u32> {
+fn wait_for_process_group_exit(pgid: u32) -> Result<Vec<u32>, CleanupError> {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        let survivors = processes_in_pgid(pgid);
+        let survivors = processes_in_pgid(pgid)?;
         if survivors.is_empty() || Instant::now() >= deadline {
-            return survivors;
+            return Ok(survivors);
         }
         std::thread::sleep(TIMEOUT_POLL);
     }
@@ -467,12 +574,25 @@ pub(crate) fn kill_process_group(pgid: u32) {
     let _ = signal_process_group(pgid, libc::SIGKILL);
 }
 
-pub fn processes_in_pgid(pgid: u32) -> Vec<u32> {
+pub fn processes_in_pgid(pgid: u32) -> Result<Vec<u32>, CleanupError> {
+    processes_in_pgid_at(Path::new("/proc"), pgid)
+}
+
+fn processes_in_pgid_at(proc_root: &Path, pgid: u32) -> Result<Vec<u32>, CleanupError> {
+    let entries = std::fs::read_dir(proc_root).map_err(|error| {
+        CleanupError::new(
+            CleanupOperation::InspectProcessGroup(ProcessInspectionOperation::ReadProc),
+            error,
+        )
+    })?;
     let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return out;
-    };
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            CleanupError::new(
+                CleanupOperation::InspectProcessGroup(ProcessInspectionOperation::ReadProcEntry),
+                error,
+            )
+        })?;
         let Some(pid) = entry
             .file_name()
             .to_str()
@@ -480,27 +600,63 @@ pub fn processes_in_pgid(pgid: u32) -> Vec<u32> {
         else {
             continue;
         };
-        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
-            continue;
+        let stat_path = entry.path().join("stat");
+        let stat = match std::fs::read_to_string(&stat_path) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // The process exited between listing `/proc` and reading its
+                // stat file, so it cannot be a final survivor.
+                continue;
+            }
+            Err(error) => {
+                return Err(CleanupError::new(
+                    CleanupOperation::InspectProcessGroup(ProcessInspectionOperation::ReadStat(
+                        pid,
+                    )),
+                    error,
+                ));
+            }
         };
-        let Some((_, rest)) = stat.rsplit_once(')') else {
-            continue;
-        };
-        let mut fields = rest.split_whitespace();
-        let state = fields.next();
-        let _ppid = fields.next();
-        let member_pgid = fields.next().and_then(|s| s.parse::<u32>().ok());
-        if state != Some("Z") && member_pgid == Some(pgid) {
+        if parse_process_stat(pid, &stat)? == Some(pgid) {
             out.push(pid);
         }
     }
     out.sort_unstable();
-    out
+    Ok(out)
+}
+
+fn parse_process_stat(pid: u32, stat: &str) -> Result<Option<u32>, CleanupError> {
+    let invalid = |message: &str| {
+        CleanupError::new(
+            CleanupOperation::InspectProcessGroup(ProcessInspectionOperation::ParseStat(pid)),
+            std::io::Error::new(std::io::ErrorKind::InvalidData, message),
+        )
+    };
+    let (_, rest) = stat
+        .rsplit_once(')')
+        .ok_or_else(|| invalid("process stat is missing the command terminator"))?;
+    let mut fields = rest.split_whitespace();
+    let state = fields
+        .next()
+        .ok_or_else(|| invalid("process stat is missing state"))?;
+    let _ppid = fields
+        .next()
+        .ok_or_else(|| invalid("process stat is missing parent pid"))?;
+    let member_pgid = fields
+        .next()
+        .ok_or_else(|| invalid("process stat is missing process group"))?
+        .parse::<u32>()
+        .map_err(|_| invalid("process stat has an invalid process group"))?;
+    Ok((state != "Z").then_some(member_pgid))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn process_group_members(pgid: u32) -> Vec<u32> {
+        processes_in_pgid(pgid).expect("inspect process group")
+    }
 
     #[test]
     fn exit_records_code_without_intervention_or_forced_cleanup() {
@@ -566,10 +722,34 @@ mod tests {
         assert_eq!(outcome.stdout, b"partial-out");
         assert_eq!(outcome.stderr, b"partial-err");
         let deadline = Instant::now() + Duration::from_secs(2);
-        while !processes_in_pgid(pgid).is_empty() && Instant::now() < deadline {
+        while !process_group_members(pgid).is_empty() && Instant::now() < deadline {
             std::thread::yield_now();
         }
-        assert!(processes_in_pgid(pgid).is_empty());
+        assert!(process_group_members(pgid).is_empty());
+    }
+
+    #[test]
+    fn descendant_inheriting_output_pipe_is_reconciled_before_drain() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "printf direct-out; sleep 2 & exit 0"]);
+        let started = Instant::now();
+
+        let outcome = RunningCommand::spawn(cmd)
+            .expect("spawn")
+            .wait(Some(Duration::from_millis(100)))
+            .expect("descendant cleanup outcome");
+
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "pipe drain exceeded external bound: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(outcome.termination, Some(ProcessTermination::Exited(0)));
+        assert_eq!(outcome.interventions, vec![HarnessIntervention::ForcedKill]);
+        assert!(outcome.cleanup.forced);
+        assert!(outcome.cleanup.succeeded(), "{:?}", outcome.cleanup);
+        assert!(outcome.cleanup.surviving_pids.is_empty());
+        assert_eq!(outcome.stdout, b"direct-out");
     }
 
     #[test]
@@ -663,6 +843,50 @@ mod tests {
         assert!(outcome.cleanup.surviving_pids.is_empty());
     }
 
+    #[test]
+    fn process_group_inspection_errors_are_typed_and_fail_cleanup_closed() {
+        let missing_root = tempfile::tempdir()
+            .expect("temp parent")
+            .path()
+            .join("missing-proc");
+        let root_error =
+            processes_in_pgid_at(&missing_root, 7).expect_err("missing proc root must fail");
+        assert_eq!(
+            root_error.operation,
+            CleanupOperation::InspectProcessGroup(ProcessInspectionOperation::ReadProc)
+        );
+
+        let proc_root = tempfile::tempdir().expect("temp proc");
+        let pid_dir = proc_root.path().join("4242");
+        std::fs::create_dir(&pid_dir).expect("pid dir");
+        std::fs::create_dir(pid_dir.join("stat")).expect("unreadable stat entry");
+
+        let error = processes_in_pgid_at(proc_root.path(), 7).expect_err("stat read must fail");
+        assert_eq!(
+            error.operation,
+            CleanupOperation::InspectProcessGroup(ProcessInspectionOperation::ReadStat(4242))
+        );
+        let mut cleanup = ProcessGroupCleanup::default();
+        assert!(process_group_requires_cleanup(
+            &mut cleanup,
+            Err(error.clone())
+        ));
+        assert_eq!(cleanup.errors, vec![error]);
+        assert!(!cleanup.succeeded());
+    }
+
+    #[test]
+    fn process_stat_parser_rejects_incomplete_and_invalid_group_fields() {
+        for stat in ["4242 malformed", "4242 (test) S 1 nope"] {
+            let error = parse_process_stat(4242, stat).expect_err("malformed stat must fail");
+            assert_eq!(
+                error.operation,
+                CleanupOperation::InspectProcessGroup(ProcessInspectionOperation::ParseStat(4242))
+            );
+            assert_eq!(error.kind, std::io::ErrorKind::InvalidData);
+        }
+    }
+
     /// #105: a group signal aimed at the harness's own group would interrupt
     /// the test binary itself. The guard must reject it instead of firing.
     #[test]
@@ -734,9 +958,9 @@ mod tests {
         assert!(outcome.cleanup.succeeded(), "{:?}", outcome.cleanup);
         assert!(outcome.cleanup.surviving_pids.is_empty());
         let deadline = Instant::now() + Duration::from_secs(2);
-        while !processes_in_pgid(pgid).is_empty() && Instant::now() < deadline {
+        while !process_group_members(pgid).is_empty() && Instant::now() < deadline {
             std::thread::yield_now();
         }
-        assert!(processes_in_pgid(pgid).is_empty());
+        assert!(process_group_members(pgid).is_empty());
     }
 }

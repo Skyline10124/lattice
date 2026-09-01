@@ -56,7 +56,7 @@ pub fn assert_exit_success(output: &CommandOutcome) -> Result<(), AssertError> {
         Ok(())
     } else {
         Err(AssertError::ExitNotSuccess {
-            actual: format!("{output:?}"),
+            actual: output.summary().to_string(),
         })
     }
 }
@@ -66,7 +66,7 @@ pub fn assert_exit_failure(output: &CommandOutcome) -> Result<(), AssertError> {
         Ok(())
     } else {
         Err(AssertError::ExitNotFailure {
-            actual: format!("{output:?}"),
+            actual: output.summary().to_string(),
         })
     }
 }
@@ -82,7 +82,7 @@ pub fn assert_exit_code(output: &CommandOutcome, expected: i32) -> Result<(), As
     } else {
         Err(AssertError::ExitCodeMismatch {
             expected,
-            actual: format!("{output:?}"),
+            actual: output.summary().to_string(),
         })
     }
 }
@@ -213,7 +213,7 @@ mod tests {
     use super::*;
     use crate::driver::{
         CleanupError, CleanupOperation, HarnessIntervention, ProcessGroupCleanup,
-        ProcessTermination,
+        ProcessInspectionOperation, ProcessTermination,
     };
     use std::time::Duration;
 
@@ -234,6 +234,36 @@ mod tests {
             raw_os_error: None,
             message: "synthetic cleanup failure".into(),
         }
+    }
+
+    fn assert_secret_forms_absent(text: &str) {
+        for form in [
+            "sk-issue185-secret",
+            "[115, 107, 45, 105, 115, 115, 117, 101, 49, 56, 53, 45, 115, 101, 99, 114, 101, 116]",
+            "736b2d69737375653138352d736563726574",
+            "c2staXNzdWUxODUtc2VjcmV0",
+        ] {
+            assert!(!text.contains(form), "diagnostic leaked {form:?}: {text}");
+        }
+    }
+
+    #[test]
+    fn exit_assertion_errors_exclude_output_payload_encodings() {
+        let mut value = outcome(ProcessTermination::Exited(1));
+        value.stdout = b"sk-issue185-secret".to_vec();
+        value.stderr = b"sk-issue185-secret".to_vec();
+
+        let error = assert_exit_code(&value, 0).unwrap_err().to_string();
+
+        assert_secret_forms_absent(&error);
+        assert!(
+            error.contains("stdout_bytes: 18"),
+            "missing byte count: {error}"
+        );
+        assert!(
+            error.contains("stderr_bytes: 18"),
+            "missing byte count: {error}"
+        );
     }
 
     #[test]
@@ -277,6 +307,7 @@ mod tests {
             CleanupOperation::SignalProcessGroup(libc::SIGKILL),
             CleanupOperation::KillChild,
             CleanupOperation::WaitChild,
+            CleanupOperation::InspectProcessGroup(ProcessInspectionOperation::ReadProc),
         ] {
             let mut value = outcome(ProcessTermination::Exited(2));
             value.cleanup.errors.push(cleanup_error(operation));

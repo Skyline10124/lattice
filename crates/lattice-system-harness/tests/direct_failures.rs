@@ -339,15 +339,15 @@ fn direct_failure_sigint_while_stalled_commits_cancelled() {
         require(
             outcome.command.termination == Some(ProcessTermination::Exited(1)),
             format!(
-                "cooperative cancellation must preserve exit 1: {:?}",
-                outcome.command
+                "cooperative cancellation must preserve exit 1: {}",
+                outcome.command.summary()
             ),
         )?;
         require(
             outcome.command.interventions == vec![HarnessIntervention::InterruptRequested],
             format!(
-                "cooperative cancellation must retain only SIGINT: {:?}",
-                outcome.command
+                "cooperative cancellation must retain only SIGINT: {}",
+                outcome.command.summary()
             ),
         )?;
         require(

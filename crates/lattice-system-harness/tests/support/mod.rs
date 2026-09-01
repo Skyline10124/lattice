@@ -17,7 +17,10 @@ pub(crate) fn driver() -> LatticeDriver {
 pub(crate) fn assert_clean_send(execution: &SendExecution) -> Result<(), AssertError> {
     if execution.command.clean_exit_code().is_none() {
         return Err(AssertError::StdoutMissing {
-            expected: format!("session send did not exit cleanly: {:?}", execution.command),
+            expected: format!(
+                "session send did not exit cleanly: {}",
+                execution.command.summary()
+            ),
         });
     }
     if !execution.malformed_lines.is_empty() {

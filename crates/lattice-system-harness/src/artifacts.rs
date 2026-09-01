@@ -229,7 +229,11 @@ impl ScenarioEvidence {
             std::fs::write(
                 self.failure_dir.join(format!("{index}-command.txt")),
                 redact(
-                    &format!("{}\noutcome: {:?}\n", command.summary, command.outcome),
+                    &format!(
+                        "{}\noutcome: {}\n",
+                        command.summary,
+                        command.outcome.summary()
+                    ),
                     &secrets,
                 ),
             )?;
@@ -496,7 +500,7 @@ mod tests {
     use super::*;
     use crate::driver::{
         CleanupError, CleanupOperation, HarnessIntervention, ProcessGroupCleanup,
-        ProcessTermination,
+        ProcessInspectionOperation, ProcessTermination,
     };
     use crate::fake_llm::CapturedRequest;
     use crate::world::ScenarioWorld;
@@ -774,6 +778,7 @@ mod tests {
             CleanupOperation::SignalProcessGroup(libc::SIGKILL),
             CleanupOperation::KillChild,
             CleanupOperation::WaitChild,
+            CleanupOperation::InspectProcessGroup(ProcessInspectionOperation::ReadProc),
         ]
         .into_iter()
         .map(|operation| CleanupError {
@@ -811,6 +816,7 @@ mod tests {
             "SignalProcessGroup(9)",
             "KillChild",
             "WaitChild",
+            "InspectProcessGroup(ReadProc)",
             "surviving_pids: [11, 22]",
         ] {
             assert!(command.contains(fact), "missing {fact:?} in {command}");
@@ -823,6 +829,48 @@ mod tests {
             std::fs::read(failure_dir.join("0-stderr.txt")).unwrap(),
             b"partial stderr"
         );
+    }
+
+    #[test]
+    fn scenario_evidence_excludes_output_payload_encodings() {
+        let secret = "sk-issue185-secret";
+        let world = ScenarioWorld::new("evidence-command-secret").unwrap();
+        let root = TempDir::new().unwrap();
+        let failure_dir = root.path().join("scenario");
+        let mut evidence =
+            ScenarioEvidence::new(&world, &failure_dir, [secret.to_string()]).unwrap();
+        let outcome = CommandOutcome {
+            stdout: secret.as_bytes().to_vec(),
+            stderr: secret.as_bytes().to_vec(),
+            termination: Some(ProcessTermination::Exited(1)),
+            interventions: Vec::new(),
+            cleanup: ProcessGroupCleanup::default(),
+        };
+
+        evidence.record_command("lattice test", &outcome);
+        evidence.finish(true).unwrap();
+
+        for entry in std::fs::read_dir(&failure_dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_file() {
+                let text = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned();
+                for form in [
+                    secret,
+                    "[115, 107, 45, 105, 115, 115, 117, 101, 49, 56, 53, 45, 115, 101, 99, 114, 101, 116]",
+                    "736b2d69737375653138352d736563726574",
+                    "c2staXNzdWUxODUtc2VjcmV0",
+                ] {
+                    assert!(
+                        !text.contains(form),
+                        "artifact {} leaked {form:?}: {text}",
+                        path.display()
+                    );
+                }
+            }
+        }
+        let command = std::fs::read_to_string(failure_dir.join("0-command.txt")).unwrap();
+        assert!(command.contains("stdout_bytes: 18"));
+        assert!(command.contains("stderr_bytes: 18"));
     }
 
     #[test]

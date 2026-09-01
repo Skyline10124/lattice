@@ -2,6 +2,53 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #185 PR #209 review: secure diagnostics and bounded cleanup — 2026-09-01
+
+**Severity:** HIGH（secret disclosure / system-harness hang / cleanup false green）
+
+**Problem:** Independent review found three defects in the first #185 implementation. Failure
+artifacts and assertion/support errors formatted all of `CommandOutcome` with derived `Debug`, so
+stdout/stderr secrets became reversible decimal byte arrays that the plaintext sentinel scan could
+not find. `RunningCommand::finish` joined drain threads before inspecting the process group, which
+let an exited direct child hang the harness while a descendant retained a pipe. Linux `/proc`
+inspection also converted root, directory-entry, stat-read, and stat-parse failures into an empty
+member set, allowing incomplete cleanup evidence to report success.
+
+**Fix:** Added one metadata-only `CommandOutcomeSummary` containing termination, intervention,
+cleanup, and stdout/stderr byte counts. Assertion, artifact, and scenario-support diagnostics use
+that summary, and `CommandOutcome`'s defensive `Debug` delegates to it, so raw output bytes cannot
+enter a diagnostic through a missed `Debug` caller. This does not add #192's combined-failure
+system. Drain readers now use nonblocking Linux pipes with a bounded stop-and-join path. `finish`
+inspects and reconciles the process group before draining; a remaining descendant or incomplete
+inspection records `ForcedKill`, attempts `SIGKILL`, waits for bounded final survivor evidence, and
+then returns the bytes collected so far without detached work. Process inspection now returns typed
+`ReadProc`, `ReadProcEntry`, `ReadStat(pid)`, or `ParseStat(pid)` cleanup errors. Those errors remain
+in `ProcessGroupCleanup`, make `succeeded()` false, and force the cleanup decision closed.
+
+**Verification:**
+
+- The original review probes reproduced before repair: the secret was recoverable from
+  `0-command.txt`, and `timeout 1s ... -- orphan` exited 124. After repair, the orphan probe returns
+  in 26 ms with forced cleanup; the adversarial secret decoder finds no byte array to parse.
+- `cargo test -p lattice-system-harness --lib driver::tests -- --nocapture` — PASS（12 passed）。
+- Descendant-inherits-pipe regression under a two-second external bound — PASS（20/20 runs）。
+- `cargo test -p lattice-system-harness --lib assert::tests -- --nocapture` — PASS（3 passed）。
+- `cargo test -p lattice-system-harness --lib artifacts::tests -- --nocapture` — PASS（18 passed）。
+- `cargo test -p lattice-system-harness --all-features --no-run` — PASS。
+- `cargo build -p lattice-cli --bin lattice` — PASS。
+- `LATTICE_BIN="$(pwd)/target/debug/lattice" cargo test -p lattice-system-harness` — PASS
+  （76 library tests and every ordinary fast, Direct-Local, and PTY target）。
+- `cargo xtask harness-boundary`, `cargo fmt --all --check`, and
+  `cargo clippy -p lattice-system-harness --all-targets -- -D warnings` — PASS。
+
+The unrelated #200 operator timeout test was not deleted, weakened, or retimed. `FINDINGS.md` is
+unchanged because these repairs leave no #185-specific code residual; the required PR check remains
+a publication gate and is rerun after push.
+
+**Changed files:** `crates/lattice-system-harness/src/{driver,assert,artifacts,lib}.rs`,
+`crates/lattice-system-harness/tests/{support/mod.rs,direct_failures.rs,direct_session_isolation.rs,pty_tui_smoke.rs}`,
+and `FIX.md`.
+
 ## GitHub #185: preserve command termination and cleanup facts — 2026-09-01
 
 **Severity:** MEDIUM（system-harness false green / process cleanup diagnostics）
