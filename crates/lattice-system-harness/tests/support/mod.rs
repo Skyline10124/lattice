@@ -70,10 +70,10 @@ pub(crate) fn finish_scenario(
         evidence.record_command(*summary, outcome);
     }
     evidence.record_captures(captures);
+    let primary = result.err().map(|error| error.to_string());
     evidence
-        .finish(result.is_err())
-        .unwrap_or_else(|error| panic!("scenario evidence failed: {error}"));
-    result.unwrap_or_else(|error| panic!("{error}"));
+        .finish_report(primary)
+        .unwrap_or_else(|report| panic!("{report}"));
 }
 
 pub(crate) fn wire_fake_llm(

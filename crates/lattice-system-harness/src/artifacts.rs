@@ -570,33 +570,93 @@ impl ScenarioEvidence {
         self.captures = captures;
     }
 
+    pub fn finish_report(self, primary_assertion: Option<String>) -> Result<(), FailureReport> {
+        let persist = primary_assertion.is_some();
+        self.finish_internal(primary_assertion, persist)
+    }
+
     pub fn finish(self, failed: bool) -> Result<(), EvidenceError> {
-        if !failed {
-            return Ok(());
-        }
-        std::fs::create_dir_all(&self.failure_dir)?;
+        self.finish_internal(None, failed)
+            .map_err(|report| EvidenceError::FailureReport(report.to_string()))
+    }
+
+    fn finish_internal(
+        self,
+        primary_assertion: Option<String>,
+        persist: bool,
+    ) -> Result<(), FailureReport> {
         let secrets: Vec<&str> = self.sentinels.iter().map(String::as_str).collect();
-        for (index, command) in self.commands.iter().enumerate() {
-            std::fs::write(
-                self.failure_dir.join(format!("{index}-command.txt")),
+        let mut report = FailureReport::new(primary_assertion, &secrets);
+        for command in &self.commands {
+            report.add_command_diagnostic(
                 render_command_text(&command.summary, &command.outcome, &secrets),
-            )?;
-            std::fs::write(
-                self.failure_dir.join(format!("{index}-stdout.txt")),
-                redact(&String::from_utf8_lossy(&command.outcome.stdout), &secrets),
-            )?;
-            std::fs::write(
-                self.failure_dir.join(format!("{index}-stderr.txt")),
-                redact(&String::from_utf8_lossy(&command.outcome.stderr), &secrets),
-            )?;
+                &secrets,
+            );
         }
-        write_fake_llm_log(&self.failure_dir, &self.captures, &secrets)?;
-        let after = WorkspaceSnapshot::capture(&self.project_dir)?;
-        write_workspace_diff(&self.failure_dir, &self.before, &after, &secrets)?;
-        verify_persisted_bundle(&self.failure_dir, &secrets)
+        if !persist {
+            return report.finish();
+        }
+        if let Err(error) = std::fs::create_dir_all(&self.failure_dir) {
+            report.add_evidence_error("create artifact root", error, &secrets);
+            return report.finish();
+        }
+
+        for (index, command) in self.commands.iter().enumerate() {
+            attempt(
+                &format!("write {index}-command.txt"),
+                std::fs::write(
+                    self.failure_dir.join(format!("{index}-command.txt")),
+                    render_command_text(&command.summary, &command.outcome, &secrets),
+                ),
+                &secrets,
+                &mut report.evidence_errors,
+            );
+            attempt(
+                &format!("write {index}-stdout.txt"),
+                std::fs::write(
+                    self.failure_dir.join(format!("{index}-stdout.txt")),
+                    redact(&String::from_utf8_lossy(&command.outcome.stdout), &secrets),
+                ),
+                &secrets,
+                &mut report.evidence_errors,
+            );
+            attempt(
+                &format!("write {index}-stderr.txt"),
+                std::fs::write(
+                    self.failure_dir.join(format!("{index}-stderr.txt")),
+                    redact(&String::from_utf8_lossy(&command.outcome.stderr), &secrets),
+                ),
+                &secrets,
+                &mut report.evidence_errors,
+            );
+        }
+
+        attempt(
+            "write fake LLM log",
+            write_fake_llm_log(&self.failure_dir, &self.captures, &secrets),
+            &secrets,
+            &mut report.evidence_errors,
+        );
+        if let Some(after) = attempt(
+            "capture workspace after",
+            WorkspaceSnapshot::capture(&self.project_dir),
+            &secrets,
+            &mut report.evidence_errors,
+        ) {
+            write_workspace_diff_collecting(
+                &self.failure_dir,
+                &self.before,
+                &after,
+                &secrets,
+                &mut report,
+            );
+        }
+        scan_bundle_into_report(&self.failure_dir, &secrets, &mut report);
+        report.finish()
     }
 }
 
+#[cfg(test)]
 fn verify_persisted_bundle(dir: &Path, secrets: &[&str]) -> Result<(), EvidenceError> {
     let leaked = scan_artifacts_for_secrets(dir, secrets)?;
     if leaked.is_empty() {
@@ -685,13 +745,42 @@ pub fn write_workspace_diff(
     after: &WorkspaceSnapshot,
     secrets: &[&str],
 ) -> std::io::Result<()> {
+    let mut report = FailureReport::new(None, secrets);
+    write_workspace_diff_collecting(failure_dir, before, after, secrets, &mut report);
+    match report.evidence_errors.into_iter().next() {
+        Some(error) => Err(std::io::Error::other(error)),
+        None => Ok(()),
+    }
+}
+
+fn write_workspace_diff_collecting(
+    failure_dir: &Path,
+    before: &WorkspaceSnapshot,
+    after: &WorkspaceSnapshot,
+    secrets: &[&str],
+    report: &mut FailureReport,
+) {
     let before_text = redact(&before.render(), secrets);
     let after_text = redact(&after.render(), secrets);
-    std::fs::write(failure_dir.join("workspace_before.txt"), &before_text)?;
-    std::fs::write(failure_dir.join("workspace_after.txt"), &after_text)?;
     let diff = redact(&unified_listing_diff(before, after), secrets);
-    std::fs::write(failure_dir.join("workspace_diff.txt"), diff)?;
-    Ok(())
+    attempt(
+        "write workspace_before.txt",
+        std::fs::write(failure_dir.join("workspace_before.txt"), before_text),
+        secrets,
+        &mut report.evidence_errors,
+    );
+    attempt(
+        "write workspace_after.txt",
+        std::fs::write(failure_dir.join("workspace_after.txt"), after_text),
+        secrets,
+        &mut report.evidence_errors,
+    );
+    attempt(
+        "write workspace_diff.txt",
+        std::fs::write(failure_dir.join("workspace_diff.txt"), diff),
+        secrets,
+        &mut report.evidence_errors,
+    );
 }
 
 fn unified_listing_diff(before: &WorkspaceSnapshot, after: &WorkspaceSnapshot) -> String {
@@ -731,15 +820,17 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, u64)>) -> std::io::Resul
             .ok()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| path.display().to_string());
-        let metadata = entry.metadata()?;
-        if metadata.is_dir() {
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
             if path.file_name().and_then(|name| name.to_str()) == Some(".git") {
                 continue;
             }
             out.push((format!("{rel}/"), 0));
             walk(root, &path, out)?;
+        } else if file_type.is_symlink() {
+            out.push((rel, std::fs::symlink_metadata(&path)?.len()));
         } else {
-            out.push((rel, metadata.len()));
+            out.push((rel, entry.metadata()?.len()));
         }
     }
     Ok(())
@@ -781,8 +872,7 @@ pub fn write_world_context(
         context.push_str(&redact_env_pair(&name, &value, secrets));
         context.push('\n');
     }
-    std::fs::write(dir.join("world.txt"), context)?;
-    Ok(())
+    std::fs::write(dir.join("world.txt"), redact(&context, secrets))
 }
 
 #[cfg(test)]
@@ -1326,5 +1416,115 @@ mod tests {
         );
         let patched = std::fs::read_to_string(leaked_file).unwrap();
         assert_eq!(patched, "value [REDACTED]");
+    }
+
+    #[test]
+    fn scenario_evidence_preserves_primary_two_write_errors_and_scan_results() {
+        let secret = "direct-report-secret";
+        let world = ScenarioWorld::new("direct-report-errors").unwrap();
+        let root = TempDir::new().unwrap();
+        let failure_dir = root.path().join("scenario");
+        let mut evidence =
+            ScenarioEvidence::new(&world, &failure_dir, [secret.to_string()]).unwrap();
+        evidence.record_command(format!("lattice {secret}"), &report_test_outcome(secret));
+
+        std::fs::create_dir_all(&failure_dir).unwrap();
+        std::fs::create_dir(failure_dir.join("0-command.txt")).unwrap();
+        std::fs::create_dir(failure_dir.join("0-stdout.txt")).unwrap();
+        std::fs::write(failure_dir.join("leak.txt"), format!("leak {secret}")).unwrap();
+        std::os::unix::fs::symlink(
+            failure_dir.join("leak.txt"),
+            failure_dir.join("invalid-link"),
+        )
+        .unwrap();
+
+        let report = evidence
+            .finish_report(Some(format!("primary {secret}")))
+            .unwrap_err();
+        let text = report.to_string();
+        assert!(!text.contains(secret));
+        assert!(text.contains("primary [REDACTED]"));
+        assert!(text.contains("leak.txt"));
+        assert!(text.contains("command diagnostics:"));
+        assert!(text.contains("outcome: CommandOutcome"));
+        let command_error = text.find("write 0-command.txt").unwrap();
+        let stdout_error = text.find("write 0-stdout.txt").unwrap();
+        assert!(command_error < stdout_error);
+        assert!(text.contains("invalid-link"));
+        assert_eq!(
+            std::fs::read_to_string(failure_dir.join("leak.txt")).unwrap(),
+            "leak [REDACTED]"
+        );
+    }
+
+    #[test]
+    fn scenario_evidence_records_command_diagnostics_before_persistence() {
+        let world = ScenarioWorld::new("direct-report-create-error").unwrap();
+        let root = TempDir::new().unwrap();
+        let failure_dir = root.path().join("scenario");
+        let mut evidence =
+            ScenarioEvidence::new(&world, &failure_dir, Vec::<String>::new()).unwrap();
+        evidence.record_command("lattice test", &report_test_outcome("clean"));
+        std::fs::write(&failure_dir, "root type conflict").unwrap();
+
+        let report = evidence
+            .finish_report(Some("primary assertion".into()))
+            .unwrap_err();
+        let text = report.to_string();
+        assert!(text.contains("primary assertion"));
+        assert!(text.contains("command diagnostics:"));
+        assert!(text.contains("outcome: CommandOutcome"));
+        assert!(text.contains("create artifact root"));
+    }
+
+    #[test]
+    fn legacy_scenario_evidence_finish_remains_usable() {
+        let world = ScenarioWorld::new("legacy-evidence-finish").unwrap();
+        let root = TempDir::new().unwrap();
+        let failure_dir = root.path().join("scenario");
+        let evidence = ScenarioEvidence::new(&world, &failure_dir, Vec::<String>::new()).unwrap();
+        evidence.finish(true).unwrap();
+        assert!(failure_dir.join("workspace_diff.txt").is_file());
+    }
+
+    #[test]
+    fn workspace_snapshot_records_symlink_without_following_target() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("project");
+        let target = dir.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("child.txt"), "outside").unwrap();
+        std::os::unix::fs::symlink(&target, root.join("linked-dir")).unwrap();
+
+        let snapshot = WorkspaceSnapshot::capture(&root).unwrap();
+        let paths: Vec<&str> = snapshot
+            .entries
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .collect();
+        assert!(paths.contains(&"linked-dir"));
+        assert!(!paths.iter().any(|path| path.contains("child.txt")));
+    }
+
+    #[test]
+    fn world_context_final_buffer_redacts_dynamic_fields() {
+        let secret = "world-dynamic-secret";
+        let world = ScenarioWorld::new(&format!("world-{secret}")).unwrap();
+        let out_dir = TempDir::new().unwrap();
+        write_world_context(
+            out_dir.path(),
+            &world,
+            &format!("scenario-{secret}"),
+            &format!("lattice {secret}"),
+            &[secret],
+        )
+        .unwrap();
+
+        let text = std::fs::read_to_string(out_dir.path().join("world.txt")).unwrap();
+        assert!(!text.contains(secret));
+        assert!(text.contains("scenario-[REDACTED]"));
+        assert!(text.contains("lattice [REDACTED]"));
+        assert!(text.contains(REDACTED));
     }
 }
