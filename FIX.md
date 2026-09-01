@@ -75,6 +75,50 @@ rechecks retain the error. Requested `SIGINT` behavior is unchanged.
 **Changed files:** `crates/lattice-system-harness/src/{driver,session_send,assert,artifacts}.rs`,
 `docs/plans/2026-09-01-issue185-command-outcome-followup.md`, `FIX.md`, and `FINDINGS.md`.
 
+## GitHub #186 PR #210 review follow-up: remove port-reuse flake and close wire gaps — 2026-09-01
+
+**Severity:** MEDIUM（system-harness flake / raw-wire regression gap）
+
+**Problem:** PR #210's shutdown regression immediately rebound the server's former ephemeral TCP
+address. Under the ordinary parallel harness, Linux returned `EADDRINUSE` even though bounded
+shutdown had completed, so the test failed 1/83 from OS port-reuse state rather than fake-provider
+state. The existing raw request-line matrix also omitted non-ASCII and control bytes, and no client
+declared a longer `Content-Length`, sent a short body, half-closed its write side, and pinned the
+incomplete-body rejection bytes.
+
+**Fix:** Deleted the TCP rebind assertion. The existing lifecycle test now checks the server's
+ABA-free terminal state directly: its listener and serve handle are removed, the serve loop has
+published exit, the active handler count is zero, all handler handles were joined and drained, and
+no thread failure was stored. No sleep or new lifecycle API was added.
+
+The existing request-line table now sends non-ASCII and control separators as raw bytes and checks
+the fixed ASCII rejection response byte-for-byte, without UTF-8 replacement. The existing bounded
+`Content-Length` test now declares four bytes, writes two, half-closes `Shutdown::Write`, and checks
+the complete CRLF response, exact `Content-Length: 24`, and bounded completion. No new test matrix
+or helper abstraction was added.
+
+**Verification:**
+
+- Before repair, the ordinary full harness reproduced the review failure exactly: 82 passed and
+  `gated_response_waits_for_release_and_shutdown_joins_handlers` failed with `EADDRINUSE`.
+- `cargo test -p lattice-system-harness --lib fake_llm::tests -- --nocapture` — PASS（15/15）。
+- Exact request-line, short-body, and shutdown owner tests — PASS（50/50 each）。
+- Exact concurrent capture/Sequence regression — PASS（50/50）。
+- `cargo test -p lattice-system-harness --all-features --no-run` — PASS。
+- `cargo build -p lattice-cli --bin lattice` — PASS。
+- `LATTICE_BIN="/home/astrin/Dev/lattice-worktrees/issue-186/target/debug/lattice" cargo test -p
+  lattice-system-harness --test direct_failures` — PASS（8/8）。
+- The full ordinary harness with the same absolute branch binary — PASS（2/2 complete runs under
+  default parallel load; each included 83/83 library tests and every ordinary target）。
+- `cargo xtask harness-boundary`, `cargo fmt --all --check`,
+  `cargo clippy -p lattice-system-harness --all-targets -- -D warnings`, and
+  `git diff --check origin/main...HEAD` — PASS。
+
+`FINDINGS.md` remains unchanged because this follow-up leaves no #186-specific residual. GitHub #40
+stays open for maintainer closeout.
+
+**Changed files:** `crates/lattice-system-harness/src/fake_llm.rs` and `FIX.md`.
+
 ## GitHub #186: make fake-provider HTTP and Sequence assignment deterministic — 2026-09-01
 
 **Severity:** MEDIUM（system-harness false green / provider race / teardown hang）

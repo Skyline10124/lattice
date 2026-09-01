@@ -1266,6 +1266,14 @@ mod tests {
                 b"POST  /chat/completions HTTP/1.1",
                 b"HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: 23\r\nConnection: close\r\n\r\nmalformed request line\n",
             ),
+            (
+                b"POST\xff/chat/completions HTTP/1.1",
+                b"HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: 23\r\nConnection: close\r\n\r\nmalformed request line\n",
+            ),
+            (
+                b"POST\t/chat/completions HTTP/1.1",
+                b"HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: 23\r\nConnection: close\r\n\r\nmalformed request line\n",
+            ),
         ];
 
         for (request_line, expected) in cases {
@@ -1310,6 +1318,27 @@ mod tests {
             assert_eq!(exchange_raw(server.local_addr(), request), *expected);
             assert!(started.elapsed() < Duration::from_secs(1));
         }
+
+        let mut stream = TcpStream::connect(server.local_addr()).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("read timeout");
+        stream
+            .write_all(
+                b"POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 4\r\n\r\n{}",
+            )
+            .expect("write short body");
+        stream
+            .shutdown(Shutdown::Write)
+            .expect("half-close request write side");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .expect("read incomplete-body response");
+        assert_eq!(
+            response,
+            b"HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: 24\r\nConnection: close\r\n\r\nincomplete request body\n"
+        );
         assert!(server.captured_requests().is_empty());
     }
 
@@ -1494,8 +1523,7 @@ mod tests {
 
         let (mut server, gate) =
             FakeLlmServer::start_gated(SseScript::plain("cancelled")).expect("server");
-        let addr = server.local_addr();
-        let response = request_in_thread(addr);
+        let response = request_in_thread(server.local_addr());
         server
             .wait_for_requests(1, Duration::from_secs(2))
             .expect("captured request");
@@ -1508,7 +1536,24 @@ mod tests {
             .recv_timeout(Duration::from_secs(2))
             .expect("cancelled handler joined")
             .expect("client io");
-        TcpListener::bind(addr).expect("shutdown released listener");
+
+        assert!(server.listener.is_none(), "listener was not removed");
+        assert!(
+            server.serve_handle.is_none(),
+            "serve thread handle was not joined"
+        );
+        assert!(
+            server.handlers.lock().unwrap().is_empty(),
+            "handler thread handles were not joined"
+        );
+        let state = server.state.0.lock().unwrap();
+        assert!(state.serve_exited, "serve thread did not publish exit");
+        assert_eq!(state.active_handlers, 0, "handler remained active");
+        assert!(
+            state.failures.is_empty(),
+            "shutdown stored thread failures: {:?}",
+            state.failures
+        );
     }
 
     #[test]
