@@ -29,8 +29,9 @@ is not duplicated here.
 
 ## TDD seams
 
-- `driver::tests`: an escaped pipe writer forces a stopped drain and proves that
-  captured bytes remain available while exact exit is rejected.
+- `driver::tests`: a local `UnixStream` pair keeps its writer open while the
+  drain is stopped, preserving captured bytes and rejecting exact exit without
+  a shell, detached process, or scheduler-dependent process-group behavior.
 - `session_send::tests`: a synthetic signaled/contaminated outcome survives
   inside `NewSessionFailed`.
 - `driver::tests`: a pure cleanup helper receives `ESRCH` plus either an empty or

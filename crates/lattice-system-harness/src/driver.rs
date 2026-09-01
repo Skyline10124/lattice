@@ -199,9 +199,14 @@ pub struct LatticeCommand {
 /// would hit the test process itself, killing the whole `cargo test` run
 /// (#105). Every group signal additionally refuses to fire when the target
 /// group is this process's own group.
+struct DrainResult {
+    bytes: Vec<u8>,
+    reached_eof: bool,
+}
+
 struct DrainHandle {
     stop: Arc<AtomicBool>,
-    thread: JoinHandle<std::io::Result<Vec<u8>>>,
+    thread: JoinHandle<std::io::Result<DrainResult>>,
 }
 
 pub struct RunningCommand {
@@ -441,23 +446,29 @@ fn drain_to_thread<R: Read + Send + 'static>(maybe: Option<R>) -> DrainHandle {
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
     let thread = std::thread::spawn(move || {
-        let mut output = Vec::new();
+        let mut bytes = Vec::new();
         let Some(mut stream) = maybe else {
-            return Ok(output);
+            return Ok(DrainResult {
+                bytes,
+                reached_eof: true,
+            });
         };
         let mut chunk = [0_u8; 8192];
-        while !thread_stop.load(Ordering::Acquire) {
+        let reached_eof = loop {
+            if thread_stop.load(Ordering::Acquire) {
+                break false;
+            }
             match stream.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(read) => output.extend_from_slice(&chunk[..read]),
+                Ok(0) => break true,
+                Ok(read) => bytes.extend_from_slice(&chunk[..read]),
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(TIMEOUT_POLL);
                 }
                 Err(error) => return Err(error),
             }
-        }
-        Ok(output)
+        };
+        Ok(DrainResult { bytes, reached_eof })
     });
     DrainHandle { stop, thread }
 }
@@ -470,14 +481,13 @@ fn finish_drain(handle: Option<DrainHandle>) -> Result<(Vec<u8>, bool), DriverEr
     while !handle.thread.is_finished() && Instant::now() < deadline {
         std::thread::sleep(TIMEOUT_POLL);
     }
-    let complete = handle.thread.is_finished();
     handle.stop.store(true, Ordering::Release);
-    let bytes = handle
+    let result = handle
         .thread
         .join()
         .map_err(|_| DriverError::DrainThreadPanicked)?
         .map_err(DriverError::Io)?;
-    Ok((bytes, complete))
+    Ok((result.bytes, result.reached_eof))
 }
 
 fn record_cleanup_result<T>(
@@ -795,15 +805,26 @@ mod tests {
 
     #[test]
     fn incomplete_output_drain_rejects_clean_exit() {
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", "setsid sh -c 'sleep 1; printf late' & printf prefix"]);
+        let (reader, mut writer) =
+            std::os::unix::net::UnixStream::pair().expect("create local pipe");
+        reader
+            .set_nonblocking(true)
+            .expect("set reader nonblocking");
+        let drain = drain_to_thread(Some(reader));
+        std::io::Write::write_all(&mut writer, b"prefix").expect("write prefix");
 
-        let outcome = RunningCommand::spawn(cmd)
-            .expect("spawn")
-            .wait(Some(Duration::from_secs(2)))
-            .expect("outcome");
+        let (stdout, stdout_complete) = finish_drain(Some(drain)).expect("finish drain");
+        drop(writer);
+        let outcome = CommandOutcome {
+            stdout,
+            stderr: Vec::new(),
+            stdout_complete,
+            stderr_complete: true,
+            termination: Some(ProcessTermination::Exited(0)),
+            interventions: Vec::new(),
+            cleanup: ProcessGroupCleanup::default(),
+        };
 
-        assert_eq!(outcome.termination, Some(ProcessTermination::Exited(0)));
         assert_eq!(outcome.stdout, b"prefix");
         assert!(!outcome.stdout_complete);
         assert!(

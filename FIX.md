@@ -3,6 +3,36 @@
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
 
+## GitHub #185 PR #211 review: make drain completeness deterministic — 2026-09-01
+
+**Severity:** HIGH（PR-introduced CI failure / output-completeness false red）
+
+**Problem:** The first completeness regression launched `setsid sh` and relied on a detached process
+remaining alive with an inherited stdout FD. GitHub Actions did not preserve that shell/process
+behavior, so the PR's new `assert!(!outcome.stdout_complete)` failed. The implementation also inferred
+completeness from `JoinHandle::is_finished()` at one scheduler instant instead of the drain reader's
+actual EOF observation.
+
+**Fix:** The drain thread now returns one private `DrainResult { bytes, reached_eof }`. `read == 0`
+sets `reached_eof = true`; a stop-requested exit sets it false; a missing stream is complete.
+`finish_drain` still uses the bounded thread wait for teardown, but derives completeness only from the
+joined drain result. The regression now uses a local nonblocking `UnixStream::pair`: it writes
+`prefix`, keeps the writer open so EOF cannot occur, finishes the drain, and closes the writer
+explicitly. No shell, detached process, process-group behavior, or wall-clock performance threshold
+remains.
+
+**Verification:**
+
+- Exact incomplete-drain regression — PASS（1/1; 20/20 repeated runs）。
+- Driver tests — PASS（14/14）。
+- `cargo clippy -p lattice-system-harness --all-targets -- -D warnings` — PASS。
+- `cargo fmt --all --check`, all-features `--no-run`, and `cargo xtask harness-boundary` — PASS。
+- The full ordinary harness with the absolute worktree binary — PASS（79 library tests and every
+  ordinary fast, Direct-Local, and PTY target）。
+
+**Changed files:** `crates/lattice-system-harness/src/driver.rs`,
+`docs/plans/2026-09-01-issue185-command-outcome-followup.md`, and `FIX.md`.
+
 ## GitHub #185 PR #209 follow-up: preserve output completeness and cleanup facts — 2026-09-01
 
 **Severity:** HIGH（exact-exit false green / command-outcome information loss）
