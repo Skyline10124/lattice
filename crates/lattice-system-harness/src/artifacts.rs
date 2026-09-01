@@ -1,24 +1,140 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
 use crate::driver::CommandOutcome;
-
 use crate::world::ScenarioWorld;
 
-/// Redacted failure bundle written when a scenario fails (minimal tracer bullet).
+const REDACTED: &str = "[REDACTED]";
+
+/// Redacted failure bundle written when a scenario fails.
 #[derive(Debug, Clone)]
 pub struct FailureArtifacts {
     pub dir: PathBuf,
     pub stdout: String,
     pub stderr: String,
-    pub command_summary: String,
+    pub command_text: String,
 }
 
-const REDACTED: &str = "[REDACTED]";
+/// One safe, composable account of a failed scenario and its evidence pipeline.
+pub struct FailureReport {
+    primary_assertion: Option<String>,
+    secret_leaks: Vec<String>,
+    command_diagnostics: Vec<String>,
+    evidence_errors: Vec<String>,
+}
+
+impl FailureReport {
+    pub(crate) fn new(primary_assertion: Option<String>, secrets: &[&str]) -> Self {
+        Self {
+            primary_assertion: primary_assertion.map(|value| redact(&value, secrets)),
+            secret_leaks: Vec::new(),
+            command_diagnostics: Vec::new(),
+            evidence_errors: Vec::new(),
+        }
+    }
+
+    pub(crate) fn add_secret_location(&mut self, location: impl AsRef<str>, secrets: &[&str]) {
+        self.secret_leaks.push(redact(location.as_ref(), secrets));
+    }
+
+    pub(crate) fn add_command_diagnostic(&mut self, diagnostic: impl AsRef<str>, secrets: &[&str]) {
+        self.command_diagnostics
+            .push(redact(diagnostic.as_ref(), secrets));
+    }
+
+    pub(crate) fn add_evidence_error(
+        &mut self,
+        stage: &'static str,
+        error: impl fmt::Display,
+        secrets: &[&str],
+    ) {
+        self.evidence_errors
+            .push(redact(&format!("{stage}: {error}"), secrets));
+    }
+
+    pub(crate) fn finish(mut self) -> Result<(), Self> {
+        self.secret_leaks.sort();
+        self.secret_leaks.dedup();
+        if self.primary_assertion.is_some()
+            || !self.secret_leaks.is_empty()
+            || !self.evidence_errors.is_empty()
+        {
+            Err(self)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl fmt::Display for FailureReport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut wrote_section = false;
+
+        if !self.secret_leaks.is_empty() {
+            writeln!(formatter, "secret leaks:")?;
+            for location in &self.secret_leaks {
+                writeln!(formatter, "- {location}")?;
+            }
+            wrote_section = true;
+        }
+
+        if let Some(primary) = &self.primary_assertion {
+            if wrote_section {
+                writeln!(formatter)?;
+            }
+            writeln!(formatter, "primary assertion:")?;
+            write!(formatter, "{primary}")?;
+            if !primary.ends_with('\n') {
+                writeln!(formatter)?;
+            }
+            wrote_section = true;
+        }
+
+        if !self.command_diagnostics.is_empty() {
+            if wrote_section {
+                writeln!(formatter)?;
+            }
+            writeln!(formatter, "command diagnostics:")?;
+            for (index, diagnostic) in self.command_diagnostics.iter().enumerate() {
+                writeln!(formatter, "[command {index}]")?;
+                write!(formatter, "{diagnostic}")?;
+                if !diagnostic.ends_with('\n') {
+                    writeln!(formatter)?;
+                }
+            }
+            wrote_section = true;
+        }
+
+        if !self.evidence_errors.is_empty() {
+            if wrote_section {
+                writeln!(formatter)?;
+            }
+            writeln!(formatter, "evidence errors:")?;
+            for error in &self.evidence_errors {
+                writeln!(formatter, "- {error}")?;
+            }
+            wrote_section = true;
+        }
+
+        if !wrote_section {
+            write!(formatter, "failure report")?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for FailureReport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
+    }
+}
+
+impl std::error::Error for FailureReport {}
 
 pub fn redact(text: &str, secrets: &[&str]) -> String {
     let mut out = text.to_string();
@@ -30,22 +146,29 @@ pub fn redact(text: &str, secrets: &[&str]) -> String {
     out
 }
 
+pub(crate) fn render_command_text(
+    summary: &str,
+    outcome: &CommandOutcome,
+    secrets: &[&str],
+) -> String {
+    redact(
+        &format!("{summary}\noutcome: {}\n", outcome.summary()),
+        secrets,
+    )
+}
+
 pub fn capture_from_output(
     dir: PathBuf,
     output: &CommandOutcome,
     command_summary: impl Into<String>,
     secrets: &[&str],
 ) -> FailureArtifacts {
-    let stdout = redact(&String::from_utf8_lossy(&output.stdout), secrets);
-    let stderr = redact(&String::from_utf8_lossy(&output.stderr), secrets);
-    // Redact the command summary too: a caller may interpolate a secret-bearing
-    // argument (e.g. an API key passed on the command line) into the summary.
-    let command_summary = redact(&command_summary.into(), secrets);
+    let command_summary = command_summary.into();
     FailureArtifacts {
         dir,
-        stdout,
-        stderr,
-        command_summary,
+        stdout: redact(&String::from_utf8_lossy(&output.stdout), secrets),
+        stderr: redact(&String::from_utf8_lossy(&output.stderr), secrets),
+        command_text: render_command_text(&command_summary, output, secrets),
     }
 }
 
@@ -56,16 +179,11 @@ pub fn write_failure_artifacts(artifacts: &FailureArtifacts) -> std::io::Result<
     std::fs::create_dir_all(&artifacts.dir)?;
     std::fs::write(artifacts.dir.join("stdout.txt"), &artifacts.stdout)?;
     std::fs::write(artifacts.dir.join("stderr.txt"), &artifacts.stderr)?;
-    std::fs::write(
-        artifacts.dir.join("command.txt"),
-        &artifacts.command_summary,
-    )?;
+    std::fs::write(artifacts.dir.join("command.txt"), &artifacts.command_text)?;
     Ok(())
 }
 
 /// Recursively scan persisted artifacts for byte-level secret sentinels.
-/// Hits are redacted in place and reported; any traversal, read, or rewrite
-/// error fails closed instead of certifying an incomplete scan.
 #[derive(Debug, Error)]
 #[error("secret scan failed at {}: {source}", path.display())]
 pub struct ArtifactScanError {
@@ -228,14 +346,7 @@ impl ScenarioEvidence {
         for (index, command) in self.commands.iter().enumerate() {
             std::fs::write(
                 self.failure_dir.join(format!("{index}-command.txt")),
-                redact(
-                    &format!(
-                        "{}\noutcome: {}\n",
-                        command.summary,
-                        command.outcome.summary()
-                    ),
-                    &secrets,
-                ),
+                render_command_text(&command.summary, &command.outcome, &secrets),
             )?;
             std::fs::write(
                 self.failure_dir.join(format!("{index}-stdout.txt")),
@@ -263,16 +374,8 @@ fn verify_persisted_bundle(dir: &Path, secrets: &[&str]) -> Result<(), EvidenceE
 }
 
 /// Persist the fake LLM's captured request log into a failure bundle.
-///
-/// RFC #41 (Codeberg #19) decision eight + PRD user story 21 require that a
-/// failure artifact bundle include the requests the fake LLM received, so the
-/// post-mortem can see what the product actually sent. Each capture is written
-/// as one pretty-printed JSON object on a separated block; secrets listed in
-/// `secrets` are substring-redacted from the rendered bodies (the fake LLM
-/// typically receives only the `Bearer <FAKE_API_KEY>` header, which never
-/// reaches the body, but the redaction defense is applied regardless).
 pub fn write_fake_llm_log(
-    failure_dir: &std::path::Path,
+    failure_dir: &Path,
     captures: &[crate::fake_llm::CapturedRequest],
     secrets: &[&str],
 ) -> std::io::Result<()> {
@@ -296,23 +399,17 @@ pub fn write_fake_llm_log(
         text.push_str(&redact(&raw, secrets));
         text.push_str("\n\n");
     }
-    std::fs::write(failure_dir.join("fake_llm_requests.txt"), text)?;
-    Ok(())
+    std::fs::write(failure_dir.join("fake_llm_requests.txt"), text)
 }
 
-/// A captured workspace listing: `(relative_path, size_bytes)` entries,
-/// sorted by path. Used to compute a before/after diff on failure (RFC #41
-/// decision eight, PRD user story 21: "工作区差异").
+/// A captured workspace listing: `(relative_path, size_bytes)` entries, sorted by path.
 #[derive(Debug, Clone)]
 pub struct WorkspaceSnapshot {
     pub entries: Vec<(String, u64)>,
 }
 
 impl WorkspaceSnapshot {
-    /// Capture the current host-side project tree (skipping `.git`
-    /// internals). Call this **before** the turn starts so a failure can
-    /// diff it against the post-turn tree.
-    pub fn capture(root: &std::path::Path) -> std::io::Result<Self> {
+    pub fn capture(root: &Path) -> std::io::Result<Self> {
         let mut entries = Vec::new();
         walk(root, root, &mut entries)?;
         entries.sort_by(|a, b| a.0.cmp(&b.0));
@@ -328,14 +425,9 @@ impl WorkspaceSnapshot {
     }
 }
 
-/// Write a shallow recursive listing of a directory tree (relative paths +
-/// sizes) into `<failure_dir>/workspace_listing.txt`. The listing is
-/// redacted against `secrets` in case a project file name or path embeds a
-/// sentinel. This is the single-snapshot variant; for the before/after diff
-/// the spec asks for, use [`write_workspace_diff`].
 pub fn write_workspace_listing(
-    failure_dir: &std::path::Path,
-    root: &std::path::Path,
+    failure_dir: &Path,
+    root: &Path,
     secrets: &[&str],
 ) -> std::io::Result<()> {
     let snapshot = WorkspaceSnapshot::capture(root)?;
@@ -343,23 +435,14 @@ pub fn write_workspace_listing(
     for (rel, size) in &snapshot.entries {
         text.push_str(&format!("  {rel} ({size} bytes)\n"));
     }
-    let text = redact(&text, secrets);
-    std::fs::write(failure_dir.join("workspace_listing.txt"), text)?;
-    Ok(())
+    std::fs::write(
+        failure_dir.join("workspace_listing.txt"),
+        redact(&text, secrets),
+    )
 }
 
-/// Write the before/after workspace diff (RFC #41 decision eight, PRD user
-/// story 21: "工作区差异"). Writes `workspace_before.txt`,
-/// `workspace_after.txt`, and `workspace_diff.txt` (a unified diff of the
-/// two listings) into `failure_dir`, all redacted against `secrets`.
-///
-/// The diff is over the host-side project tree listing (path + size), not a
-/// byte-level file-content diff — the Direct-Local workspace IS the host
-/// project tree, so the listing captures exactly what a turn observed and
-/// mutated. A path appearing/disappearing or a size change shows up as a
-/// `-`/`+` line.
 pub fn write_workspace_diff(
-    failure_dir: &std::path::Path,
+    failure_dir: &Path,
     before: &WorkspaceSnapshot,
     after: &WorkspaceSnapshot,
     secrets: &[&str],
@@ -368,19 +451,14 @@ pub fn write_workspace_diff(
     let after_text = redact(&after.render(), secrets);
     std::fs::write(failure_dir.join("workspace_before.txt"), &before_text)?;
     std::fs::write(failure_dir.join("workspace_after.txt"), &after_text)?;
-    let diff = unified_listing_diff(before, after);
-    let diff = redact(&diff, secrets);
+    let diff = redact(&unified_listing_diff(before, after), secrets);
     std::fs::write(failure_dir.join("workspace_diff.txt"), diff)?;
     Ok(())
 }
 
-/// Produce a minimal unified-diff-style rendering of two workspace listings:
-/// lines present in `before` but not `after` become `-`, lines in `after`
-/// but not `before` become `+`, lines unchanged are omitted (the diff is
-/// just the changes, not a full unified diff with context — that is what a
-/// post-mortem actually wants).
 fn unified_listing_diff(before: &WorkspaceSnapshot, after: &WorkspaceSnapshot) -> String {
     use std::collections::BTreeMap;
+
     let before_map: BTreeMap<&String, u64> = before.entries.iter().map(|(p, s)| (p, *s)).collect();
     let after_map: BTreeMap<&String, u64> = after.entries.iter().map(|(p, s)| (p, *s)).collect();
     let mut out = String::new();
@@ -388,65 +466,47 @@ fn unified_listing_diff(before: &WorkspaceSnapshot, after: &WorkspaceSnapshot) -
     keys.sort();
     keys.dedup();
     for key in keys {
-        let b = before_map.get(key);
-        let a = after_map.get(key);
-        match (b, a) {
-            (Some(bs), Some(as_)) if bs == as_ => {}
-            (Some(bs), Some(as_)) => {
-                out.push_str(&format!("- {key}\t{bs}\n"));
-                out.push_str(&format!("+ {key}\t{as_}\n"));
+        match (before_map.get(key), after_map.get(key)) {
+            (Some(before_size), Some(after_size)) if before_size == after_size => {}
+            (Some(before_size), Some(after_size)) => {
+                out.push_str(&format!("- {key}\t{before_size}\n"));
+                out.push_str(&format!("+ {key}\t{after_size}\n"));
             }
-            (Some(bs), None) => out.push_str(&format!("- {key}\t{bs}\n")),
-            (None, Some(as_)) => out.push_str(&format!("+ {key}\t{as_}\n")),
+            (Some(before_size), None) => {
+                out.push_str(&format!("- {key}\t{before_size}\n"));
+            }
+            (None, Some(after_size)) => {
+                out.push_str(&format!("+ {key}\t{after_size}\n"));
+            }
             (None, None) => {}
         }
     }
     out
 }
 
-fn walk(
-    root: &std::path::Path,
-    dir: &std::path::Path,
-    out: &mut Vec<(String, u64)>,
-) -> std::io::Result<()> {
+fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, u64)>) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
         let rel = path
             .strip_prefix(root)
             .ok()
-            .map(|p| p.display().to_string())
+            .map(|path| path.display().to_string())
             .unwrap_or_else(|| path.display().to_string());
-        let meta = entry.metadata()?;
-        if meta.is_dir() {
-            // Skip `.git` internals to keep the listing readable; the harness
-            // git project is small and `.git` is not product state.
-            if path.file_name().and_then(|n| n.to_str()) == Some(".git") {
+        let metadata = entry.metadata()?;
+        if metadata.is_dir() {
+            if path.file_name().and_then(|name| name.to_str()) == Some(".git") {
                 continue;
             }
             out.push((format!("{rel}/"), 0));
             walk(root, &path, out)?;
         } else {
-            out.push((rel, meta.len()));
+            out.push((rel, metadata.len()));
         }
     }
     Ok(())
 }
 
-/// Render an `(env name, env value)` pair for the `world.txt` context file,
-/// with secret leakage defenses:
-///
-/// - If the variable's *name* matches a secret-name pattern (contains `KEY`,
-///   `SECRET`, `TOKEN`, `PASSWORD`, `CREDENTIAL`, `AUTH`, `PRIVATE`), the
-///   value is replaced with `[REDACTED-ENV]` regardless of the `secrets`
-///   list — a test that `set_env("ANTHROPIC_API_KEY", "sk-...")` must not
-///   leak the key into a persisted artifact even if the caller forgot to add
-///   it to `secrets`.
-/// - Otherwise the value is substring-redacted against the caller-supplied
-///   `secrets` list (e.g. a secret embedded in a `PATH` or custom var).
-///
-/// The name itself is never redacted (it carries no secret and is needed for
-/// post-mortem reproduction).
 pub fn redact_env_pair(name: &str, value: &str, secrets: &[&str]) -> String {
     const SECRET_NAME_MARKERS: &[&str] = &[
         "KEY",
@@ -458,40 +518,32 @@ pub fn redact_env_pair(name: &str, value: &str, secrets: &[&str]) -> String {
         "PRIVATE",
     ];
     let upper = name.to_ascii_uppercase();
-    let looks_secret = SECRET_NAME_MARKERS.iter().any(|m| upper.contains(m));
-    if looks_secret {
+    if SECRET_NAME_MARKERS
+        .iter()
+        .any(|marker| upper.contains(marker))
+    {
         return format!("  {name}=[REDACTED-ENV]");
     }
     format!("  {name}={}", redact(value, secrets))
 }
 
-/// Build and write the `world.txt` context — scenario name, redacted command
-/// summary, project/home/port, and the redacted env allow-list — into `dir`.
-/// Shared by every failure-artifact path so the world-context block is not
-/// duplicated per caller (the copies had drifted across
-/// `assert_with_failure_artifacts` and the retired KVM-lane full-turn bundle).
-///
-/// `command_summary` must already be redacted (the caller passes
-/// `artifacts.command_summary`, which `capture_from_output` redacts). Env
-/// values are redacted via [`redact_env_pair`]: secret-name vars are masked
-/// entirely, others are substring-redacted against `secrets`.
 pub fn write_world_context(
-    dir: &std::path::Path,
+    dir: &Path,
     world: &ScenarioWorld,
     scenario_name: &str,
     command_summary: &str,
     secrets: &[&str],
 ) -> std::io::Result<()> {
-    let mut ctx = format!("scenario: {scenario_name}\ncommand: {command_summary}\n");
-    ctx.push_str(&format!("project_dir: {}\n", world.project_dir().display()));
-    ctx.push_str(&format!("home: {}\n", world.home().display()));
-    ctx.push_str(&format!("port: {}\n", world.port()));
-    ctx.push_str("env:\n");
-    for (k, v) in world.env_summary() {
-        ctx.push_str(&redact_env_pair(&k, &v, secrets));
-        ctx.push('\n');
+    let mut context = format!("scenario: {scenario_name}\ncommand: {command_summary}\n");
+    context.push_str(&format!("project_dir: {}\n", world.project_dir().display()));
+    context.push_str(&format!("home: {}\n", world.home().display()));
+    context.push_str(&format!("port: {}\n", world.port()));
+    context.push_str("env:\n");
+    for (name, value) in world.env_summary() {
+        context.push_str(&redact_env_pair(&name, &value, secrets));
+        context.push('\n');
     }
-    std::fs::write(dir.join("world.txt"), ctx)?;
+    std::fs::write(dir.join("world.txt"), context)?;
     Ok(())
 }
 
@@ -887,5 +939,99 @@ mod tests {
             std::fs::read(dir.path().join("leak.bin")).unwrap(),
             b"\xff[REDACTED]"
         );
+    }
+
+    fn report_test_outcome(secret: &str) -> CommandOutcome {
+        CommandOutcome {
+            stdout: format!("stdout {secret}").into_bytes(),
+            stderr: format!("stderr {secret}").into_bytes(),
+            stdout_complete: false,
+            stderr_complete: true,
+            termination: Some(ProcessTermination::Signaled(libc::SIGTERM)),
+            interventions: vec![HarnessIntervention::ForcedKill],
+            cleanup: ProcessGroupCleanup {
+                forced: true,
+                errors: vec![CleanupError {
+                    operation: CleanupOperation::WaitChild,
+                    kind: std::io::ErrorKind::Other,
+                    raw_os_error: None,
+                    message: format!("cleanup {secret}"),
+                }],
+                surviving_pids: vec![41],
+            },
+        }
+    }
+
+    #[test]
+    fn failure_report_preserves_primary_leaks_commands_and_multiple_evidence_errors() {
+        let mut report = FailureReport::new(Some("primary assertion".into()), &[]);
+        report.add_secret_location("z/leak.txt", &[]);
+        report.add_secret_location("a/leak.txt", &[]);
+        report.add_secret_location("a/leak.txt", &[]);
+        report.add_command_diagnostic("command facts", &[]);
+        report.add_evidence_error("first stage", "first failure", &[]);
+        report.add_evidence_error("second stage", "second failure", &[]);
+
+        let report = report.finish().unwrap_err();
+        let text = report.to_string();
+        assert!(text.contains("primary assertion"));
+        assert!(text.contains("a/leak.txt"));
+        assert!(text.contains("z/leak.txt"));
+        assert_eq!(text.matches("a/leak.txt").count(), 1);
+        assert!(text.contains("command facts"));
+        assert!(text.contains("first stage: first failure"));
+        assert!(text.contains("second stage: second failure"));
+        assert_eq!(format!("{report:?}"), text);
+    }
+
+    #[test]
+    fn failure_report_display_is_redacted_and_stably_ordered() {
+        let secret = "failure-report-secret";
+        let mut report = FailureReport::new(Some(format!("primary {secret}")), &[secret]);
+        report.add_secret_location(format!("z-{secret}"), &[secret]);
+        report.add_secret_location(format!("a-{secret}"), &[secret]);
+        report.add_command_diagnostic(format!("command {secret}"), &[secret]);
+        report.add_evidence_error("persist", format!("error {secret}"), &[secret]);
+        let report = report.finish().unwrap_err();
+        let text = report.to_string();
+
+        assert!(!text.contains(secret));
+        assert!(text.contains(REDACTED));
+        let leaks = text.find("secret leaks:").unwrap();
+        let primary = text.find("primary assertion:").unwrap();
+        let commands = text.find("command diagnostics:").unwrap();
+        let evidence = text.find("evidence errors:").unwrap();
+        assert!(leaks < primary && primary < commands && commands < evidence);
+        assert!(text.find("a-[REDACTED]").unwrap() < text.find("z-[REDACTED]").unwrap());
+    }
+
+    #[test]
+    fn capture_from_output_redacts_stdout_stderr_and_shared_command_text() {
+        let secret = "capture-secret";
+        let outcome = report_test_outcome(secret);
+        let artifacts = capture_from_output(
+            PathBuf::from("bundle"),
+            &outcome,
+            format!("lattice --token {secret}"),
+            &[secret],
+        );
+
+        for text in [
+            artifacts.stdout.as_str(),
+            artifacts.stderr.as_str(),
+            artifacts.command_text.as_str(),
+        ] {
+            assert!(!text.contains(secret), "artifact leaked sentinel: {text}");
+        }
+        assert!(
+            artifacts
+                .command_text
+                .contains("lattice --token [REDACTED]")
+        );
+        assert!(artifacts.command_text.contains("outcome: CommandOutcome"));
+        assert!(artifacts.command_text.contains("Signaled(15)"));
+        assert!(artifacts.command_text.contains("stdout_complete: false"));
+        assert!(artifacts.command_text.contains("surviving_pids: [41]"));
+        assert!(artifacts.command_text.contains("cleanup [REDACTED]"));
     }
 }

@@ -6,7 +6,8 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 use crate::artifacts::{
-    capture_from_output, scan_artifacts_for_secrets, write_failure_artifacts, write_world_context,
+    FailureReport, capture_from_output, render_command_text, scan_artifacts_for_secrets,
+    write_failure_artifacts, write_world_context,
 };
 use crate::driver::CommandOutcome;
 use crate::world::ScenarioWorld;
@@ -45,10 +46,12 @@ pub enum AssertError {
     StdoutMissing { expected: String },
     #[error("stderr missing expected substring: {expected}")]
     StderrMissing { expected: String },
-    #[error("output contained forbidden secret sentinel: {0}")]
-    SecretLeak(String),
+    #[error("output contained forbidden secret sentinel at {location}")]
+    SecretLeak { location: String },
     #[error("failed to write failure artifacts: {0}")]
     ArtifactIo(#[from] std::io::Error),
+    #[error(transparent)]
+    FailureReport(FailureReport),
 }
 
 pub fn assert_exit_success(output: &CommandOutcome) -> Result<(), AssertError> {
@@ -134,25 +137,110 @@ pub fn assert_stderr_contains(output: &CommandOutcome, needle: &str) -> Result<(
 }
 
 pub fn assert_no_secret(output: &CommandOutcome, secret: &str) -> Result<(), AssertError> {
-    let combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    if combined.contains(secret) {
-        Err(AssertError::SecretLeak(secret.into()))
+    if !secret.is_empty()
+        && (String::from_utf8_lossy(&output.stdout).contains(secret)
+            || String::from_utf8_lossy(&output.stderr).contains(secret))
+    {
+        Err(AssertError::SecretLeak {
+            location: "command stdout/stderr".into(),
+        })
     } else {
         Ok(())
     }
 }
 
-/// On assertion failure, write redacted stdout/stderr plus a scenario-world
-/// context file to a **persistent** directory so the bundle survives test
-/// teardown. The previous implementation wrote under `world.root()`, which is a
-/// `tempfile::TempDir` deleted the instant the world drops — so a failed
-/// scenario left nothing to inspect. The bundle now lands under
-/// `$LATTICE_HARNESS_FAILURE_DIR/<scenario_name>/` (default
-/// `target/harness-failures/<scenario_name>/`).
+/// Finalize one fast-path assertion without letting artifact failures replace it.
+pub fn finalize_with_failure_artifacts(
+    world: &ScenarioWorld,
+    scenario_name: &str,
+    command_summary: &str,
+    output: &CommandOutcome,
+    secrets: &[&str],
+    result: Result<(), AssertError>,
+) -> Result<(), FailureReport> {
+    let primary_assertion = result.err().map(|error| error.to_string());
+    let failed = primary_assertion.is_some();
+    let mut report = FailureReport::new(primary_assertion, secrets);
+    report.add_command_diagnostic(
+        render_command_text(command_summary, output, secrets),
+        secrets,
+    );
+
+    let dir = failure_dir(scenario_name);
+    if dir.exists()
+        && let Err(error) = std::fs::remove_dir_all(&dir)
+    {
+        report.add_evidence_error("clean stale artifact bundle", error, secrets);
+        return report.finish();
+    }
+    if !failed {
+        return report.finish();
+    }
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        report.add_evidence_error("create artifact root", error, secrets);
+        return report.finish();
+    }
+
+    let artifacts = capture_from_output(dir, output, command_summary, secrets);
+    persist_fast_failure_bundle(
+        world,
+        scenario_name,
+        command_summary,
+        &artifacts,
+        secrets,
+        &mut report,
+    );
+    report.finish()
+}
+
+fn persist_fast_failure_bundle(
+    world: &ScenarioWorld,
+    scenario_name: &str,
+    command_summary: &str,
+    artifacts: &crate::artifacts::FailureArtifacts,
+    secrets: &[&str],
+    report: &mut FailureReport,
+) {
+    if let Err(error) = write_failure_artifacts(artifacts) {
+        report.add_evidence_error("write failure artifacts", error, secrets);
+        return;
+    }
+    if let Err(error) = write_world_context(
+        &artifacts.dir,
+        world,
+        scenario_name,
+        command_summary,
+        secrets,
+    ) {
+        report.add_evidence_error("write world.txt", error, secrets);
+        return;
+    }
+    match scan_artifacts_for_secrets(&artifacts.dir, secrets) {
+        Err(error) => report.add_evidence_error("secret scan", error, secrets),
+        Ok(leaked) => {
+            let locations: Vec<String> = leaked
+                .iter()
+                .map(|path| {
+                    path.file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "<artifact>".into())
+                })
+                .collect();
+            for location in &locations {
+                report.add_secret_location(location, secrets);
+            }
+            if !locations.is_empty()
+                && let Err(error) = std::fs::write(
+                    artifacts.dir.join("sentinel_scan.txt"),
+                    format!("post-write sentinel scan redacted: {locations:?}\n"),
+                )
+            {
+                report.add_evidence_error("write sentinel_scan.txt", error, secrets);
+            }
+        }
+    }
+}
+
 pub fn assert_with_failure_artifacts(
     world: &ScenarioWorld,
     scenario_name: &str,
@@ -161,51 +249,15 @@ pub fn assert_with_failure_artifacts(
     secrets: &[&str],
     result: Result<(), AssertError>,
 ) -> Result<(), AssertError> {
-    let dir = failure_dir(scenario_name);
-    if result.is_ok() {
-        if dir.exists() {
-            std::fs::remove_dir_all(dir)?;
-        }
-        return Ok(());
-    }
-    if let Err(err) = result {
-        let artifacts = capture_from_output(dir.clone(), output, command_summary, secrets);
-        write_failure_artifacts(&artifacts)?;
-        // Persist the scenario-world context so the post-mortem can reproduce
-        // the isolated HOME/project/port/env the binary ran under. Env values
-        // are redacted via `write_world_context` (secret-name vars masked
-        // entirely; others substring-redacted against `secrets`) so a
-        // secret-bearing env var set via `ScenarioWorld::set_env` cannot leak
-        // into the artifact.
-        write_world_context(
-            &dir,
-            world,
-            scenario_name,
-            &artifacts.command_summary,
-            secrets,
-        )?;
-        // RFC #41 (Codeberg #19) decision eight: redact before writing (done
-        // above), then
-        // scan after writing as defense-in-depth. Any leaked file is
-        // best-effort redacted in place by `scan_artifacts_for_secrets` and
-        // recorded in `sentinel_scan.txt` so the operator can see the
-        // pre-write redaction missed it. The scan never masks the original
-        // assertion error: we still return `err` below.
-        let leaked = scan_artifacts_for_secrets(&dir, secrets)
-            .map_err(|error| AssertError::ArtifactIo(std::io::Error::other(error)))?;
-        if !leaked.is_empty() {
-            let _ = std::fs::write(
-                dir.join("sentinel_scan.txt"),
-                format!(
-                    "post-write sentinel scan redacted {} file(s): {leaked:?}\n",
-                    leaked.len()
-                ),
-            );
-            return Err(AssertError::SecretLeak(format!("{leaked:?}")));
-        }
-        return Err(err);
-    }
-    Ok(())
+    finalize_with_failure_artifacts(
+        world,
+        scenario_name,
+        command_summary,
+        output,
+        secrets,
+        result,
+    )
+    .map_err(AssertError::FailureReport)
 }
 
 #[cfg(test)]
@@ -326,5 +378,24 @@ mod tests {
                 "accepted contaminated outcome: {value:?}"
             );
         }
+    }
+
+    #[test]
+    fn assert_no_secret_reports_location_without_storing_secret() {
+        let secret = "assert-secret-value";
+        let mut value = outcome(ProcessTermination::Exited(0));
+        value.stdout = format!("leaked {secret}").into_bytes();
+
+        let error = assert_no_secret(&value, secret).unwrap_err();
+        assert!(matches!(
+            error,
+            AssertError::SecretLeak { ref location }
+                if location == "command stdout/stderr"
+        ));
+        let display = error.to_string();
+        let debug = format!("{error:?}");
+        assert!(!display.contains(secret));
+        assert!(!debug.contains(secret));
+        assert!(display.contains("command stdout/stderr"));
     }
 }
