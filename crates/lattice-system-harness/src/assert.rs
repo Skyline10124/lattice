@@ -221,6 +221,8 @@ mod tests {
         CommandOutcome {
             stdout: Vec::new(),
             stderr: Vec::new(),
+            stdout_complete: true,
+            stderr_complete: true,
             termination: Some(termination),
             interventions: Vec::new(),
             cleanup: ProcessGroupCleanup::default(),

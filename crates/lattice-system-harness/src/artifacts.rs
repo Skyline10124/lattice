@@ -791,6 +791,8 @@ mod tests {
         let outcome = CommandOutcome {
             stdout: b"partial stdout".to_vec(),
             stderr: b"partial stderr".to_vec(),
+            stdout_complete: true,
+            stderr_complete: true,
             termination: Some(ProcessTermination::Signaled(libc::SIGTERM)),
             interventions: vec![
                 HarnessIntervention::InterruptRequested,
@@ -842,6 +844,8 @@ mod tests {
         let outcome = CommandOutcome {
             stdout: secret.as_bytes().to_vec(),
             stderr: secret.as_bytes().to_vec(),
+            stdout_complete: true,
+            stderr_complete: true,
             termination: Some(ProcessTermination::Exited(1)),
             interventions: Vec::new(),
             cleanup: ProcessGroupCleanup::default(),
