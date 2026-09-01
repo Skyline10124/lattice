@@ -77,6 +77,7 @@
   and combines artifact/evidence errors without replacing the primary assertion.
   Do not copy raw stdout/stderr into the summary or create a third outcome model.
 
+
 ### M-TOOL-01: ADR 0004 build-closed WASM Component Tool runtime — hard cut implemented; identity/Bundle/docs remain — `architecture` / `lancet-runtime`
 - **Location**: `docs/adr/0004-build-closed-wasm-tool-catalog.md`; `crates/lancet-runtime`; Source Tools under `tools/`.
 - **Problem**: PR #178 implements runtime convergence; the pre-#35 descriptor-identity residual remains, while operator Tool Bundle installation/activation and the final architecture-document closeout are separate work.

@@ -75,6 +75,196 @@ rechecks retain the error. Requested `SIGINT` behavior is unchanged.
 **Changed files:** `crates/lattice-system-harness/src/{driver,session_send,assert,artifacts}.rs`,
 `docs/plans/2026-09-01-issue185-command-outcome-followup.md`, `FIX.md`, and `FINDINGS.md`.
 
+## GitHub #186 PR #210 final review wording cleanup — 2026-09-01
+
+**Severity:** LOW（documentation and test-name precision）
+
+**Problem:** The plan claimed that no lifecycle assertion used `thread::sleep`, although the deadline
+owner regression uses a bounded sleep to place process wait after the spawn deadline. The fixture
+failure test also said `first` despite constructing only one failure.
+
+**Fix:** The plan now limits the no-sleep claim to fake-provider external synchronization and names
+the deadline owner's local timing control. The test is now
+`shutdown_returns_fixture_failure`; its behavior and coverage are unchanged.
+
+**Verification:**
+
+- `cargo test -p lattice-system-harness --lib fake_llm::tests::shutdown_returns_fixture_failure -- --exact` — PASS（1/1）。
+- `cargo fmt --all --check` and `git diff --check` — PASS。
+
+**Changed files:** `crates/lattice-system-harness/src/fake_llm.rs`,
+`docs/plans/2026-09-01-issue186-fake-provider-determinism.md`, and `FIX.md`.
+
+## GitHub #186 PR #210 scope reduction: keep bounded teardown, remove health polling — 2026-09-01
+
+**Severity:** MEDIUM（test-fixture overreach）
+
+**Problem:** The fake provider exposed independent `health()` and `wait_for_failure()` APIs and
+stored every fixture failure in a vector. Their only consumer was a local test that queried the same
+handler I/O error through failure wait, health, and shutdown. This turned a one-shot harness fixture
+into a small service manager and created a false cross-ticket residual for #192/#196/#205.
+
+**Fix:** Removed both polling APIs. `ServerState` now retains only `first_failure`, and every serve,
+handler, spawn, accept, or join failure records only the first diagnostic. The required request wait
+still fails early when a capture is impossible. Bounded `shutdown(timeout)` wakes accept, cancels the
+gate, joins serve/handler threads, and returns the retained fixture failure after teardown. The local
+failure test now asserts only that shutdown returns that error. The `M-GH186-01` residual was removed
+from `FINDINGS.md`; #192/#196/#205 retain only their existing product/assertion scopes.
+
+**Verification:**
+
+- `cargo test -p lattice-system-harness --lib fake_llm::tests -- --nocapture` — PASS（15/15）。
+- `cargo clippy -p lattice-system-harness --all-targets -- -D warnings` — PASS。
+- `cargo fmt --all --check`, debug CLI build, and `cargo xtask harness-boundary` — PASS。
+- The full ordinary harness with the absolute worktree binary — PASS（84 library tests and every
+  ordinary fast, Direct-Local, and PTY target）。
+
+**Changed files:** `crates/lattice-system-harness/src/fake_llm.rs`,
+`docs/plans/2026-09-01-issue186-fake-provider-determinism.md`, `FINDINGS.md`, and `FIX.md`.
+
+## GitHub #186 PR #210 review follow-up: use one command deadline and remove fake HTTP policy — 2026-09-01
+
+**Severity:** HIGH（system-harness timeout false green / test-only protocol overreach）
+
+**Problem:** `LatticeDriver::start` discarded `LatticeCommand.timeout`, while
+`RunningCommand::wait` started a new timer only after provider request/stall handshakes. A nominal
+30-second command could therefore spend up to 60 seconds waiting for a request and then receive a
+fresh process-wait budget. The fake provider also tried to reject `Connection: keep-alive` and
+pipelining with one immediate nonblocking `peek`; delayed extra bytes were accepted, so the claimed
+contract was timing-dependent. Two owner tests additionally imposed unowned sub-second performance
+thresholds.
+
+**Fix:** `RunningCommand` now records process-spawn time and the `LatticeCommand` timeout supplied by
+`LatticeDriver::start`. Intermediate provider request, stall, and release waits cap themselves to
+`remaining_timeout`, and `wait_spawned` consumes the stored absolute deadline instead of creating a
+new timeout. The regression `timeout_includes_time_before_wait` holds a child past its spawn deadline
+and proves that work released afterward cannot run; it uses an observable child action rather than a
+wall-clock threshold.
+
+GitHub #186 now defines the smallest real fixture contract. The parser validates one bounded
+`POST /chat/completions HTTP/1.1` request, rejects unsupported transfer framing and routes, sends one
+`Connection: close` response, and closes the socket. It no longer interprets `Connection`, peeks for
+future pipelined bytes, or tests either behavior. The unrelated `< 1s` assertions were deleted.
+Server-health consumption by product-failure scenarios remains assigned to #192/#196/#205.
+
+**Verification:**
+
+- The new deadline regression failed before the fix because `after-deadline` reached stdout, then
+  passed after the timer moved to process spawn.
+- `cargo test -p lattice-system-harness --lib driver::tests::timeout_includes_time_before_wait --
+  --exact --nocapture` — PASS（1/1）。
+- `cargo test -p lattice-system-harness --lib fake_llm::tests -- --nocapture` — PASS（15/15）。
+- `LATTICE_BIN="$PWD/target/debug/lattice" cargo test -p lattice-system-harness --test
+  direct_failures` — PASS（8/8）。
+- The exact concurrent mutation witness — PASS（1/1）。
+- `cargo fmt --all --check`, harness all-target Clippy with `-D warnings`, all-features `--no-run`,
+  and `cargo xtask harness-boundary` — PASS。
+- The full ordinary harness with the absolute worktree binary — PASS（84 library tests and every
+  ordinary fast, Direct-Local, and PTY target）。
+
+**Changed files:** `crates/lattice-system-harness/src/{driver,fake_llm,session_send}.rs`,
+`crates/lattice-system-harness/tests/{direct_failures,direct_mutation}.rs`,
+`docs/plans/2026-09-01-issue186-fake-provider-determinism.md`, and `FIX.md`.
+
+## GitHub #186 PR #210 review follow-up: remove port-reuse flake and close wire gaps — 2026-09-01
+
+**Severity:** MEDIUM（system-harness flake / raw-wire regression gap）
+
+**Problem:** PR #210's shutdown regression immediately rebound the server's former ephemeral TCP
+address. Under the ordinary parallel harness, Linux returned `EADDRINUSE` even though bounded
+shutdown had completed, so the test failed 1/83 from OS port-reuse state rather than fake-provider
+state. The existing raw request-line matrix also omitted non-ASCII and control bytes, and no client
+declared a longer `Content-Length`, sent a short body, half-closed its write side, and pinned the
+incomplete-body rejection bytes.
+
+**Fix:** Deleted the TCP rebind assertion. The existing lifecycle test now checks the server's
+ABA-free terminal state directly: its listener and serve handle are removed, the serve loop has
+published exit, the active handler count is zero, all handler handles were joined and drained, and
+no thread failure was stored. No sleep or new lifecycle API was added.
+
+The existing request-line table now sends non-ASCII and control separators as raw bytes and checks
+the fixed ASCII rejection response byte-for-byte, without UTF-8 replacement. The existing bounded
+`Content-Length` test now declares four bytes, writes two, half-closes `Shutdown::Write`, and checks
+the complete CRLF response, exact `Content-Length: 24`, and bounded completion. No new test matrix
+or helper abstraction was added.
+
+**Verification:**
+
+- Before repair, the ordinary full harness reproduced the review failure exactly: 82 passed and
+  `gated_response_waits_for_release_and_shutdown_joins_handlers` failed with `EADDRINUSE`.
+- `cargo test -p lattice-system-harness --lib fake_llm::tests -- --nocapture` — PASS（15/15）。
+- Exact request-line, short-body, and shutdown owner tests — PASS（50/50 each）。
+- Exact concurrent capture/Sequence regression — PASS（50/50）。
+- `cargo test -p lattice-system-harness --all-features --no-run` — PASS。
+- `cargo build -p lattice-cli --bin lattice` — PASS。
+- `LATTICE_BIN="/home/astrin/Dev/lattice-worktrees/issue-186/target/debug/lattice" cargo test -p
+  lattice-system-harness --test direct_failures` — PASS（8/8）。
+- The full ordinary harness with the same absolute branch binary — PASS（2/2 complete runs under
+  default parallel load; each included 83/83 library tests and every ordinary target）。
+- `cargo xtask harness-boundary`, `cargo fmt --all --check`,
+  `cargo clippy -p lattice-system-harness --all-targets -- -D warnings`, and
+  `git diff --check origin/main...HEAD` — PASS。
+
+`FINDINGS.md` remains unchanged because this follow-up leaves no #186-specific residual. GitHub #40
+stays open for maintainer closeout.
+
+**Changed files:** `crates/lattice-system-harness/src/fake_llm.rs` and `FIX.md`.
+
+## GitHub #186: make fake-provider HTTP and Sequence assignment deterministic — 2026-09-01
+
+**Severity:** MEDIUM（system-harness false green / provider race / teardown hang）
+
+**Problem:** The shared localhost fake provider accepted unchecked methods, targets, versions, and
+framing; treated missing or malformed `Content-Length` as an empty body; allocated any declared
+body size; and converted invalid request bytes with lossy UTF-8. HTTP error literals mixed
+indentation with line endings and counted characters rather than sent bytes. Capture publication
+and `Sequence` script assignment used separate locks on opposite sides of a response gate, so
+concurrent handlers could swap the scripted response associated with capture order. Teardown
+polled with sleeps, swallowed thread failures, and exposed no bounded stall, release, or shutdown
+acknowledgement.
+
+**Fix:** Kept the fixture deliberately narrow and dependency-free. Its byte parser now accepts one
+`POST /chat/completions HTTP/1.1` request per connection with exact `Host`,
+`Content-Type: application/json`, and single decimal `Content-Length` rules. It caps headers at
+16,384 bytes and the body at 1,048,576 bytes before unbounded growth or body allocation, rejects
+unsupported transfer encoding, persistence, pipelining, routes, malformed CRLF, and invalid UTF-8,
+and emits fixed byte-exact rejection responses. Scripted HTTP errors use the same CRLF response
+writer and byte-counted length. One shared lock now assigns the next `Sequence` entry and appends
+the corresponding capture as one transaction.
+
+`wait_for_requests`, `wait_until_stalled`, bounded release acknowledgement, explicit bounded
+shutdown, health, and failure waits now use condition variables. Shutdown wakes blocking `accept`
+with a loopback connection, cancels stalled handlers, waits only to the caller's deadline, and
+retains serve/handler errors for assertions. The exact product tests
+`direct_failure_sigint_while_stalled_commits_cancelled`,
+`direct_failure_session_lock_serializes_same_session_turns`, and
+`direct_mutation_concurrent_same_target_create_has_one_winner` replaced only synchronization
+sleeps or ignored waits with these handshakes. Their existing exit, #185 outcome, event,
+cleanup, persistence, and workspace assertions remain unchanged, so the replacement is an
+assertion superset. #192 still owns combined assertion, leak, evidence, and cleanup failures.
+
+**Verification:**
+
+- `cargo test -p lattice-system-harness --lib fake_llm::tests -- --nocapture` — PASS（15 named
+  tests, including protocol, oversize, exact error bytes, lifecycle, thread failure, and
+  capture/Sequence pairing）。
+- Exact concurrent capture/Sequence regression — PASS（50/50 consecutive runs）。
+- `cargo test -p lattice-system-harness --all-features --no-run` — PASS（all targets compiled）。
+- `cargo build -p lattice-cli --bin lattice` — PASS。
+- `LATTICE_BIN="/home/astrin/Dev/lattice-worktrees/issue-186/target/debug/lattice" cargo test -p
+  lattice-system-harness --test direct_failures` — PASS（8/8）。
+- The full harness with the same absolute branch binary — PASS（83 library tests and every
+  ordinary fast, Direct-Local, and PTY target）。
+- `cargo xtask harness-boundary`, `cargo fmt --all --check`, and
+  `cargo clippy -p lattice-system-harness --all-targets -- -D warnings` — PASS。
+
+`FINDINGS.md` is unchanged because no #186-specific residual remains. GitHub #40 stays open for
+maintainer closeout.
+
+**Changed files:** `docs/plans/2026-09-01-issue186-fake-provider-determinism.md`,
+`crates/lattice-system-harness/src/fake_llm.rs`,
+`crates/lattice-system-harness/tests/{direct_failures.rs,direct_mutation.rs}`, and `FIX.md`.
+
 ## GitHub #185 PR #209 review: secure diagnostics and bounded cleanup — 2026-09-01
 
 **Severity:** HIGH（secret disclosure / system-harness hang / cleanup false green）
