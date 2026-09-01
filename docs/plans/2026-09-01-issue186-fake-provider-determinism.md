@@ -173,10 +173,10 @@ dependency.
   and handler completion through a condition variable, and joins only after
   completion is published. `Drop` uses one fixed bounded fallback and never an
   unbounded join.
-- Serve-loop errors, handler I/O errors, and caught thread panics are retained
-  in shared state. An immediate health query, bounded failure wait, request
-  wait, and explicit shutdown can surface them. They are not reduced to an
-  `eprintln!` or swallowed join result.
+- Serve-loop errors, handler I/O errors, and caught thread panics retain only
+  the first fixture failure. A request wait returns it when the requested capture
+  becomes impossible; explicit shutdown returns it after bounded teardown. There
+  is no independent health query or failure subscription API.
 - No lifecycle assertion uses `thread::sleep`. Direct SIGINT, deadline, session
   lock, and mutation concurrency callers wait for request or stall readiness
   before interrupt or release.
@@ -218,9 +218,9 @@ that slice.
    observes request arrival and stall readiness, proves no response with a
    nonblocking channel check, uses bounded release acknowledgement, and uses
    explicit bounded shutdown to prove listener release and gate cancellation.
-9. Add `server_thread_failures_are_bounded_and_observable`. A logged server is
-   given an unwritable log target, then the test observes the handler failure
-   through the bounded failure handshake and shutdown result.
+9. Add `shutdown_returns_first_fixture_failure`. A logged server is given an
+   unwritable log target, then bounded shutdown returns the retained handler
+   failure after joining teardown.
 10. Add `timeout_includes_time_before_wait`. A child is held past its absolute
     spawn deadline before `wait` begins; work released after that deadline must
     not run. This pins the shared command budget without a wall-clock threshold.

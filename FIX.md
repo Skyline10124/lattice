@@ -75,6 +75,33 @@ rechecks retain the error. Requested `SIGINT` behavior is unchanged.
 **Changed files:** `crates/lattice-system-harness/src/{driver,session_send,assert,artifacts}.rs`,
 `docs/plans/2026-09-01-issue185-command-outcome-followup.md`, `FIX.md`, and `FINDINGS.md`.
 
+## GitHub #186 PR #210 scope reduction: keep bounded teardown, remove health polling — 2026-09-01
+
+**Severity:** MEDIUM（test-fixture overreach）
+
+**Problem:** The fake provider exposed independent `health()` and `wait_for_failure()` APIs and
+stored every fixture failure in a vector. Their only consumer was a local test that queried the same
+handler I/O error through failure wait, health, and shutdown. This turned a one-shot harness fixture
+into a small service manager and created a false cross-ticket residual for #192/#196/#205.
+
+**Fix:** Removed both polling APIs. `ServerState` now retains only `first_failure`, and every serve,
+handler, spawn, accept, or join failure records only the first diagnostic. The required request wait
+still fails early when a capture is impossible. Bounded `shutdown(timeout)` wakes accept, cancels the
+gate, joins serve/handler threads, and returns the retained fixture failure after teardown. The local
+failure test now asserts only that shutdown returns that error. The `M-GH186-01` residual was removed
+from `FINDINGS.md`; #192/#196/#205 retain only their existing product/assertion scopes.
+
+**Verification:**
+
+- `cargo test -p lattice-system-harness --lib fake_llm::tests -- --nocapture` — PASS（15/15）。
+- `cargo clippy -p lattice-system-harness --all-targets -- -D warnings` — PASS。
+- `cargo fmt --all --check`, debug CLI build, and `cargo xtask harness-boundary` — PASS。
+- The full ordinary harness with the absolute worktree binary — PASS（84 library tests and every
+  ordinary fast, Direct-Local, and PTY target）。
+
+**Changed files:** `crates/lattice-system-harness/src/fake_llm.rs`,
+`docs/plans/2026-09-01-issue186-fake-provider-determinism.md`, `FINDINGS.md`, and `FIX.md`.
+
 ## GitHub #186 PR #210 review follow-up: use one command deadline and remove fake HTTP policy — 2026-09-01
 
 **Severity:** HIGH（system-harness timeout false green / test-only protocol overreach）

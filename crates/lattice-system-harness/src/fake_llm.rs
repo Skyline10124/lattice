@@ -223,7 +223,15 @@ struct ServerState {
     shutdown_requested: bool,
     serve_exited: bool,
     active_handlers: usize,
-    failures: Vec<String>,
+    first_failure: Option<String>,
+}
+
+impl ServerState {
+    fn record_failure(&mut self, failure: impl Into<String>) {
+        if self.first_failure.is_none() {
+            self.first_failure = Some(failure.into());
+        }
+    }
 }
 
 pub struct FakeLlmServer {
@@ -274,7 +282,7 @@ impl FakeLlmServer {
                 shutdown_requested: false,
                 serve_exited: false,
                 active_handlers: 0,
-                failures: Vec::new(),
+                first_failure: None,
             }),
             Condvar::new(),
         ));
@@ -300,7 +308,7 @@ impl FakeLlmServer {
                     let (lock, wake) = &*thread_state;
                     let mut state = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                     if result.is_err() {
-                        state.failures.push("serve thread panicked".into());
+                        state.record_failure("serve thread panicked");
                     }
                     state.serve_exited = true;
                     wake.notify_all();
@@ -332,7 +340,7 @@ impl FakeLlmServer {
         let (lock, wake) = &*self.state;
         let mut state = lock.lock().unwrap();
         while state.requests.len() < count {
-            if let Some(failure) = state.failures.first() {
+            if let Some(failure) = &state.first_failure {
                 return Err(ServeError::ThreadFailure(failure.clone()));
             }
             if state.serve_exited {
@@ -353,37 +361,12 @@ impl FakeLlmServer {
         Ok(())
     }
 
-    pub fn health(&self) -> Result<(), ServeError> {
-        let state = self.state.0.lock().unwrap();
-        match state.failures.first() {
-            Some(failure) => Err(ServeError::ThreadFailure(failure.clone())),
-            None => Ok(()),
-        }
-    }
-
-    pub fn wait_for_failure(&self, timeout: Duration) -> Result<String, ServeError> {
-        let deadline = Instant::now() + timeout;
-        let (lock, wake) = &*self.state;
-        let mut state = lock.lock().unwrap();
-        loop {
-            if let Some(failure) = state.failures.first() {
-                return Ok(failure.clone());
-            }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(timeout_error("fake-provider thread failure", timeout));
-            }
-            let (next, result) = wake.wait_timeout(state, remaining).unwrap();
-            state = next;
-            if result.timed_out() && state.failures.is_empty() {
-                return Err(timeout_error("fake-provider thread failure", timeout));
-            }
-        }
-    }
-
     pub fn shutdown(&mut self, timeout: Duration) -> Result<(), ServeError> {
         if self.listener.is_none() {
-            return self.health();
+            return match self.state.0.lock().unwrap().first_failure.clone() {
+                Some(failure) => Err(ServeError::ThreadFailure(failure)),
+                None => Ok(()),
+            };
         }
         let deadline = Instant::now() + timeout;
         {
@@ -421,8 +404,7 @@ impl FakeLlmServer {
                 .0
                 .lock()
                 .unwrap()
-                .failures
-                .push("serve thread join failed".into());
+                .record_failure("serve thread join failed");
         }
         for handle in self.handlers.lock().unwrap().drain(..) {
             if handle.join().is_err() {
@@ -430,12 +412,14 @@ impl FakeLlmServer {
                     .0
                     .lock()
                     .unwrap()
-                    .failures
-                    .push("handler thread join failed".into());
+                    .record_failure("handler thread join failed");
             }
         }
         self.listener.take();
-        self.health()
+        match self.state.0.lock().unwrap().first_failure.clone() {
+            Some(failure) => Err(ServeError::ThreadFailure(failure)),
+            None => Ok(()),
+        }
     }
 
     fn local_addr(&self) -> std::net::SocketAddr {
@@ -445,8 +429,8 @@ impl FakeLlmServer {
 
 impl Drop for FakeLlmServer {
     fn drop(&mut self) {
-        // Drop cannot return lifecycle errors. The explicit `shutdown` and
-        // health APIs retain them; this fallback only guarantees a bounded wait.
+        // Drop cannot return lifecycle errors. Explicit `shutdown` retains the
+        // first fixture failure; this fallback only guarantees a bounded wait.
         let _ = self.shutdown(Duration::from_secs(3));
     }
 }
@@ -488,8 +472,8 @@ fn serve_loop(
                             lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                         match result {
                             Ok(Ok(())) => {}
-                            Ok(Err(error)) => server.failures.push(error.to_string()),
-                            Err(_) => server.failures.push("handler thread panicked".into()),
+                            Ok(Err(error)) => server.record_failure(error.to_string()),
+                            Err(_) => server.record_failure("handler thread panicked"),
                         }
                         server.active_handlers -= 1;
                         wake.notify_all();
@@ -500,9 +484,7 @@ fn serve_loop(
                         let (lock, wake) = &*state;
                         let mut server = lock.lock().unwrap();
                         server.active_handlers -= 1;
-                        server
-                            .failures
-                            .push(format!("failed to spawn handler thread: {error}"));
+                        server.record_failure(format!("failed to spawn handler thread: {error}"));
                         wake.notify_all();
                     }
                 }
@@ -511,8 +493,7 @@ fn serve_loop(
                 let (lock, wake) = &*state;
                 lock.lock()
                     .unwrap()
-                    .failures
-                    .push(format!("accept failed: {error}"));
+                    .record_failure(format!("accept failed: {error}"));
                 wake.notify_all();
                 break;
             }
@@ -1520,14 +1501,14 @@ mod tests {
         assert!(state.serve_exited, "serve thread did not publish exit");
         assert_eq!(state.active_handlers, 0, "handler remained active");
         assert!(
-            state.failures.is_empty(),
-            "shutdown stored thread failures: {:?}",
-            state.failures
+            state.first_failure.is_none(),
+            "shutdown stored a thread failure: {:?}",
+            state.first_failure
         );
     }
 
     #[test]
-    fn server_thread_failures_are_bounded_and_observable() {
+    fn shutdown_returns_first_fixture_failure() {
         let log_directory = tempfile::tempdir().expect("log directory");
         let mut server =
             FakeLlmServer::start_logged(SseScript::plain("unused"), log_directory.path())
@@ -1541,17 +1522,12 @@ mod tests {
             "failed handler must not send a response"
         );
 
-        let failure = server
-            .wait_for_failure(Duration::from_secs(2))
-            .expect("bounded handler failure");
-        assert!(failure.starts_with("io:"), "unexpected failure: {failure}");
-        assert!(matches!(
-            server.health(),
-            Err(ServeError::ThreadFailure(ref observed)) if observed == &failure
-        ));
-        assert!(matches!(
-            server.shutdown(Duration::from_secs(2)),
-            Err(ServeError::ThreadFailure(ref observed)) if observed == &failure
-        ));
+        let error = server
+            .shutdown(Duration::from_secs(2))
+            .expect_err("shutdown must return the fixture failure");
+        assert!(
+            matches!(error, ServeError::ThreadFailure(ref failure) if failure.starts_with("io:")),
+            "unexpected shutdown error: {error}"
+        );
     }
 }
