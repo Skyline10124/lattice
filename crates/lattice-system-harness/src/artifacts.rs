@@ -1,8 +1,12 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
+use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::fs::{File, OpenOptions};
+use std::os::fd::AsRawFd;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Component, Path, PathBuf};
 
 use thiserror::Error;
 
@@ -10,6 +14,7 @@ use crate::driver::CommandOutcome;
 use crate::world::ScenarioWorld;
 
 const REDACTED: &str = "[REDACTED]";
+const CLAIMS_DIR: &str = ".claims";
 
 /// Redacted failure bundle written when a scenario fails.
 #[derive(Debug, Clone)]
@@ -144,6 +149,10 @@ pub fn redact(text: &str, secrets: &[&str]) -> String {
         }
     }
     out
+}
+
+fn redact_io_error(error: std::io::Error, secrets: &[&str]) -> std::io::Error {
+    std::io::Error::new(error.kind(), redact(&error.to_string(), secrets))
 }
 
 pub(crate) fn render_command_text(
@@ -281,6 +290,10 @@ fn redact_bytes(mut bytes: Vec<u8>, secrets: &[&[u8]]) -> Vec<u8> {
 
 #[derive(Debug, Error)]
 pub enum EvidenceError {
+    #[error("invalid artifact name")]
+    InvalidArtifactName,
+    #[error("artifact target is already claimed")]
+    ArtifactClaimBusy,
     #[error("evidence I/O failed: {0}")]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -289,16 +302,75 @@ pub enum EvidenceError {
     PostWriteSentinel(Vec<PathBuf>),
 }
 
+pub(crate) fn validate_artifact_name(name: &OsStr) -> Result<(), EvidenceError> {
+    let bytes = name.as_bytes();
+    if bytes.is_empty() || bytes.contains(&b'/') || bytes.contains(&0) {
+        return Err(EvidenceError::InvalidArtifactName);
+    }
+    let mut components = Path::new(name).components();
+    let normal = match (components.next(), components.next()) {
+        (Some(Component::Normal(normal)), None) => normal,
+        _ => return Err(EvidenceError::InvalidArtifactName),
+    };
+    if normal == OsStr::new(CLAIMS_DIR) {
+        return Err(EvidenceError::InvalidArtifactName);
+    }
+    Ok(())
+}
+
+pub(crate) struct ArtifactClaim {
+    _file: File,
+}
+
+impl ArtifactClaim {
+    pub(crate) fn acquire(target: &Path) -> Result<Self, EvidenceError> {
+        let name = target
+            .file_name()
+            .ok_or(EvidenceError::InvalidArtifactName)?;
+        validate_artifact_name(name)?;
+        let base = target.parent().ok_or(EvidenceError::InvalidArtifactName)?;
+        let claims_dir = base.join(CLAIMS_DIR);
+        std::fs::create_dir_all(&claims_dir)?;
+        let mut lock_name = OsString::from(name);
+        lock_name.push(".lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(claims_dir.join(lock_name))?;
+        // SAFETY: `file` owns a valid descriptor for the duration of the call and
+        // remains alive in `ArtifactClaim` until the lock should be released.
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                return Err(EvidenceError::ArtifactClaimBusy);
+            }
+            return Err(EvidenceError::Io(error));
+        }
+        Ok(Self { _file: file })
+    }
+}
+
+pub(crate) fn clear_stale_bundle(target: &Path) -> std::io::Result<()> {
+    if target.exists() {
+        std::fs::remove_dir_all(target)?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 struct RecordedCommand {
     summary: String,
     outcome: CommandOutcome,
 }
 
-/// Failure-only scenario recorder. Construction clears stale artifacts so a
-/// passing rerun cannot leave an older failure looking current.
+/// Failure-only scenario recorder. Construction claims the target and clears
+/// stale artifacts so a passing rerun cannot leave an older failure current.
 pub struct ScenarioEvidence {
     failure_dir: PathBuf,
+    _claim: ArtifactClaim,
     project_dir: PathBuf,
     before: WorkspaceSnapshot,
     commands: Vec<RecordedCommand>,
@@ -313,16 +385,24 @@ impl ScenarioEvidence {
         sentinels: impl IntoIterator<Item = String>,
     ) -> Result<Self, EvidenceError> {
         let failure_dir = failure_dir.into();
-        if failure_dir.exists() {
-            std::fs::remove_dir_all(&failure_dir)?;
-        }
+        let sentinels: Vec<String> = sentinels.into_iter().collect();
+        let secrets: Vec<&str> = sentinels.iter().map(String::as_str).collect();
+        let claim = ArtifactClaim::acquire(&failure_dir).map_err(|error| match error {
+            EvidenceError::Io(source) => EvidenceError::Io(redact_io_error(source, &secrets)),
+            other => other,
+        })?;
+        clear_stale_bundle(&failure_dir)
+            .map_err(|error| EvidenceError::Io(redact_io_error(error, &secrets)))?;
+        let before = WorkspaceSnapshot::capture(world.project_dir())
+            .map_err(|error| EvidenceError::Io(redact_io_error(error, &secrets)))?;
         Ok(Self {
             failure_dir,
+            _claim: claim,
             project_dir: world.project_dir().to_path_buf(),
-            before: WorkspaceSnapshot::capture(world.project_dir())?,
+            before,
             commands: Vec::new(),
             captures: Vec::new(),
-            sentinels: sentinels.into_iter().collect(),
+            sentinels,
         })
     }
 
@@ -1033,5 +1113,41 @@ mod tests {
         assert!(artifacts.command_text.contains("stdout_complete: false"));
         assert!(artifacts.command_text.contains("surviving_pids: [41]"));
         assert!(artifacts.command_text.contains("cleanup [REDACTED]"));
+    }
+
+    #[test]
+    fn artifact_name_rejects_non_component_and_reserved_inputs() {
+        for invalid in ["", ".", "..", "a/b", "a/../b", "/tmp/x", ".claims", "a\0b"] {
+            assert!(
+                matches!(
+                    validate_artifact_name(OsStr::new(invalid)),
+                    Err(EvidenceError::InvalidArtifactName)
+                ),
+                "accepted invalid artifact name {invalid:?}"
+            );
+        }
+        validate_artifact_name(OsStr::new("scenario-name")).unwrap();
+    }
+
+    #[test]
+    fn artifact_claim_precedes_cleanup_and_releases_after_drop() {
+        let root = TempDir::new().unwrap();
+        let target = root.path().join("scenario");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("stale.txt"), "stale").unwrap();
+
+        let first = ArtifactClaim::acquire(&target).unwrap();
+        clear_stale_bundle(&target).unwrap();
+        let lock = root.path().join(".claims/scenario.lock");
+        assert!(root.path().join(".claims").is_dir());
+        assert!(lock.is_file());
+        assert!(matches!(
+            ArtifactClaim::acquire(&target),
+            Err(EvidenceError::ArtifactClaimBusy)
+        ));
+        drop(first);
+        let second = ArtifactClaim::acquire(&target).unwrap();
+        assert!(lock.is_file());
+        drop(second);
     }
 }

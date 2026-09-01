@@ -1,12 +1,14 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
+use std::ffi::OsStr;
 use std::path::PathBuf;
 
 use thiserror::Error;
 
 use crate::artifacts::{
-    FailureReport, capture_from_output, render_command_text, scan_artifacts_for_secrets,
+    ArtifactClaim, EvidenceError, FailureReport, capture_from_output, clear_stale_bundle,
+    render_command_text, scan_artifacts_for_secrets, validate_artifact_name,
     write_failure_artifacts, write_world_context,
 };
 use crate::driver::CommandOutcome;
@@ -24,14 +26,16 @@ use crate::world::ScenarioWorld;
 /// collects every scenario's bundle in one place.
 const FAILURE_DIR_ENV: &str = "LATTICE_HARNESS_FAILURE_DIR";
 
-pub fn failure_dir(scenario_name: &str) -> PathBuf {
-    match std::env::var(FAILURE_DIR_ENV) {
-        Ok(base) => PathBuf::from(base).join(scenario_name),
-        Err(_) => PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("harness-failures")
-            .join(scenario_name),
-    }
+pub fn failure_dir(name: &str) -> Result<PathBuf, EvidenceError> {
+    validate_artifact_name(OsStr::new(name))?;
+    let base = std::env::var(FAILURE_DIR_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join("harness-failures")
+        });
+    Ok(base.join(name))
 }
 
 #[derive(Debug, Error)]
@@ -166,10 +170,21 @@ pub fn finalize_with_failure_artifacts(
         secrets,
     );
 
-    let dir = failure_dir(scenario_name);
-    if dir.exists()
-        && let Err(error) = std::fs::remove_dir_all(&dir)
-    {
+    let dir = match failure_dir(scenario_name) {
+        Ok(dir) => dir,
+        Err(error) => {
+            report.add_evidence_error("validate artifact target", error, secrets);
+            return report.finish();
+        }
+    };
+    let _claim = match ArtifactClaim::acquire(&dir) {
+        Ok(claim) => claim,
+        Err(error) => {
+            report.add_evidence_error("claim artifact target", error, secrets);
+            return report.finish();
+        }
+    };
+    if let Err(error) = clear_stale_bundle(&dir) {
         report.add_evidence_error("clean stale artifact bundle", error, secrets);
         return report.finish();
     }

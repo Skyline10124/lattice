@@ -193,15 +193,16 @@ fn direct_secrets_failure_bundle_redacts_sentinels() {
             turn.exit_code == Some(lattice_system_harness::SendExitCode::Failed),
             "turn must exit 1",
         )?;
-        // Force a failure-artifact write by running a deliberately failing
-        // assertion through the evidence helper, then scan the bundle dir.
-        let bundle_dir = failure_dir(&spec.name);
+        // Use a distinct target because the Direct recorder already holds the
+        // scenario claim while this compatibility fast-path bundle is written.
+        let bundle_name = format!("{}-fast", spec.name);
+        let bundle_dir = failure_dir(&bundle_name).expect("valid scenario name");
         let failing = AssertError::StdoutMissing {
             expected: "intentional failure to trigger artifacts".to_string(),
         };
         let write_result = lattice_system_harness::assert_with_failure_artifacts(
             &world,
-            &spec.name,
+            &bundle_name,
             "lattice --json session send",
             &turn.command,
             &[FAKE_API_KEY],

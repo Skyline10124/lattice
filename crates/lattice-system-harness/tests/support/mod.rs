@@ -55,7 +55,8 @@ pub(crate) fn require(condition: bool, expected: impl Into<String>) -> Result<()
 }
 
 pub(crate) fn evidence(world: &ScenarioWorld, spec: &ScenarioSpec) -> ScenarioEvidence {
-    ScenarioEvidence::new(world, failure_dir(&spec.name), [FAKE_API_KEY.to_string()])
+    let failure_dir = failure_dir(&spec.name).expect("valid scenario name");
+    ScenarioEvidence::new(world, failure_dir, [FAKE_API_KEY.to_string()])
         .expect("scenario evidence")
 }
 
