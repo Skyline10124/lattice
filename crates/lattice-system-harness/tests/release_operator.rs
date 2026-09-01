@@ -8,7 +8,6 @@
 mod support;
 
 use std::collections::HashSet;
-use std::process::Output;
 use std::time::Duration;
 
 use lattice_system_harness::{
@@ -21,7 +20,7 @@ use support::{
     tool_call, wire_fake_llm,
 };
 
-fn parse_json(output: &Output) -> Value {
+fn parse_json(output: &CommandOutcome) -> Value {
     let stdout = String::from_utf8_lossy(&output.stdout);
     serde_json::from_str(stdout.trim())
         .unwrap_or_else(|error| panic!("expected JSON output, got {stdout:?}: {error}"))
@@ -124,7 +123,7 @@ fn assert_single_release_case(
         ],
     );
     require(
-        query.status.success(),
+        query.is_clean_exit(0),
         format!(
             "release {expected_method} query failed: {}",
             String::from_utf8_lossy(&query.stderr)
@@ -155,7 +154,7 @@ fn assert_single_release_case(
             tip,
         ],
     );
-    require(pinned.status.success(), "release pinned query failed")?;
+    require(pinned.is_clean_exit(0), "release pinned query failed")?;
     let pinned_json = parse_json(&pinned);
     require(
         pinned_json.get("ledger_oid").and_then(Value::as_str) == Some(tip)
@@ -182,7 +181,7 @@ fn assert_single_release_case(
             "--tail",
         ],
     );
-    require(tail.status.success(), "release tail failed")?;
+    require(tail.is_clean_exit(0), "release tail failed")?;
     let tail_json = parse_json(&tail);
     let transitions = rows(&tail_json);
     require(
@@ -217,7 +216,7 @@ fn assert_single_release_case(
         ],
     );
     require(
-        continuation.status.success(),
+        continuation.is_clean_exit(0),
         "release tail continuation failed",
     )?;
     let continuation_json = parse_json(&continuation);
@@ -241,7 +240,7 @@ fn assert_single_release_case(
             turn_id,
         ],
     );
-    require(replay.status.success(), "release replay failed")?;
+    require(replay.is_clean_exit(0), "release replay failed")?;
     let replay_json = parse_json(&replay);
     let calls = replay_calls(&replay_json);
     require(
@@ -256,7 +255,7 @@ fn assert_single_release_case(
     )?;
 
     let status = cli(world, spec, &["--json", "lancet", "status"]);
-    require(status.status.success(), "release status failed")?;
+    require(status.is_clean_exit(0), "release status failed")?;
     let status_json = parse_json(&status);
     let recent = status_json
         .get("recent_calls")
@@ -425,7 +424,7 @@ fn release_mixed_case() {
             &spec,
             &["--json", "audit", "query", "--session", &session_id],
         );
-        require(query.status.success(), "release mixed query failed")?;
+        require(query.is_clean_exit(0), "release mixed query failed")?;
         let query_json = parse_json(&query);
         let current = rows(&query_json);
         require(
@@ -459,7 +458,7 @@ fn release_mixed_case() {
                 &last_turn_id,
             ],
         );
-        require(replay.status.success(), "release mixed replay failed")?;
+        require(replay.is_clean_exit(0), "release mixed replay failed")?;
         let replay_json = parse_json(&replay);
         require(
             replay_calls(&replay_json)
@@ -471,7 +470,7 @@ fn release_mixed_case() {
         )?;
 
         let status = cli(&world, &spec, &["--json", "lancet", "status"]);
-        require(status.status.success(), "release mixed status failed")?;
+        require(status.is_clean_exit(0), "release mixed status failed")?;
         let status_json = parse_json(&status);
         let recent = status_json
             .get("recent_calls")

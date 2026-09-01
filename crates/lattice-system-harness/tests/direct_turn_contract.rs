@@ -298,7 +298,7 @@ fn direct_turn_completed_reopen_contract() {
         )?;
         let human_log_stdout = String::from_utf8_lossy(&human_log.stdout);
         require(
-            human_log.status.success()
+            human_log.is_clean_exit(0)
                 && human_log_stdout.contains("turn 0")
                 && human_log_stdout.contains("first prompt"),
             format!("human session log omitted committed turn: {human_log_stdout}"),
@@ -341,12 +341,12 @@ fn direct_turn_completed_reopen_contract() {
         )?;
 
         // --- missing session: exit 2 with no JSONL Turn events ---
-        let missing_outcome = parse_send_stdout(&missing.stdout, missing.status.code());
+        let missing_outcome = parse_send_stdout(&missing.stdout, missing.exit_code());
         require(
             missing_outcome.exit_code == Some(SendExitCode::InputError),
             format!(
                 "missing session did not exit 2: code={:?} termination={:?}",
-                missing.status.code(),
+                missing.exit_code(),
                 missing.termination
             ),
         )?;

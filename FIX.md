@@ -2,6 +2,98 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #185 PR #209 review: secure diagnostics and bounded cleanup — 2026-09-01
+
+**Severity:** HIGH（secret disclosure / system-harness hang / cleanup false green）
+
+**Problem:** Independent review found three defects in the first #185 implementation. Failure
+artifacts and assertion/support errors formatted all of `CommandOutcome` with derived `Debug`, so
+stdout/stderr secrets became reversible decimal byte arrays that the plaintext sentinel scan could
+not find. `RunningCommand::finish` joined drain threads before inspecting the process group, which
+let an exited direct child hang the harness while a descendant retained a pipe. Linux `/proc`
+inspection also converted root, directory-entry, stat-read, and stat-parse failures into an empty
+member set, allowing incomplete cleanup evidence to report success.
+
+**Fix:** Added one metadata-only `CommandOutcomeSummary` containing termination, intervention,
+cleanup, and stdout/stderr byte counts. Assertion, artifact, and scenario-support diagnostics use
+that summary, and `CommandOutcome`'s defensive `Debug` delegates to it, so raw output bytes cannot
+enter a diagnostic through a missed `Debug` caller. This does not add #192's combined-failure
+system. Drain readers now use nonblocking Linux pipes with a bounded stop-and-join path. `finish`
+inspects and reconciles the process group before draining; a remaining descendant or incomplete
+inspection records `ForcedKill`, attempts `SIGKILL`, waits for bounded final survivor evidence, and
+then returns the bytes collected so far without detached work. Process inspection now returns typed
+`ReadProc`, `ReadProcEntry`, `ReadStat(pid)`, or `ParseStat(pid)` cleanup errors. Those errors remain
+in `ProcessGroupCleanup`, make `succeeded()` false, and force the cleanup decision closed.
+
+**Verification:**
+
+- The original review probes reproduced before repair: the secret was recoverable from
+  `0-command.txt`, and `timeout 1s ... -- orphan` exited 124. After repair, the orphan probe returns
+  in 26 ms with forced cleanup; the adversarial secret decoder finds no byte array to parse.
+- `cargo test -p lattice-system-harness --lib driver::tests -- --nocapture` — PASS（12 passed）。
+- Descendant-inherits-pipe regression under a two-second external bound — PASS（20/20 runs）。
+- `cargo test -p lattice-system-harness --lib assert::tests -- --nocapture` — PASS（3 passed）。
+- `cargo test -p lattice-system-harness --lib artifacts::tests -- --nocapture` — PASS（18 passed）。
+- `cargo test -p lattice-system-harness --all-features --no-run` — PASS。
+- `cargo build -p lattice-cli --bin lattice` — PASS。
+- `LATTICE_BIN="$(pwd)/target/debug/lattice" cargo test -p lattice-system-harness` — PASS
+  （76 library tests and every ordinary fast, Direct-Local, and PTY target）。
+- `cargo xtask harness-boundary`, `cargo fmt --all --check`, and
+  `cargo clippy -p lattice-system-harness --all-targets -- -D warnings` — PASS。
+
+The unrelated #200 operator timeout test was not deleted, weakened, or retimed. `FINDINGS.md` is
+unchanged because these repairs leave no #185-specific code residual; the required PR check remains
+a publication gate and is rerun after push.
+
+**Changed files:** `crates/lattice-system-harness/src/{driver,assert,artifacts,lib}.rs`,
+`crates/lattice-system-harness/tests/{support/mod.rs,direct_failures.rs,direct_session_isolation.rs,pty_tui_smoke.rs}`,
+and `FIX.md`.
+
+## GitHub #185: preserve command termination and cleanup facts — 2026-09-01
+
+**Severity:** MEDIUM（system-harness false green / process cleanup diagnostics）
+
+**Problem:** `CommandOutcome` used one `Termination` enum to mix the direct child's exit,
+harness intervention, and cleanup. Signals collapsed to `Exited(None)`; an interrupt could hide
+the observed exit; interrupt followed by timeout lost the timeout and forced kill; group-signal,
+direct-child kill/wait errors, and surviving PIDs were discarded. Assertion helpers accepted only
+`std::process::Output`, mapped signals to `-1`, and could not reject a matching exit code
+contaminated by intervention or failed cleanup.
+
+**Fix:** Replaced the old enum in place with one authoritative `CommandOutcome`. It now retains
+stdout/stderr, `ProcessTermination::{Exited, Signaled}`, ordered `HarnessIntervention` facts, and
+`ProcessGroupCleanup` with forced-cleanup state, typed operation errors, and sorted surviving PIDs.
+Timeout after interrupt keeps interrupt, timeout, and forced-kill facts. Exact-exit helpers now
+accept only a matching normal exit with no intervention, forced cleanup, cleanup error, or survivor.
+All harness consumers retain the full outcome; failure evidence records the same model. No generic
+panic inference was added because the product exposes no panic marker.
+
+The existing timeout and interrupt test identities remain. Their prior byte-drain and empty-group
+assertions remain and now also pin concrete termination, interventions, and cleanup. New exit,
+signal, interrupt-timeout, explicit-kill, cleanup-failure, exact-exit, and artifact tests form a
+strict assertion superset; no test was deleted or moved. `FINDINGS.md` was unchanged because this
+fix leaves no issue-specific residual.
+
+**Verification:**
+
+- `cargo test -p lattice-system-harness --lib driver::tests -- --nocapture` — PASS（9 passed）;
+  the same focused driver suite passed 20 consecutive runs.
+- `cargo test -p lattice-system-harness --lib assert::tests -- --nocapture` — PASS（2 passed）。
+- `cargo test -p lattice-system-harness --lib artifacts::tests -- --nocapture` — PASS（17 passed）。
+- `cargo test -p lattice-system-harness --all-features --no-run` — PASS（all targets compiled）。
+- `cargo build -p lattice-cli --bin lattice` — PASS。
+- `LATTICE_BIN="$(pwd)/target/debug/lattice" cargo test -p lattice-system-harness` — PASS
+  （71 library tests plus every ordinary fast, Direct-Local, and PTY target）。
+- `cargo xtask harness-boundary` — PASS。
+- `cargo fmt --all --check` — PASS。
+- `cargo clippy -p lattice-system-harness --all-targets -- -D warnings` — PASS。
+- Retired-interface search found no old `Termination`, `Exited(None)`, or lossy harness
+  `.output`/`.status` consumer. The remaining `std::process::Output` belongs to test-side Git.
+
+**Changed files:** `crates/lattice-system-harness/src/{driver,assert,artifacts,cli,lib,session_send}.rs`,
+`crates/lattice-system-harness/tests/support/mod.rs`, the migrated `direct_*` consumers,
+`fast_{audit,config,env_boundary,session}_cli.rs`, and `release_operator.rs`.
+
 ## GitHub #182 PR #184 review: keep compact TUI copy actionable — 2026-08-31
 
 **Severity:** MEDIUM（status 可用性 / 视觉契约）

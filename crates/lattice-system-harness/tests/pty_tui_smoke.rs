@@ -118,7 +118,7 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
     // Then verify the whole group is gone (no orphaned lattice/fake-LLM children).
     std::thread::sleep(Duration::from_millis(400));
     if let Some(pgid) = pgid {
-        let survivors = processes_in_pgid(pgid);
+        let survivors = processes_in_pgid(pgid).expect("inspect TUI process group");
         assert!(
             survivors.is_empty(),
             "TUI process group {pgid} still has live members after quit+drop: {survivors:?}"

@@ -28,7 +28,9 @@ pub use assert::{
 };
 pub use driver::processes_in_pgid;
 pub use driver::{
-    CommandOutcome, DriverError, LatticeCommand, LatticeDriver, RunningCommand, Termination,
+    CleanupError, CleanupOperation, CommandOutcome, CommandOutcomeSummary, DriverError,
+    HarnessIntervention, LatticeCommand, LatticeDriver, ProcessGroupCleanup,
+    ProcessInspectionOperation, ProcessTermination, RunningCommand,
 };
 pub use fake_llm::{
     CapturedRequest, FAKE_API_KEY, FakeLlmServer, ResponseGate, ServeError, SseScript,

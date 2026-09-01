@@ -15,13 +15,11 @@
 //! These scenarios supersede the crate-internal `session_*` and
 //! `smoke_session_*` unit tests in `lattice-cli` whose behaviour is fully
 //! covered here (see `docs/TEST-TRIAGE.md`).
-use std::process::Output;
-
 use lattice_system_harness::cli::{ok_or_artifacts, run};
 use lattice_system_harness::{
-    AssertError, ScenarioSpec, ScenarioWorld, assert_exit_code, assert_exit_failure,
-    assert_exit_success, assert_no_secret, assert_stderr_contains, assert_stdout_contains,
-    assert_stdout_contains_all, assert_with_failure_artifacts,
+    AssertError, CommandOutcome, ScenarioSpec, ScenarioWorld, assert_exit_code,
+    assert_exit_failure, assert_exit_success, assert_no_secret, assert_stderr_contains,
+    assert_stdout_contains, assert_stdout_contains_all, assert_with_failure_artifacts,
 };
 use serde_json::Value;
 
@@ -68,7 +66,7 @@ fn create_session(world: &ScenarioWorld, spec: &ScenarioSpec) -> String {
 fn assert_session_new_contract(
     world: &ScenarioWorld,
     scenario_name: &str,
-    out: &Output,
+    out: &CommandOutcome,
 ) -> Result<String, AssertError> {
     let parsed = parse_json_or_artifacts(world, scenario_name, "lattice --json session new", out)?;
     let session_id = parsed
@@ -111,7 +109,7 @@ fn parse_json_or_artifacts(
     world: &ScenarioWorld,
     scenario_name: &str,
     summary: &str,
-    out: &Output,
+    out: &CommandOutcome,
 ) -> Result<Value, AssertError> {
     let stdout = String::from_utf8_lossy(&out.stdout);
     serde_json::from_str(stdout.trim()).or_else(|e| {
@@ -161,7 +159,7 @@ fn create_session_on_branch(
     world: &ScenarioWorld,
     spec: &ScenarioSpec,
     branch: &str,
-) -> (String, Value, Output) {
+) -> (String, Value, CommandOutcome) {
     let out = run(world, spec, &session_new_args(branch));
     let parsed = parse_json_or_artifacts(
         world,

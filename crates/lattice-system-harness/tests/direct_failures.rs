@@ -15,8 +15,9 @@ use std::fs;
 use std::time::Duration;
 
 use lattice_system_harness::{
-    AssertError, FAKE_API_KEY, FakeLlmServer, RunningCommand, SendExitCode, SessionSendDriver,
-    SseScript, TurnEventLine, assert_event_subsequence,
+    AssertError, FAKE_API_KEY, FakeLlmServer, HarnessIntervention, ProcessTermination,
+    RunningCommand, SendExitCode, SessionSendDriver, SseScript, TurnEventLine,
+    assert_event_subsequence,
 };
 use serde_json::Value;
 use support::{
@@ -335,11 +336,29 @@ fn direct_failure_sigint_while_stalled_commits_cancelled() {
     let captures = server.captured_requests();
 
     let result: Result<(), AssertError> = (|| {
-        // The harness reports `Interrupted` whenever `interrupt()` was called,
-        // even when the product cooperatively cancelled and exited with code
-        // 1. The coverage signal is the JSONL event chain, not the
-        // termination classification. Signal-kill would emit no events at
-        // all, so the cancel->commit subsequence proves cooperative cancel.
+        require(
+            outcome.command.termination == Some(ProcessTermination::Exited(1)),
+            format!(
+                "cooperative cancellation must preserve exit 1: {}",
+                outcome.command.summary()
+            ),
+        )?;
+        require(
+            outcome.command.interventions == vec![HarnessIntervention::InterruptRequested],
+            format!(
+                "cooperative cancellation must retain only SIGINT: {}",
+                outcome.command.summary()
+            ),
+        )?;
+        require(
+            !outcome.command.cleanup.forced && outcome.command.cleanup.succeeded(),
+            format!(
+                "cooperative cancellation required forced cleanup: {:?}",
+                outcome.command.cleanup
+            ),
+        )?;
+        // The JSONL cancel-to-commit subsequence proves product cooperation;
+        // a signal-killed process would emit no committed cancellation.
         require(
             outcome.malformed_lines.is_empty(),
             "no malformed JSONL on cooperative cancel",

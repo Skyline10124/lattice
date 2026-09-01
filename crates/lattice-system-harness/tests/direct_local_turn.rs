@@ -105,7 +105,7 @@ fn direct_local_plain_text_turn_commits_and_exit_zero() {
             .unwrap_or_default();
         let log_stdout = String::from_utf8_lossy(&log_output.stdout);
         require(
-            log_output.status.success()
+            log_output.is_clean_exit(0)
                 && !commit_id.is_empty()
                 && log_stdout.contains(commit_id)
                 && log_stdout.contains("\"outcome\": {")
