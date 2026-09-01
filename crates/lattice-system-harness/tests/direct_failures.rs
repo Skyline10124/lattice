@@ -326,9 +326,9 @@ fn direct_failure_sigint_while_stalled_commits_cancelled() {
     // stall before delivering SIGINT.
     let mut running: RunningCommand = send.spawn("stall then cancel").expect("spawn send");
     server
-        .wait_for_requests(1, Duration::from_secs(60))
+        .wait_for_requests(1, running.remaining_timeout(Duration::from_secs(60)))
         .expect("provider request before SIGINT");
-    gate.wait_until_stalled(1, Duration::from_secs(2))
+    gate.wait_until_stalled(1, running.remaining_timeout(Duration::from_secs(2)))
         .expect("provider handler stalled before SIGINT");
     running.interrupt().expect("deliver SIGINT");
 
@@ -606,9 +606,9 @@ fn direct_failure_session_lock_serializes_same_session_turns() {
     // Cold start loads five embedded Component Tools after #32; 10s was flaky
     // when this test ran alone without a warm target/debug cache.
     gated_server
-        .wait_for_requests(1, Duration::from_secs(60))
+        .wait_for_requests(1, running_a.remaining_timeout(Duration::from_secs(60)))
         .expect("turn A must reach the gated fake LLM");
-    gate.wait_until_stalled(1, Duration::from_secs(2))
+    gate.wait_until_stalled(1, running_a.remaining_timeout(Duration::from_secs(2)))
         .expect("turn A handler must reach the response gate");
 
     // (3) Retarget world env to a second non-gated fake LLM and start turn B on
@@ -622,7 +622,7 @@ fn direct_failure_session_lock_serializes_same_session_turns() {
     let running_b = send.spawn("racing turn B").expect("spawn B");
     require(
         racer_server
-            .wait_for_requests(1, Duration::from_millis(200))
+            .wait_for_requests(1, running_b.remaining_timeout(Duration::from_millis(200)))
             .is_err(),
         "turn B must wait on the session lock before contacting its provider",
     )
@@ -630,7 +630,7 @@ fn direct_failure_session_lock_serializes_same_session_turns() {
 
     // (4) Release A. It commits first; B then acquires the session lock,
     // snapshots the new head, and commits against that head.
-    gate.release(Duration::from_secs(2))
+    gate.release(running_a.remaining_timeout(Duration::from_secs(2)))
         .expect("turn A left the response gate");
     let stalled = send.wait_spawned(running_a).expect("wait A");
     let racer = send.wait_spawned(running_b).expect("wait B");

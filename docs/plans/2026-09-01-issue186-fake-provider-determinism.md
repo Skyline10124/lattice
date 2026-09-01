@@ -114,10 +114,9 @@ The fixture accepts one request per TCP connection with these exact rules:
 - Exactly one decimal `Content-Length` is required. Empty, signed, non-decimal,
   duplicate, or conflicting values are rejected. Any `Transfer-Encoding` is
   rejected before body allocation.
-- A missing `Connection` header or `Connection: close` is accepted. Any other
-  value, including `keep-alive`, is rejected. The fixture always sends
-  `Connection: close`, serves no second request, and rejects bytes buffered
-  after the declared body as pipelining.
+- `Connection` is not a request policy input. The fixture reads one bounded
+  request, sends one response with `Connection: close`, and closes the socket.
+  It does not inspect future bytes or claim to detect keep-alive or pipelining.
 - Request headers, including the final `\r\n\r\n`, are capped at 16,384 bytes.
   The reader checks the cap before growing the accumulator. The declared body
   is capped at 1,048,576 bytes. The fixture parses and checks the decimal length
@@ -136,8 +135,8 @@ includes `Content-Type`, byte-counted `Content-Length`, and
 `Connection: close`, then sends the stated body once. Scripted `HttpError`
 responses use the same response writer, so a non-ASCII JSON body proves that
 `Content-Length` counts bytes rather than characters. Unsupported method,
-route, version, framing, length, UTF-8, size, persistence, and pipeline cases
-have stable status/body pairs asserted as raw bytes.
+route, version, framing, length, UTF-8, and size cases have stable status/body
+pairs asserted as raw bytes.
 
 This is the whole HTTP contract. There is no chunk decoder, keep-alive loop,
 pipeline queue, route table, HTTP/2 support, or generic request framework.
@@ -181,6 +180,9 @@ dependency.
 - No lifecycle assertion uses `thread::sleep`. Direct SIGINT, deadline, session
   lock, and mutation concurrency callers wait for request or stall readiness
   before interrupt or release.
+- `RunningCommand` measures its per-command timeout from process spawn. Provider
+  request, stall, and release waits cap themselves to the same remaining budget;
+  the final process wait cannot start a fresh timeout.
 
 ## Vertical-slice TDD and red tests
 
@@ -198,8 +200,9 @@ that slice.
    missing, malformed, duplicate, conflicting, and oversize declarations, and
    proves oversize rejection without sending a body.
 4. Add `request_contract_rejects_unsupported_framing_and_invalid_utf8`. It
-   checks chunked transfer, keep-alive, pipelining, bare-LF framing, invalid
-   header bytes, and invalid body UTF-8 through exact raw responses.
+   checks chunked transfer, bare-LF framing, invalid header bytes, and invalid
+   body UTF-8 through exact raw responses. Connection intent and future bytes
+   are intentionally outside the fixture contract.
 5. Add `request_contract_rejects_oversize_headers_before_terminator`. It sends
    a header beyond 16,384 bytes without a terminator and receives a bounded,
    exact rejection.
@@ -218,6 +221,9 @@ that slice.
 9. Add `server_thread_failures_are_bounded_and_observable`. A logged server is
    given an unwritable log target, then the test observes the handler failure
    through the bounded failure handshake and shutdown result.
+10. Add `timeout_includes_time_before_wait`. A child is held past its absolute
+    spawn deadline before `wait` begins; work released after that deadline must
+    not run. This pins the shared command budget without a wall-clock threshold.
 
 After the local owner tests are green, replace the 400 ms synchronization sleep
 in `direct_failure_sigint_while_stalled_commits_cancelled` with
@@ -225,13 +231,16 @@ in `direct_failure_sigint_while_stalled_commits_cancelled` with
 `direct_failure_session_lock_serializes_same_session_turns` and
 `direct_mutation_concurrent_same_target_create_has_one_winner`. Product outcome
 and workspace assertions remain byte-for-byte in place.
+Those handshakes use `RunningCommand::remaining_timeout`, so they consume the
+same command budget established at spawn.
 
 ## Replacement-first and assertion ownership
 
 No existing test is deleted or moved. The eight current `fake_llm` identities
 remain. The valid-server and gated-lifecycle tests gain stricter assertions,
-and the seven new local tests own protocol rejection, bounds, atomic Sequence
-assignment, and thread-failure observability.
+and the seven new fake-provider tests own protocol rejection, bounds, atomic
+Sequence assignment, and thread-failure observability. The driver regression
+owns the spawn-to-wait deadline.
 
 The local tests are the sole owners of fake-provider HTTP and concurrency
 semantics. `direct_failures` continues to own product provider failure, SIGINT,

@@ -75,6 +75,50 @@ rechecks retain the error. Requested `SIGINT` behavior is unchanged.
 **Changed files:** `crates/lattice-system-harness/src/{driver,session_send,assert,artifacts}.rs`,
 `docs/plans/2026-09-01-issue185-command-outcome-followup.md`, `FIX.md`, and `FINDINGS.md`.
 
+## GitHub #186 PR #210 review follow-up: use one command deadline and remove fake HTTP policy — 2026-09-01
+
+**Severity:** HIGH（system-harness timeout false green / test-only protocol overreach）
+
+**Problem:** `LatticeDriver::start` discarded `LatticeCommand.timeout`, while
+`RunningCommand::wait` started a new timer only after provider request/stall handshakes. A nominal
+30-second command could therefore spend up to 60 seconds waiting for a request and then receive a
+fresh process-wait budget. The fake provider also tried to reject `Connection: keep-alive` and
+pipelining with one immediate nonblocking `peek`; delayed extra bytes were accepted, so the claimed
+contract was timing-dependent. Two owner tests additionally imposed unowned sub-second performance
+thresholds.
+
+**Fix:** `RunningCommand` now records process-spawn time and the `LatticeCommand` timeout supplied by
+`LatticeDriver::start`. Intermediate provider request, stall, and release waits cap themselves to
+`remaining_timeout`, and `wait_spawned` consumes the stored absolute deadline instead of creating a
+new timeout. The regression `timeout_includes_time_before_wait` holds a child past its spawn deadline
+and proves that work released afterward cannot run; it uses an observable child action rather than a
+wall-clock threshold.
+
+GitHub #186 now defines the smallest real fixture contract. The parser validates one bounded
+`POST /chat/completions HTTP/1.1` request, rejects unsupported transfer framing and routes, sends one
+`Connection: close` response, and closes the socket. It no longer interprets `Connection`, peeks for
+future pipelined bytes, or tests either behavior. The unrelated `< 1s` assertions were deleted.
+Server-health consumption by product-failure scenarios remains assigned to #192/#196/#205.
+
+**Verification:**
+
+- The new deadline regression failed before the fix because `after-deadline` reached stdout, then
+  passed after the timer moved to process spawn.
+- `cargo test -p lattice-system-harness --lib driver::tests::timeout_includes_time_before_wait --
+  --exact --nocapture` — PASS（1/1）。
+- `cargo test -p lattice-system-harness --lib fake_llm::tests -- --nocapture` — PASS（15/15）。
+- `LATTICE_BIN="$PWD/target/debug/lattice" cargo test -p lattice-system-harness --test
+  direct_failures` — PASS（8/8）。
+- The exact concurrent mutation witness — PASS（1/1）。
+- `cargo fmt --all --check`, harness all-target Clippy with `-D warnings`, all-features `--no-run`,
+  and `cargo xtask harness-boundary` — PASS。
+- The full ordinary harness with the absolute worktree binary — PASS（84 library tests and every
+  ordinary fast, Direct-Local, and PTY target）。
+
+**Changed files:** `crates/lattice-system-harness/src/{driver,fake_llm,session_send}.rs`,
+`crates/lattice-system-harness/tests/{direct_failures,direct_mutation}.rs`,
+`docs/plans/2026-09-01-issue186-fake-provider-determinism.md`, and `FIX.md`.
+
 ## GitHub #186 PR #210 review follow-up: remove port-reuse flake and close wire gaps — 2026-09-01
 
 **Severity:** MEDIUM（system-harness flake / raw-wire regression gap）

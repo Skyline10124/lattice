@@ -687,7 +687,6 @@ fn read_http_request(stream: &mut TcpStream) -> Result<String, RequestReadError>
     let mut content_type: Option<&[u8]> = None;
     let mut content_length: Option<&[u8]> = None;
     let mut transfer_encoding = false;
-    let mut connection: Option<&[u8]> = None;
     for line in lines {
         if line.is_empty() {
             continue;
@@ -719,8 +718,6 @@ fn read_http_request(stream: &mut TcpStream) -> Result<String, RequestReadError>
             }
         } else if name.eq_ignore_ascii_case(b"transfer-encoding") {
             transfer_encoding = true;
-        } else if name.eq_ignore_ascii_case(b"connection") && connection.replace(value).is_some() {
-            return Err(reject("400 Bad Request", b"unsupported connection\n"));
         }
     }
 
@@ -732,9 +729,6 @@ fn read_http_request(stream: &mut TcpStream) -> Result<String, RequestReadError>
     }
     if !content_type.is_some_and(|value| value.eq_ignore_ascii_case(b"application/json")) {
         return Err(reject("400 Bad Request", b"invalid content-type\n"));
-    }
-    if connection.is_some_and(|value| !value.eq_ignore_ascii_case(b"close")) {
-        return Err(reject("400 Bad Request", b"unsupported connection\n"));
     }
     let Some(content_length) = content_length else {
         return Err(reject("411 Length Required", b"content-length required\n"));
@@ -756,18 +750,6 @@ fn read_http_request(stream: &mut TcpStream) -> Result<String, RequestReadError>
             }
             _ => Err(RequestReadError::Io(error)),
         };
-    }
-    stream.set_nonblocking(true)?;
-    let mut extra = [0_u8; 1];
-    let pipeline_result = stream.peek(&mut extra);
-    stream.set_nonblocking(false)?;
-    match pipeline_result {
-        Ok(0) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-        Ok(_) => {
-            return Err(reject("400 Bad Request", b"pipelining not supported\n"));
-        }
-        Err(error) => return Err(RequestReadError::Io(error)),
     }
     String::from_utf8(body).map_err(|_| reject("400 Bad Request", b"invalid utf-8 body\n"))
 }
@@ -1314,9 +1296,7 @@ mod tests {
         ];
 
         for (request, expected) in cases {
-            let started = Instant::now();
             assert_eq!(exchange_raw(server.local_addr(), request), *expected);
-            assert!(started.elapsed() < Duration::from_secs(1));
         }
 
         let mut stream = TcpStream::connect(server.local_addr()).expect("connect");
@@ -1353,14 +1333,6 @@ mod tests {
                 b"HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: 20\r\nConnection: close\r\n\r\nunsupported framing\n",
             ),
             (
-                b"POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: 2\r\n\r\n{}",
-                b"HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: 23\r\nConnection: close\r\n\r\nunsupported connection\n",
-            ),
-            (
-                b"POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}POST /chat/completions HTTP/1.1\r\n",
-                b"HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: 25\r\nConnection: close\r\n\r\npipelining not supported\n",
-            ),
-            (
                 b"POST /chat/completions HTTP/1.1\nHost: localhost\nContent-Type: application/json\nContent-Length: 2\n\n{}",
                 bad_framing,
             ),
@@ -1393,12 +1365,10 @@ mod tests {
         let server = FakeLlmServer::start(SseScript::plain("unused")).expect("server");
         let mut request = b"POST /chat/completions HTTP/1.1\r\nX-Fill: ".to_vec();
         request.extend(std::iter::repeat_n(b'a', MAX_REQUEST_HEADER_BYTES));
-        let started = Instant::now();
         assert_eq!(
             exchange_raw(server.local_addr(), &request),
             b"HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Type: text/plain\r\nContent-Length: 26\r\nConnection: close\r\n\r\nrequest headers too large\n"
         );
-        assert!(started.elapsed() < Duration::from_secs(1));
         assert!(server.captured_requests().is_empty());
     }
 

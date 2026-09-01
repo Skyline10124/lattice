@@ -617,12 +617,26 @@ fn direct_mutation_concurrent_same_target_create_has_one_winner() {
     let running_b = send.spawn("create b").expect("spawn b");
 
     server
-        .wait_for_requests(1, Duration::from_secs(60))
+        .wait_for_requests(
+            1,
+            running_a
+                .remaining_timeout(Duration::from_secs(60))
+                .min(running_b.remaining_timeout(Duration::from_secs(60))),
+        )
         .expect("one create reached the fake provider");
-    gate.wait_until_stalled(1, Duration::from_secs(2))
-        .expect("first create handler reached the response gate");
-    gate.release(Duration::from_secs(2))
-        .expect("first create handler left the response gate");
+    gate.wait_until_stalled(
+        1,
+        running_a
+            .remaining_timeout(Duration::from_secs(2))
+            .min(running_b.remaining_timeout(Duration::from_secs(2))),
+    )
+    .expect("first create handler reached the response gate");
+    gate.release(
+        running_a
+            .remaining_timeout(Duration::from_secs(2))
+            .min(running_b.remaining_timeout(Duration::from_secs(2))),
+    )
+    .expect("first create handler left the response gate");
 
     let a = send.wait_spawned(running_a).expect("wait a");
     let b = send.wait_spawned(running_b).expect("wait b");

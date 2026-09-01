@@ -215,10 +215,20 @@ pub struct RunningCommand {
     stdout: Option<DrainHandle>,
     stderr: Option<DrainHandle>,
     interventions: Vec<HarnessIntervention>,
+    started_at: Instant,
+    timeout: Option<Duration>,
 }
 
 impl RunningCommand {
-    pub fn spawn(mut command: Command) -> std::io::Result<Self> {
+    pub fn spawn(command: Command) -> std::io::Result<Self> {
+        Self::spawn_with_timeout(command, None)
+    }
+
+    fn spawn_with_timeout(
+        mut command: Command,
+        timeout: Option<Duration>,
+    ) -> std::io::Result<Self> {
+        let started_at = Instant::now();
         command.stdin(Stdio::null());
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
@@ -246,11 +256,20 @@ impl RunningCommand {
             stdout,
             stderr,
             interventions: Vec::new(),
+            started_at,
+            timeout,
         })
     }
 
     pub fn pgid(&self) -> u32 {
         self.pgid
+    }
+
+    /// Remaining command time, capped for one intermediate handshake.
+    pub fn remaining_timeout(&self, cap: Duration) -> Duration {
+        self.timeout
+            .map(|limit| limit.saturating_sub(self.started_at.elapsed()).min(cap))
+            .unwrap_or(cap)
     }
 
     /// Deliver a controlled interrupt to the whole process group.
@@ -283,13 +302,13 @@ impl RunningCommand {
     /// Wait for completion while retaining all bytes drained before cleanup.
     /// Timeout and interrupt are outcomes, not I/O errors.
     pub fn wait(mut self, timeout: Option<Duration>) -> Result<CommandOutcome, DriverError> {
-        let start = Instant::now();
+        let limit = self.timeout.or(timeout);
         loop {
             if let Some(status) = self.child.as_mut().expect("running child").try_wait()? {
                 return self.finish(Some(status), ProcessGroupCleanup::default());
             }
-            if let Some(limit) = timeout
-                && start.elapsed() >= limit
+            if let Some(limit) = limit
+                && self.started_at.elapsed() >= limit
             {
                 self.interventions
                     .push(HarnessIntervention::TimedOut(limit));
@@ -388,7 +407,7 @@ impl LatticeDriver {
     ) -> Result<RunningCommand, DriverError> {
         let mut cmd = world.command(&self.binary);
         cmd.args(&command.args);
-        Ok(RunningCommand::spawn(cmd)?)
+        Ok(RunningCommand::spawn_with_timeout(cmd, command.timeout)?)
     }
 
     pub fn run(
@@ -396,7 +415,7 @@ impl LatticeDriver {
         world: &ScenarioWorld,
         command: &LatticeCommand,
     ) -> Result<CommandOutcome, DriverError> {
-        self.start(world, command)?.wait(command.timeout)
+        self.start(world, command)?.wait(None)
     }
 
     pub fn help(
@@ -742,6 +761,46 @@ mod tests {
         assert_eq!(outcome.signal(), Some(libc::SIGTERM));
         assert!(outcome.interventions.is_empty());
         assert_eq!(outcome.cleanup, ProcessGroupCleanup::default());
+    }
+
+    #[test]
+    fn timeout_includes_time_before_wait() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ready = dir.path().join("ready");
+        let trigger = dir.path().join("trigger");
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(format!(
+            "touch '{}'; while [ ! -e '{}' ]; do sleep 0.01; done; printf after-deadline; sleep 30",
+            ready.display(),
+            trigger.display()
+        ));
+        let running = RunningCommand::spawn_with_timeout(cmd, Some(Duration::from_millis(500)))
+            .expect("spawn");
+        let ready_deadline = Instant::now() + Duration::from_secs(2);
+        while !ready.exists() && Instant::now() < ready_deadline {
+            std::thread::yield_now();
+        }
+        assert!(ready.exists(), "child never reached ready state");
+        std::thread::sleep(Duration::from_millis(550));
+
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            std::fs::write(trigger, b"release").expect("release child");
+        });
+        let outcome = running.wait(None).expect("timeout outcome");
+        release.join().expect("release thread");
+
+        assert_eq!(
+            outcome.interventions,
+            vec![
+                HarnessIntervention::TimedOut(Duration::from_millis(500)),
+                HarnessIntervention::ForcedKill,
+            ]
+        );
+        assert_eq!(
+            outcome.stdout, b"",
+            "the timeout restarted at wait(), allowing output after the spawn deadline"
+        );
     }
 
     #[test]

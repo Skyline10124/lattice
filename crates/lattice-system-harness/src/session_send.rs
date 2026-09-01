@@ -633,7 +633,7 @@ impl<'a> SessionSendDriver<'a> {
     /// Wait for a previously [`spawn`](Self::spawn)ed send and parse its
     /// JSONL the same way [`send`](Self::send) does.
     pub fn wait_spawned(&self, running: RunningCommand) -> Result<SendExecution, DriverError> {
-        let command = running.wait(Some(self.budget.cap_timeout(self.spec.step_timeout())))?;
+        let command = running.wait(None)?;
         let parsed = parse_send_stdout(&command.stdout, command.exit_code());
         Ok(SendExecution { command, parsed })
     }

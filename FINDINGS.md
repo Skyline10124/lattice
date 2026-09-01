@@ -77,6 +77,24 @@
   and combines artifact/evidence errors without replacing the primary assertion.
   Do not copy raw stdout/stderr into the summary or create a third outcome model.
 
+### M-GH186-01: fake-provider thread failures are observable but not yet part of every external verdict — DEFERRED — `test-hygiene` / `lattice-system-harness` / GitHub #192/#196/#205
+
+- **Location**: `crates/lattice-system-harness/src/fake_llm.rs`
+  (`FakeLlmServer::{health,shutdown}` and `Drop`); provider-backed tests under
+  `crates/lattice-system-harness/tests/`.
+- **Problem**: #186 made serve/handler failures queryable and added bounded owner
+  tests, but ordinary external scenarios still rely on `Drop`, which cannot return
+  and therefore discards the fallback `shutdown` error. A scenario that expects a
+  provider failure could pass its product assertion while omitting a simultaneous
+  fake-provider infrastructure failure from the final verdict.
+- **Current status**: DEFERRED, not a #186 blocker. The revised #186 contract owns
+  the minimal fixture and its observable failure API; it does not duplicate the
+  combined-failure contract owned by #192.
+- **Plan**: #196 consumes explicit provider health/shutdown in the provider-failure,
+  SIGINT, and deadline witnesses; #192 combines that infrastructure result without
+  replacing the primary product assertion; #205 removes provider-backed paths that
+  rely only on `Drop`.
+
 ### M-TOOL-01: ADR 0004 build-closed WASM Component Tool runtime — hard cut implemented; identity/Bundle/docs remain — `architecture` / `lancet-runtime`
 - **Location**: `docs/adr/0004-build-closed-wasm-tool-catalog.md`; `crates/lancet-runtime`; Source Tools under `tools/`.
 - **Problem**: PR #178 implements runtime convergence; the pre-#35 descriptor-identity residual remains, while operator Tool Bundle installation/activation and the final architecture-document closeout are separate work.
