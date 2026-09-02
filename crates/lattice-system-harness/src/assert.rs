@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 use crate::artifacts::{
-    capture_from_output, scan_artifacts_for_secrets, write_failure_artifacts, write_world_context,
+    ArtifactClaim, EvidenceError, FailureReport, capture_from_output, checked_failure_dir,
+    clear_stale_bundle, render_command_text, scan_bundle_into_report,
+    write_failure_artifacts_collecting, write_world_context,
 };
 use crate::driver::CommandOutcome;
 use crate::world::ScenarioWorld;
@@ -21,16 +23,8 @@ use crate::world::ScenarioWorld;
 /// without polluting the tree. `cargo xtask ci` redirects this to the
 /// workspace-level `$(pwd)/target/harness-failures` so a full local run
 /// collects every scenario's bundle in one place.
-const FAILURE_DIR_ENV: &str = "LATTICE_HARNESS_FAILURE_DIR";
-
-pub fn failure_dir(scenario_name: &str) -> PathBuf {
-    match std::env::var(FAILURE_DIR_ENV) {
-        Ok(base) => PathBuf::from(base).join(scenario_name),
-        Err(_) => PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("harness-failures")
-            .join(scenario_name),
-    }
+pub fn failure_dir(name: &str) -> Result<PathBuf, EvidenceError> {
+    checked_failure_dir(name)
 }
 
 #[derive(Debug, Error)]
@@ -45,10 +39,10 @@ pub enum AssertError {
     StdoutMissing { expected: String },
     #[error("stderr missing expected substring: {expected}")]
     StderrMissing { expected: String },
-    #[error("output contained forbidden secret sentinel: {0}")]
-    SecretLeak(String),
-    #[error("failed to write failure artifacts: {0}")]
-    ArtifactIo(#[from] std::io::Error),
+    #[error("output contained forbidden secret sentinel at {location}")]
+    SecretLeak { location: String },
+    #[error(transparent)]
+    FailureReport(FailureReport),
 }
 
 pub fn assert_exit_success(output: &CommandOutcome) -> Result<(), AssertError> {
@@ -134,25 +128,115 @@ pub fn assert_stderr_contains(output: &CommandOutcome, needle: &str) -> Result<(
 }
 
 pub fn assert_no_secret(output: &CommandOutcome, secret: &str) -> Result<(), AssertError> {
-    let combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    if combined.contains(secret) {
-        Err(AssertError::SecretLeak(secret.into()))
+    if !secret.is_empty()
+        && (String::from_utf8_lossy(&output.stdout).contains(secret)
+            || String::from_utf8_lossy(&output.stderr).contains(secret))
+    {
+        Err(AssertError::SecretLeak {
+            location: "command stdout/stderr".into(),
+        })
     } else {
         Ok(())
     }
 }
 
-/// On assertion failure, write redacted stdout/stderr plus a scenario-world
-/// context file to a **persistent** directory so the bundle survives test
-/// teardown. The previous implementation wrote under `world.root()`, which is a
-/// `tempfile::TempDir` deleted the instant the world drops — so a failed
-/// scenario left nothing to inspect. The bundle now lands under
-/// `$LATTICE_HARNESS_FAILURE_DIR/<scenario_name>/` (default
-/// `target/harness-failures/<scenario_name>/`).
+/// Finalize one fast-path assertion without letting artifact failures replace it.
+pub fn finalize_with_failure_artifacts(
+    world: &ScenarioWorld,
+    scenario_name: &str,
+    command_summary: &str,
+    output: &CommandOutcome,
+    secrets: &[&str],
+    result: Result<(), AssertError>,
+) -> Result<(), FailureReport> {
+    let target = failure_dir(scenario_name);
+    finalize_with_failure_artifacts_at_target(
+        world,
+        scenario_name,
+        command_summary,
+        output,
+        secrets,
+        result,
+        target,
+    )
+}
+
+fn finalize_with_failure_artifacts_at_target(
+    world: &ScenarioWorld,
+    scenario_name: &str,
+    command_summary: &str,
+    output: &CommandOutcome,
+    secrets: &[&str],
+    result: Result<(), AssertError>,
+    target: Result<PathBuf, EvidenceError>,
+) -> Result<(), FailureReport> {
+    let primary_assertion = result.err().map(|error| error.to_string());
+    let failed = primary_assertion.is_some();
+    let mut report = FailureReport::new(primary_assertion, secrets);
+    report.add_command_diagnostic(
+        render_command_text(command_summary, output, secrets),
+        secrets,
+    );
+
+    let dir = match target {
+        Ok(dir) => dir,
+        Err(error) => {
+            report.add_evidence_error("validate artifact target", error, secrets);
+            return report.finish();
+        }
+    };
+    let _claim = match ArtifactClaim::acquire(&dir) {
+        Ok(claim) => claim,
+        Err(error) => {
+            report.add_evidence_error("claim artifact target", error, secrets);
+            return report.finish();
+        }
+    };
+    if let Err(error) = clear_stale_bundle(&dir) {
+        report.add_evidence_error("clean stale artifact bundle", error, secrets);
+        return report.finish();
+    }
+    if !failed {
+        return report.finish();
+    }
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        report.add_evidence_error("create artifact root", error, secrets);
+        return report.finish();
+    }
+
+    let artifacts = capture_from_output(dir, output, command_summary, secrets);
+    persist_fast_failure_bundle(
+        world,
+        scenario_name,
+        command_summary,
+        &artifacts,
+        secrets,
+        &mut report,
+    );
+    report.finish()
+}
+
+fn persist_fast_failure_bundle(
+    world: &ScenarioWorld,
+    scenario_name: &str,
+    command_summary: &str,
+    artifacts: &crate::artifacts::FailureArtifacts,
+    secrets: &[&str],
+    report: &mut FailureReport,
+) {
+    write_failure_artifacts_collecting(artifacts, secrets, report);
+    if let Err(error) = write_world_context(
+        &artifacts.dir,
+        world,
+        scenario_name,
+        command_summary,
+        secrets,
+    ) {
+        report.add_evidence_error("write world.txt", error, secrets);
+    }
+    scan_bundle_into_report(&artifacts.dir, secrets, report);
+}
+
 pub fn assert_with_failure_artifacts(
     world: &ScenarioWorld,
     scenario_name: &str,
@@ -161,51 +245,15 @@ pub fn assert_with_failure_artifacts(
     secrets: &[&str],
     result: Result<(), AssertError>,
 ) -> Result<(), AssertError> {
-    let dir = failure_dir(scenario_name);
-    if result.is_ok() {
-        if dir.exists() {
-            std::fs::remove_dir_all(dir)?;
-        }
-        return Ok(());
-    }
-    if let Err(err) = result {
-        let artifacts = capture_from_output(dir.clone(), output, command_summary, secrets);
-        write_failure_artifacts(&artifacts)?;
-        // Persist the scenario-world context so the post-mortem can reproduce
-        // the isolated HOME/project/port/env the binary ran under. Env values
-        // are redacted via `write_world_context` (secret-name vars masked
-        // entirely; others substring-redacted against `secrets`) so a
-        // secret-bearing env var set via `ScenarioWorld::set_env` cannot leak
-        // into the artifact.
-        write_world_context(
-            &dir,
-            world,
-            scenario_name,
-            &artifacts.command_summary,
-            secrets,
-        )?;
-        // RFC #41 (Codeberg #19) decision eight: redact before writing (done
-        // above), then
-        // scan after writing as defense-in-depth. Any leaked file is
-        // best-effort redacted in place by `scan_artifacts_for_secrets` and
-        // recorded in `sentinel_scan.txt` so the operator can see the
-        // pre-write redaction missed it. The scan never masks the original
-        // assertion error: we still return `err` below.
-        let leaked = scan_artifacts_for_secrets(&dir, secrets)
-            .map_err(|error| AssertError::ArtifactIo(std::io::Error::other(error)))?;
-        if !leaked.is_empty() {
-            let _ = std::fs::write(
-                dir.join("sentinel_scan.txt"),
-                format!(
-                    "post-write sentinel scan redacted {} file(s): {leaked:?}\n",
-                    leaked.len()
-                ),
-            );
-            return Err(AssertError::SecretLeak(format!("{leaked:?}")));
-        }
-        return Err(err);
-    }
-    Ok(())
+    finalize_with_failure_artifacts(
+        world,
+        scenario_name,
+        command_summary,
+        output,
+        secrets,
+        result,
+    )
+    .map_err(AssertError::FailureReport)
 }
 
 #[cfg(test)]
@@ -326,5 +374,98 @@ mod tests {
                 "accepted contaminated outcome: {value:?}"
             );
         }
+    }
+
+    #[test]
+    fn assert_no_secret_reports_location_without_storing_secret() {
+        let secret = "assert-secret-value";
+        let mut value = outcome(ProcessTermination::Exited(0));
+        value.stdout = format!("leaked {secret}").into_bytes();
+
+        let error = assert_no_secret(&value, secret).unwrap_err();
+        assert!(matches!(
+            error,
+            AssertError::SecretLeak { ref location }
+                if location == "command stdout/stderr"
+        ));
+        let display = error.to_string();
+        let debug = format!("{error:?}");
+        assert!(!display.contains(secret));
+        assert!(!debug.contains(secret));
+        assert!(display.contains("command stdout/stderr"));
+    }
+
+    #[test]
+    fn fast_failure_report_preserves_primary_two_write_errors_and_scan_results() {
+        let secret = "fast-report-secret";
+        let world = ScenarioWorld::new("fast-report-errors").unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let dir = root.path().join("scenario");
+        let _claim = ArtifactClaim::acquire(&dir).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir(dir.join("stdout.txt")).unwrap();
+        std::fs::create_dir(dir.join("stderr.txt")).unwrap();
+        std::fs::write(dir.join("leak.txt"), format!("leak {secret}")).unwrap();
+        std::os::unix::fs::symlink(dir.join("leak.txt"), dir.join("invalid-link")).unwrap();
+
+        let mut value = outcome(ProcessTermination::Exited(1));
+        value.stdout = format!("stdout {secret}").into_bytes();
+        value.stderr = format!("stderr {secret}").into_bytes();
+        let command_summary = format!("lattice {secret}");
+        let artifacts = capture_from_output(dir, &value, &command_summary, &[secret]);
+        let mut report = FailureReport::new(Some(format!("primary {secret}")), &[secret]);
+        report.add_command_diagnostic(
+            render_command_text(&command_summary, &value, &[secret]),
+            &[secret],
+        );
+
+        persist_fast_failure_bundle(
+            &world,
+            "scenario",
+            &command_summary,
+            &artifacts,
+            &[secret],
+            &mut report,
+        );
+        let report = report.finish().unwrap_err();
+        let text = report.to_string();
+        assert!(!text.contains(secret));
+        assert!(text.contains("primary [REDACTED]"));
+        assert!(text.contains("leak.txt"));
+        assert!(text.contains("invalid-link"));
+        assert!(text.contains("command diagnostics:"));
+        let stdout_error = text.find("write stdout.txt").unwrap();
+        let stderr_error = text.find("write stderr.txt").unwrap();
+        assert!(stdout_error < stderr_error);
+        assert_eq!(
+            std::fs::read_to_string(artifacts.dir.join("leak.txt")).unwrap(),
+            "leak [REDACTED]"
+        );
+    }
+
+    #[test]
+    fn fast_success_clears_stale_bundle_without_writing_new_evidence() {
+        let world = ScenarioWorld::new("fast-success-stale-cleanup").unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let dir = root.path().join("scenario");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("stale.txt"), "stale failure").unwrap();
+        let value = outcome(ProcessTermination::Exited(0));
+
+        finalize_with_failure_artifacts_at_target(
+            &world,
+            "scenario",
+            "lattice --version",
+            &value,
+            &[],
+            Ok(()),
+            Ok(dir.clone()),
+        )
+        .unwrap();
+
+        assert!(!dir.exists());
+        let claims = root.path().join(".claims");
+        assert!(claims.is_dir());
+        assert!(claims.join("scenario.lock").is_file());
     }
 }

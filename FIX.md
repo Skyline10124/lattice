@@ -3,6 +3,89 @@
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
 
+## GitHub #192 PR #212 review: close unchecked artifact write paths — 2026-09-01
+
+**Severity:** HIGH (unchecked destructive test-harness API / stale failure false diagnosis)
+
+**Problem:** Review found that `artifacts::write_failure_artifacts` remained a public raw writer even
+after the new finalizers stopped using it. External harness callers could construct arbitrary bundle
+data, delete an arbitrary target directory, and write without name validation, a claim, redaction, or
+`FailureReport`. `ScenarioEvidence::new` also accepted an arbitrary `PathBuf`; validating only its
+basename did not prove that the target came from the configured failure base. Finally, no owner test
+proved that a successful Fast rerun removes an older same-name failure bundle while preserving the
+`.claims` namespace.
+
+**Fix:** Deleted the zero-call public writer; made `FailureArtifacts` and `capture_from_output`
+crate-private; and removed the dead `AssertError::ArtifactIo`, `EvidenceError::{Scan,
+PostWriteSentinel}`, and `verify_persisted_bundle` surfaces. Public `ScenarioEvidence::new` now accepts
+only a scenario name and resolves it through the same checked failure-base builder as `failure_dir`;
+module tests retain one private `new_at_dir` seam for `TempDir` injection. The Fast finalizer has a
+private target seam, and `fast_success_clears_stale_bundle_without_writing_new_evidence` proves that a
+successful rerun removes the stale scenario bundle without deleting `.claims` or its persistent lock
+file. Crate guidance now records the Direct recorder's construction-to-finish/drop claim lifetime.
+
+**Verification:**
+
+- `scenario_evidence_rejects_arbitrary_target_paths` failed before the constructor fix, then passed.
+- Both new focused owner tests — PASS (2/2).
+- `cargo test -p lattice-system-harness --lib -- --nocapture` — PASS (101/101).
+- `cargo test -p lattice-system-harness --all-features --no-run` — PASS.
+- `cargo clippy -p lattice-system-harness --all-targets -- -D warnings` — PASS.
+- `cargo fmt --all --check`, `cargo xtask harness-boundary`, and the debug CLI build — PASS.
+- `LATTICE_BIN="$PWD/target/debug/lattice" cargo test -p lattice-system-harness --test
+  direct_secrets -- --nocapture` — PASS (2/2).
+- The ordinary harness passed with only the pre-existing
+  `direct_operator_status_bounds_twenty_newest_invocations` timeout owner explicitly skipped; every
+  remaining Fast, Direct-Local, and PTY target passed.
+
+**Changed files:** `crates/lattice-system-harness/src/{artifacts,assert}.rs`,
+`crates/lattice-system-harness/tests/support/mod.rs`,
+`crates/lattice-system-harness/AGENTS.md`,
+`docs/plans/2026-09-01-issue192-failure-artifact-contract.md`, and `FIX.md`.
+
+## GitHub #192: preserve complete, redacted failure reports (2026-09-01)
+
+**Severity:** HIGH (primary assertion loss, incomplete secret evidence, concurrent artifact corruption)
+
+**Problem:** Fast assertions and Direct scenario evidence used separate first-error-wins persistence
+paths. A write, cleanup, scanner error, or post-write secret hit could replace the original
+assertion. The scanner discarded leaks found before a later I/O error, fast `command.txt` omitted
+the existing `CommandOutcomeSummary`, and same-name writers could clean and mix one another's
+bundles. Artifact names were joined without a component check, and failure-only workspace snapshots
+followed symlinked directories.
+
+**Fix:** Added one `FailureReport` that displays sorted safe leak locations, the redacted primary
+assertion, shared metadata-only command diagnostics, and every evidence error in a fixed order.
+Fast and Direct paths now use the same command renderer and collecting writers. The scanner records
+a leak before patching, continues across reachable siblings, and returns all scan errors to the new
+finalizers while the public adapter keeps its first-error signature.
+
+Failure targets now reject empty, absolute, multi-component, dot, NUL, and reserved `.claims`
+names. Each writer takes a Linux nonblocking `flock` on the persistent
+`<base>/.claims/<scenario>.lock` file before stale cleanup and holds it through scanning. Workspace
+snapshots record symlinks as leaves with `symlink_metadata`. The nested compatibility bundle in
+`direct_secrets` uses a distinct target because its Direct recorder already holds the scenario
+claim. `M-GH185-01` was removed after fast `command.txt` gained termination, intervention, cleanup,
+survivor, byte-count, and completeness facts.
+
+**Verification:**
+
+- Assertion and artifact unit suites: PASS (5/5 and 29/29).
+- `cargo test -p lattice-system-harness --all-features --no-run`: PASS.
+- `cargo fmt --all --check`: PASS.
+- `cargo clippy -p lattice-system-harness --all-targets -- -D warnings`: PASS.
+- `cargo xtask harness-boundary`: PASS.
+- `cargo build -p lattice-cli --bin lattice`: PASS.
+- Full harness with `LATTICE_BIN="$PWD/target/debug/lattice"`: PASS (100 library tests and every
+  ordinary fast, Direct-Local, and PTY target).
+- `env -u LATTICE_BIN cargo xtask ci`: PASS.
+
+**Changed files:** `crates/lattice-system-harness/src/{artifacts,assert,lib}.rs`,
+`crates/lattice-system-harness/tests/{support/mod.rs,direct_secrets.rs}`,
+`crates/lattice-system-harness/AGENTS.md`, `docs/TESTING.md`,
+`docs/plans/2026-09-01-issue192-failure-artifact-contract.md`, `FINDINGS.md`, and `FIX.md`.
+
+
 ## GitHub #185 PR #211 review: make drain completeness deterministic — 2026-09-01
 
 **Severity:** HIGH（PR-introduced CI failure / output-completeness false red）

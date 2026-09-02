@@ -61,22 +61,6 @@
 ## MEDIUM
 
 
-### M-GH185-01: fast failure bundles omit command-outcome metadata — DEFERRED — `test-hygiene` / `lattice-system-harness` / GitHub #192
-
-- **Location**: `crates/lattice-system-harness/src/artifacts.rs`
-  (`FailureArtifacts`, `capture_from_output`, and `write_failure_artifacts`);
-  fast binary tests calling `assert_with_failure_artifacts`.
-- **Problem**: the fast failure path receives a complete `CommandOutcome` but
-  persists only stdout, stderr, and a static command summary. Its bundle therefore
-  omits termination, harness interventions, cleanup errors, surviving PIDs, and
-  output-completeness flags even though panic diagnostics retain a safe summary.
-- **Current status**: DEFERRED to #192, not part of this #185 follow-up. The
-  `ScenarioEvidence` path already records the metadata-only outcome; adding another
-  evidence type here would duplicate #192's combined failure contract.
-- **Plan**: #192 adds the existing `CommandOutcomeSummary` to `FailureArtifacts`
-  and combines artifact/evidence errors without replacing the primary assertion.
-  Do not copy raw stdout/stderr into the summary or create a third outcome model.
-
 
 ### M-TOOL-01: ADR 0004 build-closed WASM Component Tool runtime — hard cut implemented; identity/Bundle/docs remain — `architecture` / `lancet-runtime`
 - **Location**: `docs/adr/0004-build-closed-wasm-tool-catalog.md`; `crates/lancet-runtime`; Source Tools under `tools/`.

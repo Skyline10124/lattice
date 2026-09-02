@@ -6,7 +6,7 @@
 use lattice_system_harness::{
     AssertError, CapturedRequest, CommandOutcome, FAKE_API_KEY, FakeLlmServer, HarnessIntervention,
     LatticeCommand, LatticeDriver, ProcessTermination, ResponseGate, ScenarioEvidence,
-    ScenarioSpec, ScenarioWorld, SendExecution, SendOutcome, SseScript, TurnEventLine, failure_dir,
+    ScenarioSpec, ScenarioWorld, SendExecution, SendOutcome, SseScript, TurnEventLine,
 };
 use serde_json::Value;
 
@@ -55,8 +55,7 @@ pub(crate) fn require(condition: bool, expected: impl Into<String>) -> Result<()
 }
 
 pub(crate) fn evidence(world: &ScenarioWorld, spec: &ScenarioSpec) -> ScenarioEvidence {
-    ScenarioEvidence::new(world, failure_dir(&spec.name), [FAKE_API_KEY.to_string()])
-        .expect("scenario evidence")
+    ScenarioEvidence::new(world, &spec.name, [FAKE_API_KEY.to_string()]).expect("scenario evidence")
 }
 
 pub(crate) fn finish_scenario(
@@ -69,10 +68,10 @@ pub(crate) fn finish_scenario(
         evidence.record_command(*summary, outcome);
     }
     evidence.record_captures(captures);
+    let primary = result.err().map(|error| error.to_string());
     evidence
-        .finish(result.is_err())
-        .unwrap_or_else(|error| panic!("scenario evidence failed: {error}"));
-    result.unwrap_or_else(|error| panic!("{error}"));
+        .finish_report(primary)
+        .unwrap_or_else(|report| panic!("{report}"));
 }
 
 pub(crate) fn wire_fake_llm(

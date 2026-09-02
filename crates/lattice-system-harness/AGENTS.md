@@ -31,9 +31,23 @@ integration-test target of any product crate.
   (`process_group(0)`). Timeout and controlled interrupt retain drained
   stdout/stderr, reap the direct child, and clean the whole group. Do not add a
   non-Linux no-op or degraded cleanup fallback.
-- Fake-provider races use `ResponseGate` plus bounded request waits. Failure
-  evidence is redacted before writing, stale bundles are cleared, and recursive
-  byte-level sentinel scans fail closed on both hits and I/O errors.
+- Fake-provider races use `ResponseGate` plus bounded request waits.
+- Fast and Direct failure paths build one `FailureReport`. It keeps the primary
+  assertion, safe bundle-relative leak locations, shared metadata-only command
+  diagnostics, and every independent evidence error. Never store raw output or
+  matched secret bytes in the report.
+- Failure bundle names must be one non-reserved path component. `.claims` is
+  reserved. Acquire the nonblocking `<base>/.claims/<scenario>.lock` claim before
+  stale cleanup, hold it through persistence and scanning, and never delete the
+  lock file.
+- A live `ScenarioEvidence` owns its scenario claim from construction until
+  `finish_report`/`finish` consumes it or the recorder is dropped. Nested finalizers
+  must use a distinct scenario name.
+- Redact evidence before writing. The recursive byte-level scanner records all
+  observed leaks and scan errors, patches hits in place, and continues across
+  reachable siblings.
+- Failure-only workspace snapshots use symlink metadata and record a symlink as
+  a leaf. They never follow its target.
 - `ScenarioBudget::cap_timeout` applies `min(step_timeout, remaining_total)`;
   multi-command drivers must use the capped value for every spawned command.
 - Direct-Local integration targets share only generic plumbing through private

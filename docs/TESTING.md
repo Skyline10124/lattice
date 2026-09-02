@@ -234,9 +234,16 @@ with `ResponseGate` plus bounded request waits, not with a global
 
 ## 5. Failure artifacts
 
-When a scenario fails an assertion wrapped in `assert_with_failure_artifacts`
-(`crates/lattice-system-harness/src/assert.rs`), the harness writes a redacted
-bundle under `$LATTICE_HARNESS_FAILURE_DIR/<scenario>/`.
+Fast assertions wrapped in `assert_with_failure_artifacts` and Direct scenarios
+finished through `ScenarioEvidence::finish_report` use the same failure-report and
+persistence rules. A failed run writes a redacted bundle under
+`$LATTICE_HARNESS_FAILURE_DIR/<scenario>/`.
+
+The returned `FailureReport` keeps four facts in a fixed order: sorted, unique
+secret-leak locations; the primary assertion; metadata-only command diagnostics;
+and every evidence error in pipeline order. A claim, cleanup, write, or scan
+failure never replaces the primary assertion. Command diagnostics are rendered
+before bundle I/O, so they remain available when persistence itself fails.
 
 **Where they land:**
 
@@ -250,28 +257,39 @@ bundle under `$LATTICE_HARNESS_FAILURE_DIR/<scenario>/`.
 - `target/` is gitignored, so bundles persist for post-mortem inspection
   without polluting the tree.
 
+A scenario name must be one normal path component. Empty names, absolute paths,
+`.` / `..`, multi-component names, NUL, and the reserved `.claims` name fail
+closed. Before stale cleanup, the writer takes a Linux nonblocking lock on the
+persistent `<base>/.claims/<scenario>.lock` file. A second same-name writer
+fails immediately; dropping the first guard releases the lock.
+
 **Bundle contents** (`src/artifacts.rs`):
 
-- `stdout.txt`, `stderr.txt`, `command.txt` — redacted command output and
-  summary.
-- `world.txt` — scenario name, redacted command, and env context.
-- `workspace_after.txt`, `workspace_diff.txt` — the workspace tree after the
-  scenario and a unified diff against the pre-scenario baseline.
-- Multi-step scenarios additionally write per-step `0-command.txt`,
-  `0-stdout.txt`, `0-stderr.txt`, … for each tracked command.
+- `stdout.txt` and `stderr.txt` contain redacted output copies.
+- `command.txt` contains the redacted command summary plus the existing
+  `CommandOutcomeSummary`: termination, harness interventions, cleanup errors,
+  surviving PIDs, byte counts, and stdout/stderr completeness.
+- `world.txt` contains the scenario name, command, isolated paths, port, and
+  environment context. The complete buffer receives a final redaction pass.
+- `workspace_before.txt`, `workspace_after.txt`, and `workspace_diff.txt` contain
+  the failure-only workspace snapshots and their listing diff.
+- Multi-step scenarios write `0-command.txt`, `0-stdout.txt`,
+  `0-stderr.txt`, and the corresponding files for each tracked command. They use
+  the same command renderer as the fast `command.txt` and in-memory report.
 
 **Redaction and secret scanning:**
 
-- `redact()` replaces every known secret with `[REDACTED]` in stdout, stderr,
-  the command summary, and the world context before anything is written.
-- `scan_artifacts_for_secrets` recursively byte-level scans the bundle for
-  secret sentinels, redacts hits in place, and **fails closed** on any
-  traversal/read/rewrite error — a bundle that could not be fully inspected is
-  not certified clean.
-- `verify_persisted_bundle` re-scans after writing; a post-write sentinel hit
-  is a hard error.
-- Stale bundles are cleared when evidence capture begins; **passing scenarios
-  write no bundle.**
+- Raw stdout and stderr stay in `CommandOutcome` for parsing and assertions.
+  Every error string and persisted copy passes through literal redaction first.
+- The recursive byte-level scanner records every observed leak location before
+  patching the file in place. It also keeps every later traversal, read, rewrite,
+  symlink, or special-file error and continues across reachable siblings.
+- Reports and compatibility errors contain only redacted bundle-relative leak
+  locations. They never contain matched secret bytes or raw artifact paths.
+- A failure-only workspace snapshot records a symlink's own metadata as one leaf
+  and does not follow its target.
+- Stale bundles are cleared only after the claim is held. Passing scenarios write
+  no bundle.
 
 ---
 

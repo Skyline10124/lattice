@@ -18,13 +18,13 @@ pub mod session_send;
 pub mod tui_mock;
 pub mod world;
 pub use artifacts::{
-    ArtifactScanError, EvidenceError, ScenarioEvidence, WorkspaceSnapshot,
+    ArtifactScanError, EvidenceError, FailureReport, ScenarioEvidence, WorkspaceSnapshot,
     scan_artifacts_for_secrets, write_workspace_diff, write_workspace_listing, write_world_context,
 };
 pub use assert::{
     AssertError, assert_exit_code, assert_exit_failure, assert_exit_success, assert_no_secret,
     assert_stderr_contains, assert_stdout_contains, assert_stdout_contains_all,
-    assert_with_failure_artifacts, failure_dir,
+    assert_with_failure_artifacts, failure_dir, finalize_with_failure_artifacts,
 };
 pub use driver::processes_in_pgid;
 pub use driver::{
