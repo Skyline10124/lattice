@@ -237,12 +237,12 @@ impl App {
             }
             KeyAction::ScrollPageUp => self.viewport.page_up(self.transcript_height()),
             KeyAction::ScrollPageDown => {
-                let layout = frame_layout(self.term_width);
+                let layout = frame_layout(self.term_width, self.term_height);
                 let rows = self.content_rows(layout.content_w);
                 self.viewport.page_down(rows, self.transcript_height());
             }
             KeyAction::ScrollToBottom => {
-                let layout = frame_layout(self.term_width);
+                let layout = frame_layout(self.term_width, self.term_height);
                 let rows = self.content_rows(layout.content_w);
                 self.viewport.to_bottom(rows, self.transcript_height());
             }
@@ -350,7 +350,7 @@ impl App {
 
     /// Uses the same content width and vertical costs as the draw path.
     fn transcript_height(&self) -> usize {
-        let layout = frame_layout(self.term_width);
+        let layout = frame_layout(self.term_width, self.term_height);
         let input_h = input_visual_height(self, layout.content_w);
         self.term_height.saturating_sub(input_h + 2) as usize
     }
@@ -423,7 +423,7 @@ pub(crate) async fn run_app(options: TuiOptions, ctx: SessionContext) -> anyhow:
                 if let Ok(size) = terminal.size() {
                     app.term_width = size.width;
                     app.term_height = size.height;
-                    let layout = frame_layout(size.width);
+                    let layout = frame_layout(size.width, size.height);
                     let th = app.transcript_height();
                     let rows = app.content_rows(layout.content_w);
                     app.viewport.on_content_changed(rows, th);
@@ -758,7 +758,7 @@ mod tests {
         let submitted = app.apply_action(KeyAction::Paste("a\nb\nc".into()));
         assert!(submitted.is_none());
         assert_eq!(app.input.text(), "a\nb\nc");
-        assert_eq!(input_visual_height(&app, frame_layout(80).content_w), 3);
+        assert_eq!(input_visual_height(&app, frame_layout(80, 24).content_w), 3);
         assert_eq!(app.phase, TurnPhase::Idle);
     }
 

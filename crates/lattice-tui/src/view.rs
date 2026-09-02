@@ -11,45 +11,45 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::app::{App, Block, INPUT_MAX_ROWS, INPUT_MIN_ROWS, StatusKind, ToolState, TurnPhase};
 use crate::input::CTRL_C_WINDOW;
 
-pub(crate) const STATUS_MIN: u16 = 16;
-pub(crate) const STATUS_MAX: u16 = 24;
+pub(crate) const SIDEBAR_W: u16 = 40;
+pub(crate) const SIDEBAR_ASPECT: u16 = 3;
+pub(crate) const MIN_CONTENT_W_WITH_SIDEBAR: u16 = 72;
 pub(crate) const GAP: u16 = 1;
 pub(crate) const GUTTER: u16 = 2;
-pub(crate) const NARROW_MIN: u16 = 56;
 const CTRL_C_HINT: &str = "Ctrl+C to quit";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum StatusSlot {
-    Right { w: u16 },
-    BottomLine,
+pub(crate) enum Sidebar {
+    Visible,
+    Hidden,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct FrameLayout {
     pub(crate) left_w: u16,
     pub(crate) content_w: u16,
-    pub(crate) status: StatusSlot,
+    pub(crate) sidebar: Sidebar,
 }
 
-pub(crate) fn status_w(frame_w: u16) -> u16 {
-    (frame_w / 8).clamp(STATUS_MIN, STATUS_MAX)
-}
-
-pub(crate) fn frame_layout(frame_w: u16) -> FrameLayout {
-    if frame_w < NARROW_MIN {
-        return FrameLayout {
+pub(crate) fn frame_layout(frame_w: u16, frame_h: u16) -> FrameLayout {
+    let sidebar_content_w = frame_w
+        .saturating_sub(SIDEBAR_W)
+        .saturating_sub(GAP)
+        .saturating_sub(GUTTER);
+    let sufficiently_landscape = frame_w >= frame_h.saturating_mul(SIDEBAR_ASPECT);
+    let enough_conversation_width = sidebar_content_w >= MIN_CONTENT_W_WITH_SIDEBAR;
+    if sufficiently_landscape && enough_conversation_width {
+        FrameLayout {
+            left_w: frame_w.saturating_sub(SIDEBAR_W).saturating_sub(GAP),
+            content_w: sidebar_content_w,
+            sidebar: Sidebar::Visible,
+        }
+    } else {
+        FrameLayout {
             left_w: frame_w,
             content_w: frame_w.saturating_sub(GUTTER),
-            status: StatusSlot::BottomLine,
-        };
-    }
-
-    let status_w = status_w(frame_w);
-    let left_w = frame_w.saturating_sub(status_w).saturating_sub(GAP);
-    FrameLayout {
-        left_w,
-        content_w: left_w.saturating_sub(GUTTER),
-        status: StatusSlot::Right { w: status_w },
+            sidebar: Sidebar::Hidden,
+        }
     }
 }
 
@@ -192,31 +192,31 @@ fn fold_symbol(expanded: bool, unicode: bool) -> &'static str {
 
 pub(crate) fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
-    let geometry = frame_layout(area.width);
-    match geometry.status {
-        StatusSlot::Right { w } => {
+    let geometry = frame_layout(area.width, area.height);
+    match geometry.sidebar {
+        Sidebar::Visible => {
             let columns = Layout::horizontal([
                 Constraint::Length(geometry.left_w),
                 Constraint::Length(GAP),
-                Constraint::Length(w),
+                Constraint::Length(SIDEBAR_W),
             ])
             .split(area);
             draw_left(frame, app, columns[0], geometry.content_w, false);
             draw_right_status(frame, app, columns[2]);
         }
-        StatusSlot::BottomLine => {
+        Sidebar::Hidden => {
             draw_left(frame, app, area, geometry.content_w, true);
         }
     }
 }
 
-fn draw_left(frame: &mut Frame, app: &App, area: Rect, content_w: u16, narrow: bool) {
+fn draw_left(frame: &mut Frame, app: &App, area: Rect, content_w: u16, bottomline: bool) {
     let input_h = input_visual_height(app, content_w);
     let [transcript, separator, input, bottom] = left_regions(area, input_h);
     draw_transcript(frame, app, transcript, content_w);
     draw_separator(frame, separator);
     draw_input(frame, app, input, content_w);
-    if narrow {
+    if bottomline {
         draw_bottom_status(frame, app, bottom);
     } else {
         draw_prompt_tag(frame, bottom);
@@ -802,28 +802,46 @@ mod tests {
     }
 
     #[test]
-    fn layout_boundaries_are_underflow_safe() {
-        for width in [1, 7, 55, 56, 80, 176] {
-            let _ = frame_layout(width);
+    fn sidebar_visibility_follows_aspect_and_content_width() {
+        let visible = frame_layout(176, 50);
+        assert_eq!(
+            visible,
+            FrameLayout {
+                left_w: 135,
+                content_w: 133,
+                sidebar: Sidebar::Visible,
+            }
+        );
+        // 比例不足 3:1，或分栏后正文不足 72 列，都隐藏侧栏。
+        for (w, h) in [(115, 47), (85, 47), (56, 47), (80, 24)] {
+            assert_eq!(
+                frame_layout(w, h),
+                FrameLayout {
+                    left_w: w,
+                    content_w: w.saturating_sub(GUTTER),
+                    sidebar: Sidebar::Hidden,
+                },
+                "{w}x{h}"
+            );
         }
-        assert_eq!(frame_layout(55).status, StatusSlot::BottomLine);
-        assert_eq!(frame_layout(56).status, StatusSlot::Right { w: 16 });
+    }
+
+    #[test]
+    fn layout_boundaries_are_underflow_safe() {
+        for (w, h) in [(1, 1), (7, 3), (43, 10), (44, 10), (114, 38), (115, 38)] {
+            let _ = frame_layout(w, h);
+        }
         assert_eq!(
-            frame_layout(80),
+            frame_layout(1, 1),
             FrameLayout {
-                left_w: 63,
-                content_w: 61,
-                status: StatusSlot::Right { w: 16 },
+                left_w: 1,
+                content_w: 0,
+                sidebar: Sidebar::Hidden,
             }
         );
-        assert_eq!(
-            frame_layout(176),
-            FrameLayout {
-                left_w: 153,
-                content_w: 151,
-                status: StatusSlot::Right { w: 22 },
-            }
-        );
+        // 114x38 比例刚好不足；115x38 比例与正文宽度同时达标。
+        assert_eq!(frame_layout(114, 38).sidebar, Sidebar::Hidden);
+        assert_eq!(frame_layout(115, 38).sidebar, Sidebar::Visible);
     }
 
     #[test]
@@ -964,12 +982,12 @@ mod tests {
 
     #[test]
     fn wide_and_narrow_frames_draw_without_panic() -> anyhow::Result<()> {
-        for width in [1, 7, 55, 56, 80, 176] {
+        for (width, height) in [(1, 1), (7, 3), (56, 47), (80, 24), (115, 47), (176, 50)] {
             let mut app = test_app();
             app.blocks
                 .push(Block::Status(StatusKind::Notice(vec!["hello".into()])));
             app.input.set_text("typed");
-            let mut terminal = Terminal::new(TestBackend::new(width, 24))?;
+            let mut terminal = Terminal::new(TestBackend::new(width, height))?;
             terminal.draw(|frame| draw(frame, &app))?;
         }
         Ok(())
