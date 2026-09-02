@@ -1,14 +1,13 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use std::ffi::OsStr;
 use std::path::PathBuf;
 
 use thiserror::Error;
 
 use crate::artifacts::{
-    ArtifactClaim, EvidenceError, FailureReport, capture_from_output, clear_stale_bundle,
-    render_command_text, scan_bundle_into_report, validate_artifact_name,
+    ArtifactClaim, EvidenceError, FailureReport, capture_from_output, checked_failure_dir,
+    clear_stale_bundle, render_command_text, scan_bundle_into_report,
     write_failure_artifacts_collecting, write_world_context,
 };
 use crate::driver::CommandOutcome;
@@ -24,18 +23,8 @@ use crate::world::ScenarioWorld;
 /// without polluting the tree. `cargo xtask ci` redirects this to the
 /// workspace-level `$(pwd)/target/harness-failures` so a full local run
 /// collects every scenario's bundle in one place.
-const FAILURE_DIR_ENV: &str = "LATTICE_HARNESS_FAILURE_DIR";
-
 pub fn failure_dir(name: &str) -> Result<PathBuf, EvidenceError> {
-    validate_artifact_name(OsStr::new(name))?;
-    let base = std::env::var(FAILURE_DIR_ENV)
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("target")
-                .join("harness-failures")
-        });
-    Ok(base.join(name))
+    checked_failure_dir(name)
 }
 
 #[derive(Debug, Error)]
@@ -52,8 +41,6 @@ pub enum AssertError {
     StderrMissing { expected: String },
     #[error("output contained forbidden secret sentinel at {location}")]
     SecretLeak { location: String },
-    #[error("failed to write failure artifacts: {0}")]
-    ArtifactIo(#[from] std::io::Error),
     #[error(transparent)]
     FailureReport(FailureReport),
 }
@@ -162,6 +149,27 @@ pub fn finalize_with_failure_artifacts(
     secrets: &[&str],
     result: Result<(), AssertError>,
 ) -> Result<(), FailureReport> {
+    let target = failure_dir(scenario_name);
+    finalize_with_failure_artifacts_at_target(
+        world,
+        scenario_name,
+        command_summary,
+        output,
+        secrets,
+        result,
+        target,
+    )
+}
+
+fn finalize_with_failure_artifacts_at_target(
+    world: &ScenarioWorld,
+    scenario_name: &str,
+    command_summary: &str,
+    output: &CommandOutcome,
+    secrets: &[&str],
+    result: Result<(), AssertError>,
+    target: Result<PathBuf, EvidenceError>,
+) -> Result<(), FailureReport> {
     let primary_assertion = result.err().map(|error| error.to_string());
     let failed = primary_assertion.is_some();
     let mut report = FailureReport::new(primary_assertion, secrets);
@@ -170,7 +178,7 @@ pub fn finalize_with_failure_artifacts(
         secrets,
     );
 
-    let dir = match failure_dir(scenario_name) {
+    let dir = match target {
         Ok(dir) => dir,
         Err(error) => {
             report.add_evidence_error("validate artifact target", error, secrets);
@@ -433,5 +441,31 @@ mod tests {
             std::fs::read_to_string(artifacts.dir.join("leak.txt")).unwrap(),
             "leak [REDACTED]"
         );
+    }
+
+    #[test]
+    fn fast_success_clears_stale_bundle_without_writing_new_evidence() {
+        let world = ScenarioWorld::new("fast-success-stale-cleanup").unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let dir = root.path().join("scenario");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("stale.txt"), "stale failure").unwrap();
+        let value = outcome(ProcessTermination::Exited(0));
+
+        finalize_with_failure_artifacts_at_target(
+            &world,
+            "scenario",
+            "lattice --version",
+            &value,
+            &[],
+            Ok(()),
+            Ok(dir.clone()),
+        )
+        .unwrap();
+
+        assert!(!dir.exists());
+        let claims = root.path().join(".claims");
+        assert!(claims.is_dir());
+        assert!(claims.join("scenario.lock").is_file());
     }
 }

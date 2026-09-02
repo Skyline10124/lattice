@@ -40,6 +40,9 @@ integration-test target of any product crate.
   reserved. Acquire the nonblocking `<base>/.claims/<scenario>.lock` claim before
   stale cleanup, hold it through persistence and scanning, and never delete the
   lock file.
+- A live `ScenarioEvidence` owns its scenario claim from construction until
+  `finish_report`/`finish` consumes it or the recorder is dropped. Nested finalizers
+  must use a distinct scenario name.
 - Redact evidence before writing. The recursive byte-level scanner records all
   observed leaks and scan errors, patches hits in place, and continues across
   reachable siblings.

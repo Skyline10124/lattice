@@ -15,14 +15,27 @@ use crate::world::ScenarioWorld;
 
 const REDACTED: &str = "[REDACTED]";
 const CLAIMS_DIR: &str = ".claims";
+const FAILURE_DIR_ENV: &str = "LATTICE_HARNESS_FAILURE_DIR";
+
+pub(crate) fn checked_failure_dir(name: &str) -> Result<PathBuf, EvidenceError> {
+    validate_artifact_name(OsStr::new(name))?;
+    let base = std::env::var(FAILURE_DIR_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join("harness-failures")
+        });
+    Ok(base.join(name))
+}
 
 /// Redacted failure bundle written when a scenario fails.
 #[derive(Debug, Clone)]
-pub struct FailureArtifacts {
-    pub dir: PathBuf,
-    pub stdout: String,
-    pub stderr: String,
-    pub command_text: String,
+pub(crate) struct FailureArtifacts {
+    pub(crate) dir: PathBuf,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
+    pub(crate) command_text: String,
 }
 
 /// One safe, composable account of a failed scenario and its evidence pipeline.
@@ -166,7 +179,7 @@ pub(crate) fn render_command_text(
     )
 }
 
-pub fn capture_from_output(
+pub(crate) fn capture_from_output(
     dir: PathBuf,
     output: &CommandOutcome,
     command_summary: impl Into<String>,
@@ -178,19 +191,6 @@ pub fn capture_from_output(
         stdout: redact(&String::from_utf8_lossy(&output.stdout), secrets),
         stderr: redact(&String::from_utf8_lossy(&output.stderr), secrets),
         command_text: render_command_text(&command_summary, output, secrets),
-    }
-}
-
-pub fn write_failure_artifacts(artifacts: &FailureArtifacts) -> std::io::Result<()> {
-    if artifacts.dir.exists() {
-        std::fs::remove_dir_all(&artifacts.dir)?;
-    }
-    std::fs::create_dir_all(&artifacts.dir)?;
-    let mut report = FailureReport::new(None, &[]);
-    write_failure_artifacts_collecting(artifacts, &[], &mut report);
-    match report.evidence_errors.into_iter().next() {
-        Some(error) => Err(std::io::Error::other(error)),
-        None => Ok(()),
     }
 }
 
@@ -447,10 +447,6 @@ pub enum EvidenceError {
     ArtifactClaimBusy,
     #[error("evidence I/O failed: {0}")]
     Io(#[from] std::io::Error),
-    #[error(transparent)]
-    Scan(#[from] ArtifactScanError),
-    #[error("post-write sentinel found in: {0:?}")]
-    PostWriteSentinel(Vec<String>),
     #[error("{0}")]
     FailureReport(String),
 }
@@ -534,10 +530,17 @@ pub struct ScenarioEvidence {
 impl ScenarioEvidence {
     pub fn new(
         world: &ScenarioWorld,
-        failure_dir: impl Into<PathBuf>,
+        scenario_name: &str,
         sentinels: impl IntoIterator<Item = String>,
     ) -> Result<Self, EvidenceError> {
-        let failure_dir = failure_dir.into();
+        Self::new_at_dir(world, checked_failure_dir(scenario_name)?, sentinels)
+    }
+
+    fn new_at_dir(
+        world: &ScenarioWorld,
+        failure_dir: PathBuf,
+        sentinels: impl IntoIterator<Item = String>,
+    ) -> Result<Self, EvidenceError> {
         let sentinels: Vec<String> = sentinels.into_iter().collect();
         let secrets: Vec<&str> = sentinels.iter().map(String::as_str).collect();
         let claim = ArtifactClaim::acquire(&failure_dir).map_err(|error| match error {
@@ -653,21 +656,6 @@ impl ScenarioEvidence {
         }
         scan_bundle_into_report(&self.failure_dir, &secrets, &mut report);
         report.finish()
-    }
-}
-
-#[cfg(test)]
-fn verify_persisted_bundle(dir: &Path, secrets: &[&str]) -> Result<(), EvidenceError> {
-    let leaked = scan_artifacts_for_secrets(dir, secrets)?;
-    if leaked.is_empty() {
-        Ok(())
-    } else {
-        Err(EvidenceError::PostWriteSentinel(
-            leaked
-                .iter()
-                .map(|path| safe_artifact_location(dir, path, secrets))
-                .collect(),
-        ))
     }
 }
 
@@ -1134,7 +1122,9 @@ mod tests {
         let failure_dir = root.path().join("scenario");
         std::fs::create_dir_all(&failure_dir).unwrap();
         std::fs::write(failure_dir.join("stale.txt"), "old failure").unwrap();
-        let evidence = ScenarioEvidence::new(&world, &failure_dir, Vec::<String>::new()).unwrap();
+        let evidence =
+            ScenarioEvidence::new_at_dir(&world, failure_dir.clone(), Vec::<String>::new())
+                .unwrap();
         assert!(
             !failure_dir.exists(),
             "constructor must clear stale evidence"
@@ -1142,7 +1132,9 @@ mod tests {
         evidence.finish(false).unwrap();
         assert!(!failure_dir.exists(), "passing scenarios write no bundle");
 
-        let evidence = ScenarioEvidence::new(&world, &failure_dir, Vec::<String>::new()).unwrap();
+        let evidence =
+            ScenarioEvidence::new_at_dir(&world, failure_dir.clone(), Vec::<String>::new())
+                .unwrap();
         evidence.finish(true).unwrap();
         assert!(failure_dir.join("workspace_diff.txt").is_file());
     }
@@ -1153,7 +1145,8 @@ mod tests {
         let root = TempDir::new().unwrap();
         let failure_dir = root.path().join("scenario");
         let mut evidence =
-            ScenarioEvidence::new(&world, &failure_dir, Vec::<String>::new()).unwrap();
+            ScenarioEvidence::new_at_dir(&world, failure_dir.clone(), Vec::<String>::new())
+                .unwrap();
         let cleanup_errors = [
             CleanupOperation::SignalProcessGroup(libc::SIGKILL),
             CleanupOperation::KillChild,
@@ -1220,7 +1213,8 @@ mod tests {
         let root = TempDir::new().unwrap();
         let failure_dir = root.path().join("scenario");
         let mut evidence =
-            ScenarioEvidence::new(&world, &failure_dir, [secret.to_string()]).unwrap();
+            ScenarioEvidence::new_at_dir(&world, failure_dir.clone(), [secret.to_string()])
+                .unwrap();
         let outcome = CommandOutcome {
             stdout: secret.as_bytes().to_vec(),
             stderr: secret.as_bytes().to_vec(),
@@ -1255,18 +1249,6 @@ mod tests {
         let command = std::fs::read_to_string(failure_dir.join("0-command.txt")).unwrap();
         assert!(command.contains("stdout_bytes: 18"));
         assert!(command.contains("stderr_bytes: 18"));
-    }
-
-    #[test]
-    fn persisted_bundle_verification_fails_after_redacting_a_sentinel_hit() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("leak.bin"), b"\xffsecret-value").unwrap();
-        let error = verify_persisted_bundle(dir.path(), &["secret-value"]).unwrap_err();
-        assert!(matches!(error, EvidenceError::PostWriteSentinel(_)));
-        assert_eq!(
-            std::fs::read(dir.path().join("leak.bin")).unwrap(),
-            b"\xff[REDACTED]"
-        );
     }
 
     fn report_test_outcome(secret: &str) -> CommandOutcome {
@@ -1378,6 +1360,26 @@ mod tests {
     }
 
     #[test]
+    fn scenario_evidence_rejects_arbitrary_target_paths() {
+        let world = ScenarioWorld::new("checked-evidence-target").unwrap();
+        let root = TempDir::new().unwrap();
+        let parent = root.path().join("nested");
+        let target = parent.join("scenario");
+        std::fs::create_dir_all(&target).unwrap();
+        let marker = target.join("keep.txt");
+        std::fs::write(&marker, "keep").unwrap();
+
+        let result = ScenarioEvidence::new(
+            &world,
+            target.to_string_lossy().as_ref(),
+            Vec::<String>::new(),
+        );
+
+        assert!(matches!(result, Err(EvidenceError::InvalidArtifactName)));
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "keep");
+    }
+
+    #[test]
     fn artifact_claim_precedes_cleanup_and_releases_after_drop() {
         let root = TempDir::new().unwrap();
         let target = root.path().join("scenario");
@@ -1425,7 +1427,8 @@ mod tests {
         let root = TempDir::new().unwrap();
         let failure_dir = root.path().join("scenario");
         let mut evidence =
-            ScenarioEvidence::new(&world, &failure_dir, [secret.to_string()]).unwrap();
+            ScenarioEvidence::new_at_dir(&world, failure_dir.clone(), [secret.to_string()])
+                .unwrap();
         evidence.record_command(format!("lattice {secret}"), &report_test_outcome(secret));
 
         std::fs::create_dir_all(&failure_dir).unwrap();
@@ -1463,7 +1466,8 @@ mod tests {
         let root = TempDir::new().unwrap();
         let failure_dir = root.path().join("scenario");
         let mut evidence =
-            ScenarioEvidence::new(&world, &failure_dir, Vec::<String>::new()).unwrap();
+            ScenarioEvidence::new_at_dir(&world, failure_dir.clone(), Vec::<String>::new())
+                .unwrap();
         evidence.record_command("lattice test", &report_test_outcome("clean"));
         std::fs::write(&failure_dir, "root type conflict").unwrap();
 
@@ -1482,7 +1486,9 @@ mod tests {
         let world = ScenarioWorld::new("legacy-evidence-finish").unwrap();
         let root = TempDir::new().unwrap();
         let failure_dir = root.path().join("scenario");
-        let evidence = ScenarioEvidence::new(&world, &failure_dir, Vec::<String>::new()).unwrap();
+        let evidence =
+            ScenarioEvidence::new_at_dir(&world, failure_dir.clone(), Vec::<String>::new())
+                .unwrap();
         evidence.finish(true).unwrap();
         assert!(failure_dir.join("workspace_diff.txt").is_file());
     }

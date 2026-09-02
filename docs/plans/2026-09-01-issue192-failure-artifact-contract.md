@@ -310,7 +310,9 @@ validator 只接受一个**精确的** `Component::Normal`，并额外拒绝：
 - NUL；
 - 保留名称 `.claims`。
 
-使用一个共享 validator，供 `failure_dir` 和 `ScenarioEvidence::new` 的 target basename 校验；不得在多处复制规则，也不建立 `SafePath` 类型。
+使用一个共享 validator，供 `failure_dir` 与公开的
+`ScenarioEvidence::new(scenario_name, ...)` 校验同一个安全单组件名称。公开构造器不得接受调用方提供的
+`PathBuf`；需要 `TempDir` 的模块单元测试只使用 crate-private `new_at_dir` seam。不得在多处复制规则，也不建立 `SafePath` 类型。
 
 当前仓库内固定字面量调用点可显式：
 
@@ -425,7 +427,8 @@ fn attempt<T>(
 - Direct 每个 recorded command 的 command/stdout/stderr；
 - workspace before/after/diff 三个文件。
 
-原有 public writer 可以保留首错兼容 adapter，但新 finalizer 不得通过它丢失后续错误。
+零调用点的公开 raw writer 必须删除；`FailureArtifacts`、`capture_from_output` 与 collecting writer
+仅作为 crate-private 统一 pipeline 存在。#205 只保留仍有调用者的兼容入口。
 
 ### 5.10 fast path 新入口
 
@@ -449,6 +452,8 @@ pub fn finalize_with_failure_artifacts(
 - acquire claim；busy/I/O 进入 evidence errors；
 - claim 后清理 stale bundle；失败则停止写盘；
 - assertion 成功时只清理 stale bundle；清理失败返回 evidence-only report；
+- owner test 必须预建 stale marker，执行 fast 成功 finalizer，并证明 scenario bundle 消失而
+  `.claims` 命名空间仍存在；
 - assertion 失败时创建 root，并逐个尝试 stdout/stderr/command/world 写入；
 - 即使部分写入失败，只要 root 可读，仍运行完整 scanner collector；
 - scanner leaks、scan errors、写入 errors 与 primary 一次性返回。
@@ -482,7 +487,8 @@ Result<(), AssertError>
 
 要求：
 
-- `ScenarioEvidence::new` validate target basename、acquire claim、claim 后清理 stale bundle，并在整个 recorder 生命周期持有 guard；
+- `ScenarioEvidence::new` 只接收 `scenario_name`，通过唯一 checked failure-base builder 取得
+  target；随后 acquire claim、claim 后清理 stale bundle，并在整个 recorder 生命周期持有 guard；
 - 在任何 artifact I/O 前，把所有 recorded command diagnostics 用共享 renderer 加入 report；
 - Direct recorded command、provider capture、workspace diff 和 scanner 的独立错误全部收集；
 - `tests/support::finish_scenario` 最终只 panic 一次，文本同时包含 primary、leaks、commands 与 evidence errors；
