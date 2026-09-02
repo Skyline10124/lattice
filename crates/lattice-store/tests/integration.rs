@@ -115,26 +115,29 @@ fn xdg_state_root_fallback_order() {
 }
 
 #[test]
-fn create_lock_and_repo_lock_are_distinct_files() {
+fn create_returns_after_releasing_create_lock_and_repo_lock_is_distinct() {
     let state = tempfile::tempdir().unwrap();
     let layout = StateLayout::in_state_root(state.path());
     let repo = StoreRepo::create_global(&layout, "sessions.git", meta(), |_| Ok(())).unwrap();
-    // The create lock lives in the parent, the repo lock inside the git dir;
-    // holding one never blocks the other (they never overlap by contract).
+
+    // The first-create lock file remains in the parent directory but is released
+    // before create returns. Steady-state repository writes use a distinct lock
+    // inside the repository.
     let create_lock = layout.lattice_root().join(".sessions.git.create.lock");
     assert!(create_lock.exists());
-    let write = repo.write_lock().unwrap();
-    assert!(write.path().ends_with("lattice-repo.lock"));
+
+    let write = repo.write_lock().expect("repository write lock");
     assert!(write.path().starts_with(repo.git_dir()));
+    assert!(write.path().ends_with("lattice-repo.lock"));
+    assert_ne!(write.path(), create_lock.as_path());
     drop(write);
-    // And the create lock is free after create returned (non-blocking strict
-    // acquire must succeed immediately).
-    let guard = lattice_store::lock::acquire_flock_strict(
+
+    let create = lattice_store::lock::acquire_flock_strict(
         &create_lock,
         lattice_store::Blocking::NonBlocking,
     )
-    .unwrap();
-    drop(guard);
+    .expect("create lock must be free after create returns");
+    drop(create);
 }
 
 /// Child mode: publish one store, then stop inside a second store's init callback

@@ -29,6 +29,26 @@ fn open_absent_store_fails_closed_without_creating_it() {
     assert!(!path.exists(), "strict open must not create the store");
 }
 
+#[test]
+fn created_session_store_config_is_readable_and_has_no_remote() {
+    let dir = temp_dir("no_remote_config");
+    let store = GitSessionGraphStore::create(dir.path().join("sessions.git"))
+        .expect("create Session store");
+
+    let config_path = store.dir().join("config");
+    let _config = std::fs::read_to_string(&config_path)
+        .expect("created bare Session store must have a readable config");
+
+    let repo = gix::open_opts(store.dir(), gix::open::Options::isolated())
+        .expect("open created Session store");
+    let remotes: Vec<_> = repo.remote_names().into_iter().collect();
+
+    assert!(
+        remotes.is_empty(),
+        "Session store must not configure remotes"
+    );
+}
+
 /// SC1: a store created for another domain is rejected by identity, not
 /// silently reused.
 #[test]
