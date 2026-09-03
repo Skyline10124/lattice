@@ -99,6 +99,10 @@ pub enum SseScript {
     /// request -> plain text, so a turn that uses a Tool still terminates
     /// cleanly.
     Sequence { scripts: Vec<SseScript> },
+    /// 按请求轮转内层脚本，走完最后一个后回到第一个。`Sequence` 会
+    /// 收敛到最后一个脚本，`Cycle` 则对后续每个请求重复整套模式，因此
+    /// 同一个 TUI 会话里的每一轮 turn 都能重演相同的失败/成功形状。
+    Cycle { scripts: Vec<SseScript> },
 }
 
 impl SseScript {
@@ -773,6 +777,19 @@ fn handle_request(
                     (scripts[idx].clone(), true)
                 }
             }
+            SseScript::Cycle { scripts } => {
+                if scripts.is_empty() {
+                    (
+                        SseScript::IllegalResponse {
+                            body: "fake_llm: empty Cycle script".into(),
+                        },
+                        false,
+                    )
+                } else {
+                    let idx = state.next % scripts.len();
+                    (scripts[idx].clone(), true)
+                }
+            }
             other => (other.clone(), false),
         };
         state.next += usize::from(advance_sequence);
@@ -1036,6 +1053,13 @@ fn render_script(script: &SseScript) -> String {
             // rendering; reaching this arm is a harness bug. Emit a malformed
             // payload so the turn fails loudly instead of silently passing.
             out.push_str("data: fake_llm: unresolved Sequence script\n\n");
+            out.push_str("data: [DONE]\n\n");
+        }
+        SseScript::Cycle { .. } => {
+            // Cycle 与 Sequence 一样在 handle_request 里按请求解析；
+            // 走到这里说明 harness 有 bug。发出畸形载荷，让 turn 大声
+            // 失败而不是悄悄通过。
+            out.push_str("data: fake_llm: unresolved Cycle script\n\n");
             out.push_str("data: [DONE]\n\n");
         }
     }
@@ -1377,6 +1401,30 @@ mod tests {
             )
             .as_bytes()
         );
+    }
+
+    #[test]
+    fn cycle_serves_scripts_round_robin_across_requests() {
+        let server = FakeLlmServer::start(SseScript::Cycle {
+            scripts: vec![SseScript::plain("cycle-a"), SseScript::plain("cycle-b")],
+        })
+        .expect("cycle server");
+        let addr = server.local_addr();
+        let body = r#"{"model":"m","messages":[],"stream":true}"#;
+        let request = format!(
+            "POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        for expected in ["cycle-a", "cycle-b", "cycle-a", "cycle-b"] {
+            let response = exchange_raw(addr, request.as_bytes());
+            let needle = format!(r#""content":"{expected}""#);
+            assert!(
+                response
+                    .windows(needle.len())
+                    .any(|bytes| bytes == needle.as_bytes()),
+                "Cycle 必须按轮转重复脚本；期望 {expected}"
+            );
+        }
     }
 
     #[test]
