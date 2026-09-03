@@ -17,11 +17,24 @@ use lattice_api::{RunTurnRequest, TurnEvent};
 use crate::TuiOptions;
 use crate::input::{CTRL_C_WINDOW, History, InputBuffer, KeyAction, resolve_key};
 use crate::session::SessionContext;
-use crate::view::{Viewport, frame_layout, input_visual_height, transcript_lines};
+use crate::view::{Dock, Sidebar, Viewport, frame_layout, transcript_lines};
 
 const FRAME: Duration = Duration::from_millis(33);
-pub(crate) const INPUT_MIN_ROWS: u16 = 2;
-pub(crate) const INPUT_MAX_ROWS: u16 = 5;
+
+/// Dock 上 Warn / Error 两个非 Prompt 状态的严重级。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DockSeverity {
+    Warn,
+    Error,
+}
+
+/// 状态事件的展示位置：直接进 transcript，或暂驻 Dock。
+/// 不变量：`blocks` 中至多存在一个 `StatusPlacement::Dock(_)`。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StatusPlacement {
+    Transcript,
+    Dock(DockSeverity),
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Block {
@@ -34,7 +47,10 @@ pub(crate) enum Block {
         name: String,
         state: ToolState,
     },
-    Status(StatusKind),
+    Status {
+        kind: StatusKind,
+        placement: StatusPlacement,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -152,23 +168,23 @@ impl App {
             }
             TurnEvent::CommitFailed { reason } => {
                 self.fail_running_tools(&reason);
-                self.push_status(StatusKind::CommitFailed { reason });
+                self.push_dock_status(StatusKind::CommitFailed { reason }, DockSeverity::Error);
             }
             TurnEvent::EvidenceDurabilityFailed { attempts } => {
                 let reason = format!(
                     "terminal evidence durability failed after {attempts} attempt(s)"
                 );
                 self.fail_running_tools(&reason);
-                self.push_status(StatusKind::CommitFailed { reason });
+                self.push_dock_status(StatusKind::CommitFailed { reason }, DockSeverity::Error);
             }
             TurnEvent::RecoveryRequired { reason } => {
                 let reason = format!("recovery required: {reason}");
                 self.fail_running_tools(&reason);
-                self.push_status(StatusKind::CommitFailed { reason });
+                self.push_dock_status(StatusKind::CommitFailed { reason }, DockSeverity::Error);
             }
             TurnEvent::TurnFailed { reason } => {
                 self.fail_running_tools(&reason);
-                self.push_status(StatusKind::TurnFailed { reason });
+                self.push_dock_status(StatusKind::TurnFailed { reason }, DockSeverity::Error);
             }
             TurnEvent::TurnCancelled { reason } => {
                 self.fail_running_tools(reason.as_deref().unwrap_or("cancelled"));
@@ -183,18 +199,24 @@ impl App {
                 ..
             } => {
                 if will_retry {
-                    self.push_status(StatusKind::LlmRetry {
-                        attempt,
-                        max_attempts,
-                        delay_ms: delay_ms.unwrap_or(0),
-                        message,
-                    });
+                    self.push_dock_status(
+                        StatusKind::LlmRetry {
+                            attempt,
+                            max_attempts,
+                            delay_ms: delay_ms.unwrap_or(0),
+                            message,
+                        },
+                        DockSeverity::Warn,
+                    );
                 } else {
-                    self.push_status(StatusKind::LlmFailed {
-                        attempt,
-                        max_attempts,
-                        message,
-                    });
+                    self.push_dock_status(
+                        StatusKind::LlmFailed {
+                            attempt,
+                            max_attempts,
+                            message,
+                        },
+                        DockSeverity::Error,
+                    );
                 }
             }
             TurnEvent::TurnStarted { .. }
@@ -210,6 +232,28 @@ impl App {
     /// submitted with the returned prompt.
     #[rustfmt::skip]
     pub(crate) fn apply_action(&mut self, action: KeyAction) -> Option<String> {
+        if self.dock_status().is_some() {
+            match action {
+                // 无修饰 Space：释放当前 WARN / ERROR 回 transcript，
+                // Space 被消费，不进入 InputBuffer。
+                KeyAction::Insert(' ') => { self.release_dock_status(); return None; }
+                // Dock 显示状态时，输入编辑与提交不得改动不可见的 InputBuffer。
+                KeyAction::Insert(_)
+                | KeyAction::Paste(_)
+                | KeyAction::Newline
+                | KeyAction::Submit
+                | KeyAction::Backspace
+                | KeyAction::Delete
+                | KeyAction::Left
+                | KeyAction::Right
+                | KeyAction::Home
+                | KeyAction::End
+                | KeyAction::Up
+                | KeyAction::Down => return None,
+                // PageUp / PageDown、Ctrl+C、Ctrl+D 等全局动作沿用现有语义。
+                _ => {}
+            }
+        }
         match action {
             KeyAction::Insert(c) => self.input.insert_char(c),
             KeyAction::Paste(text) => self.input.insert_paste(&text),
@@ -237,12 +281,12 @@ impl App {
             }
             KeyAction::ScrollPageUp => self.viewport.page_up(self.transcript_height()),
             KeyAction::ScrollPageDown => {
-                let layout = frame_layout(self.term_width);
+                let layout = frame_layout(self.term_width, self.term_height);
                 let rows = self.content_rows(layout.content_w);
                 self.viewport.page_down(rows, self.transcript_height());
             }
             KeyAction::ScrollToBottom => {
-                let layout = frame_layout(self.term_width);
+                let layout = frame_layout(self.term_width, self.term_height);
                 let rows = self.content_rows(layout.content_w);
                 self.viewport.to_bottom(rows, self.transcript_height());
             }
@@ -276,7 +320,7 @@ impl App {
             lattice_api::STREAM_IDLE_TIMEOUT_SECS
         );
         self.fail_running_tools(&reason);
-        self.push_status(StatusKind::TurnFailed { reason });
+        self.push_dock_status(StatusKind::TurnFailed { reason }, DockSeverity::Error);
         self.phase = TurnPhase::Idle;
         self.cancel_flag = None;
     }
@@ -312,8 +356,48 @@ impl App {
         expired
     }
 
+    /// 当前 Dock 状态；`blocks` 中至多存在一个 `StatusPlacement::Dock(_)`，
+    /// 推导时直接取唯一项，不做 `rev()` 兜底。
+    pub(crate) fn dock_status(&self) -> Option<(&StatusKind, DockSeverity)> {
+        self.blocks.iter().find_map(|block| match block {
+            Block::Status {
+                kind,
+                placement: StatusPlacement::Dock(severity),
+            } => Some((kind, *severity)),
+            _ => None,
+        })
+    }
+
+    /// 直接进 transcript。
     fn push_status(&mut self, kind: StatusKind) {
-        self.blocks.push(Block::Status(kind));
+        self.blocks.push(Block::Status {
+            kind,
+            placement: StatusPlacement::Transcript,
+        });
+    }
+
+    /// 先把当前 Dock status 的 placement 改回 `Transcript`，再以
+    /// `Dock(severity)` 追加新 status。turnover 全部在内部完成。
+    fn push_dock_status(&mut self, kind: StatusKind, severity: DockSeverity) {
+        self.release_dock_status();
+        self.blocks.push(Block::Status {
+            kind,
+            placement: StatusPlacement::Dock(severity),
+        });
+    }
+
+    /// WARN / ERROR 状态下把当前 Dock status 释放回 transcript；它会在
+    /// 原本的时间位置出现且只出现一次。无活动状态时是空操作。
+    fn release_dock_status(&mut self) {
+        for block in &mut self.blocks {
+            if let Block::Status {
+                placement: placement @ StatusPlacement::Dock(_),
+                ..
+            } = block
+            {
+                *placement = StatusPlacement::Transcript;
+            }
+        }
     }
 
     fn submit(&mut self) -> Option<String> {
@@ -348,11 +432,17 @@ impl App {
         }
     }
 
-    /// Uses the same content width and vertical costs as the draw path.
+    /// 与绘制路径使用同一内容宽度和垂直开销。
+    /// Dock::height() 是 Dock 占用的唯一来源；bottomline 只在侧栏隐藏时存在。
     fn transcript_height(&self) -> usize {
-        let layout = frame_layout(self.term_width);
-        let input_h = input_visual_height(self, layout.content_w);
-        self.term_height.saturating_sub(input_h + 2) as usize
+        let layout = frame_layout(self.term_width, self.term_height);
+        let bottom_h = match layout.sidebar {
+            Sidebar::Visible => 0,
+            Sidebar::Hidden => 1,
+        };
+        let dock = Dock::new(self);
+        self.term_height
+            .saturating_sub(dock.height(layout.content_w) + bottom_h) as usize
     }
 }
 
@@ -423,7 +513,7 @@ pub(crate) async fn run_app(options: TuiOptions, ctx: SessionContext) -> anyhow:
                 if let Ok(size) = terminal.size() {
                     app.term_width = size.width;
                     app.term_height = size.height;
-                    let layout = frame_layout(size.width);
+                    let layout = frame_layout(size.width, size.height);
                     let th = app.transcript_height();
                     let rows = app.content_rows(layout.content_w);
                     app.viewport.on_content_changed(rows, th);
@@ -758,7 +848,8 @@ mod tests {
         let submitted = app.apply_action(KeyAction::Paste("a\nb\nc".into()));
         assert!(submitted.is_none());
         assert_eq!(app.input.text(), "a\nb\nc");
-        assert_eq!(input_visual_height(&app, frame_layout(80).content_w), 3);
+        // 3 行内容 + rail：Dock::height 是视口高度的唯一来源。
+        assert_eq!(Dock::new(&app).height(frame_layout(80, 24).content_w), 4);
         assert_eq!(app.phase, TurnPhase::Idle);
     }
 
@@ -831,11 +922,195 @@ mod tests {
         assert!(app.cancel_flag.is_none());
         assert_failed_tool(&app, 0, "stream timed out");
         match app.blocks.last() {
-            Some(Block::Status(StatusKind::TurnFailed { reason })) => {
+            Some(Block::Status {
+                kind: StatusKind::TurnFailed { reason },
+                placement: StatusPlacement::Dock(DockSeverity::Error),
+            }) => {
                 assert!(reason.contains(&lattice_api::STREAM_IDLE_TIMEOUT_SECS.to_string()));
             }
-            other => panic!("expected TurnFailed, got {other:?}"),
+            other => panic!("期望暂驻 Dock 的 TurnFailed，实际 {other:?}"),
         }
+    }
+
+    /// §19.2：Warn / Error 的 Dock 生命周期与 transcript 时间顺序。
+    /// 释放后的状态必须回到它原本的时间位置，且只出现一次。
+    #[test]
+    fn dock_lifecycle_keeps_transcript_order_and_draft() {
+        let mut app = test_app();
+        app.input.set_text("draft");
+        // 初始为 Prompt。
+        assert!(app.dock_status().is_none());
+
+        // LlmRetry A → 只在 WARN Dock，transcript 暂不显示。
+        app.apply_turn_event(TurnEvent::LlmRequestError {
+            provider: None,
+            model: "mock".into(),
+            attempt: 1,
+            max_attempts: 3,
+            error_kind: "network".into(),
+            retryable: true,
+            will_retry: true,
+            delay_ms: Some(100),
+            status_code: None,
+            message: "retry-a".into(),
+        });
+        let (kind, severity) = app.dock_status().expect("retry 应暂驻 Dock");
+        assert!(matches!(kind, StatusKind::LlmRetry { message, .. } if message == "retry-a"));
+        assert_eq!(severity, DockSeverity::Warn);
+        assert!(!transcript_text(&app, 78).contains("retry-a"));
+
+        // INFO 类状态直接进 transcript，Dock 不受影响。
+        app.apply_turn_event(TurnEvent::TurnCancelled {
+            reason: Some("info-i".into()),
+        });
+        assert!(transcript_text(&app, 78).contains("info-i"));
+        assert!(matches!(
+            app.dock_status(),
+            Some((StatusKind::LlmRetry { .. }, _))
+        ));
+
+        // CommitFailed B → turnover：A 释放到 transcript，B 留在 ERROR Dock。
+        app.apply_turn_event(TurnEvent::CommitFailed {
+            reason: "commit-b".into(),
+        });
+        let (kind, severity) = app.dock_status().expect("失败应暂驻 Dock");
+        assert!(matches!(kind, StatusKind::CommitFailed { reason } if reason == "commit-b"));
+        assert_eq!(severity, DockSeverity::Error);
+        let text = transcript_text(&app, 78);
+        assert!(text.contains("retry-a"), "释放的 warn 保持原时间位置");
+        assert!(!text.contains("commit-b"), "新错误留在 Dock");
+
+        // Space：B 释放，Dock 回 Prompt，Space 不进入 InputBuffer，草稿不变。
+        let submitted = app.apply_action(KeyAction::Insert(' '));
+        assert!(submitted.is_none());
+        assert!(app.dock_status().is_none());
+        assert_eq!(app.input.text(), "draft");
+        assert_eq!(app.phase, TurnPhase::Idle);
+
+        // 最终 transcript 顺序仍为 A, I, B。
+        let text = transcript_text(&app, 78);
+        assert!(text.contains("retry-a"));
+        assert!(text.contains("commit-b"));
+        let order: Vec<usize> = ["retry-a", "info-i", "commit-b"]
+            .into_iter()
+            .map(|marker| {
+                transcript_lines(&app, 78)
+                    .iter()
+                    .position(|line| line.to_string().contains(marker))
+                    .unwrap_or_else(|| panic!("缺少 {marker}"))
+            })
+            .collect();
+        let mut sorted = order.clone();
+        sorted.sort_unstable();
+        assert_eq!(order, sorted, "transcript 顺序必须保持 A, I, B");
+
+        // 不变量：blocks 中至多一个 Dock placement。
+        assert_eq!(dock_placement_count(&app), 0);
+    }
+
+    /// 同级替换 WARN A -> WARN B：旧状态在 turnover 时进入 transcript。
+    #[test]
+    fn dock_turnover_replaces_same_severity_without_losing_the_old() {
+        let mut app = test_app();
+        for message in ["retry-a", "retry-b"] {
+            app.apply_turn_event(TurnEvent::LlmRequestError {
+                provider: None,
+                model: "mock".into(),
+                attempt: 1,
+                max_attempts: 3,
+                error_kind: "network".into(),
+                retryable: true,
+                will_retry: true,
+                delay_ms: Some(0),
+                status_code: None,
+                message: message.into(),
+            });
+        }
+        let (kind, severity) = app.dock_status().expect("最新 warn 暂驻 Dock");
+        assert!(matches!(kind, StatusKind::LlmRetry { message, .. } if message == "retry-b"));
+        assert_eq!(severity, DockSeverity::Warn);
+        let text = transcript_text(&app, 78);
+        assert!(text.contains("retry-a"), "旧 warn 已原位释放");
+        assert!(!text.contains("retry-b"));
+        assert_eq!(
+            dock_placement_count(&app),
+            1,
+            "不变量：至多一个 Dock placement"
+        );
+
+        // ERROR A -> WARN B 同理。
+        app.apply_turn_event(TurnEvent::TurnFailed {
+            reason: "turn-failed-a".into(),
+        });
+        app.apply_turn_event(TurnEvent::LlmRequestError {
+            provider: None,
+            model: "mock".into(),
+            attempt: 2,
+            max_attempts: 3,
+            error_kind: "network".into(),
+            retryable: true,
+            will_retry: true,
+            delay_ms: Some(0),
+            status_code: None,
+            message: "retry-c".into(),
+        });
+        assert!(matches!(
+            app.dock_status(),
+            Some((StatusKind::LlmRetry { message, .. }, DockSeverity::Warn)) if message == "retry-c"
+        ));
+        let text = transcript_text(&app, 78);
+        assert!(text.contains("turn-failed-a"));
+        assert!(text.contains("retry-a") && text.contains("retry-b"));
+        assert_eq!(dock_placement_count(&app), 1);
+    }
+
+    /// §14.3：WARN / ERROR 下屏蔽不可见输入编辑，全局动作照常。
+    #[test]
+    fn dock_status_blocks_invisible_input_but_keeps_globals() {
+        let mut app = test_app();
+        app.input.set_text("draft");
+        app.apply_turn_event(TurnEvent::TurnFailed {
+            reason: "blocked".into(),
+        });
+
+        // 普通字符、退格、提交都不改动不可见 InputBuffer。
+        assert!(app.apply_action(KeyAction::Insert('x')).is_none());
+        assert!(app.apply_action(KeyAction::Backspace).is_none());
+        assert!(app.apply_action(KeyAction::Submit).is_none());
+        assert_eq!(app.input.text(), "draft");
+
+        // 无修饰 Space 释放后，输入恢复正常。
+        app.apply_action(KeyAction::Insert(' '));
+        assert!(app.dock_status().is_none());
+        assert!(app.apply_action(KeyAction::Insert('x')).is_none());
+        assert_eq!(app.input.text(), "draftx");
+
+        // Prompt 态的 Space 保持普通输入行为。
+        app.apply_action(KeyAction::Insert(' '));
+        assert_eq!(app.input.text(), "draftx ");
+    }
+
+    fn transcript_text(app: &App, width: u16) -> String {
+        transcript_lines(app, width)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn dock_placement_count(app: &App) -> usize {
+        app.blocks
+            .iter()
+            .filter(|block| {
+                matches!(
+                    block,
+                    Block::Status {
+                        placement: StatusPlacement::Dock(_),
+                        ..
+                    }
+                )
+            })
+            .count()
     }
 
     /// The regression guard for the idle bound itself: `poll_turn` is rebuilt

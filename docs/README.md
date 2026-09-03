@@ -23,6 +23,7 @@ explicit architecture decision and a complete native implementation.
 - [Testing](TESTING.md) - test strategy, commands, and CI lanes.
 - [LANCET](LANCET.md) - CEP and LANCET reference. Read its drift notice: current
   contracts and explicitly retained legacy sections coexist in this document.
+- [Cassette Futurism 调色板](cassette-futurism-palette.jsx) — `lattice-tui` 所有锁定颜色值的 8 色相 × 12 阶来源。第 9 阶为实心/填充阶。这是持久资产，不是问题单范围文档，不归入 `archive/`。
 ## Architecture Decisions
 
 - [ADR 0001](adr/0001-workspace-vcs-replaces-guest-git-promotion.md) — historical

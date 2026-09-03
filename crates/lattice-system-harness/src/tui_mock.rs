@@ -23,15 +23,17 @@ pub enum TuiMockScenario {
     Disconnect,
     Slow,
     Error,
+    Flaky,
 }
 
 impl TuiMockScenario {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::LongText,
         Self::ToolCall,
         Self::Disconnect,
         Self::Slow,
         Self::Error,
+        Self::Flaky,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -41,16 +43,18 @@ impl TuiMockScenario {
             Self::Disconnect => "disconnect",
             Self::Slow => "slow",
             Self::Error => "error",
+            Self::Flaky => "flaky",
         }
     }
 
     pub const fn description(self) -> &'static str {
         match self {
-            Self::LongText => "long deterministic transcript",
-            Self::ToolCall => "session.todo_write lifecycle",
-            Self::Disconnect => "partial text followed by disconnect",
-            Self::Slow => "response stalls until Esc cancellation",
-            Self::Error => "deterministic provider HTTP 500",
+            Self::LongText => "确定性的长对话记录",
+            Self::ToolCall => "session.todo_write 工具生命周期",
+            Self::Disconnect => "输出部分文本后断开连接",
+            Self::Slow => "响应保持停滞，等待 Esc 取消",
+            Self::Error => "稳定返回提供方 HTTP 500",
+            Self::Flaky => "首次请求返回 HTTP 500，重试后成功",
         }
     }
 
@@ -83,6 +87,19 @@ impl TuiMockScenario {
             Self::Error => SseScript::HttpError {
                 status: 500,
                 body: r#"{"error":{"message":"mock provider failure"}}"#.into(),
+            },
+            // Cycle 按请求轮转、永不收敛到最后一个脚本，所以同一 TUI
+            // 会话里每一次 prompt 都重演「第一次 500、重试成功」；用于
+            // 真机验证 WARN Dock 在 turn 成功后不自动消失（§14.3 无自
+            // 动恢复），直到 Space 释放。
+            Self::Flaky => SseScript::Cycle {
+                scripts: vec![
+                    SseScript::HttpError {
+                        status: 500,
+                        body: r#"{"error":{"message":"mock provider failure"}}"#.into(),
+                    },
+                    SseScript::plain("mock response after retry"),
+                ],
             },
         }
     }
@@ -152,6 +169,15 @@ pub fn run_tui_mock(scenario: TuiMockScenario) -> Result<ExitStatus, TuiMockErro
     world.set_env("OPENAI_COMPATIBLE_MODEL", AGENT);
     world.set_env("OPENAI_COMPATIBLE_API_KEY", FAKE_API_KEY);
 
+    // ScenarioWorld::command() 有意清空子进程环境以保证 harness 隔离；
+    // 交互式 TUI 还需要终端能力变量，否则真实的 TUI 子进程探测不到
+    // COLORTERM，会回退为 ANSI 命名色而非设计的 24-bit RGB 调色板。
+    for key in ["TERM", "COLORTERM", "LANG", "LC_ALL"] {
+        if let Ok(value) = std::env::var(key) {
+            world.set_env(key, value);
+        }
+    }
+
     eprintln!(
         "TUI mock scenario: {scenario} ({})\nSubmit any prompt to run it.{}",
         scenario.description(),
@@ -213,6 +239,13 @@ mod tests {
         assert!(matches!(
             TuiMockScenario::Error.script(),
             SseScript::HttpError { status: 500, .. }
+        ));
+        assert!(matches!(
+            TuiMockScenario::Flaky.script(),
+            SseScript::Cycle { scripts }
+                if scripts.len() == 2
+                    && matches!(scripts[0], SseScript::HttpError { status: 500, .. })
+                    && matches!(scripts[1], SseScript::PlainText { .. })
         ));
     }
 
