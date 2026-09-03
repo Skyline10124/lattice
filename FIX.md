@@ -8727,33 +8727,32 @@ with the 180-second total and every global harness/xtask timeout unchanged.
   passed 1/1 and 7/7. `env -u LATTICE_BIN cargo xtask ci` passed all gates.
 - **Changed files:** `crates/lattice-system-harness/tests/direct_mutation.rs`, `FIX.md`.
 
-## 2026-09-03：GitHub #187 修正 Session config 与 store lock 测试诚信
+## 2026-09-03：GitHub #187 修正 Session 配置与存储锁测试诚信
 
-- **ID/严重级别：** GitHub #187 / MEDIUM（测试 false-green 与契约过度陈述）。
-- **问题：** `lattice-api` 的 no-remote 测试为 bare Session store 创建了
+- **ID/严重级别：** GitHub #187 / MEDIUM（测试假绿与契约过度陈述）。
+- **问题：** `lattice-api` 的无远端测试为裸 Session 存储库创建了
   `sessions.git/config`，却读取不存在的 `<temp>/.git/config`，并用
   `if config_path.is_file()` 静默跳过关键断言。该测试还混入 Session/Turn
-  与 remote-tracking ref 构造。`lattice-store` 的 lock 测试则把顺序获取两把锁
+  与远端跟踪引用构造。`lattice-store` 的锁测试则把顺序获取两把锁
   误述为“持有一把锁不会阻塞另一把锁”，超出了实际断言和生产契约。
-- **修复：** 将 config/no-remote 契约迁到 `lattice-session` owner 层。新测试从
+- **修复：** 将配置/无远端契约迁到 `lattice-session` 所有者层。新测试从
   `store.dir().join("config")` 无条件读取真实配置，并通过
-  `repo.remote_names().is_empty()` 检查没有 remote。删除 API 层重复测试及人工
-  remote-tracking 场景。现有 PendingTurn finalization 测试继续作为被删 head 断言的
-  更强 owner。store lock replacement 明确断言两条路径不等、repository lock 位于
-  Git 目录，并在释放 repository lock 后 non-blocking 重取 create lock；删除旧 identity
-  与双持锁 overclaim。
+  `repo.remote_names().is_empty()` 检查未配置远端。删除 API 层重复测试及人工
+  远端跟踪引用场景。现有 PendingTurn 最终发布测试继续作为被删分支头断言的
+  更强所有者。存储锁替代测试明确断言两条路径不等、仓库写锁位于 Git 目录，
+  并在释放仓库写锁后以非阻塞方式重取创建锁；删除旧测试标识与双持锁过度陈述。
 - **验证：**
   - 删除 API 测试前，
     `cargo test -p lattice-session git_graph::tests::state_and_locks::created_session_store_config_is_readable_and_has_no_remote -- --exact`
     与
     `cargo test -p lattice-session git_graph::tests::pending_journal::finalize_publishes_head_pin_state_and_deletes_active_turn_atomically -- --exact`
     各显示 `1 passed`。
-  - 删除旧 lock identity 前，
+  - 删除旧锁测试标识前，
     `cargo test -p lattice-store --test integration create_returns_after_releasing_create_lock_and_repo_lock_is_distinct -- --exact`
-    显示 `1 passed`。删除后两条 replacement focused sanity 仍各显示 `1 passed`，
-    `rg` 确认 crates 下两个旧 test identity 均为零命中。
+    显示 `1 passed`。删除后两条替代测试的定向回归仍各显示 `1 passed`，
+    `rg` 确认 `crates/` 下两个旧测试标识均为零命中。
   - `cargo test -p lattice-session -p lattice-store -p lattice-api` 通过；
-    `cargo fmt --all -- --check` 通过；受影响三个 crate 的 all-target Clippy
+    `cargo fmt --all -- --check` 通过；Clippy 对三个受影响 crate 的全部目标
     以 `-D warnings` 通过。
   - `env -u LATTICE_BIN cargo xtask ci` 通过全部仓库门禁。
 - **变更文件：** `docs/plans/2026-09-03-issue187-store-config-lock-test-integrity.md`、

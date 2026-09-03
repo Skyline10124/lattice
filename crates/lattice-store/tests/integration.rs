@@ -120,9 +120,8 @@ fn create_returns_after_releasing_create_lock_and_repo_lock_is_distinct() {
     let layout = StateLayout::in_state_root(state.path());
     let repo = StoreRepo::create_global(&layout, "sessions.git", meta(), |_| Ok(())).unwrap();
 
-    // The first-create lock file remains in the parent directory but is released
-    // before create returns. Steady-state repository writes use a distinct lock
-    // inside the repository.
+    // 首次创建锁文件保留在父目录中，但 `StoreRepo::create*` 返回前已经释放。
+    // 稳态仓库写操作使用仓库内另一条锁文件路径。
     let create_lock = layout.lattice_root().join(".sessions.git.create.lock");
     assert!(create_lock.exists());
 
