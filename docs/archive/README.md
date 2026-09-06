@@ -1,16 +1,12 @@
-# Documentation Archive
+# 文档归档
 
-Files in this directory are retained for historical context only. They may
-describe removed methods, superseded execution models, completed milestones, or
-proposals that were never implemented.
+本目录中的文件仅供历史追溯，可能描述已移除的方法、被取代的执行模型、
+已完成的里程碑或从未实现的提案。
 
-- [`releases/`](releases/) contains point-in-time release walkthroughs, reports,
-  and evidence templates.
-- [`designs/`](designs/) contains superseded architecture designs.
-- [`plans/`](plans/) contains completed migration plans retained only for
-  historical execution context.
-- [`uninode/`](uninode/) contains the unimplemented Uninode/context-compiler
-  research line and its latest implementation plan.
+- [发布记录](releases/)：当时的发布说明、报告与证据模板。
+- [架构设计](designs/)：已被取代的架构设计。
+- [迁移计划](plans/)：已完成的迁移计划，仅供追溯当时的执行过程。
+- [Uninode 研究](uninode/)：尚未实现的 Uninode/context-compiler 研究及其最近的实施计划。
 
-Do not use archive documents as current requirements. Start from
-[`docs/README.md`](../README.md) and verify claims against current source.
+归档文档不作为现行要求。查阅当前项目时，从[文档索引](../README.md)进入，
+并用当前源码核验相关事实。
