@@ -11,12 +11,14 @@
 
 - [项目宪章](governance/charter.md)：权威来源、授权关系与 Agent 地位。
 - [文档生命周期](governance/document-lifecycle.md)：文档分类、语言与命名、批准、修订和迁移。
+- [架构合同写作](governance/architecture-contracts.md)：补充领域模型、结构与接口、数据流、行为语义及审查要求。
 - [Agent 身份与权限](governance/agent-permissions.md)：独立身份、任务授权、凭据与操作边界。
 - [Git 操作与协作记录](governance/git-operations.md)：默认只读、写操作授权，以及 commit、PR 和评论格式。
 
 ## 架构与设计
 
 - [宿主平台](architecture/platform.md)：Linux 宿主支持范围与 WASM guest 边界。
+- [本地工作区与变更历史](architecture/workspace.md)：草案，覆盖观察、文件变更、私有历史、Turn checkpoint 与显式 Rewind。
 - [LANCET 运行时](LANCET.md)：工具目录、调用生命周期、宿主权限、工作区与审计接口。
 - [TUI 设计](specs/2026-08-31-issue182-tui-cassette-futurism-spec.md)：终端布局、交互与配色规格。
 - [Cell 准入与证据模型](specs/2026-07-26-issue28-cell-admission-design.md)：包含保留的模型与已退役的设计，先阅读文件开头的更新说明。
