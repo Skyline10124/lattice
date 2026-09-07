@@ -2,7 +2,7 @@
 
 定稿日期：2026-08-28
 实现状态：已由 PR #184 落地；2026-09-03 侧栏与停靠区重构（`docs/plans/2026-09-03-tui-sidebar-dock-plan.md`）落地后同步更新本文。
-配色源：仓库内 `docs/cassette-futurism-palette.jsx`（8 hues × 12 steps，OKLCH 生成）
+配色源：仓库内 [Cassette Futurism 配色资产](../reference/cassette-futurism-palette.md)（8 hues × 12 steps，OKLCH 生成）
 数字来源：2026-08-28 细节锁定 + 2026-08-31 讨论复核 + 2026-08-31 实现前对码复核
 
 这份 spec 记录已经定死并落地的 #182 行为。
@@ -245,7 +245,7 @@ Ok 用 `ToolOk` 勾。Failed 的 `✗`、`error_summary`、`TurnFailed`、cancel
 | `WARN` tag bg | amber-9 | `#9f6200` | Yellow | Assistant / cream-2 |
 | `ERROR` tag bg | signal-red-9 | `#cb2b31` | Red | Assistant / cream-2 |
 
-真彩色用 hex；否则用上表命名色回退。不探测 256 色、不读 terminfo、不引入 Theme 类型。不要为了这四处把整套 8×12 塞进终端。`signal-red-9` 同时作为 `ToolErr` 前景色与 `ERROR` tag 填充色，hex 不变。amber 取自配色源 `docs/cassette-futurism-palette.jsx` 的 `amber-9`（step 9 为 `solid`，是填充面应取的阶；amber 在该表的语义位就是 warning / caution），`#9f6200` 底上压 cream-2 `#f5f3ef` 对比度约 4.6:1，高于右栏 DimMeta 压 navy-11 的 2.55:1。
+真彩色用 hex；否则用上表命名色回退。不探测 256 色、不读 terminfo、不引入 Theme 类型。不要为了这四处把整套 8×12 塞进终端。`signal-red-9` 同时作为 `ToolErr` 前景色与 `ERROR` tag 填充色，hex 不变。amber 取自配色源 `docs/reference/cassette-futurism-palette.md` 的 `amber-9`（step 9 为 `solid`，是填充面应取的阶；amber 在该表的语义位就是 warning / caution），`#9f6200` 底上压 cream-2 `#f5f3ef` 对比度约 4.6:1，高于右栏 DimMeta 压 navy-11 的 2.55:1。
 
 终端底（transcript 透出）=`navy-12` `#1c293e`。它不是填出来的色，是默认底。
 

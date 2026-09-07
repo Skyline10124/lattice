@@ -160,7 +160,7 @@ TUI 承诺深色终端主题。真彩色终端使用表中 hex 值；其他终�
 
 `signal-red-9` 同时作为 `ToolErr` 前景色与 `ERROR` tag 填充色，hex 不变。
 amber 只解禁 `WARN` tag 这一处填充色，其他区域仍然禁止。配色源收录在仓库
-`docs/cassette-futurism-palette.jsx`（8 hues × 12 steps，step 9 为 `solid`，
+`docs/reference/cassette-futurism-palette.md`（8 hues × 12 steps，step 9 为 `solid`，
 是填充面应取的阶）。不新增第六种前景角色、左栏背景或主题抽象。
 
 ## 折叠锁

@@ -20,17 +20,21 @@
 - [宿主平台](architecture/platform.md)：Linux 宿主支持范围与 WASM guest 边界。
 - [本地工作区与变更历史](architecture/workspace.md)：草案，覆盖观察、文件变更、私有历史、Turn checkpoint 与显式 Rewind。
 - [LANCET 运行时](LANCET.md)：工具目录、调用生命周期、宿主权限、工作区与审计接口。
+- [LANCET 工具执行](architecture/lancet.md)：草案，承接工具组成、Host 权限、调用执行、证据与操作员读取。
+- [Cell 权限与证据](architecture/cell.md)：草案，承接 Cell 模型、能力准入、Host 授权、结果计量与版本化证据。
 - [TUI 设计](specs/2026-08-31-issue182-tui-cassette-futurism-spec.md)：终端布局、交互与配色规格。
+- [TUI 交互与视觉](architecture/tui.md)：草案，承接产品接线、键位、布局、停靠区、工具显示与配色。
 - [Cell 准入与证据模型](specs/2026-07-26-issue28-cell-admission-design.md)：包含保留的模型与已退役的设计，先阅读文件开头的更新说明。
 
 ## 开发与验证
 
 - [测试与验证](TESTING.md)：测试分层、验证责任、执行命令与 CI 入口。
+- [测试工程](contract/testing.md)：草案，承接测试分层、场景隔离、被测产物、执行资源与失败证据要求。
 
 ## 参考资料
 
 - [领域术语](../CONTEXT.md)：项目领域概念与命名。
-- [Cassette Futurism 调色板](cassette-futurism-palette.jsx)：TUI 配色的持久设计资产，不随任务关闭归档；具体用法见 TUI 设计。
+- [Cassette Futurism 配色资产](reference/cassette-futurism-palette.md)：完整色表、色阶语义与配色示例；TUI 实际用色见其规格与合同。
 
 ## 决策记录
 
