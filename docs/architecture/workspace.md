@@ -10,8 +10,7 @@ status: draft
 ## 目的与范围
 
 本合同规定 LATTICE 对本地工作区的观察、文件变更、私有变更历史及显式 Rewind 的职责、接口和行为边界。
-维护归属为 `lancet-runtime` 的工作区与历史模块；策略、会话协调和通用存储机制分别由对应领域负责。
-工具目录、完整调用生命周期、会话图模型和存储内核的内部协议不在本文展开。
+维护归属为 `lancet-runtime` 的工作区与历史模块。[Cell 合同](cell.md#准入与操作授权)维护能力准入与操作授权，[会话合同](session.md)维护 Turn 日志与重开协调，[存储合同](storage.md)维护私有库布局、锁和发布机制；本文规定工作区操作如何使用这些机制。工具组成与执行入口见 [LANCET 合同](lancet.md)。
 
 本文为待审查的承接草案。现行依据及生效前需核对的内容见文末，旧入口尚未切换。
 
@@ -25,7 +24,7 @@ status: draft
 - **Workspace History** 保存 LATTICE 已安装变更的前后内容与关联身份，以私有 Git 对象和引用表达。记录范围限于 LATTICE 触及的路径，不收集整个项目的外部修改。
 - **Session History** 保存会话及工具交互。已完成 Turn 通过项目级 `WorkspaceHistoryCheckpoint` 与工作区历史关联，普通会话指针移动不恢复本地文件。
 
-完整术语入口暂为根 [CONTEXT.md](../../CONTEXT.md)。其中无变更 Turn 的 checkpoint 表述按本文“Turn 完成边界”承接，不沿用无条件继承旧 OID 的写法。
+术语入口暂为根 [CONTEXT.md](../../CONTEXT.md)，会话历史的精确模型由[会话合同](session.md#会话turn-与历史)承接；checkpoint 的项目范围与完成边界见[Turn checkpoint](#turn-checkpoint)。
 
 ### 组件接口
 
@@ -57,8 +56,7 @@ flowchart LR
 
 ### 私有存储与数据关系
 
-工作区历史按项目寻址，保存在 Local Workspace 和用户项目 `.git` 之外的 `projects/<ProjectStoreKey>/workspace-history.git`。
-私有历史操作不修改用户 Git 的对象、引用、索引或 HEAD。生产打开路径严格核验存储；创建由新建会话的组合路径负责，不把缺失存储当成空历史。
+工作区历史使用[私有状态布局](storage.md#私有状态根)中的项目级 `workspace-history.git`，不修改用户 Git 的对象、引用、索引或 HEAD。生产路径遵循[严格打开与首次创建](storage.md#创建与严格打开)，由工作区领域继续核验历史事实，不把缺失存储当成空历史。
 
 - Git blob 保存内容，tree 表达相关路径的前后状态，commit 表达顺序及父子关系，`refs/lattice/workspace-history/current` 指向当前记录的变更。
 - 变更记录关联 `InvocationId`、`TurnId`、效果序号、方法、路径及前后内容身份。关联信息不决定 Invocation 的终态。
@@ -135,7 +133,7 @@ Rewind 撤销文件创建时按同一规则尽力清理原操作新建的目录�
 | 安装后历史发布失败 | 本地安装事实仍成立，历史发布未能确认成功 | 返回结果不确定的错误及已观察效果，不通过扫描历史猜测成功终态 |
 
 当前 Host 将历史错误映射为 `OutcomeIndeterminate`；父目录同步失败且历史记录成功时返回 `ExecutionFailed`。
-这些错误属于工作区 Host 层，完整调用的终态与重开协调仍由调用生命周期规则处理。
+这些错误属于工作区 Host 层；[调用结果](lancet.md#结果证据与失败处理)与[重开协调](session.md#重开取消与未完成状态)分别决定 Invocation 和 Turn 的关闭方式。
 
 调用方不得仅凭错误、超时或取消推定文件未改变。安装后的失败需要核验实际文件与持久引用；本文不将重新执行 Tool 作为补救方式。
 
@@ -150,15 +148,14 @@ Rewind 撤销文件创建时按同一规则尽力清理原操作新建的目录�
 - Rewind 由协调层持独占锁，覆盖规划、预检、恢复、历史引用移动、会话引用尝试和审计追加。下层验证持锁凭据，不重复获取同一锁。
 - Turn 完成时持共享锁，覆盖读取当前历史 checkpoint 至会话 Turn 与引用事务完成。
 
-会话绑定操作的锁序为 `SessionExecutionLock → WorkspaceOperationLock → 至多一个存储库写锁`。
-不得在持有存储库锁时反向取得操作锁，不升级共享锁，也不同时持有两个存储库写锁。
+持锁凭据、获取顺序及互斥规则遵循[存储锁机制](storage.md#锁与并发语义)。会话绑定操作先按[会话锁范围](session.md#操作锁与发布锁)取得 SessionExecutionLock，再按上述期限持有项目锁。
 
 非 LATTICE 写者不受该操作锁控制。外部进程仍可能在最后一次前提核验与安装之间或安装后写入；原子安装和内容身份核验不提供外部写者串行化，也不提供整个 Turn 的快照隔离。
 
 ### Turn checkpoint
 
-每个完成的 Turn 保存项目全局 `WorkspaceHistoryCheckpoint = Empty | Oid(ObjectId)`。
-该值在完成边界读取，可包含同一项目其他 Session 已记录的变更。即使本 Turn 未写文件，也读取当时的项目 checkpoint；读取失败不得转换为 `Empty`。
+`WorkspaceHistoryCheckpoint = Empty | Oid(ObjectId)` 标识项目全局工作区历史的位置。`Empty` 仅表示权威历史引用不存在，`Oid` 指向已记录历史；读取失败或非法 OID 不转为 `Empty`。
+每个完成的 Turn 都在[最终发布边界](session.md#turn-最终发布)读取并保存该值，即使本 Turn 未写文件。checkpoint 可以包含同一项目其他 Session 已记录的变更。
 
 共享操作锁保证 checkpoint 读取与 Turn 发布之间没有新的 LATTICE 变更插入。
 它不冻结外部文件修改，也不把 checkpoint 变成所有本地文件的快照。
@@ -213,7 +210,7 @@ Rewind 按共用文件变更模块报告的实际效果记录进度与审计。�
 | Turn 与项目历史关联 | `cargo test -p lattice-api --test workspace_history_acceptance` |
 | 显式恢复、冲突、引用及审计边界 | `cargo test -p lattice-api --test rewind_acceptance` |
 
-外部二进制场景和构建要求参照 [测试与验证](../TESTING.md)。测试结果与未验证范围记录在对应任务中。
+验证分层与[被测二进制要求](../contract/testing.md#被测二进制)由测试工程草案承接，具体运行配方仍见[旧测试文档](../TESTING.md)。测试结果与未验证范围记录在对应任务中。
 
 ### 现行依据与拟承接范围
 

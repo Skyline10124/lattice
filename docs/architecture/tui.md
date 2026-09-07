@@ -11,7 +11,7 @@ status: draft
 
 本合同规定全屏 TUI 的产品接线、键盘交互、布局、状态呈现与配色。维护归属为 `lattice-tui`；CLI 解析由 `lattice-cli` 负责，会话与 Turn 执行通过公开 `lattice-api` 接口完成。
 
-本文为承接草案，旧 [TUI 规格](../specs/2026-08-31-issue182-tui-cassette-futurism-spec.md)和[局部指引](../../crates/lattice-tui/AGENTS.md)尚未切换。显示状态不定义调用持久终态或会话恢复协议。
+本文为承接草案，旧 [TUI 规格](../specs/2026-08-31-issue182-tui-cassette-futurism-spec.md)和[局部指引](../../crates/lattice-tui/AGENTS.md)尚未切换。TUI 通过[会话公开接口](session.md#组件与接口)观察和操作当前会话；调用持久终态与重开规则由 LANCET、会话领域维护。
 
 ## 职责与显示模型
 
@@ -34,7 +34,7 @@ flowchart LR
     I -->|请求或取消| A["lattice-api"]
     A -->|Turn 事件| I
     I -->|block 与停靠区状态| V["视图与 viewport"]
-    V -->|终端 cell| T["备用屏幕"]
+    V -->|终端字符单元| T["备用屏幕"]
 ```
 
 图中连线表示事件或显示数据传递，持久化由 API 所属领域处理。
@@ -43,7 +43,7 @@ flowchart LR
 
 ### 水平与垂直分配
 
-尺寸以终端 cell 为单位。右侧栏宽度固定为 40，列间空隙 `gap = 1`，左列 `gutter = 2` 用于状态指示，不计入正文宽度。
+尺寸以终端字符单元为单位。右侧栏宽度固定为 40 列，列间空隙 `gap = 1`，左列 `gutter = 2` 用于状态指示，不计入正文宽度。
 
 | 条件或尺寸 | 规则 |
 | --- | --- |
@@ -87,7 +87,7 @@ Ctrl+C 提示在两秒内替代最低优先级的换行提示，过期须触发�
 工具行按事件字段渲染，不按工具名添加专用逻辑。调用 ID 用于 started/finished 配对，默认隐藏；排障显示时可截断为 `#<id>`，不能当作操作名。
 `output_len` 按字节显示，例如 `1204 B`，不写为字符数，也不添加千分位。没有事件提供的参数、hash 或操作字段不臆造显示。
 
-收到 Turn 终态或事件流结束时，仍未配对完成的 Running 工具块显示为失败并注明取消、终态原因或 `turn ended before tool completion`。这是未获得完整显示结果的界面状态，不反推 InvocationStore 中的执行终态。
+收到 Turn 终态或事件流结束时，仍未配对完成的 Running 工具块显示为失败并注明取消、终态原因或 `turn ended before tool completion`。这表示界面未获得完整显示结果，Invocation 的执行 outcome 仍以 [LANCET 持久事实](lancet.md#结果证据与失败处理)为准。
 
 ## 停靠区与输入
 
@@ -128,11 +128,11 @@ Ctrl+C 提示在两秒内替代最低优先级的换行提示，过期须触发�
 WARN/ERROR 显示时屏蔽普通输入、编辑、粘贴与提交，不修改不可见的输入缓冲；全局翻页、取消和退出行为继续按条件执行。
 启动时探测一次 keyboard enhancement 支持，提示文案与探测结果一致。
 
-输入历史尽力保存到 `<session_dir>/repl_history.txt`，沿用纯文本行格式。协作取消通过 API 的 `cancel_flag` 发出；raw 模式下 Ctrl+C 作为 KeyEvent 处理，不另起系统信号 watcher。取消后的 Turn 提交或 pending 状态以公开 API 的持久协议为准。
+输入历史尽力保存到 `<session_dir>/repl_history.txt`，沿用纯文本行格式。协作取消通过 API 的 `cancel_flag` 发出；raw 模式下 Ctrl+C 作为 KeyEvent 处理，不另起系统信号 watcher。取消后的 Turn 提交或 pending 状态按[会话取消与关闭规则](session.md#重开取消与未完成状态)处理，TUI 展示 API 返回的结果。
 
 ## 配色与终端约定
 
-支持深色终端。真彩色使用下列 hex，其他终端使用命名色回退，不探测 terminfo 或 256 色模式。配色来自 [Cassette Futurism 配色资产](../reference/cassette-futurism-palette.md)，仅使用约定的角色和填充面。
+支持深色终端。真彩色使用下列 hex，其他终端使用命名色回退，不探测 terminfo 或 256 色模式。[Cassette Futurism 配色资产](../reference/cassette-futurism-palette.md)提供参考色表，TUI 实际用色由本节的角色和填充面约定。
 
 | 前景角色 | Token | Hex | 命名色回退 | 用途 |
 | --- | --- | --- | --- | --- |
@@ -163,7 +163,7 @@ WARN/ERROR 显示时屏蔽普通输入、编辑、粘贴与提交，不修改不
 | --- | --- |
 | 键位、折行、停靠区、状态释放与布局 | `cargo test -p lattice-tui` |
 | CLI 接线 | CLI 表面变化时检查 `cargo test -p lattice-cli` |
-| 实际终端入口 | 重建 lattice-cli，以对应 `LATTICE_BIN` 运行 harness 的 `pty_tui_smoke` |
+| 实际终端入口 | 按测试工程的[被测二进制要求](../contract/testing.md#被测二进制)准备 lattice-cli，运行 harness 的 `pty_tui_smoke` |
 | 交互与配色 | 真彩色和命名色回退、超宽及极小终端、错误确认、翻页与光标的人工检查 |
 
 自动化与人工检查分工见[测试工程草案](../contract/testing.md)，具体运行指南仍见[旧测试文档](../TESTING.md)。颜色辨识与终端行为需实机核验，不能仅由布局计算通过推定体验合格。

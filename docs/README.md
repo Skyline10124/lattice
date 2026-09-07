@@ -18,6 +18,8 @@
 ## 架构与设计
 
 - [宿主平台](architecture/platform.md)：Linux 宿主支持范围与 WASM guest 边界。
+- [私有存储与持久化](architecture/storage.md)：草案，承接状态寻址、三库归属、Git 内核、创建与打开、通用锁序、引用发布及持久性边界。
+- [会话与 Turn](architecture/session.md)：草案，承接会话历史、对话模型、请求接受、持久阶段、结果关闭与重开协调。
 - [本地工作区与变更历史](architecture/workspace.md)：草案，覆盖观察、文件变更、私有历史、Turn checkpoint 与显式 Rewind。
 - [LANCET 运行时](LANCET.md)：工具目录、调用生命周期、宿主权限、工作区与审计接口。
 - [LANCET 工具执行](architecture/lancet.md)：草案，承接工具组成、Host 权限、调用执行、证据与操作员读取。

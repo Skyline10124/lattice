@@ -11,7 +11,7 @@ status: draft
 
 本合同规定 Tool 的 Cell 模型、能力准入、Host 操作授权、结果计量和证据语义。`lancet-protocol` 维护数据契约，`lancet-runtime` 执行准入、授权与记录，`lancet-authority` 提供领域策略，`lancet-audit` 负责持久证据及操作员读取。
 
-工具构建、执行生命周期和终态发布的衔接见 [LANCET 合同草案](lancet.md)。路径解析、文件安装和恢复效果见[工作区合同草案](workspace.md)。本文保持草案，旧规则入口尚未切换。
+[LANCET 合同](lancet.md#构建与封闭组成)维护工具构建与组成，并负责[执行及终态发布](lancet.md#调用身份与执行流程)；[会话合同](session.md#pendingturn-与结果关闭)维护结果关闭与重开协调；[工作区合同](workspace.md#文件变更)维护文件安装与恢复效果。本文保持草案，旧规则入口尚未切换。
 
 ## 模型与声明
 
@@ -34,7 +34,7 @@ status: draft
 
 ### 声明来源与校验
 
-每个 Source Tool manifest 维护自身 Descriptor，生成链和封闭组成由 LANCET 合同承接。Descriptor 中 scope 名称、能力名称各自唯一，每个能力引用已声明的 scope。
+Descriptor 的 manifest 来源和生成链见 [LANCET 的概念与契约来源](lancet.md#概念与契约来源)及[生成与校验](lancet.md#生成与校验)。其 Cell 声明须满足：scope 名称、能力名称各自唯一，每个能力引用已声明的 scope。
 能力名称采用至少两段的小写点分形式，各段允许小写字母、数字、下划线和连字符；语法为 `^[a-z0-9_-]+(\.[a-z0-9_-]+)+$`。跨 Tool 的同名能力必须对应相同 Cell。
 
 CellRef 使用 `ctx:ext:scope` 三段形式。guest 返回的 CellRef 不包含 trust；Host 根据 Descriptor 补全证据中的信任边界。带第四段 trust 的 guest CellRef 应被拒绝。scope 名称不能包含会改变分段的冒号。
@@ -69,7 +69,7 @@ CellRef 使用 `ctx:ext:scope` 三段形式。guest 返回的 CellRef 不包含 
 | 会话 | 目标绑定当前调用的 Turn；会话 import 负责取得相应的会话 scope |
 | 无具体目标或不支持的目标 | 操作授权拒绝 |
 
-路径形式检查不替代文件系统包含关系核验；主机名形式检查不替代网络策略。具体领域规则继续由所属合同维护。
+路径形式检查不替代文件系统包含关系核验；主机名形式检查不替代网络策略。工作区 Host 继续执行[路径与观察](workspace.md#路径与观察)及[文件变更](workspace.md#文件变更)规则，网络 Host 继续执行 [LANCET 的网络获取规则](lancet.md#网络获取)。
 
 `host-control.emit-event` 使用会话通道上的 `mutate:none:<scope>` 和当前 Turn 目标。无法唯一确定会话 scope 时拒绝该操作；取消状态查询是无效果控制探测，不要求效果授权。
 
@@ -101,7 +101,7 @@ guest 返回一个结果 CellRef 和结构化结果。Host 解析后，要求结
 有效结果的 `context_measure` 为 `len(canonical_json(result_value))`，单位是字节，由 Host 计算。所有结果效果均计量，不因声明 `alloc`、`free` 或 `mutate` 而省略。
 有界领域操作返回数据时按对应 Host 定义记录交付量；无返回值的操作可不带该度量。操作返回量与最终结果表示是不同测量对象，不能直接相加视为唯一预算消耗。
 
-计量提供事实，预算执行由对应 Host 与 Turn 预算负责。`free` 标签本身不证明上下文已释放，guest 自报用量也不能取代 Host 度量。
+计量提供事实，预算执行由对应 Host 与 Turn 预算负责。`free` 标签本身不证明上下文已释放，guest 自报用量也不能取代 Host 度量。此处结果值的字节计量与会话层 [ToolContent 材料上限](session.md#resultdraft-与关闭材料)分别约束各自对象，不互作替代。
 
 ## 证据模型与失败语义
 
@@ -117,7 +117,7 @@ guest 返回一个结果 CellRef 和结构化结果。Host 解析后，要求结
 `ObservedTarget::None` 可以作为数据词汇存在，但不能据此授权一个无目标的 Host 操作。
 
 领域证据按需要携带截断、可见性、变更前提与安装事实、网络逐跳事实等信息。缺省值与明确的否定结论区分，例如未提供 `truncated` 不等于明确声明未截断。
-内容身份、安装效果和持久性之间的具体关系由工作区合同说明；Cell 记录不能替代该领域所需的效果报告。
+内容身份、安装效果和持久性之间的关系见[工作区效果报告](workspace.md#效果报告与辅助资源清理)；Cell 记录不能替代该领域报告。
 
 ### 失败中的事实保留
 
@@ -129,7 +129,7 @@ guest 返回一个结果 CellRef 和结构化结果。Host 解析后，要求结
 | 结果校验失败、trap、超限或取消 | 已记录的操作效果与拒绝继续保留，结果效果依实际校验结果产生 |
 | 没有可靠的完整执行证据 | 由调用协调依据持久事实处理，不从结果材料反推或补造执行证据 |
 
-`CellEvidenceTriple` 将三类版本化记录交给协调层，作为内部 receipt，不是 provider 结果字段。InvocationStore 内终态和完整证据的原子发布、重开协调与发布失败处理由 LANCET 及会话领域承接。
+`CellEvidenceTriple` 将三类版本化记录交给协调层，构成内部 receipt 的证据部分，不是 provider 结果字段。[LANCET](lancet.md#结果证据与失败处理)维护终态与完整证据的一次发布边界；[会话合同](session.md#重开取消与未完成状态)维护重开协调及不能持久关闭时的处理。
 调用事件、内存证据快照和操作员投影不构成持久化确认。
 
 ### 内容与版本边界

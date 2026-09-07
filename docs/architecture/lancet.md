@@ -11,8 +11,7 @@ status: draft
 
 本合同规定 LANCET 的工具组成、Tool Host 边界、调用执行及证据与持久事实的衔接。维护归属为 `lancet-runtime`、`lancet-authority`、`lancet-protocol`、`lancet-audit` 和 `lancet-api` 各自负责的部分。
 
-产品调用由 `lattice-api::TurnCoordinator` 发起和协调。完整 Turn 状态机、会话存储和通用 Git 持久化机制由对应领域维护。
-本文为承接草案，尚未替代旧 [LANCET 运行时](../LANCET.md)。工作区详细设计见[工作区合同草案](workspace.md)，其未完成的设计补充不因本文件引用而生效。
+产品调用由 `lattice-api::TurnCoordinator` 发起和协调。[会话合同](session.md#pendingturn-与结果关闭)维护完整 Turn 日志与结果关闭，[存储合同](storage.md#对象引用与持久化)维护通用发布与持久化机制，[工作区合同](workspace.md)维护文件操作。本文为承接草案，尚未替代旧 [LANCET 运行时](../LANCET.md)；相邻草案中的设计要求不因引用而生效。
 
 ## 工具模型与职责
 
@@ -61,7 +60,7 @@ flowchart LR
     R -->|按绑定身份执行| H["Tool Host 与 Component"]
 ```
 
-组成校验拒绝缺失、重复、未经批准的注册，以及 Descriptor、产物摘要、实际 imports、ABI 或预期身份不一致。跨工具复用同一能力名称时，必须映射到相同 Cell。
+组成校验拒绝缺失、重复、未经批准的注册，以及 Descriptor、产物摘要、实际 imports、ABI 或预期身份不一致。能力名称与 Cell 的一致性遵循 [Cell 声明校验](cell.md#声明来源与校验)。
 
 默认发行包含 `observe.workspace`、`mutate.create`、`mutate.edit`、`fetch.web` 和 `session.todo_write`。增加 Source Tool 需要在新运行时构建前完成准入；每个运行进程保持原有目录，不能动态加载更多代码。
 启用列表仅过滤固定目录；未知工具名和未知被拒绝能力名导致构造失败。
@@ -112,7 +111,7 @@ Cell 模型、能力匹配、scope/trust 解析及拒绝证据由该草案集中
 `fetch.web` 仅通过 `network-fetch` Host 发出 GET 请求。Host 依次核验允许主机、协议与地址策略，解析 DNS 并固定连接地址，验证 TLS，并对每次重定向重新检查。
 公网访问采用 HTTPS；显式 localhost 策略作为受控例外处理，其余私有、保留和特殊地址拒绝。跨源重定向移除调用方请求头，响应头、响应体、重定向次数和 deadline 均受限制，取消与 Turn 观察预算参与执行。
 
-证据中的逐跳端点移除 userinfo、query 和 fragment，分别记录 Host 已接收与已交付 guest 的字节量。I/O 已发生后的超限、取消或其他失败保留为实际效果，不能记作设施调用前的拒绝。
+网络证据按 [Cell 的内容边界](cell.md#内容与版本边界)保存脱敏端点，分别记录 Host 已接收与已交付 guest 的字节量。I/O 已发生后的超限、取消或其他失败保留为实际效果，不能记作设施调用前的拒绝。
 
 ## 调用身份与执行流程
 
@@ -122,18 +121,17 @@ Cell 模型、能力匹配、scope/trust 解析及拒绝证据由该草案集中
 
 协调层以 `PlanKey` 和精确有序绑定预留一批调用。绑定包含 Session/Turn/消息/片段地址、方法、Descriptor 身份与规范参数摘要。同一预留的重复请求须逐项一致；不一致或部分预留不能作为可执行批次接受。
 
-生产流程如下，持久节点属于相应领域存储：
+InvocationStore 的执行路径为 `Reserved → DispatchStarted → Terminal`；未分发的预留也可直接关闭为 `NotExecuted` 终态。`Absent` 是查询结果，不是记录。Terminal 同时保存执行 outcome、结果材料状态和完整 Cell 证据。
+下图展开已预留调用的分发与运行时返回路径。协调层先按[逐调用关闭顺序](session.md#绑定与逐调用关闭)持久进入初始 StepClosing，才进入图中流程；receipt 返回后的候选固定、材料发布、终态发布与游标推进也由该节衔接。
 
 ```mermaid
 flowchart TD
-    B["协调层生成精确绑定"] --> R["InvocationStore 持久预留 Reserved"]
-    R --> V["核验预留、方法及规范参数"]
+    R["已持久预留 Reserved"] --> V["核验预留、方法及规范参数"]
     V --> D["持久发布 DispatchStarted"]
     D --> A["Cell 准入与调用上下文"]
-    A --> E["Component 与受控 Host 操作"]
-    E --> Q["类型化结果与 Host 证据"]
-    Q --> T["协调层发布终态与完整证据"]
-    T --> S["关闭对应 ToolResult 与后续 Turn 阶段"]
+    A -->|获准| E["Component 与受控 Host 操作"]
+    A -->|拒绝| Q["ExecutionReceipt：类型化结果与 Host 证据"]
+    E --> Q
 ```
 
 `DispatchStarted` 在执行器接管前必须持久化，是“可能已执行”的保守边界，不证明 guest 已开始或外部效果已发生。调用在此前停止时按未执行关闭；越过该边界后不能仅凭没有返回值推定未执行。
@@ -151,13 +149,12 @@ flowchart TD
 | Cell 准入拒绝 | 不把控制权交给 Component，返回类型化拒绝与准入证据 |
 | Host 操作前拒绝 | 不调用对应设施，记录拒绝；与调用整体终态分别处理 |
 | trap、资源耗尽、超时或取消 | 返回有界、脱敏的类型化错误，保留已经观察到的效果 |
-| 执行已返回，终态与证据发布未确认成功 | 协调层停止后续分发，按有限发布预算处理；未能持久关闭时保持 Turn pending |
-| 重开时只有 Reserved | 关闭为 `NotExecuted`，不重新分发 |
-| 重开时已有 DispatchStarted 但无可靠终态 | 按持久事实协调为 `Indeterminate`，不借结果草稿猜测成功 |
+| 执行已返回，终态与证据发布未确认成功 | 协调层停止后续分发，按会话合同的 [FinalizeBudget](session.md#resultdraft-与关闭材料)处理；未能持久关闭时保持 Turn pending |
 
-执行终态与结果材料可用性分别记录；执行成功不保证模型可见结果材料可用。终态和完整 Cell 证据在 InvocationStore 内作为一次原子发布处理，不扩展为文件、SessionStore 和 InvocationStore 的跨库事务。
+执行 outcome 为 `Succeeded`、`Failed`、`Rejected`、`Cancelled`、`NotExecuted` 或 `Indeterminate`，与结果材料可用性分别记录。执行成功不保证模型可见结果材料可用；[会话合同](session.md#resultdraft-与关闭材料)维护材料状态及 ToolResult 关闭。
+终态和完整 Cell 证据在 InvocationStore 内作为一次 ledger commit/ref 原子发布，按[存储屏障](storage.md#屏障覆盖)确认持久性；这一范围不扩展为文件、SessionStore 和 InvocationStore 的跨库事务。
 
-`CepError` 的 retriability 描述错误属性，不授权重新执行已越过分发边界的调用。重开只进行关闭与协调，不重新请求 provider 或分发 Tool。已有终态保持不变；存储无法写入时，协调层保留未完成阶段并报告恢复需求。有限发布重试和 PendingTurn 的精确阶段继续由 ADR 0005 及对应会话领域承接。
+`CepError` 的 retriability 描述错误属性，不授权重新执行已越过分发边界的调用。重开时 LANCET 提供固定持久事实，不重新执行 Tool；协调层按[会话重开规则](session.md#重开取消与未完成状态)关闭调用与 Turn，包括未分发关闭、不确定终态和存储不可写时保留 pending。
 
 ## 证据与操作员读取
 
@@ -168,7 +165,7 @@ flowchart TD
 
 ### InvocationStore 与操作员接口
 
-`lancet-audit` 拥有项目级 `projects/<ProjectStoreKey>/invocations.git`，负责有序批量预留、持久分发标记、终态与证据以及固定视图读取。通用 Git 机制由 `lattice-store` 提供；操作员投影、派生索引和事件通知不成为第二套生命周期权威。
+`lancet-audit` 拥有[私有状态布局](storage.md#私有状态根)中的项目级 `invocations.git`，负责有序批量预留、持久分发标记、终态与证据以及固定视图读取。通用 Git 机制由 `lattice-store` 提供；操作员投影、派生索引和事件通知不成为第二套生命周期权威。
 
 操作员查询经 `lancet-api` 调用 `lancet-audit`，不组合 Tool runtime，也不取得 Session 或 Workspace 操作锁：
 
@@ -195,7 +192,7 @@ flowchart TD
 | 组成、准入、Host 与运行时结果 | `cargo test -p lancet-runtime` |
 | 调用入口与操作员接口 | `cargo test -p lancet-api`、`cargo test -p lancet-audit` |
 
-`lattice lancet doctor` 检查工作区规范化与生成目录的组成；它不验证完整执行、持久终态或 Bundle 安装。外部二进制场景和必要构建条件参照[测试与验证](../TESTING.md)。
+`lattice lancet doctor` 检查工作区规范化与生成目录的组成；它不验证完整执行、持久终态或 Bundle 安装。外部场景遵循测试工程的[被测二进制要求](../contract/testing.md#被测二进制)，具体构建与运行配方仍见[旧测试文档](../TESTING.md)。
 
 ### 来源与未完成承接
 
