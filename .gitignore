@@ -45,3 +45,6 @@ repos/
 .lattice/
 .lancet/
 findings/
+
+# 不再适用的文档
+docs/archive/
