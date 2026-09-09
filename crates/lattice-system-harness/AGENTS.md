@@ -1,126 +1,28 @@
-# AGENTS.md
+# lattice-system-harness 工作指引
 
-Crate-local guidance for `lattice-system-harness`.
+## 职责
 
-## Role
+测试已构建 `lattice` 二进制的独立外部 harness，不是产品 crate 的 integration-test target。只共享通用驱动，场景 fixture 和断言留在本场景，Direct 场景共用的 plumbing 位于私有 `tests/support/mod.rs`。
 
-External system-test harness for the built `lattice` binary. It is **not** an
-integration-test target of any product crate.
+## 上位文档
 
-## Boundaries
+修改前读取[测试工程](../../docs/development/testing.md)及[宿主平台](../../docs/architecture/platform.md)。构建、命令和产物定位见[验证指南](../../docs/development/validation-guide.md)，产品断言同时读取对应领域合同。
 
-- Manifest must not depend on `lattice-*`, `lancet-*`, `{ workspace = true }`,
-  or `path = "../…"` product crates. Enforced by `cargo xtask harness-boundary`.
-  General test/system libraries are allowed (`tempfile`, `portable-pty`,
-  `serde`, `thiserror`); the boundary check keys off product-crate names and
-  workspace membership, not off "any dependency".
-- Only obtain the product via **`LATTICE_BIN`**; never import session/agent/API crates.
-- Scenario worlds use isolated HOME/XDG, dedicated session store under scenario
-  HOME, scenario-local ports, empty project `.env`, and `env_clear()` before allow-list.
-- Git and `lattice` subprocesses share the same cleared allow-list (no host HOME/git config).
-- Read session/audit state through `lattice` CLI only.
-- The fake LLM (`src/fake_llm.rs`) connects through the formal
-  `OPENAI_COMPATIBLE_*` configuration; there is no test-only provider,
-  hidden flag, or product-side change (RFC #41 (Codeberg #19) decision four).
-- `SessionSendDriver` (`src/session_send.rs`) drives the public
-  `lattice --json session send` entrypoint and returns raw command evidence
-  together with parsed JSONL. Unknown valid `TurnEvent` variants are kept as
-  `Unknown`; malformed nonblank lines are retained separately. Exit code
-  classification mirrors the product's 0/1/2 contract without importing it.
-- Subprocesses are spawned in their own Linux process group
-  (`process_group(0)`). Timeout and controlled interrupt retain drained
-  stdout/stderr, reap the direct child, and clean the whole group. Do not add a
-  non-Linux no-op or degraded cleanup fallback.
-- Fake-provider races use `ResponseGate` plus bounded request waits.
-- Fast and Direct failure paths build one `FailureReport`. It keeps the primary
-  assertion, safe bundle-relative leak locations, shared metadata-only command
-  diagnostics, and every independent evidence error. Never store raw output or
-  matched secret bytes in the report.
-- Failure bundle names must be one non-reserved path component. `.claims` is
-  reserved. Acquire the nonblocking `<base>/.claims/<scenario>.lock` claim before
-  stale cleanup, hold it through persistence and scanning, and never delete the
-  lock file.
-- A live `ScenarioEvidence` owns its scenario claim from construction until
-  `finish_report`/`finish` consumes it or the recorder is dropped. Nested finalizers
-  must use a distinct scenario name.
-- Redact evidence before writing. The recursive byte-level scanner records all
-  observed leaks and scan errors, patches hits in place, and continues across
-  reachable siblings.
-- Failure-only workspace snapshots use symlink metadata and record a symlink as
-  a leaf. They never follow its target.
-- `ScenarioBudget::cap_timeout` applies `min(step_timeout, remaining_total)`;
-  multi-command drivers must use the capped value for every spawned command.
-- Direct-Local integration targets share only generic plumbing through private
-  `tests/support/mod.rs`; scenario-specific fixtures and assertions stay local.
+## 局部约束
 
-## Test Layers (RFC #41 decision two / seven, updated by #62 (Codeberg #40))
+- manifest 不依赖 lattice/lancet 产品 crate，不用 workspace/path 形式引入产品实现；通用测试和系统库允许。由 `cargo xtask harness-boundary` 按产品名称及 workspace 归属核验，不是禁止所有依赖。
+- 仅通过 `LATTICE_BIN` 获取产品。读取 session/audit 走公开 CLI；工作区历史的既有通用 Git 对象检查例外按测试合同执行，不扩大私有读取面。
+- 环境隔离、端口、空 `.env`、env_clear/allowlist、ResponseGate、进程组清理、预算、FailureReport、claim 和脱敏遵循测试合同，不增加非 Linux 空实现或故障跳过。
+- fake LLM 通过正式 `OPENAI_COMPATIBLE_*` 接入，无隐藏参数或测试 provider。`fast_env_boundary` 删除变量用 `unset_env`，不能以设空串代替不存在而产生假绿。
+- `SessionSendDriver` 驱动 `lattice --json session send`，同时返回原始命令证据与解析 JSONL；未知但有效事件保留为 `Unknown`，非空畸形行另存，不导入产品类型即可核验 0/1/2 退出契约。
+- 场景专用断言不可为共享而丢失；独立 release operator fixture/断言由 rollout 对锁定 release 二进制运行，不能把 debug `direct_operator` 重跑当作 release 验收。
 
-- **Fast binary black-box** (`tests/fast_cli_help.rs`, plus all `#[test]`
-  unit tests in `src/`): run on every ordinary CI. `cargo xtask ci` runs
-  these by default. `tests/fast_env_boundary.rs` (#99) belongs to this lane: it
-  writes a hostile `.env` into the scenario project and asserts through
-  `doctor` / `resolve` / `session new` that `LATTICE_*`, provider endpoint,
-  proxy, and `HOME`/`XDG_*` keys do not take effect while an API key still
-  does. Those scenarios call `ScenarioWorld::unset_env` to remove a key from
-  the child allow-list entirely — `set_env(key, "")` still defines the
-  variable, and a defined variable can never be injected from a `.env`, so the
-  scenario would pass for the wrong reason.
-- **Direct-Local turn scenarios** (`tests/direct_local_turn.rs`): plain-text
-  turn, session reopen against changed Local state, and policy denial
-  skeletons. They drive the real turn path against the canonical Local
-  Workspace — no KVM, no MSB daemon, no OCI image, no `[workspace]` profile
-  section — and run in the ordinary lane. The full Direct-Local scenario
-  matrix landed in #46 (Codeberg #24) slices 0–8: `direct_turn_contract`
-  (turn lifecycle + reopen), `direct_observation` (visibility/bounds),
-  `direct_mutation` (atomic mutation/concurrency/effect denial), `direct_tools`
-  (fetch/todo/catalog/retired methods), `direct_failures` (provider
-  failures/SIGINT/deadline/no-rollback), `direct_operator` (independent native,
-  Component, mixed, and newest-20 audit/status contracts), `direct_secrets`
-  (sentinel scanning),
-  `direct_session_isolation` (two-session graph isolation),
-  `direct_workspace_history` (#63: a real turn's installed mutation is
-  recorded in the private bare history under the scenario's isolated HOME,
-  read back with plain `gix`; a pre-install failure records nothing),
-  `direct_crash_barriers` (feature `crash-barriers`: real SIGSTOP/SIGKILL
-  windows, including cumulative multi-step transcript recovery, pre-dispatch
-  cancellation closing durably as `StepClosed::CancelTurn` with no Tool effect, and
-  post-mutation WorkspaceHistory checkpoint publication),
-  `direct_rewind` (#64: `session rewind` reverses only the later LATTICE
-  mutations while unrelated external creates/edits/deletes and ignored
-  content survive, the session log lands on the target Turn, the project
-  `.git` is untouched, pins survive a prune; a diverged LATTICE path exits 1
-  with a structured conflict and nothing moves). The
-  `TurnCommit.workspace_history_oid` binding is not observable through the
-  CLI by design (#63 adds no user command), so it stays a library-layer
-  assertion.
-- **Release operator matrix** (`tests/release_operator.rs`, feature
-  `release-operator`): a separate N/C/M fixture and assertion set driven only
-  by `cargo xtask rollout` against the locked release binary. The ordinary
-  harness suite does not build this target, and the rollout gate does not
-  rerun a `direct_operator` test as a release substitute.
-- **PTY smoke** (`tests/pty_tui_smoke.rs`): proves the TUI entrypoint wires
-  into the same Direct-Local `stream_turn` chain. Also ordinary-lane since
-  #62; the retired KVM-lane opt-in gate and its `layer_guard` module are
-  gone — a broken Direct-Local environment is a product failure, never a
-  skip.
+## 场景与验证入口
 
-## Verification
-
-Run from the workspace root:
-
-- `cargo xtask harness-boundary`
-- `cargo build -p lattice-cli --bin lattice`
-- Full suite (ordinary lane, no KVM/MSB required):
-  `LATTICE_BIN="$(pwd)/target/debug/lattice" cargo test -p lattice-system-harness`
-`LATTICE_BIN` is resolved by `LatticeDriver::from_env` **in the test process**
-(`is_file()` then `canonicalize`), i.e. relative to the test-process cwd,
-before any scenario child is spawned. A relative path that is a real file from
-that cwd works fine — `canonicalize` then stores an absolute path so the later
-child `current_dir` change to the scenario project dir cannot break it. The
-old `LATTICE_BIN=target/debug/lattice` example failed only because `cargo test
--p lattice-system-harness` runs with the crate dir as cwd, where
-`target/debug/lattice` does not exist (the binary is built at the workspace
-root's `target/`). So the requirement is "a real file resolvable from the
-test-process cwd"; `$(pwd)/target/debug/lattice` from the workspace root is the
-cwd-independent way to satisfy it (and is what `cargo xtask ci` defaults
-to). An absolute path is recommended but not a code-enforced contract.
+- 快速场景覆盖 help、环境和 CLI；Direct 场景覆盖真实 Turn/reopen、观察、变更、工具、失败/取消/deadline、操作员、秘密、会话隔离、工作区历史及 Rewind。
+- `direct_operator` 与 `release_operator` 分别保留 fetch、todo 和组合调用场景及 newest-20 断言；它们均使用 Component，不再用 native/Component/mixed 名称描述执行路径。
+- crash-barriers 显式场景验证 SIGSTOP/SIGKILL 窗口、多步累积 transcript、分发前取消的持久关闭及变更后的 checkpoint；普通套件不等于运行了这些 feature。
+- Rewind 场景保护无关外部内容、项目 Git、pin 可达性与预检冲突；预检无移动不推广到执行中失败。TurnCommit 的 checkpoint 绑定等未公开数据关系仍由库层验证。
+- PTY smoke 验证同一 Direct-Local Turn 接线，不能以环境故障跳过。
+- 先按测试合同准备当前被测二进制，再运行所需 fast/direct/PTY target；`release-operator`、`crash-barriers` 必须显式说明。`LATTICE_BIN` 在测试进程 cwd 解析，绝对路径是推荐做法而非额外代码契约。
+- 全量 harness 仅在影响范围需要时执行，不作为每次局部修改的默认命令。
