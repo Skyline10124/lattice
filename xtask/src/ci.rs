@@ -7,13 +7,13 @@
 //! machine has 24 cores and runs a heavy desktop whose Electron apps massively
 //! over-reserve virtual address space; cargo's default of one rustc per core
 //! plus codegen allocation spikes has triggered global OOM during the compile
-//! phase (see FINDINGS.md "OOM: dev-machine compile-phase oversubscription").
+//! phase (see docs/archive/records/FINDINGS.md "OOM: dev-machine compile-phase oversubscription").
 //! The cap bounds the compile footprint on oversubscribed hosts without
 //! slowing down resource-rich CI, where `CARGO_BUILD_JOBS` can be raised.
 //!
 //! The test step runs one `cargo test -p <crate>` per workspace member in
 //! dependency order, each under a hard timeout. A single runaway (e.g. a
-//! network test hanging in a DNS-blackhole environment — see FINDINGS.md
+//! network test hanging in a DNS-blackhole environment — see docs/archive/records/FINDINGS.md
 //! L-26-01) is bounded to its crate's budget and fails fast instead of
 //! hanging the whole gate indefinitely.
 

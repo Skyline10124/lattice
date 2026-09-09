@@ -1,89 +1,31 @@
-# AGENTS.md
+# lattice-cli 工作指引
 
-Crate-local guidance for `lattice-cli`.
+## 职责
 
-## Role
+维护 `lattice` 二进制入口、clap 命令与分派、文本和 JSONL 渲染、dotenv/日志初始化、退出码；通过下层公开 API 调用会话、模型和审计能力，不重复 Turn 或 LANCET 执行逻辑。
 
-This crate owns the `lattice` binary entry point, clap command surface,
-human-readable rendering, JSONL rendering, dotenv/logging setup, exit-code
-semantics, and command modules that call into public API/session/model/audit
-layers.
+- `main.rs`：命令、全局参数、分派和退出处理。
+- `commands/run.rs`：Turn 流渲染、JSONL、idle timeout、usage 和退出分类。
+- `commands/session.rs`：会话操作与发送；models/resolve/model_render 模块负责模型列表与解析输出。
+- `commands/doctor.rs`：凭据与 endpoint 来源列、工作区 `.env` 摘要；audit/lancet 模块保持为公开下层接口的薄封装。
+- `env_boundary.rs`：唯一进程环境安装入口，在 Tokio 运行时创建前执行，保证 `set_var` 的单线程前提。
 
-## Sub-Architecture
+## 上位文档
 
-- `src/main.rs` owns clap commands, global flags, command dispatch, and process
-  exit handling.
-- `src/commands/run.rs` owns turn stream rendering, JSONL output, idle timeout,
-  usage rendering, and exit-code derivation.
-- `src/commands/session.rs` owns session command operations and turn send flow.
-- `src/commands/models.rs`, `resolve.rs`, and `model_render.rs` own model
-  listing and resolution output.
-- `src/commands/doctor.rs` owns diagnostics, including the credential/endpoint
-  `source` column and the workspace `.env` summary.
-- `src/env_boundary.rs` owns the workspace `.env` trust boundary: it loads the
-  file, refuses the untrusted key classes, and records the provenance `doctor`
-  reports. It is the only place that mutates the process environment, and
-  `main` calls it before the tokio runtime exists because `set_var` is only
-  sound single-threaded.
-- `src/commands/audit.rs` and `lancet.rs` own audit and LANCET inspection
-  surfaces.
-- CLI audit/status tests serialise `XDG_STATE_HOME` through
-  `lancet_audit::ScopedXdgStateHome`, pulled in via
-  `[dev-dependencies] lancet-audit = { features = ["test-support"] }`. The
-  crate-local `src/commands/test_env.rs` copy was deleted in GitHub #39.
-- `tests/cli_cutover.rs` covers cutover behavior; release/end-to-end smoke testing
-  is owned by `lattice-system-harness` (`LATTICE_BIN` black-box) and `lattice-api`.
+修改前读取[会话合同](../../docs/architecture/session.md)、[LANCET 操作员接口](../../docs/architecture/lancet.md)、[TUI 分工](../../docs/architecture/tui.md)和[测试工程](../../docs/development/testing.md)。运行配方见[验证指南](../../docs/development/validation-guide.md)。
 
-## Boundaries
+## 环境与输出边界
 
-- Keep the CLI thin; do not duplicate turn runtime or native LANCET execution.
-- Prefer typed API/session/model calls over lower-level internals.
-- Keep JSONL output aligned with public `TurnEvent` values from `lattice-api`.
-- Command parsing belongs here; durable runtime semantics belong below the CLI.
+- 工作区 `.env` 是不可信输入。按大小写无关模式拒绝 `LATTICE_*`、provider endpoint 键（`*_BASE_URL`、`*_API_BASE`、`*_API_URL`、`*_ENDPOINT`）、`*_PROXY`、`HOME`/`XDG_*`、`SSL_CERT_FILE`/`SSL_CERT_DIR`；普通凭据仍适用。
+- 拒绝依据模式而非枚举变量名。新增依赖读取的环境变量时核对 `classify`：proxy 会影响 `hyper-util`，证书变量会让 `rustls-native-certs` 替换信任库。
+- 不增加第二个 loader 或直接调用 `dotenvy::dotenv()`。拒绝值不得进入变量替换状态；启动不打印拒绝，doctor 提供观察结果且不回显源行。
+- 环境决策进入纯 `plan_dotenv`：输入文件字节及 `already_set` 判定，返回报告与待安装键值。优先级、BOM 和解析失败在不修改测试进程环境的情况下验证，不把决策放到 `set_var` 循环。
+- JSONL 对齐公开 `TurnEvent`，stdout 不混入人类状态行；保留公开的 0/1/2 退出契约，pre-stream 错误分类变化须有精确黑盒断言。
+- idle timeout 与产品 deadline 是不同边界；调整时核对会话预算、实际事件及退出信息，不将观察超时当成持久关闭证明。
 
-- A workspace `.env` is untrusted input. `src/env_boundary.rs`
-  refuses `LATTICE_*`, provider endpoint keys (`*_BASE_URL`, `*_API_BASE`,
-  `*_API_URL`, `*_ENDPOINT`), `*_PROXY`, `HOME`/`XDG_*`, and
-  `SSL_CERT_FILE`/`SSL_CERT_DIR` from it (case-insensitively), while ordinary
-  credentials still apply. Do not add a second `.env` loader, do not call
-  `dotenvy::dotenv()` directly, and do not make refusals print at startup —
-  `doctor` is the observability surface. Refusals are keyed on patterns, not an
-  enumerated key list, so a new `LATTICE_*` or `*_BASE_URL` variable is covered
-  without touching the boundary. `plan_dotenv` is the pure seam: it takes the
-  file bytes plus an `already_set` predicate and returns the report and the
-  pairs to install, so precedence/BOM/parse-failure are unit-testable without
-  mutating the test process env — keep new decisions there, not in the
-  `set_var` loop. When adding an env var that a dependency reads (not just our
-  own code), check it against `classify`: `*_PROXY` is load-bearing because
-  `hyper-util` reads it, and `SSL_CERT_*` because `rustls-native-certs`
-  *replaces* the trust store when either is set. Refused values must not enter
-  dotenv substitution state, and diagnostics must never echo source lines.
+## 验证入口
 
-## Next Actions
-
-- Keep parser/help tests updated for every command surface change.
-- Preserve the public 0/1/2 exit contract and add exact black-box assertions
-  whenever a pre-stream error classification changes.
-- If API/agent durable deadlines are introduced, align CLI idle timeout behavior
-  and exit-code messaging.
-- Keep JSONL mode machine-readable: no human status lines on stdout in JSON
-  mode.
-- Keep diagnostics and LANCET inspection commands thin wrappers over public
-  lower-layer surfaces.
-
-## Record Maintenance
-
-- Update `Recent Issues` and `Next Actions` when command surface, rendering,
-  JSONL, timeout, or exit-code behavior changes.
-- Record unresolved CLI/user-facing risks in root `FINDINGS.md`.
-- Record landed CLI fixes in root `FIX.md` with verification commands.
-- If a runtime issue is only visible in CLI, record the owning lower crate too.
-- Keep this file near 80 lines by pruning stale fixed notes once they no longer
-  guide edits.
-
-## Verification
-
-- Local: `cargo test -p lattice-cli`.
-- Command-surface changes need parser/help tests.
-- Turn rendering changes should run API streaming tests plus
-  `lattice-system-harness` integration scenarios.
+- `cargo test -p lattice-cli`；每次命令变更覆盖 parser/help。
+- Turn 渲染关联 API streaming 与外部 harness；环境边界关联 `fast_env_boundary`，退出码用黑盒断言。
+- audit/status 测试通过 dev-dependency 的 `lancet-audit` `test-support` 使用唯一 `ScopedXdgStateHome` 串行化进程 XDG 变量，不新建 crate-local 副本。
+- `tests/cli_cutover.rs` 保留局部覆盖，release 与端到端场景遵循测试合同规定的外部归属。

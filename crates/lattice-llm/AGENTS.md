@@ -1,102 +1,31 @@
-# AGENTS.md
+# lattice-llm 工作指引
 
-Crate-local guidance for `lattice-llm`.
+## 职责
 
-## Role
+维护 provider 请求与流交互、工具 wire 类型、SSE、模型路由、endpoint 元数据、请求时 DNS pinning 及日志设置。持久消息与 usage 直接使用 `lattice-conversation` 类型，不负责 Session 图、profile 发现、Agent 循环或 LANCET 执行。
 
-This crate owns LLM vocabulary and provider interaction: chat/stream request and
-response types, tool-call types, provider adapters, SSE parsing, model routing,
-endpoint metadata, request-time DNS pinning, and logging setup.
+- `types.rs`：请求信封、工具定义、流事件与目标；`client.rs`：HTTP 行为和请求时安全。
+- `providers/`：provider 信封、认证、SSE 累积；`provider_projection/` 是唯一生产消息 codec。
+- `sse.rs`：流解析；router/endpoints 模块：模型与 provider 解析；`stub.rs`：测试客户端；`logging.rs`：日志初始化。
+- 共享 URL/DNS/地址检查归 `net-guard`，client 将中立错误映射为 `LlmError`。
 
-## Sub-Architecture
+## 上位文档
 
-- `src/types.rs` owns provider request envelopes, tool definitions, streaming
-  events, and targets; durable message and usage semantics come directly from
-  `lattice-conversation::{NativeMessage, TokenUsage}`.
-- `src/client.rs` owns HTTP client behavior and request-time security hooks.
-- `src/providers/` owns provider envelopes, auth, and SSE accumulation. It must
-  not implement a second ToolCall/ToolResult codec.
-- `src/provider_projection/` is the sole production provider message codec: all
-  three request builders call `request_messages_to_wire`, and all three SSE
-  parsers publish their authoritative `MessageComplete` through
-  `wire_to_native`; all three parse usage through `wire_usage`. Official-wire
-  `tests/fixtures/projection/`. The seam meters assembled bodies through
-  `lattice_conversation::AttemptAssembly`, so an over-limit wire fails closed
-  with `ProjectionError::OutputLimitExceeded` instead of yielding a partial
-  message. `project_cross_provider` drops replay state, provider call IDs, and
-  reasoning parts: ADR 0005 §7 forbids replaying source reasoning into another
-  provider.
-- `src/sse.rs` owns streaming parser behavior.
-- `src/router.rs` and `src/endpoints.rs` own model alias/provider resolution.
-- `net-guard` owns shared URL validation, DNS checks, private-address
-  rejection, and rebinding suffix checks; `client.rs` maps its neutral errors
-  into `LlmError`.
-- `src/stub.rs` owns local stub client behavior used by tests.
-- `src/logging.rs` owns tracing/log initialization.
+修改前读取[会话的对话与模型请求合同](../../docs/architecture/session.md)、[测试工程](../../docs/development/testing.md)；Tool 网络路径由 [LANCET 合同](../../docs/architecture/lancet.md)另行维护，不能覆盖本层 provider 策略。
 
-## Boundaries
+## 局部约束
 
-- No session graph, profile discovery, agent-loop orchestration, or native
-  LANCET execution here.
-- Keep provider protocol quirks inside provider modules or the client layer.
-- Higher layers should consume typed `LlmEvent`, `LlmError`, and model metadata.
-- Preserve SSRF protections on every network-facing change.
-- ADR 0005 makes provider Tool Call IDs optional opaque wire metadata, never
-  LANCET invocation identity. Since GitHub #142 provider-neutral messages and
-  bounded part-local replay state live in `lattice-conversation`; same-provider
-  replay must preserve real IDs/signatures/part order, while cross-provider
-  projection must not leak source-provider opaque state. Do not synthesize
-  `tc_*` IDs as domain identity.
+- provider 协议差异留在 provider/client 层，高层只消费类型化 `LlmEvent`、`LlmError` 和模型元数据。
+- 所有请求 builder 经 `request_messages_to_wire`，权威 MessageComplete 经 `wire_to_native`，usage 经 `wire_usage`；不新建 ToolCall/ToolResult codec。组装经 `AttemptAssembly`，超限返回 `ProjectionError::OutputLimitExceeded`，不返回部分消息。
+- provider call ID 是可选不透明 wire 元数据，不是领域 Invocation 身份，不合成 `tc_*` 身份。same-provider 保留真实 ID、签名及 part 顺序；cross-provider 去掉 replay state、provider call ID 与 reasoning，不泄露来源 provider 状态。
+- `validate_base_url` 的 DNS 检查仅尽力而为，请求时解析地址固定才是主要 SSRF 防线。localhost、127.0.0.1、::1 使用一致的 loopback 例外，其他私有/保留 IP literal 拒绝。
+- HTTP 默认 `redirect::Policy::none()`；重新允许重定向必须逐跳重新执行地址与 pinning 检查，避免向未经验证的主机转送 body 和密钥。不能依赖首跳校验保护后续跳。
+- DNS rebinding 防御结合连接地址固定和 `net-guard` 分类/后缀规则。扩大启发式或后缀范围须有测试，并如实报告未覆盖风险。
+- 点号工具名 `a.b` 与 wire 名 `a__b` 的编解码只属于 provider 适配，目录名仍保持点号。
+- 日志写 stderr，ANSI 取决于交互 stderr 与 `NO_COLOR`，不污染 JSONL stdout。保留 `DEFAULT_MAX_OUTPUT_TOKENS` 默认来源，不重新硬编码旧 4096 上限；JSON 解析不以哨兵错误值承担正常控制流。
 
-## Recent Issues
+## 验证入口
 
-- PARTIAL M-04: `validate_base_url` DNS checks are best-effort; authoritative
-  protection is request-time resolved IP pinning in `client.rs`.
-- FIXED L-21-03: `validate_base_url` now treats `localhost`, `127.0.0.1`, and
-  `::1` consistently with the request-time loopback exemption; other private or
-  reserved IP literals remain rejected.
-- FIXED #100-A/C: `logging.rs` writes to stderr (`fmt()` defaults to stdout,
-  which is the `--json` JSONL contract) and derives ANSI from an interactive
-  stderr plus `NO_COLOR`; the Anthropic default output ceiling moved off 4096
-  to `DEFAULT_MAX_OUTPUT_TOKENS`. #100-B (`TurnId` uniqueness) closed in #139-B;
-  `lattice-llm` continues to consume caller-supplied typed identity only.
-- FIXED #90: `http_client_builder` sets `redirect::Policy::none()`. Pinning and
-  URL validation bind the first hop only, so a followed redirect reached an
-  unvalidated host and replayed the body plus `x-api-key`/`x-goog-api-key`.
-  Do not re-enable redirects without re-running the net-guard checks per hop.
-- PARTIAL M-05: `web_fetch`/external fetch rebinding defense relies on pinned IP
-  plus the maintained `net-guard` denylist shared with native web behavior.
-- FIXED L-02: provider JSON parsing no longer uses a sentinel error value for
-  normal control flow.
-- WATCH P22.5: strict OpenAI-compatible gateways may reject dotted tool names;
-  wire adapters map `a.b` to `a__b` while CEP catalog remains dotted.
-- WATCH: model routing and credential status are consumed by CLI/API surfaces.
-
-## Next Actions
-
-- Keep request-time DNS pinning as the primary SSRF defense; do not rely solely
-  on configuration-time validation.
-- Expand rebinding heuristics or suffix coverage only with tests and a note in
-  `FINDINGS.md` if residual risk remains.
-- Preserve dotted-name encoding/decoding as a provider wire detail, not a catalog
-  contract change.
-- When adding providers, include stream parsing, tool-call, usage, and error
-  mapping tests.
-
-## Record Maintenance
-
-- Update `Recent Issues` and `Next Actions` when provider adapters, security,
-  routing, SSE, or tool-call wire behavior changes.
-- Record unresolved LLM/network risks in root `FINDINGS.md`.
-- Record landed LLM fixes in root `FIX.md` with verification commands.
-- Keep provider-specific notes local and concise; cross-crate policy/security
-  residuals belong in `FINDINGS.md`.
-- Keep this file near 80 lines by replacing stale bullets with current risks.
-
-## Verification
-
-- Local: `cargo test -p lattice-llm`.
-- Provider/streaming changes: also run affected `lattice-agent` and
-  `lattice-api` streaming tests.
-- URL/DNS changes need explicit private IP, localhost, rebinding, redirect, and
-  pinning coverage where applicable.
+- `cargo test -p lattice-llm`；projection 对照 `tests/fixtures/projection/` 的正式 wire fixtures。
+- provider 新增或修改覆盖流、Tool call、usage、错误映射，并关联 agent/API streaming。
+- URL/DNS 变化覆盖私网、localhost、rebinding、redirect 与 pinning。

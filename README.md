@@ -1,152 +1,140 @@
 # LATTICE
 
-![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)
-![Rust 1.94+](https://img.shields.io/badge/Rust-1.94%2B-orange.svg)
-![Platform: Linux only](https://img.shields.io/badge/platform-Linux%20only-informational.svg)
+LATTICE 是用 Rust 编写、围绕会话组织的大模型运行时，提供命令行和终端交互界面。
+会话历史使用 Git 存储，模型通过 LANCET 调用结构化工具，在宿主策略控制下读取和修改本地项目。
 
-A session-centric LLM runtime in Rust: every turn commits to a **git-backed
-session graph**, and Tool execution flows through **LANCET**: a reservation-
-gated, manifest-generated WASM Component runtime with host-enforced Cell
-capabilities, path guards, evidence, and an audit trail.
+> **警告**：项目处于快速迭代阶段，接口、配置和实现仍会有破坏性调整，请勿用于生产环境。
+>
+> 本项目主要由 Code Agents 驱动，个人开发者实力有限，使用前风险自斟。
 
-## Platform support
+## 当前能力
 
-LATTICE supports Linux hosts only for building, testing, deployment, and
-runtime operation. macOS, Windows, BSD, and generic Unix targets are not
-supported. The project does not preserve compatibility branches or weaker
-fallback behavior for possible future ports; a future platform expansion would
-require a separate architecture decision and a complete native implementation.
+- **会话管理**：保存对话与工具调用记录，支持会话重开、历史查看和分支操作。
+- **项目操作**：通过结构化工具读取、搜索、创建和编辑文件，也可按配置启用网页获取和待办维护。
+- **调用审计**：记录工具调用的执行状态与证据，提供独立的操作员查询入口。
 
-Source Tools are compiled to `wasm32-unknown-unknown` as sandboxed guest
-artifacts inside the Linux host. That guest target is not another supported
-deployment platform.
+工具在 WASM Component 中执行，权限由宿主控制。运行中的工具目录固定，
+不支持动态加载插件，也不向模型提供任意 Shell 命令执行能力。
 
-## Workspace
+## 安装
 
-LATTICE is a Cargo workspace of 25 packages, layered so dependencies always
-point from higher layers down. See [AGENTS.md](AGENTS.md) for the authoritative
-graph with every edge spelled out.
+目前仅支持 Linux 主机。Rust 工具链版本由
+[rust-toolchain.toml](rust-toolchain.toml) 指定。
 
-```text
-Layer 0 (leaf):  lancet-protocol  lattice-store  net-guard
-Layer 1:         lattice-conversation(->protocol)
-                 lattice-profile(->protocol)
-                 lancet-authority(->protocol,net-guard)
-                 lancet-audit(->protocol,lattice-store)
-Layer 2:         lattice-llm(->net-guard,conversation)
-                 lattice-session(->protocol,conversation,lattice-store)
-                 lancet-runtime(->protocol,authority,net-guard,lattice-store)
-Layer 3:         lattice-agent(->llm,conversation)
-                 lancet-api(->protocol,audit,authority,runtime)
-Layer 4:         lattice-api(->lancet-api,protocol,audit,authority,agent,
-                             conversation,llm,profile,session)
-Layer 5:         lattice-tui(->lattice-api)
-                 lattice-cli(->lancet-api,lattice-api,session,tui)
-
-Outside the product graph: lattice-tool-prelude and the five Source Tool
-packages, mutate-shared, xtask, and lattice-system-harness.
-```
-
-| Crate | Role |
-|---|---|
-| `lancet-protocol` | Pure wire/data contracts: durable identities and bindings, JSON-RPC frames, typed errors, Cell descriptors, and versioned evidence. No I/O or async runtime. |
-| `lancet-audit` | Authoritative project-keyed Git `InvocationStore` plus pinned-view operator query/tail/replay; terminal records carry typed Cell evidence under `InvocationId`. |
-| `lancet-authority` | Cell capability admission support, Guard L1 path checks, network policy, and workspace visibility policy. |
-| `lancet-runtime` | Sole generated-Component execution path: closed catalog, reservation-bound call controls/events, Tool Host enforcement, Local Workspace/history, and pinned GET-only network execution. |
-| `lancet-api` | Thin Turn-runtime and operator facade over `lancet-runtime` and `lancet-audit`. |
-| `net-guard` | Neutral URL/DNS safety leaf: base-URL validation, private/reserved IP checks. |
-| `lattice-llm` | Provider adapters, SSE streaming, model routing, URL/DNS security, and provider replay/projection. |
-| `lattice-conversation` | Provider-neutral data-only conversation contract: ordered `NativeMessage` with bound/unbound ToolCall typestates, semantic/replay digests, per-attempt usage, and interruption records. No I/O, stores, or ID generators. |
-| `lattice-session` | Git-backed Session graph plus the durable PendingTurn journal and typed `NativeMessage<BoundToolCall>` transcript. |
-| `lattice-store` | ADR 0005 domain-neutral private-Git/Linux durability kernel: XDG topology, `ProjectStoreKey`, typed create/open, ref CAS/transactions, flock, durability barriers, atomic first-create, capability probes. No domain schemas, no workspace deps. |
-| `lattice-profile` | Strict `agent.toml` schema, discovery, defaults, LANCET `[lancet]` policy sections. |
-| `lattice-agent` | Store-free, one-attempt `ModelStepDriver`; it neither dispatches Tools nor commits Turns. |
-| `lattice-api` | Public Session/Turn facade and sole production `TurnCoordinator` saga over PendingTurn, InvocationStore, and LANCET. |
-| `lattice-tui` | Full-screen chat TUI over `lattice-api` via `ratatui`/`crossterm`: alternate screen, transcript / input / status regions. |
-| `lattice-cli` | The `lattice` binary: clap command surface and dispatch. |
-| `lattice-tool-prelude` | ADR 0004 guest SDK for Source Tools: generated WIT bindings, descriptor helpers. |
-| `lattice-system-harness` | Black-box test harness driving the built binary via `LATTICE_BIN`; takes no product-crate dependency. |
-
-### Component Tool catalog
-
-The built runtime exposes exactly five manifest-owned Component Tools:
-`observe.workspace`, `mutate.create`, `mutate.edit`, `fetch.web`, and
-`session.todo_write`. Source Tool manifests and generated artifacts are the
-only descriptor and provider-projection authority.
-
-Audit query, tail, and replay are **operator-only** (`lattice audit` via
-`lancet-api::{query_audit, tail_audit, replay_audit}`); they are not Tools and
-cannot be enabled in `[tools].enabled`. Command execution is not an
-agent-visible capability.
-
-## Installation
-
-Requires a Linux host and Rust **1.94+** (edition 2024; rustc 1.96.0 is pinned).
-Build the shipped Linux host binary explicitly; Source Tool crates are wasm32
-guest artifacts:
+拉取源码后，在 LATTICE 仓库根目录安装：
 
 ```sh
-cargo build --release -p lattice-cli
+git clone https://github.com/Skyline10124/lattice.git
+cd lattice
+cargo install --locked --path crates/lattice-cli
 ```
 
-The CLI binary is `lattice` (declared in `crates/lattice-cli/Cargo.toml`).
-Run it without installing via `cargo run -p lattice-cli -- <command>`, or
-install the release binary to `$CARGO_HOME/bin`:
+确保 Cargo 的可执行文件安装目录已加入 `PATH`，然后检查入口：
 
 ```sh
-cargo install --path crates/lattice-cli
+lattice --help
 ```
 
-## Quick start
+## 快速开始
+
+以下示例创建一个只允许读取项目文件的 Agent，使用 Anthropic 的 `sonnet` 模型别名。
+
+### 1. 准备配置
+
+进入希望读取的项目根目录，创建配置目录：
 
 ```sh
-# 1. Set a provider key (Anthropic, OpenAI, or Gemini)
-export ANTHROPIC_API_KEY="..."
-
-# 2. Create a session bound to an agent profile and project branch
-cargo run -p lattice-cli -- session new --agent default --project-branch main
-
-# 3. Send a prompt; the turn streams to the terminal and commits to the graph
-cargo run -p lattice-cli -- session send <session_id> "Summarize this repo in one line."
-
-# 4. Open the interactive full-screen TUI over that session
-cargo run -p lattice-cli -- tui <session_id>
+mkdir -p .lattice/agents/reader
 ```
 
-## Usage examples
+将以下内容保存为 `.lattice/agents/reader/agent.toml`。
+
+> 文件已经存在时，先检查现有配置，不要直接覆盖。
+
+```toml
+schema_version = 1
+
+[agent]
+name = "reader"
+model = "sonnet"
+
+[prompt]
+system = "请用中文回答。先读取相关文件，再根据实际内容说明项目结构与实现。"
+
+[tools]
+enabled = ["observe.workspace"]
+```
+
+配置目录名称与 `[agent].name` 保持一致。
+这里仅启用工作区读取工具，不授予创建、编辑文件或抓取网页的工具权限。
+
+### 2. 配置模型凭据
+
+在当前终端设置服务商密钥：
 
 ```sh
-# List authenticated models available to the configured providers
-cargo run -p lattice-cli -- models --auth
-
-# Resolve a model alias to its provider details
-cargo run -p lattice-cli -- resolve sonnet
-
-# Branch and inspect session history (every turn is a commit in the graph)
-cargo run -p lattice-cli -- session branch <session_id> experiment
-cargo run -p lattice-cli -- session log <session_id>
-
-# LANCET self-check and invocation-ledger status
-cargo run -p lattice-cli -- lancet status
-cargo run -p lattice-cli -- lancet doctor
+export ANTHROPIC_API_KEY="替换为你的密钥"
 ```
 
-Expected outcomes: `session new` prints the new session id; `session send`
-streams assistant tokens to stdout and tool/status lines to stderr, then
-records the turn as a commit; `lancet status` shows a pinned ledger view and
-recent typed invocation states; `lancet doctor` validates the workspace and
-generated closed catalog. Add `--json` (global flag) to
-emit one `TurnEvent` JSON object per line on stdout instead of human output.
+> 密钥不要写入提交到仓库的文件。只读工具配置不代表离线运行，
+> 对话仍需要调用模型服务。
 
-## Build, test, lint
+### 3. 启动终端界面
+
+保持在目标项目根目录，创建会话并进入 TUI：
 
 ```sh
-cargo build -p lattice-cli
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-cargo fmt --all --check
+lattice tui --agent reader --project-branch main
 ```
 
-## License
+将 `main` 替换为项目的目标分支名。首次创建 TUI 会话需要提供
+`--project-branch`；打开已有会话时使用会话 ID：
 
-Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
+```sh
+lattice tui <session_id>
+```
+
+进入界面后，可以输入：
+
+```
+----PROMPT----------------------------
+> 概括这个项目的用途，并指出主要入口文件和目录。
+```
+
+## 命令行入口
+
+不使用 TUI 时，可以通过 `session` 子命令创建会话、发送消息和查看历史。
+具体参数以各命令的帮助为准：
+
+```sh
+# 会话管理
+lattice session --help
+
+# 查看已配置凭据的模型
+lattice models --auth
+
+# 工具调用审计
+lattice audit --help
+
+# LANCET 自检
+lattice lancet doctor
+```
+
+## 开发与贡献
+
+任务、问题与实现讨论在 GitHub Issues 和 PR 中进行。
+提交贡献或使用编码 Agent 前，请阅读 [AGENTS.md](AGENTS.md)。
+
+## 文档导航
+
+| 内容 | 入口 |
+| --- | --- |
+| 文档索引 | [docs/README.md](docs/README.md) |
+| Agent 工作指引 | [AGENTS.md](AGENTS.md) |
+| 领域术语 | [docs/reference/glossary.md](docs/reference/glossary.md) |
+| LANCET 工具执行 | [架构合同](docs/architecture/lancet.md)与[工具开发指南](docs/development/tool-development.md) |
+| 开发测试与验证方式 | [测试工程合同](docs/development/testing.md)与[验证操作指南](docs/development/validation-guide.md) |
+
+## 许可证
+
+本项目采用 [Apache-2.0](LICENSE) 许可证。

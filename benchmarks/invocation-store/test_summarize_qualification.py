@@ -810,7 +810,7 @@ class DocumentRendering(unittest.TestCase):
             self.assertEqual(sq.check_doc(missing), 2)
 
     def test_the_approval_record_gate_table_is_current(self):
-        record = HERE / "../../docs/plans/2026-08-21-issue139a-qualification-contract-v2.md"
+        record = HERE / "../../docs/development/invocation-store-diagnostics.md"
         self.assertEqual(sq.check_doc(record.resolve()), 0)
 
 

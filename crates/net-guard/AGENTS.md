@@ -1,29 +1,18 @@
-# AGENTS.md
+# net-guard 工作指引
 
-Crate-local guidance for `net-guard`.
+## 职责与边界
 
-## Role
+- 作为领域中立的 Layer-0 叶子，提供 URL 校验、DNS 解析、私有与保留地址拒绝、DNS rebinding 域名检查及中立错误。
+- 只依赖 `std` 和 `url`，不引入 Tokio、reqwest、LANCET 或 LLM 类型。网络策略、HTTP 客户端、provider 行为及 Tool 执行留在调用方。
+- 调用方必须保留请求时 DNS 地址固定，不能用配置时校验替代连接边界。
+- IPv4/IPv6 special-purpose 分类对齐 IANA 注册表。通用 provider 路径保留已说明的代理 fake-IP 范围，严格 Tool-egress 判定拒绝这些范围；每次更新添加前缀边界测试。
 
-This crate is the neutral Layer-0 leaf for URL validation, DNS resolution,
-private/reserved address rejection, and DNS-rebinding-domain checks shared by
-LATTICE and LANCET.
+## 上位文档
 
-## Boundaries
+修改前读取[宿主平台](../../docs/architecture/platform.md)。Tool 网络接线同时读取 [LANCET 网络获取](../../docs/architecture/lancet.md#网络获取)，不将其领域策略套用于所有 provider。
 
-- Keep the public interface limited to URL/DNS safety behavior and neutral
-  errors.
-- Depend only on `std` and `url`; do not add tokio, reqwest, LANCET, or LLM
-  types.
-- Keep network policy, HTTP client construction, provider behavior, and native
-  fetch execution in their owning crates.
-- Preserve request-time DNS pinning semantics in callers.
+## 验证入口
 
-- Keep IPv4/IPv6 special-purpose classification aligned with the IANA registries.
-  The generic provider path preserves documented proxy fake-IP ranges; the stricter
-  Tool-egress predicate rejects them. Add prefix-boundary tests with every update.
-
-## Verification
-
-- Local: `cargo test -p net-guard`.
-- Dependency gate: `cargo tree -p net-guard --depth 1`.
-- Cross-crate changes: run the affected LLM, authority, and native tests.
+- 本地：`cargo test -p net-guard`。
+- 依赖边界：`cargo tree -p net-guard --depth 1`。
+- 跨 crate 影响：按调用路径验证 `lattice-llm`、`lancet-authority` 和 `lancet-runtime`。

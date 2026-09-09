@@ -390,7 +390,7 @@ impl LocalWorkspace {
     /// existed) and the `O_NOFOLLOW` open is retried; the retry catches a
     /// symlink swapped in between the `mkdirat` and the `openat`.
     ///
-    /// # What this does NOT guarantee (see FINDINGS.md L-39-04)
+    /// # What this does NOT guarantee (see docs/archive/records/FINDINGS.md L-39-04)
     ///
     /// This is **not** equivalent to `openat2(RESOLVE_BENEATH)`. `openat2`
     /// resolves parent *and* leaf in one atomic kernel call; here the parent is

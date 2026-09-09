@@ -1,48 +1,23 @@
-# AGENTS.md
+# lattice-tool-prelude 工作指引
 
-Crate-local guidance for `lattice-tool-prelude`.
+## 职责
 
-## Role
+提供 Source Tool 的 guest SDK、固定版本的 `wit_bindgen` 生成器重导出和 `export_tool!` Component 导出胶水。Host 策略、效果、审计及工作区、网络、会话操作不由本 crate 暴露。
 
-Guest-side SDK for LATTICE Source Tools (ADR 0004). The *only* API surface a
-Source Tool guest depends on. It re-exports the pinned `wit_bindgen` bindings
-generator and provides the `export_tool!` Component export glue. It exposes no
-host internals: no `lancet-*` dependency, no policy/effect/audit surface, and
-no workspace/network/session operation.
+## 上位文档
 
-## Boundaries
+修改前读取 [LANCET 构建与封闭组成](../../docs/architecture/lancet.md#构建与封闭组成)及[宿主平台](../../docs/architecture/platform.md)。构建操作见[工具开发指南](../../docs/development/tool-development.md)。
 
-- `#![no_std]` + `extern crate alloc`. Guests target `wasm32-unknown-unknown`
-  (not `wasm32-wasip2`) so the import whitelist equals the Tool Host world and
-  the no-ambient-WASI gate is trivial.
-- `pub use wit_bindgen;` pins the bindings toolchain for every Tool. Guests
-  also depend on `wit-bindgen` directly because `generate!` emits
-  `wit_bindgen::rt::...` by bare crate path; keep both at the same version.
-- `export_tool!` must be invoked **inside** the guest's `mod bindings` (where
-  `wit_bindgen::generate!` ran): wit-bindgen's generated `export!` resolves
-  `self` at the call site, so the export cannot be wired from the crate root.
-- Never add a `lancet-*` dependency here; that would leak host internals into
-  the guest trust boundary.
+## 局部约束
 
-## Source Tools
+- 使用 `#![no_std]` 和 `extern crate alloc`；guest 目标为 `wasm32-unknown-unknown`，不是 `wasm32-wasip2`，导入仅限 Tool Host world。
+- 不引入 `lancet-*` 依赖或 Host 内部类型。
+- prelude 重导出的 `wit_bindgen` 与 guest 直接依赖的 `wit-bindgen` 版本一致；`generate!` 生成代码通过裸 crate 路径引用其运行时。
+- `export_tool!` 在执行 `wit_bindgen::generate!` 的 guest `mod bindings` 内调用，不能从 crate 根接线，避免生成宏的 `self` 解析错误。
+- `tools/noop` 是 `distribution = "fixture"` 的 tracer，仅由 `test-utils` fixture 组成。生产 Tool 的 manifest 拥有契约，参数 schema 由 Host 在进入 Component 前校验；guest 不再维护一套命令式 Descriptor 规则。
 
-- `tools/noop` (`distribution = "fixture"`) is the tracer, composed only by the
-  `test-utils` fixture. `tools/todo-write` (`distribution = "builtin"`) is the
-  first production Tool (#29): its manifest owns the whole contract, and all of
-  its validation lives in the params schema so the host refuses a bad call before
-  the Component is entered. A guest must not carry a second, imperative copy of
-  the descriptor's rules.
+## 验证入口
 
-## Verification
-
-- Local: `cargo test -p lattice-tool-prelude`.
-- Boundary: `cargo tree -p lattice-tool-prelude` must show no `lancet-*`.
-- Guest build: `cargo build -p <tool> --target wasm32-unknown-unknown` (driven
-  by `cargo xtask tool-build`).
-
-## Record Maintenance
-
-- Update this file in the same patch that changes the prelude's role or
-  boundary contract.
-- Mirror landed fixes in root `FIX.md` and open/residual items in root
-  `FINDINGS.md`.
+- `cargo test -p lattice-tool-prelude`。
+- `cargo tree -p lattice-tool-prelude`：无 `lancet-*` 依赖。
+- guest 构建由 `cargo xtask tool-build` 驱动，对应 `cargo build -p <tool> --target wasm32-unknown-unknown`。

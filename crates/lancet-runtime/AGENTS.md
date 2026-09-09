@@ -1,229 +1,40 @@
-# AGENTS.md
+# lancet-runtime 工作指引
 
-Crate-local guidance for `lancet-runtime`.
+## 职责与模块
 
-## Role
+维护唯一 Component 执行路径、封闭目录、Cell 准入、call-scoped 控制与事件、Tool Host、具体 LocalWorkspace、WorkspaceHistory、证据和结果校验。
 
-ADR 0004's sole Component execution path. This crate owns the Wasmtime engine,
-generated closed catalog and provider projection, reservation-bound call
-controls/events, Cell capability admission, Tool Host enforcement for all five
-built-ins, the concrete Local Workspace, pinned GET-only network execution,
-Cell evidence, and Component result validation.
+- `composition.rs`/`catalog.rs`：组成校验与不可变目录、provider 投影；缺失/重复/身份/ABI/import/通道或 capability→Cell 冲突拒绝。
+- `admission.rs`：enabled→deny→boundary 准入、Host scope 解析与逐操作授权；拒绝携带 AdmissionEvidence，未知 deny/enabled 名称在组成时拒绝。
+- `execution.rs`：按 Turn 组合 runtime、上下文、Host、预算、工作区及历史，核对 request/binding 一致性。
+- `runtime.rs`：Component 实例、engine/linker/ticker、参数校验、取消、结果 CellRef 与 schema 校验及 Host 计量；`limits.rs`/`error_map.rs` 维护资源限制与类型化错误。
+- `control.rs`/`host.rs`：当前调用取消、顺序事件和 receipt；`evidence.rs` 的共享记录器提供快照。
+- `workspace/`、`host_workspace.rs`、`host_mutate.rs`：具体本地路径解析、观察、编辑准备与安装；`history.rs` 记录和规划私有历史。
+- `host_network.rs`：受控 GET、逐跳地址固定、TLS、响应限制与证据；`bindings.rs` 生成版本化 Tool Host WIT 绑定。
 
-## Sub-Architecture
+## 上位文档
 
-- `src/composition.rs` owns `EmbeddedTool`, `ExpectedToolIdentity`,
-  `CompositionError`, `ClosedCatalog`, and the `compose` gate. The gate
-  verifies descriptor digest, artifact digest, ABI, imports, and channel
-  adapters at startup, and rejects conflicting capability-to-Cell mappings.
-  The catalog is immutable after `compose`.
-- `src/admission.rs` owns `admit_tool` (the fixed enabled → deny → boundary
-  stage order), `AdmittedTool`, `AdmissionDenial` (which always carries its
-  `AdmissionEvidence`), the per-operation `authorize_operation`, host-owned
-  `resolve_scope`, and `validate_policy_against_catalog` (unknown deny name
-  = startup error). This is the only authorization authority for Component
-  Tools; admission is always enforced.
-- `src/catalog.rs` projects provider-visible Tool definitions directly from the
-  immutable generated catalog and rejects unknown enabled names.
-- `src/control.rs` owns call-scoped cancellation, ordered host-bound Tool events,
-  and execution receipts carrying typed Cell evidence.
-- `src/execution.rs` owns `RuntimeExecution`, the sole per-Turn composition of
-  Component runtime, admitted call context, hosts, budgets, Local Workspace, and
-  WorkspaceHistory. It checks request method/arguments against the binding, resolves
-  the current descriptor, performs Cell admission, and executes the Component.
-- `src/runtime.rs` owns `ComponentRuntime`, `ComponentCallContext`,
-  `StoreState`, the engine/linker/ticker construction, and the `call`
-  method (params validation, pre-cancel short-circuit, instantiation,
-  cancellation-aware guest-error mapping, result CellRef validation against
-  the descriptor ceiling *and* the admitted set, result schema validation,
-  host-computed context measure, Cell evidence recording). Call-scoped
-  cancellation state is the sole cancellation authority (#70 (Codeberg #48)):
-  pre-call check, guest logical-error path, and epoch abort all converge on
-  one shared `CallCancelled` error. `call` takes `&self`, launches Wasmtime on a
-  blocking worker, and drives async imports through the composed catalog's bounded
-  process-level Tokio runtime (two async workers, at most eight blocking DNS tasks).
-  The process-level epoch ticker is lazy and the `Arc<ComponentRuntime>` remains
-  shareable across catalog projection and `RuntimeExecution`.
-- `src/history.rs` owns `WorkspaceHistory`, `WorkspaceHistoryBacking`,
-  `MutationRecord`, `RecordedMutation`, and `HistorySnapshot` — the private
-  durable history of successfully installed Atomic Local Mutations (#63),
-  built on the `lattice-store` kernel since #143. A project-scoped store
-  outside the Local Workspace and outside the user's project `.git`; Git
-  blobs/trees/commits express before/after state and
-  `refs/lattice/workspace-history/current` tracks the newest recorded
-  mutation. Normal recording writes no per-record refs (everything it appends
-  is an ancestor of `current`); a Rewind retains the tip it abandons through
-  the kernel's `refs/lattice/retained/<oid>` pin, which is what keeps prior
-  object ids resolvable without time-based expiry. Recording and rewinding
-  serialize on the kernel's repository write lock. Never a Git subprocess,
-  never `git2`, never a parallel receipt/SQLite store.
-- `src/bindings.rs` owns the `wasmtime::component::bindgen!` expansion for
-  the Tool Host WIT world (`lattice:tool-host@0.1.0`).
-- `src/host.rs` implements the `host-control` interface on `StoreState`
-  (cancellation probe + structured events) and binds each effectful import
-  to its cell: `emit-event ⇒ Cell{Mutate, None, <session-channel scope>}`
-  with target `Session{turn_id}`. `cancelled` is a pure control probe and is
-  never gated.
-- `src/workspace/` owns the one concrete `LocalWorkspace`: secure per-segment
-  resolution, Policy-Visible Workspace filtering, bounded read/list/grep/find,
-  content hashing, no-replace create, atomic edit install, private mutation
-  history recording, error normalization, and the Local operation vocabulary.
-  Synchronous cores serve Wasmtime Tool Host imports without nesting a Tokio
-  runtime.
-- `src/host_workspace.rs` implements the `workspace-observe` WIT imports on
-  `WorkspaceObservationHost` (#30): the four observation operations
-  (read/list/grep/find) behind one visibility decision. Every call parses
-  the project-relative path, authorizes `alloc:read:workspace` through the
-  same `authorize_operation` seam, charges the turn-scoped observation
-  budget, applies System Path Exclusion/read-denial/ignored-path inclusion
-  through `VisibilityEngine`, enforces `ObservationPolicyConfig` byte/line/result
-  bounds host-side, and reports hidden paths as missing. Read imports expose
-  one host-rendered window so budget/evidence match the exact visible content;
-  the Component owns only the outer union result document.
-  Effect evidence records both host-computed truncation and content-free
-  visibility decisions. A host refusal is remembered so the structured
-  `CepError` reaches the caller instead of the guest's string paraphrase.
-- `src/host_mutate.rs` implements the `workspace-mutate` WIT imports on
-  `WorkspaceMutationHost` (#31): `read-for-edit`, `create-if-absent`,
-  `replace-with-expected`, and non-installing `refuse-edit`. Every call re-resolves the path, authorizes
-  `mutate:write:workspace`, enforces the single `MAX_WORKSPACE_WRITE_BYTES`
-  cap (#120), applies System Path Exclusion / write-deny / Mutation
-  Preconditions, installs atomically (or refuses before any Local bytes
-  change), appends private history after a successful install, and records
-  MutationEvidence. If the atomic name installation succeeds but the following
-  parent-directory fsync fails, the Host keeps the installed receipt, appends
-  history and installed evidence, then returns `ExecutionFailed`; it never
-  relabels changed bytes as an uninstalled refusal. Early refusals (parse / guard / size) call
-  `record_refusal` so the typed CEP code outranks the guest `Err(String)`.
-- `src/host_network.rs` implements the async `network-fetch` import (#32). It
-  validates policy before I/O, resolves and pins each connection, verifies TLS
-  with platform roots, follows at most five revalidated redirects, strips caller
-  headers on cross-origin redirects, disables compression, caps headers and the
-  final shaped body, and shares the Turn observation budget/deadline/cancellation.
-  Per-hop evidence strips userinfo/query/fragment, distinguishes host-received bytes
-  from bytes delivered to the guest, and records every post-I/O failure as an
-  `ObservedEffect`; `DeniedOperation` remains pre-I/O only.
-- `src/limits.rs` owns `ExecutionLimits`, `RecordingLimits`, and
-  `AbortReason`. Resource limits use `StoreLimits` + epoch interruption +
-  fuel.
-- `src/evidence.rs` owns `CellEvidenceLedger` — `Arc<Mutex>`-backed
-  recorder for one call's admission evidence, observed effects, and denied
-  operations, ordered by a shared `seq`. Clones share the underlying
-  records so the caller can read `snapshot()`/`snapshot_keys()` after the
-  call moves one clone into the wasmtime `Store` (D.3).
-- `src/error_map.rs` maps wasmtime traps/limits/aborts to structured
-  `CepError` codes (`ToolTrap`/`ToolTimeout`/`ToolResourceExhausted`/
-  `CallCancelled`) and owns the shared `cancelled_error` used by every
-  cancellation observation point (#70). No guest backtrace/host path/secret
-  is exposed.
-  `lancet-api` reuses that public constructor for the pre-admission cancellation
-  boundary, so the structured code/category is not duplicated above the runtime.
-- `src/generated/host_composition.rs` is **generated** by `cargo xtask
-  tool-codegen` from the Tool manifests that declare `distribution = "builtin"`
-  (#29). It carries their `inventory` registrations (`include_bytes!` of the
-  committed descriptor + Component) and the host-pinned `EXPECTED_COMPONENTS`
-  identity list. This is the only mechanism that links a Tool into a built
-  runtime: a Tool crate's own `generated/registration.rs` is not compiled
-  anywhere. Since #29 it embeds `session.todo_write`, so `from_embedded()`
-  composes a non-empty catalog in production; #30 added `observe.workspace`,
-  and #31 added `mutate.create` / `mutate.edit`; #32 added `fetch.web`. The
-  production composition now contains all five built-ins.
-  `src/generated/noop_fixture.rs` remains the hand-maintained `test-utils`
-  fixture.
-- `src/test_helpers.rs` (`test-utils` feature) provides synthetic
-  registration/identity construction for gate negative-case tests.
+修改前按对象读取 [LANCET](../../docs/architecture/lancet.md)、[Cell](../../docs/architecture/cell.md)、[工作区](../../docs/architecture/workspace.md)、[存储](../../docs/architecture/storage.md)合同。工具构建见[开发指南](../../docs/development/tool-development.md)，验证范围见[测试工程](../../docs/development/testing.md)。
 
-## Boundaries
+## 局部约束
 
-- No `lancet-api` or LATTICE session/agent/profile dependency.
-  `lancet-authority` is a lower layer and a legitimate dependency for network,
-  read-visibility, Guard L1, and System Path Exclusion policy.
-- No `wasmtime-wasi`/`wasi-common` dependency — no ambient WASI. Only
-  versioned Tool Host WIT imports are linked.
-- `WorkspaceHistory` never touches the Local Workspace or the user's project
-  `.git`, never writes a compensation commit, and exposes no user command
-  surface. Callers record only after an install has already succeeded.
-- ADR 0005/#143 moved WorkspaceHistory's repository/ref/lock/fsync mechanics
-  to `lattice-store`, not its mutation/rewind semantics. This crate owns the
-  typed history handle and Local mutation integration and must not hand-roll
-  durability primitives. Never merge workspace history with
-  sessions/invocations or hold its repository write lock together with another
-  repository lock.
-- The history store is project-scoped
-  (`projects/<ProjectStoreKey>/workspace-history.git`) and strictly opened:
-  `WorkspaceHistory::open` fails closed on a missing store, and `create` is
-  reserved for the `session new` composition path.
-- The per-project `WorkspaceOperationLock`
-  (`locks/projects/<ProjectStoreKey>/workspace.lock`) is reached through
-  `WorkspaceHistory::lock_workspace_operation` /
-  `LocalWorkspace::lock_operation`. Observation takes it shared; mutation
-  holds it exclusive from the precondition check through atomic install and
-  history publication; rewind holds it across plan/restore/ref move. The
-  kernel repository write lock is strictly narrower and is taken underneath
-  it, never the reverse, and a shared hold is never upgraded.
-- No runtime registration API: the catalog is immutable after `compose`.
-  The public constructor (`from_embedded`) reads `inventory` + the
-  generated `EXPECTED_COMPONENTS` only.
-- `test-utils` feature exposes only the fixed no-op fixture constructor
-  and synthetic test helpers. Production code never enables it.
-  Domain operations use handle-per-capability imports: `workspace-observe`,
-  `workspace-mutate`, and async `network-fetch`. Each binds its own Cell through
-  `authorize_operation`.
-- Every effectful Tool Host import is gated by its host-bound cell and
-  concrete target. A denial rejects only that operation: the host facility
-  is never invoked, the call continues, and a `DeniedOperation` is recorded
-  instead of an effect. Path targets require workspace scopes; host targets
-  require network scopes. Other target kinds fail closed.
-- `lancet-api::LancetRuntime::dispatch` validates the exact durable reservation before
-  calling this crate. `RuntimeExecution` checks request/binding consistency, performs
-  Cell admission, and passes the resulting `AdmittedTool` through
-  `ComponentCallContext`. The current compiled descriptor-identity residual is tracked
-  as `H-GH34-03`; no legacy effect vocabulary participates in a decision.
-- `call` is `&self`: the epoch ticker is lazily spawned on first call via
-  `OnceLock` (requires a tokio runtime context; composition does not).
-  `set_limits` remains `&mut self` (tests only).
+- 不依赖 lancet-api 或 LATTICE session/agent/profile；authority 是合法下层。无 `wasmtime-wasi`/`wasi-common`，只链接版本化 Host imports，无 ambient WASI。
+- `from_embedded` 只消费 inventory 与生成的 EXPECTED_COMPONENTS，无运行时注册 API。`generated/host_composition.rs` 由 manifest 经 tool-codegen 生成，是生产嵌入的唯一来源；Tool 自己的 registration.rs 不单独编译接入。
+- `generated/noop_fixture.rs` 是手工维护的固定 test-utils fixture，test_helpers 只为负向测试合成身份/注册。生产不启用 test-utils，不使用固定 fixture 或调用者自造目录。
+- `call(&self)` 在阻塞 worker 运行 Wasmtime；async imports 使用有界进程级 Tokio runtime：2 个 async workers，最多 8 个阻塞 DNS task。epoch ticker 首次调用经 OnceLock 启动，需要 Tokio 上下文，组成本身不需要；共享 Arc 跨投影/执行复用，`set_limits(&mut self)` 仅测试。
+- call-scoped 状态是唯一取消权威，pre-call、guest logical error、epoch abort 汇入同一 `CallCancelled`；API 复用 `cancelled_error`，不复制代码/类别。错误脱敏，不暴露 backtrace、宿主路径或秘密。
+- 每个 effectful import 绑定 Host 确认的 Cell 与具体目标，拒绝只拒绝该操作，设施不执行，记录 DeniedOperation 而非 effect。path/host 目标分别要求 workspace/network scope；emit-event 绑定当前 Turn 的 session Cell，cancelled 是不经授权门的纯控制探测。
+- 观察四操作使用相同可见性与授权入口，Host 渲染单个可见窗口，使预算、truncation 和无内容 visibility 证据对齐；guest 只包装外层结果。
+- `read-for-edit`、`create-if-absent`、`replace-with-expected`、不安装的 `refuse-edit` 每次重解析路径并授权 `mutate:write:workspace`，执行单一写入上限、系统排除、write-deny 和前提。类型化 Host 拒绝必须优先于 guest 的字符串转述。
+- 文件安装、辅助资源清理、安装后目录同步失败的效果报告按工作区合同。不能把目标未安装扩大为工作区无变化；新设计中未完成的实现和验证不因本入口整理而消失。
+- WorkspaceHistory 只记录已安装事实并规划恢复，不写本地文件、用户 Git 或补偿 commit，不提供 Agent 历史命令。前态以安装者观察的内容为准；ref/锁/fsync 委托内核，不手写、不用 git subprocess/git2/平行 SQLite 或 receipt store。
+- 操作锁与仓库锁期限遵循合同，新 mutation 入口先取得 exclusive 操作锁再读前提，不共享升级。历史严格打开，创建限指定组成入口；Rewind 保留被放弃 tip，不能用时间过期破坏历史 OID 可解析性。
+- 网络维持平台 TLS roots、最多五次逐跳复核重定向、跨 origin 剥离 caller headers、禁压缩、共享预算与取消；区分 received/delivered bytes，I/O 后失败记录 effect，DeniedOperation 仅用于 I/O 前拒绝。
+- reserved Descriptor 到实际 compiled Component 的精确身份及启用集校验风险见 LANCET 合同待核验项；不得以文档迁移宣称已解决。
 
-## Verification
+## 验证入口
 
-- Local: `cargo test -p lancet-runtime`.
-- Observation changes: `cargo test -p lancet-runtime --lib host_workspace::`
-  plus `LATTICE_BIN=$PWD/target/debug/lattice cargo test -p
-  lattice-system-harness --test direct_observation`.
-- Network changes: `cargo test -p lancet-runtime --lib host_network::` plus the
-  relevant `lattice-system-harness` Tool round trips.
-- Mutation changes: `cargo test -p lancet-runtime --lib host_mutate::` plus
-  `LATTICE_BIN=$PWD/target/debug/lattice cargo test -p lattice-system-harness
-  --test direct_mutation --test direct_failures --test direct_rewind
-  --test direct_workspace_history`.
-- History changes: `cargo test -p lancet-runtime --lib history::` plus
-  `cargo test -p lattice-api --test workspace_history_acceptance`.
-- Rewind changes: also `cargo test -p lattice-api --test rewind_acceptance`.
-- Clippy: `cargo clippy -p lancet-runtime --all-targets -- -D warnings`.
-- No-WASI: `cargo tree -p lancet-runtime | grep -E "wasmtime-wasi|wasi-common"`
-  must be empty.
-- Protocol: `cargo test -p lancet-protocol` (Tool execution error codes).
-
-## Next Actions
-
-- `WorkspaceHistory` records and plans; the Local Workspace writes stay
-  outside it. #64 added `plan_rewind` / `rewind_with`: the walk from
-  `current` back to a target identity, the per-path preflight/restore states
-  derived from parent trees, and the guarded backwards move of `current`
-  (deleting it for an empty target) under the kernel's repository write lock,
-  after retaining the abandoned tip. The
-  restore itself is the caller's closure — do not pull filesystem writes,
-  a second history store, or an Agent-visible history command in here.
-- Keep the baseline rule content-based: the parent tree must equal the
-  before state the installer observed, since the Local Workspace is shared
-  with the user and drifts.
-- Keep the operation-lock order intact when touching observation or mutation:
-  `WorkspaceOperationLock` first, at most one repository write lock under it,
-  no upgrade from shared. A new mutation entry point must take the exclusive
-  hold before its precondition read, not after.
-
-## Record Maintenance
-
-- Update this file in the same patch that changes the runtime's role or
-  boundary contract.
-- Mirror landed fixes in root `FIX.md` and open/residual items in root
-  `FINDINGS.md`.
+- `cargo test -p lancet-runtime`、`cargo clippy -p lancet-runtime --all-targets -- -D warnings`。
+- 观察：`--lib host_workspace::` 与 `direct_observation`；网络：`--lib host_network::` 与 Tool round-trip。
+- 变更：`--lib host_mutate::` 与 direct_mutation/failures/rewind/workspace_history；历史：`--lib history::` 与 API workspace_history_acceptance；Rewind 关联 rewind_acceptance。
+- 协议错误码关联 lancet-protocol。依赖树应无 ambient WASI；harness 使用当前构建产物并按影响选择，不默认启动全仓验证。

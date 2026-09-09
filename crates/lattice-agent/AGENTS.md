@@ -1,46 +1,26 @@
-# AGENTS.md
+# lattice-agent 工作指引
 
-Crate-local guidance for `lattice-agent`.
+## 职责
 
-## Role
+`ModelStepDriver` 驱动一次 provider attempt：从类型化历史组装冻结请求、打开并消费流、执行协议上限与计量、发送观察事件并返回类型化结果。
 
-This crate owns one provider attempt through `ModelStepDriver`: frozen request
-assembly from typed conversation history, provider stream opening/consumption,
-protocol ceiling enforcement, live model-step events, and typed attempt outcomes.
-It owns no multi-turn loop, retry policy, Tool execution, InvocationId allocation,
-store handle, reconciliation, or Turn commit.
+- `src/model_step.rs`：请求投影、流轮询、取消与 deadline、计量和 attempt 组装。
+- `src/testing.rs`：feature 控制的确定性 provider 响应。
+- `tests/streaming_seam.rs`：公开可注入流接口。
 
-## Sub-Architecture
+## 上位文档
 
-- `src/model_step.rs` owns `LlmClient`, `ModelStepRequest`, `ModelStepDriver`,
-  request projection, stream polling, cancellation/deadline enforcement, protocol
-  metering, and typed attempt assembly.
-- `src/testing.rs` provides feature-gated deterministic provider responses.
-- `tests/streaming_seam.rs` covers the public injectable streaming seam.
+修改前读取[会话合同](../../docs/architecture/session.md)的模型请求、执行预算及事件语义；验证选择遵循[测试工程](../../docs/development/testing.md)。
 
-## Boundaries
+## 边界
 
-- Depend only on `lattice-llm` and the data-only `lattice-conversation` contract.
-  Do not add `lattice-session`, LANCET runtime/native/audit, profile, or store edges.
-- Do not allocate invocation identities, bind or dispatch Tools, reserve/finalize
-  invocation records, retry provider attempts, reconcile PendingTurn, or commit a Turn.
-  Those responsibilities belong to `lattice-api::TurnCoordinator`.
-- Cancellation and deadline apply while opening and consuming the provider stream.
-  Opening failures remain typed `ModelStepError::OpeningFailed`; in-flight
-  cancellation/deadline/stream failures become typed `ModelStepAttempt` outcomes.
-- Provider wire details remain in `lattice-llm`; this crate consumes typed events.
-- Live event delivery is observational and must not become persistence authority.
+- 工作区依赖仅限 `lattice-llm` 和纯数据层 `lattice-conversation`；不引入 session、LANCET runtime/audit、profile 或 store。
+- 模型循环与重试策略、InvocationId 分配、Tool 绑定和分发、预留和终态发布、PendingTurn 协调及 Turn 提交由 `lattice-api::TurnCoordinator` 负责。
+- 取消与 deadline 同时覆盖流打开和消费。opening 失败保留 `ModelStepError::OpeningFailed`；流中取消、deadline 或错误进入类型化 `ModelStepAttempt`。
+- provider wire 细节留在 `lattice-llm`，本层消费类型化事件；live 事件不是持久化权威。
 
-## Recent Issues
+## 验证入口
 
-- LANDED #139-B Commit 4/6: deleted `AgentLoop` and `ToolCallExecutor`; production
-  now calls one-attempt `ModelStepDriver` from the durable Turn saga.
-- FIXED #139-B review: provider stream opening now races the same cooperative
-  cancellation/deadline poll as stream consumption.
-
-## Verification
-
-- Local: `cargo test -p lattice-agent`.
-- Test utilities: `cargo test -p lattice-agent --features test-utils`.
-- Request/outcome changes: also run affected `lattice-api` Turn tests and the
-  pinned-binary `direct_failures` system harness.
+- `cargo test -p lattice-agent`。
+- 测试设施：`cargo test -p lattice-agent --features test-utils`。
+- 请求或结果变化：相关 API Turn 测试及使用当前二进制的 `direct_failures` 场景。

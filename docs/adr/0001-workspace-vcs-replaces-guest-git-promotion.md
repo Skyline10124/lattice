@@ -1,8 +1,12 @@
+---
+status: superseded
+---
+
 # ADR 0001: Workspace VCS Replaces Guest-Git Promotion
 
 - Status: Superseded by ADR 0002
 - Date: 2026-07-15
-- Canonical vocabulary: root `CONTEXT.md`
+- 历史状态：本 ADR 已由 ADR 0002 取代，不作为当前规范。后续 Direct-Local 与私有历史规则见[工作区合同](../architecture/workspace.md)，术语见[领域术语表](../reference/glossary.md)。原文保留供追溯。
 
 ## Context
 

@@ -4,7 +4,7 @@
     "Thresholds, run counts, and sample shapes remain centralized here so later",
     "redesign work can compare evidence without treating a verdict as a blocker.",
     "The strict adjudicator is retained for follow-up GitHub #153.",
-    "Record: docs/plans/2026-08-21-issue139a-qualification-contract-v2.md"
+    "Record: docs/development/invocation-store-diagnostics.md"
   ],
   "enforcement_status": "diagnostic_only",
   "follow_up_issue": 153,
