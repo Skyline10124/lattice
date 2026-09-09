@@ -216,7 +216,7 @@ Rewind 按共用文件变更模块报告的实际效果记录进度与审计。�
 ### 来源与承接范围
 
 - [领域术语表](../reference/glossary.md)：保留工作区、内容身份、前提、历史及 Rewind 的简短定义与关键区别，完整规则由本文维护；无变更 Turn 的 OID 词条已与本文的项目全局 checkpoint 规则同步。
-- 原 LANCET 入口与 [#31 切片 C](../archive/plans/2026-08-01-issue31-sliceC-create-edit-components.md)：观察、变更、语义编辑与工作区历史；操作资料由[工具开发指南](../development/tool-development.md)承接。
+- 观察、变更、语义编辑与工作区历史由本文维护；操作资料见[工具开发指南](../development/tool-development.md)。
 - [ADR 0003](../adr/0003-lancet-operates-directly-on-local-workspace.md)：Direct-Local、路径策略、单路径安装与 Rewind 的设计依据；组件归属结合 [ADR 0004](../adr/0004-build-closed-wasm-tool-catalog.md) 的修订读取。
 - [ADR 0005](../adr/0005-durable-turn-invocation-and-private-git-stores.md)：项目私有存储、锁序、全局 checkpoint、历史与 Invocation 终态的关系及 Rewind 范围。
 - [lancet-runtime 局部指引](../../crates/lancet-runtime/AGENTS.md)、[lancet-api 局部指引](../../crates/lancet-api/AGENTS.md)、[lattice-api 局部指引](../../crates/lattice-api/AGENTS.md)：现有职责、操作锁与安装后失败要求。

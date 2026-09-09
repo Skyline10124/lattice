@@ -157,7 +157,7 @@ Component 可复现性检查中，仅产物摘要漂移按既有约定为警告�
 纯文档修订核对测试归属、被测产物、默认与 feature 场景范围、失败语义、引用和示例。修改驱动或证据机制时，先验证超时、清理、脱敏与报告的直接边界，再选必要的外部产品场景。
 
 - 原 `docs/TESTING.md` 的分层、二进制解析、夹具、超时、失败证据与 rollout 要求由本文承接；操作资料已迁入[验证操作指南](validation-guide.md)。
-- #185/#186/#192 的命令结果、fake provider 和失败证据规则由本文承接，旧计划及修复证据保留在[归档](../archive/README.md)，不因归档改写原验证状态。
+- #185/#186/#192 的命令结果、fake provider 和失败证据规则由本文承接，原验证状态不因文档迁移改变。
 - [harness 局部指引](../../crates/lattice-system-harness/AGENTS.md)：外部依赖、场景隔离、进程组、证据占用及显式 feature 场景。
 - [场景定义](../../crates/lattice-system-harness/src/scenario.rs)、[进程驱动](../../crates/lattice-system-harness/src/driver.rs)及 [harness manifest](../../crates/lattice-system-harness/Cargo.toml)：核验实际预算、二进制解析与目标启用条件。
 - [普通 CI](../../.github/workflows/ci.yml)、[完整验证](../../.github/workflows/full-gate.yml)、[本地验证入口](../../xtask/src/ci.rs)与 [rollout](../../xtask/src/rollout.rs)：核验实际编排、构建与证据行为。

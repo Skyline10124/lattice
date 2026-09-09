@@ -56,7 +56,7 @@ python3 benchmarks/invocation-store/summarize_qualification.py qualify "$BUNDLE"
 
 bundle 位于忽略的 `target/invocation-store-bundles/<stamp>-<sha>/`，不是提交的运行产物。环境、原始 JSONL、run conditions、日志、source-history 身份及原 summary 一起保留。缺文件、错版本、错误数量或非数值序列不能通过调阈值或补造数据修复。
 
-不删样本、不丢 outlier、不因 host load、I/O PSI 或 stall 到来而判环境无效并择优重跑。不把 host stall 追溯改为实现 PASS。新分类器对旧证据的结果是外部评估，与原记录并存；原批准、撤回、数学模型、样本与 verdict 保存在[历史 v2 记录](../archive/plans/2026-08-21-issue139a-qualification-contract-v2.md)及其引用的批准记录，不能重写。
+不删样本、不丢 outlier、不因 host load、I/O PSI 或 stall 到来而判环境无效并择优重跑。不把 host stall 追溯改为实现 PASS。新分类器对旧证据的结果是外部评估，与原记录并存；原批准、撤回、数学模型、样本与 verdict 不能重写。
 
 下表是现有 manifest 的原样生成输出，包括其英文 basis。这是机器可比较的现行诊断参数展示，不是本指南重新批准统计解释或产品时限。预算耦合仍按会话合同，旧样本不构成产品保证。
 

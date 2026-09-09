@@ -211,8 +211,8 @@ ledger 是唯一数据权威，`refs/lattice/invocations/high-water` 仅为单�
 - 原 `docs/LANCET.md` 的执行入口、目录、通道、证据与操作员规则由本文及相邻合同承接，操作资料见[工具开发指南](../development/tool-development.md)。
 - [ADR 0004](../adr/0004-build-closed-wasm-tool-catalog.md)：封闭构建、manifest 来源、WASM 隔离、Bundle 设计和三层生命周期。
 - [ADR 0005](../adr/0005-durable-turn-invocation-and-private-git-stores.md)：身份、预留、分发、终态与证据、ledger/witness、冷读成本、顺序执行及重开边界。完整 PendingTurn 和存储内核分别归会话、存储合同，资格化操作见[诊断指南](../development/invocation-store-diagnostics.md)。
-- [Cell 历史设计](../archive/designs/2026-07-26-issue28-cell-admission-design.md)：准入、操作授权、结果计量和证据分离；native 双路径、SQLite、Turn/audit provenance 与 attestation 不恢复。
-- [网络决议记录](../archive/plans/2026-08-04-issue32-fetch-component-grill-decisions.md)：已确认的网络 Host、安全、限制、投影与证据要求由本文承接，未决项和旧实现流水仅作追溯。
+- 准入、操作授权、结果计量和证据分离由 [Cell 合同](cell.md)维护；native 双路径、SQLite、Turn/audit provenance 与 attestation 不恢复。
+- 已确认的网络 Host、安全、限制、投影与证据要求由本文承接。
 - [运行时局部指引](../../crates/lancet-runtime/AGENTS.md)及[审计局部指引](../../crates/lancet-audit/AGENTS.md)：组件归属与执行边界。
 
 Bundle 安装、重建及活动版本切换失败的完整语义仍需明确，由 [#35](https://github.com/Skyline10124/lattice/issues/35)承接；reserved Descriptor 到实际编译 Component 的 exact identity gate 及 model-visible/executable 启用集一致性仍需在该项前核验，不增加第二个 catalog authority。网络旧记录中的 DNS 后未连接分类、body 编码及 header 规则未决项，本轮未重新作行为验证；保留为核验线索，不以归档宣称已解决。

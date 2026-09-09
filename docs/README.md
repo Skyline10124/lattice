@@ -45,6 +45,5 @@
 - [ADR 0003](adr/0003-lancet-operates-directly-on-local-workspace.md)：LANCET 直接操作本地工作区的理由与取舍。
 - [ADR 0004](adr/0004-build-closed-wasm-tool-catalog.md)：构建期封闭的 WASM 工具目录。
 - [ADR 0005](adr/0005-durable-turn-invocation-and-private-git-stores.md)：持久化 Turn、Invocation 身份与私有 Git 存储。
-- [归档索引](archive/README.md)：历史规格、计划、原始 FIX/FINDINGS、发布记录与研究材料；其中未决技术记录不代表当前已解决。
 
 ADR 的用途与规则承接方式见[文档生命周期](governance/document-lifecycle.md#分类与归属)。

@@ -169,7 +169,6 @@ WARN/ERROR 显示时屏蔽普通输入、编辑、粘贴与提交，不修改不
 
 自动化与人工检查分工见[测试工程合同](../development/testing.md)，运行配方见[验证操作指南](../development/validation-guide.md)。颜色辨识与终端行为需实机核验，不能仅由布局计算通过推定体验合格。
 
-- [TUI 历史规格](../archive/designs/2026-08-31-issue182-tui-cassette-futurism-spec.md)：固定侧栏、统一停靠区、说话人分组、工具状态和配色。
 - [TUI 局部指引](../../crates/lattice-tui/AGENTS.md)：公开 API 边界、键位、输入历史与验证入口。
 - [ADR 0005](../adr/0005-durable-turn-invocation-and-private-git-stores.md)：取消和失败的持久状态由 Turn 协议决定。旧指引“取消后照常 commit”的概括不作为 TUI 保证。
 

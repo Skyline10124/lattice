@@ -159,7 +159,7 @@ canonical JSON 由 [`canonical.rs`](../../crates/lancet-protocol/src/canonical.r
 ### 来源与迁移边界
 
 - [ADR 0004](../adr/0004-build-closed-wasm-tool-catalog.md)：Cell 词汇、scope/trust 与 Host 权限边界。
-- [Cell 历史设计](../archive/designs/2026-07-26-issue28-cell-admission-design.md)：能力准入、精确集合覆盖、结果计量、canonical JSON 和版本化证据读取。旧示例给 `ObservedTarget` 加 `deny_unknown_fields` 与同节持久读取 prose 不一致；本文按明确的 forward-compatible 约定及当前协议类型承接，不恢复 native 双路径、SQLite、Turn/audit provenance 或 attestation。
+- 本文承接能力准入、精确集合覆盖、结果计量、canonical JSON 和版本化证据读取，遵循 forward-compatible 的持久读取约定，不恢复 native 双路径、SQLite、Turn/audit provenance 或 attestation。
 - [ADR 0005](../adr/0005-durable-turn-invocation-and-private-git-stores.md)与原 LANCET 入口的 InvocationId 归属、终态与证据持久化、Host 通道规则由本文及 [LANCET 合同](lancet.md)承接。
 - [协议局部指引](../../crates/lancet-protocol/AGENTS.md)、[策略局部指引](../../crates/lancet-authority/AGENTS.md)及[运行时局部指引](../../crates/lancet-runtime/AGENTS.md)：数据契约、领域策略与运行时执行的职责划分。
 
