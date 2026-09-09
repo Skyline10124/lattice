@@ -1,5 +1,5 @@
 ---
-status: draft
+status: active
 ---
 
 # 测试工程
@@ -11,7 +11,7 @@ status: draft
 
 本合同规定测试分层、外部二进制验证、场景隔离、执行资源和失败证据的要求。产品 crate 维护局部不变量，`lattice-system-harness` 维护外部系统测试，`xtask` 维护验证与发布证据入口。
 
-本文件为承接草案，旧 [测试与验证](../TESTING.md) 尚未退役。工具安装、日常操作配方与历史验证记录暂留旧文档；根 [Agent 工作指引](../../AGENTS.md#开发与测试纪律) 继续维护按风险选择最小充分验证集的通用纪律。
+[验证操作指南](validation-guide.md)维护工具安装、日常运行与证据查看；根 [Agent 工作指引](../../AGENTS.md#开发与测试纪律)继续维护按风险选择最小充分验证集的通用纪律。
 
 ## 测试分层与归属
 
@@ -61,7 +61,7 @@ flowchart LR
 绝对路径是推荐传递方式，不是驱动对输入形式的强制限制。相对路径按测试进程的工作目录解析，不能假定它相对于仓库根。
 调用者须核对二进制来源、构建配置和所测工作区；文件存在与路径规范化本身不能证明二进制未过期。
 
-`xtask ci` 仅在 `LATTICE_BIN` 未设置时补入当前仓库的 debug 路径。worktree 或切换分支后仍继承旧值时，应显式指向当前产物或在该次命令中取消旧值。具体构建命令参照旧测试文档，宿主与 Source Tool guest 产物分别构建，不将 guest 当作 Linux 宿主二进制。
+`xtask ci` 仅在 `LATTICE_BIN` 未设置时补入当前仓库的 debug 路径。worktree 或切换分支后仍继承旧值时，应显式指向当前产物或在该次命令中取消旧值。具体构建命令见[验证操作指南](validation-guide.md#安装与构建产物)，宿主与 Source Tool guest 产物分别构建，不将 guest 当作 Linux 宿主二进制。
 
 ### 场景隔离
 
@@ -71,6 +71,14 @@ flowchart LR
 需要测试变量不存在时，移除变量；将值设为空仍表示变量已定义，不能代替不存在状态。
 
 场景内部并发与取消通过 `ResponseGate` 等可控制事件及有界等待同步。通用驱动可以共享，特定场景的夹具和断言保持在本场景；不靠全局串行执行掩盖隔离或竞争问题。
+
+### Fake provider 的确定性边界
+
+fake provider 只接受单连接单个 `POST /chat/completions HTTP/1.1`，请求头使用 CRLF，Host 非空且恰好一个，Content-Type 恰好一个且为 application/json；名称大小写不敏感，拒绝控制字符与折叠。Content-Length 须为单个非负十进制字段，拒绝 Transfer-Encoding、重复/冲突长度及非法 UTF-8，不使用 lossy 转换。合法 UTF-8 的非 JSON body 保留为诊断，不虚构有效模型请求。
+
+headers 连同终止符上限 16,384 bytes，body 声明上限 1,048,576 bytes；在扩大缓冲或分配 body 前校验，读写使用固定两秒 deadline。拒绝响应使用不回显输入的固定 ASCII body。响应头使用 CRLF 和按字节计数的 Content-Length，发送一次后关闭连接；不承诺检测未来 keep-alive/pipelining 字节，不扩展通用 HTTP 服务。
+
+验证后的 request capture、Sequence 选择/推进与到达通知在同一临界区发生，gate 只控制交付，不重排脚本归属。超出 Sequence 重复最后一项，空 Sequence 产生 IllegalResponse。request/stall/release/shutdown 采用有界握手；shutdown 唤醒 accept、取消 gate，确认线程完成后才 join，Drop 不作无界等待。保留首个 fixture failure，捕获已不可能时提早报告，shutdown 在有界清理后返回该错误；不另建 health 或 failure 订阅接口。实际接口和固定响应维护于 [`fake_llm.rs`](../../crates/lattice-system-harness/src/fake_llm.rs)。
 
 ## 执行与资源边界
 
@@ -82,6 +90,9 @@ Direct-Local 场景同时限制单命令和整个场景耗时。每次启动命�
 
 子进程在 Linux 独立进程组中运行。超时和受控中断保留已收集的 stdout/stderr，回收直接子进程并清理整个进程组；清理失败、存活进程和输出不完整均进入诊断。
 Direct-Local 不依赖虚拟机、守护进程或容器镜像。已选场景的环境故障作为失败报告，不以跳过当作通过。
+`CommandOutcome` 是命令结果的唯一完整模型，分别保留观察到的 exit/signal、按序发生的 harness interventions、所有清理错误、存活 PID 和 stdout/stderr 的 EOF 完整性。exact clean exit 要求匹配的退出码、无干预、无强制清理、无清理错误或存活者，且两条输出流完整；不能用信号、缺失状态或单纯 exit 0 代替。摘要与 Debug 只含安全元数据，不从信号推定产品 panic。清理 SIGKILL 的 ESRCH 仅在立即复核进程组为空后可忽略，不能推广到请求的 SIGINT。
+
+命令预算从 spawn 开始，provider request、stall、release 与最终 wait 共用剩余预算，不能在 wait 时重新计时。PTY raw 模式提交使用回车 `\r`；输出排空按 deadline 限制等待，不能等阻塞 read 返回后才检查超时。
 
 编译并发、重型验证数量和重复运行遵循根指引。超时后的重试先确认旧验证进程已退出，不启动重叠测试来替代结果核验。
 
@@ -137,7 +148,7 @@ CI 编排通过 Cargo、公开 xtask 入口或已构建二进制调用验证，�
 rollout 只在全部必需步骤实际通过时通过。失败、阻塞或跳过都不能算通过，测试步骤须有非零通过测试数。步骤结果逐步保存，未执行步骤保持阻塞，失败证据与产物身份关联到对应构建。
 发布证据的生成不代替人类批准、合并或发布授权。
 
-Component 可复现性检查中，仅产物摘要漂移按既有约定为警告；guest 构建、Component 编码、验证、imports 或 WIT 不符合要求仍是失败。不能将整个 `tool-build --verify` 步骤都解释为非阻塞。
+Component 可复现性检查中，仅产物摘要漂移按既有约定为警告；guest 构建、Component 编码、验证、imports 或 WIT 不符合要求仍是失败。不能将整个 `tool-build --verify` 步骤都解释为非阻塞。跨机可复现证据不自动触发硬门升级；所有者已在本次文档收尾裁决取消自动升级义务，未来硬门须重新提案和批准。
 
 固定工具链与 encoder 版本从 `rust-toolchain.toml`、相关构建入口及 manifest 读取，安装操作参照开发指南。`.githooks/pre-commit` 负责阻止误暂存忽略文件，不承担测试执行。
 
@@ -145,10 +156,10 @@ Component 可复现性检查中，仅产物摘要漂移按既有约定为警告�
 
 纯文档修订核对测试归属、被测产物、默认与 feature 场景范围、失败语义、引用和示例。修改驱动或证据机制时，先验证超时、清理、脱敏与报告的直接边界，再选必要的外部产品场景。
 
-- [旧测试文档](../TESTING.md)：测试分层、二进制解析、夹具、超时、失败证据和 rollout 要求。操作配方、安装说明和历史材料本轮不迁出。
+- 原 `docs/TESTING.md` 的分层、二进制解析、夹具、超时、失败证据与 rollout 要求由本文承接；操作资料已迁入[验证操作指南](validation-guide.md)。
+- #185/#186/#192 的命令结果、fake provider 和失败证据规则由本文承接，旧计划及修复证据保留在[归档](../archive/README.md)，不因归档改写原验证状态。
 - [harness 局部指引](../../crates/lattice-system-harness/AGENTS.md)：外部依赖、场景隔离、进程组、证据占用及显式 feature 场景。
 - [场景定义](../../crates/lattice-system-harness/src/scenario.rs)、[进程驱动](../../crates/lattice-system-harness/src/driver.rs)及 [harness manifest](../../crates/lattice-system-harness/Cargo.toml)：核验实际预算、二进制解析与目标启用条件。
 - [普通 CI](../../.github/workflows/ci.yml)、[完整验证](../../.github/workflows/full-gate.yml)、[本地验证入口](../../xtask/src/ci.rs)与 [rollout](../../xtask/src/rollout.rs)：核验实际编排、构建与证据行为。
 
-旧文档中将 rollout 称为“layer 4”及“所有场景均在普通 CI 运行”的概括不作为新定义；本合同分别描述人工检查、发布证据和 feature 场景。旧文档还存在步骤列表与解释文字不一致的问题，实际顺序以经核验的工作流和 xtask 为实现事实，不在本轮调整 CI。
-[Bundle 安装与活动版本切换](../architecture/lancet.md#bundle-安装设计)尚未实现，其验证不属于现有默认产品矩阵的覆盖。合同生效时再按范围切换旧入口和局部引用。
+[Bundle 安装与活动版本切换](../architecture/lancet.md#bundle-安装设计)尚未实现，其验证不属于现有默认产品矩阵的覆盖。现行规则以本文为准，局部入口另行整理。

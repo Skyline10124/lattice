@@ -17,7 +17,7 @@
 //! non-empty query results) are seeded via a committed Direct-Local turn
 //! (see `tests/direct_local_turn.rs`); no KVM/MSB lane exists anymore
 //! (#62, Codeberg #40).
-//! See `docs/TEST-TRIAGE.md` and `FINDINGS.md`.
+//! Historical evidence: `docs/archive/records/FINDINGS.md`; current rules: `docs/development/testing.md`.
 //!
 //! These scenarios supersede the crate-internal
 //! `audit_query_errors_when_store_missing` unit test in `lattice-cli`.

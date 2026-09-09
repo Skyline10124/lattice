@@ -131,9 +131,9 @@ lattice lancet doctor
 | --- | --- |
 | 文档索引 | [docs/README.md](docs/README.md) |
 | Agent 工作指引 | [AGENTS.md](AGENTS.md) |
-| 领域术语 | [CONTEXT.md](CONTEXT.md) |
-| LANCET 工具运行时 | [docs/LANCET.md](docs/LANCET.md) |
-| 开发测试与验证方式 | [docs/TESTING.md](docs/TESTING.md) |
+| 领域术语 | [docs/reference/glossary.md](docs/reference/glossary.md) |
+| LANCET 工具执行 | [架构合同](docs/architecture/lancet.md)与[工具开发指南](docs/development/tool-development.md) |
+| 开发测试与验证方式 | [测试工程合同](docs/development/testing.md)与[验证操作指南](docs/development/validation-guide.md) |
 
 ## 许可证
 

@@ -5,7 +5,7 @@
 
 Qualification contract v2. Every threshold, run count, and sample shape comes
 from `qualification-contract-v2.json`; this module holds estimators, not
-constants. See `docs/plans/2026-08-21-issue139a-qualification-contract-v2.md`.
+constants. See `docs/development/invocation-store-diagnostics.md`.
 
 Modes:
 

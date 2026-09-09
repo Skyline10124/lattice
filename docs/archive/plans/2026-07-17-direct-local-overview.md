@@ -10,7 +10,7 @@ per-issue 计划中，不在此复制。
 | 1 | #59 | [issue59-direct-local-turn](2026-07-17-issue59-direct-local-turn.md) |
 | 2 | #60 | [issue60-remove-execution-backend](2026-07-17-issue60-remove-execution-backend.md) |
 | 3 | #61 | [issue61-policy-visible-read](2026-07-17-issue61-policy-visible-read.md) |
-| 4 | #62 | [issue62-remove-upper-msb-residue](../archive/plans/2026-07-17-issue62-remove-upper-msb-residue.md) |
+| 4 | #62 | [issue62-remove-upper-msb-residue](2026-07-17-issue62-remove-upper-msb-residue.md) |
 | 5 | 待开票 | [gix-only-cleanup](2026-07-17-gix-only-cleanup.md) |
 
 ## 规范源

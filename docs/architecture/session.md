@@ -1,5 +1,5 @@
 ---
-status: draft
+status: active
 ---
 
 # 会话与 Turn
@@ -11,7 +11,7 @@ status: draft
 
 本合同规定会话历史、provider-neutral 对话、Turn 请求接受、持久阶段、结果关闭和重开协调。`lattice-conversation` 维护对话数据，`lattice-session` 维护会话图与 PendingTurn，`lattice-api` 负责产品接口及跨存储协调，`lattice-agent` 驱动一次模型请求。
 
-本文为承接草案，现行依据仍由 [ADR 0005](../adr/0005-durable-turn-invocation-and-private-git-stores.md)及相关局部指引维护，旧入口尚未切换。相邻领域分别维护 [LANCET 的调用身份与执行流程](lancet.md#调用身份与执行流程)、[工作区 checkpoint](workspace.md#turn-checkpoint)与[显式 Rewind](workspace.md#显式-rewind)、[通用存储发布](storage.md#对象引用与持久化)和[锁机制](storage.md#锁与并发语义)。本合同维护这些领域事实如何进入 Turn 日志与重开协调。
+相邻领域分别维护 [LANCET 的调用身份与执行流程](lancet.md#调用身份与执行流程)、[工作区 checkpoint](workspace.md#turn-checkpoint)与[显式 Rewind](workspace.md#显式-rewind)、[通用存储发布](storage.md#对象引用与持久化)和[锁机制](storage.md#锁与并发语义)。本合同维护这些领域事实如何进入 Turn 日志与重开协调。
 
 ## 模型与职责
 
@@ -84,6 +84,8 @@ Tool 参数必须为一个 JSON 对象，通过协议的 canonical JSON 规则�
 SessionState 不重复保存活动 Turn；仓库顶层 `HEAD` 和可变 sidecar 不参与会话权威。移动分支或 reset 不使已确认的 Turn 依赖 reflog 保留。图读取应保留可达父链的对话，包括 merge 侧消息。
 
 创建与打开分开：打开严格核验既有存储及会话事实，不因缺失或损坏而初始化。首次创建仅通过获准的会话创建路径执行。会话对外读取使用固定引用或对象视图，不从不同时间的读取拼出未经核验的状态。
+
+Session 存储构造器须生成存在且可读取的 bare repository 配置，不配置远端，因而不由远端配置产生 `refs/lattice/**` 的 push/fetch refspec。这不禁止配置其他位置出现该文本；配置验证归会话存储所有者，不以全文件子串扫描代替语义检查。
 
 已有 `refs/lattice/session-validation/<SessionId>` 是派生校验投影，与当前会话 ref 集合认证对应。投影不匹配或不可用时完整验证该会话对象后才能返回句柄；打开不写投影，会话变更通过同一存储事务更新投影。
 
@@ -198,7 +200,9 @@ Tool 返回后，协调层规范化 ToolContent，计算长度、摘要及精确
 
 关闭结果分别保存执行 outcome 和材料可用性。执行成功可以伴随材料不可用，不能为填补正文而推翻持久终态。需要大输出的 Tool 应通过自身接口提供分页、游标或摘要。
 
-FinalizeBudget 从执行器返回后开始，覆盖锁等待、不确定 draft 复核、终态与证据发布和重试等待，与 Turn deadline 分开。当前预算为 60 秒，首次立即尝试，可重试的持久化失败按 25 毫秒起步、上限 1 秒的指数退避处理；预算到期不再发起新尝试。损坏及身份或摘要不匹配不重试。性能资格化证据和阈值由对应验证材料维护。
+FinalizeBudget 从执行器返回后开始，覆盖实际锁等待、不确定 draft 复核、终态与证据发布和重试等待，与 Turn deadline 分开。当前预算为 60 秒，首次立即尝试，可重试的持久化失败按 25 毫秒起步、上限 1 秒的指数退避处理；预算到期不再发起新尝试，但不异步强行取消已经进行的内核持久化。损坏及身份或摘要不匹配不重试。
+
+预算耦合保持 `lock_wait_gate + 2 * full_finalize_gate + backoff_cap <= FinalizeBudget`，诊断阈值的唯一来源为 [qualification manifest](../../benchmarks/invocation-store/qualification-contract-v2.json)，不能独立放宽阈值或把旧样本值解释为产品时限保证。诊断的使用与历史证据边界见 [InvocationStore 诊断指南](../development/invocation-store-diagnostics.md)。锁遵循现有[存储锁机制](storage.md#锁与并发语义)，不要求另设按 ProjectStoreKey 的 admission-control 队列。
 
 若终态与证据未能在预算内确认持久，Turn 保持在当前 StepClosing，后续绑定不分发，不发布 StepClosed、TurnCommit 或永久 Turn pin。对调用方报告持久性失败和恢复需求。
 
@@ -255,10 +259,10 @@ flowchart LR
 | 单次尝试、流中断和资源计量 | `cargo test -p lattice-agent` |
 | 会话图、CAS 日志、候选与重开 reducer | `cargo test -p lattice-session` |
 | live/reopen 协调、checkpoint、取消和事件收集 | `cargo test -p lattice-api` |
-| 真实二进制的失败与恢复路径 | 按[测试工程草案](../contract/testing.md)选择相关 Direct-Local 及显式崩溃场景 |
+| 真实二进制的失败与恢复路径 | 按[测试工程合同](../development/testing.md)选择相关 Direct-Local 及显式崩溃场景 |
 
 Schema、摘要或阶段迁移修改须检查已存记录、完整前驱链、调用方与恢复路径，不能仅更新当前写者。版本化载荷与类型分别由 [PendingTurn 合同类型](../../crates/lattice-session/src/pending/contract.rs)、[绑定](../../crates/lattice-session/src/pending/binding.rs)、[结果材料](../../crates/lattice-session/src/pending/draft.rs)和[关闭类型](../../crates/lattice-session/src/pending/outcome.rs)维护。
 
 主要承接来源为 ADR 0005 的会话权威、对话、请求接受、PendingTurn、模型尝试、ResultDraft、重开和最终发布部分，以及[会话局部指引](../../crates/lattice-session/AGENTS.md)、[API 局部指引](../../crates/lattice-api/AGENTS.md)、[对话局部指引](../../crates/lattice-conversation/AGENTS.md)和[Agent 局部指引](../../crates/lattice-agent/AGENTS.md)中的有效边界。
 
-后续已落地的累积 transcript、统一候选基础、派生 strict-open 校验投影和候选修订细节按现行协议承接。旧性能活动、任务状态及已删除组件的实施步骤保留在历史材料中。合同批准时协调相邻草案、术语表和局部入口的替代范围；当前不切换旧文档读写流程。
+后续已落地的累积 transcript、统一候选基础、派生 strict-open 校验投影和候选修订细节按现行协议承接。旧性能活动、任务状态及已删除组件的实施步骤保留在历史材料中，现行诊断见 [InvocationStore 诊断指南](../development/invocation-store-diagnostics.md)。上述规则以本文及相邻合同为准，局部入口的读写流程另行整理。

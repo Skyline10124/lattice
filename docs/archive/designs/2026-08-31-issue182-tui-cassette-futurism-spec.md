@@ -2,10 +2,13 @@
 
 定稿日期：2026-08-28
 实现状态：已由 PR #184 落地；2026-09-03 侧栏与停靠区重构（`docs/plans/2026-09-03-tui-sidebar-dock-plan.md`）落地后同步更新本文。
-配色源：仓库内 [Cassette Futurism 配色资产](../reference/cassette-futurism-palette.md)（8 hues × 12 steps，OKLCH 生成）
+配色源：仓库内 [Cassette Futurism 配色资产](../../reference/cassette-futurism-palette.md)（8 hues × 12 steps，OKLCH 生成）
 数字来源：2026-08-28 细节锁定 + 2026-08-31 讨论复核 + 2026-08-31 实现前对码复核
 
 这份 spec 记录已经定死并落地的 #182 行为。
+
+> 承接说明：布局、停靠区、说话人分组、工具状态及配色规范现由 [TUI 合同](../../architecture/tui.md#验证与承接)维护，本文保留设计来源与历史记录。
+> 未承接的条款仍留在本文；绑定 Issue 的目录冻结与卡片实施顺序不因本次承接解除，DimMeta 可读性及主值配色调整仍按合同所列范围待审查。
 
 ---
 

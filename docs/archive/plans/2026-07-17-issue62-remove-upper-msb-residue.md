@@ -6,8 +6,8 @@
 > (Direct-Local) + ADR 0004 (Tool Host).
 
 - 票：<https://github.com/Skyline10124/lattice/issues/62>（原 Codeberg #40）
-- 前置依赖：#61（[计划](../../plans/2026-07-17-issue61-policy-visible-read.md)）。全局约束
-  与验证矩阵见 [总览](../../plans/2026-07-17-direct-local-overview.md)。
+- 前置依赖：#61（[计划](2026-07-17-issue61-policy-visible-read.md)）。全局约束
+  与验证矩阵见 [总览](2026-07-17-direct-local-overview.md)。
 - 对应 ADR 0003 Migration Sequence step 4 的 `[workspace]` 删除 + step 5 +
   step 6 的骨架部分（完整 direct-Local 场景覆盖归 #46）。
 

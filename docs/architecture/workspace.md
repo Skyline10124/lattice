@@ -1,5 +1,5 @@
 ---
-status: draft
+status: active
 ---
 
 # 本地工作区与变更历史
@@ -12,7 +12,7 @@ status: draft
 本合同规定 LATTICE 对本地工作区的观察、文件变更、私有变更历史及显式 Rewind 的职责、接口和行为边界。
 维护归属为 `lancet-runtime` 的工作区与历史模块。[Cell 合同](cell.md#准入与操作授权)维护能力准入与操作授权，[会话合同](session.md)维护 Turn 日志与重开协调，[存储合同](storage.md)维护私有库布局、锁和发布机制；本文规定工作区操作如何使用这些机制。工具组成与执行入口见 [LANCET 合同](lancet.md)。
 
-本文为待审查的承接草案。现行依据及生效前需核对的内容见文末，旧入口尚未切换。
+本文承接范围及仍需核验的实现问题见文末。
 
 ## 模型与职责
 
@@ -24,7 +24,7 @@ status: draft
 - **Workspace History** 保存 LATTICE 已安装变更的前后内容与关联身份，以私有 Git 对象和引用表达。记录范围限于 LATTICE 触及的路径，不收集整个项目的外部修改。
 - **Session History** 保存会话及工具交互。已完成 Turn 通过项目级 `WorkspaceHistoryCheckpoint` 与工作区历史关联，普通会话指针移动不恢复本地文件。
 
-术语入口暂为根 [CONTEXT.md](../../CONTEXT.md)，会话历史的精确模型由[会话合同](session.md#会话turn-与历史)承接；checkpoint 的项目范围与完成边界见[Turn checkpoint](#turn-checkpoint)。
+术语入口为[领域术语表](../reference/glossary.md)，会话历史的精确模型由[会话合同](session.md#会话turn-与历史)承接；checkpoint 的项目范围与完成边界见[Turn checkpoint](#turn-checkpoint)。
 
 ### 组件接口
 
@@ -96,6 +96,7 @@ Host 负责计算可见内容、内容身份、遍历限制和截断结果，并
 
 `mutate.create` 安装一个新文件，目标存在时拒绝覆盖；`mutate.edit` 对已有文件生成最终内容，并携带所依据的内容身份。
 Host 负责写入大小限制、路径与策略核验、取消检查及最终 Mutation Precondition 核验。
+语义编辑使用 replace/insert 和可选的 occurrence 选择。匹配缺失、歧义及指定 occurrence 不存在保留可供重新规划的诊断；空匹配文本、非法 occurrence 属于输入验证错误。操作成功应用后依次拒绝 no-op、trailing newline 状态改变，以及向已有空文件插入内容；传输格式变化不得丢失这些行为或诊断。共享语义与参数用法见[工具开发指南](../development/tool-development.md#语义编辑)。Host 在安装前执行 WriteLimits 字节限制，不信任 guest 已校验的声明。
 本地文件变更模块统一负责内容准备、目标安装或删除、持久化、辅助资源清理及效果报告，供 Host 变更与 Rewind 共用。历史记录与会话协调由调用方所属领域负责，依据模块返回的实际效果继续处理。
 
 正常路径依次为：
@@ -210,20 +211,23 @@ Rewind 按共用文件变更模块报告的实际效果记录进度与审计。�
 | Turn 与项目历史关联 | `cargo test -p lattice-api --test workspace_history_acceptance` |
 | 显式恢复、冲突、引用及审计边界 | `cargo test -p lattice-api --test rewind_acceptance` |
 
-验证分层与[被测二进制要求](../contract/testing.md#被测二进制)由测试工程草案承接，具体运行配方仍见[旧测试文档](../TESTING.md)。测试结果与未验证范围记录在对应任务中。
+验证分层与[被测二进制要求](../development/testing.md#被测二进制)由测试工程合同维护，运行配方见[验证操作指南](../development/validation-guide.md)。测试结果与未验证范围记录在对应任务中。
 
-### 现行依据与拟承接范围
+### 来源与承接范围
 
-- [CONTEXT.md](../../CONTEXT.md)：工作区、内容身份、前提、历史及 Rewind 相关术语的规则部分。术语入口保留；无变更 Turn 的 OID 表述待批准切换时同步。
-- [LANCET 运行时](../LANCET.md#local-workspace)：观察、变更与工作区历史的边界；工具目录、网络及完整调用协议继续由原领域承接。
+- [领域术语表](../reference/glossary.md)：保留工作区、内容身份、前提、历史及 Rewind 的简短定义与关键区别，完整规则由本文维护；无变更 Turn 的 OID 词条已与本文的项目全局 checkpoint 规则同步。
+- 原 LANCET 入口与 [#31 切片 C](../archive/plans/2026-08-01-issue31-sliceC-create-edit-components.md)：观察、变更、语义编辑与工作区历史；操作资料由[工具开发指南](../development/tool-development.md)承接。
 - [ADR 0003](../adr/0003-lancet-operates-directly-on-local-workspace.md)：Direct-Local、路径策略、单路径安装与 Rewind 的设计依据；组件归属结合 [ADR 0004](../adr/0004-build-closed-wasm-tool-catalog.md) 的修订读取。
 - [ADR 0005](../adr/0005-durable-turn-invocation-and-private-git-stores.md)：项目私有存储、锁序、全局 checkpoint、历史与 Invocation 终态的关系及 Rewind 范围。
 - [lancet-runtime 局部指引](../../crates/lancet-runtime/AGENTS.md)、[lancet-api 局部指引](../../crates/lancet-api/AGENTS.md)、[lattice-api 局部指引](../../crates/lattice-api/AGENTS.md)：现有职责、操作锁与安装后失败要求。
 
-### 生效前核对项
+现行规则以本文及对应合同为准，旧实施计划与根记录保留为历史证据，局部入口另行整理。
+
+### 实现与验证待办
 
 - 本文的统一文件变更职责、效果报告与辅助资源清理要求属于本轮设计补充，尚未完成实现与故障验证。需核验父目录来源记录、清理安全条件及残留报告；进程突然退出后的残留发现与处理边界仍待确认。
 - 现有 Rewind 恢复安装在名称替换后同步失败时丢失已安装信息，失败路径未加入已恢复列表；删除路径在 `unlinkat` 后直接返回。需按效果报告要求修正接口衔接，并确认安装、删除及新建目录的持久化范围与验证方式。
 - 部分恢复、引用已发布但持久性未确认、安装后历史失败等情形，仍需核验诊断与后续处理的完整边界。
+- 历史安全记录中的观察路径校验与打开间竞争、已 pin 父目录被并发移出工作区、grep 返回载荷聚合限制及 symlink 列举差异，尚未在本轮逐项复验。静态 symlink 拒绝或 pinned dirfd 不等于 `openat2(RESOLVE_BENEATH)` 的原子包含关系保证；不得以相同结论代替验证，也不另建第二套路径解析权威。涉及不可信共存目录或安全敏感文件时，须先核验这些边界。
 
 上述核对涉及 [本地安装](../../crates/lancet-runtime/src/workspace/local.rs)、[Host 变更](../../crates/lancet-runtime/src/host_mutate.rs)、[恢复执行](../../crates/lancet-runtime/src/workspace/rewind.rs)及[会话协调](../../crates/lattice-api/src/rewind.rs)。源码用于核验实现事实，不自行改变规范要求。

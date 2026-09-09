@@ -12,6 +12,6 @@ default = []
 [dependencies]
 # Re-export of the workspace-pinned generator. Guest Tools also take a direct
 # `wit-bindgen` dependency because `generate!` emits `wit_bindgen::rt::...` by
-# bare crate path (FINDINGS.md L-5-02 / #73); the single `=` pin in
+# bare crate path (docs/archive/records/FINDINGS.md L-5-02 / #73); the single `=` pin in
 # `[workspace.dependencies]` is what keeps both paths on one version.
 wit-bindgen = { workspace = true }

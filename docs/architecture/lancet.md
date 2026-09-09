@@ -1,5 +1,5 @@
 ---
-status: draft
+status: active
 ---
 
 # LANCET 工具执行
@@ -11,7 +11,7 @@ status: draft
 
 本合同规定 LANCET 的工具组成、Tool Host 边界、调用执行及证据与持久事实的衔接。维护归属为 `lancet-runtime`、`lancet-authority`、`lancet-protocol`、`lancet-audit` 和 `lancet-api` 各自负责的部分。
 
-产品调用由 `lattice-api::TurnCoordinator` 发起和协调。[会话合同](session.md#pendingturn-与结果关闭)维护完整 Turn 日志与结果关闭，[存储合同](storage.md#对象引用与持久化)维护通用发布与持久化机制，[工作区合同](workspace.md)维护文件操作。本文为承接草案，尚未替代旧 [LANCET 运行时](../LANCET.md)；相邻草案中的设计要求不因引用而生效。
+产品调用由 `lattice-api::TurnCoordinator` 发起和协调。[会话合同](session.md#pendingturn-与结果关闭)维护完整 Turn 日志与结果关闭，[存储合同](storage.md#对象引用与持久化)维护通用发布与持久化机制，[工作区合同](workspace.md)维护文件操作。
 
 ## 工具模型与职责
 
@@ -24,7 +24,7 @@ status: draft
 - **Closed Tool Catalog** 是一个构建产物内固定的 Tool 集合。
 - **Tool Host** 提供受控工作区、网络、会话及调用控制接口，负责核验权限和记录实际效果。
 
-术语与易混淆称呼暂由根 [CONTEXT.md](../../CONTEXT.md) 维护。manifest 的维护与批准遵循治理规则。
+术语与易混淆称呼由[领域术语表](../reference/glossary.md)维护。manifest 的维护与批准遵循治理规则。
 
 ### 组件职责
 
@@ -92,8 +92,8 @@ Component 不获得环境中的 WASI 文件系统、网络或进程权限，只�
 
 ### Cell 准入与操作授权
 
-运行时按 [Cell 合同草案](cell.md#准入与操作授权)执行调用准入与逐次 Host 操作授权，并在返回前完成[结果校验与计量](cell.md#结果校验与计量)。Tool 可见性、能力准入和领域操作许可分别核验。
-Cell 模型、能力匹配、scope/trust 解析及拒绝证据由该草案集中承接；旧规则入口尚未切换。
+运行时按 [Cell 合同](cell.md#准入与操作授权)执行调用准入与逐次 Host 操作授权，并在返回前完成[结果校验与计量](cell.md#结果校验与计量)。Tool 可见性、能力准入和领域操作许可分别核验。
+Cell 模型、能力匹配、scope/trust 解析及拒绝证据由该合同集中维护。
 
 ### 领域通道
 
@@ -104,14 +104,22 @@ Cell 模型、能力匹配、scope/trust 解析及拒绝证据由该草案集中
 | 网络获取 | URL、主机与地址策略、连接、重定向、TLS、流量与时间限制 |
 | 会话与控制 | 绑定当前调用的会话操作及结构化事件；取消查询是无效果的控制探测 |
 
-工作区通道的现行规则仍由旧文档承接，详细迁移见工作区合同草案。工具 enablement 不替代领域通道的授权检查。
+工作区通道遵循[工作区合同](workspace.md)。工具 enablement 不替代领域通道的授权检查。
 
 ### 网络获取
 
 `fetch.web` 仅通过 `network-fetch` Host 发出 GET 请求。Host 依次核验允许主机、协议与地址策略，解析 DNS 并固定连接地址，验证 TLS，并对每次重定向重新检查。
 公网访问采用 HTTPS；显式 localhost 策略作为受控例外处理，其余私有、保留和特殊地址拒绝。跨源重定向移除调用方请求头，响应头、响应体、重定向次数和 deadline 均受限制，取消与 Turn 观察预算参与执行。
+调用须同时通过 `ex` 能力边界和非空 `allowed_hosts` 目标策略；空允许列表拒绝全部网络，`allow_public_https` 只是公网 HTTPS 开关。localhost 还须显式启用并列入允许主机。每次调用最多一次网络 import，Host 内部处理重定向，不由 guest 发起第二条独立网络操作。最多跟随 5 次重定向，初始请求计数为 0；DNS、连接、TLS、各跳与 body 共用一次调用 deadline 和取消身份，不逐跳重置。
+
+初始请求拒绝 Host、Connection、Content-Length、Transfer-Encoding、Upgrade、Proxy-Authorization 等连接控制字段。origin 的 scheme、host 或 port 改变时丢弃全部调用者 headers，同源才可保留允许的字段。Host 每跳重建请求并强制 `Accept-Encoding: identity`，不提供 Cookie jar、认证挑战登录或凭证委派。
+
+网络元数据按字节施加固定 Host 上限，不允许 Tool 参数或 profile 放宽：原始及每跳规范 URL 8 KiB、调用者 request headers 32 个、单 name 128 bytes、单 value 8 KiB、request headers 合计 16 KiB、response headers 64 个及合计 64 KiB。request 合计包含 Host 自动字段，response 重复字段分别计数。各跳重核 URL 和 headers；HTTP 库默认限制不替代这些边界。body 使用 profile 的响应上限，超限返回显式 `truncated=true`；HTTP non-2xx 保留实际 status 与受限 body，不伪装为空成功。
+
+guest 只接收最小成功投影与无 payload 的粗错误标签，结构化分类由 Host 保留并优先返回。参数 schema、结果字段与 Host wire 分别见 [fetch manifest](../../tools/fetch-web/manifest.toml)和[生成 WIT](../../tools/fetch-web/generated/tool-host.wit)，不独立维护第二份 schema。网络不可用、拒绝、元数据超限、deadline 与取消分别保留类型化错误；trap 或执行资源耗尽不伪装成网络失败，重试属性不授权重放调用。
 
 网络证据按 [Cell 的内容边界](cell.md#内容与版本边界)保存脱敏端点，分别记录 Host 已接收与已交付 guest 的字节量。I/O 已发生后的超限、取消或其他失败保留为实际效果，不能记作设施调用前的拒绝。
+网络证据逐 hop 保留排序去重的 DNS candidates、实际连接 peer、协商 TLS 状态和明确的 failure phase；不能从 URL 或错误字符串推断 transport 事实。不另存 URL digest、重复 origin、certificate、cipher、SNI、原始 TLS 错误或 header values。读取量与交付量分别计量，不能把整形后的 body 长度当作全部接收字节。
 
 ## 调用身份与执行流程
 
@@ -160,20 +168,24 @@ flowchart TD
 
 ### 证据归属
 
-`CellEvidenceTriple` 的准入、效果与拒绝记录，以及顺序、内容和版本要求见 [Cell 合同草案](cell.md#证据模型与失败语义)。运行时将 Host 生成的证据交给协调层，持久结果材料由对应领域保存。
+`CellEvidenceTriple` 的准入、效果与拒绝记录，以及顺序、内容和版本要求见 [Cell 合同](cell.md#证据模型与失败语义)。运行时将 Host 生成的证据交给协调层，持久结果材料由对应领域保存。
 运行时错误采用类型化 `CepError`、有界消息及脱敏数据，不暴露 guest backtrace、秘密或宿主路径。
 
 ### InvocationStore 与操作员接口
 
 `lancet-audit` 拥有[私有状态布局](storage.md#私有状态根)中的项目级 `invocations.git`，负责有序批量预留、持久分发标记、终态与证据以及固定视图读取。通用 Git 机制由 `lattice-store` 提供；操作员投影、派生索引和事件通知不成为第二套生命周期权威。
 
+ledger 是唯一数据权威，`refs/lattice/invocations/high-water` 仅为单调 high-water witness，不存第二份生命周期状态。首次创建写入领域 genesis；每次预留、分发与终态更新以原 ledger tip 的直接子 commit 通过 CAS 追加。必须先持久推进 `refs/lattice/invocations/ledger`，再推进 witness。崩溃可使 witness 落后并仍为 ledger 祖先，读取接受该顺序状态，后续写入修复 witness；witness 缺失、分叉或 ledger 落后于 witness 时拒绝读取。不得 rebase、merge、截断、重写或删除 ledger，既有游标必须保持为当前 tip 的祖先。
+
+周期性 anchor 的认证 `state_digest` checkpoint 将冷读和首写重建限制为 O(state bytes) 加有界 delta replay，与累计历史深度解耦；这不是 O(1)。普通 transition 的临界区为 O(event bytes)。派生缓存或投影不替代 ledger 与 witness 核验。
+
 操作员查询经 `lancet-api` 调用 `lancet-audit`，不组合 Tool runtime，也不取得 Session 或 Workspace 操作锁：
 
 | 接口 | 读取语义 |
 | --- | --- |
 | `lattice audit` | 固定 ledger tip，返回每个调用的状态，包括尚未终结的记录 |
-| `lattice audit tail` | 从可达的独占 OID 游标之后读取有序生命周期变更 |
-| `lattice audit replay --turn` | 按模型步骤与片段顺序读取 Turn 调用事实，不重新执行工具 |
+| `lattice audit --tail` | 从可达的独占 OID 游标之后读取有序生命周期变更 |
+| `lattice audit replay --session <SessionId> --turn <TurnId>` | 按模型步骤与片段顺序读取 Turn 调用事实，不重新执行工具 |
 | `lattice lancet status` | 返回固定视图的 OID 与有界状态投影 |
 
 读取可能观察到跨库流程的中间状态。公开关联使用 `InvocationId`；Git OID 用于存储寻址和游标。上述操作员接口不是 Agent Tool。
@@ -192,15 +204,16 @@ flowchart TD
 | 组成、准入、Host 与运行时结果 | `cargo test -p lancet-runtime` |
 | 调用入口与操作员接口 | `cargo test -p lancet-api`、`cargo test -p lancet-audit` |
 
-`lattice lancet doctor` 检查工作区规范化与生成目录的组成；它不验证完整执行、持久终态或 Bundle 安装。外部场景遵循测试工程的[被测二进制要求](../contract/testing.md#被测二进制)，具体构建与运行配方仍见[旧测试文档](../TESTING.md)。
+`lattice lancet doctor` 检查工作区规范化与生成目录的组成；它不验证完整执行、持久终态或 Bundle 安装。外部场景遵循测试工程的[被测二进制要求](../development/testing.md#被测二进制)，构建与运行配方见[验证操作指南](../development/validation-guide.md)。
 
-### 来源与未完成承接
+### 来源与承接范围
 
-- [LANCET 运行时](../LANCET.md)：执行入口、目录、通道、证据与操作员接口；工作区细节另由工作区草案承接。
+- 原 `docs/LANCET.md` 的执行入口、目录、通道、证据与操作员规则由本文及相邻合同承接，操作资料见[工具开发指南](../development/tool-development.md)。
 - [ADR 0004](../adr/0004-build-closed-wasm-tool-catalog.md)：封闭构建、manifest 来源、WASM 隔离、Bundle 设计和三层生命周期。
-- [ADR 0005](../adr/0005-durable-turn-invocation-and-private-git-stores.md)：身份、预留、分发、终态与证据、顺序执行及重开边界。本文不承接完整 PendingTurn、存储内核或资格化协议。
-- [Cell 旧设计](../specs/2026-07-26-issue28-cell-admission-design.md)：保留模型的准入、操作授权、结果计量和证据分离。已退役的 native 双路径、SQLite、Turn/audit provenance 与 attestation 不迁入。
-- [运行时局部指引](../../crates/lancet-runtime/AGENTS.md)及[审计局部指引](../../crates/lancet-audit/AGENTS.md)：现有组件归属与执行边界。
+- [ADR 0005](../adr/0005-durable-turn-invocation-and-private-git-stores.md)：身份、预留、分发、终态与证据、ledger/witness、冷读成本、顺序执行及重开边界。完整 PendingTurn 和存储内核分别归会话、存储合同，资格化操作见[诊断指南](../development/invocation-store-diagnostics.md)。
+- [Cell 历史设计](../archive/designs/2026-07-26-issue28-cell-admission-design.md)：准入、操作授权、结果计量和证据分离；native 双路径、SQLite、Turn/audit provenance 与 attestation 不恢复。
+- [网络决议记录](../archive/plans/2026-08-04-issue32-fetch-component-grill-decisions.md)：已确认的网络 Host、安全、限制、投影与证据要求由本文承接，未决项和旧实现流水仅作追溯。
+- [运行时局部指引](../../crates/lancet-runtime/AGENTS.md)及[审计局部指引](../../crates/lancet-audit/AGENTS.md)：组件归属与执行边界。
 
-Bundle 安装设计的实现工作还需明确安装失败、重建失败和活动版本切换失败的处理语义。生效前仍需核验预留 Descriptor 身份到实际编译 Component 的完整校验链；当前局部指引记录的该身份链历史待核验项须确认处理状态。
-旧文档、术语表及局部入口在承接获批时按范围切换，文档读写流程随入口迁移同步核对。
+Bundle 安装、重建及活动版本切换失败的完整语义仍需明确，由 [#35](https://github.com/Skyline10124/lattice/issues/35)承接；reserved Descriptor 到实际编译 Component 的 exact identity gate 及 model-visible/executable 启用集一致性仍需在该项前核验，不增加第二个 catalog authority。网络旧记录中的 DNS 后未连接分类、body 编码及 header 规则未决项，本轮未重新作行为验证；保留为核验线索，不以归档宣称已解决。
+上述规则以本文及对应合同为准，历史与已退役实现不再是默认执行入口。术语表的读写入口见[领域文档指引](../agents/domain.md)，其他局部入口另行整理。

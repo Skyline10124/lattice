@@ -1,5 +1,5 @@
 ---
-status: draft
+status: active
 ---
 
 # 私有存储与持久化
@@ -11,7 +11,7 @@ status: draft
 
 本合同规定私有状态寻址、领域存储归属、通用 Git 内核、创建与打开、引用发布、锁和持久性验证边界。`lattice-store` 维护通用机制，领域 crate 维护记录、引用命名、schema 及其不变量。
 
-本文为承接草案，现行依据仍由 [ADR 0005](../adr/0005-durable-turn-invocation-and-private-git-stores.md)及[存储局部指引](../../crates/lattice-store/AGENTS.md)承接。会话与 PendingTurn 见[会话草案](session.md)，调用生命周期与证据见 [LANCET 草案](lancet.md)和 [Cell 草案](cell.md)，文件安装及 Rewind 见[工作区草案](workspace.md)。
+会话与 PendingTurn 见[会话合同](session.md)，调用生命周期与证据见 [LANCET 合同](lancet.md)和 [Cell 合同](cell.md)，文件安装及 Rewind 见[工作区合同](workspace.md)。
 
 ## 状态布局与身份
 
@@ -167,6 +167,8 @@ StoreError 保留操作与底层原因，但不是所有变更效果的完整领
 
 CAS 的相同目标重试不授权修改身份。当前 `MustNotExist` 对完全相同目标可按幂等成功处理，不同目标仍是冲突；领域还须验证绑定或对象内容等同关系。
 
+阻塞的 Git/文件系统持久化在 `spawn_blocking` 等阻塞执行边界内完成；不得跨 await 持有 repository write lock。该要求不缩短领域操作锁覆盖的期限。
+
 ## 锁与并发语义
 
 操作锁覆盖领域操作，仓库锁覆盖单库发布。需要多类锁的操作遵循以下顺序，仅取得本次操作需要的锁：
@@ -198,7 +200,7 @@ guard 是显式持有凭据，不由线程 ID 或任务 ID 推定所有权。最
 
 派生索引、缓存和校验投影的认证、重建与失效由所属领域维护。[会话校验投影](session.md#权威引用)由 `lattice-session` 维护，Invocation 的 ledger ref、witness、checkpoint 和[固定视图](lancet.md#invocationstore-与操作员接口)由 `lancet-audit` 维护。它们不成为内核中的第二套 schema 或领域状态权威。
 
-内核格式与领域 schema 分别演化。格式、目录拓扑或屏障变化须核验既有数据的打开、引用可达性、精确重试及各领域发布接口，破坏性处理须先说明影响并获授权。历史性能与故障证据按[测试工程的证据保留要求](../contract/testing.md#脱敏与完整性)处理。
+内核格式与领域 schema 分别演化。格式、目录拓扑或屏障变化须核验既有数据的打开、引用可达性、精确重试及各领域发布接口，破坏性处理须先说明影响并获授权。历史性能与故障证据按[测试工程的证据保留要求](../development/testing.md#脱敏与完整性)处理。
 
 ## 位置能力与验证
 
@@ -222,8 +224,8 @@ SIGKILL 后重开证明相应进程崩溃场景；注入屏障失败验证调用
 | 领域发布、重试、恢复与可达性 | 按影响选择 `lattice-session`、`lancet-audit`、`lancet-runtime` 及协调层测试 |
 | 实际存储位置能力 | 在获准目录运行预构建的 `lattice-store-probe` |
 
-纯文档修订核对接口责任、发布顺序、锁范围、来源、状态及图示。修改内核时先检查直接故障窗口，再验证使用该机制的领域，执行资源和被测产物按[测试工程草案](../contract/testing.md)处理。
+纯文档修订核对接口责任、发布顺序、锁范围、来源、状态及图示。修改内核时先检查直接故障窗口，再验证使用该机制的领域，执行资源和被测产物按[测试工程合同](../development/testing.md)处理。
 
 承接来源包括 ADR 0005 的项目寻址、三库布局、通用内核、操作锁和位置能力部分，以及存储局部指引的已落地屏障和同进程仲裁要求。机制接口与实现核对位置为 [`repo.rs`](../../crates/lattice-store/src/repo.rs)、[`durability.rs`](../../crates/lattice-store/src/durability.rs)、[`lock.rs`](../../crates/lattice-store/src/lock.rs)及 [`probe.rs`](../../crates/lattice-store/src/probe.rs)。
 
-局部指引中“操作锁可重入”的概括按当前显式 guard 语义展开，不迁入旧的自动嵌套假设。创建残留的完整报告、跨位置能力覆盖及多引用发布中断的诊断范围仍需在生效前核验。旧入口的替代范围在承接批准时同步确认。
+局部指引中“操作锁可重入”的概括按当前显式 guard 语义展开，不迁入旧的自动嵌套假设。创建残留的完整报告、跨位置能力覆盖及多引用发布中断的诊断范围仍需核验。现行规则以本文为准，原实施计划与运行记录留作历史，局部入口另行整理。

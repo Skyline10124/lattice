@@ -1,3 +1,7 @@
+---
+status: accepted
+---
+
 # ADR 0004: Build-Closed WASM Tool Catalog
 
 - Status: Accepted
@@ -5,7 +9,10 @@
 - Amends: ADR 0003 catalog and handler-ownership decisions
 - Amended by: ADR 0005 invocation identity, operator storage, and
   session-bound orchestration decisions
-- Canonical vocabulary: root `CONTEXT.md`
+- 术语导航：[领域术语表](../reference/glossary.md)
+
+> 承接说明：封闭构建、manifest 来源、WASM 隔离、Bundle 安装设计及运行时生命周期由 [LANCET 合同](../architecture/lancet.md#来源与承接范围)维护；Cell、scope/trust 与操作授权见 [Cell 合同](../architecture/cell.md#来源与迁移边界)，本地文件与历史边界见[工作区合同](../architecture/workspace.md#来源与承接范围)。
+> 本 ADR 保留理由、取舍、历史与原有修订关系，现行规则由上述合同承接；外部 Bundle 安装、宿主自动重建和活动版本切换仍未实现，见[安装设计](../architecture/lancet.md#bundle-安装设计)。跨机摘要漂移的警告与完整性失败边界由[测试工程合同](../development/testing.md#ci-与发布证据)维护，不再按旧计划自动升级硬门。
 
 ## Context
 

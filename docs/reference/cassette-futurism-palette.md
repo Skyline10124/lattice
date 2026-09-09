@@ -1,3 +1,7 @@
+---
+status: active
+---
+
 # Cassette Futurism 配色资产
 
 > 类型：参考资料 · 设计资产
@@ -8,7 +12,7 @@
 
 原设计标注为 OKLCH 色表，以 Lone Trail 为视觉参考。本文保留原资产的 hex 值，不重新生成色阶；原 JSX 展示组件中的复制、明暗预览切换和装饰动画不再保留为代码。
 
-色系与色阶说明是设计参考。TUI 的实际角色、填充面与回退要求由 [TUI 规格](../specs/2026-08-31-issue182-tui-cassette-futurism-spec.md)维护，后续承接见 [TUI 合同草案](../architecture/tui.md)。
+色系与色阶说明是设计参考。TUI 的实际角色、填充面与回退要求由 [TUI 交互与视觉合同](../architecture/tui.md)维护。
 
 ## 色系用途
 

@@ -11,6 +11,9 @@ comment). This document is also the B9/C7/A4 **legacy deletion gate** record (§
 > this historical design are retired. Current operator reads expose typed
 > finalized audit rows with optional Cell evidence; see `docs/LANCET.md`.
 
+> 承接说明：保留模型的能力准入、精确 Cell 覆盖、Host 授权、结果计量与版本化证据由 [Cell 合同](../../architecture/cell.md#来源与迁移边界)维护；执行通道及终态发布由 [LANCET 合同](../../architecture/lancet.md#来源与承接范围)维护。
+> 已承接规范以对应合同为准，未承接内容继续留在本记录；原有退役说明保持有效，native 双路径、SQLite、Turn/audit provenance 与 attestation 不因本次承接恢复效力。
+
 ## 1. Goal
 
 One unified Cell authorization and evidence path for Component Tools:

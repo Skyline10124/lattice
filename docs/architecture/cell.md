@@ -1,5 +1,5 @@
 ---
-status: draft
+status: active
 ---
 
 # Cell 权限与证据
@@ -11,7 +11,7 @@ status: draft
 
 本合同规定 Tool 的 Cell 模型、能力准入、Host 操作授权、结果计量和证据语义。`lancet-protocol` 维护数据契约，`lancet-runtime` 执行准入、授权与记录，`lancet-authority` 提供领域策略，`lancet-audit` 负责持久证据及操作员读取。
 
-[LANCET 合同](lancet.md#构建与封闭组成)维护工具构建与组成，并负责[执行及终态发布](lancet.md#调用身份与执行流程)；[会话合同](session.md#pendingturn-与结果关闭)维护结果关闭与重开协调；[工作区合同](workspace.md#文件变更)维护文件安装与恢复效果。本文保持草案，旧规则入口尚未切换。
+[LANCET 合同](lancet.md#构建与封闭组成)维护工具构建与组成，并负责[执行及终态发布](lancet.md#调用身份与执行流程)；[会话合同](session.md#pendingturn-与结果关闭)维护结果关闭与重开协调；[工作区合同](workspace.md#文件变更)维护文件安装与恢复效果。
 
 ## 模型与声明
 
@@ -36,6 +36,7 @@ status: draft
 
 Descriptor 的 manifest 来源和生成链见 [LANCET 的概念与契约来源](lancet.md#概念与契约来源)及[生成与校验](lancet.md#生成与校验)。其 Cell 声明须满足：scope 名称、能力名称各自唯一，每个能力引用已声明的 scope。
 能力名称采用至少两段的小写点分形式，各段允许小写字母、数字、下划线和连字符；语法为 `^[a-z0-9_-]+(\.[a-z0-9_-]+)+$`。跨 Tool 的同名能力必须对应相同 Cell。
+每个能力的验证顺序固定为名称 grammar、重复名称、未声明 scope，诊断不得因重排而改变。
 
 CellRef 使用 `ctx:ext:scope` 三段形式。guest 返回的 CellRef 不包含 trust；Host 根据 Descriptor 补全证据中的信任边界。带第四段 trust 的 guest CellRef 应被拒绝。scope 名称不能包含会改变分段的冒号。
 
@@ -99,6 +100,7 @@ guest 返回一个结果 CellRef 和结构化结果。Host 解析后，要求结
 越出 Descriptor 的结果 Cell 或不在准入集合中的结果被拒绝，不记录为有效结果效果。此前已经发生的操作效果保留，不能因结果不合法而抹去。格式或 schema 不匹配由运行时返回相应类型化错误。
 
 有效结果的 `context_measure` 为 `len(canonical_json(result_value))`，单位是字节，由 Host 计算。所有结果效果均计量，不因声明 `alloc`、`free` 或 `mutate` 而省略。
+canonical JSON 由 [`canonical.rs`](../../crates/lancet-protocol/src/canonical.rs) 的单一实现生成：显式排序对象键，不依赖 `serde_json::Map` 内部结构或 `preserve_order` 是否启用；不输出空白，数字沿用 serde_json 格式，数组顺序保持不变。
 有界领域操作返回数据时按对应 Host 定义记录交付量；无返回值的操作可不带该度量。操作返回量与最终结果表示是不同测量对象，不能直接相加视为唯一预算消耗。
 
 计量提供事实，预算执行由对应 Host 与 Turn 预算负责。`free` 标签本身不证明上下文已释放，guest 自报用量也不能取代 Host 度量。此处结果值的字节计量与会话层 [ToolContent 材料上限](session.md#resultdraft-与关闭材料)分别约束各自对象，不互作替代。
@@ -136,7 +138,7 @@ guest 返回一个结果 CellRef 和结构化结果。Host 解析后，要求结
 
 证据保存权限判断与效果事实，不保存工具参数正文、结果正文、文件或响应内容、凭据及宿主绝对路径。项目相对路径、内容摘要、大小和经过脱敏的网络信息按所属字段保存。网络端点去除 userinfo、query 和 fragment。
 
-三个持久记录根各自携带版本。读取者先核对支持的版本，再解释内容；旧记录缺少可选领域信息时，不补成当前已经核验的事实。具体编码由协议类型维护，版本兼容检查由持久读取路径执行。
+持久读取根必须是 `AdmissionEvidence`、`ObservedEffectsRecord`、`DeniedOperationsRecord` 三个版本化记录之一，裸效果或拒绝数组不是可读取的记录根。读取者先核对支持的版本，再解释内容。上述记录及 `ObservedTarget`、`ObservedScope`、`ObservedEffect`、`DeniedOperation` 证据结构允许未知字段，不加 `deny_unknown_fields`；这一兼容约定不扩展到其中引用的闭合 Cell 模型、未知版本或未知枚举值。旧记录缺少可选领域信息时，不补成当前已经核验的事实。具体编码由协议类型维护，版本兼容检查由持久读取路径执行。
 新增证据字段应同时核对生产、版本校验、持久存储和操作员投影。当前结果材料及其他领域存储的内容策略由各自合同规定。
 
 ## 验证与承接
@@ -157,9 +159,9 @@ guest 返回一个结果 CellRef 和结构化结果。Host 解析后，要求结
 ### 来源与迁移边界
 
 - [ADR 0004](../adr/0004-build-closed-wasm-tool-catalog.md)：Cell 词汇、scope/trust 与 Host 权限边界。
-- [Cell 旧设计](../specs/2026-07-26-issue28-cell-admission-design.md)：能力准入、精确集合覆盖、结果计量和版本化证据分离。旧文档中的 native 双路径、SQLite、Turn/audit provenance 和 attestation 不在承接范围内。
-- [ADR 0005](../adr/0005-durable-turn-invocation-and-private-git-stores.md)及旧 [LANCET 运行时](../LANCET.md)：InvocationId 归属、终态与证据持久化、当前 Host 通道。
+- [Cell 历史设计](../archive/designs/2026-07-26-issue28-cell-admission-design.md)：能力准入、精确集合覆盖、结果计量、canonical JSON 和版本化证据读取。旧示例给 `ObservedTarget` 加 `deny_unknown_fields` 与同节持久读取 prose 不一致；本文按明确的 forward-compatible 约定及当前协议类型承接，不恢复 native 双路径、SQLite、Turn/audit provenance 或 attestation。
+- [ADR 0005](../adr/0005-durable-turn-invocation-and-private-git-stores.md)与原 LANCET 入口的 InvocationId 归属、终态与证据持久化、Host 通道规则由本文及 [LANCET 合同](lancet.md)承接。
 - [协议局部指引](../../crates/lancet-protocol/AGENTS.md)、[策略局部指引](../../crates/lancet-authority/AGENTS.md)及[运行时局部指引](../../crates/lancet-runtime/AGENTS.md)：数据契约、领域策略与运行时执行的职责划分。
 
-旧设计中“Path/Host 目标尚不可授权”“操作效果均无计量”等阶段性表述已由领域 Host 接口扩展，不能作为当前通道限制迁入。本文按现行入口及协议核对这些扩展，旧入口在承接批准前保留。
-工作区草案新增的辅助资源清理与完整效果报告尚未完成实现；相关证据字段、版本与持久读取衔接需在该设计实施时核验。
+旧设计中“Path/Host 目标尚不可授权”“操作效果均无计量”等阶段性表述已由领域 Host 接口扩展，不能作为当前通道限制。现行规则以本文及对应合同为准，原文保留为历史，局部入口另行整理。
+工作区合同新增的辅助资源清理与完整效果报告尚未完成实现；相关证据字段、版本与持久读取衔接需在该设计实施时核验。

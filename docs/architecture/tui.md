@@ -1,5 +1,5 @@
 ---
-status: draft
+status: active
 ---
 
 # TUI 交互与视觉
@@ -11,7 +11,7 @@ status: draft
 
 本合同规定全屏 TUI 的产品接线、键盘交互、布局、状态呈现与配色。维护归属为 `lattice-tui`；CLI 解析由 `lattice-cli` 负责，会话与 Turn 执行通过公开 `lattice-api` 接口完成。
 
-本文为承接草案，旧 [TUI 规格](../specs/2026-08-31-issue182-tui-cassette-futurism-spec.md)和[局部指引](../../crates/lattice-tui/AGENTS.md)尚未切换。TUI 通过[会话公开接口](session.md#组件与接口)观察和操作当前会话；调用持久终态与重开规则由 LANCET、会话领域维护。
+TUI 通过[会话公开接口](session.md#组件与接口)观察和操作当前会话；调用持久终态与重开规则由 LANCET、会话领域维护。
 
 ## 职责与显示模型
 
@@ -38,6 +38,7 @@ flowchart LR
 ```
 
 图中连线表示事件或显示数据传递，持久化由 API 所属领域处理。
+Turn 事件使用穷举匹配，不以兜底分支吞掉新增事件。Turn 流 idle timeout 的单一常量来源为 `lattice_api::STREAM_IDLE_TIMEOUT_SECS`；超时显示失败并收口仍 Running 的工具块，不伪造持久提交。取消请求置协作标志后继续消费事件流，终态后的实际持久状态由 API 决定。
 
 ## 布局
 
@@ -163,15 +164,15 @@ WARN/ERROR 显示时屏蔽普通输入、编辑、粘贴与提交，不修改不
 | --- | --- |
 | 键位、折行、停靠区、状态释放与布局 | `cargo test -p lattice-tui` |
 | CLI 接线 | CLI 表面变化时检查 `cargo test -p lattice-cli` |
-| 实际终端入口 | 按测试工程的[被测二进制要求](../contract/testing.md#被测二进制)准备 lattice-cli，运行 harness 的 `pty_tui_smoke` |
+| 实际终端入口 | 按测试工程的[被测二进制要求](../development/testing.md#被测二进制)准备 lattice-cli，运行 harness 的 `pty_tui_smoke` |
 | 交互与配色 | 真彩色和命名色回退、超宽及极小终端、错误确认、翻页与光标的人工检查 |
 
-自动化与人工检查分工见[测试工程草案](../contract/testing.md)，具体运行指南仍见[旧测试文档](../TESTING.md)。颜色辨识与终端行为需实机核验，不能仅由布局计算通过推定体验合格。
+自动化与人工检查分工见[测试工程合同](../development/testing.md)，运行配方见[验证操作指南](../development/validation-guide.md)。颜色辨识与终端行为需实机核验，不能仅由布局计算通过推定体验合格。
 
-- [TUI 旧规格](../specs/2026-08-31-issue182-tui-cassette-futurism-spec.md)：固定侧栏、统一停靠区、说话人分组、工具状态和配色。
+- [TUI 历史规格](../archive/designs/2026-08-31-issue182-tui-cassette-futurism-spec.md)：固定侧栏、统一停靠区、说话人分组、工具状态和配色。
 - [TUI 局部指引](../../crates/lattice-tui/AGENTS.md)：公开 API 边界、键位、输入历史与验证入口。
 - [ADR 0005](../adr/0005-durable-turn-invocation-and-private-git-stores.md)：取消和失败的持久状态由 Turn 协议决定。旧指引“取消后照常 commit”的概括不作为 TUI 保证。
 
 旧规格的 `ToolErr` 表格有列顺序错位，本文按局部指引和同页配色说明承接为 signal-red-9、`#cb2b31`、Red。
 DimMeta 在 navy-11 上的可读性仍需人工核验；旧规格提出难读时将 session/agent 主值改用 Assistant，是否启用该调整留待审查，不自行改色。
-绑定 Issue 的目录冻结与卡片实施顺序留在原记录，未在本文宣布解除。旧入口的替换范围及其剩余条款在合同批准时一并核对。
+文件与目录按渲染职责组织，不固定为五个文件，不以 #116 完成为 `render/` 目录调整的前提，也不采用旧切片的 1250/800 行数上限。公开 API 边界、共享渲染归属与 block 数据契约保持不变；组织调整不授权新增工具卡片或其他功能。上述来源中的现行规则以本文为准，原实施过程留作历史。
