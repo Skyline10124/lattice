@@ -612,6 +612,7 @@ deterministically, no new attempt starts after the deadline, and corruption or
 identity/digest mismatch is never retried.
 
 # 139-A's retained 20+20 Arch Linux/Btrfs qualification previously approved a
+
 **60-second monotonic budget**: the first attempt is immediate, retriable
 durability failures use deterministic exponential delays from 25 milliseconds
 capped at 1 second, and no new attempt starts after the deadline. It is the
@@ -630,7 +631,9 @@ benchmark**. The corrected-harness bundle
 full-finalize FAIL** and **5/20 terminal-publish FAIL**. K is not raised.
 The `FinalizeBudget` remains an architecture and failure-semantics constraint.
 On 2026-08-22, #139-A was approved on its correctness and structural evidence;
+
 # 139-B may proceed. The performance qualification is diagnostic-only pending
+
 GitHub #153, and historical campaign verdicts remain unchanged evidence rather
 than a production-wiring prerequisite. Journal CAS callers must not add a second
 `fsync_pending` after successful `cas_ref`; that contract change is not an
@@ -949,7 +952,8 @@ teaching `lattice-store` domain schemas.
                                                                   -> #34
 ```
 
-# 142 adds data types, strict Tool argument/message contracts, provider fixtures,
+# 142 adds data types, strict Tool argument/message contracts, provider fixtures
+
 and conversation ownership without switching the production numeric path. #143
 adds the generic kernel, XDG topology, SessionState/head persistence, operation
 locks, and WorkspaceHistory mechanics without creating production
@@ -957,7 +961,8 @@ InvocationStore. #142 and #143 may land independently after #141. #144 consumes
 both to add the TurnId-keyed permanent Turn pins, direct `active-turn` journal,
 PendingTurn state machine, and pure reducer against synthetic Invocation facts.
 
-# 139-A implements the real non-production InvocationStore and stress harnesses.
+# 139-A implements the real non-production InvocationStore and stress harnesses
+
 `LOCAL_LEDGER_STRESS` retains the accepted 8 sessions × 20 steps × 8 invocations
 = 1,280 invocations and 2,720 ledger commits. `RESULT_FINALIZE_STRESS` combines
 the real SessionStore and InvocationStore with synthetic result/effect facts.
@@ -982,7 +987,8 @@ for contract v1. #139-A is approved and #139-B may proceed; the qualification
 redesign is tracked by #153.
 Record: `docs/plans/2026-08-21-issue139a-qualification-contract-v2.md`.
 
-# 139-B performs one production hard cut: canonical JSON-RPC InvocationId,
+# 139-B performs one production hard cut: canonical JSON-RPC InvocationId
+
 TurnCoordinator, dispatch, ResultDraft, terminal evidence, operator Adapter,
 conversation/Turn outcome schema, and deletion of SQLite persistence, numeric
 IDs, old sidecars/lifecycle fields, ProvisionalCompletionHook, legacy readers,
@@ -991,6 +997,7 @@ imports, and dual writes. #139-B retains the existing
 `lancet-native` itself is removed.
 
 # 143 is already a no-import hard cut for the Session and WorkspaceHistory
+
 locations/formats: old config-root Session data and old WorkspaceHistory data are
 manually removed/rebuilt, and rewind does not span the cut. #143 does not change
 or orphan the transitional SQLite audit resolver; that store remains the #114
