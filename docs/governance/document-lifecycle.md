@@ -19,7 +19,7 @@ status: active
 
 | 类别 | 保存位置 | 职责与权威 |
 | --- | --- | --- |
-| 慢文档：治理、架构、工程合同 | `docs/governance/`、<br>`docs/architecture/`、<br>`docs/contract/` | 承载经人类批准的现行规范 |
+| 慢文档：治理、架构、工程合同 | `docs/governance/`、<br>`docs/architecture/`、<br>`docs/development/` | 承载经人类批准的现行规范 |
 | 慢文档：参考资料 | `docs/reference/` | 解释术语、接口和用法，不另立架构规则 |
 | 决策记录 | `docs/adr/` | 保存决策理由、取舍与状态，不与当前合同竞争权威 |
 | 快文档：任务、提案、审查 | GitHub Issue、PR 和评论 | 承载授权范围、验收标准、工作状态和建议 |
@@ -58,6 +58,23 @@ status: active
 - 局部 `AGENTS.md` 按职责、禁止越界、必读上位文档和验证组织。
   具体键位、配色、布局、协议流程和状态机等归入领域合同，不堆入 Agent 入口。
   入口以内容聚焦为准，不为满足机械行数限制拆出碎片文档。
+
+## 状态元信息
+
+维护中的合同、指南、参考资料及 `docs/agents/` 文档在文件顶部使用 YAML frontmatter 声明 `status`：
+
+```yaml
+---
+status: active
+---
+```
+
+- 合同使用 `draft`（草案）、`pending`（待裁决）、`active`（现行）、`superseded`（已取代）或 `revoked`（已废止），对应下文生命周期。
+- 指南与参考资料使用相同状态词表达文档的维护状态；`active` 表示当前维护和使用，不赋予规范效力，也不证明所述功能已经实现或验证通过。
+- ADR 使用决策状态：`proposed`、`accepted`、`rejected`、`superseded` 或 `revoked`。按已有决策记录填写，保留取代、修订关系与历史正文；`accepted` 不使 ADR 取代现行合同。
+- `README.md`、`AGENTS.md`、`CLAUDE.md` 等索引与指引入口，以及 skill 和角色文件，不要求此字段；工具约定的元信息保持原格式。归档原文不批量补写状态，由归档目录和索引说明其历史身份。
+
+状态值须与正文和实际批准一致，不能仅为补齐字段而把草案、待裁决材料或旧决策标为现行。
 
 ## 慢文档的生命周期
 
