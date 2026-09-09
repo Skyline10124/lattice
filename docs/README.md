@@ -13,7 +13,8 @@
 - [文档生命周期](governance/document-lifecycle.md)：文档分类、语言与命名、批准、修订和迁移。
 - [架构合同写作](governance/architecture-contracts.md)：领域模型、结构与接口、数据流、行为语义及审查要求。
 - [Agent 身份与权限](governance/agent-permissions.md)：独立身份、任务授权、凭据与操作边界。
-- [Git 操作与协作记录](governance/git-operations.md)：默认只读、写操作授权，以及 commit、PR 和评论格式。
+- [Git 操作与协作记录](governance/git-operations.md)：默认只读、写操作授权，以及 commit 和评论格式。
+- [PR 格式与行文规范](governance/pull-requests.md)：PR 标题、结构化授权、变更边界、验证记录与行文要求。
 
 ## 架构
 
