@@ -106,6 +106,11 @@ pub(super) async fn run_coordinator_saga(
         .as_ref()
         .map(|p| p.profile.llm.retry.max_retries.saturating_add(1).max(1))
         .unwrap_or(1);
+    let retry = request
+        .loaded_profile
+        .as_ref()
+        .map(|p| p.profile.llm.retry.clone())
+        .unwrap_or_default();
 
     let (agent_tx, mut agent_rx) = mpsc::channel::<TurnEvent>(TURN_EVENT_CHANNEL_CAPACITY);
     let cep_agent_tx = agent_tx.clone();
@@ -167,6 +172,7 @@ pub(super) async fn run_coordinator_saga(
         }
 
         let mut attempt: u32 = 0;
+        let mut retry_delay_ms = retry.initial_delay_ms.min(retry.max_delay_ms);
         let complete_message = loop {
             if Instant::now() >= turn_deadline {
                 turn_outcome = TurnOutcome::Interrupted {
@@ -282,7 +288,27 @@ pub(super) async fn run_coordinator_saga(
                 deadline: Some(turn_deadline),
             };
 
-            let attempt_result = model_driver.run(&step_request, Some(&step_tx)).await;
+            // 循环头部检查之后的 journal 发布与 observer 投递仍会耗时，
+            // 期间可能到达 deadline 或触发取消：此时不打开 provider，
+            // 直接关闭已发布的 attempt。
+            let interruption = if Instant::now() >= turn_deadline {
+                Some(lattice_conversation::AttemptInterruption::Timeout)
+            } else if is_cancelled(request.cancel_flag.as_ref()) {
+                Some(lattice_conversation::AttemptInterruption::Cancelled)
+            } else {
+                None
+            };
+            let attempt_result = if let Some(reason) = interruption {
+                Ok(ModelStepAttempt {
+                    status: ModelStepStatus::Interrupted(reason),
+                    message: None,
+                    usage: None,
+                    finish_reason: None,
+                    diagnostic: None,
+                })
+            } else {
+                model_driver.run(&step_request, Some(&step_tx)).await
+            };
             drop(step_tx);
             let _ = forwarder.await;
             drain_ready_events(&mut agent_rx, &mut ordered_events, &mut observer).await;
@@ -291,21 +317,6 @@ pub(super) async fn run_coordinator_saga(
                 Err(ModelStepError::OpeningFailed { message, retryable }) => {
                     attempt_usages.push(None);
                     let recorded_at = chrono::Utc::now().timestamp();
-                    let will_retry = retryable && attempt + 1 < max_attempts;
-                    observer
-                        .emit(TurnEvent::LlmRequestError {
-                            provider: Some(prepared.provider.clone()).filter(|p| p != "unknown"),
-                            model: prepared.model.clone(),
-                            attempt: attempt + 1,
-                            max_attempts,
-                            error_kind: "opening_failed".into(),
-                            retryable,
-                            will_retry,
-                            delay_ms: None,
-                            status_code: None,
-                            message: message.clone(),
-                        })
-                        .await;
                     if let Err(err) = coordinator
                         .io
                         .advance_turn(
@@ -322,7 +333,28 @@ pub(super) async fn run_coordinator_saga(
                     {
                         break 'saga Err(map_io(err));
                     }
+                    let will_retry = retryable && attempt + 1 < max_attempts;
+                    let now = Instant::now();
+                    let delay = Duration::from_millis(retry_delay_ms)
+                        .min(turn_deadline.saturating_duration_since(now));
+                    let retry_at = now + delay;
+                    observer
+                        .emit(TurnEvent::LlmRequestError {
+                            provider: Some(prepared.provider.clone()).filter(|p| p != "unknown"),
+                            model: prepared.model.clone(),
+                            attempt: attempt + 1,
+                            max_attempts,
+                            error_kind: "opening_failed".into(),
+                            retryable,
+                            will_retry,
+                            delay_ms: will_retry.then_some(delay.as_millis() as u64),
+                            status_code: None,
+                            message: message.clone(),
+                        })
+                        .await;
                     if will_retry {
+                        wait_for_model_retry(retry_at, request.cancel_flag.as_ref()).await;
+                        retry_delay_ms = retry_delay_ms.saturating_mul(2).min(retry.max_delay_ms);
                         attempt += 1;
                         continue;
                     }
@@ -1318,6 +1350,14 @@ async fn publish_not_executed(
         .await
         .map_err(map_finalize_failure)?;
     Ok(super::invocation_facts::project_terminal(outcome, material))
+}
+
+// AtomicBool 取消标志没有唤醒机制；沿用模型驱动的 50 毫秒轮询节奏。
+async fn wait_for_model_retry(until: Instant, cancel: Option<&Arc<AtomicBool>>) {
+    while Instant::now() < until && !is_cancelled(cancel) {
+        let next_poll = Instant::now() + Duration::from_millis(50);
+        tokio::time::sleep_until(until.min(next_poll)).await;
+    }
 }
 
 fn is_cancelled(flag: Option<&Arc<AtomicBool>>) -> bool {

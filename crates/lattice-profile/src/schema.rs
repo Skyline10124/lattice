@@ -280,12 +280,12 @@ pub struct ToolsSection {
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LlmSection {
-    /// Optional cooperative per-turn deadline in seconds.
+    /// 可选的协作式单 Turn deadline，单位为秒。
     ///
-    /// When set, the agent loop races LLM stream consumption and stream
-    /// creation against `now + timeout_secs`. The default is `None` (no
-    /// deadline); the CLI's observer idle timeout remains a separate
-    /// last-resort guard. Validated nonzero and <= 3600 at load time.
+    /// `None` 表示使用协调层内置的 300 秒默认值。生效时长在 Turn 接受时
+    /// 冻结；单调时钟 deadline 在持久 `TurnStarted` 发布后开始，限制
+    /// provider 请求、重试等待与 Tool 分发，不中断必须完成的持久关闭。
+    /// observer idle timeout 是独立边界。显式值在加载时按 1..=3600 校验。
     #[serde(default)]
     pub timeout_secs: Option<u64>,
     #[serde(default)]
