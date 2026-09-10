@@ -3,7 +3,7 @@ name: research
 description: 根据一手来源研究问题，在现有文档归属内记录可追溯结论。
 ---
 
-先按当前宿主读取 [Pi 说明](../../README.pi.md)或 [Delta 说明](../../README.delta.md)，再按所选说明读取 `research/SKILL.md` 源工作流。
+先按当前宿主读取 [Pi 说明](../../README.pi.md)或 [Delta 说明](../../README.delta.md)，再读取仓库内的[源工作流](../../skill-sources/research/SKILL.md)。
 
 按当前宿主说明选择文档、网页搜索和页面读取能力，优先官方一手来源。API 结论对应项目依赖版本，区分事实、推断与未验证部分。
 
