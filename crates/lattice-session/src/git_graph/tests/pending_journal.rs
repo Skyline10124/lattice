@@ -38,6 +38,150 @@ fn head_oid(store: &GitSessionGraphStore) -> Option<String> {
 }
 
 #[test]
+fn begin_exact_retry_confirms_published_root_without_changing_frozen_facts() {
+    let (_fixture, store, session) = setup();
+    let lock = store
+        .lock_execution(&session, LockMode::Exclusive, Blocking::Block)
+        .unwrap();
+    let facts = turn_started_facts(None);
+    lattice_store::fault::fail_ref_fsync(true);
+    assert!(store.begin_pending_turn(facts.clone(), &lock).is_err());
+    let visible = store.read_active_turn(&session).unwrap().unwrap();
+    let retry = store
+        .begin_pending_turn(facts.clone(), &lock)
+        .expect("exact retry");
+    assert_eq!(retry.oid, visible.oid);
+    let mut conflicting = facts;
+    conflicting.user_message = user_message("different input");
+    assert!(matches!(
+        store.begin_pending_turn(conflicting, &lock),
+        Err(SessionError::Conflict(_))
+    ));
+}
+#[test]
+fn fixed_view_reads_pending_while_execution_is_locked() {
+    let (_fixture, store, session) = setup();
+    let lock = store
+        .lock_execution(&session, LockMode::Exclusive, Blocking::Block)
+        .unwrap();
+    let pending = store
+        .begin_pending_turn(turn_started_facts(None), &lock)
+        .unwrap();
+    lattice_store::fault::fail_ref_fsync(true);
+    let view = store.read_view(&session, Some(turn_id())).unwrap();
+    assert_eq!(view.active_turn.as_ref().unwrap().oid, pending.oid);
+    assert!(view.head_commit_id.is_none());
+    assert!(matches!(
+        view.requested_turn,
+        Some(crate::StoredTurn::Pending(_))
+    ));
+    let observation = store.observe(&session, Some(turn_id())).unwrap();
+    assert_eq!(
+        observation.active_turn.as_ref().unwrap().journal_oid,
+        pending.oid.to_string()
+    );
+    let public = serde_json::to_value(&observation).unwrap();
+    assert!(public["requested_turn"].get("config").is_none());
+    assert!(
+        store
+            .begin_pending_turn(turn_started_facts(None), &lock)
+            .is_err(),
+        "只读观察不能消耗发布屏障的故障注入"
+    );
+}
+
+#[test]
+fn transcript_pages_are_bounded_and_keep_utf8_boundaries() {
+    let (_fixture, store, session) = setup();
+    let commit = store
+        .test_commit_turn(super::commit_input(
+            &session,
+            vec![],
+            vec![
+                crate::test_helpers::user_msg("中文请求"),
+                crate::test_helpers::assistant_msg("中文结果"),
+            ],
+            (),
+        ))
+        .unwrap();
+    let mut offset = 0;
+    let mut jsonl = String::new();
+    loop {
+        let page = store
+            .read_transcript_page(&session, &commit.commit_id, offset, 7)
+            .unwrap();
+        assert!(page.jsonl.len() <= 7);
+        jsonl.push_str(&page.jsonl);
+        match page.next_offset {
+            Some(next) => {
+                assert!(next > offset);
+                offset = next;
+            }
+            None => break,
+        }
+    }
+    assert!(jsonl.contains("中文请求") && jsonl.contains("中文结果"));
+    assert!(
+        store
+            .read_transcript_page(&session, &commit.commit_id, 0, 65_537)
+            .is_err()
+    );
+    assert!(
+        store
+            .read_transcript_page(&session, &commit.commit_id, usize::MAX, 7)
+            .is_err()
+    );
+    assert!(
+        store
+            .read_transcript_page(&session, &commit.commit_id, 0, 0)
+            .is_err()
+    );
+    let multibyte = jsonl.find('中').unwrap();
+    assert!(
+        store
+            .read_transcript_page(&session, &commit.commit_id, multibyte + 1, 7)
+            .is_err()
+    );
+    assert!(
+        store
+            .read_transcript_page(&session, &commit.commit_id, multibyte, 1)
+            .is_err()
+    );
+    let end = store
+        .read_transcript_page(&session, &commit.commit_id, jsonl.len(), 7)
+        .unwrap();
+    assert_eq!(end.jsonl, "");
+    assert_eq!(end.next_offset, None);
+}
+#[test]
+fn transcript_pages_reload_large_legal_turn_without_truncation() {
+    let (_fixture, store, session) = setup();
+    // 每步正文不超过 2 MiB；累计 32 步的 JSONL 连同消息元数据会超过 64 MiB。
+    let text = "x".repeat(2 * 1024 * 1024);
+    let mut messages = vec![crate::test_helpers::user_msg("大回合")];
+    messages.extend((0..32).map(|_| crate::test_helpers::assistant_msg(&text)));
+    let commit = store
+        .test_commit_turn(super::commit_input(&session, vec![], messages, ()))
+        .unwrap();
+    let bytes = store
+        .kernel()
+        .read_tree_blob(commit.commit_id.parse().unwrap(), "turn/messages.jsonl")
+        .unwrap();
+    assert!(bytes.len() > 64 * 1024 * 1024);
+    let first = store
+        .read_transcript_page(&session, &commit.commit_id, 0, 65_536)
+        .unwrap();
+    assert!(first.jsonl.contains("大回合"));
+    assert_eq!(first.next_offset, Some(first.jsonl.len()));
+    let offset = bytes.len() - 65_536;
+    let last = store
+        .read_transcript_page(&session, &commit.commit_id, offset, 65_536)
+        .unwrap();
+    assert_eq!(last.jsonl.as_bytes(), &bytes[offset..]);
+    assert_eq!(last.next_offset, None);
+}
+
+#[test]
 fn cumulative_transcript_survives_continue_model_and_the_next_attempt() {
     use lattice_conversation::{MessagePart, MessageSemantic, OpaqueProviderState, TokenUsage};
 
@@ -156,6 +300,33 @@ fn cumulative_transcript_survives_continue_model_and_the_next_attempt() {
         crate::pending::step::closure_transcript(&closure, None),
     ];
     assert_eq!(attempt_1.snapshot.post_user_transcript, expected);
+    let mut offset = 0;
+    let mut jsonl = String::new();
+    loop {
+        let page = store
+            .read_transcript_page(&session, &attempt_1.oid.to_string(), offset, 127)
+            .unwrap();
+        assert!(page.jsonl.len() <= 127);
+        jsonl.push_str(&page.jsonl);
+        match page.next_offset {
+            Some(next) => offset = next,
+            None => break,
+        }
+    }
+    let messages: Vec<lattice_conversation::NativeMessage<lattice_conversation::BoundToolCall>> =
+        jsonl
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+    assert_eq!(
+        messages[0],
+        turn_started_facts(None)
+            .user_message
+            .bind_zero_tool()
+            .unwrap()
+    );
+    assert_eq!(&messages[1..], expected.as_slice());
+    assert!(!jsonl.contains("profile_snapshot_json"));
     assert_eq!(
         attempt_1.snapshot.root.as_ref().unwrap().config,
         frozen_config(),
@@ -577,6 +748,15 @@ fn finalize_publishes_head_pin_state_and_deletes_active_turn_atomically() {
         )
         .expect("closing");
 
+    lattice_store::fault::fail_ref_fsync(true);
+    assert!(store.finalize_turn(&session, &turn_id(), &lock).is_err());
+    assert!(matches!(
+        store
+            .observe(&session, Some(turn_id()))
+            .unwrap()
+            .requested_turn,
+        Some(crate::TurnObservation::Committed(_))
+    ));
     let committed = store
         .finalize_turn(&session, &turn_id(), &lock)
         .expect("finalize");
@@ -639,11 +819,91 @@ fn finalize_publishes_head_pin_state_and_deletes_active_turn_atomically() {
     let lock = store
         .lock_execution(&session, LockMode::Exclusive, Blocking::Block)
         .expect("relock");
+    lattice_store::fault::fail_ref_fsync(true);
+    let unconfirmed = store.finalize_turn(&session, &turn_id(), &lock);
+    lattice_store::fault::fail_ref_fsync(false);
+    assert!(
+        unconfirmed.is_err(),
+        "a visible pin cannot bypass the durability barrier"
+    );
     // Finalize is idempotent: the exact pinned TurnCommit comes back.
     let again = store
         .finalize_turn(&session, &turn_id(), &lock)
         .expect("idempotent");
     assert_eq!(again.commit_id, commit_oid);
+    store
+        .reset_locked(&session, &first.commit_id, &lock)
+        .unwrap();
+    assert!(
+        matches!(
+            store.begin_pending_turn(turn_started_facts(Some(first.commit_id.clone())), &lock),
+            Err(SessionError::Conflict(_))
+        ),
+        "reset cannot make a pinned TurnId executable again"
+    );
+    let view = store.read_view(&session, Some(turn_id())).unwrap();
+    assert!(
+        matches!(view.requested_turn, Some(crate::StoredTurn::Committed { commit, .. }) if commit.commit_id == commit_oid)
+    );
+    let changed_message = store
+        .kernel()
+        .write_commit_at(
+            store.kernel().commit_tree(turn_oid).unwrap(),
+            &store.kernel().commit_parents(turn_oid).unwrap(),
+            "different final candidate message",
+            store.kernel().commit_time(turn_oid).unwrap().unwrap(),
+        )
+        .unwrap();
+    store
+        .kernel()
+        .cas_ref(
+            &pin,
+            changed_message,
+            RefExpectation::MustMatch(turn_oid),
+            "forge message",
+        )
+        .unwrap();
+    assert!(
+        matches!(
+            store.finalize_turn(&session, &turn_id(), &lock),
+            Err(SessionError::JournalCorruption { .. })
+        ),
+        "pin 必须对应原始最终候选，不能只检查正文和时间"
+    );
+    store
+        .kernel()
+        .cas_ref(
+            &pin,
+            turn_oid,
+            RefExpectation::MustMatch(changed_message),
+            "restore fixture pin",
+        )
+        .unwrap();
+    let forged = store
+        .kernel()
+        .write_commit_at(
+            store.kernel().commit_tree(turn_oid).unwrap(),
+            &[crate::git_graph::helpers::parse_oid(&first.commit_id).unwrap()],
+            "forged final parent",
+            103,
+        )
+        .unwrap();
+    store
+        .kernel()
+        .cas_ref(
+            &pin,
+            forged,
+            RefExpectation::MustMatch(turn_oid),
+            "forge pin",
+        )
+        .unwrap();
+    assert!(
+        matches!(
+            store.finalize_turn(&session, &turn_id(), &lock),
+            Err(SessionError::JournalCorruption { .. })
+        ),
+        "the pin fast path must authenticate the committed journal, not just manifest identity"
+    );
 }
 
 #[test]

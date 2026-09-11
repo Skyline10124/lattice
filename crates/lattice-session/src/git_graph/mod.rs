@@ -49,6 +49,11 @@ pub(crate) mod state;
 mod tests;
 mod validation;
 
+mod view;
+pub use view::{
+    CommittedTurnObservation, PendingObservation, SessionObservation, SessionReadView, StoredTurn,
+    TranscriptPage, TurnObservation,
+};
 pub(crate) const DEFAULT_BRANCH: &str = "main";
 
 /// Structural work performed by the last [`GitSessionGraphStore::open`]

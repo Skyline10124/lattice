@@ -577,6 +577,39 @@ impl StoreRepo {
             .map_err(|e| StoreError::Git(format!("peel {path} to blob: {e}")))?;
         Ok(blob.data.clone())
     }
+    /// 在分配正文前核对对象长度；供领域的有界观察入口使用，不改变普通读取契约。
+    pub fn read_tree_blob_bounded(
+        &self,
+        commit_oid: gix::ObjectId,
+        path: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>> {
+        let repo = self.repo();
+        let tree = repo
+            .find_commit(commit_oid)
+            .map_err(|e| StoreError::Git(format!("find commit: {e}")))?
+            .tree()
+            .map_err(|e| StoreError::Git(format!("read tree: {e}")))?;
+        let entry = tree
+            .lookup_entry_by_path(path)
+            .map_err(|e| StoreError::Git(format!("lookup tree path: {e}")))?
+            .ok_or_else(|| StoreError::Git("tree path not found".into()))?;
+        let header = repo
+            .find_header(entry.id().detach())
+            .map_err(|e| StoreError::Git(format!("read object header: {e}")))?;
+        if header.kind() != gix::objs::Kind::Blob || header.size() > max_bytes as u64 {
+            return Err(StoreError::InvalidInput {
+                detail: "blob exceeds bounded read limit or has wrong kind".into(),
+            });
+        }
+        let object = entry
+            .object()
+            .map_err(|e| StoreError::Git(format!("read bounded blob: {e}")))?;
+        let blob = object
+            .try_into_blob()
+            .map_err(|e| StoreError::Git(format!("bounded object is not a blob: {e}")))?;
+        Ok(blob.data.clone())
+    }
 
     /// Newest-first rev-walk from `tips`, optionally hiding `hide`.
     pub fn rev_walk(
@@ -1604,6 +1637,14 @@ mod tests {
             repo.read_tree_blob(c2, "two.txt").unwrap(),
             b"content".to_vec()
         );
+        assert_eq!(
+            repo.read_tree_blob_bounded(c2, "two.txt", 7).unwrap(),
+            b"content"
+        );
+        assert!(matches!(
+            repo.read_tree_blob_bounded(c2, "two.txt", 6),
+            Err(StoreError::InvalidInput { .. })
+        ));
         let walk = repo.rev_walk(&[c2], &[]).unwrap();
         // Exactly c2 and its parent c1; the meta commit is not an ancestor.
         assert_eq!(walk.len(), 2);

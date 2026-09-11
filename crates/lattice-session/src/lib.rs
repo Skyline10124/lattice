@@ -26,7 +26,10 @@ pub use graph::{
 pub use graph::{PreparedTurnCommit, TurnCommitInput, prepare_turn_commit};
 
 pub mod git_graph;
-pub use git_graph::{GitSessionGraphStore, PendingTurnTip};
+pub use git_graph::{
+    CommittedTurnObservation, GitSessionGraphStore, PendingObservation, PendingTurnTip,
+    SessionObservation, SessionReadView, StoredTurn, TranscriptPage, TurnObservation,
+};
 
 /// Durable PendingTurn journal contract and pure reconciliation decision
 /// function (ADR 0005 §9/§14, GitHub #144).
