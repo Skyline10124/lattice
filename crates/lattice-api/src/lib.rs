@@ -13,8 +13,11 @@
 //! shims. Public callers receive typed request, response, event, and session
 //! facade values only.
 
+pub mod local;
 mod models;
 mod profile;
+mod profile_paths;
+pub use profile_paths::validate_agents_dir;
 mod rewind;
 pub mod root;
 mod session;

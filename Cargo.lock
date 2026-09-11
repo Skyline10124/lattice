@@ -3029,6 +3029,7 @@ dependencies = [
  "toml",
  "unicode-width",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

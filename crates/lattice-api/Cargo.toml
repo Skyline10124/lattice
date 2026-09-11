@@ -28,7 +28,8 @@ tokio = { workspace = true }
 tokio-stream = { workspace = true }
 unicode-width = { workspace = true }
 uuid = { workspace = true }
-libc = { workspace = true, optional = true }
+libc = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 gix = { workspace = true }
@@ -46,4 +47,4 @@ tokio-stream = { workspace = true }
 
 [features]
 default = []
-test-crash-barriers = ["dep:libc", "lancet-api/test-crash-barriers"]
+test-crash-barriers = ["lancet-api/test-crash-barriers"]

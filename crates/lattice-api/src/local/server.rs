@@ -1,0 +1,1905 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
+use super::{ipc, types::*};
+use futures::{FutureExt, StreamExt};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::Duration,
+};
+use tokio::{
+    net::{UnixListener, UnixStream},
+    sync::{broadcast, oneshot, watch},
+    task::JoinSet,
+};
+
+type CoreCompletion = (
+    oneshot::Receiver<crate::session::Result<crate::TurnCompletion>>,
+    Arc<AtomicU64>,
+);
+
+// 只由核心的身份核验或恢复结果建立；请求自报的 TurnId 不能成为完成确认的归属。
+struct OwnedTurn {
+    id: TurnId,
+    completion: Option<Result<()>>,
+}
+
+struct Owner {
+    identity: Option<TurnRequest>,
+    reply: watch::Sender<Option<Response>>,
+    done: watch::Sender<Option<Result<()>>>,
+    events: broadcast::Sender<crate::turn::SequencedTurnEvent>,
+    sequence: AtomicU64,
+    cancel: Arc<AtomicBool>,
+    // 即使转发观察或准备任务 panic，监督者也必须等待已经接管的核心执行结束。
+    core: Mutex<Option<CoreCompletion>>,
+    turn: Mutex<Option<OwnedTurn>>,
+    recovery_target: Arc<std::sync::OnceLock<TurnId>>,
+}
+
+impl Owner {
+    fn new(identity: Option<TurnRequest>) -> Self {
+        Self {
+            identity,
+            reply: watch::channel(None).0,
+            done: watch::channel(None).0,
+            events: broadcast::channel(64).0,
+            sequence: AtomicU64::new(0),
+            cancel: Arc::default(),
+            core: Mutex::new(None),
+            turn: Mutex::new(None),
+            recovery_target: Arc::default(),
+        }
+    }
+    fn source_sequence(&self) -> u64 {
+        let forwarded = self.sequence.load(Ordering::Acquire);
+        lock(&self.core)
+            .as_ref()
+            .map_or(forwarded, |(_, sequence)| {
+                forwarded.max(sequence.load(Ordering::Acquire))
+            })
+    }
+    fn reply(&self, response: Response) {
+        self.reply.send_replace(Some(response));
+    }
+}
+
+#[derive(Default)]
+struct Admission {
+    stopping: bool,
+    owners: HashMap<String, Arc<Owner>>,
+    // 仅记录本进程的完成确认；缺失不证明可见 pin 已通过发布屏障。
+    completions: HashMap<(String, TurnId), Result<()>>,
+    unconfirmed_operations: usize,
+}
+
+struct Backend {
+    layout: crate::StateLayout,
+    epoch: String,
+    admission: Mutex<Admission>,
+    closed: watch::Sender<bool>,
+    session: tokio::sync::OnceCell<crate::SessionApi>,
+    subscriptions: tokio::sync::Semaphore,
+    #[cfg(test)]
+    snapshot_gate: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn internal() -> LocalError {
+    LocalError::new(
+        LocalErrorKind::Internal,
+        "backend operation failed; inspect durable state",
+    )
+}
+fn busy() -> LocalError {
+    LocalError::new(LocalErrorKind::Busy, "session has another owned operation")
+}
+
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|_| internal())?
+}
+
+impl Backend {
+    fn new(layout: crate::StateLayout) -> Arc<Self> {
+        Arc::new(Self {
+            layout,
+            epoch: uuid::Uuid::new_v4().to_string(),
+            admission: Mutex::default(),
+            closed: watch::channel(false).0,
+            session: tokio::sync::OnceCell::new(),
+            subscriptions: tokio::sync::Semaphore::new(32),
+            #[cfg(test)]
+            snapshot_gate: Mutex::new(None),
+        })
+    }
+    fn status(&self) -> DaemonStatus {
+        let state = lock(&self.admission);
+        DaemonStatus {
+            epoch: self.epoch.clone(),
+            stopping: state.stopping,
+            owners: state.owners.len(),
+            unconfirmed_operations: state.unconfirmed_operations,
+        }
+    }
+    async fn open(&self) -> Result<crate::SessionApi> {
+        self.session
+            .get_or_try_init(|| async {
+                let layout = self.layout.clone();
+                blocking(move || crate::SessionApi::git_open_layout(&layout).map_err(Into::into))
+                    .await
+            })
+            .await
+            .cloned()
+    }
+    async fn query(
+        &self,
+        session_id: String,
+        turn_id: Option<TurnId>,
+    ) -> Result<SessionObservation> {
+        #[cfg(test)]
+        {
+            let gate = lock(&self.snapshot_gate).take();
+            if let Some((entered, release)) = gate {
+                let _ = entered.send(());
+                let _ = release.await;
+            }
+        }
+        let api = self.open().await?;
+        blocking(move || {
+            api.git_store_for_coordinator()?
+                .observe(&session_id, turn_id)
+                .map_err(crate::session::map_session_error)
+                .map_err(Into::into)
+        })
+        .await
+    }
+    fn cursor(&self, sequence: u64) -> EventCursor {
+        EventCursor {
+            epoch: self.epoch.clone(),
+            sequence,
+        }
+    }
+
+    fn claim(
+        self: &Arc<Self>,
+        key: String,
+        identity: Option<TurnRequest>,
+        operation: impl FnOnce() -> Request,
+    ) -> Result<Arc<Owner>> {
+        let owner = {
+            // 只管理接管权；磁盘、Component 和 provider 工作全部在释放此锁之后进行。
+            let mut state = lock(&self.admission);
+            if let Some(owner) = state.owners.get(&key) {
+                return if identity.is_some() && owner.identity == identity {
+                    Ok(owner.clone())
+                } else if identity
+                    .as_ref()
+                    .zip(owner.identity.as_ref())
+                    .is_some_and(|(a, b)| a.turn_id == b.turn_id)
+                {
+                    Err(LocalError::new(
+                        LocalErrorKind::Conflict,
+                        "TurnId is bound to different input or workspace",
+                    ))
+                } else {
+                    Err(busy())
+                };
+            }
+            if state.stopping {
+                return Err(LocalError::new(
+                    LocalErrorKind::Stopping,
+                    "backend is draining",
+                ));
+            }
+            if state.owners.len() >= 32 {
+                return Err(busy());
+            }
+            let owner = Arc::new(Owner::new(identity));
+            state.owners.insert(key.clone(), owner.clone());
+            owner
+        };
+        let operation = operation();
+        let backend = self.clone();
+        let task_owner = owner.clone();
+        tokio::spawn(async move {
+            let result = std::panic::AssertUnwindSafe(backend.perform(operation, &task_owner))
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|_| Err(internal()));
+            // core receiver 不属于上面的可展开 future，转发 panic 不会遗失排空凭据。
+            let completion = lock(&task_owner.core).take();
+            let mut final_result = result;
+            if let Some((completion, sequence)) = completion {
+                match completion
+                    .await
+                    .map_err(|_| internal())
+                    .and_then(|result| result.map_err(Into::into))
+                {
+                    Err(error) => final_result = Err(error),
+                    Ok(crate::TurnCompletion::Pending(_)) => {
+                        final_result = Err(LocalError::new(
+                            LocalErrorKind::RecoveryRequired,
+                            "Turn remains pending",
+                        ))
+                    }
+                    Ok(crate::TurnCompletion::Committed(commit)) => {
+                        *lock(&task_owner.turn) = Some(OwnedTurn {
+                            id: commit.turn_id,
+                            completion: Some(Ok(())),
+                        });
+                    }
+                }
+                if let Some(turn) = lock(&task_owner.turn).as_mut()
+                    && turn.completion.is_none()
+                {
+                    turn.completion = Some(final_result.clone());
+                }
+                task_owner
+                    .sequence
+                    .store(sequence.load(Ordering::Acquire), Ordering::Release);
+            }
+            if let Some(id) = task_owner.recovery_target.get() {
+                let mut turn = lock(&task_owner.turn);
+                let turn = turn.get_or_insert(OwnedTurn {
+                    id: *id,
+                    completion: None,
+                });
+                if turn.completion.is_none() {
+                    turn.completion = Some(final_result.clone());
+                }
+            }
+            if task_owner.reply.borrow().is_none() {
+                task_owner.reply(Response::Error(
+                    final_result.clone().err().unwrap_or_else(internal),
+                ));
+            }
+            {
+                let mut state = lock(&backend.admission);
+                if final_result.as_ref().err().is_some_and(|error| {
+                    matches!(
+                        error.kind,
+                        LocalErrorKind::RecoveryRequired
+                            | LocalErrorKind::StoreUnavailable
+                            | LocalErrorKind::Internal
+                    )
+                }) {
+                    state.unconfirmed_operations += 1;
+                }
+                if let Some(turn) = lock(&task_owner.turn).take() {
+                    state.completions.insert(
+                        (key.clone(), turn.id),
+                        turn.completion.unwrap_or_else(|| Err(internal())),
+                    );
+                }
+                state.owners.remove(&key);
+            }
+            task_owner.done.send_replace(Some(final_result));
+        });
+        Ok(owner)
+    }
+
+    async fn perform(&self, operation: Request, owner: &Owner) -> Result<()> {
+        match operation {
+            Request::Submit {
+                request,
+                configuration,
+            } => self.submit(request, configuration, owner).await,
+            Request::Recover { session_id } => {
+                let api = self.open().await?;
+                let recovered = crate::turn::recover_turn_with_target(
+                    api,
+                    session_id.clone(),
+                    owner.recovery_target.clone(),
+                )
+                .await?;
+                if let Some(commit) = &recovered {
+                    *lock(&owner.turn) = Some(OwnedTurn {
+                        id: commit.turn_id,
+                        completion: Some(Ok(())),
+                    });
+                }
+                owner.reply(Response::View(Box::new(
+                    self.query(session_id, recovered.map(|commit| commit.turn_id))
+                        .await?,
+                )));
+                Ok(())
+            }
+            Request::Create { request } => {
+                let layout = self.layout.clone();
+                let session = blocking(move || {
+                    let api = crate::SessionApi::git_create_layout(&layout)?;
+                    api.create_session(request).map_err(Into::into)
+                })
+                .await?;
+                owner.reply(Response::Session(session));
+                Ok(())
+            }
+            Request::Write { session_id, change } => {
+                let api = self.open().await?;
+                let id = session_id.clone();
+                let result = blocking(move || {
+                    let (id, execution_lock) = api.try_lock_execution(&id)?;
+                    Ok(match change {
+                        SessionWrite::Checkout { target } => SessionWriteResult::Checkout(
+                            api.checkout_locked(&id, &target, &execution_lock)?,
+                        ),
+                        SessionWrite::Branch { name, from } => SessionWriteResult::Branch(
+                            api.branch_locked(&id, &name, from.as_deref(), &execution_lock)?,
+                        ),
+                        SessionWrite::Reset { target } => SessionWriteResult::Reset(
+                            api.reset_locked(&id, &target, &execution_lock)?,
+                        ),
+                        SessionWrite::SetAgent { name } => SessionWriteResult::SetAgent(
+                            api.git_store_for_coordinator()?
+                                .set_active_agent_locked(&id, &name, &execution_lock)
+                                .map_err(crate::session::map_session_error)?,
+                        ),
+                    })
+                })
+                .await?;
+                owner.reply(Response::Write(result));
+                Ok(())
+            }
+            Request::Rewind {
+                session_id,
+                target,
+                workspace,
+            } => {
+                let api = self.open().await?;
+                let result = blocking(move || {
+                    match crate::rewind_to_turn(&api, &session_id, &target, &workspace) {
+                        Ok(crate::RewindOutcome::Success(value)) => {
+                            Ok(LocalRewindResult::Success(value))
+                        }
+                        Ok(crate::RewindOutcome::Conflict(value)) => {
+                            Ok(LocalRewindResult::Conflict(value))
+                        }
+                        Err(crate::RewindError::AuditPublicationFailed { partial, .. }) => {
+                            Ok(LocalRewindResult::AuditPublicationFailed(partial))
+                        }
+                        Err(crate::RewindError::Api(error)) => Err(error.into()),
+                    }
+                })
+                .await?;
+                let unconfirmed = matches!(result, LocalRewindResult::AuditPublicationFailed(_));
+                owner.reply(Response::Rewind(result));
+                if unconfirmed { Err(internal()) } else { Ok(()) }
+            }
+            _ => Err(internal()),
+        }
+    }
+
+    async fn submit(
+        &self,
+        request: TurnRequest,
+        configuration: Option<Box<super::FrozenConfiguration>>,
+        owner: &Owner,
+    ) -> Result<()> {
+        let api = self.open().await?;
+        let path = request.workspace.clone();
+        let workspace = blocking(move || {
+            let root = crate::LocalWorkspaceRoot::from_path(&path)?;
+            if root.canonical_path() != path {
+                return Err(LocalError::new(
+                    LocalErrorKind::BadRequest,
+                    "workspace must be canonical",
+                ));
+            }
+            Ok(root)
+        })
+        .await?;
+        let view = self
+            .query(request.session_id.clone(), Some(request.turn_id))
+            .await?;
+        if view.session.project_store_key != workspace.store_key_hex() {
+            return Err(LocalError::new(
+                LocalErrorKind::Conflict,
+                "workspace differs from session binding",
+            ));
+        }
+        // 已有事实与恢复优先于新配置校验；找回不能用重发材料覆盖冻结配置。
+        let (loaded_profile, connection) = if view.requested_turn.is_some()
+            || view.active_turn.is_some()
+        {
+            (None, None)
+        } else if let Some(configuration) = configuration {
+            let (profile, connection) = blocking(move || configuration.into_execution()).await?;
+            (Some(profile), Some(connection))
+        } else {
+            owner.reply(Response::Acceptance(Acceptance::NeedsConfiguration));
+            return Ok(());
+        };
+        let execution = crate::turn::start_execution(
+            api,
+            request.turn_id,
+            workspace,
+            crate::RunTurnRequest {
+                input: request.input,
+                session_id: request.session_id.clone(),
+                loaded_profile,
+                cancel_flag: Some(owner.cancel.clone()),
+                test_llm: None,
+                test_project_root: None,
+            },
+            connection,
+            false,
+            owner.recovery_target.clone(),
+        );
+        let crate::TurnExecution {
+            acceptance,
+            completion,
+            mut events,
+            event_sequence,
+            ..
+        } = execution;
+        *lock(&owner.core) = Some((completion, event_sequence.clone()));
+        let accepted = acceptance.await.map_err(|_| internal())??;
+        let id = match &accepted {
+            crate::TurnAcceptance::Accepted { turn_id }
+            | crate::TurnAcceptance::ConfirmationUnknown { turn_id } => *turn_id,
+            crate::TurnAcceptance::Existing(turn) => turn.started().turn_id,
+            crate::TurnAcceptance::Recovered(commit) => commit.turn_id,
+        };
+        *lock(&owner.turn) = Some(OwnedTurn {
+            id,
+            completion: None,
+        });
+        let response = match accepted {
+            crate::TurnAcceptance::Accepted { turn_id } => Acceptance::Accepted { turn_id },
+            crate::TurnAcceptance::ConfirmationUnknown { turn_id } => {
+                Acceptance::ConfirmationUnknown { turn_id }
+            }
+            crate::TurnAcceptance::Existing(_) => Acceptance::Existing {
+                turn: self
+                    .query(request.session_id.clone(), Some(request.turn_id))
+                    .await?
+                    .requested_turn
+                    .ok_or_else(internal)?,
+            },
+            crate::TurnAcceptance::Recovered(commit) => {
+                let view = self
+                    .query(request.session_id.clone(), Some(commit.turn_id))
+                    .await?;
+                let Some(TurnObservation::Committed(turn)) = view.requested_turn else {
+                    return Err(internal());
+                };
+                Acceptance::Recovered { turn }
+            }
+        };
+        owner.reply(Response::Acceptance(response));
+        while let Some(event) = events.next().await {
+            owner.sequence.store(event.sequence, Ordering::Release);
+            // 大事件不挤占订阅者队列，缺失序号与最终序号会明确报告 Gap。
+            if serde_json::to_vec(&event).map_err(|_| internal())?.len() <= 65_536 {
+                let _ = owner.events.send(event);
+            }
+        }
+        owner
+            .sequence
+            .store(event_sequence.load(Ordering::Acquire), Ordering::Release);
+        Ok(())
+    }
+
+    async fn dispatch(self: &Arc<Self>, request: Request) -> Result<Response> {
+        match request {
+            Request::Status => Ok(Response::Status(self.status())),
+            Request::History {
+                session_id,
+                head,
+                offset,
+                limit,
+            } => {
+                let api = self.open().await?;
+                Ok(Response::History(
+                    blocking(move || {
+                        api.git_store_for_coordinator()?
+                            .history_page(&session_id, &head, offset, limit)
+                            .map_err(crate::session::map_session_error)
+                            .map_err(Into::into)
+                    })
+                    .await?,
+                ))
+            }
+            Request::List => {
+                let api = self.open().await?;
+                Ok(Response::Sessions(
+                    blocking(move || api.list_sessions().map_err(Into::into)).await?,
+                ))
+            }
+            Request::SessionStatus { session_id } => {
+                let api = self.open().await?;
+                let id = blocking(move || {
+                    api.open_session(crate::OpenSessionRequest { id: session_id })
+                        .map(|session| session.session_id)
+                        .map_err(Into::into)
+                })
+                .await?;
+                let view = self.query(id, None).await?;
+                Ok(Response::SessionStatus(crate::SessionStatus {
+                    session_id: view.session.session_id,
+                    head: view.head,
+                    current_commit_id: view.head_commit_id,
+                    active_agent_name: view.session.active_agent_name,
+                    branches: view.branches,
+                    commit_count: view.commit_count,
+                    project_target_branch: view.session.project_target_branch,
+                    project_store_key: view.session.project_store_key,
+                }))
+            }
+            Request::Log { session_id } => {
+                let api = self.open().await?;
+                Ok(Response::Log(
+                    blocking(move || api.log(&session_id).map_err(Into::into)).await?,
+                ))
+            }
+            Request::Diff {
+                session_id,
+                from,
+                to,
+            } => {
+                let api = self.open().await?;
+                Ok(Response::Diff(
+                    blocking(move || api.diff(&session_id, &from, &to).map_err(Into::into)).await?,
+                ))
+            }
+            Request::Stop => {
+                lock(&self.admission).stopping = true;
+                while self.status().owners != 0 {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                Ok(Response::Status(self.status()))
+            }
+            Request::Query {
+                session_id,
+                turn_id,
+            } => Ok(Response::View(Box::new(
+                self.query(session_id, turn_id).await?,
+            ))),
+            Request::Open { session_id } => {
+                let api = self.open().await?;
+                Ok(Response::Session(
+                    blocking(move || {
+                        api.open_session(crate::OpenSessionRequest { id: session_id })
+                            .map_err(Into::into)
+                    })
+                    .await?,
+                ))
+            }
+            Request::Commit {
+                session_id,
+                commit_id,
+            } => {
+                let api = self.open().await?;
+                let result = blocking(move || {
+                    api.git_store_for_coordinator()?
+                        .observe_commit(&session_id, &commit_id)
+                        .map_err(crate::session::map_session_error)
+                        .map_err(Into::into)
+                })
+                .await?;
+                Ok(Response::Commit(Box::new(result)))
+            }
+            Request::Transcript {
+                session_id,
+                commit_id,
+                offset,
+                limit,
+            } => {
+                let api = self.open().await?;
+                Ok(Response::Transcript(
+                    api.read_transcript_page(&session_id, &commit_id, offset, limit)
+                        .await?,
+                ))
+            }
+            Request::Cancel {
+                session_id,
+                turn_id,
+            } => {
+                let owner = lock(&self.admission).owners.get(&session_id).cloned();
+                let owned = owner.as_ref().is_some_and(|owner| {
+                    owner
+                        .identity
+                        .as_ref()
+                        .is_some_and(|request| request.turn_id == turn_id)
+                });
+                if owned {
+                    owner.unwrap().cancel.store(true, Ordering::Release);
+                }
+                // 无所有者时仍查询持久状态，但绝不顺带恢复或重新执行。
+                if !owned {
+                    self.query(session_id, Some(turn_id)).await?;
+                }
+                Ok(Response::Cancelled { owned })
+            }
+            request @ Request::Create { .. } => {
+                self.wait_reply(self.claim(
+                    format!("create:{}", uuid::Uuid::new_v4()),
+                    None,
+                    || request,
+                )?)
+                .await
+            }
+            Request::Submit {
+                request,
+                configuration,
+            } => {
+                validate_identity(&request.session_id)?;
+                if request.input.len() > 2 * 1024 * 1024 || !request.workspace.is_absolute() {
+                    return Err(LocalError::new(
+                        LocalErrorKind::BadRequest,
+                        "invalid Turn request",
+                    ));
+                }
+                let mut configuration = configuration;
+                // 共享纯 probe 时保留正式配置；等它释放后仅重新准入一次，持续争抢返回 Busy。
+                for _ in 0..2 {
+                    let owner =
+                        self.claim(request.session_id.clone(), Some(request.clone()), || {
+                            Request::Submit {
+                                request: request.clone(),
+                                configuration: configuration.take(),
+                            }
+                        })?;
+                    let response = self.wait_reply(owner).await?;
+                    if !matches!(
+                        response,
+                        Response::Acceptance(Acceptance::NeedsConfiguration)
+                    ) || configuration.is_none()
+                    {
+                        return Ok(response);
+                    }
+                }
+                Err(busy())
+            }
+            request
+            @ (Request::Recover { .. } | Request::Write { .. } | Request::Rewind { .. }) => {
+                let id = match &request {
+                    Request::Recover { session_id }
+                    | Request::Write { session_id, .. }
+                    | Request::Rewind { session_id, .. } => session_id.clone(),
+                    _ => unreachable!(),
+                };
+                validate_identity(&id)?;
+                self.wait_reply(self.claim(id, None, || request)?).await
+            }
+            Request::Subscribe { .. } => Err(internal()),
+        }
+    }
+
+    async fn wait_reply(&self, owner: Arc<Owner>) -> Result<Response> {
+        let mut reply = owner.reply.subscribe();
+        loop {
+            let response = reply.borrow_and_update().clone();
+            if let Some(response) = response {
+                if !matches!(response, Response::Acceptance(ref value) if *value != Acceptance::NeedsConfiguration)
+                {
+                    let mut done = owner.done.subscribe();
+                    while done.borrow_and_update().is_none() {
+                        done.changed().await.map_err(|_| internal())?;
+                    }
+                }
+                return Ok(response);
+            }
+            reply.changed().await.map_err(|_| internal())?;
+        }
+    }
+
+    async fn subscribe(
+        &self,
+        stream: &mut UnixStream,
+        session_id: String,
+        turn_id: TurnId,
+        previous: Option<EventCursor>,
+    ) -> Result<()> {
+        // 慢观察者不能占满所有连接槽，保留普通查询和取消的接入空间。
+        let _subscription = self.subscriptions.try_acquire().map_err(|_| busy())?;
+        let owner = lock(&self.admission)
+            .owners
+            .get(&session_id)
+            .filter(|owner| {
+                lock(&owner.turn)
+                    .as_ref()
+                    .is_some_and(|turn| turn.id == turn_id)
+                    || owner.recovery_target.get() == Some(&turn_id)
+            })
+            .cloned();
+        // 先登记，再固定引用，最后读取核心序号。包含在快照中的正文早于这个 cut 产生，
+        // 转发队列可能落后，不能以转发进度判定哪些 token 尚未被快照覆盖。
+        let mut events = owner.as_ref().map(|owner| owner.events.subscribe());
+        let mut done = owner.as_ref().map(|owner| owner.done.subscribe());
+        let view = self.query(session_id.clone(), Some(turn_id)).await?;
+        let mut sequence = owner.as_ref().map_or(0, |owner| owner.source_sequence());
+        if previous
+            .as_ref()
+            .is_some_and(|cursor| cursor.epoch != self.epoch || cursor.sequence != sequence)
+            || sequence > 0
+        {
+            ipc::write(
+                stream,
+                &Response::Observation(Observation::Gap {
+                    cursor: self.cursor(sequence),
+                }),
+            )
+            .await?;
+        }
+        let known_completion = lock(&self.admission)
+            .completions
+            .get(&(session_id.clone(), turn_id))
+            .cloned();
+        if owner.is_none()
+            && (known_completion.is_some()
+                || matches!(view.requested_turn, Some(TurnObservation::Committed(_))))
+        {
+            let result = known_completion.unwrap_or_else(|| Err(LocalError::new(
+                LocalErrorKind::StoreUnavailable,
+                "result is visible; durability confirmation unknown; explicitly retry the same request")));
+            return ipc::write(
+                stream,
+                &Response::Observation(Observation::Finished {
+                    view: Box::new(view),
+                    cursor: self.cursor(sequence),
+                    error: result.err(),
+                }),
+            )
+            .await;
+        }
+        // 引用可见不等于发布屏障或核心收尾结束；有所有者时必须等独立 completion。
+        ipc::write(
+            stream,
+            &Response::Observation(Observation::Snapshot {
+                view: Box::new(view),
+                cursor: self.cursor(sequence),
+                owned: owner.is_some(),
+            }),
+        )
+        .await?;
+        let Some(owner) = owner else {
+            return Ok(());
+        };
+        let events = events.as_mut().unwrap();
+        let done = done.as_mut().unwrap();
+        let mut closed = self.closed.subscribe();
+        loop {
+            let result = done.borrow_and_update().clone();
+            if let Some(result) = result {
+                let final_sequence = owner.sequence.load(Ordering::Acquire);
+                if final_sequence != sequence {
+                    ipc::write(
+                        stream,
+                        &Response::Observation(Observation::Gap {
+                            cursor: self.cursor(final_sequence),
+                        }),
+                    )
+                    .await?;
+                }
+                let view = self.query(session_id, Some(turn_id)).await?;
+                return ipc::write(
+                    stream,
+                    &Response::Observation(Observation::Finished {
+                        view: Box::new(view),
+                        cursor: self.cursor(final_sequence),
+                        error: result.err(),
+                    }),
+                )
+                .await;
+            }
+            tokio::select! {
+                event = events.recv() => match event {
+                    Ok(event) if event.sequence > sequence => {
+                        if event.sequence != sequence + 1 {
+                            let view = self.query(session_id.clone(), Some(turn_id)).await?;
+                            sequence = owner.source_sequence();
+                            ipc::write(stream, &Response::Observation(Observation::Gap { cursor: self.cursor(sequence) })).await?;
+                            ipc::write(stream, &Response::Observation(Observation::Snapshot { view: Box::new(view), cursor: self.cursor(sequence), owned: true })).await?;
+                            // 触发缺口的旧事件也可能已在快照中；不在重载后重新拼接它。
+                        } else {
+                            sequence = event.sequence;
+                            ipc::write(stream, &Response::Observation(Observation::Event { cursor: self.cursor(sequence), event: event.event })).await?;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        *events = events.resubscribe();
+                        let view = self.query(session_id.clone(), Some(turn_id)).await?;
+                        sequence = owner.source_sequence();
+                        ipc::write(stream, &Response::Observation(Observation::Gap { cursor: self.cursor(sequence) })).await?;
+                        ipc::write(stream, &Response::Observation(Observation::Snapshot { view: Box::new(view), cursor: self.cursor(sequence), owned: true })).await?;
+                    }
+                    _ => {},
+                },
+                _ = done.changed() => {},
+                _ = closed.changed() => {},
+            }
+        }
+    }
+}
+
+fn validate_identity(id: &str) -> Result<()> {
+    if id.len() != 32
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(LocalError::new(
+            LocalErrorKind::BadRequest,
+            "canonical SessionId required",
+        ));
+    }
+    Ok(())
+}
+
+async fn connection(backend: Arc<Backend>, mut stream: UnixStream) -> Result<()> {
+    ipc::check_peer(&stream)?;
+    let request = tokio::time::timeout(Duration::from_secs(10), ipc::read::<Request>(&mut stream))
+        .await
+        .map_err(|_| LocalError::new(LocalErrorKind::Transport, "request frame timed out"))??;
+    if let Request::Subscribe {
+        session_id,
+        turn_id,
+        cursor,
+    } = request
+    {
+        if let Err(error) = backend
+            .subscribe(&mut stream, session_id, turn_id, cursor)
+            .await
+        {
+            ipc::write(&mut stream, &Response::Error(error)).await?;
+        }
+        return Ok(());
+    }
+    let response = backend
+        .dispatch(request)
+        .await
+        .unwrap_or_else(Response::Error);
+    ipc::write(&mut stream, &response).await
+}
+
+/// 前台运行后台进程主体。调用者不得为正常 stop abort 此 future；它持有终身实例锁。
+/// 不读 dotenv、不预热 Component、不自动恢复；正常 stop 关闭准入并等待全部接管任务。
+pub async fn serve(layout: crate::StateLayout) -> Result<()> {
+    let binding_layout = layout.clone();
+    let (instance, listener) = blocking(move || ipc::Instance::bind(&binding_layout)).await?;
+    let listener = UnixListener::from_std(listener)?;
+    let backend = Backend::new(layout);
+    let mut connections = JoinSet::new();
+    let mut failure = None;
+    loop {
+        let status = backend.status();
+        if status.stopping && status.owners == 0 {
+            break;
+        }
+        tokio::select! {
+            accepted = listener.accept() => match accepted {
+                Ok((stream, _)) if connections.len() < 64 => { connections.spawn(connection(backend.clone(), stream)); }
+                Ok(_) => {},
+                Err(error) => { failure = Some(error.into()); lock(&backend.admission).stopping = true; break; }
+            },
+            _ = connections.join_next(), if !connections.is_empty() => {},
+            _ = tokio::time::sleep(Duration::from_millis(25)) => {},
+        }
+    }
+    while backend.status().owners != 0 {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    backend.closed.send_replace(true);
+    drop(listener);
+    while connections.join_next().await.is_some() {}
+    blocking(move || instance.cleanup()).await?;
+    failure.map_or(Ok(()), Err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn invalid_frozen_tool_tls_roots_reject_before_acceptance() {
+        let directory = tempfile::tempdir().unwrap();
+        let backend = Backend::new(crate::StateLayout::in_state_root(directory.path()));
+        let root = crate::LocalWorkspaceRoot::from_path(directory.path()).unwrap();
+        let Response::Session(session) = backend
+            .dispatch(Request::Create {
+                request: crate::CreateSessionRequest {
+                    label: None,
+                    active_agent: "local-test".into(),
+                    project_branch: "main".into(),
+                    project_store_key: root.store_key_hex(),
+                },
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("session")
+        };
+        let configuration = super::super::tests::frozen(directory.path(), "http://127.0.0.1:1/v1");
+        // reqwest 的 DER 包装不解析证书；后台须在 TurnStarted 前验证 Tool 使用的根。
+        let mut material = serde_json::to_value(configuration).unwrap();
+        material["connection"]["roots_der"] = serde_json::json!([[0, 1, 2]]);
+        let configuration = serde_json::from_value(material).unwrap();
+        let turn_id = super::super::new_turn_id();
+        let response = backend
+            .dispatch(Request::Submit {
+                request: TurnRequest {
+                    session_id: session.session_id.clone(),
+                    turn_id,
+                    workspace: root.canonical_path().into(),
+                    input: "invalid TLS roots".into(),
+                },
+                configuration: Some(Box::new(configuration)),
+            })
+            .await
+            .unwrap();
+        backend.dispatch(Request::Stop).await.unwrap();
+        assert!(matches!(
+            response,
+            Response::Error(LocalError {
+                kind: LocalErrorKind::BadRequest,
+                ..
+            })
+        ));
+        let view = backend
+            .query(session.session_id, Some(turn_id))
+            .await
+            .unwrap();
+        assert!(view.requested_turn.is_none());
+        assert!(view.active_turn.is_none());
+    }
+
+    #[tokio::test]
+    async fn configured_submit_survives_an_inflight_configuration_probe() {
+        let directory = tempfile::tempdir().unwrap();
+        let backend = Backend::new(crate::StateLayout::in_state_root(directory.path()));
+        let root = crate::LocalWorkspaceRoot::from_path(directory.path()).unwrap();
+        let Response::Session(session) = backend
+            .dispatch(Request::Create {
+                request: crate::CreateSessionRequest {
+                    label: None,
+                    active_agent: "local-test".into(),
+                    project_branch: "main".into(),
+                    project_store_key: root.store_key_hex(),
+                },
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("session")
+        };
+        let request = TurnRequest {
+            session_id: session.session_id.clone(),
+            turn_id: super::super::new_turn_id(),
+            workspace: root.canonical_path().into(),
+            input: "probe race".into(),
+        };
+        let probe = Arc::new(Owner::new(Some(request.clone())));
+        lock(&backend.admission)
+            .owners
+            .insert(session.session_id.clone(), probe.clone());
+        let configuration = super::super::tests::frozen(directory.path(), "http://127.0.0.1:1/v1");
+        let server = backend.clone();
+        let submit = tokio::spawn(async move {
+            server
+                .dispatch(Request::Submit {
+                    request,
+                    configuration: Some(Box::new(configuration)),
+                })
+                .await
+        });
+        // 明确等到正式提交已共享 probe 回执，再释放 probe，不以 sleep 猜测交错。
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while probe.reply.receiver_count() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        probe.reply(Response::Acceptance(Acceptance::NeedsConfiguration));
+        lock(&backend.admission).owners.remove(&session.session_id);
+        probe.done.send_replace(Some(Ok(())));
+        let response = submit.await.unwrap().unwrap();
+        backend.dispatch(Request::Stop).await.unwrap();
+        assert!(matches!(
+            response,
+            Response::Acceptance(Acceptance::Accepted { .. })
+        ));
+    }
+
+    async fn pending_backend() -> (tempfile::TempDir, Arc<Backend>, TurnRequest) {
+        let directory = tempfile::tempdir().unwrap();
+        let backend = Backend::new(crate::StateLayout::in_state_root(directory.path()));
+        let root = crate::LocalWorkspaceRoot::from_path(directory.path()).unwrap();
+        let Response::Session(session) = backend
+            .dispatch(Request::Create {
+                request: crate::CreateSessionRequest {
+                    label: None,
+                    active_agent: "test".into(),
+                    project_branch: "main".into(),
+                    project_store_key: root.store_key_hex(),
+                },
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("session")
+        };
+        let request = TurnRequest {
+            session_id: session.session_id,
+            turn_id: super::super::new_turn_id(),
+            workspace: root.canonical_path().into(),
+            input: "recover me".into(),
+        };
+        let api = backend.open().await.unwrap();
+        let pending = request.clone();
+        tokio::task::spawn_blocking(move || {
+            let store = api.git_store_for_coordinator().unwrap();
+            let (_, guard) = api.lock_execution(&pending.session_id).unwrap();
+            store
+                .begin_pending_turn(
+                    lattice_session::pending::TurnStartedFacts {
+                        turn_id: pending.turn_id,
+                        session_id: lancet_protocol::SessionId::parse(&pending.session_id).unwrap(),
+                        project_store_key: root.store_key(),
+                        parent_conversation_tip: None,
+                        user_message: lattice_conversation::NativeMessage::new(
+                            lattice_conversation::MessageRole::User,
+                            None,
+                            vec![lattice_conversation::MessagePart::semantic_only(
+                                lattice_conversation::MessageSemantic::Text {
+                                    text: pending.input,
+                                },
+                            )],
+                        ),
+                        config: lattice_session::pending::FrozenTurnConfig {
+                            agent_name: "test".into(),
+                            model: "test".into(),
+                            provider: "test".into(),
+                            system_prompt: None,
+                            profile_snapshot_json: "{}".into(),
+                            policy_snapshot_json: "{}".into(),
+                            catalog: lattice_session::pending::ToolCatalogSnapshot::new(
+                                "test-build".into(),
+                                vec![],
+                            )
+                            .unwrap(),
+                            limits: lattice_session::pending::TurnExecutionLimits {
+                                timeout_secs: 300,
+                                max_model_steps: lattice_session::pending::MAX_MODEL_STEPS,
+                                max_model_attempts: 1,
+                            },
+                        },
+                        accepted_at: "2026-08-24T00:00:00Z".into(),
+                    },
+                    &guard,
+                )
+                .unwrap();
+        })
+        .await
+        .unwrap();
+        (directory, backend, request)
+    }
+
+    #[tokio::test]
+    async fn snapshot_cut_excludes_covered_tokens_even_when_forwarding_lags() {
+        for gap_reload in [false, true] {
+            let (_directory, backend, request) = pending_backend().await;
+            let owner = Arc::new(Owner::new(Some(request.clone())));
+            *lock(&owner.turn) = Some(OwnedTurn {
+                id: request.turn_id,
+                completion: None,
+            });
+            let source = Arc::new(AtomicU64::new(0));
+            let (_completion, receiver) = oneshot::channel();
+            *lock(&owner.core) = Some((receiver, source.clone()));
+            lock(&backend.admission)
+                .owners
+                .insert(request.session_id.clone(), owner.clone());
+            let (entered, entry) = oneshot::channel();
+            let (release, resume) = oneshot::channel();
+            if !gap_reload {
+                *lock(&backend.snapshot_gate) = Some((entered, resume));
+            } else {
+                // Gap 路径在初始快照之后才武装相同读取屏障。
+                *lock(&backend.snapshot_gate) = None;
+                drop(entered);
+                drop(resume);
+            }
+            let (mut writer, mut reader) = UnixStream::pair().unwrap();
+            let server = backend.clone();
+            let session_id = request.session_id.clone();
+            let id = request.turn_id;
+            let task =
+                tokio::spawn(
+                    async move { server.subscribe(&mut writer, session_id, id, None).await },
+                );
+            let release = if gap_reload {
+                assert!(matches!(
+                    observe(&mut reader).await,
+                    Observation::Snapshot { .. }
+                ));
+                let (entered, entry) = oneshot::channel();
+                let (release, resume) = oneshot::channel();
+                *lock(&backend.snapshot_gate) = Some((entered, resume));
+                source.store(2, Ordering::Release);
+                owner
+                    .events
+                    .send(crate::turn::SequencedTurnEvent {
+                        sequence: 2,
+                        event: crate::TurnEvent::TokenDelta {
+                            content: "covered".into(),
+                        },
+                    })
+                    .unwrap();
+                tokio::time::timeout(Duration::from_secs(5), entry)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                release
+            } else {
+                tokio::time::timeout(Duration::from_secs(5), entry)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                release
+            };
+            let api = backend.open().await.unwrap();
+            let session_id = request.session_id.clone();
+            source.store(2, Ordering::Release);
+            tokio::task::spawn_blocking(move || {
+                use lancet_protocol::ModelAttemptKey;
+                use lattice_session::pending::PendingStage;
+                let store = api.git_store_for_coordinator().unwrap();
+                let (_, guard) = api.lock_execution(&session_id).unwrap();
+                let key = ModelAttemptKey {
+                    turn_id: id,
+                    model_step_ordinal: 0,
+                    attempt_ordinal: 0,
+                };
+                store
+                    .advance_pending_turn(
+                        &session_id,
+                        PendingStage::ModelAttemptStarted { key },
+                        100,
+                        &guard,
+                    )
+                    .unwrap();
+                let message = lattice_conversation::NativeMessage::new(
+                    lattice_conversation::MessageRole::Assistant,
+                    None,
+                    vec![lattice_conversation::MessagePart::semantic_only(
+                        lattice_conversation::MessageSemantic::Text {
+                            text: "covered".into(),
+                        },
+                    )],
+                );
+                store
+                    .advance_pending_turn(
+                        &session_id,
+                        PendingStage::MessageComplete {
+                            key,
+                            message,
+                            usage: None,
+                        },
+                        101,
+                        &guard,
+                    )
+                    .unwrap();
+            })
+            .await
+            .unwrap();
+            if !gap_reload {
+                // 序号已由核心分配，但后台尚未更新转发进度。
+                owner
+                    .events
+                    .send(crate::turn::SequencedTurnEvent {
+                        sequence: 2,
+                        event: crate::TurnEvent::TokenDelta {
+                            content: "covered".into(),
+                        },
+                    })
+                    .unwrap();
+            }
+            release.send(()).unwrap();
+            let (view, cursor) = loop {
+                match observe(&mut reader).await {
+                    Observation::Gap { .. } => {}
+                    Observation::Snapshot { view, cursor, .. } => break (view, cursor),
+                    other => panic!("unexpected {other:?}"),
+                }
+            };
+            let journal = &view.active_turn.as_ref().unwrap().journal_oid;
+            let page = backend
+                .open()
+                .await
+                .unwrap()
+                .read_transcript_page(&request.session_id, journal, 0, 65_536)
+                .await
+                .unwrap();
+            assert!(page.jsonl.contains("covered"), "{}", page.jsonl);
+            assert_eq!(
+                cursor.sequence, 2,
+                "snapshot must cut at the source sequence after fixing refs"
+            );
+            source.store(3, Ordering::Release);
+            owner
+                .events
+                .send(crate::turn::SequencedTurnEvent {
+                    sequence: 3,
+                    event: crate::TurnEvent::TurnCommitting,
+                })
+                .unwrap();
+            let next = observe(&mut reader).await;
+            assert!(
+                matches!(
+                    next,
+                    Observation::Event {
+                        event: crate::TurnEvent::TurnCommitting,
+                        ..
+                    }
+                ),
+                "{next:?}"
+            );
+            owner.sequence.store(3, Ordering::Release);
+            owner.done.send_replace(Some(Ok(())));
+            assert!(matches!(
+                observe(&mut reader).await,
+                Observation::Finished { .. }
+            ));
+            task.await.unwrap().unwrap();
+            lock(&backend.admission).owners.clear();
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_completion_belongs_to_the_old_turn() {
+        for independent in [false, true] {
+            let (_directory, backend, old) = pending_backend().await;
+            let mut new = old.clone();
+            new.turn_id = super::super::new_turn_id();
+            new.input = "not accepted".into();
+            lock(&backend.admission)
+                .completions
+                .insert((old.session_id.clone(), old.turn_id), Err(internal()));
+            let response = backend
+                .dispatch(if independent {
+                    Request::Recover {
+                        session_id: old.session_id.clone(),
+                    }
+                } else {
+                    Request::Submit {
+                        request: new.clone(),
+                        configuration: None,
+                    }
+                })
+                .await
+                .unwrap();
+            if independent {
+                assert!(matches!(response, Response::View(_)));
+            } else {
+                assert!(
+                    matches!(response, Response::Acceptance(Acceptance::Recovered { turn }) if turn.turn_id == old.turn_id)
+                );
+            }
+            backend.dispatch(Request::Stop).await.unwrap();
+            assert!(
+                backend
+                    .query(new.session_id.clone(), Some(new.turn_id))
+                    .await
+                    .unwrap()
+                    .requested_turn
+                    .is_none()
+            );
+            assert!(
+                !lock(&backend.admission)
+                    .completions
+                    .contains_key(&(new.session_id, new.turn_id))
+            );
+            let (mut writer, mut reader) = UnixStream::pair().unwrap();
+            let server = backend.clone();
+            let task = tokio::spawn(async move {
+                server
+                    .subscribe(&mut writer, old.session_id, old.turn_id, None)
+                    .await
+            });
+            let observation = observe(&mut reader).await;
+            task.await.unwrap().unwrap();
+            assert!(
+                matches!(observation, Observation::Finished { error: None, .. }),
+                "{observation:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_failure_keeps_verified_old_turn_diagnostics_after_disconnect() {
+        for independent in [false, true] {
+            for after_publish in [false, true] {
+                let (_directory, backend, old) = pending_backend().await;
+                let mut new = old.clone();
+                new.turn_id = super::super::new_turn_id();
+                new.input = "not accepted".into();
+                let operation = if independent {
+                    Request::Recover {
+                        session_id: old.session_id.clone(),
+                    }
+                } else {
+                    Request::Submit {
+                        request: new.clone(),
+                        configuration: None,
+                    }
+                };
+                let layout = backend.layout.clone();
+                let root = crate::LocalWorkspaceRoot::from_path(&old.workspace).unwrap();
+                let ledger = tokio::task::spawn_blocking(move || {
+                    lancet_audit::invocation_store::InvocationStore::open(
+                        &layout,
+                        &root.store_key(),
+                    )
+                    .unwrap()
+                })
+                .await
+                .unwrap();
+                let ledger = Arc::new(ledger);
+                let before = {
+                    let ledger = ledger.clone();
+                    tokio::task::spawn_blocking(move || ledger.pinned_view().unwrap().commit_oid)
+                        .await
+                        .unwrap()
+                };
+                lock(&backend.admission)
+                    .completions
+                    .insert((old.session_id.clone(), old.turn_id), Err(internal()));
+                let (entered, release, fault_result) =
+                    crate::turn::finalize_fault::arm(old.turn_id, after_publish);
+                let (writer, mut client) = UnixStream::pair().unwrap();
+                let server = backend.clone();
+                let operation_task = tokio::spawn(connection(server, writer));
+                ipc::write(&mut client, &operation).await.unwrap();
+                tokio::time::timeout(Duration::from_secs(5), entered)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let owner = lock(&backend.admission)
+                    .owners
+                    .get(&old.session_id)
+                    .unwrap()
+                    .clone();
+                let api = backend.open().await.unwrap();
+                let session_id = old.session_id.clone();
+                assert!(
+                    tokio::task::spawn_blocking(move || matches!(
+                        api.try_lock_execution(&session_id),
+                        Err(crate::ApiError::Busy(_))
+                    ))
+                    .await
+                    .unwrap(),
+                    "recovery must hold the full Turn lock"
+                );
+                let view = backend
+                    .open()
+                    .await
+                    .unwrap()
+                    .read_view(&old.session_id, Some(old.turn_id))
+                    .await
+                    .unwrap();
+                let pending = view.active_turn.unwrap();
+                assert!(pending.snapshot.attempt_usages.is_empty());
+                assert!(pending.snapshot.post_user_transcript.is_empty());
+                assert!(
+                    matches!(pending.snapshot.stage, lattice_session::pending::PendingStage::TurnClosing(ref closing)
+                        if closing.candidate.outcome == crate::TurnOutcome::Interrupted { reason: lattice_session::pending::TurnInterruption::ProcessInterruptedBeforeModelAttempt }
+                    ),
+                    "recovery must not start a provider attempt"
+                );
+                let (mut observer_writer, mut observer_reader) = UnixStream::pair().unwrap();
+                let observer_backend = backend.clone();
+                let observer_session = old.session_id.clone();
+                let observer_turn = old.turn_id;
+                let observer_task = tokio::spawn(async move {
+                    observer_backend
+                        .subscribe(&mut observer_writer, observer_session, observer_turn, None)
+                        .await
+                });
+                let inflight = observe(&mut observer_reader).await;
+                drop(observer_reader);
+                // 操作连接先断开，再让真实最终发布失败；错误须由后台保留而非客户端回传。
+                drop(client);
+                release.send(()).unwrap();
+                let mut done = owner.done.subscribe();
+                let result = tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        if let Some(result) = done.borrow_and_update().clone() {
+                            break result;
+                        }
+                        done.changed().await.unwrap();
+                    }
+                })
+                .await
+                .unwrap();
+                assert_eq!(
+                    fault_result.await.unwrap(),
+                    Some(if after_publish {
+                        "injected ref-fsync failure"
+                    } else {
+                        "injected object-fsync failure"
+                    })
+                );
+                let error = result.expect_err("injected recovery failure");
+                // IPC 按既有安全边界脱敏底层路径；重订阅须保留这份精确公开错误，不换成旧错误或 unknown。
+                assert_eq!(
+                    error,
+                    LocalError::from(crate::ApiError::Internal(String::new()))
+                );
+                assert!(
+                    operation_task.await.unwrap().is_err(),
+                    "disconnected operation cannot deliver its receipt"
+                );
+                assert!(
+                    matches!(inflight, Observation::Snapshot { owned: true, ref view, .. }
+                    if matches!(&view.requested_turn, Some(TurnObservation::Pending(turn)) if turn.turn_id == old.turn_id)),
+                    "{inflight:?}"
+                );
+                assert!(
+                    observer_task.await.unwrap().is_err(),
+                    "disconnected observer cannot erase the completion"
+                );
+                assert!(
+                    owner
+                        .reply
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|reply| matches!(reply, Response::Error(_))),
+                    "B must not receive acceptance"
+                );
+                for _ in 0..2 {
+                    let (mut writer, mut reader) = UnixStream::pair().unwrap();
+                    let server = backend.clone();
+                    let session_id = old.session_id.clone();
+                    let turn_id = old.turn_id;
+                    let task = tokio::spawn(async move {
+                        server
+                            .subscribe(&mut writer, session_id, turn_id, None)
+                            .await
+                    });
+                    let observation = observe(&mut reader).await;
+                    task.await.unwrap().unwrap();
+                    let Observation::Finished {
+                        view,
+                        error: observed_error,
+                        ..
+                    } = observation
+                    else {
+                        panic!("known recovery error missing: {observation:?}");
+                    };
+                    assert_eq!(
+                        observed_error,
+                        Some(error.clone()),
+                        "independent={independent}, after_publish={after_publish}"
+                    );
+                    match view.requested_turn.unwrap() {
+                        TurnObservation::Committed(turn) => {
+                            assert!(after_publish);
+                            assert_eq!(turn.turn_id, old.turn_id);
+                            assert!(view.active_turn.is_none());
+                            assert!(matches!(
+                                turn.outcome,
+                                crate::TurnOutcome::Interrupted { .. }
+                            ));
+                        }
+                        TurnObservation::Pending(turn) => {
+                            assert!(!after_publish);
+                            assert_eq!(turn.turn_id, old.turn_id);
+                            assert_eq!(view.active_turn.unwrap().turn_id, old.turn_id);
+                        }
+                    }
+                }
+                assert!(
+                    backend
+                        .query(new.session_id.clone(), Some(new.turn_id))
+                        .await
+                        .unwrap()
+                        .requested_turn
+                        .is_none()
+                );
+                assert!(
+                    !lock(&backend.admission)
+                        .completions
+                        .contains_key(&(new.session_id, new.turn_id))
+                );
+                let after =
+                    tokio::task::spawn_blocking(move || ledger.pinned_view().unwrap().commit_oid)
+                        .await
+                        .unwrap();
+                assert_eq!(
+                    after, before,
+                    "recovery and read-only subscriptions must not dispatch Tools"
+                );
+                assert_eq!(backend.status().owners, 0);
+                backend.dispatch(Request::Stop).await.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_identity_preserves_original_completion() {
+        let directory = tempfile::tempdir().unwrap();
+        let backend = Backend::new(crate::StateLayout::in_state_root(directory.path()));
+        let root = crate::LocalWorkspaceRoot::from_path(directory.path()).unwrap();
+        let Response::Session(session) = backend
+            .dispatch(Request::Create {
+                request: crate::CreateSessionRequest {
+                    label: None,
+                    active_agent: "local-test".into(),
+                    project_branch: "main".into(),
+                    project_store_key: root.store_key_hex(),
+                },
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("session")
+        };
+        let request = TurnRequest {
+            session_id: session.session_id.clone(),
+            turn_id: super::super::new_turn_id(),
+            workspace: root.canonical_path().into(),
+            input: "original input".into(),
+        };
+        let response = backend
+            .dispatch(Request::Submit {
+                request: request.clone(),
+                configuration: Some(Box::new(super::super::tests::frozen(
+                    directory.path(),
+                    "http://127.0.0.1:1/v1",
+                ))),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            response,
+            Response::Acceptance(Acceptance::Accepted { .. })
+        ));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while backend.status().owners != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let key = (request.session_id.clone(), request.turn_id);
+        assert_eq!(
+            lock(&backend.admission).completions.get(&key),
+            Some(&Ok(()))
+        );
+        for expected in [
+            Ok(()),
+            Err(LocalError::new(
+                LocalErrorKind::StoreUnavailable,
+                "original durability failure",
+            )),
+        ] {
+            // 完成屏障错误由所属存储层注入验证；这里固定该事实，检验冲突请求不能覆盖它。
+            lock(&backend.admission)
+                .completions
+                .insert(key.clone(), expected.clone());
+            let mut conflicting = request.clone();
+            conflicting.input = "different input".into();
+            let (entered, entry) = oneshot::channel();
+            let (release, resume) = oneshot::channel();
+            *lock(&backend.snapshot_gate) = Some((entered, resume));
+            let server = backend.clone();
+            let conflict = tokio::spawn(async move {
+                server
+                    .dispatch(Request::Submit {
+                        request: conflicting,
+                        configuration: None,
+                    })
+                    .await
+            });
+            tokio::time::timeout(Duration::from_secs(5), entry)
+                .await
+                .unwrap()
+                .unwrap();
+            let (mut writer, mut reader) = UnixStream::pair().unwrap();
+            let server = backend.clone();
+            let session_id = request.session_id.clone();
+            let turn_id = request.turn_id;
+            let observing = tokio::spawn(async move {
+                server
+                    .subscribe(&mut writer, session_id, turn_id, None)
+                    .await
+            });
+            let during_validation = observe(&mut reader).await;
+            release.send(()).unwrap();
+            let response = conflict.await.unwrap().unwrap();
+            observing.await.unwrap().unwrap();
+            assert!(
+                matches!(&during_validation, Observation::Finished { error, .. } if error.as_ref() == expected.as_ref().err()),
+                "{during_validation:?}"
+            );
+            assert!(
+                matches!(response, Response::Error(error) if error.kind == LocalErrorKind::Conflict)
+            );
+            let (mut writer, mut reader) = UnixStream::pair().unwrap();
+            let server = backend.clone();
+            let session_id = request.session_id.clone();
+            let turn_id = request.turn_id;
+            let task = tokio::spawn(async move {
+                server
+                    .subscribe(&mut writer, session_id, turn_id, None)
+                    .await
+            });
+            let observation = observe(&mut reader).await;
+            task.await.unwrap().unwrap();
+            assert!(
+                matches!(&observation, Observation::Finished { error, .. } if error.as_ref() == expected.as_ref().err()),
+                "{observation:?}"
+            );
+        }
+        backend.dispatch(Request::Stop).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn visible_commit_waits_for_the_owned_completion_result() {
+        let directory = tempfile::tempdir().unwrap();
+        let layout = crate::StateLayout::in_state_root(directory.path());
+        let backend = Backend::new(layout);
+        let root = crate::LocalWorkspaceRoot::from_path(directory.path()).unwrap();
+        let Response::Session(session) = backend
+            .dispatch(Request::Create {
+                request: crate::CreateSessionRequest {
+                    label: None,
+                    active_agent: "test".into(),
+                    project_branch: "main".into(),
+                    project_store_key: root.store_key_hex(),
+                },
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("session")
+        };
+        let path = directory.path().join("agent.toml");
+        std::fs::write(
+            &path,
+            "schema_version=1\n[agent]\nname='test'\nmodel='stub-model'\n[prompt]\nsystem='test'\n",
+        )
+        .unwrap();
+        let id = super::super::new_turn_id();
+        let request = TurnRequest {
+            session_id: session.session_id.clone(),
+            turn_id: id,
+            workspace: root.canonical_path().into(),
+            input: "test".into(),
+        };
+        let llm = lattice_agent::testing::FakeStreamingLlmClient::builder()
+            .push_events(vec![
+                lattice_llm::LlmEvent::Token {
+                    content: "stored".into(),
+                },
+                lattice_llm::LlmEvent::Done {
+                    finish_reason: "stop".into(),
+                    usage: None,
+                },
+            ])
+            .build();
+        let execution = crate::start_turn(
+            backend.open().await.unwrap(),
+            id,
+            root,
+            crate::RunTurnRequest {
+                input: request.input.clone(),
+                session_id: session.session_id.clone(),
+                loaded_profile: Some(crate::load_agent_profile_path(&path).unwrap()),
+                cancel_flag: None,
+                test_llm: Some(Arc::new(llm)),
+                test_project_root: Some(directory.path().to_string_lossy().into()),
+            },
+            None,
+        );
+        execution.acceptance.await.unwrap().unwrap();
+        execution.completion.await.unwrap().unwrap();
+        let owner = Arc::new(Owner::new(Some(request.clone())));
+        *lock(&owner.turn) = Some(OwnedTurn {
+            id,
+            completion: None,
+        });
+        lock(&backend.admission)
+            .owners
+            .insert(session.session_id.clone(), owner.clone());
+        let (mut writer, mut reader) = UnixStream::pair().unwrap();
+        let server = backend.clone();
+        let task = tokio::spawn(async move {
+            server
+                .subscribe(&mut writer, session.session_id, id, None)
+                .await
+        });
+        assert!(
+            matches!(observe(&mut reader).await, Observation::Snapshot { owned: true, view, .. } if matches!(view.requested_turn, Some(TurnObservation::Committed(_))))
+        );
+        assert!(!task.is_finished());
+        owner.done.send_replace(Some(Err(internal())));
+        assert!(matches!(
+            observe(&mut reader).await,
+            Observation::Finished { error: Some(_), .. }
+        ));
+        task.await.unwrap().unwrap();
+        lock(&backend.admission).owners.clear();
+        // 同一个可见 pin，在 owner 的错误回执退场后仍不能被新订阅当作确认成功。
+        // 与上面的 owner 错误使用同一确认事实；无关请求的拒绝不再充当 Turn 完成。
+        lock(&backend.admission)
+            .completions
+            .insert((request.session_id.clone(), id), Err(internal()));
+        let (mut writer, mut reader) = UnixStream::pair().unwrap();
+        let server = backend.clone();
+        let id_string = request.session_id.clone();
+        let task =
+            tokio::spawn(async move { server.subscribe(&mut writer, id_string, id, None).await });
+        let failure = observe(&mut reader).await;
+        task.await.unwrap().unwrap();
+        assert!(matches!(
+            failure,
+            Observation::Finished { error: Some(_), .. }
+        ));
+        let confirmed = backend
+            .dispatch(Request::Submit {
+                request: request.clone(),
+                configuration: None,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            confirmed,
+            Response::Acceptance(Acceptance::Existing { .. })
+        ));
+        backend.dispatch(Request::Stop).await.unwrap();
+        let (mut writer, mut reader) = UnixStream::pair().unwrap();
+        let server = backend.clone();
+        let id_string = request.session_id.clone();
+        let task =
+            tokio::spawn(async move { server.subscribe(&mut writer, id_string, id, None).await });
+        assert!(matches!(
+            observe(&mut reader).await,
+            Observation::Finished { error: None, .. }
+        ));
+        task.await.unwrap().unwrap();
+        let restarted = Backend::new(backend.layout.clone());
+        let (mut writer, mut reader) = UnixStream::pair().unwrap();
+        let task = tokio::spawn(async move {
+            restarted
+                .subscribe(&mut writer, request.session_id, id, None)
+                .await
+        });
+        assert!(matches!(
+            observe(&mut reader).await,
+            Observation::Finished { error: Some(_), .. }
+        ));
+        task.await.unwrap().unwrap();
+    }
+
+    async fn observe(socket: &mut UnixStream) -> Observation {
+        let Response::Observation(observation) =
+            tokio::time::timeout(Duration::from_secs(5), ipc::read(socket))
+                .await
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("expected observation")
+        };
+        observation
+    }
+
+    #[tokio::test]
+    async fn loss_before_forwarding_slow_receiver_and_tail_each_reload_fixed_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let layout = crate::StateLayout::in_state_root(directory.path());
+        let backend = Backend::new(layout);
+        let key = crate::LocalWorkspaceRoot::from_path(directory.path())
+            .unwrap()
+            .store_key_hex();
+        let Response::Session(session) = backend
+            .dispatch(Request::Create {
+                request: crate::CreateSessionRequest {
+                    label: None,
+                    active_agent: "test".into(),
+                    project_branch: "main".into(),
+                    project_store_key: key,
+                },
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("expected session")
+        };
+        let request = TurnRequest {
+            session_id: session.session_id.clone(),
+            turn_id: TurnId::parse(&uuid::Uuid::new_v4().to_string()).unwrap(),
+            workspace: directory.path().into(),
+            input: "test".into(),
+        };
+        let owner = Arc::new(Owner::new(Some(request.clone())));
+        *lock(&owner.turn) = Some(OwnedTurn {
+            id: request.turn_id,
+            completion: None,
+        });
+        lock(&backend.admission)
+            .owners
+            .insert(session.session_id.clone(), owner.clone());
+        let (mut writer, mut reader) = UnixStream::pair().unwrap();
+        let server = backend.clone();
+        let task = tokio::spawn(async move {
+            server
+                .subscribe(&mut writer, request.session_id, request.turn_id, None)
+                .await
+        });
+        assert!(matches!(
+            observe(&mut reader).await,
+            Observation::Snapshot { .. }
+        ));
+        owner.sequence.store(2, Ordering::Release);
+        owner
+            .events
+            .send(crate::turn::SequencedTurnEvent {
+                sequence: 2,
+                event: crate::TurnEvent::TurnCommitting,
+            })
+            .unwrap();
+        assert!(
+            matches!(observe(&mut reader).await, Observation::Gap { cursor } if cursor.sequence == 2)
+        );
+        assert!(matches!(
+            observe(&mut reader).await,
+            Observation::Snapshot { .. }
+        ));
+        owner.sequence.store(3, Ordering::Release);
+        owner
+            .events
+            .send(crate::turn::SequencedTurnEvent {
+                sequence: 3,
+                event: crate::TurnEvent::TurnCommitting,
+            })
+            .unwrap();
+        assert!(
+            matches!(observe(&mut reader).await, Observation::Event { cursor, .. } if cursor.sequence == 3)
+        );
+        // 当前线程不让订阅任务运行，确定性越过队列容量，不依赖机器速度。
+        for sequence in 4..=70 {
+            owner.sequence.store(sequence, Ordering::Release);
+            owner
+                .events
+                .send(crate::turn::SequencedTurnEvent {
+                    sequence,
+                    event: crate::TurnEvent::TurnCommitting,
+                })
+                .unwrap();
+        }
+        assert!(
+            matches!(observe(&mut reader).await, Observation::Gap { cursor } if cursor.sequence == 70)
+        );
+        assert!(matches!(
+            observe(&mut reader).await,
+            Observation::Snapshot { .. }
+        ));
+        owner.sequence.store(71, Ordering::Release);
+        owner.done.send_replace(Some(Ok(())));
+        assert!(
+            matches!(observe(&mut reader).await, Observation::Gap { cursor } if cursor.sequence == 71)
+        );
+        assert!(matches!(
+            observe(&mut reader).await,
+            Observation::Finished { .. }
+        ));
+        task.await.unwrap().unwrap();
+        lock(&backend.admission).owners.clear();
+    }
+}
