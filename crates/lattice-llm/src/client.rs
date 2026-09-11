@@ -370,36 +370,30 @@ fn http_client_builder() -> reqwest::ClientBuilder {
         .read_timeout(HTTP_IO_TIMEOUT)
 }
 
-fn build_http_client_for_url(url: &str) -> Result<reqwest::Client, LlmError> {
+fn build_http_client_for_url(
+    url: &str,
+    builder: reqwest::ClientBuilder,
+) -> Result<reqwest::Client, LlmError> {
     let Some((host, port)) = parsed_request_host_port(url) else {
-        return http_client_builder().build().map_err(|e| LlmError::Config {
-            message: format!("failed to build HTTP client: {}", e),
+        return Err(LlmError::Config {
+            message: "invalid provider URL".into(),
         });
     };
-
     if net_guard::host_is_dns_rebinding_domain(&host) {
         return Err(LlmError::Config {
-            message: format!(
-                "hostname '{}' is a known DNS rebinding domain and is not allowed",
-                host
-            ),
+            message: "DNS rebinding hostname is not allowed".into(),
         });
     }
-
-    if is_localhost_request_host(&host) {
-        return http_client_builder().build().map_err(|e| LlmError::Config {
-            message: format!("failed to build HTTP client: {}", e),
-        });
-    }
-
-    let pinned =
-        net_guard::resolve_public_socket_addrs(&host, port).map_err(llm_error_from_net_guard)?;
-    http_client_builder()
-        .resolve_to_addrs(host.as_str(), &pinned)
-        .build()
-        .map_err(|e| LlmError::Config {
-            message: format!("failed to build HTTP client: {}", e),
-        })
+    let builder = if is_localhost_request_host(&host) {
+        builder
+    } else {
+        let pinned = net_guard::resolve_public_socket_addrs(&host, port)
+            .map_err(llm_error_from_net_guard)?;
+        builder.resolve_to_addrs(host.as_str(), &pinned)
+    };
+    builder.build().map_err(|_| LlmError::Config {
+        message: "failed to build HTTP client".into(),
+    })
 }
 
 fn llm_error_from_net_guard(error: NetGuardError) -> LlmError {
@@ -494,34 +488,50 @@ async fn read_error_body_capped(response: reqwest::Response) -> String {
     text
 }
 
-/// Dispatch a chat request to the appropriate provider and return a stream.
+/// 兼容单进程调用者；后台执行必须传入已经冻结的 LlmConnection。
 pub async fn dispatch_stream(
     request: ChatRequest,
     resolved: ResolvedModel,
 ) -> Result<LlmStream, LlmError> {
-    let api_key = validate_and_read_key(&resolved)?;
+    crate::LlmConnection::from_resolved_env(resolved)?
+        .stream(request)
+        .await
+}
 
-    let url = build_endpoint_url(&resolved);
-    let body = build_request_body(&request, &resolved)?;
-    let headers = build_auth_headers(&resolved, &api_key);
-
-    let client = build_http_client_for_url(&url)?;
+pub(crate) async fn dispatch_frozen(
+    request: ChatRequest,
+    connection: &crate::LlmConnection,
+) -> Result<LlmStream, LlmError> {
+    let resolved = &connection.resolved;
+    let url = build_endpoint_url(resolved);
+    let body = build_request_body(&request, resolved)?;
+    let headers = build_auth_headers(resolved, &connection.api_key);
+    // 当前 Cargo features 没有 system-proxy；显式禁用防止未来特性合并偷偷改变连接边界。
+    let builder = http_client_builder()
+        .no_proxy()
+        .tls_certs_only(connection.roots.clone());
+    let client = build_http_client_for_url(&url, builder)?;
     let mut req_builder = client.post(&url).json(&body);
-
     for (name, value) in &headers {
         req_builder = req_builder.header(name.as_str(), value.as_str());
     }
-
     let response = req_builder.send().await.map_err(llm_error_from_request)?;
-
     let status = response.status();
     if !status.is_success() {
-        let status_text = read_error_body_capped(response).await;
+        let status_text = read_error_body_capped(response)
+            .await
+            .replace(connection.api_key.as_str(), "[REDACTED]");
         return Err(llm_error_from_status(status, status_text));
     }
-
-    let provider = resolved.provider.clone();
-    Ok(stream_sse_response(response, provider).await)
+    let stream = stream_sse_response(response, resolved.provider.clone()).await;
+    let api_key = connection.api_key.clone();
+    // provider 的流内错误同样会进入公开诊断和 Turn 日志，必须在越过适配边界前脱敏。
+    Ok(Box::pin(stream.map(move |event| match event {
+        LlmEvent::Error { message } => LlmEvent::Error {
+            message: message.replace(api_key.as_str(), "[REDACTED]"),
+        },
+        other => other,
+    })))
 }
 
 #[cfg(test)]
@@ -690,7 +700,7 @@ mod tests {
         });
 
         let url = format!("http://{redirector_addr}/v1/chat/completions");
-        let client = build_http_client_for_url(&url).expect("build client");
+        let client = build_http_client_for_url(&url, http_client_builder()).expect("build client");
         let response = client
             .post(&url)
             .header("x-api-key", "sk-ant-secret")
@@ -708,6 +718,77 @@ mod tests {
             !reached.load(Ordering::SeqCst),
             "redirect target must never be contacted"
         );
+    }
+
+    #[tokio::test]
+    async fn explicit_connection_freezes_endpoint_credentials_and_redacts_errors() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for (status, body) in [
+                ("401 Unauthorized", "frozen-secret rejected"),
+                (
+                    "200 OK",
+                    "data: {\"error\":{\"message\":\"frozen-secret rejected\"}}\n\n",
+                ),
+            ] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut chunk = [0; 1024];
+                    let count = socket.read(&mut chunk).await.unwrap();
+                    assert!(count > 0);
+                    request.extend_from_slice(&chunk[..count]);
+                    assert!(request.len() <= 8192);
+                    if request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request = String::from_utf8(request).unwrap();
+                assert!(
+                    request
+                        .to_ascii_lowercase()
+                        .contains("authorization: bearer frozen-secret")
+                );
+                socket.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            }
+        });
+        let resolved = ResolvedModel {
+            alias: "compat:frozen-model".into(),
+            provider: ProviderKind::OpenAiCompatible,
+            provider_model: "frozen-model".into(),
+            base_url: format!("http://{address}"),
+            api_key_env: "UNUSED_FROZEN_CREDENTIAL".into(),
+            credential_status: crate::CredentialStatus::Missing,
+        };
+        let connection =
+            crate::LlmConnection::new(resolved, "frozen-secret".into(), Vec::new()).unwrap();
+        let request = ChatRequest::new(Vec::new(), crate::ModelTarget::new("compat:frozen-model"));
+        let error = match tokio::time::timeout(Duration::from_secs(3), connection.stream(request))
+            .await
+            .unwrap()
+        {
+            Ok(_) => panic!("expected provider failure"),
+            Err(error) => error,
+        };
+        assert_eq!(error.status_code(), Some(401));
+        assert!(!format!("{error:?}").contains("frozen-secret"));
+        let request = ChatRequest::new(Vec::new(), crate::ModelTarget::new("compat:frozen-model"));
+        let events = tokio::time::timeout(Duration::from_secs(3), async {
+            connection
+                .stream(request)
+                .await
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await
+        })
+        .await
+        .unwrap();
+        assert!(
+            matches!(events.as_slice(), [LlmEvent::Error { message }] if message == "API error: [REDACTED] rejected")
+        );
+        server.await.unwrap();
     }
 
     #[test]

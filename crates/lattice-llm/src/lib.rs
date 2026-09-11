@@ -4,6 +4,8 @@
 //! LATTICE LLM vocabulary and functional call facade.
 
 mod client;
+mod connection;
+pub use connection::{ConnectionMaterial, LlmConnection};
 mod endpoints;
 mod logging;
 pub mod provider_projection;
