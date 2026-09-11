@@ -10,16 +10,10 @@ use futures::stream::Stream;
 use lattice_profile::LoadedAgentProfile;
 use lattice_session::pending::{ClosureOrigin, TurnOutcome, WorkspaceHistoryCheckpoint};
 
-/// Request to run a turn through either [`run_turn`] or [`stream_turn`].
+/// 各执行入口共用原有请求形状；显式请求身份和连接材料由 [`crate::start_turn`] 单独接收。
 ///
-/// Both facades accept the same input shape, so they share this single
-/// request type. `run_turn` returns after the turn is committed, while
-/// `stream_turn` returns a live [`TurnEvent`] stream after startup validation
-/// so callers can observe model deltas, tool activity, terminal status, and
-/// commit lifecycle events as they occur.
-///
-/// [`run_turn`]: crate::turn::run_turn
-/// [`stream_turn`]: crate::turn::stream_turn
+/// [`crate::run_turn`] 等待持久完成， [`crate::stream_turn`] 在接受或恢复回执后返回观察流。
+/// 恢复已有 pending 时只报告旧 Turn，不接受此处的新输入。
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RunTurnRequest {
     pub input: String,
@@ -212,6 +206,44 @@ pub enum TurnEvent {
         error_code: Option<String>,
     },
 }
+
+/// 接受确认来自持久发布返回值，与有损事件通道无关。
+#[derive(Clone, Debug, PartialEq)]
+pub enum TurnAcceptance {
+    /// 仅在 TurnStarted 已确认持久后返回。
+    Accepted { turn_id: lancet_protocol::TurnId },
+    /// 找回同一请求；Pending 只报告日志，不在此恢复或重新执行。
+    Existing(Box<lattice_session::StoredTurn>),
+    /// 关闭的是既有 Turn，本次新 prompt 没有被接受。
+    Recovered(Box<lattice_session::TurnCommit>),
+    /// 发布结果不确定；不能据此重分配身份，必须查询或重试同一 TurnId。
+    ConfirmationUnknown { turn_id: lancet_protocol::TurnId },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum TurnCompletion {
+    Committed(Box<lattice_session::TurnCommit>),
+    /// 本次所有者任务已结束，但持久 Turn 仍待独立恢复；不是提交完成。
+    Pending(lancet_protocol::TurnId),
+}
+
+/// 释放观察者或回执不取消任务；后台排空必须等待 completion，而非事件 EOF。
+pub struct TurnExecution {
+    pub acceptance: tokio::sync::oneshot::Receiver<crate::session::Result<TurnAcceptance>>,
+    pub completion: tokio::sync::oneshot::Receiver<crate::session::Result<TurnCompletion>>,
+    pub events: SequencedTurnEventStream,
+    /// 包括未投递事件的最终序号，用于识别尾部缺口；不是持久状态。
+    pub event_sequence: Arc<std::sync::atomic::AtomicU64>,
+    pub cancel_flag: Arc<AtomicBool>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SequencedTurnEvent {
+    pub sequence: u64,
+    pub event: TurnEvent,
+}
+
+pub type SequencedTurnEventStream = Pin<Box<dyn Stream<Item = SequencedTurnEvent> + Send>>;
 
 /// Boxed stream of TurnEvent values.
 pub type TurnEventStream = Pin<Box<dyn Stream<Item = TurnEvent> + Send>>;

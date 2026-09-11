@@ -29,6 +29,62 @@ use super::finalize::{
 };
 use super::invocation_facts;
 
+#[cfg(test)]
+pub(crate) mod finalize_fault {
+    use lancet_protocol::TurnId;
+    use std::{
+        collections::HashMap,
+        sync::{LazyLock, Mutex, mpsc},
+        time::Duration,
+    };
+    use tokio::sync::oneshot;
+
+    type Fault = (
+        bool,
+        oneshot::Sender<()>,
+        mpsc::Receiver<()>,
+        oneshot::Sender<Option<&'static str>>,
+    );
+    static FAULTS: LazyLock<Mutex<HashMap<TurnId, Fault>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    // 按 Turn 隔离并在真实发布线程内启用既有内核故障；不伪造协调结果。
+    pub(crate) fn arm(
+        turn: TurnId,
+        after_publish: bool,
+    ) -> (
+        oneshot::Receiver<()>,
+        mpsc::Sender<()>,
+        oneshot::Receiver<Option<&'static str>>,
+    ) {
+        let (entered, reached) = oneshot::channel();
+        let (release, wait) = mpsc::channel();
+        let (report, result) = oneshot::channel();
+        assert!(
+            FAULTS
+                .lock()
+                .unwrap()
+                .insert(turn, (after_publish, entered, wait, report))
+                .is_none()
+        );
+        (reached, release, result)
+    }
+
+    pub(super) fn inject(turn: TurnId) -> Option<oneshot::Sender<Option<&'static str>>> {
+        let (after_publish, entered, release, report) = FAULTS.lock().unwrap().remove(&turn)?;
+        let _ = entered.send(());
+        release
+            .recv_timeout(Duration::from_secs(5))
+            .expect("release finalization fault");
+        if after_publish {
+            lattice_store::fault::fail_ref_fsync(true);
+        } else {
+            lattice_store::fault::fail_object_fsync(true);
+        }
+        Some(report)
+    }
+}
+
 /// Errors surfaced by the coordinator's private store adapters.
 #[derive(Debug, Error)]
 pub(crate) enum CoordinatorIoError {
@@ -234,10 +290,26 @@ impl CoordinatorStoreIo {
         lock: Arc<lattice_session::FlockGuard>,
     ) -> Result<lattice_session::TurnCommit, CoordinatorIoError> {
         let store = Arc::clone(&self.session);
-        tokio::task::spawn_blocking(move || store.finalize_turn(&session_id, &turn_id, &lock))
-            .await
-            .map_err(CoordinatorIoError::Blocking)?
-            .map_err(CoordinatorIoError::Session)
+        tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            let report = finalize_fault::inject(turn_id);
+            let result = store.finalize_turn(&session_id, &turn_id, &lock);
+            #[cfg(test)]
+            if let Some(report) = report {
+                let operation = match &result {
+                    Err(SessionError::Store(lattice_store::StoreError::Durability {
+                        operation,
+                        ..
+                    })) => Some(*operation),
+                    _ => None,
+                };
+                let _ = report.send(operation);
+            }
+            result
+        })
+        .await
+        .map_err(CoordinatorIoError::Blocking)?
+        .map_err(CoordinatorIoError::Session)
     }
 
     pub(crate) async fn publish_draft(

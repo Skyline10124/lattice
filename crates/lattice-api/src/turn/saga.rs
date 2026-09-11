@@ -68,7 +68,7 @@ async fn hit_turn_crash_barrier(
 ) -> Result<(), ApiError> {
     Ok(())
 }
-/// Drive the durable live Turn after `TurnStarted` is published.
+/// 持久接受后驱动唯一 live saga；返回真实关闭结果，不从观察流推导完成。
 pub(super) async fn run_coordinator_saga(
     prepared: PreparedTurn,
     request: RunTurnRequest,
@@ -76,8 +76,8 @@ pub(super) async fn run_coordinator_saga(
     deps: ProductionTurnDeps,
     coordinator: Arc<TurnCoordinator>,
     execution_lock: Arc<FlockGuard>,
-    mut observer: ObserverSink,
-) {
+    observer: &mut ObserverSink,
+) -> Result<lattice_session::TurnCommit, ApiError> {
     let ProductionTurnDeps {
         model_driver,
         tool_catalog,
@@ -311,7 +311,7 @@ pub(super) async fn run_coordinator_saga(
             };
             drop(step_tx);
             let _ = forwarder.await;
-            drain_ready_events(&mut agent_rx, &mut ordered_events, &mut observer).await;
+            drain_ready_events(&mut agent_rx, &mut ordered_events, observer).await;
 
             match attempt_result {
                 Err(ModelStepError::OpeningFailed { message, retryable }) => {
@@ -394,7 +394,7 @@ pub(super) async fn run_coordinator_saga(
                         &session_id,
                         &coordinator,
                         &execution_lock,
-                        &mut observer,
+                        observer,
                     )
                     .await
                     {
@@ -715,7 +715,7 @@ pub(super) async fn run_coordinator_saga(
                     history.push(tool_result);
                     ordered_events
                         .emit(
-                            &mut observer,
+                            observer,
                             TurnEvent::ToolCallFinished {
                                 id: public_invocation_id,
                                 name: binding.method.clone(),
@@ -922,7 +922,7 @@ pub(super) async fn run_coordinator_saga(
 
             ordered_events
                 .emit(
-                    &mut observer,
+                    observer,
                     TurnEvent::ToolCallFinished {
                         id: public_invocation_id,
                         name: binding.method.clone(),
@@ -1010,72 +1010,70 @@ pub(super) async fn run_coordinator_saga(
     };
 
     while let Ok(Some(event)) = tokio::time::timeout(CEP_EVENT_DRAIN_GRACE, agent_rx.recv()).await {
-        ordered_events.emit(&mut observer, event).await;
+        ordered_events.emit(observer, event).await;
     }
     cep_forwarder.abort();
     while let Ok(event) = agent_rx.try_recv() {
-        ordered_events.emit(&mut observer, event).await;
+        ordered_events.emit(observer, event).await;
     }
-    ordered_events.finish(&mut observer).await;
+    ordered_events.finish(observer).await;
 
     if let Some(terminal) = diagnostic_terminal_event(&turn_outcome, terminal_reason.as_deref()) {
         observer.emit(terminal).await;
     }
     observer.emit(TurnEvent::TurnCommitting).await;
 
-    match saga_result {
+    let result = match saga_result {
         Ok(()) => {
-            let closure = LiveTurnClosure {
-                session_id: &session_id,
-                turn_id,
-                outcome: turn_outcome,
-            };
-            let commit = close_live_turn(
+            close_live_turn(
                 &coordinator,
-                closure,
+                LiveTurnClosure {
+                    session_id: &session_id,
+                    turn_id,
+                    outcome: turn_outcome,
+                },
                 Arc::clone(&execution_lock),
                 workspace_history,
             )
-            .await;
-            match commit {
-                Ok(commit) => {
-                    observer
-                        .emit(TurnEvent::TurnCommitted {
-                            session_id: prepared.session_id,
-                            commit_id: commit.commit_id,
-                            outcome: commit.outcome,
-                            origin: commit.origin,
-                            workspace_history_checkpoint: commit.workspace_history_checkpoint,
-                        })
-                        .await;
-                }
-                Err(err) => {
-                    observer
-                        .emit(TurnEvent::CommitFailed {
-                            reason: err.to_string(),
-                        })
-                        .await;
-                }
-            }
+            .await
         }
-        Err(ApiError::EvidenceDurabilityFailed(err)) => {
+        Err(error) => Err(error),
+    };
+    match &result {
+        Ok(commit) => {
+            observer
+                .emit(TurnEvent::TurnCommitted {
+                    session_id: commit.session_id.clone(),
+                    commit_id: commit.commit_id.clone(),
+                    outcome: commit.outcome.clone(),
+                    origin: commit.origin,
+                    workspace_history_checkpoint: commit.workspace_history_checkpoint.clone(),
+                })
+                .await
+        }
+        Err(ApiError::EvidenceDurabilityFailed(error)) => {
             observer
                 .emit(TurnEvent::EvidenceDurabilityFailed {
-                    attempts: err.attempts,
+                    attempts: error.attempts,
                 })
-                .await;
+                .await
         }
         Err(ApiError::RecoveryRequired(reason)) => {
-            observer.emit(TurnEvent::RecoveryRequired { reason }).await;
+            observer
+                .emit(TurnEvent::RecoveryRequired {
+                    reason: reason.clone(),
+                })
+                .await
         }
-        Err(err) => {
+        Err(error) => {
             observer
                 .emit(TurnEvent::CommitFailed {
-                    reason: err.to_string(),
+                    reason: error.to_string(),
                 })
-                .await;
+                .await
         }
     }
+    result
 }
 
 async fn drain_ready_events(

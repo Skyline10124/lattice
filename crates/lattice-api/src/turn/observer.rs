@@ -1,16 +1,19 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Best-effort public turn-event observer sink shared by live + saga.
+//! 尽力投递的观察通道；序号在第一个可能丢失的位置之前分配。
 
 use std::collections::{HashSet, VecDeque};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use super::types::TurnEvent;
+use super::types::{SequencedTurnEvent, TurnEvent};
 
-/// Max wait when forwarding a non-delta [`TurnEvent`] to a slow observer.
 pub(super) const OBSERVER_SEND_TIMEOUT: Duration = Duration::from_millis(500);
 
 fn is_streaming_delta(event: &TurnEvent) -> bool {
@@ -20,33 +23,115 @@ fn is_streaming_delta(event: &TurnEvent) -> bool {
     )
 }
 
-/// Best-effort public observer sink.
+enum Sender {
+    #[cfg(test)]
+    Legacy(mpsc::Sender<TurnEvent>),
+    Sequenced(mpsc::Sender<SequencedTurnEvent>),
+}
+
 pub(super) struct ObserverSink {
-    sender: mpsc::Sender<TurnEvent>,
+    sender: Sender,
+    sequence: Arc<AtomicU64>,
     gave_up: bool,
 }
 
 impl ObserverSink {
+    #[cfg(test)]
     pub(super) fn new(sender: mpsc::Sender<TurnEvent>) -> Self {
         Self {
-            sender,
+            sender: Sender::Legacy(sender),
+            sequence: Arc::default(),
             gave_up: false,
         }
     }
 
-    pub(super) async fn emit(&mut self, event: TurnEvent) {
+    pub(super) fn sequenced(
+        sender: mpsc::Sender<SequencedTurnEvent>,
+        sequence: Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            sender: Sender::Sequenced(sender),
+            sequence,
+            gave_up: false,
+        }
+    }
+
+    /// 模型增量在唯一丢弃点之前编号；回调不等待观察者，也不建立额外转发队列。
+    pub(super) fn emit_delta(&mut self, event: TurnEvent) {
+        debug_assert!(is_streaming_delta(&event));
+        let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
         if self.gave_up {
             return;
         }
-        if is_streaming_delta(&event) {
-            let _ = self.sender.try_send(event);
+        match &self.sender {
+            #[cfg(test)]
+            Sender::Legacy(sender) => {
+                let _ = sender.try_send(event);
+            }
+            Sender::Sequenced(sender) => {
+                let _ = sender.try_send(SequencedTurnEvent { sequence, event });
+            }
+        }
+    }
+
+    pub(super) async fn emit(&mut self, event: TurnEvent) {
+        let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
+        if self.gave_up {
             return;
         }
-        let send = self.sender.send(event);
-        match tokio::time::timeout(OBSERVER_SEND_TIMEOUT, send).await {
-            Ok(Ok(())) => {}
-            _ => self.gave_up = true,
+        let delta = is_streaming_delta(&event);
+        match &self.sender {
+            #[cfg(test)]
+            Sender::Legacy(sender) => {
+                if delta {
+                    let _ = sender.try_send(event);
+                } else if !matches!(
+                    tokio::time::timeout(OBSERVER_SEND_TIMEOUT, sender.send(event)).await,
+                    Ok(Ok(()))
+                ) {
+                    self.gave_up = true;
+                }
+            }
+            Sender::Sequenced(sender) => {
+                let event = SequencedTurnEvent { sequence, event };
+                if delta {
+                    let _ = sender.try_send(event);
+                } else if !matches!(
+                    tokio::time::timeout(OBSERVER_SEND_TIMEOUT, sender.send(event)).await,
+                    Ok(Ok(()))
+                ) {
+                    self.gave_up = true;
+                }
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn sequence_includes_dropped_deltas_and_the_unobserved_tail() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let count = Arc::new(AtomicU64::new(0));
+        let mut sink = ObserverSink::sequenced(tx, count.clone());
+        sink.emit_delta(TurnEvent::TokenDelta {
+            content: "first".into(),
+        });
+        sink.emit_delta(TurnEvent::TokenDelta {
+            content: "lost".into(),
+        });
+        assert_eq!(rx.recv().await.unwrap().sequence, 1);
+        sink.emit(TurnEvent::TurnCommitting).await;
+        assert_eq!(rx.recv().await.unwrap().sequence, 3);
+        drop(rx);
+        sink.emit(TurnEvent::TurnCommitting).await;
+        sink.emit(TurnEvent::TokenDelta {
+            content: "tail".into(),
+        })
+        .await;
+        assert_eq!(count.load(Ordering::Relaxed), 5);
     }
 }
 

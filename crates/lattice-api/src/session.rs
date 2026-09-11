@@ -31,7 +31,7 @@ pub enum RecoveryRequired {
     },
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 pub enum ApiError {
     #[error("session '{0}' not found")]
     NotFound(String),
@@ -389,9 +389,8 @@ impl SessionApi {
             .map_err(map_session_error)
     }
 
-    /// Acquire the exclusive SessionExecutionLock for a full live Turn or
-    /// Rewind. The blocking syscall is performed by the caller's blocking
-    /// offload boundary, not by this synchronous helper on an async worker.
+    /// 测试构造器使用阻塞获取；产品入口忙时通过 try_lock_execution 拒绝。
+    #[cfg(test)]
     pub(crate) fn lock_execution(
         &self,
         session_id: &str,
@@ -403,6 +402,21 @@ impl SessionApi {
                 &resolved,
                 lattice_session::LockMode::Exclusive,
                 lattice_session::Blocking::Block,
+            )
+            .map_err(map_session_error)?;
+        Ok((resolved, guard))
+    }
+    pub(crate) fn try_lock_execution(
+        &self,
+        session_id: &str,
+    ) -> Result<(String, lattice_session::FlockGuard)> {
+        let resolved = self.resolve_id(session_id)?;
+        let guard = self
+            .store
+            .lock_execution(
+                &resolved,
+                lattice_session::LockMode::Exclusive,
+                lattice_session::Blocking::NonBlocking,
             )
             .map_err(map_session_error)?;
         Ok((resolved, guard))
@@ -483,9 +497,53 @@ impl SessionApi {
             .get_turn_commit(&resolved, commit_id)
             .map_err(map_session_error)
     }
+
+    /// 忙时可读的固定观察视图；不执行恢复、引用屏障或任何模型/Tool 工作。
+    pub async fn read_view(
+        &self,
+        session_id: &str,
+        turn_id: Option<lattice_session::TurnId>,
+    ) -> Result<lattice_session::SessionReadView> {
+        let api = self.clone();
+        let session_id = session_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let id = api.resolve_id(&session_id)?;
+            let store = api.turn_store.as_ref().ok_or_else(|| {
+                ApiError::Internal("fixed views require the authoritative Git Session store".into())
+            })?;
+            store.read_view(&id, turn_id).map_err(map_session_error)
+        })
+        .await
+        .map_err(|err| ApiError::Internal(format!("read Session view: {err}")))?
+    }
+
+    pub async fn read_transcript_page(
+        &self,
+        session_id: &str,
+        commit_id: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<lattice_session::TranscriptPage> {
+        let api = self.clone();
+        let session_id = session_id.to_owned();
+        let commit_id = commit_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let id = api.resolve_id(&session_id)?;
+            let store = api.turn_store.as_ref().ok_or_else(|| {
+                ApiError::Internal(
+                    "transcript pages require the authoritative Git Session store".into(),
+                )
+            })?;
+            store
+                .read_transcript_page(&id, &commit_id, offset, limit)
+                .map_err(map_session_error)
+        })
+        .await
+        .map_err(|err| ApiError::Internal(format!("read transcript page: {err}")))?
+    }
 }
 
-fn map_session_error(e: lattice_session::SessionError) -> ApiError {
+pub(crate) fn map_session_error(e: lattice_session::SessionError) -> ApiError {
     match e {
         lattice_session::SessionError::NotFound(id) => ApiError::NotFound(id),
         lattice_session::SessionError::InvalidBranchName => {

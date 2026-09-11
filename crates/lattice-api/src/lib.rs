@@ -47,16 +47,13 @@ pub use session::{
 };
 pub use turn::{
     RunTurnRequest, RunTurnResult, RunTurnStage, STREAM_IDLE_TIMEOUT_SECS, ToolResultSummary,
-    TurnEvent, TurnEventStream, TurnUsageSummary, collect_turn_result_from_events, run_turn,
-    stream_turn,
+    TurnAcceptance, TurnCompletion, TurnEvent, TurnEventStream, TurnExecution, TurnUsageSummary,
+    collect_turn_result_from_events, recover_turn, run_turn, start_turn, stream_turn,
 };
 
-/// Eagerly compose the process-level shared Component runtime (#171).
-///
-/// Call this during application startup (before the first Turn) so the
-/// Wasmtime compilation cost is paid once at init rather than on the first
-/// prompt. Returns `Err` if composition fails; the error is latched and
-/// every subsequent `stream_turn` / `run_turn` will observe the same failure.
+/// 提前组成进程共享的 Component 运行时，将首次新执行所需的编译成本移到预热阶段。
+/// 组成错误会被缓存，并在后续需要 Component 组成的新执行路径中返回。
+/// 只读查询、既有请求找回及 closure-only 恢复不依赖此预热，也不因预热失败而被拒绝。
 pub fn warmup_component_runtime() -> Result<(), std::sync::Arc<CompositionError>> {
     lancet_api::ComponentRuntime::shared().map(|_| ())
 }

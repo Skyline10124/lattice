@@ -41,6 +41,8 @@ pub struct LancetRuntimeConfig {
     pub policy: PolicyConfig,
     /// Component Tool admission inputs. Fail-closed by default.
     pub capability_admission: CapabilityAdmissionPolicy,
+    /// 提交端冻结的 DER 信任根；只用于本 Turn，不读取后台环境或证书路径。
+    pub tls_roots_der: Vec<Vec<u8>>,
     /// Authoritative project invocation ledger backing.
     pub invocations: WorkspaceHistoryBacking,
     /// Private workspace mutation history backing.

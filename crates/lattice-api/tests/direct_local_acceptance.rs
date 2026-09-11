@@ -60,6 +60,7 @@ fn direct_local_runtime(root: &std::path::Path) -> ReservedRuntime {
         .collect();
     ReservedRuntime::build(LancetRuntimeConfig {
         local_workspace_root: root.to_path_buf(),
+        tls_roots_der: Vec::new(),
         invocations: lancet_api::WorkspaceHistoryBacking::Disabled,
         workspace_history: lancet_api::WorkspaceHistoryBacking::Disabled,
         enabled_tools: enabled,
@@ -233,6 +234,7 @@ async fn policy_deny_blocks_create_on_direct_local() {
     let enabled = vec![MUTATE_CREATE.to_string()];
     let runtime = ReservedRuntime::build(LancetRuntimeConfig {
         local_workspace_root: dir.path().to_path_buf(),
+        tls_roots_der: Vec::new(),
         invocations: lancet_api::WorkspaceHistoryBacking::Disabled,
         workspace_history: lancet_api::WorkspaceHistoryBacking::Disabled,
         enabled_tools: enabled,

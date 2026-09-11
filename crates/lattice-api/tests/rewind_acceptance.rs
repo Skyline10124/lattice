@@ -118,6 +118,7 @@ fn build_runtime(root: &Path, history: &WorkspaceHistoryBacking) -> ReservedRunt
         .collect();
     ReservedRuntime::build(LancetRuntimeConfig {
         local_workspace_root: root.to_path_buf(),
+        tls_roots_der: Vec::new(),
         invocations: lancet_api::WorkspaceHistoryBacking::Disabled,
         enabled_tools: enabled,
         policy,

@@ -1,15 +1,10 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Live turn streaming path (live turn).
-//!
-//! Startup validation via [`prepare_live_turn_locked`], then a spawned task
-//! that publishes durable `TurnStarted` and hands the Turn to the #139-B
-//! [`super::saga`] coordinator loop.
+//! live Turn 在执行所有者任务内固定配置、发布接受事实，再交给唯一协调循环。
+//! 接受与完成回执独立于观察通道，断开观察者不取消执行。
 
 use std::sync::Arc;
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
 
 use lattice_session::{FlockGuard, GraphHead, ProjectStoreKey};
 
@@ -17,14 +12,18 @@ use super::cep::ProductionTurnDeps;
 use super::mapping::resolve_model_and_prompt;
 #[cfg(test)]
 use super::observer::CepOrderedEmitter;
-use super::observer::ObserverSink;
-use super::types::{RunTurnRequest, TurnEvent, TurnEventStream};
+use super::types::{RunTurnRequest, TurnEvent};
 use crate::session::{OpenSessionRequest, Result, SessionApi};
+#[cfg(test)]
+use {
+    super::observer::ObserverSink, super::types::TurnEventStream, tokio::sync::mpsc,
+    tokio_stream::wrappers::ReceiverStream,
+};
 
 /// Bounded channel capacity for the turn event stream.
 pub(super) const TURN_EVENT_CHANNEL_CAPACITY: usize = 256;
 
-/// All state gathered during startup validation, before the live task spawns.
+/// 持有执行锁后固定的 live 输入，不与观察通道共享可变配置。
 pub(crate) struct PreparedTurn {
     pub session_id: String,
     pub parent_commit_id: Option<String>,
@@ -38,15 +37,15 @@ pub(crate) struct PreparedTurn {
     pub project_store_key: ProjectStoreKey,
 }
 
-/// Prepare a live Turn while the caller already holds the full
-/// `SessionExecutionLock`.
+/// 持有全 Turn 执行锁后固定历史与配置，冻结 provider 时不再读取环境。
 pub(crate) fn prepare_live_turn_locked(
     session: &SessionApi,
     request: &RunTurnRequest,
     project_root: &std::path::Path,
     execution_lock: &FlockGuard,
+    frozen_provider: Option<&str>,
 ) -> Result<PreparedTurn> {
-    let (model, system_prompt, provider) = resolve_model_and_prompt(request);
+    let (model, system_prompt, provider) = resolve_model_and_prompt(request, frozen_provider);
 
     let s = session.open_session(OpenSessionRequest {
         id: request.session_id.clone(),
@@ -94,41 +93,21 @@ pub(crate) fn prepare_live_turn_locked(
     })
 }
 
-async fn run_live_turn_task(
-    _session: SessionApi,
+pub(super) async fn run_live_turn_task(
     prepared: PreparedTurn,
     request: RunTurnRequest,
-    turn_tx: mpsc::Sender<TurnEvent>,
+    turn_id: lancet_protocol::TurnId,
     deps: ProductionTurnDeps,
     coordinator: Arc<super::coordinator::TurnCoordinator>,
     execution_lock: Arc<FlockGuard>,
-) {
-    let turn_id = coordinator.ids.new_turn_id();
+    feedback: &mut super::execute::ExecutionFeedback,
+) -> Result<lattice_session::TurnCommit> {
     let loaded = request.loaded_profile.as_ref().expect("validated profile");
-    let session_id = match lancet_protocol::SessionId::parse(&prepared.session_id) {
-        Ok(session_id) => session_id,
-        Err(err) => {
-            let mut observer = ObserverSink::new(turn_tx.clone());
-            observer
-                .emit(TurnEvent::CommitFailed {
-                    reason: format!("invalid persisted SessionId: {err}"),
-                })
-                .await;
-            return;
-        }
-    };
-    let policy_snapshot_json = match serde_json::to_string(&loaded.profile.lancet) {
-        Ok(snapshot) => snapshot,
-        Err(err) => {
-            let mut observer = ObserverSink::new(turn_tx.clone());
-            observer
-                .emit(TurnEvent::CommitFailed {
-                    reason: format!("failed to freeze LANCET policy: {err}"),
-                })
-                .await;
-            return;
-        }
-    };
+    let session_id = lancet_protocol::SessionId::parse(&prepared.session_id)
+        .map_err(|_| crate::session::ApiError::Internal("invalid persisted SessionId".into()))?;
+    let policy_snapshot_json = serde_json::to_string(&loaded.profile.lancet).map_err(|err| {
+        crate::session::ApiError::Internal(format!("freeze LANCET policy: {err}"))
+    })?;
     let catalog = lattice_session::pending::ToolCatalogSnapshot::new(
         env!("CARGO_PKG_VERSION").to_string(),
         deps.tool_catalog
@@ -140,78 +119,59 @@ async fn run_live_turn_task(
                 input_schema: tool.parameters.clone(),
             })
             .collect(),
-    );
-    let accepted_at = chrono::Utc::now().to_rfc3339();
-    let begin = coordinator
-        .io
-        .begin_turn(
-            lattice_session::pending::TurnStartedFacts {
-                turn_id,
-                session_id,
-                project_store_key: prepared.project_store_key,
-                parent_conversation_tip: prepared.parent_commit_id.clone(),
-                user_message: lattice_conversation::NativeMessage::new(
-                    lattice_conversation::MessageRole::User,
-                    None,
-                    vec![lattice_conversation::MessagePart::semantic_only(
-                        lattice_conversation::MessageSemantic::Text {
-                            text: request.input.clone(),
-                        },
-                    )],
-                ),
-                config: lattice_session::pending::FrozenTurnConfig {
-                    agent_name: prepared.agent_name.clone(),
-                    model: prepared.model.clone(),
-                    provider: prepared.provider.clone(),
-                    system_prompt: prepared.system_prompt.clone(),
-                    profile_snapshot_json: prepared.profile_snapshot_json.clone(),
-                    policy_snapshot_json,
-                    catalog: match catalog {
-                        Ok(catalog) => catalog,
-                        Err(err) => {
-                            let mut observer = ObserverSink::new(turn_tx);
-                            observer
-                                .emit(TurnEvent::CommitFailed {
-                                    reason: err.to_string(),
-                                })
-                                .await;
-                            return;
-                        }
-                    },
-                    limits: lattice_session::pending::TurnExecutionLimits {
-                        timeout_secs: loaded.profile.llm.timeout_secs.unwrap_or(300),
-                        max_model_steps: lattice_session::pending::MAX_MODEL_STEPS,
-                        max_model_attempts: loaded.profile.llm.retry.max_retries.saturating_add(1),
-                    },
+    )
+    .map_err(|err| crate::session::ApiError::BadRequest(err.to_string()))?;
+    let facts = lattice_session::pending::TurnStartedFacts {
+        turn_id,
+        session_id,
+        project_store_key: prepared.project_store_key,
+        parent_conversation_tip: prepared.parent_commit_id.clone(),
+        user_message: lattice_conversation::NativeMessage::new(
+            lattice_conversation::MessageRole::User,
+            None,
+            vec![lattice_conversation::MessagePart::semantic_only(
+                lattice_conversation::MessageSemantic::Text {
+                    text: request.input.clone(),
                 },
-                accepted_at,
+            )],
+        ),
+        config: lattice_session::pending::FrozenTurnConfig {
+            agent_name: prepared.agent_name.clone(),
+            model: prepared.model.clone(),
+            provider: prepared.provider.clone(),
+            system_prompt: prepared.system_prompt.clone(),
+            profile_snapshot_json: prepared.profile_snapshot_json.clone(),
+            policy_snapshot_json,
+            catalog,
+            limits: lattice_session::pending::TurnExecutionLimits {
+                timeout_secs: loaded.profile.llm.timeout_secs.unwrap_or(300),
+                max_model_steps: lattice_session::pending::MAX_MODEL_STEPS,
+                max_model_attempts: loaded.profile.llm.retry.max_retries.saturating_add(1),
             },
-            Arc::clone(&execution_lock),
-        )
-        .await;
-    if let Err(err) = begin {
-        let mut observer = ObserverSink::new(turn_tx);
-        observer
-            .emit(TurnEvent::CommitFailed {
-                reason: err.to_string(),
-            })
-            .await;
-        return;
-    }
-    #[cfg(feature = "test-crash-barriers")]
-    if let Err(err) =
-        super::crash_barrier::hit(&coordinator, &prepared.session_id, "turn_started").await
+        },
+        accepted_at: chrono::Utc::now().to_rfc3339(),
+    };
+    facts
+        .validate()
+        .map_err(|err| crate::session::ApiError::BadRequest(err.to_string()))?;
+    if let Err(error) = coordinator
+        .io
+        .begin_turn(facts, Arc::clone(&execution_lock))
+        .await
     {
-        let mut observer = ObserverSink::new(turn_tx);
-        observer
-            .emit(TurnEvent::CommitFailed {
-                reason: err.to_string(),
-            })
-            .await;
-        return;
+        // 发布错误不能当作未接受；调用方以同一身份查询或重试，不自动打开 provider。
+        feedback.accept(super::types::TurnAcceptance::ConfirmationUnknown { turn_id });
+        return Err(crate::session::ApiError::StoreUnavailable(format!(
+            "Turn acceptance confirmation unknown: {error}"
+        )));
     }
-    let mut observer = ObserverSink::new(turn_tx);
-    observer
+    feedback.accept(super::types::TurnAcceptance::Accepted { turn_id });
+    #[cfg(feature = "test-crash-barriers")]
+    super::crash_barrier::hit(&coordinator, &prepared.session_id, "turn_started")
+        .await
+        .map_err(|err| crate::session::ApiError::Internal(err.to_string()))?;
+    feedback
+        .observer
         .emit(TurnEvent::TurnStarted {
             session_id: prepared.session_id.clone(),
             turn_id: turn_id.to_string(),
@@ -219,7 +179,6 @@ async fn run_live_turn_task(
             branch: prepared.branch.clone(),
         })
         .await;
-
     super::saga::run_coordinator_saga(
         prepared,
         request,
@@ -227,35 +186,48 @@ async fn run_live_turn_task(
         deps,
         coordinator,
         execution_lock,
-        observer,
+        &mut feedback.observer,
     )
-    .await;
+    .await
 }
 
-/// Execute a turn with an already-prepared session snapshot and return a live stream.
+#[cfg(test)]
 pub(super) async fn stream_turn_live_prepared(
-    session: SessionApi,
+    _session: SessionApi,
     prepared: PreparedTurn,
     request: RunTurnRequest,
     deps: ProductionTurnDeps,
     coordinator: Arc<super::coordinator::TurnCoordinator>,
     execution_lock: Arc<FlockGuard>,
 ) -> Result<TurnEventStream> {
-    let (tx, rx) = mpsc::channel::<TurnEvent>(TURN_EVENT_CHANNEL_CAPACITY);
-
+    let (tx, rx) = mpsc::channel(TURN_EVENT_CHANNEL_CAPACITY);
+    let (accepted, _) = tokio::sync::oneshot::channel();
+    let turn_id = coordinator.ids.new_turn_id();
     tokio::spawn(async move {
-        run_live_turn_task(
-            session,
+        let mut feedback = super::execute::ExecutionFeedback {
+            acceptance: Some(accepted),
+            observer: ObserverSink::new(tx),
+            recovery_target: Arc::default(),
+        };
+        if let Err(error) = run_live_turn_task(
             prepared,
             request,
-            tx,
+            turn_id,
             deps,
             coordinator,
             execution_lock,
+            &mut feedback,
         )
-        .await;
+        .await
+        {
+            feedback
+                .observer
+                .emit(TurnEvent::CommitFailed {
+                    reason: error.to_string(),
+                })
+                .await;
+        }
     });
-
     Ok(Box::pin(ReceiverStream::new(rx)))
 }
 
@@ -282,6 +254,7 @@ pub(super) async fn stream_turn_live(
         &request,
         workspace_root.canonical_path(),
         execution_lock.as_ref(),
+        None,
     )?;
     let layout = session.state_layout().ok_or_else(|| {
         crate::session::ApiError::Internal(

@@ -640,10 +640,8 @@ pub fn rewind_to_turn_with_barriers(
     project_root: &Path,
     barriers: &RewindBarriers<'_>,
 ) -> std::result::Result<RewindOutcome, RewindError> {
-    // Rewind is Session-bound for its entire read/restore/ref-publication
-    // saga. Resolve the id before locking, then keep the explicit guard until
-    // the final audit append completes.
-    let (resolved_session_id, execution_lock) = session.lock_execution(session_id)?;
+    // Rewind 全程持有会话执行权；忙时拒绝而非让后台排队等待另一个所有者。
+    let (resolved_session_id, execution_lock) = session.try_lock_execution(session_id)?;
     let audit_session_id =
         lancet_protocol::SessionId::parse(&resolved_session_id).map_err(|err| {
             ApiError::Internal(format!(
