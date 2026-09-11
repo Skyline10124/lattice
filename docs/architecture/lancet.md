@@ -6,6 +6,7 @@ status: active
 
 > 类型：架构合同
 > 上位依据：[项目宪章](../governance/charter.md)、[宿主平台](platform.md)
+> 修订状态：仅“网络获取”中的提交端冻结 TLS 根引用待人类批准；生效前该部分仍适用[原有效版本](https://github.com/Skyline10124/lattice/blob/0e20dc090dce79330e06276da8255e9f4fb8cc39/docs/architecture/lancet.md)，其余合同保持 active。
 
 ## 目的与范围
 
@@ -109,6 +110,7 @@ Cell 模型、能力匹配、scope/trust 解析及拒绝证据由该合同集中
 ### 网络获取
 
 `fetch.web` 仅通过 `network-fetch` Host 发出 GET 请求。Host 依次核验允许主机、协议与地址策略，解析 DNS 并固定连接地址，验证 TLS，并对每次重定向重新检查。
+Tool Host 的 TLS 根来自[提交端冻结配置](session.md#执行配置冻结)，由 Turn 专属信任配置验证已固定地址的连接；冻结规则不改变本节的逐跳网络授权与证据边界。
 公网访问采用 HTTPS；显式 localhost 策略作为受控例外处理，其余私有、保留和特殊地址拒绝。跨源重定向移除调用方请求头，响应头、响应体、重定向次数和 deadline 均受限制，取消与 Turn 观察预算参与执行。
 调用须同时通过 `ex` 能力边界和非空 `allowed_hosts` 目标策略；空允许列表拒绝全部网络，`allow_public_https` 只是公网 HTTPS 开关。localhost 还须显式启用并列入允许主机。每次调用最多一次网络 import，Host 内部处理重定向，不由 guest 发起第二条独立网络操作。最多跟随 5 次重定向，初始请求计数为 0；DNS、连接、TLS、各跳与 body 共用一次调用 deadline 和取消身份，不逐跳重置。
 

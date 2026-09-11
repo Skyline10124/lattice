@@ -101,6 +101,23 @@ lattice tui <session_id>
 > 概括这个项目的用途，并指出主要入口文件和目录。
 ```
 
+## 后台执行与重连
+
+Session 命令与 TUI 首次使用时自动启动同用户、同状态根的本地后台。已确认接受的 Turn 在前端关闭后继续执行；TUI 的 Ctrl+D 或 `/quit` 只断开，Esc/Ctrl+C 明确请求取消。重新打开 `lattice tui <session_id>` 可重载持久历史，`/reconnect` 更新当前界面的连接。
+
+按 TurnId 查询或继续观察已有请求：
+
+```text
+lattice session turn <session_id> <turn_id>
+lattice session turn <session_id> <turn_id> --follow
+lattice session cancel <session_id> <turn_id>
+lattice session recover <session_id>
+lattice daemon status
+lattice daemon stop
+```
+
+`<session_id>` 与 `<turn_id>` 是待替换的身份占位。查询与重连不执行恢复；`recover` 只关闭旧 pending。观察缺口会明确提示，重载持久正文，不逐 token 补播。接受或完成确认未知时保留原 TurnId，显式重试方法、退出码与后台停止说明见[操作指南](docs/development/validation-guide.md#后台与重连操作)。本工作分支的相关合同修订[待人类批准](docs/README.md#工作分支修订状态)。
+
 ## 命令行入口
 
 不使用 TUI 时，可以通过 `session` 子命令创建会话、发送消息和查看历史。

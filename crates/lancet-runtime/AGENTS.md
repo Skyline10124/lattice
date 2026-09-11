@@ -16,6 +16,8 @@
 
 修改前按对象读取 [LANCET](../../docs/architecture/lancet.md)、[Cell](../../docs/architecture/cell.md)、[工作区](../../docs/architecture/workspace.md)、[存储](../../docs/architecture/storage.md)合同。工具构建见[开发指南](../../docs/development/tool-development.md)，验证范围见[测试工程](../../docs/development/testing.md)。
 
+> 本入口的冻结 TLS 根修订待人类批准；生效前原有效版本继续适用，见[修订状态](../../docs/README.md#工作分支修订状态)。
+
 ## 局部约束
 
 - 不依赖 lancet-api 或 LATTICE session/agent/profile；authority 是合法下层。无 `wasmtime-wasi`/`wasi-common`，只链接版本化 Host imports，无 ambient WASI。
@@ -29,7 +31,7 @@
 - 文件安装、辅助资源清理、安装后目录同步失败的效果报告按工作区合同。不能把目标未安装扩大为工作区无变化；新设计中未完成的实现和验证不因本入口整理而消失。
 - WorkspaceHistory 只记录已安装事实并规划恢复，不写本地文件、用户 Git 或补偿 commit，不提供 Agent 历史命令。前态以安装者观察的内容为准；ref/锁/fsync 委托内核，不手写、不用 git subprocess/git2/平行 SQLite 或 receipt store。
 - 操作锁与仓库锁期限遵循合同，新 mutation 入口先取得 exclusive 操作锁再读前提，不共享升级。历史严格打开，创建限指定组成入口；Rewind 保留被放弃 tip，不能用时间过期破坏历史 OID 可解析性。
-- 网络维持平台 TLS roots、最多五次逐跳复核重定向、跨 origin 剥离 caller headers、禁压缩、共享预算与取消；区分 received/delivered bytes，I/O 后失败记录 effect，DeniedOperation 仅用于 I/O 前拒绝。
+- 网络 TLS 输入与逐跳行为遵循 [LANCET 网络获取](../../docs/architecture/lancet.md#网络获取)，Turn 组合接收显式冻结根，不读后台环境替换信任配置。保留跨 origin 剥离 caller headers、禁压缩、共享预算与取消；区分 received/delivered bytes，I/O 后失败记录 effect，DeniedOperation 仅用于 I/O 前拒绝。
 - reserved Descriptor 到实际 compiled Component 的精确身份及启用集校验风险见 LANCET 合同待核验项；不得以文档迁移宣称已解决。
 
 ## 验证入口

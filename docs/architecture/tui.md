@@ -1,11 +1,12 @@
 ---
-status: active
+status: pending
 ---
 
 # TUI 交互与视觉
 
 > 类型：架构合同
 > 上位依据：[项目宪章](../governance/charter.md)、[宿主平台](platform.md)
+> 修订状态：本工作分支的后台接线、历史重载、连接与取消呈现修订待人类批准；生效前[原有效版本](https://github.com/Skyline10124/lattice/blob/0e20dc090dce79330e06276da8255e9f4fb8cc39/docs/architecture/tui.md)继续适用。
 
 ## 目的与范围
 
@@ -15,15 +16,16 @@ TUI 通过[会话公开接口](session.md#组件与接口)观察和操作当前�
 
 ## 职责与显示模型
 
-CLI 调用 `lattice_tui::run`，TUI 经 `ratatui`/`crossterm` 使用备用屏幕与 raw 键盘输入。会话、profile 和 provider 配置问题在交互界面启动前明确返回。
+CLI 调用 `lattice_tui::run`，TUI 经 `ratatui`/`crossterm` 使用备用屏幕与 raw 键盘输入，并通过 `LocalClient` 连接后台。新会话在界面启动前校验配置；打开已有会话及重连只读持久事实，不要求当前 profile/provider 凭据。新 Turn 的配置按[会话冻结规则](session.md#执行配置冻结)在提交时准备。
 
-给定 `TuiOptions.session_id` 时打开指定会话，未给定时创建会话。界面操作当前会话，不提供会话选择器、分支或时间线视图。
+给定 `TuiOptions.session_id` 时打开指定会话，未给定时创建会话。启动加载固定 head 的可达历史与固定 active journal 的正文；界面操作当前会话，不提供会话选择器、分支或时间线视图。
 
 | 部分 | 职责 |
 | --- | --- |
-| 启动与会话准备 | 打开或创建会话、加载 profile、准备公开 API 请求 |
+| 启动与会话准备 | 经后台打开或创建会话、加载持久历史，提交新请求时准备配置 |
+| 连接 | 查询、订阅、正文重载与显式取消，不拥有后台执行任务 |
 | 输入与历史 | 多行缓冲、光标、粘贴、键位和历史浏览 |
-| 应用事件循环 | 接收键盘及 Turn 事件、维护界面状态、请求取消与触发重绘 |
+| 应用事件循环 | 接收键盘、固定视图与观察事件，分别维护执行和连接状态 |
 | 视图 | 统一计算布局、折行、viewport、停靠区和状态信息 |
 
 对话记录使用扁平 block 序列。说话人分组由渲染顺序确定，不为显示新增嵌套 Turn 容器。共享渲染由 TUI 侧维护，不能反向依赖 `lattice-cli`。
@@ -31,14 +33,23 @@ CLI 调用 `lattice_tui::run`，TUI 经 `ratatui`/`crossterm` 使用备用屏幕
 ```mermaid
 flowchart LR
     K["键盘与粘贴"] --> I["输入与应用状态"]
-    I -->|请求或取消| A["lattice-api"]
-    A -->|Turn 事件| I
+    I -->|提交、查询、订阅或取消| A["LocalClient / 本地后台"]
+    A -->|固定视图、正文与观察事件| I
     I -->|block 与停靠区状态| V["视图与 viewport"]
     V -->|终端字符单元| T["备用屏幕"]
 ```
 
 图中连线表示事件或显示数据传递，持久化由 API 所属领域处理。
-Turn 事件使用穷举匹配，不以兜底分支吞掉新增事件。Turn 流 idle timeout 的单一常量来源为 `lattice_api::STREAM_IDLE_TIMEOUT_SECS`；超时显示失败并收口仍 Running 的工具块，不伪造持久提交。取消请求置协作标志后继续消费事件流，终态后的实际持久状态由 API 决定。
+
+### 连接、确认与重载
+
+执行状态、连接状态及正文可用性分别呈现。Turn 事件使用穷举匹配，不以兜底分支吞掉新增事件；接受和完成确认依[会话接口语义](session.md#请求身份与确认)，不能从事件流或可读 pin 推定成功。
+
+`/reconnect` 及重新打开已有 Session 加载固定视图与持久正文，再观察后续事件。按[订阅交接规则](session.md#观察与重连)处理快照与事件竞争；收到 Gap 时清除临时增量并以固定 committed/pending 正文替换，保留缺口提示，不补造丢失文字。
+
+Turn 流 idle timeout 的单一常量来源为 `lattice_api::STREAM_IDLE_TIMEOUT_SECS`。超时、断连或 EOF 显示观察中断及重连入口，未配对工具改为未知；不将 Turn 改为 Failed、发起恢复或重新接受 prompt。界面独立保存快照给出的 TurnId、commit、类型化 outcome 与完成确认，再决定是否替换正文；正文读取失败或连接错误不撤销已知终态和已取得的确认。正文不可用时仍呈现这些事实，明确当前正文显示未验证并提示重载，不把旧临时内容当作新持久正文。
+
+界面在提交前保留并显示 TurnId。接受或完成确认未知时保留该身份与诊断，引导用户查询或显式重试原请求；重连本身不执行确认屏障。Busy 保留输入并报告拒绝，恢复旧 Turn 的回执明确本次新 prompt 未接受。
 
 ## 布局
 
@@ -83,12 +94,14 @@ Ctrl+C 提示在两秒内替代最低优先级的换行提示，过期须触发�
 | 运行中 | 一行，使用 `DimMeta` 与运行提示 |
 | 成功 | 一行折叠，显示工具名和结果字节数 |
 | 失败 | 展开并显示错误摘要 |
+| 观察未知 | 使用 `DimMeta`，明确尚未取得结果 |
+| 材料不可用 | 使用 `DimMeta`，保留执行 outcome 并提示结果材料不可用 |
 
 `▸`、`▾` 为状态指示，不是交互控件；ASCII 回退使用 `>`、`v`。不增加展开键或鼠标处理。
 工具行按事件字段渲染，不按工具名添加专用逻辑。调用 ID 用于 started/finished 配对，默认隐藏；排障显示时可截断为 `#<id>`，不能当作操作名。
 `output_len` 按字节显示，例如 `1204 B`，不写为字符数，也不添加千分位。没有事件提供的参数、hash 或操作字段不臆造显示。
 
-收到 Turn 终态或事件流结束时，仍未配对完成的 Running 工具块显示为失败并注明取消、终态原因或 `turn ended before tool completion`。这表示界面未获得完整显示结果，Invocation 的执行 outcome 仍以 [LANCET 持久事实](lancet.md#结果证据与失败处理)为准。
+已知 Turn 终态到达时，未配对完成的工具块显示失败并注明终态原因及显示结果缺失。仅观察流结束时按[连接中断](#连接确认与重载)显示未知。持久重载按 Invocation 的真实 outcome 与材料可用性呈现：结果材料不可用时明确标示，不因缺少正文将执行成功改为失败。Invocation outcome 以 [LANCET 持久事实](lancet.md#结果证据与失败处理)为准。
 
 ## 停靠区与输入
 
@@ -129,7 +142,9 @@ Ctrl+C 提示在两秒内替代最低优先级的换行提示，过期须触发�
 WARN/ERROR 显示时屏蔽普通输入、编辑、粘贴与提交，不修改不可见的输入缓冲；全局翻页、取消和退出行为继续按条件执行。
 启动时探测一次 keyboard enhancement 支持，提示文案与探测结果一致。
 
-输入历史尽力保存到 `<session_dir>/repl_history.txt`，沿用纯文本行格式。协作取消通过 API 的 `cancel_flag` 发出；raw 模式下 Ctrl+C 作为 KeyEvent 处理，不另起系统信号 watcher。取消后的 Turn 提交或 pending 状态按[会话取消与关闭规则](session.md#重开取消与未完成状态)处理，TUI 展示 API 返回的结果。
+输入历史尽力保存到 `<session_dir>/repl_history.txt`，沿用纯文本行格式。raw 模式下 Ctrl+C 作为 KeyEvent 处理，不另起系统信号 watcher。Esc/Ctrl+C 经 LocalClient 向当前 Session/Turn 显式请求取消；继续观察，按[会话取消与关闭规则](session.md#重开取消与未完成状态)显示接管、未接管、确认未知及最终状态。
+
+Ctrl+D、`/quit` 和普通退出只断开前端，不取消后台 Turn。第二次 Ctrl+C 退出不撤销此前取消意图，前端退出前对已经发出的取消发送等待确认；无法取得回执时明确报告未知并保留 TurnId，不能伪报取消完成。
 
 ## 配色与终端约定
 

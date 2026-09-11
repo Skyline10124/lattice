@@ -1,11 +1,12 @@
 ---
-status: active
+status: pending
 ---
 
 # 会话与 Turn
 
 > 类型：架构合同
 > 上位依据：[项目宪章](../governance/charter.md)、[宿主平台](platform.md)
+> 修订状态：本工作分支的本地后台、请求确认与重连修订待人类批准；生效前[原有效版本](https://github.com/Skyline10124/lattice/blob/0e20dc090dce79330e06276da8255e9f4fb8cc39/docs/architecture/session.md)继续适用。
 
 ## 目的与范围
 
@@ -26,7 +27,7 @@ Turn 是一次已接受用户请求的执行与关闭单元，可以包含多个
 | 身份或地址 | 含义 |
 | --- | --- |
 | `SessionId` | 会话身份，展示缩写不改变其规范身份 |
-| `TurnId` | 已接受请求的显式身份，与 TurnCommit 的 Git OID 分开 |
+| `TurnId` | 客户端提交前分配并保留的请求身份；生成 ID 不等于接受，与 TurnCommit 的 Git OID 分开 |
 | `ModelAttemptKey` | 某 Turn 的模型步骤与尝试序号 |
 | `ModelMessageAddress`、`ToolCallAddress` | 会话内模型消息与有序片段位置 |
 | `PlanKey` | 一批精确调用绑定的所有者 |
@@ -39,13 +40,18 @@ provider Tool Call ID 属于 provider 协议材料，不参与会话绑定或执
 | 组件 | 责任与接口边界 |
 | --- | --- |
 | `lattice-conversation` | 有序消息、ToolCall typestate、结果关闭、语义与回放摘要、尝试诊断及 usage；不持有存储、运行时、HTTP 客户端或身份生成器 |
-| `lattice-session` | 会话状态、分支图、TurnCommit、PendingTurn、ResultDraft 与纯协调决策；不读取 InvocationStore |
-| `lattice-api::SessionApi` | 创建、打开、列表、状态、日志、分支、checkout、reset 和 diff 的公开入口 |
-| `lattice-api::TurnCoordinator` | 全 Turn 锁、配置冻结、模型循环与重试、调用绑定与执行、跨库事实投影、结果关闭和最终发布 |
+| `lattice-session` | 会话状态、分支图、TurnCommit、PendingTurn、ResultDraft、固定读取视图与纯协调决策；不读取 InvocationStore |
+| `lattice-api::SessionApi` | 会话创建、打开、历史和引用操作的领域入口，向本地后台提供固定状态与正文读取 |
+| `lattice-api::local` | 具体 `LocalClient` 与后台 `serve`；接管任务、接受与完成回执、查询、订阅、取消、恢复及会话写操作 |
+| `lattice-api::TurnCoordinator` | 唯一 Turn saga 所有者；全 Turn 锁、冻结执行输入、模型循环与重试、调用绑定与执行、跨库事实投影、结果关闭和最终发布 |
 | `lattice-agent::ModelStepDriver` | 消费冻结请求和对话历史，驱动一次 provider 请求并返回类型化尝试结果 |
-| `lattice-llm` | provider wire 协议、流事件适配及对话投影 |
+| `lattice-llm` | 显式内存连接配置、provider wire 协议、流事件适配及对话投影 |
 
-`stream_turn` 是公开实时执行核心，`run_turn` 通过收集它的事件得到结果。事件投递是观察通道，观察者背压或释放不能取代执行排空、持久关闭及错误处理。持久化未完成时不以流结束代替 TurnCommit。
+CLI/TUI 经 LocalClient 操作会话。后台拥有连接之外的准备、接受、执行任务与取消控制，终端关闭或观察者释放不销毁这些任务。后台不另建 Turn 状态机，持久执行仍经 TurnCoordinator；实例作用域与本地访问边界见[存储合同](storage.md#本地后台与访问边界)。
+
+执行核心分别提供接受结果、完成结果与观察事件。`stream_turn`、`run_turn` 复用同一核心；收集事件不能替代独立完成结果，流结束也不证明持久关闭。模型观察在第一处可能丢弃前编号，回调不得阻塞执行；后续有界通道的丢失按[观察与重连](#观察与重连)处理。
+
+正常 stop 原子关闭新准入，等待已接管的准备、接受、执行及必要持久收尾，包括异常任务的排空；等待期间查询与取消仍可用。排空不要求客户端读完观察流，不因慢客户端中止执行。收尾未确认时保留实际 pending 或已发布候选，报告恢复需求或确认未知；停止回执不能抹去未确认的操作。
 
 显式 `RewindCoordinator` 与 TurnCoordinator 分别维护自己的流程，PendingTurn 不充当 Rewind 的崩溃日志。
 
@@ -91,19 +97,52 @@ Session 存储构造器须生成存在且可读取的 bare repository 配置，�
 
 ### 操作锁与发布锁
 
-`SessionExecutionLock` 独占持有覆盖整个 live Turn、重开协调及会话状态或引用变更。status 为一致读取取得非阻塞共享锁，独占者存在时返回 `SessionBusy`。open、list、log、diff 等快照读取可固定已提交引用；strict open 在存储锁内验证跨引用关系后释放，不把繁忙状态报成损坏。
+`SessionExecutionLock` 独占持有覆盖整个 live Turn、重开协调及会话状态或引用变更。新执行或恢复非阻塞取锁；同 Session 忙时拒绝不同的新请求，不排队。同一请求共享正在进行的接受结果，身份冲突按[请求身份与确认](#请求身份与确认)处理。
 
-锁的获取顺序、重入与释放遵循[存储锁机制](storage.md#锁与并发语义)。不同 Session 的执行锁彼此独立，共享项目上的工作区操作按[工作区操作锁](workspace.md#操作锁)协调；协调层分别遵守两种操作锁的持有期限。
+公开 status、Turn 查询与订阅在短仓库锁下固定 state、head、active-turn 和所请求永久 pin，释放锁后读取不可变对象并核验关系；不取得全 Turn 执行锁，不等待 live Turn 排空。open、list、log、diff 保留各自快照语义，strict-open 仍在仓库锁内完成其跨引用完整性验证，不因忙时读取而降级。
+
+锁的获取顺序、重入与释放遵循[存储锁机制](storage.md#锁与并发语义)。不同 Session 的执行锁彼此独立，模型执行可重叠；共享项目的工作区操作按[工作区操作锁](workspace.md#操作锁)协调。后台准入临界区只管理接管权，不跨 provider、持久化或整段 Turn 持有。
+
+### 观察与重连
+
+查询与订阅只读取已核验事实，不补写确认屏障、不调用恢复、不请求模型或分发 Tool。已提交历史从固定 head 读取并保留 merge 侧消息；正文按同 Session 的固定 TurnCommit 或 pending journal OID 分页重载。pending 正文来自已验证快照的用户消息与累积 `post_user_transcript`，不从实时 delta 拼造持久正文，也不公开冻结配置。
+
+订阅先登记观察通道，再固定状态视图。事件游标包含后台 epoch 与序号，序号在首次可能丢失之前分配。序号不连续、队列溢出、末尾丢失或 epoch 变化时报告 `Gap`，重新固定视图并重载正文；新视图替换临时增量，不重复追加，不承诺逐 token 重放。慢观察者、断连及 idle timeout 只影响观察，不阻止执行与持久收尾。
+
+单页和 IPC 帧有界，UTF-8 分页不得截坏字符或以传输限制拒绝原本合法的整 Turn 记录。当前底层每页仍读取或解析单个 Turn/pending blob，内存成本为 O(single Turn blob)，多页存在重复解析；有界 wire 不构成固定内存或流式 Git 读取保证。接口类型见[固定视图](../../crates/lattice-session/src/git_graph/view.rs)与[本地公开结果](../../crates/lattice-api/src/local/types.rs)。
 
 ## Turn 的接受与模型步骤
 
 ### 请求接受
 
-协调层持有 SessionExecutionLock 后，核对项目绑定，严格打开项目存储，验证用户输入和对象大小，并冻结当前 Agent、profile、策略、模型、system prompt、启用工具目录及执行限制。
+协调层持有 SessionExecutionLock 后，核对项目绑定与请求身份，严格打开项目存储。仅在需要接受新请求时验证用户输入和对象大小，固定提交端提供的当前 Agent、profile、策略、模型、system prompt、启用工具目录及执行限制。
 
-`TurnStarted` 持久发布用户消息、TurnId、父对话 tip、配置快照与目录摘要，是请求接受边界。之前的失败不建立持久 Turn，也不发送 provider 请求；发布后发生的失败、取消或崩溃必须关闭原 Turn，不能删除已接受请求再当作未发生。
+`TurnStarted` 持久发布用户消息、TurnId、父对话 tip、配置快照与目录摘要，是请求接受边界。发布前拒绝不建立已接受 Turn，不发送 provider 请求。引用已可见但屏障未确认时返回确认未知，保留原请求身份并核验实际发布事实；确认持久后发生的失败、取消或崩溃必须关闭原 Turn，不能删除已接受请求再当作未发生。
 
-冻结配置不保存凭据。目录快照包含有序工具名、Descriptor 身份、描述、规范输入 schema 与运行时构建身份，不保存 provider wire 投影。用户输入上限 2 MiB，目录规范快照上限 1 MiB，均在发布前核验。
+目录快照包含有序工具名、Descriptor 身份、描述、规范输入 schema 与运行时构建身份，不保存 provider wire 投影。用户输入上限 2 MiB，目录规范快照上限 1 MiB，均在发布前核验。
+
+### 请求身份与确认
+
+客户端在首次提交前生成并保留规范 `(SessionId, TurnId)`。相同身份、用户输入与项目绑定找回原 Turn；相同身份而输入或绑定不同返回 Conflict；新 TurnId 即使文本相同也是独立请求。接受时原子核验 active-turn 与永久 pin，checkout/reset 不使旧 TurnId 可再次执行。身份复用现有 PendingTurn、TurnCommit 与永久 pin，不另建请求账本或持久双写。
+
+接受和完成通过独立回执确认，不依赖尽力投递的 TurnStarted/TurnCommitted 事件。同一后台中，执行所有者退场后仍保留其完成确认或错误；新的订阅者不能把可读 pin 当成成功回执。恢复在全 Turn 锁下核验旧 Turn 后即确定诊断归属，不以是否成功关闭或新请求自报的身份决定；旧 Turn 仍 pending 或 pin 已可见时，新只读订阅均返回本后台已知的恢复错误。未经核验的请求冲突不覆盖原 Turn 的确认或诊断。后台重启丢失这份内存确认时，可读取原结果，但完成确认仍为未知。
+
+显式重发同一请求在执行所有权下核验原输入与绑定，并对原候选完成必要确认屏障。pending 找回只确认原接受，不推进模型或结果关闭；已提交 Turn 找回核验精确最终候选。重试沿用原候选、时间和冻结配置，不能用新配置覆盖已接受请求。无法确认时报告错误与未知状态，不分配替代 TurnId。此保证只约束请求接受与模型循环，不承诺 Tool exactly-once。
+
+| 公开操作 | 效果与前提 |
+| --- | --- |
+| `query`、`subscribe`、历史与正文读取 | 只读固定事实；无需当前 profile/provider 凭据，不确认发布屏障或恢复 |
+| `submit`、`lookup_or_recover` | 同请求找回并确认；存在其他旧 pending 且取得独占权时只关闭旧 Turn；仅 `NeedsConfiguration` 后才准备新执行配置 |
+| `recover` | 独立取得执行所有权，严格打开相关库并 closure-only；不依赖当前 profile、provider 凭据或 Component 组成 |
+| `cancel` | 按 Session/Turn 定位当前所有者并接管取消意图；回执与持久 Cancelled 分开 |
+
+`lookup_or_recover` 属于可能写入的提交路径，不能用作重连的只读接口。公开类型与方法见[本地 API](../../crates/lattice-api/src/local/client.rs)，CLI 配方见[验证操作指南](../development/validation-guide.md#后台与重连操作)。
+
+### 执行配置冻结
+
+提交端按既有配置来源、优先级和工作区 `.env` 信任边界解析配置，在接受前传入已解析执行策略、模型、endpoint、凭据及实际启用的 HTTP/TLS 材料。后台按 Turn 使用这份显式输入，不通过切换共享环境、cwd 或稍后重读凭据路径改变配置。工作区 dotenv 的拒绝模式仍由 [CLI 环境边界](../../crates/lattice-cli/AGENTS.md#环境与输出边界)维护。
+
+持久快照保存非秘密的执行事实；凭据与 TLS 材料仅在内存中传递和使用，不进入持久记录、公开 DTO、Debug、错误回显或日志。provider 与 Tool Host 使用同一提交端冻结的 TLS 根材料，各 Turn 独立构造信任配置；坏材料在接受前拒绝，空根集合不回退到后台平台根。Tool 网络仍执行 [LANCET 的逐跳授权与地址固定](lancet.md#网络获取)，不能由冻结信任材料绕过。
 
 ### 模型请求与执行预算
 
@@ -245,7 +284,9 @@ flowchart LR
 | StepClosed 已决定结束 | 使用所记录的 outcome 进入 TurnClosing |
 | TurnClosing 或精确最终候选已存在 | 核验候选及前提，幂等完成最终会话事务 |
 
-重开获得新的有限发布预算。存储仍不可写或预算耗尽时继续保留 pending，返回 `RecoveryRequired`。存在 active-turn 时，新 prompt 命令只协调并报告旧 Turn，不同时接受新 prompt；恢复后由用户重新发送。不提供强制丢弃已接受 Turn 的入口。
+后台启动与只读重连不自动恢复。崩溃后的 pending 由独占执行所有权下的显式 `recover` 关闭；新 prompt 路径若发现旧 pending，也只协调并报告旧 Turn，本次新 prompt 未接受，恢复后由用户另行发送。重开获得新的有限发布预算；存储仍不可写或预算耗尽时保留 pending，返回 `RecoveryRequired`，不提供强制丢弃已接受 Turn 的入口。
+
+取消回执表示后台已接管指定 Session/Turn 的取消意图，重复请求幂等；没有 live 所有者或回执丢失时明确报告未接管或确认未知，不顺带恢复。取消意图仅在内存中，后台崩溃后仍依持久日志关闭，不能把回执当作 durable Cancelled。
 
 取消按每个调用的持久事实分类，已有终态不改写；未分发、确认取消和执行不确定分别处理。Turn 以取消为主因时关闭为 Cancelled，已关闭的消息和调用事实仍保留。超时、取消或 observer 断开均不能推定文件效果未发生。
 

@@ -2,6 +2,12 @@
 
 本页按主题提供文档入口，不定义独立规则。文档分类、效力与迁移方式由治理合同规定。
 
+## 工作分支修订状态
+
+本地后台与重连的工作分支修订待人类批准。下列 `pending` 表示正在审阅的修订，生效前仍适用[原有效版本](https://github.com/Skyline10124/lattice/tree/0e20dc090dce79330e06276da8255e9f4fb8cc39)中的同路径文档；不撤销其已批准约束。LANCET 仅冻结 TLS 根引用待批准，平台、工作区和 Cell 等未涉及合同保持原状态。
+
+相关局部入口的职责与指针同步待批准：[CLI](../crates/lattice-cli/AGENTS.md)、[TUI](../crates/lattice-tui/AGENTS.md)、[API](../crates/lattice-api/AGENTS.md)、[Agent](../crates/lattice-agent/AGENTS.md)、[runtime](../crates/lancet-runtime/AGENTS.md)、[harness](../crates/lattice-system-harness/AGENTS.md)。README 与操作指南描述工作分支用法，维护状态不构成规范批准或产品验收。
+
 ## 项目入口
 
 - [项目介绍与快速开始](../README.md)：安装、配置与运行。
@@ -19,18 +25,18 @@
 ## 架构
 
 - [宿主平台](architecture/platform.md)：Linux 宿主支持范围与 WASM guest 边界。
-- [私有存储与持久化](architecture/storage.md)：状态寻址、三库归属、Git 内核、创建与打开、通用锁序、引用发布及持久性边界。
-- [会话与 Turn](architecture/session.md)：会话历史、对话模型、请求接受、持久阶段、结果关闭与重开协调。
+- [私有存储与持久化](architecture/storage.md)（修订 pending）：状态寻址、三库归属、后台单例与本地身份、Git 内核、锁序、引用发布及持久性边界。
+- [会话与 Turn](architecture/session.md)（修订 pending）：后台任务所有权、请求身份与确认、固定读取与重连、持久阶段及 closure-only 恢复。
 - [本地工作区与变更历史](architecture/workspace.md)：观察、文件变更、私有历史、Turn checkpoint 与显式 Rewind。
-- [LANCET 工具执行](architecture/lancet.md)：工具组成、Host 权限、调用执行、证据与操作员读取。
+- [LANCET 工具执行](architecture/lancet.md)（仅冻结 TLS 根引用待批准）：工具组成、Host 权限、调用执行、证据与操作员读取。
 - [Cell 权限与证据](architecture/cell.md)：Cell 模型、能力准入、Host 授权、结果计量与版本化证据。
-- [TUI 交互与视觉](architecture/tui.md)：产品接线、键位、布局、停靠区、工具显示与配色。
+- [TUI 交互与视觉](architecture/tui.md)（修订 pending）：历史重载、连接与执行状态、退出与取消、键位、布局、工具显示与配色。
 
 ## 开发与验证
 
 - [工具开发与操作](development/tool-development.md)：manifest/生成链、profile、语义编辑、audit/status/doctor。
-- [测试工程](development/testing.md)：测试分层、场景隔离、被测产物、执行资源与失败证据要求。
-- [验证操作指南](development/validation-guide.md)：安装、构建、局部验证、显式 feature、本地 CI、rollout 和证据查看。
+- [测试工程](development/testing.md)（修订 pending）：测试分层、自有产品后台与前后进程组清理、被测产物、执行资源与失败证据要求。
+- [验证操作指南](development/validation-guide.md)：安装、构建、后台命令与重连用法、局部验证、显式 feature、本地 CI、rollout 和证据查看。
 - [InvocationStore 诊断指南](development/invocation-store-diagnostics.md)：diagnostic-only 资格化工具、输入与版本、manifest 生成参数及历史证据保留。
 
 ## 参考资料

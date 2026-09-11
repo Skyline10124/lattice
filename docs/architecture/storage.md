@@ -1,11 +1,12 @@
 ---
-status: active
+status: pending
 ---
 
 # 私有存储与持久化
 
 > 类型：架构合同
 > 上位依据：[项目宪章](../governance/charter.md)、[宿主平台](platform.md)
+> 修订状态：本工作分支的后台作用域与本地访问边界修订待人类批准；生效前[原有效版本](https://github.com/Skyline10124/lattice/blob/0e20dc090dce79330e06276da8255e9f4fb8cc39/docs/architecture/storage.md)继续适用。
 
 ## 目的与范围
 
@@ -28,6 +29,18 @@ status: active
 | `locks/projects/<ProjectStoreKey>/workspace.lock` | 项目工作区操作锁 |
 
 各仓库位于 Local Workspace 外部，分别维护提交链。删除工作区或移动会话分支不级联删除其他领域的私有状态。配置私有状态位置时应核对其与工作区的实际关系，XDG 路径解析本身不提供包含关系隔离。
+
+### 本地后台与访问边界
+
+`STATE_ROOT` 指上述 XDG 状态根，同一有效用户、同一规范状态根只有一个本地执行后台。首次使用可自动启动当前 `lattice` 的后台主体，使用独立进程组并脱离终端 stdio；最后一个客户端断开后继续运行。正常停止与任务排空由[会话所有权](session.md#组件与接口)维护。
+
+后台终身持有 `<state-root>/lattice/local/owner.lock` 的非阻塞独占 flock，锁持有者才可绑定或清理 `local/api.sock`。仅处理核验为本用户、身份未变化且已失效的 socket；不按 PID、mtime、连接数或超时抢占所有权，不杀掉身份或协议不兼容的已有后台。内核在持有者退出后释放 flock，锁文件存在本身不表示后台存活。
+
+本地目录与 socket 核验类型、所有者及私有权限，通信双方均核对 Linux peer UID。IPC 只提供本机 Unix socket，不开放远程入口；版本化帧、长度检查和有界队列约束请求与观察，协议不兼容或身份检查失败即拒绝。控制资源不保存业务事实，epoch 只标识观察连续性。实现入口为[本地 IPC](../../crates/lattice-api/src/local/ipc.rs)。
+
+后台持有领域存储句柄和任务控制，领域 crate 继续维护原有三库的身份、strict-open、对象关系与发布规则。Session 请求身份的持久归属仍是 `sessions.git` 的 PendingTurn 与永久 pin，详见[请求身份与确认](session.md#请求身份与确认)；不增加第二份请求状态库。启动后台不创建或修复缺失的领域库，不恢复 pending。
+
+单例锁只排除第二个后台，不串行化各 Session 的 Turn；短准入管理与各库锁分开。常驻持库不改变[既有锁序与持有期限](#锁与并发语义)。
 
 ### ProjectStoreKey
 

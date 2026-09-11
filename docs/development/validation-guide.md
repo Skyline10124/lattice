@@ -39,6 +39,63 @@ cargo xtask tool-build --verify
 
 不要用不加区分的 `cargo build --workspace` 代替宿主构建，它会尝试 host-link guest cdylib。也不要为使宿主链接通过而更改 guest 的 crate-type。Tool 生成、构建与完整性规则见[工具开发指南](tool-development.md#开发来源与生成)。
 
+## 后台与重连操作
+
+以下是当前工作分支的公开 CLI 用法；相关[合同修订待批准](../README.md#工作分支修订状态)，操作示例不代表产品验收。提交新请求前在目标项目根准备有效 profile 与凭据；找回请求时保持原工作区、用户及 `XDG_STATE_HOME`。Session 与 TUI 命令会按需自启后台；`daemon status`、`daemon stop` 只联系已有后台，不自启。纯查询可创建连接所需运行资源，但不创建领域库、补确认屏障或恢复 Turn。
+
+### 提交与找回
+
+先创建会话，记下输出的 Session ID：
+
+```sh
+lattice session new --agent reader --project-branch main
+```
+
+以下变量中的 Session ID 须替换为上一步结果。首次提交前生成一次 TurnId，另行保存该 ID、Session ID、原输入和工作区。确认未知后重试不要重新执行生成 ID 的一行。
+
+```sh
+SESSION_ID="替换为已创建的会话 ID"
+read -r TURN_ID < /proc/sys/kernel/random/uuid
+PROMPT="概括这个项目的用途，并指出主要入口文件和目录。"
+printf 'session=%s turn=%s\n' "$SESSION_ID" "$TURN_ID"
+lattice --json session send "$SESSION_ID" "$PROMPT" --turn-id "$TURN_ID"
+```
+
+`lattice run "$SESSION_ID" "$PROMPT" --turn-id "$TURN_ID"` 是同一发送入口。未提供 `--turn-id` 时，前端生成 ID 并在发请求前输出 `submission` 记录；该记录只说明客户端身份，接受须看独立回执。不同请求忙时返回 Busy，保留原任务；不排队。
+
+重连先查询状态与固定正文，按需继续观察：
+
+```sh
+lattice --json session turn "$SESSION_ID" "$TURN_ID"
+lattice --json session turn "$SESSION_ID" "$TURN_ID" --follow
+lattice tui "$SESSION_ID"
+```
+
+这些操作不要求当前 profile/provider 凭据。`--follow` 的 Gap 表示未取得连续增量，后续 snapshot/transcript 是替换视图。JSONL 中 `transcript.object_id` 可以是 TurnCommit 或 pending journal OID，`state` 区分 pending 与已关闭结果；不能把所有正文对象解释成已提交 Turn。
+
+后台重启后，结果可见与完成确认分别报告。需要显式确认原请求时，在同一工作区以原 SessionId、TurnId 和完全相同的输入重发上述 `session send`。找回已有请求不加载新配置、不重跑模型或 Tool，可补必要持久确认屏障；pending 的同请求找回不负责关闭旧日志，关闭使用独立 `recover`。输入或项目绑定不符返回 Conflict。
+
+### 取消、恢复与停止
+
+```sh
+lattice --json session cancel "$SESSION_ID" "$TURN_ID"
+lattice --json session recover "$SESSION_ID"
+lattice --json daemon status
+lattice --json daemon stop
+```
+
+取消输出 `owned: true` 表示后台已接管取消意图，`owned: false` 表示无对应 live 所有者；二者都不能代替持久 Cancelled。回执未知时按原 ID 查询或再次明确取消。CLI 的 Ctrl+C 请求取消，再次 Ctrl+C 结束观察；TUI 的 Esc/Ctrl+C 请求取消，Ctrl+D、`/quit` 只退出。已经发出的取消在退出前等待确认，未确认会提示未知。
+
+`recover` 需要会话执行所有权，忙时拒绝；它不依赖当前 profile/provider，只按持久事实关闭旧 Turn。新 prompt 若先遇到旧 pending，也只报告恢复的旧 Turn，本次输入未接受。持久写入失败时保留实际 pending 或已可见的最终 pin，不删除状态；本后台按已核验的旧 Turn 保存恢复诊断，断连后用其原 ID 执行只读 `session turn --follow` 仍可取得这份错误。
+
+stop 先关闭新准入，再等已接管工作及必要收尾。`unconfirmed_operations` 是当前后台进程记录的未确认操作计数，不是持久 pending 数；非零时命令返回失败并需查询相关 Session。stop 连接丢失不证明已停止，重新用 status 核验。最后一个前端退出不会自动 stop。
+
+执行命令的 `0` 表示取得对应成功结果，`1` 包含执行、观察、持久确认或正文读取失败，`2` 表示使用/前提错误；以结构化错误和固定结果分别判断。纯 Turn 查询的 `0` 只表示查询及正文读取成功。即使已收到完成回执，正文读取失败仍退出 `1`，保留可见终态，待重连读取；不能据退出码把已完成 Turn 改成失败或重新执行。
+
+需要在隔离场景显式运行后台时，使用 `lattice daemon serve --state-root <绝对状态根>`，该参数指 XDG 状态根，产品在其下使用 `lattice/`。前台运行 serve 不加载工作区 dotenv；测试中的独立进程组和清理归属按[测试合同](testing.md#超时与进程生命周期)处理，不在开发者真实状态上注入崩溃或清理。
+
+当前 Local IPC 使用 `LTLOCAL2`，客户端与后台应来自相符构建；协议或身份不兼容会拒绝连接，不自动杀后台或迁移旧状态。请求身份与正文读取复用原 Pending v3、三库布局、refs、永久 pin、committed schema 和摘要；既有记录仍按原完整性规则读取，不需重建。Rust 直接调用者的接口变化以源码为准，不提供读取后台环境的兼容回退。
+
 ## 日常验证
 
 先选择直接受影响的 crate 或目标：
@@ -48,10 +105,12 @@ cargo test -p lancet-authority
 cargo test -p lattice-api
 cargo test -p lattice-system-harness --test direct_local_turn
 cargo test -p lattice-system-harness --test direct_operator
+cargo test -p lattice-system-harness --test direct_background -- --list
+cargo test -p lattice-system-harness --test direct_background
 cargo test -p lattice-system-harness --test pty_tui_smoke
 ```
 
-后三项需要上节的被测二进制。只迭代 harness 时可运行 `cargo test -p lattice-system-harness`；确需完整默认套件时运行 `cargo test --workspace`。使用过滤字符串时检查实际匹配的测试和通过数，零测试不算完成验证；需要完整名称时使用 `-- --exact`。
+上述 harness 目标需要当前被测二进制，并由场景持有独立后台与清理职责。只迭代 harness 时可运行 `cargo test -p lattice-system-harness`；确需完整默认套件时运行 `cargo test --workspace`。使用过滤字符串时检查实际匹配的测试和通过数，零测试不算完成验证；需要完整名称时使用 `-- --exact`。
 
 crate 共享测试辅助接口可能要求 `test-utils`，例如：
 
