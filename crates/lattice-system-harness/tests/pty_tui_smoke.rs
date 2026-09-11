@@ -125,3 +125,172 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
         );
     }
 }
+
+mod support;
+
+fn finish_pty(
+    evidence: lattice_system_harness::ScenarioEvidence,
+    result: std::thread::Result<()>,
+) -> Result<(), lattice_system_harness::FailureReport> {
+    let primary = result.err().map(|error| {
+        error
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| error.downcast_ref::<&str>().map(|text| text.to_string()))
+            .unwrap_or_else(|| "PTY scenario panicked with a non-text payload".into())
+    });
+    evidence.finish_report(primary)
+}
+
+#[test]
+fn pty_failure_report_preserves_redacted_panic_reason() {
+    for (index, payload) in [
+        Box::new("specific PTY wait failure FAKE_SECRET") as Box<dyn std::any::Any + Send>,
+        Box::new(String::from("specific PTY result failure FAKE_SECRET")),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let world = ScenarioWorld::new("pty-panic-report").unwrap();
+        let evidence = lattice_system_harness::ScenarioEvidence::new(
+            &world,
+            &format!("pty-panic-{index}"),
+            ["FAKE_SECRET".into()],
+        )
+        .unwrap();
+        let report = finish_pty(evidence, Err(payload)).unwrap_err();
+        let rendered = report.to_string();
+        assert!(rendered.contains("specific PTY"), "{rendered}");
+        assert!(!rendered.contains("FAKE_SECRET"), "{rendered}");
+        assert!(rendered.contains("[REDACTED]"), "{rendered}");
+        println!("{rendered}");
+    }
+}
+#[test]
+fn pty_detach_reloads_pending_and_result_without_cancelling() {
+    use lattice_system_harness::{SessionSendDriver, SseScript};
+    let driver = driver();
+    let (world, mut spec) =
+        support::direct_world("pty-background-reconnect", "tui-smoke", "[]", "");
+    spec.step_timeout_secs = 120;
+    spec.total_timeout_secs = Some(300);
+    let budget = spec.start_budget();
+    let mut evidence = support::evidence(&world, &spec);
+    let (server, gate) = support::wire_gated_fake_llm(
+        &world,
+        "tui-smoke",
+        SseScript::plain("background reconnect answer"),
+    );
+    let session = SessionSendDriver::new(&driver, &world, &spec, "tui-smoke", "main").unwrap();
+    let mut tui = PtyTuiDriver::reconnect(&driver, &world, session.session_id()).unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tui.wait_for_ready(budget.cap_timeout(spec.step_timeout()))
+            .unwrap();
+        tui.send_line("persistent pending input").unwrap();
+        gate.wait_until_stalled(1, budget.cap_timeout(spec.step_timeout()))
+            .unwrap();
+        tui.wait_for(budget.cap_timeout(spec.step_timeout()), |text| {
+            text.contains("已确认接受")
+        })
+        .unwrap();
+        let owners = world.daemon_pids().unwrap();
+        assert_eq!(owners.len(), 1);
+        assert_ne!(tui.pgid(), Some(owners[0]));
+        tui.send_keys(b"\x04").unwrap();
+        tui.wait_for_exit(budget.cap_timeout(Duration::from_secs(15)))
+            .unwrap();
+        assert!(processes_in_pgid(tui.pgid().unwrap()).unwrap().is_empty());
+        assert_eq!(world.daemon_pids().unwrap(), owners);
+        evidence.record_pty(tui.output());
+        let mut reconnected =
+            PtyTuiDriver::reconnect(&driver, &world, session.session_id()).unwrap();
+        let result = (|| {
+            reconnected.wait_for_ready(budget.cap_timeout(spec.step_timeout()))?;
+            reconnected.wait_for(budget.cap_timeout(spec.step_timeout()), |text| {
+                text.contains("persistent pending input")
+            })?;
+            gate.release(budget.cap_timeout(spec.step_timeout()))
+                .unwrap();
+            reconnected.wait_for(budget.cap_timeout(spec.step_timeout()), |text| {
+                text.contains("background reconnect answer")
+            })?;
+            reconnected.send_line("/quit")?;
+            reconnected.wait_for_exit(budget.cap_timeout(Duration::from_secs(15)))
+        })();
+        evidence.record_pty(reconnected.output());
+        result.unwrap();
+        world.stop_daemon().unwrap();
+        let mut reopened = PtyTuiDriver::reconnect(&driver, &world, session.session_id()).unwrap();
+        let reopened_result = (|| {
+            reopened.wait_for_ready(budget.cap_timeout(spec.step_timeout()))?;
+            reopened.wait_for(budget.cap_timeout(spec.step_timeout()), |text| {
+                text.contains("background reconnect answer")
+                    && text.contains("confirmation unknown")
+                    && !text.contains("✓ committed")
+            })?;
+            reopened.send_line("/quit")?;
+            reopened.wait_for_exit(budget.cap_timeout(Duration::from_secs(15)))
+        })();
+        evidence.record_pty(reopened.output());
+        reopened_result.unwrap();
+        assert_eq!(server.captured_requests().len(), 1);
+    }));
+    evidence.record_pty(tui.output());
+    evidence.record_captures(server.captured_requests());
+    finish_pty(evidence, result).unwrap_or_else(|report| panic!("{report}"));
+}
+
+#[test]
+fn pty_second_ctrl_c_preserves_cancel_acknowledgement() {
+    use lattice_system_harness::{SessionSendDriver, SseScript};
+    let driver = driver();
+    let (world, mut spec) = support::direct_world("pty-background-cancel", "tui-smoke", "[]", "");
+    spec.step_timeout_secs = 120;
+    spec.total_timeout_secs = Some(300);
+    let budget = spec.start_budget();
+    let mut evidence = support::evidence(&world, &spec);
+    let (server, gate) = support::wire_gated_fake_llm(
+        &world,
+        "tui-smoke",
+        SseScript::plain("must not be delivered"),
+    );
+    let session = SessionSendDriver::new(&driver, &world, &spec, "tui-smoke", "main").unwrap();
+    let mut tui = PtyTuiDriver::reconnect(&driver, &world, session.session_id()).unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tui.wait_for_ready(budget.cap_timeout(spec.step_timeout()))
+            .unwrap();
+        tui.send_line("cancel before exit").unwrap();
+        gate.wait_until_stalled(1, budget.cap_timeout(spec.step_timeout()))
+            .unwrap();
+        tui.wait_for(budget.cap_timeout(spec.step_timeout()), |text| {
+            text.contains("已确认接受")
+        })
+        .unwrap();
+        tui.send_keys(b"\x03\x03").unwrap();
+        tui.wait_for_exit(budget.cap_timeout(Duration::from_secs(15)))
+            .unwrap();
+        assert!(processes_in_pgid(tui.pgid().unwrap()).unwrap().is_empty());
+        let deadline = std::time::Instant::now() + budget.cap_timeout(Duration::from_secs(30));
+        loop {
+            let log = session
+                .run_command(&["--json", "session", "log", session.session_id()])
+                .unwrap();
+            evidence.record_command("query cancellation after TUI exit", &log);
+            assert!(log.is_clean_exit(0));
+            let value: serde_json::Value = serde_json::from_slice(&log.stdout).unwrap();
+            if let Some(turn) = value["turns"].as_array().unwrap().first() {
+                assert!(turn["outcome"].get("cancelled").is_some());
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "cancelled Turn did not close"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(server.captured_requests().len(), 1);
+    }));
+    evidence.record_pty(tui.output());
+    evidence.record_captures(server.captured_requests());
+    finish_pty(evidence, result).unwrap_or_else(|report| panic!("{report}"));
+}

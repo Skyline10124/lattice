@@ -7,6 +7,9 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
+use std::sync::Arc;
+
+use crate::daemon::ScenarioDaemon;
 
 use thiserror::Error;
 
@@ -33,12 +36,13 @@ fn os_free_port() -> Result<u16, std::io::Error> {
 
 /// Isolated external world for one harness scenario.
 pub struct ScenarioWorld {
-    root: tempfile::TempDir,
+    root: Option<tempfile::TempDir>,
     home: PathBuf,
     project: PathBuf,
     session_store: PathBuf,
     port: u16,
     allowed_env: Mutex<HashMap<String, String>>,
+    pub(crate) daemon: Arc<ScenarioDaemon>,
 }
 
 #[derive(Debug, Error)]
@@ -89,7 +93,8 @@ impl ScenarioWorld {
         allowed_env.insert("LATTICE_AGENTS_DIR".into(), String::new());
 
         Ok(Self {
-            root,
+            daemon: Arc::new(ScenarioDaemon::new(home.join(".local/state"))),
+            root: Some(root),
             home,
             project,
             session_store,
@@ -99,7 +104,7 @@ impl ScenarioWorld {
     }
 
     pub fn root(&self) -> &Path {
-        self.root.path()
+        self.root.as_ref().expect("scenario root").path()
     }
 
     pub fn home(&self) -> &Path {
@@ -291,6 +296,33 @@ impl ScenarioWorld {
             return Err("scenario HOME resolved to the developer HOME".into());
         }
         Ok(())
+    }
+
+    /// 显式收尾用于场景证据；Drop 仍覆盖断言 panic 的路径。
+    pub fn stop_daemon(&self) -> Result<(), Vec<String>> {
+        self.daemon.cleanup()
+    }
+
+    /// 进程控制仅作用于经过产物、状态根和组首领核对的后台。
+    pub fn daemon_pids(&self) -> std::io::Result<Vec<u32>> {
+        self.daemon.owners()
+    }
+}
+
+impl Drop for ScenarioWorld {
+    fn drop(&mut self) {
+        if let Err(errors) = self.stop_daemon() {
+            // 未确认清理完成时保留自有状态，避免留下失去数据根的后台。
+            if let Some(root) = self.root.take() {
+                let _ = root.keep();
+            }
+            // 清理不能覆盖原断言；展开期间只报告，不二次 panic。
+            if std::thread::panicking() {
+                eprintln!("scenario daemon cleanup: {errors:?}");
+            } else {
+                panic!("scenario daemon cleanup: {errors:?}");
+            }
+        }
     }
 }
 

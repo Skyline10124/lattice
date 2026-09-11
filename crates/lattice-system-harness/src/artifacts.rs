@@ -520,11 +520,13 @@ struct RecordedCommand {
 pub struct ScenarioEvidence {
     failure_dir: PathBuf,
     _claim: ArtifactClaim,
+    daemon: std::sync::Arc<crate::daemon::ScenarioDaemon>,
     project_dir: PathBuf,
     before: WorkspaceSnapshot,
     commands: Vec<RecordedCommand>,
     captures: Vec<crate::fake_llm::CapturedRequest>,
     sentinels: Vec<String>,
+    pty_output: Vec<Vec<u8>>,
 }
 
 impl ScenarioEvidence {
@@ -554,11 +556,13 @@ impl ScenarioEvidence {
         Ok(Self {
             failure_dir,
             _claim: claim,
+            daemon: world.daemon.clone(),
             project_dir: world.project_dir().to_path_buf(),
             before,
             commands: Vec::new(),
             captures: Vec::new(),
             sentinels,
+            pty_output: Vec::new(),
         })
     }
 
@@ -571,6 +575,11 @@ impl ScenarioEvidence {
 
     pub fn record_captures(&mut self, captures: Vec<crate::fake_llm::CapturedRequest>) {
         self.captures = captures;
+    }
+
+    /// PTY 字节单独记录，不伪造管道命令的退出或 EOF 证据。
+    pub fn record_pty(&mut self, bytes: &[u8]) {
+        self.pty_output.push(bytes.to_vec());
     }
 
     pub fn finish_report(self, primary_assertion: Option<String>) -> Result<(), FailureReport> {
@@ -590,6 +599,13 @@ impl ScenarioEvidence {
     ) -> Result<(), FailureReport> {
         let secrets: Vec<&str> = self.sentinels.iter().map(String::as_str).collect();
         let mut report = FailureReport::new(primary_assertion, &secrets);
+        let cleanup = self.daemon.cleanup();
+        let persist = persist || cleanup.is_err();
+        if let Err(errors) = cleanup {
+            for error in errors {
+                report.add_evidence_error("daemon cleanup", error, &secrets);
+            }
+        }
         for command in &self.commands {
             report.add_command_diagnostic(
                 render_command_text(&command.summary, &command.outcome, &secrets),
@@ -602,6 +618,13 @@ impl ScenarioEvidence {
         if let Err(error) = std::fs::create_dir_all(&self.failure_dir) {
             report.add_evidence_error("create artifact root", error, &secrets);
             return report.finish();
+        }
+
+        for (index, bytes) in self.pty_output.iter().enumerate() {
+            attempt("write PTY output", std::fs::write(
+                self.failure_dir.join(format!("{index}-pty.txt")),
+                redact(&String::from_utf8_lossy(bytes), &secrets),
+            ), &secrets, &mut report.evidence_errors);
         }
 
         for (index, command) in self.commands.iter().enumerate() {

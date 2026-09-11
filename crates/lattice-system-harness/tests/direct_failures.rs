@@ -17,17 +17,14 @@ use std::time::Duration;
 use lattice_system_harness::{
     AssertError, FAKE_API_KEY, FakeLlmServer, HarnessIntervention, ProcessTermination,
     RunningCommand, SendExitCode, SessionSendDriver, SseScript, TurnEventLine,
-    assert_event_subsequence,
 };
 use serde_json::Value;
 use support::{
-    assert_clean_send, direct_world, driver, evidence, finish_scenario, require, sequence,
+    assert_clean_send, assert_accepted_and_closed, direct_world, driver, evidence, finish_scenario, require, sequence,
     tool_call, wire_fake_llm, wire_gated_fake_llm,
 };
 
-/// Non-2xx startup with retry disabled commits an error turn; exit 1.
-/// Expected terminal sequence: turn_started ... turn_failed -> turn_committing
-/// -> turn_committed(outcome=failed) ; exit 1.
+/// provider 非 2xx 且禁用重试时，接受的 Turn 持久关闭为失败并退出 1。
 #[test]
 fn direct_failure_http_error_no_retry_commits_error() {
     let driver = driver();
@@ -53,16 +50,7 @@ fn direct_failure_http_error_no_retry_commits_error() {
 
     let result: Result<(), AssertError> = (|| {
         assert_clean_send(&outcome)?;
-        assert_event_subsequence(
-            &outcome.parsed,
-            &[
-                "turn_started",
-                "turn_failed",
-                "turn_committing",
-                "turn_committed",
-            ],
-        )
-        .map_err(|e| AssertError::StdoutMissing { expected: e })?;
+        assert_accepted_and_closed(&outcome)?;
         require(
             outcome.events.iter().any(|e| {
                 matches!(
@@ -83,10 +71,8 @@ fn direct_failure_http_error_no_retry_commits_error() {
             "turn_failed must surface",
         )?;
         require(
-            outcome.events.iter().any(
-                |e| matches!(e, TurnEventLine::TurnCommitted { outcome, .. } if outcome == "failed"),
-            ),
-            "turn_committed outcome=failed must surface",
+            outcome.committed_result().is_some_and(|(_, _, result)| result == "failed"),
+            "fixed Turn outcome=failed",
         )?;
         require(
             outcome.exit_code == Some(SendExitCode::Failed),
@@ -136,11 +122,7 @@ fn direct_failure_disconnect_before_output_commits_error() {
 
     let result: Result<(), AssertError> = (|| {
         assert_clean_send(&outcome)?;
-        assert_event_subsequence(
-            &outcome.parsed,
-            &["turn_started", "turn_committing", "turn_committed"],
-        )
-        .map_err(|e| AssertError::StdoutMissing { expected: e })?;
+        assert_accepted_and_closed(&outcome)?;
         require(
             !outcome
                 .events
@@ -149,10 +131,8 @@ fn direct_failure_disconnect_before_output_commits_error() {
             "stream failure must commit an error turn, not emit commit_failed",
         )?;
         require(
-            outcome.events.iter().any(
-                |e| matches!(e, TurnEventLine::TurnCommitted { outcome, .. } if outcome == "interrupted"),
-            ),
-            "turn_committed outcome=interrupted",
+            outcome.committed_result().is_some_and(|(_, _, result)| result == "interrupted"),
+            "fixed Turn outcome=interrupted",
         )?;
         require(
             outcome.exit_code == Some(SendExitCode::Failed),
@@ -231,10 +211,8 @@ fn direct_failure_disconnect_after_partial_token_commits_error() {
             "turn_failed after mid-stream disconnect",
         )?;
         require(
-            outcome.events.iter().any(
-                |e| matches!(e, TurnEventLine::TurnCommitted { outcome, .. } if outcome == "interrupted"),
-            ),
-            "turn_committed outcome=interrupted",
+            outcome.committed_result().is_some_and(|(_, _, result)| result == "interrupted"),
+            "fixed Turn outcome=interrupted",
         )?;
         require(
             outcome.exit_code == Some(SendExitCode::Failed),
@@ -285,10 +263,8 @@ fn direct_failure_malformed_sse_commits_error() {
             "turn_failed on malformed SSE",
         )?;
         require(
-            outcome.events.iter().any(
-                |e| matches!(e, TurnEventLine::TurnCommitted { outcome, .. } if outcome == "interrupted"),
-            ),
-            "turn_committed outcome=interrupted",
+            outcome.committed_result().is_some_and(|(_, _, result)| result == "interrupted"),
+            "fixed Turn outcome=interrupted",
         )?;
         require(
             outcome.exit_code == Some(SendExitCode::Failed),
@@ -366,12 +342,7 @@ fn direct_failure_sigint_while_stalled_commits_cancelled() {
             outcome.malformed_lines.is_empty(),
             "no malformed JSONL on cooperative cancel",
         )?;
-        // turn_started must be present; assert the cancel->commit chain.
-        assert_event_subsequence(
-            &outcome.parsed,
-            &["turn_cancelled", "turn_committing", "turn_committed"],
-        )
-        .map_err(|e| AssertError::StdoutMissing { expected: e })?;
+        assert_accepted_and_closed(&outcome)?;
         require(
             outcome.events.iter().any(|event| {
                 matches!(
@@ -383,11 +354,8 @@ fn direct_failure_sigint_while_stalled_commits_cancelled() {
             "turn_cancelled must carry a cancellation reason on SIGINT",
         )?;
         require(
-            outcome
-                .events
-                .iter()
-                .any(|e| matches!(e, TurnEventLine::TurnCommitted { outcome, .. } if outcome == "cancelled")),
-            "turn_committed outcome=cancelled must surface",
+            outcome.committed_result().is_some_and(|(_, _, result)| result == "cancelled"),
+            "fixed Turn outcome=cancelled",
         )?;
         require(
             outcome.exit_code == Some(SendExitCode::Failed),
@@ -455,16 +423,7 @@ fn direct_failure_profile_deadline_while_stalled_commits_error() {
 
     let result: Result<(), AssertError> = (|| {
         assert_clean_send(&outcome)?;
-        assert_event_subsequence(
-            &outcome.parsed,
-            &[
-                "turn_started",
-                "turn_failed",
-                "turn_committing",
-                "turn_committed",
-            ],
-        )
-        .map_err(|e| AssertError::StdoutMissing { expected: e })?;
+        assert_accepted_and_closed(&outcome)?;
         require(
             outcome
                 .events
@@ -473,10 +432,8 @@ fn direct_failure_profile_deadline_while_stalled_commits_error() {
             "turn_failed on deadline",
         )?;
         require(
-            outcome.events.iter().any(
-                |e| matches!(e, TurnEventLine::TurnCommitted { outcome, .. } if outcome == "interrupted"),
-            ),
-            "turn_committed outcome=interrupted on deadline",
+            outcome.committed_result().is_some_and(|(_, _, result)| result == "interrupted"),
+            "fixed Turn outcome=interrupted on deadline",
         )?;
         require(
             outcome.exit_code == Some(SendExitCode::Failed),
@@ -553,10 +510,8 @@ fn direct_failure_mutation_survives_provider_failure() {
             "turn_failed after the second-round provider failure",
         )?;
         require(
-            outcome.events.iter().any(
-                |e| matches!(e, TurnEventLine::TurnCommitted { outcome, .. } if outcome == "failed"),
-            ),
-            "turn_committed outcome=failed",
+            outcome.committed_result().is_some_and(|(_, _, result)| result == "failed"),
+            "fixed Turn outcome=failed",
         )?;
         require(
             outcome.exit_code == Some(SendExitCode::Failed),
@@ -584,129 +539,47 @@ fn direct_failure_mutation_survives_provider_failure() {
     );
 }
 
-/// Same-session sends are serialized by the full-turn execution lock: turn A
-/// remains gated on the fake LLM while turn B waits before contacting its
-/// provider, then both turns commit after A is released.
+/// 同 Session 忙时拒绝而不排队；请求必须显式重发，且以原 Turn 完成后的 head 为父。
 #[test]
-fn direct_failure_session_lock_serializes_same_session_turns() {
+fn direct_failure_session_lock_rejects_busy_then_accepts_explicit_retry() {
     let driver = driver();
     let (world, spec) = direct_world("direct-failure-stale-parent", "dl-stale", "[]", "");
-
-    // (1) Commit a baseline turn so the session has a durable parent.
     let baseline_server = wire_fake_llm(&world, "dl-stale", SseScript::plain("baseline done"));
     let scenario_evidence = evidence(&world, &spec);
     let send = SessionSendDriver::new(&driver, &world, &spec, "dl-stale", "main").expect("session");
     let baseline = send.send("baseline turn").expect("baseline");
-    let baseline_captures = baseline_server.captured_requests();
-
-    // (2) Stall turn A on a gated fake LLM after prepare/request.
-    let (gated_server, gate) =
-        wire_gated_fake_llm(&world, "dl-stale", SseScript::plain("stale turn tokens"));
+    let (gated_server, gate) = wire_gated_fake_llm(&world, "dl-stale", SseScript::plain("stale turn tokens"));
     let running_a = send.spawn("stalled turn A").expect("spawn A");
-    // Cold start loads five embedded Component Tools after #32; 10s was flaky
-    // when this test ran alone without a warm target/debug cache.
-    gated_server
-        .wait_for_requests(1, running_a.remaining_timeout(Duration::from_secs(60)))
-        .expect("turn A must reach the gated fake LLM");
-    gate.wait_until_stalled(1, running_a.remaining_timeout(Duration::from_secs(2)))
-        .expect("turn A handler must reach the response gate");
-
-    // (3) Retarget world env to a second non-gated fake LLM and start turn B on
-    // the same session. ScenarioWorld::command reads env at spawn time, so
-    // already-running A keeps the gated server while B uses the new one. The
-    // full SessionExecutionLock keeps B from reaching its provider yet.
-    let racer_server = FakeLlmServer::start(SseScript::plain("racing commit")).expect("racer llm");
+    gate.wait_until_stalled(1, running_a.remaining_timeout(Duration::from_secs(30))).unwrap();
+    let racer_server = FakeLlmServer::start(SseScript::plain("racing commit")).unwrap();
     world.set_env("OPENAI_COMPATIBLE_BASE_URL", racer_server.base_url());
-    world.set_env("OPENAI_COMPATIBLE_MODEL", "dl-stale");
     world.set_env("OPENAI_COMPATIBLE_API_KEY", FAKE_API_KEY);
-    let running_b = send.spawn("racing turn B").expect("spawn B");
-    require(
-        racer_server
-            .wait_for_requests(1, running_b.remaining_timeout(Duration::from_millis(200)))
-            .is_err(),
-        "turn B must wait on the session lock before contacting its provider",
-    )
-    .expect("turn B lock assertion");
-
-    // (4) Release A. It commits first; B then acquires the session lock,
-    // snapshots the new head, and commits against that head.
-    gate.release(running_a.remaining_timeout(Duration::from_secs(2)))
-        .expect("turn A left the response gate");
+    let racer = send.send("racing turn B").expect("busy B response before releasing A");
+    let before_retry = racer_server.captured_requests();
+    gate.release(running_a.remaining_timeout(Duration::from_secs(2))).unwrap();
     let stalled = send.wait_spawned(running_a).expect("wait A");
-    let racer = send.wait_spawned(running_b).expect("wait B");
-
-    let log = send
-        .run_command(&["--json", "session", "log", send.session_id()])
-        .expect("session log after serialized sends");
-    let mut captures = baseline_captures;
+    let retried = send.send("racing turn B").expect("explicit retry B");
+    let log = send.run_command(&["--json", "session", "log", send.session_id()]).unwrap();
+    let mut captures = baseline_server.captured_requests();
     captures.extend(gated_server.captured_requests());
     captures.extend(racer_server.captured_requests());
-
-    let result: Result<(), AssertError> = (|| {
-        assert_clean_send(&baseline)?;
-        require(
-            baseline.has_committed_completed(),
-            "baseline turn must commit completed",
-        )?;
-        assert_clean_send(&racer)?;
-        require(
-            racer.has_committed_completed(),
-            format!(
-                "turn B must commit completed after waiting: {:?}",
-                racer.type_sequence()
-            ),
-        )?;
-        assert_clean_send(&stalled)?;
-        require(
-            stalled.has_committed_completed(),
-            format!(
-                "turn A must commit completed before turn B proceeds: {:?}",
-                stalled.type_sequence()
-            ),
-        )?;
-        require(
-            !stalled
-                .events
-                .iter()
-                .any(|e| matches!(e, TurnEventLine::CommitFailed { .. })),
-            "serialized turn A must not report commit_failed",
-        )?;
-        require(
-            !racer
-                .events
-                .iter()
-                .any(|e| matches!(e, TurnEventLine::CommitFailed { .. })),
-            "serialized turn B must not report commit_failed",
-        )?;
-
-        let log_json: Value =
-            serde_json::from_slice(&log.stdout).map_err(|error| AssertError::StdoutMissing {
-                expected: format!("session log --json not JSON: {error}"),
-            })?;
-        let turns = log_json
-            .get("turns")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        require(
-            turns.len() == 3,
-            format!(
-                "durable session log must contain baseline and both serialized turns (3), got {}: {log_json}",
-                turns.len()
-            ),
-        )?;
-        Ok(())
+    let result = (|| {
+        for outcome in [&baseline, &stalled, &retried] {
+            assert_clean_send(outcome)?;
+            assert_accepted_and_closed(outcome)?;
+            require(outcome.has_committed_completed() && outcome.command.is_clean_exit(0), "accepted turn must complete")?;
+        }
+        require(racer.command.is_clean_exit(1) && racer.accepted_turn_id().is_none(), "Busy must reject without acceptance")?;
+        require(racer.events.iter().any(|event| matches!(event, TurnEventLine::Unknown { type_name, raw } if type_name == "error" && raw["kind"] == "busy")), "explicit Busy classification")?;
+        require(before_retry.is_empty() && racer_server.captured_requests().len() == 1, "rejected B must not contact provider or queue")?;
+        let log_json: Value = serde_json::from_slice(&log.stdout).unwrap();
+        let turns = log_json["turns"].as_array().unwrap();
+        require(turns.len() == 3, "only baseline, A and explicit retry may commit")?;
+        let previous = stalled.committed_result().unwrap().1;
+        require(retried.events.iter().any(|event| match event {
+            TurnEventLine::Unknown { type_name, raw } if type_name == "snapshot" => raw["view"]["requested_turn"]["parent_ids"].as_array().is_some_and(|parents| parents == &[Value::String(previous.into())]),
+            _ => false,
+        }), "explicit retry must commit against A, not its stale parent")
     })();
-
-    finish_scenario(
-        scenario_evidence,
-        &[
-            ("baseline turn", &baseline.command),
-            ("racing turn B", &racer.command),
-            ("turn A", &stalled.command),
-            ("session log after serialized sends", &log),
-        ],
-        captures,
-        result,
-    );
+    finish_scenario(scenario_evidence, &[("baseline", &baseline.command), ("Busy B", &racer.command), ("A", &stalled.command), ("explicit B", &retried.command), ("log", &log)], captures, result);
 }

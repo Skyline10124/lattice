@@ -228,6 +228,7 @@ struct ServerState {
     serve_exited: bool,
     active_handlers: usize,
     first_failure: Option<String>,
+    expected_authorization: Option<Vec<u8>>,
 }
 
 impl ServerState {
@@ -287,6 +288,7 @@ impl FakeLlmServer {
                 serve_exited: false,
                 active_handlers: 0,
                 first_failure: None,
+                expected_authorization: None,
             }),
             Condvar::new(),
         ));
@@ -332,6 +334,13 @@ impl FakeLlmServer {
     /// (`OPENAI_COMPATIBLE_BASE_URL`), without a trailing slash.
     pub fn base_url(&self) -> String {
         format!("http://127.0.0.1:{}", self.local_addr().port())
+    }
+
+    /// 仅在首个请求前设置测试凭据；只比较内存字节，不写 capture 或错误正文。
+    pub fn expect_api_key(&self, key: &str) {
+        let mut state = self.state.0.lock().unwrap();
+        assert!(state.requests.is_empty() && state.active_handlers == 0);
+        state.expected_authorization = Some(format!("Bearer {key}").into_bytes());
     }
 
     /// A snapshot of every request captured so far, in arrival order.
@@ -639,7 +648,7 @@ fn parse_decimal_length(bytes: &[u8]) -> Option<usize> {
     })
 }
 
-fn read_http_request(stream: &mut TcpStream) -> Result<String, RequestReadError> {
+fn read_http_request(stream: &mut TcpStream, expected_authorization: Option<&[u8]>) -> Result<String, RequestReadError> {
     let header = read_request_header(stream)?;
     let mut lines = header[..header.len() - 2].split(|byte| *byte == b'\n');
     let request_line = lines
@@ -671,6 +680,7 @@ fn read_http_request(stream: &mut TcpStream) -> Result<String, RequestReadError>
     let mut host: Option<&[u8]> = None;
     let mut content_type: Option<&[u8]> = None;
     let mut content_length: Option<&[u8]> = None;
+    let mut authorization: Option<&[u8]> = None;
     let mut transfer_encoding = false;
     for line in lines {
         if line.is_empty() {
@@ -701,6 +711,10 @@ fn read_http_request(stream: &mut TcpStream) -> Result<String, RequestReadError>
             if content_length.replace(value).is_some() {
                 return Err(reject("400 Bad Request", b"invalid content-length\n"));
             }
+        } else if name.eq_ignore_ascii_case(b"authorization") {
+            if authorization.replace(value).is_some() {
+                return Err(reject("400 Bad Request", b"invalid authorization header\n"));
+            }
         } else if name.eq_ignore_ascii_case(b"transfer-encoding") {
             transfer_encoding = true;
         }
@@ -725,6 +739,10 @@ fn read_http_request(stream: &mut TcpStream) -> Result<String, RequestReadError>
         return Err(reject("413 Content Too Large", b"request body too large\n"));
     }
 
+    if expected_authorization.is_some_and(|expected| authorization != Some(expected)) {
+        return Err(reject("401 Unauthorized", b"unauthorized\n"));
+    }
+
     let mut body = vec![0_u8; body_len];
     if let Err(error) = stream.read_exact(&mut body) {
         return match error.kind() {
@@ -747,7 +765,8 @@ fn handle_request(
 ) -> Result<(), ServeError> {
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
-    let body = match read_http_request(&mut stream) {
+    let expected = shared.0.lock().unwrap().expected_authorization.clone();
+    let body = match read_http_request(&mut stream, expected.as_deref()) {
         Ok(body) => body,
         Err(RequestReadError::Io(error)) => return Err(ServeError::Io(error)),
         Err(RequestReadError::Reject(rejection)) => {
@@ -1231,6 +1250,20 @@ mod tests {
         let mut response = Vec::new();
         stream.read_to_end(&mut response).expect("read response");
         response
+    }
+
+    #[test]
+    fn expected_api_key_rejects_foreign_credentials_without_capturing_them() {
+        let mut server = FakeLlmServer::start(SseScript::plain("ok")).unwrap();
+        server.expect_api_key("expected-fixture-key");
+        for (key, status) in [("foreign-fixture-key", "401"), ("expected-fixture-key", "200")] {
+            let request = format!("POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\nAuthorization: Bearer {key}\r\n\r\n{{}}");
+            let response = exchange_raw(server.local_addr(), request.as_bytes());
+            assert!(response.starts_with(format!("HTTP/1.1 {status}").as_bytes()));
+            assert!(!String::from_utf8_lossy(&response).contains(key));
+        }
+        assert_eq!(server.captured_requests().len(), 1);
+        server.shutdown(Duration::from_secs(2)).unwrap();
     }
 
     #[test]

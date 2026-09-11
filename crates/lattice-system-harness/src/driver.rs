@@ -405,6 +405,7 @@ impl LatticeDriver {
         world: &ScenarioWorld,
         command: &LatticeCommand,
     ) -> Result<RunningCommand, DriverError> {
+        world.daemon.register(&self.binary)?;
         let mut cmd = world.command(&self.binary);
         cmd.args(&command.args);
         Ok(RunningCommand::spawn_with_timeout(cmd, command.timeout)?)
@@ -626,7 +627,7 @@ fn reject_own_process_group(pgid: u32) -> std::io::Result<()> {
     Ok(())
 }
 
-fn signal_process_group(pgid: u32, signal: libc::c_int) -> std::io::Result<()> {
+pub(crate) fn signal_process_group(pgid: u32, signal: libc::c_int) -> std::io::Result<()> {
     reject_own_process_group(pgid)?;
     // SAFETY: `killpg` only delivers `signal` to the process group; it has no
     // memory-safety preconditions and reports failure through `errno`.

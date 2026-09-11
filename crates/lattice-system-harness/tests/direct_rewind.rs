@@ -18,7 +18,7 @@ mod support;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use lattice_system_harness::{AssertError, ScenarioWorld, SendOutcome, SseScript, TurnEventLine};
+use lattice_system_harness::{AssertError, ScenarioWorld, SendOutcome, SseScript};
 use serde_json::Value;
 use support::{
     assert_clean_send, cli, direct_world, driver, evidence, finish_scenario, require, sequence,
@@ -121,12 +121,9 @@ fn ref_snapshot(repo_path: &Path) -> Vec<(String, String)> {
     out
 }
 
-/// The commit id a turn was committed under.
+/// 使用公开固定结果的提交身份，不要求有损观察流必达末尾事件。
 fn committed_id(outcome: &SendOutcome) -> Option<String> {
-    outcome.events.iter().find_map(|event| match event {
-        TurnEventLine::TurnCommitted { commit_id, .. } => Some(commit_id.clone()),
-        _ => None,
-    })
+    outcome.committed_result().map(|(_, id, _)| id.to_owned())
 }
 
 fn local_revision(bytes: &[u8]) -> String {

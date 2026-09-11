@@ -91,6 +91,16 @@ impl PtyTuiDriver {
         agent: &str,
         project_branch: &str,
     ) -> Result<Self, PtyError> {
+        Self::spawn_args(driver, world, &["tui", "--agent", agent, "--project-branch", project_branch])
+    }
+
+    /// 重连只选择已存在 Session，不隐式提交或恢复旧 Turn。
+    pub fn reconnect(driver: &LatticeDriver, world: &ScenarioWorld, session_id: &str) -> Result<Self, PtyError> {
+        Self::spawn_args(driver, world, &["tui", session_id])
+    }
+
+    fn spawn_args(driver: &LatticeDriver, world: &ScenarioWorld, args: &[&str]) -> Result<Self, PtyError> {
+        world.daemon.register(driver.binary_path())?;
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -102,7 +112,7 @@ impl PtyTuiDriver {
             .map_err(|e| PtyError::Pty(e.to_string()))?;
 
         let mut cmd = CommandBuilder::new(driver.binary_path());
-        cmd.args(["tui", "--agent", agent, "--project-branch", project_branch]);
+        cmd.args(args);
         cmd.cwd(world.project_dir());
         cmd.env_clear();
         for (k, v) in world.env_summary() {
@@ -180,6 +190,13 @@ impl PtyTuiDriver {
         self.master_writer
             .write_all(line.as_bytes())
             .and_then(|_| self.master_writer.write_all(b"\r"))?;
+        self.master_writer.flush()?;
+        Ok(())
+    }
+
+    /// 原始按键不自动附加 Enter，供取消与只断开的产品交互使用。
+    pub fn send_keys(&mut self, keys: &[u8]) -> Result<(), PtyError> {
+        self.master_writer.write_all(keys)?;
         self.master_writer.flush()?;
         Ok(())
     }
@@ -349,7 +366,8 @@ impl PtyTuiDriver {
         let start = Instant::now();
         loop {
             match child.try_wait() {
-                Ok(Some(_)) => return Ok(()),
+                Ok(Some(status)) if status.success() => return Ok(()),
+                Ok(Some(status)) => return Err(PtyError::Pty(format!("TUI exit was not clean: {status}"))),
                 Ok(None) => {}
                 Err(e) => return Err(PtyError::Pty(e.to_string())),
             }

@@ -372,14 +372,22 @@ impl std::ops::Deref for SendExecution {
 }
 
 impl SendOutcome {
-    /// True iff a `turn_committed` event with `outcome == "completed"` was
-    /// observed. This is the public success signal regardless of exit code
-    /// (the product also derives exit 0 from exactly this state).
-    pub fn has_committed_completed(&self) -> bool {
-        self.events.iter().any(|e| match e {
-            TurnEventLine::TurnCommitted { outcome, .. } => outcome == "completed",
-            _ => false,
+    /// 最终固定快照可补齐丢失的终态事件，但不被伪装成补播事件。
+    pub fn committed_result(&self) -> Option<(&str, &str, &str)> {
+        committed_result(&self.events)
+    }
+
+    pub fn accepted_turn_id(&self) -> Option<&str> {
+        self.events.iter().find_map(|event| match event {
+            TurnEventLine::Unknown { type_name, raw } if type_name == "acceptance"
+                && raw["result"]["acceptance"] == "accepted" => raw["result"]["turn_id"].as_str(),
+            _ => None,
         })
+    }
+
+    /// 终态事件可能丢失；固定快照与命令结果仍须分别核验。
+    pub fn has_committed_completed(&self) -> bool {
+        self.committed_result().is_some_and(|(_, _, outcome)| outcome == "completed")
     }
 
     /// Concatenated `token_delta` content, in arrival order. Lets a scenario
@@ -403,6 +411,19 @@ impl SendOutcome {
     }
 }
 
+fn committed_result(events: &[TurnEventLine]) -> Option<(&str, &str, &str)> {
+    events.iter().rev().find_map(|event| match event {
+        TurnEventLine::TurnCommitted { session_id, commit_id, outcome } => Some((session_id.as_str(), commit_id.as_str(), outcome.as_str())),
+        TurnEventLine::Unknown { type_name, raw } if type_name == "snapshot" => {
+            let view = &raw["view"];
+            let turn = &view["requested_turn"];
+            if turn["state"] != "committed" { return None; }
+            Some((view["session"]["session_id"].as_str()?, turn["commit_id"].as_str()?, turn["outcome"].as_object()?.keys().next()?.as_str()))
+        }
+        _ => None,
+    })
+}
+
 /// Classify a `session send` exit code into the public contract. A missing
 /// exit code (signal kill) maps to [`SendExitCode::Failed`]: the scenario
 /// treats signal death as a failure, never as success.
@@ -410,20 +431,12 @@ pub fn classify_exit(code: Option<i32>) -> SendExitCode {
     SendExitCode::from_code(code).unwrap_or(SendExitCode::Failed)
 }
 
-/// Derive the expected exit code from the observed event sequence, mirroring
-/// the product's `exit_code_from_state` (`run.rs:128-152`) but using only
-/// public JSONL signals. This is the cross-check that the binary's exit code
-/// agrees with what the stream said.
-///
-/// - `CommitFailed` seen → `Failed` (1).
-/// - Any terminal (`turn_failed` / `turn_cancelled`) seen → `Failed` (1).
-/// - `turn_committed` with `outcome == "completed"` → `Committed` (0).
-/// - `turn_committed` with `outcome == "failed"` or `"cancelled"` → `Failed` (1).
-/// - Stream ended with no terminal/commit signal → `Failed` (1).
+/// 从公开终态或固定快照交叉检查退出码；显式发布错误优先，不能用可见 pin 掩盖失败。
 pub fn derive_send_exit_code(events: &[TurnEventLine]) -> SendExitCode {
     if events
         .iter()
-        .any(|e| matches!(e, TurnEventLine::CommitFailed { .. }))
+        .any(|e| matches!(e, TurnEventLine::CommitFailed { .. })
+            || matches!(e, TurnEventLine::Unknown { type_name, .. } if type_name == "error"))
     {
         return SendExitCode::Failed;
     }
@@ -435,16 +448,11 @@ pub fn derive_send_exit_code(events: &[TurnEventLine]) -> SendExitCode {
     }) {
         return SendExitCode::Failed;
     }
-    for e in events {
-        if let TurnEventLine::TurnCommitted { outcome, .. } = e {
-            return if outcome == "completed" {
-                SendExitCode::Committed
-            } else {
-                SendExitCode::Failed
-            };
-        }
+    if committed_result(events).is_some_and(|(_, _, outcome)| outcome == "completed") {
+        SendExitCode::Committed
+    } else {
+        SendExitCode::Failed
     }
-    SendExitCode::Failed
 }
 
 /// Parse a full `session send` stdout buffer into a [`SendOutcome`]. Blank
@@ -600,6 +608,11 @@ impl<'a> SessionSendDriver<'a> {
         &self.session_id
     }
 
+    /// 辅助启动、查询及屏障等待必须沿用发送驱动从创建会话起计时的同一预算。
+    pub fn budget(&self) -> &ScenarioBudget {
+        &self.budget
+    }
+
     /// Send one prompt and return raw and parsed execution evidence.
     pub fn send(&self, prompt: &str) -> Result<SendExecution, DriverError> {
         send_prompt_with_timeout(
@@ -685,6 +698,17 @@ mod tests {
 
     fn line(json: &str) -> TurnEventLine {
         parse_event_line(json).expect("parsed line")
+    }
+
+    #[test]
+    fn fixed_commit_after_gap_does_not_hide_publication_error() {
+        let snapshot = line(r#"{"type":"snapshot","view":{"session":{"session_id":"s1"},"requested_turn":{"state":"committed","commit_id":"c1","outcome":{"completed":{"finish_reason":"stop"}}}}}"#);
+        let mut events = vec![line(r#"{"type":"gap"}"#), snapshot];
+        assert_eq!(committed_result(&events), Some(("s1", "c1", "completed")));
+        assert_eq!(derive_send_exit_code(&events), SendExitCode::Committed);
+        assert!(!events.iter().any(|event| matches!(event, TurnEventLine::TurnCommitted { .. })));
+        events.push(line(r#"{"type":"error","kind":"store_unavailable"}"#));
+        assert_eq!(derive_send_exit_code(&events), SendExitCode::Failed);
     }
 
     #[test]

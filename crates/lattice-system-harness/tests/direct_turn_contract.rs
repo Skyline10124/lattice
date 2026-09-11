@@ -1,32 +1,9 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Direct-Local completed-Turn contract (issue #46 (Codeberg #24) slice 1):
-//! one vertical external-binary scenario over two turns of one session,
-//! asserting only the public surface — the `session send` JSONL stream, the
-//! captured Chat Completions requests, and `session log/status --json`.
-//!
-//! Observable assertions (separate named blocks below, one shared world):
-//!
-//! - **stream contract** — first event `turn_started`; token/model activity
-//!   before `turn_committing`/`turn_committed`; started/committed session IDs
-//!   match; nonempty commit ID; `completed` status; no failed/cancelled/
-//!   commit-failed events; branch populated on `turn_started`.
-//! - **routed provider/model** — `model_started` carries the routed provider
-//!   (`openai_compatible`) and profile model; the fake LLM receives the
-//!   provider model on the wire. A separate scenario covers default `sonnet`
-//!   → Anthropic routing without contacting `api.anthropic.com`.
-//! - **message assembly / reopen context** — request one is system + current
-//!   user input; request two contains exactly the prior user/assistant pair
-//!   before the new user message.
-//! - **log/status** — JSON reports both commit IDs, count two, HEAD `main`; the
-//!   first turn's log entry is unchanged after the second delta commit; human
-//!   log output renders the committed turn.
-//! - **missing session** — `session send` on an unknown session exits 2 with
-//!   no JSONL Turn events on stdout.
-//!
-//! No full event golden: unknown additive events are allowed between the
-//! required events (RFC #41 (Codeberg #19) decision five).
+//! 通过接受回执、固定结果、公开 log/status 与 provider capture 核验两次 Turn。
+//! 无 Gap 时保留流事件顺序检查；有 Gap 时不要求补播，持久正文和后续模型上下文仍须精确一致。
+//! 缺少凭据在接受前拒绝，缺失 Session 仅返回结构化错误，不产生模型或 Tool 活动。
 
 mod support;
 
@@ -80,86 +57,52 @@ fn message_parts(capture: &CapturedRequest) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
-/// Assertion block: completed-Turn stream contract for one `session send`.
+/// 回执确认接受，固定视图确认身份与结果；Gap 不生成虚构的模型或提交事件。
 fn assert_completed_turn(outcome: &SendOutcome, session_id: &str) -> Result<(), AssertError> {
-    // First event is turn_started; branch is populated.
-    match outcome.events.first() {
-        Some(TurnEventLine::TurnStarted {
-            session_id: started,
-            turn_id: _,
-            branch,
-        }) => {
-            require(
-                started == session_id,
-                format!("turn_started session_id {started} != {session_id}"),
-            )?;
-            require(
-                branch.as_deref() == Some("main"),
-                format!("turn_started branch not populated: {branch:?}"),
-            )?;
-        }
-        other => {
-            return Err(AssertError::StdoutMissing {
-                expected: format!("first event must be turn_started, got: {other:?}"),
-            });
-        }
+    support::assert_accepted_and_closed(outcome)?;
+    let view = outcome
+        .events
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            TurnEventLine::Unknown { type_name, raw } if type_name == "snapshot" => {
+                Some(&raw["view"])
+            }
+            _ => None,
+        })
+        .expect("fixed closure snapshot");
+    require(
+        view["session"]["session_id"] == session_id && view["head"]["branch"]["name"] == "main",
+        "fixed Session identity and attached branch",
+    )?;
+    let (committed_session, commit_id, result) =
+        outcome.committed_result().expect("committed result");
+    require(
+        committed_session == session_id && !commit_id.is_empty() && result == "completed",
+        "completed result identity",
+    )?;
+    require(
+        view["requested_turn"]["provider"] == "openai_compatible"
+            && view["requested_turn"]["model"] == "compat:dl-contract",
+        "frozen routed provider and model",
+    )?;
+    let has_gap = outcome.events.iter().any(
+        |event| matches!(event, TurnEventLine::Unknown { type_name, .. } if type_name == "gap"),
+    );
+    if !has_gap {
+        assert_event_subsequence(
+            outcome,
+            &[
+                "turn_started",
+                "model_started",
+                "token_delta",
+                "model_finished",
+                "turn_committing",
+                "turn_committed",
+            ],
+        )
+        .map_err(|expected| AssertError::StdoutMissing { expected })?;
     }
-
-    // Token/model activity before turn_committing and turn_committed.
-    assert_event_subsequence(
-        outcome,
-        &[
-            "turn_started",
-            "model_started",
-            "token_delta",
-            "model_finished",
-            "turn_committing",
-            "turn_committed",
-        ],
-    )
-    .map_err(|expected| AssertError::StdoutMissing { expected })?;
-
-    // Routed provider/model on model_started.
-    let (provider, model) = outcome
-        .events
-        .iter()
-        .find_map(|event| match event {
-            TurnEventLine::ModelStarted { provider, model } => Some((provider, model)),
-            _ => None,
-        })
-        .expect("subsequence guarantees model_started");
-    require(
-        provider.as_deref() == Some("openai_compatible"),
-        format!("model_started provider not routed: {provider:?}"),
-    )?;
-    require(
-        model == "compat:dl-contract",
-        format!("model_started model mismatch: {model}"),
-    )?;
-
-    // Matching started/committed session IDs, nonempty commit ID, completed.
-    let (committed_session, commit_id, committed_outcome) = outcome
-        .events
-        .iter()
-        .find_map(|event| match event {
-            TurnEventLine::TurnCommitted {
-                session_id,
-                commit_id,
-                outcome,
-            } => Some((session_id, commit_id, outcome)),
-            _ => None,
-        })
-        .expect("subsequence guarantees turn_committed");
-    require(
-        committed_session == session_id
-            && !commit_id.is_empty()
-            && committed_outcome == "completed",
-        format!(
-            "bad turn_committed: session={committed_session} commit={commit_id} outcome={committed_outcome}"
-        ),
-    )?;
-
-    // No failed/cancelled/commit-failed events on success.
     require(
         !outcome.events.iter().any(|event| {
             matches!(
@@ -169,31 +112,22 @@ fn assert_completed_turn(outcome: &SendOutcome, session_id: &str) -> Result<(), 
                     | TurnEventLine::CommitFailed { .. }
             )
         }),
-        format!("failure event on successful turn: {:?}", outcome.events),
+        "no failure event on successful Turn",
     )?;
-
-    // Binary exit code agrees with the stream-derived code.
-    let binary_exit = outcome
-        .exit_code
-        .expect("outcome should have an exit code classification");
-    let derived = derive_send_exit_code(&outcome.events);
     require(
-        binary_exit == SendExitCode::Committed && derived == SendExitCode::Committed,
-        format!("exit code mismatch: binary={binary_exit:?} derived={derived:?}"),
-    )?;
-    Ok(())
+        outcome.exit_code == Some(SendExitCode::Committed)
+            && derive_send_exit_code(&outcome.events) == SendExitCode::Committed,
+        "completion and exit 0 agree",
+    )
 }
 
-/// The commit ID a completed turn reported, for log/status cross-checks.
+/// 公开固定结果身份用于与 log/status 交叉核验。
 fn committed_id(outcome: &SendOutcome) -> String {
     outcome
-        .events
-        .iter()
-        .find_map(|event| match event {
-            TurnEventLine::TurnCommitted { commit_id, .. } => Some(commit_id.clone()),
-            _ => None,
-        })
-        .expect("turn_committed present")
+        .committed_result()
+        .expect("fixed committed result")
+        .1
+        .to_string()
 }
 
 #[test]
@@ -351,11 +285,8 @@ fn direct_turn_completed_reopen_contract() {
             ),
         )?;
         require(
-            missing_outcome.events.is_empty(),
-            format!(
-                "missing session emitted Turn events: {:?}",
-                missing_outcome.events
-            ),
+            matches!(missing_outcome.events.as_slice(), [TurnEventLine::Unknown { type_name, raw }] if type_name == "error" && raw["kind"] == "not_found"),
+            "missing session must emit only a typed lookup error, no Turn activity",
         )?;
         Ok(())
     })();
@@ -376,98 +307,80 @@ fn direct_turn_completed_reopen_contract() {
     );
 }
 
-/// Default alias `sonnet` routes to Anthropic on the public `model_started`
-/// event. The agent loop emits that event before provider I/O, so missing
-/// `ANTHROPIC_API_KEY` still surfaces the routed provider without contacting
-/// `api.anthropic.com`, then fails closed on the credential-class terminal.
+/// 凭据冻结发生在接受前；路由仍由公开 resolve 验证，不为观察事件运行 provider。
 #[test]
-fn direct_turn_sonnet_routed_provider_event() {
+fn direct_turn_sonnet_routes_but_missing_credentials_reject_before_acceptance() {
     let driver = driver();
     let spec = ScenarioSpec::direct_local("direct-turn-sonnet-route");
     let world = ScenarioWorld::new(&spec.name).expect("world");
-    let toml = "schema_version = 1\n\n\
-[agent]\nname = \"dl-sonnet\"\nmodel = \"sonnet\"\n\n\
-[prompt]\nsystem = \"You are a concise test agent.\"\n\n\
-[tools]\nenabled = []\n\n\
-[llm.retry]\nmax_retries = 0\ninitial_delay_ms = 1\nmax_delay_ms = 1\n";
-    world
-        .write_project_file(".lattice/agents/dl-sonnet/agent.toml", toml)
-        .expect("write agent.toml");
-    world.init_git_project().expect("init git project");
-
+    world.write_agent_profile("dl-sonnet", "sonnet").unwrap();
+    world.init_git_project().unwrap();
     let scenario_evidence = evidence(&world, &spec);
-    let send =
-        SessionSendDriver::new(&driver, &world, &spec, "dl-sonnet", "main").expect("session");
-    let outcome = send.send("route sonnet").expect("turn");
-
-    let result: Result<(), AssertError> = (|| {
-        assert_clean_send(&outcome)?;
-        let model_started = outcome.events.iter().find_map(|event| match event {
-            TurnEventLine::ModelStarted { provider, model } => {
-                Some((provider.clone(), model.clone()))
+    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-sonnet", "main").unwrap();
+    let resolved = send.run_command(&["--json", "resolve", "sonnet"]).unwrap();
+    let outcome = send.send("route sonnet").unwrap();
+    let status = send
+        .run_command(&["--json", "session", "status", send.session_id()])
+        .unwrap();
+    let id = outcome
+        .events
+        .iter()
+        .find_map(|event| match event {
+            TurnEventLine::Unknown { type_name, raw } if type_name == "submission" => {
+                raw["turn_id"].as_str()
             }
             _ => None,
-        });
+        })
+        .expect("preallocated request identity");
+    let query = send
+        .run_command(&["--json", "session", "turn", send.session_id(), id])
+        .unwrap();
+    let result = (|| {
+        assert_clean_send(&outcome)?;
+        let routing: Value = serde_json::from_slice(&resolved.stdout).unwrap();
         require(
-            model_started.is_some(),
-            format!(
-                "model_started missing before provider failure: {:?}",
-                outcome.type_sequence()
-            ),
-        )?;
-        let (provider, model) = model_started.expect("checked");
-        require(
-            provider.as_deref() == Some("anthropic"),
-            format!("sonnet must route provider=anthropic, got {provider:?}"),
-        )?;
-        require(
-            model == "sonnet",
-            format!("sonnet model_started model mismatch: {model}"),
-        )?;
-        let credential_terminal = outcome.events.iter().any(|event| match event {
-            TurnEventLine::LlmRequestError { message, .. } => {
-                let lower = message.to_lowercase();
-                lower.contains("api key")
-                    || lower.contains("credential")
-                    || lower.contains("anthropic_api_key")
-            }
-            TurnEventLine::TurnFailed { reason } => {
-                let lower = reason.to_lowercase();
-                lower.contains("api key")
-                    || lower.contains("credential")
-                    || lower.contains("anthropic_api_key")
-            }
-            _ => false,
-        });
-        require(
-            credential_terminal,
-            format!(
-                "missing ANTHROPIC_API_KEY must surface credential-class terminal: {:?}",
-                outcome.type_sequence()
-            ),
+            resolved.is_clean_exit(0)
+                && routing["provider"] == "Anthropic"
+                && routing["alias"] == "sonnet"
+                && routing["api_key_env"] == "ANTHROPIC_API_KEY"
+                && routing["credential_status"] == "Missing",
+            "sonnet resolves to Anthropic with missing credentials",
         )?;
         require(
-            !outcome.events.iter().any(|event| {
-                matches!(
-                    event,
-                    TurnEventLine::TurnCommitted { outcome, .. } if outcome == "completed"
-                )
-            }),
-            "credential failure must not complete the turn",
+            outcome.command.is_clean_exit(2)
+                && outcome.accepted_turn_id().is_none()
+                && outcome.committed_result().is_none(),
+            "missing credential rejects before durable acceptance",
         )?;
+        require(outcome.events.iter().all(|event| matches!(event, TurnEventLine::Unknown { type_name, raw } if type_name == "submission" || (type_name == "error" && raw["kind"] == "bad_request"))), "no model or Tool activity before credential rejection")?;
+        let record: Value = serde_json::from_str(
+            std::str::from_utf8(&query.stdout)
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
         require(
-            outcome.exit_code == Some(SendExitCode::Failed),
-            format!(
-                "credential failure exit must be Failed, got {:?}",
-                outcome.exit_code
-            ),
+            query.is_clean_exit(0)
+                && record["view"]["active_turn"].is_null()
+                && record["view"]["requested_turn"].is_null(),
+            "credential rejection must not leave active or pinned Turn",
         )?;
-        Ok(())
+        let status_json: Value = serde_json::from_slice(&status.stdout).unwrap();
+        require(
+            status.is_clean_exit(0) && status_json["commit_count"] == 0,
+            "credential rejection leaves no committed Turn",
+        )
     })();
-
     finish_scenario(
         scenario_evidence,
-        &[("sonnet routed model_started", &outcome.command)],
+        &[
+            ("resolve sonnet", &resolved),
+            ("reject missing credentials", &outcome.command),
+            ("status after rejection", &status),
+            ("query rejected identity", &query),
+        ],
         Vec::new(),
         result,
     );

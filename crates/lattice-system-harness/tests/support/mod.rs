@@ -34,6 +34,28 @@ pub(crate) fn assert_clean_send(execution: &SendExecution) -> Result<(), AssertE
     Ok(())
 }
 
+/// 接受回执与固定终态对应同一身份；不要求有损观察通道重放 TurnStarted/Committed。
+pub(crate) fn assert_accepted_and_closed(outcome: &SendOutcome) -> Result<(), AssertError> {
+    let id = outcome
+        .accepted_turn_id()
+        .ok_or_else(|| AssertError::StdoutMissing {
+            expected: "durable acceptance acknowledgement".into(),
+        })?;
+    let accepted = outcome.events.iter().position(|event| matches!(event, TurnEventLine::Unknown { type_name, .. } if type_name == "acceptance")).unwrap();
+    let closed = outcome.events.iter().position(|event| match event {
+        TurnEventLine::Unknown { type_name, raw } if type_name == "snapshot" => {
+            raw["view"]["requested_turn"]["state"] == "committed"
+                && raw["view"]["requested_turn"]["turn_id"].as_str() == Some(id)
+                && raw["view"]["active_turn"].is_null()
+        }
+        _ => false,
+    });
+    require(
+        closed.is_some_and(|closed| accepted < closed),
+        "fixed committed view must follow and close the accepted TurnId",
+    )
+}
+
 pub(crate) fn assert_forced_kill(outcome: &CommandOutcome) {
     assert_eq!(
         outcome.termination,
