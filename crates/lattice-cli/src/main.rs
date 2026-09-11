@@ -3,7 +3,6 @@
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
-use colored::Colorize;
 
 mod commands;
 mod env_boundary;
@@ -21,7 +20,7 @@ struct Cli {
         short,
         long,
         global = true,
-        help = "Emit one TurnEvent JSON object per line on stdout (JSONL). Human status lines and verbose epilogue are suppressed. JSONL emits public TurnEvent values as received, including ReasoningDelta when present."
+        help = "输出 JSONL；TurnEvent 保留原形，并提供 submission/acceptance/snapshot/transcript/gap 控制记录，不混入人类状态行。"
     )]
     json: bool,
 
@@ -36,6 +35,19 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// 向既有会话提交请求；等同于 session send。
+    Run {
+        session_id: String,
+        prompt: String,
+        /// 提交前保留的规范 TurnId；确认未知时仍使用这个 ID。
+        #[arg(long, value_parser = session_cmd::parse_turn_id)]
+        turn_id: Option<lattice_api::local::TurnId>,
+    },
+    /// 管理本用户、同一状态根的本地后台。
+    Daemon {
+        #[command(subcommand)]
+        action: commands::daemon::DaemonAction,
+    },
     /// List available models.
     Models {
         /// Only show authenticated models.
@@ -76,38 +88,71 @@ enum Commands {
 }
 
 fn main() -> std::process::ExitCode {
-    // Load the workspace `.env` before the tokio runtime exists: this mutates
-    // the process environment, which is only sound while single-threaded. The
-    // trust boundary in `env_boundary` decides which keys a workspace file is
-    // allowed to set (see GitHub #99).
-    env_boundary::load_workspace_dotenv();
-    async_main()
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            let help = matches!(
+                error.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            );
+            if !help && std::env::args_os().any(|arg| arg == "--json" || arg == "-j") {
+                println!(
+                    "{}",
+                    serde_json::json!({"type":"error", "kind":"bad_request", "message":"invalid command; use --help"})
+                );
+            } else {
+                let _ = error.print();
+            }
+            return std::process::ExitCode::from(if help { 0 } else { 2 });
+        }
+    };
+    if let Some(Commands::Daemon {
+        action: commands::daemon::DaemonAction::Serve { state_root },
+    }) = &cli.command
+    {
+        let root = match commands::daemon::state_root(state_root.as_deref()) {
+            Ok(root) => root,
+            Err(error) => return commands::run::report_error(&error, cli.json),
+        };
+        env_boundary::prepare_daemon_environment(&root);
+    } else {
+        // dotenv 仅在提交端、运行时创建前安装；后台不运行工作区环境加载器。
+        env_boundary::load_workspace_dotenv();
+    }
+    async_main(cli)
 }
 
 #[tokio::main]
-async fn async_main() -> std::process::ExitCode {
-    let cli = Cli::parse();
-
-    // Initialize logging.
-    if cli.verbose {
-        let _ = lattice_api::init_logging(true);
-    } else {
-        let _ = lattice_api::init_logging(false);
-    }
-
+async fn async_main(cli: Cli) -> std::process::ExitCode {
+    let json = cli.json;
+    let _ = lattice_api::init_logging(cli.verbose);
     match run_commands(cli).await {
         Ok(exit_code) => exit_code,
-        Err(e) => {
-            // `{:#}` prints the full anyhow context chain (outer: inner: root cause)
-            // so the underlying cause is not swallowed by the outermost context.
-            eprintln!("{}: {:#}", "error".red(), e);
-            std::process::ExitCode::from(1)
-        }
+        Err(error) => commands::run::report_error(&error, json),
     }
 }
 
 async fn run_commands(cli: Cli) -> Result<std::process::ExitCode> {
     match cli.command {
+        Some(Commands::Run {
+            session_id,
+            prompt,
+            turn_id,
+        }) => {
+            return session_cmd::run(
+                session_cmd::SessionAction::Send {
+                    session_id,
+                    prompt,
+                    turn_id,
+                },
+                cli.json,
+                cli.verbose,
+            )
+            .await;
+        }
+        Some(Commands::Daemon { action }) => {
+            return commands::daemon::run(action, cli.json).await;
+        }
         Some(Commands::Models { auth }) => {
             models::run(auth, cli.json)?;
         }
@@ -160,8 +205,65 @@ mod tests {
     // -- Positive parsing: CLI supported commands --
 
     #[test]
-    fn cli_surface_run_is_not_exposed() {
-        assert!(Cli::try_parse_from(["lattice", "run", "hello"]).is_err());
+    fn cli_surface_background_and_request_identity() {
+        for args in [
+            vec![
+                "lattice",
+                "run",
+                "session-id",
+                "hello",
+                "--turn-id",
+                "10000000-0000-4000-8000-000000000001",
+            ],
+            vec![
+                "lattice",
+                "session",
+                "send",
+                "session-id",
+                "hello",
+                "--turn-id",
+                "10000000-0000-4000-8000-000000000001",
+            ],
+            vec![
+                "lattice",
+                "session",
+                "turn",
+                "session-id",
+                "10000000-0000-4000-8000-000000000001",
+                "--follow",
+            ],
+            vec![
+                "lattice",
+                "session",
+                "cancel",
+                "session-id",
+                "10000000-0000-4000-8000-000000000001",
+            ],
+            vec!["lattice", "session", "recover", "session-id"],
+            vec![
+                "lattice",
+                "daemon",
+                "serve",
+                "--state-root",
+                "/tmp/isolated-state",
+            ],
+            vec!["lattice", "daemon", "status"],
+            vec!["lattice", "daemon", "stop"],
+        ] {
+            assert!(Cli::try_parse_from(&args).is_ok(), "must parse {args:?}");
+        }
+        assert!(
+            Cli::try_parse_from([
+                "lattice",
+                "session",
+                "send",
+                "s",
+                "hi",
+                "--turn-id",
+                "not-a-uuid"
+            ])
+            .is_err()
+        );
     }
 
     #[test]
@@ -272,7 +374,7 @@ mod tests {
         assert_eq!(
             subcommands,
             vec![
-                "models", "resolve", "session", "doctor", "audit", "lancet", "tui"
+                "run", "daemon", "models", "resolve", "session", "doctor", "audit", "lancet", "tui"
             ]
         );
     }

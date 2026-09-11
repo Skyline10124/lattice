@@ -37,7 +37,7 @@ fn cli_cutover_help_omits_removed_commands() {
     }
 
     for name in &[
-        "models", "resolve", "session", "doctor", "audit", "lancet", "tui",
+        "run", "daemon", "models", "resolve", "session", "doctor", "audit", "lancet", "tui",
     ] {
         assert!(
             command_names.iter().any(|candidate| candidate == name),
@@ -47,8 +47,8 @@ fn cli_cutover_help_omits_removed_commands() {
 
     assert_eq!(
         command_names.len(),
-        8,
-        "help should list only the final supported command surface (7 + clap 'help'), got:\n{stdout}"
+        10,
+        "help must list the nine supported commands and clap help, got:\n{stdout}"
     );
     assert!(
         command_names.contains(&"help".to_string()),

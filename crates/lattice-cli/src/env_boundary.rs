@@ -178,6 +178,38 @@ pub fn load_workspace_dotenv() -> &'static DotenvReport {
     })
 }
 
+/// 仅 main 在创建运行时之前调用；后台不继承提交端的凭据、策略或 TLS 环境。
+pub fn prepare_daemon_environment(state_root: &Path) {
+    // 此时进程仍单线程；先收集键，避免迭代器与环境修改交错。
+    let keys: Vec<_> = std::env::vars_os().map(|(key, _)| key).collect();
+    // 仅显式屏障构建保留既有故障接口；后台启动后不接受前端环境切换。
+    #[cfg(feature = "test-crash-barriers")]
+    let injections: Vec<_> = [
+        "LATTICE_TEST_TURN_BARRIER",
+        "LATTICE_TEST_TURN_BARRIER_ACK",
+        "LATTICE_TEST_TURN_INJECTION",
+        "LATTICE_TEST_TOOL_EFFECT_LOG",
+        "LATTICE_TEST_REWIND_BARRIER",
+        "LATTICE_TEST_REWIND_BARRIER_ACK",
+    ]
+    .into_iter()
+    .filter_map(|key| std::env::var_os(key).map(|value| (key, value)))
+    .collect();
+    unsafe {
+        for key in keys {
+            std::env::remove_var(key);
+        }
+        std::env::set_var("LANG", "C.UTF-8");
+        std::env::set_var("HOME", state_root.join("lattice/local"));
+        std::env::set_var("XDG_CONFIG_HOME", state_root.join("lattice/local/config"));
+        std::env::set_var("XDG_STATE_HOME", state_root);
+        #[cfg(feature = "test-crash-barriers")]
+        for (key, value) in injections {
+            std::env::set_var(key, value);
+        }
+    }
+}
+
 /// A decided `.env` load: the report to publish plus the key/value pairs to
 /// install. Split out from [`load_workspace_dotenv`] so every decision the
 /// boundary makes is testable without mutating the test process's environment

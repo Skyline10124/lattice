@@ -1,18 +1,17 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Singular `session` command over the session graph store.
-//!
-//! Supports session-first turn execution plus status, list, log, checkout,
-//! branch, diff, and reset.
-//! Does not import or call old session manager surfaces.
-
+//! Session 命令通过 LocalClient 操作后台；本层仅处理配置、参数与呈现。
+//! 找回、查询和恢复先于当前 profile/provider 校验；引用写操作不在前端执行。
 use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::Subcommand;
 use colored::Colorize;
-use lattice_api::{CreateSessionRequest, GraphHead, OpenSessionRequest, SessionApi};
+use lattice_api::{
+    CreateSessionRequest, GraphHead,
+    local::{LocalClient, LocalRewindResult, SessionWrite, SessionWriteResult},
+};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Lattice config root (`$XDG_CONFIG_HOME` or the Linux config directory).
@@ -48,21 +47,14 @@ pub(crate) fn session_store_path() -> Result<PathBuf> {
         .join(lattice_session::git_graph::SESSIONS_REPO_NAME))
 }
 
-/// Open the session store strictly: for every command except `session new`
-/// the store must already exist (#143 — no open-failed-init).
-fn session_api() -> Result<SessionApi> {
-    match SessionApi::git_open_layout(&state_layout()?) {
-        Ok(api) => Ok(api),
-        Err(lattice_api::ApiError::StoreUnavailable(detail)) => Err(anyhow::anyhow!(
-            "{detail}; run `lattice session new` to create the first session"
-        )),
-        Err(err) => Err(err.into()),
-    }
+pub(crate) fn parse_turn_id(value: &str) -> Result<lattice_api::local::TurnId, String> {
+    lattice_api::local::TurnId::parse(value).map_err(|_| "expected canonical TurnId UUID".into())
 }
 
-/// First-create-or-validate the session store: `session new` only.
-fn session_api_for_new() -> Result<SessionApi> {
-    Ok(SessionApi::git_create_layout(&state_layout()?)?)
+pub(crate) async fn local_client() -> Result<lattice_api::local::LocalClient> {
+    let client = lattice_api::local::LocalClient::new(state_layout()?);
+    client.ensure_running().await?;
+    Ok(client)
 }
 
 #[derive(Subcommand)]
@@ -92,6 +84,9 @@ pub enum SessionAction {
         session_id: String,
         /// Prompt text.
         prompt: String,
+        /// 提交前保留的规范 TurnId；不按 prompt 文本去重。
+        #[arg(long, value_parser = parse_turn_id)]
+        turn_id: Option<lattice_api::local::TurnId>,
     },
     /// Show session store status or a specific session's status.
     Status {
@@ -149,102 +144,106 @@ pub enum SessionAction {
         /// Turn commit id to rewind to.
         target: String,
     },
+    /// 按规范 TurnId 查询持久结果，可继续观察后续事件。
+    Turn {
+        session_id: String,
+        #[arg(value_parser = parse_turn_id)]
+        turn_id: lattice_api::local::TurnId,
+        #[arg(long)]
+        follow: bool,
+    },
+    /// 明确取消指定 Turn；确认接管不等于已持久 Cancelled。
+    Cancel {
+        session_id: String,
+        #[arg(value_parser = parse_turn_id)]
+        turn_id: lattice_api::local::TurnId,
+    },
+    /// 独立关闭旧 pending，不请求模型或重新分发工具。
+    Recover { session_id: String },
 }
 
-/// Run the `session` command.
+/// 全部 Session 命令经本地后台；前端只解析、冻结新请求配置和渲染。
 pub async fn run(
     action: SessionAction,
     json: bool,
     verbose: bool,
 ) -> Result<std::process::ExitCode> {
+    let api = local_client().await?;
     match action {
-        SessionAction::Send { session_id, prompt } => {
-            // Store open is filesystem work but does not acquire a blocking
-            // domain lock. The live prompt path itself offloads its full
-            // SessionExecutionLock/WorkspaceOperationLock critical section.
-            let api = tokio::task::spawn_blocking(session_api)
-                .await
-                .map_err(|err| anyhow::anyhow!("session store open worker failed: {err}"))??;
-            let exit = cmd_send_api(&api, &session_id, prompt, json, verbose).await;
-            Ok(exit)
+        SessionAction::Send {
+            session_id,
+            prompt,
+            turn_id,
+        } => {
+            return crate::commands::run::run_session_prompt(
+                &api, prompt, session_id, turn_id, verbose, json,
+            )
+            .await;
         }
-        action => {
-            // `session new` is the only first-create path; every other
-            // subcommand strictly opens the existing store (#143). Keep the
-            // potentially blocking first-create flock off the Tokio worker.
-            let create = matches!(&action, SessionAction::New { .. });
-            let api = tokio::task::spawn_blocking(move || {
-                if create {
-                    session_api_for_new()
-                } else {
-                    session_api()
-                }
-            })
-            .await
-            .map_err(|err| anyhow::anyhow!("session store setup worker failed: {err}"))??;
-            run_with_api(&api, action, json).await
+        SessionAction::Turn {
+            session_id,
+            turn_id,
+            follow,
+        } => {
+            let session = api.open_session(&session_id).await?;
+            return crate::commands::run::observe_turn(
+                &api,
+                &session.session_id,
+                turn_id,
+                follow,
+                verbose,
+                json,
+            )
+            .await;
         }
-    }
-}
-
-/// Run the `session` command with an explicit [`SessionApi`] instance.
-///
-/// This is the testable seam: production `run()` constructs the default API
-/// and delegates here. Tests pass a temp-backed `SessionApi` directly.
-pub(crate) async fn run_with_api(
-    api: &SessionApi,
-    action: SessionAction,
-    json: bool,
-) -> Result<std::process::ExitCode> {
-    if let SessionAction::Rewind { session_id, target } = &action {
-        return cmd_rewind_api(api, session_id, target, json).await;
-    }
-
-    let api = api.clone();
-    tokio::task::spawn_blocking(move || run_with_api_blocking(&api, action, json))
-        .await
-        .map_err(|err| anyhow::anyhow!("session command worker failed: {err}"))?
-}
-
-fn run_with_api_blocking(
-    api: &SessionApi,
-    action: SessionAction,
-    json: bool,
-) -> Result<std::process::ExitCode> {
-    match action {
+        SessionAction::Cancel {
+            session_id,
+            turn_id,
+        } => {
+            let session = api.open_session(&session_id).await?;
+            let owned = api.cancel(&session.session_id, turn_id).await?;
+            println!(
+                "{}",
+                serde_json::json!({"type": if owned { "cancel_acknowledged" } else { "cancel_not_owned" }, "session_id":session.session_id, "turn_id":turn_id, "owned":owned})
+            );
+        }
+        SessionAction::Recover { session_id } => {
+            let session = api.open_session(&session_id).await?;
+            let view = api.recover(&session.session_id).await?;
+            crate::commands::run::render_view(&api, &view, json).await?;
+        }
         SessionAction::New {
             agent,
             project_branch,
             label,
-        } => cmd_new_api(api, &agent, &project_branch, label.as_deref(), json)?,
+        } => cmd_new_api(&api, &agent, &project_branch, label.as_deref(), json).await?,
         SessionAction::Agent { session_id, agent } => {
-            cmd_agent_api(api, &session_id, &agent, json)?
+            cmd_agent_api(&api, &session_id, &agent, json).await?
         }
-        SessionAction::Send { .. } => {
-            return Err(anyhow::anyhow!(
-                "session send requires the async production runner"
-            ));
+        SessionAction::Status { session_id } => {
+            cmd_status_api(&api, session_id.as_deref(), json).await?
         }
-        SessionAction::Status { session_id } => cmd_status_api(api, session_id.as_deref(), json)?,
-        SessionAction::List => cmd_list_api(api, json)?,
-        SessionAction::Log { session_id } => cmd_log_api(api, &session_id, json)?,
+        SessionAction::List => cmd_list_api(&api, json).await?,
+        SessionAction::Log { session_id } => cmd_log_api(&api, &session_id, json).await?,
         SessionAction::Checkout { session_id, target } => {
-            cmd_checkout_api(api, &session_id, &target, json)?
+            cmd_checkout_api(&api, &session_id, &target, json).await?
         }
         SessionAction::Branch {
             session_id,
             name,
             from,
-        } => cmd_branch_api(api, &session_id, name.as_deref(), from.as_deref(), json)?,
+        } => cmd_branch_api(&api, &session_id, name.as_deref(), from.as_deref(), json).await?,
         SessionAction::Diff {
             session_id,
             from,
             to,
-        } => cmd_diff_api(api, &session_id, &from, &to, json)?,
+        } => cmd_diff_api(&api, &session_id, &from, &to, json).await?,
         SessionAction::Reset { session_id, target } => {
-            cmd_reset_api(api, &session_id, &target, json)?
+            cmd_reset_api(&api, &session_id, &target, json).await?
         }
-        SessionAction::Rewind { .. } => unreachable!("rewind is handled by the async wrapper"),
+        SessionAction::Rewind { session_id, target } => {
+            return cmd_rewind_api(&api, &session_id, &target, json).await;
+        }
     }
     Ok(std::process::ExitCode::SUCCESS)
 }
@@ -262,21 +261,27 @@ fn load_agent_checked(agent: &str) -> Result<lattice_api::LoadedAgentProfile> {
     Ok(loaded)
 }
 
-fn cmd_new_api(
-    api: &SessionApi,
+async fn cmd_new_api(
+    api: &LocalClient,
     agent: &str,
     project_branch: &str,
     label: Option<&str>,
     json: bool,
 ) -> Result<()> {
-    let _loaded = load_agent_checked(agent)?;
-    let workspace_root = lattice_api::resolve_local_workspace_root()?;
-    let session = api.create_session(CreateSessionRequest {
-        label: label.map(str::to_string),
-        active_agent: agent.to_string(),
-        project_branch: project_branch.to_string(),
-        project_store_key: workspace_root.store_key_hex(),
-    })?;
+    let name = agent.to_owned();
+    let key = tokio::task::spawn_blocking(move || -> Result<_> {
+        load_agent_checked(&name)?;
+        Ok(lattice_api::resolve_local_workspace_root()?.store_key_hex())
+    })
+    .await??;
+    let session = api
+        .create_session(CreateSessionRequest {
+            label: label.map(str::to_string),
+            active_agent: agent.to_string(),
+            project_branch: project_branch.to_string(),
+            project_store_key: key,
+        })
+        .await?;
     if json {
         let value = serde_json::json!({
             "session_id": session.session_id,
@@ -301,9 +306,16 @@ fn cmd_new_api(
     Ok(())
 }
 
-fn cmd_agent_api(api: &SessionApi, session_id: &str, agent: &str, json: bool) -> Result<()> {
-    let _loaded = load_agent_checked(agent)?;
-    let session = api.set_active_agent(session_id, agent)?;
+async fn cmd_agent_api(api: &LocalClient, session_id: &str, agent: &str, json: bool) -> Result<()> {
+    let name = agent.to_owned();
+    tokio::task::spawn_blocking(move || load_agent_checked(&name)).await??;
+    let id = api.open_session(session_id).await?.session_id;
+    let SessionWriteResult::SetAgent(session) = api
+        .write_session(&id, SessionWrite::SetAgent { name: agent.into() })
+        .await?
+    else {
+        anyhow::bail!("unexpected session write response")
+    };
     if json {
         let value = serde_json::json!({
             "session_id": session.session_id,
@@ -321,77 +333,38 @@ fn cmd_agent_api(api: &SessionApi, session_id: &str, agent: &str, json: bool) ->
     Ok(())
 }
 
-async fn cmd_send_api(
-    api: &SessionApi,
-    session_id: &str,
-    prompt: String,
-    json: bool,
-    verbose: bool,
-) -> std::process::ExitCode {
-    let session = match api.open_session(OpenSessionRequest {
-        id: session_id.to_string(),
-    }) {
-        Ok(session) => session,
-        Err(error) => {
-            eprintln!("{}: {:#}", "error".red(), error);
-            return std::process::ExitCode::from(2);
-        }
-    };
-
-    let loaded = match load_agent_checked(&session.active_agent_name) {
-        Ok(loaded) => loaded,
-        Err(error) => {
-            eprintln!("{}: {:#}", "error".red(), error);
-            return std::process::ExitCode::from(2);
-        }
-    };
-
-    crate::commands::run::run_session_prompt(prompt, session_id.to_string(), loaded, verbose, json)
-        .await
-}
-
-fn cmd_status_api(api: &SessionApi, session_id: Option<&str>, json: bool) -> Result<()> {
+async fn cmd_status_api(api: &LocalClient, session_id: Option<&str>, json: bool) -> Result<()> {
     match session_id {
         Some(id) => {
-            let status = api.status(id)?;
+            let session = api.open_session(id).await?;
+            let view = api.query(&session.session_id, None).await?;
             if json {
-                let value = serde_json::json!({
-                    "session_id": status.session_id,
-                    "head": status.head,
-                    "current_commit_id": status.current_commit_id,
-                    "active_agent": status.active_agent_name,
-                    "branches": status.branches,
-                    "commit_count": status.commit_count,
-                    "project_target_branch": status.project_target_branch,
-                });
-                println!("{}", serde_json::to_string_pretty(&value)?);
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "session_id": view.session.session_id, "head": view.head,
+                        "current_commit_id": view.head_commit_id, "active_agent": view.session.active_agent_name,
+                        "branches": view.branches, "commit_count": view.commit_count,
+                        "project_target_branch": view.session.project_target_branch,
+                        "active_turn": view.active_turn, "state_oid": view.state_oid,
+                    })
+                );
             } else {
                 println!(
-                    "{} {}",
-                    "Session:".bold(),
-                    display_id(&status.session_id).cyan()
+                    "Session: {}\n  Agent: {}\n  HEAD: {:?}\n  Commits: {}\n  Commit: {}\n  Active Turn: {}",
+                    view.session.session_id,
+                    view.session.active_agent_name,
+                    view.head,
+                    view.commit_count,
+                    view.head_commit_id.as_deref().unwrap_or("empty"),
+                    view.active_turn
+                        .map(|turn| turn.turn_id.to_string())
+                        .unwrap_or_else(|| "none".into())
                 );
-                match &status.head {
-                    GraphHead::Branch { name } => {
-                        println!("  HEAD:     branch {}", name);
-                    }
-                    GraphHead::Detached { commit_id } => {
-                        println!("  HEAD:     detached at {}", display_id(commit_id));
-                    }
-                }
-                if let Some(cid) = &status.current_commit_id {
-                    println!("  Commit:   {}", display_id(cid));
-                }
-                println!("  Agent:    {}", status.active_agent_name);
-                if let Some(branch) = &status.project_target_branch {
-                    println!("  Project:  {}", branch);
-                }
-                println!("  Branches: {}", status.branches.len());
-                println!("  Commits:  {}", status.commit_count);
             }
         }
         None => {
-            let sessions = api.list_sessions()?;
+            let sessions = api.list_sessions().await?;
             if json {
                 let value = serde_json::json!({
                     "session_count": sessions.len(),
@@ -422,8 +395,8 @@ fn cmd_status_api(api: &SessionApi, session_id: Option<&str>, json: bool) -> Res
     Ok(())
 }
 
-fn cmd_list_api(api: &SessionApi, json: bool) -> Result<()> {
-    let sessions = api.list_sessions()?;
+async fn cmd_list_api(api: &LocalClient, json: bool) -> Result<()> {
+    let sessions = api.list_sessions().await?;
     if json {
         let value = serde_json::json!({
             "sessions": sessions,
@@ -452,10 +425,8 @@ fn cmd_list_api(api: &SessionApi, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_log_api(api: &SessionApi, session_id: &str, json: bool) -> Result<()> {
-    // Verify session exists first.
-    let _status = api.status(session_id)?;
-    let entries = api.log(session_id)?;
+async fn cmd_log_api(api: &LocalClient, session_id: &str, json: bool) -> Result<()> {
+    let entries = api.log(session_id).await?;
     if json {
         let value = serde_json::json!({
             "session_id": session_id,
@@ -513,8 +484,24 @@ fn render_turn_log_entry(index: usize, entry: &lattice_api::TurnLogEntry) -> Str
     rendered
 }
 
-fn cmd_checkout_api(api: &SessionApi, session_id: &str, target: &str, json: bool) -> Result<()> {
-    let head = api.checkout(session_id, target)?;
+async fn cmd_checkout_api(
+    api: &LocalClient,
+    session_id: &str,
+    target: &str,
+    json: bool,
+) -> Result<()> {
+    let id = api.open_session(session_id).await?.session_id;
+    let SessionWriteResult::Checkout(head) = api
+        .write_session(
+            &id,
+            SessionWrite::Checkout {
+                target: target.into(),
+            },
+        )
+        .await?
+    else {
+        anyhow::bail!("unexpected session write response")
+    };
     if json {
         let value = serde_json::json!({
             "session_id": session_id,
@@ -544,8 +531,8 @@ fn cmd_checkout_api(api: &SessionApi, session_id: &str, target: &str, json: bool
     Ok(())
 }
 
-fn cmd_branch_api(
-    api: &SessionApi,
+async fn cmd_branch_api(
+    api: &LocalClient,
     session_id: &str,
     name: Option<&str>,
     from: Option<&str>,
@@ -553,7 +540,19 @@ fn cmd_branch_api(
 ) -> Result<()> {
     match name {
         Some(branch_name) => {
-            let branch_ref = api.branch(session_id, branch_name, from)?;
+            let id = api.open_session(session_id).await?.session_id;
+            let SessionWriteResult::Branch(branch_ref) = api
+                .write_session(
+                    &id,
+                    SessionWrite::Branch {
+                        name: branch_name.into(),
+                        from: from.map(str::to_owned),
+                    },
+                )
+                .await?
+            else {
+                anyhow::bail!("unexpected session write response")
+            };
             if json {
                 let value = serde_json::json!({
                     "session_id": branch_ref.session_id,
@@ -574,9 +573,7 @@ fn cmd_branch_api(
             }
         }
         None => {
-            // Branch listing reads SessionStatus.branches for the
-            // addressed session, not store-global branch state.
-            let status = api.status(session_id)?;
+            let status = api.session_status(session_id).await?;
             if json {
                 let value = serde_json::json!({
                     "session_id": session_id,
@@ -610,14 +607,14 @@ fn cmd_branch_api(
     Ok(())
 }
 
-fn cmd_diff_api(
-    api: &SessionApi,
+async fn cmd_diff_api(
+    api: &LocalClient,
     session_id: &str,
     from: &str,
     to: &str,
     json: bool,
 ) -> Result<()> {
-    let diff = api.diff(session_id, from, to)?;
+    let diff = api.diff(session_id, from, to).await?;
     if json {
         let value = serde_json::json!({
             "session_id": session_id,
@@ -643,8 +640,24 @@ fn cmd_diff_api(
     Ok(())
 }
 
-fn cmd_reset_api(api: &SessionApi, session_id: &str, target: &str, json: bool) -> Result<()> {
-    let result = api.reset(session_id, target)?;
+async fn cmd_reset_api(
+    api: &LocalClient,
+    session_id: &str,
+    target: &str,
+    json: bool,
+) -> Result<()> {
+    let id = api.open_session(session_id).await?.session_id;
+    let SessionWriteResult::Reset(result) = api
+        .write_session(
+            &id,
+            SessionWrite::Reset {
+                target: target.into(),
+            },
+        )
+        .await?
+    else {
+        anyhow::bail!("unexpected session write response")
+    };
     if json {
         let value = serde_json::json!({
             "session_id": result.session_id,
@@ -664,51 +677,28 @@ fn cmd_reset_api(api: &SessionApi, session_id: &str, target: &str, json: bool) -
     Ok(())
 }
 
-/// Run an explicit Rewind (#64).
-///
-/// Exit codes follow the pinned CLI contract: a target that does not exist or
-/// is unreachable is an input error (2); a structured same-path conflict is a
-/// runtime outcome (1), reported in full so the user can resolve it.
+/// Rewind 的文件效果、引用与审计诊断原样保留，不把错误当成未发生变更。
 async fn cmd_rewind_api(
-    api: &SessionApi,
+    api: &LocalClient,
     session_id: &str,
     target: &str,
     json: bool,
 ) -> Result<std::process::ExitCode> {
-    let project_root = std::env::current_dir()?;
-    let api = api.clone();
-    let session_id = session_id.to_owned();
-    let target = target.to_owned();
-    let outcome = match tokio::task::spawn_blocking(move || {
-        lattice_api::rewind_to_turn(&api, &session_id, &target, &project_root)
-    })
-    .await
+    let id = api.open_session(session_id).await?.session_id;
+    let root = tokio::task::spawn_blocking(lattice_api::resolve_local_workspace_root).await??;
+    match api
+        .rewind(&id, target, root.canonical_path().into())
+        .await?
     {
-        Ok(Ok(outcome)) => outcome,
-        Ok(Err(lattice_api::RewindError::Api(
-            err @ (lattice_api::ApiError::NotFound(_) | lattice_api::ApiError::BadRequest(_)),
-        ))) => {
-            eprintln!("{}: {:#}", "error".red(), err);
-            return Ok(std::process::ExitCode::from(2));
-        }
-        Ok(Err(lattice_api::RewindError::AuditPublicationFailed { detail, partial })) => {
-            eprintln!(
-                "{}: rewind actions completed but the audit record could not be published: {detail}",
-                "error".red()
-            );
+        LocalRewindResult::AuditPublicationFailed(partial) => {
             if json {
-                println!("{}", serde_json::to_string_pretty(&partial)?);
+                println!("{}", serde_json::to_string(&partial)?);
             } else {
                 eprint!("{}", render_rewind_partial_text(&partial));
             }
-            return Ok(std::process::ExitCode::from(1));
+            Ok(std::process::ExitCode::from(1))
         }
-        Ok(Err(lattice_api::RewindError::Api(err))) => return Err(err.into()),
-        Err(err) => return Err(anyhow::anyhow!("rewind worker failed: {err}")),
-    };
-
-    match outcome {
-        lattice_api::RewindOutcome::Success(success) => {
+        LocalRewindResult::Success(success) => {
             if json {
                 println!("{}", serde_json::to_string_pretty(&success)?);
             } else {
@@ -731,7 +721,7 @@ async fn cmd_rewind_api(
             }
             Ok(std::process::ExitCode::SUCCESS)
         }
-        lattice_api::RewindOutcome::Conflict(conflict) => {
+        LocalRewindResult::Conflict(conflict) => {
             if json {
                 println!("{}", serde_json::to_string_pretty(&conflict)?);
             } else {

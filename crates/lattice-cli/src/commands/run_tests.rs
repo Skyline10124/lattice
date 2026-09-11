@@ -7,6 +7,37 @@ use lattice_session::StateLayout;
 // ─── Stream timeout constants ───────────────────────────────────
 
 #[test]
+fn structured_errors_keep_exit_classes_without_echoing_private_input() {
+    for (error, expected_code, kind) in [
+        (
+            lattice_api::ApiError::BadRequest("private-test-secret".into()),
+            2,
+            "bad_request",
+        ),
+        (
+            lattice_api::ApiError::NotFound("private-test-secret".into()),
+            2,
+            "not_found",
+        ),
+        (
+            lattice_api::ApiError::Busy("private-test-secret".into()),
+            1,
+            "busy",
+        ),
+        (
+            lattice_api::ApiError::Internal("private-test-secret".into()),
+            1,
+            "internal",
+        ),
+    ] {
+        let (code, record) = error_record(&error.into());
+        assert_eq!(code, expected_code);
+        assert_eq!(record["kind"], kind);
+        assert_eq!(record["type"], "error");
+        assert!(!record.to_string().contains("private-test-secret"));
+    }
+}
+#[test]
 fn stream_timeout_constant_is_5_minutes() {
     // STREAM_TIMEOUT_SECS must be 300 (5 minutes)
     const EXPECTED_TIMEOUT: u64 = 300;

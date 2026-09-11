@@ -1,26 +1,10 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Session turn execution renderer built on `lattice_api::stream_turn`.
-//!
-//! Consumes a live `TurnEventStream` and renders events incrementally:
-//! `TokenDelta` content goes to stdout, all status/lifecycle/error lines
-//! go to stderr in human mode, and `--json` emits one `TurnEvent` JSON
-//! object per line on stdout (JSONL).
-//!
-//! # JSONL mode (`--json`)
-//!
-//! `--json` emits one `TurnEvent` JSON object per line on stdout,
-//! terminated by `\n`. Human status lines and verbose epilogue are suppressed
-//! in JSON mode. JSONL emits public `TurnEvent` values as received, including
-//! `ReasoningDelta` when present.
-//!
-//! # Exit codes
-//!
-//! - 0: Turn committed successfully (`TurnOutcome::Completed`)
-//! - 1:  Provider/API/tool failure, commit failure, terminal without commit, or protocol violation
-//! - 2: Input/configuration error (missing agent profile, missing credentials, missing session)
-
+//! CLI 通过 LocalClient 提交、找回和观察 Turn；终态退出以固定持久视图为准。
+//! JSONL 保留公开 TurnEvent，并增加 submission/acceptance/snapshot/gap 等控制记录。
+//! 观察断连、超时或 EOF 不取消任务，也不宣称 Turn 已失败。
+//! 退出码：0 为成功结果或成功查询，1 为执行/连接/持久失败，2 为输入或配置错误。
 use anyhow::Result;
 use colored::Colorize;
 use std::io::Write;
@@ -29,7 +13,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::time;
 
-use lattice_api::{LoadedAgentProfile, RunTurnRequest, TurnEvent, TurnOutcome, TurnUsageSummary};
+use lattice_api::local::{
+    Acceptance, FrozenConfiguration, LocalClient, LocalErrorKind, Observation, SessionObservation,
+    TurnId, TurnObservation, TurnRequest,
+};
+use lattice_api::{LoadedAgentProfile, TurnEvent, TurnOutcome, TurnUsageSummary};
 
 pub(crate) use lattice_api::STREAM_IDLE_TIMEOUT_SECS as STREAM_TIMEOUT_SECS;
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -399,274 +387,416 @@ fn render_verbose_epilogue<WErr: Write>(
     Ok(())
 }
 
-/// Execute one prompt in an existing session with a resolved active agent.
+/// 客户端先保留身份，再找回旧请求；只有确需新接受时加载配置。
 pub async fn run_session_prompt(
+    api: &LocalClient,
     prompt: String,
     session_id: String,
-    loaded_profile: LoadedAgentProfile,
-    verbose: bool,
-    json: bool,
-) -> std::process::ExitCode {
-    match run_inner(prompt, session_id, loaded_profile, verbose, json).await {
-        Ok(exit_code) => exit_code,
-        Err(error) => {
-            // `{:#}` prints the full anyhow context chain (outer: inner: root cause).
-            eprintln!("{}: {:#}", "error".red(), error);
-            std::process::ExitCode::from(2)
-        }
-    }
-}
-
-async fn run_inner(
-    prompt: String,
-    session_id: String,
-    loaded_profile: LoadedAgentProfile,
+    turn_id: Option<TurnId>,
     verbose: bool,
     json: bool,
 ) -> Result<std::process::ExitCode> {
-    if verbose {
-        eprintln!(
+    let session = api.open_session(&session_id).await?;
+    let turn_id = turn_id.unwrap_or_else(lattice_api::local::new_turn_id);
+    if json {
+        println!(
             "{}",
-            format!("profile: {}", loaded_profile.path.display()).dimmed()
+            serde_json::json!({"type":"submission", "session_id":session.session_id, "turn_id":turn_id})
+        );
+    } else {
+        eprintln!("session {} turn {}", session.session_id, turn_id);
+    }
+    std::io::stdout().flush()?;
+    std::io::stderr().flush()?;
+    let root = tokio::task::spawn_blocking(lattice_api::resolve_local_workspace_root).await??;
+    let request = TurnRequest {
+        session_id: session.session_id.clone(),
+        turn_id,
+        workspace: root.canonical_path().into(),
+        input: prompt,
+    };
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let acceptance = {
+        let submit = async {
+            let prior = api.lookup_or_recover(request.clone()).await?;
+            if prior != Acceptance::NeedsConfiguration {
+                return Ok::<_, anyhow::Error>(prior);
+            }
+            let name = session.active_agent_name.clone();
+            let configuration = tokio::task::spawn_blocking(move || {
+                let loaded = load_named_profile(&name, root.canonical_path())
+                    .map_err(|_| lattice_api::ApiError::BadRequest("invalid profile".into()))?;
+                if loaded.profile.agent.name != name {
+                    return Err(lattice_api::ApiError::BadRequest(
+                        "agent profile name differs".into(),
+                    )
+                    .into());
+                }
+                FrozenConfiguration::from_env(loaded, &root)
+            })
+            .await??;
+            Ok(api.submit(request, Some(configuration)).await?)
+        };
+        tokio::pin!(submit);
+        tokio::select! {
+            result = &mut submit => Some(result?),
+            _ = sigint.recv() => None,
+        }
+    };
+    let Some(acceptance) = acceptance else {
+        // 可能已接管但回执未读；保留 ID，只请求取消和查询，不另分配请求。
+        match time::timeout(
+            Duration::from_secs(5),
+            api.cancel(&session.session_id, turn_id),
+        )
+        .await
+        {
+            Ok(receipt) => render_cancel(Ok(receipt), json),
+            Err(_) => connection_notice("cancel acknowledgement unknown", json),
+        }
+        return observe_with_signal(
+            api,
+            &session.session_id,
+            turn_id,
+            verbose,
+            json,
+            sigint,
+            true,
+        )
+        .await;
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"type":"acceptance", "session_id":session.session_id, "result":acceptance})
         );
     }
+    if !json {
+        let message = match &acceptance {
+            Acceptance::Accepted { .. } => "已确认接受",
+            Acceptance::Existing { .. } => "找回既有请求；未重复执行",
+            Acceptance::Recovered { .. } => "旧 Turn 已恢复关闭；本次新 prompt 未接受",
+            Acceptance::ConfirmationUnknown { .. } => "接受确认未知；保留同一 TurnId 查询或重试",
+            Acceptance::NeedsConfiguration => "尚未接受",
+        };
+        eprintln!("{message}");
+    }
+    let selected = match acceptance {
+        Acceptance::Accepted { turn_id } | Acceptance::ConfirmationUnknown { turn_id } => turn_id,
+        Acceptance::Existing {
+            turn: TurnObservation::Pending(turn),
+        } => turn.turn_id,
+        Acceptance::Existing {
+            turn: TurnObservation::Committed(turn),
+        }
+        | Acceptance::Recovered { turn } => turn.turn_id,
+        Acceptance::NeedsConfiguration => {
+            anyhow::bail!("backend did not accept frozen configuration")
+        }
+    };
+    observe_with_signal(
+        api,
+        &session.session_id,
+        selected,
+        verbose,
+        json,
+        sigint,
+        false,
+    )
+    .await
+}
 
-    // Build SessionApi over the global session store. `run` operates on an
-    // existing session, so it strictly opens (#143).
-    let session_api =
-        lattice_api::SessionApi::git_open_layout(&crate::commands::session::state_layout()?)?;
+/// 纯观察路径不加载 profile、不恢复；流结束和 idle 仅改变连接状态。
+pub async fn observe_turn(
+    api: &LocalClient,
+    session_id: &str,
+    turn_id: TurnId,
+    follow: bool,
+    verbose: bool,
+    json: bool,
+) -> Result<std::process::ExitCode> {
+    if !follow {
+        let view = api.query(session_id, Some(turn_id)).await?;
+        render_view(api, &view, json).await?;
+        return Ok(std::process::ExitCode::SUCCESS);
+    }
+    let sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    observe_with_signal(api, session_id, turn_id, verbose, json, sigint, false).await
+}
 
-    // Cooperative cancellation: install a scoped SIGINT listener that flips
-    // a shared flag. The agent loop races stalled stream.next() against it
-    // (#24 slice 5); the harness SIGKILL path never counts as coverage.
-    let cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let sigint_flag = cancel_flag.clone();
-    let sigint_guard = tokio::spawn(async move {
-        if let Ok(mut sigint) =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-        {
-            // Each SIGINT flips the flag; the listener stays active until
-            // aborted below so it cannot affect later commands.
-            while sigint.recv().await.is_some() {
-                sigint_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+async fn observe_with_signal(
+    api: &LocalClient,
+    session_id: &str,
+    turn_id: TurnId,
+    verbose: bool,
+    json: bool,
+    mut sigint: tokio::signal::unix::Signal,
+    mut cancel_requested: bool,
+) -> Result<std::process::ExitCode> {
+    let mut stream = api.subscribe(session_id, turn_id, None).await?;
+    let mut state = RunRenderState::default();
+    let mut cancel: Option<tokio::task::JoinHandle<lattice_api::local::Result<bool>>> = None;
+    let mut deadline = time::Instant::now() + Duration::from_secs(STREAM_TIMEOUT_SECS);
+    let result = async {
+    let exit = loop {
+        tokio::select! {
+            _ = sigint.recv() => {
+                if cancel_requested {
+                    break std::process::ExitCode::from(1);
+                }
+                cancel_requested = true;
+                let client = api.clone();
+                let id = session_id.to_owned();
+                cancel = Some(tokio::spawn(async move { client.cancel(&id, turn_id).await }));
+            }
+            receipt = async { cancel.as_mut().expect("guarded cancel").await }, if cancel.is_some() => {
+                cancel = None;
+                render_cancel(receipt, json);
+            }
+            next = stream.next() => {
+                deadline = time::Instant::now() + Duration::from_secs(STREAM_TIMEOUT_SECS);
+                let observation = match next {
+                    Ok(Some(observation)) => observation,
+                    Ok(None) => { connection_notice("observation ended; execution state unknown", json); break std::process::ExitCode::from(1); }
+                    Err(error) => { report_error(&error.into(), json); break std::process::ExitCode::from(1); }
+                };
+                match observation {
+                    Observation::Event { event, .. } => {
+                        if json { render_json_event(&event, &mut std::io::stdout())?; }
+                        else { render_human_event(&event, &mut state, &mut std::io::stdout(), &mut std::io::stderr(), verbose)?; }
+                        apply_event_to_state(&event, &mut state);
+                        std::io::stdout().flush()?;
+                    }
+                    Observation::Gap { cursor } => {
+                        if json { writeln!(std::io::stdout(), "{}", serde_json::json!({"type":"gap", "cursor":cursor}))?; }
+                        else { writeln!(std::io::stderr(), "\n观察存在缺口；以下固定结果替换临时输出，不是逐 token 重放。")?; }
+                    }
+                    Observation::Snapshot { view, owned, .. } => {
+                        render_view(api, &view, json).await?;
+                        if !owned { break durable_exit(&view); }
+                    }
+                    Observation::Finished { view, error, .. } => {
+                        let read_result = render_view(api, &view, json).await;
+                        if let Some(error) = error {
+                            report_error(&error.into(), json);
+                            if let Err(read_error) = read_result { report_error(&read_error, json); }
+                            break std::process::ExitCode::from(1);
+                        }
+                        if let Err(read_error) = read_result {
+                            // 完成回执只确认执行收尾；正文未取到仍是命令失败，不抹去上面的固定终态。
+                            connection_notice("completion received; fixed transcript unavailable; reconnect to read the result", json);
+                            report_error(&read_error, json);
+                            break std::process::ExitCode::from(1);
+                        }
+                        break durable_exit(&view);
+                    }
+                }
+            }
+            _ = time::sleep_until(deadline) => {
+                connection_notice("observation timed out; execution state unknown; reconnect with the same TurnId", json);
+                break std::process::ExitCode::from(1);
             }
         }
-    });
-
-    let request = RunTurnRequest {
-        input: prompt,
-        session_id,
-        loaded_profile: Some(loaded_profile),
-        cancel_flag: Some(cancel_flag),
-        test_llm: None,
-        test_project_root: None,
     };
+    Ok::<_, anyhow::Error>(exit)
+    }.await;
+    // 第二次 Ctrl+C 只结束观察；已开始的取消发送仍等确认，未知不能伪报成功。
+    if let Some(task) = cancel {
+        match time::timeout(Duration::from_secs(5), task).await {
+            Ok(receipt) => render_cancel(receipt, json),
+            Err(_) => connection_notice("cancel acknowledgement unknown", json),
+        }
+    }
+    if verbose && !json {
+        render_verbose_epilogue(&state, &mut std::io::stderr())?;
+    }
+    result
+}
 
-    // drive stream_turn; lattice-api owns Cep runtime construction
-    let mut stream = match lattice_api::stream_turn(session_api, request).await {
-        Ok(s) => s,
-        Err(lattice_api::ApiError::NotFound(id)) => {
-            eprintln!("{}: session '{}' not found", "error".red(), id);
-            return Ok(std::process::ExitCode::from(2));
+fn render_cancel(
+    receipt: Result<lattice_api::local::Result<bool>, tokio::task::JoinError>,
+    json: bool,
+) {
+    match receipt {
+        Ok(Ok(true)) => {
+            if json {
+                let _ = writeln!(
+                    std::io::stdout(),
+                    "{}",
+                    serde_json::json!({"type":"cancel_acknowledged", "owned":true})
+                );
+            } else {
+                let _ = writeln!(std::io::stderr(), "后台已接管取消；持久终态仍待查询");
+            }
         }
-        Err(lattice_api::ApiError::BadRequest(msg)) => {
-            eprintln!("{}: {}", "error".red(), msg);
-            return Ok(std::process::ExitCode::from(2));
-        }
-        Err(lattice_api::ApiError::Conflict(msg)) => {
-            eprintln!("{}: {}", "error".red(), msg);
-            return Ok(std::process::ExitCode::from(1));
-        }
-        Err(lattice_api::ApiError::Busy(msg)) => {
-            eprintln!("{}: {}", "error".red(), msg);
-            return Ok(std::process::ExitCode::from(1));
-        }
-        Err(lattice_api::ApiError::StoreUnavailable(msg)) => {
-            eprintln!("{}: {}", "error".red(), msg);
-            return Ok(std::process::ExitCode::from(1));
-        }
-        Err(lattice_api::ApiError::EvidenceDurabilityFailed(err)) => {
-            eprintln!("{}: {}", "error".red(), err);
-            return Ok(std::process::ExitCode::from(1));
-        }
-        Err(lattice_api::ApiError::RecoveryRequired(err)) => {
-            eprintln!("{}: recovery required: {}", "error".red(), err);
-            return Ok(std::process::ExitCode::from(1));
-        }
-        Err(lattice_api::ApiError::Internal(msg)) => {
-            eprintln!("{}: {}", "error".red(), msg);
-            return Ok(std::process::ExitCode::from(1));
-        }
-    };
+        Ok(Ok(false)) => connection_notice(
+            "Turn has no live owner; cancellation not confirmed; query or recover",
+            json,
+        ),
+        _ => connection_notice("cancel acknowledgement unknown", json),
+    }
+}
 
-    // drain the stream to completion; never break on a terminal event
+fn connection_notice(message: &str, json: bool) {
+    if json {
+        let _ = writeln!(
+            std::io::stdout(),
+            "{}",
+            serde_json::json!({"type":"connection", "message":message})
+        );
+    } else {
+        let _ = writeln!(std::io::stderr(), "{message}");
+    }
+}
+
+fn durable_exit(view: &SessionObservation) -> std::process::ExitCode {
     let mut state = RunRenderState::default();
-    let stdout = std::io::stdout();
-    let stderr = std::io::stderr();
-    let mut out = stdout.lock();
-    let mut err = stderr.lock();
+    if let Some(TurnObservation::Committed(turn)) = &view.requested_turn {
+        state.last_commit = Some(CommitSignal::Committed);
+        state.last_outcome = Some(turn.outcome.clone());
+    }
+    exit_code_from_state(&state)
+}
 
-    use futures::StreamExt;
-
-    loop {
-        let event =
-            match time::timeout(Duration::from_secs(STREAM_TIMEOUT_SECS), stream.next()).await {
-                Ok(Some(event)) => event,
-                Ok(None) => break,
-                Err(_) => {
-                    out.flush()?;
-                    writeln!(
-                        err,
-                        "{}: stream timed out after {}s",
-                        "error".red(),
-                        STREAM_TIMEOUT_SECS
-                    )?;
-                    err.flush()?;
-                    return Ok(std::process::ExitCode::from(1));
-                }
-            };
-
-        if json {
-            render_json_event(&event, &mut out)?;
-        } else {
-            render_human_event(&event, &mut state, &mut out, &mut err, verbose)?;
+pub async fn render_view(api: &LocalClient, view: &SessionObservation, json: bool) -> Result<()> {
+    if json {
+        writeln!(
+            std::io::stdout(),
+            "{}",
+            serde_json::json!({"type":"snapshot", "view":view})
+        )?;
+    } else {
+        writeln!(
+            std::io::stderr(),
+            "session {} active={}",
+            view.session.session_id,
+            view.active_turn
+                .as_ref()
+                .map(|turn| turn.turn_id.to_string())
+                .unwrap_or_else(|| "none".into())
+        )?;
+    }
+    let selected = match &view.requested_turn {
+        Some(TurnObservation::Committed(turn)) => {
+            Some((turn.commit_id.as_str(), outcome_label(&turn.outcome)))
         }
-
-        apply_event_to_state(&event, &mut state);
+        Some(TurnObservation::Pending(turn)) => Some((turn.journal_oid.as_str(), "pending")),
+        None => view
+            .active_turn
+            .as_ref()
+            .map(|turn| (turn.journal_oid.as_str(), "pending")),
+    };
+    if let Some((object_id, status)) = selected {
+        let messages = api
+            .read_messages(&view.session.session_id, object_id)
+            .await?;
+        if json {
+            for message in messages {
+                writeln!(
+                    std::io::stdout(),
+                    "{}",
+                    serde_json::json!({"type":"transcript", "object_id":object_id, "state":status, "message":message})
+                )?;
+            }
+        } else {
+            writeln!(
+                std::io::stdout(),
+                "\n--- 固定可见正文 {object_id} ({status})；持久确认以完成回执为准 ---"
+            )?;
+            for message in messages {
+                for part in message.parts {
+                    use lattice_api::local::MessageSemantic;
+                    match part.semantic {
+                        MessageSemantic::Text { text } => writeln!(std::io::stdout(), "{text}")?,
+                        MessageSemantic::ToolResult {
+                            name,
+                            outcome,
+                            content,
+                            ..
+                        } => {
+                            writeln!(
+                                std::io::stdout(),
+                                "{name} · {}\n{}",
+                                outcome.as_str(),
+                                content.as_deref().unwrap_or("结果材料不可用")
+                            )?;
+                        }
+                        MessageSemantic::Reasoning { .. } | MessageSemantic::ToolCall { .. } => {}
+                    }
+                }
+            }
+        }
     }
+    Ok(())
+}
 
-    // Abort the scoped SIGINT listener once the stream has drained so it
-    // cannot observe a later command's SIGINT.
-    sigint_guard.abort();
+fn error_record(error: &anyhow::Error) -> (u8, serde_json::Value) {
+    let local = error
+        .downcast_ref::<lattice_api::local::LocalError>()
+        .cloned()
+        .or_else(|| {
+            error
+                .downcast_ref::<lattice_api::ApiError>()
+                .cloned()
+                .map(Into::into)
+        });
+    let code = match local.as_ref().map(|error| error.kind) {
+        Some(LocalErrorKind::BadRequest | LocalErrorKind::NotFound) => 2,
+        _ => 1,
+    };
+    let value = match local {
+        Some(error) => {
+            serde_json::json!({"type":"error", "kind":error.kind, "message":error.message, "recovery":error.recovery})
+        }
+        None => {
+            serde_json::json!({"type":"error", "kind":"internal", "message":"command failed; inspect configuration and durable state"})
+        }
+    };
+    (code, value)
+}
 
-    // final stdout newline (human mode only; JSONL already terminates each line)
-    if !json && state.tokens_emitted_without_newline {
-        writeln!(out)?;
+pub fn report_error(error: &anyhow::Error, json: bool) -> std::process::ExitCode {
+    let (code, value) = error_record(error);
+    if json {
+        let _ = writeln!(std::io::stdout(), "{value}");
+    } else {
+        let _ = writeln!(
+            std::io::stderr(),
+            "error: {}",
+            value["message"].as_str().unwrap_or("command failed")
+        );
     }
-    out.flush()?;
-
-    // verbose epilogue after stream drains
-    if !json && verbose {
-        render_verbose_epilogue(&state, &mut err)?;
-    }
-
-    Ok(exit_code_from_state(&state))
+    std::process::ExitCode::from(code)
 }
 
 pub(crate) fn load_named_profile(
     agent_name: &str,
     project_root: &Path,
 ) -> std::result::Result<LoadedAgentProfile, anyhow::Error> {
-    let global_agents_dir = safe_agents_dir(None).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let global_agents_dir = safe_agents_dir(None).map_err(lattice_api::ApiError::BadRequest)?;
     lattice_api::resolve_named_agent_profile(agent_name, project_root, &global_agents_dir)
         .map_err(Into::into)
 }
 
-pub(crate) fn safe_agents_dir(override_path: Option<&str>) -> Result<PathBuf, String> {
-    let path = if let Some(p) = override_path {
-        PathBuf::from(p)
+pub(crate) fn agents_dir(override_path: Option<&str>) -> PathBuf {
+    if let Some(path) = override_path {
+        PathBuf::from(path)
     } else if let Ok(dir) = std::env::var("LATTICE_AGENTS_DIR") {
         PathBuf::from(dir)
     } else if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".lattice").join("agents")
+        PathBuf::from(home).join(".lattice/agents")
     } else {
         PathBuf::from(".lattice/agents")
-    };
+    }
+}
 
+pub(crate) fn safe_agents_dir(override_path: Option<&str>) -> Result<PathBuf, String> {
+    let path = agents_dir(override_path);
     validate_agents_dir(&path)?;
     Ok(path)
 }
 
-pub(crate) fn validate_agents_dir(path: &Path) -> Result<(), String> {
-    let canonical = canonicalize_agents_dir_prefix(path)?;
-
-    let dangerous_prefixes = [
-        Path::new("/etc"),
-        Path::new("/usr"),
-        Path::new("/var"),
-        Path::new("/sys"),
-        Path::new("/proc"),
-        Path::new("/dev"),
-        Path::new("/boot"),
-    ];
-    for prefix in &dangerous_prefixes {
-        if canonical.starts_with(prefix) {
-            return Err(format!(
-                "Agents directory '{}' is inside a system path ({}). \
-                 Set LATTICE_AGENTS_DIR to a safe location (e.g., under $HOME or your project).",
-                path.display(),
-                prefix.display()
-            ));
-        }
-    }
-
-    let tmp_root = Path::new("/tmp")
-        .canonicalize()
-        .unwrap_or_else(|_| PathBuf::from("/tmp"));
-    if canonical.starts_with(&tmp_root) {
-        return Err(format!(
-            "Agents directory '{}' is inside /tmp which is world-writable and unsafe. \
-             Set LATTICE_AGENTS_DIR to a safe location.",
-            path.display()
-        ));
-    }
-
-    Ok(())
-}
-
-pub(crate) fn canonicalize_agents_dir_prefix(path: &Path) -> Result<PathBuf, String> {
-    if path.as_os_str().is_empty() {
-        return Ok(PathBuf::new());
-    }
-    if path
-        .components()
-        .any(|component| matches!(component, std::path::Component::ParentDir))
-    {
-        return Err(format!(
-            "Agents directory '{}' contains path traversal.",
-            path.display()
-        ));
-    }
-
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map_err(|error| format!("cannot resolve current directory: {error}"))?
-            .join(path)
-    };
-
-    let mut cursor = absolute.as_path();
-    let mut missing = Vec::new();
-    loop {
-        match cursor.canonicalize() {
-            Ok(mut canonical) => {
-                for component in missing.iter().rev() {
-                    canonical.push(component);
-                }
-                return Ok(canonical);
-            }
-            Err(error) => {
-                let Some(file_name) = cursor.file_name() else {
-                    return Err(format!(
-                        "cannot resolve agents directory '{}': {}",
-                        path.display(),
-                        error
-                    ));
-                };
-                missing.push(file_name.to_os_string());
-                let Some(parent) = cursor.parent() else {
-                    return Err(format!(
-                        "cannot resolve agents directory '{}': {}",
-                        path.display(),
-                        error
-                    ));
-                };
-                cursor = parent;
-            }
-        }
-    }
-}
+pub(crate) use lattice_api::validate_agents_dir;
 
 #[cfg(test)]
 #[path = "run_tests.rs"]

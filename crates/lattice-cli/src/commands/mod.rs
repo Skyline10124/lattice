@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod audit;
+pub mod daemon;
 pub mod doctor;
 pub mod lancet;
 pub(crate) mod model_render;
