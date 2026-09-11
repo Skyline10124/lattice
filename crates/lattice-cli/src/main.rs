@@ -176,8 +176,7 @@ async fn run_commands(cli: Cli) -> Result<std::process::ExitCode> {
             agent,
             project_branch,
         }) => {
-            let agents_dir =
-                commands::run::safe_agents_dir(None).map_err(|error| anyhow::anyhow!(error))?;
+            let agents_dir = commands::run::agents_dir(None);
             return lattice_tui::run(lattice_tui::TuiOptions {
                 session_id,
                 agent,

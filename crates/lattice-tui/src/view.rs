@@ -449,8 +449,13 @@ pub(crate) fn transcript_lines(app: &App, content_w: u16) -> Vec<Line<'static>> 
     let unicode = locale_utf8();
     let mut lines = Vec::new();
     let mut assistant_header = false;
+    let mut agent = app.ctx.active_agent.as_str();
     for block in &app.blocks {
         match block {
+            Block::AgentName(name) => {
+                agent = name;
+                assistant_header = false;
+            }
             Block::User(text) => {
                 separate(&mut lines);
                 lines.extend(body("user", content_w, role_style(Role::User)));
@@ -458,21 +463,11 @@ pub(crate) fn transcript_lines(app: &App, content_w: u16) -> Vec<Line<'static>> 
                 assistant_header = false;
             }
             Block::Assistant(text) => {
-                ensure_assistant_header(
-                    &mut lines,
-                    &mut assistant_header,
-                    &app.ctx.active_agent,
-                    content_w,
-                );
+                ensure_assistant_header(&mut lines, &mut assistant_header, agent, content_w);
                 lines.extend(body(text, content_w, role_style(Role::Assistant)));
             }
             Block::Tool { name, state, .. } => {
-                ensure_assistant_header(
-                    &mut lines,
-                    &mut assistant_header,
-                    &app.ctx.active_agent,
-                    content_w,
-                );
+                ensure_assistant_header(&mut lines, &mut assistant_header, agent, content_w);
                 lines.extend(tool_lines(name, state, content_w, unicode));
             }
             Block::Status { kind, placement } => {
@@ -491,7 +486,7 @@ pub(crate) fn transcript_lines(app: &App, content_w: u16) -> Vec<Line<'static>> 
                         ensure_assistant_header(
                             &mut lines,
                             &mut assistant_header,
-                            &app.ctx.active_agent,
+                            agent,
                             content_w,
                         );
                         lines.extend(status_lines(kind, content_w, unicode));
@@ -549,6 +544,12 @@ fn tool_lines(name: &str, state: &ToolState, content_w: u16, unicode: bool) -> V
             content_w,
             dim,
         ),
+        ToolState::Unknown => body(&format!("{name} · 观察结果未知"), content_w, dim),
+        ToolState::Unavailable { outcome } => body(
+            &format!("{name} · {outcome}；结果材料不可用"),
+            content_w,
+            dim,
+        ),
         ToolState::Ok { output_len } => vec![Line::from(vec![
             Span::styled(format!("{} ", fold_symbol(false, unicode)), dim),
             Span::styled(symbol(SymbolKind::Ok, unicode), role_style(Role::ToolOk)),
@@ -575,6 +576,7 @@ fn status_text(kind: &StatusKind, unicode: bool) -> String {
         StatusKind::Committed { commit_id } => format!(
             "{} committed {commit_id}", symbol(SymbolKind::Ok, unicode)
         ),
+        StatusKind::Visible { commit_id } => format!("结果可见 {commit_id}；完成确认未知"),
         StatusKind::CommitFailed { reason } => format!(
             "{} commit failed: {reason}", symbol(SymbolKind::Failed, unicode)
         ),
@@ -607,7 +609,7 @@ fn status_lines(kind: &StatusKind, content_w: u16, unicode: bool) -> Vec<Line<'s
         | StatusKind::TurnFailed { .. }
         | StatusKind::Cancelled { .. }
         | StatusKind::LlmFailed { .. } => role_style(Role::ToolErr),
-        StatusKind::LlmRetry { .. } => role_style(Role::DimMeta),
+        StatusKind::LlmRetry { .. } | StatusKind::Visible { .. } => role_style(Role::DimMeta),
         StatusKind::Notice(_) => return Vec::new(),
     };
     body(&status_text(kind, unicode), content_w, style)
@@ -700,7 +702,7 @@ fn draw_right_status(frame: &mut Frame, app: &App, area: Rect) {
     set_status_row(
         &mut rows,
         3,
-        phase_text(app.phase),
+        &phase_and_connection(app),
         phase_role(app.phase),
         available,
     );
@@ -767,7 +769,8 @@ fn draw_bottomline(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn bottom_status_line(app: &App, width: usize) -> Line<'static> {
-    let phase = phase_text(app.phase);
+    let state = phase_and_connection(app);
+    let phase = state.as_str();
     let scroll = (!app.viewport.following()).then_some("[scroll]");
     let key = if ctrl_c_visible(app) {
         CTRL_C_HINT
@@ -830,6 +833,15 @@ fn bottom_status_line(app: &App, width: usize) -> Line<'static> {
 fn joined_width<'a>(parts: impl Iterator<Item = &'a str>) -> usize {
     let parts = parts.collect::<Vec<_>>();
     parts.iter().map(|part| display_width(part)).sum::<usize>() + parts.len().saturating_sub(1) * 3
+}
+
+fn phase_and_connection(app: &App) -> String {
+    let phase = phase_text(app.phase);
+    if app.connected {
+        phase.into()
+    } else {
+        format!("{phase} · offline")
+    }
 }
 
 fn phase_text(phase: TurnPhase) -> &'static str {
@@ -969,6 +981,36 @@ mod tests {
         viewport.page_down(30, 10);
         assert!(viewport.following());
         assert_eq!(viewport.scroll(), 20);
+    }
+
+    #[test]
+    fn historical_agent_names_do_not_use_the_current_profile_label() {
+        let mut app = test_app();
+        app.blocks = vec![
+            Block::AgentName("previous-agent".into()),
+            Block::User("old prompt".into()),
+            Block::Assistant("old answer".into()),
+            Block::AgentName("next-agent".into()),
+            Block::User("next prompt".into()),
+            Block::Assistant("next answer".into()),
+        ];
+        let text = transcript_lines(&app, 80)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            text.iter()
+                .filter(|line| line.trim() == "previous-agent")
+                .count(),
+            1
+        );
+        assert_eq!(
+            text.iter()
+                .filter(|line| line.trim() == "next-agent")
+                .count(),
+            1
+        );
+        assert!(!text.iter().any(|line| line.trim() == "agent"));
     }
 
     #[test]

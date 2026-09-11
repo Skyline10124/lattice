@@ -3162,6 +3162,7 @@ dependencies = [
  "futures",
  "lattice-api",
  "ratatui",
+ "serde_json",
  "tempfile",
  "tokio",
  "unicode-width",
