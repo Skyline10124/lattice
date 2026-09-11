@@ -3,6 +3,8 @@
 
 #![allow(dead_code)]
 
+#[cfg(feature = "crash-barriers")]
+pub(crate) mod crash;
 use lattice_system_harness::{
     AssertError, CapturedRequest, CommandOutcome, FAKE_API_KEY, FakeLlmServer, HarnessIntervention,
     LatticeCommand, LatticeDriver, ProcessTermination, ResponseGate, ScenarioEvidence,
