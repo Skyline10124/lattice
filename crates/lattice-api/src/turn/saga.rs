@@ -263,19 +263,6 @@ pub(super) async fn run_coordinator_saga(
                 })
                 .await;
 
-            let (step_tx, mut step_rx) =
-                mpsc::channel::<ModelStepEvent>(TURN_EVENT_CHANNEL_CAPACITY);
-            let forward_tx = agent_tx.clone();
-            let forwarder = tokio::spawn(async move {
-                while let Some(event) = step_rx.recv().await {
-                    if let Some(mapped) = map_step_event(event)
-                        && forward_tx.send(mapped).await.is_err()
-                    {
-                        break;
-                    }
-                }
-            });
-
             let step_request = ModelStepRequest {
                 system_prompt: prepared.system_prompt.clone(),
                 history: history.clone(),
@@ -307,10 +294,17 @@ pub(super) async fn run_coordinator_saga(
                     diagnostic: None,
                 })
             } else {
-                model_driver.run(&step_request, Some(&step_tx)).await
+                model_driver
+                    .run(
+                        &step_request,
+                        Some(&mut |event| {
+                            if let Some(event) = map_step_event(event) {
+                                observer.emit_delta(event);
+                            }
+                        }),
+                    )
+                    .await
             };
-            drop(step_tx);
-            let _ = forwarder.await;
             drain_ready_events(&mut agent_rx, &mut ordered_events, observer).await;
 
             match attempt_result {
