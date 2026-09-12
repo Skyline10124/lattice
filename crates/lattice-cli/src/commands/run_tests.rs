@@ -37,6 +37,72 @@ fn structured_errors_keep_exit_classes_without_echoing_private_input() {
         assert!(!record.to_string().contains("private-test-secret"));
     }
 }
+
+#[tokio::test]
+async fn send_binding_conflict_is_exit_two_but_daemon_identity_conflict_stays_one() {
+    use lattice_api::local::{LocalErrorKind, serve};
+    use std::os::unix::fs::PermissionsExt;
+    let _serial = super::ipc_tests::signal_guard().await;
+
+    let temp = tempfile::tempdir().unwrap();
+    let layout = StateLayout::in_state_root(temp.path());
+    let store = lattice_api::SessionApi::git_create_with_layout(
+        layout.lattice_root().join("sessions.git"),
+        &layout,
+    )
+    .unwrap();
+    let session = store
+        .create_session(lattice_api::CreateSessionRequest {
+            label: None,
+            active_agent: "unused".into(),
+            project_branch: "main".into(),
+            project_store_key: lattice_api::LocalWorkspaceRoot::from_path(temp.path())
+                .unwrap()
+                .store_key_hex(),
+        })
+        .unwrap();
+    let client = LocalClient::new(layout.clone());
+    let backend = tokio::spawn(serve(layout.clone()));
+    time::timeout(Duration::from_secs(10), async {
+        while client.status().await.is_err() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let error = run_session_prompt(
+        &client,
+        "private-test-secret".into(),
+        session.session_id,
+        Some(lattice_api::local::new_turn_id()),
+        false,
+        true,
+    )
+    .await
+    .unwrap_err();
+    client.stop().await.unwrap();
+    backend.await.unwrap().unwrap();
+
+    let socket = layout.lattice_root().join("local/api.sock");
+    let _listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let daemon_error = serve(layout).await.unwrap_err();
+    assert_eq!(daemon_error.kind, LocalErrorKind::Conflict);
+    assert_eq!(
+        report_error(&daemon_error.into(), true),
+        std::process::ExitCode::from(1)
+    );
+
+    let (code, record) = error_record(&error);
+    let jsonl = format!("{record}\n");
+    let parsed: serde_json::Value = serde_json::from_str(jsonl.trim_end()).unwrap();
+    assert_eq!(parsed["type"], "error");
+    assert_eq!(parsed["kind"], "conflict");
+    assert!(!jsonl.contains("private-test-secret"));
+    assert_eq!(report_error(&error, true), std::process::ExitCode::from(2));
+    assert_eq!(code, 2);
+}
+
 #[test]
 fn stream_timeout_constant_is_5_minutes() {
     // STREAM_TIMEOUT_SECS must be 300 (5 minutes)
