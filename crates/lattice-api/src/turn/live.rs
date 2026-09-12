@@ -154,6 +154,8 @@ pub(super) async fn run_live_turn_task(
     facts
         .validate()
         .map_err(|err| crate::session::ApiError::BadRequest(err.to_string()))?;
+    // 身份与冻结事实均已在执行锁下核验；先接线再发布，避免可见 Turn 无观察所有者。
+    let _ = feedback.verified_turn.set(turn_id);
     if let Err(error) = coordinator
         .io
         .begin_turn(facts, Arc::clone(&execution_lock))
@@ -207,7 +209,7 @@ pub(super) async fn stream_turn_live_prepared(
         let mut feedback = super::execute::ExecutionFeedback {
             acceptance: Some(accepted),
             observer: ObserverSink::new(tx),
-            recovery_target: Arc::default(),
+            verified_turn: Arc::default(),
         };
         if let Err(error) = run_live_turn_task(
             prepared,

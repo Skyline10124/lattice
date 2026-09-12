@@ -38,7 +38,7 @@ struct Owner {
     // 即使转发观察或准备任务 panic，监督者也必须等待已经接管的核心执行结束。
     core: Mutex<Option<CoreCompletion>>,
     turn: Mutex<Option<OwnedTurn>>,
-    recovery_target: Arc<std::sync::OnceLock<TurnId>>,
+    verified_turn: Arc<std::sync::OnceLock<TurnId>>,
 }
 
 impl Owner {
@@ -52,7 +52,7 @@ impl Owner {
             cancel: Arc::default(),
             core: Mutex::new(None),
             turn: Mutex::new(None),
-            recovery_target: Arc::default(),
+            verified_turn: Arc::default(),
         }
     }
     fn source_sequence(&self) -> u64 {
@@ -251,7 +251,7 @@ impl Backend {
                     .sequence
                     .store(sequence.load(Ordering::Acquire), Ordering::Release);
             }
-            if let Some(id) = task_owner.recovery_target.get() {
+            if let Some(id) = task_owner.verified_turn.get() {
                 let mut turn = lock(&task_owner.turn);
                 let turn = turn.get_or_insert(OwnedTurn {
                     id: *id,
@@ -302,7 +302,7 @@ impl Backend {
                 let recovered = crate::turn::recover_turn_with_target(
                     api,
                     session_id.clone(),
-                    owner.recovery_target.clone(),
+                    owner.verified_turn.clone(),
                 )
                 .await?;
                 if let Some(commit) = &recovered {
@@ -436,7 +436,7 @@ impl Backend {
             },
             connection,
             false,
-            owner.recovery_target.clone(),
+            owner.verified_turn.clone(),
         );
         let crate::TurnExecution {
             acceptance,
@@ -706,21 +706,34 @@ impl Backend {
     ) -> Result<()> {
         // 慢观察者不能占满所有连接槽，保留普通查询和取消的接入空间。
         let _subscription = self.subscriptions.try_acquire().map_err(|_| busy())?;
-        let owner = lock(&self.admission)
-            .owners
-            .get(&session_id)
-            .filter(|owner| {
+        let (owner, mut events, mut done, view, known_completion) = loop {
+            let candidate = lock(&self.admission).owners.get(&session_id).cloned();
+            // 候选者可能尚在核验身份；先登记通道，快照后才按核心验证结果决定归属。
+            let events = candidate.as_ref().map(|owner| owner.events.subscribe());
+            let done = candidate.as_ref().map(|owner| owner.done.subscribe());
+            let view = self.query(session_id.clone(), Some(turn_id)).await?;
+            let state = lock(&self.admission);
+            if state.owners.get(&session_id).is_some_and(|current| {
+                !candidate
+                    .as_ref()
+                    .is_some_and(|owner| Arc::ptr_eq(owner, current))
+            }) {
+                // 查询期间出现新所有者：为它登记通道并重新固定快照，不能复用旧 cut。
+                continue;
+            }
+            let owner = candidate.filter(|owner| {
                 lock(&owner.turn)
                     .as_ref()
                     .is_some_and(|turn| turn.id == turn_id)
-                    || owner.recovery_target.get() == Some(&turn_id)
-            })
-            .cloned();
-        // 先登记，再固定引用，最后读取核心序号。包含在快照中的正文早于这个 cut 产生，
-        // 转发队列可能落后，不能以转发进度判定哪些 token 尚未被快照覆盖。
-        let mut events = owner.as_ref().map(|owner| owner.events.subscribe());
-        let mut done = owner.as_ref().map(|owner| owner.done.subscribe());
-        let view = self.query(session_id.clone(), Some(turn_id)).await?;
+                    || owner.verified_turn.get() == Some(&turn_id)
+            });
+            let completion = state
+                .completions
+                .get(&(session_id.clone(), turn_id))
+                .cloned();
+            break (owner, events, done, view, completion);
+        };
+        // 固定引用后读取核心序号；转发队列可能落后，不能以转发进度判断快照覆盖。
         let mut sequence = owner.as_ref().map_or(0, |owner| owner.source_sequence());
         if previous
             .as_ref()
@@ -735,10 +748,6 @@ impl Backend {
             )
             .await?;
         }
-        let known_completion = lock(&self.admission)
-            .completions
-            .get(&(session_id.clone(), turn_id))
-            .cloned();
         if owner.is_none()
             && (known_completion.is_some()
                 || matches!(view.requested_turn, Some(TurnObservation::Committed(_))))
@@ -903,6 +912,181 @@ pub async fn serve(layout: crate::StateLayout) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn subscription_handoff(start_before_snapshot: bool, claim_before_snapshot: bool) {
+        use std::{future::Future, task::Poll};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let directory = tempfile::tempdir().unwrap();
+        let backend = Backend::new(crate::StateLayout::in_state_root(directory.path()));
+        let root = crate::LocalWorkspaceRoot::from_path(directory.path()).unwrap();
+        let Response::Session(session) = backend
+            .dispatch(Request::Create {
+                request: crate::CreateSessionRequest {
+                    label: None,
+                    active_agent: "local-test".into(),
+                    project_branch: "main".into(),
+                    project_store_key: root.store_key_hex(),
+                },
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("session")
+        };
+        let request = TurnRequest {
+            session_id: session.session_id,
+            turn_id: super::super::new_turn_id(),
+            workspace: root.canonical_path().into(),
+            input: "handoff".into(),
+        };
+        let owner = Arc::new(Owner::new(Some(request.clone())));
+        if claim_before_snapshot {
+            lock(&backend.admission)
+                .owners
+                .insert(request.session_id.clone(), owner.clone());
+        }
+        let provider = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let configuration = super::super::tests::frozen(
+            directory.path(),
+            &format!("http://{}/v1", provider.local_addr().unwrap()),
+        );
+        let mut submit =
+            Box::pin(backend.submit(request.clone(), Some(Box::new(configuration)), &owner));
+        let (writer, mut reader) = UnixStream::pair().unwrap();
+        let (entered, entry) = oneshot::channel();
+        let (release, resume) = oneshot::channel();
+        let mut observing = None;
+        if !start_before_snapshot {
+            *lock(&backend.snapshot_gate) = Some((entered, resume));
+            observing = Some(tokio::spawn(connection(backend.clone(), writer)));
+            ipc::write(
+                &mut reader,
+                &Request::Subscribe {
+                    session_id: request.session_id.clone(),
+                    turn_id: request.turn_id,
+                    cursor: None,
+                },
+            )
+            .await
+            .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), entry)
+                .await
+                .unwrap()
+                .unwrap();
+        } else {
+            drop(entered);
+            drop(resume);
+            drop(writer);
+        }
+        if !claim_before_snapshot {
+            lock(&backend.admission)
+                .owners
+                .insert(request.session_id.clone(), owner.clone());
+        }
+        // 保留真实 submit future，但在核心接管后暂停 acceptance continuation 的轮询。
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            futures::future::poll_fn(|cx| {
+                assert!(submit.as_mut().poll(cx).is_pending());
+                if lock(&owner.core).is_some() {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            }),
+        )
+        .await
+        .unwrap();
+        let (mut response, _) = tokio::time::timeout(Duration::from_secs(10), provider.accept())
+            .await
+            .expect("core must reach the provider before observing the acceptance handoff")
+            .unwrap();
+        // provider 连接证明核心已通过真实准入并发布 TurnStarted，仍不恢复后台 continuation。
+        if start_before_snapshot {
+            let (writer, client) = UnixStream::pair().unwrap();
+            reader = client;
+            observing = Some(tokio::spawn(connection(backend.clone(), writer)));
+            ipc::write(
+                &mut reader,
+                &Request::Subscribe {
+                    session_id: request.session_id.clone(),
+                    turn_id: request.turn_id,
+                    cursor: None,
+                },
+            )
+            .await
+            .unwrap();
+        } else {
+            release.send(()).unwrap();
+        }
+        let snapshot = loop {
+            match observe(&mut reader).await {
+                Observation::Gap { .. } => {}
+                observation => break observation,
+            }
+        };
+        assert!(
+            matches!(&snapshot, Observation::Snapshot { owned: true, view, .. }
+                if matches!(&view.requested_turn, Some(TurnObservation::Pending(turn)) if turn.turn_id == request.turn_id)),
+            "verified Turn must remain owned across acceptance handoff: {snapshot:?}"
+        );
+        // 排空请求后才交付响应，避免未读请求的 TCP reset 冒充执行失败。
+        let mut headers = Vec::new();
+        while !headers.ends_with(b"\r\n\r\n") {
+            headers.push(response.read_u8().await.unwrap());
+            assert!(headers.len() <= 65_536);
+        }
+        let headers = String::from_utf8(headers).unwrap();
+        let length: usize = headers
+            .lines()
+            .find_map(|line| {
+                line.to_ascii_lowercase()
+                    .strip_prefix("content-length:")
+                    .map(|n| n.trim().parse().unwrap())
+            })
+            .unwrap();
+        assert!(length < 1_048_576);
+        response.read_exact(&mut vec![0; length]).await.unwrap();
+        let body = "data: {\"choices\":[{\"delta\":{\"content\":\"handoff completed\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+        response.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), submit)
+            .await
+            .unwrap()
+            .unwrap();
+        let (completion, _) = lock(&owner.core).take().unwrap();
+        let completed = completion.await.unwrap().unwrap();
+        assert!(
+            matches!(completed, crate::TurnCompletion::Committed(ref turn) if matches!(turn.outcome, crate::TurnOutcome::Completed { .. }))
+        );
+        owner.done.send_replace(Some(Ok(())));
+        loop {
+            if let Observation::Finished { view, error, .. } = observe(&mut reader).await {
+                assert!(error.is_none(), "{error:?}");
+                assert!(
+                    matches!(view.requested_turn, Some(TurnObservation::Committed(turn)) if matches!(turn.outcome, crate::TurnOutcome::Completed { .. }))
+                );
+                break;
+            }
+        }
+        observing.unwrap().await.unwrap().unwrap();
+        lock(&backend.admission).owners.clear();
+    }
+
+    #[tokio::test]
+    async fn subscription_handoff_after_core_acceptance() {
+        subscription_handoff(true, true).await;
+    }
+
+    #[tokio::test]
+    async fn subscription_handoff_verifies_owner_after_snapshot_capture() {
+        subscription_handoff(false, true).await;
+    }
+
+    #[tokio::test]
+    async fn subscription_handoff_claim_during_snapshot_capture() {
+        subscription_handoff(false, false).await;
+    }
 
     #[tokio::test]
     async fn invalid_frozen_tool_tls_roots_reject_before_acceptance() {

@@ -156,7 +156,7 @@ pub(crate) async fn recover_turn_with_target(
 pub(super) struct ExecutionFeedback {
     pub(super) acceptance: Option<oneshot::Sender<Result<TurnAcceptance>>>,
     pub(super) observer: ObserverSink,
-    pub(super) recovery_target: Arc<std::sync::OnceLock<lancet_protocol::TurnId>>,
+    pub(super) verified_turn: Arc<std::sync::OnceLock<lancet_protocol::TurnId>>,
 }
 
 impl ExecutionFeedback {
@@ -194,7 +194,7 @@ pub(crate) fn start_execution(
     mut request: RunTurnRequest,
     connection: Option<Arc<lattice_llm::LlmConnection>>,
     capture_env: bool,
-    recovery_target: Arc<std::sync::OnceLock<lancet_protocol::TurnId>>,
+    verified_turn: Arc<std::sync::OnceLock<lancet_protocol::TurnId>>,
 ) -> TurnExecution {
     let cancel_flag = request
         .cancel_flag
@@ -209,7 +209,7 @@ pub(crate) fn start_execution(
         let mut feedback = ExecutionFeedback {
             acceptance: Some(acceptance_tx),
             observer: ObserverSink::sequenced(events_tx, sequence),
-            recovery_target,
+            verified_turn,
         };
         let result = std::panic::AssertUnwindSafe(execute_owned(
             session,
@@ -263,6 +263,7 @@ async fn execute_owned(
         let store = session.git_store_for_coordinator()?;
         let id = locked.session_id.clone();
         let input = request.input.clone();
+        let verified_turn = feedback.verified_turn.clone();
         let lock = Arc::clone(&locked.execution_lock);
         tokio::task::spawn_blocking(move || -> Result<_> {
             let view = store
@@ -284,6 +285,8 @@ async fn execute_owned(
                     "TurnId is already bound to different input".into(),
                 ));
             }
+            // 已有 Turn 的输入与项目绑定已核验；确认屏障之前即确定诊断与订阅归属。
+            let _ = verified_turn.set(turn_id);
             // 找回也须确认原发布的屏障；不覆盖冻结配置、不请求模型、不执行恢复。
             let confirmation = match &existing {
                 lattice_session::StoredTurn::Pending(_) => {
@@ -312,7 +315,7 @@ async fn execute_owned(
             lattice_session::StoredTurn::Pending(_) => TurnCompletion::Pending(turn_id),
         });
     }
-    if let Some(commit) = reconcile(&locked, &feedback.recovery_target).await? {
+    if let Some(commit) = reconcile(&locked, &feedback.verified_turn).await? {
         feedback.accept(TurnAcceptance::Recovered(Box::new(commit.clone())));
         feedback.observer.emit(committed_event(&commit)).await;
         return Ok(TurnCompletion::Committed(Box::new(commit)));
