@@ -521,6 +521,8 @@ pub struct ScenarioEvidence {
     failure_dir: PathBuf,
     _claim: ArtifactClaim,
     daemon: std::sync::Arc<crate::daemon::ScenarioDaemon>,
+    /// 与世界共享的场景预算槽：收尾时普通 stop 只用同一起点的剩余量。
+    budget: std::sync::Arc<crate::world::BudgetSlot>,
     project_dir: PathBuf,
     before: WorkspaceSnapshot,
     commands: Vec<RecordedCommand>,
@@ -557,6 +559,7 @@ impl ScenarioEvidence {
             failure_dir,
             _claim: claim,
             daemon: world.daemon.clone(),
+            budget: world.budget_slot(),
             project_dir: world.project_dir().to_path_buf(),
             before,
             commands: Vec::new(),
@@ -599,7 +602,7 @@ impl ScenarioEvidence {
     ) -> Result<(), FailureReport> {
         let secrets: Vec<&str> = self.sentinels.iter().map(String::as_str).collect();
         let mut report = FailureReport::new(primary_assertion, &secrets);
-        let cleanup = self.daemon.cleanup();
+        let cleanup = self.daemon.cleanup(self.budget.normal_stop_deadline());
         let persist = persist || cleanup.is_err();
         if let Err(errors) = cleanup {
             for error in errors {

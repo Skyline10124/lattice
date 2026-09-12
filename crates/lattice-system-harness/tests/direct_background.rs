@@ -150,7 +150,7 @@ fn finish(evidence: ScenarioEvidence, result: std::thread::Result<()>) {
 #[test]
 fn detached_cli_finishes_and_world_owns_daemon_cleanup() {
     let (world, spec) = direct_world("background-cli-detach", "background", "[]", "");
-    let budget = spec.start_budget();
+    let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let (server, gate) = wire_gated_fake_llm(
@@ -228,7 +228,7 @@ fn detached_cli_finishes_and_world_owns_daemon_cleanup() {
 #[test]
 fn unread_acceptance_retry_and_restart_keep_one_turn() {
     let (world, spec) = direct_world("background-unread-acceptance", "background", "[]", "");
-    let budget = spec.start_budget();
+    let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let (server, gate) = wire_gated_fake_llm(
@@ -323,7 +323,7 @@ fn unread_acceptance_retry_and_restart_keep_one_turn() {
 #[test]
 fn busy_cancel_and_stop_do_not_serialize_distinct_sessions() {
     let (world, spec) = direct_world("background-concurrent-stop", "background", "[]", "");
-    let budget = spec.start_budget();
+    let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let (server, gate) =
@@ -470,7 +470,7 @@ fn busy_cancel_and_stop_do_not_serialize_distinct_sessions() {
 #[test]
 fn concurrent_autostart_has_one_owner_and_gap_reloads_result() {
     let (world, spec) = direct_world("background-start-gap", "background", "[]", "");
-    let budget = spec.start_budget();
+    let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let a = command(
@@ -560,7 +560,7 @@ fn shared_daemon_keeps_project_endpoints_keys_and_profiles_frozen() {
         "[\"session.todo_write\"]",
         "",
     );
-    let budget = spec.start_budget();
+    let budget = world.budget(&spec);
     let key_a = "project-alpha-private-fixture-key";
     let key_b = "project-beta-private-fixture-key";
     let mut evidence =
@@ -714,7 +714,7 @@ fn shared_daemon_keeps_project_endpoints_keys_and_profiles_frozen() {
 #[test]
 fn slow_subscriber_cannot_block_fixed_result_or_other_queries() {
     let (world, spec) = direct_world("background-slow-subscriber", "background", "[]", "");
-    let budget = spec.start_budget();
+    let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // 总正文在2MiB内，但远超Unix socket和观察队列；不是单事件超限的Gap场景。
@@ -772,6 +772,92 @@ fn slow_subscriber_cannot_block_fixed_result_or_other_queries() {
         drop(slow);
         assert_eq!(server.captured_requests().len(), 1);
         evidence.record_captures(server.captured_requests());
+    }));
+    finish(evidence, result);
+}
+
+/// 场景预算只有一个起点：较晚创建的发送驱动必须承接之前步骤已消耗的时间，
+/// 而不是从自己的创建时刻重新计时。
+#[test]
+fn later_session_driver_keeps_the_scenario_budget_origin() {
+    let (world, spec) = direct_world("background-budget-origin", "background", "[]", "");
+    let budget = world.budget(&spec);
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // 先用一步真实命令消耗预算，再创建驱动。
+        let help = run(&world, &budget, &mut evidence, &["--help"]);
+        assert!(help.is_clean_exit(0), "help: {}", help.summary());
+        let consumed = budget.elapsed();
+        let creating = Instant::now();
+        let driver = driver();
+        let session = SessionSendDriver::new(&driver, &world, &spec, "background", "main").unwrap();
+        let creation = creating.elapsed();
+        let seen = session.budget().elapsed();
+        assert!(
+            seen >= consumed + creation,
+            "driver budget restarted at creation: driver elapsed {seen:?} < scenario {consumed:?} + creation {creation:?}"
+        );
+        assert_eq!(
+            session.budget().remaining().is_some(),
+            budget.remaining().is_some()
+        );
+        world
+            .stop_daemon()
+            .expect("normal daemon cleanup within the scenario budget");
+    }));
+    finish(evidence, result);
+}
+
+/// 预算耗尽后的正常收尾必须记录失败并立刻转入有界的强制清理，不能再按固定 30 秒等待 stop。
+#[test]
+fn exhausted_budget_records_normal_stop_failure_without_fixed_wait() {
+    let (world, mut spec) = direct_world("background-budget-exhausted", "background", "[]", "");
+    spec.total_timeout_secs = Some(0);
+    let budget = world.budget(&spec);
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_eq!(budget.remaining(), Some(Duration::ZERO));
+        // 显式启动自有后台只为制造需要收尾的进程组；这里用 step 超时，不用已耗尽的预算。
+        let state_root = world
+            .session_store_dir()
+            .parent()
+            .unwrap()
+            .display()
+            .to_string();
+        let daemon = driver()
+            .start(
+                &world,
+                &LatticeCommand {
+                    args: ["daemon", "serve", "--state-root", &state_root]
+                        .iter()
+                        .map(|arg| (*arg).into())
+                        .collect(),
+                    timeout: Some(spec.step_timeout()),
+                },
+            )
+            .unwrap();
+        let deadline = Instant::now() + spec.step_timeout();
+        while world.daemon_pids().unwrap() != vec![daemon.pgid()] {
+            assert!(Instant::now() < deadline, "backend did not register");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let stopping = Instant::now();
+        let stopped = world.stop_daemon();
+        let took = stopping.elapsed();
+        let errors = stopped.expect_err("exhausted budget must fail the normal stop");
+        assert!(
+            errors.iter().any(|error| error.contains("budget")),
+            "cleanup errors must name the exhausted budget: {errors:?}"
+        );
+        assert!(took < Duration::from_secs(10), "cleanup waited {took:?}");
+        assert!(world.daemon_pids().unwrap().is_empty());
+        let killed = daemon.wait(None).unwrap();
+        evidence.record_command("backend after exhausted-budget cleanup", &killed);
+        assert!(
+            killed.cleanup.surviving_pids.is_empty(),
+            "{}",
+            killed.summary()
+        );
     }));
     finish(evidence, result);
 }

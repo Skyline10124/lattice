@@ -64,8 +64,8 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
         step_timeout_secs: 120,
         total_timeout_secs: Some(300),
     };
-    let budget = spec.start_budget();
     let world = ScenarioWorld::new(&spec.name).expect("world");
+    let budget = world.budget(&spec);
     world
         .write_project_file(".lattice/agents/tui-smoke/agent.toml", AGENT_TOML)
         .expect("write agent.toml");
@@ -174,7 +174,7 @@ fn pty_detach_reloads_pending_and_result_without_cancelling() {
         support::direct_world("pty-background-reconnect", "tui-smoke", "[]", "");
     spec.step_timeout_secs = 120;
     spec.total_timeout_secs = Some(300);
-    let budget = spec.start_budget();
+    let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let (server, gate) = support::wire_gated_fake_llm(
         &world,
@@ -247,7 +247,7 @@ fn pty_second_ctrl_c_preserves_cancel_acknowledgement() {
     let (world, mut spec) = support::direct_world("pty-background-cancel", "tui-smoke", "[]", "");
     spec.step_timeout_secs = 120;
     spec.total_timeout_secs = Some(300);
-    let budget = spec.start_budget();
+    let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let (server, gate) = support::wire_gated_fake_llm(
         &world,

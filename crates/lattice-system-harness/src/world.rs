@@ -9,7 +9,10 @@ use std::process::Command;
 use std::sync::Mutex;
 use std::sync::Arc;
 
+use std::time::Duration;
+
 use crate::daemon::ScenarioDaemon;
+use crate::scenario::{ScenarioBudget, ScenarioSpec};
 
 use thiserror::Error;
 
@@ -43,6 +46,34 @@ pub struct ScenarioWorld {
     port: u16,
     allowed_env: Mutex<HashMap<String, String>>,
     pub(crate) daemon: Arc<ScenarioDaemon>,
+    /// 场景唯一预算及其单步上限；首次 [`Self::budget`] 时登记，正常 daemon stop 也用它的剩余量。
+    budget: Arc<BudgetSlot>,
+}
+
+/// 场景预算槽：唯一起点加单步上限，世界与场景证据共享同一个实例。
+#[derive(Default)]
+pub(crate) struct BudgetSlot(Mutex<Option<(ScenarioBudget, Duration)>>);
+
+impl BudgetSlot {
+    fn budget(&self, spec: &ScenarioSpec) -> ScenarioBudget {
+        let mut slot = self.0.lock().expect("budget lock");
+        let (budget, _) = slot.get_or_insert_with(|| {
+            (
+                ScenarioBudget::new(spec.total_timeout()),
+                spec.step_timeout(),
+            )
+        });
+        budget.clone()
+    }
+
+    /// 正常 stop 的绝对期限；取锁等待计入单步上限，已登记场景还受原总期限约束。
+    pub(crate) fn normal_stop_deadline(&self) -> std::time::Instant {
+        let started = std::time::Instant::now();
+        match &*self.0.lock().expect("budget lock") {
+            Some((budget, step)) => budget.deadline(started + *step),
+            None => started + ScenarioSpec::default_step_timeout(),
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -100,6 +131,7 @@ impl ScenarioWorld {
             session_store,
             port,
             allowed_env: Mutex::new(allowed_env),
+            budget: Arc::new(BudgetSlot::default()),
         })
     }
 
@@ -298,9 +330,21 @@ impl ScenarioWorld {
         Ok(())
     }
 
-    /// 显式收尾用于场景证据；Drop 仍覆盖断言 panic 的路径。
+    /// 场景唯一的墙钟预算。首次调用从当前时刻起算并登记；之后无论谁在何时调用
+    /// （发送驱动、辅助命令、provider gate 等待）都拿到同一起点的副本，
+    /// 正常 daemon stop 也只用它的剩余量。场景内不存在第二个起点。
+    pub fn budget(&self, spec: &ScenarioSpec) -> ScenarioBudget {
+        self.budget.budget(spec)
+    }
+
+    /// 与场景证据共享的预算槽：证据收尾时的普通 stop 也只用同一起点的剩余量。
+    pub(crate) fn budget_slot(&self) -> Arc<BudgetSlot> {
+        Arc::clone(&self.budget)
+    }
+
+    /// 显式收尾用于场景证据；Drop 仍覆盖断言 panic 的路径。预算耗尽时正常 stop 记为失败。
     pub fn stop_daemon(&self) -> Result<(), Vec<String>> {
-        self.daemon.cleanup()
+        self.daemon.cleanup(self.budget.normal_stop_deadline())
     }
 
     /// 进程控制仅作用于经过产物、状态根和组首领核对的后台。

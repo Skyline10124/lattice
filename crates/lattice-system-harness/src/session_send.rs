@@ -568,8 +568,7 @@ fn send_prompt_with_timeout(
     Ok(SendExecution { command, parsed })
 }
 
-/// A convenience wrapper holding the resolved session id, so a scenario can
-/// call `send` multiple times without re-passing the id.
+/// 保存已解析的会话 ID，供场景多次 `send`，无需重复传入身份。
 pub struct SessionSendDriver<'a> {
     driver: &'a LatticeDriver,
     world: &'a ScenarioWorld,
@@ -579,7 +578,7 @@ pub struct SessionSendDriver<'a> {
 }
 
 impl<'a> SessionSendDriver<'a> {
-    /// Create a new session and wrap the id.
+    /// 创建会话并保存其 ID；会话创建与后续发送都计入场景唯一预算，不在此重新起算。
     pub fn new(
         driver: &'a LatticeDriver,
         world: &'a ScenarioWorld,
@@ -587,7 +586,7 @@ impl<'a> SessionSendDriver<'a> {
         agent: &str,
         project_branch: &str,
     ) -> Result<Self, SessionSendError> {
-        let budget = spec.start_budget();
+        let budget = world.budget(spec);
         let session_id = create_session_with_timeout(
             driver,
             world,
@@ -608,7 +607,7 @@ impl<'a> SessionSendDriver<'a> {
         &self.session_id
     }
 
-    /// 辅助启动、查询及屏障等待必须沿用发送驱动从创建会话起计时的同一预算。
+    /// 场景唯一预算的副本（与 [`ScenarioWorld::budget`] 同一起点）；辅助启动、查询及屏障等待沿用它。
     pub fn budget(&self) -> &ScenarioBudget {
         &self.budget
     }

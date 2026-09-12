@@ -91,20 +91,15 @@ impl ScenarioSpec {
         Ok(serde_json::from_str(&text)?)
     }
 
-    /// Start a [`ScenarioBudget`] tracking this scenario's whole-wall-clock
-    /// budget. Returns a no-op budget when `total_timeout` is `None`, so
-    /// fast scenarios pay nothing.
-    pub fn start_budget(&self) -> ScenarioBudget {
-        ScenarioBudget::new(self.total_timeout())
+    /// 默认单命令上限；未登记预算的场景收尾时沿用。
+    pub(crate) fn default_step_timeout() -> Duration {
+        Duration::from_secs(default_step_timeout_secs())
     }
 }
 
-/// Whole-scenario wall-clock budget (PRD user story 19, RFC #41 decision
-/// eight). Created from `ScenarioSpec::start_budget`; call `check` before
-/// each step of a multi-step scenario. If the budget has elapsed, `check`
-/// panics with a clear message — a runaway multi-step sequence must fail
-/// the scenario rather than hang, mirroring the per-command timeout's
-/// "fail, not skip" contract.
+/// 整个场景的墙钟预算。场景内唯一起点由 [`crate::ScenarioWorld::budget`] 登记并共享，
+/// 副本不会重新计时。多步骤场景在每步之前调用 `check`；预算耗尽时明确失败，
+/// 与单命令超时一样，不跳过测试或让失控的步骤序列无限等待。
 #[derive(Debug, Clone)]
 pub struct ScenarioBudget {
     limit: Option<Duration>,
@@ -119,25 +114,30 @@ impl ScenarioBudget {
         }
     }
 
-    /// Elapsed wall-clock since the budget started.
+    /// 自预算起点起经过的墙钟时间。
     pub fn elapsed(&self) -> Duration {
         self.start.elapsed()
     }
 
-    /// Remaining whole-scenario time, or `None` when there is no total budget.
+    /// 整个场景的剩余时间；没有总预算时返回 `None`。
     pub fn remaining(&self) -> Option<Duration> {
         self.limit
             .map(|limit| limit.saturating_sub(self.start.elapsed()))
     }
 
-    /// Cap a command's timeout to `min(step_timeout, remaining_total)`.
+    /// 将命令上限约束为单步上限与场景剩余时间中的较小值。
     pub fn cap_timeout(&self, step_timeout: Duration) -> Duration {
         self.remaining()
             .map_or(step_timeout, |remaining| step_timeout.min(remaining))
     }
 
-    /// Panic if the budget has elapsed. A no-op when there is no total
-    /// budget. Call this before each step of a multi-step scenario.
+    /// 将步骤绝对期限限制在场景原始期限内，避免扫描或锁等待后重置剩余量。
+    pub(crate) fn deadline(&self, step_deadline: std::time::Instant) -> std::time::Instant {
+        self.limit
+            .map_or(step_deadline, |limit| step_deadline.min(self.start + limit))
+    }
+
+    /// 多步骤场景在每步之前调用；预算耗尽即 panic，没有总预算时不作检查。
     pub fn check(&self, scenario_name: &str) {
         if let Some(limit) = self.limit
             && self.start.elapsed() >= limit
@@ -205,7 +205,7 @@ mod tests {
             total_timeout_secs: Some(180),
         };
         assert_eq!(spec.total_timeout(), Some(Duration::from_secs(180)));
-        let budget = spec.start_budget();
+        let budget = ScenarioBudget::new(spec.total_timeout());
         budget.check("x");
     }
 
@@ -213,7 +213,7 @@ mod tests {
     fn spec_without_total_timeout_yields_no_budget() {
         let spec = ScenarioSpec::fast("fast");
         assert!(spec.total_timeout().is_none());
-        let budget = spec.start_budget();
+        let budget = ScenarioBudget::new(spec.total_timeout());
         budget.check("fast");
     }
 

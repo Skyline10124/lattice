@@ -224,6 +224,19 @@ impl RunningCommand {
         Self::spawn_with_timeout(command, None)
     }
 
+    /// 正常收尾继承绝对期限；spawn 与后续 wait 都不能重新获得一份旧时长。
+    pub(crate) fn spawn_until(command: Command, deadline: Instant) -> std::io::Result<Self> {
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "command deadline exhausted before spawn",
+            ));
+        }
+        let mut running = Self::spawn(command)?;
+        running.timeout = Some(deadline.saturating_duration_since(running.started_at));
+        Ok(running)
+    }
+
     fn spawn_with_timeout(
         mut command: Command,
         timeout: Option<Duration>,
@@ -615,7 +628,7 @@ fn resolve_child_pgid(child: &Child) -> std::io::Result<u32> {
 /// Broadcasting into the harness's group interrupts the test binary itself:
 /// `cargo test` then dies with exit 130 while reporting zero failures (#105).
 /// Failing closed turns that silent, whole-run abort into a local error.
-fn reject_own_process_group(pgid: u32) -> std::io::Result<()> {
+pub(crate) fn reject_own_process_group(pgid: u32) -> std::io::Result<()> {
     // SAFETY: `getpgrp` takes no arguments, reads only the caller's own
     // process group, and cannot fail.
     let own = unsafe { libc::getpgrp() } as u32;
@@ -688,7 +701,7 @@ fn processes_in_pgid_at(proc_root: &Path, pgid: u32) -> Result<Vec<u32>, Cleanup
                 ));
             }
         };
-        if parse_process_stat(pid, &stat)? == Some(pgid) {
+        if parse_process_stat(pid, &stat)?.is_some_and(|member| member.pgid == pgid) {
             out.push(pid);
         }
     }
@@ -696,7 +709,29 @@ fn processes_in_pgid_at(proc_root: &Path, pgid: u32) -> Result<Vec<u32>, Cleanup
     Ok(out)
 }
 
-fn parse_process_stat(pid: u32, stat: &str) -> Result<Option<u32>, CleanupError> {
+/// 清理所需的进程组与会话字段；已退出或僵尸进程返回 `None`。
+pub(crate) fn process_stat(pid: u32) -> Result<Option<ProcessStat>, CleanupError> {
+    let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(CleanupError::new(
+                CleanupOperation::InspectProcessGroup(ProcessInspectionOperation::ReadStat(pid)),
+                error,
+            ));
+        }
+    };
+    parse_process_stat(pid, &stat)
+}
+
+/// `/proc/<pid>/stat` 中清理需要的字段：进程组与会话。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProcessStat {
+    pub(crate) pgid: u32,
+    pub(crate) session: u32,
+}
+
+fn parse_process_stat(pid: u32, stat: &str) -> Result<Option<ProcessStat>, CleanupError> {
     let invalid = |message: &str| {
         CleanupError::new(
             CleanupOperation::InspectProcessGroup(ProcessInspectionOperation::ParseStat(pid)),
@@ -713,12 +748,17 @@ fn parse_process_stat(pid: u32, stat: &str) -> Result<Option<u32>, CleanupError>
     let _ppid = fields
         .next()
         .ok_or_else(|| invalid("process stat is missing parent pid"))?;
-    let member_pgid = fields
+    let pgid = fields
         .next()
         .ok_or_else(|| invalid("process stat is missing process group"))?
         .parse::<u32>()
         .map_err(|_| invalid("process stat has an invalid process group"))?;
-    Ok((state != "Z").then_some(member_pgid))
+    let session = fields
+        .next()
+        .ok_or_else(|| invalid("process stat is missing session"))?
+        .parse::<u32>()
+        .map_err(|_| invalid("process stat has an invalid session"))?;
+    Ok((state != "Z").then_some(ProcessStat { pgid, session }))
 }
 
 #[cfg(test)]
@@ -1037,7 +1077,13 @@ mod tests {
 
     #[test]
     fn process_stat_parser_rejects_incomplete_and_invalid_group_fields() {
-        for stat in ["4242 malformed", "4242 (test) S 1 nope"] {
+        // 组号缺失、组号非数字、会话号缺失、会话号非数字都必须报 InvalidData，不得部分解析。
+        for stat in [
+            "4242 malformed",
+            "4242 (test) S 1 nope",
+            "4242 (test) S 1 4242",
+            "4242 (te st) S 1 4242 sid",
+        ] {
             let error = parse_process_stat(4242, stat).expect_err("malformed stat must fail");
             assert_eq!(
                 error.operation,
