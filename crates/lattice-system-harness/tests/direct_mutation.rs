@@ -582,16 +582,19 @@ fn direct_mutation_denials_have_no_side_effect() {
     );
 }
 
-/// Two gated sends create the same absent target: exactly one Component call
-/// installs and the other returns `ReplanRequired`. Session commit competition
-/// is a separate layer and does not weaken the Local mutation assertion.
+/// 同一项目的两个 Session 创建同一尚不存在的目标；两个 Turn 都停在 provider 闸口，
+/// 共同放行后真实竞争 Tool 执行：恰好一个 Component 调用安装成功，另一方返回
+/// `ReplanRequired`。会话提交竞争是另一层问题，不能削弱本地变更的断言。
+///
+/// 同一 Session 内的并发 send 会被产品以 `Busy` 拒绝，根本进不到 Tool 层，因此竞争必须由
+/// 两个不同 Session 发起；gate 要求两个 provider 应答同时停在闸口后再一起放行。
 #[test]
 fn direct_mutation_concurrent_same_target_create_has_one_winner() {
     let driver = driver();
-    let (world, mut spec) = direct_world("direct-mut-race", "dl-race", "[\"mutate.create\"]", "");
-    // Either wait may span both full-Turn executions behind the Session lock.
-    spec.step_timeout_secs = 60;
+    let (world, spec) = direct_world("direct-mut-race", "dl-race", "[\"mutate.create\"]", "");
 
+    // Sequence 按请求到达顺序供稿：前两个请求（两个 Session 各一）都拿到同一目标的 create，
+    // 后两个是工具回合后的收尾文本。
     let (server, gate) = wire_gated_fake_llm(
         &world,
         "dl-race",
@@ -601,48 +604,46 @@ fn direct_mutation_concurrent_same_target_create_has_one_winner() {
                 "mutate.create",
                 r#"{"path":"race.txt","content":"a\n","create_parents":false}"#,
             ),
-            SseScript::plain("a done"),
             tool_call(
                 "r2",
                 "mutate.create",
                 r#"{"path":"race.txt","content":"b\n","create_parents":false}"#,
             ),
+            SseScript::plain("a done"),
             SseScript::plain("b done"),
         ]),
     );
     let scenario_evidence = evidence(&world, &spec);
-    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-race", "main").expect("session");
+    let send_a =
+        SessionSendDriver::new(&driver, &world, &spec, "dl-race", "main").expect("session a");
+    let send_b =
+        SessionSendDriver::new(&driver, &world, &spec, "dl-race", "main").expect("session b");
 
-    let running_a = send.spawn("create a").expect("spawn a");
-    let running_b = send.spawn("create b").expect("spawn b");
+    let running_a = send_a.spawn("create a").expect("spawn a");
+    let running_b = send_b.spawn("create b").expect("spawn b");
+    let step = |secs: u64| {
+        running_a
+            .remaining_timeout(Duration::from_secs(secs))
+            .min(running_b.remaining_timeout(Duration::from_secs(secs)))
+    };
 
     server
-        .wait_for_requests(
-            1,
-            running_a
-                .remaining_timeout(Duration::from_secs(60))
-                .min(running_b.remaining_timeout(Duration::from_secs(60))),
-        )
-        .expect("one create reached the fake provider");
-    gate.wait_until_stalled(
-        1,
-        running_a
-            .remaining_timeout(Duration::from_secs(2))
-            .min(running_b.remaining_timeout(Duration::from_secs(2))),
-    )
-    .expect("first create handler reached the response gate");
-    gate.release(
-        running_a
-            .remaining_timeout(Duration::from_secs(2))
-            .min(running_b.remaining_timeout(Duration::from_secs(2))),
-    )
-    .expect("first create handler left the response gate");
+        .wait_for_requests(2, step(30))
+        .expect("both creates reached the fake provider");
+    gate.wait_until_stalled(2, step(2))
+        .expect("both create handlers reached the response gate together");
+    gate.release(step(2))
+        .expect("both create handlers left the response gate");
 
-    let a = send.wait_spawned(running_a).expect("wait a");
-    let b = send.wait_spawned(running_b).expect("wait b");
+    let a = send_a.wait_spawned(running_a).expect("wait a");
+    let b = send_b.wait_spawned(running_b).expect("wait b");
     let captures = server.captured_requests();
 
     let result: Result<(), AssertError> = (|| {
+        require(
+            send_a.session_id() != send_b.session_id(),
+            "race must run in two distinct sessions of the same project",
+        )?;
         assert_clean_send(&a)?;
         assert_clean_send(&b)?;
         let tool_successes = [&a, &b]
@@ -657,6 +658,17 @@ fn direct_mutation_concurrent_same_target_create_has_one_winner() {
             tool_successes == 1 && tool_failures == 1,
             format!(
                 "same-target create must have exactly one Tool winner and one loser; a={:?} b={:?}",
+                a.type_sequence(),
+                b.type_sequence()
+            ),
+        )?;
+        // 两个 Tool 执行都真实发生过：各自都有 tool_call_started，而不是一方被 Busy 拒在门外。
+        require(
+            [&a, &b]
+                .into_iter()
+                .all(|outcome| outcome.type_sequence().contains(&"tool_call_started")),
+            format!(
+                "both sessions must execute the Tool; a={:?} b={:?}",
                 a.type_sequence(),
                 b.type_sequence()
             ),
