@@ -25,7 +25,12 @@ async fn reopening_visible_history_reads_completion_without_confirming() {
             false,
             json!({"completed":{"finish_reason":"stop"}}),
         ),
-        (None, true, false, json!({"completed":{"finish_reason":"stop"}})),
+        (
+            None,
+            true,
+            false,
+            json!({"completed":{"finish_reason":"stop"}}),
+        ),
         (
             Some("original durability failure"),
             true,
@@ -38,7 +43,12 @@ async fn reopening_visible_history_reads_completion_without_confirming() {
             false,
             json!({"cancelled":{"reason":"user_cancelled"}}),
         ),
-        (None, true, true, json!({"completed":{"finish_reason":"stop"}})),
+        (
+            None,
+            true,
+            true,
+            json!({"completed":{"finish_reason":"stop"}}),
+        ),
         (
             Some("original durability failure"),
             true,
@@ -172,7 +182,12 @@ async fn reopening_visible_history_reads_completion_without_confirming() {
                 loop {
                     match connection.next().await {
                         Some(update @ Update::Snapshot { .. }) => break update,
-                        Some(Update::SelectedTurn { .. } | Update::Gap | Update::Event(_)) => {}
+                        Some(
+                            Update::SelectedTurn { .. }
+                            | Update::NotSubmitted { .. }
+                            | Update::Gap
+                            | Update::Event(_),
+                        ) => {}
                         Some(Update::Error(error)) => panic!("{error:?}"),
                         None => panic!("no snapshot"),
                     }

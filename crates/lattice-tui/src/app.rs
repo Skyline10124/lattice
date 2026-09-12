@@ -377,6 +377,11 @@ impl App {
         error: Option<lattice_api::local::LocalError>,
     ) {
         let body_unavailable = blocks.is_none();
+        // 快照本身表明请求的 Turn 已关闭且没有活动 Turn；正文是否可读不改变这一事实。
+        let closed = matches!(
+            view.requested_turn,
+            Some(lattice_api::local::TurnObservation::Committed(_))
+        ) && view.active_turn.is_none();
         self.accept_deltas = false;
         let observed = view
             .requested_turn
@@ -503,9 +508,14 @@ impl App {
             )]));
         }
         if body_unavailable {
-            self.connection_lost(
-                "已收到完成快照；持久正文不可用，当前显示未验证，/reconnect 重载".into(),
-            );
+            // 正文读取失败只说明持久正文不可用：连接仍在、Turn 是否完成由快照本身决定。
+            // 已关闭 Turn 的固定快照没有替换 blocks 时，仍要按终态收口尚在 Running 的工具行。
+            if closed {
+                self.fail_running_tools("turn ended before tool completion");
+            }
+            self.push_status(StatusKind::Notice(vec![
+                "持久正文不可用；当前显示未验证，/reconnect 重载".into(),
+            ]));
         }
     }
 
@@ -623,6 +633,15 @@ impl App {
         }
     }
 
+    /// 请求被拒绝或未发出：输入交还用户自行决定，不自动重发，也没有可取消的 Turn。
+    fn abandon_submission(&mut self) {
+        if let Some((_, prompt)) = self.submitted.take() {
+            self.input.set_text(&prompt);
+        }
+        self.phase = TurnPhase::Idle;
+        self.current_turn = None;
+    }
+
     /// 与绘制路径使用同一内容宽度和垂直开销。
     /// Dock::height() 是 Dock 占用的唯一来源；bottomline 只在侧栏隐藏时存在。
     fn transcript_height(&self) -> usize {
@@ -666,7 +685,7 @@ pub(crate) async fn run_app(
             }
             Some(Update::Gap) => initial_gap = true,
             Some(Update::Error(error)) => return Err(error.into()),
-            Some(Update::SelectedTurn { .. } | Update::Event(_)) => {}
+            Some(Update::SelectedTurn { .. } | Update::NotSubmitted { .. } | Update::Event(_)) => {}
             None => anyhow::bail!("initial observation ended without a fixed snapshot"),
         }
     };
@@ -692,66 +711,251 @@ pub(crate) async fn run_app(
         initial_error,
     );
     app.push_status(StatusKind::Notice(startup_notice(&app.ctx)));
-    let mut events = EventStream::new();
-    let mut turn_stream = initial_owned.then_some(connection);
-    let mut turn_deadline = turn_stream.as_ref().map(|_| idle_deadline());
-    let mut cancel: Option<tokio::task::JoinHandle<lattice_api::local::Result<bool>>> = None;
-    let mut cancel_intent = false;
+    let exit = run_loop(
+        &options,
+        &mut app,
+        &client,
+        initial_owned.then_some(connection),
+        EventStream::new(),
+        |app| {
+            if let Ok(size) = terminal.size() {
+                app.term_width = size.width;
+                app.term_height = size.height;
+                let layout = frame_layout(size.width, size.height);
+                let th = app.transcript_height();
+                let rows = app.content_rows(layout.content_w);
+                app.viewport.on_content_changed(rows, th);
+            }
+            terminal.draw(|f| crate::view::draw(f, app))?;
+            Ok(())
+        },
+    )
+    .await;
+    // 离开备用屏幕后再有界承接取消意图与在途提交回执；退出不能销毁已经发出的取消，也不能丢弃仍未知的回执。
+    drop(_cleanup);
+    for line in settle_exit(&client, &app.ctx.session_id, exit.control).await {
+        eprintln!("{line}");
+    }
+    exit.result
+}
+
+type CancelTask = tokio::task::JoinHandle<lattice_api::local::Result<bool>>;
+
+/// 退出后继续承接提交回执与取消回执的上限；到期仍未知则带原 ID 报告，不无界挂起。
+const EXIT_GRACE_SECS: u64 = 5;
+
+/// 取消意图绑定提交时的 TurnId。Pending 表示已请求但后台尚未确认接管；
+/// Moot 表示请求被拒绝、未发出或选定了已关闭的旧 Turn，意图没有对象，不得扩散。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CancelIntent {
+    Pending,
+    Confirmed,
+    Moot,
+}
+
+/// 事件循环持有的观察与取消状态；退出后交给 `settle_exit`，不随循环结束丢弃。
+struct TurnControl {
+    stream: Option<Connection>,
+    deadline: Option<tokio::time::Instant>,
+    cancel: Option<CancelTask>,
+    /// 在途取消发出时提交回执尚未到达：其接管可能属于探测所有者，不能作最终确认。
+    provisional: bool,
+    intent: Option<(TurnId, CancelIntent)>,
+    /// 当前 Connection 的提交回执（SelectedTurn / NotSubmitted / Error）仍在途。
+    receipt_pending: bool,
+}
+
+impl TurnControl {
+    /// 用户请求取消：意图绑定当前 TurnId；无在途取消时立即发一次，
+    /// 提交回执未到时同时阻止尚未发出的配置提交。owned=false 不是终结，回执到达后再补发。
+    fn request_cancel(&mut self, client: &LocalClient, session_id: &str, turn_id: TurnId) {
+        if !matches!(self.intent, Some((id, _)) if id == turn_id) {
+            self.intent = Some((turn_id, CancelIntent::Pending));
+        }
+        if self.cancel.is_none() {
+            self.cancel = Some(spawn_cancel(client, session_id, turn_id));
+            self.provisional = self.receipt_pending;
+        }
+        if self.receipt_pending
+            && let Some(connection) = &self.stream
+        {
+            connection.abandon_unsent();
+        }
+    }
+
+    /// 有 live 证据（接受回执或 owned 快照）时，对同一身份未确认的意图只补发一次。
+    /// 返回意图是否仍针对该 Turn。
+    fn resend_pending(&mut self, client: &LocalClient, session_id: &str, turn_id: TurnId) -> bool {
+        match self.intent {
+            Some((id, CancelIntent::Pending)) if id == turn_id => {
+                if self.cancel.is_none() {
+                    self.cancel = Some(spawn_cancel(client, session_id, turn_id));
+                    self.provisional = false;
+                }
+                true
+            }
+            Some((id, CancelIntent::Confirmed)) if id == turn_id => true,
+            _ => false,
+        }
+    }
+
+    /// 取消回执：接管只在提交回执已到时算确认；提交回执前发出的取消若已知 live 则补发一次。
+    fn settle_cancel(&mut self, client: &LocalClient, session_id: &str, taken: bool) {
+        self.cancel = None;
+        let provisional = std::mem::take(&mut self.provisional);
+        let Some((turn_id, CancelIntent::Pending)) = self.intent else {
+            return;
+        };
+        if provisional {
+            if !self.receipt_pending {
+                self.resend_pending(client, session_id, turn_id);
+            }
+        } else if taken {
+            self.intent = Some((turn_id, CancelIntent::Confirmed));
+        }
+    }
+
+    /// 请求被拒绝、未发送或选定了已关闭的旧 Turn：待办意图失去对象。返回其原 TurnId 供提示。
+    fn moot(&mut self) -> Option<TurnId> {
+        match &mut self.intent {
+            Some((turn_id, intent @ CancelIntent::Pending)) => {
+                *intent = CancelIntent::Moot;
+                Some(*turn_id)
+            }
+            _ => None,
+        }
+    }
+
+    /// 意图针对的 Turn 已观察到持久终态：不再有待确认的取消。
+    fn resolve_terminal(&mut self, view: &SessionObservation) {
+        if let Some(lattice_api::local::TurnObservation::Committed(turn)) = &view.requested_turn
+            && matches!(self.intent, Some((id, _)) if id == turn.turn_id)
+        {
+            self.intent = None;
+        }
+    }
+
+    fn close_stream(&mut self) {
+        self.stream = None;
+        self.deadline = None;
+        self.receipt_pending = false;
+    }
+}
+
+struct LoopExit {
+    result: anyhow::Result<()>,
+    control: TurnControl,
+}
+
+fn spawn_cancel(client: &LocalClient, session_id: &str, turn_id: TurnId) -> CancelTask {
+    let client = client.clone();
+    let session = session_id.to_owned();
+    tokio::spawn(async move { client.cancel(&session, turn_id).await })
+}
+
+fn rejected(error: &lattice_api::local::LocalError) -> bool {
+    matches!(
+        error.kind,
+        LocalErrorKind::BadRequest
+            | LocalErrorKind::NotFound
+            | LocalErrorKind::Busy
+            | LocalErrorKind::Conflict
+            | LocalErrorKind::Stopping
+    )
+}
+
+fn moot_notice(turn_id: TurnId) -> String {
+    format!("本次请求 {turn_id} 未接受或已关闭；取消没有对象，不作用于其他 Turn")
+}
+
+fn not_submitted_notice(turn_id: TurnId) -> String {
+    format!("请求未接受：中断后不再提交配置，未执行：turn {turn_id}")
+}
+
+/// 键盘事件流与绘制回调由调用方注入：产品接 crossterm/ratatui，测试接脚本事件并检查状态。
+#[rustfmt::skip]
+async fn run_loop<E, D>(
+    options: &TuiOptions,
+    app: &mut App,
+    client: &LocalClient,
+    initial: Option<Connection>,
+    mut events: E,
+    mut draw: D,
+) -> LoopExit
+where
+    E: futures::Stream<Item = std::io::Result<Event>> + Unpin,
+    D: FnMut(&mut App) -> anyhow::Result<()>,
+{
+    let mut control = TurnControl {
+        deadline: initial.as_ref().map(|_| idle_deadline()),
+        stream: initial,
+        cancel: None,
+        provisional: false,
+        intent: None,
+        receipt_pending: false,
+    };
+    let session = app.ctx.session_id.clone();
     let mut ticker = tokio::time::interval(FRAME);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut dirty = true;
-
-    let loop_result: anyhow::Result<()> = async {
-    loop {
-        if app.should_quit {
-            if app.cancel_requested && cancel.is_none()
-                && let Some(id) = app.current_turn {
-                    let client = client.clone(); let session = app.ctx.session_id.clone();
-                    cancel = Some(tokio::spawn(async move { client.cancel(&session, id).await }));
-                }
-            break;
-        }
-        if app.cancel_requested && cancel.is_none() {
+    let result = loop {
+        // 取消请求先于退出判定登记：同一轮到达的 Esc 与退出不能让意图丢失。
+        if app.cancel_requested {
             app.cancel_requested = false;
-            cancel_intent = true;
             if let Some(id) = app.current_turn {
-                let client = client.clone(); let session = app.ctx.session_id.clone();
-                cancel = Some(tokio::spawn(async move { client.cancel(&session, id).await }));
+                control.request_cancel(client, &session, id);
             }
+        }
+        if app.should_quit {
+            break Ok(());
         }
         if app.reconnect_requested {
             app.reconnect_requested = false;
-            turn_stream = Some(Connection::start(client.clone(), app.ctx.session_id.clone(), app.current_turn.or(app.observed_turn), None));
-            turn_deadline = Some(idle_deadline());
+            control.stream = Some(Connection::start(client.clone(), session.clone(), app.current_turn.or(app.observed_turn), None));
+            control.deadline = Some(idle_deadline());
+            control.receipt_pending = false;
         }
         tokio::select! {
             event = events.next() => {
                 match event {
                     Some(Ok(ev)) => {
-                        if let Some(prompt) = handle_input_event(&mut app, ev) {
-                            cancel_intent = false;
-                            begin_turn(&options, &mut app, &mut turn_stream, &client, prompt);
-                            turn_deadline = turn_stream.as_ref().map(|_| idle_deadline());
+                        if let Some(prompt) = handle_input_event(app, ev) {
+                            control.intent = None;
+                            begin_turn(options, app, &mut control.stream, client, prompt);
+                            control.deadline = control.stream.as_ref().map(|_| idle_deadline());
+                            control.receipt_pending = true;
                         }
                     }
                     Some(Err(_)) | None => app.should_quit = true,
                 }
                 dirty = true;
             }
-            receipt = async { cancel.as_mut().expect("guarded cancellation").await }, if cancel.is_some() => {
-                cancel = None;
-                app.push_status(StatusKind::Notice(vec![cancel_message(receipt)]));
+            receipt = async { control.cancel.as_mut().expect("guarded cancellation").await }, if control.cancel.is_some() => {
+                let taken = cancel_taken(&receipt);
+                app.push_status(StatusKind::Notice(vec![cancel_message(receipt, control.provisional)]));
+                control.settle_cancel(client, &session, taken);
                 dirty = true;
             }
-            wait = poll_turn(&mut turn_stream, turn_deadline) => {
+            wait = poll_turn(&mut control.stream, control.deadline) => {
                 match wait {
                     TurnWait::Event(update) => {
-                        turn_deadline = Some(idle_deadline());
+                        control.deadline = Some(idle_deadline());
                         match update {
-                            Update::SelectedTurn { turn_id, message } => {
+                            Update::SelectedTurn { turn_id, message, live } => {
+                                control.receipt_pending = false;
                                 app.current_turn = Some(turn_id);
                                 app.acceptance_notice = Some(format!("{message}：{turn_id}"));
-                                app.cancel_requested |= cancel_intent;
+                                if live {
+                                    if control.resend_pending(client, &session, turn_id) { app.phase = TurnPhase::Cancelling; }
+                                } else if let Some(id) = control.moot() {
+                                    app.push_status(StatusKind::Notice(vec![moot_notice(id)]));
+                                }
+                            }
+                            Update::NotSubmitted { turn_id } => {
+                                control.close_stream();
+                                control.moot();
+                                app.abandon_submission();
+                                app.push_status(StatusKind::Notice(vec![not_submitted_notice(turn_id)]));
                             }
                             Update::Event(event) => { if app.accept_live_events { app.apply_turn_event(event); } }
                             Update::Gap => {
@@ -761,28 +965,34 @@ pub(crate) async fn run_app(
                                 app.push_status(StatusKind::Notice(vec!["增量缺口；将替换持久视图，不重复追加".into()]));
                             }
                             Update::Snapshot { view, blocks, owned, confirmed, error } => {
+                                if !owned { control.resolve_terminal(&view); }
                                 app.apply_snapshot(*view, blocks, owned, confirmed, error);
-                                if cancel_intent && owned { app.phase = TurnPhase::Cancelling; }
-                                if !owned { turn_stream = None; turn_deadline = None; }
+                                if owned
+                                    && let Some(id) = app.current_turn
+                                    && control.resend_pending(client, &session, id) {
+                                        app.phase = TurnPhase::Cancelling;
+                                    }
+                                if !owned { control.close_stream(); }
                             }
                             Update::Error(error) => {
-                                if matches!(error.kind, LocalErrorKind::BadRequest | LocalErrorKind::NotFound | LocalErrorKind::Busy | LocalErrorKind::Conflict | LocalErrorKind::Stopping) {
-                                    if let Some((_, prompt)) = app.submitted.take() { app.input.set_text(&prompt); }
-                                    app.phase = TurnPhase::Idle;
-                                    app.current_turn = None;
+                                if rejected(&error) {
+                                    app.abandon_submission();
+                                    if control.receipt_pending
+                                        && let Some(id) = control.moot() {
+                                            app.push_status(StatusKind::Notice(vec![moot_notice(id)]));
+                                        }
                                 }
+                                control.receipt_pending = false;
                                 app.connection_lost(error.message);
                             }
                         }
                     }
                     TurnWait::Ended => {
-                        turn_stream = None;
-                        turn_deadline = None;
+                        control.close_stream();
                         app.finish_stream();
                     }
                     TurnWait::TimedOut => {
-                        turn_stream = None;
-                        turn_deadline = None;
+                        control.close_stream();
                         app.apply_stream_idle_timeout();
                     }
                 }
@@ -793,39 +1003,109 @@ pub(crate) async fn run_app(
                 if !dirty {
                     continue;
                 }
-                if let Ok(size) = terminal.size() {
-                    app.term_width = size.width;
-                    app.term_height = size.height;
-                    let layout = frame_layout(size.width, size.height);
-                    let th = app.transcript_height();
-                    let rows = app.content_rows(layout.content_w);
-                    app.viewport.on_content_changed(rows, th);
+                if let Err(error) = draw(app) {
+                    break Err(error);
                 }
-                terminal.draw(|f| crate::view::draw(f, &app))?;
                 dirty = false;
             }
         }
-    }
-    Ok(())
-    }.await;
-    drop(turn_stream);
-    // 离开备用屏幕后仍等取消确认；第二次 Ctrl+C 不能销毁已经发出的取消发送。
-    drop(_cleanup);
-    if let Some(task) = cancel {
-        let message = match tokio::time::timeout(Duration::from_secs(5), task).await {
-            Ok(receipt) => cancel_message(receipt),
-            Err(_) => "取消确认未知；请按 TurnId 查询或再次明确取消".into(),
-        };
-        eprintln!("{message}");
-    }
-    loop_result
+    };
+    LoopExit { result, control }
 }
 
+/// 界面退出后按原 SessionId/TurnId 有界承接取消意图：在途取消等回执；提交回执未到则继续
+/// 轮询同一 Connection，接受后再取消、拒绝或选定旧 Turn 则作废、到期仍未知则如实报告。
+/// 无取消意图的退出只断开，不新增取消。返回终端复原后要打印的行。
+async fn settle_exit(
+    client: &LocalClient,
+    session_id: &str,
+    mut control: TurnControl,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    if control.intent.is_none() {
+        return lines;
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(EXIT_GRACE_SECS);
+    while matches!(control.intent, Some((_, CancelIntent::Pending))) {
+        if let Some(task) = control.cancel.as_mut() {
+            let Ok(receipt) = tokio::time::timeout_at(deadline, task).await else {
+                break;
+            };
+            let taken = cancel_taken(&receipt);
+            lines.push(cancel_message(receipt, control.provisional));
+            control.settle_cancel(client, session_id, taken);
+            continue;
+        }
+        if !control.receipt_pending {
+            break;
+        }
+        let Some(stream) = control.stream.as_mut() else {
+            control.receipt_pending = false;
+            continue;
+        };
+        match tokio::time::timeout_at(deadline, stream.next()).await {
+            Ok(Some(Update::SelectedTurn {
+                turn_id: selected,
+                message,
+                live,
+            })) => {
+                control.receipt_pending = false;
+                lines.push(format!("{message}：{selected}"));
+                if live {
+                    control.resend_pending(client, session_id, selected);
+                } else if let Some(id) = control.moot() {
+                    lines.push(moot_notice(id));
+                }
+            }
+            Ok(Some(Update::NotSubmitted { turn_id })) => {
+                control.close_stream();
+                control.moot();
+                lines.push(not_submitted_notice(turn_id));
+            }
+            Ok(Some(Update::Error(error))) => {
+                control.receipt_pending = false;
+                if rejected(&error)
+                    && let Some(id) = control.moot()
+                {
+                    lines.push(format!("请求 {id} 被拒绝，未执行：{}", error.message));
+                } else {
+                    lines.push(format!("提交回执失败：{}", error.message));
+                }
+            }
+            Ok(Some(Update::Event(_) | Update::Gap | Update::Snapshot { .. })) => {}
+            Ok(None) => control.receipt_pending = false,
+            Err(_) => break,
+        }
+    }
+    drop(control.stream);
+    match control.intent {
+        Some((id, CancelIntent::Pending)) => lines.push(format!(
+            "取消未确认：session {session_id} turn {id}；后台可能仍接受或执行该请求，请用同一 TurnId 查询或再次取消"
+        )),
+        Some((id, CancelIntent::Confirmed)) => lines.push(format!(
+            "后台已接管取消：session {session_id} turn {id}；持久终态仍待确认"
+        )),
+        Some((_, CancelIntent::Moot)) | None => {}
+    }
+    lines
+}
+
+fn cancel_taken(
+    receipt: &Result<lattice_api::local::Result<bool>, tokio::task::JoinError>,
+) -> bool {
+    matches!(receipt, Ok(Ok(true)))
+}
+
+/// owned=false 与未知都不是终结：提交回执未到时所有者可能尚未登记，稍后仍会接受同一请求。
 fn cancel_message(
     receipt: Result<lattice_api::local::Result<bool>, tokio::task::JoinError>,
+    provisional: bool,
 ) -> String {
     match receipt {
         Ok(Ok(true)) => "后台已接管取消；持久终态仍待确认".into(),
+        Ok(Ok(false)) if provisional => {
+            "取消早于所有者登记（无 live 所有者）；提交回执到达后将对同一 TurnId 再取消".into()
+        }
         Ok(Ok(false)) => "该 Turn 无 live 所有者；没有确认持久 Cancelled，请查询或显式恢复".into(),
         _ => "取消确认未知；请按 TurnId 查询或再次明确取消".into(),
     }
@@ -983,6 +1263,10 @@ impl Drop for TerminalCleanup {
 }
 
 #[cfg(test)]
+#[path = "app_loop_tests.rs"]
+mod loop_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::input::resolve_key;
@@ -1066,7 +1350,8 @@ mod tests {
         assert!(app.current_turn.is_none());
         app.apply_snapshot(view.clone(), None, false, true, None);
         assert_eq!(&app.blocks[..2], &history);
-        assert!(!app.connected);
+        // 正文不可用不是断开：连接状态与正文可用性分开呈现。
+        assert!(app.connected);
         assert!(!app.accept_live_events);
         assert_eq!(app.phase, TurnPhase::Idle);
         assert!(app.current_turn.is_none());

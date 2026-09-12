@@ -6,12 +6,21 @@ use lattice_api::local::{
     Acceptance, FrozenConfiguration, LocalClient, LocalError, LocalErrorKind, Observation,
     SessionObservation, TurnId, TurnObservation, TurnRequest,
 };
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 
 pub(crate) enum Update {
+    /// 提交回执选定的 Turn；`live` 表示本次请求已接受或仍 pending，取消才有对象。
+    /// Recovered / 已提交的 Existing 选定的是已关闭的 Turn，本次新 prompt 未接受。
     SelectedTurn {
         turn_id: TurnId,
         message: &'static str,
+        live: bool,
+    },
+    /// 探测得 NeedsConfiguration 后已登记取消意图：配置提交未发出，请求从未被接受。
+    NotSubmitted {
+        turn_id: TurnId,
     },
     Snapshot {
         view: Box<SessionObservation>,
@@ -29,6 +38,7 @@ pub(crate) enum Update {
 pub(crate) struct Connection {
     receiver: mpsc::Receiver<Update>,
     task: tokio::task::JoinHandle<()>,
+    abandon_unsent: Arc<AtomicBool>,
 }
 impl Connection {
     pub fn start(
@@ -38,6 +48,8 @@ impl Connection {
         submission: Option<(TuiOptions, TurnRequest)>,
     ) -> Self {
         let (sender, receiver) = mpsc::channel(16);
+        let abandon_unsent = Arc::new(AtomicBool::new(false));
+        let abandon = abandon_unsent.clone();
         let task = tokio::spawn(async move {
             let result = async {
                 let mut selected = turn;
@@ -46,6 +58,15 @@ impl Connection {
                     match prior {
                         Ok(prior) => {
                             let accepted = if prior == Acceptance::NeedsConfiguration {
+                                // 已有取消意图时不再发起配置提交：未发出的请求没有可取消的对象，也不代用户重发。
+                                if abandon.load(Ordering::Acquire) {
+                                    let _ = sender
+                                        .send(Update::NotSubmitted {
+                                            turn_id: request.turn_id,
+                                        })
+                                        .await;
+                                    return Ok(());
+                                }
                                 let metadata = client.open_session(&session_id).await?;
                                 let workspace = request.workspace.clone();
                                 let config = tokio::task::spawn_blocking(move || {
@@ -60,24 +81,34 @@ impl Connection {
                                 })
                                 .await
                                 .map_err(|_| invalid())??;
+                                if abandon.load(Ordering::Acquire) {
+                                    let _ = sender
+                                        .send(Update::NotSubmitted {
+                                            turn_id: request.turn_id,
+                                        })
+                                        .await;
+                                    return Ok(());
+                                }
                                 client.submit(request, Some(config)).await?
                             } else {
                                 prior
                             };
-                            let (id, message) = match accepted {
-                                Acceptance::Accepted { turn_id } => (turn_id, "已确认接受"),
+                            let (id, message, live) = match accepted {
+                                Acceptance::Accepted { turn_id } => (turn_id, "已确认接受", true),
                                 Acceptance::ConfirmationUnknown { turn_id } => {
-                                    (turn_id, "接受确认未知；保留此 ID 查询，不分配新请求")
+                                    (turn_id, "接受确认未知；保留此 ID 查询，不分配新请求", true)
                                 }
                                 Acceptance::Existing {
                                     turn: TurnObservation::Pending(turn),
-                                } => (turn.turn_id, "找回既有 pending；未重复接受"),
+                                } => (turn.turn_id, "找回既有 pending；未重复接受", true),
                                 Acceptance::Existing {
                                     turn: TurnObservation::Committed(turn),
-                                } => (turn.turn_id, "找回既有结果；未重复执行"),
-                                Acceptance::Recovered { turn } => {
-                                    (turn.turn_id, "旧 Turn 已恢复关闭；本次新 prompt 未接受")
-                                }
+                                } => (turn.turn_id, "找回既有结果；未重复执行", false),
+                                Acceptance::Recovered { turn } => (
+                                    turn.turn_id,
+                                    "旧 Turn 已恢复关闭；本次新 prompt 未接受",
+                                    false,
+                                ),
                                 Acceptance::NeedsConfiguration => return Err(invalid()),
                             };
                             selected = Some(id);
@@ -85,6 +116,7 @@ impl Connection {
                                 .send(Update::SelectedTurn {
                                     turn_id: id,
                                     message,
+                                    live,
                                 })
                                 .await;
                         }
@@ -169,11 +201,20 @@ impl Connection {
                 let _ = sender.send(Update::Error(error)).await;
             }
         });
-        Self { receiver, task }
+        Self {
+            receiver,
+            task,
+            abandon_unsent,
+        }
     }
 
     pub async fn next(&mut self) -> Option<Update> {
         self.receiver.recv().await
+    }
+
+    /// 用户已请求取消而提交回执未到：尚未发出的配置提交不再发送；已发出的请求仍由其回执决定。
+    pub fn abandon_unsent(&self) {
+        self.abandon_unsent.store(true, Ordering::Release);
     }
 }
 impl futures::Stream for Connection {
