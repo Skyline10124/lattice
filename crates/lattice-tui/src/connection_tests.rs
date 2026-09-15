@@ -2,7 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::app::StatusKind;
+use lattice_api::local::{LocalError, LocalErrorKind, Observation};
+
+fn read_error() -> LocalError {
+    lattice_api::ApiError::StoreUnavailable("persistent history read failed".into()).into()
+}
 use serde_json::{Value, json};
 use std::{os::unix::fs::PermissionsExt, time::Duration};
 use tokio::{
@@ -13,6 +17,12 @@ use tokio::{
 #[tokio::test]
 async fn reopening_visible_history_reads_completion_without_confirming() {
     for (message, body_unavailable, snapshot_first, outcome) in [
+        (
+            None,
+            false,
+            false,
+            json!({"completed":{"finish_reason":"stop"}}),
+        ),
         (
             Some("original durability failure"),
             false,
@@ -115,9 +125,9 @@ async fn reopening_visible_history_reads_completion_without_confirming() {
             message: message.into(),
             recovery: None,
         });
-        let expected = error.clone().or_else(|| body_unavailable.then(read_error));
+        let expected = error.clone();
         let expected_outcome = commit.outcome.clone();
-        // 只替代 IPC 对端：真实 Connection、历史重载和 DTO 解码均运行，任何写操作都会失败。
+        // 只替代 IPC 对端：真实 LocalTurn、固定历史与 DTO 解码均运行，任何写操作都会失败。
         let (finish_tx, mut finish_rx) = tokio::sync::oneshot::channel();
         let mut finish_tx = Some(finish_tx);
         let server = tokio::spawn(async move {
@@ -176,64 +186,77 @@ async fn reopening_visible_history_reads_completion_without_confirming() {
             }
         });
         let mut connection =
-            Connection::start(LocalClient::new(layout), "session".into(), None, None);
+            LocalClient::new(layout).observe("session".into(), None, HistoryScope::Session);
+        let mut app = App::new(
+            SessionContext {
+                session_id: "session".into(),
+                active_agent: "test".into(),
+                project_branch: "main".into(),
+            },
+            false,
+            directory.path(),
+        );
         for index in 0..=usize::from(snapshot_first) {
-            let snapshot = tokio::time::timeout(Duration::from_secs(5), async {
-                loop {
-                    match connection.next().await {
-                        Some(update @ Update::Snapshot { .. }) => break update,
-                        Some(
-                            Update::SelectedTurn { .. }
-                            | Update::NotSubmitted { .. }
-                            | Update::Gap
-                            | Update::Event(_),
-                        ) => {}
-                        Some(Update::Error(error)) => panic!("{error:?}"),
-                        None => panic!("no snapshot"),
-                    }
-                }
-            })
-            .await
-            .unwrap();
-            let Update::Snapshot {
-                view,
-                blocks,
-                error,
-                owned,
-                confirmed,
-            } = snapshot
-            else {
-                unreachable!()
-            };
             let first_owned = snapshot_first && index == 0;
-            assert_eq!(owned, first_owned);
-            assert_eq!(confirmed, !first_owned && message.is_none());
-            assert!(
-                matches!(view.requested_turn, Some(TurnObservation::Committed(ref turn)) if turn.turn_id == turn_id && turn.commit_id == "fixed-head" && turn.outcome == expected_outcome)
-            );
-            assert_eq!(
-                error,
-                if first_owned {
-                    Some(read_error())
-                } else {
-                    expected.clone()
-                }
-            );
-            assert_eq!(blocks.is_none(), body_unavailable);
-            if let Some(blocks) = blocks {
-                assert!(!blocks.iter().any(|block| matches!(
-                    block,
-                    Block::Status {
-                        kind: StatusKind::Committed { .. },
-                        ..
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let mut state_seen = false;
+                let mut history_seen = false;
+                while !state_seen || !history_seen {
+                    let update = connection.next().await.expect("应收到更新");
+                    match &update {
+                        LocalUpdate::State { view, phase, confirmation, error, .. } => {
+                            assert_eq!(*phase == ObservationPhase::Live, first_owned);
+                            assert_eq!(*confirmation == CompletionConfirmation::Confirmed, !first_owned && message.is_none());
+                            assert!(matches!(&view.requested_turn, Some(TurnObservation::Committed(turn)) if turn.turn_id == turn_id && turn.commit_id == "fixed-head" && turn.outcome == expected_outcome));
+                            assert_eq!(*error, if first_owned { None } else { expected.clone() });
+                            state_seen = true;
+                        }
+                        LocalUpdate::History { result, stale, .. } => {
+                            assert!(!stale);
+                            assert_eq!(result.is_err(), body_unavailable);
+                            match result {
+                                Err(error) => assert_eq!(error.error, read_error()),
+                                Ok(history) => assert!(!crate::session::history_blocks((**history).clone()).iter().any(|block| matches!(block, Block::Status { kind: StatusKind::Committed { .. }, .. }))),
+                            }
+                            history_seen = true;
+                        }
+                        LocalUpdate::Connection(status) => panic!("观察不应中断：{status:?}"),
+                        _ => {}
                     }
-                )));
-            }
+                    app.apply_update(update);
+                }
+            }).await.unwrap();
             if first_owned {
                 finish_tx.take().unwrap().send(()).unwrap();
             }
         }
-        assert!(connection.next().await.is_none());
+        let text = crate::view::transcript_lines(&app, 200)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains(&format!("{expected_outcome:?}")) && text.contains(&turn_id.to_string()),
+            "{text}"
+        );
+        assert_eq!(
+            text.contains("committed fixed-head"),
+            message.is_none(),
+            "{text}"
+        );
+        assert_eq!(
+            text.matches("committed fixed-head").count(),
+            usize::from(message.is_none()),
+            "历史迟到不能重复完成状态：{text}"
+        );
+        if let Some(message) = message {
+            assert!(text.contains(message), "{text}");
+        }
+        if body_unavailable {
+            assert!(text.contains("正文不可用"), "{text}");
+        }
+        let report = connection.detach().await;
+        assert_eq!(report.history_error.is_some(), body_unavailable);
         server.abort();
         let _ = server.await;
     }

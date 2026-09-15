@@ -1023,6 +1023,7 @@ mod tests {
                 id: "opaque-id".into(),
                 name: "observe.workspace".into(),
                 state: ToolState::Ok { output_len: 1204 },
+                source: crate::app::ToolSource::HistoryResult,
             },
             Block::Assistant("after tool".into()),
             Block::Status {
@@ -1098,10 +1099,12 @@ mod tests {
                 id: "ok".into(),
                 name: "observe.workspace".into(),
                 state: ToolState::Ok { output_len: 1204 },
+                source: crate::app::ToolSource::HistoryResult,
             },
             Block::Tool {
                 id: "failed".into(),
                 name: "mutate.edit".into(),
+                source: crate::app::ToolSource::HistoryResult,
                 state: ToolState::Failed {
                     output_len: 0,
                     error: Some("expected_hash mismatch".into()),

@@ -1,11 +1,13 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::app::{Block, StatusKind, StatusPlacement, ToolState};
+use crate::app::{Block, StatusKind, StatusPlacement, ToolSource, ToolState};
 use anyhow::{Context, Result};
 use lattice_api::{
     CreateSessionRequest,
-    local::{LocalClient, MessageRole, MessageSemantic, SessionObservation, ToolResultOutcome},
+    local::{
+        LocalClient, LocalHistory, MessageRole, MessageSemantic, ToolResultOutcome, TurnObservation,
+    },
 };
 
 use crate::TuiOptions;
@@ -77,62 +79,61 @@ pub(crate) fn load_profile(
     Ok(loaded)
 }
 
-/// 历史只沿快照固定的 head 读取，期间新的引用发布不会混入此视图。
-pub(crate) async fn load_history(
-    client: &LocalClient,
-    view: &SessionObservation,
-) -> Result<Vec<Block>> {
+/// 固定历史只转换为显示块；读取对象、分页与新旧切点归 LocalTurn。
+pub(crate) fn history_blocks(history: LocalHistory) -> Vec<Block> {
     let mut blocks = Vec::new();
-    if let Some(head) = &view.head_commit_id {
-        let mut offset = 0;
-        loop {
-            let page = client
-                .history_page(&view.session.session_id, head, offset, 128)
-                .await?;
-            if page.is_empty() {
-                break;
-            }
-            offset += page.len();
-            for id in page {
-                let turn = client.read_commit(&view.session.session_id, &id).await?;
-                let messages = client.read_messages(&view.session.session_id, &id).await?;
-                blocks.push(Block::AgentName(turn.agent_name));
-                append_messages(&mut blocks, messages);
-                let kind = match turn.outcome {
-                    lattice_api::TurnOutcome::Completed { .. } => {
-                        StatusKind::Visible { commit_id: id }
-                    }
-                    lattice_api::TurnOutcome::Cancelled { .. } => {
-                        StatusKind::Cancelled { reason: None }
-                    }
-                    outcome => StatusKind::TurnFailed {
-                        reason: format!("{outcome:?}"),
-                    },
-                };
-                let needs_confirmation = !matches!(kind, StatusKind::Visible { .. });
+    for entry in history.entries {
+        blocks.push(Block::AgentName(entry.agent_name));
+        append_messages(&mut blocks, entry.messages);
+        if let TurnObservation::Committed(turn) = entry.turn {
+            let kind = match turn.outcome {
+                lattice_api::TurnOutcome::Completed { .. } => StatusKind::Visible {
+                    commit_id: turn.commit_id.clone(),
+                },
+                lattice_api::TurnOutcome::Cancelled { .. } => {
+                    StatusKind::Cancelled { reason: None }
+                }
+                outcome => StatusKind::TurnFailed {
+                    reason: format!("{outcome:?}"),
+                },
+            };
+            let needs_confirmation = !matches!(kind, StatusKind::Visible { .. });
+            blocks.push(Block::Status {
+                kind,
+                placement: StatusPlacement::Transcript,
+            });
+            if needs_confirmation {
                 blocks.push(Block::Status {
-                    kind,
+                    kind: StatusKind::Visible {
+                        commit_id: turn.commit_id,
+                    },
                     placement: StatusPlacement::Transcript,
                 });
-                if needs_confirmation {
-                    blocks.push(Block::Status {
-                        kind: StatusKind::Visible {
-                            commit_id: turn.commit_id,
-                        },
-                        placement: StatusPlacement::Transcript,
-                    });
-                }
             }
         }
     }
-    if let Some(pending) = &view.active_turn {
-        let messages = client
-            .read_messages(&view.session.session_id, &pending.journal_oid)
-            .await?;
-        blocks.push(Block::AgentName(view.session.active_agent_name.clone()));
-        append_messages(&mut blocks, messages);
-    }
-    Ok(blocks)
+    blocks
+}
+
+/// 配置来源仍属于 TUI；仅在共同句柄确认需要新配置后调用。
+pub(crate) async fn freeze_configuration(
+    client: LocalClient,
+    session_id: String,
+    options: TuiOptions,
+) -> lattice_api::local::Result<lattice_api::local::FrozenConfiguration> {
+    let metadata = client.open_session(&session_id).await?;
+    tokio::task::spawn_blocking(move || {
+        let root = lattice_api::LocalWorkspaceRoot::from_path(&options.project_root)?;
+        let loaded = load_profile(&options, &metadata.active_agent_name)
+            .map_err(|_| lattice_api::ApiError::BadRequest("新 Turn 配置无效".into()))?;
+        lattice_api::local::FrozenConfiguration::from_env(loaded, &root)
+    })
+    .await
+    .map_err(|_| {
+        lattice_api::local::LocalError::from(lattice_api::ApiError::BadRequest(
+            "新 Turn 配置无效".into(),
+        ))
+    })?
 }
 
 pub(crate) fn append_messages(
@@ -147,11 +148,20 @@ pub(crate) fn append_messages(
                     MessageRole::Assistant => blocks.push(Block::Assistant(text)),
                     MessageRole::System | MessageRole::Tool => {}
                 },
-                MessageSemantic::ToolCall { call } => blocks.push(Block::Tool {
-                    id: call.invocation_id.to_string(),
-                    name: call.name,
-                    state: ToolState::Unknown,
-                }),
+                MessageSemantic::ToolCall { call } => {
+                    let id = call.invocation_id.to_string();
+                    if !blocks
+                        .iter()
+                        .any(|block| matches!(block, Block::Tool { id: known, .. } if *known == id))
+                    {
+                        blocks.push(Block::Tool {
+                            id,
+                            name: call.name,
+                            state: ToolState::Unknown,
+                            source: ToolSource::HistoryCall,
+                        });
+                    }
+                }
                 MessageSemantic::ToolResult {
                     invocation_id,
                     name,
@@ -170,9 +180,10 @@ pub(crate) fn append_messages(
                             error: Some(format!("{}: {content}", outcome.as_str())),
                         },
                     };
-                    if let Some(Block::Tool { state: previous, .. }) = blocks.iter_mut().rev().find(|block| matches!(block, Block::Tool { id, .. } if id == &invocation_id.to_string())) {
+                    if let Some(Block::Tool { state: previous, source, .. }) = blocks.iter_mut().rev().find(|block| matches!(block, Block::Tool { id, .. } if id == &invocation_id.to_string())) {
                         *previous = state;
-                    } else { blocks.push(Block::Tool { id: invocation_id.to_string(), name, state }); }
+                        *source = ToolSource::HistoryResult;
+                    } else { blocks.push(Block::Tool { id: invocation_id.to_string(), name, state, source: ToolSource::HistoryResult }); }
                 }
                 MessageSemantic::Reasoning { .. } => {}
             }

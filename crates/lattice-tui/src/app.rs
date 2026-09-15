@@ -4,15 +4,21 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::connection::{Connection, Update};
+use crate::connection::{cancel_message, detach_lines, not_submitted_notice, submission_notice};
 use crossterm::event::{
     DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyEvent,
     KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
     PushKeyboardEnhancementFlags,
 };
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use lattice_api::TurnEvent;
-use lattice_api::local::{LocalClient, LocalErrorKind, SessionObservation, TurnId, TurnRequest};
+#[cfg(test)]
+use lattice_api::local::SessionObservation;
+use lattice_api::local::{
+    Acceptance, CancelStatus, CompletionConfirmation, ConnectionStatus, DetachReport, HistoryScope,
+    LocalClient, LocalState, LocalTurn, LocalUpdate, ObservationPhase, ResetReason, TextAction,
+    TurnId, TurnObservation, TurnRequest,
+};
 
 use crate::TuiOptions;
 use crate::input::{CTRL_C_WINDOW, History, InputBuffer, KeyAction, resolve_key};
@@ -48,11 +54,19 @@ pub(crate) enum Block {
         id: String,
         name: String,
         state: ToolState,
+        source: ToolSource,
     },
     Status {
         kind: StatusKind,
         placement: StatusPlacement,
     },
+}
+/// 仅用于显示合并的来源；事件成功不能覆盖持久 ToolResult 的真实 outcome 或材料。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ToolSource {
+    HistoryCall,
+    HistoryResult,
+    Event,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -97,17 +111,15 @@ pub(crate) struct App {
     pub(crate) phase: TurnPhase,
     pub(crate) current_turn: Option<TurnId>,
     observed_turn: Option<TurnId>,
-    // 完成事实独立于正文重载；连接错误不能撤销已经取得的确认。
-    completed_turn: Option<(Box<lattice_api::local::CommittedTurnObservation>, bool)>,
     pub(crate) connected: bool,
     cancel_requested: bool,
     reconnect_requested: bool,
     submitted: Option<(TurnId, String)>,
     durable_len: usize,
     gap_pending: bool,
-    accept_live_events: bool,
-    accept_deltas: bool,
-    acceptance_notice: Option<String>,
+    // 仅用于当前界面呈现；控制和确认合并由 LocalTurn 决定。
+    state: Option<LocalState>,
+    cancel_status: Option<CancelStatus>,
     /// Set when `supports_keyboard_enhancement()` reported true at startup.
     pub(crate) kitty_keyboard: bool,
     /// Instant of the last Ctrl+C, for the double-press exit rule.
@@ -128,16 +140,14 @@ impl App {
             phase: TurnPhase::Idle,
             current_turn: None,
             observed_turn: None,
-            completed_turn: None,
             connected: true,
             cancel_requested: false,
             reconnect_requested: false,
             submitted: None,
             durable_len: 0,
             gap_pending: false,
-            accept_live_events: true,
-            accept_deltas: true,
-            acceptance_notice: None,
+            state: None,
+            cancel_status: None,
             kitty_keyboard,
             last_ctrl_c: None,
             should_quit: false,
@@ -150,41 +160,18 @@ impl App {
     /// with **no `_ =>` arm** (§9).
     #[rustfmt::skip]
     pub(crate) fn apply_turn_event(&mut self, event: TurnEvent) {
-        if matches!(event, TurnEvent::TokenDelta { .. }) && !self.accept_deltas { return; }
         match event {
             TurnEvent::TokenDelta { content } => match self.blocks.last_mut() {
                 Some(Block::Assistant(buf)) => buf.push_str(&content),
                 _ => self.blocks.push(Block::Assistant(content)),
             },
             TurnEvent::ToolCallStarted { id, name } => {
-                self.blocks.push(Block::Tool {
-                    id,
-                    name,
-                    state: ToolState::Running,
-                });
+                self.upsert_tool(id, name, ToolState::Running);
             }
-            TurnEvent::ToolCallFinished {
-                id,
-                name: _,
-                ok,
-                output_len,
-                error_summary,
-            } => {
-                if let Some(Block::Tool { state, .. }) = self
-                    .blocks
-                    .iter_mut()
-                    .rev()
-                    .find(|b| matches!(b, Block::Tool { id: tid, .. } if *tid == id))
-                {
-                    *state = if ok {
-                        ToolState::Ok { output_len }
-                    } else {
-                        ToolState::Failed {
-                            output_len,
-                            error: error_summary,
-                        }
-                    };
-                }
+            TurnEvent::ToolCallFinished { id, name, ok, output_len, error_summary } => {
+                self.upsert_tool(id, name, if ok { ToolState::Ok { output_len } } else {
+                    ToolState::Failed { output_len, error: error_summary }
+                });
             }
             TurnEvent::TurnCommitting => {
                 if self.phase == TurnPhase::Streaming {
@@ -248,16 +235,43 @@ impl App {
                     );
                 }
             }
-            TurnEvent::ModelStarted { .. } => {
-                // 只有 cut 后完整观察到的新模型段才能拼接；不能把后缀接到已加载的旧消息。
-                self.accept_deltas = true;
-                self.blocks.push(Block::Assistant(String::new()));
-            }
-            TurnEvent::ModelFinished { .. } => self.accept_deltas = false,
+            TurnEvent::ModelStarted { .. } | TurnEvent::ModelFinished { .. } => {},
             TurnEvent::TurnStarted { .. }
             | TurnEvent::ReasoningDelta { .. }
             | TurnEvent::CepCallStarted { .. }
             | TurnEvent::CepCallFinished { .. } => {}
+        }
+    }
+
+    fn upsert_tool(&mut self, id: String, name: String, state: ToolState) {
+        if let Some(Block::Tool {
+            name: known_name,
+            state: known,
+            source,
+            ..
+        }) = self
+            .blocks
+            .iter_mut()
+            .find(|block| matches!(block, Block::Tool { id: known, .. } if *known == id))
+        {
+            if *source == ToolSource::HistoryResult {
+                return;
+            }
+            if state == ToolState::Running
+                && !matches!(known, ToolState::Running | ToolState::Unknown)
+            {
+                return;
+            }
+            *known_name = name;
+            *known = state;
+            *source = ToolSource::Event;
+        } else {
+            self.blocks.push(Block::Tool {
+                id,
+                name,
+                state,
+                source: ToolSource::Event,
+            });
         }
     }
 
@@ -337,7 +351,7 @@ impl App {
             "/quit" | "/exit" | "/q" => { self.should_quit = true; true }
             "/reconnect" => { self.reconnect_requested = true; true }
             "/help" | "/?" => { self.push_status(StatusKind::Notice(help_lines(self.kitty_keyboard))); true }
-            "/clear" => { self.blocks.clear(); self.viewport = Viewport::new(); true }
+            "/clear" => { self.blocks.clear(); self.durable_len = 0; self.viewport = Viewport::new(); true }
             _ => false,
         }
     }
@@ -368,71 +382,190 @@ impl App {
         self.push_status(StatusKind::Notice(vec![reason]));
     }
 
-    fn apply_snapshot(
-        &mut self,
-        view: SessionObservation,
-        blocks: Option<Vec<Block>>,
-        owned: bool,
-        confirmed: bool,
-        error: Option<lattice_api::local::LocalError>,
-    ) {
-        let body_unavailable = blocks.is_none();
-        // 快照本身表明请求的 Turn 已关闭且没有活动 Turn；正文是否可读不改变这一事实。
-        let closed = matches!(
-            view.requested_turn,
-            Some(lattice_api::local::TurnObservation::Committed(_))
-        ) && view.active_turn.is_none();
-        self.accept_deltas = false;
+    fn apply_update(&mut self, update: LocalUpdate) {
+        match update {
+            LocalUpdate::State {
+                view,
+                phase,
+                confirmation,
+                error,
+                ..
+            } => {
+                self.apply_state(LocalState {
+                    view,
+                    phase,
+                    confirmation,
+                    error,
+                });
+            }
+            LocalUpdate::Reset { reason, .. } => self.reset_display(reason),
+            LocalUpdate::History { result, stale, .. } => match result {
+                Ok(history) => self.replace_history(crate::session::history_blocks(*history)),
+                Err(error) => self.push_status(StatusKind::Notice(vec![format!(
+                    "{}持久正文不可用；当前内容未验证，/reconnect 重载：{:?}：{}",
+                    if stale { "旧切点" } else { "" },
+                    error.context,
+                    error.error.message
+                )])),
+            },
+            LocalUpdate::Event { event, text, .. } => {
+                match text {
+                    TextAction::Start => self.blocks.push(Block::Assistant(String::new())),
+                    TextAction::StartIncomplete => {
+                        self.push_status(StatusKind::Notice(vec![
+                            "当前模型段前文可能缺失；仅显示重连后的新后缀".into(),
+                        ]));
+                        self.blocks.push(Block::Assistant(String::new()));
+                    }
+                    TextAction::None | TextAction::Continue | TextAction::Finish => {}
+                }
+                self.apply_turn_event(event);
+            }
+            LocalUpdate::Submission { turn_id, result } => match result {
+                Ok(acceptance) => {
+                    self.submitted = None;
+                    if matches!(
+                        acceptance,
+                        Acceptance::Recovered { .. }
+                            | Acceptance::Existing {
+                                turn: TurnObservation::Committed(_)
+                            }
+                    ) {
+                        self.current_turn = None;
+                        self.phase = TurnPhase::Idle;
+                    }
+                    self.push_status(StatusKind::Notice(vec![submission_notice(&acceptance)]));
+                }
+                Err(error) => {
+                    self.restore_submission();
+                    self.push_status(StatusKind::Notice(vec![format!(
+                        "请求 {turn_id} 被拒绝或回执失败：{}",
+                        error.message
+                    )]));
+                }
+            },
+            LocalUpdate::SubmissionUnknown { turn_id, error } => {
+                self.push_status(StatusKind::Notice(vec![format!(
+                    "提交结果未知：{turn_id}；继续观察同一请求，不自动重发"
+                )]));
+                if let Some(error) = error {
+                    self.push_status(StatusKind::Notice(vec![error.message]));
+                }
+            }
+            LocalUpdate::NotSubmitted { turn_id, .. } => {
+                self.restore_submission();
+                self.push_status(StatusKind::Notice(vec![not_submitted_notice(turn_id)]));
+            }
+            LocalUpdate::Cancel {
+                turn_id,
+                status,
+                error,
+            } => {
+                self.cancel_status = Some(status);
+                self.push_status(StatusKind::Notice(vec![format!(
+                    "{}：{turn_id}",
+                    cancel_message(status)
+                )]));
+                if let Some(error) = error {
+                    self.push_status(StatusKind::Notice(vec![format!(
+                        "取消诊断：turn {turn_id}，{:?}：{}",
+                        error.kind, error.message
+                    )]));
+                }
+            }
+            LocalUpdate::Connection(status) => match status {
+                ConnectionStatus::Eof => self.finish_stream(),
+                ConnectionStatus::Idle => self.apply_stream_idle_timeout(),
+                ConnectionStatus::Error(error) => self.connection_lost(error.message),
+            },
+        }
+    }
+
+    fn apply_state(&mut self, state: LocalState) {
+        let view = &state.view;
         let observed = view
             .requested_turn
             .as_ref()
             .map(|turn| match turn {
-                lattice_api::local::TurnObservation::Pending(turn) => turn.turn_id,
-                lattice_api::local::TurnObservation::Committed(turn) => turn.turn_id,
+                TurnObservation::Pending(turn) => turn.turn_id,
+                TurnObservation::Committed(turn) => turn.turn_id,
             })
             .or_else(|| view.active_turn.as_ref().map(|turn| turn.turn_id));
         if observed.is_some() {
             self.observed_turn = observed;
         }
-        self.accept_live_events = !matches!(
-            view.requested_turn,
-            Some(lattice_api::local::TurnObservation::Committed(_))
-        );
-        if let Some(lattice_api::local::TurnObservation::Committed(turn)) = &view.requested_turn {
-            let confirmed = confirmed
-                || self
-                    .completed_turn
-                    .as_ref()
-                    .is_some_and(|(known, confirmed)| {
-                        known.turn_id == turn.turn_id
-                            && known.commit_id == turn.commit_id
-                            && *confirmed
-                    });
-            self.completed_turn = Some((turn.clone(), confirmed));
+        self.ctx.active_agent = view.session.active_agent_name.clone();
+        self.connected = true;
+        if matches!(&view.requested_turn, Some(TurnObservation::Committed(_))) {
+            self.fail_running_tools("turn ended before tool completion");
         }
-        self.ctx.active_agent = view.session.active_agent_name;
-        if let Some(blocks) = blocks {
-            self.blocks = blocks;
-            self.durable_len = self.blocks.len();
+        if state.phase == ObservationPhase::Live {
+            self.current_turn = observed;
+            self.phase = if matches!(
+                self.cancel_status,
+                Some(CancelStatus::Pending | CancelStatus::Taken)
+            ) {
+                TurnPhase::Cancelling
+            } else {
+                TurnPhase::Streaming
+            };
+        } else if state.phase == ObservationPhase::Finished || self.submitted.is_none() {
+            self.current_turn = view.active_turn.as_ref().map(|turn| turn.turn_id);
+            self.phase = TurnPhase::Idle;
         }
-        if let Some((turn, confirmed)) = &self.completed_turn {
-            let mut found = false;
-            for block in &mut self.blocks {
-                if let Block::Status { kind, .. } = block
-                    && matches!(kind, StatusKind::Visible { commit_id } | StatusKind::Committed { commit_id } if *commit_id == turn.commit_id)
-                {
-                    found = true;
-                    if *confirmed {
-                        *kind = StatusKind::Committed {
-                            commit_id: turn.commit_id.clone(),
-                        };
-                    }
+        if state.phase == ObservationPhase::Finished {
+            self.submitted = None;
+        }
+        if let Some(pending) = &view.active_turn {
+            self.notice_once(format!(
+                "pending Turn {}{}",
+                pending.turn_id,
+                if state.phase == ObservationPhase::Live {
+                    ""
+                } else {
+                    "；本连接尚未确认 live 所有权；可重连查询或用 session recover 协调"
                 }
-            }
-            if body_unavailable {
-                let turn_id = turn.turn_id;
-                let outcome = turn.outcome.clone();
-                let kind = if *confirmed {
+            ));
+        }
+        if let Some(error) = &state.error {
+            self.notice_once(format!(
+                "Turn {}：{}",
+                self.observed_turn
+                    .map_or_else(|| "未知".into(), |id| id.to_string()),
+                error.message
+            ));
+        }
+        self.state = Some(state);
+        self.show_completion();
+    }
+
+    fn notice_once(&mut self, message: String) {
+        let kind = StatusKind::Notice(vec![message]);
+        if !self
+            .blocks
+            .iter()
+            .any(|block| matches!(block, Block::Status { kind: known, .. } if *known == kind))
+        {
+            self.push_status(kind);
+        }
+    }
+
+    fn show_completion(&mut self) {
+        let Some(state) = &self.state else {
+            return;
+        };
+        let Some(TurnObservation::Committed(turn)) = &state.view.requested_turn else {
+            return;
+        };
+        let turn = turn.clone();
+        let confirmed = state.confirmation == CompletionConfirmation::Confirmed;
+        let mut found = false;
+        for block in &mut self.blocks {
+            if let Block::Status { kind, .. } = block
+                && matches!(kind, StatusKind::Visible { commit_id } | StatusKind::Committed { commit_id } if *commit_id == turn.commit_id)
+            {
+                found = true;
+                *kind = if confirmed {
                     StatusKind::Committed {
                         commit_id: turn.commit_id.clone(),
                     }
@@ -441,82 +574,104 @@ impl App {
                         commit_id: turn.commit_id.clone(),
                     }
                 };
-                if !found {
-                    self.push_status(kind);
-                }
-                let reason = format!("Turn {turn_id}：{outcome:?}");
-                self.push_status(match outcome {
-                    lattice_api::TurnOutcome::Completed { .. } => StatusKind::Notice(vec![reason]),
-                    lattice_api::TurnOutcome::Cancelled { .. } => StatusKind::Cancelled {
-                        reason: Some(reason),
-                    },
-                    lattice_api::TurnOutcome::Failed { .. }
-                    | lattice_api::TurnOutcome::Interrupted { .. } => {
-                        StatusKind::TurnFailed { reason }
-                    }
-                });
             }
         }
-        self.connected = true;
-        // 引用已发布但核心仍收尾时，取消目标仍属于原 Turn。
-        self.current_turn = view
-            .active_turn
-            .as_ref()
-            .map(|turn| turn.turn_id)
-            .or_else(|| {
-                owned
-                    .then(|| {
-                        view.requested_turn.as_ref().map(|turn| match turn {
-                            lattice_api::local::TurnObservation::Pending(turn) => turn.turn_id,
-                            lattice_api::local::TurnObservation::Committed(turn) => turn.turn_id,
-                        })
-                    })
-                    .flatten()
+        if !found {
+            self.push_status(if confirmed {
+                StatusKind::Committed {
+                    commit_id: turn.commit_id.clone(),
+                }
+            } else {
+                StatusKind::Visible {
+                    commit_id: turn.commit_id.clone(),
+                }
             });
-        self.phase = if owned {
-            TurnPhase::Streaming
-        } else {
-            TurnPhase::Idle
+        }
+        let reason = format!("Turn {}：{:?}", turn.turn_id, turn.outcome);
+        let kind = match turn.outcome {
+            lattice_api::TurnOutcome::Completed { .. } => StatusKind::Notice(vec![reason]),
+            lattice_api::TurnOutcome::Cancelled { .. } => StatusKind::Cancelled {
+                reason: Some(reason),
+            },
+            lattice_api::TurnOutcome::Failed { .. }
+            | lattice_api::TurnOutcome::Interrupted { .. } => StatusKind::TurnFailed { reason },
         };
-        if let Some(pending) = view.active_turn {
-            let id = pending.turn_id;
-            self.push_status(StatusKind::Notice(vec![format!(
-                "pending Turn {id}{}",
-                if owned {
-                    ""
-                } else {
-                    "；本连接尚未确认 live 所有权；可重连查询或用 session recover 协调"
-                }
-            )]));
-        } else {
-            self.submitted = None;
+        if !self
+            .blocks
+            .iter()
+            .any(|block| matches!(block, Block::Status { kind: known, .. } if *known == kind))
+        {
+            self.push_status(kind);
         }
-        if self.gap_pending && !body_unavailable {
-            self.push_status(StatusKind::Notice(vec![
-                "观察存在增量缺口；持久视图已替换，临时增量未重放".into(),
-            ]));
-        }
-        if let Some(message) = self.acceptance_notice.take() {
-            self.push_status(StatusKind::Notice(vec![message]));
-        }
-        if let Some(error) = error {
-            self.push_status(StatusKind::Notice(vec![format!(
-                "Turn {}：{}",
-                self.observed_turn
-                    .map_or_else(|| "未知".into(), |id| id.to_string()),
-                error.message
-            )]));
-        }
-        if body_unavailable {
-            // 正文读取失败只说明持久正文不可用：连接仍在、Turn 是否完成由快照本身决定。
-            // 已关闭 Turn 的固定快照没有替换 blocks 时，仍要按终态收口尚在 Running 的工具行。
-            if closed {
-                self.fail_running_tools("turn ended before tool completion");
+    }
+
+    fn reset_display(&mut self, reason: ResetReason) {
+        // 已移入历史位置的事件覆盖也只属于旧切点；恢复其 ToolCall-only 显示。
+        for block in &mut self.blocks[..self.durable_len] {
+            if let Block::Tool {
+                state,
+                source: source @ ToolSource::Event,
+                ..
+            } = block
+            {
+                *state = ToolState::Unknown;
+                *source = ToolSource::HistoryCall;
             }
-            self.push_status(StatusKind::Notice(vec![
-                "持久正文不可用；当前显示未验证，/reconnect 重载".into(),
-            ]));
         }
+        let statuses: Vec<_> = self
+            .blocks
+            .drain(self.durable_len..)
+            .filter(|block| matches!(block, Block::Status { .. }))
+            .collect();
+        self.blocks.extend(statuses);
+        if reason == ResetReason::Gap {
+            self.gap_pending = true;
+        }
+        if self.gap_pending {
+            self.notice_once("增量缺口；将替换持久视图，临时增量不重放".into());
+        }
+    }
+
+    fn replace_history(&mut self, mut blocks: Vec<Block>) {
+        let events: std::collections::HashMap<_, _> = self
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                Block::Tool {
+                    id,
+                    source: ToolSource::Event,
+                    ..
+                } => Some((id.clone(), block.clone())),
+                _ => None,
+            })
+            .collect();
+        let mut history_ids = std::collections::HashSet::new();
+        for block in &mut blocks {
+            if let Block::Tool { id, source, .. } = block {
+                history_ids.insert(id.clone());
+                if *source == ToolSource::HistoryCall
+                    && let Some(event) = events.get(id)
+                {
+                    *block = event.clone();
+                }
+            }
+        }
+        let temporary = self.blocks.split_off(self.durable_len);
+        self.blocks = blocks;
+        self.durable_len = self.blocks.len();
+        for block in temporary {
+            if matches!(&block, Block::Tool { id, .. } if history_ids.contains(id)) {
+                continue;
+            }
+            if let Block::Status { kind: StatusKind::Visible { commit_id } | StatusKind::Committed { commit_id }, .. } = &block
+                && self.blocks.iter().any(|known| matches!(known, Block::Status { kind: StatusKind::Visible { commit_id: id } | StatusKind::Committed { commit_id: id }, .. } if id == commit_id))
+            { continue; }
+            if matches!(block, Block::Status { .. }) && self.blocks.contains(&block) {
+                continue;
+            }
+            self.blocks.push(block);
+        }
+        self.show_completion();
     }
 
     pub(crate) fn fail_running_tools(&mut self, reason: &str) {
@@ -608,7 +763,8 @@ impl App {
         self.history.push(raw.trim());
         self.input.clear();
         let id = lattice_api::local::new_turn_id();
-        self.accept_live_events = true;
+        self.state = None;
+        self.cancel_status = None;
         self.gap_pending = false;
         self.current_turn = Some(id);
         self.observed_turn = Some(id);
@@ -633,13 +789,20 @@ impl App {
         }
     }
 
-    /// 请求被拒绝或未发出：输入交还用户自行决定，不自动重发，也没有可取消的 Turn。
-    fn abandon_submission(&mut self) {
+    /// 只归还本客户端的草稿，不撤销已知 live、接管或完成显示。
+    fn restore_submission(&mut self) {
         if let Some((_, prompt)) = self.submitted.take() {
             self.input.set_text(&prompt);
         }
-        self.phase = TurnPhase::Idle;
-        self.current_turn = None;
+        if !self
+            .state
+            .as_ref()
+            .is_some_and(|state| state.phase == ObservationPhase::Live)
+            && self.cancel_status != Some(CancelStatus::Taken)
+        {
+            self.phase = TurnPhase::Idle;
+            self.current_turn = None;
+        }
     }
 
     /// 与绘制路径使用同一内容宽度和垂直开销。
@@ -656,7 +819,7 @@ impl App {
     }
 }
 
-/// 启动先重载固定历史，再进入 raw 模式；不依赖实时流补回已提交结果。
+/// 进入 raw 模式后并行接收固定状态和正文；启动不等待整段历史读取。
 pub(crate) async fn run_app(
     mut options: TuiOptions,
     ctx: SessionContext,
@@ -665,30 +828,7 @@ pub(crate) async fn run_app(
     let root = options.project_root.clone();
     options.project_root =
         tokio::task::spawn_blocking(move || std::fs::canonicalize(root)).await??;
-    let mut connection = Connection::start(client.clone(), ctx.session_id.clone(), None, None);
-    let mut initial_gap = false;
-    let (initial_view, initial_blocks, initial_owned, initial_confirmed, initial_error) = loop {
-        match tokio::time::timeout(
-            Duration::from_secs(lattice_api::STREAM_IDLE_TIMEOUT_SECS),
-            connection.next(),
-        )
-        .await?
-        {
-            Some(Update::Snapshot {
-                view,
-                blocks,
-                owned,
-                confirmed,
-                error,
-            }) => {
-                break (view, blocks, owned, confirmed, error);
-            }
-            Some(Update::Gap) => initial_gap = true,
-            Some(Update::Error(error)) => return Err(error.into()),
-            Some(Update::SelectedTurn { .. } | Update::NotSubmitted { .. } | Update::Event(_)) => {}
-            None => anyhow::bail!("initial observation ended without a fixed snapshot"),
-        }
-    };
+    let connection = client.observe(ctx.session_id.clone(), None, HistoryScope::Session);
     let mut terminal = ratatui::try_init()?;
     let kitty = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
     crossterm::execute!(std::io::stdout(), EnableBracketedPaste)?;
@@ -702,20 +842,12 @@ pub(crate) async fn run_app(
     let _cleanup = TerminalCleanup { kitty };
 
     let mut app = App::new(ctx, kitty, &options.session_dir);
-    app.gap_pending = initial_gap;
-    app.apply_snapshot(
-        *initial_view,
-        initial_blocks,
-        initial_owned,
-        initial_confirmed,
-        initial_error,
-    );
     app.push_status(StatusKind::Notice(startup_notice(&app.ctx)));
-    let exit = run_loop(
+    let mut exit = run_loop(
         &options,
         &mut app,
         &client,
-        initial_owned.then_some(connection),
+        Some(connection),
         EventStream::new(),
         |app| {
             if let Ok(size) = terminal.size() {
@@ -731,154 +863,31 @@ pub(crate) async fn run_app(
         },
     )
     .await;
-    // 离开备用屏幕后再有界承接取消意图与在途提交回执；退出不能销毁已经发出的取消，也不能丢弃仍未知的回执。
+    // 先复原终端，再由共同句柄有界承接既有意图；普通退出不新增取消。
     drop(_cleanup);
-    for line in settle_exit(&client, &app.ctx.session_id, exit.control).await {
-        eprintln!("{line}");
+    if let Some(turn) = exit.turn {
+        exit.handoffs.push(turn.detach().boxed());
+    }
+    while let Some(report) = exit.handoffs.next().await {
+        for line in detach_lines(report) {
+            eprintln!("{line}");
+        }
     }
     exit.result
 }
 
-type CancelTask = tokio::task::JoinHandle<lattice_api::local::Result<bool>>;
-
-/// 退出后继续承接提交回执与取消回执的上限；到期仍未知则带原 ID 报告，不无界挂起。
-const EXIT_GRACE_SECS: u64 = 5;
-
-/// 取消意图绑定提交时的 TurnId。Pending 表示已请求但后台尚未确认接管；
-/// Moot 表示请求被拒绝、未发出或选定了已关闭的旧 Turn，意图没有对象，不得扩散。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CancelIntent {
-    Pending,
-    Confirmed,
-    Moot,
-}
-
-/// 事件循环持有的观察与取消状态；退出后交给 `settle_exit`，不随循环结束丢弃。
-struct TurnControl {
-    stream: Option<Connection>,
-    deadline: Option<tokio::time::Instant>,
-    cancel: Option<CancelTask>,
-    /// 在途取消发出时提交回执尚未到达：其接管可能属于探测所有者，不能作最终确认。
-    provisional: bool,
-    intent: Option<(TurnId, CancelIntent)>,
-    /// 当前 Connection 的提交回执（SelectedTurn / NotSubmitted / Error）仍在途。
-    receipt_pending: bool,
-}
-
-impl TurnControl {
-    /// 用户请求取消：意图绑定当前 TurnId；无在途取消时立即发一次，
-    /// 提交回执未到时同时阻止尚未发出的配置提交。owned=false 不是终结，回执到达后再补发。
-    fn request_cancel(&mut self, client: &LocalClient, session_id: &str, turn_id: TurnId) {
-        if !matches!(self.intent, Some((id, _)) if id == turn_id) {
-            self.intent = Some((turn_id, CancelIntent::Pending));
-        }
-        if self.cancel.is_none() {
-            self.cancel = Some(spawn_cancel(client, session_id, turn_id));
-            self.provisional = self.receipt_pending;
-        }
-        if self.receipt_pending
-            && let Some(connection) = &self.stream
-        {
-            connection.abandon_unsent();
-        }
-    }
-
-    /// 有 live 证据（接受回执或 owned 快照）时，对同一身份未确认的意图只补发一次。
-    /// 返回意图是否仍针对该 Turn。
-    fn resend_pending(&mut self, client: &LocalClient, session_id: &str, turn_id: TurnId) -> bool {
-        match self.intent {
-            Some((id, CancelIntent::Pending)) if id == turn_id => {
-                if self.cancel.is_none() {
-                    self.cancel = Some(spawn_cancel(client, session_id, turn_id));
-                    self.provisional = false;
-                }
-                true
-            }
-            Some((id, CancelIntent::Confirmed)) if id == turn_id => true,
-            _ => false,
-        }
-    }
-
-    /// 取消回执：接管只在提交回执已到时算确认；提交回执前发出的取消若已知 live 则补发一次。
-    fn settle_cancel(&mut self, client: &LocalClient, session_id: &str, taken: bool) {
-        self.cancel = None;
-        let provisional = std::mem::take(&mut self.provisional);
-        let Some((turn_id, CancelIntent::Pending)) = self.intent else {
-            return;
-        };
-        if provisional {
-            if !self.receipt_pending {
-                self.resend_pending(client, session_id, turn_id);
-            }
-        } else if taken {
-            self.intent = Some((turn_id, CancelIntent::Confirmed));
-        }
-    }
-
-    /// 请求被拒绝、未发送或选定了已关闭的旧 Turn：待办意图失去对象。返回其原 TurnId 供提示。
-    fn moot(&mut self) -> Option<TurnId> {
-        match &mut self.intent {
-            Some((turn_id, intent @ CancelIntent::Pending)) => {
-                *intent = CancelIntent::Moot;
-                Some(*turn_id)
-            }
-            _ => None,
-        }
-    }
-
-    /// 意图针对的 Turn 已观察到持久终态：不再有待确认的取消。
-    fn resolve_terminal(&mut self, view: &SessionObservation) {
-        if let Some(lattice_api::local::TurnObservation::Committed(turn)) = &view.requested_turn
-            && matches!(self.intent, Some((id, _)) if id == turn.turn_id)
-        {
-            self.intent = None;
-        }
-    }
-
-    fn close_stream(&mut self) {
-        self.stream = None;
-        self.deadline = None;
-        self.receipt_pending = false;
-    }
-}
-
 struct LoopExit {
     result: anyhow::Result<()>,
-    control: TurnControl,
+    turn: Option<LocalTurn>,
+    handoffs: FuturesUnordered<BoxFuture<'static, DetachReport>>,
 }
 
-fn spawn_cancel(client: &LocalClient, session_id: &str, turn_id: TurnId) -> CancelTask {
-    let client = client.clone();
-    let session = session_id.to_owned();
-    tokio::spawn(async move { client.cancel(&session, turn_id).await })
-}
-
-fn rejected(error: &lattice_api::local::LocalError) -> bool {
-    matches!(
-        error.kind,
-        LocalErrorKind::BadRequest
-            | LocalErrorKind::NotFound
-            | LocalErrorKind::Busy
-            | LocalErrorKind::Conflict
-            | LocalErrorKind::Stopping
-    )
-}
-
-fn moot_notice(turn_id: TurnId) -> String {
-    format!("本次请求 {turn_id} 未接受或已关闭；取消没有对象，不作用于其他 Turn")
-}
-
-fn not_submitted_notice(turn_id: TurnId) -> String {
-    format!("请求未接受：中断后不再提交配置，未执行：turn {turn_id}")
-}
-
-/// 键盘事件流与绘制回调由调用方注入：产品接 crossterm/ratatui，测试接脚本事件并检查状态。
-#[rustfmt::skip]
+/// 产品接 crossterm/ratatui，测试注入按键并检查同一绘制回调。
 async fn run_loop<E, D>(
     options: &TuiOptions,
     app: &mut App,
     client: &LocalClient,
-    initial: Option<Connection>,
+    mut turn: Option<LocalTurn>,
     mut events: E,
     mut draw: D,
 ) -> LoopExit
@@ -886,260 +895,77 @@ where
     E: futures::Stream<Item = std::io::Result<Event>> + Unpin,
     D: FnMut(&mut App) -> anyhow::Result<()>,
 {
-    let mut control = TurnControl {
-        deadline: initial.as_ref().map(|_| idle_deadline()),
-        stream: initial,
-        cancel: None,
-        provisional: false,
-        intent: None,
-        receipt_pending: false,
-    };
-    let session = app.ctx.session_id.clone();
     let mut ticker = tokio::time::interval(FRAME);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut handoffs = FuturesUnordered::new();
     let mut dirty = true;
     let result = loop {
-        // 取消请求先于退出判定登记：同一轮到达的 Esc 与退出不能让意图丢失。
-        if app.cancel_requested {
-            app.cancel_requested = false;
-            if let Some(id) = app.current_turn {
-                control.request_cancel(client, &session, id);
+        let cancel = std::mem::take(&mut app.cancel_requested);
+        let reconnect = !app.should_quit && std::mem::take(&mut app.reconnect_requested);
+        if cancel || reconnect {
+            let target = app.current_turn.or(app.observed_turn);
+            let needs_selection = turn.as_ref().is_none_or(|turn| {
+                target.is_some()
+                    && (target != turn.observed_turn_id() || (cancel && target != turn.turn_id()))
+            });
+            if needs_selection {
+                // 用户选择不同目标才另建只读句柄；旧控制交接不阻塞新目标或等待旧正文。
+                if let Some(old) = turn.replace(client.observe(
+                    app.ctx.session_id.clone(),
+                    target,
+                    HistoryScope::Session,
+                )) {
+                    handoffs.push(old.detach().boxed());
+                }
+                app.state = None;
+                app.cancel_status = None;
+                app.observed_turn = target;
+            } else if reconnect && let Some(turn) = &turn {
+                turn.reconnect();
+            }
+            if cancel && let Some(turn) = &turn {
+                turn.cancel();
             }
         }
         if app.should_quit {
             break Ok(());
         }
-        if app.reconnect_requested {
-            app.reconnect_requested = false;
-            control.stream = Some(Connection::start(client.clone(), session.clone(), app.current_turn.or(app.observed_turn), None));
-            control.deadline = Some(idle_deadline());
-            control.receipt_pending = false;
-        }
         tokio::select! {
             event = events.next() => {
                 match event {
-                    Some(Ok(ev)) => {
-                        if let Some(prompt) = handle_input_event(app, ev) {
-                            control.intent = None;
-                            begin_turn(options, app, &mut control.stream, client, prompt);
-                            control.deadline = control.stream.as_ref().map(|_| idle_deadline());
-                            control.receipt_pending = true;
+                    Some(Ok(event)) => {
+                        if let Some(prompt) = handle_input_event(app, event) {
+                            if let Some(old) = turn.take() { handoffs.push(old.detach().boxed()); }
+                            begin_turn(options, app, &mut turn, client, prompt);
                         }
                     }
                     Some(Err(_)) | None => app.should_quit = true,
                 }
                 dirty = true;
             }
-            receipt = async { control.cancel.as_mut().expect("guarded cancellation").await }, if control.cancel.is_some() => {
-                let taken = cancel_taken(&receipt);
-                app.push_status(StatusKind::Notice(vec![cancel_message(receipt, control.provisional)]));
-                control.settle_cancel(client, &session, taken);
+            Some(report) = handoffs.next(), if !handoffs.is_empty() => {
+                for line in detach_lines(report) {
+                    app.notice_once(format!("历史交接：{line}"));
+                }
                 dirty = true;
             }
-            wait = poll_turn(&mut control.stream, control.deadline) => {
-                match wait {
-                    TurnWait::Event(update) => {
-                        control.deadline = Some(idle_deadline());
-                        match update {
-                            Update::SelectedTurn { turn_id, message, live } => {
-                                control.receipt_pending = false;
-                                app.current_turn = Some(turn_id);
-                                app.acceptance_notice = Some(format!("{message}：{turn_id}"));
-                                if live {
-                                    if control.resend_pending(client, &session, turn_id) { app.phase = TurnPhase::Cancelling; }
-                                } else if let Some(id) = control.moot() {
-                                    app.push_status(StatusKind::Notice(vec![moot_notice(id)]));
-                                }
-                            }
-                            Update::NotSubmitted { turn_id } => {
-                                control.close_stream();
-                                control.moot();
-                                app.abandon_submission();
-                                app.push_status(StatusKind::Notice(vec![not_submitted_notice(turn_id)]));
-                            }
-                            Update::Event(event) => { if app.accept_live_events { app.apply_turn_event(event); } }
-                            Update::Gap => {
-                                app.gap_pending = true;
-                                app.accept_deltas = false;
-                                app.blocks.truncate(app.durable_len);
-                                app.push_status(StatusKind::Notice(vec!["增量缺口；将替换持久视图，不重复追加".into()]));
-                            }
-                            Update::Snapshot { view, blocks, owned, confirmed, error } => {
-                                if !owned { control.resolve_terminal(&view); }
-                                app.apply_snapshot(*view, blocks, owned, confirmed, error);
-                                if owned
-                                    && let Some(id) = app.current_turn
-                                    && control.resend_pending(client, &session, id) {
-                                        app.phase = TurnPhase::Cancelling;
-                                    }
-                                if !owned { control.close_stream(); }
-                            }
-                            Update::Error(error) => {
-                                if rejected(&error) {
-                                    app.abandon_submission();
-                                    if control.receipt_pending
-                                        && let Some(id) = control.moot() {
-                                            app.push_status(StatusKind::Notice(vec![moot_notice(id)]));
-                                        }
-                                }
-                                control.receipt_pending = false;
-                                app.connection_lost(error.message);
-                            }
-                        }
-                    }
-                    TurnWait::Ended => {
-                        control.close_stream();
-                        app.finish_stream();
-                    }
-                    TurnWait::TimedOut => {
-                        control.close_stream();
-                        app.apply_stream_idle_timeout();
-                    }
-                }
+            update = async { turn.as_mut().expect("已有句柄").next().await }, if turn.is_some() => {
+                if let Some(update) = update { app.apply_update(update); }
+                else { turn = None; app.finish_stream(); }
                 dirty = true;
             }
             _ = ticker.tick() => {
                 dirty |= app.expire_ctrl_c_notice(Instant::now());
-                if !dirty {
-                    continue;
-                }
-                if let Err(error) = draw(app) {
-                    break Err(error);
-                }
+                if !dirty { continue; }
+                if let Err(error) = draw(app) { break Err(error); }
                 dirty = false;
             }
         }
     };
-    LoopExit { result, control }
-}
-
-/// 界面退出后按原 SessionId/TurnId 有界承接取消意图：在途取消等回执；提交回执未到则继续
-/// 轮询同一 Connection，接受后再取消、拒绝或选定旧 Turn 则作废、到期仍未知则如实报告。
-/// 无取消意图的退出只断开，不新增取消。返回终端复原后要打印的行。
-async fn settle_exit(
-    client: &LocalClient,
-    session_id: &str,
-    mut control: TurnControl,
-) -> Vec<String> {
-    let mut lines = Vec::new();
-    if control.intent.is_none() {
-        return lines;
-    }
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(EXIT_GRACE_SECS);
-    while matches!(control.intent, Some((_, CancelIntent::Pending))) {
-        if let Some(task) = control.cancel.as_mut() {
-            let Ok(receipt) = tokio::time::timeout_at(deadline, task).await else {
-                break;
-            };
-            let taken = cancel_taken(&receipt);
-            lines.push(cancel_message(receipt, control.provisional));
-            control.settle_cancel(client, session_id, taken);
-            continue;
-        }
-        if !control.receipt_pending {
-            break;
-        }
-        let Some(stream) = control.stream.as_mut() else {
-            control.receipt_pending = false;
-            continue;
-        };
-        match tokio::time::timeout_at(deadline, stream.next()).await {
-            Ok(Some(Update::SelectedTurn {
-                turn_id: selected,
-                message,
-                live,
-            })) => {
-                control.receipt_pending = false;
-                lines.push(format!("{message}：{selected}"));
-                if live {
-                    control.resend_pending(client, session_id, selected);
-                } else if let Some(id) = control.moot() {
-                    lines.push(moot_notice(id));
-                }
-            }
-            Ok(Some(Update::NotSubmitted { turn_id })) => {
-                control.close_stream();
-                control.moot();
-                lines.push(not_submitted_notice(turn_id));
-            }
-            Ok(Some(Update::Error(error))) => {
-                control.receipt_pending = false;
-                if rejected(&error)
-                    && let Some(id) = control.moot()
-                {
-                    lines.push(format!("请求 {id} 被拒绝，未执行：{}", error.message));
-                } else {
-                    lines.push(format!("提交回执失败：{}", error.message));
-                }
-            }
-            Ok(Some(Update::Event(_) | Update::Gap | Update::Snapshot { .. })) => {}
-            Ok(None) => control.receipt_pending = false,
-            Err(_) => break,
-        }
-    }
-    drop(control.stream);
-    match control.intent {
-        Some((id, CancelIntent::Pending)) => lines.push(format!(
-            "取消未确认：session {session_id} turn {id}；后台可能仍接受或执行该请求，请用同一 TurnId 查询或再次取消"
-        )),
-        Some((id, CancelIntent::Confirmed)) => lines.push(format!(
-            "后台已接管取消：session {session_id} turn {id}；持久终态仍待确认"
-        )),
-        Some((_, CancelIntent::Moot)) | None => {}
-    }
-    lines
-}
-
-fn cancel_taken(
-    receipt: &Result<lattice_api::local::Result<bool>, tokio::task::JoinError>,
-) -> bool {
-    matches!(receipt, Ok(Ok(true)))
-}
-
-/// owned=false 与未知都不是终结：提交回执未到时所有者可能尚未登记，稍后仍会接受同一请求。
-fn cancel_message(
-    receipt: Result<lattice_api::local::Result<bool>, tokio::task::JoinError>,
-    provisional: bool,
-) -> String {
-    match receipt {
-        Ok(Ok(true)) => "后台已接管取消；持久终态仍待确认".into(),
-        Ok(Ok(false)) if provisional => {
-            "取消早于所有者登记（无 live 所有者）；提交回执到达后将对同一 TurnId 再取消".into()
-        }
-        Ok(Ok(false)) => "该 Turn 无 live 所有者；没有确认持久 Cancelled，请查询或显式恢复".into(),
-        _ => "取消确认未知；请按 TurnId 查询或再次明确取消".into(),
-    }
-}
-
-enum TurnWait {
-    Event(Update),
-    Ended,
-    TimedOut,
-}
-
-/// 观察 idle 使用绝对时刻；重建 select future 不能不断重置倒计时。
-fn idle_deadline() -> tokio::time::Instant {
-    tokio::time::Instant::now() + Duration::from_secs(lattice_api::STREAM_IDLE_TIMEOUT_SECS)
-}
-
-/// Connection 的 Stream 来自 mpsc recv，键盘/重绘赢得 select 时不会丢半帧。
-async fn poll_turn<S: futures::Stream<Item = Update> + Unpin>(
-    stream: &mut Option<S>,
-    deadline: Option<tokio::time::Instant>,
-) -> TurnWait {
-    match (stream.as_mut(), deadline) {
-        (Some(s), Some(deadline)) => match tokio::time::timeout_at(deadline, s.next()).await {
-            Ok(Some(ev)) => TurnWait::Event(ev),
-            Ok(None) => TurnWait::Ended,
-            Err(_) => TurnWait::TimedOut,
-        },
-        // A live stream with no deadline cannot happen (both are set together);
-        // wait for the stream rather than silently disabling the bound.
-        (Some(s), None) => match s.next().await {
-            Some(ev) => TurnWait::Event(ev),
-            None => TurnWait::Ended,
-        },
-        (None, _) => std::future::pending().await,
+    LoopExit {
+        result,
+        turn,
+        handoffs,
     }
 }
 
@@ -1189,22 +1015,24 @@ fn ctrl_c_action(app: &mut App) -> KeyAction {
 fn begin_turn(
     options: &TuiOptions,
     app: &mut App,
-    turn_stream: &mut Option<Connection>,
+    turn_stream: &mut Option<LocalTurn>,
     client: &LocalClient,
     prompt: String,
 ) {
     let request = TurnRequest {
         session_id: app.ctx.session_id.clone(),
-        turn_id: app.current_turn.expect("submission allocated identity"),
+        turn_id: app.current_turn.expect("提交前已分配身份"),
         workspace: options.project_root.clone(),
         input: prompt,
     };
-    *turn_stream = Some(Connection::start(
-        client.clone(),
-        app.ctx.session_id.clone(),
-        app.current_turn,
-        Some((options.clone(), request)),
-    ));
+    let configuration_client = client.clone();
+    let session_id = request.session_id.clone();
+    let options = options.clone();
+    *turn_stream = Some(
+        client.start_turn_with(request, HistoryScope::Session, move || {
+            crate::session::freeze_configuration(configuration_client, session_id, options)
+        }),
+    );
 }
 
 #[rustfmt::skip]
@@ -1265,6 +1093,10 @@ impl Drop for TerminalCleanup {
 #[cfg(test)]
 #[path = "app_loop_tests.rs"]
 mod loop_tests;
+
+#[cfg(test)]
+#[path = "connection_tests.rs"]
+mod connection_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1331,93 +1163,48 @@ mod tests {
             Block::Assistant("durable".into()),
         ];
         app.blocks.push(Block::Assistant("lost delta".into()));
-        app.gap_pending = true;
-        app.apply_snapshot(view.clone(), Some(history.clone()), true, false, None);
+        app.apply_update(LocalUpdate::Reset {
+            reason: ResetReason::Gap,
+            cursor: None,
+        });
+        app.apply_state(LocalState {
+            view: Box::new(view.clone()),
+            phase: ObservationPhase::Live,
+            confirmation: CompletionConfirmation::Unknown,
+            error: None,
+        });
+        app.replace_history(history.clone());
         assert_eq!(app.phase, TurnPhase::Streaming);
         assert_eq!(app.current_turn, Some(id));
-        assert!(!app.accept_live_events);
         assert_eq!(&app.blocks[..2], &history);
+        let text = transcript_text(&app, 200);
         assert!(
-            matches!(&app.blocks[2], Block::Status { kind: StatusKind::Notice(lines), .. } if lines[0].contains("缺口"))
+            text.contains("缺口") && !text.contains("lost delta"),
+            "{text}"
         );
-        app.apply_snapshot(view.clone(), Some(history.clone()), false, true, None);
+        assert_eq!(text.matches("durable").count(), 1);
+        assert_eq!(text.matches("增量缺口").count(), 1);
+        app.apply_state(LocalState {
+            view: Box::new(view.clone()),
+            phase: ObservationPhase::Finished,
+            confirmation: CompletionConfirmation::Confirmed,
+            error: None,
+        });
+        app.reset_display(ResetReason::Snapshot);
+        app.replace_history(history.clone());
         assert_eq!(&app.blocks[..2], &history);
-        assert_eq!(app.blocks.len(), 3);
-        assert!(
-            matches!(&app.blocks[2], Block::Status { kind: StatusKind::Notice(lines), .. } if lines[0].contains("缺口"))
-        );
         assert_eq!(app.phase, TurnPhase::Idle);
         assert!(app.current_turn.is_none());
-        app.apply_snapshot(view.clone(), None, false, true, None);
-        assert_eq!(&app.blocks[..2], &history);
-        // 正文不可用不是断开：连接状态与正文可用性分开呈现。
-        assert!(app.connected);
-        assert!(!app.accept_live_events);
-        assert_eq!(app.phase, TurnPhase::Idle);
-        assert!(app.current_turn.is_none());
+        let text = transcript_text(&app, 200);
         assert!(
-            matches!(app.blocks.last(), Some(Block::Status { kind: StatusKind::Notice(lines), .. }) if lines[0].contains("正文不可用"))
+            text.contains("缺口") && text.contains("committed commit"),
+            "{text}"
         );
-        let visible = Block::Status {
-            kind: StatusKind::Visible {
-                commit_id: "commit".into(),
-            },
-            placement: StatusPlacement::Transcript,
-        };
-        for message in [
-            "original durability failure",
-            "durability confirmation unknown",
-        ] {
-            app = test_app();
-            let error = lattice_api::local::LocalError {
-                kind: LocalErrorKind::StoreUnavailable,
-                message: message.into(),
-                recovery: None,
-            };
-            app.apply_snapshot(
-                view.clone(),
-                Some(vec![visible.clone()]),
-                false,
-                false,
-                Some(error),
-            );
-            assert_eq!(app.observed_turn, Some(id));
-            let text = transcript_text(&app, 120);
-            assert!(
-                text.contains(message)
-                    && text.contains("结果可见")
-                    && text.contains("完成确认未知"),
-                "{text}"
-            );
-            assert!(!text.contains("committed"), "{text}");
-            assert!(app.apply_builtin("/reconnect"));
-            assert_eq!(app.observed_turn, Some(id));
-            app.apply_snapshot(
-                view.clone(),
-                None,
-                false,
-                true,
-                Some(lattice_api::local::LocalError {
-                    kind: LocalErrorKind::StoreUnavailable,
-                    message: "persistent history read failed".into(),
-                    recovery: None,
-                }),
-            );
-            let text = transcript_text(&app, 200);
-            assert!(text.contains("committed commit"), "{text}");
-            assert!(!text.contains("完成确认未知"), "{text}");
-            assert!(
-                text.contains("Completed") && text.contains(&id.to_string()),
-                "{text}"
-            );
-            assert!(
-                text.contains("persistent history read failed") && text.contains("正文不可用"),
-                "{text}"
-            );
-            app.connection_lost("connection reset".into());
-            assert!(transcript_text(&app, 200).contains("committed commit"));
-        }
+        assert_eq!(text.matches("durable").count(), 1);
+        assert_eq!(text.matches("增量缺口").count(), 1);
+
         for value in [
+            serde_json::json!({"completed": {"finish_reason": "stop"}}),
             serde_json::json!({"failed": {"reason": "model_request_failed"}}),
             serde_json::json!({"cancelled": {"reason": "user_cancelled"}}),
             serde_json::json!({"interrupted": {"reason": "process_interrupted_before_model_attempt"}}),
@@ -1426,82 +1213,65 @@ mod tests {
             for confirmed in [false, true] {
                 let mut app = test_app();
                 let mut terminal = view.clone();
-                if let Some(lattice_api::local::TurnObservation::Committed(turn)) =
-                    &mut terminal.requested_turn
-                {
+                if let Some(TurnObservation::Committed(turn)) = &mut terminal.requested_turn {
                     turn.outcome = outcome.clone();
                 }
-                app.apply_snapshot(
-                    terminal,
-                    None,
-                    false,
-                    confirmed,
-                    Some(lattice_api::local::LocalError {
-                        kind: LocalErrorKind::StoreUnavailable,
-                        message: "persistent history read failed".into(),
-                        recovery: None,
-                    }),
+                let error = lattice_api::local::LocalError::from(
+                    lattice_api::ApiError::StoreUnavailable("测试错误".into()),
                 );
-                app.connection_lost("connection reset".into());
+                app.apply_state(LocalState {
+                    view: Box::new(terminal.clone()),
+                    phase: ObservationPhase::Finished,
+                    confirmation: if confirmed {
+                        CompletionConfirmation::Confirmed
+                    } else {
+                        CompletionConfirmation::Unknown
+                    },
+                    error: Some(lattice_api::local::LocalError {
+                        message: "original durability failure".into(),
+                        ..error.clone()
+                    }),
+                });
+                app.apply_update(LocalUpdate::History {
+                    view: Box::new(terminal),
+                    stale: false,
+                    result: Err(lattice_api::local::HistoryReadError {
+                        context: lattice_api::local::HistoryReadContext::Transcript {
+                            object_id: "commit".into(),
+                        },
+                        error,
+                    }),
+                });
+                assert!(app.connected, "正文失败不是断开");
                 let text = transcript_text(&app, 200);
-                assert!(text.contains(&format!("{outcome:?}")), "{text}");
                 assert!(
-                    text.contains(&id.to_string()) && text.contains("commit"),
+                    text.contains(&format!("{outcome:?}")) && text.contains(&id.to_string()),
+                    "{text}"
+                );
+                assert!(
+                    text.contains("original durability failure") && text.contains("正文不可用"),
                     "{text}"
                 );
                 assert_eq!(text.contains("committed commit"), confirmed, "{text}");
                 assert_eq!(text.contains("完成确认未知"), !confirmed, "{text}");
-                assert!(
-                    text.contains("persistent history read failed")
-                        && text.contains("正文不可用")
-                        && text.contains("connection reset"),
-                    "{text}"
-                );
                 assert!(app.blocks.iter().any(|block| matches!(block,
-                    Block::Status { kind: StatusKind::TurnFailed { .. }, .. }
-                        if matches!(outcome, lattice_api::TurnOutcome::Failed { .. } | lattice_api::TurnOutcome::Interrupted { .. })
+                    Block::Status { kind: StatusKind::TurnFailed { .. }, .. } if matches!(outcome, lattice_api::TurnOutcome::Failed { .. } | lattice_api::TurnOutcome::Interrupted { .. })
                 ) || matches!(block,
-                    Block::Status { kind: StatusKind::Cancelled { .. }, .. }
-                        if matches!(outcome, lattice_api::TurnOutcome::Cancelled { .. })
-                )), "terminal outcome must retain its display category");
+                    Block::Status { kind: StatusKind::Cancelled { .. }, .. } if matches!(outcome, lattice_api::TurnOutcome::Cancelled { .. })
+                ) || matches!(block,
+                    Block::Status { kind: StatusKind::Notice(_), .. } if matches!(outcome, lattice_api::TurnOutcome::Completed { .. })
+                )));
+                app.connection_lost("connection reset".into());
+                let after = transcript_text(&app, 200);
+                assert!(after.contains(&text) && after.contains("connection reset"));
                 assert_eq!(app.observed_turn, Some(id));
                 assert_eq!(app.phase, TurnPhase::Idle);
+                assert!(app.apply_builtin("/reconnect"));
+                assert_eq!(app.observed_turn, Some(id));
             }
         }
-        let mut pending = view.clone();
-        pending.active_turn = Some(lattice_api::local::PendingObservation {
-            turn_id: id,
-            journal_oid: "journal".into(),
-        });
-        pending.requested_turn = pending
-            .active_turn
-            .clone()
-            .map(lattice_api::local::TurnObservation::Pending);
-        app.apply_snapshot(pending, Some(history.clone()), true, false, None);
-        app.apply_turn_event(TurnEvent::TokenDelta {
-            content: "uncertain suffix".into(),
-        });
-        assert_eq!(
-            &app.blocks[..2],
-            &history,
-            "reload must not append an unproven segment"
-        );
-        assert!(!transcript_text(&app, 120).contains("uncertain suffix"));
-        app.apply_turn_event(TurnEvent::ModelStarted {
-            provider: None,
-            model: "next".into(),
-        });
-        app.apply_turn_event(TurnEvent::TokenDelta {
-            content: "next segment".into(),
-        });
-        assert_eq!(&app.blocks[..2], &history);
-        assert!(
-            matches!(app.blocks.last(), Some(Block::Assistant(text)) if text == "next segment")
-        );
-        app.apply_snapshot(view, Some(vec![visible]), false, true, None);
-        assert!(transcript_text(&app, 120).contains("committed commit"));
+        // 不完整后缀的真实重连、同切点历史与正常新段由 run_loop 的 O2 回归承接。
     }
-
     fn assert_failed_tool(app: &App, index: usize, reason: &str) {
         match &app.blocks[index] {
             Block::Tool {
@@ -1580,6 +1350,26 @@ mod tests {
                 }
             }
         }
+        app.apply_turn_event(TurnEvent::ToolCallFinished {
+            id: "call-4".into(),
+            name: "fetch.web".into(),
+            ok: false,
+            output_len: 42,
+            error_summary: Some("结束先到的错误摘要".into()),
+        });
+        app.apply_turn_event(TurnEvent::ToolCallStarted {
+            id: "call-4".into(),
+            name: "fetch.web".into(),
+        });
+        let orphan: Vec<_> = app
+            .blocks
+            .iter()
+            .filter(|b| matches!(b, Block::Tool { id, .. } if id == "call-4"))
+            .collect();
+        assert_eq!(orphan.len(), 1);
+        assert!(
+            matches!(orphan[0], Block::Tool { name, state: ToolState::Failed { output_len: 42, error: Some(error) }, source: ToolSource::Event, .. } if name == "fetch.web" && error == "结束先到的错误摘要")
+        );
     }
 
     #[test]
@@ -1907,52 +1697,5 @@ mod tests {
                 )
             })
             .count()
-    }
-
-    /// The regression guard for the idle bound itself: `poll_turn` is rebuilt
-    /// on every `select!` iteration (the 33 ms frame ticker wins constantly),
-    /// so a *relative* `timeout(...)` restarts its countdown ~30x a second and
-    /// can never elapse. Rebuild the future repeatedly against a stream that
-    /// never yields and require the absolute deadline to still fire.
-    #[tokio::test(start_paused = true)]
-    async fn idle_deadline_survives_repeated_poll_rebuilds() {
-        let mut stream = Some(futures::stream::pending::<Update>());
-        let deadline = idle_deadline();
-
-        // Two thirds of the window, consumed as many short frame-tick races.
-        let ticks = (lattice_api::STREAM_IDLE_TIMEOUT_SECS * 2 / 3).max(1);
-        for _ in 0..ticks {
-            tokio::select! {
-                wait = poll_turn(&mut stream, Some(deadline)) => {
-                    assert!(
-                        !matches!(wait, TurnWait::TimedOut),
-                        "idle bound fired before the deadline"
-                    );
-                }
-                _ = tokio::time::sleep(Duration::from_secs(1)) => {}
-            }
-        }
-
-        // Still inside the window: rebuilding must not have reset it.
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "test consumed the whole window before asserting"
-        );
-        assert!(
-            matches!(
-                poll_turn(&mut stream, Some(deadline)).await,
-                TurnWait::TimedOut
-            ),
-            "absolute deadline must elapse despite repeated rebuilds"
-        );
-        // The load-bearing assertion: it fired *at* the original deadline. A
-        // relative `timeout(...)` also eventually fires, but only after a
-        // fresh full window from the last rebuild — which is exactly the bug.
-        let fired_at = tokio::time::Instant::now();
-        assert!(
-            fired_at.duration_since(deadline) < Duration::from_secs(1),
-            "deadline was reset by rebuilding: fired {:?} late",
-            fired_at.duration_since(deadline)
-        );
     }
 }
