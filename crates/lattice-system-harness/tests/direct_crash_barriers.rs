@@ -8,9 +8,11 @@ mod support;
 use std::time::{Duration, Instant};
 
 use lattice_system_harness::{SessionSendDriver, SseScript};
-use serde_json::Value;
-use support::{assert_clean_send, direct_world, driver, sequence, tool_call, wire_logged_fake_llm};
-
+use serde_json::{Value, json};
+use support::{
+    assert_clean_send, direct_world, driver, sequence, tool_call, wire_gated_fake_llm,
+    wire_logged_fake_llm,
+};
 const BARRIER_ENV: &str = "LATTICE_TEST_TURN_BARRIER";
 const ACK_ENV: &str = "LATTICE_TEST_TURN_BARRIER_ACK";
 const INJECTION_ENV: &str = "LATTICE_TEST_TURN_INJECTION";
@@ -470,6 +472,160 @@ fn post_mutation_turn_closing_sigkill_preserves_the_current_history_checkpoint()
             Some(checkpoint.as_str())
         );
         evidence.record_command("exact candidate recovery log", &log);
+    }));
+    support::crash::finish(evidence, result);
+}
+
+/// 已持久 ModelAttemptInterrupted(Cancelled) 但 StepClosed 前真实终止后台：
+/// 显式 recover 得到顶层 Cancelled，历史与已发生效果保持，且不重放 provider/Tool。
+#[test]
+fn interrupted_cancelled_attempt_before_step_closed_recovers_as_cancelled() {
+    let driver = driver();
+    let (world, spec) = direct_world(
+        "direct-crash-interrupted-cancelled",
+        "dl-crash-cancelled",
+        "[\"mutate.create\"]",
+        "",
+    );
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let outside = tempfile::tempdir().expect("external crash-surviving counters");
+        let effect_log = outside.path().join("effects.log");
+        world.set_env(
+            "LATTICE_TEST_TOOL_EFFECT_LOG",
+            effect_log.display().to_string(),
+        );
+        let (server, gate) = wire_gated_fake_llm(
+            &world,
+            "dl-crash-cancelled",
+            sequence(vec![
+                tool_call(
+                    "provider-private-cancelled-window-call",
+                    "mutate.create",
+                    r#"{"path":"cancelled-window.txt","content":"kept\n","create_parents":false}"#,
+                ),
+                SseScript::plain("never delivered after the cancel"),
+            ]),
+        );
+        let send = SessionSendDriver::new(&driver, &world, &spec, "dl-crash-cancelled", "main")
+            .expect("session");
+        let ack = outside.path().join("model-attempt-interrupted.json");
+        world.set_env(BARRIER_ENV, "model_attempt_interrupted");
+        world.set_env(ACK_ENV, ack.display().to_string());
+        let daemon = support::crash::start(&world, &spec, send.budget());
+        let running = send
+            .spawn("cancel during the second model attempt")
+            .expect("spawn");
+        let stall = send.budget().cap_timeout(Duration::from_secs(30));
+        // 第一个模型请求交回 Tool 调用：真实效果先落地，随后才取消在途尝试。
+        gate.wait_until_stalled(1, stall).unwrap();
+        gate.release_next(stall).unwrap();
+        gate.wait_until_stalled(2, stall).unwrap();
+        let turn_id = active_turn(&send).expect("accepted Turn is active");
+        let cancel = send
+            .run_command(&[
+                "--json",
+                "session",
+                "cancel",
+                send.session_id(),
+                turn_id.as_str(),
+            ])
+            .unwrap();
+        evidence.record_command("cancel the in-flight model attempt", &cancel);
+        assert!(cancel.is_clean_exit(0), "{}", cancel.summary());
+        let facts = wait_for_ack(&ack, send.budget().cap_timeout(Duration::from_secs(20)));
+        assert_eq!(facts["barrier"], "model_attempt_interrupted");
+        assert_eq!(facts["turn_id"], json!(turn_id));
+        assert_eq!(
+            facts
+                .pointer("/snapshot/stage/stage")
+                .and_then(Value::as_str),
+            Some("model_attempt_interrupted"),
+            "the crash must follow the durable interruption: {facts}"
+        );
+        assert_eq!(
+            facts
+                .pointer("/snapshot/stage/reason")
+                .and_then(Value::as_str),
+            Some("cancelled"),
+            "the durable interruption reason must be the caller cancel: {facts}"
+        );
+        assert_eq!(fsynced_count(&effect_log), 1);
+        assert_eq!(
+            std::fs::read_to_string(world.project_dir().join("cancelled-window.txt")).unwrap(),
+            "kept\n"
+        );
+        assert_eq!(server.captured_requests().len(), 2);
+
+        support::crash::kill(&world, daemon, running, &mut evidence, send.budget());
+        world.unset_env(BARRIER_ENV);
+        world.unset_env(ACK_ENV);
+        assert_eq!(active_turn(&send).as_deref(), Some(turn_id.as_str()));
+        assert_eq!(
+            server.captured_requests().len(),
+            2,
+            "read-only queries must not call the provider"
+        );
+        let recovery = send
+            .run_command(&["--json", "session", "recover", send.session_id()])
+            .unwrap();
+        evidence.record_command("explicit recovery of the cancelled attempt", &recovery);
+        assert!(recovery.is_clean_exit(0), "{}", recovery.summary());
+        assert_eq!(
+            server.captured_requests().len(),
+            2,
+            "recovery may not start a provider request"
+        );
+        assert_eq!(
+            fsynced_count(&effect_log),
+            1,
+            "recovery must not redispatch the mutation"
+        );
+        assert!(!active_turn_exists(&send));
+        assert_eq!(
+            std::fs::read_to_string(world.project_dir().join("cancelled-window.txt")).unwrap(),
+            "kept\n",
+            "the effect recorded before the crash must stay"
+        );
+
+        let log = send
+            .run_command(&["--json", "session", "log", send.session_id()])
+            .expect("session log");
+        assert!(log.is_clean_exit(0));
+        let log_json: Value = serde_json::from_slice(&log.stdout).expect("log JSON");
+        let recovered = log_json["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|turn| turn["turn_id"] == json!(turn_id))
+            .expect("exact crashed Turn");
+        assert_eq!(recovered["origin"], "reconciled", "{recovered}");
+        assert_eq!(
+            recovered["outcome"],
+            json!({"cancelled":{"reason":"user_cancelled"}}),
+            "a persisted caller cancel must recover as top-level Cancelled: {recovered}"
+        );
+        evidence.record_command("cancelled recovery log", &log);
+
+        let messages =
+            committed_messages(&send, recovered["commit_id"].as_str().expect("commit id"));
+        assert!(
+            messages.iter().any(|message| message
+                .to_string()
+                .contains("cancel during the second model attempt")),
+            "the user message must stay in the recovered history: {messages:?}"
+        );
+        assert!(
+            messages.iter().any(|message| message
+                .to_string()
+                .contains("provider-private-cancelled-window-call")),
+            "the completed Tool batch must stay in the recovered history: {messages:?}"
+        );
+        assert!(
+            messages.iter().any(|message| message["role"] == "tool"),
+            "the durable ToolResult must stay in the recovered history: {messages:?}"
+        );
+        evidence.record_captures(server.captured_requests());
     }));
     support::crash::finish(evidence, result);
 }
@@ -952,7 +1108,8 @@ fn run_barrier_case(case: BarrierCase) {
     }));
     support::crash::finish(evidence, result);
 }
-fn active_turn_exists(send: &SessionSendDriver<'_>) -> bool {
+/// 当前活动 TurnId；崩溃遗留的 Turn 在恢复前保持可见，查询本身不触发恢复。
+fn active_turn(send: &SessionSendDriver<'_>) -> Option<String> {
     let query = send
         .run_command(&[
             "--json",
@@ -971,7 +1128,13 @@ fn active_turn_exists(send: &SessionSendDriver<'_>) -> bool {
             .unwrap(),
     )
     .unwrap();
-    !record["view"]["active_turn"].is_null()
+    record["view"]["active_turn"]["turn_id"]
+        .as_str()
+        .map(str::to_string)
+}
+
+fn active_turn_exists(send: &SessionSendDriver<'_>) -> bool {
+    active_turn(send).is_some()
 }
 
 fn fsynced_count(path: &std::path::Path) -> usize {
