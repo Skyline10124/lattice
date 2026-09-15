@@ -624,10 +624,15 @@ impl ScenarioEvidence {
         }
 
         for (index, bytes) in self.pty_output.iter().enumerate() {
-            attempt("write PTY output", std::fs::write(
-                self.failure_dir.join(format!("{index}-pty.txt")),
-                redact(&String::from_utf8_lossy(bytes), &secrets),
-            ), &secrets, &mut report.evidence_errors);
+            attempt(
+                "write PTY output",
+                std::fs::write(
+                    self.failure_dir.join(format!("{index}-pty.txt")),
+                    redact(&String::from_utf8_lossy(bytes), &secrets),
+                ),
+                &secrets,
+                &mut report.evidence_errors,
+            );
         }
 
         for (index, command) in self.commands.iter().enumerate() {

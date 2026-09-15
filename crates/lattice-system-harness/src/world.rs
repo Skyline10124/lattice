@@ -6,8 +6,8 @@ use std::ffi::OsStr;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Mutex;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use std::time::Duration;
 

@@ -442,8 +442,22 @@ mod tests {
             } else {
                 command.process_group(0);
             }
-            let child = command.spawn().expect("spawn fake daemon");
             let deadline = Instant::now() + Duration::from_secs(5);
+            // linux `execve` reports ETXTBSY while any process still holds a write handle to the
+            // inode; a sibling test thread's `fork` inherits the `fs::copy` write descriptor into a
+            // child that has not exec'd yet. Retry only that transient error, inside the same
+            // startup budget; every other error stays fatal on the spot.
+            let mut spawned = command.spawn();
+            while let Err(error) = &spawned {
+                if error.kind() != std::io::ErrorKind::ExecutableFileBusy
+                    || Instant::now() >= deadline
+                {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+                spawned = command.spawn();
+            }
+            let child = spawned.expect("spawn fake daemon");
             while !ready.exists() {
                 assert!(Instant::now() < deadline, "fake daemon never became ready");
                 std::thread::sleep(Duration::from_millis(5));
