@@ -703,12 +703,17 @@ fn direct_operator_unknown_typed_turn_fails() {
             error.get("type").and_then(Value::as_str) == Some("error"),
             format!("unknown turn replay must emit a typed error record: {stdout:?}"),
         )?;
+        // 具体原因保持不变，但请求的 TurnId 不回显（lattice-cli audit 的前缀白名单）。
         require(
             error
                 .get("message")
                 .and_then(Value::as_str)
-                .is_some_and(|message| message.contains("no invocations for turn_id")),
+                .is_some_and(|message| message.contains("no invocations for the requested turn")),
             format!("unexpected replay diagnostic: {error}"),
+        )?;
+        require(
+            !stdout.contains("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+            format!("replay diagnostic must not echo the requested TurnId: {stdout:?}"),
         )?;
         Ok(())
     })();

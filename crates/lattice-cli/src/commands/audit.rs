@@ -9,6 +9,50 @@ use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use lancet_api::{AuditReplayRequest, AuditRequest, query_audit, replay_audit, tail_audit};
 
+/// 将操作员错误映射为固定的公开原因，避免回显私有路径和用户输入。
+///
+/// `OperatorAuditError::Config` 经 `lancet-api` 透传后只剩字符串，
+/// 其中可能包含状态仓库路径和底层错误。因此依据错误构造处的固定前缀，
+/// 从 `OPERATOR_FAILURE_SUMMARIES` 选择公开短语；未登记的原因按内部故障泛化。
+///
+/// 此映射依赖 `lancet-audit/src/operator.rs` 的错误构造文案。新增或修改
+/// `Config` 原因时，需同步核对下方映射表，前缀匹配不提供类型化保证。
+fn operator_error(error: lancet_api::LancetError) -> anyhow::Error {
+    match error {
+        lancet_api::LancetError::Config(message) => match operator_failure_summary(&message) {
+            Some(summary) => anyhow::Error::new(lattice_api::local::LocalError {
+                kind: lattice_api::local::LocalErrorKind::BadRequest,
+                message: summary.to_string(),
+                recovery: None,
+            }),
+            None => anyhow::Error::new(lancet_api::LancetError::Internal(message)),
+        },
+        error => anyhow::Error::new(error),
+    }
+}
+
+/// `lancet-audit::operator` 的 `Config` 构造来源前缀 → 公开固定短语。
+const OPERATOR_FAILURE_SUMMARIES: &[(&str, &str)] = &[
+    (
+        "invocation ledger not found",
+        "invocation ledger not found for this project; run an agent turn in this project first",
+    ),
+    ("invalid session_id", "invalid session_id"),
+    ("invalid turn_id", "invalid turn_id"),
+    (
+        "no invocations for turn_id=",
+        "no invocations for the requested turn in the requested session",
+    ),
+    ("invalid ledger cursor", "invalid ledger cursor"),
+    ("unknown invocation verdict", "unknown invocation verdict"),
+];
+
+fn operator_failure_summary(message: &str) -> Option<&'static str> {
+    OPERATOR_FAILURE_SUMMARIES
+        .iter()
+        .find_map(|(prefix, summary)| message.starts_with(prefix).then_some(*summary))
+}
+
 #[derive(Args, Debug, Clone)]
 pub struct AuditQueryArgs {
     /// Filter by canonical SessionId.
@@ -92,14 +136,10 @@ async fn run_query(args: AuditQueryArgs, global_json: bool, project_root: &Path)
     request.ledger_oid = args.ledger_oid;
     request.after = args.since;
     if args.tail {
-        let output = tail_audit(request)
-            .await
-            .map_err(|err| anyhow::anyhow!("{err}"))?;
+        let output = tail_audit(request).await.map_err(operator_error)?;
         render_tail_output(&output, json)
     } else {
-        let output = query_audit(request)
-            .await
-            .map_err(|err| anyhow::anyhow!("{err}"))?;
+        let output = query_audit(request).await.map_err(operator_error)?;
         render_query_output(&output, json)
     }
 }
@@ -107,9 +147,7 @@ async fn run_query(args: AuditQueryArgs, global_json: bool, project_root: &Path)
 async fn run_replay(args: AuditReplayArgs, global_json: bool, project_root: &Path) -> Result<()> {
     let mut request = AuditReplayRequest::new(project_root, args.session, args.turn);
     request.ledger_oid = args.ledger_oid;
-    let output = replay_audit(request)
-        .await
-        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    let output = replay_audit(request).await.map_err(operator_error)?;
     if args.json || global_json {
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
