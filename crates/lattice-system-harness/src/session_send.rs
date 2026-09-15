@@ -504,6 +504,8 @@ fn valid_failure_reason(value: &Value) -> bool {
         | "empty_tool_call_id" => &["call_ordinal"],
         "arguments_too_large" => &["call_ordinal", "limit", "actual"],
         "duplicate_tool_call_id" => &["first_ordinal", "second_ordinal"],
+        // 目录外调用仅保存序号，模型提供的工具名不进入公开结果。
+        "unknown_tool" => &["call_ordinal"],
         _ => return false,
     };
     valid_usize_fields(fields, required)

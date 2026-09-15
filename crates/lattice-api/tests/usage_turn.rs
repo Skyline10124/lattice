@@ -354,3 +354,50 @@ async fn usage_resume_session_includes_previous_turn_context() {
         "HEAD should be on main branch"
     );
 }
+
+// ── 目录外工具名：拒绝仍保留该次尝试的使用量 ──────────────────────────────
+
+/// 目录外调用虽被拒绝，对应模型请求已完成。使用量应写入持久日志，
+/// 正常失败关闭后仍能从 TurnCommit 读取（R1 止血 #218）。
+#[tokio::test]
+async fn usage_rejected_out_of_catalog_tool_batch_keeps_the_attempt_usage() {
+    let ws = setup_workspace("pub fn answer() -> i32 { 1 }", &["observe.workspace"]);
+
+    let fake_llm: Arc<dyn LlmClient> = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_events(tool_call_events(
+                "call_outside",
+                "fetch.web",
+                &serde_json::json!({"url": "https://example.invalid"}).to_string(),
+            ))
+            .build(),
+    );
+    let target = create_unattached_target_branch(&ws.root, "lattice-target-outside-tool");
+    let session_dir = tempfile::tempdir().unwrap();
+    let sessions_path = session_dir.path().join("sessions");
+    let session_id = create_session_with_branch(&sessions_path, &target, &ws.root);
+    let result = lattice_api::run_turn(
+        open_session_store(&sessions_path),
+        make_request(&ws, "fetch it", &session_id, fake_llm),
+    )
+    .await
+    .expect("run_turn must close the Turn instead of failing the call");
+    assert!(matches!(
+        result.outcome,
+        lattice_session::TurnOutcome::Failed {
+            reason: lattice_session::pending::TurnFailure::InvalidToolCall { .. }
+        }
+    ));
+
+    let store =
+        GitSessionGraphStore::open(session_repo(&sessions_path)).expect("open session store");
+    let commit = store
+        .get_turn_commit(&session_id, &result.commit_id)
+        .expect("read the committed Turn")
+        .expect("the rejected Turn must still be committed");
+    assert_eq!(
+        commit.usage,
+        Some(usage_tokens()),
+        "the rejected attempt reported usage; the durable Turn must keep it"
+    );
+}

@@ -472,7 +472,33 @@ pub(super) async fn run_coordinator_saga(
             &coordinator,
         ) {
             Ok(plan) => plan,
-            Err(err) => break 'saga Err(err),
+            // 目录外调用沿用模型响应校验的拒绝关闭路径，保存使用量与拒绝原因。
+            Err(BindingPlanRejection::UnknownTool(validation)) => {
+                let attempt_key = ModelAttemptKey {
+                    turn_id,
+                    model_step_ordinal: model_step,
+                    attempt_ordinal: attempt,
+                };
+                match publish_typed_rejection(
+                    &lattice_conversation::AttemptRejection::InvalidToolCall { validation },
+                    attempt_key,
+                    attempt_usages.last().copied().flatten(),
+                    None,
+                    &session_id,
+                    &coordinator,
+                    &execution_lock,
+                )
+                .await
+                {
+                    Ok((outcome, reason)) => {
+                        turn_outcome = outcome;
+                        terminal_reason = reason;
+                        break 'saga Ok(());
+                    }
+                    Err(err) => break 'saga Err(err),
+                }
+            }
+            Err(BindingPlanRejection::Internal(err)) => break 'saga Err(err),
         };
         let recorded_at = chrono::Utc::now().timestamp();
         if let Err(err) = coordinator
@@ -1160,6 +1186,62 @@ enum AttemptHandled {
     Err(ApiError),
 }
 
+/// 按类型化拒绝关闭已完成的模型请求尝试。先保存 `ModelAttemptRejected`，
+/// 记录使用量和拒绝原因，再以同一原因发布 `StepClosed { FailTurn }`。
+///
+/// 模型响应的批次校验和目录校验共用此路径，确保恢复能读取已保存的拒绝事实和使用量。
+async fn publish_typed_rejection(
+    rejection: &lattice_conversation::AttemptRejection,
+    attempt_key: ModelAttemptKey,
+    usage: Option<lattice_conversation::TokenUsage>,
+    diagnostic: Option<String>,
+    session_id: &str,
+    coordinator: &TurnCoordinator,
+    execution_lock: &Arc<FlockGuard>,
+) -> Result<(TurnOutcome, Option<String>), ApiError> {
+    if let Err(err) = coordinator
+        .io
+        .advance_turn(
+            session_id.to_string(),
+            PendingStage::ModelAttemptRejected {
+                key: attempt_key,
+                rejection: rejection.clone(),
+                usage,
+            },
+            chrono::Utc::now().timestamp(),
+            Arc::clone(execution_lock),
+        )
+        .await
+    {
+        return Err(map_io(err));
+    }
+    // 屏障窗口：拒绝原因与使用量已持久化，`StepClosed` 尚未发布。
+    hit_turn_crash_barrier(coordinator, session_id, "model_attempt_rejected").await?;
+    let validation = match rejection {
+        lattice_conversation::AttemptRejection::InvalidToolCall { validation } => {
+            validation.clone()
+        }
+    };
+    let reason = TurnFailure::InvalidToolCall { validation };
+    if let Err(err) = coordinator
+        .io
+        .advance_turn(
+            session_id.to_string(),
+            PendingStage::StepClosed {
+                kind: StepClosedKind::FailTurn {
+                    reason: reason.clone(),
+                },
+            },
+            chrono::Utc::now().timestamp(),
+            Arc::clone(execution_lock),
+        )
+        .await
+    {
+        return Err(map_io(err));
+    }
+    Ok((TurnOutcome::Failed { reason }, diagnostic))
+}
+
 async fn handle_attempt_outcome(
     step: &ModelStepAttempt,
     attempt_key: ModelAttemptKey,
@@ -1176,50 +1258,20 @@ async fn handle_attempt_outcome(
                 "complete model attempt carried no message".into(),
             )),
         },
-        ModelStepStatus::Rejected(rejection) => {
-            if let Err(err) = coordinator
-                .io
-                .advance_turn(
-                    session_id.to_string(),
-                    PendingStage::ModelAttemptRejected {
-                        key: attempt_key,
-                        rejection: rejection.clone(),
-                        usage: step.usage,
-                    },
-                    recorded_at,
-                    Arc::clone(execution_lock),
-                )
-                .await
-            {
-                return AttemptHandled::Err(map_io(err));
-            }
-            let validation = match rejection {
-                lattice_conversation::AttemptRejection::InvalidToolCall { validation } => {
-                    validation.clone()
-                }
-            };
-            let reason = TurnFailure::InvalidToolCall { validation };
-            if let Err(err) = coordinator
-                .io
-                .advance_turn(
-                    session_id.to_string(),
-                    PendingStage::StepClosed {
-                        kind: StepClosedKind::FailTurn {
-                            reason: reason.clone(),
-                        },
-                    },
-                    chrono::Utc::now().timestamp(),
-                    Arc::clone(execution_lock),
-                )
-                .await
-            {
-                return AttemptHandled::Err(map_io(err));
-            }
-            AttemptHandled::TurnClosed {
-                outcome: TurnOutcome::Failed { reason },
-                reason: step.diagnostic.clone(),
-            }
-        }
+        ModelStepStatus::Rejected(rejection) => match publish_typed_rejection(
+            rejection,
+            attempt_key,
+            step.usage,
+            step.diagnostic.clone(),
+            session_id,
+            coordinator,
+            execution_lock,
+        )
+        .await
+        {
+            Ok((outcome, reason)) => AttemptHandled::TurnClosed { outcome, reason },
+            Err(err) => AttemptHandled::Err(err),
+        },
         ModelStepStatus::Interrupted(interruption) => {
             if let Err(err) = coordinator
                 .io
@@ -1409,6 +1461,38 @@ fn tool_result_message(closure: &ClosedBinding) -> NativeMessage<BoundToolCall> 
     )
 }
 
+/// 工具调用批次无法完成绑定规划的原因。
+///
+/// 目录外工具名是外部输入问题：整批拒绝，调用方按既有拒绝路径正常失败关闭该 Turn。
+///
+/// 其余规划不变量失败仍是内部故障，走原来的 `Err` 传播。
+#[derive(Debug)]
+enum BindingPlanRejection {
+    UnknownTool(lattice_conversation::ToolCallValidation),
+    Internal(ApiError),
+}
+
+/// 在分配任何 InvocationId、预留或分发之前核验整批工具名。
+///
+/// 目录外名称（未启用或不存在）导致整批拒绝，返回第一个越界调用的序号。
+/// 核验先于绑定和分发，确保本批合法调用也不会提前产生效果，且无需伪造工具描述。
+fn reject_unknown_tools(
+    tool_calls: &[(usize, UnboundToolCall)],
+    tool_catalog: &[lancet_api::ToolDefinition],
+) -> Result<(), BindingPlanRejection> {
+    let outsider = tool_calls
+        .iter()
+        .find(|(_, call)| !tool_catalog.iter().any(|tool| tool.name == call.name));
+    match outsider {
+        None => Ok(()),
+        Some((ordinal, _)) => Err(BindingPlanRejection::UnknownTool(
+            lattice_conversation::ToolCallValidation::UnknownTool {
+                call_ordinal: *ordinal,
+            },
+        )),
+    }
+}
+
 fn build_binding_plan(
     message: &NativeMessage<UnboundToolCall>,
     tool_calls: &[(usize, UnboundToolCall)],
@@ -1417,17 +1501,19 @@ fn build_binding_plan(
     turn_id: TurnId,
     model_step: u32,
     coordinator: &TurnCoordinator,
-) -> Result<BindingPlan, ApiError> {
+) -> Result<BindingPlan, BindingPlanRejection> {
+    // 必须先于下面的 InvocationId 分配与绑定构造（R1 止血 #218）。
+    reject_unknown_tools(tool_calls, tool_catalog)?;
     let mut bindings = Vec::with_capacity(tool_calls.len());
     for (ordinal, call) in tool_calls {
         let descriptor = tool_catalog
             .iter()
             .find(|tool| tool.name == call.name)
             .ok_or_else(|| {
-                ApiError::Internal(format!(
+                BindingPlanRejection::Internal(ApiError::Internal(format!(
                     "tool '{}' missing from descriptor catalog",
                     call.name
-                ))
+                )))
             })?;
         let invocation_id = coordinator.ids.new_invocation_id();
         let address = ToolCallAddress {
@@ -1465,7 +1551,7 @@ fn build_binding_plan(
         bindings,
     };
     plan.validate()
-        .map_err(|err| ApiError::Internal(err.to_string()))?;
+        .map_err(|err| BindingPlanRejection::Internal(ApiError::Internal(err.to_string())))?;
     Ok(plan)
 }
 
@@ -1825,6 +1911,118 @@ mod tests {
             panic!("cancelled outcome must emit TurnCancelled");
         };
         assert_eq!(reason.as_deref(), Some("cancelled by caller"));
+    }
+
+    fn catalog(names: &[&str]) -> Vec<lancet_api::ToolDefinition> {
+        names
+            .iter()
+            .map(|name| {
+                lancet_api::ToolDefinition::new(
+                    *name,
+                    "test",
+                    serde_json::json!({}),
+                    "d".repeat(64),
+                )
+            })
+            .collect()
+    }
+
+    fn unbound(name: &str) -> UnboundToolCall {
+        UnboundToolCall {
+            provider_call_id: None,
+            name: name.to_string(),
+            arguments: serde_json::json!({}),
+        }
+    }
+
+    /// 一旦分配 InvocationId 就触发测试失败的身份源。
+    ///
+    /// 用于验证整批核验先于身份分配；顺序颠倒会直接使测试失败。
+    struct PanickingIdSource;
+
+    impl super::super::coordinator::IdSource for PanickingIdSource {
+        fn new_invocation_id(&self) -> InvocationId {
+            panic!("a rejected Tool batch must not allocate an InvocationId");
+        }
+
+        fn new_turn_id(&self) -> TurnId {
+            panic!("a rejected Tool batch must not allocate a TurnId");
+        }
+    }
+
+    /// 为绑定规划测试创建协调器；任何身份分配都会触发测试失败。
+    fn plan_coordinator() -> (tempfile::TempDir, TurnCoordinator) {
+        let tmp = tempfile::tempdir().unwrap();
+        let layout = StateLayout::in_state_root(tmp.path());
+        let key = ProjectStoreKey::derive(tmp.path()).unwrap();
+        let session =
+            Arc::new(lattice_session::GitSessionGraphStore::create_layout(&layout).unwrap());
+        let invocations = Arc::new(InvocationStore::create(&layout, &key).unwrap());
+        let coordinator = TurnCoordinator::new(
+            super::super::coordinator::CoordinatorStoreIo::new(session, invocations, key).unwrap(),
+            Arc::new(PanickingIdSource),
+        );
+        (tmp, coordinator)
+    }
+
+    fn plan_message(calls: &[(usize, UnboundToolCall)]) -> NativeMessage<UnboundToolCall> {
+        NativeMessage::new(
+            MessageRole::Assistant,
+            None,
+            calls
+                .iter()
+                .map(|(_, call)| {
+                    MessagePart::semantic_only(MessageSemantic::ToolCall { call: call.clone() })
+                })
+                .collect(),
+        )
+    }
+
+    fn plan_rejection(
+        coordinator: &TurnCoordinator,
+        calls: &[(usize, UnboundToolCall)],
+        catalog: &[lancet_api::ToolDefinition],
+    ) -> BindingPlanRejection {
+        build_binding_plan(
+            &plan_message(calls),
+            calls,
+            catalog,
+            SessionId::parse("00000000000040008000000000000003").unwrap(),
+            TurnId::parse("00000000-0000-4000-8000-000000000002").unwrap(),
+            0,
+            coordinator,
+        )
+        .expect_err("an out-of-catalog batch must reject")
+    }
+
+    /// 目录外名称（此处根本不存在）在分配任何身份之前整批拒绝。
+    #[test]
+    fn nonexistent_tool_name_rejects_the_batch_before_allocating_identity() {
+        let (_tmp, coordinator) = plan_coordinator();
+        let calls = [(0, unbound("fetch.web"))];
+        let rejection = plan_rejection(&coordinator, &calls, &catalog(&[]));
+        let BindingPlanRejection::UnknownTool(validation) = rejection else {
+            panic!("outsider must not be an internal fault: {rejection:?}");
+        };
+        assert_eq!(
+            validation,
+            lattice_conversation::ToolCallValidation::UnknownTool { call_ordinal: 0 }
+        );
+    }
+
+    /// 混合批次：合法前缀不得先被接受，整批在分配身份之前拒绝。
+    #[test]
+    fn mixed_batch_rejects_before_allocating_any_invocation_id() {
+        let (_tmp, coordinator) = plan_coordinator();
+        let calls = [(0, unbound("observe.workspace")), (1, unbound("fetch.web"))];
+        let rejection = plan_rejection(&coordinator, &calls, &catalog(&["observe.workspace"]));
+        let BindingPlanRejection::UnknownTool(validation) = rejection else {
+            panic!("outsider must not be an internal fault: {rejection:?}");
+        };
+        assert_eq!(
+            validation,
+            lattice_conversation::ToolCallValidation::UnknownTool { call_ordinal: 1 }
+        );
     }
     #[test]
     fn successful_oversize_receipt_advances_live_cursor_without_a_draft() {

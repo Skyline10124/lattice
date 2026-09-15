@@ -11,6 +11,7 @@
     { "outcome": { "failed": { "reason": { "invalid_tool_call": { "validation": { "missing_tool_name": { "call_ordinal": 0 } } } } } }, "tag": "failed" },
     { "outcome": { "failed": { "reason": { "invalid_tool_call": { "validation": { "empty_tool_call_id": { "call_ordinal": 0 } } } } } }, "tag": "failed" },
     { "outcome": { "failed": { "reason": { "invalid_tool_call": { "validation": { "duplicate_tool_call_id": { "first_ordinal": 0, "second_ordinal": 1 } } } } } }, "tag": "failed" },
+    { "outcome": { "failed": { "reason": { "invalid_tool_call": { "validation": { "unknown_tool": { "call_ordinal": 0 } } } } } }, "tag": "failed" },
     { "outcome": { "cancelled": { "reason": "user_cancelled" } }, "tag": "cancelled" },
     { "outcome": { "interrupted": { "reason": "process_interrupted_before_model_attempt" } }, "tag": "interrupted" },
     { "outcome": { "interrupted": { "reason": "process_interrupted_during_model_attempt" } }, "tag": "interrupted" },
@@ -29,7 +30,8 @@
     { "outcome": { "interrupted": { "reason": { "invocation_may_have_occurred": { "invocation": "3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c" } } } }, "tag": "interrupted" }
   ],
   "reject": [
-    { "outcome": { "failed": { "reason": { "invalid_tool_call": { "validation": "unknown_tool" } } } }, "why": "公开 ToolCallValidation 没有 unknown_tool" },
+    { "outcome": { "failed": { "reason": { "invalid_tool_call": { "validation": "unknown_tool" } } } }, "why": "validation 必须是标签对象，不用裸字符串" },
+    { "outcome": { "failed": { "reason": { "invalid_tool_call": { "validation": { "unknown_tool": {} } } } } }, "why": "unknown_tool 缺少 call_ordinal" },
     { "outcome": { "failed": { "reason": { "invalid_tool_call": {} } } }, "why": "缺少嵌套 validation" },
     { "outcome": { "failed": { "reason": { "invalid_tool_call": { "validation": {} } } } }, "why": "validation 缺少标签" },
     { "outcome": { "failed": { "reason": { "invalid_tool_call": { "validation": { "bogus": { "call_ordinal": 0 } } } } } }, "why": "未知 validation 标签" },
