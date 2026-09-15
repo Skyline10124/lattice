@@ -7,6 +7,7 @@
 mod client;
 mod config;
 mod ipc;
+mod operation;
 mod server;
 mod types;
 
@@ -15,6 +16,7 @@ pub use config::FrozenConfiguration;
 pub use lattice_conversation::{
     BoundToolCall, MessageRole, MessageSemantic, NativeMessage, ToolResultOutcome,
 };
+pub use operation::LocalTurn;
 pub use server::serve;
 pub use types::{LocalRewindResult, SessionWriteResult};
 
@@ -24,10 +26,16 @@ pub fn new_turn_id() -> TurnId {
 }
 
 pub use types::{
-    Acceptance, CommittedTurnObservation, DaemonStatus, EventCursor, LocalError, LocalErrorKind,
-    Observation, PendingObservation, Result, SessionObservation, SessionWrite, TranscriptPage,
-    TurnId, TurnObservation, TurnRequest,
+    Acceptance, CancelStatus, CommittedTurnObservation, CompletionConfirmation, ConnectionStatus,
+    DaemonStatus, DetachReport, EventCursor, HistoryReadContext, HistoryReadError, HistoryScope,
+    LocalError, LocalErrorKind, LocalHistory, LocalHistoryEntry, LocalState, LocalUpdate,
+    NotSubmittedStage, Observation, ObservationPhase, PendingObservation, ResetReason, Result,
+    SessionObservation, SessionWrite, TextAction, TranscriptPage, TurnId, TurnObservation,
+    TurnRequest,
 };
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod client_tests;
