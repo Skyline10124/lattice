@@ -1237,6 +1237,12 @@ async fn handle_attempt_outcome(
             {
                 return AttemptHandled::Err(map_io(err));
             }
+            // 屏障窗口：中断原因已持久，StepClosed 尚未发布。
+            if let Err(error) =
+                hit_turn_crash_barrier(coordinator, session_id, "model_attempt_interrupted").await
+            {
+                return AttemptHandled::Err(error);
+            }
             let (kind, outcome, reason) = match interruption {
                 lattice_conversation::AttemptInterruption::Cancelled => (
                     StepClosedKind::CancelTurn {

@@ -19,7 +19,7 @@
 //! derives `Complete | Partial` from the full attempt chain.
 
 use lancet_protocol::{InvocationId, PlanKey};
-use lattice_conversation::{AttemptRejection, ToolResultOutcome};
+use lattice_conversation::{AttemptInterruption, AttemptRejection, ToolResultOutcome};
 use serde::{Deserialize, Serialize};
 
 use super::binding::{BindingPlan, PlannedBinding};
@@ -32,8 +32,8 @@ use super::facts::{
     NotExecutedReason, PlanValidation, ResultMaterial, UnavailableMaterialReason,
 };
 use super::outcome::{
-    ClosureOrigin, ToolBatchControl, TurnFailure, TurnFinishReason, TurnInterruption, TurnOutcome,
-    derive_tool_batch_control,
+    ClosureOrigin, ToolBatchControl, TurnCancellation, TurnFailure, TurnFinishReason,
+    TurnInterruption, TurnOutcome, derive_tool_batch_control,
 };
 use super::step::{ClosedBinding, MaterialAvailability, StepClosedKind, StepClosingState};
 use crate::{Result, SessionError};
@@ -226,11 +226,27 @@ pub fn reconcile(
             }
         }
         PendingStage::ModelAttemptInterrupted { reason, .. } => {
-            let turn_reason = TurnInterruption::ModelAttempt(*reason);
-            (
-                interrupted(turn_reason.clone()),
-                vec![step_closed_interrupt(turn_reason)],
-            )
+            // 取消已经持久化时，恢复与 live 路径同样以顶层
+            // Cancelled(UserCancelled) 关闭；其他中断原因保持
+            // Interrupted 透传，不新增中间状态。
+            if matches!(reason, AttemptInterruption::Cancelled) {
+                (
+                    TurnOutcome::Cancelled {
+                        reason: TurnCancellation::UserCancelled,
+                    },
+                    vec![ReconciliationAction::PublishStepClosed {
+                        kind: StepClosedKind::CancelTurn {
+                            reason: TurnCancellation::UserCancelled,
+                        },
+                    }],
+                )
+            } else {
+                let turn_reason = TurnInterruption::ModelAttempt(*reason);
+                (
+                    interrupted(turn_reason.clone()),
+                    vec![step_closed_interrupt(turn_reason)],
+                )
+            }
         }
         PendingStage::ModelAttemptRejected { rejection, .. } => {
             let validation = match rejection {
@@ -1211,6 +1227,26 @@ mod tests {
             interrupted_reason(&plan),
             TurnInterruption::ModelAttempt(AttemptInterruption::StreamError)
         ));
+    }
+
+    #[test]
+    fn interrupted_cancelled_attempt_recovers_as_user_cancelled() {
+        // 取消原因已经持久化为 ModelAttemptInterrupted(Cancelled)：恢复
+        // 与 live 路径一致，以顶层 Cancelled(UserCancelled) 关闭，而不是
+        // Interrupted(ModelAttempt(Cancelled))。
+        let snap = snapshot(PendingStage::ModelAttemptInterrupted {
+            key: key(0, 0),
+            reason: AttemptInterruption::Cancelled,
+            usage: None,
+        });
+        let plan = closure(&snap, &empty_facts(), "plan");
+        assert!(matches!(
+            plan.outcome,
+            TurnOutcome::Cancelled {
+                reason: TurnCancellation::UserCancelled
+            }
+        ));
+        assert_stage_only_closure(&plan, "closed_cancel");
     }
 
     #[test]
