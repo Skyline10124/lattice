@@ -1451,6 +1451,7 @@ fn build_binding_plan(
     }
     let plan = BindingPlan {
         plan_key: PlanKey {
+            session_id,
             turn_id,
             model_step_ordinal: model_step,
         },
@@ -1924,6 +1925,7 @@ mod tests {
         };
         let plan = BindingPlan {
             plan_key: PlanKey {
+                session_id,
                 turn_id,
                 model_step_ordinal: 0,
             },
@@ -2078,6 +2080,7 @@ mod tests {
         invocations
             .reserve_batch(
                 PlanKey {
+                    session_id,
                     turn_id,
                     model_step_ordinal: 0,
                 },

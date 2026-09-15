@@ -7,7 +7,7 @@
 //! A valid Tool-bearing model output is written durably in one step as
 //! `BindingPlanned` together with the embedded complete unbound message:
 //! there is no durable window containing a Tool-bearing `MessageComplete`
-//! without a binding plan. `PlanKey` is structural (`{TurnId,
+//! without a binding plan. `PlanKey` is structural (`{SessionId, TurnId,
 //! model_step_ordinal}`); there is no random `PlanId` and no second
 //! aggregate batch digest — the exact ordered bindings are the idempotency
 //! input. Provider origin, provider call IDs, and opaque replay state are
@@ -175,7 +175,10 @@ impl BindingPlan {
                 });
             }
             last_ordinal = Some(ordinal);
-            if binding.address.message.turn_id != self.plan_key.turn_id
+            // 键的 session 必须与每个 binding 地址的真实 session 一致；
+            // turn/step 归属沿用同一处精确核验，不弱化。
+            if binding.address.message.session_id != self.plan_key.session_id
+                || binding.address.message.turn_id != self.plan_key.turn_id
                 || binding.address.message.model_step_ordinal != self.plan_key.model_step_ordinal
             {
                 return Err(SessionError::JournalCorruption {
@@ -336,6 +339,7 @@ mod tests {
     fn plan(bindings: Vec<PlannedBinding>, message: NativeMessage<UnboundToolCall>) -> BindingPlan {
         BindingPlan {
             plan_key: PlanKey {
+                session_id: session_id(),
                 turn_id: turn_id(),
                 model_step_ordinal: 0,
             },

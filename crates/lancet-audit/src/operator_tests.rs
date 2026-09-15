@@ -78,6 +78,7 @@ fn reserve(store: &InvocationStore, step: u32, bindings: &[ReservationBinding]) 
     store
         .reserve_batch(
             PlanKey {
+                session_id: session_id(),
                 turn_id: turn_id(),
                 model_step_ordinal: step,
             },
@@ -181,6 +182,7 @@ async fn same_parent_sibling_turn_ids_keep_operator_rows_isolated() {
     store
         .reserve_batch(
             PlanKey {
+                session_id: session_id(),
                 turn_id: sibling,
                 model_step_ordinal: 3,
             },

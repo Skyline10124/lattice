@@ -421,6 +421,7 @@ mod tests {
             let turn_id = lancet_protocol::TurnId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c")
                 .expect("turn id");
             let plan_key = lancet_protocol::PlanKey {
+                session_id: "3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c".parse().unwrap(),
                 turn_id,
                 model_step_ordinal: 0,
             };

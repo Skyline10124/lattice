@@ -120,6 +120,7 @@ mod tests {
             store
                 .reserve_batch(
                     PlanKey {
+                        session_id: binding.identity.session_id,
                         turn_id: binding.identity.turn_id,
                         model_step_ordinal: index,
                     },

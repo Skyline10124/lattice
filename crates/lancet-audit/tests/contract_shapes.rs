@@ -138,6 +138,7 @@ fn invocation_ledger_wire_shapes_are_exact() {
     let turn_id = TurnId::parse("22222222-2222-4222-8222-222222222222").unwrap();
     let invocation_id = InvocationId::parse("33333333-3333-4333-8333-333333333333").unwrap();
     let plan_key = PlanKey {
+        session_id,
         turn_id,
         model_step_ordinal: 7,
     };
@@ -179,6 +180,7 @@ fn invocation_ledger_wire_shapes_are_exact() {
         "arguments_digest": "bb".repeat(32),
     });
     let expected_plan_key = serde_json::json!({
+        "session_id": "11111111111111111111111111111111",
         "turn_id": "22222222-2222-4222-8222-222222222222",
         "model_step_ordinal": 7,
     });

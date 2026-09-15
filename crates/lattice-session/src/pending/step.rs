@@ -468,6 +468,7 @@ mod tests {
         let bindings = vec![binding(0), binding(1)];
         let mut state = StepClosingState {
             plan_key: PlanKey {
+                session_id: SessionId::parse("3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c").unwrap(),
                 turn_id: turn_id(),
                 model_step_ordinal: 0,
             },
@@ -504,6 +505,7 @@ mod tests {
         let bindings = vec![binding(0), binding(1)];
         let mut state = StepClosingState {
             plan_key: PlanKey {
+                session_id: SessionId::parse("3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c").unwrap(),
                 turn_id: turn_id(),
                 model_step_ordinal: 0,
             },

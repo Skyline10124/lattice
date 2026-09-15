@@ -17,7 +17,12 @@ use super::step::{StepClosedKind, StepClosingState, closure_transcript, step_con
 use crate::{Result, SessionError};
 
 /// Schema version of the `pending.json` payload.
-pub const PENDING_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
+///
+/// Version 4 adds `session_id` to `PlanKey` (full plan identity is
+/// session + Turn + step). Snapshots written before it are rejected:
+/// deserialization fails on the missing field, and any payload that does
+/// parse carries a lower `schema_version` than this constant.
+pub const PENDING_SNAPSHOT_SCHEMA_VERSION: u32 = 4;
 
 /// The twelve durable states of one pending Turn.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -510,18 +515,23 @@ impl PendingSnapshot {
                             .into(),
                     });
                 }
-                if plan.plan_key.turn_id != self.turn_id {
+                if plan.plan_key.session_id != self.session_id
+                    || plan.plan_key.turn_id != self.turn_id
+                {
                     return Err(SessionError::JournalCorruption {
-                        detail: "plan key does not match the snapshot Turn".into(),
+                        detail: "plan key does not match the snapshot Session or Turn".into(),
                     });
                 }
                 validate_binding_sessions(&plan.bindings, &self.session_id)?;
             }
             PendingStage::StepClosing(state) => {
                 state.validate_transcript(&self.post_user_transcript)?;
-                if state.plan_key.turn_id != self.turn_id {
+                if state.plan_key.session_id != self.session_id
+                    || state.plan_key.turn_id != self.turn_id
+                {
                     return Err(SessionError::JournalCorruption {
-                        detail: "step closing plan does not match the snapshot Turn".into(),
+                        detail: "step closing plan does not match the snapshot Session or Turn"
+                            .into(),
                     });
                 }
                 validate_binding_sessions(&state.bindings, &self.session_id)?;
@@ -741,6 +751,7 @@ fn validate_step_closed_transcript(
                     })?;
             let state = StepClosingState {
                 plan_key: lancet_protocol::PlanKey {
+                    session_id: first.binding.address.message.session_id,
                     turn_id: first.binding.address.message.turn_id,
                     model_step_ordinal: *model_step_ordinal,
                 },

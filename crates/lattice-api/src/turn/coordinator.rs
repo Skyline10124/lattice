@@ -543,6 +543,7 @@ impl TurnCoordinator {
                 ),
                 _ => (
                     PlanKey {
+                        session_id: tip.snapshot.session_id,
                         turn_id: tip.snapshot.turn_id,
                         model_step_ordinal: 0,
                     },
@@ -832,6 +833,7 @@ mod tests {
 
         let session_id = "3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c".to_string();
         let plan_key = PlanKey {
+            session_id: SessionId::parse(&session_id).unwrap(),
             turn_id: TurnId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").unwrap(),
             model_step_ordinal: 0,
         };
@@ -925,6 +927,7 @@ mod tests {
         let io = CoordinatorStoreIo::new(session, Arc::clone(&invocations), key).unwrap();
         let turn_id = TurnId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").unwrap();
         let plan_key = PlanKey {
+            session_id: SessionId::parse("3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c").unwrap(),
             turn_id,
             model_step_ordinal: 2,
         };

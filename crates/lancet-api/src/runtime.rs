@@ -545,6 +545,7 @@ mod tests {
             .invocations
             .reserve_batch(
                 PlanKey {
+                    session_id: binding.identity.session_id,
                     turn_id,
                     model_step_ordinal: ordinal,
                 },

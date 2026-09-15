@@ -1025,6 +1025,7 @@ mod tests {
             .collect();
         BindingPlan {
             plan_key: PlanKey {
+                session_id: SessionId::parse(SESSION).unwrap(),
                 turn_id: turn_id(),
                 model_step_ordinal: 0,
             },
@@ -2212,6 +2213,7 @@ mod tests {
         // provisional TurnOutcome that could be mistaken for one.
         let plan = plan(1);
         let other_key = PlanKey {
+            session_id: SessionId::parse(SESSION).unwrap(),
             turn_id: lancet_protocol::TurnId::parse("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
                 .unwrap(),
             model_step_ordinal: 0,
@@ -2251,6 +2253,7 @@ mod tests {
         // reservation was lost; minting fresh candidates would invent one.
         let plan = plan(1);
         let other_key = PlanKey {
+            session_id: SessionId::parse(SESSION).unwrap(),
             turn_id: lancet_protocol::TurnId::parse("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
                 .unwrap(),
             model_step_ordinal: 0,
