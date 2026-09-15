@@ -792,27 +792,7 @@ impl GitSessionGraphStore {
 
         let _write = self.kernel().write_lock()?;
         if let Some(pinned) = self.read_turn_pin(session_id, &turn_id_str)? {
-            let commit = self.read_finalized_turn(session_id, turn_id, &pinned)?;
-            if self
-                .read_active_turn(session_id)?
-                .is_some_and(|tip| tip.snapshot.turn_id == *turn_id)
-            {
-                return Err(SessionError::JournalCorruption {
-                    detail: "committed Turn still has an active-turn ref".into(),
-                });
-            }
-            // 最终事务可能已经可见而后置屏障失败；固定引用后确认，不能仅凭 pin 返回成功。
-            let mut refs: Vec<String> = self
-                .kernel()
-                .enumerate_refs(&format!("refs/lattice/sessions/{session_id}/"))?
-                .into_iter()
-                .map(|(name, _)| name)
-                .collect();
-            refs.push(active_turn_ref_name(session_id)?);
-            refs.push(format!("refs/lattice/session-validation/{session_id}"));
-            let names: Vec<&str> = refs.iter().map(String::as_str).collect();
-            self.kernel().fsync_pending(&names)?;
-            return Ok(commit);
+            return self.confirm_pinned_turn(session_id, turn_id, &pinned);
         }
         let ref_name = active_turn_ref_name(session_id)?;
         let tip_oid = self.kernel().ref_target(&ref_name)?.ok_or_else(|| {
@@ -965,6 +945,59 @@ impl GitSessionGraphStore {
         turn_commit.profile_snapshot_json = candidate.profile_snapshot_json.clone();
         turn_commit.message_ids = message_ids;
         Ok(turn_commit)
+    }
+
+    /// 核验一个固定 pin 的 TurnCommit 并补足其 pending 引用屏障。
+    /// 调用方必须已持有仓库写锁：本函数只读取不可变对象并 fsync 引用，
+    /// 不发布引用、不生成候选、不关闭 pending Turn。固定结果在进入本函数
+    /// 前已经关闭，因此确认它不取得会话执行锁，也不等待另一个 Turn 的生命周期。
+    fn confirm_pinned_turn(
+        &self,
+        session_id: &str,
+        turn_id: &lancet_protocol::TurnId,
+        pinned: &str,
+    ) -> Result<crate::graph::TurnCommit> {
+        let commit = self.read_finalized_turn(session_id, turn_id, pinned)?;
+        if self
+            .read_active_turn(session_id)?
+            .is_some_and(|tip| tip.snapshot.turn_id == *turn_id)
+        {
+            return Err(SessionError::JournalCorruption {
+                detail: "committed Turn still has an active-turn ref".into(),
+            });
+        }
+        // 最终事务可能已经可见而后置屏障失败；固定引用后确认，不能仅凭 pin 返回成功。
+        let mut refs: Vec<String> = self
+            .kernel()
+            .enumerate_refs(&format!("refs/lattice/sessions/{session_id}/"))?
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        refs.push(active_turn_ref_name(session_id)?);
+        refs.push(format!("refs/lattice/session-validation/{session_id}"));
+        let names: Vec<&str> = refs.iter().map(String::as_str).collect();
+        self.kernel().fsync_pending(&names)?;
+        Ok(commit)
+    }
+
+    /// 观察端专用确认入口：读取固定 pin，核验 TurnCommit 与日志身份，拒绝同
+    /// Turn 的 active-turn 异常，并在同一个短仓库写锁内完成真实的 pending
+    /// 引用 fsync 屏障。
+    ///
+    /// 与 [`Self::finalize_turn`] 不同，本入口不取得会话执行锁，也不能关闭
+    /// pending Turn 或发布引用；没有固定已关闭结果的 Turn 在此不可确认，
+    /// pending 仍只经显式恢复关闭。
+    pub fn confirm_committed_turn(
+        &self,
+        session_id: &str,
+        turn_id: &lancet_protocol::TurnId,
+    ) -> Result<crate::graph::TurnCommit> {
+        let turn_id_str = turn_id.to_string();
+        let _write = self.kernel().write_lock()?;
+        let Some(pinned) = self.read_turn_pin(session_id, &turn_id_str)? else {
+            return Err(SessionError::NotFound(turn_id_str));
+        };
+        self.confirm_pinned_turn(session_id, turn_id, &pinned)
     }
 
     pub(super) fn read_finalized_turn(

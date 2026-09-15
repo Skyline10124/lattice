@@ -906,6 +906,126 @@ fn finalize_publishes_head_pin_state_and_deletes_active_turn_atomically() {
     );
 }
 
+/// 经真实 pending 日志提交一个 Turn 并留下永久 pin；观察端确认测试的共用装置。
+fn committed_turn_fixture() -> (Fixture, GitSessionGraphStore, String, String) {
+    let (f, store, session) = setup();
+    let lock = store
+        .lock_execution(&session, LockMode::Exclusive, Blocking::Block)
+        .expect("lock");
+    store
+        .begin_pending_turn(turn_started_facts(None), &lock)
+        .expect("begin");
+    store
+        .advance_pending_turn(
+            &session,
+            PendingStage::ModelAttemptStarted {
+                key: attempt_key(0, 0),
+            },
+            100,
+            &lock,
+        )
+        .expect("attempt");
+    store
+        .advance_pending_turn(
+            &session,
+            PendingStage::MessageComplete {
+                key: attempt_key(0, 0),
+                message: assistant_text("done"),
+                usage: None,
+            },
+            101,
+            &lock,
+        )
+        .expect("complete");
+    store
+        .advance_pending_turn(
+            &session,
+            PendingStage::StepClosed {
+                kind: crate::pending::StepClosedKind::FinishTurn {
+                    final_message: assistant_text("done"),
+                },
+            },
+            102,
+            &lock,
+        )
+        .expect("closed");
+    store
+        .advance_pending_turn(
+            &session,
+            PendingStage::TurnClosing(completed_turn_closing_from_active(&store, &session)),
+            103,
+            &lock,
+        )
+        .expect("closing");
+    let committed = store
+        .finalize_turn(&session, &turn_id(), &lock)
+        .expect("finalize");
+    drop(lock);
+    let commit_oid = committed.commit_id.clone();
+    assert!(store.read_active_turn(&session).expect("read").is_none());
+    (f, store, session, commit_oid)
+}
+
+#[test]
+fn confirm_committed_turn_verifies_the_fixed_result_without_the_execution_lock() {
+    let (_f, store, session, commit_oid) = committed_turn_fixture();
+    // 无执行锁也能确认：固定 pin 核验与引用屏障都在短仓库写锁内完成。
+    let confirmed = store
+        .confirm_committed_turn(&session, &turn_id())
+        .expect("confirm");
+    assert_eq!(confirmed.commit_id, commit_oid);
+    // 同 Session 另一个 Turn 持有整 Turn 执行锁时，确认旧结果不等待该锁。
+    let lock = store
+        .lock_execution(&session, LockMode::Exclusive, Blocking::Block)
+        .expect("lock");
+    let again = store
+        .confirm_committed_turn(&session, &turn_id())
+        .expect("confirm under another Turn's execution lock");
+    assert_eq!(again.commit_id, commit_oid);
+    // 屏障失败是真实持久性错误，不伪造成功；失败后可再次确认。
+    lattice_store::fault::fail_ref_fsync(true);
+    assert!(
+        store.confirm_committed_turn(&session, &turn_id()).is_err(),
+        "the fsync barrier must actually run"
+    );
+    lattice_store::fault::fail_ref_fsync(false);
+    let resumed = store
+        .confirm_committed_turn(&session, &turn_id())
+        .expect("confirm after the barrier failure");
+    assert_eq!(resumed.commit_id, commit_oid);
+    // 无 pin 的 Turn 不是可确认的固定结果：pending 仍待显式恢复。
+    let other = lancet_protocol::TurnId::parse("00000000-0000-4000-8000-00000000000f").expect("t");
+    assert!(matches!(
+        store.confirm_committed_turn(&session, &other),
+        Err(SessionError::NotFound(_))
+    ));
+    drop(lock);
+}
+
+#[test]
+fn confirm_committed_turn_rejects_a_same_turn_active_ref_anomaly() {
+    let (_f, store, session, commit_oid) = committed_turn_fixture();
+    let lock = store
+        .lock_execution(&session, LockMode::Exclusive, Blocking::Block)
+        .expect("lock");
+    let journal = store
+        .kernel()
+        .commit_parents(crate::git_graph::helpers::parse_oid(&commit_oid).unwrap())
+        .expect("parents")
+        .into_iter()
+        .next()
+        .expect("journal parent");
+    force_active_turn(&store, &session, journal);
+    assert!(
+        matches!(
+            store.confirm_committed_turn(&session, &turn_id()),
+            Err(SessionError::JournalCorruption { .. })
+        ),
+        "a committed Turn with its own active-turn ref is typed corruption"
+    );
+    drop(lock);
+}
+
 #[test]
 fn finalize_requires_a_turn_closing_tip_and_the_matching_turn() {
     let (_f, store, session) = setup();
