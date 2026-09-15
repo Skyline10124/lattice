@@ -41,7 +41,9 @@ cargo xtask tool-build --verify
 
 ## 后台与重连操作
 
-以下是当前工作分支的公开 CLI 用法；相关[合同修订待批准](../README.md#工作分支修订状态)，操作示例不代表产品验收。提交新请求前在目标项目根准备有效 profile 与凭据；找回请求时保持原工作区、用户及 `XDG_STATE_HOME`。Session 与 TUI 命令会按需自启后台；`daemon status`、`daemon stop` 只联系已有后台，不自启。纯查询可创建连接所需运行资源，但不创建领域库、补确认屏障或恢复 Turn。
+以下是当前工作分支的公开 CLI 用法，相关[合同修订待批准](../README.md#工作分支修订状态)，操作示例不代表产品验收。提交新请求时，在目标项目根准备有效 profile 与凭据。找回和重连时使用原用户、状态根及会话身份；显式重试原请求还须保持原工作区和输入。状态根按[私有状态根](../architecture/storage.md#私有状态根)解析。
+
+Session 与 TUI 命令会按需自启后台；`daemon status`、`daemon stop` 只联系已有后台，不自启。纯查询可建立连接所需运行资源，领域数据保持只读。
 
 ### 提交与找回
 
@@ -51,7 +53,7 @@ cargo xtask tool-build --verify
 lattice session new --agent reader --project-branch main
 ```
 
-以下变量中的 Session ID 须替换为上一步结果。首次提交前生成一次 TurnId，另行保存该 ID、Session ID、原输入和工作区。确认未知后重试不要重新执行生成 ID 的一行。
+将下面的 Session ID 替换为创建结果。首次提交只生成一次 TurnId，并在终端外保存 SessionId、TurnId、原输入及工作区位置，以便关闭终端后找回。
 
 ```sh
 SESSION_ID="替换为已创建的会话 ID"
@@ -61,9 +63,27 @@ printf 'session=%s turn=%s\n' "$SESSION_ID" "$TURN_ID"
 lattice --json session send "$SESSION_ID" "$PROMPT" --turn-id "$TURN_ID"
 ```
 
-`lattice run "$SESSION_ID" "$PROMPT" --turn-id "$TURN_ID"` 是同一发送入口。未提供 `--turn-id` 时，前端生成 ID 并在发请求前输出 `submission` 记录；该记录只说明客户端身份，接受须看独立回执。不同请求忙时返回 Busy，保留原任务；不排队。
+`lattice run "$SESSION_ID" "$PROMPT" --turn-id "$TURN_ID"` 使用同一发送入口。未指定 `--turn-id` 时，CLI 在发请求前生成并输出身份；JSONL 的 `submission` 记录供保存身份，独立 `acceptance` 回执说明后台是否接受。
 
-重连先查询状态与固定正文，按需继续观察：
+| 提交回复 | 下一步 |
+| --- | --- |
+| 已确认接受 | 继续观察，或断开后按原身份查询 |
+| Busy | 保存未接受的输入，待该 Session 空闲后发送；后台不排队 |
+| 接受确认未知 | 保存原身份，先查询事实；需要确认时显式重发原请求 |
+| 找回已有请求 | 使用返回的原 Turn，核对 pending 或已关闭结果 |
+| 旧 Turn 已恢复关闭，本次新 prompt 未接受 | 查看旧 Turn 结果，再决定是否发送新任务 |
+
+需要显式确认原请求时，恢复已保存的变量，在同一工作区再次执行同一条发送命令：
+
+```sh
+lattice --json session send "$SESSION_ID" "$PROMPT" --turn-id "$TURN_ID"
+```
+
+重试时沿用保存的 TurnId，不重新运行生成 ID 的一行。后台核验原输入和项目绑定后找回已有请求，不加载新配置、不重跑模型或 Tool，并可补必要持久确认屏障。同请求仍 pending 时，这次找回不关闭旧日志，关闭另用 `recover`；输入或绑定不符返回 Conflict。身份与确认规则见[会话合同](../architecture/session.md#请求身份与确认)。
+
+### 查询与继续观察
+
+在新的终端中恢复保存的身份，然后选择一次读取、持续观察或 TUI：
 
 ```sh
 lattice --json session turn "$SESSION_ID" "$TURN_ID"
@@ -71,30 +91,66 @@ lattice --json session turn "$SESSION_ID" "$TURN_ID" --follow
 lattice tui "$SESSION_ID"
 ```
 
-这些操作不要求当前 profile/provider 凭据。`--follow` 的 Gap 表示未取得连续增量，后续 snapshot/transcript 是替换视图。JSONL 中 `transcript.object_id` 可以是 TurnCommit 或 pending journal OID，`state` 区分 pending 与已关闭结果；不能把所有正文对象解释成已提交 Turn。
+这些读取无需当前 profile/provider 凭据。`pending` 表示 Turn 尚未持久关闭，可读取已保存的进展；已关闭结果给出 outcome 与对应提交。后台重启后，观察已关闭结果仍由后台按 session+turn 核验固定 pin 并补必要持久屏障，成功即交付完成确认，无需重发原请求；核验失败保留身份并报告真实存储诊断。
 
-后台重启后，结果可见与完成确认分别报告。需要显式确认原请求时，在同一工作区以原 SessionId、TurnId 和完全相同的输入重发上述 `session send`。找回已有请求不加载新配置、不重跑模型或 Tool，可补必要持久确认屏障；pending 的同请求找回不负责关闭旧日志，关闭使用独立 `recover`。输入或项目绑定不符返回 Conflict。
+`--follow` 中的 `gap` 是观察事件不连续通知。随后 `snapshot` 和 `transcript` 给出重新固定的状态与对话，消费方用它们替换对应临时输出。`transcript.object_id` 可指向 TurnCommit 或 pending journal，`state` 区分已关闭结果与 pending；所读消息不都是已提交 Turn。缺失旧 token 不逐个重放。
+
+TUI 中用 `/reconnect` 重新观察。当前模型段的新后缀会继续显示，缺失前文另有提示；完成状态先显示，持久正文独立加载。呈现方式见 [TUI 连接、确认与重载](../architecture/tui.md#连接确认与重载)。单次查询保持纯只读；`--follow` 与重连走订阅，可由后台对无 Owner 的已关闭结果补持久屏障。两者都不自动恢复旧 pending。
 
 ### 取消、恢复与停止
 
+#### 请求取消
+
+要取消指定请求，使用原身份：
+
 ```sh
 lattice --json session cancel "$SESSION_ID" "$TURN_ID"
+```
+
+`owned: true` 表示后台在判定点已接管本次取消，之后独立处理和收尾；`owned: false` 表示该判定点未接管，不表示没有后台工作。按原 TurnId 查询结果，接管回复本身不是持久 Cancelled；未知回执保留原身份，必要时再次明确取消。接管区间、明确拒绝后的新准入与持久事实边界见[会话取消规则](../architecture/session.md#取消与退出)。
+
+CLI 提交/观察期间第一次 Ctrl+C 请求取消并继续观察，再次 Ctrl+C 结束等待或观察；完成已知而只剩正文时，Ctrl+C 放弃读取。首次取消若仍在等提交回执，本客户端的具体交互句柄 [LocalTurn](../architecture/session.md#组件与接口) 在五秒后交付提交未知并重新固定同身份只读观察，不自动重发配置；有 Live 时继续观察，无 Owner 时 CLI 可在固定读取后退出。此次未知交接后，迟到的本地提交传输错误只保留未知诊断，独立完成及正文读取继续。
+
+TUI 的 Esc/Ctrl+C 取消、Ctrl+D 或 `/quit` 退出按[键位条件](../architecture/tui.md#键盘与历史)执行，两端共用 LocalTurn 的[回执等待预算](../architecture/session.md#输入与传输限制)。`not_sent` / `not_accepted` 只说明本客户端停止后续配置，不作为该 TurnId 全局未执行的判断；已知接受、接管和完成结果继续有效。
+
+#### 关闭崩溃遗留的 Turn
+
+查询看到 pending 且无 live Owner 时，可以显式恢复：
+
+```sh
 lattice --json session recover "$SESSION_ID"
+```
+
+`recover` 无需当前 profile/provider，取得会话执行所有权后依据持久事实关闭旧 Turn，忙时拒绝。完成后按原 TurnId 查询消息和结果；它不会继续模型或重分发工具。取消的内存意图、已保存取消原因与已记录关闭决定分别处理，具体窗口见[显式恢复流程](../architecture/session.md#显式恢复流程)。
+
+持久写入失败时保留实际 pending 或已可见的最终 pin，不删除状态。本后台按已核验的旧 Turn 保留恢复诊断，断连后用原 ID 执行 `session turn --follow` 仍可取得这份错误。新 prompt 若先遇到另一旧 pending，也只关闭并报告旧 Turn，本次输入未接受。
+
+#### 查询或停止已有后台
+
+```sh
 lattice --json daemon status
 lattice --json daemon stop
 ```
 
-取消输出 `owned: true` 表示后台已接管取消意图，`owned: false` 表示无对应 live 所有者；二者都不能代替持久 Cancelled。回执未知时按原 ID 查询或再次明确取消。CLI 的 Ctrl+C 请求取消，再次 Ctrl+C 结束观察；TUI 的 Esc/Ctrl+C 请求取消，Ctrl+D、`/quit` 只退出。已经发出的取消在退出前等待确认，未确认会提示未知。
+stop 先关闭新准入，再等待已接管工作及必要收尾。`unconfirmed_operations` 是当前后台进程记录的未确认操作计数，不是持久 pending 数；非零时命令返回失败，继续查询相关 Session。stop 连接丢失时，用 status 核验后台是否仍在运行。最后一个前端退出不会自动 stop。
 
-`recover` 需要会话执行所有权，忙时拒绝；它不依赖当前 profile/provider，只按持久事实关闭旧 Turn。新 prompt 若先遇到旧 pending，也只报告恢复的旧 Turn，本次输入未接受。持久写入失败时保留实际 pending 或已可见的最终 pin，不删除状态；本后台按已核验的旧 Turn 保存恢复诊断，断连后用其原 ID 执行只读 `session turn --follow` 仍可取得这份错误。
+#### 隔离场景中的显式启动
 
-stop 先关闭新准入，再等已接管工作及必要收尾。`unconfirmed_operations` 是当前后台进程记录的未确认操作计数，不是持久 pending 数；非零时命令返回失败并需查询相关 Session。stop 连接丢失不证明已停止，重新用 status 核验。最后一个前端退出不会自动 stop。
+需要显式运行后台时，使用 `lattice daemon serve --state-root <绝对状态根>`。参数指 XDG 状态根，产品在其下使用 `lattice/`。serve 前台运行且不加载工作区 dotenv；独立进程组、状态归属与清理遵循[测试合同](testing.md#超时与进程生命周期)，不在开发者真实状态上注入崩溃或执行清理。
 
-执行命令的 `0` 表示取得对应成功结果，`1` 包含执行、观察、持久确认或正文读取失败，`2` 表示使用/前提错误；以结构化错误和固定结果分别判断。纯 Turn 查询的 `0` 只表示查询及正文读取成功。即使已收到完成回执，正文读取失败仍退出 `1`，保留可见终态，待重连读取；不能据退出码把已完成 Turn 改成失败或重新执行。
+客户端与后台应来自相符构建，当前 Local IPC 标识为 `LTLOCAL2`。身份或协议不兼容时保留错误，交由用户处理；不自动终止已有后台或迁移状态。当前请求找回及对话读取沿用既有 Pending v3、三库、refs、永久 pin、committed schema 与摘要，按原完整性规则读取，重连不要求重建数据。
 
-需要在隔离场景显式运行后台时，使用 `lattice daemon serve --state-root <绝对状态根>`，该参数指 XDG 状态根，产品在其下使用 `lattice/`。前台运行 serve 不加载工作区 dotenv；测试中的独立进程组和清理归属按[测试合同](testing.md#超时与进程生命周期)处理，不在开发者真实状态上注入崩溃或清理。
+### 退出码与失败后的动作
 
-当前 Local IPC 使用 `LTLOCAL2`，客户端与后台应来自相符构建；协议或身份不兼容会拒绝连接，不自动杀后台或迁移旧状态。请求身份与正文读取复用原 Pending v3、三库布局、refs、永久 pin、committed schema 和摘要；既有记录仍按原完整性规则读取，不需重建。Rust 直接调用者的接口变化以源码为准，不提供读取后台环境的兼容回退。
+| 退出码 | 本地命令的含义 |
+| --- | --- |
+| `0` | 该命令取得对应成功结果；纯 `session turn` 表示查询和对话读取成功，不表示业务 outcome 成功，也不单独证明完成确认 |
+| `1` | 执行、观察、持久确认或内容读取等失败；结合结构化错误和固定结果定位，后台可能已保存结果或仍在收尾 |
+| `2` | 使用/前提错误，包括 BadRequest、NotFound 和提交身份冲突；修正输入或确认原请求身份 |
+
+`session send` / `run` 与 `session turn --follow` 按所选 Turn 的固定 outcome 及观察/读取错误确定退出；Failed、Cancelled、Interrupted 不作为成功执行。纯查询的成功只说明读取成功，取消命令成功也只说明取得取消回复。命令级结果与 Turn outcome 分开解释。
+
+即使已收到完成回执，内容读取失败仍退出 `1` 并保留可见终态。重连读取该结果，不因这个退出码改写已完成 Turn 或重新执行任务。参数与退出分类的静态来源为 [CLI 分派](../../crates/lattice-cli/src/main.rs)、[Session 命令](../../crates/lattice-cli/src/commands/session.rs)、[提交和观察](../../crates/lattice-cli/src/commands/run.rs)及[后台命令](../../crates/lattice-cli/src/commands/daemon.rs)。
 
 ## 日常验证
 

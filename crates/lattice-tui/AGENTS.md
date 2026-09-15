@@ -13,8 +13,9 @@
 ## 局部约束
 
 - 新会话准备在 UI 启动前报告配置问题；既有会话与重连走只读入口，新提交才冻结配置。Component 预热与执行由后台所属 API 处理。
-- session 模块负责打开/创建、配置和持久历史重载，connection 负责公开 LocalClient 连接，app 负责输入与观察事件到界面状态的映射；input 负责缓冲/历史/按键，view 负责布局/折行/viewport/停靠区。共享渲染归本 crate，目录和文件按职责组织。
-- raw 模式下 Esc/Ctrl+C 经 LocalClient 显式取消，不另起 tokio::signal::ctrl_c watcher。退出、确认未知、Gap 与连接中断的完整显示规则归 TUI 合同。
+- session 负责打开/创建、配置来源及 LocalHistory/消息到 Block 的转换；connection 只转换回执与退出报告文案。app 持有本客户端一次交互的具体句柄 LocalTurn，发出意图、消费更新，维护呈现与按 InvocationId/来源的工具配对；交付、取消回执、订阅和历史异步读取归 LocalClient。完整交接见 [TUI 组件接线](../../docs/architecture/tui.md#组件接线)。
+- input 负责缓冲、历史与按键，view 负责布局、折行、viewport 和停靠区。共享渲染归本 crate，目录和文件按职责组织。
+- raw 模式下 Esc/Ctrl+C 经 LocalTurn 登记取消意图，不另起 tokio::signal::ctrl_c watcher。退出、确认未知、Gap 与连接中断的完整显示规则归 TUI 合同。
 - REPL 历史尽力写入 `<session_dir>/repl_history.txt`，保持纯文本行格式。
 - 所有布局使用统一 content_w 和安全整数运算，具体不变量引用合同；运行状态的显示不是 Invocation 持久结果权威。
 - 目录组织调整不授权新增工具卡片或其他功能；卡片接线仍须以明确数据契约为依据。

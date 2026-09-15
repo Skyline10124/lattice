@@ -103,9 +103,11 @@ lattice tui <session_id>
 
 ## 后台执行与重连
 
-Session 命令与 TUI 首次使用时自动启动同用户、同状态根的本地后台。已确认接受的 Turn 在前端关闭后继续执行；TUI 的 Ctrl+D 或 `/quit` 只断开，Esc/Ctrl+C 明确请求取消。重新打开 `lattice tui <session_id>` 可重载持久历史，`/reconnect` 更新当前界面的连接。
+当前工作分支提供本地后台执行与重连入口，相关[合同修订待批准](docs/README.md#工作分支修订状态)。Session 命令与 TUI 首次使用时按需启动同用户、同状态根的后台。一次已接受任务称为 Turn；接受后关闭终端，后台继续执行。
 
-按 TurnId 查询或继续观察已有请求：
+提交时记下 SessionId、TurnId、原输入和工作区，重连用这些身份找回任务。TUI 中空缓冲的 Ctrl+D 或 `/quit` 只退出；运行时 Esc/Ctrl+C 请求取消。重新打开 `lattice tui <session_id>` 读取已保存对话，界面内 `/reconnect` 重新连接。
+
+按保存的身份选择操作：
 
 ```text
 lattice session turn <session_id> <turn_id>
@@ -116,7 +118,9 @@ lattice daemon status
 lattice daemon stop
 ```
 
-`<session_id>` 与 `<turn_id>` 是待替换的身份占位。查询与重连不执行恢复；`recover` 只关闭旧 pending。观察缺口会明确提示，重载持久正文，不逐 token 补播。接受或完成确认未知时保留原 TurnId，显式重试方法、退出码与后台停止说明见[操作指南](docs/development/validation-guide.md#后台与重连操作)。本工作分支的相关合同修订[待人类批准](docs/README.md#工作分支修订状态)。
+`<session_id>` 与 `<turn_id>` 替换为保存的身份。查询得到 `pending` 时，任务尚未关闭；后台仍运行可继续观察，后台崩溃遗留则用 `recover` 仅关闭旧 Turn。观察缺口会提示并重新读取已保存对话，缺失的旧流式文字不逐 token 补播。
+
+结果可读但接受或完成确认未知时，保留原 TurnId，按[操作指南](docs/development/validation-guide.md#后台与重连操作)查询或显式重试原请求。指南也说明取消、后台停止、退出码及当前重连限制；这些入口尚不代表本工作分支已通过产品验收。
 
 ## 命令行入口
 

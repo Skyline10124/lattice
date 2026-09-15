@@ -6,6 +6,7 @@ status: active
 
 LATTICE 是以会话为中心的 LLM 运行时，Agent 通过 LANCET 调用封闭目录中的结构化 Tool，操作用户的 Local Workspace。
 本文件是项目唯一的领域术语表，提供简短定义、关键区别与合同入口；完整规则由对应合同维护。
+引用待批准修订的词条按[工作分支修订状态](../README.md#工作分支修订状态)使用，生效前仍以原有效合同为准；术语表不批准新语义。
 
 ## 术语
 
@@ -78,6 +79,56 @@ _Avoid_: automatic retry, automatic merge, replay
 运行时维护且 profile 不得放宽的路径排除规则，覆盖项目 Git 管理状态、LATTICE 私有状态及项目根外路径。
 见[路径策略](../architecture/workspace.md#路径策略)。
 _Avoid_: configurable deny pattern, projection exclusion
+
+**Session**:
+持续对话的容器，以 SessionId 标识并绑定一个项目，保存历史位置与会话状态。
+见[会话、Turn 与历史](../architecture/session.md#会话turn-与历史)。
+_Avoid_: terminal connection, background process, workspace copy
+
+**Turn**:
+一次已接受任务，包含用户输入、模型步骤、工具调用及关闭结果；一个 Turn 可以有多个模型步骤。
+见[会话、Turn 与历史](../architecture/session.md#会话turn-与历史)。
+_Avoid_: model attempt, single tool call, terminal lifetime
+
+**LocalTurn**:
+本客户端一次提交或观察交互的具体句柄，关联原请求身份与已收到的状态、内容和诊断；不是第二个持久 Turn 或后台执行所有者。
+主定义与生命周期见[组件与接口](../architecture/session.md#组件与接口)及[客户端操作](../architecture/session.md#实现模块与公开操作)。
+_Avoid_: PendingTurn, TurnCoordinator, durable Turn, execution owner
+
+**TurnId**:
+客户端为提交保留的请求身份，与 SessionId 一起用于找回原请求；TurnCommit 的对象地址另由 Git OID 表达。
+请求重试见[身份与确认](../architecture/session.md#请求身份与确认)；调用批次预留键（代码 `PlanKey`）的完整身份包含 Session，跨 Session 同 TurnId 计划在项目级调用账本中不冲突，见[绑定与逐调用关闭](../architecture/session.md#绑定与逐调用关闭)。
+_Avoid_: commit OID, provider call ID, InvocationId
+
+**PendingTurn**:
+已接受但尚未持久关闭的 Turn 进度，保存冻结事实、累积对话和当前关闭阶段。
+见[日志与阶段](../architecture/session.md#日志与阶段)。
+_Avoid_: live process, token buffer, retry queue
+
+**TurnCommit**:
+Turn 关闭后保存的不可变结果对象，包含对话、outcome 和工作区 checkpoint，以 Git OID 寻址。
+见[Turn 最终发布](../architecture/session.md#turn-最终发布)。
+_Avoid_: TurnId, user project commit, whole-workspace snapshot
+
+**InvocationId**:
+一次工具调用的持久身份，贯穿绑定、预留、执行、取消、结果和证据；provider Tool Call ID 只属模型协议材料。它与标识一次工具调用批次预留的 `PlanKey`（Session+Turn+步骤）分工不同：前者定位单次调用，后者是批次预留的幂等键。
+见[绑定与持久边界](../architecture/lancet.md#绑定与持久边界)。
+_Avoid_: provider call ID, tool name, PlanKey
+
+**持久对话内容**:
+已保存的用户消息、完整模型消息与已关闭 ToolResult，供历史读取和后续模型请求使用。
+它与尚未保存的临时流式文字分开，见[用户读到的几种事实](../architecture/session.md#用户读到的几种事实)。
+_Avoid_: token replay, layout body width, frozen configuration
+
+**会话固定视图**:
+后台为一次读取选定的会话历史位置与已保存进度版本，使读取期间的新发布不混入该次对话。
+见[观察与重连](../architecture/session.md#观察与重连)；该后台读取语义仍属 R1 待批准修订，不表示整个工作区快照。
+_Avoid_: live mutable head, whole-workspace snapshot
+
+**观察 Gap**:
+通知客户端观察事件不连续的信号，客户端据此提示缺口并重新读取固定的持久对话。
+见[观察与重连](../architecture/session.md#观察与重连)，属 R1 待批准修订；观察缺失不等同于持久消息或调用终态丢失。
+_Avoid_: journal corruption, tool failure, layout gap
 
 **Session History**:
 对话 Turn 与 Tool transcript 的 Git 风格图，记录工作区交互但不拥有 Local Workspace 内容。

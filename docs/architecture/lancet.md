@@ -109,8 +109,8 @@ Cell 模型、能力匹配、scope/trust 解析及拒绝证据由该合同集中
 
 ### 网络获取
 
-`fetch.web` 仅通过 `network-fetch` Host 发出 GET 请求。Host 依次核验允许主机、协议与地址策略，解析 DNS 并固定连接地址，验证 TLS，并对每次重定向重新检查。
-Tool Host 的 TLS 根来自[提交端冻结配置](session.md#执行配置冻结)，由 Turn 专属信任配置验证已固定地址的连接；冻结规则不改变本节的逐跳网络授权与证据边界。
+`fetch.web` 仅通过 `network-fetch` Host 发出 GET 请求，供 Tool 在获准目标上取得受限响应。每次请求及重定向由 Host 核验允许主机、协议和地址策略，解析 DNS，固定连接地址，再完成 TLS 验证与读取。
+Tool Host 接收[提交端冻结配置](session.md#执行配置冻结)中的实际 TLS 根证书内容，以 Turn 专属信任配置验证 HTTPS 连接；本 Turn 的 provider 连接使用同一份冻结根内容。材料的来源、冻结时点与持久化边界由会话合同维护。Host 在每一跳继续执行本节的目标授权、地址固定和证据记录。
 公网访问采用 HTTPS；显式 localhost 策略作为受控例外处理，其余私有、保留和特殊地址拒绝。跨源重定向移除调用方请求头，响应头、响应体、重定向次数和 deadline 均受限制，取消与 Turn 观察预算参与执行。
 调用须同时通过 `ex` 能力边界和非空 `allowed_hosts` 目标策略；空允许列表拒绝全部网络，`allow_public_https` 只是公网 HTTPS 开关。localhost 还须显式启用并列入允许主机。每次调用最多一次网络 import，Host 内部处理重定向，不由 guest 发起第二条独立网络操作。最多跟随 5 次重定向，初始请求计数为 0；DNS、连接、TLS、各跳与 body 共用一次调用 deadline 和取消身份，不逐跳重置。
 
@@ -129,7 +129,7 @@ guest 只接收最小成功投影与无 payload 的粗错误标签，结构化�
 
 一个 `InvocationId` 贯穿会话绑定、预留、分发、Host 上下文、事件、取消、工作区变更关联、结果关闭和证据。provider Tool Call ID 仅用于对应 provider 的协议材料，不参与 LANCET 授权或持久身份判断。
 
-协调层以 `PlanKey` 和精确有序绑定预留一批调用。绑定包含 Session/Turn/消息/片段地址、方法、Descriptor 身份与规范参数摘要。同一预留的重复请求须逐项一致；不一致或部分预留不能作为可执行批次接受。
+协调层以 `PlanKey` 和精确有序绑定预留一批调用（一次“工具调用批次”）。`PlanKey` 完整身份为 Session + Turn + 模型步骤，与绑定中的 Session/Turn/消息/片段地址、方法、Descriptor 身份和规范参数摘要逐项对应。同一预留的重复请求须逐项一致；键的 Session 与绑定不符、跨 Session 混批或部分预留不能作为可执行批次接受。
 
 InvocationStore 的执行路径为 `Reserved → DispatchStarted → Terminal`；未分发的预留也可直接关闭为 `NotExecuted` 终态。`Absent` 是查询结果，不是记录。Terminal 同时保存执行 outcome、结果材料状态和完整 Cell 证据。
 下图展开已预留调用的分发与运行时返回路径。协调层先按[逐调用关闭顺序](session.md#绑定与逐调用关闭)持久进入初始 StepClosing，才进入图中流程；receipt 返回后的候选固定、材料发布、终态发布与游标推进也由该节衔接。
@@ -161,7 +161,8 @@ flowchart TD
 | trap、资源耗尽、超时或取消 | 返回有界、脱敏的类型化错误，保留已经观察到的效果 |
 | 执行已返回，终态与证据发布未确认成功 | 协调层停止后续分发，按会话合同的 [FinalizeBudget](session.md#resultdraft-与关闭材料)处理；未能持久关闭时保持 Turn pending |
 
-执行 outcome 为 `Succeeded`、`Failed`、`Rejected`、`Cancelled`、`NotExecuted` 或 `Indeterminate`，与结果材料可用性分别记录。执行成功不保证模型可见结果材料可用；[会话合同](session.md#resultdraft-与关闭材料)维护材料状态及 ToolResult 关闭。
+执行 outcome 为 `Succeeded`、`Failed`、`Rejected`、`Cancelled`、`NotExecuted` 或 `Indeterminate`，与结果材料可用性分别记录。例如，调用已成功但 ToolContent 超过保存上限时，仍保留 Succeeded，供模型使用的 ToolResult 标明材料不可用；具体材料关闭由[会话合同](session.md#resultdraft-与关闭材料)维护。
+观察事件用于显示调用进度。缺少 finished 事件时，读者通过持久 Invocation 终态和 Session 结果核验执行与材料，不能从未配对显示块推断调用失败。固定读取、Gap 与重载由[会话观察协议](session.md#观察与重连)维护。
 终态和完整 Cell 证据在 InvocationStore 内作为一次 ledger commit/ref 原子发布，按[存储屏障](storage.md#屏障覆盖)确认持久性；这一范围不扩展为文件、SessionStore 和 InvocationStore 的跨库事务。
 
 `CepError` 的 retriability 描述错误属性，不授权重新执行已越过分发边界的调用。重开时 LANCET 提供固定持久事实，不重新执行 Tool；协调层按[会话重开规则](session.md#重开取消与未完成状态)关闭调用与 Turn，包括未分发关闭、不确定终态和存储不可写时保留 pending。
@@ -217,5 +218,10 @@ ledger 是唯一数据权威，`refs/lattice/invocations/high-water` 仅为单�
 - 已确认的网络 Host、安全、限制、投影与证据要求由本文承接。
 - [运行时局部指引](../../crates/lancet-runtime/AGENTS.md)及[审计局部指引](../../crates/lancet-audit/AGENTS.md)：组件归属与执行边界。
 
-Bundle 安装、重建及活动版本切换失败的完整语义仍需明确，由 [#35](https://github.com/Skyline10124/lattice/issues/35)承接；reserved Descriptor 到实际编译 Component 的 exact identity gate 及 model-visible/executable 启用集一致性仍需在该项前核验，不增加第二个 catalog authority。网络旧记录中的 DNS 后未连接分类、body 编码及 header 规则未决项，本轮未重新作行为验证；保留为核验线索，不以归档宣称已解决。
-上述规则以本文及对应合同为准，历史与已退役实现不再是默认执行入口。术语表的读写入口见[领域文档指引](../agents/domain.md)，其他局部入口另行整理。
+### 待明确与待核验边界
+
+- Bundle 安装、重建及活动版本切换失败的完整语义仍待明确，由 [#35](https://github.com/Skyline10124/lattice/issues/35)承接。
+- reserved Descriptor 到实际编译 Component 的 exact identity gate、model-visible/executable 启用集一致性，仍须在 Bundle 安装前核验；目录权威保持单一。
+- DNS 后未连接的分类、body 编码与 header 规则仍有未决核验项；本节“网络获取”的有效限制继续适用，未决项不作为已经验证的保证。
+
+合同效力及 TLS 修订范围依文件头限定。历史与已退役实现不作为默认执行入口；术语表的读写入口见[领域文档指引](../agents/domain.md)，未迁入的局部细则继续由相应入口承接。
