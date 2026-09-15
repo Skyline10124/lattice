@@ -20,8 +20,8 @@ use lattice_system_harness::{
 };
 use serde_json::Value;
 use support::{
-    assert_clean_send, assert_accepted_and_closed, direct_world, driver, evidence, finish_scenario, require, sequence,
-    tool_call, wire_fake_llm, wire_gated_fake_llm,
+    assert_accepted_and_closed, assert_clean_send, direct_world, driver, evidence, finish_scenario,
+    require, sequence, tool_call, wire_fake_llm, wire_gated_fake_llm,
 };
 
 /// provider 非 2xx 且禁用重试时，接受的 Turn 持久关闭为失败并退出 1。
@@ -71,7 +71,9 @@ fn direct_failure_http_error_no_retry_commits_error() {
             "turn_failed must surface",
         )?;
         require(
-            outcome.committed_result().is_some_and(|(_, _, result)| result == "failed"),
+            outcome
+                .committed_result()
+                .is_some_and(|(_, _, result)| result == "failed"),
             "fixed Turn outcome=failed",
         )?;
         require(
@@ -131,7 +133,9 @@ fn direct_failure_disconnect_before_output_commits_error() {
             "stream failure must commit an error turn, not emit commit_failed",
         )?;
         require(
-            outcome.committed_result().is_some_and(|(_, _, result)| result == "interrupted"),
+            outcome
+                .committed_result()
+                .is_some_and(|(_, _, result)| result == "interrupted"),
             "fixed Turn outcome=interrupted",
         )?;
         require(
@@ -211,7 +215,9 @@ fn direct_failure_disconnect_after_partial_token_commits_error() {
             "turn_failed after mid-stream disconnect",
         )?;
         require(
-            outcome.committed_result().is_some_and(|(_, _, result)| result == "interrupted"),
+            outcome
+                .committed_result()
+                .is_some_and(|(_, _, result)| result == "interrupted"),
             "fixed Turn outcome=interrupted",
         )?;
         require(
@@ -263,7 +269,9 @@ fn direct_failure_malformed_sse_commits_error() {
             "turn_failed on malformed SSE",
         )?;
         require(
-            outcome.committed_result().is_some_and(|(_, _, result)| result == "interrupted"),
+            outcome
+                .committed_result()
+                .is_some_and(|(_, _, result)| result == "interrupted"),
             "fixed Turn outcome=interrupted",
         )?;
         require(
@@ -354,7 +362,9 @@ fn direct_failure_sigint_while_stalled_commits_cancelled() {
             "turn_cancelled must carry a cancellation reason on SIGINT",
         )?;
         require(
-            outcome.committed_result().is_some_and(|(_, _, result)| result == "cancelled"),
+            outcome
+                .committed_result()
+                .is_some_and(|(_, _, result)| result == "cancelled"),
             "fixed Turn outcome=cancelled",
         )?;
         require(
@@ -432,7 +442,9 @@ fn direct_failure_profile_deadline_while_stalled_commits_error() {
             "turn_failed on deadline",
         )?;
         require(
-            outcome.committed_result().is_some_and(|(_, _, result)| result == "interrupted"),
+            outcome
+                .committed_result()
+                .is_some_and(|(_, _, result)| result == "interrupted"),
             "fixed Turn outcome=interrupted on deadline",
         )?;
         require(
@@ -510,7 +522,9 @@ fn direct_failure_mutation_survives_provider_failure() {
             "turn_failed after the second-round provider failure",
         )?;
         require(
-            outcome.committed_result().is_some_and(|(_, _, result)| result == "failed"),
+            outcome
+                .committed_result()
+                .is_some_and(|(_, _, result)| result == "failed"),
             "fixed Turn outcome=failed",
         )?;
         require(
@@ -548,18 +562,25 @@ fn direct_failure_session_lock_rejects_busy_then_accepts_explicit_retry() {
     let scenario_evidence = evidence(&world, &spec);
     let send = SessionSendDriver::new(&driver, &world, &spec, "dl-stale", "main").expect("session");
     let baseline = send.send("baseline turn").expect("baseline");
-    let (gated_server, gate) = wire_gated_fake_llm(&world, "dl-stale", SseScript::plain("stale turn tokens"));
+    let (gated_server, gate) =
+        wire_gated_fake_llm(&world, "dl-stale", SseScript::plain("stale turn tokens"));
     let running_a = send.spawn("stalled turn A").expect("spawn A");
-    gate.wait_until_stalled(1, running_a.remaining_timeout(Duration::from_secs(30))).unwrap();
+    gate.wait_until_stalled(1, running_a.remaining_timeout(Duration::from_secs(30)))
+        .unwrap();
     let racer_server = FakeLlmServer::start(SseScript::plain("racing commit")).unwrap();
     world.set_env("OPENAI_COMPATIBLE_BASE_URL", racer_server.base_url());
     world.set_env("OPENAI_COMPATIBLE_API_KEY", FAKE_API_KEY);
-    let racer = send.send("racing turn B").expect("busy B response before releasing A");
+    let racer = send
+        .send("racing turn B")
+        .expect("busy B response before releasing A");
     let before_retry = racer_server.captured_requests();
-    gate.release(running_a.remaining_timeout(Duration::from_secs(2))).unwrap();
+    gate.release(running_a.remaining_timeout(Duration::from_secs(2)))
+        .unwrap();
     let stalled = send.wait_spawned(running_a).expect("wait A");
     let retried = send.send("racing turn B").expect("explicit retry B");
-    let log = send.run_command(&["--json", "session", "log", send.session_id()]).unwrap();
+    let log = send
+        .run_command(&["--json", "session", "log", send.session_id()])
+        .unwrap();
     let mut captures = baseline_server.captured_requests();
     captures.extend(gated_server.captured_requests());
     captures.extend(racer_server.captured_requests());
@@ -567,19 +588,48 @@ fn direct_failure_session_lock_rejects_busy_then_accepts_explicit_retry() {
         for outcome in [&baseline, &stalled, &retried] {
             assert_clean_send(outcome)?;
             assert_accepted_and_closed(outcome)?;
-            require(outcome.has_committed_completed() && outcome.command.is_clean_exit(0), "accepted turn must complete")?;
+            require(
+                outcome.has_committed_completed() && outcome.command.is_clean_exit(0),
+                "accepted turn must complete",
+            )?;
         }
-        require(racer.command.is_clean_exit(1) && racer.accepted_turn_id().is_none(), "Busy must reject without acceptance")?;
+        require(
+            racer.command.is_clean_exit(1) && racer.accepted_turn_id().is_none(),
+            "Busy must reject without acceptance",
+        )?;
         require(racer.events.iter().any(|event| matches!(event, TurnEventLine::Unknown { type_name, raw } if type_name == "error" && raw["kind"] == "busy")), "explicit Busy classification")?;
-        require(before_retry.is_empty() && racer_server.captured_requests().len() == 1, "rejected B must not contact provider or queue")?;
+        require(
+            before_retry.is_empty() && racer_server.captured_requests().len() == 1,
+            "rejected B must not contact provider or queue",
+        )?;
         let log_json: Value = serde_json::from_slice(&log.stdout).unwrap();
         let turns = log_json["turns"].as_array().unwrap();
-        require(turns.len() == 3, "only baseline, A and explicit retry may commit")?;
+        require(
+            turns.len() == 3,
+            "only baseline, A and explicit retry may commit",
+        )?;
         let previous = stalled.committed_result().unwrap().1;
-        require(retried.events.iter().any(|event| match event {
-            TurnEventLine::Unknown { type_name, raw } if type_name == "snapshot" => raw["view"]["requested_turn"]["parent_ids"].as_array().is_some_and(|parents| parents == &[Value::String(previous.into())]),
-            _ => false,
-        }), "explicit retry must commit against A, not its stale parent")
+        require(
+            retried.events.iter().any(|event| match event {
+                TurnEventLine::Unknown { type_name, raw } if type_name == "snapshot" => raw["view"]
+                    ["requested_turn"]["parent_ids"]
+                    .as_array()
+                    .is_some_and(|parents| parents == &[Value::String(previous.into())]),
+                _ => false,
+            }),
+            "explicit retry must commit against A, not its stale parent",
+        )
     })();
-    finish_scenario(scenario_evidence, &[("baseline", &baseline.command), ("Busy B", &racer.command), ("A", &stalled.command), ("explicit B", &retried.command), ("log", &log)], captures, result);
+    finish_scenario(
+        scenario_evidence,
+        &[
+            ("baseline", &baseline.command),
+            ("Busy B", &racer.command),
+            ("A", &stalled.command),
+            ("explicit B", &retried.command),
+            ("log", &log),
+        ],
+        captures,
+        result,
+    );
 }

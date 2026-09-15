@@ -23,9 +23,9 @@ use lattice_system_harness::{
 };
 use serde_json::Value;
 use support::{
-    assert_clean_send, direct_world, driver, evidence, finish_scenario, finished_with_code,
-    last_tool_content, require, sequence, tool_call, tool_failed, tool_ok, tool_result_value,
-    wire_fake_llm, wire_gated_fake_llm,
+    assert_accepted_and_closed, assert_clean_send, assert_committed_view_after, direct_world,
+    driver, evidence, finish_scenario, finished_with_code, last_tool_content, require, sequence,
+    tool_call, tool_failed, tool_ok, tool_result_value, wire_fake_llm, wire_gated_fake_llm,
 };
 
 fn is_non_completed_terminal(outcome: &lattice_system_harness::SendOutcome) -> bool {
@@ -759,11 +759,16 @@ fn direct_mutation_tool_activity_before_commit() {
 
     let result: Result<(), AssertError> = (|| {
         assert_clean_send(&outcome)?;
+        // 实时工具生命周期顺序仍然独立保证（不因有损通道放弃）。
         assert_event_subsequence(
             &outcome.parsed,
-            &["tool_call_started", "tool_call_finished", "turn_committed"],
+            &["tool_call_started", "tool_call_finished"],
         )
         .map_err(|e| AssertError::StdoutMissing { expected: e })?;
+        // 终态取证改为持久发布：接受回执与同 Turn 的固定 committed 视图对应，
+        // 且该视图必须出现在最后一个工具完成之后。
+        assert_accepted_and_closed(&outcome.parsed)?;
+        assert_committed_view_after(&outcome.parsed, "tool_call_finished")?;
         require(tool_ok(&outcome.parsed, "mutate.create"), "create ok")?;
         require(
             world.project_dir().join("ordered.txt").is_file(),

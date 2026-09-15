@@ -352,7 +352,22 @@ fn direct_turn_sonnet_routes_but_missing_credentials_reject_before_acceptance() 
                 && outcome.committed_result().is_none(),
             "missing credential rejects before durable acceptance",
         )?;
-        require(outcome.events.iter().all(|event| matches!(event, TurnEventLine::Unknown { type_name, raw } if type_name == "submission" || (type_name == "error" && raw["kind"] == "bad_request"))), "no model or Tool activity before credential rejection")?;
+        require(
+            outcome.events.iter().all(|event| match event {
+                TurnEventLine::Unknown { type_name, raw }
+                    if type_name == "submission"
+                        || (type_name == "error" && raw["kind"] == "bad_request") =>
+                {
+                    true
+                }
+                // 本地观察帧可以出现在拒绝之前，但必须自身证明没有 Turn 活动。
+                TurnEventLine::Unknown { type_name, raw } if type_name == "snapshot" => {
+                    raw["view"]["active_turn"].is_null() && raw["view"]["requested_turn"].is_null()
+                }
+                _ => false,
+            }),
+            "no model or Tool activity before credential rejection",
+        )?;
         let record: Value = serde_json::from_str(
             std::str::from_utf8(&query.stdout)
                 .unwrap()

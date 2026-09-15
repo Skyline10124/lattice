@@ -58,6 +58,41 @@ pub(crate) fn assert_accepted_and_closed(outcome: &SendOutcome) -> Result<(), As
     )
 }
 
+/// 有损观察通道可能淘汰 `turn_committed`；权威终态由固定发布补齐：要求带非空
+/// commit id 的 completed 固定视图出现在给定事件之后，而不是要求重放瞬时事件。
+pub(crate) fn assert_committed_view_after(
+    outcome: &SendOutcome,
+    after: &str,
+) -> Result<(), AssertError> {
+    let anchor = outcome
+        .events
+        .iter()
+        .rposition(|event| event.type_name() == after)
+        .ok_or_else(|| AssertError::StdoutMissing {
+            expected: format!("missing '{after}' before the fixed committed view"),
+        })?;
+    let closed = outcome.events.iter().position(|event| match event {
+        TurnEventLine::Unknown { type_name, raw } if type_name == "snapshot" => {
+            raw["view"]["requested_turn"]["state"] == "committed"
+        }
+        _ => false,
+    });
+    require(
+        closed.is_some_and(|closed| anchor < closed),
+        format!("fixed committed view must follow '{after}'"),
+    )?;
+    let (_, commit_id, result) =
+        outcome
+            .committed_result()
+            .ok_or_else(|| AssertError::StdoutMissing {
+                expected: "strict committed result".into(),
+            })?;
+    require(
+        !commit_id.is_empty() && result == "completed",
+        "committed result must carry a commit id and a completed outcome",
+    )
+}
+
 pub(crate) fn assert_forced_kill(outcome: &CommandOutcome) {
     assert_eq!(
         outcome.termination,

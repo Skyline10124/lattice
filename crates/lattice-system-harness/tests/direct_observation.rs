@@ -22,7 +22,8 @@ use lattice_system_harness::{
 };
 use serde_json::{Value, json};
 use support::{
-    assert_clean_send, driver, evidence, finish_scenario, require, tool_result_value, wire_fake_llm,
+    assert_clean_send, assert_committed_view_after, driver, evidence, finish_scenario, require,
+    tool_result_value, wire_fake_llm,
 };
 
 /// Build the observation fixture world with the full visibility matrix and
@@ -250,8 +251,12 @@ fn direct_observation_visibility_and_bounds() {
         )?;
 
         // tool activity and CEP lifecycle precede commit
-        assert_event_subsequence(outcome, &["tool_call_started", "turn_committed"])
+        // 实时工具生命周期顺序仍然独立保证（有损通道下也不放宽）。
+        assert_event_subsequence(outcome, &["tool_call_started", "tool_call_finished"])
             .map_err(|e| AssertError::StdoutMissing { expected: e })?;
+        // 终态取证来自持久发布：固定 committed 视图带 commit id 且跟随最后一个工具完成，
+        // 而不是要求重放可能被淘汰的瞬时 turn_committed 事件。
+        assert_committed_view_after(outcome, "tool_call_finished")?;
 
         // turn committed completed
         require(
