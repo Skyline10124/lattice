@@ -224,9 +224,11 @@ fn pty_detach_reloads_pending_and_result_without_cancelling() {
         let reopened_result = (|| {
             reopened.wait_for_ready(budget.cap_timeout(spec.step_timeout()))?;
             reopened.wait_for(budget.cap_timeout(spec.step_timeout()), |text| {
+                // 已关闭结果的重开观察由后台核验并补屏障后交付确认：固定结果与已确认
+                // 状态都显示，不再要求用户重发原请求或把完成标为未知。
                 text.contains("background reconnect answer")
-                    && text.contains("confirmation unknown")
-                    && !text.contains("✓ committed")
+                    && (text.contains("✓ committed") || text.contains("+ committed"))
+                    && !text.contains("完成确认未知")
             })?;
             reopened.send_line("/quit")?;
             reopened.wait_for_exit(budget.cap_timeout(Duration::from_secs(15)))
@@ -237,6 +239,199 @@ fn pty_detach_reloads_pending_and_result_without_cancelling() {
     }));
     evidence.record_pty(tui.output());
     evidence.record_captures(server.captured_requests());
+    finish_pty(evidence, result).unwrap_or_else(|report| panic!("{report}"));
+}
+
+/// 真实模型段已开始后换前端：新后缀必须在终态 gate 放行前可见。
+#[test]
+fn pty_mid_model_reconnect_shows_new_suffix_before_completion() {
+    use lattice_system_harness::{FakeLlmServer, SessionSendDriver, SseScript};
+    const PREFIX: &str = "SAVED_PREFIX_R1";
+    const OLD: &str = "OLD_DELTA_R1";
+    const NEW: &str = "NEW_SUFFIX_R1";
+    const INPUT: &str = "continue mid-model";
+    let driver = driver();
+    let (world, mut spec) = support::direct_world("pty-mid-model-reconnect", "tui-smoke", "[]", "");
+    spec.layer = ScenarioLayer::PtySmoke;
+    spec.step_timeout_secs = 120;
+    spec.total_timeout_secs = Some(300);
+    let budget = world.budget(&spec);
+    let step = || budget.cap_timeout(spec.step_timeout());
+    let mut evidence = support::evidence(&world, &spec);
+    let (mut server, gate) = FakeLlmServer::start_segmented(
+        SseScript::Sequence {
+            scripts: vec![
+                SseScript::plain(PREFIX),
+                SseScript::PlainText {
+                    chunks: vec![format!("{OLD} "), NEW.into()],
+                    finish_reason: "stop".into(),
+                },
+            ],
+        },
+        step(),
+    )
+    .unwrap();
+    world.set_env("OPENAI_COMPATIBLE_BASE_URL", server.base_url());
+    world.set_env("OPENAI_COMPATIBLE_MODEL", "tui-smoke");
+    world.set_env(
+        "OPENAI_COMPATIBLE_API_KEY",
+        lattice_system_harness::FAKE_API_KEY,
+    );
+    let mut original = None;
+    let mut replacement = None;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let session = SessionSendDriver::new(&driver, &world, &spec, "tui-smoke", "main")
+            .unwrap_or_else(|error| {
+                if let lattice_system_harness::SessionSendError::NewSessionFailed { outcome } =
+                    &error
+                {
+                    evidence.record_command("create PTY Session", outcome);
+                }
+                panic!("{error}");
+            });
+        let seed = session.spawn("seed history").unwrap();
+        // 第一请求的正文、finish、DONE；第二请求仍独立停在下一帧 gate。
+        for frame in 1..=3 {
+            gate.wait_until_stalled(frame, step()).unwrap();
+            gate.release_next(step()).unwrap();
+        }
+        let seed = session.wait_spawned(seed).unwrap();
+        evidence.record_command("seed durable prefix", &seed.command);
+        support::assert_clean_send(&seed).unwrap();
+        assert!(seed.command.is_clean_exit(0));
+        support::assert_accepted_and_closed(&seed.parsed).unwrap();
+
+        // 提交端的接受回执会触发重固定；不要把它误当成 TUI 已完成订阅。
+        // 先通过公开 CLI 建立在途 Turn，两次 TUI 都以只读前端进入同一模型段。
+        let in_flight = session.spawn(INPUT).unwrap();
+        gate.wait_until_stalled(4, step()).unwrap();
+        original = Some(PtyTuiDriver::reconnect(&driver, &world, session.session_id()).unwrap());
+        let tui = original.as_mut().unwrap();
+        tui.wait_for_ready(step()).unwrap();
+        tui.wait_for(step(), |text| {
+            text.contains(INPUT) && text.contains(PREFIX) && text.contains("pending Turn")
+        })
+        .unwrap();
+        gate.release_next(step()).unwrap();
+        gate.wait_until_stalled(5, step()).unwrap();
+        tui.wait_for(step(), |text| text.contains(OLD)).unwrap();
+        let old_frame = tui.redraw_text(step()).unwrap();
+        assert!(
+            old_frame.contains(OLD) && !old_frame.contains(NEW),
+            "{old_frame}"
+        );
+        println!("PTY window: old token delivered and visible; new token withheld");
+
+        let owners = world.daemon_pids().unwrap();
+        assert_eq!(owners.len(), 1);
+        assert_ne!(tui.pgid(), Some(owners[0]));
+        tui.send_keys(b"\x04").unwrap();
+        tui.wait_for_exit(budget.cap_timeout(Duration::from_secs(15)))
+            .unwrap();
+        assert!(processes_in_pgid(tui.pgid().unwrap()).unwrap().is_empty());
+        assert_eq!(world.daemon_pids().unwrap(), owners);
+        println!("PTY window: original frontend exited; same backend remains");
+
+        // 重连读取不需要 provider 配置，且不得触发第二次模型执行。
+        world.unset_env("OPENAI_COMPATIBLE_BASE_URL");
+        world.unset_env("OPENAI_COMPATIBLE_MODEL");
+        world.unset_env("OPENAI_COMPATIBLE_API_KEY");
+        replacement = Some(PtyTuiDriver::reconnect(&driver, &world, session.session_id()).unwrap());
+        let tui = replacement.as_mut().unwrap();
+        tui.wait_for_ready(step()).unwrap();
+        tui.wait_for(step(), |text| {
+            text.contains(INPUT) && text.contains(PREFIX) && text.contains("stream")
+        })
+        .unwrap();
+        let resumed = tui.redraw_text(step()).unwrap();
+        assert!(
+            resumed.contains(INPUT) && resumed.contains("stream") && !resumed.contains("offline"),
+            "{resumed}"
+        );
+        assert_eq!(resumed.matches(PREFIX).count(), 1, "{resumed}");
+        assert!(
+            !resumed.contains(OLD) && !resumed.contains(NEW),
+            "{resumed}"
+        );
+        println!("PTY window: replacement frontend subscribed and loaded durable prefix once");
+
+        gate.release_next(step()).unwrap();
+        gate.wait_until_stalled(6, step()).unwrap();
+        tui.wait_for(step(), |text| {
+            text.contains(NEW) && text.contains("前文可能缺失")
+        })
+        .unwrap();
+        let live = tui.redraw_text(step()).unwrap();
+        assert!(
+            live.contains(NEW) && live.contains("前文可能缺失") && !live.contains(OLD),
+            "{live}"
+        );
+        assert_eq!(live.matches(PREFIX).count(), 1, "{live}");
+        assert_eq!(live.matches(NEW).count(), 1, "{live}");
+        let pending = session
+            .run_command(&["--json", "session", "log", session.session_id()])
+            .unwrap();
+        evidence.record_command("new suffix visible before durable completion", &pending);
+        assert!(pending.is_clean_exit(0));
+        let log: serde_json::Value = serde_json::from_slice(&pending.stdout).unwrap();
+        assert_eq!(
+            log["turns"].as_array().unwrap().len(),
+            1,
+            "current Turn must not be closed"
+        );
+        assert_eq!(server.captured_requests().len(), 2);
+        println!(
+            "PTY window: new suffix and missing-prefix notice visible; terminal frame withheld; only seed Turn committed"
+        );
+
+        gate.release(step()).unwrap();
+        tui.wait_for(step(), |text| text.contains(OLD)).unwrap();
+        let sent = session.wait_spawned(in_flight).unwrap();
+        evidence.record_command("original CLI submission completed", &sent.command);
+        support::assert_clean_send(&sent).unwrap();
+        assert!(sent.command.is_clean_exit(0));
+        support::assert_accepted_and_closed(&sent.parsed).unwrap();
+        let closed = session
+            .run_command(&["--json", "session", "log", session.session_id()])
+            .unwrap();
+        evidence.record_command("original Turn completed after terminal release", &closed);
+        assert!(closed.is_clean_exit(0));
+        let log: serde_json::Value = serde_json::from_slice(&closed.stdout).unwrap();
+        let turns = log["turns"].as_array().unwrap();
+        assert_eq!(turns.len(), 2);
+        let completed: Vec<_> = turns
+            .iter()
+            .filter(|turn| turn["turn_id"].as_str() == sent.parsed.accepted_turn_id())
+            .collect();
+        assert_eq!(
+            completed.len(),
+            1,
+            "original TurnId must occur exactly once"
+        );
+        assert!(completed[0]["outcome"].get("completed").is_some());
+        assert_eq!(server.captured_requests().len(), 2);
+        tui.send_line("/quit").unwrap();
+        tui.wait_for_exit(budget.cap_timeout(Duration::from_secs(15)))
+            .unwrap();
+        assert!(processes_in_pgid(tui.pgid().unwrap()).unwrap().is_empty());
+        server
+            .shutdown(budget.cap_timeout(Duration::from_secs(3)))
+            .unwrap();
+        println!(
+            "PTY window: original Turn completed; replacement quit cleanly; provider requests stayed at two"
+        );
+    }));
+    for tui in [original.as_ref(), replacement.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        evidence.record_pty(tui.output());
+    }
+    evidence.record_captures(server.captured_requests());
+    // 失败时先解除 provider/PTY，再让 evidence 按既有预算停止自有后台。
+    drop(server);
+    drop(replacement);
+    drop(original);
     finish_pty(evidence, result).unwrap_or_else(|report| panic!("{report}"));
 }
 

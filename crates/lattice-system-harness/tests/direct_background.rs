@@ -12,7 +12,10 @@ use lattice_system_harness::{
     ScenarioWorld, SessionSendDriver, SseScript,
 };
 use serde_json::{Value, json};
-use support::{assert_forced_kill, direct_world, driver, wire_gated_fake_llm};
+use support::{
+    assert_clean_send, assert_forced_kill, direct_world, driver, tool_call, wire_fake_llm,
+    wire_gated_fake_llm,
+};
 
 const FIRST: &str = "00000000-0000-4000-8000-000000000001";
 const SECOND: &str = "00000000-0000-4000-8000-000000000002";
@@ -858,6 +861,341 @@ fn exhausted_budget_records_normal_stop_failure_without_fixed_wait() {
             "{}",
             killed.summary()
         );
+    }));
+    finish(evidence, result);
+}
+
+/// 后台重启后，原 Session/Turn 的已关闭结果由观察路径自身核验并补屏障：
+/// 不重发原 prompt，provider/Tool 调用数不增加，观察也不回放已关闭事件。
+#[test]
+fn daemon_restart_confirms_the_closed_result_without_resubmitting() {
+    let (world, spec) = direct_world(
+        "background-restart-confirm",
+        "background",
+        "[\"session.todo_write\"]",
+        "",
+    );
+    let budget = world.budget(&spec);
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let server = wire_fake_llm(
+            &world,
+            "background",
+            SseScript::Sequence {
+                scripts: vec![
+                    tool_call(
+                        "restart-confirm-call",
+                        "session.todo_write",
+                        r#"{"todos":[{"content":"durable","status":"pending"}]}"#,
+                    ),
+                    SseScript::plain("restart answer"),
+                ],
+            },
+        );
+        let driver = driver();
+        let session = SessionSendDriver::new(&driver, &world, &spec, "background", "main").unwrap();
+        let sid = session.session_id().to_string();
+        let sent = session.send("restart prompt").unwrap();
+        evidence.record_command("completed Turn before restart", &sent.command);
+        assert_clean_send(&sent).unwrap();
+        let turn = sent
+            .accepted_turn_id()
+            .expect("durable acceptance")
+            .to_string();
+        let commit = sent.committed_result().expect("committed").1.to_string();
+        assert_eq!(server.captured_requests().len(), 2);
+        // 重启后台：本进程完成表为空，只剩持久固定 pin。
+        world.stop_daemon().expect("normal daemon restart");
+        assert!(world.daemon_pids().unwrap().is_empty());
+
+        let observed = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &["--json", "session", "turn", &sid, &turn, "--follow"],
+        );
+        assert!(observed.is_clean_exit(0), "follow: {}", observed.summary());
+        let records = lines(&observed);
+        assert!(
+            !records.iter().any(|record| record["type"] == "error"),
+            "观察已关闭结果不得报完成失败：{records:?}"
+        );
+        assert!(
+            records.iter().any(|record| record["type"] == "snapshot"
+                && record["view"]["requested_turn"]["state"] == "committed"
+                && record["view"]["requested_turn"]["commit_id"] == json!(commit)),
+            "{records:?}"
+        );
+        assert!(
+            !records
+                .iter()
+                .any(|record| record["type"] == "tool_call_started"),
+            "已关闭结果不回放事件：{records:?}"
+        );
+        assert_eq!(
+            server.captured_requests().len(),
+            2,
+            "观察不得再调用 provider"
+        );
+
+        // 同一固定 pin 的订阅交付独立 Finished 确认，而不是“仅可见”。
+        let mut subscriber = write_frame(
+            &world,
+            &budget,
+            &json!({"operation":"subscribe", "session_id":sid, "turn_id":turn, "cursor":null}),
+        );
+        let frame = read_frame(&mut subscriber);
+        assert_eq!(frame["response"], "observation", "{frame}");
+        assert_eq!(frame["value"]["type"], "finished", "{frame}");
+        assert_eq!(frame["value"]["error"], Value::Null, "{frame}");
+        assert_eq!(
+            frame["value"]["view"]["requested_turn"]["commit_id"],
+            json!(commit)
+        );
+        drop(subscriber);
+        assert_eq!(server.captured_requests().len(), 2);
+        evidence.record_captures(server.captured_requests());
+
+        let log = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &["--json", "session", "log", &sid],
+        );
+        assert!(log.is_clean_exit(0));
+        let log: Value = serde_json::from_slice(&log.stdout).unwrap();
+        assert_eq!(log["turns"].as_array().unwrap().len(), 1);
+        assert_eq!(log["turns"][0]["commit_id"], json!(commit));
+        world.stop_daemon().expect("daemon cleanup");
+    }));
+    finish(evidence, result);
+}
+
+/// 同 Session 新 Turn 运行时，旧已关闭结果仍由后台核验并交付确认：
+/// 不等待新 Turn 的生命周期，也不关闭、取消或改写它。
+#[test]
+fn a_live_new_turn_does_not_block_the_old_result_confirmation() {
+    let (world, spec) = direct_world(
+        "background-confirm-beside-live-turn",
+        "background",
+        "[]",
+        "",
+    );
+    let budget = world.budget(&spec);
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let (server, gate) = wire_gated_fake_llm(
+            &world,
+            "background",
+            SseScript::Sequence {
+                scripts: vec![
+                    SseScript::plain("first answer"),
+                    SseScript::plain("second answer"),
+                ],
+            },
+        );
+        let driver = driver();
+        let session = SessionSendDriver::new(&driver, &world, &spec, "background", "main").unwrap();
+        let sid = session.session_id().to_string();
+        let running_first = session.spawn("first prompt").unwrap();
+        gate.wait_until_stalled(1, budget.cap_timeout(Duration::from_secs(30)))
+            .unwrap();
+        gate.release_next(budget.cap_timeout(Duration::from_secs(30)))
+            .unwrap();
+        let first = session.wait_spawned(running_first).unwrap();
+        evidence.record_command("completed old Turn", &first.command);
+        assert_clean_send(&first).unwrap();
+        let first_commit = first.committed_result().expect("committed").1.to_string();
+        let turn = first.accepted_turn_id().expect("accepted").to_string();
+
+        let running_second = session.spawn("second prompt").unwrap();
+        gate.wait_until_stalled(2, budget.cap_timeout(Duration::from_secs(30)))
+            .unwrap();
+        let live = query(&world, &budget, &mut evidence, &sid, &turn);
+        assert!(
+            live[0]["view"]["active_turn"].is_object(),
+            "新 Turn 必须在旧结果确认期间仍然在途：{} {live:?}",
+            live[0]
+        );
+
+        let observed = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &["--json", "session", "turn", &sid, &turn, "--follow"],
+        );
+        assert!(observed.is_clean_exit(0), "follow: {}", observed.summary());
+        let records = lines(&observed);
+        assert!(
+            !records.iter().any(|record| record["type"] == "error"),
+            "{records:?}"
+        );
+        assert!(
+            records.iter().any(|record| record["type"] == "snapshot"
+                && record["view"]["requested_turn"]["commit_id"] == json!(first_commit)),
+            "{records:?}"
+        );
+        // 旧结果确认已结束而新 Turn 仍在途：确认不等待它的生命周期。
+        let still_live = query(&world, &budget, &mut evidence, &sid, &turn);
+        assert!(
+            still_live[0]["view"]["active_turn"].is_object(),
+            "{still_live:?}"
+        );
+
+        gate.release_next(budget.cap_timeout(Duration::from_secs(30)))
+            .unwrap();
+        let second = session.wait_spawned(running_second).unwrap();
+        evidence.record_command("live Turn after the old confirmation", &second.command);
+        assert_clean_send(&second).unwrap();
+        assert_eq!(server.captured_requests().len(), 2);
+        let after = query(&world, &budget, &mut evidence, &sid, &turn);
+        assert_eq!(
+            after[0]["view"]["requested_turn"]["commit_id"],
+            json!(first_commit),
+            "确认旧结果不得改写它"
+        );
+        assert!(after[0]["view"]["active_turn"].is_null());
+        world.stop_daemon().expect("normal daemon cleanup");
+    }));
+    finish(evidence, result);
+}
+
+/// 同一项目两个 Session 显式使用同一 TurnId 且各自都有 Tool 批次：
+/// 计划键按 Session 区分，两批调用分别预留、分别完成，互不串话。
+#[test]
+fn same_turn_id_in_two_sessions_completes_each_tool_batch() {
+    let (world, spec) = direct_world(
+        "background-same-turn-two-sessions",
+        "background",
+        "[\"session.todo_write\"]",
+        "",
+    );
+    let budget = world.budget(&spec);
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // 每个 Turn 的模型请求按 Tool 调用、最终文本轮转；两个 Session 各自完成自己的批次。
+        let server = wire_fake_llm(
+            &world,
+            "background",
+            SseScript::Cycle {
+                scripts: vec![
+                    tool_call(
+                        "same-turn-call",
+                        "session.todo_write",
+                        r#"{"todos":[{"content":"shared","status":"pending"}]}"#,
+                    ),
+                    SseScript::plain("shared answer"),
+                ],
+            },
+        );
+        let driver = driver();
+        let alpha = SessionSendDriver::new(&driver, &world, &spec, "background", "main").unwrap();
+        let beta = SessionSendDriver::new(&driver, &world, &spec, "background", "main").unwrap();
+        assert_ne!(alpha.session_id(), beta.session_id());
+        // 两个 Session 显式使用同一 TurnId；第一个 Turn 的 Tool 批次持久后，第二个
+        // Session 在同一项目账本上用相同 TurnId 预留并完成自己的批次。顺序执行让
+        // 脚本分配确定，冲突面仍是项目级调用账本上的同一 (TurnId, step)。
+        let running_alpha = command(
+            &world,
+            &budget,
+            &[
+                "--json",
+                "run",
+                alpha.session_id(),
+                "alpha prompt",
+                "--turn-id",
+                FIRST,
+            ],
+        );
+        let alpha_done = running_alpha.wait(None).unwrap();
+        evidence.record_command("alpha Turn under shared TurnId", &alpha_done);
+        assert!(
+            alpha_done.is_clean_exit(0),
+            "alpha: {}",
+            alpha_done.summary()
+        );
+        // 第二个 Session 在第一个 Turn 已持久后使用同一 TurnId 提交自己的 Tool 批次。
+        let running_beta = command(
+            &world,
+            &budget,
+            &[
+                "--json",
+                "run",
+                beta.session_id(),
+                "beta prompt",
+                "--turn-id",
+                FIRST,
+            ],
+        );
+        let beta_done = running_beta.wait(None).unwrap();
+        evidence.record_command("beta Turn under shared TurnId", &beta_done);
+        assert!(
+            alpha_done.is_clean_exit(0),
+            "alpha: {}",
+            alpha_done.summary()
+        );
+        assert!(beta_done.is_clean_exit(0), "beta: {}", beta_done.summary());
+        for (name, outcome) in [("alpha", &alpha_done), ("beta", &beta_done)] {
+            assert!(
+                lines(outcome)
+                    .iter()
+                    .any(|record| record["type"] == "tool_call_finished"
+                        && record["name"] == "session.todo_write"
+                        && record["ok"] == json!(true)),
+                "{name} must execute its own Tool batch: {}",
+                outcome.summary()
+            );
+        }
+        assert_eq!(server.captured_requests().len(), 4);
+        evidence.record_captures(server.captured_requests());
+
+        let alpha_fixed = query(&world, &budget, &mut evidence, alpha.session_id(), FIRST);
+        let beta_fixed = query(&world, &budget, &mut evidence, beta.session_id(), FIRST);
+        assert_eq!(
+            alpha_fixed[0]["view"]["requested_turn"]["state"],
+            "committed"
+        );
+        assert_eq!(
+            beta_fixed[0]["view"]["requested_turn"]["state"],
+            "committed"
+        );
+        let alpha_commit = alpha_fixed[0]["view"]["requested_turn"]["commit_id"].clone();
+        let beta_commit = beta_fixed[0]["view"]["requested_turn"]["commit_id"].clone();
+        assert_ne!(alpha_commit, beta_commit, "每个 Session 有自己的提交");
+        assert!(
+            alpha_fixed
+                .iter()
+                .any(|record| record.to_string().contains("alpha prompt"))
+        );
+        assert!(
+            beta_fixed
+                .iter()
+                .any(|record| record.to_string().contains("beta prompt"))
+        );
+        assert!(
+            !alpha_fixed
+                .iter()
+                .any(|record| record.to_string().contains("beta prompt"))
+        );
+        assert!(
+            !beta_fixed
+                .iter()
+                .any(|record| record.to_string().contains("alpha prompt"))
+        );
+        for sid in [alpha.session_id(), beta.session_id()] {
+            let log = run(
+                &world,
+                &budget,
+                &mut evidence,
+                &["--json", "session", "log", sid],
+            );
+            assert!(log.is_clean_exit(0));
+            let log: Value = serde_json::from_slice(&log.stdout).unwrap();
+            let turns = log["turns"].as_array().unwrap();
+            assert_eq!(turns.len(), 1, "{log}");
+            assert_eq!(turns[0]["turn_id"], json!(FIRST));
+        }
+        world.stop_daemon().expect("normal daemon cleanup");
     }));
     finish(evidence, result);
 }

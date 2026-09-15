@@ -144,11 +144,13 @@ fn timeout_error(operation: &'static str, duration: Duration) -> ServeError {
 #[derive(Clone)]
 pub struct ResponseGate {
     state: Arc<(Mutex<GateState>, Condvar)>,
+    /// 分段交付共用一个场景期限；普通整份响应 gate 保持原生命周期。
+    segment_deadline: Option<Instant>,
 }
 
 #[derive(Default)]
 struct GateState {
-    released: bool,
+    released_through: usize,
     cancelled: bool,
     stalled: usize,
     departed: usize,
@@ -179,13 +181,29 @@ impl ResponseGate {
     }
 
     pub fn release(&self, timeout: Duration) -> Result<(), ServeError> {
+        self.release_through(true, timeout)
+    }
+
+    /// 只放行下一帧 SSE，并等待处理线程越过该 gate；不会顺带放行终态。
+    pub fn release_next(&self, timeout: Duration) -> Result<(), ServeError> {
+        self.release_through(false, timeout)
+    }
+
+    fn release_through(&self, all: bool, timeout: Duration) -> Result<(), ServeError> {
         let deadline = Instant::now() + timeout;
         let (lock, wake) = &*self.state;
         let mut state = lock.lock().unwrap();
-        let target = state.stalled;
-        state.released = true;
+        let target = if all {
+            state.stalled
+        } else {
+            state.departed + 1
+        };
+        state.released_through = if all { usize::MAX } else { target };
         wake.notify_all();
         while state.departed < target {
+            if state.cancelled {
+                return Err(ServeError::ThreadFailure("response gate cancelled".into()));
+            }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Err(timeout_error("fake-provider response release", timeout));
@@ -205,18 +223,31 @@ impl ResponseGate {
         wake.notify_all();
     }
 
-    fn wait(&self) -> bool {
+    fn wait(&self) -> Result<bool, ServeError> {
         let (lock, wake) = &*self.state;
         let mut state = lock.lock().unwrap();
         state.stalled += 1;
+        let ticket = state.stalled;
         wake.notify_all();
-        while !state.released && !state.cancelled {
-            state = wake.wait(state).unwrap();
+        while state.released_through < ticket && !state.cancelled {
+            state = if let Some(deadline) = self.segment_deadline {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    state.cancelled = true;
+                    wake.notify_all();
+                    return Err(ServeError::ThreadFailure(
+                        "fake-provider segment delivery deadline elapsed".into(),
+                    ));
+                }
+                wake.wait_timeout(state, remaining).unwrap().0
+            } else {
+                wake.wait(state).unwrap()
+            };
         }
-        let released = state.released;
+        let released = !state.cancelled;
         state.departed += 1;
         wake.notify_all();
-        released
+        Ok(released)
     }
 }
 
@@ -265,8 +296,24 @@ impl FakeLlmServer {
     }
 
     pub fn start_gated(script: SseScript) -> Result<(Self, ResponseGate), ServeError> {
+        Self::start_controlled(script, None)
+    }
+
+    /// 每帧 SSE 单独放行；全部交付受同一绝对期限约束，shutdown/Drop 仍取消 gate。
+    pub fn start_segmented(
+        script: SseScript,
+        timeout: Duration,
+    ) -> Result<(Self, ResponseGate), ServeError> {
+        Self::start_controlled(script, Some(Instant::now() + timeout))
+    }
+
+    fn start_controlled(
+        script: SseScript,
+        segment_deadline: Option<Instant>,
+    ) -> Result<(Self, ResponseGate), ServeError> {
         let gate = ResponseGate {
             state: Arc::new((Mutex::new(GateState::default()), Condvar::new())),
+            segment_deadline,
         };
         let server = Self::start_inner(script, Some(gate.clone()), None)?;
         Ok((server, gate))
@@ -648,7 +695,10 @@ fn parse_decimal_length(bytes: &[u8]) -> Option<usize> {
     })
 }
 
-fn read_http_request(stream: &mut TcpStream, expected_authorization: Option<&[u8]>) -> Result<String, RequestReadError> {
+fn read_http_request(
+    stream: &mut TcpStream,
+    expected_authorization: Option<&[u8]>,
+) -> Result<String, RequestReadError> {
     let header = read_request_header(stream)?;
     let mut lines = header[..header.len() - 2].split(|byte| *byte == b'\n');
     let request_line = lines
@@ -819,8 +869,10 @@ fn handle_request(
     if let Some(path) = request_log {
         append_fsynced(path, b"request\n")?;
     }
-    if let Some(gate) = gate
-        && !gate.wait()
+    let segmented = gate.is_some_and(|gate| gate.segment_deadline.is_some());
+    if !segmented
+        && let Some(gate) = gate
+        && !gate.wait()?
     {
         return Ok(());
     }
@@ -835,16 +887,38 @@ fn handle_request(
         .map_err(ServeError::Io);
     }
     let sse = render_script(&active);
-    let response = format!(
+    if !segmented {
+        // 原整份响应路径保持一次写入；分段控制不改变其他场景的交付方式。
+        let response = format!(
+            "HTTP/1.1 200 OK\r\n\
+             Content-Type: text/event-stream\r\n\
+             Cache-Control: no-cache\r\n\
+             Connection: close\r\n\
+             \r\n\
+             {sse}"
+        );
+        stream.write_all(response.as_bytes())?;
+        stream.flush()?;
+        return Ok(());
+    }
+    write!(
+        stream,
         "HTTP/1.1 200 OK\r\n\
          Content-Type: text/event-stream\r\n\
          Cache-Control: no-cache\r\n\
-         Connection: close\r\n\
-         \r\n\
-         {sse}"
-    );
-    stream.write_all(response.as_bytes())?;
-    stream.flush()?;
+         Content-Length: {}\r\n\
+         Connection: close\r\n\r\n",
+        sse.len()
+    )?;
+    for frame in sse.split_inclusive("\n\n") {
+        if let Some(gate) = gate
+            && !gate.wait()?
+        {
+            return Ok(());
+        }
+        stream.write_all(frame.as_bytes())?;
+        stream.flush()?;
+    }
     Ok(())
 }
 
@@ -1256,8 +1330,13 @@ mod tests {
     fn expected_api_key_rejects_foreign_credentials_without_capturing_them() {
         let mut server = FakeLlmServer::start(SseScript::plain("ok")).unwrap();
         server.expect_api_key("expected-fixture-key");
-        for (key, status) in [("foreign-fixture-key", "401"), ("expected-fixture-key", "200")] {
-            let request = format!("POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\nAuthorization: Bearer {key}\r\n\r\n{{}}");
+        for (key, status) in [
+            ("foreign-fixture-key", "401"),
+            ("expected-fixture-key", "200"),
+        ] {
+            let request = format!(
+                "POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\nAuthorization: Bearer {key}\r\n\r\n{{}}"
+            );
             let response = exchange_raw(server.local_addr(), request.as_bytes());
             assert!(response.starts_with(format!("HTTP/1.1 {status}").as_bytes()));
             assert!(!String::from_utf8_lossy(&response).contains(key));
@@ -1586,6 +1665,89 @@ mod tests {
             "shutdown stored a thread failure: {:?}",
             state.first_failure
         );
+    }
+
+    #[test]
+    fn segmented_response_delivers_only_released_frames_and_cancels_cleanly() {
+        use std::io::{BufRead, BufReader};
+        for cancel in [false, true] {
+            let script = SseScript::PlainText {
+                chunks: vec!["old-token".into(), "新-token".into()],
+                finish_reason: "stop".into(),
+            };
+            let expected = render_script(&script);
+            let (mut server, gate) =
+                FakeLlmServer::start_segmented(script, Duration::from_secs(5)).unwrap();
+            let mut stream = TcpStream::connect(server.local_addr()).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            stream.write_all(b"POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}").unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut headers = String::new();
+            loop {
+                let mut line = String::new();
+                assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+                headers.push_str(&line);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            assert!(headers.contains(&format!("Content-Length: {}\r\n", expected.len())));
+            for (index, token) in ["old-token", "新-token"].into_iter().enumerate() {
+                gate.wait_until_stalled(index + 1, Duration::from_secs(2))
+                    .unwrap();
+                reader.get_mut().set_nonblocking(true).unwrap();
+                let error = reader.read(&mut [0u8; 1]).unwrap_err();
+                assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+                reader.get_mut().set_nonblocking(false).unwrap();
+                gate.release_next(Duration::from_secs(2)).unwrap();
+                let mut frame = String::new();
+                reader.read_line(&mut frame).unwrap();
+                assert!(frame.contains(token) && !frame.contains("\"finish_reason\":\"stop\""));
+                let mut separator = String::new();
+                reader.read_line(&mut separator).unwrap();
+                assert_eq!(separator, "\n");
+            }
+            gate.wait_until_stalled(3, Duration::from_secs(2)).unwrap();
+            if cancel {
+                server.shutdown(Duration::from_secs(2)).unwrap();
+            } else {
+                gate.release(Duration::from_secs(2)).unwrap();
+            }
+            let mut terminal = String::new();
+            reader.read_to_string(&mut terminal).unwrap();
+            if cancel {
+                assert!(
+                    terminal.is_empty(),
+                    "shutdown must not deliver terminal frames"
+                );
+            } else {
+                assert!(
+                    terminal.contains("\"finish_reason\":\"stop\"")
+                        && terminal.ends_with("data: [DONE]\n\n")
+                );
+                server.shutdown(Duration::from_secs(2)).unwrap();
+            }
+            assert_eq!(server.captured_requests().len(), 1);
+            assert!(server.handlers.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn segmented_delivery_deadline_fails_and_joins_without_release() {
+        let (mut server, gate) =
+            FakeLlmServer::start_segmented(SseScript::plain("withheld"), Duration::ZERO).unwrap();
+        let response = request_in_thread(server.local_addr());
+        let bytes = response
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        assert!(!String::from_utf8(bytes).unwrap().contains("withheld"));
+        assert!(gate.release_next(Duration::from_secs(2)).is_err());
+        let error = server.shutdown(Duration::from_secs(2)).unwrap_err();
+        assert!(error.to_string().contains("segment"));
+        assert!(server.handlers.lock().unwrap().is_empty());
     }
 
     #[test]
