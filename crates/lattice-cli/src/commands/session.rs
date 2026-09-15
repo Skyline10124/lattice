@@ -153,6 +153,7 @@ pub enum SessionAction {
         follow: bool,
     },
     /// 明确取消指定 Turn；确认接管不等于已持久 Cancelled。
+    /// 未接管只描述后台的判定点，不表示没有后台工作；请另行查询原 Turn。
     Cancel {
         session_id: String,
         #[arg(value_parser = parse_turn_id)]
@@ -206,6 +207,16 @@ pub async fn run(
                 "{}",
                 serde_json::json!({"type": if owned { "cancel_acknowledged" } else { "cancel_not_owned" }, "session_id":session.session_id, "turn_id":turn_id, "owned":owned})
             );
+            if !json {
+                eprintln!(
+                    "{}",
+                    if owned {
+                        "后台已接管当前操作的取消；持久终态仍待查询"
+                    } else {
+                        "后台在判定点未接管本次取消；不代表没有后台工作，请查询原 Turn"
+                    }
+                );
+            }
         }
         SessionAction::Recover { session_id } => {
             let session = api.open_session(&session_id).await?;
@@ -841,6 +852,21 @@ mod session_cli {
         let mut full_args = vec!["session"];
         full_args.extend_from_slice(args);
         TestCli::try_parse_from(full_args).map(|cli| cli.action)
+    }
+
+    #[test]
+    fn cancel_help_limits_not_taken_to_the_decision_point() {
+        use clap::CommandFactory;
+        let mut command = TestCli::command();
+        let cancel = command.find_subcommand_mut("cancel").unwrap();
+        let help = cancel.render_long_help().to_string();
+        assert!(help.contains("不表示没有后台工作"));
+        assert!(help.contains("不等于已持久 Cancelled"));
+        let id = "10000000-0000-4000-8000-000000000001";
+        assert!(matches!(try_parse(&["cancel", "session-id", id]).unwrap(),
+            SessionAction::Cancel { session_id, turn_id }
+                if session_id == "session-id" && turn_id.to_string() == id));
+        assert!(try_parse(&["cancel", "session-id", "invalid"]).is_err());
     }
 
     #[test]

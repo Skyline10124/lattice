@@ -10,15 +10,20 @@ use colored::Colorize;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
 use std::time::Duration;
+#[cfg(test)]
 use tokio::time;
 
 use lattice_api::local::{
-    Acceptance, FrozenConfiguration, LocalClient, LocalErrorKind, Observation, SessionObservation,
-    TurnId, TurnObservation, TurnRequest,
+    Acceptance, CancelStatus, ConnectionStatus, FrozenConfiguration, HistoryReadError,
+    HistoryScope, LocalClient, LocalErrorKind, LocalHistory, LocalState, LocalTurn, LocalUpdate,
+    NotSubmittedStage, ObservationPhase, ResetReason, SessionObservation, TextAction, TurnId,
+    TurnObservation, TurnRequest,
 };
 use lattice_api::{LoadedAgentProfile, TurnEvent, TurnOutcome, TurnUsageSummary};
 
+#[cfg(test)]
 pub(crate) use lattice_api::STREAM_IDLE_TIMEOUT_SECS as STREAM_TIMEOUT_SECS;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TerminalSignal {
@@ -415,31 +420,11 @@ pub async fn run_session_prompt(
         workspace: root.canonical_path().into(),
         input: prompt,
     };
-    let mut control = SubmitControl {
-        api,
-        session_id: &session.session_id,
-        turn_id,
-        sigint: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?,
-        intent: CancelIntent::None,
-        cancel: None,
-        json,
-    };
-    let mut submission = control
-        .await_receipt(async {
-            api.lookup_or_recover(request.clone())
-                .await
-                .map_err(submission_error)
-        })
-        .await?;
-    if let SubmitOutcome::Receipt(Acceptance::NeedsConfiguration) = submission {
-        if control.intent != CancelIntent::None {
-            // 中断后请求尚未接受：不再静默发起配置提交，也不自动重发已放弃的请求。
-            control.settle().await;
-            submission_state(&session.session_id, turn_id, "not_accepted", json);
-            return Ok(std::process::ExitCode::from(1));
-        }
-        let name = session.active_agent_name.clone();
-        let load = tokio::task::spawn_blocking(move || {
+    let sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let session_id = session.session_id.clone();
+    let turn = api.start_turn_with(request, HistoryScope::SelectedTurn, move || async move {
+        tokio::task::spawn_blocking(move || {
+            let name = session.active_agent_name;
             let loaded = load_named_profile(&name, root.canonical_path())
                 .map_err(|_| lattice_api::ApiError::BadRequest("invalid profile".into()))?;
             if loaded.profile.agent.name != name {
@@ -448,182 +433,11 @@ pub async fn run_session_prompt(
                 );
             }
             FrozenConfiguration::from_env(loaded, &root)
-        });
-        let configuration = tokio::select! {
-            loaded = load => loaded??,
-            _ = control.sigint.recv() => {
-                // 配置尚未冻结，请求从未发出；不代用户重发。
-                submission_state(&session.session_id, turn_id, "not_sent", json);
-                return Ok(std::process::ExitCode::from(1));
-            }
-        };
-        submission = control
-            .await_receipt(async {
-                api.submit(request, Some(configuration))
-                    .await
-                    .map_err(submission_error)
-            })
-            .await?;
-    }
-    let acceptance = match submission {
-        SubmitOutcome::Receipt(acceptance) => acceptance,
-        SubmitOutcome::Interrupted => {
-            // 第二次 Ctrl+C 只结束等待；后台仍可能接受同一请求，因此原身份与未确认的取消都要可见。
-            control.settle().await;
-            submission_state(&session.session_id, turn_id, "unknown", json);
-            if control.intent == CancelIntent::Pending {
-                unconfirmed_cancel_notice(&session.session_id, turn_id, json);
-            }
-            return Ok(std::process::ExitCode::from(1));
-        }
-        SubmitOutcome::Unknown => {
-            // 有界等待到期：转入同一 TurnId 的观察，出现 live 所有者时再补发取消。
-            control.settle().await;
-            submission_state(&session.session_id, turn_id, "unknown", json);
-            return observe_with_signal(
-                api,
-                &session.session_id,
-                turn_id,
-                verbose,
-                json,
-                control.sigint,
-                control.intent,
-            )
-            .await;
-        }
-    };
-    if json {
-        println!(
-            "{}",
-            serde_json::json!({"type":"acceptance", "session_id":session.session_id, "result":acceptance})
-        );
-    }
-    if !json {
-        let message = match &acceptance {
-            Acceptance::Accepted { .. } => "已确认接受",
-            Acceptance::Existing { .. } => "找回既有请求；未重复执行",
-            Acceptance::Recovered { .. } => "旧 Turn 已恢复关闭；本次新 prompt 未接受",
-            Acceptance::ConfirmationUnknown { .. } => "接受确认未知；保留同一 TurnId 查询或重试",
-            Acceptance::NeedsConfiguration => "尚未接受",
-        };
-        eprintln!("{message}");
-    }
-    let selected = match acceptance {
-        Acceptance::Accepted { turn_id } | Acceptance::ConfirmationUnknown { turn_id } => {
-            control.confirm_live().await;
-            turn_id
-        }
-        Acceptance::Existing {
-            turn: TurnObservation::Pending(turn),
-        } => {
-            control.confirm_live().await;
-            turn.turn_id
-        }
-        Acceptance::Existing {
-            turn: TurnObservation::Committed(turn),
-        }
-        | Acceptance::Recovered { turn } => {
-            // 本次请求已关闭或未被接受：取消意图没有对象，也不得扩散到恢复的旧 Turn。
-            control.settle().await;
-            if control.intent != CancelIntent::None {
-                control.intent = CancelIntent::Moot;
-            }
-            turn.turn_id
-        }
-        Acceptance::NeedsConfiguration => {
-            anyhow::bail!("backend did not accept frozen configuration")
-        }
-    };
-    observe_with_signal(
-        api,
-        &session.session_id,
-        selected,
-        verbose,
-        json,
-        control.sigint,
-        control.intent,
-    )
-    .await
-}
-
-/// SIGINT 后仍等待提交回执的上限；到期后转入同一 TurnId 的观察而不是无界挂起。
-const SUBMIT_RECEIPT_GRACE_SECS: u64 = 5;
-
-enum SubmitOutcome {
-    Receipt(Acceptance),
-    /// 第二次 Ctrl+C：用户要求退出，提交结果仍未知。
-    Interrupted,
-    /// 有界等待到期，提交结果仍未知。
-    Unknown,
-}
-
-/// 提交阶段的控制状态：取消意图与在途取消回执都绑定原 TurnId，不随提交 future 丢弃而丢失。
-struct SubmitControl<'a> {
-    api: &'a LocalClient,
-    session_id: &'a str,
-    turn_id: TurnId,
-    sigint: tokio::signal::unix::Signal,
-    intent: CancelIntent,
-    cancel: Option<CancelTask>,
-    json: bool,
-}
-
-impl SubmitControl<'_> {
-    /// 在途提交与 SIGINT 同时轮询：中断只登记同 TurnId 的取消意图并有界等待回执，
-    /// 不丢弃提交 future（后台可能已登记同一身份，丢弃只会让回执丢失），也不另分配身份。
-    async fn await_receipt(
-        &mut self,
-        submit: impl std::future::Future<Output = Result<Acceptance>>,
-    ) -> Result<SubmitOutcome> {
-        tokio::pin!(submit);
-        let mut deadline: Option<time::Instant> = None;
-        loop {
-            tokio::select! {
-                result = &mut submit => return Ok(SubmitOutcome::Receipt(result?)),
-                _ = self.sigint.recv() => {
-                    if self.intent != CancelIntent::None {
-                        return Ok(SubmitOutcome::Interrupted);
-                    }
-                    self.intent = CancelIntent::Pending;
-                    connection_notice("interrupt received; cancelling the same TurnId and waiting for the submission receipt", self.json);
-                    self.cancel = Some(spawn_cancel(self.api, self.session_id, self.turn_id));
-                    deadline = Some(time::Instant::now() + Duration::from_secs(SUBMIT_RECEIPT_GRACE_SECS));
-                }
-                receipt = async { self.cancel.as_mut().expect("guarded cancel").await }, if self.cancel.is_some() => {
-                    self.cancel = None;
-                    if render_cancel(receipt, self.json) {
-                        self.intent = CancelIntent::Confirmed;
-                    }
-                }
-                _ = async { time::sleep_until(deadline.expect("guarded deadline")).await }, if deadline.is_some() => {
-                    return Ok(SubmitOutcome::Unknown);
-                }
-            }
-        }
-    }
-
-    /// 有界等待在途取消回执；未知不伪报成功。
-    async fn settle(&mut self) {
-        if let Some(task) = self.cancel.take()
-            && await_cancel(task, self.json).await
-        {
-            self.intent = CancelIntent::Confirmed;
-        }
-    }
-
-    /// 回执表明本 TurnId 已接受或仍 pending：先前的取消若未确认（可能早于所有者登记），对同一身份再取消一次。
-    async fn confirm_live(&mut self) {
-        self.settle().await;
-        if self.intent == CancelIntent::Pending
-            && await_cancel(
-                spawn_cancel(self.api, self.session_id, self.turn_id),
-                self.json,
-            )
-            .await
-        {
-            self.intent = CancelIntent::Confirmed;
-        }
-    }
+        })
+        .await
+        .map_err(|_| lattice_api::ApiError::Internal("configuration worker failed".into()))?
+    });
+    observe_with_signal(turn, &session_id, true, verbose, json, sigint).await
 }
 
 /// 提交结束于接受之外的状态：原身份必须可见，供用户用同一 TurnId 查询或重试，不自动重发。
@@ -636,8 +450,8 @@ fn submission_state(session_id: &str, turn_id: TurnId, state: &str, json: bool) 
         );
     } else {
         let message = match state {
-            "not_sent" => "请求未发送：配置冻结前已中断，未执行",
-            "not_accepted" => "请求未接受：中断后不再提交配置，未执行",
+            "not_sent" => "本客户端未发送后续配置：配置冻结时已中断；原 Turn 的后台状态请另行查询",
+            "not_accepted" => "本客户端不再提交配置；不代表原 Turn 未被其他连接接受",
             _ => "提交结果未知：后台可能仍接受同一请求，请用同一 TurnId 查询",
         };
         let _ = writeln!(
@@ -662,204 +476,243 @@ pub async fn observe_turn(
         return Ok(std::process::ExitCode::SUCCESS);
     }
     let sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-    observe_with_signal(
-        api,
-        session_id,
-        turn_id,
-        verbose,
-        json,
-        sigint,
-        CancelIntent::None,
-    )
-    .await
+    let turn = api.observe(session_id.into(), Some(turn_id), HistoryScope::SelectedTurn);
+    observe_with_signal(turn, session_id, false, verbose, json, sigint).await
 }
 
-/// 取消意图与提交绑定同一 TurnId；Pending 表示已请求但后台尚未确认接管，退出前必须可见报告；
-/// Moot 表示本请求未接受或已关闭，意图无对象，不得扩散到恢复出的旧 Turn。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CancelIntent {
-    None,
-    Pending,
-    Confirmed,
-    Moot,
-}
-
-type CancelTask = tokio::task::JoinHandle<lattice_api::local::Result<bool>>;
-
-fn spawn_cancel(api: &LocalClient, session_id: &str, turn_id: TurnId) -> CancelTask {
-    let client = api.clone();
-    let id = session_id.to_owned();
-    tokio::spawn(async move { client.cancel(&id, turn_id).await })
-}
-
-/// 有界等待取消回执并渲染；返回后台是否确认接管，超时与错误都不算确认。
-async fn await_cancel(task: CancelTask, json: bool) -> bool {
-    match time::timeout(Duration::from_secs(5), task).await {
-        Ok(receipt) => render_cancel(receipt, json),
-        Err(_) => {
-            connection_notice("cancel acknowledgement unknown", json);
-            false
-        }
-    }
-}
-
+/// CLI 只保留显示与退出选择；提交握手、取消交接和正文退场均由 LocalTurn 推进。
 async fn observe_with_signal(
-    api: &LocalClient,
+    mut turn: LocalTurn,
     session_id: &str,
-    turn_id: TurnId,
+    submitting: bool,
     verbose: bool,
     json: bool,
     mut sigint: tokio::signal::unix::Signal,
-    mut intent: CancelIntent,
 ) -> Result<std::process::ExitCode> {
-    let mut stream = api.subscribe(session_id, turn_id, None).await?;
-    let mut state = RunRenderState::default();
-    let mut cancel: Option<CancelTask> = None;
-    let mut body: Option<BodyRead> = None;
-    // 固定终态或完成回执处理后只剩正文读取；流不再轮询，已知完成不会被改写成未知。
-    let mut closing: Option<std::process::ExitCode> = None;
-    let mut terminal_known = false;
+    let mut render = RunRenderState::default();
+    let mut awaiting_submission = submitting;
+    let mut submission_unknown = false;
+    let mut interrupted = false;
+    let mut closing = None;
+    let mut history_ready = false;
+    let mut completion_known = false;
     let mut body_failed = false;
-    let mut deadline = time::Instant::now() + Duration::from_secs(STREAM_TIMEOUT_SECS);
+    let mut last_state = None;
+    let mut last_cancel = None;
+    let mut last_cancel_error = None;
+    let mut last_history_error = None;
+    let mut last_submission_diagnostic = None;
+    let mut not_submitted = false;
     let result = async {
-    let exit = loop {
-        if let (Some(exit), None) = (closing, &body) {
-            break exit;
-        }
-        tokio::select! {
-            _ = sigint.recv() => {
-                if let Some(exit) = closing {
-                    // 终态已固定，中断只放弃正文读取，不再对已结束的 Turn 发取消。
-                    body = None;
-                    body_failed = true;
-                    connection_notice("transcript read interrupted; fixed result above stands; reconnect to read the transcript", json);
-                    break exit;
-                }
-                if intent != CancelIntent::None {
-                    break std::process::ExitCode::from(1);
-                }
-                intent = CancelIntent::Pending;
-                cancel = Some(spawn_cancel(api, session_id, turn_id));
+        loop {
+            if (!awaiting_submission || completion_known) && history_ready && let Some(exit) = closing {
+                break Ok(exit);
             }
-            receipt = async { cancel.as_mut().expect("guarded cancel").await }, if cancel.is_some() => {
-                cancel = None;
-                if render_cancel(receipt, json) {
-                    intent = CancelIntent::Confirmed;
-                }
-            }
-            messages = async { (&mut body.as_mut().expect("guarded body").task).await }, if body.is_some() => {
-                let read = body.take().expect("guarded body");
-                deadline = time::Instant::now() + Duration::from_secs(STREAM_TIMEOUT_SECS);
-                match messages {
-                    Ok(Ok(messages)) => render_messages(&read.object_id, read.status, messages, json)?,
-                    Ok(Err(error)) => {
-                        body_failed = true;
-                        body_failure_notice(&read, closing.is_some(), json);
-                        report_error(&error.into(), json);
+            tokio::select! {
+                _ = sigint.recv() => {
+                    if closing.is_some() && (!awaiting_submission || completion_known) {
+                        body_failed |= !history_ready;
+                        connection_notice("transcript read interrupted; fixed result above stands; reconnect to read the transcript", json);
+                        break Ok(std::process::ExitCode::from(1));
                     }
-                    Err(_) => {
-                        body_failed = true;
-                        body_failure_notice(&read, closing.is_some(), json);
-                    }
+                    if interrupted { break Ok(std::process::ExitCode::from(1)); }
+                    interrupted = true;
+                    turn.cancel();
                 }
-            }
-            next = stream.next(), if closing.is_none() => {
-                deadline = time::Instant::now() + Duration::from_secs(STREAM_TIMEOUT_SECS);
-                let observation = match next {
-                    Ok(Some(observation)) => observation,
-                    Ok(None) => { connection_notice("observation ended; execution state unknown", json); break std::process::ExitCode::from(1); }
-                    Err(error) => { report_error(&error.into(), json); break std::process::ExitCode::from(1); }
-                };
-                match observation {
-                    Observation::Event { event, .. } => {
+                update = turn.next() => match update {
+                    Some(LocalUpdate::Submission { result, .. }) => {
+                        awaiting_submission = false;
+                        submission_unknown = false;
+                        let acceptance = result.map_err(submission_error)?;
+                        // 接受前的显示不能结束新观察；库随后给出重固定更新。
+                        closing = None;
+                        history_ready = false;
+                        render_acceptance(session_id, &acceptance, json)?;
+                    }
+                    Some(LocalUpdate::SubmissionUnknown { turn_id, error }) => {
+                        awaiting_submission = false;
+                        submission_unknown = true;
+                        submission_state(session_id, turn_id, "unknown", json);
+                        if let Some(error) = error {
+                            report_error(&error.clone().into(), json);
+                            last_submission_diagnostic = Some(error);
+                        }
+                    }
+                    Some(LocalUpdate::NotSubmitted { .. }) => {
+                        not_submitted = true;
+                        // 只结束本客户端的后续配置；detach 仍保留另一连接的接受/接管事实。
+                        break Ok(std::process::ExitCode::from(1));
+                    }
+                    Some(LocalUpdate::State { view, phase, confirmation, error, .. }) => {
+                        let state = LocalState { view, phase, confirmation, error };
+                        render_local_state(&state, json)?;
+                        // 可读 pin 不结束原提交确认；只有独立完成回执可越过接受等待。
+                        completion_known |= phase == ObservationPhase::Finished;
+                        closing = (phase != ObservationPhase::Live).then(|| {
+                            if state.error.is_some() { std::process::ExitCode::from(1) }
+                            else { durable_exit(&state.view) }
+                        });
+                        history_ready = false;
+                        last_state = Some(state);
+                    }
+                    Some(LocalUpdate::History { result, stale, .. }) => {
+                        match result {
+                            Ok(history) => render_history(*history, json)?,
+                            Err(error) => {
+                                body_failed = true;
+                                render_history_error(&error, json);
+                                last_history_error = Some(error);
+                            }
+                        }
+                        if !stale { history_ready = true; }
+                    }
+                    Some(LocalUpdate::Reset { reason, cursor }) => match reason {
+                        ResetReason::Gap => {
+                            if json { writeln!(std::io::stdout(), "{}", serde_json::json!({"type":"gap", "cursor":cursor}))?; }
+                            else { writeln!(std::io::stderr(), "\n观察存在缺口；以下固定结果替换临时输出，不是逐 token 重放。")?; }
+                        }
+                        ResetReason::Reconnect => { closing = None; history_ready = false; }
+                        ResetReason::Snapshot => {}
+                    },
+                    Some(LocalUpdate::Event { event, text, .. }) => {
+                        if text == TextAction::StartIncomplete {
+                            connection_notice("当前模型段前文可能缺失；以下为新收到的文字后缀", json);
+                        }
                         if json { render_json_event(&event, &mut std::io::stdout())?; }
-                        else { render_human_event(&event, &mut state, &mut std::io::stdout(), &mut std::io::stderr(), verbose)?; }
-                        apply_event_to_state(&event, &mut state);
+                        else { render_human_event(&event, &mut render, &mut std::io::stdout(), &mut std::io::stderr(), verbose)?; }
+                        apply_event_to_state(&event, &mut render);
                         std::io::stdout().flush()?;
                     }
-                    Observation::Gap { cursor } => {
-                        if json { writeln!(std::io::stdout(), "{}", serde_json::json!({"type":"gap", "cursor":cursor}))?; }
-                        else { writeln!(std::io::stderr(), "\n观察存在缺口；以下固定结果替换临时输出，不是逐 token 重放。")?; }
+                    Some(LocalUpdate::Cancel { turn_id, status, error }) => {
+                        render_cancel(status, json);
+                        if let Some(error) = &error { render_cancel_error(session_id, Some(turn_id), error, json); }
+                        last_cancel_error = error;
+                        last_cancel = Some(status);
                     }
-                    Observation::Snapshot { view, owned, .. } => {
-                        render_snapshot(&view, json)?;
-                        // 新视图固定后旧正文任务随句柄中止；迟到的旧正文不再输出，已到达的读取错误仍计入。
-                        if let Some(read) = body.take()
-                            && read.retire(json).await
-                        {
-                            body_failed = true;
+                    Some(LocalUpdate::Connection(status)) => {
+                        match status {
+                            ConnectionStatus::Error(error) => { report_error(&error.into(), json); }
+                            ConnectionStatus::Eof => connection_notice("observation ended; reconnect with the same TurnId", json),
+                            ConnectionStatus::Idle => connection_notice("observation timed out; reconnect with the same TurnId", json),
                         }
-                        body = BodyRead::start(api, &view);
-                        if owned && intent == CancelIntent::Pending && cancel.is_none() {
-                            // 先前的取消可能早于所有者登记；看到真实所有者后只对同一 TurnId 补发一次。
-                            cancel = Some(spawn_cancel(api, session_id, turn_id));
-                        }
-                        if !owned {
-                            terminal_known = matches!(view.requested_turn, Some(TurnObservation::Committed(_)));
-                            closing = Some(durable_exit(&view));
-                        }
+                        // 初始观察可早于提交，接受衔接由库负责；不据此取消提交或另起订阅。
+                        if !awaiting_submission { break Ok(std::process::ExitCode::from(1)); }
                     }
-                    Observation::Finished { view, error, .. } => {
-                        render_snapshot(&view, json)?;
-                        let mut exit = durable_exit(&view);
-                        if let Some(error) = error {
-                            report_error(&error.into(), json);
-                            exit = std::process::ExitCode::from(1);
-                        }
-                        terminal_known = matches!(view.requested_turn, Some(TurnObservation::Committed(_)));
-                        if let Some(read) = body.take()
-                            && read.retire(json).await
-                        {
-                            body_failed = true;
-                        }
-                        body = BodyRead::start(api, &view);
-                        closing = Some(exit);
-                    }
+                    None => break Ok(std::process::ExitCode::from(1)),
                 }
-            }
-            _ = time::sleep_until(deadline) => {
-                if let Some(exit) = closing {
-                    body_failed = true;
-                    connection_notice("fixed transcript read timed out; fixed result above stands; reconnect to read the transcript", json);
-                    break exit;
-                }
-                connection_notice("observation timed out; execution state unknown; reconnect with the same TurnId", json);
-                break std::process::ExitCode::from(1);
             }
         }
-    };
-    // 完成回执只确认执行收尾；正文未取到仍是命令失败，但不抹去上面的固定终态。
-    Ok::<_, anyhow::Error>(if body_failed { std::process::ExitCode::from(1) } else { exit })
     }.await;
-    drop(body);
-    // 第二次 Ctrl+C 只结束观察；已开始的取消发送仍等确认，未知不能伪报成功。
-    if let Some(task) = cancel
-        && await_cancel(task, json).await
+    let report = turn.detach().await;
+    // 仅去重已显示的事实，不用 OID、游标或读取代次控制协议。
+    if let Some(state) = &report.state
+        && last_state.as_ref() != Some(state)
     {
-        intent = CancelIntent::Confirmed;
+        render_local_state(state, json)?;
     }
-    if intent == CancelIntent::Pending && !terminal_known {
-        unconfirmed_cancel_notice(session_id, turn_id, json);
+    if let Some(status) = report.cancel
+        && last_cancel != Some(status)
+    {
+        render_cancel(status, json);
+    }
+    if let Some(error) = &report.cancel_error
+        && last_cancel_error.as_ref() != Some(error)
+    {
+        render_cancel_error(&report.session_id, report.turn_id, error, json);
+    }
+    if let Some(stage) = report.not_submitted {
+        if let Some(id) = report.turn_id {
+            submission_state(
+                &report.session_id,
+                id,
+                match stage {
+                    NotSubmittedStage::NeedsConfiguration => "not_accepted",
+                    NotSubmittedStage::FreezingConfiguration => "not_sent",
+                },
+                json,
+            );
+        }
+    } else if (awaiting_submission || submission_unknown) && !not_submitted {
+        match &report.submission {
+            Some(Ok(acceptance)) => render_acceptance(&report.session_id, acceptance, json)?,
+            Some(Err(error)) => {
+                report_error(&submission_error(error.clone()), json);
+            }
+            None => {
+                if !submission_unknown && let Some(id) = report.turn_id {
+                    submission_state(&report.session_id, id, "unknown", json);
+                }
+            }
+        }
+    }
+    if let Some(error) = report.submission_diagnostic
+        && last_submission_diagnostic.as_ref() != Some(&error)
+    {
+        report_error(&error.into(), json);
+    }
+    if matches!(
+        report.cancel,
+        Some(CancelStatus::Pending | CancelStatus::NotTaken | CancelStatus::Unknown)
+    ) && let Some(id) = report.turn_id
+    {
+        unconfirmed_cancel_notice(&report.session_id, id, json);
+    }
+    if let Some(error) = report.history_error {
+        if last_history_error.as_ref() != Some(&error) {
+            render_history_error(&error, json);
+        }
+        body_failed = true;
     }
     if verbose && !json {
-        render_verbose_epilogue(&state, &mut std::io::stderr())?;
+        render_verbose_epilogue(&render, &mut std::io::stderr())?;
     }
-    result
+    if body_failed || report.state.is_some_and(|state| state.error.is_some()) {
+        Ok(std::process::ExitCode::from(1))
+    } else {
+        result
+    }
 }
 
-fn body_failure_notice(read: &BodyRead, closing: bool, json: bool) {
-    let message = if closing {
-        format!(
-            "completion received; fixed transcript {} unavailable; reconnect to read the result",
-            read.object_id
-        )
+fn render_acceptance(session_id: &str, acceptance: &Acceptance, json: bool) -> Result<()> {
+    if json {
+        writeln!(
+            std::io::stdout(),
+            "{}",
+            serde_json::json!({"type":"acceptance", "session_id":session_id, "result":acceptance})
+        )?;
     } else {
-        format!(
-            "transcript {} ({}) unavailable; observation continues",
-            read.object_id, read.status
-        )
-    };
-    connection_notice(&message, json);
+        let message = match acceptance {
+            Acceptance::Accepted { .. } => "已确认接受",
+            Acceptance::Existing { .. } => "找回既有请求；未重复执行",
+            Acceptance::Recovered { .. } => "旧 Turn 已恢复关闭；本次新 prompt 未接受",
+            Acceptance::ConfirmationUnknown { .. } => "接受确认未知；保留同一 TurnId 查询或重试",
+            Acceptance::NeedsConfiguration => "尚未接受",
+        };
+        writeln!(std::io::stderr(), "{message}")?;
+    }
+    Ok(())
+}
+
+fn render_local_state(state: &LocalState, json: bool) -> Result<()> {
+    render_snapshot(&state.view, json)?;
+    if let Some(error) = &state.error {
+        report_error(&error.clone().into(), json);
+    }
+    Ok(())
+}
+
+fn render_history_error(error: &HistoryReadError, json: bool) {
+    connection_notice(
+        &format!(
+            "fixed transcript unavailable ({:?}); fixed result stands; reconnect to read the transcript",
+            error.context
+        ),
+        json,
+    );
+    report_error(
+        &anyhow::Error::new(error.clone()).context(HistoryFailure),
+        json,
+    );
 }
 
 /// 退出时仍未确认的取消意图必须带原身份可见，供用户用同一 TurnId 查询或再次取消。
@@ -878,13 +731,26 @@ fn unconfirmed_cancel_notice(session_id: &str, turn_id: TurnId, json: bool) {
     }
 }
 
-/// 返回后台是否已接管取消；false 与未知都不是终结，后续仍可能接受同一请求。
-fn render_cancel(
-    receipt: Result<lattice_api::local::Result<bool>, tokio::task::JoinError>,
+fn render_cancel_error(
+    session_id: &str,
+    turn_id: Option<TurnId>,
+    error: &lattice_api::local::LocalError,
     json: bool,
-) -> bool {
-    match receipt {
-        Ok(Ok(true)) => {
+) {
+    connection_notice(
+        &format!(
+            "取消诊断：session {session_id} turn {}",
+            turn_id.map_or_else(|| "未知".into(), |id| id.to_string())
+        ),
+        json,
+    );
+    report_error(&error.clone().into(), json);
+}
+
+/// 返回后台是否已接管取消；false 与未知都不是终结，后续仍可能接受同一请求。
+fn render_cancel(status: CancelStatus, json: bool) {
+    match status {
+        CancelStatus::Taken => {
             if json {
                 let _ = writeln!(
                     std::io::stdout(),
@@ -894,19 +760,13 @@ fn render_cancel(
             } else {
                 let _ = writeln!(std::io::stderr(), "后台已接管取消；持久终态仍待查询");
             }
-            true
         }
-        Ok(Ok(false)) => {
-            connection_notice(
-                "Turn has no live owner yet; cancellation not confirmed; query or recover",
-                json,
-            );
-            false
-        }
-        _ => {
-            connection_notice("cancel acknowledgement unknown", json);
-            false
-        }
+        CancelStatus::NotTaken => connection_notice(
+            "后台在判定点未接管本次取消；不代表没有后台工作，请查询原 Turn",
+            json,
+        ),
+        CancelStatus::Unknown => connection_notice("cancel acknowledgement unknown", json),
+        CancelStatus::Pending | CancelStatus::Moot => {}
     }
 }
 
@@ -933,13 +793,11 @@ fn durable_exit(view: &SessionObservation) -> std::process::ExitCode {
 
 pub async fn render_view(api: &LocalClient, view: &SessionObservation, json: bool) -> Result<()> {
     render_snapshot(view, json)?;
-    if let Some((object_id, status)) = body_target(view) {
-        let messages = api
-            .read_messages(&view.session.session_id, &object_id)
-            .await?;
-        render_messages(&object_id, status, messages, json)?;
-    }
-    Ok(())
+    let history = api
+        .read_history(view, HistoryScope::SelectedTurn)
+        .await
+        .map_err(|error| anyhow::Error::new(error).context(HistoryFailure))?;
+    render_history(history, json)
 }
 
 fn render_snapshot(view: &SessionObservation, json: bool) -> Result<()> {
@@ -963,66 +821,26 @@ fn render_snapshot(view: &SessionObservation, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// 正文按固定对象读取：已提交用 commit，pending 用已验证 journal。
-fn body_target(view: &SessionObservation) -> Option<(String, &'static str)> {
-    match &view.requested_turn {
-        Some(TurnObservation::Committed(turn)) => {
-            Some((turn.commit_id.clone(), outcome_label(&turn.outcome)))
-        }
-        Some(TurnObservation::Pending(turn)) => Some((turn.journal_oid.clone(), "pending")),
-        None => view
-            .active_turn
-            .as_ref()
-            .map(|turn| (turn.journal_oid.clone(), "pending")),
+/// 对已交付历史选择渲染标签，不选择或读取新的固定对象。
+fn render_history(history: LocalHistory, json: bool) -> Result<()> {
+    for entry in history.entries {
+        let (object_id, status) = match &entry.turn {
+            TurnObservation::Committed(turn) => (&turn.commit_id, outcome_label(&turn.outcome)),
+            TurnObservation::Pending(turn) => (&turn.journal_oid, "pending"),
+        };
+        render_messages(object_id, status, entry.messages, json)?;
     }
+    Ok(())
 }
 
 type BodyMessages = Vec<lattice_api::local::NativeMessage<lattice_api::local::BoundToolCall>>;
 
-/// 正文读取独立于控制循环；句柄丢弃即中止旧读取，迟到的旧正文不会覆盖较新的固定视图。
-struct BodyRead {
-    task: tokio::task::JoinHandle<lattice_api::local::Result<BodyMessages>>,
-    object_id: String,
-    status: &'static str,
-}
+#[derive(Debug)]
+struct HistoryFailure;
 
-impl BodyRead {
-    fn start(api: &LocalClient, view: &SessionObservation) -> Option<Self> {
-        let (object_id, status) = body_target(view)?;
-        let client = api.clone();
-        let session_id = view.session.session_id.clone();
-        let target = object_id.clone();
-        let task = tokio::spawn(async move { client.read_messages(&session_id, &target).await });
-        Some(Self {
-            task,
-            object_id,
-            status,
-        })
-    }
-
-    /// 被更新视图替换时只收割已到达的读取错误；已到达的旧正文不再输出，未完成的读取随 Drop 中止。
-    async fn retire(mut self, json: bool) -> bool {
-        if !self.task.is_finished() {
-            return false;
-        }
-        match (&mut self.task).await {
-            Ok(Ok(_)) => false,
-            Ok(Err(error)) => {
-                body_failure_notice(&self, false, json);
-                report_error(&error.into(), json);
-                true
-            }
-            Err(_) => {
-                body_failure_notice(&self, false, json);
-                true
-            }
-        }
-    }
-}
-
-impl Drop for BodyRead {
-    fn drop(&mut self) {
-        self.task.abort();
+impl std::fmt::Display for HistoryFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("fixed history read")
     }
 }
 
@@ -1091,11 +909,17 @@ fn error_record(error: &anyhow::Error) -> (u8, serde_json::Value) {
         .cloned()
         .or_else(|| {
             error
+                .downcast_ref::<HistoryReadError>()
+                .map(|error| error.error.clone())
+        })
+        .or_else(|| {
+            error
                 .downcast_ref::<lattice_api::ApiError>()
                 .cloned()
                 .map(Into::into)
         });
     let code = match local.as_ref().map(|error| error.kind) {
+        _ if error.is::<HistoryFailure>() => 1,
         Some(LocalErrorKind::BadRequest | LocalErrorKind::NotFound) => 2,
         Some(LocalErrorKind::Conflict) if error.is::<Submission>() => 2,
         _ => 1,
