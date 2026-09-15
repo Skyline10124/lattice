@@ -34,7 +34,7 @@ struct Owner {
     done: watch::Sender<Option<Result<()>>>,
     events: broadcast::Sender<crate::turn::SequencedTurnEvent>,
     sequence: AtomicU64,
-    cancel: Arc<AtomicBool>,
+    execution_cancel: Option<Arc<AtomicBool>>,
     // 即使转发观察或准备任务 panic，监督者也必须等待已经接管的核心执行结束。
     core: Mutex<Option<CoreCompletion>>,
     turn: Mutex<Option<OwnedTurn>>,
@@ -49,7 +49,7 @@ impl Owner {
             done: watch::channel(None).0,
             events: broadcast::channel(64).0,
             sequence: AtomicU64::new(0),
-            cancel: Arc::default(),
+            execution_cancel: None,
             core: Mutex::new(None),
             turn: Mutex::new(None),
             verified_turn: Arc::default(),
@@ -86,6 +86,8 @@ struct Backend {
     subscriptions: tokio::sync::Semaphore,
     #[cfg(test)]
     snapshot_gate: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
+    #[cfg(test)]
+    gates: cancellation_tests::Gates,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -123,6 +125,8 @@ impl Backend {
             subscriptions: tokio::sync::Semaphore::new(32),
             #[cfg(test)]
             snapshot_gate: Mutex::new(None),
+            #[cfg(test)]
+            gates: cancellation_tests::Gates::default(),
         })
     }
     fn status(&self) -> DaemonStatus {
@@ -166,6 +170,22 @@ impl Backend {
         })
         .await
     }
+
+    /// 观察端确认入口：按 session+turn 核验固定 pin 下的已关闭 TurnCommit
+    /// 并补足 pending 引用 fsync 屏障。核验与屏障都在短仓库写锁内完成，
+    /// 不取得整个 Session 执行锁，也不发布引用或生成候选；真实存储错误
+    /// 经结构化映射原样上报，不用“缓存空/锁忙”顶替。
+    async fn confirm_committed(&self, session_id: String, turn_id: TurnId) -> Result<()> {
+        let api = self.open().await?;
+        blocking(move || {
+            api.git_store_for_coordinator()?
+                .confirm_committed_turn(&session_id, &turn_id)
+                .map_err(crate::session::map_session_error)
+                .map_err(Into::into)
+        })
+        .await?;
+        Ok(())
+    }
     fn cursor(&self, sequence: u64) -> EventCursor {
         EventCursor {
             epoch: self.epoch.clone(),
@@ -179,7 +199,7 @@ impl Backend {
         identity: Option<TurnRequest>,
         operation: impl FnOnce() -> Request,
     ) -> Result<Arc<Owner>> {
-        let owner = {
+        let (owner, operation) = {
             // 只管理接管权；磁盘、Component 和 provider 工作全部在释放此锁之后进行。
             let mut state = lock(&self.admission);
             if let Some(owner) = state.owners.get(&key) {
@@ -207,11 +227,22 @@ impl Backend {
             if state.owners.len() >= 32 {
                 return Err(busy());
             }
-            let owner = Arc::new(Owner::new(identity));
+            let operation = operation();
+            let mut owner = Owner::new(identity);
+            // 只为实际接管的配置建立取消载体；共享者保留原操作的资格和配置。
+            if matches!(
+                &operation,
+                Request::Submit {
+                    configuration: Some(_),
+                    ..
+                }
+            ) {
+                owner.execution_cancel = Some(Arc::default());
+            }
+            let owner = Arc::new(owner);
             state.owners.insert(key.clone(), owner.clone());
-            owner
+            (owner, operation)
         };
-        let operation = operation();
         let backend = self.clone();
         let task_owner = owner.clone();
         tokio::spawn(async move {
@@ -219,6 +250,8 @@ impl Backend {
                 .catch_unwind()
                 .await
                 .unwrap_or_else(|_| Err(internal()));
+            #[cfg(test)]
+            cancellation_tests::pause(&backend.gates.supervise).await;
             // core receiver 不属于上面的可展开 future，转发 panic 不会遗失排空凭据。
             let completion = lock(&task_owner.core).take();
             let mut final_result = result;
@@ -266,6 +299,8 @@ impl Backend {
                     final_result.clone().err().unwrap_or_else(internal),
                 ));
             }
+            #[cfg(test)]
+            cancellation_tests::pause(&backend.gates.retire).await;
             {
                 let mut state = lock(&backend.admission);
                 if final_result.as_ref().err().is_some_and(|error| {
@@ -388,6 +423,8 @@ impl Backend {
         configuration: Option<Box<super::FrozenConfiguration>>,
         owner: &Owner,
     ) -> Result<()> {
+        #[cfg(test)]
+        cancellation_tests::pause(&self.gates.prepare).await;
         let api = self.open().await?;
         let path = request.workspace.clone();
         let workspace = blocking(move || {
@@ -430,7 +467,7 @@ impl Backend {
                 input: request.input,
                 session_id: request.session_id.clone(),
                 loaded_profile,
-                cancel_flag: Some(owner.cancel.clone()),
+                cancel_flag: owner.execution_cancel.clone(),
                 test_llm: None,
                 test_project_root: None,
             },
@@ -446,6 +483,8 @@ impl Backend {
             ..
         } = execution;
         *lock(&owner.core) = Some((completion, event_sequence.clone()));
+        #[cfg(test)]
+        cancellation_tests::fail_forwarding(&self.gates.forward_panic).await;
         let accepted = acceptance.await.map_err(|_| internal())??;
         let id = match &accepted {
             crate::TurnAcceptance::Accepted { turn_id }
@@ -608,17 +647,27 @@ impl Backend {
                 session_id,
                 turn_id,
             } => {
-                let owner = lock(&self.admission).owners.get(&session_id).cloned();
-                let owned = owner.as_ref().is_some_and(|owner| {
-                    owner
-                        .identity
-                        .as_ref()
-                        .is_some_and(|request| request.turn_id == turn_id)
-                });
-                if owned {
-                    owner.unwrap().cancel.store(true, Ordering::Release);
-                }
-                // 无所有者时仍查询持久状态，但绝不顺带恢复或重新执行。
+                let owned = {
+                    // 在同一准入临界区内接管取消；监督者不能在置位前移除当前操作。
+                    let state = lock(&self.admission);
+                    state
+                        .owners
+                        .get(&session_id)
+                        .filter(|owner| {
+                            owner
+                                .identity
+                                .as_ref()
+                                .is_some_and(|request| request.turn_id == turn_id)
+                        })
+                        .and_then(|owner| owner.execution_cancel.as_ref())
+                        .is_some_and(|cancel| {
+                            #[cfg(test)]
+                            self.gates.pause_cancel_store();
+                            cancel.store(true, Ordering::Release);
+                            true
+                        })
+                };
+                // 未接管时仍查询持久状态，但绝不顺带恢复或重新执行。
                 if !owned {
                     self.query(session_id, Some(turn_id)).await?;
                 }
@@ -661,6 +710,8 @@ impl Backend {
                     {
                         return Ok(response);
                     }
+                    #[cfg(test)]
+                    cancellation_tests::pause(&self.gates.retry).await;
                 }
                 Err(busy())
             }
@@ -752,9 +803,27 @@ impl Backend {
             && (known_completion.is_some()
                 || matches!(view.requested_turn, Some(TurnObservation::Committed(_))))
         {
-            let result = known_completion.unwrap_or_else(|| Err(LocalError::new(
-                LocalErrorKind::StoreUnavailable,
-                "result is visible; durability confirmation unknown; explicitly retry the same request")));
+            let result = if matches!(known_completion, Some(Ok(()))) {
+                Ok(())
+            } else if matches!(view.requested_turn, Some(TurnObservation::Committed(_))) {
+                // 可见的固定 pin 不是确认回执：后台按 session+turn 主动核验并补
+                // 真实引用屏障，不经执行锁也不等待同 Session 其他 Turn 的生命周期；
+                // 无 Owner 的 pending 仍待显式恢复，不经此路径。
+                let confirmed = self.confirm_committed(session_id.clone(), turn_id).await;
+                if confirmed.is_ok() {
+                    // 只有核验通过的固定结果才缓存成功；失败不落缓存，下一次
+                    // 订阅重新核验，旧失败诊断不能永久挡住修复后的屏障。
+                    lock(&self.admission)
+                        .completions
+                        .insert((session_id.clone(), turn_id), Ok(()));
+                }
+                confirmed
+            } else {
+                // 外层条件保证非 Committed 时必有已知完成缓存，且成功缓存已由首分支
+                // 接管，所以这里只可能交付 Owner 退场留下的真实失败；不存在“仅可见”
+                // 的完成状态，也不合成未知确认。
+                known_completion.expect("非 Committed 视图必有已知完成缓存")
+            };
             return ipc::write(
                 stream,
                 &Response::Observation(Observation::Finished {
@@ -908,6 +977,10 @@ pub async fn serve(layout: crate::StateLayout) -> Result<()> {
     blocking(move || instance.cleanup()).await?;
     failure.map_or(Ok(()), Err)
 }
+
+#[cfg(test)]
+#[path = "server_cancel_tests.rs"]
+mod cancellation_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1141,65 +1214,7 @@ mod tests {
         assert!(view.active_turn.is_none());
     }
 
-    #[tokio::test]
-    async fn configured_submit_survives_an_inflight_configuration_probe() {
-        let directory = tempfile::tempdir().unwrap();
-        let backend = Backend::new(crate::StateLayout::in_state_root(directory.path()));
-        let root = crate::LocalWorkspaceRoot::from_path(directory.path()).unwrap();
-        let Response::Session(session) = backend
-            .dispatch(Request::Create {
-                request: crate::CreateSessionRequest {
-                    label: None,
-                    active_agent: "local-test".into(),
-                    project_branch: "main".into(),
-                    project_store_key: root.store_key_hex(),
-                },
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("session")
-        };
-        let request = TurnRequest {
-            session_id: session.session_id.clone(),
-            turn_id: super::super::new_turn_id(),
-            workspace: root.canonical_path().into(),
-            input: "probe race".into(),
-        };
-        let probe = Arc::new(Owner::new(Some(request.clone())));
-        lock(&backend.admission)
-            .owners
-            .insert(session.session_id.clone(), probe.clone());
-        let configuration = super::super::tests::frozen(directory.path(), "http://127.0.0.1:1/v1");
-        let server = backend.clone();
-        let submit = tokio::spawn(async move {
-            server
-                .dispatch(Request::Submit {
-                    request,
-                    configuration: Some(Box::new(configuration)),
-                })
-                .await
-        });
-        // 明确等到正式提交已共享 probe 回执，再释放 probe，不以 sleep 猜测交错。
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while probe.reply.receiver_count() == 0 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        probe.reply(Response::Acceptance(Acceptance::NeedsConfiguration));
-        lock(&backend.admission).owners.remove(&session.session_id);
-        probe.done.send_replace(Some(Ok(())));
-        let response = submit.await.unwrap().unwrap();
-        backend.dispatch(Request::Stop).await.unwrap();
-        assert!(matches!(
-            response,
-            Response::Acceptance(Acceptance::Accepted { .. })
-        ));
-    }
-
-    async fn pending_backend() -> (tempfile::TempDir, Arc<Backend>, TurnRequest) {
+    pub(super) async fn pending_backend() -> (tempfile::TempDir, Arc<Backend>, TurnRequest) {
         let directory = tempfile::tempdir().unwrap();
         let backend = Backend::new(crate::StateLayout::in_state_root(directory.path()));
         let root = crate::LocalWorkspaceRoot::from_path(directory.path()).unwrap();
@@ -1505,7 +1520,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recovery_failure_keeps_verified_old_turn_diagnostics_after_disconnect() {
+    async fn recovery_failure_after_disconnect_follows_the_durable_stage() {
         for independent in [false, true] {
             for after_publish in [false, true] {
                 let (_directory, backend, old) = pending_backend().await;
@@ -1553,6 +1568,19 @@ mod tests {
                     .await
                     .unwrap()
                     .unwrap();
+                // 无配置确认/恢复虽拥有旧 Turn 的观察与诊断，仍不接管新执行取消。
+                for turn_id in [old.turn_id, new.turn_id] {
+                    assert!(matches!(
+                        backend
+                            .dispatch(Request::Cancel {
+                                session_id: old.session_id.clone(),
+                                turn_id,
+                            })
+                            .await
+                            .unwrap(),
+                        Response::Cancelled { owned: false }
+                    ));
+                }
                 let owner = lock(&backend.admission)
                     .owners
                     .get(&old.session_id)
@@ -1619,7 +1647,7 @@ mod tests {
                     })
                 );
                 let error = result.expect_err("injected recovery failure");
-                // IPC 按既有安全边界脱敏底层路径；重订阅须保留这份精确公开错误，不换成旧错误或 unknown。
+                // IPC 按既有安全边界脱敏底层路径；未发布的 pending 重订阅须保留这份精确公开错误，不换成旧错误或 unknown。
                 assert_eq!(
                     error,
                     LocalError::from(crate::ApiError::Internal(String::new()))
@@ -1663,11 +1691,18 @@ mod tests {
                         ..
                     } = observation
                     else {
-                        panic!("known recovery error missing: {observation:?}");
+                        panic!("recovery observation missing: {observation:?}");
+                    };
+                    // 已发布但屏障失败时固定 pin 已经关闭：重订阅先核验固定结果并
+                    // 重做真实引用屏障，注入故障是一次性的，因此这里交付确认；尚未
+                    // 发布的 pending 仍保留精确诊断。
+                    let expected_error = if after_publish {
+                        None
+                    } else {
+                        Some(error.clone())
                     };
                     assert_eq!(
-                        observed_error,
-                        Some(error.clone()),
+                        observed_error, expected_error,
                         "independent={independent}, after_publish={after_publish}"
                     );
                     match view.requested_turn.unwrap() {
@@ -1765,17 +1800,18 @@ mod tests {
             lock(&backend.admission).completions.get(&key),
             Some(&Ok(()))
         );
-        for expected in [
+        // 旧完成缓存（成功或真实失败）都不是权威，冲突请求的错误也不能写入观察
+        // 结果：固定 pin 由后台重新核验，核验通过后交付确认。
+        for cached in [
             Ok(()),
             Err(LocalError::new(
                 LocalErrorKind::StoreUnavailable,
                 "original durability failure",
             )),
         ] {
-            // 完成屏障错误由所属存储层注入验证；这里固定该事实，检验冲突请求不能覆盖它。
             lock(&backend.admission)
                 .completions
-                .insert(key.clone(), expected.clone());
+                .insert(key.clone(), cached.clone());
             let mut conflicting = request.clone();
             conflicting.input = "different input".into();
             let (entered, entry) = oneshot::channel();
@@ -1808,7 +1844,8 @@ mod tests {
             let response = conflict.await.unwrap().unwrap();
             observing.await.unwrap().unwrap();
             assert!(
-                matches!(&during_validation, Observation::Finished { error, .. } if error.as_ref() == expected.as_ref().err()),
+                matches!(&during_validation, Observation::Finished { view, error: None, .. }
+                    if matches!(&view.requested_turn, Some(TurnObservation::Committed(turn)) if turn.turn_id == request.turn_id)),
                 "{during_validation:?}"
             );
             assert!(
@@ -1826,7 +1863,8 @@ mod tests {
             let observation = observe(&mut reader).await;
             task.await.unwrap().unwrap();
             assert!(
-                matches!(&observation, Observation::Finished { error, .. } if error.as_ref() == expected.as_ref().err()),
+                matches!(&observation, Observation::Finished { view, error: None, .. }
+                    if matches!(&view.requested_turn, Some(TurnObservation::Committed(turn)) if turn.turn_id == request.turn_id)),
                 "{observation:?}"
             );
         }
@@ -1834,7 +1872,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn visible_commit_waits_for_the_owned_completion_result() {
+    async fn visible_commit_waits_for_the_owner_then_reverifies_and_confirms() {
         let directory = tempfile::tempdir().unwrap();
         let layout = crate::StateLayout::in_state_root(directory.path());
         let backend = Backend::new(layout);
@@ -1919,8 +1957,8 @@ mod tests {
         ));
         task.await.unwrap().unwrap();
         lock(&backend.admission).owners.clear();
-        // 同一个可见 pin，在 owner 的错误回执退场后仍不能被新订阅当作确认成功。
-        // 与上面的 owner 错误使用同一确认事实；无关请求的拒绝不再充当 Turn 完成。
+        // 只可见的固定 pin 仍不是回执：owner 的错误回执退场后，新订阅重新核验
+        // 固定结果并重做真实引用屏障，核验通过才交付确认；旧错误缓存不永久阻止核验。
         lock(&backend.admission)
             .completions
             .insert((request.session_id.clone(), id), Err(internal()));
@@ -1931,10 +1969,17 @@ mod tests {
             tokio::spawn(async move { server.subscribe(&mut writer, id_string, id, None).await });
         let failure = observe(&mut reader).await;
         task.await.unwrap().unwrap();
-        assert!(matches!(
-            failure,
-            Observation::Finished { error: Some(_), .. }
-        ));
+        assert!(
+            matches!(failure, Observation::Finished { error: None, .. }),
+            "{failure:?}"
+        );
+        assert_eq!(
+            lock(&backend.admission)
+                .completions
+                .get(&(request.session_id.clone(), id)),
+            Some(&Ok(())),
+            "重新核验成功只对应已核验的固定结果"
+        );
         let confirmed = backend
             .dispatch(Request::Submit {
                 request: request.clone(),
@@ -1966,9 +2011,199 @@ mod tests {
         });
         assert!(matches!(
             observe(&mut reader).await,
-            Observation::Finished { error: Some(_), .. }
+            Observation::Finished { error: None, .. }
         ));
         task.await.unwrap().unwrap();
+    }
+
+    /// 真实链路建立一个已关闭 Turn（FakeStreamingLlmClient 走完整提交），
+    /// 作为重启确认与并发观察场景的公共前置。
+    async fn committed_backend() -> (tempfile::TempDir, Arc<Backend>, TurnRequest, String) {
+        let directory = tempfile::tempdir().unwrap();
+        let layout = crate::StateLayout::in_state_root(directory.path());
+        let backend = Backend::new(layout);
+        let root = crate::LocalWorkspaceRoot::from_path(directory.path()).unwrap();
+        let Response::Session(session) = backend
+            .dispatch(Request::Create {
+                request: crate::CreateSessionRequest {
+                    label: None,
+                    active_agent: "test".into(),
+                    project_branch: "main".into(),
+                    project_store_key: root.store_key_hex(),
+                },
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("session")
+        };
+        let path = directory.path().join("agent.toml");
+        std::fs::write(
+            &path,
+            "schema_version=1\n[agent]\nname='test'\nmodel='stub-model'\n[prompt]\nsystem='test'\n",
+        )
+        .unwrap();
+        let id = super::super::new_turn_id();
+        let request = TurnRequest {
+            session_id: session.session_id.clone(),
+            turn_id: id,
+            workspace: root.canonical_path().into(),
+            input: "test".into(),
+        };
+        let llm = lattice_agent::testing::FakeStreamingLlmClient::builder()
+            .push_events(vec![
+                lattice_llm::LlmEvent::Token {
+                    content: "stored".into(),
+                },
+                lattice_llm::LlmEvent::Done {
+                    finish_reason: "stop".into(),
+                    usage: None,
+                },
+            ])
+            .build();
+        let execution = crate::start_turn(
+            backend.open().await.unwrap(),
+            id,
+            root,
+            crate::RunTurnRequest {
+                input: request.input.clone(),
+                session_id: session.session_id.clone(),
+                loaded_profile: Some(crate::load_agent_profile_path(&path).unwrap()),
+                cancel_flag: None,
+                test_llm: Some(Arc::new(llm)),
+                test_project_root: Some(directory.path().to_string_lossy().into()),
+            },
+            None,
+        );
+        execution.acceptance.await.unwrap().unwrap();
+        let crate::TurnCompletion::Committed(commit) = execution.completion.await.unwrap().unwrap()
+        else {
+            panic!("committed turn")
+        };
+        (directory, backend, request, commit.commit_id)
+    }
+
+    #[tokio::test]
+    async fn restarted_backend_confirms_the_fixed_committed_result() {
+        let (_directory, backend, request, commit_id) = committed_backend().await;
+        let session_id = request.session_id.clone();
+        let id = request.turn_id;
+        // 重启等价：新 Backend 的内存完成表为空，固定结果必须由后台自行核验并补屏障。
+        let restarted = Backend::new(backend.layout.clone());
+        for _ in 0..2 {
+            let (mut writer, mut reader) = UnixStream::pair().unwrap();
+            let server = restarted.clone();
+            let observing_session = session_id.clone();
+            let task = tokio::spawn(async move {
+                server
+                    .subscribe(&mut writer, observing_session, id, None)
+                    .await
+            });
+            let observation = observe(&mut reader).await;
+            task.await.unwrap().unwrap();
+            assert!(
+                matches!(
+                    &observation,
+                    Observation::Finished { view, error: None, .. }
+                        if matches!(&view.requested_turn, Some(TurnObservation::Committed(turn))
+                            if turn.turn_id == id && turn.commit_id == commit_id)
+                ),
+                "观察已关闭结果必须取得完成确认：{observation:?}"
+            );
+        }
+        assert_eq!(
+            lock(&restarted.admission)
+                .completions
+                .get(&(session_id, id)),
+            Some(&Ok(())),
+            "成功确认只对应已核验的固定结果"
+        );
+    }
+
+    #[tokio::test]
+    async fn confirming_an_old_result_does_not_wait_on_another_turns_execution() {
+        let (_directory, backend, request, _commit_id) = committed_backend().await;
+        let session_id = request.session_id.clone();
+        let id = request.turn_id;
+        // 同 Session 另一个 Turn 正在执行：注册其 Owner 并真实持有整 Turn 执行锁。
+        let other_id = super::super::new_turn_id();
+        let other = Arc::new(Owner::new(None));
+        *lock(&other.turn) = Some(OwnedTurn {
+            id: other_id,
+            completion: None,
+        });
+        lock(&backend.admission)
+            .owners
+            .insert(session_id.clone(), other.clone());
+        let api = backend.open().await.unwrap();
+        let holder_session = session_id.clone();
+        let (locked, acquired): (_, oneshot::Receiver<()>) = oneshot::channel();
+        let (release, released): (_, oneshot::Receiver<()>) = oneshot::channel();
+        let holder = tokio::task::spawn_blocking(move || {
+            let (_resolved, _guard) = api.lock_execution(&holder_session).unwrap();
+            let _ = locked.send(());
+            let _ = released.blocking_recv();
+        });
+        acquired.await.unwrap();
+        let (mut writer, mut reader) = UnixStream::pair().unwrap();
+        let server = backend.clone();
+        let observing_session = session_id.clone();
+        let task = tokio::spawn(async move {
+            server
+                .subscribe(&mut writer, observing_session, id, None)
+                .await
+        });
+        // 确认旧固定结果不得等待另一 Turn 的生命周期。
+        let observation = tokio::time::timeout(Duration::from_secs(5), observe(&mut reader)).await;
+        let observation = observation.expect("confirmation must not wait on the other turn");
+        assert!(
+            matches!(&observation, Observation::Finished { error: None, .. }),
+            "{observation:?}"
+        );
+        // 另一 Turn 的 Owner 未被关闭、取消或改写。
+        assert!(other.done.borrow().is_none());
+        assert!(other.reply.borrow().is_none());
+        assert!(lock(&backend.admission).owners.contains_key(&session_id));
+        drop(release);
+        holder.await.unwrap();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_stale_failure_completion_does_not_block_reverification() {
+        let (_directory, backend, request, _commit_id) = committed_backend().await;
+        let session_id = request.session_id.clone();
+        let id = request.turn_id;
+        // 旧真实失败诊断（如屏障曾失败）留在完成表；固定 pin 仍是权威，
+        // 后续观察必须重新核验并补屏障，而不是被旧错误永久挡住。
+        lock(&backend.admission).completions.insert(
+            (session_id.clone(), id),
+            Err(LocalError::new(
+                LocalErrorKind::Internal,
+                "finalize barrier failed",
+            )),
+        );
+        let (mut writer, mut reader) = UnixStream::pair().unwrap();
+        let server = backend.clone();
+        let observing_session = session_id.clone();
+        let task = tokio::spawn(async move {
+            server
+                .subscribe(&mut writer, observing_session, id, None)
+                .await
+        });
+        assert!(
+            matches!(
+                observe(&mut reader).await,
+                Observation::Finished { error: None, .. }
+            ),
+            "已修复的固定结果必须重新核验成功"
+        );
+        task.await.unwrap().unwrap();
+        assert_eq!(
+            lock(&backend.admission).completions.get(&(session_id, id)),
+            Some(&Ok(())),
+            "成功缓存只对应已核验的固定结果"
+        );
     }
 
     async fn observe(socket: &mut UnixStream) -> Observation {
