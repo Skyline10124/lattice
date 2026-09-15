@@ -1046,12 +1046,18 @@ fn render_script(script: &SseScript) -> String {
                 }]
             });
             push_data(&mut out, &args);
+            // 为工具调用响应提供使用量，以验证拒绝后的使用量保留，而非只覆盖缺失值。
             let done = serde_json::json!({
                 "id": "chatcmpl-fake",
                 "object": "chat.completion.chunk",
                 "choices": [
                     {"index": 0, "delta": {}, "finish_reason": "tool_calls"}
-                ]
+                ],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2
+                }
             });
             push_data(&mut out, &done);
             out.push_str("data: [DONE]\n\n");
@@ -1108,7 +1114,14 @@ fn render_script(script: &SseScript) -> String {
                 &serde_json::json!({
                     "id": "chatcmpl-fake",
                     "object": "chat.completion.chunk",
-                    "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]
+                    "choices": [
+                        {"index": 0, "delta": {}, "finish_reason": "tool_calls"}
+                    ],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": calls.len() as u64,
+                    "total_tokens": 1 + calls.len() as u64
+                }
                 }),
             );
             out.push_str("data: [DONE]\n\n");
@@ -1202,6 +1215,8 @@ mod tests {
         assert!(sse.contains("\"name\":\"observe__workspace\""));
         assert!(sse.contains("\"arguments\":\"{}\""));
         assert!(sse.contains("\"finish_reason\":\"tool_calls\""));
+        assert!(sse.contains("\"usage\""));
+        assert!(sse.contains("\"total_tokens\":2"));
         assert!(sse.ends_with("data: [DONE]\n\n"));
     }
 

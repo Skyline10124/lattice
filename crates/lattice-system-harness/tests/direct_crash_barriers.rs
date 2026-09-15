@@ -630,6 +630,218 @@ fn interrupted_cancelled_attempt_before_step_closed_recovers_as_cancelled() {
     support::crash::finish(evidence, result);
 }
 
+/// 在 `ModelAttemptRejected` 已持久化、`StepClosed` 尚未发布时终止后台。
+/// 显式恢复应保留同一 Turn 的 `UnknownTool` 失败原因、使用量和此前已提交内容，
+/// 且不重新请求模型或重放工具。
+///
+/// 此处拒绝事实已落盘；与拒绝尚未持久化时的模型请求中断区别处理。
+#[test]
+fn rejected_out_of_catalog_attempt_before_step_closed_recovers_as_failed_unknown_tool() {
+    let driver = driver();
+    let (world, spec) = direct_world(
+        "direct-crash-rejected-outsider",
+        "dl-crash-rejected",
+        "[\"session.todo_write\"]",
+        "",
+    );
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let outside = tempfile::tempdir().expect("external crash-surviving counters");
+        let provider_log = outside.path().join("provider.log");
+        let effect_log = outside.path().join("effects.log");
+        world.set_env(
+            "LATTICE_TEST_TOOL_EFFECT_LOG",
+            effect_log.display().to_string(),
+        );
+        let server = wire_logged_fake_llm(
+            &world,
+            "dl-crash-rejected",
+            sequence(vec![
+                // 先由基线任务保存真实工具结果；崩溃只发生在后续的拒绝尝试中。
+                tool_call(
+                    "provider-private-baseline-call",
+                    "session.todo_write",
+                    r#"{"todos":[{"content":"durable baseline","status":"pending"}]}"#,
+                ),
+                SseScript::plain("baseline complete"),
+                // 目录外名称：整批在分配/分发之前被拒绝。
+                tool_call(
+                    "provider-private-outsider-call",
+                    "fetch.web",
+                    r#"{"url":"https://example.com/"}"#,
+                ),
+            ]),
+            &provider_log,
+        );
+        let send = SessionSendDriver::new(&driver, &world, &spec, "dl-crash-rejected", "main")
+            .expect("session");
+        let baseline_daemon = support::crash::start(&world, &spec, send.budget());
+        let baseline = send.send("baseline").expect("baseline");
+        evidence.record_command("baseline Turn", &baseline.command);
+        assert_clean_send(&baseline).expect("baseline clean");
+        assert!(baseline.command.is_clean_exit(0));
+        assert_eq!(fsynced_count(&effect_log), 1);
+        assert_eq!(fsynced_count(&provider_log), 2);
+        let baseline_commit = baseline
+            .committed_result()
+            .expect("baseline committed result")
+            .1;
+        world.stop_daemon().unwrap();
+        let stopped = baseline_daemon.wait(None).unwrap();
+        evidence.record_command("stop baseline daemon before arming barrier", &stopped);
+        assert!(stopped.is_clean_exit(0));
+
+        let ack = outside.path().join("model-attempt-rejected.json");
+        world.set_env(BARRIER_ENV, "model_attempt_rejected");
+        world.set_env(ACK_ENV, ack.display().to_string());
+        let daemon = support::crash::start(&world, &spec, send.budget());
+        let running = send
+            .spawn("call a Tool outside the enabled catalog")
+            .expect("spawn");
+        let facts = wait_for_ack(&ack, send.budget().cap_timeout(Duration::from_secs(20)));
+        assert_eq!(facts["barrier"], "model_attempt_rejected");
+        let turn_id = facts["turn_id"].as_str().expect("turn id").to_string();
+        assert_eq!(
+            facts
+                .pointer("/snapshot/stage/stage")
+                .and_then(Value::as_str),
+            Some("model_attempt_rejected"),
+            "the crash must follow the durable rejection: {facts}"
+        );
+        assert_eq!(
+            facts
+                .pointer(
+                    "/snapshot/stage/rejection/invalid_tool_call/validation/unknown_tool/call_ordinal"
+                )
+                .and_then(Value::as_u64),
+            Some(0),
+            "the durable rejection must name the outsider ordinal: {facts}"
+        );
+        assert_eq!(
+            facts
+                .pointer("/snapshot/stage/usage/total_tokens")
+                .and_then(Value::as_u64),
+            Some(2),
+            "the durable rejection must carry the attempt usage: {facts}"
+        );
+        assert_eq!(fsynced_count(&provider_log), 3);
+        assert_eq!(
+            fsynced_count(&effect_log),
+            1,
+            "an out-of-catalog batch must not dispatch any Tool"
+        );
+
+        support::crash::kill(&world, daemon, running, &mut evidence, send.budget());
+        world.unset_env(BARRIER_ENV);
+        world.unset_env(ACK_ENV);
+        assert_eq!(active_turn(&send).as_deref(), Some(turn_id.as_str()));
+        assert_eq!(
+            fsynced_count(&provider_log),
+            3,
+            "read-only queries must not call the provider"
+        );
+        let recovery = send
+            .run_command(&["--json", "session", "recover", send.session_id()])
+            .unwrap();
+        evidence.record_command("explicit recovery of the rejected attempt", &recovery);
+        assert!(recovery.is_clean_exit(0), "{}", recovery.summary());
+        assert_eq!(
+            fsynced_count(&provider_log),
+            3,
+            "recovery may not start a provider request"
+        );
+        assert_eq!(
+            fsynced_count(&effect_log),
+            1,
+            "recovery must not redispatch the rejected batch"
+        );
+        assert!(!active_turn_exists(&send));
+
+        let log = send
+            .run_command(&["--json", "session", "log", send.session_id()])
+            .expect("session log");
+        assert!(log.is_clean_exit(0));
+        evidence.record_command("rejected recovery log", &log);
+        let log_json: Value = serde_json::from_slice(&log.stdout).expect("log JSON");
+        let recovered = log_json["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|turn| turn["turn_id"] == json!(turn_id))
+            .expect("exact crashed Turn");
+        assert_eq!(recovered["origin"], "reconciled", "{recovered}");
+        assert_eq!(
+            recovered["outcome"],
+            json!({"failed":{"reason":{"invalid_tool_call":{"validation":{"unknown_tool":{"call_ordinal":0}}}}}}),
+            "a persisted typed rejection must recover as the same Failed reason: {recovered}"
+        );
+        assert_eq!(
+            recovered["usage"],
+            json!({"completion_tokens":1,"prompt_tokens":1,"total_tokens":2}),
+            "the rejected attempt's reported usage must survive the crash: {recovered}"
+        );
+
+        let messages =
+            committed_messages(&send, recovered["commit_id"].as_str().expect("commit id"));
+        assert!(
+            messages.iter().any(|message| message
+                .to_string()
+                .contains("call a Tool outside the enabled catalog")),
+            "the user message must stay in the recovered history: {messages:?}"
+        );
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message["role"] == "tool")
+                .count(),
+            0,
+            "an out-of-catalog batch must not add a Tool message: {messages:?}"
+        );
+        assert!(
+            !messages.iter().any(|message| message
+                .to_string()
+                .contains("provider-private-outsider-call")),
+            "the rejected batch must not enter the transcript: {messages:?}"
+        );
+        // 崩溃前已提交的基线任务仍在同一会话中可读，其正文与工具结果应保持完整。
+        let baseline_turns = log_json["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|turn| turn["commit_id"] == json!(baseline_commit))
+            .count();
+        assert_eq!(
+            baseline_turns, 1,
+            "the committed baseline Turn must stay in the session: {log_json}"
+        );
+        let baseline_turn = log_json["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|turn| turn["commit_id"] == json!(baseline_commit))
+            .expect("baseline Turn");
+        assert!(
+            baseline_turn["outcome"].get("completed").is_some(),
+            "the baseline Turn must stay completed: {baseline_turn}"
+        );
+        let baseline_messages = committed_messages(&send, baseline_commit);
+        assert!(
+            baseline_messages
+                .iter()
+                .any(|message| message.to_string().contains("durable baseline")),
+            "content committed before the crash must stay readable: {baseline_messages:?}"
+        );
+        assert!(
+            baseline_messages
+                .iter()
+                .any(|message| message["role"] == "tool"),
+            "the baseline ToolResult must stay readable: {baseline_messages:?}"
+        );
+        evidence.record_captures(server.captured_requests());
+    }));
+    support::crash::finish(evidence, result);
+}
+
 #[test]
 fn model_and_binding_windows_recover_without_provider_replay() {
     for case in [
