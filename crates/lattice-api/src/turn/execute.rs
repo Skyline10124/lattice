@@ -1,22 +1,27 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use futures::{FutureExt, StreamExt};
+use futures::FutureExt;
+#[cfg(any(test, feature = "test-utils"))]
+use futures::StreamExt;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 
 use super::cep::{ProductionTurnDepsInput, build_production_turn_deps};
+#[cfg(any(test, feature = "test-utils"))]
 use super::collector::RunTurnCollector;
-use super::coordinator::{CoordinatorStoreIo, IdSource, RandomIdSource, TurnCoordinator};
+#[cfg(any(test, feature = "test-utils"))]
+use super::coordinator::IdSource;
+use super::coordinator::{CoordinatorStoreIo, RandomIdSource, TurnCoordinator};
 use super::llm::RealLlmClient;
+#[cfg(any(test, feature = "test-utils"))]
 use super::mapping::resolve_project_root;
 use super::observer::ObserverSink;
-use super::types::{
-    RunTurnRequest, RunTurnResult, TurnAcceptance, TurnCompletion, TurnEvent, TurnEventStream,
-    TurnExecution,
-};
+use super::types::{RunTurnRequest, TurnAcceptance, TurnCompletion, TurnEvent, TurnExecution};
+#[cfg(any(test, feature = "test-utils"))]
+use super::types::{RunTurnResult, TurnEventStream};
 use crate::session::{ApiError, Result, SessionApi};
 
 #[derive(Debug, Clone)]
@@ -324,7 +329,8 @@ async fn execute_owned(
         .loaded_profile
         .as_ref()
         .ok_or_else(|| ApiError::BadRequest("loaded active agent profile is required".into()))?;
-    if request.test_llm.is_none() && connection.is_none() && capture_env {
+    let injected_llm = request.injected_llm();
+    if injected_llm.is_none() && connection.is_none() && capture_env {
         let target = lattice_llm::ModelTarget::new(&loaded.profile.agent.model);
         connection = Some(Arc::new(
             tokio::task::spawn_blocking(move || lattice_llm::LlmConnection::from_env(&target))
@@ -340,9 +346,13 @@ async fn execute_owned(
             "profile model differs from frozen connection".into(),
         ));
     }
-    let llm: Arc<dyn lattice_agent::LlmClient> = match (&request.test_llm, &connection) {
-        (Some(client), _) => client.clone(),
-        (_, Some(connection)) => Arc::new(RealLlmClient(connection.clone())),
+    let (llm, provider): (Arc<dyn lattice_agent::LlmClient>, _) = match (injected_llm, &connection)
+    {
+        (Some((client, provider)), _) => (client, provider),
+        (_, Some(connection)) => (
+            Arc::new(RealLlmClient(connection.clone())),
+            connection.model().provider.clone(),
+        ),
         _ => {
             return Err(ApiError::BadRequest(
                 "frozen provider connection is required".into(),
@@ -371,9 +381,7 @@ async fn execute_owned(
         let session = session.clone();
         let request = request.clone();
         let lock = Arc::clone(&locked.execution_lock);
-        let provider = connection
-            .as_ref()
-            .map(|connection| connection.model().provider.as_str());
+        let provider = provider.as_str();
         tokio::task::spawn_blocking(move || {
             super::live::prepare_live_turn_locked(
                 &session,
@@ -409,6 +417,7 @@ fn committed_event(commit: &lattice_session::TurnCommit) -> TurnEvent {
     }
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 async fn legacy_execution(session: SessionApi, request: RunTurnRequest) -> Result<TurnExecution> {
     let root = resolve_project_root(&request)?;
     let workspace =
@@ -427,7 +436,8 @@ async fn legacy_execution(session: SessionApi, request: RunTurnRequest) -> Resul
     ))
 }
 
-/// 兼容现有同进程前端；仍由同一已接管任务执行，调用者释放流不取消它。
+/// 测试复用同一已接管任务；调用者释放观察流不取消执行。
+#[cfg(any(test, feature = "test-utils"))]
 pub async fn stream_turn(session: SessionApi, request: RunTurnRequest) -> Result<TurnEventStream> {
     let execution = legacy_execution(session, request).await?;
     let acceptance = execution
@@ -443,6 +453,7 @@ pub async fn stream_turn(session: SessionApi, request: RunTurnRequest) -> Result
 }
 
 /// 收集同一 live 核心；完成结果独立于末尾事件是否投递成功。
+#[cfg(any(test, feature = "test-utils"))]
 pub async fn run_turn(session: SessionApi, request: RunTurnRequest) -> Result<RunTurnResult> {
     let execution = legacy_execution(session, request).await?;
     execution

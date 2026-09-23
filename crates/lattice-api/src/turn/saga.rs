@@ -258,7 +258,7 @@ pub(super) async fn run_coordinator_saga(
 
             observer
                 .emit(TurnEvent::ModelStarted {
-                    provider: Some(prepared.provider.clone()).filter(|p| p != "unknown"),
+                    provider: Some(prepared.provider.clone()),
                     model: prepared.model.clone(),
                 })
                 .await;
@@ -267,7 +267,7 @@ pub(super) async fn run_coordinator_saga(
                 system_prompt: prepared.system_prompt.clone(),
                 history: history.clone(),
                 model: prepared.model.clone(),
-                provider: Some(prepared.provider.clone()).filter(|p| p != "unknown"),
+                provider: Some(prepared.provider.clone()),
                 tools: tool_definitions.clone(),
                 temperature: None,
                 max_tokens: None,
@@ -334,7 +334,7 @@ pub(super) async fn run_coordinator_saga(
                     let retry_at = now + delay;
                     observer
                         .emit(TurnEvent::LlmRequestError {
-                            provider: Some(prepared.provider.clone()).filter(|p| p != "unknown"),
+                            provider: Some(prepared.provider.clone()),
                             model: prepared.model.clone(),
                             attempt: attempt + 1,
                             max_attempts,

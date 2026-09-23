@@ -37,15 +37,15 @@ pub(crate) struct PreparedTurn {
     pub project_store_key: ProjectStoreKey,
 }
 
-/// 持有全 Turn 执行锁后固定历史与配置，冻结 provider 时不再读取环境。
+/// 持有全 Turn 执行锁后固定历史与配置，provider 由调用方显式冻结，不再读取环境。
 pub(crate) fn prepare_live_turn_locked(
     session: &SessionApi,
     request: &RunTurnRequest,
     project_root: &std::path::Path,
     execution_lock: &FlockGuard,
-    frozen_provider: Option<&str>,
+    frozen_provider: &str,
 ) -> Result<PreparedTurn> {
-    let (model, system_prompt, provider) = resolve_model_and_prompt(request, frozen_provider);
+    let (model, system_prompt, provider) = resolve_model_and_prompt(request, frozen_provider)?;
 
     let s = session.open_session(OpenSessionRequest {
         id: request.session_id.clone(),
@@ -239,6 +239,7 @@ pub(super) async fn stream_turn_live(
     session: SessionApi,
     request: RunTurnRequest,
     deps: ProductionTurnDeps,
+    provider: lattice_llm::ProviderKind,
 ) -> Result<TurnEventStream> {
     let requested_root = super::mapping::resolve_project_root(&request)?;
     let workspace_root = crate::root::LocalWorkspaceRoot::from_path(&requested_root)?;
@@ -256,7 +257,7 @@ pub(super) async fn stream_turn_live(
         &request,
         workspace_root.canonical_path(),
         execution_lock.as_ref(),
-        None,
+        provider.as_str(),
     )?;
     let layout = session.state_layout().ok_or_else(|| {
         crate::session::ApiError::Internal(

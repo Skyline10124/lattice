@@ -1,11 +1,10 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! LATTICE thin public API facade.
+//! LATTICE 公开应用接口。
 //!
-//! This crate is the application entry point for session creation, session
-//! lookup, turn execution, and streaming. It exposes the public surface through
-//! [`SessionApi`], `run_turn`, and `stream_turn`.
+//! [`SessionApi`] 提供会话操作，[`local::LocalClient`] 提供本地提交与观察，
+//! [`start_turn`] 提供后台执行接线；run_turn/stream_turn 仅供测试复用执行核心。
 //!
 //! # Boundary
 //!
@@ -51,8 +50,10 @@ pub use session::{
 pub use turn::{
     RunTurnRequest, RunTurnResult, RunTurnStage, STREAM_IDLE_TIMEOUT_SECS, ToolResultSummary,
     TurnAcceptance, TurnCompletion, TurnEvent, TurnEventStream, TurnExecution, TurnUsageSummary,
-    collect_turn_result_from_events, recover_turn, run_turn, start_turn, stream_turn,
+    collect_turn_result_from_events, recover_turn, start_turn,
 };
+#[cfg(any(test, feature = "test-utils"))]
+pub use turn::{run_turn, stream_turn};
 
 /// 提前组成进程共享的 Component 运行时，将首次新执行所需的编译成本移到预热阶段。
 /// 组成错误会被缓存，并在后续需要 Component 组成的新执行路径中返回。

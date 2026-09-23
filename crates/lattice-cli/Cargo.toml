@@ -27,6 +27,7 @@ dotenvy = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+lattice-api = { workspace = true, features = ["test-utils"] }
 lancet-audit = { workspace = true, features = ["test-support"] }
 lattice-agent = { workspace = true, features = ["test-utils"] }
 lattice-profile = { workspace = true }

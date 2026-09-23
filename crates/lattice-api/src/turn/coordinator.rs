@@ -111,6 +111,7 @@ pub(crate) trait IdSource: Send + Sync {
     /// Generate one caller-allocated Tool invocation identity.
     fn new_invocation_id(&self) -> InvocationId;
     /// Generate one accepted user Turn identity.
+    #[cfg(any(test, feature = "test-utils"))]
     fn new_turn_id(&self) -> TurnId;
 }
 
@@ -123,6 +124,7 @@ impl IdSource for RandomIdSource {
             .expect("uuid v4 display is canonical hyphenated lowercase")
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     fn new_turn_id(&self) -> TurnId {
         TurnId::parse(&uuid::Uuid::new_v4().to_string())
             .expect("uuid v4 display is canonical hyphenated lowercase")

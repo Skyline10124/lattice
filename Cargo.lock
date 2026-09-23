@@ -3013,6 +3013,7 @@ dependencies = [
  "lancet-protocol",
  "lancet-runtime",
  "lattice-agent",
+ "lattice-api",
  "lattice-conversation",
  "lattice-llm",
  "lattice-profile",

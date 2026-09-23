@@ -468,7 +468,9 @@ impl Backend {
                 session_id: request.session_id.clone(),
                 loaded_profile,
                 cancel_flag: owner.execution_cancel.clone(),
+                #[cfg(any(test, feature = "test-utils"))]
                 test_llm: None,
+                #[cfg(any(test, feature = "test-utils"))]
                 test_project_root: None,
             },
             connection,
@@ -1924,7 +1926,7 @@ mod tests {
                 session_id: session.session_id.clone(),
                 loaded_profile: Some(crate::load_agent_profile_path(&path).unwrap()),
                 cancel_flag: None,
-                test_llm: Some(Arc::new(llm)),
+                test_llm: Some((Arc::new(llm), lattice_llm::ProviderKind::OpenAiCompatible)),
                 test_project_root: Some(directory.path().to_string_lossy().into()),
             },
             None,
@@ -2070,7 +2072,7 @@ mod tests {
                 session_id: session.session_id.clone(),
                 loaded_profile: Some(crate::load_agent_profile_path(&path).unwrap()),
                 cancel_flag: None,
-                test_llm: Some(Arc::new(llm)),
+                test_llm: Some((Arc::new(llm), lattice_llm::ProviderKind::OpenAiCompatible)),
                 test_project_root: Some(directory.path().to_string_lossy().into()),
             },
             None,

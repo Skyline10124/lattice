@@ -125,7 +125,8 @@ async fn stream_turn_live_with_agent(
         events,
     };
 
-    super::live::stream_turn_live(session, request, deps).await
+    super::live::stream_turn_live(session, request, deps, lattice_llm::ProviderKind::Anthropic)
+        .await
 }
 
 fn make_request(input: &str) -> RunTurnRequest {
@@ -221,7 +222,7 @@ async fn recovery_rejects_the_wrong_workspace_before_any_side_effect() {
             .build(),
     );
     let mut request = make_request("wrong workspace");
-    request.test_llm = Some(client.clone());
+    request.test_llm = Some((client.clone(), lattice_llm::ProviderKind::Anthropic));
     request.test_project_root = Some(other_workspace.path().to_string_lossy().into_owned());
 
     let err = match super::execute::stream_turn(session.clone(), request).await {
@@ -275,7 +276,7 @@ async fn recovery_strict_open_failure_does_not_advance_the_session_or_ledger() {
             .build(),
     );
     let mut request = make_request("strict reopen");
-    request.test_llm = Some(client.clone());
+    request.test_llm = Some((client.clone(), lattice_llm::ProviderKind::Anthropic));
     request.test_project_root = Some(workspace.canonical_path().to_string_lossy().into_owned());
 
     let err = match super::execute::stream_turn(session.clone(), request).await {
@@ -310,7 +311,7 @@ async fn valid_recovery_reports_only_the_pending_turn_without_a_profile() {
     );
     let mut request = make_request("after recovery");
     request.loaded_profile = None;
-    request.test_llm = Some(client.clone());
+    request.test_llm = Some((client.clone(), lattice_llm::ProviderKind::Anthropic));
     request.test_project_root = Some(workspace.canonical_path().to_string_lossy().into_owned());
     let events: Vec<_> = super::execute::stream_turn(session.clone(), request)
         .await
@@ -352,7 +353,7 @@ async fn accepted_turn_finishes_without_observers_and_replays_without_a_profile(
     );
     let id = lancet_protocol::TurnId::parse("22222222-2222-4222-8222-222222222222").unwrap();
     let mut request = make_request("keep running");
-    request.test_llm = Some(client.clone());
+    request.test_llm = Some((client.clone(), lattice_llm::ProviderKind::Anthropic));
     let execution = super::execute::start_turn(
         session.clone(),
         id,
@@ -470,7 +471,7 @@ async fn another_session_executes_while_busy_session_rejects_new_turns() {
             .build(),
     );
     let mut request = make_request("busy request");
-    request.test_llm = Some(client.clone());
+    request.test_llm = Some((client.clone(), lattice_llm::ProviderKind::Anthropic));
     let id = lancet_protocol::TurnId::parse("44444444-4444-4444-8444-444444444444").unwrap();
     let busy = super::execute::start_turn(
         session.clone(),
@@ -623,7 +624,7 @@ async fn recovery_rejects_a_turn_closing_checkpoint_that_no_longer_matches_curre
             .build(),
     );
     let mut request = make_request("must not run");
-    request.test_llm = Some(client.clone());
+    request.test_llm = Some((client.clone(), lattice_llm::ProviderKind::Anthropic));
     request.test_project_root = Some(workspace.canonical_path().to_string_lossy().into_owned());
     let error = match super::execute::stream_turn(session.clone(), request).await {
         Ok(_) => panic!("mismatched pinned checkpoint must fail closed"),
@@ -664,7 +665,7 @@ async fn turn_uses_the_injected_non_default_session_repository() {
             .build(),
     );
     let mut request = make_request("custom repository");
-    request.test_llm = Some(client.clone());
+    request.test_llm = Some((client.clone(), lattice_llm::ProviderKind::Anthropic));
     request.test_project_root = Some(workspace.canonical_path().to_string_lossy().into_owned());
 
     let events: Vec<_> = super::execute::stream_turn(session, request)

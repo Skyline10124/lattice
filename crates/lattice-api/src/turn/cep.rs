@@ -651,7 +651,7 @@ enabled = ["{tool}"]
             session_id: "s".into(),
             loaded_profile: Some(profile.clone()),
             cancel_flag: None,
-            test_llm: Some(llm.clone()),
+            test_llm: Some((llm.clone(), lattice_llm::ProviderKind::OpenAiCompatible)),
             test_project_root: Some(project.path().to_string_lossy().into()),
         };
         let enabled_tools = ["session.todo_write".to_string()];

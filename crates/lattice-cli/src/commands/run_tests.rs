@@ -229,7 +229,7 @@ async fn run_integration_commits_existing_session() {
         session_id: created.session_id,
         loaded_profile: Some(loaded_profile("stub-model")),
         cancel_flag: None,
-        test_llm: Some(llm),
+        test_llm: Some((llm, lattice_llm::ProviderKind::OpenAiCompatible)),
         test_project_root: Some(temp.path().to_string_lossy().to_string()),
     };
 

@@ -32,6 +32,7 @@ libc = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
+lattice-api = { workspace = true, features = ["test-utils"] }
 gix = { workspace = true }
 lattice-session = { workspace = true, features = ["test-utils"] }
 lattice-store = { workspace = true, features = ["test-fault-injection"] }
@@ -47,4 +48,6 @@ tokio-stream = { workspace = true }
 
 [features]
 default = []
+# 仅供本 crate 与下游测试复用同进程 Turn 执行入口。
+test-utils = []
 test-crash-barriers = ["lancet-api/test-crash-barriers"]

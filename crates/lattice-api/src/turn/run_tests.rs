@@ -84,7 +84,7 @@ async fn run_turn_uses_existing_session_transcript() {
             .build(),
     );
     let mut request = make_request_with_session("second turn", &session_id);
-    request.test_llm = Some(llm);
+    request.test_llm = Some((llm, lattice_llm::ProviderKind::Anthropic));
     request.test_project_root = Some(fixture.project_root.clone());
 
     let result = run_turn(fixture.session_api, request).await.unwrap();
@@ -263,22 +263,20 @@ async fn run_cutover_uses_loaded_profile_model() {
 #[tokio::test]
 async fn run_turn_plumbs_stable_provider_to_agent_request_and_commit_metadata() {
     let fixture = setup_with_events(happy_events(), &[]);
-    let request = with_test_llm(
-        RunTurnRequest {
-            input: "test".to_string(),
-            session_id: TEST_SESSION_ID.to_string(),
-            loaded_profile: Some(make_loaded_profile(
-                "compat:deepseek-chat",
-                "System from profile.",
-            )),
-            cancel_flag: None,
-            test_llm: None,
-            test_project_root: None,
-        },
-        fixture.llm.clone(),
-        &fixture.enabled_tools,
-        &fixture.project_root,
-    );
+    let request = RunTurnRequest {
+        input: "test".to_string(),
+        session_id: TEST_SESSION_ID.to_string(),
+        loaded_profile: Some(make_loaded_profile(
+            "compat:deepseek-chat",
+            "System from profile.",
+        )),
+        cancel_flag: None,
+        test_llm: Some((
+            fixture.llm.clone(),
+            lattice_llm::ProviderKind::OpenAiCompatible,
+        )),
+        test_project_root: Some(fixture.project_root.clone()),
+    };
 
     let result = run_turn(fixture.session_api, request).await.unwrap();
     assert!(matches!(
@@ -287,6 +285,7 @@ async fn run_turn_plumbs_stable_provider_to_agent_request_and_commit_metadata() 
     ));
 
     let entry = last_log_entry(fixture.store.as_ref(), &result.session_id);
+    assert_eq!(entry.model, "compat:deepseek-chat");
     assert_eq!(entry.provider, "openai_compatible");
 }
 
@@ -318,7 +317,7 @@ async fn run_turn_commits_parent_from_initial_transcript() {
             .build(),
     );
     let mut request = make_request_with_session("second turn", &session_id);
-    request.test_llm = Some(llm);
+    request.test_llm = Some((llm, lattice_llm::ProviderKind::Anthropic));
     request.test_project_root = Some(fixture.project_root.clone());
 
     let result = run_turn(session_api, request).await.unwrap();

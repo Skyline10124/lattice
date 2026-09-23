@@ -8,7 +8,7 @@
 - `local/operation.rs`：LocalTurn 是本客户端一次提交或观察交互的具体句柄，管理交付、在途取消、观察、正文任务和退出交接；前端提供意图与配置来源并消费更新，持久 Turn 仍由后台执行。接口分层见[公开操作](../../docs/architecture/session.md#实现模块与公开操作)。
 - `local/server.rs`：serve 持实例资源和连接；Backend 管准入、存储句柄及本进程完成诊断，Owner 监督独立操作。接管、同一取消载体与独立收尾遵循[取消与退出](../../docs/architecture/session.md#取消与退出)。
 - `session.rs`：公开会话操作、固定读取、ID 解析和结构化错误映射。
-- `turn/live.rs`、`turn/execute.rs`：同一 live 核心及独立接受/完成结果，stream_turn/run_turn 复用该核心。
+- `turn/live.rs`、`turn/execute.rs`：同一 live 核心及独立接受/完成结果；start_turn 用于后台执行接线，run_turn/stream_turn 仅供测试复用核心。
 - `turn/cep.rs`：profile→policy、Tool 事件映射及生产依赖接线；首次共享 Component 组成经 spawn_blocking，组装仍归 lancet-api。
 - coordinator/saga 模块：阻塞存储适配、可注入 IdSource、日志、绑定、预留、顺序执行、结果材料、终态和最终发布。
 - `turn/invocation_facts.rs`：pinned audit ledger → session pending facts，避免 audit→session 生产依赖。

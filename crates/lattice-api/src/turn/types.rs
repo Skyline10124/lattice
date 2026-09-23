@@ -12,7 +12,7 @@ use lattice_session::pending::{ClosureOrigin, TurnOutcome, WorkspaceHistoryCheck
 
 /// 各执行入口共用原有请求形状；显式请求身份和连接材料由 [`crate::start_turn`] 单独接收。
 ///
-/// [`crate::run_turn`] 等待持久完成， [`crate::stream_turn`] 在接受或恢复回执后返回观察流。
+/// 测试辅助入口 run_turn/stream_turn 复用同一执行核心，分别收集结果或观察事件。
 /// 恢复已有 pending 时只报告旧 Turn，不接受此处的新输入。
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RunTurnRequest {
@@ -23,12 +23,27 @@ pub struct RunTurnRequest {
     /// Cooperative cancellation flag forwarded to the agent loop.
     #[serde(skip)]
     pub cancel_flag: Option<Arc<AtomicBool>>,
-    /// Test-only LLM injection for lattice-api integration tests.
+    /// 测试注入同时提供客户端与明确的 provider，避免从模型标签猜测保存身份。
+    /// 只在测试或 `test-utils` 构建中存在，生产调用方无法替换真实模型客户端。
+    #[cfg(any(test, feature = "test-utils"))]
     #[serde(skip)]
-    pub test_llm: Option<Arc<dyn lattice_agent::LlmClient>>,
-    /// Test-only project root for CEP runtime wiring.
+    pub test_llm: Option<(Arc<dyn lattice_agent::LlmClient>, lattice_llm::ProviderKind)>,
+    /// 测试入口使用的项目根目录，生产执行始终使用后台核验过的工作区。
+    #[cfg(any(test, feature = "test-utils"))]
     #[serde(skip)]
     pub test_project_root: Option<String>,
+}
+
+impl RunTurnRequest {
+    /// 测试注入的模型客户端；生产构建中没有注入入口，恒为 None。
+    pub(crate) fn injected_llm(
+        &self,
+    ) -> Option<(Arc<dyn lattice_agent::LlmClient>, lattice_llm::ProviderKind)> {
+        #[cfg(any(test, feature = "test-utils"))]
+        return self.test_llm.clone();
+        #[cfg(not(any(test, feature = "test-utils")))]
+        None
+    }
 }
 
 impl PartialEq for RunTurnRequest {
