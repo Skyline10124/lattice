@@ -1123,28 +1123,14 @@ async fn tool_finished_before_history_remains_visible_once() {
         frames
             .unbounded_send(event_frame(
                 3,
-                TurnEvent::ToolCallStarted {
-                    id: invocation.into(),
-                    name: "observe.workspace".into(),
-                },
-            ))
-            .unwrap();
-        frames
-            .unbounded_send(event_frame(
-                4,
                 TurnEvent::TokenDelta {
                     content: "工具之后的新文字".into(),
                 },
             ))
             .unwrap();
-        let frame = remote
+        remote
             .wait_frame(|frame| frame.text.contains("工具之后的新文字"))
             .await;
-        assert!(
-            frame.text.contains("17 B"),
-            "迟到 Started 不得降级：{}",
-            frame.text
-        );
         history_tx
             .send(transcript(vec![
                 message("user", vec![json!({"text":{"text":"固定工具历史"}})]),

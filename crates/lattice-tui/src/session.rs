@@ -50,9 +50,7 @@ pub(crate) async fn open_or_create(
     Ok(SessionContext {
         session_id: session.session_id,
         active_agent: session.active_agent_name,
-        project_branch: session
-            .project_target_branch
-            .unwrap_or_else(|| "main".into()),
+        project_branch: session.project_target_branch.context("会话配置无效")?,
     })
 }
 
@@ -149,18 +147,12 @@ pub(crate) fn append_messages(
                     MessageRole::System | MessageRole::Tool => {}
                 },
                 MessageSemantic::ToolCall { call } => {
-                    let id = call.invocation_id.to_string();
-                    if !blocks
-                        .iter()
-                        .any(|block| matches!(block, Block::Tool { id: known, .. } if *known == id))
-                    {
-                        blocks.push(Block::Tool {
-                            id,
-                            name: call.name,
-                            state: ToolState::Unknown,
-                            source: ToolSource::HistoryCall,
-                        });
-                    }
+                    blocks.push(Block::Tool {
+                        id: call.invocation_id.to_string(),
+                        name: call.name,
+                        state: ToolState::Unknown,
+                        source: ToolSource::HistoryCall,
+                    });
                 }
                 MessageSemantic::ToolResult {
                     invocation_id,

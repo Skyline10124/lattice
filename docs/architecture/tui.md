@@ -172,7 +172,7 @@ Ctrl+C 提示在两秒内替代最低优先级的换行提示，过期须触发�
 
 ### 按调用身份合并工具显示
 
-[app](../../crates/lattice-tui/src/app.rs) 按 InvocationId 配对历史和当前切点事件，并用 `ToolSource` 保留来源；[session](../../crates/lattice-tui/src/session.rs) 的消息转换给出历史来源。事件中的 started/finished 即使先于历史返回，也立即建立或更新同 ID 的工具块；未见 started 的 finished 仍显示其 name、ok、output_len 和 error_summary，迟到或重复 started 不降级已知完成。
+[app](../../crates/lattice-tui/src/app.rs) 按 InvocationId 配对历史和当前切点事件，并用 `ToolSource` 保留来源；[session](../../crates/lattice-tui/src/session.rs) 的消息转换给出历史来源。事件中的 started/finished 即使先于历史返回，也立即建立或更新同 ID 的工具块；未见 started 的 finished 仍显示其 name、ok、output_len 和 error_summary。
 
 | 来源 | 历史到达或事件更新时的呈现 |
 | --- | --- |

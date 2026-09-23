@@ -257,11 +257,6 @@ impl App {
             if *source == ToolSource::HistoryResult {
                 return;
             }
-            if state == ToolState::Running
-                && !matches!(known, ToolState::Running | ToolState::Unknown)
-            {
-                return;
-            }
             *known_name = name;
             *known = state;
             *source = ToolSource::Event;
@@ -1356,10 +1351,6 @@ mod tests {
             ok: false,
             output_len: 42,
             error_summary: Some("结束先到的错误摘要".into()),
-        });
-        app.apply_turn_event(TurnEvent::ToolCallStarted {
-            id: "call-4".into(),
-            name: "fetch.web".into(),
         });
         let orphan: Vec<_> = app
             .blocks

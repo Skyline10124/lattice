@@ -20,7 +20,7 @@ pub(crate) fn submission_notice(acceptance: &Acceptance) -> String {
         Acceptance::Recovered { turn } => {
             (turn.turn_id, "旧 Turn 已恢复关闭；本次新 prompt 未接受")
         }
-        Acceptance::NeedsConfiguration => return "提交协议尚未完成".into(),
+        Acceptance::NeedsConfiguration => return "本地响应异常".into(),
     };
     format!("{message}：{id}")
 }
