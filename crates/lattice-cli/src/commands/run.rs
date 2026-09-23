@@ -25,28 +25,11 @@ use lattice_api::{LoadedAgentProfile, TurnEvent, TurnOutcome, TurnUsageSummary};
 
 #[cfg(test)]
 pub(crate) use lattice_api::STREAM_IDLE_TIMEOUT_SECS as STREAM_TIMEOUT_SECS;
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum TerminalSignal {
-    Failed { reason: String },
-    Cancelled { reason: Option<String> },
-}
 
-/// Commit signal accumulated from `TurnCommitted` or `CommitFailed`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum CommitSignal {
-    Committed,
-    Failed { reason: String },
-}
-
-/// Accumulated state from a live `TurnEvent` stream, used to derive
-/// the CLI exit code after the stream drains.
-///
-/// `usage_total` is summed across multiple `ModelFinished` events;
-/// `TurnCommitted` is NOT a usage source.
+/// 仅累计显示所需字段；退出依据固定结果及独立完成、正文读取报告。
+/// usage_total 汇总 ModelFinished，不将 TurnCommitted 当作 usage 来源。
 #[derive(Debug, Default)]
 struct RunRenderState {
-    last_terminal: Option<TerminalSignal>,
-    last_commit: Option<CommitSignal>,
     last_outcome: Option<TurnOutcome>,
     tokens_emitted_without_newline: bool,
     mid_token_stderr_newline_applied: bool,
@@ -84,53 +67,20 @@ fn apply_event_to_state(event: &TurnEvent, state: &mut RunRenderState) {
         TurnEvent::ToolCallFinished { .. } => {
             state.tool_finished_count += 1;
         }
-        TurnEvent::TurnFailed { reason } => {
-            state.last_terminal = Some(TerminalSignal::Failed {
-                reason: reason.clone(),
-            });
-        }
-        TurnEvent::TurnCancelled { reason } => {
-            state.last_terminal = Some(TerminalSignal::Cancelled {
-                reason: reason.clone(),
-            });
-        }
-        TurnEvent::TurnCommitting => {}
         TurnEvent::TurnCommitted {
             session_id,
             commit_id,
             outcome,
             ..
         } => {
-            state.last_commit = Some(CommitSignal::Committed);
             state.session_id = Some(session_id.clone());
             state.commit_id = Some(commit_id.clone());
             state.last_outcome = Some(outcome.clone());
         }
-        TurnEvent::CommitFailed { reason } => {
-            state.last_commit = Some(CommitSignal::Failed {
-                reason: reason.clone(),
-            });
-        }
-        TurnEvent::EvidenceDurabilityFailed { attempts } => {
-            state.last_commit = Some(CommitSignal::Failed {
-                reason: format!("terminal evidence durability failed after {attempts} attempt(s)"),
-            });
-        }
-        TurnEvent::RecoveryRequired { reason } => {
-            state.last_commit = Some(CommitSignal::Failed {
-                reason: format!("recovery required: {reason}"),
-            });
-        }
-        // All other variants (ModelStarted, ReasoningDelta,
-        // ToolCallStarted, ModelFinished without usage): no state mutation.
         _ => {}
     }
 }
 
-/// Derive exit code from accumulated stream signals (rows 1-7).
-///
-/// Row 8 (ApiError::NotFound -> exit 2) and Row 9 (ApiError::Internal -> exit 1)
-/// are handled in `run_inner` before the stream starts.
 fn outcome_label(outcome: &TurnOutcome) -> &'static str {
     match outcome {
         TurnOutcome::Completed { .. } => "completed",
@@ -138,34 +88,6 @@ fn outcome_label(outcome: &TurnOutcome) -> &'static str {
         TurnOutcome::Interrupted { .. } => "interrupted",
         TurnOutcome::Cancelled { .. } => "cancelled",
     }
-}
-
-fn exit_code_from_state(state: &RunRenderState) -> std::process::ExitCode {
-    // Row 4: CommitFailed -> 1 (regardless of last_outcome)
-    if matches!(state.last_commit, Some(CommitSignal::Failed { .. })) {
-        return std::process::ExitCode::from(1);
-    }
-    // Defensive: if TurnFailed/TurnCancelled was seen, exit 1 regardless of commit status
-    if state.last_terminal.is_some() {
-        return std::process::ExitCode::from(1);
-    }
-    // Row 1: TurnCommitted{Completed} -> 0
-    if matches!(state.last_outcome, Some(TurnOutcome::Completed { .. })) {
-        return std::process::ExitCode::SUCCESS;
-    }
-    // Row 2/3: TurnCommitted{Error|Cancelled} -> 1
-    if matches!(
-        state.last_outcome,
-        Some(
-            TurnOutcome::Failed { .. }
-                | TurnOutcome::Interrupted { .. }
-                | TurnOutcome::Cancelled { .. }
-        )
-    ) {
-        return std::process::ExitCode::from(1);
-    }
-    // Row 7: Stream ended without any terminal/commit signal -> 1
-    std::process::ExitCode::from(1)
 }
 
 /// Render a `TurnEvent` as one JSONL line on `out`.
@@ -779,12 +701,12 @@ fn connection_notice(message: &str, json: bool) {
 }
 
 fn durable_exit(view: &SessionObservation) -> std::process::ExitCode {
-    let mut state = RunRenderState::default();
-    if let Some(TurnObservation::Committed(turn)) = &view.requested_turn {
-        state.last_commit = Some(CommitSignal::Committed);
-        state.last_outcome = Some(turn.outcome.clone());
+    if matches!(&view.requested_turn, Some(TurnObservation::Committed(turn)) if matches!(turn.outcome, TurnOutcome::Completed { .. }))
+    {
+        std::process::ExitCode::SUCCESS
+    } else {
+        std::process::ExitCode::from(1)
     }
-    exit_code_from_state(&state)
 }
 
 pub async fn render_view(api: &LocalClient, view: &SessionObservation, json: bool) -> Result<()> {

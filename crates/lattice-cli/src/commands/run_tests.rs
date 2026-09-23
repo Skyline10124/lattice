@@ -422,85 +422,6 @@ fn verbose_epilogue_skips_unset_fields() {
     );
 }
 
-// ─── exit-code matrix (Task 6) ────────────────────────────
-
-#[test]
-fn exit_code_from_state_covers_all_da4_rows() {
-    use std::process::ExitCode;
-    fn ec_to_dbg(c: ExitCode) -> String {
-        format!("{:?}", c)
-    }
-
-    // Row 1: TurnCommitted{Completed} -> 0
-    let mut s = RunRenderState {
-        last_outcome: Some(lattice_api::TurnOutcome::Completed {
-            finish_reason: lattice_api::TurnFinishReason::Stop,
-        }),
-        last_commit: Some(CommitSignal::Committed),
-        ..Default::default()
-    };
-    assert_eq!(
-        ec_to_dbg(exit_code_from_state(&s)),
-        ec_to_dbg(ExitCode::SUCCESS)
-    );
-
-    // Row 2: TurnCommitted{Error} -> 1
-    s.last_outcome = Some(lattice_api::TurnOutcome::Failed {
-        reason: lattice_session::pending::TurnFailure::ModelRequestFailed,
-    });
-    assert_ne!(
-        ec_to_dbg(exit_code_from_state(&s)),
-        ec_to_dbg(ExitCode::SUCCESS)
-    );
-
-    // Row 3: TurnCommitted{Cancelled} -> 1
-    s.last_outcome = Some(lattice_api::TurnOutcome::Cancelled {
-        reason: lattice_session::pending::TurnCancellation::UserCancelled,
-    });
-    assert_ne!(
-        ec_to_dbg(exit_code_from_state(&s)),
-        ec_to_dbg(ExitCode::SUCCESS)
-    );
-
-    // Row 4: CommitFailed -> 1 (regardless of last_outcome)
-    s.last_commit = Some(CommitSignal::Failed {
-        reason: "parent mismatch".into(),
-    });
-    assert_ne!(
-        ec_to_dbg(exit_code_from_state(&s)),
-        ec_to_dbg(ExitCode::SUCCESS)
-    );
-
-    // Row 5: TurnFailed without TurnCommitted -> 1
-    let s5 = RunRenderState {
-        last_terminal: Some(TerminalSignal::Failed {
-            reason: "boom".into(),
-        }),
-        ..Default::default()
-    };
-    assert_ne!(
-        ec_to_dbg(exit_code_from_state(&s5)),
-        ec_to_dbg(ExitCode::SUCCESS)
-    );
-
-    // Row 6: TurnCancelled without TurnCommitted -> 1
-    let s6 = RunRenderState {
-        last_terminal: Some(TerminalSignal::Cancelled { reason: None }),
-        ..Default::default()
-    };
-    assert_ne!(
-        ec_to_dbg(exit_code_from_state(&s6)),
-        ec_to_dbg(ExitCode::SUCCESS)
-    );
-
-    // Row 7: stream ended without any terminal/commit -> 1 (protocol violation)
-    let s7 = RunRenderState::default();
-    assert_ne!(
-        ec_to_dbg(exit_code_from_state(&s7)),
-        ec_to_dbg(ExitCode::SUCCESS)
-    );
-}
-
 // ─── Sequence test helpers ────────────────────────────────────
 
 /// Drive a Vec<TurnEvent> through the human renderer with Vec<u8>
@@ -581,7 +502,7 @@ fn seq_happy_path_human() {
             },
         },
     ];
-    let (out, err, state) = fake_event_loop(events, false);
+    let (out, err, _state) = fake_event_loop(events, false);
     // stdout = TokenDelta concatenation; " world\n" ends with \n,
     // so final-newline logic does NOT append an extra \n.
     assert_eq!(s(&out), "Hello world\n");
@@ -593,11 +514,6 @@ fn seq_happy_path_human() {
     // non-verbose hides reasoning and model-finished
     assert!(!err_str.contains("reasoning"));
     assert!(!err_str.contains("model finished"));
-    // Exit code = SUCCESS
-    assert_eq!(
-        format!("{:?}", exit_code_from_state(&state)),
-        format!("{:?}", std::process::ExitCode::SUCCESS)
-    );
 }
 
 #[test]
@@ -777,18 +693,12 @@ fn seq_tool_failure_renders_summary() {
             },
         },
     ];
-    let (_out, err, state) = fake_event_loop(events, false);
+    let (_out, err, _state) = fake_event_loop(events, false);
     let err_str = s(&err);
     // Tool failure renders char count and error summary with failure glyph
     assert!(err_str.contains("120 chars"));
     assert!(err_str.contains("permission denied"));
     assert!(err_str.contains("✗"));
-    // tool failure inside a successful turn does NOT change exit code
-    // Terminal status comes from TurnCommitted.
-    assert_eq!(
-        format!("{:?}", exit_code_from_state(&state)),
-        format!("{:?}", std::process::ExitCode::SUCCESS)
-    );
 }
 
 #[test]
@@ -828,18 +738,11 @@ fn seq_turn_failed_then_commit_drains_stream() {
     assert!(err_str.contains("C"));
     assert!(err_str.contains("error")); // lowercase status
     // State accumulated correctly
-    assert!(state.last_terminal.is_some());
     assert_eq!(
         state.last_outcome,
         Some(lattice_api::TurnOutcome::Failed {
             reason: lattice_session::pending::TurnFailure::ModelRequestFailed
         })
-    );
-    assert!(state.last_commit.is_some());
-    // row 2: TurnCommitted{Error} -> exit 1
-    assert_ne!(
-        format!("{:?}", exit_code_from_state(&state)),
-        format!("{:?}", std::process::ExitCode::SUCCESS)
     );
 }
 
@@ -854,41 +757,11 @@ fn seq_commit_failed_renders_reason() {
             reason: "parent mismatch".into(),
         },
     ];
-    let (_out, err, state) = fake_event_loop(events, false);
+    let (_out, err, _state) = fake_event_loop(events, false);
     let err_str = s(&err);
     // CommitFailed renders the failure glyph and reason
     assert!(err_str.contains("commit failed"));
     assert!(err_str.contains("parent mismatch"));
-    // row 4: CommitFailed -> exit 1
-    assert_ne!(
-        format!("{:?}", exit_code_from_state(&state)),
-        format!("{:?}", std::process::ExitCode::SUCCESS)
-    );
-}
-
-#[test]
-fn seq_stream_ends_without_terminal_is_protocol_violation() {
-    let events = vec![
-        TurnEvent::TurnStarted {
-            turn_id: "s1:root".into(),
-            session_id: "S".into(),
-            parent_commit_id: None,
-            branch: None,
-        },
-        TurnEvent::ModelStarted {
-            provider: None,
-            model: "x".into(),
-        },
-    ];
-    let (_out, _err, state) = fake_event_loop(events, false);
-    // No terminal event arrived
-    assert!(state.last_terminal.is_none());
-    assert!(state.last_commit.is_none());
-    // row 7: stream ended without terminal or commit -> exit 1
-    assert_ne!(
-        format!("{:?}", exit_code_from_state(&state)),
-        format!("{:?}", std::process::ExitCode::SUCCESS)
-    );
 }
 
 #[test]

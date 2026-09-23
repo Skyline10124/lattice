@@ -231,6 +231,41 @@ async fn reconnected_body_read_uses_final_result_for_exit() {
 }
 
 #[tokio::test]
+async fn fixed_turn_outcome_determines_follow_exit() {
+    let _serial = signal_guard().await;
+    for (outcome, expected) in [
+        (json!({"completed":{"finish_reason":"stop"}}), 0),
+        (json!({"failed":{"reason":"model_request_failed"}}), 1),
+        (json!({"cancelled":{"reason":"user_cancelled"}}), 1),
+        (
+            json!({"interrupted":{"reason":"process_interrupted_before_model_attempt"}}),
+            1,
+        ),
+    ] {
+        let peer = Peer::new();
+        let turn = lattice_api::local::new_turn_id();
+        let mut fixed = view(turn, true);
+        let Some(TurnObservation::Committed(commit)) = &mut fixed.requested_turn else {
+            unreachable!()
+        };
+        commit.outcome = serde_json::from_value(outcome).unwrap();
+        let driver = async {
+            let (mut subscription, _) = peer.request("subscribe").await;
+            snapshot(&mut subscription, fixed, true).await;
+            let (mut body, request) = peer.request("transcript").await;
+            assert_eq!(request["commit_id"], COMMIT);
+            empty_transcript(&mut body).await;
+        };
+        run_observe(
+            driver,
+            observe_turn(&peer.client, SESSION, turn, true, false, true),
+            expected,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
 async fn stalled_pending_body_does_not_block_finished_and_is_aborted() {
     let _serial = signal_guard().await;
     let peer = Peer::new();
