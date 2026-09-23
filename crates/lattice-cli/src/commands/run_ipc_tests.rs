@@ -177,9 +177,57 @@ async fn pending_body_error_does_not_discard_finished() {
     run_observe(
         driver,
         observe_turn(&peer.client, SESSION, turn, true, false, true),
-        1,
+        0,
     )
     .await;
+}
+
+#[tokio::test]
+async fn reconnected_body_read_uses_final_result_for_exit() {
+    let _serial = signal_guard().await;
+    for final_body_available in [true, false] {
+        let peer = Peer::new();
+        let turn = lattice_api::local::new_turn_id();
+        let driver = async {
+            let (mut submit, mut subscription) = begin_submit(&peer, turn).await;
+            snapshot(&mut subscription, view(turn, false), false).await;
+            let (mut body, request) = peer.request("transcript").await;
+            assert_eq!(request["commit_id"], PENDING);
+            // 正文连接真实 EOF；接受回执稍后到达，触发同一任务的只读重连。
+            body.shutdown().await.unwrap();
+            closed(&mut body).await;
+            reply(
+                &mut submit,
+                "acceptance",
+                json!({"acceptance":"existing", "turn":view(turn, false).requested_turn.unwrap()}),
+            )
+            .await;
+            let (mut reconnected, request) = peer.request("subscribe").await;
+            assert_eq!(request["turn_id"], json!(turn));
+            assert_eq!(request["session_id"], SESSION);
+            snapshot(&mut reconnected, view(turn, true), true).await;
+            let (mut body, request) = peer.request("transcript").await;
+            assert_eq!(request["commit_id"], COMMIT);
+            if final_body_available {
+                let message = lattice_session::test_helpers::assistant_msg("重连后读取到的回答");
+                reply(
+                    &mut body,
+                    "transcript",
+                    json!({"jsonl":serde_json::to_string(&message).unwrap() + "\n", "next_offset":null}),
+                )
+                .await;
+            } else {
+                body.shutdown().await.unwrap();
+            }
+            closed(&mut body).await;
+        };
+        run_observe(
+            driver,
+            send(&peer, turn),
+            if final_body_available { 0 } else { 1 },
+        )
+        .await;
+    }
 }
 
 #[tokio::test]

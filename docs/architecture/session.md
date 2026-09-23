@@ -377,7 +377,7 @@ LTLOCAL2 当前没有独立的“仅可见”字段，也没有单独的“仅�
 1. Backend 先登记观察通道，再固定 state、head、active-turn 和所请求永久 pin。事件游标以后台 epoch 区分进程生命周期，以 sequence 表示顺序；序号在首次可能丢弃前分配，固定后的切点采用核心源序号。
 2. LocalTurn 先交付 State 及该切点的 Reset，再独立推进 Event 和 History。State 分别携带观察阶段、完成确认和诊断；History 只替换持久区域，同切点已经交付的新文字和工具事件继续保留。前端按更新动作渲染，无需比较 OID、游标或读取代次。
 3. 序号跳跃、队列溢出、末尾事件缺失或 epoch 改变时，后台给出 Gap；客户端本地显示队列丢事件也产生缺口与重新固定动作。LocalTurn 使旧切点临时观察失效，管理重固定、旧连接退场和后续只读订阅，前端保留缺口提示。
-4. 新固定视图取代旧正文读取时，LocalTurn 终止并收割旧任务。旧成功不再交付，已发生的失败带原 view、读取对象与 `stale=true` 交付；新的正文挂起或失败也不遮蔽已收到的 Finished、outcome 和确认。
+4. 新固定视图取代旧正文读取时，LocalTurn 终止并收割旧任务。旧成功不再交付，已发生的失败带原 view、读取对象与 `stale=true` 交付为诊断；新的正文挂起或失败也不遮蔽已收到的 Finished、outcome 和确认。后续正文读取成功后清除尚未解决的读取错误，中间失败仍保留为提示。CLI 按最终固定结果、完成错误和最终正文读取结果选择退出码；最终仍读不到正文或核验发现数据损坏时退出 1，不因已知 Completed 而忽略失败。
 
 切点后未见 ModelStarted 就收到 TokenDelta 时，LocalTurn 给出 `TextAction::StartIncomplete`。前端在持久前缀之外显示当前模型段的新后缀，并提示前文可能缺失；随后真正的 ModelStarted 开始正常新段，ModelFinished 结束当前段。重载取回已保存消息，不补造缺失 token 或模型尝试身份。工具按 InvocationId 与来源配对，显示规则见 [TUI 对话记录与工具显示](tui.md#对话记录与工具显示)。
 

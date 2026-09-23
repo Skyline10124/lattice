@@ -174,7 +174,8 @@ pub struct DetachReport {
     /// 交接后原 Submit 的非终结传输诊断；submission 仍为 None（接受未知）。
     pub submission_diagnostic: Option<LocalError>,
     pub not_submitted: Option<NotSubmittedStage>,
-    /// 本句柄最近一次实际正文失败；后来的成功/完成/退出不抹去失败信号。
+    /// 尚未被后续成功正文读取消解的最近失败；完成确认和退出本身不清除它。
+    /// 旧失败仍通过 History 更新携带原 view/context 交付，不作为后来成功读取的结局。
     pub history_error: Option<HistoryReadError>,
     pub cancel: Option<CancelStatus>,
     /// 原 turn_id 当前取消意图的诊断。新意图或 true/false 回执清除；

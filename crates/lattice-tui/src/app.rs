@@ -402,7 +402,7 @@ impl App {
             LocalUpdate::History { result, stale, .. } => match result {
                 Ok(history) => self.replace_history(crate::session::history_blocks(*history)),
                 Err(error) => self.push_status(StatusKind::Notice(vec![format!(
-                    "{}持久正文不可用；当前内容未验证，/reconnect 重载：{:?}：{}",
+                    "{}持久正文不可用；此次内容未验证，/reconnect 重载：{:?}：{}",
                     if stale { "旧切点" } else { "" },
                     error.context,
                     error.error.message

@@ -132,6 +132,7 @@ async fn reopening_visible_history_reads_completion_without_confirming() {
         let mut finish_tx = Some(finish_tx);
         let server = tokio::spawn(async move {
             let mut completion = None;
+            let mut subscriptions = 0;
             loop {
                 let mut stream = tokio::select! {
                     accepted = listener.accept() => accepted.unwrap().0,
@@ -155,13 +156,14 @@ async fn reopening_visible_history_reads_completion_without_confirming() {
                     "history" => {
                         json!({"response":"history", "value": if request["offset"] == 0 { vec!["fixed-head"] } else { vec![] }})
                     }
-                    "transcript" if body_unavailable => {
+                    "transcript" if body_unavailable && subscriptions == 1 => {
                         json!({"response":"error", "value":read_error()})
                     }
                     "transcript" => {
                         json!({"response":"transcript", "value":{"jsonl":"", "next_offset":null}})
                     }
                     "subscribe" => {
+                        subscriptions += 1;
                         assert_eq!(request["turn_id"], json!(turn_id));
                         let mut fixed = view.clone();
                         fixed.requested_turn =
@@ -169,7 +171,7 @@ async fn reopening_visible_history_reads_completion_without_confirming() {
                         let finished = json!({"response":"observation", "value":Observation::Finished {
                             view: Box::new(fixed.clone()), cursor: lattice_api::local::EventCursor { epoch:"test".into(), sequence:1 }, error:error.clone(),
                         }});
-                        if snapshot_first {
+                        if snapshot_first && subscriptions == 1 {
                             let snapshot = json!({"response":"observation", "value":Observation::Snapshot {
                                 view: Box::new(fixed), cursor: lattice_api::local::EventCursor { epoch:"test".into(), sequence:0 }, owned:true,
                             }});
@@ -255,8 +257,43 @@ async fn reopening_visible_history_reads_completion_without_confirming() {
         if body_unavailable {
             assert!(text.contains("正文不可用"), "{text}");
         }
+        let reload = body_unavailable && snapshot_first && message.is_none();
+        if reload {
+            connection.reconnect();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let update = connection.next().await.unwrap();
+                    let loaded = matches!(
+                        &update,
+                        LocalUpdate::History {
+                            result: Ok(_),
+                            stale: false,
+                            ..
+                        }
+                    );
+                    app.apply_update(update);
+                    if loaded {
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        }
         let report = connection.detach().await;
-        assert_eq!(report.history_error.is_some(), body_unavailable);
+        assert_eq!(report.history_error.is_some(), body_unavailable && !reload);
+        if reload {
+            let state = report.state.as_ref().unwrap();
+            assert_eq!(state.confirmation, CompletionConfirmation::Confirmed);
+            assert!(
+                matches!(&state.view.requested_turn, Some(TurnObservation::Committed(turn)) if turn.turn_id == turn_id && turn.outcome == expected_outcome)
+            );
+            assert!(
+                !crate::connection::detach_lines(report)
+                    .iter()
+                    .any(|line| line.contains("正文不可用"))
+            );
+        }
         server.abort();
         let _ = server.await;
     }

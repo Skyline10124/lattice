@@ -2214,19 +2214,10 @@ async fn v1_completed_old_ipc_read_is_harvested_only_for_failure() {
             report.state.unwrap().confirmation,
             CompletionConfirmation::Confirmed
         );
-        if fails {
-            assert_eq!(
-                report.history_error,
-                Some(HistoryReadError {
-                    context: HistoryReadContext::Transcript {
-                        object_id: "retiring-body".into()
-                    },
-                    error
-                })
-            );
-        } else {
-            assert_eq!(report.history_error, None);
-        }
+        assert_eq!(
+            report.history_error, None,
+            "最终正文成功，旧失败仅保留为原对象的提示"
+        );
     }
 }
 

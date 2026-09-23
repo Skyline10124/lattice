@@ -496,7 +496,6 @@ async fn observe_with_signal(
     let mut closing = None;
     let mut history_ready = false;
     let mut completion_known = false;
-    let mut body_failed = false;
     let mut last_state = None;
     let mut last_cancel = None;
     let mut last_cancel_error = None;
@@ -511,7 +510,6 @@ async fn observe_with_signal(
             tokio::select! {
                 _ = sigint.recv() => {
                     if closing.is_some() && (!awaiting_submission || completion_known) {
-                        body_failed |= !history_ready;
                         connection_notice("transcript read interrupted; fixed result above stands; reconnect to read the transcript", json);
                         break Ok(std::process::ExitCode::from(1));
                     }
@@ -559,7 +557,6 @@ async fn observe_with_signal(
                         match result {
                             Ok(history) => render_history(*history, json)?,
                             Err(error) => {
-                                body_failed = true;
                                 render_history_error(&error, json);
                                 last_history_error = Some(error);
                             }
@@ -657,16 +654,15 @@ async fn observe_with_signal(
     {
         unconfirmed_cancel_notice(&report.session_id, id, json);
     }
-    if let Some(error) = report.history_error {
-        if last_history_error.as_ref() != Some(&error) {
-            render_history_error(&error, json);
-        }
-        body_failed = true;
+    if let Some(error) = &report.history_error
+        && last_history_error.as_ref() != Some(error)
+    {
+        render_history_error(error, json);
     }
     if verbose && !json {
         render_verbose_epilogue(&render, &mut std::io::stderr())?;
     }
-    if body_failed || report.state.is_some_and(|state| state.error.is_some()) {
+    if report.history_error.is_some() || report.state.is_some_and(|state| state.error.is_some()) {
         Ok(std::process::ExitCode::from(1))
     } else {
         result

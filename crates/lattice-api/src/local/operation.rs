@@ -797,7 +797,7 @@ impl Worker {
                     let result = result.unwrap_or_else(|_| Err(HistoryReadError {
                         context: HistoryReadContext::Worker, error: worker_error(),
                     }));
-                    if let Err(error) = &result { self.report.history_error = Some(error.clone()); }
+                    self.report.history_error = result.as_ref().err().cloned();
                     self.pending.push_back(LocalUpdate::History { view: body.view.clone(), result: result.map(Box::new), stale: false });
                 }
                 _ = tokio::time::sleep_until(self.deadline), if self.subscription.is_some() || self.body.is_some() => {
@@ -813,7 +813,7 @@ impl Worker {
                             context: HistoryReadContext::Worker,
                             error: if error.is_cancelled() { LocalError::new(LocalErrorKind::Transport, "fixed history read timed out") } else { worker_error() },
                         }));
-                        if let Err(error) = &result { self.report.history_error = Some(error.clone()); }
+                        self.report.history_error = result.as_ref().err().cloned();
                         self.pending.push_back(LocalUpdate::History { view: body.view.clone(), result: result.map(Box::new), stale: false });
                     }
                 }
