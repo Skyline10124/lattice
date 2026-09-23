@@ -576,19 +576,18 @@ pub fn classify_exit(code: Option<i32>) -> SendExitCode {
     SendExitCode::from_code(code).unwrap_or(SendExitCode::Failed)
 }
 
-/// 从公开终态或固定快照交叉检查退出码；显式发布错误优先，不能用可见 pin 掩盖失败。
+/// 核验任务结局，不把提交或连接诊断当成任务失败；命令退出及输出完整性另行核验。
 pub fn derive_send_exit_code(events: &[TurnEventLine]) -> SendExitCode {
-    if events.iter().any(|e| {
-        matches!(e, TurnEventLine::CommitFailed { .. })
-            || matches!(e, TurnEventLine::Unknown { type_name, .. } if type_name == "error")
-    }) {
-        return SendExitCode::Failed;
-    }
-    if events.iter().any(|e| {
-        matches!(
-            e,
-            TurnEventLine::TurnFailed { .. } | TurnEventLine::TurnCancelled { .. }
-        )
+    if events.iter().any(|e| match e {
+        TurnEventLine::CommitFailed { .. }
+        | TurnEventLine::TurnFailed { .. }
+        | TurnEventLine::TurnCancelled { .. } => true,
+        // 连接或提交回执未知只作诊断；保存、完成确认及其他错误仍失败。
+        TurnEventLine::Unknown { type_name, raw } if type_name == "error" => !matches!(
+            raw["kind"].as_str(),
+            Some("transport" | "protocol" | "not_running")
+        ),
+        _ => false,
     }) {
         return SendExitCode::Failed;
     }
@@ -844,6 +843,20 @@ mod tests {
     }
 
     #[test]
+    fn real_submission_receipt_loss_does_not_fail_completed_turn() {
+        // 真实 CLI/后台的原始输出：接受回执延迟后丢失，未知交接后读到完成与正文，退出 0。
+        let outcome = parse_send_stdout(
+            include_bytes!("../tests/fixtures/submission_unknown_completed.jsonl"),
+            Some(0),
+        );
+        assert!(outcome.malformed_lines.is_empty());
+        assert_eq!(
+            derive_send_exit_code(&outcome.events),
+            outcome.exit_code.expect("captured CLI exit 0")
+        );
+    }
+
+    #[test]
     fn fixed_commit_after_gap_does_not_hide_publication_error() {
         let snapshot = line(
             r#"{"type":"snapshot","view":{"session":{"session_id":"s1"},"requested_turn":{"state":"committed","commit_id":"c1","outcome":{"completed":{"finish_reason":"stop"}}}}}"#,
@@ -856,7 +869,10 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, TurnEventLine::TurnCommitted { .. }))
         );
-        events.push(line(r#"{"type":"error","kind":"store_unavailable"}"#));
+        // 最终 pin 可见仍可能在持久确认时保存失败，不能仅凭 Completed 判成功。
+        events.push(line(
+            r#"{"type":"error","kind":"store_unavailable","message":"store unavailable; inspect durable state","recovery":null}"#,
+        ));
         assert_eq!(derive_send_exit_code(&events), SendExitCode::Failed);
     }
 
