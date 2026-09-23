@@ -1,7 +1,6 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use futures::FutureExt;
 #[cfg(any(test, feature = "test-utils"))]
 use futures::StreamExt;
 use std::sync::Arc;
@@ -216,7 +215,7 @@ pub(crate) fn start_execution(
             observer: ObserverSink::sequenced(events_tx, sequence),
             verified_turn,
         };
-        let result = std::panic::AssertUnwindSafe(execute_owned(
+        let result = execute_owned(
             session,
             turn_id,
             workspace,
@@ -224,19 +223,10 @@ pub(crate) fn start_execution(
             connection,
             capture_env,
             &mut feedback,
-        ))
-        .catch_unwind()
-        .await
-        .unwrap_or_else(|_| {
-            Err(ApiError::Internal(
-                "Turn owner panicked; inspect durable state before recovery".into(),
-            ))
-        });
-        if let Some(sender) = feedback.acceptance.take() {
-            let error = result.as_ref().err().cloned().unwrap_or_else(|| {
-                ApiError::Internal("Turn ended without an acceptance result".into())
-            });
-            let _ = sender.send(Err(error));
+        )
+        .await;
+        if let (Some(sender), Err(error)) = (feedback.acceptance.take(), &result) {
+            let _ = sender.send(Err(error.clone()));
         }
         let _ = completion_tx.send(result);
     });

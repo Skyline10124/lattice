@@ -53,17 +53,6 @@ pub(crate) fn prepare_live_turn_locked(
     let session_id = s.session_id;
 
     let workspace = crate::root::LocalWorkspaceRoot::from_path(project_root)?;
-    let expected_key = ProjectStoreKey::parse(&s.project_store_key).map_err(|err| {
-        crate::session::ApiError::Internal(format!(
-            "session '{session_id}' has an invalid ProjectStoreKey binding: {err}"
-        ))
-    })?;
-    if expected_key != workspace.store_key() {
-        return Err(crate::session::ApiError::Conflict(format!(
-            "session '{session_id}' is bound to project key {expected_key}, but the current Local Workspace resolves to {}",
-            workspace.store_key()
-        )));
-    }
 
     let transcript = session.head_transcript(&session_id)?;
     let parent_commit_id = transcript.parent_commit_id.clone();
@@ -89,7 +78,7 @@ pub(crate) fn prepare_live_turn_locked(
         transcript,
         agent_name: profile_snapshot.agent_name,
         profile_snapshot_json: profile_snapshot.profile_snapshot_json,
-        project_store_key: expected_key,
+        project_store_key: workspace.store_key(),
     })
 }
 

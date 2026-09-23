@@ -1510,10 +1510,9 @@ fn build_binding_plan(
             .iter()
             .find(|tool| tool.name == call.name)
             .ok_or_else(|| {
-                BindingPlanRejection::Internal(ApiError::Internal(format!(
-                    "tool '{}' missing from descriptor catalog",
-                    call.name
-                )))
+                BindingPlanRejection::Internal(ApiError::Internal(
+                    "internal Turn planning failure".into(),
+                ))
             })?;
         let invocation_id = coordinator.ids.new_invocation_id();
         let address = ToolCallAddress {

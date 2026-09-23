@@ -101,8 +101,7 @@ impl LocalClient {
                 );
             }
             match page.next_offset {
-                Some(next) if next > offset => offset = next,
-                Some(_) => return Err(protocol()),
+                Some(next) => offset = next,
                 None => break,
             }
         }
@@ -154,7 +153,6 @@ impl LocalClient {
             HistoryScope::Session => {
                 if let Some(head) = &view.head_commit_id {
                     let mut offset = 0;
-                    let mut seen = std::collections::HashSet::new();
                     loop {
                         let page = self
                             .history_page(session, head, offset, 128)
@@ -171,9 +169,6 @@ impl LocalClient {
                         }
                         offset += page.len();
                         for object_id in page {
-                            if !seen.insert(object_id.clone()) {
-                                continue;
-                            }
                             let turn =
                                 self.read_commit(session, &object_id)
                                     .await
@@ -473,8 +468,9 @@ impl LocalClient {
         )
         .await?;
         match ipc::read(&mut stream).await? {
-            Response::Acceptance(Acceptance::NeedsConfiguration) => Err(protocol()),
-            Response::Acceptance(value) => Ok(SubmissionReply::Accepted(value)),
+            Response::Acceptance(value) if value != Acceptance::NeedsConfiguration => {
+                Ok(SubmissionReply::Accepted(value))
+            }
             Response::Error(error) => Ok(SubmissionReply::BackendFailed(error)),
             _ => Err(protocol()),
         }
@@ -552,7 +548,7 @@ impl LocalClient {
             .layout
             .lattice_root()
             .parent()
-            .ok_or_else(protocol)?
+            .ok_or_else(|| LocalError::new(LocalErrorKind::Internal, "local worker failed"))?
             .to_path_buf();
         tokio::task::spawn_blocking(move || {
             use std::os::unix::process::CommandExt;

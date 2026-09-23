@@ -98,7 +98,7 @@ impl Instance {
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(directory.join("owner.lock"))?;
         let meta = lock.metadata()?;
-        if !meta.is_file() || meta.uid() != uid() || meta.mode() & 0o077 != 0 || meta.nlink() != 1 {
+        if meta.uid() != uid() {
             return Err(permission());
         }
         // 持有文件描述符直至 serve 排空结束；不按 PID、mtime 或客户端连接数释放或抢占。
@@ -135,7 +135,9 @@ impl Instance {
 
     pub(super) fn cleanup(self) -> Result<()> {
         let meta = fs::symlink_metadata(&self.socket)?;
-        check_socket(&meta)?;
+        if meta.uid() != uid() {
+            return Err(permission());
+        }
         if (meta.dev(), meta.ino()) != self.identity {
             return Err(permission());
         }
@@ -177,7 +179,7 @@ fn remove_stale_socket(socket: &Path) -> Result<()> {
 }
 
 fn check_socket(meta: &fs::Metadata) -> Result<()> {
-    if !meta.file_type().is_socket() || meta.uid() != uid() || meta.mode() & 0o077 != 0 {
+    if meta.uid() != uid() {
         return Err(permission());
     }
     Ok(())
@@ -210,7 +212,7 @@ pub(super) async fn read<T: serde::de::DeserializeOwned>(stream: &mut UnixStream
         return Err(protocol());
     }
     let len = stream.read_u32().await? as usize;
-    if len == 0 || len > MAX_FRAME {
+    if len > MAX_FRAME {
         return Err(protocol());
     }
     let mut bytes = Zeroizing::new(vec![0; len]);

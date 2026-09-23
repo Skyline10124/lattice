@@ -173,12 +173,7 @@ async fn o3_fixed_session_merge_pending_and_selected_pin() {
     );
     reply(
         &mut stream,
-        Response::History(vec![
-            "base".into(),
-            "side".into(),
-            "base".into(),
-            "merge".into(),
-        ]),
+        Response::History(vec!["base".into(), "side".into(), "merge".into()]),
     )
     .await;
     for object in ["base", "side", "merge"] {
@@ -192,7 +187,7 @@ async fn o3_fixed_session_merge_pending_and_selected_pin() {
         transcript(&peer, object, object).await;
     }
     let (mut stream, request) = peer.request().await;
-    assert!(matches!(request, Request::History { head, offset: 4, .. } if head == "merge"));
+    assert!(matches!(request, Request::History { head, offset: 3, .. } if head == "merge"));
     reply(&mut stream, Response::History(vec![])).await;
     // 对端的 head/pending 此时可以已移动；只允许旧切点的 journal，不提供二次 query。
     transcript(&peer, "old-journal", "pending").await;

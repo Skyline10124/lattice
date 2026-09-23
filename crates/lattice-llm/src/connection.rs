@@ -107,11 +107,6 @@ impl LlmConnection {
     }
 
     pub async fn stream(&self, request: ChatRequest) -> Result<LlmStream, LlmError> {
-        if request.target.model != self.resolved.alias {
-            return Err(LlmError::Config {
-                message: "request model differs from frozen connection".into(),
-            });
-        }
         crate::client::dispatch_frozen(request, self).await
     }
 }

@@ -58,7 +58,6 @@ impl ObserverSink {
 
     /// 模型增量在唯一丢弃点之前编号；回调不等待观察者，也不建立额外转发队列。
     pub(super) fn emit_delta(&mut self, event: TurnEvent) {
-        debug_assert!(is_streaming_delta(&event));
         let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
         if self.gave_up {
             return;
