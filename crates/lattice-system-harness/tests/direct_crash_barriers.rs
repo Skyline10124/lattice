@@ -76,24 +76,16 @@ fn turn_started_sigkill_reopens_without_replaying_the_provider() {
             1,
             "read-only reconnect must not recover or execute"
         );
-        let recovered = send
-            .send("new prompt must not be accepted during recovery")
-            .unwrap();
-        evidence.record_command("prompt only closes the old Turn", &recovered.command);
-        assert_clean_send(&recovered).unwrap();
-        assert!(recovered.command.is_clean_exit(1));
-        assert!(recovered.accepted_turn_id().is_none());
-        assert_eq!(recovered.committed_result().unwrap().2, "interrupted");
+        send_after_crash(
+            &send,
+            &server,
+            facts["turn_id"].as_str().unwrap(),
+            1,
+            &mut evidence,
+        );
         assert_recovery_confirmation(&send, facts["turn_id"].as_str().unwrap(), &mut evidence);
-        assert_eq!(server.captured_requests().len(), 1);
-        assert_eq!(fsynced_count(&provider_log), 1);
         assert!(!active_turn_exists(&send));
-        let new_turn = send.send("explicit new prompt after recovery").unwrap();
-        evidence.record_command("explicit new Turn", &new_turn.command);
-        assert_clean_send(&new_turn).unwrap();
-        assert!(new_turn.command.is_clean_exit(0));
         assert_eq!(fsynced_count(&provider_log), 2);
-        assert_eq!(server.captured_requests().len(), 2);
         let log = send
             .run_command(&["--json", "session", "log", send.session_id()])
             .unwrap();
@@ -108,6 +100,130 @@ fn turn_started_sigkill_reopens_without_replaying_the_provider() {
         evidence.record_captures(server.captured_requests());
     }));
     support::crash::finish(evidence, result);
+}
+
+#[test]
+fn reset_after_crash_closes_old_turn_before_moving_head() {
+    let driver = driver();
+    let (world, spec) = direct_world("direct-crash-reset", "dl-crash-reset", "[]", "");
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let outside = tempfile::tempdir().unwrap();
+        let provider_log = outside.path().join("provider.log");
+        let server = wire_logged_fake_llm(
+            &world,
+            "dl-crash-reset",
+            sequence(vec![
+                SseScript::plain("基线完成"),
+                SseScript::plain("重置后完成"),
+            ]),
+            &provider_log,
+        );
+        let send =
+            SessionSendDriver::new(&driver, &world, &spec, "dl-crash-reset", "main").unwrap();
+        let baseline = send.send("基线").unwrap();
+        evidence.record_command("基线任务", &baseline.command);
+        assert_clean_send(&baseline).unwrap();
+        assert!(baseline.command.is_clean_exit(0));
+        let target = baseline.committed_result().unwrap().1;
+        let ack = outside.path().join("reset-turn-started.json");
+        world.set_env(BARRIER_ENV, "turn_started");
+        world.set_env(ACK_ENV, ack.display().to_string());
+        let daemon = support::crash::start(&world, &spec, send.budget());
+        let running = send.spawn("崩溃遗留输入").unwrap();
+        let facts = wait_for_ack(&ack, send.budget().cap_timeout(Duration::from_secs(20)));
+        assert_eq!(facts["barrier"], "turn_started");
+        let old_id = facts["turn_id"].as_str().unwrap();
+        support::crash::kill(&world, daemon, running, &mut evidence, send.budget());
+        world.unset_env(BARRIER_ENV);
+        world.unset_env(ACK_ENV);
+        assert!(active_turn_exists(&send));
+        let reset = send
+            .run_command(&["--json", "session", "reset", send.session_id(), target])
+            .unwrap();
+        evidence.record_command("遗留任务存在时重置", &reset);
+        assert!(reset.is_clean_exit(0), "{}", reset.summary());
+        let reset: Value = serde_json::from_slice(&reset.stdout).unwrap();
+        let old = send
+            .run_command(&["--json", "session", "turn", send.session_id(), old_id])
+            .unwrap();
+        evidence.record_command("重置后仍可读取旧任务永久历史", &old);
+        assert!(old.is_clean_exit(0));
+        let snapshot: Value = serde_json::from_str(
+            std::str::from_utf8(&old.stdout)
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        let view = &snapshot["view"];
+        assert!(view["active_turn"].is_null());
+        assert_eq!(view["head_commit_id"], target);
+        assert_eq!(view["requested_turn"]["turn_id"], old_id);
+        assert_eq!(view["requested_turn"]["origin"], "reconciled");
+        assert_eq!(
+            view["requested_turn"]["outcome"],
+            json!({"interrupted":{"reason":"process_interrupted_before_model_attempt"}})
+        );
+        assert_eq!(
+            reset["old_commit_id"], view["requested_turn"]["commit_id"],
+            "必须先关闭旧任务，再重置"
+        );
+        assert_eq!(reset["new_commit_id"], target);
+        assert_eq!(fsynced_count(&provider_log), 1);
+        assert_recovery_confirmation(&send, old_id, &mut evidence);
+        send_after_crash(&send, &server, old_id, 1, &mut evidence);
+        assert!(!active_turn_exists(&send));
+        assert_eq!(fsynced_count(&provider_log), 2);
+        let captures = server.captured_requests();
+        assert!(
+            !captures[1].raw["messages"]
+                .to_string()
+                .contains("崩溃遗留输入"),
+            "新任务应基于重置后的历史"
+        );
+        evidence.record_captures(captures);
+    }));
+    support::crash::finish(evidence, result);
+}
+
+const NEW_PROMPT: &str = "崩溃后继续这次新任务";
+
+fn send_after_crash(
+    send: &SessionSendDriver<'_>,
+    server: &lattice_system_harness::FakeLlmServer,
+    old_turn: &str,
+    expected_before: usize,
+    evidence: &mut lattice_system_harness::ScenarioEvidence,
+) {
+    let fresh = send.send(NEW_PROMPT).unwrap();
+    evidence.record_command("自动关闭旧任务并执行新消息", &fresh.command);
+    assert_clean_send(&fresh).unwrap();
+    assert!(
+        fresh.command.is_clean_exit(0),
+        "{}",
+        fresh.command.summary()
+    );
+    let id = fresh.accepted_turn_id().expect("新消息应已接受");
+    assert_ne!(id, old_turn);
+    support::assert_accepted_and_closed(&fresh).unwrap();
+    let (_, _, outcome) = fresh.committed_result().expect("新任务应已关闭");
+    assert_eq!(outcome, "completed");
+    let captures = server.captured_requests();
+    assert_eq!(
+        captures.len(),
+        expected_before + 1,
+        "只增加新任务的一次模型请求"
+    );
+    let user = captures.last().unwrap().raw["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|message| message["role"] == "user")
+        .unwrap();
+    assert_eq!(user["content"], NEW_PROMPT);
 }
 
 fn assert_recovery_confirmation(
@@ -166,7 +282,7 @@ fn next_model_attempt_sigkill_recovers_the_byte_exact_cumulative_transcript() {
             "LATTICE_TEST_TOOL_EFFECT_LOG",
             effect_log.display().to_string(),
         );
-        let _server = wire_logged_fake_llm(
+        let server = wire_logged_fake_llm(
             &world,
             "dl-crash-transcript",
             sequence(vec![
@@ -211,17 +327,15 @@ fn next_model_attempt_sigkill_recovers_the_byte_exact_cumulative_transcript() {
         world.unset_env(ACK_ENV);
         assert!(active_turn_exists(&send));
         assert_eq!(fsynced_count(&provider_log), 1, "query must not recover");
-        let recovery = send
-            .run_command(&["--json", "session", "recover", send.session_id()])
-            .unwrap();
-        evidence.record_command("independent closure-only recovery", &recovery);
-        assert!(recovery.is_clean_exit(0));
-        assert_recovery_confirmation(&send, facts["turn_id"].as_str().unwrap(), &mut evidence);
-        assert_eq!(
-            fsynced_count(&provider_log),
+        send_after_crash(
+            &send,
+            &server,
+            facts["turn_id"].as_str().unwrap(),
             1,
-            "no provider replay or new prompt"
+            &mut evidence,
         );
+        assert_recovery_confirmation(&send, facts["turn_id"].as_str().unwrap(), &mut evidence);
+        assert_eq!(fsynced_count(&provider_log), 2, "只增加新任务请求");
         assert_eq!(fsynced_count(&effect_log), 1, "no Tool redispatch");
         assert!(!active_turn_exists(&send));
 
@@ -262,7 +376,7 @@ fn post_mutation_step_closed_sigkill_reconciles_with_current_history_checkpoint(
             "LATTICE_TEST_TOOL_EFFECT_LOG",
             effect_log.display().to_string(),
         );
-        let _server = wire_logged_fake_llm(
+        let server = wire_logged_fake_llm(
             &world,
             "dl-crash-step-checkpoint",
             sequence(vec![
@@ -312,16 +426,14 @@ fn post_mutation_step_closed_sigkill_reconciles_with_current_history_checkpoint(
         world.unset_env(BARRIER_ENV);
         world.unset_env(ACK_ENV);
         assert!(active_turn_exists(&send));
-        let recovery = send
-            .run_command(&["--json", "session", "recover", send.session_id()])
-            .unwrap();
-        evidence.record_command("recover mutation StepClosed", &recovery);
-        assert!(recovery.is_clean_exit(0));
-        assert_eq!(
-            fsynced_count(&provider_log),
+        send_after_crash(
+            &send,
+            &server,
+            facts["turn_id"].as_str().unwrap(),
             1,
-            "closure-only must not call the provider"
+            &mut evidence,
         );
+        assert_eq!(fsynced_count(&provider_log), 2, "只增加新任务请求");
         assert_eq!(
             fsynced_count(&effect_log),
             1,
@@ -379,7 +491,7 @@ fn post_mutation_turn_closing_sigkill_preserves_the_current_history_checkpoint()
             "LATTICE_TEST_TOOL_EFFECT_LOG",
             effect_log.display().to_string(),
         );
-        let _server = wire_logged_fake_llm(
+        let server = wire_logged_fake_llm(
             &world,
             "dl-crash-checkpoint",
             sequence(vec![
@@ -437,16 +549,8 @@ fn post_mutation_turn_closing_sigkill_preserves_the_current_history_checkpoint()
         world.unset_env(BARRIER_ENV);
         world.unset_env(ACK_ENV);
         assert!(active_turn_exists(&send));
-        let recovery = send
-            .run_command(&["--json", "session", "recover", send.session_id()])
-            .unwrap();
-        evidence.record_command("finalize exact TurnClosing candidate", &recovery);
-        assert!(recovery.is_clean_exit(0));
-        assert_eq!(
-            fsynced_count(&provider_log),
-            2,
-            "no provider replay or new Turn"
-        );
+        send_after_crash(&send, &server, &crashed_turn_id, 2, &mut evidence);
+        assert_eq!(fsynced_count(&provider_log), 3, "只增加新任务请求");
         assert_eq!(fsynced_count(&effect_log), 1, "no mutation redispatch");
         assert!(!active_turn_exists(&send));
 
@@ -477,7 +581,7 @@ fn post_mutation_turn_closing_sigkill_preserves_the_current_history_checkpoint()
 }
 
 /// 已持久 ModelAttemptInterrupted(Cancelled) 但 StepClosed 前真实终止后台：
-/// 显式 recover 得到顶层 Cancelled，历史与已发生效果保持，且不重放 provider/Tool。
+/// 新提交先关闭旧任务为顶层 Cancelled，历史与已发生效果保持，不重放旧 provider/Tool。
 #[test]
 fn interrupted_cancelled_attempt_before_step_closed_recovers_as_cancelled() {
     let driver = driver();
@@ -505,6 +609,7 @@ fn interrupted_cancelled_attempt_before_step_closed_recovers_as_cancelled() {
                     r#"{"path":"cancelled-window.txt","content":"kept\n","create_parents":false}"#,
                 ),
                 SseScript::plain("never delivered after the cancel"),
+                SseScript::plain("新任务完成"),
             ]),
         );
         let send = SessionSendDriver::new(&driver, &world, &spec, "dl-crash-cancelled", "main")
@@ -566,16 +671,9 @@ fn interrupted_cancelled_attempt_before_step_closed_recovers_as_cancelled() {
             2,
             "read-only queries must not call the provider"
         );
-        let recovery = send
-            .run_command(&["--json", "session", "recover", send.session_id()])
+        gate.release(send.budget().cap_timeout(Duration::from_secs(5)))
             .unwrap();
-        evidence.record_command("explicit recovery of the cancelled attempt", &recovery);
-        assert!(recovery.is_clean_exit(0), "{}", recovery.summary());
-        assert_eq!(
-            server.captured_requests().len(),
-            2,
-            "recovery may not start a provider request"
-        );
+        send_after_crash(&send, &server, &turn_id, 2, &mut evidence);
         assert_eq!(
             fsynced_count(&effect_log),
             1,
@@ -631,8 +729,8 @@ fn interrupted_cancelled_attempt_before_step_closed_recovers_as_cancelled() {
 }
 
 /// 在 `ModelAttemptRejected` 已持久化、`StepClosed` 尚未发布时终止后台。
-/// 显式恢复应保留同一 Turn 的 `UnknownTool` 失败原因、使用量和此前已提交内容，
-/// 且不重新请求模型或重放工具。
+/// 新提交前自动关闭应保留旧 Turn 的 `UnknownTool` 失败原因、使用量和此前已提交内容，
+/// 且不重新请求旧模型或重放工具。
 ///
 /// 此处拒绝事实已落盘；与拒绝尚未持久化时的模型请求中断区别处理。
 #[test]
@@ -670,6 +768,7 @@ fn rejected_out_of_catalog_attempt_before_step_closed_recovers_as_failed_unknown
                     "fetch.web",
                     r#"{"url":"https://example.com/"}"#,
                 ),
+                SseScript::plain("新任务完成"),
             ]),
             &provider_log,
         );
@@ -740,16 +839,8 @@ fn rejected_out_of_catalog_attempt_before_step_closed_recovers_as_failed_unknown
             3,
             "read-only queries must not call the provider"
         );
-        let recovery = send
-            .run_command(&["--json", "session", "recover", send.session_id()])
-            .unwrap();
-        evidence.record_command("explicit recovery of the rejected attempt", &recovery);
-        assert!(recovery.is_clean_exit(0), "{}", recovery.summary());
-        assert_eq!(
-            fsynced_count(&provider_log),
-            3,
-            "recovery may not start a provider request"
-        );
+        send_after_crash(&send, &server, &turn_id, 3, &mut evidence);
+        assert_eq!(fsynced_count(&provider_log), 4, "只增加新任务请求");
         assert_eq!(
             fsynced_count(&effect_log),
             1,
@@ -1255,22 +1346,14 @@ fn run_barrier_case(case: BarrierCase) {
             expected_pre_kill,
             "queries must not recover"
         );
-        let recovery = send
-            .run_command(&["--json", "session", "recover", send.session_id()])
-            .unwrap();
-        evidence.record_command("independent crash recovery", &recovery);
-        assert!(
-            recovery.is_clean_exit(0),
-            "recovery {}: {}",
-            case.barrier,
-            recovery.summary()
-        );
-        assert_eq!(
-            server.captured_requests().len(),
+        send_after_crash(
+            &send,
+            &server,
+            session_facts["turn_id"].as_str().unwrap(),
             expected_pre_kill,
-            "recovery may not start a provider request"
+            &mut evidence,
         );
-        assert_eq!(fsynced_count(&provider_log), expected_pre_kill);
+        assert_eq!(fsynced_count(&provider_log), expected_pre_kill + 1);
         assert!(!active_turn_exists(&send));
         assert_eq!(
             fsynced_count(&effect_log),
@@ -1293,8 +1376,8 @@ fn run_barrier_case(case: BarrierCase) {
         let recovered_turns = recovery_json["turns"].as_array().expect("recovery turns");
         assert_eq!(
             recovered_turns.len(),
-            2,
-            "baseline plus exactly one recovered Turn: {recovery_json}"
+            3,
+            "基线、旧任务关闭以及本次新任务各一次：{recovery_json}"
         );
         assert_eq!(recovered_turns[1]["turn_id"], session_facts["turn_id"]);
         if case.barrier == "turn_closing" {
