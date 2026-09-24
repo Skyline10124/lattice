@@ -201,12 +201,12 @@ provider 与 Tool Host 共享本次冻结的 TLS 根内容，各 Turn 独立构�
 
 | 对象 | 协议上限 |
 | --- | --- |
-| 单 ToolCall 参数 | 8 MiB |
+| 单 ToolCall 参数 | 1 MiB |
 | 助手正文 | 2 MiB |
 | reasoning | 2 MiB |
 | 一次 ModelAttempt 总量 | 16 MiB |
 
-超限立即停止消费，保存有界诊断并记录 `OutputLimitExceeded`。这些是对话协议与组装器的限制，出处为 [ADR 0005](../adr/0005-durable-turn-invocation-and-private-git-stores.md)模型尝试部分和 [`lattice-conversation`](../../crates/lattice-conversation/src/lib.rs) 的计量类型，不能解释为容量或延迟的测量结论。
+超限立即停止消费，保存有界诊断并记录 `OutputLimitExceeded`。这些是对话协议与组装器的限制，计量类型在 [`lattice-conversation`](../../crates/lattice-conversation/src/lib.rs)，不能解释为容量或延迟的测量结论。单 ToolCall 参数上限与 LANCET 单文件工作区写入上限 `MAX_WORKSPACE_WRITE_BYTES`（1 MiB）一致：写入内容随参数传入，超过该大小的调用无法成功执行。正文、reasoning 与单次尝试总量的出处为 [ADR 0005](../adr/0005-durable-turn-invocation-and-private-git-stores.md)模型尝试部分；ADR 记录的 8 MiB 参数上限已由本节取代。
 
 Turn 的单调时钟 deadline 在 TurnStarted 发布后开始，限制后续 provider 请求与 Tool 分发。必要的 Invocation 终态、Step 和 Turn 持久化由独立收尾预算保护；重开仅关闭，不重建剩余执行时间。每次尝试分别保存 provider 给出的 `Option<TokenUsage>`，缺失表示未知；失败、中断和重试尝试的已知 usage 也保留，Turn 汇总派生为 Complete 或 Partial。
 

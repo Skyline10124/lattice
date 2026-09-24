@@ -16,8 +16,12 @@ use crate::attempt::AttemptInterruption;
 /// journal finite independently of argument byte sizes.
 pub const MAX_TOOL_CALLS_PER_BATCH: usize = 32;
 
-/// Maximum byte length of one ToolCall's textual arguments (8 MiB).
-pub const MAX_TOOL_CALL_ARGUMENTS_BYTES: usize = 8 * 1024 * 1024;
+/// Maximum byte length of one ToolCall's textual arguments (1 MiB).
+///
+/// Aligned with the LANCET single-file workspace write limit
+/// (`MAX_WORKSPACE_WRITE_BYTES`, 1 MiB): write content travels inside the
+/// arguments, so a larger call could never execute successfully.
+pub const MAX_TOOL_CALL_ARGUMENTS_BYTES: usize = 1024 * 1024;
 
 /// Maximum byte length of the assistant content of one attempt (2 MiB).
 pub const MAX_ASSISTANT_CONTENT_BYTES: usize = 2 * 1024 * 1024;
@@ -32,7 +36,7 @@ pub const MAX_MODEL_ATTEMPT_BYTES: usize = 16 * 1024 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LimitKind {
-    /// One ToolCall's arguments (8 MiB).
+    /// One ToolCall's arguments (1 MiB).
     ToolCallArguments,
     /// Assistant content of one attempt (2 MiB).
     AssistantContent,
@@ -225,7 +229,7 @@ mod tests {
     #[test]
     fn attempt_total_limit_aggregates_all_payloads() {
         let mut assembly = AttemptAssembly::new();
-        // 2 MiB assistant + 2 MiB reasoning + 8 MiB arguments = 12 MiB.
+        // 2 MiB assistant + 2 MiB reasoning + 1 MiB arguments = 5 MiB.
         assembly
             .push_assistant(&"a".repeat(MAX_ASSISTANT_CONTENT_BYTES))
             .expect("assistant");
@@ -236,13 +240,17 @@ mod tests {
         assembly
             .push_tool_arguments(&"t".repeat(MAX_TOOL_CALL_ARGUMENTS_BYTES))
             .expect("arguments");
-        // 4 MiB of headroom remains; fill it with a second ToolCall's
-        // arguments (per-call limit resets, so only the total can trip).
-        let headroom = MAX_MODEL_ATTEMPT_BYTES - assembly.total_bytes();
-        assembly.begin_tool_call();
-        assembly
-            .push_tool_arguments(&"u".repeat(headroom))
-            .expect("fill remaining headroom");
+        // Fill the remaining headroom with further ToolCalls, each within the
+        // per-call limit (which resets per call), so only the total can trip.
+        let mut headroom = MAX_MODEL_ATTEMPT_BYTES - assembly.total_bytes();
+        while headroom > 0 {
+            let chunk = headroom.min(MAX_TOOL_CALL_ARGUMENTS_BYTES);
+            assembly.begin_tool_call();
+            assembly
+                .push_tool_arguments(&"u".repeat(chunk))
+                .expect("fill remaining headroom");
+            headroom -= chunk;
+        }
         assert_eq!(assembly.total_bytes(), MAX_MODEL_ATTEMPT_BYTES);
         let (kind, limit, _) = exceeded({
             assembly.begin_tool_call();
