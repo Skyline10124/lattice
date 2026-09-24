@@ -238,7 +238,6 @@ mod tests {
                 "session-id",
                 "10000000-0000-4000-8000-000000000001",
             ],
-            vec!["lattice", "session", "recover", "session-id"],
             vec![
                 "lattice",
                 "daemon",

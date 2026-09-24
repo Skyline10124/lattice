@@ -301,7 +301,6 @@ pub struct TurnRequest {
 pub enum Acceptance {
     Accepted { turn_id: TurnId },
     Existing { turn: TurnObservation },
-    Recovered { turn: Box<CommittedTurnObservation> },
     ConfirmationUnknown { turn_id: TurnId },
     NeedsConfiguration,
 }
@@ -412,9 +411,6 @@ pub(super) enum Request {
     Submit {
         request: TurnRequest,
         configuration: Option<Box<super::config::FrozenConfiguration>>,
-    },
-    Recover {
-        session_id: String,
     },
     Query {
         session_id: String,

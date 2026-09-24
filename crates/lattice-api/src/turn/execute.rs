@@ -18,9 +18,9 @@ use super::llm::RealLlmClient;
 #[cfg(any(test, feature = "test-utils"))]
 use super::mapping::resolve_project_root;
 use super::observer::ObserverSink;
-use super::types::{RunTurnRequest, TurnAcceptance, TurnCompletion, TurnEvent, TurnExecution};
+use super::types::{RunTurnRequest, TurnAcceptance, TurnCompletion, TurnExecution};
 #[cfg(any(test, feature = "test-utils"))]
-use super::types::{RunTurnResult, TurnEventStream};
+use super::types::{RunTurnResult, TurnEvent, TurnEventStream};
 use crate::session::{ApiError, Result, SessionApi};
 
 #[derive(Debug, Clone)]
@@ -141,7 +141,8 @@ fn reconcile_error(error: super::coordinator::CoordinatorIoError) -> ApiError {
 }
 
 /// 独立 closure-only 恢复；忙时立即拒绝，无 pending 时不创建 Turn。
-pub async fn recover_turn(
+#[cfg(test)]
+pub(super) async fn recover_turn(
     session: SessionApi,
     session_id: String,
 ) -> Result<Option<lattice_session::TurnCommit>> {
@@ -310,11 +311,8 @@ async fn execute_owned(
             lattice_session::StoredTurn::Pending(_) => TurnCompletion::Pending(turn_id),
         });
     }
-    if let Some(commit) = reconcile(&locked, &feedback.verified_turn).await? {
-        feedback.accept(TurnAcceptance::Recovered(Box::new(commit.clone())));
-        feedback.observer.emit(committed_event(&commit)).await;
-        return Ok(TurnCompletion::Committed(Box::new(commit)));
-    }
+    // 旧任务只做关闭；新提交的观察、诊断与取消身份不能被它占用。
+    reconcile(&locked, &std::sync::OnceLock::new()).await?;
     let loaded = request
         .loaded_profile
         .as_ref()
@@ -397,6 +395,7 @@ async fn execute_owned(
     .map(|commit| TurnCompletion::Committed(Box::new(commit)))
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 fn committed_event(commit: &lattice_session::TurnCommit) -> TurnEvent {
     TurnEvent::TurnCommitted {
         session_id: commit.session_id.clone(),

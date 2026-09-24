@@ -229,8 +229,6 @@ pub enum TurnAcceptance {
     Accepted { turn_id: lancet_protocol::TurnId },
     /// 找回同一请求；Pending 只报告日志，不在此恢复或重新执行。
     Existing(Box<lattice_session::StoredTurn>),
-    /// 关闭的是既有 Turn，本次新 prompt 没有被接受。
-    Recovered(Box<lattice_session::TurnCommit>),
     /// 发布结果不确定；不能据此重分配身份，必须查询或重试同一 TurnId。
     ConfirmationUnknown { turn_id: lancet_protocol::TurnId },
 }
@@ -238,7 +236,8 @@ pub enum TurnAcceptance {
 #[derive(Clone, Debug, PartialEq)]
 pub enum TurnCompletion {
     Committed(Box<lattice_session::TurnCommit>),
-    /// 本次所有者任务已结束，但持久 Turn 仍待独立恢复；不是提交完成。
+    /// 本次所有者任务已结束，但持久 Turn 尚未关闭；不是提交完成。
+    /// 崩溃遗留任务由后续新提交或会话写操作自动关闭。
     Pending(lancet_protocol::TurnId),
 }
 

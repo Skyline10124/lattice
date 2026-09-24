@@ -602,7 +602,6 @@ fn render_acceptance(session_id: &str, acceptance: &Acceptance, json: bool) -> R
         let message = match acceptance {
             Acceptance::Accepted { .. } => "已确认接受",
             Acceptance::Existing { .. } => "找回既有请求；未重复执行",
-            Acceptance::Recovered { .. } => "旧 Turn 已恢复关闭；本次新 prompt 未接受",
             Acceptance::ConfirmationUnknown { .. } => "接受确认未知；保留同一 TurnId 查询或重试",
             Acceptance::NeedsConfiguration => "本地响应异常",
         };

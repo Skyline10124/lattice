@@ -299,49 +299,6 @@ async fn recovery_strict_open_failure_does_not_advance_the_session_or_ledger() {
 }
 
 #[tokio::test]
-async fn valid_recovery_reports_only_the_pending_turn_without_a_profile() {
-    let dir = tempfile::tempdir().unwrap();
-    let session = make_session(dir.path());
-    let workspace = crate::root::LocalWorkspaceRoot::resolve().unwrap();
-    begin_pending_turn(&session, workspace.store_key());
-    let client = Arc::new(
-        FakeStreamingLlmClient::builder()
-            .push_events(happy_events())
-            .build(),
-    );
-    let mut request = make_request("after recovery");
-    request.loaded_profile = None;
-    request.test_llm = Some((client.clone(), lattice_llm::ProviderKind::Anthropic));
-    request.test_project_root = Some(workspace.canonical_path().to_string_lossy().into_owned());
-    let events: Vec<_> = super::execute::stream_turn(session.clone(), request)
-        .await
-        .expect("report the recovered Turn")
-        .collect()
-        .await;
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event, TurnEvent::TurnCommitted { .. }))
-    );
-    assert_eq!(client.call_count(), 0);
-    assert!(
-        session
-            .git_store_for_coordinator()
-            .unwrap()
-            .read_active_turn(TEST_SESSION_ID)
-            .unwrap()
-            .is_none()
-    );
-    let log = session.log(TEST_SESSION_ID).unwrap();
-    assert_eq!(log.len(), 1, "recovery must not accept the new prompt");
-    assert_eq!(log[0].origin, lattice_session::ClosureOrigin::Reconciled);
-    assert_eq!(
-        log[0].workspace_history_checkpoint,
-        lattice_session::WorkspaceHistoryCheckpoint::Empty
-    );
-}
-
-#[tokio::test]
 async fn accepted_turn_finishes_without_observers_and_replays_without_a_profile() {
     let dir = tempfile::tempdir().unwrap();
     let session = make_session(dir.path());
@@ -426,6 +383,67 @@ async fn accepted_turn_finishes_without_observers_and_replays_without_a_profile(
         2,
         "same text with a new identity is independent"
     );
+}
+
+#[tokio::test]
+async fn new_submission_closes_old_turn_without_stealing_identity_or_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = make_session(dir.path());
+    let workspace = crate::root::LocalWorkspaceRoot::resolve().unwrap();
+    let pending = begin_pending_turn(&session, workspace.store_key());
+    let client = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_events(happy_events())
+            .build(),
+    );
+    let mut request = make_request("新的输入");
+    request.test_llm = Some((client.clone(), lattice_llm::ProviderKind::Anthropic));
+    let id = lancet_protocol::TurnId::parse("33333333-3333-4333-8333-333333333333").unwrap();
+    let verified = Arc::default();
+    let execution = super::execute::start_execution(
+        session.clone(),
+        id,
+        workspace,
+        request,
+        None,
+        false,
+        Arc::clone(&verified),
+    );
+    assert!(matches!(
+        execution.acceptance.await.unwrap().unwrap(),
+        super::types::TurnAcceptance::Accepted { turn_id } if turn_id == id
+    ));
+    let events: Vec<_> = execution.events.collect().await;
+    let super::types::TurnCompletion::Committed(commit) =
+        execution.completion.await.unwrap().unwrap()
+    else {
+        panic!("新任务应完成");
+    };
+    assert_eq!(commit.turn_id, id);
+    assert_eq!(verified.get(), Some(&id));
+    assert_eq!(client.call_count(), 1);
+    let old = session
+        .read_view(TEST_SESSION_ID, Some(pending.snapshot.turn_id))
+        .await
+        .unwrap();
+    let Some(lattice_session::StoredTurn::Committed { commit: old, .. }) = old.requested_turn
+    else {
+        panic!("旧任务应已关闭");
+    };
+    assert_eq!(old.origin, lattice_session::ClosureOrigin::Reconciled);
+    assert!(matches!(
+        old.outcome,
+        lattice_session::TurnOutcome::Interrupted { .. }
+    ));
+    let commits: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.event {
+            TurnEvent::TurnCommitted { commit_id, .. } => Some(commit_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(commits, vec![&commit.commit_id]);
+    assert_eq!(session.log(TEST_SESSION_ID).unwrap().len(), 2);
 }
 
 #[tokio::test]

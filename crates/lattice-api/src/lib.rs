@@ -50,7 +50,7 @@ pub use session::{
 pub use turn::{
     RunTurnRequest, RunTurnResult, RunTurnStage, STREAM_IDLE_TIMEOUT_SECS, ToolResultSummary,
     TurnAcceptance, TurnCompletion, TurnEvent, TurnEventStream, TurnExecution, TurnUsageSummary,
-    collect_turn_result_from_events, recover_turn, start_turn,
+    collect_turn_result_from_events, start_turn,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use turn::{run_turn, stream_turn};

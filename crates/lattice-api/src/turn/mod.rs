@@ -40,7 +40,7 @@ mod live_tests;
 pub use collector::collect_turn_result_from_events;
 #[cfg(test)]
 pub(crate) use coordinator::finalize_fault;
-pub use execute::{STREAM_IDLE_TIMEOUT_SECS, recover_turn, start_turn};
+pub use execute::{STREAM_IDLE_TIMEOUT_SECS, start_turn};
 pub(crate) use execute::{recover_turn_with_target, start_execution};
 #[cfg(any(test, feature = "test-utils"))]
 pub use execute::{run_turn, stream_turn};

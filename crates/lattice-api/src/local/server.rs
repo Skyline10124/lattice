@@ -326,32 +326,31 @@ impl Backend {
         Ok(owner)
     }
 
+    async fn close_pending(&self, api: crate::SessionApi, session_id: &str) -> Result<()> {
+        if api.read_view(session_id, None).await?.active_turn.is_none() {
+            return Ok(());
+        }
+        // 关闭诊断单独归属旧任务，不占用随后新提交的 Owner 身份或事件通道。
+        let target = Arc::default();
+        let result =
+            crate::turn::recover_turn_with_target(api, session_id.to_owned(), Arc::clone(&target))
+                .await
+                .map_err(LocalError::from);
+        if let Some(id) = target.get() {
+            lock(&self.admission).completions.insert(
+                (session_id.to_owned(), *id),
+                result.as_ref().map(|_| ()).map_err(Clone::clone),
+            );
+        }
+        result.map(|_| ())
+    }
+
     async fn perform(&self, operation: Request, owner: &Owner) -> Result<()> {
         match operation {
             Request::Submit {
                 request,
                 configuration,
             } => self.submit(request, configuration, owner).await,
-            Request::Recover { session_id } => {
-                let api = self.open().await?;
-                let recovered = crate::turn::recover_turn_with_target(
-                    api,
-                    session_id.clone(),
-                    owner.verified_turn.clone(),
-                )
-                .await?;
-                if let Some(commit) = &recovered {
-                    *lock(&owner.turn) = Some(OwnedTurn {
-                        id: commit.turn_id,
-                        completion: Some(Ok(())),
-                    });
-                }
-                owner.reply(Response::View(Box::new(
-                    self.query(session_id, recovered.map(|commit| commit.turn_id))
-                        .await?,
-                )));
-                Ok(())
-            }
             Request::Create { request } => {
                 let layout = self.layout.clone();
                 let session = blocking(move || {
@@ -364,6 +363,7 @@ impl Backend {
             }
             Request::Write { session_id, change } => {
                 let api = self.open().await?;
+                self.close_pending(api.clone(), &session_id).await?;
                 let id = session_id.clone();
                 let result = blocking(move || {
                     let (id, execution_lock) = api.try_lock_execution(&id)?;
@@ -394,6 +394,7 @@ impl Backend {
                 workspace,
             } => {
                 let api = self.open().await?;
+                self.close_pending(api.clone(), &session_id).await?;
                 let result = blocking(move || {
                     match crate::rewind_to_turn(&api, &session_id, &target, &workspace) {
                         Ok(crate::RewindOutcome::Success(value)) => {
@@ -447,10 +448,11 @@ impl Backend {
                 "workspace differs from session binding",
             ));
         }
-        // 已有事实与恢复优先于新配置校验；找回不能用重发材料覆盖冻结配置。
-        let (loaded_profile, connection) = if view.requested_turn.is_some()
-            || view.active_turn.is_some()
-        {
+        // 同请求只确认原事实；不同旧任务先关闭，再继续本次配置握手。
+        if view.requested_turn.is_none() && view.active_turn.is_some() {
+            self.close_pending(api.clone(), &request.session_id).await?;
+        }
+        let (loaded_profile, connection) = if view.requested_turn.is_some() {
             (None, None)
         } else if let Some(configuration) = configuration {
             let (profile, connection) = blocking(move || configuration.into_execution()).await?;
@@ -492,7 +494,6 @@ impl Backend {
             crate::TurnAcceptance::Accepted { turn_id }
             | crate::TurnAcceptance::ConfirmationUnknown { turn_id } => *turn_id,
             crate::TurnAcceptance::Existing(turn) => turn.started().turn_id,
-            crate::TurnAcceptance::Recovered(commit) => commit.turn_id,
         };
         *lock(&owner.turn) = Some(OwnedTurn {
             id,
@@ -510,15 +511,6 @@ impl Backend {
                     .requested_turn
                     .ok_or_else(internal)?,
             },
-            crate::TurnAcceptance::Recovered(commit) => {
-                let view = self
-                    .query(request.session_id.clone(), Some(commit.turn_id))
-                    .await?;
-                let Some(TurnObservation::Committed(turn)) = view.requested_turn else {
-                    return Err(internal());
-                };
-                Acceptance::Recovered { turn }
-            }
         };
         owner.reply(Response::Acceptance(response));
         while let Some(event) = events.next().await {
@@ -717,12 +709,11 @@ impl Backend {
                 }
                 Err(busy())
             }
-            request
-            @ (Request::Recover { .. } | Request::Write { .. } | Request::Rewind { .. }) => {
+            request @ (Request::Write { .. } | Request::Rewind { .. }) => {
                 let id = match &request {
-                    Request::Recover { session_id }
-                    | Request::Write { session_id, .. }
-                    | Request::Rewind { session_id, .. } => session_id.clone(),
+                    Request::Write { session_id, .. } | Request::Rewind { session_id, .. } => {
+                        session_id.clone()
+                    }
                     _ => unreachable!(),
                 };
                 validate_identity(&id)?;
@@ -810,7 +801,7 @@ impl Backend {
             } else if matches!(view.requested_turn, Some(TurnObservation::Committed(_))) {
                 // 可见的固定 pin 不是确认回执：后台按 session+turn 主动核验并补
                 // 真实引用屏障，不经执行锁也不等待同 Session 其他 Turn 的生命周期；
-                // 无 Owner 的 pending 仍待显式恢复，不经此路径。
+                // 崩溃遗留 pending 由后续新提交或会话写操作自动关闭，不经此观察路径。
                 let confirmed = self.confirm_committed(session_id.clone(), turn_id).await;
                 if confirmed.is_ok() {
                     // 只有核验通过的固定结果才缓存成功；失败不落缓存，下一次
@@ -983,6 +974,8 @@ pub async fn serve(layout: crate::StateLayout) -> Result<()> {
 #[cfg(test)]
 #[path = "server_cancel_tests.rs"]
 mod cancellation_tests;
+#[cfg(test)]
+pub(super) use cancellation_tests::Provider;
 
 #[cfg(test)]
 mod tests {
@@ -1214,6 +1207,61 @@ mod tests {
             .unwrap();
         assert!(view.requested_turn.is_none());
         assert!(view.active_turn.is_none());
+    }
+
+    #[tokio::test]
+    async fn set_agent_without_pending_does_not_require_project_stores() {
+        let directory = tempfile::tempdir().unwrap();
+        let backend = Backend::new(crate::StateLayout::in_state_root(directory.path()));
+        let root = crate::LocalWorkspaceRoot::from_path(directory.path()).unwrap();
+        let Response::Session(session) = backend
+            .dispatch(Request::Create {
+                request: crate::CreateSessionRequest {
+                    label: None,
+                    active_agent: "原代理".into(),
+                    project_branch: "main".into(),
+                    project_store_key: root.store_key_hex(),
+                },
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("应创建会话");
+        };
+        let project_stores = backend.layout.project_dir(&root.store_key());
+        std::fs::remove_dir_all(&project_stores).unwrap();
+        assert!(
+            backend
+                .query(session.session_id.clone(), None)
+                .await
+                .unwrap()
+                .active_turn
+                .is_none()
+        );
+        let response = backend
+            .dispatch(Request::Write {
+                session_id: session.session_id.clone(),
+                change: SessionWrite::SetAgent {
+                    name: "新代理".into(),
+                },
+            })
+            .await
+            .unwrap();
+        assert!(
+            matches!(response, Response::Write(SessionWriteResult::SetAgent(_))),
+            "缺少项目库不应阻止无 pending 的 SetAgent"
+        );
+        assert_eq!(
+            backend
+                .query(session.session_id, None)
+                .await
+                .unwrap()
+                .session
+                .active_agent_name,
+            "新代理"
+        );
+        assert!(!project_stores.exists(), "普通会话写操作不创建项目库");
+        backend.dispatch(Request::Stop).await.unwrap();
     }
 
     pub(super) async fn pending_backend() -> (tempfile::TempDir, Arc<Backend>, TurnRequest) {
@@ -1462,19 +1510,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recovery_completion_belongs_to_the_old_turn() {
-        for independent in [false, true] {
+    async fn auto_close_probe_and_write_preserve_old_completion() {
+        for write in [false, true] {
             let (_directory, backend, old) = pending_backend().await;
             let mut new = old.clone();
             new.turn_id = super::super::new_turn_id();
-            new.input = "not accepted".into();
-            lock(&backend.admission)
-                .completions
-                .insert((old.session_id.clone(), old.turn_id), Err(internal()));
+            new.input = "新的输入".into();
             let response = backend
-                .dispatch(if independent {
-                    Request::Recover {
+                .dispatch(if write {
+                    Request::Write {
                         session_id: old.session_id.clone(),
+                        change: SessionWrite::SetAgent {
+                            name: "新代理".into(),
+                        },
                     }
                 } else {
                     Request::Submit {
@@ -1484,14 +1532,29 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            if independent {
-                assert!(matches!(response, Response::View(_)));
+            if write {
+                assert!(matches!(
+                    response,
+                    Response::Write(SessionWriteResult::SetAgent(_))
+                ));
             } else {
-                assert!(
-                    matches!(response, Response::Acceptance(Acceptance::Recovered { turn }) if turn.turn_id == old.turn_id)
-                );
+                assert!(matches!(
+                    response,
+                    Response::Acceptance(Acceptance::NeedsConfiguration)
+                ));
             }
-            backend.dispatch(Request::Stop).await.unwrap();
+            let view = backend
+                .query(old.session_id.clone(), Some(old.turn_id))
+                .await
+                .unwrap();
+            assert!(view.active_turn.is_none());
+            assert!(
+                matches!(view.requested_turn, Some(TurnObservation::Committed(ref turn))
+                if turn.turn_id == old.turn_id && turn.origin == crate::ClosureOrigin::Reconciled)
+            );
+            if write {
+                assert_eq!(view.session.active_agent_name, "新代理");
+            }
             assert!(
                 backend
                     .query(new.session_id.clone(), Some(new.turn_id))
@@ -1518,6 +1581,7 @@ mod tests {
                 matches!(observation, Observation::Finished { error: None, .. }),
                 "{observation:?}"
             );
+            backend.dispatch(Request::Stop).await.unwrap();
         }
     }
 
@@ -1530,8 +1594,11 @@ mod tests {
                 new.turn_id = super::super::new_turn_id();
                 new.input = "not accepted".into();
                 let operation = if independent {
-                    Request::Recover {
+                    Request::Write {
                         session_id: old.session_id.clone(),
+                        change: SessionWrite::SetAgent {
+                            name: "不应应用".into(),
+                        },
                     }
                 } else {
                     Request::Submit {
@@ -1557,9 +1624,6 @@ mod tests {
                         .await
                         .unwrap()
                 };
-                lock(&backend.admission)
-                    .completions
-                    .insert((old.session_id.clone(), old.turn_id), Err(internal()));
                 let (entered, release, fault_result) =
                     crate::turn::finalize_fault::arm(old.turn_id, after_publish);
                 let (writer, mut client) = UnixStream::pair().unwrap();
@@ -1570,7 +1634,7 @@ mod tests {
                     .await
                     .unwrap()
                     .unwrap();
-                // 无配置确认/恢复虽拥有旧 Turn 的观察与诊断，仍不接管新执行取消。
+                // 关闭旧任务不接管新执行取消，写操作与无配置探测都保持此边界。
                 for turn_id in [old.turn_id, new.turn_id] {
                     assert!(matches!(
                         backend
@@ -1659,14 +1723,32 @@ mod tests {
                     "disconnected operation cannot deliver its receipt"
                 );
                 assert!(
-                    matches!(inflight, Observation::Snapshot { owned: true, ref view, .. }
-                    if matches!(&view.requested_turn, Some(TurnObservation::Pending(turn)) if turn.turn_id == old.turn_id)),
+                    matches!(inflight, Observation::Snapshot { owned: false, ref view, .. }
+                    if matches!(&view.requested_turn, Some(TurnObservation::Pending(turn))
+                        if turn.turn_id == old.turn_id && turn.journal_oid == pending.oid.to_string())
+                        && view.active_turn.as_ref().is_some_and(|turn| turn.turn_id == old.turn_id)),
                     "{inflight:?}"
                 );
-                assert!(
-                    observer_task.await.unwrap().is_err(),
-                    "disconnected observer cannot erase the completion"
+                observer_task.await.unwrap().unwrap();
+                assert_eq!(
+                    lock(&backend.admission)
+                        .completions
+                        .get(&(old.session_id.clone(), old.turn_id)),
+                    Some(&Err(error.clone())),
+                    "断连的观察者不能抹掉完成记录"
                 );
+                if independent {
+                    assert_eq!(
+                        backend
+                            .query(old.session_id.clone(), None)
+                            .await
+                            .unwrap()
+                            .session
+                            .active_agent_name,
+                        "test",
+                        "关闭失败后 SetAgent 不应生效"
+                    );
+                }
                 assert!(
                     owner
                         .reply

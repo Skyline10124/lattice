@@ -421,10 +421,9 @@ impl App {
                     self.submitted = None;
                     if matches!(
                         acceptance,
-                        Acceptance::Recovered { .. }
-                            | Acceptance::Existing {
-                                turn: TurnObservation::Committed(_)
-                            }
+                        Acceptance::Existing {
+                            turn: TurnObservation::Committed(_)
+                        }
                     ) {
                         self.current_turn = None;
                         self.phase = TurnPhase::Idle;
@@ -518,7 +517,7 @@ impl App {
                 if state.phase == ObservationPhase::Live {
                     ""
                 } else {
-                    "；本连接尚未确认 live 所有权；可重连查询或用 session recover 协调"
+                    "；本连接尚未确认 live 所有权；可重连查询，发送新消息前后台会自动关闭崩溃遗留任务"
                 }
             ));
         }
@@ -899,10 +898,9 @@ where
         let reconnect = !app.should_quit && std::mem::take(&mut app.reconnect_requested);
         if cancel || reconnect {
             let target = app.current_turn.or(app.observed_turn);
-            let needs_selection = turn.as_ref().is_none_or(|turn| {
-                target.is_some()
-                    && (target != turn.observed_turn_id() || (cancel && target != turn.turn_id()))
-            });
+            let needs_selection = turn
+                .as_ref()
+                .is_none_or(|turn| target.is_some() && target != turn.turn_id());
             if needs_selection {
                 // 用户选择不同目标才另建只读句柄；旧控制交接不阻塞新目标或等待旧正文。
                 if let Some(old) = turn.replace(client.observe(

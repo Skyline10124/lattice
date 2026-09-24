@@ -159,8 +159,6 @@ pub enum SessionAction {
         #[arg(value_parser = parse_turn_id)]
         turn_id: lattice_api::local::TurnId,
     },
-    /// 独立关闭旧 pending，不请求模型或重新分发工具。
-    Recover { session_id: String },
 }
 
 /// 全部 Session 命令经本地后台；前端只解析、冻结新请求配置和渲染。
@@ -217,11 +215,6 @@ pub async fn run(
                     }
                 );
             }
-        }
-        SessionAction::Recover { session_id } => {
-            let session = api.open_session(&session_id).await?;
-            let view = api.recover(&session.session_id).await?;
-            crate::commands::run::render_view(&api, &view, json).await?;
         }
         SessionAction::New {
             agent,

@@ -388,7 +388,7 @@ impl LocalClient {
         }
     }
 
-    /// 惰性配置入口：首轮无配置探测直接返回 Existing、Busy 或 Recovered 时不调用 load。
+    /// 惰性配置入口：首轮无配置探测直接返回 Existing 或 Busy 时不调用 load。
     /// 收到 NeedsConfiguration 后最多加载一次，后续准入仍可能因并发变化返回这些结果。
     pub async fn submit_with<F, Fut>(&self, request: TurnRequest, load: F) -> Result<Acceptance>
     where
@@ -476,23 +476,11 @@ impl LocalClient {
         }
     }
 
-    pub async fn recover(&self, session_id: &str) -> Result<SessionObservation> {
-        match self
-            .call(Request::Recover {
-                session_id: session_id.into(),
-            })
-            .await?
-        {
-            Response::View(view) => Ok(*view),
-            _ => Err(protocol()),
-        }
-    }
-
     /// 请求取消指定 Turn，并返回后台在判定点是否接管本次意图。
     ///
     /// `true` 表示后台已实际接管带配置的操作，并独立负责从准备到执行、完成或明确诊断的处理与收尾；
     /// 连接退出不撤销该责任。同身份无配置请求若共享该操作，也可以得到 `true`。
-    /// `false` 表示判定点未接管取消；独立无配置探测、确认或恢复仍可能正在运行，
+    /// `false` 表示判定点未接管取消；独立无配置探测、确认或会话写操作仍可能正在运行，
     /// 配置也可能仍由提交连接持有。它不证明没有后台工作或后来不会接受同身份请求。
     ///
     /// 操作明确拒绝、确认未建立 Turn 且监督退出后，新准入不继承旧取消；

@@ -181,8 +181,8 @@ async fn c3_cancel_store_and_supervisor_removal_share_admission_lock() {
     assert!(protected, "查找、资格和置位必须与监督移除同锁");
 }
 
-struct Provider {
-    endpoint: String,
+pub(in crate::local) struct Provider {
+    pub(in crate::local) endpoint: String,
     arrived: oneshot::Receiver<()>,
     release: watch::Sender<bool>,
     shutdown: oneshot::Sender<()>,
@@ -190,7 +190,7 @@ struct Provider {
 }
 
 impl Provider {
-    async fn start() -> Self {
+    pub(in crate::local) async fn start() -> Self {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
@@ -238,10 +238,63 @@ impl Provider {
         }
     }
 
-    async fn finish(self) -> Vec<serde_json::Value> {
+    pub(in crate::local) async fn finish(self) -> Vec<serde_json::Value> {
         self.release.send_replace(true);
         self.shutdown.send(()).unwrap();
         bounded(self.task).await.unwrap()
+    }
+}
+
+#[tokio::test]
+async fn configured_submit_does_not_start_a_turn_when_auto_close_fails() {
+    for after_publish in [false, true] {
+        let (directory, backend, old) = super::tests::pending_backend().await;
+        let provider = Provider::start().await;
+        let mut new = old.clone();
+        new.turn_id = super::super::new_turn_id();
+        new.input = "不应接受的新输入".into();
+        let (entered, release, fault_result) =
+            crate::turn::finalize_fault::arm(old.turn_id, after_publish);
+        let submission = submit(
+            &backend,
+            &new,
+            Some(super::super::tests::frozen(
+                directory.path(),
+                &provider.endpoint,
+            )),
+        );
+        bounded(entered).await.unwrap();
+        release.send(()).unwrap();
+        let response = bounded(submission).await.unwrap().unwrap();
+        assert!(
+            matches!(response, Response::Error(_)),
+            "关闭失败不能返回接受回执"
+        );
+        assert_eq!(
+            bounded(fault_result).await.unwrap(),
+            Some(if after_publish {
+                "injected ref-fsync failure"
+            } else {
+                "injected object-fsync failure"
+            })
+        );
+        idle(&backend).await;
+        let view = backend
+            .query(new.session_id.clone(), Some(new.turn_id))
+            .await
+            .unwrap();
+        assert!(view.requested_turn.is_none(), "关闭失败不能创建新 Turn");
+        assert!(
+            view.active_turn
+                .as_ref()
+                .is_none_or(|turn| turn.turn_id == old.turn_id)
+        );
+        backend.dispatch(Request::Stop).await.unwrap();
+        assert_eq!(
+            provider.finish().await.len(),
+            0,
+            "关闭失败不能调用 provider"
+        );
     }
 }
 
@@ -656,9 +709,17 @@ async fn c5_existing_pending_and_pin_precede_new_configuration_and_recovery_is_c
     );
     let mut new = request.clone();
     new.turn_id = super::super::new_turn_id();
-    new.input = "不接受的新输入".into();
+    new.input = "取消这次新输入".into();
     let (prepared, release) = arm(&backend.gates.prepare);
-    let recovery = submit(&backend, &new, Some(invalid()));
+    let recovery = submit(
+        &backend,
+        &new,
+        Some(configuration_named(
+            directory.path(),
+            &provider.endpoint,
+            "新配置",
+        )),
+    );
     bounded(prepared).await.unwrap();
     assert!(cancel(&backend, &new).await);
     assert!(
@@ -667,7 +728,7 @@ async fn c5_existing_pending_and_pin_precede_new_configuration_and_recovery_is_c
     );
     release.send(()).unwrap();
     assert!(
-        matches!(bounded(recovery).await.unwrap().unwrap(), Response::Acceptance(Acceptance::Recovered { turn }) if turn.turn_id == request.turn_id)
+        matches!(bounded(recovery).await.unwrap().unwrap(), Response::Acceptance(Acceptance::Accepted { turn_id }) if turn_id == new.turn_id)
     );
     let old = committed(&backend, &request).await;
     assert_eq!(old.origin, crate::ClosureOrigin::Reconciled);
@@ -675,14 +736,12 @@ async fn c5_existing_pending_and_pin_precede_new_configuration_and_recovery_is_c
         old.outcome,
         crate::TurnOutcome::Interrupted { .. }
     ));
-    assert!(
-        backend
-            .query(new.session_id, Some(new.turn_id))
-            .await
-            .unwrap()
-            .requested_turn
-            .is_none()
-    );
+    let fresh = committed(&backend, &new).await;
+    assert_eq!(fresh.origin, crate::ClosureOrigin::Live);
+    assert!(matches!(
+        fresh.outcome,
+        crate::TurnOutcome::Cancelled { .. }
+    ));
     assert!(!cancel(&backend, &request).await);
     let replay = submit(&backend, &request, Some(invalid()));
     assert!(

@@ -17,9 +17,6 @@ pub(crate) fn submission_notice(acceptance: &Acceptance) -> String {
         Acceptance::Existing {
             turn: TurnObservation::Committed(turn),
         } => (turn.turn_id, "找回既有结果；未重复执行"),
-        Acceptance::Recovered { turn } => {
-            (turn.turn_id, "旧 Turn 已恢复关闭；本次新 prompt 未接受")
-        }
         Acceptance::NeedsConfiguration => return "本地响应异常".into(),
     };
     format!("{message}：{id}")
@@ -33,7 +30,7 @@ pub(crate) fn cancel_message(status: CancelStatus) -> &'static str {
     match status {
         CancelStatus::Pending => "已请求取消；等待后台接管回执",
         CancelStatus::Taken => "后台已接管取消；持久终态仍待确认",
-        CancelStatus::NotTaken => "后台未接管本次取消；不表示没有后台工作，请查询或显式恢复",
+        CancelStatus::NotTaken => "后台未接管本次取消；不表示没有后台工作，请查询原 Turn",
         CancelStatus::Unknown => "取消确认未知；请按 TurnId 查询或再次明确取消",
         CancelStatus::Moot => "本次取消交接已结束；不作用于其他 Turn，已知结果保持",
     }

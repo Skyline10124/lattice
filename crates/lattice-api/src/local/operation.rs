@@ -24,7 +24,7 @@ pub struct LocalTurn {
     commands: watch::Sender<Commands>,
     abandon: watch::Sender<bool>,
     updates: mpsc::Receiver<LocalUpdate>,
-    targets: watch::Receiver<(Option<TurnId>, Option<TurnId>)>,
+    target: watch::Receiver<Option<TurnId>>,
     task: Option<JoinHandle<DetachReport>>,
 }
 
@@ -41,7 +41,7 @@ impl LocalClient {
         turn
     }
 
-    /// 以原身份惰性提交；首轮无配置探测直接返回 Existing、Busy 或 Recovered 时不调用 load。
+    /// 以原身份惰性提交；首轮无配置探测直接返回 Existing 或 Busy 时不调用 load。
     /// 收到 NeedsConfiguration 后最多加载一次，后续准入仍可能因并发变化返回这些结果。
     pub fn start_turn_with<F, Fut>(
         &self,
@@ -85,21 +85,16 @@ impl LocalTurn {
                 commands,
                 abandon,
                 updates,
-                targets: worker.targets.subscribe(),
+                target: worker.target.subscribe(),
                 task: None,
             },
             worker,
         )
     }
 
-    /// 原提交/取消目标；observe(None) 完成首次选择前为 None。Recovered 不改变它。
+    /// 提交、观察与取消共用的目标；observe(None) 完成首次选择前为 None。
     pub fn turn_id(&self) -> Option<TurnId> {
-        self.targets.borrow().0
-    }
-
-    /// 实际只读订阅目标；Recovered 可使它不同于原提交/取消目标。
-    pub fn observed_turn_id(&self) -> Option<TurnId> {
-        self.targets.borrow().1
+        *self.target.borrow()
     }
 
     /// 同步登记原目标取消意图；已有在途请求先收割，重复输入不产生并发 Cancel。
@@ -164,8 +159,7 @@ struct Worker {
     updates: mpsc::Sender<LocalUpdate>,
     pending: VecDeque<LocalUpdate>,
     report: DetachReport,
-    selected: Option<TurnId>,
-    targets: watch::Sender<(Option<TurnId>, Option<TurnId>)>,
+    target: watch::Sender<Option<TurnId>>,
     submission: Option<JoinHandle<Result<SubmissionReply>>>,
     submission_deadline: Option<Instant>,
     /// 已交接提交等待的取消代次；后续明确取消仍有自己的退出回执窗口。
@@ -213,8 +207,7 @@ impl Worker {
                 history_error: None,
                 state: None,
             },
-            selected: turn_id,
-            targets: watch::channel((turn_id, turn_id)).0,
+            target: watch::channel(turn_id).0,
             submission: None,
             submission_deadline: None,
             submission_handoff: None,
@@ -237,18 +230,15 @@ impl Worker {
     }
 
     fn select(&mut self, selected: Option<TurnId>) {
-        self.selected = selected;
-        if self.report.turn_id.is_none() {
-            self.report.turn_id = selected;
-        }
-        self.targets.send_replace((self.report.turn_id, selected));
+        self.report.turn_id = selected;
+        self.target.send_replace(selected);
     }
 
     fn connect(&mut self) {
         self.deadline = Instant::now() + Duration::from_secs(crate::STREAM_IDLE_TIMEOUT_SECS);
         let client = self.client.clone();
         let session = self.report.session_id.clone();
-        let selected = self.selected;
+        let selected = self.report.turn_id;
         self.connection = Some(tokio::spawn(async move {
             let selected = match selected {
                 Some(id) => Some(id),
@@ -403,11 +393,10 @@ impl Worker {
         } else {
             CompletionConfirmation::Unknown
         };
-        let is_target = self.selected == self.report.turn_id;
-        if phase == ObservationPhase::Live && is_target {
+        if phase == ObservationPhase::Live {
             self.live_evidence = true;
         }
-        if identity.is_some() && is_target {
+        if identity.is_some() {
             self.closed = true;
         }
         self.report.state = Some(LocalState {
@@ -628,12 +617,9 @@ impl Worker {
                 self.live_evidence |= pending.turn_id == turn_id;
                 Some(pending.turn_id)
             }
-            Ok(
-                Acceptance::Existing {
-                    turn: TurnObservation::Committed(turn),
-                }
-                | Acceptance::Recovered { turn },
-            ) => {
+            Ok(Acceptance::Existing {
+                turn: TurnObservation::Committed(turn),
+            }) => {
                 self.closed = true;
                 self.confirmed = Some((turn.turn_id, turn.commit_id.clone()));
                 Some(turn.turn_id)

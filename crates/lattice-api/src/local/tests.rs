@@ -421,7 +421,18 @@ async fn detached_owners_share_acceptance_overlap_and_drain_with_fixed_reload() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn query_and_recovery_do_not_load_new_configuration_or_accept_new_prompt() {
+async fn query_stays_read_only_and_probe_or_write_closes_without_configuration() {
+    for operation in ["probe", "write"] {
+        close_pending_through(operation).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn submit_with_closes_pending_before_loading_configuration_once() {
+    close_pending_through("submit_with").await;
+}
+
+async fn close_pending_through(operation: &str) {
     use lattice_session::pending::{
         FrozenTurnConfig, ToolCatalogSnapshot, TurnExecutionLimits, TurnStartedFacts,
     };
@@ -439,109 +450,156 @@ async fn query_and_recovery_do_not_load_new_configuration_or_accept_new_prompt()
     })
     .await
     .unwrap();
-    for via_prompt in [false, true] {
-        let session = client
-            .create_session(crate::CreateSessionRequest {
-                label: None,
-                active_agent: "test".into(),
-                project_branch: "main".into(),
-                project_store_key: root.store_key_hex(),
+    let session = client
+        .create_session(crate::CreateSessionRequest {
+            label: None,
+            active_agent: "test".into(),
+            project_branch: "main".into(),
+            project_store_key: root.store_key_hex(),
+        })
+        .await
+        .unwrap();
+    let store = lattice_session::GitSessionGraphStore::open_layout(&layout).unwrap();
+    let old_id = TurnId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    {
+        let lock = store
+            .lock_execution(
+                &session.session_id,
+                LockMode::Exclusive,
+                Blocking::NonBlocking,
+            )
+            .unwrap();
+        store
+            .begin_pending_turn(
+                TurnStartedFacts {
+                    turn_id: old_id,
+                    session_id: lancet_protocol::SessionId::parse(&session.session_id).unwrap(),
+                    project_store_key: root.store_key(),
+                    parent_conversation_tip: None,
+                    user_message: lattice_conversation::NativeMessage::new(
+                        lattice_conversation::MessageRole::User,
+                        None,
+                        vec![lattice_conversation::MessagePart::semantic_only(
+                            lattice_conversation::MessageSemantic::Text {
+                                text: "old prompt".into(),
+                            },
+                        )],
+                    ),
+                    config: FrozenTurnConfig {
+                        agent_name: "test".into(),
+                        model: "unconfigured-model".into(),
+                        provider: "test".into(),
+                        system_prompt: None,
+                        profile_snapshot_json: "{}".into(),
+                        policy_snapshot_json: "{}".into(),
+                        catalog: ToolCatalogSnapshot::new("test".into(), vec![]).unwrap(),
+                        limits: TurnExecutionLimits {
+                            timeout_secs: 300,
+                            max_model_steps: 32,
+                            max_model_attempts: 1,
+                        },
+                    },
+                    accepted_at: "2026-09-01T00:00:00Z".into(),
+                },
+                &lock,
+            )
+            .unwrap();
+    }
+    let before = client
+        .query(&session.session_id, Some(old_id))
+        .await
+        .unwrap();
+    assert!(!client.cancel(&session.session_id, old_id).await.unwrap());
+    assert_eq!(
+        before,
+        client
+            .query(&session.session_id, Some(old_id))
+            .await
+            .unwrap()
+    );
+    if operation == "submit_with" {
+        let provider = super::server::Provider::start().await;
+        let new_id = new_turn_id();
+        let loads = std::cell::Cell::new(0);
+        let acceptance = client.submit_with(
+                TurnRequest {
+                    session_id: session.session_id.clone(),
+                    turn_id: new_id,
+                    workspace: root.canonical_path().into(),
+                    input: "关闭旧任务后接受新输入".into(),
+                },
+                || async {
+                    loads.set(loads.get() + 1);
+                    let closed = client.query(&session.session_id, Some(old_id)).await?;
+                    assert!(closed.active_turn.is_none(), "加载配置前必须关闭旧 pending");
+                    assert!(matches!(
+                        closed.requested_turn,
+                        Some(TurnObservation::Committed(ref turn))
+                            if turn.turn_id == old_id && turn.origin == crate::ClosureOrigin::Reconciled
+                    ));
+                    Ok(frozen(workspace.path(), &provider.endpoint))
+                },
+            ).await.unwrap();
+        assert_eq!(loads.get(), 1);
+        assert_eq!(acceptance, Acceptance::Accepted { turn_id: new_id });
+        let mut observation = client
+            .subscribe(&session.session_id, new_id, None)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if let Observation::Finished { view, error, .. } = observation.next().await.unwrap().unwrap() {
+                        assert!(error.is_none());
+                        assert!(matches!(view.requested_turn, Some(TurnObservation::Committed(ref turn))
+                            if turn.turn_id == new_id && matches!(turn.outcome, crate::TurnOutcome::Completed { .. })));
+                        break;
+                    }
+                }
+            }).await.unwrap();
+        assert_eq!(
+            provider.finish().await.len(),
+            1,
+            "只执行新任务，不重放旧任务"
+        );
+    } else if operation == "probe" {
+        let new_id = TurnId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+        let result = client
+            .lookup_or_recover(TurnRequest {
+                session_id: session.session_id.clone(),
+                turn_id: new_id,
+                workspace: root.canonical_path().into(),
+                input: "新的输入".into(),
             })
             .await
             .unwrap();
-        let store = lattice_session::GitSessionGraphStore::open_layout(&layout).unwrap();
-        let old_id = TurnId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
-        {
-            let lock = store
-                .lock_execution(
-                    &session.session_id,
-                    LockMode::Exclusive,
-                    Blocking::NonBlocking,
-                )
-                .unwrap();
-            store
-                .begin_pending_turn(
-                    TurnStartedFacts {
-                        turn_id: old_id,
-                        session_id: lancet_protocol::SessionId::parse(&session.session_id).unwrap(),
-                        project_store_key: root.store_key(),
-                        parent_conversation_tip: None,
-                        user_message: lattice_conversation::NativeMessage::new(
-                            lattice_conversation::MessageRole::User,
-                            None,
-                            vec![lattice_conversation::MessagePart::semantic_only(
-                                lattice_conversation::MessageSemantic::Text {
-                                    text: "old prompt".into(),
-                                },
-                            )],
-                        ),
-                        config: FrozenTurnConfig {
-                            agent_name: "test".into(),
-                            model: "unconfigured-model".into(),
-                            provider: "test".into(),
-                            system_prompt: None,
-                            profile_snapshot_json: "{}".into(),
-                            policy_snapshot_json: "{}".into(),
-                            catalog: ToolCatalogSnapshot::new("test".into(), vec![]).unwrap(),
-                            limits: TurnExecutionLimits {
-                                timeout_secs: 300,
-                                max_model_steps: 32,
-                                max_model_attempts: 1,
-                            },
-                        },
-                        accepted_at: "2026-09-01T00:00:00Z".into(),
-                    },
-                    &lock,
-                )
-                .unwrap();
-        }
-        let before = client
-            .query(&session.session_id, Some(old_id))
-            .await
-            .unwrap();
-        assert!(!client.cancel(&session.session_id, old_id).await.unwrap());
-        assert_eq!(
-            before,
+        assert_eq!(result, Acceptance::NeedsConfiguration);
+        assert!(
             client
-                .query(&session.session_id, Some(old_id))
+                .query(&session.session_id, Some(new_id))
                 .await
                 .unwrap()
+                .requested_turn
+                .is_none()
         );
-        if via_prompt {
-            let new_id = TurnId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
-            let result = client
-                .submit_with(
-                    TurnRequest {
-                        session_id: session.session_id.clone(),
-                        turn_id: new_id,
-                        workspace: root.canonical_path().into(),
-                        input: "new prompt".into(),
-                    },
-                    || async { panic!("recovery must not load configuration") },
-                )
-                .await
-                .unwrap();
-            assert!(matches!(result, Acceptance::Recovered { turn } if turn.turn_id == old_id));
-            assert!(
-                client
-                    .query(&session.session_id, Some(new_id))
-                    .await
-                    .unwrap()
-                    .requested_turn
-                    .is_none()
-            );
-        } else {
-            client.recover(&session.session_id).await.unwrap();
-        }
-        let after = client
-            .query(&session.session_id, Some(old_id))
+    } else {
+        client
+            .write_session(
+                &session.session_id,
+                SessionWrite::SetAgent {
+                    name: "新代理".into(),
+                },
+            )
             .await
             .unwrap();
-        assert!(after.active_turn.is_none());
-        assert!(
-            matches!(after.requested_turn, Some(TurnObservation::Committed(turn)) if turn.origin == crate::ClosureOrigin::Reconciled)
-        );
     }
+    let after = client
+        .query(&session.session_id, Some(old_id))
+        .await
+        .unwrap();
+    assert!(after.active_turn.is_none());
+    assert!(
+        matches!(after.requested_turn, Some(TurnObservation::Committed(turn)) if turn.origin == crate::ClosureOrigin::Reconciled)
+    );
     client.stop().await.unwrap();
     serving.await.unwrap().unwrap();
 }
