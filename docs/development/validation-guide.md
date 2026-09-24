@@ -71,7 +71,6 @@ lattice --json session send "$SESSION_ID" "$PROMPT" --turn-id "$TURN_ID"
 | Busy | 保存未接受的输入，待该 Session 空闲后发送；后台不排队 |
 | 接受确认未知 | 保存原身份，先查询事实；需要确认时显式重发原请求 |
 | 找回已有请求 | 使用返回的原 Turn，核对 pending 或已关闭结果 |
-| 旧 Turn 已恢复关闭，本次新 prompt 未接受 | 查看旧 Turn 结果，再决定是否发送新任务 |
 
 需要显式确认原请求时，恢复已保存的变量，在同一工作区再次执行同一条发送命令：
 
@@ -79,7 +78,7 @@ lattice --json session send "$SESSION_ID" "$PROMPT" --turn-id "$TURN_ID"
 lattice --json session send "$SESSION_ID" "$PROMPT" --turn-id "$TURN_ID"
 ```
 
-重试时沿用保存的 TurnId，不重新运行生成 ID 的一行。后台核验原输入和项目绑定后找回已有请求，不加载新配置、不重跑模型或 Tool，并可补必要持久确认屏障。同请求仍 pending 时，这次找回不关闭旧日志，关闭另用 `recover`；输入或绑定不符返回 Conflict。身份与确认规则见[会话合同](../architecture/session.md#请求身份与确认)。
+重试时沿用保存的 TurnId，不重新运行生成 ID 的一行。后台核验原输入和项目绑定后找回已有请求，不加载新配置、不重跑模型或 Tool，并可补必要持久确认屏障。同请求仍 pending 时，这次找回只确认原接受；崩溃遗留日志在后续新提交或会话写操作前自动关闭。输入或绑定不符返回 Conflict。身份与确认规则见[会话合同](../architecture/session.md#请求身份与确认)。
 
 ### 查询与继续观察
 
@@ -115,15 +114,17 @@ TUI 的 Esc/Ctrl+C 取消、Ctrl+D 或 `/quit` 退出按[键位条件](../archit
 
 #### 关闭崩溃遗留的 Turn
 
-查询看到 pending 且无 live Owner 时，可以显式恢复：
+查询看到崩溃遗留 pending 且无 live Owner 时，直接发送下一条新消息。CLI 为新任务生成新的 TurnId，后台先关闭旧 Turn，再接受并执行这条消息：
 
 ```sh
-lattice --json session recover "$SESSION_ID"
+lattice --json session send "$SESSION_ID" "继续检查项目的测试入口。"
 ```
 
-`recover` 无需当前 profile/provider，取得会话执行所有权后依据持久事实关闭旧 Turn，忙时拒绝。完成后按原 TurnId 查询消息和结果；它不会继续模型或重分发工具。取消的内存意图、已保存取消原因与已记录关闭决定分别处理，具体窗口见[显式恢复流程](../architecture/session.md#显式恢复流程)。
+checkout、branch、reset、set-agent 和 rewind 也由后台先关闭旧 Turn，再执行用户选择的操作。同一 Session 正在执行时，新写操作返回 Busy。旧 Turn 的关闭无需当前 profile/provider；发送新消息时，客户端在旧任务关闭后按需加载新执行配置。
 
-持久写入失败时保留实际 pending 或已可见的最终 pin，不删除状态。本后台按已核验的旧 Turn 保留恢复诊断，断连后用原 ID 执行 `session turn --follow` 仍可取得这份错误。新 prompt 若先遇到另一旧 pending，也只关闭并报告旧 Turn，本次输入未接受。
+关闭遵循 closure-only，只依据旧持久事实收尾，不重放旧模型请求或重分发旧工具。完成后按旧 TurnId 查询原消息和结果；新请求的接受回执与结果属于新 Turn。取消的内存意图、已保存取消原因与已记录关闭决定分别处理，具体窗口见[自动关闭崩溃遗留任务](../architecture/session.md#自动关闭崩溃遗留任务)。
+
+关闭失败时，本次新输入或写操作停止，后台保留实际 pending 或已可见的最终 pin，并按已核验的旧 Turn 保留恢复诊断。断连后用旧 ID 执行 `session turn --follow` 仍可取得这份错误；后续新提交或写操作从原持久停点重新核验。
 
 #### 查询或停止已有后台
 

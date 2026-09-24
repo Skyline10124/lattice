@@ -49,7 +49,7 @@ status: pending
 4. 显式 stop 关闭新准入并等待已接管操作收尾，具体查询、取消和排空责任见[停止后台](session.md#停止后台)。
 5. 后台正常退出时由实例锁持有者清理自己的 socket 并释放资源。锁文件可以留存，是否持锁以 flock 为准；异常退出留下的 socket 由下一持锁者按第 2 步核验处理。
 
-请求接受、未完成进度与永久请求身份由 `sessions.git` 的 PendingTurn、TurnCommit 和永久 pin 保存，见[请求身份与确认](session.md#请求身份与确认)。InvocationStore 与 Workspace History 继续保存各自项目事实。进程控制资源不构成业务状态库；后台启动保持领域库原样，创建走[首次创建](#首次创建)，旧 pending 关闭走[显式恢复](session.md#显式恢复流程)。
+请求接受、未完成进度与永久请求身份由 `sessions.git` 的 PendingTurn、TurnCommit 和永久 pin 保存，见[请求身份与确认](session.md#请求身份与确认)。InvocationStore 与 Workspace History 继续保存各自项目事实。进程控制资源不构成业务状态库；后台启动保持领域库原样，创建走[首次创建](#首次创建)，崩溃遗留 pending 在后续新提交或会话写操作前[自动关闭](session.md#自动关闭崩溃遗留任务)。
 
 #### 本地访问与所有权边界
 

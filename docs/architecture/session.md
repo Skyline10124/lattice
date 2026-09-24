@@ -126,22 +126,21 @@ sequenceDiagram
 | --- | --- | --- |
 | 查看会话：`open`、`list`、status、log、diff | 会话身份及相应历史位置 | 读取已核验的会话或固定历史视图 |
 | 查看一个 Turn：`observe`、`LocalTurn::next/reconnect` | SessionId、所选 TurnId 与历史范围 | 返回只读 LocalTurn；未指定 Turn 时优先选 active，否则选 head 对应 Turn，空会话交付空历史；重连继续原观察目标 |
-| 提交或找回请求：`start_turn_with` | 原请求身份、输入、规范工作区、历史范围及一次性配置加载闭包 | 返回 LocalTurn，完整交付提交并衔接观察；首轮无配置探测直接返回 Existing、Busy 或 Recovered 时不加载配置；收到 NeedsConfiguration 后最多加载一次，后续准入仍可能因并发变化返回这些结果。Recovered 另给旧 Turn 的观察事实 |
+| 提交或找回请求：`start_turn_with` | 原请求身份、输入、规范工作区、历史范围及一次性配置加载闭包 | 返回 LocalTurn，完整交付提交并衔接观察；首轮无配置探测直接返回 Existing 或 Busy 时不加载配置；发现其他崩溃遗留 Turn 时先关闭，再返回 NeedsConfiguration，最多加载一次配置并继续本次新输入。后续准入仍可能因并发变化返回 Existing 或 Busy；新请求的回执与观察保持本次身份 |
 | 读取已固定内容：`read_history` | 已取得的 SessionObservation 与 `HistoryScope` | SelectedTurn 读取所选 Turn，包括 reset 后的永久 pin；Session 遍历固定 head 的可达历史、去重并保留 merge 顺序，再读取固定 active journal；不二次 query |
-| 关闭崩溃遗留：`recover` | SessionId，能够取得独占执行所有权 | 严格打开相关库，依据旧日志仅做关闭，返回结果或恢复需求；无需当前 profile、provider 凭据或 Component 组成 |
 | 请求取消：`LocalTurn::cancel`，或独立命令的 `LocalClient::cancel` | 原目标 SessionId / TurnId | 句柄同步登记意图并管理在途回执；独立命令返回后台接管结果，持久关闭结果另行查询 |
-| 修改会话：创建及引用/状态操作 | 创建输入，或会话身份和变更目标 | 由后台经 SessionApi 执行，受会话锁和严格存储验证约束 |
+| 修改会话：创建及引用/状态操作 | 创建输入，或会话身份和变更目标 | 由后台经 SessionApi 执行；checkout、branch、reset、set-agent 和 rewind 先自动关闭崩溃遗留 Turn，再执行原操作，受会话锁和严格存储验证约束 |
 | 停止后台：`stop` | 当前本地后台 | 关闭新准入并等待已接管操作收尾，返回停止时已知状态 |
 
 `LocalTurn::next` 交付 LocalUpdate，取消一次等待不会丢失已接收更新或半帧；已完成后句柄仍可显式重连。普通退出使用 `detach` 取得最后已知提交、取消、状态和读取诊断，或由 Drop 停止本地后续工作；两者都不新增取消。
 
-`LocalTurn::turn_id` 给出原提交/取消身份；未指定目标的观察句柄在首次选择完成前返回 None。`observed_turn_id` 给出实际只读订阅目标，Recovered 后可以与原身份不同。固定 view 还可同时包含所请求的旧结果与另一个 active Turn，不能据此改写旧句柄身份。前端选择不同活动目标时调用新的 `observe`，原句柄仍独立交接其控制事实；对同一观察目标重连则继续使用原句柄及其已知确认。
+`LocalTurn::turn_id` 给出提交、观察与取消共用的身份；未指定目标的观察句柄在首次选择完成前返回 None。固定 view 还可同时包含所请求的旧结果与另一个 active Turn，不能据此改写旧句柄身份。前端选择不同活动目标时调用新的 `observe`，原句柄仍独立交接其控制事实；对同一观察目标重连则继续使用原句柄及其已知确认。
 
 公开类型与方法见[本地连接与读取](../../crates/lattice-api/src/local/client.rs)、[LocalTurn](../../crates/lattice-api/src/local/operation.rs)和[结果类型](../../crates/lattice-api/src/local/types.rs)，命令用法见[验证操作指南](../development/validation-guide.md#后台与重连操作)。`RewindCoordinator` 独立协调显式文件恢复，遵循工作区合同。
 
 ### 低层接口与提交握手
 
-`query`、`subscribe`、固定对象分页接口继续提供只读操作；一次性 query/recover 返回的 view 可直接交给 `read_history`。`submit`、`lookup_or_recover` 与 `submit_with` 是可能写入的提交接口，不能用作只读重连。前端的持续交互使用上表的具体句柄，握手、订阅切点与控制交接由客户端库维护。
+`query`、`subscribe`、固定对象分页接口继续提供只读操作；一次性 query 返回的 view 可直接交给 `read_history`。`submit`、`lookup_or_recover` 与 `submit_with` 是可能写入的提交接口，不能用作只读重连。前端的持续交互使用上表的具体句柄，握手、订阅切点与控制交接由客户端库维护。
 
 无配置探测允许旧请求找回、Busy 和旧 Turn 关闭先于新凭据加载发生。`NeedsConfiguration` 请求新执行输入，不进入 PendingTurn 的持久阶段；共同惰性握手在库内消费它，最多调用一次加载闭包，并在配置发送关口再次检查本地放弃。`submit_with` 与 `start_turn_with` 复用该握手，前者的闭包仍可借用且不要求 Send/'static，后者为独立任务持有 Send/'static 的闭包和 future。
 
@@ -192,7 +191,7 @@ provider 与 Tool Host 共享本次冻结的 TLS 根内容，各 Turn 独立构�
 | opening 失败，尚无任何流事件，适配器判为可重试且预算尚有剩余 | 写 ModelAttemptFailed，按冻结策略退避，再发布下一尝试序号 |
 | opening 失败且不可重试或尝试预算耗尽 | 写 ModelAttemptFailed，按模型请求失败关闭 |
 | 已收到任何流事件后发生错误、取消或超时，执行核心仍能收尾 | 写 ModelAttemptInterrupted，进入关闭 |
-| 进程突然退出，尝试结束事实未保存 | 重开根据已持久阶段关闭；只有 ModelAttemptStarted 时按进程中断处理，见“显式恢复流程” |
+| 进程突然退出，尝试结束事实未保存 | 重开根据已持久阶段关闭；只有 ModelAttemptStarted 时按进程中断处理，见“自动关闭崩溃遗留任务” |
 | 收到完整有效消息 | 无 Tool 时发布 MessageComplete；有 Tool 时进入 BindingPlanned |
 | 完整输出的批次校验失败 | 写 ModelAttemptRejected，保存类型化拒绝原因并关闭 |
 
@@ -354,13 +353,13 @@ flowchart LR
 | 同 Session 有不同请求正在执行 | 非阻塞返回 Busy；前端保留未提交输入，由用户稍后发送 |
 | 同请求仍 pending，能够取得执行所有权 | 核验原输入和绑定，确认原接受；这次找回保持 pending，不推进模型或结果关闭 |
 | 同请求已有永久 pin | 核验精确最终候选，完成必要确认屏障，返回原结果 |
-| 发现其他旧 pending，能够取得独占权 | 只关闭并报告旧 Turn；本次新 prompt 未接受，用户在恢复后另行发送 |
+| 发现其他旧 pending，能够取得独占权 | 先按 closure-only 规则关闭旧 Turn，再继续本次新输入；关闭失败则提交失败，不接受新输入 |
 
 显式同请求重试沿用原候选、时间和冻结配置。无法确认时返回错误与未知状态，前端保留原 TurnId；重连读取使用 query/subscribe，可能补屏障或关闭旧 Turn 的 `lookup_or_recover` 只用于提交流程。
 
 执行核心分别给出接受结果、完成结果和观察事件。`stream_turn`、`run_turn` 复用该核心，收集事件之外仍须取得独立 completion。Backend 在 Owner 退场后保存本进程已知的完成确认或错误；恢复取得执行锁并核验旧 Turn 后确定诊断归属。旧 Turn 仍 pending 时，新订阅者取得该已知恢复错误；已关闭的固定结果由后台重新核验（见下段），旧错误缓存不阻止修复后的再次核验。未经核验的请求冲突不覆盖原 Turn 的诊断。
 
-Backend 重启后内存确认丢失，但观察已关闭结果不再要求用户重发原请求。用户读取结果、后台核验、前端显示按此顺序成立：订阅固定 pin 的已关闭 Turn 时，后台按 session+turn 核验 TurnCommit 及其关联数据，拒绝同 Turn active-turn 异常，并在短仓库写锁内补足 pending 引用 fsync 屏障，核验通过才交付完成确认。该核验不经执行锁，不等待同 Session 其他 Turn 的生命周期，也不关闭、取消或重放它们；无 Owner 的 pending 仍待显式恢复，不由观察触发。真实存储错误按具体失败诊断交付，不以“缓存空/锁忙”要求重试。可读 pin、TurnStarted/TurnCommitted 观察事件或流结束本身仍不是确认回执；请求找回保证不扩展为 Tool exactly-once。
+Backend 重启后内存确认丢失，但观察已关闭结果不再要求用户重发原请求。用户读取结果、后台核验、前端显示按此顺序成立：订阅固定 pin 的已关闭 Turn 时，后台按 session+turn 核验 TurnCommit 及其关联数据，拒绝同 Turn active-turn 异常，并在短仓库写锁内补足 pending 引用 fsync 屏障，核验通过才交付完成确认。该核验不经执行锁，不等待同 Session 其他 Turn 的生命周期，也不关闭、取消或重放它们；无 Owner 的 pending 等待下一次新提交或写操作自动关闭，不由观察触发。真实存储错误按具体失败诊断交付，不以“缓存空/锁忙”要求重试。可读 pin、TurnStarted/TurnCommitted 观察事件或流结束本身仍不是确认回执；请求找回保证不扩展为 Tool exactly-once。
 
 LocalTurn 将固定结果、观察阶段和完成确认分别交付。`ObservationPhase::Live` 表示当前切点已核验观察 Owner，NoOwner 表示该切点没有观察 Owner；它们不判定取消资格。Finished 表示独立后台完成回执，可能携带仍 pending 的视图或真实完成失败。
 
@@ -399,8 +398,8 @@ Backend 以实际接管的操作确定取消资格。新建带完整配置的 Su
 | --- | --- |
 | 原目标的带配置操作已被实际接管 | 置位同一取消载体并返回 true；重复请求幂等，后台独立处理至完成或明确诊断，连接退出不撤销责任 |
 | 无配置请求共享了上述操作 | 仍可返回 true；资格来自被共享的实际操作，不取决于来访连接是否带配置 |
-| 独立无配置探测、确认或恢复，或配置仍由连接持有并等待探测结束 | 不接管新执行取消；false 仅表示判定点未接管，不证明没有后台工作或后来不会接受同身份请求 |
-| 没有可接管取消的对应操作 | 查询原持久事实后返回 false，查询错误仍返回错误；已有 pending 的关闭另走显式 recover |
+| 独立无配置探测、确认、会话写操作，或配置仍由连接持有并等待探测结束 | 不接管新执行取消；false 仅表示判定点未接管，不证明没有后台工作或后来不会接受同身份请求 |
+| 没有可接管取消的对应操作 | 查询原持久事实后返回 false，查询错误仍返回错误；崩溃遗留 pending 在后续新提交或写操作前自动关闭 |
 | 请求传输失败或回执丢失、超时 | 客户端报告 Unknown，保留原身份及其他已知事实 |
 
 操作明确拒绝、可确认未建立 Turn 且监督退场后，新一轮同身份准入不继承旧取消，包括早已到达、此时才重新准入的连接。未知发布、已有 pending 或 pin 仍按原候选与持久事实核验，不归入这类明确拒绝。
@@ -409,7 +408,7 @@ Backend 以实际接管的操作确定取消资格。新建带完整配置的 Su
 
 LocalTurn 将取消显示为 Pending、Taken、NotTaken、Unknown 或 Moot，分别表示等待回执、已接管、判定点未接管、回执未知及无需继续交接。原目标尚未关闭、取消尚未接管且无在途 Cancel 时，首次 false 或传输未知与同目标接受/owned 观察证据结合，最多触发一次补发；两种回执先后顺序共用该额度。
 
-true 后由后台履行责任，不自动补发；再次明确取消可开始新额度，旧在途回执不充当新意图回执。后台明确拒绝本次操作或原目标已关闭时结束后续补发，已知 Taken 与真实结果分别保留；Recovered 不把新请求取消转给旧 Turn。
+true 后由后台履行责任，不自动补发；再次明确取消可开始新额度，旧在途回执不充当新意图回执。后台明确拒绝本次操作或原目标已关闭时结束后续补发，已知 Taken 与真实结果分别保留；新请求取消不转给自动关闭的旧 Turn。
 
 `NotSubmitted` 只说明本客户端放弃后续配置发送的位置。CLI 的 `not_sent` 对应配置冻结中放弃，`not_accepted` 对应收到 NeedsConfiguration 后放弃；记录形状保持，含义限定于本客户端。已经发出的探测可能共享其他连接的执行，因此晚到的本地未提交结果不撤销已知接受、Taken 或完成事实。
 
@@ -423,11 +422,15 @@ true 后由后台履行责任，不自动补发；再次明确取消可开始新
 
 取消控制本身在内存中，true 确认的是当前操作接管，不保证迟到取消改写已决定结果或必得持久 Cancelled。执行核心随后保存的取消原因、Invocation 终态和 StepClosed 决定才是崩溃后可用事实。调用关闭区分未分发、已确认取消和执行不确定，已有终态保持原值。以取消为主因的 Turn 关闭为 Cancelled，已关闭消息、调用事实和已发生效果保留；取消不回滚文件。崩溃窗口的顶层分类见下节。
 
-### 显式恢复流程
+### 自动关闭崩溃遗留任务
 
-用户重连看到 pending 且无 live Owner 后，可以发起 recover。Backend 接管恢复任务，执行核心非阻塞取得独占 SessionExecutionLock，核对 Session/项目绑定并严格打开相关库。TurnCoordinator 固定并验证 PendingSnapshot 和 Invocation 事实，把它们交给纯 reducer；reducer 返回关闭计划或候选修订请求，协调层执行跨库 I/O，再发布最终结果。
+用户发送新消息，或执行 checkout、branch、reset、set-agent、rewind 时，Backend 先取得该 Session 的操作准入。若存在其他崩溃遗留 pending，执行核心非阻塞取得独占 SessionExecutionLock，核对 Session/项目绑定并严格打开相关库。TurnCoordinator 固定并验证 PendingSnapshot 和 Invocation 事实，把它们交给纯 reducer；reducer 返回关闭计划或候选修订请求，协调层执行跨库 I/O，再发布最终结果。
 
-这种恢复称为 closure-only：它依据已保存事实完成关闭，不重新请求 provider 或执行 Tool。恢复可保留已发生效果与可用材料；仅留在进程内 receipt、尚未持久保存的内容无法保证找回。
+旧 Turn 成功关闭后，后台继续用户原本的操作。新提交按需加载配置并接受、执行本次输入；回执、观察事件、诊断和取消身份归属新 Turn，旧关闭结果按原 TurnId 查询。关闭失败时返回现有错误及诊断，本次新输入或写操作停止。关闭本身无需当前 profile、provider 凭据或 Component 组成。
+
+同一 Session 正在执行操作时，新写操作在后台准入阶段返回 Busy；只有取得执行所有权后才协调遗留日志。同请求重试仍按[请求身份与确认](#请求身份与确认)找回原事实。后台启动和只读查询、观察保持原有边界，自动关闭由上述新提交或写操作触发。
+
+这种关闭称为 closure-only：它依据已保存事实完成旧 Turn，不重新请求旧任务的 provider 或执行 Tool。已发生效果与可用材料继续保留；仅留在进程内 receipt、尚未持久保存的内容无法保证找回。
 
 | 重开时的持久状态 | 关闭方向 |
 | --- | --- |

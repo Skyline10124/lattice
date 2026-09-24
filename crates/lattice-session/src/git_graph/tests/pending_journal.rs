@@ -993,7 +993,7 @@ fn confirm_committed_turn_verifies_the_fixed_result_without_the_execution_lock()
         .confirm_committed_turn(&session, &turn_id())
         .expect("confirm after the barrier failure");
     assert_eq!(resumed.commit_id, commit_oid);
-    // 无 pin 的 Turn 不是可确认的固定结果：pending 仍待显式恢复。
+    // 无 pin 的 Turn 在此返回 NotFound；确认入口只处理固定的已关闭结果。
     let other = lancet_protocol::TurnId::parse("00000000-0000-4000-8000-00000000000f").expect("t");
     assert!(matches!(
         store.confirm_committed_turn(&session, &other),

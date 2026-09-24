@@ -113,12 +113,11 @@ lattice tui <session_id>
 lattice session turn <session_id> <turn_id>
 lattice session turn <session_id> <turn_id> --follow
 lattice session cancel <session_id> <turn_id>
-lattice session recover <session_id>
 lattice daemon status
 lattice daemon stop
 ```
 
-`<session_id>` 与 `<turn_id>` 替换为保存的身份。查询得到 `pending` 时，任务尚未关闭；后台仍运行可继续观察，后台崩溃遗留则用 `recover` 仅关闭旧 Turn。观察缺口会提示并重新读取已保存对话，缺失的旧流式文字不逐 token 补播。
+`<session_id>` 与 `<turn_id>` 替换为保存的身份。查询得到 `pending` 时，任务尚未关闭；后台仍运行可继续观察。后台崩溃遗留的任务，会在该会话下一次发送新消息，或执行 checkout、branch、reset、set-agent、rewind 之前自动关闭：关闭只依据已保存的进度，不再请求模型、不重跑工具；随后正常执行这次操作。观察缺口会提示并重新读取已保存对话，缺失的旧流式文字不逐 token 补播。
 
 结果可读但接受或完成确认未知时，保留原 TurnId，按[操作指南](docs/development/validation-guide.md#后台与重连操作)查询或显式重试原请求。指南也说明取消、后台停止、退出码及当前重连限制；这些入口尚不代表本工作分支已通过产品验收。
 

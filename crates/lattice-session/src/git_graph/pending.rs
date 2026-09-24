@@ -986,7 +986,7 @@ impl GitSessionGraphStore {
     ///
     /// 与 [`Self::finalize_turn`] 不同，本入口不取得会话执行锁，也不能关闭
     /// pending Turn 或发布引用；没有固定已关闭结果的 Turn 在此不可确认，
-    /// pending 仍只经显式恢复关闭。
+    /// 崩溃遗留 pending 由后台在新提交或会话写操作前自动关闭。
     pub fn confirm_committed_turn(
         &self,
         session_id: &str,
