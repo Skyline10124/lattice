@@ -18,8 +18,6 @@
 
 修改前读取[会话](../../docs/architecture/session.md)、[工作区](../../docs/architecture/workspace.md)、[存储](../../docs/architecture/storage.md)、[LANCET](../../docs/architecture/lancet.md)及 [Cell](../../docs/architecture/cell.md)合同。
 
-> 本入口的后台相关修订待人类批准；生效前原有效版本继续适用，见[修订状态](../../docs/README.md#工作分支修订状态)。
-
 ## 局部约束
 
 - TurnCoordinator 是唯一 Turn saga 所有者，使用窄领域接口持有全 Turn SessionExecutionLock；无第二 dispatch/schema/Component 组装路径或跨库事务，不同时持有两把仓库写锁。CLI 渲染与 provider wire 分别留在 CLI/LLM。

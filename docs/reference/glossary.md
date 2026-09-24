@@ -6,7 +6,7 @@ status: active
 
 LATTICE 是以会话为中心的 LLM 运行时，Agent 通过 LANCET 调用封闭目录中的结构化 Tool，操作用户的 Local Workspace。
 本文件是项目唯一的领域术语表，提供简短定义、关键区别与合同入口；完整规则由对应合同维护。
-引用待批准修订的词条按[工作分支修订状态](../README.md#工作分支修订状态)使用，生效前仍以原有效合同为准；术语表不批准新语义。
+术语表不批准新语义。
 
 ## 术语
 
@@ -122,12 +122,12 @@ _Avoid_: token replay, layout body width, frozen configuration
 
 **会话固定视图**:
 后台为一次读取选定的会话历史位置与已保存进度版本，使读取期间的新发布不混入该次对话。
-见[观察与重连](../architecture/session.md#观察与重连)；该后台读取语义仍属 R1 待批准修订，不表示整个工作区快照。
+见[观察与重连](../architecture/session.md#观察与重连)；该后台读取语义不表示整个工作区快照。
 _Avoid_: live mutable head, whole-workspace snapshot
 
 **观察 Gap**:
 通知客户端观察事件不连续的信号，客户端据此提示缺口并重新读取固定的持久对话。
-见[观察与重连](../architecture/session.md#观察与重连)，属 R1 待批准修订；观察缺失不等同于持久消息或调用终态丢失。
+见[观察与重连](../architecture/session.md#观察与重连)；观察缺失不等同于持久消息或调用终态丢失。
 _Avoid_: journal corruption, tool failure, layout gap
 
 **Session History**:

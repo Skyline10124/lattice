@@ -1,12 +1,11 @@
 ---
-status: pending
+status: active
 ---
 
 # 会话与 Turn
 
 > 类型：架构合同
 > 上位依据：[项目宪章](../governance/charter.md)、[宿主平台](platform.md)
-> 修订状态：本工作分支的本地后台、请求确认与重连修订待人类批准；生效前[原有效版本](https://github.com/Skyline10124/lattice/blob/0e20dc090dce79330e06276da8255e9f4fb8cc39/docs/architecture/session.md)继续适用。
 
 ## 目的与范围
 
@@ -516,7 +515,7 @@ SessionState 通过上述引用关系定位活动 Turn，不重复保存它；�
 | 工作区访问与 Turn checkpoint | 项目 WorkspaceOperationLock | 按[工作区操作锁](workspace.md#操作锁)覆盖相应操作；checkpoint 从读取至最终会话事务持共享锁 |
 | 单库发布 | 该 repository write lock | 覆盖旧 tip、对象、引用事务及屏障，遵循[存储锁机制](storage.md#锁与并发语义) |
 
-status 的固定短仓库视图是本次 R1 待批准语义替代。原有效版本要求 status 取得非阻塞共享执行锁，独占者存在时返回 SessionBusy；本文不把两者视为等义整理。
+status 使用固定短仓库视图，这是 R1 对原语义的替代：R1 前的版本要求 status 取得非阻塞共享执行锁，独占者存在时返回 SessionBusy；本文不把两者视为等义整理。
 
 不同 Session 的执行锁独立，同项目不同 Session 的模型执行可以重叠。共享工作区按操作协调，而非按整个 Turn 排队。涉及多类锁时依次取得 SessionExecutionLock、WorkspaceOperationLock、至多一个 repository write lock；显式重入、FIFO 的适用范围和释放规则由存储合同维护。
 
@@ -569,4 +568,4 @@ status 的固定短仓库视图是本次 R1 待批准语义替代。原有效版
 
 Schema、摘要或阶段迁移修改须检查已存记录、完整前驱链、调用方与恢复路径。版本化载荷与类型分别由 [PendingTurn 合同类型](../../crates/lattice-session/src/pending/contract.rs)、[绑定](../../crates/lattice-session/src/pending/binding.rs)、[结果材料](../../crates/lattice-session/src/pending/draft.rs)和[关闭类型](../../crates/lattice-session/src/pending/outcome.rs)维护。
 
-原有效协议中有序对话、会话权威、尝试与预算、精确候选、累积 transcript、ResultDraft、重开和最终发布条款在本文相应章节承接。背景取舍见 [ADR 0005](../adr/0005-durable-turn-invocation-and-private-git-stores.md)，未迁入的局部细则继续由[会话](../../crates/lattice-session/AGENTS.md)、[API](../../crates/lattice-api/AGENTS.md)、[对话](../../crates/lattice-conversation/AGENTS.md)和 [Agent](../../crates/lattice-agent/AGENTS.md)入口承接。旧性能活动保留在历史证据中，现行诊断入口为 [InvocationStore 诊断指南](../development/invocation-store-diagnostics.md)。本地后台修订的效力仍受文件头的待批准范围限定。
+R1 前协议中有序对话、会话权威、尝试与预算、精确候选、累积 transcript、ResultDraft、重开和最终发布条款在本文相应章节承接。背景取舍见 [ADR 0005](../adr/0005-durable-turn-invocation-and-private-git-stores.md)，未迁入的局部细则继续由[会话](../../crates/lattice-session/AGENTS.md)、[API](../../crates/lattice-api/AGENTS.md)、[对话](../../crates/lattice-conversation/AGENTS.md)和 [Agent](../../crates/lattice-agent/AGENTS.md)入口承接。旧性能活动保留在历史证据中，现行诊断入口为 [InvocationStore 诊断指南](../development/invocation-store-diagnostics.md)。

@@ -1,12 +1,11 @@
 ---
-status: pending
+status: active
 ---
 
 # 私有存储与持久化
 
 > 类型：架构合同
 > 上位依据：[项目宪章](../governance/charter.md)、[宿主平台](platform.md)
-> 修订状态：本工作分支的后台作用域与本地访问边界修订待人类批准；生效前[原有效版本](https://github.com/Skyline10124/lattice/blob/0e20dc090dce79330e06276da8255e9f4fb8cc39/docs/architecture/storage.md)继续适用。
 
 ## 目的与范围
 
@@ -258,4 +257,4 @@ SIGKILL 后重开证明相应进程崩溃场景；注入屏障失败验证调用
 
 承接来源包括 ADR 0005 的项目寻址、三库布局、通用内核、操作锁和位置能力部分，以及存储局部指引的已落地屏障和同进程仲裁要求。机制接口与实现核对位置为 [`repo.rs`](../../crates/lattice-store/src/repo.rs)、[`durability.rs`](../../crates/lattice-store/src/durability.rs)、[`lock.rs`](../../crates/lattice-store/src/lock.rs)及 [`probe.rs`](../../crates/lattice-store/src/probe.rs)。
 
-局部指引中“操作锁可重入”的概括按当前显式 guard 语义展开，不迁入旧的自动嵌套假设。创建残留的完整报告、跨位置能力覆盖及多引用发布中断的诊断范围仍需核验。后台作用域与访问边界修订的效力依文件头限定，其他已批准规则继续适用；原实施计划与运行记录留作历史，局部入口另行整理。
+局部指引中“操作锁可重入”的概括按当前显式 guard 语义展开，不迁入旧的自动嵌套假设。创建残留的完整报告、跨位置能力覆盖及多引用发布中断的诊断范围仍需核验。原实施计划与运行记录留作历史。

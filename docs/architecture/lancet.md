@@ -6,7 +6,6 @@ status: active
 
 > 类型：架构合同
 > 上位依据：[项目宪章](../governance/charter.md)、[宿主平台](platform.md)
-> 修订状态：仅“网络获取”中的提交端冻结 TLS 根引用待人类批准；生效前该部分仍适用[原有效版本](https://github.com/Skyline10124/lattice/blob/0e20dc090dce79330e06276da8255e9f4fb8cc39/docs/architecture/lancet.md)，其余合同保持 active。
 
 ## 目的与范围
 
@@ -224,4 +223,4 @@ ledger 是唯一数据权威，`refs/lattice/invocations/high-water` 仅为单�
 - reserved Descriptor 到实际编译 Component 的 exact identity gate、model-visible/executable 启用集一致性，仍须在 Bundle 安装前核验；目录权威保持单一。
 - DNS 后未连接的分类、body 编码与 header 规则仍有未决核验项；本节“网络获取”的有效限制继续适用，未决项不作为已经验证的保证。
 
-合同效力及 TLS 修订范围依文件头限定。历史与已退役实现不作为默认执行入口；术语表的读写入口见[领域文档指引](../agents/domain.md)，未迁入的局部细则继续由相应入口承接。
+历史与已退役实现不作为默认执行入口；术语表的读写入口见[领域文档指引](../agents/domain.md)，未迁入的局部细则继续由相应入口承接。

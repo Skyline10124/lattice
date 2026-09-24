@@ -16,8 +16,6 @@
 
 修改前按对象读取 [LANCET](../../docs/architecture/lancet.md)、[Cell](../../docs/architecture/cell.md)、[工作区](../../docs/architecture/workspace.md)、[存储](../../docs/architecture/storage.md)合同。工具构建见[开发指南](../../docs/development/tool-development.md)，验证范围见[测试工程](../../docs/development/testing.md)。
 
-> 本入口的冻结 TLS 根修订待人类批准；生效前原有效版本继续适用，见[修订状态](../../docs/README.md#工作分支修订状态)。
-
 ## 局部约束
 
 - 不依赖 lancet-api 或 LATTICE session/agent/profile；authority 是合法下层。无 `wasmtime-wasi`/`wasi-common`，只链接版本化 Host imports，无 ambient WASI。

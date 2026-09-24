@@ -103,7 +103,7 @@ lattice tui <session_id>
 
 ## 后台执行与重连
 
-当前工作分支提供本地后台执行与重连入口，相关[合同修订待批准](docs/README.md#工作分支修订状态)。Session 命令与 TUI 首次使用时按需启动同用户、同状态根的后台。一次已接受任务称为 Turn；接受后关闭终端，后台继续执行。
+LATTICE 提供本地后台执行与重连入口。Session 命令与 TUI 首次使用时按需启动同用户、同状态根的后台。一次已接受任务称为 Turn；接受后关闭终端，后台继续执行。
 
 提交时记下 SessionId、TurnId、原输入和工作区，重连用这些身份找回任务。TUI 中空缓冲的 Ctrl+D 或 `/quit` 只退出；运行时 Esc/Ctrl+C 请求取消。重新打开 `lattice tui <session_id>` 读取已保存对话，界面内 `/reconnect` 重新连接。
 

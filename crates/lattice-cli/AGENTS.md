@@ -15,8 +15,6 @@
 
 修改前读取[会话合同](../../docs/architecture/session.md)、[存储后台边界](../../docs/architecture/storage.md#本地后台与访问边界)、[LANCET 操作员接口](../../docs/architecture/lancet.md)、[TUI 分工](../../docs/architecture/tui.md)和[测试工程](../../docs/development/testing.md)。提交接线重点核对[配置冻结](../../docs/architecture/session.md#执行配置冻结)与[请求接受](../../docs/architecture/session.md#请求接受)；找回、查询和重连分别核对[身份与确认](../../docs/architecture/session.md#请求身份与确认)及[观察边界](../../docs/architecture/session.md#观察边界)。运行配方见[验证指南](../../docs/development/validation-guide.md)。
 
-> 本入口的后台相关修订待人类批准；生效前原有效版本继续适用，见[修订状态](../../docs/README.md#工作分支修订状态)。
-
 ## 环境与输出边界
 
 - 工作区 `.env` 是不可信输入。按大小写无关模式拒绝 `LATTICE_*`、provider endpoint 键（`*_BASE_URL`、`*_API_BASE`、`*_API_URL`、`*_ENDPOINT`）、`*_PROXY`、`HOME`/`XDG_*`、`SSL_CERT_FILE`/`SSL_CERT_DIR`；普通凭据仍适用。

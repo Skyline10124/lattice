@@ -8,8 +8,6 @@
 
 修改前读取[测试工程](../../docs/development/testing.md)及[宿主平台](../../docs/architecture/platform.md)。构建、命令和产物定位见[验证指南](../../docs/development/validation-guide.md)，产品断言同时读取对应领域合同。
 
-> 本入口的后台场景与清理修订待人类批准；生效前原有效版本继续适用，见[修订状态](../../docs/README.md#工作分支修订状态)。
-
 ## 局部约束
 
 - manifest 不依赖 lattice/lancet 产品 crate，不用 workspace/path 形式引入产品实现；通用测试和系统库允许。由 `cargo xtask harness-boundary` 按产品名称及 workspace 归属核验，不是禁止所有依赖。

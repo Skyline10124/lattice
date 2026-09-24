@@ -12,8 +12,6 @@
 
 修改前读取[会话合同](../../docs/architecture/session.md)的模型请求、执行预算及事件语义；验证选择遵循[测试工程](../../docs/development/testing.md)。
 
-> 本入口的观察回调修订待人类批准；生效前原有效版本继续适用，见[修订状态](../../docs/README.md#工作分支修订状态)。
-
 ## 边界
 
 - 工作区依赖仅限 `lattice-llm` 和纯数据层 `lattice-conversation`；不引入 session、LANCET runtime/audit、profile 或 store。

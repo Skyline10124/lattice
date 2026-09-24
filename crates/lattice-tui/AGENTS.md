@@ -8,8 +8,6 @@
 
 修改前读取 [TUI 交互与视觉合同](../../docs/architecture/tui.md)。键位、布局尺寸、停靠区、配色、折叠指示及非目标均由该合同维护；取消和持久结果读取[会话合同](../../docs/architecture/session.md)，测试读取[测试工程](../../docs/development/testing.md)。色表是[设计资产](../../docs/reference/cassette-futurism-palette.md)，不代替实际用色规则。
 
-> 本入口的后台相关修订待人类批准；生效前原有效版本继续适用，见[修订状态](../../docs/README.md#工作分支修订状态)。
-
 ## 局部约束
 
 - 新会话准备在 UI 启动前报告配置问题；既有会话与重连走只读入口，新提交才冻结配置。Component 预热与执行由后台所属 API 处理。

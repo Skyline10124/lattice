@@ -1,12 +1,11 @@
 ---
-status: pending
+status: active
 ---
 
 # 测试工程
 
 > 类型：工程合同
 > 上位依据：[项目宪章](../governance/charter.md)、[宿主平台](../architecture/platform.md)
-> 修订状态：本工作分支的自有产品后台、跨进程场景与清理职责修订待人类批准；生效前[原有效版本](https://github.com/Skyline10124/lattice/blob/0e20dc090dce79330e06276da8255e9f4fb8cc39/docs/development/testing.md)继续适用。
 
 ## 目的与范围
 
@@ -252,4 +251,4 @@ Component 可复现性检查中，仅产物摘要漂移按既有约定为警告�
 - [场景定义](../../crates/lattice-system-harness/src/scenario.rs)、[进程驱动](../../crates/lattice-system-harness/src/driver.rs)及 [harness manifest](../../crates/lattice-system-harness/Cargo.toml)：核验实际预算、二进制解析与目标启用条件。
 - [普通 CI](../../.github/workflows/ci.yml)、[完整验证](../../.github/workflows/full-gate.yml)、[本地验证入口](../../xtask/src/ci.rs)与 [rollout](../../xtask/src/rollout.rs)：核验实际编排、构建与证据行为。
 
-[Bundle 安装与活动版本切换](../architecture/lancet.md#bundle-安装设计)尚未实现，其验证不属于现有默认产品矩阵的覆盖。本文后台相关修订的效力依文件头限定，未迁入的局部细则继续由相应入口承接。
+[Bundle 安装与活动版本切换](../architecture/lancet.md#bundle-安装设计)尚未实现，其验证不属于现有默认产品矩阵的覆盖。未迁入的局部细则继续由相应入口承接。

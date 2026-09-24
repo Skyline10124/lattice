@@ -1,12 +1,11 @@
 ---
-status: pending
+status: active
 ---
 
 # TUI 交互与视觉
 
 > 类型：架构合同
 > 上位依据：[项目宪章](../governance/charter.md)、[宿主平台](platform.md)
-> 修订状态：本工作分支的后台接线、历史重载、连接与取消呈现修订待人类批准；生效前[原有效版本](https://github.com/Skyline10124/lattice/blob/0e20dc090dce79330e06276da8255e9f4fb8cc39/docs/architecture/tui.md)继续适用。
 
 ## 目的与范围
 
@@ -284,6 +283,6 @@ TUI 只操作当前会话，不提供会话选择器、分支或时间线视图�
 - [TUI 局部指引](../../crates/lattice-tui/AGENTS.md)：公开 API 边界、键位、输入历史与验证入口。
 - [ADR 0005](../adr/0005-durable-turn-invocation-and-private-git-stores.md)：取消和失败的持久状态由 Turn 协议决定。旧指引“取消后照常 commit”的概括不作为 TUI 保证。
 
-布局公式、尺寸示例、键位条件与配色表沿用原有效版本，是界面设计参数；它们不构成实机可读性验证。DimMeta 在 navy-11 上的可读性仍需人工核验；难读时是否将 session/agent 主值改用 Assistant，仍待审查。
+布局公式、尺寸示例、键位条件与配色表沿用 R1 前的版本，是界面设计参数；它们不构成实机可读性验证。DimMeta 在 navy-11 上的可读性仍需人工核验；难读时是否将 session/agent 主值改用 Assistant，仍待审查。
 
-文件与目录按渲染职责组织，不固定文件数量或源码行数上限；公开 API 边界、共享渲染归属与 block 数据契约保持不变。组织调整不授权新增工具卡片或其他功能。后台相关修订的效力依文件头限定，原有效职责继续由本文承接；历史过程说明留在任务记录中。
+文件与目录按渲染职责组织，不固定文件数量或源码行数上限；公开 API 边界、共享渲染归属与 block 数据契约保持不变。组织调整不授权新增工具卡片或其他功能。R1 前的 TUI 职责由本文承接；历史过程说明留在任务记录中。
