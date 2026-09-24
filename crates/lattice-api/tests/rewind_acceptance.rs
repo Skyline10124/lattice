@@ -118,6 +118,7 @@ fn build_runtime(root: &Path, history: &WorkspaceHistoryBacking) -> ReservedRunt
         .collect();
     ReservedRuntime::build(LancetRuntimeConfig {
         local_workspace_root: root.to_path_buf(),
+        tls_roots_der: Vec::new(),
         invocations: lancet_api::WorkspaceHistoryBacking::Disabled,
         enabled_tools: enabled,
         policy,
@@ -621,7 +622,7 @@ fn turn_request(
         session_id: session_id.to_string(),
         loaded_profile: Some(ws.loaded.clone()),
         cancel_flag: None,
-        test_llm: Some(llm),
+        test_llm: Some((llm, lattice_llm::ProviderKind::Anthropic)),
         test_project_root: Some(ws.root.to_string_lossy().to_string()),
         // Durable path: external audit store and a real private history,
         // both under the scoped state root.

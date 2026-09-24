@@ -10,16 +10,10 @@ use futures::stream::Stream;
 use lattice_profile::LoadedAgentProfile;
 use lattice_session::pending::{ClosureOrigin, TurnOutcome, WorkspaceHistoryCheckpoint};
 
-/// Request to run a turn through either [`run_turn`] or [`stream_turn`].
+/// 各执行入口共用原有请求形状；显式请求身份和连接材料由 [`crate::start_turn`] 单独接收。
 ///
-/// Both facades accept the same input shape, so they share this single
-/// request type. `run_turn` returns after the turn is committed, while
-/// `stream_turn` returns a live [`TurnEvent`] stream after startup validation
-/// so callers can observe model deltas, tool activity, terminal status, and
-/// commit lifecycle events as they occur.
-///
-/// [`run_turn`]: crate::turn::run_turn
-/// [`stream_turn`]: crate::turn::stream_turn
+/// 测试辅助入口 run_turn/stream_turn 复用同一执行核心，分别收集结果或观察事件。
+/// 恢复已有 pending 时只报告旧 Turn，不接受此处的新输入。
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RunTurnRequest {
     pub input: String,
@@ -29,12 +23,27 @@ pub struct RunTurnRequest {
     /// Cooperative cancellation flag forwarded to the agent loop.
     #[serde(skip)]
     pub cancel_flag: Option<Arc<AtomicBool>>,
-    /// Test-only LLM injection for lattice-api integration tests.
+    /// 测试注入同时提供客户端与明确的 provider，避免从模型标签猜测保存身份。
+    /// 只在测试或 `test-utils` 构建中存在，生产调用方无法替换真实模型客户端。
+    #[cfg(any(test, feature = "test-utils"))]
     #[serde(skip)]
-    pub test_llm: Option<Arc<dyn lattice_agent::LlmClient>>,
-    /// Test-only project root for CEP runtime wiring.
+    pub test_llm: Option<(Arc<dyn lattice_agent::LlmClient>, lattice_llm::ProviderKind)>,
+    /// 测试入口使用的项目根目录，生产执行始终使用后台核验过的工作区。
+    #[cfg(any(test, feature = "test-utils"))]
     #[serde(skip)]
     pub test_project_root: Option<String>,
+}
+
+impl RunTurnRequest {
+    /// 测试注入的模型客户端；生产构建中没有注入入口，恒为 None。
+    pub(crate) fn injected_llm(
+        &self,
+    ) -> Option<(Arc<dyn lattice_agent::LlmClient>, lattice_llm::ProviderKind)> {
+        #[cfg(any(test, feature = "test-utils"))]
+        return self.test_llm.clone();
+        #[cfg(not(any(test, feature = "test-utils")))]
+        None
+    }
 }
 
 impl PartialEq for RunTurnRequest {
@@ -212,6 +221,43 @@ pub enum TurnEvent {
         error_code: Option<String>,
     },
 }
+
+/// 接受确认来自持久发布返回值，与有损事件通道无关。
+#[derive(Clone, Debug, PartialEq)]
+pub enum TurnAcceptance {
+    /// 仅在 TurnStarted 已确认持久后返回。
+    Accepted { turn_id: lancet_protocol::TurnId },
+    /// 找回同一请求；Pending 只报告日志，不在此恢复或重新执行。
+    Existing(Box<lattice_session::StoredTurn>),
+    /// 发布结果不确定；不能据此重分配身份，必须查询或重试同一 TurnId。
+    ConfirmationUnknown { turn_id: lancet_protocol::TurnId },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum TurnCompletion {
+    Committed(Box<lattice_session::TurnCommit>),
+    /// 本次所有者任务已结束，但持久 Turn 尚未关闭；不是提交完成。
+    /// 崩溃遗留任务由后续新提交或会话写操作自动关闭。
+    Pending(lancet_protocol::TurnId),
+}
+
+/// 释放观察者或回执不取消任务；后台排空必须等待 completion，而非事件 EOF。
+pub struct TurnExecution {
+    pub acceptance: tokio::sync::oneshot::Receiver<crate::session::Result<TurnAcceptance>>,
+    pub completion: tokio::sync::oneshot::Receiver<crate::session::Result<TurnCompletion>>,
+    pub events: SequencedTurnEventStream,
+    /// 包括未投递事件的最终序号，用于识别尾部缺口；不是持久状态。
+    pub event_sequence: Arc<std::sync::atomic::AtomicU64>,
+    pub cancel_flag: Arc<AtomicBool>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SequencedTurnEvent {
+    pub sequence: u64,
+    pub event: TurnEvent,
+}
+
+pub type SequencedTurnEventStream = Pin<Box<dyn Stream<Item = SequencedTurnEvent> + Send>>;
 
 /// Boxed stream of TurnEvent values.
 pub type TurnEventStream = Pin<Box<dyn Stream<Item = TurnEvent> + Send>>;

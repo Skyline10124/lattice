@@ -224,12 +224,13 @@ fn parse_event_line_checked(line: &str) -> Result<Option<TurnEventLine>, String>
         },
         "turn_committing" => TurnEventLine::TurnCommitting,
         "turn_committed" => {
-            let outcome = value
-                .get("outcome")
-                .and_then(Value::as_object)
-                .and_then(|object| object.keys().next())
-                .cloned()
-                .ok_or_else(|| "field 'outcome' must be a tagged object".to_string())?;
+            let outcome = tagged_outcome(
+                value
+                    .get("outcome")
+                    .ok_or_else(|| "field 'outcome' is required".to_string())?,
+            )
+            .map_err(|reason| format!("field 'outcome': {reason}"))?
+            .to_string();
             required_string(&value, "origin")?;
             if value.get("workspace_history_checkpoint").is_none() {
                 return Err("missing field 'workspace_history_checkpoint'".to_string());
@@ -252,6 +253,18 @@ fn parse_event_line_checked(line: &str) -> Result<Option<TurnEventLine>, String>
         }
         "cep_call_finished" => {
             validate_cep_fields(&value, true)?;
+            TurnEventLine::Unknown {
+                type_name,
+                raw: value,
+            }
+        }
+        "snapshot" => {
+            // 固定快照中已提交 Turn 的 outcome 与直播终态共用同一严格判定；畸形不得充当结果。
+            let turn = &value["view"]["requested_turn"];
+            if turn["state"] == "committed" {
+                tagged_outcome(&turn["outcome"])
+                    .map_err(|reason| format!("committed snapshot outcome: {reason}"))?;
+            }
             TurnEventLine::Unknown {
                 type_name,
                 raw: value,
@@ -372,14 +385,26 @@ impl std::ops::Deref for SendExecution {
 }
 
 impl SendOutcome {
-    /// True iff a `turn_committed` event with `outcome == "completed"` was
-    /// observed. This is the public success signal regardless of exit code
-    /// (the product also derives exit 0 from exactly this state).
-    pub fn has_committed_completed(&self) -> bool {
-        self.events.iter().any(|e| match e {
-            TurnEventLine::TurnCommitted { outcome, .. } => outcome == "completed",
-            _ => false,
+    /// 最终固定快照可补齐丢失的终态事件，但不被伪装成补播事件。
+    pub fn committed_result(&self) -> Option<(&str, &str, &str)> {
+        committed_result(&self.events)
+    }
+
+    pub fn accepted_turn_id(&self) -> Option<&str> {
+        self.events.iter().find_map(|event| match event {
+            TurnEventLine::Unknown { type_name, raw }
+                if type_name == "acceptance" && raw["result"]["acceptance"] == "accepted" =>
+            {
+                raw["result"]["turn_id"].as_str()
+            }
+            _ => None,
         })
+    }
+
+    /// 终态事件可能丢失；固定快照与命令结果仍须分别核验。
+    pub fn has_committed_completed(&self) -> bool {
+        self.committed_result()
+            .is_some_and(|(_, _, outcome)| outcome == "completed")
     }
 
     /// Concatenated `token_delta` content, in arrival order. Lets a scenario
@@ -403,6 +428,147 @@ impl SendOutcome {
     }
 }
 
+fn committed_result(events: &[TurnEventLine]) -> Option<(&str, &str, &str)> {
+    events.iter().rev().find_map(|event| match event {
+        TurnEventLine::TurnCommitted {
+            session_id,
+            commit_id,
+            outcome,
+        } => Some((session_id.as_str(), commit_id.as_str(), outcome.as_str())),
+        TurnEventLine::Unknown { type_name, raw } if type_name == "snapshot" => {
+            let view = &raw["view"];
+            let turn = &view["requested_turn"];
+            if turn["state"] != "committed" {
+                return None;
+            }
+            Some((
+                view["session"]["session_id"].as_str()?,
+                turn["commit_id"].as_str()?,
+                tagged_outcome(&turn["outcome"]).ok()?,
+            ))
+        }
+        _ => None,
+    })
+}
+
+/// 按公开 `TurnOutcome`、`ToolCallValidation`、`AttemptInterruption` 与 `InvocationId`
+/// 的序列化形式核验标签、原因值域和嵌套字段；不导入产品类型，也不接受自造的兼容形式。
+/// 直播 `turn_committed` 与固定快照共用此入口，畸形终态不得进入成功推导。
+fn tagged_outcome(value: &Value) -> Result<&str, String> {
+    let (tag, payload) =
+        single_tag(value).ok_or_else(|| "outcome must carry exactly one tag".to_string())?;
+    if !payload.is_object() {
+        return Err(format!("outcome `{tag}` payload must be an object"));
+    }
+    let valid = match tag {
+        "completed" => payload["finish_reason"].as_str() == Some("stop"),
+        "failed" => valid_failure_reason(&payload["reason"]),
+        "cancelled" => payload["reason"].as_str() == Some("user_cancelled"),
+        "interrupted" => valid_interruption_reason(&payload["reason"]),
+        other => return Err(format!("unknown outcome tag `{other}`")),
+    };
+    if !valid {
+        return Err(format!(
+            "outcome `{tag}` has an invalid finish_reason or reason"
+        ));
+    }
+    Ok(tag)
+}
+
+fn single_tag(value: &Value) -> Option<(&str, &Value)> {
+    let object = value.as_object()?;
+    if object.len() != 1 {
+        return None;
+    }
+    object
+        .iter()
+        .next()
+        .map(|(tag, payload)| (tag.as_str(), payload))
+}
+
+fn valid_failure_reason(value: &Value) -> bool {
+    if let Some(reason) = value.as_str() {
+        return matches!(reason, "model_request_failed" | "model_step_limit_exceeded");
+    }
+    let Some(("invalid_tool_call", payload)) = single_tag(value) else {
+        return false;
+    };
+    let Some((tag, fields)) = single_tag(&payload["validation"]) else {
+        return false;
+    };
+    let required: &[&str] = match tag {
+        "too_many_calls" => &["limit", "actual"],
+        "malformed_arguments"
+        | "arguments_not_object"
+        | "missing_tool_name"
+        | "empty_tool_call_id" => &["call_ordinal"],
+        "arguments_too_large" => &["call_ordinal", "limit", "actual"],
+        "duplicate_tool_call_id" => &["first_ordinal", "second_ordinal"],
+        // 目录外调用仅保存序号，模型提供的工具名不进入公开结果。
+        "unknown_tool" => &["call_ordinal"],
+        _ => return false,
+    };
+    valid_usize_fields(fields, required)
+}
+
+fn valid_interruption_reason(value: &Value) -> bool {
+    if let Some(reason) = value.as_str() {
+        return matches!(
+            reason,
+            "process_interrupted_before_model_attempt"
+                | "process_interrupted_during_model_attempt"
+                | "process_interrupted_during_model_retry"
+                | "process_interrupted_during_tool_binding"
+                | "while_awaiting_model_continuation"
+                | "process_interrupted_during_step_closing"
+        );
+    }
+    match single_tag(value) {
+        Some(("model_attempt", reason)) => valid_attempt_interruption(reason),
+        Some(("invocation_may_have_occurred", payload)) => {
+            payload["invocation"].as_str().is_some_and(|id| {
+                id.len() == 36
+                    && id.bytes().enumerate().all(|(index, byte)| match index {
+                        8 | 13 | 18 | 23 => byte == b'-',
+                        14 => byte == b'4',
+                        19 => matches!(byte, b'8' | b'9' | b'a' | b'b'),
+                        _ => byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte),
+                    })
+            })
+        }
+        _ => false,
+    }
+}
+
+fn valid_attempt_interruption(value: &Value) -> bool {
+    if let Some(reason) = value.as_str() {
+        return matches!(
+            reason,
+            "stream_error" | "timeout" | "cancelled" | "process_interrupted"
+        );
+    }
+    let Some(("output_limit_exceeded", payload)) = single_tag(value) else {
+        return false;
+    };
+    matches!(
+        payload["kind"].as_str(),
+        Some(
+            "tool_call_arguments"
+                | "assistant_content"
+                | "reasoning_content"
+                | "model_attempt_total"
+        )
+    ) && valid_usize_fields(payload, &["limit", "actual"])
+}
+
+fn valid_usize_fields(value: &Value, fields: &[&str]) -> bool {
+    fields.iter().all(|field| {
+        value[*field]
+            .as_u64()
+            .is_some_and(|number| usize::try_from(number).is_ok())
+    })
+}
+
 /// Classify a `session send` exit code into the public contract. A missing
 /// exit code (signal kill) maps to [`SendExitCode::Failed`]: the scenario
 /// treats signal death as a failure, never as success.
@@ -410,41 +576,26 @@ pub fn classify_exit(code: Option<i32>) -> SendExitCode {
     SendExitCode::from_code(code).unwrap_or(SendExitCode::Failed)
 }
 
-/// Derive the expected exit code from the observed event sequence, mirroring
-/// the product's `exit_code_from_state` (`run.rs:128-152`) but using only
-/// public JSONL signals. This is the cross-check that the binary's exit code
-/// agrees with what the stream said.
-///
-/// - `CommitFailed` seen → `Failed` (1).
-/// - Any terminal (`turn_failed` / `turn_cancelled`) seen → `Failed` (1).
-/// - `turn_committed` with `outcome == "completed"` → `Committed` (0).
-/// - `turn_committed` with `outcome == "failed"` or `"cancelled"` → `Failed` (1).
-/// - Stream ended with no terminal/commit signal → `Failed` (1).
+/// 核验任务结局，不把提交或连接诊断当成任务失败；命令退出及输出完整性另行核验。
 pub fn derive_send_exit_code(events: &[TurnEventLine]) -> SendExitCode {
-    if events
-        .iter()
-        .any(|e| matches!(e, TurnEventLine::CommitFailed { .. }))
-    {
-        return SendExitCode::Failed;
-    }
-    if events.iter().any(|e| {
-        matches!(
-            e,
-            TurnEventLine::TurnFailed { .. } | TurnEventLine::TurnCancelled { .. }
-        )
+    if events.iter().any(|e| match e {
+        TurnEventLine::CommitFailed { .. }
+        | TurnEventLine::TurnFailed { .. }
+        | TurnEventLine::TurnCancelled { .. } => true,
+        // 连接或提交回执未知只作诊断；保存、完成确认及其他错误仍失败。
+        TurnEventLine::Unknown { type_name, raw } if type_name == "error" => !matches!(
+            raw["kind"].as_str(),
+            Some("transport" | "protocol" | "not_running")
+        ),
+        _ => false,
     }) {
         return SendExitCode::Failed;
     }
-    for e in events {
-        if let TurnEventLine::TurnCommitted { outcome, .. } = e {
-            return if outcome == "completed" {
-                SendExitCode::Committed
-            } else {
-                SendExitCode::Failed
-            };
-        }
+    if committed_result(events).is_some_and(|(_, _, outcome)| outcome == "completed") {
+        SendExitCode::Committed
+    } else {
+        SendExitCode::Failed
     }
-    SendExitCode::Failed
 }
 
 /// Parse a full `session send` stdout buffer into a [`SendOutcome`]. Blank
@@ -560,8 +711,7 @@ fn send_prompt_with_timeout(
     Ok(SendExecution { command, parsed })
 }
 
-/// A convenience wrapper holding the resolved session id, so a scenario can
-/// call `send` multiple times without re-passing the id.
+/// 保存已解析的会话 ID，供场景多次 `send`，无需重复传入身份。
 pub struct SessionSendDriver<'a> {
     driver: &'a LatticeDriver,
     world: &'a ScenarioWorld,
@@ -571,7 +721,7 @@ pub struct SessionSendDriver<'a> {
 }
 
 impl<'a> SessionSendDriver<'a> {
-    /// Create a new session and wrap the id.
+    /// 创建会话并保存其 ID；会话创建与后续发送都计入场景唯一预算，不在此重新起算。
     pub fn new(
         driver: &'a LatticeDriver,
         world: &'a ScenarioWorld,
@@ -579,7 +729,7 @@ impl<'a> SessionSendDriver<'a> {
         agent: &str,
         project_branch: &str,
     ) -> Result<Self, SessionSendError> {
-        let budget = spec.start_budget();
+        let budget = world.budget(spec);
         let session_id = create_session_with_timeout(
             driver,
             world,
@@ -598,6 +748,11 @@ impl<'a> SessionSendDriver<'a> {
 
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// 场景唯一预算的副本（与 [`ScenarioWorld::budget`] 同一起点）；辅助启动、查询及屏障等待沿用它。
+    pub fn budget(&self) -> &ScenarioBudget {
+        &self.budget
     }
 
     /// Send one prompt and return raw and parsed execution evidence.
@@ -685,6 +840,40 @@ mod tests {
 
     fn line(json: &str) -> TurnEventLine {
         parse_event_line(json).expect("parsed line")
+    }
+
+    #[test]
+    fn real_submission_receipt_loss_does_not_fail_completed_turn() {
+        // 真实 CLI/后台的原始输出：接受回执延迟后丢失，未知交接后读到完成与正文，退出 0。
+        let outcome = parse_send_stdout(
+            include_bytes!("../tests/fixtures/submission_unknown_completed.jsonl"),
+            Some(0),
+        );
+        assert!(outcome.malformed_lines.is_empty());
+        assert_eq!(
+            derive_send_exit_code(&outcome.events),
+            outcome.exit_code.expect("captured CLI exit 0")
+        );
+    }
+
+    #[test]
+    fn fixed_commit_after_gap_does_not_hide_publication_error() {
+        let snapshot = line(
+            r#"{"type":"snapshot","view":{"session":{"session_id":"s1"},"requested_turn":{"state":"committed","commit_id":"c1","outcome":{"completed":{"finish_reason":"stop"}}}}}"#,
+        );
+        let mut events = vec![line(r#"{"type":"gap"}"#), snapshot];
+        assert_eq!(committed_result(&events), Some(("s1", "c1", "completed")));
+        assert_eq!(derive_send_exit_code(&events), SendExitCode::Committed);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, TurnEventLine::TurnCommitted { .. }))
+        );
+        // 最终 pin 可见仍可能在持久确认时保存失败，不能仅凭 Completed 判成功。
+        events.push(line(
+            r#"{"type":"error","kind":"store_unavailable","message":"store unavailable; inspect durable state","recovery":null}"#,
+        ));
+        assert_eq!(derive_send_exit_code(&events), SendExitCode::Failed);
     }
 
     #[test]
@@ -932,6 +1121,131 @@ mod tests {
         ];
         let idxs = assert_event_subsequence(&outcome, &required).expect("subseq");
         assert_eq!(idxs, vec![0, 1, 2, 3, 4]);
+    }
+
+    /// 独立期望夹具：合法标签对象与各类畸形对象；直播 `turn_committed` 与固定快照共用同一判定。
+    fn outcome_tag_fixture() -> Value {
+        serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/turn_outcome_tags.json"
+        )))
+        .expect("fixture JSON")
+    }
+
+    fn committed_line(outcome: &Value) -> String {
+        format!(
+            r#"{{"type":"turn_committed","session_id":"s","commit_id":"c","outcome":{outcome},"origin":"live","workspace_history_checkpoint":"empty"}}"#
+        )
+    }
+
+    fn committed_snapshot_line(outcome: &Value) -> String {
+        format!(
+            r#"{{"type":"snapshot","view":{{"session":{{"session_id":"s"}},"requested_turn":{{"state":"committed","commit_id":"c","outcome":{outcome}}}}}}}"#
+        )
+    }
+
+    #[test]
+    fn live_turn_committed_accepts_exactly_one_legal_outcome_tag() {
+        let fixture = outcome_tag_fixture();
+        for case in fixture["accept"].as_array().expect("accept cases") {
+            let parsed = parse_send_stdout(
+                format!("{}\n", committed_line(&case["outcome"])).as_bytes(),
+                Some(0),
+            );
+            assert!(
+                parsed.malformed_lines.is_empty(),
+                "rejected legal outcome {}: {:?}",
+                case["outcome"],
+                parsed.malformed_lines
+            );
+            assert_eq!(
+                parsed.committed_result().map(|(_, _, outcome)| outcome),
+                case["tag"].as_str(),
+                "outcome {}",
+                case["outcome"]
+            );
+        }
+        for case in fixture["reject"].as_array().expect("reject cases") {
+            let parsed = parse_send_stdout(
+                format!("{}\n", committed_line(&case["outcome"])).as_bytes(),
+                Some(0),
+            );
+            assert!(
+                parsed.events.is_empty(),
+                "accepted malformed outcome ({}): {} -> {:?}",
+                case["why"],
+                case["outcome"],
+                parsed.events
+            );
+            assert_eq!(parsed.malformed_lines.len(), 1, "{}", case["why"]);
+            assert_eq!(
+                derive_send_exit_code(&parsed.events),
+                SendExitCode::Failed,
+                "{}",
+                case["why"]
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_snapshot_outcome_uses_the_same_strict_tag_parser() {
+        let fixture = outcome_tag_fixture();
+        for case in fixture["accept"].as_array().expect("accept cases") {
+            let parsed = parse_send_stdout(
+                format!("{}\n", committed_snapshot_line(&case["outcome"])).as_bytes(),
+                Some(0),
+            );
+            assert!(
+                parsed.malformed_lines.is_empty(),
+                "rejected legal snapshot outcome {}: {:?}",
+                case["outcome"],
+                parsed.malformed_lines
+            );
+            assert_eq!(
+                parsed.committed_result().map(|(_, _, outcome)| outcome),
+                case["tag"].as_str(),
+                "snapshot outcome {}",
+                case["outcome"]
+            );
+            let expected = if case["tag"] == "completed" {
+                SendExitCode::Committed
+            } else {
+                SendExitCode::Failed
+            };
+            assert_eq!(
+                derive_send_exit_code(&parsed.events),
+                expected,
+                "snapshot outcome {}",
+                case["outcome"]
+            );
+        }
+        for case in fixture["reject"].as_array().expect("reject cases") {
+            let parsed = parse_send_stdout(
+                format!("{}\n", committed_snapshot_line(&case["outcome"])).as_bytes(),
+                Some(0),
+            );
+            assert!(
+                parsed.committed_result().is_none(),
+                "malformed snapshot outcome derived a commit ({}): {} -> {:?}",
+                case["why"],
+                case["outcome"],
+                parsed.committed_result()
+            );
+            assert!(!parsed.has_committed_completed(), "{}", case["why"]);
+            assert_eq!(
+                derive_send_exit_code(&parsed.events),
+                SendExitCode::Failed,
+                "{}",
+                case["why"]
+            );
+            assert_eq!(
+                parsed.malformed_lines.len(),
+                1,
+                "malformed committed snapshot must be retained as a malformed line ({}): {}",
+                case["why"],
+                case["outcome"]
+            );
+        }
     }
 
     #[test]

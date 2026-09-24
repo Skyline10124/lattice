@@ -36,7 +36,24 @@ pub fn resolve_model(model: &str) -> Result<ModelInfo> {
     router
         .resolve(&target)
         .map(model_info)
-        .map_err(|err| ApiError::BadRequest(err.to_string()))
+        .map_err(|err| ApiError::BadRequest(model_resolution_error(&err)))
+}
+
+/// 未知别名等使用错误的公开诊断：别名原文不进入 `ApiError`。
+///
+/// 未知别名和空的 OpenAI 兼容模型名诊断会拼入命令行输入。此处按错误类型
+/// 提取稳定原因；缺少模型名的固定配置提示可原样展示，其余错误仅保留类别。
+fn model_resolution_error(error: &lattice_llm::LlmError) -> String {
+    match error {
+        lattice_llm::LlmError::UnknownModel(_) => "unknown model alias".to_string(),
+        lattice_llm::LlmError::Other(message)
+            if message == lattice_llm::MISSING_OPENAI_COMPATIBLE_MODEL_HINT =>
+        {
+            message.clone()
+        }
+        lattice_llm::LlmError::Other(_) => "openai-compatible model name is invalid".to_string(),
+        other => format!("model resolution failed: {}", other.kind()),
+    }
 }
 
 /// Initialize LATTICE logging through the public API facade.

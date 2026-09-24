@@ -131,6 +131,17 @@ impl GitSessionGraphStore {
     ) -> Result<GraphSession> {
         let _exec =
             self.acquire_execution_lock(session_id, LockMode::Exclusive, Blocking::Block)?;
+        self.set_active_agent_locked(session_id, agent_name, &_exec)
+    }
+
+    /// 显式持锁入口供后台非阻塞准入使用，不缩短会话状态发布的执行锁期限。
+    pub fn set_active_agent_locked(
+        &self,
+        session_id: &str,
+        agent_name: &str,
+        execution_lock: &lattice_store::FlockGuard,
+    ) -> Result<GraphSession> {
+        self.validate_execution_lock(session_id, execution_lock)?;
         let _write = self.kernel().write_lock()?;
         let (previous, mut session_state) = state::read_state(self.kernel(), session_id)?;
         session_state.active_agent_name = agent_name.to_string();
@@ -140,7 +151,7 @@ impl GitSessionGraphStore {
     }
 }
 
-fn count_turn_commits(
+pub(super) fn count_turn_commits(
     store: &lattice_store::StoreRepo,
     head: Option<gix::ObjectId>,
 ) -> Result<usize> {

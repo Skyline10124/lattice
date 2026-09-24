@@ -162,8 +162,8 @@ pub struct RawToolCall {
     pub arguments: String,
 }
 
-/// Why a ToolCall batch is invalid. One invalid call rejects the entire
-/// completed attempt (ADR 0005 §7).
+/// 工具调用批次的校验失败原因。一项调用无效即拒绝整批；
+/// 若该批次来自完整的模型响应，则拒绝该次模型请求尝试（ADR 0005 §7）。
 #[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolCallValidation {
@@ -219,6 +219,17 @@ pub enum ToolCallValidation {
         first_ordinal: usize,
         /// Ordinal of the duplicate.
         second_ordinal: usize,
+    },
+    /// 调用的工具不在本次 Turn 的启用目录中。
+    ///
+    /// 启用目录由运行时提供，因此此拒绝由绑定规划器在分配 InvocationId 前产生，
+    /// 而不是由 `validate_tool_call_batch` 的协议校验产生。
+    /// 仅保存调用序号，避免把没有独立长度限制的模型工具名写入持久记录和公开结果。
+    /// 本实现用于 #218 止血，不代表 #220 的调用状态重设计。
+    #[error("tool call at part ordinal {call_ordinal} names an unknown tool")]
+    UnknownTool {
+        /// 被拒绝调用在消息部件中的序号。
+        call_ordinal: usize,
     },
 }
 

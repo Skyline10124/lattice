@@ -6,7 +6,7 @@
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use bytes::Bytes;
@@ -31,7 +31,6 @@ use lancet_protocol::evidence::{
 use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability};
 use rustls::ClientConfig;
 use rustls::pki_types::ServerName;
-use rustls_platform_verifier::ConfigVerifierExt as _;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use url::Url;
@@ -60,6 +59,7 @@ pub type BudgetRemaining = Arc<dyn Fn() -> usize + Send + Sync>;
 /// Call-scoped host authority. A Component gets one instance and may call it once.
 pub struct NetworkFetchHost {
     policy: NetworkPolicyConfig,
+    tls: Arc<ClientConfig>,
     charge: BudgetCharge,
     remaining: BudgetRemaining,
     scope_name: String,
@@ -73,9 +73,11 @@ impl NetworkFetchHost {
         charge: BudgetCharge,
         remaining: BudgetRemaining,
         scope_name: impl Into<String>,
+        tls: Arc<ClientConfig>,
     ) -> Self {
         Self {
             policy,
+            tls,
             charge,
             remaining,
             scope_name: scope_name.into(),
@@ -401,16 +403,7 @@ impl NetworkFetchHost {
                     return Err(FetchError::Unavailable);
                 }
             };
-            let connector = match tls_connector() {
-                Ok(connector) => connector,
-                Err(()) => {
-                    evidence.transport.tls = TlsState::Failed;
-                    evidence.failure_phase = Some(NetworkFailurePhase::Tls);
-                    self.record_effect(ctx, target, evidence, None, None);
-                    self.remember(unavailable_error());
-                    return Err(FetchError::Unavailable);
-                }
-            };
+            let connector = TlsConnector::from(Arc::clone(&self.tls));
             let tls = match controlled(ctx, connector.connect(server_name, stream)).await {
                 Ok(Ok(tls)) => tls,
                 Ok(Err(_)) => {
@@ -702,16 +695,22 @@ async fn connect_candidates(
     Err(WaitFailure::Unavailable)
 }
 
-fn tls_connector() -> Result<TlsConnector, ()> {
-    static CONFIG: OnceLock<Result<Arc<ClientConfig>, ()>> = OnceLock::new();
-    CONFIG
-        .get_or_init(|| {
-            let mut config = ClientConfig::with_platform_verifier().map_err(|_| ())?;
-            config.alpn_protocols = vec![b"http/1.1".to_vec()];
-            Ok(Arc::new(config))
-        })
-        .clone()
-        .map(TlsConnector::from)
+pub(crate) fn tls_config(roots_der: &[Vec<u8>]) -> Result<Arc<ClientConfig>, String> {
+    let mut roots = rustls::RootCertStore::empty();
+    for der in roots_der {
+        roots
+            .add(der.as_slice().into())
+            .map_err(|_| "invalid Tool TLS root certificate".to_string())?;
+    }
+    // 空集合保留为无信任根，不能因缺失或错误材料回退后台的系统根。
+    let mut config =
+        ClientConfig::builder_with_provider(rustls::crypto::aws_lc_rs::default_provider().into())
+            .with_safe_default_protocol_versions()
+            .map_err(|_| "cannot configure Tool TLS protocol versions".to_string())?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(Arc::new(config))
 }
 
 async fn send_request<I>(
@@ -1118,6 +1117,7 @@ async fn budget_refusals_distinguish_pre_and_post_io() {
         Arc::new(|_| panic!("preflight refusal must not charge")),
         Arc::new(|| 0),
         "external-host",
+        tls_config(&[]).unwrap(),
     );
     let preflight_error = preflight_host
         .fetch(
@@ -1151,6 +1151,7 @@ async fn budget_refusals_distinguish_pre_and_post_io() {
         }),
         Arc::new(|| usize::MAX),
         "external-host",
+        tls_config(&[]).unwrap(),
     );
 
     let error = host

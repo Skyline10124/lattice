@@ -163,7 +163,7 @@ pub(super) fn with_test_llm(
     enabled_tools: &[String],
     project_root: &str,
 ) -> RunTurnRequest {
-    request.test_llm = Some(llm);
+    request.test_llm = Some((llm, lattice_llm::ProviderKind::Anthropic));
     request.test_project_root = Some(project_root.to_string());
     if request.loaded_profile.is_none() || !enabled_tools.is_empty() {
         request.loaded_profile = Some(make_loaded_profile_with_tools(

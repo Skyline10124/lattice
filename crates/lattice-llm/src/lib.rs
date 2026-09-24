@@ -4,6 +4,8 @@
 //! LATTICE LLM vocabulary and functional call facade.
 
 mod client;
+mod connection;
+pub use connection::{ConnectionMaterial, LlmConnection};
 mod endpoints;
 mod logging;
 pub mod provider_projection;
@@ -15,7 +17,10 @@ mod types;
 
 pub use lattice_conversation::TokenUsage;
 pub use logging::init_logging;
-pub use router::{CredentialStatus, ModelRouter, ProviderKind, ResolvedModel};
+pub use router::{
+    CredentialStatus, MISSING_OPENAI_COMPATIBLE_MODEL_HINT, ModelRouter, ProviderKind,
+    ResolvedModel,
+};
 pub use stub::{LlmError, LlmStream, StubLlm, stream};
 pub use types::{ChatRequest, LlmEvent, ModelTarget, ToolDefinition};
 

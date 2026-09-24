@@ -234,6 +234,7 @@ mod tests {
     fn empty_view_projects_to_empty_facts() {
         let view = view_with(LedgerSnapshot::default());
         let plan_key = PlanKey {
+            session_id: SessionId::parse("3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c").unwrap(),
             turn_id: TurnId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").unwrap(),
             model_step_ordinal: 0,
         };
@@ -246,6 +247,7 @@ mod tests {
     #[test]
     fn exact_reservation_projects_with_recomputed_binding_digests() {
         let plan_key = PlanKey {
+            session_id: SessionId::parse("3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c").unwrap(),
             turn_id: TurnId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").unwrap(),
             model_step_ordinal: 0,
         };
@@ -295,10 +297,12 @@ mod tests {
     #[test]
     fn foreign_owned_candidate_is_preserved_for_collision_detection() {
         let plan_key = PlanKey {
+            session_id: SessionId::parse("3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c").unwrap(),
             turn_id: TurnId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").unwrap(),
             model_step_ordinal: 0,
         };
         let foreign_key = PlanKey {
+            session_id: SessionId::parse("3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c").unwrap(),
             turn_id: TurnId::parse("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee").unwrap(),
             model_step_ordinal: 3,
         };

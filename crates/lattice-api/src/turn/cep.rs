@@ -55,6 +55,7 @@ pub(crate) struct ProductionTurnDepsInput<'a> {
     pub project_store_key: lattice_session::ProjectStoreKey,
     pub state_layout: lattice_session::StateLayout,
     pub enabled_tools: &'a [String],
+    pub tls_roots_der: &'a [Vec<u8>],
     pub llm: Arc<dyn lattice_agent::LlmClient>,
     pub lancet: Option<&'a LancetSection>,
 }
@@ -296,13 +297,8 @@ fn resolve_lancet_policy(
     }
 }
 
-/// Build a turn-scoped LANCET runtime and wrap its client in a sequencer.
-///
-/// Translation of the profile into policy happens here; runtime composition is
-/// delegated to [`lancet_api::LancetRuntime::build`], which constructs the
-/// one concrete Direct-Local execution routing internally (ADR 0003). There is
-/// no Upper lifecycle, workspace override, or externally supplied execution
-/// backend.
+/// 组装 Turn 专属运行时；路径、外部策略、领域存储打开及 Component 组成全部在阻塞池。
+/// 配置仍由既有 profile 转换，执行器和 saga 不增加第二条路径。
 pub(crate) async fn build_production_turn_deps(
     input: ProductionTurnDepsInput<'_>,
 ) -> Result<ProductionTurnDeps, ApiError> {
@@ -312,61 +308,55 @@ pub(crate) async fn build_production_turn_deps(
         project_store_key,
         state_layout,
         enabled_tools,
+        tls_roots_der,
         llm,
         lancet,
     } = input;
-    // Canonicalize the full Local Workspace before constructing either policy
-    // or project-store backing. Runtime composition revalidates this exact root.
-    let canonical_root = std::fs::canonicalize(project_root).map_err(|err| {
-        ApiError::BadRequest(format!(
-            "cannot canonicalize Local Workspace root '{project_root}': {err}"
-        ))
-    })?;
-    let project_root = canonical_root.to_str().ok_or_else(|| {
-        ApiError::BadRequest(
-            "Local Workspace root must be valid UTF-8 for the runtime policy path".into(),
-        )
-    })?;
-
-    let policy = resolve_lancet_policy(lancet, project_root)?;
-    let workspace_history = WorkspaceHistoryBacking::for_key(state_layout, project_store_key);
-
-    // #28 B8/D6: the profile is the single admission authority — `[tools].enabled`
-    // is the stage-1 capability grant, `[lancet.capabilities]` subtracts. Without
-    // a loaded profile nothing is admitted (fail closed).
+    let project_root = PathBuf::from(project_root);
+    let enabled_tools = enabled_tools.to_vec();
+    let tls_roots_der = tls_roots_der.to_vec();
+    let lancet = lancet.cloned();
     let capability_admission = request
         .loaded_profile
         .as_ref()
         .map(|loaded| loaded.profile.capability_admission_policy())
         .unwrap_or_default();
-
-    // Compile the process-level closed runtime off Tokio's async workers. The
-    // subsequent build reads the same latched instance without recompiling.
-    tokio::task::spawn_blocking(ComponentRuntime::shared)
-        .await
-        .map_err(|err| ApiError::Internal(format!("component composition worker failed: {err}")))?
-        .map_err(|err| ApiError::Internal(format!("component composition: {err}")))?;
-
-    let mut runtime = LancetRuntime::build(LancetRuntimeConfig {
-        local_workspace_root: canonical_root,
-        enabled_tools: enabled_tools.to_vec(),
-        policy,
-        capability_admission,
-        invocations: workspace_history.clone(),
-        workspace_history,
+    tokio::task::spawn_blocking(move || {
+        let canonical_root = std::fs::canonicalize(&project_root).map_err(|err| {
+            ApiError::BadRequest(format!("cannot canonicalize Local Workspace root: {err}"))
+        })?;
+        let project_root = canonical_root.to_str().ok_or_else(|| {
+            ApiError::BadRequest(
+                "Local Workspace root must be valid UTF-8 for the runtime policy path".into(),
+            )
+        })?;
+        let policy = resolve_lancet_policy(lancet.as_ref(), project_root)?;
+        let workspace_history = WorkspaceHistoryBacking::for_key(state_layout, project_store_key);
+        ComponentRuntime::shared()
+            .map_err(|err| ApiError::Internal(format!("component composition: {err}")))?;
+        let mut runtime = LancetRuntime::build(LancetRuntimeConfig {
+            local_workspace_root: canonical_root,
+            enabled_tools,
+            policy,
+            capability_admission,
+            tls_roots_der,
+            invocations: workspace_history.clone(),
+            workspace_history,
+        })
+        .map_err(map_lancet_err)?;
+        let tool_catalog = runtime.tool_definitions().to_vec();
+        let workspace_history = Arc::clone(runtime.workspace_history());
+        let events = runtime.take_events();
+        Ok(ProductionTurnDeps {
+            model_driver: lattice_agent::ModelStepDriver::new(llm),
+            tool_catalog,
+            runtime,
+            events,
+            workspace_history,
+        })
     })
-    .map_err(map_lancet_err)?;
-    let tool_catalog = runtime.tool_definitions().to_vec();
-    let workspace_history = Arc::clone(runtime.workspace_history());
-    let events = runtime.take_events();
-
-    Ok(ProductionTurnDeps {
-        model_driver: lattice_agent::ModelStepDriver::new(llm),
-        tool_catalog,
-        runtime,
-        events,
-        workspace_history,
-    })
+    .await
+    .map_err(|err| ApiError::Internal(format!("Turn dependency worker failed: {err}")))?
 }
 
 /// Map a CEP transport notification into an internal agent turn event.
@@ -661,7 +651,7 @@ enabled = ["{tool}"]
             session_id: "s".into(),
             loaded_profile: Some(profile.clone()),
             cancel_flag: None,
-            test_llm: Some(llm.clone()),
+            test_llm: Some((llm.clone(), lattice_llm::ProviderKind::OpenAiCompatible)),
             test_project_root: Some(project.path().to_string_lossy().into()),
         };
         let enabled_tools = ["session.todo_write".to_string()];
@@ -671,6 +661,7 @@ enabled = ["{tool}"]
             project_store_key: project_key,
             state_layout: layout,
             enabled_tools: &enabled_tools,
+            tls_roots_der: &[],
             llm,
             lancet: Some(&profile.profile.lancet),
         })

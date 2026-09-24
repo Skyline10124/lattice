@@ -3,6 +3,8 @@
 
 #![allow(dead_code)]
 
+#[cfg(feature = "crash-barriers")]
+pub(crate) mod crash;
 use lattice_system_harness::{
     AssertError, CapturedRequest, CommandOutcome, FAKE_API_KEY, FakeLlmServer, HarnessIntervention,
     LatticeCommand, LatticeDriver, ProcessTermination, ResponseGate, ScenarioEvidence,
@@ -32,6 +34,63 @@ pub(crate) fn assert_clean_send(execution: &SendExecution) -> Result<(), AssertE
         });
     }
     Ok(())
+}
+
+/// 接受回执与固定终态对应同一身份；不要求有损观察通道重放 TurnStarted/Committed。
+pub(crate) fn assert_accepted_and_closed(outcome: &SendOutcome) -> Result<(), AssertError> {
+    let id = outcome
+        .accepted_turn_id()
+        .ok_or_else(|| AssertError::StdoutMissing {
+            expected: "durable acceptance acknowledgement".into(),
+        })?;
+    let accepted = outcome.events.iter().position(|event| matches!(event, TurnEventLine::Unknown { type_name, .. } if type_name == "acceptance")).unwrap();
+    let closed = outcome.events.iter().position(|event| match event {
+        TurnEventLine::Unknown { type_name, raw } if type_name == "snapshot" => {
+            raw["view"]["requested_turn"]["state"] == "committed"
+                && raw["view"]["requested_turn"]["turn_id"].as_str() == Some(id)
+                && raw["view"]["active_turn"].is_null()
+        }
+        _ => false,
+    });
+    require(
+        closed.is_some_and(|closed| accepted < closed),
+        "fixed committed view must follow and close the accepted TurnId",
+    )
+}
+
+/// 有损观察通道可能淘汰 `turn_committed`；权威终态由固定发布补齐：要求带非空
+/// commit id 的 completed 固定视图出现在给定事件之后，而不是要求重放瞬时事件。
+pub(crate) fn assert_committed_view_after(
+    outcome: &SendOutcome,
+    after: &str,
+) -> Result<(), AssertError> {
+    let anchor = outcome
+        .events
+        .iter()
+        .rposition(|event| event.type_name() == after)
+        .ok_or_else(|| AssertError::StdoutMissing {
+            expected: format!("missing '{after}' before the fixed committed view"),
+        })?;
+    let closed = outcome.events.iter().position(|event| match event {
+        TurnEventLine::Unknown { type_name, raw } if type_name == "snapshot" => {
+            raw["view"]["requested_turn"]["state"] == "committed"
+        }
+        _ => false,
+    });
+    require(
+        closed.is_some_and(|closed| anchor < closed),
+        format!("fixed committed view must follow '{after}'"),
+    )?;
+    let (_, commit_id, result) =
+        outcome
+            .committed_result()
+            .ok_or_else(|| AssertError::StdoutMissing {
+                expected: "strict committed result".into(),
+            })?;
+    require(
+        !commit_id.is_empty() && result == "completed",
+        "committed result must carry a commit id and a completed outcome",
+    )
 }
 
 pub(crate) fn assert_forced_kill(outcome: &CommandOutcome) {

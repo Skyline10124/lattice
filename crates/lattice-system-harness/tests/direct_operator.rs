@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use lattice_system_harness::{
     AssertError, CommandOutcome, FixtureHttpServer, HttpFixture, SendExecution, SessionSendDriver,
-    SseScript, TurnEventLine,
+    SseScript,
 };
 use serde_json::Value;
 use support::{
@@ -100,13 +100,10 @@ fn methods(rows: &[Value]) -> Vec<&str> {
 }
 
 fn turn_id_of(turn: &SendExecution) -> String {
-    turn.events
-        .iter()
-        .find_map(|event| match event {
-            TurnEventLine::TurnStarted { turn_id, .. } => Some(turn_id.clone()),
-            _ => None,
-        })
-        .expect("turn id")
+    // 有损观察通道可能淘汰 `turn_started`；请求身份以持久接受回执为准。
+    turn.accepted_turn_id()
+        .expect("durable acceptance acknowledgement")
+        .to_string()
 }
 
 fn fetch_network_profile() -> String {
@@ -699,16 +696,33 @@ fn direct_operator_unknown_typed_turn_fails() {
             replay.clean_exit_code().is_some_and(|code| code != 0),
             "unknown turn replay must fail",
         )?;
-        let error = String::from_utf8_lossy(&replay.stderr);
+        // `--json` 的错误以 typed error record 走 stdout（见 report_error），stderr 保持为空。
+        let stdout = String::from_utf8_lossy(&replay.stdout);
+        let error: Value = serde_json::from_str(stdout.trim()).unwrap_or(Value::Null);
         require(
-            error.contains("no invocations for turn_id"),
+            error.get("type").and_then(Value::as_str) == Some("error"),
+            format!("unknown turn replay must emit a typed error record: {stdout:?}"),
+        )?;
+        // 具体原因保持不变，但请求的 TurnId 不回显（lattice-cli audit 的前缀白名单）。
+        require(
+            error
+                .get("message")
+                .and_then(Value::as_str)
+                .is_some_and(|message| message.contains("no invocations for the requested turn")),
             format!("unexpected replay diagnostic: {error}"),
+        )?;
+        require(
+            !stdout.contains("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+            format!("replay diagnostic must not echo the requested TurnId: {stdout:?}"),
         )?;
         Ok(())
     })();
     finish_scenario(
         scenario_evidence,
-        &[("unknown turn replay", &seed.command)],
+        &[
+            ("seed turn send", &seed.command),
+            ("unknown turn replay", &replay),
+        ],
         Vec::new(),
         result,
     );

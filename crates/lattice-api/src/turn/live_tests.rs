@@ -109,6 +109,7 @@ async fn stream_turn_live_with_agent(
             root.canonical_path().to_path_buf(),
         ),
         capability_admission: Default::default(),
+        tls_roots_der: Vec::new(),
         invocations: backing.clone(),
         workspace_history: backing,
     })
@@ -124,7 +125,8 @@ async fn stream_turn_live_with_agent(
         events,
     };
 
-    super::live::stream_turn_live(session, request, deps).await
+    super::live::stream_turn_live(session, request, deps, lattice_llm::ProviderKind::Anthropic)
+        .await
 }
 
 fn make_request(input: &str) -> RunTurnRequest {
@@ -220,7 +222,7 @@ async fn recovery_rejects_the_wrong_workspace_before_any_side_effect() {
             .build(),
     );
     let mut request = make_request("wrong workspace");
-    request.test_llm = Some(client.clone());
+    request.test_llm = Some((client.clone(), lattice_llm::ProviderKind::Anthropic));
     request.test_project_root = Some(other_workspace.path().to_string_lossy().into_owned());
 
     let err = match super::execute::stream_turn(session.clone(), request).await {
@@ -274,7 +276,7 @@ async fn recovery_strict_open_failure_does_not_advance_the_session_or_ledger() {
             .build(),
     );
     let mut request = make_request("strict reopen");
-    request.test_llm = Some(client.clone());
+    request.test_llm = Some((client.clone(), lattice_llm::ProviderKind::Anthropic));
     request.test_project_root = Some(workspace.canonical_path().to_string_lossy().into_owned());
 
     let err = match super::execute::stream_turn(session.clone(), request).await {
@@ -297,48 +299,232 @@ async fn recovery_strict_open_failure_does_not_advance_the_session_or_ledger() {
 }
 
 #[tokio::test]
-async fn valid_recovery_closes_the_pending_turn_then_runs_the_new_turn() {
+async fn accepted_turn_finishes_without_observers_and_replays_without_a_profile() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = make_session(dir.path());
+    let client = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_events(happy_events())
+            .push_events(happy_events())
+            .build(),
+    );
+    let id = lancet_protocol::TurnId::parse("22222222-2222-4222-8222-222222222222").unwrap();
+    let mut request = make_request("keep running");
+    request.test_llm = Some((client.clone(), lattice_llm::ProviderKind::Anthropic));
+    let execution = super::execute::start_turn(
+        session.clone(),
+        id,
+        crate::root::LocalWorkspaceRoot::resolve().unwrap(),
+        request.clone(),
+        None,
+    );
+    assert!(matches!(
+        execution.acceptance.await.unwrap().unwrap(),
+        super::types::TurnAcceptance::Accepted { .. }
+    ));
+    drop(execution.events);
+    let completed = execution.completion.await.unwrap().unwrap();
+    let super::types::TurnCompletion::Committed(commit) = completed else {
+        panic!("expected committed")
+    };
+    request.loaded_profile = None;
+    let replay = super::execute::start_turn(
+        session.clone(),
+        id,
+        crate::root::LocalWorkspaceRoot::resolve().unwrap(),
+        request.clone(),
+        None,
+    );
+    assert!(matches!(
+        replay.acceptance.await.unwrap().unwrap(),
+        super::types::TurnAcceptance::Existing(_)
+    ));
+    let super::types::TurnCompletion::Committed(again) = replay.completion.await.unwrap().unwrap()
+    else {
+        panic!("expected replay")
+    };
+    assert_eq!(commit.commit_id, again.commit_id);
+    assert_eq!(client.call_count(), 1);
+    assert_eq!(session.log(TEST_SESSION_ID).unwrap().len(), 1);
+    let mut conflicting = request.clone();
+    conflicting.input = "different input".into();
+    let conflict = super::execute::start_turn(
+        session.clone(),
+        id,
+        crate::root::LocalWorkspaceRoot::resolve().unwrap(),
+        conflicting,
+        None,
+    );
+    assert!(matches!(
+        conflict.acceptance.await.unwrap(),
+        Err(crate::session::ApiError::Conflict(_))
+    ));
+    assert!(conflict.completion.await.unwrap().is_err());
+    request.loaded_profile = Some(make_loaded_profile("sonnet", "System from profile."));
+    let new_id = lancet_protocol::TurnId::parse("33333333-3333-4333-8333-333333333333").unwrap();
+    let independent = super::execute::start_turn(
+        session.clone(),
+        new_id,
+        crate::root::LocalWorkspaceRoot::resolve().unwrap(),
+        request,
+        None,
+    );
+    assert!(matches!(
+        independent.acceptance.await.unwrap().unwrap(),
+        super::types::TurnAcceptance::Accepted { .. }
+    ));
+    drop(independent.events);
+    assert!(matches!(
+        independent.completion.await.unwrap().unwrap(),
+        super::types::TurnCompletion::Committed(_)
+    ));
+    assert_eq!(
+        client.call_count(),
+        2,
+        "same text with a new identity is independent"
+    );
+}
+
+#[tokio::test]
+async fn new_submission_closes_old_turn_without_stealing_identity_or_events() {
     let dir = tempfile::tempdir().unwrap();
     let session = make_session(dir.path());
     let workspace = crate::root::LocalWorkspaceRoot::resolve().unwrap();
-    begin_pending_turn(&session, workspace.store_key());
+    let pending = begin_pending_turn(&session, workspace.store_key());
     let client = Arc::new(
         FakeStreamingLlmClient::builder()
             .push_events(happy_events())
             .build(),
     );
-    let mut request = make_request("after recovery");
-    request.test_llm = Some(client.clone());
-    request.test_project_root = Some(workspace.canonical_path().to_string_lossy().into_owned());
-
-    let events: Vec<_> = super::execute::stream_turn(session.clone(), request)
-        .await
-        .expect("valid recovery starts the new Turn")
-        .collect()
-        .await;
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event, TurnEvent::TurnCommitted { .. }))
+    let mut request = make_request("新的输入");
+    request.test_llm = Some((client.clone(), lattice_llm::ProviderKind::Anthropic));
+    let id = lancet_protocol::TurnId::parse("33333333-3333-4333-8333-333333333333").unwrap();
+    let verified = Arc::default();
+    let execution = super::execute::start_execution(
+        session.clone(),
+        id,
+        workspace,
+        request,
+        None,
+        false,
+        Arc::clone(&verified),
     );
+    assert!(matches!(
+        execution.acceptance.await.unwrap().unwrap(),
+        super::types::TurnAcceptance::Accepted { turn_id } if turn_id == id
+    ));
+    let events: Vec<_> = execution.events.collect().await;
+    let super::types::TurnCompletion::Committed(commit) =
+        execution.completion.await.unwrap().unwrap()
+    else {
+        panic!("新任务应完成");
+    };
+    assert_eq!(commit.turn_id, id);
+    assert_eq!(verified.get(), Some(&id));
     assert_eq!(client.call_count(), 1);
+    let old = session
+        .read_view(TEST_SESSION_ID, Some(pending.snapshot.turn_id))
+        .await
+        .unwrap();
+    let Some(lattice_session::StoredTurn::Committed { commit: old, .. }) = old.requested_turn
+    else {
+        panic!("旧任务应已关闭");
+    };
+    assert_eq!(old.origin, lattice_session::ClosureOrigin::Reconciled);
+    assert!(matches!(
+        old.outcome,
+        lattice_session::TurnOutcome::Interrupted { .. }
+    ));
+    let commits: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.event {
+            TurnEvent::TurnCommitted { commit_id, .. } => Some(commit_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(commits, vec![&commit.commit_id]);
+    assert_eq!(session.log(TEST_SESSION_ID).unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn independent_recovery_and_read_views_do_not_require_execution_configuration() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = make_session(dir.path());
+    let workspace = crate::root::LocalWorkspaceRoot::resolve().unwrap();
+    let pending = begin_pending_turn(&session, workspace.store_key());
+    let (_, lock) = session.try_lock_execution(TEST_SESSION_ID).unwrap();
+    let view = session
+        .read_view(TEST_SESSION_ID, Some(pending.snapshot.turn_id))
+        .await
+        .unwrap();
+    assert_eq!(view.active_turn.unwrap().oid, pending.oid);
+    assert!(matches!(
+        super::execute::recover_turn(session.clone(), TEST_SESSION_ID.into()).await,
+        Err(crate::session::ApiError::Busy(_))
+    ));
+    drop(lock);
+    let recovered = super::execute::recover_turn(session.clone(), TEST_SESSION_ID.into())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.turn_id, pending.snapshot.turn_id);
+    assert_eq!(recovered.origin, lattice_session::ClosureOrigin::Reconciled);
     assert!(
-        session
-            .git_store_for_coordinator()
-            .unwrap()
-            .read_active_turn(TEST_SESSION_ID)
+        super::execute::recover_turn(session.clone(), TEST_SESSION_ID.into())
+            .await
             .unwrap()
             .is_none()
     );
-    let log = session.log(TEST_SESSION_ID).unwrap();
-    assert_eq!(log.len(), 2, "reconciled Turn plus new live Turn");
-    assert_eq!(log[0].origin, lattice_session::ClosureOrigin::Reconciled);
-    assert_eq!(
-        log[0].workspace_history_checkpoint,
-        lattice_session::WorkspaceHistoryCheckpoint::Empty,
-        "a genuinely empty history remains typed Empty on recovery"
+    assert_eq!(session.log(TEST_SESSION_ID).unwrap().len(), 1);
+}
+#[tokio::test]
+async fn another_session_executes_while_busy_session_rejects_new_turns() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = make_session(dir.path());
+    let workspace = crate::root::LocalWorkspaceRoot::resolve().unwrap();
+    let (_, lock) = session.try_lock_execution(TEST_SESSION_ID).unwrap();
+    let client = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_events(happy_events())
+            .build(),
     );
-    assert_eq!(log[1].origin, lattice_session::ClosureOrigin::Live);
+    let mut request = make_request("busy request");
+    request.test_llm = Some((client.clone(), lattice_llm::ProviderKind::Anthropic));
+    let id = lancet_protocol::TurnId::parse("44444444-4444-4444-8444-444444444444").unwrap();
+    let busy = super::execute::start_turn(
+        session.clone(),
+        id,
+        workspace.clone(),
+        request.clone(),
+        None,
+    );
+    assert!(matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), busy.acceptance)
+            .await
+            .unwrap()
+            .unwrap(),
+        Err(crate::session::ApiError::Busy(_))
+    ));
+    assert!(busy.completion.await.unwrap().is_err());
+    assert_eq!(client.call_count(), 0);
+    let other_id = "fedcba9876543210fedcba9876543210";
+    session
+        .store()
+        .create_session(other_id, None, "test", "main", &workspace.store_key())
+        .unwrap();
+    request.session_id = other_id.into();
+    let other = super::execute::start_turn(session.clone(), id, workspace, request, None);
+    assert!(matches!(
+        other.acceptance.await.unwrap().unwrap(),
+        super::types::TurnAcceptance::Accepted { .. }
+    ));
+    drop(other.events);
+    assert!(matches!(
+        other.completion.await.unwrap().unwrap(),
+        super::types::TurnCompletion::Committed(_)
+    ));
+    assert_eq!(client.call_count(), 1);
+    drop(lock);
 }
 
 #[tokio::test]
@@ -456,7 +642,7 @@ async fn recovery_rejects_a_turn_closing_checkpoint_that_no_longer_matches_curre
             .build(),
     );
     let mut request = make_request("must not run");
-    request.test_llm = Some(client.clone());
+    request.test_llm = Some((client.clone(), lattice_llm::ProviderKind::Anthropic));
     request.test_project_root = Some(workspace.canonical_path().to_string_lossy().into_owned());
     let error = match super::execute::stream_turn(session.clone(), request).await {
         Ok(_) => panic!("mismatched pinned checkpoint must fail closed"),
@@ -497,7 +683,7 @@ async fn turn_uses_the_injected_non_default_session_repository() {
             .build(),
     );
     let mut request = make_request("custom repository");
-    request.test_llm = Some(client.clone());
+    request.test_llm = Some((client.clone(), lattice_llm::ProviderKind::Anthropic));
     request.test_project_root = Some(workspace.canonical_path().to_string_lossy().into_owned());
 
     let events: Vec<_> = super::execute::stream_turn(session, request)

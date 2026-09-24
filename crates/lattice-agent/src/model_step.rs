@@ -168,14 +168,12 @@ impl ModelStepDriver {
         Self { llm }
     }
 
-    /// Execute one provider attempt.
-    ///
-    /// Fails before streaming only for typed request-assembly errors; every
-    /// in-flight outcome is a [`ModelStepAttempt`], never an `Err`.
+    /// 执行一次provider尝试；打开失败保持类型化错误，流内结果由ModelStepAttempt表达。
+    /// 观察回调必须非阻塞。协调器在回调内编号并尽力投递，不能让慢客户端反压模型消费。
     pub async fn run(
         &self,
         request: &ModelStepRequest,
-        live: Option<&tokio::sync::mpsc::Sender<ModelStepEvent>>,
+        live: Option<&mut (dyn FnMut(ModelStepEvent) + Send)>,
     ) -> Result<ModelStepAttempt, ModelStepError> {
         let mut messages = Vec::with_capacity(request.history.len() + 1);
         if let Some(system) = &request.system_prompt {
@@ -243,12 +241,12 @@ impl ModelStepDriver {
         &self,
         mut stream: lattice_llm::LlmStream,
         request: &ModelStepRequest,
-        live: Option<&tokio::sync::mpsc::Sender<ModelStepEvent>>,
+        mut live: Option<&mut (dyn FnMut(ModelStepEvent) + Send)>,
     ) -> Result<ModelStepAttempt, ModelStepError> {
-        let emit = |event: ModelStepEvent,
-                    live: Option<&tokio::sync::mpsc::Sender<ModelStepEvent>>| {
-            if let Some(sender) = live {
-                let _ = sender.try_send(event);
+        // 同步交给协调器的非阻塞观察入口，避免在它编号之前无声丢弃增量。
+        let mut emit = |event: ModelStepEvent| {
+            if let Some(observer) = live.as_deref_mut() {
+                observer(event);
             }
         };
 
@@ -325,13 +323,10 @@ impl ModelStepDriver {
 
             if !saw_stream_event {
                 saw_stream_event = true;
-                emit(
-                    ModelStepEvent::Opened {
-                        provider: request.provider.clone(),
-                        model: request.model.clone(),
-                    },
-                    live,
-                );
+                emit(ModelStepEvent::Opened {
+                    provider: request.provider.clone(),
+                    model: request.model.clone(),
+                });
             }
 
             match event {
@@ -340,13 +335,13 @@ impl ModelStepDriver {
                     if let Err(interruption) = assembly.push_assistant(&content) {
                         return Ok(interrupted(interruption, usage, finish_reason, None));
                     }
-                    emit(ModelStepEvent::TokenDelta { content }, live);
+                    emit(ModelStepEvent::TokenDelta { content });
                 }
                 LlmEvent::Reasoning { content } => {
                     if let Err(interruption) = assembly.push_reasoning(&content) {
                         return Ok(interrupted(interruption, usage, finish_reason, None));
                     }
-                    emit(ModelStepEvent::ReasoningDelta { content }, live);
+                    emit(ModelStepEvent::ReasoningDelta { content });
                 }
                 LlmEvent::ToolCallStart { .. } => assembly.begin_tool_call(),
                 LlmEvent::ToolCallDelta {
@@ -954,27 +949,25 @@ mod tests {
 
     #[test]
     fn live_events_mirror_the_stream() {
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(16);
-        runtime().block_on(async move {
-            driver(vec![
-                LlmEvent::Started,
-                LlmEvent::Token {
-                    content: "hi".to_string(),
-                },
-                LlmEvent::Done {
-                    finish_reason: "stop".to_string(),
-                    usage: None,
-                },
-            ])
-            .run(&request(), Some(&sender))
-            .await
-            .expect("attempt runs");
-        });
         let mut seen = Vec::new();
-        while let Ok(event) = receiver.try_recv() {
-            seen.push(event);
-        }
+        let mut events = vec![LlmEvent::Started];
+        events.extend((0..1600).map(|_| LlmEvent::Token {
+            content: "hi".into(),
+        }));
+        events.push(LlmEvent::Done {
+            finish_reason: "stop".into(),
+            usage: None,
+        });
+        runtime().block_on(async {
+            driver(events)
+                .run(&request(), Some(&mut |event| seen.push(event)))
+                .await
+                .expect("attempt runs");
+        });
         assert!(matches!(seen[0], ModelStepEvent::Opened { .. }));
-        assert!(matches!(seen[1], ModelStepEvent::TokenDelta { .. }));
+        assert_eq!(seen.len(), 1601);
+        assert!(seen[1..].iter().all(
+            |event| matches!(event, ModelStepEvent::TokenDelta { content } if content == "hi")
+        ));
     }
 }

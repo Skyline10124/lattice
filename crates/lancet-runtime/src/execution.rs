@@ -31,17 +31,20 @@ pub struct RuntimeExecution {
     visibility_policy: ReadVisibilityPolicy,
     workspace: Arc<LocalWorkspace>,
     history: Arc<WorkspaceHistory>,
+    tls: Arc<rustls::ClientConfig>,
     events: mpsc::UnboundedSender<ToolEvent>,
 }
 
 impl RuntimeExecution {
-    /// Construct the one concrete Local Workspace and event channel for a Turn.
+    /// 在接受前构造工作区与 TLS；所有调用共享本 Turn 的配置，不读取进程环境。
     pub fn new(
         components: Arc<ComponentRuntime>,
         context: Arc<CepTurnContext>,
         policy: &PolicyConfig,
         history: Arc<WorkspaceHistory>,
+        tls_roots_der: &[Vec<u8>],
     ) -> Result<(Self, mpsc::UnboundedReceiver<ToolEvent>), String> {
+        let tls = crate::host_network::tls_config(tls_roots_der)?;
         let visibility_policy = policy.workspace.read_visibility_policy()?;
         let workspace = Arc::new(LocalWorkspace::with_history(
             &context.policy.project_root,
@@ -56,6 +59,7 @@ impl RuntimeExecution {
                 visibility_policy,
                 workspace,
                 history,
+                tls,
                 events,
             },
             receiver,
@@ -207,6 +211,7 @@ impl RuntimeExecution {
             charge,
             remaining,
             scope,
+            Arc::clone(&self.tls),
         )))
     }
 }

@@ -1,31 +1,25 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Fast binary black-box: audit command error surface (issue #40 "fast binary
-//! black-box" matrix, Codeberg #18; triage replacement target
-//! `planned_audit_cli`).
+//! 审计命令错误输出的快速二进制黑盒测试（#40，原 Codeberg #18）。
 //!
-//! Drives the built `lattice` binary for the uninitialized audit surface. With no
-//! session/project store having been created for the project, the invocation ledger does not exist, so
-//! `audit query` / `replay` / `--tail` must degrade to a clean configuration
-//! error (exit 1, message naming the missing store) rather than panic.
-//! This is exactly the regression guard for the runtime-nesting bug
-//! fixed in `lattice-cli/src/commands/audit.rs` (`audit::run` is now async and
-//! reuses the top-level `#[tokio::main]` runtime instead of nesting one).
+//! 在项目尚未创建调用账本时，通过已构建的 `lattice` 验证 `audit query`、
+//! `replay` 和 `--tail` 返回明确的前提错误及退出码 2。JSON 模式将类型化
+//! `bad_request` 记录写到标准输出；文本模式将诊断写到标准错误。
 //!
-//! The turn-bearing audit states (seeded store, replay of a real turn,
-//! non-empty query results) are seeded via a committed Direct-Local turn
-//! (see `tests/direct_local_turn.rs`); no KVM/MSB lane exists anymore
-//! (#62, Codeberg #40).
-//! Historical evidence: `docs/archive/records/FINDINGS.md`; current rules: `docs/development/testing.md`.
+//! 同时保护 `audit::run` 复用顶层异步运行时的行为，避免嵌套创建运行时引发崩溃。
+//! 已有账本、真实 Turn 重放和非空查询结果由 `tests/direct_local_turn.rs`
+//! 等直接本地场景覆盖；这些场景不依赖已移除的 KVM/MSB 测试通道（#62，原 Codeberg #40）。
 //!
-//! These scenarios supersede the crate-internal
-//! `audit_query_errors_when_store_missing` unit test in `lattice-cli`.
+//! 本组场景承接原 `planned_audit_cli`，替代 CLI 内部的
+//! `audit_query_errors_when_store_missing` 单元测试。历史证据见
+//! `docs/archive/records/FINDINGS.md`，现行测试规则见 `docs/development/testing.md`。
 
 use lattice_system_harness::{
     AssertError, CommandOutcome, LatticeCommand, LatticeDriver, ScenarioSpec, ScenarioWorld,
-    assert_exit_failure, assert_stderr_contains, assert_with_failure_artifacts,
+    assert_exit_code, assert_stderr_contains, assert_with_failure_artifacts,
 };
+use serde_json::Value;
 
 fn driver() -> LatticeDriver {
     LatticeDriver::from_env().expect("LATTICE_BIN must point to a built lattice binary")
@@ -54,12 +48,77 @@ fn ok_or_artifacts(
         .unwrap_or_else(|e| panic!("{e}"));
 }
 
-/// Assert an audit subcommand degrades to the documented missing-store
-/// invocation-ledger configuration error (exit 1) instead of panicking. With no
-/// session/project store created for the project, the ledger is absent.
+/// 缺少调用账本的公开诊断；文本模式与 JSON 模式共用同一原因。
+const MISSING_LEDGER: &str = "invocation ledger not found";
+
+fn require(condition: bool, expected: String) -> Result<(), AssertError> {
+    if condition {
+        Ok(())
+    } else {
+        Err(AssertError::StdoutMissing { expected })
+    }
+}
+
+/// 项目根目录和 XDG 状态仓库路径仅供内部定位，公开诊断不回显这些私有路径。
+fn no_private_path(world: &ScenarioWorld, out: &CommandOutcome) -> Result<(), AssertError> {
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    for private in [world.project_dir(), world.session_store_dir()] {
+        let private = private.display().to_string();
+        require(
+            !stdout.contains(&private) && !stderr.contains(&private),
+            format!("diagnostics must not echo {private}: {}", out.summary()),
+        )?;
+    }
+    Ok(())
+}
+
+/// 缺少调用账本时，文本模式将前提错误写到标准错误并返回退出码 2，标准输出为空。
 fn assert_missing_store(world: &ScenarioWorld, name: &str, summary: &str, out: &CommandOutcome) {
-    let result = assert_exit_failure(out)
-        .and_then(|_| assert_stderr_contains(out, "invocation ledger not found"));
+    let result = assert_exit_code(out, 2)
+        .and_then(|_| assert_stderr_contains(out, MISSING_LEDGER))
+        .and_then(|_| {
+            require(
+                out.stdout.is_empty(),
+                format!("text errors stay off stdout: {}", out.summary()),
+            )
+        })
+        .and_then(|_| no_private_path(world, out));
+    ok_or_artifacts(world, name, summary, out, result);
+}
+
+/// `--json` 将同一原因写为标准输出中的类型化错误记录，返回退出码 2，标准错误为空。
+fn assert_missing_store_json(
+    world: &ScenarioWorld,
+    name: &str,
+    summary: &str,
+    out: &CommandOutcome,
+) {
+    let result = assert_exit_code(out, 2)
+        .and_then(|_| {
+            require(
+                out.stderr.is_empty(),
+                format!("JSON errors stay off stderr: {}", out.summary()),
+            )
+        })
+        .and_then(|_| {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let record: Value = serde_json::from_str(stdout.trim()).map_err(|error| {
+                AssertError::StdoutMissing {
+                    expected: format!("one typed error record ({error}): {stdout}"),
+                }
+            })?;
+            require(
+                record.get("type").and_then(Value::as_str) == Some("error")
+                    && record.get("kind").and_then(Value::as_str) == Some("bad_request")
+                    && record
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .is_some_and(|message| message.contains(MISSING_LEDGER)),
+                format!("unexpected audit JSON diagnostic: {stdout}"),
+            )
+        })
+        .and_then(|_| no_private_path(world, out));
     ok_or_artifacts(world, name, summary, out, result);
 }
 
@@ -72,7 +131,7 @@ fn fast_audit_query_missing_store_errors_cleanly_json() {
         &spec,
         &["audit", "query", "--session", "nobody", "--json"],
     );
-    assert_missing_store(
+    assert_missing_store_json(
         &world,
         "fast-audit-query-missing-json",
         "lattice audit query --json",
@@ -102,7 +161,7 @@ fn fast_audit_tail_missing_store_errors_cleanly() {
         &spec,
         &["audit", "query", "--session", "nobody", "--tail", "--json"],
     );
-    assert_missing_store(
+    assert_missing_store_json(
         &world,
         "fast-audit-tail-missing",
         "lattice audit query --tail --json",
@@ -127,7 +186,7 @@ fn fast_audit_replay_missing_store_errors_cleanly() {
             "--json",
         ],
     );
-    assert_missing_store(
+    assert_missing_store_json(
         &world,
         "fast-audit-replay-missing",
         "lattice audit replay --json",

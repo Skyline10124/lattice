@@ -1,35 +1,30 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use lattice_llm::{ModelRouter, ModelTarget};
+#[cfg(any(test, feature = "test-utils"))]
 use std::path::PathBuf;
 
 use super::types::RunTurnRequest;
 
-/// Resolve model alias and system prompt from the request.
+/// 模型与提示来自已加载配置，provider 必须由冻结连接或测试注入显式提供。
 pub(crate) fn resolve_model_and_prompt(
     request: &RunTurnRequest,
-) -> (String, Option<String>, String) {
-    let (model, system_prompt) = if let Some(ref lp) = request.loaded_profile {
-        let model = lp.profile.agent.model.clone();
-        let system_prompt = if lp.system_prompt.is_empty() {
-            None
-        } else {
-            Some(lp.system_prompt.clone())
-        };
-        (model, system_prompt)
+    frozen_provider: &str,
+) -> crate::session::Result<(String, Option<String>, String)> {
+    let lp = request.loaded_profile.as_ref().ok_or_else(|| {
+        crate::session::ApiError::BadRequest("loaded active agent profile is required".into())
+    })?;
+    let model = lp.profile.agent.model.clone();
+    let system_prompt = if lp.system_prompt.is_empty() {
+        None
     } else {
-        ("sonnet".to_string(), None)
+        Some(lp.system_prompt.clone())
     };
 
-    let provider = ModelRouter::new()
-        .resolve(&ModelTarget::new(&model))
-        .map(|rm| rm.provider.as_str().to_string())
-        .unwrap_or_else(|_| "unknown".to_string());
-
-    (model, system_prompt, provider)
+    Ok((model, system_prompt, frozen_provider.to_owned()))
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn resolve_project_root(request: &RunTurnRequest) -> crate::session::Result<PathBuf> {
     if let Some(root) = &request.test_project_root {
         return Ok(PathBuf::from(root));

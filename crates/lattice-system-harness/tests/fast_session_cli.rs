@@ -18,8 +18,8 @@
 use lattice_system_harness::cli::{ok_or_artifacts, run};
 use lattice_system_harness::{
     AssertError, CommandOutcome, ScenarioSpec, ScenarioWorld, assert_exit_code,
-    assert_exit_failure, assert_exit_success, assert_no_secret, assert_stderr_contains,
-    assert_stdout_contains, assert_stdout_contains_all, assert_with_failure_artifacts,
+    assert_exit_success, assert_no_secret, assert_stderr_contains, assert_stdout_contains,
+    assert_stdout_contains_all, assert_with_failure_artifacts,
 };
 use serde_json::Value;
 
@@ -253,9 +253,8 @@ fn fast_session_list_before_any_session_fails_closed() {
     let world = ScenarioWorld::new(&spec.name).expect("world");
     let out = run(&world, &spec, &["session", "list"]);
 
-    let result = assert_exit_failure(&out)
-        .and_then(|_| assert_stderr_contains(&out, "not initialized"))
-        .and_then(|_| assert_stderr_contains(&out, "lattice session new"));
+    let result = assert_exit_code(&out, 1)
+        .and_then(|_| assert_stderr_contains(&out, "store unavailable; inspect durable state"));
     ok_or_artifacts(&world, &spec.name, "lattice session list", &out, result);
     assert!(
         !world.session_store_dir().join("sessions.git").exists(),
@@ -457,9 +456,8 @@ fn fast_session_status_nonexistent_session_errors() {
     let _existing = create_session(&world, &spec);
     let out = run(&world, &spec, &["session", "status", "nope-sid"]);
 
-    let result = assert_exit_failure(&out)
-        .and_then(|_| assert_stderr_contains(&out, "not found"))
-        .and_then(|_| assert_stderr_contains(&out, "nope-sid"));
+    let result = assert_exit_code(&out, 2)
+        .and_then(|_| assert_stderr_contains(&out, "session or Turn not found"));
     ok_or_artifacts(
         &world,
         &spec.name,
@@ -477,9 +475,8 @@ fn fast_session_log_nonexistent_session_errors() {
     let _existing = create_session(&world, &spec);
     let out = run(&world, &spec, &["session", "log", "nope-sid"]);
 
-    let result = assert_exit_failure(&out)
-        .and_then(|_| assert_stderr_contains(&out, "not found"))
-        .and_then(|_| assert_stderr_contains(&out, "nope-sid"));
+    let result = assert_exit_code(&out, 2)
+        .and_then(|_| assert_stderr_contains(&out, "session or Turn not found"));
     ok_or_artifacts(
         &world,
         &spec.name,
@@ -507,8 +504,7 @@ fn fast_session_send_nonexistent_session_errors() {
     let out = run(&world, &spec, &["session", "send", "nope-sid", "hello"]);
 
     let result = assert_exit_code(&out, 2)
-        .and_then(|_| assert_stderr_contains(&out, "not found"))
-        .and_then(|_| assert_stderr_contains(&out, "nope-sid"));
+        .and_then(|_| assert_stderr_contains(&out, "session or Turn not found"));
     ok_or_artifacts(
         &world,
         &spec.name,
@@ -539,11 +535,7 @@ fn fast_session_send_no_agent_profile_errors() {
     let out = run(&world, &spec, &["session", "send", &session_id, "hello"]);
 
     let result = assert_exit_code(&out, 2)
-        .and_then(|_| {
-            assert_stderr_contains(&out, "agent.toml")
-                .or_else(|_| assert_stderr_contains(&out, "profile"))
-                .or_else(|_| assert_stderr_contains(&out, "not found"))
-        })
+        .and_then(|_| assert_stderr_contains(&out, "request or frozen configuration is invalid"))
         .and_then(|_| assert_no_secret(&out, "sk-fast-send-no-profile-sentinel"));
     assert_with_failure_artifacts(
         &world,

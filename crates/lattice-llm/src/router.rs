@@ -16,6 +16,11 @@ use crate::endpoints::{
 use crate::stub::LlmError;
 use crate::types::ModelTarget;
 
+/// 缺 `OPENAI_COMPATIBLE_MODEL` 时的固定提示：不含别名或凭据值，可直接展示。
+///
+/// 公开 API 只按这个常量判定该分支，未知别名的文案则一律不对外透出别名原文。
+pub const MISSING_OPENAI_COMPATIBLE_MODEL_HINT: &str =
+    "openai-compatible requires OPENAI_COMPATIBLE_MODEL or use compat:<model>";
 /// Supported LLM provider families.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProviderKind {
@@ -141,8 +146,7 @@ impl ModelRouter {
             return match std::env::var("OPENAI_COMPATIBLE_MODEL") {
                 Ok(model) if !model.is_empty() => Ok(build_openai_compatible(alias, &model)),
                 _ => Err(LlmError::Other(
-                    "openai-compatible requires OPENAI_COMPATIBLE_MODEL or use compat:<model>"
-                        .to_string(),
+                    MISSING_OPENAI_COMPATIBLE_MODEL_HINT.to_string(),
                 )),
             };
         }

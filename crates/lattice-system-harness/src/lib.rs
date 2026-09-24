@@ -9,6 +9,7 @@
 pub mod artifacts;
 mod assert;
 pub mod cli;
+mod daemon;
 pub mod driver;
 pub mod fake_llm;
 pub mod fixture_http;

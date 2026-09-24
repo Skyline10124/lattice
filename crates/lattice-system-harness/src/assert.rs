@@ -173,6 +173,13 @@ fn finalize_with_failure_artifacts_at_target(
     let primary_assertion = result.err().map(|error| error.to_string());
     let failed = primary_assertion.is_some();
     let mut report = FailureReport::new(primary_assertion, secrets);
+    let cleanup = world.stop_daemon();
+    let failed = failed || cleanup.is_err();
+    if let Err(errors) = cleanup {
+        for error in errors {
+            report.add_evidence_error("daemon cleanup", error, secrets);
+        }
+    }
     report.add_command_diagnostic(
         render_command_text(command_summary, output, secrets),
         secrets,

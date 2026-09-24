@@ -144,6 +144,7 @@ pub(crate) fn one_binding_plan() -> crate::pending::BindingPlan {
     };
     crate::pending::BindingPlan {
         plan_key: PlanKey {
+            session_id: session_id(),
             turn_id: turn_id(),
             model_step_ordinal: 0,
         },

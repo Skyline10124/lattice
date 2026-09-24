@@ -20,8 +20,9 @@ use lattice_system_harness::{
 };
 use serde_json::Value;
 use support::{
-    assert_clean_send, direct_world, driver, evidence, finish_scenario, last_tool_content, require,
-    sequence, tool_call, tool_failed, tool_ok, tool_result_value, wire_fake_llm,
+    assert_clean_send, assert_committed_view_after, cli, direct_world, driver, evidence,
+    finish_scenario, last_tool_content, require, sequence, tool_call, tool_failed, tool_ok,
+    tool_result_value, wire_fake_llm,
 };
 
 fn fetch_network_profile(max_bytes: u64) -> String {
@@ -147,6 +148,7 @@ fn direct_tools_fetch_disabled_no_dispatch() {
     let scenario_evidence = evidence(&world, &spec);
     let send = SessionSendDriver::new(&driver, &world, &spec, "dl-foff", "main").expect("session");
     let outcome = send.send("try fetch").expect("turn");
+    let session_id = send.session_id().to_string();
     let captures = server.captured_requests();
 
     let result: Result<(), AssertError> = (|| {
@@ -177,6 +179,48 @@ fn direct_tools_fetch_disabled_no_dispatch() {
         require(
             !cep_fetch,
             "disabled fetch.web must not emit cep_call_started",
+        )?;
+        // 目录外调用整批拒绝，保存类型化原因并将 Turn 正常关闭为失败，
+        // 不留下未关闭任务，也不为该批次追加模型请求。
+        require(
+            outcome
+                .committed_result()
+                .is_some_and(|(_, _, result)| result == "failed"),
+            format!("disabled fetch.web must close the Turn failed: {outcome:?}"),
+        )?;
+        require(
+            !outcome.has_committed_completed(),
+            "a rejected batch must not commit a completed Turn",
+        )?;
+        require(
+            captures.len() == 1,
+            format!("expected exactly one model request, got {}", captures.len()),
+        )?;
+        let turn_id = outcome
+            .accepted_turn_id()
+            .expect("accepted TurnId")
+            .to_string();
+        let view = cli(
+            &world,
+            &spec,
+            &["--json", "session", "turn", &session_id, &turn_id],
+        );
+        let snapshot = String::from_utf8_lossy(&view.stdout)
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find(|record| record["type"] == "snapshot")
+            .ok_or_else(|| AssertError::StdoutMissing {
+                expected: format!("session turn snapshot: {}", view.summary()),
+            })?;
+        require(
+            snapshot["view"]["requested_turn"]["state"] == "committed",
+            format!("rejected batch must not leave a pending Turn: {snapshot}"),
+        )?;
+        require(
+            snapshot["view"]["requested_turn"]["outcome"]
+                == serde_json::json!({"failed": {"reason": {"invalid_tool_call": {"validation":
+                    {"unknown_tool": {"call_ordinal": 0}}}}}}),
+            format!("durable typed rejection mismatch: {snapshot}"),
         )?;
         Ok(())
     })();
@@ -319,18 +363,8 @@ fn direct_tools_fetch_capability_denial_with_public_https() {
             !tool_ok(&outcome.parsed, "fetch.web"),
             "capability denial must not succeed fetch.web",
         )?;
-        require(
-            outcome.events.iter().any(|event| {
-                matches!(
-                    event,
-                    TurnEventLine::TurnCommitted { outcome, .. } if outcome == "completed"
-                )
-            }),
-            format!(
-                "turn must still complete after capability-denied tool: {:?}",
-                outcome.type_sequence()
-            ),
-        )?;
+        // Gap 后从固定快照核验本次 Turn 的真实提交，不依赖瞬时终态事件或仅凭退出码。
+        assert_committed_view_after(&outcome.parsed, "turn_committing")?;
         Ok(())
     })();
 

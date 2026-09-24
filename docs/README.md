@@ -19,18 +19,18 @@
 ## 架构
 
 - [宿主平台](architecture/platform.md)：Linux 宿主支持范围与 WASM guest 边界。
-- [私有存储与持久化](architecture/storage.md)：状态寻址、三库归属、Git 内核、创建与打开、通用锁序、引用发布及持久性边界。
-- [会话与 Turn](architecture/session.md)：会话历史、对话模型、请求接受、持久阶段、结果关闭与重开协调。
+- [私有存储与持久化](architecture/storage.md)：状态寻址、三库归属、后台单例与本地身份、Git 内核、锁序、引用发布及持久性边界。
+- [会话与 Turn](architecture/session.md)：提交到结果可见的流程、配置冻结、后台职责、请求确认、固定读取与 closure-only 恢复。
 - [本地工作区与变更历史](architecture/workspace.md)：观察、文件变更、私有历史、Turn checkpoint 与显式 Rewind。
 - [LANCET 工具执行](architecture/lancet.md)：工具组成、Host 权限、调用执行、证据与操作员读取。
 - [Cell 权限与证据](architecture/cell.md)：Cell 模型、能力准入、Host 授权、结果计量与版本化证据。
-- [TUI 交互与视觉](architecture/tui.md)：产品接线、键位、布局、停靠区、工具显示与配色。
+- [TUI 交互与视觉](architecture/tui.md)：持久对话与临时文字、输入和后台接线、重连与取消、工具显示、键位、布局与配色。
 
 ## 开发与验证
 
 - [工具开发与操作](development/tool-development.md)：manifest/生成链、profile、语义编辑、audit/status/doctor。
-- [测试工程](development/testing.md)：测试分层、场景隔离、被测产物、执行资源与失败证据要求。
-- [验证操作指南](development/validation-guide.md)：安装、构建、局部验证、显式 feature、本地 CI、rollout 和证据查看。
+- [测试工程](development/testing.md)：测试分层、后台与重连场景步骤、被测产物、隔离和清理、执行资源与失败证据。
+- [验证操作指南](development/validation-guide.md)：安装、构建、后台命令与重连用法、局部验证、显式 feature、本地 CI、rollout 和证据查看。
 - [InvocationStore 诊断指南](development/invocation-store-diagnostics.md)：diagnostic-only 资格化工具、输入与版本、manifest 生成参数及历史证据保留。
 
 ## 参考资料

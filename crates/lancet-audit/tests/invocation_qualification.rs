@@ -307,6 +307,8 @@ fn stress_turn_id(session: u32) -> TurnId {
 
 fn stress_plan_key(session: u32, step: u32) -> PlanKey {
     PlanKey {
+        session_id: SessionId::parse(&format!("00000000{session:04x}40008000{session:012x}"))
+            .unwrap(),
         turn_id: stress_turn_id(session),
         model_step_ordinal: step,
     }
@@ -363,6 +365,7 @@ fn result_journal(
     .unwrap();
     let turn_id = stress_turn_id(session_number);
     let plan_key = PlanKey {
+        session_id,
         turn_id,
         model_step_ordinal: 0,
     };
@@ -543,6 +546,7 @@ fn clean_collision_revises_candidates_end_to_end_over_real_stores() {
     // Step 0: another plan already owns every candidate ID this Turn planned.
     let (facts, plan, reservations) = result_journal(0, key);
     let foreign_key = PlanKey {
+        session_id: SessionId::parse("ffffffff111144448888ffffffffffff").unwrap(),
         turn_id: stress_turn_id(0xfff),
         model_step_ordinal: 3,
     };
@@ -1836,6 +1840,7 @@ fn cold_reopen_benchmark() {
         let id = InvocationId::parse(&format!("00000000-0000-4000-8000-{i:012x}")).unwrap();
         candidate_ids.push(id);
         let plan_key = PlanKey {
+            session_id: SessionId::parse("aaaaaaaa111144448888cccccccccccc").unwrap(),
             turn_id: TurnId::parse(&format!("11111111-1111-4111-8111-{i:012x}")).unwrap(),
             model_step_ordinal: 0,
         };
@@ -1908,6 +1913,7 @@ fn cold_reopen_benchmark() {
     let fresh = InvocationStore::open(&layout, &key).unwrap();
     let view = fresh.pinned_view().unwrap();
     let query_plan_key = PlanKey {
+        session_id: SessionId::parse("aaaaaaaa111144448888cccccccccccc").unwrap(),
         turn_id: TurnId::parse("11111111-1111-4111-8111-000000000000").unwrap(),
         model_step_ordinal: 0,
     };

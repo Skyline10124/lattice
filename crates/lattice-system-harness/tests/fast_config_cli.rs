@@ -14,7 +14,7 @@
 
 use lattice_system_harness::{
     AssertError, CommandOutcome, LatticeCommand, LatticeDriver, ScenarioSpec, ScenarioWorld,
-    assert_exit_failure, assert_exit_success, assert_no_secret, assert_stderr_contains,
+    assert_exit_code, assert_exit_success, assert_no_secret, assert_stderr_contains,
     assert_stdout_contains, assert_stdout_contains_all, assert_with_failure_artifacts,
 };
 use serde_json::Value;
@@ -301,14 +301,17 @@ fn fast_resolve_verbose_includes_auth_env_and_credential_status() {
 fn fast_resolve_unknown_model_errors() {
     let spec = ScenarioSpec::fast("fast-resolve-unknown");
     let world = ScenarioWorld::new(&spec.name).expect("world");
-    let out = run(&world, &spec, &["resolve", "nope-xyz"]);
+    // 命令行传入的私有别名会进入错误构造；验证公开诊断仍不回显该输入。
+    let alias = "private-alias-do-not-echo";
+    let out = run(&world, &spec, &["resolve", alias]);
 
-    let result =
-        assert_exit_failure(&out).and_then(|_| assert_stderr_contains(&out, "unknown model alias"));
+    let result = assert_exit_code(&out, 2)
+        .and_then(|_| assert_stderr_contains(&out, "unknown model alias"))
+        .and_then(|_| assert_no_secret(&out, alias));
     ok_or_artifacts(
         &world,
         "fast-resolve-unknown",
-        "lattice resolve nope-xyz",
+        "lattice resolve <unknown alias>",
         &out,
         result,
     );

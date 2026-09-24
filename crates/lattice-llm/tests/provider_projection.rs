@@ -7,8 +7,9 @@
 
 use lattice_conversation::{
     AttemptInterruption, LimitKind, MAX_ASSISTANT_CONTENT_BYTES, MAX_MODEL_ATTEMPT_BYTES,
-    MAX_REASONING_CONTENT_BYTES, MAX_TOOL_CALL_ARGUMENTS_BYTES, MessageSemantic, NativeMessage,
-    OpaqueProviderState, ProviderOrigin, UnboundToolCall, replay_state_digest, semantic_digest,
+    MAX_REASONING_CONTENT_BYTES, MAX_TOOL_CALL_ARGUMENTS_BYTES, MAX_TOOL_CALLS_PER_BATCH,
+    MessageSemantic, NativeMessage, OpaqueProviderState, ProviderOrigin, UnboundToolCall,
+    replay_state_digest, semantic_digest,
 };
 use lattice_llm::provider_projection::{
     ProjectionError, native_to_wire, project_cross_provider, wire_to_native,
@@ -618,39 +619,35 @@ fn reasoning_content_limit_is_enforced_at_the_seam() {
 #[test]
 fn attempt_total_limit_is_enforced_at_the_seam() {
     // 2 MiB assistant + 2 MiB reasoning + 12 MiB of tool arguments spread over
-    // two calls (the per-call budget is 8 MiB and resets per call, so only the
+    // half-limit calls (the per-call budget resets per call, so only the
     // 16 MiB aggregate can trip here).
     let filler =
         MAX_MODEL_ATTEMPT_BYTES - MAX_ASSISTANT_CONTENT_BYTES - MAX_REASONING_CONTENT_BYTES;
     let overhead = r#"{"a":""}"#.len();
-    let per_call = filler / 2;
-    assert!(per_call <= MAX_TOOL_CALL_ARGUMENTS_BYTES);
+    let per_call = MAX_TOOL_CALL_ARGUMENTS_BYTES / 2;
+    let calls = filler / per_call;
+    assert_eq!(calls * per_call, filler);
+    assert!(calls <= MAX_TOOL_CALLS_PER_BATCH);
 
     let build = |extra: usize| {
-        let first = per_call - overhead;
-        let second = filler - per_call - overhead + extra;
+        let tool_calls: Vec<_> = (0..calls)
+            .map(|i| {
+                let len = per_call - overhead + if i + 1 == calls { extra } else { 0 };
+                serde_json::json!({
+                    "id": format!("call_{}", i + 1),
+                    "type": "function",
+                    "function": {
+                        "name": "t",
+                        "arguments": format!("{{\"a\":\"{}\"}}", "z".repeat(len)),
+                    }
+                })
+            })
+            .collect();
         serde_json::json!({"choices": [{"message": {
             "role": "assistant",
             "content": "x".repeat(MAX_ASSISTANT_CONTENT_BYTES),
             "reasoning_content": "r".repeat(MAX_REASONING_CONTENT_BYTES),
-            "tool_calls": [
-                {
-                    "id": "call_1",
-                    "type": "function",
-                    "function": {
-                        "name": "t",
-                        "arguments": format!("{{\"a\":\"{}\"}}", "z".repeat(first)),
-                    }
-                },
-                {
-                    "id": "call_2",
-                    "type": "function",
-                    "function": {
-                        "name": "t",
-                        "arguments": format!("{{\"a\":\"{}\"}}", "z".repeat(second)),
-                    }
-                }
-            ]
+            "tool_calls": tool_calls,
         }}]})
     };
 
@@ -1046,7 +1043,7 @@ fn malformed_usage_fails_typed() {
 
 #[test]
 fn tool_arguments_exact_boundary_is_accepted_for_every_provider() {
-    // 8 MiB of textual arguments lands exactly on the per-call limit; every
+    // 1 MiB of textual arguments lands exactly on the per-call limit; every
     // projector must accept it. Plus-one interruption for Anthropic/Gemini is
     // covered above; here OpenAI joins the family.
     let overhead = r#"{"a":""}"#.len();

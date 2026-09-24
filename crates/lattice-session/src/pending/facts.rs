@@ -299,6 +299,7 @@ mod tests {
 
     fn plan_key() -> PlanKey {
         PlanKey {
+            session_id: SessionId::parse("3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c").unwrap(),
             turn_id: TurnId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").unwrap(),
             model_step_ordinal: 0,
         }
@@ -306,6 +307,7 @@ mod tests {
 
     fn other_plan_key() -> PlanKey {
         PlanKey {
+            session_id: SessionId::parse("3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c").unwrap(),
             turn_id: TurnId::parse("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee").unwrap(),
             model_step_ordinal: 0,
         }

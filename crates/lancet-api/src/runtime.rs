@@ -71,6 +71,7 @@ impl LancetRuntime {
             enabled_tools,
             mut policy,
             capability_admission,
+            tls_roots_der,
             invocations,
             workspace_history,
         } = config;
@@ -111,6 +112,7 @@ impl LancetRuntime {
             Arc::new(CepTurnContext::from_policy(cep_policy)),
             &policy,
             Arc::clone(&workspace_history),
+            &tls_roots_der,
         )
         .map_err(LancetError::Config)?;
 
@@ -501,6 +503,7 @@ mod tests {
                 denied_capabilities: Default::default(),
                 max_boundary: Trust::Ex,
             },
+            tls_roots_der: Vec::new(),
             invocations: backing.clone(),
             workspace_history: backing,
         })
@@ -542,6 +545,7 @@ mod tests {
             .invocations
             .reserve_batch(
                 PlanKey {
+                    session_id: binding.identity.session_id,
                     turn_id,
                     model_step_ordinal: ordinal,
                 },

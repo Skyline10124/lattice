@@ -112,6 +112,7 @@ fn one_call_plan() -> BindingPlan {
     };
     BindingPlan {
         plan_key: PlanKey {
+            session_id: session_id(),
             turn_id: turn_id(),
             model_step_ordinal: 0,
         },
@@ -706,6 +707,9 @@ fn continue_model_must_name_the_plan_step_it_closes() {
 fn snapshot_rejects_addresses_from_another_session() {
     let other = SessionId::parse("00000000000000000000000000000001").unwrap();
     let mut plan = one_call_plan();
+    // 计划自身一致：键与绑定地址都属于另一个 Session；本 Session 的快照仍须
+    // 在该计划与其 Session 不一致时 fail closed。
+    plan.plan_key.session_id = other;
     plan.bindings[0].address.message.session_id = other;
     plan.bindings[0].binding_digest =
         super::super::binding::PlannedBinding::compute_binding_digest(

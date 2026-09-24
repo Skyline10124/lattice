@@ -91,6 +91,28 @@ impl PtyTuiDriver {
         agent: &str,
         project_branch: &str,
     ) -> Result<Self, PtyError> {
+        Self::spawn_args(
+            driver,
+            world,
+            &["tui", "--agent", agent, "--project-branch", project_branch],
+        )
+    }
+
+    /// 重连只选择已存在 Session，不隐式提交或恢复旧 Turn。
+    pub fn reconnect(
+        driver: &LatticeDriver,
+        world: &ScenarioWorld,
+        session_id: &str,
+    ) -> Result<Self, PtyError> {
+        Self::spawn_args(driver, world, &["tui", session_id])
+    }
+
+    fn spawn_args(
+        driver: &LatticeDriver,
+        world: &ScenarioWorld,
+        args: &[&str],
+    ) -> Result<Self, PtyError> {
+        world.daemon.register(driver.binary_path())?;
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -102,7 +124,7 @@ impl PtyTuiDriver {
             .map_err(|e| PtyError::Pty(e.to_string()))?;
 
         let mut cmd = CommandBuilder::new(driver.binary_path());
-        cmd.args(["tui", "--agent", agent, "--project-branch", project_branch]);
+        cmd.args(args);
         cmd.cwd(world.project_dir());
         cmd.env_clear();
         for (k, v) in world.env_summary() {
@@ -184,6 +206,13 @@ impl PtyTuiDriver {
         Ok(())
     }
 
+    /// 原始按键不自动附加 Enter，供取消与只断开的产品交互使用。
+    pub fn send_keys(&mut self, keys: &[u8]) -> Result<(), PtyError> {
+        self.master_writer.write_all(keys)?;
+        self.master_writer.flush()?;
+        Ok(())
+    }
+
     /// Drain PTY output until `predicate` returns `true` on the accumulated
     /// output (with ANSI escapes stripped and consecutive whitespace collapsed
     /// for matching only), or until `timeout` elapses. Returns the raw
@@ -203,6 +232,23 @@ impl PtyTuiDriver {
             let stripped = strip_ansi(&String::from_utf8_lossy(raw));
             predicate(&collapse_ws(&stripped))
         })
+    }
+
+    /// 用原生 resize 请求完整重绘，返回一个已完成帧的文字而非历史输出拼接。
+    /// 仅用于内容稳定的 gate 窗口；不模拟通用终端，也不检查布局或颜色。
+    pub fn redraw_text(&mut self, timeout: Duration) -> Result<String, PtyError> {
+        let offset = self.output.len();
+        let mut size = self
+            .master
+            .get_size()
+            .map_err(|e| PtyError::Pty(e.to_string()))?;
+        size.cols = if size.cols == 80 { 81 } else { 80 };
+        self.master
+            .resize(size)
+            .map_err(|e| PtyError::Pty(e.to_string()))?;
+        self.drain_until(timeout, |raw| full_redraw(&raw[offset..]).is_some())?;
+        let frame = full_redraw(&self.output[offset..]).expect("completed redraw");
+        Ok(collapse_ws(&strip_ansi(&String::from_utf8_lossy(frame))))
     }
 
     /// Drain PTY output until `predicate` returns `true` on the accumulated
@@ -349,7 +395,10 @@ impl PtyTuiDriver {
         let start = Instant::now();
         loop {
             match child.try_wait() {
-                Ok(Some(_)) => return Ok(()),
+                Ok(Some(status)) if status.success() => return Ok(()),
+                Ok(Some(status)) => {
+                    return Err(PtyError::Pty(format!("TUI exit was not clean: {status}")));
+                }
                 Ok(None) => {}
                 Err(e) => return Err(PtyError::Pty(e.to_string())),
             }
@@ -365,6 +414,18 @@ impl Drop for PtyTuiDriver {
     fn drop(&mut self) {
         self.kill_and_reap();
     }
+}
+
+// ratatui 的 fullscreen resize 先清屏并重置 back buffer；Crossterm 在
+// 完整字符 diff 后 flush 光标显隐。只截取该帧，排除之前和之后的增量重绘。
+fn full_redraw(raw: &[u8]) -> Option<&[u8]> {
+    let clear = b"\x1b[2J";
+    let start = raw.windows(clear.len()).position(|part| part == clear)? + clear.len();
+    let frame = &raw[start..];
+    let end = frame
+        .windows(6)
+        .position(|part| part == b"\x1b[?25h" || part == b"\x1b[?25l")?;
+    Some(&frame[..end])
 }
 
 /// Strip ANSI escape sequences (CSI, OSC, simple escapes) from `text`. Used
@@ -421,6 +482,28 @@ fn collapse_ws(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_redraw_requires_a_complete_frame_and_excludes_other_paints() {
+        let raw = b"old paint\x1b[2J\x1b[1;1Hprefix\x1b[2;1Hprefix\x1b[?25hnext paint";
+        let end = raw
+            .windows(6)
+            .position(|part| part == b"\x1b[?25h")
+            .unwrap()
+            + 6;
+        for cut in 0..end {
+            assert!(full_redraw(&raw[..cut]).is_none(), "partial frame at {cut}");
+        }
+        let frame = full_redraw(raw).unwrap();
+        assert_eq!(frame, b"\x1b[1;1Hprefix\x1b[2;1Hprefix");
+        assert_eq!(
+            strip_ansi(std::str::from_utf8(frame).unwrap())
+                .matches("prefix")
+                .count(),
+            2
+        );
+        assert_eq!(full_redraw(b"\x1b[2Jtext\x1b[?25l"), Some(&b"text"[..]));
+    }
 
     #[test]
     fn strip_ansi_removes_color_and_cursor_codes() {

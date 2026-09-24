@@ -18,7 +18,6 @@
 
 use std::collections::BTreeSet;
 
-use chrono::Utc;
 use lattice_store::{RefExpectation, RefTxnEdit, TreeSpec};
 
 use gix::objs::tree::EntryKind;
@@ -393,6 +392,27 @@ impl GitSessionGraphStore {
                 facts.project_store_key
             )));
         }
+        let pin_ref = turn_pin_ref_name(&session_id, &facts.turn_id.to_string())?;
+        if self.kernel().ref_target(&pin_ref)?.is_some() {
+            return Err(SessionError::Conflict(format!(
+                "Turn {} has already been committed",
+                facts.turn_id
+            )));
+        }
+        if let Some(tip) = self.read_active_turn(&session_id)? {
+            let started = self.resolve_turn_started(&tip)?;
+            if started.snapshot.stage == PendingStage::TurnStarted(facts.clone()) {
+                // 精确重试只确认原候选，不能用新时钟或配置重建已公开的接受事实。
+                let active_ref = active_turn_ref_name(&session_id)?;
+                let projection_ref = format!("refs/lattice/session-validation/{session_id}");
+                self.kernel()
+                    .fsync_pending(&[&active_ref, &projection_ref])?;
+                return Ok(tip);
+            }
+            return Err(SessionError::Conflict(format!(
+                "session '{session_id}' already has a different active Turn"
+            )));
+        }
         let head_oid = resolve_head_oid(self.kernel(), &session_state, &session_id)?;
         match (&facts.parent_conversation_tip, head_oid) {
             (Some(frozen), Some(actual)) if frozen == &actual.to_string() => {}
@@ -402,16 +422,6 @@ impl GitSessionGraphStore {
                     "TurnStarted parent tip {frozen:?} does not match the current head {actual:?}"
                 )));
             }
-        }
-
-        if self
-            .kernel()
-            .ref_target(&active_turn_ref_name(&session_id)?)?
-            .is_some()
-        {
-            return Err(SessionError::Conflict(format!(
-                "session '{session_id}' already has an active Turn"
-            )));
         }
 
         let snapshot = PendingSnapshot {
@@ -780,11 +790,10 @@ impl GitSessionGraphStore {
         let turn_id_str = turn_id.to_string();
         let pin_ref = turn_pin_ref_name(session_id, &turn_id_str)?;
 
-        if let Some(pinned) = self.read_turn_pin(session_id, &turn_id_str)? {
-            return self.read_finalized_turn(session_id, turn_id, &pinned);
-        }
-
         let _write = self.kernel().write_lock()?;
+        if let Some(pinned) = self.read_turn_pin(session_id, &turn_id_str)? {
+            return self.confirm_pinned_turn(session_id, turn_id, &pinned);
+        }
         let ref_name = active_turn_ref_name(session_id)?;
         let tip_oid = self.kernel().ref_target(&ref_name)?.ok_or_else(|| {
             SessionError::Conflict(format!(
@@ -884,7 +893,7 @@ impl GitSessionGraphStore {
 
         let (state_oid, _) = state::read_state(self.kernel(), session_id)?;
         let mut new_state = session_state.clone();
-        new_state.updated_at = Utc::now().to_rfc3339();
+        new_state.updated_at = candidate.created_at.clone();
         if let SessionHead::Detached { commit_id } = &mut new_state.head {
             *commit_id = turn_commit_oid.to_string();
         }
@@ -927,25 +936,71 @@ impl GitSessionGraphStore {
             },
         )?;
 
-        let mut published: Vec<String> = vec![pin_ref.clone(), ref_name.clone()];
-        if let SessionHead::Attached { branch } = &session_state.head {
-            published.push(state::head_ref_name(session_id, branch)?);
-        }
-        published.push(state::state_ref_name(session_id)?);
-        let published: Vec<&str> = published.iter().map(String::as_str).collect();
-        self.kernel().fsync_pending(&published)?;
-
         let manifest = candidate_manifest(&prepared, &candidate);
         let oid_str = turn_commit_oid.to_string();
         let message_ids: Vec<String> = (0..prepared.messages.len())
             .map(|i| format!("{oid_str}:{i}"))
             .collect();
         let mut turn_commit = turn_commit_from_manifest_and_oid(turn_commit_oid, &manifest);
+        turn_commit.profile_snapshot_json = candidate.profile_snapshot_json.clone();
         turn_commit.message_ids = message_ids;
         Ok(turn_commit)
     }
 
-    fn read_finalized_turn(
+    /// 核验一个固定 pin 的 TurnCommit 并补足其 pending 引用屏障。
+    /// 调用方必须已持有仓库写锁：本函数只读取不可变对象并 fsync 引用，
+    /// 不发布引用、不生成候选、不关闭 pending Turn。固定结果在进入本函数
+    /// 前已经关闭，因此确认它不取得会话执行锁，也不等待另一个 Turn 的生命周期。
+    fn confirm_pinned_turn(
+        &self,
+        session_id: &str,
+        turn_id: &lancet_protocol::TurnId,
+        pinned: &str,
+    ) -> Result<crate::graph::TurnCommit> {
+        let commit = self.read_finalized_turn(session_id, turn_id, pinned)?;
+        if self
+            .read_active_turn(session_id)?
+            .is_some_and(|tip| tip.snapshot.turn_id == *turn_id)
+        {
+            return Err(SessionError::JournalCorruption {
+                detail: "committed Turn still has an active-turn ref".into(),
+            });
+        }
+        // 最终事务可能已经可见而后置屏障失败；固定引用后确认，不能仅凭 pin 返回成功。
+        let mut refs: Vec<String> = self
+            .kernel()
+            .enumerate_refs(&format!("refs/lattice/sessions/{session_id}/"))?
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        refs.push(active_turn_ref_name(session_id)?);
+        refs.push(format!("refs/lattice/session-validation/{session_id}"));
+        let names: Vec<&str> = refs.iter().map(String::as_str).collect();
+        self.kernel().fsync_pending(&names)?;
+        Ok(commit)
+    }
+
+    /// 观察端专用确认入口：读取固定 pin，核验 TurnCommit 与日志身份，拒绝同
+    /// Turn 的 active-turn 异常，并在同一个短仓库写锁内完成真实的 pending
+    /// 引用 fsync 屏障。
+    ///
+    /// 与 [`Self::finalize_turn`] 不同，本入口不取得会话执行锁，也不能关闭
+    /// pending Turn 或发布引用；没有固定已关闭结果的 Turn 在此不可确认，
+    /// 崩溃遗留 pending 由后台在新提交或会话写操作前自动关闭。
+    pub fn confirm_committed_turn(
+        &self,
+        session_id: &str,
+        turn_id: &lancet_protocol::TurnId,
+    ) -> Result<crate::graph::TurnCommit> {
+        let turn_id_str = turn_id.to_string();
+        let _write = self.kernel().write_lock()?;
+        let Some(pinned) = self.read_turn_pin(session_id, &turn_id_str)? else {
+            return Err(SessionError::NotFound(turn_id_str));
+        };
+        self.confirm_pinned_turn(session_id, turn_id, &pinned)
+    }
+
+    pub(super) fn read_finalized_turn(
         &self,
         session_id: &str,
         expected_turn_id: &lancet_protocol::TurnId,
@@ -970,12 +1025,72 @@ impl GitSessionGraphStore {
                 ),
             });
         }
+        let parents = self.kernel().commit_parents(oid)?;
+        let journal = parents
+            .first()
+            .copied()
+            .ok_or_else(|| SessionError::JournalCorruption {
+                detail: "pinned Turn has no committed journal".into(),
+            })?;
+        if !is_journal_commit(self.kernel(), journal)? {
+            return Err(SessionError::JournalCorruption {
+                detail: "pinned Turn parent is not a journal".into(),
+            });
+        }
+        let tip = self.read_pending_snapshot_at(journal)?;
+        self.validate_pending_project_binding(session_id, &tip)?;
+        let PendingStage::Committed(facts) = &tip.snapshot.stage else {
+            return Err(SessionError::JournalCorruption {
+                detail: "pinned Turn parent is not Committed".into(),
+            });
+        };
+        if tip.snapshot.session_id.as_str() != session_id || facts.turn_id != *expected_turn_id {
+            return Err(SessionError::JournalCorruption {
+                detail: "pinned Turn journal identity differs".into(),
+            });
+        }
+        let root = self.resolve_turn_started(&tip)?;
+        let PendingStage::TurnStarted(started) = &root.snapshot.stage else {
+            unreachable!()
+        };
+        let input = candidate_turn_commit_input(
+            session_id,
+            &facts.candidate,
+            &started.parent_conversation_tip,
+        )?;
+        let prepared = prepare_turn_commit(&input, &facts.candidate.created_at);
+        if manifest_bytes != serialize_manifest(&candidate_manifest(&prepared, &facts.candidate))? {
+            return Err(SessionError::JournalCorruption {
+                detail: "pinned Turn manifest differs from final candidate".into(),
+            });
+        }
         let messages_bytes = self.kernel().read_tree_blob(oid, "turn/messages.jsonl")?;
-        let count = String::from_utf8(messages_bytes)
-            .map(|jsonl| jsonl.lines().filter(|l| !l.is_empty()).count())
-            .unwrap_or(0);
+        if messages_bytes != messages_to_jsonl(&prepared.messages)?.as_bytes()
+            || self.kernel().commit_message(oid)? != facts.candidate.commit_message
+            || self.kernel().read_tree_blob(oid, "turn/agent.json")?
+                != build_agent_json(&facts.candidate.agent_name).as_bytes()
+            || self.kernel().read_tree_blob(oid, "turn/profile.json")?
+                != facts.candidate.profile_snapshot_json.as_bytes()
+            || parents[1..]
+                != facts
+                    .candidate
+                    .side_parent_ids
+                    .iter()
+                    .map(|id| parse_oid(id))
+                    .collect::<Result<Vec<_>>>()?
+            || self.kernel().commit_time(oid)?
+                != Some(parse_rfc3339_to_unix(
+                    &facts.candidate.created_at,
+                    "candidate.created_at",
+                )?)
+        {
+            return Err(SessionError::JournalCorruption {
+                detail: "pinned Turn content or parents differ from final candidate".into(),
+            });
+        }
         let mut turn_commit = turn_commit_from_manifest_and_oid(oid, &manifest);
-        turn_commit.message_ids = (0..count)
+        turn_commit.profile_snapshot_json = facts.candidate.profile_snapshot_json.clone();
+        turn_commit.message_ids = (0..prepared.messages.len())
             .map(|i| format!("{commit_oid_hex}:{i}"))
             .collect();
         Ok(turn_commit)

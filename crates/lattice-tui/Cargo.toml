@@ -17,6 +17,7 @@ unicode-width  = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+serde_json = { workspace = true }
 # `test-util` (paused clock) is not part of tokio's `full`; it is what lets the
 # idle-deadline regression test advance 300 s without sleeping.
 tokio = { workspace = true, features = ["test-util"] }

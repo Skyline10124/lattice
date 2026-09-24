@@ -59,7 +59,11 @@ const REPO_NAME: &str = "invocations.git";
 const STORE_KIND: &str = "invocations";
 
 /// Schema version — bump on any record-shape change.
-const STORE_SCHEMA_VERSION: u32 = 4;
+/// Schema version — bump on any record-shape change. Version 5 adds
+/// `session_id` to `PlanKey` (full plan identity is session + Turn + step);
+/// repositories created before it are rejected at open with an explicit
+/// version error instead of being read as the new shape.
+const STORE_SCHEMA_VERSION: u32 = 5;
 
 /// Version of the per-commit event payload.
 const LEDGER_EVENT_VERSION: u32 = 1;
@@ -1549,7 +1553,8 @@ fn validate_snapshot_shape(snapshot: &LedgerSnapshot) -> Result<()> {
                     detail: format!("plan {:?} spans sessions", plan.plan_key),
                 });
             }
-            if binding.identity.turn_id != plan.plan_key.turn_id
+            if binding.identity.session_id != plan.plan_key.session_id
+                || binding.identity.turn_id != plan.plan_key.turn_id
                 || binding.identity.model_step_ordinal != plan.plan_key.model_step_ordinal
             {
                 return Err(InvocationStoreError::Corruption {
@@ -1737,7 +1742,10 @@ fn validate_event_shape(event: &LedgerEvent) -> Result<()> {
                         id: binding.invocation_id,
                     });
                 }
-                if binding.identity.turn_id != plan.plan_key.turn_id
+                // 键的 session 必须与每个 binding 的真实 session 一致；
+                // turn/step 归属检查沿用同一处精确核验，不弱化。
+                if binding.identity.session_id != plan.plan_key.session_id
+                    || binding.identity.turn_id != plan.plan_key.turn_id
                     || binding.identity.model_step_ordinal != plan.plan_key.model_step_ordinal
                 {
                     return Err(InvocationStoreError::Corruption {
@@ -2016,6 +2024,7 @@ mod tests {
 
     fn plan_key(step: u32) -> PlanKey {
         PlanKey {
+            session_id: SessionId::parse("aaaaaaaa111144448888cccccccccccc").unwrap(),
             turn_id: TurnId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").unwrap(),
             model_step_ordinal: step,
         }
@@ -2452,6 +2461,52 @@ mod tests {
         store.reserve_batch(plan_key(0), &bindings).unwrap(); // idempotent
         let (_, snap) = store.snapshot().unwrap();
         assert_eq!(snap.invocations.len(), 1);
+    }
+
+    #[test]
+    fn cross_session_plans_with_same_turn_and_step_coexist() {
+        // 项目级账本按完整 session+turn+step 键区分不同 Session 的同
+        // TurnId 计划：两个 Session 在同一 Turn/步骤键位的预留必须可以
+        // 并存，且各自的重复预留保持幂等。
+        let (_tmp, layout, key) = test_env();
+        let store = InvocationStore::create(&layout, &key).unwrap();
+        let mut session_b = binding(0);
+        session_b.identity.session_id =
+            SessionId::parse("bbbbbbbb222244448888dddddddddddd").unwrap();
+        // 两个 Session 的同 TurnId 计划使用各自 Session 的候选身份，
+        // 互不共享 InvocationId。
+        session_b.invocation_id =
+            InvocationId::parse("00000000-0000-4000-8000-0000000000aa").unwrap();
+
+        let session_a_key = plan_key(0);
+        let mut session_b_key = plan_key(0);
+        session_b_key.session_id = session_b.identity.session_id;
+
+        store.reserve_batch(session_a_key, &[binding(0)]).unwrap();
+        store
+            .reserve_batch(session_b_key, &[session_b.clone()])
+            .unwrap();
+        // 各自的重复预留保持幂等，不互斥。
+        store.reserve_batch(session_a_key, &[binding(0)]).unwrap();
+        store.reserve_batch(session_b_key, &[session_b]).unwrap();
+        let (_, snap) = store.snapshot().unwrap();
+        assert_eq!(snap.plans.len(), 2);
+        assert_eq!(snap.invocations.len(), 2);
+    }
+
+    #[test]
+    fn reserve_rejects_a_plan_key_from_another_session() {
+        // 键的 session 必须与每个 binding 的真实 session 一致：跨 Session
+        // 的键配本 Session 的 binding 属于精确核验失败，不是可执行预留。
+        let (_tmp, layout, key) = test_env();
+        let store = InvocationStore::create(&layout, &key).unwrap();
+        let mut foreign_key = plan_key(0);
+        foreign_key.session_id = SessionId::parse("bbbbbbbb222244448888dddddddddddd").unwrap();
+        let err = store.reserve_batch(foreign_key, &[binding(0)]).unwrap_err();
+        assert!(
+            matches!(err, InvocationStoreError::Corruption { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]

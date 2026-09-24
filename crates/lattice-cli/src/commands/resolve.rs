@@ -4,6 +4,24 @@
 use anyhow::Result;
 use colored::Colorize;
 
+/// 保留未知别名等使用错误的可归因诊断。
+///
+/// 原因在 `ApiError::BadRequest` 中；本地命令不跨 IPC，借道会脱敏的
+/// `From<ApiError> for LocalError` 会丢掉原因，因此按既有 `LocalError` 词汇
+/// 保留原因；其它意外故障仍走 `report_error` 的安全泛化。
+fn resolve_error(error: lattice_api::ApiError) -> anyhow::Error {
+    match error {
+        lattice_api::ApiError::BadRequest(reason) => {
+            anyhow::Error::new(lattice_api::local::LocalError {
+                kind: lattice_api::local::LocalErrorKind::BadRequest,
+                message: reason,
+                recovery: None,
+            })
+        }
+        error => anyhow::Error::new(error),
+    }
+}
+
 /// Resolve a model alias to provider details.
 ///
 /// Default text: short provider/provider_model only.
@@ -13,7 +31,7 @@ use colored::Colorize;
 ///
 /// Never prints credential values — only env var names and present/missing status.
 pub fn run(model: &str, verbose: bool, json: bool) -> Result<()> {
-    let resolved = lattice_api::resolve_model(model).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let resolved = lattice_api::resolve_model(model).map_err(resolve_error)?;
 
     if json {
         let out = super::model_render::resolved_model_json(&resolved);

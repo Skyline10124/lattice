@@ -1,10 +1,8 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Production LLM client wired into API-owned turn execution.
-
-/// Production `LlmClient` that delegates to `lattice_llm::stream`.
-pub(crate) struct RealLlmClient;
+/// 每个 Turn 持有提交时冻结的连接，不在模型重试或下一步骤重新读取环境。
+pub(crate) struct RealLlmClient(pub std::sync::Arc<lattice_llm::LlmConnection>);
 
 #[async_trait::async_trait]
 impl lattice_agent::LlmClient for RealLlmClient {
@@ -12,8 +10,9 @@ impl lattice_agent::LlmClient for RealLlmClient {
         &self,
         request: lattice_llm::ChatRequest,
     ) -> std::result::Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
-        lattice_llm::stream(request)
+        self.0
+            .stream(request)
             .await
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })
+            .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { Box::new(error) })
     }
 }

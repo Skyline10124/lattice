@@ -18,6 +18,8 @@ url = { workspace = true }
 urlencoding = { workspace = true }
 reqwest = { workspace = true }
 bytes = { workspace = true }
+zeroize = { workspace = true }
+rustls-native-certs = "0.8.4"
 
 [dev-dependencies]
 tokio = { workspace = true }

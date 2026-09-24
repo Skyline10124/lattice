@@ -100,6 +100,7 @@ fn build_runtime(root: &Path, history: &WorkspaceHistoryBacking) -> ReservedRunt
         .collect();
     ReservedRuntime::build(LancetRuntimeConfig {
         local_workspace_root: root.to_path_buf(),
+        tls_roots_der: Vec::new(),
         invocations: lancet_api::WorkspaceHistoryBacking::Disabled,
         enabled_tools: enabled,
         policy,
@@ -333,6 +334,7 @@ async fn failures_before_installation_record_nothing_and_do_not_move_current() {
     };
     let denied_runtime = ReservedRuntime::build(LancetRuntimeConfig {
         local_workspace_root: denied_root.path().to_path_buf(),
+        tls_roots_der: Vec::new(),
         invocations: lancet_api::WorkspaceHistoryBacking::Disabled,
         enabled_tools: COMPONENT_TOOLS.iter().map(|n| (*n).to_string()).collect(),
         policy,
@@ -369,6 +371,7 @@ async fn failures_before_installation_record_nothing_and_do_not_move_current() {
     };
     let effect_runtime = ReservedRuntime::build(LancetRuntimeConfig {
         local_workspace_root: effect_root.path().to_path_buf(),
+        tls_roots_der: Vec::new(),
         invocations: lancet_api::WorkspaceHistoryBacking::Disabled,
         enabled_tools: COMPONENT_TOOLS.iter().map(|n| (*n).to_string()).collect(),
         policy,
@@ -878,7 +881,7 @@ fn turn_request(
         session_id: session_id.to_string(),
         loaded_profile: Some(ws.loaded.clone()),
         cancel_flag: None,
-        test_llm: Some(llm),
+        test_llm: Some((llm, lattice_llm::ProviderKind::Anthropic)),
         test_project_root: Some(ws.root.to_string_lossy().to_string()),
         // Take the durable path: an external audit store and a real private
         // workspace history, both under the scoped state root.

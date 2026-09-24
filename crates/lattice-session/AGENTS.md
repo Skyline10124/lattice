@@ -25,6 +25,7 @@
 - journal payload predecessor 与 Git parent 一致，根接冻结 conversation tip；每个 binding/draft/candidate 地址与 SessionId 交叉核验。strict-open 验证完整 active-turn 和永久 Turn pin 的 manifest 身份。
 - ContinueModel 的 model_step_ordinal 使两份快照即可验证步连续性与首次 attempt 为零。无 journal committer time 时 reconcile fail closed；advance_pending_turn 先识别精确已发布候选，再判断是否非法迁移。
 - 累积 post_user_transcript 是唯一 authority；live/reopen 共用候选基础。重开只关闭、不请求模型或重执行 Tool；最终发布仅经 PendingTurn 事务。
+- 已关闭结果的观察端确认（`confirm_committed_turn`）只核验固定 pin 并补足 pending 引用屏障：不取会话执行锁、不发布引用或候选、不关闭 pending；崩溃遗留 pending 由后台在新提交或会话写操作前按[自动关闭规则](../../docs/architecture/session.md#自动关闭崩溃遗留任务)处理。
 - 直接 commit 构造和 fixture builder 仅测试可见；下游只在 dev-dependencies 启用 test-utils，生产依赖不得取消 cfg 隔离。保留候选修订的结构不变、精确计划及所有权校验。
 
 ## 验证入口

@@ -38,7 +38,6 @@ http-body-util = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 rustls = { workspace = true }
-rustls-platform-verifier = { workspace = true }
 tokio-rustls = { workspace = true }
 url = { workspace = true }
 # #143: the private WorkspaceHistory is a project-scoped store in the

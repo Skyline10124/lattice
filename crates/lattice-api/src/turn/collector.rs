@@ -1,10 +1,9 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Collect a [`RunTurnResult`] by draining a live [`TurnEvent`] stream.
+//! 从公开 TurnEvent 收集 RunTurnResult。
 //!
-//! Production [`super::run_turn`] uses this module so the sync facade shares
-//! the same execution core as [`super::stream_turn`].
+//! 测试辅助入口 run_turn 使用此收集器；后台执行的接受与完成仍走独立回执。
 
 use super::types::{RunTurnResult, RunTurnStage, ToolResultSummary, TurnEvent, TurnUsageSummary};
 use crate::session::ApiError;

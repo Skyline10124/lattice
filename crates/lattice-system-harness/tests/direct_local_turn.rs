@@ -24,10 +24,14 @@
 mod support;
 
 use lattice_system_harness::{
-    AssertError, ScenarioSpec, ScenarioWorld, SendExitCode, SessionSendDriver, SseScript,
-    TurnEventLine, assert_event_subsequence, derive_send_exit_code,
+    AssertError, CapturedRequest, ScenarioSpec, ScenarioWorld, SendExitCode, SendOutcome,
+    SessionSendDriver, SseScript, TurnEventLine, assert_event_subsequence, derive_send_exit_code,
 };
-use support::{assert_clean_send, driver, evidence, finish_scenario, require, wire_fake_llm};
+use serde_json::{Value, json};
+use support::{
+    assert_accepted_and_closed, assert_clean_send, driver, evidence, finish_scenario, require,
+    wire_fake_llm,
+};
 
 /// A Direct-Local project world with a fake-LLM-backed agent profile.
 ///
@@ -52,10 +56,122 @@ fn turn_world(
     (world, spec)
 }
 
-/// Minimal complete turn over the Direct-Local runtime: the fake LLM
-/// receives a real Chat Completions request, `session send` emits the
-/// required public event subsequence, the exit code is 0 and agrees with
-/// the stream-derived code, and `session log --json` reflects the commit.
+/// 接受、固定正文与公开日志共同证明 live Turn；有 Gap 时不伪造缺失事件。
+fn assert_live_text_turn(
+    outcome: &SendOutcome,
+    session_id: &str,
+    prompt: &str,
+    reply: &str,
+    log: &Value,
+) -> Result<(), AssertError> {
+    assert_accepted_and_closed(outcome)?;
+    let (committed_session, commit_id, result) =
+        outcome
+            .committed_result()
+            .ok_or_else(|| AssertError::StdoutMissing {
+                expected: "strict committed result".into(),
+            })?;
+    require(
+        committed_session == session_id
+            && !commit_id.is_empty()
+            && result == "completed"
+            && outcome.exit_code == Some(SendExitCode::Committed)
+            && derive_send_exit_code(&outcome.events) == SendExitCode::Committed,
+        "completed result identity and both exit classifications must agree",
+    )?;
+    let has_gap = outcome.events.iter().any(
+        |event| matches!(event, TurnEventLine::Unknown { type_name, .. } if type_name == "gap"),
+    );
+    if !has_gap {
+        assert_event_subsequence(
+            outcome,
+            &[
+                "turn_started",
+                "model_started",
+                "token_delta",
+                "model_finished",
+                "turn_committing",
+                "turn_committed",
+            ],
+        )
+        .map_err(|expected| AssertError::StdoutMissing { expected })?;
+        require(
+            outcome.assistant_text() == reply,
+            "continuous stream must carry the exact reply",
+        )?;
+    }
+    let turn_id = outcome.accepted_turn_id().expect("accepted TurnId");
+    require(
+        outcome.events.iter().any(|event| match event {
+            TurnEventLine::Unknown { type_name, raw } if type_name == "snapshot" => {
+                let view = &raw["view"];
+                view["session"]["session_id"] == session_id
+                    && view["active_turn"].is_null()
+                    && view["requested_turn"]["turn_id"] == turn_id
+                    && view["requested_turn"]["commit_id"] == commit_id
+                    && view["requested_turn"]["origin"] == "live"
+            }
+            _ => false,
+        }),
+        "fixed result must identify this live Turn and commit",
+    )?;
+    // 无论是否发生 Gap，都按最终 commit 固定正文核验；pending 正文不能代替提交内容。
+    let transcript: Vec<_> = outcome
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            TurnEventLine::Unknown { type_name, raw }
+                if type_name == "transcript"
+                    && raw["state"] == "completed"
+                    && raw["object_id"] == commit_id =>
+            {
+                Some((&raw["message"]["role"], &raw["message"]["parts"]))
+            }
+            _ => None,
+        })
+        .collect();
+    let text_parts =
+        |text: &str| json!([{"replay_state": null, "semantic": {"text": {"text": text}}}]);
+    require(
+        transcript
+            == vec![
+                (&json!("user"), &text_parts(prompt)),
+                (&json!("assistant"), &text_parts(reply)),
+            ],
+        "fixed committed transcript must contain exactly the user input and assistant reply",
+    )?;
+    require(
+        log["session_id"] == session_id
+            && log["turns"].as_array().is_some_and(|turns| {
+                turns.iter().any(|turn| {
+                    turn["turn_id"] == turn_id
+                        && turn["commit_id"] == commit_id
+                        && turn["commit_message"] == prompt
+                        && turn["origin"] == "live"
+                        && turn["outcome"] == json!({"completed": {"finish_reason": "stop"}})
+                        && turn["message_count"] == 2
+                        && turn["tool_message_count"] == 0
+                })
+            }),
+        "session log must corroborate the same live completed Turn and commit",
+    )
+}
+
+fn request_messages(capture: &CapturedRequest) -> Vec<(&str, &str)> {
+    capture.raw["messages"]
+        .as_array()
+        .expect("provider messages")
+        .iter()
+        .map(|message| {
+            (
+                message["role"].as_str().expect("role"),
+                message["content"].as_str().expect("text content"),
+            )
+        })
+        .collect()
+}
+
+/// 真实文本 Turn：provider 捕获请求，流或固定正文交付回答，退出分类与 session log 互证提交。
 #[test]
 fn direct_local_plain_text_turn_commits_and_exit_zero() {
     let driver = driver();
@@ -74,50 +190,26 @@ fn direct_local_plain_text_turn_commits_and_exit_zero() {
 
     let result: Result<(), AssertError> = (|| {
         assert_clean_send(&execution)?;
-        assert_event_subsequence(
-            outcome,
-            &[
-                "turn_started",
-                "model_started",
-                "token_delta",
-                "model_finished",
-                "turn_committed",
-            ],
-        )
-        .map_err(|expected| AssertError::StdoutMissing { expected })?;
-
-        let binary_exit = outcome
-            .exit_code
-            .expect("outcome should have an exit code classification");
-        let derived = derive_send_exit_code(&outcome.events);
+        require(log_output.is_clean_exit(0), "session log must exit cleanly")?;
+        let log: Value = serde_json::from_slice(&log_output.stdout).expect("session log JSON");
+        assert_live_text_turn(outcome, send.session_id(), "ping", "ok", &log)?;
         require(
-            binary_exit == SendExitCode::Committed && derived == SendExitCode::Committed,
-            format!("exit code mismatch: binary={binary_exit:?} derived={derived:?}"),
-        )?;
-
-        let commit_id = outcome
-            .events
-            .iter()
-            .find_map(|event| match event {
-                TurnEventLine::TurnCommitted { commit_id, .. } => Some(commit_id.as_str()),
-                _ => None,
-            })
-            .unwrap_or_default();
-        let log_stdout = String::from_utf8_lossy(&log_output.stdout);
-        require(
-            log_output.is_clean_exit(0)
-                && !commit_id.is_empty()
-                && log_stdout.contains(commit_id)
-                && log_stdout.contains("\"outcome\": {")
-                && log_stdout.contains("\"completed\": {"),
-            "session log --json did not reflect the new commit",
+            log["turns"]
+                .as_array()
+                .is_some_and(|turns| turns.len() == 1),
+            "one committed Turn in log",
         )?;
         require(
-            captures.iter().any(|capture| {
-                capture.model == "dl-plain"
-                    && capture.message_roles.iter().any(|role| role == "user")
-            }),
-            "fake LLM did not receive model=dl-plain with a user role",
+            captures.len() == 1,
+            "plain Turn must make exactly one real provider request",
+        )?;
+        let messages = request_messages(&captures[0]);
+        require(
+            captures[0].model == "dl-plain"
+                && messages.len() == 2
+                && messages[0].0 == "system"
+                && messages[1] == ("user", "ping"),
+            "fake LLM must receive model=dl-plain and the exact current user input",
         )?;
         Ok(())
     })();
@@ -133,12 +225,8 @@ fn direct_local_plain_text_turn_commits_and_exit_zero() {
     );
 }
 
-/// Session reopen against changed Local state: an external (non-LATTICE)
-/// edit + commit lands between two turns of the same session; the second
-/// turn still commits and its request carries the first turn's transcript
-/// (user text + assistant reply), proving the reopen path reads current
-/// Local state and session history. Skeleton — full external-binary
-/// competition coverage (mid-turn races, mutation conflicts) is #46.
+/// 同一 Session 两次发送之间发生外部编辑与提交；重开保留项目文件和 Git HEAD，
+/// 第二次真实模型请求必须携带第一次的完整对话，两次 live 提交均可由固定结果与日志互证。
 #[test]
 fn direct_local_session_reopen_after_external_change() {
     let driver = driver();
@@ -162,6 +250,14 @@ fn direct_local_session_reopen_after_external_change() {
     world
         .git(&["commit", "-m", "external change"])
         .expect("git commit");
+    let project_head = || {
+        gix::open_opts(world.project_dir(), gix::open::Options::isolated())
+            .expect("open project Git")
+            .head_id()
+            .expect("project Git HEAD")
+            .detach()
+    };
+    let external_commit = project_head();
     let second = send
         .send("again")
         .expect("second turn drives to completion");
@@ -173,44 +269,57 @@ fn direct_local_session_reopen_after_external_change() {
     let result: Result<(), AssertError> = (|| {
         assert_clean_send(&first)?;
         assert_clean_send(&second)?;
-        require(
-            first.has_committed_completed(),
-            format!("first turn did not commit: {:?}", first.type_sequence()),
-        )?;
-        require(
-            second.has_committed_completed(),
-            format!(
-                "second turn did not commit after external change: {:?}",
-                second.type_sequence()
-            ),
-        )?;
+        require(log_output.is_clean_exit(0), "session log must exit cleanly")?;
+        let log: Value = serde_json::from_slice(&log_output.stdout).expect("session log JSON");
+        assert_live_text_turn(&first, send.session_id(), "ping", "pong-one", &log)?;
+        assert_live_text_turn(&second, send.session_id(), "again", "pong-two", &log)?;
         require(
             captures.len() == 2,
             format!("expected one LLM request per turn, got: {captures:?}"),
         )?;
-        let second_body = captures
-            .get(1)
-            .map(|capture| capture.raw.to_string())
-            .unwrap_or_default();
+        let first_messages = request_messages(&captures[0]);
+        let second_messages = request_messages(&captures[1]);
         require(
-            second_body.contains("ping") && second_body.contains("pong-one"),
-            format!("second request lacked first-turn transcript context: {second_body}"),
+            captures.iter().all(|capture| capture.model == "dl-reopen")
+                && first_messages.len() == 2
+                && first_messages[0].0 == "system"
+                && first_messages[1] == ("user", "ping")
+                && second_messages.len() == 4
+                && second_messages[0].0 == "system"
+                && second_messages[1..]
+                    == [
+                        ("user", "ping"),
+                        ("assistant", "pong-one"),
+                        ("user", "again"),
+                    ],
+            "two real requests must carry the exact inputs and prior user/assistant context",
         )?;
 
         let commit_ids: Vec<&str> = [&first, &second]
             .iter()
-            .filter_map(|outcome| {
-                outcome.events.iter().find_map(|event| match event {
-                    TurnEventLine::TurnCommitted { commit_id, .. } => Some(commit_id.as_str()),
-                    _ => None,
-                })
-            })
+            .filter_map(|outcome| outcome.committed_result().map(|(_, id, _)| id))
             .collect();
-        let log_stdout = String::from_utf8_lossy(&log_output.stdout);
         require(commit_ids.len() == 2, "both turns must report commit ids")?;
         require(
-            commit_ids.iter().all(|id| log_stdout.contains(id)),
-            format!("session log omitted a commit: {log_stdout}"),
+            commit_ids[0] != commit_ids[1],
+            "two Turns must have distinct commit ids",
+        )?;
+        require(
+            log["turns"].as_array().is_some_and(|turns| {
+                turns.len() == 2
+                    && commit_ids
+                        .iter()
+                        .all(|id| turns.iter().any(|turn| turn["commit_id"] == *id))
+            }),
+            "session log must contain exactly the two reported commits",
+        )?;
+        require(
+            std::fs::read(world.project_dir().join("external.txt"))
+                .ok()
+                .as_deref()
+                == Some(b"external edit between turns\n")
+                && project_head() == external_commit,
+            "reopening the Session must not roll back the exact external file or Git commit",
         )?;
         Ok(())
     })();
