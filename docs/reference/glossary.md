@@ -111,7 +111,7 @@ _Avoid_: model attempt, partial reply, ToolCall without result
 _Avoid_: PendingTurn, token buffer, retry queue
 
 **Turn 记录**:
-每个 Turn 的独立记录，接受时与 UserMessage 节点同事务创建，关闭时补上结局、usage、notice 与末节点（该 Turn 写入的最后一个节点）；公开读取为 `TurnSummary { outcome, notice }`。它不保存工作区历史位置，Turn 与文件变更的关联记在 Workspace History 的变更记录中。
+每个 Turn 的独立记录，接受时与 UserMessage 节点同事务创建，关闭时补上结局、usage 与 notice；公开读取为 `TurnSummary { outcome, notice }`。它不保存工作区历史位置，Turn 与文件变更的关联记在 Workspace History 的变更记录中。
 见[关闭 Step 与 Turn](../architecture/session.md#关闭-step-与-turn)。
 _Avoid_: TurnCommit, last Step, commit OID
 

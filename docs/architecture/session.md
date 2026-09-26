@@ -41,9 +41,9 @@ Turn 与 Step 的执行进度和结局分三层记录：
 | --- | --- | --- | --- |
 | 树节点 | `(SessionId, seq)` | UserMessage 或 Step 的对话内容、父节点、`turn_id` | 只追加 |
 | Step 记录 | `(TurnId, 步骤序号)` | `attempts`：每次 provider 请求的终态、usage 与诊断；`end`：`Continue(node)`、`Finish(node)` 或 `Stop { node: Option<NodeId>, cause }` | 进行中的 Step 记录称为 ActiveStep，就地更新；关闭后不再修改 |
-| Turn 记录 | `TurnId` | Session、用户节点、原始输入、冻结配置、开始时间；关闭时补 `outcome`、`reason`、`notice`、usage 汇总、结束时间与末节点 | 接受时创建，关闭时补全，之后不再修改 |
+| Turn 记录 | `TurnId` | Session、用户节点、原始输入、冻结配置、开始时间；关闭时补 `outcome`、`reason`、`notice`、usage 汇总与结束时间 | 接受时创建，关闭时补全，之后不再修改 |
 
-Turn 的**末节点**是该 Turn 写入的最后一个节点：没有写出 Step 节点时是它的 UserMessage，否则是最后写入的 Step 节点。Turn 进行中时，同一 Session 不接受其他提交或退回，新节点总以当前位置为父，所以一个 Turn 的节点在树上连成一条链，末节点就是 Session 的当前位置。Turn 关闭时末节点写入 Turn 记录，之后不再变化；即使用户退回并分叉，从根到末节点的路径仍是这个 Turn 当时的完整对话。
+读取对话只有一种范围：从根到 Session 当前位置的路径，也就是下一次请求发给模型的上下文。要看其他分叉上的对话，先 `rewind` 到那里。
 
 Session 不保存“当前 agent”。agent 是 Turn 冻结配置的一部分，当前 agent 即当前位置所属 Turn 的 agent；提交时显式指定 agent 可以覆盖它。退回旧节点后，当前 agent 自然回到当时的 agent。
 
@@ -141,14 +141,14 @@ sequenceDiagram
 | 查看会话：`list`、`log` | 无，或 SessionId | `list` 每行给出 SessionId、项目绑定、当前节点序号、节点数、是否有进行中 Turn 与更新时间；`log` 先给出当前位置、当前 agent 与进行中 Turn，再以树形列出全部节点（含不在当前分叉上的节点），标出当前位置，并在每个 Turn 的首节点注明 TurnId、结局与 notice |
 | 查看一个 Turn：`observe`、`LocalTurn::next/reconnect` | SessionId 与所选 TurnId | 返回只读 LocalTurn；未指定 Turn 时优先选进行中的 Turn，否则选当前位置所属 Turn，空会话交付空历史；重连继续原观察目标 |
 | 提交或找回请求：`start_turn_with` | 原请求身份（TurnId，已有会话时含 SessionId）、输入、规范工作区及一次性配置加载闭包；新会话必须指定 agent | 返回 LocalTurn，完整交付提交并衔接观察；首轮无配置探测直接返回已有 Turn 或 Busy 时不加载配置；发现崩溃遗留 Turn 时先关闭，再返回 NeedsConfiguration，最多加载一次配置并继续本次新输入。后续准入仍可能因并发变化返回已有 Turn 或 Busy |
-| 读取对话：`read_history` | 已取得的观察快照 | 观察目标是所选 Turn 时，读取从根到该 Turn 在快照中的[末节点](#会话turn-与会话树)的路径，不受之后的 `rewind` 或分叉影响；没有 Turn 的空会话读取从根到当前位置的路径。页面只包含快照已有的节点 |
+| 读取对话：`read_history` | 已取得的观察快照 | 读取从根到快照中 Session 当前位置的路径。页面只包含快照已有的节点 |
 | 退回：`rewind` | SessionId 与目标 NodeId | 把当前位置移到树上任意已有节点；之后的提交从那里分叉，原分支保留在树上。不修改工作区文件 |
 | 请求取消：`LocalTurn::cancel`，或独立命令的 `LocalClient::cancel` | 原目标 SessionId / TurnId | 句柄同步登记意图并管理在途回执；独立命令返回后台接管结果，持久结局另行查询 |
 | 停止后台：`stop` | 当前本地后台 | 关闭新准入并等待已接管操作收尾，返回停止时已知状态 |
 
 CLI 的 `lattice session` 子命令为 `send`、`rewind`、`list`、`log`、`turn` 和 `cancel`，顶层 `lattice run` 是 `session send` 的别名。`session send` 不带 `--session` 时创建新 Session：项目绑定从当前目录解析，`--agent` 必填；带 `--session` 时向已有 Session 提交，`--agent` 可选。`session turn` 查看单个 Turn 的详情，`--follow` 用于断线后继续观察。TUI 不带 Session 启动时，在首次提交时创建 Session。
 
-`session turn` 的详情（含 `--json`）除 `TurnSummary` 与对话内容外，按步骤序号列出该 Turn 的全部 Step 记录：每次尝试的终态与原因、`end` 的类型与原因、对应的节点序号（未写节点时明确为无）；Turn 仍在进行时还列出 ActiveStep 的状态与各槽位进度。这是 Step 记录唯一的公开读取路径，输出不含冻结配置中的秘密。
+`session turn` 的详情（含 `--json`）给出 `TurnSummary`，并按步骤序号列出该 Turn 的全部 Step 记录：每次尝试的终态与原因、`end` 的类型与原因、对应的节点序号（未写节点时明确为无）；Turn 仍在进行时还列出 ActiveStep 的状态与各槽位进度。它不按路径读取对话。这是 Step 记录唯一的公开读取路径，输出不含冻结配置中的秘密。
 
 `LocalTurn::next` 交付 LocalUpdate，取消一次等待不会丢失已接收更新或半帧；已完成后句柄仍可显式重连。普通退出使用 `detach` 取得最后已知提交、取消、状态和读取诊断，或由 Drop 停止本地后续工作；两者都不新增取消。
 

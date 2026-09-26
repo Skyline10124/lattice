@@ -82,7 +82,7 @@ redb 的相关保证：写事务使用 `Durability::Immediate` 时，`commit` �
 | --- | --- | --- | --- |
 | 树节点 | `(SessionId, seq)` | UserMessage 或 Step 的对话内容、父节点、`turn_id` | 只追加 |
 | Step 记录 | `(TurnId, 步骤序号)` | `attempts`：每次 provider 请求的终态、usage 与诊断；`end`：`Continue(node) \| Finish(node) \| Stop { node: Option<NodeId>, cause }` | 进行中即 ActiveStep，就地更新；关闭后不再修改 |
-| Turn 记录 | `TurnId` | Session、用户节点、冻结配置摘要、开始时间；关闭时补 `outcome`、`reason`、`notice`、usage 汇总、结束时间、末节点（该 Turn 写入的最后一个节点） | 接受时创建，关闭时补全，之后不再修改 |
+| Turn 记录 | `TurnId` | Session、用户节点、冻结配置摘要、开始时间；关闭时补 `outcome`、`reason`、`notice`、usage 汇总与结束时间 | 接受时创建，关闭时补全，之后不再修改 |
 
 Turn 的正常流程：
 

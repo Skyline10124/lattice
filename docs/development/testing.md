@@ -151,9 +151,9 @@ Direct-Local 使用场景自有的产品后台，可以通过正式入口自动�
 
 1. 目标：验证 `rewind` 到树上任意节点后提交会从该节点分叉，原分支保留，发给模型的上下文是根到该节点的路径。
 2. 准备：一个多步且写过文件的 Turn，一个在工具执行后被取消的 Turn；两个 Turn 使用不同 agent。
-3. 操作：`rewind` 到前一 Turn 中部的 Step 节点后 `send`；分叉后用 `session turn` 查看不在当前路径上的原 Turn；在一个 Turn 进行中时 `rewind`；`rewind` 到不存在的序号。
-4. 观察：记录树形 `log`、当前位置与当前 agent、fake provider 捕获的请求上下文、原 Turn 的 `session turn` 输出以及工作区文件。
-5. 断言：原分支节点仍在 `log` 中，新节点以目标节点为父；请求上下文只含根到目标节点路径上的内容；未指定 agent 时使用目标节点所属 Turn 的 agent；原 Turn 的 `session turn` 仍给出它自己的结局与对话，不含新分支的内容；工作区文件不变。进行中的 `rewind` 返回 Busy，不存在的序号被拒绝且当前位置不变。产物记录 `log`、`session turn` 输出、请求捕获与文件摘要。
+3. 操作：`rewind` 到前一 Turn 中部的 Step 节点，先读取对话再 `send`；分叉后用 `session turn` 查看原 Turn；再 `rewind` 回原 Turn 的最后一个节点并读取对话；在一个 Turn 进行中时 `rewind`；`rewind` 到不存在的序号。
+4. 观察：记录树形 `log`、当前位置与当前 agent、每次读取的对话、fake provider 捕获的请求上下文、原 Turn 的 `session turn` 输出以及工作区文件。
+5. 断言：原分支节点仍在 `log` 中，新节点以目标节点为父；每次读取的对话都是根到当时当前位置的路径（退回后、发送前止于目标节点；退回原 Turn 后恢复原对话）；请求上下文与发送前读取的对话一致；未指定 agent 时使用目标节点所属 Turn 的 agent；原 Turn 的 `session turn` 仍给出它自己的结局与 Step 记录；工作区文件不变。进行中的 `rewind` 返回 Busy，不存在的序号被拒绝且当前位置不变。产物记录 `log`、对话读取、`session turn` 输出、请求捕获与文件摘要。
 6. 清理：按共同规则停止自有后台并保留产物。
 
 #### 旧库拒绝
