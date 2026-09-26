@@ -7,7 +7,9 @@ authors.workspace = true
 description = "LATTICE session graph and git-style conversation refs"
 
 [dependencies]
-chrono = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+redb = { workspace = true }
+rustix = { workspace = true }
 lancet-protocol = { workspace = true }
 lattice-conversation = { workspace = true }
 lattice-store = { workspace = true }

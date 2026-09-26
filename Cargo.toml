@@ -63,6 +63,7 @@ http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 indexmap = "2"
+redb = "4.3.0"
 regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["charset", "http2", "json", "rustls", "stream"] }
 serde = { version = "1", features = ["derive"] }

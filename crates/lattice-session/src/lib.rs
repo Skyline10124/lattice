@@ -25,6 +25,9 @@ pub use graph::{
 #[cfg(any(test, feature = "test-utils"))]
 pub use graph::{PreparedTurnCommit, TurnCommitInput, prepare_turn_commit};
 
+/// 全局事务会话库；与旧 Git 图实现并存，尚未接线。
+pub mod store;
+
 pub mod git_graph;
 pub use git_graph::{
     CommittedTurnObservation, GitSessionGraphStore, PendingObservation, PendingTurnTip,
