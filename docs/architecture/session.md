@@ -305,9 +305,13 @@ stateDiagram-v2
 
 不变量：
 
-- 一个 Turn 只有最后一个 Step 记录的 `end` 不是 `Continue`；这个值定义了“最后一个”，各 Step 记录形状一致。
-- 一个 Turn 至少有一个 Step 记录。尚未开始请求就关闭的 Turn（例如在第一次请求前取消，或进程在接受后立即退出），写入一条没有尝试、`end = Stop { node: None, cause }` 的 Step 记录。
+不变量按 Turn 是否关闭分别成立：
+
+- 进行中的 Turn：零条或若干条以 `Continue` 关闭的 Step 记录，加至多一条 ActiveStep。接受后尚未开始请求、或刚以 `Continue` 关闭一个 Step 而下一步尚未开始时，没有 ActiveStep 是合法状态。
+- 已关闭的 Turn：至少一条 Step 记录，没有 ActiveStep；只有最后一条的 `end` 是 `Finish` 或 `Stop`，其余都是 `Continue`。这个值定义了“最后一个”，各 Step 记录形状一致。尚未开始请求就关闭的 Turn（例如在第一次请求前取消，或进程在接受后立即退出），写入一条没有尝试、`end = Stop { node: None, cause }` 的 Step 记录。
 - `TurnOutcome` 由最后一个 Step 的 `end` 派生，与 Turn 记录在同一事务写入，来源唯一。
+
+读取校验按这两种形状分别检查，不把进行中 Turn 的合法状态当作损坏。
 
 ### 调用槽位
 
@@ -332,7 +336,8 @@ stateDiagram-v2
 - Succeeded 载荷的规范 JSON 超过 65,536 字节时，不保存正文、不截断，保留完整摘要与长度，ToolResult 标明内容不可用（OutputTooLarge）；outcome 仍为 Succeeded。需要大输出的 Tool 通过自身接口提供分页、游标或摘要。
 - 发给模型的结果文字不存储，由 provider 投影从载荷派生。取消或关闭时补写的终态使用按终态类型固定的最小文案，#220 定下统一反馈后对齐。
 - result Cell 的形态不在本合同冻结。库中的值带格式版本，[#117](https://github.com/Skyline10124/lattice/issues/117) 定下后作为新增字段加入 Succeeded 载荷。
-- 取消或停止时，未完成的调用写入类型化终态，不伪造成功输出：未 Started 的为 NotExecuted 或 Cancelled，已 Started 无结果的为 Indeterminate。已有终态保持原值。
+- 取消或停止时，未完成的调用写入类型化终态，不伪造成功输出：已 Started 无结果的为 Indeterminate；未 Started 的为 NotExecuted，原因记为 `CancelledBeforeDispatch`（分发前收到取消）、`DeadlineBeforeDispatch`（分发前 Turn deadline 已到）、`PrecedingInvocationIndeterminate`（前序调用效果不确定）或 `BeforeDispatch`（其他停止，含自动关闭补写）。已有终态保持原值。前三种原因沿用现有 `NotExecutedReason`，`DeadlineBeforeDispatch` 是新增变体，用来把分发前的 Deadline 写成持久事实。
+- live 执行决定停止分发时，余下槽位的终态与 Step 节点、`end`、Turn 关闭在同一事务写入，所以停止原因要么已随终态持久，要么尚未决定。
 - Tool 执行返回后，终态写入属于必要收尾，不受 Turn deadline 约束。写入失败按[事务失败](#事务与一致性)处理，后续调用不分发。
 
 LANCET 的执行、准入与证据由 [LANCET 调用流程](lancet.md#调用身份与执行流程)维护。
@@ -343,7 +348,7 @@ LANCET 的执行、准入与证据由 [LANCET 调用流程](lancet.md#调用身�
 
 - `Continue(node)`：协调器决定继续请求模型，随后开始下一 Step。
 - `Finish(node)`：模型给出无工具调用的完整回答。
-- `Stop { node, cause }`：因取消、错误、效果不确定或步骤上限停止。`cause` 取自最后一次尝试的原因，或步骤级原因：调用效果不确定、模型步骤上限。已有完整回复时 `node` 指向写入的 Step 节点，没有时为 None。
+- `Stop { node, cause }`：因取消、错误、效果不确定、分发前 Deadline 或步骤上限停止。没有完整回复时，`cause` 取自最后一次尝试的原因，`node` 为 None；有完整回复时，`node` 指向写入的 Step 节点，`cause` 按[自动关闭](#自动关闭崩溃遗留任务)中的有序终态规则从槽位终态推导；达到模型步骤上限时为步骤上限。
 
 `Finish` 或 `Stop` 的 Step 是 Turn 的最后一个 Step，同一事务补全 Turn 记录并清除 Session 的进行中 Turn：
 
@@ -352,7 +357,7 @@ TurnOutcome = Completed | Failed { reason } | Cancelled
 ```
 
 - `Finish` 得到 Completed；`Stop { cause: Cancelled }` 得到 Cancelled；其他 `Stop` 得到 Failed。
-- `notice = Option<{ level, text }>` 在写入时按结局定级：Failed 为 Error，Cancelled 为 Info，Completed 无 notice。`text` 由最后一个 Step 的 `Stop` 原因决定：`ProviderError` 取产生该原因的那次尝试的诊断，即 provider 错误原文，经现有脱敏并截断到 `MAX_PROVIDER_ERROR_CHARS`（2048 字符）；其他原因（含 Cancelled、ProcessExit、调用效果不确定、模型步骤上限）使用按原因固定、由代码定义的文案。先前已被重试取代的失败尝试不作为 notice 来源。实时 `TurnFailed` 事件携带同一对象。
+- `notice = Option<{ level, text }>` 在写入时按结局定级：Failed 为 Error，Cancelled 为 Info，Completed 无 notice。`text` 由最后一个 Step 的 `Stop` 原因决定：`ProviderError` 取产生该原因的那次尝试的诊断，即 provider 错误原文，先经现有脱敏；其他原因（含 Cancelled、ProcessExit、Deadline、调用效果不确定、模型步骤上限）使用按原因固定、由代码定义的文案。所有 `text` 都不超过 `MAX_PROVIDER_ERROR_CHARS`（2048 字符），超长的诊断在脱敏后截断。先前已被重试取代的失败尝试不作为 notice 来源。实时 `TurnFailed` 事件携带同一对象。
 - 公开读取投影为 `TurnSummary { outcome, notice }`，内部 `reason` 不导出给前端。
 
 关闭 Turn 只写会话库，不读取工作区历史，也不取得工作区操作锁。Turn 与文件变更的关联由工作区历史中每条变更记录的 `TurnId` 与 `InvocationId` 承载，见[私有存储与数据关系](workspace.md#私有存储与数据关系)。
@@ -389,8 +394,8 @@ TurnOutcome = Completed | Failed { reason } | Cancelled
 - **快照切点**：会话库与内存观察状态按固定顺序衔接。
   - Owner 先提交会话库事务，再在观察锁内更新段列表并追加对应事件，例如新尝试开始时清空段列表、Step 关闭后追加 Step 关闭事件。
   - 快照在观察锁内开启会话库读事务，并复制段列表与序号。这样，序号之前各事件对应的提交必定在读事务中可见；读事务还可能多含一次刚提交、事件尚未追加的提交。
-  - 段列表标注所属步骤序号与尝试序号。快照的会话库部分已显示该尝试结束或该 Step 已关闭时，客户端丢弃这份段列表，以会话库中的记录为准。之后到达的同一关闭事件按步骤序号与节点身份幂等应用，不重复显示。
-- **结束**：Turn 关闭事件是该 Turn 的最后一个事件，在关闭事务提交后追加。订阅者读到它，或得到的快照已显示 Turn 关闭时，才收到结束。结束不会早于最后一个事件交付。Turn 关闭后 Owner 释放内存观察状态，此后的订阅只从会话库取得快照并直接结束。
+  - 段列表标注所属步骤序号与尝试序号。快照的会话库部分已显示该尝试 `Stopped`，或所属 Step 已关闭时，这份段列表已被替代；尝试 `Completed` 而工具仍在执行时，段列表继续有效，快照中的 ActiveStep 也带有同一份完整回复。客户端保留已显示的临时文字，直到对应 Step 节点的正文实际装入显示，再按步骤序号与节点身份原位替换；历史读取挂起或失败时，临时文字继续显示。之后到达的同一关闭事件幂等应用，不重复显示。
+- **结束**：Turn 关闭事件是该 Turn 的最后一个事件，在关闭事务提交后追加。订阅者读到它，或得到的快照已显示 Turn 关闭时，收到结束。关闭事件只携带关闭事务已写入的内容（最后一个 Step 与 `TurnSummary`），快照显示 Turn 关闭时这些内容已在快照中，所以即使关闭事件尚未追加，订阅者也不必等待它。保证是：收到结束时，客户端已拥有该 Turn 关闭后会话库中的全部内容，不会缺少最后一个 Step 或结局。Turn 关闭后 Owner 释放内存观察状态，此后的订阅只从会话库取得快照并直接结束。
 - **后台重启**：内存观察状态随进程消失，进行中的 Turn 由之后的写操作[自动关闭](#自动关闭崩溃遗留任务)。客户端重连后用新快照重建，Turn 记录说明结局；丢失的只有当时正在生成的半截文字，它本就只作诊断。
 - **客户端本地丢弃**：客户端自己的显示队列丢弃事件时，按已交付的最后游标重新订阅。
 
@@ -455,14 +460,14 @@ true 后由后台履行责任，不自动补发；再次明确取消可开始新
 | Turn 已接受，尚无 Step 记录 | 一条无尝试的 Step 记录，`Stop { None, ProcessExit }` | Failed |
 | ActiveStep 为 `Requesting`，尝试尚无终态 | 追加 `Stopped { ProcessExit }`，`Stop { None, ProcessExit }` | Failed |
 | ActiveStep 处于重试间隙：最后尝试为可重试终态，且该步骤尝试预算未尽 | `Stop { None, ProcessExit }`，不恢复重试 | Failed |
-| ActiveStep 最后尝试为不可重试终态，或为可重试终态但尝试预算已尽，Step 尚未关闭 | `Stop { None, cause }`，`cause` 取自该尝试 | 按原因：Cancelled 或 Failed |
-| 执行中，存在未 Started 的槽位 | 该槽位写 NotExecuted | 见下两行 |
+| ActiveStep 最后尝试为不可重试终态，或为可重试终态但尝试预算已尽，Step 尚未关闭 | 当前事务序列不会产生此状态（不再重试的 `Stopped` 与 Step、Turn 关闭同事务写入），读到时按数据损坏报告，不关闭 | — |
+| 执行中，存在未 Started 的槽位 | 该槽位写 NotExecuted：前序有 Indeterminate 时原因为 `PrecedingInvocationIndeterminate`，否则为 `BeforeDispatch` | 见下两行 |
 | 执行中，存在已 Started 无终态的槽位 | 该槽位写 Indeterminate；不依据缺少结果推定文件未改变 | 见下一行 |
 | 执行中，各槽位已有终态或已按上两行补写 | 写入 Step 节点，`Stop { Some(node), cause }`，`cause` 按下文规则推导 | Cancelled 或 Failed |
 | 最后一个 Step 以 `Continue` 关闭，下一 Step 尚未开始 | 一条无尝试的 Step 记录，`Stop { None, ProcessExit }` | Failed |
 | Turn 记录已关闭 | 无需处理 | 原结局 |
 
-表中“执行中”的各行同时适用：先补写各槽位终态，再写 Step 节点与 `end`。`cause` 与 live 执行使用同一批次控制规则，按片段顺序取第一个导致停止分发的终态（已持久的或刚补写的）：取消类终态得到 Cancelled，Indeterminate 得到调用效果不确定；都没有时为 ProcessExit。所以已写入的取消终态在崩溃后仍关闭为 Cancelled，与未崩溃时一致。关闭事务提交前出错时，Turn 保持原状，再次触发时重新规划；会话库不可写时返回错误与恢复需求。
+表中“执行中”的各行同时适用：先补写各槽位终态，再写 Step 节点与 `end`。`cause` 与 live 执行使用同一有序终态规则：按片段顺序取第一个导致停止分发的终态（已持久的或刚补写的）——Cancelled 或 NotExecuted(`CancelledBeforeDispatch`) 得到 Cancelled，Indeterminate 得到调用效果不确定，NotExecuted(`DeadlineBeforeDispatch`) 得到 Deadline，NotExecuted(`BeforeDispatch`) 得到 ProcessExit。live 执行的停止原因随余下终态与 Step 关闭同事务写入，所以已写入的取消或 Deadline 在崩溃后仍得到同一原因；尚未写入的停止决定不存在于库中，按 ProcessExit 关闭。关闭事务提交前出错时，Turn 保持原状，再次触发时重新规划；会话库不可写时返回错误与恢复需求。
 
 ### 停止后台
 

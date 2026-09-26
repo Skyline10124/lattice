@@ -96,7 +96,8 @@ Turn 的正常流程：
 
 不变量：
 
-- 一个 Turn 只有最后一个 Step 记录的 `end` 不是 `Continue`；这个值就定义了"最后一个"，各 Step 记录形状一致。
+- 进行中的 Turn：零条或若干条以 `Continue` 关闭的 Step 记录，加至多一条 ActiveStep；接受后或 `Continue` 之后、下一步开始前没有 ActiveStep 是合法状态。
+- 已关闭的 Turn：至少一条 Step 记录、没有 ActiveStep，只有最后一条的 `end` 是 `Finish` 或 `Stop`；这个值就定义了"最后一个"，各 Step 记录形状一致。
 - `TurnOutcome` 由最后一个 Step 的 `end` 派生，存入 Turn 记录，来源唯一。
 - 同一 Session 最多一条 ActiveStep，且仅在 Turn 进行中存在。"只追加不改写"约束树与已关闭记录，不约束 ActiveStep。
 
@@ -123,7 +124,7 @@ cause = ProviderError { retryable }
 - `Deadline`（Turn 墙钟上限）与 `OutputLimit`（单次回复字节上限）沿用现有门禁，只作为原因记录；数值与粒度由 #222 另行裁决。
 - `InvalidBatch` 维持 R1 的整批拒绝、不重试；是否反馈模型纠正归 #220。
 
-Step 以 `Stop` 结束时，`cause` 取自最后一次尝试的原因，或步骤级原因：调用效果不确定、模型步骤上限。
+Step 以 `Stop` 结束时，没有完整回复则 `cause` 取自最后一次尝试的原因；有完整回复则按第 8 节的有序终态规则从槽位终态推导（取消、调用效果不确定、分发前 Deadline 或 ProcessExit）；达到模型步骤上限时为步骤上限。
 
 ```text
 TurnOutcome = Completed | Failed { reason } | Cancelled
@@ -144,7 +145,7 @@ TurnOutcome = Completed | Failed { reason } | Cancelled
 | Rejected、Cancelled、NotExecuted、Indeterminate | 类型化原因 |
 
 - 发给模型的结果文本不存储，由 provider 投影从载荷派生；投影是纯函数，不在请求时扫描、补齐缺失结果。
-- 取消或自动关闭时，每个未完成调用写入类型化终态，不伪造成功输出：未 Started 的为 NotExecuted 或 Cancelled，已 Started 无结果的为 Indeterminate。给模型的文字先用按终态类型固定的最小文案，#220 定下统一反馈后对齐。
+- 取消、停止或自动关闭时，每个未完成调用写入类型化终态，不伪造成功输出：已 Started 无结果的为 Indeterminate；未 Started 的为 NotExecuted，原因为 `CancelledBeforeDispatch`、`DeadlineBeforeDispatch`、`PrecedingInvocationIndeterminate` 或 `BeforeDispatch`（见第 8 节）。给模型的文字先用按终态类型固定的最小文案，#220 定下统一反馈后对齐。
 - result Cell 形态不在本阶段冻结。库中的值带格式版本，#117 定下后作为新增字段加入 Succeeded 载荷。
 - InvocationId 在第 5 节第 3 步的同一事务中插入全局索引。键冲突时放弃该事务、重新生成后重试；预留与步骤写入在一个事务里，不再需要跨库的候选修订流程。
 - "执行前先持久记录 Started，崩溃后无结果即 Indeterminate，不重新执行"保持不变。外部效果与记录无法同时完成，这条规则与记录粒度无关。
@@ -153,7 +154,7 @@ TurnOutcome = Completed | Failed { reason } | Cancelled
 
 - 取消或失败后，Session 当前位置停在该 Turn 最后写入的节点，已完成的步骤进入之后的上下文。用户取消通常是为了换种说法继续，已完成的工具结果仍有用；需要丢弃时 rewind 到该用户消息之前。
 - 崩溃遗留的进行中 Turn 仍按 closure-only 规则由后台在该 Session 下一次写操作前自动关闭，不请求 provider、不执行 Tool：ActiveStep 处于 `Requesting` 时追加 `Stopped { ProcessExit }`；处于执行时按第 7 节写入各槽位终态并写 Step 节点；随后以 `Stop` 关闭 Step 与 Turn。自动关闭所需事实全部在同一库中，由一个事务完成。
-- 执行中关闭的 `cause` 与 live 执行使用同一批次控制规则：按片段顺序取第一个导致停止分发的终态（已持久的或刚补写的），取消类得到 Cancelled，Indeterminate 得到调用效果不确定，都没有时为 ProcessExit。已写入的取消终态在崩溃后仍关闭为 Cancelled，崩溃时机不改变结局。
+- 执行中关闭的 `cause` 与 live 执行使用同一有序终态规则：按片段顺序取第一个导致停止分发的终态（已持久的或刚补写的），取消类得到 Cancelled，Indeterminate 得到调用效果不确定，`NotExecuted(DeadlineBeforeDispatch)` 得到 Deadline，自动关闭补写的 `NotExecuted(BeforeDispatch)` 得到 ProcessExit。live 执行决定停止分发时，余下槽位的终态（含原因）与 Step、Turn 关闭同事务写入。`DeadlineBeforeDispatch` 是对现有 `NotExecutedReason` 的新增变体，原先这一原因只存在于 live 内存。已写入的取消或 Deadline 在崩溃后仍得到同一原因，崩溃时机不改变结局。
 
 ### 9. 对外结局呈现
 
@@ -164,7 +165,7 @@ notice = Option<{ level, text }>
 ```
 
 - 写入时按 outcome 定级：Failed → Error，Cancelled → Info，Completed 无 notice。
-- `text` 由最后一个 Step 的 `Stop` 原因决定：`ProviderError` 取产生该原因的那次尝试的诊断，即 provider 错误原文，经现有脱敏并截断到 `MAX_PROVIDER_ERROR_CHARS`（2048 字符）；其他原因使用按原因固定、由代码定义的文案。已被重试取代的失败尝试不作为来源。
+- `text` 由最后一个 Step 的 `Stop` 原因决定：`ProviderError` 取产生该原因的那次尝试的诊断，即 provider 错误原文，先经现有脱敏；其他原因使用按原因固定、由代码定义的文案。所有 `text` 都不超过 `MAX_PROVIDER_ERROR_CHARS`（2048 字符）。已被重试取代的失败尝试不作为来源。
 - 实时 `TurnFailed` 事件携带同一对象，重载前后显示一致靠构造成立。
 - 公开读取投影为 `TurnSummary { outcome, notice }`；内部 `reason` 枚举不再导出给前端。
 
@@ -179,8 +180,8 @@ notice = Option<{ level, text }>
   - **当前尝试的段列表**：当前模型尝试已发出的正文与 reasoning delta，按到达顺序记为 `(类型, 文字)` 段，相邻同类合并。它等于一个一直连着的订阅者按序拼出的结果。新尝试开始时清空，Step 关闭后由 redb 中的 Step 节点取代，Turn 关闭后释放。
 - **订阅**：订阅者带游标读取。游标仍在窗口内时，从游标之后逐条继续。新订阅，或游标已落出窗口的慢订阅者，先得到快照（树、Turn 记录与已关闭的 Step，加上段列表及其序号），再从该序号起接窗口中的事件。读得慢只会多重新同步一次，不会丢内容。
 - **内存上界**：段列表受单次尝试的正文与 reasoning 上限约束（各 2 MiB，`lattice-conversation/src/limits.rs`），每个 Turn 至多约 4 MiB 加一个窗口；同时进行的 Turn 受现有 Owner 上限（32）约束。工具结果在槽位提交时已写入 redb，从快照读取，不占观察内存。
-- **快照切点**：Owner 先提交 redb 事务，再在观察锁内更新段列表并追加事件；快照在观察锁内开启 redb 读事务并复制段列表与序号。所以序号之前各事件对应的提交必定可见，读事务至多多含一次事件尚未追加的提交。段列表标注步骤与尝试序号，快照已显示该尝试结束或该 Step 关闭时丢弃段列表；随后到达的同一关闭事件按步骤序号与节点身份幂等应用。
-- **结束**：Turn 关闭事件是最后一个事件，在关闭事务提交后追加。订阅者读到它，或快照已显示 Turn 关闭时，才收到结束，所以结束不会早于最后一个事件交付。
+- **快照切点**：Owner 先提交 redb 事务，再在观察锁内更新段列表并追加事件；快照在观察锁内开启 redb 读事务并复制段列表与序号。所以序号之前各事件对应的提交必定可见，读事务至多多含一次事件尚未追加的提交。段列表标注步骤与尝试序号，快照已显示该尝试 `Stopped` 或该 Step 关闭时才被替代；尝试 `Completed` 而工具仍在执行时继续有效。客户端保留已显示的临时文字，直到对应 Step 节点正文实际装入显示后原位替换；随后到达的同一关闭事件按步骤序号与节点身份幂等应用。
+- **结束**：Turn 关闭事件是最后一个事件，在关闭事务提交后追加。订阅者读到它，或快照已显示 Turn 关闭时，收到结束。关闭事件只携带关闭事务已写入的内容，快照显示关闭时这些内容已在快照中，不必等待尚未追加的关闭事件。保证是：收到结束时，客户端已拥有该 Turn 关闭后 redb 中的全部内容。
 - **后台重启**：内存观察状态随进程消失，进行中的 Turn 按第 8 节自动关闭。客户端重连后用新快照重建，Turn 记录说明结局；丢失的只有当时正在生成的半截文字，它本就只作诊断。
 - **删除 Gap**：原先的 Gap 来自容量 64 的广播队列会挤掉慢订阅者的事件，以及快照不含正在生成的文字、切点之前的事件不能重放。段列表补上了快照缺的部分，落出窗口只是重新同步，订阅协议只剩"快照 + 按序事件 + 结束"。客户端自己的显示队列丢弃事件时，由客户端按游标重新订阅。
 - **顺序保留**：Step 节点中助手消息的 parts 按到达顺序保存正文、reasoning 与工具调用的交错。Anthropic 与 Gemini 的解析已按 block/part 顺序生成；OpenAI 兼容解析器现在把正文与 reasoning 各拼成一个字符串、固定按 reasoning → 正文 → 工具调用生成 parts，改为按到达顺序生成（相邻同类合并，工具调用排在首次出现的位置）。Chat Completions 请求只有一个 `reasoning_content` 和一个 `content` 字段，`native_to_wire` 发请求时照旧合并同类内容，同一 provider 回放不受影响。不变量：当前尝试的段列表与最终 Step 的正文/reasoning parts，合并相邻同类后序列相同，Step 关闭时显示不跳变。
