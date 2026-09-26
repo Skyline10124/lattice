@@ -1,5 +1,5 @@
 ---
-status: pending
+status: active
 ---
 
 # LANCET 工具执行

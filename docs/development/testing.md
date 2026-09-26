@@ -1,5 +1,5 @@
 ---
-status: pending
+status: active
 ---
 
 # 测试工程

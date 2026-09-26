@@ -1,5 +1,5 @@
 ---
-status: pending
+status: active
 ---
 
 # 本地工作区与变更历史

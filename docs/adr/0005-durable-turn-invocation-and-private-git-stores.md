@@ -9,6 +9,7 @@ status: accepted
 - Amends: ADR 0004 decision 8 and the execution assumptions in GitHub #24/#34
 - Depends on: ADR 0003 and ADR 0004
 - Implementation tracking: GitHub #141–#144 and #139
+- Superseded in part by: ADR 0006 (PendingTurn phases, the three-store layout, ModelAttempt events, the Interrupted outcome, Turn checkpoint and file Rewind; see ADR 0006 “与 ADR 0005 的关系”)
 
 > 承接说明：会话、对话、请求接受、PendingTurn、ResultDraft、重开及最终发布由[会话合同](../architecture/session.md#验证与承接)维护；调用身份、预留、分发、终态与操作员读取由 [LANCET 合同](../architecture/lancet.md#来源与承接范围)维护，Cell 证据由 [Cell 合同](../architecture/cell.md#来源与迁移边界)维护。
 > 项目寻址、三库布局、Git 内核、锁及位置能力由[存储合同](../architecture/storage.md#验证入口与承接)维护；项目全局 checkpoint、文件历史与 Rewind 由[工作区合同](../architecture/workspace.md#来源与承接范围)维护。
