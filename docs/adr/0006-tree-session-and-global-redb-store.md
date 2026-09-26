@@ -141,8 +141,8 @@ TurnOutcome = Completed | Failed { reason } | Cancelled
 | outcome | 载荷 |
 | --- | --- |
 | Succeeded | 完整 JSON value |
-| Failed | 结构化 CepError |
-| Rejected、Cancelled、NotExecuted、Indeterminate | 类型化原因 |
+| Failed、Rejected | 结构化 CepError |
+| Cancelled、NotExecuted、Indeterminate | 类型化原因 |
 
 - 发给模型的结果文本不存储，由 provider 投影从载荷派生；投影是纯函数，不在请求时扫描、补齐缺失结果。
 - 取消、停止或自动关闭时，每个未完成调用写入类型化终态，不伪造成功输出：已 Started 无结果的为 Indeterminate；未 Started 的为 NotExecuted，原因为 `CancelledBeforeDispatch`、`DeadlineBeforeDispatch`、`PrecedingInvocationIndeterminate` 或 `BeforeDispatch`（见第 8 节）。给模型的文字先用按终态类型固定的最小文案，#220 定下统一反馈后对齐。

@@ -330,8 +330,8 @@ stateDiagram-v2
 | outcome | 载荷 |
 | --- | --- |
 | Succeeded | 完整 JSON value |
-| Failed | 结构化 CepError |
-| Rejected、Cancelled、NotExecuted、Indeterminate | 类型化原因 |
+| Failed、Rejected | 结构化 CepError（含 message；发给模型的内容保留有界 message，模型可据此修正参数） |
+| Cancelled、NotExecuted、Indeterminate | 类型化原因 |
 
 - Succeeded 载荷的规范 JSON 超过 65,536 字节时，不保存正文、不截断，保留完整摘要与长度，ToolResult 标明内容不可用（OutputTooLarge）；outcome 仍为 Succeeded。需要大输出的 Tool 通过自身接口提供分页、游标或摘要。
 - 发给模型的结果文字不存储，由 provider 投影从载荷派生。取消或关闭时补写的终态使用按终态类型固定的最小文案，#220 定下统一反馈后对齐。
