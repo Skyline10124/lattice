@@ -9,9 +9,11 @@
 
 use std::collections::BTreeMap;
 
-use lattice_conversation::{ProviderOrigin, TokenUsage};
+use lattice_conversation::{ProviderOrigin, RawToolCall, TokenUsage};
 
-use crate::provider_projection::{ProjectionError, request_messages_to_wire, wire_usage};
+use crate::provider_projection::{
+    OpenAiPart, ProjectionError, request_messages_to_wire, wire_usage,
+};
 use crate::router::ResolvedModel;
 use crate::types::{ChatRequest, LlmEvent};
 
@@ -83,18 +85,14 @@ pub fn auth_header_value(api_key: &str) -> String {
     format!("Bearer {}", api_key)
 }
 
-#[derive(Default)]
 struct OpenAiToolCall {
-    provider_call_id: Option<String>,
-    name: String,
-    arguments: String,
+    part_ordinal: usize,
     started: bool,
 }
 
 #[derive(Default)]
 pub struct OpenAiSseParser {
-    assistant_content: String,
-    reasoning_content: String,
+    parts: Vec<OpenAiPart>,
     tool_calls: BTreeMap<u32, OpenAiToolCall>,
     pending_finish_reason: Option<String>,
     completed: bool,
@@ -111,42 +109,7 @@ impl OpenAiSseParser {
         lattice_conversation::NativeMessage<lattice_conversation::UnboundToolCall>,
         ProjectionError,
     > {
-        let calls = std::mem::take(&mut self.tool_calls);
-        let tool_calls: Vec<serde_json::Value> = calls
-            .values()
-            .map(|call| {
-                let mut wire = serde_json::json!({
-                    "type": "function",
-                    "function": {
-                        "name": wire_tool_name(&call.name),
-                        "arguments": call.arguments,
-                    }
-                });
-                if let Some(id) = &call.provider_call_id {
-                    wire["id"] = serde_json::json!(id);
-                }
-                wire
-            })
-            .collect();
-        let mut message = serde_json::json!({
-            "role": "assistant",
-            "content": if self.assistant_content.is_empty() {
-                serde_json::Value::Null
-            } else {
-                serde_json::Value::String(std::mem::take(&mut self.assistant_content))
-            },
-        });
-        if !self.reasoning_content.is_empty() {
-            message["reasoning_content"] =
-                serde_json::Value::String(std::mem::take(&mut self.reasoning_content));
-        }
-        if !tool_calls.is_empty() {
-            message["tool_calls"] = serde_json::Value::Array(tool_calls);
-        }
-        crate::provider_projection::wire_to_native(
-            ProviderOrigin::OpenAiCompatible,
-            &serde_json::json!({"choices": [{"message": message}]}),
-        )
+        crate::provider_projection::openai_parts_to_native(std::mem::take(&mut self.parts))
     }
     fn finish(&mut self, usage: Option<TokenUsage>) -> Vec<LlmEvent> {
         self.completed = true;
@@ -207,7 +170,12 @@ impl OpenAiSseParser {
                     .and_then(|value| value.as_str())
                     && !reasoning.is_empty()
                 {
-                    self.reasoning_content.push_str(reasoning);
+                    if let Some(OpenAiPart::Reasoning(text)) = self.parts.last_mut() {
+                        text.push_str(reasoning);
+                    } else {
+                        self.parts
+                            .push(OpenAiPart::Reasoning(reasoning.to_string()));
+                    }
                     events.push(LlmEvent::Reasoning {
                         content: reasoning.to_string(),
                     });
@@ -216,7 +184,11 @@ impl OpenAiSseParser {
                 if let Some(content) = delta.get("content").and_then(|value| value.as_str())
                     && !content.is_empty()
                 {
-                    self.assistant_content.push_str(content);
+                    if let Some(OpenAiPart::Text(text)) = self.parts.last_mut() {
+                        text.push_str(content);
+                    } else {
+                        self.parts.push(OpenAiPart::Text(content.to_string()));
+                    }
                     events.push(LlmEvent::Token {
                         content: content.to_string(),
                     });
@@ -236,7 +208,21 @@ impl OpenAiSseParser {
                                         .to_string(),
                             }];
                         };
-                        let call = self.tool_calls.entry(index).or_default();
+                        let slot = self.tool_calls.entry(index).or_insert_with(|| {
+                            let part_ordinal = self.parts.len();
+                            self.parts.push(OpenAiPart::ToolCall(RawToolCall {
+                                provider_call_id: None,
+                                name: String::new(),
+                                arguments: String::new(),
+                            }));
+                            OpenAiToolCall {
+                                part_ordinal,
+                                started: false,
+                            }
+                        });
+                        let OpenAiPart::ToolCall(call) = &mut self.parts[slot.part_ordinal] else {
+                            unreachable!("tool index always points to its original call part");
+                        };
                         if let Some(id) = tool_call.get("id").and_then(|value| value.as_str()) {
                             call.provider_call_id = Some(id.to_string());
                         }
@@ -248,8 +234,8 @@ impl OpenAiSseParser {
                         {
                             call.name = canonical_tool_name(name);
                         }
-                        if !call.started && !call.name.is_empty() {
-                            call.started = true;
+                        if !slot.started && !call.name.is_empty() {
+                            slot.started = true;
                             events.push(LlmEvent::ToolCallStart {
                                 index: index as usize,
                                 provider_call_id: call.provider_call_id.clone(),
@@ -490,6 +476,432 @@ mod tests {
             event,
             LlmEvent::Error { message } if message.contains("index")
         )));
+    }
+
+    fn delta(parser: &mut OpenAiSseParser, delta: serde_json::Value) -> Vec<LlmEvent> {
+        parser.parse_chunk(
+            None,
+            &serde_json::json!({"choices": [{"delta": delta}]}).to_string(),
+        )
+    }
+
+    fn finish(parser: &mut OpenAiSseParser) -> Vec<LlmEvent> {
+        let mut events =
+            parser.parse_chunk(None, r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#);
+        events.extend(parser.parse_chunk(None, "[DONE]"));
+        events
+    }
+
+    fn completed(events: &[LlmEvent]) -> &NativeMessage<lattice_conversation::UnboundToolCall> {
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, LlmEvent::MessageComplete { .. }))
+                .count(),
+            1,
+        );
+        events
+            .iter()
+            .find_map(|e| match e {
+                LlmEvent::MessageComplete { message } => Some(message),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    fn labels(message: &NativeMessage<lattice_conversation::UnboundToolCall>) -> Vec<String> {
+        message
+            .parts
+            .iter()
+            .map(|p| match &p.semantic {
+                MessageSemantic::Text { text } => format!("T:{text}"),
+                MessageSemantic::Reasoning { text } => format!("R:{text}"),
+                MessageSemantic::ToolCall { call } => format!("C:{}", call.name),
+                _ => panic!("unexpected result"),
+            })
+            .collect()
+    }
+
+    fn call_delta(index: u32, name: &str, arguments: &str) -> serde_json::Value {
+        serde_json::json!({"tool_calls": [{"index": index, "function": {
+            "name": name, "arguments": arguments
+        }}]})
+    }
+
+    #[test]
+    fn order_f01_reasoning_text_reasoning_matches_live_segments() {
+        let mut parser = OpenAiSseParser::new();
+        let mut live = Vec::new();
+        for (field, value) in [
+            ("reasoning_content", "想"),
+            ("content", "答"),
+            ("reasoning_content", "再想"),
+        ] {
+            live.extend(delta(&mut parser, serde_json::json!({field: value})));
+        }
+        let live: Vec<_> = live
+            .iter()
+            .map(|e| match e {
+                LlmEvent::Reasoning { content } => format!("R:{content}"),
+                LlmEvent::Token { content } => format!("T:{content}"),
+                _ => panic!("unexpected event"),
+            })
+            .collect();
+        assert_eq!(live, ["R:想", "T:答", "R:再想"]);
+        assert_eq!(labels(completed(&finish(&mut parser))), live);
+    }
+
+    #[test]
+    fn order_f02_same_chunk_follows_emitted_order() {
+        let mut parser = OpenAiSseParser::new();
+        delta(&mut parser, serde_json::json!({"content": "A"}));
+        let events = delta(
+            &mut parser,
+            serde_json::json!({
+                "content": "B", "reasoning_content": "R",
+                "tool_calls": [{"index": 8, "function": {"name": "t", "arguments": "{}"}}]
+            }),
+        );
+        assert!(matches!(
+            &events[..],
+            [
+                LlmEvent::Reasoning { .. },
+                LlmEvent::Token { .. },
+                LlmEvent::ToolCallStart { index: 8, .. },
+                LlmEvent::ToolCallDelta { index: 8, .. }
+            ]
+        ));
+        assert_eq!(
+            labels(completed(&finish(&mut parser))),
+            ["T:A", "R:R", "T:B", "C:t"]
+        );
+    }
+
+    #[test]
+    fn order_f03_tool_separates_text_parts() {
+        let mut parser = OpenAiSseParser::new();
+        delta(&mut parser, serde_json::json!({"content": "A"}));
+        delta(&mut parser, call_delta(0, "t", "{}"));
+        delta(&mut parser, serde_json::json!({"content": "B"}));
+        assert_eq!(
+            labels(completed(&finish(&mut parser))),
+            ["T:A", "C:t", "T:B"]
+        );
+    }
+
+    #[test]
+    fn order_f04_sparse_indices_follow_first_arrival() {
+        let mut parser = OpenAiSseParser::new();
+        for (index, name) in [(u32::MAX, "first"), (7, "second"), (1, "third")] {
+            delta(&mut parser, call_delta(index, name, "{}"));
+        }
+        assert_eq!(
+            labels(completed(&finish(&mut parser))),
+            ["C:first", "C:second", "C:third"]
+        );
+    }
+
+    #[test]
+    fn order_f05_late_metadata_and_fragments_fill_original_slot() {
+        let mut parser = OpenAiSseParser::new();
+        let first = delta(
+            &mut parser,
+            serde_json::json!({"tool_calls": [{
+                "index": 9, "function": {"arguments": "{\"path\":"}
+            }]}),
+        );
+        assert!(matches!(
+            &first[..],
+            [LlmEvent::ToolCallDelta { index: 9, .. }]
+        ));
+        delta(&mut parser, serde_json::json!({"content": "between"}));
+        delta(&mut parser, call_delta(2, "second", "{}"));
+        let later = delta(
+            &mut parser,
+            serde_json::json!({"tool_calls": [{
+                "index": 9, "id": "real-id", "function": {"name": "observe__workspace", "arguments": "\"a\"}"}
+            }]}),
+        );
+        assert!(matches!(
+            &later[..],
+            [
+                LlmEvent::ToolCallStart { index: 9, .. },
+                LlmEvent::ToolCallDelta { index: 9, .. }
+            ]
+        ));
+        let events = finish(&mut parser);
+        let message = completed(&events);
+        assert_eq!(
+            labels(message),
+            ["C:observe.workspace", "T:between", "C:second"]
+        );
+        let calls: Vec<_> = message.tool_calls().collect();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].1.provider_call_id.as_deref(), Some("real-id"));
+        assert_eq!(calls[0].1.arguments, serde_json::json!({"path": "a"}));
+        assert_eq!(calls[1].1.arguments, serde_json::json!({}));
+    }
+
+    #[test]
+    fn order_f06_usage_and_done_complete_once() {
+        for mode in 0..3 {
+            let mut parser = OpenAiSseParser::new();
+            let mut chunk = serde_json::json!({"choices": [{"delta": {"content": "A"}, "finish_reason": "stop"}]});
+            let usage =
+                serde_json::json!({"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3});
+            if mode == 0 {
+                chunk["usage"] = usage.clone();
+            }
+            let mut events = parser.parse_chunk(None, &chunk.to_string());
+            if mode != 0 {
+                assert!(!events.iter().any(|e| matches!(
+                    e,
+                    LlmEvent::MessageComplete { .. } | LlmEvent::Done { .. }
+                )));
+            }
+            if mode == 1 {
+                events.extend(parser.parse_chunk(
+                    None,
+                    &serde_json::json!({"choices": [], "usage": usage}).to_string(),
+                ));
+            }
+            events.extend(parser.parse_chunk(None, "[DONE]"));
+            assert_eq!(labels(completed(&events)), ["T:A"]);
+            let done: Vec<_> = events
+                .iter()
+                .filter_map(|e| match e {
+                    LlmEvent::Done {
+                        finish_reason,
+                        usage,
+                    } => Some((finish_reason.as_str(), *usage)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                done,
+                vec![(
+                    "stop",
+                    if mode == 2 {
+                        None
+                    } else {
+                        Some(TokenUsage {
+                            prompt_tokens: 1,
+                            completion_tokens: 2,
+                            total_tokens: 3,
+                        })
+                    }
+                )]
+            );
+            assert!(parser.parse_chunk(None, "[DONE]").is_empty());
+            assert!(delta(&mut parser, serde_json::json!({"content": "late"})).is_empty());
+        }
+    }
+
+    #[test]
+    fn order_f07_empty_fragments_do_not_split_adjacent_parts() {
+        let mut parser = OpenAiSseParser::new();
+        assert!(
+            delta(
+                &mut parser,
+                serde_json::json!({"content": "", "reasoning_content": ""})
+            )
+            .is_empty()
+        );
+        for (field, value) in [
+            ("content", "A"),
+            ("reasoning_content", ""),
+            ("content", "B"),
+            ("reasoning_content", "R"),
+            ("content", ""),
+            ("reasoning_content", "S"),
+        ] {
+            delta(&mut parser, serde_json::json!({field: value}));
+        }
+        assert_eq!(labels(completed(&finish(&mut parser))), ["T:AB", "R:RS"]);
+        let mut empty = OpenAiSseParser::new();
+        assert!(completed(&finish(&mut empty)).parts.is_empty());
+    }
+
+    fn assert_limit(events: &[LlmEvent], kind: &str) {
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, LlmEvent::Error { message } if message.contains(kind))),
+            "expected limit {kind}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, LlmEvent::MessageComplete { .. } | LlmEvent::Done { .. }))
+        );
+    }
+
+    #[test]
+    fn order_f08_text_and_reasoning_limits_span_parts() {
+        use lattice_conversation::{MAX_ASSISTANT_CONTENT_BYTES, MAX_REASONING_CONTENT_BYTES};
+        for (field, other, limit, kind) in [
+            (
+                "content",
+                "reasoning_content",
+                MAX_ASSISTANT_CONTENT_BYTES,
+                "AssistantContent",
+            ),
+            (
+                "reasoning_content",
+                "content",
+                MAX_REASONING_CONTENT_BYTES,
+                "ReasoningContent",
+            ),
+        ] {
+            for extra in ["", "!"] {
+                let mut parser = OpenAiSseParser::new();
+                delta(
+                    &mut parser,
+                    serde_json::json!({field: "é".repeat(limit / 4)}),
+                );
+                delta(&mut parser, serde_json::json!({other: "separator"}));
+                delta(
+                    &mut parser,
+                    serde_json::json!({field: format!("{}{extra}", "é".repeat(limit / 4))}),
+                );
+                let events = finish(&mut parser);
+                if extra.is_empty() {
+                    completed(&events);
+                } else {
+                    assert_limit(&events, kind);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn order_f09_interleaved_call_and_total_limits() {
+        use lattice_conversation::{MAX_MODEL_ATTEMPT_BYTES, MAX_TOOL_CALL_ARGUMENTS_BYTES};
+        let limit = MAX_TOOL_CALL_ARGUMENTS_BYTES;
+        let args = format!("{{\"x\":\"{}\"}}", "z".repeat(limit - 8));
+        assert_eq!(args.len(), limit);
+        for extra in ["", " "] {
+            let mut parser = OpenAiSseParser::new();
+            delta(&mut parser, call_delta(9, "first", &args[..limit / 2]));
+            delta(&mut parser, call_delta(2, "second", "{}"));
+            delta(
+                &mut parser,
+                call_delta(9, "", &format!("{}{extra}", &args[limit / 2..])),
+            );
+            let events = finish(&mut parser);
+            if extra.is_empty() {
+                completed(&events);
+            } else {
+                assert_limit(&events, "ToolCallArguments");
+            }
+        }
+        for extra in [false, true] {
+            let mut parser = OpenAiSseParser::new();
+            for index in 0..(MAX_MODEL_ATTEMPT_BYTES / limit) as u32 {
+                delta(&mut parser, call_delta(index, "t", &args));
+            }
+            if extra {
+                delta(&mut parser, serde_json::json!({"content": "!"}));
+            }
+            let events = finish(&mut parser);
+            if extra {
+                assert_limit(&events, "ModelAttemptTotal");
+            } else {
+                completed(&events);
+            }
+        }
+    }
+
+    #[test]
+    fn order_f10_invalid_batches_never_publish_partial_messages() {
+        use lattice_conversation::MAX_TOOL_CALLS_PER_BATCH;
+        for case in 0..3 {
+            let mut parser = OpenAiSseParser::new();
+            delta(&mut parser, serde_json::json!({"content": "prefix"}));
+            let count = if case == 2 {
+                MAX_TOOL_CALLS_PER_BATCH + 1
+            } else {
+                2
+            };
+            for index in 0..count {
+                let mut call = call_delta(
+                    index as u32,
+                    "t",
+                    if case == 0 && index == 1 { "{" } else { "{}" },
+                );
+                if case == 1 {
+                    call["tool_calls"][0]["id"] = serde_json::json!("duplicate");
+                }
+                delta(&mut parser, call);
+            }
+            let events = finish(&mut parser);
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, LlmEvent::MessageRejected { .. })),
+                "case {case}"
+            );
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| matches!(e, LlmEvent::MessageComplete { .. }))
+            );
+        }
+    }
+
+    fn ordered_native() -> NativeMessage<lattice_conversation::UnboundToolCall> {
+        use lattice_conversation::UnboundToolCall;
+        NativeMessage::new(
+            MessageRole::Assistant,
+            Some(ProviderOrigin::OpenAiCompatible),
+            vec![
+                MessagePart::semantic_only(MessageSemantic::Text { text: "A".into() }),
+                MessagePart::semantic_only(MessageSemantic::Reasoning { text: "R".into() }),
+                MessagePart::semantic_only(MessageSemantic::ToolCall {
+                    call: UnboundToolCall {
+                        provider_call_id: Some("real".into()),
+                        name: "observe.workspace".into(),
+                        arguments: serde_json::json!({"z": 1, "a": 2}),
+                    },
+                }),
+                MessagePart::semantic_only(MessageSemantic::Text { text: "B".into() }),
+                MessagePart::semantic_only(MessageSemantic::Reasoning { text: "S".into() }),
+            ],
+        )
+    }
+
+    #[test]
+    fn order_f11_request_merges_without_changing_wire_shape() {
+        let message = ordered_native();
+        let wire =
+            crate::provider_projection::native_to_wire(ProviderOrigin::OpenAiCompatible, &message)
+                .unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "role": "assistant", "content": "AB", "reasoning_content": "RS",
+                "tool_calls": [{"id": "real", "type": "function", "function": {"name": "observe__workspace", "arguments": "{\"a\":2,\"z\":1}"}}]
+            })
+        );
+    }
+
+    #[test]
+    fn order_f12_cross_provider_preserves_remaining_order() {
+        let source = ordered_native();
+        let original = source.clone();
+        let projected =
+            crate::provider_projection::project_cross_provider(&source, ProviderOrigin::Gemini);
+        assert_eq!(labels(&projected), ["T:A", "C:observe.workspace", "T:B"]);
+        assert!(
+            projected
+                .tool_calls()
+                .next()
+                .unwrap()
+                .1
+                .provider_call_id
+                .is_none()
+        );
+        assert_eq!(source, original);
     }
 
     #[test]

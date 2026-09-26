@@ -20,6 +20,7 @@
 //! whose closing call carries no provider ID fails the request assembly with
 //! a typed error (plan decision 9) instead of inventing an ID.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -251,6 +252,7 @@ impl ModelStepDriver {
         };
 
         let mut assembly = AttemptAssembly::new();
+        let mut tool_arguments = BTreeMap::<usize, AttemptAssembly>::new();
         let mut complete_message: Option<NativeMessage<UnboundToolCall>> = None;
         let mut rejection: Option<AttemptRejection> = None;
         let mut saw_stream_event = false;
@@ -343,10 +345,23 @@ impl ModelStepDriver {
                     }
                     emit(ModelStepEvent::ReasoningDelta { content });
                 }
-                LlmEvent::ToolCallStart { .. } => assembly.begin_tool_call(),
+                LlmEvent::ToolCallStart { .. } => {}
                 LlmEvent::ToolCallDelta {
-                    arguments_delta, ..
+                    index,
+                    arguments_delta,
                 } => {
+                    // Deltas may interleave or precede metadata; Start must not
+                    // reset an index's allowance. Keep the attempt total shared.
+                    if let Err(interruption) = tool_arguments
+                        .entry(index)
+                        .or_default()
+                        .push_tool_arguments(&arguments_delta)
+                    {
+                        return Ok(interrupted(interruption, usage, finish_reason, None));
+                    }
+                    // The per-index accountant checked the call limit above.
+                    // Reset only this fragment counter, not the shared total.
+                    assembly.begin_tool_call();
                     if let Err(interruption) = assembly.push_tool_arguments(&arguments_delta) {
                         return Ok(interrupted(interruption, usage, finish_reason, None));
                     }

@@ -24,6 +24,10 @@ pub use router::{
 pub use stub::{LlmError, LlmStream, StubLlm, stream};
 pub use types::{ChatRequest, LlmEvent, ModelTarget, ToolDefinition};
 
+// Expose the real parser only for cross-crate streaming boundary tests.
+#[cfg(feature = "test-utils")]
+pub use providers::openai::OpenAiSseParser;
+
 #[cfg(test)]
 mod test_env {
     use std::sync::{LazyLock, Mutex};
@@ -66,7 +70,10 @@ mod production_codec_boundary {
     fn every_provider_delegates_request_and_response_projection() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/providers");
         for (file, response_marker) in [
-            ("openai.rs", "wire_to_native"),
+            (
+                "openai.rs",
+                "crate::provider_projection::openai_parts_to_native(",
+            ),
             ("anthropic.rs", "wire_to_native"),
             ("gemini.rs", "complete_message_event"),
         ] {

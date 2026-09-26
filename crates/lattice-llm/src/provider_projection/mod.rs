@@ -32,6 +32,8 @@ mod anthropic;
 mod gemini;
 mod openai;
 
+pub(crate) use openai::{OpenAiPart, parts_to_native as openai_parts_to_native};
+
 pub(crate) fn openai_wire_tool_name(canonical: &str) -> String {
     canonical.replace('.', "__")
 }
