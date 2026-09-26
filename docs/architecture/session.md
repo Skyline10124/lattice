@@ -336,7 +336,7 @@ stateDiagram-v2
 - Succeeded 载荷的规范 JSON 超过 65,536 字节时，不保存正文、不截断，保留完整摘要与长度，ToolResult 标明内容不可用（OutputTooLarge）；outcome 仍为 Succeeded。需要大输出的 Tool 通过自身接口提供分页、游标或摘要。
 - 发给模型的结果文字不存储，由 provider 投影从载荷派生。取消或关闭时补写的终态使用按终态类型固定的最小文案，#220 定下统一反馈后对齐。
 - result Cell 的形态不在本合同冻结。库中的值带格式版本，[#117](https://github.com/Skyline10124/lattice/issues/117) 定下后作为新增字段加入 Succeeded 载荷。
-- 取消或停止时，未完成的调用写入类型化终态，不伪造成功输出：已 Started 无结果的为 Indeterminate；未 Started 的为 NotExecuted，原因记为 `CancelledBeforeDispatch`（分发前收到取消）、`DeadlineBeforeDispatch`（分发前 Turn deadline 已到）、`PrecedingInvocationIndeterminate`（前序调用效果不确定）或 `BeforeDispatch`（其他停止，含自动关闭补写）。已有终态保持原值。前三种原因沿用现有 `NotExecutedReason`，`DeadlineBeforeDispatch` 是新增变体，用来把分发前的 Deadline 写成持久事实。
+- 取消或停止时，未完成的调用写入类型化终态，不伪造成功输出：已 Started 无结果的为 Indeterminate；未 Started 的为 NotExecuted，原因记为 `CancelledBeforeDispatch`（分发前收到取消）、`DeadlineBeforeDispatch`（分发前 Turn deadline 已到）、`PrecedingInvocationIndeterminate`（前序调用效果不确定）或 `BeforeDispatch`（其他停止，含自动关闭补写）。已有终态保持原值。其中 `BeforeDispatch`、`CancelledBeforeDispatch`、`PrecedingInvocationIndeterminate` 沿用现有 `NotExecutedReason`；`DeadlineBeforeDispatch` 是新增变体，用来把分发前的 Deadline 写成持久事实。分发后被取消的调用才写 `Cancelled`。
 - live 执行决定停止分发时，余下槽位的终态与 Step 节点、`end`、Turn 关闭在同一事务写入，所以停止原因要么已随终态持久，要么尚未决定。
 - Tool 执行返回后，终态写入属于必要收尾，不受 Turn deadline 约束。写入失败按[事务失败](#事务与一致性)处理，后续调用不分发。
 
@@ -348,7 +348,11 @@ LANCET 的执行、准入与证据由 [LANCET 调用流程](lancet.md#调用身�
 
 - `Continue(node)`：协调器决定继续请求模型，随后开始下一 Step。
 - `Finish(node)`：模型给出无工具调用的完整回答。
-- `Stop { node, cause }`：因取消、错误、效果不确定、分发前 Deadline 或步骤上限停止。没有完整回复时，`cause` 取自最后一次尝试的原因，`node` 为 None；有完整回复时，`node` 指向写入的 Step 节点，`cause` 按[自动关闭](#自动关闭崩溃遗留任务)中的有序终态规则从槽位终态推导；达到模型步骤上限时为步骤上限。
+- `Stop { node, cause }`：因取消、错误、效果不确定、Deadline 或步骤上限停止。`cause` 是实际导致停止的原因，与 `end` 同事务写入：
+  - 没有完整回复、因某次尝试不再重试而停止：取该尝试的原因，`node` 为 None。
+  - 没有完整回复、在尝试之前或两次尝试之间（重试退避中）收到取消或 Turn deadline 已到：取 Cancelled 或 Deadline，不开始新尝试，也不沿用先前尝试的原因；`node` 为 None。
+  - 有完整回复：`node` 指向写入的 Step 节点，`cause` 按[自动关闭](#自动关闭崩溃遗留任务)中的有序终态规则从槽位终态推导。
+  - 达到模型步骤上限：步骤上限。
 
 `Finish` 或 `Stop` 的 Step 是 Turn 的最后一个 Step，同一事务补全 Turn 记录并清除 Session 的进行中 Turn：
 
@@ -395,7 +399,7 @@ TurnOutcome = Completed | Failed { reason } | Cancelled
   - Owner 先提交会话库事务，再在观察锁内更新段列表并追加对应事件，例如新尝试开始时清空段列表、Step 关闭后追加 Step 关闭事件。
   - 快照在观察锁内开启会话库读事务，并复制段列表与序号。这样，序号之前各事件对应的提交必定在读事务中可见；读事务还可能多含一次刚提交、事件尚未追加的提交。
   - 段列表标注所属步骤序号与尝试序号。快照的会话库部分已显示该尝试 `Stopped`，或所属 Step 已关闭时，这份段列表已被替代；尝试 `Completed` 而工具仍在执行时，段列表继续有效，快照中的 ActiveStep 也带有同一份完整回复。客户端保留已显示的临时文字，直到对应 Step 节点的正文实际装入显示，再按步骤序号与节点身份原位替换；历史读取挂起或失败时，临时文字继续显示。之后到达的同一关闭事件幂等应用，不重复显示。
-- **结束**：Turn 关闭事件是该 Turn 的最后一个事件，在关闭事务提交后追加。订阅者读到它，或得到的快照已显示 Turn 关闭时，收到结束。关闭事件只携带关闭事务已写入的内容（最后一个 Step 与 `TurnSummary`），快照显示 Turn 关闭时这些内容已在快照中，所以即使关闭事件尚未追加，订阅者也不必等待它。保证是：收到结束时，客户端已拥有该 Turn 关闭后会话库中的全部内容，不会缺少最后一个 Step 或结局。Turn 关闭后 Owner 释放内存观察状态，此后的订阅只从会话库取得快照并直接结束。
+- **结束**：Turn 关闭事件是该 Turn 的最后一个事件，在关闭事务提交后追加。订阅者读到它，或得到的快照已显示 Turn 关闭时，收到结束。关闭事件只携带关闭事务已写入的内容（最后一个 Step 与 `TurnSummary`），快照显示 Turn 关闭时这些内容已在快照中，所以即使关闭事件尚未追加，订阅者也不必等待它。保证是：收到结束时，客户端已收到该 Turn 的 `TurnSummary` 与 Step 记录，以及快照时从根到当前位置的对话。Turn 关闭时当前位置就是它最后写入的节点，所以观察正在执行的 Turn 时，最后一个 Step 的正文一定在内；关闭后已 `rewind` 离开时，对话仍只按当前位置读取，不另外交付该 Turn 的正文。执行诊断（如关闭写入失败）不属于快照内容，仍按[请求身份与找回](#请求身份与找回)单独交付。Turn 关闭后 Owner 释放内存观察状态，此后的订阅只从会话库取得快照并直接结束。
 - **后台重启**：内存观察状态随进程消失，进行中的 Turn 由之后的写操作[自动关闭](#自动关闭崩溃遗留任务)。客户端重连后用新快照重建，Turn 记录说明结局；丢失的只有当时正在生成的半截文字，它本就只作诊断。
 - **客户端本地丢弃**：客户端自己的显示队列丢弃事件时，按已交付的最后游标重新订阅。
 

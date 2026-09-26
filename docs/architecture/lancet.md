@@ -131,7 +131,7 @@ guest 只接收最小成功投影与无 payload 的粗错误标签，结构化�
 
 模型回复含工具调用时，协调层在一个会话库事务中把回复记入 ActiveStep，为每个调用建立[调用槽位](session.md#调用槽位)并分配 InvocationId。槽位记录 Session/Turn/步骤/片段地址、方法、Descriptor 身份和规范参数摘要，顺序与原回复一致。InvocationId 在同一事务插入全局索引，键冲突时放弃该事务、重新生成后重试。
 
-槽位的执行路径为 `已登记 → Started → 终态`；未 Started 的槽位也可直接写入 `NotExecuted` 或 `Cancelled` 终态。终态同时保存执行 outcome、结果载荷和完整 Cell 证据。下图展开一个已登记调用的分发与运行时返回路径：
+槽位的执行路径为 `已登记 → Started → 终态`；未 Started 的槽位可直接写入 `NotExecuted` 终态，原因规则见[调用槽位](session.md#调用槽位)（分发前收到取消为 `CancelledBeforeDispatch`）。`Cancelled` 只用于已分发后被取消的调用。终态同时保存执行 outcome、结果载荷和完整 Cell 证据。下图展开一个已登记调用的分发与运行时返回路径：
 
 ```mermaid
 flowchart TD
