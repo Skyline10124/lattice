@@ -71,7 +71,7 @@ redb 的相关保证：写事务使用 `Durability::Immediate` 时，`commit` �
 - `lattice session` 子命令只剩 `send`、`rewind`、`list`、`log`、`turn`、`cancel`。删除 `new`、`status`、`checkout`、`reset`、`diff` 与独立 `agent` 命令。顶层 `lattice run` 保持现状。
 - `session send` 不带 `--session` 时创建新 Session：项目绑定从当前目录解析，Session 记录与第一个 Turn 在同一接受事务中写入，`--agent` 必填。带 `--session` 时向已有 Session 提交。同一 `--turn-id` 重发按 Turn 记录找回原请求及其 Session，首次发送确认不明时重发不会多建 Session。
 - Session 记录只保存身份、项目绑定、当前位置、进行中 Turn 与时间；不再保存 `project_target_branch` 与 `label`。前者只被校验、保存和显示，没有行为依赖。TUI 不带 Session 启动时，在首次提交时创建。
-- `list` 每行显示 SessionId、项目绑定、当前节点序号、节点数、是否有进行中 Turn 与更新时间。`log <session>` 开头显示当前位置、当前 agent 与进行中 Turn，随后以树形列出全部节点（含不在当前分叉上的节点），标出当前位置，并在每个 Turn 的首节点注明 TurnId、结局与 notice。`turn` 负责单个 Turn 的详情与断线后续观察。
+- `list` 每行显示 SessionId、项目绑定、当前节点序号、节点数、是否有进行中 Turn 与更新时间。`log <session>` 开头显示当前位置、当前 agent 与进行中 Turn，随后以树形列出全部节点（含不在当前分叉上的节点），标出当前位置，并在每个 Turn 的首节点注明 TurnId、结局与 notice。`turn` 负责单个 Turn 的详情与断线后续观察；详情（含 `--json`）按步骤序号列出全部 Step 记录：各尝试终态、`end` 的类型与原因、对应节点序号（未写节点时为无）。这使 Step 记录与无节点的 `Stop` 能经公开 CLI 在 E2E 中断言。
 - 不设 Session 级"当前 agent"字段。agent 是 Turn 冻结配置的一部分，当前 agent 即当前位置所属 Turn 的 agent；`send --agent` 覆盖。rewind 到旧节点后自然回到当时的 agent。
 - Session 有由 Owner 执行的进行中 Turn 时（判定看整个 Turn，不只看是否存在 ActiveStep），不同请求的 `send` 与 `rewind` 返回 Busy，与 R1 的同 Session 排他一致。同 `--turn-id` 重发找回原请求；无 Owner 的崩溃遗留 Turn 按第 8 节先自动关闭。
 

@@ -146,6 +146,8 @@ sequenceDiagram
 
 CLI 的 `lattice session` 子命令为 `send`、`rewind`、`list`、`log`、`turn` 和 `cancel`，顶层 `lattice run` 是 `session send` 的别名。`session send` 不带 `--session` 时创建新 Session：项目绑定从当前目录解析，`--agent` 必填；带 `--session` 时向已有 Session 提交，`--agent` 可选。`session turn` 查看单个 Turn 的详情，`--follow` 用于断线后继续观察。TUI 不带 Session 启动时，在首次提交时创建 Session。
 
+`session turn` 的详情（含 `--json`）除 `TurnSummary` 与对话内容外，按步骤序号列出该 Turn 的全部 Step 记录：每次尝试的终态与原因、`end` 的类型与原因、对应的节点序号（未写节点时明确为无）；Turn 仍在进行时还列出 ActiveStep 的状态与各槽位进度。这是 Step 记录唯一的公开读取路径，输出不含冻结配置中的秘密。
+
 `LocalTurn::next` 交付 LocalUpdate，取消一次等待不会丢失已接收更新或半帧；已完成后句柄仍可显式重连。普通退出使用 `detach` 取得最后已知提交、取消、状态和读取诊断，或由 Drop 停止本地后续工作；两者都不新增取消。
 
 `LocalTurn::turn_id` 给出提交、观察与取消共用的身份；未指定目标的观察句柄在首次选择完成前返回 None。前端选择不同活动目标时调用新的 `observe`，原句柄仍独立交接其控制事实；对同一观察目标重连则继续使用原句柄。
