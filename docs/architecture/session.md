@@ -41,7 +41,9 @@ Turn 与 Step 的执行进度和结局分三层记录：
 | --- | --- | --- | --- |
 | 树节点 | `(SessionId, seq)` | UserMessage 或 Step 的对话内容、父节点、`turn_id` | 只追加 |
 | Step 记录 | `(TurnId, 步骤序号)` | `attempts`：每次 provider 请求的终态、usage 与诊断；`end`：`Continue(node)`、`Finish(node)` 或 `Stop { node: Option<NodeId>, cause }` | 进行中的 Step 记录称为 ActiveStep，就地更新；关闭后不再修改 |
-| Turn 记录 | `TurnId` | Session、用户节点、原始输入、冻结配置、开始时间；关闭时补 `outcome`、`reason`、`notice`、WorkspaceHistory checkpoint、usage 汇总、结束时间与末节点 | 接受时创建，关闭时补全，之后不再修改 |
+| Turn 记录 | `TurnId` | Session、用户节点、原始输入、冻结配置、开始时间；关闭时补 `outcome`、`reason`、`notice`、usage 汇总、结束时间与末节点 | 接受时创建，关闭时补全，之后不再修改 |
+
+Turn 的**末节点**是该 Turn 写入的最后一个节点：没有写出 Step 节点时是它的 UserMessage，否则是最后写入的 Step 节点。Turn 进行中时，同一 Session 不接受其他提交或退回，新节点总以当前位置为父，所以一个 Turn 的节点在树上连成一条链，末节点就是 Session 的当前位置。Turn 关闭时末节点写入 Turn 记录，之后不再变化；即使用户退回并分叉，从根到末节点的路径仍是这个 Turn 当时的完整对话。
 
 Session 不保存“当前 agent”。agent 是 Turn 冻结配置的一部分，当前 agent 即当前位置所属 Turn 的 agent；提交时显式指定 agent 可以覆盖它。退回旧节点后，当前 agent 自然回到当时的 agent。
 
@@ -72,7 +74,7 @@ LocalClient 用 `LocalTurn` 组织本客户端一次提交或观察交互。Loca
 6. **登记并执行工具。** TurnCoordinator 核验完整回复，在一个事务中把回复记入 ActiveStep、为每个调用建立槽位并分配 InvocationId。执行某个调用前，先提交该槽位的 `Started`；LANCET 随后按权限读取文件，返回执行结果、内容和证据。详细顺序见[调用槽位](#调用槽位)。
 7. **保存调用结果。** TurnCoordinator 把执行终态、结果载荷和证据写入该槽位。
 8. **关闭 Step 并继续。** 全部槽位都有结果后，TurnCoordinator 在一个事务中写入 Step 节点、以 `Continue` 关闭 Step 记录、清除 ActiveStep、把当前位置前移到新节点，然后开始下一步骤。ModelStepDriver 接收带有 ToolResult 的对话，模型据文件内容生成解释。
-9. **关闭 Turn。** 模型给出不含工具调用的完整回答后，协调层读取此时项目的文件历史位置（checkpoint），在一个事务中写入最后的 Step 节点、以 `Finish` 关闭 Step 记录，并补全 Turn 记录、清除 Session 的进行中 Turn。见[关闭 Step 与 Turn](#关闭-step-与-turn)。
+9. **关闭 Turn。** 模型给出不含工具调用的完整回答后，协调层在一个事务中写入最后的 Step 节点、以 `Finish` 关闭 Step 记录，并补全 Turn 记录、清除 Session 的进行中 Turn。见[关闭 Step 与 Turn](#关闭-step-与-turn)。
 10. **取得结果。** 观察者读到最新事件且 Turn 记录已关闭时收到结束。LocalTurn 交付结局，前端显示；此前离开的用户也可以重新连接，读到同一 Turn 记录。
 
 下图只表示接管后的执行与观察可以重叠，持久步骤的精确顺序由后文定义：
@@ -118,7 +120,7 @@ sequenceDiagram
 
 ## 实现模块与公开操作
 
-以下将前面的角色对应到代码模块，展开调用入口和内部协作。`lattice-api` 负责跨领域协调，把 LANCET 执行结果、[项目 checkpoint](workspace.md#turn-checkpoint) 和会话库写入接入 Turn；适用边界见[范围与禁止事项](#范围与禁止事项)。
+以下将前面的角色对应到代码模块，展开调用入口和内部协作。`lattice-api` 负责跨领域协调，把 LANCET 执行结果和会话库写入接入 Turn；适用边界见[范围与禁止事项](#范围与禁止事项)。
 
 | 模块 | 具体职责 |
 | --- | --- |
@@ -139,7 +141,7 @@ sequenceDiagram
 | 查看会话：`list`、`log` | 无，或 SessionId | `list` 每行给出 SessionId、项目绑定、当前节点序号、节点数、是否有进行中 Turn 与更新时间；`log` 先给出当前位置、当前 agent 与进行中 Turn，再以树形列出全部节点（含不在当前分叉上的节点），标出当前位置，并在每个 Turn 的首节点注明 TurnId、结局与 notice |
 | 查看一个 Turn：`observe`、`LocalTurn::next/reconnect` | SessionId 与所选 TurnId | 返回只读 LocalTurn；未指定 Turn 时优先选进行中的 Turn，否则选当前位置所属 Turn，空会话交付空历史；重连继续原观察目标 |
 | 提交或找回请求：`start_turn_with` | 原请求身份（TurnId，已有会话时含 SessionId）、输入、规范工作区及一次性配置加载闭包；新会话必须指定 agent | 返回 LocalTurn，完整交付提交并衔接观察；首轮无配置探测直接返回已有 Turn 或 Busy 时不加载配置；发现崩溃遗留 Turn 时先关闭，再返回 NeedsConfiguration，最多加载一次配置并继续本次新输入。后续准入仍可能因并发变化返回已有 Turn 或 Busy |
-| 读取对话：`read_history` | 已取得的观察快照 | 观察目标是所选 Turn 时，读取从根到该 Turn 在快照中最后一个节点的路径，不受之后的 `rewind` 或分叉影响；没有 Turn 的空会话读取从根到当前位置的路径。页面只包含快照已有的节点 |
+| 读取对话：`read_history` | 已取得的观察快照 | 观察目标是所选 Turn 时，读取从根到该 Turn 在快照中的[末节点](#会话turn-与会话树)的路径，不受之后的 `rewind` 或分叉影响；没有 Turn 的空会话读取从根到当前位置的路径。页面只包含快照已有的节点 |
 | 退回：`rewind` | SessionId 与目标 NodeId | 把当前位置移到树上任意已有节点；之后的提交从那里分叉，原分支保留在树上。不修改工作区文件 |
 | 请求取消：`LocalTurn::cancel`，或独立命令的 `LocalClient::cancel` | 原目标 SessionId / TurnId | 句柄同步登记意图并管理在途回执；独立命令返回后台接管结果，持久结局另行查询 |
 | 停止后台：`stop` | 当前本地后台 | 关闭新准入并等待已接管操作收尾，返回停止时已知状态 |
@@ -351,7 +353,7 @@ TurnOutcome = Completed | Failed { reason } | Cancelled
 - `notice = Option<{ level, text }>` 在写入时按结局定级：Failed 为 Error，Cancelled 为 Info，Completed 无 notice。`text` 由最后一个 Step 的 `Stop` 原因决定：`ProviderError` 取产生该原因的那次尝试的诊断，即 provider 错误原文，经现有脱敏并截断到 `MAX_PROVIDER_ERROR_CHARS`（2048 字符）；其他原因（含 Cancelled、ProcessExit、调用效果不确定、模型步骤上限）使用按原因固定、由代码定义的文案。先前已被重试取代的失败尝试不作为 notice 来源。实时 `TurnFailed` 事件携带同一对象。
 - 公开读取投影为 `TurnSummary { outcome, notice }`，内部 `reason` 不导出给前端。
 
-关闭 Turn 前，协调层取得共享 WorkspaceOperationLock，读取[项目全局 checkpoint](workspace.md#turn-checkpoint)，持锁直到关闭事务提交。每个完成 Turn 都读取该值，包括没有写文件的 Turn；checkpoint 可以包含同项目其他 Session 已记录的变更。读取或身份校验失败时停止关闭，不构造空 checkpoint；Turn 保持进行中，由后续自动关闭处理。事务提交前进程退出时，checkpoint 没有保存，自动关闭时重新读取。
+关闭 Turn 只写会话库，不读取工作区历史，也不取得工作区操作锁。Turn 与文件变更的关联由工作区历史中每条变更记录的 `TurnId` 与 `InvocationId` 承载，见[私有存储与数据关系](workspace.md#私有存储与数据关系)。
 
 会话库事务提供本库的原子提交；工作区历史与会话库各自提交，所以读取可能见到跨库中间状态，例如文件已记入工作区历史而 Turn 尚未关闭。已发生的文件效果由工作区合同处理。
 
@@ -440,7 +442,7 @@ true 后由后台履行责任，不自动补发；再次明确取消可开始新
 
 ### 自动关闭崩溃遗留任务
 
-用户向某个 Session 提交新请求或执行 `rewind` 时，Backend 先取得该 Session 的操作准入。若该 Session 有无 Owner 的进行中 Turn，执行核心非阻塞取得独占 SessionExecutionLock，核对 Session/项目绑定，读取 Turn 记录与 ActiveStep，由 `lattice-session` 规划关闭，再取得共享 WorkspaceOperationLock 读取 checkpoint，在一个事务中写入全部关闭事实。
+用户向某个 Session 提交新请求或执行 `rewind` 时，Backend 先取得该 Session 的操作准入。若该 Session 有无 Owner 的进行中 Turn，执行核心非阻塞取得独占 SessionExecutionLock，核对 Session/项目绑定，读取 Turn 记录与 ActiveStep，由 `lattice-session` 规划关闭，在一个事务中写入全部关闭事实。
 
 这种关闭称为 closure-only：它依据已保存事实完成旧 Turn，不请求 provider、不执行 Tool，也不需要当前 profile、provider 凭据或 Component 组成。已发生效果与已保存的结果继续保留；仅留在进程内、尚未写入的结果无法找回。
 
@@ -502,7 +504,7 @@ Session 永久绑定产品组合层提供的 `ProjectStoreKey`，执行请求的
 | `rewind` | 独占 SessionExecutionLock | 覆盖该写操作；与 live Turn、自动关闭互斥 |
 | `list`、`log`、query/subscribe 的快照 | 会话库读事务 | 不取操作锁，不等待 live Turn 排空 |
 | 后台准入 | Backend 短临界区 | 只管理接管权，释放后才执行 provider、存储或整段 Turn |
-| 工作区访问与 Turn checkpoint | 项目 WorkspaceOperationLock | 按[工作区操作锁](workspace.md#操作锁)覆盖相应操作；checkpoint 从读取至关闭事务提交持共享锁 |
+| 工作区观察与变更 | 项目 WorkspaceOperationLock | 按[工作区操作锁](workspace.md#操作锁)覆盖相应操作；关闭 Turn 与自动关闭不取得该锁 |
 | 会话库写入 | 该库的写事务 | 库保证同一时刻只有一个写事务；覆盖一步状态变化 |
 
 不同 Session 的执行锁独立，同项目不同 Session 的模型执行可以重叠。共享工作区按操作协调，而非按整个 Turn 排队。涉及多类锁时依次取得 SessionExecutionLock、WorkspaceOperationLock，最后是会话库写事务或至多一个 repository write lock，两者不同时持有；锁序与释放规则由[存储合同](storage.md#锁与并发语义)维护。

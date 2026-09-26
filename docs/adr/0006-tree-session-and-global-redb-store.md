@@ -31,7 +31,7 @@ LATTICE 后台是全局会话网关，本身没有项目概念；Session 对项�
 | 存储 | 作用域 | 内容 |
 | --- | --- | --- |
 | `lattice.redb` | 全局一份 | Session、树节点、Step 记录、Turn 记录、调用槽位与索引 |
-| `projects/<ProjectStoreKey>/workspace-history.git` | 每项目一份 | LANCET 的项目全局文件历史与 checkpoint，记录语义不变 |
+| `projects/<ProjectStoreKey>/workspace-history.git` | 每项目一份 | LANCET 的项目全局文件变更历史，记录语义不变；不再为 Turn 保存 checkpoint |
 
 - `sessions.git` 与 `projects/<key>/invocations.git` 删除，不换成项目级表。
 - DispatchStarted、调用终态与 Cell evidence 是协调器视角的事实（"已把调用交出去""收到了结果"），落在进行中步骤的调用槽位上。
@@ -67,7 +67,8 @@ redb 的相关保证：写事务使用 `Durability::Immediate` 时，`commit` �
 唯一的移动操作是 `rewind <seq>`：把当前位置移到树上任意已有节点，之后 `send` 从那里自然分叉，原分支保留在树上。
 
 - 不保留分支名，不设 `branch` 命令。`log` 以树形展示结构。
-- rewind 只切换对话位置，不回退工作区文件。原有的文件 Rewind（按目标 Turn 的 checkpoint 撤销其后全部 LATTICE 变更后移动会话引用）连同 `RewindCoordinator`、`lancet-api` 的恢复规划与执行接口、`lancet-runtime` 的恢复执行和 Rewind 审计链一并删除。WorkspaceHistory 照旧记录每次变更的前后内容与每个 Turn 的 checkpoint；文件恢复如需提供，另行裁决设计。
+- rewind 只切换对话位置，不回退工作区文件。原有的文件 Rewind（按目标 Turn 的 checkpoint 撤销其后全部 LATTICE 变更后移动会话引用）连同 `RewindCoordinator`、`lancet-api` 的恢复规划与执行接口、`lancet-runtime` 的恢复执行和 Rewind 审计链一并删除。
+- Turn checkpoint 一并删除。它唯一的功能读取方是文件 Rewind，其余只在 `log` 中显示。Turn 记录不再保存工作区历史位置；关闭 Turn（含自动关闭）只写会话库，不取工作区操作锁、不读 `workspace-history.git`，所以工作区历史库出错不会阻止 Turn 关闭。WorkspaceHistory 照旧逐次记录变更的前后内容，每条记录带 `TurnId` 与 `InvocationId`，`current` 只前进；会话与历史的对应由这两个身份承载。文件恢复如需提供，从中推导位置，另行裁决设计。
 - `lattice session` 子命令只剩 `send`、`rewind`、`list`、`log`、`turn`、`cancel`。删除 `new`、`status`、`checkout`、`reset`、`diff` 与独立 `agent` 命令。顶层 `lattice run` 保持现状。
 - `session send` 不带 `--session` 时创建新 Session：项目绑定从当前目录解析，Session 记录与第一个 Turn 在同一接受事务中写入，`--agent` 必填。带 `--session` 时向已有 Session 提交。同一 `--turn-id` 重发按 Turn 记录找回原请求及其 Session，首次发送确认不明时重发不会多建 Session。
 - Session 记录只保存身份、项目绑定、当前位置、进行中 Turn 与时间；不再保存 `project_target_branch` 与 `label`。前者只被校验、保存和显示，没有行为依赖。TUI 不带 Session 启动时，在首次提交时创建。
@@ -81,7 +82,7 @@ redb 的相关保证：写事务使用 `Durability::Immediate` 时，`commit` �
 | --- | --- | --- | --- |
 | 树节点 | `(SessionId, seq)` | UserMessage 或 Step 的对话内容、父节点、`turn_id` | 只追加 |
 | Step 记录 | `(TurnId, 步骤序号)` | `attempts`：每次 provider 请求的终态、usage 与诊断；`end`：`Continue(node) \| Finish(node) \| Stop { node: Option<NodeId>, cause }` | 进行中即 ActiveStep，就地更新；关闭后不再修改 |
-| Turn 记录 | `TurnId` | Session、用户节点、冻结配置摘要、开始时间；关闭时补 `outcome`、`reason`、`notice`、WorkspaceHistory checkpoint、usage 汇总、结束时间、末节点 | 接受时创建，关闭时补全，之后不再修改 |
+| Turn 记录 | `TurnId` | Session、用户节点、冻结配置摘要、开始时间；关闭时补 `outcome`、`reason`、`notice`、usage 汇总、结束时间、末节点（该 Turn 写入的最后一个节点） | 接受时创建，关闭时补全，之后不再修改 |
 
 Turn 的正常流程：
 
@@ -206,7 +207,7 @@ notice = Option<{ level, text }>
 | §2 项目存储寻址 | 保留，仅用于 `workspace-history.git` |
 | §3 一个状态根、三个仓库 | 取代：一个全局 redb + 每项目 `workspace-history.git` |
 | §4 `lattice-store` 通用持久内核 | 适用范围缩小到 `workspace-history.git` |
-| §5 操作锁在仓库锁之外 | 保留 SessionExecutionLock 与工作区操作锁；仓库写锁的约束只适用于 `workspace-history.git` |
+| §5 操作锁在仓库锁之外 | 保留 SessionExecutionLock 与工作区操作锁，工作区操作锁不再覆盖 Turn 关闭；仓库写锁的约束只适用于 `workspace-history.git` |
 | §6 会话权威在 `sessions.git` | 取代：会话权威在全局 redb |
 | §7 对话是纯数据合同 | 保留 |
 | §8 `TurnStarted` 是接受边界 | 保留语义，边界改为 Turn 记录创建的事务 |
@@ -216,8 +217,8 @@ notice = Option<{ level, text }>
 | §12 ResultDraft 只是材料 | 取代：结果直接写入槽位 |
 | §13 批次执行与取消按序、失败关闭 | 保留 |
 | §14 重开只做关闭 | 保留，改由第 8 节的单事务自动关闭实现 |
-| §15 Turn outcome 与最终 checkpoint 有类型 | 部分取代：去掉 Interrupted，结局改由最后一个 Step 派生 |
-| §16 WorkspaceHistory 记录关联而非终态权威 | 记录与关联规则保留；Rewind 与 `RewindCoordinator` 取消，见第 4 节 |
+| §15 Turn outcome 与最终 checkpoint 有类型 | 部分取代：去掉 Interrupted，结局改由最后一个 Step 派生；Turn checkpoint 删除，见第 4 节 |
+| §16 WorkspaceHistory 记录关联而非终态权威 | 记录与关联规则保留；Rewind、`RewindCoordinator` 与 Turn checkpoint 取消，见第 4 节 |
 | §17 操作员读取是 pinned ledger 读取 | 取代：读全局库 |
 | §18 文件系统能力按位置核验 | 保留，适用于 `workspace-history.git`；redb 所在位置另按存储合同核验 |
 | §19 所属与依赖图 | 按实施更新 |
@@ -237,7 +238,7 @@ ADR 0005 在本 ADR 接受后改为部分被取代，正文保留。ADR 0003 的
 代价与风险：
 
 - 旧会话与调用账本不可读，需要人手处理旧库。
-- 删除工作区文件回退功能及其代码；WorkspaceHistory 仍然记录前后内容，将来提供恢复时需要重新设计与验证。
+- 删除工作区文件回退功能、Turn checkpoint 及相关代码；WorkspaceHistory 仍然记录前后内容与 Turn/调用身份，将来提供恢复时需要重新设计与验证。Turn 关闭时刻的项目全局历史位置（含其他 Session 的变更）不再保存，将来也无法为已关闭的 Turn 补回。
 - 半截回复会被重试：实时观察者可能先看到一段部分文字，随后看到新尝试从头开始，前端须按尝试边界处理。
 - 读取与观察模型（固定视图、分页、Gap 与重固定、完成确认、IPC DTO、TUI/CLI 历史加载）都要随存储重写，实施量主要在这里。
 - 进行中 Turn 的观察状态占用后台内存：每个 Turn 至多约 4 MiB 文字加一个事件窗口，同时至多 32 个 Turn。这是 provider 解析器已有累积文字的一份拷贝，因为观察层只能拿到中立的 delta 事件。
@@ -256,6 +257,7 @@ ADR 0005 在本 ADR 接受后改为部分被取代，正文保留。ADR 0003 的
 | 保留 `session status` | 不带 ID 时与 `list` 重复；单 Session 的字段多为 Git 表示，剩余信息由 `log` 开头显示 |
 | rewind 同时回退文件 | 从旧节点继续对话不等于要退回工作区，且项目全局回退会影响其他 Session |
 | 保留文件 Rewind 代码但不接入 | 要继续维护和测试一段没有调用方的代码；将来需要恢复时按当时的模型重新设计 |
+| 保留 Turn checkpoint | 唯一的功能读取方是已删除的文件 Rewind；保存它要求每次关闭 Turn 取工作区锁并读取另一个库，读取失败会让 Turn 无法关闭，Session 随之无法继续 |
 | 只允许 Turn 级 rewind | Step 节点天然配对完整，步骤级定位没有额外成本 |
 | 用独立节点表示工具结果 | 会制造有调用无结果的中间状态，需要额外补齐规则 |
 | 请求模型时临时补齐缺失结果 | 每次请求都要扫描配对；持久终态已能表达同一事实 |

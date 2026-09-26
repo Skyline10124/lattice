@@ -111,7 +111,7 @@ _Avoid_: model attempt, partial reply, ToolCall without result
 _Avoid_: PendingTurn, token buffer, retry queue
 
 **Turn 记录**:
-每个 Turn 的独立记录，接受时与 UserMessage 节点同事务创建，关闭时补上结局、checkpoint、usage 与 notice；公开读取为 `TurnSummary { outcome, notice }`。
+每个 Turn 的独立记录，接受时与 UserMessage 节点同事务创建，关闭时补上结局、usage、notice 与末节点（该 Turn 写入的最后一个节点）；公开读取为 `TurnSummary { outcome, notice }`。它不保存工作区历史位置，Turn 与文件变更的关联记在 Workspace History 的变更记录中。
 见[关闭 Step 与 Turn](../architecture/session.md#关闭-step-与-turn)。
 _Avoid_: TurnCommit, last Step, commit OID
 
@@ -141,16 +141,10 @@ _Avoid_: token replay, layout body width, frozen configuration
 _Avoid_: Gap, pinned view, whole-workspace snapshot
 
 **Workspace History**:
-LATTICE 已成功安装的 Atomic Local Mutation 的私有持久记录，使用 Git tree 表达前后状态，仅覆盖 LATTICE 变更过的路径。
+LATTICE 已成功安装的 Atomic Local Mutation 的私有持久记录，使用 Git tree 表达前后状态，仅覆盖 LATTICE 变更过的路径；每条变更记录带 `TurnId` 与 `InvocationId`。
 它位于 Local Workspace 和用户项目 Git 之外的私有 bare Git 库，见[私有存储与数据关系](../architecture/workspace.md#私有存储与数据关系)。
 _Avoid_: whole-project snapshot, execution workspace, projection, checkpoint,
 receipt store
-
-**Workspace-History Object ID**:
-已记录 Workspace History 位置的 Git 对象身份；项目全局 checkpoint 的 `Empty` 分支表示权威历史引用不存在，不是已有 Git OID。
-每个关闭的 Turn 都在关闭事务之前、持共享工作区操作锁读取当前项目 checkpoint，由关闭事务存入 Turn 记录，即使本 Turn 未写文件，也可包含其他 Session 已记录的变更。
-见[Turn checkpoint](../architecture/workspace.md#turn-checkpoint)、[私有存储与数据关系](../architecture/workspace.md#私有存储与数据关系)及[关闭 Step 与 Turn](../architecture/session.md#关闭-step-与-turn)。
-_Avoid_: workspace snapshot id, session commit id, checkpoint handle
 
 **Rewind**:
 把 Session 当前位置移到会话树上任意已有节点；之后的提交从该节点分叉，原分支保留。它只切换对话位置，不恢复工作区文件。

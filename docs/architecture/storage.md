@@ -15,7 +15,7 @@ status: pending
 私有状态只有两类存储：
 
 - **会话库** `lattice.redb`：全局一份，保存 Session、会话树、Step 与 Turn 记录和调用槽位，由 `lattice-session` 维护。
-- **工作区历史库** `workspace-history.git`：每项目一份，保存项目全局文件历史与 checkpoint，由 `lancet-runtime` 维护，经 `lattice-store` 的通用 Git 机制发布。
+- **工作区历史库** `workspace-history.git`：每项目一份，保存项目全局文件变更历史，由 `lancet-runtime` 维护，经 `lattice-store` 的通用 Git 机制发布。
 
 会话记录与事务序列见[会话合同](session.md)，调用执行与证据见 [LANCET 合同](lancet.md)和 [Cell 合同](cell.md)，文件安装与工作区历史见[工作区合同](workspace.md)。
 
@@ -28,7 +28,7 @@ status: pending
 | 相对 `<state-root>/lattice/` 的位置 | 归属与作用 |
 | --- | --- |
 | `lattice.redb` | `lattice-session`，全局会话库 |
-| `projects/<ProjectStoreKey>/workspace-history.git` | `lancet-runtime`，项目级变更历史与 checkpoint |
+| `projects/<ProjectStoreKey>/workspace-history.git` | `lancet-runtime`，项目级变更历史 |
 | `locks/sessions/<SessionId>.lock` | 会话操作锁 |
 | `locks/projects/<ProjectStoreKey>/workspace.lock` | 项目工作区操作锁 |
 
@@ -253,11 +253,11 @@ CAS 的相同目标重试不授权修改身份。当前 `MustNotExist` 对完全
 
 ```text
 SessionExecutionLock（会话绑定操作）
-  → WorkspaceOperationLock（访问或一致采样项目工作区）
+  → WorkspaceOperationLock（观察或变更项目工作区）
     → 会话库写事务，或至多一个 repository write lock
 ```
 
-不持有会话库写事务或仓库锁反向取得操作锁，不升级共享锁，不同时持有会话库写事务与仓库写锁，也不同时持有两个仓库写锁。会话库写事务内不等待模型、Tool、网络或其他锁，不跨 await 持有。[会话合同](session.md#操作锁)维护会话操作的持有期限，[工作区合同](workspace.md#操作锁)维护观察、变更与 Turn checkpoint 的项目锁范围。操作员查询只用会话库读事务，不取得这两种操作锁。
+不持有会话库写事务或仓库锁反向取得操作锁，不升级共享锁，不同时持有会话库写事务与仓库写锁，也不同时持有两个仓库写锁。会话库写事务内不等待模型、Tool、网络或其他锁，不跨 await 持有。[会话合同](session.md#操作锁)维护会话操作的持有期限，[工作区合同](workspace.md#操作锁)维护观察与变更的项目锁范围；关闭 Turn 只写会话库，不取得工作区操作锁。操作员查询只用会话库读事务，不取得这两种操作锁。
 
 | 锁类别 | 同进程语义 |
 | --- | --- |

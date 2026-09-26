@@ -9,7 +9,7 @@ status: pending
 
 ## 目的与范围
 
-本合同规定 LATTICE 对本地工作区的观察、文件变更、私有变更历史及 Turn checkpoint 的职责、接口和行为边界。
+本合同规定 LATTICE 对本地工作区的观察、文件变更与私有变更历史的职责、接口和行为边界。
 维护归属为 `lancet-runtime` 的工作区与历史模块。[Cell 合同](cell.md#准入与操作授权)维护能力准入与操作授权，[会话合同](session.md)维护 Turn 记录、自动关闭与会话退回，[存储合同](storage.md)维护私有库布局、锁和发布机制；本文规定工作区操作如何使用这些机制。工具组成与执行入口见 [LANCET 合同](lancet.md)。
 
 本文承接范围及仍需核验的实现问题见文末。
@@ -22,9 +22,9 @@ status: pending
 - **Policy-Visible Workspace** 是读取策略允许观察的当前路径集合，由本地状态过滤而来，不复制文件，也不建立跨调用快照。
 - **Local Revision** 标识一次观察所依据的文件内容。编辑携带该内容身份作为 Mutation Precondition；创建的前提是目标仍不存在。
 - **Workspace History** 保存 LATTICE 已安装变更的前后内容与关联身份，以私有 Git 对象和引用表达。记录范围限于 LATTICE 触及的路径，不收集整个项目的外部修改。
-- **会话树**保存会话及工具交互。已关闭的 Turn 在 Turn 记录中保存项目级 `WorkspaceHistoryCheckpoint`，以此与工作区历史关联。会话退回只移动会话当前位置，不恢复本地文件。
+- **会话树**保存会话及工具交互。会话与工作区历史的关联由历史一侧承载：每条变更记录带 `TurnId` 与 `InvocationId`，Turn 记录不保存工作区历史位置。会话退回只移动会话当前位置，不恢复本地文件。
 
-术语入口为[领域术语表](../reference/glossary.md)，会话树的精确模型由[会话合同](session.md#会话turn-与会话树)承接；checkpoint 的项目范围与保存边界见[Turn checkpoint](#turn-checkpoint)。
+术语入口为[领域术语表](../reference/glossary.md)，会话树的精确模型由[会话合同](session.md#会话turn-与会话树)承接。
 
 ### 组件接口
 
@@ -32,9 +32,8 @@ status: pending
 | --- | --- |
 | `lancet-authority` | 路径可见性、系统路径排除、Guard 与 Cell 策略判断 |
 | `lancet-runtime` | Tool Host 工作区接口、具体路径解析、观察、安装与历史记录 |
-| `lancet-api` | 组合运行时，提供工作区历史库定位与 checkpoint 读取接口 |
-| `lattice-api` | 将 profile 转为策略；在关闭 Turn 时读取 checkpoint 交会话库保存 |
-| `lattice-session` | 在 Turn 记录中保存 checkpoint，执行会话库事务 |
+| `lancet-api` | 组合运行时，提供工作区历史库定位 |
+| `lattice-api` | 将 profile 转为策略 |
 | `lattice-store` | 提供领域中立的私有 Git 对象、引用、锁与持久化机制 |
 
 生产 Tool 通过 Host 的结构化接口访问工作区。输入数据不解释为 shell 语法；Tool 不接收可绕过策略的文件系统或存储句柄。
@@ -50,8 +49,6 @@ flowchart LR
     W -->|文件操作| L["Local Workspace"]
     H -->|安装后记录| R["WorkspaceHistory"]
     R -->|对象与引用事务| S["lattice-store"]
-    C["lattice-api 协调层"] -->|读取 checkpoint| R
-    C -->|关闭 Turn 并保存 checkpoint| G["lattice-session"]
 ```
 
 ### 私有存储与数据关系
@@ -61,7 +58,7 @@ flowchart LR
 - Git blob 保存内容，tree 表达相关路径的前后状态，commit 表达顺序及父子关系，`refs/lattice/workspace-history/current` 指向当前记录的变更。
 - 变更记录关联 `InvocationId`、`TurnId`、效果序号、方法、路径及前后内容身份。关联信息不决定 Invocation 的终态。
 - 父 tree 必须与安装器实际观察到的变更前内容相符。当前记录机制在需要时插入 baseline commit，使外部修改后的真实前态也可恢复；baseline 不作为一次 Tool 变更。
-- 历史只追加：`current` 只随新记录的变更前进，已保存在 Turn 记录中的 checkpoint OID 始终可解析。当前不提供按 checkpoint 恢复文件的操作；历史保留前后内容，供将来另行裁决的恢复设计使用。
+- 历史只追加：`current` 只随新记录的变更前进，已记录的提交始终是 `current` 的祖先。按 `TurnId` 或 `InvocationId` 可以从 `current` 向前找到对应的变更提交。当前不提供恢复文件的操作；历史保留前后内容与关联身份，将来另行裁决的恢复设计从中推导位置。
 
 ## 路径与观察
 
@@ -135,7 +132,7 @@ Host 负责写入大小限制、路径与策略核验、取消检查及最终 Mu
 
 调用方不得仅凭错误、超时或取消推定文件未改变。安装后的失败需要核验实际文件与持久引用；本文不将重新执行 Tool 作为补救方式。
 
-## 并发与 Turn 完成边界
+## 并发边界
 
 ### 操作锁
 
@@ -143,19 +140,10 @@ Host 负责写入大小限制、路径与策略核验、取消检查及最终 Mu
 
 - 观察持共享锁，覆盖一次有界操作。
 - 变更在内容身份与前提核验前取得独占锁，持有至安装和历史发布结束。
-- Turn 关闭时持共享锁，覆盖读取当前历史 checkpoint 至关闭 Turn 的会话库事务提交；自动关闭同样适用。
 
-持锁凭据、获取顺序及互斥规则遵循[存储锁机制](storage.md#锁与并发语义)。会话绑定操作先按[会话锁范围](session.md#操作锁)取得 SessionExecutionLock，再按上述期限持有项目锁。
+持锁凭据、获取顺序及互斥规则遵循[存储锁机制](storage.md#锁与并发语义)。会话绑定操作先按[会话锁范围](session.md#操作锁)取得 SessionExecutionLock，再按上述期限持有项目锁。关闭 Turn（含自动关闭）不取得该锁，也不访问工作区历史库。
 
 非 LATTICE 写者不受该操作锁控制。外部进程仍可能在最后一次前提核验与安装之间或安装后写入；原子安装和内容身份核验不提供外部写者串行化，也不提供整个 Turn 的快照隔离。
-
-### Turn checkpoint
-
-`WorkspaceHistoryCheckpoint = Empty | Oid(ObjectId)` 标识项目全局工作区历史的位置。`Empty` 仅表示权威历史引用不存在，`Oid` 指向已记录历史；读取失败或非法 OID 不转为 `Empty`。
-每个关闭的 Turn 都在[关闭事务](session.md#关闭-step-与-turn)之前读取该值，由关闭事务保存，包括自动关闭，即使本 Turn 未写文件。读取在会话库写事务之外进行，写事务内不访问工作区历史库。checkpoint 可以包含同一项目其他 Session 已记录的变更。
-
-共享操作锁保证 checkpoint 读取与关闭事务之间没有新的 LATTICE 变更插入。
-它不冻结外部文件修改，也不把 checkpoint 变成所有本地文件的快照。
 
 ## 验证与承接
 
@@ -167,8 +155,8 @@ Host 负责写入大小限制、路径与策略核验、取消检查及最终 Mu
 | --- | --- |
 | 可见性、观察限制与 Host 证据 | `cargo test -p lancet-runtime --lib host_workspace::` |
 | 前提、安装、历史错误及安装后同步失败 | `cargo test -p lancet-runtime --lib host_mutate::` |
-| 私有历史及恢复规划 | `cargo test -p lancet-runtime --lib history::` |
-| Turn 与项目历史关联 | `cargo test -p lattice-api --test workspace_history_acceptance` |
+| 私有历史记录与读取 | `cargo test -p lancet-runtime --lib history::` |
+| 变更记录与 Turn/调用身份的关联 | `cargo test -p lattice-api --test workspace_history_acceptance` |
 
 验证分层与[被测二进制要求](../development/testing.md#被测二进制)由测试工程合同维护，运行配方见[验证操作指南](../development/validation-guide.md)。测试结果与未验证范围记录在对应任务中。
 
@@ -177,8 +165,8 @@ Host 负责写入大小限制、路径与策略核验、取消检查及最终 Mu
 - [领域术语表](../reference/glossary.md)：保留工作区、内容身份、前提及历史的简短定义与关键区别，完整规则由本文维护。
 - 观察、变更、语义编辑与工作区历史由本文维护；操作资料见[工具开发指南](../development/tool-development.md)。
 - [ADR 0003](../adr/0003-lancet-operates-directly-on-local-workspace.md)：Direct-Local、路径策略与单路径安装的设计依据；组件归属结合 [ADR 0004](../adr/0004-build-closed-wasm-tool-catalog.md) 的修订读取。其中的文件 Rewind 已由 ADR 0006 取消。
-- [ADR 0005](../adr/0005-durable-turn-invocation-and-private-git-stores.md)：项目工作区历史库、锁序与全局 checkpoint 的依据；会话、调用存储与 Rewind 部分已由 ADR 0006 取代。
-- [ADR 0006](../adr/0006-tree-session-and-global-redb-store.md)：会话退回只移动对话位置、取消文件 Rewind，以及 checkpoint 保存在 Turn 记录中的依据。文件恢复如需提供，另行裁决。
+- [ADR 0005](../adr/0005-durable-turn-invocation-and-private-git-stores.md)：项目工作区历史库与锁序的依据；会话、调用存储、全局 checkpoint 与 Rewind 部分已由 ADR 0006 取代。
+- [ADR 0006](../adr/0006-tree-session-and-global-redb-store.md)：会话退回只移动对话位置、取消文件 Rewind 与 Turn checkpoint 的依据。文件恢复如需提供，另行裁决。
 - [lancet-runtime 局部指引](../../crates/lancet-runtime/AGENTS.md)、[lancet-api 局部指引](../../crates/lancet-api/AGENTS.md)、[lattice-api 局部指引](../../crates/lattice-api/AGENTS.md)：现有职责、操作锁与安装后失败要求。
 
 现行规则以本文及对应合同为准，旧实施计划与根记录保留为历史证据，局部入口另行整理。
