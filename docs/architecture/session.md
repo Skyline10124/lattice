@@ -29,7 +29,7 @@ Session（会话）保存用户的一段持续对话，以 `SessionId` 标识，
 - **UserMessage**：一条用户输入。
 - **Step**：一次完整的模型回复，连同它发出的全部 `(ToolCall, ToolResult)` 对。没有工具调用的回复是 0 对的 Step。本例中，第一个 Step 是“请求读取文件”的回复及其读取结果，第二个 Step 是最终解释。
 
-每个节点记录父节点和所属 `turn_id`。节点身份 NodeId 是每个 Session 内单调递增的 `u64`，写入节点时分配，父节点序号恒小于子节点；跨 Session 引用写作 `(SessionId, seq)`，用户可以直接输入序号。**当前位置**是 Session 记录中的一个 NodeId：新节点以当前位置为父，写入后当前位置前移到新节点。连续两个 UserMessage 是合法结构，例如取消了一个尚未产生 Step 的 Turn 后再发送。
+每个 Session 建立时写入根节点 `0`：它没有内容、不属于任何 Turn，代表空对话，树始终只有这一个根。其他节点记录父节点和所属 `turn_id`。节点身份 NodeId 是每个 Session 内单调递增的 `u64`，写入节点时分配，第一条 UserMessage 为 `1`，父节点序号恒小于子节点；跨 Session 引用写作 `(SessionId, seq)`，用户可以直接输入序号。**当前位置**是 Session 记录中的一个 NodeId：新节点以当前位置为父，写入后当前位置前移到新节点。连续两个 UserMessage 是合法结构，例如取消了一个尚未产生 Step 的 Turn 后再发送。
 
 Step 节点只在全部调用都有结果后才写入树，结果包括[调用槽位](#调用槽位)中的类型化终态。所以树上任何时刻都不存在有调用、无结果的节点。
 
@@ -43,9 +43,11 @@ Turn 与 Step 的执行进度和结局分三层记录：
 | Step 记录 | `(TurnId, 步骤序号)` | `attempts`：每次 provider 请求的终态、usage 与诊断；`end`：`Continue(node)`、`Finish(node)` 或 `Stop { node: Option<NodeId>, cause }` | 进行中的 Step 记录称为 ActiveStep，就地更新；关闭后不再修改 |
 | Turn 记录 | `TurnId` | Session、用户节点、原始输入、冻结配置、开始时间；关闭时补 `outcome`、`reason`、`notice`、usage 汇总与结束时间 | 接受时创建，关闭时补全，之后不再修改 |
 
-读取对话只有一种范围：从根到 Session 当前位置的路径，也就是下一次请求发给模型的上下文。要看其他分叉上的对话，先 `rewind` 到那里。
+读取对话只有一种范围：从根到 Session 当前位置的路径，也就是下一次请求发给模型的上下文；根节点 `0` 不含内容，不发给 provider。要看其他分叉上的对话，先 `rewind` 到那里。
 
-Session 不保存“当前 agent”。agent 是 Turn 冻结配置的一部分，当前 agent 即当前位置所属 Turn 的 agent；提交时显式指定 agent 可以覆盖它。退回旧节点后，当前 agent 自然回到当时的 agent。
+`rewind N` 只有一种语义：把当前位置移到节点 N 本身，下一次提交的新节点以 N 为父。改写某条用户消息就是退回到它的父节点再发送，改写第一条消息就是 `rewind 0`。会话层不提供“编辑消息”等第二种入口；前端可以把选中消息并改写的交互翻译为这两步。
+
+Session 不保存“当前 agent”。agent 是 Turn 冻结配置的一部分，当前 agent 即当前位置所属 Turn 的 agent；提交时显式指定 agent 可以覆盖它。退回旧节点后，当前 agent 自然回到当时的 agent。当前位置为根节点 `0` 时没有当前 agent，提交必须指定 agent，与新建 Session 相同。
 
 ### 组件与接口
 
@@ -140,13 +142,13 @@ sequenceDiagram
 | --- | --- | --- |
 | 查看会话：`list`、`log` | 无，或 SessionId | `list` 每行给出 SessionId、项目绑定、当前节点序号、节点数、是否有进行中 Turn 与更新时间；`log` 先给出当前位置、当前 agent 与进行中 Turn，再以树形列出全部节点（含不在当前分叉上的节点），标出当前位置，并在每个 Turn 的首节点注明 TurnId、结局与 notice |
 | 查看一个 Turn：`observe`、`LocalTurn::next/reconnect` | SessionId 与所选 TurnId | 返回只读 LocalTurn；未指定 Turn 时优先选进行中的 Turn，否则选当前位置所属 Turn，空会话交付空历史；重连继续原观察目标 |
-| 提交或找回请求：`start_turn_with` | 原请求身份（TurnId，已有会话时含 SessionId）、输入、规范工作区及一次性配置加载闭包；新会话必须指定 agent | 返回 LocalTurn，完整交付提交并衔接观察；首轮无配置探测直接返回已有 Turn 或 Busy 时不加载配置；发现崩溃遗留 Turn 时先关闭，再返回 NeedsConfiguration，最多加载一次配置并继续本次新输入。后续准入仍可能因并发变化返回已有 Turn 或 Busy |
+| 提交或找回请求：`start_turn_with` | 原请求身份（TurnId，已有会话时含 SessionId）、输入、规范工作区及一次性配置加载闭包；新会话或当前位置为根节点时必须指定 agent | 返回 LocalTurn，完整交付提交并衔接观察；首轮无配置探测直接返回已有 Turn 或 Busy 时不加载配置；发现崩溃遗留 Turn 时先关闭，再返回 NeedsConfiguration，最多加载一次配置并继续本次新输入。后续准入仍可能因并发变化返回已有 Turn 或 Busy |
 | 读取对话：`read_history` | 已取得的观察快照 | 读取从根到快照中 Session 当前位置的路径。页面只包含快照已有的节点 |
 | 退回：`rewind` | SessionId 与目标 NodeId | 把当前位置移到树上任意已有节点；之后的提交从那里分叉，原分支保留在树上。不修改工作区文件 |
 | 请求取消：`LocalTurn::cancel`，或独立命令的 `LocalClient::cancel` | 原目标 SessionId / TurnId | 句柄同步登记意图并管理在途回执；独立命令返回后台接管结果，持久结局另行查询 |
 | 停止后台：`stop` | 当前本地后台 | 关闭新准入并等待已接管操作收尾，返回停止时已知状态 |
 
-CLI 的 `lattice session` 子命令为 `send`、`rewind`、`list`、`log`、`turn` 和 `cancel`，顶层 `lattice run` 是 `session send` 的别名。`session send` 不带 `--session` 时创建新 Session：项目绑定从当前目录解析，`--agent` 必填；带 `--session` 时向已有 Session 提交，`--agent` 可选。`session turn` 查看单个 Turn 的详情，`--follow` 用于断线后继续观察。TUI 不带 Session 启动时，在首次提交时创建 Session。
+CLI 的 `lattice session` 子命令为 `send`、`rewind`、`list`、`log`、`turn` 和 `cancel`，顶层 `lattice run` 是 `session send` 的别名。`session send` 不带 `--session` 时创建新 Session：项目绑定从当前目录解析，`--agent` 必填；带 `--session` 时向已有 Session 提交，`--agent` 可选，当前位置为根节点时必填。`session turn` 查看单个 Turn 的详情，`--follow` 用于断线后继续观察。TUI 不带 Session 启动时，在首次提交时创建 Session。
 
 `session turn` 的详情（含 `--json`）给出 `TurnSummary`，并按步骤序号列出该 Turn 的全部 Step 记录：每次尝试的终态与原因、`end` 的类型与原因、对应的节点序号（未写节点时明确为无）；Turn 仍在进行时还列出 ActiveStep 的状态与各槽位进度。它不按路径读取对话。这是 Step 记录唯一的公开读取路径，输出不含冻结配置中的秘密。
 
@@ -168,9 +170,9 @@ CLI 的 `lattice session` 子命令为 `send`、`rewind`、`list`、`log`、`tur
 
 执行核心持有 SessionExecutionLock 后核对身份、项目绑定与输入；新接受还验证用户消息、工具目录及执行限制。接受事务写入以下事实：
 
-- UserMessage 节点，父节点为 Session 当前位置（新会话为无父的根节点）。
+- UserMessage 节点，父节点为 Session 当前位置；新会话先写入根节点 `0`，第一条 UserMessage 为 `1`、父节点为 `0`。
 - 未关闭的 Turn 记录：TurnId、SessionId、用户节点、原始输入、项目绑定、`FrozenTurnConfig` 和接受时间。
-- Session 记录的当前位置指向新节点，进行中 Turn 指向该 TurnId；新会话的 Session 记录在同一事务创建。
+- Session 记录的当前位置指向新节点，进行中 Turn 指向该 TurnId；新会话的 Session 记录与根节点在同一事务创建。
 
 这个事务提交是请求接受的持久边界。用户消息为 User 角色的 text parts，大小规则见[输入与传输限制](#输入与传输限制)。
 

@@ -56,15 +56,16 @@ redb 的相关保证：写事务使用 `Durability::Immediate` 时，`commit` �
 - **节点**两种：`UserMessage` 是一条用户输入；`Step` 是一次完整模型回复，连同它发出的全部 `(ToolCall, ToolResult)` 对。没有工具调用的回复是 0 对的 Step。
 - 配对靠构造保证：一个 Step 只有在全部调用都有结果（含第 7 节的类型化终态）后才写入树，所以树上任何时刻不存在有调用、无结果的节点。
 - 节点记录父节点和所属 `turn_id`，不记录 Turn 结局。
-- **NodeId** 是每 Session 单调递增的 `u64`，写节点时分配，父节点序号恒小于子节点。跨 Session 引用写作 `(SessionId, seq)`。用户可以直接输入序号。
-- **当前位置**是 Session 记录中的一个 NodeId。新节点以当前位置为父，写入后当前位置前移到新节点。
+- **根节点 `0`** 在 Session 建立时写入，没有内容、不属于任何 Turn，代表空对话；树始终单根，节点 `0` 不发给 provider。没有它，第一条消息之前就没有可以退回的位置。
+- **NodeId** 是每 Session 单调递增的 `u64`，写节点时分配，第一条 UserMessage 为 `1`，父节点序号恒小于子节点。跨 Session 引用写作 `(SessionId, seq)`。用户可以直接输入序号。
+- **当前位置**是 Session 记录中的一个 NodeId，始终有值。新节点以当前位置为父，写入后当前位置前移到新节点。
 - 连续两个 `UserMessage` 是合法结构（例如取消了一个尚无 Step 的 Turn 后再发送）；provider 投影按适配器要求合并或原样传递。
 
 `TurnId` 仍是 UUID v4，承担提交去重与找回，与 NodeId 分工不同。
 
 ### 4. 会话操作
 
-唯一的移动操作是 `rewind <seq>`：把当前位置移到树上任意已有节点，之后 `send` 从那里自然分叉，原分支保留在树上。
+唯一的移动操作是 `rewind <seq>`：把当前位置移到树上任意已有节点本身，之后 `send` 的新节点以它为父，原分支保留在树上。改写某条用户消息就是退回到它的父节点再发送，第一条消息即 `rewind 0`。会话层只保留这一种语义，不提供 `send --edit` 之类的第二入口；顺手的编辑交互由前端组合这两步实现。
 
 - 不保留分支名，不设 `branch` 命令。`log` 以树形展示结构。
 - rewind 只切换对话位置，不回退工作区文件。原有的文件 Rewind（按目标 Turn 的 checkpoint 撤销其后全部 LATTICE 变更后移动会话引用）连同 `RewindCoordinator`、`lancet-api` 的恢复规划与执行接口、`lancet-runtime` 的恢复执行和 Rewind 审计链一并删除。
@@ -73,7 +74,7 @@ redb 的相关保证：写事务使用 `Durability::Immediate` 时，`commit` �
 - `session send` 不带 `--session` 时创建新 Session：项目绑定从当前目录解析，Session 记录与第一个 Turn 在同一接受事务中写入，`--agent` 必填。带 `--session` 时向已有 Session 提交。同一 `--turn-id` 重发按 Turn 记录找回原请求及其 Session，首次发送确认不明时重发不会多建 Session。
 - Session 记录只保存身份、项目绑定、当前位置、进行中 Turn 与时间；不再保存 `project_target_branch` 与 `label`。前者只被校验、保存和显示，没有行为依赖。TUI 不带 Session 启动时，在首次提交时创建。
 - `list` 每行显示 SessionId、项目绑定、当前节点序号、节点数、是否有进行中 Turn 与更新时间。`log <session>` 开头显示当前位置、当前 agent 与进行中 Turn，随后以树形列出全部节点（含不在当前分叉上的节点），标出当前位置，并在每个 Turn 的首节点注明 TurnId、结局与 notice。`turn` 负责单个 Turn 的详情与断线后续观察；详情（含 `--json`）按步骤序号列出全部 Step 记录：各尝试终态、`end` 的类型与原因、对应节点序号（未写节点时为无）。这使 Step 记录与无节点的 `Stop` 能经公开 CLI 在 E2E 中断言。
-- 不设 Session 级"当前 agent"字段。agent 是 Turn 冻结配置的一部分，当前 agent 即当前位置所属 Turn 的 agent；`send --agent` 覆盖。rewind 到旧节点后自然回到当时的 agent。
+- 不设 Session 级"当前 agent"字段。agent 是 Turn 冻结配置的一部分，当前 agent 即当前位置所属 Turn 的 agent；`send --agent` 覆盖。rewind 到旧节点后自然回到当时的 agent。当前位置为根节点 `0` 时没有当前 agent，`send` 必须带 `--agent`。
 - Session 有由 Owner 执行的进行中 Turn 时（判定看整个 Turn，不只看是否存在 ActiveStep），不同请求的 `send` 与 `rewind` 返回 Busy，与 R1 的同 Session 排他一致。同 `--turn-id` 重发找回原请求；无 Owner 的崩溃遗留 Turn 按第 8 节先自动关闭。
 
 ### 5. 三层记录与 Turn 生命周期

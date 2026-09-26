@@ -86,12 +86,12 @@ _Avoid_: configurable deny pattern, projection exclusion
 _Avoid_: terminal connection, background process, workspace copy
 
 **会话树**:
-Session 内由 UserMessage 与 Step 节点组成的只追加树。新节点以当前位置为父；发给模型的上下文是根到当前位置的路径。它记录工作区交互，但不拥有 Local Workspace 内容。
+Session 内由根节点 `0`、UserMessage 与 Step 节点组成的只追加单根树。根节点没有内容、不属于任何 Turn，代表空对话。新节点以当前位置为父；发给模型的上下文是根到当前位置的路径。它记录工作区交互，但不拥有 Local Workspace 内容。
 见[会话、Turn 与会话树](../architecture/session.md#会话turn-与会话树)。
 _Avoid_: Session History, branch, Git commit graph, workspace checkpoint lineage
 
 **NodeId**:
-会话树节点在 Session 内单调递增的 `u64` 序号，父节点序号恒小于子节点；跨 Session 引用写作 `(SessionId, seq)`。
+会话树节点在 Session 内单调递增的 `u64` 序号，根节点为 `0`，父节点序号恒小于子节点；跨 Session 引用写作 `(SessionId, seq)`。
 见[会话、Turn 与会话树](../architecture/session.md#会话turn-与会话树)。
 _Avoid_: Git OID, branch name, TurnId
 
@@ -147,6 +147,6 @@ _Avoid_: whole-project snapshot, execution workspace, projection, checkpoint,
 receipt store
 
 **Rewind**:
-把 Session 当前位置移到会话树上任意已有节点；之后的提交从该节点分叉，原分支保留。它只切换对话位置，不恢复工作区文件。
+把 Session 当前位置移到会话树上任意已有节点本身；之后的提交以该节点为父分叉，原分支保留。改写一条用户消息即退回到它的父节点再提交（第一条消息为 `rewind 0`）。它只切换对话位置，不恢复工作区文件。
 见[实现模块与公开操作](../architecture/session.md#实现模块与公开操作)。
 _Avoid_: branch, checkout, reset, file restore, workspace rollback
