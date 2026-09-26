@@ -139,7 +139,7 @@ sequenceDiagram
 | 查看会话：`list`、`log` | 无，或 SessionId | `list` 每行给出 SessionId、项目绑定、当前节点序号、节点数、是否有进行中 Turn 与更新时间；`log` 先给出当前位置、当前 agent 与进行中 Turn，再以树形列出全部节点（含不在当前分叉上的节点），标出当前位置，并在每个 Turn 的首节点注明 TurnId、结局与 notice |
 | 查看一个 Turn：`observe`、`LocalTurn::next/reconnect` | SessionId 与所选 TurnId | 返回只读 LocalTurn；未指定 Turn 时优先选进行中的 Turn，否则选当前位置所属 Turn，空会话交付空历史；重连继续原观察目标 |
 | 提交或找回请求：`start_turn_with` | 原请求身份（TurnId，已有会话时含 SessionId）、输入、规范工作区及一次性配置加载闭包；新会话必须指定 agent | 返回 LocalTurn，完整交付提交并衔接观察；首轮无配置探测直接返回已有 Turn 或 Busy 时不加载配置；发现崩溃遗留 Turn 时先关闭，再返回 NeedsConfiguration，最多加载一次配置并继续本次新输入。后续准入仍可能因并发变化返回已有 Turn 或 Busy |
-| 读取对话：`read_history` | 已取得的观察快照 | 读取快照所定当前位置从根到该节点的路径，页面只包含快照已有的节点 |
+| 读取对话：`read_history` | 已取得的观察快照 | 观察目标是所选 Turn 时，读取从根到该 Turn 在快照中最后一个节点的路径，不受之后的 `rewind` 或分叉影响；没有 Turn 的空会话读取从根到当前位置的路径。页面只包含快照已有的节点 |
 | 退回：`rewind` | SessionId 与目标 NodeId | 把当前位置移到树上任意已有节点；之后的提交从那里分叉，原分支保留在树上。不修改工作区文件 |
 | 请求取消：`LocalTurn::cancel`，或独立命令的 `LocalClient::cancel` | 原目标 SessionId / TurnId | 句柄同步登记意图并管理在途回执；独立命令返回后台接管结果，持久结局另行查询 |
 | 停止后台：`stop` | 当前本地后台 | 关闭新准入并等待已接管操作收尾，返回停止时已知状态 |
@@ -221,9 +221,9 @@ cause = ProviderError { retryable }
 | 尝试结果 | 保存什么及下一动作 |
 | --- | --- |
 | `Stopped { ProviderError { retryable: true } }`，该步骤尝试预算未尽 | 追加终态，按冻结策略退避，再以下一尝试序号请求。已收到多少流内容不影响重试资格 |
-| `Stopped`，原因不可重试或尝试预算已尽 | 追加终态，以 `Stop` 关闭 Step 与 Turn |
-| `Completed`，回复无工具调用 | 按[关闭 Step 与 Turn](#关闭-step-与-turn)写入 Step 节点，由协调器决定结束 Turn |
-| `Completed`，回复含工具调用 | 回复记入 ActiveStep 并建立调用槽位，进入[调用槽位](#调用槽位)的执行 |
+| `Stopped`，原因不可重试，或可重试但该步骤尝试预算已尽 | 追加终态，以 `Stop` 关闭 Step 与 Turn，`cause` 取自该尝试 |
+| `Completed`，回复无工具调用 | 尝试终态与 Step 节点、`Finish` 及 Turn 关闭在同一事务写入，见[关闭 Step 与 Turn](#关闭-step-与-turn) |
+| `Completed`，回复含工具调用 | 尝试终态与完整回复、调用槽位在同一事务写入，进入[调用槽位](#调用槽位)的执行 |
 | 完整输出的批次校验失败 | 追加 `Stopped { InvalidBatch }`，整批拒绝、不重试，以 `Stop` 关闭 |
 | 进程突然退出，尝试终态未保存 | 后台下次写操作前[自动关闭](#自动关闭崩溃遗留任务)，按 `Stopped { ProcessExit }` 记录 |
 
@@ -278,11 +278,13 @@ Tool 参数通过协议 canonical JSON 生成规范对象和摘要。有效调�
 | 事务 | 写入内容 | 之后的状态 |
 | --- | --- | --- |
 | 开始请求 | ActiveStep 置为 `Requesting { attempt }` | 等待 provider |
-| 尝试结束 | 在 `attempts` 追加 AttemptEnd | 重试、进入执行或关闭 |
-| 登记调用 | 完整回复、各调用槽位、InvocationId 索引 | 执行中 |
+| 尝试停止 | 在 `attempts` 追加 `Stopped`；不再重试时同一事务关闭 Step 与 Turn | 重试或关闭 |
+| 登记调用 | 在 `attempts` 追加 `Completed`，写入完整回复、各调用槽位、InvocationId 索引 | 执行中 |
 | 调用开始 | 一个槽位标记 `Started` | 等待 LANCET 返回 |
 | 调用结束 | 一个槽位的终态、结果载荷与证据 | 下一调用或关闭 Step |
-| 关闭 Step | Step 节点、Step 记录的 `end`、清除 ActiveStep、前移当前位置；最后一个 Step 同时关闭 Turn | 下一 Step 或 Turn 结束 |
+| 关闭 Step | Step 节点、Step 记录的 `end`、清除 ActiveStep、前移当前位置；无工具调用的回复同时追加 `Completed`；最后一个 Step 同时关闭 Turn | 下一 Step 或 Turn 结束 |
+
+`Completed` 不单独提交：它总与登记调用或关闭 Step 在同一事务写入，所以不存在“完整回复已保存、尚未登记也未关闭”的持久状态。
 
 ```mermaid
 stateDiagram-v2
@@ -344,7 +346,7 @@ TurnOutcome = Completed | Failed { reason } | Cancelled
 ```
 
 - `Finish` 得到 Completed；`Stop { cause: Cancelled }` 得到 Cancelled；其他 `Stop` 得到 Failed。
-- `notice = Option<{ level, text }>` 在写入时按结局定级：Failed 为 Error，Cancelled 为 Info，Completed 无 notice。Failed 的 `text` 取最后一次失败尝试的诊断，即 provider 错误原文，经现有脱敏并截断到 `MAX_PROVIDER_ERROR_CHARS`（2048 字符）。实时 `TurnFailed` 事件携带同一对象。
+- `notice = Option<{ level, text }>` 在写入时按结局定级：Failed 为 Error，Cancelled 为 Info，Completed 无 notice。`text` 由最后一个 Step 的 `Stop` 原因决定：`ProviderError` 取产生该原因的那次尝试的诊断，即 provider 错误原文，经现有脱敏并截断到 `MAX_PROVIDER_ERROR_CHARS`（2048 字符）；其他原因（含 Cancelled、ProcessExit、调用效果不确定、模型步骤上限）使用按原因固定、由代码定义的文案。先前已被重试取代的失败尝试不作为 notice 来源。实时 `TurnFailed` 事件携带同一对象。
 - 公开读取投影为 `TurnSummary { outcome, notice }`，内部 `reason` 不导出给前端。
 
 关闭 Turn 前，协调层取得共享 WorkspaceOperationLock，读取[项目全局 checkpoint](workspace.md#turn-checkpoint)，持锁直到关闭事务提交。每个完成 Turn 都读取该值，包括没有写文件的 Turn；checkpoint 可以包含同项目其他 Session 已记录的变更。读取或身份校验失败时停止关闭，不构造空 checkpoint；Turn 保持进行中，由后续自动关闭处理。事务提交前进程退出时，checkpoint 没有保存，自动关闭时重新读取。
@@ -378,7 +380,11 @@ TurnOutcome = Completed | Failed { reason } | Cancelled
   - **事件窗口**：最近的固定条数事件，当前为 64 条。窗口大小只影响慢订阅者多久重新同步一次，不影响正确性。
   - **当前尝试的段列表**：当前模型尝试已发出的正文与 reasoning delta，按到达顺序记为 `(类型, 文字)` 段，相邻同类合并。它等于一个一直连着的订阅者按序拼出的结果。新尝试开始时清空，Step 关闭后由会话库中的 Step 节点取代，Turn 关闭后释放。
 - **订阅**：订阅者带游标读取，游标由后台 epoch 与事件序号组成。游标仍在窗口内时，从游标之后逐条继续。新订阅、游标已落出窗口或 epoch 已改变的订阅者，先得到快照，再从快照的序号起接窗口中的事件。快照包含：Session 记录、Turn 记录、已写入的节点、ActiveStep 与各槽位状态，加上段列表及其序号。读得慢只会多重新同步一次，不会丢内容。
-- **结束**：订阅者读到最新序号且 Turn 已关闭，才收到结束。结束判定与事件在同一结构中，不存在事件尚未交付就先报告结束的竞争。
+- **快照切点**：会话库与内存观察状态按固定顺序衔接。
+  - Owner 先提交会话库事务，再在观察锁内更新段列表并追加对应事件，例如新尝试开始时清空段列表、Step 关闭后追加 Step 关闭事件。
+  - 快照在观察锁内开启会话库读事务，并复制段列表与序号。这样，序号之前各事件对应的提交必定在读事务中可见；读事务还可能多含一次刚提交、事件尚未追加的提交。
+  - 段列表标注所属步骤序号与尝试序号。快照的会话库部分已显示该尝试结束或该 Step 已关闭时，客户端丢弃这份段列表，以会话库中的记录为准。之后到达的同一关闭事件按步骤序号与节点身份幂等应用，不重复显示。
+- **结束**：Turn 关闭事件是该 Turn 的最后一个事件，在关闭事务提交后追加。订阅者读到它，或得到的快照已显示 Turn 关闭时，才收到结束。结束不会早于最后一个事件交付。Turn 关闭后 Owner 释放内存观察状态，此后的订阅只从会话库取得快照并直接结束。
 - **后台重启**：内存观察状态随进程消失，进行中的 Turn 由之后的写操作[自动关闭](#自动关闭崩溃遗留任务)。客户端重连后用新快照重建，Turn 记录说明结局；丢失的只有当时正在生成的半截文字，它本就只作诊断。
 - **客户端本地丢弃**：客户端自己的显示队列丢弃事件时，按已交付的最后游标重新订阅。
 
@@ -442,15 +448,15 @@ true 后由后台履行责任，不自动补发；再次明确取消可开始新
 | --- | --- | --- |
 | Turn 已接受，尚无 Step 记录 | 一条无尝试的 Step 记录，`Stop { None, ProcessExit }` | Failed |
 | ActiveStep 为 `Requesting`，尝试尚无终态 | 追加 `Stopped { ProcessExit }`，`Stop { None, ProcessExit }` | Failed |
-| ActiveStep 处于重试间隙，最后尝试已有可重试终态 | `Stop { None, ProcessExit }`，不恢复重试 | Failed |
-| ActiveStep 最后尝试为不可重试终态，Step 尚未关闭 | `Stop { None, cause }`，`cause` 取自该尝试 | 按原因：Cancelled 或 Failed |
+| ActiveStep 处于重试间隙：最后尝试为可重试终态，且该步骤尝试预算未尽 | `Stop { None, ProcessExit }`，不恢复重试 | Failed |
+| ActiveStep 最后尝试为不可重试终态，或为可重试终态但尝试预算已尽，Step 尚未关闭 | `Stop { None, cause }`，`cause` 取自该尝试 | 按原因：Cancelled 或 Failed |
 | 执行中，存在未 Started 的槽位 | 该槽位写 NotExecuted | 见下两行 |
-| 执行中，存在已 Started 无终态的槽位 | 该槽位写 Indeterminate；不依据缺少结果推定文件未改变 | Failed，原因为调用效果不确定 |
-| 执行中，各槽位已有终态或已按上两行补写，且无 Indeterminate | 写入 Step 节点，`Stop { Some(node), ProcessExit }` | Failed |
+| 执行中，存在已 Started 无终态的槽位 | 该槽位写 Indeterminate；不依据缺少结果推定文件未改变 | 见下一行 |
+| 执行中，各槽位已有终态或已按上两行补写 | 写入 Step 节点，`Stop { Some(node), cause }`，`cause` 按下文规则推导 | Cancelled 或 Failed |
 | 最后一个 Step 以 `Continue` 关闭，下一 Step 尚未开始 | 一条无尝试的 Step 记录，`Stop { None, ProcessExit }` | Failed |
 | Turn 记录已关闭 | 无需处理 | 原结局 |
 
-表中“执行中”的各行同时适用：先补写各槽位终态，再写 Step 节点与 `end`。存在 Indeterminate 时 `cause` 为调用效果不确定，否则为 ProcessExit。关闭事务提交前出错时，Turn 保持原状，再次触发时重新规划；会话库不可写时返回错误与恢复需求。
+表中“执行中”的各行同时适用：先补写各槽位终态，再写 Step 节点与 `end`。`cause` 与 live 执行使用同一批次控制规则，按片段顺序取第一个导致停止分发的终态（已持久的或刚补写的）：取消类终态得到 Cancelled，Indeterminate 得到调用效果不确定；都没有时为 ProcessExit。所以已写入的取消终态在崩溃后仍关闭为 Cancelled，与未崩溃时一致。关闭事务提交前出错时，Turn 保持原状，再次触发时重新规划；会话库不可写时返回错误与恢复需求。
 
 ### 停止后台
 
@@ -483,7 +489,7 @@ Session 永久绑定产品组合层提供的 `ProjectStoreKey`，执行请求的
 
 - 写事务内只做会话库读写，不等待模型、Tool、网络或其他锁；阻塞的库操作在 `spawn_blocking` 等阻塞执行边界内完成，不跨 await 持有写事务。
 - 读者用读事务取得一致快照，不需要锁。
-- **事务失败**：`commit` 返回错误时，事务可能已持久，不能当作已回滚；库随后拒绝新的写事务。后台停止在该库上的全部写入：进行中的 Turn 不再启动 provider 或 Tool，后台关闭并重新打开会话库，以读到的记录为准；仍未关闭的 Turn 按崩溃遗留任务自动关闭。
+- **事务失败**：redb 的 `commit` 错误分两类。`TransactionPoisoned` 表示事务已回滚、库仍可开始新事务，但引起它的存储错误可能仍在库中；其他错误表示事务可能已持久、不能当作已回滚，库随后拒绝新的写事务。本项目的策略对两类一律保守处理：后台停止在该库上的全部写入，进行中的 Turn 不再启动 provider 或 Tool，后台关闭并重新打开会话库，以读到的记录为准；仍未关闭的 Turn 按崩溃遗留任务自动关闭。
 
 ### 操作锁
 

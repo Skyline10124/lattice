@@ -73,7 +73,7 @@ redb 的相关保证：写事务使用 `Durability::Immediate` 时，`commit` �
 - Session 记录只保存身份、项目绑定、当前位置、进行中 Turn 与时间；不再保存 `project_target_branch` 与 `label`。前者只被校验、保存和显示，没有行为依赖。TUI 不带 Session 启动时，在首次提交时创建。
 - `list` 每行显示 SessionId、项目绑定、当前节点序号、节点数、是否有进行中 Turn 与更新时间。`log <session>` 开头显示当前位置、当前 agent 与进行中 Turn，随后以树形列出全部节点（含不在当前分叉上的节点），标出当前位置，并在每个 Turn 的首节点注明 TurnId、结局与 notice。`turn` 负责单个 Turn 的详情与断线后续观察。
 - 不设 Session 级"当前 agent"字段。agent 是 Turn 冻结配置的一部分，当前 agent 即当前位置所属 Turn 的 agent；`send --agent` 覆盖。rewind 到旧节点后自然回到当时的 agent。
-- Session 有进行中的 Turn 时，`send` 与 `rewind` 返回 Busy，与 R1 的同 Session 排他一致。
+- Session 有由 Owner 执行的进行中 Turn 时（判定看整个 Turn，不只看是否存在 ActiveStep），不同请求的 `send` 与 `rewind` 返回 Busy，与 R1 的同 Session 排他一致。同 `--turn-id` 重发找回原请求；无 Owner 的崩溃遗留 Turn 按第 8 节先自动关闭。
 
 ### 5. 三层记录与 Turn 生命周期
 
@@ -86,8 +86,8 @@ redb 的相关保证：写事务使用 `Durability::Immediate` 时，`commit` �
 Turn 的正常流程：
 
 1. **接受**：同一事务写入 `UserMessage` 节点、未关闭的 Turn 记录，并把 Session 的当前位置与进行中 Turn 指向它们；新建 Session 时 Session 记录也在这个事务中创建。这个提交是请求接受的持久边界，承接 ADR 0005 的 `TurnStarted`。同 `TurnId` 重试按 Turn 记录找回原请求。
-2. **请求模型**：写入 ActiveStep，状态 `Requesting { attempt }`。每次 provider 请求结束，在 ActiveStep 的 `attempts` 中追加终态。
-3. **收到完整回复**：无调用时，同一事务写 Step 节点、以 `Finish` 关闭 Step 记录，并关闭 Turn（第 6 步）。有调用时，ActiveStep 记下完整回复，为每个调用建立槽位并分配 InvocationId，状态转为执行。
+2. **请求模型**：写入 ActiveStep，状态 `Requesting { attempt }`。请求以停止结束时，单独提交追加到 `attempts` 的 `Stopped` 终态（不再重试时同一事务关闭 Step 与 Turn）。
+3. **收到完整回复**：`Completed` 终态不单独提交，与下一个状态变化同事务写入，所以不存在“回复已保存、尚未登记也未关闭”的持久状态。无调用时，同一事务追加 `Completed`、写 Step 节点、以 `Finish` 关闭 Step 记录，并关闭 Turn（第 6 步）。有调用时，同一事务追加 `Completed`、在 ActiveStep 记下完整回复，为每个调用建立槽位并分配 InvocationId，状态转为执行。
 4. **执行调用**：每个调用执行前单独提交槽位 `Started`；结果到达后单独提交终态与载荷。写事务内不等待模型、Tool 或网络。
 5. **关闭 Step**：全部槽位有结果后，同一事务写 Step 节点、关闭 Step 记录、清除 ActiveStep、前移当前位置。协调器决定继续时 `end = Continue(node)`，回到第 2 步开始下一步骤。
 6. **关闭 Turn**：最后一个 Step 关闭的同一事务补全 Turn 记录并清除 Session 的进行中 Turn。
@@ -151,6 +151,7 @@ TurnOutcome = Completed | Failed { reason } | Cancelled
 
 - 取消或失败后，Session 当前位置停在该 Turn 最后写入的节点，已完成的步骤进入之后的上下文。用户取消通常是为了换种说法继续，已完成的工具结果仍有用；需要丢弃时 rewind 到该用户消息之前。
 - 崩溃遗留的进行中 Turn 仍按 closure-only 规则由后台在该 Session 下一次写操作前自动关闭，不请求 provider、不执行 Tool：ActiveStep 处于 `Requesting` 时追加 `Stopped { ProcessExit }`；处于执行时按第 7 节写入各槽位终态并写 Step 节点；随后以 `Stop` 关闭 Step 与 Turn。自动关闭所需事实全部在同一库中，由一个事务完成。
+- 执行中关闭的 `cause` 与 live 执行使用同一批次控制规则：按片段顺序取第一个导致停止分发的终态（已持久的或刚补写的），取消类得到 Cancelled，Indeterminate 得到调用效果不确定，都没有时为 ProcessExit。已写入的取消终态在崩溃后仍关闭为 Cancelled，崩溃时机不改变结局。
 
 ### 9. 对外结局呈现
 
@@ -161,7 +162,7 @@ notice = Option<{ level, text }>
 ```
 
 - 写入时按 outcome 定级：Failed → Error，Cancelled → Info，Completed 无 notice。
-- Failed 的 `text` 取最后一次失败尝试的诊断，即 provider 错误原文，经现有脱敏并截断到 `MAX_PROVIDER_ERROR_CHARS`（2048 字符）。
+- `text` 由最后一个 Step 的 `Stop` 原因决定：`ProviderError` 取产生该原因的那次尝试的诊断，即 provider 错误原文，经现有脱敏并截断到 `MAX_PROVIDER_ERROR_CHARS`（2048 字符）；其他原因使用按原因固定、由代码定义的文案。已被重试取代的失败尝试不作为来源。
 - 实时 `TurnFailed` 事件携带同一对象，重载前后显示一致靠构造成立。
 - 公开读取投影为 `TurnSummary { outcome, notice }`；内部 `reason` 枚举不再导出给前端。
 
@@ -176,7 +177,8 @@ notice = Option<{ level, text }>
   - **当前尝试的段列表**：当前模型尝试已发出的正文与 reasoning delta，按到达顺序记为 `(类型, 文字)` 段，相邻同类合并。它等于一个一直连着的订阅者按序拼出的结果。新尝试开始时清空，Step 关闭后由 redb 中的 Step 节点取代，Turn 关闭后释放。
 - **订阅**：订阅者带游标读取。游标仍在窗口内时，从游标之后逐条继续。新订阅，或游标已落出窗口的慢订阅者，先得到快照（树、Turn 记录与已关闭的 Step，加上段列表及其序号），再从该序号起接窗口中的事件。读得慢只会多重新同步一次，不会丢内容。
 - **内存上界**：段列表受单次尝试的正文与 reasoning 上限约束（各 2 MiB，`lattice-conversation/src/limits.rs`），每个 Turn 至多约 4 MiB 加一个窗口；同时进行的 Turn 受现有 Owner 上限（32）约束。工具结果在槽位提交时已写入 redb，从快照读取，不占观察内存。
-- **结束**：订阅者读到最新序号且 Turn 已关闭，才收到结束。结束判定与事件在同一结构中，不存在事件尚未交付就先报告结束的竞争。
+- **快照切点**：Owner 先提交 redb 事务，再在观察锁内更新段列表并追加事件；快照在观察锁内开启 redb 读事务并复制段列表与序号。所以序号之前各事件对应的提交必定可见，读事务至多多含一次事件尚未追加的提交。段列表标注步骤与尝试序号，快照已显示该尝试结束或该 Step 关闭时丢弃段列表；随后到达的同一关闭事件按步骤序号与节点身份幂等应用。
+- **结束**：Turn 关闭事件是最后一个事件，在关闭事务提交后追加。订阅者读到它，或快照已显示 Turn 关闭时，才收到结束，所以结束不会早于最后一个事件交付。
 - **后台重启**：内存观察状态随进程消失，进行中的 Turn 按第 8 节自动关闭。客户端重连后用新快照重建，Turn 记录说明结局；丢失的只有当时正在生成的半截文字，它本就只作诊断。
 - **删除 Gap**：原先的 Gap 来自容量 64 的广播队列会挤掉慢订阅者的事件，以及快照不含正在生成的文字、切点之前的事件不能重放。段列表补上了快照缺的部分，落出窗口只是重新同步，订阅协议只剩"快照 + 按序事件 + 结束"。客户端自己的显示队列丢弃事件时，由客户端按游标重新订阅。
 - **顺序保留**：Step 节点中助手消息的 parts 按到达顺序保存正文、reasoning 与工具调用的交错。Anthropic 与 Gemini 的解析已按 block/part 顺序生成；OpenAI 兼容解析器现在把正文与 reasoning 各拼成一个字符串、固定按 reasoning → 正文 → 工具调用生成 parts，改为按到达顺序生成（相邻同类合并，工具调用排在首次出现的位置）。Chat Completions 请求只有一个 `reasoning_content` 和一个 `content` 字段，`native_to_wire` 发请求时照旧合并同类内容，同一 provider 回放不受影响。不变量：当前尝试的段列表与最终 Step 的正文/reasoning parts，合并相邻同类后序列相同，Step 关闭时显示不跳变。
@@ -184,7 +186,7 @@ notice = Option<{ level, text }>
 - **完成确认**：已关闭的 Turn 记录可读即已持久，不再有每 Turn 的确认状态和补屏障步骤。"未知"只剩一种真实来源：提交请求是否被接受尚不清楚，由同一 `--turn-id` 重发找回处理。
   - 依据（redb 4.2.0 与 4.3.0 源码，默认独占写模式）：`Immediate` 提交先在 header 的局部副本中写入新根并落盘，最后一次 `sync_data` 成功后，才在锁内替换读者使用的共享 header；`begin_read` 只读共享 header。4.3.0 的实验性多进程模式下读者直接读文件 header，可能早于最后一次同步看到新提交；`Durability::None` 提交先可见、不保证持久。所以第 1 节的使用条件不可放宽。
   - 可见可能早于 `commit` 返回：发布共享 header 后还有释放页等后处理。此时业务数据已持久，不影响上面的结论。
-  - `commit` 返回错误时，redb 的语义是事务要么完整生效、要么完全未生效，但可能已经持久，不能当作已回滚；库随后拒绝新的写事务，需关闭重开。写入方因此不宣布成功，也不宣布回滚，关闭并重开库后以读到的记录为准，其余按第 8 节处理。
+  - `commit` 错误分两类（redb 4.3.0）：`TransactionPoisoned` 表示事务已回滚、库仍可开始新事务，但引起它的存储错误不因回滚而修复；其他错误表示事务要么完整生效、要么完全未生效，但可能已经持久，不能当作已回滚，库随后拒绝新的写事务、需关闭重开。本项目的策略对两类同样保守处理：写入方不宣布成功，也不宣布回滚，关闭并重开库后以读到的记录为准，其余按第 8 节处理。这是项目策略，不是 redb 对两类错误的共同保证。
 
 这承接 #224（正常流程报告 Gap 并漏交付事件）与 #225（历史 Turn 显示完成确认未知）。TUI 在本进程内遗忘已取得确认的问题属于前端，不在本 ADR 范围内。
 
@@ -192,7 +194,7 @@ notice = Option<{ level, text }>
 
 - redb 是被使用的成熟库，不做性能资格化，不设阈值。ADR 0005 的资格化针对自研的 Git 编排；真实使用出现延迟问题时再测量。
 - 以 E2E 场景为主要验证手段，使用被测二进制与真实状态根。场景选择中等到困难的组合，每个场景结束产出可核验、可重复的产物。
-- 自有记录层的不变量在 E2E 崩溃场景中核验：在每个提交点 SIGKILL 后重开，检查树中无未配对节点、一个 Turn 只有最后一个 Step 的 `end` 不是 `Continue`、Turn 记录与最后一个 Step 一致、进行中 Turn 存在时 `send` 与 `rewind` 返回 Busy。
+- 自有记录层的不变量在 E2E 的崩溃场景中核验：在每个提交点 SIGKILL 后重开，检查树中无未配对节点、一个 Turn 只有最后一个 Step 的 `end` 不是 `Continue`、Turn 记录与最后一个 Step 一致、已写入的取消终态关闭为 Cancelled、有 Owner 执行的进行中 Turn 存在时不同请求的 `send` 与 `rewind` 返回 Busy。
 - 观察在 E2E 场景中核验：多步 Turn 中途新建订阅、故意放慢到落出窗口的订阅者、最后事件与 Turn 关闭同时就绪，三种情况下客户端拼出的内容都与关闭后从 redb 重读的内容一致；模型流中正文与 reasoning 交错到达时（含 OpenAI 兼容 provider），实时段列表与 Step parts 合并相邻同类后一致；后台重启后重连得到自动关闭的结局。
 - 必须隔离测试的部分（如表编码、值版本解析、旧库拒绝），先列出全部失败方式再写实现。
 

@@ -152,7 +152,7 @@ Host 负责写入大小限制、路径与策略核验、取消检查及最终 Mu
 ### Turn checkpoint
 
 `WorkspaceHistoryCheckpoint = Empty | Oid(ObjectId)` 标识项目全局工作区历史的位置。`Empty` 仅表示权威历史引用不存在，`Oid` 指向已记录历史；读取失败或非法 OID 不转为 `Empty`。
-每个关闭的 Turn 都在[关闭事务](session.md#关闭-step-与-turn)中读取并保存该值，包括自动关闭，即使本 Turn 未写文件。checkpoint 可以包含同一项目其他 Session 已记录的变更。
+每个关闭的 Turn 都在[关闭事务](session.md#关闭-step-与-turn)之前读取该值，由关闭事务保存，包括自动关闭，即使本 Turn 未写文件。读取在会话库写事务之外进行，写事务内不访问工作区历史库。checkpoint 可以包含同一项目其他 Session 已记录的变更。
 
 共享操作锁保证 checkpoint 读取与关闭事务之间没有新的 LATTICE 变更插入。
 它不冻结外部文件修改，也不把 checkpoint 变成所有本地文件的快照。

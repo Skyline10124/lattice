@@ -106,7 +106,7 @@ _Avoid_: model attempt, single tool call, terminal lifetime
 _Avoid_: model attempt, partial reply, ToolCall without result
 
 **ActiveStep**:
-进行中 Step 的持久记录，保存已完成的模型回复与各调用槽位的进度；Step 关闭时转为树上的 Step 节点。
+进行中的 Step 记录，就地更新：请求阶段保存尝试状态，收到含工具调用的完整回复后保存回复与各调用槽位的进度。关闭后记录不再修改；只有存在完整回复时，关闭事务才同时写入树上的 Step 节点。
 见[ActiveStep 与事务序列](../architecture/session.md#activestep-与事务序列)。
 _Avoid_: PendingTurn, token buffer, retry queue
 
@@ -148,7 +148,7 @@ receipt store
 
 **Workspace-History Object ID**:
 已记录 Workspace History 位置的 Git 对象身份；项目全局 checkpoint 的 `Empty` 分支表示权威历史引用不存在，不是已有 Git OID。
-每个关闭的 Turn 都在关闭事务中读取当前项目 checkpoint 并存入 Turn 记录，即使本 Turn 未写文件，也可包含其他 Session 已记录的变更。
+每个关闭的 Turn 都在关闭事务之前、持共享工作区操作锁读取当前项目 checkpoint，由关闭事务存入 Turn 记录，即使本 Turn 未写文件，也可包含其他 Session 已记录的变更。
 见[Turn checkpoint](../architecture/workspace.md#turn-checkpoint)、[私有存储与数据关系](../architecture/workspace.md#私有存储与数据关系)及[关闭 Step 与 Turn](../architecture/session.md#关闭-step-与-turn)。
 _Avoid_: workspace snapshot id, session commit id, checkpoint handle
 
