@@ -75,3 +75,25 @@
 - F35/F36 的内存观察锁/事件切点和 IPC 帧计量：同文「观察快照、慢订阅与读取失败」。S1 验证 redb 读快照与不可变节点分页，不实现订阅。
 - F04/F05 的 CLI send/list/audit 拒绝接线：同文「旧库拒绝」。S1 的目录检测本身不推给 E2E。
 - 故障注入只证明自有边界的控制与分类，不证明 redb 内部原子性或真实硬件掉电持久性；不降低真实文件后端与 Immediate 的要求。
+
+## S2 / WP1 接缝（实施前清单）
+
+沿用 S1 F01–F44；以下为 WP1 新增/迁移的隔离边界，不代表产品 E2E 已通过。
+
+| 编号 | 失败方式与可证伪断言 | 入口 |
+| --- | --- | --- |
+| W1-01 | 结构化结果迁至 conversation 后改变 serde tag、Box、hex 或摘要；固定 S1 样本 round-trip 和摘要一致，非法内容仍由 store 拒绝 | store `structured_result_wire`、既有 `payload_evidence_and_privacy`、重开矩阵 |
+| W1-01r | Rejected 丢失 CepError.message/data、旧无 message 形状误接受、错误码跨 outcome；保存→关闭→重开完整错误相等，operator 仍不含正文，嵌套未知字段拒绝 | `rejected_error_round_trip_and_privacy` |
+| W1-09 | commit 释放数据库写者到禁写发布之间启动逃逸；同一健康锁内已交接者算在途，排队启动回调及所有后续启动均拒绝；回调 panic 后 fail closed | 扩展 `commit_failure_disables_all_writers`，`execution_start_panic_disables_store` |
+| W1-05 | 观察安全投影缺失或从多个时刻拼接；同一 SessionRead 的节点 agent/槽位结果与 operator 状态保持固定快照 | 既有 F35/F38/F39，新增窄读取时扩展相应用例 |
+| W1-06 | XDG guard 迁出后锁分裂或先解锁再恢复；设置及未设置原值均在 guard 释放前恢复 | `test_support` 子进程隔离检查；其他测试显式 StateLayout |
+
+W1-02/W1-08 的失败清单分别放在 llm/agent crate；W1-03/04 放在 lancet-api；W1-07 放在 lancet-runtime。完整 Owner 停写/排空重开与公开 operator 跨项目 E2E 留 WP2–WP4。
+
+## S2 / WP2 提交故障接缝
+
+- 下游 Backend 必须能在真实写事务的 Poisoned、UnknownBefore、UnknownAfter 三个既有故障点核验错误传播、全库禁启与排空重开。仅在 `test-utils` 导出同步、线程局部的注入闭包，恢复上一个注入状态；不新增普通生产注入入口，不更改 Immediate 与禁写策略。覆盖入口为 API 的 `commit_fault_quiesces_other_session_until_reader_and_owner_really_retire`，S1 原故障矩阵继续复用相同 hit。
+
+## S2 第二次审查：创建持久性未知
+
+- Backend 的 CreationDurabilityUnknown 恢复必须重走既有 create 的严格核验与父目录同步分支；仅 open 不够。下游测试通过 test-utils 同步线程局部 probe 在真实父目录同步边界注入失败并计数，分别保护恢复同步成功后 Ready、再次失败仍不可用且目标 inode 不变。普通 open 不触发该 probe。

@@ -1,52 +1,116 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use serde::{Deserialize, Serialize};
-
-pub use lancet_protocol::TurnId;
-pub use lattice_session::{
-    CommittedTurnObservation, PendingObservation, SessionObservation, TranscriptPage,
-    TurnObservation,
+pub use crate::turn::{AttemptSegments, TextSegment, TurnRef};
+pub use lancet_protocol::{InvocationId, ModelAttemptKey, SessionId, TurnId};
+pub use lattice_conversation::{ResultPayload, StepContent, StoredToolResult, SuccessContent};
+pub use lattice_session::store::{
+    AuditPage, AuditReplay, AuditTailPage, ChangeSeq, HistoryAnchor, HistoryCursor,
+    MaterialSummary, Node, NodeFragment, NodeId, NodeKind, NodeRef, NoticeLevel,
+    OperatorInvocationState, OperatorStatus, Page, PublicTurnOutcome, SessionListRow, SessionLog,
+    SessionRecord, StepDetail, StepDetailState, StepEnd, StepKey, TurnDetail, TurnSummary,
+    UsageSummary,
 };
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
-/// SelectedTurn 供单 Turn 输出；Session 供完整会话显示。两者都只读取传入的固定切点。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HistoryScope {
-    SelectedTurn,
-    Session,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct LocalHistory {
-    pub view: SessionObservation,
-    pub entries: Vec<LocalHistoryEntry>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct LocalHistoryEntry {
-    pub turn: TurnObservation,
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct TurnView {
+    pub session_id: SessionId,
+    pub turn_id: TurnId,
+    pub user_node: NodeId,
     pub agent_name: String,
-    pub messages: Vec<super::NativeMessage<super::BoundToolCall>>,
+    pub accepted_at: chrono::DateTime<chrono::Utc>,
+    pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub summary: Option<TurnSummary>,
+    pub usage: UsageSummary,
+}
+impl From<&TurnDetail> for TurnView {
+    fn from(turn: &TurnDetail) -> Self {
+        Self {
+            session_id: turn.session_id,
+            turn_id: turn.turn_id,
+            user_node: turn.user_node,
+            agent_name: turn.agent_name.clone(),
+            accepted_at: turn.accepted_at,
+            ended_at: turn.ended_at,
+            summary: turn.summary.clone(),
+            usage: turn.usage.clone(),
+        }
+    }
 }
 
-/// 错误指向实际读取的固定对象，而不是错误到达时的当前 head。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ActiveStepView {
+    pub key: lattice_session::store::StepKey,
+    pub state: ActiveStateView,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ActiveStateView {
+    Requesting {
+        attempt: u32,
+    },
+    RetryReady {
+        next_attempt: u32,
+    },
+    Executing {
+        reply: lattice_conversation::NativeMessage<lattice_conversation::BoundToolCall>,
+        slots: Vec<SlotView>,
+    },
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SlotView {
+    pub invocation: lattice_session::store::OperatorInvocation,
+    pub result: Option<lattice_session::store::StoredToolResult>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ObservationSnapshot {
+    pub session: SessionRecord,
+    pub current_agent: Option<String>,
+    pub selected_turn: Option<TurnDetail>,
+    pub active: Option<ActiveStepView>,
+    pub history: HistoryAnchor,
+    pub attempt: Option<AttemptSegments>,
+    pub cursor: EventCursor,
+    pub owned: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct HistoryEntry {
+    pub node: NodeId,
+    pub agent_name: String,
+    pub content: Node,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct LocalHistory {
+    pub anchor: HistoryAnchor,
+    pub entries: Vec<HistoryEntry>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct HistoryFragmentView {
+    pub fragment: NodeFragment,
+    pub agent_name: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct HistoryPageView {
+    pub anchor: HistoryAnchor,
+    pub fragments: Vec<HistoryFragmentView>,
+    pub next: Option<HistoryCursor>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum HistoryReadContext {
-    /// 读取任务本身异常退出；具体切点保留在 History 更新的 view 中。
     Worker,
     Page {
-        head: String,
-        offset: usize,
+        anchor: HistoryAnchor,
+        cursor: Option<HistoryCursor>,
     },
-    Commit {
-        object_id: String,
-    },
-    Transcript {
-        object_id: String,
+    Node {
+        node: NodeRef,
     },
 }
-
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, thiserror::Error)]
 #[error("{error}")]
 pub struct HistoryReadError {
     pub context: HistoryReadContext,
@@ -55,20 +119,14 @@ pub struct HistoryReadError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ObservationPhase {
     Live,
-    /// 此切点没有观察 Owner；与取消资格、是否已有持久 pending 分开。
     NoOwner,
-    /// 后台交付独立完成回执；可能仍有 pending 或完成诊断。
     Finished,
 }
-
-/// 只描述本客户端停止后续配置发送的位置，不断言 TurnId 全局从未执行。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NotSubmittedStage {
     NeedsConfiguration,
     FreezingConfiguration,
 }
-
-/// 接管事实与最终 outcome 分开；Moot 只结束未确认意图，不覆盖 Taken。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CancelStatus {
     Pending,
@@ -77,29 +135,12 @@ pub enum CancelStatus {
     Unknown,
     Moot,
 }
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CompletionConfirmation {
-    Unknown,
-    Confirmed,
-}
-
-/// 完成确认及诊断独立于正文加载和连接状态。
 #[derive(Clone, Debug, PartialEq)]
 pub struct LocalState {
-    pub view: Box<SessionObservation>,
+    pub view: Box<ObservationSnapshot>,
     pub phase: ObservationPhase,
-    pub confirmation: CompletionConfirmation,
     pub error: Option<LocalError>,
 }
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ResetReason {
-    Snapshot,
-    Gap,
-    Reconnect,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConnectionStatus {
     Eof,
@@ -107,27 +148,13 @@ pub enum ConnectionStatus {
     Error(LocalError),
 }
 
-/// 文字段的显示动作；StartIncomplete 表示切点前的文字可能缺失，不合成模型事件。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TextAction {
-    None,
-    Start,
-    StartIncomplete,
-    Continue,
-    Finish,
-}
-
-/// 消费顺序：State → Reset → 此切点的 Event/History。History 只替换持久区域，
-/// 不清除此前已经交付的同切点临时事件；旧切点成功不交付，失败带 stale=true。
+/// 状态先交付；历史真正装入后才发布 Finished，旧代读取错误仍保留为 stale。
 #[derive(Clone, Debug, PartialEq)]
 pub enum LocalUpdate {
     Submission {
         turn_id: TurnId,
         result: Result<Acceptance>,
     },
-    /// 首次取消后的提交回执等待已到期；结果未知，句柄继续同身份只读观察，
-    /// 并保留晚到回执及原取消意图。这不是拒绝或未执行的证明。
-    /// error 仅为交接后原 Submit 的本地传输诊断，不结束观察或覆盖已知完成。
     SubmissionUnknown {
         turn_id: TurnId,
         error: Option<LocalError>,
@@ -137,25 +164,28 @@ pub enum LocalUpdate {
         stage: NotSubmittedStage,
     },
     State {
-        view: Box<SessionObservation>,
-        cursor: Option<EventCursor>,
+        view: Box<ObservationSnapshot>,
         phase: ObservationPhase,
-        confirmation: CompletionConfirmation,
         error: Option<LocalError>,
     },
     Reset {
-        reason: ResetReason,
-        cursor: Option<EventCursor>,
+        view: Box<ObservationSnapshot>,
+        generation: u64,
     },
     History {
-        view: Box<SessionObservation>,
+        anchor: HistoryAnchor,
+        generation: u64,
         result: std::result::Result<Box<LocalHistory>, HistoryReadError>,
         stale: bool,
     },
     Event {
         cursor: EventCursor,
         event: crate::TurnEvent,
-        text: TextAction,
+    },
+    Finished {
+        turn: Option<TurnRef>,
+        anchor: HistoryAnchor,
+        generation: u64,
     },
     Cancel {
         turn_id: TurnId,
@@ -164,35 +194,61 @@ pub enum LocalUpdate {
     },
     Connection(ConnectionStatus),
 }
-
-/// 普通退出只结束本地观察；已知固定结果与完成确认继续可供调用者使用。
 #[derive(Clone, Debug, PartialEq)]
 pub struct DetachReport {
-    pub session_id: String,
+    pub session_id: Option<SessionId>,
     pub turn_id: Option<TurnId>,
     pub submission: Option<Result<Acceptance>>,
-    /// 交接后原 Submit 的非终结传输诊断；submission 仍为 None（接受未知）。
     pub submission_diagnostic: Option<LocalError>,
     pub not_submitted: Option<NotSubmittedStage>,
-    /// 尚未被后续成功正文读取消解的最近失败；完成确认和退出本身不清除它。
-    /// 旧失败仍通过 History 更新携带原 view/context 交付，不作为后来成功读取的结局。
     pub history_error: Option<HistoryReadError>,
     pub cancel: Option<CancelStatus>,
-    /// 原 turn_id 当前取消意图的诊断。新意图或 true/false 回执清除；
-    /// 同意图补发等待、超时及 Moot 保留最近错误，不构成永久错误日志。
     pub cancel_error: Option<LocalError>,
     pub state: Option<LocalState>,
 }
 
-/// 连接状态与持久 Turn 状态分别表达；任何传输错误都不证明请求未被接受。
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]
 pub struct LocalError {
     pub kind: LocalErrorKind,
     pub message: String,
-    pub recovery: Option<crate::RecoveryRequired>,
+    pub recovery: Option<RecoveryNeed>,
+    pub store: Option<StoreDiagnostic>,
 }
-
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecoveryNeed {
+    pub turn: Option<TurnRef>,
+    pub cause: RecoveryCause,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryCause {
+    CommitFailed,
+    WriteDisabled,
+    WorkerFailed,
+    ReopenFailed,
+    ClosureFailed,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StoreDiagnostic {
+    NotInitialized {
+        path: PathBuf,
+    },
+    LegacyStores {
+        paths: Vec<PathBuf>,
+    },
+    UnsupportedVersion {
+        table: String,
+        key: String,
+        found: u32,
+        supported: u32,
+    },
+    Corruption {
+        table: String,
+        key: String,
+    },
+}
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LocalErrorKind {
@@ -210,66 +266,99 @@ pub enum LocalErrorKind {
     Permission,
     AlreadyRunning,
 }
-
 pub type Result<T> = std::result::Result<T, LocalError>;
-
 impl LocalError {
     pub(super) fn new(kind: LocalErrorKind, message: &str) -> Self {
         Self {
             kind,
             message: message.into(),
             recovery: None,
+            store: None,
+        }
+    }
+    pub(crate) fn recovery(cause: RecoveryCause) -> Self {
+        Self {
+            recovery: Some(RecoveryNeed { turn: None, cause }),
+            ..Self::new(
+                LocalErrorKind::RecoveryRequired,
+                "session store recovery required",
+            )
         }
     }
 }
-
 impl From<crate::ApiError> for LocalError {
     fn from(error: crate::ApiError) -> Self {
         use crate::ApiError;
         use LocalErrorKind::*;
-        // 错误分类可以跨 IPC，底层字符串可能包含输入或秘密，不能原样公开。
-        let (kind, message, recovery) = match error {
-            ApiError::NotFound(_) => (NotFound, "session or Turn not found", None),
-            ApiError::BadRequest(_) => (
-                BadRequest,
-                "request or frozen configuration is invalid",
-                None,
-            ),
-            ApiError::Conflict(_) => (
-                Conflict,
-                "request identity or session binding conflicts",
-                None,
-            ),
-            ApiError::Busy(_) => (Busy, "session is busy", None),
-            ApiError::StoreUnavailable(_) => (
-                StoreUnavailable,
-                "store unavailable; inspect durable state",
-                None,
-            ),
-            ApiError::Internal(_) => (
-                Internal,
-                "operation failed; inspect durable state before recovery",
-                None,
-            ),
-            ApiError::RecoveryRequired(reason) => (
-                RecoveryRequired,
-                "durable reconciliation required",
-                Some(reason),
-            ),
-            ApiError::EvidenceDurabilityFailed(reason) => (
-                RecoveryRequired,
-                "evidence durability not confirmed",
-                Some(crate::RecoveryRequired::EvidenceDurabilityFailed(reason)),
-            ),
+        use lattice_session::store::StoreError;
+        let (kind, message) = match &error {
+            ApiError::NotFound(_) => (NotFound, "session or Turn not found"),
+            ApiError::BadRequest(_) => (BadRequest, "request or frozen configuration is invalid"),
+            ApiError::Conflict(_) => (Conflict, "request identity or Session binding conflicts"),
+            ApiError::Busy(_) => (Busy, "session is busy"),
+            ApiError::StoreUnavailable(_) => (StoreUnavailable, "store unavailable"),
+            ApiError::Internal(_) => (Internal, "operation failed; inspect durable state"),
+            ApiError::WorkerFailed => return Self::recovery(RecoveryCause::WorkerFailed),
+            ApiError::Store(error) => {
+                let mut result = Self::new(StoreUnavailable, "session store unavailable");
+                result.store = match error.as_ref() {
+                    StoreError::NotInitialized { path } => {
+                        Some(StoreDiagnostic::NotInitialized { path: path.clone() })
+                    }
+                    StoreError::LegacyStores { paths } => Some(StoreDiagnostic::LegacyStores {
+                        paths: paths.clone(),
+                    }),
+                    StoreError::UnsupportedVersion {
+                        table,
+                        key,
+                        found,
+                        supported,
+                    } => Some(StoreDiagnostic::UnsupportedVersion {
+                        table: table.clone(),
+                        key: key.clone(),
+                        found: *found,
+                        supported: *supported,
+                    }),
+                    StoreError::Corruption { table, key, .. } => {
+                        Some(StoreDiagnostic::Corruption {
+                            table: table.clone(),
+                            key: key.clone(),
+                        })
+                    }
+                    StoreError::CommitFailed { .. }
+                    | StoreError::CreationDurabilityUnknown { .. } => {
+                        return Self::recovery(RecoveryCause::CommitFailed);
+                    }
+                    StoreError::WriteDisabled => {
+                        return Self::recovery(RecoveryCause::WriteDisabled);
+                    }
+                    StoreError::RecoveryRequired { .. } => {
+                        return Self::recovery(RecoveryCause::ClosureFailed);
+                    }
+                    StoreError::NotFound { .. } => {
+                        result.kind = NotFound;
+                        None
+                    }
+                    StoreError::Conflict { .. } | StoreError::SessionCollision { .. } => {
+                        result.kind = Conflict;
+                        None
+                    }
+                    StoreError::Busy { .. } => {
+                        result.kind = Busy;
+                        None
+                    }
+                    StoreError::InvalidInput { .. } | StoreError::InvalidCursor => {
+                        result.kind = BadRequest;
+                        None
+                    }
+                    _ => None,
+                };
+                return result;
+            }
         };
-        Self {
-            kind,
-            message: message.into(),
-            recovery,
-        }
+        Self::new(kind, message)
     }
 }
-
 impl From<std::io::Error> for LocalError {
     fn from(error: std::io::Error) -> Self {
         let kind = match error.kind() {
@@ -286,174 +375,203 @@ impl From<std::io::Error> for LocalError {
     }
 }
 
-/// 客户端在第一次提交前保留此身份；重试不能另分配 TurnId。
+/// 私有请求不实现正文 Debug。SID 只在首次接受后确定。
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TurnRequest {
-    pub session_id: String,
+    pub session_id: Option<SessionId>,
     pub turn_id: TurnId,
-    pub workspace: std::path::PathBuf,
+    pub workspace: PathBuf,
     pub input: String,
+    pub agent: Option<String>,
 }
-
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TurnTarget {
+    pub turn_id: TurnId,
+    pub session_id: Option<SessionId>,
+}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "acceptance", rename_all = "snake_case")]
 pub enum Acceptance {
-    Accepted { turn_id: TurnId },
-    Existing { turn: TurnObservation },
-    ConfirmationUnknown { turn_id: TurnId },
-    NeedsConfiguration,
+    Accepted {
+        turn: TurnView,
+    },
+    Existing {
+        turn: TurnView,
+    },
+    ConfirmationUnknown {
+        turn_id: TurnId,
+        session_id: Option<SessionId>,
+    },
+    NeedsConfiguration {
+        agent_name: String,
+    },
 }
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DaemonStatus {
     pub epoch: String,
     pub stopping: bool,
     pub owners: usize,
-    /// 本次后台生命周期内未确认成功的所有者操作数；不是持久 pending 计数。
     pub unconfirmed_operations: usize,
 }
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EventCursor {
     pub epoch: String,
     pub sequence: u64,
 }
-
-/// Snapshot/Gap 后替换持久视图并清空临时增量；结果正文经固定 commit 字节页重载。
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Observation {
     Snapshot {
-        view: Box<SessionObservation>,
-        cursor: EventCursor,
-        owned: bool,
+        view: Box<ObservationSnapshot>,
     },
     Event {
         cursor: EventCursor,
         event: crate::TurnEvent,
     },
-    Gap {
-        cursor: EventCursor,
-    },
     Finished {
-        view: Box<SessionObservation>,
+        turn: Option<TurnRef>,
         cursor: EventCursor,
-        error: Option<LocalError>,
+        history: LocalHistory,
     },
 }
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
-pub enum SessionWrite {
-    Checkout { target: String },
-    Branch { name: String, from: Option<String> },
-    Reset { target: String },
-    SetAgent { name: String },
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct AuditSelection {
+    pub session_id: Option<SessionId>,
+    pub turn_id: Option<TurnId>,
+    pub method: Option<String>,
+    pub outcome: Option<lattice_conversation::ToolResultOutcome>,
 }
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(tag = "operation", content = "value", rename_all = "snake_case")]
-pub enum SessionWriteResult {
-    Checkout(crate::GraphHead),
-    Branch(crate::GraphRef),
-    Reset(crate::ResetResult),
-    SetAgent(crate::GraphSession),
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(tag = "outcome", content = "value", rename_all = "snake_case")]
-pub enum LocalRewindResult {
-    Success(crate::RewindSuccess),
-    Conflict(crate::RewindConflict),
-    AuditPublicationFailed(Box<crate::RewindPartialState>),
-}
-
-// 请求与秘密材料刻意不实现 Debug，协议处理不记录正文。
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Request {
     Status,
     Stop,
-    List,
-    History {
-        session_id: String,
-        head: String,
-        offset: usize,
-        limit: usize,
+    ResolveSession {
+        prefix: String,
     },
-    SessionStatus {
-        session_id: String,
+    List {
+        after: Option<SessionId>,
+        limit: u32,
     },
     Log {
-        session_id: String,
+        session_id: SessionId,
     },
-    Diff {
-        session_id: String,
-        from: String,
-        to: String,
+    Turn {
+        target: TurnTarget,
+    },
+    History {
+        anchor: HistoryAnchor,
+        cursor: Option<HistoryCursor>,
+        max_bytes: u32,
     },
     Rewind {
-        session_id: String,
-        target: String,
-        workspace: std::path::PathBuf,
-    },
-    Open {
-        session_id: String,
-    },
-    Create {
-        request: crate::CreateSessionRequest,
-    },
-    Write {
-        session_id: String,
-        change: SessionWrite,
+        session_id: SessionId,
+        target: NodeId,
+        workspace: PathBuf,
     },
     Submit {
         request: TurnRequest,
         configuration: Option<Box<super::config::FrozenConfiguration>>,
     },
     Query {
-        session_id: String,
+        session_id: Option<SessionId>,
         turn_id: Option<TurnId>,
     },
-    Commit {
-        session_id: String,
-        commit_id: String,
-    },
-    Transcript {
-        session_id: String,
-        commit_id: String,
-        offset: usize,
-        limit: usize,
-    },
     Cancel {
-        session_id: String,
-        turn_id: TurnId,
+        target: TurnTarget,
     },
     Subscribe {
-        session_id: String,
-        turn_id: TurnId,
+        target: TurnTarget,
         cursor: Option<EventCursor>,
     },
+    AuditQuery {
+        workspace: PathBuf,
+        selection: AuditSelection,
+        after: Option<InvocationId>,
+        limit: u32,
+    },
+    AuditTail {
+        workspace: PathBuf,
+        selection: AuditSelection,
+        after: ChangeSeq,
+        limit: u32,
+    },
+    AuditReplay {
+        workspace: PathBuf,
+        session_id: SessionId,
+        turn_id: TurnId,
+    },
+    OperatorStatus {
+        workspace: PathBuf,
+    },
 }
-
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "response", content = "value", rename_all = "snake_case")]
 pub(super) enum Response {
     Status(DaemonStatus),
-    Sessions(Vec<crate::SessionGraphSummary>),
-    History(Vec<String>),
-    SessionStatus(crate::SessionStatus),
-    Log(Vec<crate::TurnLogEntry>),
-    Diff(crate::GraphDiff),
-    Write(SessionWriteResult),
-    Rewind(LocalRewindResult),
-    Session(crate::GraphSession),
-    View(Box<SessionObservation>),
-    Commit(Box<CommittedTurnObservation>),
-    Transcript(TranscriptPage),
+    Session(SessionRecord),
+    Sessions(Page<SessionListRow, SessionId>),
+    Log(SessionLog),
+    Turn(TurnDetail),
+    History(HistoryPageView),
+    Rewind(SessionRecord),
     Acceptance(Acceptance),
+    View(Box<ObservationSnapshot>),
     Observation(Observation),
     Cancelled { owned: bool },
+    Audit(AuditPage),
+    AuditTail(AuditTailPage),
+    AuditReplay(AuditReplay),
+    OperatorStatus(OperatorStatus),
     Error(LocalError),
+    HistoryError(HistoryReadError),
+}
+
+#[cfg(test)]
+mod v3_tests {
+    use super::*;
+    #[test]
+    fn first_submission_and_safe_store_diagnostics_have_v3_shapes() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "operation":"submit", "request": {"session_id":null,
+            "turn_id":"00000000-0000-4000-8000-000000000001", "workspace":"/tmp/project", "input":" original ", "agent":"alpha"},
+            "configuration":null
+        })).expect("first submission has no SessionId");
+        assert!(matches!(
+            request,
+            Request::Submit {
+                request: TurnRequest {
+                    session_id: None,
+                    agent: Some(_),
+                    ..
+                },
+                ..
+            }
+        ));
+        let error = LocalError::from(crate::ApiError::from(
+            lattice_session::store::StoreError::LegacyStores {
+                paths: vec![
+                    "/tmp/state/sessions.git".into(),
+                    "/tmp/state/projects/p/invocations.git".into(),
+                ],
+            },
+        ));
+        assert!(
+            matches!(error.store, Some(StoreDiagnostic::LegacyStores { ref paths }) if paths.len() == 2)
+        );
+        let error = LocalError::from(crate::ApiError::from(
+            lattice_session::store::StoreError::Corruption {
+                table: "nodes".into(),
+                key: "1".into(),
+                detail: "secret-body".into(),
+            },
+        ));
+        let wire = serde_json::to_string(&error).unwrap();
+        assert!(!wire.contains("secret-body"));
+        assert!(matches!(
+            error.store,
+            Some(StoreDiagnostic::Corruption { .. })
+        ));
+    }
 }

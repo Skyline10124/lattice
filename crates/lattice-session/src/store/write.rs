@@ -166,20 +166,7 @@ impl SessionStore {
     ) -> Result<T> {
         self.check_lock(lock, lock.session_id)?;
         // 必须在 begin_write 前取得健康锁；commit 释放 redb 写者后仍不能让等待者抢跑。
-        #[cfg(test)]
-        if matches!(
-            self.write_disabled.try_lock(),
-            Err(std::sync::TryLockError::WouldBlock)
-        ) {
-            write_probe(WriteStage::HealthLockContended);
-        }
-        let mut disabled = self
-            .write_disabled
-            .lock()
-            .map_err(|_| StoreError::WriteDisabled)?;
-        if *disabled {
-            return Err(StoreError::WriteDisabled);
-        }
+        let mut disabled = self.execution_health()?;
         let mut tx = self.db.begin_write()?;
         tx.set_durability(redb::Durability::Immediate)?;
         let (before, scope) = local::write(&tx, lock.session_id, selection)?;
@@ -192,27 +179,27 @@ impl SessionStore {
         codec::persist(&tx, &before, &after)?;
         #[cfg(test)]
         write_probe(WriteStage::BeforeCommit);
-        #[cfg(test)]
-        let injected = if hit(FaultPoint::CommitPoisoned) {
+        #[cfg(any(test, feature = "test-utils"))]
+        let injected = if hit(FaultPoint::Poisoned) {
             Some(redb::CommitError::TransactionPoisoned)
-        } else if hit(FaultPoint::CommitUnknownBefore) {
+        } else if hit(FaultPoint::UnknownBefore) {
             Some(redb::CommitError::Storage(redb::StorageError::Io(
                 injected_io(),
             )))
         } else {
             None
         };
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-utils"))]
         let committed = if let Some(error) = injected {
             drop(tx);
             Err(error)
         } else {
             tx.commit()
         };
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-utils")))]
         let committed = tx.commit();
-        #[cfg(test)]
-        let committed = if committed.is_ok() && hit(FaultPoint::CommitUnknownAfter) {
+        #[cfg(any(test, feature = "test-utils"))]
+        let committed = if committed.is_ok() && hit(FaultPoint::UnknownAfter) {
             Err(redb::CommitError::Storage(redb::StorageError::Io(
                 injected_io(),
             )))

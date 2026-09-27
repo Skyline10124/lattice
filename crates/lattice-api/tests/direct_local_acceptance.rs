@@ -61,7 +61,6 @@ fn direct_local_runtime(root: &std::path::Path) -> ReservedRuntime {
     ReservedRuntime::build(LancetRuntimeConfig {
         local_workspace_root: root.to_path_buf(),
         tls_roots_der: Vec::new(),
-        invocations: lancet_api::WorkspaceHistoryBacking::Disabled,
         workspace_history: lancet_api::WorkspaceHistoryBacking::Disabled,
         enabled_tools: enabled,
         policy,
@@ -235,7 +234,6 @@ async fn policy_deny_blocks_create_on_direct_local() {
     let runtime = ReservedRuntime::build(LancetRuntimeConfig {
         local_workspace_root: dir.path().to_path_buf(),
         tls_roots_der: Vec::new(),
-        invocations: lancet_api::WorkspaceHistoryBacking::Disabled,
         workspace_history: lancet_api::WorkspaceHistoryBacking::Disabled,
         enabled_tools: enabled,
         policy,

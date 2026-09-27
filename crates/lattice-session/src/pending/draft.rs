@@ -18,11 +18,7 @@ use thiserror::Error;
 
 use crate::Result;
 
-/// Canonical ToolContent byte limit (64 KiB, ADR 0005 §12). Exact boundary
-/// legal; plus one rejected without truncation.
-pub const MAX_TOOL_CONTENT_BYTES: usize = 65_536;
-
-const CONTENT_DOMAIN: &[u8] = b"lattice-tool-content-digest-v1\0";
+pub use lattice_conversation::{MAX_TOOL_CONTENT_BYTES, tool_content_digest};
 
 /// Construction/validation error for a draft's canonical content.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -50,18 +46,6 @@ impl ToolContentError {
             }
         }
     }
-}
-
-/// SHA-256 over the domain separator, explicit byte length, and the
-/// canonical ToolContent bytes (same construction as the conversation
-/// digests, ADR 0005 §7/§12).
-pub fn tool_content_digest(canonical_content: &str) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(CONTENT_DOMAIN);
-    hasher.update((canonical_content.len() as u64).to_be_bytes());
-    hasher.update(canonical_content.as_bytes());
-    hasher.finalize().into()
 }
 
 /// The exact cross-store ResultDraft record (ADR 0005 §12). Carries no

@@ -31,16 +31,10 @@
 //! $XDG_STATE_HOME/lattice/projects/<ProjectStoreKey>/workspace-history.git
 //!   refs/lattice/meta                           -> kernel store identity
 //!   refs/lattice/workspace-history/current      -> newest recorded mutation
-//!   refs/lattice/retained/<oid>                 -> kernel retention pin
 //! ```
 //!
-//! `current` moves forward on every recorded mutation. Normal recording writes
-//! no per-record refs: everything it appends is an ancestor of `current`. An
-//! explicit Rewind (GitHub #64) moves `current` *backwards*, so it retains the
-//! abandoned tip through the kernel's retention primitive first — that is what
-//! keeps prior object ids resolvable forever, with no time-based expiry,
-//! compensation commit, or reflog dependency. The store is private state; the
-//! user's project refs are never touched.
+//! `current` 仅随记录前进，所有已记录提交始终可达；会话退回不修改它。
+//! 此库是私有状态，不触及用户项目的 refs。
 //!
 //! ## Before/after state
 //!
@@ -63,7 +57,7 @@
 //!
 //! ## Concurrency
 //!
-//! Recording and rewinding hold the kernel's standard per-repository write
+//! Recording holds the kernel's standard per-repository write
 //! lock across the read-build-publish sequence, so a second LATTICE process —
 //! or a second runtime in one process — cannot interleave. The compare-and-set
 //! on `current` remains the fail-closed arbiter: a writer that somehow loses
@@ -361,7 +355,7 @@ impl WorkspaceHistory {
 
     /// Acquire the per-project `WorkspaceOperationLock` (ADR 0005 §5).
     ///
-    /// Observation takes it shared; mutation and Rewind take it exclusively
+    /// Observation takes it shared; mutations take it exclusively
     /// and hold it from the precondition read through install and history
     /// publication. It is strictly outside the repository write lock — a
     /// holder may take at most one repository write lock underneath it, and
@@ -386,7 +380,9 @@ impl WorkspaceHistory {
         let Some(store) = self.store.as_ref() else {
             return Ok(None);
         };
-        Ok(store.ref_target(CURRENT_REF)?.map(|oid| oid.to_string()))
+        let tip = store.ref_target(CURRENT_REF)?;
+        validate_history(store, tip)?;
+        Ok(tip.map(|oid| oid.to_string()))
     }
 
     /// Record one successfully installed mutation.
@@ -442,392 +438,92 @@ impl WorkspaceHistory {
 
     /// Whether `oid` is still reachable in this history.
     ///
-    /// Reachable means an ancestor of `current` — the normal case, which needs
-    /// no per-record refs — or pinned by the kernel's retention primitive,
-    /// which is how a Rewind keeps the tip it abandoned resolvable. It never
-    /// depends on `current` still pointing at or past the object.
+    /// 已记录提交只能是 current 本身或其祖先，不维护恢复遗留 pin。
     pub fn is_reachable(&self, oid: &str) -> Result<bool, WorkspaceHistoryError> {
         let Some(store) = self.store.as_ref() else {
             return Ok(false);
         };
         let object_id = parse_oid(oid)?;
-        // Tips that keep history alive: the live `current`, plus every
-        // retention pin a Rewind left on a tip it abandoned. An object is
-        // reachable when it is one of those tips or an ancestor of one.
-        let mut tips = store.retained_pins()?;
-        if let Some(current) = store.ref_target(CURRENT_REF)? {
-            tips.push(current);
-        }
-        if tips.contains(&object_id) {
-            return Ok(true);
-        }
-        if tips.is_empty() {
+        let Some(current) = store.ref_target(CURRENT_REF)? else {
             return Ok(false);
-        }
-        Ok(store.rev_walk(&tips, &[])?.contains(&object_id))
-    }
-}
-
-// ─── Rewind (GitHub #64) ────────────────────────────────────────────────────
-
-/// One recorded mutation that an explicit Rewind will reverse.
-///
-/// Steps are ordered newest-first — the reverse of real execution order —
-/// because that is the order a Rewind conceptually unwinds them. All fields
-/// come from the mutation commit's message trailers.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RewindStep {
-    /// The mutation commit being reversed.
-    pub commit_id: String,
-    /// CEP method that installed the mutation.
-    pub method: String,
-    /// Turn the mutation belonged to.
-    pub turn_id: TurnId,
-    /// Invocation within the turn.
-    pub invocation_id: InvocationId,
-    /// Workspace-relative path the mutation touched.
-    pub path: String,
-    /// Post-install Local Revision recorded for the mutation.
-    pub recorded_content_hash: Option<String>,
-}
-
-/// The final on-disk state one path must reach for a Rewind to complete.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RewindPathRestore {
-    /// Workspace-relative path.
-    pub path: String,
-    /// Bytes recorded for the path at the current tip, or `None` when the
-    /// history records it as absent there.
-    pub expected: Option<Vec<u8>>,
-    /// Bytes the path must hold after the Rewind, or `None` to delete it.
-    pub restore: Option<Vec<u8>>,
-}
-
-/// A complete Rewind: which mutations are reversed and what each path becomes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RewindPlan {
-    /// The history object id the Rewind starts from.
-    pub from: Option<String>,
-    /// The history object id the Rewind lands on.
-    pub to: Option<String>,
-    /// Reversed mutations, newest-first.
-    pub steps: Vec<RewindStep>,
-    /// Final per-path restores, sorted by path.
-    pub restores: Vec<RewindPathRestore>,
-}
-
-impl RewindPlan {
-    /// Whether the plan reverses nothing.
-    pub fn is_empty(&self) -> bool {
-        self.steps.is_empty() && self.restores.is_empty()
-    }
-}
-
-/// Failure planning or applying a Rewind.
-#[derive(Debug, thiserror::Error)]
-pub enum RewindError<E> {
-    /// The private history could not be read or written.
-    #[error(transparent)]
-    History(#[from] WorkspaceHistoryError),
-    /// Recording is disabled, so there is nothing to rewind.
-    #[error("workspace history is disabled")]
-    Disabled,
-    /// The requested target is not on the recorded chain.
-    #[error("rewind target '{target}' is not reachable from the current history tip")]
-    TargetUnreachable {
-        /// The requested target object id.
-        target: String,
-    },
-    /// The plan does not cover every path whose recorded state differs.
-    #[error("rewind plan does not cover changed paths: {}", paths.join(", "))]
-    PlanIncomplete {
-        /// Paths the plan failed to cover.
-        paths: Vec<String>,
-    },
-    /// The apply closure refused the plan; no ref was moved.
-    #[error("rewind aborted before any ref moved")]
-    Apply(#[source] E),
-    /// Every path was restored but the history ref did not move durably.
-    ///
-    /// This is a failure: callers must never report the Rewind as successful.
-    #[error("workspace restored but the history ref move failed: {0}")]
-    RefMove(String),
-}
-
-impl WorkspaceHistory {
-    /// Plan — without applying — the Rewind from `current` back to `target`.
-    ///
-    /// Read-only inspection surface. The authoritative plan is rebuilt under
-    /// the repository write lock inside [`WorkspaceHistory::rewind_with`].
-    pub fn plan_rewind(
-        &self,
-        target: Option<&str>,
-    ) -> Result<RewindPlan, RewindError<std::convert::Infallible>> {
-        let Some(store) = self.store.as_ref() else {
-            return Err(RewindError::Disabled);
         };
-        plan_rewind_locked(store, target)
-    }
-
-    /// Rewind the history to `target`, letting `apply` restore the workspace.
-    ///
-    /// The whole sequence — plan, apply (preflight + restore), retention of
-    /// the abandoned tip, and the compare-and-set that moves `current`
-    /// backwards — runs under the kernel's repository write lock, so a
-    /// concurrent *recorder* can never interleave. The lock covers history
-    /// writes, not the Local Workspace: a Turn installing a mutation takes it
-    /// only after its bytes are already on disk, so a concurrently running
-    /// Turn can still write a path while a Rewind is between verifying and
-    /// restoring it. `apply` returning `Err` aborts before any ref moves. The
-    /// abandoned tip is retained first, so every reversed commit stays
-    /// reachable afterwards.
-    pub fn rewind_with<E>(
-        &self,
-        target: Option<&str>,
-        apply: impl FnOnce(&RewindPlan) -> Result<(), E>,
-    ) -> Result<RewindPlan, RewindError<E>> {
-        let Some(store) = self.store.as_ref() else {
-            return Err(RewindError::Disabled);
-        };
-        let _write = store.write_lock().map_err(WorkspaceHistoryError::from)?;
-        let plan = match plan_rewind_locked(store, target) {
-            Ok(plan) => plan,
-            Err(err) => return Err(err.into_apply_never()),
-        };
-
-        apply(&plan).map_err(RewindError::Apply)?;
-
-        if plan.from != plan.to {
-            let expected = plan
-                .from
-                .as_deref()
-                .map(parse_oid)
-                .transpose()?
-                .expect("a non-empty rewind always starts from a commit");
-            // Retention before the ref moves: once `current` steps back, the
-            // abandoned tip is only reachable through this pin.
-            store
-                .retain(expected)
-                .map_err(WorkspaceHistoryError::from)?;
-            move_current_backwards(store, expected, plan.to.as_deref())
-                .map_err(RewindError::RefMove)?;
-        }
-        Ok(plan)
+        Ok(current == object_id || store.rev_walk(&[current], &[])?.contains(&object_id))
     }
 }
 
-impl RewindError<std::convert::Infallible> {
-    /// Re-brand a plan-time error for any apply-error type.
-    ///
-    /// Planning never produces `Apply`, so this is a lossless conversion.
-    fn into_apply_never<E>(self) -> RewindError<E> {
-        match self {
-            Self::History(e) => RewindError::History(e),
-            Self::Disabled => RewindError::Disabled,
-            Self::TargetUnreachable { target } => RewindError::TargetUnreachable { target },
-            Self::PlanIncomplete { paths } => RewindError::PlanIncomplete { paths },
-            Self::RefMove(msg) => RewindError::RefMove(msg),
-            Self::Apply(never) => match never {},
-        }
-    }
+/// 已校验的历史变更；仅供记录读取，不提供恢复规划。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HistoryMutation {
+    method: String,
+    turn_id: TurnId,
+    invocation_id: InvocationId,
+    path: String,
+    recorded_content_hash: String,
 }
 
-/// Walk `current` back to `target` and build the reversal plan.
-fn plan_rewind_locked(
+/// 固定 current 后核验完整不可变链；不持锁、不修改引用。
+fn validate_history(
     store: &StoreRepo,
-    target: Option<&str>,
-) -> Result<RewindPlan, RewindError<std::convert::Infallible>> {
-    let target_oid = target.map(parse_oid).transpose()?;
-    let from = store
-        .ref_target(CURRENT_REF)
-        .map_err(WorkspaceHistoryError::from)?;
-
-    let mut steps = Vec::new();
-    // Newest-first walk: a later (re-)insert for the same path comes from an
-    // OLDER mutation, so the map naturally converges on the parent-tree state
-    // of the oldest reversed mutation per path — the state the path had when
-    // LATTICE first touched it after the target.
-    let mut restores: BTreeMap<String, Option<Vec<u8>>> = BTreeMap::new();
-
-    let mut cursor = from;
-    let mut is_tip = true;
+    tip: Option<gix::ObjectId>,
+) -> Result<(), WorkspaceHistoryError> {
+    let mut cursor = tip;
     let mut newer_was_baseline = false;
     while let Some(oid) = cursor {
-        let message = store
-            .commit_message(oid)
-            .map_err(WorkspaceHistoryError::from)?;
-        let parents = store
-            .commit_parents(oid)
-            .map_err(WorkspaceHistoryError::from)?;
+        let parents = store.commit_parents(oid)?;
         if parents.len() > 1 {
             return Err(history_corruption(
                 &oid,
-                format!(
-                    "history commits must have at most one parent, found {}",
-                    parents.len()
-                ),
-            )
-            .into());
+                "history commits must have at most one parent",
+            ));
         }
         let parent = parents.into_iter().next();
-        let parent_tree = match parent {
-            Some(parent_oid) => Some(commit_tree_id(store, parent_oid)?),
-            None => None,
-        };
-        let parsed = parse_history_commit(&oid, &message)?;
-        let is_baseline = matches!(&parsed, ParsedHistoryCommit::Baseline);
-        let mutation_before = match &parsed {
-            ParsedHistoryCommit::Baseline => None,
-            ParsedHistoryCommit::Mutation(step) => {
-                let before = tree_blob(store, parent_tree, &step.path)?;
-                match (step.method.as_str(), before.is_some()) {
-                    ("mutate.create", true) => {
-                        return Err(history_corruption(
-                            &oid,
-                            "mutate.create parent state must not contain the target path",
-                        )
-                        .into());
-                    }
-                    ("mutate.edit", false) => {
-                        return Err(history_corruption(
-                            &oid,
-                            "mutate.edit parent state must contain the target path",
-                        )
-                        .into());
-                    }
-                    _ => {}
-                }
-                let after = tree_blob(store, Some(commit_tree_id(store, oid)?), &step.path)?
-                    .ok_or_else(|| {
-                        history_corruption(&oid, "mutation tree must contain the target path")
-                    })?;
-                let actual_hash = crate::workspace::content_hash(&after);
-                if step.recorded_content_hash.as_deref() != Some(actual_hash.as_str()) {
-                    return Err(history_corruption(
-                        &oid,
-                        format!(
-                            "'lattice-content-hash' trailer does not match the mutation tree ({actual_hash})"
-                        ),
-                    )
-                    .into());
-                }
-                Some(before)
-            }
-        };
-
-        if is_tip && is_baseline {
-            return Err(history_corruption(&oid, "history tip must be a mutation commit").into());
+        let parsed = parse_history_commit(&oid, &store.commit_message(oid)?)?;
+        let is_baseline = matches!(parsed, ParsedHistoryCommit::Baseline);
+        if is_baseline && Some(oid) == tip {
+            return Err(history_corruption(
+                &oid,
+                "history tip must be a mutation commit",
+            ));
         }
         if newer_was_baseline && is_baseline {
             return Err(history_corruption(
                 &oid,
                 "baseline commits must be followed by exactly one mutation commit",
-            )
-            .into());
+            ));
         }
-        if target_oid == Some(oid) {
-            if is_baseline {
-                return Err(
-                    history_corruption(&oid, "rewind target must be a mutation commit").into(),
-                );
-            }
-            break;
-        }
-
         if let ParsedHistoryCommit::Mutation(step) = parsed {
-            let before = mutation_before.ok_or_else(|| {
-                history_corruption(&oid, "mutation parent state was not validated")
-            })?;
-            restores.insert(step.path.clone(), before);
-            steps.push(step);
+            let parent_tree = parent.map(|p| commit_tree_id(store, p)).transpose()?;
+            let before = tree_blob(store, parent_tree, &step.path)?;
+            match (step.method.as_str(), before.is_some()) {
+                ("mutate.create", true) => {
+                    return Err(history_corruption(
+                        &oid,
+                        "mutate.create parent state must not contain the target path",
+                    ));
+                }
+                ("mutate.edit", false) => {
+                    return Err(history_corruption(
+                        &oid,
+                        "mutate.edit parent state must contain the target path",
+                    ));
+                }
+                _ => {}
+            }
+            let after = tree_blob(store, Some(commit_tree_id(store, oid)?), &step.path)?
+                .ok_or_else(|| {
+                    history_corruption(&oid, "mutation tree must contain the target path")
+                })?;
+            if step.recorded_content_hash != crate::workspace::content_hash(&after) {
+                return Err(history_corruption(
+                    &oid,
+                    "'lattice-content-hash' trailer does not match the mutation tree",
+                ));
+            }
         }
-
         newer_was_baseline = is_baseline;
         cursor = parent;
-        is_tip = false;
     }
-
-    if cursor.is_none() && target_oid.is_some() {
-        return Err(RewindError::TargetUnreachable {
-            target: target.unwrap_or("<none>").to_string(),
-        });
-    }
-
-    // Preflight expectation per path: the state at `from` — the recorded
-    // post-state of the newest reversed mutation of that path.
-    let from_tree = match from {
-        Some(oid) => Some(commit_tree_id(store, oid)?),
-        None => None,
-    };
-    let mut path_restores = Vec::with_capacity(restores.len());
-    for (path, restore) in restores {
-        let expected = tree_blob(store, from_tree, &path)?;
-        path_restores.push(RewindPathRestore {
-            path,
-            expected,
-            restore,
-        });
-    }
-
-    // Structural check, independent of how the steps were parsed: the plan
-    // must cover every path whose recorded state differs between the target
-    // and the tip. Anything else means a mutation commit was mis-read, and
-    // proceeding would move `current` while leaving a mutated path both
-    // unverified and unrestored — a Rewind reporting success over a path it
-    // never touched. Fail closed instead.
-    let target_tree = match target_oid {
-        Some(oid) => Some(commit_tree_id(store, oid)?),
-        None => None,
-    };
-    let planned: std::collections::BTreeSet<&str> =
-        path_restores.iter().map(|r| r.path.as_str()).collect();
-    let uncovered: Vec<String> = changed_paths(store, from_tree, target_tree)?
-        .into_iter()
-        .filter(|path| !planned.contains(path.as_str()))
-        .collect();
-    if !uncovered.is_empty() {
-        return Err(RewindError::PlanIncomplete { paths: uncovered });
-    }
-
-    Ok(RewindPlan {
-        from: from.map(|oid| oid.to_string()),
-        to: target_oid.map(|oid| oid.to_string()),
-        steps,
-        restores: path_restores,
-    })
-}
-
-/// Paths whose recorded content differs between two history trees.
-fn changed_paths(
-    store: &StoreRepo,
-    from: Option<gix::ObjectId>,
-    to: Option<gix::ObjectId>,
-) -> Result<Vec<String>, WorkspaceHistoryError> {
-    let from_files = tree_files(store, from)?;
-    let to_files = tree_files(store, to)?;
-    let mut changed = Vec::new();
-    for (path, bytes) in &from_files {
-        if to_files.get(path) != Some(bytes) {
-            changed.push(path.clone());
-        }
-    }
-    for path in to_files.keys() {
-        if !from_files.contains_key(path) {
-            changed.push(path.clone());
-        }
-    }
-    Ok(changed)
-}
-
-/// Every recorded file in a tree, or an empty map for no tree.
-fn tree_files(
-    store: &StoreRepo,
-    tree: Option<gix::ObjectId>,
-) -> Result<BTreeMap<String, Vec<u8>>, WorkspaceHistoryError> {
-    match tree {
-        Some(oid) => Ok(store.tree_files(oid)?),
-        None => Ok(BTreeMap::new()),
-    }
+    Ok(())
 }
 
 /// One recognized commit in the closed WorkspaceHistory chain.
@@ -835,7 +531,7 @@ enum ParsedHistoryCommit {
     /// Chain plumbing that captures external before-state drift.
     Baseline,
     /// One installed LATTICE mutation.
-    Mutation(RewindStep),
+    Mutation(HistoryMutation),
 }
 
 fn history_corruption(oid: &gix::ObjectId, reason: impl Into<String>) -> WorkspaceHistoryError {
@@ -965,51 +661,13 @@ fn parse_history_commit(
         ));
     }
 
-    Ok(ParsedHistoryCommit::Mutation(RewindStep {
-        commit_id: oid.to_string(),
+    Ok(ParsedHistoryCommit::Mutation(HistoryMutation {
         method,
         turn_id,
         invocation_id,
         path,
-        recorded_content_hash: Some(content_hash),
+        recorded_content_hash: content_hash,
     }))
-}
-
-/// Move `current` backwards to `target`, or delete it for an empty target.
-///
-/// Guarded: the ref must still equal `expected`, which the repository write
-/// lock makes certain in-process; the CAS constraint stays as the fail-closed
-/// arbiter. Retention pins are untouched.
-fn move_current_backwards(
-    store: &StoreRepo,
-    expected: gix::ObjectId,
-    target: Option<&str>,
-) -> Result<(), String> {
-    let retained_ref = format!("{}/{}", lattice_store::RETAINED_REF_PREFIX, expected);
-    match target {
-        Some(target) => {
-            let target_oid = parse_oid(target).map_err(|e| e.to_string())?;
-            store
-                .cas_ref(
-                    CURRENT_REF,
-                    target_oid,
-                    RefExpectation::MustMatch(expected),
-                    "lattice workspace history rewind",
-                )
-                .map_err(|e| e.to_string())?;
-        }
-        None => {
-            store
-                .delete_ref(CURRENT_REF, RefExpectation::MustMatch(expected))
-                .map_err(|e| e.to_string())?;
-        }
-    }
-    store
-        // The retention pin was published before `current` moved. Include it
-        // in the closing barrier as an explicit invariant even though the
-        // kernel's retain CAS also applies its own publication barrier.
-        .fsync_pending(&[CURRENT_REF, retained_ref.as_str()])
-        .map_err(|e| e.to_string())
 }
 
 // ─── Recording ──────────────────────────────────────────────────────────────
@@ -1526,10 +1184,7 @@ mod tests {
         assert!(history.is_reachable(&baseline).unwrap());
     }
 
-    /// The Local Workspace is shared with the user. When a path drifts between
-    /// two LATTICE mutations, the parent tree holds LATTICE's stale
-    /// after-state — the real before state must still be recorded, or a
-    /// Rewind built on this history would overwrite the user's own edit.
+    /// 外部修改后的真实前态必须记录，不能沿用上次变更的陈旧后态。
     #[test]
     fn external_drift_between_mutations_still_records_the_real_before_state() {
         let state = TempDir::new().unwrap();
@@ -1690,7 +1345,7 @@ mod tests {
         ));
     }
 
-    // ─── Rewind (#64) ───────────────────────────────────────────────────
+    // ─── 历史记录真实性 ───────────────────────────────────────────────
 
     /// Open the private repository directly, bypassing the handle (and its
     /// locks) — the unit-test stand-in for an out-of-band actor.
@@ -1702,9 +1357,9 @@ mod tests {
         .expect("open private repo")
     }
 
-    fn assert_history_corruption(error: RewindError<std::convert::Infallible>, expected: &str) {
+    fn assert_history_corruption(error: WorkspaceHistoryError, expected: &str) {
         match error {
-            RewindError::History(WorkspaceHistoryError::Corruption { reason, .. }) => {
+            WorkspaceHistoryError::Corruption { reason, .. } => {
                 assert!(
                     reason.contains(expected),
                     "expected corruption containing '{expected}', got '{reason}'"
@@ -1715,7 +1370,7 @@ mod tests {
     }
 
     #[test]
-    fn rewind_rejects_a_forged_merge_commit() {
+    fn current_rejects_a_forged_merge_commit() {
         let state = TempDir::new().unwrap();
         let history = history_at(&state);
         let first = history.record(&create("a.txt", "1")).unwrap().unwrap();
@@ -1750,11 +1405,11 @@ mod tests {
         repo.reference(CURRENT_REF, merge, PreviousValue::Any, "test forged merge")
             .unwrap();
 
-        assert_history_corruption(history.plan_rewind(None).unwrap_err(), "at most one parent");
+        assert_history_corruption(history.current().unwrap_err(), "at most one parent");
     }
 
     #[test]
-    fn rewind_rejects_baseline_tip_and_target_shapes() {
+    fn current_rejects_baseline_tip() {
         let state = TempDir::new().unwrap();
         let history = history_at(&state);
         let recorded = history
@@ -1762,11 +1417,6 @@ mod tests {
             .unwrap()
             .unwrap();
         let baseline = recorded.baseline_commit_id.expect("baseline commit");
-
-        assert_history_corruption(
-            history.plan_rewind(Some(&baseline)).unwrap_err(),
-            "rewind target must be a mutation commit",
-        );
 
         let repo = raw_repo(&history);
         repo.reference(
@@ -1777,13 +1427,13 @@ mod tests {
         )
         .unwrap();
         assert_history_corruption(
-            history.plan_rewind(None).unwrap_err(),
+            history.current().unwrap_err(),
             "history tip must be a mutation commit",
         );
     }
 
     #[test]
-    fn rewind_rejects_forged_root_edit_and_mismatched_content_hash() {
+    fn current_rejects_forged_root_edit_and_mismatched_content_hash() {
         let state = TempDir::new().unwrap();
         let history = history_at(&state);
         let record = edit("existing.txt", "old", "new");
@@ -1822,7 +1472,7 @@ mod tests {
         )
         .unwrap();
         assert_history_corruption(
-            history.plan_rewind(None).unwrap_err(),
+            history.current().unwrap_err(),
             "mutate.edit parent state must contain the target path",
         );
 
@@ -1846,368 +1496,60 @@ mod tests {
         )
         .unwrap();
         assert_history_corruption(
-            history.plan_rewind(None).unwrap_err(),
+            history.current().unwrap_err(),
             "does not match the mutation tree",
         );
     }
 
     #[test]
-    fn rewind_plan_collects_only_mutations_after_target_in_reverse_order() {
+    fn recorded_mutation_preserves_call_identity() {
         let state = TempDir::new().unwrap();
         let history = history_at(&state);
-        let first = history.record(&create("a.txt", "a1")).unwrap().unwrap();
-        let second = history.record(&create("b.txt", "b1")).unwrap().unwrap();
-        let third = history.record(&edit("a.txt", "a1", "a2")).unwrap().unwrap();
-
-        let plan = history.plan_rewind(Some(&first.commit_id)).unwrap();
-        assert_eq!(plan.from.as_deref(), Some(third.commit_id.as_str()));
-        assert_eq!(plan.to.as_deref(), Some(first.commit_id.as_str()));
-        let ids: Vec<&str> = plan.steps.iter().map(|s| s.commit_id.as_str()).collect();
-        assert_eq!(
-            ids,
-            vec![third.commit_id.as_str(), second.commit_id.as_str()],
-            "steps are newest-first and exclude the target"
-        );
-        assert_eq!(plan.steps[0].method, "mutate.edit");
-        assert_eq!(plan.steps[0].path, "a.txt");
-        assert_eq!(plan.steps[0].turn_id, test_turn_id(1));
-        assert_eq!(plan.steps[0].invocation_id, test_invocation_id(2));
-        assert!(
-            plan.steps[0]
-                .recorded_content_hash
-                .as_deref()
-                .is_some_and(|h| h.starts_with("blake3:")),
-            "mutation steps carry the recorded post-state revision"
-        );
+        let record = create("a.txt", "a1");
+        let saved = history.record(&record).unwrap().unwrap();
+        let store = history.store.as_ref().unwrap();
+        let oid = parse_oid(&saved.commit_id).unwrap();
+        let ParsedHistoryCommit::Mutation(parsed) =
+            parse_history_commit(&oid, &store.commit_message(oid).unwrap()).unwrap()
+        else {
+            panic!("mutation");
+        };
+        assert_eq!(parsed.turn_id, test_turn_id(1));
+        assert_eq!(parsed.invocation_id, test_invocation_id(1));
+        assert_eq!(parsed.method, "mutate.create");
+        assert_eq!(parsed.path, "a.txt");
+        assert_eq!(parsed.recorded_content_hash, record.content_hash);
     }
 
     #[test]
-    fn rewind_restores_the_earliest_parent_state_per_path() {
+    fn a_path_with_leading_whitespace_round_trips() {
         let state = TempDir::new().unwrap();
         let history = history_at(&state);
-        let target = history.record(&create("f.txt", "v1")).unwrap().unwrap();
-        history.record(&edit("f.txt", "v1", "v2")).unwrap().unwrap();
-        history.record(&edit("f.txt", "v2", "v3")).unwrap().unwrap();
-
-        let plan = history.plan_rewind(Some(&target.commit_id)).unwrap();
-        assert_eq!(plan.restores.len(), 1);
-        let restore = &plan.restores[0];
-        assert_eq!(restore.path, "f.txt");
-        assert_eq!(
-            restore.expected.as_deref(),
-            Some(b"v3".as_ref()),
-            "preflight expects the newest recorded post-state"
-        );
-        assert_eq!(
-            restore.restore.as_deref(),
-            Some(b"v1".as_ref()),
-            "restore is the parent state of the oldest reversed mutation"
-        );
-    }
-
-    #[test]
-    fn rewind_reverses_a_create_to_absence() {
-        let state = TempDir::new().unwrap();
-        let history = history_at(&state);
-        let target = history.record(&create("kept.txt", "k")).unwrap().unwrap();
-        history.record(&create("new.txt", "n")).unwrap().unwrap();
-
-        let plan = history.plan_rewind(Some(&target.commit_id)).unwrap();
-        assert_eq!(plan.restores.len(), 1);
-        assert_eq!(plan.restores[0].path, "new.txt");
-        assert_eq!(plan.restores[0].expected.as_deref(), Some(b"n".as_ref()));
-        assert_eq!(
-            plan.restores[0].restore, None,
-            "reversing a create restores absence"
-        );
-    }
-
-    /// External drift recorded by a baseline inside the reversed range must
-    /// come back: the user's own pre-mutation content is the restore state,
-    /// not LATTICE's older recorded state.
-    #[test]
-    fn rewind_restores_baselined_external_drift() {
-        let state = TempDir::new().unwrap();
-        let history = history_at(&state);
-        let target = history.record(&create("d.txt", "v1")).unwrap().unwrap();
-        // User edited d.txt outside LATTICE to "user-edit"; LATTICE then
-        // edited it. The recorder wrote a baseline capturing "user-edit".
-        let drifted = history
-            .record(&edit("d.txt", "user-edit", "v2"))
-            .unwrap()
-            .unwrap();
-        assert!(
-            drifted.baseline_commit_id.is_some(),
-            "drift forces baseline"
-        );
-
-        let plan = history.plan_rewind(Some(&target.commit_id)).unwrap();
-        assert_eq!(plan.steps.len(), 1, "the baseline is not a step");
-        assert_eq!(
-            plan.restores[0].restore.as_deref(),
-            Some(b"user-edit".as_ref()),
-            "the baselined external content is what comes back"
-        );
-    }
-
-    /// A create whose target the user had deleted outside LATTICE records a
-    /// baseline that *removes* the path. Reversing that create must restore
-    /// the user's deletion — not resurrect LATTICE's older content — so the
-    /// external delete survives the Rewind.
-    #[test]
-    fn rewind_restores_absence_across_a_create_after_an_external_delete() {
-        let state = TempDir::new().unwrap();
-        let history = history_at(&state);
-        let target = history.record(&create("anchor.txt", "a")).unwrap().unwrap();
-        // LATTICE creates the file, the user deletes it, LATTICE creates it
-        // again — the second create baselines the path away first.
-        history
-            .record(&create("cycle.txt", "first"))
-            .unwrap()
-            .unwrap();
-        let again = history
-            .record(&create("cycle.txt", "second"))
-            .unwrap()
-            .unwrap();
-        assert!(
-            again.baseline_commit_id.is_some(),
-            "a create after an external delete must baseline the path away"
-        );
-
-        let plan = history.plan_rewind(Some(&target.commit_id)).unwrap();
-        let restore = plan
-            .restores
-            .iter()
-            .find(|r| r.path == "cycle.txt")
-            .expect("the cycled path is planned");
-        assert_eq!(
-            restore.expected.as_deref(),
-            Some(b"second".as_ref()),
-            "preflight expects the newest recorded post-state"
-        );
-        assert_eq!(
-            restore.restore, None,
-            "reversing back past the first create restores absence"
-        );
-        assert_eq!(plan.steps.len(), 2, "both creates are reversed");
-    }
-
-    #[test]
-    fn rewind_to_current_is_an_empty_plan_and_moves_nothing() {
-        let state = TempDir::new().unwrap();
-        let history = history_at(&state);
-        let tip = history.record(&create("a.txt", "x")).unwrap().unwrap();
-
-        let plan = history
-            .rewind_with(Some(&tip.commit_id), |plan| {
-                assert!(plan.steps.is_empty());
-                assert!(plan.restores.is_empty());
-                Ok::<(), std::convert::Infallible>(())
-            })
-            .unwrap();
-        assert!(plan.is_empty());
-        assert_eq!(
-            history.current().unwrap().as_deref(),
-            Some(tip.commit_id.as_str())
-        );
-    }
-
-    #[test]
-    fn rewind_to_none_unwinds_everything_and_deletes_current() {
-        let state = TempDir::new().unwrap();
-        let history = history_at(&state);
-        let first = history.record(&create("a.txt", "1")).unwrap().unwrap();
-        let second = history.record(&create("b.txt", "2")).unwrap().unwrap();
-
-        let plan = history
-            .rewind_with(None, |plan| {
-                assert_eq!(plan.steps.len(), 2);
-                assert!(plan.restores.iter().all(|r| r.restore.is_none()));
-                Ok::<(), std::convert::Infallible>(())
-            })
-            .unwrap();
-        assert_eq!(plan.to, None);
-        assert_eq!(history.current().unwrap(), None, "current is deleted");
-        // Reversed commits stay pinned and resolvable.
-        assert!(history.is_reachable(&first.commit_id).unwrap());
-        assert!(history.is_reachable(&second.commit_id).unwrap());
-        assert!(history.resolve(&second.commit_id).unwrap().is_some());
-    }
-
-    #[test]
-    fn rewind_rejects_targets_that_are_not_on_the_chain() {
-        let state = TempDir::new().unwrap();
-        let history = history_at(&state);
-        history.record(&create("a.txt", "1")).unwrap().unwrap();
-
-        let bogus = "1".repeat(40);
-        let err = history.plan_rewind(Some(&bogus)).unwrap_err();
-        assert!(
-            matches!(err, RewindError::TargetUnreachable { .. }),
-            "got {err:?}"
-        );
-
-        // An empty history cannot reach any concrete target either.
-        let empty_state = TempDir::new().unwrap();
-        let empty = history_at(&empty_state);
-        let err = empty.plan_rewind(Some(&bogus)).unwrap_err();
-        assert!(matches!(err, RewindError::TargetUnreachable { .. }));
-    }
-
-    /// After a rewind, the abandoned tip is pinned but no longer on the
-    /// chain — a second rewind "forward" to it must be rejected, not
-    /// silently replay.
-    #[test]
-    fn rewind_cannot_target_a_commit_abandoned_by_a_prior_rewind() {
-        let state = TempDir::new().unwrap();
-        let history = history_at(&state);
-        let first = history.record(&create("a.txt", "1")).unwrap().unwrap();
-        let second = history.record(&create("b.txt", "2")).unwrap().unwrap();
-        history
-            .rewind_with(Some(&first.commit_id), |_| {
-                Ok::<(), std::convert::Infallible>(())
-            })
-            .unwrap();
-
-        let err = history.plan_rewind(Some(&second.commit_id)).unwrap_err();
-        assert!(
-            matches!(err, RewindError::TargetUnreachable { .. }),
-            "an off-chain (though pinned) commit is not a valid target: {err:?}"
-        );
-        assert!(history.is_reachable(&second.commit_id).unwrap());
-    }
-
-    #[test]
-    fn rewind_apply_failure_aborts_before_any_ref_moves() {
-        let state = TempDir::new().unwrap();
-        let history = history_at(&state);
-        let first = history.record(&create("a.txt", "1")).unwrap().unwrap();
-        let tip = history.record(&create("b.txt", "2")).unwrap().unwrap();
-
-        let err = history
-            .rewind_with(Some(&first.commit_id), |_| Err("workspace conflict"))
-            .unwrap_err();
-        assert!(matches!(err, RewindError::Apply("workspace conflict")));
-        assert_eq!(
-            history.current().unwrap().as_deref(),
-            Some(tip.commit_id.as_str()),
-            "an aborted rewind must not move current"
-        );
-    }
-
-    /// If the ref cannot be moved durably after the workspace was restored,
-    /// the rewind must fail loudly — never report success.
-    #[test]
-    fn rewind_ref_move_failure_is_an_error_not_a_success() {
-        let state = TempDir::new().unwrap();
-        let history = history_at(&state);
-        let first = history.record(&create("a.txt", "1")).unwrap().unwrap();
-        history.record(&create("b.txt", "2")).unwrap().unwrap();
-
-        let err = history
-            .rewind_with(Some(&first.commit_id), |_| {
-                // Sabotage: an out-of-band actor deletes `current` while the
-                // apply phase runs (raw gix, so the advisory lock is not
-                // taken). The trailing CAS must fail closed.
-                let repo = raw_repo(&history);
-                let name: gix::refs::FullName = CURRENT_REF.try_into().unwrap();
-                repo.edit_reference(gix::refs::transaction::RefEdit {
-                    change: gix::refs::transaction::Change::Delete {
-                        expected: PreviousValue::Any,
-                        log: gix::refs::transaction::RefLog::AndReference,
-                    },
-                    name,
-                    deref: false,
-                })
-                .expect("sabotage delete");
-                Ok::<(), std::convert::Infallible>(())
-            })
-            .unwrap_err();
-        assert!(matches!(err, RewindError::RefMove(_)), "got {err:?}");
-    }
-
-    #[test]
-    fn rewind_keeps_every_reversed_commit_reachable() {
-        let state = TempDir::new().unwrap();
-        let history = history_at(&state);
-        let target = history.record(&create("a.txt", "1")).unwrap().unwrap();
-        let reversed_a = history.record(&edit("a.txt", "1", "2")).unwrap().unwrap();
-        let reversed_b = history.record(&create("c.txt", "3")).unwrap().unwrap();
-
-        history
-            .rewind_with(Some(&target.commit_id), |_| {
-                Ok::<(), std::convert::Infallible>(())
-            })
-            .unwrap();
-
-        assert_eq!(
-            history.current().unwrap().as_deref(),
-            Some(target.commit_id.as_str())
-        );
-        for oid in [&reversed_a.commit_id, &reversed_b.commit_id] {
-            assert!(history.is_reachable(oid).unwrap(), "{oid} lost its pin");
-            assert!(history.resolve(oid).unwrap().is_some());
-        }
-    }
-
-    #[test]
-    fn recording_after_a_rewind_appends_on_the_new_tip() {
-        let state = TempDir::new().unwrap();
-        let history = history_at(&state);
-        let target = history.record(&create("a.txt", "v1")).unwrap().unwrap();
-        history.record(&edit("a.txt", "v1", "v2")).unwrap().unwrap();
-        history
-            .rewind_with(Some(&target.commit_id), |_| {
-                Ok::<(), std::convert::Infallible>(())
-            })
-            .unwrap();
-
-        let next = history.record(&edit("a.txt", "v1", "v4")).unwrap().unwrap();
-        assert_eq!(
-            next.parent_commit_id.as_deref(),
-            Some(target.commit_id.as_str()),
-            "post-rewind recording chains on the rewound tip"
-        );
-        assert_eq!(
-            next.baseline_commit_id, None,
-            "the restored content matches the rewound tree, so no baseline"
-        );
-    }
-
-    /// A workspace-relative path may legitimately begin with a space —
-    /// `mutate.create` with `./ a.txt` normalizes to ` a.txt`. The path
-    /// trailer must round-trip byte-exactly, or the plan would verify and
-    /// restore a *different* path while leaving the real one untouched and
-    /// still move `current`.
-    #[test]
-    fn a_path_with_leading_whitespace_round_trips_through_the_plan() {
-        let state = TempDir::new().unwrap();
-        let history = history_at(&state);
-        let target = history.record(&create("anchor.txt", "a")).unwrap().unwrap();
-        history
+        let saved = history
             .record(&create(" spaced.txt", "s1"))
             .unwrap()
             .unwrap();
-
-        let plan = history.plan_rewind(Some(&target.commit_id)).unwrap();
-        assert_eq!(plan.steps.len(), 1);
+        assert_eq!(history.current().unwrap(), Some(saved.commit_id.clone()));
+        let store = history.store.as_ref().unwrap();
+        let oid = parse_oid(&saved.commit_id).unwrap();
+        let ParsedHistoryCommit::Mutation(parsed) =
+            parse_history_commit(&oid, &store.commit_message(oid).unwrap()).unwrap()
+        else {
+            panic!("mutation");
+        };
+        assert_eq!(parsed.path, " spaced.txt");
         assert_eq!(
-            plan.steps[0].path, " spaced.txt",
-            "the recorded path must survive parsing unchanged"
+            history.resolve(&saved.commit_id).unwrap().unwrap().files[" spaced.txt"],
+            b"s1"
         );
-        assert_eq!(plan.restores.len(), 1);
-        assert_eq!(plan.restores[0].path, " spaced.txt");
-        assert_eq!(plan.restores[0].expected.as_deref(), Some(b"s1".as_ref()));
-        assert_eq!(plan.restores[0].restore, None);
     }
 
-    /// An out-of-band commit with no recognized history kind must fail before
-    /// a Rewind can move `current` over its unverified tree.
+    /// 未知历史类型拒绝读取，不移动 current 或修复原始记录。
     #[test]
     fn a_forged_commit_without_a_history_kind_fails_closed() {
         let state = TempDir::new().unwrap();
         let history = history_at(&state);
-        let target = history.record(&create("a.txt", "a")).unwrap().unwrap();
+        history.record(&create("a.txt", "a")).unwrap().unwrap();
         let hidden = history.record(&create("b.txt", "b")).unwrap().unwrap();
 
         // Rewrite the newest commit with its mutation trailer stripped, as a
@@ -2234,23 +1576,19 @@ mod tests {
             .unwrap();
 
         assert_history_corruption(
-            history.plan_rewind(Some(&target.commit_id)).unwrap_err(),
+            history.current().unwrap_err(),
             "missing 'lattice-history-kind' trailer",
         );
         assert_eq!(
-            history.current().unwrap().as_deref(),
-            Some(opaque.to_string().as_str()),
-            "a refused plan must not move the ref"
+            repo.find_reference(CURRENT_REF)
+                .unwrap()
+                .target()
+                .try_id()
+                .unwrap()
+                .to_string(),
+            opaque.to_string(),
+            "a refused read must not move the ref"
         );
-    }
-
-    #[test]
-    fn rewind_on_disabled_history_is_rejected() {
-        let history = WorkspaceHistory::disabled();
-        let err = history
-            .rewind_with(None, |_| Ok::<(), std::convert::Infallible>(()))
-            .unwrap_err();
-        assert!(matches!(err, RewindError::Disabled));
     }
 
     #[test]

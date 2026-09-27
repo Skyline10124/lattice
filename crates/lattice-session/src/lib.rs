@@ -27,6 +27,10 @@ pub use graph::{PreparedTurnCommit, TurnCommitInput, prepare_turn_commit};
 
 /// 全局事务会话库；与旧 Git 图实现并存，尚未接线。
 pub mod store;
+#[cfg(any(test, feature = "test-support"))]
+mod test_support;
+#[cfg(any(test, feature = "test-support"))]
+pub use test_support::ScopedXdgStateHome;
 
 pub mod git_graph;
 pub use git_graph::{

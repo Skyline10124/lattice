@@ -14,6 +14,18 @@ use crate::attempt::ModelAttemptRecord;
 use crate::message::NativeMessage;
 use crate::tool_call::BoundToolCall;
 
+/// 生产历史只含系统/用户消息及完整配对的 Step，不承接旧 Tool 字符串。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "content",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum ConversationItem {
+    Message(NativeMessage<BoundToolCall>),
+    Step(crate::StepContent),
+}
 /// Ordered conversation history: completed (fully bound) messages and the
 /// per-attempt records behind them.
 ///

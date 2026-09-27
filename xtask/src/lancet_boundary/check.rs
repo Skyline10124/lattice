@@ -7,16 +7,10 @@ use cargo_metadata::{DependencyKind, MetadataCommand};
 
 type LineHit = String;
 
-/// `lancet-audit` owns operator ledger reads without composing the Tool runtime.
-/// Keeping the runtime dependency absent makes that boundary structural.
-const AUDIT_FORBIDDEN_DEPS: &[&str] = &["lancet-runtime"];
+/// 会话库的操作员读取不能组合 Tool runtime；开发依赖也不能引入其类型。
+const SESSION_FORBIDDEN_DEPS: &[&str] = &["lancet-runtime"];
 
-/// `lancet-audit` owns the operator audit read path (#39), so an operator read
-/// never composing the Tool runtime is a dependency-graph property.
-///
-/// Dev-dependencies count: a test-only edge still puts the types one `use` away
-/// from the production module in the same crate.
-pub fn lancet_audit_forbidden_dependency_graph(repo_root: &Path) -> anyhow::Result<Vec<LineHit>> {
+pub fn session_forbidden_dependency_graph(repo_root: &Path) -> anyhow::Result<Vec<LineHit>> {
     let mut parts = Vec::new();
 
     let metadata = MetadataCommand::new()
@@ -25,25 +19,25 @@ pub fn lancet_audit_forbidden_dependency_graph(repo_root: &Path) -> anyhow::Resu
         .exec()
         .map_err(|e| anyhow::anyhow!("cargo metadata --no-deps --format-version 1 failed: {e}"))?;
 
-    let audit = metadata
+    let session = metadata
         .packages
         .iter()
-        .find(|pkg| pkg.name == "lancet-audit")
-        .ok_or_else(|| anyhow::anyhow!("lancet-audit is missing from the workspace metadata"))?;
+        .find(|pkg| pkg.name == "lattice-session")
+        .ok_or_else(|| anyhow::anyhow!("lattice-session is missing from the workspace metadata"))?;
 
-    for dep in &audit.dependencies {
-        if AUDIT_FORBIDDEN_DEPS.contains(&dep.name.as_str()) {
+    for dep in &session.dependencies {
+        if SESSION_FORBIDDEN_DEPS.contains(&dep.name.as_str()) {
             parts.push(format!(
-                "lancet-audit -> {} ({:?}) reopens the Tool runtime path",
+                "lattice-session -> {} ({:?}) reopens the Tool runtime path",
                 dep.name, dep.kind
             ));
         }
     }
 
-    let manifest = repo_root.join("crates/lancet-audit/Cargo.toml");
+    let manifest = repo_root.join("crates/lattice-session/Cargo.toml");
     let manifest_text = std::fs::read_to_string(&manifest)?;
     for (line_no, line) in manifest_text.lines().enumerate() {
-        if AUDIT_FORBIDDEN_DEPS
+        if SESSION_FORBIDDEN_DEPS
             .iter()
             .any(|forbidden| line.contains(forbidden))
         {
@@ -162,38 +156,6 @@ fn feature_reaches_test_only(
     reaches
 }
 
-/// Forbidden normal/dev dependency edges of the #139-B composition (plan
-/// §2.1). `lancet-audit -> lattice-session` as a *dev*-dependency is the
-/// documented #139-A qualification seam and stays legal until that harness
-/// is deleted; a normal edge would make LATTICE session types nameable from
-/// the audit production surface and break LANCET's independent
-/// embeddability.
-pub fn issue139b_forbidden_dependency_graph(repo_root: &Path) -> anyhow::Result<Vec<String>> {
-    let metadata = MetadataCommand::new()
-        .current_dir(repo_root)
-        .no_deps()
-        .exec()
-        .map_err(|e| anyhow::anyhow!("cargo metadata --no-deps --format-version 1 failed: {e}"))?;
-
-    let mut parts = Vec::new();
-    for pkg in &metadata.packages {
-        for dep in &pkg.dependencies {
-            let forbidden = match (pkg.name.as_str(), dep.name.as_str()) {
-                ("lancet-audit", "lattice-session") => dep.kind == DependencyKind::Normal,
-                ("lattice-session", "lancet-audit") => true,
-                _ => false,
-            };
-            if forbidden {
-                parts.push(format!(
-                    "{} -> {} ({:?}) is a forbidden #139-B edge",
-                    pkg.name, dep.name, dep.kind
-                ));
-            }
-        }
-    }
-    Ok(parts)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,6 +164,62 @@ mod tests {
 
     fn joined(hits: &[LineHit]) -> String {
         hits.join("\n")
+    }
+
+    fn write_session_workspace(root: &Path, dependencies: &str) {
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nresolver = \"3\"\nmembers = [\"crates/lattice-session\", \"crates/lancet-runtime\"]\n",
+        )
+        .unwrap();
+        for name in ["lattice-session", "lancet-runtime"] {
+            let path = root.join("crates").join(name);
+            fs::create_dir_all(path.join("src")).unwrap();
+            fs::write(path.join("src/lib.rs"), "").unwrap();
+            let deps = if name == "lattice-session" {
+                dependencies
+            } else {
+                ""
+            };
+            fs::write(
+                path.join("Cargo.toml"),
+                format!(
+                    "[package]\nname = \"{name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n{deps}",
+                ),
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn session_without_runtime_dependency_is_clean() {
+        let dir = TempDir::new().unwrap();
+        write_session_workspace(dir.path(), "");
+        let hits = session_forbidden_dependency_graph(dir.path()).unwrap();
+        assert!(hits.is_empty(), "runtime-free session rejected: {hits:?}");
+    }
+
+    fn assert_session_runtime_dependency_rejected(section: &str, kind: &str) {
+        let dir = TempDir::new().unwrap();
+        write_session_workspace(
+            dir.path(),
+            &format!("[{section}]\nlancet-runtime = {{ path = \"../lancet-runtime\" }}\n"),
+        );
+        let hits = session_forbidden_dependency_graph(dir.path()).unwrap();
+        assert!(
+            joined(&hits).contains(&format!("lattice-session -> lancet-runtime ({kind})")),
+            "session runtime edge not flagged: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn session_normal_runtime_dependency_is_rejected() {
+        assert_session_runtime_dependency_rejected("dependencies", "Normal");
+    }
+
+    #[test]
+    fn session_dev_runtime_dependency_is_rejected() {
+        assert_session_runtime_dependency_rejected("dev-dependencies", "Development");
     }
 
     /// A two-crate virtual workspace where the consumer enables `test-utils`

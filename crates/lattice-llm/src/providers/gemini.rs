@@ -152,7 +152,7 @@ impl GeminiSseParser {
             Err(e) => return vec![e],
         };
 
-        if let Some(error_event) = super::extract_api_error(&root) {
+        if let Some(error_event) = super::extract_api_error(ProviderOrigin::Gemini, &root) {
             return vec![error_event];
         }
 
@@ -168,11 +168,10 @@ impl GeminiSseParser {
             if let Some(parts_arr) = parts {
                 for part in parts_arr {
                     if part.get("text").is_some() && part.get("functionCall").is_some() {
-                        return vec![LlmEvent::Error {
-                            message:
-                                "malformed Gemini wire: one part contains text and functionCall"
-                                    .to_string(),
-                        }];
+                        return vec![LlmEvent::error(
+                            "malformed Gemini wire: one part contains text and functionCall",
+                            false,
+                        )];
                     }
                     let (index, is_new_part) = self.merge_part(part);
                     if part.get("thought").and_then(|value| value.as_bool()) == Some(true) {
@@ -280,9 +279,7 @@ impl GeminiSseParser {
                 let usage = match wire_usage(ProviderOrigin::Gemini, &root) {
                     Ok(usage) => usage,
                     Err(error) => {
-                        events.push(LlmEvent::Error {
-                            message: error.to_string(),
-                        });
+                        events.push(LlmEvent::error(error.to_string(), false));
                         return events;
                     }
                 };
@@ -292,7 +289,10 @@ impl GeminiSseParser {
                     super::complete_message_event(ProviderOrigin::Gemini, &complete_root);
                 self.parts.clear();
                 self.tool_call_indices.clear();
-                let failed = matches!(completion, LlmEvent::Error { .. });
+                let failed = matches!(
+                    completion,
+                    LlmEvent::Error { .. } | LlmEvent::OutputLimit { .. }
+                );
                 events.push(completion);
                 if failed {
                     return events;
@@ -330,14 +330,14 @@ mod tests {
         }
     }
 
-    fn text(role: MessageRole, content: &str) -> NativeMessage<BoundToolCall> {
-        NativeMessage::new(
+    fn text(role: MessageRole, content: &str) -> lattice_conversation::ConversationItem {
+        lattice_conversation::ConversationItem::Message(NativeMessage::<BoundToolCall>::new(
             role,
             None,
             vec![MessagePart::semantic_only(MessageSemantic::Text {
-                text: content.to_string(),
+                text: content.into(),
             })],
-        )
+        ))
     }
 
     #[test]
@@ -504,7 +504,7 @@ mod tests {
         );
         assert!(events.iter().any(|event| matches!(
             event,
-            LlmEvent::Error { message } if message.contains("text and functionCall")
+            LlmEvent::Error { failure } if !failure.retryable && failure.message.contains("text and functionCall")
         )));
         assert!(!events.iter().any(|event| matches!(
             event,

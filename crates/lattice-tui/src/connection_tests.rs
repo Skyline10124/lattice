@@ -2,306 +2,248 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use lattice_api::local::{LocalError, LocalErrorKind, Observation};
+use lattice_api::local::{LocalError, ObservationSnapshot, TurnView};
+use serde_json::json;
 
+const SID: &str = "11111111111141118111111111111111";
 fn read_error() -> LocalError {
     lattice_api::ApiError::StoreUnavailable("persistent history read failed".into()).into()
 }
-use serde_json::{Value, json};
-use std::{os::unix::fs::PermissionsExt, time::Duration};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::UnixListener,
-};
+fn app() -> App {
+    App::new(
+        SessionContext {
+            session_id: None,
+            active_agent: "test".into(),
+        },
+        false,
+        Path::new("/nonexistent-tui-test-history"),
+    )
+}
+fn view(id: TurnId, outcome: &str) -> ObservationSnapshot {
+    serde_json::from_value(json!({
+        "session":{"session_id":SID,"project_store_key":"0".repeat(64),"current":1,"active_turn":null,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},
+        "current_agent":"test","selected_turn":{"session_id":SID,"turn_id":id,"user_node":1,"agent_name":"test","accepted_at":"2026-01-01T00:00:00Z","ended_at":"2026-01-01T00:00:01Z","summary":{"outcome":outcome,"notice":match outcome { "failed" => json!({"level":"error","text":"provider failure"}), "cancelled" => json!({"level":"info","text":"cancelled by user"}), _ => serde_json::Value::Null }},"usage":{"kind":"partial","known":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0},"unknown_attempts":1},"steps":[]},
+        "active":null,"history":{"session_id":SID,"head":1},"attempt":null,"cursor":{"epoch":"test","sequence":1},"owned":false
+    })).unwrap()
+}
 
-#[tokio::test]
-async fn reopening_visible_history_reads_completion_without_confirming() {
-    for (message, body_unavailable, snapshot_first, outcome) in [
-        (
-            None,
-            false,
-            false,
-            json!({"completed":{"finish_reason":"stop"}}),
-        ),
-        (
-            Some("original durability failure"),
-            false,
-            false,
-            json!({"completed":{"finish_reason":"stop"}}),
-        ),
-        (
-            Some("durability confirmation unknown"),
-            false,
-            false,
-            json!({"completed":{"finish_reason":"stop"}}),
-        ),
-        (
-            None,
-            true,
-            false,
-            json!({"completed":{"finish_reason":"stop"}}),
-        ),
-        (
-            Some("original durability failure"),
-            true,
-            false,
-            json!({"failed":{"reason":"model_request_failed"}}),
-        ),
-        (
-            None,
-            true,
-            false,
-            json!({"cancelled":{"reason":"user_cancelled"}}),
-        ),
-        (
-            None,
-            true,
-            true,
-            json!({"completed":{"finish_reason":"stop"}}),
-        ),
-        (
-            Some("original durability failure"),
-            true,
-            true,
-            json!({"failed":{"reason":"model_request_failed"}}),
-        ),
-        (
-            None,
-            true,
-            true,
-            json!({"cancelled":{"reason":"user_cancelled"}}),
-        ),
-        (
-            None,
-            true,
-            true,
-            json!({"interrupted":{"reason":"process_interrupted_before_model_attempt"}}),
-        ),
-    ] {
-        let directory = tempfile::tempdir().unwrap();
-        let layout = lattice_api::StateLayout::in_state_root(directory.path());
-        let local = layout.lattice_root().join("local");
-        std::fs::create_dir_all(&local).unwrap();
-        std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let socket = local.join("api.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
-        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let turn_id = lattice_api::local::new_turn_id();
-        let commit = lattice_api::local::CommittedTurnObservation {
-            commit_id: "fixed-head".into(),
-            turn_id,
-            parent_ids: vec![],
-            agent_name: "test".into(),
-            model: "test".into(),
-            provider: "test".into(),
-            outcome: serde_json::from_value(outcome).unwrap(),
-            origin: lattice_api::ClosureOrigin::Live,
-            usage: None,
-            workspace_history_checkpoint: lattice_api::WorkspaceHistoryCheckpoint::Empty,
-            created_at: String::new(),
+#[test]
+fn new_display_has_no_session_until_acceptance() {
+    let mut app = app();
+    app.input.set_text(" original ");
+    assert_eq!(app.submit().as_deref(), Some(" original "));
+    assert!(app.ctx.session_id.is_none());
+    let id = app.current_turn.unwrap();
+    app.apply_update(LocalUpdate::Submission {
+        turn_id: id,
+        result: Err(read_error()),
+    });
+    assert_eq!(app.input.text(), " original ");
+    assert!(app.ctx.session_id.is_none());
+    let accepted = TurnView::from(view(id, "completed").selected_turn.as_ref().unwrap());
+    app.apply_update(LocalUpdate::Submission {
+        turn_id: id,
+        result: Ok(Acceptance::Accepted { turn: accepted }),
+    });
+    assert_eq!(app.ctx.session_id.unwrap().as_str(), SID);
+}
+
+#[test]
+fn summary_survives_slow_failed_history_and_is_not_duplicated() {
+    for outcome in ["completed", "failed", "cancelled"] {
+        let mut app = app();
+        let id = lattice_api::local::new_turn_id();
+        let key = lattice_api::local::ModelAttemptKey {
+            turn_id: id,
+            model_step_ordinal: 0,
+            attempt_ordinal: 1,
         };
-        let view = SessionObservation {
-            state_oid: "state".into(),
-            session: lattice_api::GraphSession {
-                session_id: "session".into(),
-                label: None,
-                active_agent_name: "test".into(),
-                created_at: String::new(),
-                updated_at: String::new(),
-                project_target_branch: Some("main".into()),
-                project_store_key: "key".into(),
-            },
-            head: lattice_api::GraphHead::Branch {
-                name: "main".into(),
-            },
-            head_commit_id: Some(commit.commit_id.clone()),
-            branches: vec![],
-            commit_count: 1,
-            active_turn: None,
-            requested_turn: None,
-        };
-        let error = message.map(|message| LocalError {
-            kind: LocalErrorKind::StoreUnavailable,
-            message: message.into(),
-            recovery: None,
+        app.apply_turn_event(TurnEvent::TokenDelta {
+            key,
+            content: "live answer".into(),
         });
-        let expected = error.clone();
-        let expected_outcome = commit.outcome.clone();
-        // 只替代 IPC 对端：真实 LocalTurn、固定历史与 DTO 解码均运行，任何写操作都会失败。
-        let (finish_tx, mut finish_rx) = tokio::sync::oneshot::channel();
-        let mut finish_tx = Some(finish_tx);
-        let server = tokio::spawn(async move {
-            let mut completion = None;
-            let mut subscriptions = 0;
-            loop {
-                let mut stream = tokio::select! {
-                    accepted = listener.accept() => accepted.unwrap().0,
-                    _ = &mut finish_rx, if completion.is_some() => {
-                        let (mut stream, response) = completion.take().unwrap();
-                        send_response(&mut stream, &response).await;
-                        continue;
-                    }
-                };
-                let mut magic = [0; 8];
-                stream.read_exact(&mut magic).await.unwrap();
-                assert_eq!(&magic, b"LTLOCAL2");
-                let length = stream.read_u32().await.unwrap() as usize;
-                assert!(length <= 16 * 1024 * 1024);
-                let mut bytes = vec![0; length];
-                stream.read_exact(&mut bytes).await.unwrap();
-                let request: Value = serde_json::from_slice(&bytes).unwrap();
-                let response = match request["operation"].as_str().unwrap() {
-                    "query" => json!({"response":"view", "value":view}),
-                    "commit" => json!({"response":"commit", "value":commit}),
-                    "history" => {
-                        json!({"response":"history", "value": if request["offset"] == 0 { vec!["fixed-head"] } else { vec![] }})
-                    }
-                    "transcript" if body_unavailable && subscriptions == 1 => {
-                        json!({"response":"error", "value":read_error()})
-                    }
-                    "transcript" => {
-                        json!({"response":"transcript", "value":{"jsonl":"", "next_offset":null}})
-                    }
-                    "subscribe" => {
-                        subscriptions += 1;
-                        assert_eq!(request["turn_id"], json!(turn_id));
-                        let mut fixed = view.clone();
-                        fixed.requested_turn =
-                            Some(TurnObservation::Committed(Box::new(commit.clone())));
-                        let finished = json!({"response":"observation", "value":Observation::Finished {
-                            view: Box::new(fixed.clone()), cursor: lattice_api::local::EventCursor { epoch:"test".into(), sequence:1 }, error:error.clone(),
-                        }});
-                        if snapshot_first && subscriptions == 1 {
-                            let snapshot = json!({"response":"observation", "value":Observation::Snapshot {
-                                view: Box::new(fixed), cursor: lattice_api::local::EventCursor { epoch:"test".into(), sequence:0 }, owned:true,
-                            }});
-                            send_response(&mut stream, &snapshot).await;
-                            // 第一份快照及正文读取失败交接后，才允许独立完成回执到达。
-                            completion = Some((stream, finished));
-                            continue;
-                        }
-                        finished
-                    }
-                    other => panic!("reconnect performed non-read operation: {other}"),
-                };
-                send_response(&mut stream, &response).await;
-            }
+        let view = view(id, outcome);
+        app.apply_update(LocalUpdate::State {
+            view: Box::new(view.clone()),
+            phase: ObservationPhase::NoOwner,
+            error: Some(read_error()),
         });
-        let mut connection =
-            LocalClient::new(layout).observe("session".into(), None, HistoryScope::Session);
-        let mut app = App::new(
-            SessionContext {
-                session_id: "session".into(),
-                active_agent: "test".into(),
-                project_branch: "main".into(),
-            },
-            false,
-            directory.path(),
+        app.apply_update(LocalUpdate::Reset {
+            view: Box::new(view.clone()),
+            generation: 1,
+        });
+        app.apply_update(LocalUpdate::History {
+            anchor: view.history.clone(),
+            generation: 1,
+            stale: false,
+            result: Err(lattice_api::local::HistoryReadError {
+                context: lattice_api::local::HistoryReadContext::Worker,
+                error: read_error(),
+            }),
+        });
+        assert!(
+            app.blocks
+                .iter()
+                .any(|b| matches!(b, Block::Assistant(text) if text == "live answer"))
         );
-        for index in 0..=usize::from(snapshot_first) {
-            let first_owned = snapshot_first && index == 0;
-            tokio::time::timeout(Duration::from_secs(5), async {
-                let mut state_seen = false;
-                let mut history_seen = false;
-                while !state_seen || !history_seen {
-                    let update = connection.next().await.expect("应收到更新");
-                    match &update {
-                        LocalUpdate::State { view, phase, confirmation, error, .. } => {
-                            assert_eq!(*phase == ObservationPhase::Live, first_owned);
-                            assert_eq!(*confirmation == CompletionConfirmation::Confirmed, !first_owned && message.is_none());
-                            assert!(matches!(&view.requested_turn, Some(TurnObservation::Committed(turn)) if turn.turn_id == turn_id && turn.commit_id == "fixed-head" && turn.outcome == expected_outcome));
-                            assert_eq!(*error, if first_owned { None } else { expected.clone() });
-                            state_seen = true;
-                        }
-                        LocalUpdate::History { result, stale, .. } => {
-                            assert!(!stale);
-                            assert_eq!(result.is_err(), body_unavailable);
-                            match result {
-                                Err(error) => assert_eq!(error.error, read_error()),
-                                Ok(history) => assert!(!crate::session::history_blocks((**history).clone()).iter().any(|block| matches!(block, Block::Status { kind: StatusKind::Committed { .. }, .. }))),
-                            }
-                            history_seen = true;
-                        }
-                        LocalUpdate::Connection(status) => panic!("观察不应中断：{status:?}"),
-                        _ => {}
-                    }
-                    app.apply_update(update);
-                }
-            }).await.unwrap();
-            if first_owned {
-                finish_tx.take().unwrap().send(()).unwrap();
-            }
-        }
+        app.apply_update(LocalUpdate::State {
+            view: Box::new(view.clone()),
+            phase: ObservationPhase::Finished,
+            error: None,
+        });
         let text = crate::view::transcript_lines(&app, 200)
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(
-            text.contains(&format!("{expected_outcome:?}")) && text.contains(&turn_id.to_string()),
-            "{text}"
-        );
+        assert!(text.contains(outcome), "{text}");
+        assert!(text.contains("正文不可用"), "{text}");
         assert_eq!(
-            text.contains("committed fixed-head"),
-            message.is_none(),
-            "{text}"
-        );
-        assert_eq!(
-            text.matches("committed fixed-head").count(),
-            usize::from(message.is_none()),
-            "历史迟到不能重复完成状态：{text}"
-        );
-        if let Some(message) = message {
-            assert!(text.contains(message), "{text}");
-        }
-        if body_unavailable {
-            assert!(text.contains("正文不可用"), "{text}");
-        }
-        let reload = body_unavailable && snapshot_first && message.is_none();
-        if reload {
-            connection.reconnect();
-            tokio::time::timeout(Duration::from_secs(5), async {
-                loop {
-                    let update = connection.next().await.unwrap();
-                    let loaded = matches!(
-                        &update,
-                        LocalUpdate::History {
-                            result: Ok(_),
-                            stale: false,
-                            ..
-                        }
-                    );
-                    app.apply_update(update);
-                    if loaded {
-                        break;
+            app.blocks
+                .iter()
+                .filter(|b| matches!(
+                    b,
+                    Block::Status {
+                        kind: StatusKind::Summary { .. },
+                        ..
                     }
-                }
-            })
-            .await
-            .unwrap();
-        }
-        let report = connection.detach().await;
-        assert_eq!(report.history_error.is_some(), body_unavailable && !reload);
-        if reload {
-            let state = report.state.as_ref().unwrap();
-            assert_eq!(state.confirmation, CompletionConfirmation::Confirmed);
-            assert!(
-                matches!(&state.view.requested_turn, Some(TurnObservation::Committed(turn)) if turn.turn_id == turn_id && turn.outcome == expected_outcome)
-            );
-            assert!(
-                !crate::connection::detach_lines(report)
-                    .iter()
-                    .any(|line| line.contains("正文不可用"))
-            );
-        }
-        server.abort();
-        let _ = server.await;
+                ))
+                .count(),
+            1
+        );
     }
 }
 
-async fn send_response(stream: &mut tokio::net::UnixStream, response: &Value) {
-    let bytes = serde_json::to_vec(response).unwrap();
-    stream.write_all(b"LTLOCAL2").await.unwrap();
-    stream.write_u32(bytes.len() as u32).await.unwrap();
-    stream.write_all(&bytes).await.unwrap();
+#[test]
+fn retry_replaces_only_its_attempt_and_stale_history_cannot_replace_display() {
+    let mut app = app();
+    let id = lattice_api::local::new_turn_id();
+    let key = lattice_api::local::ModelAttemptKey {
+        turn_id: id,
+        model_step_ordinal: 0,
+        attempt_ordinal: 1,
+    };
+    app.apply_turn_event(TurnEvent::TokenDelta {
+        key,
+        content: "first attempt".into(),
+    });
+    let next = lattice_api::local::ModelAttemptKey {
+        attempt_ordinal: 2,
+        ..key
+    };
+    app.apply_turn_event(TurnEvent::TokenDelta {
+        key: next,
+        content: "retry answer".into(),
+    });
+    let view = view(id, "completed");
+    app.apply_update(LocalUpdate::Reset {
+        view: Box::new(view.clone()),
+        generation: 2,
+    });
+    app.apply_update(LocalUpdate::History {
+        anchor: view.history.clone(),
+        generation: 1,
+        stale: true,
+        result: Ok(Box::new(lattice_api::local::LocalHistory {
+            anchor: view.history,
+            entries: vec![],
+        })),
+    });
+    let text = crate::view::transcript_lines(&app, 200)
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("retry answer"), "{text}");
+    assert!(!text.contains("first attempt"), "{text}");
+}
+
+#[test]
+fn closed_owned_snapshot_is_idle_before_history_and_finished_is_separate() {
+    let mut app = app();
+    app.input.set_text("prompt");
+    app.submit();
+    let id = app.current_turn.unwrap();
+    let mut view = view(id, "completed");
+    view.owned = true;
+    app.apply_update(LocalUpdate::State {
+        view: Box::new(view.clone()),
+        phase: ObservationPhase::Live,
+        error: None,
+    });
+    assert_eq!(app.phase, TurnPhase::Idle);
+    assert_eq!(app.current_turn, None);
+    assert_ne!(
+        app.state.as_ref().unwrap().phase,
+        ObservationPhase::Finished
+    );
+    app.apply_update(LocalUpdate::Reset {
+        view: Box::new(view.clone()),
+        generation: 1,
+    });
+    app.apply_update(LocalUpdate::Finished {
+        turn: Some(lattice_api::local::TurnRef {
+            session_id: view.session.session_id,
+            turn_id: id,
+        }),
+        anchor: view.history,
+        generation: 1,
+    });
+    assert_eq!(
+        app.state.as_ref().unwrap().phase,
+        ObservationPhase::Finished
+    );
+}
+
+#[test]
+fn loaded_step_and_terminal_tool_cannot_be_overwritten_by_late_events() {
+    let mut app = app();
+    let id = lattice_api::local::new_turn_id();
+    let key = ModelAttemptKey {
+        turn_id: id,
+        model_step_ordinal: 0,
+        attempt_ordinal: 0,
+    };
+    let invocation = "30000000-0000-4000-8000-000000000003".to_string();
+    app.replace_history(vec![
+        Block::Step(StepKey {
+            turn_id: id,
+            ordinal: 0,
+        }),
+        Block::Assistant("saved".into()),
+        Block::Tool {
+            id: invocation.clone(),
+            name: "observe.workspace".into(),
+            state: ToolState::Unavailable {
+                outcome: "succeeded".into(),
+            },
+            source: ToolSource::HistoryResult,
+        },
+    ]);
+    app.apply_turn_event(TurnEvent::TokenDelta {
+        key,
+        content: "saved".into(),
+    });
+    app.apply_turn_event(TurnEvent::ToolCallFinished {
+        id: invocation.parse().unwrap(),
+        name: "observe.workspace".into(),
+        outcome: ToolResultOutcome::Failed,
+        material: MaterialSummary::NoContent,
+        error_summary: Some("late".into()),
+    });
+    assert_eq!(
+        app.blocks
+            .iter()
+            .filter(|b| matches!(b, Block::Assistant(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        app.blocks
+            .iter()
+            .filter(|b| matches!(b, Block::Tool { .. }))
+            .count(),
+        1
+    );
+    assert!(app.blocks.iter().any(|b|matches!(b,Block::Tool{state:ToolState::Unavailable{outcome},..} if outcome=="succeeded")));
 }

@@ -36,7 +36,7 @@ pub(crate) fn assert_clean_send(execution: &SendExecution) -> Result<(), AssertE
     Ok(())
 }
 
-/// 接受回执与固定终态对应同一身份；不要求有损观察通道重放 TurnStarted/Committed。
+/// 接受与持久关闭快照必须对应同一 Turn，且 summary 来自公开读取。
 pub(crate) fn assert_accepted_and_closed(outcome: &SendOutcome) -> Result<(), AssertError> {
     let id = outcome
         .accepted_turn_id()
@@ -44,22 +44,20 @@ pub(crate) fn assert_accepted_and_closed(outcome: &SendOutcome) -> Result<(), As
             expected: "durable acceptance acknowledgement".into(),
         })?;
     let accepted = outcome.events.iter().position(|event| matches!(event, TurnEventLine::Unknown { type_name, .. } if type_name == "acceptance")).unwrap();
-    let closed = outcome.events.iter().position(|event| match event {
-        TurnEventLine::Unknown { type_name, raw } if type_name == "snapshot" => {
-            raw["view"]["requested_turn"]["state"] == "committed"
-                && raw["view"]["requested_turn"]["turn_id"].as_str() == Some(id)
-                && raw["view"]["active_turn"].is_null()
-        }
-        _ => false,
+    let closed = outcome.events.iter().position(|event| {
+        matches!(event,
+        TurnEventLine::Unknown { type_name, raw } if type_name == "snapshot"
+        && raw["view"]["selected_turn"]["turn_id"].as_str() == Some(id)
+        && !raw["view"]["selected_turn"]["summary"].is_null()
+        && raw["view"]["session"]["active_turn"].is_null())
     });
     require(
         closed.is_some_and(|closed| accepted < closed),
-        "fixed committed view must follow and close the accepted TurnId",
+        "closed snapshot must follow acceptance",
     )
 }
 
-/// 有损观察通道可能淘汰 `turn_committed`；权威终态由固定发布补齐：要求带非空
-/// commit id 的 completed 固定视图出现在给定事件之后，而不是要求重放瞬时事件。
+/// 不要求瞬时事件重放；公开快照中的持久 summary 必须晚于指定进度。
 pub(crate) fn assert_committed_view_after(
     outcome: &SendOutcome,
     after: &str,
@@ -69,27 +67,22 @@ pub(crate) fn assert_committed_view_after(
         .iter()
         .rposition(|event| event.type_name() == after)
         .ok_or_else(|| AssertError::StdoutMissing {
-            expected: format!("missing '{after}' before the fixed committed view"),
+            expected: format!("missing '{after}'"),
         })?;
-    let closed = outcome.events.iter().position(|event| match event {
-        TurnEventLine::Unknown { type_name, raw } if type_name == "snapshot" => {
-            raw["view"]["requested_turn"]["state"] == "committed"
-        }
-        _ => false,
+    let closed = outcome.events.iter().rposition(|event| {
+        matches!(event,
+        TurnEventLine::Unknown { type_name, raw } if type_name == "snapshot"
+        && raw["view"]["selected_turn"]["summary"]["outcome"] == "completed")
     });
     require(
         closed.is_some_and(|closed| anchor < closed),
-        format!("fixed committed view must follow '{after}'"),
+        format!("completed snapshot must follow '{after}'"),
     )?;
-    let (_, commit_id, result) =
-        outcome
-            .committed_result()
-            .ok_or_else(|| AssertError::StdoutMissing {
-                expected: "strict committed result".into(),
-            })?;
     require(
-        !commit_id.is_empty() && result == "completed",
-        "committed result must carry a commit id and a completed outcome",
+        outcome
+            .closed_result()
+            .is_some_and(|(_, _, result)| result == "completed"),
+        "durable completed summary",
     )
 }
 

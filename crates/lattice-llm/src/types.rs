@@ -4,7 +4,7 @@
 //! These types define the direct wire contract for LATTICE LLM calls
 //! and are independent of `lattice-core`.
 
-use lattice_conversation::{BoundToolCall, NativeMessage, TokenUsage};
+use lattice_conversation::{ConversationItem, NativeMessage, TokenUsage};
 use serde::{Deserialize, Serialize};
 
 /// A tool definition providing a function specification to the model.
@@ -35,7 +35,7 @@ impl ToolDefinition {
 pub struct ChatRequest {
     /// Durable provider-neutral history. Provider wire is projected exactly once
     /// by the selected provider builder.
-    pub messages: Vec<NativeMessage<BoundToolCall>>,
+    pub messages: Vec<ConversationItem>,
     pub tools: Vec<ToolDefinition>,
     pub target: ModelTarget,
     pub temperature: Option<f64>,
@@ -45,10 +45,7 @@ pub struct ChatRequest {
 }
 
 impl ChatRequest {
-    pub fn new(
-        messages: impl Into<Vec<NativeMessage<BoundToolCall>>>,
-        target: ModelTarget,
-    ) -> Self {
+    pub fn new(messages: impl Into<Vec<ConversationItem>>, target: ModelTarget) -> Self {
         ChatRequest {
             messages: messages.into(),
             tools: Vec::new(),
@@ -58,6 +55,13 @@ impl ChatRequest {
             max_completion_tokens: None,
         }
     }
+}
+
+/// provider 的错误分类独立于已收到的 delta 数量。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderFailure {
+    pub message: String,
+    pub retryable: bool,
 }
 
 /// A streaming LLM event for the API.
@@ -97,7 +101,10 @@ pub enum LlmEvent {
         usage: Option<TokenUsage>,
     },
     Error {
-        message: String,
+        failure: ProviderFailure,
+    },
+    OutputLimit {
+        interruption: lattice_conversation::AttemptInterruption,
     },
     Citation {
         index: usize,
@@ -116,6 +123,17 @@ pub enum LlmEvent {
         category: String,
         probability: String,
     },
+}
+
+impl LlmEvent {
+    pub(crate) fn error(message: impl Into<String>, retryable: bool) -> Self {
+        Self::Error {
+            failure: ProviderFailure {
+                message: message.into(),
+                retryable,
+            },
+        }
+    }
 }
 
 /// A model target specifying which model alias to route to.
@@ -164,7 +182,7 @@ mod tests {
     #[test]
     fn chat_request_round_trips_native_history() {
         let request = ChatRequest {
-            messages: vec![user("hello")],
+            messages: vec![ConversationItem::Message(user("hello"))],
             tools: vec![ToolDefinition::new(
                 "get_weather",
                 "Get weather",

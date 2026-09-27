@@ -529,6 +529,7 @@ pub struct ScenarioEvidence {
     captures: Vec<crate::fake_llm::CapturedRequest>,
     sentinels: Vec<String>,
     pty_output: Vec<Vec<u8>>,
+    attachments: Vec<(String, serde_json::Value)>,
 }
 
 impl ScenarioEvidence {
@@ -566,6 +567,7 @@ impl ScenarioEvidence {
             captures: Vec::new(),
             sentinels,
             pty_output: Vec::new(),
+            attachments: Vec::new(),
         })
     }
 
@@ -579,6 +581,16 @@ impl ScenarioEvidence {
     pub fn record_captures(&mut self, captures: Vec<crate::fake_llm::CapturedRequest>) {
         self.captures = captures;
     }
+    /// 保存场景的公开读取、屏障和产物身份；与其他证据共用脱敏及扫描。
+    pub fn record_json(
+        &mut self,
+        name: &str,
+        value: &serde_json::Value,
+    ) -> Result<(), EvidenceError> {
+        validate_artifact_name(OsStr::new(name))?;
+        self.attachments.push((name.to_owned(), value.clone()));
+        Ok(())
+    }
 
     /// PTY 字节单独记录，不伪造管道命令的退出或 EOF 证据。
     pub fn record_pty(&mut self, bytes: &[u8]) {
@@ -588,6 +600,21 @@ impl ScenarioEvidence {
     pub fn finish_report(self, primary_assertion: Option<String>) -> Result<(), FailureReport> {
         let persist = primary_assertion.is_some();
         self.finish_internal(primary_assertion, persist)
+    }
+
+    /// 断言成功后调用：先排空自有后台，再写入独立的新目录；绝不覆盖旧证据。
+    pub fn finish_success(mut self, target: &Path) -> Result<(), EvidenceError> {
+        if let Err(errors) = self.daemon.cleanup(self.budget.normal_stop_deadline()) {
+            return self
+                .finish_report(Some(format!("daemon cleanup: {errors:?}")))
+                .map_err(|report| EvidenceError::FailureReport(report.to_string()));
+        }
+        let claim = ArtifactClaim::acquire(target)?;
+        std::fs::create_dir(target)?;
+        self.failure_dir = target.to_path_buf();
+        self._claim = claim;
+        self.finish_internal(None, true)
+            .map_err(|report| EvidenceError::FailureReport(report.to_string()))
     }
 
     pub fn finish(self, failed: bool) -> Result<(), EvidenceError> {
@@ -623,6 +650,17 @@ impl ScenarioEvidence {
             return report.finish();
         }
 
+        for (name, value) in &self.attachments {
+            attempt(
+                "write JSON evidence",
+                std::fs::write(
+                    self.failure_dir.join(format!("{name}.json")),
+                    redact(&value.to_string(), &secrets),
+                ),
+                &secrets,
+                &mut report.evidence_errors,
+            );
+        }
         for (index, bytes) in self.pty_output.iter().enumerate() {
             attempt(
                 "write PTY output",
@@ -1489,6 +1527,34 @@ mod tests {
             std::fs::read_to_string(failure_dir.join("leak.txt")).unwrap(),
             "leak [REDACTED]"
         );
+    }
+
+    #[test]
+    fn success_archive_is_separate_redacted_and_never_overwritten() {
+        let world = ScenarioWorld::new("success-evidence").unwrap();
+        let root = TempDir::new().unwrap();
+        let failure = root.path().join("failure");
+        let success = root.path().join("success");
+        let mut evidence =
+            ScenarioEvidence::new_at_dir(&world, failure.clone(), ["secret-token".into()]).unwrap();
+        evidence.record_pty(b"answer secret-token");
+        evidence
+            .record_json("cut", &json!({"marker":"secret-token","sequence":65}))
+            .unwrap();
+        assert!(evidence.record_json("../escape", &json!({})).is_err());
+        evidence.finish_success(&success).unwrap();
+        assert!(!failure.exists());
+        assert!(
+            !std::fs::read_to_string(success.join("0-pty.txt"))
+                .unwrap()
+                .contains("secret-token")
+        );
+        let cut: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(success.join("cut.json")).unwrap()).unwrap();
+        assert_eq!(cut, json!({"marker":"[REDACTED]","sequence":65}));
+        let evidence = ScenarioEvidence::new_at_dir(&world, failure, []).unwrap();
+        assert!(evidence.finish_success(&success).is_err());
+        assert!(success.join("0-pty.txt").exists());
     }
 
     #[test]

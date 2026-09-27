@@ -1,197 +1,157 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! 尽力投递的观察通道；序号在第一个可能丢失的位置之前分配。
+//! Owner 的无损内存切点：先同步更新段、窗口与序号，再发送可合并唤醒。
 
-use std::collections::{HashSet, VecDeque};
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
-};
-use std::time::Duration;
+use super::types::{AttemptSegments, SequencedTurnEvent, TextSegment, TurnEvent};
+use lattice_session::store::{ActiveStep, DurableSnapshot, SessionStore};
+use std::{collections::VecDeque, sync::Mutex};
 
-use tokio::sync::mpsc;
-
-use super::types::{SequencedTurnEvent, TurnEvent};
-
-pub(super) const OBSERVER_SEND_TIMEOUT: Duration = Duration::from_millis(500);
-
-fn is_streaming_delta(event: &TurnEvent) -> bool {
-    matches!(
-        event,
-        TurnEvent::TokenDelta { .. } | TurnEvent::ReasoningDelta { .. }
-    )
+#[derive(Default)]
+struct ObservationState {
+    seq: u64,
+    events: VecDeque<SequencedTurnEvent>,
+    attempt: Option<AttemptSegments>,
+    terminal: bool,
 }
 
-enum Sender {
-    #[cfg(test)]
-    Legacy(mpsc::Sender<TurnEvent>),
-    Sequenced(mpsc::Sender<SequencedTurnEvent>),
+pub(crate) struct ObserverSink {
+    state: Mutex<ObservationState>,
+    changed: tokio::sync::watch::Sender<u64>,
 }
-
-pub(super) struct ObserverSink {
-    sender: Sender,
-    sequence: Arc<AtomicU64>,
-    gave_up: bool,
+impl Default for ObserverSink {
+    fn default() -> Self {
+        Self {
+            state: Mutex::default(),
+            changed: tokio::sync::watch::channel(0).0,
+        }
+    }
 }
-
 impl ObserverSink {
-    #[cfg(test)]
-    pub(super) fn new(sender: mpsc::Sender<TurnEvent>) -> Self {
-        Self {
-            sender: Sender::Legacy(sender),
-            sequence: Arc::default(),
-            gave_up: false,
-        }
+    pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changed.subscribe()
     }
 
-    pub(super) fn sequenced(
-        sender: mpsc::Sender<SequencedTurnEvent>,
-        sequence: Arc<AtomicU64>,
-    ) -> Self {
-        Self {
-            sender: Sender::Sequenced(sender),
-            sequence,
-            gave_up: false,
-        }
-    }
-
-    /// 模型增量在唯一丢弃点之前编号；回调不等待观察者，也不建立额外转发队列。
-    pub(super) fn emit_delta(&mut self, event: TurnEvent) {
-        let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
-        if self.gave_up {
+    /// 模型回调直接进入此处；没有可能在保存段之前丢失 delta 的通道。
+    pub(crate) fn emit(&self, event: TurnEvent) {
+        let mut state = self.state.lock().expect("observation lock poisoned");
+        if state.terminal {
             return;
         }
-        match &self.sender {
-            #[cfg(test)]
-            Sender::Legacy(sender) => {
-                let _ = sender.try_send(event);
+        match &event {
+            TurnEvent::ModelStarted { key, .. } => {
+                state.attempt = Some(AttemptSegments {
+                    key: *key,
+                    segments: Vec::new(),
+                });
             }
-            Sender::Sequenced(sender) => {
-                let _ = sender.try_send(SequencedTurnEvent { sequence, event });
+            TurnEvent::TokenDelta { key, content } | TurnEvent::ReasoningDelta { key, content } => {
+                let Some(attempt) = state.attempt.as_mut().filter(|a| a.key == *key) else {
+                    return;
+                };
+                let text = matches!(&event, TurnEvent::TokenDelta { .. });
+                match (attempt.segments.last_mut(), text) {
+                    (Some(TextSegment::Text { text }), true)
+                    | (Some(TextSegment::Reasoning { text }), false) => text.push_str(content),
+                    _ => attempt.segments.push(if text {
+                        TextSegment::Text {
+                            text: content.clone(),
+                        }
+                    } else {
+                        TextSegment::Reasoning {
+                            text: content.clone(),
+                        }
+                    }),
+                }
             }
+            TurnEvent::LlmRequestError { key, .. } => {
+                if state.attempt.as_ref().is_some_and(|a| a.key == *key) {
+                    state.attempt = None;
+                }
+            }
+            TurnEvent::StepClosed { .. } => state.attempt = None,
+            TurnEvent::TurnCompleted { .. }
+            | TurnEvent::TurnFailed { .. }
+            | TurnEvent::TurnCancelled { .. } => {
+                state.attempt = None;
+                state.terminal = true;
+            }
+            TurnEvent::TurnStarted { .. }
+            | TurnEvent::ModelFinished { .. }
+            | TurnEvent::CallsRegistered { .. }
+            | TurnEvent::ToolCallStarted { .. }
+            | TurnEvent::ToolCallFinished { .. }
+            | TurnEvent::CepCallStarted { .. }
+            | TurnEvent::CepCallFinished { .. } => {}
         }
+        state.seq = state
+            .seq
+            .checked_add(1)
+            .expect("observation sequence exhausted");
+        let sequence = state.seq;
+        state
+            .events
+            .push_back(SequencedTurnEvent { sequence, event });
+        if state.events.len() > 64 {
+            state.events.pop_front();
+        }
+        // 通知在同锁更新之后发布，watch 合并不会丢掉内存权威。
+        self.changed.send_replace(sequence);
     }
 
-    pub(super) async fn emit(&mut self, event: TurnEvent) {
-        let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
-        if self.gave_up {
-            return;
+    /// None 表示必须重新快照；空 Vec 表示已赶上切点，而非丢失事件。
+    pub(crate) fn events_after(&self, sequence: u64) -> Option<Vec<SequencedTurnEvent>> {
+        let state = self.state.lock().expect("observation lock poisoned");
+        if sequence > state.seq
+            || state
+                .events
+                .front()
+                .is_some_and(|e| sequence.saturating_add(1) < e.sequence)
+        {
+            return None;
         }
-        let delta = is_streaming_delta(&event);
-        match &self.sender {
-            #[cfg(test)]
-            Sender::Legacy(sender) => {
-                if delta {
-                    let _ = sender.try_send(event);
-                } else if !matches!(
-                    tokio::time::timeout(OBSERVER_SEND_TIMEOUT, sender.send(event)).await,
-                    Ok(Ok(()))
-                ) {
-                    self.gave_up = true;
-                }
-            }
-            Sender::Sequenced(sender) => {
-                let event = SequencedTurnEvent { sequence, event };
-                if delta {
-                    let _ = sender.try_send(event);
-                } else if !matches!(
-                    tokio::time::timeout(OBSERVER_SEND_TIMEOUT, sender.send(event)).await,
-                    Ok(Ok(()))
-                ) {
-                    self.gave_up = true;
-                }
-            }
+        Some(
+            state
+                .events
+                .iter()
+                .filter(|e| e.sequence > sequence)
+                .cloned()
+                .collect(),
+        )
+    }
+
+    /// 调用方在阻塞边界内持当前代租约；同锁 begin_read，锁外解码，事务不返回 async 层。
+    pub(crate) fn snapshot(
+        &self,
+        store: &SessionStore,
+        session: lancet_protocol::SessionId,
+        turn: Option<lancet_protocol::TurnId>,
+    ) -> lattice_session::store::Result<(DurableSnapshot, Option<AttemptSegments>, u64)> {
+        let (read, mut attempt, seq) = {
+            let state = self.state.lock().expect("observation lock poisoned");
+            (store.begin_read()?, state.attempt.clone(), state.seq)
+        };
+        let snapshot = read.snapshot(session, turn)?;
+        if !snapshot.active.as_ref().is_some_and(|active| {
+            attempt.as_ref().is_some_and(|a| {
+                a.key.turn_id == active.key.turn_id
+                    && a.key.model_step_ordinal == active.key.ordinal
+                    && match &active.state {
+                        ActiveStep::Requesting { attempt } => a.key.attempt_ordinal == *attempt,
+                        ActiveStep::Executing { .. } => active
+                            .attempts
+                            .last()
+                            .is_some_and(|last| last.attempt == a.key.attempt_ordinal),
+                        ActiveStep::RetryReady { .. } => false,
+                    }
+            })
+        }) {
+            attempt = None;
         }
+        Ok((snapshot, attempt, seq))
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn sequence_includes_dropped_deltas_and_the_unobserved_tail() {
-        let (tx, mut rx) = mpsc::channel(1);
-        let count = Arc::new(AtomicU64::new(0));
-        let mut sink = ObserverSink::sequenced(tx, count.clone());
-        sink.emit_delta(TurnEvent::TokenDelta {
-            content: "first".into(),
-        });
-        sink.emit_delta(TurnEvent::TokenDelta {
-            content: "lost".into(),
-        });
-        assert_eq!(rx.recv().await.unwrap().sequence, 1);
-        sink.emit(TurnEvent::TurnCommitting).await;
-        assert_eq!(rx.recv().await.unwrap().sequence, 3);
-        drop(rx);
-        sink.emit(TurnEvent::TurnCommitting).await;
-        sink.emit(TurnEvent::TokenDelta {
-            content: "tail".into(),
-        })
-        .await;
-        assert_eq!(count.load(Ordering::Relaxed), 5);
-    }
-}
-
-#[derive(Default)]
-pub(super) struct CepOrderedEmitter {
-    completed_calls: HashSet<lancet_protocol::InvocationId>,
-    buffered: VecDeque<(Option<lancet_protocol::InvocationId>, TurnEvent)>,
-}
-
-impl CepOrderedEmitter {
-    pub(super) async fn emit(&mut self, observer: &mut ObserverSink, event: TurnEvent) {
-        match event {
-            TurnEvent::CepCallStarted { .. } => observer.emit(event).await,
-            TurnEvent::CepCallFinished { invocation_id, .. } => {
-                observer.emit(event).await;
-                self.completed_calls.insert(invocation_id);
-                self.flush_call(observer, invocation_id).await;
-            }
-            event @ TurnEvent::ToolCallFinished { .. } => {
-                let invocation_id = tool_call_finished_id(&event);
-                if invocation_id.is_some_and(|id| self.completed_calls.remove(&id)) {
-                    observer.emit(event).await;
-                } else {
-                    self.buffered.push_back((invocation_id, event));
-                }
-            }
-            event => observer.emit(event).await,
-        }
-    }
-
-    pub(super) async fn finish(&mut self, observer: &mut ObserverSink) {
-        self.completed_calls.clear();
-        while let Some((_, event)) = self.buffered.pop_front() {
-            observer.emit(event).await;
-        }
-    }
-
-    async fn flush_call(
-        &mut self,
-        observer: &mut ObserverSink,
-        invocation_id: lancet_protocol::InvocationId,
-    ) {
-        let mut buffered = std::mem::take(&mut self.buffered);
-        let mut emitted = false;
-        while let Some((buffered_id, event)) = buffered.pop_front() {
-            if buffered_id == Some(invocation_id) {
-                observer.emit(event).await;
-                emitted = true;
-            } else {
-                self.buffered.push_back((buffered_id, event));
-            }
-        }
-        if emitted {
-            self.completed_calls.remove(&invocation_id);
-        }
-    }
-}
-
-fn tool_call_finished_id(event: &TurnEvent) -> Option<lancet_protocol::InvocationId> {
-    let TurnEvent::ToolCallFinished { id, .. } = event else {
-        return None;
-    };
-    lancet_protocol::InvocationId::parse(id).ok()
-}
+#[path = "observer_tests.rs"]
+mod redb_tests;

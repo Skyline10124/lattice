@@ -41,12 +41,16 @@ pub(crate) fn openai_wire_tool_name(canonical: &str) -> String {
 pub(crate) fn openai_canonical_tool_name(wire: &str) -> String {
     wire.replace("__", ".")
 }
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use lattice_conversation::{
     AttemptInterruption, BoundToolCall, InvocationId, MessageRole, MessageSemantic, NativeMessage,
     ProviderOrigin, TokenUsage, ToolCallState, ToolCallValidation, ToolResultOutcome,
     UnboundToolCall,
+};
+use lattice_conversation::{
+    ConversationItem, MAX_TOOL_CONTENT_BYTES, ResultPayload, StoredToolResult, SuccessContent,
+    canonical_json, tool_content_digest,
 };
 use serde_json::Value;
 use thiserror::Error;
@@ -55,6 +59,8 @@ use thiserror::Error;
 /// message, no fabricated identity, no guessed replay state.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ProjectionError {
+    #[error("invalid structured step: {detail}")]
+    InvalidStep { detail: &'static str },
     /// The wire JSON does not match the provider's official shape.
     #[error("malformed {provider} wire: {detail}")]
     MalformedWire {
@@ -222,57 +228,36 @@ pub struct RequestMessages {
 /// message through a second DTO or invent a missing provider call ID.
 pub fn request_messages_to_wire(
     origin: ProviderOrigin,
-    history: &[NativeMessage<BoundToolCall>],
+    history: &[ConversationItem],
 ) -> Result<RequestMessages, ProjectionError> {
     let mut system = None;
     let mut messages = Vec::new();
-    let mut last_assistant: Option<NativeMessage<BoundToolCall>> = None;
-    let mut index = 0;
-
-    while index < history.len() {
-        let message = &history[index];
-        match message.role {
-            MessageRole::System => {
-                push_system_text(&mut system, &plain_text(origin, message)?);
-                last_assistant = None;
-                index += 1;
-            }
-            MessageRole::User => {
-                messages.push(user_to_wire(origin, &plain_text(origin, message)?));
-                last_assistant = None;
-                index += 1;
-            }
-            MessageRole::Assistant => {
-                let projected = if message.provider_origin == Some(origin) {
-                    message.clone()
-                } else {
-                    project_cross_provider(message, origin)
-                };
-                messages.push(native_to_wire(origin, &projected)?);
-                last_assistant = Some(projected);
-                index += 1;
-            }
-            MessageRole::Tool => {
-                let assistant = last_assistant.as_ref().ok_or_else(|| {
-                    ProjectionError::MalformedWire {
-                        provider: origin,
-                        detail: format!(
-                            "tool message at history ordinal {index} has no preceding assistant message"
-                        ),
-                    }
-                })?;
-                let mut parts = Vec::new();
-                while index < history.len() && history[index].role == MessageRole::Tool {
-                    parts.extend(history[index].parts.clone());
-                    index += 1;
+    for item in history {
+        match item {
+            ConversationItem::Message(message) => match message.role {
+                MessageRole::System => push_system_text(&mut system, &plain_text(origin, message)?),
+                MessageRole::User => {
+                    messages.push(user_to_wire(origin, &plain_text(origin, message)?))
                 }
-                let tool = NativeMessage::new(MessageRole::Tool, None, parts);
-                messages.extend(tool_results_to_wire(origin, assistant, &tool)?);
-                last_assistant = None;
+                _ => {
+                    return Err(ProjectionError::InvalidStep {
+                        detail: "standalone message must be system or user",
+                    });
+                }
+            },
+            ConversationItem::Step(step) => {
+                let projected = if step.assistant.provider_origin == Some(origin) {
+                    step.assistant.clone()
+                } else {
+                    project_cross_provider(&step.assistant, origin)
+                };
+                // 先核完整配对，再生成 wire；不从相邻历史修补结果。
+                let results = tool_results_to_wire(origin, &projected, &step.results)?;
+                messages.push(native_to_wire(origin, &projected)?);
+                messages.extend(results);
             }
         }
     }
-
     Ok(RequestMessages { system, messages })
 }
 
@@ -331,86 +316,104 @@ fn user_to_wire(origin: ProviderOrigin, text: &str) -> Value {
     }
 }
 
-/// One conversation ToolResult closure joined to its closing bound ToolCall.
+/// 已核验配对后的 provider 输入，仅存在于本次投影。
 struct ToolResultClosure {
     invocation_id: InvocationId,
     provider_call_id: Option<String>,
     name: String,
     outcome: ToolResultOutcome,
-    content: Option<String>,
+    content: String,
 }
 
-/// The model-facing wire content of one closure.
-///
-/// Available material is passed through verbatim. A closure whose material is
-/// unavailable carries the true outcome spelled in a self-describing JSON
-/// object instead — the outcome stays honest without inventing Tool output.
-fn closure_content(outcome: ToolResultOutcome, content: &Option<String>) -> String {
-    match content {
-        Some(text) => text.clone(),
-        None => format!("{{\"outcome\":\"{}\"}}", outcome.as_str()),
-    }
+fn closure_content(payload: &ResultPayload) -> String {
+    use serde_json::json;
+    let value = match payload {
+        ResultPayload::Succeeded(SuccessContent::Json { value, .. }) => {
+            return canonical_json(value);
+        }
+        ResultPayload::Succeeded(SuccessContent::OutputTooLarge {
+            digest,
+            byte_length,
+        }) => json!({
+            "outcome": "succeeded", "content_unavailable": "output_too_large",
+            "digest": digest.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+            "byte_length": byte_length,
+        }),
+        ResultPayload::Failed(error) | ResultPayload::Rejected(error) => {
+            const BOUNDED_ERROR_CONTENT_BYTES: usize = 4_096;
+            let mut end = error.message.len().min(BOUNDED_ERROR_CONTENT_BYTES);
+            while !error.message.is_char_boundary(end) {
+                end -= 1;
+            }
+            json!({"error":{"code":error.code.as_i32(), "message":&error.message[..end]}})
+        }
+        _ => json!({"outcome":payload.outcome().as_str()}),
+    };
+    canonical_json(&value)
 }
 
-/// Encode one conversation ToolResult closure message into the origin
-/// provider's next-request wire shape (ADR 0005 §7, #139-B Commit 2).
-///
-/// `assistant` is the bound Tool-bearing message the closures belong to; each
-/// closure is joined to its closing ToolCall by canonical `InvocationId`, and
-/// the provider call ID required by the OpenAI/Anthropic wire is taken from
-/// that call — never synthesized. Providers with no ID-bearing result shape
-/// (Gemini `functionResponse`) encode closures whose calls carry no provider
-/// ID.
-///
-/// Returns the request messages to append, in closure order: one message per
-/// closure for the OpenAI wire, one merged user turn for the Anthropic and
-/// Gemini wires.
+/// 按助手调用顺序核验精确结果配对；provider ID 只来自同一个调用。
 pub fn tool_results_to_wire(
     origin: ProviderOrigin,
     assistant: &NativeMessage<BoundToolCall>,
-    tool: &NativeMessage<BoundToolCall>,
+    results: &[StoredToolResult],
 ) -> Result<Vec<Value>, ProjectionError> {
-    let mut closing_ids: BTreeMap<InvocationId, Option<String>> = BTreeMap::new();
-    for (_, call) in assistant.tool_calls() {
-        closing_ids.insert(call.invocation_id, call.provider_call_id.clone());
+    let invalid = |detail| ProjectionError::InvalidStep { detail };
+    if assistant.role != MessageRole::Assistant
+        || assistant
+            .parts
+            .iter()
+            .any(|p| matches!(p.semantic, MessageSemantic::ToolResult { .. }))
+    {
+        return Err(invalid(
+            "step requires an assistant without embedded results",
+        ));
     }
-
-    let mut closures = Vec::new();
-    for (ordinal, part) in tool.parts.iter().enumerate() {
-        let MessageSemantic::ToolResult {
-            invocation_id,
-            name,
-            outcome,
-            content,
-        } = &part.semantic
-        else {
-            return Err(ProjectionError::MalformedWire {
-                provider: origin,
-                detail: format!("tool message part ordinal {ordinal} is not a ToolResult closure"),
-            });
-        };
-        // No provider result shape has a slot for part-local replay state.
-        if part.replay_state.is_some() {
-            return Err(ProjectionError::UnsupportedPart {
-                provider: origin,
-                part_ordinal: ordinal,
-            });
+    let calls: Vec<_> = assistant.tool_calls().collect();
+    if calls.len() != results.len() {
+        return Err(invalid("result count mismatch"));
+    }
+    let mut ids = BTreeSet::new();
+    let mut closures = Vec::with_capacity(results.len());
+    for ((_, call), result) in calls.into_iter().zip(results) {
+        if call.invocation_id != result.invocation_id
+            || call.name != result.name
+            || !ids.insert(result.invocation_id)
+        {
+            return Err(invalid("result identity, name or order mismatch"));
         }
-        let Some(provider_call_id) = closing_ids.get(invocation_id).cloned() else {
-            return Err(ProjectionError::UnmatchedToolResult {
-                provider: origin,
-                invocation_id: *invocation_id,
-            });
-        };
+        match &result.payload {
+            ResultPayload::Succeeded(SuccessContent::Json {
+                value,
+                digest,
+                byte_length,
+            }) => {
+                let bytes = canonical_json(value);
+                if bytes.len() > MAX_TOOL_CONTENT_BYTES
+                    || bytes.len() as u64 != *byte_length
+                    || tool_content_digest(&bytes) != *digest
+                {
+                    return Err(invalid("success content identity mismatch"));
+                }
+            }
+            ResultPayload::Succeeded(SuccessContent::OutputTooLarge { byte_length, .. })
+                if *byte_length <= MAX_TOOL_CONTENT_BYTES as u64 =>
+            {
+                return Err(invalid("invalid oversized result length"));
+            }
+            _ => {}
+        }
         closures.push(ToolResultClosure {
-            invocation_id: *invocation_id,
-            provider_call_id,
-            name: name.clone(),
-            outcome: *outcome,
-            content: content.clone(),
+            invocation_id: result.invocation_id,
+            provider_call_id: call.provider_call_id.clone(),
+            name: result.name.clone(),
+            outcome: result.payload.outcome(),
+            content: closure_content(&result.payload),
         });
     }
-
+    if closures.is_empty() {
+        return Ok(Vec::new());
+    }
     match origin {
         ProviderOrigin::OpenAiCompatible => openai::tool_result_messages(&closures),
         ProviderOrigin::Anthropic => anthropic::tool_result_messages(&closures),

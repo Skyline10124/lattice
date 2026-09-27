@@ -86,6 +86,7 @@ fn with_complete_message(mut events: Vec<LlmEvent>) -> Vec<LlmEvent> {
                 LlmEvent::MessageComplete { .. }
                     | LlmEvent::MessageRejected { .. }
                     | LlmEvent::Error { .. }
+                    | LlmEvent::OutputLimit { .. }
             )
         })
     {

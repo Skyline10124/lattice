@@ -25,7 +25,7 @@ pub fn prepare_terminal(
     let payload = match result {
         Ok(value) => {
             let bytes = lancet_protocol::canonical_json(&value);
-            let digest = crate::pending::draft::tool_content_digest(&bytes);
+            let digest = lattice_conversation::tool_content_digest(&bytes);
             let byte_length = bytes.len() as u64;
             ResultPayload::Succeeded(if bytes.len() > MAX_TOOL_CONTENT_BYTES {
                 SuccessContent::OutputTooLarge {
@@ -52,10 +52,7 @@ pub fn prepare_terminal(
                 CepErrorFamily::Validation | CepErrorFamily::Permission | CepErrorFamily::Guard
             ) =>
             {
-                ResultPayload::Rejected(RejectedReason {
-                    code,
-                    retriability: e.retriability,
-                })
+                ResultPayload::Rejected(Box::new(e))
             }
             _ => ResultPayload::Failed(Box::new(e)),
         },

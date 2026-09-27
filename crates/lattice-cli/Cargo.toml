@@ -28,11 +28,10 @@ url = { workspace = true }
 
 [dev-dependencies]
 lattice-api = { workspace = true, features = ["test-utils"] }
-lancet-audit = { workspace = true, features = ["test-support"] }
 lattice-agent = { workspace = true, features = ["test-utils"] }
 lattice-profile = { workspace = true }
 lattice-llm = { workspace = true }
-lattice-session = { workspace = true, features = ["test-utils"] }
+lattice-session = { workspace = true, features = ["test-utils", "test-support"] }
 async-trait = { workspace = true }
 tempfile = { workspace = true }
 

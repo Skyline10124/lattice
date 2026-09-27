@@ -125,7 +125,10 @@ impl OpenAiSseParser {
             })
             .collect::<Vec<_>>();
         let completion = super::projection_result_event(self.complete_message());
-        let failed = matches!(completion, LlmEvent::Error { .. });
+        let failed = matches!(
+            completion,
+            LlmEvent::Error { .. } | LlmEvent::OutputLimit { .. }
+        );
         events.push(completion);
         if !failed {
             events.push(LlmEvent::Done {
@@ -154,7 +157,8 @@ impl OpenAiSseParser {
             Err(e) => return vec![e],
         };
 
-        if let Some(error_event) = super::extract_api_error(&root) {
+        if let Some(error_event) = super::extract_api_error(ProviderOrigin::OpenAiCompatible, &root)
+        {
             return vec![error_event];
         }
 
@@ -202,11 +206,10 @@ impl OpenAiSseParser {
                             .and_then(|value| value.as_u64())
                             .and_then(|value| u32::try_from(value).ok())
                         else {
-                            return vec![LlmEvent::Error {
-                                message:
-                                    "malformed OpenAI wire: tool call index is missing or too large"
-                                        .to_string(),
-                            }];
+                            return vec![LlmEvent::error(
+                                "malformed OpenAI wire: tool call index is missing or too large",
+                                false,
+                            )];
                         };
                         let slot = self.tool_calls.entry(index).or_insert_with(|| {
                             let part_ordinal = self.parts.len();
@@ -272,9 +275,7 @@ impl OpenAiSseParser {
                 Ok(usage) => events.extend(self.finish(usage)),
                 Err(error) => {
                     self.completed = true;
-                    events.push(LlmEvent::Error {
-                        message: error.to_string(),
-                    });
+                    events.push(LlmEvent::error(error.to_string(), false));
                 }
             }
         }
@@ -305,14 +306,14 @@ mod tests {
         }
     }
 
-    fn text(role: MessageRole, content: &str) -> NativeMessage<BoundToolCall> {
-        NativeMessage::new(
+    fn text(role: MessageRole, content: &str) -> lattice_conversation::ConversationItem {
+        lattice_conversation::ConversationItem::Message(NativeMessage::<BoundToolCall>::new(
             role,
             None,
             vec![MessagePart::semantic_only(MessageSemantic::Text {
-                text: content.to_string(),
+                text: content.into(),
             })],
-        )
+        ))
     }
 
     #[test]
@@ -474,7 +475,7 @@ mod tests {
         );
         assert!(events.iter().any(|event| matches!(
             event,
-            LlmEvent::Error { message } if message.contains("index")
+            LlmEvent::Error { failure } if !failure.retryable && failure.message.contains("index")
         )));
     }
 
@@ -726,7 +727,7 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, LlmEvent::Error { message } if message.contains(kind))),
+                .any(|e| matches!(e, LlmEvent::OutputLimit { interruption } if format!("{interruption:?}").contains(kind))),
             "expected limit {kind}"
         );
         assert!(

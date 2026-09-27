@@ -15,6 +15,30 @@ use redb::ReadableTable;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, fs, os::unix::fs::symlink, sync::Arc};
 
+#[test]
+fn structured_result_wire() {
+    let wire = json!({
+        "invocation_id": "00000000-0000-4000-8000-000000000001",
+        "name": "observe.workspace",
+        "payload": {"outcome":"succeeded", "payload": {
+            "kind":"output_too_large", "digest":"ab".repeat(32), "byte_length":65537
+        }}
+    });
+    let neutral: lattice_conversation::StoredToolResult =
+        serde_json::from_value(wire.clone()).unwrap();
+    let stored: StoredToolResult = neutral;
+    assert_eq!(serde_json::to_value(&stored).unwrap(), wire);
+    assert_eq!(stored.payload.outcome(), ToolResultOutcome::Succeeded);
+    let digest = lattice_conversation::tool_content_digest("{}")
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    assert_eq!(
+        digest,
+        "75f9393780337294f4a878b86195ce835e1af90ba8f3a63c2702f6d6e42f29f4"
+    );
+}
+
 fn now() -> Timestamp {
     "2026-09-26T00:00:00Z".parse().unwrap()
 }
@@ -113,6 +137,64 @@ fn reply(k: ModelAttemptKey, count: usize) -> CompleteReply {
         ),
     }
 }
+#[test]
+fn rejected_error_round_trip_and_privacy() {
+    let (_dir, layout, db) = store();
+    let (lock, calls) = running(&db, sid(1), tid(1), 1, 1);
+    let binding = &calls.bindings[0];
+    let term = terminal(binding, Some(CepErrorCode::CapabilityNotGranted));
+    let wire = serde_json::to_value(&term).unwrap();
+    assert_eq!(
+        wire["result"]["payload"]["payload"]["message"],
+        "private-error"
+    );
+    let bytes = codec::encode(&term).unwrap();
+    assert_eq!(
+        codec::decode::<InvocationTerminal>("steps", "test", &bytes).unwrap(),
+        term
+    );
+    let mut bad = wire.clone();
+    bad["result"]["payload"]["payload"]["unknown"] = json!(true);
+    let mut bytes = 1u32.to_be_bytes().to_vec();
+    bytes.extend(lancet_protocol::canonical_json(&bad).as_bytes());
+    assert!(codec::decode::<InvocationTerminal>("steps", "test", &bytes).is_err());
+    let mut old = wire;
+    old["result"]["payload"]["payload"]
+        .as_object_mut()
+        .unwrap()
+        .remove("message");
+    assert!(serde_json::from_value::<InvocationTerminal>(old).is_err());
+    db.start_invocation(&lock, binding, now()).unwrap();
+    db.finish_invocation(
+        &lock,
+        TerminalInput {
+            invocation_id: binding.invocation_id,
+            terminal: term.clone(),
+        },
+        now(),
+    )
+    .unwrap();
+    db.auto_close(&lock, tid(1), now()).unwrap();
+    drop(lock);
+    drop(db);
+    let db = SessionStore::open(&layout).unwrap();
+    let state = durable(&db, sid(1), tid(1));
+    let StepState::Closed { invocations, .. } = &state.steps[0].state else {
+        panic!("closed");
+    };
+    assert_eq!(invocations[0].terminal, term);
+    let operator = db
+        .begin_read()
+        .unwrap()
+        .operator_status(&project(1))
+        .unwrap();
+    assert!(
+        !serde_json::to_string(&operator)
+            .unwrap()
+            .contains("private-error")
+    );
+}
+
 fn stopped(k: ModelAttemptKey, cause: StopCause) -> AttemptStopped {
     AttemptStopped {
         key: k,
@@ -2270,13 +2352,19 @@ fn strict_open_rejects_corruption() {
 #[test]
 fn commit_failure_disables_all_writers() {
     for point in [
-        FaultPoint::CommitPoisoned,
-        FaultPoint::CommitUnknownBefore,
-        FaultPoint::CommitUnknownAfter,
+        FaultPoint::Poisoned,
+        FaultPoint::UnknownBefore,
+        FaultPoint::UnknownAfter,
     ] {
         let (_dir, layout, db) = store();
         let db = Arc::new(db);
         let lock = db.try_lock_session(sid(1)).unwrap();
+        let starts = std::sync::atomic::AtomicUsize::new(0);
+        assert_eq!(
+            db.with_execution_start(|| starts.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
+                .unwrap(),
+            0
+        );
         let timeout = std::time::Duration::from_secs(5);
         std::thread::scope(|scope| {
             let (at_commit, commit_reached) = std::sync::mpsc::channel();
@@ -2309,6 +2397,7 @@ fn commit_failure_disables_all_writers() {
                     let queued = queued.clone();
                     let completed = completed.clone();
                     let db = &db;
+                    let starts = &starts;
                     scope.spawn(move || {
                         let lock = db.try_lock_session(sid(n)).unwrap();
                         let result = with_write_probe(
@@ -2317,7 +2406,16 @@ fn commit_failure_disables_all_writers() {
                                     queued.send(n).unwrap();
                                 }
                             },
-                            || db.accept_turn(&lock, accept(sid(n), tid(n))),
+                            || {
+                                if n == 5 {
+                                    db.with_execution_start(|| {
+                                        starts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                    })
+                                    .map(|_| ())
+                                } else {
+                                    db.accept_turn(&lock, accept(sid(n), tid(n))).map(|_| ())
+                                }
+                            },
                         );
                         completed
                             .send(matches!(result, Err(StoreError::WriteDisabled)))
@@ -2354,7 +2452,7 @@ fn commit_failure_disables_all_writers() {
                         kind: CommitFailureKind::TransactionPoisoned,
                         ..
                     }
-                ) == (point == FaultPoint::CommitPoisoned)
+                ) == (point == FaultPoint::Poisoned)
             );
             for _ in 2..6 {
                 assert!(done.recv_timeout(timeout).expect("queued writer completed"));
@@ -2363,13 +2461,18 @@ fn commit_failure_disables_all_writers() {
                 handle.join().unwrap();
             }
         });
+        assert!(matches!(
+            db.with_execution_start(|| panic!("disabled start")),
+            Err(StoreError::WriteDisabled)
+        ));
+        assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(
             db.begin_read()
                 .unwrap()
                 .turn_record(tid(1))
                 .unwrap()
                 .is_some(),
-            point == FaultPoint::CommitUnknownAfter
+            point == FaultPoint::UnknownAfter
         );
         drop(lock);
         drop(db);
@@ -2382,9 +2485,29 @@ fn commit_failure_disables_all_writers() {
                 .unwrap()
                 .items
                 .len(),
-            usize::from(point == FaultPoint::CommitUnknownAfter)
+            usize::from(point == FaultPoint::UnknownAfter)
         );
     }
+}
+
+#[test]
+fn execution_start_panic_disables_store() {
+    let (_dir, _layout, db) = store();
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = db.with_execution_start(|| panic!("handoff failed"));
+        }))
+        .is_err()
+    );
+    assert!(matches!(
+        db.with_execution_start(|| ()),
+        Err(StoreError::WriteDisabled)
+    ));
+    let lock = db.try_lock_session(sid(1)).unwrap();
+    assert!(matches!(
+        db.accept_turn(&lock, accept(sid(1), tid(1))),
+        Err(StoreError::WriteDisabled)
+    ));
 }
 
 // F14/F20/F28/F30：纯规划也要拒绝不一致的输入，不能借用 strict-open 的保证。
@@ -2627,10 +2750,7 @@ fn input_and_evidence_boundaries() {
 #[test]
 fn transaction_failure_matrix() {
     for phase in 0..11 {
-        for point in [
-            FaultPoint::CommitUnknownBefore,
-            FaultPoint::CommitUnknownAfter,
-        ] {
+        for point in [FaultPoint::UnknownBefore, FaultPoint::UnknownAfter] {
             let (_dir, layout, db) = store();
             let lock = db.try_lock_session(sid(1)).unwrap();
             db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
@@ -2737,7 +2857,7 @@ fn transaction_failure_matrix() {
             let after = codec::load_read(&db.begin_read().unwrap().tx).unwrap();
             assert_eq!(
                 before == after,
-                point == FaultPoint::CommitUnknownBefore,
+                point == FaultPoint::UnknownBefore,
                 "phase {phase}"
             );
             validate::records(&after).unwrap();

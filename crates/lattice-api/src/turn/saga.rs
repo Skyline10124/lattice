@@ -1,2327 +1,611 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Production TurnCoordinator live saga (#139-B Commit 6).
-//!
-//! Drives one-attempt [`ModelStepDriver`] calls under durable journal stages:
-//! retries, binding, reservation, sequential Tool dispatch, ResultDraft,
-//! terminal/evidence, StepClosing, and Live TurnClosing/finalization.
+//! 单库 live 循环。提交成功才推进执行，关闭完全由会话库的领域事务完成。
 
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::time::Duration;
-
-use lancet_api::{DispatchNotStartedCause, DispatchOutcome, ExecutionReceipt, WorkspaceHistory};
-use lancet_protocol::{
-    BindingIdentity, CepError, CepErrorFamily, InvocationBinding, ModelAttemptKey,
-    ModelMessageAddress, PlanKey, SessionId, ToolCallAddress, TurnId, arguments_digest,
-    canonical_json,
+use super::{
+    coordinator::{CoordinatorIoError, TurnCoordinator},
+    observer::ObserverSink,
+    types::{TurnEvent, TurnRef},
 };
+use lancet_protocol::{ModelAttemptKey, TurnId};
 use lattice_agent::{
-    ModelStepAttempt, ModelStepError, ModelStepEvent, ModelStepRequest, ModelStepStatus,
+    ModelStepAttempt, ModelStepDriver, ModelStepError, ModelStepEvent, ModelStepRequest,
+    ModelStopCause,
 };
-use lattice_conversation::{
-    BoundToolCall, MessagePart, MessageRole, MessageSemantic, NativeMessage, ToolResultOutcome,
-    UnboundToolCall,
+use lattice_conversation::{ConversationItem, ProviderOrigin, ToolResultOutcome};
+use lattice_session::store::*;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
 };
-use lattice_llm::ToolDefinition;
-use lattice_session::pending::{
-    BindingPlan, ClosedBinding, ClosureOrigin, DraftClassification, DraftPublication,
-    ExecutionOutcome, LiveControllingCause, MAX_MODEL_STEPS, MaterialAvailability,
-    NotExecutedReason, PendingStage, PlannedBinding, ResultDraft, ResultMaterial, StepClosedKind,
-    StepClosingState, ToolBatchControl, ToolContentError, TurnCancellation, TurnClosingFacts,
-    TurnFailure, TurnFinishReason, TurnInterruption, TurnOutcome, UnavailableMaterialReason,
-    WorkspaceHistoryCheckpoint, derive_tool_batch_control, step_conversation_digest,
-};
-use lattice_session::{FlockGuard, TurnCommit};
-use tokio::sync::mpsc;
-use tokio::time::Instant;
+use std::time::Duration;
+use tokio::{task::JoinHandle, time::Instant};
 
-use super::cep::{ProductionTurnDeps, map_cep_tool_event};
-use super::coordinator::{CoordinatorIoError, TurnCoordinator};
+type Result<T> = std::result::Result<T, CoordinatorIoError>;
 
-use super::finalize::{FinalizeBudget, FinalizeFailure};
-use super::live::{PreparedTurn, TURN_EVENT_CHANNEL_CAPACITY};
-use super::observer::{CepOrderedEmitter, ObserverSink};
-use super::types::{RunTurnRequest, TurnEvent};
-use crate::session::ApiError;
-
-const CEP_EVENT_DRAIN_GRACE: Duration = Duration::from_millis(50);
-const BOUNDED_ERROR_CONTENT_BYTES: usize = 4_096;
-
-#[cfg(feature = "test-crash-barriers")]
-async fn hit_turn_crash_barrier(
-    coordinator: &TurnCoordinator,
-    session_id: &str,
-    barrier: &str,
-) -> Result<(), ApiError> {
-    super::crash_barrier::hit(coordinator, session_id, barrier)
-        .await
-        .map_err(map_io)
+pub(crate) struct LiveExecution {
+    pub driver: Arc<ModelStepDriver>,
+    pub runtime: Arc<lancet_api::LancetRuntime>,
+    pub events: tokio::sync::mpsc::UnboundedReceiver<lancet_protocol::ToolEvent>,
+    pub observer: Arc<ObserverSink>,
+    pub cancel: Arc<AtomicBool>,
+    /// 库代故障，不是用户取消。退出时不向失败代写入内存结果。
+    pub shutdown: Arc<AtomicBool>,
+    pub deadline: Instant,
+    pub retry: lattice_profile::LlmRetrySection,
 }
 
-#[cfg(not(feature = "test-crash-barriers"))]
-async fn hit_turn_crash_barrier(
-    _coordinator: &TurnCoordinator,
-    _session_id: &str,
-    _barrier: &str,
-) -> Result<(), ApiError> {
-    Ok(())
-}
-/// 持久接受后驱动唯一 live saga；返回真实关闭结果，不从观察流推导完成。
-pub(super) async fn run_coordinator_saga(
-    prepared: PreparedTurn,
-    request: RunTurnRequest,
-    turn_id: TurnId,
-    deps: ProductionTurnDeps,
-    coordinator: Arc<TurnCoordinator>,
-    execution_lock: Arc<FlockGuard>,
-    observer: &mut ObserverSink,
-) -> Result<lattice_session::TurnCommit, ApiError> {
-    let ProductionTurnDeps {
-        model_driver,
-        tool_catalog,
-        runtime,
-        mut events,
-        workspace_history,
-        ..
-    } = deps;
-    let tool_definitions = tool_catalog
-        .iter()
-        .cloned()
-        .map(|tool| ToolDefinition::new(tool.name, tool.description, tool.parameters))
-        .collect::<Vec<_>>();
-    let session_id = prepared.session_id.clone();
-    let session_proto = SessionId::parse(&session_id).expect("canonical SessionId");
-    let turn_deadline = Instant::now()
-        + Duration::from_secs(
-            request
-                .loaded_profile
-                .as_ref()
-                .map(|p| p.profile.llm.timeout_secs.unwrap_or(300))
-                .unwrap_or(300),
-        );
-    let max_attempts = request
-        .loaded_profile
-        .as_ref()
-        .map(|p| p.profile.llm.retry.max_retries.saturating_add(1).max(1))
-        .unwrap_or(1);
-    let retry = request
-        .loaded_profile
-        .as_ref()
-        .map(|p| p.profile.llm.retry.clone())
-        .unwrap_or_default();
-
-    let (agent_tx, mut agent_rx) = mpsc::channel::<TurnEvent>(TURN_EVENT_CHANNEL_CAPACITY);
-    let cep_agent_tx = agent_tx.clone();
-    let cep_forwarder = tokio::spawn(async move {
-        while let Some(event) = events.recv().await {
-            if let Some(agent_event) = map_cep_tool_event(event)
-                && cep_agent_tx.send(agent_event).await.is_err()
-            {
-                break;
-            }
+impl LiveExecution {
+    fn healthy(&self) -> Result<()> {
+        if self.shutdown.load(Ordering::Acquire) {
+            Err(StoreError::WriteDisabled.into())
+        } else {
+            Ok(())
         }
-    });
-
-    let mut ordered_events = CepOrderedEmitter::default();
-    let mut history = prepared.transcript.messages.clone();
-    history.push(user_message(&request.input));
-
-    let mut attempt_usages: Vec<Option<lattice_conversation::TokenUsage>> = Vec::new();
-    let mut model_step: u32 = 0;
-    let mut awaiting_model_continuation = false;
-    let mut terminal_reason: Option<String> = None;
-    let mut turn_outcome = TurnOutcome::Completed {
-        finish_reason: TurnFinishReason::Stop,
-    };
-
-    macro_rules! crash_barrier {
-        ($label:lifetime, $name:expr) => {
-            if let Err(error) = hit_turn_crash_barrier(&coordinator, &session_id, $name).await {
-                break $label Err(error);
-            }
-        };
     }
-    let saga_result: Result<(), ApiError> = 'saga: loop {
-        if model_step >= MAX_MODEL_STEPS {
-            turn_outcome = TurnOutcome::Failed {
-                reason: TurnFailure::ModelStepLimitExceeded,
-            };
-            terminal_reason = Some("model step limit exceeded".into());
-            if !awaiting_model_continuation {
-                let recorded_at = chrono::Utc::now().timestamp();
-                if let Err(err) = coordinator
-                    .io
-                    .advance_turn(
-                        session_id.clone(),
-                        PendingStage::StepClosed {
-                            kind: StepClosedKind::FailTurn {
-                                reason: TurnFailure::ModelStepLimitExceeded,
-                            },
-                        },
-                        recorded_at,
-                        Arc::clone(&execution_lock),
-                    )
-                    .await
-                {
-                    break 'saga Err(map_io(err));
-                }
-            }
-            break 'saga Ok(());
+
+    fn stop(&self) -> Option<StopCause> {
+        if self.cancel.load(Ordering::Acquire) {
+            Some(StopCause::Cancelled)
+        } else if Instant::now() >= self.deadline {
+            Some(StopCause::Deadline)
+        } else {
+            None
         }
+    }
 
-        let mut attempt: u32 = 0;
-        let mut retry_delay_ms = retry.initial_delay_ms.min(retry.max_delay_ms);
-        let complete_message = loop {
-            if Instant::now() >= turn_deadline {
-                turn_outcome = TurnOutcome::Interrupted {
-                    reason: TurnInterruption::ModelAttempt(
-                        lattice_conversation::AttemptInterruption::Timeout,
-                    ),
-                };
-                terminal_reason = Some("timeout".into());
-                if awaiting_model_continuation {
-                    break 'saga Ok(());
-                }
-                let recorded_at = chrono::Utc::now().timestamp();
-                if let Err(err) = coordinator
-                    .io
-                    .advance_turn(
-                        session_id.clone(),
-                        PendingStage::StepClosed {
-                            kind: StepClosedKind::InterruptTurn {
-                                reason: TurnInterruption::ModelAttempt(
-                                    lattice_conversation::AttemptInterruption::Timeout,
-                                ),
-                            },
-                        },
-                        recorded_at,
-                        Arc::clone(&execution_lock),
-                    )
-                    .await
-                {
-                    break 'saga Err(map_io(err));
-                }
-                break 'saga Ok(());
+    /// 不丢弃已启动 worker。故障只请求协作停止，等待实际返回后再释放执行责任。
+    async fn join<T>(
+        &mut self,
+        mut worker: JoinHandle<T>,
+        cancellation: Arc<AtomicBool>,
+    ) -> Result<T> {
+        loop {
+            if self.cancel.load(Ordering::Acquire) || self.shutdown.load(Ordering::Acquire) {
+                cancellation.store(true, Ordering::Release);
             }
-
-            if is_cancelled(request.cancel_flag.as_ref()) {
-                turn_outcome = TurnOutcome::Cancelled {
-                    reason: TurnCancellation::UserCancelled,
-                };
-                terminal_reason = Some("cancelled by caller".into());
-                if awaiting_model_continuation {
-                    break 'saga Ok(());
+            tokio::select! {
+                result = &mut worker => {
+                    self.drain_events();
+                    self.healthy()?;
+                    return Ok(result?);
                 }
-                let recorded_at = chrono::Utc::now().timestamp();
-                if let Err(err) = coordinator
-                    .io
-                    .advance_turn(
-                        session_id.clone(),
-                        PendingStage::StepClosed {
-                            kind: StepClosedKind::CancelTurn {
-                                reason: TurnCancellation::UserCancelled,
-                            },
-                        },
-                        recorded_at,
-                        Arc::clone(&execution_lock),
-                    )
-                    .await
-                {
-                    break 'saga Err(map_io(err));
-                }
-                break 'saga Ok(());
+                Some(event) = self.events.recv() => self.emit_tool(event),
+                _ = tokio::time::sleep(Duration::from_millis(10)) => {}
             }
+        }
+    }
 
-            let attempt_key = ModelAttemptKey {
+    fn emit_tool(&self, event: lancet_protocol::ToolEvent) {
+        if let Some(event) = super::cep::map_cep_tool_event(event) {
+            self.observer.emit(event);
+        }
+    }
+
+    fn drain_events(&mut self) {
+        while let Ok(event) = self.events.try_recv() {
+            self.emit_tool(event);
+        }
+    }
+
+    async fn backoff(&self, delay: Duration) -> Result<()> {
+        let until = (Instant::now() + delay).min(self.deadline);
+        while Instant::now() < until && self.stop().is_none() {
+            self.healthy()?;
+            tokio::time::sleep_until(until.min(Instant::now() + Duration::from_millis(10))).await;
+        }
+        self.healthy()
+    }
+}
+
+/// 调用者已接受本 Turn 并持有独占 SessionExecutionLock；这里不恢复旧请求。
+pub(crate) async fn run_coordinator_saga(
+    coordinator: &TurnCoordinator,
+    turn_id: TurnId,
+    mut live: LiveExecution,
+) -> Result<TurnDetail> {
+    let session = coordinator.io.session_id();
+    let config = coordinator
+        .io
+        .read(move |read| Ok(read.durable_turn(session, turn_id)?.turn.config))
+        .await?;
+    let origin = match config.provider.as_str() {
+        "openai" | "openai_compatible" => ProviderOrigin::OpenAiCompatible,
+        "anthropic" => ProviderOrigin::Anthropic,
+        "gemini" => ProviderOrigin::Gemini,
+        _ => {
+            return Err(StoreError::InvalidInput {
+                field: "provider",
+                detail: "unknown frozen provider".into(),
+            }
+            .into());
+        }
+    };
+    let tools = config
+        .catalog
+        .entries
+        .iter()
+        .map(|tool| {
+            lattice_llm::ToolDefinition::new(
+                tool.name.clone(),
+                tool.description.clone(),
+                tool.input_schema.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut ordinal = 0;
+    loop {
+        live.healthy()?;
+        if let Some(cause) = live.stop().or_else(|| {
+            (ordinal >= config.limits.max_model_steps).then_some(StopCause::ModelStepLimit)
+        }) {
+            let closed = coordinator
+                .io
+                .close_step(CloseStep::StopBetweenRequests { turn_id, cause })
+                .await?;
+            return publish_closed(coordinator, &live.observer, closed).await;
+        }
+        let history = coordinator
+            .io
+            .read(move |read| history(read, session))
+            .await?;
+        let mut attempt = 0;
+        let mut delay = live.retry.initial_delay_ms.min(live.retry.max_delay_ms);
+        let reply = loop {
+            live.healthy()?;
+            if let Some(cause) = live.stop() {
+                let closed = coordinator
+                    .io
+                    .close_step(CloseStep::StopBetweenRequests { turn_id, cause })
+                    .await?;
+                return publish_closed(coordinator, &live.observer, closed).await;
+            }
+            let key = ModelAttemptKey {
                 turn_id,
-                model_step_ordinal: model_step,
+                model_step_ordinal: ordinal,
                 attempt_ordinal: attempt,
             };
-            let recorded_at = chrono::Utc::now().timestamp();
-            if let Err(err) = coordinator
-                .io
-                .advance_turn(
-                    session_id.clone(),
-                    PendingStage::ModelAttemptStarted { key: attempt_key },
-                    recorded_at,
-                    Arc::clone(&execution_lock),
-                )
-                .await
-            {
-                break 'saga Err(map_io(err));
-            }
-            crash_barrier!('saga, "model_attempt_started");
-            crash_barrier!('saga, &format!("model_attempt_started_{model_step}"));
-            awaiting_model_continuation = false;
-
-            observer
-                .emit(TurnEvent::ModelStarted {
-                    provider: Some(prepared.provider.clone()),
-                    model: prepared.model.clone(),
-                })
-                .await;
-
-            let step_request = ModelStepRequest {
-                system_prompt: prepared.system_prompt.clone(),
+            coordinator.io.start_request(key).await?;
+            #[cfg(feature = "test-crash-barriers")]
+            super::crash_barrier::hit(
+                &coordinator.io,
+                turn_id,
+                "request_started",
+                Some(ordinal),
+                None,
+            )
+            .await?;
+            live.observer.emit(TurnEvent::ModelStarted {
+                key,
+                provider: origin,
+                model: config.model.clone(),
+            });
+            let cancellation = Arc::new(AtomicBool::new(live.cancel.load(Ordering::Acquire)));
+            let request = ModelStepRequest {
+                system_prompt: config.system_prompt.clone(),
                 history: history.clone(),
-                model: prepared.model.clone(),
-                provider: Some(prepared.provider.clone()),
-                tools: tool_definitions.clone(),
+                model: config.model.clone(),
+                provider: Some(config.provider.clone()),
+                tools: tools.clone(),
                 temperature: None,
                 max_tokens: None,
-                cancel: request.cancel_flag.clone(),
-                deadline: Some(turn_deadline),
+                cancel: Some(cancellation.clone()),
+                deadline: Some(live.deadline),
             };
-
-            // 循环头部检查之后的 journal 发布与 observer 投递仍会耗时，
-            // 期间可能到达 deadline 或触发取消：此时不打开 provider，
-            // 直接关闭已发布的 attempt。
-            let interruption = if Instant::now() >= turn_deadline {
-                Some(lattice_conversation::AttemptInterruption::Timeout)
-            } else if is_cancelled(request.cancel_flag.as_ref()) {
-                Some(lattice_conversation::AttemptInterruption::Cancelled)
-            } else {
-                None
-            };
-            let attempt_result = if let Some(reason) = interruption {
-                Ok(ModelStepAttempt {
-                    status: ModelStepStatus::Interrupted(reason),
-                    message: None,
-                    usage: None,
-                    finish_reason: None,
-                    diagnostic: None,
-                })
-            } else {
-                model_driver
-                    .run(
-                        &step_request,
-                        Some(&mut |event| {
-                            if let Some(event) = map_step_event(event) {
-                                observer.emit_delta(event);
-                            }
-                        }),
-                    )
-                    .await
-            };
-            drain_ready_events(&mut agent_rx, &mut ordered_events, observer).await;
-
-            match attempt_result {
-                Err(ModelStepError::OpeningFailed { message, retryable }) => {
-                    attempt_usages.push(None);
-                    let recorded_at = chrono::Utc::now().timestamp();
-                    if let Err(err) = coordinator
-                        .io
-                        .advance_turn(
-                            session_id.clone(),
-                            PendingStage::ModelAttemptFailed {
-                                key: attempt_key,
-                                retryable,
-                                usage: None,
-                            },
-                            recorded_at,
-                            Arc::clone(&execution_lock),
-                        )
-                        .await
-                    {
-                        break 'saga Err(map_io(err));
-                    }
-                    let will_retry = retryable && attempt + 1 < max_attempts;
-                    let now = Instant::now();
-                    let delay = Duration::from_millis(retry_delay_ms)
-                        .min(turn_deadline.saturating_duration_since(now));
-                    let retry_at = now + delay;
-                    observer
-                        .emit(TurnEvent::LlmRequestError {
-                            provider: Some(prepared.provider.clone()),
-                            model: prepared.model.clone(),
-                            attempt: attempt + 1,
-                            max_attempts,
-                            error_kind: "opening_failed".into(),
-                            retryable,
-                            will_retry,
-                            delay_ms: will_retry.then_some(delay.as_millis() as u64),
-                            status_code: None,
-                            message: message.clone(),
-                        })
-                        .await;
-                    if will_retry {
-                        wait_for_model_retry(retry_at, request.cancel_flag.as_ref()).await;
-                        retry_delay_ms = retry_delay_ms.saturating_mul(2).min(retry.max_delay_ms);
-                        attempt += 1;
-                        continue;
-                    }
-                    turn_outcome = TurnOutcome::Failed {
-                        reason: TurnFailure::ModelRequestFailed,
-                    };
-                    terminal_reason = Some(format!("LLM error: {message}"));
-                    let recorded_at = chrono::Utc::now().timestamp();
-                    if let Err(err) = coordinator
-                        .io
-                        .advance_turn(
-                            session_id.clone(),
-                            PendingStage::StepClosed {
-                                kind: StepClosedKind::FailTurn {
-                                    reason: TurnFailure::ModelRequestFailed,
-                                },
-                            },
-                            recorded_at,
-                            Arc::clone(&execution_lock),
-                        )
-                        .await
-                    {
-                        break 'saga Err(map_io(err));
-                    }
-                    break 'saga Ok(());
-                }
-                Err(ModelStepError::Projection(error)) => {
-                    break 'saga Err(ApiError::Internal(format!(
-                        "provider request projection failed: {error}"
-                    )));
-                }
-                Ok(step) => {
-                    attempt_usages.push(step.usage);
-                    match handle_attempt_outcome(
-                        &step,
-                        attempt_key,
-                        &session_id,
-                        &coordinator,
-                        &execution_lock,
-                        observer,
-                    )
-                    .await
-                    {
-                        AttemptHandled::TurnClosed { outcome, reason } => {
-                            turn_outcome = outcome;
-                            terminal_reason = reason;
-                            break 'saga Ok(());
-                        }
-                        AttemptHandled::Complete(message) => break message,
-                        AttemptHandled::Err(err) => break 'saga Err(err),
-                    }
-                }
-            }
-        };
-
-        observer
-            .emit(TurnEvent::ModelFinished {
-                finish_reason: "stop".into(),
-                usage: attempt_usages.last().copied().flatten().map(Into::into),
-            })
-            .await;
-
-        let tool_calls: Vec<(usize, UnboundToolCall)> = complete_message
-            .tool_calls()
-            .map(|(ordinal, call)| (ordinal, call.clone()))
-            .collect();
-
-        if tool_calls.is_empty() {
-            let recorded_at = chrono::Utc::now().timestamp();
-            if let Err(err) = coordinator
+            let driver = live.driver.clone();
+            let observer = live.observer.clone();
+            live.healthy()?;
+            let worker = coordinator
                 .io
-                .advance_turn(
-                    session_id.clone(),
-                    PendingStage::MessageComplete {
-                        key: ModelAttemptKey {
-                            turn_id,
-                            model_step_ordinal: model_step,
-                            attempt_ordinal: attempt,
-                        },
-                        message: complete_message.clone(),
-                        usage: attempt_usages.last().copied().flatten(),
-                    },
-                    recorded_at,
-                    Arc::clone(&execution_lock),
-                )
-                .await
-            {
-                break 'saga Err(map_io(err));
-            }
-            let recorded_at = chrono::Utc::now().timestamp();
-            if let Err(err) = coordinator
-                .io
-                .advance_turn(
-                    session_id.clone(),
-                    PendingStage::StepClosed {
-                        kind: StepClosedKind::FinishTurn {
-                            final_message: complete_message.clone(),
-                        },
-                    },
-                    recorded_at,
-                    Arc::clone(&execution_lock),
-                )
-                .await
-            {
-                break 'saga Err(map_io(err));
-            }
-            turn_outcome = TurnOutcome::Completed {
-                finish_reason: TurnFinishReason::Stop,
-            };
-            break 'saga Ok(());
-        }
-
-        // Tool-bearing: BindingPlanned -> reserve -> Bound -> StepClosing -> dispatch
-        let plan = match build_binding_plan(
-            &complete_message,
-            &tool_calls,
-            &tool_catalog,
-            session_proto,
-            turn_id,
-            model_step,
-            &coordinator,
-        ) {
-            Ok(plan) => plan,
-            // 目录外调用沿用模型响应校验的拒绝关闭路径，保存使用量与拒绝原因。
-            Err(BindingPlanRejection::UnknownTool(validation)) => {
-                let attempt_key = ModelAttemptKey {
-                    turn_id,
-                    model_step_ordinal: model_step,
-                    attempt_ordinal: attempt,
-                };
-                match publish_typed_rejection(
-                    &lattice_conversation::AttemptRejection::InvalidToolCall { validation },
-                    attempt_key,
-                    attempt_usages.last().copied().flatten(),
-                    None,
-                    &session_id,
-                    &coordinator,
-                    &execution_lock,
-                )
-                .await
-                {
-                    Ok((outcome, reason)) => {
-                        turn_outcome = outcome;
-                        terminal_reason = reason;
-                        break 'saga Ok(());
-                    }
-                    Err(err) => break 'saga Err(err),
-                }
-            }
-            Err(BindingPlanRejection::Internal(err)) => break 'saga Err(err),
-        };
-        let recorded_at = chrono::Utc::now().timestamp();
-        if let Err(err) = coordinator
-            .io
-            .advance_turn(
-                session_id.clone(),
-                PendingStage::BindingPlanned {
-                    plan: plan.clone(),
-                    usage: attempt_usages.last().copied().flatten(),
-                },
-                recorded_at,
-                Arc::clone(&execution_lock),
-            )
-            .await
-        {
-            break 'saga Err(map_io(err));
-        }
-        crash_barrier!('saga, "binding_planned");
-
-        let mut plan = plan;
-        match reserve_with_revision(&coordinator, &session_id, &execution_lock, &mut plan).await {
-            Ok(()) => {}
-            Err(err) => break 'saga Err(err),
-        }
-        crash_barrier!('saga, "reservation_published");
-
-        let recorded_at = chrono::Utc::now().timestamp();
-        if let Err(err) = coordinator
-            .io
-            .advance_turn(
-                session_id.clone(),
-                PendingStage::Bound { plan: plan.clone() },
-                recorded_at,
-                Arc::clone(&execution_lock),
-            )
-            .await
-        {
-            break 'saga Err(map_io(err));
-        }
-        crash_barrier!('saga, "bound");
-
-        let bound_assistant = match plan.bound_message() {
-            Ok(message) => message,
-            Err(error) => break 'saga Err(ApiError::Internal(error.to_string())),
-        };
-        let mut closing = StepClosingState {
-            plan_key: plan.plan_key,
-            bindings: plan.bindings.clone(),
-            closure_cursor: 0,
-            closures: Vec::new(),
-            current_candidate: None,
-        };
-        let recorded_at = chrono::Utc::now().timestamp();
-        if let Err(err) = coordinator
-            .io
-            .advance_turn(
-                session_id.clone(),
-                PendingStage::StepClosing(closing.clone()),
-                recorded_at,
-                Arc::clone(&execution_lock),
-            )
-            .await
-        {
-            break 'saga Err(map_io(err));
-        }
-        crash_barrier!('saga, "step_closing_empty");
-
-        history.push(bound_assistant.clone());
-
-        let mut live_cause = LiveControllingCause::Continue;
-        let mut batch_control = ToolBatchControl::Continue;
-        let mut terminal_facts = Vec::with_capacity(plan.bindings.len());
-        for (index, binding) in plan.bindings.iter().enumerate() {
-            let mut skip_reason = remaining_skip_reason(&batch_control);
-            if skip_reason.is_none() {
-                if is_cancelled(request.cancel_flag.as_ref()) {
-                    skip_reason = Some(NotExecutedReason::CancelledBeforeDispatch);
-                } else if Instant::now() >= turn_deadline {
-                    live_cause = LiveControllingCause::ModelAttemptTimeout;
-                    skip_reason = Some(NotExecutedReason::BeforeDispatch);
-                }
-            }
-            if let Some(reason) = skip_reason {
-                let terminal = match publish_not_executed(&coordinator, binding, reason).await {
-                    Ok(terminal) => terminal,
-                    Err(err) => break 'saga Err(err),
-                };
-                terminal_facts.push(terminal);
-                crash_barrier!('saga, "terminal_published");
-                let closure = ClosedBinding {
-                    binding: binding.clone(),
-                    outcome: ToolResultOutcome::NotExecuted,
-                    material: MaterialAvailability::Unavailable {
-                        reason: UnavailableMaterialReason::NotExecuted,
-                        digest: None,
-                        byte_length: None,
-                    },
-                };
-                let tool_result = tool_result_message(&closure);
-                closing.closures.push(closure.clone());
-                closing.closure_cursor += 1;
-                closing.current_candidate = None;
-                let recorded_at = chrono::Utc::now().timestamp();
-                if let Err(err) = coordinator
-                    .io
-                    .advance_turn(
-                        session_id.clone(),
-                        PendingStage::StepClosing(closing.clone()),
-                        recorded_at,
-                        Arc::clone(&execution_lock),
-                    )
-                    .await
-                {
-                    break 'saga Err(map_io(err));
-                }
-                crash_barrier!('saga, &format!("cursor_{}", closing.closure_cursor));
-                history.push(tool_result);
-                batch_control =
-                    match derive_live_batch_control(&plan.bindings, &terminal_facts, live_cause) {
-                        Ok(control) => control,
-                        Err(err) => break 'saga Err(err),
-                    };
-                continue;
-            }
-
-            let call = match plan
-                .message
-                .parts
-                .get(binding.address.part_ordinal as usize)
-            {
-                Some(MessagePart {
-                    semantic: MessageSemantic::ToolCall { call },
-                    ..
-                }) => call,
-                _ => {
-                    break 'saga Err(ApiError::Internal(
-                        "binding points at a non-ToolCall part".into(),
-                    ));
-                }
-            };
-
-            let public_invocation_id = binding.invocation_id.to_string();
-            observer
-                .emit(TurnEvent::ToolCallStarted {
-                    id: public_invocation_id.clone(),
-                    name: binding.method.clone(),
-                })
-                .await;
-
-            let invocation_binding = InvocationBinding {
-                invocation_id: binding.invocation_id,
-                identity: BindingIdentity {
-                    session_id: session_proto,
-                    turn_id,
-                    model_step_ordinal: model_step,
-                    part_ordinal: binding.address.part_ordinal,
-                    method: binding.method.clone(),
-                    descriptor_identity: binding.descriptor_identity.clone(),
-                    arguments_digest: binding.arguments_digest,
-                },
-            };
-            #[cfg(feature = "test-crash-barriers")]
-            if let Err(err) = super::crash_barrier::prepare_dispatch(
-                &coordinator,
-                &session_id,
-                binding.invocation_id,
-            )
-            .await
-            {
-                break 'saga Err(map_io(err));
-            }
-            #[cfg(feature = "test-crash-barriers")]
-            super::crash_barrier::cancel_before_dispatch(request.cancel_flag.as_ref());
-            let params = call.arguments.clone();
-            let receipt = match runtime
-                .dispatch(
-                    invocation_binding,
-                    binding.method.clone(),
-                    params,
-                    request.cancel_flag.clone(),
-                )
-                .await
-            {
-                DispatchOutcome::Executed(receipt) => receipt,
-                DispatchOutcome::ReconciliationRequired(_error) => {
-                    break 'saga Err(ApiError::RecoveryRequired(
-                        crate::session::RecoveryRequired::InvocationReconciliationRequired {
-                            invocation_id: binding.invocation_id,
-                        },
-                    ));
-                }
-                DispatchOutcome::NotExecuted { cause, error } => {
-                    let reason = match cause {
-                        DispatchNotStartedCause::BeforeDispatch => {
-                            NotExecutedReason::BeforeDispatch
-                        }
-                        DispatchNotStartedCause::CancelledBeforeDispatch => {
-                            NotExecutedReason::CancelledBeforeDispatch
-                        }
-                    };
-                    let terminal = match publish_not_executed(&coordinator, binding, reason).await {
-                        Ok(terminal) => terminal,
-                        Err(err) => break 'saga Err(err),
-                    };
-                    terminal_facts.push(terminal);
-                    crash_barrier!('saga, "terminal_published");
-                    let closure = ClosedBinding {
-                        binding: binding.clone(),
-                        outcome: ToolResultOutcome::NotExecuted,
-                        material: MaterialAvailability::Unavailable {
-                            reason: UnavailableMaterialReason::NotExecuted,
-                            digest: None,
-                            byte_length: None,
-                        },
-                    };
-                    let tool_result = tool_result_message(&closure);
-                    closing.closures.push(closure);
-                    closing.closure_cursor = (index as u32) + 1;
-                    closing.current_candidate = None;
-                    let recorded_at = chrono::Utc::now().timestamp();
-                    if let Err(err) = coordinator
-                        .io
-                        .advance_turn(
-                            session_id.clone(),
-                            PendingStage::StepClosing(closing.clone()),
-                            recorded_at,
-                            Arc::clone(&execution_lock),
-                        )
-                        .await
-                    {
-                        break 'saga Err(map_io(err));
-                    }
-                    crash_barrier!('saga, &format!("cursor_{}", closing.closure_cursor));
-                    history.push(tool_result);
-                    ordered_events
-                        .emit(
-                            observer,
-                            TurnEvent::ToolCallFinished {
-                                id: public_invocation_id,
-                                name: binding.method.clone(),
-                                ok: false,
-                                output_len: 0,
-                                error_summary: Some(error.message),
-                            },
-                        )
-                        .await;
-                    batch_control = match derive_live_batch_control(
-                        &plan.bindings,
-                        &terminal_facts,
-                        live_cause,
-                    ) {
-                        Ok(control) => control,
-                        Err(err) => break 'saga Err(err),
-                    };
-                    continue;
-                }
-            };
-            #[cfg(feature = "test-crash-barriers")]
-            super::crash_barrier::record_tool_effect(binding.invocation_id);
-            let finalize_budget = FinalizeBudget::anchored_at(Instant::now());
-
-            let (exec_outcome, conversation_outcome, canonical_content, evidence) =
-                classify_receipt(receipt);
-            let draft_result = ResultDraft::new(
-                binding.invocation_id,
-                binding.binding_digest,
-                turn_id,
-                binding.address.message,
-                binding.address.part_ordinal,
-                canonical_content.clone(),
-            );
-            crash_barrier!('saga, "candidate_computed");
-
-            let (material, draft_for_pin) = match draft_result {
-                Ok(draft) => {
-                    closing.current_candidate = Some(draft.clone());
-                    let recorded_at = chrono::Utc::now().timestamp();
-                    if let Err(err) = coordinator
-                        .io
-                        .advance_turn(
-                            session_id.clone(),
-                            PendingStage::StepClosing(closing.clone()),
-                            recorded_at,
-                            Arc::clone(&execution_lock),
-                        )
-                        .await
-                    {
-                        break 'saga Err(map_io(err));
-                    }
-                    crash_barrier!('saga, "candidate_pinned");
-                    let publication = coordinator
-                        .io
-                        .publish_draft(draft.clone(), Arc::clone(&execution_lock))
-                        .await;
-                    match publication {
-                        Ok(DraftPublication::Durable { .. }) => (
-                            MaterialAvailability::Available {
-                                digest: draft.content_digest,
-                                byte_length: draft.byte_length,
-                            },
-                            Some(draft),
-                        ),
-                        Ok(DraftPublication::CleanAbsent) => (
-                            MaterialAvailability::Unavailable {
-                                reason: UnavailableMaterialReason::DraftPublicationFailed,
-                                digest: Some(draft.content_digest),
-                                byte_length: Some(draft.byte_length),
-                            },
-                            Some(draft),
-                        ),
-                        Ok(DraftPublication::Uncertain { candidate }) => {
-                            match coordinator
-                                .io
-                                .revalidate_draft_under_budget(candidate, finalize_budget)
-                                .await
-                            {
-                                Ok(DraftClassification::Durable) => (
-                                    MaterialAvailability::Available {
-                                        digest: draft.content_digest,
-                                        byte_length: draft.byte_length,
-                                    },
-                                    Some(draft),
-                                ),
-                                Ok(DraftClassification::CleanAbsent) => (
-                                    MaterialAvailability::Unavailable {
-                                        reason: UnavailableMaterialReason::DraftPublicationFailed,
-                                        digest: Some(draft.content_digest),
-                                        byte_length: Some(draft.byte_length),
-                                    },
-                                    Some(draft),
-                                ),
-                                Err(err) => break 'saga Err(map_finalize_failure(err)),
-                            }
-                        }
-                        Err(err) => break 'saga Err(map_io(err)),
-                    }
-                }
-                Err(ToolContentError::TooLarge {
-                    actual,
-                    full_digest,
-                    ..
-                }) => (
-                    MaterialAvailability::Unavailable {
-                        reason: UnavailableMaterialReason::OutputTooLarge,
-                        digest: Some(full_digest),
-                        byte_length: Some(actual as u64),
-                    },
-                    None,
-                ),
-            };
-
-            crash_barrier!('saga, "draft_published");
-
-            let terminal_material = match &material {
-                MaterialAvailability::Available {
-                    digest,
-                    byte_length,
-                } => lancet_audit::invocation_store::TerminalMaterial::Available {
-                    digest: *digest,
-                    byte_length: *byte_length,
-                },
-                MaterialAvailability::Unavailable {
-                    reason,
-                    digest,
-                    byte_length,
-                } => lancet_audit::invocation_store::TerminalMaterial::Unavailable {
-                    reason: match reason {
-                        UnavailableMaterialReason::DraftPublicationFailed => {
-                            lancet_audit::invocation_store::UnavailableMaterialReason::DraftPublicationFailed
-                        }
-                        UnavailableMaterialReason::OutputTooLarge => {
-                            lancet_audit::invocation_store::UnavailableMaterialReason::OutputTooLarge
-                        }
-                        UnavailableMaterialReason::NotExecuted => {
-                            lancet_audit::invocation_store::UnavailableMaterialReason::NotExecuted
-                        }
-                    },
-                    digest: *digest,
-                    byte_length: *byte_length,
-                },
-            };
-
-            if let Err(err) = coordinator
-                .io
-                .publish_terminal_with_budget(
-                    binding.invocation_id,
-                    exec_outcome.clone(),
-                    terminal_material.clone(),
-                    evidence,
-                    finalize_budget,
-                )
-                .await
-            {
-                break 'saga Err(map_finalize_failure(err));
-            }
-
-            terminal_facts.push(super::invocation_facts::project_terminal(
-                exec_outcome,
-                terminal_material,
-            ));
-            crash_barrier!('saga, "terminal_published");
-
-            let closure = ClosedBinding {
-                binding: binding.clone(),
-                outcome: conversation_outcome,
-                material,
-            };
-            let content = match &closure.material {
-                MaterialAvailability::Available { .. } => Some(canonical_content),
-                MaterialAvailability::Unavailable { .. } => None,
-            };
-            let tool_result = NativeMessage::new(
-                MessageRole::Tool,
-                None,
-                vec![MessagePart::semantic_only(MessageSemantic::ToolResult {
-                    invocation_id: binding.invocation_id,
-                    name: binding.method.clone(),
-                    outcome: conversation_outcome,
-                    content,
-                })],
-            );
-            closing.closures.push(closure.clone());
-            closing.closure_cursor = (index as u32) + 1;
-            closing.current_candidate = None;
-            let recorded_at = chrono::Utc::now().timestamp();
-            if let Err(err) = coordinator
-                .io
-                .advance_turn(
-                    session_id.clone(),
-                    PendingStage::StepClosing(closing.clone()),
-                    recorded_at,
-                    Arc::clone(&execution_lock),
-                )
-                .await
-            {
-                break 'saga Err(map_io(err));
-            }
-            crash_barrier!('saga, &format!("cursor_{}", closing.closure_cursor));
-
-            history.push(tool_result);
-
-            ordered_events
-                .emit(
-                    observer,
-                    TurnEvent::ToolCallFinished {
-                        id: public_invocation_id,
-                        name: binding.method.clone(),
-                        ok: matches!(conversation_outcome, ToolResultOutcome::Succeeded),
-                        output_len: match &closure.material {
-                            MaterialAvailability::Available { byte_length, .. } => {
-                                *byte_length as usize
-                            }
-                            MaterialAvailability::Unavailable {
-                                byte_length: Some(n),
-                                ..
-                            } => *n as usize,
-                            _ => 0,
-                        },
-                        error_summary: None,
-                    },
-                )
-                .await;
-
-            let _ = draft_for_pin;
-            batch_control =
-                match derive_live_batch_control(&plan.bindings, &terminal_facts, live_cause) {
-                    Ok(control) => control,
-                    Err(err) => break 'saga Err(err),
-                };
-        }
-
-        let step_closed_kind = match &batch_control {
-            ToolBatchControl::Continue => StepClosedKind::ContinueModel {
-                model_step_ordinal: model_step,
-                ordered_tool_results: closing.closures.clone(),
-                conversation_digest: step_conversation_digest(&bound_assistant, &closing.closures),
-            },
-            ToolBatchControl::Cancel(reason) => {
-                turn_outcome = TurnOutcome::Cancelled { reason: *reason };
-                terminal_reason = Some("cancelled by caller".into());
-                StepClosedKind::CancelTurn { reason: *reason }
-            }
-            ToolBatchControl::Interrupt(reason) => {
-                turn_outcome = TurnOutcome::Interrupted {
-                    reason: reason.clone(),
-                };
-                terminal_reason = Some(
-                    match reason {
-                        TurnInterruption::ModelAttempt(
-                            lattice_conversation::AttemptInterruption::Timeout,
-                        ) => "timeout",
-                        TurnInterruption::InvocationMayHaveOccurred { .. } => {
-                            "tool invocation may have occurred"
-                        }
-                        _ => "tool batch interrupted",
-                    }
-                    .into(),
-                );
-                StepClosedKind::InterruptTurn {
-                    reason: reason.clone(),
-                }
-            }
-        };
-
-        let recorded_at = chrono::Utc::now().timestamp();
-        if let Err(err) = coordinator
-            .io
-            .advance_turn(
-                session_id.clone(),
-                PendingStage::StepClosed {
-                    kind: step_closed_kind,
-                },
-                recorded_at,
-                Arc::clone(&execution_lock),
-            )
-            .await
-        {
-            break 'saga Err(map_io(err));
-        }
-
-        crash_barrier!('saga, "step_closed");
-
-        if !matches!(batch_control, ToolBatchControl::Continue) {
-            break 'saga Ok(());
-        }
-
-        awaiting_model_continuation = true;
-        model_step += 1;
-    };
-
-    while let Ok(Some(event)) = tokio::time::timeout(CEP_EVENT_DRAIN_GRACE, agent_rx.recv()).await {
-        ordered_events.emit(observer, event).await;
-    }
-    cep_forwarder.abort();
-    while let Ok(event) = agent_rx.try_recv() {
-        ordered_events.emit(observer, event).await;
-    }
-    ordered_events.finish(observer).await;
-
-    if let Some(terminal) = diagnostic_terminal_event(&turn_outcome, terminal_reason.as_deref()) {
-        observer.emit(terminal).await;
-    }
-    observer.emit(TurnEvent::TurnCommitting).await;
-
-    let result = match saga_result {
-        Ok(()) => {
-            close_live_turn(
-                &coordinator,
-                LiveTurnClosure {
-                    session_id: &session_id,
-                    turn_id,
-                    outcome: turn_outcome,
-                },
-                Arc::clone(&execution_lock),
-                workspace_history,
-            )
-            .await
-        }
-        Err(error) => Err(error),
-    };
-    match &result {
-        Ok(commit) => {
-            observer
-                .emit(TurnEvent::TurnCommitted {
-                    session_id: commit.session_id.clone(),
-                    commit_id: commit.commit_id.clone(),
-                    outcome: commit.outcome.clone(),
-                    origin: commit.origin,
-                    workspace_history_checkpoint: commit.workspace_history_checkpoint.clone(),
-                })
-                .await
-        }
-        Err(ApiError::EvidenceDurabilityFailed(error)) => {
-            observer
-                .emit(TurnEvent::EvidenceDurabilityFailed {
-                    attempts: error.attempts,
-                })
-                .await
-        }
-        Err(ApiError::RecoveryRequired(reason)) => {
-            observer
-                .emit(TurnEvent::RecoveryRequired {
-                    reason: reason.clone(),
-                })
-                .await
-        }
-        Err(error) => {
-            observer
-                .emit(TurnEvent::CommitFailed {
-                    reason: error.to_string(),
-                })
-                .await
-        }
-    }
-    result
-}
-
-async fn drain_ready_events(
-    agent_rx: &mut mpsc::Receiver<TurnEvent>,
-    ordered_events: &mut CepOrderedEmitter,
-    observer: &mut ObserverSink,
-) {
-    while let Ok(event) = agent_rx.try_recv() {
-        ordered_events.emit(observer, event).await;
-    }
-}
-
-fn diagnostic_terminal_event(outcome: &TurnOutcome, reason: Option<&str>) -> Option<TurnEvent> {
-    match outcome {
-        TurnOutcome::Completed { .. } => None,
-        TurnOutcome::Cancelled { .. } => Some(TurnEvent::TurnCancelled {
-            reason: Some(
-                reason
-                    .map(str::to_string)
-                    .unwrap_or_else(|| typed_outcome_diagnostic(outcome)),
-            ),
-        }),
-        TurnOutcome::Failed { .. } | TurnOutcome::Interrupted { .. } => {
-            Some(TurnEvent::TurnFailed {
-                reason: reason
-                    .map(str::to_string)
-                    .unwrap_or_else(|| typed_outcome_diagnostic(outcome)),
-            })
-        }
-    }
-}
-
-fn typed_outcome_diagnostic(outcome: &TurnOutcome) -> String {
-    match outcome {
-        TurnOutcome::Completed { .. } => "turn completed".to_string(),
-        TurnOutcome::Failed { reason } => match reason {
-            TurnFailure::ModelRequestFailed => "model request failed".to_string(),
-            TurnFailure::ModelStepLimitExceeded => "model step limit exceeded".to_string(),
-            TurnFailure::InvalidToolCall { validation } => validation.to_string(),
-        },
-        TurnOutcome::Cancelled { .. } => "cancelled by caller".to_string(),
-        TurnOutcome::Interrupted { reason } => match reason {
-            TurnInterruption::ProcessInterruptedBeforeModelAttempt => {
-                "process interrupted before model attempt".to_string()
-            }
-            TurnInterruption::ProcessInterruptedDuringModelAttempt => {
-                "process interrupted during model attempt".to_string()
-            }
-            TurnInterruption::ProcessInterruptedDuringModelRetry => {
-                "process interrupted during model retry".to_string()
-            }
-            TurnInterruption::ModelAttempt(interruption) => match interruption {
-                lattice_conversation::AttemptInterruption::StreamError => {
-                    "model stream failed".to_string()
-                }
-                lattice_conversation::AttemptInterruption::Timeout => {
-                    "model attempt timed out".to_string()
-                }
-                lattice_conversation::AttemptInterruption::Cancelled => {
-                    "model attempt cancelled".to_string()
-                }
-                lattice_conversation::AttemptInterruption::OutputLimitExceeded { .. } => {
-                    "model output exceeded protocol limit".to_string()
-                }
-                lattice_conversation::AttemptInterruption::ProcessInterrupted => {
-                    "process interrupted during model attempt".to_string()
-                }
-            },
-            TurnInterruption::ProcessInterruptedDuringToolBinding => {
-                "process interrupted during Tool binding".to_string()
-            }
-            TurnInterruption::WhileAwaitingModelContinuation => {
-                "process interrupted while awaiting model continuation".to_string()
-            }
-            TurnInterruption::ProcessInterruptedDuringStepClosing => {
-                "process interrupted during step closing".to_string()
-            }
-            TurnInterruption::InvocationMayHaveOccurred { invocation } => {
-                format!("Tool invocation {invocation} may have occurred")
-            }
-        },
-    }
-}
-enum AttemptHandled {
-    Complete(NativeMessage<UnboundToolCall>),
-    TurnClosed {
-        outcome: TurnOutcome,
-        reason: Option<String>,
-    },
-    Err(ApiError),
-}
-
-/// 按类型化拒绝关闭已完成的模型请求尝试。先保存 `ModelAttemptRejected`，
-/// 记录使用量和拒绝原因，再以同一原因发布 `StepClosed { FailTurn }`。
-///
-/// 模型响应的批次校验和目录校验共用此路径，确保恢复能读取已保存的拒绝事实和使用量。
-async fn publish_typed_rejection(
-    rejection: &lattice_conversation::AttemptRejection,
-    attempt_key: ModelAttemptKey,
-    usage: Option<lattice_conversation::TokenUsage>,
-    diagnostic: Option<String>,
-    session_id: &str,
-    coordinator: &TurnCoordinator,
-    execution_lock: &Arc<FlockGuard>,
-) -> Result<(TurnOutcome, Option<String>), ApiError> {
-    if let Err(err) = coordinator
-        .io
-        .advance_turn(
-            session_id.to_string(),
-            PendingStage::ModelAttemptRejected {
-                key: attempt_key,
-                rejection: rejection.clone(),
-                usage,
-            },
-            chrono::Utc::now().timestamp(),
-            Arc::clone(execution_lock),
-        )
-        .await
-    {
-        return Err(map_io(err));
-    }
-    // 屏障窗口：拒绝原因与使用量已持久化，`StepClosed` 尚未发布。
-    hit_turn_crash_barrier(coordinator, session_id, "model_attempt_rejected").await?;
-    let validation = match rejection {
-        lattice_conversation::AttemptRejection::InvalidToolCall { validation } => {
-            validation.clone()
-        }
-    };
-    let reason = TurnFailure::InvalidToolCall { validation };
-    if let Err(err) = coordinator
-        .io
-        .advance_turn(
-            session_id.to_string(),
-            PendingStage::StepClosed {
-                kind: StepClosedKind::FailTurn {
-                    reason: reason.clone(),
-                },
-            },
-            chrono::Utc::now().timestamp(),
-            Arc::clone(execution_lock),
-        )
-        .await
-    {
-        return Err(map_io(err));
-    }
-    Ok((TurnOutcome::Failed { reason }, diagnostic))
-}
-
-async fn handle_attempt_outcome(
-    step: &ModelStepAttempt,
-    attempt_key: ModelAttemptKey,
-    session_id: &str,
-    coordinator: &TurnCoordinator,
-    execution_lock: &Arc<FlockGuard>,
-    observer: &mut ObserverSink,
-) -> AttemptHandled {
-    let recorded_at = chrono::Utc::now().timestamp();
-    match &step.status {
-        ModelStepStatus::Complete => match step.message.clone() {
-            Some(message) => AttemptHandled::Complete(message),
-            None => AttemptHandled::Err(ApiError::Internal(
-                "complete model attempt carried no message".into(),
-            )),
-        },
-        ModelStepStatus::Rejected(rejection) => match publish_typed_rejection(
-            rejection,
-            attempt_key,
-            step.usage,
-            step.diagnostic.clone(),
-            session_id,
-            coordinator,
-            execution_lock,
-        )
-        .await
-        {
-            Ok((outcome, reason)) => AttemptHandled::TurnClosed { outcome, reason },
-            Err(err) => AttemptHandled::Err(err),
-        },
-        ModelStepStatus::Interrupted(interruption) => {
-            if let Err(err) = coordinator
-                .io
-                .advance_turn(
-                    session_id.to_string(),
-                    PendingStage::ModelAttemptInterrupted {
-                        key: attempt_key,
-                        reason: *interruption,
-                        usage: step.usage,
-                    },
-                    recorded_at,
-                    Arc::clone(execution_lock),
-                )
-                .await
-            {
-                return AttemptHandled::Err(map_io(err));
-            }
-            // 屏障窗口：中断原因已持久，StepClosed 尚未发布。
-            if let Err(error) =
-                hit_turn_crash_barrier(coordinator, session_id, "model_attempt_interrupted").await
-            {
-                return AttemptHandled::Err(error);
-            }
-            let (kind, outcome, reason) = match interruption {
-                lattice_conversation::AttemptInterruption::Cancelled => (
-                    StepClosedKind::CancelTurn {
-                        reason: TurnCancellation::UserCancelled,
-                    },
-                    TurnOutcome::Cancelled {
-                        reason: TurnCancellation::UserCancelled,
-                    },
-                    Some("cancelled by caller".into()),
-                ),
-                other => (
-                    StepClosedKind::InterruptTurn {
-                        reason: TurnInterruption::ModelAttempt(*other),
-                    },
-                    TurnOutcome::Interrupted {
-                        reason: TurnInterruption::ModelAttempt(*other),
-                    },
-                    step.diagnostic.clone(),
-                ),
-            };
-            let _ = observer;
-            if let Err(err) = coordinator
-                .io
-                .advance_turn(
-                    session_id.to_string(),
-                    PendingStage::StepClosed { kind },
-                    chrono::Utc::now().timestamp(),
-                    Arc::clone(execution_lock),
-                )
-                .await
-            {
-                return AttemptHandled::Err(map_io(err));
-            }
-            AttemptHandled::TurnClosed { outcome, reason }
-        }
-    }
-}
-
-fn map_step_event(event: ModelStepEvent) -> Option<TurnEvent> {
-    match event {
-        ModelStepEvent::Opened { .. } => None,
-        ModelStepEvent::ReasoningDelta { content } => Some(TurnEvent::ReasoningDelta { content }),
-        ModelStepEvent::TokenDelta { content } => Some(TurnEvent::TokenDelta { content }),
-    }
-}
-
-fn map_io(err: CoordinatorIoError) -> ApiError {
-    match err {
-        CoordinatorIoError::EvidenceDurabilityFailed { attempts } => {
-            ApiError::RecoveryRequired(crate::session::RecoveryRequired::EvidenceDurabilityFailed(
-                crate::session::EvidenceDurabilityFailed { attempts },
-            ))
-        }
-        other => ApiError::Internal(other.to_string()),
-    }
-}
-
-fn map_finalize_failure(
-    err: FinalizeFailure<lancet_audit::invocation_store::InvocationStoreError>,
-) -> ApiError {
-    match err {
-        FinalizeFailure::EvidenceDurabilityFailed { attempts } => {
-            ApiError::EvidenceDurabilityFailed(crate::session::EvidenceDurabilityFailed {
-                attempts,
-            })
-        }
-        FinalizeFailure::Fatal(inner) => {
-            ApiError::Internal(format!("terminal publication failed: {inner}"))
-        }
-    }
-}
-
-async fn publish_not_executed(
-    coordinator: &TurnCoordinator,
-    binding: &PlannedBinding,
-    reason: NotExecutedReason,
-) -> Result<(ExecutionOutcome, ResultMaterial), ApiError> {
-    let reason = match reason {
-        NotExecutedReason::BeforeDispatch => {
-            lancet_audit::invocation_store::NotExecutedReason::BeforeDispatch
-        }
-        NotExecutedReason::CancelledBeforeDispatch => {
-            lancet_audit::invocation_store::NotExecutedReason::CancelledBeforeDispatch
-        }
-        NotExecutedReason::PrecedingInvocationIndeterminate => {
-            lancet_audit::invocation_store::NotExecutedReason::PrecedingInvocationIndeterminate
-        }
-    };
-    let outcome = lancet_audit::invocation_store::TerminalOutcome::NotExecuted { reason };
-    let material = lancet_audit::invocation_store::TerminalMaterial::Unavailable {
-        reason: lancet_audit::invocation_store::UnavailableMaterialReason::NotExecuted,
-        digest: None,
-        byte_length: None,
-    };
-    coordinator
-        .io
-        .publish_terminal_under_budget(
-            binding.invocation_id,
-            outcome.clone(),
-            material.clone(),
-            empty_evidence(&binding.method),
-        )
-        .await
-        .map_err(map_finalize_failure)?;
-    Ok(super::invocation_facts::project_terminal(outcome, material))
-}
-
-// AtomicBool 取消标志没有唤醒机制；沿用模型驱动的 50 毫秒轮询节奏。
-async fn wait_for_model_retry(until: Instant, cancel: Option<&Arc<AtomicBool>>) {
-    while Instant::now() < until && !is_cancelled(cancel) {
-        let next_poll = Instant::now() + Duration::from_millis(50);
-        tokio::time::sleep_until(until.min(next_poll)).await;
-    }
-}
-
-fn is_cancelled(flag: Option<&Arc<AtomicBool>>) -> bool {
-    flag.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
-}
-
-fn derive_live_batch_control(
-    bindings: &[PlannedBinding],
-    outcomes: &[(ExecutionOutcome, ResultMaterial)],
-    live_cause: LiveControllingCause,
-) -> Result<ToolBatchControl, ApiError> {
-    let closed_bindings = bindings.get(..outcomes.len()).ok_or_else(|| {
-        ApiError::Internal("Tool batch produced more outcomes than bindings".to_string())
-    })?;
-    derive_tool_batch_control(closed_bindings, outcomes, Some(live_cause))
-        .map_err(|error| ApiError::Internal(error.to_string()))
-}
-
-fn remaining_skip_reason(control: &ToolBatchControl) -> Option<NotExecutedReason> {
-    match control {
-        ToolBatchControl::Continue => None,
-        ToolBatchControl::Interrupt(TurnInterruption::InvocationMayHaveOccurred { .. }) => {
-            Some(NotExecutedReason::PrecedingInvocationIndeterminate)
-        }
-        ToolBatchControl::Cancel(_) | ToolBatchControl::Interrupt(_) => {
-            Some(NotExecutedReason::BeforeDispatch)
-        }
-    }
-}
-
-fn user_message(input: &str) -> NativeMessage<BoundToolCall> {
-    NativeMessage::new(
-        MessageRole::User,
-        None,
-        vec![MessagePart::semantic_only(MessageSemantic::Text {
-            text: input.to_string(),
-        })],
-    )
-}
-
-fn tool_result_message(closure: &ClosedBinding) -> NativeMessage<BoundToolCall> {
-    NativeMessage::new(
-        MessageRole::Tool,
-        None,
-        vec![MessagePart::semantic_only(MessageSemantic::ToolResult {
-            invocation_id: closure.binding.invocation_id,
-            name: closure.binding.method.clone(),
-            outcome: closure.outcome,
-            content: None,
-        })],
-    )
-}
-
-/// 工具调用批次无法完成绑定规划的原因。
-///
-/// 目录外工具名是外部输入问题：整批拒绝，调用方按既有拒绝路径正常失败关闭该 Turn。
-///
-/// 其余规划不变量失败仍是内部故障，走原来的 `Err` 传播。
-#[derive(Debug)]
-enum BindingPlanRejection {
-    UnknownTool(lattice_conversation::ToolCallValidation),
-    Internal(ApiError),
-}
-
-/// 在分配任何 InvocationId、预留或分发之前核验整批工具名。
-///
-/// 目录外名称（未启用或不存在）导致整批拒绝，返回第一个越界调用的序号。
-/// 核验先于绑定和分发，确保本批合法调用也不会提前产生效果，且无需伪造工具描述。
-fn reject_unknown_tools(
-    tool_calls: &[(usize, UnboundToolCall)],
-    tool_catalog: &[lancet_api::ToolDefinition],
-) -> Result<(), BindingPlanRejection> {
-    let outsider = tool_calls
-        .iter()
-        .find(|(_, call)| !tool_catalog.iter().any(|tool| tool.name == call.name));
-    match outsider {
-        None => Ok(()),
-        Some((ordinal, _)) => Err(BindingPlanRejection::UnknownTool(
-            lattice_conversation::ToolCallValidation::UnknownTool {
-                call_ordinal: *ordinal,
-            },
-        )),
-    }
-}
-
-fn build_binding_plan(
-    message: &NativeMessage<UnboundToolCall>,
-    tool_calls: &[(usize, UnboundToolCall)],
-    tool_catalog: &[lancet_api::ToolDefinition],
-    session_id: SessionId,
-    turn_id: TurnId,
-    model_step: u32,
-    coordinator: &TurnCoordinator,
-) -> Result<BindingPlan, BindingPlanRejection> {
-    // 必须先于下面的 InvocationId 分配与绑定构造（R1 止血 #218）。
-    reject_unknown_tools(tool_calls, tool_catalog)?;
-    let mut bindings = Vec::with_capacity(tool_calls.len());
-    for (ordinal, call) in tool_calls {
-        let descriptor = tool_catalog
-            .iter()
-            .find(|tool| tool.name == call.name)
-            .ok_or_else(|| {
-                BindingPlanRejection::Internal(ApiError::Internal(
-                    "internal Turn planning failure".into(),
-                ))
-            })?;
-        let invocation_id = coordinator.ids.new_invocation_id();
-        let address = ToolCallAddress {
-            message: ModelMessageAddress {
-                session_id,
-                turn_id,
-                model_step_ordinal: model_step,
-            },
-            part_ordinal: *ordinal as u32,
-        };
-        let args_digest = arguments_digest(&call.arguments);
-        let binding_digest = PlannedBinding::compute_binding_digest(
-            &invocation_id,
-            &address,
-            &call.name,
-            &descriptor.descriptor_identity,
-            &args_digest,
-        );
-        bindings.push(PlannedBinding {
-            invocation_id,
-            address,
-            method: call.name.clone(),
-            descriptor_identity: descriptor.descriptor_identity.clone(),
-            arguments_digest: args_digest,
-            binding_digest,
-        });
-    }
-    let plan = BindingPlan {
-        plan_key: PlanKey {
-            session_id,
-            turn_id,
-            model_step_ordinal: model_step,
-        },
-        message: message.clone(),
-        bindings,
-    };
-    plan.validate()
-        .map_err(|err| BindingPlanRejection::Internal(ApiError::Internal(err.to_string())))?;
-    Ok(plan)
-}
-
-async fn reserve_with_revision(
-    coordinator: &TurnCoordinator,
-    session_id: &str,
-    execution_lock: &Arc<FlockGuard>,
-    plan: &mut BindingPlan,
-) -> Result<(), ApiError> {
-    loop {
-        match coordinator.io.reserve_plan(plan.clone()).await {
-            Ok(()) => return Ok(()),
-            Err(CoordinatorIoError::InvocationStore(
-                lancet_audit::invocation_store::InvocationStoreError::DuplicateInvocation {
-                    ..
-                },
-            )) => {
-                let tip = coordinator
-                    .io
-                    .read_active_turn(session_id.to_string())
-                    .await
-                    .map_err(map_io)?
-                    .ok_or_else(|| {
-                        ApiError::Internal("active Turn missing during revision".into())
-                    })?;
-                let candidates = plan
-                    .bindings
-                    .iter()
-                    .map(|b| b.invocation_id)
-                    .collect::<Vec<_>>();
-                let facts = coordinator
-                    .io
-                    .pin_invocation_facts(plan.plan_key, candidates)
-                    .await
-                    .map_err(map_io)?;
-                match lattice_session::pending::reconcile(&tip.snapshot, &facts)
-                    .map_err(|e| ApiError::Internal(e.to_string()))?
-                {
-                    lattice_session::pending::ReconciliationDecision::ReviseCandidates(request) => {
-                        let store = coordinator.io.session_store();
-                        let ids = Arc::clone(&coordinator.ids);
-                        let lock = Arc::clone(execution_lock);
-                        let tip_clone = tip.clone();
-                        tokio::task::spawn_blocking(move || {
-                            store.execute_candidate_revision(
+                .start_execution(
+                    async move {
+                        driver
+                            .run(
                                 &request,
-                                &tip_clone,
-                                tip_clone.snapshot.recorded_at.ok_or_else(|| {
-                                    lattice_session::SessionError::JournalCorruption {
-                                        detail:
-                                            "pending journal commit has no readable committer time"
-                                                .into(),
+                                Some(&mut |event| match event {
+                                    ModelStepEvent::TokenDelta { content } => {
+                                        observer.emit(TurnEvent::TokenDelta { key, content })
                                     }
-                                })?,
-                                &lock,
-                                || ids.new_invocation_id(),
+                                    ModelStepEvent::ReasoningDelta { content } => {
+                                        observer.emit(TurnEvent::ReasoningDelta { key, content })
+                                    }
+                                    ModelStepEvent::Opened { .. } => {}
+                                }),
                             )
-                        })
-                        .await
-                        .map_err(|e| ApiError::Internal(e.to_string()))?
-                        .map_err(|e| ApiError::Internal(e.to_string()))?;
-                        let refreshed = coordinator
-                            .io
-                            .read_active_turn(session_id.to_string())
                             .await
-                            .map_err(map_io)?
-                            .ok_or_else(|| {
-                                ApiError::Internal("active Turn missing after revision".into())
-                            })?;
-                        match refreshed.snapshot.stage {
-                            PendingStage::BindingPlanned {
-                                plan: revised_plan, ..
-                            } => *plan = revised_plan,
-                            _ => {
-                                return Err(ApiError::Internal(
-                                    "revision did not republish BindingPlanned".into(),
-                                ));
-                            }
-                        }
-                    }
-                    other => {
-                        return Err(ApiError::Internal(format!(
-                            "expected candidate revision after collision, got {other:?}"
-                        )));
-                    }
+                    },
+                    live.cancel.clone(),
+                    live.deadline,
+                )
+                .await?;
+            let result = match worker {
+                Ok(worker) => live.join(worker, cancellation).await?,
+                Err(cause) => Ok(ModelStepAttempt::Stopped {
+                    cause: if cause == StopCause::Cancelled {
+                        ModelStopCause::Cancelled
+                    } else {
+                        ModelStopCause::Deadline
+                    },
+                    usage: None,
+                    diagnostic: Default::default(),
+                }),
+            };
+            let stopped = match result {
+                Ok(ModelStepAttempt::Complete {
+                    message,
+                    usage,
+                    finish_reason,
+                }) => {
+                    live.observer.emit(TurnEvent::ModelFinished {
+                        key,
+                        usage,
+                        finish_reason,
+                    });
+                    break CompleteReply {
+                        key,
+                        origin,
+                        message,
+                        usage,
+                    };
+                }
+                Ok(ModelStepAttempt::Stopped {
+                    cause,
+                    usage,
+                    diagnostic,
+                }) => AttemptStopped {
+                    key,
+                    origin,
+                    usage,
+                    cause: map_stop(cause),
+                    diagnostic: AttemptDiagnostic {
+                        provider_error: diagnostic
+                            .provider_error
+                            .as_deref()
+                            .map(bound_provider_diagnostic),
+                        invalid_batch: diagnostic.invalid_batch,
+                        partial: Vec::new(),
+                    },
+                },
+                Err(ModelStepError::OpeningFailed { message, retryable }) => AttemptStopped {
+                    key,
+                    origin,
+                    usage: None,
+                    cause: StopCause::ProviderError { retryable },
+                    diagnostic: AttemptDiagnostic {
+                        provider_error: Some(bound_provider_diagnostic(&message)),
+                        ..Default::default()
+                    },
+                },
+                Err(ModelStepError::Projection(_)) => AttemptStopped {
+                    key,
+                    origin,
+                    usage: None,
+                    cause: StopCause::ProviderError { retryable: false },
+                    diagnostic: AttemptDiagnostic {
+                        provider_error: Some("provider request projection failed".into()),
+                        ..Default::default()
+                    },
+                },
+            };
+            let retryable = matches!(stopped.cause, StopCause::ProviderError { retryable: true });
+            let message = stopped
+                .diagnostic
+                .provider_error
+                .clone()
+                .unwrap_or_default();
+            let provider_error = matches!(stopped.cause, StopCause::ProviderError { .. });
+            live.healthy()?;
+            let stopped = coordinator.io.stop_attempt(stopped).await?;
+            #[cfg(feature = "test-crash-barriers")]
+            super::crash_barrier::hit(
+                &coordinator.io,
+                turn_id,
+                "attempt_stopped",
+                Some(ordinal),
+                None,
+            )
+            .await?;
+            let wait = Duration::from_millis(delay)
+                .min(live.deadline.saturating_duration_since(Instant::now()));
+            if provider_error {
+                let will_retry = matches!(stopped, AttemptStopResult::RetryReady { .. });
+                live.observer.emit(TurnEvent::LlmRequestError {
+                    key,
+                    retryable,
+                    will_retry,
+                    delay_ms: will_retry.then_some(wait.as_millis() as u64),
+                    message,
+                });
+            }
+            match stopped {
+                AttemptStopResult::Closed(closed) => {
+                    return publish_closed(coordinator, &live.observer, closed).await;
+                }
+                AttemptStopResult::RetryReady { next_attempt } => {
+                    live.backoff(wait).await?;
+                    attempt = next_attempt;
+                    delay = delay.saturating_mul(2).min(live.retry.max_delay_ms);
                 }
             }
-            Err(err) => return Err(map_io(err)),
+        };
+        live.healthy()?;
+        if reply.message.tool_calls().next().is_none() {
+            let closed = coordinator.io.close_step(CloseStep::Finish(reply)).await?;
+            return publish_closed(coordinator, &live.observer, closed).await;
         }
-    }
-}
-
-fn classify_receipt(
-    receipt: ExecutionReceipt,
-) -> (
-    lancet_audit::invocation_store::TerminalOutcome,
-    ToolResultOutcome,
-    String,
-    lancet_audit::invocation_store::TerminalEvidence,
-) {
-    match receipt {
-        ExecutionReceipt {
-            result: Ok(value),
-            evidence,
-        } => (
-            lancet_audit::invocation_store::TerminalOutcome::Succeeded,
-            ToolResultOutcome::Succeeded,
-            canonical_json(&value),
-            terminal_evidence(evidence),
-        ),
-        ExecutionReceipt {
-            result: Err(err),
-            evidence,
-        } => {
-            let (terminal, conversation) = map_cep_outcome(&err);
-            (
-                terminal,
-                conversation,
-                bounded_error_content(&err),
-                terminal_evidence(evidence),
+        let key = reply.key;
+        let usage = reply.usage;
+        let registered = match coordinator.register(reply).await {
+            Ok(calls) => calls,
+            Err(CoordinatorIoError::Store(StoreError::InvalidInput { .. })) => {
+                let stopped = coordinator
+                    .io
+                    .stop_attempt(AttemptStopped {
+                        key,
+                        origin,
+                        usage,
+                        cause: StopCause::InvalidBatch,
+                        diagnostic: AttemptDiagnostic::default(),
+                    })
+                    .await?;
+                let AttemptStopResult::Closed(closed) = stopped else {
+                    unreachable!("InvalidBatch is not retryable")
+                };
+                return publish_closed(coordinator, &live.observer, closed).await;
+            }
+            Err(error) => return Err(error),
+        };
+        #[cfg(feature = "test-crash-barriers")]
+        super::crash_barrier::hit(
+            &coordinator.io,
+            turn_id,
+            "calls_registered",
+            Some(ordinal),
+            None,
+        )
+        .await?;
+        live.observer.emit(TurnEvent::CallsRegistered {
+            key: registered.key,
+            calls: registered.bindings.clone(),
+        });
+        for (binding, (_, call)) in registered
+            .bindings
+            .iter()
+            .zip(registered.reply.tool_calls())
+        {
+            live.healthy()?;
+            if let Some(cause) = live.stop() {
+                let stop = if cause == StopCause::Cancelled {
+                    DispatchStop::Cancelled
+                } else {
+                    DispatchStop::Deadline
+                };
+                let closed = coordinator
+                    .io
+                    .close_step(CloseStep::StopExecuting {
+                        key: registered.key,
+                        stop,
+                    })
+                    .await?;
+                return publish_closed(coordinator, &live.observer, closed).await;
+            }
+            let started = coordinator.io.start_invocation(binding.clone()).await?;
+            #[cfg(feature = "test-crash-barriers")]
+            super::crash_barrier::hit(
+                &coordinator.io,
+                turn_id,
+                "invocation_started",
+                Some(ordinal),
+                Some(binding),
             )
+            .await?;
+            live.healthy()?;
+            let runtime = live.runtime.clone();
+            let method = call.name.clone();
+            let params = call.arguments.clone();
+            let cancellation = Arc::new(AtomicBool::new(live.cancel.load(Ordering::Acquire)));
+            let call_cancel = cancellation.clone();
+            let worker = coordinator
+                .io
+                .start_execution(
+                    async move {
+                        runtime
+                            .dispatch(started, method, params, Some(call_cancel))
+                            .await
+                    },
+                    live.cancel.clone(),
+                    live.deadline,
+                )
+                .await?;
+            let worker = match worker {
+                Ok(worker) => worker,
+                Err(cause) => {
+                    let closed = coordinator
+                        .io
+                        .close_step(CloseStep::StopExecuting {
+                            key: registered.key,
+                            stop: if cause == StopCause::Cancelled {
+                                DispatchStop::Cancelled
+                            } else {
+                                DispatchStop::Deadline
+                            },
+                        })
+                        .await?;
+                    return publish_closed(coordinator, &live.observer, closed).await;
+                }
+            };
+            live.observer.emit(TurnEvent::ToolCallStarted {
+                id: binding.invocation_id,
+                name: call.name.clone(),
+            });
+            let receipt = live.join(worker, cancellation).await?;
+            let terminal = prepare_terminal(binding, receipt.result, receipt.evidence)?;
+            let outcome = terminal.result().payload.outcome();
+            let error_summary = match &terminal.result().payload {
+                ResultPayload::Failed(error) | ResultPayload::Rejected(error) => {
+                    Some(bound_provider_diagnostic(&error.message))
+                }
+                _ => None,
+            };
+            let stop = matches!(
+                outcome,
+                ToolResultOutcome::Cancelled
+                    | ToolResultOutcome::Indeterminate
+                    | ToolResultOutcome::NotExecuted
+            );
+            coordinator
+                .io
+                .finish_invocation(TerminalInput {
+                    invocation_id: binding.invocation_id,
+                    terminal,
+                })
+                .await?;
+            #[cfg(feature = "test-crash-barriers")]
+            super::crash_barrier::hit(
+                &coordinator.io,
+                turn_id,
+                "invocation_finished",
+                Some(ordinal),
+                Some(binding),
+            )
+            .await?;
+            let detail = coordinator
+                .io
+                .read(move |read| read.turn_detail(session, turn_id))
+                .await?;
+            let StepDetailState::Executing { slots } =
+                &detail.steps.last().expect("active Step").state
+            else {
+                unreachable!()
+            };
+            let row = slots
+                .iter()
+                .find(|slot| slot.invocation_id == binding.invocation_id)
+                .expect("committed slot");
+            let OperatorInvocationState::Terminal { material, .. } = &row.state else {
+                unreachable!()
+            };
+            live.observer.emit(TurnEvent::ToolCallFinished {
+                id: binding.invocation_id,
+                name: call.name.clone(),
+                outcome,
+                material: material.clone(),
+                error_summary,
+            });
+            if stop {
+                let closed = coordinator
+                    .io
+                    .close_step(CloseStep::StopExecuting {
+                        key: registered.key,
+                        stop: DispatchStop::ProcessExit,
+                    })
+                    .await?;
+                return publish_closed(coordinator, &live.observer, closed).await;
+            }
+        }
+        live.healthy()?;
+        let closed = coordinator
+            .io
+            .close_step(CloseStep::Continue {
+                key: registered.key,
+            })
+            .await?;
+        publish_closed(coordinator, &live.observer, closed).await?;
+        ordinal += 1;
+    }
+}
+
+fn map_stop(cause: ModelStopCause) -> StopCause {
+    match cause {
+        ModelStopCause::ProviderError { retryable } => StopCause::ProviderError { retryable },
+        ModelStopCause::Cancelled => StopCause::Cancelled,
+        ModelStopCause::Deadline => StopCause::Deadline,
+        ModelStopCause::OutputLimit => StopCause::OutputLimit,
+        ModelStopCause::InvalidBatch => StopCause::InvalidBatch,
+    }
+}
+
+fn history(
+    read: &SessionRead,
+    session_id: lancet_protocol::SessionId,
+) -> lattice_session::store::Result<Vec<ConversationItem>> {
+    let mut current = read.session(session_id)?.current;
+    let mut items = Vec::new();
+    while current != NodeId(0) {
+        match read.node(NodeRef {
+            session_id,
+            node: current,
+        })? {
+            Node::UserMessage {
+                parent, message, ..
+            } => {
+                items.push(ConversationItem::Message(message));
+                current = parent;
+            }
+            Node::Step {
+                parent, content, ..
+            } => {
+                items.push(ConversationItem::Step(content));
+                current = parent;
+            }
+            Node::Root => {
+                return Err(StoreError::Corruption {
+                    table: "nodes".into(),
+                    key: current.0.to_string(),
+                    detail: "nonzero root".into(),
+                });
+            }
         }
     }
+    items.reverse();
+    Ok(items)
 }
 
-fn map_cep_outcome(
-    err: &CepError,
-) -> (
-    lancet_audit::invocation_store::TerminalOutcome,
-    ToolResultOutcome,
-) {
-    use lancet_audit::invocation_store::TerminalOutcome;
-    use lancet_protocol::error::CepErrorCode;
-    if matches!(err.code, CepErrorCode::CallCancelled) {
-        return (TerminalOutcome::Cancelled, ToolResultOutcome::Cancelled);
-    }
-    if matches!(err.code, CepErrorCode::OutcomeIndeterminate) {
-        return (
-            TerminalOutcome::Indeterminate {
-                reason: lancet_audit::invocation_store::IndeterminateReason::MayHaveOccurred,
-            },
-            ToolResultOutcome::Indeterminate,
-        );
-    }
-    match err.code.family() {
-        CepErrorFamily::Validation | CepErrorFamily::Permission | CepErrorFamily::Guard => {
-            (TerminalOutcome::Rejected, ToolResultOutcome::Rejected)
-        }
-        _ => (TerminalOutcome::Failed, ToolResultOutcome::Failed),
-    }
-}
-
-fn bounded_error_content(err: &CepError) -> String {
-    let mut message = err.message.clone();
-    if message.len() > BOUNDED_ERROR_CONTENT_BYTES {
-        let mut end = BOUNDED_ERROR_CONTENT_BYTES;
-        while !message.is_char_boundary(end) {
-            end -= 1;
-        }
-        message.truncate(end);
-    }
-    canonical_json(&serde_json::json!({
-        "error": {
-            "code": err.code as i32,
-            "message": message,
-        }
-    }))
-}
-
-fn terminal_evidence(
-    evidence: lancet_protocol::CellEvidenceTriple,
-) -> lancet_audit::invocation_store::TerminalEvidence {
-    lancet_audit::invocation_store::TerminalEvidence {
-        admission: evidence.admission,
-        effects: evidence.effects,
-        denied: evidence.denied,
-    }
-}
-
-fn empty_evidence(tool: &str) -> lancet_audit::invocation_store::TerminalEvidence {
-    lancet_audit::invocation_store::TerminalEvidence {
-        admission: lancet_protocol::AdmissionEvidence {
-            version: lancet_protocol::ADMISSION_EVIDENCE_VERSION,
-            tool: tool.to_string(),
-            approved_capabilities: Vec::new(),
-            denied_capabilities: Vec::new(),
-            boundary_excluded: Vec::new(),
-            max_boundary: lancet_protocol::Trust::In,
-        },
-        effects: lancet_protocol::ObservedEffectsRecord {
-            version: lancet_protocol::OBSERVED_EFFECTS_RECORD_VERSION,
-            effects: Vec::new(),
-        },
-        denied: lancet_protocol::DeniedOperationsRecord {
-            version: lancet_protocol::DENIED_OPERATIONS_RECORD_VERSION,
-            denied: Vec::new(),
-        },
-    }
-}
-struct LiveTurnClosure<'a> {
-    session_id: &'a str,
-    turn_id: TurnId,
-    outcome: TurnOutcome,
-}
-
-async fn close_live_turn(
+async fn publish_closed(
     coordinator: &TurnCoordinator,
-    closure: LiveTurnClosure<'_>,
-    execution_lock: Arc<FlockGuard>,
-    workspace_history: Arc<WorkspaceHistory>,
-) -> Result<TurnCommit, ApiError> {
-    let LiveTurnClosure {
+    observer: &ObserverSink,
+    closed: ClosedStep,
+) -> Result<TurnDetail> {
+    let session_id = coordinator.io.session_id();
+    let turn_id = closed.record.key.turn_id;
+    let detail = coordinator
+        .io
+        .read(move |read| read.turn_detail(session_id, turn_id))
+        .await?;
+    let step = detail.steps.last().expect("closed Step exists").clone();
+    #[cfg(feature = "test-crash-barriers")]
+    super::crash_barrier::hit(
+        &coordinator.io,
+        turn_id,
+        "step_closed",
+        Some(step.key.ordinal),
+        None,
+    )
+    .await?;
+    let turn = TurnRef {
         session_id,
         turn_id,
-        outcome,
-    } = closure;
-    let tip = coordinator
-        .io
-        .read_active_turn(session_id.to_string())
-        .await
-        .map_err(map_io)?
-        .ok_or_else(|| ApiError::Internal("active Turn missing at close".into()))?;
-    if tip.snapshot.turn_id != turn_id {
-        return Err(ApiError::Internal(
-            "active Turn identity changed before close".into(),
-        ));
-    }
-    let recorded_at = tip.snapshot.recorded_at.ok_or_else(|| {
-        ApiError::Internal("pending journal commit has no readable committer time".into())
-    })?;
-    let basis = tip
-        .snapshot
-        .turn_commit_candidate_basis(outcome, ClosureOrigin::Live)
-        .map_err(|error| ApiError::Internal(error.to_string()))?;
-
-    // ADR 0005 §5/§15: one shared WorkspaceOperationLock covers the
-    // authoritative current() read, TurnClosing publication, and final
-    // Session ref transaction. No repository write lock crosses another.
-    let history = Arc::clone(&workspace_history);
-    let (workspace_guard, checkpoint) = tokio::task::spawn_blocking(move || {
-        let guard = history
-            .lock_workspace_operation(
-                lattice_session::LockMode::Shared,
-                lattice_session::Blocking::Block,
-            )
-            .map_err(|error| {
-                ApiError::Internal(format!("acquire workspace checkpoint lock: {error}"))
-            })?
-            .ok_or_else(|| {
-                ApiError::Internal("production Turn has disabled workspace history".into())
-            })?;
-        let current = history.current().map_err(|error| {
-            ApiError::Internal(format!("read workspace history checkpoint: {error}"))
-        })?;
-        let checkpoint = WorkspaceHistoryCheckpoint::from_current(current)
-            .map_err(|error| ApiError::Internal(error.to_string()))?;
-        Ok::<_, ApiError>((guard, checkpoint))
-    })
-    .await
-    .map_err(|error| ApiError::Internal(format!("read checkpoint task failed: {error}")))??;
-    let candidate = basis
-        .with_workspace_history_checkpoint(checkpoint)
-        .map_err(|error| ApiError::Internal(error.to_string()))?;
-
-    let session_store = coordinator.io.session_store();
-    let lock = Arc::clone(&execution_lock);
-    let session_id_owned = session_id.to_string();
-    tokio::task::spawn_blocking(move || {
-        session_store.advance_pending_turn(
-            &session_id_owned,
-            PendingStage::TurnClosing(TurnClosingFacts { turn_id, candidate }),
-            recorded_at,
-            lock.as_ref(),
-        )
-    })
-    .await
-    .map_err(|error| ApiError::Internal(format!("publish TurnClosing task failed: {error}")))?
-    .map_err(|error| ApiError::Internal(format!("publish TurnClosing: {error}")))?;
-
-    #[cfg(feature = "test-crash-barriers")]
-    super::crash_barrier::hit(coordinator, session_id, "turn_closing")
-        .await
-        .map_err(map_io)?;
-
-    let session_store = coordinator.io.session_store();
-    let lock = Arc::clone(&execution_lock);
-    let session_id_owned = session_id.to_string();
-    let result = tokio::task::spawn_blocking(move || {
-        session_store.finalize_turn(&session_id_owned, &turn_id, lock.as_ref())
-    })
-    .await
-    .map_err(|error| ApiError::Internal(format!("finalize Turn task failed: {error}")))?
-    .map_err(|error| ApiError::Internal(format!("finalize Turn: {error}")));
-    drop(workspace_guard);
-    result
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use lancet_audit::invocation_store::{
-        BindingIdentity as StoreBindingIdentity, InvocationState, InvocationStore,
-        NotExecutedReason as AuditNotExecutedReason, ReservationBinding, TerminalOutcome,
     };
-    use lancet_protocol::InvocationId;
-    use lattice_session::{ProjectStoreKey, SessionGraphStore, StateLayout};
-
-    fn empty_triple(tool: &str) -> lancet_protocol::CellEvidenceTriple {
-        lancet_protocol::CellEvidenceTriple {
-            admission: empty_evidence(tool).admission,
-            effects: empty_evidence(tool).effects,
-            denied: empty_evidence(tool).denied,
-        }
-    }
-
-    #[test]
-    fn indeterminate_cep_error_maps_to_may_have_occurred() {
-        let mut err = CepError::internal_error("history durability failed");
-        err.code = lancet_protocol::CepErrorCode::OutcomeIndeterminate;
-        let (terminal, conversation) = map_cep_outcome(&err);
-        assert!(matches!(
-            terminal,
-            TerminalOutcome::Indeterminate {
-                reason: lancet_audit::invocation_store::IndeterminateReason::MayHaveOccurred
-            }
-        ));
-        assert_eq!(conversation, ToolResultOutcome::Indeterminate);
-    }
-
-    #[test]
-    fn typed_outcome_supplies_non_empty_diagnostic_fallbacks() {
-        let invalid = TurnOutcome::Failed {
-            reason: TurnFailure::InvalidToolCall {
-                validation: lattice_conversation::ToolCallValidation::MalformedArguments {
-                    call_ordinal: 2,
-                },
+    observer.emit(match &detail.summary {
+        None => TurnEvent::StepClosed { step },
+        Some(summary) => match summary.outcome {
+            PublicTurnOutcome::Completed => TurnEvent::TurnCompleted {
+                turn,
+                step,
+                summary: summary.clone(),
             },
-        };
-        let timeout = TurnOutcome::Interrupted {
-            reason: TurnInterruption::ModelAttempt(
-                lattice_conversation::AttemptInterruption::Timeout,
-            ),
-        };
-        let cancelled = TurnOutcome::Cancelled {
-            reason: TurnCancellation::UserCancelled,
-        };
-
-        for outcome in [&invalid, &timeout] {
-            let Some(TurnEvent::TurnFailed { reason }) = diagnostic_terminal_event(outcome, None)
-            else {
-                panic!("non-completed outcome must emit TurnFailed");
-            };
-            assert!(!reason.is_empty());
-        }
-        let Some(TurnEvent::TurnCancelled { reason }) = diagnostic_terminal_event(&cancelled, None)
-        else {
-            panic!("cancelled outcome must emit TurnCancelled");
-        };
-        assert_eq!(reason.as_deref(), Some("cancelled by caller"));
-    }
-
-    fn catalog(names: &[&str]) -> Vec<lancet_api::ToolDefinition> {
-        names
-            .iter()
-            .map(|name| {
-                lancet_api::ToolDefinition::new(
-                    *name,
-                    "test",
-                    serde_json::json!({}),
-                    "d".repeat(64),
-                )
-            })
-            .collect()
-    }
-
-    fn unbound(name: &str) -> UnboundToolCall {
-        UnboundToolCall {
-            provider_call_id: None,
-            name: name.to_string(),
-            arguments: serde_json::json!({}),
-        }
-    }
-
-    /// 一旦分配 InvocationId 就触发测试失败的身份源。
-    ///
-    /// 用于验证整批核验先于身份分配；顺序颠倒会直接使测试失败。
-    struct PanickingIdSource;
-
-    impl super::super::coordinator::IdSource for PanickingIdSource {
-        fn new_invocation_id(&self) -> InvocationId {
-            panic!("a rejected Tool batch must not allocate an InvocationId");
-        }
-
-        fn new_turn_id(&self) -> TurnId {
-            panic!("a rejected Tool batch must not allocate a TurnId");
-        }
-    }
-
-    /// 为绑定规划测试创建协调器；任何身份分配都会触发测试失败。
-    fn plan_coordinator() -> (tempfile::TempDir, TurnCoordinator) {
-        let tmp = tempfile::tempdir().unwrap();
-        let layout = StateLayout::in_state_root(tmp.path());
-        let key = ProjectStoreKey::derive(tmp.path()).unwrap();
-        let session =
-            Arc::new(lattice_session::GitSessionGraphStore::create_layout(&layout).unwrap());
-        let invocations = Arc::new(InvocationStore::create(&layout, &key).unwrap());
-        let coordinator = TurnCoordinator::new(
-            super::super::coordinator::CoordinatorStoreIo::new(session, invocations, key).unwrap(),
-            Arc::new(PanickingIdSource),
-        );
-        (tmp, coordinator)
-    }
-
-    fn plan_message(calls: &[(usize, UnboundToolCall)]) -> NativeMessage<UnboundToolCall> {
-        NativeMessage::new(
-            MessageRole::Assistant,
-            None,
-            calls
-                .iter()
-                .map(|(_, call)| {
-                    MessagePart::semantic_only(MessageSemantic::ToolCall { call: call.clone() })
-                })
-                .collect(),
-        )
-    }
-
-    fn plan_rejection(
-        coordinator: &TurnCoordinator,
-        calls: &[(usize, UnboundToolCall)],
-        catalog: &[lancet_api::ToolDefinition],
-    ) -> BindingPlanRejection {
-        build_binding_plan(
-            &plan_message(calls),
-            calls,
-            catalog,
-            SessionId::parse("00000000000040008000000000000003").unwrap(),
-            TurnId::parse("00000000-0000-4000-8000-000000000002").unwrap(),
-            0,
-            coordinator,
-        )
-        .expect_err("an out-of-catalog batch must reject")
-    }
-
-    /// 目录外名称（此处根本不存在）在分配任何身份之前整批拒绝。
-    #[test]
-    fn nonexistent_tool_name_rejects_the_batch_before_allocating_identity() {
-        let (_tmp, coordinator) = plan_coordinator();
-        let calls = [(0, unbound("fetch.web"))];
-        let rejection = plan_rejection(&coordinator, &calls, &catalog(&[]));
-        let BindingPlanRejection::UnknownTool(validation) = rejection else {
-            panic!("outsider must not be an internal fault: {rejection:?}");
-        };
-        assert_eq!(
-            validation,
-            lattice_conversation::ToolCallValidation::UnknownTool { call_ordinal: 0 }
-        );
-    }
-
-    /// 混合批次：合法前缀不得先被接受，整批在分配身份之前拒绝。
-    #[test]
-    fn mixed_batch_rejects_before_allocating_any_invocation_id() {
-        let (_tmp, coordinator) = plan_coordinator();
-        let calls = [(0, unbound("observe.workspace")), (1, unbound("fetch.web"))];
-        let rejection = plan_rejection(&coordinator, &calls, &catalog(&["observe.workspace"]));
-        let BindingPlanRejection::UnknownTool(validation) = rejection else {
-            panic!("outsider must not be an internal fault: {rejection:?}");
-        };
-        assert_eq!(
-            validation,
-            lattice_conversation::ToolCallValidation::UnknownTool { call_ordinal: 1 }
-        );
-    }
-    #[test]
-    fn successful_oversize_receipt_advances_live_cursor_without_a_draft() {
-        let tmp = tempfile::tempdir().unwrap();
-        let layout = StateLayout::in_state_root(tmp.path());
-        let project_key = ProjectStoreKey::derive(tmp.path()).unwrap();
-        let store = lattice_session::GitSessionGraphStore::create_layout(&layout).unwrap();
-        let session = "00000000000040008000000000000003";
-        let session_id = SessionId::parse(session).unwrap();
-        let turn_id = TurnId::parse("00000000-0000-4000-8000-000000000002").unwrap();
-        let invocation_id = InvocationId::parse("00000000-0000-4000-8000-000000000001").unwrap();
-        store
-            .create_session(session, None, "test", "main", &project_key)
-            .unwrap();
-        let lock = store
-            .lock_execution(
-                session,
-                lattice_session::LockMode::Exclusive,
-                lattice_session::Blocking::Block,
-            )
-            .unwrap();
-        let descriptor_identity = "d".repeat(64);
-        let catalog = lattice_session::pending::ToolCatalogSnapshot::new(
-            "test-build".to_string(),
-            vec![lattice_session::pending::ToolCatalogEntry {
-                name: "observe.workspace".to_string(),
-                descriptor_identity: descriptor_identity.clone(),
-                description: "observe".to_string(),
-                input_schema: serde_json::json!({"type": "object"}),
-            }],
-        )
-        .unwrap();
-        store
-            .begin_pending_turn(
-                lattice_session::pending::TurnStartedFacts {
-                    turn_id,
-                    session_id,
-                    project_store_key: project_key,
-                    parent_conversation_tip: None,
-                    user_message: NativeMessage::new(
-                        MessageRole::User,
-                        None,
-                        vec![MessagePart::semantic_only(MessageSemantic::Text {
-                            text: "read the large file".to_string(),
-                        })],
-                    ),
-                    config: lattice_session::pending::FrozenTurnConfig {
-                        agent_name: "test".to_string(),
-                        model: "test-model".to_string(),
-                        provider: "test-provider".to_string(),
-                        system_prompt: None,
-                        profile_snapshot_json: "{}".to_string(),
-                        policy_snapshot_json: "{}".to_string(),
-                        catalog,
-                        limits: lattice_session::pending::TurnExecutionLimits {
-                            timeout_secs: 60,
-                            max_model_steps: MAX_MODEL_STEPS,
-                            max_model_attempts: 1,
-                        },
-                    },
-                    accepted_at: "2026-08-30T00:00:00Z".to_string(),
-                },
-                &lock,
-            )
-            .unwrap();
-        store
-            .advance_pending_turn(
-                session,
-                PendingStage::ModelAttemptStarted {
-                    key: ModelAttemptKey {
-                        turn_id,
-                        model_step_ordinal: 0,
-                        attempt_ordinal: 0,
-                    },
-                },
-                100,
-                &lock,
-            )
-            .unwrap();
-
-        let arguments = serde_json::json!({"path": "large.txt"});
-        let address = ToolCallAddress {
-            message: ModelMessageAddress {
-                session_id,
-                turn_id,
-                model_step_ordinal: 0,
+            PublicTurnOutcome::Failed => TurnEvent::TurnFailed {
+                turn,
+                step,
+                summary: summary.clone(),
             },
-            part_ordinal: 0,
-        };
-        let arguments_digest = arguments_digest(&arguments);
-        let binding = PlannedBinding {
-            invocation_id,
-            binding_digest: lattice_session::pending::binding_digest(
-                &invocation_id,
-                &address,
-                "observe.workspace",
-                &descriptor_identity,
-                &arguments_digest,
-            ),
-            address,
-            method: "observe.workspace".to_string(),
-            descriptor_identity,
-            arguments_digest,
-        };
-        let plan = BindingPlan {
-            plan_key: PlanKey {
-                session_id,
-                turn_id,
-                model_step_ordinal: 0,
+            PublicTurnOutcome::Cancelled => TurnEvent::TurnCancelled {
+                turn,
+                step,
+                summary: summary.clone(),
             },
-            message: NativeMessage::new(
-                MessageRole::Assistant,
-                Some(lattice_conversation::ProviderOrigin::Anthropic),
-                vec![MessagePart::semantic_only(MessageSemantic::ToolCall {
-                    call: UnboundToolCall {
-                        provider_call_id: Some("call-oversize".to_string()),
-                        name: binding.method.clone(),
-                        arguments,
-                    },
-                })],
-            ),
-            bindings: vec![binding.clone()],
-        };
-        store
-            .advance_pending_turn(
-                session,
-                PendingStage::BindingPlanned {
-                    plan: plan.clone(),
-                    usage: None,
-                },
-                101,
-                &lock,
-            )
-            .unwrap();
-        store
-            .advance_pending_turn(
-                session,
-                PendingStage::Bound { plan: plan.clone() },
-                102,
-                &lock,
-            )
-            .unwrap();
-        let closing = StepClosingState {
-            plan_key: plan.plan_key,
-            bindings: plan.bindings,
-            closure_cursor: 0,
-            closures: Vec::new(),
-            current_candidate: None,
-        };
-        store
-            .advance_pending_turn(
-                session,
-                PendingStage::StepClosing(closing.clone()),
-                103,
-                &lock,
-            )
-            .unwrap();
-
-        let receipt = ExecutionReceipt {
-            result: Ok(serde_json::Value::String("x".repeat(65_535))),
-            evidence: empty_triple("oversize.test"),
-        };
-        let (terminal, conversation, content, _) = classify_receipt(receipt);
-        assert_eq!(terminal, TerminalOutcome::Succeeded);
-        assert_eq!(conversation, ToolResultOutcome::Succeeded);
-        assert_eq!(content.len(), 65_537);
-        let ToolContentError::TooLarge {
-            actual,
-            full_digest,
-            ..
-        } = ResultDraft::new(
-            invocation_id,
-            binding.binding_digest,
-            turn_id,
-            address.message,
-            address.part_ordinal,
-            content,
-        )
-        .expect_err("oversize canonical content is not persisted as a draft");
-        store
-            .advance_pending_turn(
-                session,
-                PendingStage::StepClosing(StepClosingState {
-                    closure_cursor: 1,
-                    closures: vec![ClosedBinding {
-                        binding,
-                        outcome: conversation,
-                        material: MaterialAvailability::Unavailable {
-                            reason: UnavailableMaterialReason::OutputTooLarge,
-                            digest: Some(full_digest),
-                            byte_length: Some(actual as u64),
-                        },
-                    }],
-                    ..closing
-                }),
-                104,
-                &lock,
-            )
-            .expect("a live oversize closure advances without a pinned draft");
-    }
-
-    #[test]
-    fn bounded_error_content_truncates_utf8_at_a_char_boundary() {
-        let mut error = CepError::internal_error("界".repeat(2_000));
-        error.message.push('x');
-        let content = bounded_error_content(&error);
-        let value: serde_json::Value = serde_json::from_str(&content).unwrap();
-        let message = value["error"]["message"].as_str().unwrap();
-        assert!(message.len() <= BOUNDED_ERROR_CONTENT_BYTES);
-        assert!(message.is_char_boundary(message.len()));
-    }
-
-    #[test]
-    fn finalize_budget_expiry_is_a_typed_api_error() {
-        let error = map_finalize_failure(FinalizeFailure::EvidenceDurabilityFailed { attempts: 3 });
-        assert!(matches!(
-            error,
-            ApiError::EvidenceDurabilityFailed(crate::session::EvidenceDurabilityFailed {
-                attempts: 3
-            })
-        ));
-    }
-
-    #[tokio::test]
-    async fn skipped_binding_is_terminalized_before_journal_closure() {
-        let tmp = tempfile::tempdir().unwrap();
-        let layout = StateLayout::in_state_root(tmp.path());
-        let key = ProjectStoreKey::derive(tmp.path()).unwrap();
-        let session =
-            Arc::new(lattice_session::GitSessionGraphStore::create_layout(&layout).unwrap());
-        let invocations = Arc::new(InvocationStore::create(&layout, &key).unwrap());
-        let turn_id = TurnId::parse("00000000-0000-4000-8000-000000000002").unwrap();
-        let session_id = SessionId::parse("00000000000040008000000000000003").unwrap();
-        let invocation_id = InvocationId::parse("00000000-0000-4000-8000-000000000001").unwrap();
-        let address = ToolCallAddress {
-            message: ModelMessageAddress {
-                session_id,
-                turn_id,
-                model_step_ordinal: 0,
-            },
-            part_ordinal: 0,
-        };
-        let arguments_digest = arguments_digest(&serde_json::json!({}));
-        let binding_digest = lattice_session::pending::binding_digest(
-            &invocation_id,
-            &address,
-            "observe.workspace",
-            &"d".repeat(64),
-            &arguments_digest,
-        );
-        let binding = PlannedBinding {
-            invocation_id,
-            address,
-            method: "observe.workspace".into(),
-            descriptor_identity: "d".repeat(64),
-            arguments_digest,
-            binding_digest,
-        };
-        invocations
-            .reserve_batch(
-                PlanKey {
-                    session_id,
-                    turn_id,
-                    model_step_ordinal: 0,
-                },
-                &[ReservationBinding {
-                    invocation_id,
-                    identity: StoreBindingIdentity {
-                        session_id,
-                        turn_id,
-                        model_step_ordinal: 0,
-                        part_ordinal: 0,
-                        method: binding.method.clone(),
-                        descriptor_identity: binding.descriptor_identity.clone(),
-                        arguments_digest,
-                    },
-                }],
-            )
-            .unwrap();
-        let coordinator = TurnCoordinator::new(
-            super::super::coordinator::CoordinatorStoreIo::new(
-                session,
-                Arc::clone(&invocations),
-                key,
-            )
-            .unwrap(),
-            Arc::new(super::super::coordinator::RandomIdSource),
-        );
-        publish_not_executed(&coordinator, &binding, NotExecutedReason::BeforeDispatch)
-            .await
-            .unwrap();
-        let (_, snapshot) = invocations.snapshot().unwrap();
-        assert!(matches!(
-            snapshot.invocations[&invocation_id].state,
-            InvocationState::Terminal {
-                outcome: TerminalOutcome::NotExecuted {
-                    reason: AuditNotExecutedReason::BeforeDispatch
-                },
-                ..
-            }
-        ));
-    }
+        },
+    });
+    Ok(detail)
 }

@@ -4,11 +4,11 @@ version.workspace = true
 license.workspace = true
 edition.workspace = true
 authors.workspace = true
-description = "LANCET unified public API: CEP runtime composition and operator audit reads, independent of the LATTICE session/agent layers"
+description = "LANCET public API: Component execution and session-store operator reads"
 
 [dependencies]
 lancet-protocol = { workspace = true }
-lancet-audit = { workspace = true }
+lattice-session = { workspace = true }
 lancet-authority = { workspace = true }
 lancet-runtime = { workspace = true }
 serde_json = { workspace = true }
@@ -16,15 +16,7 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-libc = { workspace = true, optional = true }
-
-[features]
-default = []
-test-crash-barriers = ["dep:libc"]
-
 [dev-dependencies]
-# Normal dependency above; the dev-entry adds the `test-support` feature so
-# test builds get `ScopedXdgStateHome` (shared XDG/env test isolation).
-lancet-audit = { workspace = true, features = ["test-support"] }
+lattice-conversation = { workspace = true }
 tempfile = { workspace = true }
-lattice-store = { workspace = true, features = ["test-fault-injection"] }
+lattice-store = { workspace = true }

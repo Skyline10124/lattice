@@ -4,12 +4,13 @@
 //! LATTICE↔LANCET turn seam: profile/policy translation, runtime assembly,
 //! and CEP-event projection over [`lancet_api`].
 
+#[cfg(test)]
+use lancet_api::WorkspaceHistory;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use lancet_api::{
-    ComponentRuntime, LancetError, LancetRuntime, LancetRuntimeConfig, WorkspaceHistory,
-    WorkspaceHistoryBacking,
+    ComponentRuntime, LancetError, LancetRuntime, LancetRuntimeConfig, WorkspaceHistoryBacking,
 };
 use lancet_authority::policy::default::{ExternalPolicyFile, PolicyConfig, WorkspacePolicy};
 use lancet_authority::{CepPolicyConfig, NetworkPolicyConfig, ObservationPolicyConfig};
@@ -42,10 +43,6 @@ pub(crate) struct ProductionTurnDeps {
     pub tool_catalog: Vec<lancet_api::ToolDefinition>,
     pub runtime: LancetRuntime,
     pub events: tokio::sync::mpsc::UnboundedReceiver<ToolEvent>,
-    /// Private durable history of successfully installed Atomic Local
-    /// Mutations (#63). The live turn path reads its current object id once
-    /// the agent loop is done and records it on the Turn commit.
-    pub workspace_history: Arc<WorkspaceHistory>,
 }
 
 pub(crate) struct ProductionTurnDepsInput<'a> {
@@ -340,19 +337,16 @@ pub(crate) async fn build_production_turn_deps(
             policy,
             capability_admission,
             tls_roots_der,
-            invocations: workspace_history.clone(),
             workspace_history,
         })
         .map_err(map_lancet_err)?;
         let tool_catalog = runtime.tool_definitions().to_vec();
-        let workspace_history = Arc::clone(runtime.workspace_history());
         let events = runtime.take_events();
         Ok(ProductionTurnDeps {
             model_driver: lattice_agent::ModelStepDriver::new(llm),
             tool_catalog,
             runtime,
             events,
-            workspace_history,
         })
     })
     .await
@@ -641,14 +635,18 @@ enabled = ["{tool}"]
         project: &TempDir,
     ) -> Result<ProductionTurnDeps, ApiError> {
         let layout = lattice_session::StateLayout::in_state_root(&project.path().join("state"));
-        let project_key = crate::turn::test_support::test_project_key(project.path());
-        crate::stores::create_project_stores(&layout, project_key)
-            .expect("create fixture project stores");
+        let project_key = lattice_session::ProjectStoreKey::derive(project.path()).unwrap();
+        WorkspaceHistory::create(WorkspaceHistoryBacking::for_key(
+            layout.clone(),
+            project_key,
+        ))
+        .expect("create fixture workspace history");
         let llm: Arc<dyn lattice_agent::LlmClient> =
             Arc::new(FakeStreamingLlmClient::builder().build());
         let request = RunTurnRequest {
             input: "hi".into(),
-            session_id: "s".into(),
+            session_id: None,
+            agent: Some(profile.profile.agent.name.clone()),
             loaded_profile: Some(profile.clone()),
             cancel_flag: None,
             test_llm: Some((llm.clone(), lattice_llm::ProviderKind::OpenAiCompatible)),

@@ -3,7 +3,7 @@
 
 use super::hex_digest;
 use lancet_protocol::{
-    BindingIdentity, CellEvidenceTriple, CepError, CepErrorCode, InvocationBinding, InvocationId,
+    BindingIdentity, CellEvidenceTriple, CepErrorCode, InvocationBinding, InvocationId,
     ModelAttemptKey, ModelMessageAddress, Retriability, SessionId, ToolCallAddress, TurnId,
 };
 use lattice_conversation::{
@@ -320,85 +320,10 @@ pub enum EvidenceUnavailableReason {
     NotDispatched,
     ProcessExit,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NotExecutedReason {
-    BeforeDispatch,
-    CancelledBeforeDispatch,
-    DeadlineBeforeDispatch,
-    PrecedingInvocationIndeterminate,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum IndeterminateReason {
-    MayHaveOccurred,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RejectedReason {
-    pub code: CepErrorCode,
-    pub retriability: Retriability,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CancelledReason {
-    DuringDispatch,
-}
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StoredToolResult {
-    pub invocation_id: InvocationId,
-    pub name: String,
-    pub payload: ResultPayload,
-}
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-#[serde(
-    tag = "outcome",
-    content = "payload",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
-pub enum ResultPayload {
-    Succeeded(SuccessContent),
-    Failed(Box<CepError>),
-    Rejected(RejectedReason),
-    Cancelled(CancelledReason),
-    NotExecuted(NotExecutedReason),
-    Indeterminate(IndeterminateReason),
-}
-impl ResultPayload {
-    pub fn outcome(&self) -> ToolResultOutcome {
-        match self {
-            Self::Succeeded(_) => ToolResultOutcome::Succeeded,
-            Self::Failed(_) => ToolResultOutcome::Failed,
-            Self::Rejected(_) => ToolResultOutcome::Rejected,
-            Self::Cancelled(_) => ToolResultOutcome::Cancelled,
-            Self::NotExecuted(_) => ToolResultOutcome::NotExecuted,
-            Self::Indeterminate(_) => ToolResultOutcome::Indeterminate,
-        }
-    }
-}
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum SuccessContent {
-    Json {
-        value: serde_json::Value,
-        #[serde(with = "hex_digest")]
-        digest: [u8; 32],
-        byte_length: u64,
-    },
-    OutputTooLarge {
-        #[serde(with = "hex_digest")]
-        digest: [u8; 32],
-        byte_length: u64,
-    },
-}
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StepContent {
-    pub assistant: NativeMessage<BoundToolCall>,
-    pub results: Vec<StoredToolResult>,
-}
+pub use lattice_conversation::{
+    CancelledReason, IndeterminateReason, NotExecutedReason, RejectedReason, ResultPayload,
+    StepContent, StoredToolResult, SuccessContent,
+};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InvocationIndexEntry {
@@ -466,6 +391,23 @@ pub struct RegisteredCalls {
     pub reply: NativeMessage<BoundToolCall>,
     pub bindings: Vec<InvocationBinding>,
 }
+/// 仅 `start_invocation` 提交成功后取得；不能复制、反序列化或自行构造。
+///
+/// ```compile_fail
+/// fn duplicate(started: lattice_session::store::StartedInvocation) {
+///     let _copy = started.clone();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// let _: lattice_session::store::StartedInvocation = serde_json::from_str("{}").unwrap();
+/// ```
+///
+/// ```compile_fail
+/// fn forge(binding: lancet_protocol::InvocationBinding) {
+///     let _ = lattice_session::store::StartedInvocation { binding };
+/// }
+/// ```
 #[derive(Debug)]
 pub struct StartedInvocation {
     pub(super) binding: InvocationBinding,
@@ -763,10 +705,6 @@ redacted_debug!(
     AttemptDiagnostic,
     DiagnosticPart,
     InvocationTerminal,
-    StoredToolResult,
-    ResultPayload,
-    SuccessContent,
-    StepContent,
     AcceptTurn,
     CompleteReply,
     RegisteredCalls,

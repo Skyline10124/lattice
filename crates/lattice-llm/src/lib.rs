@@ -22,7 +22,7 @@ pub use router::{
     ResolvedModel,
 };
 pub use stub::{LlmError, LlmStream, StubLlm, stream};
-pub use types::{ChatRequest, LlmEvent, ModelTarget, ToolDefinition};
+pub use types::{ChatRequest, LlmEvent, ModelTarget, ProviderFailure, ToolDefinition};
 
 // Expose the real parser only for cross-crate streaming boundary tests.
 #[cfg(feature = "test-utils")]

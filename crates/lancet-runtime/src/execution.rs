@@ -94,6 +94,21 @@ impl RuntimeExecution {
             };
         };
 
+        if !self
+            .components
+            .descriptor_identities()
+            .any(|(actual, identity)| {
+                actual.name == method && identity == binding.identity.descriptor_identity
+            })
+        {
+            return ExecutionReceipt {
+                result: Err(CepError::invalid_params(
+                    "invocation descriptor identity mismatch",
+                )),
+                evidence: CellEvidenceTriple::refused_before_admission(&method),
+            };
+        }
+
         emit_call_started(&events, invocation_id, &method);
         let result = match admit_tool(descriptor, &self.context.policy.capability_admission) {
             Ok(admitted) => {

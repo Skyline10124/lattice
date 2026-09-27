@@ -14,12 +14,8 @@ pub fn run() -> anyhow::Result<()> {
         "LANCET boundary check failed",
         &[
             (
-                "lancet-audit forbidden dependency graph (operator read stays runtime-free)",
-                check::lancet_audit_forbidden_dependency_graph(&root)?,
-            ),
-            (
-                "#139-B forbidden composition edges",
-                check::issue139b_forbidden_dependency_graph(&root)?,
+                "lattice-session forbidden dependency graph (operator read stays runtime-free)",
+                check::session_forbidden_dependency_graph(&root)?,
             ),
             (
                 "test-only features reachable from production features/dependencies",

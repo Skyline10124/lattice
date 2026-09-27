@@ -41,7 +41,7 @@ use lattice_conversation::{
 };
 use serde_json::{Value, json};
 
-use super::{ProjectionError, ToolResultClosure, closure_content};
+use super::{ProjectionError, ToolResultClosure};
 
 fn limit_exceeded(interruption: lattice_conversation::AttemptInterruption) -> ProjectionError {
     ProjectionError::OutputLimitExceeded {
@@ -234,7 +234,7 @@ pub(crate) fn tool_result_messages(
         messages.push(json!({
             "role": "tool",
             "tool_call_id": tool_call_id,
-            "content": closure_content(closure.outcome, &closure.content),
+            "content": closure.content,
         }));
     }
     Ok(messages)

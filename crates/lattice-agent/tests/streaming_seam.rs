@@ -13,12 +13,14 @@ use lattice_llm::{ChatRequest, LlmEvent, ModelTarget};
 
 fn request() -> ChatRequest {
     ChatRequest::new(
-        vec![NativeMessage::<BoundToolCall>::new(
-            MessageRole::User,
-            None,
-            vec![MessagePart::semantic_only(MessageSemantic::Text {
-                text: "stream please".to_string(),
-            })],
+        vec![lattice_conversation::ConversationItem::Message(
+            NativeMessage::<BoundToolCall>::new(
+                MessageRole::User,
+                None,
+                vec![MessagePart::semantic_only(MessageSemantic::Text {
+                    text: "stream please".into(),
+                })],
+            ),
         )],
         ModelTarget::new("test-model"),
     )
@@ -105,7 +107,10 @@ async fn fake_stream_distinguishes_startup_and_in_band_errors() {
         .push_events(vec![
             token("partial"),
             LlmEvent::Error {
-                message: "mid-stream".to_string(),
+                failure: lattice_llm::ProviderFailure {
+                    message: "mid-stream".into(),
+                    retryable: false,
+                },
             },
             done(),
         ])
@@ -119,7 +124,7 @@ async fn fake_stream_distinguishes_startup_and_in_band_errors() {
     assert!(
         events
             .iter()
-            .any(|event| matches!(event, LlmEvent::Error { message } if message == "mid-stream"))
+            .any(|event| matches!(event, LlmEvent::Error { failure } if failure.message == "mid-stream" && !failure.retryable))
     );
     assert!(
         !events
@@ -171,4 +176,42 @@ async fn exhausted_fake_stream_fails_before_opening() {
         Err(error) => error,
     };
     assert!(error.to_string().contains("no more fake responses"));
+}
+
+#[tokio::test]
+async fn typed_stream_failure_after_delta_preserves_retryability() {
+    use lattice_agent::{ModelStepAttempt, ModelStepDriver, ModelStepRequest, ModelStopCause};
+    for retryable in [false, true] {
+        let client = FakeStreamingLlmClient::builder()
+            .push_events(vec![
+                token("partial"),
+                LlmEvent::Error {
+                    failure: lattice_llm::ProviderFailure {
+                        message: "already redacted".into(),
+                        retryable,
+                    },
+                },
+            ])
+            .build();
+        let result = ModelStepDriver::new(std::sync::Arc::new(client))
+            .run(
+                &ModelStepRequest {
+                    system_prompt: None,
+                    history: vec![],
+                    model: "test-model".into(),
+                    provider: None,
+                    tools: vec![],
+                    temperature: None,
+                    max_tokens: None,
+                    cancel: None,
+                    deadline: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, ModelStepAttempt::Stopped { cause: ModelStopCause::ProviderError { retryable: actual }, diagnostic, .. } if actual == retryable && diagnostic.provider_error.as_deref() == Some("already redacted"))
+        );
+    }
 }

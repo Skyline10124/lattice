@@ -30,7 +30,7 @@ use lattice_conversation::{
 };
 use serde_json::{Value, json};
 
-use super::{ProjectionError, ToolResultClosure, closure_content};
+use super::{ProjectionError, ToolResultClosure};
 
 fn limit_exceeded(interruption: lattice_conversation::AttemptInterruption) -> ProjectionError {
     ProjectionError::OutputLimitExceeded {
@@ -225,12 +225,12 @@ pub(crate) fn tool_result_messages(
 ) -> Result<Vec<Value>, ProjectionError> {
     let mut parts: Vec<Value> = Vec::with_capacity(closures.len());
     for closure in closures {
-        let content = closure_content(closure.outcome, &closure.content);
+        let content = &closure.content;
         let response = match closure.outcome {
             ToolResultOutcome::Failed | ToolResultOutcome::Rejected => {
                 json!({ "error": content })
             }
-            _ => match serde_json::from_str::<Value>(&content) {
+            _ => match serde_json::from_str::<Value>(content) {
                 Ok(Value::Object(object)) => Value::Object(object),
                 _ => json!({ "result": content }),
             },

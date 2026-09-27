@@ -31,20 +31,36 @@ pub(crate) fn parse_json_data(
 
     serde_json::from_str(trimmed)
         .map(Some)
-        .map_err(|e| LlmEvent::Error {
-            message: format!("{provider} SSE JSON parse error: {e}"),
-        })
+        .map_err(|e| LlmEvent::error(format!("{provider} SSE JSON parse error: {e}"), false))
 }
 
 /// Extract an API-level error event from a response JSON value.
 /// Returns `None` if `root` does not contain an error payload.
-pub(crate) fn extract_api_error(root: &serde_json::Value) -> Option<LlmEvent> {
-    root.get("error")
-        .and_then(|err| err.get("message"))
-        .and_then(|m| m.as_str())
-        .map(|message| LlmEvent::Error {
-            message: format!("API error: {}", message),
-        })
+pub(crate) fn extract_api_error(
+    provider: lattice_conversation::ProviderOrigin,
+    root: &serde_json::Value,
+) -> Option<LlmEvent> {
+    use lattice_conversation::ProviderOrigin;
+    let error = root.get("error")?;
+    let message = error
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown provider error");
+    let retryable = match provider {
+        ProviderOrigin::OpenAiCompatible => matches!(
+            error["type"].as_str(),
+            Some("server_error" | "rate_limit_error")
+        ),
+        ProviderOrigin::Anthropic => matches!(
+            error["type"].as_str(),
+            Some("overloaded_error" | "api_error" | "rate_limit_error")
+        ),
+        ProviderOrigin::Gemini => matches!(
+            error["status"].as_str(),
+            Some("UNAVAILABLE" | "INTERNAL" | "RESOURCE_EXHAUSTED")
+        ),
+    };
+    Some(LlmEvent::error(format!("API error: {message}"), retryable))
 }
 
 pub(crate) fn projection_result_event(
@@ -60,9 +76,11 @@ pub(crate) fn projection_result_event(
                 rejection: lattice_conversation::AttemptRejection::InvalidToolCall { validation },
             }
         }
-        Err(error) => LlmEvent::Error {
-            message: error.to_string(),
-        },
+        Err(crate::provider_projection::ProjectionError::OutputLimitExceeded {
+            interruption,
+            ..
+        }) => LlmEvent::OutputLimit { interruption },
+        Err(error) => LlmEvent::error(error.to_string(), false),
     }
 }
 
@@ -77,6 +95,49 @@ pub(crate) fn complete_message_event(
 mod parse_json_data_tests {
     use super::*;
 
+    #[test]
+    fn streaming_retryability_uses_provider_fields_not_message() {
+        use lattice_conversation::ProviderOrigin::*;
+        for (provider, error, retryable) in [
+            (
+                OpenAiCompatible,
+                serde_json::json!({"type":"server_error", "message":"failure"}),
+                true,
+            ),
+            (
+                Anthropic,
+                serde_json::json!({"type":"overloaded_error", "message":"failure"}),
+                true,
+            ),
+            (
+                Gemini,
+                serde_json::json!({"status":"UNAVAILABLE", "message":"failure"}),
+                true,
+            ),
+            (
+                OpenAiCompatible,
+                serde_json::json!({"type":"invalid_request_error", "message":"server_error retry me"}),
+                false,
+            ),
+            (
+                Anthropic,
+                serde_json::json!({"message":"overloaded_error"}),
+                false,
+            ),
+            (
+                Gemini,
+                serde_json::json!({"status":"INVALID_ARGUMENT", "message":"UNAVAILABLE"}),
+                false,
+            ),
+        ] {
+            let LlmEvent::Error { failure } =
+                extract_api_error(provider, &serde_json::json!({"error":error})).unwrap()
+            else {
+                panic!("typed failure");
+            };
+            assert_eq!(failure.retryable, retryable);
+        }
+    }
     #[test]
     fn parse_valid_json_returns_some() {
         let result = parse_json_data("TestProvider", r#"{"key": "value"}"#);

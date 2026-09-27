@@ -18,7 +18,7 @@
 //! What it proves (issue #43 (Codeberg #21) acceptance point: at least one
 //! PTY smoke):
 //!
-//! - `lattice tui --agent <name> --project-branch <branch>` starts, enters
+//! - `lattice tui --agent <name>` starts, enters
 //!   the alternate screen, and accepts a prompt.
 //! - Sending a prompt produces assistant token text through the real turn
 //!   chain (the fake LLM receives the request).
@@ -82,7 +82,7 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
     );
 
     budget.check(&spec.name);
-    let mut tui = PtyTuiDriver::spawn(&driver, &world, "tui-smoke", "main").expect("spawn tui");
+    let mut tui = PtyTuiDriver::spawn(&driver, &world, "tui-smoke").expect("spawn tui");
 
     // Wait for the TUI to enter the alternate screen. Ready recognition
     // lives inside the driver (`wait_for_ready`); the scenario never matches
@@ -181,8 +181,8 @@ fn pty_detach_reloads_pending_and_result_without_cancelling() {
         "tui-smoke",
         SseScript::plain("background reconnect answer"),
     );
-    let session = SessionSendDriver::new(&driver, &world, &spec, "tui-smoke", "main").unwrap();
-    let mut tui = PtyTuiDriver::reconnect(&driver, &world, session.session_id()).unwrap();
+    let session = SessionSendDriver::new(&driver, &world, &spec, "tui-smoke");
+    let mut tui = PtyTuiDriver::spawn(&driver, &world, "tui-smoke").unwrap();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         tui.wait_for_ready(budget.cap_timeout(spec.step_timeout()))
             .unwrap();
@@ -193,6 +193,12 @@ fn pty_detach_reloads_pending_and_result_without_cancelling() {
             text.contains("已确认接受")
         })
         .unwrap();
+        let listed = session.run_command(&["--json", "session", "list"]).unwrap();
+        evidence.record_command("accepted TUI Session", &listed);
+        assert!(listed.is_clean_exit(0));
+        let list: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+        assert_eq!(list.as_array().unwrap().len(), 1);
+        let sid = list[0]["session_id"].as_str().unwrap();
         let owners = world.daemon_pids().unwrap();
         assert_eq!(owners.len(), 1);
         assert_ne!(tui.pgid(), Some(owners[0]));
@@ -202,8 +208,7 @@ fn pty_detach_reloads_pending_and_result_without_cancelling() {
         assert!(processes_in_pgid(tui.pgid().unwrap()).unwrap().is_empty());
         assert_eq!(world.daemon_pids().unwrap(), owners);
         evidence.record_pty(tui.output());
-        let mut reconnected =
-            PtyTuiDriver::reconnect(&driver, &world, session.session_id()).unwrap();
+        let mut reconnected = PtyTuiDriver::reconnect(&driver, &world, sid).unwrap();
         let result = (|| {
             reconnected.wait_for_ready(budget.cap_timeout(spec.step_timeout()))?;
             reconnected.wait_for(budget.cap_timeout(spec.step_timeout()), |text| {
@@ -220,15 +225,11 @@ fn pty_detach_reloads_pending_and_result_without_cancelling() {
         evidence.record_pty(reconnected.output());
         result.unwrap();
         world.stop_daemon().unwrap();
-        let mut reopened = PtyTuiDriver::reconnect(&driver, &world, session.session_id()).unwrap();
+        let mut reopened = PtyTuiDriver::reconnect(&driver, &world, sid).unwrap();
         let reopened_result = (|| {
             reopened.wait_for_ready(budget.cap_timeout(spec.step_timeout()))?;
             reopened.wait_for(budget.cap_timeout(spec.step_timeout()), |text| {
-                // 已关闭结果的重开观察由后台核验并补屏障后交付确认：固定结果与已确认
-                // 状态都显示，不再要求用户重发原请求或把完成标为未知。
-                text.contains("background reconnect answer")
-                    && (text.contains("✓ committed") || text.contains("+ committed"))
-                    && !text.contains("完成确认未知")
+                text.contains("background reconnect answer") && text.contains("completed")
             })?;
             reopened.send_line("/quit")?;
             reopened.wait_for_exit(budget.cap_timeout(Duration::from_secs(15)))
@@ -280,15 +281,7 @@ fn pty_mid_model_reconnect_shows_new_suffix_before_completion() {
     let mut original = None;
     let mut replacement = None;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let session = SessionSendDriver::new(&driver, &world, &spec, "tui-smoke", "main")
-            .unwrap_or_else(|error| {
-                if let lattice_system_harness::SessionSendError::NewSessionFailed { outcome } =
-                    &error
-                {
-                    evidence.record_command("create PTY Session", outcome);
-                }
-                panic!("{error}");
-            });
+        let session = SessionSendDriver::new(&driver, &world, &spec, "tui-smoke");
         let seed = session.spawn("seed history").unwrap();
         // 第一请求的正文、finish、DONE；第二请求仍独立停在下一帧 gate。
         for frame in 1..=3 {
@@ -305,11 +298,12 @@ fn pty_mid_model_reconnect_shows_new_suffix_before_completion() {
         // 先通过公开 CLI 建立在途 Turn，两次 TUI 都以只读前端进入同一模型段。
         let in_flight = session.spawn(INPUT).unwrap();
         gate.wait_until_stalled(4, step()).unwrap();
-        original = Some(PtyTuiDriver::reconnect(&driver, &world, session.session_id()).unwrap());
+        original =
+            Some(PtyTuiDriver::reconnect(&driver, &world, session.session_id().unwrap()).unwrap());
         let tui = original.as_mut().unwrap();
         tui.wait_for_ready(step()).unwrap();
         tui.wait_for(step(), |text| {
-            text.contains(INPUT) && text.contains(PREFIX) && text.contains("pending Turn")
+            text.contains(INPUT) && text.contains(PREFIX) && text.contains("stream")
         })
         .unwrap();
         gate.release_next(step()).unwrap();
@@ -336,7 +330,8 @@ fn pty_mid_model_reconnect_shows_new_suffix_before_completion() {
         world.unset_env("OPENAI_COMPATIBLE_BASE_URL");
         world.unset_env("OPENAI_COMPATIBLE_MODEL");
         world.unset_env("OPENAI_COMPATIBLE_API_KEY");
-        replacement = Some(PtyTuiDriver::reconnect(&driver, &world, session.session_id()).unwrap());
+        replacement =
+            Some(PtyTuiDriver::reconnect(&driver, &world, session.session_id().unwrap()).unwrap());
         let tui = replacement.as_mut().unwrap();
         tui.wait_for_ready(step()).unwrap();
         tui.wait_for(step(), |text| {
@@ -349,40 +344,30 @@ fn pty_mid_model_reconnect_shows_new_suffix_before_completion() {
             "{resumed}"
         );
         assert_eq!(resumed.matches(PREFIX).count(), 1, "{resumed}");
-        assert!(
-            !resumed.contains(OLD) && !resumed.contains(NEW),
-            "{resumed}"
-        );
+        assert!(resumed.contains(OLD) && !resumed.contains(NEW), "{resumed}");
         println!("PTY window: replacement frontend subscribed and loaded durable prefix once");
 
         gate.release_next(step()).unwrap();
         gate.wait_until_stalled(6, step()).unwrap();
-        tui.wait_for(step(), |text| {
-            text.contains(NEW) && text.contains("前文可能缺失")
-        })
-        .unwrap();
+        tui.wait_for(step(), |text| text.contains(NEW) && text.contains(OLD))
+            .unwrap();
         let live = tui.redraw_text(step()).unwrap();
-        assert!(
-            live.contains(NEW) && live.contains("前文可能缺失") && !live.contains(OLD),
-            "{live}"
-        );
+        assert!(live.contains(NEW) && live.contains(OLD), "{live}");
         assert_eq!(live.matches(PREFIX).count(), 1, "{live}");
         assert_eq!(live.matches(NEW).count(), 1, "{live}");
         let pending = session
-            .run_command(&["--json", "session", "log", session.session_id()])
+            .run_command(&["--json", "session", "log", session.session_id().unwrap()])
             .unwrap();
         evidence.record_command("new suffix visible before durable completion", &pending);
         assert!(pending.is_clean_exit(0));
         let log: serde_json::Value = serde_json::from_slice(&pending.stdout).unwrap();
-        assert_eq!(
-            log["turns"].as_array().unwrap().len(),
-            1,
-            "current Turn must not be closed"
+        assert!(
+            !log["session"]["active_turn"].is_null(),
+            "current Turn still running"
         );
+        assert_eq!(log["nodes"].as_array().unwrap().len(), 4);
         assert_eq!(server.captured_requests().len(), 2);
-        println!(
-            "PTY window: new suffix and missing-prefix notice visible; terminal frame withheld; only seed Turn committed"
-        );
+        println!("PTY window: complete prefix and new suffix visible; terminal frame withheld");
 
         gate.release(step()).unwrap();
         tui.wait_for(step(), |text| text.contains(OLD)).unwrap();
@@ -392,23 +377,22 @@ fn pty_mid_model_reconnect_shows_new_suffix_before_completion() {
         assert!(sent.command.is_clean_exit(0));
         support::assert_accepted_and_closed(&sent.parsed).unwrap();
         let closed = session
-            .run_command(&["--json", "session", "log", session.session_id()])
+            .run_command(&["--json", "session", "log", session.session_id().unwrap()])
             .unwrap();
         evidence.record_command("original Turn completed after terminal release", &closed);
         assert!(closed.is_clean_exit(0));
         let log: serde_json::Value = serde_json::from_slice(&closed.stdout).unwrap();
-        let turns = log["turns"].as_array().unwrap();
-        assert_eq!(turns.len(), 2);
-        let completed: Vec<_> = turns
+        let nodes = log["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 5);
+        let completed: Vec<_> = nodes
             .iter()
-            .filter(|turn| turn["turn_id"].as_str() == sent.parsed.accepted_turn_id())
+            .filter(|row| row["turn_start"]["turn_id"].as_str() == sent.parsed.accepted_turn_id())
             .collect();
+        assert_eq!(completed.len(), 1);
         assert_eq!(
-            completed.len(),
-            1,
-            "original TurnId must occur exactly once"
+            completed[0]["turn_start"]["summary"]["outcome"],
+            "completed"
         );
-        assert!(completed[0]["outcome"].get("completed").is_some());
         assert_eq!(server.captured_requests().len(), 2);
         tui.send_line("/quit").unwrap();
         tui.wait_for_exit(budget.cap_timeout(Duration::from_secs(15)))
@@ -449,8 +433,8 @@ fn pty_second_ctrl_c_preserves_cancel_acknowledgement() {
         "tui-smoke",
         SseScript::plain("must not be delivered"),
     );
-    let session = SessionSendDriver::new(&driver, &world, &spec, "tui-smoke", "main").unwrap();
-    let mut tui = PtyTuiDriver::reconnect(&driver, &world, session.session_id()).unwrap();
+    let session = SessionSendDriver::new(&driver, &world, &spec, "tui-smoke");
+    let mut tui = PtyTuiDriver::spawn(&driver, &world, "tui-smoke").unwrap();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         tui.wait_for_ready(budget.cap_timeout(spec.step_timeout()))
             .unwrap();
@@ -461,6 +445,11 @@ fn pty_second_ctrl_c_preserves_cancel_acknowledgement() {
             text.contains("已确认接受")
         })
         .unwrap();
+        let listed = session.run_command(&["--json", "session", "list"]).unwrap();
+        evidence.record_command("accepted cancellation Session", &listed);
+        assert!(listed.is_clean_exit(0));
+        let list: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+        let sid = list[0]["session_id"].as_str().unwrap();
         tui.send_keys(b"\x03\x03").unwrap();
         tui.wait_for_exit(budget.cap_timeout(Duration::from_secs(15)))
             .unwrap();
@@ -468,13 +457,14 @@ fn pty_second_ctrl_c_preserves_cancel_acknowledgement() {
         let deadline = std::time::Instant::now() + budget.cap_timeout(Duration::from_secs(30));
         loop {
             let log = session
-                .run_command(&["--json", "session", "log", session.session_id()])
+                .run_command(&["--json", "session", "log", sid])
                 .unwrap();
             evidence.record_command("query cancellation after TUI exit", &log);
             assert!(log.is_clean_exit(0));
             let value: serde_json::Value = serde_json::from_slice(&log.stdout).unwrap();
-            if let Some(turn) = value["turns"].as_array().unwrap().first() {
-                assert!(turn["outcome"].get("cancelled").is_some());
+            if value["session"]["active_turn"].is_null() {
+                let turn = &value["nodes"][1]["turn_start"];
+                assert_eq!(turn["summary"]["outcome"], "cancelled");
                 break;
             }
             assert!(

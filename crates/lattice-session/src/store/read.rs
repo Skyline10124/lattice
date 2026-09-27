@@ -42,7 +42,10 @@ pub(super) fn operator(slot: &InvocationSlot) -> OperatorInvocation {
                     MaterialSummary::NoContent,
                 ),
                 ResultPayload::Rejected(r) => (
-                    Some(OperatorReason::Rejected(r.clone())),
+                    Some(OperatorReason::Rejected(RejectedReason {
+                        code: r.code,
+                        retriability: r.retriability.clone(),
+                    })),
                     MaterialSummary::NoContent,
                 ),
                 ResultPayload::Cancelled(r) => (

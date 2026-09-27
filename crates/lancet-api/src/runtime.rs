@@ -1,19 +1,18 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Thin composition of the durable InvocationStore with Component execution.
+//! 消费已提交的调用凭据，组合生成的 Component 执行器。
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use lancet_audit::invocation_store::{InvocationState, InvocationStore, InvocationStoreError};
 use lancet_authority::{CepPolicyConfig, CepTurnContext};
-use lancet_protocol::{CepError, CepErrorCode, InvocationBinding, Retriability, ToolEvent};
+use lancet_protocol::ToolEvent;
 use lancet_runtime::{
     CancellationSender, CatalogSelectionError, ComponentRuntime, ExecutionReceipt,
     RuntimeExecution, ToolDefinition, WorkspaceHistory, WorkspaceHistoryBacking,
-    enabled_tool_definitions, error_map::cancelled_error,
+    enabled_tool_definitions,
 };
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -22,49 +21,18 @@ use crate::config::LancetRuntimeConfig;
 use crate::error::LancetError;
 
 #[cfg(test)]
-static FAIL_NEXT_ADMISSION_REF_FSYNC: AtomicBool = AtomicBool::new(false);
-#[cfg(test)]
-static CANCEL_AFTER_NEXT_ADMISSION: AtomicBool = AtomicBool::new(false);
-#[cfg(test)]
 static STALL_NEXT_CANCELLATION_MONITOR: AtomicBool = AtomicBool::new(false);
-
-/// Typed reason the runtime did not cross durable `DispatchStarted`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DispatchNotStartedCause {
-    /// Validation or admission failed while the reservation remained pre-dispatch.
-    BeforeDispatch,
-    /// Caller cancellation was already visible before dispatch.
-    CancelledBeforeDispatch,
-}
-
-/// Result of the reservation-gated handoff.
-#[derive(Debug)]
-pub enum DispatchOutcome {
-    /// The exact invocation never crossed durable `DispatchStarted`.
-    NotExecuted {
-        /// Typed durable reason, independent of error-code presentation.
-        cause: DispatchNotStartedCause,
-        /// Diagnostic error returned to the caller.
-        error: CepError,
-    },
-    /// Durable state may have crossed `DispatchStarted`; preserve pending state
-    /// and let the coordinator reconcile from authoritative invocation facts.
-    ReconciliationRequired(CepError),
-    /// The Component returned a known result/evidence receipt after handoff.
-    Executed(ExecutionReceipt),
-}
 
 /// One opaque, turn-scoped generated-Component runtime.
 pub struct LancetRuntime {
     execution: RuntimeExecution,
-    invocations: Arc<InvocationStore>,
     tool_definitions: Vec<ToolDefinition>,
     workspace_history: Arc<WorkspaceHistory>,
     events: Option<mpsc::UnboundedReceiver<ToolEvent>>,
 }
 
 impl LancetRuntime {
-    /// Compose the generated catalog and strictly open the project stores.
+    /// 组合生成目录，并严格打开项目工作区历史。
     pub fn build(config: LancetRuntimeConfig) -> Result<Self, LancetError> {
         let LancetRuntimeConfig {
             local_workspace_root,
@@ -72,14 +40,12 @@ impl LancetRuntime {
             mut policy,
             capability_admission,
             tls_roots_der,
-            invocations,
             workspace_history,
         } = config;
 
         policy.project_root = validate_project_store_bindings(
             &local_workspace_root,
             &policy.project_root,
-            &invocations,
             &workspace_history,
         )?;
 
@@ -102,7 +68,6 @@ impl LancetRuntime {
             network: policy.network.clone(),
             capability_admission,
         };
-        let invocations = open_invocation_store(&invocations)?;
         let workspace_history =
             Arc::new(WorkspaceHistory::open(workspace_history).map_err(|error| {
                 LancetError::Internal(format!("workspace history setup: {error}"))
@@ -118,7 +83,6 @@ impl LancetRuntime {
 
         Ok(Self {
             execution,
-            invocations,
             tool_definitions,
             workspace_history,
             events: Some(events),
@@ -137,83 +101,20 @@ impl LancetRuntime {
             .expect("Tool event receiver may be taken only once")
     }
 
-    /// Private mutation history sampled after all dispatches complete.
+    /// 文件变更的私有历史；不参与 Turn 关闭。
     pub fn workspace_history(&self) -> &Arc<WorkspaceHistory> {
         &self.workspace_history
     }
 
-    /// Refuse pre-cancellation before dispatch; otherwise durably admit the exact
-    /// reservation and synchronize cancellation before Component execution.
+    /// 消费成功提交 Started 后的唯一执行凭据；不重新持久化或猜测调用终态。
     pub async fn dispatch(
         &self,
-        binding: InvocationBinding,
+        started: lattice_session::store::StartedInvocation,
         method: String,
         params: Value,
         cancel_flag: Option<Arc<AtomicBool>>,
-    ) -> DispatchOutcome {
-        if !binding.matches_request(&method, &params) {
-            return DispatchOutcome::NotExecuted {
-                cause: DispatchNotStartedCause::BeforeDispatch,
-                error: CepError::invalid_params(
-                    "invocation binding does not match request method/arguments",
-                ),
-            };
-        }
-
-        if cancel_flag
-            .as_ref()
-            .is_some_and(|flag| flag.load(Ordering::Relaxed))
-        {
-            return DispatchOutcome::NotExecuted {
-                cause: DispatchNotStartedCause::CancelledBeforeDispatch,
-                error: cancelled_error(&method),
-            };
-        }
-
-        let store = Arc::clone(&self.invocations);
-        let admission_store = Arc::clone(&store);
-        let admission_binding = binding.clone();
-        #[cfg(test)]
-        let admission_cancel_flag = cancel_flag.clone();
-        match tokio::task::spawn_blocking(move || {
-            #[cfg(test)]
-            if FAIL_NEXT_ADMISSION_REF_FSYNC.swap(false, Ordering::SeqCst) {
-                lattice_store::fault::fail_ref_fsync(true);
-            }
-            let result = admission_store.admit_reserved(&admission_binding);
-            #[cfg(test)]
-            if CANCEL_AFTER_NEXT_ADMISSION.swap(false, Ordering::SeqCst) {
-                admission_cancel_flag
-                    .as_ref()
-                    .expect("admission cancellation hook requires a flag")
-                    .store(true, Ordering::SeqCst);
-            }
-            result
-        })
-        .await
-        {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                return classify_admission_failure(
-                    store,
-                    binding.invocation_id,
-                    admission_error(error),
-                )
-                .await;
-            }
-            Err(_) => {
-                return classify_admission_failure(
-                    store,
-                    binding.invocation_id,
-                    admission_worker_error(),
-                )
-                .await;
-            }
-        }
-
-        #[cfg(feature = "test-crash-barriers")]
-        stop_after_dispatch_started(&self.invocations, binding.invocation_id);
-
+    ) -> ExecutionReceipt {
+        let binding = started.binding().clone();
         let (sender, cancellation) = CancellationSender::pair();
         let monitor = cancel_flag.as_ref().map(|flag| {
             let flag = Arc::clone(flag);
@@ -238,11 +139,9 @@ impl LancetRuntime {
             sender.cancel();
         }
         let _guard = DispatchGuard { sender, monitor };
-        DispatchOutcome::Executed(
-            self.execution
-                .call(binding, method, params, cancellation)
-                .await,
-        )
+        self.execution
+            .call(binding, method, params, cancellation)
+            .await
     }
 }
 
@@ -260,81 +159,6 @@ impl Drop for DispatchGuard {
     }
 }
 
-async fn classify_admission_failure(
-    store: Arc<InvocationStore>,
-    invocation_id: lancet_protocol::InvocationId,
-    error: CepError,
-) -> DispatchOutcome {
-    let observed = tokio::task::spawn_blocking(move || {
-        store.query_invocations(std::slice::from_ref(&invocation_id))
-    })
-    .await;
-    let definitely_not_executed = matches!(
-        observed,
-        Ok(Ok(ref facts))
-            if facts
-                .get(&invocation_id)
-                .is_some_and(|record| matches!(record.state, InvocationState::Reserved))
-    );
-    if definitely_not_executed {
-        DispatchOutcome::NotExecuted {
-            cause: DispatchNotStartedCause::BeforeDispatch,
-            error,
-        }
-    } else {
-        DispatchOutcome::ReconciliationRequired(error)
-    }
-}
-
-fn open_invocation_store(
-    backing: &WorkspaceHistoryBacking,
-) -> Result<Arc<InvocationStore>, LancetError> {
-    match backing {
-        WorkspaceHistoryBacking::Project { layout, key } => {
-            Ok(Arc::new(InvocationStore::open(layout, key).map_err(
-                |error| LancetError::Internal(format!("invocation store setup: {error}")),
-            )?))
-        }
-        WorkspaceHistoryBacking::Disabled => Err(LancetError::Config(
-            "production runtime requires a project InvocationStore backing".into(),
-        )),
-    }
-}
-
-fn admission_worker_error() -> CepError {
-    CepError::tool_execution(
-        CepErrorCode::ExecutionFailed,
-        "invocation",
-        "admission_worker_failed",
-        None,
-        Retriability::Unknown,
-    )
-}
-
-fn admission_error(error: InvocationStoreError) -> CepError {
-    let retriability = if error.is_durability_retryable() {
-        Retriability::Transient
-    } else {
-        Retriability::Permanent
-    };
-    let (code, category) = match error {
-        InvocationStoreError::InvalidTransition { .. }
-        | InvocationStoreError::DifferentPlan { .. }
-        | InvocationStoreError::DuplicateInvocation { .. }
-        | InvocationStoreError::InvalidReservation { .. } => {
-            (CepErrorCode::ResourceConflict, "reservation_state")
-        }
-        InvocationStoreError::Corruption { .. } => {
-            (CepErrorCode::Reserved, "invocation_store_corruption")
-        }
-        _ => (
-            CepErrorCode::ExecutionFailed,
-            "invocation_store_unavailable",
-        ),
-    };
-    CepError::tool_execution(code, "invocation", category, None, retriability)
-}
-
 fn map_catalog_selection_error(error: CatalogSelectionError) -> LancetError {
     LancetError::UnknownTools {
         unknown: error.unknown,
@@ -345,7 +169,6 @@ fn map_catalog_selection_error(error: CatalogSelectionError) -> LancetError {
 fn validate_project_store_bindings(
     local_workspace_root: &std::path::Path,
     policy_root: &std::path::Path,
-    invocations: &WorkspaceHistoryBacking,
     workspace_history: &WorkspaceHistoryBacking,
 ) -> Result<std::path::PathBuf, LancetError> {
     let canonical_workspace = std::fs::canonicalize(local_workspace_root).map_err(|error| {
@@ -372,16 +195,10 @@ fn validate_project_store_bindings(
         lancet_runtime::ProjectStoreKey::derive(&canonical_workspace).map_err(|error| {
             LancetError::Config(format!("derive Local Workspace project key: {error}"))
         })?;
-    let (invocation_layout, invocation_key) = project_backing(invocations, "InvocationStore")?;
-    let (history_layout, history_key) = project_backing(workspace_history, "WorkspaceHistory")?;
-    if invocation_key != expected_key || history_key != expected_key {
+    let (_, history_key) = project_backing(workspace_history, "WorkspaceHistory")?;
+    if history_key != expected_key {
         return Err(LancetError::Config(
             "project store key does not match canonical Local Workspace".into(),
-        ));
-    }
-    if invocation_layout != history_layout {
-        return Err(LancetError::Config(
-            "InvocationStore and WorkspaceHistory use different StateLayout roots".into(),
         ));
     }
     Ok(canonical_policy)
@@ -405,77 +222,24 @@ fn project_backing<'a>(
     }
 }
 
-#[cfg(feature = "test-crash-barriers")]
-fn stop_after_dispatch_started(
-    invocations: &InvocationStore,
-    invocation_id: lancet_protocol::InvocationId,
-) {
-    use std::io::Write;
-
-    const BARRIER_ENV: &str = "LATTICE_TEST_TURN_BARRIER";
-    const ACK_ENV: &str = "LATTICE_TEST_TURN_BARRIER_ACK";
-    if std::env::var_os(BARRIER_ENV).as_deref() != Some(std::ffi::OsStr::new("dispatch_started")) {
-        return;
-    }
-    let facts = invocations
-        .query_invocations(&[invocation_id])
-        .expect("read dispatch barrier facts");
-    let path =
-        std::path::PathBuf::from(std::env::var_os(ACK_ENV).expect("dispatch barrier ack path"));
-    assert!(
-        path.is_absolute(),
-        "dispatch barrier ack path must be absolute"
-    );
-    let mut context_path = path.as_os_str().to_os_string();
-    context_path.push(".context");
-    let context: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(std::path::PathBuf::from(context_path))
-            .expect("read dispatch barrier session context"),
-    )
-    .expect("parse dispatch barrier session context");
-    let session_context = context
-        .get("session")
-        .expect("dispatch barrier context has session facts");
-    let record = facts
-        .get(&invocation_id)
-        .expect("dispatch barrier invocation record");
-    let mut file = std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&path)
-        .expect("create dispatch barrier ack");
-    serde_json::to_writer(
-        &mut file,
-        &serde_json::json!({
-            "barrier": "dispatch_started",
-            "invocation_id": invocation_id,
-            "record": record,
-            "session_context": session_context,
-        }),
-    )
-    .expect("write dispatch barrier ack");
-    file.write_all(b"\n").expect("write barrier newline");
-    file.sync_all().expect("sync dispatch barrier ack");
-    std::fs::File::open(path.parent().expect("dispatch ack parent"))
-        .expect("open dispatch ack parent")
-        .sync_all()
-        .expect("sync dispatch ack parent");
-    unsafe { libc::raise(libc::SIGSTOP) };
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use lancet_protocol::{
-        BindingIdentity, InvocationId, PlanKey, SessionId, TurnId, arguments_digest, cell::Trust,
+        CepErrorCode, InvocationId, ModelAttemptKey, SessionId, TurnId, cell::Trust,
         evidence::CapabilityAdmissionPolicy,
     };
+    use lattice_conversation::{
+        MessagePart, MessageRole, MessageSemantic, NativeMessage, ProviderOrigin, UnboundToolCall,
+    };
+    use lattice_session::store::*;
     use tempfile::TempDir;
 
     static DISPATCH_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     struct TestRuntime {
         runtime: LancetRuntime,
+        db: SessionStore,
         workspace: TempDir,
         _state: TempDir,
     }
@@ -486,150 +250,252 @@ mod tests {
         let root = std::fs::canonicalize(workspace.path()).unwrap();
         let backing = WorkspaceHistoryBacking::for_project_in(state.path(), &root).unwrap();
         WorkspaceHistory::create(backing.clone()).unwrap();
-        let (layout, key) = match &backing {
-            WorkspaceHistoryBacking::Project { layout, key } => (layout, *key),
-            WorkspaceHistoryBacking::Disabled => unreachable!(),
-        };
-        InvocationStore::create(layout, &key).unwrap();
-        let enabled_tools = enabled.iter().map(|name| (*name).to_string()).collect();
+        let db =
+            SessionStore::create(&lattice_store::StateLayout::in_state_root(state.path())).unwrap();
         let runtime = LancetRuntime::build(LancetRuntimeConfig {
             local_workspace_root: root.clone(),
-            enabled_tools,
+            enabled_tools: enabled.iter().map(|s| s.to_string()).collect(),
             policy: lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
                 root,
             ),
             capability_admission: CapabilityAdmissionPolicy {
-                enabled_tools: enabled.iter().map(|name| (*name).to_string()).collect(),
+                enabled_tools: enabled.iter().map(|s| s.to_string()).collect(),
                 denied_capabilities: Default::default(),
                 max_boundary: Trust::Ex,
             },
             tls_roots_der: Vec::new(),
-            invocations: backing.clone(),
             workspace_history: backing,
         })
         .unwrap();
         TestRuntime {
             runtime,
+            db,
             workspace,
             _state: state,
         }
     }
 
-    fn reserve_binding(
-        runtime: &LancetRuntime,
-        method: &str,
+    fn start(
+        env: &TestRuntime,
+        n: u64,
         params: &Value,
-        ordinal: u32,
-    ) -> InvocationBinding {
-        let turn_id = TurnId::parse("22222222-2222-4222-8222-222222222222").unwrap();
-        let descriptor_identity = runtime
-            .tool_definitions
+        wrong_descriptor: bool,
+    ) -> StartedInvocation {
+        let sid = SessionId::parse(&format!("{n:032x}")).unwrap();
+        let tid = TurnId::parse(&format!("00000000-0000-4000-8000-{n:012x}")).unwrap();
+        let now = "2026-09-27T00:00:00Z".parse().unwrap();
+        let lock = env.db.try_lock_session(sid).unwrap();
+        let tool = env
+            .runtime
+            .tool_definitions()
             .iter()
-            .find(|tool| tool.name == method)
-            .map(|tool| tool.descriptor_identity.clone())
-            .unwrap_or_else(|| "test-descriptor".to_string());
-        let binding = InvocationBinding {
-            invocation_id: InvocationId::parse(&format!("00000000-0000-4000-8000-{ordinal:012x}"))
-                .unwrap(),
-            identity: BindingIdentity {
-                session_id: SessionId::parse("11111111111111111111111111111111").unwrap(),
-                turn_id,
-                model_step_ordinal: ordinal,
-                part_ordinal: 0,
-                method: method.to_string(),
-                descriptor_identity,
-                arguments_digest: arguments_digest(params),
+            .find(|t| t.name == "mutate.create")
+            .unwrap();
+        let config = FrozenTurnConfig {
+            agent_name: "test".into(),
+            model: "model".into(),
+            provider: "openai".into(),
+            system_prompt: None,
+            profile_snapshot_json: "{}".into(),
+            policy_snapshot_json: "{}".into(),
+            catalog: ToolCatalogSnapshot::new(
+                "build".into(),
+                vec![ToolCatalogEntry {
+                    name: tool.name.clone(),
+                    descriptor_identity: if wrong_descriptor {
+                        "a".repeat(64)
+                    } else {
+                        tool.descriptor_identity.clone()
+                    },
+                    description: tool.description.clone(),
+                    input_schema: tool.parameters.clone(),
+                }],
+            )
+            .unwrap(),
+            limits: TurnExecutionLimits {
+                timeout_secs: 30,
+                max_model_steps: 32,
+                max_model_attempts: 1,
             },
         };
-        runtime
-            .invocations
-            .reserve_batch(
-                PlanKey {
-                    session_id: binding.identity.session_id,
-                    turn_id,
-                    model_step_ordinal: ordinal,
+        env.db
+            .accept_turn(
+                &lock,
+                AcceptTurn {
+                    session: AcceptSession::New { id: sid },
+                    turn_id: tid,
+                    project_store_key: lattice_store::ProjectStoreKey::derive(env.workspace.path())
+                        .unwrap(),
+                    input: "create".into(),
+                    config,
+                    accepted_at: now,
+                    agent_selection: AgentSelection::Explicit,
                 },
-                std::slice::from_ref(&binding),
             )
             .unwrap();
-        binding
-    }
-
-    #[tokio::test]
-    async fn published_dispatch_started_is_not_classified_not_executed() {
-        let _guard = DISPATCH_TEST_LOCK.lock().await;
-        let env = test_runtime(&[]);
-        let params = serde_json::json!({"value": "test"});
-        let binding = reserve_binding(&env.runtime, "test.echo", &params, 1);
-
-        FAIL_NEXT_ADMISSION_REF_FSYNC.store(true, Ordering::SeqCst);
-        let outcome = env
-            .runtime
-            .dispatch(
-                binding.clone(),
-                binding.identity.method.clone(),
-                params,
-                None,
-            )
-            .await;
-
-        let DispatchOutcome::ReconciliationRequired(error) = outcome else {
-            panic!("a visible DispatchStarted fact must require reconciliation");
+        let key = ModelAttemptKey {
+            turn_id: tid,
+            model_step_ordinal: 0,
+            attempt_ordinal: 0,
         };
-        assert_eq!(error.retriability, Retriability::Transient);
-        let facts = env
-            .runtime
-            .invocations
-            .query_invocations(&[binding.invocation_id])
+        env.db.start_request(&lock, key, now).unwrap();
+        let calls = env
+            .db
+            .register_calls(
+                &lock,
+                CompleteReply {
+                    key,
+                    origin: ProviderOrigin::OpenAiCompatible,
+                    usage: None,
+                    message: NativeMessage::new(
+                        MessageRole::Assistant,
+                        Some(ProviderOrigin::OpenAiCompatible),
+                        vec![MessagePart::semantic_only(MessageSemantic::ToolCall {
+                            call: UnboundToolCall {
+                                provider_call_id: Some("call".into()),
+                                name: "mutate.create".into(),
+                                arguments: params.clone(),
+                            },
+                        })],
+                    ),
+                },
+                &[InvocationId::parse(&format!("00000000-0000-4000-8000-{n:012x}")).unwrap()],
+                now,
+            )
             .unwrap();
-        assert!(matches!(
-            facts[&binding.invocation_id].state,
-            InvocationState::DispatchStarted
-        ));
+        env.db
+            .start_invocation(&lock, &calls.bindings[0], now)
+            .unwrap()
     }
 
     #[tokio::test]
-    async fn cancellation_during_admission_reaches_component_before_mutation() {
+    async fn started_cancellation_is_synchronous() {
         let _guard = DISPATCH_TEST_LOCK.lock().await;
         let env = test_runtime(&["mutate.create"]);
-        let path = "cancelled-during-admission.txt";
-        let params = serde_json::json!({
-            "path": path,
-            "content": "must not be installed\n",
-            "create_parents": false
-        });
-        let binding = reserve_binding(&env.runtime, "mutate.create", &params, 3);
-        let cancel_flag = Arc::new(AtomicBool::new(false));
-        CANCEL_AFTER_NEXT_ADMISSION.store(true, Ordering::SeqCst);
+        let params =
+            serde_json::json!({"path":"cancelled.txt","content":"no\n","create_parents":false});
+        let started = start(&env, 1, &params, false);
         STALL_NEXT_CANCELLATION_MONITOR.store(true, Ordering::SeqCst);
-
-        let outcome = env
+        let receipt = env
             .runtime
             .dispatch(
-                binding.clone(),
-                binding.identity.method.clone(),
+                started,
+                "mutate.create".into(),
                 params,
-                Some(cancel_flag),
+                Some(Arc::new(AtomicBool::new(true))),
             )
             .await;
-
-        let DispatchOutcome::Executed(receipt) = outcome else {
-            panic!("post-admission cancellation must close as an executed cancellation");
-        };
-        let error = receipt
-            .result
-            .expect_err("Component must observe cancellation before mutation");
-        assert_eq!(error.code, CepErrorCode::CallCancelled);
-        let facts = env
-            .runtime
-            .invocations
-            .query_invocations(&[binding.invocation_id])
-            .unwrap();
         assert_eq!(
-            facts[&binding.invocation_id].state,
-            InvocationState::DispatchStarted
+            receipt.result.unwrap_err().code,
+            CepErrorCode::CallCancelled
         );
-        assert!(!env.workspace.path().join(path).exists());
+        assert!(!env.workspace.path().join("cancelled.txt").exists());
         assert_eq!(env.runtime.workspace_history().current().unwrap(), None);
+        assert!(!receipt.evidence.admission.approved_capabilities.is_empty());
+    }
+
+    #[tokio::test]
+    async fn started_dispatch_checks_binding_and_records_mutation() {
+        let _guard = DISPATCH_TEST_LOCK.lock().await;
+        let env = test_runtime(&["mutate.create"]);
+        let params =
+            serde_json::json!({"path":"created.txt","content":"yes\n","create_parents":false});
+        for n in 1..=3 {
+            let started = start(&env, n, &params, n == 3);
+            let method = if n == 1 {
+                "mutate.edit"
+            } else {
+                "mutate.create"
+            };
+            let actual = if n == 2 {
+                serde_json::json!({"path":"other.txt"})
+            } else {
+                params.clone()
+            };
+            let receipt = env
+                .runtime
+                .dispatch(started, method.into(), actual, None)
+                .await;
+            assert_eq!(
+                receipt.result.unwrap_err().code,
+                CepErrorCode::SchemaMismatch
+            );
+            assert!(!env.workspace.path().join("created.txt").exists());
+            assert_eq!(env.runtime.workspace_history().current().unwrap(), None);
+        }
+        let started = start(&env, 4, &params, false);
+        let receipt = env
+            .runtime
+            .dispatch(started, "mutate.create".into(), params, None)
+            .await;
+        assert!(receipt.result.is_ok(), "{:?}", receipt.result);
+        assert_eq!(
+            std::fs::read(env.workspace.path().join("created.txt")).unwrap(),
+            b"yes\n"
+        );
+        assert!(env.runtime.workspace_history().current().unwrap().is_some());
+        assert!(!receipt.evidence.effects.effects.is_empty());
+    }
+
+    #[test]
+    fn operator_facade_uses_supplied_snapshot() {
+        let env = test_runtime(&["mutate.create"]);
+        let project = lattice_store::ProjectStoreKey::derive(env.workspace.path()).unwrap();
+        let read = env.db.begin_read().unwrap();
+        let filter = AuditFilter {
+            project_store_key: project,
+            session_id: None,
+            turn_id: None,
+            method: None,
+            outcome: None,
+        };
+        let params =
+            serde_json::json!({"path":"created.txt","content":"yes\n","create_parents":false});
+        let _started = start(&env, 1, &params, false);
+        assert!(
+            crate::query_audit(&read, &filter, None, 20)
+                .unwrap()
+                .rows
+                .is_empty()
+        );
+        assert_eq!(
+            crate::collect_status(&read, &project)
+                .unwrap()
+                .latest_change,
+            ChangeSeq(0)
+        );
+        let fresh = env.db.begin_read().unwrap();
+        let rows = crate::query_audit(&fresh, &filter, None, 20).unwrap().rows;
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(rows[0].state, OperatorInvocationState::Started));
+        assert_eq!(
+            crate::collect_status(&fresh, &project).unwrap().recent,
+            rows
+        );
+        assert_eq!(
+            crate::tail_audit(&fresh, &filter, ChangeSeq(0), 20)
+                .unwrap()
+                .rows
+                .len(),
+            2
+        );
+        assert_eq!(
+            crate::replay_audit(
+                &fresh,
+                &project,
+                rows[0].binding.session_id,
+                rows[0].binding.turn_id
+            )
+            .unwrap()
+            .calls,
+            rows
+        );
+        let other = lattice_store::ProjectStoreKey::from_canonical_path_bytes(b"/other");
+        assert!(
+            crate::collect_status(&fresh, &other)
+                .unwrap()
+                .recent
+                .is_empty()
+        );
     }
 }

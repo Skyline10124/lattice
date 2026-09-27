@@ -4,7 +4,11 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use crate::TuiOptions;
 use crate::connection::{cancel_message, detach_lines, not_submitted_notice, submission_notice};
+use crate::input::{CTRL_C_WINDOW, History, InputBuffer, KeyAction, resolve_key};
+use crate::session::SessionContext;
+use crate::view::{Dock, Sidebar, Viewport, frame_layout, transcript_lines};
 use crossterm::event::{
     DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyEvent,
     KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
@@ -12,18 +16,12 @@ use crossterm::event::{
 };
 use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use lattice_api::TurnEvent;
-#[cfg(test)]
-use lattice_api::local::SessionObservation;
 use lattice_api::local::{
-    Acceptance, CancelStatus, CompletionConfirmation, ConnectionStatus, DetachReport, HistoryScope,
-    LocalClient, LocalState, LocalTurn, LocalUpdate, ObservationPhase, ResetReason, TextAction,
-    TurnId, TurnObservation, TurnRequest,
+    Acceptance, ActiveStateView, CancelStatus, ConnectionStatus, DetachReport, LocalClient,
+    LocalState, LocalTurn, LocalUpdate, MaterialSummary, ModelAttemptKey, ObservationPhase,
+    ObservationSnapshot, SessionId, StepKey, TextSegment, ToolResultOutcome, TurnId, TurnRequest,
+    TurnSummary,
 };
-
-use crate::TuiOptions;
-use crate::input::{CTRL_C_WINDOW, History, InputBuffer, KeyAction, resolve_key};
-use crate::session::SessionContext;
-use crate::view::{Dock, Sidebar, Viewport, frame_layout, transcript_lines};
 
 const FRAME: Duration = Duration::from_millis(33);
 
@@ -44,6 +42,9 @@ pub(crate) enum StatusPlacement {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Block {
+    /// 无视觉内容的归属标记，用于节点正文实际到达后的替换。
+    Step(StepKey),
+    UserTurn(TurnId),
     /// 渲染作用域，不单独占行；历史不能被重标为当前 Agent 的发言。
     AgentName(String),
     User(String),
@@ -82,13 +83,10 @@ pub(crate) enum ToolState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[rustfmt::skip]
 pub(crate) enum StatusKind {
-    Committed { commit_id: String },
-    Visible { commit_id: String },
-    CommitFailed { reason: String },
+    Summary { turn_id: TurnId, summary: TurnSummary },
     TurnFailed { reason: String },
-    Cancelled { reason: Option<String> },
-    LlmRetry { attempt: u32, max_attempts: u32, delay_ms: u64, message: String },
-    LlmFailed { attempt: u32, max_attempts: u32, message: String },
+    LlmRetry { attempt: u32, delay_ms: u64, message: String },
+    LlmFailed { attempt: u32, message: String },
     /// `/help` output and startup banner.
     Notice(Vec<String>),
 }
@@ -97,7 +95,6 @@ pub(crate) enum StatusKind {
 pub(crate) enum TurnPhase {
     Idle,
     Streaming,
-    Committing,
     /// 取消请求已发起，接管确认与持久终态分别观察。
     Cancelling,
 }
@@ -116,8 +113,9 @@ pub(crate) struct App {
     reconnect_requested: bool,
     submitted: Option<(TurnId, String)>,
     durable_len: usize,
-    gap_pending: bool,
-    // 仅用于当前界面呈现；控制和确认合并由 LocalTurn 决定。
+    generation: u64,
+    attempt: Option<lattice_api::local::AttemptSegments>,
+    // 控制与观察归 LocalTurn；这里只保存当前显示。
     state: Option<LocalState>,
     cancel_status: Option<CancelStatus>,
     /// Set when `supports_keyboard_enhancement()` reported true at startup.
@@ -145,7 +143,8 @@ impl App {
             reconnect_requested: false,
             submitted: None,
             durable_len: 0,
-            gap_pending: false,
+            generation: 0,
+            attempt: None,
             state: None,
             cancel_status: None,
             kitty_keyboard,
@@ -156,69 +155,80 @@ impl App {
         }
     }
 
-    /// Pure: fold one `TurnEvent` into `blocks` / `phase`. Exhaustive `match`
-    /// with **no `_ =>` arm** (§9).
-    #[rustfmt::skip]
     pub(crate) fn apply_turn_event(&mut self, event: TurnEvent) {
+        // 快照可能比事件窗口领先一个提交；已装入节点的尝试不再重建临时块。
+        let key = match &event {
+            TurnEvent::ModelStarted { key, .. }
+            | TurnEvent::TokenDelta { key, .. }
+            | TurnEvent::ReasoningDelta { key, .. }
+            | TurnEvent::LlmRequestError { key, .. }
+            | TurnEvent::ModelFinished { key, .. } => Some(key),
+            _ => None,
+        };
+        if let Some(key) = key && self.blocks[..self.durable_len].iter().any(|block| {
+            matches!(block, Block::Step(step) if step.turn_id == key.turn_id && step.ordinal == key.model_step_ordinal)
+        }) { return; }
         match event {
-            TurnEvent::TokenDelta { content } => match self.blocks.last_mut() {
-                Some(Block::Assistant(buf)) => buf.push_str(&content),
-                _ => self.blocks.push(Block::Assistant(content)),
-            },
-            TurnEvent::ToolCallStarted { id, name } => {
-                self.upsert_tool(id, name, ToolState::Running);
-            }
-            TurnEvent::ToolCallFinished { id, name, ok, output_len, error_summary } => {
-                self.upsert_tool(id, name, if ok { ToolState::Ok { output_len } } else {
-                    ToolState::Failed { output_len, error: error_summary }
-                });
-            }
-            TurnEvent::TurnCommitting => {
-                if self.phase == TurnPhase::Streaming {
-                    self.phase = TurnPhase::Committing;
+            TurnEvent::ModelStarted { key, .. } => self.start_attempt(key),
+            TurnEvent::TokenDelta { key, content } => {
+                self.start_attempt(key);
+                if let Some(attempt) = &mut self.attempt {
+                    attempt.segments.push(TextSegment::Text {
+                        text: content.clone(),
+                    });
+                }
+                match self.blocks.last_mut() {
+                    Some(Block::Assistant(text)) => text.push_str(&content),
+                    _ => self.blocks.push(Block::Assistant(content)),
                 }
             }
-            TurnEvent::TurnCommitted { commit_id, .. } => {
-                self.fail_running_tools("turn ended before tool completion");
-                self.push_status(StatusKind::Visible { commit_id });
+            TurnEvent::ReasoningDelta { key, content } => {
+                self.start_attempt(key);
+                if let Some(attempt) = &mut self.attempt {
+                    attempt
+                        .segments
+                        .push(TextSegment::Reasoning { text: content });
+                }
             }
-            TurnEvent::CommitFailed { reason } => {
-                self.fail_running_tools(&reason);
-                self.push_dock_status(StatusKind::CommitFailed { reason }, DockSeverity::Error);
+            TurnEvent::ToolCallStarted { id, name } => {
+                self.upsert_tool(id.to_string(), name, ToolState::Running)
             }
-            TurnEvent::EvidenceDurabilityFailed { attempts } => {
-                let reason = format!(
-                    "terminal evidence durability failed after {attempts} attempt(s)"
+            TurnEvent::ToolCallFinished {
+                id,
+                name,
+                outcome,
+                material,
+                error_summary,
+            } => {
+                self.upsert_tool(
+                    id.to_string(),
+                    name,
+                    tool_state(outcome, &material, error_summary),
                 );
-                self.fail_running_tools(&reason);
-                self.push_dock_status(StatusKind::CommitFailed { reason }, DockSeverity::Error);
             }
-            TurnEvent::RecoveryRequired { reason } => {
-                let reason = format!("recovery required: {reason}");
-                self.fail_running_tools(&reason);
-                self.push_dock_status(StatusKind::CommitFailed { reason }, DockSeverity::Error);
-            }
-            TurnEvent::TurnFailed { reason } => {
-                self.fail_running_tools(&reason);
-                self.push_dock_status(StatusKind::TurnFailed { reason }, DockSeverity::Error);
-            }
-            TurnEvent::TurnCancelled { reason } => {
-                self.fail_running_tools(reason.as_deref().unwrap_or("cancelled"));
-                self.push_status(StatusKind::Cancelled { reason });
+            TurnEvent::TurnCompleted { turn, summary, .. }
+            | TurnEvent::TurnFailed { turn, summary, .. }
+            | TurnEvent::TurnCancelled { turn, summary, .. } => {
+                self.fail_running_tools("turn ended before tool completion");
+                self.show_summary(turn.turn_id, summary);
+                self.phase = TurnPhase::Idle;
             }
             TurnEvent::LlmRequestError {
-                attempt,
-                max_attempts,
+                key,
                 will_retry,
                 delay_ms,
                 message,
                 ..
             } => {
                 if will_retry {
+                    self.remove_step(StepKey {
+                        turn_id: key.turn_id,
+                        ordinal: key.model_step_ordinal,
+                    });
+                    self.attempt = None;
                     self.push_dock_status(
                         StatusKind::LlmRetry {
-                            attempt,
-                            max_attempts,
+                            attempt: key.attempt_ordinal,
                             delay_ms: delay_ms.unwrap_or(0),
                             message,
                         },
@@ -227,20 +237,53 @@ impl App {
                 } else {
                     self.push_dock_status(
                         StatusKind::LlmFailed {
-                            attempt,
-                            max_attempts,
+                            attempt: key.attempt_ordinal,
                             message,
                         },
                         DockSeverity::Error,
                     );
                 }
             }
-            TurnEvent::ModelStarted { .. } | TurnEvent::ModelFinished { .. } => {},
-            TurnEvent::TurnStarted { .. }
-            | TurnEvent::ReasoningDelta { .. }
+            TurnEvent::StepClosed { .. } => {} // 实际正文到达前保留临时块。
+            TurnEvent::TurnStarted { turn, .. } => self.ctx.session_id = Some(turn.session_id),
+            TurnEvent::CallsRegistered { .. }
+            | TurnEvent::ModelFinished { .. }
             | TurnEvent::CepCallStarted { .. }
             | TurnEvent::CepCallFinished { .. } => {}
         }
+    }
+
+    fn start_attempt(&mut self, key: ModelAttemptKey) {
+        if self
+            .attempt
+            .as_ref()
+            .is_some_and(|attempt| attempt.key == key)
+        {
+            return;
+        }
+        let step = StepKey {
+            turn_id: key.turn_id,
+            ordinal: key.model_step_ordinal,
+        };
+        self.remove_step(step);
+        self.blocks.push(Block::Step(step));
+        self.attempt = Some(lattice_api::local::AttemptSegments {
+            key,
+            segments: vec![],
+        });
+    }
+
+    fn remove_step(&mut self, step: StepKey) {
+        let mut removing = false;
+        let temporary = self.blocks.split_off(self.durable_len);
+        self.blocks.extend(temporary.into_iter().filter(|block| {
+            match block {
+                Block::Step(key) => removing = *key == step,
+                Block::UserTurn(_) => removing = false,
+                _ => {}
+            }
+            !removing || matches!(block, Block::Status { .. })
+        }));
     }
 
     fn upsert_tool(&mut self, id: String, name: String, state: ToolState) {
@@ -379,23 +422,23 @@ impl App {
 
     fn apply_update(&mut self, update: LocalUpdate) {
         match update {
-            LocalUpdate::State {
-                view,
-                phase,
-                confirmation,
-                error,
-                ..
-            } => {
-                self.apply_state(LocalState {
-                    view,
-                    phase,
-                    confirmation,
-                    error,
-                });
+            LocalUpdate::State { view, phase, error } => {
+                self.apply_state(LocalState { view, phase, error })
             }
-            LocalUpdate::Reset { reason, .. } => self.reset_display(reason),
-            LocalUpdate::History { result, stale, .. } => match result {
-                Ok(history) => self.replace_history(crate::session::history_blocks(*history)),
+            LocalUpdate::Reset { view, generation } => {
+                self.generation = generation;
+                self.reset_display(&view);
+            }
+            LocalUpdate::History {
+                result,
+                stale,
+                generation,
+                ..
+            } => match result {
+                Ok(history) if !stale && generation == self.generation => {
+                    self.replace_history(crate::session::history_blocks(*history))
+                }
+                Ok(_) => {}
                 Err(error) => self.push_status(StatusKind::Notice(vec![format!(
                     "{}持久正文不可用；此次内容未验证，/reconnect 重载：{:?}：{}",
                     if stale { "旧切点" } else { "" },
@@ -403,30 +446,26 @@ impl App {
                     error.error.message
                 )])),
             },
-            LocalUpdate::Event { event, text, .. } => {
-                match text {
-                    TextAction::Start => self.blocks.push(Block::Assistant(String::new())),
-                    TextAction::StartIncomplete => {
-                        self.push_status(StatusKind::Notice(vec![
-                            "当前模型段前文可能缺失；仅显示重连后的新后缀".into(),
-                        ]));
-                        self.blocks.push(Block::Assistant(String::new()));
-                    }
-                    TextAction::None | TextAction::Continue | TextAction::Finish => {}
+            LocalUpdate::Finished { generation, .. } => {
+                if generation == self.generation
+                    && let Some(state) = &mut self.state
+                {
+                    state.phase = ObservationPhase::Finished;
                 }
-                self.apply_turn_event(event);
             }
+            LocalUpdate::Event { event, .. } => self.apply_turn_event(event),
             LocalUpdate::Submission { turn_id, result } => match result {
                 Ok(acceptance) => {
-                    self.submitted = None;
-                    if matches!(
-                        acceptance,
-                        Acceptance::Existing {
-                            turn: TurnObservation::Committed(_)
+                    if let Acceptance::Accepted { turn } | Acceptance::Existing { turn } =
+                        &acceptance
+                    {
+                        self.ctx.session_id = Some(turn.session_id);
+                        self.ctx.active_agent = turn.agent_name.clone();
+                        self.submitted = None;
+                        if turn.summary.is_some() {
+                            self.current_turn = None;
+                            self.phase = TurnPhase::Idle;
                         }
-                    ) {
-                        self.current_turn = None;
-                        self.phase = TurnPhase::Idle;
                     }
                     self.push_status(StatusKind::Notice(vec![submission_notice(&acceptance)]));
                 }
@@ -478,21 +517,16 @@ impl App {
     fn apply_state(&mut self, state: LocalState) {
         let view = &state.view;
         let observed = view
-            .requested_turn
+            .selected_turn
             .as_ref()
-            .map(|turn| match turn {
-                TurnObservation::Pending(turn) => turn.turn_id,
-                TurnObservation::Committed(turn) => turn.turn_id,
-            })
-            .or_else(|| view.active_turn.as_ref().map(|turn| turn.turn_id));
+            .map(|turn| turn.turn_id)
+            .or(view.session.active_turn);
         if observed.is_some() {
             self.observed_turn = observed;
         }
-        self.ctx.active_agent = view.session.active_agent_name.clone();
+        self.ctx.session_id = Some(view.session.session_id);
+        self.ctx.active_agent = view.current_agent.clone().unwrap_or_default();
         self.connected = true;
-        if matches!(&view.requested_turn, Some(TurnObservation::Committed(_))) {
-            self.fail_running_tools("turn ended before tool completion");
-        }
         if state.phase == ObservationPhase::Live {
             self.current_turn = observed;
             self.phase = if matches!(
@@ -504,33 +538,34 @@ impl App {
                 TurnPhase::Streaming
             };
         } else if state.phase == ObservationPhase::Finished || self.submitted.is_none() {
-            self.current_turn = view.active_turn.as_ref().map(|turn| turn.turn_id);
+            self.current_turn = view.session.active_turn;
             self.phase = TurnPhase::Idle;
         }
-        if state.phase == ObservationPhase::Finished {
+        if let Some(turn) = &view.selected_turn
+            && let Some(summary) = &turn.summary
+        {
             self.submitted = None;
+            self.current_turn = view.session.active_turn;
+            self.phase = TurnPhase::Idle;
+            self.fail_running_tools("turn ended before tool completion");
+            self.show_summary(turn.turn_id, summary.clone());
         }
-        if let Some(pending) = &view.active_turn {
+        if let Some(id) = view.session.active_turn
+            && !view.owned
+        {
             self.notice_once(format!(
-                "pending Turn {}{}",
-                pending.turn_id,
-                if state.phase == ObservationPhase::Live {
-                    ""
-                } else {
-                    "；本连接尚未确认 live 所有权；可重连查询，发送新消息前后台会自动关闭崩溃遗留任务"
-                }
+                "pending Turn {id}；无 live Owner；发送新消息前后台会自动关闭崩溃遗留任务"
             ));
         }
         if let Some(error) = &state.error {
-            self.notice_once(format!(
-                "Turn {}：{}",
-                self.observed_turn
-                    .map_or_else(|| "未知".into(), |id| id.to_string()),
-                error.message
-            ));
+            self.push_dock_status(
+                StatusKind::TurnFailed {
+                    reason: error.message.clone(),
+                },
+                DockSeverity::Error,
+            );
         }
         self.state = Some(state);
-        self.show_completion();
     }
 
     fn notice_once(&mut self, message: String) {
@@ -538,91 +573,50 @@ impl App {
         if !self
             .blocks
             .iter()
-            .any(|block| matches!(block, Block::Status { kind: known, .. } if *known == kind))
+            .any(|block| matches!(block, Block::Status { kind:known, .. } if *known == kind))
         {
             self.push_status(kind);
         }
     }
 
-    fn show_completion(&mut self) {
-        let Some(state) = &self.state else {
-            return;
-        };
-        let Some(TurnObservation::Committed(turn)) = &state.view.requested_turn else {
-            return;
-        };
-        let turn = turn.clone();
-        let confirmed = state.confirmation == CompletionConfirmation::Confirmed;
-        let mut found = false;
-        for block in &mut self.blocks {
-            if let Block::Status { kind, .. } = block
-                && matches!(kind, StatusKind::Visible { commit_id } | StatusKind::Committed { commit_id } if *commit_id == turn.commit_id)
-            {
-                found = true;
-                *kind = if confirmed {
-                    StatusKind::Committed {
-                        commit_id: turn.commit_id.clone(),
-                    }
-                } else {
-                    StatusKind::Visible {
-                        commit_id: turn.commit_id.clone(),
-                    }
-                };
-            }
-        }
-        if !found {
-            self.push_status(if confirmed {
-                StatusKind::Committed {
-                    commit_id: turn.commit_id.clone(),
-                }
-            } else {
-                StatusKind::Visible {
-                    commit_id: turn.commit_id.clone(),
-                }
-            });
-        }
-        let reason = format!("Turn {}：{:?}", turn.turn_id, turn.outcome);
-        let kind = match turn.outcome {
-            lattice_api::TurnOutcome::Completed { .. } => StatusKind::Notice(vec![reason]),
-            lattice_api::TurnOutcome::Cancelled { .. } => StatusKind::Cancelled {
-                reason: Some(reason),
-            },
-            lattice_api::TurnOutcome::Failed { .. }
-            | lattice_api::TurnOutcome::Interrupted { .. } => StatusKind::TurnFailed { reason },
-        };
-        if !self
-            .blocks
-            .iter()
-            .any(|block| matches!(block, Block::Status { kind: known, .. } if *known == kind))
-        {
-            self.push_status(kind);
-        }
+    fn show_summary(&mut self, turn_id: TurnId, summary: TurnSummary) {
+        if self.blocks.iter().any(|block| matches!(block, Block::Status { kind:StatusKind::Summary { turn_id:id, .. }, .. } if *id == turn_id)) { return; }
+        self.push_status(StatusKind::Summary { turn_id, summary });
     }
 
-    fn reset_display(&mut self, reason: ResetReason) {
-        // 已移入历史位置的事件覆盖也只属于旧切点；恢复其 ToolCall-only 显示。
-        for block in &mut self.blocks[..self.durable_len] {
-            if let Block::Tool {
-                state,
-                source: source @ ToolSource::Event,
-                ..
-            } = block
-            {
-                *state = ToolState::Unknown;
-                *source = ToolSource::HistoryCall;
+    fn reset_display(&mut self, view: &ObservationSnapshot) {
+        // 重同步只替换当前活动步骤；已关闭步骤的临时正文等待 History 实际安装。
+        if let Some(active) = &view.active {
+            self.remove_step(active.key);
+            self.attempt = None;
+            match &active.state {
+                ActiveStateView::Requesting { .. } => {
+                    if let Some(attempt) = &view.attempt {
+                        self.start_attempt(attempt.key);
+                        self.attempt = Some(attempt.clone());
+                        for segment in &attempt.segments {
+                            if let TextSegment::Text { text } = segment {
+                                self.blocks.push(Block::Assistant(text.clone()));
+                            }
+                        }
+                    }
+                }
+                ActiveStateView::RetryReady { .. } => {}
+                ActiveStateView::Executing { reply, slots } => {
+                    self.blocks.push(Block::Step(active.key));
+                    crate::session::append_step(
+                        &mut self.blocks,
+                        lattice_api::local::StepContent {
+                            assistant: reply.clone(),
+                            results: slots
+                                .iter()
+                                .filter_map(|slot| slot.result.clone())
+                                .collect(),
+                        },
+                    );
+                    self.attempt = view.attempt.clone();
+                }
             }
-        }
-        let statuses: Vec<_> = self
-            .blocks
-            .drain(self.durable_len..)
-            .filter(|block| matches!(block, Block::Status { .. }))
-            .collect();
-        self.blocks.extend(statuses);
-        if reason == ResetReason::Gap {
-            self.gap_pending = true;
-        }
-        if self.gap_pending {
-            self.notice_once("增量缺口；将替换持久视图，临时增量不重放".into());
         }
     }
 
@@ -650,22 +644,30 @@ impl App {
                 }
             }
         }
+        let loaded: Vec<_> = blocks
+            .iter()
+            .filter(|b| matches!(b, Block::Step(_) | Block::UserTurn(_)))
+            .cloned()
+            .collect();
         let temporary = self.blocks.split_off(self.durable_len);
         self.blocks = blocks;
         self.durable_len = self.blocks.len();
+        let mut replaced = false;
         for block in temporary {
+            if matches!(block, Block::Step(_) | Block::UserTurn(_)) {
+                replaced = loaded.contains(&block);
+            }
+            if replaced && !matches!(block, Block::Status { .. }) {
+                continue;
+            }
             if matches!(&block, Block::Tool { id, .. } if history_ids.contains(id)) {
                 continue;
             }
-            if let Block::Status { kind: StatusKind::Visible { commit_id } | StatusKind::Committed { commit_id }, .. } = &block
-                && self.blocks.iter().any(|known| matches!(known, Block::Status { kind: StatusKind::Visible { commit_id: id } | StatusKind::Committed { commit_id: id }, .. } if id == commit_id))
-            { continue; }
             if matches!(block, Block::Status { .. }) && self.blocks.contains(&block) {
                 continue;
             }
             self.blocks.push(block);
         }
-        self.show_completion();
     }
 
     pub(crate) fn fail_running_tools(&mut self, reason: &str) {
@@ -759,10 +761,11 @@ impl App {
         let id = lattice_api::local::new_turn_id();
         self.state = None;
         self.cancel_status = None;
-        self.gap_pending = false;
+        self.attempt = None;
         self.current_turn = Some(id);
         self.observed_turn = Some(id);
         self.submitted = Some((id, raw.clone()));
+        self.blocks.push(Block::UserTurn(id));
         self.blocks
             .push(Block::AgentName(self.ctx.active_agent.clone()));
         self.blocks.push(Block::User(raw.clone()));
@@ -813,6 +816,34 @@ impl App {
     }
 }
 
+pub(crate) fn session_label(id: Option<SessionId>) -> String {
+    id.map_or_else(|| "未接受".into(), |id| id.to_string())
+}
+
+fn tool_state(
+    outcome: ToolResultOutcome,
+    material: &MaterialSummary,
+    error: Option<String>,
+) -> ToolState {
+    let output_len = match material {
+        MaterialSummary::Available { byte_length, .. } => *byte_length as usize,
+        MaterialSummary::OutputTooLarge { .. } => {
+            return ToolState::Unavailable {
+                outcome: outcome.as_str().into(),
+            };
+        }
+        MaterialSummary::NoContent => 0,
+    };
+    if outcome == ToolResultOutcome::Succeeded {
+        ToolState::Ok { output_len }
+    } else {
+        ToolState::Failed {
+            output_len,
+            error: error.or_else(|| Some(outcome.as_str().into())),
+        }
+    }
+}
+
 /// 进入 raw 模式后并行接收固定状态和正文；启动不等待整段历史读取。
 pub(crate) async fn run_app(
     mut options: TuiOptions,
@@ -822,7 +853,7 @@ pub(crate) async fn run_app(
     let root = options.project_root.clone();
     options.project_root =
         tokio::task::spawn_blocking(move || std::fs::canonicalize(root)).await??;
-    let connection = client.observe(ctx.session_id.clone(), None, HistoryScope::Session);
+    let connection = ctx.session_id.map(|id| client.observe(Some(id), None));
     let mut terminal = ratatui::try_init()?;
     let kitty = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
     crossterm::execute!(std::io::stdout(), EnableBracketedPaste)?;
@@ -841,7 +872,7 @@ pub(crate) async fn run_app(
         &options,
         &mut app,
         &client,
-        Some(connection),
+        connection,
         EventStream::new(),
         |app| {
             if let Ok(size) = terminal.size() {
@@ -903,11 +934,7 @@ where
                 .is_none_or(|turn| target.is_some() && target != turn.turn_id());
             if needs_selection {
                 // 用户选择不同目标才另建只读句柄；旧控制交接不阻塞新目标或等待旧正文。
-                if let Some(old) = turn.replace(client.observe(
-                    app.ctx.session_id.clone(),
-                    target,
-                    HistoryScope::Session,
-                )) {
+                if let Some(old) = turn.replace(client.observe(app.ctx.session_id, target)) {
                     handoffs.push(old.detach().boxed());
                 }
                 app.state = None;
@@ -1013,19 +1040,16 @@ fn begin_turn(
     prompt: String,
 ) {
     let request = TurnRequest {
-        session_id: app.ctx.session_id.clone(),
+        session_id: app.ctx.session_id,
         turn_id: app.current_turn.expect("提交前已分配身份"),
         workspace: options.project_root.clone(),
         input: prompt,
+        agent: (!options.agent.is_empty()).then(|| options.agent.clone()),
     };
-    let configuration_client = client.clone();
-    let session_id = request.session_id.clone();
     let options = options.clone();
-    *turn_stream = Some(
-        client.start_turn_with(request, HistoryScope::Session, move || {
-            crate::session::freeze_configuration(configuration_client, session_id, options)
-        }),
-    );
+    *turn_stream = Some(client.start_turn_with(request, move |agent| {
+        crate::session::freeze_configuration(agent, options)
+    }));
 }
 
 #[rustfmt::skip]
@@ -1046,9 +1070,8 @@ fn help_lines(kitty: bool) -> Vec<String> {
 fn startup_notice(ctx: &SessionContext) -> Vec<String> {
     vec![
         "LATTICE".into(),
-        format!("session {}", ctx.session_id),
+        format!("session {}", session_label(ctx.session_id)),
         format!("agent {}", ctx.active_agent),
-        format!("project {}", ctx.project_branch),
         "/help  show commands".into(),
         "/clear  clear transcript".into(),
         "/quit  exit".into(),
@@ -1101,9 +1124,8 @@ mod tests {
     fn test_app() -> App {
         App::new(
             SessionContext {
-                session_id: "sess".into(),
+                session_id: None,
                 active_agent: "agent".into(),
-                project_branch: "main".into(),
             },
             false,
             // History is not under test here; an empty dir keeps it inert.
@@ -1111,160 +1133,6 @@ mod tests {
         )
     }
 
-    #[test]
-    fn snapshot_replaces_deltas_and_preserves_gap_without_terminal_event() {
-        let mut app = test_app();
-        let id = lattice_api::local::new_turn_id();
-        let view = SessionObservation {
-            state_oid: "state".into(),
-            session: lattice_api::GraphSession {
-                session_id: "session".into(),
-                label: None,
-                active_agent_name: "agent".into(),
-                created_at: String::new(),
-                updated_at: String::new(),
-                project_target_branch: Some("main".into()),
-                project_store_key: "key".into(),
-            },
-            head: lattice_api::GraphHead::Branch {
-                name: "main".into(),
-            },
-            head_commit_id: Some("commit".into()),
-            branches: Vec::new(),
-            commit_count: 1,
-            active_turn: None,
-            requested_turn: Some(lattice_api::local::TurnObservation::Committed(Box::new(
-                lattice_api::local::CommittedTurnObservation {
-                    commit_id: "commit".into(),
-                    turn_id: id,
-                    parent_ids: Vec::new(),
-                    agent_name: "agent".into(),
-                    model: "model".into(),
-                    provider: "provider".into(),
-                    outcome: lattice_api::TurnOutcome::Completed {
-                        finish_reason: lattice_api::TurnFinishReason::Stop,
-                    },
-                    origin: lattice_api::ClosureOrigin::Live,
-                    usage: None,
-                    workspace_history_checkpoint: lattice_api::WorkspaceHistoryCheckpoint::Empty,
-                    created_at: String::new(),
-                },
-            ))),
-        };
-        let history = vec![
-            Block::User("prompt".into()),
-            Block::Assistant("durable".into()),
-        ];
-        app.blocks.push(Block::Assistant("lost delta".into()));
-        app.apply_update(LocalUpdate::Reset {
-            reason: ResetReason::Gap,
-            cursor: None,
-        });
-        app.apply_state(LocalState {
-            view: Box::new(view.clone()),
-            phase: ObservationPhase::Live,
-            confirmation: CompletionConfirmation::Unknown,
-            error: None,
-        });
-        app.replace_history(history.clone());
-        assert_eq!(app.phase, TurnPhase::Streaming);
-        assert_eq!(app.current_turn, Some(id));
-        assert_eq!(&app.blocks[..2], &history);
-        let text = transcript_text(&app, 200);
-        assert!(
-            text.contains("缺口") && !text.contains("lost delta"),
-            "{text}"
-        );
-        assert_eq!(text.matches("durable").count(), 1);
-        assert_eq!(text.matches("增量缺口").count(), 1);
-        app.apply_state(LocalState {
-            view: Box::new(view.clone()),
-            phase: ObservationPhase::Finished,
-            confirmation: CompletionConfirmation::Confirmed,
-            error: None,
-        });
-        app.reset_display(ResetReason::Snapshot);
-        app.replace_history(history.clone());
-        assert_eq!(&app.blocks[..2], &history);
-        assert_eq!(app.phase, TurnPhase::Idle);
-        assert!(app.current_turn.is_none());
-        let text = transcript_text(&app, 200);
-        assert!(
-            text.contains("缺口") && text.contains("committed commit"),
-            "{text}"
-        );
-        assert_eq!(text.matches("durable").count(), 1);
-        assert_eq!(text.matches("增量缺口").count(), 1);
-
-        for value in [
-            serde_json::json!({"completed": {"finish_reason": "stop"}}),
-            serde_json::json!({"failed": {"reason": "model_request_failed"}}),
-            serde_json::json!({"cancelled": {"reason": "user_cancelled"}}),
-            serde_json::json!({"interrupted": {"reason": "process_interrupted_before_model_attempt"}}),
-        ] {
-            let outcome: lattice_api::TurnOutcome = serde_json::from_value(value).unwrap();
-            for confirmed in [false, true] {
-                let mut app = test_app();
-                let mut terminal = view.clone();
-                if let Some(TurnObservation::Committed(turn)) = &mut terminal.requested_turn {
-                    turn.outcome = outcome.clone();
-                }
-                let error = lattice_api::local::LocalError::from(
-                    lattice_api::ApiError::StoreUnavailable("测试错误".into()),
-                );
-                app.apply_state(LocalState {
-                    view: Box::new(terminal.clone()),
-                    phase: ObservationPhase::Finished,
-                    confirmation: if confirmed {
-                        CompletionConfirmation::Confirmed
-                    } else {
-                        CompletionConfirmation::Unknown
-                    },
-                    error: Some(lattice_api::local::LocalError {
-                        message: "original durability failure".into(),
-                        ..error.clone()
-                    }),
-                });
-                app.apply_update(LocalUpdate::History {
-                    view: Box::new(terminal),
-                    stale: false,
-                    result: Err(lattice_api::local::HistoryReadError {
-                        context: lattice_api::local::HistoryReadContext::Transcript {
-                            object_id: "commit".into(),
-                        },
-                        error,
-                    }),
-                });
-                assert!(app.connected, "正文失败不是断开");
-                let text = transcript_text(&app, 200);
-                assert!(
-                    text.contains(&format!("{outcome:?}")) && text.contains(&id.to_string()),
-                    "{text}"
-                );
-                assert!(
-                    text.contains("original durability failure") && text.contains("正文不可用"),
-                    "{text}"
-                );
-                assert_eq!(text.contains("committed commit"), confirmed, "{text}");
-                assert_eq!(text.contains("完成确认未知"), !confirmed, "{text}");
-                assert!(app.blocks.iter().any(|block| matches!(block,
-                    Block::Status { kind: StatusKind::TurnFailed { .. }, .. } if matches!(outcome, lattice_api::TurnOutcome::Failed { .. } | lattice_api::TurnOutcome::Interrupted { .. })
-                ) || matches!(block,
-                    Block::Status { kind: StatusKind::Cancelled { .. }, .. } if matches!(outcome, lattice_api::TurnOutcome::Cancelled { .. })
-                ) || matches!(block,
-                    Block::Status { kind: StatusKind::Notice(_), .. } if matches!(outcome, lattice_api::TurnOutcome::Completed { .. })
-                )));
-                app.connection_lost("connection reset".into());
-                let after = transcript_text(&app, 200);
-                assert!(after.contains(&text) && after.contains("connection reset"));
-                assert_eq!(app.observed_turn, Some(id));
-                assert_eq!(app.phase, TurnPhase::Idle);
-                assert!(app.apply_builtin("/reconnect"));
-                assert_eq!(app.observed_turn, Some(id));
-            }
-        }
-        // 不完整后缀的真实重连、同切点历史与正常新段由 run_loop 的 O2 回归承接。
-    }
     fn assert_failed_tool(app: &App, index: usize, reason: &str) {
         match &app.blocks[index] {
             Block::Tool {
@@ -1278,98 +1146,106 @@ mod tests {
         }
     }
 
+    fn attempt() -> ModelAttemptKey {
+        ModelAttemptKey {
+            turn_id: TurnId::parse("11111111-1111-4111-8111-111111111111").unwrap(),
+            model_step_ordinal: 0,
+            attempt_ordinal: 1,
+        }
+    }
+    fn invocation(n: u32) -> lattice_api::local::InvocationId {
+        lattice_api::local::InvocationId::parse(&format!("22222222-2222-4222-8222-{n:012}"))
+            .unwrap()
+    }
+    fn retry(message: &str, will_retry: bool) -> TurnEvent {
+        TurnEvent::LlmRequestError {
+            key: attempt(),
+            retryable: will_retry,
+            will_retry,
+            delay_ms: Some(100),
+            message: message.into(),
+        }
+    }
     fn start_tool(app: &mut App, name: &str) {
         app.apply_turn_event(TurnEvent::ToolCallStarted {
-            id: "call-1".into(),
+            id: invocation(1),
             name: name.into(),
         });
     }
     #[test]
     fn token_deltas_coalesce_into_one_assistant_block() {
         let mut app = test_app();
-        app.apply_turn_event(TurnEvent::TokenDelta {
-            content: "a".into(),
-        });
-        app.apply_turn_event(TurnEvent::TokenDelta {
-            content: "b".into(),
-        });
-        assert_eq!(app.blocks, vec![Block::Assistant("ab".into())]);
+        for content in ["a", "b"] {
+            app.apply_turn_event(TurnEvent::TokenDelta {
+                key: attempt(),
+                content: content.into(),
+            });
+        }
+        let assistants: Vec<_> = app
+            .blocks
+            .iter()
+            .filter(|b| matches!(b, Block::Assistant(_)))
+            .collect();
+        assert_eq!(assistants, vec![&Block::Assistant("ab".into())]);
     }
-
     #[test]
     fn tool_finished_updates_the_block_with_matching_id() {
         let mut app = test_app();
-        // Three concurrent tools: with only one in flight, "updates the block
-        // with the matching id" would pass even if the code updated any block.
-        for (id, name) in [
-            ("call-1", "observe.workspace"),
-            ("call-2", "mutate.edit"),
-            ("call-3", "fetch.web"),
+        for (n, name) in [
+            (1, "observe.workspace"),
+            (2, "mutate.edit"),
+            (3, "fetch.web"),
         ] {
             app.apply_turn_event(TurnEvent::ToolCallStarted {
-                id: id.into(),
+                id: invocation(n),
                 name: name.into(),
             });
         }
         app.apply_turn_event(TurnEvent::ToolCallFinished {
-            id: "call-2".into(),
+            id: invocation(2),
             name: "mutate.edit".into(),
-            ok: false,
-            output_len: 0,
+            outcome: ToolResultOutcome::Failed,
+            material: MaterialSummary::NoContent,
             error_summary: Some("precondition failed".into()),
         });
-
-        let states: Vec<(&str, &ToolState)> = app
-            .blocks
-            .iter()
-            .filter_map(|b| match b {
-                Block::Tool { id, state, .. } => Some((id.as_str(), state)),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(states.len(), 3, "every started tool keeps its own block");
-        for (id, state) in states {
-            match (id, state) {
-                ("call-2", ToolState::Failed { output_len, error }) => {
-                    assert_eq!(*output_len, 0);
-                    assert_eq!(error.as_deref(), Some("precondition failed"));
+        assert_eq!(app.blocks.len(), 3);
+        assert_failed_tool(&app, 1, "precondition failed");
+        for index in [0, 2] {
+            assert!(matches!(
+                &app.blocks[index],
+                Block::Tool {
+                    state: ToolState::Running,
+                    ..
                 }
-                ("call-2", other) => panic!("call-2 should be Failed, got {other:?}"),
-                (other_id, ToolState::Running) => {
-                    assert!(matches!(other_id, "call-1" | "call-3"));
-                }
-                (other_id, other) => {
-                    panic!("{other_id} must stay Running, got {other:?}")
-                }
-            }
+            ));
         }
         app.apply_turn_event(TurnEvent::ToolCallFinished {
-            id: "call-4".into(),
+            id: invocation(4),
             name: "fetch.web".into(),
-            ok: false,
-            output_len: 42,
-            error_summary: Some("结束先到的错误摘要".into()),
+            outcome: ToolResultOutcome::Succeeded,
+            material: MaterialSummary::Available {
+                digest: [0; 32],
+                byte_length: 42,
+            },
+            error_summary: None,
         });
-        let orphan: Vec<_> = app
-            .blocks
-            .iter()
-            .filter(|b| matches!(b, Block::Tool { id, .. } if id == "call-4"))
-            .collect();
-        assert_eq!(orphan.len(), 1);
-        assert!(
-            matches!(orphan[0], Block::Tool { name, state: ToolState::Failed { output_len: 42, error: Some(error) }, source: ToolSource::Event, .. } if name == "fetch.web" && error == "结束先到的错误摘要")
-        );
+        assert!(matches!(
+            &app.blocks[3],
+            Block::Tool {
+                state: ToolState::Ok { output_len: 42 },
+                source: ToolSource::Event,
+                ..
+            }
+        ));
+        assert_eq!(app.blocks.len(), 4);
     }
-
     #[test]
     fn terminal_event_closes_running_tools() {
         let mut app = test_app();
         start_tool(&mut app, "mutate.edit");
-        app.apply_turn_event(TurnEvent::TurnFailed {
-            reason: "provider failed".into(),
-        });
-
-        assert_failed_tool(&app, 0, "provider failed");
+        let event:TurnEvent=serde_json::from_value(serde_json::json!({"type":"turn_failed","turn":{"session_id":"11111111111141118111111111111111","turn_id":attempt().turn_id},"step":{"key":{"turn_id":attempt().turn_id,"ordinal":0},"attempts":[],"state":{"state":"closed","end":{"end":"stop","node":null,"cause":{"cause":"process_exit"}},"slots":[]}},"summary":{"outcome":"failed","notice":{"level":"error","text":"process exited"}}})).unwrap();
+        app.apply_turn_event(event);
+        assert_failed_tool(&app, 0, "turn ended before tool completion");
     }
 
     #[test]
@@ -1407,7 +1283,7 @@ mod tests {
         assert!(!app.blocks.iter().any(|block| matches!(
             block,
             Block::Status {
-                kind: StatusKind::Cancelled { .. },
+                kind: StatusKind::Summary { .. },
                 ..
             }
         )));
@@ -1517,39 +1393,24 @@ mod tests {
         assert!(app.dock_status().is_none());
 
         // LlmRetry A → 只在 WARN Dock，transcript 暂不显示。
-        app.apply_turn_event(TurnEvent::LlmRequestError {
-            provider: None,
-            model: "mock".into(),
-            attempt: 1,
-            max_attempts: 3,
-            error_kind: "network".into(),
-            retryable: true,
-            will_retry: true,
-            delay_ms: Some(100),
-            status_code: None,
-            message: "retry-a".into(),
-        });
+        app.apply_turn_event(retry("retry-a", true));
         let (kind, severity) = app.dock_status().expect("retry 应暂驻 Dock");
         assert!(matches!(kind, StatusKind::LlmRetry { message, .. } if message == "retry-a"));
         assert_eq!(severity, DockSeverity::Warn);
         assert!(!transcript_text(&app, 78).contains("retry-a"));
 
         // INFO 类状态直接进 transcript，Dock 不受影响。
-        app.apply_turn_event(TurnEvent::TurnCancelled {
-            reason: Some("info-i".into()),
-        });
+        app.push_status(StatusKind::Notice(vec!["info-i".into()]));
         assert!(transcript_text(&app, 78).contains("info-i"));
         assert!(matches!(
             app.dock_status(),
             Some((StatusKind::LlmRetry { .. }, _))
         ));
 
-        // CommitFailed B → turnover：A 释放到 transcript，B 留在 ERROR Dock。
-        app.apply_turn_event(TurnEvent::CommitFailed {
-            reason: "commit-b".into(),
-        });
+        // LlmFailed B → turnover：A 释放到 transcript，B 留在 ERROR Dock。
+        app.apply_turn_event(retry("commit-b", false));
         let (kind, severity) = app.dock_status().expect("失败应暂驻 Dock");
-        assert!(matches!(kind, StatusKind::CommitFailed { reason } if reason == "commit-b"));
+        assert!(matches!(kind, StatusKind::LlmFailed { message, .. } if message == "commit-b"));
         assert_eq!(severity, DockSeverity::Error);
         let text = transcript_text(&app, 78);
         assert!(text.contains("retry-a"), "释放的 warn 保持原时间位置");
@@ -1588,18 +1449,7 @@ mod tests {
     fn dock_turnover_replaces_same_severity_without_losing_the_old() {
         let mut app = test_app();
         for message in ["retry-a", "retry-b"] {
-            app.apply_turn_event(TurnEvent::LlmRequestError {
-                provider: None,
-                model: "mock".into(),
-                attempt: 1,
-                max_attempts: 3,
-                error_kind: "network".into(),
-                retryable: true,
-                will_retry: true,
-                delay_ms: Some(0),
-                status_code: None,
-                message: message.into(),
-            });
+            app.apply_turn_event(retry(message, true));
         }
         let (kind, severity) = app.dock_status().expect("最新 warn 暂驻 Dock");
         assert!(matches!(kind, StatusKind::LlmRetry { message, .. } if message == "retry-b"));
@@ -1614,21 +1464,8 @@ mod tests {
         );
 
         // ERROR A -> WARN B 同理。
-        app.apply_turn_event(TurnEvent::TurnFailed {
-            reason: "turn-failed-a".into(),
-        });
-        app.apply_turn_event(TurnEvent::LlmRequestError {
-            provider: None,
-            model: "mock".into(),
-            attempt: 2,
-            max_attempts: 3,
-            error_kind: "network".into(),
-            retryable: true,
-            will_retry: true,
-            delay_ms: Some(0),
-            status_code: None,
-            message: "retry-c".into(),
-        });
+        app.apply_turn_event(retry("turn-failed-a", false));
+        app.apply_turn_event(retry("retry-c", true));
         assert!(matches!(
             app.dock_status(),
             Some((StatusKind::LlmRetry { message, .. }, DockSeverity::Warn)) if message == "retry-c"
@@ -1644,9 +1481,7 @@ mod tests {
     fn dock_status_blocks_invisible_input_but_keeps_globals() {
         let mut app = test_app();
         app.input.set_text("draft");
-        app.apply_turn_event(TurnEvent::TurnFailed {
-            reason: "blocked".into(),
-        });
+        app.apply_turn_event(retry("blocked", false));
 
         // 普通字符、退格、提交都不改动不可见 InputBuffer。
         assert!(app.apply_action(KeyAction::Insert('x')).is_none());

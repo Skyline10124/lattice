@@ -19,6 +19,7 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
+tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]
 lattice-store = { workspace = true, features = ["test-fault-injection"] }
@@ -28,3 +29,4 @@ tempfile = { workspace = true }
 default = []
 # Shared git fixture helpers for downstream crate tests.
 test-utils = []
+test-support = ["dep:tempfile"]

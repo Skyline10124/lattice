@@ -3,23 +3,23 @@
 
 //! 本地客户端回执的显示文案；不调度请求、订阅或退出交接。
 
-use lattice_api::local::{Acceptance, CancelStatus, DetachReport, TurnId, TurnObservation};
+use lattice_api::local::{Acceptance, CancelStatus, DetachReport, TurnId};
 
 pub(crate) fn submission_notice(acceptance: &Acceptance) -> String {
-    let (id, message) = match acceptance {
-        Acceptance::Accepted { turn_id } => (*turn_id, "已确认接受"),
-        Acceptance::ConfirmationUnknown { turn_id } => {
-            (*turn_id, "接受确认未知；保留此 ID 查询，不分配新请求")
+    match acceptance {
+        Acceptance::Accepted { turn } => format!(
+            "已确认接受：session {} turn {}",
+            turn.session_id, turn.turn_id
+        ),
+        Acceptance::Existing { turn } => format!(
+            "找回既有请求：session {} turn {}；未重复执行",
+            turn.session_id, turn.turn_id
+        ),
+        Acceptance::ConfirmationUnknown { turn_id, .. } => {
+            format!("接受确认未知：{turn_id}；保留此 ID 查询，不分配新请求")
         }
-        Acceptance::Existing {
-            turn: TurnObservation::Pending(turn),
-        } => (turn.turn_id, "找回既有 pending；未重复接受"),
-        Acceptance::Existing {
-            turn: TurnObservation::Committed(turn),
-        } => (turn.turn_id, "找回既有结果；未重复执行"),
-        Acceptance::NeedsConfiguration => return "本地响应异常".into(),
-    };
-    format!("{message}：{id}")
+        Acceptance::NeedsConfiguration { .. } => "本地响应异常".into(),
+    }
 }
 
 pub(crate) fn not_submitted_notice(turn_id: TurnId) -> String {
@@ -41,7 +41,7 @@ pub(crate) fn detach_lines(report: DetachReport) -> Vec<String> {
     let mut lines = Vec::new();
     let identity = format!(
         "session {} turn {}",
-        report.session_id,
+        crate::app::session_label(report.session_id),
         report
             .turn_id
             .map_or_else(|| "未知".into(), |id| id.to_string())
@@ -81,21 +81,29 @@ pub(crate) fn detach_lines(report: DetachReport) -> Vec<String> {
         ));
     }
     if let Some(state) = report.state {
-        if let Some(TurnObservation::Committed(turn)) = &state.view.requested_turn {
+        if let Some(turn) = &state.view.selected_turn
+            && let Some(summary) = &turn.summary
+        {
             lines.push(format!(
-                "Turn {}：{:?}，commit {}，完成确认 {:?}",
-                turn.turn_id, turn.outcome, turn.commit_id, state.confirmation
+                "Turn {}：{:?} {}",
+                turn.turn_id,
+                summary.outcome,
+                summary
+                    .notice
+                    .as_ref()
+                    .map_or("", |notice| notice.text.as_str())
             ));
         }
         if let Some(error) = state.error {
-            let target = match &state.view.requested_turn {
-                Some(TurnObservation::Committed(turn)) => Some(turn.turn_id),
-                Some(TurnObservation::Pending(turn)) => Some(turn.turn_id),
-                None => report.turn_id,
-            };
+            let target = state
+                .view
+                .selected_turn
+                .as_ref()
+                .map(|turn| turn.turn_id)
+                .or(report.turn_id);
             lines.push(format!(
                 "观察诊断：session {} turn {}：{}",
-                report.session_id,
+                crate::app::session_label(report.session_id),
                 target.map_or_else(|| "未知".into(), |id| id.to_string()),
                 error.message
             ));

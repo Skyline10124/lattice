@@ -190,7 +190,7 @@ pub fn run_tui_mock(scenario: TuiMockScenario) -> Result<ExitStatus, TuiMockErro
 
     Ok(world
         .command(driver.binary_path())
-        .args(["tui", "--agent", AGENT, "--project-branch", "main"])
+        .args(["tui", "--agent", AGENT])
         .status()?)
 }
 

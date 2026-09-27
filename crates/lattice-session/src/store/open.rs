@@ -15,6 +15,41 @@ use std::{
     path::Path,
 };
 
+#[cfg(feature = "test-utils")]
+thread_local! {
+    static CREATION_SYNC_PROBE: std::cell::RefCell<Option<Box<dyn Fn() -> bool>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// 下游故障回归：仅在当前同步线程的创建父目录屏障前调用，true 注入失败。
+#[cfg(feature = "test-utils")]
+pub fn with_test_creation_sync_probe<T>(
+    probe: impl Fn() -> bool + 'static,
+    operation: impl FnOnce() -> T,
+) -> T {
+    struct Reset(Option<Box<dyn Fn() -> bool>>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            CREATION_SYNC_PROBE.with(|p| {
+                p.replace(self.0.take());
+            });
+        }
+    }
+    let _reset = Reset(CREATION_SYNC_PROBE.with(|p| p.replace(Some(Box::new(probe)))));
+    operation()
+}
+
+fn sync_creation_parent(parent: &Path) -> std::result::Result<(), lattice_store::StoreError> {
+    #[cfg(feature = "test-utils")]
+    if CREATION_SYNC_PROBE.with(|p| p.borrow().as_ref().is_some_and(|probe| probe())) {
+        return Err(lattice_store::StoreError::Durability {
+            operation: "fsync directory",
+            path: parent.to_path_buf(),
+            source: injected_io(),
+        });
+    }
+    fsync_dir(parent)
+}
+
 fn io(operation: &'static str, path: &Path, source: std::io::Error) -> StoreError {
     StoreError::Io {
         operation,
@@ -151,9 +186,11 @@ impl SessionStore {
         reject_legacy(&layout)?;
         if metadata(&target)?.is_some() {
             let store = Self::open(&layout)?;
-            fsync_dir(parent).map_err(|source| StoreError::CreationDurabilityUnknown {
-                path: target,
-                source,
+            sync_creation_parent(parent).map_err(|source| {
+                StoreError::CreationDurabilityUnknown {
+                    path: target,
+                    source,
+                }
             })?;
             return Ok(store);
         }
@@ -224,7 +261,7 @@ impl SessionStore {
                 },
             });
         }
-        fsync_dir(parent).map_err(|source| StoreError::CreationDurabilityUnknown {
+        sync_creation_parent(parent).map_err(|source| StoreError::CreationDurabilityUnknown {
             path: target,
             source,
         })?;

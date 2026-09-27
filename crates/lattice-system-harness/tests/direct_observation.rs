@@ -209,8 +209,7 @@ fn direct_observation_visibility_and_bounds() {
         tool_sequence(calls, "observation complete"),
     );
     let scenario_evidence = evidence(&world, &spec);
-    let send =
-        SessionSendDriver::new(&driver, &world, &spec, "dl-obs", "main").expect("create session");
+    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-obs");
     let execution = send.send("observe the workspace").expect("turn drives");
     let captures = server.captured_requests();
 
@@ -260,7 +259,7 @@ fn direct_observation_visibility_and_bounds() {
 
         // turn committed completed
         require(
-            outcome.has_committed_completed(),
+            outcome.has_completed(),
             format!("turn did not complete: {:?}", outcome.type_sequence()),
         )?;
         let binary_exit = outcome.exit_code.expect("exit code classification");
@@ -301,7 +300,7 @@ fn direct_observation_visibility_and_bounds() {
         // 3. private/ignored.txt -> reported as missing, with no hidden reason
         let r3 = tool_result_value(&captures[3]).expect("ignored-path error envelope");
         require(
-            r3.pointer("/error/code").and_then(Value::as_u64) == Some(2)
+            r3.pointer("/error/code").and_then(Value::as_i64) == Some(-32003)
                 && r3.pointer("/error/message").and_then(Value::as_str)
                     == Some("not_found: 'private/ignored.txt'")
                 && !r3.to_string().contains("HiddenReason"),
@@ -321,7 +320,7 @@ fn direct_observation_visibility_and_bounds() {
         // 5. denied/hidden.txt -> reported as missing, with no policy detail
         let r5 = tool_result_value(&captures[5]).expect("denied-path error envelope");
         require(
-            r5.pointer("/error/code").and_then(Value::as_u64) == Some(2)
+            r5.pointer("/error/code").and_then(Value::as_i64) == Some(-32003)
                 && r5.pointer("/error/message").and_then(Value::as_str)
                     == Some("not_found: 'denied/hidden.txt'")
                 && !r5.to_string().contains("HiddenReason"),
@@ -331,7 +330,7 @@ fn direct_observation_visibility_and_bounds() {
         // 6. .lattice/private.txt -> system exclusion, reported as missing
         let r6 = tool_result_value(&captures[6]).expect("system-path error envelope");
         require(
-            r6.pointer("/error/code").and_then(Value::as_u64) == Some(2)
+            r6.pointer("/error/code").and_then(Value::as_i64) == Some(-32003)
                 && r6.pointer("/error/message").and_then(Value::as_str)
                     == Some("not_found: '.lattice/private.txt'")
                 && !r6.to_string().contains("HiddenReason"),
@@ -341,7 +340,7 @@ fn direct_observation_visibility_and_bounds() {
         // 7. big.txt -> explicit bounded-read error
         let r7 = tool_result_value(&captures[7]).expect("read-limit error envelope");
         require(
-            r7.pointer("/error/code").and_then(Value::as_u64) == Some(23)
+            r7.pointer("/error/code").and_then(Value::as_i64) == Some(-32060)
                 && r7.pointer("/error/message").and_then(Value::as_str)
                     == Some(
                         "limit observation.max_single_read_bytes exceeded: requested 53, allowed 32",
@@ -432,7 +431,7 @@ fn direct_observation_visibility_and_bounds() {
                 format!("path must be relative: '{path}'")
             };
             require(
-                error.pointer("/error/code").and_then(Value::as_u64) == Some(1)
+                error.pointer("/error/code").and_then(Value::as_i64) == Some(-32002)
                     && error.pointer("/error/message").and_then(Value::as_str)
                         == Some(expected.as_str()),
                 format!("root-escape error mismatch for {path:?}: {error}"),

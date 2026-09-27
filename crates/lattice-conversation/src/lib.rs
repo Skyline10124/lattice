@@ -24,6 +24,7 @@ pub mod history;
 pub mod limits;
 pub mod message;
 pub mod outcome;
+pub mod result;
 pub mod tool_call;
 pub mod usage;
 
@@ -39,7 +40,8 @@ pub use lancet_protocol::{
 pub use attempt::{AttemptInterruption, AttemptOutcome, AttemptRejection, ModelAttemptRecord};
 pub use digest::{replay_state_digest, semantic_digest};
 pub use graph_types::HeadTranscript;
-pub use history::ConversationHistory;
+pub use history::{ConversationHistory, ConversationItem};
+pub use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability};
 pub use limits::{
     AttemptAssembly, LimitKind, MAX_ASSISTANT_CONTENT_BYTES, MAX_MODEL_ATTEMPT_BYTES,
     MAX_REASONING_CONTENT_BYTES, MAX_TOOL_CALL_ARGUMENTS_BYTES, MAX_TOOL_CALLS_PER_BATCH,
@@ -49,6 +51,11 @@ pub use message::{
     OpaqueProviderState, OpaqueReplayStateError, ProviderOrigin, ToolCallState,
 };
 pub use outcome::ToolResultOutcome;
+pub use result::{
+    CancelledReason, IndeterminateReason, MAX_TOOL_CONTENT_BYTES, NotExecutedReason,
+    RejectedReason, ResultPayload, StepContent, StoredToolResult, SuccessContent,
+    tool_content_digest,
+};
 pub use tool_call::{
     ArgumentsDigestMismatch, BoundToolCall, RawToolCall, ToolCallValidation, UnboundToolCall,
     validate_tool_call_batch,

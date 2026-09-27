@@ -20,6 +20,8 @@ use codec::Records;
 use lancet_protocol::{SessionId, TurnId};
 use lattice_store::{FlockGuard, StateLayout};
 pub use open::detect_legacy_stores;
+#[cfg(feature = "test-utils")]
+pub use open::with_test_creation_sync_probe;
 use std::{path::PathBuf, sync::Mutex};
 pub use types::*;
 
@@ -41,6 +43,33 @@ pub struct SessionExecutionLock {
 impl SessionExecutionLock {
     pub fn session_id(&self) -> SessionId {
         self.session_id
+    }
+}
+
+impl SessionStore {
+    /// 在提交健康锁内同步交接已经准备好的执行责任。
+    /// 回调只能交给现有监督任务，不得 I/O、await 或等待其他锁。
+    pub fn with_execution_start<T>(&self, start: impl FnOnce() -> T) -> Result<T> {
+        let _health = self.execution_health()?;
+        Ok(start())
+    }
+
+    fn execution_health(&self) -> Result<std::sync::MutexGuard<'_, bool>> {
+        #[cfg(test)]
+        if matches!(
+            self.write_disabled.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ) {
+            write_probe(WriteStage::HealthLockContended);
+        }
+        let disabled = self
+            .write_disabled
+            .lock()
+            .map_err(|_| StoreError::WriteDisabled)?;
+        if *disabled {
+            return Err(StoreError::WriteDisabled);
+        }
+        Ok(disabled)
     }
 }
 
@@ -83,21 +112,45 @@ fn commit_error(source: redb::CommitError) -> StoreError {
     StoreError::CommitFailed { kind, source }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FaultPoint {
+    #[cfg(test)]
     Probe,
+    #[cfg(test)]
     CreateCommit,
+    #[cfg(test)]
     BeforeRename,
+    #[cfg(test)]
     AfterRename,
+    #[cfg(test)]
     Cleanup,
-    CommitPoisoned,
-    CommitUnknownBefore,
-    CommitUnknownAfter,
+    Poisoned,
+    UnknownBefore,
+    UnknownAfter,
 }
-#[cfg(test)]
+/// 下游只在同步存储闭包中注入；不跨线程或 await 传播。
+#[cfg(feature = "test-utils")]
+#[derive(Clone, Copy)]
+pub enum TestCommitFault {
+    Poisoned,
+    UnknownBefore,
+    UnknownAfter,
+}
+#[cfg(feature = "test-utils")]
+pub fn with_test_commit_fault<T>(fault: TestCommitFault, operation: impl FnOnce() -> T) -> T {
+    with_fault(
+        match fault {
+            TestCommitFault::Poisoned => FaultPoint::Poisoned,
+            TestCommitFault::UnknownBefore => FaultPoint::UnknownBefore,
+            TestCommitFault::UnknownAfter => FaultPoint::UnknownAfter,
+        },
+        operation,
+    )
+}
+#[cfg(any(test, feature = "test-utils"))]
 thread_local! {static FAULT:std::cell::Cell<Option<FaultPoint>>=const {std::cell::Cell::new(None)};}
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 fn with_fault<T>(point: FaultPoint, f: impl FnOnce() -> T) -> T {
     struct Reset(Option<FaultPoint>);
     impl Drop for Reset {
@@ -108,7 +161,7 @@ fn with_fault<T>(point: FaultPoint, f: impl FnOnce() -> T) -> T {
     let _reset = Reset(FAULT.replace(Some(point)));
     f()
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 fn hit(point: FaultPoint) -> bool {
     FAULT.with(|f| {
         if f.get() == Some(point) {
@@ -119,7 +172,7 @@ fn hit(point: FaultPoint) -> bool {
         }
     })
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 fn injected_io() -> std::io::Error {
     std::io::Error::other("injected failure")
 }

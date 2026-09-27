@@ -8,9 +8,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use futures::{StreamExt, stream};
 use lattice_agent::{
-    LlmClient, ModelStepAttempt, ModelStepDriver, ModelStepRequest, ModelStepStatus,
+    LlmClient, ModelStepAttempt, ModelStepDriver, ModelStepRequest, ModelStopCause,
 };
-use lattice_conversation::{AttemptInterruption, LimitKind, MessageSemantic};
+use lattice_conversation::MessageSemantic;
 use lattice_llm::OpenAiSseParser;
 use lattice_llm::{ChatRequest, LlmStream};
 use serde_json::{Value, json};
@@ -108,8 +108,9 @@ async fn order_f13_interleaved_legal_arguments_complete() {
         arguments(&mut frames, a, &payload[8..]);
         finish(&mut frames);
         let (attempt, _) = run(frames).await;
-        assert_eq!(attempt.status, ModelStepStatus::Complete);
-        let message = attempt.message.unwrap();
+        let ModelStepAttempt::Complete { message, .. } = attempt else {
+            panic!("complete message");
+        };
         assert_eq!(message.parts.len(), 2);
         for part in message.parts {
             let MessageSemantic::ToolCall { call } = part.semantic else {
@@ -140,15 +141,13 @@ async fn order_f14_interleaved_limit_stops_at_crossing_fragment() {
         arguments(&mut frames, 9, &payload[1_048_577..]);
         finish(&mut frames);
         let (attempt, consumed) = run(frames).await;
-        assert_eq!(
-            attempt.status,
-            ModelStepStatus::Interrupted(AttemptInterruption::OutputLimitExceeded {
-                kind: LimitKind::ToolCallArguments,
-                limit: 1_048_576,
-                actual: 1_048_577,
-            })
-        );
-        assert!(attempt.message.is_none());
+        assert!(matches!(
+            attempt,
+            ModelStepAttempt::Stopped {
+                cause: ModelStopCause::OutputLimit,
+                ..
+            }
+        ));
         assert_eq!(consumed, crossing_frame);
     }
 }
@@ -177,14 +176,12 @@ async fn interleaved_arguments_share_total_with_text_and_reasoning() {
     arguments(&mut frames, 12, "}");
     finish(&mut frames);
     let (attempt, consumed) = run(frames).await;
-    assert_eq!(
-        attempt.status,
-        ModelStepStatus::Interrupted(AttemptInterruption::OutputLimitExceeded {
-            kind: LimitKind::ModelAttemptTotal,
-            limit: 16_777_216,
-            actual: 16_777_217,
-        })
-    );
-    assert!(attempt.message.is_none());
+    assert!(matches!(
+        attempt,
+        ModelStepAttempt::Stopped {
+            cause: ModelStopCause::OutputLimit,
+            ..
+        }
+    ));
     assert_eq!(consumed, crossing_frame);
 }

@@ -12,8 +12,7 @@
 //! It owns no session or invocation store, no UUID generation, no multi-step
 //! loop, no tool executor, no retry policy, and no Turn-commit authority:
 //! those moved to the composition layer. Opening failures are surfaced as
-//! [`ModelStepStatus::OpeningFailed`] with a retryable *hint*; whether to
-//! retry — and only before any stream event — is the caller's decision.
+//! [`ModelStepError::OpeningFailed`]；流内失败同样保留可重试性，由调用方按预算决定。
 //!
 //! Every provider Tool Call ID is preserved verbatim when the provider
 //! supplies one and is never synthesized. A conversation ToolResult closure
@@ -86,35 +85,35 @@ impl std::fmt::Display for ModelStepError {
 
 impl std::error::Error for ModelStepError {}
 
-/// Terminal classification of one provider attempt.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ModelStepStatus {
-    /// The attempt produced a complete valid message (zero-Tool, or
-    /// Tool-bearing and ready to enter binding).
-    Complete,
-    /// The provider finished but the complete output is invalid.
-    Rejected(AttemptRejection),
-    /// The attempt was interrupted before a complete valid message.
-    Interrupted(AttemptInterruption),
+/// 单次尝试的停止原因；是否重试由协调层及预算决定。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelStopCause {
+    ProviderError { retryable: bool },
+    Cancelled,
+    Deadline,
+    OutputLimit,
+    InvalidBatch,
 }
 
-/// The result of one model step attempt.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelDiagnostic {
+    pub provider_error: Option<String>,
+    pub invalid_batch: Option<lattice_conversation::ToolCallValidation>,
+}
+
+/// 完整回复必有消息；停止尝试的诊断绝不进入对话历史。
 #[derive(Debug, Clone, PartialEq)]
-pub struct ModelStepAttempt {
-    /// Terminal classification.
-    pub status: ModelStepStatus,
-    /// The complete valid message, present only for
-    /// [`ModelStepStatus::Complete`]. Tool calls are unbound: binding is the
-    /// coordinator's job.
-    pub message: Option<NativeMessage<UnboundToolCall>>,
-    /// Provider-reported usage; `None` is unknown, never zero. Retained on
-    /// non-complete attempts when the provider supplied it.
-    pub usage: Option<lattice_conversation::TokenUsage>,
-    /// The provider's finish reason, when the attempt reached `Done`.
-    pub finish_reason: Option<String>,
-    /// Bounded diagnostic for non-complete attempts (the provider's error
-    /// text). Diagnostics never enter the conversation.
-    pub diagnostic: Option<String>,
+pub enum ModelStepAttempt {
+    Complete {
+        message: NativeMessage<UnboundToolCall>,
+        usage: Option<lattice_conversation::TokenUsage>,
+        finish_reason: Option<String>,
+    },
+    Stopped {
+        cause: ModelStopCause,
+        usage: Option<lattice_conversation::TokenUsage>,
+        diagnostic: ModelDiagnostic,
+    },
 }
 
 /// Live per-attempt events for best-effort display streaming.
@@ -123,7 +122,7 @@ pub struct ModelStepAttempt {
 /// a mirror, never a second authority.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ModelStepEvent {
-    /// The first provider stream event arrived (the no-retry boundary).
+    /// 收到首个 provider 事件；不改变错误的重试属性。
     Opened {
         provider: Option<String>,
         model: String,
@@ -141,7 +140,7 @@ pub struct ModelStepRequest {
     /// Optional system prompt, prepended once.
     pub system_prompt: Option<String>,
     /// Assembled provider-neutral history of completed (bound) messages.
-    pub history: Vec<NativeMessage<lattice_conversation::BoundToolCall>>,
+    pub history: Vec<lattice_conversation::ConversationItem>,
     /// Model alias.
     pub model: String,
     /// Optional provider override.
@@ -178,12 +177,14 @@ impl ModelStepDriver {
     ) -> Result<ModelStepAttempt, ModelStepError> {
         let mut messages = Vec::with_capacity(request.history.len() + 1);
         if let Some(system) = &request.system_prompt {
-            messages.push(NativeMessage::<lattice_conversation::BoundToolCall>::new(
-                MessageRole::System,
-                None,
-                vec![MessagePart::semantic_only(MessageSemantic::Text {
-                    text: system.clone(),
-                })],
+            messages.push(lattice_conversation::ConversationItem::Message(
+                NativeMessage::new(
+                    MessageRole::System,
+                    None,
+                    vec![MessagePart::semantic_only(MessageSemantic::Text {
+                        text: system.clone(),
+                    })],
+                ),
             ));
         }
         messages.extend(request.history.iter().cloned());
@@ -198,6 +199,26 @@ impl ModelStepDriver {
             max_tokens: request.max_tokens,
             max_completion_tokens: None,
         };
+
+        // 预构造请求及任务调度也可能耗尽预算，首次打开不能依赖后续轮询补救。
+        if request
+            .cancel
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Acquire))
+        {
+            return Ok(interrupted(
+                AttemptInterruption::Cancelled,
+                None,
+                None,
+                None,
+            ));
+        }
+        if request
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Ok(interrupted(AttemptInterruption::Timeout, None, None, None));
+        }
 
         let opening = self.llm.stream_chat(chat);
         tokio::pin!(opening);
@@ -397,13 +418,20 @@ impl ModelStepDriver {
                     finish_reason = Some(reason);
                     break;
                 }
-                LlmEvent::Error { message } => {
-                    return Ok(interrupted(
-                        AttemptInterruption::StreamError,
+                LlmEvent::Error { failure } => {
+                    return Ok(ModelStepAttempt::Stopped {
+                        cause: ModelStopCause::ProviderError {
+                            retryable: failure.retryable,
+                        },
                         usage,
-                        finish_reason,
-                        Some(message),
-                    ));
+                        diagnostic: ModelDiagnostic {
+                            provider_error: Some(failure.message.chars().take(2048).collect()),
+                            invalid_batch: None,
+                        },
+                    });
+                }
+                LlmEvent::OutputLimit { interruption } => {
+                    return Ok(interrupted(interruption, usage, finish_reason, None));
                 }
                 LlmEvent::Citation { .. }
                 | LlmEvent::Signature { .. }
@@ -412,13 +440,14 @@ impl ModelStepDriver {
             }
         }
 
-        if let Some(rejection) = rejection {
-            return Ok(ModelStepAttempt {
-                status: ModelStepStatus::Rejected(rejection),
-                message: None,
+        if let Some(AttemptRejection::InvalidToolCall { validation }) = rejection {
+            return Ok(ModelStepAttempt::Stopped {
+                cause: ModelStopCause::InvalidBatch,
                 usage,
-                finish_reason,
-                diagnostic: None,
+                diagnostic: ModelDiagnostic {
+                    provider_error: None,
+                    invalid_batch: Some(validation),
+                },
             });
         }
 
@@ -430,12 +459,10 @@ impl ModelStepDriver {
                 Some("provider completed without an authoritative message".to_string()),
             ));
         };
-        Ok(ModelStepAttempt {
-            status: ModelStepStatus::Complete,
-            message: Some(message),
+        Ok(ModelStepAttempt::Complete {
+            message,
             usage,
             finish_reason,
-            diagnostic: None,
         })
     }
 }
@@ -443,15 +470,31 @@ impl ModelStepDriver {
 fn interrupted(
     interruption: AttemptInterruption,
     usage: Option<lattice_conversation::TokenUsage>,
-    finish_reason: Option<String>,
+    _finish_reason: Option<String>,
     diagnostic: Option<String>,
 ) -> ModelStepAttempt {
-    ModelStepAttempt {
-        status: ModelStepStatus::Interrupted(interruption),
-        message: None,
+    let cause = match interruption {
+        AttemptInterruption::Cancelled => ModelStopCause::Cancelled,
+        AttemptInterruption::Timeout => ModelStopCause::Deadline,
+        AttemptInterruption::OutputLimitExceeded { .. } => ModelStopCause::OutputLimit,
+        AttemptInterruption::StreamError | AttemptInterruption::ProcessInterrupted => {
+            ModelStopCause::ProviderError { retryable: false }
+        }
+    };
+    let provider_error = matches!(cause, ModelStopCause::ProviderError { .. }).then(|| {
+        diagnostic
+            .unwrap_or_else(|| "provider stream ended without completion".into())
+            .chars()
+            .take(2048)
+            .collect()
+    });
+    ModelStepAttempt::Stopped {
+        cause,
         usage,
-        finish_reason,
-        diagnostic,
+        diagnostic: ModelDiagnostic {
+            provider_error,
+            invalid_batch: None,
+        },
     }
 }
 
@@ -462,7 +505,7 @@ fn model_step_opening_error(error: Box<dyn std::error::Error + Send + Sync>) -> 
         return ModelStepError::Projection(projection.clone());
     }
     ModelStepError::OpeningFailed {
-        message: error.to_string(),
+        message: error.to_string().chars().take(2048).collect(),
         retryable: classify_retryable(error.as_ref()),
     }
 }
@@ -484,7 +527,7 @@ mod tests {
     use crate::testing::FakeStreamingLlmClient;
     use lattice_conversation::{
         InvocationId, MAX_ASSISTANT_CONTENT_BYTES, MAX_REASONING_CONTENT_BYTES,
-        MAX_TOOL_CALL_ARGUMENTS_BYTES, ToolCallAddress, ToolResultOutcome,
+        MAX_TOOL_CALL_ARGUMENTS_BYTES, ToolCallAddress,
     };
     use lattice_llm::LlmEvent;
 
@@ -585,6 +628,33 @@ mod tests {
         InvocationId::parse(&format!("00000000-0000-4000-8000-{index:012x}")).unwrap()
     }
 
+    #[tokio::test]
+    async fn stopped_request_never_opens_provider() {
+        for cancelled in [false, true] {
+            let client = Arc::new(
+                FakeStreamingLlmClient::builder()
+                    .push_events(vec![LlmEvent::Done {
+                        finish_reason: "stop".into(),
+                        usage: None,
+                    }])
+                    .build(),
+            );
+            let driver = ModelStepDriver::new(client.clone());
+            let mut request = request();
+            request.cancel = Some(Arc::new(AtomicBool::new(cancelled)));
+            request.deadline = Some(Instant::now());
+            let result = driver.run(&request, None).await.unwrap();
+            assert_eq!(
+                client.call_count(),
+                0,
+                "stopped request must not open provider"
+            );
+            assert!(
+                matches!(result, ModelStepAttempt::Stopped { cause, usage: None, .. } if cause == if cancelled { ModelStopCause::Cancelled } else { ModelStopCause::Deadline })
+            );
+        }
+    }
+
     #[test]
     fn zero_tool_attempt_completes_with_ordered_message() {
         let attempt = runtime()
@@ -608,8 +678,14 @@ mod tests {
                 .run(&request(), None),
             )
             .expect("attempt runs");
-        assert!(matches!(attempt.status, ModelStepStatus::Complete));
-        let message = attempt.message.expect("complete message");
+        let ModelStepAttempt::Complete {
+            message,
+            usage,
+            finish_reason,
+        } = attempt
+        else {
+            panic!("complete message");
+        };
         assert_eq!(message.parts.len(), 2);
         assert!(matches!(
             message.parts[0].semantic,
@@ -619,8 +695,8 @@ mod tests {
             message.parts[1].semantic,
             MessageSemantic::Text { .. }
         ));
-        assert_eq!(attempt.usage.as_ref().map(|u| u.total_tokens), Some(3));
-        assert_eq!(attempt.finish_reason.as_deref(), Some("stop"));
+        assert_eq!(usage.as_ref().map(|u| u.total_tokens), Some(3));
+        assert_eq!(finish_reason.as_deref(), Some("stop"));
     }
 
     #[test]
@@ -646,13 +722,14 @@ mod tests {
                 .run(&request(), None),
             )
             .expect("attempt runs");
-        assert!(matches!(attempt.status, ModelStepStatus::Complete));
-        let message = attempt.message.expect("complete message");
+        let ModelStepAttempt::Complete { message, usage, .. } = attempt else {
+            panic!("complete message");
+        };
         let calls: Vec<_> = message.tool_calls().collect();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].1.provider_call_id.as_deref(), Some("call_1"));
         // Usage is unknown, not zero.
-        assert_eq!(attempt.usage, None);
+        assert_eq!(usage, None);
     }
 
     #[test]
@@ -679,10 +756,16 @@ mod tests {
             )
             .expect("attempt runs");
         assert!(matches!(
-            attempt.status,
-            ModelStepStatus::Rejected(AttemptRejection::InvalidToolCall { .. })
+            attempt,
+            ModelStepAttempt::Stopped {
+                cause: ModelStopCause::InvalidBatch,
+                diagnostic: ModelDiagnostic {
+                    invalid_batch: Some(_),
+                    ..
+                },
+                ..
+            }
         ));
-        assert!(attempt.message.is_none());
     }
 
     #[test]
@@ -701,7 +784,7 @@ mod tests {
                 .run(&request(), None),
             )
             .expect("attempt runs");
-        assert!(matches!(exact.status, ModelStepStatus::Complete));
+        assert!(matches!(exact, ModelStepAttempt::Complete { .. }));
 
         let over = runtime()
             .block_on(
@@ -721,13 +804,12 @@ mod tests {
             )
             .expect("attempt runs");
         assert!(matches!(
-            over.status,
-            ModelStepStatus::Interrupted(AttemptInterruption::OutputLimitExceeded {
-                kind: lattice_conversation::LimitKind::AssistantContent,
+            over,
+            ModelStepAttempt::Stopped {
+                cause: ModelStopCause::OutputLimit,
                 ..
-            })
+            }
         ));
-        assert!(over.message.is_none());
     }
 
     #[test]
@@ -747,8 +829,11 @@ mod tests {
             )
             .expect("attempt runs");
         assert!(matches!(
-            over_reasoning.status,
-            ModelStepStatus::Interrupted(AttemptInterruption::OutputLimitExceeded { .. })
+            over_reasoning,
+            ModelStepAttempt::Stopped {
+                cause: ModelStopCause::OutputLimit,
+                ..
+            }
         ));
 
         let overhead = r#"{"a":""}"#.len();
@@ -776,8 +861,11 @@ mod tests {
             )
             .expect("attempt runs");
         assert!(matches!(
-            over_args.status,
-            ModelStepStatus::Interrupted(AttemptInterruption::OutputLimitExceeded { .. })
+            over_args,
+            ModelStepAttempt::Stopped {
+                cause: ModelStopCause::OutputLimit,
+                ..
+            }
         ));
     }
 
@@ -790,15 +878,21 @@ mod tests {
                         content: "par".to_string(),
                     },
                     LlmEvent::Error {
-                        message: "boom".to_string(),
+                        failure: lattice_llm::ProviderFailure {
+                            message: "boom".into(),
+                            retryable: false,
+                        },
                     },
                 ])
                 .run(&request(), None),
             )
             .expect("attempt runs");
         assert!(matches!(
-            error.status,
-            ModelStepStatus::Interrupted(AttemptInterruption::StreamError)
+            error,
+            ModelStepAttempt::Stopped {
+                cause: ModelStopCause::ProviderError { retryable: false },
+                ..
+            }
         ));
 
         let no_done = runtime()
@@ -810,8 +904,11 @@ mod tests {
             )
             .expect("attempt runs");
         assert!(matches!(
-            no_done.status,
-            ModelStepStatus::Interrupted(AttemptInterruption::StreamError)
+            no_done,
+            ModelStepAttempt::Stopped {
+                cause: ModelStopCause::ProviderError { retryable: false },
+                ..
+            }
         ));
     }
 
@@ -835,8 +932,11 @@ mod tests {
             )
             .expect("attempt runs");
         assert!(matches!(
-            cancelled.status,
-            ModelStepStatus::Interrupted(AttemptInterruption::Cancelled)
+            cancelled,
+            ModelStepAttempt::Stopped {
+                cause: ModelStopCause::Cancelled,
+                ..
+            }
         ));
 
         let past = Instant::now() - Duration::from_millis(1);
@@ -857,8 +957,11 @@ mod tests {
             )
             .expect("attempt runs");
         assert!(matches!(
-            timed_out.status,
-            ModelStepStatus::Interrupted(AttemptInterruption::Timeout)
+            timed_out,
+            ModelStepAttempt::Stopped {
+                cause: ModelStopCause::Deadline,
+                ..
+            }
         ));
     }
 
@@ -874,8 +977,11 @@ mod tests {
             ))
             .expect("attempt runs");
         assert!(matches!(
-            attempt.status,
-            ModelStepStatus::Interrupted(AttemptInterruption::Timeout)
+            attempt,
+            ModelStepAttempt::Stopped {
+                cause: ModelStopCause::Deadline,
+                ..
+            }
         ));
     }
 
@@ -901,20 +1007,26 @@ mod tests {
     #[test]
     fn history_tool_results_without_provider_ids_fail_typed() {
         let assistant = bound_assistant(None, invocation(0));
-        let tool = NativeMessage::new(
-            MessageRole::Tool,
-            None,
-            vec![MessagePart::semantic_only(MessageSemantic::ToolResult {
-                invocation_id: invocation(0),
-                name: "observe.workspace".to_string(),
-                outcome: ToolResultOutcome::Succeeded,
-                content: Some("{}".to_string()),
-            })],
-        );
+        let tool = lattice_conversation::StoredToolResult {
+            invocation_id: invocation(0),
+            name: "observe.workspace".into(),
+            payload: lattice_conversation::ResultPayload::Succeeded(
+                lattice_conversation::SuccessContent::Json {
+                    value: serde_json::json!({}),
+                    digest: lattice_conversation::tool_content_digest("{}"),
+                    byte_length: 2,
+                },
+            ),
+        };
         let result = runtime().block_on(
             ModelStepDriver::new(Arc::new(ProjectionCheckingClient)).run(
                 &ModelStepRequest {
-                    history: vec![assistant, tool],
+                    history: vec![lattice_conversation::ConversationItem::Step(
+                        lattice_conversation::StepContent {
+                            assistant,
+                            results: vec![tool],
+                        },
+                    )],
                     ..request()
                 },
                 None,
@@ -934,16 +1046,17 @@ mod tests {
     #[test]
     fn history_with_real_provider_ids_assembles_the_request() {
         let assistant = bound_assistant(Some("call_9"), invocation(0));
-        let tool = NativeMessage::new(
-            MessageRole::Tool,
-            None,
-            vec![MessagePart::semantic_only(MessageSemantic::ToolResult {
-                invocation_id: invocation(0),
-                name: "observe.workspace".to_string(),
-                outcome: ToolResultOutcome::Succeeded,
-                content: Some("{\"ok\":true}".to_string()),
-            })],
-        );
+        let tool = lattice_conversation::StoredToolResult {
+            invocation_id: invocation(0),
+            name: "observe.workspace".into(),
+            payload: lattice_conversation::ResultPayload::Succeeded(
+                lattice_conversation::SuccessContent::Json {
+                    value: serde_json::json!({"ok":true}),
+                    digest: lattice_conversation::tool_content_digest("{\"ok\":true}"),
+                    byte_length: 11,
+                },
+            ),
+        };
         let attempt = runtime()
             .block_on(
                 driver(vec![LlmEvent::Done {
@@ -952,14 +1065,19 @@ mod tests {
                 }])
                 .run(
                     &ModelStepRequest {
-                        history: vec![assistant, tool],
+                        history: vec![lattice_conversation::ConversationItem::Step(
+                            lattice_conversation::StepContent {
+                                assistant,
+                                results: vec![tool],
+                            },
+                        )],
                         ..request()
                     },
                     None,
                 ),
             )
             .expect("assembles");
-        assert!(matches!(attempt.status, ModelStepStatus::Complete));
+        assert!(matches!(attempt, ModelStepAttempt::Complete { .. }));
     }
 
     #[test]

@@ -887,9 +887,7 @@ impl LocalWorkspace {
 
     /// Synchronous core of [`LocalWorkspace::install_atomic`].
     ///
-    /// Shared by the async mutation path and the explicit Rewind restore
-    /// (#64), which runs on a blocking thread of its own. The pinned-dirfd
-    /// walk (#39) lives here, so both callers get it.
+    /// 异步变更在阻塞线程复用此入口，保留 pinned-dirfd 路径核验。
     pub fn install_atomic_sync(
         &self,
         path: &WorkspacePath,
@@ -1013,44 +1011,6 @@ impl LocalWorkspace {
             installed,
             durability_error,
         })
-    }
-
-    /// Remove a file.
-    pub async fn remove_file(&self, path: &WorkspacePath) -> Result<(), LocalWorkspaceError> {
-        path.require_file_path()?;
-        let ws = self.blocking_clone();
-        let path = path.clone();
-        tokio::task::spawn_blocking(move || ws.remove_file_sync(&path))
-            .await
-            .map_err(|e| LocalWorkspaceError::Io(std::io::Error::other(e)))?
-    }
-
-    /// Synchronous core of [`LocalWorkspace::remove_file`], shared with the
-    /// explicit Rewind restore (#64). The pinned-dirfd unlink (#39) lives
-    /// here, so both callers get it.
-    pub fn remove_file_sync(&self, path: &WorkspacePath) -> Result<(), LocalWorkspaceError> {
-        path.require_file_path()?;
-        let (full, facts) = self.resolve_secure(path, PathIntent::Delete)?;
-        if !facts.exists {
-            return Err(LocalWorkspaceError::NotFound {
-                normalized: path.as_str().to_string(),
-            });
-        }
-        if !matches!(facts.kind, Some(PathKind::File)) {
-            return Err(LocalWorkspaceError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "not a regular file",
-            )));
-        }
-        let (parent_rel, leaf) = split_parent_leaf(&self.root, &full)?;
-        let parent_fd = self.open_parent_dir_secure(&parent_rel, false)?;
-        // Unlink the single-component leaf through the pinned fd. A
-        // post-resolve file→dir swap fails (EISDIR/EPERM → Io); a
-        // swapped-in symlink leaf has its directory ENTRY removed —
-        // which lives inside the workspace — never its target.
-        rustix::fs::unlinkat(&parent_fd, leaf.as_os_str(), AtFlags::empty())
-            .map_err(|e| LocalWorkspaceError::Io(e.into()))?;
-        Ok(())
     }
 
     /// Flip a one-shot flag so the next install (`install_atomic` or
@@ -1921,16 +1881,6 @@ mod tests {
         assert!(dir.path().join("a/b/c.txt").exists());
     }
 
-    #[tokio::test]
-    async fn remove_file_deletes_target() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("rm.txt"), b"x").unwrap();
-        let ws = ws_at(&dir);
-        let path = WorkspacePath::parse("rm.txt").unwrap();
-        ws.remove_file(&path).await.unwrap();
-        assert!(!dir.path().join("rm.txt").exists());
-    }
-
     // ── TOCTOU-safe write path (pinned dirfd walk) ───────────────────────
 
     /// Names of `.lattice-tmp-*` residue directly beneath `dir`.
@@ -2046,7 +1996,7 @@ mod tests {
 
     // End-to-end guard: every mutation entry point already rejects a
     // symlinked parent at resolve_secure; pin that the outside target stays
-    // byte-identical afterward for all three write operations.
+    // byte-identical afterward for both write operations.
     #[tokio::test]
     async fn write_paths_reject_symlink_parent_and_leave_outside_untouched() {
         let dir = TempDir::new().unwrap();
@@ -2066,16 +2016,10 @@ mod tests {
             matches!(err, Err(LocalWorkspaceError::SymlinkRejected { .. })),
             "got {err:?}"
         );
-        let err = ws.remove_file(&path).await;
-        assert!(
-            matches!(err, Err(LocalWorkspaceError::SymlinkRejected { .. })),
-            "got {err:?}"
-        );
-
         assert_eq!(
             std::fs::read(outside.path().join("x")).unwrap(),
             b"keep",
-            "outside file must survive all three rejected mutations"
+            "outside file must survive both rejected mutations"
         );
         assert_eq!(
             std::fs::read_dir(outside.path()).unwrap().count(),

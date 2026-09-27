@@ -290,18 +290,17 @@ impl AnthropicSseParser {
                             ..
                         }) = self.blocks.get_mut(&index)
                         else {
-                            return vec![LlmEvent::Error {
-                                message:
-                                    "malformed Anthropic wire: argument delta has no Tool block"
-                                        .to_string(),
-                            }];
+                            return vec![LlmEvent::error(
+                                "malformed Anthropic wire: argument delta has no Tool block",
+                                false,
+                            )];
                         };
                         if !*argument_deltas_started {
                             if arguments.is_some() {
-                                return vec![LlmEvent::Error {
-                                    message: "malformed Anthropic wire: Tool input is present both at start and in deltas"
-                                        .to_string(),
-                                }];
+                                return vec![LlmEvent::error(
+                                    "malformed Anthropic wire: Tool input is present both at start and in deltas",
+                                    false,
+                                )];
                             }
                             *arguments = Some(String::new());
                             *argument_deltas_started = true;
@@ -373,13 +372,14 @@ impl AnthropicSseParser {
                 let usage = match wire_usage(ProviderOrigin::Anthropic, &usage_wire) {
                     Ok(usage) => usage,
                     Err(error) => {
-                        return vec![LlmEvent::Error {
-                            message: error.to_string(),
-                        }];
+                        return vec![LlmEvent::error(error.to_string(), false)];
                     }
                 };
                 let completion = super::projection_result_event(self.complete_message());
-                if matches!(completion, LlmEvent::Error { .. }) {
+                if matches!(
+                    completion,
+                    LlmEvent::Error { .. } | LlmEvent::OutputLimit { .. }
+                ) {
                     vec![completion]
                 } else {
                     vec![
@@ -392,14 +392,10 @@ impl AnthropicSseParser {
                 }
             }
             "message_stop" | "ping" => vec![],
-            "error" => {
-                let msg = root["error"]["message"]
-                    .as_str()
-                    .or_else(|| root["error"]["type"].as_str())
-                    .unwrap_or("Unknown Anthropic streaming error")
-                    .to_string();
-                vec![LlmEvent::Error { message: msg }]
-            }
+            "error" => vec![
+                super::extract_api_error(ProviderOrigin::Anthropic, &root)
+                    .unwrap_or_else(|| LlmEvent::error("unknown Anthropic streaming error", false)),
+            ],
             _ => vec![],
         }
     }
@@ -427,14 +423,14 @@ mod tests {
         }
     }
 
-    fn text(role: MessageRole, content: &str) -> NativeMessage<BoundToolCall> {
-        NativeMessage::new(
+    fn text(role: MessageRole, content: &str) -> lattice_conversation::ConversationItem {
+        lattice_conversation::ConversationItem::Message(NativeMessage::<BoundToolCall>::new(
             role,
             None,
             vec![MessagePart::semantic_only(MessageSemantic::Text {
-                text: content.to_string(),
+                text: content.into(),
             })],
-        )
+        ))
     }
 
     fn start_message(parser: &mut AnthropicSseParser) {
@@ -618,7 +614,7 @@ mod tests {
         );
         assert!(events.iter().any(|event| matches!(
             event,
-            LlmEvent::Error { message } if message.contains("both at start and in deltas")
+            LlmEvent::Error { failure } if !failure.retryable && failure.message.contains("both at start and in deltas")
         )));
     }
 

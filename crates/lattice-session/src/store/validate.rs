@@ -228,7 +228,7 @@ pub(super) fn terminal(binding: &InvocationBinding, t: &InvocationTerminal) -> R
             let bytes = lancet_protocol::canonical_json(value);
             if bytes.len() > MAX_TOOL_CONTENT_BYTES
                 || bytes.len() as u64 != *byte_length
-                || crate::pending::draft::tool_content_digest(&bytes) != *digest
+                || lattice_conversation::tool_content_digest(&bytes) != *digest
             {
                 return Err(invalid("terminal", "success content identity mismatch"));
             }
