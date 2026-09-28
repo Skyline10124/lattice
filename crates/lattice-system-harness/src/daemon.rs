@@ -162,7 +162,7 @@ impl ScenarioDaemon {
             }
             let args = match std::fs::read(entry.path().join("cmdline")) {
                 Ok(args) => args,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) if crate::driver::process_exited(&error) => continue,
                 Err(error) => return Err(error),
             };
             let fields: Vec<_> = args
