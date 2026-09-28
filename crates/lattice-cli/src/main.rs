@@ -61,7 +61,7 @@ enum Commands {
     },
     /// Run diagnostics.
     Doctor,
-    /// Inspect finalized CEP audit records.
+    /// Inspect CEP invocation records (registered, started and terminal).
     Audit(Box<audit::AuditCmd>),
     /// LANCET inspection and self-check subcommands.
     Lancet {
