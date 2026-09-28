@@ -1,7 +1,7 @@
 # LATTICE
 
 LATTICE 是用 Rust 编写、围绕会话组织的大模型运行时，提供命令行和终端交互界面。
-会话树与调用记录保存在全局 redb 会话库中，模型通过 LANCET 调用结构化工具，在宿主策略控制下读取和修改本地项目；文件变更另记入每项目的私有 Git 历史。
+模型通过 LANCET 调用结构化工具，在宿主策略控制下读取和修改本地项目。
 
 > **警告**：项目处于快速迭代阶段，接口、配置和实现仍会有破坏性调整，请勿用于生产环境。
 >
@@ -103,11 +103,11 @@ lattice tui "$SESSION_ID"
 
 ## 后台执行与重连
 
-LATTICE 提供本地后台执行与重连入口。Session 命令与 TUI 首次使用时按需启动同用户、同状态根的后台。一次已接受任务称为 Turn；接受后关闭终端，后台继续执行。
+Session 命令和 TUI 首次使用时会自动启动本地后台。请求被接受后，即使关闭终端，任务也会在后台继续执行。
 
-提交时记下 SessionId、TurnId、原输入和工作区，重连用这些身份找回任务。TUI 中空缓冲的 Ctrl+D 或 `/quit` 只退出；运行时 Esc/Ctrl+C 请求取消。重新打开 `lattice tui <session_id>` 读取已保存对话，界面内 `/reconnect` 重新连接。
+TUI 中，输入框为空时按 Ctrl+D 或输入 `/quit` 只退出界面；任务运行时按 Esc 或 Ctrl+C 请求取消。之后用 `lattice tui <session_id>` 重新打开会话，在界面内输入 `/reconnect` 重新连接。
 
-按保存的身份选择操作：
+命令行提交被接受后会输出会话 ID 与本次任务（Turn）的 ID。用它们查询、继续观察或取消任务，或查看、停止后台：
 
 ```text
 lattice session turn <turn_id>
@@ -117,21 +117,23 @@ lattice daemon status
 lattice daemon stop
 ```
 
-`<session_id>` 与 `<turn_id>` 替换为保存的身份。`session turn` 按 TurnId 显示结局和全部 Step 记录，进行中时还列出 ActiveStep。后台崩溃遗留的 Turn 会在该 Session 的下一次新提交或 `rewind` 前自动关闭：只依据已保存事实，不再请求模型或重跑工具。查询与重连保持只读；慢订阅通过新快照重同步，后台重启会丢失未保存的半截流式文字。
-
-接受回执未知时，保留原 TurnId、输入和工作区，按[操作指南](docs/development/validation-guide.md#后台与重连操作)查询或显式重发原请求；首次提交尚无 SessionId 也能找回。指南同时说明取消、退回分叉、后台停止与退出码。
+接受回执未知时如何找回、取消与崩溃遗留任务的处理、退出码等，见[后台与重连操作](docs/development/validation-guide.md#后台与重连操作)。
 
 ## 命令行入口
 
-Session 命令为 `send`、`rewind`、`list`、`log`、`turn` 和 `cancel`，顶层 `run` 是 `session send` 的别名。首次发送不带 `--session`，必须提供 `--agent`：
+首次发送不带 `--session`，必须用 `--agent` 指定 Agent：
 
 ```sh
 lattice session send "概括项目用途。" --agent reader
 ```
 
-后续发送使用 `--session <session_id>`。`rewind N` 把当前位置移到节点 N 本身，之后的提交从那里分叉，原分支保留，文件不回退；根节点为 `0`，退回根后发送仍须指定 agent。完整配方见[会话退回与分叉](docs/development/validation-guide.md#会话退回与分叉)。
+后续发送改用 `--session <session_id>`。顶层 `lattice run` 与 `session send` 相同。
 
-旧 `sessions.git` / `invocations.git` 不迁移；发现时拒绝打开并列出路径，由人决定删除或存档。不要把删除状态作为日常恢复步骤，处理边界见[开发状态诊断与重建](docs/development/tool-development.md#开发状态诊断与重建边界)。具体参数以各命令帮助为准：
+`lattice session rewind <session_id> <节点序号>` 把当前位置移到会话树中的某个节点，之后的提交从那里分叉继续；原分支保留，文件不回退。节点序号用 `lattice session log <session_id>` 查看，用法见[会话退回与分叉](docs/development/validation-guide.md#会话退回与分叉)。
+
+从旧版本升级时，旧的 `sessions.git` / `invocations.git` 状态不会迁移，打开时会被拒绝并列出路径，处理方式见[开发状态诊断与重建边界](docs/development/tool-development.md#开发状态诊断与重建边界)。
+
+具体参数以各命令帮助为准：
 
 ```sh
 # 会话管理

@@ -130,6 +130,11 @@ _Avoid_: NodeId, provider call ID, InvocationId
 见[登记与持久边界](../architecture/lancet.md#登记与持久边界)。
 _Avoid_: provider call ID, tool name, PlanKey
 
+**调用槽位**:
+模型回复中一个 ToolCall 在进行中 Step（ActiveStep）里的持久记录。登记事务为回复中的每个 ToolCall 建立一个槽位并分配 InvocationId，顺序与回复中的片段顺序一致。它先为该调用将来的 ToolResult 占住位置，故称槽位；之后依次写入 `Started`、终态、载荷与 Cell 证据。Step 只有在每个槽位都有终态后才写入会话树，所以树上不会出现有调用而无结果的节点。槽位归 `lattice-session`，与 Step 记录在同一个会话库事务里写入。
+见[调用槽位](../architecture/session.md#调用槽位)。
+_Avoid_: invocation ledger, `invocations.git`, BindingPlan, provider Tool Call ID as slot identity
+
 **持久对话内容**:
 已写入会话树的 UserMessage 与 Step 节点，供历史读取和后续模型请求使用。
 它与尚未保存的临时流式文字分开，见[用户读到的几种事实](../architecture/session.md#用户读到的几种事实)。

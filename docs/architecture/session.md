@@ -27,7 +27,7 @@ Session（会话）保存用户的一段持续对话，以 `SessionId` 标识，
 会话历史是一棵只追加的树，节点有两种：
 
 - **UserMessage**：一条用户输入。
-- **Step**：一次完整的模型回复，连同它发出的全部 `(ToolCall, ToolResult)` 对。没有工具调用的回复是 0 对的 Step。本例中，第一个 Step 是“请求读取文件”的回复及其读取结果，第二个 Step 是最终解释。
+- **Step**：一次完整的模型回复，连同它发出的全部 `(ToolCall, ToolResult)` 对。没有工具调用的回复是 0 对的 Step。
 
 每个 Session 建立时写入根节点 `0`：它没有内容、不属于任何 Turn，代表空对话，树始终只有这一个根。其他节点记录父节点和所属 `turn_id`。节点身份 NodeId 是每个 Session 内单调递增的 `u64`，写入节点时分配，第一条 UserMessage 为 `1`，父节点序号恒小于子节点；跨 Session 引用写作 `(SessionId, seq)`，用户可以直接输入序号。**当前位置**是 Session 记录中的一个 NodeId：新节点以当前位置为父，写入后当前位置前移到新节点。连续两个 UserMessage 是合法结构，例如取消了一个尚未产生 Step 的 Turn 后再发送。
 
@@ -323,20 +323,36 @@ stateDiagram-v2
 2. 把调用交给 LANCET 执行，取得执行结果、载荷与 Cell 证据。
 3. 提交该槽位的终态、载荷与证据。
 
-确定的 `Succeeded`、`Failed` 或 `Rejected` 终态允许继续下一调用；取消、未执行或效果不确定时停止后续分发，余下槽位写入类型化终态后关闭 Step。live 执行与自动关闭从有序槽位终态通过同一规则得出批次控制，崩溃时机不改变 Turn 结局。Rejected 之后是否继续请求模型、混合批次如何执行，由 [#220](https://github.com/Skyline10124/lattice/issues/220) 另行裁决，不改变槽位形态。
+每个槽位最终写入 `ToolResultOutcome` 的一种结局，以及按结局确定形状的载荷。判定只看两件事：调用有没有越过第 1 步的 `Started`，以及 LANCET 返回了什么。
 
-槽位保存 `ToolResultOutcome` 的一种，以及按 outcome 确定形状的载荷：
+| 结局 | 越过 Started | 判定依据 | 载荷 | 外部效果 |
+| --- | --- | --- | --- | --- |
+| NotExecuted | 否 | 协调层停止分发，调用从未交给 LANCET；原因见下文 | 类型化原因 | 保证没有 |
+| Succeeded | 是 | LANCET 正常返回 JSON | 完整 JSON value | 可能已发生 |
+| Rejected | 是 | 返回的 CepError 属于 Validation（参数或结果校验）、Permission（权限与准入）或 Guard（策略守卫）错误族 | 结构化 CepError（含 message；发给模型的内容保留有界 message，模型可据此修正参数） | 可能已发生 |
+| Failed | 是 | 返回的 CepError 属于其余错误族，且不是 `CallCancelled` 或 `OutcomeIndeterminate` | 同 Rejected | 可能已发生 |
+| Cancelled | 是 | 返回 `CallCancelled`，即分发后被取消 | 类型化原因 | 可能已发生 |
+| Indeterminate | 是 | 返回 `OutcomeIndeterminate`；或越过 Started 后在 Step 关闭前没有结果，由取消、停止或自动关闭补写 | 类型化原因 | 未知 |
 
-| outcome | 载荷 |
-| --- | --- |
-| Succeeded | 完整 JSON value |
-| Failed、Rejected | 结构化 CepError（含 message；发给模型的内容保留有界 message，模型可据此修正参数） |
-| Cancelled、NotExecuted、Indeterminate | 类型化原因 |
+错误族由 [`CepErrorCode::family`](../../crates/lancet-protocol/src/error.rs) 定义，映射由 [`prepare_terminal`](../../crates/lattice-session/src/store/close.rs) 执行。载荷还遵循：
 
 - Succeeded 载荷的规范 JSON 超过 65,536 字节时，不保存正文、不截断，保留完整摘要与长度，ToolResult 标明内容不可用（OutputTooLarge）；outcome 仍为 Succeeded。需要大输出的 Tool 通过自身接口提供分页、游标或摘要。
 - 发给模型的结果文字不存储，由 provider 投影从载荷派生。取消或关闭时补写的终态使用按终态类型固定的最小文案，#220 定下统一反馈后对齐。
 - result Cell 的形态不在本合同冻结。库中的值带格式版本，[#117](https://github.com/Skyline10124/lattice/issues/117) 定下后作为新增字段加入 Succeeded 载荷。
-- 取消或停止时，未完成的调用写入类型化终态，不伪造成功输出：已 Started 无结果的为 Indeterminate；未 Started 的为 NotExecuted，原因记为 `CancelledBeforeDispatch`（分发前收到取消）、`DeadlineBeforeDispatch`（分发前 Turn deadline 已到）、`PrecedingInvocationIndeterminate`（前序调用效果不确定）或 `BeforeDispatch`（其他停止，含自动关闭补写）。已有终态保持原值。其中 `BeforeDispatch`、`CancelledBeforeDispatch`、`PrecedingInvocationIndeterminate` 沿用现有 `NotExecutedReason`；`DeadlineBeforeDispatch` 是新增变体，用来把分发前的 Deadline 写成持久事实。分发后被取消的调用才写 `Cancelled`。
+
+Rejected 与 Failed 的区别是错误种类，不是有没有执行。拒绝可能发生在准入阶段，此时 Component 未运行（如 `CapabilityNotGranted`）；也可能发生在 Component 执行途中，某次宿主操作被拒（如 `PathContainment`、`ReplanRequired`，运行时优先采用宿主记录的拒绝），或返回结果未通过校验，这时此前的宿主操作可能已经生效。
+
+同一个取消按阶段落在不同结局：分发前收到取消为 NotExecuted；分发后被取消、LANCET 返回 `CallCancelled` 时才写 Cancelled；已越过 Started 却没有取得结果的为 Indeterminate。NotExecuted 的原因：
+
+- `CancelledBeforeDispatch`：分发前收到取消。
+- `DeadlineBeforeDispatch`：分发前 Turn deadline 已到。它是新增变体，用来把分发前的 Deadline 写成持久事实；其余三个沿用现有 `NotExecutedReason`。
+- `PrecedingInvocationIndeterminate`：同一回复中前序调用的效果不确定。
+- `BeforeDispatch`：其他停止，包括前序调用被取消后余下的调用和自动关闭补写。
+
+Succeeded、Failed 或 Rejected 允许继续下一调用；Cancelled、NotExecuted 或 Indeterminate 停止后续分发。取消或停止时，未完成的槽位按上述规则写入类型化终态后关闭 Step，不伪造成功输出，已有终态保持原值。live 执行与自动关闭从有序槽位终态通过同一规则得出批次控制，崩溃时机不改变 Turn 结局。Rejected 之后是否继续请求模型、混合批次如何执行，由 [#220](https://github.com/Skyline10124/lattice/issues/220) 另行裁决，不改变槽位形态。
+
+停止与收尾的写入：
+
 - live 执行决定停止分发时，余下槽位的终态与 Step 节点、`end`、Turn 关闭在同一事务写入，所以停止原因要么已随终态持久，要么尚未决定。
 - Tool 执行返回后，终态写入属于必要收尾，不受 Turn deadline 约束。写入失败按[事务失败](#事务与一致性)处理，后续调用不分发。
 

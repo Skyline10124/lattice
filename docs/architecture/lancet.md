@@ -160,7 +160,7 @@ flowchart TD
 | trap、资源耗尽、超时或取消 | 返回有界、脱敏的类型化错误，保留已经观察到的效果 |
 | 执行已返回，槽位终态写入失败 | 协调层停止后续分发，按会话合同的[事务失败](session.md#事务与一致性)处理；Turn 保持进行中，由之后的自动关闭处理，已 Started 无终态的槽位记为 Indeterminate |
 
-执行 outcome 为 `Succeeded`、`Failed`、`Rejected`、`Cancelled`、`NotExecuted` 或 `Indeterminate`，载荷形状按 outcome 确定。例如，调用已成功但返回内容超过保存上限时，仍保留 Succeeded，供模型使用的 ToolResult 标明内容不可用；具体规则由[会话合同](session.md#调用槽位)维护。
+执行 outcome 为 `Succeeded`、`Failed`、`Rejected`、`Cancelled`、`NotExecuted` 或 `Indeterminate`，载荷形状按 outcome 确定。从 LANCET 看，`NotExecuted` 表示调用从未交给 LANCET；其余五种来自 LANCET 的返回或返回缺失。`Rejected` 与 `Failed` 按错误族区分，不按是否执行区分：拒绝也可能发生在 Component 执行途中，此前的宿主操作可能已生效。各结局的判定依据、载荷与效果保证见[调用槽位](session.md#调用槽位)。
 观察事件用于显示调用进度。缺少 finished 事件时，读者通过槽位终态核验执行结果，不能从未配对显示块推断调用失败。快照与重连由[会话观察协议](session.md#观察与重连)维护。
 终态、载荷和完整 Cell 证据在一个会话库事务中写入槽位；这一范围不扩展为文件与会话库的跨库事务。
 
