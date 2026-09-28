@@ -169,11 +169,18 @@ impl OpenAiSseParser {
                 let delta = &choice["delta"];
                 let finish_reason = choice["finish_reason"].as_str();
 
-                if let Some(reasoning) = delta
-                    .get("reasoning_content")
-                    .and_then(|value| value.as_str())
-                    && !reasoning.is_empty()
-                {
+                // Some compatible servers name the text field `reasoning`;
+                // when both are present they carry the same segment, so
+                // `reasoning_content` wins and only one is counted.
+                let reasoning = ["reasoning_content", "reasoning"]
+                    .into_iter()
+                    .find_map(|key| {
+                        delta
+                            .get(key)
+                            .and_then(|value| value.as_str())
+                            .filter(|text| !text.is_empty())
+                    });
+                if let Some(reasoning) = reasoning {
                     if let Some(OpenAiPart::Reasoning(text)) = self.parts.last_mut() {
                         text.push_str(reasoning);
                     } else {
@@ -538,6 +545,32 @@ mod tests {
             ("reasoning_content", "再想"),
         ] {
             live.extend(delta(&mut parser, serde_json::json!({field: value})));
+        }
+        let live: Vec<_> = live
+            .iter()
+            .map(|e| match e {
+                LlmEvent::Reasoning { content } => format!("R:{content}"),
+                LlmEvent::Token { content } => format!("T:{content}"),
+                _ => panic!("unexpected event"),
+            })
+            .collect();
+        assert_eq!(live, ["R:想", "T:答", "R:再想"]);
+        assert_eq!(labels(completed(&finish(&mut parser))), live);
+    }
+
+    /// R-01/R-02: some compatible servers send text reasoning as
+    /// `delta.reasoning`; it must take the same ordered path, and a delta
+    /// carrying both fields counts the segment once (`reasoning_content` wins).
+    #[test]
+    fn reasoning_alias_keeps_order_and_is_not_double_counted() {
+        let mut parser = OpenAiSseParser::new();
+        let mut live = Vec::new();
+        for value in [
+            serde_json::json!({"reasoning": "想"}),
+            serde_json::json!({"content": "答"}),
+            serde_json::json!({"reasoning_content": "再想", "reasoning": "再想"}),
+        ] {
+            live.extend(delta(&mut parser, value));
         }
         let live: Vec<_> = live
             .iter()
