@@ -751,6 +751,10 @@ fn parse_process_stat(pid: u32, stat: &str) -> Result<Option<ProcessStat>, Clean
     let state = fields
         .next()
         .ok_or_else(|| invalid("process stat is missing state"))?;
+    // Z（僵尸）与 X（正在释放）都已退出；X 的进程组与会话字段报告为 -1，不能解析。
+    if matches!(state, "Z" | "X") {
+        return Ok(None);
+    }
     let _ppid = fields
         .next()
         .ok_or_else(|| invalid("process stat is missing parent pid"))?;
@@ -764,7 +768,7 @@ fn parse_process_stat(pid: u32, stat: &str) -> Result<Option<ProcessStat>, Clean
         .ok_or_else(|| invalid("process stat is missing session"))?
         .parse::<u32>()
         .map_err(|_| invalid("process stat has an invalid session"))?;
-    Ok((state != "Z").then_some(ProcessStat { pgid, session }))
+    Ok(Some(ProcessStat { pgid, session }))
 }
 
 #[cfg(test)]
@@ -1097,6 +1101,9 @@ mod tests {
             );
             assert_eq!(error.kind, std::io::ErrorKind::InvalidData);
         }
+        // 内核对正在释放的进程报告 pgrp/session 为 -1；它已退出，不是存活成员。
+        let dead = "4242 (sleep) X 0 -1 -1 0 -1 4227084";
+        assert_eq!(parse_process_stat(4242, dead).expect("dead stat"), None);
     }
 
     /// #105: a group signal aimed at the harness's own group would interrupt
