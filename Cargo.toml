@@ -123,6 +123,29 @@ tempfile = "3"
 [profile.bench]
 lto = true
 
+# Debug builds run Wasmtime's Cranelift unoptimized, so composing the embedded
+# Tool Components took ~6.8 s per process (release: ~0.55 s) and pushed Turn
+# tests past their 10 s handoff timeouts. Optimizing only the compiler crates
+# measured ~0.73 s while workspace crates stay fast to rebuild.
+[profile.dev.package.cranelift-codegen]
+opt-level = 3
+[profile.dev.package.cranelift-frontend]
+opt-level = 3
+[profile.dev.package.cranelift-bforest]
+opt-level = 3
+[profile.dev.package.cranelift-entity]
+opt-level = 3
+[profile.dev.package.cranelift-assembler-x64]
+opt-level = 3
+[profile.dev.package.regalloc2]
+opt-level = 3
+[profile.dev.package.wasmparser]
+opt-level = 3
+[profile.dev.package.wasmtime-environ]
+opt-level = 3
+[profile.dev.package.wasmtime-internal-cranelift]
+opt-level = 3
+
 # Keep workspace crates fast to rebuild while optimizing dependencies: an unoptimized
 # Wasmtime Component compiler added about six seconds before every mock response.
 [profile.tui-mock]
