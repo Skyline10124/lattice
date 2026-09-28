@@ -65,7 +65,7 @@ fn require(condition: bool, expected: String) -> Result<(), AssertError> {
     }
 }
 
-/// S2 的类型化缺库错误显式指出目标库；不回显无关 workspace。
+/// 类型化的缺库错误显式指出目标库；不回显无关 workspace。
 fn no_private_path(world: &ScenarioWorld, out: &CommandOutcome) -> Result<(), AssertError> {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);

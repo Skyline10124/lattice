@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! 原创建/重开身份风险改为首次接受原子建 Session；label/branch 已按 ADR 0006 删除。
+//! Session 在首次接受时原子创建；重开、只读查询、rewind 与同 Session 并发接受保持身份和历史不变。
 use lattice_api::local::*;
 use lattice_api::{RunTurnRequest, SessionApi, StateLayout, TurnAcceptance, TurnCompletion};
 use lattice_session::store::{PublicTurnOutcome, SessionStore};

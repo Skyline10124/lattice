@@ -1,6 +1,6 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
-//! S2 公开 Session 查询、树与输入拒绝；旧空会话/项目分支测试承接见 FAILURE_MODES.md。
+//! 公开 Session 查询、树形历史与输入拒绝。
 mod support;
 use lattice_system_harness::{SessionSendDriver, SseScript};
 use serde_json::Value;

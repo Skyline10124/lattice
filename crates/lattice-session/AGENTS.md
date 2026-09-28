@@ -8,7 +8,7 @@
 - `store/codec.rs`、`open.rs`、`validate.rs`：表与值版本、创建/严格打开、形状及跨记录一致性校验。
 - `store/write.rs`、`close.rs`：事务写入与纯关闭规划；`read.rs`：快照、树、Step 详情、分页和操作员投影。
 - `store/config.rs`、`hex_digest.rs`：冻结事实与摘要编码；`local.rs`：按 Session/Turn 等范围加载事务记录。
-- `store/tests.rs` 与 `store/FAILURE_MODES.md`：记录层风险及回归；`test_support.rs`：唯一 XDG 测试 guard。
+- `store/tests.rs`：记录层回归；`test_support.rs`：唯一 XDG 测试 guard。
 
 ## 上位文档
 
@@ -26,6 +26,6 @@
 
 ## 验证入口
 
-- `cargo test -p lattice-session`；隔离风险先登记 `store/FAILURE_MODES.md`，按任务要求观察红后实现。
+- `cargo test -p lattice-session`；须隔离测试的部分按[测试合同](../../docs/development/testing.md)先列出全部失败方式，再观察红后实现。
 - 格式、树、事务或读取变化关联 API/CLI；真实提交、退回分叉、旧库拒绝和崩溃关闭使用当前二进制的外部 harness，不以纯 planner 测试代替提交窗口。
 - `cargo xtask lancet-boundary` 检查 session 的 runtime-free 边界与生产测试 feature 隔离。
