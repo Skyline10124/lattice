@@ -136,7 +136,7 @@ redb 打开时对库文件取独占锁，另一进程打开得到 `DatabaseAlrea
 
 ### 职责分工
 
-`lattice-store` 为工作区历史库提供通用 Git 机制，不依赖其他项目 crate。它提供 canonical bytes、不可变 blob/tree/commit、窄对象读取、引用 CAS、多引用事务、保留 pin、Linux 锁、首次创建与同步屏障，也提供上文的 ProjectStoreKey 推导与操作锁。
+`lattice-store` 为工作区历史库提供通用 Git 机制，不依赖其他项目 crate。它提供 canonical bytes、不可变 blob/tree/commit、窄对象读取、单引用 CAS、Linux 锁、首次创建与同步屏障，也提供上文的 ProjectStoreKey 推导与操作锁。
 
 领域封装决定仓库文件名、引用命名空间、记录类型、schema、对象关系及迁移。内核不提供通用业务 `put/get`、原始 gix Repository getter、全存储注册表、可插拔后端或跨库事务。
 
@@ -216,9 +216,9 @@ flowchart LR
     R --> A["确认持久发布成功"]
 ```
 
-`cas_ref`、`delete_ref` 与 `ref_transaction` 在编辑引用前同步 pending objects，编辑后同步相关引用及目录。对象屏障失败时不继续发布新引用；引用前提不符返回 CasConflict。已写对象可以留为不可达对象。
+`cas_ref` 在编辑引用前同步 pending objects，编辑后同步该引用及相关目录。对象屏障失败时不继续发布新引用；引用前提不符返回 CasConflict。已写对象可以留为不可达对象。调用方在 `cas_ref` 成功后不再追加屏障。
 
-多引用事务用于同一仓库的一组带前提更新与删除。任一前提失败时整组不发布。需要一致观察整组状态的读者仍使用领域规定的锁或固定视图；普通多次 ref 读取不能因此视为原子快照。任意 I/O 故障后的可见状态须实际核验，不承诺跨仓库回滚。
+内核不提供多引用事务。任意 I/O 故障后的可见状态须实际核验，不承诺跨仓库回滚。
 
 ### 屏障覆盖
 
@@ -277,7 +277,7 @@ guard 是显式持有凭据，不由线程 ID 或任务 ID 推定所有权。最
 
 会话库中的 InvocationId 索引与调用变更日志是派生记录，与其权威记录在同一写事务中更新，不另设修复流程；两者不一致视为损坏。
 
-工作区历史库的已确认状态由领域 ref 或明确的 retention pin 保持可达，不能依赖 reflog 保留。通用 pin 位于 `refs/lattice/retained/<oid>`；领域负责决定何时 pin、何时可释放。释放 pin 不等于立即删除对象。当前不运行自动 GC、repack、maintenance、级联删除或历史改写，不为处理损坏自动重新初始化，不向外部 remote 添加 `refs/lattice/**` 推送规则。工作区历史不是整项目备份。
+工作区历史库的已确认状态由 `current` 引用的祖先链保持可达，不能依赖 reflog 保留；`current` 只前进，历史上每个提交都是它的祖先。当前不运行自动 GC、repack、maintenance、级联删除或历史改写，不为处理损坏自动重新初始化，不向外部 remote 添加 `refs/lattice/**` 推送规则。工作区历史不是整项目备份。
 
 会话库格式、Git 内核格式与各领域 schema 分别演化。格式、目录拓扑、事务序列或屏障变化须核验既有数据的打开、可达性及各领域写入接口，破坏性处理须先说明影响并获授权。历史性能与故障证据按[测试工程的证据保留要求](../development/testing.md#脱敏与完整性)处理。
 
@@ -309,4 +309,4 @@ SIGKILL 后重开证明相应进程崩溃场景；注入屏障失败验证调用
 
 承接来源为 ADR 0005 的项目寻址、通用内核、操作锁和位置能力部分，以及 [ADR 0006](../adr/0006-tree-session-and-global-redb-store.md) 的存储布局与会话库使用条件。机制接口与实现核对位置为 [`repo.rs`](../../crates/lattice-store/src/repo.rs)、[`durability.rs`](../../crates/lattice-store/src/durability.rs)、[`lock.rs`](../../crates/lattice-store/src/lock.rs)及 [`probe.rs`](../../crates/lattice-store/src/probe.rs)。
 
-局部指引中“操作锁可重入”的概括按当前显式 guard 语义展开，不迁入旧的自动嵌套假设。创建残留的完整报告、跨位置能力覆盖及多引用发布中断的诊断范围仍需核验。
+局部指引中“操作锁可重入”的概括按当前显式 guard 语义展开，不迁入旧的自动嵌套假设。创建残留的完整报告与跨位置能力覆盖仍需核验。
