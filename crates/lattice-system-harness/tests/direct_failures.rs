@@ -40,7 +40,31 @@ fn failed(outcome: &SendExecution, cause: &str) -> Result<(), AssertError> {
         format!("Stop cause {cause}: {end}"),
     )
 }
-fn provider_failure(name: &str, script: SseScript, partial: bool) {
+fn finish_failure(
+    mut evidence: lattice_system_harness::ScenarioEvidence,
+    send: &SessionSendDriver<'_>,
+    commands: &[(&str, &lattice_system_harness::CommandOutcome)],
+    captures: Vec<lattice_system_harness::CapturedRequest>,
+    result: Result<(), AssertError>,
+    test: &str,
+) {
+    for (label, command) in commands {
+        evidence.record_command(*label, command);
+    }
+    evidence.record_captures(captures);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        result.unwrap();
+        record_session(
+            send,
+            &mut evidence,
+            send.session_id().unwrap(),
+            serde_json::json!({"test":test,"commands":commands.iter().map(|(label, _)| *label).collect::<Vec<_>>()}),
+        );
+    }));
+    finish_recorded(evidence, result, "direct_failures", test);
+}
+
+fn provider_failure(name: &str, test: &str, script: SseScript, partial: bool) {
     let driver = driver();
     let (world, spec) = direct_world(
         name,
@@ -82,20 +106,23 @@ fn provider_failure(name: &str, script: SseScript, partial: bool) {
             "failed partial is not a paired Step node",
         )
     })();
-    finish_scenario(
+    finish_failure(
         evidence,
+        &send,
         &[
             ("provider failure", &outcome.command),
             ("turn detail", &detail),
         ],
         server.captured_requests(),
         result,
+        test,
     );
 }
 #[test]
 fn direct_failure_http_error_no_retry_commits_error() {
     provider_failure(
         "direct-failure-http-error",
+        "direct_failure_http_error_no_retry_commits_error",
         SseScript::HttpError {
             status: 500,
             body: r#"{"error":{"message":"provider down"}}"#.into(),
@@ -107,6 +134,7 @@ fn direct_failure_http_error_no_retry_commits_error() {
 fn direct_failure_disconnect_before_output_commits_error() {
     provider_failure(
         "direct-failure-disc-pre",
+        "direct_failure_disconnect_before_output_commits_error",
         SseScript::Disconnect {
             chunks_before_drop: vec![],
         },
@@ -117,6 +145,7 @@ fn direct_failure_disconnect_before_output_commits_error() {
 fn direct_failure_disconnect_after_partial_token_commits_error() {
     provider_failure(
         "direct-failure-disc-partial",
+        "direct_failure_disconnect_after_partial_token_commits_error",
         SseScript::Disconnect {
             chunks_before_drop: vec!["partial".into()],
         },
@@ -127,6 +156,7 @@ fn direct_failure_disconnect_after_partial_token_commits_error() {
 fn direct_failure_malformed_sse_commits_error() {
     provider_failure(
         "direct-failure-malformed",
+        "direct_failure_malformed_sse_commits_error",
         SseScript::IllegalResponse {
             body: "not json at all".into(),
         },
@@ -184,11 +214,13 @@ fn direct_failure_sigint_while_stalled_commits_cancelled() {
             "cancellation survives reload",
         )
     })();
-    finish_scenario(
+    finish_failure(
         evidence,
+        &send,
         &[("SIGINT", &outcome.command), ("reloaded Turn", &detail)],
         server.captured_requests(),
         result,
+        "direct_failure_sigint_while_stalled_commits_cancelled",
     );
 }
 #[test]
@@ -211,11 +243,13 @@ fn direct_failure_profile_deadline_while_stalled_commits_error() {
             "one stalled request, no text",
         )
     })();
-    finish_scenario(
+    finish_failure(
         evidence,
+        &send,
         &[("deadline", &outcome.command)],
         server.captured_requests(),
         result,
+        "direct_failure_profile_deadline_while_stalled_commits_error",
     );
 }
 #[test]
@@ -262,11 +296,13 @@ fn direct_failure_mutation_survives_provider_failure() {
             "tool round then failed request only",
         )
     })();
-    finish_scenario(
+    finish_failure(
         evidence,
+        &send,
         &[("mutation then failure", &outcome.command)],
         server.captured_requests(),
         result,
+        "direct_failure_mutation_survives_provider_failure",
     );
 }
 #[test]
@@ -323,8 +359,9 @@ fn direct_failure_session_lock_rejects_busy_then_accepts_explicit_retry() {
     let mut captures = baseline_server.captured_requests();
     captures.extend(gated.captured_requests());
     captures.extend(racer_server.captured_requests());
-    finish_scenario(
+    finish_failure(
         evidence,
+        &send,
         &[
             ("baseline", &baseline.command),
             ("Busy", &racer.command),
@@ -334,5 +371,6 @@ fn direct_failure_session_lock_rejects_busy_then_accepts_explicit_retry() {
         ],
         captures,
         result,
+        "direct_failure_session_lock_rejects_busy_then_accepts_explicit_retry",
     );
 }

@@ -106,3 +106,13 @@
 - F11：首次创建 rename 已发布但父目录同步失败，管理槽恢复必须保留创建未知原因，排空后严格核验原目标并重做父目录同步；成功才 Ready，重试同步失败仍不可用且不删除目标。使用仓库 test-utils 的父目录同步故障 seam，经真实 acquire(true) 触发，记录同步尝试；普通 commit 故障仍严格 open。
 - F12：Requesting/Started 写入或健康锁交接等待跨过 deadline/取消时，不再启动 provider/Tool。协调器最终 handoff gate 与模型首次打开前分别核验；Requesting 写 Stopped(Deadline/Cancelled)，Started 无 receipt 按合同补 Indeterminate，尾槽和 Step/Turn 同事务关闭，必要写入不受 deadline 限制。使用真实临时库和受控交接 gate，不从最终失败结局反推没有执行。
 - 本轮先登记、再新增回归：F10 在接受回执 gate 暂停期间查询 SID，用竞争 probe 的到达或 Busy 回执二选一同步，随后释放原回执；同时核原请求 Accepted、竞争请求 Busy、一次 provider 请求及持久关闭，避免修复后仍等待不应进入的 probe gate。
+
+## S6 外部调度与崩溃接缝
+
+- S6-01：rewind 成功事务之后提供显式 feature 屏障（含 current 与 Session），默认产物不包含。外部 harness 先写场景并观察屏障缺失红，再加接线；业务 rewind 语义不变。
+- S6-03/04：显式 test-crash-barriers 的异步调度 gate 只暂停关闭通知或特定订阅读游标，不持准入/观察/存储锁，不改变结果、不合成 provider/Tool。marker 记录真实命中与身份，有界等待释放文件；原 SIGSTOP/SIGKILL 屏障行为保持。默认产物不读这些环境变量。外部 harness 保护真实窗口，已有实现先于新增行为断言时以受控变异证明，不倒填 TDD。
+- S6-07：外部库级故障场景只在显式 test-crash-barriers 编译时将同步 auto_close 闭包交给既有 session 提交故障点，不在 API 伪造提交错误或直接改库。故障选择文件在自有调度目录，只消费一次；恢复调度停在排他租约取得后、旧库释放前，窗口内 acquire 仍拒绝，放行后走真实 drop/open。默认构建不启用 session 的 test-utils。
+- S6-11：非槽位提交点需要按步骤精确选择，否则总在首步暂停，无法证明多步累积关闭。显式 crash feature 的选择器接受 `name:step`，已有 `name` 与 `name:step:part` 保持原义；外部真实命中 marker 验证，不改变正常产物、事务或协议。
+- S6-14：外部历史故障 seam 只在显式 crash feature 的 `Backend::history_page` 编译，按读取 anchor 记录命中；只暂停/拒绝该内容读取，不持任何库锁、不修改 Turn 或库健康、不改等待预算。最终订阅与独立分页共用该读取边界，故障解除后必须读取原事实；默认产物不包含接线。
+- S6-19：历史页已成功解码、释放读事务后才暂停响应；旧anchor的页在新快照/完整历史之后返回，不能覆盖TUI新正文或撤销Completed。仅显式feature在Backend::history_page成功值边界提供history_ready_N/history_return_N调度marker，外部公开IPC+PTY先测缺失gate红；不修改页内容、等待阈值或LocalTurn业务，现有代次拒绝规则继续由局部测试保护。
+- S6-21：快照读事务已捕获 Running，Owner 在快照返回前持久关闭并退场；不能把旧 Running 与新的 owned=false 拼接后终止观察。复用 snapshot gate，先在真实临时会话库关闭并移除原 Owner，再放行读取，要求重读到最终 Step/summary；无 Owner 的崩溃 Running 仍只读且不自动关闭。来源为 S6 第5轮 TLS 场景出现 Requesting/NoOwner、CLI退出1的失败记录；局部重现确认前不将假设称为根因。

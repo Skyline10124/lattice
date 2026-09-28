@@ -95,9 +95,6 @@ pub(super) fn assistant<S: ToolCallState>(message: &NativeMessage<S>) -> Result<
                     arguments,
                 });
             }
-            MessageSemantic::ToolResult { .. } => {
-                return Err(invalid("reply", "assistant contains tool result"));
-            }
         }
         if let Some(replay) = &part.replay_state {
             total = total.saturating_add(replay.as_str().len());

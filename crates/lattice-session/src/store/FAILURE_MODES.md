@@ -97,3 +97,13 @@ W1-02/W1-08 的失败清单分别放在 llm/agent crate；W1-03/04 放在 lancet
 ## S2 第二次审查：创建持久性未知
 
 - Backend 的 CreationDurabilityUnknown 恢复必须重走既有 create 的严格核验与父目录同步分支；仅 open 不够。下游测试通过 test-utils 同步线程局部 probe 在真实父目录同步边界注入失败并计数，分别保护恢复同步成功后 Ready、再次失败仍不可用且目标 inode 不变。普通 open 不触发该 probe。
+
+## S5 旧实现删除与纯配置迁移
+
+- S5-01：迁移冻结配置时不能改变目录/配置摘要域、长度编码、字段 wire 或凭据键拒绝。保留并迁移原 config 的四个独立测试（目录边界、摘要自检、嵌套凭据、执行预算）；既有 F02/F10/重开覆盖持久读取。只迁移测试与错误类型，不增加旧符号不存在的断言。
+- S5-02：删除 Git 会话夹具不能删除 API 工作区真实 Git 初始化能力；唯一仍在使用的非 bare fixture 迁至 API 的 dev support，原 workspace_history_acceptance / release_e2e 验证真实调用链。
+- 旧 journal/CAS/候选修订/图拓扑测试随已批准删除的实现退出；新库原子性、关闭、绑定、快照与故障语义由 F01–F44 继续保护。红阶段与受控变异实际结果记录于本轮交接，不将既有测试迁移宣称为新功能 TDD。
+
+## S6 外部故障产物
+
+- S6-07：显式 test-crash-barriers 复用现有三个提交故障点的同步线程局部闭包，仅扩大该故障 seam 的 cfg，不启用 test-utils 的其他构造器。外部 harness 先观察缺故障红；普通构建无注入入口。原真实 redb/Immediate、健康锁与提交错误分类不变；不把注入当作硬件或 redb 内部故障资格化。

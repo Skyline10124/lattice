@@ -126,6 +126,84 @@ pub(crate) fn finish_scenario(
         .unwrap_or_else(|report| panic!("{report}"));
 }
 
+/// 复用 PTY 的公开读取采集，保留整棵树及其中每个 Turn 的操作员投影。
+pub(crate) fn record_session(
+    session: &lattice_system_harness::SessionSendDriver<'_>,
+    evidence: &mut ScenarioEvidence,
+    sid: &str,
+    parameters: Value,
+) {
+    let log = session
+        .run_command(&["--json", "session", "log", sid])
+        .unwrap();
+    evidence.record_command("--json session log", &log);
+    assert!(log.is_clean_exit(0));
+    let tree: Value = serde_json::from_slice(&log.stdout).unwrap();
+    for args in [
+        vec!["session", "log", sid],
+        vec!["--json", "session", "list"],
+        vec!["--json", "audit", "--tail"],
+        vec!["--json", "lancet", "status"],
+    ] {
+        let out = session.run_command(&args).unwrap();
+        evidence.record_command(args.join(" "), &out);
+        assert!(out.is_clean_exit(0));
+    }
+    for node in tree["nodes"].as_array().unwrap() {
+        if let Some(tid) = node["turn_start"]["turn_id"].as_str() {
+            for args in [
+                vec!["--json", "session", "turn", tid],
+                vec!["--json", "audit", "replay", "--session", sid, "--turn", tid],
+            ] {
+                let out = session.run_command(&args).unwrap();
+                evidence.record_command(args.join(" "), &out);
+                assert!(out.is_clean_exit(0));
+            }
+        }
+    }
+    evidence.record_json("state-summary", &tree).unwrap();
+    evidence.record_json("parameters", &parameters).unwrap();
+}
+
+/// 为选定 E2E 保留成功证据；失败仍走原报告与清理路径。
+pub(crate) fn finish_recorded(
+    mut evidence: ScenarioEvidence,
+    result: std::thread::Result<()>,
+    target: &str,
+    test: &str,
+) {
+    if let Err(error) = result {
+        let primary = error
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| error.downcast_ref::<&str>().map(|text| text.to_string()))
+            .unwrap_or_else(|| "scenario panicked with a non-text payload".into());
+        evidence.finish_report(Some(primary)).unwrap();
+        return;
+    }
+    let driver = driver();
+    let bytes = std::fs::read(driver.binary_path()).unwrap();
+    evidence.record_json("provenance", &serde_json::json!({
+        "binary":driver.binary_path(),
+        "binary_blake3":blake3::hash(&bytes).to_hex().to_string(),
+        "test_target":target,"test":test,
+        "reproduce":format!("CARGO_BUILD_JOBS=8 cargo build -p lattice-cli --bin lattice && CARGO_BUILD_JOBS=8 LATTICE_BIN=$(pwd)/target/debug/lattice cargo test -p lattice-system-harness --test {target} {test} -- --exact --nocapture")
+    })).unwrap();
+    let base = std::env::var_os("LATTICE_HARNESS_SUCCESS_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/harness-success")
+        });
+    std::fs::create_dir_all(&base).unwrap();
+    let run = tempfile::Builder::new()
+        .prefix(&format!("{test}-"))
+        .tempdir_in(base)
+        .unwrap()
+        .keep();
+    let target = run.join("evidence");
+    evidence.finish_success(&target).unwrap();
+    eprintln!("SUCCESS_EVIDENCE={}", target.display());
+}
 pub(crate) fn wire_fake_llm(
     world: &ScenarioWorld,
     agent: &str,

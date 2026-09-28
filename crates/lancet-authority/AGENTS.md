@@ -2,7 +2,7 @@
 
 ## 职责
 
-维护确定性、无 Tool I/O 的宿主策略：网络与工作区策略、观察预算、Guard L1、读取可见性和 System Path Exclusion。Cell 准入执行、Component 生命周期及 Host I/O 归 `lancet-runtime`，持久证据归 `lancet-audit`。
+维护确定性、无 Tool I/O 的宿主策略：网络与工作区策略、观察预算、Guard L1、读取可见性和 System Path Exclusion。Cell 准入执行、Component 生命周期及 Host I/O 归 `lancet-runtime`，持久证据归 `lattice-session` 的调用槽位。
 
 - `policy/network.rs`：I/O 前 URL 策略与唯一 `allowed_hosts` matcher；runtime 独立核验解析地址与连接。
 - `policy/observation.rs`：观察界限及共享 per-Turn 预算。

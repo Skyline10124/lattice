@@ -14,16 +14,10 @@
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use lattice_store::{
-    ProjectStoreKey, StateLayout, StoreError, StoreMeta, StoreRepo, StoreScope, xdg_state_root,
-};
+use lattice_store::{ProjectStoreKey, StateLayout, StoreError, StoreRepo, xdg_state_root};
 
-fn meta() -> StoreMeta {
-    StoreMeta {
-        store_kind: "session".into(),
-        store_schema_version: 1,
-        scope: StoreScope::Global,
-    }
+fn key() -> ProjectStoreKey {
+    ProjectStoreKey::from_canonical_path_bytes(b"/ws")
 }
 
 #[test]
@@ -118,11 +112,21 @@ fn xdg_state_root_fallback_order() {
 fn create_returns_after_releasing_create_lock_and_repo_lock_is_distinct() {
     let state = tempfile::tempdir().unwrap();
     let layout = StateLayout::in_state_root(state.path());
-    let repo = StoreRepo::create_global(&layout, "sessions.git", meta(), |_| Ok(())).unwrap();
+    let repo = StoreRepo::create_project(
+        &layout,
+        &key(),
+        "workspace-history.git",
+        "workspace-history",
+        1,
+        |_| Ok(()),
+    )
+    .unwrap();
 
     // 首次创建锁文件保留在父目录中，但 `StoreRepo::create*` 返回前已经释放。
     // 稳态仓库写操作使用仓库内另一条锁文件路径。
-    let create_lock = layout.lattice_root().join(".sessions.git.create.lock");
+    let create_lock = layout
+        .project_dir(&key())
+        .join(".workspace-history.git.create.lock");
     assert!(create_lock.exists());
 
     let write = repo.write_lock().expect("repository write lock");
@@ -143,13 +147,28 @@ fn create_returns_after_releasing_create_lock_and_repo_lock_is_distinct() {
 /// so the parent can SIGKILL us at a known pre-publication point.
 fn crash_child_loop(dir: &Path) {
     let layout = StateLayout::in_state_root(dir);
-    StoreRepo::create_global(&layout, "store-0.git", meta(), |_| Ok(())).unwrap();
-    StoreRepo::create_global(&layout, "store-1.git", meta(), |_| {
-        std::fs::write(dir.join("crash-child-ready"), b"ready").unwrap();
-        loop {
-            std::thread::park();
-        }
-    })
+    StoreRepo::create_project(
+        &layout,
+        &key(),
+        "store-0.git",
+        "workspace-history",
+        1,
+        |_| Ok(()),
+    )
+    .unwrap();
+    StoreRepo::create_project(
+        &layout,
+        &key(),
+        "store-1.git",
+        "workspace-history",
+        1,
+        |_| {
+            std::fs::write(dir.join("crash-child-ready"), b"ready").unwrap();
+            loop {
+                std::thread::park();
+            }
+        },
+    )
     .unwrap();
 }
 
@@ -199,18 +218,34 @@ fn sigkill_mid_create_leaves_only_absent_or_fully_valid_stores() {
     // Every target is either absent or a fully valid store; a stale sibling
     // temp never blocks recreation.
     let layout = StateLayout::in_state_root(dir.path());
-    StoreRepo::open_global(&layout, "store-0.git", "session", 1).unwrap();
+    StoreRepo::open_project(&layout, &key(), "store-0.git", "workspace-history", 1).unwrap();
     assert!(
-        !layout.lattice_root().join("store-1.git").exists(),
+        !layout.project_store(&key(), "store-1.git").exists(),
         "the store interrupted before publication must remain absent"
     );
 
     // A fresh create at the same state root still works (stale temps and
     // lock files from the dead child are reclaimed/harmless).
-    StoreRepo::create_global(&layout, "after-crash.git", meta(), |_| Ok(())).unwrap();
-    StoreRepo::open_global(&layout, "after-crash.git", "session", 1).unwrap();
+    StoreRepo::create_project(
+        &layout,
+        &key(),
+        "after-crash.git",
+        "workspace-history",
+        1,
+        |_| Ok(()),
+    )
+    .unwrap();
+    StoreRepo::open_project(&layout, &key(), "after-crash.git", "workspace-history", 1).unwrap();
 
     // And re-creating the target interrupted before publication works too.
-    StoreRepo::create_global(&layout, "store-1.git", meta(), |_| Ok(())).unwrap();
-    StoreRepo::open_global(&layout, "store-1.git", "session", 1).unwrap();
+    StoreRepo::create_project(
+        &layout,
+        &key(),
+        "store-1.git",
+        "workspace-history",
+        1,
+        |_| Ok(()),
+    )
+    .unwrap();
+    StoreRepo::open_project(&layout, &key(), "store-1.git", "workspace-history", 1).unwrap();
 }

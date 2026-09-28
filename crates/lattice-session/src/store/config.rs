@@ -1,27 +1,15 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Frozen request-acceptance facts published by `TurnStarted`
-//! (ADR 0005 §8, GitHub #144).
-//!
-//! Once `TurnStarted` is published the request is accepted: every later
-//! failure, cancellation, or crash closes the Turn rather than erasing it.
-//! The snapshot freezes the parent conversation tip, the user message, the
-//! explicit `TurnId`, the effective profile/policy/model/system/catalog
-//! selection, and the execution limits. It structurally contains no
-//! credentials: the frozen types have no credential-bearing fields, and the
-//! canonical snapshot JSON is additionally checked against a deterministic
-//! exact-key denylist so an operator putting a secret under a recognized
-//! credential key fails closed at publication, not at first leak.
+//! Turn 接受时冻结的非秘密执行配置、工具目录及协议上限。
+//! 摘要保持既有域分离与规范 JSON 编码，配置不保存凭据。
 
 use sha2::{Digest, Sha256};
 
-use lancet_protocol::{SessionId, TurnId};
-use lattice_conversation::{NativeMessage, UnboundToolCall};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{ProjectStoreKey, Result, SessionError};
+use super::{Result, invalid};
 
 /// Code-defined model-step safety limit; not profile-configurable
 /// (ADR 0005 §10).
@@ -88,16 +76,22 @@ impl TurnExecutionLimits {
     /// the attempt budget is between one and [`MAX_MODEL_ATTEMPTS`].
     pub fn validate(&self) -> Result<()> {
         if self.max_model_steps != MAX_MODEL_STEPS {
-            return Err(SessionError::InvalidInput(format!(
-                "max_model_steps must be the code-defined {MAX_MODEL_STEPS}, got {}",
-                self.max_model_steps
-            )));
+            return Err(invalid(
+                "limits",
+                &format!(
+                    "max_model_steps must be the code-defined {MAX_MODEL_STEPS}, got {}",
+                    self.max_model_steps
+                ),
+            ));
         }
         if !(1..=MAX_MODEL_ATTEMPTS).contains(&self.max_model_attempts) {
-            return Err(SessionError::InvalidInput(format!(
-                "max_model_attempts must be between 1 and {MAX_MODEL_ATTEMPTS}, got {}",
-                self.max_model_attempts
-            )));
+            return Err(invalid(
+                "limits",
+                &format!(
+                    "max_model_attempts must be between 1 and {MAX_MODEL_ATTEMPTS}, got {}",
+                    self.max_model_attempts
+                ),
+            ));
         }
         Ok(())
     }
@@ -139,24 +133,23 @@ impl ToolCatalogSnapshot {
     pub fn new(runtime_build_id: String, mut entries: Vec<ToolCatalogEntry>) -> Result<Self> {
         for entry in &entries {
             if entry.name.is_empty() {
-                return Err(SessionError::InvalidInput(
-                    "catalog entry name must not be empty".to_string(),
-                ));
+                return Err(invalid("catalog", "catalog entry name must not be empty"));
             }
         }
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         if entries.windows(2).any(|pair| pair[0].name == pair[1].name) {
-            return Err(SessionError::InvalidInput(
-                "catalog entry names must be unique".to_string(),
-            ));
+            return Err(invalid("catalog", "catalog entry names must be unique"));
         }
         let (canonical, digest) = Self::canonicalize(&runtime_build_id, &entries)?;
         if canonical.len() > MAX_CATALOG_SNAPSHOT_BYTES {
-            return Err(SessionError::InvalidInput(format!(
-                "catalog snapshot canonical bytes exceed the 1 MiB limit: {} > {}",
-                canonical.len(),
-                MAX_CATALOG_SNAPSHOT_BYTES
-            )));
+            return Err(invalid(
+                "catalog",
+                &format!(
+                    "catalog snapshot canonical bytes exceed the 1 MiB limit: {} > {}",
+                    canonical.len(),
+                    MAX_CATALOG_SNAPSHOT_BYTES
+                ),
+            ));
         }
         Ok(Self {
             runtime_build_id,
@@ -170,17 +163,16 @@ impl ToolCatalogSnapshot {
     pub fn validate(&self) -> Result<()> {
         let (canonical, digest) = Self::canonicalize(&self.runtime_build_id, &self.entries)?;
         if canonical.len() > MAX_CATALOG_SNAPSHOT_BYTES {
-            return Err(SessionError::JournalCorruption {
-                detail: format!(
-                    "catalog snapshot canonical bytes exceed the 1 MiB limit: {}",
-                    canonical.len()
-                ),
-            });
+            return Err(invalid(
+                "catalog",
+                "catalog snapshot exceeds the 1 MiB limit",
+            ));
         }
         if digest != self.digest {
-            return Err(SessionError::JournalCorruption {
-                detail: "catalog snapshot digest does not describe its entries".to_string(),
-            });
+            return Err(invalid(
+                "catalog",
+                "catalog snapshot digest does not describe its entries",
+            ));
         }
         Ok(())
     }
@@ -190,7 +182,7 @@ impl ToolCatalogSnapshot {
         entries: &[ToolCatalogEntry],
     ) -> Result<(String, [u8; 32])> {
         let value = serde_json::to_value((runtime_build_id, entries))
-            .map_err(|e| SessionError::InvalidInput(format!("serialize catalog: {e}")))?;
+            .map_err(|_| invalid("catalog", "cannot serialize catalog"))?;
         let canonical = lancet_protocol::canonical_json(&value);
         let digest = digest_with_domain(CATALOG_DOMAIN, canonical.as_bytes());
         Ok((canonical, digest))
@@ -200,7 +192,7 @@ impl ToolCatalogSnapshot {
 /// The complete frozen effective configuration one accepted Turn runs under.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrozenTurnConfig {
-    /// Agent display name for the TurnCommit projection.
+    /// Turn 的 Agent 名，用于日志及当前位置的 Agent 投影。
     pub agent_name: String,
     /// Effective model id.
     pub model: String,
@@ -225,7 +217,7 @@ impl FrozenTurnConfig {
     /// (profile, policy, model selection, system prompt, catalog, limits).
     pub fn digest(&self) -> Result<[u8; 32]> {
         let value = serde_json::to_value(self)
-            .map_err(|e| SessionError::InvalidInput(format!("serialize frozen config: {e}")))?;
+            .map_err(|_| invalid("config", "cannot serialize frozen config"))?;
         let canonical = lancet_protocol::canonical_json(&value);
         Ok(digest_with_domain(PROFILE_DOMAIN, canonical.as_bytes()))
     }
@@ -236,15 +228,12 @@ impl FrozenTurnConfig {
     /// string field is non-empty where required.
     pub fn validate(&self) -> Result<()> {
         if self.agent_name.is_empty() || self.model.is_empty() || self.provider.is_empty() {
-            return Err(SessionError::JournalCorruption {
-                detail: "frozen config agent/model/provider must not be empty".to_string(),
-            });
+            return Err(invalid(
+                "config",
+                "frozen config agent/model/provider must not be empty",
+            ));
         }
-        self.limits
-            .validate()
-            .map_err(|e| SessionError::JournalCorruption {
-                detail: format!("frozen limits invalid: {e}"),
-            })?;
+        self.limits.validate()?;
         self.catalog.validate()?;
         check_no_credential_keys(&self.profile_snapshot_json, "profile")?;
         check_no_credential_keys(&self.policy_snapshot_json, "policy")?;
@@ -255,13 +244,13 @@ impl FrozenTurnConfig {
 /// Parse canonical JSON and fail closed on any exact credential key at any
 /// object depth.
 fn check_no_credential_keys(json: &str, kind: &str) -> Result<Value> {
-    let value: Value = serde_json::from_str(json).map_err(|e| {
-        SessionError::InvalidInput(format!("{kind} snapshot is not valid JSON: {e}"))
-    })?;
+    let value: Value =
+        serde_json::from_str(json).map_err(|_| invalid("config", "snapshot is not valid JSON"))?;
     if let Some(key) = find_credential_key(&value) {
-        return Err(SessionError::InvalidInput(format!(
-            "{kind} snapshot carries credential key '{key}'"
-        )));
+        return Err(invalid(
+            "config",
+            &format!("{kind} snapshot carries credential key '{key}'"),
+        ));
     }
     Ok(value)
 }
@@ -282,85 +271,10 @@ fn find_credential_key(value: &Value) -> Option<&'static str> {
         _ => None,
     }
 }
-
-/// The complete facts published atomically by `TurnStarted`
-/// (ADR 0005 §8/§9).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TurnStartedFacts {
-    /// The accepted Turn's explicit identity; never derived late.
-    pub turn_id: TurnId,
-    /// Owning session identity.
-    pub session_id: SessionId,
-    /// Exact project-store address persisted by the owning Session. Recovery
-    /// uses this binding before it opens any project-keyed store.
-    pub project_store_key: ProjectStoreKey,
-    /// Conversation tip (commit oid hex) the Turn started from; `None` for
-    /// the first Turn of an empty branch. The final publication transaction
-    /// CASes the conversation head against exactly this value.
-    pub parent_conversation_tip: Option<String>,
-    /// The accepted user message. Role must be `User` with no ToolCall or
-    /// ToolResult parts and bounded text.
-    pub user_message: NativeMessage<UnboundToolCall>,
-    /// Frozen effective configuration.
-    pub config: FrozenTurnConfig,
-    /// Acceptance time (RFC 3339). The journal commit's own committer time
-    /// is derived from it; the store never invents a clock.
-    pub accepted_at: String,
-}
-
-impl TurnStartedFacts {
-    /// Validate the frozen facts before publication: identity presence,
-    /// parent tip shape, user message role/shape/size, and the whole frozen
-    /// configuration.
-    pub fn validate(&self) -> Result<()> {
-        if self.parent_conversation_tip.as_deref() == Some("") {
-            return Err(SessionError::InvalidInput(
-                "parent_conversation_tip must be an oid or absent".to_string(),
-            ));
-        }
-        if self.user_message.role != lattice_conversation::MessageRole::User {
-            return Err(SessionError::InvalidInput(
-                "user message role must be 'user'".to_string(),
-            ));
-        }
-        let mut text_bytes = 0usize;
-        for part in &self.user_message.parts {
-            use lattice_conversation::MessageSemantic;
-            match &part.semantic {
-                MessageSemantic::Text { text } => text_bytes += text.len(),
-                MessageSemantic::Reasoning { .. } => {
-                    return Err(SessionError::InvalidInput(
-                        "user message must not carry reasoning parts".to_string(),
-                    ));
-                }
-                MessageSemantic::ToolCall { .. } => {
-                    return Err(SessionError::InvalidInput(
-                        "user message must not carry tool call parts".to_string(),
-                    ));
-                }
-                MessageSemantic::ToolResult { .. } => {
-                    return Err(SessionError::InvalidInput(
-                        "user message must not carry tool result parts".to_string(),
-                    ));
-                }
-            }
-        }
-        if text_bytes > MAX_USER_INPUT_BYTES {
-            return Err(SessionError::InvalidInput(format!(
-                "user input exceeds the byte bound: {text_bytes} > {MAX_USER_INPUT_BYTES}"
-            )));
-        }
-        chrono::DateTime::parse_from_rfc3339(&self.accepted_at)
-            .map_err(|e| SessionError::InvalidInput(format!("accepted_at is not RFC 3339: {e}")))
-            .map(|_| ())?;
-        self.config.validate()
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::StoreError;
     use super::*;
-    use lattice_conversation::{MessagePart, MessageRole, MessageSemantic};
 
     fn catalog() -> ToolCatalogSnapshot {
         ToolCatalogSnapshot::new(
@@ -396,16 +310,6 @@ mod tests {
         }
     }
 
-    fn user_message(text: &str) -> NativeMessage<UnboundToolCall> {
-        NativeMessage::new(
-            MessageRole::User,
-            None,
-            vec![MessagePart::semantic_only(MessageSemantic::Text {
-                text: text.to_string(),
-            })],
-        )
-    }
-
     #[test]
     fn catalog_limit_is_exact_boundary_legal_plus_one_rejected() {
         let build = |description_len: usize| {
@@ -433,7 +337,7 @@ mod tests {
         let boundary = build(lo).expect("largest fitting snapshot");
         boundary.validate().expect("exact boundary validates");
         assert!(
-            matches!(build(lo + 1), Err(SessionError::InvalidInput { .. })),
+            matches!(build(lo + 1), Err(StoreError::InvalidInput { .. })),
             "plus one byte must fail closed"
         );
     }
@@ -446,7 +350,7 @@ mod tests {
         tampered.entries[0].description = "changed".to_string();
         assert!(matches!(
             tampered.validate(),
-            Err(SessionError::JournalCorruption { .. })
+            Err(StoreError::InvalidInput { .. })
         ));
     }
 
@@ -456,13 +360,13 @@ mod tests {
         bad.profile_snapshot_json = "{\"lancet\":{\"net\":{\"api_key\":\"sk-1\"}}}".to_string();
         assert!(matches!(
             bad.validate(),
-            Err(SessionError::InvalidInput { .. })
+            Err(StoreError::InvalidInput { .. })
         ));
         let mut nested = config();
         nested.policy_snapshot_json = "{\"a\":[{\"PASSWORD\":\"x\"}]}".to_string();
         assert!(matches!(
             nested.validate(),
-            Err(SessionError::InvalidInput { .. })
+            Err(StoreError::InvalidInput { .. })
         ));
         config().validate().expect("clean config passes");
     }
@@ -479,59 +383,5 @@ mod tests {
         assert!(limits.validate().is_err());
         limits.max_model_attempts = MAX_MODEL_ATTEMPTS;
         limits.validate().expect("last valid attempt budget");
-    }
-
-    #[test]
-    fn turn_started_facts_validate_user_message_shape() {
-        let facts = |message: NativeMessage<UnboundToolCall>| TurnStartedFacts {
-            turn_id: TurnId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").unwrap(),
-            session_id: SessionId::parse("3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c").unwrap(),
-            project_store_key: ProjectStoreKey::from_canonical_path_bytes(b"/test/project"),
-            parent_conversation_tip: None,
-            user_message: message,
-            config: config(),
-            accepted_at: "2026-08-16T00:00:00Z".to_string(),
-        };
-        facts(user_message("hello")).validate().expect("valid");
-
-        let assistant = NativeMessage::new(
-            MessageRole::Assistant,
-            None,
-            vec![MessagePart::semantic_only(MessageSemantic::Text {
-                text: "hi".to_string(),
-            })],
-        );
-        assert!(facts(assistant).validate().is_err());
-
-        let with_call = NativeMessage::new(
-            MessageRole::User,
-            None,
-            vec![MessagePart::semantic_only(MessageSemantic::ToolCall {
-                call: UnboundToolCall {
-                    provider_call_id: None,
-                    name: "t".to_string(),
-                    arguments: serde_json::json!({}),
-                },
-            })],
-        );
-        assert!(facts(with_call).validate().is_err());
-    }
-
-    #[test]
-    fn turn_started_facts_reject_oversize_user_input() {
-        let mut facts = TurnStartedFacts {
-            turn_id: TurnId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").unwrap(),
-            session_id: SessionId::parse("3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c").unwrap(),
-            project_store_key: ProjectStoreKey::from_canonical_path_bytes(b"/test/project"),
-            parent_conversation_tip: None,
-            user_message: user_message(&"x".repeat(MAX_USER_INPUT_BYTES)),
-            config: config(),
-            accepted_at: "2026-08-16T00:00:00Z".to_string(),
-        };
-        facts
-            .validate()
-            .expect("exact boundary user input is legal");
-        facts.user_message = user_message(&"x".repeat(MAX_USER_INPUT_BYTES + 1));
-        assert!(facts.validate().is_err());
     }
 }

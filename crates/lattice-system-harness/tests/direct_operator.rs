@@ -11,7 +11,7 @@ use support::*;
 fn network() -> &'static str {
     "\n[lancet.network]\nallow_localhost = true\nallowed_hosts = [\"localhost\"]\nmax_web_response_bytes = 1024\n\n[lancet.capabilities]\nmax_boundary = \"ex\"\n"
 }
-fn operator_case(name: &str, methods: &[&str]) {
+fn operator_case(name: &str, test: &str, methods: &[&str]) {
     let driver = driver();
     let web = FixtureHttpServer::start(HttpFixture::plain("operator fixture")).unwrap();
     let (world, spec) = direct_world(
@@ -146,28 +146,37 @@ fn operator_case(name: &str, methods: &[&str]) {
             methods.iter().filter(|m| **m == methods[0]).count()
         );
         assert_eq!(server.captured_requests().len(), 2);
+        record_session(
+            &send,
+            &mut evidence,
+            sid,
+            serde_json::json!({"methods":methods,"prompt":"operator matrix","final_reply":"complete"}),
+        );
     }));
     evidence.record_captures(server.captured_requests());
-    evidence
-        .finish_report(result.err().map(|p| {
-            p.downcast_ref::<String>()
-                .cloned()
-                .unwrap_or_else(|| "operator assertion failed".into())
-        }))
-        .unwrap();
+    finish_recorded(evidence, result, "direct_operator", test);
 }
 #[test]
 fn direct_operator_fetch_terminal_contract() {
-    operator_case("direct-operator-fetch", &["fetch.web"]);
+    operator_case(
+        "direct-operator-fetch",
+        "direct_operator_fetch_terminal_contract",
+        &["fetch.web"],
+    );
 }
 #[test]
 fn direct_operator_component_terminal_contract() {
-    operator_case("direct-operator-component", &["session.todo_write"]);
+    operator_case(
+        "direct-operator-component",
+        "direct_operator_component_terminal_contract",
+        &["session.todo_write"],
+    );
 }
 #[test]
 fn direct_operator_mixed_query_tail_replay_and_status() {
     operator_case(
         "direct-operator-cross",
+        "direct_operator_mixed_query_tail_replay_and_status",
         &["fetch.web", "session.todo_write"],
     );
 }
@@ -175,6 +184,7 @@ fn direct_operator_mixed_query_tail_replay_and_status() {
 fn direct_operator_status_bounds_twenty_newest_invocations() {
     operator_case(
         "direct-operator-status-bound",
+        "direct_operator_status_bounds_twenty_newest_invocations",
         &["fetch.web", "session.todo_write"].repeat(11),
     );
 }
@@ -183,7 +193,7 @@ fn direct_operator_unknown_typed_session_is_empty() {
     let driver = driver();
     let (world, spec) = direct_world("direct-operator-unknown-sess", "operator", "[]", "");
     let server = wire_fake_llm(&world, "operator", SseScript::plain("seed"));
-    let evidence = evidence(&world, &spec);
+    let mut evidence = evidence(&world, &spec);
     let send = SessionSendDriver::new(&driver, &world, &spec, "operator");
     let seed = send.send("seed").unwrap();
     let query = cli(
@@ -224,15 +234,28 @@ fn direct_operator_unknown_typed_session_is_empty() {
             "zero-call Turn replay is valid",
         )
     })();
-    finish_scenario(
+    for (label, out) in [
+        ("seed", &seed.command),
+        ("unknown session", &query),
+        ("zero replay", &zero),
+    ] {
+        evidence.record_command(label, out);
+    }
+    evidence.record_captures(server.captured_requests());
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        result.unwrap();
+        record_session(
+            &send,
+            &mut evidence,
+            send.session_id().unwrap(),
+            serde_json::json!({"prompt":"seed","unknown_session":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","zero_call_replay":true}),
+        );
+    }));
+    finish_recorded(
         evidence,
-        &[
-            ("seed", &seed.command),
-            ("unknown session", &query),
-            ("zero replay", &zero),
-        ],
-        server.captured_requests(),
         result,
+        "direct_operator",
+        "direct_operator_unknown_typed_session_is_empty",
     );
 }
 #[test]
@@ -240,7 +263,7 @@ fn direct_operator_unknown_typed_turn_fails() {
     let driver = driver();
     let (world, spec) = direct_world("direct-operator-unknown-turn", "operator", "[]", "");
     let server = wire_fake_llm(&world, "operator", SseScript::plain("seed"));
-    let evidence = evidence(&world, &spec);
+    let mut evidence = evidence(&world, &spec);
     let send = SessionSendDriver::new(&driver, &world, &spec, "operator");
     let seed = send.send("seed").unwrap();
     let replay = cli(
@@ -269,10 +292,22 @@ fn direct_operator_unknown_typed_turn_fails() {
             "error does not echo requested ID",
         )
     })();
-    finish_scenario(
+    evidence.record_command("seed", &seed.command);
+    evidence.record_command("unknown turn", &replay);
+    evidence.record_captures(server.captured_requests());
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        result.unwrap();
+        record_session(
+            &send,
+            &mut evidence,
+            send.session_id().unwrap(),
+            serde_json::json!({"prompt":"seed","unknown_turn":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}),
+        );
+    }));
+    finish_recorded(
         evidence,
-        &[("seed", &seed.command), ("unknown turn", &replay)],
-        server.captured_requests(),
         result,
+        "direct_operator",
+        "direct_operator_unknown_typed_turn_fails",
     );
 }

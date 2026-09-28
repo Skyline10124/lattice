@@ -11,7 +11,7 @@
 //! - semantic and replay digests ([`digest`]);
 //! - per-attempt usage and interruption/rejection records ([`attempt`]);
 //! - provider origin and bounded part-local opaque replay state;
-//! - the typed durable branch transcript ([`HeadTranscript`]).
+//! - 结构化 Step 与其调用结果，以及 provider-neutral 对话历史。
 //!
 //! It depends only on the data-only `lancet-protocol` and neutral data
 //! dependencies. It owns no filesystem, store, lock, runtime, provider HTTP
@@ -19,7 +19,6 @@
 
 pub mod attempt;
 pub mod digest;
-pub mod graph_types;
 pub mod history;
 pub mod limits;
 pub mod message;
@@ -39,8 +38,7 @@ pub use lancet_protocol::{
 
 pub use attempt::{AttemptInterruption, AttemptOutcome, AttemptRejection, ModelAttemptRecord};
 pub use digest::{replay_state_digest, semantic_digest};
-pub use graph_types::HeadTranscript;
-pub use history::{ConversationHistory, ConversationItem};
+pub use history::ConversationItem;
 pub use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability};
 pub use limits::{
     AttemptAssembly, LimitKind, MAX_ASSISTANT_CONTENT_BYTES, MAX_MODEL_ATTEMPT_BYTES,

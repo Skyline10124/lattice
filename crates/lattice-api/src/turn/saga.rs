@@ -587,6 +587,16 @@ async fn publish_closed(
         session_id,
         turn_id,
     };
+    #[cfg(feature = "test-crash-barriers")]
+    if detail.summary.is_some() {
+        super::crash_barrier::schedule(
+            "turn_closed",
+            serde_json::json!({
+                "session_id":session_id,"turn_id":turn_id,"step":step.key.ordinal
+            }),
+        )
+        .await;
+    }
     observer.emit(match &detail.summary {
         None => TurnEvent::StepClosed { step },
         Some(summary) => match summary.outcome {

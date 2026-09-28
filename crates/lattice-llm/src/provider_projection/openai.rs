@@ -195,12 +195,6 @@ pub fn native_to_wire<S: ToolCallState>(
                 }
                 tool_calls.push(function_call);
             }
-            MessageSemantic::ToolResult { .. } => {
-                return Err(ProjectionError::UnsupportedPart {
-                    provider: ProviderOrigin::OpenAiCompatible,
-                    part_ordinal: ordinal,
-                });
-            }
         }
     }
 

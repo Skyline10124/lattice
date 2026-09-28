@@ -527,6 +527,17 @@ impl Backend {
                 .selected_turn
                 .as_ref()
                 .and_then(|t| state.turns.get(&t.turn_id));
+            // Owner 退场前可能刚提交最终状态，不能将旧读事务拼成 Running/NoOwner。
+            let latest = match turn_id {
+                Some(turn) => state.turns.get(&turn),
+                None => state.sessions.get(&session_id),
+            };
+            if candidate
+                .as_ref()
+                .is_some_and(|before| !latest.is_some_and(|after| Arc::ptr_eq(before, after)))
+            {
+                continue;
+            }
             if current
                 .is_some_and(|current| !candidate.as_ref().is_some_and(|o| Arc::ptr_eq(o, current)))
             {
@@ -597,7 +608,15 @@ impl Backend {
     ) -> Result<HistoryPageView> {
         #[cfg(test)]
         cancellation_tests::pause(&self.gates.history).await;
-        self.open()
+        #[cfg(feature = "test-crash-barriers")]
+        if crate::turn::crash_barrier::history_read_fault(&anchor).await {
+            return Err(LocalError::new(
+                LocalErrorKind::StoreUnavailable,
+                "injected history read failure",
+            ));
+        }
+        let page = self
+            .open()
             .await?
             .read(move |read| {
                 let page = read.history_page(&anchor, cursor.as_ref(), max_bytes as usize)?;
@@ -630,7 +649,23 @@ impl Backend {
                 })
             })
             .await
-            .map_err(Into::into)
+            .map_err(LocalError::from)?;
+        #[cfg(feature = "test-crash-barriers")]
+        {
+            // 已解码成功且读租约已释放，单独控制返回时序，不改页内容。
+            let marker = serde_json::json!({"anchor":page.anchor,"fragments":page.fragments.len()});
+            crate::turn::crash_barrier::schedule(
+                &format!("history_ready_{}", page.anchor.head.0),
+                marker.clone(),
+            )
+            .await;
+            crate::turn::crash_barrier::schedule(
+                &format!("history_return_{}", page.anchor.head.0),
+                marker,
+            )
+            .await;
+        }
+        Ok(page)
     }
 
     async fn dispatch(self: &Arc<Self>, request: Request) -> Result<Response> {
@@ -925,6 +960,14 @@ impl Backend {
         });
         if let Some(cursor) = resume {
             sequence = cursor.sequence;
+            #[cfg(feature = "test-crash-barriers")]
+            crate::turn::crash_barrier::schedule(
+                "subscription",
+                serde_json::json!({
+                    "turn_id":target.turn_id,"sequence":sequence
+                }),
+            )
+            .await;
         } else if view
             .selected_turn
             .as_ref()
@@ -1417,6 +1460,38 @@ mod tests {
             task.await.unwrap().unwrap().owned,
             "snapshot must repeat after owner handoff"
         );
+    }
+
+    #[tokio::test]
+    async fn snapshot_rechecks_owner_retired_during_capture() {
+        for explicit_turn in [true, false] {
+            let (_directory, backend, request) = pending_backend().await;
+            let original = owner(&backend, &request);
+            let (entered, release) = cancellation_tests::arm(&backend.gates.snapshot);
+            let server = backend.clone();
+            let query = request.clone();
+            let task = tokio::spawn(async move {
+                server
+                    .query(query.session_id, explicit_turn.then_some(query.turn_id))
+                    .await
+            });
+            entered.await.unwrap();
+            close(&backend, &request).await;
+            {
+                let mut state = lock(&backend.admission);
+                state.turns.remove(&request.turn_id);
+                state.sessions.remove(&request.session_id.unwrap());
+                state.owners.retain(|owner| !Arc::ptr_eq(owner, &original));
+            }
+            release.send(()).unwrap();
+            let view = task.await.unwrap().unwrap();
+            assert!(!view.owned);
+            assert!(
+                view.selected_turn.unwrap().summary.is_some(),
+                "retired Owner must not turn an obsolete Running snapshot into NoOwner"
+            );
+            assert!(view.active.is_none());
+        }
     }
 
     #[tokio::test]

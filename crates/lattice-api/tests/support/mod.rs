@@ -8,15 +8,14 @@ use lancet_protocol::{CepError, InvocationId, ModelAttemptKey, SessionId, TurnId
 use lattice_conversation::{
     MessagePart, MessageRole, MessageSemantic, NativeMessage, ProviderOrigin, UnboundToolCall,
 };
-use lattice_session::{
-    store::{
-        AcceptSession, AcceptTurn, AgentSelection, CloseStep, CompleteReply, DispatchStop,
-        FrozenTurnConfig, SessionExecutionLock, SessionStore, StartedInvocation, StepKey,
-        TerminalInput, ToolCatalogEntry, ToolCatalogSnapshot, TurnExecutionLimits,
-        prepare_terminal,
-    },
-    test_utils::init_fixture_repo,
+use lattice_session::store::{
+    AcceptSession, AcceptTurn, AgentSelection, CloseStep, CompleteReply, DispatchStop,
+    FrozenTurnConfig, SessionExecutionLock, SessionStore, StartedInvocation, StepKey,
+    TerminalInput, ToolCatalogEntry, ToolCatalogSnapshot, TurnExecutionLimits, prepare_terminal,
 };
+
+mod git_fixture;
+use git_fixture::init_fixture_repo;
 use std::ops::Deref;
 use std::path::Path;
 use std::sync::{

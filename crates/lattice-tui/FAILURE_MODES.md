@@ -15,4 +15,8 @@
 | W3-03b | 已有 Session 显式 --agent 被忽略（尤其 rewind 0）。提交 IPC 必须携带显式选择，未指定才继承后台 current agent。 |
 | W3-05d | 关闭 Step 的延迟事件重新开启已装入节点的临时块，或 History 清除了未装入 Step 的工具终态。相同 Step/Invocation 应幂等，持久优先。 |
 
+
+## S4 交错流显示一致性
+
+- S4-01：同一次尝试 Text → Reasoning → Text，reasoning 不单独显示。实时 TokenDelta 拼成连续正文，但 Requesting 重连快照或 Step History 将正文拆成不同助手行，导致重连/最终替换时跳变。先在 connection_tests 通过 Event/Reset/History 的同一显示接缝比较行文本，再以真实分段 provider + PTY 重连和最终重载核验；不改持久 parts 或隐藏 reasoning 的合同。
 删除承接：project_branch 校验及 Git commit/OID、Gap、完成确认专属断言按 ADR0006 退役；结局持久性、正文读取、重连与取消风险迁至新快照/Step/TurnSummary 断言，不删除仍有效键位、布局、工具来源和独立控制回归。

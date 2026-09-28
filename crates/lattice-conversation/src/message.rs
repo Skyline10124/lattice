@@ -6,23 +6,16 @@
 //!
 //! The ordered part vector is durable conversation order: a part's index in
 //! `parts` is its `part_ordinal`. Replay state is part-local and opaque:
-//! Text (including empty Text), Reasoning, ToolCall, and ToolResult parts may
-//! all carry it when the provider contract requires it, and a part that
-//! carries replay state is never filtered out, even when its semantic payload
-//! is empty.
+//! Text（含空文本）、Reasoning、ToolCall 可带 provider 所需的片段回放状态；
+//! 即使片段正文为空，也不因过滤丢弃其回放状态。
 //!
-//! `NativeMessage<UnboundToolCall>` only exists before binding (a PendingTurn
-//! `MessageComplete`/`BindingPlanned` stage); completed conversation stores
-//! `NativeMessage<BoundToolCall>`. There is no `Option<InvocationId>`
-//! typestate shortcut.
+//! 未绑定调用只用于请求完成到登记之前；持久消息使用 BoundToolCall，
+//! 结果只保存在 StepContent 的结构化结果中，不保存 provider 派生文字。
 
 use std::fmt;
 
-use lancet_protocol::InvocationId;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
 use thiserror::Error;
-
-use crate::outcome::ToolResultOutcome;
 
 /// Maximum byte length of one part-local opaque replay state (64 KiB).
 pub const MAX_OPAQUE_REPLAY_STATE_BYTES: usize = 64 * 1024;
@@ -179,18 +172,6 @@ pub enum MessageSemantic<S: ToolCallState> {
         /// The call, in the message's binding state.
         call: S,
     },
-    /// A provider-neutral Tool result closing a bound ToolCall.
-    ToolResult {
-        /// The invocation this result closes.
-        invocation_id: InvocationId,
-        /// The Tool method name.
-        name: String,
-        /// The execution outcome closure.
-        outcome: ToolResultOutcome,
-        /// Model-facing result content; `None` when the result material is
-        /// unavailable (the outcome remains the true execution outcome).
-        content: Option<String>,
-    },
 }
 
 /// One ordered part of a message: neutral semantics plus optional part-local
@@ -269,17 +250,6 @@ impl NativeMessage<crate::UnboundToolCall> {
                 semantic: match part.semantic {
                     MessageSemantic::Text { text } => MessageSemantic::Text { text },
                     MessageSemantic::Reasoning { text } => MessageSemantic::Reasoning { text },
-                    MessageSemantic::ToolResult {
-                        invocation_id,
-                        name,
-                        outcome,
-                        content,
-                    } => MessageSemantic::ToolResult {
-                        invocation_id,
-                        name,
-                        outcome,
-                        content,
-                    },
                     MessageSemantic::ToolCall { .. } => unreachable!("checked above"),
                 },
                 replay_state: part.replay_state,
@@ -345,9 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn message_serde_roundtrip_with_all_part_kinds() {
-        let invocation =
-            InvocationId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").expect("invocation id");
+    fn text_and_reasoning_serde_roundtrip() {
         let message = NativeMessage::new(
             MessageRole::Assistant,
             Some(ProviderOrigin::Anthropic),
@@ -355,12 +323,6 @@ mod tests {
                 text_part("hello"),
                 MessagePart::semantic_only(MessageSemantic::Reasoning {
                     text: "thinking".to_string(),
-                }),
-                MessagePart::semantic_only(MessageSemantic::ToolResult {
-                    invocation_id: invocation,
-                    name: "observe.workspace".to_string(),
-                    outcome: ToolResultOutcome::Succeeded,
-                    content: Some("{}".to_string()),
                 }),
             ],
         );

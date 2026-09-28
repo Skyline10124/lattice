@@ -6,13 +6,14 @@
 
 mod close;
 mod codec;
+mod config;
+mod hex_digest;
 mod local;
 mod open;
 mod read;
 mod types;
 mod validate;
 mod write;
-use crate::pending::hex_digest;
 pub use close::{
     bound_provider_diagnostic, first_stopping_cause, plan_auto_close, prepare_terminal,
 };
@@ -112,7 +113,7 @@ fn commit_error(source: redb::CommitError) -> StoreError {
     StoreError::CommitFailed { kind, source }
 }
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(any(test, feature = "test-utils", feature = "test-crash-barriers"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FaultPoint {
     #[cfg(test)]
@@ -130,14 +131,14 @@ enum FaultPoint {
     UnknownAfter,
 }
 /// 下游只在同步存储闭包中注入；不跨线程或 await 传播。
-#[cfg(feature = "test-utils")]
+#[cfg(any(feature = "test-utils", feature = "test-crash-barriers"))]
 #[derive(Clone, Copy)]
 pub enum TestCommitFault {
     Poisoned,
     UnknownBefore,
     UnknownAfter,
 }
-#[cfg(feature = "test-utils")]
+#[cfg(any(feature = "test-utils", feature = "test-crash-barriers"))]
 pub fn with_test_commit_fault<T>(fault: TestCommitFault, operation: impl FnOnce() -> T) -> T {
     with_fault(
         match fault {
@@ -148,9 +149,9 @@ pub fn with_test_commit_fault<T>(fault: TestCommitFault, operation: impl FnOnce(
         operation,
     )
 }
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(any(test, feature = "test-utils", feature = "test-crash-barriers"))]
 thread_local! {static FAULT:std::cell::Cell<Option<FaultPoint>>=const {std::cell::Cell::new(None)};}
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(any(test, feature = "test-utils", feature = "test-crash-barriers"))]
 fn with_fault<T>(point: FaultPoint, f: impl FnOnce() -> T) -> T {
     struct Reset(Option<FaultPoint>);
     impl Drop for Reset {
@@ -161,7 +162,7 @@ fn with_fault<T>(point: FaultPoint, f: impl FnOnce() -> T) -> T {
     let _reset = Reset(FAULT.replace(Some(point)));
     f()
 }
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(any(test, feature = "test-utils", feature = "test-crash-barriers"))]
 fn hit(point: FaultPoint) -> bool {
     FAULT.with(|f| {
         if f.get() == Some(point) {
@@ -172,7 +173,7 @@ fn hit(point: FaultPoint) -> bool {
         }
     })
 }
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(any(test, feature = "test-utils", feature = "test-crash-barriers"))]
 fn injected_io() -> std::io::Error {
     std::io::Error::other("injected failure")
 }

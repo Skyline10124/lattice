@@ -10,7 +10,7 @@
 pub(crate) mod cep;
 pub(crate) mod coordinator;
 #[cfg(feature = "test-crash-barriers")]
-mod crash_barrier;
+pub(crate) mod crash_barrier;
 pub(crate) mod execute;
 mod live;
 mod llm;

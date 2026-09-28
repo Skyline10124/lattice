@@ -44,3 +44,36 @@
 - W4-10：旧 sessions.git 或其他项目 invocations.git 被忽略，新 redb 静默创建。只在隔离状态根造旧 Git fixture，send/list/audit 必须列路径并失败，provider 计数为0，新库不存在。此为现行拒绝策略，不是墓碑测试。
 
 - 已删除无引用的旧 `tests/fixtures/submission_unknown_completed.jsonl` 与 `turn_outcome_tags.json`，不再保存可被误用的旧 Gap/checkpoint 成功样本。未知提交/取消回执、后来成功与畸形终态的独立保护由 `src/session_send_tests.rs` 当前 summary/History fixtures 承接；原数据仍可从 Git 历史取得，不保留兼容解析。
+
+## S4 显示与证据
+
+- S4-01：扩展现有 PTY 分段重连场景为 Text → Reasoning → Text；原前端实时正文、无凭据重连及最终新前端读取必须保持同一连续正文，隐藏 reasoning 不引入换行。真实 provider gate 证明片段窗口，公开 log/turn/audit 与 PTY 帧保留到独立成功目录。
+- S4-02：现有两 agent 退回分叉场景补存文本 log/turn、JSON、audit、二进制摘要与复现参数；通过不再仅删除临时状态后留下测试计数。复用已验证的 ScenarioEvidence::finish_success，不改证据格式或清理语义。
+
+## S5 历史保留证据
+
+- S5-H01：旧 Git 会话与 retained 删除后，工作区 mutation 的 current/TurnId/InvocationId 不能丢失。复用两 agent 多步退回场景，补存退回前后 history current 与其提交消息，和原 Turn/slot 身份同包复核；不直接读取 redb。这里仅增加证据采集，当前只前进的隔离回归继续由 runtime history 与 API workspace_history_acceptance 保护，不另造重复场景或墓碑测试。
+
+## S6 矩阵与窗口证据（实施前登记）
+
+- S6-01：rewind 提交后、回执前崩溃，重开不得回到旧 current、改写原 Turn 或丢失分叉；用真实 CLI 移到中部/根、命中提交屏障并 SIGKILL，再从公开 log/turn/history 核验与发送。缺屏障是验证失败，不算崩溃通过。
+- S6-02：原矩阵只有可重试失败与请求取消，没有不可重试尝试、已持久 Cancelled 槽位及补尾 Deadline。扩展原提交矩阵并以真实 gated fetch 取消取得槽位终态，核对 live 与 reopen 的有序关闭结果、已发生 mutation、无旧请求/Tool 重放。
+- S6-03：关闭事务已提交但事件尚未追加时，订阅错误等待 Owner 或先 Finished 后正文。用显式 feature 调度 gate 挂起事件发布（不持存储/观察锁），订阅必须即时交付 Closed 快照、最后 Step、根路径和 Finished。
+- S6-04：慢订阅实际未落出64窗口却被当通过。保持同一公开 IPC 订阅，在服务端读游标前以显式 feature gate 暂停，放行超过64个交错 delta 后恢复，要求新快照与后续事件重建完整内容并与持久 Step 对照；仅断开后重连不代替此窗口。
+- S6-05：旧库两者并存未逐路径拒绝或拒绝时修改旧库。扩展原 legacy 场景为单个/并存，按文件清单与字节摘要核旧库不变，缺库查询不创建；没有 Session 的拒绝场景如实记录 log/turn 不适用。
+- S6-06：成功 bundle 的复现命令硬编码为别的测试，或未保存阶段参数/状态/树/Turn/audit。复用已有证据机制，逐场景记录精确 test/case、脚本、feature 与构建身份；不改写旧产物。
+- S6-07：自动关闭 commit 回滚、提交前未知、提交后未知时，另一个 Session 仍在登记调用后或 Continue 间隙；不得继续 Tool/provider、新输入或 rewind。外部真实二进制以显式 feature 复用存储提交故障点，调度 gate 证明旧 Owner 未退场时不能重开；释放后真实关闭旧句柄、严格重开，公开读取按磁盘事实区分三个结果，不自动关闭其他 Turn。再次关闭成功才继续原写操作；故障不能写用户 Cancelled。保存两 Session 的前后 Turn/log/audit、窗口、进程和 provider 请求。
+- S6-07b：排空后严格重开仍失败不能自动 create 或重新准入。外部场景只在自有临时状态根、重开 gate 期间将库文件临时移开（不读取 redb）；公开查询/新提交/rewind 均报 NotInitialized，原文件还原后同一后台仍不可用；重启后才能读原事实。失败期间不产生替代库，inode 与已保存节点保持，归档注明这是打开失败而非磁盘掉电。
+- S6-08：只有内存中的取消回执却在崩溃后被当持久 Cancelled。在 Requesting 提交后调度暂停、cancel 返回 true、尚无停止提交时 SIGKILL，查询保持 Running，随后 send 只关闭旧请求为 ProcessExit 并恰好执行新输入；与 S6-02 的持久取消对照。
+- S6-09：回执未读的首发/已有 Session ×后台持续/重启四组合必须找回原 Turn，不能重新加载已删除配置、重复接受或多建 Session；旧测试仅首发组合。扩展同一测试保留输入冲突/独立 TurnId 的断言，在公开 IPC 写完整配置后不读取接受帧，记录该连接销毁窗口、原 Turn 和 provider 请求；分别在重启之前或之后首次找回。
+- S6-10：跨 Session 并发/Busy/取消接管/stop 及回执丢失场景的成功证据缺失；只增加公开 list/树形 log/turn/audit、参数与窗口附件并调用既有成功归档接口，不另写重复的产品行为测试。
+- S6-11：逐提交点必须在带三个调用的多步脚本中验证（接受/首个请求天然尚无前序 Step），第二 Step 停止不能丢失第一 Step。精确选择非槽位的步骤停点，记录真实 step/part；只读 query/subscribe 不关闭，rewind 后逐节点核对调用和结果的身份/方法/次序、前序 Step/终态不变、尾槽原因、唯一最后 end 与 TurnSummary。超大成功仍成功；不把未命中屏障或单调用场景当完整矩阵。先用现有产物观察缺步骤选择红，再扩展仅显式 feature 的选择器；已有关闭语义另以受控变异验证独立失败信号。
+- S6-12：两 agent 场景补第二 Turn 实际安装工具后、下一 provider gate 内取消；rewind 中部后不指定 agent 必须继承目标 Turn。退回前/中部/原末端/根的公开 history 精确核路径，再逐项核 provider messages（含完整 ToolCall/Result 投影）、系统提示及工具定义；不存在节点与根无 agent 在拒绝后不改变整树；取消/退回均不回退两个文件及工作区历史。已有业务先于扩展测试，原绿时用受控投影变异证明，不伪称原缺陷红。
+- S6-13：观察窗口场景合入流内 server_error 重试、三调用 Step、执行中重连与最终71个交错片段。记录失败尝试已显示正文、新尝试为空且旧正文不进树/请求、工具执行中完整回复仍可重连；同一慢订阅确实落出64窗口后重建，关闭事件前取得多步完整历史。已实现业务用关闭尝试清理/流内可重试性受控变异证明独立红，禁止把脚本时序失败算产品红。
+- S6-14：最终历史读取挂起/报错不撤销 Completed，也不清除已显示的流正文；CLI 必须退出1而非成功，服务端不能伪造 Finished。仅显式 feature 按 history anchor.head 控制所有该页读取等待/错误，真实 CLI+PTY+公开 IPC 同时验证；解除错误后同 TUI /reconnect 取得完整正文、无重复助手块，退出不再报告当前正文不可用。旧页迟到替代关系仍由 LocalTurn 局部回归保护，未实测的外部窗口不冒称完成。
+- S6-15：同后台跨项目操作员读取在混合生命周期/六种终态时串读、游标按项目而非全局推进、recent重复或超过20。外部脚本组合22调用（含超大成功/拒绝/失败）、真实fetch取消补尾、Started后SIGKILL补Indeterminate；另一项目产生夹在其中的变更。query/tail/replay/status逐身份核对，空过滤页推进全局游标，删除profile后仍可读；公开DTO不得含参数/结果正文。已有实现原绿时以临时项目过滤变异取得独立红，完整撤销后重跑。
+- S6-16：跨项目同TurnId重发不得共享原Owner/旧记录或先加载配置；原输入与Session即使相同，workspace绑定不同仍Conflict，原事实与provider次数不变。补到已有全局身份场景并归档，不新增重复测试。
+- S6-17：rewind提交屏障扩为三调用两步，恢复后保留每个调用结果配对及原分支；同一慢订阅组合在最终关闭后重启，以旧epoch游标再订阅必须返回新快照与相同完整历史，不重新请求provider。
+- S6-18：真实TLS接入使用两套自签CA/localhost证书，同后台两个Session并发provider握手后冻结来源被替换，后续provider与fetch仍仅使用各自冻结根/策略。正式CLI SSL_CERT_FILE/SSL_CERT_DIR来源，不把dotenv信任覆盖当合法配置；公开IPC坏DER在接受前拒绝，跨根provider失败、Tool TLS错误保留效果/失败阶段，空允许列表拒绝且无GET。场景专用Python标准库TLS代理仅包裹既有正式fake provider，证书由隔离openssl命令生成；不安装依赖、不输出私钥，不用HTTP证明TLS。
+- S6-19：真实两步/三调用Turn在工具Step后暂停下一模型回复；仅TUI发起的旧anchor2读取成功后挂起交付。放行模型并重连，新anchor3完整正文与Completed先显示，再释放旧页、确认返回marker，前端不得丢新正文或重复旧块。公开分页与最终history记录新旧cut，旧业务已存在时保留前轮局部代次回归红证据，不把缺gate当产品缺陷。
+- S6-20：补充产品场景虽通过但未归档成功状态/参数，不能据测试计数宣称矩阵证据完整。复用现有 PTY 公开 Session 采集与 finish_recorded，覆盖前轮精确列出的24项；先以归档覆盖检查观察缺包红，再增加采集。缺库拒绝只记真实错误、库不存在与 log/turn 不适用，不制造 Session。保留所有现行业务断言和预算；这是证据缺口，不称产品行为缺陷。

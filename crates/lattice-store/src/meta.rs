@@ -9,9 +9,9 @@
 //! refs/lattice/meta -> commit(tree{ meta.json })  — canonical JSON:
 //! {
 //!     "repository_format_version": 1,        // kernel envelope version
-//!     "store_kind": "session",               // domain-owned
+//!     "store_kind": "workspace-history",     // domain-owned
 //!     "store_schema_version": 1,             // domain-owned
-//!     "scope": {"type":"global"} | {"type":"project","key":"<ProjectStoreKey>"}
+//!     "scope": {"type":"project","key":"<ProjectStoreKey>"}
 //! }
 //! ```
 //!
@@ -32,13 +32,10 @@ pub const META_REF: &str = "refs/lattice/meta";
 /// File inside the meta commit's tree carrying the canonical JSON record.
 pub const META_TREE_FILE: &str = "meta.json";
 
-/// Store scope: a global repository (exactly one per state root) or a
-/// project-scoped repository bound to its directory's [`ProjectStoreKey`].
+/// 绑定目录 ProjectStoreKey 的项目仓库身份。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum StoreScope {
-    /// Global scope (`sessions.git`).
-    Global,
     /// Project scope; the key must equal the key of the directory the
     /// repository lives in.
     Project {
@@ -50,11 +47,11 @@ pub enum StoreScope {
 /// The domain-supplied identity record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreMeta {
-    /// Domain-owned store kind (e.g. `"session"`, `"workspace-history"`).
+    /// 领域定义的存储种类（如 workspace-history）。
     pub store_kind: String,
     /// Domain-owned schema version of the store's contents.
     pub store_schema_version: u32,
-    /// Global or project scope.
+    /// 项目作用域。
     pub scope: StoreScope,
 }
 
@@ -168,19 +165,12 @@ mod tests {
 
     fn meta() -> StoreMeta {
         StoreMeta {
-            store_kind: "session".into(),
+            store_kind: "workspace-history".into(),
             store_schema_version: 1,
-            scope: StoreScope::Global,
+            scope: StoreScope::Project {
+                key: ProjectStoreKey::from_canonical_path_bytes(b"/ws"),
+            },
         }
-    }
-
-    #[test]
-    fn canonical_wire_bytes_are_stable() {
-        let bytes = serialize_meta(&meta()).unwrap();
-        assert_eq!(
-            String::from_utf8(bytes).unwrap(),
-            r#"{"repository_format_version":1,"scope":{"type":"global"},"store_kind":"session","store_schema_version":1}"#
-        );
     }
 
     #[test]
@@ -193,8 +183,10 @@ mod tests {
         })
         .unwrap();
         let text = String::from_utf8(bytes).unwrap();
-        assert!(text.contains(r#""scope":{"key":""#));
-        assert!(text.contains(r#""type":"project""#));
+        assert_eq!(
+            text,
+            r#"{"repository_format_version":1,"scope":{"key":"738bcf21ea34a32ae8e0ac6cbb6cec11a72da7bcb0a6ffee300c58a9715ad864","type":"project"},"store_kind":"workspace-history","store_schema_version":1}"#
+        );
     }
 
     #[test]
@@ -205,9 +197,11 @@ mod tests {
         check_expected(
             &parsed,
             &ExpectedMeta {
-                store_kind: "session".into(),
+                store_kind: "workspace-history".into(),
                 store_schema_version: 1,
-                scope: StoreScope::Global,
+                scope: StoreScope::Project {
+                    key: ProjectStoreKey::from_canonical_path_bytes(b"/ws"),
+                },
             },
         )
         .unwrap();
@@ -227,7 +221,7 @@ mod tests {
             },
             ExpectedMeta {
                 scope: StoreScope::Project {
-                    key: ProjectStoreKey::from_canonical_path_bytes(b"/ws"),
+                    key: ProjectStoreKey::from_canonical_path_bytes(b"/other"),
                 },
                 ..ExpectedMeta::from(&meta)
             },
@@ -244,7 +238,10 @@ mod tests {
     #[test]
     fn rejects_unknown_fields_and_garbage() {
         assert!(parse_meta(b"not json").is_err());
-        assert!(parse_meta(br#"{"repository_format_version":1,"store_kind":"s","store_schema_version":1,"scope":{"type":"global"},"extra":1}"#).is_err());
+        let mut extra: serde_json::Value =
+            serde_json::from_slice(&serialize_meta(&meta()).unwrap()).unwrap();
+        extra["extra"] = serde_json::json!(1);
+        assert!(parse_meta(&serde_json::to_vec(&extra).unwrap()).is_err());
     }
 
     impl From<&StoreMeta> for ExpectedMeta {

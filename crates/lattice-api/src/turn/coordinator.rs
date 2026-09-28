@@ -250,7 +250,12 @@ impl TurnCoordinator {
             .write(|store, lock| {
                 let active = store.begin_read()?.session(lock.session_id())?.active_turn;
                 active
-                    .map(|turn| store.auto_close(lock, turn, chrono::Utc::now()))
+                    .map(|turn| {
+                        let close = || store.auto_close(lock, turn, chrono::Utc::now());
+                        #[cfg(feature = "test-crash-barriers")]
+                        let close = || super::crash_barrier::auto_close_fault(close);
+                        close()
+                    })
                     .transpose()
             })
             .await
@@ -258,9 +263,13 @@ impl TurnCoordinator {
 
     pub(crate) async fn rewind(&self, target: NodeId) -> Result<SessionRecord> {
         self.auto_close().await?;
-        self.io
+        let session = self
+            .io
             .write(move |store, lock| store.rewind(lock, target, chrono::Utc::now()))
-            .await
+            .await?;
+        #[cfg(feature = "test-crash-barriers")]
+        super::crash_barrier::rewind_hit(&self.io, &session).await?;
+        Ok(session)
     }
 }
 

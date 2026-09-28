@@ -202,12 +202,6 @@ pub fn native_to_wire<S: ToolCallState>(
                 }
                 blocks.push(block);
             }
-            MessageSemantic::ToolResult { .. } => {
-                return Err(ProjectionError::UnsupportedPart {
-                    provider: ProviderOrigin::Anthropic,
-                    part_ordinal: ordinal,
-                });
-            }
         }
     }
     Ok(json!({

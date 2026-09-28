@@ -13,7 +13,7 @@
 ## 局部约束
 
 - `InvocationId`/`TurnId` 为小写、带连字符的 UUID v4，`SessionId` 为 32 位小写十六进制；parse/display/serde/schema 一致。本 crate 校验但不生成 ID，不引入第二套 String/newtype 身份。
-- 运行时使用已预留 InvocationId 的规范字符串，预留才创建 Invocation。控制通知可以引用已有 InvocationId，但不能预留或执行 Tool。
+- 运行时使用已登记槽位的 InvocationId 规范字符串，身份由协调层在会话库事务中登记。控制通知可以引用已有 InvocationId，但不能登记或执行 Tool。
 - 字段序列化变化是跨 crate 契约变化，显式核对 serde/schemars。Cell 词汇先在此定义，再协调策略、审计、运行时和生成消费者，不编码具体引擎/Host 实现假设。
 - 三类持久证据记录先核版本再解释内容；字段演化、未知字段策略和 canonical JSON 遵循 Cell 合同。`truncated: Option<bool>` 保留三态，visibility 不携带文件内容，mutation 证据保留前后 revision、前提及安装事实。
 - 不恢复已退役的 Turn/audit provenance、in-toto attestation 或另一套操作员投影词汇；artifact identity 与 Bundle provenance 在其所属契约维护。
@@ -22,4 +22,4 @@
 ## 验证入口
 
 - `cargo test -p lancet-protocol`。
-- schema/wire 变化增加必要序列化或 schemars 断言，并检查受影响的 authority、audit、runtime、API 和 CLI。
+- schema/wire 变化增加必要序列化或 schemars 断言，并检查受影响的 authority、session、runtime、API 和 CLI。

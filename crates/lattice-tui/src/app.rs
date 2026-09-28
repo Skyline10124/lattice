@@ -177,10 +177,7 @@ impl App {
                         text: content.clone(),
                     });
                 }
-                match self.blocks.last_mut() {
-                    Some(Block::Assistant(text)) => text.push_str(&content),
-                    _ => self.blocks.push(Block::Assistant(content)),
-                }
+                crate::session::append_assistant_text(&mut self.blocks, content);
             }
             TurnEvent::ReasoningDelta { key, content } => {
                 self.start_attempt(key);
@@ -596,7 +593,10 @@ impl App {
                         self.attempt = Some(attempt.clone());
                         for segment in &attempt.segments {
                             if let TextSegment::Text { text } = segment {
-                                self.blocks.push(Block::Assistant(text.clone()));
+                                crate::session::append_assistant_text(
+                                    &mut self.blocks,
+                                    text.clone(),
+                                );
                             }
                         }
                     }

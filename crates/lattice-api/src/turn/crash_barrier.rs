@@ -12,14 +12,19 @@ use std::{io::Write, path::PathBuf};
 struct Marker {
     barrier: &'static str,
     session_id: SessionId,
-    turn_id: TurnId,
+    turn_id: Option<TurnId>,
+    current: Option<lattice_session::store::NodeId>,
     step: Option<u32>,
     part: Option<u32>,
     invocation_id: Option<InvocationId>,
     change_seq: ChangeSeq,
 }
-fn selected(config: &str, name: &str, slot: Option<(u32, u32)>) -> bool {
-    config == name || slot.is_some_and(|(step, part)| config == format!("{name}:{step}:{part}"))
+fn selected(config: &str, name: &str, step: Option<u32>, part: Option<u32>) -> bool {
+    config == name
+        || step.is_some_and(|step| config == format!("{name}:{step}"))
+        || step
+            .zip(part)
+            .is_some_and(|(step, part)| config == format!("{name}:{step}:{part}"))
 }
 pub(crate) async fn hit(
     io: &CoordinatorStoreIo,
@@ -28,15 +33,24 @@ pub(crate) async fn hit(
     step: Option<u32>,
     binding: Option<&InvocationBinding>,
 ) -> Result<(), CoordinatorIoError> {
-    let slot = binding.map(|binding| {
-        (
-            binding.identity.model_step_ordinal,
-            binding.identity.part_ordinal,
-        )
-    });
+    schedule(
+        barrier,
+        serde_json::json!({
+            "session_id":io.session_id(),"turn_id":turn_id,"step":step,
+            "invocation_id":binding.map(|b| b.invocation_id)
+        }),
+    )
+    .await;
     if !std::env::var("LATTICE_TEST_TURN_BARRIER")
         .ok()
-        .is_some_and(|config| selected(&config, barrier, slot))
+        .is_some_and(|config| {
+            selected(
+                &config,
+                barrier,
+                step,
+                binding.map(|b| b.identity.part_ordinal),
+            )
+        })
     {
         return Ok(());
     }
@@ -50,12 +64,41 @@ pub(crate) async fn hit(
     let marker = Marker {
         barrier,
         session_id,
-        turn_id,
+        turn_id: Some(turn_id),
+        current: None,
         step,
         part: binding.map(|b| b.identity.part_ordinal),
         invocation_id: binding.map(|b| b.invocation_id),
         change_seq,
     };
+    stop(marker).await
+}
+
+pub(crate) async fn rewind_hit(
+    io: &CoordinatorStoreIo,
+    session: &lattice_session::store::SessionRecord,
+) -> Result<(), CoordinatorIoError> {
+    if std::env::var("LATTICE_TEST_TURN_BARRIER").as_deref() != Ok("rewind_committed") {
+        return Ok(());
+    }
+    let project = session.project_store_key;
+    let change_seq = io
+        .read(move |read| Ok(read.operator_status(&project)?.latest_change))
+        .await?;
+    stop(Marker {
+        barrier: "rewind_committed",
+        session_id: session.session_id,
+        turn_id: None,
+        current: Some(session.current),
+        step: None,
+        part: None,
+        invocation_id: None,
+        change_seq,
+    })
+    .await
+}
+
+async fn stop(marker: Marker) -> Result<(), CoordinatorIoError> {
     tokio::task::spawn_blocking(move || {
         let path = PathBuf::from(
             std::env::var_os("LATTICE_TEST_TURN_BARRIER_ACK").expect("barrier ack required"),
@@ -82,38 +125,169 @@ pub(crate) async fn hit(
     Ok(())
 }
 
+/// 外部场景的单次调度窗口；只在显式故障产物编译，不暂停整个后台。
+pub(crate) async fn schedule(name: &str, marker: serde_json::Value) {
+    use tokio::io::AsyncWriteExt;
+    let Some(root) = std::env::var_os("LATTICE_TEST_SCHEDULE_DIR") else {
+        return;
+    };
+    let root = PathBuf::from(root);
+    assert!(root.is_absolute(), "schedule directory must be absolute");
+    if !tokio::fs::try_exists(root.join(format!("{name}.arm")))
+        .await
+        .expect("read schedule arm")
+    {
+        return;
+    }
+    let mut ready = match tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(root.join(format!("{name}.ready")))
+        .await
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return,
+        Err(error) => panic!("claim schedule gate: {error}"),
+    };
+    ready
+        .write_all(&serde_json::to_vec(&marker).expect("encode schedule marker"))
+        .await
+        .expect("write schedule marker");
+    ready.sync_all().await.expect("sync schedule marker");
+    let release = root.join(format!("{name}.release"));
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while !tokio::fs::try_exists(&release)
+            .await
+            .expect("read schedule release")
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("schedule gate was not released");
+}
+/// 同一 anchor 的并发读取一起受控，避免另一条订阅绕过已暂停的最终页。
+pub(crate) async fn history_read_fault(anchor: &lattice_session::store::HistoryAnchor) -> bool {
+    let Some(root) = std::env::var_os("LATTICE_TEST_SCHEDULE_DIR") else {
+        return false;
+    };
+    let root = PathBuf::from(root);
+    assert!(root.is_absolute(), "schedule directory must be absolute");
+    let name = format!("history_read_{}", anchor.head.0);
+    schedule(&name, serde_json::json!({"anchor":anchor})).await;
+    if tokio::fs::try_exists(root.join(format!("{name}.arm")))
+        .await
+        .expect("read history arm")
+    {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            while !tokio::fs::try_exists(root.join(format!("{name}.release")))
+                .await
+                .expect("read history release")
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("history gate was not released");
+    }
+    tokio::fs::try_exists(root.join(format!("{name}.error")))
+        .await
+        .expect("read history fault")
+}
+
+/// 在真实同步事务内复用存储层故障点；文件仅选择一次注入，不承载业务状态。
+pub(crate) fn auto_close_fault<T>(operation: impl FnOnce() -> T) -> T {
+    use lattice_session::store::{TestCommitFault, with_test_commit_fault};
+    let Some(root) = std::env::var_os("LATTICE_TEST_SCHEDULE_DIR") else {
+        return operation();
+    };
+    let root = PathBuf::from(root);
+    assert!(root.is_absolute(), "schedule directory must be absolute");
+    let source = root.join("auto_close.fault");
+    let claimed = root.join("auto_close.fault-consumed");
+    match std::fs::rename(source, &claimed) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return operation(),
+        Err(error) => panic!("claim commit fault: {error}"),
+    }
+    let name = std::fs::read_to_string(claimed).expect("read commit fault");
+    let fault = match name.as_str() {
+        "poisoned" => TestCommitFault::Poisoned,
+        "unknown_before" => TestCommitFault::UnknownBefore,
+        "unknown_after" => TestCommitFault::UnknownAfter,
+        _ => panic!("unknown commit fault"),
+    };
+    let result = with_test_commit_fault(fault, operation);
+    std::fs::write(
+        root.join("auto_close.fault-hit"),
+        serde_json::to_vec(&serde_json::json!({"fault":name})).expect("encode fault marker"),
+    )
+    .expect("write fault marker");
+    result
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
-    fn selector_can_pin_started_slot_without_stopping_earlier_calls() {
+    fn selector_can_pin_step_or_slot_without_stopping_earlier_commits() {
+        assert!(super::selected(
+            "request_started",
+            "request_started",
+            Some(0),
+            None
+        ));
+        assert!(super::selected(
+            "request_started:1",
+            "request_started",
+            Some(1),
+            None
+        ));
+        assert!(!super::selected(
+            "request_started:1",
+            "request_started",
+            Some(0),
+            None
+        ));
+        assert!(!super::selected(
+            "request_started:1",
+            "request_started",
+            None,
+            None
+        ));
         assert!(super::selected(
             "invocation_started",
             "invocation_started",
-            Some((1, 3))
+            Some(1),
+            Some(3)
         ));
         assert!(super::selected(
             "invocation_started:1:3",
             "invocation_started",
-            Some((1, 3))
+            Some(1),
+            Some(3)
         ));
         assert!(!super::selected(
             "invocation_started:1:3",
             "invocation_started",
-            Some((0, 3))
+            Some(0),
+            Some(3)
         ));
         assert!(!super::selected(
             "invocation_started:1:3",
             "invocation_started",
-            Some((1, 2))
+            Some(1),
+            Some(2)
         ));
         assert!(!super::selected(
             "invocation_started:1:3",
             "calls_registered",
-            Some((1, 3))
+            Some(1),
+            None
         ));
         assert!(!super::selected(
             "invocation_started:1:3",
             "invocation_started",
+            None,
             None
         ));
     }

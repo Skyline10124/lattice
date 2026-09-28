@@ -83,30 +83,53 @@ fn session_queries_and_rewind_preserve_the_tree_across_restart() {
         let list: Value = serde_json::from_slice(&out.stdout).unwrap();
         assert_eq!(list[0]["node_count"], 5);
         assert_eq!(server.captured_requests().len(), 2);
+        support::record_session(
+            &send,
+            &mut evidence,
+            sid,
+            serde_json::json!({"prompts":["first","branch"],"rewind":0,"restart":true,"reply":"durable answer"}),
+        );
     }));
     evidence.record_captures(server.captured_requests());
-    evidence
-        .finish_report(result.err().map(|p| format!("{p:?}")))
-        .unwrap();
+    support::finish_recorded(
+        evidence,
+        result,
+        "fast_session_cli",
+        "session_queries_and_rewind_preserve_the_tree_across_restart",
+    );
 }
 
 #[test]
 fn missing_store_read_does_not_create_a_database() {
     let spec = lattice_system_harness::ScenarioSpec::fast("session-missing-store");
     let world = lattice_system_harness::ScenarioWorld::new(&spec.name).unwrap();
-    let out = cli(&world, &spec, &["session", "list"]);
-    lattice_system_harness::assert_with_failure_artifacts(
-        &world,
-        &spec.name,
-        "list without database",
-        &out,
-        &[],
-        lattice_system_harness::assert_exit_code(&out, 1).and_then(|_| {
-            lattice_system_harness::assert_stderr_contains(&out, "store unavailable")
-        }),
-    )
-    .unwrap();
-    assert!(!world.session_store_dir().join("lattice.redb").exists());
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let out = cli(&world, &spec, &["session", "list"]);
+        evidence.record_command("session list", &out);
+        lattice_system_harness::assert_exit_code(&out, 1).unwrap();
+        lattice_system_harness::assert_stderr_contains(&out, "store unavailable").unwrap();
+        let audit = cli(&world, &spec, &["--json", "audit"]);
+        evidence.record_command("--json audit", &audit);
+        assert!(audit.is_clean_exit(1));
+        let exists = world.session_store_dir().join("lattice.redb").exists();
+        assert!(!exists);
+        evidence
+            .record_json(
+                "state-summary",
+                &serde_json::json!({
+                    "database_exists":exists,"log_turn":"不适用：库尚未创建，没有 Session 或 Turn"
+                }),
+            )
+            .unwrap();
+        evidence.record_json("parameters", &serde_json::json!({"commands":["session list","--json audit"],"profile":null,"provider":null})).unwrap();
+    }));
+    support::finish_recorded(
+        evidence,
+        result,
+        "fast_session_cli",
+        "missing_store_read_does_not_create_a_database",
+    );
 }
 
 #[test]
@@ -155,9 +178,18 @@ fn missing_session_and_missing_profile_fail_before_dispatch() {
         lattice_system_harness::assert_no_secret(&out, lattice_system_harness::FAKE_API_KEY)
             .unwrap();
         assert_eq!(server.captured_requests().len(), 1);
+        support::record_session(
+            &send,
+            &mut evidence,
+            sid,
+            serde_json::json!({"seed":"seed","rejected_prompt":"hello","unknown_session":"nope-sid","profile_removed":true,"provider_requests":1}),
+        );
     }));
     evidence.record_captures(server.captured_requests());
-    evidence
-        .finish_report(result.err().map(|p| format!("{p:?}")))
-        .unwrap();
+    support::finish_recorded(
+        evidence,
+        result,
+        "fast_session_cli",
+        "missing_session_and_missing_profile_fail_before_dispatch",
+    );
 }

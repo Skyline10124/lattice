@@ -1,6 +1,8 @@
 # CLI R2 失败方式（WP3）
 
 范围：计划 §6 W3-01/03/04/06/07/08；测试 seam 为 clap、命令渲染及真实 LocalClient/Unix socket。先登记，再迁移测试并观察红；依赖旧 TUI 导致的编译失败不冒称行为红。
+S6 调度接缝：显式 crash 产物的 daemon 环境安装应保留 `LATTICE_TEST_SCHEDULE_DIR`，普通产物仍清除。外部 `slow_window_and_closed_snapshot_deliver_exact_history` 实测安装前屏障未命中；不为此新增普通产物隐藏行为或独立重复单测。
+
 
 | ID | 失败方式与独立信号 |
 | --- | --- |

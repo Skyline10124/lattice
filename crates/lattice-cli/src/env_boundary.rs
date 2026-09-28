@@ -187,6 +187,7 @@ pub fn prepare_daemon_environment(state_root: &Path) {
     let injections: Vec<_> = [
         "LATTICE_TEST_TURN_BARRIER",
         "LATTICE_TEST_TURN_BARRIER_ACK",
+        "LATTICE_TEST_SCHEDULE_DIR",
         "LATTICE_TEST_TURN_INJECTION",
         "LATTICE_TEST_TOOL_EFFECT_LOG",
         "LATTICE_TEST_REWIND_BARRIER",

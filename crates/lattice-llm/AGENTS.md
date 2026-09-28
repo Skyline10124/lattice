@@ -16,7 +16,7 @@
 ## 局部约束
 
 - provider 协议差异留在 provider/client 层，高层只消费类型化 `LlmEvent`、`LlmError` 和模型元数据。
-- 所有请求 builder 经 `request_messages_to_wire`，权威 MessageComplete 经 `wire_to_native`，usage 经 `wire_usage`；不新建 ToolCall/ToolResult codec。组装经 `AttemptAssembly`，超限返回 `ProjectionError::OutputLimitExceeded`，不返回部分消息。
+- 所有请求 builder 经 `request_messages_to_wire`；完整消息转换集中在 `provider_projection`。OpenAI 流通过 `openai_parts_to_native` 保留到达顺序，不重造固定字段顺序；非流 wire 通过 `wire_to_native`，usage 经 `wire_usage`。不新建 ToolCall/ToolResult codec，组装经 `AttemptAssembly`，超限返回 `ProjectionError::OutputLimitExceeded`，不返回部分消息。
 - provider call ID 是可选不透明 wire 元数据，不是领域 Invocation 身份，不合成 `tc_*` 身份。same-provider 保留真实 ID、签名及 part 顺序；cross-provider 去掉 replay state、provider call ID 与 reasoning，不泄露来源 provider 状态。
 - `validate_base_url` 的 DNS 检查仅尽力而为，请求时解析地址固定才是主要 SSRF 防线。localhost、127.0.0.1、::1 使用一致的 loopback 例外，其他私有/保留 IP literal 拒绝。
 - HTTP 默认 `redirect::Policy::none()`；重新允许重定向必须逐跳重新执行地址与 pinning 检查，避免向未经验证的主机转送 body 和密钥。不能依赖首跳校验保护后续跳。

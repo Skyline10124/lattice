@@ -217,6 +217,12 @@ impl StoreManager {
         tokio::spawn(async move {
             // 排他租约等所有真实 worker/Owner 释放；不依赖 Arc 计数、sleep 或 abort。
             let drained = manager.leases.clone().write_owned().await;
+            #[cfg(feature = "test-crash-barriers")]
+            crate::turn::crash_barrier::schedule(
+                "store_reopen",
+                serde_json::json!({"generation":generation}),
+            )
+            .await;
             let worker_manager = manager.clone();
             let result = tokio::task::spawn_blocking(move || {
                 let _drained = drained;

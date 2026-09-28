@@ -719,17 +719,6 @@ fn bind_message(message: &NativeMessage<UnboundToolCall>) -> NativeMessage<Bound
             MessageSemantic::Reasoning { text } => {
                 MessageSemantic::Reasoning { text: text.clone() }
             }
-            MessageSemantic::ToolResult {
-                invocation_id,
-                name,
-                outcome,
-                content,
-            } => MessageSemantic::ToolResult {
-                invocation_id: *invocation_id,
-                name: name.clone(),
-                outcome: *outcome,
-                content: content.clone(),
-            },
         };
         bound_parts.push(MessagePart {
             semantic,

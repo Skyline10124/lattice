@@ -14,11 +14,11 @@ use lattice_store::ProjectStoreKey;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-pub use crate::pending::{
+pub use super::config::{
     FrozenTurnConfig, MAX_CATALOG_SNAPSHOT_BYTES, MAX_MODEL_ATTEMPTS, MAX_MODEL_STEPS,
-    MAX_TOOL_CONTENT_BYTES, MAX_USER_INPUT_BYTES, ToolCatalogEntry, ToolCatalogSnapshot,
-    TurnExecutionLimits,
+    MAX_USER_INPUT_BYTES, ToolCatalogEntry, ToolCatalogSnapshot, TurnExecutionLimits,
 };
+pub use lattice_conversation::MAX_TOOL_CONTENT_BYTES;
 pub type Timestamp = chrono::DateTime<chrono::Utc>;
 pub type Result<T> = std::result::Result<T, StoreError>;
 pub const MAX_PROVIDER_ERROR_CHARS: usize = 2048;

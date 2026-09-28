@@ -1,11 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Shared gix-backed fixture helpers for tests.
-//!
-//! Replaces shell-git and legacy-git-bindings fixture bootstraps across the
-//! workspace. Enabled by the `test-utils` feature (and always available to
-//! this crate's own tests).
+//! API 工作区验收使用的非 bare Git 夹具；仅在 integration tests 编译。
 
 use std::fs;
 use std::path::Path;
@@ -18,7 +14,7 @@ const FIXTURE_AUTHOR_EMAIL: &str = "test@lattice.local";
 
 /// Initialize an empty non-bare git repository at `dir` (creates the directory
 /// if needed). No commits are created.
-pub fn init_empty_repo(dir: &Path) -> gix::Repository {
+fn init_empty_repo(dir: &Path) -> gix::Repository {
     fs::create_dir_all(dir).expect("create fixture dir");
     // Fixture setup is deliberately side-effect free with respect to the
     // process CWD. A deleted CWD is an environment failure, not a reason for
@@ -59,7 +55,7 @@ pub fn init_fixture_repo(dir: &Path, files: &[(&str, &str)]) -> gix::Repository 
 
 /// Stage the listed relative worktree paths (already written under `root`) and
 /// create a new commit on `refs/heads/main`.
-pub fn commit_paths(
+fn commit_paths(
     repo: &gix::Repository,
     root: &Path,
     files: &[(&str, &str)],
@@ -105,38 +101,6 @@ pub fn commit_paths(
     repo.reference("refs/heads/main", commit_id, constraint, "fixture commit")
         .expect("update refs/heads/main");
     commit_id
-}
-
-/// Create a commit that captures every regular file under `root` (skipping
-/// `.git`) and advances `refs/heads/main`.
-pub fn commit_all(repo: &gix::Repository, root: &Path, message: &str) -> gix::ObjectId {
-    let mut paths = Vec::new();
-    collect_file_paths(root, root, &mut paths);
-    let files: Vec<(&str, &str)> = paths.iter().map(|path| (path.as_str(), "")).collect();
-    commit_paths(repo, root, &files, message)
-}
-
-fn collect_file_paths(root: &Path, dir: &Path, out: &mut Vec<String>) {
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if entry.file_name() == ".git" {
-            continue;
-        }
-        if path.is_dir() {
-            collect_file_paths(root, &path, out);
-        } else if path.is_file() {
-            let rel = path
-                .strip_prefix(root)
-                .expect("path under root")
-                .to_string_lossy()
-                .into_owned();
-            out.push(rel);
-        }
-    }
 }
 
 fn write_commit(

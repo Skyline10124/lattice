@@ -81,52 +81,77 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
         lattice_system_harness::FAKE_API_KEY,
     );
 
-    budget.check(&spec.name);
-    let mut tui = PtyTuiDriver::spawn(&driver, &world, "tui-smoke").expect("spawn tui");
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        budget.check(&spec.name);
+        let mut tui = PtyTuiDriver::spawn(&driver, &world, "tui-smoke").expect("spawn tui");
 
-    // Wait for the TUI to enter the alternate screen. Ready recognition
-    // lives inside the driver (`wait_for_ready`); the scenario never matches
-    // display bytes itself (RFC #41 decision three).
-    tui.wait_for_ready(Duration::from_secs(30))
-        .expect("tui entered alternate screen");
+        // Wait for the TUI to enter the alternate screen. Ready recognition
+        // lives inside the driver (`wait_for_ready`); the scenario never matches
+        // display bytes itself (RFC #41 decision three).
+        tui.wait_for_ready(Duration::from_secs(30))
+            .expect("tui entered alternate screen");
 
-    // Send a prompt and wait for the assistant token text. The fake LLM
-    // uses the shared long-text mock, so the final deterministic line must surface.
-    budget.check(&spec.name);
-    tui.send_line("ping").expect("send prompt");
-    tui.wait_for(Duration::from_secs(60), |s| s.contains("mock line 32"))
-        .expect("assistant token text appeared");
+        // Send a prompt and wait for the assistant token text. The fake LLM
+        // uses the shared long-text mock, so the final deterministic line must surface.
+        budget.check(&spec.name);
+        tui.send_line("ping").expect("send prompt");
+        tui.wait_for(Duration::from_secs(60), |s| s.contains("mock line 32"))
+            .expect("assistant token text appeared");
 
-    let caps = server.captured_requests();
-    assert!(
-        caps.iter()
-            .any(|c| c.model == "tui-smoke" && c.message_roles.iter().any(|r| r == "user")),
-        "fake LLM did not receive the expected request; captures: {caps:?}"
-    );
-
-    // `/quit` must exit the TUI **by itself**. Observe the child's own exit
-    // before `Drop` runs: Drop kills the process group, so a survivor check
-    // alone would pass even if `/quit` did nothing at all — it would only
-    // prove SIGKILL works.
-    tui.send_line("/quit").expect("send /quit");
-    tui.wait_for_exit(Duration::from_secs(15))
-        .expect("/quit must exit the TUI without being killed");
-
-    let pgid = tui.pgid();
-    drop(tui);
-
-    // Then verify the whole group is gone (no orphaned lattice/fake-LLM children).
-    std::thread::sleep(Duration::from_millis(400));
-    if let Some(pgid) = pgid {
-        let survivors = processes_in_pgid(pgid).expect("inspect TUI process group");
+        let caps = server.captured_requests();
         assert!(
-            survivors.is_empty(),
-            "TUI process group {pgid} still has live members after quit+drop: {survivors:?}"
+            caps.iter()
+                .any(|c| c.model == "tui-smoke" && c.message_roles.iter().any(|r| r == "user")),
+            "fake LLM did not receive the expected request; captures: {caps:?}"
         );
-    }
+
+        // `/quit` must exit the TUI **by itself**. Observe the child's own exit
+        // before `Drop` runs: Drop kills the process group, so a survivor check
+        // alone would pass even if `/quit` did nothing at all — it would only
+        // prove SIGKILL works.
+        tui.send_line("/quit").expect("send /quit");
+        tui.wait_for_exit(Duration::from_secs(15))
+            .expect("/quit must exit the TUI without being killed");
+
+        evidence.record_pty(tui.output());
+        let pgid = tui.pgid();
+        drop(tui);
+
+        // Then verify the whole group is gone (no orphaned lattice/fake-LLM children).
+        std::thread::sleep(Duration::from_millis(400));
+        if let Some(pgid) = pgid {
+            let survivors = processes_in_pgid(pgid).expect("inspect TUI process group");
+            assert!(
+                survivors.is_empty(),
+                "TUI process group {pgid} still has live members after quit+drop: {survivors:?}"
+            );
+        }
+        let session =
+            lattice_system_harness::SessionSendDriver::new(&driver, &world, &spec, "tui-smoke");
+        let out = session.run_command(&["--json", "session", "list"]).unwrap();
+        evidence.record_command("--json session list", &out);
+        assert!(out.is_clean_exit(0));
+        let list: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        record_pty_session(
+            &session,
+            &mut evidence,
+            list[0]["session_id"].as_str().unwrap(),
+            serde_json::json!({"prompt":"ping","script":"TuiMockScenario::LongText","exit":"/quit"}),
+        );
+    }));
+    evidence.record_captures(server.captured_requests());
+    support::finish_recorded(
+        evidence,
+        result,
+        "pty_tui_smoke",
+        "pty_tui_smoke_runs_turn_and_quits_cleanly",
+    );
 }
 
 mod support;
+
+use support::record_session as record_pty_session;
 
 fn finish_pty(
     evidence: lattice_system_harness::ScenarioEvidence,
@@ -237,10 +262,22 @@ fn pty_detach_reloads_pending_and_result_without_cancelling() {
         evidence.record_pty(reopened.output());
         reopened_result.unwrap();
         assert_eq!(server.captured_requests().len(), 1);
+        record_pty_session(
+            &session,
+            &mut evidence,
+            sid,
+            serde_json::json!({"script":"gated background reconnect answer","frontend":"Ctrl+D while provider held","daemon_pids":owners,"provider_requests":1}),
+        );
     }));
     evidence.record_pty(tui.output());
     evidence.record_captures(server.captured_requests());
-    finish_pty(evidence, result).unwrap_or_else(|report| panic!("{report}"));
+    drop(tui);
+    support::finish_recorded(
+        evidence,
+        result,
+        "pty_tui_smoke",
+        "pty_detach_reloads_pending_and_result_without_cancelling",
+    );
 }
 
 /// 真实模型段已开始后换前端：新后缀必须在终态 gate 放行前可见。
@@ -263,9 +300,13 @@ fn pty_mid_model_reconnect_shows_new_suffix_before_completion() {
         SseScript::Sequence {
             scripts: vec![
                 SseScript::plain(PREFIX),
-                SseScript::PlainText {
-                    chunks: vec![format!("{OLD} "), NEW.into()],
-                    finish_reason: "stop".into(),
+                SseScript::Chunks {
+                    chunks: vec![
+                        serde_json::json!({"choices":[{"index":0,"delta":{"content":OLD}}]}),
+                        serde_json::json!({"choices":[{"index":0,"delta":{"reasoning_content":"HIDDEN_REASONING_S4"}}]}),
+                        serde_json::json!({"choices":[{"index":0,"delta":{"content":NEW}}]}),
+                        serde_json::json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}),
+                    ],
                 },
             ],
         },
@@ -349,10 +390,14 @@ fn pty_mid_model_reconnect_shows_new_suffix_before_completion() {
 
         gate.release_next(step()).unwrap();
         gate.wait_until_stalled(6, step()).unwrap();
+        gate.release_next(step()).unwrap();
+        gate.wait_until_stalled(7, step()).unwrap();
         tui.wait_for(step(), |text| text.contains(NEW) && text.contains(OLD))
             .unwrap();
         let live = tui.redraw_text(step()).unwrap();
         assert!(live.contains(NEW) && live.contains(OLD), "{live}");
+        assert!(live.contains(&format!("{OLD}{NEW}")), "{live}");
+        assert!(!live.contains("HIDDEN_REASONING_S4"), "{live}");
         assert_eq!(live.matches(PREFIX).count(), 1, "{live}");
         assert_eq!(live.matches(NEW).count(), 1, "{live}");
         let pending = session
@@ -394,10 +439,71 @@ fn pty_mid_model_reconnect_shows_new_suffix_before_completion() {
             "completed"
         );
         assert_eq!(server.captured_requests().len(), 2);
+        for args in [
+            vec!["session", "log", session.session_id().unwrap()],
+            vec![
+                "--json",
+                "session",
+                "turn",
+                sent.accepted_turn_id().unwrap(),
+            ],
+            vec![
+                "--json",
+                "audit",
+                "replay",
+                "--session",
+                session.session_id().unwrap(),
+                "--turn",
+                sent.accepted_turn_id().unwrap(),
+            ],
+        ] {
+            let out = session.run_command(&args).unwrap();
+            evidence.record_command(args.join(" "), &out);
+            assert!(out.is_clean_exit(0), "{}", out.summary());
+        }
+        evidence
+            .record_json(
+                "observation-windows",
+                &serde_json::json!({
+                    "root":world.root(),"workspace":world.project_dir(),
+                    "state_root":world.session_store_dir().parent(),
+                    "daemon_pids":owners,"frontend_pgid":tui.pgid(),
+                    "original":old_frame,"resumed":resumed,"live":live,
+                    "gates_hit":[4,5,6,7],"provider_requests":2
+                }),
+            )
+            .unwrap();
         tui.send_line("/quit").unwrap();
         tui.wait_for_exit(budget.cap_timeout(Duration::from_secs(15)))
             .unwrap();
         assert!(processes_in_pgid(tui.pgid().unwrap()).unwrap().is_empty());
+        let mut reopened =
+            PtyTuiDriver::reconnect(&driver, &world, session.session_id().unwrap()).unwrap();
+        let reload_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            reopened.wait_for_ready(step()).unwrap();
+            reopened
+                .wait_for(step(), |text| {
+                    text.contains(OLD) && text.contains("completed")
+                })
+                .unwrap();
+            let reloaded = reopened.redraw_text(step()).unwrap();
+            evidence
+                .record_json("reloaded-frame", &serde_json::json!({"text":reloaded}))
+                .unwrap();
+            assert!(reloaded.contains(&format!("{OLD}{NEW}")), "{reloaded}");
+            assert!(!reloaded.contains("HIDDEN_REASONING_S4"), "{reloaded}");
+            assert_eq!(reloaded.matches(OLD).count(), 1, "{reloaded}");
+            assert_eq!(reloaded.matches(NEW).count(), 1, "{reloaded}");
+            reopened.send_line("/quit").unwrap();
+            reopened
+                .wait_for_exit(budget.cap_timeout(Duration::from_secs(15)))
+                .unwrap();
+        }));
+        evidence.record_pty(reopened.output());
+        drop(reopened);
+        if let Err(error) = reload_result {
+            std::panic::resume_unwind(error);
+        }
         server
             .shutdown(budget.cap_timeout(Duration::from_secs(3)))
             .unwrap();
@@ -416,7 +522,12 @@ fn pty_mid_model_reconnect_shows_new_suffix_before_completion() {
     drop(server);
     drop(replacement);
     drop(original);
-    finish_pty(evidence, result).unwrap_or_else(|report| panic!("{report}"));
+    support::finish_recorded(
+        evidence,
+        result,
+        "pty_tui_smoke",
+        "pty_mid_model_reconnect_shows_new_suffix_before_completion",
+    );
 }
 
 #[test]
@@ -474,8 +585,20 @@ fn pty_second_ctrl_c_preserves_cancel_acknowledgement() {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(server.captured_requests().len(), 1);
+        record_pty_session(
+            &session,
+            &mut evidence,
+            sid,
+            serde_json::json!({"script":"gated must not be delivered","frontend":"two Ctrl+C after accepted","provider_requests":1}),
+        );
     }));
     evidence.record_pty(tui.output());
     evidence.record_captures(server.captured_requests());
-    finish_pty(evidence, result).unwrap_or_else(|report| panic!("{report}"));
+    drop(tui);
+    support::finish_recorded(
+        evidence,
+        result,
+        "pty_tui_smoke",
+        "pty_second_ctrl_c_preserves_cancel_acknowledgement",
+    );
 }

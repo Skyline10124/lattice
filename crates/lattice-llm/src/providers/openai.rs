@@ -518,7 +518,6 @@ mod tests {
                 MessageSemantic::Text { text } => format!("T:{text}"),
                 MessageSemantic::Reasoning { text } => format!("R:{text}"),
                 MessageSemantic::ToolCall { call } => format!("C:{}", call.name),
-                _ => panic!("unexpected result"),
             })
             .collect()
     }

@@ -156,7 +156,7 @@ pub(crate) fn append_messages(
             match part.semantic {
                 MessageSemantic::Text { text } => match message.role {
                     MessageRole::User => blocks.push(Block::User(text)),
-                    MessageRole::Assistant => blocks.push(Block::Assistant(text)),
+                    MessageRole::Assistant => append_assistant_text(blocks, text),
                     MessageRole::System | MessageRole::Tool => {}
                 },
                 MessageSemantic::ToolCall { call } => blocks.push(Block::Tool {
@@ -165,8 +165,16 @@ pub(crate) fn append_messages(
                     state: ToolState::Unknown,
                     source: ToolSource::HistoryCall,
                 }),
-                MessageSemantic::Reasoning { .. } | MessageSemantic::ToolResult { .. } => {}
+                MessageSemantic::Reasoning { .. } => {}
             }
         }
+    }
+}
+
+/// 隐藏 reasoning 不应在重连或持久正文替换时引入实时流没有的换行。
+pub(crate) fn append_assistant_text(blocks: &mut Vec<Block>, text: String) {
+    match blocks.last_mut() {
+        Some(Block::Assistant(previous)) => previous.push_str(&text),
+        _ => blocks.push(Block::Assistant(text)),
     }
 }

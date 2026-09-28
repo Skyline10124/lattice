@@ -169,7 +169,7 @@ pub fn native_to_wire<S: ToolCallState>(
     message: &NativeMessage<S>,
 ) -> Result<Value, ProjectionError> {
     let mut wire_parts: Vec<Value> = Vec::new();
-    for (ordinal, part) in message.parts.iter().enumerate() {
+    for part in &message.parts {
         let thought_signature = part.replay_state.as_ref().map(|state| state.as_str());
         match &part.semantic {
             MessageSemantic::Text { text } => {
@@ -199,12 +199,6 @@ pub fn native_to_wire<S: ToolCallState>(
                     wire_part["thoughtSignature"] = json!(signature);
                 }
                 wire_parts.push(wire_part);
-            }
-            MessageSemantic::ToolResult { .. } => {
-                return Err(ProjectionError::UnsupportedPart {
-                    provider: ProviderOrigin::Gemini,
-                    part_ordinal: ordinal,
-                });
             }
         }
     }

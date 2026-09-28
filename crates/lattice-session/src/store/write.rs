@@ -179,7 +179,7 @@ impl SessionStore {
         codec::persist(&tx, &before, &after)?;
         #[cfg(test)]
         write_probe(WriteStage::BeforeCommit);
-        #[cfg(any(test, feature = "test-utils"))]
+        #[cfg(any(test, feature = "test-utils", feature = "test-crash-barriers"))]
         let injected = if hit(FaultPoint::Poisoned) {
             Some(redb::CommitError::TransactionPoisoned)
         } else if hit(FaultPoint::UnknownBefore) {
@@ -189,16 +189,16 @@ impl SessionStore {
         } else {
             None
         };
-        #[cfg(any(test, feature = "test-utils"))]
+        #[cfg(any(test, feature = "test-utils", feature = "test-crash-barriers"))]
         let committed = if let Some(error) = injected {
             drop(tx);
             Err(error)
         } else {
             tx.commit()
         };
-        #[cfg(not(any(test, feature = "test-utils")))]
+        #[cfg(not(any(test, feature = "test-utils", feature = "test-crash-barriers")))]
         let committed = tx.commit();
-        #[cfg(any(test, feature = "test-utils"))]
+        #[cfg(any(test, feature = "test-utils", feature = "test-crash-barriers"))]
         let committed = if committed.is_ok() && hit(FaultPoint::UnknownAfter) {
             Err(redb::CommitError::Storage(redb::StorageError::Io(
                 injected_io(),
@@ -470,9 +470,6 @@ impl SessionStore {
                             },
                         });
                         MessageSemantic::ToolCall { call: bound }
-                    }
-                    MessageSemantic::ToolResult { .. } => {
-                        return Err(invalid("reply", "unexpected tool result"));
                     }
                 };
                 parts.push(MessagePart {

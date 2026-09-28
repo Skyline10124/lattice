@@ -57,17 +57,19 @@ cargo xtask lancet-boundary
 
 ## Audit 与 status
 
-在对应 Local Workspace 根目录运行。当前 CLI 的 tail 是 `--tail` 选项，不是 `audit tail` 子命令；replay 同时需要 SessionId 和 TurnId。
+在对应 Local Workspace 根目录运行。查询经 Local IPC 由后台读取全局会话库，按 Session 的项目绑定过滤，无需当前 profile/provider 凭据或 Component 组成。tail 是 `--tail` 选项，不是子命令；replay 同时需要 SessionId 和 TurnId。
 
 ```sh
 lattice audit --help
 lattice audit --json
-lattice audit --tail --since <ledger_oid> --json
-lattice audit replay --session <SessionId> --turn <TurnId> --json
+lattice audit --tail --since 0 --json
+SESSION_ID="替换为会话 ID"
+TURN_ID="替换为 TurnId"
+lattice audit replay --session "$SESSION_ID" --turn "$TURN_ID" --json
 lattice lancet status --json
 ```
 
-查询和 replay 可用 `--at <ledger_oid>` 固定视图。`--since` 是排他的 ledger OID 游标，不能使用旧数字 audit ID。过滤选项与参数解析见 [`commands/audit.rs`](../../crates/lattice-cli/src/commands/audit.rs)；固定 tip、顺序及生命周期语义见 [InvocationStore 操作员接口](../architecture/lancet.md#invocationstore-与操作员接口)。这些是 Host-only 操作，不向 Agent 注册为 Tool，也不会重新执行工具。
+`--since` 是排他的全局 ChangeSeq 游标，`0` 从日志起点读取；续读使用响应的 `next_after`。其他项目的变化也会推进扫描位置，所以过滤后空页仍可能推进游标。查询在一个读事务中完成，不再接受 `--at` 或 ledger OID；Registered、Started 及终态都可读。过滤、分页参数见 [`commands/audit.rs`](../../crates/lattice-cli/src/commands/audit.rs)，语义见[操作员接口](../architecture/lancet.md#操作员接口)。DTO 不含原始参数、结果正文或 schema；这些是 Host-only 操作，不向 Agent 注册为 Tool，也不会重新执行工具。
 
 ## Doctor
 
@@ -80,11 +82,11 @@ lattice --json lancet doctor
 
 ## 开发状态诊断与重建边界
 
-持久化失败先按 [Session 重开](../architecture/session.md#重开取消与未完成状态)关闭旧 Turn，不重新联系 provider 或分发 Tool，不把已有目录删除重建作为普通恢复手段。旧 #139-B 的 no-import hard cut 与清理步骤是历史操作，不授权清理当前状态。
+先通过只读查询确认实际状态。后台在该 Session 的下一次新提交或 `rewind` 前按[自动关闭规则](../architecture/session.md#自动关闭崩溃遗留任务)处理无 Owner 的遗留 Turn，不重新联系 provider 或分发 Tool；单纯重开与观察不触发关闭。不要把删除目录重建作为普通恢复手段，旧 #139-B 的清理步骤不授权处理当前状态。
 
-确需开发状态重建时，先由人类明确选择绝对 STATE_ROOT、Local Workspace、ProjectStoreKey 和数据归属，逐项列出将受影响的会话与项目库。全局 `sessions.git` 与项目的 `invocations.git` / `workspace-history.git` 分别核验；默认保留全局会话，不以广泛 glob 删除其他项目数据。所需原证据先保全，任何删除、搬移、重新创建都须有对应授权。路径规则见[存储布局](../architecture/storage.md#私有状态根)，不从旧日志路径猜测当前目标。
+确需开发状态重建时，先由人类明确选择绝对 STATE_ROOT、Local Workspace、ProjectStoreKey 和数据归属，逐项列出受影响对象。全局 `lattice.redb` 保存所有项目的会话，不能为处理单个项目随意删除；项目 `workspace-history.git` 单独核验。发现旧 `sessions.git` 或任意项目 `invocations.git` 时，后台拒绝打开并列出路径，由人决定删除或存档，不迁移、不兼容读取。所需原证据先保全，任何删除、搬移、重新创建都须有对应授权，不用广泛 glob 操作其他项目。路径以[存储布局](../architecture/storage.md#私有状态根)为准，不从旧日志猜测。
 
-重建后使用正式创建入口验证新 Session 与零 Tool Turn；旧 Session/Turn 与 WorkspaceHistory 不承诺跨 hard cut 可读或可 Rewind。没有运行上述验证时，只能报告完成文件处理，不能宣称恢复闭环。
+重建后通过不带 `--session`、带 `--agent` 的正式 `session send` 入口验证新 Session 和一次无工具调用的 Turn，核对 `list`、`log`、`turn --json` 与操作员输出。旧 Session/Turn 不承诺跨 hard cut 可读；会话 `rewind` 不恢复文件。没有实际运行这些验证时，只能报告完成文件处理，不能宣称恢复闭环。
 
 ## 验证与出处
 

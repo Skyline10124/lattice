@@ -359,12 +359,7 @@ pub fn tool_results_to_wire(
     results: &[StoredToolResult],
 ) -> Result<Vec<Value>, ProjectionError> {
     let invalid = |detail| ProjectionError::InvalidStep { detail };
-    if assistant.role != MessageRole::Assistant
-        || assistant
-            .parts
-            .iter()
-            .any(|p| matches!(p.semantic, MessageSemantic::ToolResult { .. }))
-    {
+    if assistant.role != MessageRole::Assistant {
         return Err(invalid(
             "step requires an assistant without embedded results",
         ));

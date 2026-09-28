@@ -63,7 +63,9 @@ fn main() -> ExitCode {
         let meta = StoreMeta {
             store_kind: "probe".to_string(),
             store_schema_version: 1,
-            scope: StoreScope::Global,
+            scope: StoreScope::Project {
+                key: lattice_store::ProjectStoreKey::derive(&location)?,
+            },
         };
         let repo = StoreRepo::create(&smoke, meta, |repo| {
             let blob = repo.write_blob(b"probe-smoke")?;
@@ -79,7 +81,9 @@ fn main() -> ExitCode {
         let expected = lattice_store::ExpectedMeta {
             store_kind: "probe".to_string(),
             store_schema_version: 1,
-            scope: StoreScope::Global,
+            scope: StoreScope::Project {
+                key: lattice_store::ProjectStoreKey::derive(&location)?,
+            },
         };
         let reopened = StoreRepo::open(&smoke, &expected)?;
         if reopened.ref_target("refs/lattice/probe/smoke")?.is_none() {

@@ -54,19 +54,6 @@ fn semantic_projection<S: ToolCallState>(message: &NativeMessage<S>) -> Value {
                     "arguments": call.arguments(),
                 }
             }),
-            MessageSemantic::ToolResult {
-                invocation_id,
-                name,
-                outcome,
-                content,
-            } => json!({
-                "tool_result": {
-                    "invocation_id": invocation_id.to_string(),
-                    "name": name,
-                    "outcome": outcome.as_str(),
-                    "content": content,
-                }
-            }),
         })
         .collect();
     json!({
@@ -76,7 +63,7 @@ fn semantic_projection<S: ToolCallState>(message: &NativeMessage<S>) -> Value {
 }
 
 /// Provider-neutral semantic digest: role, ordered text, complete reasoning,
-/// canonical Tool call/result semantics. Excludes provider origin, provider
+/// canonical Tool call semantics. Excludes provider origin, provider
 /// call IDs, and every part-local replay state.
 pub fn semantic_digest<S: ToolCallState>(message: &NativeMessage<S>) -> [u8; 32] {
     digest_with_domain(

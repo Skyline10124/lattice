@@ -2,35 +2,30 @@
 
 ## 职责与模块
 
-维护会话图、不可变 TurnCommit、分支和 detached HEAD、diff、usage、GitSessionGraphStore、PendingTurn/ResultDraft 和纯协调 reducer。对话及 usage 类型归 lattice-conversation，原样重导出，持久化归本 crate。
+维护全局会话库 `lattice.redb`：Session、只追加的会话树、Step/Turn 记录、调用槽位、InvocationId 索引和调用变更日志。提供同步的领域事务、自动关闭规划、历史读取与操作员只读投影；对话与 usage 类型归 `lattice-conversation`。
 
-- `graph.rs`/`lib.rs`：图接口、模型、错误、分支校验与公开重导出。
-- `git_graph/session.rs`/`state.rs`：SessionState 与 session ref 发布；commit/refs 模块：树、commit、transcript、manifest、分支/checkout/reset/diff。
-- `git_graph/pending.rs` 与 `pending/`：CAS 日志、材料分类、候选修订、最终引用事务与纯 reducer。
-- `git_graph/validation.rs`：认证到会话 ref 集合的派生 strict-open 投影；helpers：序列化辅助。
-- tests/pending_journal、pending_crash、pending_fixtures：日志/崩溃/拓扑与确定性构造；test_utils 仅为下游测试提供设施。
+- `store/mod.rs`、`types.rs`：SessionStore、锁凭据、领域类型、错误与公开接口。
+- `store/codec.rs`、`open.rs`、`validate.rs`：表与值版本、创建/严格打开、形状及跨记录一致性校验。
+- `store/write.rs`、`close.rs`：事务写入与纯关闭规划；`read.rs`：快照、树、Step 详情、分页和操作员投影。
+- `store/config.rs`、`hex_digest.rs`：冻结事实与摘要编码；`local.rs`：按 Session/Turn 等范围加载事务记录。
+- `store/tests.rs` 与 `store/FAILURE_MODES.md`：记录层风险及回归；`test_support.rs`：唯一 XDG 测试 guard。
 
 ## 上位文档
 
-修改前读取[会话合同](../../docs/architecture/session.md)、[存储合同](../../docs/architecture/storage.md)、[工作区 checkpoint](../../docs/architecture/workspace.md)及[测试工程](../../docs/development/testing.md)。
+修改前读取[会话合同](../../docs/architecture/session.md)、[存储合同](../../docs/architecture/storage.md)、[调用与证据](../../docs/architecture/lancet.md)及[测试工程](../../docs/development/testing.md)。涉及文件关联时读取[工作区历史](../../docs/architecture/workspace.md)。旧 Git 会话、独立调用账本与跨库协调的取代范围见 [ADR 0006](../../docs/adr/0006-tree-session-and-global-redb-store.md)。
 
 ## 局部约束
 
-- Git 是唯一生产存储；无 SQLite、可变 sidecar、importer、git2 或自制持久化机制。会话永久绑定组成层传入的 ProjectStoreKey，不从进程 cwd 推导。
-- 不负责 provider、profile 发现、CLI、Tool 执行或 InvocationStore I/O，不依赖 audit。Invocation facts 由 API 投影，reconcile 只消费数据；不能把候选修订请求当成闭合 TurnOutcome。
-- committed serde 形状、canonical JSON、commit 身份及类型化 checkpoint 是持久契约，不就地改 conversation 重导出形状。`Empty` 仅来自权威历史 ref 缺失，OID 必须规范校验。
-- refs/锁/严格打开与最终发布遵循会话、存储合同。open 不初始化或修复；普通读取不增加全局写瓶颈，strict-open 在仓库锁内验证跨引用不变量。损坏无关会话也不能被忽略。
-- 派生校验投影与领域 ref 变更在同一内核事务发布，open 不写投影；缺失或认证不符转完整会话对象校验，不使投影成为第二权威。不为 refs/lattice/** 配置远端 push refspec。
-- CAS 成功已含所需对象/引用屏障，不再追加重复屏障；已发布但未确认持久的精确重试仍完成同步。任意 I/O 失败的部分效果按存储合同处理，不承诺普通错误时所有引用必然未动。
-- journal payload predecessor 与 Git parent 一致，根接冻结 conversation tip；每个 binding/draft/candidate 地址与 SessionId 交叉核验。strict-open 验证完整 active-turn 和永久 Turn pin 的 manifest 身份。
-- ContinueModel 的 model_step_ordinal 使两份快照即可验证步连续性与首次 attempt 为零。无 journal committer time 时 reconcile fail closed；advance_pending_turn 先识别精确已发布候选，再判断是否非法迁移。
-- 累积 post_user_transcript 是唯一 authority；live/reopen 共用候选基础。重开只关闭、不请求模型或重执行 Tool；最终发布仅经 PendingTurn 事务。
-- 已关闭结果的观察端确认（`confirm_committed_turn`）只核验固定 pin 并补足 pending 引用屏障：不取会话执行锁、不发布引用或候选、不关闭 pending；崩溃遗留 pending 由后台在新提交或会话写操作前按[自动关闭规则](../../docs/architecture/session.md#自动关闭崩溃遗留任务)处理。
-- 直接 commit 构造和 fixture builder 仅测试可见；下游只在 dev-dependencies 启用 test-utils，生产依赖不得取消 cfg 隔离。保留候选修订的结构不变、精确计划及所有权校验。
+- 会话库格式与事务由本 crate 拥有，不暴露原始表或写事务。redb 版本、文件后端、独占打开与 Immediate 提交遵循存储合同；不引入双写、旧库迁移或兼容读取。
+- Session 永久绑定组成层传入的 ProjectStoreKey，不从进程 cwd 推导。不负责 provider、profile 发现、CLI 或 Tool 执行，不依赖 runtime/API/agent/profile；操作员读取保持 runtime-free。
+- open 不初始化、不修复，损坏无关 Session 也不能忽略。类型、值版本、规范 JSON、绑定摘要与证据版本都须校验，派生索引和变更日志随权威记录在同一事务更新。
+- 树节点与已关闭记录只追加；进行中 Step 按事务推进。槽位全部有结果后才写 Step 节点，最后一个 Step 与 Turn 同时关闭。live 与自动关闭共用有序终态规则，不从缺少结果推定未执行。
+- 自动关闭只消费持久事实，不请求模型、不重执行 Tool、不采样工作区。读取不关闭遗留 Turn；退回只移动当前位置，文件及工作区历史保持原样。
+- 锁范围、失败后停写与关闭重开遵循会话和存储合同。写事务内不等待外部操作；同步接口由异步调用方放入阻塞执行边界。
+- 操作员 DTO 不含参数、结果正文、schema 或冻结秘密。测试设施仅在 `cfg(test)` 或显式测试 feature 下可用，下游通过 dev-dependencies 启用，生产不得绕过领域事务。
 
 ## 验证入口
 
-- `cargo test -p lattice-session`，保留 pending correctness、strict-open、lineage、pin 与真实 SIGKILL fixture。
-- transcript/ref 变化覆盖 linear、merge、diamond、branch reset、detached HEAD，不能漏 merge 侧消息。
-- schema/ref/topology 变化关联 API/CLI；性能变化按实际影响验证竞争或分块，不将 diagnostic-only 活动当作正确性豁免。
-- `cargo xtask lancet-boundary` 检查生产 test-utils 隔离与依赖。
+- `cargo test -p lattice-session`；隔离风险先登记 `store/FAILURE_MODES.md`，按任务要求观察红后实现。
+- 格式、树、事务或读取变化关联 API/CLI；真实提交、退回分叉、旧库拒绝和崩溃关闭使用当前二进制的外部 harness，不以纯 planner 测试代替提交窗口。
+- `cargo xtask lancet-boundary` 检查 session 的 runtime-free 边界与生产测试 feature 隔离。

@@ -4,9 +4,10 @@
 //! 无数据库时 operator 查询必须类型化失败且不创建库、不回显私有路径。
 //! 有库查询、全局 ChangeSeq 与重放由 direct_operator 保护。
 
+mod support;
 use lattice_system_harness::{
     AssertError, CommandOutcome, LatticeCommand, LatticeDriver, ScenarioSpec, ScenarioWorld,
-    assert_exit_code, assert_stderr_contains, assert_with_failure_artifacts,
+    assert_exit_code, assert_stderr_contains,
 };
 use serde_json::Value;
 
@@ -33,8 +34,24 @@ fn ok_or_artifacts(
     out: &CommandOutcome,
     result: Result<(), AssertError>,
 ) {
-    assert_with_failure_artifacts(world, name, summary, out, &[], result)
-        .unwrap_or_else(|e| panic!("{e}"));
+    let mut evidence = lattice_system_harness::ScenarioEvidence::new(world, name, []).unwrap();
+    evidence.record_command(summary, out);
+    let result =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            result.unwrap();
+            let exists = world.session_store_dir().join("lattice.redb").exists();
+            assert!(!exists, "read must not initialize the store");
+            evidence.record_json("state-summary", &serde_json::json!({
+            "database_exists":exists,"log_turn":"不适用：未初始化库，没有 Session 或 Turn"
+        })).unwrap();
+            evidence
+                .record_json(
+                    "parameters",
+                    &serde_json::json!({"command":summary,"profile":null,"provider":null}),
+                )
+                .unwrap();
+        }));
+    support::finish_recorded(evidence, result, "fast_audit_cli", name);
 }
 
 /// 缺少调用账本的公开诊断；文本模式与 JSON 模式共用同一原因。
@@ -122,7 +139,7 @@ fn fast_audit_query_missing_store_errors_cleanly_json() {
     let out = run(&world, &spec, &["audit", "query", "--json"]);
     assert_missing_store_json(
         &world,
-        "fast-audit-query-missing-json",
+        "fast_audit_query_missing_store_errors_cleanly_json",
         "lattice audit query --json",
         &out,
     );
@@ -135,7 +152,7 @@ fn fast_audit_query_missing_store_errors_cleanly_text() {
     let out = run(&world, &spec, &["audit", "query"]);
     assert_missing_store(
         &world,
-        "fast-audit-query-missing-text",
+        "fast_audit_query_missing_store_errors_cleanly_text",
         "lattice audit query",
         &out,
     );
@@ -148,7 +165,7 @@ fn fast_audit_tail_missing_store_errors_cleanly() {
     let out = run(&world, &spec, &["audit", "query", "--tail", "--json"]);
     assert_missing_store_json(
         &world,
-        "fast-audit-tail-missing",
+        "fast_audit_tail_missing_store_errors_cleanly",
         "lattice audit query --tail --json",
         &out,
     );
@@ -173,7 +190,7 @@ fn fast_audit_replay_missing_store_errors_cleanly() {
     );
     assert_missing_store_json(
         &world,
-        "fast-audit-replay-missing",
+        "fast_audit_replay_missing_store_errors_cleanly",
         "lattice audit replay --json",
         &out,
     );

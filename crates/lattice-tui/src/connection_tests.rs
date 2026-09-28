@@ -247,3 +247,84 @@ fn loaded_step_and_terminal_tool_cannot_be_overwritten_by_late_events() {
     );
     assert!(app.blocks.iter().any(|b|matches!(b,Block::Tool{state:ToolState::Unavailable{outcome},..} if outcome=="succeeded")));
 }
+
+#[test]
+fn hidden_reasoning_does_not_change_text_on_snapshot_or_history_replacement() {
+    let id = lattice_api::local::new_turn_id();
+    let key = ModelAttemptKey {
+        turn_id: id,
+        model_step_ordinal: 0,
+        attempt_ordinal: 0,
+    };
+    let mut live = app();
+    live.apply_turn_event(TurnEvent::TokenDelta {
+        key,
+        content: "before ".into(),
+    });
+    live.apply_turn_event(TurnEvent::ReasoningDelta {
+        key,
+        content: "hidden".into(),
+    });
+    live.apply_turn_event(TurnEvent::TokenDelta {
+        key,
+        content: "after".into(),
+    });
+    let render = |app: &App| {
+        crate::view::transcript_lines(app, 80)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+    };
+    let expected = render(&live);
+    assert!(
+        expected
+            .iter()
+            .any(|line| line.trim_start() == "before after"),
+        "{expected:?}"
+    );
+    assert!(!expected.iter().any(|line| line.contains("hidden")));
+
+    let mut snapshot = view(id, "completed");
+    snapshot.session.active_turn = Some(id);
+    let turn = snapshot.selected_turn.as_mut().unwrap();
+    turn.summary = None;
+    turn.ended_at = None;
+    snapshot.owned = true;
+    snapshot.active = Some(
+        serde_json::from_value(json!({
+            "key":{"turn_id":id,"ordinal":0},
+            "state":{"state":"requesting","attempt":0}
+        }))
+        .unwrap(),
+    );
+    snapshot.attempt = live.attempt.clone();
+    let mut reconnected = app();
+    reconnected.apply_update(LocalUpdate::Reset {
+        view: Box::new(snapshot.clone()),
+        generation: 1,
+    });
+    let resumed = render(&reconnected);
+
+    let history = serde_json::from_value(json!({
+        "anchor":{"session_id":SID,"head":2},
+        "entries":[{"node":2,"agent_name":"test","content":{
+            "kind":"step","parent":1,"turn_id":id,"step_ordinal":0,
+            "content":{"assistant":{"role":"assistant","origin":"open_ai_compatible","parts":[
+                {"semantic":{"text":{"text":"before "}}},
+                {"semantic":{"reasoning":{"text":"hidden"}}},
+                {"semantic":{"text":{"text":"after"}}}
+            ]},"results":[]}
+        }}]
+    }))
+    .unwrap();
+    live.apply_update(LocalUpdate::History {
+        anchor: lattice_api::local::HistoryAnchor {
+            session_id: SID.parse().unwrap(),
+            head: lattice_api::local::NodeId(2),
+        },
+        generation: 0,
+        stale: false,
+        result: Ok(Box::new(history)),
+    });
+    assert_eq!((resumed, render(&live)), (expected.clone(), expected));
+}
