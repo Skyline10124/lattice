@@ -749,7 +749,8 @@ fn try_record_once(
 
     // Everything appended here is an ancestor of the new `current`, so the
     // normal path needs no per-record refs: the CAS below is what publishes
-    // it, and the barrier makes objects and ref durable together.
+    // it, and `cas_ref` already fsyncs the pending objects before publishing
+    // and the ref after, so no second barrier follows a successful CAS.
     let expect = match parent {
         Some(oid) => RefExpectation::MustMatch(oid),
         None => RefExpectation::MustNotExist,
@@ -760,14 +761,11 @@ fn try_record_once(
         expect,
         "lattice workspace history mutation",
     ) {
-        Ok(()) => {
-            store.fsync_pending(&[CURRENT_REF])?;
-            Ok(RecordAttempt::Recorded(RecordedMutation {
-                commit_id: commit.to_string(),
-                baseline_commit_id,
-                parent_commit_id: parent.map(|oid| oid.to_string()),
-            }))
-        }
+        Ok(()) => Ok(RecordAttempt::Recorded(RecordedMutation {
+            commit_id: commit.to_string(),
+            baseline_commit_id,
+            parent_commit_id: parent.map(|oid| oid.to_string()),
+        })),
         Err(StoreError::CasConflict { detail, .. }) => Ok(RecordAttempt::CurrentMoved(detail)),
         Err(err) => Err(err.into()),
     }
