@@ -78,7 +78,11 @@ pub(crate) async fn freeze_configuration(
 pub(crate) fn history_blocks(history: LocalHistory) -> Vec<Block> {
     let mut blocks = Vec::new();
     for entry in history.entries {
-        blocks.push(Block::AgentName(entry.agent_name));
+        // Turn 的 agent 在接受时冻结，同一 Turn 的 Step 不再重复标题；路径从根开始，
+        // 每个 Step 前必有本 Turn 的 UserMessage。
+        if !matches!(entry.content, Node::Step { .. }) {
+            blocks.push(Block::AgentName(entry.agent_name));
+        }
         match entry.content {
             Node::Root => {}
             Node::UserMessage {

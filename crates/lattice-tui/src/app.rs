@@ -644,7 +644,7 @@ impl App {
                 }
             }
         }
-        // 已装入节点所在组的起点：history_blocks 在每个节点前放一个 AgentName。
+        // 已装入节点所在组的起点：history_blocks 在每个 UserMessage 节点前放一个 AgentName。
         let starts: Vec<(Block, usize)> = blocks
             .iter()
             .enumerate()
@@ -907,7 +907,7 @@ pub(crate) async fn run_app(
     let _cleanup = TerminalCleanup { kitty };
 
     let mut app = App::new(ctx, kitty, &options.session_dir);
-    app.push_status(StatusKind::Notice(startup_notice(&app.ctx)));
+    app.push_status(StatusKind::Notice(startup_notice()));
     let mut exit = run_loop(
         &options,
         &mut app,
@@ -1107,11 +1107,10 @@ fn help_lines(kitty: bool) -> Vec<String> {
 }
 
 #[rustfmt::skip]
-fn startup_notice(ctx: &SessionContext) -> Vec<String> {
+/// session 与 agent 由状态行（或侧栏）显示并随接受更新，这里不重复。
+fn startup_notice() -> Vec<String> {
     vec![
         "LATTICE".into(),
-        format!("session {}", session_label(ctx.session_id)),
-        format!("agent {}", ctx.active_agent),
         "/help  show commands".into(),
         "/clear  clear transcript".into(),
         "/quit  exit".into(),

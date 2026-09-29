@@ -30,13 +30,13 @@ use std::time::Duration;
 
 use lattice_system_harness::processes_in_pgid;
 use lattice_system_harness::{
-    LatticeDriver, PtyTuiDriver, ScenarioLayer, ScenarioSpec, ScenarioWorld, TuiMockScenario,
+    LatticeDriver, PtyTuiDriver, ScenarioLayer, ScenarioSpec, ScenarioWorld,
 };
 
 /// Minimal project-local agent profile for the TUI smoke: the Direct-Local
-/// end-state shape — no `[workspace]` section, no enabled tools (this is a
-/// plain-text turn, so no `tool_calls` should appear). Hand-written TOML,
-/// not serde — the harness boundary forbids `lattice-profile`.
+/// end-state shape — no `[workspace]` section. `session.todo_write` gives the
+/// Turn a Tool Step before the final text Step, so one Turn spans two Steps.
+/// Hand-written TOML, not serde — the harness boundary forbids `lattice-profile`.
 const AGENT_TOML: &str = r#"schema_version = 1
 
 [agent]
@@ -47,8 +47,28 @@ model = "compat:tui-smoke"
 system = "You are a concise test agent. Reply briefly."
 
 [tools]
-enabled = []
+enabled = ["session.todo_write"]
 "#;
+
+/// 一个 Turn 两个 Step：先调用工具，再输出三行最终回答。
+fn two_step_script() -> lattice_system_harness::SseScript {
+    use lattice_system_harness::SseScript;
+    SseScript::Sequence {
+        scripts: vec![
+            SseScript::ToolCall {
+                call_id: "smoke-call-1".into(),
+                tool_name: "session.todo_write".into(),
+                arguments_json: r#"{"todos":[{"content":"smoke","status":"in_progress"}]}"#.into(),
+            },
+            SseScript::PlainText {
+                chunks: (1..=3)
+                    .map(|n| format!("mock line {n:02}: final answer.\n"))
+                    .collect(),
+                finish_reason: "stop".into(),
+            },
+        ],
+    }
+}
 
 fn driver() -> LatticeDriver {
     LatticeDriver::from_env().expect("LATTICE_BIN must point to a built lattice binary")
@@ -72,8 +92,8 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
     world.init_git_project().expect("init git project");
     budget.check(&spec.name);
 
-    let server = lattice_system_harness::FakeLlmServer::start(TuiMockScenario::LongText.script())
-        .expect("start fake llm");
+    let server =
+        lattice_system_harness::FakeLlmServer::start(two_step_script()).expect("start fake llm");
     world.set_env("OPENAI_COMPATIBLE_BASE_URL", server.base_url());
     world.set_env("OPENAI_COMPATIBLE_MODEL", "tui-smoke");
     world.set_env(
@@ -91,24 +111,42 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
         // display bytes itself (RFC #41 decision three).
         tui.wait_for_ready(Duration::from_secs(30))
             .expect("tui entered alternate screen");
+        // session 与 agent 只在状态行显示，启动说明不重复；提交前状态行的 session 是“未接受”。
+        tui.wait_for(Duration::from_secs(30), |s| s.contains("show commands"))
+            .expect("startup notice appeared");
+        let start = tui
+            .redraw_text(Duration::from_secs(10))
+            .expect("startup frame");
+        assert!(
+            start.matches("未接受").count() == 1 && start.matches("tui-smoke").count() == 1,
+            "session and agent must appear only in the status line: {start}"
+        );
 
-        // Send a prompt. The fake LLM uses the shared long-text mock, so the final
-        // deterministic line must end up on screen.
+        // Send a prompt. The Turn runs a Tool Step and then a three-line text Step.
         budget.check(&spec.name);
         tui.send_line("ping").expect("send prompt");
 
         // Turn 关闭后，持久正文装入会替换实时块；实时事件积压被丢弃时，正文只经由这次装入到达。
         // 装入在屏幕上没有标志，整行移位后终端只重写变化的字符格，输出流里拼不出连续的文字，
-        // 所以等它落定后取整帧判断：最终回答在屏幕上，启动提示按时间顺序留在本 Turn 之前。
+        // 所以等它落定后取整帧判断。
         tui.wait_for(Duration::from_secs(60), |s| s.contains("completed"))
             .expect("turn summary appeared");
         std::thread::sleep(Duration::from_secs(3));
         let frame = tui
             .redraw_text(Duration::from_secs(10))
             .expect("settled frame");
+        // 启动提示按时间顺序留在本 Turn 之前，最终回答仍在屏幕上。
+        let notice = frame.find("show commands");
+        let answer = frame.find("mock line 03");
         assert!(
-            frame.contains("mock line 32") && !frame.contains("show commands"),
-            "final answer must stay on screen after the durable history install: {frame}"
+            answer.is_some() && notice.is_none_or(|n| Some(n) < answer),
+            "final answer must stay on screen after the startup notice: {frame}"
+        );
+        // 两个 Step 同属一个 Turn：助手标题只出现一次，另一处是状态行。
+        assert_eq!(
+            frame.matches("tui-smoke").count(),
+            2,
+            "one assistant header per Turn plus the status line: {frame}"
         );
         // 首次提交在接受事务里才创建会话库；接受前不应有订阅，也就不应出现“库不可用”。
         let shown = String::from_utf8_lossy(tui.output()).into_owned();
@@ -155,7 +193,7 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
             &session,
             &mut evidence,
             list[0]["session_id"].as_str().unwrap(),
-            serde_json::json!({"prompt":"ping","script":"TuiMockScenario::LongText","exit":"/quit"}),
+            serde_json::json!({"prompt":"ping","script":"todo_write tool step + three-line text step","exit":"/quit"}),
         );
     }));
     evidence.record_captures(server.captured_requests());
