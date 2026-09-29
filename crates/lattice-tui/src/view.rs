@@ -10,8 +10,10 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Block, DockSeverity, StatusKind, ToolState, TurnPhase};
 use crate::input::{CTRL_C_WINDOW, InputBuffer};
-use crate::{markdown, wrapping};
+use crate::wrapping;
 
+pub(crate) mod browse;
+pub(crate) use browse::Focus;
 mod dock;
 mod statusline;
 pub(crate) use dock::{Dock, DockIntent};
@@ -81,13 +83,22 @@ impl Viewport {
 
     /// Content changed to `content_rows`; viewport height is `height`.
     pub(crate) fn on_content_changed(&mut self, content_rows: usize, height: usize) {
+        if (self.rows, self.height) == (content_rows, height) {
+            return;
+        }
+        let shrank = content_rows < self.rows || height != self.height;
         (self.rows, self.height) = (content_rows, height);
         let max = content_rows.saturating_sub(height);
         if self.follow {
             self.scroll = max;
-        } else {
+        } else if shrank {
             self.scroll = self.scroll.min(max);
         }
+    }
+
+    /// 浏览时 Dock 占位/释放不等于用户滚动：视图不动，允许底部暂留空行。
+    pub(crate) fn on_dock_changed(&mut self, content_rows: usize, height: usize) {
+        (self.rows, self.height) = (content_rows, height);
     }
 
     pub(crate) fn page_up(&mut self, height: usize) {
@@ -183,8 +194,11 @@ fn fold_symbol(expanded: bool) -> &'static str {
     }
 }
 
-pub(crate) fn draw(frame: &mut Frame, app: &App) {
+pub(crate) fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
+    app.term_width = area.width;
+    app.term_height = area.height;
+    let transcript = app.prepare_transcript();
     let geometry = frame_layout(area.width, area.height);
     match geometry.sidebar {
         Sidebar::Visible => {
@@ -194,16 +208,16 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
                 Constraint::Length(SIDEBAR_W),
             ])
             .split(area);
-            draw_left(frame, app, columns[0], geometry.content_w);
+            draw_left(frame, app, columns[0], geometry.content_w, &transcript);
             frame.render_widget(Paragraph::new("").style(status_surface_style()), columns[2]);
         }
         Sidebar::Hidden => {
-            draw_left(frame, app, area, geometry.content_w);
+            draw_left(frame, app, area, geometry.content_w, &transcript);
         }
     }
 }
 
-fn draw_left(frame: &mut Frame, app: &App, area: Rect, content_w: u16) {
+fn draw_left(frame: &mut Frame, app: &App, area: Rect, content_w: u16, transcript: &Transcript) {
     let dock = Dock::new(app);
     let bottom_h = 1.min(area.height);
     let above = area.height.saturating_sub(bottom_h);
@@ -217,6 +231,7 @@ fn draw_left(frame: &mut Frame, app: &App, area: Rect, content_w: u16) {
         app,
         Rect::new(area.x, area.y, area.width, transcript_h),
         content_w,
+        transcript,
     );
     dock.render(frame, Rect::new(area.x, dock_y, area.width, dock_h));
     if bottom_h > 0 {
@@ -229,12 +244,32 @@ fn draw_left(frame: &mut Frame, app: &App, area: Rect, content_w: u16) {
 }
 
 /// One source of truth for transcript rendering and viewport row counts.
+pub(crate) struct Transcript {
+    pub(crate) lines: Vec<Line<'static>>,
+    pub(crate) owners: Vec<BlockPosition>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BlockPosition {
+    pub(crate) id: crate::blocks::BlockId,
+    pub(crate) row: usize,
+}
+
+#[cfg(test)]
 pub(crate) fn transcript_lines(app: &App, content_w: u16) -> Vec<Line<'static>> {
+    render_transcript(app, content_w).lines
+}
+
+pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
     let mut lines = Vec::new();
+    let mut owners = Vec::new();
+    let mut cache = app.markdown_cache.borrow_mut();
     let mut assistant_header = false;
     let mut agent: Option<&str> = None;
     let mut turn = None;
-    for block in &app.blocks {
+    for entry in &app.blocks.entries {
+        let block = &entry.block;
+        let start = lines.len();
         match block {
             Block::UserTurn(id, ordinal) => turn = Some((*id, *ordinal)),
             Block::Step(step) => {
@@ -251,7 +286,7 @@ pub(crate) fn transcript_lines(app: &App, content_w: u16) -> Vec<Line<'static>> 
                     turn.map(|(_, n)| n),
                     content_w,
                 );
-                lines.extend(with_gutter(markdown::render(text, content_w)));
+                lines.extend(with_gutter(cache.render(text, content_w).as_ref().clone()));
                 assistant_header = false;
             }
             Block::AssistantStart {
@@ -278,7 +313,7 @@ pub(crate) fn transcript_lines(app: &App, content_w: u16) -> Vec<Line<'static>> 
                     turn.map(|(_, n)| n),
                     content_w,
                 );
-                lines.extend(with_gutter(markdown::render(text, content_w)));
+                lines.extend(with_gutter(cache.render(text, content_w).as_ref().clone()));
             }
             Block::Tool { name, state, .. } => {
                 ensure_assistant_header(
@@ -324,8 +359,13 @@ pub(crate) fn transcript_lines(app: &App, content_w: u16) -> Vec<Line<'static>> 
                 }
             }
         }
+        owners.extend((start..lines.len()).map(|row| BlockPosition {
+            id: entry.id,
+            row: row.saturating_sub(start),
+        }));
     }
-    lines
+    cache.finish_render();
+    Transcript { lines, owners }
 }
 
 fn separate(lines: &mut Vec<Line<'static>>) {
@@ -541,6 +581,10 @@ fn input_visual(input: &InputBuffer, content_w: u16) -> (Vec<String>, usize, usi
     (visual.lines, visual.cursor.0, visual.cursor.1)
 }
 
+pub(crate) fn input_cursor(input: &InputBuffer, content_w: u16) -> (usize, usize) {
+    InputVisual::new(input, content_w).cursor
+}
+
 pub(crate) fn move_input_vertical(input: &mut InputBuffer, content_w: u16, down: bool) {
     let visual = InputVisual::new(input, content_w);
     let (row, col) = visual.cursor;
@@ -562,11 +606,29 @@ pub(crate) fn move_input_vertical(input: &mut InputBuffer, content_w: u16, down:
     }
 }
 
-fn draw_transcript(frame: &mut Frame, app: &App, area: Rect, content_w: u16) {
-    let lines = transcript_lines(app, content_w);
+fn draw_transcript(
+    frame: &mut Frame,
+    app: &App,
+    area: Rect,
+    content_w: u16,
+    transcript: &Transcript,
+) {
+    let lines = &transcript.lines;
     let start = app.viewport.scroll().min(lines.len());
-    let end = (start + area.height as usize).min(lines.len());
+    let end = start
+        .saturating_add(usize::from(area.height))
+        .min(lines.len());
     frame.render_widget(Paragraph::new(lines[start..end].to_vec()), area);
+    if let Focus::Transcript(cursor) = &app.focus
+        && (start..end).contains(&cursor.row)
+        && content_w > 0
+    {
+        let x = GUTTER.saturating_add(cursor.column(lines, content_w) as u16);
+        let y = cursor.row.saturating_sub(start) as u16;
+        if x < area.width {
+            frame.set_cursor_position((area.x.saturating_add(x), area.y.saturating_add(y)));
+        }
+    }
 }
 
 fn joined_width<'a>(parts: impl Iterator<Item = &'a str>) -> usize {
@@ -705,6 +767,81 @@ mod tests {
     }
 
     #[test]
+    fn projection_owns_rows_and_reuses_only_unchanged_markdown_bodies() {
+        use std::rc::Rc;
+        let mut app = test_app();
+        let user = "# question\n\n```rust\nlet x = 1;\n```";
+        app.blocks.push(Block::User(user.into()));
+        app.blocks.push(Block::Assistant("answer".into()));
+        app.blocks.push(Block::Status {
+            kind: StatusKind::Notice(vec!["notice".into()]),
+            placement: StatusPlacement::Transcript,
+        });
+        app.blocks.push(Block::Status {
+            kind: StatusKind::LlmFailed {
+                attempt: 1,
+                message: "dock".into(),
+            },
+            placement: StatusPlacement::Dock(DockSeverity::Error),
+        });
+        let transcript = app.prepare_transcript();
+        assert_eq!(transcript.lines.len(), transcript.owners.len());
+        assert_eq!(
+            transcript.owners.first().unwrap().id,
+            app.blocks.entries[0].id
+        );
+        assert_eq!(
+            transcript.owners.last().unwrap().id,
+            app.blocks.entries[2].id
+        );
+        assert!(
+            !transcript
+                .owners
+                .iter()
+                .any(|p| p.id == app.blocks.entries[3].id)
+        );
+        for (index, owner) in transcript.owners.iter().enumerate() {
+            if index == 0 || transcript.owners[index - 1].id != owner.id {
+                assert_eq!(owner.row, 0);
+            } else {
+                assert_eq!(owner.row, transcript.owners[index - 1].row + 1);
+            }
+        }
+        let user_lines = app.markdown_cache.borrow_mut().render(user, 78);
+        let answer = app.markdown_cache.borrow_mut().render("answer", 78);
+        let old_answer = Rc::downgrade(&answer);
+        drop(answer);
+        app.prepare_transcript(); // complete frame resets marks set by inspection
+        app.blocks[1] = Block::Assistant("answer\nstreamed **suffix**".into());
+        let cached = app.prepare_transcript();
+        assert!(Rc::ptr_eq(
+            &user_lines,
+            &app.markdown_cache.borrow_mut().render(user, 78)
+        ));
+        assert!(old_answer.upgrade().is_none());
+        *app.markdown_cache.borrow_mut() = Default::default();
+        let fresh = app.prepare_transcript();
+        assert_eq!(cached.lines, fresh.lines);
+        assert_eq!(cached.owners, fresh.owners);
+    }
+
+    #[test]
+    fn browse_cursor_uses_terminal_cursor_and_hides_input_hint() -> anyhow::Result<()> {
+        use ratatui::backend::Backend;
+        let mut app = test_app();
+        app.blocks.push(Block::Assistant("abc你".into()));
+        app.input.set_text("abc");
+        app.apply_action(crate::input::KeyAction::Up);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
+        terminal.draw(|frame| draw(frame, &mut app))?;
+        assert_eq!(terminal.backend_mut().get_cursor_position()?, (5, 0).into());
+        let text = buffer_text(&terminal, 80, 24);
+        assert!(text.contains("↓ 0 行"));
+        assert!(!text.contains("Alt+Enter"));
+        Ok(())
+    }
+
+    #[test]
     fn left_column_has_statusline_with_or_without_empty_full_height_sidebar() -> anyhow::Result<()>
     {
         for (w, h) in [(80, 24), (176, 50), (1, 1), (7, 3)] {
@@ -713,7 +850,7 @@ mod tests {
             app.term_height = h;
             let geometry = frame_layout(w, h);
             let mut terminal = Terminal::new(TestBackend::new(w, h))?;
-            terminal.draw(|f| draw(f, &app))?;
+            terminal.draw(|f| draw(f, &mut app))?;
             // 宽字符尾格不发送到终端；背景由字符起始格覆盖整个 glyph。
             let mut x = 0;
             while x < geometry.left_w {
@@ -815,7 +952,8 @@ mod tests {
                 placement: StatusPlacement::Transcript,
             },
             Block::Assistant("answer".into()),
-        ];
+        ]
+        .into();
         let lines = transcript_lines(&app, 80);
         let text: Vec<_> = lines.iter().map(ToString::to_string).collect();
         let title = text
@@ -843,7 +981,7 @@ mod tests {
             let lines = transcript_lines(&app, width);
             assert_eq!(lines.len(), app.content_rows(width));
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-            terminal.draw(|frame| draw(frame, &app)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         }
     }
 
@@ -919,7 +1057,7 @@ mod tests {
             "暂驻 Dock 的状态不出现在 transcript"
         );
 
-        for block in &mut app.blocks {
+        for block in app.blocks.iter_mut() {
             if let Block::Status { placement, .. } = block {
                 *placement = StatusPlacement::Transcript;
             }
@@ -1067,7 +1205,7 @@ mod tests {
                     .unwrap()
                     .starts_with(&format!("  ── {label} "))
             );
-            assert!(screen.contains("Space 返回输入"));
+            assert!(screen.contains("Space 关闭"));
             assert!(screen.contains("fifth") && !screen.contains("sixth"));
             let (title, text) = if severity == DockSeverity::Warn {
                 (Role::Warn, Role::Assistant)
@@ -1158,7 +1296,7 @@ mod tests {
             });
             app.input.set_text("typed");
             let mut terminal = Terminal::new(TestBackend::new(width, height))?;
-            terminal.draw(|frame| draw(frame, &app))?;
+            terminal.draw(|frame| draw(frame, &mut app))?;
         }
         Ok(())
     }
@@ -1184,7 +1322,7 @@ mod tests {
                 });
                 app.input.set_text("draft");
                 let mut terminal = Terminal::new(TestBackend::new(width, height))?;
-                terminal.draw(|frame| draw(frame, &app))?;
+                terminal.draw(|frame| draw(frame, &mut app))?;
             }
         }
         Ok(())
@@ -1201,12 +1339,14 @@ mod tests {
                 kind: StatusKind::Notice(vec!["**notice**".into()]),
                 placement: StatusPlacement::Transcript,
             },
-        ];
+        ]
+        .into();
         let lines = transcript_lines(&app, 10);
         assert_eq!(lines.len(), app.content_rows(10));
         assert!(matches!(&app.blocks[0], Block::User(raw) if raw == source));
         let mut terminal = Terminal::new(TestBackend::new(12, lines.len() as u16))?;
-        terminal.draw(|frame| draw_transcript(frame, &app, frame.area(), 10))?;
+        let transcript = render_transcript(&app, 10);
+        terminal.draw(|frame| draw_transcript(frame, &app, frame.area(), 10, &transcript))?;
         let screen = buffer_text(&terminal, 12, lines.len() as u16);
         for (actual, expected) in screen.lines().zip(&lines) {
             assert_eq!(actual.trim_end(), expected.to_string().trim_end());
@@ -1299,7 +1439,8 @@ mod tests {
         let mut app = test_app();
         app.blocks = vec![Block::User(
             "| aa | bb |\n| --- | --- |\n| cc | dd |".into(),
-        )];
+        )]
+        .into();
         let lines = transcript_lines(&app, 8);
         assert_eq!(
             lines[1].width(),
@@ -1308,7 +1449,8 @@ mod tests {
         );
         assert_eq!(app.content_rows(8), 6);
         let mut terminal = Terminal::new(TestBackend::new(10, 6))?;
-        terminal.draw(|frame| draw_transcript(frame, &app, frame.area(), 8))?;
+        let transcript = render_transcript(&app, 8);
+        terminal.draw(|frame| draw_transcript(frame, &app, frame.area(), 8, &transcript))?;
         assert_eq!(
             buffer_text(&terminal, 10, 6).lines().collect::<Vec<_>>(),
             [

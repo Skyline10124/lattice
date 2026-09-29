@@ -88,6 +88,48 @@ fn finished(view: &ObservationSnapshot) -> Value {
         json!({"type":"finished","turn":{"session_id":sid(),"turn_id":view.selected_turn.as_ref().unwrap().turn_id},"cursor":view.cursor,"history":{"anchor":view.history,"entries":history_entries(view)}}),
     )
 }
+#[test]
+fn dock_status_survives_r2_history_until_space() {
+    for will_retry in [true, false] {
+        let mut h = Harness::new(false);
+        let id = lattice_api::local::new_turn_id();
+        h.app.apply_update(LocalUpdate::Reset {
+            view: Box::new(view(id, false)),
+            generation: 1,
+        });
+        h.app.apply_turn_event(TurnEvent::LlmRequestError {
+            key: key(id, 0, 1),
+            retryable: will_retry,
+            will_retry,
+            delay_ms: Some(100),
+            message: "dock-marker".into(),
+        });
+        let closed = view(id, true);
+        let loaded: lattice_api::local::LocalHistory = serde_json::from_value(
+            json!({"anchor":closed.history,"entries":history_entries(&closed)}),
+        )
+        .unwrap();
+        for _ in 0..2 {
+            h.app.apply_update(LocalUpdate::History {
+                anchor: closed.history.clone(),
+                result: Ok(Box::new(loaded.clone())),
+                stale: false,
+                generation: 1,
+            });
+            assert!(
+                h.app.dock_status().is_some(),
+                "History must not release Dock"
+            );
+            assert!(!frame(&h.app).text.contains("dock-marker"));
+        }
+        h.app.apply_action(KeyAction::Insert(' '));
+        assert!(h.app.dock_status().is_none());
+        assert_eq!(frame(&h.app).text.matches("dock-marker").count(), 1);
+        h.app
+            .replace_history(crate::session::history_blocks(loaded));
+        assert_eq!(frame(&h.app).text.matches("dock-marker").count(), 1);
+    }
+}
 
 enum Reply {
     Now(Value),

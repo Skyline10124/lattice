@@ -5,10 +5,13 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::TuiOptions;
+use crate::blocks::{BlockList, IdentifiedBlock, identity_slots};
 use crate::connection::{cancel_message, detach_lines, not_submitted_notice, submission_notice};
 use crate::input::{CTRL_C_WINDOW, History, InputBuffer, KeyAction, resolve_key};
 use crate::session::SessionContext;
-use crate::view::{Dock, DockIntent, Viewport, frame_layout, transcript_lines};
+#[cfg(test)]
+use crate::view::transcript_lines;
+use crate::view::{Dock, DockIntent, Focus, Transcript, Viewport, frame_layout, render_transcript};
 use crossterm::event::{
     DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyEvent,
     KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
@@ -106,7 +109,10 @@ pub(crate) enum TurnPhase {
 
 pub(crate) struct App {
     pub(crate) ctx: SessionContext,
-    pub(crate) blocks: Vec<Block>,
+    pub(crate) blocks: BlockList,
+    pub(crate) markdown_cache: std::cell::RefCell<crate::markdown::RenderCache>,
+    pub(crate) focus: Focus,
+    dock_changed: bool,
     pub(crate) input: InputBuffer,
     pub(crate) history: History,
     pub(crate) viewport: Viewport,
@@ -142,7 +148,10 @@ impl App {
         Self {
             loaded_user_count: ctx.session_id.is_none().then_some(0),
             ctx,
-            blocks: Vec::new(),
+            blocks: BlockList::default(),
+            markdown_cache: Default::default(),
+            focus: Focus::Dock,
+            dock_changed: false,
             input: InputBuffer::new(),
             history: History::load(session_dir),
             viewport: Viewport::new(),
@@ -194,7 +203,7 @@ impl App {
             | TurnEvent::ModelFinished { key, .. } => Some(key),
             _ => None,
         };
-        if let Some(key) = key && self.blocks[..self.durable_len].iter().any(|block| {
+        if let Some(key) = key && self.blocks.iter().take(self.durable_len).any(|block| {
             matches!(block, Block::Step(step) if step.turn_id == key.turn_id && step.ordinal == key.model_step_ordinal)
         }) { return; }
         match event {
@@ -301,15 +310,20 @@ impl App {
 
     fn remove_step(&mut self, step: StepKey) {
         let mut removing = false;
-        let temporary = self.blocks.split_off(self.durable_len);
-        self.blocks.extend(temporary.into_iter().filter(|block| {
-            match block {
-                Block::Step(key) => removing = *key == step,
-                Block::UserTurn(..) => removing = false,
-                _ => {}
-            }
-            !removing || matches!(block, Block::Status { .. })
-        }));
+        let temporary = self
+            .blocks
+            .entries
+            .split_off(self.durable_len.min(self.blocks.len()));
+        self.blocks
+            .entries
+            .extend(temporary.into_iter().filter(|entry| {
+                match &entry.block {
+                    Block::Step(key) => removing = *key == step,
+                    Block::UserTurn(..) => removing = false,
+                    _ => {}
+                }
+                !removing || matches!(entry.block, Block::Status { .. })
+            }));
     }
 
     fn upsert_tool(&mut self, id: String, name: String, state: ToolState) {
@@ -341,20 +355,68 @@ impl App {
 
     /// 保留键先执行；其余动作交给 Dock 栈顶解释，模块不接触 LocalTurn。
     pub(crate) fn apply_action(&mut self, action: KeyAction) -> Option<String> {
+        let width = frame_layout(self.term_width, self.term_height).content_w;
+        let transcript = self.prepare_transcript();
+        let lines = &transcript.lines;
         match action {
-            KeyAction::ScrollPageUp => self.viewport.page_up(self.transcript_height()),
-            KeyAction::ScrollPageDown | KeyAction::ScrollToBottom => {
-                let layout = frame_layout(self.term_width, self.term_height);
-                let rows = self.content_rows(layout.content_w);
+            KeyAction::ScrollPageUp | KeyAction::ScrollPageDown | KeyAction::ScrollToBottom => {
                 let height = self.transcript_height();
-                if matches!(action, KeyAction::ScrollToBottom) {
-                    self.viewport.to_bottom(rows, height);
-                } else {
-                    self.viewport.page_down(rows, height);
+                if width == 0 || height == 0 {
+                    self.focus_input(lines.len());
+                    return None;
+                }
+                match action {
+                    KeyAction::ScrollPageUp => self.viewport.page_up(height),
+                    KeyAction::ScrollPageDown => self.viewport.page_down(lines.len(), height),
+                    _ => self.viewport.to_bottom(lines.len(), height),
+                }
+                if let Focus::Transcript(cursor) = &mut self.focus {
+                    if !matches!(action, KeyAction::ScrollToBottom) {
+                        self.viewport.pause();
+                    }
+                    self.viewport.clamp_cursor(cursor);
+                    cursor.reanchor(&transcript);
                 }
             }
             KeyAction::CancelOrClear => self.cancel_or_clear(),
             KeyAction::Quit => self.should_quit = true,
+            KeyAction::Insert(' ') if self.dock_status().is_some() => self.release_dock_status(),
+            KeyAction::Insert(_) | KeyAction::ModifiedSpace | KeyAction::Paste(_)
+                if self.dock_status().is_some() => {}
+            action if matches!(self.focus, Focus::Transcript(_)) => match action {
+                KeyAction::Clear => self.focus_input(lines.len()),
+                KeyAction::Insert(c) => {
+                    self.focus_input(lines.len());
+                    self.input.insert_char(c);
+                }
+                KeyAction::ModifiedSpace => {
+                    self.focus_input(lines.len());
+                    self.input.insert_char(' ');
+                }
+                KeyAction::Paste(text) => {
+                    self.focus_input(lines.len());
+                    self.input.insert_paste(&text);
+                }
+                action @ (KeyAction::Up
+                | KeyAction::Down
+                | KeyAction::Left
+                | KeyAction::Right
+                | KeyAction::Home
+                | KeyAction::End) => {
+                    if let Focus::Transcript(cursor) = &mut self.focus {
+                        if matches!(action, KeyAction::Down)
+                            && cursor.row >= lines.len().saturating_sub(1)
+                        {
+                            self.focus_input(lines.len());
+                        } else {
+                            cursor.move_in(&action, lines, width);
+                            cursor.reanchor(&transcript);
+                            self.viewport.reveal(cursor.row);
+                        }
+                    }
+                }
+                _ => {}
+            },
             action => match Dock::new(self).route(action) {
                 DockIntent::Submit => return self.submit(),
                 DockIntent::ReleaseStatus => self.release_dock_status(),
@@ -371,12 +433,24 @@ impl App {
                     KeyAction::Home => self.input.home(),
                     KeyAction::End => self.input.end(),
                     KeyAction::Up | KeyAction::Down => {
-                        let width = frame_layout(self.term_width, self.term_height).content_w;
-                        crate::view::move_input_vertical(
-                            &mut self.input,
-                            width,
-                            matches!(action, KeyAction::Down),
-                        );
+                        let (row, col) = crate::view::input_cursor(&self.input, width);
+                        if matches!(action, KeyAction::Up)
+                            && row == 0
+                            && width > 0
+                            && self.transcript_height() > 0
+                            && let Some(cursor) =
+                                transcript.cursor(transcript.lines.len().saturating_sub(1), col)
+                        {
+                            self.viewport.pause();
+                            self.viewport.reveal(cursor.row);
+                            self.focus = Focus::Transcript(cursor);
+                        } else {
+                            crate::view::move_input_vertical(
+                                &mut self.input,
+                                width,
+                                matches!(action, KeyAction::Down),
+                            );
+                        }
                     }
                     KeyAction::HistoryPrev | KeyAction::HistoryNext => {
                         let entry = if matches!(action, KeyAction::HistoryPrev) {
@@ -395,6 +469,11 @@ impl App {
         None
     }
 
+    fn focus_input(&mut self, rows: usize) {
+        self.focus = Focus::Dock;
+        self.viewport.to_bottom(rows, self.transcript_height());
+    }
+
     /// 本地指令不提交 Turn；重连只重新观察，普通退出不触发取消。
     #[rustfmt::skip]
     pub(crate) fn apply_builtin(&mut self, input: &str) -> bool {
@@ -402,14 +481,52 @@ impl App {
             "/quit" | "/exit" | "/q" => { self.should_quit = true; true }
             "/reconnect" => { self.reconnect_requested = true; true }
             "/help" | "/?" => { self.push_status(StatusKind::Notice(help_lines(self.kitty_keyboard))); true }
-            "/clear" => { self.blocks.clear(); self.durable_len = 0; self.viewport = Viewport::new(); true }
+            "/clear" => { self.blocks.clear(); self.durable_len = 0; self.viewport = Viewport::new(); self.focus = Focus::Dock; true }
             _ => false,
         }
     }
 
     /// Number of transcript rows at the shared content width, used by `Viewport`.
+    #[cfg(test)]
     pub(crate) fn content_rows(&self, content_w: u16) -> usize {
-        transcript_lines(self, content_w).len()
+        render_transcript(self, content_w).lines.len()
+    }
+
+    pub(crate) fn prepare_transcript(&mut self) -> Transcript {
+        let width = frame_layout(self.term_width, self.term_height).content_w;
+        let transcript = render_transcript(self, width);
+        let previous_scroll = self.viewport.scroll();
+        let screen_row = match self.focus {
+            Focus::Transcript(cursor) => cursor.row.saturating_sub(self.viewport.scroll()),
+            Focus::Dock => 0,
+        };
+        // 合同只要求浏览时 Warn/Error 不动视图；焦点在 Dock 且跟随时仍贴底，最新内容不被遮住。
+        if std::mem::take(&mut self.dock_changed) && matches!(self.focus, Focus::Transcript(_)) {
+            self.viewport
+                .on_dock_changed(transcript.lines.len(), self.transcript_height());
+        } else {
+            self.viewport
+                .on_content_changed(transcript.lines.len(), self.transcript_height());
+        }
+        if width == 0 || self.transcript_height() == 0 || transcript.lines.is_empty() {
+            self.focus_input(transcript.lines.len());
+        }
+        if let Focus::Transcript(mut cursor) = self.focus {
+            let previous_row = cursor.row;
+            let retained = transcript.relocate(&mut cursor);
+            if !retained {
+                self.viewport.keep_screen_row(cursor.row, screen_row);
+            } else if self.viewport.following() {
+                if self.viewport.scroll() != previous_scroll {
+                    self.viewport.clamp_cursor(&mut cursor);
+                }
+            } else if cursor.row != previous_row {
+                self.viewport.keep_screen_row(cursor.row, screen_row);
+            }
+            cursor.reanchor(&transcript);
+            self.focus = Focus::Transcript(cursor);
+        }
+        transcript
     }
 
     pub(crate) fn apply_stream_idle_timeout(&mut self) {
@@ -421,7 +538,7 @@ impl App {
 
     fn connection_lost(&mut self, reason: String) {
         self.connected = false;
-        for block in &mut self.blocks {
+        for block in self.blocks.iter_mut() {
             if let Block::Tool {
                 state: state @ ToolState::Running,
                 ..
@@ -653,7 +770,7 @@ impl App {
         }
     }
 
-    fn replace_history(&mut self, mut blocks: Vec<Block>) {
+    fn replace_history(&mut self, blocks: Vec<Block>) {
         self.loaded_user_count = Some(
             blocks
                 .iter()
@@ -664,20 +781,27 @@ impl App {
                 })
                 .unwrap_or(0),
         );
+        let old_slots = identity_slots(&self.blocks.entries);
+        let mut blocks: Vec<_> = blocks
+            .into_iter()
+            .map(|block| self.blocks.identify(block))
+            .collect();
+        let new_slots = identity_slots(&blocks);
         // 接受标记归属于 UserMessage；正文已到则由持久助手/工具接管，否则放回 USER 之后。
         // 不把它当作状态提示，否则 History 会把它挪到下一节点之前或遗失。
         let mut loaded_starts = std::collections::HashSet::new();
         for marker in self
             .blocks
+            .entries
             .iter()
-            .filter(|block| matches!(block, Block::AssistantStart { .. }))
+            .filter(|entry| matches!(entry.block, Block::AssistantStart { .. }))
         {
-            let Block::AssistantStart { turn_id, .. } = marker else {
+            let Block::AssistantStart { turn_id, .. } = &marker.block else {
                 continue;
             };
             let Some(start) = blocks
                 .iter()
-                .position(|block| matches!(block, Block::UserTurn(id, _) if id == turn_id))
+                .position(|entry| matches!(&entry.block, Block::UserTurn(id, _) if id == turn_id))
             else {
                 continue;
             };
@@ -686,23 +810,28 @@ impl App {
                 .iter()
                 .enumerate()
                 .skip(start.saturating_add(1))
-                .find(|(_, block)| matches!(block, Block::AgentName(_) | Block::UserTurn(..)))
+                .find(|(_, entry)| matches!(entry.block, Block::AgentName(_) | Block::UserTurn(..)))
                 .map_or(blocks.len(), |(index, _)| index);
-            if !blocks[start..end].iter().any(|block| {
-                matches!(block, Block::Assistant(text) if !text.is_empty())
-                    || matches!(block, Block::Tool { .. })
-            }) {
+            if !blocks
+                .get(start..end)
+                .unwrap_or_default()
+                .iter()
+                .any(|entry| {
+                    matches!(&entry.block, Block::Assistant(text) if !text.is_empty())
+                        || matches!(entry.block, Block::Tool { .. })
+                })
+            {
                 let after_user = blocks
                     .iter()
                     .enumerate()
                     .take(end)
                     .skip(start.saturating_add(1))
-                    .take_while(|(_, block)| matches!(block, Block::User(_)))
+                    .take_while(|(_, entry)| matches!(entry.block, Block::User(_)))
                     .last()
                     .map_or(start.saturating_add(1), |(index, _)| {
                         index.saturating_add(1)
                     });
-                blocks.insert(after_user, marker.clone());
+                blocks.insert(after_user.min(blocks.len()), marker.clone());
             }
         }
         let events: std::collections::HashMap<_, _> = self
@@ -718,13 +847,13 @@ impl App {
             })
             .collect();
         let mut history_ids = std::collections::HashSet::new();
-        for block in &mut blocks {
-            if let Block::Tool { id, source, .. } = block {
+        for entry in &mut blocks {
+            if let Block::Tool { id, source, .. } = &entry.block {
                 history_ids.insert(id.clone());
                 if *source == ToolSource::HistoryCall
                     && let Some(event) = events.get(id)
                 {
-                    *block = event.clone();
+                    entry.block = event.clone();
                 }
             }
         }
@@ -732,82 +861,95 @@ impl App {
         let starts: Vec<(Block, usize)> = blocks
             .iter()
             .enumerate()
-            .filter(|(_, b)| matches!(b, Block::Step(_) | Block::UserTurn(..)))
-            .map(|(i, b)| {
-                let scoped = i > 0 && matches!(blocks[i - 1], Block::AgentName(_));
-                (b.clone(), if scoped { i - 1 } else { i })
+            .filter(|(_, entry)| matches!(entry.block, Block::Step(_) | Block::UserTurn(..)))
+            .map(|(i, entry)| {
+                let previous = i.saturating_sub(1);
+                let scoped = i > 0
+                    && blocks
+                        .get(previous)
+                        .is_some_and(|e| matches!(e.block, Block::AgentName(_)));
+                (entry.block.clone(), if scoped { previous } else { i })
             })
             .collect();
-        let start_of = |b: &Block| {
+        let start_of = |block: &Block| {
             starts
                 .iter()
-                .find(|(m, _)| match (m, b) {
+                .find(|(marker, _)| match (marker, block) {
                     (Block::UserTurn(left, _), Block::UserTurn(right, _)) => left == right,
-                    _ => m == b,
+                    _ => marker == block,
                 })
                 .map(|(_, i)| *i)
         };
         // 临时提示按时间顺序保留：放在它之后出现的第一个已装入节点之前，没有则留在末尾。
         // 旧持久块与已装入节点的实时块由新历史取代；未装入的实时块按原顺序接在末尾。
-        let old = std::mem::take(&mut self.blocks);
+        let old = std::mem::take(&mut self.blocks.entries);
         let durable_len = self.durable_len;
-        let mut inserts: Vec<(usize, Block)> = Vec::new();
+        let mut inserts: Vec<(usize, IdentifiedBlock)> = Vec::new();
         let mut pending = Vec::new();
         let mut tail = Vec::new();
         let mut replaced = false;
-        for (index, block) in old.into_iter().enumerate() {
+        for (index, entry) in old.into_iter().enumerate() {
+            let block = &entry.block;
             if index == durable_len {
                 replaced = false;
             }
-            if matches!(&block, Block::AssistantStart { turn_id, .. } if loaded_starts.contains(turn_id))
+            if matches!(block, Block::AssistantStart { turn_id, .. } if loaded_starts.contains(turn_id))
             {
                 continue;
             }
             if matches!(block, Block::Status { .. }) {
-                pending.push(block);
+                pending.push(entry);
             } else if matches!(block, Block::Step(_) | Block::UserTurn(..)) {
-                if let Some(start) = start_of(&block) {
+                if let Some(start) = start_of(block) {
                     inserts.extend(pending.drain(..).map(|status| (start, status)));
                     replaced = true;
                 } else if index >= durable_len {
                     tail.append(&mut pending);
-                    tail.push(block);
+                    tail.push(entry);
                     replaced = false;
                 }
             } else if index < durable_len
                 || replaced
-                || matches!(&block, Block::Tool { id, .. } if history_ids.contains(id))
+                || matches!(block, Block::Tool { id, .. } if history_ids.contains(id))
             {
                 continue;
             } else {
                 tail.append(&mut pending);
-                tail.push(block);
+                tail.push(entry);
             }
         }
         tail.append(&mut pending);
-        let mut result: Vec<Block> = Vec::with_capacity(blocks.len() + inserts.len() + tail.len());
+        let mut result: Vec<IdentifiedBlock> = Vec::with_capacity(
+            blocks
+                .len()
+                .saturating_add(inserts.len())
+                .saturating_add(tail.len()),
+        );
         // 回退到其他位置后，旧节点在新历史中的顺序可能与原来不同；稳定排序保持同一位置上提示的先后。
         inserts.sort_by_key(|(at, _)| *at);
         let mut inserts = inserts.into_iter().peekable();
-        for (index, block) in blocks.into_iter().enumerate() {
+        for (index, entry) in blocks.into_iter().enumerate() {
             while let Some((_, status)) = inserts.next_if(|(at, _)| *at == index) {
-                if !result.contains(&status) {
+                if !result.iter().any(|known| known.block == status.block) {
                     result.push(status);
                 }
             }
-            result.push(block);
+            result.push(entry);
         }
         self.durable_len = result.len();
-        for block in tail {
-            if !(matches!(block, Block::Status { .. }) && result.contains(&block)) {
-                result.push(block);
+        for entry in tail {
+            if !(matches!(entry.block, Block::Status { .. })
+                && result.iter().any(|known| known.block == entry.block))
+            {
+                result.push(entry);
             }
         }
-        self.blocks = result;
+        self.blocks.entries = result;
+        self.blocks.inherit_discarded(old_slots, new_slots);
     }
 
     pub(crate) fn fail_running_tools(&mut self, reason: &str) {
-        for block in &mut self.blocks {
+        for block in self.blocks.iter_mut() {
             if let Block::Tool {
                 state: state @ ToolState::Running,
                 ..
@@ -858,6 +1000,7 @@ impl App {
     /// 先把当前 Dock status 的 placement 改回 `Transcript`，再以
     /// `Dock(severity)` 追加新 status。turnover 全部在内部完成。
     fn push_dock_status(&mut self, kind: StatusKind, severity: DockSeverity) {
+        self.dock_changed = true;
         self.release_dock_status();
         self.blocks.push(Block::Status {
             kind,
@@ -868,13 +1011,14 @@ impl App {
     /// WARN / ERROR 状态下把当前 Dock status 释放回 transcript；它会在
     /// 原本的时间位置出现且只出现一次。无活动状态时是空操作。
     fn release_dock_status(&mut self) {
-        for block in &mut self.blocks {
+        for block in self.blocks.iter_mut() {
             if let Block::Status {
                 placement: placement @ StatusPlacement::Dock(_),
                 ..
             } = block
             {
                 *placement = StatusPlacement::Transcript;
+                self.dock_changed = true;
             }
         }
     }
@@ -987,17 +1131,13 @@ pub(crate) async fn run_app(
     options.project_root =
         tokio::task::spawn_blocking(move || std::fs::canonicalize(root)).await??;
     let connection = ctx.session_id.map(|id| client.observe(Some(id), None));
+    // try_init 可能在 raw/备用屏幕已改变后失败，恢复 guard 必须先于初始化。
+    let mut cleanup = TerminalCleanup { kitty: false };
     let mut terminal = ratatui::try_init()?;
     let kitty = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
-    crossterm::execute!(std::io::stdout(), EnableBracketedPaste)?;
-    if kitty {
-        crossterm::execute!(
-            std::io::stdout(),
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
-        )?;
-    }
     install_cleanup_panic_hook(kitty);
-    let _cleanup = TerminalCleanup { kitty };
+    cleanup.kitty = kitty;
+    enable_terminal_modes(&mut std::io::stdout(), kitty)?;
 
     let mut app = App::new(ctx, kitty, &options.session_dir);
     app.push_status(StatusKind::Notice(startup_notice()));
@@ -1008,21 +1148,13 @@ pub(crate) async fn run_app(
         connection,
         EventStream::new(),
         |app| {
-            if let Ok(size) = terminal.size() {
-                app.term_width = size.width;
-                app.term_height = size.height;
-                let layout = frame_layout(size.width, size.height);
-                let th = app.transcript_height();
-                let rows = app.content_rows(layout.content_w);
-                app.viewport.on_content_changed(rows, th);
-            }
             terminal.draw(|f| crate::view::draw(f, app))?;
             Ok(())
         },
     )
     .await;
     // 先复原终端，再由共同句柄有界承接既有意图；普通退出不新增取消。
-    drop(_cleanup);
+    drop(cleanup);
     if let Some(turn) = exit.turn {
         exit.handoffs.push(turn.detach().boxed());
     }
@@ -1133,7 +1265,7 @@ fn handle_input_event(app: &mut App, event: Event) -> Option<String> {
             let action = if is_ctrl_c(&key) {
                 ctrl_c_action(app)
             } else {
-                resolve_key(key, app.kitty_keyboard, app.input.is_empty())
+                resolve_key(key, app.kitty_keyboard, app.input.is_empty() && matches!(app.focus, Focus::Dock) && app.dock_status().is_none())
             };
             app.apply_action(action)
         }
@@ -1213,14 +1345,38 @@ fn startup_notice() -> Vec<String> {
     ]
 }
 
+fn enable_terminal_modes(writer: &mut impl std::io::Write, kitty: bool) -> std::io::Result<()> {
+    crossterm::execute!(
+        writer,
+        crossterm::cursor::SetCursorStyle::BlinkingBlock,
+        EnableBracketedPaste
+    )?;
+    if kitty {
+        crossterm::execute!(
+            writer,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )?;
+    }
+    Ok(())
+}
+
+fn restore_terminal_modes(writer: &mut impl std::io::Write, kitty: bool) -> std::io::Result<()> {
+    // 每项独立尝试；形状恢复失败也不能跳过键盘/粘贴清理。
+    let shape = crossterm::execute!(writer, crossterm::cursor::SetCursorStyle::DefaultUserShape);
+    let paste = crossterm::execute!(writer, DisableBracketedPaste);
+    let keyboard = if kitty {
+        crossterm::execute!(writer, PopKeyboardEnhancementFlags)
+    } else {
+        Ok(())
+    };
+    shape.and(paste).and(keyboard)
+}
+
 #[rustfmt::skip]
 fn install_cleanup_panic_hook(kitty: bool) {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let _ = crossterm::execute!(std::io::stdout(), DisableBracketedPaste);
-        if kitty {
-            let _ = crossterm::execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
-        }
+        let _ = restore_terminal_modes(&mut std::io::stdout(), kitty);
         prev(info);
     }));
 }
@@ -1232,10 +1388,7 @@ struct TerminalCleanup {
 #[rustfmt::skip]
 impl Drop for TerminalCleanup {
     fn drop(&mut self) {
-        if self.kitty {
-            let _ = crossterm::execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
-        }
-        let _ = crossterm::execute!(std::io::stdout(), DisableBracketedPaste);
+        let _ = restore_terminal_modes(&mut std::io::stdout(), self.kitty);
         ratatui::restore();
     }
 }
@@ -1249,8 +1402,91 @@ mod loop_tests;
 mod connection_tests;
 
 #[cfg(test)]
+#[path = "browse_tests.rs"]
+mod browse_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn terminal_cleanup_restores_on_normal_error_and_panic_paths() {
+        const PROBE: &str = "LATTICE_TUI_CLEANUP_PROBE";
+        if let Ok(mode) = std::env::var(PROBE) {
+            let run = || -> std::io::Result<()> {
+                let _cleanup = TerminalCleanup { kitty: false };
+                if mode == "init-error" {
+                    ratatui::try_init()?;
+                    panic!("closed stdin must reject terminal initialization");
+                }
+                install_cleanup_panic_hook(false);
+                enable_terminal_modes(&mut std::io::stdout(), false)?;
+                if mode == "panic" {
+                    panic!("cleanup probe panic");
+                }
+                if mode == "error" {
+                    return Err(std::io::Error::other("cleanup probe error"));
+                }
+                Ok(())
+            };
+            assert_eq!(run().is_ok(), mode == "normal");
+            return;
+        }
+        for mode in ["normal", "error", "init-error", "panic"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "app::tests::terminal_cleanup_restores_on_normal_error_and_panic_paths",
+                    "--nocapture",
+                ])
+                .env(PROBE, mode)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.success(),
+                mode != "panic",
+                "mode {mode}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let restored = output.stdout.windows(5).position(|s| s == b"\x1b[0 q");
+            assert!(restored.is_some(), "{mode} must restore default shape");
+            let enabled = output.stdout.windows(5).position(|s| s == b"\x1b[1 q");
+            if mode == "init-error" {
+                assert!(enabled.is_none());
+            } else {
+                assert!(enabled.unwrap() < restored.unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_modes_set_shape_before_input_modes_and_restore_shape_first() {
+        for kitty in [false, true] {
+            let mut output = Vec::new();
+            enable_terminal_modes(&mut output, kitty).unwrap();
+            assert!(
+                output.starts_with(b"\x1b[1 q"),
+                "blinking block must be set first"
+            );
+            assert!(output.windows(8).any(|part| part == b"\x1b[?2004h"));
+            let split = output.len();
+            restore_terminal_modes(&mut output, kitty).unwrap();
+            assert!(
+                output[split..].starts_with(b"\x1b[0 q"),
+                "restore shape before input modes"
+            );
+            assert!(
+                output[split..]
+                    .windows(8)
+                    .any(|part| part == b"\x1b[?2004l")
+            );
+            assert_eq!(output.windows(5).any(|part| part == b"\x1b[<1u"), kitty);
+            for marker in [b"\x1b[?25h", b"\x1b[?25l"] {
+                assert!(!output.windows(marker.len()).any(|part| part == marker));
+            }
+        }
+    }
+
     use lattice_api::TurnEvent;
     use std::time::Duration;
 
@@ -1264,6 +1500,114 @@ mod tests {
             // History is not under test here; an empty dir keeps it inert.
             Path::new("/nonexistent-tui-test-history"),
         )
+    }
+
+    #[test]
+    fn r2_history_preserves_node_ids_and_unloaded_suffix_but_not_other_turns() {
+        let mut app = test_app();
+        app.input.set_text("prompt");
+        app.apply_action(KeyAction::Submit);
+        let turn_id = app.current_turn.unwrap();
+        let key = ModelAttemptKey {
+            turn_id,
+            model_step_ordinal: 0,
+            attempt_ordinal: 1,
+        };
+        app.apply_turn_event(TurnEvent::TokenDelta {
+            key,
+            content: "stream".into(),
+        });
+        let body_id = |app: &App, text: &str| {
+            app.blocks
+                .entries
+                .iter()
+                .find(|e| matches!(&e.block, Block::User(s) | Block::Assistant(s) if s == text))
+                .unwrap()
+                .id
+        };
+        let user_id = body_id(&app, "prompt");
+        let stream_id = body_id(&app, "stream");
+        let status_id = app
+            .blocks
+            .entries
+            .iter()
+            .find(|e| matches!(e.block, Block::Status { .. }))
+            .unwrap()
+            .id;
+        let history = |include_second: bool| {
+            let mut blocks = vec![
+                Block::AgentName("agent".into()),
+                Block::UserTurn(turn_id, std::num::NonZeroUsize::MIN),
+                Block::User("prompt".into()),
+                Block::Step(StepKey {
+                    turn_id,
+                    ordinal: 0,
+                }),
+                Block::Assistant("stream saved".into()),
+                Block::Tool {
+                    id: invocation(1).to_string(),
+                    name: "test".into(),
+                    state: ToolState::Ok { output_len: 0 },
+                    source: ToolSource::HistoryResult,
+                },
+            ];
+            if include_second {
+                blocks.extend([
+                    Block::Step(StepKey {
+                        turn_id,
+                        ordinal: 1,
+                    }),
+                    Block::Assistant("suffix saved".into()),
+                ]);
+            }
+            blocks
+        };
+        for _ in 0..2 {
+            app.replace_history(history(false));
+            assert_eq!(
+                body_id(&app, "prompt"),
+                user_id,
+                "AgentName and statuses do not shift node positions"
+            );
+            assert_eq!(body_id(&app, "stream saved"), stream_id);
+            assert!(app.blocks.entries.iter().any(|e| e.id == status_id));
+        }
+        let later = ModelAttemptKey {
+            model_step_ordinal: 1,
+            ..key
+        };
+        app.apply_turn_event(TurnEvent::TokenDelta {
+            key: later,
+            content: "suffix".into(),
+        });
+        let suffix_id = body_id(&app, "suffix");
+        app.replace_history(history(false));
+        assert_eq!(body_id(&app, "stream saved"), stream_id);
+        assert_eq!(
+            body_id(&app, "suffix"),
+            suffix_id,
+            "unloaded node retains its id"
+        );
+        app.replace_history(history(true));
+        assert_eq!(body_id(&app, "suffix saved"), suffix_id);
+        assert_eq!(body_id(&app, "stream saved"), stream_id);
+        // CLI rewind 到根再发送另一轮，文字和位置相同也不是同一节点。
+        let other = lattice_api::local::new_turn_id();
+        app.replace_history(vec![
+            Block::AgentName("agent".into()),
+            Block::UserTurn(other, std::num::NonZeroUsize::MIN),
+            Block::User("prompt".into()),
+            Block::Step(StepKey {
+                turn_id: other,
+                ordinal: 0,
+            }),
+            Block::Assistant("stream saved".into()),
+        ]);
+        assert_ne!(body_id(&app, "prompt"), user_id);
+        assert_ne!(body_id(&app, "stream saved"), stream_id);
+        assert!(!app.blocks.entries.iter().any(|e| e.id == suffix_id));
+        let ids: std::collections::HashSet<_> = app.blocks.entries.iter().map(|e| e.id).collect();
+        assert_eq!(ids.len(), app.blocks.len());
     }
 
     #[test]

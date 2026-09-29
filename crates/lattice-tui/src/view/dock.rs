@@ -16,6 +16,7 @@ enum Module<'a> {
 
 struct InputModule<'a> {
     input: &'a InputBuffer,
+    focused: bool,
 }
 
 struct StatusModule<'a> {
@@ -33,7 +34,10 @@ impl<'a> Dock<'a> {
     pub(crate) fn new(app: &'a App) -> Self {
         let top = match app.dock_status() {
             Some((kind, severity)) => Module::Status(StatusModule { kind, severity }),
-            None => Module::Input(InputModule { input: &app.input }),
+            None => Module::Input(InputModule {
+                input: &app.input,
+                focused: matches!(app.focus, Focus::Dock),
+            }),
         };
         Self {
             top,
@@ -129,7 +133,7 @@ impl InputModule<'_> {
         frame.render_widget(Paragraph::new(shown), area);
         let y = cursor_row.saturating_sub(scroll) as u16;
         let x = GUTTER.saturating_add(cursor_col as u16);
-        if y < area.height && x < area.width {
+        if self.focused && y < area.height && x < area.width {
             frame.set_cursor_position((area.x.saturating_add(x), area.y.saturating_add(y)));
         }
     }
@@ -158,7 +162,7 @@ impl StatusModule<'_> {
             Paragraph::new(title_line(
                 label,
                 title_role,
-                &["Space 返回输入".into()],
+                &["Space 关闭".into()],
                 title.width as usize,
             )),
             title,

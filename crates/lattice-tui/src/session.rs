@@ -3,6 +3,7 @@
 
 use crate::TuiOptions;
 use crate::app::{Block, ToolSource, ToolState};
+use crate::blocks::BlockList;
 use anyhow::Context;
 use lattice_api::local::{
     LocalClient, LocalHistory, MessageRole, MessageSemantic, Node, ResultPayload, SessionId,
@@ -76,7 +77,7 @@ pub(crate) async fn freeze_configuration(
 }
 
 pub(crate) fn history_blocks(history: LocalHistory) -> Vec<Block> {
-    let mut blocks = Vec::new();
+    let mut blocks = BlockList::default();
     let mut ordinal = std::num::NonZeroUsize::MIN;
     for entry in history.entries {
         // Turn 的 agent 在接受时冻结，同一 Turn 的 Step 不再重复标题；路径从根开始，
@@ -108,9 +109,13 @@ pub(crate) fn history_blocks(history: LocalHistory) -> Vec<Block> {
         }
     }
     blocks
+        .entries
+        .into_iter()
+        .map(|entry| entry.block)
+        .collect()
 }
 
-pub(crate) fn append_step(blocks: &mut Vec<Block>, content: StepContent) {
+pub(crate) fn append_step(blocks: &mut BlockList, content: StepContent) {
     append_messages(blocks, vec![content.assistant]);
     for result in content.results {
         let state = match &result.payload {
@@ -154,7 +159,7 @@ pub(crate) fn append_step(blocks: &mut Vec<Block>, content: StepContent) {
 }
 
 pub(crate) fn append_messages(
-    blocks: &mut Vec<Block>,
+    blocks: &mut BlockList,
     messages: Vec<lattice_api::local::NativeMessage<lattice_api::local::BoundToolCall>>,
 ) {
     for message in messages {
@@ -178,7 +183,7 @@ pub(crate) fn append_messages(
 }
 
 /// 隐藏 reasoning 不应在重连或持久正文替换时引入实时流没有的换行。
-pub(crate) fn append_assistant_text(blocks: &mut Vec<Block>, text: String) {
+pub(crate) fn append_assistant_text(blocks: &mut BlockList, text: String) {
     match blocks.last_mut() {
         Some(Block::Assistant(previous)) => previous.push_str(&text),
         _ => blocks.push(Block::Assistant(text)),

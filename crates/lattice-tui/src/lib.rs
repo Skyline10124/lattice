@@ -4,6 +4,7 @@
 //! Full-screen TUI shell for LATTICE.
 
 mod app;
+mod blocks;
 mod connection;
 mod input;
 mod markdown;

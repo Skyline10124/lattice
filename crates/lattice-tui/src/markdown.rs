@@ -22,6 +22,82 @@ const OPTIONS: Options = Options::ENABLE_TABLES
     .union(Options::ENABLE_TASKLISTS)
     .union(Options::ENABLE_STRIKETHROUGH);
 
+/// 正文只由原文与宽度决定；一次完整投影结束即回收不再使用的版本。
+#[derive(Default)]
+pub(crate) struct RenderCache {
+    entries: std::collections::HashMap<u16, std::collections::HashMap<String, CachedBody>>,
+}
+
+struct CachedBody {
+    lines: std::rc::Rc<Vec<Line<'static>>>,
+    used: bool,
+}
+
+impl RenderCache {
+    pub(crate) fn render(&mut self, source: &str, width: u16) -> std::rc::Rc<Vec<Line<'static>>> {
+        let entries = self.entries.entry(width).or_default();
+        if let Some(entry) = entries.get_mut(source) {
+            entry.used = true;
+            return entry.lines.clone();
+        }
+        let lines = std::rc::Rc::new(render(source, width));
+        entries.insert(
+            source.to_owned(),
+            CachedBody {
+                lines: lines.clone(),
+                used: true,
+            },
+        );
+        lines
+    }
+
+    pub(crate) fn finish_render(&mut self) {
+        self.entries.retain(|_, entries| {
+            entries.retain(|_, entry| std::mem::take(&mut entry.used));
+            !entries.is_empty()
+        });
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    use std::rc::Rc;
+
+    #[test]
+    fn cached_render_hits_and_reclaims_unused_widths_and_stream_versions() {
+        let mut cache = RenderCache::default();
+        let source = "# 标题\n\n```rust\nlet value = 42;\n```";
+        let first = cache.render(source, 24);
+        assert_eq!(*first, render(source, 24));
+        assert!(
+            Rc::ptr_eq(&first, &cache.render(source, 24)),
+            "unchanged body must hit cache"
+        );
+        cache.finish_render();
+        let old = Rc::downgrade(&first);
+        drop(first);
+        let narrow = cache.render(source, 12);
+        let growing = cache.render(&format!("{source}\n追加"), 24);
+        assert_eq!(*narrow, render(source, 12));
+        assert_eq!(*growing, render(&format!("{source}\n追加"), 24));
+        cache.finish_render();
+        assert!(old.upgrade().is_none(), "unused width/source is reclaimed");
+        assert!(Rc::ptr_eq(&narrow, &cache.render(source, 12)));
+        cache.finish_render();
+        let unused = Rc::downgrade(&growing);
+        drop(growing);
+        assert!(
+            unused.upgrade().is_none(),
+            "only the growing body was invalidated"
+        );
+        let remaining = Rc::downgrade(&narrow);
+        drop(narrow);
+        cache.finish_render();
+        assert!(remaining.upgrade().is_none());
+    }
+}
+
 pub(crate) fn render(source: &str, width: u16) -> Vec<Line<'static>> {
     // Expanding before parsing matches CommonMark, which also places tab stops from the
     // start of the source line when it determines block structure.
