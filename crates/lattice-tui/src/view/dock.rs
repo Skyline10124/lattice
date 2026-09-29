@@ -17,6 +17,8 @@ enum Module<'a> {
 struct InputModule<'a> {
     input: &'a InputBuffer,
     focused: bool,
+    running: bool,
+    queue_full: bool,
 }
 
 struct StatusModule<'a> {
@@ -37,6 +39,8 @@ impl<'a> Dock<'a> {
             None => Module::Input(InputModule {
                 input: &app.input,
                 focused: matches!(app.focus, Focus::Dock),
+                running: app.phase != TurnPhase::Idle,
+                queue_full: app.queue.is_full(),
             }),
         };
         Self {
@@ -108,6 +112,12 @@ impl InputModule<'_> {
         let scroll = cursor_row.saturating_sub(height.saturating_sub(1));
         let below = visual.len().saturating_sub(scroll + height);
         let mut right = Vec::new();
+        if self.running {
+            right.push("Enter 排队".into());
+        }
+        if self.queue_full {
+            right.push("排队已满".into());
+        }
         if scroll > 0 {
             right.push(format!("↑ {scroll} 行"));
         }

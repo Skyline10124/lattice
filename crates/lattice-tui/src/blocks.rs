@@ -59,9 +59,14 @@ pub(crate) struct BlockList {
 }
 
 impl BlockList {
-    pub(crate) fn identify(&mut self, block: Block) -> IdentifiedBlock {
+    pub(crate) fn allocate_id(&mut self) -> BlockId {
         let id = BlockId(self.next_id);
         self.next_id = self.next_id.saturating_add(1);
+        id
+    }
+
+    pub(crate) fn identify(&mut self, block: Block) -> IdentifiedBlock {
+        let id = self.allocate_id();
         IdentifiedBlock { id, block }
     }
 

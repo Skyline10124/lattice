@@ -114,6 +114,8 @@ pub(crate) struct App {
     pub(crate) focus: Focus,
     dock_changed: bool,
     pub(crate) input: InputBuffer,
+    pub(crate) queue: crate::queue::Queue,
+    auto_sent_after: std::collections::HashSet<TurnId>,
     pub(crate) history: History,
     pub(crate) viewport: Viewport,
     pub(crate) phase: TurnPhase,
@@ -153,6 +155,8 @@ impl App {
             focus: Focus::Dock,
             dock_changed: false,
             input: InputBuffer::new(),
+            queue: Default::default(),
+            auto_sent_after: Default::default(),
             history: History::load(session_dir),
             viewport: Viewport::new(),
             phase: TurnPhase::Idle,
@@ -362,7 +366,9 @@ impl App {
             KeyAction::ScrollPageUp | KeyAction::ScrollPageDown | KeyAction::ScrollToBottom => {
                 let height = self.transcript_height();
                 if width == 0 || height == 0 {
-                    self.focus_input(lines.len());
+                    if !self.queue.is_editing() {
+                        self.focus_input(lines.len());
+                    }
                     return None;
                 }
                 match action {
@@ -374,17 +380,49 @@ impl App {
                     if !matches!(action, KeyAction::ScrollToBottom) {
                         self.viewport.pause();
                     }
-                    self.viewport.clamp_cursor(cursor);
-                    cursor.reanchor(&transcript);
+                    if !self.queue.is_editing() {
+                        self.viewport.clamp_cursor(cursor);
+                        cursor.reanchor(&transcript);
+                    }
                 }
             }
             KeyAction::CancelOrClear => self.cancel_or_clear(),
             KeyAction::Quit => self.should_quit = true,
+            action if self.queue.is_editing() => {
+                match action {
+                    KeyAction::Submit | KeyAction::Clear => {
+                        self.queue.finish_edit(matches!(action, KeyAction::Submit));
+                        return self.auto_submit();
+                    }
+                    action => self.queue.edit(&action, width),
+                }
+                let transcript = self.prepare_transcript();
+                if let Some((row, _)) = transcript.editor_cursor {
+                    self.viewport.reveal(row);
+                }
+            }
             KeyAction::Insert(' ') if self.dock_status().is_some() => self.release_dock_status(),
             KeyAction::Insert(_) | KeyAction::ModifiedSpace | KeyAction::Paste(_)
                 if self.dock_status().is_some() => {}
             action if matches!(self.focus, Focus::Transcript(_)) => match action {
-                KeyAction::Clear => self.focus_input(lines.len()),
+                KeyAction::Submit => {
+                    if let Focus::Transcript(cursor) = self.focus {
+                        self.queue.start_edit(cursor.block.id);
+                    }
+                    let transcript = self.prepare_transcript();
+                    if let Some((row, _)) = transcript.editor_cursor {
+                        self.viewport.reveal(row);
+                    }
+                }
+                KeyAction::Clear => {
+                    if let Focus::Transcript(cursor) = self.focus
+                        && self.queue.remove(cursor.block.id)
+                    {
+                        self.prepare_transcript();
+                    } else {
+                        self.focus_input(lines.len());
+                    }
+                }
                 KeyAction::Insert(c) => {
                     self.focus_input(lines.len());
                     self.input.insert_char(c);
@@ -422,16 +460,7 @@ impl App {
                 DockIntent::ReleaseStatus => self.release_dock_status(),
                 DockIntent::None => {}
                 DockIntent::Edit(action) => match action {
-                    KeyAction::Insert(c) => self.input.insert_char(c),
-                    KeyAction::Paste(text) => self.input.insert_paste(&text),
-                    KeyAction::Newline => self.input.newline(),
                     KeyAction::Clear => self.input.clear(),
-                    KeyAction::Backspace => self.input.backspace(),
-                    KeyAction::Delete => self.input.delete(),
-                    KeyAction::Left => self.input.move_left(),
-                    KeyAction::Right => self.input.move_right(),
-                    KeyAction::Home => self.input.home(),
-                    KeyAction::End => self.input.end(),
                     KeyAction::Up | KeyAction::Down => {
                         let (row, col) = crate::view::input_cursor(&self.input, width);
                         if matches!(action, KeyAction::Up)
@@ -462,7 +491,7 @@ impl App {
                             self.input.set_text(entry);
                         }
                     }
-                    _ => {}
+                    action => self.input.edit(&action, width),
                 },
             },
         }
@@ -508,12 +537,20 @@ impl App {
             self.viewport
                 .on_content_changed(transcript.lines.len(), self.transcript_height());
         }
-        if width == 0 || self.transcript_height() == 0 || transcript.lines.is_empty() {
+        if (width == 0 || self.transcript_height() == 0 || transcript.lines.is_empty())
+            && !self.queue.is_editing()
+        {
             self.focus_input(transcript.lines.len());
         }
         if let Focus::Transcript(mut cursor) = self.focus {
             let previous_row = cursor.row;
-            let retained = transcript.relocate(&mut cursor);
+            let retained = if let Some((row, col)) = transcript.editor_cursor {
+                cursor.row = row;
+                cursor.desired_col = col;
+                true
+            } else {
+                transcript.relocate(&mut cursor)
+            };
             if !retained {
                 self.viewport.keep_screen_row(cursor.row, screen_row);
             } else if self.viewport.following() {
@@ -537,6 +574,7 @@ impl App {
     }
 
     fn connection_lost(&mut self, reason: String) {
+        self.queue.pause();
         self.connected = false;
         for block in self.blocks.iter_mut() {
             if let Block::Tool {
@@ -548,6 +586,31 @@ impl App {
             }
         }
         self.push_status(StatusKind::Notice(vec![reason]));
+    }
+
+    fn apply_handoff(&mut self, report: DetachReport) {
+        // 旧句柄的回执只结清自己的名额，不覆盖新 Turn 的状态或输入。
+        if let Some(id) = report.turn_id {
+            match &report.submission {
+                Some(Ok(Acceptance::Accepted { .. } | Acceptance::Existing { .. })) => {
+                    self.queue.release(id);
+                }
+                Some(Err(_) | Ok(Acceptance::NeedsConfiguration { .. })) => {
+                    self.queue.reject(id);
+                }
+                None if report.not_submitted.is_some() => {
+                    self.queue.reject(id);
+                }
+                Some(Ok(Acceptance::ConfirmationUnknown { .. })) | None => {
+                    if self.queue.release(id) {
+                        self.queue.pause();
+                    }
+                }
+            }
+        }
+        for line in detach_lines(report) {
+            self.notice_once(format!("历史交接：{line}"));
+        }
     }
 
     fn apply_update(&mut self, update: LocalUpdate) {
@@ -586,9 +649,23 @@ impl App {
             LocalUpdate::Event { event, .. } => self.apply_turn_event(event),
             LocalUpdate::Submission { turn_id, result } => match result {
                 Ok(acceptance) => {
+                    // 自动发送的一条放回队首并回到空闲；手动提交按原有行为不归还输入区。
+                    if matches!(acceptance, Acceptance::NeedsConfiguration { .. })
+                        && self.queue.reject(turn_id)
+                    {
+                        self.submitted = None;
+                        self.restore_submission();
+                    }
+                    if matches!(acceptance, Acceptance::ConfirmationUnknown { .. }) {
+                        self.queue.pause();
+                        if self.queue.release(turn_id) {
+                            self.submitted = None;
+                        }
+                    }
                     if let Acceptance::Accepted { turn } | Acceptance::Existing { turn } =
                         &acceptance
                     {
+                        self.queue.release(turn_id);
                         self.ctx.session_id = Some(turn.session_id);
                         self.ctx.active_agent = turn.agent_name.clone();
                         self.submitted = None;
@@ -603,7 +680,7 @@ impl App {
                     self.push_status(StatusKind::Notice(vec![submission_notice(&acceptance)]));
                 }
                 Err(error) => {
-                    self.restore_submission();
+                    self.reject_submission(turn_id);
                     self.push_status(StatusKind::Notice(vec![format!(
                         "请求 {turn_id} 被拒绝或回执失败：{}",
                         error.message
@@ -611,6 +688,10 @@ impl App {
                 }
             },
             LocalUpdate::SubmissionUnknown { turn_id, error } => {
+                self.queue.pause();
+                if self.queue.release(turn_id) {
+                    self.submitted = None;
+                }
                 self.push_status(StatusKind::Notice(vec![format!(
                     "提交结果未知：{turn_id}；继续观察同一请求，不自动重发"
                 )]));
@@ -619,7 +700,7 @@ impl App {
                 }
             }
             LocalUpdate::NotSubmitted { turn_id, .. } => {
-                self.restore_submission();
+                self.reject_submission(turn_id);
                 self.push_status(StatusKind::Notice(vec![not_submitted_notice(turn_id)]));
             }
             LocalUpdate::Cancel {
@@ -727,6 +808,9 @@ impl App {
     }
 
     fn show_summary(&mut self, turn_id: TurnId, summary: TurnSummary) {
+        if summary.outcome != lattice_api::local::PublicTurnOutcome::Completed {
+            self.queue.pause();
+        }
         if self.blocks.iter().any(|block| matches!(block, Block::Status { kind:StatusKind::Summary { turn_id:id, .. }, .. } if *id == turn_id)) { return; }
         self.push_status(StatusKind::Summary { turn_id, summary });
     }
@@ -1026,6 +1110,10 @@ impl App {
     fn submit(&mut self) -> Option<String> {
         let raw = self.input.text();
         if raw.trim().is_empty() {
+            if self.phase == TurnPhase::Idle && self.input.is_empty() {
+                self.queue.resume();
+                return self.send_queue_head();
+            }
             return None;
         }
         if self.apply_builtin(raw.trim()) {
@@ -1034,12 +1122,53 @@ impl App {
             return None;
         }
         if self.phase != TurnPhase::Idle {
+            let id = self.blocks.allocate_id();
+            if self.queue.enqueue(id, raw) {
+                self.input.clear();
+            }
             return None;
         }
         let ordinal = std::num::NonZeroUsize::new(self.loaded_user_count?.saturating_add(1))?;
-        self.history.push(raw.trim());
         self.input.clear();
         let id = lattice_api::local::new_turn_id();
+        Some(self.start_submission(raw, id, ordinal))
+    }
+
+    fn auto_submit(&mut self) -> Option<String> {
+        let state = self.state.as_ref()?;
+        let turn = state.view.selected_turn.as_ref()?;
+        if !turn
+            .summary
+            .as_ref()
+            .is_some_and(|s| s.outcome == lattice_api::local::PublicTurnOutcome::Completed)
+            || self.auto_sent_after.contains(&turn.turn_id)
+        {
+            return None;
+        }
+        let completed = turn.turn_id;
+        let raw = self.send_queue_head()?;
+        self.auto_sent_after.insert(completed);
+        Some(raw)
+    }
+
+    fn send_queue_head(&mut self) -> Option<String> {
+        if self.should_quit || self.phase != TurnPhase::Idle {
+            return None;
+        }
+        let ordinal = std::num::NonZeroUsize::new(self.loaded_user_count?.saturating_add(1))?;
+        let id = lattice_api::local::new_turn_id();
+        let raw = self.queue.start_send(id)?;
+        Some(self.start_submission(raw, id, ordinal))
+    }
+
+    // 手动与排队共用提交路径，不借用或覆盖正在编辑的输入区。
+    fn start_submission(
+        &mut self,
+        raw: String,
+        id: TurnId,
+        ordinal: std::num::NonZeroUsize,
+    ) -> String {
+        self.history.push(raw.trim());
         self.state = None;
         self.cancel_status = None;
         self.attempt = None;
@@ -1055,7 +1184,7 @@ impl App {
             "提交身份 {id}；确认丢失仍按此 ID 找回"
         )]));
         self.phase = TurnPhase::Streaming;
-        Some(raw)
+        raw
     }
 
     #[rustfmt::skip]
@@ -1065,6 +1194,21 @@ impl App {
             self.phase = TurnPhase::Cancelling;
         } else if self.dock_status().is_none() {
             self.input.clear();
+        }
+    }
+
+    /// 自动发送的一条放回队首且不进输入区；手动提交归还输入区。两者都回到空闲。
+    fn reject_submission(&mut self, turn_id: TurnId) {
+        let automatic = self.queue.reject(turn_id);
+        if self
+            .submitted
+            .as_ref()
+            .is_some_and(|(id, _)| *id == turn_id)
+        {
+            if automatic {
+                self.submitted = None;
+            }
+            self.restore_submission();
         }
     }
 
@@ -1229,9 +1373,7 @@ where
                 dirty = true;
             }
             Some(report) = handoffs.next(), if !handoffs.is_empty() => {
-                for line in detach_lines(report) {
-                    app.notice_once(format!("历史交接：{line}"));
-                }
+                app.apply_handoff(report);
                 dirty = true;
             }
             update = async { turn.as_mut().expect("已有句柄").next().await }, if turn.is_some() => {
@@ -1246,7 +1388,18 @@ where
                 dirty = false;
             }
         }
+        if let Some(prompt) = app.auto_submit() {
+            if let Some(old) = turn.take() {
+                handoffs.push(old.detach().boxed());
+            }
+            begin_turn(options, app, &mut turn, client, prompt);
+            dirty = true;
+        }
     };
+    // 输入结束、普通退出和绘制失败都保存尚未发送的原文；不保存编辑器草稿。
+    for text in app.queue.drain() {
+        app.history.push(&text);
+    }
     LoopExit {
         result,
         turn,
@@ -1934,7 +2087,7 @@ mod tests {
     }
 
     #[test]
-    fn input_submit_keeps_running_draft_and_help_describes_new_keys() {
+    fn input_submit_queues_running_draft_and_help_describes_new_keys() {
         let mut app = test_app();
         let enter = Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(handle_input_event(&mut app, enter.clone()).is_none());
@@ -1945,7 +2098,8 @@ mod tests {
         );
         app.input.set_text("next");
         assert!(handle_input_event(&mut app, enter.clone()).is_none());
-        assert_eq!(app.input.text(), "next");
+        assert!(app.input.is_empty());
+        assert_eq!(app.queue.messages().next().unwrap().text, "next");
         app.input.set_text("/help");
         assert!(handle_input_event(&mut app, enter).is_none());
         let text = transcript_text(&app, 120);

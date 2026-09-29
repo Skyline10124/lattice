@@ -247,6 +247,7 @@ fn draw_left(frame: &mut Frame, app: &App, area: Rect, content_w: u16, transcrip
 pub(crate) struct Transcript {
     pub(crate) lines: Vec<Line<'static>>,
     pub(crate) owners: Vec<BlockPosition>,
+    pub(crate) editor_cursor: Option<(usize, usize)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -364,8 +365,52 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
             row: row.saturating_sub(start),
         }));
     }
+    let mut editor_cursor = None;
+    for message in app.queue.messages() {
+        let start = lines.len();
+        separate(&mut lines);
+        let mut right = vec![
+            if app.queue.is_paused() {
+                "暂停"
+            } else {
+                "排队"
+            }
+            .into(),
+        ];
+        if message.editor().is_some() {
+            right.push("Enter 完成编辑".into());
+        } else if matches!(app.focus, Focus::Transcript(cursor) if cursor.block.id == message.id) {
+            right.extend(["Enter 编辑".into(), "Esc 删除".into()]);
+        }
+        lines.extend(with_gutter(vec![title_line(
+            "USER",
+            Role::User,
+            &right,
+            usize::from(content_w),
+        )]));
+        if let Some(editor) = message.editor() {
+            let (visual, row, col) = input_visual(editor, content_w);
+            editor_cursor = Some((lines.len().saturating_add(row), col));
+            lines.extend(with_gutter(
+                visual
+                    .into_iter()
+                    .map(|text| Line::from(Span::styled(text, role_style(Role::Assistant))))
+                    .collect(),
+            ));
+        } else {
+            lines.extend(body(&message.text, content_w, role_style(Role::DimMeta)));
+        }
+        owners.extend((start..lines.len()).map(|row| BlockPosition {
+            id: message.id,
+            row: row.saturating_sub(start),
+        }));
+    }
     cache.finish_render();
-    Transcript { lines, owners }
+    Transcript {
+        lines,
+        owners,
+        editor_cursor,
+    }
 }
 
 fn separate(lines: &mut Vec<Line<'static>>) {
@@ -619,12 +664,16 @@ fn draw_transcript(
         .saturating_add(usize::from(area.height))
         .min(lines.len());
     frame.render_widget(Paragraph::new(lines[start..end].to_vec()), area);
-    if let Focus::Transcript(cursor) = &app.focus
-        && (start..end).contains(&cursor.row)
+    let cursor = transcript.editor_cursor.or_else(|| match &app.focus {
+        Focus::Transcript(cursor) => Some((cursor.row, cursor.column(lines, content_w))),
+        Focus::Dock => None,
+    });
+    if let Some((row, col)) = cursor
+        && (start..end).contains(&row)
         && content_w > 0
     {
-        let x = GUTTER.saturating_add(cursor.column(lines, content_w) as u16);
-        let y = cursor.row.saturating_sub(start) as u16;
+        let x = GUTTER.saturating_add(u16::try_from(col).unwrap_or(u16::MAX));
+        let y = row.saturating_sub(start) as u16;
         if x < area.width {
             frame.set_cursor_position((area.x.saturating_add(x), area.y.saturating_add(y)));
         }

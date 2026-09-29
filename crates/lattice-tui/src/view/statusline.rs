@@ -26,7 +26,9 @@ pub(super) fn line(app: &App, width: usize) -> Line<'static> {
     let mut right = [
         (!app.viewport.following()).then(|| format!("↓ {below} 行")),
         ctrl_c_visible(app).then(|| CTRL_C_HINT.into()),
-        (matches!(app.focus, Focus::Dock) && app.dock_status().is_none()).then(|| {
+        (app.queue.is_editing()
+            || (matches!(app.focus, Focus::Dock) && app.dock_status().is_none()))
+        .then(|| {
             if app.kitty_keyboard {
                 "S-Enter 换行"
             } else {

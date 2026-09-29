@@ -8,6 +8,7 @@ mod blocks;
 mod connection;
 mod input;
 mod markdown;
+mod queue;
 mod session;
 mod view;
 mod wrapping;

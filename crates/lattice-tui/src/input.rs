@@ -97,6 +97,28 @@ impl InputBuffer {
     pub(crate) fn rows(&self) -> usize { self.lines.len().max(1) }
 }
 
+impl InputBuffer {
+    /// 纯文本编辑，不解释提交、焦点、历史或草稿归属；输入区与排队编辑器共用。
+    pub(crate) fn edit(&mut self, action: &KeyAction, width: u16) {
+        match action {
+            KeyAction::Insert(c) => self.insert_char(*c),
+            KeyAction::ModifiedSpace => self.insert_char(' '),
+            KeyAction::Paste(text) => self.insert_paste(text),
+            KeyAction::Newline => self.newline(),
+            KeyAction::Backspace => self.backspace(),
+            KeyAction::Delete => self.delete(),
+            KeyAction::Left => self.move_left(),
+            KeyAction::Right => self.move_right(),
+            KeyAction::Home => self.home(),
+            KeyAction::End => self.end(),
+            KeyAction::Up | KeyAction::Down => {
+                crate::view::move_input_vertical(self, width, matches!(action, KeyAction::Down));
+            }
+            _ => {}
+        }
+    }
+}
+
 pub(crate) struct History {
     entries: Vec<String>,
     /// `None` = not currently browsing history.
