@@ -644,30 +644,70 @@ impl App {
                 }
             }
         }
-        let loaded: Vec<_> = blocks
+        // 已装入节点所在组的起点：history_blocks 在每个节点前放一个 AgentName。
+        let starts: Vec<(Block, usize)> = blocks
             .iter()
-            .filter(|b| matches!(b, Block::Step(_) | Block::UserTurn(_)))
-            .cloned()
+            .enumerate()
+            .filter(|(_, b)| matches!(b, Block::Step(_) | Block::UserTurn(_)))
+            .map(|(i, b)| {
+                let scoped = i > 0 && matches!(blocks[i - 1], Block::AgentName(_));
+                (b.clone(), if scoped { i - 1 } else { i })
+            })
             .collect();
-        let temporary = self.blocks.split_off(self.durable_len);
-        self.blocks = blocks;
-        self.durable_len = self.blocks.len();
+        let start_of = |b: &Block| starts.iter().find(|(m, _)| m == b).map(|(_, i)| *i);
+        // 临时提示按时间顺序保留：放在它之后出现的第一个已装入节点之前，没有则留在末尾。
+        // 旧持久块与已装入节点的实时块由新历史取代；未装入的实时块按原顺序接在末尾。
+        let old = std::mem::take(&mut self.blocks);
+        let durable_len = self.durable_len;
+        let mut inserts: Vec<(usize, Block)> = Vec::new();
+        let mut pending = Vec::new();
+        let mut tail = Vec::new();
         let mut replaced = false;
-        for block in temporary {
-            if matches!(block, Block::Step(_) | Block::UserTurn(_)) {
-                replaced = loaded.contains(&block);
+        for (index, block) in old.into_iter().enumerate() {
+            if index == durable_len {
+                replaced = false;
             }
-            if replaced && !matches!(block, Block::Status { .. }) {
+            if matches!(block, Block::Status { .. }) {
+                pending.push(block);
+            } else if matches!(block, Block::Step(_) | Block::UserTurn(_)) {
+                if let Some(start) = start_of(&block) {
+                    inserts.extend(pending.drain(..).map(|status| (start, status)));
+                    replaced = true;
+                } else if index >= durable_len {
+                    tail.append(&mut pending);
+                    tail.push(block);
+                    replaced = false;
+                }
+            } else if index < durable_len
+                || replaced
+                || matches!(&block, Block::Tool { id, .. } if history_ids.contains(id))
+            {
                 continue;
+            } else {
+                tail.append(&mut pending);
+                tail.push(block);
             }
-            if matches!(&block, Block::Tool { id, .. } if history_ids.contains(id)) {
-                continue;
-            }
-            if matches!(block, Block::Status { .. }) && self.blocks.contains(&block) {
-                continue;
-            }
-            self.blocks.push(block);
         }
+        tail.append(&mut pending);
+        let mut result: Vec<Block> = Vec::with_capacity(blocks.len() + inserts.len() + tail.len());
+        // 回退到其他位置后，旧节点在新历史中的顺序可能与原来不同；稳定排序保持同一位置上提示的先后。
+        inserts.sort_by_key(|(at, _)| *at);
+        let mut inserts = inserts.into_iter().peekable();
+        for (index, block) in blocks.into_iter().enumerate() {
+            while let Some((_, status)) = inserts.next_if(|(at, _)| *at == index) {
+                if !result.contains(&status) {
+                    result.push(status);
+                }
+            }
+            result.push(block);
+        }
+        self.durable_len = result.len();
+        for block in tail {
+            if !(matches!(block, Block::Status { .. }) && result.contains(&block)) {
+                result.push(block);
+            }
+        }
+        self.blocks = result;
     }
 
     pub(crate) fn fail_running_tools(&mut self, reason: &str) {

@@ -92,12 +92,24 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
         tui.wait_for_ready(Duration::from_secs(30))
             .expect("tui entered alternate screen");
 
-        // Send a prompt and wait for the assistant token text. The fake LLM
-        // uses the shared long-text mock, so the final deterministic line must surface.
+        // Send a prompt. The fake LLM uses the shared long-text mock, so the final
+        // deterministic line must end up on screen.
         budget.check(&spec.name);
         tui.send_line("ping").expect("send prompt");
-        tui.wait_for(Duration::from_secs(60), |s| s.contains("mock line 32"))
-            .expect("assistant token text appeared");
+
+        // Turn 关闭后，持久正文装入会替换实时块；实时事件积压被丢弃时，正文只经由这次装入到达。
+        // 装入在屏幕上没有标志，整行移位后终端只重写变化的字符格，输出流里拼不出连续的文字，
+        // 所以等它落定后取整帧判断：最终回答在屏幕上，启动提示按时间顺序留在本 Turn 之前。
+        tui.wait_for(Duration::from_secs(60), |s| s.contains("completed"))
+            .expect("turn summary appeared");
+        std::thread::sleep(Duration::from_secs(3));
+        let frame = tui
+            .redraw_text(Duration::from_secs(10))
+            .expect("settled frame");
+        assert!(
+            frame.contains("mock line 32") && !frame.contains("show commands"),
+            "final answer must stay on screen after the durable history install: {frame}"
+        );
 
         let caps = server.captured_requests();
         assert!(
