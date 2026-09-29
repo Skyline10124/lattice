@@ -38,7 +38,6 @@ pub use execute::run_turn;
 pub(crate) use execute::start_execution;
 pub use execute::{STREAM_IDLE_TIMEOUT_SECS, start_turn};
 pub use types::{
-    AttemptSegments, RunTurnRequest, RunTurnResult, SequencedTurnEvent, SequencedTurnEventStream,
-    TextSegment, TurnAcceptance, TurnCompletion, TurnEvent, TurnEventStream, TurnExecution,
-    TurnRef,
+    AttemptSegments, RunTurnRequest, RunTurnResult, SequencedTurnEvent, TextSegment,
+    TurnAcceptance, TurnCompletion, TurnEvent, TurnExecution, TurnRef,
 };

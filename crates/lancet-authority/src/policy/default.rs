@@ -115,15 +115,6 @@ impl PolicyConfig {
         }
         Ok(())
     }
-
-    pub fn to_cep_policy_config(&self) -> super::CepPolicyConfig {
-        super::CepPolicyConfig {
-            project_root: self.project_root.clone(),
-            observation: self.observation.clone(),
-            network: self.network.clone(),
-            capability_admission: Default::default(),
-        }
-    }
 }
 
 /// Strict external policy file. Removed execution/effect tables are rejected.

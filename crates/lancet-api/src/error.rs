@@ -27,6 +27,3 @@ pub enum LancetError {
         available: Vec<String>,
     },
 }
-
-/// Convenience result alias for the LANCET public API.
-pub type LancetResult<T> = Result<T, LancetError>;

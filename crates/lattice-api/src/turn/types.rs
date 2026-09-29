@@ -2,11 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use serde::{Deserialize, Serialize};
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use futures::stream::Stream;
 use lancet_protocol::SessionId;
 use lattice_profile::LoadedAgentProfile;
 use lattice_session::store::{TurnDetail, TurnSummary, UsageSummary};
@@ -184,8 +182,3 @@ pub struct SequencedTurnEvent {
     pub sequence: u64,
     pub event: TurnEvent,
 }
-
-pub type SequencedTurnEventStream = Pin<Box<dyn Stream<Item = SequencedTurnEvent> + Send>>;
-
-/// Boxed stream of TurnEvent values.
-pub type TurnEventStream = Pin<Box<dyn Stream<Item = TurnEvent> + Send>>;

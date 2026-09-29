@@ -3,8 +3,6 @@
 
 //! Turn-scoped observation budget tracking.
 
-use lancet_protocol::error::ReservedErrorData;
-use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability};
 use std::sync::{Arc, Mutex};
 
 /// Immutable per-turn budget limits, derived from the observation policy.
@@ -38,21 +36,6 @@ pub struct BudgetExhausted {
     pub limit: &'static str,
     pub requested: usize,
     pub remaining: usize,
-}
-
-impl BudgetExhausted {
-    /// Map budget exhaustion to a typed CEP error for handler responses.
-    pub fn to_cep_error(&self) -> CepError {
-        CepError::new(
-            CepErrorCode::Reserved,
-            format!("observation budget exhausted: {}", self.limit),
-            CepErrorData::Reserved(ReservedErrorData {
-                code: self.limit.to_string(),
-                detail: format!("requested={} remaining={}", self.requested, self.remaining),
-            }),
-            Retriability::RequiresReplan,
-        )
-    }
 }
 
 /// Mutable per-turn observation counter.

@@ -96,16 +96,6 @@ fn project_root_violation_message(message: String) -> CepError {
 #[cfg(test)]
 pub const BACKEND_SAFETY_NET_TEST_PATH: &str = "__cep_backend_safety_net__";
 
-/// Test-only hook simulating a backend-time denial after CEP policy allowed the path.
-#[cfg(test)]
-pub fn check_backend_safety_net(path: &str) -> Option<CepError> {
-    if path == BACKEND_SAFETY_NET_TEST_PATH {
-        Some(backend_safety_net_denial(path))
-    } else {
-        None
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

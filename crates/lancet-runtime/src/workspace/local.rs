@@ -19,7 +19,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::history::{MutationRecord, RecordedMutation, WorkspaceHistory, WorkspaceHistoryError};
+use crate::history::{WorkspaceHistory, WorkspaceHistoryError};
 use regex::Regex;
 use rustix::fs::{AtFlags, Mode, OFlags};
 use rustix::io::Errno;
@@ -185,28 +185,6 @@ impl LocalWorkspace {
         blocking: lattice_store::Blocking,
     ) -> Result<Option<lattice_store::FlockGuard>, WorkspaceHistoryError> {
         self.history.lock_workspace_operation(mode, blocking)
-    }
-
-    /// Append one successfully installed Atomic Local Mutation to the private
-    /// history.
-    ///
-    /// Callers must only reach this after the atomic install returned success:
-    /// a recorded commit asserts the mutation is on disk. Returns `Ok(None)`
-    /// when history recording is disabled. Recording writes only into the
-    /// private history repository — never the Local Workspace and never the
-    /// project `.git`.
-    pub async fn record_mutation(
-        &self,
-        record: MutationRecord,
-    ) -> Result<Option<RecordedMutation>, WorkspaceHistoryError> {
-        let history = Arc::clone(&self.history);
-        tokio::task::spawn_blocking(move || history.record(&record))
-            .await
-            .unwrap_or_else(|err| {
-                Err(WorkspaceHistoryError::Repo(format!(
-                    "history recording task failed: {err}"
-                )))
-            })
     }
 
     /// Clone the shareable state for a `spawn_blocking` closure.
@@ -448,24 +426,6 @@ impl LocalWorkspace {
         intent: PathIntent,
     ) -> Result<PathFacts, LocalWorkspaceError> {
         self.resolve_secure(path, intent).map(|(_, facts)| facts)
-    }
-
-    /// Async per-segment secure resolution returning only the observed facts.
-    ///
-    /// Handlers and the edit engine use this for preflight: the facts feed
-    /// both their own flow (existence/kind/byte size) and Guard L1
-    /// validation via [`PathFacts::to_guard`]. Resolution runs in the
-    /// blocking pool.
-    pub async fn resolve_facts(
-        &self,
-        path: &WorkspacePath,
-        intent: PathIntent,
-    ) -> Result<PathFacts, LocalWorkspaceError> {
-        let ws = self.blocking_clone();
-        let path = path.clone();
-        tokio::task::spawn_blocking(move || ws.resolve_facts_blocking(&path, intent))
-            .await
-            .map_err(|e| LocalWorkspaceError::Io(std::io::Error::other(e)))?
     }
 
     /// Read a file under the workspace, returning its bytes. Synchronous form.

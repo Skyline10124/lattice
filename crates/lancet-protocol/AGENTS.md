@@ -4,7 +4,7 @@
 
 维护纯共享 wire/data 契约：JSON-RPC 信封和 CEP Tool frame、类型化持久身份与绑定、Cell/能力、错误和版本化证据。无 I/O、async runtime、执行引擎或策略副作用。
 
-`jsonrpc.rs`/`frame.rs` 维护信封及别名；`cell.rs`/`capability.rs` 维护 Cell、trust-free CellRef 和能力解析；`evidence.rs` 维护三类版本化证据；`canonical.rs` 维护确定性 JSON；`binding.rs`、`identity.rs`、`address.rs` 维护绑定、身份及中立地址；`error.rs` 集中维护错误码与 retriability。`lib.rs` 的公开重导出是 crate 接口。
+`jsonrpc.rs`/`frame.rs` 维护信封及别名；`cell.rs` 维护 Cell 与 trust-free CellRef；`evidence.rs` 维护三类版本化证据；`canonical.rs` 维护确定性 JSON；`binding.rs`、`identity.rs`、`address.rs` 维护绑定、身份及中立地址；`error.rs` 集中维护错误码与 retriability。`lib.rs` 的公开重导出是 crate 接口。
 
 ## 上位文档
 

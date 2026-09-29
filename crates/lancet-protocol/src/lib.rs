@@ -8,7 +8,6 @@
 //! - **JSON-RPC 2.0** envelope types (`jsonrpc`) — domain-neutral request/response/notification.
 //! - **Frame aliases** (`frame`) — CEP-specific type aliases over JSON-RPC (`ToolCall`, `ToolResult`, `ToolEvent`).
 //! - **Cell effect model** (`cell`) — ADR 0004 `CtxOp`/`ExtImpact`/scope/trust/capability core.
-//! - **Required capabilities** (`capability`) — capability patterns and matchers.
 //! - **Admission evidence** (`evidence`) — approved capabilities vs observed effects.
 //! - **Canonical JSON** (`canonical`) — deterministic bytes for protocol consumers.
 //! - **Typed identities** (`identity`) — UUID-v4 `InvocationId`/`TurnId` and `SessionId`.
@@ -20,7 +19,6 @@
 pub mod address;
 pub mod binding;
 pub mod canonical;
-pub mod capability;
 pub mod cell;
 pub mod error;
 pub mod evidence;
@@ -33,7 +31,6 @@ pub mod jsonrpc;
 pub use address::{ModelAttemptKey, ModelMessageAddress, PlanKey, ToolCallAddress};
 pub use binding::{BindingIdentity, InvocationBinding, arguments_digest};
 pub use canonical::canonical_json;
-pub use capability::RequiredCapability;
 pub use cell::{
     ArtifactIdentity, Capability, Cell, CellKeyError, ChannelKind, CtxOp, DescriptorError,
     ExtImpact, ScopeDecl, ToolDescriptor, ToolOutput, Trust, parse_cell_ref,

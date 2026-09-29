@@ -33,12 +33,5 @@ pub use session::{ApiError, SessionApi};
 pub use turn::run_turn;
 pub use turn::{
     RunTurnRequest, RunTurnResult, STREAM_IDLE_TIMEOUT_SECS, TurnAcceptance, TurnCompletion,
-    TurnEvent, TurnEventStream, TurnExecution, TurnRef, start_turn,
+    TurnEvent, TurnExecution, TurnRef, start_turn,
 };
-
-/// 提前组成进程共享的 Component 运行时，将首次新执行所需的编译成本移到预热阶段。
-/// 组成错误会被缓存，并在后续需要 Component 组成的新执行路径中返回。
-/// 只读查询、既有请求找回及 closure-only 恢复不依赖此预热，也不因预热失败而被拒绝。
-pub fn warmup_component_runtime() -> Result<(), std::sync::Arc<CompositionError>> {
-    lancet_api::ComponentRuntime::shared().map(|_| ())
-}

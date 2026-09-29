@@ -93,9 +93,6 @@ impl TurnEventLine {
         }
     }
 }
-pub fn parse_event_line(line: &str) -> Option<TurnEventLine> {
-    parse_event_line_checked(line).ok().flatten()
-}
 fn string<'a>(value: &'a Value, field: &str) -> Result<&'a str, String> {
     value
         .get(field)
@@ -493,9 +490,6 @@ fn closed_result(events: &[TurnEventLine]) -> Option<(&str, &str, &str)> {
         }
         _ => None,
     })
-}
-pub fn classify_exit(code: Option<i32>) -> SendExitCode {
-    SendExitCode::from_code(code).unwrap_or(SendExitCode::Failed)
 }
 /// 没有完整历史或有读取/执行错误时不能由 Completed 推导命令成功。
 /// 进程退出、干预、EOF 和畸形行仍必须通过 SendExecution 另外核验。

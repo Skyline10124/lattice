@@ -179,14 +179,6 @@ impl WorkspaceHistoryBacking {
         })
     }
 
-    /// Project-scoped backing under the XDG state root (production).
-    pub fn for_project(workspace_root: &Path) -> Result<Self, WorkspaceHistoryError> {
-        Ok(Self::Project {
-            layout: StateLayout::resolve()?,
-            key: ProjectStoreKey::derive(workspace_root)?,
-        })
-    }
-
     /// Backing for an already-derived storage address.
     pub fn for_key(layout: StateLayout, key: ProjectStoreKey) -> Self {
         Self::Project { layout, key }

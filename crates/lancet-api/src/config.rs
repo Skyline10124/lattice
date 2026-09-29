@@ -17,13 +17,6 @@ pub fn workspace_history_backing_in(
     WorkspaceHistoryBacking::for_project_in(state_root, project_root)
 }
 
-/// Private workspace-history store backing under the Linux XDG state directory.
-pub fn workspace_history_backing(
-    project_root: &Path,
-) -> Result<WorkspaceHistoryBacking, WorkspaceHistoryError> {
-    WorkspaceHistoryBacking::for_project(project_root)
-}
-
 /// Inputs for [`crate::LancetRuntime::build`].
 ///
 /// 策略和工作区历史绑定由组成层冻结；调用事实由会话库持有。
