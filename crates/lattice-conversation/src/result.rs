@@ -5,7 +5,7 @@
 
 use crate::tool_call::hex_digest;
 use crate::{BoundToolCall, NativeMessage, ToolResultOutcome};
-use lancet_protocol::{CepError, CepErrorCode, InvocationId, Retriability};
+use lancet_protocol::{CepError, InvocationId};
 use serde::{Deserialize, Serialize};
 
 pub const MAX_TOOL_CONTENT_BYTES: usize = 65_536;
@@ -20,29 +20,16 @@ pub fn tool_content_digest(canonical_content: &str) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// 已越过 Started 却没有确定结果的原因；外部效果未知。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum NotExecutedReason {
-    BeforeDispatch,
-    CancelledBeforeDispatch,
-    DeadlineBeforeDispatch,
-    PrecedingInvocationIndeterminate,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum IndeterminateReason {
-    MayHaveOccurred,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RejectedReason {
-    pub code: CepErrorCode,
-    pub retriability: Retriability,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CancelledReason {
-    DuringDispatch,
+pub enum IndeterminateCause {
+    /// Step 停止或进程退出时尚未取得结果，由关闭事务补写。
+    NoResult,
+    /// LANCET 返回 `CallCancelled`。
+    Cancelled,
+    /// LANCET 返回 `OutcomeIndeterminate`。
+    Reported,
 }
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -59,21 +46,21 @@ pub struct StoredToolResult {
     deny_unknown_fields
 )]
 pub enum ResultPayload {
+    /// LANCET 返回 JSON。
     Succeeded(SuccessContent),
+    /// LANCET 返回 CepError；策略或校验拒绝是其中的错误族。
     Failed(Box<CepError>),
-    Rejected(Box<CepError>),
-    Cancelled(CancelledReason),
-    NotExecuted(NotExecutedReason),
-    Indeterminate(IndeterminateReason),
+    /// 从未交给 LANCET。不带原因：为什么停记在 Step 的结束原因里。
+    NotExecuted,
+    /// 已越过 Started，效果未知。
+    Indeterminate(IndeterminateCause),
 }
 impl ResultPayload {
     pub fn outcome(&self) -> ToolResultOutcome {
         match self {
             Self::Succeeded(_) => ToolResultOutcome::Succeeded,
             Self::Failed(_) => ToolResultOutcome::Failed,
-            Self::Rejected(_) => ToolResultOutcome::Rejected,
-            Self::Cancelled(_) => ToolResultOutcome::Cancelled,
-            Self::NotExecuted(_) => ToolResultOutcome::NotExecuted,
+            Self::NotExecuted => ToolResultOutcome::NotExecuted,
             Self::Indeterminate(_) => ToolResultOutcome::Indeterminate,
         }
     }

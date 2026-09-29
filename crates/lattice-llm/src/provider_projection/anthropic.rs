@@ -212,8 +212,8 @@ pub fn native_to_wire<S: ToolCallState>(
 
 /// One user turn whose content carries every `tool_result` block, in closure
 /// order. Blocks correlate to their `tool_use` through `tool_use_id`, so a
-/// closing call with no provider ID cannot be encoded. `Failed`/`Rejected`
-/// closures set the official `is_error` flag.
+/// closing call with no provider ID cannot be encoded. `Failed` closures set
+/// the official `is_error` flag.
 pub(crate) fn tool_result_messages(
     closures: &[ToolResultClosure],
 ) -> Result<Vec<Value>, ProjectionError> {
@@ -233,7 +233,6 @@ pub(crate) fn tool_result_messages(
         if matches!(
             closure.outcome,
             lattice_conversation::ToolResultOutcome::Failed
-                | lattice_conversation::ToolResultOutcome::Rejected
         ) {
             block["is_error"] = json!(true);
         }

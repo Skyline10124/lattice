@@ -116,7 +116,7 @@ pub(crate) fn append_step(blocks: &mut Vec<Block>, content: StepContent) {
                     outcome: "succeeded".into(),
                 }
             }
-            ResultPayload::Failed(error) | ResultPayload::Rejected(error) => ToolState::Failed {
+            ResultPayload::Failed(error) => ToolState::Failed {
                 output_len: 0,
                 error: Some(error.message.clone()),
             },

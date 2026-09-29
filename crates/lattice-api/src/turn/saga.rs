@@ -13,7 +13,7 @@ use lattice_agent::{
     ModelStepAttempt, ModelStepDriver, ModelStepError, ModelStepEvent, ModelStepRequest,
     ModelStopCause,
 };
-use lattice_conversation::{ConversationItem, ProviderOrigin, ToolResultOutcome};
+use lattice_conversation::{ConversationItem, ProviderOrigin};
 use lattice_session::store::*;
 use std::sync::{
     Arc,
@@ -443,17 +443,10 @@ pub(crate) async fn run_coordinator_saga(
             let terminal = prepare_terminal(binding, receipt.result, receipt.evidence)?;
             let outcome = terminal.result().payload.outcome();
             let error_summary = match &terminal.result().payload {
-                ResultPayload::Failed(error) | ResultPayload::Rejected(error) => {
-                    Some(bound_provider_diagnostic(&error.message))
-                }
+                ResultPayload::Failed(error) => Some(bound_provider_diagnostic(&error.message)),
                 _ => None,
             };
-            let stop = matches!(
-                outcome,
-                ToolResultOutcome::Cancelled
-                    | ToolResultOutcome::Indeterminate
-                    | ToolResultOutcome::NotExecuted
-            );
+            let stop = stops_batch(&terminal.result().payload);
             coordinator
                 .io
                 .finish_invocation(TerminalInput {

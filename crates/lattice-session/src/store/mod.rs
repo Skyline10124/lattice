@@ -15,7 +15,7 @@ mod types;
 mod validate;
 mod write;
 pub use close::{
-    bound_provider_diagnostic, first_stopping_cause, plan_auto_close, prepare_terminal,
+    bound_provider_diagnostic, first_stopping_cause, plan_auto_close, prepare_terminal, stops_batch,
 };
 use codec::Records;
 use lancet_protocol::{SessionId, TurnId};

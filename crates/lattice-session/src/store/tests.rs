@@ -710,21 +710,38 @@ fn impossible_transaction_shapes_are_rejected() {
         .unwrap();
     db.auto_close(&lock, tid(2), now()).unwrap();
     let closed = durable(&db, sid(2), tid(2));
-    for reason in [
-        NotExecutedReason::BeforeDispatch,
-        NotExecutedReason::DeadlineBeforeDispatch,
-        NotExecutedReason::CancelledBeforeDispatch,
+    // 关闭后槽位为 [Indeterminate(NoResult), NotExecuted, NotExecuted]；以下形状都不可能由关闭事务写出。
+    for (index, payload, reason, label) in [
+        (
+            1,
+            ResultPayload::Indeterminate(IndeterminateCause::NoResult),
+            EvidenceUnavailableReason::NoResult,
+            "no-result after a stopping slot",
+        ),
+        (
+            0,
+            ResultPayload::Indeterminate(IndeterminateCause::Reported),
+            EvidenceUnavailableReason::NoResult,
+            "reported indeterminate without receipt",
+        ),
+        (
+            1,
+            ResultPayload::NotExecuted,
+            EvidenceUnavailableReason::NoResult,
+            "not-executed with no-result evidence",
+        ),
     ] {
         let mut state = closed.clone();
         let StepState::Closed { invocations, .. } = &mut state.steps[0].state else {
             unreachable!()
         };
-        invocations[1].terminal.result.payload = ResultPayload::NotExecuted(reason);
+        invocations[index].terminal.result.payload = payload;
+        invocations[index].terminal.evidence = InvocationEvidence::Unavailable { reason };
         if !matches!(
             plan_auto_close(&state, now()),
             Err(StoreError::Corruption { .. })
         ) {
-            missed.push("indeterminate tail reason");
+            missed.push(label);
         }
     }
     assert!(
@@ -1708,10 +1725,8 @@ fn auto_close_matrix() {
             if case == 0 || case == 6 { 0 } else { 1 }
         );
         let first = durable(&db, sid(1), tid(1));
+        // 崩溃落在 Started 前后都是进程退出；只有已写入的槽位自身停止（此处是取消）优先。
         let expected_cause = match case {
-            4 => StopCause::InvocationIndeterminate {
-                invocation_id: iid(2),
-            },
             7 => StopCause::Cancelled,
             _ => StopCause::ProcessExit,
         };
@@ -1779,23 +1794,17 @@ fn auto_close_matrix() {
                         result: StoredToolResult {
                             invocation_id: iid(2),
                             name: "observe.workspace".into(),
-                            payload: ResultPayload::Indeterminate(
-                                IndeterminateReason::MayHaveOccurred,
-                            ),
+                            payload: ResultPayload::Indeterminate(IndeterminateCause::NoResult),
                         },
                         evidence: InvocationEvidence::Unavailable {
-                            reason: EvidenceUnavailableReason::ProcessExit,
+                            reason: EvidenceUnavailableReason::NoResult,
                         },
                     },
                     SlotState::Registered => InvocationTerminal {
                         result: StoredToolResult {
                             invocation_id: iid(index as u64 + 1),
                             name: "observe.workspace".into(),
-                            payload: ResultPayload::NotExecuted(if case == 4 {
-                                NotExecutedReason::PrecedingInvocationIndeterminate
-                            } else {
-                                NotExecutedReason::BeforeDispatch
-                            }),
+                            payload: ResultPayload::NotExecuted,
                         },
                         evidence: InvocationEvidence::Unavailable {
                             reason: EvidenceUnavailableReason::NotDispatched,
@@ -1891,7 +1900,7 @@ fn auto_close_matrix() {
     assert!(plan_auto_close(&state, now()).is_err());
 }
 
-// F21/F24/F29：同一有序规则服务 live 与恢复，不把后序不确定提升到取消之前。
+// 同一有序规则服务 live 与恢复：槽位自身的停止优先，否则取关闭 Step 的外部停止。
 #[test]
 fn ordered_terminal_causes() {
     for (stop, expected) in [
@@ -1923,7 +1932,13 @@ fn ordered_terminal_causes() {
         } = &state.steps[0].state
         {
             assert_eq!(cause, &expected);
-            assert_eq!(first_stopping_cause(invocations).unwrap(), Some(expected));
+            // 没轮到的槽位不带原因，原因只在 Step 的 end 里。
+            assert_eq!(first_stopping_cause(invocations).unwrap(), None);
+            assert!(
+                invocations[1..]
+                    .iter()
+                    .all(|i| i.terminal.result.payload == ResultPayload::NotExecuted)
+            );
         } else {
             panic!("closed stop")
         }
@@ -1947,11 +1962,18 @@ fn ordered_terminal_causes() {
     );
     let mut state = durable(&db, sid(1), tid(1));
     if let StepState::Closed { invocations, .. } = &mut state.steps[0].state {
-        invocations[0].terminal.result.payload =
-            ResultPayload::NotExecuted(NotExecutedReason::PrecedingInvocationIndeterminate);
+        // NotExecuted 之后不能再出现有结果的调用。
+        invocations[0].terminal.result.payload = ResultPayload::NotExecuted;
         invocations[0].terminal.evidence = InvocationEvidence::Unavailable {
             reason: EvidenceUnavailableReason::NotDispatched,
         };
+        let binding = invocations[1].binding.clone();
+        invocations[1].terminal = prepare_terminal(
+            &binding,
+            Ok(json!(null)),
+            CellEvidenceTriple::refused_before_admission(&binding.identity.method),
+        )
+        .unwrap();
         assert!(first_stopping_cause(invocations).is_err());
     }
 }
@@ -2010,19 +2032,30 @@ fn payload_evidence_and_privacy() {
     ev["effects"]["future"] = json!(true);
     let ev = serde_json::from_value(ev).unwrap();
     assert!(prepare_terminal(binding, Ok(json!(null)), ev).is_ok());
-    for (code, outcome) in [
-        (CepErrorCode::ExecutionFailed, ToolResultOutcome::Failed),
-        (CepErrorCode::GuardDenied, ToolResultOutcome::Rejected),
-        (CepErrorCode::CallCancelled, ToolResultOutcome::Cancelled),
+    for (code, payload) in [
+        (
+            CepErrorCode::ExecutionFailed,
+            ResultPayload::Failed(Box::new(CepError::internal_error(""))),
+        ),
+        (
+            CepErrorCode::GuardDenied,
+            ResultPayload::Failed(Box::new(CepError::internal_error(""))),
+        ),
+        (
+            CepErrorCode::CallCancelled,
+            ResultPayload::Indeterminate(IndeterminateCause::Cancelled),
+        ),
         (
             CepErrorCode::OutcomeIndeterminate,
-            ToolResultOutcome::Indeterminate,
+            ResultPayload::Indeterminate(IndeterminateCause::Reported),
         ),
     ] {
-        assert_eq!(
-            terminal(binding, Some(code)).result.payload.outcome(),
-            outcome
-        );
+        let actual = terminal(binding, Some(code)).result.payload;
+        match (&actual, &payload) {
+            // 拒绝类错误归 Failed，错误码原样保留。
+            (ResultPayload::Failed(e), ResultPayload::Failed(_)) => assert_eq!(e.code, code),
+            _ => assert_eq!(actual, payload),
+        }
     }
     assert_eq!(
         bound_provider_diagnostic(&"树".repeat(2049))

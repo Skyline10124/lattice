@@ -12,9 +12,9 @@ fn parse_change(value: &str) -> Result<ChangeSeq, String> {
     super::session::parse_node_id(value).map(|id| ChangeSeq(id.0))
 }
 fn parse_outcome(value: &str) -> Result<String, String> {
-    outcome(value).map(|_| value.into()).map_err(|_| {
-        "expected succeeded/failed/rejected/cancelled/not_executed/indeterminate".into()
-    })
+    outcome(value)
+        .map(|_| value.into())
+        .map_err(|_| "expected succeeded/failed/not_executed/indeterminate".into())
 }
 fn outcome(value: &str) -> Result<ToolResultOutcome> {
     serde_json::from_value(serde_json::Value::String(value.into()))

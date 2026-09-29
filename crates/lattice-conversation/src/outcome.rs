@@ -9,9 +9,13 @@
 //! invocation slot in `lattice-session` stores the same vocabulary plus the
 //! outcome-shaped payload (see `docs/architecture/session.md#调用槽位`).
 //!
-//! Only `NotExecuted` means the call was never handed to LANCET. Every other
-//! outcome is recorded after the slot crossed `Started`, so it may have had
-//! external effects.
+//! Two dimensions, as for model attempts: the outcome is the end shape, and
+//! `IndeterminateCause` or the returned `CepError` carries the reason. Only
+//! `NotExecuted` means the call was never handed to LANCET and guarantees no
+//! external effect; every other outcome is recorded after the slot crossed
+//! `Started`. Policy or validation refusals are `Failed` with a Validation,
+//! Permission or Guard `CepError`; cancellation after dispatch is
+//! `Indeterminate`.
 
 use serde::{Deserialize, Serialize};
 
@@ -21,23 +25,13 @@ use serde::{Deserialize, Serialize};
 pub enum ToolResultOutcome {
     /// LANCET returned a JSON result.
     Succeeded,
-    /// LANCET returned a `CepError` outside the Validation, Permission and
-    /// Guard families (other than `CallCancelled` / `OutcomeIndeterminate`).
+    /// LANCET returned a `CepError`; its family and retriability say why.
     Failed,
-    /// LANCET returned a Validation, Permission or Guard `CepError`. The refusal
-    /// may come from admission (the Component never ran) or from a host
-    /// operation refused mid-execution, after earlier host operations took
-    /// effect; it does not mean "rejected before execution".
-    Rejected,
-    /// LANCET returned `CallCancelled`: cancelled after dispatch.
-    Cancelled,
-    /// The coordinator never handed the call to LANCET (cancelled or out of
-    /// deadline before dispatch, a preceding call was indeterminate, or the
-    /// Turn stopped). The only outcome that guarantees no external effect.
+    /// The coordinator never handed the call to LANCET; the Step's stop cause
+    /// says why. The only outcome that guarantees no external effect.
     NotExecuted,
-    /// The slot crossed `Started` but no result was recorded before the Step
-    /// closed (stop or crash), or LANCET returned `OutcomeIndeterminate`:
-    /// effects are unknown.
+    /// The slot crossed `Started` without a determinate result: effects are
+    /// unknown.
     Indeterminate,
 }
 
@@ -47,8 +41,6 @@ impl ToolResultOutcome {
         match self {
             Self::Succeeded => "succeeded",
             Self::Failed => "failed",
-            Self::Rejected => "rejected",
-            Self::Cancelled => "cancelled",
             Self::NotExecuted => "not_executed",
             Self::Indeterminate => "indeterminate",
         }
@@ -64,8 +56,6 @@ mod tests {
         let cases = [
             (ToolResultOutcome::Succeeded, "succeeded"),
             (ToolResultOutcome::Failed, "failed"),
-            (ToolResultOutcome::Rejected, "rejected"),
-            (ToolResultOutcome::Cancelled, "cancelled"),
             (ToolResultOutcome::NotExecuted, "not_executed"),
             (ToolResultOutcome::Indeterminate, "indeterminate"),
         ];

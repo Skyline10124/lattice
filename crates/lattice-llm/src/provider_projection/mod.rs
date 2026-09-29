@@ -339,7 +339,7 @@ fn closure_content(payload: &ResultPayload) -> String {
             "digest": digest.iter().map(|b| format!("{b:02x}")).collect::<String>(),
             "byte_length": byte_length,
         }),
-        ResultPayload::Failed(error) | ResultPayload::Rejected(error) => {
+        ResultPayload::Failed(error) => {
             const BOUNDED_ERROR_CONTENT_BYTES: usize = 4_096;
             let mut end = error.message.len().min(BOUNDED_ERROR_CONTENT_BYTES);
             while !error.message.is_char_boundary(end) {
@@ -347,7 +347,8 @@ fn closure_content(payload: &ResultPayload) -> String {
             }
             json!({"error":{"code":error.code.as_i32(), "message":&error.message[..end]}})
         }
-        _ => json!({"outcome":payload.outcome().as_str()}),
+        ResultPayload::NotExecuted => json!({"outcome":"not_executed"}),
+        ResultPayload::Indeterminate(cause) => json!({"outcome":"indeterminate","cause":cause}),
     };
     canonical_json(&value)
 }

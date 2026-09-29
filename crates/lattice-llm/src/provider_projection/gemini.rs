@@ -211,7 +211,7 @@ pub fn native_to_wire<S: ToolCallState>(
 /// One user turn whose parts carry every `functionResponse`, in closure
 /// order. The Gemini result shape correlates by Tool name and carries no
 /// provider call ID, so closures whose calls have no provider ID encode
-/// normally. `Failed`/`Rejected` closures use the conventional
+/// normally. `Failed` closures use the conventional
 /// `response: {"error": …}` spelling; other outcomes pass an object content
 /// through and wrap everything else as `{"result": …}`.
 pub(crate) fn tool_result_messages(
@@ -221,7 +221,7 @@ pub(crate) fn tool_result_messages(
     for closure in closures {
         let content = &closure.content;
         let response = match closure.outcome {
-            ToolResultOutcome::Failed | ToolResultOutcome::Rejected => {
+            ToolResultOutcome::Failed => {
                 json!({ "error": content })
             }
             _ => match serde_json::from_str::<Value>(content) {

@@ -290,7 +290,7 @@ fn tool_failure_keeps_diagnostic_and_newline() {
     let event = TurnEvent::ToolCallFinished {
         id: "30000000-0000-4000-8000-000000000003".parse().unwrap(),
         name: "read".into(),
-        outcome: lattice_api::local::ToolResultOutcome::Rejected,
+        outcome: lattice_api::local::ToolResultOutcome::Failed,
         material: MaterialSummary::NoContent,
         error_summary: Some("permission denied".into()),
     };
@@ -302,5 +302,5 @@ fn tool_failure_keeps_diagnostic_and_newline() {
     assert!(text.starts_with('\n'));
     assert!(!text.starts_with("\n\n"));
     assert!(text.contains("permission denied"));
-    assert!(text.contains("rejected"));
+    assert!(text.contains("failed"));
 }

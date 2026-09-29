@@ -949,7 +949,7 @@ async fn turn_whose_mutation_fails_before_install_records_no_history_identity() 
         .unwrap();
     assert!(
         matches!(&detail.steps[0].state, StepDetailState::Closed { slots, .. }
-        if slots.len() == 1 && slots[0].binding.method == "mutate.edit" && matches!(slots[0].state, OperatorInvocationState::Terminal { outcome: lattice_conversation::ToolResultOutcome::Rejected, .. }))
+        if slots.len() == 1 && slots[0].binding.method == "mutate.edit" && matches!(slots[0].state, OperatorInvocationState::Terminal { outcome: lattice_conversation::ToolResultOutcome::Failed, .. }))
     );
     assert_eq!(
         std::fs::read_to_string(ws.root.join("src/lib.rs")).unwrap(),

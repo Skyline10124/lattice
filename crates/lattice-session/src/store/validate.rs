@@ -3,8 +3,7 @@
 
 use super::*;
 use lancet_protocol::{
-    CellEvidenceTriple, CepErrorCode, CepErrorFamily, InvocationBinding, InvocationId,
-    ModelMessageAddress,
+    CellEvidenceTriple, CepErrorCode, InvocationBinding, InvocationId, ModelMessageAddress,
 };
 use lattice_conversation::{
     BoundToolCall, MessageRole, MessageSemantic, NativeMessage, ProviderOrigin, RawToolCall,
@@ -194,23 +193,27 @@ pub(super) fn terminal(binding: &InvocationBinding, t: &InvocationTerminal) -> R
     if t.result.invocation_id != binding.invocation_id || t.result.name != binding.identity.method {
         return Err(invalid("terminal", "result identity mismatch"));
     }
+    // 没有 LANCET 结果的两种终态只由关闭事务补写，证据与形状一一对应。
     match (&t.result.payload, &t.evidence) {
         (
-            ResultPayload::NotExecuted(_),
+            ResultPayload::NotExecuted,
             InvocationEvidence::Unavailable {
                 reason: EvidenceUnavailableReason::NotDispatched,
             },
-        ) => {}
-        (
-            ResultPayload::Indeterminate(_),
+        )
+        | (
+            ResultPayload::Indeterminate(IndeterminateCause::NoResult),
             InvocationEvidence::Unavailable {
-                reason: EvidenceUnavailableReason::ProcessExit,
+                reason: EvidenceUnavailableReason::NoResult,
             },
         ) => {}
-        (ResultPayload::NotExecuted(_), _) => {
+        (
+            ResultPayload::NotExecuted | ResultPayload::Indeterminate(IndeterminateCause::NoResult),
+            _,
+        ) => {
             return Err(invalid(
                 "terminal",
-                "not-executed receipt has execution evidence",
+                "closure-written terminal has mismatched evidence",
             ));
         }
         (_, InvocationEvidence::Recorded(e)) => evidence(binding, e)?,
@@ -235,35 +238,23 @@ pub(super) fn terminal(binding: &InvocationBinding, t: &InvocationTerminal) -> R
         {
             return Err(invalid("terminal", "unnecessary unavailable content"));
         }
+        // 这两个错误码归 Indeterminate，其余错误（含策略与校验拒绝）归 Failed。
         ResultPayload::Failed(e)
             if matches!(
                 e.code,
                 CepErrorCode::CallCancelled | CepErrorCode::OutcomeIndeterminate
-            ) || matches!(
-                e.code.family(),
-                CepErrorFamily::Validation | CepErrorFamily::Permission | CepErrorFamily::Guard
             ) =>
         {
             return Err(invalid("terminal", "error belongs to a different outcome"));
-        }
-        ResultPayload::Rejected(r)
-            if !matches!(
-                r.code.family(),
-                CepErrorFamily::Validation | CepErrorFamily::Permission | CepErrorFamily::Guard
-            ) =>
-        {
-            return Err(invalid("terminal", "invalid rejection code"));
         }
         _ => {}
     }
     Ok(())
 }
-/// 终态前缀，最多一个 Started，余下 Registered；停止之后只能补 NotExecuted。
+/// 终态前缀，最多一个 Started，余下 Registered；停止批次的终态之后只能是 NotExecuted。
 pub(super) fn slot_order(slots: &[InvocationSlot]) -> Result<()> {
     let mut waiting = false;
-    let mut stopping = false;
-    let mut indeterminate = false;
-    let mut tail_reason = None;
+    let mut stopped = false;
     let mut last = None;
     let mut ids = BTreeSet::new();
     let mut message = None;
@@ -280,7 +271,7 @@ pub(super) fn slot_order(slots: &[InvocationSlot]) -> Result<()> {
         match &slot.state {
             SlotState::Registered => waiting = true,
             SlotState::Started => {
-                if waiting || stopping {
+                if waiting || stopped {
                     return Err(corrupt("steps", "slots", "out-of-order start"));
                 }
                 waiting = true;
@@ -288,36 +279,14 @@ pub(super) fn slot_order(slots: &[InvocationSlot]) -> Result<()> {
             SlotState::Terminal(t) => {
                 terminal(&slot.binding, t)
                     .map_err(|_| corrupt("steps", "terminal", "invalid terminal"))?;
-                if waiting || stopping && !matches!(t.result.payload, ResultPayload::NotExecuted(_))
-                {
+                if waiting || stopped && !matches!(t.result.payload, ResultPayload::NotExecuted) {
                     return Err(corrupt(
                         "steps",
                         "slots",
                         "execution after unfinished or stopping slot",
                     ));
                 }
-                if matches!(
-                    t.result.payload,
-                    ResultPayload::NotExecuted(NotExecutedReason::PrecedingInvocationIndeterminate)
-                ) && !indeterminate
-                {
-                    return Err(corrupt("steps", "slots", "missing preceding indeterminate"));
-                }
-                if let ResultPayload::NotExecuted(reason) = &t.result.payload {
-                    if indeterminate
-                        && *reason != NotExecutedReason::PrecedingInvocationIndeterminate
-                        || tail_reason.is_some_and(|previous| previous != reason)
-                    {
-                        return Err(corrupt(
-                            "steps",
-                            "slots",
-                            "inconsistent closure tail reason",
-                        ));
-                    }
-                    tail_reason = Some(reason);
-                }
-                indeterminate |= matches!(t.result.payload, ResultPayload::Indeterminate(_));
-                stopping |= close::stopping_cause(&slot.binding, &t.result.payload).is_some();
+                stopped |= close::stops_batch(&t.result.payload);
             }
         }
     }
@@ -494,7 +463,7 @@ pub(super) fn durable(state: &DurableTurnState) -> Result<()> {
                     }
                     ActiveStep::Executing { reply, slots } => {
                         if !complete || slots.is_empty() || slots.iter().any(|slot| {
-                            matches!(&slot.state, SlotState::Terminal(t) if !matches!(t.evidence, InvocationEvidence::Recorded(_)) || matches!(t.result.payload, ResultPayload::NotExecuted(_)))
+                            matches!(&slot.state, SlotState::Terminal(t) if !matches!(t.evidence, InvocationEvidence::Recorded(_)) || matches!(t.result.payload, ResultPayload::NotExecuted))
                         }) {
                             // 无 receipt 的补写只能与 Step/Turn 关闭同事务发布。
                             return Err(err());
@@ -520,7 +489,11 @@ pub(super) fn durable(state: &DurableTurnState) -> Result<()> {
                 }
                 match end {
                     StepEnd::Continue { .. } => {
-                        if invocations.is_empty() || first_stopping_cause(invocations)?.is_some() {
+                        if invocations.is_empty()
+                            || invocations
+                                .iter()
+                                .any(|s| close::stops_batch(&s.terminal.result.payload))
+                        {
                             return Err(err());
                         }
                     }
@@ -533,11 +506,18 @@ pub(super) fn durable(state: &DurableTurnState) -> Result<()> {
                         node: Some(_),
                         cause,
                     } => {
-                        if invocations.is_empty()
-                            || *cause
-                                != first_stopping_cause(invocations)?
-                                    .unwrap_or(StopCause::ProcessExit)
-                        {
+                        // 与关闭时同一规则：槽位自身的停止优先，否则是关闭 Step 的外部停止。
+                        let external = match cause {
+                            StopCause::Cancelled => Some(DispatchStop::Cancelled),
+                            StopCause::Deadline => Some(DispatchStop::Deadline),
+                            StopCause::ProcessExit => Some(DispatchStop::ProcessExit),
+                            _ => None,
+                        };
+                        let derived = match external {
+                            Some(stop) => close::step_stop_cause(invocations, stop)?,
+                            None => close::first_stopping_cause(invocations)?,
+                        };
+                        if invocations.is_empty() || derived.as_ref() != Some(cause) {
                             return Err(err());
                         }
                     }

@@ -1287,9 +1287,24 @@ fn frozen_tls_roots_and_policies_are_isolated_between_concurrent_turns() {
             ta["steps"][0]["state"]["slots"][1]["state"]["outcome"],
             "failed"
         );
-        assert_eq!(
-            tb["steps"][0]["state"]["slots"][0]["state"]["outcome"],
-            "rejected"
+        // 跨根请求被策略拒绝：结局是 Failed，错误码属于 Validation/Permission/Guard 错误族。
+        let refused = &tb["steps"][0]["state"]["slots"][0]["state"];
+        assert_eq!(refused["outcome"], "failed");
+        assert!(
+            matches!(
+                refused["reason"]["value"]["code"].as_str(),
+                Some(
+                    "schema_mismatch"
+                        | "path_containment"
+                        | "type_error"
+                        | "capability_not_granted"
+                        | "project_root_violation"
+                        | "ambient_authority_denied"
+                        | "guard_denied"
+                        | "replan_required"
+                )
+            ),
+            "{refused}"
         );
         let own = &ta["steps"][0]["state"]["slots"][0]["state"]["evidence"]["value"]["effects"]["effects"]
             [0]["network"];

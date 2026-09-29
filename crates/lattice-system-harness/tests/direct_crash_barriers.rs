@@ -508,7 +508,12 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
                 > 65536
         );
         assert_eq!(slots[20]["state"]["outcome"], "failed");
-        assert_eq!(slots[21]["state"]["outcome"], "rejected");
+        // 策略或校验拒绝不再是独立结局：它是 Failed 里的错误族，错误码与可重试性原样保留。
+        assert_eq!(slots[21]["state"]["outcome"], "failed");
+        assert_eq!(
+            slots[21]["state"]["reason"],
+            json!({"kind":"failed","value":{"code":"type_error","retriability":"permanent"}})
+        );
         let before_beta = read_json(&world, &spec, &mut evidence, &["--json", "audit", "--tail"]);
         let cursor = before_beta["next_after"].as_u64().unwrap().to_string();
         let beta_provider = FakeLlmServer::start(support::sequence(vec![
@@ -697,10 +702,20 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
                 assert!(out.is_clean_exit(2));
             }
             let closed = stage(&world, &spec, &mut evidence, sid, &turn);
+            // 已 Started 的调用没有确定结果：崩溃时是未取得结果，取消时是 LANCET 返回的 CallCancelled。
             assert_eq!(
                 closed["steps"][0]["state"]["slots"][0]["state"]["outcome"],
-                if crash { "indeterminate" } else { "cancelled" }
+                "indeterminate"
             );
+            assert_eq!(
+                closed["steps"][0]["state"]["slots"][0]["state"]["reason"],
+                json!({"kind":"indeterminate","value":if crash { "no_result" } else { "cancelled" }})
+            );
+            assert_eq!(
+                closed["steps"][0]["state"]["end"]["cause"]["cause"],
+                if crash { "process_exit" } else { "cancelled" }
+            );
+            assert!(closed["steps"][0]["state"]["slots"][1]["state"]["reason"].is_null());
             assert_eq!(
                 closed["steps"][0]["state"]["slots"][1]["state"]["outcome"],
                 "not_executed"
@@ -737,14 +752,7 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
             .collect();
         assert_eq!(
             outcomes,
-            BTreeSet::from([
-                "succeeded",
-                "failed",
-                "rejected",
-                "cancelled",
-                "not_executed",
-                "indeterminate"
-            ])
+            BTreeSet::from(["succeeded", "failed", "not_executed", "indeterminate"])
         );
         let changes = alpha_tail["rows"].as_array().unwrap();
         let mut latest = BTreeMap::new();
@@ -1162,13 +1170,13 @@ fn r2_s2_multicall_reconnect_busy_sigkill_auto_close() {
         assert_eq!(stopped["slots"][1]["state"]["outcome"], "indeterminate");
         assert_eq!(stopped["slots"][2]["state"]["outcome"], "not_executed");
         assert_eq!(
-            stopped["slots"][2]["state"]["reason"],
-            json!({"kind":"not_executed","value":"preceding_invocation_indeterminate"})
+            stopped["slots"][1]["state"]["reason"],
+            json!({"kind":"indeterminate","value":"no_result"})
         );
-        assert_eq!(
-            stopped["end"]["cause"],
-            json!({"cause":"invocation_indeterminate","invocation_id":marker["invocation_id"]})
-        );
+        // 没轮到的槽位不带原因；为什么停只记在 Step 的 end.cause。
+        assert!(stopped["slots"][2]["state"]["reason"].is_null());
+        // 崩溃发生在 Started 前后，停止原因都是进程退出。
+        assert_eq!(stopped["end"]["cause"], json!({"cause":"process_exit"}));
         // 自动关闭产生的完整配对节点通过公开 History 获取，而非读取 redb。
         read_json(
             &world,
@@ -1554,14 +1562,10 @@ fn redb_commit_windows_close_only_and_preserve_terminal_facts() {
                 } else {
                     Value::Null
                 };
-                let cause = if name == "started" {
-                    json!({"cause":"invocation_indeterminate","invocation_id":slots[1]["invocation_id"]})
-                } else {
-                    json!({"cause":"process_exit"})
-                };
+                // 无论崩溃落在 Started 前后，自动关闭的原因都是进程退出。
                 assert_eq!(
                     steps.last().unwrap()["state"]["end"],
-                    json!({"end":"stop","node":node,"cause":cause})
+                    json!({"end":"stop","node":node,"cause":{"cause":"process_exit"}})
                 );
                 if name == "accepted" || name == "continue" {
                     assert!(
@@ -1594,24 +1598,17 @@ fn redb_commit_windows_close_only_and_preserve_terminal_facts() {
                 {
                     assert_eq!(old_slot["binding"], new_slot["binding"]);
                     assert_eq!(old_slot["invocation_id"], new_slot["invocation_id"]);
-                    if old_slot["state"]["state"] == "registered" {
-                        assert_eq!(
-                            new_slot["state"]["reason"],
-                            json!({"kind":"not_executed",
-                            "value":if name == "started" { "preceding_invocation_indeterminate" } else { "before_dispatch" }})
-                        );
-                    }
                     if old_slot["state"]["state"] == "terminal" {
                         assert_eq!(old_slot, new_slot);
-                    } else {
+                    } else if old_slot["state"]["state"] == "started" {
+                        assert_eq!(new_slot["state"]["outcome"], "indeterminate");
                         assert_eq!(
-                            new_slot["state"]["outcome"],
-                            if old_slot["state"]["state"] == "started" {
-                                "indeterminate"
-                            } else {
-                                "not_executed"
-                            }
+                            new_slot["state"]["reason"],
+                            json!({"kind":"indeterminate","value":"no_result"})
                         );
+                    } else {
+                        assert_eq!(new_slot["state"]["outcome"], "not_executed");
+                        assert!(new_slot["state"]["reason"].is_null());
                     }
                 }
             }
@@ -2635,8 +2632,8 @@ fn cancelled_slot_live_and_crash_share_ordered_closure() {
                 let orphan = stage(&world, &spec, &mut evidence, sid, TURN);
                 assert!(orphan["summary"].is_null());
                 assert_eq!(
-                    orphan["steps"][1]["state"]["slots"][1]["state"]["outcome"],
-                    "cancelled"
+                    orphan["steps"][1]["state"]["slots"][1]["state"]["reason"],
+                    json!({"kind":"indeterminate","value":"cancelled"})
                 );
                 assert_eq!(
                     orphan["steps"][1]["state"]["slots"][2]["state"]["state"],
@@ -2678,11 +2675,13 @@ fn cancelled_slot_live_and_crash_share_ordered_closure() {
                 slots[0],
                 running["selected_turn"]["steps"][1]["state"]["slots"][0]
             );
-            assert_eq!(slots[1]["state"]["outcome"], "cancelled");
+            assert_eq!(slots[1]["state"]["outcome"], "indeterminate");
             assert_eq!(
-                slots[2]["state"]["reason"],
-                json!({"kind":"not_executed","value":"before_dispatch"})
+                slots[1]["state"]["reason"],
+                json!({"kind":"indeterminate","value":"cancelled"})
             );
+            assert_eq!(slots[2]["state"]["outcome"], "not_executed");
+            assert!(slots[2]["state"]["reason"].is_null());
             let mut observer = Wire::connect(
                 &world,
                 json!({"operation":"subscribe","target":{"session_id":sid,"turn_id":TURN},"cursor":null}),
@@ -2841,10 +2840,7 @@ fn dispatch_deadline_tail_is_atomic_and_survives_crash() {
         assert_eq!(slots.len(), 2);
         for slot in slots {
             assert_eq!(slot["state"]["outcome"], "not_executed");
-            assert_eq!(
-                slot["state"]["reason"],
-                json!({"kind":"not_executed","value":"deadline_before_dispatch"})
-            );
+            assert!(slot["state"]["reason"].is_null());
         }
         let mut observer = Wire::connect(
             &world,

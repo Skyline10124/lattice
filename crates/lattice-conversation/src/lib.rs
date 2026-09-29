@@ -50,9 +50,8 @@ pub use message::{
 };
 pub use outcome::ToolResultOutcome;
 pub use result::{
-    CancelledReason, IndeterminateReason, MAX_TOOL_CONTENT_BYTES, NotExecutedReason,
-    RejectedReason, ResultPayload, StepContent, StoredToolResult, SuccessContent,
-    tool_content_digest,
+    IndeterminateCause, MAX_TOOL_CONTENT_BYTES, ResultPayload, StepContent, StoredToolResult,
+    SuccessContent, tool_content_digest,
 };
 pub use tool_call::{
     ArgumentsDigestMismatch, BoundToolCall, RawToolCall, ToolCallValidation, UnboundToolCall,

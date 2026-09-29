@@ -517,7 +517,7 @@ impl SessionStore {
             let key=StepKey {turn_id:binding.identity.turn_id,ordinal:binding.identity.model_step_ordinal};let (_,mut step)=r.executing(lock.session_id,key)?;
             let StepState::Active {active:ActiveStep::Executing {slots,..}}=&mut step.state else {unreachable!()};
             let position=slots.iter().position(|s|!matches!(s.state,SlotState::Terminal(_))).ok_or_else(||transition(key.turn_id,"no unfinished slot"))?;
-            if slots[..position].iter().any(|s|matches!(&s.state,SlotState::Terminal(t) if close::stopping_cause(&s.binding,&t.result.payload).is_some()))||slots[position].binding!=*binding||!matches!(slots[position].state,SlotState::Registered) {return Err(transition(key.turn_id,"invocation cannot start"));}
+            if slots[..position].iter().any(|s|matches!(&s.state,SlotState::Terminal(t) if close::stops_batch(&t.result.payload)))||slots[position].binding!=*binding||!matches!(slots[position].state,SlotState::Registered) {return Err(transition(key.turn_id,"invocation cannot start"));}
             slots[position].state=SlotState::Started;r.change(&slots[position])?;r.steps.insert(key,step);r.touch(lock.session_id,now)?;Ok(StartedInvocation {binding:binding.clone()})
         })
     }
@@ -550,7 +550,7 @@ impl SessionStore {
                 .ok_or_else(|| transition(key.turn_id, "invocation not in step"))?;
             if !matches!(slot.state, SlotState::Started)
                 || !matches!(input.terminal.evidence, InvocationEvidence::Recorded(_))
-                || matches!(input.terminal.result.payload, ResultPayload::NotExecuted(_))
+                || matches!(input.terminal.result.payload, ResultPayload::NotExecuted)
             {
                 return Err(transition(
                     key.turn_id,
@@ -622,7 +622,11 @@ impl SessionStore {
                         _ => Err(transition(key.turn_id, "cannot continue unfinished calls")),
                     })
                     .collect::<Result<_>>()?;
-                if first_stopping_cause(&invocations)?.is_some() {
+                if first_stopping_cause(&invocations)?.is_some()
+                    || invocations
+                        .iter()
+                        .any(|s| close::stops_batch(&s.terminal.result.payload))
+                {
                     return Err(transition(key.turn_id, "cannot continue stopping calls"));
                 }
                 let (node, value) = close::node_for(&state, &record, reply.clone(), &invocations);
@@ -654,18 +658,17 @@ impl SessionStore {
                 else {
                     unreachable!()
                 };
-                let (invocations, changed) = close::fill_slots(slots, stop)?;
-                let first = first_stopping_cause(&invocations)?;
-                if first.is_none() && stop != DispatchStop::ProcessExit {
+                let (invocations, changed) = close::fill_slots(slots)?;
+                let Some(cause) = close::step_stop_cause(&invocations, stop)? else {
                     return Err(transition(
                         key.turn_id,
                         "close Continue before stopping between requests",
                     ));
-                }
+                };
                 let node = close::node_for(&state, &record, reply.clone(), &invocations);
                 let end = StepEnd::Stop {
                     node: Some(node.0),
-                    cause: first.unwrap_or(StopCause::ProcessExit),
+                    cause,
                 };
                 r.apply_closure(
                     lock.session_id,

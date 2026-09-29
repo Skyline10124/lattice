@@ -786,7 +786,7 @@ fn cross_provider_projection_drops_bound_provider_ids_and_replay_state() {
 }
 
 use lattice_conversation::{
-    ConversationItem, NotExecutedReason, ResultPayload, StepContent, StoredToolResult,
+    ConversationItem, IndeterminateCause, ResultPayload, StepContent, StoredToolResult,
     SuccessContent, canonical_json, tool_content_digest,
 };
 
@@ -860,7 +860,6 @@ fn structured_steps_require_exact_pairing() {
 
 #[test]
 fn structured_result_outcomes_and_large_success() {
-    use lattice_conversation::{CancelledReason, IndeterminateReason};
     use lattice_conversation::{CepError, CepErrorCode, CepErrorData, Retriability};
     let mut rejected = CepError::internal_error("界".repeat(2000));
     rejected.code = CepErrorCode::CapabilityNotGranted;
@@ -880,10 +879,10 @@ fn structured_result_outcomes_and_large_success() {
             .unwrap(),
             Retriability::Permanent,
         ))),
-        ResultPayload::Rejected(Box::new(rejected.clone())),
-        ResultPayload::Cancelled(CancelledReason::DuringDispatch),
-        ResultPayload::NotExecuted(NotExecutedReason::DeadlineBeforeDispatch),
-        ResultPayload::Indeterminate(IndeterminateReason::MayHaveOccurred),
+        ResultPayload::Failed(Box::new(rejected.clone())),
+        ResultPayload::Indeterminate(IndeterminateCause::Cancelled),
+        ResultPayload::NotExecuted,
+        ResultPayload::Indeterminate(IndeterminateCause::NoResult),
         ResultPayload::Succeeded(SuccessContent::OutputTooLarge {
             digest: [0xab; 32],
             byte_length: 65537,
@@ -922,10 +921,7 @@ fn structured_result_outcomes_and_large_success() {
                     .to_string(),
                 ProviderOrigin::Gemini => {
                     let response = &wire[0]["parts"][0]["functionResponse"]["response"];
-                    if matches!(
-                        payload.outcome(),
-                        ToolResultOutcome::Failed | ToolResultOutcome::Rejected
-                    ) {
+                    if payload.outcome() == ToolResultOutcome::Failed {
                         response["error"].as_str().unwrap().into()
                     } else {
                         response.to_string()
@@ -943,9 +939,14 @@ fn structured_result_outcomes_and_large_success() {
                     json,
                     serde_json::json!({"error":{"code":CepErrorCode::CapabilityNotGranted.as_i32(),"message":"界".repeat(1365)}})
                 ),
-                3..=5 => assert_eq!(
+                3 => assert_eq!(
                     json,
-                    serde_json::json!({"outcome":payload.outcome().as_str()})
+                    serde_json::json!({"outcome":"indeterminate","cause":"cancelled"})
+                ),
+                4 => assert_eq!(json, serde_json::json!({"outcome":"not_executed"})),
+                5 => assert_eq!(
+                    json,
+                    serde_json::json!({"outcome":"indeterminate","cause":"no_result"})
                 ),
                 _ => assert_eq!(json["outcome"], "succeeded"),
             }
@@ -987,7 +988,7 @@ fn structured_result_fixtures_and_missing_ids() {
             results.push(StoredToolResult {
                 invocation_id: invocation(1),
                 name: "get_time".into(),
-                payload: ResultPayload::NotExecuted(NotExecutedReason::BeforeDispatch),
+                payload: ResultPayload::NotExecuted,
             });
         }
         if origin == ProviderOrigin::Anthropic {

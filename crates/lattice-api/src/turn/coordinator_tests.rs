@@ -437,7 +437,8 @@ async fn live_multicall_closes_continue_then_finish_from_structured_history() {
     assert!(
         matches!(&detail.steps[0].state, StepDetailState::Closed { end: StepEnd::Continue { node: NodeId(2) }, slots }
         if slots.len() == 2 && matches!(slots[0].state, OperatorInvocationState::Terminal { outcome: lattice_conversation::ToolResultOutcome::Succeeded, .. })
-        && matches!(slots[1].state, OperatorInvocationState::Terminal { outcome: lattice_conversation::ToolResultOutcome::Rejected, .. }))
+        && matches!(&slots[1].state, OperatorInvocationState::Terminal { outcome: lattice_conversation::ToolResultOutcome::Failed, reason: Some(OperatorReason::Failed { code, .. }), .. }
+            if matches!(code.family(), lancet_protocol::CepErrorFamily::Validation | lancet_protocol::CepErrorFamily::Permission | lancet_protocol::CepErrorFamily::Guard)))
     );
     assert!(
         matches!(&detail.steps[1].state, StepDetailState::Closed { end: StepEnd::Finish { node: NodeId(3) }, slots } if slots.is_empty())
@@ -723,18 +724,20 @@ async fn stop_during_handoff(tool: bool, cancelled: bool) {
         usize::from(tool),
         "stopped handoff must not open provider"
     );
+    // 停止发生在交接之前：原因是真实的取消或 Deadline，已 Started 的槽位记为未取得结果。
+    let expected = if cancelled {
+        StopCause::Cancelled
+    } else {
+        StopCause::Deadline
+    };
     if tool {
         assert!(
-            matches!(&detail.steps[0].state, StepDetailState::Closed { end: StepEnd::Stop { cause: StopCause::InvocationIndeterminate { .. }, .. }, slots } if
-            matches!(slots[0].state, OperatorInvocationState::Terminal { outcome: lattice_conversation::ToolResultOutcome::Indeterminate, .. }) &&
-            matches!(slots[1].state, OperatorInvocationState::Terminal { outcome: lattice_conversation::ToolResultOutcome::NotExecuted, reason: Some(OperatorReason::NotExecuted(NotExecutedReason::PrecedingInvocationIndeterminate)), .. }))
+            matches!(&detail.steps[0].state, StepDetailState::Closed { end: StepEnd::Stop { cause, .. }, slots } if
+            cause == &expected &&
+            matches!(slots[0].state, OperatorInvocationState::Terminal { outcome: lattice_conversation::ToolResultOutcome::Indeterminate, reason: Some(OperatorReason::Indeterminate(IndeterminateCause::NoResult)), .. }) &&
+            matches!(slots[1].state, OperatorInvocationState::Terminal { outcome: lattice_conversation::ToolResultOutcome::NotExecuted, reason: None, .. }))
         );
     } else {
-        let expected = if cancelled {
-            StopCause::Cancelled
-        } else {
-            StopCause::Deadline
-        };
         assert!(
             matches!(&detail.steps[0].state, StepDetailState::Closed { end: StepEnd::Stop { node: None, cause }, .. } if cause == &expected)
         );

@@ -317,12 +317,13 @@ pub enum InvocationEvidence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceUnavailableReason {
+    /// 调用从未交给 LANCET（NotExecuted）。
     NotDispatched,
-    ProcessExit,
+    /// 已 Started 但未取得结果（Indeterminate NoResult）。
+    NoResult,
 }
 pub use lattice_conversation::{
-    CancelledReason, IndeterminateReason, NotExecutedReason, RejectedReason, ResultPayload,
-    StepContent, StoredToolResult, SuccessContent,
+    IndeterminateCause, ResultPayload, StepContent, StoredToolResult, SuccessContent,
 };
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -422,11 +423,21 @@ pub struct TerminalInput {
     pub invocation_id: InvocationId,
     pub terminal: InvocationTerminal,
 }
+/// 协调层在两次分发之间停止执行的原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchStop {
     Cancelled,
     Deadline,
     ProcessExit,
+}
+impl From<DispatchStop> for StopCause {
+    fn from(stop: DispatchStop) -> Self {
+        match stop {
+            DispatchStop::Cancelled => Self::Cancelled,
+            DispatchStop::Deadline => Self::Deadline,
+            DispatchStop::ProcessExit => Self::ProcessExit,
+        }
+    }
 }
 #[derive(Debug)]
 pub enum CloseStep {
@@ -651,10 +662,7 @@ pub enum OperatorReason {
         code: CepErrorCode,
         retriability: Retriability,
     },
-    Rejected(RejectedReason),
-    Cancelled(CancelledReason),
-    NotExecuted(NotExecutedReason),
-    Indeterminate(IndeterminateReason),
+    Indeterminate(IndeterminateCause),
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]

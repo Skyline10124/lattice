@@ -3,8 +3,7 @@
 
 use super::*;
 use lancet_protocol::{
-    CellEvidenceTriple, CepError, CepErrorCode, CepErrorFamily, InvocationBinding,
-    ModelMessageAddress,
+    CellEvidenceTriple, CepError, CepErrorCode, InvocationBinding, ModelMessageAddress,
 };
 use lattice_conversation::TokenUsage;
 
@@ -42,17 +41,10 @@ pub fn prepare_terminal(
         }
         Err(e) => match e.code {
             CepErrorCode::CallCancelled => {
-                ResultPayload::Cancelled(CancelledReason::DuringDispatch)
+                ResultPayload::Indeterminate(IndeterminateCause::Cancelled)
             }
             CepErrorCode::OutcomeIndeterminate => {
-                ResultPayload::Indeterminate(IndeterminateReason::MayHaveOccurred)
-            }
-            code if matches!(
-                code.family(),
-                CepErrorFamily::Validation | CepErrorFamily::Permission | CepErrorFamily::Guard
-            ) =>
-            {
-                ResultPayload::Rejected(Box::new(e))
+                ResultPayload::Indeterminate(IndeterminateCause::Reported)
             }
             _ => ResultPayload::Failed(Box::new(e)),
         },
@@ -67,29 +59,28 @@ pub fn prepare_terminal(
     })
 }
 
-pub(super) fn stopping_cause(
-    binding: &InvocationBinding,
-    payload: &ResultPayload,
-) -> Option<StopCause> {
+/// 只有 LANCET 给出确定结果时才继续下一调用；其余结局停止后续分发。
+pub fn stops_batch(payload: &ResultPayload) -> bool {
+    !matches!(
+        payload,
+        ResultPayload::Succeeded(_) | ResultPayload::Failed(_)
+    )
+}
+
+/// 槽位自身决定的停止原因。NotExecuted 与 NoResult 由关闭 Step 的外部停止补写，不带原因。
+fn own_stop(binding: &InvocationBinding, payload: &ResultPayload) -> Option<StopCause> {
     match payload {
-        ResultPayload::Succeeded(_) | ResultPayload::Failed(_) | ResultPayload::Rejected(_) => None,
-        ResultPayload::Cancelled(_)
-        | ResultPayload::NotExecuted(NotExecutedReason::CancelledBeforeDispatch) => {
-            Some(StopCause::Cancelled)
+        ResultPayload::Indeterminate(IndeterminateCause::Cancelled) => Some(StopCause::Cancelled),
+        ResultPayload::Indeterminate(IndeterminateCause::Reported) => {
+            Some(StopCause::InvocationIndeterminate {
+                invocation_id: binding.invocation_id,
+            })
         }
-        ResultPayload::Indeterminate(_) => Some(StopCause::InvocationIndeterminate {
-            invocation_id: binding.invocation_id,
-        }),
-        ResultPayload::NotExecuted(NotExecutedReason::DeadlineBeforeDispatch) => {
-            Some(StopCause::Deadline)
-        }
-        ResultPayload::NotExecuted(NotExecutedReason::BeforeDispatch) => {
-            Some(StopCause::ProcessExit)
-        }
-        ResultPayload::NotExecuted(NotExecutedReason::PrecedingInvocationIndeterminate) => None,
+        _ => None,
     }
 }
-/// 返回第一个停止事实；继续类终态不参与严重性比较。
+
+/// 按片段顺序返回第一个由槽位自身决定的停止原因。
 pub fn first_stopping_cause(slots: &[ClosedInvocation]) -> Result<Option<StopCause>> {
     let active: Vec<_> = slots
         .iter()
@@ -101,59 +92,61 @@ pub fn first_stopping_cause(slots: &[ClosedInvocation]) -> Result<Option<StopCau
     validate::slot_order(&active)?;
     Ok(slots
         .iter()
-        .find_map(|s| stopping_cause(&s.binding, &s.terminal.result.payload)))
+        .find_map(|s| own_stop(&s.binding, &s.terminal.result.payload)))
 }
+
+/// Step 的停止原因：槽位自身的停止优先；否则取关闭 Step 的外部停止。
+/// 所有槽位都已有确定结果时，只有进程退出能让 Step 停下；取消或 Deadline 应先以 Continue 关闭，
+/// 再在请求之间停止，此时返回 `None`。
+pub(super) fn step_stop_cause(
+    slots: &[ClosedInvocation],
+    stop: DispatchStop,
+) -> Result<Option<StopCause>> {
+    if let Some(cause) = first_stopping_cause(slots)? {
+        return Ok(Some(cause));
+    }
+    let unfinished = slots
+        .iter()
+        .any(|s| stops_batch(&s.terminal.result.payload));
+    Ok((unfinished || stop == DispatchStop::ProcessExit).then(|| stop.into()))
+}
+
 pub(super) fn fill_slots(
     slots: &[InvocationSlot],
-    stop: DispatchStop,
 ) -> Result<(Vec<ClosedInvocation>, Vec<ClosedInvocation>)> {
     validate::slot_order(slots)?;
     let mut closed = Vec::with_capacity(slots.len());
     let mut changed = Vec::new();
-    let mut indeterminate = false;
     for slot in slots {
-        let terminal = match &slot.state {
-            SlotState::Terminal(t) => t.clone(),
-            SlotState::Started => InvocationTerminal {
+        let (payload, reason) = match &slot.state {
+            SlotState::Terminal(t) => {
+                closed.push(ClosedInvocation {
+                    binding: slot.binding.clone(),
+                    terminal: t.clone(),
+                });
+                continue;
+            }
+            SlotState::Started => (
+                ResultPayload::Indeterminate(IndeterminateCause::NoResult),
+                EvidenceUnavailableReason::NoResult,
+            ),
+            SlotState::Registered => (
+                ResultPayload::NotExecuted,
+                EvidenceUnavailableReason::NotDispatched,
+            ),
+        };
+        let entry = ClosedInvocation {
+            binding: slot.binding.clone(),
+            terminal: InvocationTerminal {
                 result: StoredToolResult {
                     invocation_id: slot.binding.invocation_id,
                     name: slot.binding.identity.method.clone(),
-                    payload: ResultPayload::Indeterminate(IndeterminateReason::MayHaveOccurred),
+                    payload,
                 },
-                evidence: InvocationEvidence::Unavailable {
-                    reason: EvidenceUnavailableReason::ProcessExit,
-                },
+                evidence: InvocationEvidence::Unavailable { reason },
             },
-            SlotState::Registered => {
-                let reason = if indeterminate {
-                    NotExecutedReason::PrecedingInvocationIndeterminate
-                } else {
-                    match stop {
-                        DispatchStop::Cancelled => NotExecutedReason::CancelledBeforeDispatch,
-                        DispatchStop::Deadline => NotExecutedReason::DeadlineBeforeDispatch,
-                        DispatchStop::ProcessExit => NotExecutedReason::BeforeDispatch,
-                    }
-                };
-                InvocationTerminal {
-                    result: StoredToolResult {
-                        invocation_id: slot.binding.invocation_id,
-                        name: slot.binding.identity.method.clone(),
-                        payload: ResultPayload::NotExecuted(reason),
-                    },
-                    evidence: InvocationEvidence::Unavailable {
-                        reason: EvidenceUnavailableReason::NotDispatched,
-                    },
-                }
-            }
         };
-        indeterminate |= matches!(terminal.result.payload, ResultPayload::Indeterminate(_));
-        let entry = ClosedInvocation {
-            binding: slot.binding.clone(),
-            terminal,
-        };
-        if !matches!(slot.state, SlotState::Terminal(_)) {
-            changed.push(entry.clone());
-        }
+        changed.push(entry.clone());
         closed.push(entry);
     }
     first_stopping_cause(&closed)?;
@@ -346,8 +339,9 @@ pub fn plan_auto_close(state: &DurableTurnState, now: Timestamp) -> Result<AutoC
             }),
             ActiveStep::RetryReady { .. } => {}
             ActiveStep::Executing { reply, slots } => {
-                (invocations, changed) = fill_slots(slots, DispatchStop::ProcessExit)?;
-                cause = first_stopping_cause(&invocations)?.unwrap_or(StopCause::ProcessExit);
+                (invocations, changed) = fill_slots(slots)?;
+                cause = step_stop_cause(&invocations, DispatchStop::ProcessExit)?
+                    .unwrap_or(StopCause::ProcessExit);
                 node = Some(node_for(state, &record, reply.clone(), &invocations));
             }
         }

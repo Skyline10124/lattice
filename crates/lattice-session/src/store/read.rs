@@ -41,23 +41,9 @@ pub(super) fn operator(slot: &InvocationSlot) -> OperatorInvocation {
                     }),
                     MaterialSummary::NoContent,
                 ),
-                ResultPayload::Rejected(r) => (
-                    Some(OperatorReason::Rejected(RejectedReason {
-                        code: r.code,
-                        retriability: r.retriability.clone(),
-                    })),
-                    MaterialSummary::NoContent,
-                ),
-                ResultPayload::Cancelled(r) => (
-                    Some(OperatorReason::Cancelled(r.clone())),
-                    MaterialSummary::NoContent,
-                ),
-                ResultPayload::NotExecuted(r) => (
-                    Some(OperatorReason::NotExecuted(r.clone())),
-                    MaterialSummary::NoContent,
-                ),
-                ResultPayload::Indeterminate(r) => (
-                    Some(OperatorReason::Indeterminate(r.clone())),
+                ResultPayload::NotExecuted => (None, MaterialSummary::NoContent),
+                ResultPayload::Indeterminate(cause) => (
+                    Some(OperatorReason::Indeterminate(*cause)),
                     MaterialSummary::NoContent,
                 ),
             };

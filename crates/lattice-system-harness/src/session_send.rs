@@ -288,12 +288,7 @@ fn parse_event_line_checked(line: &str) -> Result<Option<TurnEventLine>, String>
             let outcome = string(&value, "outcome")?;
             if !matches!(
                 outcome,
-                "succeeded"
-                    | "failed"
-                    | "rejected"
-                    | "cancelled"
-                    | "not_executed"
-                    | "indeterminate"
+                "succeeded" | "failed" | "not_executed" | "indeterminate"
             ) {
                 return Err("unknown tool outcome".into());
             }
