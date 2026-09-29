@@ -40,23 +40,37 @@ pub(crate) fn wrap(spans: Vec<Span<'static>>, width: usize) -> Vec<Line<'static>
 /// replaces tabs once, before any width is measured. Stops are every 4 columns from the
 /// start of each source line.
 pub(crate) fn expand_tabs(text: &str) -> Cow<'_, str> {
+    expand_tabs_tracking(text, |_, _| {})
+}
+
+/// 回调记录展开区间与源 Tab 偏移，供 Markdown 还原字节范围。
+pub(crate) fn expand_tabs_tracking(
+    text: &str,
+    mut tab: impl FnMut(std::ops::Range<usize>, usize),
+) -> Cow<'_, str> {
     if !text.contains('\t') {
         return Cow::Borrowed(text);
     }
     let mut expanded = String::with_capacity(text.len());
+    let mut original = 0usize;
     for (index, line) in text.split('\n').enumerate() {
         if index > 0 {
             expanded.push('\n');
+            original = original.saturating_add(1);
         }
-        let mut column = 0;
+        let mut column = 0usize;
         for (index, part) in line.split('\t').enumerate() {
             if index > 0 {
-                let spaces = 4 - column % 4;
+                let spaces = 4usize.saturating_sub(column % 4);
+                let start = expanded.len();
                 expanded.push_str(&" ".repeat(spaces));
-                column += spaces;
+                tab(start..expanded.len(), original);
+                original = original.saturating_add(1);
+                column = column.saturating_add(spaces);
             }
             expanded.push_str(part);
-            column += part.width();
+            original = original.saturating_add(part.len());
+            column = column.saturating_add(part.width());
         }
     }
     Cow::Owned(expanded)

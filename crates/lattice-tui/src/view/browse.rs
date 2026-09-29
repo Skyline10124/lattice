@@ -20,18 +20,14 @@ pub(crate) struct BrowseCursor {
 impl Transcript {
     /// 返回原 Block 是否仍有可显示行；消失时必须落在替代块开头。
     pub(crate) fn relocate(&self, cursor: &mut BrowseCursor) -> bool {
-        if let Some(start) = self
+        if let Some((row, _)) = self
             .owners
             .iter()
-            .position(|owner| owner.id == cursor.block.id)
+            .enumerate()
+            .filter(|(_, owner)| owner.id == cursor.block.id)
+            .min_by_key(|(_, owner)| owner.row.abs_diff(cursor.block.row))
         {
-            let rows = self
-                .owners
-                .iter()
-                .skip(start)
-                .take_while(|owner| owner.id == cursor.block.id)
-                .count();
-            cursor.row = start.saturating_add(cursor.block.row.min(rows.saturating_sub(1)));
+            cursor.row = row;
             return true;
         } else if let Some((row, _)) = self
             .owners

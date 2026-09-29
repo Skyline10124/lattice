@@ -19,6 +19,7 @@ struct InputModule<'a> {
     focused: bool,
     running: bool,
     queue_full: bool,
+    comments: usize,
 }
 
 struct StatusModule<'a> {
@@ -41,6 +42,7 @@ impl<'a> Dock<'a> {
                 focused: matches!(app.focus, Focus::Dock),
                 running: app.phase != TurnPhase::Idle,
                 queue_full: app.queue.is_full(),
+                comments: app.queue.draft_count(),
             }),
         };
         Self {
@@ -123,6 +125,9 @@ impl InputModule<'_> {
         }
         if below > 0 {
             right.push(format!("↓ {below} 行"));
+        }
+        if self.comments > 0 {
+            right.push(format!("{} 条评论待发送", self.comments));
         }
         frame.render_widget(
             Paragraph::new(title_line("USER", Role::User, &right, title.width as usize)),

@@ -14,6 +14,8 @@ use crate::wrapping;
 
 pub(crate) mod browse;
 pub(crate) use browse::Focus;
+mod comments;
+pub(crate) use comments::CommentNavigation;
 mod dock;
 mod statusline;
 pub(crate) use dock::{Dock, DockIntent};
@@ -248,6 +250,9 @@ pub(crate) struct Transcript {
     pub(crate) lines: Vec<Line<'static>>,
     pub(crate) owners: Vec<BlockPosition>,
     pub(crate) editor_cursor: Option<(usize, usize)>,
+    anchors: Vec<(usize, crate::comment::Anchor, usize)>,
+    ending_items: std::collections::HashMap<crate::comment::Location, usize>,
+    markers: Vec<comments::Marker>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -264,6 +269,9 @@ pub(crate) fn transcript_lines(app: &App, content_w: u16) -> Vec<Line<'static>> 
 pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
     let mut lines = Vec::new();
     let mut owners = Vec::new();
+    let mut anchors = Vec::new();
+    let mut ending_items = std::collections::HashMap::new();
+    let mut markers = Vec::new();
     let mut cache = app.markdown_cache.borrow_mut();
     let mut assistant_header = false;
     let mut agent: Option<&str> = None;
@@ -287,8 +295,84 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
                     turn.map(|(_, n)| n),
                     content_w,
                 );
-                lines.extend(with_gutter(cache.render(text, content_w).as_ref().clone()));
+                lines.extend(with_gutter(
+                    cache
+                        .render(text, content_w)
+                        .iter()
+                        .map(|row| row.line.clone())
+                        .collect(),
+                ));
                 assistant_header = false;
+            }
+            Block::CommentedUser(message) | Block::RejectedUser(message) => {
+                transcript_title(
+                    &mut lines,
+                    "USER",
+                    Role::User,
+                    turn.map(|(_, n)| n),
+                    content_w,
+                );
+                if matches!(block, Block::RejectedUser(_)) {
+                    let targets = message.comments.iter().map(|comment| {
+                        let id = app
+                            .queue
+                            .pending_comment_id(comment.n)
+                            .unwrap_or_else(|| entry.id.comment(comment.n, 0));
+                        (id, comment)
+                    });
+                    comments::markers(&mut lines, &mut markers, targets, content_w);
+                } else {
+                    comments::markers(
+                        &mut lines,
+                        &mut markers,
+                        comments::identified(&message.comments, entry.id),
+                        content_w,
+                    );
+                }
+                if !message.text.is_empty() {
+                    lines.extend(with_gutter(
+                        cache
+                            .render(&message.text, content_w)
+                            .iter()
+                            .map(|row| row.line.clone())
+                            .collect(),
+                    ));
+                }
+                assistant_header = false;
+            }
+            Block::HistoryAssistant(text) => {
+                if !text.text.is_empty() {
+                    ensure_assistant_header(
+                        &mut lines,
+                        &mut assistant_header,
+                        agent,
+                        turn.map(|(_, n)| n),
+                        content_w,
+                    );
+                    let rendered = cache.render(&text.text, content_w);
+                    if app.turn_closed(text.fragment.turn) {
+                        for (index, row) in rendered.iter().enumerate() {
+                            let at = lines.len().saturating_add(index);
+                            if let Some(element) = &row.element
+                                && let Some(anchor) = text.anchor(element.range.clone())
+                            {
+                                anchors.push((at, anchor, element.indent));
+                            }
+                            for range in &row.ending_items {
+                                ending_items.insert(
+                                    crate::comment::Location {
+                                        fragment: text.fragment.clone(),
+                                        range: range.clone(),
+                                    },
+                                    at,
+                                );
+                            }
+                        }
+                    }
+                    lines.extend(with_gutter(
+                        rendered.iter().map(|row| row.line.clone()).collect(),
+                    ));
+                }
             }
             Block::AssistantStart {
                 turn_id,
@@ -314,7 +398,13 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
                     turn.map(|(_, n)| n),
                     content_w,
                 );
-                lines.extend(with_gutter(cache.render(text, content_w).as_ref().clone()));
+                lines.extend(with_gutter(
+                    cache
+                        .render(text, content_w)
+                        .iter()
+                        .map(|row| row.line.clone())
+                        .collect(),
+                ));
             }
             Block::Tool { name, state, .. } => {
                 ensure_assistant_header(
@@ -377,7 +467,7 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
             }
             .into(),
         ];
-        if message.editor().is_some() {
+        if app.queue.editor(message.id).is_some() {
             right.push("Enter 完成编辑".into());
         } else if matches!(app.focus, Focus::Transcript(cursor) if cursor.block.id == message.id) {
             right.extend(["Enter 编辑".into(), "Esc 删除".into()]);
@@ -388,7 +478,13 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
             &right,
             usize::from(content_w),
         )]));
-        if let Some(editor) = message.editor() {
+        comments::markers(
+            &mut lines,
+            &mut markers,
+            comments::identified(&message.comments, message.id),
+            content_w,
+        );
+        if let Some(editor) = app.queue.editor(message.id) {
             let (visual, row, col) = input_visual(editor, content_w);
             editor_cursor = Some((lines.len().saturating_add(row), col));
             lines.extend(with_gutter(
@@ -406,11 +502,16 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
         }));
     }
     cache.finish_render();
-    Transcript {
+    let mut transcript = Transcript {
         lines,
         owners,
         editor_cursor,
-    }
+        anchors,
+        ending_items,
+        markers,
+    };
+    comments::attach(app, &mut transcript, content_w);
+    transcript
 }
 
 fn separate(lines: &mut Vec<Line<'static>>) {

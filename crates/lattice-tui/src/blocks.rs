@@ -5,7 +5,27 @@ use crate::app::Block;
 use lattice_api::local::TurnId;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct BlockId(u128);
+pub(crate) enum BlockId {
+    Block(u128),
+    Comment {
+        owner: u128,
+        number: usize,
+        occurrence: usize,
+    },
+}
+
+impl BlockId {
+    pub(crate) fn comment(self, number: usize, occurrence: usize) -> Self {
+        let owner = match self {
+            Self::Block(owner) | Self::Comment { owner, .. } => owner,
+        };
+        Self::Comment {
+            owner,
+            number,
+            occurrence,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct IdentifiedBlock {
@@ -42,7 +62,16 @@ pub(crate) fn identity_slots(entries: &[IdentifiedBlock]) -> Vec<IdentitySlot> {
             let slot = node.map(|node| {
                 (
                     entry.id,
-                    (node, position, std::mem::discriminant(&entry.block)),
+                    (
+                        node,
+                        position,
+                        match entry.block {
+                            Block::HistoryAssistant(_) => {
+                                std::mem::discriminant(&Block::Assistant(String::new()))
+                            }
+                            _ => std::mem::discriminant(&entry.block),
+                        },
+                    ),
                 )
             });
             position = position.saturating_add(1);
@@ -60,7 +89,7 @@ pub(crate) struct BlockList {
 
 impl BlockList {
     pub(crate) fn allocate_id(&mut self) -> BlockId {
-        let id = BlockId(self.next_id);
+        let id = BlockId::Block(self.next_id);
         self.next_id = self.next_id.saturating_add(1);
         id
     }

@@ -5,9 +5,7 @@
 
 use std::sync::LazyLock;
 
-use pulldown_cmark::{
-    CodeBlockKind, Event, OffsetIter, Options, Parser, Tag, TagEnd, TextMergeWithOffset,
-};
+use pulldown_cmark::{CodeBlockKind, Event, OffsetIter, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use syntect::easy::HighlightLines;
@@ -16,11 +14,60 @@ use syntect::parsing::SyntaxSet;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::view::{Role, role_style};
-use crate::wrapping::{expand_tabs, wrap};
+use crate::wrapping::{expand_tabs_tracking, wrap};
 
 const OPTIONS: Options = Options::ENABLE_TABLES
     .union(Options::ENABLE_TASKLISTS)
     .union(Options::ENABLE_STRIKETHROUGH);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SourceElement {
+    pub(crate) range: std::ops::Range<usize>,
+    pub(crate) indent: usize,
+}
+
+/// 正文和源映射一起缓存；折行共享元素范围。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RenderedLine {
+    pub(crate) line: Line<'static>,
+    pub(crate) element: Option<SourceElement>,
+    pub(crate) ending_items: Vec<std::ops::Range<usize>>,
+}
+
+impl std::ops::Deref for RenderedLine {
+    type Target = Line<'static>;
+    fn deref(&self) -> &Self::Target {
+        &self.line
+    }
+}
+
+impl std::fmt::Display for RenderedLine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.line, f)
+    }
+}
+
+fn mapped(
+    lines: Vec<Line<'static>>,
+    element: Option<SourceElement>,
+) -> impl Iterator<Item = RenderedLine> {
+    lines.into_iter().map(move |line| RenderedLine {
+        line,
+        element: element.clone(),
+        ending_items: Vec::new(),
+    })
+}
+
+fn source_element(source: &str, range: std::ops::Range<usize>) -> Option<SourceElement> {
+    let text = source.get(range.clone())?;
+    Some(SourceElement {
+        range: range.start
+            ..range
+                .start
+                .saturating_add(text.trim_end_matches(['\r', '\n']).len()),
+        indent: 0,
+    })
+}
 
 /// 正文只由原文与宽度决定；一次完整投影结束即回收不再使用的版本。
 #[derive(Default)]
@@ -29,12 +76,12 @@ pub(crate) struct RenderCache {
 }
 
 struct CachedBody {
-    lines: std::rc::Rc<Vec<Line<'static>>>,
+    lines: std::rc::Rc<Vec<RenderedLine>>,
     used: bool,
 }
 
 impl RenderCache {
-    pub(crate) fn render(&mut self, source: &str, width: u16) -> std::rc::Rc<Vec<Line<'static>>> {
+    pub(crate) fn render(&mut self, source: &str, width: u16) -> std::rc::Rc<Vec<RenderedLine>> {
         let entries = self.entries.entry(width).or_default();
         if let Some(entry) = entries.get_mut(source) {
             entry.used = true;
@@ -98,28 +145,149 @@ mod cache_tests {
     }
 }
 
-pub(crate) fn render(source: &str, width: u16) -> Vec<Line<'static>> {
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+
+    #[test]
+    fn source_ranges_follow_wrapped_paragraphs_and_headings() {
+        let source = "# 标题\n\nfirst **word**\nnext";
+        let rendered = render(source, 8);
+        let mapped: Vec<_> = rendered
+            .iter()
+            .map(|row| row.element.as_ref().map(|e| (e.range.clone(), e.indent)))
+            .collect();
+        assert_eq!(
+            mapped,
+            [
+                Some((0..8, 0)),
+                None,
+                Some((10..29, 0)),
+                Some((10..29, 0)),
+                Some((10..29, 0))
+            ]
+        );
+    }
+
+    #[test]
+    fn source_ranges_preserve_tabs_and_nested_list_quote_code_table_elements() {
+        for (source, width, expected) in [
+            (
+                "- outer\n  - inner wide\n- last\n\n> quoted\n> words",
+                12,
+                vec![
+                    Some(("- outer\n  - inner wide", 2)),
+                    Some(("- inner wide", 4)),
+                    Some(("- inner wide", 4)),
+                    Some(("- last", 2)),
+                    None,
+                    Some(("quoted\n> words", 2)),
+                    Some(("quoted\n> words", 2)),
+                ],
+            ),
+            (
+                "# 中\t题\n\n段\t落 宽\n\n> 👨‍👩‍👧‍👦\t尾",
+                10,
+                vec![
+                    Some(("# 中\t题", 0)),
+                    None,
+                    Some(("段\t落 宽", 0)),
+                    None,
+                    Some(("👨‍👩‍👧‍👦\t尾", 2)),
+                ],
+            ),
+            (
+                "> ```\n> \t中 aa bb\n> \n> tail\n> ```",
+                12,
+                vec![
+                    None,
+                    Some(("\t中 aa bb", 6)),
+                    Some(("\t中 aa bb", 6)),
+                    Some(("", 4)),
+                    Some(("tail", 4)),
+                    None,
+                ],
+            ),
+            (
+                "| 中 | b |\n| -- | -- |\n| 宽字 | tail |",
+                12,
+                vec![
+                    None,
+                    Some(("| 中 | b |", 2)),
+                    None,
+                    Some(("| 宽字 | tail |", 2)),
+                    Some(("| 宽字 | tail |", 2)),
+                    None,
+                ],
+            ),
+        ] {
+            let rows = render(source, width);
+            let actual: Vec<_> = rows
+                .iter()
+                .map(|r| {
+                    r.element
+                        .as_ref()
+                        .map(|e| (source.get(e.range.clone()).unwrap(), e.indent))
+                })
+                .collect();
+            assert_eq!(actual, expected, "{source}");
+        }
+    }
+}
+
+pub(crate) fn render(source: &str, width: u16) -> Vec<RenderedLine> {
     // Expanding before parsing matches CommonMark, which also places tab stops from the
     // start of the source line when it determines block structure.
-    let source = expand_tabs(source);
-    Renderer {
-        source: &source,
-        // Merged text lets bare URLs be found even where the parser splits text events.
-        events: TextMergeWithOffset::new(Parser::new_ext(&source, OPTIONS).into_offset_iter()),
+    let mut tabs = Vec::new();
+    let expanded = expand_tabs_tracking(source, |range, original| tabs.push((range, original)));
+    let mut lines = Renderer {
+        source: &expanded,
+        // 代码行保留独立偏移；普通行内文字在 inline_event 合并。
+        events: Parser::new_ext(&expanded, OPTIONS)
+            .into_offset_iter()
+            .peekable(),
         task_item: false,
     }
-    .blocks(None, usize::from(width))
+    .blocks(None, usize::from(width), None);
+    let original_offset = |offset: usize| {
+        let preceding = tabs.partition_point(|(range, _)| range.start < offset);
+        match preceding.checked_sub(1).and_then(|index| tabs.get(index)) {
+            Some((range, original)) if offset < range.end => *original,
+            Some((range, original)) => original
+                .saturating_add(1)
+                .saturating_add(offset.saturating_sub(range.end)),
+            None => offset,
+        }
+    };
+    for row in &mut lines {
+        for range in &mut row.ending_items {
+            *range = original_offset(range.start)..original_offset(range.end);
+        }
+        if let Some(element) = &mut row.element {
+            element.range =
+                original_offset(element.range.start)..original_offset(element.range.end);
+            if source.get(element.range.clone()).is_none() {
+                row.element = None;
+            }
+        }
+    }
+    lines
 }
 
 struct Renderer<'a> {
     source: &'a str,
-    events: TextMergeWithOffset<'a, OffsetIter<'a>>,
+    events: std::iter::Peekable<OffsetIter<'a>>,
     /// Set when the list item being rendered starts with a task checkbox.
     task_item: bool,
 }
 
 impl Renderer<'_> {
-    fn blocks(&mut self, end: Option<TagEnd>, width: usize) -> Vec<Line<'static>> {
+    fn blocks(
+        &mut self,
+        end: Option<TagEnd>,
+        width: usize,
+        item: Option<SourceElement>,
+    ) -> Vec<RenderedLine> {
         let mut lines = Vec::new();
         let mut pending = Vec::new();
         while let Some((event, range)) = self.events.next() {
@@ -128,37 +296,50 @@ impl Renderer<'_> {
             }
             match event {
                 Event::Start(Tag::Paragraph) => {
-                    begin_block(&mut lines, &mut pending, width);
-                    pending = self.inline(TagEnd::Paragraph, role_style(Role::Assistant));
-                    flush(&mut lines, &mut pending, width);
+                    begin_block(&mut lines, &mut pending, width, item.clone());
+                    let spans = self.inline(TagEnd::Paragraph, role_style(Role::Assistant));
+                    lines.extend(mapped(
+                        wrap(spans, width),
+                        source_element(self.source, range),
+                    ));
                 }
                 Event::Start(Tag::Heading { level, .. }) => {
-                    begin_block(&mut lines, &mut pending, width);
+                    begin_block(&mut lines, &mut pending, width, item.clone());
                     let spans = self.inline(
                         TagEnd::Heading(level),
                         role_style(Role::Assistant).add_modifier(Modifier::BOLD),
                     );
-                    lines.extend(wrap(spans, width));
+                    lines.extend(mapped(
+                        wrap(spans, width),
+                        source_element(self.source, range),
+                    ));
                 }
                 Event::Start(Tag::BlockQuote(kind)) => {
-                    begin_block(&mut lines, &mut pending, width);
-                    let quoted =
-                        self.blocks(Some(TagEnd::BlockQuote(kind)), width.saturating_sub(2));
+                    begin_block(&mut lines, &mut pending, width, item.clone());
+                    let quoted = self.blocks(
+                        Some(TagEnd::BlockQuote(kind)),
+                        width.saturating_sub(2),
+                        None,
+                    );
                     for mut line in quoted {
-                        for span in &mut line.spans {
+                        if let Some(element) = &mut line.element {
+                            element.indent = element.indent.saturating_add(2);
+                        }
+                        for span in &mut line.line.spans {
                             span.style = span.style.patch(role_style(Role::DimMeta));
                         }
-                        line.spans
+                        line.line
+                            .spans
                             .insert(0, Span::styled("▎ ", role_style(Role::DimMeta)));
                         lines.push(line);
                     }
                 }
                 Event::Start(Tag::List(start)) => {
-                    begin_block(&mut lines, &mut pending, width);
+                    begin_block(&mut lines, &mut pending, width, item.clone());
                     lines.extend(self.list(start.is_some(), width));
                 }
                 Event::Start(Tag::CodeBlock(kind)) => {
-                    begin_block(&mut lines, &mut pending, width);
+                    begin_block(&mut lines, &mut pending, width, item.clone());
                     let fenced = matches!(kind, CodeBlockKind::Fenced(_));
                     let language = match kind {
                         CodeBlockKind::Fenced(info) => {
@@ -168,15 +349,30 @@ impl Renderer<'_> {
                     };
                     // End(CodeBlock) also occurs at EOF or a container boundary. Only an
                     // explicit closing fence extends the block past its opening/body text.
-                    let mut text_end = self.source[range.clone()]
+                    let mut text_end = self
+                        .source
+                        .get(range.clone())
+                        .unwrap_or("")
                         .find('\n')
                         .map_or(range.end, |offset| {
                             range.start.saturating_add(offset).saturating_add(1)
                         });
                     let mut text = String::new();
+                    let mut elements = Vec::new();
                     for (event, range) in self.events.by_ref() {
                         match event {
                             Event::Text(part) => {
+                                let mut start = range.start;
+                                for line in self
+                                    .source
+                                    .get(range.clone())
+                                    .unwrap_or("")
+                                    .split_inclusive('\n')
+                                {
+                                    let end = start.saturating_add(line.len());
+                                    elements.push(source_element(self.source, start..end));
+                                    start = end;
+                                }
                                 text.push_str(&part);
                                 text_end = range.end;
                             }
@@ -189,34 +385,41 @@ impl Renderer<'_> {
                         &text,
                         width,
                         !fenced || range.end > text_end,
+                        elements,
                     ));
                 }
                 Event::Start(Tag::Table(_)) => {
-                    begin_block(&mut lines, &mut pending, width);
+                    begin_block(&mut lines, &mut pending, width, item.clone());
                     lines.extend(self.table(width));
                 }
                 Event::Start(Tag::HtmlBlock) => {
-                    begin_block(&mut lines, &mut pending, width);
+                    begin_block(&mut lines, &mut pending, width, item.clone());
                     let text = plain(&self.inline(TagEnd::HtmlBlock, role_style(Role::Assistant)));
-                    lines.extend(wrap(
-                        vec![Span::styled(
-                            text.trim_end_matches('\n').to_owned(),
-                            role_style(Role::Assistant),
-                        )],
-                        width,
+                    lines.extend(mapped(
+                        wrap(
+                            vec![Span::styled(
+                                text.trim_end_matches('\n').to_owned(),
+                                role_style(Role::Assistant),
+                            )],
+                            width,
+                        ),
+                        None,
                     ));
                 }
                 Event::Rule => {
-                    begin_block(&mut lines, &mut pending, width);
-                    lines.push(Line::from(Span::styled(
-                        "─".repeat(width.min(8)),
-                        role_style(Role::DimMeta),
-                    )));
+                    begin_block(&mut lines, &mut pending, width, item.clone());
+                    lines.extend(mapped(
+                        vec![Line::from(Span::styled(
+                            "─".repeat(width.min(8)),
+                            role_style(Role::DimMeta),
+                        ))],
+                        None,
+                    ));
                 }
                 event => pending.extend(self.inline_event(event, role_style(Role::Assistant))),
             }
         }
-        flush(&mut lines, &mut pending, width);
+        flush(&mut lines, &mut pending, width, item);
         lines
     }
 
@@ -233,7 +436,15 @@ impl Renderer<'_> {
 
     fn inline_event(&mut self, event: Event<'_>, style: Style) -> Vec<Span<'static>> {
         match event {
-            Event::Text(text) => autolinks(&text, style),
+            Event::Text(text) => {
+                let mut text = text.into_string();
+                while matches!(self.events.peek(), Some((Event::Text(_), _))) {
+                    if let Some((Event::Text(next), _)) = self.events.next() {
+                        text.push_str(&next);
+                    }
+                }
+                autolinks(&text, style)
+            }
             Event::Html(text) | Event::InlineHtml(text) => {
                 vec![Span::styled(text.into_string(), style)]
             }
@@ -287,7 +498,7 @@ impl Renderer<'_> {
         }
     }
 
-    fn list(&mut self, ordered: bool, width: usize) -> Vec<Line<'static>> {
+    fn list(&mut self, ordered: bool, width: usize) -> Vec<RenderedLine> {
         // A nested list must not clear the flag of the item that contains it.
         let outer_task = std::mem::take(&mut self.task_item);
         let mut lines = Vec::new();
@@ -298,7 +509,10 @@ impl Renderer<'_> {
                     // The parser exposes only the list's initial number. Offsets retain each
                     // item's actual marker, including non-sequential source numbers.
                     let marker = if ordered {
-                        let number: String = self.source[range]
+                        let number: String = self
+                            .source
+                            .get(range.clone())
+                            .unwrap_or("")
                             .chars()
                             .take_while(char::is_ascii_digit)
                             .collect();
@@ -308,7 +522,11 @@ impl Renderer<'_> {
                     };
                     let indent = marker.width();
                     self.task_item = false;
-                    let mut item = self.blocks(Some(TagEnd::Item), width.saturating_sub(indent));
+                    let mut item = self.blocks(
+                        Some(TagEnd::Item),
+                        width.saturating_sub(indent),
+                        source_element(self.source, range.clone()),
+                    );
                     // The checkbox replaces the bullet; both are two columns wide.
                     let marker = if self.task_item && !ordered {
                         String::new()
@@ -316,10 +534,18 @@ impl Renderer<'_> {
                         marker
                     };
                     if item.is_empty() {
-                        item.push(Line::default());
+                        item.extend(mapped(vec![Line::default()], None));
+                    }
+                    if let Some(last) = item.last_mut()
+                        && let Some(element) = source_element(self.source, range)
+                    {
+                        last.ending_items.push(element.range);
                     }
                     for (index, mut line) in item.into_iter().enumerate() {
-                        line.spans.insert(
+                        if let Some(element) = &mut line.element {
+                            element.indent = element.indent.saturating_add(indent);
+                        }
+                        line.line.spans.insert(
                             0,
                             Span::styled(
                                 if index == 0 {
@@ -340,12 +566,19 @@ impl Renderer<'_> {
         lines
     }
 
-    fn table(&mut self, width: usize) -> Vec<Line<'static>> {
+    fn table(&mut self, width: usize) -> Vec<RenderedLine> {
         let mut rows = Vec::new();
+        let mut elements = Vec::new();
         let mut row = Vec::new();
-        while let Some((event, _)) = self.events.next() {
+        while let Some((event, range)) = self.events.next() {
             match event {
                 Event::End(TagEnd::Table) => break,
+                Event::Start(Tag::TableHead | Tag::TableRow) => {
+                    elements.push(source_element(self.source, range).map(|mut element| {
+                        element.indent = 2;
+                        element
+                    }));
+                }
                 Event::Start(Tag::TableCell) => {
                     row.push(self.inline(TagEnd::TableCell, role_style(Role::Assistant)))
                 }
@@ -355,7 +588,7 @@ impl Renderer<'_> {
                 _ => {}
             }
         }
-        table_lines(rows, width)
+        table_lines(rows, width, elements)
     }
 }
 
@@ -416,19 +649,29 @@ fn plain(spans: &[Span<'_>]) -> String {
     spans.iter().map(|span| span.content.as_ref()).collect()
 }
 
-fn flush(lines: &mut Vec<Line<'static>>, spans: &mut Vec<Span<'static>>, width: usize) {
+fn flush(
+    lines: &mut Vec<RenderedLine>,
+    spans: &mut Vec<Span<'static>>,
+    width: usize,
+    element: Option<SourceElement>,
+) {
     if !spans.is_empty() {
-        lines.extend(wrap(std::mem::take(spans), width));
+        lines.extend(mapped(wrap(std::mem::take(spans), width), element));
     }
 }
 
 /// Separates block-level elements by one blank line. Text still pending here belongs to a
 /// tight list item, which stays attached to the nested block that follows it.
-fn begin_block(lines: &mut Vec<Line<'static>>, pending: &mut Vec<Span<'static>>, width: usize) {
+fn begin_block(
+    lines: &mut Vec<RenderedLine>,
+    pending: &mut Vec<Span<'static>>,
+    width: usize,
+    item: Option<SourceElement>,
+) {
     let tight = !pending.is_empty();
-    flush(lines, pending, width);
+    flush(lines, pending, width, item);
     if !tight && !lines.is_empty() {
-        lines.push(Line::default());
+        lines.extend(mapped(vec![Line::default()], None));
     }
 }
 
@@ -478,7 +721,13 @@ static CODE_THEME: LazyLock<Theme> = LazyLock::new(|| Theme {
     ..Theme::default()
 });
 
-fn code_block(language: &str, text: &str, width: usize, closed: bool) -> Vec<Line<'static>> {
+fn code_block(
+    language: &str,
+    text: &str,
+    width: usize,
+    closed: bool,
+    elements: Vec<Option<SourceElement>>,
+) -> Vec<RenderedLine> {
     let dim = role_style(Role::DimMeta);
     let label = if language.is_empty() {
         "┌".to_owned()
@@ -495,7 +744,7 @@ fn code_block(language: &str, text: &str, width: usize, closed: bool) -> Vec<Lin
         title.push(ch);
         used = used.saturating_add(size);
     }
-    let mut lines = vec![Line::from(Span::styled(title, dim))];
+    let mut lines: Vec<_> = mapped(vec![Line::from(Span::styled(title, dim))], None).collect();
     let language = language.to_ascii_lowercase();
     let mut highlighter = if language.is_empty() || language == "diff" {
         None
@@ -504,9 +753,19 @@ fn code_block(language: &str, text: &str, width: usize, closed: bool) -> Vec<Lin
             .find_syntax_by_token(&language)
             .map(|syntax| HighlightLines::new(syntax, &CODE_THEME))
     };
-    for source in text.split_terminator('\n') {
-        let indent = source.len() - source.trim_start_matches(' ').len();
-        let body = &source[indent..];
+    for (source_index, source) in text.split_terminator('\n').enumerate() {
+        let indent = source
+            .len()
+            .saturating_sub(source.trim_start_matches(' ').len());
+        let body = source.get(indent..).unwrap_or("");
+        let element = elements
+            .get(source_index)
+            .cloned()
+            .flatten()
+            .map(|mut element| {
+                element.indent = indent.saturating_add(2);
+                element
+            });
         let available = width.saturating_sub(2).saturating_sub(indent);
         let spans = if let Some(parser) = highlighter.as_mut() {
             match code_spans(parser, source, indent) {
@@ -527,14 +786,21 @@ fn code_block(language: &str, text: &str, width: usize, closed: bool) -> Vec<Lin
             );
             line.spans
                 .insert(0, Span::styled(if index == 0 { "│ " } else { "┆ " }, dim));
-            lines.push(line);
+            lines.push(RenderedLine {
+                line,
+                element: element.clone(),
+                ending_items: Vec::new(),
+            });
         }
     }
     if closed {
-        lines.push(Line::from(Span::styled(
-            if width > 0 { "└" } else { "" },
-            dim,
-        )));
+        lines.extend(mapped(
+            vec![Line::from(Span::styled(
+                if width > 0 { "└" } else { "" },
+                dim,
+            ))],
+            None,
+        ));
     }
     lines
 }
@@ -638,7 +904,11 @@ fn column_widths(natural: &[usize], width: usize) -> Vec<usize> {
     result
 }
 
-fn table_lines(rows: Vec<Vec<Vec<Span<'static>>>>, width: usize) -> Vec<Line<'static>> {
+fn table_lines(
+    rows: Vec<Vec<Vec<Span<'static>>>>,
+    width: usize,
+    elements: Vec<Option<SourceElement>>,
+) -> Vec<RenderedLine> {
     let columns = rows.first().map_or(0, Vec::len);
     let natural: Vec<_> = (0..columns)
         .map(|index| {
@@ -663,7 +933,11 @@ fn table_lines(rows: Vec<Vec<Vec<Span<'static>>>>, width: usize) -> Vec<Line<'st
             border.push_str(&"─".repeat(width + 2));
             border.push(if index + 1 == columns { right } else { middle });
         }
-        Line::from(Span::styled(border, dim))
+        RenderedLine {
+            line: Line::from(Span::styled(border, dim)),
+            element: None,
+            ending_items: Vec::new(),
+        }
     };
     let mut lines = vec![border('┌', '┬', '┐')];
     for (index, row) in rows.into_iter().enumerate() {
@@ -683,7 +957,11 @@ fn table_lines(rows: Vec<Vec<Vec<Span<'static>>>>, width: usize) -> Vec<Line<'st
                 spans.push(Span::raw(" ".repeat(padding + 1)));
                 spans.push(Span::styled("│", dim));
             }
-            lines.push(Line::from(spans));
+            lines.push(RenderedLine {
+                line: Line::from(spans),
+                element: elements.get(index).cloned().flatten(),
+                ending_items: Vec::new(),
+            });
         }
         if index == 0 {
             lines.push(border('├', '┼', '┤'));

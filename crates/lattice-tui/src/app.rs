@@ -51,6 +51,10 @@ pub(crate) enum Block {
     /// 渲染作用域，不单独占行；历史不能被重标为当前 Agent 的发言。
     AgentName(String),
     User(String),
+    CommentedUser(crate::comment::Message),
+    /// 保留被拒提交的标记，但不重复挂载已归还的评论。
+    RejectedUser(crate::comment::Message),
+    HistoryAssistant(crate::comment::HistoryText),
     /// 接受或 Live 观察的显示标记，不伪造正文，也不拥有持久节点。
     AssistantStart {
         turn_id: TurnId,
@@ -127,7 +131,8 @@ pub(crate) struct App {
     pub(crate) context_tokens: Option<u64>,
     cancel_requested: bool,
     reconnect_requested: bool,
-    submitted: Option<(TurnId, String)>,
+    submitted: Option<(TurnId, crate::queue::Outgoing)>,
+    closed_turns: std::collections::HashSet<TurnId>,
     // None 仅表示打开已有会话后尚未装入第一份路径。
     loaded_user_count: Option<usize>,
     durable_len: usize,
@@ -169,6 +174,7 @@ impl App {
             cancel_requested: false,
             reconnect_requested: false,
             submitted: None,
+            closed_turns: Default::default(),
             durable_len: 0,
             generation: 0,
             attempt: None,
@@ -391,10 +397,14 @@ impl App {
             action if self.queue.is_editing() => {
                 match action {
                     KeyAction::Submit | KeyAction::Clear => {
-                        self.queue.finish_edit(matches!(action, KeyAction::Submit));
+                        if let Some(anchor) =
+                            self.queue.finish_edit(matches!(action, KeyAction::Submit))
+                        {
+                            self.focus_anchor(&anchor);
+                        }
                         return self.auto_submit();
                     }
-                    action => self.queue.edit(&action, width),
+                    action => self.queue.edit(&action, transcript.editor_width(width)),
                 }
                 let transcript = self.prepare_transcript();
                 if let Some((row, _)) = transcript.editor_cursor {
@@ -407,7 +417,19 @@ impl App {
             action if matches!(self.focus, Focus::Transcript(_)) => match action {
                 KeyAction::Submit => {
                     if let Focus::Transcript(cursor) = self.focus {
-                        self.queue.start_edit(cursor.block.id);
+                        match transcript.comment_navigation(cursor, width) {
+                            Some(crate::view::CommentNavigation::Jump(target)) => {
+                                self.focus = Focus::Transcript(target);
+                                self.viewport.reveal(target.row);
+                            }
+                            Some(crate::view::CommentNavigation::Compose(anchor)) => {
+                                let id = self.blocks.allocate_id();
+                                self.queue.start_comment(id, anchor, &self.blocks);
+                            }
+                            None => {
+                                self.queue.start_edit(cursor.block.id);
+                            }
+                        }
                     }
                     let transcript = self.prepare_transcript();
                     if let Some((row, _)) = transcript.editor_cursor {
@@ -415,12 +437,19 @@ impl App {
                     }
                 }
                 KeyAction::Clear => {
-                    if let Focus::Transcript(cursor) = self.focus
-                        && self.queue.remove(cursor.block.id)
-                    {
-                        self.prepare_transcript();
-                    } else {
-                        self.focus_input(lines.len());
+                    if let Focus::Transcript(cursor) = self.focus {
+                        if let Some(anchor) = self.queue.remove_draft(cursor.block.id) {
+                            self.focus_anchor(&anchor);
+                        } else if matches!(
+                            transcript.comment_navigation(cursor, width),
+                            Some(crate::view::CommentNavigation::Jump(_))
+                        ) {
+                            self.focus_input(lines.len());
+                        } else if self.queue.remove(cursor.block.id) {
+                            self.prepare_transcript();
+                        } else {
+                            self.focus_input(lines.len());
+                        }
                     }
                 }
                 KeyAction::Insert(c) => {
@@ -496,6 +525,22 @@ impl App {
             },
         }
         None
+    }
+
+    pub(crate) fn turn_closed(&self, turn: TurnId) -> bool {
+        self.closed_turns.contains(&turn)
+    }
+
+    fn focus_anchor(&mut self, location: &crate::comment::Location) {
+        let width = frame_layout(self.term_width, self.term_height).content_w;
+        let transcript = render_transcript(self, width);
+        if let Some(cursor) = transcript.anchor_cursor(location) {
+            self.focus = Focus::Transcript(cursor);
+            self.viewport
+                .on_content_changed(transcript.lines.len(), self.transcript_height());
+            self.viewport.pause();
+            self.viewport.reveal(cursor.row);
+        }
     }
 
     fn focus_input(&mut self, rows: usize) {
@@ -596,10 +641,16 @@ impl App {
                     self.queue.release(id);
                 }
                 Some(Err(_) | Ok(Acceptance::NeedsConfiguration { .. })) => {
-                    self.queue.reject(id);
+                    if self.queue.reject(id) {
+                        self.mark_rejected_comments(id);
+                        self.discard_missing_comments();
+                    }
                 }
                 None if report.not_submitted.is_some() => {
-                    self.queue.reject(id);
+                    if self.queue.reject(id) {
+                        self.mark_rejected_comments(id);
+                        self.discard_missing_comments();
+                    }
                 }
                 Some(Ok(Acceptance::ConfirmationUnknown { .. })) | None => {
                     if self.queue.release(id) {
@@ -629,6 +680,17 @@ impl App {
                 ..
             } => match result {
                 Ok(history) if !stale && generation == self.generation => {
+                    // 只结合同一个历史切点的 Session 快照：该 Session 唯一进行中 Turn
+                    // 之外的节点都已关闭；不能由“Step 已写入”推断它自身的 Turn 关闭。
+                    if let Some(state) = &self.state
+                        && state.view.history == history.anchor
+                    {
+                        self.closed_turns
+                            .extend(history.entries.iter().filter_map(|entry| {
+                                let turn = entry.content.turn_id()?;
+                                (state.view.session.active_turn != Some(turn)).then_some(turn)
+                            }));
+                    }
                     self.replace_history(crate::session::history_blocks(*history))
                 }
                 Ok(_) => {}
@@ -650,11 +712,22 @@ impl App {
             LocalUpdate::Submission { turn_id, result } => match result {
                 Ok(acceptance) => {
                     // 自动发送的一条放回队首并回到空闲；手动提交按原有行为不归还输入区。
-                    if matches!(acceptance, Acceptance::NeedsConfiguration { .. })
-                        && self.queue.reject(turn_id)
-                    {
-                        self.submitted = None;
-                        self.restore_submission();
+                    if matches!(acceptance, Acceptance::NeedsConfiguration { .. }) {
+                        if self.queue.reject(turn_id) {
+                            self.mark_rejected_comments(turn_id);
+                            self.submitted = None;
+                            self.restore_submission();
+                        } else if self
+                            .submitted
+                            .as_ref()
+                            .is_some_and(|(id, _)| *id == turn_id)
+                        {
+                            self.mark_rejected_comments(turn_id);
+                            if let Some((_, message)) = self.submitted.take() {
+                                self.queue.restore(message, &mut self.blocks);
+                            }
+                        }
+                        self.discard_missing_comments();
                     }
                     if matches!(acceptance, Acceptance::ConfirmationUnknown { .. }) {
                         self.queue.pause();
@@ -808,6 +881,7 @@ impl App {
     }
 
     fn show_summary(&mut self, turn_id: TurnId, summary: TurnSummary) {
+        self.closed_turns.insert(turn_id);
         if summary.outcome != lattice_api::local::PublicTurnOutcome::Completed {
             self.queue.pause();
         }
@@ -902,6 +976,7 @@ impl App {
                 .iter()
                 .any(|entry| {
                     matches!(&entry.block, Block::Assistant(text) if !text.is_empty())
+                        || matches!(&entry.block, Block::HistoryAssistant(text) if !text.text.is_empty())
                         || matches!(entry.block, Block::Tool { .. })
                 })
             {
@@ -910,7 +985,7 @@ impl App {
                     .enumerate()
                     .take(end)
                     .skip(start.saturating_add(1))
-                    .take_while(|(_, entry)| matches!(entry.block, Block::User(_)))
+                    .take_while(|(_, entry)| matches!(entry.block, Block::User(_) | Block::CommentedUser(_)))
                     .last()
                     .map_or(start.saturating_add(1), |(index, _)| {
                         index.saturating_add(1)
@@ -1030,6 +1105,7 @@ impl App {
         }
         self.blocks.entries = result;
         self.blocks.inherit_discarded(old_slots, new_slots);
+        self.discard_missing_comments();
     }
 
     pub(crate) fn fail_running_tools(&mut self, reason: &str) {
@@ -1109,7 +1185,7 @@ impl App {
 
     fn submit(&mut self) -> Option<String> {
         let raw = self.input.text();
-        if raw.trim().is_empty() {
+        if raw.trim().is_empty() && self.queue.draft_count() == 0 {
             if self.phase == TurnPhase::Idle && self.input.is_empty() {
                 self.queue.resume();
                 return self.send_queue_head();
@@ -1131,7 +1207,8 @@ impl App {
         let ordinal = std::num::NonZeroUsize::new(self.loaded_user_count?.saturating_add(1))?;
         self.input.clear();
         let id = lattice_api::local::new_turn_id();
-        Some(self.start_submission(raw, id, ordinal))
+        let message = self.queue.take_message(raw);
+        Some(self.start_submission(message, id, ordinal))
     }
 
     fn auto_submit(&mut self) -> Option<String> {
@@ -1164,22 +1241,23 @@ impl App {
     // 手动与排队共用提交路径，不借用或覆盖正在编辑的输入区。
     fn start_submission(
         &mut self,
-        raw: String,
+        message: crate::queue::Outgoing,
         id: TurnId,
         ordinal: std::num::NonZeroUsize,
     ) -> String {
-        self.history.push(raw.trim());
+        self.history.push(message.text.trim());
+        let raw = message.encode();
         self.state = None;
         self.cancel_status = None;
         self.attempt = None;
         self.current_turn = Some(id);
         self.observed_turn = Some(id);
-        self.submitted = Some((id, raw.clone()));
+        self.submitted = Some((id, message));
         // UserTurn 先于 AgentName：历史装入时以 UserTurn 定位已装入节点，其前的临时提示才会放回该轮之前。
         self.blocks.push(Block::UserTurn(id, ordinal));
         self.blocks
             .push(Block::AgentName(self.ctx.active_agent.clone()));
-        self.blocks.push(Block::User(raw.clone()));
+        self.blocks.push(crate::session::user_block(raw.clone()));
         self.push_status(StatusKind::Notice(vec![format!(
             "提交身份 {id}；确认丢失仍按此 ID 找回"
         )]));
@@ -1197,25 +1275,70 @@ impl App {
         }
     }
 
+    fn discard_missing_comments(&mut self) {
+        let steps = self
+            .blocks
+            .iter()
+            .take(self.durable_len)
+            .filter_map(|block| match block {
+                Block::Step(key) => Some(*key),
+                _ => None,
+            })
+            .collect();
+        let dropped = self.queue.retain_steps(&steps);
+        if !dropped.is_empty() {
+            self.push_status(StatusKind::Notice(vec![format!(
+                "锚点 Step 不在当前历史，丢弃评论：{}",
+                dropped
+                    .iter()
+                    .map(|n| format!("#{n}"))
+                    .collect::<Vec<_>>()
+                    .join("、")
+            )]));
+        }
+    }
+
     /// 自动发送的一条放回队首且不进输入区；手动提交归还输入区。两者都回到空闲。
     fn reject_submission(&mut self, turn_id: TurnId) {
         let automatic = self.queue.reject(turn_id);
-        if self
+        let manual = self
             .submitted
             .as_ref()
-            .is_some_and(|(id, _)| *id == turn_id)
-        {
+            .is_some_and(|(id, _)| *id == turn_id);
+        if automatic || manual {
+            self.mark_rejected_comments(turn_id);
+        }
+        if manual {
             if automatic {
                 self.submitted = None;
             }
             self.restore_submission();
+        }
+        if automatic || manual {
+            self.discard_missing_comments();
+        }
+    }
+
+    fn mark_rejected_comments(&mut self, turn_id: TurnId) {
+        let mut scope = None;
+        for (index, entry) in self.blocks.entries.iter_mut().enumerate() {
+            if let Block::UserTurn(id, _) = &entry.block {
+                scope = Some(*id);
+            }
+            if index >= self.durable_len
+                && scope == Some(turn_id)
+                && let Block::CommentedUser(message) = &entry.block
+            {
+                entry.block = Block::RejectedUser(message.clone());
+            }
         }
     }
 
     /// 只归还本客户端的草稿，不撤销已知 live、接管或完成显示。
     fn restore_submission(&mut self) {
         if let Some((_, prompt)) = self.submitted.take() {
-            self.input.set_text(&prompt);
+            let text = self.queue.restore(prompt, &mut self.blocks);
+            self.input.set_text(&text);
         }
         if !self
             .state

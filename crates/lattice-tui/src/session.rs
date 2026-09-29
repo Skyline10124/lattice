@@ -104,7 +104,7 @@ pub(crate) fn history_blocks(history: LocalHistory) -> Vec<Block> {
                     turn_id,
                     ordinal: step_ordinal,
                 }));
-                append_step(&mut blocks, content);
+                append_history_step(&mut blocks, content, turn_id, step_ordinal);
             }
         }
     }
@@ -113,6 +113,53 @@ pub(crate) fn history_blocks(history: LocalHistory) -> Vec<Block> {
         .into_iter()
         .map(|entry| entry.block)
         .collect()
+}
+
+fn append_history_step(
+    blocks: &mut BlockList,
+    content: StepContent,
+    turn: lattice_api::local::TurnId,
+    step: u32,
+) {
+    // 与 append_assistant_text 的相邻拼接规则一致；reasoning 不分块，工具调用分块。
+    let mut groups: Vec<(usize, usize)> = Vec::new();
+    let mut adjacent = false;
+    for (index, part) in content.assistant.parts.iter().enumerate() {
+        match part.semantic {
+            MessageSemantic::Text { .. } => {
+                if adjacent {
+                    if let Some((_, count)) = groups.last_mut() {
+                        *count = count.saturating_add(1);
+                    }
+                } else {
+                    groups.push((index, 1));
+                }
+                adjacent = true;
+            }
+            MessageSemantic::ToolCall { .. } => adjacent = false,
+            MessageSemantic::Reasoning { .. } => {}
+        }
+    }
+    let start = blocks.len();
+    append_step(blocks, content);
+    let mut groups = groups.into_iter();
+    for block in blocks.iter_mut().skip(start) {
+        if let Block::Assistant(text) = block
+            && let Some((part, 1)) = groups.next()
+        {
+            *block = Block::HistoryAssistant(crate::comment::HistoryText {
+                fragment: crate::comment::Fragment { turn, step, part },
+                text: std::mem::take(text).into(),
+            });
+        }
+    }
+}
+
+pub(crate) fn user_block(text: String) -> Block {
+    match crate::comment::Message::parse(&text) {
+        Some(message) => Block::CommentedUser(message),
+        None => Block::User(text),
+    }
 }
 
 pub(crate) fn append_step(blocks: &mut BlockList, content: StepContent) {
@@ -166,7 +213,7 @@ pub(crate) fn append_messages(
         for part in message.parts {
             match part.semantic {
                 MessageSemantic::Text { text } => match message.role {
-                    MessageRole::User => blocks.push(Block::User(text)),
+                    MessageRole::User => blocks.push(user_block(text)),
                     MessageRole::Assistant => append_assistant_text(blocks, text),
                     MessageRole::System | MessageRole::Tool => {}
                 },
