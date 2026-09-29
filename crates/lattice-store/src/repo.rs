@@ -5,12 +5,8 @@
 //! per-repository write lock, and atomic first-create publication (ADR 0005
 //! §4).
 //!
-//! A [`StoreRepo`] is one validated private bare repository. Domain wrappers
-//! (`lattice-session`, `lancet-runtime`, later `lancet-audit`) own their
-//! repository file names, store kinds, schema versions, refs, records, and
-//! invariants; this module owns only domain-neutral mechanics. There is no
-//! generic `put(key, value)`, no raw `gix::Repository` getter, no all-stores
-//! handle, and no pluggable backend.
+//! StoreRepo 提供工作区历史所需的项目 Git 机制；领域负责文件名、schema、
+//! 引用与记录不变量。内核不暴露原始 Repository 或通用业务 put/get。
 //!
 //! ## First-create protocol
 //!
@@ -37,7 +33,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use gix::objs::tree::EntryKind;
-use gix::refs::transaction::{Change, LogChange, PreviousValue, RefEdit, RefLog};
+use gix::refs::transaction::PreviousValue;
 
 use crate::durability::{
     fsync_dir, fsync_publication, fsync_tree, precreate_loose_object_fanout,
@@ -57,11 +53,6 @@ pub const REPO_LOCK_FILE: &str = "lattice-repo.lock";
 
 /// Ref namespace every kernel-managed ref lives under.
 pub const LATTICE_REF_PREFIX: &str = "refs/lattice/";
-
-/// Retention pin namespace: `refs/lattice/retained/<oid>` keeps an object
-/// reachable independent of any domain ref (ADR 0005 §4 "retention
-/// primitives").
-pub const RETAINED_REF_PREFIX: &str = "refs/lattice/retained";
 
 const KERNEL_AUTHOR_NAME: &str = "LATTICE";
 const KERNEL_AUTHOR_EMAIL: &str = "lattice@localhost";
@@ -154,17 +145,6 @@ impl From<RefExpectation> for PreviousValue {
     }
 }
 
-/// One edit inside a multi-ref transaction.
-#[derive(Debug, Clone)]
-pub struct RefTxnEdit {
-    /// Full ref name (must be under `refs/lattice/`).
-    pub name: String,
-    /// What the ref must look like before the edit.
-    pub expect: RefExpectation,
-    /// The new target; `None` deletes the ref.
-    pub new: Option<gix::ObjectId>,
-}
-
 impl StoreRepo {
     // ─── Open / create ─────────────────────────────────────────────────
 
@@ -209,23 +189,6 @@ impl StoreRepo {
         })
     }
 
-    /// Strictly open the global store `name` from the layout root.
-    pub fn open_global(
-        layout: &StateLayout,
-        name: &str,
-        store_kind: &str,
-        store_schema_version: u32,
-    ) -> Result<Self> {
-        Self::open(
-            &layout.lattice_root().join(name),
-            &ExpectedMeta {
-                store_kind: store_kind.to_string(),
-                store_schema_version,
-                scope: StoreScope::Global,
-            },
-        )
-    }
-
     /// Strictly open the project store `name` bound to `key`. The recorded
     /// scope must match the directory key structurally.
     pub fn open_project(
@@ -250,9 +213,7 @@ impl StoreRepo {
     /// domain's initial objects/refs; it runs at most once per process call
     /// and never on an existing repository.
     ///
-    /// This is the only initialization path, and it is restricted to the
-    /// composition entry points the ADR names (`session new`, #139-A's
-    /// isolated harness). Everything else strictly opens.
+    /// 产品仅在新 Session 首次提交时创建工作区历史；隔离测试使用自有目录。
     pub fn create(
         path: &Path,
         meta: StoreMeta,
@@ -362,17 +323,6 @@ impl StoreRepo {
         Self::open(path, &expected)
     }
 
-    /// Create the global store `name` under the layout root.
-    pub fn create_global(
-        layout: &StateLayout,
-        name: &str,
-        meta: StoreMeta,
-        init: impl FnOnce(&StoreRepo) -> Result<()>,
-    ) -> Result<Self> {
-        debug_assert_eq!(meta.scope, StoreScope::Global);
-        Self::create(&layout.lattice_root().join(name), meta, init)
-    }
-
     /// Create the project store `name` under the key's project directory. The
     /// recorded scope is forced to the directory key, so a project store can
     /// never record a scope that disagrees with its location.
@@ -430,57 +380,6 @@ impl StoreRepo {
         }
     }
 
-    /// Enumerate `(name, target)` pairs under a ref prefix, sorted by name.
-    pub fn enumerate_refs(&self, prefix: &str) -> Result<Vec<(String, gix::ObjectId)>> {
-        let repo = self.repo();
-        let platform = repo
-            .references()
-            .map_err(|e| StoreError::Git(format!("enumerate references: {e}")))?;
-        let iter = platform
-            .prefixed(prefix)
-            .map_err(|e| StoreError::Git(format!("iterate references: {e}")))?;
-        let mut out = Vec::new();
-        for r in iter {
-            let r = r.map_err(|e| StoreError::Git(format!("read reference: {e}")))?;
-            let name = r.name().as_bstr().to_string();
-            if let Some(oid) = r.target().try_id() {
-                out.push((name, oid.to_owned()));
-            }
-        }
-        out.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(out)
-    }
-
-    /// Read a blob's bytes.
-    pub fn read_blob(&self, oid: gix::ObjectId) -> Result<Vec<u8>> {
-        let repo = self.repo();
-        let object = repo
-            .find_object(oid)
-            .map_err(|e| StoreError::Git(format!("find object {oid}: {e}")))?;
-        let blob = object
-            .try_into_blob()
-            .map_err(|e| StoreError::Git(format!("object {oid} is not a blob: {e}")))?;
-        Ok(blob.data.clone())
-    }
-
-    /// Compute the object id [`Self::write_blob`] would produce for `bytes`
-    /// without writing anything. Object identity is content addressing over
-    /// the canonical git blob header; read-side callers use this to look up
-    /// a candidate object a writer may or may not have published.
-    pub fn blob_id(&self, bytes: &[u8]) -> Result<gix::ObjectId> {
-        let mut hasher = gix::hash::hasher(self.repo().object_hash());
-        hasher.update(format!("blob {}\0", bytes.len()).as_bytes());
-        hasher.update(bytes);
-        hasher
-            .try_finalize()
-            .map_err(|e| StoreError::Git(format!("hash blob identity: {e}")))
-    }
-
-    /// Whether an object with this id exists in the object database.
-    pub fn has_object(&self, oid: gix::ObjectId) -> Result<bool> {
-        Ok(matches!(self.repo().try_find_object(oid), Ok(Some(_))))
-    }
-
     /// Read the tree of a commit.
     pub fn commit_tree(&self, commit_oid: gix::ObjectId) -> Result<gix::ObjectId> {
         let repo = self.repo();
@@ -510,16 +409,6 @@ impl StoreRepo {
             .find_commit(commit_oid)
             .map_err(|e| StoreError::Git(format!("find commit {commit_oid}: {e}")))?;
         Ok(commit.message_raw_sloppy().to_string())
-    }
-
-    /// Commit timestamp in unix seconds, when the commit records a readable
-    /// time.
-    pub fn commit_time(&self, commit_oid: gix::ObjectId) -> Result<Option<i64>> {
-        let repo = self.repo();
-        let commit = repo
-            .find_commit(commit_oid)
-            .map_err(|e| StoreError::Git(format!("find commit {commit_oid}: {e}")))?;
-        Ok(commit.time().ok().map(|time| time.seconds))
     }
 
     /// Read the blob at `path` inside a tree. `None` when the path is absent
@@ -556,61 +445,6 @@ impl StoreRepo {
         Ok(out)
     }
 
-    /// Read the blob at `path` inside a commit's tree.
-    pub fn read_tree_blob(&self, commit_oid: gix::ObjectId, path: &str) -> Result<Vec<u8>> {
-        let repo = self.repo();
-        let commit = repo
-            .find_commit(commit_oid)
-            .map_err(|e| StoreError::Git(format!("find commit for tree read: {e}")))?;
-        let tree = commit
-            .tree()
-            .map_err(|e| StoreError::Git(format!("read commit tree: {e}")))?;
-        let entry = tree
-            .lookup_entry_by_path(path)
-            .map_err(|e| StoreError::Git(format!("lookup tree path {path}: {e}")))?
-            .ok_or_else(|| StoreError::Git(format!("find tree path {path}: not found")))?;
-        let object = entry
-            .object()
-            .map_err(|e| StoreError::Git(format!("load blob object for {path}: {e}")))?;
-        let blob = object
-            .try_into_blob()
-            .map_err(|e| StoreError::Git(format!("peel {path} to blob: {e}")))?;
-        Ok(blob.data.clone())
-    }
-    /// 在分配正文前核对对象长度；供领域的有界观察入口使用，不改变普通读取契约。
-    pub fn read_tree_blob_bounded(
-        &self,
-        commit_oid: gix::ObjectId,
-        path: &str,
-        max_bytes: usize,
-    ) -> Result<Vec<u8>> {
-        let repo = self.repo();
-        let tree = repo
-            .find_commit(commit_oid)
-            .map_err(|e| StoreError::Git(format!("find commit: {e}")))?
-            .tree()
-            .map_err(|e| StoreError::Git(format!("read tree: {e}")))?;
-        let entry = tree
-            .lookup_entry_by_path(path)
-            .map_err(|e| StoreError::Git(format!("lookup tree path: {e}")))?
-            .ok_or_else(|| StoreError::Git("tree path not found".into()))?;
-        let header = repo
-            .find_header(entry.id().detach())
-            .map_err(|e| StoreError::Git(format!("read object header: {e}")))?;
-        if header.kind() != gix::objs::Kind::Blob || header.size() > max_bytes as u64 {
-            return Err(StoreError::InvalidInput {
-                detail: "blob exceeds bounded read limit or has wrong kind".into(),
-            });
-        }
-        let object = entry
-            .object()
-            .map_err(|e| StoreError::Git(format!("read bounded blob: {e}")))?;
-        let blob = object
-            .try_into_blob()
-            .map_err(|e| StoreError::Git(format!("bounded object is not a blob: {e}")))?;
-        Ok(blob.data.clone())
-    }
-
     /// Newest-first rev-walk from `tips`, optionally hiding `hide`.
     pub fn rev_walk(
         &self,
@@ -631,15 +465,6 @@ impl StoreRepo {
             ids.push(info.id);
         }
         Ok(ids)
-    }
-
-    /// Merge base of two commits, if one exists.
-    pub fn merge_base(&self, a: gix::ObjectId, b: gix::ObjectId) -> Result<Option<gix::ObjectId>> {
-        let repo = self.repo();
-        match repo.merge_base(a, b) {
-            Ok(id) => Ok(Some(id.detach())),
-            Err(_) => Ok(None),
-        }
     }
 
     /// The empty tree id for this repository's object hash.
@@ -741,116 +566,6 @@ impl StoreRepo {
             .map(|_| ())
             .map_err(|e| classify_ref_error(ref_name, e))?;
         self.fsync_pending(&[ref_name])
-    }
-
-    /// Delete one ref under `expect`.
-    pub fn delete_ref(&self, ref_name: &str, expect: RefExpectation) -> Result<()> {
-        validate_ref_name(ref_name)?;
-        self.fsync_pending(&[])?;
-        let name: gix::refs::FullName = ref_name
-            .try_into()
-            .map_err(|e| StoreError::Git(format!("ref name {ref_name}: {e}")))?;
-        self.repo()
-            .edit_reference(RefEdit {
-                change: Change::Delete {
-                    expected: expect.into(),
-                    log: RefLog::AndReference,
-                },
-                name,
-                deref: false,
-            })
-            .map(|_| ())
-            .map_err(|e| classify_ref_error(ref_name, e))?;
-        self.fsync_pending(&[ref_name])
-    }
-
-    /// Apply a multi-ref transaction atomically within this repository.
-    pub fn ref_transaction(&self, edits: &[RefTxnEdit]) -> Result<()> {
-        let mut gix_edits = Vec::with_capacity(edits.len());
-        for edit in edits {
-            validate_ref_name(&edit.name)?;
-            let name: gix::refs::FullName = edit
-                .name
-                .as_str()
-                .try_into()
-                .map_err(|e| StoreError::Git(format!("ref name {}: {e}", edit.name)))?;
-            let change = match edit.new {
-                Some(target) => Change::Update {
-                    expected: edit.expect.into(),
-                    log: LogChange {
-                        mode: RefLog::AndReference,
-                        ..Default::default()
-                    },
-                    new: gix::refs::Target::Object(target),
-                },
-                None => Change::Delete {
-                    expected: edit.expect.into(),
-                    log: RefLog::AndReference,
-                },
-            };
-            gix_edits.push(RefEdit {
-                change,
-                name,
-                deref: false,
-            });
-        }
-        let ref_names: Vec<&str> = edits.iter().map(|edit| edit.name.as_str()).collect();
-        self.fsync_pending(&[])?;
-        let repo = self.repo();
-        repo.edit_references(gix_edits)
-            .map(|_| ())
-            .map_err(|e| classify_ref_error("<transaction>", e))?;
-        drop(repo);
-        self.fsync_pending(&ref_names)
-    }
-
-    // ─── Retention primitives ──────────────────────────────────────────
-
-    /// Pin `oid` under `refs/lattice/retained/<oid>` so it stays reachable
-    /// independent of any domain ref. Idempotent.
-    pub fn retain(&self, oid: gix::ObjectId) -> Result<()> {
-        let ref_name = format!("{RETAINED_REF_PREFIX}/{oid}");
-        match self.ref_target(&ref_name)? {
-            Some(existing) if existing == oid => self.fsync_pending(&[ref_name.as_str()]),
-            Some(_) => Err(StoreError::Corruption {
-                detail: format!("retention pin for {oid} points elsewhere"),
-            }),
-            None => self.cas_ref(
-                &ref_name,
-                oid,
-                RefExpectation::MustNotExist,
-                "lattice retain",
-            ),
-        }
-    }
-
-    /// Whether `oid` currently carries a retention pin.
-    pub fn is_retained(&self, oid: gix::ObjectId) -> Result<bool> {
-        let ref_name = format!("{RETAINED_REF_PREFIX}/{oid}");
-        Ok(self.ref_target(&ref_name)? == Some(oid))
-    }
-
-    /// Every currently pinned object id.
-    pub fn retained_pins(&self) -> Result<Vec<gix::ObjectId>> {
-        Ok(self
-            .enumerate_refs(&format!("{RETAINED_REF_PREFIX}/"))?
-            .into_iter()
-            .map(|(_, oid)| oid)
-            .collect())
-    }
-
-    /// Release a retention pin. Idempotent.
-    pub fn release(&self, oid: gix::ObjectId) -> Result<()> {
-        let ref_name = format!("{RETAINED_REF_PREFIX}/{oid}");
-        match self.ref_target(&ref_name)? {
-            Some(existing) if existing == oid => {
-                self.delete_ref(&ref_name, RefExpectation::MustMatch(oid))
-            }
-            Some(_) => Err(StoreError::Corruption {
-                detail: format!("retention pin for {oid} points elsewhere"),
-            }),
-            None => Ok(()),
-        }
     }
 
     // ─── Durability ────────────────────────────────────────────────────
@@ -1135,45 +850,73 @@ mod tests {
         (state, layout)
     }
 
-    fn global_meta() -> StoreMeta {
+    fn project_meta() -> StoreMeta {
         StoreMeta {
-            store_kind: "session".into(),
+            store_kind: "workspace-history".into(),
             store_schema_version: 1,
-            scope: StoreScope::Global,
+            scope: StoreScope::Project {
+                key: ProjectStoreKey::from_canonical_path_bytes(b"/ws"),
+            },
         }
     }
 
     #[test]
     fn create_then_strict_open_roundtrip() {
         let (_state, layout) = temp_layout();
-        let created =
-            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
-        assert_eq!(created.meta().store_kind, "session");
-        assert!(layout.lattice_root().join("sessions.git").exists());
+        let created = StoreRepo::create(
+            &layout.lattice_root().join("store.git"),
+            project_meta(),
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(created.meta().store_kind, "workspace-history");
+        assert!(layout.lattice_root().join("store.git").exists());
         assert!(created.ref_target(META_REF).unwrap().is_some());
 
-        let opened = StoreRepo::open_global(&layout, "sessions.git", "session", 1).unwrap();
+        let opened = StoreRepo::open(
+            &layout.lattice_root().join("store.git"),
+            &ExpectedMeta::from(&project_meta()),
+        )
+        .unwrap();
         assert_eq!(opened.meta(), created.meta());
     }
 
     #[test]
     fn create_is_idempotent_and_validates_existing() {
         let (_state, layout) = temp_layout();
-        StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
+        StoreRepo::create(
+            &layout.lattice_root().join("store.git"),
+            project_meta(),
+            |_| Ok(()),
+        )
+        .unwrap();
         // Same identity: validate and reuse, never reinitialize.
-        StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| {
-            panic!("init must not run on an existing store")
-        })
+        StoreRepo::create(
+            &layout.lattice_root().join("store.git"),
+            project_meta(),
+            |_| panic!("init must not run on an existing store"),
+        )
         .unwrap();
         // Wrong kind: typed corruption, not reinitialization.
-        let err = StoreRepo::open_global(&layout, "sessions.git", "other-kind", 1).unwrap_err();
+        let err = StoreRepo::open(
+            &layout.lattice_root().join("store.git"),
+            &ExpectedMeta {
+                store_kind: "other-kind".into(),
+                ..ExpectedMeta::from(&project_meta())
+            },
+        )
+        .unwrap_err();
         assert!(matches!(err, StoreError::Corruption { .. }));
     }
 
     #[test]
     fn strict_open_missing_is_not_initialized() {
         let (_state, layout) = temp_layout();
-        let err = StoreRepo::open_global(&layout, "sessions.git", "session", 1).unwrap_err();
+        let err = StoreRepo::open(
+            &layout.lattice_root().join("store.git"),
+            &ExpectedMeta::from(&project_meta()),
+        )
+        .unwrap_err();
         assert!(matches!(err, StoreError::NotInitialized { .. }));
     }
 
@@ -1203,22 +946,20 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, StoreError::NotInitialized { .. }));
 
-        // The scope check itself, without addressing indirection: address the
-        // existing store by its real directory, but under a Global
-        // expectation that contradicts the recorded project scope.
+        // 同一仓库以错误的项目身份打开，必须拒绝。
         let real_path = layout.project_store(&key, "workspace-history.git");
         let err = StoreRepo::open(
             &real_path,
             &ExpectedMeta {
                 store_kind: "workspace-history".into(),
                 store_schema_version: 1,
-                scope: StoreScope::Global,
+                scope: StoreScope::Project { key: other },
             },
         )
         .unwrap_err();
         assert!(
             matches!(err, StoreError::Corruption { ref detail } if detail.contains("scope")),
-            "a recorded project scope must fail closed under a global expectation: {err:?}"
+            "a recorded project scope must fail closed under a different key: {err:?}"
         );
 
         // Scope forgery: hand-build a repo whose recorded key differs from
@@ -1248,23 +989,35 @@ mod tests {
         for _ in 0..8 {
             let layout = std::sync::Arc::clone(&layout);
             handles.push(std::thread::spawn(move || {
-                StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(()))
-                    .unwrap()
-                    .meta()
-                    .clone()
+                StoreRepo::create(
+                    &layout.lattice_root().join("store.git"),
+                    project_meta(),
+                    |_| Ok(()),
+                )
+                .unwrap()
+                .meta()
+                .clone()
             }));
         }
         let metas: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
-        assert!(metas.iter().all(|m| *m == global_meta()));
+        assert!(metas.iter().all(|m| *m == project_meta()));
         // Exactly one published repository, valid on strict open.
-        StoreRepo::open_global(&layout, "sessions.git", "session", 1).unwrap();
+        StoreRepo::open(
+            &layout.lattice_root().join("store.git"),
+            &ExpectedMeta::from(&project_meta()),
+        )
+        .unwrap();
     }
 
     #[test]
     fn cas_conflict_is_typed() {
         let (_state, layout) = temp_layout();
-        let repo =
-            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
+        let repo = StoreRepo::create(
+            &layout.lattice_root().join("store.git"),
+            project_meta(),
+            |_| Ok(()),
+        )
+        .unwrap();
         let blob = repo.write_blob(b"x").unwrap();
         repo.cas_ref(
             "refs/lattice/sessions/s/state",
@@ -1310,8 +1063,12 @@ mod tests {
     #[test]
     fn ref_cas_requires_object_barrier_before_publication() {
         let (_state, layout) = temp_layout();
-        let repo =
-            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
+        let repo = StoreRepo::create(
+            &layout.lattice_root().join("store.git"),
+            project_meta(),
+            |_| Ok(()),
+        )
+        .unwrap();
         let blob = repo.write_blob(b"barrier-before-cas").unwrap();
         fault::fail_object_fsync(true);
 
@@ -1338,8 +1095,12 @@ mod tests {
     #[test]
     fn successful_cas_ref_runs_one_object_barrier_and_one_ref_barrier() {
         let (_state, layout) = temp_layout();
-        let repo =
-            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
+        let repo = StoreRepo::create(
+            &layout.lattice_root().join("store.git"),
+            project_meta(),
+            |_| Ok(()),
+        )
+        .unwrap();
         let blob = repo.write_blob(b"barrier-counts").unwrap();
         fault::reset_barrier_counts();
         repo.cas_ref(
@@ -1378,8 +1139,12 @@ mod tests {
     #[test]
     fn ref_cas_reports_post_publication_barrier_failure() {
         let (_state, layout) = temp_layout();
-        let repo =
-            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
+        let repo = StoreRepo::create(
+            &layout.lattice_root().join("store.git"),
+            project_meta(),
+            |_| Ok(()),
+        )
+        .unwrap();
         let blob = repo.write_blob(b"barrier-after-cas").unwrap();
         fault::fail_ref_fsync(true);
 
@@ -1399,83 +1164,14 @@ mod tests {
     }
 
     #[test]
-    fn ref_transaction_requires_object_barrier_before_publication() {
-        let (_state, layout) = temp_layout();
-        let repo =
-            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
-        let blob = repo.write_blob(b"transaction-before-cas").unwrap();
-        fault::fail_object_fsync(true);
-
-        let err = repo
-            .ref_transaction(&[RefTxnEdit {
-                name: "refs/lattice/barrier/transaction-pre".to_string(),
-                expect: RefExpectation::MustNotExist,
-                new: Some(blob),
-            }])
-            .unwrap_err();
-        assert!(matches!(err, StoreError::Durability { .. }), "got {err:?}");
-        assert_eq!(
-            repo.ref_target("refs/lattice/barrier/transaction-pre")
-                .unwrap(),
-            None
-        );
-    }
-
-    #[test]
-    fn ref_transaction_reports_post_publication_barrier_failure() {
-        let (_state, layout) = temp_layout();
-        let repo =
-            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
-        let blob = repo.write_blob(b"transaction-after-cas").unwrap();
-        fault::fail_ref_fsync(true);
-
-        let err = repo
-            .ref_transaction(&[RefTxnEdit {
-                name: "refs/lattice/barrier/transaction-post".to_string(),
-                expect: RefExpectation::MustNotExist,
-                new: Some(blob),
-            }])
-            .unwrap_err();
-        assert!(matches!(err, StoreError::Durability { .. }), "got {err:?}");
-        assert_eq!(
-            repo.ref_target("refs/lattice/barrier/transaction-post")
-                .unwrap(),
-            Some(blob)
-        );
-    }
-
-    #[test]
-    fn retention_pin_barrier_fails_before_a_rewind_can_move_current() {
-        let (_state, layout) = temp_layout();
-        let repo =
-            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
-        let blob = repo.write_blob(b"retention-barrier").unwrap();
-        fault::fail_ref_fsync(true);
-
-        let err = repo.retain(blob).unwrap_err();
-        assert!(matches!(err, StoreError::Durability { .. }), "got {err:?}");
-        // The ref edit may already be visible in this process when its
-        // post-publication fsync fails; the caller receives an error and must
-        // not proceed to move `current`.
-        assert_eq!(
-            repo.ref_target(&format!("{RETAINED_REF_PREFIX}/{blob}"))
-                .unwrap(),
-            Some(blob)
-        );
-
-        repo.retain(blob).expect("retry after a failed pin barrier");
-        assert_eq!(
-            repo.ref_target(&format!("{RETAINED_REF_PREFIX}/{blob}"))
-                .unwrap(),
-            Some(blob)
-        );
-    }
-
-    #[test]
     fn refs_outside_lattice_namespace_are_rejected() {
         let (_state, layout) = temp_layout();
-        let repo =
-            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
+        let repo = StoreRepo::create(
+            &layout.lattice_root().join("store.git"),
+            project_meta(),
+            |_| Ok(()),
+        )
+        .unwrap();
         let blob = repo.write_blob(b"x").unwrap();
         let err = repo
             .cas_ref("refs/heads/main", blob, RefExpectation::MustNotExist, "t")
@@ -1487,76 +1183,17 @@ mod tests {
     }
 
     #[test]
-    fn retain_and_release_roundtrip() {
-        let (_state, layout) = temp_layout();
-        let repo =
-            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
-        let blob = repo.write_blob(b"pin me").unwrap();
-        repo.retain(blob).unwrap();
-        assert!(
-            repo.ref_target(&format!("{RETAINED_REF_PREFIX}/{blob}"))
-                .unwrap()
-                .is_some()
-        );
-        repo.retain(blob).unwrap(); // idempotent
-        repo.release(blob).unwrap();
-        assert!(
-            repo.ref_target(&format!("{RETAINED_REF_PREFIX}/{blob}"))
-                .unwrap()
-                .is_none()
-        );
-        repo.release(blob).unwrap(); // idempotent
-    }
-
-    #[test]
-    fn ref_transaction_is_atomic() {
-        let (_state, layout) = temp_layout();
-        let repo =
-            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
-        let blob = repo.write_blob(b"x").unwrap();
-        repo.ref_transaction(&[
-            RefTxnEdit {
-                name: "refs/lattice/a".into(),
-                expect: RefExpectation::MustNotExist,
-                new: Some(blob),
-            },
-            RefTxnEdit {
-                name: "refs/lattice/b".into(),
-                expect: RefExpectation::MustNotExist,
-                new: Some(blob),
-            },
-        ])
-        .unwrap();
-        // A conflicting edit aborts the whole transaction: `a` must not move
-        // (different value under MustNotExist) and `c` must not appear.
-        let other = repo.write_blob(b"y").unwrap();
-        let err = repo
-            .ref_transaction(&[
-                RefTxnEdit {
-                    name: "refs/lattice/a".into(),
-                    expect: RefExpectation::MustNotExist,
-                    new: Some(other),
-                },
-                RefTxnEdit {
-                    name: "refs/lattice/c".into(),
-                    expect: RefExpectation::MustNotExist,
-                    new: Some(blob),
-                },
-            ])
-            .unwrap_err();
-        assert!(matches!(err, StoreError::CasConflict { .. }));
-        assert_eq!(repo.ref_target("refs/lattice/a").unwrap(), Some(blob));
-        assert!(repo.ref_target("refs/lattice/c").unwrap().is_none());
-    }
-
-    #[test]
     fn fault_before_rename_leaves_no_target_and_cleans_temp() {
         let (_state, layout) = temp_layout();
         crate::fault::fail_before_rename(true);
-        let err = StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(()))
-            .unwrap_err();
+        let err = StoreRepo::create(
+            &layout.lattice_root().join("store.git"),
+            project_meta(),
+            |_| Ok(()),
+        )
+        .unwrap_err();
         assert!(matches!(err, StoreError::Durability { .. }));
-        let target = layout.lattice_root().join("sessions.git");
+        let target = layout.lattice_root().join("store.git");
         assert!(!target.exists());
         // No leftover temporaries.
         let leftovers: Vec<_> = std::fs::read_dir(layout.lattice_root())
@@ -1565,12 +1202,17 @@ mod tests {
             .filter(|e| {
                 e.file_name()
                     .to_string_lossy()
-                    .starts_with(".sessions.git.tmp-")
+                    .starts_with(".store.git.tmp-")
             })
             .collect();
         assert!(leftovers.is_empty(), "leftover temps: {leftovers:?}");
         // Retry succeeds.
-        StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
+        StoreRepo::create(
+            &layout.lattice_root().join("store.git"),
+            project_meta(),
+            |_| Ok(()),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1578,8 +1220,12 @@ mod tests {
         let (_state, layout) = temp_layout();
         crate::fault::reset_repo_create_trace();
         crate::fault::fail_parent_fsync(true);
-        let err = StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(()))
-            .unwrap_err();
+        let err = StoreRepo::create(
+            &layout.lattice_root().join("store.git"),
+            project_meta(),
+            |_| Ok(()),
+        )
+        .unwrap_err();
         assert!(matches!(err, StoreError::Durability { .. }));
         assert!(
             crate::fault::created_repo_paths().is_empty(),
@@ -1588,7 +1234,11 @@ mod tests {
         // The rename already published the repository; a later open validates
         // it. This is exactly why failure classification matters: the caller
         // must not retry blindly, but the store is not half-initialized.
-        StoreRepo::open_global(&layout, "sessions.git", "session", 1).unwrap();
+        StoreRepo::open(
+            &layout.lattice_root().join("store.git"),
+            &ExpectedMeta::from(&project_meta()),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1596,32 +1246,32 @@ mod tests {
         let (_state, layout) = temp_layout();
         let parent = layout.lattice_root();
         std::fs::create_dir_all(parent).unwrap();
-        let orphan = parent.join(".sessions.git.tmp-999999-0");
+        let orphan = parent.join(".store.git.tmp-999999-0");
         std::fs::create_dir_all(&orphan).unwrap();
         std::fs::write(orphan.join("partial"), b"dead creator").unwrap();
-        StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
+        StoreRepo::create(
+            &layout.lattice_root().join("store.git"),
+            project_meta(),
+            |_| Ok(()),
+        )
+        .unwrap();
         assert!(!orphan.exists());
-        StoreRepo::open_global(&layout, "sessions.git", "session", 1).unwrap();
-    }
-
-    #[test]
-    fn blob_id_predicts_write_blob_and_has_object_reports_existence() {
-        let (_state, layout) = temp_layout();
-        let repo =
-            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
-        let bytes = b"candidate bytes".to_vec();
-        let predicted = repo.blob_id(&bytes).unwrap();
-        assert!(!repo.has_object(predicted).unwrap(), "not written yet");
-        let written = repo.write_blob(&bytes).unwrap();
-        assert_eq!(predicted, written);
-        assert!(repo.has_object(predicted).unwrap());
+        StoreRepo::open(
+            &layout.lattice_root().join("store.git"),
+            &ExpectedMeta::from(&project_meta()),
+        )
+        .unwrap();
     }
 
     #[test]
     fn tree_spec_edits_and_rev_walk() {
         let (_state, layout) = temp_layout();
-        let repo =
-            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
+        let repo = StoreRepo::create(
+            &layout.lattice_root().join("store.git"),
+            project_meta(),
+            |_| Ok(()),
+        )
+        .unwrap();
         let blob = repo.write_blob(b"content").unwrap();
         let tree = repo
             .write_tree(TreeSpec::new().upsert("file.txt", EntryKind::Blob, blob))
@@ -1634,17 +1284,9 @@ mod tests {
         assert_eq!(repo.commit_parents(c2).unwrap(), vec![c1]);
         assert_eq!(repo.commit_tree(c1).unwrap(), tree);
         assert_eq!(
-            repo.read_tree_blob(c2, "two.txt").unwrap(),
-            b"content".to_vec()
+            repo.read_tree_path(tree2, "two.txt").unwrap(),
+            Some(b"content".to_vec())
         );
-        assert_eq!(
-            repo.read_tree_blob_bounded(c2, "two.txt", 7).unwrap(),
-            b"content"
-        );
-        assert!(matches!(
-            repo.read_tree_blob_bounded(c2, "two.txt", 6),
-            Err(StoreError::InvalidInput { .. })
-        ));
         let walk = repo.rev_walk(&[c2], &[]).unwrap();
         // Exactly c2 and its parent c1; the meta commit is not an ancestor.
         assert_eq!(walk.len(), 2);
@@ -1672,8 +1314,12 @@ mod tests {
     #[test]
     fn first_create_constructs_all_256_fanout_directories() {
         let (_state, layout) = temp_layout();
-        let repo =
-            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
+        let repo = StoreRepo::create(
+            &layout.lattice_root().join("store.git"),
+            project_meta(),
+            |_| Ok(()),
+        )
+        .unwrap();
         assert_complete_loose_object_fanout(repo.git_dir());
     }
 
@@ -1681,11 +1327,11 @@ mod tests {
     fn first_create_records_publication_and_reuse_does_not() {
         crate::fault::reset_repo_create_trace();
         let (_state, layout) = temp_layout();
-        let path = layout.lattice_root().join("sessions.git");
-        StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
+        let path = layout.lattice_root().join("store.git");
+        StoreRepo::create(&path, project_meta(), |_| Ok(())).unwrap();
         let created = crate::fault::created_repo_paths();
         assert_eq!(created, vec![path.clone()]);
-        StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| {
+        StoreRepo::create(&path, project_meta(), |_| {
             panic!("init must not run on an existing store")
         })
         .unwrap();
@@ -1694,15 +1340,23 @@ mod tests {
             vec![path],
             "reusing an existing store is not a first-create"
         );
-        StoreRepo::open_global(&layout, "sessions.git", "session", 1).unwrap();
+        StoreRepo::open(
+            &layout.lattice_root().join("store.git"),
+            &ExpectedMeta::from(&project_meta()),
+        )
+        .unwrap();
         assert_eq!(crate::fault::created_repo_paths().len(), 1);
     }
 
     #[test]
     fn strict_open_rejects_missing_fanout_and_does_not_repair() {
         let (_state, layout) = temp_layout();
-        let repo =
-            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
+        let repo = StoreRepo::create(
+            &layout.lattice_root().join("store.git"),
+            project_meta(),
+            |_| Ok(()),
+        )
+        .unwrap();
         let missing = repo.git_dir().join("objects").join("ff");
         if missing.exists() {
             std::fs::remove_dir_all(&missing).unwrap();
@@ -1710,7 +1364,11 @@ mod tests {
         assert!(!missing.exists());
         drop(repo);
 
-        let err = StoreRepo::open_global(&layout, "sessions.git", "session", 1).unwrap_err();
+        let err = StoreRepo::open(
+            &layout.lattice_root().join("store.git"),
+            &ExpectedMeta::from(&project_meta()),
+        )
+        .unwrap_err();
         assert!(
             matches!(err, StoreError::Corruption { ref detail } if detail.contains("objects/ff")),
             "missing fanout is corruption, not a repair invitation: {err:?}"
@@ -1724,8 +1382,12 @@ mod tests {
     #[test]
     fn strict_open_rejects_malformed_fanout_and_does_not_repair() {
         let (_state, layout) = temp_layout();
-        let repo =
-            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
+        let repo = StoreRepo::create(
+            &layout.lattice_root().join("store.git"),
+            project_meta(),
+            |_| Ok(()),
+        )
+        .unwrap();
         let fanout = repo.git_dir().join("objects").join("aa");
         if fanout.is_dir() {
             std::fs::remove_dir_all(&fanout).unwrap();
@@ -1733,7 +1395,11 @@ mod tests {
         std::fs::write(&fanout, b"not a directory").unwrap();
         drop(repo);
 
-        let err = StoreRepo::open_global(&layout, "sessions.git", "session", 1).unwrap_err();
+        let err = StoreRepo::open(
+            &layout.lattice_root().join("store.git"),
+            &ExpectedMeta::from(&project_meta()),
+        )
+        .unwrap_err();
         assert!(
             matches!(err, StoreError::Corruption { .. }),
             "a fanout file is corruption: {err:?}"
@@ -1748,8 +1414,12 @@ mod tests {
     #[test]
     fn object_file_barrier_failure_prevents_ref_cas() {
         let (_state, layout) = temp_layout();
-        let repo =
-            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
+        let repo = StoreRepo::create(
+            &layout.lattice_root().join("store.git"),
+            project_meta(),
+            |_| Ok(()),
+        )
+        .unwrap();
         let blob = repo.write_blob(b"object-file-barrier").unwrap();
         let object = crate::durability::loose_object_path(repo.git_dir(), blob);
         fault::reset_fsync_trace();
@@ -1776,8 +1446,12 @@ mod tests {
     #[test]
     fn fanout_directory_barrier_failure_prevents_ref_cas() {
         let (_state, layout) = temp_layout();
-        let repo =
-            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
+        let repo = StoreRepo::create(
+            &layout.lattice_root().join("store.git"),
+            project_meta(),
+            |_| Ok(()),
+        )
+        .unwrap();
         let blob = repo.write_blob(b"fanout-dir-barrier").unwrap();
         let fanout = crate::durability::loose_object_path(repo.git_dir(), blob)
             .parent()
@@ -1807,8 +1481,12 @@ mod tests {
     #[test]
     fn cas_ref_does_not_sync_top_level_objects_directory() {
         let (_state, layout) = temp_layout();
-        let repo =
-            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
+        let repo = StoreRepo::create(
+            &layout.lattice_root().join("store.git"),
+            project_meta(),
+            |_| Ok(()),
+        )
+        .unwrap();
         let blob = repo.write_blob(b"no-objects-dir-fsync").unwrap();
         let object = crate::durability::loose_object_path(repo.git_dir(), blob);
         let fanout = object.parent().unwrap().to_path_buf();
@@ -1839,8 +1517,12 @@ mod tests {
     #[test]
     fn ref_only_fsync_pending_does_not_sync_object_namespace() {
         let (_state, layout) = temp_layout();
-        let repo =
-            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
+        let repo = StoreRepo::create(
+            &layout.lattice_root().join("store.git"),
+            project_meta(),
+            |_| Ok(()),
+        )
+        .unwrap();
         let blob = repo.write_blob(b"ref-only-barrier").unwrap();
         repo.cas_ref(
             "refs/lattice/barrier/ref-only",
@@ -1865,8 +1547,12 @@ mod tests {
     #[test]
     fn exact_retry_after_post_cas_ref_barrier_failure() {
         let (_state, layout) = temp_layout();
-        let repo =
-            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
+        let repo = StoreRepo::create(
+            &layout.lattice_root().join("store.git"),
+            project_meta(),
+            |_| Ok(()),
+        )
+        .unwrap();
         let blob = repo.write_blob(b"exact-retry-bytes").unwrap();
         fault::fail_ref_fsync(true);
         let err = repo
@@ -1888,6 +1574,5 @@ mod tests {
             repo.ref_target("refs/lattice/barrier/exact-retry").unwrap(),
             Some(blob)
         );
-        assert_eq!(repo.read_blob(blob).unwrap(), b"exact-retry-bytes");
     }
 }

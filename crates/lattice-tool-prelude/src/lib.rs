@@ -43,10 +43,20 @@ pub use wit_bindgen;
 /// within the `bindings` module (where `generate!` ran), not the crate root.
 /// This macro is a thin, documented wrapper over that generated `export!`.
 ///
+/// The export is emitted only for `wasm32`. Guest crates are workspace
+/// members, so `cargo build --workspace` also links them as host cdylibs;
+/// the Component export names contain `:` (`lattice:tool/...`), which the
+/// host ELF version script cannot express and rust-lld rejects. The host
+/// build still type-checks the guest and runs its unit tests.
+///
 /// Host internals are not reachable from this crate.
 #[macro_export]
 macro_rules! export_tool {
     ($ty:ident) => {
+        #[cfg(target_arch = "wasm32")]
         export!($ty);
+        // Keeps the guest's `use crate::Tool;` in `bindings` used on host.
+        #[cfg(not(target_arch = "wasm32"))]
+        const _: ::core::marker::PhantomData<$ty> = ::core::marker::PhantomData;
     };
 }

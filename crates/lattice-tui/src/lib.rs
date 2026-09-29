@@ -15,7 +15,6 @@ use std::path::PathBuf;
 pub struct TuiOptions {
     pub session_id: Option<String>,
     pub agent: String,
-    pub project_branch: Option<String>,
     pub session_dir: PathBuf,
     pub agents_dir: PathBuf,
     pub project_root: PathBuf,

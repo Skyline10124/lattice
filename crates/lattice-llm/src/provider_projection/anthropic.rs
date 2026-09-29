@@ -33,7 +33,7 @@ use lattice_conversation::{
 };
 use serde_json::{Value, json};
 
-use super::{ProjectionError, ToolResultClosure, closure_content};
+use super::{ProjectionError, ToolResultClosure};
 
 fn limit_exceeded(interruption: lattice_conversation::AttemptInterruption) -> ProjectionError {
     ProjectionError::OutputLimitExceeded {
@@ -202,12 +202,6 @@ pub fn native_to_wire<S: ToolCallState>(
                 }
                 blocks.push(block);
             }
-            MessageSemantic::ToolResult { .. } => {
-                return Err(ProjectionError::UnsupportedPart {
-                    provider: ProviderOrigin::Anthropic,
-                    part_ordinal: ordinal,
-                });
-            }
         }
     }
     Ok(json!({
@@ -218,8 +212,8 @@ pub fn native_to_wire<S: ToolCallState>(
 
 /// One user turn whose content carries every `tool_result` block, in closure
 /// order. Blocks correlate to their `tool_use` through `tool_use_id`, so a
-/// closing call with no provider ID cannot be encoded. `Failed`/`Rejected`
-/// closures set the official `is_error` flag.
+/// closing call with no provider ID cannot be encoded. `Failed` closures set
+/// the official `is_error` flag.
 pub(crate) fn tool_result_messages(
     closures: &[ToolResultClosure],
 ) -> Result<Vec<Value>, ProjectionError> {
@@ -234,12 +228,11 @@ pub(crate) fn tool_result_messages(
         let mut block = json!({
             "type": "tool_result",
             "tool_use_id": tool_use_id,
-            "content": closure_content(closure.outcome, &closure.content),
+            "content": closure.content,
         });
         if matches!(
             closure.outcome,
             lattice_conversation::ToolResultOutcome::Failed
-                | lattice_conversation::ToolResultOutcome::Rejected
         ) {
             block["is_error"] = json!(true);
         }

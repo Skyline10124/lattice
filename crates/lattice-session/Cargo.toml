@@ -4,25 +4,29 @@ version.workspace = true
 license.workspace = true
 edition.workspace = true
 authors.workspace = true
-description = "LATTICE session graph and git-style conversation refs"
+description = "LATTICE 全局事务会话库"
 
 [dependencies]
-chrono = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+redb = { workspace = true }
+rustix = { workspace = true }
 lancet-protocol = { workspace = true }
 lattice-conversation = { workspace = true }
 lattice-store = { workspace = true }
-gix = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
+tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]
-lattice-store = { workspace = true, features = ["test-fault-injection"] }
 tempfile = { workspace = true }
 
 [features]
 default = []
-# Shared git fixture helpers for downstream crate tests.
+# 下游隔离测试使用的存储故障接缝与消息构造。
 test-utils = []
+test-support = ["dep:tempfile"]
+# 仅显式外部故障产物复用提交失败接缝，不启用其余测试构造器。
+test-crash-barriers = []

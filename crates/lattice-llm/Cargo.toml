@@ -21,6 +21,9 @@ bytes = { workspace = true }
 zeroize = { workspace = true }
 rustls-native-certs = "0.8.4"
 
+[features]
+test-utils = []
+
 [dev-dependencies]
 tokio = { workspace = true }
 # `logging.rs` only installs the subscriber; the stream-routing test needs a

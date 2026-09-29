@@ -10,10 +10,7 @@
 //!
 //! The history is read back with plain `gix` — a general Git library, not a
 //! product crate — so this scenario stays inside the harness boundary. The
-//! `TurnCommit.workspace_history_checkpoint` binding is deliberately *not* asserted
-//! here: #63 forbids new user-facing command surface, so that field is not
-//! observable through the CLI. It is covered at the library layer in
-//! `crates/lattice-api/tests/workspace_history_acceptance.rs`.
+//! 正常历史仍保存变更前后内容和 TurnId/InvocationId；会话退回不移动历史。
 
 mod support;
 
@@ -186,9 +183,7 @@ fn direct_workspace_history_records_installed_mutation() {
         ]),
     );
     let scenario_evidence = evidence(&world, &spec);
-    let send =
-        lattice_system_harness::SessionSendDriver::new(&driver, &world, &spec, "dl-wshist", "main")
-            .expect("session");
+    let send = lattice_system_harness::SessionSendDriver::new(&driver, &world, &spec, "dl-wshist");
 
     let turn = send.send("create the note").expect("turn");
     let captures = server.captured_requests();
@@ -200,7 +195,7 @@ fn direct_workspace_history_records_installed_mutation() {
             "create must succeed",
         )?;
         require(
-            turn.has_committed_completed(),
+            turn.has_completed(),
             format!("turn incomplete: {:?}", turn.type_sequence()),
         )?;
 
@@ -337,14 +332,8 @@ fn direct_workspace_history_records_nothing_for_a_failed_mutation() {
         ]),
     );
     let scenario_evidence = evidence(&world, &spec);
-    let send = lattice_system_harness::SessionSendDriver::new(
-        &driver,
-        &world,
-        &spec,
-        "dl-wshist-fail",
-        "main",
-    )
-    .expect("session");
+    let send =
+        lattice_system_harness::SessionSendDriver::new(&driver, &world, &spec, "dl-wshist-fail");
 
     let turn = send.send("edit with a stale hash").expect("turn");
     let captures = server.captured_requests();

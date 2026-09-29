@@ -21,11 +21,6 @@ name = "direct_crash_barriers"
 path = "tests/direct_crash_barriers.rs"
 required-features = ["crash-barriers"]
 
-[[test]]
-name = "direct_rewind_crash_barriers"
-path = "tests/direct_rewind_crash_barriers.rs"
-required-features = ["crash-barriers"]
-
 [dependencies]
 # General hashing library (not a product crate): scenarios need the same
 # Local Revision string the product computes to script `mutate.edit`

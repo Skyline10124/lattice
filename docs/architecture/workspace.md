@@ -9,8 +9,8 @@ status: active
 
 ## 目的与范围
 
-本合同规定 LATTICE 对本地工作区的观察、文件变更、私有变更历史及显式 Rewind 的职责、接口和行为边界。
-维护归属为 `lancet-runtime` 的工作区与历史模块。[Cell 合同](cell.md#准入与操作授权)维护能力准入与操作授权，[会话合同](session.md)维护 Turn 日志与重开协调，[存储合同](storage.md)维护私有库布局、锁和发布机制；本文规定工作区操作如何使用这些机制。工具组成与执行入口见 [LANCET 合同](lancet.md)。
+本合同规定 LATTICE 对本地工作区的观察、文件变更与私有变更历史的职责、接口和行为边界。
+维护归属为 `lancet-runtime` 的工作区与历史模块。[Cell 合同](cell.md#准入与操作授权)维护能力准入与操作授权，[会话合同](session.md)维护 Turn 记录、自动关闭与会话退回，[存储合同](storage.md)维护私有库布局、锁和发布机制；本文规定工作区操作如何使用这些机制。工具组成与执行入口见 [LANCET 合同](lancet.md)。
 
 本文承接范围及仍需核验的实现问题见文末。
 
@@ -22,19 +22,18 @@ status: active
 - **Policy-Visible Workspace** 是读取策略允许观察的当前路径集合，由本地状态过滤而来，不复制文件，也不建立跨调用快照。
 - **Local Revision** 标识一次观察所依据的文件内容。编辑携带该内容身份作为 Mutation Precondition；创建的前提是目标仍不存在。
 - **Workspace History** 保存 LATTICE 已安装变更的前后内容与关联身份，以私有 Git 对象和引用表达。记录范围限于 LATTICE 触及的路径，不收集整个项目的外部修改。
-- **Session History** 保存会话及工具交互。已完成 Turn 通过项目级 `WorkspaceHistoryCheckpoint` 与工作区历史关联，普通会话指针移动不恢复本地文件。
+- **会话树**保存会话及工具交互。会话与工作区历史的关联由历史一侧承载：每条变更记录带 `TurnId` 与 `InvocationId`，Turn 记录不保存工作区历史位置。会话退回只移动会话当前位置，不恢复本地文件。
 
-术语入口为[领域术语表](../reference/glossary.md)，会话历史的精确模型由[会话合同](session.md#会话turn-与历史)承接；checkpoint 的项目范围与完成边界见[Turn checkpoint](#turn-checkpoint)。
+术语入口为[领域术语表](../reference/glossary.md)，会话树的精确模型由[会话合同](session.md#会话turn-与会话树)承接。
 
 ### 组件接口
 
 | 组件 | 工作区相关职责 |
 | --- | --- |
 | `lancet-authority` | 路径可见性、系统路径排除、Guard 与 Cell 策略判断 |
-| `lancet-runtime` | Tool Host 工作区接口、具体路径解析、观察、安装、历史记录、恢复执行与 Rewind 审计 |
-| `lancet-api` | 组合运行时，提供工作区 Rewind 的规划与执行接口，并验证所持操作锁与目标存储的绑定 |
-| `lattice-api` | 将 profile 转为策略；协调 Turn checkpoint 与显式 Rewind 的会话侧操作 |
-| `lattice-session` | 保存 Turn checkpoint，执行会话状态和引用事务 |
+| `lancet-runtime` | Tool Host 工作区接口、具体路径解析、观察、安装与历史记录 |
+| `lancet-api` | 组合运行时，提供工作区历史库定位 |
+| `lattice-api` | 将 profile 转为策略 |
 | `lattice-store` | 提供领域中立的私有 Git 对象、引用、锁与持久化机制 |
 
 生产 Tool 通过 Host 的结构化接口访问工作区。输入数据不解释为 shell 语法；Tool 不接收可绕过策略的文件系统或存储句柄。
@@ -50,19 +49,16 @@ flowchart LR
     W -->|文件操作| L["Local Workspace"]
     H -->|安装后记录| R["WorkspaceHistory"]
     R -->|对象与引用事务| S["lattice-store"]
-    C["lattice-api 协调层"] -->|读取 checkpoint| R
-    C -->|提交 Turn 与 checkpoint| G["lattice-session"]
 ```
 
 ### 私有存储与数据关系
 
-工作区历史使用[私有状态布局](storage.md#私有状态根)中的项目级 `workspace-history.git`，不修改用户 Git 的对象、引用、索引或 HEAD。生产路径遵循[严格打开与首次创建](storage.md#创建与严格打开)，由工作区领域继续核验历史事实，不把缺失存储当成空历史。
+工作区历史使用[私有状态布局](storage.md#私有状态根)中的项目级 `workspace-history.git`，不修改用户 Git 的对象、引用、索引或 HEAD。生产路径遵循[严格打开](storage.md#打开)与[首次创建](storage.md#仓库首次创建)，由工作区领域继续核验历史事实，不把缺失存储当成空历史。
 
 - Git blob 保存内容，tree 表达相关路径的前后状态，commit 表达顺序及父子关系，`refs/lattice/workspace-history/current` 指向当前记录的变更。
 - 变更记录关联 `InvocationId`、`TurnId`、效果序号、方法、路径及前后内容身份。关联信息不决定 Invocation 的终态。
 - 父 tree 必须与安装器实际观察到的变更前内容相符。当前记录机制在需要时插入 baseline commit，使外部修改后的真实前态也可恢复；baseline 不作为一次 Tool 变更。
-- Rewind 移走当前 tip 前保留被放弃的历史，使原有 OID 继续可解析。恢复通过移动引用选择历史状态，不追加补偿变更 commit。
-- Rewind 审计使用同一私有库中的独立追加链，记录路径、内容身份、OID 和处理结果，不写文件正文；它与 Workspace History 的变更链、InvocationStore 分别承担不同职责。
+- 历史只追加：`current` 只随新记录的变更前进，已记录的提交始终是 `current` 的祖先。按 `TurnId` 或 `InvocationId` 可以从 `current` 向前找到对应的变更提交。当前不提供恢复文件的操作；历史保留前后内容与关联身份，将来另行裁决的恢复设计从中推导位置。
 
 ## 路径与观察
 
@@ -97,7 +93,7 @@ Host 负责计算可见内容、内容身份、遍历限制和截断结果，并
 `mutate.create` 安装一个新文件，目标存在时拒绝覆盖；`mutate.edit` 对已有文件生成最终内容，并携带所依据的内容身份。
 Host 负责写入大小限制、路径与策略核验、取消检查及最终 Mutation Precondition 核验。
 语义编辑使用 replace/insert 和可选的 occurrence 选择。匹配缺失、歧义及指定 occurrence 不存在保留可供重新规划的诊断；空匹配文本、非法 occurrence 属于输入验证错误。操作成功应用后依次拒绝 no-op、trailing newline 状态改变，以及向已有空文件插入内容；传输格式变化不得丢失这些行为或诊断。共享语义与参数用法见[工具开发指南](../development/tool-development.md#语义编辑)。Host 在安装前执行 WriteLimits 字节限制，不信任 guest 已校验的声明。
-本地文件变更模块统一负责内容准备、目标安装或删除、持久化、辅助资源清理及效果报告，供 Host 变更与 Rewind 共用。历史记录与会话协调由调用方所属领域负责，依据模块返回的实际效果继续处理。
+本地文件变更模块统一负责内容准备、目标安装、持久化、辅助资源清理及效果报告，供 Host 变更使用。历史记录与会话协调由调用方所属领域负责，依据模块返回的实际效果继续处理。
 
 正常路径依次为：
 
@@ -121,8 +117,6 @@ Host 负责写入大小限制、路径与策略核验、取消检查及最终 Mu
 - 清理失败保留原始错误，并报告已知残留和无法确认的清理结果。
 - 已安装的目标内容不作为辅助资源回滚。后续恢复须重新核验当前状态，避免覆盖外部写入。
 
-Rewind 撤销文件创建时按同一规则尽力清理原操作新建的目录；历史须保留辨认这些目录所需的来源信息。无法核验归属或安全清理条件时保留目录，并报告原因。
-
 ### 失败与后续处理
 
 | 阶段或情形 | 文件与历史事实 | 处理边界 |
@@ -134,11 +128,11 @@ Rewind 撤销文件创建时按同一规则尽力清理原操作新建的目录�
 | 安装后历史发布失败 | 本地安装事实仍成立，历史发布未能确认成功 | 返回结果不确定的错误及已观察效果，不通过扫描历史猜测成功终态 |
 
 当前 Host 将历史错误映射为 `OutcomeIndeterminate`；父目录同步失败且历史记录成功时返回 `ExecutionFailed`。
-这些错误属于工作区 Host 层；[调用结果](lancet.md#结果证据与失败处理)与[重开协调](session.md#重开取消与未完成状态)分别决定 Invocation 和 Turn 的关闭方式。
+这些错误属于工作区 Host 层；[调用结果](lancet.md#结果证据与失败处理)与[会话合同](session.md#重开取消与未完成状态)分别决定调用槽位和 Turn 的关闭方式。
 
 调用方不得仅凭错误、超时或取消推定文件未改变。安装后的失败需要核验实际文件与持久引用；本文不将重新执行 Tool 作为补救方式。
 
-## 并发与 Turn 完成边界
+## 并发边界
 
 ### 操作锁
 
@@ -146,56 +140,10 @@ Rewind 撤销文件创建时按同一规则尽力清理原操作新建的目录�
 
 - 观察持共享锁，覆盖一次有界操作。
 - 变更在内容身份与前提核验前取得独占锁，持有至安装和历史发布结束。
-- Rewind 由协调层持独占锁，覆盖规划、预检、恢复、历史引用移动、会话引用尝试和审计追加。下层验证持锁凭据，不重复获取同一锁。
-- Turn 完成时持共享锁，覆盖读取当前历史 checkpoint 至会话 Turn 与引用事务完成。
 
-持锁凭据、获取顺序及互斥规则遵循[存储锁机制](storage.md#锁与并发语义)。会话绑定操作先按[会话锁范围](session.md#操作锁与发布锁)取得 SessionExecutionLock，再按上述期限持有项目锁。
+持锁凭据、获取顺序及互斥规则遵循[存储锁机制](storage.md#锁与并发语义)。会话绑定操作先按[会话锁范围](session.md#操作锁)取得 SessionExecutionLock，再按上述期限持有项目锁。关闭 Turn（含自动关闭）不取得该锁，也不访问工作区历史库。
 
 非 LATTICE 写者不受该操作锁控制。外部进程仍可能在最后一次前提核验与安装之间或安装后写入；原子安装和内容身份核验不提供外部写者串行化，也不提供整个 Turn 的快照隔离。
-
-### Turn checkpoint
-
-`WorkspaceHistoryCheckpoint = Empty | Oid(ObjectId)` 标识项目全局工作区历史的位置。`Empty` 仅表示权威历史引用不存在，`Oid` 指向已记录历史；读取失败或非法 OID 不转为 `Empty`。
-每个完成的 Turn 都在[最终发布边界](session.md#turn-最终发布)读取并保存该值，即使本 Turn 未写文件。checkpoint 可以包含同一项目其他 Session 已记录的变更。
-
-共享操作锁保证 checkpoint 读取与 Turn 发布之间没有新的 LATTICE 变更插入。
-它不冻结外部文件修改，也不把 checkpoint 变成所有本地文件的快照。
-
-## 显式 Rewind
-
-### 范围与流程
-
-用户选择当前会话可达的目标 Turn。协调层核验会话、项目绑定及目标 checkpoint，然后从项目当前历史向目标 checkpoint 规划全局变更后缀。
-该范围可能包含其他 Session 的后续变更，不按当前 Session 过滤。会话侧只移动所选择会话的引用。
-
-1. 持会话执行锁核对目标属于当前会话且从当前 HEAD 可达。无法确定目标历史身份时拒绝，不猜测为空历史。
-2. 取得项目独占操作锁，验证规划覆盖反向范围中的全部变更路径。
-3. 对所有受影响路径预检，将当前内容或路径状态与历史记录的后态比较。
-4. 全部预检通过后，经安全路径解析与安装接口逐路径恢复前态，原先不存在的文件恢复为不存在。
-5. 文件恢复成功后保留被放弃的历史 tip，并移动工作区历史引用。
-6. 保留被放弃的会话 head，移动所选会话引用，追加本次 Rewind 审计结果。
-
-完整成功意味着恢复、工作区历史引用、所选会话引用和成功审计均已完成。
-无关外部修改保留；对受影响路径检测到分歧时，不强制覆盖或跳过冲突路径。
-
-### 冲突、部分完成与恢复
-
-| 情形 | 已知状态与处理 |
-| --- | --- |
-| 目标无效、项目绑定不符或规划不完整 | 在恢复前拒绝 |
-| 预检发现内容变化、缺失、类型变化或无法读取 | 返回路径级冲突；本地恢复不执行，工作区历史 `current` 和会话引用不移动，可追加冲突审计 |
-| 逐路径恢复中发生 I/O 失败 | 可能已有路径恢复；停止后续恢复，报告和审计保留已知部分状态 |
-| 恢复完成，工作区历史引用发布未确认持久成功 | 文件已经恢复，会话引用移动尚未执行；报告失败，引用现状须重新核验 |
-| 工作区侧完成，会话引用发布失败 | 文件和工作区历史已经改变；报告会话侧失败并记录已知状态，不将其当成完整成功 |
-| 审计追加失败 | 前序动作可能已完成；返回审计发布失败和可核验的部分状态，不盲目重新执行恢复 |
-
-Rewind 按共用文件变更模块报告的实际效果记录进度与审计。失败路径本身已发生的安装或删除也须记录，持久性未确认和清理残留分别保留，不仅收集返回成功的路径。
-
-冲突拒绝发生在全路径预检阶段；恢复阶段的逐路径安装不构成多文件事务。
-项目操作锁只排除其他遵循该锁的 LATTICE 操作，不能消除外部写者在预检后修改文件的竞争窗口。
-
-当前协调实现可在两个权威引用均已指向目标时核验最近成功审计，重放原结果或补充无操作完成记录，不重复恢复文件。
-这不是覆盖任意崩溃位置的恢复协议。独立 Rewind 不使用 PendingTurn 作为崩溃日志；扩展为新的持久恢复协议需要另行裁决。
 
 ## 验证与承接
 
@@ -207,18 +155,18 @@ Rewind 按共用文件变更模块报告的实际效果记录进度与审计。�
 | --- | --- |
 | 可见性、观察限制与 Host 证据 | `cargo test -p lancet-runtime --lib host_workspace::` |
 | 前提、安装、历史错误及安装后同步失败 | `cargo test -p lancet-runtime --lib host_mutate::` |
-| 私有历史及恢复规划 | `cargo test -p lancet-runtime --lib history::` |
-| Turn 与项目历史关联 | `cargo test -p lattice-api --test workspace_history_acceptance` |
-| 显式恢复、冲突、引用及审计边界 | `cargo test -p lattice-api --test rewind_acceptance` |
+| 私有历史记录与读取 | `cargo test -p lancet-runtime --lib history::` |
+| 变更记录与 Turn/调用身份的关联 | `cargo test -p lattice-api --test workspace_history_acceptance` |
 
 验证分层与[被测二进制要求](../development/testing.md#被测二进制)由测试工程合同维护，运行配方见[验证操作指南](../development/validation-guide.md)。测试结果与未验证范围记录在对应任务中。
 
 ### 来源与承接范围
 
-- [领域术语表](../reference/glossary.md)：保留工作区、内容身份、前提、历史及 Rewind 的简短定义与关键区别，完整规则由本文维护；无变更 Turn 的 OID 词条已与本文的项目全局 checkpoint 规则同步。
+- [领域术语表](../reference/glossary.md)：保留工作区、内容身份、前提及历史的简短定义与关键区别，完整规则由本文维护。
 - 观察、变更、语义编辑与工作区历史由本文维护；操作资料见[工具开发指南](../development/tool-development.md)。
-- [ADR 0003](../adr/0003-lancet-operates-directly-on-local-workspace.md)：Direct-Local、路径策略、单路径安装与 Rewind 的设计依据；组件归属结合 [ADR 0004](../adr/0004-build-closed-wasm-tool-catalog.md) 的修订读取。
-- [ADR 0005](../adr/0005-durable-turn-invocation-and-private-git-stores.md)：项目私有存储、锁序、全局 checkpoint、历史与 Invocation 终态的关系及 Rewind 范围。
+- [ADR 0003](../adr/0003-lancet-operates-directly-on-local-workspace.md)：Direct-Local、路径策略与单路径安装的设计依据；组件归属结合 [ADR 0004](../adr/0004-build-closed-wasm-tool-catalog.md) 的修订读取。其中的文件 Rewind 已由 ADR 0006 取消。
+- [ADR 0005](../adr/0005-durable-turn-invocation-and-private-git-stores.md)：项目工作区历史库与锁序的依据；会话、调用存储、全局 checkpoint 与 Rewind 部分已由 ADR 0006 取代。
+- [ADR 0006](../adr/0006-tree-session-and-global-redb-store.md)：会话退回只移动对话位置、取消文件 Rewind 与 Turn checkpoint 的依据。文件恢复如需提供，另行裁决。
 - [lancet-runtime 局部指引](../../crates/lancet-runtime/AGENTS.md)、[lancet-api 局部指引](../../crates/lancet-api/AGENTS.md)、[lattice-api 局部指引](../../crates/lattice-api/AGENTS.md)：现有职责、操作锁与安装后失败要求。
 
 现行规则以本文及对应合同为准，旧实施计划与根记录保留为历史证据，局部入口另行整理。
@@ -226,8 +174,7 @@ Rewind 按共用文件变更模块报告的实际效果记录进度与审计。�
 ### 实现与验证待办
 
 - 本文的统一文件变更职责、效果报告与辅助资源清理要求属于本轮设计补充，尚未完成实现与故障验证。需核验父目录来源记录、清理安全条件及残留报告；进程突然退出后的残留发现与处理边界仍待确认。
-- 现有 Rewind 恢复安装在名称替换后同步失败时丢失已安装信息，失败路径未加入已恢复列表；删除路径在 `unlinkat` 后直接返回。需按效果报告要求修正接口衔接，并确认安装、删除及新建目录的持久化范围与验证方式。
-- 部分恢复、引用已发布但持久性未确认、安装后历史失败等情形，仍需核验诊断与后续处理的完整边界。
+- 安装后历史失败、引用已发布但持久性未确认等情形，仍需核验诊断与后续处理的完整边界。
 - 历史安全记录中的观察路径校验与打开间竞争、已 pin 父目录被并发移出工作区、grep 返回载荷聚合限制及 symlink 列举差异，尚未在本轮逐项复验。静态 symlink 拒绝或 pinned dirfd 不等于 `openat2(RESOLVE_BENEATH)` 的原子包含关系保证；不得以相同结论代替验证，也不另建第二套路径解析权威。涉及不可信共存目录或安全敏感文件时，须先核验这些边界。
 
-上述核对涉及 [本地安装](../../crates/lancet-runtime/src/workspace/local.rs)、[Host 变更](../../crates/lancet-runtime/src/host_mutate.rs)、[恢复执行](../../crates/lancet-runtime/src/workspace/rewind.rs)及[会话协调](../../crates/lattice-api/src/rewind.rs)。源码用于核验实现事实，不自行改变规范要求。
+上述核对涉及[本地安装](../../crates/lancet-runtime/src/workspace/local.rs)与[Host 变更](../../crates/lancet-runtime/src/host_mutate.rs)。源码用于核验实现事实，不自行改变规范要求。

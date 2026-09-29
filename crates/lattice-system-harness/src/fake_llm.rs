@@ -61,6 +61,8 @@ pub struct CapturedRequest {
 /// The kind of SSE script the fake server returns for a request.
 #[derive(Debug, Clone)]
 pub enum SseScript {
+    /// 手工编排的合法 OpenAI chunks，保持跨类型到达顺序；结尾自动添加 DONE。
+    Chunks { chunks: Vec<Value> },
     /// Plain assistant text. Emits one or more `delta.content` chunks then a
     /// terminal chunk with `finish_reason: "stop"` and `usage`, then
     /// `data: [DONE]`.
@@ -980,6 +982,12 @@ fn parse_chat_completions_body(body: &str) -> CapturedRequest {
 fn render_script(script: &SseScript) -> String {
     let mut out = String::new();
     match script {
+        SseScript::Chunks { chunks } => {
+            for chunk in chunks {
+                out.push_str(&format!("data: {chunk}\n\n"));
+            }
+            out.push_str("data: [DONE]\n\n");
+        }
         SseScript::PlainText {
             chunks,
             finish_reason,
@@ -1183,6 +1191,21 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+
+    #[test]
+    fn ordered_chunks_preserve_interleaved_frames() {
+        let chunks = vec![
+            serde_json::json!({"choices":[{"index":0,"delta":{"content":"前"}}]}),
+            serde_json::json!({"choices":[{"index":0,"delta":{"reasoning_content":"思"}}]}),
+            serde_json::json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}),
+        ];
+        let expected = chunks
+            .iter()
+            .map(|c| format!("data: {c}\n\n"))
+            .collect::<String>()
+            + "data: [DONE]\n\n";
+        assert_eq!(render_script(&SseScript::Chunks { chunks }), expected);
+    }
 
     /// Render a plain-text script and verify the exact SSE shape the product
     /// framer expects: one `data: {chunk}\n\n` per content chunk, a terminal

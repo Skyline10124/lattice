@@ -1,7 +1,7 @@
 # LATTICE
 
 LATTICE 是用 Rust 编写、围绕会话组织的大模型运行时，提供命令行和终端交互界面。
-会话历史使用 Git 存储，模型通过 LANCET 调用结构化工具，在宿主策略控制下读取和修改本地项目。
+模型通过 LANCET 调用结构化工具，在宿主策略控制下读取和修改本地项目。
 
 > **警告**：项目处于快速迭代阶段，接口、配置和实现仍会有破坏性调整，请勿用于生产环境。
 >
@@ -9,7 +9,7 @@ LATTICE 是用 Rust 编写、围绕会话组织的大模型运行时，提供命
 
 ## 当前能力
 
-- **会话管理**：保存对话与工具调用记录，支持会话重开、历史查看和分支操作。
+- **会话管理**：保存对话与工具调用记录，支持重连、树形历史查看和退回节点后分叉继续。
 - **项目操作**：通过结构化工具读取、搜索、创建和编辑文件，也可按配置启用网页获取和待办维护。
 - **调用审计**：记录工具调用的执行状态与证据，提供独立的操作员查询入口。
 
@@ -81,17 +81,17 @@ export ANTHROPIC_API_KEY="替换为你的密钥"
 
 ### 3. 启动终端界面
 
-保持在目标项目根目录，创建会话并进入 TUI：
+保持在目标项目根目录，进入 TUI：
 
 ```sh
-lattice tui --agent reader --project-branch main
+lattice tui --agent reader
 ```
 
-将 `main` 替换为项目的目标分支名。首次创建 TUI 会话需要提供
-`--project-branch`；打开已有会话时使用会话 ID：
+TUI 在首次提交被接受时创建 Session，启动界面本身不创建。打开已有会话时使用会话 ID：
 
 ```sh
-lattice tui <session_id>
+SESSION_ID="替换为已保存的会话 ID"
+lattice tui "$SESSION_ID"
 ```
 
 进入界面后，可以输入：
@@ -103,28 +103,37 @@ lattice tui <session_id>
 
 ## 后台执行与重连
 
-LATTICE 提供本地后台执行与重连入口。Session 命令与 TUI 首次使用时按需启动同用户、同状态根的后台。一次已接受任务称为 Turn；接受后关闭终端，后台继续执行。
+Session 命令和 TUI 首次使用时会自动启动本地后台。请求被接受后，即使关闭终端，任务也会在后台继续执行。
 
-提交时记下 SessionId、TurnId、原输入和工作区，重连用这些身份找回任务。TUI 中空缓冲的 Ctrl+D 或 `/quit` 只退出；运行时 Esc/Ctrl+C 请求取消。重新打开 `lattice tui <session_id>` 读取已保存对话，界面内 `/reconnect` 重新连接。
+TUI 中，输入框为空时按 Ctrl+D 或输入 `/quit` 只退出界面；任务运行时按 Esc 或 Ctrl+C 请求取消。之后用 `lattice tui <session_id>` 重新打开会话，在界面内输入 `/reconnect` 重新连接。
 
-按保存的身份选择操作：
+命令行提交被接受后会输出会话 ID 与本次任务（Turn）的 ID。用它们查询、继续观察或取消任务，或查看、停止后台：
 
 ```text
-lattice session turn <session_id> <turn_id>
-lattice session turn <session_id> <turn_id> --follow
+lattice session turn <turn_id>
+lattice session turn <turn_id> --follow
 lattice session cancel <session_id> <turn_id>
 lattice daemon status
 lattice daemon stop
 ```
 
-`<session_id>` 与 `<turn_id>` 替换为保存的身份。查询得到 `pending` 时，任务尚未关闭；后台仍运行可继续观察。后台崩溃遗留的任务，会在该会话下一次发送新消息，或执行 checkout、branch、reset、set-agent、rewind 之前自动关闭：关闭只依据已保存的进度，不再请求模型、不重跑工具；随后正常执行这次操作。观察缺口会提示并重新读取已保存对话，缺失的旧流式文字不逐 token 补播。
-
-结果可读但接受或完成确认未知时，保留原 TurnId，按[操作指南](docs/development/validation-guide.md#后台与重连操作)查询或显式重试原请求。指南也说明取消、后台停止、退出码及当前重连限制；这些入口尚不代表本工作分支已通过产品验收。
+接受回执未知时如何找回、取消与崩溃遗留任务的处理、退出码等，见[后台与重连操作](docs/development/validation-guide.md#后台与重连操作)。
 
 ## 命令行入口
 
-不使用 TUI 时，可以通过 `session` 子命令创建会话、发送消息和查看历史。
-具体参数以各命令的帮助为准：
+首次发送不带 `--session`，必须用 `--agent` 指定 Agent：
+
+```sh
+lattice session send "概括项目用途。" --agent reader
+```
+
+后续发送改用 `--session <session_id>`。顶层 `lattice run` 与 `session send` 相同。
+
+`lattice session rewind <session_id> <节点序号>` 把当前位置移到会话树中的某个节点，之后的提交从那里分叉继续；原分支保留，文件不回退。节点序号用 `lattice session log <session_id>` 查看，用法见[会话退回与分叉](docs/development/validation-guide.md#会话退回与分叉)。
+
+从旧版本升级时，旧的 `sessions.git` / `invocations.git` 状态不会迁移，打开时会被拒绝并列出路径，处理方式见[开发状态诊断与重建边界](docs/development/tool-development.md#开发状态诊断与重建边界)。
+
+具体参数以各命令帮助为准：
 
 ```sh
 # 会话管理

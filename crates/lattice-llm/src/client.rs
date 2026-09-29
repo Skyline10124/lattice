@@ -220,15 +220,13 @@ async fn stream_sse_response(response: reqwest::Response, provider: ProviderKind
                     if state.buffer.len() > sse::MAX_SSE_BUFFER_SIZE {
                         state.finished = true;
                         return Some((
-                            LlmEvent::Error {
-                                message: LlmError::ProtocolLimit {
-                                    message: format!(
-                                        "SSE in-flight buffer size exceeded: {} bytes",
-                                        state.buffer.len()
-                                    ),
-                                }
-                                .to_string(),
-                            },
+                            LlmEvent::error(
+                                format!(
+                                    "SSE in-flight buffer size exceeded: {} bytes",
+                                    state.buffer.len()
+                                ),
+                                false,
+                            ),
                             state,
                         ));
                     }
@@ -240,11 +238,9 @@ async fn stream_sse_response(response: reqwest::Response, provider: ProviderKind
                 Some(Err(e)) => {
                     state.finished = true;
                     return Some((
-                        LlmEvent::Error {
-                            message: LlmError::StreamRead {
-                                message: e.to_string(),
-                            }
-                            .to_string(),
+                        {
+                            let error = llm_error_from_request(e);
+                            LlmEvent::error(error.to_string(), error.retryable())
                         },
                         state,
                     ));
@@ -293,12 +289,10 @@ fn drain_complete_events(state: &mut SseStreamState) {
             continue;
         }
         if state.event_count >= sse::MAX_SSE_EVENTS {
-            state.pending.push_back(LlmEvent::Error {
-                message: LlmError::ProtocolLimit {
-                    message: format!("SSE event count exceeded: {}", sse::MAX_SSE_EVENTS),
-                }
-                .to_string(),
-            });
+            state.pending.push_back(LlmEvent::error(
+                format!("SSE event count exceeded: {}", sse::MAX_SSE_EVENTS),
+                false,
+            ));
             state.finished = true;
             return;
         }
@@ -417,13 +411,11 @@ fn llm_error_from_request(err: reqwest::Error) -> LlmError {
 
 fn summarize_provider_body(body: &str) -> String {
     const MAX_PROVIDER_ERROR_CHARS: usize = 2048;
-    let mut summary = body
-        .chars()
-        .take(MAX_PROVIDER_ERROR_CHARS)
-        .collect::<String>();
-    if body.chars().count() > MAX_PROVIDER_ERROR_CHARS {
-        summary.push_str("...");
+    if body.chars().count() <= MAX_PROVIDER_ERROR_CHARS {
+        return body.to_owned();
     }
+    let mut summary: String = body.chars().take(MAX_PROVIDER_ERROR_CHARS - 3).collect();
+    summary.push_str("...");
     summary
 }
 
@@ -527,9 +519,11 @@ pub(crate) async fn dispatch_frozen(
     let api_key = connection.api_key.clone();
     // provider 的流内错误同样会进入公开诊断和 Turn 日志，必须在越过适配边界前脱敏。
     Ok(Box::pin(stream.map(move |event| match event {
-        LlmEvent::Error { message } => LlmEvent::Error {
-            message: message.replace(api_key.as_str(), "[REDACTED]"),
-        },
+        LlmEvent::Error { mut failure } => {
+            failure.message =
+                summarize_provider_body(&failure.message.replace(api_key.as_str(), "[REDACTED]"));
+            LlmEvent::Error { failure }
+        }
         other => other,
     })))
 }
@@ -538,6 +532,13 @@ pub(crate) async fn dispatch_frozen(
 mod tests {
     use super::*;
     use crate::endpoints::{ANTHROPIC_BASE_URL, GEMINI_BASE_URL, OPENAI_BASE_URL};
+
+    #[test]
+    fn provider_diagnostic_bound_includes_ellipsis() {
+        let text = summarize_provider_body(&"界".repeat(2049));
+        assert_eq!(text.chars().count(), 2048);
+        assert!(text.ends_with("..."));
+    }
     use crate::router::{CredentialStatus, ModelRouter};
     use crate::test_env::with_env_vars;
     use crate::types::ModelTarget;
@@ -786,7 +787,7 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            matches!(events.as_slice(), [LlmEvent::Error { message }] if message == "API error: [REDACTED] rejected")
+            matches!(events.as_slice(), [LlmEvent::Error { failure }] if failure.message == "API error: [REDACTED] rejected" && !failure.retryable)
         );
         server.await.unwrap();
     }

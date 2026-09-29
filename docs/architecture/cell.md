@@ -9,9 +9,9 @@ status: active
 
 ## 目的与范围
 
-本合同规定 Tool 的 Cell 模型、能力准入、Host 操作授权、结果计量和证据语义。`lancet-protocol` 维护数据契约，`lancet-runtime` 执行准入、授权与记录，`lancet-authority` 提供领域策略，`lancet-audit` 负责持久证据及操作员读取。
+本合同规定 Tool 的 Cell 模型、能力准入、Host 操作授权、结果计量和证据语义。`lancet-protocol` 维护数据契约，`lancet-runtime` 执行准入、授权与记录，`lancet-authority` 提供领域策略，`lattice-session` 把证据持久保存在调用槽位中并提供操作员读取。
 
-[LANCET 合同](lancet.md#构建与封闭组成)维护工具构建与组成，并负责[执行及终态发布](lancet.md#调用身份与执行流程)；[会话合同](session.md#pendingturn-与结果关闭)维护结果关闭与重开协调；[工作区合同](workspace.md#文件变更)维护文件安装与恢复效果。
+[LANCET 合同](lancet.md#构建与封闭组成)维护工具构建与组成，并负责[执行及终态写入](lancet.md#调用身份与执行流程)；[会话合同](session.md#step-执行与结果保存)维护调用槽位与 Step 关闭；[工作区合同](workspace.md#文件变更)维护文件安装效果。
 
 ## 模型与声明
 
@@ -103,7 +103,7 @@ guest 返回一个结果 CellRef 和结构化结果。Host 解析后，要求结
 canonical JSON 由 [`canonical.rs`](../../crates/lancet-protocol/src/canonical.rs) 的单一实现生成：显式排序对象键，不依赖 `serde_json::Map` 内部结构或 `preserve_order` 是否启用；不输出空白，数字沿用 serde_json 格式，数组顺序保持不变。
 有界领域操作返回数据时按对应 Host 定义记录交付量；无返回值的操作可不带该度量。操作返回量与最终结果表示是不同测量对象，不能直接相加视为唯一预算消耗。
 
-计量提供事实，预算执行由对应 Host 与 Turn 预算负责。`free` 标签本身不证明上下文已释放，guest 自报用量也不能取代 Host 度量。此处结果值的字节计量与会话层 [ToolContent 材料上限](session.md#resultdraft-与关闭材料)分别约束各自对象，不互作替代。
+计量提供事实，预算执行由对应 Host 与 Turn 预算负责。`free` 标签本身不证明上下文已释放，guest 自报用量也不能取代 Host 度量。此处结果值的字节计量与会话层[调用槽位的内容保存上限](session.md#调用槽位)分别约束各自对象，不互作替代。
 
 ## 证据模型与失败语义
 
@@ -131,7 +131,7 @@ canonical JSON 由 [`canonical.rs`](../../crates/lancet-protocol/src/canonical.r
 | 结果校验失败、trap、超限或取消 | 已记录的操作效果与拒绝继续保留，结果效果依实际校验结果产生 |
 | 没有可靠的完整执行证据 | 由调用协调依据持久事实处理，不从结果材料反推或补造执行证据 |
 
-`CellEvidenceTriple` 将三类版本化记录交给协调层，构成内部 receipt 的证据部分，不是 provider 结果字段。[LANCET](lancet.md#结果证据与失败处理)维护终态与完整证据的一次发布边界；[会话合同](session.md#重开取消与未完成状态)维护重开协调及不能持久关闭时的处理。
+`CellEvidenceTriple` 将三类版本化记录交给协调层，构成内部 receipt 的证据部分，不是 provider 结果字段。[LANCET](lancet.md#结果证据与失败处理)维护终态与完整证据在调用槽位中的一次写入边界；[会话合同](session.md#重开取消与未完成状态)维护自动关闭及不能持久关闭时的处理。
 调用事件、内存证据快照和操作员投影不构成持久化确认。
 
 ### 内容与版本边界
@@ -152,7 +152,7 @@ canonical JSON 由 [`canonical.rs`](../../crates/lancet-protocol/src/canonical.r
 | 效果与拒绝顺序 | `cargo test -p lancet-runtime --lib evidence::` |
 | 结果覆盖、schema 与计量 | `cargo test -p lancet-runtime --lib runtime::` |
 | 领域拒绝与执行后效果 | 对应 `host_workspace::`、`host_mutate::`、`host_network::` 测试 |
-| 持久证据及操作员接口 | `cargo test -p lancet-audit`、`cargo test -p lancet-api` |
+| 持久证据及操作员接口 | `cargo test -p lattice-session`、`cargo test -p lancet-api` |
 
 按实际修改选用验证入口。文档修改检查语义、引用、状态及图示。
 
@@ -160,7 +160,7 @@ canonical JSON 由 [`canonical.rs`](../../crates/lancet-protocol/src/canonical.r
 
 - [ADR 0004](../adr/0004-build-closed-wasm-tool-catalog.md)：Cell 词汇、scope/trust 与 Host 权限边界。
 - 本文承接能力准入、精确集合覆盖、结果计量、canonical JSON 和版本化证据读取，遵循 forward-compatible 的持久读取约定，不恢复 native 双路径、SQLite、Turn/audit provenance 或 attestation。
-- [ADR 0005](../adr/0005-durable-turn-invocation-and-private-git-stores.md)与原 LANCET 入口的 InvocationId 归属、终态与证据持久化、Host 通道规则由本文及 [LANCET 合同](lancet.md)承接。
+- [ADR 0005](../adr/0005-durable-turn-invocation-and-private-git-stores.md)与原 LANCET 入口的 InvocationId 归属、终态与证据持久化、Host 通道规则由本文及 [LANCET 合同](lancet.md)承接；证据的持久位置按 [ADR 0006](../adr/0006-tree-session-and-global-redb-store.md) 改为全局会话库的调用槽位，记录内容与版本化读取规则不变。
 - [协议局部指引](../../crates/lancet-protocol/AGENTS.md)、[策略局部指引](../../crates/lancet-authority/AGENTS.md)及[运行时局部指引](../../crates/lancet-runtime/AGENTS.md)：数据契约、领域策略与运行时执行的职责划分。
 
 旧设计中“Path/Host 目标尚不可授权”“操作效果均无计量”等阶段性表述已由领域 Host 接口扩展，不能作为当前通道限制。现行规则以本文及对应合同为准，原文保留为历史，局部入口另行整理。

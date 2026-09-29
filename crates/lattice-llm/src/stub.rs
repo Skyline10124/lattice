@@ -126,8 +126,14 @@ impl StubLlm {
             .messages
             .iter()
             .rev()
-            .find(|message| message.role == MessageRole::User)
-            .map(native_text)
+            .find_map(|item| match item {
+                lattice_conversation::ConversationItem::Message(message)
+                    if message.role == MessageRole::User =>
+                {
+                    Some(native_text(message))
+                }
+                _ => None,
+            })
             .unwrap_or_default();
 
         let token_content = if last_user_msg.is_empty() {
@@ -176,14 +182,14 @@ mod tests {
 
     fn make_request(text: &str) -> ChatRequest {
         ChatRequest::new(
-            vec![lattice_conversation::NativeMessage::new(
-                MessageRole::User,
-                None,
-                vec![lattice_conversation::MessagePart::semantic_only(
-                    MessageSemantic::Text {
-                        text: text.to_string(),
-                    },
-                )],
+            vec![lattice_conversation::ConversationItem::Message(
+                lattice_conversation::NativeMessage::new(
+                    MessageRole::User,
+                    None,
+                    vec![lattice_conversation::MessagePart::semantic_only(
+                        MessageSemantic::Text { text: text.into() },
+                    )],
+                ),
             )],
             ModelTarget::default(),
         )

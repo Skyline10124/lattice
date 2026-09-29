@@ -4,72 +4,81 @@
 
 //! Shared direct-Component integration-test helpers.
 
-use std::collections::BTreeMap;
+use lancet_protocol::{CepError, InvocationId, ModelAttemptKey, SessionId, TurnId};
+use lattice_conversation::{
+    MessagePart, MessageRole, MessageSemantic, NativeMessage, ProviderOrigin, UnboundToolCall,
+};
+use lattice_session::store::{
+    AcceptSession, AcceptTurn, AgentSelection, CloseStep, CompleteReply, DispatchStop,
+    FrozenTurnConfig, SessionExecutionLock, SessionStore, StartedInvocation, StepKey,
+    TerminalInput, ToolCatalogEntry, ToolCatalogSnapshot, TurnExecutionLimits, prepare_terminal,
+};
+
+mod git_fixture;
+use git_fixture::init_fixture_repo;
 use std::ops::Deref;
 use std::path::Path;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-
-use lancet_audit::invocation_store::InvocationStore;
-use lancet_protocol::{
-    BindingIdentity, CepError, InvocationBinding, InvocationId, PlanKey, SessionId, TurnId,
-    arguments_digest,
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
 };
-use lattice_session::test_utils::init_fixture_repo;
 
 pub struct ReservedRuntime {
     runtime: Arc<lancet_api::LancetRuntime>,
     client: ReservedClient,
-    _state: tempfile::TempDir,
+    _state: Arc<tempfile::TempDir>,
 }
-
 impl ReservedRuntime {
     pub fn build(
         mut config: lancet_api::LancetRuntimeConfig,
     ) -> Result<Self, lancet_api::LancetError> {
-        let state = tempfile::TempDir::new()
-            .map_err(|error| lancet_api::LancetError::Internal(error.to_string()))?;
-        let backing = match &config.workspace_history {
-            lancet_api::WorkspaceHistoryBacking::Project { .. } => config.workspace_history.clone(),
-            lancet_api::WorkspaceHistoryBacking::Disabled => {
-                let backing = lancet_api::WorkspaceHistoryBacking::for_project_in(
-                    state.path(),
-                    &config.local_workspace_root,
-                )
-                .map_err(|error| lancet_api::LancetError::Internal(error.to_string()))?;
-                lancet_api::WorkspaceHistory::create(backing.clone())
-                    .map_err(|error| lancet_api::LancetError::Internal(error.to_string()))?;
-                config.workspace_history = backing.clone();
-                backing
-            }
-        };
-        let (layout, key) = match &backing {
-            lancet_api::WorkspaceHistoryBacking::Project { layout, key } => (layout.clone(), *key),
-            lancet_api::WorkspaceHistoryBacking::Disabled => unreachable!(),
-        };
-        InvocationStore::create(&layout, &key)
-            .map_err(|error| lancet_api::LancetError::Internal(error.to_string()))?;
-        config.invocations = backing;
-
+        let state = Arc::new(
+            tempfile::TempDir::new()
+                .map_err(|e| lancet_api::LancetError::Internal(e.to_string()))?,
+        );
+        if matches!(
+            config.workspace_history,
+            lancet_api::WorkspaceHistoryBacking::Disabled
+        ) {
+            config.workspace_history = lancet_api::WorkspaceHistoryBacking::for_project_in(
+                state.path(),
+                &config.local_workspace_root,
+            )
+            .map_err(|e| lancet_api::LancetError::Internal(e.to_string()))?;
+            lancet_api::WorkspaceHistory::create(config.workspace_history.clone())
+                .map_err(|e| lancet_api::LancetError::Internal(e.to_string()))?;
+        }
+        let project = lattice_session::ProjectStoreKey::derive(&config.local_workspace_root)
+            .map_err(|e| lancet_api::LancetError::Internal(e.to_string()))?;
+        // 每个测试运行时持独立文件库；工作区历史可共用，但不重复打开同一 redb。
+        let store = Arc::new(
+            SessionStore::create(&lattice_session::StateLayout::in_state_root(state.path()))
+                .map_err(|e| lancet_api::LancetError::Internal(e.to_string()))?,
+        );
         let mut runtime = lancet_api::LancetRuntime::build(config)?;
-        // Keep the ordered Tool event receiver live while these tests focus on
-        // terminal results rather than event projection.
         let mut events = runtime.take_events();
         tokio::spawn(async move { while events.recv().await.is_some() {} });
+        let catalog = ToolCatalogSnapshot::new(
+            "integration-runtime".into(),
+            runtime
+                .tool_definitions()
+                .iter()
+                .map(|t| ToolCatalogEntry {
+                    name: t.name.clone(),
+                    descriptor_identity: t.descriptor_identity.clone(),
+                    description: t.description.clone(),
+                    input_schema: t.parameters.clone(),
+                })
+                .collect(),
+        )
+        .map_err(|e| lancet_api::LancetError::Internal(e.to_string()))?;
         let runtime = Arc::new(runtime);
-        let descriptors = runtime
-            .tool_definitions()
-            .iter()
-            .map(|tool| (tool.name.clone(), tool.descriptor_identity.clone()))
-            .collect();
         let client = ReservedClient {
-            runtime: Arc::clone(&runtime),
-            invocations: Arc::new(
-                InvocationStore::open(&layout, &key)
-                    .map_err(|error| lancet_api::LancetError::Internal(error.to_string()))?,
-            ),
-            descriptors: Arc::new(descriptors),
-            next: Arc::new(AtomicU32::new(0)),
+            runtime: runtime.clone(),
+            store,
+            project,
+            catalog,
+            _state: state.clone(),
         };
         Ok(Self {
             runtime,
@@ -77,79 +86,152 @@ impl ReservedRuntime {
             _state: state,
         })
     }
-
     pub fn client(&self) -> ReservedClient {
         self.client.clone()
     }
 }
-
 impl Deref for ReservedRuntime {
     type Target = lancet_api::LancetRuntime;
-
     fn deref(&self) -> &Self::Target {
         &self.runtime
     }
 }
-
 #[derive(Clone)]
 pub struct ReservedClient {
     runtime: Arc<lancet_api::LancetRuntime>,
-    invocations: Arc<InvocationStore>,
-    descriptors: Arc<BTreeMap<String, String>>,
-    next: Arc<AtomicU32>,
+    store: Arc<SessionStore>,
+    project: lattice_session::ProjectStoreKey,
+    catalog: ToolCatalogSnapshot,
+    _state: Arc<tempfile::TempDir>,
 }
-
 impl ReservedClient {
-    fn binding(&self, method: &str, params: &serde_json::Value) -> InvocationBinding {
-        let ordinal = self.next.fetch_add(1, Ordering::Relaxed);
-        let turn_id = TurnId::parse("22222222-2222-4222-8222-222222222222").unwrap();
-        let binding = InvocationBinding {
-            invocation_id: InvocationId::parse(&format!("00000000-0000-4000-8000-{ordinal:012x}",))
-                .unwrap(),
-            identity: BindingIdentity {
-                session_id: SessionId::parse("11111111111111111111111111111111").unwrap(),
-                turn_id,
-                model_step_ordinal: ordinal,
-                part_ordinal: 0,
-                method: method.to_string(),
-                descriptor_identity: self
-                    .descriptors
-                    .get(method)
-                    .cloned()
-                    .unwrap_or_else(|| "0".repeat(64)),
-                arguments_digest: arguments_digest(params),
-            },
-        };
-        self.invocations
-            .reserve_batch(
-                PlanKey {
-                    session_id: binding.identity.session_id,
-                    turn_id,
-                    model_step_ordinal: ordinal,
+    fn started(
+        &self,
+        method: String,
+        params: serde_json::Value,
+    ) -> (StartedInvocation, SessionExecutionLock, StepKey) {
+        let sid = SessionId::parse(&uuid::Uuid::new_v4().simple().to_string()).unwrap();
+        let tid = TurnId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+        let id = InvocationId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+        let lock = self.store.try_lock_session(sid).unwrap();
+        self.store
+            .accept_turn(
+                &lock,
+                AcceptTurn {
+                    session: AcceptSession::New { id: sid },
+                    turn_id: tid,
+                    project_store_key: self.project,
+                    input: "component fixture".into(),
+                    accepted_at: chrono::Utc::now(),
+                    agent_selection: AgentSelection::Explicit,
+                    config: FrozenTurnConfig {
+                        agent_name: "test".into(),
+                        model: "test".into(),
+                        provider: "openai_compatible".into(),
+                        system_prompt: None,
+                        profile_snapshot_json: "{}".into(),
+                        policy_snapshot_json: "{}".into(),
+                        catalog: self.catalog.clone(),
+                        limits: TurnExecutionLimits {
+                            timeout_secs: 300,
+                            max_model_steps: 32,
+                            max_model_attempts: 1,
+                        },
+                    },
                 },
-                std::slice::from_ref(&binding),
             )
-            .expect("reserve integration-test invocation");
-        binding
+            .unwrap();
+        let key = ModelAttemptKey {
+            turn_id: tid,
+            model_step_ordinal: 0,
+            attempt_ordinal: 0,
+        };
+        self.store
+            .start_request(&lock, key, chrono::Utc::now())
+            .unwrap();
+        let registered = self
+            .store
+            .register_calls(
+                &lock,
+                CompleteReply {
+                    key,
+                    origin: ProviderOrigin::OpenAiCompatible,
+                    usage: None,
+                    message: NativeMessage::new(
+                        MessageRole::Assistant,
+                        Some(ProviderOrigin::OpenAiCompatible),
+                        vec![MessagePart::semantic_only(MessageSemantic::ToolCall {
+                            call: UnboundToolCall {
+                                provider_call_id: Some("fixture-call".into()),
+                                name: method,
+                                arguments: params,
+                            },
+                        })],
+                    ),
+                },
+                &[id],
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        (
+            self.store
+                .start_invocation(&lock, &registered.bindings[0], chrono::Utc::now())
+                .unwrap(),
+            lock,
+            registered.key,
+        )
     }
-
+    async fn dispatch(
+        &self,
+        method: String,
+        params: serde_json::Value,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> lancet_api::ExecutionReceipt {
+        let client = self.clone();
+        let method_for_start = method.clone();
+        let params_for_start = params.clone();
+        let (started, lock, key) =
+            tokio::task::spawn_blocking(move || client.started(method_for_start, params_for_start))
+                .await
+                .unwrap();
+        let binding = started.binding().clone();
+        let receipt = self.runtime.dispatch(started, method, params, cancel).await;
+        let terminal =
+            prepare_terminal(&binding, receipt.result.clone(), receipt.evidence.clone()).unwrap();
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || {
+            store
+                .finish_invocation(
+                    &lock,
+                    TerminalInput {
+                        invocation_id: binding.invocation_id,
+                        terminal,
+                    },
+                    chrono::Utc::now(),
+                )
+                .unwrap();
+            store
+                .close_step(
+                    &lock,
+                    CloseStep::StopExecuting {
+                        key,
+                        stop: DispatchStop::ProcessExit,
+                    },
+                    chrono::Utc::now(),
+                )
+                .unwrap();
+        })
+        .await
+        .unwrap();
+        receipt
+    }
     pub async fn call_receipt(
         &self,
         method: impl Into<String>,
         params: serde_json::Value,
     ) -> Result<lancet_api::ExecutionReceipt, CepError> {
-        let method = method.into();
-        match self
-            .runtime
-            .dispatch(self.binding(&method, &params), method, params, None)
-            .await
-        {
-            lancet_api::DispatchOutcome::Executed(receipt) => Ok(receipt),
-            lancet_api::DispatchOutcome::NotExecuted { error, .. }
-            | lancet_api::DispatchOutcome::ReconciliationRequired(error) => Err(error),
-        }
+        Ok(self.dispatch(method.into(), params, None).await)
     }
-
     pub async fn call_raw(
         &self,
         method: impl Into<String>,
@@ -157,7 +239,6 @@ impl ReservedClient {
     ) -> Result<serde_json::Value, CepError> {
         self.call_receipt(method, params).await?.result
     }
-
     pub fn start_call_raw(
         &self,
         method: String,
@@ -166,20 +247,13 @@ impl ReservedClient {
         impl std::future::Future<Output = Result<serde_json::Value, CepError>> + Send + 'static,
         TestCallControl,
     ) {
-        let binding = self.binding(&method, &params);
-        let runtime = Arc::clone(&self.runtime);
+        let client = self.clone();
         let flag = Arc::new(AtomicBool::new(false));
-        let control = TestCallControl {
-            flag: Arc::clone(&flag),
-        };
-        let future = async move {
-            match runtime.dispatch(binding, method, params, Some(flag)).await {
-                lancet_api::DispatchOutcome::Executed(receipt) => receipt.result,
-                lancet_api::DispatchOutcome::NotExecuted { error, .. }
-                | lancet_api::DispatchOutcome::ReconciliationRequired(error) => Err(error),
-            }
-        };
-        (future, control)
+        let control = TestCallControl { flag: flag.clone() };
+        (
+            async move { client.dispatch(method, params, Some(flag)).await.result },
+            control,
+        )
     }
 }
 

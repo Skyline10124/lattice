@@ -96,6 +96,10 @@ pub(crate) fn kill(
     evidence: &mut ScenarioEvidence,
     budget: &lattice_system_harness::ScenarioBudget,
 ) {
+    evidence.record_json("crash-processes", &serde_json::json!({
+        "backend_pid":daemon.pgid(),"backend_pgid":daemon.pgid(),"frontend_pgid":frontend.pgid(),
+        "binary":super::driver().binary_path(),"state_root":world.session_store_dir().parent()
+    })).unwrap();
     assert_eq!(world.daemon_pids().unwrap(), vec![daemon.pgid()]);
     assert_ne!(daemon.pgid(), frontend.pgid());
     let deadline = Instant::now() + budget.cap_timeout(Duration::from_secs(2));

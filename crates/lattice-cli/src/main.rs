@@ -20,7 +20,7 @@ struct Cli {
         short,
         long,
         global = true,
-        help = "输出 JSONL；TurnEvent 保留原形，并提供 submission/acceptance/snapshot/transcript/gap 控制记录，不混入人类状态行。"
+        help = "输出 JSONL：submission/acceptance/snapshot/history/event/connection/error，不混入人类状态行。"
     )]
     json: bool,
 
@@ -35,14 +35,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// 向既有会话提交请求；等同于 session send。
-    Run {
-        session_id: String,
-        prompt: String,
-        /// 提交前保留的规范 TurnId；确认未知时仍使用这个 ID。
-        #[arg(long, value_parser = session_cmd::parse_turn_id)]
-        turn_id: Option<lattice_api::local::TurnId>,
-    },
+    /// 提交请求；等同于 session send。
+    Run(session_cmd::SendArgs),
     /// 管理本用户、同一状态根的本地后台。
     Daemon {
         #[command(subcommand)]
@@ -60,13 +54,14 @@ enum Commands {
         model: String,
     },
     /// Manage sessions.
+    #[command(disable_help_subcommand = true)]
     Session {
         #[command(subcommand)]
         action: session_cmd::SessionAction,
     },
     /// Run diagnostics.
     Doctor,
-    /// Inspect finalized CEP audit records.
+    /// Inspect CEP invocation records (registered, started and terminal).
     Audit(Box<audit::AuditCmd>),
     /// LANCET inspection and self-check subcommands.
     Lancet {
@@ -75,15 +70,10 @@ enum Commands {
     },
     /// Open the terminal UI.
     Tui {
-        /// Optional session id to open. If omitted, a new session is created.
+        /// 已有会话；省略时在首次提交接受后创建。
         session_id: Option<String>,
-        /// Agent profile name used when creating a new TUI session.
-        #[arg(long, default_value = "default")]
-        agent: String,
-        /// Project target branch for new TUI sessions.
-        /// Required when creating a new session; ignored when opening an existing one.
         #[arg(long, required_unless_present = "session_id")]
-        project_branch: Option<String>,
+        agent: Option<String>,
     },
 }
 
@@ -134,17 +124,9 @@ async fn async_main(cli: Cli) -> std::process::ExitCode {
 
 async fn run_commands(cli: Cli) -> Result<std::process::ExitCode> {
     match cli.command {
-        Some(Commands::Run {
-            session_id,
-            prompt,
-            turn_id,
-        }) => {
+        Some(Commands::Run(args)) => {
             return session_cmd::run(
-                session_cmd::SessionAction::Send {
-                    session_id,
-                    prompt,
-                    turn_id,
-                },
+                session_cmd::SessionAction::Send(args),
                 cli.json,
                 cli.verbose,
             )
@@ -169,18 +151,13 @@ async fn run_commands(cli: Cli) -> Result<std::process::ExitCode> {
             audit::run(*cmd, cli.json).await?;
         }
         Some(Commands::Lancet { action }) => {
-            lancet_cmd::run(action, cli.json)?;
+            lancet_cmd::run(action, cli.json).await?;
         }
-        Some(Commands::Tui {
-            session_id,
-            agent,
-            project_branch,
-        }) => {
+        Some(Commands::Tui { session_id, agent }) => {
             let agents_dir = commands::run::agents_dir(None);
             return lattice_tui::run(lattice_tui::TuiOptions {
                 session_id,
-                agent,
-                project_branch,
+                agent: agent.unwrap_or_default(),
                 session_dir: session_cmd::default_session_dir(),
                 agents_dir,
                 project_root: std::env::current_dir()?,
@@ -201,43 +178,61 @@ mod tests {
     use super::{Cli, Commands};
     use clap::{CommandFactory, Parser};
 
-    // -- Positive parsing: CLI supported commands --
+    #[test]
+    fn r2_send_run_and_node_surface() {
+        for command in [vec!["session", "send"], vec!["run"]] {
+            for tail in [
+                vec!["hello", "--agent", "coder"],
+                vec!["hello", "--session", "abcd"],
+            ] {
+                let mut args = vec!["lattice"];
+                args.extend(command.clone());
+                args.extend(tail);
+                assert!(Cli::try_parse_from(&args).is_ok(), "{args:?}");
+            }
+        }
+        for node in ["0", "18446744073709551615"] {
+            assert!(Cli::try_parse_from(["lattice", "session", "rewind", "abcd", node]).is_ok());
+        }
+        for node in ["-1", "+1", "ff00", "18446744073709551616"] {
+            assert!(Cli::try_parse_from(["lattice", "session", "rewind", "abcd", node]).is_err());
+        }
+        assert!(
+            Cli::try_parse_from([
+                "lattice",
+                "session",
+                "turn",
+                "10000000-0000-4000-8000-000000000001"
+            ])
+            .is_ok()
+        );
+    }
 
     #[test]
     fn cli_surface_background_and_request_identity() {
+        let id = "10000000-0000-4000-8000-000000000001";
         for args in [
             vec![
                 "lattice",
                 "run",
-                "session-id",
                 "hello",
+                "--agent",
+                "coder",
                 "--turn-id",
-                "10000000-0000-4000-8000-000000000001",
+                id,
             ],
             vec![
                 "lattice",
                 "session",
                 "send",
-                "session-id",
                 "hello",
+                "--session",
+                "abcd",
                 "--turn-id",
-                "10000000-0000-4000-8000-000000000001",
+                id,
             ],
-            vec![
-                "lattice",
-                "session",
-                "turn",
-                "session-id",
-                "10000000-0000-4000-8000-000000000001",
-                "--follow",
-            ],
-            vec![
-                "lattice",
-                "session",
-                "cancel",
-                "session-id",
-                "10000000-0000-4000-8000-000000000001",
-            ],
+            vec!["lattice", "session", "turn", id, "--follow"],
+            vec!["lattice", "session", "cancel", "abcd", id],
             vec![
                 "lattice",
                 "daemon",
@@ -248,40 +243,39 @@ mod tests {
             vec!["lattice", "daemon", "status"],
             vec!["lattice", "daemon", "stop"],
         ] {
-            assert!(Cli::try_parse_from(&args).is_ok(), "must parse {args:?}");
+            assert!(Cli::try_parse_from(args).is_ok());
         }
         assert!(
             Cli::try_parse_from([
                 "lattice",
-                "session",
-                "send",
-                "s",
-                "hi",
+                "run",
+                "hello",
+                "--agent",
+                "coder",
                 "--turn-id",
-                "not-a-uuid"
+                "invalid"
             ])
             .is_err()
         );
     }
-
     #[test]
-    fn cli_surface_session_new_agent() {
-        let cli = Cli::try_parse_from([
-            "lattice",
-            "session",
-            "new",
-            "--agent",
-            "coder",
-            "--project-branch",
-            "main",
-        ])
-        .unwrap();
-        assert!(cli.command.is_some());
+    fn replay_by_turn_id_needs_neither_session_nor_agent() {
+        for command in [vec!["session", "send"], vec!["run"]] {
+            let mut args = vec!["lattice"];
+            args.extend(command);
+            args.extend([
+                "original input",
+                "--turn-id",
+                "00000000-0000-4000-8000-000000000001",
+            ]);
+            assert!(Cli::try_parse_from(args).is_ok());
+        }
     }
-
     #[test]
     fn cli_surface_session_send() {
-        let cli = Cli::try_parse_from(["lattice", "session", "send", "sess1", "hello"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["lattice", "session", "send", "hello", "--session", "sess1"])
+                .unwrap();
         assert!(cli.command.is_some());
     }
 
@@ -298,41 +292,8 @@ mod tests {
     }
 
     #[test]
-    fn cli_surface_session_status() {
-        let cli = Cli::try_parse_from(["lattice", "session", "status"]).unwrap();
-        assert!(cli.command.is_some());
-    }
-
-    #[test]
     fn cli_surface_session_log() {
         let cli = Cli::try_parse_from(["lattice", "session", "log", "sess1"]).unwrap();
-        assert!(cli.command.is_some());
-    }
-
-    #[test]
-    fn cli_surface_session_checkout() {
-        let cli = Cli::try_parse_from(["lattice", "session", "checkout", "sess1", "main"]).unwrap();
-        assert!(cli.command.is_some());
-    }
-
-    #[test]
-    fn cli_surface_session_branch_with_from() {
-        let cli = Cli::try_parse_from([
-            "lattice", "session", "branch", "sess1", "feature", "--from", "commit1",
-        ])
-        .unwrap();
-        assert!(cli.command.is_some());
-    }
-
-    #[test]
-    fn cli_surface_session_diff() {
-        let cli = Cli::try_parse_from(["lattice", "session", "diff", "sess1", "a", "b"]).unwrap();
-        assert!(cli.command.is_some());
-    }
-
-    #[test]
-    fn cli_surface_session_reset() {
-        let cli = Cli::try_parse_from(["lattice", "session", "reset", "sess1", "commit1"]).unwrap();
         assert!(cli.command.is_some());
     }
 
@@ -378,30 +339,18 @@ mod tests {
     }
 
     #[test]
-    fn cli_surface_tui_requires_project_branch_for_new_session() {
-        assert!(
-            Cli::try_parse_from(["lattice", "tui"]).is_err(),
-            "new TUI sessions must require --project-branch"
-        );
+    fn cli_surface_tui_requires_agent_only_without_session() {
+        assert!(Cli::try_parse_from(["lattice", "tui"]).is_err());
+        assert!(Cli::try_parse_from(["lattice", "tui", "--agent", "coder"]).is_ok());
+        let cli = Cli::try_parse_from(["lattice", "tui", "abcd"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Tui {
+                session_id: Some(_),
+                agent: None
+            })
+        ));
     }
-
-    #[test]
-    fn cli_surface_tui_parses_session_id_and_agent() {
-        let cli = Cli::try_parse_from(["lattice", "tui", "sess1", "--agent", "coder"]).unwrap();
-        match cli.command.unwrap() {
-            Commands::Tui {
-                session_id,
-                agent,
-                project_branch,
-            } => {
-                assert_eq!(session_id.as_deref(), Some("sess1"));
-                assert_eq!(agent, "coder");
-                assert!(project_branch.is_none());
-            }
-            _ => panic!("expected Tui"),
-        }
-    }
-
     #[test]
     fn cli_surface_lancet_no_subcommand_parses() {
         let cli = Cli::try_parse_from(["lattice", "lancet"]).unwrap();
@@ -473,39 +422,25 @@ mod tests {
             _ => panic!("expected Audit command"),
         }
     }
-
     #[test]
-    fn cli_surface_tui_accepts_project_branch() {
-        let cli = Cli::try_parse_from([
-            "lattice",
-            "tui",
-            "--agent",
-            "coder",
-            "--project-branch",
-            "feature/x",
-        ])
-        .unwrap();
-        match cli.command.unwrap() {
-            Commands::Tui {
-                session_id,
-                agent,
-                project_branch,
-            } => {
-                assert!(session_id.is_none());
-                assert_eq!(agent, "coder");
-                assert_eq!(project_branch.as_deref(), Some("feature/x"));
-            }
-            _ => panic!("expected Tui"),
-        }
-    }
-
-    #[test]
-    fn cli_surface_session_new_requires_project_branch() {
-        // session new without --project-branch should fail after 36-15.
-        // Currently this parses fine (no required flag), making this test RED.
-        assert!(
-            Cli::try_parse_from(["lattice", "session", "new", "--agent", "coder"]).is_err(),
-            "session new should require --project-branch"
+    fn session_help_lists_exactly_the_six_operations() {
+        let help = Cli::try_parse_from(["lattice", "session", "--help"])
+            .err()
+            .expect("help exits parsing")
+            .to_string();
+        let commands: Vec<_> = help
+            .split_once("Commands:\n")
+            .unwrap()
+            .1
+            .split_once("Options:")
+            .unwrap()
+            .0
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            .collect();
+        assert_eq!(
+            commands,
+            ["send", "rewind", "list", "log", "turn", "cancel"]
         );
     }
 }

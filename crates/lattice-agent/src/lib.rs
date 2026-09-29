@@ -11,8 +11,8 @@
 pub mod model_step;
 
 pub use model_step::{
-    LlmClient, ModelStepAttempt, ModelStepDriver, ModelStepError, ModelStepEvent, ModelStepRequest,
-    ModelStepStatus,
+    LlmClient, ModelDiagnostic, ModelStepAttempt, ModelStepDriver, ModelStepError, ModelStepEvent,
+    ModelStepRequest, ModelStopCause,
 };
 
 #[cfg(feature = "test-utils")]

@@ -79,7 +79,7 @@ pub struct PtyTuiDriver {
 }
 
 impl PtyTuiDriver {
-    /// Spawn `lattice tui --agent <agent> --project-branch <branch>` in a
+    /// Spawn `lattice tui --agent <agent>` in a
     /// PTY inside the scenario world. The fake LLM env must already be wired
     /// into the world. The child runs in a new session/process group under
     /// the PTY; `portable-pty` sets it as the controlling terminal, so
@@ -89,13 +89,8 @@ impl PtyTuiDriver {
         driver: &LatticeDriver,
         world: &ScenarioWorld,
         agent: &str,
-        project_branch: &str,
     ) -> Result<Self, PtyError> {
-        Self::spawn_args(
-            driver,
-            world,
-            &["tui", "--agent", agent, "--project-branch", project_branch],
-        )
+        Self::spawn_args(driver, world, &["tui", "--agent", agent])
     }
 
     /// 重连只选择已存在 Session，不隐式提交或恢复旧 Turn。

@@ -1,331 +1,262 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-
+use super::{test_support::*, types::TurnEvent};
 use lattice_agent::LlmClient;
-use lattice_agent::testing::FakeStreamingLlmClient;
+use lattice_conversation::*;
 use lattice_llm::{LlmEvent, TokenUsage};
-
-use super::execute::run_turn;
-use super::test_support::*;
-use super::types::{RunTurnRequest, RunTurnStage};
-use crate::session::{CreateSessionRequest, SessionApi};
+use lattice_session::store::*;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 
 #[tokio::test]
-async fn run_turn_uses_required_session_and_returns_session_id() {
+async fn run_turn_result_and_saved_nodes_preserve_contract_fields() {
     let fixture = setup_with_events(happy_events(), &[]);
-    let result = run_turn(
-        fixture.session_api,
-        with_test_llm(
-            make_request("hello"),
-            fixture.llm.clone(),
-            &fixture.enabled_tools,
-            &fixture.project_root,
-        ),
+    let result = super::execute::run_turn(
+        fixture.api.clone(),
+        fixture.layout.clone(),
+        fixture.request.clone(),
     )
     .await
     .unwrap();
-
-    assert!(
-        !result.session_id.is_empty(),
-        "session_id should not be empty"
-    );
-    assert!(
-        !result.commit_id.is_empty(),
-        "commit_id should not be empty"
-    );
-    assert_eq!(fixture.store.log(&result.session_id).unwrap().len(), 1);
-}
-
-#[tokio::test]
-async fn run_turn_commits_exactly_one_turn() {
-    let fixture = setup_with_events(happy_events(), &[]);
-    let result = run_turn(
-        fixture.session_api,
-        with_test_llm(
-            make_request("test input"),
-            fixture.llm.clone(),
-            &fixture.enabled_tools,
-            &fixture.project_root,
-        ),
-    )
-    .await
-    .unwrap();
-
-    assert!(matches!(
-        result.outcome,
-        lattice_session::TurnOutcome::Completed { .. }
-    ));
-    assert_eq!(fixture.store.log(&result.session_id).unwrap().len(), 1);
-}
-
-#[tokio::test]
-async fn run_turn_uses_existing_session_transcript() {
-    let fixture = setup_with_events(happy_events(), &[]);
-    let created = fixture
-        .session_api
-        .create_session(CreateSessionRequest {
-            label: None,
-            active_agent: "test".to_string(),
-            project_branch: "main".to_string(),
-            project_store_key: super::test_support::test_project_key(std::path::Path::new(
-                &fixture.project_root,
-            ))
-            .to_string(),
-        })
-        .unwrap();
-    let session_id = created.session_id.clone();
-
-    let llm: Arc<dyn LlmClient> = Arc::new(
-        FakeStreamingLlmClient::builder()
-            .push_events(happy_events())
-            .build(),
-    );
-    let mut request = make_request_with_session("second turn", &session_id);
-    request.test_llm = Some((llm, lattice_llm::ProviderKind::Anthropic));
-    request.test_project_root = Some(fixture.project_root.clone());
-
-    let result = run_turn(fixture.session_api, request).await.unwrap();
-
-    assert_eq!(result.session_id, session_id);
-    assert_eq!(fixture.store.log(&session_id).unwrap().len(), 1);
-}
-
-#[tokio::test]
-async fn run_turn_result_contains_contract_fields() {
-    let fixture = setup_with_events(happy_events(), &[]);
-    let result = run_turn(
-        fixture.session_api,
-        with_test_llm(
-            make_request("hello"),
-            fixture.llm.clone(),
-            &fixture.enabled_tools,
-            &fixture.project_root,
-        ),
-    )
-    .await
-    .unwrap();
-
-    assert!(!result.session_id.is_empty());
-    assert!(!result.commit_id.is_empty());
-    assert_eq!(result.assistant_output, "test response");
-    assert!(matches!(
-        result.outcome,
-        lattice_session::TurnOutcome::Completed { .. }
-    ));
-    let usage = result.usage.as_ref().expect("usage should be present");
-    assert_eq!(usage.prompt_tokens, 10);
-    assert_eq!(usage.completion_tokens, 5);
-    assert_eq!(usage.total_tokens, 15);
-    assert!(result.tool_results.is_empty());
+    assert_eq!(result.summary.outcome, PublicTurnOutcome::Completed);
     assert_eq!(
-        result.stages,
-        vec![
-            RunTurnStage::Profile,
-            RunTurnStage::Session,
-            RunTurnStage::Agent,
-            RunTurnStage::Llm,
-            RunTurnStage::Tools,
-            RunTurnStage::Commit,
-            RunTurnStage::Render,
-        ]
+        result.usage,
+        UsageSummary::Complete {
+            total: TokenUsage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15
+            }
+        }
     );
+    let read = fixture.store.begin_read().unwrap();
+    assert_eq!(read.list(None, 10).unwrap().items.len(), 1);
+    let detail = read
+        .turn_detail(result.turn.session_id, result.turn.turn_id)
+        .unwrap();
+    assert_eq!(detail.steps, result.steps);
+    assert_eq!(detail.user_node, NodeId(1));
+    assert_eq!(read.log(result.turn.session_id).unwrap().nodes.len(), 3);
+    let Node::Step { content, .. } = read
+        .node(NodeRef {
+            session_id: result.turn.session_id,
+            node: NodeId(2),
+        })
+        .unwrap()
+    else {
+        panic!("Step")
+    };
+    assert!(
+        matches!(&content.assistant.parts[0].semantic, MessageSemantic::Text { text } if text == "test response")
+    );
+    assert!(content.results.is_empty());
 }
 
-#[tokio::test]
-async fn run_turn_failed_outcome_is_committed() {
-    let events = vec![LlmEvent::Error {
-        message: "LLM error: provider unavailable".to_string(),
-    }];
-    let fixture = setup_with_events(events, &[]);
-    let result = run_turn(
-        fixture.session_api,
-        with_test_llm(
-            make_request("hello"),
-            fixture.llm.clone(),
-            &fixture.enabled_tools,
-            &fixture.project_root,
-        ),
-    )
-    .await
-    .unwrap();
-
-    assert!(matches!(
-        result.outcome,
-        lattice_session::TurnOutcome::Interrupted { .. }
-    ));
-    assert_eq!(result.assistant_output, "");
-}
-
-#[tokio::test]
-async fn run_turn_cancelled_outcome_is_committed() {
-    let cancel = Arc::new(AtomicBool::new(false));
-    let llm: Arc<dyn LlmClient> = Arc::new(CancelOnDoneLlm::new(
-        cancel.clone(),
-        vec![
-            LlmEvent::ToolCallStart {
-                index: 0,
-                provider_call_id: Some("call_1".to_string()),
-                name: "observe.workspace".to_string(),
-            },
-            LlmEvent::ToolCallDelta {
-                index: 0,
-                arguments_delta: r#"{"mode":"read_file","path":"src/lib.rs"}"#.to_string(),
-            },
-            LlmEvent::ToolCallEnd { index: 0 },
+struct Capture(Mutex<Vec<lattice_llm::ChatRequest>>);
+#[async_trait::async_trait]
+impl LlmClient for Capture {
+    async fn stream_chat(
+        &self,
+        request: lattice_llm::ChatRequest,
+    ) -> std::result::Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
+        self.0.lock().unwrap().push(request);
+        let mut events = happy_events();
+        events.insert(
+            1,
             LlmEvent::MessageComplete {
-                message: lattice_conversation::NativeMessage::new(
-                    lattice_conversation::MessageRole::Assistant,
-                    Some(lattice_conversation::ProviderOrigin::OpenAiCompatible),
-                    vec![lattice_conversation::MessagePart::semantic_only(
-                        lattice_conversation::MessageSemantic::ToolCall {
-                            call: lattice_conversation::UnboundToolCall {
-                                provider_call_id: Some("call_1".to_string()),
-                                name: "observe.workspace".to_string(),
-                                arguments: serde_json::json!({
-                                    "mode": "read_file",
-                                    "path": "src/lib.rs",
-                                }),
-                            },
-                        },
-                    )],
+                message: NativeMessage::new(
+                    MessageRole::Assistant,
+                    Some(ProviderOrigin::OpenAiCompatible),
+                    vec![MessagePart::semantic_only(MessageSemantic::Text {
+                        text: "test response".into(),
+                    })],
                 ),
             },
-        ],
-        "tool_calls",
-        Some(TokenUsage {
-            prompt_tokens: 5,
-            completion_tokens: 2,
-            total_tokens: 7,
-        }),
-    ));
-    let fixture = setup_fixture(llm, &["observe.workspace"]);
-    let mut request = make_request("hello");
-    request.cancel_flag = Some(cancel);
-
-    let result = run_turn(
-        fixture.session_api,
-        with_test_llm(
-            request,
-            fixture.llm.clone(),
-            &fixture.enabled_tools,
-            &fixture.project_root,
-        ),
-    )
-    .await
-    .unwrap();
-
+        );
+        Ok(Box::pin(futures::stream::iter(events)))
+    }
+}
+#[tokio::test]
+async fn next_turn_uses_root_path_parent_and_frozen_model_provider_prompt() {
+    let llm = Arc::new(Capture(Mutex::default()));
+    let fixture = setup_fixture(llm.clone(), &[]);
+    let mut request = fixture.request.clone();
+    request.loaded_profile.as_mut().unwrap().profile.agent.model = "compat:profile-model".into();
+    let (first, _) = fixture.run(request.clone()).await;
+    request.session_id = Some(first.session_id);
+    request.agent = None;
+    request.input = "follow-up".into();
+    let (second, _) = fixture.run(request).await;
+    let read = fixture.store.begin_read().unwrap();
+    assert_eq!(second.user_node, NodeId(3));
     assert!(matches!(
-        result.outcome,
-        lattice_session::TurnOutcome::Cancelled { .. }
+        read.node(NodeRef {
+            session_id: first.session_id,
+            node: second.user_node
+        })
+        .unwrap(),
+        Node::UserMessage {
+            parent: NodeId(2),
+            ..
+        }
     ));
-    let entry = last_log_entry(fixture.store.as_ref(), &result.session_id);
+    assert_eq!(read.log(first.session_id).unwrap().nodes.len(), 5);
+    let stored = read.turn_record(second.turn_id).unwrap().unwrap();
+    assert_eq!(stored.config.model, "compat:profile-model");
+    assert_eq!(stored.config.provider, "openai_compatible");
+    let requests = llm.0.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].target.model, "compat:profile-model");
     assert_eq!(
-        entry.usage,
-        Some(lattice_session::TurnUsage {
-            prompt_tokens: 5,
-            completion_tokens: 2,
-            total_tokens: 7,
-        }),
-        "completed model attempt usage remains durable when cancellation wins before dispatch"
+        requests[1].target.provider.as_deref(),
+        Some("openai_compatible")
+    );
+    assert_eq!(requests[1].messages.len(), 4);
+    assert!(
+        matches!(&requests[1].messages[0], ConversationItem::Message(message) if message.role == MessageRole::System)
+    );
+    assert!(
+        matches!(&requests[1].messages[1], ConversationItem::Message(message) if matches!(&message.parts[0].semantic, MessageSemantic::Text { text } if text == "hello"))
+    );
+    assert!(
+        matches!(&requests[1].messages[2], ConversationItem::Step(step) if matches!(&step.assistant.parts[0].semantic, MessageSemantic::Text { text } if text == "test response"))
     );
 }
 
 #[tokio::test]
-async fn run_cutover_uses_loaded_profile_model() {
-    let fixture = setup_with_events(happy_events(), &[]);
-    let request = with_test_llm(
-        RunTurnRequest {
-            input: "test".to_string(),
-            session_id: TEST_SESSION_ID.to_string(),
-            loaded_profile: Some(make_loaded_profile("profile-model", "System from profile.")),
-            cancel_flag: None,
-            test_llm: None,
-            test_project_root: None,
-        },
-        fixture.llm.clone(),
-        &fixture.enabled_tools,
-        &fixture.project_root,
+async fn provider_failure_closes_with_the_same_persistent_notice_and_no_partial_node() {
+    let fixture = setup_with_events(
+        vec![
+            LlmEvent::Token {
+                content: "partial".into(),
+            },
+            LlmEvent::Error {
+                failure: lattice_llm::ProviderFailure {
+                    message: "provider unavailable".into(),
+                    retryable: false,
+                },
+            },
+        ],
+        &[],
     );
-
-    let result = run_turn(fixture.session_api, request).await.unwrap();
-    assert!(matches!(
-        result.outcome,
-        lattice_session::TurnOutcome::Completed { .. }
-    ));
-
-    let entry = last_log_entry(fixture.store.as_ref(), &result.session_id);
-    assert_eq!(entry.model, "profile-model");
+    let (detail, events) = fixture.run(fixture.request.clone()).await;
+    assert_eq!(
+        detail.summary.as_ref().unwrap().outcome,
+        PublicTurnOutcome::Failed
+    );
+    assert_eq!(
+        detail
+            .summary
+            .as_ref()
+            .unwrap()
+            .notice
+            .as_ref()
+            .unwrap()
+            .text,
+        "provider unavailable"
+    );
+    assert!(
+        matches!(&events.last().unwrap(), TurnEvent::TurnFailed { summary, step, .. } if Some(summary) == detail.summary.as_ref() && step == &detail.steps[0])
+    );
+    assert_eq!(
+        fixture
+            .store
+            .begin_read()
+            .unwrap()
+            .log(detail.session_id)
+            .unwrap()
+            .nodes
+            .len(),
+        2
+    );
+    assert_eq!(
+        detail.usage,
+        UsageSummary::Partial {
+            known: TokenUsage {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0
+            },
+            unknown_attempts: 1
+        }
+    );
 }
 
-#[tokio::test]
-async fn run_turn_plumbs_stable_provider_to_agent_request_and_commit_metadata() {
-    let fixture = setup_with_events(happy_events(), &[]);
-    let request = RunTurnRequest {
-        input: "test".to_string(),
-        session_id: TEST_SESSION_ID.to_string(),
-        loaded_profile: Some(make_loaded_profile(
-            "compat:deepseek-chat",
-            "System from profile.",
-        )),
-        cancel_flag: None,
-        test_llm: Some((
-            fixture.llm.clone(),
-            lattice_llm::ProviderKind::OpenAiCompatible,
-        )),
-        test_project_root: Some(fixture.project_root.clone()),
-    };
-
-    let result = run_turn(fixture.session_api, request).await.unwrap();
-    assert!(matches!(
-        result.outcome,
-        lattice_session::TurnOutcome::Completed { .. }
-    ));
-
-    let entry = last_log_entry(fixture.store.as_ref(), &result.session_id);
-    assert_eq!(entry.model, "compat:deepseek-chat");
-    assert_eq!(entry.provider, "openai_compatible");
+struct CancelOnDone(Arc<AtomicBool>);
+#[async_trait::async_trait]
+impl LlmClient for CancelOnDone {
+    async fn stream_chat(
+        &self,
+        _: lattice_llm::ChatRequest,
+    ) -> std::result::Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
+        let cancel = self.0.clone();
+        let events = vec![
+            LlmEvent::MessageComplete {
+                message: NativeMessage::new(
+                    MessageRole::Assistant,
+                    Some(ProviderOrigin::OpenAiCompatible),
+                    vec![MessagePart::semantic_only(MessageSemantic::ToolCall {
+                        call: UnboundToolCall {
+                            provider_call_id: Some("call".into()),
+                            name: "observe.workspace".into(),
+                            arguments: serde_json::json!({"mode":"read_file","path":"src/lib.rs"}),
+                        },
+                    })],
+                ),
+            },
+            LlmEvent::Done {
+                finish_reason: "tool_calls".into(),
+                usage: Some(TokenUsage {
+                    prompt_tokens: 5,
+                    completion_tokens: 2,
+                    total_tokens: 7,
+                }),
+            },
+        ];
+        Ok(Box::pin(futures::stream::iter(events).map(move |event| {
+            if matches!(event, LlmEvent::Done { .. }) {
+                cancel.store(true, Ordering::Release);
+            }
+            event
+        })))
+    }
 }
-
+use futures::StreamExt;
 #[tokio::test]
-async fn run_turn_commits_parent_from_initial_transcript() {
-    let fixture = setup_with_events(happy_events(), &[]);
-    let first = run_turn(
-        fixture.session_api,
-        with_test_llm(
-            make_request("first turn"),
-            fixture.llm.clone(),
-            &fixture.enabled_tools,
-            &fixture.project_root,
-        ),
-    )
-    .await
-    .unwrap();
-    let first_commit_id = first.commit_id.clone();
-    let session_id = first.session_id.clone();
-
-    let layout = lattice_session::StateLayout::in_state_root(
-        &std::path::Path::new(&fixture.project_root).join(".test-state"),
+async fn completed_attempt_usage_survives_cancellation_before_dispatch() {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let fixture = setup_fixture(
+        Arc::new(CancelOnDone(cancel.clone())),
+        &["observe.workspace"],
     );
-    let session_api = SessionApi::git_open_with_layout(&fixture.sessions_path, &layout)
-        .expect("open session store");
-    let llm: Arc<dyn LlmClient> = Arc::new(
-        FakeStreamingLlmClient::builder()
-            .push_events(happy_events())
-            .build(),
+    let mut request = fixture.request.clone();
+    request.cancel_flag = Some(cancel);
+    let (detail, _) = fixture.run(request).await;
+    assert_eq!(
+        detail.summary.as_ref().unwrap().outcome,
+        PublicTurnOutcome::Cancelled
     );
-    let mut request = make_request_with_session("second turn", &session_id);
-    request.test_llm = Some((llm, lattice_llm::ProviderKind::Anthropic));
-    request.test_project_root = Some(fixture.project_root.clone());
-
-    let result = run_turn(session_api, request).await.unwrap();
-
+    assert_eq!(
+        detail.usage,
+        UsageSummary::Complete {
+            total: TokenUsage {
+                prompt_tokens: 5,
+                completion_tokens: 2,
+                total_tokens: 7
+            }
+        }
+    );
     assert!(matches!(
-        result.outcome,
-        lattice_session::TurnOutcome::Completed { .. }
+        &detail.steps[0].state,
+        StepDetailState::Closed {
+            end: StepEnd::Stop {
+                cause: StopCause::Cancelled,
+                ..
+            },
+            ..
+        }
     ));
-    let entry = last_log_entry(fixture.store.as_ref(), &result.session_id);
-    assert_eq!(entry.parent_ids, vec![first_commit_id]);
 }

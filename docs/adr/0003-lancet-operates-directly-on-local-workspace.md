@@ -8,6 +8,7 @@ status: accepted
 - Date: 2026-07-16
 - Supersedes: ADR 0002
 - Amended by: ADR 0004 (Tool catalog and execution ownership only)
+- Superseded in part by: ADR 0006 (the Rewind section only; file Rewind is removed and `rewind` moves only the Session position)
 - 术语导航：[领域术语表](../reference/glossary.md)
 
 > 承接说明：Direct-Local、路径策略、单路径安装与 Rewind 的已承接规范由[工作区合同](../architecture/workspace.md#来源与承接范围)维护；工具目录与执行归属结合 ADR 0004 的修订，见 [LANCET 合同](../architecture/lancet.md#构建与封闭组成)及[组件职责](../architecture/lancet.md#组件职责)。

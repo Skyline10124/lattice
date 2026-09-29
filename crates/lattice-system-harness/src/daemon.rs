@@ -162,7 +162,7 @@ impl ScenarioDaemon {
             }
             let args = match std::fs::read(entry.path().join("cmdline")) {
                 Ok(args) => args,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) if crate::driver::process_exited(&error) => continue,
                 Err(error) => return Err(error),
             };
             let fields: Vec<_> = args
@@ -271,6 +271,9 @@ impl ScenarioDaemon {
                 .and_then(|running| running.wait(None).map_err(std::io::Error::other));
             match stop {
                 Ok(outcome) if outcome.is_clean_exit(0) => {}
+                // 场景自己的 stop 已排空时，后台可能在归属扫描后、连接前退出；
+                // not_running 只说明连接已无人接收，组是否排空仍由下方排空检查裁决。
+                Ok(outcome) if already_stopped(&outcome) => {}
                 Ok(outcome) => errors.push(format!("daemon stop: {}", outcome.summary())),
                 Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
                     errors.push("scenario budget exhausted before normal daemon stop".into());
@@ -380,6 +383,13 @@ fn finish(errors: Vec<String>) -> Result<(), Vec<String>> {
     } else {
         Err(errors)
     }
+}
+
+/// `daemon stop` 干净退出 1 且报告 `not_running`：后台已不再接收连接。
+fn already_stopped(outcome: &crate::driver::CommandOutcome) -> bool {
+    outcome.is_clean_exit(1)
+        && serde_json::from_slice::<serde_json::Value>(&outcome.stdout)
+            .is_ok_and(|line| line["type"] == "error" && line["kind"] == "not_running")
 }
 
 #[cfg(test)]

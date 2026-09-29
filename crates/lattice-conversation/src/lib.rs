@@ -11,7 +11,7 @@
 //! - semantic and replay digests ([`digest`]);
 //! - per-attempt usage and interruption/rejection records ([`attempt`]);
 //! - provider origin and bounded part-local opaque replay state;
-//! - the typed durable branch transcript ([`HeadTranscript`]).
+//! - 结构化 Step 与其调用结果，以及 provider-neutral 对话历史。
 //!
 //! It depends only on the data-only `lancet-protocol` and neutral data
 //! dependencies. It owns no filesystem, store, lock, runtime, provider HTTP
@@ -19,11 +19,11 @@
 
 pub mod attempt;
 pub mod digest;
-pub mod graph_types;
 pub mod history;
 pub mod limits;
 pub mod message;
 pub mod outcome;
+pub mod result;
 pub mod tool_call;
 pub mod usage;
 
@@ -38,8 +38,8 @@ pub use lancet_protocol::{
 
 pub use attempt::{AttemptInterruption, AttemptOutcome, AttemptRejection, ModelAttemptRecord};
 pub use digest::{replay_state_digest, semantic_digest};
-pub use graph_types::HeadTranscript;
-pub use history::ConversationHistory;
+pub use history::ConversationItem;
+pub use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability};
 pub use limits::{
     AttemptAssembly, LimitKind, MAX_ASSISTANT_CONTENT_BYTES, MAX_MODEL_ATTEMPT_BYTES,
     MAX_REASONING_CONTENT_BYTES, MAX_TOOL_CALL_ARGUMENTS_BYTES, MAX_TOOL_CALLS_PER_BATCH,
@@ -49,6 +49,10 @@ pub use message::{
     OpaqueProviderState, OpaqueReplayStateError, ProviderOrigin, ToolCallState,
 };
 pub use outcome::ToolResultOutcome;
+pub use result::{
+    IndeterminateCause, MAX_TOOL_CONTENT_BYTES, ResultPayload, StepContent, StoredToolResult,
+    SuccessContent, tool_content_digest,
+};
 pub use tool_call::{
     ArgumentsDigestMismatch, BoundToolCall, RawToolCall, ToolCallValidation, UnboundToolCall,
     validate_tool_call_batch,

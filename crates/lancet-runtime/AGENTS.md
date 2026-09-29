@@ -9,7 +9,7 @@
 - `execution.rs`：按 Turn 组合 runtime、上下文、Host、预算、工作区及历史，核对 request/binding 一致性。
 - `runtime.rs`：Component 实例、engine/linker/ticker、参数校验、取消、结果 CellRef 与 schema 校验及 Host 计量；`limits.rs`/`error_map.rs` 维护资源限制与类型化错误。
 - `control.rs`/`host.rs`：当前调用取消、顺序事件和 receipt；`evidence.rs` 的共享记录器提供快照。
-- `workspace/`、`host_workspace.rs`、`host_mutate.rs`：具体本地路径解析、观察、编辑准备与安装；`history.rs` 记录和规划私有历史。
+- `workspace/`、`host_workspace.rs`、`host_mutate.rs`：具体本地路径解析、观察、编辑准备与安装；`history.rs` 记录和读取私有历史。
 - `host_network.rs`：受控 GET、逐跳地址固定、TLS、响应限制与证据；`bindings.rs` 生成版本化 Tool Host WIT 绑定。
 
 ## 上位文档
@@ -27,8 +27,8 @@
 - 观察四操作使用相同可见性与授权入口，Host 渲染单个可见窗口，使预算、truncation 和无内容 visibility 证据对齐；guest 只包装外层结果。
 - `read-for-edit`、`create-if-absent`、`replace-with-expected`、不安装的 `refuse-edit` 每次重解析路径并授权 `mutate:write:workspace`，执行单一写入上限、系统排除、write-deny 和前提。类型化 Host 拒绝必须优先于 guest 的字符串转述。
 - 文件安装、辅助资源清理、安装后目录同步失败的效果报告按工作区合同。不能把目标未安装扩大为工作区无变化；新设计中未完成的实现和验证不因本入口整理而消失。
-- WorkspaceHistory 只记录已安装事实并规划恢复，不写本地文件、用户 Git 或补偿 commit，不提供 Agent 历史命令。前态以安装者观察的内容为准；ref/锁/fsync 委托内核，不手写、不用 git subprocess/git2/平行 SQLite 或 receipt store。
-- 操作锁与仓库锁期限遵循合同，新 mutation 入口先取得 exclusive 操作锁再读前提，不共享升级。历史严格打开，创建限指定组成入口；Rewind 保留被放弃 tip，不能用时间过期破坏历史 OID 可解析性。
+- WorkspaceHistory 只记录已安装事实，不写本地文件、用户 Git 或补偿 commit，不提供 Agent 历史命令。前态以安装者观察的内容为准；ref/锁/fsync 委托内核，不手写、不用 git subprocess/git2/平行 SQLite 或 receipt store。
+- 操作锁与仓库锁期限遵循合同，新 mutation 入口先取得 exclusive 操作锁再读前提，不共享升级。历史严格打开，创建限指定组成入口；current 只前进，已记录提交保持祖先可达，不因会话退回而移动历史或恢复文件。
 - 网络 TLS 输入与逐跳行为遵循 [LANCET 网络获取](../../docs/architecture/lancet.md#网络获取)，Turn 组合接收显式冻结根，不读后台环境替换信任配置。保留跨 origin 剥离 caller headers、禁压缩、共享预算与取消；区分 received/delivered bytes，I/O 后失败记录 effect，DeniedOperation 仅用于 I/O 前拒绝。
 - reserved Descriptor 到实际 compiled Component 的精确身份及启用集校验风险见 LANCET 合同待核验项；不得以文档迁移宣称已解决。
 
@@ -36,5 +36,5 @@
 
 - `cargo test -p lancet-runtime`、`cargo clippy -p lancet-runtime --all-targets -- -D warnings`。
 - 观察：`--lib host_workspace::` 与 `direct_observation`；网络：`--lib host_network::` 与 Tool round-trip。
-- 变更：`--lib host_mutate::` 与 direct_mutation/failures/rewind/workspace_history；历史：`--lib history::` 与 API workspace_history_acceptance；Rewind 关联 rewind_acceptance。
+- 变更：`--lib host_mutate::` 与 direct_mutation/direct_failures/direct_workspace_history；历史：`--lib history::` 与 API workspace_history_acceptance；会话退回不改变文件的外部断言在 direct_tree_session。
 - 协议错误码关联 lancet-protocol。依赖树应无 ambient WASI；harness 使用当前构建产物并按影响选择，不默认启动全仓验证。

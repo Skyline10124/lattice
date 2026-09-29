@@ -16,4 +16,4 @@ futures = { workspace = true }
 unicode-width = { workspace = true }
 
 [features]
-test-utils = []
+test-utils = ["lattice-llm/test-utils"]

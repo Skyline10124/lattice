@@ -26,10 +26,7 @@ pub fn workspace_history_backing(
 
 /// Inputs for [`crate::LancetRuntime::build`].
 ///
-/// Policy is supplied as fully resolved LANCET types. The authoritative
-/// invocation ledger and workspace-history repository are both strict project
-/// stores; disabled backings are valid only in lower-level tests that do not
-/// build a production runtime.
+/// 策略和工作区历史绑定由组成层冻结；调用事实由会话库持有。
 pub struct LancetRuntimeConfig {
     /// Canonicalizable full Local Workspace root used for project-store
     /// addressing. `policy.project_root` may narrow authority to a subdirectory
@@ -43,8 +40,6 @@ pub struct LancetRuntimeConfig {
     pub capability_admission: CapabilityAdmissionPolicy,
     /// 提交端冻结的 DER 信任根；只用于本 Turn，不读取后台环境或证书路径。
     pub tls_roots_der: Vec<Vec<u8>>,
-    /// Authoritative project invocation ledger backing.
-    pub invocations: WorkspaceHistoryBacking,
     /// Private workspace mutation history backing.
     pub workspace_history: WorkspaceHistoryBacking,
 }

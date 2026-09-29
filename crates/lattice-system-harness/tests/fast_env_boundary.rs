@@ -143,24 +143,44 @@ fn fast_dotenv_lattice_keys_are_refused() {
 fn fast_dotenv_agents_dir_cannot_redirect_profile_lookup() {
     let spec = ScenarioSpec::fast("fast-dotenv-agents-dir");
     let world = hostile_world(&spec.name);
-    world.write_agent_profile("evil", "sonnet").unwrap();
+    world.write_agent_profile("evil", "compat:evil").unwrap();
+    let server = lattice_system_harness::FakeLlmServer::start(
+        lattice_system_harness::SseScript::plain("control accepted"),
+    )
+    .unwrap();
+    world.set_env("OPENAI_COMPATIBLE_BASE_URL", server.base_url());
+    world.set_env(
+        "OPENAI_COMPATIBLE_API_KEY",
+        lattice_system_harness::FAKE_API_KEY,
+    );
     world.init_git_project().unwrap();
     // 空覆盖会绕过 HOME 派生目录校验；不可信 dotenv 不能开启这条路径。
     world
         .write_project_file(".env", "LATTICE_AGENTS_DIR=\n")
         .unwrap();
-    let args = &[
-        "--json",
-        "session",
-        "new",
-        "--agent",
-        "evil",
-        "--project-branch",
-        "main",
-    ];
+    let args = &["--json", "run", "boundary control", "--agent", "evil"];
     let from_dotenv = run(&world, &spec, args);
     let result = lattice_system_harness::assert_exit_code(&from_dotenv, 2)
-        .and_then(|_| parse_json(&from_dotenv))
+        .and_then(|_| {
+            let records = String::from_utf8_lossy(&from_dotenv.stdout)
+                .lines()
+                .map(serde_json::from_str::<Value>)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| AssertError::StdoutMissing {
+                    expected: format!("valid JSONL: {e}"),
+                })?;
+            require(
+                !records
+                    .iter()
+                    .any(|v| v["type"] == "acceptance" && v["result"]["acceptance"] == "accepted"),
+                "invalid directory must not accept a Turn",
+            )?;
+            require(
+                server.captured_requests().is_empty(),
+                "invalid directory must not dispatch",
+            )?;
+            Ok(records.last().expect("typed error").clone())
+        })
         .and_then(|value| {
             require(
                 value["kind"] == "bad_request",
@@ -171,14 +191,19 @@ fn fast_dotenv_agents_dir_cannot_redirect_profile_lookup() {
     // 相同值只有明确来自提交进程时才生效，避免全部禁用变量造成假绿。
     world.set_env("LATTICE_AGENTS_DIR", "");
     let from_process = run(&world, &spec, args);
-    let control = assert_exit_success(&from_process)
-        .and_then(|_| parse_json(&from_process))
-        .and_then(|value| {
-            require(
-                value["active_agent"] == "evil",
-                "process override must permit the selected project profile",
-            )
-        });
+    let control = assert_exit_success(&from_process).and_then(|_| {
+        require(
+            String::from_utf8_lossy(&from_process.stdout)
+                .lines()
+                .map(|line| serde_json::from_str::<Value>(line).expect("JSONL"))
+                .any(|value| {
+                    value["type"] == "acceptance" && value["result"]["acceptance"] == "accepted"
+                }),
+            "process override must permit the selected project profile",
+        )
+    });
+    assert_eq!(server.captured_requests().len(), 1);
+    assert_eq!(server.captured_requests()[0].raw["model"], "evil");
     assert_result(
         &world,
         "fast-dotenv-agents-dir-control",

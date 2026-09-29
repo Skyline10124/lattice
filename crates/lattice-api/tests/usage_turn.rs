@@ -1,57 +1,17 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Deterministic usage tests for the main turn path.
-//!
-//! These tests exercise the real `run_turn` → live `stream_turn` collector →
-//! durable coordinator saga with a fake streaming LLM.
-//! No network, no real API keys.
-
+//! 使用真实文件会话库与 Component，保护调用结果、续接上下文和失败 usage。
 mod support;
-
-use std::sync::Arc;
 
 use lattice_agent::LlmClient;
 use lattice_agent::testing::FakeStreamingLlmClient;
-use lattice_api::RunTurnRequest;
-use lattice_conversation::MessageRole;
+use lattice_api::{RunTurnRequest, SessionApi};
+use lattice_conversation::{ConversationItem, MessageSemantic};
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
-use lattice_session::{GitSessionGraphStore, SessionGraphStore, StateLayout};
-
-fn session_layout(sessions_path: &std::path::Path) -> StateLayout {
-    let state_root = sessions_path
-        .parent()
-        .expect("session path has a parent")
-        .join("state");
-    StateLayout::in_state_root(&state_root)
-}
-
-fn session_repo(sessions_path: &std::path::Path) -> std::path::PathBuf {
-    session_layout(sessions_path)
-        .lattice_root()
-        .join("sessions.git")
-}
-fn create_session_store(sessions_path: impl AsRef<std::path::Path>) -> lattice_api::SessionApi {
-    let sessions_path = sessions_path.as_ref();
-    let layout = session_layout(sessions_path);
-    lattice_api::SessionApi::git_create_with_layout(session_repo(sessions_path), &layout)
-        .expect("create session store")
-}
-
-fn open_session_store(sessions_path: &std::path::Path) -> lattice_api::SessionApi {
-    let layout = session_layout(sessions_path);
-    lattice_api::SessionApi::git_open_with_layout(session_repo(sessions_path), &layout)
-        .expect("open session store")
-}
-
-fn store_key_hex(root: &std::path::Path) -> String {
-    lattice_api::LocalWorkspaceRoot::from_path(root)
-        .expect("resolve workspace root")
-        .store_key_hex()
-}
-
-// ── Streaming event helpers ─────────────────────────────────────────────────
+use lattice_session::{StateLayout, store::*};
+use std::sync::{Arc, Mutex};
 
 fn usage_tokens() -> TokenUsage {
     TokenUsage {
@@ -61,12 +21,12 @@ fn usage_tokens() -> TokenUsage {
     }
 }
 
-fn tool_call_events(id: &str, name: &str, args: &str) -> Vec<LlmEvent> {
+fn tool_call_events(name: &str, args: serde_json::Value) -> Vec<LlmEvent> {
     vec![
         LlmEvent::ToolCallStart {
             index: 0,
-            provider_call_id: Some(id.to_string()),
-            name: name.to_string(),
+            provider_call_id: Some("call_1".into()),
+            name: name.into(),
         },
         LlmEvent::ToolCallDelta {
             index: 0,
@@ -74,7 +34,7 @@ fn tool_call_events(id: &str, name: &str, args: &str) -> Vec<LlmEvent> {
         },
         LlmEvent::ToolCallEnd { index: 0 },
         LlmEvent::Done {
-            finish_reason: "tool_calls".to_string(),
+            finish_reason: "tool_calls".into(),
             usage: Some(usage_tokens()),
         },
     ]
@@ -83,321 +43,284 @@ fn tool_call_events(id: &str, name: &str, args: &str) -> Vec<LlmEvent> {
 fn final_response_events(text: &str) -> Vec<LlmEvent> {
     vec![
         LlmEvent::Token {
-            content: text.to_string(),
+            content: text.into(),
         },
         LlmEvent::Done {
-            finish_reason: "stop".to_string(),
+            finish_reason: "stop".into(),
             usage: Some(usage_tokens()),
         },
     ]
 }
 
-/// Temp workspace with src/lib.rs and a default agent profile.
 struct Workspace {
     _dir: tempfile::TempDir,
-    _global_agents: tempfile::TempDir,
+    _state: tempfile::TempDir,
     root: std::path::PathBuf,
     loaded: LoadedAgentProfile,
-}
-
-fn workspace_toml_suffix(_enabled_tools: &[&str]) -> &'static str {
-    r#"
-[lancet.workspace]
-denied_write_patterns = [".git/**"]
-"#
+    layout: StateLayout,
+    store: Arc<SessionStore>,
 }
 
 fn setup_workspace(src_content: &str, enabled_tools: &[&str]) -> Workspace {
     let ws = tempfile::tempdir().unwrap();
     let root = ws.path().to_path_buf();
-
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(root.join("src/lib.rs"), src_content).unwrap();
     support::init_git_repo(&root);
-
     let profile_dir = root.join(".lattice/agents/default");
     std::fs::create_dir_all(&profile_dir).unwrap();
-    let enabled: Vec<String> = enabled_tools.iter().map(|s| s.to_string()).collect();
-    let toml_content = format!(
-        r#"schema_version = 1
+    std::fs::write(
+        profile_dir.join("agent.toml"),
+        format!(
+            r#"schema_version = 1
 [agent]
 name = "default"
 model = "sonnet"
 [prompt]
 system = "You are a test agent."
 [tools]
-enabled = {enabled:?}{workspace}
-"#,
-        workspace = workspace_toml_suffix(enabled_tools),
-    );
-    std::fs::write(profile_dir.join("agent.toml"), toml_content).unwrap();
-
-    let global_agents = tempfile::tempdir().unwrap();
-    let paths = DiscoveryPaths {
-        project_root: root.clone(),
-        global_agents_dir: global_agents.path().to_path_buf(),
-    };
-    let loaded = lattice_profile::resolve_agent_profile(ProfileSource::Default, &paths)
-        .expect("profile must load");
-
+enabled = {enabled_tools:?}
+[lancet.workspace]
+denied_write_patterns = [".git/**"]
+"#
+        ),
+    )
+    .unwrap();
+    let global = tempfile::tempdir().unwrap();
+    let loaded = lattice_profile::resolve_agent_profile(
+        ProfileSource::Default,
+        &DiscoveryPaths {
+            project_root: root.clone(),
+            global_agents_dir: global.path().to_path_buf(),
+        },
+    )
+    .unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let layout = StateLayout::in_state_root(state.path());
+    let store = Arc::new(SessionStore::create(&layout).unwrap());
     Workspace {
         _dir: ws,
-        _global_agents: global_agents,
+        _state: state,
         root,
         loaded,
+        layout,
+        store,
     }
-}
-
-/// Create an unattached branch at the current HEAD without checking it out.
-fn create_unattached_target_branch(root: &std::path::Path, name: &str) -> String {
-    let mut repo = gix::open_opts(root, gix::open::Options::isolated()).expect("open repo");
-    // Isolated repos have no identity; inject a fixture committer for the reflog.
-    {
-        let mut cfg = repo.config_snapshot_mut();
-        cfg.set_raw_value("user.name", "lattice-test")
-            .expect("set name");
-        cfg.set_raw_value("user.email", "test@lattice.local")
-            .expect("set email");
-        let _ = cfg.commit();
-    }
-    let head = repo
-        .head_id()
-        .expect("HEAD id for unattached branch")
-        .detach();
-    repo.reference(
-        format!("refs/heads/{name}"),
-        head,
-        gix::refs::transaction::PreviousValue::MustNotExist,
-        "create unattached target branch",
-    )
-    .expect("create unattached target branch");
-    name.to_string()
-}
-
-fn create_session_with_branch(
-    sessions_path: &std::path::Path,
-    branch: &str,
-    project_root: &std::path::Path,
-) -> String {
-    create_session_store(sessions_path)
-        .create_session(lattice_api::CreateSessionRequest {
-            label: None,
-            active_agent: "default".to_string(),
-            project_branch: branch.to_string(),
-            project_store_key: store_key_hex(project_root),
-        })
-        .expect("create session")
-        .session_id
 }
 
 fn make_request(
     ws: &Workspace,
     input: &str,
-    session_id: &str,
+    session_id: Option<lancet_protocol::SessionId>,
     llm: Arc<dyn LlmClient>,
 ) -> RunTurnRequest {
-    // No `set_current_dir` here: `test_project_root` already pins the root, and
-    // mutating the process-global CWD from concurrent tests made sibling tests
-    // fail once a `TempDir` dropped (see the note in `tests/consistency.rs`).
     RunTurnRequest {
-        input: input.to_string(),
-        session_id: session_id.to_string(),
+        input: input.into(),
+        session_id,
+        agent: Some("default".into()),
         loaded_profile: Some(ws.loaded.clone()),
         cancel_flag: None,
-        test_llm: Some((llm, lattice_llm::ProviderKind::Anthropic)),
-        test_project_root: Some(ws.root.to_string_lossy().to_string()),
+        test_llm: Some((llm, lattice_llm::ProviderKind::OpenAiCompatible)),
+        test_project_root: Some(ws.root.to_string_lossy().into()),
     }
 }
 
-// ── Test 2: edit workspace file and commit ──────────────────────────────────
-
 #[tokio::test]
 async fn usage_run_turn_can_edit_workspace_file_and_commit() {
-    let ws = setup_workspace("pub fn answer() -> i32 { 1 }", &["mutate.edit"]);
-
     let original = "pub fn answer() -> i32 { 1 }";
-    let hash = format!("blake3:{}", blake3::hash(original.as_bytes()).to_hex());
-    let edit_args = serde_json::json!({
-        "path": "src/lib.rs",
-        "expected_hash": hash,
-        "edits": [{
-            "op": "replace_text",
-            "old": original,
-            "new": "pub fn answer() -> i32 { 42 }"
-        }]
-    });
-    let fake_llm: Arc<dyn LlmClient> = Arc::new(
-        FakeStreamingLlmClient::builder()
-            .push_events(tool_call_events(
-                "call_1",
-                "mutate.edit",
-                &edit_args.to_string(),
-            ))
-            .push_events(final_response_events("Edited successfully."))
-            .build(),
-    );
-    let target = create_unattached_target_branch(&ws.root, "lattice-target-edit");
-    let session_dir = tempfile::tempdir().unwrap();
-    let sessions_path = session_dir.path().join("sessions");
-    let session_id = create_session_with_branch(&sessions_path, &target, &ws.root);
+    let ws = setup_workspace(original, &["mutate.edit"]);
+    let fake = Arc::new(FakeStreamingLlmClient::builder()
+        .push_events(tool_call_events("mutate.edit", serde_json::json!({
+            "path":"src/lib.rs", "expected_hash":format!("blake3:{}", blake3::hash(original.as_bytes()).to_hex()),
+            "edits":[{"op":"replace_text", "old":original, "new":"pub fn answer() -> i32 { 42 }"}]
+        })))
+        .push_events(final_response_events("Edited successfully.")).build());
     let result = lattice_api::run_turn(
-        open_session_store(&sessions_path),
-        make_request(&ws, "Change the answer to 42", &session_id, fake_llm),
+        SessionApi::from_store(ws.store.clone()),
+        ws.layout.clone(),
+        make_request(&ws, "Change the answer to 42", None, fake),
     )
     .await
-    .expect("run_turn must succeed");
-
-    let edit_result = result
-        .tool_results
-        .iter()
-        .find(|t| t.name == "mutate.edit")
-        .expect("mutate.edit tool result");
-    assert!(
-        edit_result.ok,
-        "mutate.edit must succeed in the Local Workspace: {:?}",
-        edit_result.error_summary
+    .unwrap();
+    assert_eq!(result.summary.outcome, PublicTurnOutcome::Completed);
+    assert_eq!(
+        std::fs::read_to_string(ws.root.join("src/lib.rs")).unwrap(),
+        "pub fn answer() -> i32 { 42 }"
     );
-
-    assert!(matches!(
-        result.outcome,
-        lattice_session::TurnOutcome::Completed { .. }
-    ));
-
-    let verify_api = open_session_store(&sessions_path);
-    let log = verify_api
-        .log(&result.session_id)
-        .expect("log must succeed");
-    assert_eq!(log.len(), 1);
-
+    let read = ws.store.begin_read().unwrap();
+    let detail = read
+        .turn_detail(result.turn.session_id, result.turn.turn_id)
+        .unwrap();
+    assert_eq!(detail.steps, result.steps);
     assert!(
-        result
-            .tool_results
-            .iter()
-            .any(|t| t.name == "mutate.edit" && t.ok),
-        "should have a successful mutate.edit tool result"
+        matches!(&detail.steps[0].state, StepDetailState::Closed { end: StepEnd::Continue { .. }, slots }
+        if slots.len() == 1 && slots[0].binding.method == "mutate.edit" && matches!(slots[0].state, OperatorInvocationState::Terminal { outcome: lattice_conversation::ToolResultOutcome::Succeeded, .. }))
     );
+    assert_eq!(read.log(result.turn.session_id).unwrap().nodes.len(), 4);
 }
 
-// ── Test 3: resume session includes previous transcript ─────────────────────
+struct Capture {
+    inner: FakeStreamingLlmClient,
+    requests: Mutex<Vec<lattice_llm::ChatRequest>>,
+}
+#[async_trait::async_trait]
+impl LlmClient for Capture {
+    async fn stream_chat(
+        &self,
+        request: lattice_llm::ChatRequest,
+    ) -> std::result::Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
+        self.requests.lock().unwrap().push(request.clone());
+        self.inner.stream_chat(request).await
+    }
+}
 
 #[tokio::test]
 async fn usage_resume_session_includes_previous_turn_context() {
     let ws = setup_workspace("pub fn answer() -> i32 { 42 }", &["observe.workspace"]);
-
-    let fake_llm: Arc<dyn LlmClient> = Arc::new(
-        FakeStreamingLlmClient::builder()
+    let fake = Arc::new(Capture {
+        inner: FakeStreamingLlmClient::builder()
             .push_events(final_response_events("First turn done."))
             .push_events(final_response_events("Second turn done."))
+            .push_events(final_response_events("Third turn done."))
             .build(),
-    );
-
-    let target = create_unattached_target_branch(&ws.root, "lattice-target-resume");
-    let session_dir = tempfile::tempdir().unwrap();
-    let sessions_path = session_dir.path().join("sessions");
-    let session_id = create_session_with_branch(&sessions_path, &target, &ws.root);
-
-    let result1 = lattice_api::run_turn(
-        open_session_store(&sessions_path),
-        make_request(&ws, "Hello", &session_id, fake_llm.clone()),
+        requests: Mutex::default(),
+    });
+    let api = SessionApi::from_store(ws.store.clone());
+    let first = lattice_api::run_turn(
+        api.clone(),
+        ws.layout.clone(),
+        make_request(&ws, "Hello", None, fake.clone()),
     )
     .await
-    .expect("turn 1 must succeed");
+    .unwrap();
+    let second = lattice_api::run_turn(
+        api.clone(),
+        ws.layout.clone(),
+        make_request(&ws, "Follow up", Some(first.turn.session_id), fake.clone()),
+    )
+    .await
+    .unwrap();
+    let third = lattice_api::run_turn(
+        api,
+        ws.layout.clone(),
+        make_request(&ws, "Last input", Some(first.turn.session_id), fake.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(third.summary.outcome, PublicTurnOutcome::Completed);
+    assert_eq!(first.summary.outcome, PublicTurnOutcome::Completed);
+    assert_eq!(second.summary.outcome, PublicTurnOutcome::Completed);
+    let read = ws.store.begin_read().unwrap();
+    let detail = read
+        .turn_detail(second.turn.session_id, second.turn.turn_id)
+        .unwrap();
     assert!(matches!(
-        result1.outcome,
-        lattice_session::TurnOutcome::Completed { .. }
+        read.node(NodeRef {
+            session_id: second.turn.session_id,
+            node: detail.user_node
+        })
+        .unwrap(),
+        Node::UserMessage {
+            parent: NodeId(2),
+            ..
+        }
     ));
-    let request2 = make_request(&ws, "Follow up", &session_id, fake_llm);
-    let result2 = lattice_api::run_turn(open_session_store(&sessions_path), request2)
-        .await
-        .expect("turn 2 must succeed");
-    assert!(matches!(
-        result2.outcome,
-        lattice_session::TurnOutcome::Completed { .. }
-    ));
-
-    let store =
-        GitSessionGraphStore::open(session_repo(&sessions_path)).expect("open session store");
-    let transcript = store
-        .head_transcript(&session_id)
-        .expect("head_transcript after turn 2");
-    assert!(
-        transcript
-            .messages
-            .iter()
-            .any(|message| message.role == MessageRole::User
-                && lattice_session::test_helpers::text(message) == Some("Hello")),
-        "transcript must include first turn user message"
+    assert_eq!(read.log(second.turn.session_id).unwrap().nodes.len(), 7);
+    let requests = fake.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    let text =
+        |message: &lattice_conversation::NativeMessage<lattice_conversation::BoundToolCall>| {
+            let MessageSemantic::Text { text } = &message.parts[0].semantic else {
+                panic!("text")
+            };
+            (message.role, text.clone())
+        };
+    use lattice_conversation::MessageRole::{Assistant, System, User};
+    let supplied: Vec<_> = requests[2]
+        .messages
+        .iter()
+        .map(|item| match item {
+            ConversationItem::Message(message) => text(message),
+            ConversationItem::Step(step) => text(&step.assistant),
+        })
+        .collect();
+    assert_eq!(
+        supplied,
+        vec![
+            (System, "You are a test agent.".into()),
+            (User, "Hello".into()),
+            (Assistant, "First turn done.".into()),
+            (User, "Follow up".into()),
+            (Assistant, "Second turn done.".into()),
+            (User, "Last input".into()),
+        ]
     );
-    assert!(
-        transcript
-            .messages
-            .iter()
-            .any(|message| message.role == MessageRole::Assistant
-                && lattice_session::test_helpers::text(message) == Some("First turn done.")),
-        "transcript must include first turn assistant message"
-    );
-
-    let verify_api = open_session_store(&sessions_path);
-    let log = verify_api.log(&session_id).expect("log must succeed");
-    assert_eq!(log.len(), 2, "session log should have 2 commits");
-
-    let second = &log[1];
-    assert!(
-        second.parent_ids.contains(&result1.commit_id),
-        "second commit parent should include first commit"
-    );
-
-    let status = verify_api.status(&session_id).expect("status must succeed");
-    assert_eq!(status.commit_count, 2, "status should report 2 commits");
-    assert!(
-        matches!(status.head, lattice_session::GraphHead::Branch { name } if name == "main"),
-        "HEAD should be on main branch"
+    let mut saved = Vec::new();
+    for n in 1..=6 {
+        let node = read
+            .node(NodeRef {
+                session_id: first.turn.session_id,
+                node: NodeId(n),
+            })
+            .unwrap();
+        saved.push(match node {
+            Node::UserMessage { message, .. } => text(&message),
+            Node::Step { content, .. } => text(&content.assistant),
+            Node::Root => panic!("content node"),
+        });
+    }
+    assert_eq!(
+        saved,
+        vec![
+            (User, "Hello".into()),
+            (Assistant, "First turn done.".into()),
+            (User, "Follow up".into()),
+            (Assistant, "Second turn done.".into()),
+            (User, "Last input".into()),
+            (Assistant, "Third turn done.".into()),
+        ]
     );
 }
 
-// ── 目录外工具名：拒绝仍保留该次尝试的使用量 ──────────────────────────────
-
-/// 目录外调用虽被拒绝，对应模型请求已完成。使用量应写入持久日志，
-/// 正常失败关闭后仍能从 TurnCommit 读取（R1 止血 #218）。
 #[tokio::test]
 async fn usage_rejected_out_of_catalog_tool_batch_keeps_the_attempt_usage() {
     let ws = setup_workspace("pub fn answer() -> i32 { 1 }", &["observe.workspace"]);
-
-    let fake_llm: Arc<dyn LlmClient> = Arc::new(
+    let fake = Arc::new(
         FakeStreamingLlmClient::builder()
             .push_events(tool_call_events(
-                "call_outside",
                 "fetch.web",
-                &serde_json::json!({"url": "https://example.invalid"}).to_string(),
+                serde_json::json!({"url":"https://example.invalid"}),
             ))
             .build(),
     );
-    let target = create_unattached_target_branch(&ws.root, "lattice-target-outside-tool");
-    let session_dir = tempfile::tempdir().unwrap();
-    let sessions_path = session_dir.path().join("sessions");
-    let session_id = create_session_with_branch(&sessions_path, &target, &ws.root);
     let result = lattice_api::run_turn(
-        open_session_store(&sessions_path),
-        make_request(&ws, "fetch it", &session_id, fake_llm),
+        SessionApi::from_store(ws.store.clone()),
+        ws.layout.clone(),
+        make_request(&ws, "fetch it", None, fake),
     )
     .await
-    .expect("run_turn must close the Turn instead of failing the call");
+    .unwrap();
+    assert_eq!(result.summary.outcome, PublicTurnOutcome::Failed);
+    let detail = ws
+        .store
+        .begin_read()
+        .unwrap()
+        .turn_detail(result.turn.session_id, result.turn.turn_id)
+        .unwrap();
     assert!(matches!(
-        result.outcome,
-        lattice_session::TurnOutcome::Failed {
-            reason: lattice_session::pending::TurnFailure::InvalidToolCall { .. }
+        detail.steps[0].state,
+        StepDetailState::Closed {
+            end: StepEnd::Stop {
+                node: None,
+                cause: StopCause::InvalidBatch
+            },
+            ..
         }
     ));
-
-    let store =
-        GitSessionGraphStore::open(session_repo(&sessions_path)).expect("open session store");
-    let commit = store
-        .get_turn_commit(&session_id, &result.commit_id)
-        .expect("read the committed Turn")
-        .expect("the rejected Turn must still be committed");
     assert_eq!(
-        commit.usage,
-        Some(usage_tokens()),
-        "the rejected attempt reported usage; the durable Turn must keep it"
+        detail.usage,
+        UsageSummary::Complete {
+            total: usage_tokens()
+        }
     );
 }

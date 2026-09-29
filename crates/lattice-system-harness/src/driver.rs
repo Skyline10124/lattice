@@ -687,7 +687,7 @@ fn processes_in_pgid_at(proc_root: &Path, pgid: u32) -> Result<Vec<u32>, Cleanup
         let stat_path = entry.path().join("stat");
         let stat = match std::fs::read_to_string(&stat_path) {
             Ok(stat) => stat,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(error) if process_exited(&error) => {
                 // The process exited between listing `/proc` and reading its
                 // stat file, so it cannot be a final survivor.
                 continue;
@@ -713,7 +713,7 @@ fn processes_in_pgid_at(proc_root: &Path, pgid: u32) -> Result<Vec<u32>, Cleanup
 pub(crate) fn process_stat(pid: u32) -> Result<Option<ProcessStat>, CleanupError> {
     let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
         Ok(stat) => stat,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if process_exited(&error) => return Ok(None),
         Err(error) => {
             return Err(CleanupError::new(
                 CleanupOperation::InspectProcessGroup(ProcessInspectionOperation::ReadStat(pid)),
@@ -722,6 +722,12 @@ pub(crate) fn process_stat(pid: u32) -> Result<Option<ProcessStat>, CleanupError
         }
     };
     parse_process_stat(pid, &stat)
+}
+
+/// 进程在列出 `/proc` 与读取 stat 之间退出：目录已消失时为 ENOENT，
+/// 目录仍在但进程已回收时读取返回 ESRCH。两者都说明它不再是存活成员。
+pub(crate) fn process_exited(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound || error.raw_os_error() == Some(libc::ESRCH)
 }
 
 /// `/proc/<pid>/stat` 中清理需要的字段：进程组与会话。
@@ -745,6 +751,10 @@ fn parse_process_stat(pid: u32, stat: &str) -> Result<Option<ProcessStat>, Clean
     let state = fields
         .next()
         .ok_or_else(|| invalid("process stat is missing state"))?;
+    // Z（僵尸）与 X（正在释放）都已退出；X 的进程组与会话字段报告为 -1，不能解析。
+    if matches!(state, "Z" | "X") {
+        return Ok(None);
+    }
     let _ppid = fields
         .next()
         .ok_or_else(|| invalid("process stat is missing parent pid"))?;
@@ -758,7 +768,7 @@ fn parse_process_stat(pid: u32, stat: &str) -> Result<Option<ProcessStat>, Clean
         .ok_or_else(|| invalid("process stat is missing session"))?
         .parse::<u32>()
         .map_err(|_| invalid("process stat has an invalid session"))?;
-    Ok((state != "Z").then_some(ProcessStat { pgid, session }))
+    Ok(Some(ProcessStat { pgid, session }))
 }
 
 #[cfg(test)]
@@ -1091,6 +1101,9 @@ mod tests {
             );
             assert_eq!(error.kind, std::io::ErrorKind::InvalidData);
         }
+        // 内核对正在释放的进程报告 pgrp/session 为 -1；它已退出，不是存活成员。
+        let dead = "4242 (sleep) X 0 -1 -1 0 -1 4227084";
+        assert_eq!(parse_process_stat(4242, dead).expect("dead stat"), None);
     }
 
     /// #105: a group signal aimed at the harness's own group would interrupt

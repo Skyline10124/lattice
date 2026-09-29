@@ -10,8 +10,7 @@
 /// runtime fault.
 #[derive(Debug, thiserror::Error)]
 pub enum LancetError {
-    /// The supplied [`crate::LancetRuntimeConfig`] is invalid (bad paths, audit
-    /// store setup failure, malformed base envelope).
+    /// 运行时配置无效，例如路径、工作区历史绑定或输入信封不合法。
     #[error("invalid lancet configuration: {0}")]
     Config(String),
 

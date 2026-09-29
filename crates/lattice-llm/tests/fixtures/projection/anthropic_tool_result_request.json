@@ -4,7 +4,7 @@
     {
       "type": "tool_result",
       "tool_use_id": "toolu_01AbCdEfGh",
-      "content": "permission denied by policy",
+      "content": "{\"error\":{\"code\":-32020,\"message\":\"permission denied by policy\"}}",
       "is_error": true
     },
     {

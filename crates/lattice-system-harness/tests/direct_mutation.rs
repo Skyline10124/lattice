@@ -18,8 +18,7 @@ use std::fs;
 use std::time::Duration;
 
 use lattice_system_harness::{
-    AssertError, SendExitCode, SessionSendDriver, SseScript, TurnEventLine,
-    assert_event_subsequence,
+    AssertError, SendExitCode, SessionSendDriver, SseScript, assert_event_subsequence,
 };
 use serde_json::Value;
 use support::{
@@ -29,13 +28,10 @@ use support::{
 };
 
 fn is_non_completed_terminal(outcome: &lattice_system_harness::SendOutcome) -> bool {
-    outcome.events.iter().any(|e| match e {
-        TurnEventLine::TurnFailed { .. }
-        | TurnEventLine::TurnCancelled { .. }
-        | TurnEventLine::CommitFailed { .. } => true,
-        TurnEventLine::TurnCommitted { outcome, .. } => outcome != "completed",
-        _ => false,
-    }) || outcome.exit_code == Some(SendExitCode::Failed)
+    outcome
+        .closed_result()
+        .is_some_and(|(_, _, outcome)| outcome != "completed")
+        || outcome.exit_code == Some(SendExitCode::Failed)
 }
 
 /// `mutate.create` succeeds only while the target is absent; bytes appear
@@ -63,8 +59,7 @@ fn direct_mutation_create_atomic_and_existing_target() {
         ]),
     );
     let scenario_evidence = evidence(&world, &spec);
-    let send =
-        SessionSendDriver::new(&driver, &world, &spec, "dl-create", "main").expect("session");
+    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-create");
 
     let first = send.send("create new.txt").expect("first turn");
     let second = send.send("create new.txt again").expect("second turn");
@@ -75,7 +70,7 @@ fn direct_mutation_create_atomic_and_existing_target() {
         assert_clean_send(&second)?;
         require(tool_ok(&first.parsed, "mutate.create"), "first create ok")?;
         require(
-            first.has_committed_completed(),
+            first.has_completed(),
             format!("first turn incomplete: {:?}", first.type_sequence()),
         )?;
         let path = world.project_dir().join("new.txt");
@@ -90,7 +85,7 @@ fn direct_mutation_create_atomic_and_existing_target() {
             "second create of existing target must fail",
         )?;
         require(
-            second.has_committed_completed(),
+            second.has_completed(),
             "second turn should still complete after tool failure",
         )?;
         require(
@@ -155,7 +150,7 @@ fn direct_mutation_edit_hash_and_anchor() {
         ]),
     );
     let scenario_evidence = evidence(&world, &spec);
-    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-edit", "main").expect("session");
+    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-edit");
 
     let observe = send.send("read tracked.txt").expect("observe turn");
     let captures_obs = server.captured_requests();
@@ -220,7 +215,7 @@ fn direct_mutation_edit_hash_and_anchor() {
                 == "hello world\n",
             "failed edit must preserve original bytes",
         )?;
-        require(bad.has_committed_completed(), "bad-edit turn completes")?;
+        require(bad.has_completed(), "bad-edit turn completes")?;
 
         let good = send.send("edit with good anchor").expect("good edit turn");
         let captures_edit = server2.captured_requests();
@@ -232,7 +227,7 @@ fn direct_mutation_edit_hash_and_anchor() {
                 == "hello lattice\n",
             "good edit must install new bytes",
         )?;
-        require(good.has_committed_completed(), "good-edit turn completes")?;
+        require(good.has_completed(), "good-edit turn completes")?;
         require(
             captures_edit.len() >= 2,
             format!("edit captures missing: {}", captures_edit.len()),
@@ -278,7 +273,7 @@ fn direct_mutation_stale_edit_and_external_visibility() {
         ]),
     );
     let scenario_evidence = evidence(&world, &spec);
-    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-stale", "main").expect("session");
+    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-stale");
     let observe = send.send("read tracked").expect("observe");
     let captures_obs = server.captured_requests();
     drop(server);
@@ -395,8 +390,7 @@ fn direct_mutation_no_rollback_after_provider_failure() {
         ]),
     );
     let scenario_evidence = evidence(&world, &spec);
-    let send =
-        SessionSendDriver::new(&driver, &world, &spec, "dl-noroll", "main").expect("session");
+    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-noroll");
     let outcome = send.send("create then die").expect("turn drives");
     let captures = server.captured_requests();
 
@@ -408,7 +402,7 @@ fn direct_mutation_no_rollback_after_provider_failure() {
             path.is_file() && fs::read_to_string(&path).unwrap_or_default() == "must-remain\n",
             "successful mutation must remain after provider failure",
         )?;
-        let completed = outcome.has_committed_completed();
+        let completed = outcome.has_completed();
         let failed_or_error = is_non_completed_terminal(&outcome.parsed);
         require(
             !completed || failed_or_error,
@@ -458,8 +452,7 @@ fn direct_mutation_denials_have_no_side_effect() {
         ]),
     );
     let mut scenario_evidence = evidence(&world, &spec);
-    let send =
-        SessionSendDriver::new(&driver, &world, &spec, "dl-dwrite", "main").expect("session");
+    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-dwrite");
     let write_deny = send.send("write denied").expect("turn");
     let caps1 = server.captured_requests();
     drop(server);
@@ -478,8 +471,7 @@ fn direct_mutation_denials_have_no_side_effect() {
         ]),
     );
     let mut evidence2 = evidence(&world2, &spec2);
-    let send2 =
-        SessionSendDriver::new(&driver, &world2, &spec2, "dl-dsys", "main").expect("session");
+    let send2 = SessionSendDriver::new(&driver, &world2, &spec2, "dl-dsys");
     let sys_deny = send2.send("write .lattice").expect("turn");
     let caps2 = server2.captured_requests();
     drop(server2);
@@ -504,8 +496,7 @@ fn direct_mutation_denials_have_no_side_effect() {
         ]),
     );
     let evidence3 = evidence(&world3, &spec3);
-    let send3 =
-        SessionSendDriver::new(&driver, &world3, &spec3, "dl-deff", "main").expect("session");
+    let send3 = SessionSendDriver::new(&driver, &world3, &spec3, "dl-deff");
     let effect_deny = send3.send("effect denied create").expect("turn");
     let caps3 = server3.captured_requests();
 
@@ -614,10 +605,8 @@ fn direct_mutation_concurrent_same_target_create_has_one_winner() {
         ]),
     );
     let scenario_evidence = evidence(&world, &spec);
-    let send_a =
-        SessionSendDriver::new(&driver, &world, &spec, "dl-race", "main").expect("session a");
-    let send_b =
-        SessionSendDriver::new(&driver, &world, &spec, "dl-race", "main").expect("session b");
+    let send_a = SessionSendDriver::new(&driver, &world, &spec, "dl-race");
+    let send_b = SessionSendDriver::new(&driver, &world, &spec, "dl-race");
 
     let running_a = send_a.spawn("create a").expect("spawn a");
     let running_b = send_b.spawn("create b").expect("spawn b");
@@ -686,8 +675,8 @@ fn direct_mutation_concurrent_same_target_create_has_one_winner() {
             ),
         )?;
 
-        let a_completed = a.has_committed_completed();
-        let b_completed = b.has_committed_completed();
+        let a_completed = a.has_completed();
+        let b_completed = b.has_completed();
         require(
             a_completed || b_completed,
             format!(
@@ -753,7 +742,7 @@ fn direct_mutation_tool_activity_before_commit() {
         ]),
     );
     let scenario_evidence = evidence(&world, &spec);
-    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-order", "main").expect("session");
+    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-order");
     let outcome = send.send("create ordered").expect("turn");
     let captures = server.captured_requests();
 

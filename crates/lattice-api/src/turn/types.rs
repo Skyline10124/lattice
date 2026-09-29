@@ -7,35 +7,25 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use futures::stream::Stream;
+use lancet_protocol::SessionId;
 use lattice_profile::LoadedAgentProfile;
-use lattice_session::pending::{ClosureOrigin, TurnOutcome, WorkspaceHistoryCheckpoint};
+use lattice_session::store::{TurnDetail, TurnSummary, UsageSummary};
 
-/// 各执行入口共用原有请求形状；显式请求身份和连接材料由 [`crate::start_turn`] 单独接收。
-///
-/// 测试辅助入口 run_turn/stream_turn 复用同一执行核心，分别收集结果或观察事件。
-/// 恢复已有 pending 时只报告旧 Turn，不接受此处的新输入。
-#[derive(Clone, Serialize, Deserialize)]
+/// 执行核心的冻结输入；凭据通过独立连接参数传入。
+#[derive(Clone)]
 pub struct RunTurnRequest {
     pub input: String,
-    pub session_id: String,
-    #[serde(skip)]
+    pub session_id: Option<SessionId>,
+    pub agent: Option<String>,
     pub loaded_profile: Option<LoadedAgentProfile>,
-    /// Cooperative cancellation flag forwarded to the agent loop.
-    #[serde(skip)]
     pub cancel_flag: Option<Arc<AtomicBool>>,
-    /// 测试注入同时提供客户端与明确的 provider，避免从模型标签猜测保存身份。
-    /// 只在测试或 `test-utils` 构建中存在，生产调用方无法替换真实模型客户端。
     #[cfg(any(test, feature = "test-utils"))]
-    #[serde(skip)]
     pub test_llm: Option<(Arc<dyn lattice_agent::LlmClient>, lattice_llm::ProviderKind)>,
-    /// 测试入口使用的项目根目录，生产执行始终使用后台核验过的工作区。
     #[cfg(any(test, feature = "test-utils"))]
-    #[serde(skip)]
     pub test_project_root: Option<String>,
 }
 
 impl RunTurnRequest {
-    /// 测试注入的模型客户端；生产构建中没有注入入口，恒为 None。
     pub(crate) fn injected_llm(
         &self,
     ) -> Option<(Arc<dyn lattice_agent::LlmClient>, lattice_llm::ProviderKind)> {
@@ -46,83 +36,15 @@ impl RunTurnRequest {
     }
 }
 
-impl PartialEq for RunTurnRequest {
-    fn eq(&self, other: &Self) -> bool {
-        self.input == other.input
-            && self.session_id == other.session_id
-            && self.loaded_profile == other.loaded_profile
-    }
-}
-
-/// A stage in the turn execution pipeline.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub enum RunTurnStage {
-    Profile,
-    Session,
-    Agent,
-    Llm,
-    Tools,
-    Commit,
-    Render,
-}
-
-impl std::fmt::Display for RunTurnStage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RunTurnStage::Profile => write!(f, "profile"),
-            RunTurnStage::Session => write!(f, "session"),
-            RunTurnStage::Agent => write!(f, "agent"),
-            RunTurnStage::Llm => write!(f, "llm"),
-            RunTurnStage::Tools => write!(f, "tools"),
-            RunTurnStage::Commit => write!(f, "commit"),
-            RunTurnStage::Render => write!(f, "render"),
-        }
-    }
-}
-
-/// Summary of a single tool execution.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct ToolResultSummary {
-    pub tool_call_id: String,
-    pub name: String,
-    pub ok: bool,
-    pub output_len: usize,
-    pub error_summary: Option<String>,
-}
-
-/// Token usage statistics.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct TurnUsageSummary {
-    pub prompt_tokens: u64,
-    pub completion_tokens: u64,
-    pub total_tokens: u64,
-}
-
-impl From<lattice_session::TurnUsage> for TurnUsageSummary {
-    fn from(u: lattice_session::TurnUsage) -> Self {
-        Self {
-            prompt_tokens: u.prompt_tokens,
-            completion_tokens: u.completion_tokens,
-            total_tokens: u.total_tokens,
-        }
-    }
-}
-
-/// Result of executing a synchronous turn.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct RunTurnResult {
-    pub session_id: String,
-    pub commit_id: String,
-    pub assistant_output: String,
-    pub outcome: TurnOutcome,
-    pub origin: ClosureOrigin,
-    pub workspace_history_checkpoint: WorkspaceHistoryCheckpoint,
-    pub usage: Option<TurnUsageSummary>,
-    pub tool_results: Vec<ToolResultSummary>,
-    pub stages: Vec<RunTurnStage>,
+    pub turn: TurnRef,
+    pub summary: TurnSummary,
+    pub usage: UsageSummary,
+    pub steps: Vec<lattice_session::store::StepDetail>,
 }
 
-/// Public turn stream event with stable JSON discriminator.
+/// 所有终结事件仅来自已经提交的关闭事实。
 ///
 /// Serializes with `#[serde(tag = "type", rename_all = "snake_case")]`, so
 /// each variant produces JSON of the form `{"type": "snake_case_name", ...}`.
@@ -135,83 +57,56 @@ pub struct RunTurnResult {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TurnEvent {
-    /// The turn has started execution.
     TurnStarted {
-        session_id: String,
-        /// Additive stable turn identifier (`<session>:<parent-or-root>`).
-        /// Audit replay needs it to address a turn deterministically; old
-        /// consumers ignore the extra field.
-        turn_id: String,
-        parent_commit_id: Option<String>,
-        branch: Option<String>,
+        turn: TurnRef,
+        user_node: lattice_session::store::NodeId,
     },
-    /// A model request is starting.
     ModelStarted {
-        provider: Option<String>,
+        key: lancet_protocol::ModelAttemptKey,
+        provider: lattice_conversation::ProviderOrigin,
         model: String,
     },
-    /// A model request failed before a stream opened.
+    TokenDelta {
+        key: lancet_protocol::ModelAttemptKey,
+        content: String,
+    },
+    ReasoningDelta {
+        key: lancet_protocol::ModelAttemptKey,
+        content: String,
+    },
     LlmRequestError {
-        provider: Option<String>,
-        model: String,
-        attempt: u32,
-        max_attempts: u32,
-        error_kind: String,
+        key: lancet_protocol::ModelAttemptKey,
         retryable: bool,
         will_retry: bool,
         delay_ms: Option<u64>,
-        status_code: Option<u16>,
         message: String,
     },
-    /// A chunk of reasoning/thinking text from the LLM.
-    ReasoningDelta { content: String },
-    /// A chunk of visible assistant text from the LLM.
-    TokenDelta { content: String },
-    /// A tool call is about to execute.
-    ToolCallStarted { id: String, name: String },
-    /// A tool call has completed.
-    ToolCallFinished {
-        id: String,
+    ModelFinished {
+        key: lancet_protocol::ModelAttemptKey,
+        finish_reason: Option<String>,
+        usage: Option<lattice_conversation::TokenUsage>,
+    },
+    CallsRegistered {
+        key: lattice_session::store::StepKey,
+        calls: Vec<lancet_protocol::InvocationBinding>,
+    },
+    ToolCallStarted {
+        id: lancet_protocol::InvocationId,
         name: String,
-        ok: bool,
-        output_len: usize,
+    },
+    ToolCallFinished {
+        id: lancet_protocol::InvocationId,
+        name: String,
+        outcome: lattice_conversation::ToolResultOutcome,
+        material: lattice_session::store::MaterialSummary,
         error_summary: Option<String>,
     },
-    /// A model request completed successfully.
-    ModelFinished {
-        finish_reason: String,
-        usage: Option<TurnUsageSummary>,
-    },
-    /// The turn failed due to an error.
-    TurnFailed { reason: String },
-    /// The turn was cancelled.
-    TurnCancelled { reason: Option<String> },
-    /// Commit persistence is in progress.
-    TurnCommitting,
-    /// The turn was committed successfully.
-    TurnCommitted {
-        session_id: String,
-        commit_id: String,
-        outcome: TurnOutcome,
-        origin: ClosureOrigin,
-        workspace_history_checkpoint: WorkspaceHistoryCheckpoint,
-    },
-    /// Terminal/evidence publication exhausted its fixed durability budget.
-    EvidenceDurabilityFailed { attempts: u32 },
-    /// Durable invocation facts require a closure-only reconciliation pass.
-    RecoveryRequired {
-        reason: crate::session::RecoveryRequired,
-    },
-    /// Commit persistence failed.
-    CommitFailed { reason: String },
-    /// A CEP call has started on the embedded server.
     CepCallStarted {
         invocation_id: lancet_protocol::InvocationId,
         method: String,
         semantic_stage: String,
         guard_stage: String,
     },
-    /// A CEP call has finished on the embedded server.
     CepCallFinished {
         invocation_id: lancet_protocol::InvocationId,
         method: String,
@@ -220,37 +115,70 @@ pub enum TurnEvent {
         guard_stage: String,
         error_code: Option<String>,
     },
+    StepClosed {
+        step: lattice_session::store::StepDetail,
+    },
+    TurnCompleted {
+        turn: TurnRef,
+        step: lattice_session::store::StepDetail,
+        summary: lattice_session::store::TurnSummary,
+    },
+    TurnFailed {
+        turn: TurnRef,
+        step: lattice_session::store::StepDetail,
+        summary: lattice_session::store::TurnSummary,
+    },
+    TurnCancelled {
+        turn: TurnRef,
+        step: lattice_session::store::StepDetail,
+        summary: lattice_session::store::TurnSummary,
+    },
 }
 
-/// 接受确认来自持久发布返回值，与有损事件通道无关。
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TurnRef {
+    pub session_id: lancet_protocol::SessionId,
+    pub turn_id: lancet_protocol::TurnId,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AttemptSegments {
+    pub key: lancet_protocol::ModelAttemptKey,
+    pub segments: Vec<TextSegment>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TextSegment {
+    Text { text: String },
+    Reasoning { text: String },
+}
+/// 接受回执与独立完成回执都不从观察窗口推导。
 #[derive(Clone, Debug, PartialEq)]
 pub enum TurnAcceptance {
-    /// 仅在 TurnStarted 已确认持久后返回。
-    Accepted { turn_id: lancet_protocol::TurnId },
-    /// 找回同一请求；Pending 只报告日志，不在此恢复或重新执行。
-    Existing(Box<lattice_session::StoredTurn>),
-    /// 发布结果不确定；不能据此重分配身份，必须查询或重试同一 TurnId。
-    ConfirmationUnknown { turn_id: lancet_protocol::TurnId },
+    Accepted {
+        turn: TurnDetail,
+    },
+    Existing {
+        turn: TurnDetail,
+    },
+    ConfirmationUnknown {
+        turn_id: lancet_protocol::TurnId,
+        session_id: Option<SessionId>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum TurnCompletion {
-    Committed(Box<lattice_session::TurnCommit>),
-    /// 本次所有者任务已结束，但持久 Turn 尚未关闭；不是提交完成。
-    /// 崩溃遗留任务由后续新提交或会话写操作自动关闭。
-    Pending(lancet_protocol::TurnId),
+    Closed(Box<TurnDetail>),
+    Running(TurnRef),
 }
 
-/// 释放观察者或回执不取消任务；后台排空必须等待 completion，而非事件 EOF。
 pub struct TurnExecution {
     pub acceptance: tokio::sync::oneshot::Receiver<crate::session::Result<TurnAcceptance>>,
     pub completion: tokio::sync::oneshot::Receiver<crate::session::Result<TurnCompletion>>,
-    pub events: SequencedTurnEventStream,
-    /// 包括未投递事件的最终序号，用于识别尾部缺口；不是持久状态。
-    pub event_sequence: Arc<std::sync::atomic::AtomicU64>,
     pub cancel_flag: Arc<AtomicBool>,
 }
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct SequencedTurnEvent {
     pub sequence: u64,

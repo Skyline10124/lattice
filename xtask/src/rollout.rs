@@ -373,8 +373,6 @@ fn build_plan(ctx: &Ctx) -> Vec<Planned> {
         "-p",
         "lancet-authority",
         "-p",
-        "lancet-audit",
-        "-p",
         "lancet-api",
         "-p",
         "lattice-api",

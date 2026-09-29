@@ -25,7 +25,7 @@ mod support;
 
 use lattice_system_harness::{
     AssertError, CapturedRequest, ScenarioSpec, ScenarioWorld, SendExitCode, SendOutcome,
-    SessionSendDriver, SseScript, TurnEventLine, assert_event_subsequence, derive_send_exit_code,
+    SessionSendDriver, SseScript, TurnEventLine, derive_send_exit_code,
 };
 use serde_json::{Value, json};
 use support::{
@@ -56,7 +56,7 @@ fn turn_world(
     (world, spec)
 }
 
-/// 接受、固定正文与公开日志共同证明 live Turn；有 Gap 时不伪造缺失事件。
+/// 接受、最终根路径正文与树形日志共同证明同一个 Turn。
 fn assert_live_text_turn(
     outcome: &SendOutcome,
     session_id: &str,
@@ -65,95 +65,55 @@ fn assert_live_text_turn(
     log: &Value,
 ) -> Result<(), AssertError> {
     assert_accepted_and_closed(outcome)?;
-    let (committed_session, commit_id, result) =
+    let (sid, turn_id, result) =
         outcome
-            .committed_result()
+            .closed_result()
             .ok_or_else(|| AssertError::StdoutMissing {
-                expected: "strict committed result".into(),
+                expected: "closed result".into(),
             })?;
     require(
-        committed_session == session_id
-            && !commit_id.is_empty()
+        sid == session_id
             && result == "completed"
             && outcome.exit_code == Some(SendExitCode::Committed)
             && derive_send_exit_code(&outcome.events) == SendExitCode::Committed,
-        "completed result identity and both exit classifications must agree",
+        "completed identity and delivery must agree",
     )?;
-    let has_gap = outcome.events.iter().any(
-        |event| matches!(event, TurnEventLine::Unknown { type_name, .. } if type_name == "gap"),
-    );
-    if !has_gap {
-        assert_event_subsequence(
-            outcome,
-            &[
-                "turn_started",
-                "model_started",
-                "token_delta",
-                "model_finished",
-                "turn_committing",
-                "turn_committed",
-            ],
-        )
-        .map_err(|expected| AssertError::StdoutMissing { expected })?;
-        require(
-            outcome.assistant_text() == reply,
-            "continuous stream must carry the exact reply",
-        )?;
-    }
-    let turn_id = outcome.accepted_turn_id().expect("accepted TurnId");
-    require(
-        outcome.events.iter().any(|event| match event {
-            TurnEventLine::Unknown { type_name, raw } if type_name == "snapshot" => {
-                let view = &raw["view"];
-                view["session"]["session_id"] == session_id
-                    && view["active_turn"].is_null()
-                    && view["requested_turn"]["turn_id"] == turn_id
-                    && view["requested_turn"]["commit_id"] == commit_id
-                    && view["requested_turn"]["origin"] == "live"
-            }
-            _ => false,
-        }),
-        "fixed result must identify this live Turn and commit",
-    )?;
-    // 无论是否发生 Gap，都按最终 commit 固定正文核验；pending 正文不能代替提交内容。
-    let transcript: Vec<_> = outcome
+    let history = outcome
         .events
         .iter()
-        .filter_map(|event| match event {
-            TurnEventLine::Unknown { type_name, raw }
-                if type_name == "transcript"
-                    && raw["state"] == "completed"
-                    && raw["object_id"] == commit_id =>
-            {
-                Some((&raw["message"]["role"], &raw["message"]["parts"]))
+        .rev()
+        .find_map(|event| match event {
+            TurnEventLine::Unknown { type_name, raw } if type_name == "history" => {
+                Some(&raw["history"])
             }
             _ => None,
         })
+        .ok_or_else(|| AssertError::StdoutMissing {
+            expected: "complete history".into(),
+        })?;
+    let entries: Vec<_> = history["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["content"]["turn_id"] == turn_id)
         .collect();
-    let text_parts =
-        |text: &str| json!([{"replay_state": null, "semantic": {"text": {"text": text}}}]);
+    let text_parts = |text: &str| json!([{"replay_state":null,"semantic":{"text":{"text":text}}}]);
     require(
-        transcript
-            == vec![
-                (&json!("user"), &text_parts(prompt)),
-                (&json!("assistant"), &text_parts(reply)),
-            ],
-        "fixed committed transcript must contain exactly the user input and assistant reply",
+        entries.len() == 2
+            && entries[0]["content"]["message"]["parts"] == text_parts(prompt)
+            && entries[1]["content"]["content"]["assistant"]["parts"] == text_parts(reply)
+            && entries[1]["content"]["content"]["results"] == json!([]),
+        "history contains exact user and assistant text",
     )?;
     require(
-        log["session_id"] == session_id
-            && log["turns"].as_array().is_some_and(|turns| {
-                turns.iter().any(|turn| {
-                    turn["turn_id"] == turn_id
-                        && turn["commit_id"] == commit_id
-                        && turn["commit_message"] == prompt
-                        && turn["origin"] == "live"
-                        && turn["outcome"] == json!({"completed": {"finish_reason": "stop"}})
-                        && turn["message_count"] == 2
-                        && turn["tool_message_count"] == 0
+        log["session"]["session_id"] == session_id
+            && log["nodes"].as_array().is_some_and(|rows| {
+                rows.iter().any(|row| {
+                    row["turn_start"]["turn_id"] == turn_id
+                        && row["turn_start"]["summary"]["outcome"] == "completed"
                 })
             }),
-        "session log must corroborate the same live completed Turn and commit",
+        "tree log corroborates the same completed Turn",
     )
 }
 
@@ -179,12 +139,11 @@ fn direct_local_plain_text_turn_commits_and_exit_zero() {
     let server = wire_fake_llm(&world, "dl-plain", SseScript::plain("ok"));
     let scenario_evidence = evidence(&world, &spec);
 
-    let send =
-        SessionSendDriver::new(&driver, &world, &spec, "dl-plain", "main").expect("create session");
+    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-plain");
     let execution = send.send("ping").expect("run session send");
     let outcome = &execution.parsed;
     let log_output = send
-        .run_command(&["--json", "session", "log", send.session_id()])
+        .run_command(&["--json", "session", "log", send.session_id().unwrap()])
         .expect("session log --json");
     let captures = server.captured_requests();
 
@@ -192,12 +151,10 @@ fn direct_local_plain_text_turn_commits_and_exit_zero() {
         assert_clean_send(&execution)?;
         require(log_output.is_clean_exit(0), "session log must exit cleanly")?;
         let log: Value = serde_json::from_slice(&log_output.stdout).expect("session log JSON");
-        assert_live_text_turn(outcome, send.session_id(), "ping", "ok", &log)?;
+        assert_live_text_turn(outcome, send.session_id().unwrap(), "ping", "ok", &log)?;
         require(
-            log["turns"]
-                .as_array()
-                .is_some_and(|turns| turns.len() == 1),
-            "one committed Turn in log",
+            log["nodes"].as_array().is_some_and(|rows| rows.len() == 3),
+            "root, user and Step only",
         )?;
         require(
             captures.len() == 1,
@@ -239,8 +196,7 @@ fn direct_local_session_reopen_after_external_change() {
         },
     );
     let scenario_evidence = evidence(&world, &spec);
-    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-reopen", "main")
-        .expect("create session");
+    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-reopen");
 
     let first = send.send("ping").expect("first turn drives to completion");
     world
@@ -262,7 +218,7 @@ fn direct_local_session_reopen_after_external_change() {
         .send("again")
         .expect("second turn drives to completion");
     let log_output = send
-        .run_command(&["--json", "session", "log", send.session_id()])
+        .run_command(&["--json", "session", "log", send.session_id().unwrap()])
         .expect("session log --json");
     let captures = server.captured_requests();
 
@@ -271,8 +227,14 @@ fn direct_local_session_reopen_after_external_change() {
         assert_clean_send(&second)?;
         require(log_output.is_clean_exit(0), "session log must exit cleanly")?;
         let log: Value = serde_json::from_slice(&log_output.stdout).expect("session log JSON");
-        assert_live_text_turn(&first, send.session_id(), "ping", "pong-one", &log)?;
-        assert_live_text_turn(&second, send.session_id(), "again", "pong-two", &log)?;
+        assert_live_text_turn(&first, send.session_id().unwrap(), "ping", "pong-one", &log)?;
+        assert_live_text_turn(
+            &second,
+            send.session_id().unwrap(),
+            "again",
+            "pong-two",
+            &log,
+        )?;
         require(
             captures.len() == 2,
             format!("expected one LLM request per turn, got: {captures:?}"),
@@ -295,23 +257,18 @@ fn direct_local_session_reopen_after_external_change() {
             "two real requests must carry the exact inputs and prior user/assistant context",
         )?;
 
-        let commit_ids: Vec<&str> = [&first, &second]
+        let turn_ids: Vec<_> = [&first, &second]
             .iter()
-            .filter_map(|outcome| outcome.committed_result().map(|(_, id, _)| id))
+            .map(|outcome| outcome.closed_result().unwrap().1)
             .collect();
-        require(commit_ids.len() == 2, "both turns must report commit ids")?;
+        require(turn_ids[0] != turn_ids[1], "two distinct Turns")?;
+        let rows = log["nodes"].as_array().unwrap();
         require(
-            commit_ids[0] != commit_ids[1],
-            "two Turns must have distinct commit ids",
-        )?;
-        require(
-            log["turns"].as_array().is_some_and(|turns| {
-                turns.len() == 2
-                    && commit_ids
-                        .iter()
-                        .all(|id| turns.iter().any(|turn| turn["commit_id"] == *id))
-            }),
-            "session log must contain exactly the two reported commits",
+            rows.len() == 5
+                && turn_ids
+                    .iter()
+                    .all(|id| rows.iter().any(|row| row["turn_start"]["turn_id"] == *id)),
+            "tree contains root and both complete Turns",
         )?;
         require(
             std::fs::read(world.project_dir().join("external.txt"))
@@ -368,8 +325,7 @@ fn direct_local_mutate_create_denied_by_write_policy() {
         },
     );
     let scenario_evidence = evidence(&world, &spec);
-    let send =
-        SessionSendDriver::new(&driver, &world, &spec, "dl-deny", "main").expect("create session");
+    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-deny");
     let outcome = send.send("create blocked/denied.txt").expect("turn drives");
     let captures = server.captured_requests();
 
@@ -400,7 +356,7 @@ fn direct_local_mutate_create_denied_by_write_policy() {
             "denied mutate.create left a file on disk",
         )?;
         require(
-            outcome.has_committed_completed(),
+            outcome.has_completed(),
             format!(
                 "turn did not recover after denial: {:?}",
                 outcome.type_sequence()

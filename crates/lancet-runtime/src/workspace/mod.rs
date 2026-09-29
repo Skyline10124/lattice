@@ -9,11 +9,9 @@
 //! atomic replacement, and filesystem error normalization behind one concrete
 //! type. It is not a public pluggable execution-backend interface.
 //!
-//! Tool Host `workspace-observe` and `workspace-mutate` imports plus Rewind
-//! share this module. Network execution is owned by the sibling runtime host.
+//! Tool Host 的工作区观察与变更共用此模块；网络执行由相邻 Host 负责。
 
 mod local;
-pub mod rewind;
 mod types;
 mod visibility;
 
@@ -28,8 +26,7 @@ pub use visibility::{VisibilityEngine, VisibilityEvidence, join_rel};
 /// Maximum bytes a single Atomic Local Mutation may write to one file (#120).
 ///
 /// One definition for every live workspace write path. It is not a
-/// profile/config axis: a Cell must not raise its own write budget. Rewind
-/// reinstates bytes the workspace already held.
+/// profile/config axis: a Cell must not raise its own write budget.
 pub const MAX_WORKSPACE_WRITE_BYTES: usize = 1024 * 1024;
 
 /// Canonical content hash for a byte slice.

@@ -719,17 +719,6 @@ fn bind_message(message: &NativeMessage<UnboundToolCall>) -> NativeMessage<Bound
             MessageSemantic::Reasoning { text } => {
                 MessageSemantic::Reasoning { text: text.clone() }
             }
-            MessageSemantic::ToolResult {
-                invocation_id,
-                name,
-                outcome,
-                content,
-            } => MessageSemantic::ToolResult {
-                invocation_id: *invocation_id,
-                name: name.clone(),
-                outcome: *outcome,
-                content: content.clone(),
-            },
         };
         bound_parts.push(MessagePart {
             semantic,
@@ -796,167 +785,249 @@ fn cross_provider_projection_drops_bound_provider_ids_and_replay_state() {
     assert_eq!(tool_calls[0].1.invocation_id, invocation(0));
 }
 
-fn tool_closure(
-    invocation_id: InvocationId,
-    name: &str,
-    outcome: ToolResultOutcome,
-    content: Option<&str>,
-) -> MessagePart<BoundToolCall> {
-    MessagePart::semantic_only(MessageSemantic::ToolResult {
+use lattice_conversation::{
+    ConversationItem, IndeterminateCause, ResultPayload, StepContent, StoredToolResult,
+    SuccessContent, canonical_json, tool_content_digest,
+};
+
+fn success(invocation_id: InvocationId, name: &str, value: Value) -> StoredToolResult {
+    let bytes = canonical_json(&value);
+    StoredToolResult {
         invocation_id,
-        name: name.to_string(),
-        outcome,
-        content: content.map(str::to_string),
-    })
-}
-
-#[test]
-fn openai_tool_results_encode_against_the_official_fixture() {
-    let native = wire_to_native(
-        ProviderOrigin::OpenAiCompatible,
-        &fixture("openai_assistant_tool_calls.json"),
-    )
-    .expect("projection");
-    let bound = bind_message(&native);
-    let tool = NativeMessage::new(
-        MessageRole::Tool,
-        Some(ProviderOrigin::OpenAiCompatible),
-        vec![
-            tool_closure(
-                invocation(0),
-                "get_weather",
-                ToolResultOutcome::Succeeded,
-                Some(r#"{"city":"Tokyo","temperature":21}"#),
-            ),
-            tool_closure(
-                invocation(1),
-                "get_time",
-                ToolResultOutcome::NotExecuted,
-                None,
-            ),
-        ],
-    );
-    let encoded =
-        tool_results_to_wire(ProviderOrigin::OpenAiCompatible, &bound, &tool).expect("encoding");
-    let expected = fixture("openai_tool_result_request.json");
-    assert_eq!(serde_json::Value::Array(encoded), expected);
-}
-
-#[test]
-fn anthropic_tool_results_merge_into_one_user_turn_with_is_error() {
-    let native = wire_to_native(
-        ProviderOrigin::Anthropic,
-        &anthropic_message(&fixture("anthropic_thinking_tool_use.json")),
-    )
-    .expect("projection");
-    let bound = bind_message(&native);
-    let tool = NativeMessage::new(
-        MessageRole::Tool,
-        Some(ProviderOrigin::Anthropic),
-        vec![
-            tool_closure(
-                invocation(0),
-                "get_weather",
-                ToolResultOutcome::Failed,
-                Some("permission denied by policy"),
-            ),
-            tool_closure(
-                invocation(1),
-                "get_time",
-                ToolResultOutcome::NotExecuted,
-                None,
-            ),
-        ],
-    );
-    let encoded = tool_results_to_wire(ProviderOrigin::Anthropic, &bound, &tool).expect("encoding");
-    assert_eq!(encoded.len(), 1);
-    assert_eq!(encoded[0], fixture("anthropic_tool_result_request.json"));
-}
-
-#[test]
-fn gemini_tool_results_encode_without_any_provider_id() {
-    let native = wire_to_native(
-        ProviderOrigin::Gemini,
-        &fixture("gemini_function_call_no_id.json"),
-    )
-    .expect("projection");
-    let bound = bind_message(&native);
-    assert!(
-        bound
-            .tool_calls()
-            .next()
-            .unwrap()
-            .1
-            .provider_call_id
-            .is_none()
-    );
-    let tool = NativeMessage::new(
-        MessageRole::Tool,
-        Some(ProviderOrigin::Gemini),
-        vec![tool_closure(
-            invocation(0),
-            "get_weather",
-            ToolResultOutcome::Succeeded,
-            Some(r#"{"city":"Paris","temperature":18}"#),
-        )],
-    );
-    let encoded = tool_results_to_wire(ProviderOrigin::Gemini, &bound, &tool).expect("encoding");
-    assert_eq!(encoded.len(), 1);
-    assert_eq!(encoded[0], fixture("gemini_tool_result_request.json"));
-}
-
-#[test]
-fn id_bearing_wires_fail_typed_when_the_call_had_no_provider_id() {
-    // A missing provider call ID is a valid conversation fact; OpenAI and
-    // Anthropic result shapes cannot encode it, so the next request fails
-    // with a typed error instead of a synthesized ID.
-    let native = wire_to_native(
-        ProviderOrigin::Gemini,
-        &fixture("gemini_function_call_no_id.json"),
-    )
-    .expect("projection");
-    let bound = bind_message(&native);
-    let tool = NativeMessage::new(
-        MessageRole::Tool,
-        Some(ProviderOrigin::Gemini),
-        vec![tool_closure(
-            invocation(0),
-            "get_weather",
-            ToolResultOutcome::Succeeded,
-            Some("{}"),
-        )],
-    );
-    for origin in [ProviderOrigin::OpenAiCompatible, ProviderOrigin::Anthropic] {
-        assert!(matches!(
-            tool_results_to_wire(origin, &bound, &tool),
-            Err(ProjectionError::ToolResultWithoutProviderCallId { invocation_id, .. })
-                if invocation_id == invocation(0)
-        ));
+        name: name.into(),
+        payload: ResultPayload::Succeeded(SuccessContent::Json {
+            value,
+            digest: tool_content_digest(&bytes),
+            byte_length: bytes.len() as u64,
+        }),
     }
 }
 
 #[test]
-fn unmatched_tool_result_closure_fails_closed() {
-    let native = wire_to_native(
-        ProviderOrigin::OpenAiCompatible,
-        &fixture("openai_assistant_tool_calls.json"),
-    )
-    .expect("projection");
-    let bound = bind_message(&native);
-    let stranger = NativeMessage::new(
-        MessageRole::Tool,
-        Some(ProviderOrigin::OpenAiCompatible),
-        vec![tool_closure(
-            invocation(9),
-            "get_weather",
-            ToolResultOutcome::Succeeded,
-            Some("{}"),
-        )],
+fn structured_steps_require_exact_pairing() {
+    let origin = ProviderOrigin::OpenAiCompatible;
+    let assistant = bind_message(
+        &wire_to_native(origin, &fixture("openai_assistant_tool_calls.json")).unwrap(),
     );
-    assert!(matches!(
-        tool_results_to_wire(ProviderOrigin::OpenAiCompatible, &bound, &stranger),
-        Err(ProjectionError::UnmatchedToolResult { .. })
-    ));
+    let results = vec![
+        success(invocation(0), "get_weather", serde_json::json!({})),
+        success(invocation(1), "get_time", serde_json::json!({})),
+    ];
+    for case in 0..8 {
+        let mut step = StepContent {
+            assistant: assistant.clone(),
+            results: results.clone(),
+        };
+        match case {
+            0 => {
+                step.results.pop();
+            }
+            1 => step.results.push(results[0].clone()),
+            2 => step.results[1] = results[0].clone(),
+            3 => step.results.swap(0, 1),
+            4 => step.results[0].name = "wrong".into(),
+            5 => step.assistant.role = MessageRole::Tool,
+            6 => step.results[0].invocation_id = invocation(9),
+            _ => {
+                if let ResultPayload::Succeeded(SuccessContent::Json { digest, .. }) =
+                    &mut step.results[0].payload
+                {
+                    *digest = [0; 32];
+                }
+            }
+        }
+        assert!(
+            lattice_llm::provider_projection::request_messages_to_wire(
+                origin,
+                &[ConversationItem::Step(step)]
+            )
+            .is_err(),
+            "case {case}"
+        );
+    }
+    for role in [MessageRole::Tool, MessageRole::Assistant] {
+        let mut message = assistant.clone();
+        message.role = role;
+        assert!(
+            lattice_llm::provider_projection::request_messages_to_wire(
+                origin,
+                &[ConversationItem::Message(message)]
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn structured_result_outcomes_and_large_success() {
+    use lattice_conversation::{CepError, CepErrorCode, CepErrorData, Retriability};
+    let mut rejected = CepError::internal_error("界".repeat(2000));
+    rejected.code = CepErrorCode::CapabilityNotGranted;
+    let variants = [
+        success(
+            invocation(0),
+            "get_weather",
+            serde_json::json!({"z":1,"a":2}),
+        )
+        .payload,
+        ResultPayload::Failed(Box::new(CepError::new(
+            CepErrorCode::ExecutionFailed,
+            "failed",
+            serde_json::from_value::<CepErrorData>(
+                serde_json::json!({"kind":"execution","operation":"get_weather","detail":null}),
+            )
+            .unwrap(),
+            Retriability::Permanent,
+        ))),
+        ResultPayload::Failed(Box::new(rejected.clone())),
+        ResultPayload::Indeterminate(IndeterminateCause::Cancelled),
+        ResultPayload::NotExecuted,
+        ResultPayload::Indeterminate(IndeterminateCause::NoResult),
+        ResultPayload::Succeeded(SuccessContent::OutputTooLarge {
+            digest: [0xab; 32],
+            byte_length: 65537,
+        }),
+    ];
+    for origin in [
+        ProviderOrigin::OpenAiCompatible,
+        ProviderOrigin::Anthropic,
+        ProviderOrigin::Gemini,
+    ] {
+        let assistant = bind_message(
+            &wire_to_native(
+                ProviderOrigin::Gemini,
+                &fixture("gemini_function_call_no_id.json"),
+            )
+            .unwrap(),
+        );
+        let mut assistant = assistant;
+        if let MessageSemantic::ToolCall { call } = &mut assistant.parts[0].semantic {
+            call.provider_call_id = Some("real-id".into());
+        }
+        for (index, payload) in variants.iter().enumerate() {
+            let results = [StoredToolResult {
+                invocation_id: invocation(0),
+                name: "get_weather".into(),
+                payload: payload.clone(),
+            }];
+            let wire = tool_results_to_wire(origin, &assistant, &results).unwrap();
+            let text = match origin {
+                ProviderOrigin::OpenAiCompatible => {
+                    wire[0]["content"].as_str().unwrap().to_string()
+                }
+                ProviderOrigin::Anthropic => wire[0]["content"][0]["content"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+                ProviderOrigin::Gemini => {
+                    let response = &wire[0]["parts"][0]["functionResponse"]["response"];
+                    if payload.outcome() == ToolResultOutcome::Failed {
+                        response["error"].as_str().unwrap().into()
+                    } else {
+                        response.to_string()
+                    }
+                }
+            };
+            let json: Value = serde_json::from_str(&text).unwrap();
+            match index {
+                0 => assert_eq!(json, serde_json::json!({"a":2,"z":1})),
+                1 => assert_eq!(
+                    json,
+                    serde_json::json!({"error":{"code":CepErrorCode::ExecutionFailed.as_i32(),"message":"failed"}})
+                ),
+                2 => assert_eq!(
+                    json,
+                    serde_json::json!({"error":{"code":CepErrorCode::CapabilityNotGranted.as_i32(),"message":"界".repeat(1365)}})
+                ),
+                3 => assert_eq!(
+                    json,
+                    serde_json::json!({"outcome":"indeterminate","cause":"cancelled"})
+                ),
+                4 => assert_eq!(json, serde_json::json!({"outcome":"not_executed"})),
+                5 => assert_eq!(
+                    json,
+                    serde_json::json!({"outcome":"indeterminate","cause":"no_result"})
+                ),
+                _ => assert_eq!(json["outcome"], "succeeded"),
+            }
+            if index == 6 {
+                assert_eq!(json["content_unavailable"], "output_too_large");
+                assert_eq!(json["digest"], "ab".repeat(32));
+                assert_eq!(json["byte_length"], 65537);
+            }
+        }
+    }
+}
+
+#[test]
+fn structured_result_fixtures_and_missing_ids() {
+    for (origin, source, expected) in [
+        (
+            ProviderOrigin::OpenAiCompatible,
+            "openai_assistant_tool_calls.json",
+            "openai_tool_result_request.json",
+        ),
+        (
+            ProviderOrigin::Anthropic,
+            "anthropic_thinking_tool_use.json",
+            "anthropic_tool_result_request.json",
+        ),
+        (
+            ProviderOrigin::Gemini,
+            "gemini_function_call_no_id.json",
+            "gemini_tool_result_request.json",
+        ),
+    ] {
+        let bound = bind_message(&wire_to_native(origin, &fixture(source)).unwrap());
+        let mut results = vec![success(
+            invocation(0),
+            "get_weather",
+            serde_json::json!({"city":if origin == ProviderOrigin::Gemini {"Paris"} else {"Tokyo"}, "temperature":if origin == ProviderOrigin::Gemini {18} else {21}}),
+        )];
+        if origin != ProviderOrigin::Gemini {
+            results.push(StoredToolResult {
+                invocation_id: invocation(1),
+                name: "get_time".into(),
+                payload: ResultPayload::NotExecuted,
+            });
+        }
+        if origin == ProviderOrigin::Anthropic {
+            results[0].payload = ResultPayload::Failed(Box::new(serde_json::from_value(serde_json::json!({"code":"execution_failed","message":"permission denied by policy","data":{"kind":"execution","operation":"get_weather","detail":null},"retriability":"permanent"})).unwrap()));
+        }
+        let encoded = tool_results_to_wire(origin, &bound, &results).unwrap();
+        assert_eq!(
+            if origin == ProviderOrigin::OpenAiCompatible {
+                Value::Array(encoded)
+            } else {
+                encoded[0].clone()
+            },
+            fixture(expected)
+        );
+        if origin == ProviderOrigin::Gemini {
+            for target in [ProviderOrigin::OpenAiCompatible, ProviderOrigin::Anthropic] {
+                assert!(matches!(
+                    tool_results_to_wire(target, &bound, &results),
+                    Err(ProjectionError::ToolResultWithoutProviderCallId { .. })
+                ));
+            }
+        }
+        let step = StepContent {
+            assistant: bound,
+            results,
+        };
+        let saved = step.clone();
+        let projected = lattice_llm::provider_projection::request_messages_to_wire(
+            ProviderOrigin::Gemini,
+            &[ConversationItem::Step(step.clone())],
+        )
+        .unwrap();
+        assert!(
+            !serde_json::to_string(&projected.messages)
+                .unwrap()
+                .contains("toolu_")
+        );
+        assert_eq!(step, saved);
+    }
 }
 
 #[test]

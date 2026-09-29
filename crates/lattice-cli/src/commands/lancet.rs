@@ -3,23 +3,21 @@
 
 //! `lattice lancet` — LANCET inspection and self-check subcommands.
 //!
-//! - `lancet status`: reads the project InvocationStore without composing a
-//!   Tool runtime and shows recent typed invocation states.
+//! - `lancet status`: 经后台读取当前项目调用状态，不组合 Tool runtime。
 //! - `lancet doctor`: validates the workspace and generated closed catalog.
 
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use colored::Colorize;
-use lancet_api::{
-    LancetDoctorOutput, LancetDoctorRequest, LancetStatusOutput, collect_status, run_doctor_checks,
-};
+use lancet_api::{LancetDoctorOutput, LancetDoctorRequest, run_doctor_checks};
+use lattice_api::local::{LocalClient, OperatorStatus};
 #[cfg(test)]
 use std::path::Path;
 
 /// `lattice lancet` subcommand group.
 #[derive(Subcommand)]
 pub enum LancetAction {
-    /// Show recent typed invocation states from the project ledger.
+    /// 显示项目近期调用状态与全局变更高水位。
     Status {
         /// Emit JSON instead of human-readable output.
         #[arg(long)]
@@ -30,9 +28,9 @@ pub enum LancetAction {
 }
 
 /// Dispatch the `lancet` subcommand group. `None` action defaults to `Status`.
-pub fn run(action: Option<LancetAction>, global_json: bool) -> Result<()> {
+pub async fn run(action: Option<LancetAction>, global_json: bool) -> Result<()> {
     match action.unwrap_or(LancetAction::Status { json: false }) {
-        LancetAction::Status { json } => run_status(json || global_json),
+        LancetAction::Status { json } => run_status(json || global_json).await,
         LancetAction::Doctor {} => run_doctor(global_json),
     }
 }
@@ -41,50 +39,30 @@ pub fn run(action: Option<LancetAction>, global_json: bool) -> Result<()> {
 // lancet status
 // ---------------------------------------------------------------------------
 
-fn run_status(json: bool) -> Result<()> {
-    let project_root = std::env::current_dir().context("current working directory")?;
-    let output = collect_status(&project_root)?;
+async fn run_status(json: bool) -> Result<()> {
+    let workspace = std::env::current_dir().context("current working directory")?;
+    let client = super::session::local_client().await?;
+    status_with_client(&client, workspace, json).await
+}
 
+pub(super) async fn status_with_client(
+    client: &LocalClient,
+    workspace: std::path::PathBuf,
+    json: bool,
+) -> Result<()> {
+    let output: OperatorStatus = client.operator_status(workspace).await?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&output)?);
+        println!("{}", serde_json::to_string(&output)?);
     } else {
-        render_status_text(&output);
-    }
-    Ok(())
-}
-
-fn render_status_text(output: &LancetStatusOutput) {
-    for line in status_text_lines(output) {
-        println!("{line}");
-    }
-}
-
-fn status_text_lines(output: &LancetStatusOutput) -> Vec<String> {
-    let mut lines = vec!["lancet status".dimmed().to_string()];
-    lines.push(format!(
-        "Ledger: {}",
-        output.ledger_oid.as_deref().unwrap_or("none")
-    ));
-    lines.push("Recent Invocations:".bold().to_string());
-    if output.recent_calls.is_empty() {
-        lines.push(format!("  {}", "none".dimmed()));
-    } else {
-        for call in &output.recent_calls {
-            lines.push(format!(
-                "  {} {} {:?}",
-                call.invocation_id,
-                call.record.binding.method.cyan(),
-                call.record.state
-            ));
+        println!("lancet status\nlatest_change={}", output.latest_change.0);
+        for row in output.recent {
+            println!(
+                "{} {} {:?}",
+                row.invocation_id, row.binding.method, row.state
+            );
         }
     }
-    lines.push(String::new());
-    lines.push(format!(
-        "{}: {}",
-        "Last Verdict".bold(),
-        output.last_verdict.as_deref().unwrap_or("none").dimmed()
-    ));
-    lines
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

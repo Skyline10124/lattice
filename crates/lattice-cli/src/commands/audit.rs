@@ -1,110 +1,58 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
-
-//! `lattice audit` — query, tail, and replay the project InvocationStore.
-
-use std::path::Path;
-
+//! 操作员查询只经后台 IPC，不打开数据库、不加载执行配置。
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
-use lancet_api::{AuditReplayRequest, AuditRequest, query_audit, replay_audit, tail_audit};
+use lattice_api::local::{
+    AuditSelection, ChangeSeq, LocalClient, SessionId, ToolResultOutcome, TurnId,
+};
+use std::path::Path;
 
-/// 将操作员错误映射为固定的公开原因，避免回显私有路径和用户输入。
-///
-/// `OperatorAuditError::Config` 经 `lancet-api` 透传后只剩字符串，
-/// 其中可能包含状态仓库路径和底层错误。因此依据错误构造处的固定前缀，
-/// 从 `OPERATOR_FAILURE_SUMMARIES` 选择公开短语；未登记的原因按内部故障泛化。
-///
-/// 此映射依赖 `lancet-audit/src/operator.rs` 的错误构造文案。新增或修改
-/// `Config` 原因时，需同步核对下方映射表，前缀匹配不提供类型化保证。
-fn operator_error(error: lancet_api::LancetError) -> anyhow::Error {
-    match error {
-        lancet_api::LancetError::Config(message) => match operator_failure_summary(&message) {
-            Some(summary) => anyhow::Error::new(lattice_api::local::LocalError {
-                kind: lattice_api::local::LocalErrorKind::BadRequest,
-                message: summary.to_string(),
-                recovery: None,
-            }),
-            None => anyhow::Error::new(lancet_api::LancetError::Internal(message)),
-        },
-        error => anyhow::Error::new(error),
-    }
+fn parse_change(value: &str) -> Result<ChangeSeq, String> {
+    super::session::parse_node_id(value).map(|id| ChangeSeq(id.0))
 }
-
-/// `lancet-audit::operator` 的 `Config` 构造来源前缀 → 公开固定短语。
-const OPERATOR_FAILURE_SUMMARIES: &[(&str, &str)] = &[
-    (
-        "invocation ledger not found",
-        "invocation ledger not found for this project; run an agent turn in this project first",
-    ),
-    ("invalid session_id", "invalid session_id"),
-    ("invalid turn_id", "invalid turn_id"),
-    (
-        "no invocations for turn_id=",
-        "no invocations for the requested turn in the requested session",
-    ),
-    ("invalid ledger cursor", "invalid ledger cursor"),
-    ("unknown invocation verdict", "unknown invocation verdict"),
-];
-
-fn operator_failure_summary(message: &str) -> Option<&'static str> {
-    OPERATOR_FAILURE_SUMMARIES
-        .iter()
-        .find_map(|(prefix, summary)| message.starts_with(prefix).then_some(*summary))
+fn parse_outcome(value: &str) -> Result<String, String> {
+    outcome(value)
+        .map(|_| value.into())
+        .map_err(|_| "expected succeeded/failed/not_executed/indeterminate".into())
 }
-
+fn outcome(value: &str) -> Result<ToolResultOutcome> {
+    serde_json::from_value(serde_json::Value::String(value.into()))
+        .map_err(|_| lattice_api::ApiError::BadRequest("invalid outcome".into()).into())
+}
 #[derive(Args, Debug, Clone)]
 pub struct AuditQueryArgs {
-    /// Filter by canonical SessionId.
     #[arg(long)]
     pub session: Option<String>,
-    /// Filter by canonical TurnId.
     #[arg(long)]
     pub turn: Option<String>,
-    /// Filter by Tool method.
     #[arg(long)]
     pub method: Option<String>,
-    /// Filter by lifecycle verdict.
-    #[arg(long)]
-    pub verdict: Option<String>,
-    /// Pin query to an immutable ledger commit OID.
-    #[arg(long = "at")]
-    pub ledger_oid: Option<String>,
-    /// Emit lifecycle transitions instead of current state.
+    #[arg(long,value_parser=parse_outcome)]
+    pub outcome: Option<String>,
+    /// 读取按全局 ChangeSeq 排序的调用变化。
     #[arg(long)]
     pub tail: bool,
-    /// Exclusive ledger commit OID cursor for tail.
-    #[arg(long)]
-    pub since: Option<String>,
-    /// Emit JSON.
+    /// 排他变更序号；仅与 --tail 一起使用。
+    #[arg(long,requires="tail",value_parser=parse_change)]
+    pub since: Option<ChangeSeq>,
     #[arg(long)]
     pub json: bool,
 }
-
 #[derive(Args, Debug, Clone)]
 pub struct AuditReplayArgs {
-    /// Canonical SessionId.
     #[arg(long)]
     pub session: String,
-    /// Canonical TurnId.
     #[arg(long)]
     pub turn: String,
-    /// Pin replay to an immutable ledger commit OID.
-    #[arg(long = "at")]
-    pub ledger_oid: Option<String>,
-    /// Emit JSON.
     #[arg(long)]
     pub json: bool,
 }
-
 #[derive(Subcommand, Debug, Clone)]
 pub enum AuditAction {
-    /// Query current invocation state or tail transitions.
     Query(AuditQueryArgs),
-    /// Replay one Turn's invocation records.
     Replay(AuditReplayArgs),
 }
-
 #[derive(Args, Debug, Clone)]
 pub struct AuditCmd {
     #[command(subcommand)]
@@ -112,93 +60,104 @@ pub struct AuditCmd {
     #[command(flatten)]
     pub query: AuditQueryArgs,
 }
-
 pub async fn run(cmd: AuditCmd, global_json: bool) -> Result<()> {
-    let project_root = std::env::current_dir().context("current working directory")?;
-    run_async(cmd, global_json, &project_root).await
-}
-
-async fn run_async(cmd: AuditCmd, global_json: bool, project_root: &Path) -> Result<()> {
+    let workspace = std::env::current_dir().context("current working directory")?;
+    let client = super::session::local_client().await?;
     match cmd.action {
-        Some(AuditAction::Replay(args)) => run_replay(args, global_json, project_root).await,
-        Some(AuditAction::Query(args)) => run_query(args, global_json, project_root).await,
-        None => run_query(cmd.query, global_json, project_root).await,
+        Some(AuditAction::Replay(args)) => {
+            let session = SessionId::parse(&args.session)
+                .map_err(|_| lattice_api::ApiError::BadRequest("invalid SessionId".into()))?;
+            let turn = TurnId::parse(&args.turn)
+                .map_err(|_| lattice_api::ApiError::BadRequest("invalid TurnId".into()))?;
+            let replay = client.audit_replay(workspace, session, turn).await?;
+            if args.json || global_json {
+                println!("{}", serde_json::to_string(&replay)?);
+            } else {
+                println!(
+                    "session={} turn={} latest_change={} calls={}",
+                    replay.session_id,
+                    replay.turn_id,
+                    replay.latest_change.0,
+                    replay.calls.len()
+                );
+                for row in replay.calls {
+                    println!(
+                        "{} {} {:?}",
+                        row.invocation_id, row.binding.method, row.state
+                    );
+                }
+            }
+            Ok(())
+        }
+        Some(AuditAction::Query(args)) => run_query(&client, args, global_json, &workspace).await,
+        None => run_query(&client, cmd.query, global_json, &workspace).await,
     }
 }
-
-async fn run_query(args: AuditQueryArgs, global_json: bool, project_root: &Path) -> Result<()> {
-    let json = args.json || global_json;
-    let mut request = AuditRequest::new(project_root);
-    request.session_id = args.session;
-    request.turn_id = args.turn;
-    request.method = args.method;
-    request.verdict = args.verdict;
-    request.ledger_oid = args.ledger_oid;
-    request.after = args.since;
+pub(super) async fn run_query(
+    client: &LocalClient,
+    args: AuditQueryArgs,
+    global_json: bool,
+    workspace: &Path,
+) -> Result<()> {
+    let selection = AuditSelection {
+        session_id: args
+            .session
+            .as_deref()
+            .map(SessionId::parse)
+            .transpose()
+            .map_err(|_| lattice_api::ApiError::BadRequest("invalid SessionId".into()))?,
+        turn_id: args
+            .turn
+            .as_deref()
+            .map(TurnId::parse)
+            .transpose()
+            .map_err(|_| lattice_api::ApiError::BadRequest("invalid TurnId".into()))?,
+        method: args.method,
+        outcome: args.outcome.as_deref().map(outcome).transpose()?,
+    };
     if args.tail {
-        let output = tail_audit(request).await.map_err(operator_error)?;
-        render_tail_output(&output, json)
-    } else {
-        let output = query_audit(request).await.map_err(operator_error)?;
-        render_query_output(&output, json)
-    }
-}
-
-async fn run_replay(args: AuditReplayArgs, global_json: bool, project_root: &Path) -> Result<()> {
-    let mut request = AuditReplayRequest::new(project_root, args.session, args.turn);
-    request.ledger_oid = args.ledger_oid;
-    let output = replay_audit(request).await.map_err(operator_error)?;
-    if args.json || global_json {
-        println!("{}", serde_json::to_string_pretty(&output)?);
-    } else {
-        println!(
-            "ledger={} session={} turn={} calls={}",
-            output.trace.ledger_oid,
-            output.trace.session_id,
-            output.trace.turn_id,
-            output.trace.calls.len()
-        );
-        for call in &output.trace.calls {
+        let page = client
+            .audit_tail(
+                workspace.into(),
+                selection,
+                args.since.unwrap_or(ChangeSeq(0)),
+                256,
+            )
+            .await?;
+        if args.json || global_json {
+            println!("{}", serde_json::to_string(&page)?);
+        } else {
             println!(
-                "  invocation_id={} method={} state={:?}",
-                call.invocation_id, call.record.binding.method, call.record.state
+                "latest_change={} next_after={} done={}",
+                page.latest_change.0, page.next_after.0, page.done
             );
+            for change in page.rows {
+                println!(
+                    "{} {} {} {:?}",
+                    change.sequence.0,
+                    change.row.invocation_id,
+                    change.row.binding.method,
+                    change.row.state
+                );
+            }
         }
-    }
-    Ok(())
-}
-
-fn render_query_output(output: &lancet_api::AuditQueryOutput, json: bool) -> Result<()> {
-    if json {
-        println!("{}", serde_json::to_string_pretty(output)?);
     } else {
-        println!("ledger={} rows={}", output.ledger_oid, output.row_count);
-        for row in &output.rows {
+        let page = client
+            .audit_query(workspace.into(), selection, None, 256)
+            .await?;
+        if args.json || global_json {
+            println!("{}", serde_json::to_string(&page)?);
+        } else {
             println!(
-                "  invocation_id={} method={} state={:?}",
-                row.invocation_id, row.record.binding.method, row.record.state
+                "latest_change={} next={:?}",
+                page.latest_change.0, page.next
             );
-        }
-    }
-    Ok(())
-}
-
-fn render_tail_output(output: &lancet_api::AuditTailOutput, json: bool) -> Result<()> {
-    if json {
-        println!("{}", serde_json::to_string_pretty(output)?);
-    } else {
-        println!(
-            "ledger={} tail_rows={} cursor={} done={}",
-            output.ledger_oid,
-            output.rows.len(),
-            output.last_cursor.as_deref().unwrap_or("none"),
-            output.done
-        );
-        for row in &output.rows {
-            println!(
-                "  commit={} invocation_id={} method={} state={:?}",
-                row.ledger_oid, row.invocation_id, row.record.binding.method, row.record.state
-            );
+            for row in page.rows {
+                println!(
+                    "{} {} {:?}",
+                    row.invocation_id, row.binding.method, row.state
+                );
+            }
         }
     }
     Ok(())

@@ -41,7 +41,7 @@ use lattice_conversation::{
 };
 use serde_json::{Value, json};
 
-use super::{ProjectionError, ToolResultClosure, closure_content};
+use super::{ProjectionError, ToolResultClosure};
 
 fn limit_exceeded(interruption: lattice_conversation::AttemptInterruption) -> ProjectionError {
     ProjectionError::OutputLimitExceeded {
@@ -57,6 +57,51 @@ fn malformed(detail: impl Into<String>) -> ProjectionError {
     }
 }
 
+/// 流解析器按首次到达位置保存的原始段；调用参数在整批验证前保持原文。
+pub(crate) enum OpenAiPart {
+    Text(String),
+    Reasoning(String),
+    ToolCall(RawToolCall),
+}
+
+pub(crate) fn parts_to_native(
+    parts: Vec<OpenAiPart>,
+) -> Result<NativeMessage<UnboundToolCall>, ProjectionError> {
+    let mut assembly = AttemptAssembly::new();
+    let mut raw_calls = Vec::new();
+    for part in &parts {
+        match part {
+            OpenAiPart::Text(text) => assembly.push_assistant(text).map_err(limit_exceeded)?,
+            OpenAiPart::Reasoning(text) => assembly.push_reasoning(text).map_err(limit_exceeded)?,
+            OpenAiPart::ToolCall(call) => {
+                assembly.begin_tool_call();
+                assembly
+                    .push_tool_arguments(&call.arguments)
+                    .map_err(limit_exceeded)?;
+                raw_calls.push(call.clone());
+            }
+        }
+    }
+    let mut calls = validate_tool_call_batch(&raw_calls)?.into_iter();
+    let parts = parts
+        .into_iter()
+        .map(|part| {
+            MessagePart::semantic_only(match part {
+                OpenAiPart::Text(text) => MessageSemantic::Text { text },
+                OpenAiPart::Reasoning(text) => MessageSemantic::Reasoning { text },
+                OpenAiPart::ToolCall(_) => MessageSemantic::ToolCall {
+                    call: calls.next().expect("one validated call per raw part"),
+                },
+            })
+        })
+        .collect();
+    Ok(NativeMessage::new(
+        MessageRole::Assistant,
+        Some(ProviderOrigin::OpenAiCompatible),
+        parts,
+    ))
+}
+
 pub fn wire_to_native(wire: &Value) -> Result<NativeMessage<UnboundToolCall>, ProjectionError> {
     let message = wire
         .get("choices")
@@ -65,28 +110,20 @@ pub fn wire_to_native(wire: &Value) -> Result<NativeMessage<UnboundToolCall>, Pr
         .and_then(|choice| choice.get("message"))
         .ok_or_else(|| malformed("missing choices[0].message"))?;
 
-    let mut parts: Vec<MessagePart<UnboundToolCall>> = Vec::new();
-    let mut assembly = AttemptAssembly::new();
-
+    // 完整 response body 不携带交错信息；仅 SSE 路径能保留到达顺序。
+    let mut parts = Vec::new();
     if let Some(reasoning) = message.get("reasoning_content").and_then(Value::as_str) {
-        assembly.push_reasoning(reasoning).map_err(limit_exceeded)?;
-        parts.push(MessagePart::semantic_only(MessageSemantic::Reasoning {
-            text: reasoning.to_string(),
-        }));
+        parts.push(OpenAiPart::Reasoning(reasoning.to_string()));
     }
     match message.get("content") {
         Some(Value::String(text)) => {
-            assembly.push_assistant(text).map_err(limit_exceeded)?;
-            parts.push(MessagePart::semantic_only(MessageSemantic::Text {
-                text: text.clone(),
-            }));
+            parts.push(OpenAiPart::Text(text.clone()));
         }
         // Explicit null or absent content carries no text part.
         Some(Value::Null) | None => {}
         _ => return Err(malformed("message.content is not a string or null")),
     }
 
-    let mut raw_calls: Vec<RawToolCall> = Vec::new();
     match message.get("tool_calls") {
         Some(Value::Array(calls)) => {
             for call in calls {
@@ -106,31 +143,17 @@ pub fn wire_to_native(wire: &Value) -> Result<NativeMessage<UnboundToolCall>, Pr
                     Some(Value::Null) | None => None,
                     _ => return Err(malformed("tool_calls[].id is not a string")),
                 };
-                assembly.begin_tool_call();
-                assembly
-                    .push_tool_arguments(arguments)
-                    .map_err(limit_exceeded)?;
-                raw_calls.push(RawToolCall {
+                parts.push(OpenAiPart::ToolCall(RawToolCall {
                     provider_call_id,
                     name: super::openai_canonical_tool_name(name),
                     arguments: arguments.to_string(),
-                });
+                }));
             }
         }
         Some(Value::Null) | None => {}
         _ => return Err(malformed("message.tool_calls is not an array")),
     }
-    for call in validate_tool_call_batch(&raw_calls)? {
-        parts.push(MessagePart::semantic_only(MessageSemantic::ToolCall {
-            call,
-        }));
-    }
-
-    Ok(NativeMessage::new(
-        MessageRole::Assistant,
-        Some(ProviderOrigin::OpenAiCompatible),
-        parts,
-    ))
+    parts_to_native(parts)
 }
 
 pub fn native_to_wire<S: ToolCallState>(
@@ -172,12 +195,6 @@ pub fn native_to_wire<S: ToolCallState>(
                 }
                 tool_calls.push(function_call);
             }
-            MessageSemantic::ToolResult { .. } => {
-                return Err(ProjectionError::UnsupportedPart {
-                    provider: ProviderOrigin::OpenAiCompatible,
-                    part_ordinal: ordinal,
-                });
-            }
         }
     }
 
@@ -211,7 +228,7 @@ pub(crate) fn tool_result_messages(
         messages.push(json!({
             "role": "tool",
             "tool_call_id": tool_call_id,
-            "content": closure_content(closure.outcome, &closure.content),
+            "content": closure.content,
         }));
     }
     Ok(messages)

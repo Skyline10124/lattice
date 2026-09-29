@@ -60,16 +60,15 @@ fn direct_secrets_sentinels_never_leak_into_public_sinks() {
         ]),
     );
     let scenario_evidence = evidence(&world, &spec);
-    let send =
-        SessionSendDriver::new(&driver, &world, &spec, "dl-secret", "main").expect("session");
-    let sid = send.session_id().to_string();
+    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-secret");
 
     let turn = send.send("hello").expect("turn");
+    let sid = send.session_id().expect("accepted Session");
     let captures = server.captured_requests();
 
     let result: Result<(), AssertError> = (|| {
         assert_clean_send(&turn)?;
-        require(turn.has_committed_completed(), "turn must complete")?;
+        require(turn.has_completed(), "turn must complete")?;
         require(
             tool_ok(&turn.parsed, "session.todo_write"),
             "Tool-bearing secret scenario must execute session.todo_write",
@@ -78,14 +77,17 @@ fn direct_secrets_sentinels_never_leak_into_public_sinks() {
         let send_stdout = String::from_utf8_lossy(&turn.command.stdout);
         let send_stderr = String::from_utf8_lossy(&turn.command.stderr);
 
-        let ss = cli(&world, &spec, &["--json", "session", "status", &sid]);
-        let sl = cli(&world, &spec, &["--json", "session", "log", &sid]);
+        let ss = cli(&world, &spec, &["--json", "session", "list"]);
+        let sl = cli(&world, &spec, &["--json", "session", "log", sid]);
         let aq = cli(
             &world,
             &spec,
-            &["--json", "audit", "query", "--session", &sid],
+            &["--json", "audit", "query", "--session", sid],
         );
         let ls = cli(&world, &spec, &["--json", "lancet", "status"]);
+        for output in [&ss, &sl, &aq, &ls] {
+            require(output.is_clean_exit(0), "public sink query succeeds")?;
+        }
         require(
             String::from_utf8_lossy(&aq.stdout).contains("session.todo_write"),
             "Git operator query must include the Tool-bearing invocation",
@@ -181,14 +183,14 @@ fn direct_secrets_failure_bundle_redacts_sentinels() {
         },
     );
     let scenario_evidence = evidence(&world, &spec);
-    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-sec-b", "main").expect("session");
+    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-sec-b");
 
     let turn = send.send("trigger failure").expect("turn");
     let captures = server.captured_requests();
 
     let result: Result<(), AssertError> = (|| {
         assert_clean_send(&turn)?;
-        require(!turn.has_committed_completed(), "turn must fail")?;
+        require(!turn.has_completed(), "turn must fail")?;
         require(
             turn.exit_code == Some(lattice_system_harness::SendExitCode::Failed),
             "turn must exit 1",

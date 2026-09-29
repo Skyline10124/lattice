@@ -1,518 +1,177 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
-
-//! Release-binary operator matrix over the authoritative Git InvocationStore.
-//!
-//! This target is feature-gated and executed only by `cargo xtask rollout`.
-
+//! Release operator 矩阵；由 cargo xtask rollout 使用实际 release 二进制执行。
 mod support;
-
-use std::collections::HashSet;
-use std::time::Duration;
-
-use lattice_system_harness::{
-    AssertError, CommandOutcome, FixtureHttpServer, HttpFixture, SendExecution, SessionSendDriver,
-    SseScript, TurnEventLine,
-};
+use lattice_system_harness::{FixtureHttpServer, HttpFixture, SessionSendDriver, SseScript};
 use serde_json::Value;
-use support::{
-    assert_clean_send, cli, direct_world, driver, evidence, finish_scenario, require, sequence,
-    tool_call, wire_fake_llm,
-};
-
-fn parse_json(output: &CommandOutcome) -> Value {
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    serde_json::from_str(stdout.trim())
-        .unwrap_or_else(|error| panic!("expected JSON output, got {stdout:?}: {error}"))
-}
-
-fn rows(value: &Value) -> &[Value] {
-    value
-        .get("rows")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_else(|| panic!("expected rows: {value}"))
-}
-
-fn replay_calls(value: &Value) -> &[Value] {
-    value
-        .pointer("/trace/calls")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_else(|| panic!("expected trace.calls: {value}"))
-}
-
-fn method(row: &Value) -> Option<&str> {
-    row.pointer("/record/binding/method")
-        .and_then(Value::as_str)
-}
-
-fn invocation_id(row: &Value) -> Option<&str> {
-    row.get("invocation_id").and_then(Value::as_str)
-}
-
-fn terminal_succeeded(row: &Value) -> bool {
-    row.pointer("/record/state/terminal/outcome")
-        .and_then(Value::as_str)
-        == Some("succeeded")
-}
-
-fn row_matches(row: &Value, session_id: &str, turn_id: &str, expected_method: &str) -> bool {
-    invocation_id(row).is_some_and(|id| id.len() == 36)
-        && method(row) == Some(expected_method)
-        && row
-            .pointer("/record/binding/session_id")
-            .and_then(Value::as_str)
-            == Some(session_id)
-        && row
-            .pointer("/record/binding/turn_id")
-            .and_then(Value::as_str)
-            == Some(turn_id)
-        && row
-            .pointer("/record/binding/descriptor_identity")
-            .and_then(Value::as_str)
-            .is_some_and(|digest| digest.len() == 64)
-        && row
-            .pointer("/record/binding/arguments_digest")
-            .and_then(Value::as_str)
-            .is_some_and(|digest| digest.len() == 64)
-        && terminal_succeeded(row)
-        && row
-            .pointer("/record/state/terminal/evidence/admission/tool")
-            .and_then(Value::as_str)
-            == Some(expected_method)
-        && row.get("metadata_json").is_none()
-}
-
-fn turn_id_of(turn: &SendExecution) -> String {
-    turn.events
-        .iter()
-        .find_map(|event| match event {
-            TurnEventLine::TurnStarted { turn_id, .. } => Some(turn_id.clone()),
-            _ => None,
-        })
-        .expect("turn id")
-}
-
-fn fetch_network_profile() -> String {
-    "\n[lancet.network]\nallow_localhost = true\nallowed_hosts = [\"localhost\"]\nmax_web_response_bytes = 1024\n\n[lancet.capabilities]\nmax_boundary = \"ex\"\n".to_string()
-}
-
-fn assert_single_release_case(
-    world: &lattice_system_harness::ScenarioWorld,
-    spec: &lattice_system_harness::ScenarioSpec,
-    session_id: &str,
-    turn_id: &str,
-    expected_method: &str,
-) -> Result<(), AssertError> {
-    let query = cli(
-        world,
-        spec,
-        &[
-            "--json",
-            "audit",
-            "query",
-            "--session",
-            session_id,
-            "--turn",
-            turn_id,
-            "--method",
-            expected_method,
-            "--verdict",
-            "succeeded",
-        ],
-    );
-    require(
-        query.is_clean_exit(0),
-        format!(
-            "release {expected_method} query failed: {}",
-            String::from_utf8_lossy(&query.stderr)
-        ),
-    )?;
-    let query_json = parse_json(&query);
-    let current = rows(&query_json);
-    require(
-        current.len() == 1 && row_matches(&current[0], session_id, turn_id, expected_method),
-        format!("release {expected_method} query mismatch: {query_json}"),
-    )?;
-    let invocation = invocation_id(&current[0]).expect("invocation id");
-    let tip = query_json
-        .get("ledger_oid")
-        .and_then(Value::as_str)
-        .expect("ledger oid");
-
-    let pinned = cli(
-        world,
-        spec,
-        &[
-            "--json",
-            "audit",
-            "query",
-            "--session",
-            session_id,
-            "--at",
-            tip,
-        ],
-    );
-    require(pinned.is_clean_exit(0), "release pinned query failed")?;
-    let pinned_json = parse_json(&pinned);
-    require(
-        pinned_json.get("ledger_oid").and_then(Value::as_str) == Some(tip)
-            && rows(&pinned_json)
-                .first()
-                .and_then(|row| invocation_id(row))
-                == Some(invocation),
-        format!("release pinned query mismatch: {pinned_json}"),
-    )?;
-
-    let tail = cli(
-        world,
-        spec,
-        &[
-            "--json",
-            "audit",
-            "query",
-            "--session",
-            session_id,
-            "--turn",
-            turn_id,
-            "--method",
-            expected_method,
-            "--tail",
-        ],
-    );
-    require(tail.is_clean_exit(0), "release tail failed")?;
-    let tail_json = parse_json(&tail);
-    let transitions = rows(&tail_json);
-    require(
-        transitions.len() == 3
-            && transitions.iter().all(|row| {
-                invocation_id(row) == Some(invocation)
-                    && method(row) == Some(expected_method)
-                    && row
-                        .get("ledger_oid")
-                        .and_then(Value::as_str)
-                        .is_some_and(|oid| oid.len() == 40)
-            })
-            && terminal_succeeded(&transitions[2]),
-        format!("release {expected_method} tail mismatch: {tail_json}"),
-    )?;
-    let cursor = tail_json
-        .get("last_cursor")
-        .and_then(Value::as_str)
-        .expect("last cursor");
-    let continuation = cli(
-        world,
-        spec,
-        &[
-            "--json",
-            "audit",
-            "query",
-            "--session",
-            session_id,
-            "--tail",
-            "--since",
-            cursor,
-        ],
-    );
-    require(
-        continuation.is_clean_exit(0),
-        "release tail continuation failed",
-    )?;
-    let continuation_json = parse_json(&continuation);
-    require(
-        rows(&continuation_json).is_empty()
-            && continuation_json.get("last_cursor").and_then(Value::as_str) == Some(cursor)
-            && continuation_json.get("done").and_then(Value::as_bool) == Some(true),
-        format!("release tail continuation mismatch: {continuation_json}"),
-    )?;
-
-    let replay = cli(
-        world,
-        spec,
-        &[
-            "--json",
-            "audit",
-            "replay",
-            "--session",
-            session_id,
-            "--turn",
-            turn_id,
-        ],
-    );
-    require(replay.is_clean_exit(0), "release replay failed")?;
-    let replay_json = parse_json(&replay);
-    let calls = replay_calls(&replay_json);
-    require(
-        replay_json
-            .pointer("/trace/ledger_oid")
-            .and_then(Value::as_str)
-            == Some(tip)
-            && calls.len() == 1
-            && invocation_id(&calls[0]) == Some(invocation)
-            && row_matches(&calls[0], session_id, turn_id, expected_method),
-        format!("release replay mismatch: {replay_json}"),
-    )?;
-
-    let status = cli(world, spec, &["--json", "lancet", "status"]);
-    require(status.is_clean_exit(0), "release status failed")?;
-    let status_json = parse_json(&status);
-    let recent = status_json
-        .get("recent_calls")
-        .and_then(Value::as_array)
-        .expect("recent calls");
-    require(
-        status_json.get("ledger_oid").and_then(Value::as_str) == Some(tip)
-            && status_json.get("last_verdict").and_then(Value::as_str) == Some("succeeded")
-            && recent.len() <= 20
-            && recent
-                .iter()
-                .find(|row| method(row) == Some(expected_method))
-                .is_some_and(|row| row_matches(row, session_id, turn_id, expected_method)),
-        format!("release status mismatch: {status_json}"),
-    )?;
-    Ok(())
-}
-
-fn release_fetch_case() {
+use std::{collections::HashSet, time::Duration};
+use support::*;
+fn release_case(name: &str, methods: &[&str], turns: usize) {
     let driver = driver();
-    let web = FixtureHttpServer::start(HttpFixture::plain("release fetch fixture"))
-        .expect("fixture HTTP server");
-    let fetch_url = web.url_path("/release-fetch");
-    let fetch_args = format!(r#"{{"url":"{fetch_url}"}}"#);
+    let web = FixtureHttpServer::start(HttpFixture::plain("release fixture")).unwrap();
     let (world, spec) = direct_world(
-        "release-operator-fetch",
-        "release-op-fetch",
-        "[\"fetch.web\"]",
-        &fetch_network_profile(),
-    );
-    let server = wire_fake_llm(
-        &world,
-        "release-op-fetch",
-        sequence(vec![
-            tool_call("release-fetch", "fetch.web", &fetch_args),
-            SseScript::plain("release fetch complete"),
-        ]),
-    );
-    let scenario_evidence = evidence(&world, &spec);
-    let send = SessionSendDriver::new(&driver, &world, &spec, "release-op-fetch", "main")
-        .expect("session");
-    let session_id = send.session_id().to_string();
-    let turn = send.send("release fetch matrix").expect("fetch turn");
-    let turn_id = turn_id_of(&turn);
-    let captures = server.captured_requests();
-    let result: Result<(), AssertError> = (|| {
-        assert_clean_send(&turn)?;
-        require(
-            turn.has_committed_completed(),
-            "release fetch turn must complete",
-        )?;
-        web.wait_for_requests(1, Duration::from_secs(5))
-            .map_err(|error| AssertError::StdoutMissing {
-                expected: format!("release fetch missing: {error}"),
-            })?;
-        assert_single_release_case(&world, &spec, &session_id, &turn_id, "fetch.web")
-    })();
-    finish_scenario(
-        scenario_evidence,
-        &[("release fetch matrix", &turn.command)],
-        captures,
-        result,
-    );
-}
-
-fn release_component_case() {
-    let driver = driver();
-    let (world, spec) = direct_world(
-        "release-operator-component",
-        "release-op-component",
-        "[\"session.todo_write\"]",
-        "",
-    );
-    let server = wire_fake_llm(
-        &world,
-        "release-op-component",
-        sequence(vec![
-            tool_call(
-                "release-component",
-                "session.todo_write",
-                r#"{"todos":[{"content":"release component","status":"pending"}]}"#,
-            ),
-            SseScript::plain("release component complete"),
-        ]),
-    );
-    let scenario_evidence = evidence(&world, &spec);
-    let send = SessionSendDriver::new(&driver, &world, &spec, "release-op-component", "main")
-        .expect("session");
-    let session_id = send.session_id().to_string();
-    let turn = send
-        .send("release Component matrix")
-        .expect("Component turn");
-    let turn_id = turn_id_of(&turn);
-    let captures = server.captured_requests();
-    let result: Result<(), AssertError> = (|| {
-        assert_clean_send(&turn)?;
-        require(
-            turn.has_committed_completed(),
-            "release Component turn must complete",
-        )?;
-        assert_single_release_case(&world, &spec, &session_id, &turn_id, "session.todo_write")
-    })();
-    finish_scenario(
-        scenario_evidence,
-        &[("release Component matrix", &turn.command)],
-        captures,
-        result,
-    );
-}
-
-fn release_mixed_case() {
-    let driver = driver();
-    let web = FixtureHttpServer::start(HttpFixture::plain("release mixed fixture"))
-        .expect("fixture HTTP server");
-    let fetch_url = web.url_path("/release-mixed");
-    let fetch_args = format!(r#"{{"url":"{fetch_url}"}}"#);
-    let (world, spec) = direct_world(
-        "release-operator-mixed",
-        "release-op-mixed",
+        name,
+        "release-operator",
         "[\"fetch.web\",\"session.todo_write\"]",
-        &fetch_network_profile(),
+        "\n[lancet.network]\nallow_localhost = true\nallowed_hosts = [\"localhost\"]\nmax_web_response_bytes = 1024\n\n[lancet.capabilities]\nmax_boundary = \"ex\"\n",
     );
     let mut scripts = Vec::new();
-    for index in 0..11 {
-        scripts.push(tool_call(
-            &format!("release-mixed-fetch-{index}"),
-            "fetch.web",
-            &fetch_args,
-        ));
-        scripts.push(tool_call(
-            &format!("release-mixed-component-{index}"),
-            "session.todo_write",
-            &format!(r#"{{"todos":[{{"content":"release mixed {index}","status":"pending"}}]}}"#),
-        ));
-        scripts.push(SseScript::plain(format!("release mixed {index} complete")));
-    }
-    let server = wire_fake_llm(&world, "release-op-mixed", sequence(scripts));
-    let scenario_evidence = evidence(&world, &spec);
-    let send = SessionSendDriver::new(&driver, &world, &spec, "release-op-mixed", "main")
-        .expect("session");
-    let session_id = send.session_id().to_string();
-    let turns: Vec<_> = (0..11)
-        .map(|index| {
-            send.send(&format!("release mixed turn {index}"))
-                .expect("mixed turn")
-        })
-        .collect();
-    let last_turn_id = turn_id_of(turns.last().expect("last turn"));
-    let captures = server.captured_requests();
-
-    let result: Result<(), AssertError> = (|| {
-        for turn in &turns {
-            assert_clean_send(turn)?;
-            require(
-                turn.has_committed_completed(),
-                "release mixed turn must complete",
-            )?;
+    for i in 0..turns {
+        for method in methods {
+            let arguments = if *method == "fetch.web" {
+                serde_json::json!({"url":web.url_path("/release")})
+            } else {
+                serde_json::json!({"todos":[{"content":format!("release {i}"),"status":"pending"}]})
+            };
+            scripts.push(tool_call(
+                &format!("{method}-{i}"),
+                method,
+                &arguments.to_string(),
+            ));
         }
-        web.wait_for_requests(11, Duration::from_secs(5))
-            .map_err(|error| AssertError::StdoutMissing {
-                expected: format!("release mixed fetch count mismatch: {error}"),
-            })?;
-
-        let query = cli(
-            &world,
-            &spec,
-            &["--json", "audit", "query", "--session", &session_id],
-        );
-        require(query.is_clean_exit(0), "release mixed query failed")?;
-        let query_json = parse_json(&query);
-        let current = rows(&query_json);
-        require(
-            current.len() == 22,
-            format!("expected 22 rows: {query_json}"),
-        )?;
-        let all_ids: HashSet<&str> = current.iter().filter_map(invocation_id).collect();
-        require(
-            all_ids.len() == 22
-                && current.iter().all(|row| {
-                    let row_method = method(row).expect("method");
-                    terminal_succeeded(row)
-                        && row
-                            .pointer("/record/state/terminal/evidence/admission/tool")
-                            .and_then(Value::as_str)
-                            == Some(row_method)
-                }),
-            format!("release mixed row mismatch: {query_json}"),
-        )?;
-
-        let replay = cli(
-            &world,
-            &spec,
-            &[
-                "--json",
-                "audit",
-                "replay",
-                "--session",
-                &session_id,
-                "--turn",
-                &last_turn_id,
-            ],
-        );
-        require(replay.is_clean_exit(0), "release mixed replay failed")?;
-        let replay_json = parse_json(&replay);
-        require(
-            replay_calls(&replay_json)
+        scripts.push(SseScript::plain(format!("release {i} complete")));
+    }
+    let server = wire_fake_llm(&world, "release-operator", sequence(scripts));
+    let mut evidence = evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let send = SessionSendDriver::new(&driver, &world, &spec, "release-operator");
+        let mut tids = Vec::new();
+        for i in 0..turns {
+            let turn = send.send(&format!("release Turn {i}")).unwrap();
+            evidence.record_command(format!("Turn {i}"), &turn.command);
+            assert_clean_send(&turn).unwrap();
+            assert!(turn.has_completed());
+            tids.push(turn.accepted_turn_id().unwrap().to_owned());
+        }
+        let sid = send.session_id().unwrap();
+        let fetches = methods.iter().filter(|m| **m == "fetch.web").count() * turns;
+        if fetches > 0 {
+            web.wait_for_requests(fetches, Duration::from_secs(5))
+                .unwrap();
+        }
+        let mut read = |args: &[&str]| -> Value {
+            let out = cli(&world, &spec, args);
+            evidence.record_command(args.join(" "), &out);
+            assert!(out.is_clean_exit(0), "{}", out.summary());
+            serde_json::from_slice(&out.stdout).unwrap()
+        };
+        let query = read(&[
+            "--json",
+            "audit",
+            "query",
+            "--session",
+            sid,
+            "--outcome",
+            "succeeded",
+        ]);
+        let rows = query["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), methods.len() * turns);
+        let ids: HashSet<_> = rows
+            .iter()
+            .map(|r| r["invocation_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids.len(), rows.len());
+        for row in rows {
+            assert_eq!(row["binding"]["session_id"], sid);
+            assert!(tids.contains(&row["binding"]["turn_id"].as_str().unwrap().to_owned()));
+            assert_eq!(row["state"]["state"], "terminal");
+            assert_eq!(row["state"]["outcome"], "succeeded");
+            assert_eq!(
+                row["state"]["evidence"]["value"]["admission"]["tool"],
+                row["binding"]["method"]
+            );
+            for field in ["descriptor_identity", "arguments_digest"] {
+                assert_eq!(row["binding"][field].as_str().unwrap().len(), 64);
+            }
+        }
+        let tail = read(&["--json", "audit", "query", "--session", sid, "--tail"]);
+        let changes = tail["rows"].as_array().unwrap();
+        assert_eq!(changes.len(), rows.len() * 3);
+        assert_eq!(tail["latest_change"], query["latest_change"]);
+        for (i, change) in changes.iter().enumerate() {
+            assert_eq!(change["sequence"], i + 1);
+        }
+        for row in rows {
+            let states: Vec<_> = changes
                 .iter()
-                .filter_map(method)
-                .collect::<Vec<_>>()
-                == vec!["fetch.web", "session.todo_write"],
-            format!("release mixed replay order mismatch: {replay_json}"),
-        )?;
-
-        let status = cli(&world, &spec, &["--json", "lancet", "status"]);
-        require(status.is_clean_exit(0), "release mixed status failed")?;
-        let status_json = parse_json(&status);
-        let recent = status_json
-            .get("recent_calls")
-            .and_then(Value::as_array)
-            .expect("recent calls");
-        let recent_ids: HashSet<&str> = recent.iter().filter_map(invocation_id).collect();
-        require(
-            recent.len() == 20
-                && recent_ids.len() == 20
-                && recent_ids.is_subset(&all_ids)
-                && all_ids.difference(&recent_ids).count() == 2
-                && recent
+                .filter(|c| c["row"]["invocation_id"] == row["invocation_id"])
+                .map(|c| c["row"]["state"]["state"].as_str().unwrap())
+                .collect();
+            assert_eq!(states, ["registered", "started", "terminal"]);
+        }
+        let cursor = tail["next_after"].as_u64().unwrap().to_string();
+        let continuation = read(&[
+            "--json",
+            "audit",
+            "query",
+            "--session",
+            sid,
+            "--tail",
+            "--since",
+            &cursor,
+        ]);
+        assert_eq!(continuation["rows"], serde_json::json!([]));
+        assert_eq!(continuation["next_after"], tail["next_after"]);
+        assert_eq!(continuation["done"], true);
+        for tid in &tids {
+            let replay = read(&["--json", "audit", "replay", "--session", sid, "--turn", tid]);
+            assert_eq!(replay["latest_change"], query["latest_change"]);
+            let calls = replay["calls"].as_array().unwrap();
+            assert_eq!(
+                calls
                     .iter()
-                    .filter(|row| method(row) == Some("fetch.web"))
-                    .count()
-                    == 10
-                && recent
-                    .iter()
-                    .filter(|row| method(row) == Some("session.todo_write"))
-                    .count()
-                    == 10
-                && recent.iter().all(terminal_succeeded)
-                && status_json.get("last_verdict").and_then(Value::as_str) == Some("succeeded"),
-            format!("release mixed bounded status mismatch: {status_json}"),
-        )?;
-        Ok(())
-    })();
-
-    let summaries: Vec<String> = (0..turns.len())
-        .map(|index| format!("release mixed turn {index}"))
-        .collect();
-    let commands: Vec<(&str, &CommandOutcome)> = summaries
-        .iter()
-        .zip(&turns)
-        .map(|(summary, turn)| (summary.as_str(), &turn.command))
-        .collect();
-    finish_scenario(scenario_evidence, &commands, captures, result);
+                    .map(|r| r["binding"]["method"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                methods
+            );
+            for row in calls {
+                assert!(rows.contains(row));
+            }
+        }
+        let status = read(&["--json", "lancet", "status"]);
+        assert_eq!(status["latest_change"], tail["latest_change"]);
+        let recent = status["recent"].as_array().unwrap();
+        let expected: Vec<_> = changes
+            .iter()
+            .rev()
+            .filter(|c| c["row"]["state"]["state"] == "terminal")
+            .take(20)
+            .map(|c| &c["row"])
+            .collect();
+        assert_eq!(recent.iter().collect::<Vec<_>>(), expected);
+        assert_eq!(recent.len(), rows.len().min(20));
+        if turns == 11 {
+            for method in methods {
+                assert_eq!(
+                    recent
+                        .iter()
+                        .filter(|r| r["binding"]["method"] == *method)
+                        .count(),
+                    10
+                );
+            }
+        }
+        assert_eq!(
+            server.captured_requests().len(),
+            turns * (methods.len() + 1)
+        );
+    }));
+    evidence.record_captures(server.captured_requests());
+    evidence
+        .finish_report(result.err().map(|p| {
+            p.downcast_ref::<String>()
+                .cloned()
+                .unwrap_or_else(|| "release operator assertion".into())
+        }))
+        .unwrap();
 }
-
 #[test]
 fn release_operator_component_matrix() {
-    release_fetch_case();
-    release_component_case();
-    release_mixed_case();
+    release_case("release-operator-fetch", &["fetch.web"], 1);
+    release_case("release-operator-component", &["session.todo_write"], 1);
+    release_case(
+        "release-operator-mixed",
+        &["fetch.web", "session.todo_write"],
+        11,
+    );
 }

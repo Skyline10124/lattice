@@ -30,7 +30,7 @@ use lattice_conversation::{
 };
 use serde_json::{Value, json};
 
-use super::{ProjectionError, ToolResultClosure, closure_content};
+use super::{ProjectionError, ToolResultClosure};
 
 fn limit_exceeded(interruption: lattice_conversation::AttemptInterruption) -> ProjectionError {
     ProjectionError::OutputLimitExceeded {
@@ -169,7 +169,7 @@ pub fn native_to_wire<S: ToolCallState>(
     message: &NativeMessage<S>,
 ) -> Result<Value, ProjectionError> {
     let mut wire_parts: Vec<Value> = Vec::new();
-    for (ordinal, part) in message.parts.iter().enumerate() {
+    for part in &message.parts {
         let thought_signature = part.replay_state.as_ref().map(|state| state.as_str());
         match &part.semantic {
             MessageSemantic::Text { text } => {
@@ -200,12 +200,6 @@ pub fn native_to_wire<S: ToolCallState>(
                 }
                 wire_parts.push(wire_part);
             }
-            MessageSemantic::ToolResult { .. } => {
-                return Err(ProjectionError::UnsupportedPart {
-                    provider: ProviderOrigin::Gemini,
-                    part_ordinal: ordinal,
-                });
-            }
         }
     }
     Ok(json!({
@@ -217,7 +211,7 @@ pub fn native_to_wire<S: ToolCallState>(
 /// One user turn whose parts carry every `functionResponse`, in closure
 /// order. The Gemini result shape correlates by Tool name and carries no
 /// provider call ID, so closures whose calls have no provider ID encode
-/// normally. `Failed`/`Rejected` closures use the conventional
+/// normally. `Failed` closures use the conventional
 /// `response: {"error": …}` spelling; other outcomes pass an object content
 /// through and wrap everything else as `{"result": …}`.
 pub(crate) fn tool_result_messages(
@@ -225,12 +219,12 @@ pub(crate) fn tool_result_messages(
 ) -> Result<Vec<Value>, ProjectionError> {
     let mut parts: Vec<Value> = Vec::with_capacity(closures.len());
     for closure in closures {
-        let content = closure_content(closure.outcome, &closure.content);
+        let content = &closure.content;
         let response = match closure.outcome {
-            ToolResultOutcome::Failed | ToolResultOutcome::Rejected => {
+            ToolResultOutcome::Failed => {
                 json!({ "error": content })
             }
-            _ => match serde_json::from_str::<Value>(&content) {
+            _ => match serde_json::from_str::<Value>(content) {
                 Ok(Value::Object(object)) => Value::Object(object),
                 _ => json!({ "result": content }),
             },

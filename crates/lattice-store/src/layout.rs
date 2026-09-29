@@ -9,8 +9,8 @@
 //!
 //! ```text
 //! $XDG_STATE_HOME/lattice/
-//! ├── sessions.git                                (name owned by lattice-session)
-//! ├── projects/<ProjectStoreKey>/<store>.git      (names owned by domains)
+//! ├── lattice.redb                              (owned by lattice-session)
+//! ├── projects/<ProjectStoreKey>/workspace-history.git
 //! └── locks/
 //!     ├── sessions/<SessionId>.lock
 //!     └── projects/<ProjectStoreKey>/workspace.lock

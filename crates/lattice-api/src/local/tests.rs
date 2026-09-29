@@ -44,7 +44,7 @@ async fn private_socket_rejects_second_owner_and_oversized_frame() {
     );
     let (mut writer, mut reader) = tokio::net::UnixStream::pair().unwrap();
     ipc::check_peer(&writer).unwrap();
-    writer.write_all(b"LTLOCAL2").await.unwrap();
+    writer.write_all(b"LTLOCAL3").await.unwrap();
     writer.write_u32((ipc::MAX_FRAME + 1) as u32).await.unwrap();
     let result = ipc::read::<serde_json::Value>(&mut reader).await;
     assert!(matches!(
@@ -106,14 +106,6 @@ async fn detached_owners_share_acceptance_overlap_and_drain_with_fixed_reload() 
     .await
     .unwrap();
     let root = crate::LocalWorkspaceRoot::from_path(project.path()).unwrap();
-    let create = || crate::CreateSessionRequest {
-        label: None,
-        active_agent: "local-test".into(),
-        project_branch: "main".into(),
-        project_store_key: root.store_key_hex(),
-    };
-    let a = client.create_session(create()).await.unwrap();
-    let b = client.create_session(create()).await.unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
     let arrived = Arc::new(AtomicUsize::new(0));
@@ -154,71 +146,75 @@ async fn detached_owners_share_acceptance_overlap_and_drain_with_fixed_reload() 
             result.unwrap();
         }
     });
-    let request = |id: String| TurnRequest {
-        session_id: id,
-        turn_id: TurnId::parse(&uuid::Uuid::new_v4().to_string()).unwrap(),
+    let request = |session_id| TurnRequest {
+        session_id,
+        turn_id: new_turn_id(),
         workspace: root.canonical_path().into(),
         input: "local prompt".into(),
+        agent: Some("local-test".into()),
     };
-    let first = request(a.session_id.clone());
-    let second = request(b.session_id.clone());
+    let first = request(None);
+    let second = request(None);
     assert_eq!(
-        client.lookup_or_recover(first.clone()).await.unwrap(),
-        Acceptance::NeedsConfiguration
+        client.submit(first.clone(), None).await.unwrap(),
+        Acceptance::NeedsConfiguration {
+            agent_name: "local-test".into()
+        }
     );
     let (accepted, replay) = tokio::join!(
         client.submit(first.clone(), Some(frozen(project.path(), &endpoint))),
         client.submit(first.clone(), Some(frozen(project.path(), &endpoint)))
     );
-    assert!(matches!(accepted.unwrap(), Acceptance::Accepted { .. }));
-    assert!(matches!(replay.unwrap(), Acceptance::Accepted { .. }));
-    let busy = client
-        .submit(request(a.session_id.clone()), None)
-        .await
-        .unwrap_err();
-    assert_eq!(busy.kind, LocalErrorKind::Busy);
+    let Acceptance::Accepted { turn: a } = accepted.unwrap() else {
+        panic!("first acceptance")
+    };
+    assert!(
+        matches!(replay.unwrap(), Acceptance::Accepted { turn } | Acceptance::Existing { turn } if turn.turn_id == first.turn_id && turn.session_id == a.session_id)
+    );
+    assert_eq!(
+        client
+            .submit(request(Some(a.session_id)), None)
+            .await
+            .unwrap_err()
+            .kind,
+        LocalErrorKind::Busy
+    );
     let mut conflict = first.clone();
     conflict.input.push('!');
     assert_eq!(
         client.submit(conflict, None).await.unwrap_err().kind,
         LocalErrorKind::Conflict
     );
-    assert!(matches!(
-        client
-            .submit(second.clone(), Some(frozen(project.path(), &endpoint)))
-            .await
-            .unwrap(),
-        Acceptance::Accepted { .. }
-    ));
+    let Acceptance::Accepted { turn: b } = client
+        .submit(second.clone(), Some(frozen(project.path(), &endpoint)))
+        .await
+        .unwrap()
+    else {
+        panic!("second acceptance")
+    };
+    assert_ne!(a.session_id, b.session_id);
     wait_until(|| arrived.load(Ordering::SeqCst) == 2).await;
     let view = client
-        .query(&a.session_id, Some(first.turn_id))
+        .query(Some(a.session_id), Some(first.turn_id))
         .await
         .unwrap();
-    assert!(matches!(
-        view.requested_turn,
-        Some(TurnObservation::Pending(_))
-    ));
-    let status = client.session_status(&a.session_id).await.unwrap();
-    assert_eq!(status.commit_count, 0);
+    assert!(view.selected_turn.as_ref().unwrap().summary.is_none());
+    assert_eq!(client.log(a.session_id).await.unwrap().nodes.len(), 2);
     assert_eq!(
         client
-            .write_session(
-                &a.session_id,
-                SessionWrite::SetAgent {
-                    name: "other".into()
-                }
-            )
+            .rewind(a.session_id, NodeId(0), root.canonical_path().into())
             .await
-            .err()
-            .unwrap()
+            .unwrap_err()
             .kind,
         LocalErrorKind::Busy
     );
+    let target = TurnTarget {
+        session_id: Some(a.session_id),
+        turn_id: first.turn_id,
+    };
     let mut observation = client
         .subscribe(
-            &a.session_id,
-            first.turn_id,
+            target,
             Some(EventCursor {
                 epoch: "previous-process".into(),
                 sequence: 0,
@@ -226,24 +222,16 @@ async fn detached_owners_share_acceptance_overlap_and_drain_with_fixed_reload() 
         )
         .await
         .unwrap();
-    assert!(matches!(
-        observation.next().await.unwrap(),
-        Some(Observation::Gap { .. })
-    ));
-    let Some(Observation::Snapshot {
-        view, owned: true, ..
-    }) = observation.next().await.unwrap()
-    else {
-        panic!("pending snapshot")
+    let Some(Observation::Snapshot { view }) = observation.next().await.unwrap() else {
+        panic!("snapshot, not Gap")
     };
-    let pending = view.active_turn.unwrap();
-    let pending_messages = client
-        .read_messages(&a.session_id, &pending.journal_oid)
-        .await
-        .unwrap();
-    assert_eq!(pending_messages.len(), 1);
+    assert!(view.owned);
+    let pending_anchor = view.history.clone();
+    let pending_history = client.read_history(&view).await.unwrap();
+    assert_eq!(pending_history.entries.len(), 1);
     assert!(
-        matches!(&pending_messages[0].parts[0].semantic, MessageSemantic::Text { text } if text == "local prompt")
+        matches!(&pending_history.entries[0].content, Node::UserMessage { message, .. }
+        if matches!(&message.parts[0].semantic, MessageSemantic::Text { text } if text == "local prompt"))
     );
     drop(observation);
     let stopping_client = client.clone();
@@ -255,9 +243,10 @@ async fn detached_owners_share_acceptance_overlap_and_drain_with_fixed_reload() 
     })
     .await
     .unwrap();
+    assert!(!stop.is_finished());
     assert_eq!(
         client
-            .submit(request(b.session_id.clone()), None)
+            .submit(request(Some(b.session_id)), None)
             .await
             .unwrap_err()
             .kind,
@@ -265,12 +254,26 @@ async fn detached_owners_share_acceptance_overlap_and_drain_with_fixed_reload() 
     );
     assert!(
         client
-            .query(&a.session_id, Some(first.turn_id))
+            .query(Some(a.session_id), Some(first.turn_id))
             .await
             .is_ok()
     );
-    assert!(client.cancel(&b.session_id, second.turn_id).await.unwrap());
-    client.cancel(&b.session_id, second.turn_id).await.unwrap();
+    let cancel_target = TurnTarget {
+        session_id: Some(b.session_id),
+        turn_id: second.turn_id,
+    };
+    assert!(client.cancel(cancel_target).await.unwrap());
+    // 等持久取消而不是与 provider release 竞争；控制回执不等于已关闭。
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if client.turn(cancel_target).await.unwrap().summary.is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     release.send_replace(true);
     let status = stop.await.unwrap().unwrap();
     assert_eq!(status.owners, 0);
@@ -278,144 +281,69 @@ async fn detached_owners_share_acceptance_overlap_and_drain_with_fixed_reload() 
     shutdown.send(()).unwrap();
     provider.await.unwrap();
     assert_eq!(arrived.load(Ordering::SeqCst), 2);
-    // 重启没有自动恢复或 provider 接线；只读结果与永久身份仍可找回。
     let serving = tokio::spawn(serve(layout));
     tokio::time::timeout(Duration::from_secs(10), async {
         while client.status().await.is_err() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await
     .unwrap();
-    let cancelled = client
-        .query(&b.session_id, Some(second.turn_id))
-        .await
-        .unwrap();
-    assert!(
-        matches!(cancelled.requested_turn, Some(TurnObservation::Committed(turn)) if matches!(turn.outcome, crate::TurnOutcome::Cancelled { .. }))
+    assert_eq!(
+        client
+            .turn(cancel_target)
+            .await
+            .unwrap()
+            .summary
+            .unwrap()
+            .outcome,
+        lattice_session::store::PublicTurnOutcome::Cancelled
     );
     let prior = client
-        .submit_with(first.clone(), || async {
+        .submit_with(first.clone(), |_| async {
             panic!("existing Turn must not load configuration")
         })
         .await
         .unwrap();
-    let Acceptance::Existing {
-        turn: TurnObservation::Committed(commit),
-    } = prior
-    else {
-        panic!("expected stored result")
-    };
-    let mut text = String::new();
-    let mut offset = 0;
+    assert!(
+        matches!(prior, Acceptance::Existing { turn } if turn.turn_id == first.turn_id && turn.summary.is_some())
+    );
+    let view = client
+        .query(Some(a.session_id), Some(first.turn_id))
+        .await
+        .unwrap();
+    let history = client.read_history(&view).await.unwrap();
+    assert_eq!(history.entries.len(), 2);
+    let encoded = serde_json::to_string(&history).unwrap();
+    assert!(encoded.contains("后台结果"));
+    assert!(!encoded.contains("local-test-secret"));
+    let mut offset = None;
+    let mut fragments = String::new();
     loop {
         let page = client
-            .read_transcript_page(&a.session_id, &commit.commit_id, offset, 17)
+            .history_page(pending_anchor.clone(), offset, 17)
             .await
             .unwrap();
-        text.push_str(&page.jsonl);
-        if let Some(next) = page.next_offset {
-            offset = next;
-        } else {
+        for entry in page.fragments {
+            fragments.push_str(&entry.fragment.json_fragment);
+        }
+        offset = page.next;
+        if offset.is_none() {
             break;
         }
     }
-    assert!(text.contains("后台结果"));
+    let saved: Node = serde_json::from_str(&fragments).unwrap();
+    assert_eq!(saved, pending_history.entries[0].content);
+    assert_eq!(client.list_sessions().await.unwrap().len(), 2);
+    assert_eq!(client.log(a.session_id).await.unwrap().nodes.len(), 3);
     assert_eq!(
         client
-            .history_page(&a.session_id, &commit.commit_id, 0, 1)
-            .await
-            .unwrap(),
-        vec![commit.commit_id.clone()]
-    );
-    assert!(
-        client
-            .history_page(&a.session_id, &commit.commit_id, 1, 1)
+            .rewind(a.session_id, NodeId(0), root.canonical_path().into())
             .await
             .unwrap()
-            .is_empty()
+            .current,
+        NodeId(0)
     );
-    let messages = client
-        .read_messages(&a.session_id, &commit.commit_id)
-        .await
-        .unwrap();
-    assert_eq!(messages.len(), 2);
-    // 后续提交与后台重启不改变已固定的 pending 正文，也不触发模型重做。
-    assert_eq!(
-        client
-            .read_messages(&a.session_id, &pending.journal_oid)
-            .await
-            .unwrap(),
-        pending_messages
-    );
-    assert_eq!(client.list_sessions().await.unwrap().len(), 2);
-    assert_eq!(client.log(&a.session_id).await.unwrap().len(), 1);
-    let diff = client
-        .diff(&a.session_id, &commit.commit_id, &commit.commit_id)
-        .await
-        .unwrap();
-    assert!(diff.only_in_from.is_empty() && diff.only_in_to.is_empty());
-    assert!(matches!(
-        client
-            .write_session(
-                &a.session_id,
-                SessionWrite::Branch {
-                    name: "review".into(),
-                    from: Some(commit.commit_id.clone())
-                }
-            )
-            .await
-            .unwrap(),
-        SessionWriteResult::Branch(_)
-    ));
-    assert!(matches!(
-        client
-            .write_session(
-                &a.session_id,
-                SessionWrite::Checkout {
-                    target: "review".into()
-                }
-            )
-            .await
-            .unwrap(),
-        SessionWriteResult::Checkout(_)
-    ));
-    assert!(matches!(
-        client
-            .write_session(
-                &a.session_id,
-                SessionWrite::Reset {
-                    target: commit.commit_id.clone()
-                }
-            )
-            .await
-            .unwrap(),
-        SessionWriteResult::Reset(_)
-    ));
-    assert!(matches!(
-        client
-            .write_session(
-                &a.session_id,
-                SessionWrite::SetAgent {
-                    name: "other".into()
-                }
-            )
-            .await
-            .unwrap(),
-        SessionWriteResult::SetAgent(_)
-    ));
-    assert!(matches!(
-        client
-            .rewind(
-                &a.session_id,
-                &commit.commit_id,
-                root.canonical_path().into()
-            )
-            .await
-            .unwrap(),
-        LocalRewindResult::Success(_)
-    ));
-    assert!(!text.contains("local-test-secret"));
     client.stop().await.unwrap();
     serving.await.unwrap().unwrap();
 }
@@ -433,173 +361,234 @@ async fn submit_with_closes_pending_before_loading_configuration_once() {
 }
 
 async fn close_pending_through(operation: &str) {
-    use lattice_session::pending::{
-        FrozenTurnConfig, ToolCatalogSnapshot, TurnExecutionLimits, TurnStartedFacts,
-    };
-    use lattice_session::{Blocking, LockMode, SessionGraphStore};
+    use lattice_session::store::*;
     let state = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let layout = crate::StateLayout::in_state_root(state.path());
     let root = crate::LocalWorkspaceRoot::from_path(workspace.path()).unwrap();
+    let store = SessionStore::create(&layout).unwrap();
+    let session_id = SessionId::parse(&uuid::Uuid::new_v4().simple().to_string()).unwrap();
+    let old_id = new_turn_id();
+    let guard = store.try_lock_session(session_id).unwrap();
+    store
+        .accept_turn(
+            &guard,
+            AcceptTurn {
+                session: AcceptSession::New { id: session_id },
+                turn_id: old_id,
+                project_store_key: root.store_key(),
+                input: "old prompt".into(),
+                accepted_at: chrono::Utc::now(),
+                agent_selection: AgentSelection::Explicit,
+                config: FrozenTurnConfig {
+                    agent_name: "local-test".into(),
+                    model: "unconfigured-model".into(),
+                    provider: "openai_compatible".into(),
+                    system_prompt: None,
+                    profile_snapshot_json: "{}".into(),
+                    policy_snapshot_json: "{}".into(),
+                    catalog: ToolCatalogSnapshot::new("test".into(), vec![]).unwrap(),
+                    limits: TurnExecutionLimits {
+                        timeout_secs: 300,
+                        max_model_steps: 32,
+                        max_model_attempts: 1,
+                    },
+                },
+            },
+        )
+        .unwrap();
+    drop(guard);
+    drop(store);
     let serving = tokio::spawn(serve(layout.clone()));
     let client = LocalClient::new(layout.clone());
     tokio::time::timeout(Duration::from_secs(10), async {
         while client.status().await.is_err() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await
     .unwrap();
-    let session = client
-        .create_session(crate::CreateSessionRequest {
-            label: None,
-            active_agent: "test".into(),
-            project_branch: "main".into(),
-            project_store_key: root.store_key_hex(),
-        })
-        .await
-        .unwrap();
-    let store = lattice_session::GitSessionGraphStore::open_layout(&layout).unwrap();
-    let old_id = TurnId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
-    {
-        let lock = store
-            .lock_execution(
-                &session.session_id,
-                LockMode::Exclusive,
-                Blocking::NonBlocking,
-            )
-            .unwrap();
-        store
-            .begin_pending_turn(
-                TurnStartedFacts {
-                    turn_id: old_id,
-                    session_id: lancet_protocol::SessionId::parse(&session.session_id).unwrap(),
-                    project_store_key: root.store_key(),
-                    parent_conversation_tip: None,
-                    user_message: lattice_conversation::NativeMessage::new(
-                        lattice_conversation::MessageRole::User,
-                        None,
-                        vec![lattice_conversation::MessagePart::semantic_only(
-                            lattice_conversation::MessageSemantic::Text {
-                                text: "old prompt".into(),
-                            },
-                        )],
-                    ),
-                    config: FrozenTurnConfig {
-                        agent_name: "test".into(),
-                        model: "unconfigured-model".into(),
-                        provider: "test".into(),
-                        system_prompt: None,
-                        profile_snapshot_json: "{}".into(),
-                        policy_snapshot_json: "{}".into(),
-                        catalog: ToolCatalogSnapshot::new("test".into(), vec![]).unwrap(),
-                        limits: TurnExecutionLimits {
-                            timeout_secs: 300,
-                            max_model_steps: 32,
-                            max_model_attempts: 1,
-                        },
-                    },
-                    accepted_at: "2026-09-01T00:00:00Z".into(),
-                },
-                &lock,
-            )
-            .unwrap();
-    }
-    let before = client
-        .query(&session.session_id, Some(old_id))
-        .await
-        .unwrap();
-    assert!(!client.cancel(&session.session_id, old_id).await.unwrap());
+    let target = TurnTarget {
+        session_id: Some(session_id),
+        turn_id: old_id,
+    };
+    let before = client.query(Some(session_id), Some(old_id)).await.unwrap();
+    assert!(before.selected_turn.as_ref().unwrap().summary.is_none());
+    assert!(!client.cancel(target).await.unwrap());
     assert_eq!(
         before,
-        client
-            .query(&session.session_id, Some(old_id))
-            .await
-            .unwrap()
+        client.query(Some(session_id), Some(old_id)).await.unwrap()
     );
+    let new_id = new_turn_id();
+    let request = TurnRequest {
+        session_id: Some(session_id),
+        turn_id: new_id,
+        workspace: root.canonical_path().into(),
+        input: "关闭旧任务后接受新输入".into(),
+        agent: None,
+    };
     if operation == "submit_with" {
+        // 已有会话正常新执行仍要求历史存在；关闭本身不读取它。
+        lancet_api::WorkspaceHistory::create(lancet_api::WorkspaceHistoryBacking::for_key(
+            layout,
+            root.store_key(),
+        ))
+        .unwrap();
         let provider = super::server::Provider::start().await;
-        let new_id = new_turn_id();
         let loads = std::cell::Cell::new(0);
-        let acceptance = client.submit_with(
-                TurnRequest {
-                    session_id: session.session_id.clone(),
-                    turn_id: new_id,
-                    workspace: root.canonical_path().into(),
-                    input: "关闭旧任务后接受新输入".into(),
-                },
-                || async {
+        let acceptance = client
+            .submit_with(request, |agent| {
+                assert_eq!(agent, "local-test");
+                async {
                     loads.set(loads.get() + 1);
-                    let closed = client.query(&session.session_id, Some(old_id)).await?;
-                    assert!(closed.active_turn.is_none(), "加载配置前必须关闭旧 pending");
+                    let closed = client.turn(target).await?;
+                    assert_eq!(
+                        closed.summary.as_ref().unwrap().outcome,
+                        PublicTurnOutcome::Failed
+                    );
                     assert!(matches!(
-                        closed.requested_turn,
-                        Some(TurnObservation::Committed(ref turn))
-                            if turn.turn_id == old_id && turn.origin == crate::ClosureOrigin::Reconciled
+                        closed.steps[0].state,
+                        StepDetailState::Closed {
+                            end: StepEnd::Stop {
+                                node: None,
+                                cause: StopCause::ProcessExit
+                            },
+                            ..
+                        }
                     ));
                     Ok(frozen(workspace.path(), &provider.endpoint))
-                },
-            ).await.unwrap();
-        assert_eq!(loads.get(), 1);
-        assert_eq!(acceptance, Acceptance::Accepted { turn_id: new_id });
-        let mut observation = client
-            .subscribe(&session.session_id, new_id, None)
-            .await
-            .unwrap();
-        tokio::time::timeout(Duration::from_secs(10), async {
-                loop {
-                    if let Observation::Finished { view, error, .. } = observation.next().await.unwrap().unwrap() {
-                        assert!(error.is_none());
-                        assert!(matches!(view.requested_turn, Some(TurnObservation::Committed(ref turn))
-                            if turn.turn_id == new_id && matches!(turn.outcome, crate::TurnOutcome::Completed { .. })));
-                        break;
-                    }
                 }
-            }).await.unwrap();
-        assert_eq!(
-            provider.finish().await.len(),
-            1,
-            "只执行新任务，不重放旧任务"
-        );
-    } else if operation == "probe" {
-        let new_id = TurnId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
-        let result = client
-            .lookup_or_recover(TurnRequest {
-                session_id: session.session_id.clone(),
-                turn_id: new_id,
-                workspace: root.canonical_path().into(),
-                input: "新的输入".into(),
             })
             .await
             .unwrap();
-        assert_eq!(result, Acceptance::NeedsConfiguration);
-        assert!(
-            client
-                .query(&session.session_id, Some(new_id))
-                .await
-                .unwrap()
-                .requested_turn
-                .is_none()
-        );
-    } else {
-        client
-            .write_session(
-                &session.session_id,
-                SessionWrite::SetAgent {
-                    name: "新代理".into(),
+        assert_eq!(loads.get(), 1);
+        assert!(matches!(acceptance, Acceptance::Accepted { turn } if turn.turn_id == new_id));
+        let mut observation = client
+            .subscribe(
+                TurnTarget {
+                    session_id: Some(session_id),
+                    turn_id: new_id,
                 },
+                None,
             )
             .await
             .unwrap();
-    }
-    let after = client
-        .query(&session.session_id, Some(old_id))
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut summary_seen = false;
+            loop {
+                match observation.next().await.unwrap().unwrap() {
+                    Observation::Snapshot { view } => {
+                        if view
+                            .selected_turn
+                            .as_ref()
+                            .is_some_and(|t| t.summary.is_some())
+                        {
+                            assert_eq!(
+                                view.selected_turn
+                                    .as_ref()
+                                    .unwrap()
+                                    .summary
+                                    .as_ref()
+                                    .unwrap()
+                                    .outcome,
+                                PublicTurnOutcome::Completed
+                            );
+                            summary_seen = true;
+                        }
+                    }
+                    Observation::Finished { history, .. } => {
+                        assert!(summary_seen);
+                        assert_eq!(history.entries.len(), 3); // 旧 User、新 User、新 Step
+                        break;
+                    }
+                    Observation::Event { .. } => {}
+                }
+            }
+        })
         .await
         .unwrap();
-    assert!(after.active_turn.is_none());
-    assert!(
-        matches!(after.requested_turn, Some(TurnObservation::Committed(turn)) if turn.origin == crate::ClosureOrigin::Reconciled)
+        assert_eq!(provider.finish().await.len(), 1);
+    } else if operation == "probe" {
+        assert_eq!(
+            client.submit(request, None).await.unwrap(),
+            Acceptance::NeedsConfiguration {
+                agent_name: "local-test".into()
+            }
+        );
+        assert_eq!(
+            client
+                .turn(TurnTarget {
+                    session_id: Some(session_id),
+                    turn_id: new_id
+                })
+                .await
+                .unwrap_err()
+                .kind,
+            LocalErrorKind::NotFound
+        );
+    } else {
+        client
+            .rewind(session_id, NodeId(0), root.canonical_path().into())
+            .await
+            .unwrap();
+    }
+    let after = client.query(Some(session_id), Some(old_id)).await.unwrap();
+    assert!(after.session.active_turn.is_none());
+    let old = after.selected_turn.unwrap();
+    assert_eq!(old.summary.unwrap().outcome, PublicTurnOutcome::Failed);
+    assert!(matches!(
+        old.steps[0].state,
+        StepDetailState::Closed {
+            end: StepEnd::Stop {
+                node: None,
+                cause: StopCause::ProcessExit
+            },
+            ..
+        }
+    ));
+    client.stop().await.unwrap();
+    serving.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn first_probe_and_readonly_requests_never_initialize_missing_store() {
+    let state = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let layout = crate::StateLayout::in_state_root(state.path());
+    let serving = tokio::spawn(serve(layout.clone()));
+    let client = LocalClient::new(layout.clone());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while client.status().await.is_err() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let request = TurnRequest {
+        session_id: None,
+        turn_id: new_turn_id(),
+        workspace: project.path().canonicalize().unwrap(),
+        input: " original ".into(),
+        agent: Some("alpha".into()),
+    };
+    assert_eq!(
+        client.submit(request.clone(), None).await.unwrap(),
+        Acceptance::NeedsConfiguration {
+            agent_name: "alpha".into()
+        }
     );
+    let mut invalid = request;
+    invalid.agent = None;
+    assert_eq!(
+        client.submit(invalid, None).await.unwrap_err().kind,
+        LocalErrorKind::BadRequest
+    );
+    let error = client.list_sessions().await.unwrap_err();
+    assert!(matches!(
+        error.store,
+        Some(StoreDiagnostic::NotInitialized { .. })
+    ));
+    assert!(!layout.lattice_root().join("lattice.redb").exists());
     client.stop().await.unwrap();
     serving.await.unwrap().unwrap();
 }

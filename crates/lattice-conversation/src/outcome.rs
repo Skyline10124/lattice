@@ -1,13 +1,21 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Provider-neutral Tool result closure (ADR 0005 §7/§11).
+//! Provider-neutral Tool result closure.
 //!
 //! The execution outcome is a closed sum. A `ToolResult` conversation part
 //! must close its ToolCall through the provider result block with exactly one
-//! of these outcomes; it is never re-labeled after the fact. The
-//! InvocationStore (#139-A) owns the durable terminal record with the same
-//! vocabulary plus typed reasons; this is the conversation-facing closure.
+//! of these outcomes; it is never re-labeled after the fact. The durable
+//! invocation slot in `lattice-session` stores the same vocabulary plus the
+//! outcome-shaped payload (see `docs/architecture/session.md#调用槽位`).
+//!
+//! Two dimensions, as for model attempts: the outcome is the end shape, and
+//! `IndeterminateCause` or the returned `CepError` carries the reason. Only
+//! `NotExecuted` means the call was never handed to LANCET and guarantees no
+//! external effect; every other outcome is recorded after the slot crossed
+//! `Started`. Policy or validation refusals are `Failed` with a Validation,
+//! Permission or Guard `CepError`; cancellation after dispatch is
+//! `Indeterminate`.
 
 use serde::{Deserialize, Serialize};
 
@@ -15,19 +23,15 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolResultOutcome {
-    /// The Tool executed and returned a result.
+    /// LANCET returned a JSON result.
     Succeeded,
-    /// The Tool executed and produced a failure result.
+    /// LANCET returned a `CepError`; its family and retriability say why.
     Failed,
-    /// The call was rejected before execution (policy, guard, or validation).
-    Rejected,
-    /// Execution was cancelled after dispatch.
-    Cancelled,
-    /// The call never dispatched (e.g. an earlier binding in the batch stopped
-    /// the batch).
+    /// The coordinator never handed the call to LANCET; the Step's stop cause
+    /// says why. The only outcome that guarantees no external effect.
     NotExecuted,
-    /// The system cannot determine whether execution occurred (the durable
-    /// `DispatchStarted` boundary was crossed without a terminal fact).
+    /// The slot crossed `Started` without a determinate result: effects are
+    /// unknown.
     Indeterminate,
 }
 
@@ -37,8 +41,6 @@ impl ToolResultOutcome {
         match self {
             Self::Succeeded => "succeeded",
             Self::Failed => "failed",
-            Self::Rejected => "rejected",
-            Self::Cancelled => "cancelled",
             Self::NotExecuted => "not_executed",
             Self::Indeterminate => "indeterminate",
         }
@@ -54,8 +56,6 @@ mod tests {
         let cases = [
             (ToolResultOutcome::Succeeded, "succeeded"),
             (ToolResultOutcome::Failed, "failed"),
-            (ToolResultOutcome::Rejected, "rejected"),
-            (ToolResultOutcome::Cancelled, "cancelled"),
             (ToolResultOutcome::NotExecuted, "not_executed"),
             (ToolResultOutcome::Indeterminate, "indeterminate"),
         ];

@@ -1,171 +1,294 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Test-only acknowledged crash barriers for the production Turn saga.
-
-use std::collections::BTreeMap;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-
-use lancet_audit::invocation_store::{InvocationRecord, PinnedLedgerView};
-use lancet_protocol::InvocationId;
-use lattice_session::PendingTurnTip;
+//! 显式故障产物的提交后停点；marker 仅记录身份和事务序号，不复制正文。
+use super::coordinator::{CoordinatorIoError, CoordinatorStoreIo};
+use lancet_protocol::{InvocationBinding, InvocationId, SessionId, TurnId};
+use lattice_session::store::ChangeSeq;
 use serde::Serialize;
-
-use super::coordinator::{CoordinatorIoError, TurnCoordinator};
-
-pub(crate) const BARRIER_ENV: &str = "LATTICE_TEST_TURN_BARRIER";
-pub(crate) const ACK_ENV: &str = "LATTICE_TEST_TURN_BARRIER_ACK";
-const INJECTION_ENV: &str = "LATTICE_TEST_TURN_INJECTION";
-const CANCEL_BEFORE_DISPATCH: &str = "cancel_before_dispatch";
+use std::{io::Write, path::PathBuf};
 
 #[derive(Serialize)]
-struct CrashBarrierFacts {
-    barrier: String,
-    session_id: String,
-    turn_id: String,
-    active_turn_oid: String,
-    snapshot: lattice_session::pending::PendingSnapshot,
-    draft_classification: Option<lattice_session::pending::DraftClassification>,
-    ledger_oid: String,
-    invocations: BTreeMap<InvocationId, InvocationRecord>,
+struct Marker {
+    barrier: &'static str,
+    session_id: SessionId,
+    turn_id: Option<TurnId>,
+    current: Option<lattice_session::store::NodeId>,
+    step: Option<u32>,
+    part: Option<u32>,
+    invocation_id: Option<InvocationId>,
+    change_seq: ChangeSeq,
 }
-
+fn selected(config: &str, name: &str, step: Option<u32>, part: Option<u32>) -> bool {
+    config == name
+        || step.is_some_and(|step| config == format!("{name}:{step}"))
+        || step
+            .zip(part)
+            .is_some_and(|(step, part)| config == format!("{name}:{step}:{part}"))
+}
 pub(crate) async fn hit(
-    coordinator: &TurnCoordinator,
-    session_id: &str,
-    barrier: &str,
+    io: &CoordinatorStoreIo,
+    turn_id: TurnId,
+    barrier: &'static str,
+    step: Option<u32>,
+    binding: Option<&InvocationBinding>,
 ) -> Result<(), CoordinatorIoError> {
-    let configured = std::env::var(BARRIER_ENV).ok();
-    if configured.as_deref() != Some(barrier) {
+    schedule(
+        barrier,
+        serde_json::json!({
+            "session_id":io.session_id(),"turn_id":turn_id,"step":step,
+            "invocation_id":binding.map(|b| b.invocation_id)
+        }),
+    )
+    .await;
+    if !std::env::var("LATTICE_TEST_TURN_BARRIER")
+        .ok()
+        .is_some_and(|config| {
+            selected(
+                &config,
+                barrier,
+                step,
+                binding.map(|b| b.identity.part_ordinal),
+            )
+        })
+    {
         return Ok(());
     }
-    let (tip, ledger, draft_classification) = coordinator
-        .io
-        .crash_barrier_snapshot(session_id.to_string())
+    let session_id = io.session_id();
+    let change_seq = io
+        .read(move |read| {
+            let project = read.session(session_id)?.project_store_key;
+            Ok(read.operator_status(&project)?.latest_change)
+        })
         .await?;
-    stop_at_barrier(session_id, barrier, tip, ledger, draft_classification);
-}
-
-pub(crate) fn cancel_before_dispatch(cancel_flag: Option<&Arc<AtomicBool>>) {
-    if std::env::var(INJECTION_ENV).ok().as_deref() == Some(CANCEL_BEFORE_DISPATCH) {
-        cancel_flag
-            .expect("cancellation injection requires the CLI cancel flag")
-            .store(true, Ordering::Relaxed);
-    }
-}
-
-pub(crate) async fn prepare_dispatch(
-    coordinator: &TurnCoordinator,
-    session_id: &str,
-    invocation_id: InvocationId,
-) -> Result<(), CoordinatorIoError> {
-    if std::env::var(BARRIER_ENV).ok().as_deref() != Some("dispatch_started") {
-        return Ok(());
-    }
-    let (tip, ledger, draft_classification) = coordinator
-        .io
-        .crash_barrier_snapshot(session_id.to_string())
-        .await?;
-    let turn_id = tip.snapshot.turn_id;
-    let invocations = ledger
-        .snapshot
-        .invocations
-        .into_iter()
-        .filter(|(_, record)| record.binding.turn_id == turn_id)
-        .collect();
-    let facts = CrashBarrierFacts {
-        barrier: "dispatch_started_context".to_string(),
-        session_id: session_id.to_string(),
-        turn_id: turn_id.to_string(),
-        active_turn_oid: tip.oid.to_string(),
-        snapshot: tip.snapshot,
-        draft_classification,
-        ledger_oid: ledger.commit_oid.to_string(),
-        invocations,
+    let marker = Marker {
+        barrier,
+        session_id,
+        turn_id: Some(turn_id),
+        current: None,
+        step,
+        part: binding.map(|b| b.identity.part_ordinal),
+        invocation_id: binding.map(|b| b.invocation_id),
+        change_seq,
     };
-    let mut path = ack_path().into_os_string();
-    path.push(".context");
-    let path = PathBuf::from(path);
-    let value = serde_json::json!({
-        "invocation_id": invocation_id,
-        "session": facts,
-    });
-    write_ack(&path, &value);
+    stop(marker).await
+}
+
+pub(crate) async fn rewind_hit(
+    io: &CoordinatorStoreIo,
+    session: &lattice_session::store::SessionRecord,
+) -> Result<(), CoordinatorIoError> {
+    if std::env::var("LATTICE_TEST_TURN_BARRIER").as_deref() != Ok("rewind_committed") {
+        return Ok(());
+    }
+    let project = session.project_store_key;
+    let change_seq = io
+        .read(move |read| Ok(read.operator_status(&project)?.latest_change))
+        .await?;
+    stop(Marker {
+        barrier: "rewind_committed",
+        session_id: session.session_id,
+        turn_id: None,
+        current: Some(session.current),
+        step: None,
+        part: None,
+        invocation_id: None,
+        change_seq,
+    })
+    .await
+}
+
+async fn stop(marker: Marker) -> Result<(), CoordinatorIoError> {
+    tokio::task::spawn_blocking(move || {
+        let path = PathBuf::from(
+            std::env::var_os("LATTICE_TEST_TURN_BARRIER_ACK").expect("barrier ack required"),
+        );
+        assert!(path.is_absolute(), "barrier ack must be absolute");
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+            .expect("create barrier ack");
+        serde_json::to_writer(&mut file, &marker).expect("encode barrier ack");
+        file.write_all(b"\n").expect("terminate barrier ack");
+        file.sync_all().expect("sync barrier ack");
+        std::fs::File::open(path.parent().expect("ack parent"))
+            .expect("open parent")
+            .sync_all()
+            .expect("sync parent");
+        // SAFETY: only the current explicitly feature-enabled process is stopped.
+        // Harness must verify this marker and process ownership before SIGKILL.
+        let result = unsafe { libc::raise(libc::SIGSTOP) };
+        panic!("crash barrier resumed unexpectedly ({result})");
+    })
+    .await?;
     Ok(())
 }
 
-pub(crate) fn record_tool_effect(invocation_id: InvocationId) {
-    let Some(path) = std::env::var_os("LATTICE_TEST_TOOL_EFFECT_LOG") else {
+/// 外部场景的单次调度窗口；只在显式故障产物编译，不暂停整个后台。
+pub(crate) async fn schedule(name: &str, marker: serde_json::Value) {
+    use tokio::io::AsyncWriteExt;
+    let Some(root) = std::env::var_os("LATTICE_TEST_SCHEDULE_DIR") else {
         return;
     };
-    let path = PathBuf::from(path);
-    assert!(path.is_absolute(), "Tool effect log path must be absolute");
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .expect("open Tool effect log");
-    writeln!(file, "{invocation_id}").expect("append Tool effect log");
-    file.sync_all().expect("fsync Tool effect log");
-}
-
-fn stop_at_barrier(
-    session_id: &str,
-    barrier: &str,
-    tip: PendingTurnTip,
-    ledger: PinnedLedgerView,
-    draft_classification: Option<lattice_session::pending::DraftClassification>,
-) -> ! {
-    let turn_id = tip.snapshot.turn_id;
-    let invocations = ledger
-        .snapshot
-        .invocations
-        .into_iter()
-        .filter(|(_, record)| record.binding.turn_id == turn_id)
-        .collect();
-    let facts = CrashBarrierFacts {
-        barrier: barrier.to_string(),
-        session_id: session_id.to_string(),
-        turn_id: turn_id.to_string(),
-        active_turn_oid: tip.oid.to_string(),
-        snapshot: tip.snapshot,
-        draft_classification,
-        ledger_oid: ledger.commit_oid.to_string(),
-        invocations,
-    };
-    let path = ack_path();
-    write_ack(&path, &facts);
-    // SAFETY: this test-only Linux feature stops only the current process. The
-    // external harness validates the fsynced ack before SIGKILLing its process
-    // group. Returning from SIGSTOP would mean the barrier protocol was broken.
-    let result = unsafe { libc::raise(libc::SIGSTOP) };
-    panic!("crash barrier resumed unexpectedly (raise returned {result})");
-}
-
-fn ack_path() -> PathBuf {
-    let path =
-        PathBuf::from(std::env::var_os(ACK_ENV).expect("crash barrier ack path is required"));
-    assert!(
-        path.is_absolute(),
-        "crash barrier ack path must be absolute"
-    );
-    path
-}
-
-fn write_ack(path: &Path, facts: &impl Serialize) {
-    let bytes = serde_json::to_vec(facts).expect("serialize crash barrier facts");
-    let mut file = std::fs::OpenOptions::new()
-        .create_new(true)
+    let root = PathBuf::from(root);
+    assert!(root.is_absolute(), "schedule directory must be absolute");
+    if !tokio::fs::try_exists(root.join(format!("{name}.arm")))
+        .await
+        .expect("read schedule arm")
+    {
+        return;
+    }
+    let mut ready = match tokio::fs::OpenOptions::new()
         .write(true)
-        .open(path)
-        .expect("create crash barrier ack");
-    file.write_all(&bytes).expect("write crash barrier ack");
-    file.write_all(b"\n").expect("terminate crash barrier ack");
-    file.sync_all().expect("fsync crash barrier ack");
-    let parent = std::fs::File::open(path.parent().expect("ack parent"))
-        .expect("open crash barrier ack parent");
-    parent.sync_all().expect("fsync crash barrier ack parent");
+        .create_new(true)
+        .open(root.join(format!("{name}.ready")))
+        .await
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return,
+        Err(error) => panic!("claim schedule gate: {error}"),
+    };
+    ready
+        .write_all(&serde_json::to_vec(&marker).expect("encode schedule marker"))
+        .await
+        .expect("write schedule marker");
+    ready.sync_all().await.expect("sync schedule marker");
+    let release = root.join(format!("{name}.release"));
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while !tokio::fs::try_exists(&release)
+            .await
+            .expect("read schedule release")
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("schedule gate was not released");
+}
+/// 同一 anchor 的并发读取一起受控，避免另一条订阅绕过已暂停的最终页。
+pub(crate) async fn history_read_fault(anchor: &lattice_session::store::HistoryAnchor) -> bool {
+    let Some(root) = std::env::var_os("LATTICE_TEST_SCHEDULE_DIR") else {
+        return false;
+    };
+    let root = PathBuf::from(root);
+    assert!(root.is_absolute(), "schedule directory must be absolute");
+    let name = format!("history_read_{}", anchor.head.0);
+    schedule(&name, serde_json::json!({"anchor":anchor})).await;
+    if tokio::fs::try_exists(root.join(format!("{name}.arm")))
+        .await
+        .expect("read history arm")
+    {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            while !tokio::fs::try_exists(root.join(format!("{name}.release")))
+                .await
+                .expect("read history release")
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("history gate was not released");
+    }
+    tokio::fs::try_exists(root.join(format!("{name}.error")))
+        .await
+        .expect("read history fault")
+}
+
+/// 在真实同步事务内复用存储层故障点；文件仅选择一次注入，不承载业务状态。
+pub(crate) fn auto_close_fault<T>(operation: impl FnOnce() -> T) -> T {
+    use lattice_session::store::{TestCommitFault, with_test_commit_fault};
+    let Some(root) = std::env::var_os("LATTICE_TEST_SCHEDULE_DIR") else {
+        return operation();
+    };
+    let root = PathBuf::from(root);
+    assert!(root.is_absolute(), "schedule directory must be absolute");
+    let source = root.join("auto_close.fault");
+    let claimed = root.join("auto_close.fault-consumed");
+    match std::fs::rename(source, &claimed) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return operation(),
+        Err(error) => panic!("claim commit fault: {error}"),
+    }
+    let name = std::fs::read_to_string(claimed).expect("read commit fault");
+    let fault = match name.as_str() {
+        "poisoned" => TestCommitFault::Poisoned,
+        "unknown_before" => TestCommitFault::UnknownBefore,
+        "unknown_after" => TestCommitFault::UnknownAfter,
+        _ => panic!("unknown commit fault"),
+    };
+    let result = with_test_commit_fault(fault, operation);
+    std::fs::write(
+        root.join("auto_close.fault-hit"),
+        serde_json::to_vec(&serde_json::json!({"fault":name})).expect("encode fault marker"),
+    )
+    .expect("write fault marker");
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn selector_can_pin_step_or_slot_without_stopping_earlier_commits() {
+        assert!(super::selected(
+            "request_started",
+            "request_started",
+            Some(0),
+            None
+        ));
+        assert!(super::selected(
+            "request_started:1",
+            "request_started",
+            Some(1),
+            None
+        ));
+        assert!(!super::selected(
+            "request_started:1",
+            "request_started",
+            Some(0),
+            None
+        ));
+        assert!(!super::selected(
+            "request_started:1",
+            "request_started",
+            None,
+            None
+        ));
+        assert!(super::selected(
+            "invocation_started",
+            "invocation_started",
+            Some(1),
+            Some(3)
+        ));
+        assert!(super::selected(
+            "invocation_started:1:3",
+            "invocation_started",
+            Some(1),
+            Some(3)
+        ));
+        assert!(!super::selected(
+            "invocation_started:1:3",
+            "invocation_started",
+            Some(0),
+            Some(3)
+        ));
+        assert!(!super::selected(
+            "invocation_started:1:3",
+            "invocation_started",
+            Some(1),
+            Some(2)
+        ));
+        assert!(!super::selected(
+            "invocation_started:1:3",
+            "calls_registered",
+            Some(1),
+            None
+        ));
+        assert!(!super::selected(
+            "invocation_started:1:3",
+            "invocation_started",
+            None,
+            None
+        ));
+    }
 }

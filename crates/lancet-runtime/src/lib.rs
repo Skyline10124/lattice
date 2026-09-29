@@ -38,8 +38,8 @@
 //!   [`workspace::VisibilityEngine`] moved down here in GitHub #30, because the
 //!   `workspace-observe` and `workspace-mutate` Tool Host imports execute all
 //!   filesystem operations here. Secure per-segment path resolution, System Path
-//!   Exclusion, visibility, bounded reads, atomic installation, mutation history,
-//!   and Rewind share this one concrete module.
+//!   Exclusion, visibility, bounded reads, atomic installation and mutation history
+//!   share this one concrete module.
 //!
 //! `lancet-runtime` does **not** depend on `lancet-api` or any LATTICE
 //! session/agent/profile crate. The `lancet-authority` edge points downward.
@@ -58,7 +58,6 @@ pub mod host_mutate;
 pub mod host_network;
 pub mod host_workspace;
 pub mod limits;
-pub mod rewind_audit;
 pub mod runtime;
 pub mod workspace;
 
@@ -75,8 +74,8 @@ pub use control::{Cancellation, CancellationSender, EventSink, ExecutionReceipt}
 pub use evidence::CellEvidenceLedger;
 pub use execution::RuntimeExecution;
 pub use history::{
-    HistorySnapshot, MutationRecord, RecordedMutation, RewindError, RewindPathRestore, RewindPlan,
-    RewindStep, WorkspaceHistory, WorkspaceHistoryBacking, WorkspaceHistoryError,
+    HistorySnapshot, MutationRecord, RecordedMutation, WorkspaceHistory, WorkspaceHistoryBacking,
+    WorkspaceHistoryError,
 };
 /// Lock and addressing vocabulary from the durability kernel, re-exported so
 /// callers holding a runtime handle need no direct kernel dependency

@@ -1,51 +1,22 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Fake-LLM end-to-end release scenario.
-//!
-//! Validates the full edit → edit cycle in a **single `run_turn`**
-//! with a multi-round `FakeStreamingLlmClient` under the Direct-Local runtime.
-//! Uses a persisted on-disk audit DB so finalized operator rows can be
-//! inspected after the turn completes.
-//!
+//! 既有进程内双 edit 验收：真实 Component、文件会话库与私有工作区历史。
+//! 不是外部二进制 E2E 或发布批准。
 //! Filter: `release_e2e_criterion_8`
 
 mod support;
 
 use std::sync::Arc;
 
-use lancet_api::{AuditRequest, query_audit};
+use lancet_api::replay_audit;
 use lattice_agent::LlmClient;
 use lattice_agent::testing::FakeStreamingLlmClient;
-use lattice_api::RunTurnRequest;
+use lattice_api::{RunTurnRequest, SessionApi};
+use lattice_conversation::{MessageSemantic, ToolResultOutcome};
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
-use lattice_session::{GitSessionGraphStore, SessionGraphStore, StateLayout};
-
-fn store_key_hex(root: &std::path::Path) -> String {
-    lattice_api::LocalWorkspaceRoot::from_path(root)
-        .expect("resolve workspace root")
-        .store_key_hex()
-}
-
-fn sessions_path() -> std::path::PathBuf {
-    StateLayout::resolve()
-        .expect("resolve scoped test state layout")
-        .lattice_root()
-        .join("sessions.git")
-}
-
-fn create_session_store() -> lattice_api::SessionApi {
-    let layout = StateLayout::resolve().expect("resolve scoped test state layout");
-    lattice_api::SessionApi::git_create_with_layout(sessions_path(), &layout)
-        .expect("create session store")
-}
-
-fn open_session_store() -> lattice_api::SessionApi {
-    let layout = StateLayout::resolve().expect("resolve scoped test state layout");
-    lattice_api::SessionApi::git_open_with_layout(sessions_path(), &layout)
-        .expect("open session store")
-}
+use lattice_session::{StateLayout, store::*};
 
 // ── Streaming event helpers ──────────────────────────────────────────────────
 
@@ -94,7 +65,7 @@ struct ReleaseE2eWorkspace {
     _dir: tempfile::TempDir,
     /// Holds the shared env lock and points `XDG_STATE_HOME` at a temp state
     /// root for the whole fixture lifetime, restoring the previous value on drop.
-    _state: lancet_audit::ScopedXdgStateHome,
+    _state: lattice_session::ScopedXdgStateHome,
     _global_agents: tempfile::TempDir,
     root: std::path::PathBuf,
     canonical_root: std::path::PathBuf,
@@ -106,7 +77,7 @@ struct ReleaseE2eWorkspace {
 /// The profile enables `mutate.edit` with an empty workspace deny list
 /// (except `.git/**`) so edits apply cleanly.
 fn setup_release_e2e_workspace(src_content: &str) -> ReleaseE2eWorkspace {
-    let state = lancet_audit::ScopedXdgStateHome::new();
+    let state = lattice_session::ScopedXdgStateHome::new();
     let ws = tempfile::tempdir().unwrap();
     let root = ws.path().to_path_buf();
 
@@ -153,7 +124,6 @@ denied_write_patterns = [".git/**"]
 fn make_release_e2e_request(
     ws: &ReleaseE2eWorkspace,
     input: &str,
-    session_id: &str,
     llm: Arc<dyn LlmClient>,
 ) -> RunTurnRequest {
     // No `set_current_dir` here: `test_project_root` already pins the root, and
@@ -161,53 +131,18 @@ fn make_release_e2e_request(
     // fail once a `TempDir` dropped (see the note in `tests/consistency.rs`).
     RunTurnRequest {
         input: input.to_string(),
-        session_id: session_id.to_string(),
+        session_id: None,
+        agent: Some("default".into()),
         loaded_profile: Some(ws.loaded.clone()),
         cancel_flag: None,
-        test_llm: Some((llm, lattice_llm::ProviderKind::Anthropic)),
+        test_llm: Some((llm, lattice_llm::ProviderKind::OpenAiCompatible)),
         test_project_root: Some(ws.root.to_string_lossy().to_string()),
-        // Persist audit to disk so the finalized operator rows remain available
-        // after run_turn.
     }
 }
 
 // ── Release criterion-8 test ──────────────────────────────────────────────────
 
-// Single `run_turn` driving mutate.edit → mutate.edit → Done(stop)
-// without envelope declaration.
-//
-// Asserts:
-// 1. Turn completes with status=Completed.
-// 2. Direct-Local edits are verified via tool outcomes (section 6).
-// 3. Session has exactly one commit in the graph.
-// 4. Audit rows are in edit → edit order.
-// 5. Both mutate.edit tool results succeed without profile verify configured.
-
-/// Create an unattached branch at the current HEAD without checking it out.
-fn create_unattached_target_branch(root: &std::path::Path, name: &str) -> String {
-    let mut repo = gix::open_opts(root, gix::open::Options::isolated()).expect("open repo");
-    // Isolated repos have no identity; inject a fixture committer for the reflog.
-    {
-        let mut cfg = repo.config_snapshot_mut();
-        cfg.set_raw_value("user.name", "lattice-test")
-            .expect("set name");
-        cfg.set_raw_value("user.email", "test@lattice.local")
-            .expect("set email");
-        let _ = cfg.commit();
-    }
-    let head = repo
-        .head_id()
-        .expect("HEAD id for unattached branch")
-        .detach();
-    repo.reference(
-        format!("refs/heads/{name}"),
-        head,
-        gix::refs::transaction::PreviousValue::MustNotExist,
-        "create unattached target branch",
-    )
-    .expect("create unattached target branch");
-    name.to_string()
-}
+// 同一个 Turn 完成两次 edit 与最终回答，重开后按调用顺序核验持久成功终态。
 
 #[tokio::test]
 async fn release_e2e_criterion_8() {
@@ -268,119 +203,63 @@ async fn release_e2e_criterion_8() {
             .build(),
     );
 
-    // ── Execute the single turn ──────────────────────────────────────────
-    let target = create_unattached_target_branch(&ws.root, "lattice-target-release");
-    let session_id = create_session_store()
-        .create_session(lattice_api::CreateSessionRequest {
-            label: None,
-            active_agent: "default".to_string(),
-            project_branch: target,
-            project_store_key: store_key_hex(&ws.root),
-        })
-        .expect("create session")
-        .session_id;
-
+    let layout = StateLayout::resolve().unwrap();
+    let store = Arc::new(SessionStore::create(&layout).unwrap());
     let result = lattice_api::run_turn(
-        open_session_store(),
-        make_release_e2e_request(
-            &ws,
-            "Run release criterion-8 sequence",
-            &session_id,
-            fake_llm,
-        ),
+        SessionApi::from_store(store.clone()),
+        layout.clone(),
+        make_release_e2e_request(&ws, "Run release criterion-8 sequence", fake_llm),
     )
     .await
     .expect("run_turn must succeed");
-
-    // ── 1. Turn completed successfully ───────────────────────────────────
-    assert!(
-        matches!(
-            result.outcome,
-            lattice_session::TurnOutcome::Completed { .. }
-        ),
-        "turn must complete; output: {}",
-        result.assistant_output
-    );
-    assert!(
-        result.assistant_output.contains("Criterion-8 verified"),
-        "assistant output: {}",
-        result.assistant_output
-    );
-
-    // ── 2. Direct-Local edits apply in the guarded Local Workspace ─
-    // Verified via mutate.edit tool outcomes in section 6 below.
-
-    // ── 3. Session has exactly one commit ────────────────────────────────
-    let store = GitSessionGraphStore::open(sessions_path()).expect("open session store");
-    let log = store
-        .log(&result.session_id)
-        .expect("session log must be readable");
-    assert_eq!(log.len(), 1, "session must have exactly one commit");
-
-    // ── 4. Authoritative invocation ledger: ordered Component calls ─────────
-    let mut audit_request = AuditRequest::new(&ws.canonical_root);
-    audit_request.session_id = Some(result.session_id.clone());
-    let audit = query_audit(audit_request)
-        .await
-        .expect("query invocation ledger");
-    let rows = audit.rows;
-    let turn_id = rows
-        .first()
-        .map(|row| row.record.binding.turn_id)
-        .expect("at least one invocation row");
-    assert!(
-        rows.iter().all(|row| row.record.binding.turn_id == turn_id),
-        "all invocations from one production Turn share one typed TurnId"
-    );
-    assert!(rows.len() >= 2, "must have at least two invocation rows");
-
-    let methods: Vec<&str> = rows
-        .iter()
-        .map(|row| row.record.binding.method.as_str())
-        .collect();
-    let edit_positions: Vec<usize> = methods
-        .iter()
-        .enumerate()
-        .filter(|&(_, &method)| method == "mutate.edit")
-        .map(|(index, _)| index)
-        .collect();
+    assert_eq!(result.summary.outcome, PublicTurnOutcome::Completed);
     assert_eq!(
-        edit_positions.len(),
-        2,
-        "must have exactly two mutate.edit invocations: {methods:?}"
+        std::fs::read_to_string(ws.root.join("src/lib.rs")).unwrap(),
+        good_content
     );
-    assert!(edit_positions[0] < edit_positions[1]);
-    // ── 5. Tool results: both edits succeed without profile verify ─
-    let edit_results: Vec<_> = result
-        .tool_results
-        .iter()
-        .filter(|t| t.name == "mutate.edit")
-        .collect();
+    // 关闭并严格重开，操作员读取不能依赖尚存的内存 receipt。
+    drop(store);
+    let store = SessionStore::open(&layout).unwrap();
+    let read = store.begin_read().unwrap();
+    let log = read.log(result.turn.session_id).unwrap();
+    assert_eq!(log.nodes.len(), 5); // Root、User、三个完整 Step。
     assert_eq!(
-        edit_results.len(),
-        2,
-        "must have 2 mutate.edit tool results; all results: {:?}",
-        result
-            .tool_results
+        log.nodes
             .iter()
-            .map(|t| &t.name)
-            .collect::<Vec<_>>()
+            .filter(|node| node.turn_start.is_some())
+            .count(),
+        1
     );
-    assert!(
-        edit_results[0].ok,
-        "first mutate.edit must succeed without profile verify; error: {:?}",
-        edit_results[0].error_summary
-    );
-    assert!(
-        edit_results[1].ok,
-        "second mutate.edit must succeed; error: {:?}",
-        edit_results[1].error_summary
-    );
-
-    println!(
-        "release criterion-8 PASSED: session={}, turn_id={}, finalized_rows={}",
-        result.session_id,
-        turn_id,
-        rows.len()
+    let project = lattice_session::ProjectStoreKey::derive(&ws.canonical_root).unwrap();
+    let replay =
+        replay_audit(&read, &project, result.turn.session_id, result.turn.turn_id).unwrap();
+    assert_eq!(replay.calls.len(), 2);
+    for (ordinal, row) in replay.calls.iter().enumerate() {
+        assert_eq!(row.binding.turn_id, result.turn.turn_id);
+        assert_eq!(row.binding.model_step_ordinal, ordinal as u32);
+        assert_eq!(row.binding.method, "mutate.edit");
+        assert!(matches!(
+            row.state,
+            OperatorInvocationState::Terminal {
+                outcome: ToolResultOutcome::Succeeded,
+                ..
+            }
+        ));
+    }
+    let Node::Step { content, .. } = read
+        .node(NodeRef {
+            session_id: result.turn.session_id,
+            node: log.session.current,
+        })
+        .unwrap()
+    else {
+        panic!("final Step")
+    };
+    assert!(content.assistant.parts.iter().any(|part| matches!(&part.semantic, MessageSemantic::Text { text } if text.contains("Criterion-8 verified"))));
+    assert_eq!(
+        read.turn_detail(result.turn.session_id, result.turn.turn_id)
+            .unwrap()
+            .steps,
+        result.steps
     );
 }

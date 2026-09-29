@@ -81,78 +81,77 @@ _Avoid_: automatic retry, automatic merge, replay
 _Avoid_: configurable deny pattern, projection exclusion
 
 **Session**:
-持续对话的容器，以 SessionId 标识并绑定一个项目，保存历史位置与会话状态。
-见[会话、Turn 与历史](../architecture/session.md#会话turn-与历史)。
+持续对话的容器，以 SessionId 标识并绑定一个项目，保存一棵会话树和当前位置；不带 Session 的首次提交在接受事务中创建它。
+见[会话、Turn 与会话树](../architecture/session.md#会话turn-与会话树)。
 _Avoid_: terminal connection, background process, workspace copy
 
+**会话树**:
+Session 内由根节点 `0`、UserMessage 与 Step 节点组成的只追加单根树。根节点没有内容、不属于任何 Turn，代表空对话。新节点以当前位置为父；发给模型的上下文是根到当前位置的路径。它记录工作区交互，但不拥有 Local Workspace 内容。
+见[会话、Turn 与会话树](../architecture/session.md#会话turn-与会话树)。
+_Avoid_: Session History, branch, Git commit graph, workspace checkpoint lineage
+
+**NodeId**:
+会话树节点在 Session 内单调递增的 `u64` 序号，根节点为 `0`，父节点序号恒小于子节点；跨 Session 引用写作 `(SessionId, seq)`。
+见[会话、Turn 与会话树](../architecture/session.md#会话turn-与会话树)。
+_Avoid_: Git OID, branch name, TurnId
+
 **Turn**:
-一次已接受任务，包含用户输入、模型步骤、工具调用及关闭结果；一个 Turn 可以有多个模型步骤。
-见[会话、Turn 与历史](../architecture/session.md#会话turn-与历史)。
+一次已接受任务：一个 UserMessage 节点加若干 Step 节点，结局记在 Turn 记录中；一个 Turn 可以有多个 Step。
+见[会话、Turn 与会话树](../architecture/session.md#会话turn-与会话树)。
 _Avoid_: model attempt, single tool call, terminal lifetime
+
+**Step**:
+一次完整的模型回复及其全部 `(ToolCall, ToolResult)` 对，是会话树上的节点；关闭时未执行或未完成的调用也写入类型化终态。每次 provider 请求记在对应 Step 记录的 `attempts` 中。
+见[ActiveStep 与事务序列](../architecture/session.md#activestep-与事务序列)。
+_Avoid_: model attempt, partial reply, ToolCall without result
+
+**ActiveStep**:
+进行中的 Step 记录，就地更新：请求阶段保存尝试状态，收到含工具调用的完整回复后保存回复与各调用槽位的进度。关闭后记录不再修改；只有存在完整回复时，关闭事务才同时写入树上的 Step 节点。
+见[ActiveStep 与事务序列](../architecture/session.md#activestep-与事务序列)。
+_Avoid_: PendingTurn, token buffer, retry queue
+
+**Turn 记录**:
+每个 Turn 的独立记录，接受时与 UserMessage 节点同事务创建，关闭时补上结局、usage 与 notice；公开读取为 `TurnSummary { outcome, notice }`。它不保存工作区历史位置，Turn 与文件变更的关联记在 Workspace History 的变更记录中。
+见[关闭 Step 与 Turn](../architecture/session.md#关闭-step-与-turn)。
+_Avoid_: TurnCommit, last Step, commit OID
 
 **LocalTurn**:
 本客户端一次提交或观察交互的具体句柄，关联原请求身份与已收到的状态、内容和诊断；不是第二个持久 Turn 或后台执行所有者。
 主定义与生命周期见[组件与接口](../architecture/session.md#组件与接口)及[客户端操作](../architecture/session.md#实现模块与公开操作)。
-_Avoid_: PendingTurn, TurnCoordinator, durable Turn, execution owner
+_Avoid_: ActiveStep, TurnCoordinator, durable Turn, execution owner
 
 **TurnId**:
-客户端为提交保留的请求身份，与 SessionId 一起用于找回原请求；TurnCommit 的对象地址另由 Git OID 表达。
-请求重试见[身份与确认](../architecture/session.md#请求身份与确认)；调用批次预留键（代码 `PlanKey`）的完整身份包含 Session，跨 Session 同 TurnId 计划在项目级调用账本中不冲突，见[绑定与逐调用关闭](../architecture/session.md#绑定与逐调用关闭)。
-_Avoid_: commit OID, provider call ID, InvocationId
-
-**PendingTurn**:
-已接受但尚未持久关闭的 Turn 进度，保存冻结事实、累积对话和当前关闭阶段。
-见[日志与阶段](../architecture/session.md#日志与阶段)。
-_Avoid_: live process, token buffer, retry queue
-
-**TurnCommit**:
-Turn 关闭后保存的不可变结果对象，包含对话、outcome 和工作区 checkpoint，以 Git OID 寻址。
-见[Turn 最终发布](../architecture/session.md#turn-最终发布)。
-_Avoid_: TurnId, user project commit, whole-workspace snapshot
+客户端为提交预先保留的请求身份，用于找回原请求；向已有 Session 提交时与 SessionId 一起核对，不带 Session 的首次提交按它找回所建 Session。
+请求重试见[请求身份与找回](../architecture/session.md#请求身份与找回)。
+_Avoid_: NodeId, provider call ID, InvocationId
 
 **InvocationId**:
-一次工具调用的持久身份，贯穿绑定、预留、执行、取消、结果和证据；provider Tool Call ID 只属模型协议材料。它与标识一次工具调用批次预留的 `PlanKey`（Session+Turn+步骤）分工不同：前者定位单次调用，后者是批次预留的幂等键。
-见[绑定与持久边界](../architecture/lancet.md#绑定与持久边界)。
+一次工具调用的持久身份，贯穿槽位登记、执行、取消、结果和证据；provider Tool Call ID 只属模型协议材料。
+见[登记与持久边界](../architecture/lancet.md#登记与持久边界)。
 _Avoid_: provider call ID, tool name, PlanKey
 
+**调用槽位**:
+模型回复中一个 ToolCall 在进行中 Step（ActiveStep）里的持久记录。登记事务为回复中的每个 ToolCall 建立一个槽位并分配 InvocationId，顺序与回复中的片段顺序一致。它先为该调用将来的 ToolResult 占住位置，故称槽位；之后依次写入 `Started`、终态、载荷与 Cell 证据。Step 只有在每个槽位都有终态后才写入会话树，所以树上不会出现有调用而无结果的节点。槽位归 `lattice-session`，与 Step 记录在同一个会话库事务里写入。
+见[调用槽位](../architecture/session.md#调用槽位)。
+_Avoid_: invocation ledger, `invocations.git`, BindingPlan, provider Tool Call ID as slot identity
+
 **持久对话内容**:
-已保存的用户消息、完整模型消息与已关闭 ToolResult，供历史读取和后续模型请求使用。
+已写入会话树的 UserMessage 与 Step 节点，供历史读取和后续模型请求使用。
 它与尚未保存的临时流式文字分开，见[用户读到的几种事实](../architecture/session.md#用户读到的几种事实)。
 _Avoid_: token replay, layout body width, frozen configuration
 
-**会话固定视图**:
-后台为一次读取选定的会话历史位置与已保存进度版本，使读取期间的新发布不混入该次对话。
-见[观察与重连](../architecture/session.md#观察与重连)；该后台读取语义不表示整个工作区快照。
-_Avoid_: live mutable head, whole-workspace snapshot
-
-**观察 Gap**:
-通知客户端观察事件不连续的信号，客户端据此提示缺口并重新读取固定的持久对话。
-见[观察与重连](../architecture/session.md#观察与重连)；观察缺失不等同于持久消息或调用终态丢失。
-_Avoid_: journal corruption, tool failure, layout gap
-
-**Session History**:
-对话 Turn 与 Tool transcript 的 Git 风格图，记录工作区交互但不拥有 Local Workspace 内容。
-普通会话引用移动不恢复文件，见[会话、Turn 与历史](../architecture/session.md#会话turn-与历史)。
-_Avoid_: workspace checkpoint lineage, Local rollback log, retained sandbox
+**观察快照**:
+订阅开始或重新同步时后台交付的状态：Session 记录、Turn 记录、已写入节点、ActiveStep 与槽位状态，加上当前尝试的段列表及其事件序号；之后的事件从该序号继续，不丢内容。
+见[观察与重连](../architecture/session.md#观察与重连)；它不是整个工作区的快照。
+_Avoid_: Gap, pinned view, whole-workspace snapshot
 
 **Workspace History**:
-LATTICE 已成功安装的 Atomic Local Mutation 的私有持久记录，使用 Git tree 表达前后状态，仅覆盖 LATTICE 变更过的路径。
+LATTICE 已成功安装的 Atomic Local Mutation 的私有持久记录，使用 Git tree 表达前后状态，仅覆盖 LATTICE 变更过的路径；每条变更记录带 `TurnId` 与 `InvocationId`。
 它位于 Local Workspace 和用户项目 Git 之外的私有 bare Git 库，见[私有存储与数据关系](../architecture/workspace.md#私有存储与数据关系)。
 _Avoid_: whole-project snapshot, execution workspace, projection, checkpoint,
 receipt store
 
-**Workspace-History Object ID**:
-已记录 Workspace History 位置的 Git 对象身份；项目全局 checkpoint 的 `Empty` 分支表示权威历史引用不存在，不是已有 Git OID。
-每个完成的 Turn 都在最终发布边界读取当前项目 checkpoint 并存入不可变提交，即使本 Turn 未写文件，也可包含其他 Session 已记录的变更。
-见[Turn checkpoint](../architecture/workspace.md#turn-checkpoint)、[OID 保留与可解析性](../architecture/workspace.md#私有存储与数据关系)及[Turn 最终发布](../architecture/session.md#turn-最终发布)。
-_Avoid_: workspace snapshot id, session commit id, checkpoint handle
-
 **Rewind**:
-用户显式选择较早的可达 Session History 点，按目标 Turn 的项目全局 checkpoint 撤销其后的 LATTICE 变更后缀，包含其他 Session 的后续变更，不按当前 Session 过滤。
-它保留无关外部修改，拒绝强制覆盖已偏离记录后态的路径，会话侧只移动所选会话的引用，见[显式 Rewind](../architecture/workspace.md#显式-rewind)。
-_Avoid_: whole-workspace snapshot restore, automatic overwrite, conversation-only reset
-
-**Rewind Conflict**:
-Rewind 全路径预检发现受影响路径已变化、缺失、类型改变或不可读时的结构化拒绝，列出每个分歧路径及记录与观察到的 Local Revision 或路径状态。
-此时不执行本地恢复、不移动工作区历史 current 或会话引用，可追加冲突审计；执行中失败可能已产生部分效果，见[冲突、部分完成与恢复](../architecture/workspace.md#冲突部分完成与恢复)。
-_Avoid_: partial rewind, per-path skip, forced overwrite
+把 Session 当前位置移到会话树上任意已有节点本身；之后的提交以该节点为父分叉，原分支保留。改写一条用户消息即退回到它的父节点再提交（第一条消息为 `rewind 0`）。它只切换对话位置，不恢复工作区文件。
+见[实现模块与公开操作](../architecture/session.md#实现模块与公开操作)。
+_Avoid_: branch, checkout, reset, file restore, workspace rollback

@@ -17,43 +17,24 @@ mod models;
 mod profile;
 mod profile_paths;
 pub use profile_paths::validate_agents_dir;
-mod rewind;
 pub mod root;
 mod session;
-pub mod stores;
+mod stores;
 pub mod turn;
 
 pub use lancet_api::CompositionError;
-pub use lattice_session::{
-    ClosureOrigin, TurnFinishReason, TurnOutcome, WorkspaceHistoryCheckpoint,
-};
-pub use lattice_session::{
-    GraphDiff, GraphHead, GraphRef, GraphSession, ResetResult, SessionGraphSummary, SessionStatus,
-    TurnLogEntry,
-};
-/// Private-state addressing, re-exported so `lattice-tui` keeps its single
-/// dependency on this facade (ADR 0005 §3).
+pub use lattice_session::store::{NodeId, TurnSummary, UsageSummary};
 pub use lattice_session::{ProjectStoreKey, StateLayout};
 pub use models::{ModelInfo, init_logging, list_models, resolve_model};
 pub use profile::{LoadedAgentProfile, load_agent_profile_path, resolve_named_agent_profile};
-pub use rewind::{
-    RewindAuditRecordObservation, RewindBarrierFacts, RewindBarriers, RewindConflict, RewindError,
-    RewindOutcome, RewindPartialState, RewindPathConflict, RewindPathPreflight,
-    RewindRefObservation, RewindRestoredPath, RewindStep, RewindSuccess, SessionHeadMove,
-    rewind_to_turn, rewind_to_turn_with_barriers,
-};
 pub use root::{LocalWorkspaceRoot, resolve_local_workspace_root};
-pub use session::{
-    ApiError, CreateSessionRequest, EvidenceDurabilityFailed, OpenSessionRequest, RecoveryRequired,
-    SessionApi,
-};
-pub use turn::{
-    RunTurnRequest, RunTurnResult, RunTurnStage, STREAM_IDLE_TIMEOUT_SECS, ToolResultSummary,
-    TurnAcceptance, TurnCompletion, TurnEvent, TurnEventStream, TurnExecution, TurnUsageSummary,
-    collect_turn_result_from_events, start_turn,
-};
+pub use session::{ApiError, SessionApi};
 #[cfg(any(test, feature = "test-utils"))]
-pub use turn::{run_turn, stream_turn};
+pub use turn::run_turn;
+pub use turn::{
+    RunTurnRequest, RunTurnResult, STREAM_IDLE_TIMEOUT_SECS, TurnAcceptance, TurnCompletion,
+    TurnEvent, TurnEventStream, TurnExecution, TurnRef, start_turn,
+};
 
 /// 提前组成进程共享的 Component 运行时，将首次新执行所需的编译成本移到预热阶段。
 /// 组成错误会被缓存，并在后续需要 Component 组成的新执行路径中返回。

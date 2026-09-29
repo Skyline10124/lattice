@@ -18,21 +18,12 @@ pub use lattice_conversation::{
 };
 pub use operation::LocalTurn;
 pub use server::serve;
-pub use types::{LocalRewindResult, SessionWriteResult};
-
 /// 身份在发送之前分配，与输入文本无关；调用者负责保存并显示它。
 pub fn new_turn_id() -> TurnId {
     TurnId::parse(&uuid::Uuid::new_v4().to_string()).expect("generated canonical UUID")
 }
 
-pub use types::{
-    Acceptance, CancelStatus, CommittedTurnObservation, CompletionConfirmation, ConnectionStatus,
-    DaemonStatus, DetachReport, EventCursor, HistoryReadContext, HistoryReadError, HistoryScope,
-    LocalError, LocalErrorKind, LocalHistory, LocalHistoryEntry, LocalState, LocalUpdate,
-    NotSubmittedStage, Observation, ObservationPhase, PendingObservation, ResetReason, Result,
-    SessionObservation, SessionWrite, TextAction, TranscriptPage, TurnId, TurnObservation,
-    TurnRequest,
-};
+pub use types::*;
 
 #[cfg(test)]
 mod tests;

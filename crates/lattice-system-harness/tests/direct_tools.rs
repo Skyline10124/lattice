@@ -60,14 +60,14 @@ fn direct_tools_fetch_web_localhost_success_and_cap() {
         ]),
     );
     let scenario_evidence = evidence(&world, &spec);
-    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-fetch", "main").expect("session");
+    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-fetch");
     let outcome = send.send("fetch the fixture").expect("turn");
     let captures = server.captured_requests();
 
     let result: Result<(), AssertError> = (|| {
         assert_clean_send(&outcome)?;
         require(tool_ok(&outcome.parsed, "fetch.web"), "fetch.web ok")?;
-        require(outcome.has_committed_completed(), "turn completed")?;
+        require(outcome.has_completed(), "turn completed")?;
         web.wait_for_requests(1, Duration::from_secs(5))
             .map_err(|e| AssertError::StdoutMissing {
                 expected: format!("fixture did not receive request: {e}"),
@@ -146,9 +146,8 @@ fn direct_tools_fetch_disabled_no_dispatch() {
         ]),
     );
     let scenario_evidence = evidence(&world, &spec);
-    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-foff", "main").expect("session");
+    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-foff");
     let outcome = send.send("try fetch").expect("turn");
-    let session_id = send.session_id().to_string();
     let captures = server.captured_requests();
 
     let result: Result<(), AssertError> = (|| {
@@ -184,12 +183,12 @@ fn direct_tools_fetch_disabled_no_dispatch() {
         // 不留下未关闭任务，也不为该批次追加模型请求。
         require(
             outcome
-                .committed_result()
+                .closed_result()
                 .is_some_and(|(_, _, result)| result == "failed"),
             format!("disabled fetch.web must close the Turn failed: {outcome:?}"),
         )?;
         require(
-            !outcome.has_committed_completed(),
+            !outcome.has_completed(),
             "a rejected batch must not commit a completed Turn",
         )?;
         require(
@@ -200,27 +199,22 @@ fn direct_tools_fetch_disabled_no_dispatch() {
             .accepted_turn_id()
             .expect("accepted TurnId")
             .to_string();
-        let view = cli(
-            &world,
-            &spec,
-            &["--json", "session", "turn", &session_id, &turn_id],
-        );
-        let snapshot = String::from_utf8_lossy(&view.stdout)
-            .lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .find(|record| record["type"] == "snapshot")
-            .ok_or_else(|| AssertError::StdoutMissing {
-                expected: format!("session turn snapshot: {}", view.summary()),
-            })?;
+        let view = cli(&world, &spec, &["--json", "session", "turn", &turn_id]);
+        require(view.is_clean_exit(0), "turn detail clean read")?;
+        let detail: Value = serde_json::from_slice(&view.stdout).expect("turn detail");
         require(
-            snapshot["view"]["requested_turn"]["state"] == "committed",
-            format!("rejected batch must not leave a pending Turn: {snapshot}"),
+            detail["summary"]["outcome"] == "failed",
+            "rejected batch closes Failed",
         )?;
         require(
-            snapshot["view"]["requested_turn"]["outcome"]
-                == serde_json::json!({"failed": {"reason": {"invalid_tool_call": {"validation":
-                    {"unknown_tool": {"call_ordinal": 0}}}}}}),
-            format!("durable typed rejection mismatch: {snapshot}"),
+            detail["steps"][0]["state"]["end"]["cause"]["cause"] == "invalid_batch",
+            "durable invalid batch",
+        )?;
+        require(
+            detail["steps"][0]["state"]["slots"]
+                .as_array()
+                .is_some_and(Vec::is_empty),
+            "no slots for rejected batch",
         )?;
         Ok(())
     })();
@@ -256,7 +250,7 @@ fn direct_tools_fetch_host_policy_denial() {
         ]),
     );
     let scenario_evidence = evidence(&world, &spec);
-    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-fdeny", "main").expect("session");
+    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-fdeny");
     let outcome = send.send("fetch denied host").expect("turn");
     let captures = server.captured_requests();
 
@@ -316,7 +310,7 @@ fn direct_tools_fetch_capability_denial_with_public_https() {
         ]),
     );
     let scenario_evidence = evidence(&world, &spec);
-    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-fcap", "main").expect("session");
+    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-fcap");
     let outcome = send.send("fetch example.com").expect("turn");
     let captures = server.captured_requests();
 
@@ -363,8 +357,8 @@ fn direct_tools_fetch_capability_denial_with_public_https() {
             !tool_ok(&outcome.parsed, "fetch.web"),
             "capability denial must not succeed fetch.web",
         )?;
-        // Gap 后从固定快照核验本次 Turn 的真实提交，不依赖瞬时终态事件或仅凭退出码。
-        assert_committed_view_after(&outcome.parsed, "turn_committing")?;
+        // 关闭快照核验本次 Turn 的真实结局，不依赖必须收到瞬时终结事件。
+        assert_committed_view_after(&outcome.parsed, "tool_call_finished")?;
         Ok(())
     })();
 
@@ -404,7 +398,7 @@ fn direct_tools_todo_write_success() {
         ]),
     );
     let scenario_evidence = evidence(&world, &spec);
-    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-todo", "main").expect("session");
+    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-todo");
     let outcome = send.send("write todos").expect("turn");
     let status = send
         .run_command(&["--json", "lancet", "status"])
@@ -417,7 +411,7 @@ fn direct_tools_todo_write_success() {
             tool_ok(&outcome.parsed, "session.todo_write"),
             "todo_write ok",
         )?;
-        require(outcome.has_committed_completed(), "turn completed")?;
+        require(outcome.has_completed(), "turn completed")?;
         let cep_started = outcome.events.iter().position(|event| match event {
             TurnEventLine::Unknown { type_name, raw } if type_name == "cep_call_started" => {
                 raw.get("method").and_then(Value::as_str) == Some("session.todo_write")
@@ -531,20 +525,16 @@ fn direct_tools_todo_write_success() {
                 expected: format!("lancet status --json not JSON: {error}"),
             })?;
         let recent_calls = status_json
-            .get("recent_calls")
+            .get("recent")
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
         require(
             recent_calls.iter().any(|call| {
-                call.pointer("/record/binding/method")
-                    .and_then(Value::as_str)
+                call.pointer("/binding/method").and_then(Value::as_str)
                     == Some("session.todo_write")
-                    && call
-                        .pointer("/record/state/terminal/outcome")
-                        .and_then(Value::as_str)
-                        == Some("succeeded")
-            }) && status_json.get("last_verdict").and_then(Value::as_str) == Some("succeeded"),
+                    && call.pointer("/state/outcome").and_then(Value::as_str) == Some("succeeded")
+            }) && status_json["recent"][0]["state"]["outcome"] == "succeeded",
             format!("lancet status omitted typed todo terminal: {status_json}"),
         )?;
         Ok(())
@@ -585,8 +575,7 @@ fn direct_tools_todo_write_validation_rejection() {
         ]),
     );
     let scenario_evidence = evidence(&world, &spec);
-    let send =
-        SessionSendDriver::new(&driver, &world, &spec, "dl-todobad", "main").expect("session");
+    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-todobad");
     let outcome = send.send("bad todos").expect("turn");
     let captures = server.captured_requests();
 
@@ -650,8 +639,7 @@ fn direct_tools_todo_write_result_survives_session_reopen() {
         ]),
     );
     let scenario_evidence = evidence(&world, &spec);
-    let send =
-        SessionSendDriver::new(&driver, &world, &spec, "dl-todoreopen", "main").expect("session");
+    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-todoreopen");
 
     let first = send.send("write the plan").expect("first turn");
     let second = send.send("what was the plan").expect("second turn");
@@ -665,7 +653,7 @@ fn direct_tools_todo_write_result_survives_session_reopen() {
             "the Component call must succeed on the first turn",
         )?;
         require(
-            first.has_committed_completed() && second.has_committed_completed(),
+            first.has_completed() && second.has_completed(),
             "both turns must commit",
         )?;
         // Request 1: the tool call. Request 2: the tool result. Request 3: the
@@ -709,7 +697,7 @@ fn direct_tools_catalog_exposure_matches_enabled() {
     );
     let server = wire_fake_llm(&world, "dl-cat", SseScript::plain("no tools needed"));
     let scenario_evidence = evidence(&world, &spec);
-    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-cat", "main").expect("session");
+    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-cat");
     let outcome = send.send("hello").expect("turn");
     let captures = server.captured_requests();
 

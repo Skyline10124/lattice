@@ -452,6 +452,7 @@ pub(crate) fn transcript_lines(app: &App, content_w: u16) -> Vec<Line<'static>> 
     let mut agent = app.ctx.active_agent.as_str();
     for block in &app.blocks {
         match block {
+            Block::Step(_) | Block::UserTurn(_) => {}
             Block::AgentName(name) => {
                 agent = name;
                 assistant_header = false;
@@ -573,29 +574,19 @@ fn tool_lines(name: &str, state: &ToolState, content_w: u16, unicode: bool) -> V
 #[rustfmt::skip]
 fn status_text(kind: &StatusKind, unicode: bool) -> String {
     match kind {
-        StatusKind::Committed { commit_id } => format!(
-            "{} committed {commit_id}", symbol(SymbolKind::Ok, unicode)
-        ),
-        StatusKind::Visible { commit_id } => format!("结果可见 {commit_id}；完成确认未知"),
-        StatusKind::CommitFailed { reason } => format!(
-            "{} commit failed: {reason}", symbol(SymbolKind::Failed, unicode)
-        ),
+        StatusKind::Summary { turn_id, summary } => format!("{} turn {turn_id} {}{}",
+            symbol(match summary.outcome { lattice_api::local::PublicTurnOutcome::Completed => SymbolKind::Ok, lattice_api::local::PublicTurnOutcome::Failed => SymbolKind::Failed, lattice_api::local::PublicTurnOutcome::Cancelled => SymbolKind::Cancelled }, unicode),
+            match summary.outcome { lattice_api::local::PublicTurnOutcome::Completed => "completed", lattice_api::local::PublicTurnOutcome::Failed => "failed", lattice_api::local::PublicTurnOutcome::Cancelled => "cancelled" },
+            summary.notice.as_ref().map_or_else(String::new, |notice| format!("：{}", notice.text))),
         StatusKind::TurnFailed { reason } => format!(
             "{} {reason}", symbol(SymbolKind::Failed, unicode)
         ),
-        StatusKind::Cancelled { reason } => {
-            let mark = symbol(SymbolKind::Cancelled, unicode);
-            reason.as_ref().map_or_else(
-                || format!("{mark} cancelled"),
-                |reason| format!("{mark} cancelled: {reason}"),
-            )
-        }
-        StatusKind::LlmRetry { attempt, max_attempts, delay_ms, message } => format!(
-            "{} llm retry {attempt}/{max_attempts} after {delay_ms}ms: {message}",
+        StatusKind::LlmRetry { attempt, delay_ms, message } => format!(
+            "{} llm retry {attempt} after {delay_ms}ms: {message}",
             symbol(SymbolKind::Running, unicode)
         ),
-        StatusKind::LlmFailed { attempt, max_attempts, message } => format!(
-            "{} llm failed {attempt}/{max_attempts}: {message}",
+        StatusKind::LlmFailed { attempt, message } => format!(
+            "{} llm failed {attempt}: {message}",
             symbol(SymbolKind::Failed, unicode)
         ),
         StatusKind::Notice(_) => String::new(),
@@ -604,12 +595,15 @@ fn status_text(kind: &StatusKind, unicode: bool) -> String {
 
 fn status_lines(kind: &StatusKind, content_w: u16, unicode: bool) -> Vec<Line<'static>> {
     let style = match kind {
-        StatusKind::Committed { .. } => role_style(Role::ToolOk),
-        StatusKind::CommitFailed { .. }
-        | StatusKind::TurnFailed { .. }
-        | StatusKind::Cancelled { .. }
-        | StatusKind::LlmFailed { .. } => role_style(Role::ToolErr),
-        StatusKind::LlmRetry { .. } | StatusKind::Visible { .. } => role_style(Role::DimMeta),
+        StatusKind::Summary { summary, .. } => {
+            role_style(match summary.notice.as_ref().map(|n| &n.level) {
+                Some(lattice_api::local::NoticeLevel::Error) => Role::ToolErr,
+                Some(lattice_api::local::NoticeLevel::Info) => Role::DimMeta,
+                None => Role::ToolOk,
+            })
+        }
+        StatusKind::TurnFailed { .. } | StatusKind::LlmFailed { .. } => role_style(Role::ToolErr),
+        StatusKind::LlmRetry { .. } => role_style(Role::DimMeta),
         StatusKind::Notice(_) => return Vec::new(),
     };
     body(&status_text(kind, unicode), content_w, style)
@@ -691,7 +685,13 @@ fn draw_right_status(frame: &mut Frame, app: &App, area: Rect) {
     }
     let available = area.width.saturating_sub(1) as usize;
     let mut rows = vec![Line::default(); area.height as usize];
-    set_status_row(&mut rows, 0, &app.ctx.session_id, Role::DimMeta, available);
+    set_status_row(
+        &mut rows,
+        0,
+        &crate::app::session_label(app.ctx.session_id),
+        Role::DimMeta,
+        available,
+    );
     set_status_row(
         &mut rows,
         1,
@@ -779,8 +779,9 @@ fn bottom_status_line(app: &App, width: usize) -> Line<'static> {
     } else {
         "Alt+Enter newline"
     };
+    let session_id = crate::app::session_label(app.ctx.session_id);
     let full = [
-        app.ctx.session_id.as_str(),
+        session_id.as_str(),
         app.ctx.active_agent.as_str(),
         phase,
         scroll.unwrap_or(""),
@@ -796,7 +797,7 @@ fn bottom_status_line(app: &App, width: usize) -> Line<'static> {
         .saturating_sub(tail_width)
         .saturating_sub(agent_width)
         .saturating_sub(6);
-    let session = truncate_display(&app.ctx.session_id, session_room);
+    let session = truncate_display(&session_id, session_room);
     let session_cost = display_width(&session) + usize::from(!session.is_empty()) * 3;
     let agent_room = width
         .saturating_sub(tail_width)
@@ -848,7 +849,6 @@ fn phase_text(phase: TurnPhase) -> &'static str {
     match phase {
         TurnPhase::Idle => "idle",
         TurnPhase::Streaming => "stream",
-        TurnPhase::Committing => "commit",
         TurnPhase::Cancelling => "cancel",
     }
 }
@@ -857,7 +857,7 @@ fn phase_role(phase: TurnPhase) -> Role {
     match phase {
         TurnPhase::Streaming => Role::User,
         TurnPhase::Cancelling => Role::ToolErr,
-        TurnPhase::Idle | TurnPhase::Committing => Role::DimMeta,
+        TurnPhase::Idle => Role::DimMeta,
     }
 }
 
@@ -899,9 +899,8 @@ mod tests {
     fn test_app() -> App {
         App::new(
             SessionContext {
-                session_id: "sess".into(),
+                session_id: None,
                 active_agent: "agent".into(),
-                project_branch: "main".into(),
             },
             false,
             std::path::Path::new("/nonexistent-tui-test-history"),
@@ -1027,8 +1026,12 @@ mod tests {
             },
             Block::Assistant("after tool".into()),
             Block::Status {
-                kind: StatusKind::Committed {
-                    commit_id: "abc".into(),
+                kind: StatusKind::Summary {
+                    turn_id: lattice_api::local::new_turn_id(),
+                    summary: lattice_api::TurnSummary {
+                        outcome: lattice_api::local::PublicTurnOutcome::Completed,
+                        notice: None,
+                    },
                 },
                 placement: StatusPlacement::Transcript,
             },
@@ -1055,7 +1058,7 @@ mod tests {
     fn dock_status_is_hidden_from_transcript_until_released() {
         let mut app = test_app();
         app.blocks.push(Block::Status {
-            kind: StatusKind::CommitFailed {
+            kind: StatusKind::TurnFailed {
                 reason: "boom".into(),
             },
             placement: StatusPlacement::Dock(crate::app::DockSeverity::Error),
@@ -1136,7 +1139,6 @@ mod tests {
     fn dock_height_clamps_status_rows_one_to_five() {
         let retry = |message: String| StatusKind::LlmRetry {
             attempt: 1,
-            max_attempts: 3,
             delay_ms: 0,
             message,
         };
@@ -1275,7 +1277,6 @@ mod tests {
                     kind: match severity {
                         DockSeverity::Warn => StatusKind::LlmRetry {
                             attempt: 2,
-                            max_attempts: 3,
                             delay_ms: 250,
                             message: "retrying model request".into(),
                         },

@@ -1,87 +1,73 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
-
 use super::*;
+use lattice_session::store::{ChangeSeq, PublicTurnOutcome, TurnDetail};
 
 type Gate = (oneshot::Sender<()>, oneshot::Receiver<()>);
 type StoreGate = (oneshot::Sender<()>, std::sync::mpsc::Receiver<()>);
 
-// 只控制真实准备、置位和监督退场的时序，不提供 Owner 或取消载体注入。
+// 只控制实际操作的调度，不注入 Owner、取消载体或完成结果。
 #[derive(Default)]
 pub(super) struct Gates {
+    pub(super) probe: Mutex<Option<Gate>>,
     pub(super) prepare: Mutex<Option<Gate>>,
     pub(super) retire: Mutex<Option<Gate>>,
     pub(super) retry: Mutex<Option<Gate>>,
     pub(super) forward_panic: Mutex<Option<Gate>>,
     pub(super) supervise: Mutex<Option<Gate>>,
+    pub(super) snapshot: Mutex<Option<Gate>>,
+    pub(super) accepted: Mutex<Option<Gate>>,
+    pub(super) history: Mutex<Option<Gate>>,
     cancel_store: Mutex<Option<StoreGate>>,
 }
-
 impl Gates {
     pub(super) fn pause_cancel_store(&self) {
-        let gate = lock(&self.cancel_store).take();
-        if let Some((entered, release)) = gate {
-            let _ = entered.send(());
+        if let Some((entered, release)) = lock(&self.cancel_store).take() {
+            entered.send(()).unwrap();
             release.recv_timeout(Duration::from_secs(10)).unwrap();
         }
     }
 }
-
-fn arm(slot: &Mutex<Option<Gate>>) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+pub(super) fn arm(slot: &Mutex<Option<Gate>>) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
     let (entered, entry) = oneshot::channel();
     let (release, resume) = oneshot::channel();
     assert!(lock(slot).replace((entered, resume)).is_none());
     (entry, release)
 }
-
 pub(super) async fn pause(slot: &Mutex<Option<Gate>>) {
     let gate = lock(slot).take();
     if let Some((entered, release)) = gate {
-        let _ = entered.send(());
-        let _ = bounded(release).await;
+        entered.send(()).unwrap();
+        bounded(release).await.unwrap();
     }
 }
-
 pub(super) async fn fail_forwarding(slot: &Mutex<Option<Gate>>) {
     let gate = lock(slot).take();
     if let Some((entered, release)) = gate {
-        let _ = entered.send(());
-        let _ = bounded(release).await;
-        panic!("注入观察转发 panic，核心收尾仍归监督者");
+        entered.send(()).unwrap();
+        bounded(release).await.unwrap();
+        panic!("注入接受 continuation panic，核心收尾仍归监督者");
     }
 }
-
 async fn bounded<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::time::timeout(Duration::from_secs(10), future)
         .await
-        .expect("局部交接必须在测试预算内完成")
+        .expect("局部交接超时")
 }
-
-async fn setup() -> (tempfile::TempDir, Arc<Backend>, TurnRequest) {
-    let directory = tempfile::tempdir().unwrap();
-    let backend = Backend::new(crate::StateLayout::in_state_root(directory.path()));
-    let root = crate::LocalWorkspaceRoot::from_path(directory.path()).unwrap();
-    let Response::Session(session) = bounded(backend.dispatch(Request::Create {
-        request: crate::CreateSessionRequest {
-            label: None,
-            active_agent: "local-test".into(),
-            project_branch: "main".into(),
-            project_store_key: root.store_key_hex(),
-        },
-    }))
-    .await
-    .unwrap() else {
-        panic!("创建会话应返回身份")
-    };
-    let request = TurnRequest {
-        session_id: session.session_id,
-        turn_id: super::super::new_turn_id(),
-        workspace: root.canonical_path().into(),
-        input: "取消交接".into(),
-    };
-    (directory, backend, request)
+pub(super) async fn setup() -> (tempfile::TempDir, Arc<Backend>, TurnRequest) {
+    let (dir, backend, mut request) = super::tests::pending_backend().await;
+    super::tests::close(&backend, &request).await;
+    let root = crate::LocalWorkspaceRoot::from_path(dir.path()).unwrap();
+    let backing =
+        lancet_api::WorkspaceHistoryBacking::for_key(backend.layout.clone(), root.store_key());
+    tokio::task::spawn_blocking(move || lancet_api::WorkspaceHistory::create(backing))
+        .await
+        .unwrap()
+        .unwrap();
+    request.turn_id = super::super::new_turn_id();
+    request.input = "取消交接".into();
+    (dir, backend, request)
 }
-
 fn submit(
     backend: &Arc<Backend>,
     request: &TurnRequest,
@@ -98,97 +84,111 @@ fn submit(
             .await
     })
 }
-
 async fn cancel(backend: &Arc<Backend>, request: &TurnRequest) -> bool {
     let Response::Cancelled { owned } = bounded(backend.dispatch(Request::Cancel {
-        session_id: request.session_id.clone(),
-        turn_id: request.turn_id,
+        target: TurnTarget {
+            session_id: request.session_id,
+            turn_id: request.turn_id,
+        },
     }))
     .await
     .unwrap() else {
-        panic!("取消应返回是否接管")
+        panic!("cancel response")
     };
     owned
 }
-
-#[tokio::test]
-async fn c2_probe_does_not_take_cancellation_or_wait_for_future_configuration() {
-    let (_directory, backend, request) = setup().await;
-    let (entered, entry) = oneshot::channel();
-    let (release, resume) = oneshot::channel();
-    *lock(&backend.snapshot_gate) = Some((entered, resume));
-    let probe = submit(&backend, &request, None);
-    bounded(entry).await.unwrap();
-    let owned = cancel(&backend, &request).await;
-    release.send(()).unwrap();
-    assert!(matches!(
-        bounded(probe).await.unwrap().unwrap(),
-        Response::Acceptance(Acceptance::NeedsConfiguration)
-    ));
-    let Response::Status(status) = bounded(backend.dispatch(Request::Stop)).await.unwrap() else {
-        panic!("停止应返回状态")
-    };
-    assert_eq!(status.owners, 0);
+async fn absent(backend: &Backend, request: &TurnRequest) {
+    let id = request.turn_id;
+    assert!(
+        backend
+            .open()
+            .await
+            .unwrap()
+            .read(move |r| r.turn_record(id))
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+async fn idle(backend: &Backend) {
+    bounded(async {
+        let mut changed = backend.changed.subscribe();
+        while backend.status().owners != 0 {
+            changed.changed().await.unwrap();
+        }
+    })
+    .await;
+}
+async fn committed(backend: &Backend, request: &TurnRequest) -> TurnDetail {
+    idle(backend).await;
     let view = backend
         .query(request.session_id, Some(request.turn_id))
         .await
         .unwrap();
-    assert!(view.requested_turn.is_none() && view.active_turn.is_none());
-    assert!(!owned, "独立无配置探测不接管未来执行的取消");
+    assert!(view.active.is_none());
+    let turn = view.selected_turn.unwrap();
+    assert!(turn.summary.is_some());
+    turn
 }
-
-fn invalid_configuration(project: &std::path::Path) -> super::super::FrozenConfiguration {
-    let configuration = super::super::tests::frozen(project, "http://127.0.0.1:1/v1");
+fn outcome(turn: &TurnDetail) -> PublicTurnOutcome {
+    turn.summary.as_ref().unwrap().outcome.clone()
+}
+async fn change_seq(backend: &Backend, request: &TurnRequest) -> ChangeSeq {
+    let key = crate::LocalWorkspaceRoot::from_path(&request.workspace)
+        .unwrap()
+        .store_key();
+    backend
+        .open()
+        .await
+        .unwrap()
+        .read(move |r| Ok(r.operator_status(&key)?.latest_change))
+        .await
+        .unwrap()
+}
+async fn wait_for_replies(backend: &Backend, request: &TurnRequest, count: usize) {
+    bounded(async {
+        loop {
+            if lock(&backend.admission)
+                .turns
+                .get(&request.turn_id)
+                .is_some_and(|o| o.reply.receiver_count() >= count)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+}
+fn configuration_named(
+    directory: &std::path::Path,
+    endpoint: &str,
+    prompt: &str,
+) -> super::super::FrozenConfiguration {
+    let configuration = super::super::tests::frozen(directory, endpoint);
+    let mut value = serde_json::to_value(configuration).unwrap();
+    value["system_prompt"] = serde_json::json!(prompt);
+    serde_json::from_value(value).unwrap()
+}
+fn invalid_configuration(directory: &std::path::Path) -> super::super::FrozenConfiguration {
+    let configuration = super::super::tests::frozen(directory, "http://127.0.0.1:1/v1");
     let mut value = serde_json::to_value(configuration).unwrap();
     value["profile_toml"] = serde_json::json!("不是 TOML");
     serde_json::from_value(value).unwrap()
 }
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn c3_cancel_store_and_supervisor_removal_share_admission_lock() {
-    let (directory, backend, request) = setup().await;
-    let (prepared, release_prepare) = arm(&backend.gates.prepare);
-    let (retiring, release_retire) = arm(&backend.gates.retire);
-    let submission = submit(
-        &backend,
-        &request,
-        Some(invalid_configuration(directory.path())),
+fn accepted(response: Response, id: TurnId) {
+    assert!(
+        matches!(response, Response::Acceptance(Acceptance::Accepted { turn }) if turn.turn_id == id)
     );
-    bounded(prepared).await.unwrap();
-    let (entered, entry) = oneshot::channel();
-    let (release_store, resume) = std::sync::mpsc::channel();
-    *lock(&backend.gates.cancel_store) = Some((entered, resume));
-    let server = backend.clone();
-    let target = request.clone();
-    let cancellation = tokio::spawn(async move { cancel(&server, &target).await });
-    bounded(entry).await.unwrap();
-    release_prepare.send(()).unwrap();
-    bounded(retiring).await.unwrap();
-    // 在置位前的真实临界区观察锁；旧的锁外 store 会让监督者提前移除。
-    let protected = backend.admission.try_lock().is_err();
-    release_store.send(()).unwrap();
-    assert!(bounded(cancellation).await.unwrap());
-    release_retire.send(()).unwrap();
-    assert!(matches!(
-        bounded(submission).await.unwrap().unwrap(),
-        Response::Error(LocalError {
-            kind: LocalErrorKind::BadRequest,
-            ..
-        })
-    ));
-    assert!(!cancel(&backend, &request).await);
-    assert_eq!(backend.status().owners, 0);
-    assert!(protected, "查找、资格和置位必须与监督移除同锁");
 }
 
 pub(in crate::local) struct Provider {
     pub(in crate::local) endpoint: String,
-    arrived: oneshot::Receiver<()>,
-    release: watch::Sender<bool>,
+    pub(super) arrived: oneshot::Receiver<()>,
+    pub(super) release: watch::Sender<bool>,
     shutdown: oneshot::Sender<()>,
     task: tokio::task::JoinHandle<Vec<serde_json::Value>>,
 }
-
 impl Provider {
     pub(in crate::local) async fn start() -> Self {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -201,29 +201,19 @@ impl Provider {
             let mut arrival = Some(arrival);
             let mut requests = Vec::new();
             loop {
-                let (mut socket, _) = tokio::select! {
-                    accepted = listener.accept() => accepted.unwrap(),
-                    _ = &mut stopping => break,
-                };
+                let (mut socket, _) = tokio::select! { accepted = listener.accept() => accepted.unwrap(), _ = &mut stopping => break };
                 bounded(async {
                     let mut headers = Vec::new();
-                    while !headers.ends_with(b"\r\n\r\n") {
-                        headers.push(socket.read_u8().await.unwrap());
-                        assert!(headers.len() <= 65_536);
-                    }
+                    while !headers.ends_with(b"\r\n\r\n") { headers.push(socket.read_u8().await.unwrap()); assert!(headers.len() <= 65_536); }
                     let headers = String::from_utf8(headers).unwrap();
-                    let length: usize = headers.lines().find_map(|line| {
-                        line.to_ascii_lowercase().strip_prefix("content-length:")
-                            .map(|value| value.trim().parse().unwrap())
-                    }).unwrap();
+                    let length: usize = headers.lines().find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").map(|n| n.trim().parse().unwrap())).unwrap();
                     assert!(length < 1_048_576);
-                    let mut body = vec![0; length];
-                    socket.read_exact(&mut body).await.unwrap();
+                    let mut body = vec![0; length]; socket.read_exact(&mut body).await.unwrap();
                     requests.push(serde_json::from_slice(&body).unwrap());
                     if let Some(arrival) = arrival.take() { let _ = arrival.send(()); }
                     while !*gate.borrow_and_update() { gate.changed().await.unwrap(); }
                     let body = "data: {\"choices\":[{\"delta\":{\"content\":\"完成\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
-                    // 取消可先关闭响应连接；正向执行另以持久 Completed 断言交付成功。
+                    // 取消允许先断连接，正向返回由持久 outcome 验证。
                     let _ = socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
                 }).await;
             }
@@ -237,7 +227,6 @@ impl Provider {
             task,
         }
     }
-
     pub(in crate::local) async fn finish(self) -> Vec<serde_json::Value> {
         self.release.send_replace(true);
         self.shutdown.send(()).unwrap();
@@ -246,180 +235,106 @@ impl Provider {
 }
 
 #[tokio::test]
-async fn configured_submit_does_not_start_a_turn_when_auto_close_fails() {
-    for after_publish in [false, true] {
-        let (directory, backend, old) = super::tests::pending_backend().await;
-        let provider = Provider::start().await;
-        let mut new = old.clone();
-        new.turn_id = super::super::new_turn_id();
-        new.input = "不应接受的新输入".into();
-        let (entered, release, fault_result) =
-            crate::turn::finalize_fault::arm(old.turn_id, after_publish);
-        let submission = submit(
-            &backend,
-            &new,
-            Some(super::super::tests::frozen(
-                directory.path(),
-                &provider.endpoint,
-            )),
-        );
-        bounded(entered).await.unwrap();
-        release.send(()).unwrap();
-        let response = bounded(submission).await.unwrap().unwrap();
-        assert!(
-            matches!(response, Response::Error(_)),
-            "关闭失败不能返回接受回执"
-        );
-        assert_eq!(
-            bounded(fault_result).await.unwrap(),
-            Some(if after_publish {
-                "injected ref-fsync failure"
-            } else {
-                "injected object-fsync failure"
-            })
-        );
-        idle(&backend).await;
-        let view = backend
-            .query(new.session_id.clone(), Some(new.turn_id))
-            .await
-            .unwrap();
-        assert!(view.requested_turn.is_none(), "关闭失败不能创建新 Turn");
-        assert!(
-            view.active_turn
-                .as_ref()
-                .is_none_or(|turn| turn.turn_id == old.turn_id)
-        );
-        backend.dispatch(Request::Stop).await.unwrap();
-        assert_eq!(
-            provider.finish().await.len(),
-            0,
-            "关闭失败不能调用 provider"
-        );
-    }
+async fn c2_probe_does_not_take_cancellation_or_wait_for_future_configuration() {
+    let (_dir, backend, request) = setup().await;
+    let (entry, release) = arm(&backend.gates.probe);
+    let task = submit(&backend, &request, None);
+    bounded(entry).await.unwrap();
+    assert!(!cancel(&backend, &request).await);
+    release.send(()).unwrap();
+    assert!(matches!(
+        bounded(task).await.unwrap().unwrap(),
+        Response::Acceptance(Acceptance::NeedsConfiguration { .. })
+    ));
+    absent(&backend, &request).await;
+    assert_eq!(backend.status().owners, 0);
 }
 
-async fn idle(backend: &Backend) {
-    bounded(async {
-        while backend.status().owners != 0 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await;
-}
-
-async fn ledger_tip(backend: &Backend, request: &TurnRequest) -> String {
-    let layout = backend.layout.clone();
-    let workspace = request.workspace.clone();
-    bounded(tokio::task::spawn_blocking(move || {
-        let root = crate::LocalWorkspaceRoot::from_path(&workspace).unwrap();
-        lancet_audit::invocation_store::InvocationStore::open(&layout, &root.store_key())
-            .unwrap()
-            .pinned_view()
-            .unwrap()
-            .commit_oid
-            .to_string()
-    }))
-    .await
-    .unwrap()
-}
-
-async fn committed(backend: &Backend, request: &TurnRequest) -> CommittedTurnObservation {
-    idle(backend).await;
-    let view = backend
-        .query(request.session_id.clone(), Some(request.turn_id))
-        .await
-        .unwrap();
-    assert!(view.active_turn.is_none());
-    let Some(TurnObservation::Committed(turn)) = view.requested_turn else {
-        panic!("监督退出后应保留固定 Turn 结果")
-    };
-    *turn
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn c3_cancel_store_and_supervisor_removal_share_admission_lock() {
+    let (dir, backend, request) = setup().await;
+    let (prepared, release_prepare) = arm(&backend.gates.prepare);
+    let (retiring, release_retire) = arm(&backend.gates.retire);
+    let task = submit(&backend, &request, Some(invalid_configuration(dir.path())));
+    bounded(prepared).await.unwrap();
+    let (entered, entry) = oneshot::channel();
+    let (release_store, resume) = std::sync::mpsc::channel();
+    *lock(&backend.gates.cancel_store) = Some((entered, resume));
+    let server = backend.clone();
+    let target = request.clone();
+    let cancellation = tokio::spawn(async move { cancel(&server, &target).await });
+    bounded(entry).await.unwrap();
+    release_prepare.send(()).unwrap();
+    bounded(retiring).await.unwrap();
+    let protected = backend.admission.try_lock().is_err();
+    release_store.send(()).unwrap();
+    assert!(bounded(cancellation).await.unwrap());
+    release_retire.send(()).unwrap();
+    assert!(matches!(
+        bounded(task).await.unwrap().unwrap(),
+        Response::Error(LocalError {
+            kind: LocalErrorKind::BadRequest,
+            ..
+        })
+    ));
+    assert!(!cancel(&backend, &request).await);
+    assert_eq!(backend.status().owners, 0);
+    assert!(protected, "取消查找与置位不得在监督移除锁之外");
 }
 
 #[tokio::test]
 async fn c1_preparation_cancel_survives_all_frontend_disconnects() {
-    let (directory, backend, request) = setup().await;
-    let provider = Provider::start().await;
-    let before = ledger_tip(&backend, &request).await;
-    let configuration = super::super::tests::frozen(directory.path(), &provider.endpoint);
-    let (prepared, release) = arm(&backend.gates.prepare);
-    let (writer, mut frontend) = UnixStream::pair().unwrap();
-    let connection = tokio::spawn(connection(backend.clone(), writer));
-    ipc::write(
-        &mut frontend,
-        &Request::Submit {
-            request: request.clone(),
-            configuration: Some(Box::new(configuration)),
-        },
-    )
-    .await
-    .unwrap();
-    bounded(prepared).await.unwrap();
-    let view = backend
-        .query(request.session_id.clone(), Some(request.turn_id))
+    for without_sid in [false, true] {
+        let (dir, backend, mut request) = setup().await;
+        if without_sid {
+            request.session_id = None;
+        }
+        let provider = Provider::start().await;
+        let before = change_seq(&backend, &request).await;
+        let (prepared, release) = arm(&backend.gates.prepare);
+        let (writer, mut frontend) = UnixStream::pair().unwrap();
+        let task = tokio::spawn(connection(backend.clone(), writer));
+        ipc::write(
+            &mut frontend,
+            &Request::Submit {
+                request: request.clone(),
+                configuration: Some(Box::new(super::super::tests::frozen(
+                    dir.path(),
+                    &provider.endpoint,
+                ))),
+            },
+        )
         .await
         .unwrap();
-    assert!(view.requested_turn.is_none() && view.active_turn.is_none());
-    assert!(cancel(&backend, &request).await);
-    drop(frontend);
-    release.send(()).unwrap();
-    assert!(
-        bounded(connection).await.unwrap().is_err(),
-        "回执连接已断开"
-    );
-    let turn = committed(&backend, &request).await;
-    assert_eq!(turn.turn_id, request.turn_id);
-    assert!(matches!(turn.outcome, crate::TurnOutcome::Cancelled { .. }));
-    assert_eq!(
-        ledger_tip(&backend, &request).await,
-        before,
-        "不得分发 Tool"
-    );
-    assert_eq!(provider.finish().await.len(), 0, "不得请求 provider");
-    assert!(!cancel(&backend, &request).await);
-    bounded(backend.dispatch(Request::Stop)).await.unwrap();
-}
-
-async fn wait_for_replies(backend: &Backend, request: &TurnRequest, count: usize) {
-    bounded(async {
-        loop {
-            let waiting = lock(&backend.admission)
-                .owners
-                .get(&request.session_id)
-                .is_some_and(|owner| owner.reply.receiver_count() >= count);
-            if waiting {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await;
-}
-
-fn configuration_named(
-    directory: &std::path::Path,
-    endpoint: &str,
-    prompt: &str,
-) -> super::super::FrozenConfiguration {
-    let configuration = super::super::tests::frozen(directory, endpoint);
-    let mut value = serde_json::to_value(configuration).unwrap();
-    value["system_prompt"] = serde_json::json!(prompt);
-    serde_json::from_value(value).unwrap()
+        bounded(prepared).await.unwrap();
+        absent(&backend, &request).await;
+        assert!(cancel(&backend, &request).await);
+        drop(frontend);
+        release.send(()).unwrap();
+        assert!(bounded(task).await.unwrap().is_err());
+        assert_eq!(
+            outcome(&committed(&backend, &request).await),
+            PublicTurnOutcome::Cancelled
+        );
+        assert_eq!(change_seq(&backend, &request).await, before);
+        assert_eq!(provider.finish().await.len(), 0);
+        assert!(!cancel(&backend, &request).await);
+    }
 }
 
 #[tokio::test]
 async fn c2_concurrent_configurations_share_probe_then_one_cancellable_execution() {
-    let (directory, backend, request) = setup().await;
+    let (dir, backend, request) = setup().await;
     let provider = Provider::start().await;
-    let before = ledger_tip(&backend, &request).await;
-    let (queried, release_probe) = arm(&backend.snapshot_gate);
+    let before = change_seq(&backend, &request).await;
+    let (entered, release_probe) = arm(&backend.gates.probe);
     let probe = submit(&backend, &request, None);
-    bounded(queried).await.unwrap();
+    bounded(entered).await.unwrap();
     let first = submit(
         &backend,
         &request,
         Some(configuration_named(
-            directory.path(),
+            dir.path(),
             &provider.endpoint,
             "第一份",
         )),
@@ -428,77 +343,80 @@ async fn c2_concurrent_configurations_share_probe_then_one_cancellable_execution
         &backend,
         &request,
         Some(configuration_named(
-            directory.path(),
+            dir.path(),
             &provider.endpoint,
             "第二份",
         )),
     );
     wait_for_replies(&backend, &request, 3).await;
-    let probe_owned = cancel(&backend, &request).await;
-    let (prepared, release_execution) = arm(&backend.gates.prepare);
+    assert!(!cancel(&backend, &request).await);
+    let (prepared, release) = arm(&backend.gates.prepare);
     release_probe.send(()).unwrap();
     assert!(matches!(
         bounded(probe).await.unwrap().unwrap(),
-        Response::Acceptance(Acceptance::NeedsConfiguration)
+        Response::Acceptance(Acceptance::NeedsConfiguration { .. })
     ));
     bounded(prepared).await.unwrap();
     wait_for_replies(&backend, &request, 2).await;
     assert!(cancel(&backend, &request).await);
-    release_execution.send(()).unwrap();
-    for submission in [first, second] {
-        assert!(matches!(bounded(submission).await.unwrap().unwrap(),
-            Response::Acceptance(Acceptance::Accepted { turn_id }) if turn_id == request.turn_id));
+    release.send(()).unwrap();
+    for task in [first, second] {
+        accepted(bounded(task).await.unwrap().unwrap(), request.turn_id);
     }
-    let turn = committed(&backend, &request).await;
-    assert!(matches!(turn.outcome, crate::TurnOutcome::Cancelled { .. }));
-    let view = backend
+    assert_eq!(
+        outcome(&committed(&backend, &request).await),
+        PublicTurnOutcome::Cancelled
+    );
+    let id = request.turn_id;
+    let record = backend
         .open()
         .await
         .unwrap()
-        .read_view(&request.session_id, Some(request.turn_id))
+        .read(move |r| r.turn_record(id))
         .await
+        .unwrap()
         .unwrap();
-    let stored = view.requested_turn.unwrap();
     assert!(matches!(
-        stored.started().config.system_prompt.as_deref(),
+        record.config.system_prompt.as_deref(),
         Some("第一份" | "第二份")
     ));
-    assert_eq!(ledger_tip(&backend, &request).await, before);
+    assert_eq!(change_seq(&backend, &request).await, before);
     assert_eq!(provider.finish().await.len(), 0);
-    assert!(!probe_owned, "连接中的配置尚未由后台接管");
 }
 
 #[tokio::test]
 async fn c2_configuration_after_probe_retirement_does_not_inherit_false_cancel() {
-    let (directory, backend, request) = setup().await;
+    let (dir, backend, request) = setup().await;
     let provider = Provider::start().await;
-    let (queried, release) = arm(&backend.snapshot_gate);
+    let (entry, release) = arm(&backend.gates.probe);
     let probe = submit(&backend, &request, None);
-    bounded(queried).await.unwrap();
+    bounded(entry).await.unwrap();
     assert!(!cancel(&backend, &request).await);
     release.send(()).unwrap();
     assert!(matches!(
         bounded(probe).await.unwrap().unwrap(),
-        Response::Acceptance(Acceptance::NeedsConfiguration)
+        Response::Acceptance(Acceptance::NeedsConfiguration { .. })
     ));
     assert_eq!(backend.status().owners, 0);
-    let result = submit(
-        &backend,
-        &request,
-        Some(configuration_named(
-            directory.path(),
-            &provider.endpoint,
-            "晚到配置",
-        )),
+    accepted(
+        bounded(submit(
+            &backend,
+            &request,
+            Some(configuration_named(
+                dir.path(),
+                &provider.endpoint,
+                "晚到配置",
+            )),
+        ))
+        .await
+        .unwrap()
+        .unwrap(),
+        request.turn_id,
     );
-    assert!(matches!(
-        bounded(result).await.unwrap().unwrap(),
-        Response::Acceptance(Acceptance::Accepted { .. })
-    ));
-    assert!(matches!(
-        committed(&backend, &request).await.outcome,
-        crate::TurnOutcome::Completed { .. }
-    ));
+    assert_eq!(
+        outcome(&committed(&backend, &request).await),
+        PublicTurnOutcome::Completed
+    );
     let requests = provider.finish().await;
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0]["messages"][0]["content"], "晚到配置");
@@ -506,94 +424,92 @@ async fn c2_configuration_after_probe_retirement_does_not_inherit_false_cancel()
 
 #[tokio::test]
 async fn c3_unconfigured_replay_shares_execution_and_late_cancel_preserves_outcome() {
-    let (directory, backend, request) = setup().await;
+    let (dir, backend, request) = setup().await;
     let provider = Provider::start().await;
     let (retiring, release) = arm(&backend.gates.retire);
-    let submission = submit(
-        &backend,
-        &request,
-        Some(configuration_named(
-            directory.path(),
-            &provider.endpoint,
-            "原执行",
-        )),
+    accepted(
+        bounded(submit(
+            &backend,
+            &request,
+            Some(configuration_named(
+                dir.path(),
+                &provider.endpoint,
+                "原执行",
+            )),
+        ))
+        .await
+        .unwrap()
+        .unwrap(),
+        request.turn_id,
     );
-    assert!(matches!(
-        bounded(submission).await.unwrap().unwrap(),
-        Response::Acceptance(Acceptance::Accepted { .. })
-    ));
     bounded(retiring).await.unwrap();
-    let replay = submit(&backend, &request, None);
-    assert!(
-        matches!(bounded(replay).await.unwrap().unwrap(), Response::Acceptance(Acceptance::Accepted { turn_id }) if turn_id == request.turn_id)
-    );
+    assert!(matches!(
+        bounded(submit(&backend, &request, None)).await.unwrap().unwrap(),
+        Response::Acceptance(Acceptance::Existing { turn }) if turn.turn_id == request.turn_id
+    ));
     assert!(cancel(&backend, &request).await);
     release.send(()).unwrap();
     let original = committed(&backend, &request).await;
-    assert!(matches!(
-        original.outcome,
-        crate::TurnOutcome::Completed { .. }
-    ));
+    assert_eq!(outcome(&original), PublicTurnOutcome::Completed);
     assert!(!cancel(&backend, &request).await);
     let mut next = request.clone();
     next.turn_id = super::super::new_turn_id();
-    let submission = submit(
-        &backend,
-        &next,
-        Some(configuration_named(
-            directory.path(),
-            &provider.endpoint,
-            "后续执行",
-        )),
+    accepted(
+        bounded(submit(
+            &backend,
+            &next,
+            Some(configuration_named(
+                dir.path(),
+                &provider.endpoint,
+                "后续执行",
+            )),
+        ))
+        .await
+        .unwrap()
+        .unwrap(),
+        next.turn_id,
     );
-    assert!(matches!(
-        bounded(submission).await.unwrap().unwrap(),
-        Response::Acceptance(Acceptance::Accepted { .. })
-    ));
-    assert!(matches!(
-        committed(&backend, &next).await.outcome,
-        crate::TurnOutcome::Completed { .. }
-    ));
+    assert_eq!(
+        outcome(&committed(&backend, &next).await),
+        PublicTurnOutcome::Completed
+    );
     assert_eq!(committed(&backend, &request).await, original);
     assert_eq!(provider.finish().await.len(), 2);
 }
 
-async fn rejected_cancellation_then_retry(waited_on_probe: bool) {
-    let (directory, backend, request) = setup().await;
+async fn rejected_cancellation_then_retry(waited: bool) {
+    let (dir, backend, request) = setup().await;
     let provider = Provider::start().await;
-    let mut waiting = None;
-    if waited_on_probe {
-        let (queried, release_probe) = arm(&backend.snapshot_gate);
+    let waiting = if waited {
+        let (entry, release) = arm(&backend.gates.probe);
         let probe = submit(&backend, &request, None);
-        bounded(queried).await.unwrap();
+        bounded(entry).await.unwrap();
         let (retrying, release_retry) = arm(&backend.gates.retry);
         let configured = submit(
             &backend,
             &request,
             Some(configuration_named(
-                directory.path(),
+                dir.path(),
                 &provider.endpoint,
-                "等待中的有效配置",
+                "有效配置",
             )),
         );
         wait_for_replies(&backend, &request, 2).await;
-        release_probe.send(()).unwrap();
+        release.send(()).unwrap();
         assert!(matches!(
             bounded(probe).await.unwrap().unwrap(),
-            Response::Acceptance(Acceptance::NeedsConfiguration)
+            Response::Acceptance(Acceptance::NeedsConfiguration { .. })
         ));
         bounded(retrying).await.unwrap();
-        waiting = Some((configured, release_retry));
-    }
-    let (prepared, release_prepare) = arm(&backend.gates.prepare);
-    let rejected = submit(
-        &backend,
-        &request,
-        Some(invalid_configuration(directory.path())),
-    );
-    bounded(prepared).await.unwrap();
+        Some((configured, release_retry))
+    } else {
+        None
+    };
+    let (entry, release) = arm(&backend.gates.prepare);
+    let rejected = submit(&backend, &request, Some(invalid_configuration(dir.path())));
+    bounded(entry).await.unwrap();
     assert!(cancel(&backend, &request).await);
-    release_prepare.send(()).unwrap();
+    release.send(()).unwrap();
     assert!(matches!(
         bounded(rejected).await.unwrap().unwrap(),
         Response::Error(LocalError {
@@ -601,195 +517,143 @@ async fn rejected_cancellation_then_retry(waited_on_probe: bool) {
             ..
         })
     ));
+    absent(&backend, &request).await;
     assert_eq!(backend.status().owners, 0);
-    let view = backend
-        .query(request.session_id.clone(), Some(request.turn_id))
-        .await
-        .unwrap();
-    assert!(
-        view.requested_turn.is_none() && view.active_turn.is_none(),
-        "只使用可证明未建立 Turn 的拒绝"
-    );
-    let valid = if let Some((configured, release_retry)) = waiting {
-        release_retry.send(()).unwrap();
-        configured
+    let valid = if let Some((task, release)) = waiting {
+        release.send(()).unwrap();
+        task
     } else {
         submit(
             &backend,
             &request,
             Some(configuration_named(
-                directory.path(),
+                dir.path(),
                 &provider.endpoint,
-                "晚到的有效配置",
+                "有效配置",
             )),
         )
     };
-    assert!(
-        matches!(bounded(valid).await.unwrap().unwrap(), Response::Acceptance(Acceptance::Accepted { turn_id }) if turn_id == request.turn_id)
+    accepted(bounded(valid).await.unwrap().unwrap(), request.turn_id);
+    assert_eq!(
+        outcome(&committed(&backend, &request).await),
+        PublicTurnOutcome::Completed
     );
-    assert!(matches!(
-        committed(&backend, &request).await.outcome,
-        crate::TurnOutcome::Completed { .. }
-    ));
     let requests = provider.finish().await;
     assert_eq!(requests.len(), 1);
-    assert_eq!(
-        requests[0]["messages"][0]["content"],
-        if waited_on_probe {
-            "等待中的有效配置"
-        } else {
-            "晚到的有效配置"
-        }
-    );
+    assert_eq!(requests[0]["messages"][0]["content"], "有效配置");
 }
-
 #[tokio::test]
 async fn c4_rejected_operation_does_not_cancel_a_later_retry() {
     rejected_cancellation_then_retry(false).await;
 }
-
 #[tokio::test]
 async fn c4_rejected_operation_does_not_cancel_configuration_already_waiting_on_probe() {
     rejected_cancellation_then_retry(true).await;
 }
 
 #[tokio::test]
-async fn c5_existing_pending_and_pin_precede_new_configuration_and_recovery_is_closure_only() {
-    let (directory, backend, request) = super::tests::pending_backend().await;
+async fn c5_existing_turn_precedes_configuration_and_recovery_is_closure_only() {
+    let (dir, backend, request) = super::tests::pending_backend().await;
     let provider = Provider::start().await;
-    let before = ledger_tip(&backend, &request).await;
+    let before = change_seq(&backend, &request).await;
     let pending = backend
-        .query(request.session_id.clone(), Some(request.turn_id))
+        .query(request.session_id, Some(request.turn_id))
         .await
         .unwrap();
-    assert!(!cancel(&backend, &request).await);
-    let (prepared, release) = arm(&backend.gates.prepare);
-    let replay = submit(&backend, &request, None);
-    bounded(prepared).await.unwrap();
-    assert!(
-        !cancel(&backend, &request).await,
-        "确认 Owner 不接管新执行取消"
-    );
-    release.send(()).unwrap();
-    assert!(matches!(
-        bounded(replay).await.unwrap().unwrap(),
-        Response::Acceptance(Acceptance::Existing {
-            turn: TurnObservation::Pending(_)
-        })
-    ));
-    idle(&backend).await;
-    assert_eq!(
-        backend
-            .query(request.session_id.clone(), Some(request.turn_id))
-            .await
-            .unwrap(),
-        pending,
-        "同请求确认不能隐式关闭 pending"
-    );
-    let invalid = || {
-        let configuration = configuration_named(directory.path(), &provider.endpoint, "不应加载");
-        let mut value = serde_json::to_value(configuration).unwrap();
-        value["profile_toml"] = serde_json::json!("不是 TOML");
-        serde_json::from_value(value).unwrap()
-    };
-    let replay = submit(&backend, &request, Some(invalid()));
-    assert!(matches!(
-        bounded(replay).await.unwrap().unwrap(),
-        Response::Acceptance(Acceptance::Existing {
-            turn: TurnObservation::Pending(_)
-        })
-    ));
-    idle(&backend).await;
-    assert_eq!(
-        backend
-            .query(request.session_id.clone(), Some(request.turn_id))
-            .await
-            .unwrap(),
-        pending
-    );
+    for config in [None, Some(invalid_configuration(dir.path()))] {
+        assert!(!cancel(&backend, &request).await);
+        assert!(
+            matches!(bounded(submit(&backend, &request, config)).await.unwrap().unwrap(), Response::Acceptance(Acceptance::Existing { turn }) if turn.summary.is_none())
+        );
+        assert_eq!(
+            backend
+                .query(request.session_id, Some(request.turn_id))
+                .await
+                .unwrap(),
+            pending
+        );
+    }
+    let root = crate::LocalWorkspaceRoot::from_path(dir.path()).unwrap();
+    let backing =
+        lancet_api::WorkspaceHistoryBacking::for_key(backend.layout.clone(), root.store_key());
+    tokio::task::spawn_blocking(move || lancet_api::WorkspaceHistory::create(backing))
+        .await
+        .unwrap()
+        .unwrap();
     let mut new = request.clone();
     new.turn_id = super::super::new_turn_id();
-    new.input = "取消这次新输入".into();
-    let (prepared, release) = arm(&backend.gates.prepare);
-    let recovery = submit(
+    new.input = "新输入".into();
+    let (entry, release) = arm(&backend.gates.prepare);
+    let task = submit(
         &backend,
         &new,
         Some(configuration_named(
-            directory.path(),
+            dir.path(),
             &provider.endpoint,
             "新配置",
         )),
     );
-    bounded(prepared).await.unwrap();
+    bounded(entry).await.unwrap();
     assert!(cancel(&backend, &new).await);
-    assert!(
-        !cancel(&backend, &request).await,
-        "不把新请求取消转给旧 Turn"
-    );
-    release.send(()).unwrap();
-    assert!(
-        matches!(bounded(recovery).await.unwrap().unwrap(), Response::Acceptance(Acceptance::Accepted { turn_id }) if turn_id == new.turn_id)
-    );
-    let old = committed(&backend, &request).await;
-    assert_eq!(old.origin, crate::ClosureOrigin::Reconciled);
-    assert!(matches!(
-        old.outcome,
-        crate::TurnOutcome::Interrupted { .. }
-    ));
-    let fresh = committed(&backend, &new).await;
-    assert_eq!(fresh.origin, crate::ClosureOrigin::Live);
-    assert!(matches!(
-        fresh.outcome,
-        crate::TurnOutcome::Cancelled { .. }
-    ));
     assert!(!cancel(&backend, &request).await);
-    let replay = submit(&backend, &request, Some(invalid()));
-    assert!(
-        matches!(bounded(replay).await.unwrap().unwrap(), Response::Acceptance(Acceptance::Existing { turn: TurnObservation::Committed(turn) }) if *turn == old)
+    release.send(()).unwrap();
+    accepted(bounded(task).await.unwrap().unwrap(), new.turn_id);
+    let old = committed(&backend, &request).await;
+    assert_eq!(outcome(&old), PublicTurnOutcome::Failed);
+    assert!(matches!(
+        old.steps[0].state,
+        lattice_session::store::StepDetailState::Closed {
+            end: lattice_session::store::StepEnd::Stop {
+                cause: lattice_session::store::StopCause::ProcessExit,
+                node: None
+            },
+            ..
+        }
+    ));
+    assert_eq!(
+        outcome(&committed(&backend, &new).await),
+        PublicTurnOutcome::Cancelled
     );
-    idle(&backend).await;
-    assert_eq!(ledger_tip(&backend, &request).await, before);
+    assert!(
+        matches!(bounded(submit(&backend, &request, Some(invalid_configuration(dir.path())))).await.unwrap().unwrap(), Response::Acceptance(Acceptance::Existing { turn }) if turn == TurnView::from(&old))
+    );
+    assert_eq!(change_seq(&backend, &request).await, before);
     assert_eq!(provider.finish().await.len(), 0);
 }
 
 #[tokio::test]
 async fn c5_exact_identity_and_stop_preserve_the_owned_preparation() {
-    let (directory, backend, request) = setup().await;
+    let (dir, backend, request) = setup().await;
     let provider = Provider::start().await;
     let other_workspace = tempfile::tempdir().unwrap();
-    let (prepared, release) = arm(&backend.gates.prepare);
+    let (entry, release) = arm(&backend.gates.prepare);
     let submission = submit(
         &backend,
         &request,
         Some(configuration_named(
-            directory.path(),
+            dir.path(),
             &provider.endpoint,
             "应取消",
         )),
     );
-    bounded(prepared).await.unwrap();
-    let mut conflict = request.clone();
-    conflict.input.push('！');
-    assert_eq!(
-        bounded(submit(&backend, &conflict, None))
-            .await
-            .unwrap()
-            .err()
-            .unwrap()
-            .kind,
-        LocalErrorKind::Conflict
-    );
-    conflict = request.clone();
-    conflict.workspace = other_workspace.path().into();
-    assert_eq!(
-        bounded(submit(&backend, &conflict, None))
-            .await
-            .unwrap()
-            .err()
-            .unwrap()
-            .kind,
-        LocalErrorKind::Conflict
-    );
+    bounded(entry).await.unwrap();
+    for workspace in [false, true] {
+        let mut conflict = request.clone();
+        if workspace {
+            conflict.workspace = other_workspace.path().into();
+        } else {
+            conflict.input.push('!');
+        }
+        assert_eq!(
+            bounded(submit(&backend, &conflict, None))
+                .await
+                .unwrap()
+                .err()
+                .unwrap()
+                .kind,
+            LocalErrorKind::Conflict
+        );
+    }
     let mut other = request.clone();
     other.turn_id = super::super::new_turn_id();
     assert_eq!(
@@ -811,10 +675,9 @@ async fn c5_exact_identity_and_stop_preserve_the_owned_preparation() {
     })
     .await;
     assert!(!stop.is_finished());
-    let mut free_session = other.clone();
-    free_session.session_id = "0".repeat(32);
+    other.session_id = None;
     assert_eq!(
-        bounded(submit(&backend, &free_session, None))
+        bounded(submit(&backend, &other, None))
             .await
             .unwrap()
             .err()
@@ -827,39 +690,36 @@ async fn c5_exact_identity_and_stop_preserve_the_owned_preparation() {
     assert!(cancel(&backend, &request).await);
     release.send(()).unwrap();
     for task in [submission, replay] {
-        assert!(matches!(
-            bounded(task).await.unwrap().unwrap(),
-            Response::Acceptance(Acceptance::Accepted { .. })
-        ));
+        accepted(bounded(task).await.unwrap().unwrap(), request.turn_id);
     }
     let Response::Status(status) = bounded(stop).await.unwrap().unwrap() else {
-        panic!("排空返回状态")
+        panic!("stop")
     };
     assert!(status.stopping && status.owners == 0);
-    assert!(matches!(
-        committed(&backend, &request).await.outcome,
-        crate::TurnOutcome::Cancelled { .. }
-    ));
+    assert_eq!(
+        outcome(&committed(&backend, &request).await),
+        PublicTurnOutcome::Cancelled
+    );
     assert_eq!(provider.finish().await.len(), 0);
 }
 
 #[tokio::test]
 async fn c5_forwarding_panic_keeps_core_completion_until_stop_drains() {
-    let (directory, backend, request) = setup().await;
+    let (dir, backend, request) = setup().await;
     let mut provider = Provider::start().await;
     provider.release.send_replace(false);
-    let before = ledger_tip(&backend, &request).await;
+    let before = change_seq(&backend, &request).await;
     let (forwarding, fail) = arm(&backend.gates.forward_panic);
-    let (supervising, release_supervisor) = arm(&backend.gates.supervise);
+    let (supervising, resume) = arm(&backend.gates.supervise);
     let (retiring, release_retire) = arm(&backend.gates.retire);
     let (writer, mut frontend) = UnixStream::pair().unwrap();
-    let connection = tokio::spawn(connection(backend.clone(), writer));
+    let task = tokio::spawn(connection(backend.clone(), writer));
     ipc::write(
         &mut frontend,
         &Request::Submit {
             request: request.clone(),
             configuration: Some(Box::new(configuration_named(
-                directory.path(),
+                dir.path(),
                 &provider.endpoint,
                 "监督排空",
             ))),
@@ -872,7 +732,7 @@ async fn c5_forwarding_panic_keeps_core_completion_until_stop_drains() {
     drop(frontend);
     fail.send(()).unwrap();
     bounded(supervising).await.unwrap();
-    release_supervisor.send(()).unwrap();
+    resume.send(()).unwrap();
     let server = backend.clone();
     let stop = tokio::spawn(async move { server.dispatch(Request::Stop).await });
     bounded(async {
@@ -882,21 +742,81 @@ async fn c5_forwarding_panic_keeps_core_completion_until_stop_drains() {
     })
     .await;
     assert!(!stop.is_finished());
-    assert_eq!(backend.status().owners, 1, "转发退出不得丢弃核心完成接收器");
+    assert_eq!(backend.status().owners, 1);
     assert!(cancel(&backend, &request).await);
     bounded(retiring).await.unwrap();
-    assert!(!stop.is_finished(), "监督退场前 stop 仍须等待");
+    assert!(!stop.is_finished());
     release_retire.send(()).unwrap();
     let Response::Status(status) = bounded(stop).await.unwrap().unwrap() else {
-        panic!("排空返回状态")
+        panic!("stop")
     };
     assert_eq!(status.owners, 0);
-    assert_eq!(status.unconfirmed_operations, 1, "保留转发诊断");
-    assert!(bounded(connection).await.unwrap().is_err());
-    assert!(matches!(
-        committed(&backend, &request).await.outcome,
-        crate::TurnOutcome::Cancelled { .. }
-    ));
-    assert_eq!(ledger_tip(&backend, &request).await, before);
+    assert_eq!(status.unconfirmed_operations, 1);
+    assert!(bounded(task).await.unwrap().is_err());
+    assert_eq!(
+        outcome(&committed(&backend, &request).await),
+        PublicTurnOutcome::Cancelled
+    );
+    assert_eq!(change_seq(&backend, &request).await, before);
     assert_eq!(provider.finish().await.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn new_session_reserves_admission_before_accepted_identity_is_visible() {
+    let (dir, backend, mut request) = setup().await;
+    request.session_id = None;
+    let provider = Provider::start().await;
+    provider.release.send_replace(false);
+    let (at_accept, resume_accept) = arm(&backend.gates.accepted);
+    let original = submit(
+        &backend,
+        &request,
+        Some(super::super::tests::frozen(dir.path(), &provider.endpoint)),
+    );
+    bounded(at_accept).await.unwrap();
+    let view = backend.query(None, Some(request.turn_id)).await.unwrap();
+    assert!(view.owned);
+    let (at_probe, resume_probe) = arm(&backend.gates.probe);
+    let mut other = request.clone();
+    other.turn_id = super::super::new_turn_id();
+    other.session_id = Some(view.session.session_id);
+    other.input = "competing request during acceptance handoff".into();
+    let mut competing = submit(&backend, &other, None);
+    let early = bounded(async {
+        tokio::select! {
+            result = &mut competing => Some(result.unwrap()),
+            result = at_probe => { result.unwrap(); None }
+        }
+    })
+    .await;
+    resume_accept.send(()).unwrap();
+    provider.release.send_replace(true);
+    let response = bounded(original).await.unwrap();
+    let _ = resume_probe.send(());
+    let second = match early {
+        Some(response) => response,
+        None => bounded(competing).await.unwrap(),
+    };
+    idle(&backend).await;
+    let durable = backend.query(None, Some(request.turn_id)).await.unwrap();
+    assert!(durable.selected_turn.unwrap().summary.is_some());
+    assert_eq!(provider.finish().await.len(), 1);
+    assert!(
+        matches!(
+            response,
+            Ok(Response::Acceptance(Acceptance::Accepted { .. }))
+        ),
+        "already accepted original must receive Accepted: {}",
+        serde_json::to_string(&response).unwrap()
+    );
+    assert!(matches!(
+        second,
+        Err(LocalError {
+            kind: LocalErrorKind::Busy,
+            ..
+        }) | Ok(Response::Error(LocalError {
+            kind: LocalErrorKind::Busy,
+            ..
+        }))
+    ));
 }

@@ -40,9 +40,9 @@ pub use fixture_http::{CapturedHttpRequest, FixtureHttpError, FixtureHttpServer,
 pub use pty_tui::{PtyError, PtyTuiDriver};
 pub use scenario::{ScenarioBudget, ScenarioError, ScenarioLayer, ScenarioSpec};
 pub use session_send::{
-    MalformedJsonLine, SendExecution, SendExitCode, SendOutcome, SessionSendDriver,
-    SessionSendError, TurnEventLine, assert_event_subsequence, classify_exit,
-    derive_send_exit_code, parse_event_line, parse_send_stdout,
+    MalformedJsonLine, SendExecution, SendExitCode, SendOutcome, SessionSendDriver, TurnEventLine,
+    assert_event_subsequence, classify_exit, derive_send_exit_code, parse_event_line,
+    parse_send_stdout,
 };
 pub use tui_mock::{TuiMockError, TuiMockScenario, run_tui_mock};
 pub use world::{ScenarioWorld, WorldError};
