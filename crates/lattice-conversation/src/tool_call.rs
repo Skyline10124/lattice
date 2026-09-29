@@ -7,9 +7,9 @@
 //! scalars, malformed JSON, and duplicate/incomplete Tool calls are invalid;
 //! there is no empty-to-`{}` normalization. If any ToolCall in a completed
 //! provider batch is invalid, the entire attempt is rejected
-//! (`AttemptRejection::InvalidToolCall`) and produces no `MessageComplete`,
-//! `BindingPlanned`, `InvocationId`, or transcript content — this validator is
-//! the fail-closed gate that decision is built from.
+//! (`AttemptRejection::InvalidToolCall`) and produces no invocation slot,
+//! `InvocationId`, or conversation-tree content — this validator is the
+//! fail-closed gate that decision is built from.
 
 use lancet_protocol::{InvocationId, ToolCallAddress, arguments_digest};
 use serde::{Deserialize, Serialize};

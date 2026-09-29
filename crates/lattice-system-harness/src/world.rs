@@ -147,8 +147,8 @@ impl ScenarioWorld {
         &self.project
     }
 
-    /// The private-state root holding `sessions.git`, the per-project stores,
-    /// and the lock tree (ADR 0005 §3).
+    /// The private-state root holding the global `lattice.redb`, the
+    /// per-project stores, and the lock tree.
     pub fn session_store_dir(&self) -> &Path {
         &self.session_store
     }

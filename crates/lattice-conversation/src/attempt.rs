@@ -11,8 +11,8 @@ use crate::tool_call::ToolCallValidation;
 /// A completed provider output rejected before binding.
 ///
 /// A rejected attempt retains its bounded assembled output and diagnostics
-/// for Session diagnosis but produces no `MessageComplete`, `BindingPlanned`,
-/// `InvocationId`, or transcript content.
+/// for Session diagnosis but produces no invocation slot, `InvocationId`, or
+/// conversation-tree content.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttemptRejection {

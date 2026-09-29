@@ -277,8 +277,8 @@ impl WorkspaceHistory {
     /// Strictly open the history for `backing`.
     ///
     /// A missing or identity-invalid store fails closed (#143): opening never
-    /// initializes. The store is first-created by the `session new`
-    /// composition path.
+    /// initializes. The store is first-created when a Turn creates a new
+    /// Session (`lattice-api` `turn::execute`).
     pub fn open(backing: WorkspaceHistoryBacking) -> Result<Self, WorkspaceHistoryError> {
         match &backing {
             WorkspaceHistoryBacking::Disabled => Ok(Self::disabled()),

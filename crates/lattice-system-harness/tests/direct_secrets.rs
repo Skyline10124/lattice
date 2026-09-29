@@ -5,8 +5,8 @@
 //!
 //! Uses a unique per-scenario provider-credential sentinel plus a
 //! denied-workspace-content sentinel, then scans every public sink
-//! (command stdout/stderr, parsed JSONL, session status/log, audit
-//! query/replay, and lancet status JSON) and asserts no sentinel
+//! (command stdout/stderr, parsed JSONL, session list/log, audit query,
+//! and lancet status JSON) and asserts no sentinel
 //! leaks. A detected sentinel is an assertion failure.
 
 mod support;
@@ -25,7 +25,7 @@ use support::{
 const DENIED_CONTENT_SENTINEL: &str = "sentinel-denied-content-0xDEADBEEF";
 
 /// Scan every public sink for sentinels after a turn: stdout/stderr, parsed
-/// JSONL, session status/log, audit query/replay, and lancet status.
+/// JSONL, session list/log, audit query, and lancet status.
 /// The FAKE_API_KEY (provider credential) and the denied-content sentinel must
 /// not appear in any of them.
 #[test]
@@ -90,17 +90,17 @@ fn direct_secrets_sentinels_never_leak_into_public_sinks() {
         }
         require(
             String::from_utf8_lossy(&aq.stdout).contains("session.todo_write"),
-            "Git operator query must include the Tool-bearing invocation",
+            "operator audit query must include the Tool-bearing invocation",
         )?;
         let sinks: Vec<(&str, String)> = vec![
             ("send stdout", send_stdout.to_string()),
             ("send stderr", send_stderr.to_string()),
             (
-                "session status",
+                "session list",
                 String::from_utf8_lossy(&ss.stdout).to_string(),
             ),
             (
-                "session status stderr",
+                "session list stderr",
                 String::from_utf8_lossy(&ss.stderr).to_string(),
             ),
             (
