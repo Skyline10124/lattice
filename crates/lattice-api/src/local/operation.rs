@@ -465,8 +465,11 @@ impl Worker {
             Err(error) => {
                 self.subscription = None;
                 self.progress = None;
-                self.pending
-                    .push_back(LocalUpdate::Connection(ConnectionStatus::Error(error)));
+                // 订阅在服务端首次查询时才发现目标未创建，处理同连接结果。
+                if !(self.submission.is_some() && target_not_created(&error)) {
+                    self.pending
+                        .push_back(LocalUpdate::Connection(ConnectionStatus::Error(error)));
+                }
             }
         }
     }
@@ -658,6 +661,9 @@ impl Worker {
                             self.select(selected); self.install_subscription(subscription);
                             if let Some(view) = view { self.fixed(Box::new(view)).await; }
                         }
+                        // 自己的提交尚未有结果时，目标 Turn 或（新会话的）会话库还没有创建是预期的：
+                        // 这不是观察故障，接受、找回或交接后会重新订阅。
+                        Err(error) if self.submission.is_some() && target_not_created(&error) => {}
                         Err(error) => self.pending.push_back(LocalUpdate::Connection(ConnectionStatus::Error(error))),
                     }
                 }
@@ -716,6 +722,10 @@ impl Worker {
         self.retire_body().await;
         self.report
     }
+}
+fn target_not_created(error: &LocalError) -> bool {
+    error.kind == LocalErrorKind::NotFound
+        || matches!(error.store, Some(StoreDiagnostic::NotInitialized { .. }))
 }
 fn worker_error() -> LocalError {
     LocalError::new(LocalErrorKind::Internal, "local worker failed")

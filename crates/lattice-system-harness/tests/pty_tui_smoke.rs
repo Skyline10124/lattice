@@ -110,6 +110,12 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
             frame.contains("mock line 32") && !frame.contains("show commands"),
             "final answer must stay on screen after the durable history install: {frame}"
         );
+        // 首次提交在接受事务里才创建会话库；接受前不应有订阅，也就不应出现“库不可用”。
+        let shown = String::from_utf8_lossy(tui.output()).into_owned();
+        assert!(
+            !shown.contains("store unavailable"),
+            "first submission must not report a missing session store"
+        );
 
         let caps = server.captured_requests();
         assert!(
