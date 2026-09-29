@@ -132,16 +132,3 @@ pub(crate) fn kill(
     evidence.record_command("frontend observes backend crash", &disconnected);
     assert!(disconnected.is_clean_exit(1), "{}", disconnected.summary());
 }
-
-pub(crate) fn finish(evidence: ScenarioEvidence, result: std::thread::Result<()>) {
-    let primary = result.err().map(|error| {
-        error
-            .downcast_ref::<String>()
-            .cloned()
-            .or_else(|| error.downcast_ref::<&str>().map(|text| text.to_string()))
-            .unwrap_or_else(|| "crash scenario panicked".into())
-    });
-    evidence
-        .finish_report(primary)
-        .unwrap_or_else(|report| panic!("{report}"));
-}

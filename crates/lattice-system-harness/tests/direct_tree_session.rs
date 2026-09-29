@@ -73,12 +73,7 @@ fn first_prompt_is_the_only_session_creation_and_request() {
             serde_json::json!({"prompt":"first real input","reply":"answer","agent":"reader","provider_requests":1}),
         );
     }));
-    support::finish_recorded(
-        evidence,
-        checked,
-        "direct_tree_session",
-        "first_prompt_is_the_only_session_creation_and_request",
-    );
+    support::finish_recorded(evidence, checked);
 }
 
 mod support;
@@ -538,12 +533,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
             "provider_requests":6,"script":"alpha create kept.txt then final; beta create cancelled.txt then cancel at request2; alpha fork; beta root"})).unwrap();
         server.shutdown(spec.step_timeout()).unwrap();
     }));
-    support::finish_recorded(
-        evidence,
-        result,
-        "direct_tree_session",
-        "multi_step_two_agent_tree_rewind_preserves_files_and_old_turn",
-    );
+    support::finish_recorded(evidence, result);
 }
 
 #[test]
@@ -635,11 +625,6 @@ fn legacy_stores_are_refused_before_any_new_database_or_request() {
             evidence.record_captures(server.captured_requests());
             server.shutdown(spec.step_timeout()).unwrap();
         }));
-        support::finish_recorded(
-            evidence,
-            result,
-            "direct_tree_session",
-            "legacy_stores_are_refused_before_any_new_database_or_request",
-        );
+        support::finish_recorded(evidence, result);
     }
 }

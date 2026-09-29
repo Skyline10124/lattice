@@ -91,12 +91,7 @@ fn session_queries_and_rewind_preserve_the_tree_across_restart() {
         );
     }));
     evidence.record_captures(server.captured_requests());
-    support::finish_recorded(
-        evidence,
-        result,
-        "fast_session_cli",
-        "session_queries_and_rewind_preserve_the_tree_across_restart",
-    );
+    support::finish_recorded(evidence, result);
 }
 
 #[test]
@@ -124,12 +119,7 @@ fn missing_store_read_does_not_create_a_database() {
             .unwrap();
         evidence.record_json("parameters", &serde_json::json!({"commands":["session list","--json audit"],"profile":null,"provider":null})).unwrap();
     }));
-    support::finish_recorded(
-        evidence,
-        result,
-        "fast_session_cli",
-        "missing_store_read_does_not_create_a_database",
-    );
+    support::finish_recorded(evidence, result);
 }
 
 #[test]
@@ -186,10 +176,5 @@ fn missing_session_and_missing_profile_fail_before_dispatch() {
         );
     }));
     evidence.record_captures(server.captured_requests());
-    support::finish_recorded(
-        evidence,
-        result,
-        "fast_session_cli",
-        "missing_session_and_missing_profile_fail_before_dispatch",
-    );
+    support::finish_recorded(evidence, result);
 }

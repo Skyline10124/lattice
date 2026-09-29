@@ -189,24 +189,6 @@ fn segments(reply: &Value) -> Vec<Value> {
     }
     result
 }
-fn finish(evidence: ScenarioEvidence, result: std::thread::Result<()>, name: &str) {
-    if result.is_err() {
-        support::crash::finish(evidence, result);
-        return;
-    }
-    let base = std::env::var_os("LATTICE_HARNESS_SUCCESS_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("target/harness-success"));
-    std::fs::create_dir_all(&base).unwrap();
-    let run = tempfile::Builder::new()
-        .prefix(&format!("{name}-"))
-        .tempdir_in(base)
-        .unwrap()
-        .keep();
-    let target = run.join("evidence");
-    evidence.finish_success(&target).unwrap();
-    eprintln!("SUCCESS_EVIDENCE={}", target.display());
-}
 fn provenance(world: &ScenarioWorld, evidence: &mut ScenarioEvidence, script: Value) {
     let driver = support::driver();
     let bytes = std::fs::read(driver.binary_path()).unwrap();
@@ -398,7 +380,7 @@ fn late_successful_history_page_cannot_replace_newer_tui_snapshot() {
         evidence.record_command("late-page backend stop", &stopped);
         assert!(stopped.is_clean_exit(0));
     }));
-    finish(evidence, result, "history-late-success");
+    support::finish_recorded(evidence, result);
 }
 
 #[test]
@@ -860,7 +842,7 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
         evidence.record_captures(provider.captured_requests());
         evidence.record_captures(beta_provider.captured_requests());
     }));
-    finish(evidence, result, "operator-global-matrix");
+    support::finish_recorded(evidence, result);
 }
 
 #[test]
@@ -1264,7 +1246,7 @@ fn r2_s2_multicall_reconnect_busy_sigkill_auto_close() {
             .unwrap();
         evidence.record_json("state-summary",&json!({"turn":closed,"history_current":tip,"file_blake3":blake3::hash(&std::fs::read(world.project_dir().join("created.txt")).unwrap()).to_hex().to_string(),"provider_requests":3,"peer_requests":1})).unwrap();
     }));
-    finish(evidence, result, "s2-vertical");
+    support::finish_recorded(evidence, result);
 }
 
 #[test]
@@ -1686,7 +1668,7 @@ fn redb_commit_windows_close_only_and_preserve_terminal_facts() {
                 .shutdown(budget.cap_timeout(spec.step_timeout()))
                 .unwrap();
         }));
-        finish(evidence, result, name);
+        support::finish_recorded(evidence, result);
     }
 }
 
@@ -1822,7 +1804,7 @@ fn persisted_cancel_after_mutation_survives_crash_without_replay() {
             .shutdown(budget.cap_timeout(spec.step_timeout()))
             .unwrap();
     }));
-    finish(evidence, result, "cancelled");
+    support::finish_recorded(evidence, result);
 }
 
 #[test]
@@ -1992,7 +1974,7 @@ fn rewind_commit_survives_sigkill_and_keeps_both_branches() {
                 .shutdown(budget.cap_timeout(spec.step_timeout()))
                 .unwrap();
         }));
-        finish(evidence, result, &format!("rewind-{target}"));
+        support::finish_recorded(evidence, result);
     }
 }
 
@@ -2196,7 +2178,7 @@ fn history_read_failure_preserves_live_text_and_summary_then_reconnect_clears_er
         evidence.record_command("history fault backend shutdown", &stopped);
         assert!(stopped.is_clean_exit(0));
     }));
-    finish(evidence, result, "history-read-fault");
+    support::finish_recorded(evidence, result);
 }
 
 #[test]
@@ -2511,7 +2493,7 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
         assert_eq!(provider.captured_requests().len(), 3);
         evidence.record_json("epoch-reconnect", &json!({"old_cursor":event["value"]["cursor"],"snapshot":new_snapshot,"finished":new_finished})).unwrap();
     }));
-    finish(evidence, result, "observation-windows");
+    support::finish_recorded(evidence, result);
 }
 
 #[test]
@@ -2718,7 +2700,7 @@ fn cancelled_slot_live_and_crash_share_ordered_closure() {
                 .shutdown(budget.cap_timeout(spec.step_timeout()))
                 .unwrap();
         }));
-        finish(evidence, result, &format!("cancel-slot-{crash}"));
+        support::finish_recorded(evidence, result);
     }
 }
 
@@ -2877,7 +2859,7 @@ fn dispatch_deadline_tail_is_atomic_and_survives_crash() {
             .shutdown(budget.cap_timeout(spec.step_timeout()))
             .unwrap();
     }));
-    finish(evidence, result, "dispatch-deadline");
+    support::finish_recorded(evidence, result);
 }
 
 #[test]
@@ -3235,7 +3217,7 @@ fn closure_commit_fault_stops_other_sessions_until_real_reopen() {
                 evidence.record_command("fault backend shutdown", &stopped);
                 assert!(stopped.is_clean_exit(0));
             }));
-            finish(evidence, result, &name);
+            support::finish_recorded(evidence, result);
         }
     }
 }
@@ -3376,5 +3358,5 @@ fn memory_only_cancel_crash_is_process_exit_and_next_send_runs_once() {
             .shutdown(budget.cap_timeout(spec.step_timeout()))
             .unwrap();
     }));
-    finish(evidence, result, "memory-only-cancel");
+    support::finish_recorded(evidence, result);
 }

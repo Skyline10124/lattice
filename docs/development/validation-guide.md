@@ -27,7 +27,6 @@ cargo install wasm-tools --version 1.254.0 --locked
 cargo build -p lattice-cli --bin lattice
 export LATTICE_BIN="$(pwd)/target/debug/lattice"
 export LATTICE_HARNESS_FAILURE_DIR="$(pwd)/target/harness-failures"
-export LATTICE_HARNESS_SUCCESS_DIR="$(pwd)/target/harness-success"
 ```
 
 若配置了自定义 target 目录，按实际产物位置设置变量。harness 从测试进程 cwd 解析 `LATTICE_BIN`，确认是文件后规范化为绝对路径；缺失变量或无效路径不会回退 PATH。`cargo test -p lattice-system-harness` 的 cwd 是 crate 目录，不能把仓库根相对路径直接传给它。worktree 中还须防止继承主 checkout 的旧产物路径。
@@ -265,7 +264,6 @@ rollout 是发布证据编排，不是人工体验层。当前 [`rollout.rs`](..
 | --- | --- |
 | 本地默认 harness 失败 | `<harness crate>/target/harness-failures/<scenario>/`，以 crate 目录固定定位 |
 | 本地 CI 与普通 CI 失败 | `target/harness-failures/` |
-| 已采集的会话场景成功证据 | `LATTICE_HARNESS_SUCCESS_DIR` 指定目录，默认 `<harness crate>/target/harness-success/`；包含状态、树形 log、turn JSON、audit、参数与复现信息，不与失败目录混用 |
 | rollout 场景失败 | `target/rollout/harness-failures/` |
 | rollout 主记录 | `target/rollout/rollout-alpha-<yyyymmddTHHMMSSZ>.json`，`--out` 可改主要位置 |
 | rollout 最近记录 | `target/rollout/alpha-latest.json` |

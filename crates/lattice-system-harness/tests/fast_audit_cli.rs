@@ -51,7 +51,7 @@ fn ok_or_artifacts(
                 )
                 .unwrap();
         }));
-    support::finish_recorded(evidence, result, "fast_audit_cli", name);
+    support::finish_recorded(evidence, result);
 }
 
 /// 缺少调用账本的公开诊断；文本模式与 JSON 模式共用同一原因。

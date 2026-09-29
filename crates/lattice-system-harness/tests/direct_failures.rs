@@ -61,7 +61,7 @@ fn finish_failure(
             serde_json::json!({"test":test,"commands":commands.iter().map(|(label, _)| *label).collect::<Vec<_>>()}),
         );
     }));
-    finish_recorded(evidence, result, "direct_failures", test);
+    finish_recorded(evidence, result);
 }
 
 fn provider_failure(name: &str, test: &str, script: SseScript, partial: bool) {

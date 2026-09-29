@@ -602,21 +602,6 @@ impl ScenarioEvidence {
         self.finish_internal(primary_assertion, persist)
     }
 
-    /// 断言成功后调用：先排空自有后台，再写入独立的新目录；绝不覆盖旧证据。
-    pub fn finish_success(mut self, target: &Path) -> Result<(), EvidenceError> {
-        if let Err(errors) = self.daemon.cleanup(self.budget.normal_stop_deadline()) {
-            return self
-                .finish_report(Some(format!("daemon cleanup: {errors:?}")))
-                .map_err(|report| EvidenceError::FailureReport(report.to_string()));
-        }
-        let claim = ArtifactClaim::acquire(target)?;
-        std::fs::create_dir(target)?;
-        self.failure_dir = target.to_path_buf();
-        self._claim = claim;
-        self.finish_internal(None, true)
-            .map_err(|report| EvidenceError::FailureReport(report.to_string()))
-    }
-
     pub fn finish(self, failed: bool) -> Result<(), EvidenceError> {
         self.finish_internal(None, failed)
             .map_err(|report| EvidenceError::FailureReport(report.to_string()))
@@ -1530,11 +1515,10 @@ mod tests {
     }
 
     #[test]
-    fn success_archive_is_separate_redacted_and_never_overwritten() {
-        let world = ScenarioWorld::new("success-evidence").unwrap();
+    fn failure_bundle_redacts_pty_and_json_attachments() {
+        let world = ScenarioWorld::new("attachment-evidence").unwrap();
         let root = TempDir::new().unwrap();
         let failure = root.path().join("failure");
-        let success = root.path().join("success");
         let mut evidence =
             ScenarioEvidence::new_at_dir(&world, failure.clone(), ["secret-token".into()]).unwrap();
         evidence.record_pty(b"answer secret-token");
@@ -1542,19 +1526,15 @@ mod tests {
             .record_json("cut", &json!({"marker":"secret-token","sequence":65}))
             .unwrap();
         assert!(evidence.record_json("../escape", &json!({})).is_err());
-        evidence.finish_success(&success).unwrap();
-        assert!(!failure.exists());
+        assert!(evidence.finish_report(Some("primary".into())).is_err());
         assert!(
-            !std::fs::read_to_string(success.join("0-pty.txt"))
+            !std::fs::read_to_string(failure.join("0-pty.txt"))
                 .unwrap()
                 .contains("secret-token")
         );
         let cut: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(success.join("cut.json")).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(failure.join("cut.json")).unwrap()).unwrap();
         assert_eq!(cut, json!({"marker":"[REDACTED]","sequence":65}));
-        let evidence = ScenarioEvidence::new_at_dir(&world, failure, []).unwrap();
-        assert!(evidence.finish_success(&success).is_err());
-        assert!(success.join("0-pty.txt").exists());
     }
 
     #[test]

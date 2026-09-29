@@ -197,12 +197,7 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
         );
     }));
     evidence.record_captures(server.captured_requests());
-    support::finish_recorded(
-        evidence,
-        result,
-        "pty_tui_smoke",
-        "pty_tui_smoke_runs_turn_and_quits_cleanly",
-    );
+    support::finish_recorded(evidence, result);
 }
 
 mod support;
@@ -328,12 +323,7 @@ fn pty_detach_reloads_pending_and_result_without_cancelling() {
     evidence.record_pty(tui.output());
     evidence.record_captures(server.captured_requests());
     drop(tui);
-    support::finish_recorded(
-        evidence,
-        result,
-        "pty_tui_smoke",
-        "pty_detach_reloads_pending_and_result_without_cancelling",
-    );
+    support::finish_recorded(evidence, result);
 }
 
 /// 真实模型段已开始后换前端：新后缀必须在终态 gate 放行前可见。
@@ -578,12 +568,7 @@ fn pty_mid_model_reconnect_shows_new_suffix_before_completion() {
     drop(server);
     drop(replacement);
     drop(original);
-    support::finish_recorded(
-        evidence,
-        result,
-        "pty_tui_smoke",
-        "pty_mid_model_reconnect_shows_new_suffix_before_completion",
-    );
+    support::finish_recorded(evidence, result);
 }
 
 #[test]
@@ -651,10 +636,5 @@ fn pty_second_ctrl_c_preserves_cancel_acknowledgement() {
     evidence.record_pty(tui.output());
     evidence.record_captures(server.captured_requests());
     drop(tui);
-    support::finish_recorded(
-        evidence,
-        result,
-        "pty_tui_smoke",
-        "pty_second_ctrl_c_preserves_cancel_acknowledgement",
-    );
+    support::finish_recorded(evidence, result);
 }

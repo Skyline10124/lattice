@@ -276,12 +276,7 @@ fn detached_cli_finishes_and_world_owns_daemon_cleanup() {
             );
         }
     }));
-    support::finish_recorded(
-        evidence,
-        result,
-        "direct_background",
-        "detached_cli_finishes_and_world_owns_daemon_cleanup",
-    );
+    support::finish_recorded(evidence, result);
 }
 #[test]
 fn unread_acceptance_retry_and_restart_keep_one_turn() {
@@ -453,12 +448,7 @@ fn unread_acceptance_retry_and_restart_keep_one_turn() {
                     .shutdown(budget.cap_timeout(Duration::from_secs(30)))
                     .unwrap();
             }));
-            support::finish_recorded(
-                evidence,
-                result,
-                "direct_background",
-                "unread_acceptance_retry_and_restart_keep_one_turn",
-            );
+            support::finish_recorded(evidence, result);
         }
     }
 }
@@ -578,12 +568,7 @@ fn busy_cancel_and_stop_do_not_serialize_distinct_sessions() {
         evidence.record_json("parameters", &json!({"script":"parallel answer","requests":["parallel a","parallel b"],
             "state_root":world.session_store_dir().parent(),"provider_requests":2,"stop":lines(&drained)})).unwrap();
     }));
-    support::finish_recorded(
-        evidence,
-        result,
-        "direct_background",
-        "busy_cancel_and_stop_do_not_serialize_distinct_sessions",
-    );
+    support::finish_recorded(evidence, result);
 }
 #[test]
 fn concurrent_autostart_has_one_owner_and_snapshot_reloads_result() {
@@ -649,12 +634,7 @@ fn concurrent_autostart_has_one_owner_and_snapshot_reloads_result() {
         evidence.record_json("parameters", &json!({"script":"gated 24000 Chinese characters","turns":[FIRST,SECOND],"snapshot":snapshot})).unwrap();
         evidence.record_captures(server.captured_requests());
     }));
-    support::finish_recorded(
-        evidence,
-        result,
-        "direct_background",
-        "concurrent_autostart_has_one_owner_and_snapshot_reloads_result",
-    );
+    support::finish_recorded(evidence, result);
 }
 #[test]
 fn slow_subscriber_cannot_block_fixed_result_or_other_queries() {
@@ -714,12 +694,7 @@ fn slow_subscriber_cannot_block_fixed_result_or_other_queries() {
             .unwrap();
         evidence.record_captures(server.captured_requests());
     }));
-    support::finish_recorded(
-        evidence,
-        result,
-        "direct_background",
-        "slow_subscriber_cannot_block_fixed_result_or_other_queries",
-    );
+    support::finish_recorded(evidence, result);
 }
 #[test]
 fn shared_daemon_keeps_project_endpoints_keys_and_profiles_frozen() {
@@ -873,12 +848,7 @@ fn shared_daemon_keeps_project_endpoints_keys_and_profiles_frozen() {
         evidence.record_json("beta-state", &beta).unwrap();
         evidence.record_json("parameters", &json!({"turns":[FIRST,SECOND],"prompts":["alpha","beta"],"methods":["session.todo_write"],"final_reply":"frozen result","provider_requests":[2,2],"source_changed_after_both_gates":true})).unwrap();
     }));
-    support::finish_recorded(
-        evidence,
-        result,
-        "direct_background",
-        "shared_daemon_keeps_project_endpoints_keys_and_profiles_frozen",
-    );
+    support::finish_recorded(evidence, result);
 }
 #[test]
 fn later_session_driver_keeps_the_scenario_budget_origin() {
@@ -1006,12 +976,7 @@ fn daemon_restart_reads_closed_result_without_resubmitting() {
             .unwrap();
         evidence.record_captures(server.captured_requests());
     }));
-    support::finish_recorded(
-        evidence,
-        result,
-        "direct_background",
-        "daemon_restart_reads_closed_result_without_resubmitting",
-    );
+    support::finish_recorded(evidence, result);
 }
 #[test]
 fn a_live_new_turn_does_not_block_old_closed_observation() {
@@ -1071,12 +1036,7 @@ fn a_live_new_turn_does_not_block_old_closed_observation() {
         evidence.record_json("parameters", &json!({"script":"two gated answer Turns","old_turn":tid,"during_live":before,"after_observation":still})).unwrap();
         evidence.record_captures(server.captured_requests());
     }));
-    support::finish_recorded(
-        evidence,
-        result,
-        "direct_background",
-        "a_live_new_turn_does_not_block_old_closed_observation",
-    );
+    support::finish_recorded(evidence, result);
 }
 #[test]
 fn frozen_tls_roots_and_policies_are_isolated_between_concurrent_turns() {
@@ -1419,12 +1379,7 @@ fn frozen_tls_roots_and_policies_are_isolated_between_concurrent_turns() {
         evidence.record_captures(a.captured_requests());
         evidence.record_captures(b.captured_requests());
     }));
-    support::finish_recorded(
-        evidence,
-        result,
-        "direct_background",
-        "frozen_tls_roots_and_policies_are_isolated_between_concurrent_turns",
-    );
+    support::finish_recorded(evidence, result);
 }
 
 #[test]
@@ -1524,10 +1479,5 @@ fn global_turn_identity_rejects_a_different_session_without_dispatch() {
         assert_ne!(inv_a, inv_b);
         evidence.record_captures(server.captured_requests());
     }));
-    support::finish_recorded(
-        evidence,
-        result,
-        "direct_background",
-        "global_turn_identity_rejects_a_different_session_without_dispatch",
-    );
+    support::finish_recorded(evidence, result);
 }
