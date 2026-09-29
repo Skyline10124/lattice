@@ -6,8 +6,10 @@
 mod app;
 mod connection;
 mod input;
+mod markdown;
 mod session;
 mod view;
+mod wrapping;
 
 use std::path::PathBuf;
 
