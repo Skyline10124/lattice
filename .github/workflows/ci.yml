@@ -44,6 +44,14 @@ jobs:
         env:
           LATTICE_BIN: ${{ github.workspace }}/target/debug/lattice
           LATTICE_HARNESS_FAILURE_DIR: ${{ github.workspace }}/target/harness-failures
+      # Crash-barrier scenarios need a product binary built with the barrier
+      # feature. It overwrites target/debug/lattice, so it runs after the
+      # ordinary test step that uses the plain binary.
+      - run: cargo build -p lattice-cli --bin lattice --features test-crash-barriers
+      - run: cargo test -p lattice-system-harness --features crash-barriers --test direct_crash_barriers
+        env:
+          LATTICE_BIN: ${{ github.workspace }}/target/debug/lattice
+          LATTICE_HARNESS_FAILURE_DIR: ${{ github.workspace }}/target/harness-failures
       # Dependency / architecture boundary checks (same contracts `cargo
       # xtask ci` runs locally).
       - run: cargo xtask harness-boundary
