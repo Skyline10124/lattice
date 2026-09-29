@@ -142,11 +142,11 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
             answer.is_some() && notice.is_none_or(|n| Some(n) < answer),
             "final answer must stay on screen after the startup notice: {frame}"
         );
-        // 两个 Step 同属一个 Turn：助手标题只出现一次，另一处是状态行。
+        // 两个 Step 同属一个 Turn：助手标题线只出现一次。状态行也显示 agent 与模型名，不计入。
         assert_eq!(
-            frame.matches("tui-smoke").count(),
-            2,
-            "one assistant header per Turn plus the status line: {frame}"
+            frame.matches("── tui-smoke ─").count(),
+            1,
+            "one assistant header per Turn: {frame}"
         );
         // 首次提交在接受事务里才创建会话库；接受前不应有订阅，也就不应出现“库不可用”。
         let shown = String::from_utf8_lossy(tui.output()).into_owned();

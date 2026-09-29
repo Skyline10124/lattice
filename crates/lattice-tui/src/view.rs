@@ -232,26 +232,62 @@ fn draw_left(frame: &mut Frame, app: &App, area: Rect, content_w: u16) {
 pub(crate) fn transcript_lines(app: &App, content_w: u16) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut assistant_header = false;
-    let mut agent = app.ctx.active_agent.as_str();
+    let mut agent: Option<&str> = None;
+    let mut turn = None;
     for block in &app.blocks {
         match block {
-            Block::Step(_) | Block::UserTurn(_) => {}
-            Block::AgentName(name) => {
-                agent = name;
-                assistant_header = false;
+            Block::UserTurn(id, ordinal) => turn = Some((*id, *ordinal)),
+            Block::Step(step) => {
+                if turn.is_some_and(|(id, _)| id != step.turn_id) {
+                    turn = None;
+                }
             }
+            Block::AgentName(name) => agent = Some(name),
             Block::User(text) => {
-                separate(&mut lines);
-                lines.extend(body("user", content_w, role_style(Role::User)));
+                transcript_title(
+                    &mut lines,
+                    "USER",
+                    Role::User,
+                    turn.map(|(_, n)| n),
+                    content_w,
+                );
                 lines.extend(with_gutter(markdown::render(text, content_w)));
                 assistant_header = false;
             }
+            Block::AssistantStart {
+                turn_id,
+                agent: name,
+            } => {
+                if turn.is_some_and(|(id, _)| id == *turn_id) {
+                    agent = Some(name);
+                    ensure_assistant_header(
+                        &mut lines,
+                        &mut assistant_header,
+                        agent,
+                        turn.map(|(_, n)| n),
+                        content_w,
+                    );
+                }
+            }
+            Block::Assistant(text) if text.is_empty() => {}
             Block::Assistant(text) => {
-                ensure_assistant_header(&mut lines, &mut assistant_header, agent, content_w);
+                ensure_assistant_header(
+                    &mut lines,
+                    &mut assistant_header,
+                    agent,
+                    turn.map(|(_, n)| n),
+                    content_w,
+                );
                 lines.extend(with_gutter(markdown::render(text, content_w)));
             }
             Block::Tool { name, state, .. } => {
-                ensure_assistant_header(&mut lines, &mut assistant_header, agent, content_w);
+                ensure_assistant_header(
+                    &mut lines,
+                    &mut assistant_header,
+                    agent,
+                    turn.map(|(_, n)| n),
+                    content_w,
+                );
                 lines.extend(tool_lines(name, state, content_w));
             }
             Block::Status { kind, placement } => {
@@ -266,11 +302,21 @@ pub(crate) fn transcript_lines(app: &App, content_w: u16) -> Vec<Line<'static>> 
                             lines.extend(body(text, content_w, role_style(Role::DimMeta)));
                         }
                     }
+                    StatusKind::Summary { turn_id, .. }
+                        if turn.is_none_or(|(id, _)| id != *turn_id) =>
+                    {
+                        lines.extend(body(
+                            &status_text(kind),
+                            content_w,
+                            role_style(Role::DimMeta),
+                        ));
+                    }
                     kind => {
                         ensure_assistant_header(
                             &mut lines,
                             &mut assistant_header,
                             agent,
+                            turn.map(|(_, n)| n),
                             content_w,
                         );
                         lines.extend(status_lines(kind, content_w));
@@ -293,15 +339,35 @@ fn separate(lines: &mut Vec<Line<'static>>) {
     }
 }
 
+fn transcript_title(
+    lines: &mut Vec<Line<'static>>,
+    title: &str,
+    role: Role,
+    ordinal: Option<std::num::NonZeroUsize>,
+    content_w: u16,
+) {
+    separate(lines);
+    let right = ordinal
+        .map(|n| format!("#{n}"))
+        .into_iter()
+        .collect::<Vec<_>>();
+    lines.extend(with_gutter(vec![title_line(
+        title,
+        role,
+        &right,
+        usize::from(content_w),
+    )]));
+}
+
 fn ensure_assistant_header(
     lines: &mut Vec<Line<'static>>,
     shown: &mut bool,
-    agent: &str,
+    agent: Option<&str>,
+    ordinal: Option<std::num::NonZeroUsize>,
     content_w: u16,
 ) {
-    if !*shown {
-        separate(lines);
-        lines.extend(body(agent, content_w, role_style(Role::Assistant)));
+    if !*shown && let (Some(agent), Some(ordinal)) = (agent, ordinal) {
+        transcript_title(lines, agent, Role::Assistant, Some(ordinal), content_w);
         *shown = true;
     }
 }
@@ -505,7 +571,12 @@ fn draw_transcript(frame: &mut Frame, app: &App, area: Rect, content_w: u16) {
 
 fn joined_width<'a>(parts: impl Iterator<Item = &'a str>) -> usize {
     let parts = parts.collect::<Vec<_>>();
-    parts.iter().map(|part| display_width(part)).sum::<usize>() + parts.len().saturating_sub(1) * 3
+    parts
+        .iter()
+        .fold(0usize, |width, part| {
+            width.saturating_add(display_width(part))
+        })
+        .saturating_add(parts.len().saturating_sub(1).saturating_mul(3))
 }
 
 fn phase_and_connection(app: &App) -> String {
@@ -550,7 +621,10 @@ pub(crate) fn title_line(title: &str, role: Role, right: &[String], width: usize
     }
     let mut right = right;
     while !right.is_empty()
-        && 9 + display_width(title) + joined_width(right.iter().map(String::as_str)) > width
+        && 9usize
+            .saturating_add(display_width(title))
+            .saturating_add(joined_width(right.iter().map(String::as_str)))
+            > width
     {
         right = &right[1..];
     }
@@ -563,13 +637,13 @@ pub(crate) fn title_line(title: &str, role: Role, right: &[String], width: usize
         ),
         Span::styled(" ", dim),
     ];
-    let remaining = width.saturating_sub(4 + display_width(&title));
+    let remaining = width.saturating_sub(4usize.saturating_add(display_width(&title)));
     if right.is_empty() {
         spans.push(Span::styled("─".repeat(remaining), dim));
     } else {
         let right = right.join(" · ");
         spans.push(Span::styled(
-            "─".repeat(remaining.saturating_sub(display_width(&right) + 4)),
+            "─".repeat(remaining.saturating_sub(display_width(&right).saturating_add(4))),
             dim,
         ));
         spans.push(Span::styled(format!(" {right} ──"), dim));
@@ -709,9 +783,77 @@ mod tests {
     }
 
     #[test]
+    fn notices_and_unrelated_outcomes_do_not_start_or_reset_assistant_headers() {
+        let mut app = test_app();
+        let id = lattice_api::local::new_turn_id();
+        let other = lattice_api::local::new_turn_id();
+        app.blocks = vec![
+            Block::AgentName("agent".into()),
+            Block::UserTurn(id, std::num::NonZeroUsize::MIN),
+            Block::User("question".into()),
+            Block::Assistant(String::new()),
+            Block::Status {
+                kind: StatusKind::Notice(vec!["before".into()]),
+                placement: StatusPlacement::Transcript,
+            },
+            Block::Status {
+                kind: StatusKind::Summary {
+                    turn_id: other,
+                    summary: lattice_api::TurnSummary {
+                        outcome: lattice_api::local::PublicTurnOutcome::Completed,
+                        notice: None,
+                    },
+                },
+                placement: StatusPlacement::Transcript,
+            },
+            Block::AssistantStart {
+                turn_id: id,
+                agent: "agent".into(),
+            },
+            Block::Status {
+                kind: StatusKind::Notice(vec!["after".into()]),
+                placement: StatusPlacement::Transcript,
+            },
+            Block::Assistant("answer".into()),
+        ];
+        let lines = transcript_lines(&app, 80);
+        let text: Vec<_> = lines.iter().map(ToString::to_string).collect();
+        let title = text
+            .iter()
+            .position(|line| line.contains("── agent ─"))
+            .unwrap();
+        let summary = text
+            .iter()
+            .position(|line| line.contains("completed"))
+            .unwrap();
+        assert!(summary < title);
+        assert_eq!(
+            text.iter()
+                .filter(|line| line.contains("── agent ─"))
+                .count(),
+            1
+        );
+        assert_eq!(text[title + 1].trim(), "after");
+        assert_eq!(text[title + 2].trim(), "answer");
+        assert_eq!(
+            lines[title].spans[2].style,
+            role_style(Role::Assistant).add_modifier(ratatui::style::Modifier::BOLD)
+        );
+        for (width, height) in [(0, 0), (1, 1), (2, 2), (6, 3)] {
+            let lines = transcript_lines(&app, width);
+            assert_eq!(lines.len(), app.content_rows(width));
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| draw(frame, &app)).unwrap();
+        }
+    }
+
+    #[test]
     fn transcript_groups_one_agent_header_and_shares_row_count() {
         let mut app = test_app();
+        let id = lattice_api::local::new_turn_id();
         app.blocks.extend([
+            Block::AgentName("agent".into()),
+            Block::UserTurn(id, std::num::NonZeroUsize::MIN),
             Block::User("question".into()),
             Block::Assistant("before tool".into()),
             Block::Tool {
@@ -723,7 +865,7 @@ mod tests {
             Block::Assistant("after tool".into()),
             Block::Status {
                 kind: StatusKind::Summary {
-                    turn_id: lattice_api::local::new_turn_id(),
+                    turn_id: id,
                     summary: lattice_api::TurnSummary {
                         outcome: lattice_api::local::PublicTurnOutcome::Completed,
                         notice: None,
@@ -731,12 +873,21 @@ mod tests {
                 },
                 placement: StatusPlacement::Transcript,
             },
+            Block::UserTurn(
+                lattice_api::local::new_turn_id(),
+                std::num::NonZeroUsize::new(2).unwrap(),
+            ),
             Block::User("next".into()),
         ]);
 
         let lines = transcript_lines(&app, 61);
         let text = lines.iter().map(ToString::to_string).collect::<Vec<_>>();
-        assert_eq!(text.iter().filter(|line| line.trim() == "agent").count(), 1);
+        assert_eq!(
+            text.iter()
+                .filter(|line| line.contains("── agent ─") && line.ends_with(" #1 ──"))
+                .count(),
+            1
+        );
         assert!(text.iter().any(|line| line.contains("1204 B")));
         assert!(!text.iter().any(|line| line.contains("opaque-id")));
         assert_eq!(lines.len(), app.content_rows(61));
@@ -930,10 +1081,10 @@ mod tests {
     }
 
     #[test]
-    fn statusline_orders_fields_and_focus_hints_without_session_id() {
+    fn statusline_orders_fields_and_focus_hints() {
         let mut app = test_app();
         let line = statusline::line(&app, 40);
-        assert_eq!(line.to_string(), " agent            Alt+Enter 换行 · idle ");
+        assert_eq!(line.to_string(), " 未接受 · agent   Alt+Enter 换行 · idle ");
         app.kitty_keyboard = true;
         app.last_ctrl_c = Some(std::time::Instant::now());
         app.phase = TurnPhase::Streaming;
@@ -1161,7 +1312,7 @@ mod tests {
         assert_eq!(
             buffer_text(&terminal, 10, 6).lines().collect::<Vec<_>>(),
             [
-                "  user    ",
+                "  ── USE ─",
                 "  ┌────┬──",
                 "  │ aa │ b",
                 "  ├────┼──",

@@ -77,6 +77,7 @@ pub(crate) async fn freeze_configuration(
 
 pub(crate) fn history_blocks(history: LocalHistory) -> Vec<Block> {
     let mut blocks = Vec::new();
+    let mut ordinal = std::num::NonZeroUsize::MIN;
     for entry in history.entries {
         // Turn 的 agent 在接受时冻结，同一 Turn 的 Step 不再重复标题；路径从根开始，
         // 每个 Step 前必有本 Turn 的 UserMessage。
@@ -88,7 +89,8 @@ pub(crate) fn history_blocks(history: LocalHistory) -> Vec<Block> {
             Node::UserMessage {
                 turn_id, message, ..
             } => {
-                blocks.push(Block::UserTurn(turn_id));
+                blocks.push(Block::UserTurn(turn_id, ordinal));
+                ordinal = ordinal.saturating_add(1);
                 append_messages(&mut blocks, vec![message]);
             }
             Node::Step {

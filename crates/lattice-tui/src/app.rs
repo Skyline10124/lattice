@@ -44,10 +44,15 @@ pub(crate) enum StatusPlacement {
 pub(crate) enum Block {
     /// 无视觉内容的归属标记，用于节点正文实际到达后的替换。
     Step(StepKey),
-    UserTurn(TurnId),
+    UserTurn(TurnId, std::num::NonZeroUsize),
     /// 渲染作用域，不单独占行；历史不能被重标为当前 Agent 的发言。
     AgentName(String),
     User(String),
+    /// 接受或 Live 观察的显示标记，不伪造正文，也不拥有持久节点。
+    AssistantStart {
+        turn_id: TurnId,
+        agent: String,
+    },
     /// Accumulates `TokenDelta`. A new delta appends to the trailing
     /// `Assistant` block when one exists, otherwise pushes a new block.
     Assistant(String),
@@ -115,6 +120,8 @@ pub(crate) struct App {
     cancel_requested: bool,
     reconnect_requested: bool,
     submitted: Option<(TurnId, String)>,
+    // None 仅表示打开已有会话后尚未装入第一份路径。
+    loaded_user_count: Option<usize>,
     durable_len: usize,
     generation: u64,
     attempt: Option<lattice_api::local::AttemptSegments>,
@@ -133,6 +140,7 @@ pub(crate) struct App {
 impl App {
     pub(crate) fn new(ctx: SessionContext, kitty_keyboard: bool, session_dir: &Path) -> Self {
         Self {
+            loaded_user_count: ctx.session_id.is_none().then_some(0),
             ctx,
             blocks: Vec::new(),
             input: InputBuffer::new(),
@@ -162,6 +170,21 @@ impl App {
     }
 
     pub(crate) fn apply_turn_event(&mut self, event: TurnEvent) {
+        // 状态栏消费最近事件，不受正文是否已被 History 接管影响。
+        match &event {
+            TurnEvent::ModelStarted {
+                provider, model, ..
+            } => {
+                self.model = Some(model.clone());
+                self.provider = Some(provider.as_str().to_owned());
+            }
+            TurnEvent::ModelFinished {
+                usage: Some(usage), ..
+            } => {
+                self.context_tokens = Some(usage.total_tokens);
+            }
+            _ => {}
+        }
         // 快照可能比事件窗口领先一个提交；已装入节点的尝试不再重建临时块。
         let key = match &event {
             TurnEvent::ModelStarted { key, .. }
@@ -282,7 +305,7 @@ impl App {
         self.blocks.extend(temporary.into_iter().filter(|block| {
             match block {
                 Block::Step(key) => removing = *key == step,
-                Block::UserTurn(_) => removing = false,
+                Block::UserTurn(..) => removing = false,
                 _ => {}
             }
             !removing || matches!(block, Block::Status { .. })
@@ -452,6 +475,9 @@ impl App {
                         self.ctx.session_id = Some(turn.session_id);
                         self.ctx.active_agent = turn.agent_name.clone();
                         self.submitted = None;
+                        if turn.summary.is_none() {
+                            self.ensure_assistant_start(turn.turn_id, &turn.agent_name);
+                        }
                         if turn.summary.is_some() {
                             self.current_turn = None;
                             self.phase = TurnPhase::Idle;
@@ -519,6 +545,9 @@ impl App {
         self.connected = true;
         if state.phase == ObservationPhase::Live {
             self.current_turn = observed;
+            if let Some(turn) = &view.selected_turn {
+                self.ensure_assistant_start(turn.turn_id, &turn.agent_name);
+            }
             self.phase = if matches!(
                 self.cancel_status,
                 Some(CancelStatus::Pending | CancelStatus::Taken)
@@ -556,6 +585,17 @@ impl App {
             );
         }
         self.state = Some(state);
+    }
+
+    fn ensure_assistant_start(&mut self, turn_id: TurnId, agent: &str) {
+        if !self.blocks.iter().any(
+            |block| matches!(block, Block::AssistantStart { turn_id: id, .. } if *id == turn_id),
+        ) {
+            self.blocks.push(Block::AssistantStart {
+                turn_id,
+                agent: agent.into(),
+            });
+        }
     }
 
     fn notice_once(&mut self, message: String) {
@@ -614,6 +654,57 @@ impl App {
     }
 
     fn replace_history(&mut self, mut blocks: Vec<Block>) {
+        self.loaded_user_count = Some(
+            blocks
+                .iter()
+                .rev()
+                .find_map(|block| match block {
+                    Block::UserTurn(_, ordinal) => Some(ordinal.get()),
+                    _ => None,
+                })
+                .unwrap_or(0),
+        );
+        // 接受标记归属于 UserMessage；正文已到则由持久助手/工具接管，否则放回 USER 之后。
+        // 不把它当作状态提示，否则 History 会把它挪到下一节点之前或遗失。
+        let mut loaded_starts = std::collections::HashSet::new();
+        for marker in self
+            .blocks
+            .iter()
+            .filter(|block| matches!(block, Block::AssistantStart { .. }))
+        {
+            let Block::AssistantStart { turn_id, .. } = marker else {
+                continue;
+            };
+            let Some(start) = blocks
+                .iter()
+                .position(|block| matches!(block, Block::UserTurn(id, _) if id == turn_id))
+            else {
+                continue;
+            };
+            loaded_starts.insert(*turn_id);
+            let end = blocks
+                .iter()
+                .enumerate()
+                .skip(start.saturating_add(1))
+                .find(|(_, block)| matches!(block, Block::AgentName(_) | Block::UserTurn(..)))
+                .map_or(blocks.len(), |(index, _)| index);
+            if !blocks[start..end].iter().any(|block| {
+                matches!(block, Block::Assistant(text) if !text.is_empty())
+                    || matches!(block, Block::Tool { .. })
+            }) {
+                let after_user = blocks
+                    .iter()
+                    .enumerate()
+                    .take(end)
+                    .skip(start.saturating_add(1))
+                    .take_while(|(_, block)| matches!(block, Block::User(_)))
+                    .last()
+                    .map_or(start.saturating_add(1), |(index, _)| {
+                        index.saturating_add(1)
+                    });
+                blocks.insert(after_user, marker.clone());
+            }
+        }
         let events: std::collections::HashMap<_, _> = self
             .blocks
             .iter()
@@ -641,13 +732,21 @@ impl App {
         let starts: Vec<(Block, usize)> = blocks
             .iter()
             .enumerate()
-            .filter(|(_, b)| matches!(b, Block::Step(_) | Block::UserTurn(_)))
+            .filter(|(_, b)| matches!(b, Block::Step(_) | Block::UserTurn(..)))
             .map(|(i, b)| {
                 let scoped = i > 0 && matches!(blocks[i - 1], Block::AgentName(_));
                 (b.clone(), if scoped { i - 1 } else { i })
             })
             .collect();
-        let start_of = |b: &Block| starts.iter().find(|(m, _)| m == b).map(|(_, i)| *i);
+        let start_of = |b: &Block| {
+            starts
+                .iter()
+                .find(|(m, _)| match (m, b) {
+                    (Block::UserTurn(left, _), Block::UserTurn(right, _)) => left == right,
+                    _ => m == b,
+                })
+                .map(|(_, i)| *i)
+        };
         // 临时提示按时间顺序保留：放在它之后出现的第一个已装入节点之前，没有则留在末尾。
         // 旧持久块与已装入节点的实时块由新历史取代；未装入的实时块按原顺序接在末尾。
         let old = std::mem::take(&mut self.blocks);
@@ -660,9 +759,13 @@ impl App {
             if index == durable_len {
                 replaced = false;
             }
+            if matches!(&block, Block::AssistantStart { turn_id, .. } if loaded_starts.contains(turn_id))
+            {
+                continue;
+            }
             if matches!(block, Block::Status { .. }) {
                 pending.push(block);
-            } else if matches!(block, Block::Step(_) | Block::UserTurn(_)) {
+            } else if matches!(block, Block::Step(_) | Block::UserTurn(..)) {
                 if let Some(start) = start_of(&block) {
                     inserts.extend(pending.drain(..).map(|status| (start, status)));
                     replaced = true;
@@ -789,6 +892,7 @@ impl App {
         if self.phase != TurnPhase::Idle {
             return None;
         }
+        let ordinal = std::num::NonZeroUsize::new(self.loaded_user_count?.saturating_add(1))?;
         self.history.push(raw.trim());
         self.input.clear();
         let id = lattice_api::local::new_turn_id();
@@ -798,7 +902,8 @@ impl App {
         self.current_turn = Some(id);
         self.observed_turn = Some(id);
         self.submitted = Some((id, raw.clone()));
-        self.blocks.push(Block::UserTurn(id));
+        // UserTurn 先于 AgentName：历史装入时以 UserTurn 定位已装入节点，其前的临时提示才会放回该轮之前。
+        self.blocks.push(Block::UserTurn(id, ordinal));
         self.blocks
             .push(Block::AgentName(self.ctx.active_agent.clone()));
         self.blocks.push(Block::User(raw.clone()));
@@ -1159,6 +1264,101 @@ mod tests {
             // History is not under test here; an empty dir keeps it inert.
             Path::new("/nonexistent-tui-test-history"),
         )
+    }
+
+    #[test]
+    fn existing_session_preserves_input_until_history_is_loaded() {
+        let mut app = App::new(
+            SessionContext {
+                session_id: Some(SessionId::parse("11111111111141118111111111111111").unwrap()),
+                active_agent: "agent".into(),
+            },
+            false,
+            Path::new("/nonexistent-tui-test-history"),
+        );
+        app.input.set_text("kept prompt");
+        assert_eq!(app.apply_action(KeyAction::Submit), None);
+        assert_eq!(app.input.text(), "kept prompt");
+        app.input.set_text("/quit");
+        assert_eq!(app.apply_action(KeyAction::Submit), None);
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn startup_notice_stays_before_the_submitted_turn_after_history_loads() {
+        let mut app = test_app();
+        app.push_status(StatusKind::Notice(vec!["banner".into()]));
+        app.input.set_text("ping");
+        app.apply_action(KeyAction::Submit);
+        let id = app.current_turn.unwrap();
+        app.replace_history(vec![
+            Block::AgentName("agent".into()),
+            Block::UserTurn(id, std::num::NonZeroUsize::MIN),
+            Block::User("ping".into()),
+            Block::Step(StepKey {
+                turn_id: id,
+                ordinal: 0,
+            }),
+            Block::Assistant("answer".into()),
+        ]);
+        let position = |wanted: fn(&Block) -> bool| app.blocks.iter().position(wanted).unwrap();
+        assert!(
+            position(
+                |b| matches!(b, Block::Status { kind: StatusKind::Notice(lines), .. } if lines == &["banner".to_string()])
+            ) < position(|b| matches!(b, Block::UserTurn(..))),
+            "{:?}",
+            app.blocks
+        );
+    }
+
+    #[test]
+    fn model_events_update_statusline_even_when_step_content_is_already_loaded() {
+        // 每组是独立请求；previous 是本客户端先前请求留下的上下文用量。
+        for (previous, total, expected) in [
+            (None, None, None),
+            (None, Some(12345u64), Some(12345)),
+            (Some(12345), None, Some(12345)),
+            (Some(12345), Some(47), Some(47)),
+        ] {
+            let mut app = test_app();
+            app.model = Some("previous-model".into());
+            app.context_tokens = previous;
+            let key = attempt();
+            // 快照可先装入 Step，随后才收到同一请求的模型事件。
+            app.replace_history(vec![
+                Block::AgentName("agent".into()),
+                Block::UserTurn(key.turn_id, std::num::NonZeroUsize::MIN),
+                Block::User("prompt".into()),
+                Block::Step(StepKey {
+                    turn_id: key.turn_id,
+                    ordinal: 0,
+                }),
+                Block::Assistant("answer".into()),
+            ]);
+            app.apply_turn_event(
+                serde_json::from_value(serde_json::json!({
+                    "type":"model_started", "key":key, "provider":"anthropic", "model":"model-a"
+                }))
+                .unwrap(),
+            );
+            assert_eq!(app.model.as_deref(), Some("model-a"));
+            assert_eq!(app.provider.as_deref(), Some("anthropic"));
+            assert_eq!(app.context_tokens, previous);
+            app.apply_turn_event(serde_json::from_value(serde_json::json!({
+                "type":"model_finished", "key":key, "finish_reason":"stop",
+                "usage":total.map(|total_tokens| serde_json::json!({"prompt_tokens":total_tokens - 7, "completion_tokens":7,"total_tokens":total_tokens}))
+            })).unwrap());
+            assert_eq!(app.context_tokens, expected);
+        }
+        // 提供商显示稳定标识，不是 serde 名。
+        let mut app = test_app();
+        app.apply_turn_event(
+            serde_json::from_value(serde_json::json!({
+                "type":"model_started", "key":attempt(), "provider":"open_ai_compatible", "model":"m"
+            }))
+            .unwrap(),
+        );
+        assert_eq!(app.provider.as_deref(), Some("openai"));
     }
 
     fn assert_failed_tool(app: &App, index: usize, reason: &str) {

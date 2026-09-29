@@ -16,7 +16,9 @@ pub(super) fn line(app: &App, width: usize) -> Line<'static> {
         return Line::from(Span::styled(" ".repeat(width), dim));
     }
     let below = app.viewport.hidden_below();
+    let session = session_field(app.ctx.session_id);
     let mut left = [
+        Some(session.as_str()),
         Some(app.ctx.active_agent.as_str()),
         app.model.as_deref(),
         app.provider.as_deref(),
@@ -107,15 +109,24 @@ enum Slot {
     Right(usize),
 }
 
-/// 等宽字段的省略先后：上下文、提供商、模型、agent、翻看提示、phase。
-const TIE_ORDER: [Slot; 6] = [
+/// 等宽字段的省略先后：上下文、提供商、模型、session、agent、翻看提示、phase。
+const TIE_ORDER: [Slot; 7] = [
     Slot::Right(3),
+    Slot::Left(3),
     Slot::Left(2),
-    Slot::Left(1),
     Slot::Left(0),
+    Slot::Left(1),
     Slot::Right(0),
     Slot::Right(4),
 ];
+
+/// SessionId 只显示前 8 个字符；新会话在首个请求被接受前没有身份。
+fn session_field(id: Option<lattice_api::local::SessionId>) -> String {
+    id.map_or_else(
+        || "未接受".into(),
+        |id| id.to_string().chars().take(8).collect(),
+    )
+}
 
 fn fits(left: &[Option<&str>], right: &[Option<String>], room: usize) -> bool {
     let left_w = joined_width(left.iter().copied().flatten());
@@ -154,27 +165,29 @@ mod tests {
         app.viewport.page_up(20);
         for (width, expected) in [
             (
-                75,
-                " a · m · p ↓ 12 行 · Ctrl+C to quit · S-Enter 换行 · 上下文 12.3k · stream ",
+                84,
+                " 未接受 · a · m · p ↓ 12 行 · Ctrl+C to quit · S-Enter 换行 · 上下文 12.3k · stream ",
             ),
             (
-                60,
-                " a · m · p ↓ 12 行 · Ctrl+C to quit · 上下文 12.3k · stream ",
+                69,
+                " 未接受 · a · m · p ↓ 12 行 · Ctrl+C to quit · 上下文 12.3k · stream ",
             ),
-            (43, " a · m · p ↓ 12 行 · 上下文 12.3k · stream "),
-            (28, " a · m · p ↓ 12 行 · stream "),
+            (52, " 未接受 · a · m · p ↓ 12 行 · 上下文 12.3k · stream "),
+            (37, " 未接受 · a · m · p ↓ 12 行 · stream "),
+            (27, " 未接受 · a · m · p stream "),
             (18, " a · m · p stream "),
             (11, " a · m · p "),
         ] {
             assert_eq!(line(&app, width).to_string(), expected);
         }
-        // 先去换行键提示、再去退出提示，之后按宽度：上下文 12 > 翻看 7 > phase 6；
-        // 等宽的 agent、模型、提供商按提供商、模型、agent 的先后省略。
+        // 先去换行键提示、再去退出提示，之后按宽度：上下文 12 > 翻看 7 > session、phase 6；
+        // 等宽时 session 先于 phase，agent、模型、提供商按提供商、模型、agent 的先后省略。
         for (width, present, absent) in [
-            (74, "Ctrl+C to quit", "换行"),
-            (59, "上下文", "Ctrl+C"),
-            (42, "↓ 12 行 · stream", "上下文"),
-            (27, "stream", "↓"),
+            (83, "Ctrl+C to quit", "换行"),
+            (68, "上下文", "Ctrl+C"),
+            (51, "↓ 12 行 · stream", "上下文"),
+            (36, "stream", "↓"),
+            (26, "stream", "未接受"),
             (17, "a · m · p", "stream"),
             (10, "a · m", " · p"),
             (6, "a", "m"),
@@ -189,6 +202,16 @@ mod tests {
         }
         app.viewport.to_bottom(32, 20);
         assert!(!line(&app, 100).to_string().contains("↓"));
+    }
+
+    #[test]
+    fn session_shows_the_first_eight_characters_once_known() {
+        let mut app = super::super::tests::test_app();
+        app.ctx.active_agent = "a".into();
+        assert!(line(&app, 40).to_string().starts_with(" 未接受 · a "));
+        let id = lattice_api::local::SessionId::parse("0123456789ab4cde8f0123456789abcd").unwrap();
+        app.ctx.session_id = Some(id);
+        assert!(line(&app, 40).to_string().starts_with(" 01234567 · a "));
     }
 
     #[test]

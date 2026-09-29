@@ -46,7 +46,7 @@ impl Renderer<'_> {
     fn blocks(&mut self, end: Option<TagEnd>, width: usize) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
         let mut pending = Vec::new();
-        while let Some((event, _)) = self.events.next() {
+        while let Some((event, range)) = self.events.next() {
             if matches!(event, Event::End(tag) if Some(tag) == end) {
                 break;
             }
@@ -83,14 +83,37 @@ impl Renderer<'_> {
                 }
                 Event::Start(Tag::CodeBlock(kind)) => {
                     begin_block(&mut lines, &mut pending, width);
+                    let fenced = matches!(kind, CodeBlockKind::Fenced(_));
                     let language = match kind {
                         CodeBlockKind::Fenced(info) => {
                             info.split_whitespace().next().unwrap_or("").to_owned()
                         }
                         CodeBlockKind::Indented => String::new(),
                     };
-                    let text = plain(&self.inline(TagEnd::CodeBlock, role_style(Role::Assistant)));
-                    lines.extend(code_block(&language, &text, width));
+                    // End(CodeBlock) also occurs at EOF or a container boundary. Only an
+                    // explicit closing fence extends the block past its opening/body text.
+                    let mut text_end = self.source[range.clone()]
+                        .find('\n')
+                        .map_or(range.end, |offset| {
+                            range.start.saturating_add(offset).saturating_add(1)
+                        });
+                    let mut text = String::new();
+                    for (event, range) in self.events.by_ref() {
+                        match event {
+                            Event::Text(part) => {
+                                text.push_str(&part);
+                                text_end = range.end;
+                            }
+                            Event::End(TagEnd::CodeBlock) => break,
+                            _ => {}
+                        }
+                    }
+                    lines.extend(code_block(
+                        &language,
+                        &text,
+                        width,
+                        !fenced || range.end > text_end,
+                    ));
                 }
                 Event::Start(Tag::Table(_)) => {
                     begin_block(&mut lines, &mut pending, width);
@@ -110,7 +133,7 @@ impl Renderer<'_> {
                 Event::Rule => {
                     begin_block(&mut lines, &mut pending, width);
                     lines.push(Line::from(Span::styled(
-                        "─".repeat(width),
+                        "─".repeat(width.min(8)),
                         role_style(Role::DimMeta),
                     )));
                 }
@@ -379,24 +402,23 @@ static CODE_THEME: LazyLock<Theme> = LazyLock::new(|| Theme {
     ..Theme::default()
 });
 
-fn code_block(language: &str, text: &str, width: usize) -> Vec<Line<'static>> {
+fn code_block(language: &str, text: &str, width: usize, closed: bool) -> Vec<Line<'static>> {
     let dim = role_style(Role::DimMeta);
     let label = if language.is_empty() {
-        String::new()
+        "┌".to_owned()
     } else {
-        format!("── {language} ")
+        format!("┌ {language}")
     };
     let mut title = String::new();
-    let mut used = 0;
+    let mut used = 0usize;
     for ch in label.chars() {
         let size = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if used + size > width {
+        if used.saturating_add(size) > width {
             break;
         }
         title.push(ch);
-        used += size;
+        used = used.saturating_add(size);
     }
-    title.push_str(&"─".repeat(width.saturating_sub(used)));
     let mut lines = vec![Line::from(Span::styled(title, dim))];
     let language = language.to_ascii_lowercase();
     let mut highlighter = if language.is_empty() || language == "diff" {
@@ -431,6 +453,12 @@ fn code_block(language: &str, text: &str, width: usize) -> Vec<Line<'static>> {
                 .insert(0, Span::styled(if index == 0 { "│ " } else { "┆ " }, dim));
             lines.push(line);
         }
+    }
+    if closed {
+        lines.push(Line::from(Span::styled(
+            if width > 0 { "└" } else { "" },
+            dim,
+        )));
     }
     lines
 }
@@ -693,8 +721,9 @@ mod tests {
                 "  • b",
                 "• c",
                 "",
-                "──────",
+                "┌",
                 "│ x",
+                "└",
                 "",
                 "──────",
             ]
@@ -702,7 +731,7 @@ mod tests {
     }
 
     #[test]
-    fn quotes_prefix_every_visual_line_and_rules_fill_width() {
+    fn quotes_prefix_every_visual_line_and_rules_stay_short() {
         let lines = render("> one three two\n>\n> next", 9);
         assert_eq!(
             lines.iter().map(ToString::to_string).collect::<Vec<_>>(),
@@ -714,9 +743,12 @@ mod tests {
                 .flat_map(|line| &line.spans)
                 .all(|span| span.style.fg == role_style(Role::DimMeta).fg)
         );
-        let rule = render("---", 9);
-        assert_eq!(rule[0].to_string(), "─────────");
-        assert_eq!(rule[0].spans[0].style, role_style(Role::DimMeta));
+        for (width, expected) in [(80, "────────"), (8, "────────"), (3, "───"), (0, "")]
+        {
+            let rule = render("---", width);
+            assert_eq!(rule[0].to_string(), expected);
+            assert_eq!(rule[0].spans[0].style, role_style(Role::DimMeta));
+        }
     }
 
     #[test]
@@ -747,13 +779,13 @@ mod tests {
     }
 
     #[test]
-    fn code_titles_wrapping_indentation_and_tabs() {
+    fn code_borders_wrapping_indentation_and_tabs() {
         let lines = render("```rust extra\n\tone three two\n```", 13);
         assert_eq!(
             lines.iter().map(ToString::to_string).collect::<Vec<_>>(),
-            ["── rust ─────", "│     one", "┆     three", "┆     two"]
+            ["┌ rust", "│     one", "┆     three", "┆     two", "└"]
         );
-        assert_eq!(lines[0].width(), 13);
+        assert_eq!(lines[0].spans[0].style, role_style(Role::DimMeta));
         for line in &lines[1..] {
             assert_eq!(line.spans[0].style, role_style(Role::DimMeta));
             assert!(
@@ -762,12 +794,9 @@ mod tests {
                     .all(|span| span.style == role_style(Role::Assistant))
             );
         }
-        assert_eq!(text("```\nx\n```", 5), ["─────", "│ x"]);
-        assert_eq!(text("```rust\nx\n\n", 12), ["── rust ────", "│ x", "│ "]);
-        assert_eq!(
-            text("    plain code", 20),
-            ["────────────────────", "│ plain code"]
-        );
+        assert_eq!(text("```\nx\n```", 5), ["┌", "│ x", "└"]);
+        assert_eq!(text("```rust\nx\n\n", 12), ["┌ rust", "│ x", "│ "]);
+        assert_eq!(text("    plain code", 20), ["┌", "│ plain code", "└"]);
         assert_eq!(text("```rust\nx\n```\nafter", 12).last().unwrap(), "after");
         for language in ["", "unknown-language"] {
             let lines = render(
@@ -779,6 +808,50 @@ mod tests {
                     .iter()
                     .all(|span| span.style == role_style(Role::Assistant))
             );
+        }
+    }
+
+    #[test]
+    fn code_bottom_waits_for_an_explicit_closing_fence() {
+        for source in [
+            "```",
+            "```rust",
+            "```rust\n",
+            "```rust\nx",
+            "```rust\nx\n``",
+            "```rust\nx\n~~~",
+            "```rust\nx\n``` not a fence",
+            "```rust\nx\n    ```",
+            "````rust\nx\n```",
+            "> ```rust\n> x\n\nafter",
+            "- ```rust\n  x\n\nafter",
+        ] {
+            assert!(
+                !text(source, 40)
+                    .iter()
+                    .any(|line| line.trim_end().ends_with('└')),
+                "premature bottom: {source:?}"
+            );
+        }
+        for source in [
+            "```\n```",
+            "```rust\nx\n```",
+            "```rust\nx\n````  \n",
+            "~~~rust\nx\n~~~",
+            "```rust\r\nx\r\n```\r\n",
+            "> ```rust\n> x\n> ```",
+            "- ```rust\n  x\n  ```",
+        ] {
+            assert!(
+                text(source, 40).last().unwrap().ends_with('└'),
+                "missing bottom: {source:?}"
+            );
+        }
+        assert_eq!(text("```\n```", 20), ["┌", "└"]);
+        for width in 0..=3 {
+            let lines = render("```语言\nx\n```", width);
+            assert!(lines.first().unwrap().width() <= usize::from(width));
+            assert!(lines.last().unwrap().width() <= usize::from(width));
         }
     }
 

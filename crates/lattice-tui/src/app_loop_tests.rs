@@ -208,6 +208,7 @@ struct Frame {
     input: String,
     text: String,
     cancel: Option<CancelStatus>,
+    finished: bool,
 }
 fn frame(app: &App) -> Frame {
     Frame {
@@ -221,6 +222,10 @@ fn frame(app: &App) -> Frame {
             .collect::<Vec<_>>()
             .join("\n"),
         cancel: app.cancel_status,
+        finished: app
+            .state
+            .as_ref()
+            .is_some_and(|s| s.phase == ObservationPhase::Finished),
     }
 }
 struct Harness {
@@ -309,6 +314,329 @@ impl Remote {
 }
 
 #[tokio::test]
+async fn live_observation_waits_for_user_history_before_drawing_header() {
+    let id = lattice_api::local::new_turn_id();
+    let live = view(id, false);
+    let (history_tx, history_rx) = oneshot::channel();
+    let mut history_rx = Some(history_rx);
+    let response_history = history(&live);
+    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
+        "subscribe" => Reply::Now(snapshot(&live)),
+        "history" => Reply::Hold(history_rx.take().unwrap()),
+        _ => panic!("read only"),
+    });
+    let mut h = Harness::new(false);
+    let remote = h.remote.clone();
+    let driver = async {
+        let before = remote.wait(|f| f.phase == TurnPhase::Streaming).await;
+        assert!(!before.text.contains("── unused ─"));
+        peer.wait(|s| count(s, "history") == 1).await;
+        history_tx.send(response_history).unwrap();
+        let after = remote.wait(|f| f.text.contains("original prompt")).await;
+        assert_eq!(
+            after.text.matches("── unused ─").count(),
+            1,
+            "{}",
+            after.text
+        );
+        assert_eq!(after.text.matches(" #1 ──").count(), 2);
+        assert!(!after.text.contains("live body"));
+        remote.line("/quit");
+    };
+    let (exit, ()) = tokio::join!(
+        h.run(
+            &peer.client,
+            Some(peer.client.observe(Some(sid()), Some(id)))
+        ),
+        driver
+    );
+    exit.result.unwrap();
+}
+
+#[test]
+fn unaccepted_submissions_never_start_an_assistant_segment() {
+    use lattice_api::local::{LocalError, LocalErrorKind, NotSubmittedStage};
+    for kind in [
+        Some(LocalErrorKind::Busy),
+        Some(LocalErrorKind::BadRequest),
+        None,
+    ] {
+        let mut h = Harness::new(true);
+        h.app.input.set_text("prompt");
+        h.app.apply_action(KeyAction::Submit).unwrap();
+        let turn_id = h.app.current_turn.unwrap();
+        let update = match kind {
+            Some(kind) => LocalUpdate::Submission {
+                turn_id,
+                result: Err(LocalError {
+                    kind,
+                    message: "not accepted".into(),
+                    recovery: None,
+                    store: None,
+                }),
+            },
+            None => LocalUpdate::NotSubmitted {
+                turn_id,
+                stage: NotSubmittedStage::FreezingConfiguration,
+            },
+        };
+        h.app.apply_update(update);
+        assert_eq!(h.app.input.text(), "prompt");
+        assert!(!frame(&h.app).text.contains("── unused ─"));
+        assert!(
+            !h.app
+                .blocks
+                .iter()
+                .any(|block| matches!(block, Block::AssistantStart { .. }))
+        );
+    }
+}
+
+#[test]
+fn off_path_summary_is_independent_and_history_assigns_observed_ordinals() {
+    let observed = lattice_api::local::new_turn_id();
+    let other = lattice_api::local::new_turn_id();
+    let mut h = Harness::new(false);
+    let closed = view(observed, true);
+    h.app.apply_state(LocalState {
+        view: Box::new(closed.clone()),
+        phase: ObservationPhase::Finished,
+        error: None,
+    });
+    assert!(!frame(&h.app).text.contains("── unused ─"));
+    let other_history = serde_json::from_value(
+        json!({"anchor":view(other,false).history,"entries":history_entries(&view(other,false))}),
+    )
+    .unwrap();
+    h.app
+        .replace_history(crate::session::history_blocks(other_history));
+    let lines = crate::view::transcript_lines(&h.app, 200);
+    assert!(
+        !frame(&h.app).text.contains("── unused ─"),
+        "off-path outcome must not start another Turn's assistant"
+    );
+    let summary = lines
+        .iter()
+        .find(|line| line.to_string().contains("completed"))
+        .unwrap();
+    assert!(
+        summary
+            .spans
+            .iter()
+            .skip(1)
+            .all(|span| span.style == crate::view::role_style(crate::view::Role::DimMeta))
+    );
+    let loaded =
+        serde_json::from_value(json!({"anchor":closed.history,"entries":history_entries(&closed)}))
+            .unwrap();
+    h.app
+        .replace_history(crate::session::history_blocks(loaded));
+    assert_eq!(frame(&h.app).text.matches("── unused ─").count(), 1);
+}
+
+#[test]
+fn history_and_local_submission_use_user_positions_not_node_numbers() {
+    let first = lattice_api::local::new_turn_id();
+    let second = lattice_api::local::new_turn_id();
+    let mut entries = history_entries(&view(first, true))
+        .as_array()
+        .unwrap()
+        .clone();
+    entries.push(json!({"node":7,"agent_name":"second-agent","content":{"kind":"user_message","parent":2,"turn_id":second,"message":{"role":"user","parts":[{"semantic":{"text":{"text":"second prompt"}}}]}}}));
+    let history =
+        serde_json::from_value(json!({"anchor":{"session_id":sid(),"head":7},"entries":entries}))
+            .unwrap();
+    let blocks = crate::session::history_blocks(history);
+    let ordinals: Vec<_> = blocks
+        .iter()
+        .filter_map(|block| match block {
+            Block::UserTurn(id, ordinal) => Some((*id, ordinal.get())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ordinals, [(first, 1), (second, 2)]);
+    let mut h = Harness::new(false);
+    h.app.replace_history(blocks);
+    assert_eq!(
+        (
+            h.app.model.as_ref(),
+            h.app.provider.as_ref(),
+            h.app.context_tokens
+        ),
+        (None, None, None)
+    );
+    h.app.input.set_text("third prompt");
+    assert_eq!(
+        h.app.apply_action(KeyAction::Submit).as_deref(),
+        Some("third prompt")
+    );
+    let text = frame(&h.app).text;
+    let user_headers: Vec<_> = text
+        .lines()
+        .filter(|line| line.contains("── USER ─"))
+        .collect();
+    assert_eq!(user_headers.len(), 3, "{text}");
+    for (line, suffix) in user_headers.iter().zip([" #1 ──", " #2 ──", " #3 ──"]) {
+        assert!(line.ends_with(suffix), "{line}");
+    }
+    assert!(
+        text.lines()
+            .any(|line| line.contains("── unused ─") && line.ends_with(" #1 ──"))
+    );
+    assert!(!text.contains("── second-agent ─"), "no reply yet");
+}
+
+#[tokio::test]
+async fn accepted_and_existing_start_one_assistant_header_before_body_and_history() {
+    for acceptance in ["accepted", "existing"] {
+        let (submit_tx, submit_rx) = oneshot::channel();
+        let mut submit_rx = Some(submit_rx);
+        let (stream_tx, stream_rx) = unbounded();
+        let mut stream_rx = Some(stream_rx);
+        let (history_tx, history_rx) = oneshot::channel();
+        let mut history_rx = Some(history_rx);
+        let mut subscriptions = 0;
+        let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
+            "submit" => Reply::Hold(submit_rx.take().unwrap()),
+            "subscribe" => {
+                subscriptions += 1;
+                if subscriptions == 1 {
+                    Reply::Never
+                } else {
+                    Reply::Stream(stream_rx.take().unwrap())
+                }
+            }
+            "history" => history_rx.take().map_or(Reply::Never, Reply::Hold),
+            _ => Reply::Never,
+        });
+        let mut h = Harness::new(true);
+        let remote = h.remote.clone();
+        let driver = async {
+            remote.line("original prompt");
+            let id = submitted(&peer.wait(|s| count(s, "submit") == 1).await);
+            let before = remote.wait(|f| f.text.contains("original prompt")).await;
+            assert!(
+                before
+                    .text
+                    .lines()
+                    .any(|l| l.contains("── USER ─") && l.ends_with(" #1 ──"))
+            );
+            assert!(!before.text.contains("── accepted-agent ─"));
+            let mut live = view(id, false);
+            live.selected_turn.as_mut().unwrap().agent_name = "accepted-agent".into();
+            peer.wait(|s| count(s, "subscribe") == 1).await;
+            submit_tx.send(response("acceptance", json!({"acceptance":acceptance,"turn":lattice_api::local::TurnView::from(live.selected_turn.as_ref().unwrap())}))).unwrap();
+            let accepted = remote
+                .wait(|f| {
+                    f.text.contains(if acceptance == "accepted" {
+                        "已确认接受"
+                    } else {
+                        "找回既有请求"
+                    })
+                })
+                .await;
+            assert_eq!(
+                accepted.text.matches("── accepted-agent ─").count(),
+                1,
+                "{}",
+                accepted.text
+            );
+            assert!(!accepted.text.contains("live body"));
+            stream_tx.unbounded_send(snapshot(&live)).unwrap();
+            peer.wait(|s| count(s, "history") == 1).await;
+            let mut loaded = history(&live);
+            loaded["value"]["fragments"][0]["agent_name"] = json!("accepted-agent");
+            history_tx.send(loaded).unwrap();
+            // A token after the loaded history also must not create a second header.
+            stream_tx
+                .unbounded_send(event(
+                    1,
+                    TurnEvent::TokenDelta {
+                        key: key(id, 0, 1),
+                        content: "live body".into(),
+                    },
+                ))
+                .unwrap();
+            let frame = remote.wait(|f| f.text.contains("live body")).await;
+            assert_eq!(
+                frame.text.matches("── accepted-agent ─").count(),
+                1,
+                "{}",
+                frame.text
+            );
+            let mut done = view(id, true);
+            done.selected_turn.as_mut().unwrap().agent_name = "accepted-agent".into();
+            done.cursor.sequence = 1;
+            stream_tx.unbounded_send(snapshot(&done)).unwrap();
+            let mut loaded = finished(&done);
+            for entry in loaded["value"]["history"]["entries"]
+                .as_array_mut()
+                .unwrap()
+            {
+                entry["agent_name"] = json!("accepted-agent");
+            }
+            stream_tx.unbounded_send(loaded).unwrap();
+            let final_frame = remote.wait(|f| f.finished).await;
+            assert_eq!(
+                final_frame.text.matches("── accepted-agent ─").count(),
+                1,
+                "{}",
+                final_frame.text
+            );
+            remote.line("/quit");
+        };
+        let (exit, ()) = tokio::join!(h.run(&peer.client, None), driver);
+        exit.result.unwrap();
+        assert_eq!(frame(&h.app).text.matches("── accepted-agent ─").count(), 1);
+        assert!(
+            !h.app
+                .blocks
+                .iter()
+                .any(|block| matches!(block, Block::AssistantStart { .. })),
+            "loaded Step owns the assistant segment"
+        );
+    }
+}
+
+#[tokio::test]
+async fn existing_session_waits_for_first_history_but_builtin_commands_still_work() {
+    let id = lattice_api::local::new_turn_id();
+    let closed = view(id, true);
+    let (history_tx, history_rx) = oneshot::channel();
+    let mut history_rx = Some(history_rx);
+    let response_history = history(&closed);
+    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
+        "subscribe" => Reply::Now(snapshot(&closed)),
+        "history" => Reply::Hold(history_rx.take().unwrap()),
+        _ => Reply::Never,
+    });
+    let mut h = Harness::new(false);
+    let remote = h.remote.clone();
+    let driver = async {
+        peer.wait(|s| count(s, "history") == 1).await;
+        remote.line("kept prompt");
+        // /help is a barrier after Enter: no sleep-based absence assertion.
+        remote.press(KeyCode::Esc, KeyModifiers::NONE);
+        remote.line("/help");
+        remote.wait(|f| f.text.contains("/reconnect")).await;
+        assert_eq!(count(&peer.seen.borrow(), "submit"), 0);
+        history_tx.send(response_history).unwrap();
+        remote.wait(|f| f.text.contains("live body")).await;
+        remote.line("after history");
+        peer.wait(|s| count(s, "submit") == 1).await;
+        remote.line("/quit");
+    };
+    let (exit, ()) = tokio::join!(
+        h.run(
+            &peer.client,
+            Some(peer.client.observe(Some(sid()), Some(id)))
+        ),
+        driver
+    );
+    exit.result.unwrap();
+}
+
+#[tokio::test]
 async fn first_submission_obtains_session_only_after_acceptance_and_quit_does_not_cancel() {
     let (tx, rx) = oneshot::channel();
     let mut rx = Some(rx);
@@ -369,6 +697,7 @@ async fn cancel_receipt_orders_and_late_probe_keep_original_intent() {
             _ => panic!("no configuration reload"),
         });
         let mut h = Harness::new(false);
+        h.app.replace_history(Vec::new()); // 已装入的空路径；本测试从提交窗口开始。
         let remote = h.remote.clone();
         let driver = async {
             remote.line("hi");
@@ -442,6 +771,7 @@ async fn exit_before_receipt_settles_cancel_and_configuration_abandonment() {
             _ => Reply::Never,
         });
         let mut h = Harness::new(false);
+        h.app.replace_history(Vec::new()); // 已装入的空路径；本测试从提交窗口开始。
         let remote = h.remote.clone();
         let driver = async {
             remote.line("hi");
@@ -513,6 +843,7 @@ async fn late_transport_error_keeps_observation_after_submission_grace() {
         _ => panic!("unexpected request"),
     });
     let mut h = Harness::new(false);
+    h.app.replace_history(Vec::new()); // 已装入的空路径；本测试从提交窗口开始。
     let remote = h.remote.clone();
     let driver = async {
         remote.line("hi");
@@ -783,6 +1114,7 @@ async fn busy_submission_preserves_draft_and_can_cancel_displayed_active_turn() 
         _ => panic!("no config loading"),
     });
     let mut h = Harness::new(false);
+    h.app.replace_history(Vec::new()); // 已装入的空路径；本测试从提交窗口开始。
     let remote = h.remote.clone();
     let driver = async {
         remote.line("hi");
@@ -821,6 +1153,7 @@ async fn existing_submission_keeps_explicit_agent() {
         _ => Reply::Never,
     });
     let mut h = Harness::new(false);
+    h.app.replace_history(Vec::new()); // 已装入的空路径；本测试从提交窗口开始。
     h.options.agent = "override-agent".into();
     let remote = h.remote.clone();
     let driver = async {
