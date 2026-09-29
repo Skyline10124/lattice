@@ -335,11 +335,6 @@ impl WorkspaceHistory {
         }
     }
 
-    /// Whether mutations are recorded.
-    pub fn is_enabled(&self) -> bool {
-        self.store.is_some()
-    }
-
     /// Path of the private store, when enabled.
     pub fn repo_path(&self) -> Option<&Path> {
         self.store.as_ref().map(|store| store.git_dir())
@@ -980,7 +975,6 @@ mod tests {
     #[test]
     fn disabled_history_records_nothing() {
         let history = WorkspaceHistory::disabled();
-        assert!(!history.is_enabled());
         assert_eq!(history.current().unwrap(), None);
         assert_eq!(history.record(&create("a.txt", "x")).unwrap(), None);
     }

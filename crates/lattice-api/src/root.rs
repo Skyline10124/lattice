@@ -59,11 +59,6 @@ impl LocalWorkspaceRoot {
     pub fn store_key(&self) -> ProjectStoreKey {
         self.store_key
     }
-
-    /// The storage address in its lowercase-hex display form.
-    pub fn store_key_hex(&self) -> String {
-        self.store_key.to_string()
-    }
 }
 
 /// Resolve the current Local Workspace root (see [`LocalWorkspaceRoot`]).
@@ -83,7 +78,6 @@ mod tests {
             root.canonical_path(),
             dir.path().canonicalize().unwrap().as_path()
         );
-        assert_eq!(root.store_key_hex().len(), 64);
     }
 
     #[test]

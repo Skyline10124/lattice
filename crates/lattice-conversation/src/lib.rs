@@ -36,7 +36,7 @@ pub use lancet_protocol::{
     InvocationId, ModelMessageAddress, SessionId, ToolCallAddress, TurnId, arguments_digest,
 };
 
-pub use attempt::{AttemptInterruption, AttemptOutcome, AttemptRejection, ModelAttemptRecord};
+pub use attempt::{AttemptInterruption, AttemptRejection};
 pub use digest::{replay_state_digest, semantic_digest};
 pub use history::ConversationItem;
 pub use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability};

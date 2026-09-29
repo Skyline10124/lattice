@@ -28,7 +28,7 @@ pub mod identity;
 pub mod jsonrpc;
 
 // Public re-exports of common types
-pub use address::{ModelAttemptKey, ModelMessageAddress, PlanKey, ToolCallAddress};
+pub use address::{ModelAttemptKey, ModelMessageAddress, ToolCallAddress};
 pub use binding::{BindingIdentity, InvocationBinding, arguments_digest};
 pub use canonical::canonical_json;
 pub use cell::{

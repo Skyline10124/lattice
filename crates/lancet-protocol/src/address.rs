@@ -8,9 +8,6 @@
 //! exists, and they are the address vocabulary shared by conversation binding
 //! and the Session store's invocation slots.
 //!
-//! `PlanKey` has no random `PlanId` and no second aggregate batch digest;
-//! exact ordered bindings are the idempotency input.
-//!
 //! This crate is pure data: no I/O, no runtime, no tokio.
 
 use schemars::JsonSchema;
@@ -59,22 +56,6 @@ pub struct ModelAttemptKey {
     pub attempt_ordinal: u32,
 }
 
-/// Idempotency key of one binding plan: the exact ordered bindings of one
-/// model step of one Turn of one Session. There is no random `PlanId`
-/// (ADR 0005 §1); the full identity is session + Turn + model step, so two
-/// Sessions that happen to share a TurnId have distinct plan keys.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
-)]
-pub struct PlanKey {
-    /// Session that owns the plan. Must equal every binding's session.
-    pub session_id: SessionId,
-    /// Accepted user Turn the plan belongs to.
-    pub turn_id: TurnId,
-    /// Zero-based ordinal of the model step inside the Turn.
-    pub model_step_ordinal: u32,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,44 +97,17 @@ mod tests {
     }
 
     #[test]
-    fn model_attempt_key_and_plan_key_roundtrip() {
-        let session_id = SessionId::parse("3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c").expect("session id");
-        let turn_id = TurnId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").expect("turn id");
+    fn model_attempt_key_roundtrip() {
         let attempt = ModelAttemptKey {
-            turn_id,
+            turn_id: TurnId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").expect("turn id"),
             model_step_ordinal: 0,
             attempt_ordinal: 3,
         };
-        let plan = PlanKey {
-            session_id,
-            turn_id,
-            model_step_ordinal: 0,
-        };
-        for value in [
-            serde_json::to_value(attempt).expect("attempt value"),
-            serde_json::to_value(plan).expect("plan value"),
-        ] {
-            assert!(value.get("turn_id").is_some());
-        }
+        let value = serde_json::to_value(attempt).expect("attempt value");
+        assert!(value.get("turn_id").is_some());
         let attempt_back: ModelAttemptKey =
-            serde_json::from_value(serde_json::to_value(attempt).expect("attempt value"))
-                .expect("attempt deserialize");
+            serde_json::from_value(value).expect("attempt deserialize");
         assert_eq!(attempt, attempt_back);
-        let plan_value = serde_json::to_value(plan).expect("plan value");
-        assert!(plan_value.get("session_id").is_some());
-        let plan_back: PlanKey = serde_json::from_value(plan_value).expect("plan deserialize");
-        assert_eq!(plan, plan_back);
-    }
-
-    #[test]
-    fn plan_key_rejects_the_pre_session_shape() {
-        // 完整身份是 session+turn+step：缺少 session_id 的旧形状在
-        // 反序列化边界直接拒绝，不推导、不默认。
-        let legacy = serde_json::json!({
-            "turn_id": "3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c",
-            "model_step_ordinal": 0,
-        });
-        assert!(serde_json::from_value::<PlanKey>(legacy).is_err());
     }
 
     #[test]
