@@ -610,7 +610,8 @@ async fn idle_deadline_survives_repeated_poll_rebuilds() {
 
 #[tokio::test]
 async fn switching_targets_keeps_old_receipts_and_diagnostics_out_of_new_state() {
-    for gesture in [0, 1, 2] {
+    // Esc 只清空输入，取消与选择活动目标由首次 Ctrl+C 或 /reconnect 触发。
+    for gesture in [1, 2] {
         let old = lattice_api::local::new_turn_id();
         let active = lattice_api::local::new_turn_id();
         let (old_tx, old_rx) = unbounded();
@@ -643,15 +644,18 @@ async fn switching_targets_keeps_old_receipts_and_diagnostics_out_of_new_state()
             peer.wait(|s| count(s, "subscribe") == 1).await;
             old_tx.unbounded_send(snapshot(&view(old, false))).unwrap();
             remote.wait(|f| f.current == Some(old)).await;
-            remote.press(KeyCode::Esc, KeyModifiers::NONE);
+            remote.ctrl('c');
             peer.wait(|s| count(s, "cancel") == 1).await;
             let mut closed = view(old, true);
             closed.session.active_turn = Some(active);
             old_tx.unbounded_send(snapshot(&closed)).unwrap();
             remote.wait(|f| f.current == Some(active)).await;
             match gesture {
-                0 => remote.press(KeyCode::Esc, KeyModifiers::NONE),
-                1 => remote.ctrl('c'),
+                1 => {
+                    // 第二次是对 B 的新取消，不是两秒窗口内的退出。
+                    tokio::time::sleep(CTRL_C_WINDOW + Duration::from_millis(50)).await;
+                    remote.ctrl('c');
+                }
                 _ => remote.line("/reconnect"),
             };
             remote
@@ -733,7 +737,7 @@ async fn detached_cancel_keeps_original_target_diagnostic() {
     let initial = peer.client.observe(Some(sid()), Some(id));
     let driver = async {
         remote.wait(|f| f.current == Some(id)).await;
-        remote.press(KeyCode::Esc, KeyModifiers::NONE);
+        remote.ctrl('c');
         peer.wait(|s| count(s, "cancel") == 1).await;
         remote.ctrl('d');
     };
@@ -793,7 +797,7 @@ async fn busy_submission_preserves_draft_and_can_cancel_displayed_active_turn() 
         remote.press(KeyCode::Esc, KeyModifiers::NONE);
         remote.line("/reconnect");
         remote.wait(|f| f.current == Some(active)).await;
-        remote.press(KeyCode::Esc, KeyModifiers::NONE);
+        remote.ctrl('c');
         let f = remote
             .wait(|f| f.cancel == Some(CancelStatus::Taken) && f.text.contains("历史交接：请求"))
             .await;

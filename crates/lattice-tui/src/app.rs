@@ -8,7 +8,7 @@ use crate::TuiOptions;
 use crate::connection::{cancel_message, detach_lines, not_submitted_notice, submission_notice};
 use crate::input::{CTRL_C_WINDOW, History, InputBuffer, KeyAction, resolve_key};
 use crate::session::SessionContext;
-use crate::view::{Dock, Sidebar, Viewport, frame_layout, transcript_lines};
+use crate::view::{Dock, DockIntent, Viewport, frame_layout, transcript_lines};
 use crossterm::event::{
     DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyEvent,
     KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
@@ -109,6 +109,9 @@ pub(crate) struct App {
     pub(crate) current_turn: Option<TurnId>,
     observed_turn: Option<TurnId>,
     pub(crate) connected: bool,
+    pub(crate) model: Option<String>,
+    pub(crate) provider: Option<String>,
+    pub(crate) context_tokens: Option<u64>,
     cancel_requested: bool,
     reconnect_requested: bool,
     submitted: Option<(TurnId, String)>,
@@ -139,6 +142,9 @@ impl App {
             current_turn: None,
             observed_turn: None,
             connected: true,
+            model: None,
+            provider: None,
+            context_tokens: None,
             cancel_requested: false,
             reconnect_requested: false,
             submitted: None,
@@ -310,71 +316,58 @@ impl App {
         }
     }
 
-    /// Pure: fold one resolved key action. Returns `true` when a turn should be
-    /// submitted with the returned prompt.
-    #[rustfmt::skip]
+    /// 保留键先执行；其余动作交给 Dock 栈顶解释，模块不接触 LocalTurn。
     pub(crate) fn apply_action(&mut self, action: KeyAction) -> Option<String> {
-        if self.dock_status().is_some() {
-            match action {
-                // 无修饰 Space：释放当前 WARN / ERROR 回 transcript，
-                // Space 被消费，不进入 InputBuffer。
-                KeyAction::Insert(' ') => { self.release_dock_status(); return None; }
-                // Dock 显示状态时，输入编辑与提交不得改动不可见的 InputBuffer。
-                KeyAction::Insert(_)
-                | KeyAction::Paste(_)
-                | KeyAction::Newline
-                | KeyAction::Submit
-                | KeyAction::Backspace
-                | KeyAction::Delete
-                | KeyAction::Left
-                | KeyAction::Right
-                | KeyAction::Home
-                | KeyAction::End
-                | KeyAction::Up
-                | KeyAction::Down => return None,
-                // PageUp / PageDown、Ctrl+C、Ctrl+D 等全局动作沿用现有语义。
-                _ => {}
-            }
-        }
         match action {
-            KeyAction::Insert(c) => self.input.insert_char(c),
-            KeyAction::Paste(text) => self.input.insert_paste(&text),
-            KeyAction::Newline => self.input.newline(),
-            KeyAction::Submit => return self.submit(),
-            KeyAction::Backspace => self.input.backspace(),
-            KeyAction::Delete => self.input.delete(),
-            KeyAction::Left => self.input.move_left(),
-            KeyAction::Right => self.input.move_right(),
-            KeyAction::Home => self.input.home(),
-            KeyAction::End => self.input.end(),
-            KeyAction::Up => {
-                if !self.input.move_up()
-                    && let Some(entry) = self.history.prev()
-                {
-                    self.input.set_text(entry);
-                }
-            }
-            KeyAction::Down => {
-                if !self.input.move_down()
-                    && let Some(entry) = self.history.next()
-                {
-                    self.input.set_text(entry);
-                }
-            }
             KeyAction::ScrollPageUp => self.viewport.page_up(self.transcript_height()),
-            KeyAction::ScrollPageDown => {
+            KeyAction::ScrollPageDown | KeyAction::ScrollToBottom => {
                 let layout = frame_layout(self.term_width, self.term_height);
                 let rows = self.content_rows(layout.content_w);
-                self.viewport.page_down(rows, self.transcript_height());
-            }
-            KeyAction::ScrollToBottom => {
-                let layout = frame_layout(self.term_width, self.term_height);
-                let rows = self.content_rows(layout.content_w);
-                self.viewport.to_bottom(rows, self.transcript_height());
+                let height = self.transcript_height();
+                if matches!(action, KeyAction::ScrollToBottom) {
+                    self.viewport.to_bottom(rows, height);
+                } else {
+                    self.viewport.page_down(rows, height);
+                }
             }
             KeyAction::CancelOrClear => self.cancel_or_clear(),
             KeyAction::Quit => self.should_quit = true,
-            KeyAction::Ignored => {}
+            action => match Dock::new(self).route(action) {
+                DockIntent::Submit => return self.submit(),
+                DockIntent::ReleaseStatus => self.release_dock_status(),
+                DockIntent::None => {}
+                DockIntent::Edit(action) => match action {
+                    KeyAction::Insert(c) => self.input.insert_char(c),
+                    KeyAction::Paste(text) => self.input.insert_paste(&text),
+                    KeyAction::Newline => self.input.newline(),
+                    KeyAction::Clear => self.input.clear(),
+                    KeyAction::Backspace => self.input.backspace(),
+                    KeyAction::Delete => self.input.delete(),
+                    KeyAction::Left => self.input.move_left(),
+                    KeyAction::Right => self.input.move_right(),
+                    KeyAction::Home => self.input.home(),
+                    KeyAction::End => self.input.end(),
+                    KeyAction::Up | KeyAction::Down => {
+                        let width = frame_layout(self.term_width, self.term_height).content_w;
+                        crate::view::move_input_vertical(
+                            &mut self.input,
+                            width,
+                            matches!(action, KeyAction::Down),
+                        );
+                    }
+                    KeyAction::HistoryPrev | KeyAction::HistoryNext => {
+                        let entry = if matches!(action, KeyAction::HistoryPrev) {
+                            self.history.prev()
+                        } else {
+                            self.history.next()
+                        };
+                        if let Some(entry) = entry {
+                            self.input.set_text(entry);
+                        }
+                    }
+                    _ => {}
+                },
+            },
         }
         None
     }
@@ -821,7 +814,7 @@ impl App {
         if self.current_turn.is_some() {
             self.cancel_requested = true;
             self.phase = TurnPhase::Cancelling;
-        } else {
+        } else if self.dock_status().is_none() {
             self.input.clear();
         }
     }
@@ -842,17 +835,12 @@ impl App {
         }
     }
 
-    /// 与绘制路径使用同一内容宽度和垂直开销。
-    /// Dock::height() 是 Dock 占用的唯一来源；bottomline 只在侧栏隐藏时存在。
-    fn transcript_height(&self) -> usize {
+    /// 与绘制路径使用同一内容宽度及 Dock 高度，statusline 始终占一行。
+    pub(crate) fn transcript_height(&self) -> usize {
         let layout = frame_layout(self.term_width, self.term_height);
-        let bottom_h = match layout.sidebar {
-            Sidebar::Visible => 0,
-            Sidebar::Hidden => 1,
-        };
-        let dock = Dock::new(self);
         self.term_height
-            .saturating_sub(dock.height(layout.content_w) + bottom_h) as usize
+            .saturating_sub(1)
+            .saturating_sub(Dock::new(self).height(layout.content_w)) as usize
     }
 }
 
@@ -1094,13 +1082,15 @@ fn begin_turn(
 
 #[rustfmt::skip]
 fn help_lines(kitty: bool) -> Vec<String> {
-    let nl = if kitty { "Shift+Enter  newline" } else { "Alt+Enter  newline" };
+    let nl = if kitty { "Shift+Enter  换行" } else { "Alt+Enter  换行" };
     vec![
         "/help  this message".into(),
         "/reconnect  只重连观察，不恢复或重新提交".into(),
         "/clear  clear transcript".into(),
         "/quit  exit (also Ctrl+D on empty input)".into(),
-        "Ctrl+C  cancel turn; twice within 2s to quit".into(),
+        "Esc  清空输入".into(),
+        "Ctrl+C  取消运行中 Turn；空闲清空输入；两秒内再按退出".into(),
+        "Ctrl+↑/↓  输入历史".into(),
         "Enter  submit".into(),
         nl.into(),
     ]
@@ -1156,7 +1146,6 @@ mod connection_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use lattice_api::TurnEvent;
     use std::time::Duration;
 
@@ -1283,17 +1272,31 @@ mod tests {
     }
 
     #[test]
-    fn esc_targets_the_current_turn_without_claiming_durable_cancellation() {
+    fn ctrl_c_targets_current_turn_but_esc_only_clears_input() {
         let mut app = test_app();
         let id = lattice_api::local::new_turn_id();
         app.current_turn = Some(id);
         app.phase = TurnPhase::Streaming;
-        app.apply_action(KeyAction::CancelOrClear);
+        app.input.set_text("draft");
+        handle_input_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        );
+        assert!(app.input.is_empty());
+        assert!(!app.cancel_requested);
+        assert_eq!(app.phase, TurnPhase::Streaming);
+        handle_input_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        );
         assert!(app.cancel_requested);
         assert_eq!(app.current_turn, Some(id));
         assert_eq!(app.phase, TurnPhase::Cancelling);
-        app.apply_action(KeyAction::Quit);
-        assert!(app.cancel_requested);
+        handle_input_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        );
+        assert!(app.should_quit && app.cancel_requested);
         assert!(!app.blocks.iter().any(|block| matches!(
             block,
             Block::Status {
@@ -1304,13 +1307,65 @@ mod tests {
     }
 
     #[test]
+    fn input_arrows_follow_visual_rows_and_control_arrows_browse_history() {
+        let mut app = test_app();
+        app.term_width = 7; // content_w = 5
+        app.history.push("first");
+        app.history.push("second");
+        app.input.set_text("abc中de\nx\n12中z");
+        app.input.cursor = (2, 2); // display column 2, before 中
+        let press = |app: &mut App, code, mods| {
+            handle_input_event(app, Event::Key(KeyEvent::new(code, mods)));
+        };
+        press(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(app.input.cursor, (1, 1), "clip to short line end");
+        press(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(
+            app.input.cursor,
+            (0, 5),
+            "previous soft row, display column 1"
+        );
+        press(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(app.input.cursor, (0, 1));
+        press(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(
+            app.input.text(),
+            "abc中de\nx\n12中z",
+            "first visual row does not browse history"
+        );
+        app.input.cursor = (0, 3);
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(app.input.cursor, (0, 6), "clip to soft row end");
+        app.input.set_text("abcd\n中z");
+        app.input.cursor = (0, 1);
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(
+            app.input.cursor,
+            (1, 0),
+            "never land inside a wide character"
+        );
+        app.input.end();
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(app.input.cursor, (1, 2), "last row stays put");
+        press(&mut app, KeyCode::Up, KeyModifiers::CONTROL);
+        assert_eq!(app.input.text(), "second");
+        press(&mut app, KeyCode::Up, KeyModifiers::CONTROL);
+        assert_eq!(app.input.text(), "first");
+        press(&mut app, KeyCode::Down, KeyModifiers::CONTROL);
+        assert_eq!(app.input.text(), "second");
+        press(&mut app, KeyCode::Down, KeyModifiers::CONTROL);
+        assert!(app.input.is_empty());
+    }
+
+    #[test]
     fn paste_grows_input_without_submitting() {
         let mut app = test_app();
         let submitted = app.apply_action(KeyAction::Paste("a\nb\nc".into()));
         assert!(submitted.is_none());
         assert_eq!(app.input.text(), "a\nb\nc");
-        // 3 行内容 + rail：Dock::height 是视口高度的唯一来源。
-        assert_eq!(Dock::new(&app).height(frame_layout(80, 24).content_w), 4);
+        // 3 行内容 + 空行 + 标题：Dock::height 是视口高度的唯一来源。
+        assert_eq!(Dock::new(&app).height(frame_layout(80, 24).content_w), 5);
+        assert_eq!(app.transcript_height(), 18);
         assert_eq!(app.phase, TurnPhase::Idle);
     }
 
@@ -1325,11 +1380,34 @@ mod tests {
         assert!(app.should_quit);
 
         let mut app = test_app();
+        app.input.set_text("clear on first Ctrl+C");
         ctrl_c_action(&mut app);
         app.last_ctrl_c = Some(Instant::now() - Duration::from_secs(3));
         assert!(!matches!(ctrl_c_action(&mut app), KeyAction::Quit));
         app.apply_action(KeyAction::CancelOrClear);
+        assert!(app.input.is_empty());
         assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn input_submit_keeps_running_draft_and_help_describes_new_keys() {
+        let mut app = test_app();
+        let enter = Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(handle_input_event(&mut app, enter.clone()).is_none());
+        app.input.set_text("submit");
+        assert_eq!(
+            handle_input_event(&mut app, enter.clone()),
+            Some("submit".into())
+        );
+        app.input.set_text("next");
+        assert!(handle_input_event(&mut app, enter.clone()).is_none());
+        assert_eq!(app.input.text(), "next");
+        app.input.set_text("/help");
+        assert!(handle_input_event(&mut app, enter).is_none());
+        let text = transcript_text(&app, 120);
+        assert!(text.contains("Esc  清空输入"));
+        assert!(text.contains("Ctrl+C  取消"));
+        assert!(text.contains("Ctrl+↑/↓  输入历史"));
     }
 
     #[test]
@@ -1444,25 +1522,110 @@ mod tests {
     /// §14.3：WARN / ERROR 下屏蔽不可见输入编辑，全局动作照常。
     #[test]
     fn dock_status_blocks_invisible_input_but_keeps_globals() {
-        let mut app = test_app();
-        app.input.set_text("draft");
-        app.apply_turn_event(retry("blocked", false));
-
-        // 普通字符、退格、提交都不改动不可见 InputBuffer。
-        assert!(app.apply_action(KeyAction::Insert('x')).is_none());
-        assert!(app.apply_action(KeyAction::Backspace).is_none());
-        assert!(app.apply_action(KeyAction::Submit).is_none());
-        assert_eq!(app.input.text(), "draft");
-
-        // 无修饰 Space 释放后，输入恢复正常。
-        app.apply_action(KeyAction::Insert(' '));
-        assert!(app.dock_status().is_none());
-        assert!(app.apply_action(KeyAction::Insert('x')).is_none());
-        assert_eq!(app.input.text(), "draftx");
-
-        // Prompt 态的 Space 保持普通输入行为。
-        app.apply_action(KeyAction::Insert(' '));
-        assert_eq!(app.input.text(), "draftx ");
+        for severity in [DockSeverity::Warn, DockSeverity::Error] {
+            let mut app = test_app();
+            app.input.set_text("draft");
+            app.push_dock_status(
+                StatusKind::TurnFailed {
+                    reason: "blocked".into(),
+                },
+                severity,
+            );
+            for code in [
+                KeyCode::Char('x'),
+                KeyCode::Esc,
+                KeyCode::Enter,
+                KeyCode::Backspace,
+                KeyCode::Delete,
+                KeyCode::Left,
+                KeyCode::Right,
+                KeyCode::Up,
+                KeyCode::Down,
+                KeyCode::Home,
+                KeyCode::End,
+            ] {
+                assert!(
+                    handle_input_event(
+                        &mut app,
+                        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+                    )
+                    .is_none()
+                );
+            }
+            for modifiers in [
+                KeyModifiers::SHIFT,
+                KeyModifiers::ALT,
+                KeyModifiers::CONTROL,
+            ] {
+                handle_input_event(
+                    &mut app,
+                    Event::Key(KeyEvent::new(KeyCode::Char(' '), modifiers)),
+                );
+            }
+            handle_input_event(
+                &mut app,
+                Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL)),
+            );
+            handle_input_event(
+                &mut app,
+                Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL)),
+            );
+            handle_input_event(&mut app, Event::Paste("hidden\npaste".into()));
+            assert_eq!(app.input.text(), "draft");
+            assert_eq!(app.input.cursor, (0, 5));
+            assert!(app.dock_status().is_some());
+            handle_input_event(
+                &mut app,
+                Event::Key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE)),
+            );
+            assert!(!app.viewport.following());
+            handle_input_event(
+                &mut app,
+                Event::Key(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL)),
+            );
+            assert!(app.viewport.following());
+            handle_input_event(
+                &mut app,
+                Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            );
+            assert_eq!(
+                app.input.text(),
+                "draft",
+                "空闲 Warn/Error 下 Ctrl+C 不清空草稿"
+            );
+            assert!(app.last_ctrl_c.is_some() && !app.should_quit);
+            handle_input_event(
+                &mut app,
+                Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            );
+            assert!(app.should_quit);
+            app.should_quit = false;
+            app.last_ctrl_c = None;
+            app.current_turn = Some(lattice_api::local::new_turn_id());
+            app.phase = TurnPhase::Streaming;
+            handle_input_event(
+                &mut app,
+                Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            );
+            assert!(app.cancel_requested);
+            assert_eq!(app.input.text(), "draft");
+            handle_input_event(
+                &mut app,
+                Event::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)),
+            );
+            assert!(app.dock_status().is_none());
+            assert_eq!(app.input.text(), "draft", "释放键被消费");
+            handle_input_event(
+                &mut app,
+                Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+            );
+            assert_eq!(app.input.text(), "draftx", "释放后恢复普通字符编辑");
+            handle_input_event(
+                &mut app,
+                Event::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)),
+            );
+            assert_eq!(app.input.text(), "draftx ");
+        }
     }
 
     fn transcript_text(app: &App, width: u16) -> String {

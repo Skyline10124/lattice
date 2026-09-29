@@ -52,7 +52,7 @@ impl TuiMockScenario {
             Self::LongText => "确定性的长对话记录",
             Self::ToolCall => "session.todo_write 工具生命周期",
             Self::Disconnect => "输出部分文本后断开连接",
-            Self::Slow => "响应保持停滞，等待 Esc 取消",
+            Self::Slow => "响应保持停滞，等待 Ctrl+C 取消",
             Self::Error => "稳定返回提供方 HTTP 500",
             Self::Flaky => "首次请求返回 HTTP 500，重试后成功",
         }
@@ -182,7 +182,7 @@ pub fn run_tui_mock(scenario: TuiMockScenario) -> Result<ExitStatus, TuiMockErro
         "TUI mock scenario: {scenario} ({})\nSubmit any prompt to run it.{}",
         scenario.description(),
         if scenario == TuiMockScenario::Slow {
-            " Press Esc after submission to exercise cancellation."
+            " Press Ctrl+C after submission to exercise cancellation."
         } else {
             ""
         }

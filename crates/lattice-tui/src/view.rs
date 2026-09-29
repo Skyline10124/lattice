@@ -12,16 +12,15 @@ use crate::app::{App, Block, DockSeverity, StatusKind, ToolState, TurnPhase};
 use crate::input::{CTRL_C_WINDOW, InputBuffer};
 use crate::{markdown, wrapping};
 
+mod dock;
+mod statusline;
+pub(crate) use dock::{Dock, DockIntent};
+
 pub(crate) const SIDEBAR_W: u16 = 40;
 pub(crate) const SIDEBAR_ASPECT: u16 = 3;
 pub(crate) const MIN_CONTENT_W_WITH_SIDEBAR: u16 = 72;
 pub(crate) const GAP: u16 = 1;
 pub(crate) const GUTTER: u16 = 2;
-/// rail 下方的内容行数上下限；Dock 总高 = 1 行 rail + 1..=5 行内容。
-pub(crate) const DOCK_CONTENT_MIN_ROWS: u16 = 1;
-pub(crate) const DOCK_CONTENT_MAX_ROWS: u16 = 5;
-/// Dock tag 固定占 6 cells：`PROMPT` / `WARN··` / `ERROR·`（`·` 为 tag 内 padding）。
-const DOCK_TAG_CELLS: usize = 6;
 const CTRL_C_HINT: &str = "Ctrl+C to quit";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,6 +63,10 @@ pub(crate) struct Viewport {
     scroll: usize,
     /// While true, `scroll` is pinned to the bottom on every content change.
     follow: bool,
+    /// 最近一次已知的对话记录行数与视口高度；statusline 据此算下方行数，
+    /// 不再为一个提示重渲染整段对话记录。
+    rows: usize,
+    height: usize,
 }
 
 impl Viewport {
@@ -71,11 +74,14 @@ impl Viewport {
         Self {
             scroll: 0,
             follow: true,
+            rows: 0,
+            height: 0,
         }
     }
 
     /// Content changed to `content_rows`; viewport height is `height`.
     pub(crate) fn on_content_changed(&mut self, content_rows: usize, height: usize) {
+        (self.rows, self.height) = (content_rows, height);
         let max = content_rows.saturating_sub(height);
         if self.follow {
             self.scroll = max;
@@ -85,12 +91,14 @@ impl Viewport {
     }
 
     pub(crate) fn page_up(&mut self, height: usize) {
+        self.height = height;
         self.follow = false;
         self.scroll = self.scroll.saturating_sub(height.saturating_sub(1));
     }
 
     #[rustfmt::skip]
     pub(crate) fn page_down(&mut self, content_rows: usize, height: usize) {
+        (self.rows, self.height) = (content_rows, height);
         if self.follow { return; }
         let max = content_rows.saturating_sub(height);
         self.scroll = self.scroll.saturating_add(height.saturating_sub(1)).min(max);
@@ -99,6 +107,7 @@ impl Viewport {
 
     #[allow(clippy::wrong_self_convention)]
     pub(crate) fn to_bottom(&mut self, content_rows: usize, height: usize) {
+        (self.rows, self.height) = (content_rows, height);
         self.follow = true;
         self.scroll = content_rows.saturating_sub(height);
     }
@@ -110,15 +119,22 @@ impl Viewport {
     pub(crate) fn following(&self) -> bool {
         self.follow
     }
+
+    /// 视图下方尚未显示的对话记录行数。
+    pub(crate) fn hidden_below(&self) -> usize {
+        self.rows
+            .saturating_sub(self.scroll.saturating_add(self.height))
+    }
 }
 
-/// Exactly five foreground roles.
+/// 合同中的六种界面前景角色；语法高亮另有配色。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Role {
     User,
     Assistant,
     ToolOk,
     ToolErr,
+    Warn,
     DimMeta,
 }
 
@@ -129,6 +145,7 @@ fn role_color(role: Role) -> Color {
         Role::Assistant => Color::Rgb(0xf5, 0xf3, 0xef),
         Role::ToolOk => Color::Rgb(0x2a, 0xb0, 0xb0),
         Role::ToolErr => Color::Rgb(0xcb, 0x2b, 0x31),
+        Role::Warn => Color::Rgb(0xd3, 0x89, 0x26),
         Role::DimMeta => Color::Rgb(0x85, 0x7f, 0x78),
     }
 }
@@ -139,18 +156,6 @@ pub(crate) fn role_style(role: Role) -> Style {
 
 fn status_surface_style() -> Style {
     role_style(Role::DimMeta).bg(Color::Rgb(0x2c, 0x42, 0x67))
-}
-
-fn prompt_style() -> Style {
-    role_style(Role::Assistant).bg(Color::Rgb(0x59, 0x65, 0xca))
-}
-
-fn warn_style() -> Style {
-    role_style(Role::Assistant).bg(Color::Rgb(0x9f, 0x62, 0x00))
-}
-
-fn error_style() -> Style {
-    role_style(Role::Assistant).bg(Color::Rgb(0xcb, 0x2b, 0x31))
 }
 
 /// Status symbols.
@@ -178,179 +183,6 @@ fn fold_symbol(expanded: bool) -> &'static str {
     }
 }
 
-/// 统一 Dock：`PROMPT` / `WARN` / `ERROR` 是同一组件的三个互斥状态；
-/// `INFO` 不进 Dock，直接进 transcript。
-pub(crate) enum DockView<'a> {
-    Prompt,
-    Warn(&'a StatusKind),
-    Error(&'a StatusKind),
-}
-
-/// 左侧底部的完整组件。外部布局只分配一个 Dock Rect；rail、状态标签、
-/// `SPACE → PROMPT` 提示、输入 / 状态正文与光标定位全部由它内部拥有。
-pub(crate) struct Dock<'a> {
-    view: DockView<'a>,
-    input: &'a InputBuffer,
-}
-
-impl<'a> Dock<'a> {
-    pub(crate) fn new(app: &'a App) -> Self {
-        let view = match app.dock_status() {
-            Some((kind, DockSeverity::Warn)) => DockView::Warn(kind),
-            Some((kind, DockSeverity::Error)) => DockView::Error(kind),
-            None => DockView::Prompt,
-        };
-        Self {
-            view,
-            input: &app.input,
-        }
-    }
-
-    /// rail + 内容的总行数，2..=6。视口与布局共用这一个来源。
-    pub(crate) fn height(&self, width: u16) -> u16 {
-        1 + self.content_rows(width).clamp(
-            DOCK_CONTENT_MIN_ROWS as usize,
-            DOCK_CONTENT_MAX_ROWS as usize,
-        ) as u16
-    }
-
-    /// 按内容宽度折行后的视觉行数（未夹紧）。Prompt 沿用光标可见口径。
-    fn content_rows(&self, width: u16) -> usize {
-        match &self.view {
-            DockView::Prompt => {
-                let (visual, cursor_row, _) = input_visual(self.input, width);
-                visual.len().max(cursor_row + 1)
-            }
-            DockView::Warn(kind) | DockView::Error(kind) => {
-                body(&status_text(kind), width, Style::default()).len()
-            }
-        }
-    }
-
-    pub(crate) fn render(&self, frame: &mut Frame, area: Rect) {
-        if area.height == 0 || area.width == 0 {
-            return;
-        }
-        let content_w = area.width.saturating_sub(GUTTER);
-        self.render_rail(frame, Rect::new(area.x, area.y, area.width, 1));
-        let body_area = Rect::new(
-            area.x,
-            area.y.saturating_add(1),
-            area.width,
-            area.height.saturating_sub(1),
-        );
-        match &self.view {
-            DockView::Prompt => self.render_prompt(frame, body_area, content_w),
-            DockView::Warn(kind) => self.render_status(
-                frame,
-                body_area,
-                content_w,
-                &status_text(kind),
-                role_style(Role::Assistant),
-            ),
-            DockView::Error(kind) => self.render_status(
-                frame,
-                body_area,
-                content_w,
-                &status_text(kind),
-                role_style(Role::ToolErr),
-            ),
-        }
-    }
-
-    fn tag(&self) -> (&'static str, Style) {
-        match &self.view {
-            DockView::Prompt => ("PROMPT", prompt_style()),
-            DockView::Warn(_) => ("WARN  ", warn_style()),
-            DockView::Error(_) => ("ERROR ", error_style()),
-        }
-    }
-
-    fn render_rail(&self, frame: &mut Frame, area: Rect) {
-        let unit = "─";
-        let dim = role_style(Role::DimMeta);
-        let width = area.width as usize;
-        let mut spans = Vec::new();
-        let mut used = (GUTTER as usize).min(width);
-        spans.push(Span::styled(unit.repeat(used), dim));
-        let (label, style) = self.tag();
-        let tag_room = width.saturating_sub(used).min(DOCK_TAG_CELLS);
-        let tag = truncate_display(label, tag_room);
-        used += display_width(&tag);
-        if !tag.is_empty() {
-            spans.push(Span::styled(tag, style));
-        }
-
-        let rest = width.saturating_sub(used);
-        if rest == 0 {
-            frame.render_widget(Paragraph::new(Line::from(spans)), area);
-            return;
-        }
-        match &self.view {
-            DockView::Warn(_) | DockView::Error(_) => {
-                // SPACE → PROMPT 只在 WARN / ERROR 状态显示；右锚定，
-                // 两侧各留 2 列 rail，放不下时整段 best effort 填满。
-                let hint = "SPACE → PROMPT";
-                let hint_w = display_width(hint);
-                if rest >= hint_w + 4 {
-                    spans.push(Span::styled(unit.repeat(rest - hint_w - 2), dim));
-                    spans.push(Span::styled(hint.to_string(), dim));
-                    spans.push(Span::styled(unit.repeat(2), dim));
-                } else {
-                    spans.push(Span::styled(unit.repeat(rest), dim));
-                }
-            }
-            DockView::Prompt => spans.push(Span::styled(unit.repeat(rest), dim)),
-        }
-        frame.render_widget(Paragraph::new(Line::from(spans)), area);
-    }
-
-    fn render_prompt(&self, frame: &mut Frame, area: Rect, content_w: u16) {
-        let (visual, cursor_row, cursor_col) = input_visual(self.input, content_w);
-        let height = area.height as usize;
-        let scroll = cursor_row.saturating_sub(height.saturating_sub(1));
-        let shown = visual
-            .iter()
-            .enumerate()
-            .skip(scroll)
-            .take(height)
-            .map(|(index, text)| {
-                let prompt = if index == 0 { "> " } else { "  " };
-                Line::from(vec![
-                    Span::styled(prompt, role_style(Role::User)),
-                    Span::styled(text.clone(), role_style(Role::Assistant)),
-                ])
-            })
-            .collect::<Vec<_>>();
-        frame.render_widget(Paragraph::new(shown), area);
-
-        let screen_y = cursor_row.saturating_sub(scroll) as u16;
-        let cursor_x = area
-            .x
-            .saturating_add(GUTTER)
-            .saturating_add(cursor_col as u16);
-        if screen_y < area.height && cursor_x < area.x.saturating_add(area.width) {
-            frame.set_cursor_position((cursor_x, area.y.saturating_add(screen_y)));
-        }
-    }
-
-    /// Warn / Error 正文：显示前 5 个视觉行，不给只读 Dock 增加滚动。
-    fn render_status(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        content_w: u16,
-        text: &str,
-        style: Style,
-    ) {
-        let shown = body(text, content_w, style)
-            .into_iter()
-            .take(DOCK_CONTENT_MAX_ROWS as usize)
-            .collect::<Vec<_>>();
-        frame.render_widget(Paragraph::new(shown), area);
-    }
-}
-
 pub(crate) fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
     let geometry = frame_layout(area.width, area.height);
@@ -362,18 +194,18 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
                 Constraint::Length(SIDEBAR_W),
             ])
             .split(area);
-            draw_left(frame, app, columns[0], geometry.content_w, false);
-            draw_right_status(frame, app, columns[2]);
+            draw_left(frame, app, columns[0], geometry.content_w);
+            frame.render_widget(Paragraph::new("").style(status_surface_style()), columns[2]);
         }
         Sidebar::Hidden => {
-            draw_left(frame, app, area, geometry.content_w, true);
+            draw_left(frame, app, area, geometry.content_w);
         }
     }
 }
 
-fn draw_left(frame: &mut Frame, app: &App, area: Rect, content_w: u16, bottomline: bool) {
+fn draw_left(frame: &mut Frame, app: &App, area: Rect, content_w: u16) {
     let dock = Dock::new(app);
-    let bottom_h = u16::from(bottomline).min(area.height);
+    let bottom_h = 1.min(area.height);
     let above = area.height.saturating_sub(bottom_h);
     let dock_h = dock.height(content_w).min(above);
     let transcript_h = above.saturating_sub(dock_h);
@@ -388,7 +220,7 @@ fn draw_left(frame: &mut Frame, app: &App, area: Rect, content_w: u16, bottomlin
     );
     dock.render(frame, Rect::new(area.x, dock_y, area.width, dock_h));
     if bottom_h > 0 {
-        draw_bottomline(
+        statusline::render(
             frame,
             app,
             Rect::new(area.x, bottom_y, area.width, bottom_h),
@@ -586,67 +418,82 @@ fn status_lines(kind: &StatusKind, content_w: u16) -> Vec<Line<'static>> {
     body(&status_text(kind), content_w, style)
 }
 
-fn wrap_input_text(text: &str, width: u16) -> Vec<String> {
-    let width = width.max(1) as usize;
-    let mut out = Vec::new();
-    for paragraph in text.split('\n') {
-        if paragraph.is_empty() {
-            out.push(String::new());
-            continue;
-        }
-        let mut current = String::new();
-        for ch in paragraph.chars() {
-            let ch_w = UnicodeWidthChar::width(ch).unwrap_or(0);
-            if !current.is_empty()
-                && UnicodeWidthStr::width(current.as_str()).saturating_add(ch_w) > width
-            {
-                out.push(std::mem::take(&mut current));
-            }
-            current.push(ch);
-        }
-        out.push(current);
-    }
-    if out.is_empty() {
-        out.push(String::new());
-    }
-    out
+/// 同一投影同时提供折行文字、光标与视觉行移动的源字符位置。
+struct InputVisual {
+    lines: Vec<String>,
+    positions: Vec<((usize, usize), (usize, usize))>,
+    cursor: (usize, usize),
 }
 
-fn visual_cursor(line: &str, char_index: usize, width: u16) -> (usize, usize) {
-    let width = width.max(1) as usize;
-    let prefix: String = line.chars().take(char_index).collect();
-    let lines = wrap_input_text(&prefix, width as u16);
-    let last_w = lines
-        .last()
-        .map(|line| UnicodeWidthStr::width(line.as_str()))
-        .unwrap_or(0);
-    let row = lines.len().saturating_sub(1);
-    if last_w >= width && !prefix.is_empty() {
-        (row + 1, 0)
-    } else {
-        (row, last_w)
+impl InputVisual {
+    fn new(input: &InputBuffer, content_w: u16) -> Self {
+        let width = usize::from(content_w.max(1));
+        let mut visual = Self {
+            lines: Vec::new(),
+            positions: Vec::new(),
+            cursor: (0, 0),
+        };
+        for (source_row, line) in input.lines.iter().enumerate() {
+            visual.lines.push(String::new());
+            let mut col = 0usize;
+            let chars: Vec<_> = line.chars().collect();
+            for (source_col, ch) in chars.iter().copied().enumerate() {
+                let cells = UnicodeWidthChar::width(ch).unwrap_or(0);
+                if col > 0 && col.saturating_add(cells) > width {
+                    visual.lines.push(String::new());
+                    col = 0;
+                }
+                visual.record((source_row, source_col), col, input.cursor);
+                visual
+                    .lines
+                    .last_mut()
+                    .expect("current visual row")
+                    .push(ch);
+                col = col.saturating_add(cells);
+            }
+            // 行尾占满时为插入光标保留下一行，与绘制和移动使用同一映射。
+            if col >= width {
+                visual.lines.push(String::new());
+                col = 0;
+            }
+            visual.record((source_row, chars.len()), col, input.cursor);
+        }
+        visual
+    }
+
+    fn record(&mut self, source: (usize, usize), col: usize, cursor: (usize, usize)) {
+        let position = (self.lines.len().saturating_sub(1), col);
+        self.positions.push((source, position));
+        if source == cursor {
+            self.cursor = position;
+        }
     }
 }
 
 fn input_visual(input: &InputBuffer, content_w: u16) -> (Vec<String>, usize, usize) {
-    let mut visual = Vec::new();
-    let mut cursor_row = 0usize;
-    let mut cursor_col = 0usize;
-    for (index, line) in input.lines.iter().enumerate() {
-        let wrapped = wrap_input_text(line, content_w);
-        if index < input.cursor.0 {
-            cursor_row += wrapped.len().max(1);
-        } else if index == input.cursor.0 {
-            let (row, col) = visual_cursor(line, input.cursor.1, content_w);
-            cursor_row += row;
-            cursor_col = col;
-        }
-        visual.extend(wrapped);
+    let visual = InputVisual::new(input, content_w);
+    (visual.lines, visual.cursor.0, visual.cursor.1)
+}
+
+pub(crate) fn move_input_vertical(input: &mut InputBuffer, content_w: u16, down: bool) {
+    let visual = InputVisual::new(input, content_w);
+    let (row, col) = visual.cursor;
+    let target = if down {
+        row.checked_add(1)
+    } else {
+        row.checked_sub(1)
+    };
+    let Some(target) = target.filter(|target| *target < visual.lines.len()) else {
+        return;
+    };
+    if let Some((source, _)) = visual
+        .positions
+        .iter()
+        .rev()
+        .find(|(_, (r, c))| *r == target && *c <= col)
+    {
+        input.cursor = *source;
     }
-    while visual.len() <= cursor_row {
-        visual.push(String::new());
-    }
-    (visual, cursor_row, cursor_col)
 }
 
 fn draw_transcript(frame: &mut Frame, app: &App, area: Rect, content_w: u16) {
@@ -654,158 +501,6 @@ fn draw_transcript(frame: &mut Frame, app: &App, area: Rect, content_w: u16) {
     let start = app.viewport.scroll().min(lines.len());
     let end = (start + area.height as usize).min(lines.len());
     frame.render_widget(Paragraph::new(lines[start..end].to_vec()), area);
-}
-
-fn draw_right_status(frame: &mut Frame, app: &App, area: Rect) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let available = area.width.saturating_sub(1) as usize;
-    let mut rows = vec![Line::default(); area.height as usize];
-    set_status_row(
-        &mut rows,
-        0,
-        &crate::app::session_label(app.ctx.session_id),
-        Role::DimMeta,
-        available,
-    );
-    set_status_row(
-        &mut rows,
-        1,
-        &app.ctx.active_agent,
-        Role::DimMeta,
-        available,
-    );
-    set_status_row(
-        &mut rows,
-        3,
-        &phase_and_connection(app),
-        phase_role(app.phase),
-        available,
-    );
-    if !app.viewport.following() {
-        set_status_row(&mut rows, 5, "[scroll]", Role::DimMeta, available);
-    }
-
-    let height = rows.len();
-    if ctrl_c_visible(app) {
-        set_status_row(
-            &mut rows,
-            height.saturating_sub(3),
-            CTRL_C_HINT,
-            Role::ToolErr,
-            available,
-        );
-    }
-    let key = if app.kitty_keyboard {
-        "S-Enter"
-    } else {
-        "Alt+Enter"
-    };
-    set_status_row(
-        &mut rows,
-        height.saturating_sub(2),
-        key,
-        Role::DimMeta,
-        available,
-    );
-    set_status_row(
-        &mut rows,
-        height.saturating_sub(1),
-        "newline",
-        Role::DimMeta,
-        available,
-    );
-
-    frame.render_widget(Paragraph::new(rows).style(status_surface_style()), area);
-}
-
-fn set_status_row(
-    rows: &mut [Line<'static>],
-    row: usize,
-    text: &str,
-    role: Role,
-    available: usize,
-) {
-    if row >= rows.len() {
-        return;
-    }
-    rows[row] = Line::from(vec![
-        Span::raw(" "),
-        Span::styled(truncate_display(text, available), role_style(role)),
-    ]);
-}
-
-/// 侧栏隐藏时的独立底行：整宽给状态文本，不再携带 PROMPT tag。
-fn draw_bottomline(frame: &mut Frame, app: &App, area: Rect) {
-    if area.height == 0 || area.width == 0 {
-        return;
-    }
-    let line = bottom_status_line(app, area.width as usize);
-    frame.render_widget(Paragraph::new(line).style(status_surface_style()), area);
-}
-
-fn bottom_status_line(app: &App, width: usize) -> Line<'static> {
-    let state = phase_and_connection(app);
-    let phase = state.as_str();
-    let scroll = (!app.viewport.following()).then_some("[scroll]");
-    let key = if ctrl_c_visible(app) {
-        CTRL_C_HINT
-    } else if app.kitty_keyboard {
-        "S-Enter newline"
-    } else {
-        "Alt+Enter newline"
-    };
-    let session_id = crate::app::session_label(app.ctx.session_id);
-    let full = [
-        session_id.as_str(),
-        app.ctx.active_agent.as_str(),
-        phase,
-        scroll.unwrap_or(""),
-        key,
-    ];
-    let key =
-        (joined_width(full.into_iter().filter(|part| !part.is_empty())) <= width).then_some(key);
-
-    let tail = [Some(phase), scroll, key];
-    let tail_width = joined_width(tail.into_iter().flatten());
-    let agent_width = display_width(&app.ctx.active_agent);
-    let session_room = width
-        .saturating_sub(tail_width)
-        .saturating_sub(agent_width)
-        .saturating_sub(6);
-    let session = truncate_display(&session_id, session_room);
-    let session_cost = display_width(&session) + usize::from(!session.is_empty()) * 3;
-    let agent_room = width
-        .saturating_sub(tail_width)
-        .saturating_sub(session_cost)
-        .saturating_sub(3);
-    let agent = truncate_display(&app.ctx.active_agent, agent_room);
-
-    let mut spans = Vec::new();
-    for field in [&session, &agent]
-        .into_iter()
-        .filter(|field| !field.is_empty())
-    {
-        if !spans.is_empty() {
-            spans.push(Span::styled(" · ", role_style(Role::DimMeta)));
-        }
-        spans.push(Span::styled(field.clone(), role_style(Role::DimMeta)));
-    }
-    if !spans.is_empty() {
-        spans.push(Span::styled(" · ", role_style(Role::DimMeta)));
-    }
-    spans.push(Span::styled(
-        truncate_display(phase, width),
-        role_style(phase_role(app.phase)),
-    ));
-    for field in [scroll, key].into_iter().flatten() {
-        spans.push(Span::styled(
-            format!(" · {field}"),
-            role_style(Role::DimMeta),
-        ));
-    }
-    Line::from(spans)
 }
 
 fn joined_width<'a>(parts: impl Iterator<Item = &'a str>) -> usize {
@@ -847,6 +542,41 @@ fn display_width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
 }
 
+/// 不包含 gutter；调用方把标题线放在正文区域。
+pub(crate) fn title_line(title: &str, role: Role, right: &[String], width: usize) -> Line<'static> {
+    let dim = role_style(Role::DimMeta);
+    if width < 5 {
+        return Line::from(Span::styled("─".repeat(width), dim));
+    }
+    let mut right = right;
+    while !right.is_empty()
+        && 9 + display_width(title) + joined_width(right.iter().map(String::as_str)) > width
+    {
+        right = &right[1..];
+    }
+    let title = truncate_display(title, width.saturating_sub(5));
+    let mut spans = vec![
+        Span::styled("── ", dim),
+        Span::styled(
+            title.clone(),
+            role_style(role).add_modifier(ratatui::style::Modifier::BOLD),
+        ),
+        Span::styled(" ", dim),
+    ];
+    let remaining = width.saturating_sub(4 + display_width(&title));
+    if right.is_empty() {
+        spans.push(Span::styled("─".repeat(remaining), dim));
+    } else {
+        let right = right.join(" · ");
+        spans.push(Span::styled(
+            "─".repeat(remaining.saturating_sub(display_width(&right) + 4)),
+            dim,
+        ));
+        spans.push(Span::styled(format!(" {right} ──"), dim));
+    }
+    Line::from(spans)
+}
+
 fn truncate_display(text: &str, width: usize) -> String {
     if width == 0 {
         return String::new();
@@ -873,7 +603,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    fn test_app() -> App {
+    pub(super) fn test_app() -> App {
         App::new(
             SessionContext {
                 session_id: None,
@@ -887,12 +617,77 @@ mod tests {
     fn buffer_text(terminal: &Terminal<TestBackend>, width: u16, height: u16) -> String {
         (0..height)
             .map(|y| {
-                (0..width)
-                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
-                    .collect::<String>()
+                let mut row = String::new();
+                let mut x = 0;
+                while x < width {
+                    let symbol = terminal.backend().buffer()[(x, y)].symbol();
+                    row.push_str(symbol);
+                    x += display_width(symbol).max(1) as u16;
+                }
+                row
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn left_column_has_statusline_with_or_without_empty_full_height_sidebar() -> anyhow::Result<()>
+    {
+        for (w, h) in [(80, 24), (176, 50), (1, 1), (7, 3)] {
+            let mut app = test_app();
+            app.term_width = w;
+            app.term_height = h;
+            let geometry = frame_layout(w, h);
+            let mut terminal = Terminal::new(TestBackend::new(w, h))?;
+            terminal.draw(|f| draw(f, &app))?;
+            // 宽字符尾格不发送到终端；背景由字符起始格覆盖整个 glyph。
+            let mut x = 0;
+            while x < geometry.left_w {
+                let cell = &terminal.backend().buffer()[(x, h - 1)];
+                assert_eq!(cell.bg, Color::Rgb(0x2c, 0x42, 0x67));
+                x += display_width(cell.symbol()).max(1) as u16;
+            }
+            if geometry.sidebar == Sidebar::Visible {
+                for y in 0..h {
+                    assert_eq!(
+                        terminal.backend().buffer()[(geometry.left_w, y)].symbol(),
+                        " "
+                    );
+                    for x in geometry.left_w + GAP..w {
+                        let cell = &terminal.backend().buffer()[(x, y)];
+                        assert_eq!(cell.symbol(), " ");
+                        assert_eq!(cell.bg, Color::Rgb(0x2c, 0x42, 0x67));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn title_line_omits_leftmost_status_before_truncating_title() {
+        let line = title_line("USER", Role::User, &["↑ 2 行".into(), "↓ 3 行".into()], 30);
+        assert_eq!(line.to_string(), "── USER ─── ↑ 2 行 · ↓ 3 行 ──");
+        assert_eq!(
+            title_line("USER", Role::User, &["↑ 2 行".into(), "↓ 3 行".into()], 19).to_string(),
+            "── USER ─ ↓ 3 行 ──"
+        );
+        assert_eq!(
+            title_line("USER", Role::User, &["too long".into()], 9).to_string(),
+            "── USER ─"
+        );
+        assert_eq!(
+            title_line("中文标题", Role::User, &[], 7).to_string(),
+            "── 中 ─"
+        );
+        assert_eq!(line.width(), 30);
+        assert_eq!(
+            line.spans[1].style,
+            role_style(Role::User).add_modifier(ratatui::style::Modifier::BOLD)
+        );
+        for width in 0..8 {
+            assert!(title_line("中文标题", Role::User, &["right".into()], width).width() <= width);
+        }
     }
 
     #[test]
@@ -1016,24 +811,140 @@ mod tests {
     }
 
     #[test]
+    fn dock_compression_preserves_content_before_title_and_spacer() -> anyhow::Result<()> {
+        for (height, expected) in [
+            (1, vec!["> draft"]),
+            (2, vec!["  ── USER", "> draft"]),
+            (3, vec!["", "  ── USER", "> draft"]),
+        ] {
+            let mut app = test_app();
+            app.input.set_text("draft");
+            let mut terminal = Terminal::new(TestBackend::new(40, height))?;
+            terminal.draw(|f| Dock::new(&app).render(f, f.area()))?;
+            let screen = buffer_text(&terminal, 40, height);
+            for (row, prefix) in screen.lines().zip(expected) {
+                if prefix.is_empty() {
+                    assert!(row.trim().is_empty());
+                } else {
+                    assert!(row.starts_with(prefix), "{screen}");
+                }
+            }
+            assert_eq!(
+                terminal.get_cursor_position()?,
+                ratatui::layout::Position::new(7, height - 1)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn dock_height_clamps_input_rows_one_to_ten() {
+        let mut app = test_app();
+        assert_eq!(Dock::new(&app).height(10), 3, "空输入：空行、标题、内容");
+        app.input.set_text("a\nb\nc");
+        assert_eq!(Dock::new(&app).height(10), 5);
+        app.input.set_text(&["x"; 12].join("\n"));
+        assert_eq!(Dock::new(&app).height(10), 11, "24 行终端 Dock 上限为 11");
+        app.term_height = 50;
+        assert_eq!(Dock::new(&app).height(10), 12, "最多 10 行内容");
+        for (height, expected) in [
+            (0, 0),
+            (1, 0),
+            (2, 0),
+            (3, 1),
+            (4, 1),
+            (5, 2),
+            (6, 2),
+            (7, 3),
+        ] {
+            app.term_height = height;
+            assert_eq!(Dock::new(&app).height(10), expected, "frame_h={height}");
+        }
+    }
+
+    #[test]
+    fn dock_status_title_carries_release_hint_and_caps_content() -> anyhow::Result<()> {
+        for severity in [DockSeverity::Warn, DockSeverity::Error] {
+            let mut app = test_app();
+            app.blocks.push(Block::Status {
+                kind: StatusKind::TurnFailed {
+                    reason: "first\nsecond\nthird\nfourth\nfifth\nsixth".into(),
+                },
+                placement: StatusPlacement::Dock(severity),
+            });
+            let dock = Dock::new(&app);
+            let mut terminal = Terminal::new(TestBackend::new(80, 7))?;
+            terminal.draw(|frame| dock.render(frame, frame.area()))?;
+            let screen = buffer_text(&terminal, 80, 7);
+            let label = if severity == DockSeverity::Warn {
+                "WARN"
+            } else {
+                "ERROR"
+            };
+            assert!(
+                screen
+                    .lines()
+                    .nth(1)
+                    .unwrap()
+                    .starts_with(&format!("  ── {label} "))
+            );
+            assert!(screen.contains("Space 返回输入"));
+            assert!(screen.contains("fifth") && !screen.contains("sixth"));
+            let (title, text) = if severity == DockSeverity::Warn {
+                (Role::Warn, Role::Assistant)
+            } else {
+                (Role::ToolErr, Role::ToolErr)
+            };
+            assert_eq!(terminal.backend().buffer()[(5, 1)].fg, role_color(title));
+            assert_eq!(terminal.backend().buffer()[(2, 2)].fg, role_color(text));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn statusline_orders_fields_and_focus_hints_without_session_id() {
+        let mut app = test_app();
+        let line = statusline::line(&app, 40);
+        assert_eq!(line.to_string(), " agent            Alt+Enter 换行 · idle ");
+        app.kitty_keyboard = true;
+        app.last_ctrl_c = Some(std::time::Instant::now());
+        app.phase = TurnPhase::Streaming;
+        app.connected = false;
+        let line = statusline::line(&app, 80);
+        assert!(
+            line.to_string()
+                .ends_with("Ctrl+C to quit · S-Enter 换行 · stream · offline ")
+        );
+        app.blocks.push(Block::Status {
+            kind: StatusKind::TurnFailed {
+                reason: "oops".into(),
+            },
+            placement: StatusPlacement::Dock(DockSeverity::Error),
+        });
+        let line = statusline::line(&app, 80);
+        assert!(!line.to_string().contains("换行"));
+        assert!(
+            line.to_string()
+                .ends_with("Ctrl+C to quit · stream · offline ")
+        );
+    }
+
+    #[test]
     fn colors_use_contract_rgb_values() {
         for (role, color) in [
             (Role::User, Color::Rgb(0x86, 0x95, 0xe3)),
             (Role::Assistant, Color::Rgb(0xf5, 0xf3, 0xef)),
             (Role::ToolOk, Color::Rgb(0x2a, 0xb0, 0xb0)),
             (Role::ToolErr, Color::Rgb(0xcb, 0x2b, 0x31)),
+            (Role::Warn, Color::Rgb(0xd3, 0x89, 0x26)),
             (Role::DimMeta, Color::Rgb(0x85, 0x7f, 0x78)),
         ] {
             assert_eq!(role_style(role).fg, Some(color));
         }
-        for (style, color) in [
-            (status_surface_style(), Color::Rgb(0x2c, 0x42, 0x67)),
-            (prompt_style(), Color::Rgb(0x59, 0x65, 0xca)),
-            (warn_style(), Color::Rgb(0x9f, 0x62, 0x00)),
-            (error_style(), Color::Rgb(0xcb, 0x2b, 0x31)),
-        ] {
-            assert_eq!(style.bg, Some(color));
-        }
+        assert_eq!(
+            status_surface_style().bg,
+            Some(Color::Rgb(0x2c, 0x42, 0x67))
+        );
     }
 
     #[test]
@@ -1048,8 +959,20 @@ mod tests {
 
     #[test]
     fn all_frame_shapes_draw_without_panic() -> anyhow::Result<()> {
-        for (width, height) in [(1, 1), (7, 3), (56, 47), (80, 24), (115, 47), (176, 50)] {
+        for (width, height) in [
+            (0, 0),
+            (0, 1),
+            (1, 0),
+            (1, 1),
+            (7, 3),
+            (56, 47),
+            (80, 24),
+            (115, 47),
+            (176, 50),
+        ] {
             let mut app = test_app();
+            app.term_width = width;
+            app.term_height = height;
             app.blocks.push(Block::Status {
                 kind: StatusKind::Notice(vec!["hello".into()]),
                 placement: StatusPlacement::Transcript,
@@ -1142,19 +1065,35 @@ mod tests {
         });
         let dock = Dock::new(&app);
         let expected = body("✗ one **three** two", 9, role_style(Role::ToolErr));
-        assert_eq!(dock.height(9), 1 + expected.len() as u16);
+        assert_eq!(dock.height(9), 2 + expected.len() as u16);
         let mut terminal = Terminal::new(TestBackend::new(11, dock.height(9)))?;
         terminal.draw(|frame| dock.render(frame, frame.area()))?;
         let screen = buffer_text(&terminal, 11, dock.height(9));
         assert_eq!(
             screen
                 .lines()
-                .skip(1)
+                .skip(2)
                 .map(str::trim_end)
                 .collect::<Vec<_>>(),
             ["  ✗ one", "  **three**", "  two"]
         );
         Ok(())
+    }
+
+    #[test]
+    fn input_cursor_tracks_wide_character_wrap_and_full_line_end() {
+        let mut input = InputBuffer::new();
+        input.set_text("abcd中x");
+        input.cursor = (0, 4);
+        let (lines, row, col) = input_visual(&input, 5);
+        assert_eq!(lines, ["abcd", "中x"]);
+        assert_eq!((row, col), (1, 0));
+        move_input_vertical(&mut input, 5, false);
+        assert_eq!(input.cursor, (0, 0));
+        input.set_text("12345");
+        let (lines, row, col) = input_visual(&input, 5);
+        assert_eq!(lines, ["12345", ""]);
+        assert_eq!((row, col), (1, 0));
     }
 
     #[test]
@@ -1164,7 +1103,9 @@ mod tests {
         let (lines, row, col) = input_visual(&app.input, 7);
         assert_eq!(lines, ["one thr", "ee"]);
         assert_eq!((row, col), (1, 2));
-        assert_eq!(visual_cursor("one three", 7, 7), (1, 0));
+        app.input.cursor = (0, 7);
+        let (_, row, col) = input_visual(&app.input, 7);
+        assert_eq!((row, col), (1, 0));
         assert_eq!(
             body("one three", 7, Style::default())
                 .iter()
