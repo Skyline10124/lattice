@@ -36,18 +36,33 @@ pub(super) fn line(app: &App, width: usize) -> Line<'static> {
         Some(phase_and_connection(app)),
     ];
     let room = width.saturating_sub(2);
-    for omitted in 0..5 {
-        let left_w = joined_width(left.iter().copied().flatten());
-        let right_w = joined_width(right.iter().filter_map(|s| s.as_deref()));
-        if left_w + right_w + usize::from(left_w > 0 && right_w > 0) <= room {
+    // 先省略两个按键提示，再从最宽的字段开始省略；只剩一个字段时交给下方裁剪。
+    for slot in [2, 1] {
+        if fits(&left, &right, room) {
             break;
         }
-        match omitted {
-            0 => right[2] = None,
-            1 => right[3] = None,
-            2 => left[2] = None,
-            3 => left[1] = None,
-            _ => left[0] = None,
+        right[slot] = None;
+    }
+    while !fits(&left, &right, room) {
+        let width_of = |slot: Slot| match slot {
+            Slot::Left(index) => left[index].map(display_width),
+            Slot::Right(index) => right[index].as_deref().map(display_width),
+        };
+        let present = TIE_ORDER
+            .iter()
+            .filter_map(|&slot| width_of(slot).map(|width| (slot, width)))
+            .collect::<Vec<_>>();
+        let widest = present.iter().map(|&(_, width)| width).max().unwrap_or(0);
+        let Some(&(slot, _)) = present
+            .iter()
+            .find(|&&(_, width)| width == widest)
+            .filter(|_| present.len() > 1)
+        else {
+            break;
+        };
+        match slot {
+            Slot::Left(index) => left[index] = None,
+            Slot::Right(index) => right[index] = None,
         }
     }
     let left = left.into_iter().flatten().collect::<Vec<_>>().join(" · ");
@@ -86,6 +101,28 @@ pub(super) fn line(app: &App, width: usize) -> Line<'static> {
     Line::from(out)
 }
 
+#[derive(Clone, Copy)]
+enum Slot {
+    Left(usize),
+    Right(usize),
+}
+
+/// 等宽字段的省略先后：上下文、提供商、模型、agent、翻看提示、phase。
+const TIE_ORDER: [Slot; 6] = [
+    Slot::Right(3),
+    Slot::Left(2),
+    Slot::Left(1),
+    Slot::Left(0),
+    Slot::Right(0),
+    Slot::Right(4),
+];
+
+fn fits(left: &[Option<&str>], right: &[Option<String>], room: usize) -> bool {
+    let left_w = joined_width(left.iter().copied().flatten());
+    let right_w = joined_width(right.iter().filter_map(|s| s.as_deref()));
+    left_w + right_w + usize::from(left_w > 0 && right_w > 0) <= room
+}
+
 fn format_context(tokens: u64) -> String {
     if tokens < 1000 {
         format!("上下文 {tokens}")
@@ -100,7 +137,7 @@ mod tests {
     use crate::app::StatusPlacement;
 
     #[test]
-    fn fields_omit_in_contract_order_and_keep_scroll_quit_phase() {
+    fn key_hints_go_first_then_widest_fields_are_omitted() {
         let mut app = super::super::tests::test_app();
         app.ctx.active_agent = "a".into();
         app.model = Some("m".into());
@@ -124,29 +161,42 @@ mod tests {
                 60,
                 " a · m · p ↓ 12 行 · Ctrl+C to quit · 上下文 12.3k · stream ",
             ),
-            (45, " a · m · p ↓ 12 行 · Ctrl+C to quit · stream "),
+            (43, " a · m · p ↓ 12 行 · 上下文 12.3k · stream "),
+            (28, " a · m · p ↓ 12 行 · stream "),
+            (18, " a · m · p stream "),
+            (11, " a · m · p "),
         ] {
             assert_eq!(line(&app, width).to_string(), expected);
         }
-        for (width, left, absent) in [
-            (74, "a · m · p", "换行"),
-            (59, "a · m · p", "上下文"),
-            (44, "a · m", " · p"),
-            (40, "a", " · m"),
-            (36, "", " a"),
+        // 先去换行键提示、再去退出提示，之后按宽度：上下文 12 > 翻看 7 > phase 6；
+        // 等宽的 agent、模型、提供商按提供商、模型、agent 的先后省略。
+        for (width, present, absent) in [
+            (74, "Ctrl+C to quit", "换行"),
+            (59, "上下文", "Ctrl+C"),
+            (42, "↓ 12 行 · stream", "上下文"),
+            (27, "stream", "↓"),
+            (17, "a · m · p", "stream"),
+            (10, "a · m", " · p"),
+            (6, "a", "m"),
         ] {
             let text = line(&app, width).to_string();
-            assert!(text.starts_with(&format!(" {left}")), "{width}: {text}");
+            assert!(text.contains(present), "{width}: {text}");
             assert!(!text.contains(absent), "{width}: {text}");
-            assert!(text.contains("↓ 12 行 · Ctrl+C to quit"), "{width}: {text}");
-            assert!(text.ends_with("stream "), "{width}: {text}");
         }
-        for width in 0..36 {
+        for width in 0..11 {
             let text = line(&app, width);
             assert_eq!(text.width(), width);
         }
         app.viewport.to_bottom(32, 20);
         assert!(!line(&app, 100).to_string().contains("↓"));
+    }
+
+    #[test]
+    fn wide_agent_goes_before_phase_and_last_field_is_clipped() {
+        let mut app = super::super::tests::test_app();
+        app.ctx.active_agent = "a-very-long-agent".into();
+        assert_eq!(line(&app, 12).to_string(), "       idle ");
+        assert_eq!(line(&app, 4).to_string(), " id ");
     }
 
     #[test]

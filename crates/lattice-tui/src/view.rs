@@ -813,9 +813,9 @@ mod tests {
     #[test]
     fn dock_compression_preserves_content_before_title_and_spacer() -> anyhow::Result<()> {
         for (height, expected) in [
-            (1, vec!["> draft"]),
-            (2, vec!["  ── USER", "> draft"]),
-            (3, vec!["", "  ── USER", "> draft"]),
+            (1, vec!["  draft"]),
+            (2, vec!["  ── USER", "  draft"]),
+            (3, vec!["", "  ── USER", "  draft"]),
         ] {
             let mut app = test_app();
             app.input.set_text("draft");
@@ -860,6 +860,34 @@ mod tests {
             app.term_height = height;
             assert_eq!(Dock::new(&app).height(10), expected, "frame_h={height}");
         }
+    }
+
+    #[test]
+    fn input_has_no_prompt_symbol_and_continuation_aligns() -> anyhow::Result<()> {
+        let mut app = test_app();
+        app.input.set_text("abcdefghijkl");
+        let dock = Dock::new(&app);
+        let mut terminal = Terminal::new(TestBackend::new(12, 4))?;
+        terminal.draw(|frame| dock.render(frame, Rect::new(0, 0, 12, 4)))?;
+        let screen = buffer_text(&terminal, 12, 4);
+        assert!(!screen.contains('>'), "{screen}");
+        assert!(screen.contains("── USER"));
+        let rows: Vec<&str> = screen.lines().collect();
+        assert_eq!(rows[2].trim_end(), "  abcdefghij");
+        assert_eq!(rows[3].trim_end(), "  kl", "续行与首行正文同列");
+        assert_eq!(
+            terminal.get_cursor_position()?,
+            ratatui::layout::Position::new(4, 3)
+        );
+        app.input.clear();
+        terminal.draw(|frame| Dock::new(&app).render(frame, frame.area()))?;
+        let screen = buffer_text(&terminal, 12, 4);
+        assert!(screen.lines().skip(2).all(|line| line.trim().is_empty()));
+        assert_eq!(
+            terminal.get_cursor_position()?,
+            ratatui::layout::Position::new(2, 2)
+        );
+        Ok(())
     }
 
     #[test]

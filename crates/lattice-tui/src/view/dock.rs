@@ -114,19 +114,14 @@ impl InputModule<'_> {
             Paragraph::new(title_line("USER", Role::User, &right, title.width as usize)),
             title,
         );
+        // 输入区不显示提示符，gutter 留空，正文与对话记录正文同列。
         let shown = visual
             .iter()
-            .enumerate()
             .skip(scroll)
             .take(height)
-            .map(|(index, text)| {
-                let prompt = if index == 0 && !self.input.is_empty() {
-                    "> "
-                } else {
-                    "  "
-                };
+            .map(|text| {
                 Line::from(vec![
-                    Span::styled(prompt, role_style(Role::User)),
+                    Span::raw("  "),
                     Span::styled(text.clone(), role_style(Role::Assistant)),
                 ])
             })
