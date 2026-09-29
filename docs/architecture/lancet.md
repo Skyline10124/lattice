@@ -131,7 +131,7 @@ guest 只接收最小成功投影与无 payload 的粗错误标签，结构化�
 
 模型回复含工具调用时，协调层在一个会话库事务中把回复记入 ActiveStep，为每个调用建立[调用槽位](session.md#调用槽位)并分配 InvocationId。槽位记录 Session/Turn/步骤/片段地址、方法、Descriptor 身份和规范参数摘要，顺序与原回复一致。InvocationId 在同一事务插入全局索引，键冲突时放弃该事务、重新生成后重试。
 
-槽位的执行路径为 `已登记 → Started → 终态`；未 Started 的槽位可直接写入 `NotExecuted` 终态，原因规则见[调用槽位](session.md#调用槽位)（分发前收到取消为 `CancelledBeforeDispatch`）。`Cancelled` 只用于已分发后被取消的调用。终态同时保存执行 outcome、结果载荷和完整 Cell 证据。下图展开一个已登记调用的分发与运行时返回路径：
+槽位的执行路径为 `已登记 → Started → 终态`。LANCET 返回后写入的终态同时保存执行 outcome、结果载荷和完整 Cell 证据；未 Started 的槽位只由关闭 Step 的事务写入不带原因的 `NotExecuted`，停止原因记在 Step 上，见[调用槽位](session.md#调用槽位)。下图展开一个已登记调用的分发与运行时返回路径：
 
 ```mermaid
 flowchart TD
@@ -145,7 +145,7 @@ flowchart TD
 ```
 
 `Started` 在执行器接管前必须提交，是“可能已执行”的保守边界，不证明 guest 已开始或外部效果已发生。调用在此前停止时按未执行关闭；越过该边界后不能仅凭没有返回值推定未执行。外部效果与记录无法同时完成，这条规则与记录粒度无关。
-同一模型回复的调用按片段顺序执行。确定的 `Succeeded`、`Failed` 或 `Rejected` 允许继续下一调用；取消、未执行、不确定或终态写入失败时停止后续分发。
+同一模型回复的调用按片段顺序执行。LANCET 给出确定结果（`Succeeded` 或 `Failed`）时继续下一调用；`NotExecuted`、`Indeterminate` 或终态写入失败时停止后续分发。
 
 ### 结果、证据与失败处理
 
@@ -160,9 +160,9 @@ flowchart TD
 | trap、资源耗尽、超时或取消 | 返回有界、脱敏的类型化错误，保留已经观察到的效果 |
 | 执行已返回，槽位终态写入失败 | 协调层停止后续分发，按会话合同的[事务失败](session.md#事务与一致性)处理；Turn 保持进行中，由之后的自动关闭处理，已 Started 无终态的槽位记为 Indeterminate |
 
-执行 outcome 为 `Succeeded`、`Failed`、`Rejected`、`Cancelled`、`NotExecuted` 或 `Indeterminate`，载荷形状按 outcome 确定。从 LANCET 看，`NotExecuted` 表示调用从未交给 LANCET；其余五种来自 LANCET 的返回或返回缺失。`Rejected` 与 `Failed` 按错误族区分，不按是否执行区分：拒绝也可能发生在 Component 执行途中，此前的宿主操作可能已生效。各结局的判定依据、载荷与效果保证见[调用槽位](session.md#调用槽位)。
+执行 outcome 为 `Succeeded`、`Failed`、`NotExecuted` 或 `Indeterminate`，载荷形状按 outcome 确定。从 LANCET 看，`NotExecuted` 表示调用从未交给 LANCET；其余三种都在越过 Started 后写入：`Succeeded` 与 `Failed` 是 LANCET 的确定返回，`Indeterminate` 对应返回 `CallCancelled`、`OutcomeIndeterminate` 或没有取得返回。准入或宿主操作的拒绝是 `Failed` 的错误族，不表示调用未执行。各结局的判定依据、载荷与效果保证见[调用槽位](session.md#调用槽位)。
 观察事件用于显示调用进度。缺少 finished 事件时，读者通过槽位终态核验执行结果，不能从未配对显示块推断调用失败。快照与重连由[会话观察协议](session.md#观察与重连)维护。
-终态、载荷和完整 Cell 证据在一个会话库事务中写入槽位；这一范围不扩展为文件与会话库的跨库事务。
+LANCET 返回后，终态、载荷和完整 Cell 证据在一个会话库事务中写入槽位；关闭事务补写的终态没有 Cell 证据，证据记为不可用。这一范围不扩展为文件与会话库的跨库事务。
 
 `CepError` 的 retriability 描述错误属性，不授权重新执行已越过 Started 边界的调用。崩溃遗留的 Turn 由协调层按[自动关闭规则](session.md#自动关闭崩溃遗留任务)依据槽位事实关闭，LANCET 不重新执行 Tool。
 

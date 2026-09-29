@@ -124,7 +124,7 @@ cause = ProviderError { retryable }
 - `Deadline`（Turn 墙钟上限）与 `OutputLimit`（单次回复字节上限）沿用现有门禁，只作为原因记录；数值与粒度由 #222 另行裁决。
 - `InvalidBatch` 维持 R1 的整批拒绝、不重试；是否反馈模型纠正归 #220。
 
-Step 以 `Stop` 结束时，`cause` 是实际导致停止的原因：某次尝试不再重试时取该尝试的原因；在尝试之前或重试退避中收到取消或 Deadline 时取 Cancelled 或 Deadline，不沿用先前尝试的原因；有完整回复时按第 8 节的有序终态规则从槽位终态推导（取消、调用效果不确定、分发前 Deadline 或 ProcessExit）；达到模型步骤上限时为步骤上限。
+Step 以 `Stop` 结束时，`cause` 是实际导致停止的原因：某次尝试不再重试时取该尝试的原因；在尝试之前或重试退避中收到取消或 Deadline 时取 Cancelled 或 Deadline，不沿用先前尝试的原因；有完整回复、执行调用期间停止时按第 8 节的规则推导，槽位自身的停止（LANCET 返回的取消或效果不确定）优先，否则取关闭 Step 的外部停止（Cancelled、Deadline 或 ProcessExit）；达到模型步骤上限时为步骤上限。
 
 ```text
 TurnOutcome = Completed | Failed { reason } | Cancelled
@@ -136,25 +136,34 @@ TurnOutcome = Completed | Failed { reason } | Cancelled
 
 ### 7. 调用槽位
 
-槽位保存现有 `ToolResultOutcome` 的一种，以及按 outcome 确定形状的载荷：
+槽位保存 `ToolResultOutcome` 的一种，以及按 outcome 确定形状的载荷。与第 6 节的模型尝试一样分“结束形状 × 原因”两维：outcome 只说明 LANCET 给出了什么，原因在载荷里。
 
-| outcome | 载荷 |
-| --- | --- |
-| Succeeded | 完整 JSON value |
-| Failed、Rejected | 结构化 CepError |
-| Cancelled、NotExecuted、Indeterminate | 类型化原因 |
+| outcome | 含义 | 载荷 |
+| --- | --- | --- |
+| Succeeded | LANCET 返回 JSON | 完整 JSON value |
+| Failed | LANCET 返回 `CallCancelled`、`OutcomeIndeterminate` 以外的 CepError；策略或校验拒绝是其中的错误族（Validation、Permission、Guard） | 结构化 CepError，错误码与可重试性原样保存 |
+| NotExecuted | 从未交给 LANCET；唯一保证没有外部效果的结局 | 无；为什么停看 Step 的 `end.cause` |
+| Indeterminate | 已越过 Started，效果未知 | `IndeterminateCause`：`NoResult`（Step 停止或进程退出时尚未取得结果，由关闭事务补写）、`Cancelled`（LANCET 返回 `CallCancelled`）、`Reported`（LANCET 返回 `OutcomeIndeterminate`） |
 
 - 发给模型的结果文本不存储，由 provider 投影从载荷派生；投影是纯函数，不在请求时扫描、补齐缺失结果。
-- 取消、停止或自动关闭时，每个未完成调用写入类型化终态，不伪造成功输出：已 Started 无结果的为 Indeterminate；未 Started 的为 NotExecuted，原因为 `CancelledBeforeDispatch`、`DeadlineBeforeDispatch`、`PrecedingInvocationIndeterminate` 或 `BeforeDispatch`（见第 8 节）。给模型的文字先用按终态类型固定的最小文案，#220 定下统一反馈后对齐。
+- Succeeded 与 Failed 继续下一调用；NotExecuted 与 Indeterminate 停止后续分发。Failed 中拒绝类错误之后是否继续请求模型归 #220。
+- 取消、停止或自动关闭时，关闭事务为每个未完成调用写入终态，不伪造成功输出：已 Started 无结果的为 `Indeterminate(NoResult)`，未 Started 的为 NotExecuted。这两种终态只由关闭事务写入，与 Step、Turn 关闭同事务。给模型的文字先用按终态固定的最小文案，#220 定下统一反馈后对齐。
 - result Cell 形态不在本阶段冻结。库中的值带格式版本，#117 定下后作为新增字段加入 Succeeded 载荷。
 - InvocationId 在第 5 节第 3 步的同一事务中插入全局索引。键冲突时放弃该事务、重新生成后重试；预留与步骤写入在一个事务里，不再需要跨库的候选修订流程。
 - "执行前先持久记录 Started，崩溃后无结果即 Indeterminate，不重新执行"保持不变。外部效果与记录无法同时完成，这条规则与记录粒度无关。
+
+为什么这样设计：
+
+- **与模型尝试一致的两维结构。** `AttemptEnd` 只有 `Completed` 与 `Stopped` 两种形状，原因在 `cause` 里；槽位同样用四种形状回答“LANCET 给出了什么”，原因放在 CepError 或 `IndeterminateCause` 里，不按原因拆出新的结局。读者只看 outcome 就能判断效果保证和批次是否继续。
+- **停止原因只记在 Step 一处。** 嵌套关系是 Turn → Step → 槽位，原因只从下往上传：槽位自身的停止上升为 Step 的 `end.cause`，外部停止直接记在 Step 上，不往下抄到未执行的槽位。原先每个 NotExecuted 槽位携带的原因只是 Step 原因的副本，还要额外校验两者一致。
+- **取消只剩一种写法。** 分发前的取消是 Step 的 Cancelled，余下槽位为 NotExecuted；分发后 LANCET 返回的取消是该槽位的 `Indeterminate(Cancelled)`。分发后的取消不能说明效果没有发生，属于效果未知，所以不再单独设 Cancelled 结局。
+- **拒绝不再冒充“执行前被拒”。** 独立的 Rejected 结局容易被读成未执行，但拒绝可能发生在 Component 执行途中，此前的宿主操作可能已生效。拒绝归入 Failed，由错误码及其错误族区分；唯一承诺“没有外部效果”的是 NotExecuted。
 
 ### 8. 取消、中断与崩溃后自动关闭
 
 - 取消或失败后，Session 当前位置停在该 Turn 最后写入的节点，已完成的步骤进入之后的上下文。用户取消通常是为了换种说法继续，已完成的工具结果仍有用；需要丢弃时 rewind 到该用户消息之前。
 - 崩溃遗留的进行中 Turn 仍按 closure-only 规则由后台在该 Session 下一次写操作前自动关闭，不请求 provider、不执行 Tool：ActiveStep 处于 `Requesting` 时追加 `Stopped { ProcessExit }`；处于执行时按第 7 节写入各槽位终态并写 Step 节点；随后以 `Stop` 关闭 Step 与 Turn。自动关闭所需事实全部在同一库中，由一个事务完成。
-- 执行中关闭的 `cause` 与 live 执行使用同一有序终态规则：按片段顺序取第一个导致停止分发的终态（已持久的或刚补写的），取消类得到 Cancelled，Indeterminate 得到调用效果不确定，`NotExecuted(DeadlineBeforeDispatch)` 得到 Deadline，自动关闭补写的 `NotExecuted(BeforeDispatch)` 得到 ProcessExit。live 执行决定停止分发时，余下槽位的终态（含原因）与 Step、Turn 关闭同事务写入。`DeadlineBeforeDispatch` 是对现有 `NotExecutedReason` 的新增变体，原先这一原因只存在于 live 内存。已写入的取消或 Deadline 在崩溃后仍得到同一原因，崩溃时机不改变结局。
+- 执行中关闭的 `cause` 与 live 执行、读取校验使用同一规则：槽位自身决定的停止优先（`Indeterminate(Cancelled)` 得到 Cancelled，`Indeterminate(Reported)` 得到 `InvocationIndeterminate`），否则取关闭 Step 的外部停止（live 在两次分发之间发现的 Cancelled 或 Deadline，或自动关闭的 ProcessExit）；完整规则见[会话合同](../architecture/session.md#执行中-step-的停止原因)。live 执行决定停止分发时，补写的终态与 Step、Turn 关闭同事务写入，所以已写入的取消或 Deadline 在崩溃后仍得到同一原因；崩溃落在某个槽位 Started 之前或之后，Step 原因都是 ProcessExit，崩溃时机不改变结局。
 
 ### 9. 对外结局呈现
 
@@ -246,6 +255,16 @@ ADR 0005 部分被本 ADR 取代，正文保留。ADR 0003 的“Rewind”一节
 - 进行中 Turn 的观察状态占用后台内存：每个 Turn 至多约 4 MiB 文字加一个事件窗口，同时至多 32 个 Turn。这是 provider 解析器已有累积文字的一份拷贝，因为观察层只能拿到中立的 delta 事件。
 - OpenAI 兼容 Step 的 parts 从固定顺序改为到达顺序，多段消息的 `semantic_digest` 随之变化；旧数据不迁移，没有兼容负担。
 - 全部会话集中在一个库文件；文件损坏影响所有 Session。redb 提供崩溃恢复与完整性检查，本阶段不另建备份机制。
+
+槽位结局改为第 7 节的四种形状后，与本 ADR 此前的文本相比，以下行为有变化：
+
+- 崩溃时有已 Started 的槽位：Step 原因为 ProcessExit（原为 `InvocationIndeterminate`），后续槽位为不带原因的 NotExecuted（原为 `PrecedingInvocationIndeterminate`）。崩溃落在 Started 前后，Step 原因与 Turn 结局相同。
+- Started 已提交、交给执行前发现取消或 Deadline：Step 原因是实际的 Cancelled 或 Deadline（原为 `InvocationIndeterminate`），该槽位为 `Indeterminate(NoResult)`。
+- live 执行中 LANCET 返回 `CallCancelled`：该槽位为 `Indeterminate(Cancelled)`，后续槽位为 NotExecuted（原为 `BeforeDispatch`），Step 原因为 Cancelled。
+- 类型上删除 `NotExecutedReason`（四个变体）、`CancelledReason`、`IndeterminateReason::MayHaveOccurred` 与 `RejectedReason`，结局删除 Rejected 与 Cancelled；证据原因 `EvidenceUnavailableReason::ProcessExit` 改名为 `NoResult`。
+- 给模型的最小文案：NotExecuted 为 `{"outcome":"not_executed"}`，Indeterminate 为 `{"outcome":"indeterminate","cause":"no_result|cancelled|reported"}`；Failed 仍给有界的 code 与 message。Anthropic 的 `is_error` 与 Gemini 的 `error` 字段只用于 Failed。
+- 操作员读出的原因为 `OperatorReason = Failed { code, retriability } | Indeterminate(IndeterminateCause)`，NotExecuted 与 Succeeded 的 `reason` 为 null。
+- redb 格式版本不升级：本 ADR 的存储尚未发布数据。
 
 ## 否决的方案
 

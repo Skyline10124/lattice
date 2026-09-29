@@ -114,7 +114,7 @@ sequenceDiagram
 | --- | --- |
 | 会话树 | 用户消息、完整模型回复及其调用结果，供重连读取及下一次模型请求使用；来自会话库中已写入的节点 |
 | 当前尝试的段列表 | 模型正在生成的正文与 reasoning，用于即时显示；只保存在后台内存，Step 关闭后由 Step 节点取代，不进入历史 |
-| 调用 outcome | 文件读取调用是 Succeeded、Failed、Cancelled 等哪种执行结果，由调用槽位中的终态确定 |
+| 调用 outcome | 文件读取调用是 Succeeded、Failed、NotExecuted 还是 Indeterminate，由调用槽位中的终态确定 |
 | 结果载荷 | 调用的返回内容，例如读取到的文件内容；供模型使用的文字由 provider 投影从载荷派生，详见[调用槽位](#调用槽位) |
 | Turn 结局 | 整次请求关闭为 Completed、Failed 或 Cancelled，连同面向用户的说明 notice 保存在 Turn 记录；完成关闭不限定为业务成功 |
 
@@ -323,37 +323,38 @@ stateDiagram-v2
 2. 把调用交给 LANCET 执行，取得执行结果、载荷与 Cell 证据。
 3. 提交该槽位的终态、载荷与证据。
 
-每个槽位最终写入 `ToolResultOutcome` 的一种结局，以及按结局确定形状的载荷。判定只看两件事：调用有没有越过第 1 步的 `Started`，以及 LANCET 返回了什么。
+每个槽位最终写入 `ToolResultOutcome` 的一种结局，以及按结局确定形状的载荷。结局与[模型尝试](#模型请求与执行预算)一样分两维：结局是结束形状，只说明 LANCET 给出了什么；原因放在载荷的 `CepError` 或 `IndeterminateCause` 里。判定只看两件事：调用有没有越过第 1 步的 `Started`，以及 LANCET 返回了什么。
 
 | 结局 | 越过 Started | 判定依据 | 载荷 | 外部效果 |
 | --- | --- | --- | --- | --- |
-| NotExecuted | 否 | 协调层停止分发，调用从未交给 LANCET；原因见下文 | 类型化原因 | 保证没有 |
-| Succeeded | 是 | LANCET 正常返回 JSON | 完整 JSON value | 可能已发生 |
-| Rejected | 是 | 返回的 CepError 属于 Validation（参数或结果校验）、Permission（权限与准入）或 Guard（策略守卫）错误族 | 结构化 CepError（含 message；发给模型的内容保留有界 message，模型可据此修正参数） | 可能已发生 |
-| Failed | 是 | 返回的 CepError 属于其余错误族，且不是 `CallCancelled` 或 `OutcomeIndeterminate` | 同 Rejected | 可能已发生 |
-| Cancelled | 是 | 返回 `CallCancelled`，即分发后被取消 | 类型化原因 | 可能已发生 |
-| Indeterminate | 是 | 返回 `OutcomeIndeterminate`；或越过 Started 后在 Step 关闭前没有结果，由取消、停止或自动关闭补写 | 类型化原因 | 未知 |
+| Succeeded | 是 | LANCET 返回 JSON | 完整 JSON value | 可能已发生 |
+| Failed | 是 | LANCET 返回 `CepError`，且不是 `CallCancelled` 或 `OutcomeIndeterminate`；策略或校验拒绝也在其中 | 结构化 CepError，错误码与可重试性原样保存 | 可能已发生 |
+| NotExecuted | 否 | 调用从未交给 LANCET：Step 在它 Started 之前停止 | 无 | 保证没有 |
+| Indeterminate | 是 | 越过 Started 后没有取得确定结果 | `IndeterminateCause`，见下文 | 未知 |
 
-错误族由 [`CepErrorCode::family`](../../crates/lancet-protocol/src/error.rs) 定义，映射由 [`prepare_terminal`](../../crates/lattice-session/src/store/close.rs) 执行。载荷还遵循：
+错误族由 [`CepErrorCode::family`](../../crates/lancet-protocol/src/error.rs) 定义，映射由 [`prepare_terminal`](../../crates/lattice-session/src/store/close.rs) 执行：返回 JSON 为 Succeeded，返回 `CallCancelled` 为 `Indeterminate(Cancelled)`，返回 `OutcomeIndeterminate` 为 `Indeterminate(Reported)`，其余任何 `CepError` 为 Failed。
+
+拒绝是 Failed 中 Validation（参数或结果校验）、Permission（权限与准入）和 Guard（策略守卫）错误族的错误，不是单独的结局，因为被拒绝不等于没有执行。拒绝可能发生在准入阶段，此时 Component 未运行（如 `CapabilityNotGranted`）；也可能发生在 Component 执行途中，某次宿主操作被拒（如 `PathContainment`、`ReplanRequired`，运行时优先采用宿主记录的拒绝），或返回结果未通过校验，这时此前的宿主操作可能已经生效。读者按错误码及其错误族区分拒绝。
+
+Indeterminate 的原因 `IndeterminateCause` 有三种：
+
+- `NoResult`：Step 停止或进程退出时，这个已 Started 的调用还没有取得结果，由关闭事务补写。Started 已提交、交给 LANCET 之前发现取消或 Deadline 也属于这种情况：越过 Started 后不能再证明未执行。
+- `Cancelled`：LANCET 返回 `CallCancelled`，即交出后被取消。
+- `Reported`：LANCET 返回 `OutcomeIndeterminate`，由执行方报告效果不确定。
+
+NotExecuted 不带原因。停止原因沿 Turn → Step → 槽位的嵌套只从下往上传：为什么停只在 Step 的 `end.cause` 中记录一次，不抄到每个未执行的槽位，推导规则见[执行中 Step 的停止原因](#执行中-step-的停止原因)。
+
+Succeeded 与 Failed 是 LANCET 给出的确定结果，允许继续下一调用；NotExecuted 与 Indeterminate 停止后续分发（[`stops_batch`](../../crates/lattice-session/src/store/close.rs)），停止之后的槽位只能是 NotExecuted。live 执行与自动关闭从有序槽位终态通过同一规则得出批次控制，崩溃时机不改变 Turn 结局。Failed 中拒绝类错误之后是否继续请求模型、混合批次如何执行，由 [#220](https://github.com/Skyline10124/lattice/issues/220) 另行裁决，不改变槽位形态。
+
+载荷还遵循：
 
 - Succeeded 载荷的规范 JSON 超过 65,536 字节时，不保存正文、不截断，保留完整摘要与长度，ToolResult 标明内容不可用（OutputTooLarge）；outcome 仍为 Succeeded。需要大输出的 Tool 通过自身接口提供分页、游标或摘要。
-- 发给模型的结果文字不存储，由 provider 投影从载荷派生。取消或关闭时补写的终态使用按终态类型固定的最小文案，#220 定下统一反馈后对齐。
+- 发给模型的结果文字不存储，由 provider 投影从载荷派生。Failed 给出有界的错误码与 message，模型可据此修正参数；NotExecuted 与 Indeterminate 使用固定的最小文案 `{"outcome":"not_executed"}` 与 `{"outcome":"indeterminate","cause":"no_result|cancelled|reported"}`。provider 的错误标记（Anthropic `is_error`、Gemini `error`）只用于 Failed。#220 定下统一反馈后对齐。
 - result Cell 的形态不在本合同冻结。库中的值带格式版本，[#117](https://github.com/Skyline10124/lattice/issues/117) 定下后作为新增字段加入 Succeeded 载荷。
-
-Rejected 与 Failed 的区别是错误种类，不是有没有执行。拒绝可能发生在准入阶段，此时 Component 未运行（如 `CapabilityNotGranted`）；也可能发生在 Component 执行途中，某次宿主操作被拒（如 `PathContainment`、`ReplanRequired`，运行时优先采用宿主记录的拒绝），或返回结果未通过校验，这时此前的宿主操作可能已经生效。
-
-同一个取消按阶段落在不同结局：分发前收到取消为 NotExecuted；分发后被取消、LANCET 返回 `CallCancelled` 时才写 Cancelled；已越过 Started 却没有取得结果的为 Indeterminate。NotExecuted 的原因：
-
-- `CancelledBeforeDispatch`：分发前收到取消。
-- `DeadlineBeforeDispatch`：分发前 Turn deadline 已到。它是新增变体，用来把分发前的 Deadline 写成持久事实；其余三个沿用现有 `NotExecutedReason`。
-- `PrecedingInvocationIndeterminate`：同一回复中前序调用的效果不确定。
-- `BeforeDispatch`：其他停止，包括前序调用被取消后余下的调用和自动关闭补写。
-
-Succeeded、Failed 或 Rejected 允许继续下一调用；Cancelled、NotExecuted 或 Indeterminate 停止后续分发。取消或停止时，未完成的槽位按上述规则写入类型化终态后关闭 Step，不伪造成功输出，已有终态保持原值。live 执行与自动关闭从有序槽位终态通过同一规则得出批次控制，崩溃时机不改变 Turn 结局。Rejected 之后是否继续请求模型、混合批次如何执行，由 [#220](https://github.com/Skyline10124/lattice/issues/220) 另行裁决，不改变槽位形态。
 
 停止与收尾的写入：
 
-- live 执行决定停止分发时，余下槽位的终态与 Step 节点、`end`、Turn 关闭在同一事务写入，所以停止原因要么已随终态持久，要么尚未决定。
+- 关闭进行中的 Step 时，关闭事务为未完成的槽位补写终态：已 Started 无结果的写 `Indeterminate(NoResult)`，证据为 `Unavailable { NoResult }`；只登记、未 Started 的写 NotExecuted，证据为 `Unavailable { NotDispatched }`。已有终态保持原值，不伪造成功输出，也不依据缺少结果推定文件未改变。这两种终态只由关闭事务写入，与 Step 节点、`end` 及 Turn 关闭在同一事务，所以停止原因要么已随 `end` 持久，要么尚未决定。
 - Tool 执行返回后，终态写入属于必要收尾，不受 Turn deadline 约束。写入失败按[事务失败](#事务与一致性)处理，后续调用不分发。
 
 LANCET 的执行、准入与证据由 [LANCET 调用流程](lancet.md#调用身份与执行流程)维护。
@@ -364,10 +365,10 @@ LANCET 的执行、准入与证据由 [LANCET 调用流程](lancet.md#调用身�
 
 - `Continue(node)`：协调器决定继续请求模型，随后开始下一 Step。
 - `Finish(node)`：模型给出无工具调用的完整回答。
-- `Stop { node, cause }`：因取消、错误、效果不确定、Deadline 或步骤上限停止。`cause` 是实际导致停止的原因，与 `end` 同事务写入：
+- `Stop { node, cause }`：因取消、错误、调用效果不确定（`InvocationIndeterminate`）、Deadline、进程退出或步骤上限停止。`cause` 是实际导致停止的原因，与 `end` 同事务写入：
   - 没有完整回复、因某次尝试不再重试而停止：取该尝试的原因，`node` 为 None。
   - 没有完整回复、在尝试之前或两次尝试之间（重试退避中）收到取消或 Turn deadline 已到：取 Cancelled 或 Deadline，不开始新尝试，也不沿用先前尝试的原因；`node` 为 None。
-  - 有完整回复：`node` 指向写入的 Step 节点，`cause` 按[自动关闭](#自动关闭崩溃遗留任务)中的有序终态规则从槽位终态推导。
+  - 有完整回复、执行调用期间停止：`node` 指向写入的 Step 节点，`cause` 按[执行中 Step 的停止原因](#执行中-step-的停止原因)推导。
   - 达到模型步骤上限：步骤上限。
 
 `Finish` 或 `Stop` 的 Step 是 Turn 的最后一个 Step，同一事务补全 Turn 记录并清除 Session 的进行中 Turn：
@@ -383,6 +384,16 @@ TurnOutcome = Completed | Failed { reason } | Cancelled
 关闭 Turn 只写会话库，不读取工作区历史，也不取得工作区操作锁。Turn 与文件变更的关联由工作区历史中每条变更记录的 `TurnId` 与 `InvocationId` 承载，见[私有存储与数据关系](workspace.md#私有存储与数据关系)。
 
 会话库事务提供本库的原子提交；工作区历史与会话库各自提交，所以读取可能见到跨库中间状态，例如文件已记入工作区历史而 Turn 尚未关闭。已发生的文件效果由工作区合同处理。
+
+#### 执行中 Step 的停止原因
+
+执行调用期间关闭的 Step，`cause` 由槽位终态和关闭 Step 的外部停止共同决定（[`step_stop_cause`](../../crates/lattice-session/src/store/close.rs)）。外部停止是协调层在两次分发之间发现的取消或 Turn deadline，或进程退出后由[自动关闭](#自动关闭崩溃遗留任务)记录的 ProcessExit。推导顺序：
+
+1. 按片段顺序找第一个由槽位自身决定停止的终态：`Indeterminate(Cancelled)` 得到 `Cancelled`，`Indeterminate(Reported)` 得到 `InvocationIndeterminate { invocation_id }`。
+2. 找不到时，取外部停止：`Cancelled`、`Deadline` 或 `ProcessExit`。NotExecuted 与 `Indeterminate(NoResult)` 自身不带原因，由这一步说明它们为什么停下。
+3. 所有槽位都已有确定结果（均为 Succeeded 或 Failed）时，只有 ProcessExit 能让该 Step 以 `Stop` 关闭；这时发现的取消或 Deadline 先以 `Continue` 关闭该 Step，再在下一 Step 开始请求之前以 `Stop { node: None, cause }` 停止 Turn。
+
+live 执行、自动关闭和读取校验使用这同一条规则：校验从已保存的槽位终态重新推导 `end.cause`，与记录不符即为损坏。所以崩溃时机不改变结局：进程在某个槽位 Started 之前或之后退出，该槽位分别补写为 NotExecuted 或 `Indeterminate(NoResult)`，Step 原因都是 ProcessExit。
 
 ## 重开、取消与未完成状态
 
@@ -481,13 +492,13 @@ true 后由后台履行责任，不自动补发；再次明确取消可开始新
 | ActiveStep 为 `Requesting`，尝试尚无终态 | 追加 `Stopped { ProcessExit }`，`Stop { None, ProcessExit }` | Failed |
 | ActiveStep 处于重试间隙：最后尝试为可重试终态，且该步骤尝试预算未尽 | `Stop { None, ProcessExit }`，不恢复重试 | Failed |
 | ActiveStep 最后尝试为不可重试终态，或为可重试终态但尝试预算已尽，Step 尚未关闭 | 当前事务序列不会产生此状态（不再重试的 `Stopped` 与 Step、Turn 关闭同事务写入），读到时按数据损坏报告，不关闭 | — |
-| 执行中，存在未 Started 的槽位 | 该槽位写 NotExecuted：前序有 Indeterminate 时原因为 `PrecedingInvocationIndeterminate`，否则为 `BeforeDispatch` | 见下两行 |
-| 执行中，存在已 Started 无终态的槽位 | 该槽位写 Indeterminate；不依据缺少结果推定文件未改变 | 见下一行 |
-| 执行中，各槽位已有终态或已按上两行补写 | 写入 Step 节点，`Stop { Some(node), cause }`，`cause` 按下文规则推导 | Cancelled 或 Failed |
+| 执行中，存在未 Started 的槽位 | 该槽位写 NotExecuted，不带原因 | 见下两行 |
+| 执行中，存在已 Started 无终态的槽位 | 该槽位写 `Indeterminate(NoResult)`；不依据缺少结果推定文件未改变 | 见下一行 |
+| 执行中，各槽位已有终态或已按上两行补写 | 写入 Step 节点，`Stop { Some(node), cause }`，`cause` 按[执行中 Step 的停止原因](#执行中-step-的停止原因)推导，外部停止为 ProcessExit | Cancelled 或 Failed |
 | 最后一个 Step 以 `Continue` 关闭，下一 Step 尚未开始 | 一条无尝试的 Step 记录，`Stop { None, ProcessExit }` | Failed |
 | Turn 记录已关闭 | 无需处理 | 原结局 |
 
-表中“执行中”的各行同时适用：先补写各槽位终态，再写 Step 节点与 `end`。`cause` 与 live 执行使用同一有序终态规则：按片段顺序取第一个导致停止分发的终态（已持久的或刚补写的）——Cancelled 或 NotExecuted(`CancelledBeforeDispatch`) 得到 Cancelled，Indeterminate 得到调用效果不确定，NotExecuted(`DeadlineBeforeDispatch`) 得到 Deadline，NotExecuted(`BeforeDispatch`) 得到 ProcessExit。live 执行的停止原因随余下终态与 Step 关闭同事务写入，所以已写入的取消或 Deadline 在崩溃后仍得到同一原因；尚未写入的停止决定不存在于库中，按 ProcessExit 关闭。关闭事务提交前出错时，Turn 保持原状，再次触发时重新规划；会话库不可写时返回错误与恢复需求。
+表中“执行中”的各行同时适用：先按[停止与收尾的写入](#调用槽位)补写各槽位终态，再写 Step 节点与 `end`。槽位自身决定的停止（LANCET 返回的取消或效果不确定）优先，其余情况得到 ProcessExit。live 执行的停止原因随余下终态与 Step 关闭同事务写入，所以已写入的取消或 Deadline 在崩溃后仍是同一原因；尚未写入的停止决定不存在于库中，按 ProcessExit 关闭。关闭事务提交前出错时，Turn 保持原状，再次触发时重新规划；会话库不可写时返回错误与恢复需求。
 
 ### 停止后台
 
