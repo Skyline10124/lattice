@@ -222,8 +222,8 @@ strict_uuid_v4_id!(
 
 strict_uuid_v4_id!(
     /// One accepted user Turn identity (ADR 0005 §1): a strict lowercase
-    /// hyphenated UUID v4, preserved explicitly on the `TurnCommit` and never
-    /// derived late from content or a commit seed.
+    /// hyphenated UUID v4, preserved explicitly on the Turn record and never
+    /// derived late from content.
     TurnId,
     "TurnId"
 );

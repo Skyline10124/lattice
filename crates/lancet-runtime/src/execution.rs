@@ -66,7 +66,7 @@ impl RuntimeExecution {
         ))
     }
 
-    /// Admit and execute one exact, already-reserved invocation.
+    /// Admit and execute one exact, already-registered invocation.
     pub async fn call(
         &self,
         binding: InvocationBinding,

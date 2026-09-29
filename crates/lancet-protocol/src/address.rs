@@ -5,8 +5,8 @@
 //!
 //! Pre-commit conversation addresses are structural rather than random. They
 //! identify a model message or one of its ToolCall parts before any commit
-//! exists, and they are the address vocabulary shared by conversation binding,
-//! InvocationStore reservation tuples, and reconciliation.
+//! exists, and they are the address vocabulary shared by conversation binding
+//! and the Session store's invocation slots.
 //!
 //! `PlanKey` has no random `PlanId` and no second aggregate batch digest;
 //! exact ordered bindings are the idempotency input.
@@ -62,8 +62,7 @@ pub struct ModelAttemptKey {
 /// Idempotency key of one binding plan: the exact ordered bindings of one
 /// model step of one Turn of one Session. There is no random `PlanId`
 /// (ADR 0005 §1); the full identity is session + Turn + model step, so two
-/// Sessions that happen to share a TurnId occupy distinct plan keys in the
-/// project-level invocation ledger.
+/// Sessions that happen to share a TurnId have distinct plan keys.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]

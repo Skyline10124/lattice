@@ -3,10 +3,11 @@
 
 //! Caller-supplied invocation binding facts (ADR 0005 §1/§11).
 //!
-//! A JSON-RPC request never allocates or reserves an invocation. It carries the
-//! exact immutable binding that the Turn coordinator already published in the
-//! InvocationStore. Server acceptance compares these facts byte-for-byte with
-//! the durable `Reserved` record before publishing `DispatchStarted`.
+//! A JSON-RPC request never allocates an invocation. It carries the exact
+//! immutable binding that the Turn coordinator already registered as an
+//! invocation slot of the current Step in the Session store (ADR 0006). Before
+//! execution, LANCET checks that the request method and canonical arguments
+//! match this binding and that the descriptor identity is in the frozen catalog.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -19,7 +20,7 @@ use crate::{
 
 const ARGUMENTS_DOMAIN: &[u8] = b"lattice-tool-arguments-digest-v1\0";
 
-/// Immutable non-secret identity of one reserved Tool binding.
+/// Immutable non-secret identity of one registered Tool binding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BindingIdentity {
@@ -58,7 +59,7 @@ impl BindingIdentity {
 pub struct InvocationBinding {
     /// Canonical JSON-RPC request identity.
     pub invocation_id: InvocationId,
-    /// Facts that must exactly match the durable reservation.
+    /// Facts that must exactly match the durable invocation slot.
     pub identity: BindingIdentity,
 }
 
