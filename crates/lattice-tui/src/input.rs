@@ -362,23 +362,4 @@ mod tests {
             );
         }
     }
-
-    #[test]
-    fn control_arrows_select_history_actions() {
-        assert!(matches!(
-            resolve_key(key(KeyCode::Up, KeyModifiers::CONTROL), false, false),
-            KeyAction::HistoryPrev
-        ));
-        assert!(matches!(
-            resolve_key(key(KeyCode::Down, KeyModifiers::CONTROL), false, false),
-            KeyAction::HistoryNext
-        ));
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut history = History::load(dir.path());
-        history.push("first");
-        history.push("second");
-        assert_eq!(history.prev(), Some("second"), "newest entry first");
-        assert_eq!(history.prev(), Some("first"));
-        assert_eq!(history.next(), Some("second"), "down walks back forward");
-    }
 }

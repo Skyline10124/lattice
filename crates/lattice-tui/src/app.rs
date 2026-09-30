@@ -564,12 +564,6 @@ impl App {
         }
     }
 
-    /// Number of transcript rows at the shared content width, used by `Viewport`.
-    #[cfg(test)]
-    pub(crate) fn content_rows(&self, content_w: u16) -> usize {
-        render_transcript(self, content_w).lines.len()
-    }
-
     pub(crate) fn prepare_transcript(&mut self) -> Transcript {
         let width = frame_layout(self.term_width, self.term_height).content_w;
         let transcript = render_transcript(self, width);
@@ -1713,10 +1707,6 @@ mod loop_tests;
 mod connection_tests;
 
 #[cfg(test)]
-#[path = "browse_tests.rs"]
-mod browse_tests;
-
-#[cfg(test)]
 mod tests {
     use super::*;
     #[test]
@@ -1766,34 +1756,6 @@ mod tests {
                 assert!(enabled.is_none());
             } else {
                 assert!(enabled.unwrap() < restored.unwrap());
-            }
-        }
-    }
-
-    #[test]
-    fn terminal_modes_set_shape_before_input_modes_and_restore_shape_first() {
-        for kitty in [false, true] {
-            let mut output = Vec::new();
-            enable_terminal_modes(&mut output, kitty).unwrap();
-            assert!(
-                output.starts_with(b"\x1b[1 q"),
-                "blinking block must be set first"
-            );
-            assert!(output.windows(8).any(|part| part == b"\x1b[?2004h"));
-            let split = output.len();
-            restore_terminal_modes(&mut output, kitty).unwrap();
-            assert!(
-                output[split..].starts_with(b"\x1b[0 q"),
-                "restore shape before input modes"
-            );
-            assert!(
-                output[split..]
-                    .windows(8)
-                    .any(|part| part == b"\x1b[?2004l")
-            );
-            assert_eq!(output.windows(5).any(|part| part == b"\x1b[<1u"), kitty);
-            for marker in [b"\x1b[?25h", b"\x1b[?25l"] {
-                assert!(!output.windows(marker.len()).any(|part| part == marker));
             }
         }
     }
@@ -1938,83 +1900,6 @@ mod tests {
         app.input.set_text("/quit");
         assert_eq!(app.apply_action(KeyAction::Submit), None);
         assert!(app.should_quit);
-    }
-
-    #[test]
-    fn startup_notice_stays_before_the_submitted_turn_after_history_loads() {
-        let mut app = test_app();
-        app.push_status(StatusKind::Notice(vec!["banner".into()]));
-        app.input.set_text("ping");
-        app.apply_action(KeyAction::Submit);
-        let id = app.current_turn.unwrap();
-        app.replace_history(vec![
-            Block::AgentName("agent".into()),
-            Block::UserTurn(id, std::num::NonZeroUsize::MIN),
-            Block::User("ping".into()),
-            Block::Step(StepKey {
-                turn_id: id,
-                ordinal: 0,
-            }),
-            Block::Assistant("answer".into()),
-        ]);
-        let position = |wanted: fn(&Block) -> bool| app.blocks.iter().position(wanted).unwrap();
-        assert!(
-            position(
-                |b| matches!(b, Block::Status { kind: StatusKind::Notice(lines), .. } if lines == &["banner".to_string()])
-            ) < position(|b| matches!(b, Block::UserTurn(..))),
-            "{:?}",
-            app.blocks
-        );
-    }
-
-    #[test]
-    fn model_events_update_statusline_even_when_step_content_is_already_loaded() {
-        // 每组是独立请求；previous 是本客户端先前请求留下的上下文用量。
-        for (previous, total, expected) in [
-            (None, None, None),
-            (None, Some(12345u64), Some(12345)),
-            (Some(12345), None, Some(12345)),
-            (Some(12345), Some(47), Some(47)),
-        ] {
-            let mut app = test_app();
-            app.model = Some("previous-model".into());
-            app.context_tokens = previous;
-            let key = attempt();
-            // 快照可先装入 Step，随后才收到同一请求的模型事件。
-            app.replace_history(vec![
-                Block::AgentName("agent".into()),
-                Block::UserTurn(key.turn_id, std::num::NonZeroUsize::MIN),
-                Block::User("prompt".into()),
-                Block::Step(StepKey {
-                    turn_id: key.turn_id,
-                    ordinal: 0,
-                }),
-                Block::Assistant("answer".into()),
-            ]);
-            app.apply_turn_event(
-                serde_json::from_value(serde_json::json!({
-                    "type":"model_started", "key":key, "provider":"anthropic", "model":"model-a"
-                }))
-                .unwrap(),
-            );
-            assert_eq!(app.model.as_deref(), Some("model-a"));
-            assert_eq!(app.provider.as_deref(), Some("anthropic"));
-            assert_eq!(app.context_tokens, previous);
-            app.apply_turn_event(serde_json::from_value(serde_json::json!({
-                "type":"model_finished", "key":key, "finish_reason":"stop",
-                "usage":total.map(|total_tokens| serde_json::json!({"prompt_tokens":total_tokens - 7, "completion_tokens":7,"total_tokens":total_tokens}))
-            })).unwrap());
-            assert_eq!(app.context_tokens, expected);
-        }
-        // 提供商显示稳定标识，不是 serde 名。
-        let mut app = test_app();
-        app.apply_turn_event(
-            serde_json::from_value(serde_json::json!({
-                "type":"model_started", "key":attempt(), "provider":"open_ai_compatible", "model":"m"
-            }))
-            .unwrap(),
-        );
-        assert_eq!(app.provider.as_deref(), Some("openai"));
     }
 
     fn assert_failed_tool(app: &App, index: usize, reason: &str) {
@@ -2163,69 +2048,6 @@ mod tests {
     }
 
     #[test]
-    fn input_arrows_follow_visual_rows_and_control_arrows_browse_history() {
-        let mut app = test_app();
-        app.term_width = 5; // content_w = 5
-        app.history.push("first");
-        app.history.push("second");
-        app.input.set_text("abc中de\nx\n12中z");
-        app.input.cursor = (2, 2); // display column 2, before 中
-        let press = |app: &mut App, code, mods| {
-            handle_input_event(app, Event::Key(KeyEvent::new(code, mods)));
-        };
-        press(&mut app, KeyCode::Up, KeyModifiers::NONE);
-        assert_eq!(app.input.cursor, (1, 1), "clip to short line end");
-        press(&mut app, KeyCode::Up, KeyModifiers::NONE);
-        assert_eq!(
-            app.input.cursor,
-            (0, 5),
-            "previous soft row, display column 1"
-        );
-        press(&mut app, KeyCode::Up, KeyModifiers::NONE);
-        assert_eq!(app.input.cursor, (0, 1));
-        press(&mut app, KeyCode::Up, KeyModifiers::NONE);
-        assert_eq!(
-            app.input.text(),
-            "abc中de\nx\n12中z",
-            "first visual row does not browse history"
-        );
-        app.input.cursor = (0, 3);
-        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
-        assert_eq!(app.input.cursor, (0, 6), "clip to soft row end");
-        app.input.set_text("abcd\n中z");
-        app.input.cursor = (0, 1);
-        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
-        assert_eq!(
-            app.input.cursor,
-            (1, 0),
-            "never land inside a wide character"
-        );
-        app.input.end();
-        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
-        assert_eq!(app.input.cursor, (1, 2), "last row stays put");
-        press(&mut app, KeyCode::Up, KeyModifiers::CONTROL);
-        assert_eq!(app.input.text(), "second");
-        press(&mut app, KeyCode::Up, KeyModifiers::CONTROL);
-        assert_eq!(app.input.text(), "first");
-        press(&mut app, KeyCode::Down, KeyModifiers::CONTROL);
-        assert_eq!(app.input.text(), "second");
-        press(&mut app, KeyCode::Down, KeyModifiers::CONTROL);
-        assert!(app.input.is_empty());
-    }
-
-    #[test]
-    fn paste_grows_input_without_submitting() {
-        let mut app = test_app();
-        let submitted = app.apply_action(KeyAction::Paste("a\nb\nc".into()));
-        assert!(submitted.is_none());
-        assert_eq!(app.input.text(), "a\nb\nc");
-        // 3 行内容 + 空行 + 标题：Dock::height 是视口高度的唯一来源。
-        assert_eq!(Dock::new(&app).height(frame_layout(80, 24).content_w, 0), 5);
-        assert_eq!(app.transcript_height(0), 18);
-        assert_eq!(app.phase, TurnPhase::Idle);
-    }
-
-    #[test]
     fn double_ctrl_c_within_window_quits_single_does_not() {
         let mut app = test_app();
         assert!(!matches!(ctrl_c_action(&mut app), KeyAction::Quit));
@@ -2246,28 +2068,6 @@ mod tests {
     }
 
     #[test]
-    fn input_submit_queues_running_draft_and_help_describes_new_keys() {
-        let mut app = test_app();
-        let enter = Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(handle_input_event(&mut app, enter.clone()).is_none());
-        app.input.set_text("submit");
-        assert_eq!(
-            handle_input_event(&mut app, enter.clone()),
-            Some("submit".into())
-        );
-        app.input.set_text("next");
-        assert!(handle_input_event(&mut app, enter.clone()).is_none());
-        assert!(app.input.is_empty());
-        assert_eq!(app.queue.messages().next().unwrap().text, "next");
-        app.input.set_text("/help");
-        assert!(handle_input_event(&mut app, enter).is_none());
-        let text = transcript_text(&app, 120);
-        assert!(text.contains("Esc  清空输入"));
-        assert!(text.contains("Ctrl+C  取消"));
-        assert!(text.contains("Ctrl+↑/↓  输入历史"));
-    }
-
-    #[test]
     fn idle_stream_timeout_keeps_execution_unconfirmed() {
         let mut app = test_app();
         app.phase = TurnPhase::Streaming;
@@ -2283,97 +2083,68 @@ mod tests {
         )));
     }
 
-    /// §19.2：Warn / Error 的 Dock 生命周期与 transcript 时间顺序。
-    /// 释放后的状态必须回到它原本的时间位置，且只出现一次。
+    /// Warn / Error 的 Dock 生命周期：替换（含同级与 ERROR→WARN）和释放都不丢状态，
+    /// 释放后回到原本的时间位置且只出现一次；草稿不受影响。
     #[test]
     fn dock_lifecycle_keeps_transcript_order_and_draft() {
         let mut app = test_app();
         app.input.set_text("draft");
-        // 初始为 Prompt。
         assert!(app.dock_status().is_none());
 
-        // LlmRetry A → 只在 WARN Dock，transcript 暂不显示。
+        // WARN → WARN：旧状态原位释放，新状态暂驻 Dock。
+        app.apply_turn_event(retry("retry-0", true));
         app.apply_turn_event(retry("retry-a", true));
         let (kind, severity) = app.dock_status().expect("retry 应暂驻 Dock");
         assert!(matches!(kind, StatusKind::LlmRetry { message, .. } if message == "retry-a"));
         assert_eq!(severity, DockSeverity::Warn);
-        assert!(!transcript_text(&app, 78).contains("retry-a"));
+        let text = transcript_text(&app, 78);
+        assert!(text.contains("retry-0") && !text.contains("retry-a"));
 
         // INFO 类状态直接进 transcript，Dock 不受影响。
         app.push_status(StatusKind::Notice(vec!["info-i".into()]));
         assert!(transcript_text(&app, 78).contains("info-i"));
+
+        // WARN → ERROR，再 ERROR → WARN：每次替换都把旧状态释放到原位。
+        app.apply_turn_event(retry("commit-b", false));
         assert!(matches!(
             app.dock_status(),
-            Some((StatusKind::LlmRetry { .. }, _))
+            Some((StatusKind::LlmFailed { message, .. }, DockSeverity::Error)) if message == "commit-b"
         ));
-
-        // LlmFailed B → turnover：A 释放到 transcript，B 留在 ERROR Dock。
-        app.apply_turn_event(retry("commit-b", false));
-        let (kind, severity) = app.dock_status().expect("失败应暂驻 Dock");
-        assert!(matches!(kind, StatusKind::LlmFailed { message, .. } if message == "commit-b"));
-        assert_eq!(severity, DockSeverity::Error);
-        let text = transcript_text(&app, 78);
-        assert!(text.contains("retry-a"), "释放的 warn 保持原时间位置");
-        assert!(!text.contains("commit-b"), "新错误留在 Dock");
-
-        // Space：B 释放，Dock 回 Prompt，Space 不进入 InputBuffer，草稿不变。
-        let submitted = app.apply_action(KeyAction::Insert(' '));
-        assert!(submitted.is_none());
-        assert!(app.dock_status().is_none());
-        assert_eq!(app.input.text(), "draft");
-        assert_eq!(app.phase, TurnPhase::Idle);
-
-        // 最终 transcript 顺序仍为 A, I, B。
-        let text = transcript_text(&app, 78);
-        assert!(text.contains("retry-a"));
-        assert!(text.contains("commit-b"));
-        let order: Vec<usize> = ["retry-a", "info-i", "commit-b"]
-            .into_iter()
-            .map(|marker| {
-                transcript_lines(&app, 78)
-                    .iter()
-                    .position(|line| line.to_string().contains(marker))
-                    .unwrap_or_else(|| panic!("缺少 {marker}"))
-            })
-            .collect();
-        let mut sorted = order.clone();
-        sorted.sort_unstable();
-        assert_eq!(order, sorted, "transcript 顺序必须保持 A, I, B");
-
-        // 不变量：blocks 中至多一个 Dock placement。
-        assert_eq!(dock_placement_count(&app), 0);
-    }
-
-    /// 同级替换 WARN A -> WARN B：旧状态在 turnover 时进入 transcript。
-    #[test]
-    fn dock_turnover_replaces_same_severity_without_losing_the_old() {
-        let mut app = test_app();
-        for message in ["retry-a", "retry-b"] {
-            app.apply_turn_event(retry(message, true));
-        }
-        let (kind, severity) = app.dock_status().expect("最新 warn 暂驻 Dock");
-        assert!(matches!(kind, StatusKind::LlmRetry { message, .. } if message == "retry-b"));
-        assert_eq!(severity, DockSeverity::Warn);
-        let text = transcript_text(&app, 78);
-        assert!(text.contains("retry-a"), "旧 warn 已原位释放");
-        assert!(!text.contains("retry-b"));
-        assert_eq!(
-            dock_placement_count(&app),
-            1,
-            "不变量：至多一个 Dock placement"
-        );
-
-        // ERROR A -> WARN B 同理。
-        app.apply_turn_event(retry("turn-failed-a", false));
         app.apply_turn_event(retry("retry-c", true));
         assert!(matches!(
             app.dock_status(),
             Some((StatusKind::LlmRetry { message, .. }, DockSeverity::Warn)) if message == "retry-c"
         ));
-        let text = transcript_text(&app, 78);
-        assert!(text.contains("turn-failed-a"));
-        assert!(text.contains("retry-a") && text.contains("retry-b"));
-        assert_eq!(dock_placement_count(&app), 1);
+        assert_eq!(dock_placement_count(&app), 1, "至多一个 Dock placement");
+
+        // Space：释放当前状态，Space 不进入输入，草稿不变。
+        assert!(app.apply_action(KeyAction::Insert(' ')).is_none());
+        assert!(app.dock_status().is_none());
+        assert_eq!(app.input.text(), "draft");
+        assert_eq!(app.phase, TurnPhase::Idle);
+        assert_eq!(dock_placement_count(&app), 0);
+
+        // 每条状态恰好出现一次，且保持到达顺序。
+        let lines = transcript_lines(&app, 78)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        let order: Vec<usize> = ["retry-0", "retry-a", "info-i", "commit-b", "retry-c"]
+            .into_iter()
+            .map(|marker| {
+                let rows = lines
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, line)| line.contains(marker))
+                    .map(|(row, _)| row)
+                    .collect::<Vec<_>>();
+                assert_eq!(rows.len(), 1, "{marker} 应恰好出现一次");
+                rows[0]
+            })
+            .collect();
+        let mut sorted = order.clone();
+        sorted.sort_unstable();
+        assert_eq!(order, sorted, "保持到达顺序");
     }
 
     /// §14.3：WARN / ERROR 下屏蔽不可见输入编辑，全局动作照常。

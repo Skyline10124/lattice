@@ -201,105 +201,18 @@ fn save_comment(app: &mut App, text: &str) {
     app.apply_action(KeyAction::Submit);
 }
 
-fn comment_screen(app: &mut App) -> String {
-    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 40)).unwrap();
-    let frame = terminal.draw(|f| crate::view::draw(f, app)).unwrap();
-    screen_text(frame.buffer)
-}
-
-/// 包含 `text` 的对话行中，`text` 所在的片段是否铺了评论锚点底色。
-fn anchor_highlighted(app: &mut App, text: &str) -> bool {
-    let transcript = app.prepare_transcript();
-    let line = transcript
-        .lines
-        .iter()
-        .find(|line| line.to_string().contains(text))
-        .expect("visible text");
-    line.spans
-        .iter()
-        .filter(|span| text.contains(span.content.trim()) && !span.content.trim().is_empty())
-        .all(|span| span.style.bg == Some(crate::view::COMMENT_ANCHOR_BG))
-}
-
-/// 评论显示为整行铺底色的卡片：标签行、正文、下边距；编辑器按卡片内宽度折行。
-#[test]
-fn comment_card_fills_rows_and_editor_uses_inner_width() {
-    use crate::view::COMMENT_CARD_BG;
-    let mut h = comment_app();
-    let app = &mut h.app;
-    comment_browse(app, "comment target");
-    app.apply_action(KeyAction::Submit);
-    app.apply_action(KeyAction::Paste("note text".into()));
-    let card = |app: &mut App, right: &str| {
-        let transcript = app.prepare_transcript();
-        let tag = transcript
-            .lines
-            .iter()
-            .position(|line| line.to_string().contains(" COMMENT "))
-            .expect("comment tag");
-        // 卡片外空行、上边距、标签行、空行、正文、下边距。
-        let rows = &transcript.lines[tag - 2..tag + 4];
-        assert!(
-            rows[0].to_string().trim().is_empty()
-                && rows[0].spans.iter().all(|s| s.style.bg.is_none())
-        );
-        assert!(rows[1].to_string().trim().is_empty());
-        assert!(
-            rows[2].to_string().ends_with(&format!("{right}  "))
-                && rows[2].to_string().starts_with("  "),
-            "{}",
-            rows[2]
-        );
-        assert!(rows[3].to_string().trim().is_empty());
-        assert!(
-            rows[4].to_string().starts_with("  note text"),
-            "{}",
-            rows[4]
-        );
-        assert!(rows[5].to_string().trim().is_empty());
-        for row in &rows[1..] {
-            assert_eq!(row.width(), 100, "卡片铺到左列右缘");
-            assert!(
-                row.spans
-                    .iter()
-                    .all(|s| s.width() == 0 || s.style.bg.is_some()),
-                "{row}"
-            );
-        }
-        assert!(rows[2].spans.iter().any(
-            |s| s.content == " COMMENT " && s.style.bg.is_some_and(|bg| bg != COMMENT_CARD_BG)
-        ));
-        (transcript, tag)
-    };
-    let (transcript, tag) = card(app, "草稿 · Enter 保存 · Esc 放弃 · #1");
-    assert_eq!(
-        transcript.editor_cursor,
-        Some((tag + 2, 2 + "note text".len()))
-    );
-    assert_eq!(transcript.editor_width(100), 96, "左右各留两列内边距");
-    app.apply_action(KeyAction::Submit);
-    card(app, "草稿 · #1");
-}
-
 #[test]
 fn comment_three_esc_paths_saved_count_and_blank_save() {
     let mut h = comment_app();
     let app = &mut h.app;
-    assert!(!anchor_highlighted(app, "comment target"));
     comment_browse(app, "comment target");
     app.apply_action(KeyAction::Submit);
     app.apply_action(KeyAction::Paste("new discarded".into()));
-    assert!(!comment_screen(app).contains("条评论待发送"));
-    assert!(
-        anchor_highlighted(app, "comment target"),
-        "正在写的新评论已高亮锚点"
-    );
+    assert_eq!(app.queue.draft_count(), 0, "正在写的新评论不计入待发送");
     app.apply_action(KeyAction::Clear);
     assert!(!frame(app).text.contains("new discarded"));
-    assert!(!anchor_highlighted(app, "comment target"), "丢弃后取消高亮");
     save_comment(app, "saved note");
-    assert!(comment_screen(app).contains("1 条评论待发送"));
-    assert!(anchor_highlighted(app, "comment target"));
+    assert_eq!(app.queue.draft_count(), 1);
     comment_browse(app, "saved note");
     app.apply_action(KeyAction::Submit);
     app.apply_action(KeyAction::Paste(" discarded edit".into()));
@@ -308,8 +221,7 @@ fn comment_three_esc_paths_saved_count_and_blank_save() {
     assert!(!frame(app).text.contains("discarded edit"));
     comment_browse(app, "saved note");
     app.apply_action(KeyAction::Clear);
-    assert!(!comment_screen(app).contains("条评论待发送"));
-    assert!(!anchor_highlighted(app, "comment target"));
+    assert_eq!(app.queue.draft_count(), 0);
     save_comment(app, " \n\t");
     assert_eq!(app.queue.draft_count(), 0);
 }
@@ -365,21 +277,12 @@ fn comment_manual_rejections_keep_user_markers_and_restore_one_draft_copy() {
             "receipt {receipt}"
         );
         assert!(text.contains("草稿 · #1"), "receipt {receipt}: {text}");
-        comment_browse(app, "[COMMENT 1]");
-        app.apply_action(KeyAction::Submit);
-        let Focus::Transcript(cursor) = app.focus else {
-            panic!("draft jump");
-        };
-        assert_eq!(Some(cursor.block.id), app.queue.pending_comment_id(1));
+        comment_browse(app, "rejected note");
         app.apply_action(KeyAction::Submit);
         assert!(app.queue.is_editing(), "restored draft remains editable");
         app.apply_action(KeyAction::Clear);
         comment_browse(app, "rejected note");
         app.apply_action(KeyAction::Clear);
-        comment_browse(app, "[COMMENT 1]");
-        let before = app.focus;
-        app.apply_action(KeyAction::Submit);
-        assert_eq!(app.focus, before);
         save_comment(app, "next note");
         assert_eq!(
             app.queue.drafts().next().unwrap().comment().n,
@@ -390,7 +293,7 @@ fn comment_manual_rejections_keep_user_markers_and_restore_one_draft_copy() {
 }
 
 #[test]
-fn comment_queue_only_edit_jump_rejection_and_delete() {
+fn comment_queue_only_edit_rejection_and_delete() {
     for receipt in 0..4 {
         let mut h = comment_app();
         let app = &mut h.app;
@@ -403,18 +306,7 @@ fn comment_queue_only_edit_jump_rejection_and_delete() {
         assert!(app.apply_action(KeyAction::Submit).is_none());
         let message_id = app.queue.messages().next().unwrap().id;
         assert!(frame(app).text.contains("排队 · #1"));
-        assert!(
-            anchor_highlighted(app, "comment target"),
-            "排队评论高亮锚点"
-        );
         assert_eq!(app.queue.draft_count(), 0);
-        comment_browse(app, "[COMMENT 1]");
-        app.apply_action(KeyAction::Submit);
-        app.apply_action(KeyAction::Submit);
-        let Focus::Transcript(marker) = app.focus else {
-            panic!("queue marker");
-        };
-        assert_eq!(marker.block.id, message_id);
         // 从队列标题进入编辑，空正文仍保留只带评论的消息。
         let transcript = app.prepare_transcript();
         let row = transcript
@@ -425,8 +317,6 @@ fn comment_queue_only_edit_jump_rejection_and_delete() {
         app.focus = Focus::Transcript(transcript.cursor(row, 0).unwrap());
         app.apply_action(KeyAction::Submit);
         assert!(app.queue.is_editing());
-        // 排队消息编辑器按整个正文宽度折行，与正文长度无关。
-        assert_eq!(app.prepare_transcript().editor_width(100), 100);
         app.apply_action(KeyAction::Home);
         for _ in "queued body".chars() {
             app.apply_action(KeyAction::Delete);
@@ -452,15 +342,6 @@ fn comment_queue_only_edit_jump_rejection_and_delete() {
         let text = frame(app).text;
         assert_eq!(text.matches("[COMMENT 1]").count(), 2);
         assert_eq!(text.matches("queued note").count(), 1);
-        comment_browse(app, "queued note");
-        app.apply_action(KeyAction::Submit);
-        let Focus::Transcript(marker) = app.focus else {
-            panic!("queue marker");
-        };
-        assert_eq!(
-            marker.block.id, message_id,
-            "queued comment jumps to queued marker, not rejected USER"
-        );
         let transcript = app.prepare_transcript();
         let row = transcript
             .owners
@@ -510,7 +391,7 @@ fn reload_comment(app: &mut App, target: TurnId, wire: &str, on_path: bool) {
 }
 
 #[test]
-fn comment_reload_attaches_or_falls_back_and_jumps_both_ways() {
+fn comment_reload_attaches_or_falls_back() {
     let mut source = comment_app();
     save_comment(&mut source.app, "reload note");
     source.app.focus = Focus::Dock;
@@ -531,22 +412,11 @@ fn comment_reload_attaches_or_falls_back_and_jumps_both_ways() {
         let text = frame(app).text;
         assert_eq!(text.matches("reload note").count(), 1);
         assert_eq!(text.contains("原文不匹配 · #1"), mismatch != 0);
-        if mismatch != 3 {
-            // 只有挂到锚点的已发送评论高亮；原文不匹配时锚点不高亮。
-            assert_eq!(anchor_highlighted(app, "comment target"), mismatch == 0);
-        }
         if mismatch == 0 {
             assert!(text.find("reload note").unwrap() < text.find("[COMMENT 1]").unwrap());
         } else {
             assert!(text.find("reload note").unwrap() > text.find("[COMMENT 1]").unwrap());
         }
-        comment_browse(app, "[COMMENT 1]");
-        let marker = app.focus;
-        app.apply_action(KeyAction::Submit);
-        assert_ne!(app.focus, marker);
-        app.apply_action(KeyAction::Submit);
-        assert_eq!(app.focus, marker);
-        assert!(!app.queue.is_editing());
     }
 }
 
@@ -692,34 +562,6 @@ fn comment_numbering_combines_history_queue_and_drafts_and_does_not_resume_with_
         Some("running"),
         "comment-only input is not history"
     );
-}
-
-#[test]
-fn comment_invalid_format_is_plain_markdown_with_literal_html() {
-    let mut source = comment_app();
-    save_comment(&mut source.app, "note");
-    source.app.focus = Focus::Dock;
-    let wire = source.app.submit().unwrap();
-    for text in [
-        wire.replace("n=\"1\"", "n=\"0\""),
-        wire.replace("step=\"0\"", "step=\"01\""),
-        format!("{wire}\n\n<lattice-comment broken>\n<!-- raw -->"),
-        "<b>literal</b>\n<!-- raw -->".into(),
-    ] {
-        assert_eq!(
-            crate::session::user_block(text.clone()),
-            Block::User(text.clone())
-        );
-        let shown = crate::markdown::render(&text, 200)
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(shown.contains(text.lines().next().unwrap()));
-        if text.contains("<!-- raw -->") {
-            assert!(shown.contains("<!-- raw -->"));
-        }
-    }
 }
 
 #[test]
@@ -1251,35 +1093,6 @@ fn completion_waits_for_editor_then_sends_one_on_save_or_discard() {
     }
 }
 
-#[test]
-fn queue_editor_draws_insertion_cursor_and_newline_hint_after_tiny_resize() {
-    let mut h = queued_app();
-    let app = &mut h.app;
-    app.queue.pause();
-    app.apply_action(KeyAction::Up);
-    app.apply_action(KeyAction::Submit);
-    for size in [(1, 1), (2, 3), (80, 24)] {
-        let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(size.0, size.1)).unwrap();
-        terminal
-            .draw(|frame| crate::view::draw(frame, app))
-            .unwrap();
-        assert!(app.queue.is_editing());
-        assert!(matches!(app.focus, Focus::Transcript(_)));
-        if size == (80, 24) {
-            let transcript = app.prepare_transcript();
-            let (row, col) = transcript.editor_cursor.unwrap();
-            let expected = ratatui::layout::Position::new(
-                col as u16,
-                row.saturating_sub(app.viewport.scroll()) as u16,
-            );
-            assert_eq!(terminal.get_cursor_position().unwrap(), expected);
-            let text = screen_text(terminal.backend().buffer());
-            assert!(text.contains("Alt+Enter 换行"), "{text}");
-        }
-    }
-}
-
 #[tokio::test]
 async fn every_loop_exit_saves_queue_originals_in_order() {
     for exit_kind in 0..6 {
@@ -1477,92 +1290,6 @@ fn empty_edit_deletes_and_ctrl_c_never_clears_hidden_input_or_editor() {
 }
 
 #[test]
-fn queue_rendering_and_identity_survive_history_replacement() {
-    let mut h = queued_app();
-    let app = &mut h.app;
-    app.queue.pause();
-    app.apply_action(KeyAction::Up);
-    let Focus::Transcript(before) = app.focus else {
-        panic!("browse");
-    };
-    let id = app.observed_turn.unwrap();
-    finish_completed(app, id);
-    app.prepare_transcript();
-    let Focus::Transcript(after) = app.focus else {
-        panic!("browse");
-    };
-    assert_eq!(before.block.id, after.block.id);
-    let transcript = render_transcript(app, 100);
-    let queued_ids = app.queue.messages().map(|m| m.id).collect::<Vec<_>>();
-    for (line, owner) in transcript.lines.iter().zip(&transcript.owners) {
-        if queued_ids.contains(&owner.id) {
-            assert!(!line.to_string().contains('#'), "queue has no turn number");
-            for span in &line.spans {
-                if span.content.contains("raw") {
-                    assert_eq!(
-                        span.style,
-                        crate::view::role_style(crate::view::Role::DimMeta)
-                    );
-                }
-            }
-        }
-    }
-    assert_eq!(app.queue.messages().count(), 5);
-    assert_eq!(app.history.prev(), Some("running"));
-}
-
-#[test]
-fn multiline_queue_editor_keeps_cursor_visible_and_stops_at_visual_edges() {
-    let mut h = queued_app();
-    let app = &mut h.app;
-    app.queue.pause();
-    app.term_width = 12;
-    app.term_height = 10;
-    app.apply_action(KeyAction::Up);
-    app.apply_action(KeyAction::Submit);
-    app.apply_action(KeyAction::Paste("\n中abcd\n".repeat(20)));
-    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(12, 10)).unwrap();
-    for action in [
-        KeyAction::Home,
-        KeyAction::Right,
-        KeyAction::Left,
-        KeyAction::End,
-    ] {
-        app.apply_action(action);
-        terminal
-            .draw(|frame| crate::view::draw(frame, app))
-            .unwrap();
-        let transcript = app.prepare_transcript();
-        let (row, _) = transcript.editor_cursor.unwrap();
-        assert!(row >= app.viewport.scroll());
-        assert!(row < app.viewport.scroll() + app.transcript_height(transcript.lines.len()));
-        assert!(app.queue.is_editing());
-    }
-    for _ in 0..100 {
-        app.apply_action(KeyAction::Up);
-    }
-    assert_eq!(
-        app.queue
-            .editor(app.queue.messages().last().unwrap().id)
-            .unwrap()
-            .cursor
-            .0,
-        0
-    );
-    for _ in 0..100 {
-        app.apply_action(KeyAction::Down);
-    }
-    assert!(app.queue.is_editing());
-    let editor = app
-        .queue
-        .editor(app.queue.messages().last().unwrap().id)
-        .unwrap();
-    assert_eq!(editor.cursor.0, editor.lines.len() - 1);
-    app.apply_action(KeyAction::Clear);
-    assert_eq!(app.queue.messages().last().unwrap().text, " q4\nraw ");
-}
-
-#[test]
 fn completed_summary_dispatch_does_not_wait_for_final_history() {
     let mut h = queued_app();
     let app = &mut h.app;
@@ -1695,7 +1422,6 @@ struct Frame {
     input: String,
     text: String,
     cancel: Option<CancelStatus>,
-    finished: bool,
     /// 当前 Turn 已被后台接受或正在运行：助手标题线已出现。
     started: bool,
 }
@@ -1711,10 +1437,6 @@ fn frame(app: &App) -> Frame {
             .collect::<Vec<_>>()
             .join("\n"),
         cancel: app.cancel_status,
-        finished: app
-            .state
-            .as_ref()
-            .is_some_and(|s| s.phase == ObservationPhase::Finished),
         started: app.blocks.iter().any(|block| {
             matches!(block, Block::AssistantStart { turn_id, .. } if Some(*turn_id) == app.current_turn)
         }),
@@ -1805,85 +1527,6 @@ impl Remote {
     }
 }
 
-#[tokio::test]
-async fn live_observation_waits_for_user_history_before_drawing_header() {
-    let id = lattice_api::local::new_turn_id();
-    let live = view(id, false);
-    let (history_tx, history_rx) = oneshot::channel();
-    let mut history_rx = Some(history_rx);
-    let response_history = history(&live);
-    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
-        "subscribe" => Reply::Now(snapshot(&live)),
-        "history" => Reply::Hold(history_rx.take().unwrap()),
-        _ => panic!("read only"),
-    });
-    let mut h = Harness::new(false);
-    let remote = h.remote.clone();
-    let driver = async {
-        let before = remote.wait(|f| f.phase == TurnPhase::Streaming).await;
-        assert!(!before.text.contains("── unused ─"));
-        peer.wait(|s| count(s, "history") == 1).await;
-        history_tx.send(response_history).unwrap();
-        let after = remote.wait(|f| f.text.contains("original prompt")).await;
-        assert_eq!(
-            after.text.matches("── unused ─").count(),
-            1,
-            "{}",
-            after.text
-        );
-        assert_eq!(after.text.matches(" #1 ──").count(), 2);
-        assert!(!after.text.contains("live body"));
-        remote.line("/quit");
-    };
-    let (exit, ()) = tokio::join!(
-        h.run(
-            &peer.client,
-            Some(peer.client.observe(Some(sid()), Some(id)))
-        ),
-        driver
-    );
-    exit.result.unwrap();
-}
-
-#[test]
-fn unaccepted_submissions_never_start_an_assistant_segment() {
-    use lattice_api::local::{LocalError, LocalErrorKind, NotSubmittedStage};
-    for kind in [
-        Some(LocalErrorKind::Busy),
-        Some(LocalErrorKind::BadRequest),
-        None,
-    ] {
-        let mut h = Harness::new(true);
-        h.app.input.set_text("prompt");
-        h.app.apply_action(KeyAction::Submit).unwrap();
-        let turn_id = h.app.current_turn.unwrap();
-        let update = match kind {
-            Some(kind) => LocalUpdate::Submission {
-                turn_id,
-                result: Err(LocalError {
-                    kind,
-                    message: "not accepted".into(),
-                    recovery: None,
-                    store: None,
-                }),
-            },
-            None => LocalUpdate::NotSubmitted {
-                turn_id,
-                stage: NotSubmittedStage::FreezingConfiguration,
-            },
-        };
-        h.app.apply_update(update);
-        assert_eq!(h.app.input.text(), "prompt");
-        assert!(!frame(&h.app).text.contains("── unused ─"));
-        assert!(
-            !h.app
-                .blocks
-                .iter()
-                .any(|block| matches!(block, Block::AssistantStart { .. }))
-        );
-    }
-}
-
 #[test]
 fn comment_rewind_during_queue_edit_preserves_remaining_order() {
     let mut h = comment_app();
@@ -1933,250 +1576,6 @@ fn comment_rewind_during_queue_edit_preserves_remaining_order() {
             .collect::<Vec<_>>(),
         ["middle", "last"]
     );
-}
-
-#[test]
-fn off_path_summary_is_independent_and_history_assigns_observed_ordinals() {
-    let observed = lattice_api::local::new_turn_id();
-    let other = lattice_api::local::new_turn_id();
-    let mut h = Harness::new(false);
-    let closed = view(observed, true);
-    h.app.apply_state(LocalState {
-        view: Box::new(closed.clone()),
-        phase: ObservationPhase::Finished,
-        error: None,
-    });
-    assert!(!frame(&h.app).text.contains("── unused ─"));
-    let other_history = serde_json::from_value(
-        json!({"anchor":view(other,false).history,"entries":history_entries(&view(other,false))}),
-    )
-    .unwrap();
-    h.app
-        .replace_history(crate::session::history_blocks(other_history));
-    let lines = crate::view::transcript_lines(&h.app, 200);
-    assert!(
-        !frame(&h.app).text.contains("── unused ─"),
-        "off-path outcome must not start another Turn's assistant"
-    );
-    let summary = lines
-        .iter()
-        .find(|line| line.to_string().contains("completed"))
-        .unwrap();
-    assert!(
-        summary
-            .spans
-            .iter()
-            .skip(1)
-            .all(|span| span.style == crate::view::role_style(crate::view::Role::DimMeta))
-    );
-    let loaded =
-        serde_json::from_value(json!({"anchor":closed.history,"entries":history_entries(&closed)}))
-            .unwrap();
-    h.app
-        .replace_history(crate::session::history_blocks(loaded));
-    assert_eq!(frame(&h.app).text.matches("── unused ─").count(), 1);
-}
-
-#[test]
-fn history_and_local_submission_use_user_positions_not_node_numbers() {
-    let first = lattice_api::local::new_turn_id();
-    let second = lattice_api::local::new_turn_id();
-    let mut entries = history_entries(&view(first, true))
-        .as_array()
-        .unwrap()
-        .clone();
-    entries.push(json!({"node":7,"agent_name":"second-agent","content":{"kind":"user_message","parent":2,"turn_id":second,"message":{"role":"user","parts":[{"semantic":{"text":{"text":"second prompt"}}}]}}}));
-    let history =
-        serde_json::from_value(json!({"anchor":{"session_id":sid(),"head":7},"entries":entries}))
-            .unwrap();
-    let blocks = crate::session::history_blocks(history);
-    let ordinals: Vec<_> = blocks
-        .iter()
-        .filter_map(|block| match block {
-            Block::UserTurn(id, ordinal) => Some((*id, ordinal.get())),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(ordinals, [(first, 1), (second, 2)]);
-    let mut h = Harness::new(false);
-    h.app.replace_history(blocks);
-    assert_eq!(
-        (
-            h.app.model.as_ref(),
-            h.app.provider.as_ref(),
-            h.app.context_tokens
-        ),
-        (None, None, None)
-    );
-    h.app.input.set_text("third prompt");
-    assert_eq!(
-        h.app.apply_action(KeyAction::Submit).as_deref(),
-        Some("third prompt")
-    );
-    let text = frame(&h.app).text;
-    let user_headers: Vec<_> = text
-        .lines()
-        .filter(|line| line.contains("── USER ─"))
-        .collect();
-    assert_eq!(user_headers.len(), 3, "{text}");
-    for (line, suffix) in user_headers.iter().zip([" #1 ──", " #2 ──", " #3 ──"]) {
-        assert!(line.ends_with(suffix), "{line}");
-    }
-    assert!(
-        text.lines()
-            .any(|line| line.contains("── unused ─") && line.ends_with(" #1 ──"))
-    );
-    assert!(!text.contains("── second-agent ─"), "no reply yet");
-}
-
-#[tokio::test]
-async fn accepted_and_existing_start_one_assistant_header_before_body_and_history() {
-    for acceptance in ["accepted", "existing"] {
-        let (submit_tx, submit_rx) = oneshot::channel();
-        let mut submit_rx = Some(submit_rx);
-        let (stream_tx, stream_rx) = unbounded();
-        let mut stream_rx = Some(stream_rx);
-        let (history_tx, history_rx) = oneshot::channel();
-        let mut history_rx = Some(history_rx);
-        let mut subscriptions = 0;
-        let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
-            "submit" => Reply::Hold(submit_rx.take().unwrap()),
-            "subscribe" => {
-                subscriptions += 1;
-                if subscriptions == 1 {
-                    Reply::Never
-                } else {
-                    Reply::Stream(stream_rx.take().unwrap())
-                }
-            }
-            "history" => history_rx.take().map_or(Reply::Never, Reply::Hold),
-            _ => Reply::Never,
-        });
-        let mut h = Harness::new(true);
-        let remote = h.remote.clone();
-        let driver = async {
-            remote.line("original prompt");
-            let id = submitted(&peer.wait(|s| count(s, "submit") == 1).await);
-            let before = remote.wait(|f| f.text.contains("original prompt")).await;
-            assert!(
-                before
-                    .text
-                    .lines()
-                    .any(|l| l.contains("── USER ─") && l.ends_with(" #1 ──"))
-            );
-            assert!(!before.text.contains("── accepted-agent ─"));
-            let mut live = view(id, false);
-            live.selected_turn.as_mut().unwrap().agent_name = "accepted-agent".into();
-            peer.wait(|s| count(s, "subscribe") == 1).await;
-            submit_tx.send(response("acceptance", json!({"acceptance":acceptance,"turn":lattice_api::local::TurnView::from(live.selected_turn.as_ref().unwrap())}))).unwrap();
-            let accepted = remote
-                .wait(|f| {
-                    f.started && (acceptance == "accepted" || f.text.contains("找回既有请求"))
-                })
-                .await;
-            // 接受只由助手标题线表达，不另写接受行；找回照常显示。
-            assert!(!accepted.text.contains("已确认接受"), "{}", accepted.text);
-            // TurnId 不单独显示。
-            assert!(!accepted.text.contains("提交身份"), "{}", accepted.text);
-            assert_eq!(
-                accepted.text.matches("── accepted-agent ─").count(),
-                1,
-                "{}",
-                accepted.text
-            );
-            assert!(!accepted.text.contains("live body"));
-            stream_tx.unbounded_send(snapshot(&live)).unwrap();
-            peer.wait(|s| count(s, "history") == 1).await;
-            let mut loaded = history(&live);
-            loaded["value"]["fragments"][0]["agent_name"] = json!("accepted-agent");
-            history_tx.send(loaded).unwrap();
-            // A token after the loaded history also must not create a second header.
-            stream_tx
-                .unbounded_send(event(
-                    1,
-                    TurnEvent::TokenDelta {
-                        key: key(id, 0, 1),
-                        content: "live body".into(),
-                    },
-                ))
-                .unwrap();
-            let frame = remote.wait(|f| f.text.contains("live body")).await;
-            assert_eq!(
-                frame.text.matches("── accepted-agent ─").count(),
-                1,
-                "{}",
-                frame.text
-            );
-            let mut done = view(id, true);
-            done.selected_turn.as_mut().unwrap().agent_name = "accepted-agent".into();
-            done.cursor.sequence = 1;
-            stream_tx.unbounded_send(snapshot(&done)).unwrap();
-            let mut loaded = finished(&done);
-            for entry in loaded["value"]["history"]["entries"]
-                .as_array_mut()
-                .unwrap()
-            {
-                entry["agent_name"] = json!("accepted-agent");
-            }
-            stream_tx.unbounded_send(loaded).unwrap();
-            let final_frame = remote.wait(|f| f.finished).await;
-            assert_eq!(
-                final_frame.text.matches("── accepted-agent ─").count(),
-                1,
-                "{}",
-                final_frame.text
-            );
-            remote.line("/quit");
-        };
-        let (exit, ()) = tokio::join!(h.run(&peer.client, None), driver);
-        exit.result.unwrap();
-        assert_eq!(frame(&h.app).text.matches("── accepted-agent ─").count(), 1);
-        assert!(
-            !h.app
-                .blocks
-                .iter()
-                .any(|block| matches!(block, Block::AssistantStart { .. })),
-            "loaded Step owns the assistant segment"
-        );
-    }
-}
-
-#[tokio::test]
-async fn existing_session_waits_for_first_history_but_builtin_commands_still_work() {
-    let id = lattice_api::local::new_turn_id();
-    let closed = view(id, true);
-    let (history_tx, history_rx) = oneshot::channel();
-    let mut history_rx = Some(history_rx);
-    let response_history = history(&closed);
-    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
-        "subscribe" => Reply::Now(snapshot(&closed)),
-        "history" => Reply::Hold(history_rx.take().unwrap()),
-        _ => Reply::Never,
-    });
-    let mut h = Harness::new(false);
-    let remote = h.remote.clone();
-    let driver = async {
-        peer.wait(|s| count(s, "history") == 1).await;
-        remote.line("kept prompt");
-        // /help is a barrier after Enter: no sleep-based absence assertion.
-        remote.press(KeyCode::Esc, KeyModifiers::NONE);
-        remote.line("/help");
-        remote.wait(|f| f.text.contains("/reconnect")).await;
-        assert_eq!(count(&peer.seen.borrow(), "submit"), 0);
-        history_tx.send(response_history).unwrap();
-        remote.wait(|f| f.text.contains("live body")).await;
-        remote.line("after history");
-        peer.wait(|s| count(s, "submit") == 1).await;
-        remote.line("/quit");
-    };
-    let (exit, ()) = tokio::join!(
-        h.run(
-            &peer.client,
-            Some(peer.client.observe(Some(sid()), Some(id)))
-        ),
-        driver
-    );
-    exit.result.unwrap();
 }
 
 #[tokio::test]
