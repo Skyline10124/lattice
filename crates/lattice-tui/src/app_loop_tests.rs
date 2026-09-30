@@ -245,12 +245,17 @@ fn comment_card_fills_rows_and_editor_uses_inner_width() {
         );
         assert!(rows[1].to_string().trim().is_empty());
         assert!(
-            rows[2].to_string().trim_end().ends_with(right),
+            rows[2].to_string().ends_with(&format!("{right}  "))
+                && rows[2].to_string().starts_with("  "),
             "{}",
             rows[2]
         );
         assert!(rows[3].to_string().trim().is_empty());
-        assert!(rows[4].to_string().starts_with(" note text"), "{}", rows[4]);
+        assert!(
+            rows[4].to_string().starts_with("  note text"),
+            "{}",
+            rows[4]
+        );
         assert!(rows[5].to_string().trim().is_empty());
         for row in &rows[1..] {
             assert_eq!(row.width(), 100, "卡片铺到左列右缘");
@@ -269,9 +274,9 @@ fn comment_card_fills_rows_and_editor_uses_inner_width() {
     let (transcript, tag) = card(app, "草稿 · Enter 保存 · Esc 放弃 · #1");
     assert_eq!(
         transcript.editor_cursor,
-        Some((tag + 2, 1 + "note text".len()))
+        Some((tag + 2, 2 + "note text".len()))
     );
-    assert_eq!(transcript.editor_width(100), 98, "左右各留一列内边距");
+    assert_eq!(transcript.editor_width(100), 96, "左右各留两列内边距");
     app.apply_action(KeyAction::Submit);
     card(app, "草稿 · #1");
 }

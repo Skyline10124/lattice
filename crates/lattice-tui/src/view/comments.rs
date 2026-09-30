@@ -246,13 +246,16 @@ fn highlight(line: &mut Line<'static>, indent: usize) {
 /// 评论卡片的标签，两端各留一格。
 const COMMENT_TAG: &str = " COMMENT ";
 
-/// 评论卡片：锚点正文起点到左列右缘铺底色，左右各留一列内边距。
+/// 左右内边距列数。终端字符单元高约为宽的两倍，两列与上下各一行的留白视觉上接近。
+const CARD_PAD: usize = 2;
+
+/// 评论卡片：锚点正文起点到左列右缘铺底色，左右各留 `CARD_PAD` 列内边距。
 /// 自上而下为上边距、标签与右端状态、空行、正文、下边距。
 fn render(transcript: &mut Transcript, placed: PlacedComment<'_>, width: u16) {
     let start = transcript.lines.len();
     let indent = placed.indent.min(usize::from(width));
     let card_w = usize::from(width).saturating_sub(indent);
-    let body_width = u16::try_from(card_w.saturating_sub(2)).unwrap_or(u16::MAX);
+    let body_width = u16::try_from(card_w.saturating_sub(2 * CARD_PAD)).unwrap_or(u16::MAX);
     let mut right = Vec::new();
     if !placed.state.is_empty() {
         right.push(placed.state.to_owned());
@@ -271,7 +274,7 @@ fn render(transcript: &mut Transcript, placed: PlacedComment<'_>, width: u16) {
         let (visual, row, col) = input_visual(input, body_width);
         transcript.editor_cursor = Some((
             transcript.lines.len().saturating_add(row),
-            indent.saturating_add(1).saturating_add(col),
+            indent.saturating_add(CARD_PAD).saturating_add(col),
         ));
         transcript.editor_width = Some(body_width);
         visual
@@ -288,7 +291,7 @@ fn render(transcript: &mut Transcript, placed: PlacedComment<'_>, width: u16) {
         )
     };
     for line in visual {
-        let mut spans = vec![Span::raw(" ")];
+        let mut spans = vec![Span::raw(" ".repeat(CARD_PAD))];
         spans.extend(line.spans);
         transcript.lines.push(card_row(indent, card_w, spans));
     }
@@ -303,8 +306,8 @@ fn render(transcript: &mut Transcript, placed: PlacedComment<'_>, width: u16) {
 
 /// 标签行：左侧 COMMENT 标签，右端状态放不下时从最左一项起省略。
 fn tag_row(card_w: usize, right: &[String]) -> Vec<Span<'static>> {
-    let tag = truncate_display(COMMENT_TAG, card_w.saturating_sub(2));
-    let used = display_width(&tag).saturating_add(2);
+    let tag = truncate_display(COMMENT_TAG, card_w.saturating_sub(2 * CARD_PAD));
+    let used = display_width(&tag).saturating_add(2 * CARD_PAD);
     let mut right = right;
     // 标签与状态之间至少留一格，状态右侧是内边距。
     while !right.is_empty()
@@ -316,7 +319,7 @@ fn tag_row(card_w: usize, right: &[String]) -> Vec<Span<'static>> {
         right = &right[1..];
     }
     let mut spans = vec![
-        Span::raw(" "),
+        Span::raw(" ".repeat(CARD_PAD)),
         Span::styled(
             tag,
             Style::default()
@@ -345,7 +348,7 @@ fn card_row(indent: usize, card_w: usize, spans: Vec<Span<'static>>) -> Line<'st
         }
         line.push(span);
     }
-    // 补足到卡片宽度，其中包含右侧一列内边距。
+    // 补足到卡片宽度，其中包含右侧内边距。
     line.push(Span::styled(
         " ".repeat(card_w.saturating_sub(used)),
         Style::default().bg(COMMENT_CARD_BG),
