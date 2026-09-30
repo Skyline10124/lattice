@@ -224,13 +224,17 @@ fn draw_left(frame: &mut Frame, app: &App, area: Rect, content_w: u16, transcrip
     let above = area.height.saturating_sub(bottom_h);
     let dock_h = dock.height(content_w).min(above);
     let transcript_h = above.saturating_sub(dock_h);
+    // 对话记录与 Dock 共享 statusline 之上的高度：内容不足时 Dock 紧跟最后一行，
+    // 其下留空；填满后停在 statusline 之上。viewport 仍按可用高度 `transcript_h` 计算。
+    let remaining = transcript.lines.len().saturating_sub(app.viewport.scroll());
+    let shown = transcript_h.min(u16::try_from(remaining).unwrap_or(u16::MAX));
 
-    let dock_y = area.y.saturating_add(transcript_h);
-    let bottom_y = dock_y.saturating_add(dock_h);
+    let dock_y = area.y.saturating_add(shown);
+    let bottom_y = area.y.saturating_add(above);
     draw_transcript(
         frame,
         app,
-        Rect::new(area.x, area.y, area.width, transcript_h),
+        Rect::new(area.x, area.y, area.width, shown),
         content_w,
         transcript,
     );
@@ -1421,6 +1425,53 @@ mod tests {
         assert_eq!(symbol(SymbolKind::Cancelled), "✗");
         assert_eq!(fold_symbol(false), "▸");
         assert_eq!(fold_symbol(true), "▾");
+    }
+
+    #[test]
+    /// 对话记录与 Dock 共享 statusline 之上的高度：内容不足时 Dock 紧跟最后一行，
+    /// 填满后 Dock 停在 statusline 之上；statusline 始终在最后一行。
+    fn dock_follows_short_transcript_and_statusline_stays_last() -> anyhow::Result<()> {
+        let (width, height) = (40u16, 12u16);
+        for notices in [1usize, 3, 30] {
+            let mut app = test_app();
+            app.term_width = width;
+            app.term_height = height;
+            for n in 0..notices {
+                app.blocks.push(Block::Status {
+                    kind: StatusKind::Notice(vec![format!("notice {n}")]),
+                    placement: StatusPlacement::Transcript,
+                });
+            }
+            let content = transcript_lines(&app, width).len();
+            let mut terminal = Terminal::new(TestBackend::new(width, height))?;
+            terminal.draw(|frame| draw(frame, &mut app))?;
+            let rows = terminal
+                .backend()
+                .buffer()
+                .content
+                .chunks(usize::from(width))
+                .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+                .collect::<Vec<_>>();
+            let title = rows
+                .iter()
+                .position(|row| row.contains("USER"))
+                .expect("dock title");
+            let dock_h = usize::from(Dock::new(&app).height(width));
+            let available = usize::from(height) - 1 - dock_h;
+            // Dock 的第一行是上方空行，标题线紧随其后。
+            assert_eq!(
+                title,
+                content.min(available) + 1,
+                "notices={notices}\n{}",
+                rows.join("\n")
+            );
+            assert!(
+                rows[usize::from(height) - 1].contains("idle"),
+                "{}",
+                rows.join("\n")
+            );
+        }
+        Ok(())
     }
 
     #[test]

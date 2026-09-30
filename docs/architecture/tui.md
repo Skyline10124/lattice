@@ -134,14 +134,14 @@ Ctrl+D、`/quit` 和普通退出只断开前端。第二次 Ctrl+C 退出保留�
 | 侧栏隐藏时 | `left_w = frame_w`，`content_w = frame_w` |
 | statusline | 左列最后一行，侧栏可见与否都存在 |
 | Dock | 高度由栈顶模块决定，最多 `(frame_h - 1) / 2` 行，向下取整 |
-| 对话记录高度 | `frame_h - 1 - dock_h` |
+| 对话记录可用高度 | `frame_h - 1 - dock_h`；内容不足时只占内容行数 |
 
 所有尺寸减法使用饱和运算，极小终端不得下溢或 panic。渲染以实际分配高度为准，不假定对话记录至少有一行。
 `Dock::height()` 统一提供 Dock 高度；渲染、viewport 行数、输入折行和光标定位使用同一 `content_w`。正文宽度不另设上限。
 
 `176 × 50` 显示侧栏，左列与正文宽均为 135；`115 × 47`、`85 × 47`、`56 × 47` 不满足比例条件，`80 × 24` 分栏后正文不足 72 列，均隐藏侧栏。
 
-左列由上至下为对话记录、[Dock](#dock-与输入区) 与 [statusline](#statusline)。Dock 紧贴对话记录下方，停在底部时输入区看起来就是对话的最后一段；向上翻看时，Dock 与 statusline 留在原位。侧栏全高，gap 保持空列。界面不画边框。
+左列由上至下为对话记录、[Dock](#dock-与输入区) 与 [statusline](#statusline)。对话记录与 Dock 共享 statusline 之上的高度：Dock 紧贴对话记录最后一个可见行之下，内容不足可用高度时 Dock 随内容上移，其下到 statusline 之间留空；内容填满后 Dock 停在 statusline 之上。statusline 始终在左列最后一行。停在底部时输入区看起来就是对话的最后一段；向上翻看时，Dock 与 statusline 留在原位。侧栏全高，gap 保持空列。界面不画边框。
 
 ### 侧栏
 
