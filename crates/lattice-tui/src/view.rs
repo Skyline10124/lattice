@@ -169,6 +169,10 @@ fn status_surface_style() -> Style {
 
 /// 挂着草稿、排队或已发送评论的锚点元素底色（iris-12）。
 pub(crate) const COMMENT_ANCHOR_BG: Color = Color::Rgb(0x1f, 0x25, 0x4b);
+/// 评论卡片底色（warm-gray-12）。
+pub(crate) const COMMENT_CARD_BG: Color = Color::Rgb(0x2b, 0x28, 0x25);
+/// COMMENT 标签底色（iris-9）。
+const COMMENT_TAG_BG: Color = Color::Rgb(0x59, 0x65, 0xca);
 
 /// Status symbols.
 #[rustfmt::skip]
@@ -253,6 +257,8 @@ pub(crate) struct Transcript {
     pub(crate) lines: Vec<Line<'static>>,
     pub(crate) owners: Vec<BlockPosition>,
     pub(crate) editor_cursor: Option<(usize, usize)>,
+    /// 编辑器折行宽度；与 `editor_cursor` 同时设置。
+    editor_width: Option<u16>,
     anchors: Vec<(usize, crate::comment::Anchor, usize)>,
     ending_items: std::collections::HashMap<crate::comment::Location, usize>,
     markers: Vec<comments::Marker>,
@@ -502,6 +508,7 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
     let mut transcript = Transcript {
         lines,
         owners,
+        editor_width: editor_cursor.map(|_| content_w),
         editor_cursor,
         anchors,
         ending_items,

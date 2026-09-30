@@ -55,16 +55,9 @@ impl Transcript {
             .0;
         self.cursor(row, 0)
     }
+    /// 正在编辑的输入按哪个宽度折行；没有编辑器时是正文宽度。
     pub(crate) fn editor_width(&self, width: u16) -> u16 {
-        let Some((row, _)) = self.editor_cursor else {
-            return width;
-        };
-        let indent = self
-            .lines
-            .get(row)
-            .and_then(|l| l.spans.first())
-            .map_or(0, |s| s.width());
-        width.saturating_sub(u16::try_from(indent).unwrap_or(u16::MAX))
+        self.editor_width.unwrap_or(width)
     }
 }
 
@@ -250,34 +243,35 @@ fn highlight(line: &mut Line<'static>, indent: usize) {
     }
 }
 
+/// 评论卡片的字母间隔标签，两端各留一格。
+const COMMENT_TAG: &str = " C O M M E N T ";
+
+/// 评论卡片：锚点正文起点到左列右缘铺底色，左右各留一列内边距。
+/// 第一行是标签与右端状态，其后是正文，最后留一行下边距。
 fn render(transcript: &mut Transcript, placed: PlacedComment<'_>, width: u16) {
     let start = transcript.lines.len();
     let indent = placed.indent.min(usize::from(width));
-    let body_indent = indent.saturating_add(2).min(usize::from(width));
-    let body_width = width.saturating_sub(u16::try_from(body_indent).unwrap_or(u16::MAX));
+    let card_w = usize::from(width).saturating_sub(indent);
+    let body_width = u16::try_from(card_w.saturating_sub(2)).unwrap_or(u16::MAX);
     let mut right = Vec::new();
     if !placed.state.is_empty() {
-        right.push(placed.state.into());
+        right.push(placed.state.to_owned());
     }
     if placed.editor.is_some() {
-        right.extend(["Enter 保存".into(), "Esc 放弃".into()]);
+        right.extend(["Enter 保存".to_owned(), "Esc 放弃".to_owned()]);
     }
     right.push(format!("#{}", placed.comment.n));
     transcript.lines.push(Line::default());
-    let mut title = title_line(
-        "COMMENT",
-        Role::User,
-        &right,
-        usize::from(width).saturating_sub(indent),
-    );
-    title.spans.insert(0, Span::raw(" ".repeat(indent)));
-    transcript.lines.push(title);
+    transcript
+        .lines
+        .push(card_row(indent, card_w, tag_row(card_w, &right)));
     let visual = if let Some(input) = placed.editor {
         let (visual, row, col) = input_visual(input, body_width);
         transcript.editor_cursor = Some((
             transcript.lines.len().saturating_add(row),
-            body_indent.saturating_add(col),
+            indent.saturating_add(1).saturating_add(col),
         ));
+        transcript.editor_width = Some(body_width);
         visual
             .into_iter()
             .map(|text| Line::from(Span::styled(text, role_style(Role::Assistant))))
@@ -291,14 +285,68 @@ fn render(transcript: &mut Transcript, placed: PlacedComment<'_>, width: u16) {
             usize::from(body_width),
         )
     };
-    for mut line in visual {
-        line.spans.insert(0, Span::raw(" ".repeat(body_indent)));
-        transcript.lines.push(line);
+    for line in visual {
+        let mut spans = vec![Span::raw(" ")];
+        spans.extend(line.spans);
+        transcript.lines.push(card_row(indent, card_w, spans));
     }
+    transcript.lines.push(card_row(indent, card_w, Vec::new()));
     transcript
         .owners
         .extend((start..transcript.lines.len()).map(|row| BlockPosition {
             id: placed.id,
             row: row.saturating_sub(start),
         }));
+}
+
+/// 标签行：左侧 COMMENT 标签，右端状态放不下时从最左一项起省略。
+fn tag_row(card_w: usize, right: &[String]) -> Vec<Span<'static>> {
+    let tag = truncate_display(COMMENT_TAG, card_w.saturating_sub(2));
+    let used = display_width(&tag).saturating_add(2);
+    let mut right = right;
+    // 标签与状态之间至少留一格，状态右侧是内边距。
+    while !right.is_empty()
+        && used
+            .saturating_add(1)
+            .saturating_add(joined_width(right.iter().map(String::as_str)))
+            > card_w
+    {
+        right = &right[1..];
+    }
+    let mut spans = vec![
+        Span::raw(" "),
+        Span::styled(
+            tag,
+            Style::default()
+                .fg(role_color(Role::Assistant))
+                .bg(COMMENT_TAG_BG)
+                .add_modifier(ratatui::style::Modifier::BOLD),
+        ),
+    ];
+    if !right.is_empty() {
+        let right = right.join(" · ");
+        let gap = card_w.saturating_sub(used.saturating_add(display_width(&right)));
+        spans.push(Span::raw(" ".repeat(gap)));
+        spans.push(Span::styled(right, role_style(Role::DimMeta)));
+    }
+    spans
+}
+
+/// 在卡片内容上铺卡片底色并补足到卡片宽度；已有底色的片段（标签）保持原样。
+fn card_row(indent: usize, card_w: usize, spans: Vec<Span<'static>>) -> Line<'static> {
+    let mut line = vec![Span::raw(" ".repeat(indent))];
+    let mut used = 0usize;
+    for mut span in spans {
+        used = used.saturating_add(span.width());
+        if span.style.bg.is_none() {
+            span.style = span.style.bg(COMMENT_CARD_BG);
+        }
+        line.push(span);
+    }
+    // 补足到卡片宽度，其中包含右侧一列内边距。
+    line.push(Span::styled(
+        " ".repeat(card_w.saturating_sub(used)),
+        Style::default().bg(COMMENT_CARD_BG),
+    ));
+    Line::from(line)
 }

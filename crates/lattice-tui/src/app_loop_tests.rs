@@ -221,6 +221,62 @@ fn anchor_highlighted(app: &mut App, text: &str) -> bool {
         .all(|span| span.style.bg == Some(crate::view::COMMENT_ANCHOR_BG))
 }
 
+/// 评论显示为整行铺底色的卡片：标签行、正文、下边距；编辑器按卡片内宽度折行。
+#[test]
+fn comment_card_fills_rows_and_editor_uses_inner_width() {
+    use crate::view::COMMENT_CARD_BG;
+    let mut h = comment_app();
+    let app = &mut h.app;
+    comment_browse(app, "comment target");
+    app.apply_action(KeyAction::Submit);
+    app.apply_action(KeyAction::Paste("note text".into()));
+    let card = |app: &mut App, right: &str| {
+        let transcript = app.prepare_transcript();
+        let tag = transcript
+            .lines
+            .iter()
+            .position(|line| line.to_string().contains("C O M M E N T"))
+            .expect("comment tag");
+        let rows = &transcript.lines[tag - 1..tag + 3];
+        assert!(
+            rows[0].to_string().trim().is_empty()
+                && rows[0].spans.iter().all(|s| s.style.bg.is_none())
+        );
+        assert!(
+            rows[1].to_string().trim_end().ends_with(right),
+            "{}",
+            rows[1]
+        );
+        assert!(rows[2].to_string().starts_with(" note text"), "{}", rows[2]);
+        assert!(rows[3].to_string().trim().is_empty());
+        for row in &rows[1..] {
+            assert_eq!(row.width(), 100, "卡片铺到左列右缘");
+            assert!(
+                row.spans
+                    .iter()
+                    .all(|s| s.width() == 0 || s.style.bg.is_some()),
+                "{row}"
+            );
+        }
+        assert!(
+            rows[1]
+                .spans
+                .iter()
+                .any(|s| s.content.contains("C O M M E N T")
+                    && s.style.bg.is_some_and(|bg| bg != COMMENT_CARD_BG))
+        );
+        (transcript, tag)
+    };
+    let (transcript, tag) = card(app, "草稿 · Enter 保存 · Esc 放弃 · #1");
+    assert_eq!(
+        transcript.editor_cursor,
+        Some((tag + 1, 1 + "note text".len()))
+    );
+    assert_eq!(transcript.editor_width(100), 98, "左右各留一列内边距");
+    app.apply_action(KeyAction::Submit);
+    card(app, "草稿 · #1");
+}
+
 #[test]
 fn comment_three_esc_paths_saved_count_and_blank_save() {
     let mut h = comment_app();
@@ -365,6 +421,8 @@ fn comment_queue_only_edit_jump_rejection_and_delete() {
         app.focus = Focus::Transcript(transcript.cursor(row, 0).unwrap());
         app.apply_action(KeyAction::Submit);
         assert!(app.queue.is_editing());
+        // 排队消息编辑器按整个正文宽度折行，与正文长度无关。
+        assert_eq!(app.prepare_transcript().editor_width(100), 100);
         app.apply_action(KeyAction::Home);
         for _ in "queued body".chars() {
             app.apply_action(KeyAction::Delete);
