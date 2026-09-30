@@ -133,6 +133,8 @@ pub(crate) struct App {
     reconnect_requested: bool,
     submitted: Option<(TurnId, crate::queue::Outgoing)>,
     closed_turns: std::collections::HashSet<TurnId>,
+    /// 已实时交付提交回执的请求；交接报告不再重述它们的回执。
+    delivered_submissions: std::collections::HashSet<TurnId>,
     // None 仅表示打开已有会话后尚未装入第一份路径。
     loaded_user_count: Option<usize>,
     durable_len: usize,
@@ -175,6 +177,7 @@ impl App {
             reconnect_requested: false,
             submitted: None,
             closed_turns: Default::default(),
+            delivered_submissions: Default::default(),
             durable_len: 0,
             generation: 0,
             attempt: None,
@@ -659,6 +662,22 @@ impl App {
                 }
             }
         }
+        // 已由本客户端实时交付的回执与结局不再重述；取消、诊断等新事实照常显示。
+        let mut report = report;
+        if report
+            .turn_id
+            .is_some_and(|id| self.delivered_submissions.contains(&id))
+        {
+            report.submission = None;
+        }
+        if let Some(turn) = report
+            .state
+            .as_mut()
+            .and_then(|state| state.view.selected_turn.as_mut())
+            && self.summary_shown(turn.turn_id)
+        {
+            turn.summary = None;
+        }
         for line in detach_lines(report) {
             self.notice_once(format!("历史交接：{line}"));
         }
@@ -750,9 +769,14 @@ impl App {
                             self.phase = TurnPhase::Idle;
                         }
                     }
-                    self.push_status(StatusKind::Notice(vec![submission_notice(&acceptance)]));
+                    self.delivered_submissions.insert(turn_id);
+                    // 接受由助手标题线表达，不另写接受行；找回、确认未知等其余结果照常显示。
+                    if !matches!(acceptance, Acceptance::Accepted { .. }) {
+                        self.push_status(StatusKind::Notice(vec![submission_notice(&acceptance)]));
+                    }
                 }
                 Err(error) => {
+                    self.delivered_submissions.insert(turn_id);
                     self.reject_submission(turn_id);
                     self.push_status(StatusKind::Notice(vec![format!(
                         "请求 {turn_id} 被拒绝或回执失败：{}",
@@ -880,12 +904,20 @@ impl App {
         }
     }
 
+    fn summary_shown(&self, turn_id: TurnId) -> bool {
+        self.blocks.iter().any(|block| {
+            matches!(block, Block::Status { kind: StatusKind::Summary { turn_id: id, .. }, .. } if *id == turn_id)
+        })
+    }
+
     fn show_summary(&mut self, turn_id: TurnId, summary: TurnSummary) {
         self.closed_turns.insert(turn_id);
         if summary.outcome != lattice_api::local::PublicTurnOutcome::Completed {
             self.queue.pause();
         }
-        if self.blocks.iter().any(|block| matches!(block, Block::Status { kind:StatusKind::Summary { turn_id:id, .. }, .. } if *id == turn_id)) { return; }
+        if self.summary_shown(turn_id) {
+            return;
+        }
         self.push_status(StatusKind::Summary { turn_id, summary });
     }
 
@@ -1258,9 +1290,6 @@ impl App {
         self.blocks
             .push(Block::AgentName(self.ctx.active_agent.clone()));
         self.blocks.push(crate::session::user_block(raw.clone()));
-        self.push_status(StatusKind::Notice(vec![format!(
-            "提交身份 {id}；确认丢失仍按此 ID 找回"
-        )]));
         self.phase = TurnPhase::Streaming;
         raw
     }
@@ -1803,6 +1832,7 @@ mod tests {
         };
         let user_id = body_id(&app, "prompt");
         let stream_id = body_id(&app, "stream");
+        app.push_status(StatusKind::Notice(vec!["notice".into()]));
         let status_id = app
             .blocks
             .entries

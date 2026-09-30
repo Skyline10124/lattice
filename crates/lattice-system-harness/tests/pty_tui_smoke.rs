@@ -265,10 +265,6 @@ fn pty_detach_reloads_pending_and_result_without_cancelling() {
         tui.send_line("persistent pending input").unwrap();
         gate.wait_until_stalled(1, budget.cap_timeout(spec.step_timeout()))
             .unwrap();
-        tui.wait_for(budget.cap_timeout(spec.step_timeout()), |text| {
-            text.contains("已确认接受")
-        })
-        .unwrap();
         let listed = session.run_command(&["--json", "session", "list"]).unwrap();
         evidence.record_command("accepted TUI Session", &listed);
         assert!(listed.is_clean_exit(0));
@@ -593,10 +589,6 @@ fn pty_second_ctrl_c_preserves_cancel_acknowledgement() {
         tui.send_line("cancel before exit").unwrap();
         gate.wait_until_stalled(1, budget.cap_timeout(spec.step_timeout()))
             .unwrap();
-        tui.wait_for(budget.cap_timeout(spec.step_timeout()), |text| {
-            text.contains("已确认接受")
-        })
-        .unwrap();
         let listed = session.run_command(&["--json", "session", "list"]).unwrap();
         evidence.record_command("accepted cancellation Session", &listed);
         assert!(listed.is_clean_exit(0));

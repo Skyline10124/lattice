@@ -818,9 +818,14 @@ async fn completed_observation_sends_queue_through_real_loop_once() {
         let request = seen.iter().find(|r| r["operation"] == "submit").unwrap();
         assert_eq!(request["request"]["input"], "queued via loop");
         assert_ne!(submitted(&seen), id);
-        let rendered = remote.wait(|f| f.text.contains("已确认接受")).await;
+        let rendered = remote.wait(|f| f.started && f.current != Some(id)).await;
         assert_eq!(rendered.input, "untouched draft");
-        assert_eq!(rendered.text.matches("排队").count(), 1);
+        assert_eq!(
+            rendered.text.matches("排队").count(),
+            1,
+            "{}",
+            rendered.text
+        );
         assert!(rendered.text.contains(" #2 ──"));
         remote.press(KeyCode::Esc, KeyModifiers::NONE);
         remote.line("/quit");
@@ -1599,6 +1604,8 @@ struct Frame {
     text: String,
     cancel: Option<CancelStatus>,
     finished: bool,
+    /// 当前 Turn 已被后台接受或正在运行：助手标题线已出现。
+    started: bool,
 }
 fn frame(app: &App) -> Frame {
     Frame {
@@ -1616,6 +1623,9 @@ fn frame(app: &App) -> Frame {
             .state
             .as_ref()
             .is_some_and(|s| s.phase == ObservationPhase::Finished),
+        started: app.blocks.iter().any(|block| {
+            matches!(block, Block::AssistantStart { turn_id, .. } if Some(*turn_id) == app.current_turn)
+        }),
     }
 }
 struct Harness {
@@ -1969,13 +1979,13 @@ async fn accepted_and_existing_start_one_assistant_header_before_body_and_histor
             submit_tx.send(response("acceptance", json!({"acceptance":acceptance,"turn":lattice_api::local::TurnView::from(live.selected_turn.as_ref().unwrap())}))).unwrap();
             let accepted = remote
                 .wait(|f| {
-                    f.text.contains(if acceptance == "accepted" {
-                        "已确认接受"
-                    } else {
-                        "找回既有请求"
-                    })
+                    f.started && (acceptance == "accepted" || f.text.contains("找回既有请求"))
                 })
                 .await;
+            // 接受只由助手标题线表达，不另写接受行；找回照常显示。
+            assert!(!accepted.text.contains("已确认接受"), "{}", accepted.text);
+            // TurnId 不单独显示。
+            assert!(!accepted.text.contains("提交身份"), "{}", accepted.text);
             assert_eq!(
                 accepted.text.matches("── accepted-agent ─").count(),
                 1,
@@ -2100,7 +2110,7 @@ async fn first_submission_obtains_session_only_after_acceptance_and_quit_does_no
             " original "
         );
         tx.send(accepted(id)).unwrap();
-        remote.wait(|f| f.text.contains("已确认接受")).await;
+        remote.wait(|f| f.started).await;
         remote.ctrl('d');
     };
     let ((), exit) = tokio::join!(driver, h.run(&peer.client, None));
@@ -2147,7 +2157,7 @@ async fn cancel_receipt_orders_and_late_probe_keep_original_intent() {
             peer.wait(|s| count(s, "cancel") == 1).await;
             if order == 1 {
                 stx.send(accepted(id)).unwrap();
-                remote.wait(|f| f.text.contains("已确认接受")).await;
+                remote.wait(|f| f.started).await;
                 ctx.send(response("cancelled", json!({"owned":false})))
                     .unwrap();
             } else {
@@ -2465,11 +2475,9 @@ async fn switching_targets_keeps_old_receipts_and_diagnostics_out_of_new_state()
                     Some(CancelStatus::Taken)
                 }
             );
-            assert!(
-                f.text
-                    .lines()
-                    .any(|line| line.contains("历史交接：Turn") && line.contains(&old.to_string()))
-            );
+            // 旧 Turn 的结局已实时显示，交接报告不再重述。
+            assert!(f.text.contains(&old.to_string()), "{}", f.text);
+            assert!(!f.text.contains("历史交接：Turn"), "{}", f.text);
             remote.ctrl('d');
         };
         let ((), exit) = tokio::join!(driver, h.run(&peer.client, None));
@@ -2571,10 +2579,10 @@ async fn busy_submission_preserves_draft_and_can_cancel_displayed_active_turn() 
         remote.line("/reconnect");
         remote.wait(|f| f.current == Some(active)).await;
         remote.ctrl('c');
-        let f = remote
-            .wait(|f| f.cancel == Some(CancelStatus::Taken) && f.text.contains("历史交接：请求"))
-            .await;
-        assert!(f.text.contains(&id.to_string()));
+        let f = remote.wait(|f| f.cancel == Some(CancelStatus::Taken)).await;
+        // 被拒回执已实时显示，交接报告不再重述。
+        assert!(f.text.contains(&id.to_string()), "{}", f.text);
+        assert!(!f.text.contains("历史交接：请求"), "{}", f.text);
         remote.ctrl('d');
     };
     let ((), exit) = tokio::join!(driver, h.run(&peer.client, None));
