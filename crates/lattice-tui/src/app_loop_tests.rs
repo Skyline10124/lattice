@@ -1473,7 +1473,7 @@ fn multiline_queue_editor_keeps_cursor_visible_and_stops_at_visual_edges() {
         let transcript = app.prepare_transcript();
         let (row, _) = transcript.editor_cursor.unwrap();
         assert!(row >= app.viewport.scroll());
-        assert!(row < app.viewport.scroll() + app.transcript_height());
+        assert!(row < app.viewport.scroll() + app.transcript_height(transcript.lines.len()));
         assert!(app.queue.is_editing());
     }
     for _ in 0..100 {

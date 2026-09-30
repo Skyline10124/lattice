@@ -61,7 +61,7 @@ fn browse_moves_in_cells_keeps_desired_column_and_scrolls_at_edges() {
     assert!(scroll > 0);
     app.apply_action(KeyAction::Up);
     assert_eq!(app.viewport.scroll(), scroll - 1);
-    while current(&app).0 < app.viewport.scroll() + app.transcript_height() - 1 {
+    while current(&app).0 < app.viewport.scroll() + visible_height(&mut app) - 1 {
         app.apply_action(KeyAction::Down);
     }
     let scroll = app.viewport.scroll();
@@ -163,7 +163,7 @@ fn browse_paging_clamps_cursor_and_only_control_end_resumes_following() {
         let c = cursor(&app);
         assert!(
             c.row >= app.viewport.scroll()
-                && c.row < app.viewport.scroll() + app.transcript_height(),
+                && c.row < app.viewport.scroll() + visible_height(&mut app),
             "cursor must stay on screen"
         );
         assert_eq!(c.desired_col, 3);
@@ -279,7 +279,7 @@ fn streaming_preserves_browse_position_and_control_end_follows_new_content() {
     assert!(app.viewport.following());
     assert_eq!(
         app.viewport.scroll(),
-        transcript.lines.len() - app.transcript_height()
+        transcript.lines.len() - app.transcript_height(transcript.lines.len())
     );
     assert!(cursor(&app).row >= app.viewport.scroll());
 }
@@ -306,7 +306,7 @@ fn following_view_stays_at_bottom_when_the_dock_grows_or_shrinks() {
     app.blocks.push(Block::Assistant("body\n".repeat(60)));
     let bottom = |app: &mut App| {
         let rows = app.prepare_transcript().lines.len();
-        rows.saturating_sub(app.transcript_height())
+        rows.saturating_sub(app.transcript_height(rows))
     };
     let before = bottom(&mut app);
     assert_eq!(app.viewport.scroll(), before);
@@ -463,4 +463,10 @@ fn warning_after_control_end_does_not_move_following_cursor_on_repeated_frames()
         assert_eq!(app.viewport.scroll(), scroll);
         assert!(app.viewport.following());
     }
+}
+
+/// 按当前对话记录行数计算的对话记录可用高度。
+fn visible_height(app: &mut App) -> usize {
+    let rows = app.prepare_transcript().lines.len();
+    app.transcript_height(rows)
 }

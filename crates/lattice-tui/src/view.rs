@@ -222,7 +222,7 @@ fn draw_left(frame: &mut Frame, app: &App, area: Rect, content_w: u16, transcrip
     let dock = Dock::new(app);
     let bottom_h = 1.min(area.height);
     let above = area.height.saturating_sub(bottom_h);
-    let dock_h = dock.height(content_w).min(above);
+    let dock_h = dock.height(content_w, transcript.lines.len()).min(above);
     let transcript_h = above.saturating_sub(dock_h);
     // 对话记录与 Dock 共享 statusline 之上的高度：内容不足时 Dock 紧跟最后一行，
     // 其下留空；填满后停在 statusline 之上。viewport 仍按可用高度 `transcript_h` 计算。
@@ -1280,28 +1280,69 @@ mod tests {
     }
 
     #[test]
-    fn dock_height_clamps_input_rows_one_to_ten() {
+    fn dock_height_grows_into_space_left_by_transcript() {
         let mut app = test_app();
-        assert_eq!(Dock::new(&app).height(10), 3, "空输入：空行、标题、内容");
+        assert_eq!(Dock::new(&app).height(10, 0), 3, "空输入：空行、标题、内容");
         app.input.set_text("a\nb\nc");
-        assert_eq!(Dock::new(&app).height(10), 5);
-        app.input.set_text(&["x"; 12].join("\n"));
-        assert_eq!(Dock::new(&app).height(10), 11, "24 行终端 Dock 上限为 11");
-        app.term_height = 50;
-        assert_eq!(Dock::new(&app).height(10), 12, "最多 10 行内容");
-        for (height, expected) in [
-            (0, 0),
-            (1, 0),
-            (2, 0),
-            (3, 1),
-            (4, 1),
-            (5, 2),
-            (6, 2),
-            (7, 3),
+        assert_eq!(Dock::new(&app).height(10, 0), 5);
+        app.input.set_text(&["x"; 30].join("\n"));
+        // 24 行终端 statusline 之上 23 行：上限取对话记录留下的空间与 11 中的较大者。
+        for (rows, expected) in [(0, 23), (4, 19), (12, 11), (100, 11)] {
+            assert_eq!(Dock::new(&app).height(10, rows), expected, "rows={rows}");
+        }
+        for (height, half, all) in [
+            (0, 0, 0),
+            (1, 0, 0),
+            (2, 0, 1),
+            (3, 1, 2),
+            (4, 1, 3),
+            (5, 2, 4),
+            (6, 2, 5),
+            (7, 3, 6),
         ] {
             app.term_height = height;
-            assert_eq!(Dock::new(&app).height(10), expected, "frame_h={height}");
+            assert_eq!(Dock::new(&app).height(10, 100), half, "frame_h={height}");
+            assert_eq!(Dock::new(&app).height(10, 0), all, "frame_h={height}");
         }
+    }
+
+    #[test]
+    fn dock_status_height_follows_wrapped_rows() {
+        let retry = |message: String| StatusKind::LlmRetry {
+            attempt: 1,
+            delay_ms: 0,
+            message,
+        };
+        // 超长单词按字符拆分；状态的计算高度与绘制共用正文折行结果。
+        let mut app = test_app();
+        app.blocks.push(Block::Status {
+            kind: retry("x".repeat(40)),
+            placement: StatusPlacement::Dock(crate::app::DockSeverity::Warn),
+        });
+        assert_eq!(Dock::new(&app).height(80, 0), 3, "1 视觉行");
+        app.blocks[0] = Block::Status {
+            kind: retry("x".repeat(200)),
+            placement: StatusPlacement::Dock(crate::app::DockSeverity::Warn),
+        };
+        assert_eq!(Dock::new(&app).height(80, 0), 5, "3 视觉行");
+        app.blocks[0] = Block::Status {
+            kind: retry("x".repeat(450)),
+            placement: StatusPlacement::Dock(crate::app::DockSeverity::Warn),
+        };
+        assert_eq!(Dock::new(&app).height(80, 0), 8, "6 视觉行不再夹到 5");
+        assert_eq!(Dock::new(&app).height(80, 100), 8, "未超过一半上限");
+
+        app.blocks[0] = Block::Status {
+            kind: StatusKind::TurnFailed {
+                reason: "x".repeat(450),
+            },
+            placement: StatusPlacement::Dock(crate::app::DockSeverity::Error),
+        };
+        assert_eq!(
+            Dock::new(&app).height(80, 0),
+            8,
+            "Error 与 Warn 共用同一套高度"
+        );
     }
 
     #[test]
@@ -1456,7 +1497,7 @@ mod tests {
                 .iter()
                 .position(|row| row.contains("USER"))
                 .expect("dock title");
-            let dock_h = usize::from(Dock::new(&app).height(width));
+            let dock_h = usize::from(Dock::new(&app).height(width, content));
             let available = usize::from(height) - 1 - dock_h;
             // Dock 的第一行是上方空行，标题线紧随其后。
             assert_eq!(
@@ -1471,6 +1512,20 @@ mod tests {
                 rows.join("\n")
             );
         }
+        // 对话记录短时，多行输入可以长过一半高度，占满对话记录之下的空间。
+        let mut app = test_app();
+        app.term_width = width;
+        app.term_height = height;
+        app.blocks.push(Block::Status {
+            kind: StatusKind::Notice(vec!["notice".into()]),
+            placement: StatusPlacement::Transcript,
+        });
+        let input = (0..8).map(|n| format!("line{n}")).collect::<Vec<_>>();
+        app.input.set_text(&input.join("\n"));
+        let mut terminal = Terminal::new(TestBackend::new(width, height))?;
+        terminal.draw(|frame| draw(frame, &mut app))?;
+        let screen = buffer_text(&terminal, width, height);
+        assert!(input.iter().all(|line| screen.contains(line)), "{screen}");
         Ok(())
     }
 
@@ -1584,10 +1639,10 @@ mod tests {
         });
         let dock = Dock::new(&app);
         let expected = body("✗ one **three** two", 9, role_style(Role::ToolErr));
-        assert_eq!(dock.height(9), 2 + expected.len() as u16);
-        let mut terminal = Terminal::new(TestBackend::new(9, dock.height(9)))?;
+        assert_eq!(dock.height(9, 0), 2 + expected.len() as u16);
+        let mut terminal = Terminal::new(TestBackend::new(9, dock.height(9, 0)))?;
         terminal.draw(|frame| dock.render(frame, frame.area()))?;
-        let screen = buffer_text(&terminal, 9, dock.height(9));
+        let screen = buffer_text(&terminal, 9, dock.height(9, 0));
         assert_eq!(
             screen
                 .lines()

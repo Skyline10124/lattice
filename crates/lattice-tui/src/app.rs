@@ -373,7 +373,7 @@ impl App {
         let lines = &transcript.lines;
         match action {
             KeyAction::ScrollPageUp | KeyAction::ScrollPageDown | KeyAction::ScrollToBottom => {
-                let height = self.transcript_height();
+                let height = self.transcript_height(lines.len());
                 if width == 0 || height == 0 {
                     if !self.queue.is_editing() {
                         self.focus_input(lines.len());
@@ -498,7 +498,7 @@ impl App {
                         if matches!(action, KeyAction::Up)
                             && row == 0
                             && width > 0
-                            && self.transcript_height() > 0
+                            && self.transcript_height(lines.len()) > 0
                             && let Some(cursor) =
                                 transcript.cursor(transcript.lines.len().saturating_sub(1), col)
                         {
@@ -539,8 +539,10 @@ impl App {
         let transcript = render_transcript(self, width);
         if let Some(cursor) = transcript.anchor_cursor(location) {
             self.focus = Focus::Transcript(cursor);
-            self.viewport
-                .on_content_changed(transcript.lines.len(), self.transcript_height());
+            self.viewport.on_content_changed(
+                transcript.lines.len(),
+                self.transcript_height(transcript.lines.len()),
+            );
             self.viewport.pause();
             self.viewport.reveal(cursor.row);
         }
@@ -548,7 +550,7 @@ impl App {
 
     fn focus_input(&mut self, rows: usize) {
         self.focus = Focus::Dock;
-        self.viewport.to_bottom(rows, self.transcript_height());
+        self.viewport.to_bottom(rows, self.transcript_height(rows));
     }
 
     /// 本地指令不提交 Turn；重连只重新观察，普通退出不触发取消。
@@ -578,13 +580,19 @@ impl App {
         };
         // 合同只要求浏览时 Warn/Error 不动视图；焦点在 Dock 且跟随时仍贴底，最新内容不被遮住。
         if std::mem::take(&mut self.dock_changed) && matches!(self.focus, Focus::Transcript(_)) {
-            self.viewport
-                .on_dock_changed(transcript.lines.len(), self.transcript_height());
+            self.viewport.on_dock_changed(
+                transcript.lines.len(),
+                self.transcript_height(transcript.lines.len()),
+            );
         } else {
-            self.viewport
-                .on_content_changed(transcript.lines.len(), self.transcript_height());
+            self.viewport.on_content_changed(
+                transcript.lines.len(),
+                self.transcript_height(transcript.lines.len()),
+            );
         }
-        if (width == 0 || self.transcript_height() == 0 || transcript.lines.is_empty())
+        if (width == 0
+            || self.transcript_height(transcript.lines.len()) == 0
+            || transcript.lines.is_empty())
             && !self.queue.is_editing()
         {
             self.focus_input(transcript.lines.len());
@@ -1379,12 +1387,13 @@ impl App {
         }
     }
 
-    /// 与绘制路径使用同一内容宽度及 Dock 高度，statusline 始终占一行。
-    pub(crate) fn transcript_height(&self) -> usize {
+    /// 与绘制路径使用同一内容宽度及 Dock 高度，statusline 始终占一行；
+    /// `rows` 是同一宽度下的对话记录行数，Dock 高度随它变化。
+    pub(crate) fn transcript_height(&self, rows: usize) -> usize {
         let layout = frame_layout(self.term_width, self.term_height);
         self.term_height
             .saturating_sub(1)
-            .saturating_sub(Dock::new(self).height(layout.content_w)) as usize
+            .saturating_sub(Dock::new(self).height(layout.content_w, rows)) as usize
     }
 }
 
@@ -2211,8 +2220,8 @@ mod tests {
         assert!(submitted.is_none());
         assert_eq!(app.input.text(), "a\nb\nc");
         // 3 行内容 + 空行 + 标题：Dock::height 是视口高度的唯一来源。
-        assert_eq!(Dock::new(&app).height(frame_layout(80, 24).content_w), 5);
-        assert_eq!(app.transcript_height(), 18);
+        assert_eq!(Dock::new(&app).height(frame_layout(80, 24).content_w, 0), 5);
+        assert_eq!(app.transcript_height(0), 18);
         assert_eq!(app.phase, TurnPhase::Idle);
     }
 

@@ -58,12 +58,16 @@ impl<'a> Dock<'a> {
         }
     }
 
-    pub(crate) fn height(&self, content_w: u16) -> u16 {
+    /// Dock 与对话记录共享 statusline 之上的高度：上限取对话记录留下的空间与一半中的较大者，
+    /// 对话记录短时 Dock 可占满其下全部空间，长时对话记录至少留一半。
+    pub(crate) fn height(&self, content_w: u16, transcript_rows: usize) -> u16 {
         let rows = match &self.top {
             Module::Input(module) => module.rows(content_w),
             Module::Status(module) => module.rows(content_w),
         };
-        (2 + rows).min(self.frame_h.saturating_sub(1) / 2)
+        let above = self.frame_h.saturating_sub(1);
+        let left = above.saturating_sub(u16::try_from(transcript_rows).unwrap_or(u16::MAX));
+        rows.saturating_add(2).min(left.max(above / 2))
     }
 
     pub(crate) fn render(&self, frame: &mut Frame, area: Rect) {
@@ -99,12 +103,12 @@ impl InputModule<'_> {
     }
 
     fn rows(&self, content_w: u16) -> u16 {
-        input_visual(self.input, content_w).0.len().clamp(1, 10) as u16
+        u16::try_from(input_visual(self.input, content_w).0.len().max(1)).unwrap_or(u16::MAX)
     }
 
     fn render(&self, frame: &mut Frame, title: Rect, area: Rect) {
         let (visual, cursor_row, cursor_col) = input_visual(self.input, area.width);
-        let height = usize::from(area.height).min(10);
+        let height = usize::from(area.height);
         let scroll = cursor_row.saturating_sub(height.saturating_sub(1));
         let below = visual.len().saturating_sub(scroll + height);
         let mut right = Vec::new();
@@ -152,9 +156,8 @@ impl StatusModule<'_> {
     }
 
     fn rows(&self, content_w: u16) -> u16 {
-        body(&status_text(self.kind), content_w, Style::default())
-            .len()
-            .clamp(1, 5) as u16
+        let rows = body(&status_text(self.kind), content_w, Style::default()).len();
+        u16::try_from(rows.max(1)).unwrap_or(u16::MAX)
     }
 
     fn render(&self, frame: &mut Frame, title: Rect, area: Rect) {
@@ -171,10 +174,7 @@ impl StatusModule<'_> {
             )),
             title,
         );
-        let shown = body(&status_text(self.kind), area.width, role_style(text_role))
-            .into_iter()
-            .take(5)
-            .collect::<Vec<_>>();
+        let shown = body(&status_text(self.kind), area.width, role_style(text_role));
         frame.render_widget(Paragraph::new(shown), area);
     }
 }
