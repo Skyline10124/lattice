@@ -84,7 +84,7 @@ fn browse_entry_exit_conditions_and_reserved_keys() {
         KeyAction::Paste("x\ny".into()),
     ] {
         let mut app = app();
-        app.term_width = 7; // content_w = 5; two soft rows
+        app.term_width = 5; // content_w = 5; two soft rows
         app.blocks.push(Block::Assistant("body".into()));
         app.input.set_text("abcdef");
         app.apply_action(KeyAction::Up);
@@ -177,7 +177,7 @@ fn browse_paging_clamps_cursor_and_only_control_end_resumes_following() {
 
 #[test]
 fn zero_visible_area_returns_to_input_and_prevents_browse_entry() {
-    for (width, height) in [(2, 24), (80, 1), (0, 0)] {
+    for (width, height) in [(0, 24), (80, 1), (0, 0)] {
         let mut app = app();
         app.blocks.push(Block::Assistant("body".into()));
         app.apply_action(KeyAction::Up);

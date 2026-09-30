@@ -758,7 +758,7 @@ fn queued_editor_saves_discards_deletes_and_keeps_warn_input_local() {
         app.apply_action(KeyAction::Backspace);
         app.apply_action(KeyAction::Insert('!'));
         app.apply_action(KeyAction::Submit);
-        assert!(frame(app).text.contains("cd e\n  f!"));
+        assert!(frame(app).text.contains("cd e\nf!"));
         assert!(app.dock_status().is_some());
         assert!(matches!(app.focus, Focus::Transcript(_)));
         app.apply_action(KeyAction::Submit);
@@ -1178,7 +1178,7 @@ fn queue_editor_draws_insertion_cursor_and_newline_hint_after_tiny_resize() {
             let transcript = app.prepare_transcript();
             let (row, col) = transcript.editor_cursor.unwrap();
             let expected = ratatui::layout::Position::new(
-                2 + col as u16,
+                col as u16,
                 row.saturating_sub(app.viewport.scroll()) as u16,
             );
             assert_eq!(terminal.get_cursor_position().unwrap(), expected);

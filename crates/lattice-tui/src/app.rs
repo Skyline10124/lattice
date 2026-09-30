@@ -2156,7 +2156,7 @@ mod tests {
     #[test]
     fn input_arrows_follow_visual_rows_and_control_arrows_browse_history() {
         let mut app = test_app();
-        app.term_width = 7; // content_w = 5
+        app.term_width = 5; // content_w = 5
         app.history.push("first");
         app.history.push("second");
         app.input.set_text("abc中de\nx\n12中z");

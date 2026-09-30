@@ -100,15 +100,15 @@ impl BrowseCursor {
     }
 }
 
-// 跳过 gutter；零宽字符不产生停靠格，宽字符只停在起点。
+// 零宽字符不产生停靠格，宽字符只停在起点。
 fn columns(line: Option<&Line<'_>>, width: u16) -> Vec<usize> {
     let mut columns = vec![0];
     let mut cell = 0usize;
     if let Some(line) = line {
         for glyph in line.styled_graphemes(Style::default()) {
             let cells = glyph.symbol.width();
-            if cells > 0 && cell >= usize::from(GUTTER) {
-                let col = cell.saturating_sub(usize::from(GUTTER));
+            if cells > 0 {
+                let col = cell;
                 if col.saturating_add(cells) <= usize::from(width) && col > 0 {
                     columns.push(col);
                 }

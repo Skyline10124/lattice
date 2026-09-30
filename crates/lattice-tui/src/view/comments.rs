@@ -63,7 +63,7 @@ impl Transcript {
             .lines
             .get(row)
             .and_then(|l| l.spans.first())
-            .map_or(0, |s| s.width().saturating_sub(usize::from(GUTTER)));
+            .map_or(0, |s| s.width());
         width.saturating_sub(u16::try_from(indent).unwrap_or(u16::MAX))
     }
 }
@@ -93,7 +93,7 @@ pub(super) fn markers<'c>(
         let text = format!("[COMMENT {}]", comment.n);
         let len = text.width();
         if col > 0 && col.saturating_add(1).saturating_add(len) > usize::from(width) {
-            lines.extend(with_gutter(vec![Line::from(std::mem::take(&mut spans))]));
+            lines.push(Line::from(std::mem::take(&mut spans)));
             col = 0;
         }
         if col > 0 {
@@ -109,7 +109,7 @@ pub(super) fn markers<'c>(
         col = col.saturating_add(len);
     }
     if !spans.is_empty() {
-        lines.extend(with_gutter(vec![Line::from(spans)]));
+        lines.push(Line::from(spans));
     }
 }
 
@@ -240,10 +240,7 @@ fn render(transcript: &mut Transcript, placed: PlacedComment<'_>, width: u16) {
         &right,
         usize::from(width).saturating_sub(indent),
     );
-    title.spans.insert(
-        0,
-        Span::raw(" ".repeat(usize::from(GUTTER).saturating_add(indent))),
-    );
+    title.spans.insert(0, Span::raw(" ".repeat(indent)));
     transcript.lines.push(title);
     let visual = if let Some(input) = placed.editor {
         let (visual, row, col) = input_visual(input, body_width);
@@ -265,10 +262,7 @@ fn render(transcript: &mut Transcript, placed: PlacedComment<'_>, width: u16) {
         )
     };
     for mut line in visual {
-        line.spans.insert(
-            0,
-            Span::raw(" ".repeat(usize::from(GUTTER).saturating_add(body_indent))),
-        );
+        line.spans.insert(0, Span::raw(" ".repeat(body_indent)));
         transcript.lines.push(line);
     }
     transcript

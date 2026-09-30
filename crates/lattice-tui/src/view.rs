@@ -24,7 +24,6 @@ pub(crate) const SIDEBAR_W: u16 = 40;
 pub(crate) const SIDEBAR_ASPECT: u16 = 3;
 pub(crate) const MIN_CONTENT_W_WITH_SIDEBAR: u16 = 72;
 pub(crate) const GAP: u16 = 1;
-pub(crate) const GUTTER: u16 = 2;
 const CTRL_C_HINT: &str = "Ctrl+C to quit";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,22 +40,19 @@ pub(crate) struct FrameLayout {
 }
 
 pub(crate) fn frame_layout(frame_w: u16, frame_h: u16) -> FrameLayout {
-    let sidebar_content_w = frame_w
-        .saturating_sub(SIDEBAR_W)
-        .saturating_sub(GAP)
-        .saturating_sub(GUTTER);
+    let sidebar_content_w = frame_w.saturating_sub(SIDEBAR_W).saturating_sub(GAP);
     let sufficiently_landscape = frame_w >= frame_h.saturating_mul(SIDEBAR_ASPECT);
     let enough_conversation_width = sidebar_content_w >= MIN_CONTENT_W_WITH_SIDEBAR;
     if sufficiently_landscape && enough_conversation_width {
         FrameLayout {
-            left_w: frame_w.saturating_sub(SIDEBAR_W).saturating_sub(GAP),
+            left_w: sidebar_content_w,
             content_w: sidebar_content_w,
             sidebar: Sidebar::Visible,
         }
     } else {
         FrameLayout {
             left_w: frame_w,
-            content_w: frame_w.saturating_sub(GUTTER),
+            content_w: frame_w,
             sidebar: Sidebar::Hidden,
         }
     }
@@ -295,13 +291,12 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
                     turn.map(|(_, n)| n),
                     content_w,
                 );
-                lines.extend(with_gutter(
+                lines.extend(
                     cache
                         .render(text, content_w)
                         .iter()
-                        .map(|row| row.line.clone())
-                        .collect(),
-                ));
+                        .map(|row| row.line.clone()),
+                );
                 assistant_header = false;
             }
             Block::CommentedUser(message) | Block::RejectedUser(message) => {
@@ -330,13 +325,12 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
                     );
                 }
                 if !message.text.is_empty() {
-                    lines.extend(with_gutter(
+                    lines.extend(
                         cache
                             .render(&message.text, content_w)
                             .iter()
-                            .map(|row| row.line.clone())
-                            .collect(),
-                    ));
+                            .map(|row| row.line.clone()),
+                    );
                 }
                 assistant_header = false;
             }
@@ -369,9 +363,7 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
                             }
                         }
                     }
-                    lines.extend(with_gutter(
-                        rendered.iter().map(|row| row.line.clone()).collect(),
-                    ));
+                    lines.extend(rendered.iter().map(|row| row.line.clone()));
                 }
             }
             Block::AssistantStart {
@@ -398,13 +390,12 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
                     turn.map(|(_, n)| n),
                     content_w,
                 );
-                lines.extend(with_gutter(
+                lines.extend(
                     cache
                         .render(text, content_w)
                         .iter()
-                        .map(|row| row.line.clone())
-                        .collect(),
-                ));
+                        .map(|row| row.line.clone()),
+                );
             }
             Block::Tool { name, state, .. } => {
                 ensure_assistant_header(
@@ -472,12 +463,12 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
         } else if matches!(app.focus, Focus::Transcript(cursor) if cursor.block.id == message.id) {
             right.extend(["Enter 编辑".into(), "Esc 删除".into()]);
         }
-        lines.extend(with_gutter(vec![title_line(
+        lines.push(title_line(
             "USER",
             Role::User,
             &right,
             usize::from(content_w),
-        )]));
+        ));
         comments::markers(
             &mut lines,
             &mut markers,
@@ -487,12 +478,11 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
         if let Some(editor) = app.queue.editor(message.id) {
             let (visual, row, col) = input_visual(editor, content_w);
             editor_cursor = Some((lines.len().saturating_add(row), col));
-            lines.extend(with_gutter(
+            lines.extend(
                 visual
                     .into_iter()
-                    .map(|text| Line::from(Span::styled(text, role_style(Role::Assistant))))
-                    .collect(),
-            ));
+                    .map(|text| Line::from(Span::styled(text, role_style(Role::Assistant)))),
+            );
         } else {
             lines.extend(body(&message.text, content_w, role_style(Role::DimMeta)));
         }
@@ -537,12 +527,7 @@ fn transcript_title(
         .map(|n| format!("#{n}"))
         .into_iter()
         .collect::<Vec<_>>();
-    lines.extend(with_gutter(vec![title_line(
-        title,
-        role,
-        &right,
-        usize::from(content_w),
-    )]));
+    lines.push(title_line(title, role, &right, usize::from(content_w)));
 }
 
 fn ensure_assistant_header(
@@ -559,36 +544,37 @@ fn ensure_assistant_header(
 }
 
 fn body(text: &str, content_w: u16, style: Style) -> Vec<Line<'static>> {
-    with_gutter(wrapping::wrap(
+    wrapping::wrap(
         vec![Span::styled(
             wrapping::expand_tabs(text).into_owned(),
             style,
         )],
         usize::from(content_w),
-    ))
+    )
 }
 
-fn with_gutter(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
+/// 折叠指示占工具行前两列；工具行的续行与错误详情对齐到指示之后。
+fn tool_heading(spans: Vec<Span<'static>>, expanded: bool, content_w: u16) -> Vec<Line<'static>> {
+    let fold = Span::styled(
+        format!("{} ", fold_symbol(expanded)),
+        role_style(Role::DimMeta),
+    );
+    hanging(
+        wrapping::wrap(spans, usize::from(content_w.saturating_sub(2))),
+        Some(fold),
+    )
+}
+
+fn hanging(lines: Vec<Line<'static>>, first: Option<Span<'static>>) -> Vec<Line<'static>> {
+    let mut first = first;
     lines
         .into_iter()
         .map(|mut line| {
-            if !line.spans.is_empty() {
-                line.spans.insert(0, Span::raw("  "));
-            }
+            line.spans
+                .insert(0, first.take().unwrap_or_else(|| Span::raw("  ")));
             line
         })
         .collect()
-}
-
-fn tool_heading(spans: Vec<Span<'static>>, expanded: bool, content_w: u16) -> Vec<Line<'static>> {
-    let mut lines = with_gutter(wrapping::wrap(spans, usize::from(content_w)));
-    if let Some(first) = lines.first_mut() {
-        first.spans[0] = Span::styled(
-            format!("{} ", fold_symbol(expanded)),
-            role_style(Role::DimMeta),
-        );
-    }
-    lines
 }
 
 fn tool_lines(name: &str, state: &ToolState, content_w: u16) -> Vec<Line<'static>> {
@@ -624,7 +610,7 @@ fn tool_lines(name: &str, state: &ToolState, content_w: u16) -> Vec<Line<'static
                 content_w,
             );
             if let Some(error) = error {
-                lines.extend(body(error, content_w, err));
+                lines.extend(hanging(body(error, content_w.saturating_sub(2), err), None));
             }
             lines
         }
@@ -773,7 +759,7 @@ fn draw_transcript(
         && (start..end).contains(&row)
         && content_w > 0
     {
-        let x = GUTTER.saturating_add(u16::try_from(col).unwrap_or(u16::MAX));
+        let x = u16::try_from(col).unwrap_or(u16::MAX);
         let y = row.saturating_sub(start) as u16;
         if x < area.width {
             frame.set_cursor_position((area.x.saturating_add(x), area.y.saturating_add(y)));
@@ -825,7 +811,7 @@ fn display_width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
 }
 
-/// 不包含 gutter；调用方把标题线放在正文区域。
+/// 标题线从左列起点画到 `width`。
 pub(crate) fn title_line(title: &str, role: Role, right: &[String], width: usize) -> Line<'static> {
     let dim = role_style(Role::DimMeta);
     if width < 5 {
@@ -957,8 +943,8 @@ mod tests {
                 assert_eq!(owner.row, transcript.owners[index - 1].row + 1);
             }
         }
-        let user_lines = app.markdown_cache.borrow_mut().render(user, 78);
-        let answer = app.markdown_cache.borrow_mut().render("answer", 78);
+        let user_lines = app.markdown_cache.borrow_mut().render(user, 80);
+        let answer = app.markdown_cache.borrow_mut().render("answer", 80);
         let old_answer = Rc::downgrade(&answer);
         drop(answer);
         app.prepare_transcript(); // complete frame resets marks set by inspection
@@ -966,7 +952,7 @@ mod tests {
         let cached = app.prepare_transcript();
         assert!(Rc::ptr_eq(
             &user_lines,
-            &app.markdown_cache.borrow_mut().render(user, 78)
+            &app.markdown_cache.borrow_mut().render(user, 80)
         ));
         assert!(old_answer.upgrade().is_none());
         *app.markdown_cache.borrow_mut() = Default::default();
@@ -984,7 +970,7 @@ mod tests {
         app.apply_action(crate::input::KeyAction::Up);
         let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
         terminal.draw(|frame| draw(frame, &mut app))?;
-        assert_eq!(terminal.backend_mut().get_cursor_position()?, (5, 0).into());
+        assert_eq!(terminal.backend_mut().get_cursor_position()?, (3, 0).into());
         let text = buffer_text(&terminal, 80, 24);
         assert!(text.contains("↓ 0 行"));
         assert!(!text.contains("Alt+Enter"));
@@ -1053,20 +1039,30 @@ mod tests {
 
     #[test]
     fn layout_boundaries_are_underflow_safe() {
-        for (w, h) in [(1, 1), (7, 3), (43, 10), (44, 10), (114, 38), (115, 38)] {
+        for (w, h) in [
+            (1, 1),
+            (7, 3),
+            (43, 10),
+            (44, 10),
+            (112, 37),
+            (113, 37),
+            (113, 38),
+        ] {
             let _ = frame_layout(w, h);
         }
         assert_eq!(
             frame_layout(1, 1),
             FrameLayout {
                 left_w: 1,
-                content_w: 0,
+                content_w: 1,
                 sidebar: Sidebar::Hidden,
             }
         );
-        // 114x38 比例刚好不足；115x38 比例与正文宽度同时达标。
-        assert_eq!(frame_layout(114, 38).sidebar, Sidebar::Hidden);
-        assert_eq!(frame_layout(115, 38).sidebar, Sidebar::Visible);
+        // 正文宽 = w - 41：112x37 正文 71 列，刚好不足；113x37 比例与正文宽度同时达标；
+        // 113x38 正文够宽但比例不足 3:1。
+        assert_eq!(frame_layout(112, 37).sidebar, Sidebar::Hidden);
+        assert_eq!(frame_layout(113, 37).sidebar, Sidebar::Visible);
+        assert_eq!(frame_layout(113, 38).sidebar, Sidebar::Hidden);
     }
 
     #[test]
@@ -1124,7 +1120,7 @@ mod tests {
         assert_eq!(text[title + 1].trim(), "after");
         assert_eq!(text[title + 2].trim(), "answer");
         assert_eq!(
-            lines[title].spans[2].style,
+            lines[title].spans[1].style,
             role_style(Role::Assistant).add_modifier(ratatui::style::Modifier::BOLD)
         );
         for (width, height) in [(0, 0), (1, 1), (2, 2), (6, 3)] {
@@ -1252,9 +1248,9 @@ mod tests {
     #[test]
     fn dock_compression_preserves_content_before_title_and_spacer() -> anyhow::Result<()> {
         for (height, expected) in [
-            (1, vec!["  draft"]),
-            (2, vec!["  ── USER", "  draft"]),
-            (3, vec!["", "  ── USER", "  draft"]),
+            (1, vec!["draft"]),
+            (2, vec!["── USER", "draft"]),
+            (3, vec!["", "── USER", "draft"]),
         ] {
             let mut app = test_app();
             app.input.set_text("draft");
@@ -1270,7 +1266,7 @@ mod tests {
             }
             assert_eq!(
                 terminal.get_cursor_position()?,
-                ratatui::layout::Position::new(7, height - 1)
+                ratatui::layout::Position::new(5, height - 1)
             );
         }
         Ok(())
@@ -1304,7 +1300,7 @@ mod tests {
     #[test]
     fn input_has_no_prompt_symbol_and_continuation_aligns() -> anyhow::Result<()> {
         let mut app = test_app();
-        app.input.set_text("abcdefghijkl");
+        app.input.set_text("abcdefghijklmn");
         let dock = Dock::new(&app);
         let mut terminal = Terminal::new(TestBackend::new(12, 4))?;
         terminal.draw(|frame| dock.render(frame, Rect::new(0, 0, 12, 4)))?;
@@ -1312,11 +1308,11 @@ mod tests {
         assert!(!screen.contains('>'), "{screen}");
         assert!(screen.contains("── USER"));
         let rows: Vec<&str> = screen.lines().collect();
-        assert_eq!(rows[2].trim_end(), "  abcdefghij");
-        assert_eq!(rows[3].trim_end(), "  kl", "续行与首行正文同列");
+        assert_eq!(rows[2].trim_end(), "abcdefghijkl");
+        assert_eq!(rows[3].trim_end(), "mn", "续行与首行正文同列");
         assert_eq!(
             terminal.get_cursor_position()?,
-            ratatui::layout::Position::new(4, 3)
+            ratatui::layout::Position::new(2, 3)
         );
         app.input.clear();
         terminal.draw(|frame| Dock::new(&app).render(frame, frame.area()))?;
@@ -1324,7 +1320,7 @@ mod tests {
         assert!(screen.lines().skip(2).all(|line| line.trim().is_empty()));
         assert_eq!(
             terminal.get_cursor_position()?,
-            ratatui::layout::Position::new(2, 2)
+            ratatui::layout::Position::new(0, 2)
         );
         Ok(())
     }
@@ -1353,7 +1349,7 @@ mod tests {
                     .lines()
                     .nth(1)
                     .unwrap()
-                    .starts_with(&format!("  ── {label} "))
+                    .starts_with(&format!("── {label} "))
             );
             assert!(screen.contains("Space 关闭"));
             assert!(screen.contains("fifth") && !screen.contains("sixth"));
@@ -1362,8 +1358,8 @@ mod tests {
             } else {
                 (Role::ToolErr, Role::ToolErr)
             };
-            assert_eq!(terminal.backend().buffer()[(5, 1)].fg, role_color(title));
-            assert_eq!(terminal.backend().buffer()[(2, 2)].fg, role_color(text));
+            assert_eq!(terminal.backend().buffer()[(3, 1)].fg, role_color(title));
+            assert_eq!(terminal.backend().buffer()[(0, 2)].fg, role_color(text));
         }
         Ok(())
     }
@@ -1519,7 +1515,7 @@ mod tests {
                 output_len: 0,
                 error: Some("one three two".into()),
             },
-            7,
+            8,
         );
         assert_eq!(
             failed.iter().map(ToString::to_string).collect::<Vec<_>>(),
@@ -1535,16 +1531,16 @@ mod tests {
         let dock = Dock::new(&app);
         let expected = body("✗ one **three** two", 9, role_style(Role::ToolErr));
         assert_eq!(dock.height(9), 2 + expected.len() as u16);
-        let mut terminal = Terminal::new(TestBackend::new(11, dock.height(9)))?;
+        let mut terminal = Terminal::new(TestBackend::new(9, dock.height(9)))?;
         terminal.draw(|frame| dock.render(frame, frame.area()))?;
-        let screen = buffer_text(&terminal, 11, dock.height(9));
+        let screen = buffer_text(&terminal, 9, dock.height(9));
         assert_eq!(
             screen
                 .lines()
                 .skip(2)
                 .map(str::trim_end)
                 .collect::<Vec<_>>(),
-            ["  ✗ one", "  **three**", "  two"]
+            vec!["✗ one", "**three**", "two"]
         );
         Ok(())
     }
@@ -1580,7 +1576,7 @@ mod tests {
                 .iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>(),
-            ["  one", "  three"]
+            vec!["one", "three"]
         );
     }
 
@@ -1592,24 +1588,20 @@ mod tests {
         )]
         .into();
         let lines = transcript_lines(&app, 8);
-        assert_eq!(
-            lines[1].width(),
-            13,
-            "two 2-cell columns plus frames and gutter"
-        );
+        assert_eq!(lines[1].width(), 11, "two 2-cell columns plus frames");
         assert_eq!(app.content_rows(8), 6);
-        let mut terminal = Terminal::new(TestBackend::new(10, 6))?;
+        let mut terminal = Terminal::new(TestBackend::new(8, 6))?;
         let transcript = render_transcript(&app, 8);
         terminal.draw(|frame| draw_transcript(frame, &app, frame.area(), 8, &transcript))?;
         assert_eq!(
-            buffer_text(&terminal, 10, 6).lines().collect::<Vec<_>>(),
+            buffer_text(&terminal, 8, 6).lines().collect::<Vec<_>>(),
             [
-                "  ── USE ─",
-                "  ┌────┬──",
-                "  │ aa │ b",
-                "  ├────┼──",
-                "  │ cc │ d",
-                "  └────┴──",
+                "── USE ─",
+                "┌────┬──",
+                "│ aa │ b",
+                "├────┼──",
+                "│ cc │ d",
+                "└────┴──",
             ]
         );
         Ok(())

@@ -73,12 +73,7 @@ impl<'a> Dock<'a> {
         // 极小区域先去空行，再去标题；即使没有正文空间也不越界。
         let spacer = u16::from(area.height >= 3);
         let title_h = u16::from(area.height >= 2);
-        let title_area = Rect::new(
-            area.x.saturating_add(GUTTER.min(area.width)),
-            area.y.saturating_add(spacer),
-            area.width.saturating_sub(GUTTER),
-            title_h,
-        );
+        let title_area = Rect::new(area.x, area.y.saturating_add(spacer), area.width, title_h);
         let content = Rect::new(
             area.x,
             area.y.saturating_add(spacer + title_h),
@@ -108,8 +103,7 @@ impl InputModule<'_> {
     }
 
     fn render(&self, frame: &mut Frame, title: Rect, area: Rect) {
-        let (visual, cursor_row, cursor_col) =
-            input_visual(self.input, area.width.saturating_sub(GUTTER));
+        let (visual, cursor_row, cursor_col) = input_visual(self.input, area.width);
         let height = usize::from(area.height).min(10);
         let scroll = cursor_row.saturating_sub(height.saturating_sub(1));
         let below = visual.len().saturating_sub(scroll + height);
@@ -133,21 +127,16 @@ impl InputModule<'_> {
             Paragraph::new(title_line("USER", Role::User, &right, title.width as usize)),
             title,
         );
-        // 输入区不显示提示符，gutter 留空，正文与对话记录正文同列。
+        // 输入区不显示提示符，正文与对话记录正文同列。
         let shown = visual
             .iter()
             .skip(scroll)
             .take(height)
-            .map(|text| {
-                Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(text.clone(), role_style(Role::Assistant)),
-                ])
-            })
+            .map(|text| Line::from(Span::styled(text.clone(), role_style(Role::Assistant))))
             .collect::<Vec<_>>();
         frame.render_widget(Paragraph::new(shown), area);
         let y = cursor_row.saturating_sub(scroll) as u16;
-        let x = GUTTER.saturating_add(cursor_col as u16);
+        let x = cursor_col as u16;
         if self.focused && y < area.height && x < area.width {
             frame.set_cursor_position((area.x.saturating_add(x), area.y.saturating_add(y)));
         }
@@ -182,14 +171,10 @@ impl StatusModule<'_> {
             )),
             title,
         );
-        let shown = body(
-            &status_text(self.kind),
-            area.width.saturating_sub(GUTTER),
-            role_style(text_role),
-        )
-        .into_iter()
-        .take(5)
-        .collect::<Vec<_>>();
+        let shown = body(&status_text(self.kind), area.width, role_style(text_role))
+            .into_iter()
+            .take(5)
+            .collect::<Vec<_>>();
         frame.render_widget(Paragraph::new(shown), area);
     }
 }
