@@ -474,7 +474,7 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
         if app.queue.editor(message.id).is_some() {
             right.push("Enter 完成编辑".into());
         } else if matches!(app.focus, Focus::Transcript(cursor) if cursor.block.id == message.id) {
-            right.extend(["Enter 编辑".into(), "Esc 删除".into()]);
+            right.extend(["Enter 编辑".into(), "Delete 删除".into()]);
         }
         lines.push(title_line(
             "USER",

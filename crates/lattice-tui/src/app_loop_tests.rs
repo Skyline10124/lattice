@@ -202,7 +202,7 @@ fn save_comment(app: &mut App, text: &str) {
 }
 
 #[test]
-fn comment_three_esc_paths_saved_count_and_blank_save() {
+fn comment_esc_delete_paths_saved_count_and_blank_save() {
     let mut h = comment_app();
     let app = &mut h.app;
     comment_browse(app, "comment target");
@@ -219,8 +219,17 @@ fn comment_three_esc_paths_saved_count_and_blank_save() {
     app.apply_action(KeyAction::Clear);
     assert!(frame(app).text.contains("saved note"));
     assert!(!frame(app).text.contains("discarded edit"));
+    // 不在编辑时：可打印字符与粘贴被忽略，Esc 只回到输入区，Delete 才删除草稿。
     comment_browse(app, "saved note");
+    app.apply_action(KeyAction::Insert('z'));
+    app.apply_action(KeyAction::Paste("pasted".into()));
+    assert!(matches!(app.focus, Focus::Transcript(_)));
+    assert!(app.input.is_empty());
     app.apply_action(KeyAction::Clear);
+    assert_eq!(app.focus, Focus::Dock);
+    assert_eq!(app.queue.draft_count(), 1);
+    comment_browse(app, "saved note");
+    app.apply_action(KeyAction::Delete);
     assert_eq!(app.queue.draft_count(), 0);
     save_comment(app, " \n\t");
     assert_eq!(app.queue.draft_count(), 0);
@@ -282,7 +291,7 @@ fn comment_manual_rejections_keep_user_markers_and_restore_one_draft_copy() {
         assert!(app.queue.is_editing(), "restored draft remains editable");
         app.apply_action(KeyAction::Clear);
         comment_browse(app, "rejected note");
-        app.apply_action(KeyAction::Clear);
+        app.apply_action(KeyAction::Delete);
         save_comment(app, "next note");
         assert_eq!(
             app.queue.drafts().next().unwrap().comment().n,
@@ -350,6 +359,9 @@ fn comment_queue_only_edit_rejection_and_delete() {
             .unwrap();
         app.focus = Focus::Transcript(transcript.cursor(row, 0).unwrap());
         app.apply_action(KeyAction::Clear);
+        assert_eq!(app.queue.messages().count(), 1, "Esc 不删除排队消息");
+        app.focus = Focus::Transcript(transcript.cursor(row, 0).unwrap());
+        app.apply_action(KeyAction::Delete);
         assert_eq!(app.queue.messages().count(), 0);
         assert!(!frame(app).text.contains("queued note"));
     }
@@ -673,7 +685,7 @@ fn queued_editor_saves_discards_deletes_and_keeps_warn_input_local() {
             app.submit();
         }
         app.apply_action(KeyAction::Up);
-        assert!(frame(app).text.contains("Enter 编辑 · Esc 删除"));
+        assert!(frame(app).text.contains("Enter 编辑 · Delete 删除"));
         app.apply_action(KeyAction::Submit);
         assert!(frame(app).text.contains("Enter 完成编辑"));
         app.push_dock_status(
@@ -701,7 +713,7 @@ fn queued_editor_saves_discards_deletes_and_keeps_warn_input_local() {
         assert!(!frame(app).text.contains("f!x"));
         app.apply_action(KeyAction::Insert(' '));
         assert!(app.dock_status().is_none());
-        app.apply_action(KeyAction::Clear);
+        app.apply_action(KeyAction::Delete);
         assert!(!frame(app).text.contains("ab中"));
         assert!(frame(app).text.contains("first"));
         assert!(matches!(app.focus, Focus::Transcript(_)));

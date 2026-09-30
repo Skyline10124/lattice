@@ -439,34 +439,19 @@ impl App {
                         self.viewport.reveal(row);
                     }
                 }
-                KeyAction::Clear => {
+                // 不在编辑时 Esc 只回到输入区；删除草稿或排队消息用 Delete，避免误删。
+                KeyAction::Clear => self.focus_input(lines.len()),
+                KeyAction::Delete => {
                     if let Focus::Transcript(cursor) = self.focus {
                         if let Some(anchor) = self.queue.remove_draft(cursor.block.id) {
                             self.focus_anchor(&anchor);
-                        } else if matches!(
-                            transcript.comment_navigation(cursor, width),
-                            Some(crate::view::CommentNavigation::Jump(_))
-                        ) {
-                            self.focus_input(lines.len());
                         } else if self.queue.remove(cursor.block.id) {
                             self.prepare_transcript();
-                        } else {
-                            self.focus_input(lines.len());
                         }
                     }
                 }
-                KeyAction::Insert(c) => {
-                    self.focus_input(lines.len());
-                    self.input.insert_char(c);
-                }
-                KeyAction::ModifiedSpace => {
-                    self.focus_input(lines.len());
-                    self.input.insert_char(' ');
-                }
-                KeyAction::Paste(text) => {
-                    self.focus_input(lines.len());
-                    self.input.insert_paste(&text);
-                }
+                // 对话记录中的可打印字符与粘贴被忽略，焦点不动，避免误输入。
+                KeyAction::Insert(_) | KeyAction::ModifiedSpace | KeyAction::Paste(_) => {}
                 action @ (KeyAction::Up
                 | KeyAction::Down
                 | KeyAction::Left
