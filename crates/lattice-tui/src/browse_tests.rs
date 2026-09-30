@@ -173,8 +173,6 @@ fn browse_paging_clamps_cursor_and_only_control_end_resumes_following() {
     assert!(app.viewport.following());
     assert_eq!(cursor(&app).desired_col, 3);
     assert!(cursor(&app).row >= app.viewport.scroll());
-    app.apply_builtin("/clear");
-    assert_eq!(app.focus, Focus::Dock);
 }
 
 #[test]

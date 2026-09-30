@@ -121,9 +121,6 @@ impl BlockList {
     pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }
-    pub(crate) fn clear(&mut self) {
-        self.entries.clear();
-    }
 
     pub(crate) fn inherit_discarded(&mut self, old: Vec<IdentitySlot>, new: Vec<IdentitySlot>) {
         let retained: std::collections::HashSet<_> = self.entries.iter().map(|e| e.id).collect();

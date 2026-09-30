@@ -558,7 +558,6 @@ impl App {
             "/quit" | "/exit" | "/q" => { self.should_quit = true; true }
             "/reconnect" => { self.reconnect_requested = true; true }
             "/help" | "/?" => { self.push_status(StatusKind::Notice(help_lines(self.kitty_keyboard))); true }
-            "/clear" => { self.blocks.clear(); self.durable_len = 0; self.viewport = Viewport::new(); self.focus = Focus::Dock; true }
             _ => false,
         }
     }
@@ -1628,7 +1627,6 @@ fn help_lines(kitty: bool) -> Vec<String> {
     vec![
         "/help  this message".into(),
         "/reconnect  只重连观察，不恢复或重新提交".into(),
-        "/clear  clear transcript".into(),
         "/quit  exit (also Ctrl+D on empty input)".into(),
         "Esc  清空输入".into(),
         "Ctrl+C  取消运行中 Turn；空闲清空输入；两秒内再按退出".into(),
@@ -1644,7 +1642,6 @@ fn startup_notice() -> Vec<String> {
     vec![
         "LATTICE".into(),
         "/help  show commands".into(),
-        "/clear  clear transcript".into(),
         "/quit  exit".into(),
         "/reconnect  重新读取状态并观察".into(),
     ]
