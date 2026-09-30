@@ -21,10 +21,13 @@
 //! 2. **Cell authorization** — the operation's host-bound Cell and its concrete
 //!    path target go through [`authorize_operation`], the same seam
 //!    `host-control`'s `emit-event` uses.
-//! 3. **Safe resolution** — [`LocalWorkspace::resolve_facts_blocking`] walks the
-//!    path one segment at a time with `openat`/`AT_SYMLINK_NOFOLLOW`, so a
-//!    symlink pointing outside the root fails as `RootEscape` instead of being
-//!    followed. System Path Exclusion is applied inside that walk.
+//! 3. **Safe resolution** — [`LocalWorkspace::resolve_facts_blocking`] checks the
+//!    path one segment at a time with `lstat`, so a symlink component already
+//!    present is rejected instead of being followed. It returns facts, not an
+//!    open handle: the later read/list/grep/find re-opens the path by name, so a
+//!    component swapped for a symlink between the check and the open is
+//!    followed (#233). Mutations do not share this gap; they act through the
+//!    pinned dirfd walk in `LocalWorkspace::open_parent_dir_secure`.
 //! 4. **Guard L1** — `validate_path_facts` validates the *observed* facts and
 //!    System Path Exclusions, not the requested string alone.
 //! 5. **Visibility** — one [`VisibilityEngine`], built from the turn's
