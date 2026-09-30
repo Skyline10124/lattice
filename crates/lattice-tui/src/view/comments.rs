@@ -243,11 +243,11 @@ fn highlight(line: &mut Line<'static>, indent: usize) {
     }
 }
 
-/// 评论卡片的字母间隔标签，两端各留一格。
-const COMMENT_TAG: &str = " C O M M E N T ";
+/// 评论卡片的标签，两端各留一格。
+const COMMENT_TAG: &str = " COMMENT ";
 
 /// 评论卡片：锚点正文起点到左列右缘铺底色，左右各留一列内边距。
-/// 第一行是标签与右端状态，其后是正文，最后留一行下边距。
+/// 自上而下为上边距、标签与右端状态、空行、正文、下边距。
 fn render(transcript: &mut Transcript, placed: PlacedComment<'_>, width: u16) {
     let start = transcript.lines.len();
     let indent = placed.indent.min(usize::from(width));
@@ -262,9 +262,11 @@ fn render(transcript: &mut Transcript, placed: PlacedComment<'_>, width: u16) {
     }
     right.push(format!("#{}", placed.comment.n));
     transcript.lines.push(Line::default());
+    transcript.lines.push(card_row(indent, card_w, Vec::new()));
     transcript
         .lines
         .push(card_row(indent, card_w, tag_row(card_w, &right)));
+    transcript.lines.push(card_row(indent, card_w, Vec::new()));
     let visual = if let Some(input) = placed.editor {
         let (visual, row, col) = input_visual(input, body_width);
         transcript.editor_cursor = Some((
