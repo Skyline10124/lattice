@@ -167,6 +167,9 @@ fn status_surface_style() -> Style {
     role_style(Role::DimMeta).bg(Color::Rgb(0x2c, 0x42, 0x67))
 }
 
+/// 挂着草稿、排队或已发送评论的锚点元素底色（iris-12）。
+pub(crate) const COMMENT_ANCHOR_BG: Color = Color::Rgb(0x1f, 0x25, 0x4b);
+
 /// Status symbols.
 #[rustfmt::skip]
 pub(crate) fn symbol(state: SymbolKind) -> &'static str {

@@ -136,11 +136,13 @@ pub(super) fn attach<'a>(app: &'a App, transcript: &mut Transcript, width: u16) 
         .map(|(r, o)| (o.id, r))
         .collect();
     let mut placed = Vec::new();
+    let mut highlighted = std::collections::HashSet::new();
     let mut place = |id, comment: &'a Comment, origin, fallback, editor| {
         let anchor = anchors
             .get(&comment.location)
             .filter(|(_, a, _)| a.matches(comment));
         let (after, indent, state) = if let Some((row, _, indent)) = anchor {
+            highlighted.insert(&comment.location);
             (
                 transcript
                     .ending_items
@@ -190,7 +192,14 @@ pub(super) fn attach<'a>(app: &'a App, transcript: &mut Transcript, width: u16) 
     }
     placed.sort_by_key(|p| (p.after, p.comment.n));
     let mut placed = placed.into_iter().peekable();
-    let old_lines = std::mem::take(&mut transcript.lines);
+    let mut old_lines = std::mem::take(&mut transcript.lines);
+    for (row, anchor, indent) in &transcript.anchors {
+        if highlighted.contains(anchor.location())
+            && let Some(line) = old_lines.get_mut(*row)
+        {
+            highlight(line, *indent);
+        }
+    }
     let old_owners = std::mem::take(&mut transcript.owners);
     let mut relocation = Vec::with_capacity(old_lines.len());
     let old_editor = transcript.editor_cursor.take();
@@ -217,6 +226,27 @@ pub(super) fn attach<'a>(app: &'a App, transcript: &mut Transcript, width: u16) 
     }
     if let Some((row, col)) = old_editor {
         transcript.editor_cursor = relocation.get(row).map(|r| (*r, col));
+    }
+}
+
+/// 锚点元素的视觉行从元素正文起点铺底色到文字结束处；列表符号等前缀与行尾空白不铺。
+fn highlight(line: &mut Line<'static>, indent: usize) {
+    let end = line.width().saturating_sub(
+        line.spans
+            .iter()
+            .rev()
+            .map(|span| (span.width(), span.content.trim_end().width()))
+            .take_while(|(_, text)| *text == 0)
+            .map(|(width, _)| width)
+            .sum::<usize>(),
+    );
+    let mut col = 0usize;
+    for span in &mut line.spans {
+        let start = col;
+        col = col.saturating_add(span.width());
+        if start >= indent && col <= end {
+            span.style = span.style.bg(COMMENT_ANCHOR_BG);
+        }
     }
 }
 

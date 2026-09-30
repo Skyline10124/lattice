@@ -207,18 +207,39 @@ fn comment_screen(app: &mut App) -> String {
     screen_text(frame.buffer)
 }
 
+/// 包含 `text` 的对话行中，`text` 所在的片段是否铺了评论锚点底色。
+fn anchor_highlighted(app: &mut App, text: &str) -> bool {
+    let transcript = app.prepare_transcript();
+    let line = transcript
+        .lines
+        .iter()
+        .find(|line| line.to_string().contains(text))
+        .expect("visible text");
+    line.spans
+        .iter()
+        .filter(|span| text.contains(span.content.trim()) && !span.content.trim().is_empty())
+        .all(|span| span.style.bg == Some(crate::view::COMMENT_ANCHOR_BG))
+}
+
 #[test]
 fn comment_three_esc_paths_saved_count_and_blank_save() {
     let mut h = comment_app();
     let app = &mut h.app;
+    assert!(!anchor_highlighted(app, "comment target"));
     comment_browse(app, "comment target");
     app.apply_action(KeyAction::Submit);
     app.apply_action(KeyAction::Paste("new discarded".into()));
     assert!(!comment_screen(app).contains("条评论待发送"));
+    assert!(
+        anchor_highlighted(app, "comment target"),
+        "正在写的新评论已高亮锚点"
+    );
     app.apply_action(KeyAction::Clear);
     assert!(!frame(app).text.contains("new discarded"));
+    assert!(!anchor_highlighted(app, "comment target"), "丢弃后取消高亮");
     save_comment(app, "saved note");
     assert!(comment_screen(app).contains("1 条评论待发送"));
+    assert!(anchor_highlighted(app, "comment target"));
     comment_browse(app, "saved note");
     app.apply_action(KeyAction::Submit);
     app.apply_action(KeyAction::Paste(" discarded edit".into()));
@@ -228,6 +249,7 @@ fn comment_three_esc_paths_saved_count_and_blank_save() {
     comment_browse(app, "saved note");
     app.apply_action(KeyAction::Clear);
     assert!(!comment_screen(app).contains("条评论待发送"));
+    assert!(!anchor_highlighted(app, "comment target"));
     save_comment(app, " \n\t");
     assert_eq!(app.queue.draft_count(), 0);
 }
@@ -321,6 +343,10 @@ fn comment_queue_only_edit_jump_rejection_and_delete() {
         assert!(app.apply_action(KeyAction::Submit).is_none());
         let message_id = app.queue.messages().next().unwrap().id;
         assert!(frame(app).text.contains("排队 · #1"));
+        assert!(
+            anchor_highlighted(app, "comment target"),
+            "排队评论高亮锚点"
+        );
         assert_eq!(app.queue.draft_count(), 0);
         comment_browse(app, "[COMMENT 1]");
         app.apply_action(KeyAction::Submit);
@@ -443,6 +469,10 @@ fn comment_reload_attaches_or_falls_back_and_jumps_both_ways() {
         let text = frame(app).text;
         assert_eq!(text.matches("reload note").count(), 1);
         assert_eq!(text.contains("原文不匹配 · #1"), mismatch != 0);
+        if mismatch != 3 {
+            // 只有挂到锚点的已发送评论高亮；原文不匹配时锚点不高亮。
+            assert_eq!(anchor_highlighted(app, "comment target"), mismatch == 0);
+        }
         if mismatch == 0 {
             assert!(text.find("reload note").unwrap() < text.find("[COMMENT 1]").unwrap());
         } else {
