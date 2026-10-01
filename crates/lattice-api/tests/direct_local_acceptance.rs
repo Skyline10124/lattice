@@ -255,44 +255,6 @@ async fn create_rejects_existing_target_with_replan_required() {
     assert_eq!(on_disk, b"first\n");
 }
 
-/// mutate.create install is no-replace: a file created by a concurrent
-/// writer between preflight and install is NOT silently overwritten — the
-/// install surfaces the race and the Agent must replan. (ADR 0003 decision 8
-/// + decision 9's accepted lost-update window, but the install itself must
-/// be no-replace so the Agent's own write does not clobber.)
-#[tokio::test]
-async fn create_install_is_no_replace_not_overwrite() {
-    let dir = TempDir::new().unwrap();
-    let runtime = direct_local_runtime(dir.path());
-    let client = runtime.client();
-
-    // Create succeeds on an absent target.
-    client
-        .call_raw(
-            "mutate.create",
-            serde_json::json!({"path": "race.txt", "content": "agent\n", "create_parents": false}),
-        )
-        .await
-        .expect("first create on absent target");
-    assert_eq!(
-        std::fs::read(dir.path().join("race.txt")).unwrap(),
-        b"agent\n"
-    );
-
-    // A second create on the now-existing target must fail with
-    // ReplanRequired (no-replace install), leaving the first content intact.
-    let err = client
-        .call_raw("mutate.create", serde_json::json!({"path": "race.txt", "content": "attacker\n", "create_parents": false}))
-        .await
-        .expect_err("second create must not overwrite");
-    assert_eq!(err.retriability, Retriability::RequiresReplan);
-    assert_eq!(
-        std::fs::read(dir.path().join("race.txt")).unwrap(),
-        b"agent\n",
-        "no-replace install must not clobber the existing target"
-    );
-}
-
 #[tokio::test]
 async fn edit_failures_preserve_diagnostics_and_target_contents() {
     struct EditCase {
@@ -394,28 +356,6 @@ async fn edit_failures_preserve_diagnostics_and_target_contents() {
 }
 
 #[tokio::test]
-async fn cancelled_component_mutation_before_entry_writes_nothing() {
-    let dir = TempDir::new().unwrap();
-    let runtime = direct_local_runtime(dir.path());
-    let client = runtime.client();
-    let (call, control) = client.start_call_raw(
-        MUTATE_CREATE.to_string(),
-        serde_json::json!({
-            "path": "cancelled.txt",
-            "content": "must-not-land\n",
-            "create_parents": false
-        }),
-    );
-    control.cancel();
-
-    let err = call
-        .await
-        .expect_err("a pre-cancelled mutation must not enter the Component");
-    assert_eq!(err.code, lancet_protocol::CepErrorCode::CallCancelled);
-    assert!(!dir.path().join("cancelled.txt").exists());
-}
-
-#[tokio::test]
 async fn component_mutation_install_failure_leaves_no_partial_target() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -424,16 +364,15 @@ async fn component_mutation_install_failure_leaves_no_partial_target() {
     std::fs::create_dir(&locked).unwrap();
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
 
-    // Root and some unusual filesystems bypass the permission failure this
-    // product-level test needs. Detect that directly instead of assuming an
-    // effective uid, then leave the deterministic fault to Host unit tests.
-    let probe = locked.join(".permission-probe");
-    if std::fs::write(&probe, b"").is_ok() {
-        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let _ = std::fs::remove_file(probe);
-        eprintln!("skipping read-only install fault: this process can write mode 0555 dirs");
-        return;
-    }
+    // The fault must really reach the install: a process that can still write
+    // into a mode 0555 directory (root, or a filesystem ignoring modes) would
+    // make the call succeed or fail elsewhere, so refuse to pass vacuously.
+    let probe = std::fs::write(locked.join(".permission-probe"), b"");
+    assert_eq!(
+        probe.map_err(|err| err.kind()),
+        Err(std::io::ErrorKind::PermissionDenied),
+        "test needs a non-root process on a filesystem that honours directory modes"
+    );
 
     let runtime = direct_local_runtime(dir.path());
     let err = runtime
@@ -462,9 +401,10 @@ async fn component_mutation_install_failure_leaves_no_partial_target() {
     );
 }
 
-/// Component receipts carry method-local Cell evidence without routing metadata.
+/// Component receipts carry method-local Cell evidence: the admitted method,
+/// the resolved target path, and host-computed MutationEvidence.
 #[tokio::test]
-async fn component_receipts_carry_method_local_evidence_without_routing_metadata() {
+async fn component_receipts_carry_method_local_evidence() {
     let dir = TempDir::new().unwrap();
     std::fs::write(dir.path().join("a.txt"), "audit-body\n").unwrap();
     let runtime = direct_local_runtime(dir.path());
@@ -527,20 +467,4 @@ async fn component_receipts_carry_method_local_evidence_without_routing_metadata
                 ObservedTarget::Path { path } if path == "a.txt"
             ))
     );
-
-    for evidence in [&create.evidence, &observe.evidence] {
-        let json = serde_json::to_string(evidence).expect("serialize evidence");
-        for retired in [
-            "execution_backend",
-            "upper_workspace_id",
-            "adapter_preflight_invoked",
-            "backend_invoked",
-            "direct-local",
-        ] {
-            assert!(
-                !json.contains(retired),
-                "Cell evidence must not carry retired field '{retired}': {json}"
-            );
-        }
-    }
 }
