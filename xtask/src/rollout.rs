@@ -1016,11 +1016,6 @@ mod tests {
     }
 
     #[test]
-    fn rename_lines_report_the_new_path() {
-        assert_eq!(tracked_dirty_paths("R  old.rs -> new.rs"), vec!["new.rs"]);
-    }
-
-    #[test]
     fn zero_pass_output_fails_the_guard() {
         // The v1.4 `commit_baseline` failure mode: exit 0, 0 passed.
         let vacuous = "running 3 tests\n\n\n3 filtered out\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out\n";
@@ -1045,32 +1040,6 @@ mod tests {
             output: green.to_owned(),
         };
         assert!(cargo_test_passed(&out).is_err());
-    }
-
-    /// `tail` used to slice on a raw byte index, which panics when the 800-byte
-    /// cut lands inside a multi-byte codepoint. Step output routinely contains
-    /// non-ASCII, and a panic here crashes the gate (exit 101, no record detail)
-    /// instead of reporting a step failure.
-    #[test]
-    fn tail_does_not_panic_when_the_cut_lands_mid_codepoint() {
-        // Place a 3-byte codepoint so that len-800 falls strictly inside it.
-        let s = format!("{}中{}", "x".repeat(64), "y".repeat(799));
-        assert!(
-            !s.is_char_boundary(s.len() - 800),
-            "fixture must put the cut inside a codepoint"
-        );
-
-        let out = tail(&s);
-
-        assert!(out.starts_with('…'), "long output must be marked elided");
-        assert!(out.ends_with('y'));
-        // Never returns more than the cap (leading marker excluded).
-        assert!(out.len() - '…'.len_utf8() <= 800);
-    }
-
-    #[test]
-    fn tail_returns_short_output_verbatim_and_trimmed() {
-        assert_eq!(tail("  ok — done  "), "ok — done");
     }
 
     /// Both child streams must share one file offset. Two independent

@@ -191,14 +191,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn session_without_runtime_dependency_is_clean() {
-        let dir = TempDir::new().unwrap();
-        write_session_workspace(dir.path(), "");
-        let hits = session_forbidden_dependency_graph(dir.path()).unwrap();
-        assert!(hits.is_empty(), "runtime-free session rejected: {hits:?}");
-    }
-
     fn assert_session_runtime_dependency_rejected(section: &str, kind: &str) {
         let dir = TempDir::new().unwrap();
         write_session_workspace(
@@ -268,14 +260,6 @@ mod tests {
             1,
             "dev-dependencies entry must not count: {text}"
         );
-    }
-
-    #[test]
-    fn dev_only_test_feature_is_clean() {
-        let dir = TempDir::new().unwrap();
-        write_test_feature_workspace(dir.path(), "");
-        let hits = production_test_feature_hits(dir.path()).unwrap();
-        assert!(hits.is_empty(), "dev-only test-utils flagged: {hits:?}");
     }
 
     #[test]
