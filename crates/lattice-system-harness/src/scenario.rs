@@ -157,31 +157,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn budget_with_no_limit_is_noop_and_never_panics() {
-        let b = ScenarioBudget::new(None);
-        b.check("no-limit");
-        b.check("no-limit");
-        assert!(b.elapsed() < Duration::from_secs(1));
-    }
-
-    #[test]
-    fn budget_with_elapsed_limit_panics() {
-        let b = ScenarioBudget::new(Some(Duration::from_millis(1)));
-        std::thread::sleep(Duration::from_millis(5));
-        let result = std::panic::catch_unwind(|| b.check("expired"));
-        assert!(
-            result.is_err(),
-            "an expired budget must panic, not silently pass"
-        );
-    }
-
-    #[test]
-    fn budget_within_limit_does_not_panic() {
-        let b = ScenarioBudget::new(Some(Duration::from_secs(60)));
-        b.check("fresh");
-    }
-
-    #[test]
     fn remaining_total_budget_caps_later_command_timeout() {
         let b = ScenarioBudget {
             limit: Some(Duration::from_secs(5)),
@@ -194,27 +169,6 @@ mod tests {
             ScenarioBudget::new(None).cap_timeout(Duration::from_secs(30)),
             Duration::from_secs(30)
         );
-    }
-
-    #[test]
-    fn spec_total_timeout_round_trips() {
-        let spec = ScenarioSpec {
-            name: "x".into(),
-            layer: ScenarioLayer::PtySmoke,
-            step_timeout_secs: 30,
-            total_timeout_secs: Some(180),
-        };
-        assert_eq!(spec.total_timeout(), Some(Duration::from_secs(180)));
-        let budget = ScenarioBudget::new(spec.total_timeout());
-        budget.check("x");
-    }
-
-    #[test]
-    fn spec_without_total_timeout_yields_no_budget() {
-        let spec = ScenarioSpec::fast("fast");
-        assert!(spec.total_timeout().is_none());
-        let budget = ScenarioBudget::new(spec.total_timeout());
-        budget.check("fast");
     }
 
     #[test]

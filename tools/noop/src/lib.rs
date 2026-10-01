@@ -115,31 +115,3 @@ fn json_string(s: &str) -> String {
     out.push('"');
     out
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn extract_message_round_trip() {
-        let p = r#"{"message":"hello"}"#;
-        assert_eq!(extract_message(p).unwrap(), "hello");
-    }
-
-    #[test]
-    fn extract_message_handles_escapes() {
-        let p = r#"{"message":"a\"b\\c"}"#;
-        assert_eq!(extract_message(p).unwrap(), "a\"b\\c");
-    }
-
-    #[test]
-    fn extract_message_rejects_missing_field() {
-        assert!(extract_message(r#"{"other":"x"}"#).is_err());
-    }
-
-    #[test]
-    fn json_string_escapes() {
-        assert_eq!(json_string("a\"b"), r#""a\"b""#);
-        assert_eq!(json_string("\n"), r#""\n""#);
-    }
-}

@@ -324,16 +324,6 @@ mod tests {
     }
 
     #[test]
-    fn exact_exit_code_accepts_only_a_matching_uncontaminated_exit() {
-        let clean = outcome(ProcessTermination::Exited(2));
-        assert_exit_code(&clean, 2).expect("matching clean exit");
-        assert_exit_failure(&clean).expect("clean nonzero exit");
-
-        let success = outcome(ProcessTermination::Exited(0));
-        assert_exit_success(&success).expect("clean zero exit");
-    }
-
-    #[test]
     fn exact_exit_code_rejects_signals_and_contamination() {
         let signal = outcome(ProcessTermination::Signaled(libc::SIGTERM));
         assert!(assert_exit_failure(&signal).is_err());

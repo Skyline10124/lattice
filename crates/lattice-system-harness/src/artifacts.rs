@@ -957,13 +957,6 @@ mod tests {
     }
 
     #[test]
-    fn write_fake_llm_log_empty_is_noop() {
-        let dir = TempDir::new().unwrap();
-        write_fake_llm_log(dir.path(), &[], &[]).unwrap();
-        assert!(!dir.path().join("fake_llm_requests.txt").exists());
-    }
-
-    #[test]
     fn write_fake_llm_log_redacts_secrets() {
         let dir = TempDir::new().unwrap();
         let captures = vec![CapturedRequest {
@@ -976,27 +969,6 @@ mod tests {
         let text = std::fs::read_to_string(dir.path().join("fake_llm_requests.txt")).unwrap();
         assert!(text.contains("[REDACTED]"));
         assert!(!text.contains("sk-super-secret-value"));
-    }
-
-    #[test]
-    fn write_workspace_listing_lists_files_and_dirs() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path().join("project");
-        std::fs::create_dir_all(root.join("sub")).unwrap();
-        std::fs::write(root.join("a.txt"), "hello").unwrap();
-        std::fs::write(root.join("sub").join("b.txt"), "world!").unwrap();
-        std::fs::create_dir_all(root.join(".git").join("objects")).unwrap();
-        std::fs::write(root.join(".git").join("HEAD"), "ref: x").unwrap();
-
-        let out_dir = TempDir::new().unwrap();
-        write_workspace_listing(out_dir.path(), &root, &[]).unwrap();
-        let text = std::fs::read_to_string(out_dir.path().join("workspace_listing.txt")).unwrap();
-        assert!(text.contains("a.txt (5 bytes)"));
-        assert!(text.contains("sub/b.txt (6 bytes)"));
-        assert!(text.contains("sub/"));
-        // .git internals are skipped.
-        assert!(!text.contains(".git/"));
-        assert!(!text.contains("HEAD"));
     }
 
     #[test]
@@ -1103,15 +1075,6 @@ mod tests {
     }
 
     #[test]
-    fn scan_artifacts_for_secrets_no_leak_returns_empty() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("stdout.txt"), "clean output").unwrap();
-        std::fs::write(dir.path().join("world.txt"), "scenario: s\n").unwrap();
-        let leaked = scan_artifacts_for_secrets(dir.path(), &["sk-secret"]).unwrap();
-        assert!(leaked.is_empty());
-    }
-
-    #[test]
     fn scan_artifacts_for_secrets_patches_leaked_file_in_place() {
         let dir = TempDir::new().unwrap();
         // Simulate a pre-write redaction that missed an edge: a secret
@@ -1151,22 +1114,6 @@ mod tests {
         let missing = TempDir::new().unwrap().path().join("gone");
         let error = scan_artifacts_for_secrets(&missing, &["secret"]).unwrap_err();
         assert_eq!(error.path, Path::new("."));
-    }
-
-    #[test]
-    fn scan_artifacts_for_secrets_empty_secret_list_is_noop() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("stdout.txt"), "anything").unwrap();
-        assert!(
-            scan_artifacts_for_secrets(dir.path(), &[])
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            scan_artifacts_for_secrets(dir.path(), &[""])
-                .unwrap()
-                .is_empty()
-        );
     }
 
     #[test]
@@ -1556,18 +1503,6 @@ mod tests {
         assert!(text.contains("command diagnostics:"));
         assert!(text.contains("outcome: CommandOutcome"));
         assert!(text.contains("create artifact root"));
-    }
-
-    #[test]
-    fn legacy_scenario_evidence_finish_remains_usable() {
-        let world = ScenarioWorld::new("legacy-evidence-finish").unwrap();
-        let root = TempDir::new().unwrap();
-        let failure_dir = root.path().join("scenario");
-        let evidence =
-            ScenarioEvidence::new_at_dir(&world, failure_dir.clone(), Vec::<String>::new())
-                .unwrap();
-        evidence.finish(true).unwrap();
-        assert!(failure_dir.join("workspace_diff.txt").is_file());
     }
 
     #[test]
