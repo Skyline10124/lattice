@@ -1264,64 +1264,78 @@ mod tests {
 
     use super::*;
 
-    /// Render a plain-text script and verify the exact SSE shape the product
-    /// framer expects: one `data: {chunk}\n\n` per content chunk, a terminal
-    /// chunk with `finish_reason` and `usage`, then `data: [DONE]\n\n`.
     #[test]
-    fn render_plain_text_script_matches_openai_shape() {
-        let script = SseScript::PlainText {
-            chunks: vec!["Hello".into(), " world".into()],
-            finish_reason: "stop".into(),
-        };
-        let sse = render_script(&script);
-        assert!(sse.contains("data: {"));
-        assert!(sse.contains("\"finish_reason\":\"stop\""));
-        assert!(sse.contains("\"usage\""));
-        assert!(sse.contains("\"total_tokens\""));
-        assert!(sse.ends_with("data: [DONE]\n\n"));
-    }
-
-    /// A tool-call script emits the start chunk (id + name), an arguments
-    /// delta, and a terminal chunk with `finish_reason: "tool_calls"`.
-    #[test]
-    fn render_tool_call_script_emits_start_args_and_tool_calls_finish() {
-        let script = SseScript::ToolCall {
-            call_id: "call_abc".into(),
-            tool_name: "observe__workspace".into(),
-            arguments_json: "{}".into(),
-        };
-        let sse = render_script(&script);
-        assert!(sse.contains("\"id\":\"call_abc\""));
-        assert!(sse.contains("\"name\":\"observe__workspace\""));
-        assert!(sse.contains("\"arguments\":\"{}\""));
-        assert!(sse.contains("\"finish_reason\":\"tool_calls\""));
-        assert!(sse.contains("\"usage\""));
-        assert!(sse.contains("\"total_tokens\":2"));
-        assert!(sse.ends_with("data: [DONE]\n\n"));
-    }
-
-    /// A disconnect script emits the in-flight chunks with no terminal chunk
-    /// and no `[DONE]` marker — the connection is simply truncated.
-    #[test]
-    fn render_disconnect_script_omits_terminal_chunk_and_done() {
-        let script = SseScript::Disconnect {
-            chunks_before_drop: vec!["partial".into()],
-        };
-        let sse = render_script(&script);
-        assert!(sse.contains("\"content\":\"partial\""));
-        assert!(!sse.contains("\"finish_reason\":\""));
-        assert!(!sse.contains("[DONE]"));
-    }
-
-    /// An illegal-response script emits a non-JSON `data:` payload so the
-    /// product chunk parser hits its error path.
-    #[test]
-    fn render_illegal_response_script_emits_non_json_data() {
-        let script = SseScript::IllegalResponse {
-            body: "not json at all".into(),
-        };
-        let sse = render_script(&script);
-        assert!(sse.contains("data: not json at all\n\n"));
+    fn render_scripts_preserve_expected_sse_shape() {
+        let rows: [(_, _, &[&str], &[&str], Option<&str>); 4] = [
+            // The product framer expects content chunks, finish_reason and usage,
+            // then the [DONE] marker for a plain-text response.
+            (
+                "plain_text",
+                SseScript::PlainText {
+                    chunks: vec!["Hello".into(), " world".into()],
+                    finish_reason: "stop".into(),
+                },
+                &[
+                    "data: {",
+                    "\"finish_reason\":\"stop\"",
+                    "\"usage\"",
+                    "\"total_tokens\"",
+                ],
+                &[],
+                Some("data: [DONE]\n\n"),
+            ),
+            // Tool calls emit id + name, an arguments delta, then tool_calls finish.
+            (
+                "tool_call",
+                SseScript::ToolCall {
+                    call_id: "call_abc".into(),
+                    tool_name: "observe__workspace".into(),
+                    arguments_json: "{}".into(),
+                },
+                &[
+                    "\"id\":\"call_abc\"",
+                    "\"name\":\"observe__workspace\"",
+                    "\"arguments\":\"{}\"",
+                    "\"finish_reason\":\"tool_calls\"",
+                    "\"usage\"",
+                    "\"total_tokens\":2",
+                ],
+                &[],
+                Some("data: [DONE]\n\n"),
+            ),
+            // Disconnect truncates the stream without a terminal chunk or [DONE].
+            (
+                "disconnect",
+                SseScript::Disconnect {
+                    chunks_before_drop: vec!["partial".into()],
+                },
+                &["\"content\":\"partial\""],
+                &["\"finish_reason\":\"", "[DONE]"],
+                None,
+            ),
+            // The non-JSON data payload exercises the product chunk parser's error path.
+            (
+                "illegal_response",
+                SseScript::IllegalResponse {
+                    body: "not json at all".into(),
+                },
+                &["data: not json at all\n\n"],
+                &[],
+                None,
+            ),
+        ];
+        for (name, script, required_substrings, forbidden_substrings, required_suffix) in rows {
+            let sse = render_script(&script);
+            for substring in required_substrings {
+                assert!(sse.contains(substring), "{name}: missing {substring:?}");
+            }
+            for substring in forbidden_substrings {
+                assert!(!sse.contains(substring), "{name}: unexpected {substring:?}");
+            }
+            if let Some(suffix) = required_suffix {
+                assert!(sse.ends_with(suffix), "{name}: missing suffix {suffix:?}");
+            }
+        }
     }
 
     /// Decoding a Chat Completions body surfaces model, message roles (in
