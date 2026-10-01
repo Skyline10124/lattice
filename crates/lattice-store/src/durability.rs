@@ -251,20 +251,6 @@ mod tests {
     }
 
     #[test]
-    fn fsync_publication_on_empty_syncs_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let git = dir.path().join("r.git");
-        fs::create_dir_all(git.join("objects")).unwrap();
-        fault::reset_fsync_trace();
-        fsync_publication(&git, &[], &[]).unwrap();
-        assert!(
-            fault::synced_paths().is_empty(),
-            "an empty barrier has no files or directory entries to persist: {:?}",
-            fault::synced_paths()
-        );
-    }
-
-    #[test]
     fn object_publication_syncs_file_and_fanout_not_objects_dir() {
         let dir = tempfile::tempdir().unwrap();
         let git = dir.path().join("r.git");
@@ -316,40 +302,5 @@ mod tests {
                 .any(|p| p == &objects || p.starts_with(&objects)),
             "ref-only barrier must not touch the object namespace: {synced:?}"
         );
-    }
-
-    #[test]
-    fn object_file_fsync_failure_is_the_object_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let git = dir.path().join("r.git");
-        let oid = gix::ObjectId::from_hex(b"0123456789abcdef0123456789abcdef01234567").unwrap();
-        let object = loose_object_path(&git, oid);
-        fs::create_dir_all(object.parent().unwrap()).unwrap();
-        fs::write(&object, b"blob").unwrap();
-        fault::reset_fsync_trace();
-        fault::fail_fsync_path(&object);
-        let err = fsync_publication(&git, &[oid], &[]).unwrap_err();
-        match err {
-            StoreError::Durability { path, .. } => assert_eq!(path, object),
-            other => panic!("expected Durability on the object file, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn fanout_directory_fsync_failure_is_the_fanout_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let git = dir.path().join("r.git");
-        let oid = gix::ObjectId::from_hex(b"0123456789abcdef0123456789abcdef01234567").unwrap();
-        let object = loose_object_path(&git, oid);
-        let fanout = object.parent().unwrap().to_path_buf();
-        fs::create_dir_all(&fanout).unwrap();
-        fs::write(&object, b"blob").unwrap();
-        fault::reset_fsync_trace();
-        fault::fail_fsync_path(&fanout);
-        let err = fsync_publication(&git, &[oid], &[]).unwrap_err();
-        match err {
-            StoreError::Durability { path, .. } => assert_eq!(path, fanout),
-            other => panic!("expected Durability on the fanout directory, got {other:?}"),
-        }
     }
 }

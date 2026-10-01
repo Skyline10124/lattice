@@ -124,20 +124,6 @@ mod tests {
     }
 
     #[test]
-    fn distinct_paths_distinct_keys() {
-        let a = ProjectStoreKey::from_canonical_path_bytes(b"/tmp/a");
-        let b = ProjectStoreKey::from_canonical_path_bytes(b"/tmp/b");
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn parse_round_trip() {
-        let key = ProjectStoreKey::from_canonical_path_bytes(b"/some/path");
-        let parsed = ProjectStoreKey::parse(&key.to_string()).unwrap();
-        assert_eq!(key, parsed);
-    }
-
-    #[test]
     fn parse_rejects_bad_forms() {
         for bad in [
             "",

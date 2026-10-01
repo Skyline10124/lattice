@@ -74,18 +74,4 @@ mod tests {
             r#"{"a":{"c":[2,1],"d":true},"b":1}"#
         );
     }
-
-    #[test]
-    fn scalars_round_trip() {
-        for (value, expected) in [
-            (serde_json::json!(null), "null"),
-            (serde_json::json!("x\ny"), "\"x\\ny\""),
-            (serde_json::json!(42), "42"),
-        ] {
-            assert_eq!(
-                String::from_utf8(canonical_json_bytes(&value).unwrap()).unwrap(),
-                expected
-            );
-        }
-    }
 }

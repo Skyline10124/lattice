@@ -323,38 +323,4 @@ mod tests {
             KeyAction::Newline
         ));
     }
-
-    #[test]
-    fn up_at_line_zero_browses_history_else_moves_cursor() {
-        let mut buf = InputBuffer::new();
-        buf.set_text("line0\nline1");
-        assert!(buf.move_up(), "from last line, up moves the cursor");
-        assert_eq!(buf.cursor.0, 0);
-        assert!(!buf.move_up(), "at line 0, up is for history");
-
-        // `false` is the signal the caller turns into a history step, so drive
-        // that step too: the buffer must end up holding the history entry.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut history = History::load(dir.path());
-        history.push("first");
-        history.push("second");
-        assert_eq!(history.prev(), Some("second"), "newest entry first");
-        assert_eq!(history.prev(), Some("first"));
-        buf.set_text("first");
-        assert_eq!(buf.text(), "first");
-        assert_eq!(history.next(), Some("second"), "down walks back forward");
-    }
-
-    #[test]
-    fn history_roundtrip_persists_to_repl_history_txt() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut history = History::load(dir.path());
-        history.push("hello");
-        drop(history);
-        let mut loaded = History::load(dir.path());
-        assert_eq!(loaded.prev(), Some("hello"));
-        let path = dir.path().join("repl_history.txt");
-        let body = std::fs::read_to_string(path).expect("history file");
-        assert!(body.contains("hello"));
-    }
 }

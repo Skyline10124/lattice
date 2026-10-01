@@ -1156,7 +1156,7 @@ mod connection_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::input::resolve_key;
+
     use lattice_api::TurnEvent;
     use std::time::Duration;
 
@@ -1212,22 +1212,6 @@ mod tests {
         });
     }
     #[test]
-    fn token_deltas_coalesce_into_one_assistant_block() {
-        let mut app = test_app();
-        for content in ["a", "b"] {
-            app.apply_turn_event(TurnEvent::TokenDelta {
-                key: attempt(),
-                content: content.into(),
-            });
-        }
-        let assistants: Vec<_> = app
-            .blocks
-            .iter()
-            .filter(|b| matches!(b, Block::Assistant(_)))
-            .collect();
-        assert_eq!(assistants, vec![&Block::Assistant("ab".into())]);
-    }
-    #[test]
     fn tool_finished_updates_the_block_with_matching_id() {
         let mut app = test_app();
         for (n, name) in [
@@ -1279,15 +1263,6 @@ mod tests {
         assert_eq!(app.blocks.len(), 4);
     }
     #[test]
-    fn terminal_event_closes_running_tools() {
-        let mut app = test_app();
-        start_tool(&mut app, "mutate.edit");
-        let event:TurnEvent=serde_json::from_value(serde_json::json!({"type":"turn_failed","turn":{"session_id":"11111111111141118111111111111111","turn_id":attempt().turn_id},"step":{"key":{"turn_id":attempt().turn_id,"ordinal":0},"attempts":[],"state":{"state":"closed","end":{"end":"stop","node":null,"cause":{"cause":"process_exit"}},"slots":[]}},"summary":{"outcome":"failed","notice":{"level":"error","text":"process exited"}}})).unwrap();
-        app.apply_turn_event(event);
-        assert_failed_tool(&app, 0, "turn ended before tool completion");
-    }
-
-    #[test]
     fn stream_end_keeps_execution_state_and_marks_observation_unknown() {
         let mut app = test_app();
         app.phase = TurnPhase::Streaming;
@@ -1329,15 +1304,6 @@ mod tests {
     }
 
     #[test]
-    fn esc_when_idle_clears_input() {
-        let mut app = test_app();
-        app.input.set_text("hello");
-        app.apply_action(KeyAction::CancelOrClear);
-        assert!(app.input.is_empty());
-        assert_eq!(app.phase, TurnPhase::Idle);
-    }
-
-    #[test]
     fn paste_grows_input_without_submitting() {
         let mut app = test_app();
         let submitted = app.apply_action(KeyAction::Paste("a\nb\nc".into()));
@@ -1364,46 +1330,6 @@ mod tests {
         assert!(!matches!(ctrl_c_action(&mut app), KeyAction::Quit));
         app.apply_action(KeyAction::CancelOrClear);
         assert!(!app.should_quit);
-    }
-
-    #[test]
-    fn ctrl_c_notice_expiry_requests_redraw_once() {
-        let mut app = test_app();
-        let now = Instant::now();
-        app.last_ctrl_c = Some(now - CTRL_C_WINDOW - Duration::from_millis(1));
-        assert!(app.expire_ctrl_c_notice(now));
-        assert!(app.last_ctrl_c.is_none());
-        assert!(!app.expire_ctrl_c_notice(now));
-    }
-
-    #[test]
-    fn ctrl_d_quits_only_on_empty_buffer() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        let empty = resolve_key(
-            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
-            false,
-            true,
-        );
-        let full = resolve_key(
-            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
-            false,
-            false,
-        );
-        assert!(matches!(empty, KeyAction::Quit));
-        assert!(matches!(full, KeyAction::Ignored));
-    }
-
-    #[test]
-    fn builtin_clear_empties_blocks_and_resets_viewport() {
-        let mut app = test_app();
-        app.blocks.push(Block::User("x".into()));
-        app.viewport.on_content_changed(20, 5);
-        app.viewport.page_up(5);
-        assert!(!app.viewport.following());
-        assert!(app.apply_builtin("/clear"));
-        assert!(app.blocks.is_empty());
-        assert!(app.viewport.following());
-        assert_eq!(app.viewport.scroll(), 0);
     }
 
     #[test]

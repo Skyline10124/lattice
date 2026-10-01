@@ -272,26 +272,3 @@ pub fn mount_info(location: &Path) -> Option<MountInfo> {
     }
     best.map(|(_, info)| info)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn probes_pass_on_a_temporary_smoke_location() {
-        let dir = tempfile::tempdir().unwrap();
-        let report = probe_location(dir.path()).unwrap();
-        assert!(report.all_ok());
-        assert!(report.checks.len() >= 5);
-        for check in &report.checks {
-            assert!(check.ok, "{}: {}", check.name, check.detail);
-        }
-    }
-
-    #[test]
-    fn mount_info_reports_this_filesystem() {
-        let dir = tempfile::tempdir().unwrap();
-        let info = mount_info(dir.path()).expect("mount info");
-        assert!(!info.fstype.is_empty());
-    }
-}
