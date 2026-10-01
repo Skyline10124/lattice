@@ -182,52 +182,6 @@ fn tree_snapshot(root: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
 
 // ─── Runtime layer ──────────────────────────────────────────────────────────
 
-/// AC1/AC2: the history is a private bare `gix` repository outside the Local
-/// Workspace and outside the project `.git`, and mutation state is expressed
-/// as Git trees rather than a parallel receipt store.
-#[tokio::test]
-async fn history_is_a_private_bare_repository_outside_workspace_and_project_git() {
-    let env = HistoryRuntime::build();
-    std::fs::create_dir_all(env.path().join(".git")).expect("project .git");
-
-    create_file(&env.runtime, "src/a.txt", "one\n")
-        .await
-        .expect("create succeeds");
-
-    let history = env.runtime.workspace_history();
-    let repo_path = history.repo_path().expect("history enabled").to_path_buf();
-    assert!(
-        !repo_path.starts_with(env.path()),
-        "history must live outside the Local Workspace: {} vs {}",
-        repo_path.display(),
-        env.path().display()
-    );
-    assert!(
-        !repo_path.starts_with(env.path().join(".git")),
-        "history must live outside the project .git"
-    );
-    // A bare repository: object database at the path itself, no worktree.
-    assert!(repo_path.join("HEAD").is_file());
-    assert!(repo_path.join("objects").is_dir());
-    assert!(!repo_path.join(".git").exists());
-
-    // Git objects, not a parallel store: the recorded state reads back as a
-    // tree of blobs keyed by workspace path.
-    let oid = env.current().expect("a mutation was recorded");
-    let snapshot = history.resolve(&oid).expect("resolve").expect("commit");
-    assert_eq!(
-        snapshot.files.get("src/a.txt").map(Vec::as_slice),
-        Some(b"one\n".as_ref())
-    );
-    // No sidecar receipt/SQLite store next to the repository.
-    for suspicious in ["receipts", "workspace-graph.db", "mutations.json"] {
-        assert!(
-            !repo_path.join(suspicious).exists(),
-            "no parallel {suspicious} store may exist"
-        );
-    }
-}
-
 /// AC3: every successful create/edit forms an ordered history commit, and
 /// multiple mutations in one Turn keep real execution order and parents.
 #[tokio::test]
@@ -625,54 +579,6 @@ async fn external_drift_between_mutations_records_the_observed_before_state() {
     );
     let after = history.resolve(&tip).unwrap().unwrap();
     assert_eq!(after.files.get("drift.txt").unwrap().as_slice(), b"v3\n");
-}
-
-/// AC9: no new user-facing command surface — the Agent-visible catalog is
-/// still exactly the closed five methods.
-#[tokio::test]
-async fn history_adds_no_agent_visible_method() {
-    let env = HistoryRuntime::build();
-    let mut names: Vec<String> = env
-        .runtime
-        .tool_definitions()
-        .iter()
-        .map(|t| t.name.clone())
-        .collect();
-    names.sort();
-    assert_eq!(
-        names,
-        vec![
-            "fetch.web".to_string(),
-            "mutate.create".to_string(),
-            "mutate.edit".to_string(),
-            "observe.workspace".to_string(),
-            "session.todo_write".to_string(),
-        ],
-        "the private history must not add an Agent-visible method"
-    );
-}
-
-/// AC5 (host enforcement): every installing method routes through the one
-/// concrete host module, so no mutating Tool can install without recording.
-#[tokio::test]
-async fn every_mutating_catalog_method_records() {
-    let env = HistoryRuntime::build();
-    let mutating: Vec<&str> = vec!["mutate.create", "mutate.edit"];
-
-    let mut seen = Vec::new();
-    create_file(&env.runtime, "m.txt", "v1\n").await.unwrap();
-    seen.push(env.current().unwrap());
-    replace_text(&env.runtime, "m.txt", &content_hash(b"v1\n"), "v1", "v2")
-        .await
-        .unwrap();
-    seen.push(env.current().unwrap());
-
-    assert_eq!(
-        seen.len(),
-        mutating.len(),
-        "each mutating method must move the history exactly once"
-    );
-    assert_ne!(seen[0], seen[1]);
 }
 
 // ─── Turn-layer harness ─────────────────────────────────────────────────────

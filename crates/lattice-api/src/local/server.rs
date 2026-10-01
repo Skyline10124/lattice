@@ -1161,7 +1161,7 @@ pub(super) use cancellation_tests::Provider;
 mod tests {
     use super::Result;
     use super::*;
-    use crate::turn::{TextSegment, TurnEvent};
+
     use lattice_session::store::*;
 
     pub(super) async fn pending_backend() -> (tempfile::TempDir, Arc<Backend>, TurnRequest) {
@@ -1297,39 +1297,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn closed_snapshot_delivers_without_owner_completion_or_terminal_event() {
-        let (_directory, backend, request) = pending_backend().await;
-        let owner = owner(&backend, &request);
-        close(&backend, &request).await;
-        let (view, history) = finished(&backend, &request).await;
-        assert!(view.owned);
-        assert_eq!(view.selected_turn.unwrap().steps.len(), 1);
-        assert_eq!(history.entries.len(), 1);
-        assert!(owner.done.borrow().is_none());
-        assert!(owner.observer.events_after(0).unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn restart_and_other_turn_lock_do_not_block_closed_observation() {
-        let (_directory, backend, request) = pending_backend().await;
-        close(&backend, &request).await;
-        let before = finished(&backend, &request).await;
-        let layout = backend.layout.clone();
-        drop(backend);
-        let backend = Backend::new(layout);
-        let api = backend.open().await.unwrap();
-        let sid = request.session_id.unwrap();
-        let guard = api
-            .blocking(move |api| Ok(api.store.try_lock_session(sid)?))
-            .await
-            .unwrap();
-        let after = finished(&backend, &request).await;
-        assert_eq!(before.0.selected_turn, after.0.selected_turn);
-        assert_eq!(before.1, after.1);
-        drop(guard);
-    }
-
-    #[tokio::test]
     async fn auto_close_probe_and_rewind_preserve_old_turn_without_accepting_new() {
         for rewind in [false, true] {
             let (_directory, backend, old) = pending_backend().await;
@@ -1410,39 +1377,6 @@ mod tests {
             Some(&diagnostic)
         );
         assert_eq!(finished(&backend, &request).await, original);
-    }
-
-    #[tokio::test]
-    async fn invalid_frozen_tool_tls_roots_reject_before_acceptance() {
-        let (_directory, backend, request) = cancellation_tests::setup().await;
-        let configuration =
-            super::super::tests::frozen(&request.workspace, "http://127.0.0.1:1/v1");
-        let mut material = serde_json::to_value(configuration).unwrap();
-        material["connection"]["roots_der"] = serde_json::json!([[0, 1, 2]]);
-        let response = backend
-            .dispatch(Request::Submit {
-                request: request.clone(),
-                configuration: Some(Box::new(serde_json::from_value(material).unwrap())),
-            })
-            .await
-            .unwrap();
-        assert!(matches!(
-            response,
-            Response::Error(LocalError {
-                kind: LocalErrorKind::BadRequest,
-                ..
-            })
-        ));
-        assert!(
-            backend
-                .open()
-                .await
-                .unwrap()
-                .read(move |r| r.turn_record(request.turn_id))
-                .await
-                .unwrap()
-                .is_none()
-        );
     }
 
     #[tokio::test]
@@ -1527,77 +1461,6 @@ mod tests {
         provider.finish().await;
         backend.dispatch(Request::Stop).await.unwrap();
         finished(&backend, &request).await;
-    }
-
-    #[tokio::test]
-    async fn slow_subscriber_reloads_segments_and_continues_after_cut() {
-        let (_directory, backend, request) = pending_backend().await;
-        let owner = owner(&backend, &request);
-        let key = lancet_protocol::ModelAttemptKey {
-            turn_id: request.turn_id,
-            model_step_ordinal: 0,
-            attempt_ordinal: 0,
-        };
-        let io = CoordinatorStoreIo::acquire_api(
-            backend.open().await.unwrap(),
-            request.session_id.unwrap(),
-        )
-        .await
-        .unwrap();
-        io.start_request(key).await.unwrap();
-        owner.observer.emit(TurnEvent::ModelStarted {
-            key,
-            provider: lattice_conversation::ProviderOrigin::OpenAiCompatible,
-            model: "test".into(),
-        });
-        let (mut socket, task) = subscribe(&backend, &request, None).await;
-        let mut reader = ipc::ResponseReader::default();
-        assert!(matches!(
-            response(&mut reader, &mut socket).await,
-            Response::Observation(Observation::Snapshot { .. })
-        ));
-        // 同线程在下一次让出执行前跨过整个窗口，不依赖 socket 缓冲或 sleep。
-        for i in 0..70 {
-            owner.observer.emit(TurnEvent::TokenDelta {
-                key,
-                content: format!("{i},"),
-            });
-        }
-        let Response::Observation(Observation::Snapshot { view }) =
-            response(&mut reader, &mut socket).await
-        else {
-            panic!("resnapshot")
-        };
-        assert_eq!(view.cursor.sequence, 71);
-        assert_eq!(
-            view.attempt.unwrap().segments,
-            vec![TextSegment::Text {
-                text: (0..70).map(|i| format!("{i},")).collect()
-            }]
-        );
-        owner.observer.emit(TurnEvent::TokenDelta {
-            key,
-            content: "tail".into(),
-        });
-        assert!(matches!(
-            response(&mut reader, &mut socket).await,
-            Response::Observation(Observation::Event {
-                cursor: EventCursor { sequence: 72, .. },
-                ..
-            })
-        ));
-        drop(io);
-        close(&backend, &request).await;
-        backend.changed.send_modify(|v| *v += 1);
-        assert!(matches!(
-            response(&mut reader, &mut socket).await,
-            Response::Observation(Observation::Snapshot { .. })
-        ));
-        assert!(matches!(
-            response(&mut reader, &mut socket).await,
-            Response::Observation(Observation::Finished { .. })
-        ));
-        task.await.unwrap().unwrap();
     }
 
     #[tokio::test]

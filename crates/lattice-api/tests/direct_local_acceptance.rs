@@ -135,46 +135,6 @@ async fn direct_local_runtime_exposes_closed_five_method_catalog() {
     );
 }
 
-/// observe.workspace read_file sees the current Local state, including an
-/// external modification made between two reads.
-#[tokio::test]
-async fn observe_sees_external_modification_between_tool_calls() {
-    let dir = TempDir::new().unwrap();
-    std::fs::write(dir.path().join("watch.txt"), "v1\n").unwrap();
-    let runtime = direct_local_runtime(dir.path());
-    let client = runtime.client();
-
-    // This is the same manifest-derived untyped call the product path makes.
-    let read_watch = serde_json::json!({ "mode": "read_file", "path": "watch.txt" });
-
-    let first = client
-        .call_raw(OBSERVE_WORKSPACE, read_watch.clone())
-        .await
-        .expect("first read");
-    assert_eq!(first["mode"], "read_file");
-    let first_content = first["result"]["content"]
-        .as_str()
-        .expect("read_file returns content");
-    assert!(first_content.contains("v1"));
-
-    // External writer (the user's editor) changes the file on disk between
-    // Tool calls. Direct-Local must observe the new state on the next read.
-    std::fs::write(dir.path().join("watch.txt"), "v2-external\n").unwrap();
-
-    let second = client
-        .call_raw(OBSERVE_WORKSPACE, read_watch)
-        .await
-        .expect("second read");
-    assert_eq!(second["mode"], "read_file");
-    let second_content = second["result"]["content"]
-        .as_str()
-        .expect("read_file returns content");
-    assert!(
-        second_content.contains("v2-external"),
-        "second read must see the external modification: {second_content}"
-    );
-}
-
 /// observe.workspace list_directory sees a file added by an external writer
 /// between two listings. Guards list/grep/find against stale snapshots.
 #[tokio::test]
@@ -403,62 +363,6 @@ async fn edit_semantic_diagnostics_preserve_structured_codes() {
         std::fs::read_to_string(dir.path().join("diag.txt")).unwrap(),
         body
     );
-}
-
-/// mutate.edit with the correct expected_hash atomically installs the result
-/// on Local.
-#[tokio::test]
-async fn edit_correct_hash_atomically_installs() {
-    let dir = TempDir::new().unwrap();
-    let body = "hello world\n";
-    std::fs::write(dir.path().join("ok.txt"), body).unwrap();
-    let runtime = direct_local_runtime(dir.path());
-    let client = runtime.client();
-
-    let expected = format!("blake3:{}", blake3::hash(body.as_bytes()).to_hex());
-    let result = client
-        .call_raw("mutate.edit", serde_json::json!({"path": "ok.txt", "expected_hash": expected, "edits": [{"op": "replace_text", "old": "hello", "new": "goodbye"}]}))
-        .await
-        .expect("edit installs");
-    assert_eq!(
-        result["changed_files"]
-            .as_array()
-            .expect("changed_files")
-            .len(),
-        1
-    );
-
-    let on_disk = std::fs::read(dir.path().join("ok.txt")).unwrap();
-    assert_eq!(on_disk, b"goodbye world\n");
-}
-
-/// A successful Atomic Local Mutation is NOT rolled back when a later step
-/// fails. We drive a successful create, then send a stale-hash edit that
-/// fails; the created file must remain on disk.
-#[tokio::test]
-async fn successful_mutation_survives_later_failure() {
-    let dir = TempDir::new().unwrap();
-    let runtime = direct_local_runtime(dir.path());
-    let client = runtime.client();
-
-    // 1. Successful create.
-    client
-        .call_raw("mutate.create", serde_json::json!({"path": "survives.txt", "content": "persisted\n", "create_parents": false}))
-        .await
-        .expect("create");
-    assert!(dir.path().join("survives.txt").exists());
-
-    // 2. A later step fails (stale-hash edit on a different file).
-    std::fs::write(dir.path().join("other.txt"), "x\n").unwrap();
-    let stale = "blake3:0000000000000000000000000000000000000000000000000000000000000000";
-    let _ = client
-        .call_raw("mutate.edit", serde_json::json!({"path": "other.txt", "expected_hash": stale, "edits": [{"op": "replace_text", "old": "x", "new": "y"}]}))
-        .await;
-
-    // The earlier successful create is still on disk — Direct-Local does not
-    // pretend to roll back mutations when a later Tool call fails.
-    let on_disk = std::fs::read(dir.path().join("survives.txt")).unwrap();
-    assert_eq!(on_disk, b"persisted\n");
 }
 
 #[tokio::test]

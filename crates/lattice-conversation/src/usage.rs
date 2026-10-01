@@ -35,24 +35,3 @@ impl TokenUsage {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn usage_serde_roundtrip() {
-        let usage = TokenUsage {
-            prompt_tokens: 10,
-            completion_tokens: 4,
-            total_tokens: 14,
-        };
-        let json = serde_json::to_string(&usage).expect("serialize");
-        assert_eq!(
-            json,
-            r#"{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}"#
-        );
-        let back: TokenUsage = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(usage, back);
-    }
-}

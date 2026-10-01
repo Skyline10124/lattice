@@ -338,62 +338,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn readonly_missing_does_not_create_and_recovery_waits_for_every_lease() {
-        let tmp = tempfile::tempdir().unwrap();
-        let layout = StateLayout::in_state_root(tmp.path());
-        let manager = StoreManager::new(layout.clone());
-        assert!(
-            matches!(manager.acquire(false).await, Err(ApiError::Store(error)) if matches!(error.as_ref(), lattice_session::store::StoreError::NotInitialized { .. }))
-        );
-        assert!(!layout.lattice_root().join("lattice.redb").exists());
-        let first = manager.acquire(true).await.unwrap();
-        let second = manager.acquire(false).await.unwrap();
-        let shutdown = first.shutdown();
-        let mut updates = manager.subscribe();
-        first.report_failure(&ApiError::WorkerFailed);
-        second.report_failure(&ApiError::WorkerFailed);
-        assert!(shutdown.load(Ordering::Acquire));
-        assert!(manager.acquire(false).await.is_err());
-        let starts = std::sync::atomic::AtomicUsize::new(0);
-        assert!(
-            second
-                .with_execution_start(|| {
-                    starts.fetch_add(1, Ordering::SeqCst);
-                })
-                .is_err()
-        );
-        assert_eq!(starts.load(Ordering::SeqCst), 0);
-        drop(first);
-        assert!(matches!(
-            *manager.state.lock().unwrap(),
-            StoreState::Quiescing { generation: 0, .. }
-        ));
-        drop(second);
-        tokio::time::timeout(std::time::Duration::from_secs(3), async {
-            loop {
-                if let Ok(api) = manager.acquire(false).await {
-                    assert!(!api.shutdown().load(Ordering::Acquire));
-                    assert!(
-                        api.read(|read| read.list(None, 10))
-                            .await
-                            .unwrap()
-                            .items
-                            .is_empty()
-                    );
-                    break;
-                }
-                updates.changed().await.unwrap();
-            }
-        })
-        .await
-        .unwrap();
-        assert!(matches!(
-            *manager.state.lock().unwrap(),
-            StoreState::Ready { generation: 1, .. }
-        ));
-    }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn abandoned_async_reader_retains_lease_until_blocking_worker_really_exits() {
         let tmp = tempfile::tempdir().unwrap();

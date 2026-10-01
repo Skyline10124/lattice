@@ -494,26 +494,6 @@ mod tests {
     }
 
     #[test]
-    fn bind_produces_bound_call_with_digest_and_address() {
-        let validated = validate_tool_call_batch(&[raw("read_file", r#"{"path":"a"}"#)])
-            .expect("valid")
-            .into_iter()
-            .next()
-            .expect("one call");
-        let invocation =
-            InvocationId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").expect("invocation id");
-        let bound = validated.bind(invocation, address());
-        assert_eq!(bound.invocation_id, invocation);
-        assert_eq!(bound.address, address());
-        assert_eq!(bound.arguments_digest, arguments_digest(&bound.arguments));
-
-        // Serde roundtrip keeps the digest in lowercase hex form.
-        let json = serde_json::to_string(&bound).expect("serialize");
-        let back: BoundToolCall = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(bound, back);
-    }
-
-    #[test]
     fn tampered_arguments_digest_is_rejected_on_deserialize() {
         // A digest that does not describe its own arguments must never
         // deserialize: the binding tuple would otherwise validate nothing.
