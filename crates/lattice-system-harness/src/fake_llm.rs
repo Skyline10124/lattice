@@ -22,7 +22,7 @@
 //! stream produces: one `data: {chunk}\n\n` per chunk, terminated by
 //! `data: [DONE]\n\n`.
 
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
@@ -127,6 +127,8 @@ pub enum ServeError {
         operation: &'static str,
         timeout: Duration,
     },
+    #[error("not a model request: {0}")]
+    UnexpectedRequest(String),
     #[error("fake-provider server thread failed: {0}")]
     ThreadFailure(String),
 }
@@ -261,7 +263,7 @@ struct ServerState {
     serve_exited: bool,
     active_handlers: usize,
     first_failure: Option<String>,
-    expected_authorization: Option<Vec<u8>>,
+    expected_authorization: Option<String>,
 }
 
 impl ServerState {
@@ -389,7 +391,7 @@ impl FakeLlmServer {
     pub fn expect_api_key(&self, key: &str) {
         let mut state = self.state.0.lock().unwrap();
         assert!(state.requests.is_empty() && state.active_handlers == 0);
-        state.expected_authorization = Some(format!("Bearer {key}").into_bytes());
+        state.expected_authorization = Some(format!("Bearer {key}"));
     }
 
     /// A snapshot of every request captured so far, in arrival order.
@@ -589,224 +591,49 @@ fn write_http_response(
     stream.shutdown(Shutdown::Write)
 }
 
-const MAX_REQUEST_HEADER_BYTES: usize = 16 * 1024;
-const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
-
-#[derive(Clone, Copy)]
-struct HttpRejection {
-    status: &'static str,
-    body: &'static [u8],
+/// One request from the product under test. The product is the fake provider's
+/// only client, so parsing extracts just the route, credential and body; it
+/// does not defend against malformed or hostile HTTP.
+struct HttpRequest {
+    method: String,
+    path: String,
+    authorization: Option<String>,
+    body: String,
 }
 
-impl HttpRejection {
-    const fn new(status: &'static str, body: &'static [u8]) -> Self {
-        Self { status, body }
+/// `Ok(None)` when the peer closed before sending a request line.
+fn read_http_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequest>> {
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    if reader.read_line(&mut line)? == 0 {
+        return Ok(None);
     }
-}
-
-enum RequestReadError {
-    Io(std::io::Error),
-    Reject(HttpRejection),
-}
-
-impl From<std::io::Error> for RequestReadError {
-    fn from(error: std::io::Error) -> Self {
-        Self::Io(error)
-    }
-}
-
-fn reject(status: &'static str, body: &'static [u8]) -> RequestReadError {
-    RequestReadError::Reject(HttpRejection::new(status, body))
-}
-
-fn read_request_header(stream: &mut TcpStream) -> Result<Vec<u8>, RequestReadError> {
-    let mut header = Vec::with_capacity(MAX_REQUEST_HEADER_BYTES);
-    let mut byte = [0_u8; 1];
+    let mut parts = line.split_whitespace();
+    let method = parts.next().unwrap_or_default().to_string();
+    let path = parts.next().unwrap_or_default().to_string();
+    let (mut length, mut authorization) = (0, None);
     loop {
-        if header.len() == MAX_REQUEST_HEADER_BYTES {
-            return Err(reject(
-                "431 Request Header Fields Too Large",
-                b"request headers too large\n",
-            ));
+        line.clear();
+        if reader.read_line(&mut line)? == 0 || line.trim().is_empty() {
+            break;
         }
-        match stream.read(&mut byte) {
-            Ok(0) => {
-                return Err(reject("400 Bad Request", b"malformed http framing\n"));
+        if let Some((name, value)) = line.split_once(':') {
+            let value = value.trim();
+            if name.eq_ignore_ascii_case("content-length") {
+                length = value.parse().unwrap_or(0);
+            } else if name.eq_ignore_ascii_case("authorization") {
+                authorization = Some(value.to_string());
             }
-            Ok(_) => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-                ) =>
-            {
-                return Err(reject("400 Bad Request", b"malformed http framing\n"));
-            }
-            Err(error) => return Err(RequestReadError::Io(error)),
-        }
-        if byte[0] == b'\n' && header.last() != Some(&b'\r') {
-            return Err(reject("400 Bad Request", b"malformed http framing\n"));
-        }
-        if header.last() == Some(&b'\r') && byte[0] != b'\n' {
-            return Err(reject("400 Bad Request", b"malformed http framing\n"));
-        }
-        header.push(byte[0]);
-        if header.ends_with(b"\r\n\r\n") {
-            return Ok(header);
         }
     }
-}
-
-fn is_header_name_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric()
-        || matches!(
-            byte,
-            b'!' | b'#'
-                | b'$'
-                | b'%'
-                | b'&'
-                | b'\''
-                | b'*'
-                | b'+'
-                | b'-'
-                | b'.'
-                | b'^'
-                | b'_'
-                | b'`'
-                | b'|'
-                | b'~'
-        )
-}
-
-fn trim_ascii_spaces(mut bytes: &[u8]) -> &[u8] {
-    while bytes.first() == Some(&b' ') {
-        bytes = &bytes[1..];
-    }
-    while bytes.last() == Some(&b' ') {
-        bytes = &bytes[..bytes.len() - 1];
-    }
-    bytes
-}
-
-fn parse_decimal_length(bytes: &[u8]) -> Option<usize> {
-    if bytes.is_empty() || !bytes.iter().all(u8::is_ascii_digit) {
-        return None;
-    }
-    bytes.iter().try_fold(0_usize, |value, byte| {
-        value.checked_mul(10)?.checked_add(usize::from(byte - b'0'))
-    })
-}
-
-fn read_http_request(
-    stream: &mut TcpStream,
-    expected_authorization: Option<&[u8]>,
-) -> Result<String, RequestReadError> {
-    let header = read_request_header(stream)?;
-    let mut lines = header[..header.len() - 2].split(|byte| *byte == b'\n');
-    let request_line = lines
-        .next()
-        .and_then(|line| line.strip_suffix(b"\r"))
-        .ok_or_else(|| reject("400 Bad Request", b"malformed request line\n"))?;
-    let mut request_parts = request_line.split(|byte| *byte == b' ');
-    let (Some(method), Some(target), Some(version), None) = (
-        request_parts.next(),
-        request_parts.next(),
-        request_parts.next(),
-        request_parts.next(),
-    ) else {
-        return Err(reject("400 Bad Request", b"malformed request line\n"));
-    };
-    if method != b"POST" {
-        return Err(reject("405 Method Not Allowed", b"method not allowed\n"));
-    }
-    if target != b"/chat/completions" {
-        return Err(reject("404 Not Found", b"route not found\n"));
-    }
-    if version != b"HTTP/1.1" {
-        return Err(reject(
-            "505 HTTP Version Not Supported",
-            b"http version not supported\n",
-        ));
-    }
-
-    let mut host: Option<&[u8]> = None;
-    let mut content_type: Option<&[u8]> = None;
-    let mut content_length: Option<&[u8]> = None;
-    let mut authorization: Option<&[u8]> = None;
-    let mut transfer_encoding = false;
-    for line in lines {
-        if line.is_empty() {
-            continue;
-        }
-        let Some(line) = line.strip_suffix(b"\r") else {
-            return Err(reject("400 Bad Request", b"malformed headers\n"));
-        };
-        let Some(colon) = line.iter().position(|byte| *byte == b':') else {
-            return Err(reject("400 Bad Request", b"malformed headers\n"));
-        };
-        let (name, value) = (&line[..colon], trim_ascii_spaces(&line[colon + 1..]));
-        if name.is_empty()
-            || !name.iter().copied().all(is_header_name_byte)
-            || !value.iter().all(|byte| matches!(byte, 0x20..=0x7e))
-        {
-            return Err(reject("400 Bad Request", b"malformed headers\n"));
-        }
-        if name.eq_ignore_ascii_case(b"host") {
-            if host.replace(value).is_some() {
-                return Err(reject("400 Bad Request", b"invalid host header\n"));
-            }
-        } else if name.eq_ignore_ascii_case(b"content-type") {
-            if content_type.replace(value).is_some() {
-                return Err(reject("400 Bad Request", b"invalid content-type\n"));
-            }
-        } else if name.eq_ignore_ascii_case(b"content-length") {
-            if content_length.replace(value).is_some() {
-                return Err(reject("400 Bad Request", b"invalid content-length\n"));
-            }
-        } else if name.eq_ignore_ascii_case(b"authorization") {
-            if authorization.replace(value).is_some() {
-                return Err(reject("400 Bad Request", b"invalid authorization header\n"));
-            }
-        } else if name.eq_ignore_ascii_case(b"transfer-encoding") {
-            transfer_encoding = true;
-        }
-    }
-
-    if transfer_encoding {
-        return Err(reject("400 Bad Request", b"unsupported framing\n"));
-    }
-    if host.is_none_or(<[u8]>::is_empty) {
-        return Err(reject("400 Bad Request", b"missing host header\n"));
-    }
-    if !content_type.is_some_and(|value| value.eq_ignore_ascii_case(b"application/json")) {
-        return Err(reject("400 Bad Request", b"invalid content-type\n"));
-    }
-    let Some(content_length) = content_length else {
-        return Err(reject("411 Length Required", b"content-length required\n"));
-    };
-    let Some(body_len) = parse_decimal_length(content_length) else {
-        return Err(reject("400 Bad Request", b"invalid content-length\n"));
-    };
-    if body_len > MAX_REQUEST_BODY_BYTES {
-        return Err(reject("413 Content Too Large", b"request body too large\n"));
-    }
-
-    if expected_authorization.is_some_and(|expected| authorization != Some(expected)) {
-        return Err(reject("401 Unauthorized", b"unauthorized\n"));
-    }
-
-    let mut body = vec![0_u8; body_len];
-    if let Err(error) = stream.read_exact(&mut body) {
-        return match error.kind() {
-            std::io::ErrorKind::UnexpectedEof
-            | std::io::ErrorKind::TimedOut
-            | std::io::ErrorKind::WouldBlock => {
-                Err(reject("400 Bad Request", b"incomplete request body\n"))
-            }
-            _ => Err(RequestReadError::Io(error)),
-        };
-    }
-    String::from_utf8(body).map_err(|_| reject("400 Bad Request", b"invalid utf-8 body\n"))
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body)?;
+    Ok(Some(HttpRequest {
+        method,
+        path,
+        authorization,
+        body: String::from_utf8_lossy(&body).into_owned(),
+    }))
 }
 
 fn handle_request(
@@ -818,16 +645,32 @@ fn handle_request(
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
     let expected = shared.0.lock().unwrap().expected_authorization.clone();
-    let body = match read_http_request(&mut stream, expected.as_deref()) {
-        Ok(body) => body,
-        Err(RequestReadError::Io(error)) => return Err(ServeError::Io(error)),
-        Err(RequestReadError::Reject(rejection)) => {
-            write_http_response(&mut stream, rejection.status, "text/plain", rejection.body)?;
-            return Ok(());
-        }
+    let Some(request) = read_http_request(&mut stream)? else {
+        return Ok(());
     };
+    if request.method != "POST" || request.path != "/chat/completions" {
+        write_http_response(
+            &mut stream,
+            "404 Not Found",
+            "text/plain",
+            b"not a model request\n",
+        )?;
+        return Err(ServeError::UnexpectedRequest(format!(
+            "{} {}",
+            request.method, request.path
+        )));
+    }
+    if expected.is_some_and(|expected| request.authorization.as_deref() != Some(&expected)) {
+        return write_http_response(
+            &mut stream,
+            "401 Unauthorized",
+            "text/plain",
+            b"unauthorized\n",
+        )
+        .map_err(ServeError::Io);
+    }
 
-    let captured = parse_chat_completions_body(&body);
+    let captured = parse_chat_completions_body(&request.body);
     // Script assignment and capture publication are one transaction. Capture
     // order is therefore the same order used to advance a Sequence, even if
     // gated handlers resume in a different order.
@@ -1564,6 +1407,23 @@ mod tests {
         let error = server.shutdown(Duration::from_secs(2)).unwrap_err();
         assert!(error.to_string().contains("segment"));
         assert!(server.handlers.lock().unwrap().is_empty());
+    }
+
+    /// 只有模型请求进入 capture；其他请求不能被静默接受，必须成为夹具失败。
+    #[test]
+    fn non_model_request_is_a_fixture_failure_and_not_captured() {
+        let mut server = FakeLlmServer::start(SseScript::plain("unused")).unwrap();
+        let response = exchange_raw(
+            server.local_addr(),
+            b"GET /models HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        assert!(response.starts_with(b"HTTP/1.1 404"));
+        assert!(server.captured_requests().is_empty());
+        let error = server.shutdown(Duration::from_secs(2)).unwrap_err();
+        assert!(
+            matches!(error, ServeError::ThreadFailure(ref failure) if failure == "not a model request: GET /models"),
+            "unexpected shutdown error: {error}"
+        );
     }
 
     #[test]
