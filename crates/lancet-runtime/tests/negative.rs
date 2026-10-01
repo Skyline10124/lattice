@@ -56,40 +56,6 @@ fn call_ctx(
     (ctx, rx, cancel_tx)
 }
 
-/// Fuel exhaustion: with fuel=0, the call fails with ToolResourceExhausted
-/// (resource=fuel). The engine survives for subsequent calls with normal fuel.
-#[tokio::test]
-async fn call_fuel_exhaustion_then_survival() {
-    let mut rt = ComponentRuntime::noop_fixture().expect("fixture composes");
-
-    // Set fuel to 0 — the call should fail immediately.
-    rt.set_limits(lancet_runtime::ExecutionLimits {
-        fuel: 0,
-        ..Default::default()
-    });
-
-    let (ctx, _rx, _cancel) = call_ctx(&rt);
-    let result = rt
-        .call("noop.echo", serde_json::json!({"message": "fuel"}), ctx)
-        .await;
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert_eq!(err.code, CepErrorCode::ToolResourceExhausted);
-
-    // Restore normal limits and call again.
-    rt.set_limits(lancet_runtime::ExecutionLimits::default());
-    let (ctx2, _rx, _cancel) = call_ctx(&rt);
-    let result = rt
-        .call(
-            "noop.echo",
-            serde_json::json!({"message": "survived"}),
-            ctx2,
-        )
-        .await
-        .expect("call succeeds after fuel restoration");
-    assert_eq!(result, serde_json::json!({"echoed": "survived"}));
-}
-
 // ---------------------------------------------------------------------------
 // Resource-limit enforcement (#47): each configured limit must reject a real
 // Component instantiation/call with `ToolResourceExhausted` and an accurate,
@@ -106,32 +72,41 @@ fn tool_resource(err: &lancet_protocol::CepError) -> Option<&str> {
     }
 }
 
-/// Run one call under `limits`, asserting it fails with `ToolResourceExhausted`
-/// carrying `resource`, then prove the runtime remains usable with a normal call.
+/// Run a limited call, check its original error expectations, then prove runtime survival.
 async fn assert_resource_exhausted_then_survives(
+    name: &str,
     limits: lancet_runtime::ExecutionLimits,
-    resource: &str,
+    initial_message: &str,
+    resource: Option<&str>,
 ) {
-    let mut rt = ComponentRuntime::noop_fixture().expect("fixture composes");
+    let mut rt =
+        ComponentRuntime::noop_fixture().unwrap_or_else(|error| panic!("{name}: {error:?}"));
     rt.set_limits(limits);
-
     let (ctx, _rx, _cancel) = call_ctx(&rt);
-    let err = rt
-        .call("noop.echo", serde_json::json!({"message": "limit"}), ctx)
-        .await
-        .expect_err("limit must reject");
+    let result = rt
+        .call(
+            "noop.echo",
+            serde_json::json!({"message": initial_message}),
+            ctx,
+        )
+        .await;
+    if resource.is_none() {
+        assert!(result.is_err(), "{name}");
+    }
+    let err = result.expect_err(name);
     assert_eq!(
         err.code,
         CepErrorCode::ToolResourceExhausted,
-        "expected resource-exhausted for {resource}, got {err:?}"
+        "{name}: {err:?}"
     );
-    assert_eq!(
-        tool_resource(&err),
-        Some(resource),
-        "wrong resource for {err:?}"
-    );
-
-    // The engine must survive: a normal call with default limits still works.
+    if let Some(resource) = resource {
+        assert_eq!(
+            tool_resource(&err),
+            Some(resource),
+            "{name}: wrong resource for {err:?}"
+        );
+    }
+    // Restore defaults on the same runtime, with a fresh context and live cancellation sender.
     rt.set_limits(lancet_runtime::ExecutionLimits::default());
     let (ctx2, _rx, _cancel) = call_ctx(&rt);
     let result = rt
@@ -141,82 +116,75 @@ async fn assert_resource_exhausted_then_survives(
             ctx2,
         )
         .await
-        .expect("call succeeds after resource-limit rejection");
-    assert_eq!(result, serde_json::json!({"echoed": "survived"}));
+        .unwrap_or_else(|error| panic!("{name}: call failed after restoring limits: {error:?}"));
+    assert_eq!(result, serde_json::json!({"echoed": "survived"}), "{name}");
 }
 
-/// Memory-byte limit: a `memory_size` below the guest's initial linear memory
-/// is rejected by the limiter's `memory_growing` callback and maps to
-/// `resource = "memory"` (previously fell through to `ToolTrap`).
 #[tokio::test]
-async fn memory_bytes_limit_maps_to_resource_exhausted_and_runtime_survives() {
-    assert_resource_exhausted_then_survives(
-        lancet_runtime::ExecutionLimits {
-            // One page — well below the guest module's initial memory.
-            memory_size: 64 * 1024,
-            ..Default::default()
-        },
-        "memory",
-    )
-    .await;
-}
-
-/// Table-element limit: a `table_elements` of 0 is rejected by the limiter's
-/// `table_growing` callback and maps to `resource = "table"` (previously
-/// misclassified as `"instances"`, and it fell through to `ToolTrap`).
-#[tokio::test]
-async fn table_elements_limit_maps_to_resource_exhausted_and_runtime_survives() {
-    assert_resource_exhausted_then_survives(
-        lancet_runtime::ExecutionLimits {
-            table_elements: 0,
-            ..Default::default()
-        },
-        "table",
-    )
-    .await;
-}
-
-/// Instance-count limit: the noop Component needs 3 core instances, so a limit
-/// of 1 is exceeded during instantiation. Count limits have no rejection
-/// callback, so this is classified from the static footprint as
-/// `resource = "instances"` — proving the configured count now takes effect.
-#[tokio::test]
-async fn instances_limit_maps_to_resource_exhausted_and_runtime_survives() {
-    assert_resource_exhausted_then_survives(
-        lancet_runtime::ExecutionLimits {
-            instances: 1,
-            ..Default::default()
-        },
-        "instances",
-    )
-    .await;
-}
-
-/// Memory-count limit: `memories = 0` rejects the guest module's linear memory
-/// during instantiation and is classified as `resource = "memories"`.
-#[tokio::test]
-async fn memories_limit_maps_to_resource_exhausted_and_runtime_survives() {
-    assert_resource_exhausted_then_survives(
-        lancet_runtime::ExecutionLimits {
-            memories: 0,
-            ..Default::default()
-        },
-        "memories",
-    )
-    .await;
-}
-
-/// Table-count limit: the noop Component defines 2 tables, so `tables = 1` is
-/// exceeded during instantiation and is classified as `resource = "tables"`
-/// (distinct from the per-table `table_elements` limit above).
-#[tokio::test]
-async fn tables_limit_maps_to_resource_exhausted_and_runtime_survives() {
-    assert_resource_exhausted_then_survives(
-        lancet_runtime::ExecutionLimits {
-            tables: 1,
-            ..Default::default()
-        },
-        "tables",
-    )
-    .await;
+async fn resource_limits_fail_calls_without_poisoning_the_runtime() {
+    use lancet_runtime::ExecutionLimits;
+    for (name, limits, initial_message, resource) in [
+        // Zero fuel fails immediately; the original test did not check the resource label.
+        (
+            "call_fuel_exhaustion_then_survival",
+            ExecutionLimits {
+                fuel: 0,
+                ..Default::default()
+            },
+            "fuel",
+            None,
+        ),
+        // One page is below initial guest memory: memory_growing must report memory, not ToolTrap.
+        (
+            "memory_bytes_limit_maps_to_resource_exhausted_and_runtime_survives",
+            ExecutionLimits {
+                memory_size: 64 * 1024,
+                ..Default::default()
+            },
+            "limit",
+            Some("memory"),
+        ),
+        // table_growing must report table, not instances or ToolTrap.
+        (
+            "table_elements_limit_maps_to_resource_exhausted_and_runtime_survives",
+            ExecutionLimits {
+                table_elements: 0,
+                ..Default::default()
+            },
+            "limit",
+            Some("table"),
+        ),
+        // Noop needs 3 instances; count limits have no callback and use the static footprint.
+        (
+            "instances_limit_maps_to_resource_exhausted_and_runtime_survives",
+            ExecutionLimits {
+                instances: 1,
+                ..Default::default()
+            },
+            "limit",
+            Some("instances"),
+        ),
+        // Zero memories rejects the guest's linear memory during instantiation.
+        (
+            "memories_limit_maps_to_resource_exhausted_and_runtime_survives",
+            ExecutionLimits {
+                memories: 0,
+                ..Default::default()
+            },
+            "limit",
+            Some("memories"),
+        ),
+        // Noop defines 2 tables; this is distinct from the per-table element limit.
+        (
+            "tables_limit_maps_to_resource_exhausted_and_runtime_survives",
+            ExecutionLimits {
+                tables: 1,
+                ..Default::default()
+            },
+            "limit",
+            Some("tables"),
+        ),
+    ] {
+        assert_resource_exhausted_then_survives(name, limits, initial_message, resource).await;
+    }
 }

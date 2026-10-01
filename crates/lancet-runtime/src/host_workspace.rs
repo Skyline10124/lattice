@@ -1587,94 +1587,78 @@ mod tests {
         assert_eq!(effects.effects[0].truncated, Some(false));
     }
 
-    /// Read budgeting follows the final rendered window, not the full file the
-    /// host had to inspect for its hash and single-read ceiling.
     #[test]
-    fn read_window_is_host_bounded_charged_and_recorded() {
-        let dir = tempfile::TempDir::new().expect("temp root");
-        fs::write(dir.path().join("lines.txt"), "one\ntwo\nthree\n").expect("seed");
-        let charged = Arc::new(AtomicUsize::new(0));
-        let charged_for_call = Arc::clone(&charged);
-        let charge: BudgetCharge = Arc::new(move |bytes| {
-            charged_for_call.store(bytes, Ordering::SeqCst);
-            Ok(())
-        });
-        let host = WorkspaceObservationHost::new(
-            Arc::new(LocalWorkspace::new(dir.path())),
-            ReadVisibilityPolicy::default(),
-            ObservationPolicyConfig::defaults(),
-            charge,
-            "workspace",
-        );
-        let evidence = CellEvidenceLedger::new();
-        let tool = admitted();
-
-        let read = host
-            .read(
-                &ctx(&tool, &evidence),
-                "lines.txt",
-                Some(2),
-                Some(1),
-                Some(false),
-            )
-            .expect("window reads");
-        assert!(read.content.starts_with("two\n[TRUNCATED:"));
-        assert_eq!(charged.load(Ordering::SeqCst), read.content.len());
-        let (_, effects, _) = evidence.snapshot();
-        assert_eq!(
-            effects.effects[0].context_measure,
-            Some(read.content.len() as u64)
-        );
-        assert_eq!(effects.effects[0].truncated, Some(true));
-    }
-
-    #[test]
-    fn empty_and_numbered_read_windows_charge_exact_rendered_bytes() {
-        let dir = tempfile::TempDir::new().expect("temp root");
-        fs::write(dir.path().join("lines.txt"), "one\ntwo\n").expect("seed");
-        let charged = Arc::new(AtomicUsize::new(0));
-        let charged_for_call = Arc::clone(&charged);
-        let host = WorkspaceObservationHost::new(
-            Arc::new(LocalWorkspace::new(dir.path())),
-            ReadVisibilityPolicy::default(),
-            ObservationPolicyConfig::defaults(),
-            Arc::new(move |bytes| {
+    fn read_windows_charge_and_record_exact_rendered_bytes() {
+        for (name, content, windows, truncated) in [
+            // Budgeting follows the rendered window, not the full file read for hashing.
+            (
+                "bounded_plain_window",
+                "one\ntwo\nthree\n",
+                vec![("second_line", 2, false, "two\n[TRUNCATED:")],
+                Some(true),
+            ),
+            (
+                "numbered_then_empty",
+                "one\ntwo\n",
+                vec![
+                    ("numbered", 1, true, "     1\tone\n[TRUNCATED:"),
+                    ("empty", 99, false, "[No content:"),
+                ],
+                None,
+            ),
+        ] {
+            let dir = tempfile::TempDir::new().unwrap_or_else(|error| panic!("{name}: {error}"));
+            fs::write(dir.path().join("lines.txt"), content)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            let charged = Arc::new(AtomicUsize::new(0));
+            let charged_for_call = Arc::clone(&charged);
+            let charge: BudgetCharge = Arc::new(move |bytes| {
                 charged_for_call.store(bytes, Ordering::SeqCst);
                 Ok(())
-            }),
-            "workspace",
-        );
-        let evidence = CellEvidenceLedger::new();
-        let tool = admitted();
-
-        let numbered = host
-            .read(
-                &ctx(&tool, &evidence),
-                "lines.txt",
-                Some(1),
-                Some(1),
-                Some(true),
-            )
-            .expect("numbered window");
-        assert!(numbered.content.starts_with("     1\tone\n[TRUNCATED:"));
-        assert_eq!(charged.load(Ordering::SeqCst), numbered.content.len());
-
-        let empty = host
-            .read(
-                &ctx(&tool, &evidence),
-                "lines.txt",
-                Some(99),
-                Some(1),
-                Some(false),
-            )
-            .expect("empty window message");
-        assert!(empty.content.starts_with("[No content:"));
-        assert_eq!(charged.load(Ordering::SeqCst), empty.content.len());
-        let (_, effects, _) = evidence.snapshot();
-        assert_eq!(
-            effects.effects[1].context_measure,
-            Some(empty.content.len() as u64)
-        );
+            });
+            let host = WorkspaceObservationHost::new(
+                Arc::new(LocalWorkspace::new(dir.path())),
+                ReadVisibilityPolicy::default(),
+                ObservationPolicyConfig::defaults(),
+                charge,
+                "workspace",
+            );
+            let evidence = CellEvidenceLedger::new();
+            let tool = admitted();
+            for (index, (window, start_line, line_numbers, prefix)) in windows.iter().enumerate() {
+                let read = host
+                    .read(
+                        &ctx(&tool, &evidence),
+                        "lines.txt",
+                        Some(*start_line),
+                        Some(1),
+                        Some(*line_numbers),
+                    )
+                    .unwrap_or_else(|error| panic!("{name}/{window}: {error:?}"));
+                assert!(read.content.starts_with(prefix), "{name}/{window}");
+                assert_eq!(
+                    charged.load(Ordering::SeqCst),
+                    read.content.len(),
+                    "{name}/{window}"
+                );
+                // The second scenario shares a ledger and checks only its final (index 1) measure.
+                if index == windows.len() - 1 {
+                    let (_, effects, _) = evidence.snapshot();
+                    assert_eq!(
+                        effects.effects[index].context_measure,
+                        Some(read.content.len() as u64),
+                        "{name}/{window}"
+                    );
+                    if let Some(expected) = truncated {
+                        assert_eq!(
+                            effects.effects[index].truncated,
+                            Some(expected),
+                            "{name}/{window}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// The Turn budget is charged with what the operation returned, and

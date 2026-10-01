@@ -983,55 +983,14 @@ mod tests {
     }
 
     #[test]
-    fn mutation_parser_rejects_missing_required_trailers() {
-        let canonical = mutation_message(&create("a.txt", "x"), "a.txt");
-        for key in [
-            "lattice-method",
-            "lattice-turn-id",
-            "lattice-invocation-id",
-            "lattice-path",
-            "lattice-content-hash",
-        ] {
-            let prefix = format!("{key}:");
-            let message = canonical
-                .lines()
-                .filter(|line| !line.starts_with(&prefix))
-                .collect::<Vec<_>>()
-                .join("\n");
-            assert_eq!(
-                parse_corruption_reason(&message),
-                format!("missing '{key}' trailer"),
-                "{key}"
-            );
+    fn mutation_parser_rejects_invalid_required_trailers() {
+        enum Edit<'a> {
+            Remove,
+            Duplicate,
+            Replace(&'a str),
         }
-    }
-
-    #[test]
-    fn mutation_parser_rejects_duplicate_required_trailers() {
         let canonical = mutation_message(&create("a.txt", "x"), "a.txt");
-        for key in [
-            "lattice-method",
-            "lattice-turn-id",
-            "lattice-invocation-id",
-            "lattice-path",
-            "lattice-content-hash",
-        ] {
-            let prefix = format!("{key}:");
-            let line = canonical
-                .lines()
-                .find(|line| line.starts_with(&prefix))
-                .expect("canonical trailer");
-            assert_eq!(
-                parse_corruption_reason(&format!("{canonical}{line}\n")),
-                format!("duplicate '{key}' trailer"),
-                "{key}"
-            );
-        }
-    }
-
-    #[test]
-    fn mutation_parser_rejects_malformed_required_trailers() {
-        let canonical = mutation_message(&create("a.txt", "x"), "a.txt");
+        let oid = parse_oid(&"f".repeat(40)).expect("object id");
         for (key, value) in [
             ("lattice-method", "fetch.web"),
             ("lattice-turn-id", "turn-1"),
@@ -1039,22 +998,53 @@ mod tests {
             ("lattice-path", "../escape.txt"),
             ("lattice-content-hash", "sha256:not-a-local-revision"),
         ] {
-            let prefix = format!("{key}:");
-            let message = canonical
-                .lines()
-                .map(|line| {
-                    if line.starts_with(&prefix) {
-                        format!("{key}: {value}")
-                    } else {
-                        line.to_string()
+            for (kind, edit, reason_kind, exact) in [
+                ("missing", Edit::Remove, "missing", true),
+                ("duplicate", Edit::Duplicate, "duplicate", true),
+                ("malformed", Edit::Replace(value), "invalid", false),
+            ] {
+                let name = format!("mutation_parser_rejects_{kind}_required_trailers/{key}");
+                let prefix = format!("{key}:");
+                let message = match edit {
+                    Edit::Remove => canonical
+                        .lines()
+                        .filter(|line| !line.starts_with(&prefix))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    Edit::Duplicate => {
+                        let line = canonical
+                            .lines()
+                            .find(|line| line.starts_with(&prefix))
+                            .unwrap_or_else(|| panic!("{name}: canonical trailer missing"));
+                        format!("{canonical}{line}\n")
                     }
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            assert!(
-                parse_corruption_reason(&message).starts_with(&format!("invalid '{key}' trailer")),
-                "{key}"
-            );
+                    Edit::Replace(value) => canonical
+                        .lines()
+                        .map(|line| {
+                            if line.starts_with(&prefix) {
+                                format!("{key}: {value}")
+                            } else {
+                                line.to_string()
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                };
+                let reason = match parse_history_commit(&oid, &message) {
+                    Err(WorkspaceHistoryError::Corruption { commit_id, reason }) => {
+                        assert_eq!(commit_id, oid.to_string(), "{name}");
+                        reason
+                    }
+                    Err(other) => panic!("{name}: expected history corruption, got {other:?}"),
+                    Ok(_) => panic!("{name}: expected malformed history commit to fail closed"),
+                };
+                let expected = format!("{reason_kind} '{key}' trailer");
+                if exact {
+                    assert_eq!(reason, expected, "{name}");
+                } else {
+                    assert!(reason.starts_with(&expected), "{name}");
+                }
+            }
         }
     }
 

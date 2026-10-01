@@ -780,77 +780,60 @@ mod tests {
         assert_eq!(context_measure(&value), context_measure(&reordered));
     }
 
-    /// The ceiling is an intersection: an undeclared cell is a declaration
-    /// violation, a declared-but-denied cell is an admission violation, and
-    /// both fail the call closed. The two branches are discriminated by their
-    /// message, so neither can stand in for the other.
     #[test]
-    fn result_cell_outside_the_ceiling_is_refused() {
-        let descriptor = descriptor("session.result", CtxOp::Alloc);
-
-        let undeclared = check_result_cell(
-            "synthetic.tool",
-            &descriptor,
-            &admitted(descriptor.clone(), &[]),
-            &cell(CtxOp::Mutate),
-        )
-        .expect_err("undeclared result cell must fail");
-        assert_eq!(undeclared.code, CepErrorCode::CapabilityViolation);
-        assert!(
-            undeclared.message.contains("not in declared capabilities"),
-            "{}",
-            undeclared.message
-        );
-
-        // Denying the only capability leaves nothing admitted, so admission
-        // itself refuses the tool — build the admitted set from a second
-        // capability to isolate the effect-ceiling check.
-        let mut two_caps = (*descriptor).clone();
-        two_caps.capabilities.push(Capability {
-            name: "session.events".into(),
-            cell: cell(CtxOp::Mutate),
-        });
-        let two_caps = Arc::new(two_caps);
-        let not_admitted = check_result_cell(
-            "synthetic.tool",
-            &two_caps,
-            &admitted(two_caps.clone(), &["session.result"]),
-            &cell(CtxOp::Alloc),
-        )
-        .expect_err("declared but not admitted must fail");
-        assert_eq!(not_admitted.code, CepErrorCode::CapabilityViolation);
-        assert!(
-            not_admitted.message.contains("not in the admitted"),
-            "{}",
-            not_admitted.message
-        );
-    }
-
-    /// B10/b1: the ceiling is exact on the scope axis. Two capabilities differ
-    /// only by scope and one is denied, so a coverage predicate that ignored
-    /// scope would admit the denied twin's cell.
-    #[test]
-    fn result_cell_on_a_denied_scope_is_not_covered_by_its_twin() {
-        let mut two_scopes = (*descriptor("session.result", CtxOp::Alloc)).clone();
-        two_scopes.capabilities.push(Capability {
-            name: "workspace.result".into(),
-            cell: scoped_cell(CtxOp::Alloc, "workspace"),
-        });
-        let two_scopes = Arc::new(two_scopes);
-
-        let err = check_result_cell(
-            "synthetic.tool",
-            &two_scopes,
-            &admitted(two_scopes.clone(), &["workspace.result"]),
-            &scoped_cell(CtxOp::Alloc, "workspace"),
-        )
-        .expect_err("a declared cell on a denied scope must fail");
-        assert_eq!(err.code, CepErrorCode::CapabilityViolation);
-        assert!(
-            err.message.contains("not in the admitted"),
-            "{}",
-            err.message
-        );
+    fn result_cell_must_be_declared_and_exactly_admitted() {
+        for (name, extra_capability, deny, result_cell, message_fragment) in [
+            // The ceiling intersects declarations and admission; the messages distinguish each boundary.
+            (
+                "undeclared",
+                None,
+                vec![],
+                cell(CtxOp::Mutate),
+                "not in declared capabilities",
+            ),
+            // A second capability keeps admission nonempty, isolating the result ceiling check.
+            (
+                "declared_but_not_admitted",
+                Some(Capability {
+                    name: "session.events".into(),
+                    cell: cell(CtxOp::Mutate),
+                }),
+                vec!["session.result"],
+                cell(CtxOp::Alloc),
+                "not in the admitted",
+            ),
+            // A twin differing only by scope must not cover the denied result cell.
+            (
+                "denied_scope_twin",
+                Some(Capability {
+                    name: "workspace.result".into(),
+                    cell: scoped_cell(CtxOp::Alloc, "workspace"),
+                }),
+                vec!["workspace.result"],
+                scoped_cell(CtxOp::Alloc, "workspace"),
+                "not in the admitted",
+            ),
+        ] {
+            let mut descriptor = (*descriptor("session.result", CtxOp::Alloc)).clone();
+            if let Some(capability) = extra_capability {
+                descriptor.capabilities.push(capability);
+            }
+            let descriptor = Arc::new(descriptor);
+            let Err(err) = check_result_cell(
+                "synthetic.tool",
+                &descriptor,
+                &admitted(descriptor.clone(), &deny),
+                &result_cell,
+            ) else {
+                panic!("{name}: result cell must fail");
+            };
+            assert_eq!(err.code, CepErrorCode::CapabilityViolation, "{name}");
+            assert!(
+                err.message.contains(message_fragment),
+                "{name}: {}",
+                err.message
+            );
+        }
     }
 
     /// #70 (Codeberg #48): a guest logical error while call-scoped

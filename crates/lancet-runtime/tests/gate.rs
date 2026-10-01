@@ -28,120 +28,106 @@ fn hex_sha256(bytes: &[u8]) -> String {
     out
 }
 
-/// Missing: an expected identity has no matching registration.
 #[test]
-fn gate_rejects_missing_expected_name() {
-    let tool = SyntheticTool::from_noop_bytes("noop.echo");
-    let ids: &'static [_] = Box::leak(vec![tool.identity].into_boxed_slice());
-    let result = ClosedCatalog::compose(&engine(), std::iter::empty(), ids);
-    assert!(
-        matches!(result, Err(CompositionError::MissingNames(ref n)) if n == &vec!["noop.echo".to_string()]),
-        "{result:?}"
-    );
+fn gate_rejects_invalid_catalog_names() {
+    for (name, tool_name, registration_count, identity_count, digest_xor, accepts_error) in [
+        // An expected identity without a registration is missing.
+        (
+            "missing_expected_name",
+            "noop.echo",
+            0,
+            1,
+            0,
+            (|error: &CompositionError| matches!(error, CompositionError::MissingNames(n) if n == &vec!["noop.echo".to_string()]))
+                as fn(&CompositionError) -> bool,
+        ),
+        // A single expected pin ensures the duplicate-registration check fires, not duplicate-expected.
+        (
+            "duplicate_name",
+            "noop.echo",
+            2,
+            1,
+            0,
+            |error: &CompositionError| matches!(error, CompositionError::DuplicateName(n) if n == "noop.echo"),
+        ),
+        // Same name with different digests must not silently adopt a last-wins pin; checked before registrations.
+        (
+            "duplicate_expected_name",
+            "noop.echo",
+            1,
+            2,
+            0xff,
+            |error: &CompositionError| matches!(error, CompositionError::DuplicateExpectedName(n) if n == "noop.echo"),
+        ),
+        // A registration outside the expected set is unapproved.
+        (
+            "unapproved_name",
+            "rogue.tool",
+            1,
+            0,
+            0,
+            |error: &CompositionError| matches!(error, CompositionError::UnapprovedName(n) if n == "rogue.tool"),
+        ),
+    ] {
+        let tool = SyntheticTool::from_noop_bytes(tool_name);
+        let mut identities = vec![tool.identity; identity_count];
+        if let Some(second) = identities.get_mut(1) {
+            second.descriptor_sha256[0] ^= digest_xor;
+        }
+        let ids: &'static [_] = Box::leak(identities.into_boxed_slice());
+        let registrations: Vec<&'static _> = (0..registration_count)
+            .map(|_| {
+                let tool = SyntheticTool::from_noop_bytes(tool_name);
+                &*Box::leak(Box::new(tool.registration))
+            })
+            .collect();
+        let result = ClosedCatalog::compose(&engine(), registrations, ids);
+        assert!(
+            matches!(&result, Err(error) if accepts_error(error)),
+            "{name}: {result:?}"
+        );
+    }
 }
 
-/// Duplicate registration: two registrations share a name. The expected
-/// identity set carries a single pin for that name, so the
-/// duplicate-registration check fires (not the duplicate-expected check,
-/// which guards the host-pinned identity set and runs first).
 #[test]
-fn gate_rejects_duplicate_name() {
-    let tool_a = SyntheticTool::from_noop_bytes("noop.echo");
-    let tool_b = SyntheticTool::from_noop_bytes("noop.echo");
-    // One expected identity for "noop.echo"; two registrations claim it, so
-    // the expected set is unique and the registration duplicate fires.
-    let ids: &'static [_] = Box::leak(vec![tool_a.identity].into_boxed_slice());
-    let reg_a: &'static _ = Box::leak(Box::new(tool_a.registration));
-    let reg_b: &'static _ = Box::leak(Box::new(tool_b.registration));
-    let result = ClosedCatalog::compose(&engine(), vec![reg_a, reg_b], ids);
-    assert!(
-        matches!(result, Err(CompositionError::DuplicateName(ref n)) if n == "noop.echo"),
-        "{result:?}"
-    );
-}
-
-/// Duplicate expected identity: two host-pinned identities share a name with
-/// different digests. The gate must fail closed rather than silently letting
-/// the later entry overwrite the earlier pin (no last-wins). The uniqueness
-/// check runs before registration processing.
-#[test]
-fn gate_rejects_duplicate_expected_name() {
-    let tool = SyntheticTool::from_noop_bytes("noop.echo");
-    // A second identity with the same name but a different descriptor digest,
-    // proving the gate does not silently adopt a last-wins pin.
-    let mut second = tool.identity;
-    second.descriptor_sha256[0] ^= 0xff;
-
-    let ids: &'static [_] = Box::leak(vec![tool.identity, second].into_boxed_slice());
-    let reg: &'static _ = Box::leak(Box::new(tool.registration));
-    let result = ClosedCatalog::compose(&engine(), std::iter::once(reg), ids);
-    assert!(
-        matches!(result, Err(CompositionError::DuplicateExpectedName(ref n)) if n == "noop.echo"),
-        "{result:?}"
-    );
-}
-
-/// Unapproved: a registration whose name is not in the expected set.
-#[test]
-fn gate_rejects_unapproved_name() {
-    let tool = SyntheticTool::from_noop_bytes("rogue.tool");
-    let reg: &'static _ = Box::leak(Box::new(tool.registration));
-    let result = ClosedCatalog::compose(&engine(), std::iter::once(reg), &[]);
-    assert!(
-        matches!(result, Err(CompositionError::UnapprovedName(ref n)) if n == "rogue.tool"),
-        "{result:?}"
-    );
-}
-
-/// Descriptor digest drift: the host-pinned digest doesn't match the bytes.
-#[test]
-fn gate_rejects_descriptor_digest_drift() {
-    let mut tool = SyntheticTool::from_noop_bytes("noop.echo");
-    tool.with_wrong_descriptor_digest();
-    let result = compose(&[&tool]);
-    assert!(
-        matches!(result, Err(CompositionError::DescriptorDrift(_))),
-        "{result:?}"
-    );
-}
-
-/// Artifact hash mismatch: the host-pinned artifact digest doesn't match.
-#[test]
-fn gate_rejects_artifact_hash_mismatch() {
-    let mut tool = SyntheticTool::from_noop_bytes("noop.echo");
-    tool.with_wrong_artifact_digest();
-    let result = compose(&[&tool]);
-    assert!(
-        matches!(result, Err(CompositionError::ArtifactHashMismatch(_))),
-        "{result:?}"
-    );
-}
-
-/// Import drift: the declared imports don't match the actual.
-#[test]
-fn gate_rejects_import_drift() {
-    let mut tool = SyntheticTool::from_noop_bytes("noop.echo");
-    tool.with_wrong_imports(&["lattice:tool-host/some-other@0.1.0"]);
-    let result = compose(&[&tool]);
-    assert!(
-        matches!(result, Err(CompositionError::ImportDrift { .. })),
-        "{result:?}"
-    );
-}
-
-/// Unsupported ABI: the identity declares an ABI version the host doesn't
-/// support.
-#[test]
-fn gate_rejects_unsupported_abi() {
-    let mut tool = SyntheticTool::from_noop_bytes("noop.echo");
-    tool.with_unsupported_abi();
-    let result = compose(&[&tool]);
-    // The gate reports the descriptor's abi_version (1, from the noop
-    // descriptor) because descriptor.abi_version != identity.abi_version.
-    assert!(
-        matches!(result, Err(CompositionError::UnsupportedAbi(_))),
-        "{result:?}"
-    );
+fn gate_rejects_tool_identity_drift() {
+    for (name, mutate_identity, accepts_error) in [
+        // The host-pinned descriptor digest must match the bytes.
+        (
+            "descriptor_digest_drift",
+            SyntheticTool::with_wrong_descriptor_digest as fn(&mut SyntheticTool),
+            (|error: &CompositionError| matches!(error, CompositionError::DescriptorDrift(_)))
+                as fn(&CompositionError) -> bool,
+        ),
+        // The host-pinned artifact digest must match the bytes.
+        (
+            "artifact_hash_mismatch",
+            SyntheticTool::with_wrong_artifact_digest,
+            |error: &CompositionError| matches!(error, CompositionError::ArtifactHashMismatch(_)),
+        ),
+        // Declared imports must match actual imports.
+        (
+            "import_drift",
+            |tool: &mut SyntheticTool| {
+                tool.with_wrong_imports(&["lattice:tool-host/some-other@0.1.0"])
+            },
+            |error: &CompositionError| matches!(error, CompositionError::ImportDrift { .. }),
+        ),
+        // Identity ABI becomes 99 but descriptor ABI stays 1; the gate reports the descriptor ABI.
+        (
+            "unsupported_abi",
+            SyntheticTool::with_unsupported_abi,
+            |error: &CompositionError| matches!(error, CompositionError::UnsupportedAbi(_)),
+        ),
+    ] {
+        let mut tool = SyntheticTool::from_noop_bytes("noop.echo");
+        mutate_identity(&mut tool);
+        let result = compose(&[&tool]);
+        assert!(
+            matches!(&result, Err(error) if accepts_error(error)),
+            "{name}: {result:?}"
+        );
+    }
 }
 
 /// Ambient WASI import — clean test: the component only imports
