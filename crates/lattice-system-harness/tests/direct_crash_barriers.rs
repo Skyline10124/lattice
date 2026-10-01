@@ -1390,7 +1390,20 @@ fn redb_commit_windows_close_only_and_preserve_terminal_facts() {
                     body: r#"{"error":{"message":"retry"}}"#.into(),
                 },
                 "invalid" => {
-                    support::tool_call("outsider", "fetch.web", r#"{"url":"https://example.com"}"#)
+                    let mut rejected_end = end();
+                    rejected_end["usage"] = json!({
+                        "prompt_tokens":10,"completion_tokens":5,"total_tokens":15
+                    });
+                    SseScript::Chunks {
+                        chunks: vec![
+                            chunk(json!({"tool_calls":[{
+                                "index":0,"id":"outsider","type":"function",
+                                "function":{"name":"fetch__web",
+                                    "arguments":r#"{"url":"https://example.com"}"#}
+                            }]})),
+                            rejected_end,
+                        ],
+                    }
                 }
                 _ => batch("second", "kept.txt"),
             };
@@ -1599,7 +1612,15 @@ fn redb_commit_windows_close_only_and_preserve_terminal_facts() {
                     steps[1]["state"]["end"],
                     json!({"end":"stop","node":null,"cause":{"cause":"invalid_batch"}})
                 );
-                assert_eq!(after["usage"]["total"]["total_tokens"], 4);
+                // 首个成功批次 (1,1,2) 与被拒批次 (10,5,15) 均须完整保留；
+                // 不相等的分项能捕获丢失或串位，且关闭后崩溃重开仍为 Complete。
+                assert_eq!(
+                    after["usage"],
+                    json!({"kind":"complete","total":{
+                        "prompt_tokens":11,"completion_tokens":6,"total_tokens":17
+                    }}),
+                    "invalid batch must preserve complete usage and each token counter"
+                );
             }
             if name == "nonretry" {
                 assert_eq!(

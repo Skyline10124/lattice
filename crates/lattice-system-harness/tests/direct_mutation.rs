@@ -258,9 +258,12 @@ fn direct_mutation_stale_edit_and_external_visibility() {
     world
         .write_project_file("tracked.txt", "original\n")
         .expect("seed");
+    world
+        .write_project_file("orig.txt", "x\n")
+        .expect("seed list entry");
     world.commit_all("seed").expect("commit");
 
-    let server = wire_fake_llm(
+    let (server, gate) = wire_gated_fake_llm(
         &world,
         "dl-stale",
         sequence(vec![
@@ -269,17 +272,86 @@ fn direct_mutation_stale_edit_and_external_visibility() {
                 "observe.workspace",
                 r#"{"mode":"read_file","path":"tracked.txt"}"#,
             ),
-            SseScript::plain("observed original"),
+            tool_call(
+                "list1",
+                "observe.workspace",
+                r#"{"mode":"list_directory","path":"."}"#,
+            ),
+            tool_call(
+                "list2",
+                "observe.workspace",
+                r#"{"mode":"list_directory","path":"."}"#,
+            ),
+            SseScript::plain("observed original and external addition"),
         ]),
     );
     let scenario_evidence = evidence(&world, &spec);
     let send = SessionSendDriver::new(&driver, &world, &spec, "dl-stale");
-    let observe = send.send("read tracked").expect("observe");
+    let running = send
+        .spawn("read tracked and list twice")
+        .expect("spawn observe");
+    for count in 1..=2 {
+        server
+            .wait_for_requests(count, running.remaining_timeout(Duration::from_secs(30)))
+            .expect("observe request");
+        gate.wait_until_stalled(count, running.remaining_timeout(Duration::from_secs(2)))
+            .expect("observe response stalled");
+        gate.release_next(running.remaining_timeout(Duration::from_secs(2)))
+            .expect("release read or first list");
+    }
+    server
+        .wait_for_requests(3, running.remaining_timeout(Duration::from_secs(30)))
+        .expect("first list result reached provider");
+    gate.wait_until_stalled(3, running.remaining_timeout(Duration::from_secs(2)))
+        .expect("second list stalled before execution");
+    world
+        .write_project_file("added.txt", "new\n")
+        .expect("external addition");
+    gate.release(running.remaining_timeout(Duration::from_secs(2)))
+        .expect("release second list");
+    let observe = send.wait_spawned(running).expect("observe");
     let captures_obs = server.captured_requests();
     drop(server);
 
     let result: Result<(), AssertError> = (|| {
         assert_clean_send(&observe)?;
+        let first_list = tool_result_value(&captures_obs[2]).expect("first list result");
+        let second_list = tool_result_value(&captures_obs[3]).expect("second list result");
+        for (label, list) in [("first", &first_list), ("second", &second_list)] {
+            require(
+                list["mode"] == "list_directory",
+                format!("{label} list must retain list_directory mode: {list}"),
+            )?;
+            require(
+                list["result"]["entries"]
+                    .as_array()
+                    .is_some_and(|entries| entries.iter().all(|entry| entry["name"].is_string())),
+                format!("{label} list must return named entries: {list}"),
+            )?;
+        }
+        let first_entries = first_list["result"]["entries"]
+            .as_array()
+            .expect("first entries");
+        require(
+            first_entries
+                .iter()
+                .any(|entry| entry["name"] == "orig.txt"),
+            format!("first list must contain orig.txt: {first_list}"),
+        )?;
+        require(
+            !first_entries
+                .iter()
+                .any(|entry| entry["name"] == "added.txt"),
+            format!("first list must not contain added.txt: {first_list}"),
+        )?;
+        require(
+            second_list["result"]["entries"]
+                .as_array()
+                .expect("second entries")
+                .iter()
+                .any(|entry| entry["name"] == "added.txt"),
+            format!("second list must see externally added added.txt: {second_list}"),
+        )?;
         let observed = tool_result_value(&captures_obs[1]).expect("observe result");
         let hash = observed
             .pointer("/result/content_hash")

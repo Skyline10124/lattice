@@ -700,6 +700,24 @@ fn direct_tools_catalog_exposure_matches_enabled() {
     let send = SessionSendDriver::new(&driver, &world, &spec, "dl-cat");
     let outcome = send.send("hello").expect("turn");
     let captures = server.captured_requests();
+    // 保留禁用子集检查，再通过同一后台验证完整发行目录与 manifest 字段投影。
+    let profile_path = world
+        .project_dir()
+        .join(".lattice/agents/dl-cat/agent.toml");
+    let profile = std::fs::read_to_string(&profile_path).expect("read profile");
+    world
+        .write_project_file(
+            ".lattice/agents/dl-cat/agent.toml",
+            &profile.replace(
+                "[\"observe.workspace\", \"mutate.create\", \"session.todo_write\"]",
+                "[\"observe.workspace\", \"mutate.create\", \"mutate.edit\", \"fetch.web\", \"session.todo_write\"]",
+            ),
+        )
+        .expect("enable all five tools");
+    let full = send
+        .send("show the full catalog")
+        .expect("full catalog turn");
+    let full_captures = server.captured_requests();
 
     let result: Result<(), AssertError> = (|| {
         assert_clean_send(&outcome)?;
@@ -720,13 +738,62 @@ fn direct_tools_catalog_exposure_matches_enabled() {
             !names.iter().any(|n| n.contains("fetch")),
             format!("fetch must not be advertised when disabled: {names:?}"),
         )?;
+        assert_clean_send(&full)?;
+        let full_request = &full_captures[1];
+        let mut full_names = wire_tool_names(full_request);
+        full_names.sort();
+        require(
+            full_names
+                == [
+                    "fetch__web",
+                    "mutate__create",
+                    "mutate__edit",
+                    "observe__workspace",
+                    "session__todo_write",
+                ],
+            format!("full catalog must be exactly five tools: {full_names:?}"),
+        )?;
+        let tools = full_request.raw["tools"]
+            .as_array()
+            .expect("wire tools array");
+        let todo = &tools
+            .iter()
+            .find(|tool| tool["function"]["name"] == "session__todo_write")
+            .expect("todo in full catalog")["function"];
+        require(
+            todo["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("todo list")),
+            format!("todo projection must carry manifest description: {todo}"),
+        )?;
+        require(
+            todo["parameters"]["properties"]["todos"]["type"] == "array",
+            format!("todo projection must retain todos array: {todo}"),
+        )?;
+        let observe = &tools
+            .iter()
+            .find(|tool| tool["function"]["name"] == "observe__workspace")
+            .expect("observe in full catalog")["function"];
+        require(
+            observe["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("content_hash")),
+            format!("observe projection must carry manifest description: {observe}"),
+        )?;
+        require(
+            observe["parameters"]["oneOf"].as_array().map(Vec::len) == Some(4),
+            format!("observe projection must retain four modes: {observe}"),
+        )?;
         Ok(())
     })();
 
     finish_scenario(
         scenario_evidence,
-        &[("catalog exposure", &outcome.command)],
-        captures,
+        &[
+            ("catalog exposure", &outcome.command),
+            ("full catalog projection", &full.command),
+        ],
+        full_captures,
         result,
     );
 }
