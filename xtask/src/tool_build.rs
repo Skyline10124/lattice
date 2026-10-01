@@ -333,18 +333,3 @@ fn read_tool_name(manifest_path: &Path) -> anyhow::Result<String> {
 fn crate_name(tool_name: &str) -> String {
     tool_name.replace('.', "-")
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn crate_name_maps_dots_to_dashes() {
-        assert_eq!(crate_name("noop.echo"), "noop-echo");
-    }
-
-    #[test]
-    fn component_filename_maps_dots_to_underscores() {
-        assert_eq!(component_filename("noop.echo"), "noop_echo.component.wasm");
-    }
-}

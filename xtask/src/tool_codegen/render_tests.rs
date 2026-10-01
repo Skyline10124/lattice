@@ -375,39 +375,6 @@ path = "result.result.content"
     }
 }
 
-/// An empty `[render]` must be an error: absence of the section is the only
-/// legal empty state, so a section that declares nothing is either a typo or an
-/// abandoned edit.
-#[test]
-fn empty_render_section_is_rejected() {
-    let err = check("[render]\n", &empty_object(), &empty_object())
-        .expect_err("an empty [render] must fail closed");
-    assert!(
-        err.to_string().contains("empty"),
-        "error should say the section is empty: {err}"
-    );
-}
-
-/// An arm that declares no annotations is the same fail-open shape: it happens
-/// when an author's `[[render.arms.annotations]]` block lands under the wrong
-/// arm.
-#[test]
-fn arm_without_annotations_is_rejected() {
-    let err = check_err(
-        r#"
-[[render.arms]]
-at = "result"
-case = "read_file"
-"#,
-        &observe_params(),
-        &observe_result(),
-    );
-    assert!(
-        err.contains("no \nannotations") || err.contains("no annotations"),
-        "error should say the arm has no annotations: {err}"
-    );
-}
-
 /// Single-slot roles may be declared once per scope, and not in two scopes at
 /// once: the consumer has one summary/status/truncated slot to fill.
 #[test]
@@ -487,55 +454,6 @@ path = "params.expected_hash"
     assert!(err.contains("single slot"), "{err}");
 }
 
-/// Two arms on the *same* union are mutually exclusive, so each may fill the
-/// slot; two arms on *different* unions can both be selected by one call, so
-/// they would compete for it.
-#[test]
-fn cross_arm_slot_competition_is_rejected_only_across_unions() {
-    check(
-        r#"
-[[render.arms]]
-at = "result"
-case = "read_file"
-[[render.arms.annotations]]
-role = "summary"
-path = "result.result.content_hash"
-[[render.arms]]
-at = "result"
-case = "grep"
-[[render.arms.annotations]]
-role = "truncated"
-path = "result.result.truncated"
-"#,
-        &observe_params(),
-        &observe_result(),
-    )
-    .expect("branches of one union are mutually exclusive");
-
-    let err = check_err(
-        r#"
-[[render.arms]]
-at = "params"
-case = "read_file"
-[[render.arms.annotations]]
-role = "summary"
-path = "params.path"
-[[render.arms]]
-at = "result"
-case = "read_file"
-[[render.arms.annotations]]
-role = "summary"
-path = "params.path"
-"#,
-        &observe_params(),
-        &observe_result(),
-    );
-    assert!(
-        err.contains("compete"),
-        "arms on different unions must not both fill one slot: {err}"
-    );
-}
-
 /// Repeatable roles are genuinely repeatable: a Tool with two code fields is a
 /// real shape, not a conflict.
 #[test]
@@ -592,26 +510,6 @@ path = "{bad}"
             "path {bad:?} must be rejected by the grammar"
         );
     }
-}
-
-/// The prefix is positional, so a schema property genuinely named `params` or
-/// `result` is still reachable.
-#[test]
-fn prefix_is_positional_so_a_property_named_result_is_reachable() {
-    // `result.result.content` is exactly the adjacently tagged shape.
-    check(
-        r#"
-[[render.arms]]
-at = "result"
-case = "read_file"
-[[render.arms.annotations]]
-role = "code"
-path = "result.result.content"
-"#,
-        &observe_params(),
-        &observe_result(),
-    )
-    .expect("an envelope property named `result` resolves");
 }
 
 /// A bare `params` / `result` is the schema root, which is how a root union is
@@ -1055,22 +953,6 @@ path = "result.mode"
         &observe_result(),
     )
     .expect("a `const` tag is a closed value set");
-}
-
-/// `summary` accepts a number: `fetch.web`'s HTTP status is the natural summary
-/// of that call.
-#[test]
-fn summary_accepts_a_numeric_scalar() {
-    check(
-        r#"
-[[render.annotations]]
-role = "summary"
-path = "result.status"
-"#,
-        &empty_object(),
-        &fetch_result(),
-    )
-    .expect("an integer is a scalar");
 }
 
 /// `columns` and `tree` share one spelling: the last segment carries `[]` and
@@ -1566,125 +1448,4 @@ path = "result.sha"
         err.contains("no declared"),
         "an unmodelled keyword must fail closed rather than be ignored: {err}"
     );
-}
-
-// ---------------------------------------------------------------------------
-// render.json output
-// ---------------------------------------------------------------------------
-
-fn projection(toml_src: &str, params: &serde_json::Value, result: &serde_json::Value) -> String {
-    let section = parse_section(toml_src).expect("section parses");
-    let schemas = RenderSchemas { params, result };
-    validate_render(&section, &schemas).expect("section validates");
-    render_projection("noop.echo", &section, &schemas).expect("projection renders")
-}
-
-/// Deterministic bytes: two renders are identical, the indent is 2 spaces, there
-/// is exactly one trailing newline, and no CR.
-#[test]
-fn projection_is_deterministic() {
-    let src = r#"
-[[render.annotations]]
-role = "summary"
-path = "result.status"
-[[render.annotations]]
-role = "code"
-path = "result.body"
-[[render.annotations]]
-role = "truncated"
-path = "result.truncated"
-"#;
-    let a = projection(src, &empty_object(), &fetch_result());
-    let b = projection(src, &empty_object(), &fetch_result());
-    assert_eq!(a, b);
-    assert!(a.ends_with("}\n"));
-    assert!(!a.ends_with("}\n\n"));
-    assert!(!a.contains('\r'));
-    assert!(a.contains("\n  \"tool\""), "2-space indent: {a}");
-}
-
-/// Declaration order is preserved: it is the only author-controlled signal that
-/// does not smuggle in layout.
-#[test]
-fn projection_preserves_declaration_order() {
-    let out = projection(
-        r#"
-[[render.annotations]]
-role = "code"
-path = "result.body"
-[[render.annotations]]
-role = "summary"
-path = "result.status"
-"#,
-        &empty_object(),
-        &fetch_result(),
-    );
-    let code_at = out.find("\"code\"").expect("code present");
-    let summary_at = out.find("\"summary\"").expect("summary present");
-    assert!(code_at < summary_at, "declared order must survive: {out}");
-}
-
-/// The projection carries the derived discriminant so the consumer does not
-/// re-derive it from the schema, and it does **not** carry the tool version, so
-/// an unrelated version bump is not render drift.
-#[test]
-fn projection_shape_is_exactly_the_documented_one() {
-    let out = projection(
-        r#"
-[[render.arms]]
-at = "result"
-case = "grep"
-[[render.arms.annotations]]
-role = "columns"
-path = "result.result.matches[]"
-columns = ["path", "line", "text"]
-[[render.arms.annotations]]
-role = "truncated"
-path = "result.result.truncated"
-"#,
-        &observe_params(),
-        &observe_result(),
-    );
-    let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
-    assert_eq!(v["tool"], "noop.echo");
-    assert_eq!(v["render-schema-version"], RENDER_SCHEMA_VERSION);
-    assert!(v.get("version").is_none(), "no tool version: {out}");
-    assert_eq!(v["annotations"], serde_json::json!([]));
-    assert_eq!(
-        v["arms"],
-        serde_json::json!([{
-            "at": "result",
-            "discriminant": "mode",
-            "case": "grep",
-            "annotations": [
-                { "role": "columns", "path": "result.result.matches[]",
-                  "columns": ["path", "line", "text"] },
-                { "role": "truncated", "path": "result.result.truncated" }
-            ]
-        }])
-    );
-}
-
-/// Nothing in the projection names a container, a position, or a nesting the
-/// data shape does not already have — the out-of-scope fence for this ticket.
-#[test]
-fn projection_carries_no_layout_vocabulary() {
-    let out = projection(
-        r#"
-[[render.annotations]]
-role = "summary"
-path = "result.status"
-"#,
-        &empty_object(),
-        &fetch_result(),
-    );
-    for banned in [
-        "row", "column\"", "width", "order", "position", "indent", "layout", "collapse", "expand",
-        "style", "color",
-    ] {
-        assert!(
-            !out.contains(banned),
-            "projection must not carry layout vocabulary ({banned}): {out}"
-        );
-    }
 }

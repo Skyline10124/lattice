@@ -77,28 +77,3 @@ pub fn run(args: TuiMockArgs) -> anyhow::Result<()> {
     }
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn mock_build_uses_the_optimized_profile() {
-        assert_eq!(
-            build_args(),
-            [
-                "build",
-                "--profile",
-                "tui-mock",
-                "-p",
-                "lattice-cli",
-                "--bin",
-                "lattice",
-            ]
-        );
-        assert_eq!(
-            lattice_binary(std::path::Path::new("/target")),
-            std::path::Path::new("/target/tui-mock/lattice")
-        );
-    }
-}

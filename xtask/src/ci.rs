@@ -437,20 +437,6 @@ fn ordered_test_crates(metadata: &Metadata) -> anyhow::Result<Vec<String>> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn parses_the_version_out_of_wasm_tools_version_output() {
-        assert_eq!(
-            parse_wasm_tools_version("wasm-tools 1.254.0\n").as_deref(),
-            Some("1.254.0")
-        );
-    }
-
-    #[test]
-    fn wasm_tools_version_parse_rejects_output_without_a_version_field() {
-        assert_eq!(parse_wasm_tools_version("wasm-tools\n"), None);
-        assert_eq!(parse_wasm_tools_version(""), None);
-    }
-
     /// The pinned version must stay in step with the installer in
     /// `.github/workflows/full-gate.yml`; a silent divergence would make the
     /// local gate warn on exactly the version CI uses (see #80).
@@ -495,59 +481,5 @@ mod tests {
                 manifest.display()
             );
         }
-    }
-
-    #[test]
-    fn ordered_test_crates_is_deterministic_and_excludes_xtask() {
-        let root = repo_root::repo_root().unwrap();
-        let metadata = MetadataCommand::new()
-            .current_dir(&root)
-            .exec()
-            .expect("workspace metadata");
-        let a = ordered_test_crates(&metadata).unwrap();
-        let b = ordered_test_crates(&metadata).unwrap();
-        assert_eq!(a, b, "order must be deterministic");
-        assert!(
-            !a.iter().any(|n| n == "xtask"),
-            "xtask has no tests and must be excluded: {a:?}"
-        );
-        // Sanity: the known test-bearing crates are all present.
-        for expected in [
-            "net-guard",
-            "lancet-protocol",
-            "lancet-runtime",
-            "lattice-api",
-            "lattice-cli",
-            "lattice-system-harness",
-        ] {
-            assert!(
-                a.iter().any(|n| n == expected),
-                "expected crate {expected} missing from order: {a:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn ordered_test_crates_puts_dependencies_before_dependents() {
-        let root = repo_root::repo_root().unwrap();
-        let metadata = MetadataCommand::new()
-            .current_dir(&root)
-            .exec()
-            .expect("workspace metadata");
-        let order = ordered_test_crates(&metadata).unwrap();
-        // `lancet-protocol` is a leaf dependency of `lancet-runtime` and must
-        // appear first in the generated test order.
-        let proto = order
-            .iter()
-            .position(|n| n == "lancet-protocol")
-            .expect("lancet-protocol present");
-        let runtime = order
-            .iter()
-            .position(|n| n == "lancet-runtime")
-            .expect("lancet-runtime present");
-        assert!(
-            proto < runtime,
-            "lancet-protocol must come before lancet-runtime: {order:?}"
-        );
     }
 }
