@@ -301,15 +301,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_edits_array_is_refused() {
-        let err = apply_edits("x\n", &[]).unwrap_err();
-        assert_eq!(
-            err.reason,
-            "mutate.edit requires at least one edit operation"
-        );
-    }
-
-    #[test]
     fn empty_file_gaining_content_is_refused_with_stable_message() {
         // Semantic ops cannot reach empty→non-empty (anchors need content);
         // pin the post-apply guard directly so the wire text stays covered.

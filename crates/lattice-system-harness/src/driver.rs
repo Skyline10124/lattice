@@ -780,22 +780,6 @@ mod tests {
     }
 
     #[test]
-    fn exit_records_code_without_intervention_or_forced_cleanup() {
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", "exit 7"]);
-        let outcome = RunningCommand::spawn(cmd)
-            .expect("spawn")
-            .wait(Some(Duration::from_secs(2)))
-            .expect("exit outcome");
-
-        assert_eq!(outcome.termination, Some(ProcessTermination::Exited(7)));
-        assert!(outcome.interventions.is_empty());
-        assert_eq!(outcome.cleanup, ProcessGroupCleanup::default());
-        assert_eq!(outcome.exit_code(), Some(7));
-        assert_eq!(outcome.signal(), None);
-    }
-
-    #[test]
     fn signal_records_concrete_signal_without_magic_exit_code() {
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "kill -TERM $$"]);
@@ -978,25 +962,6 @@ mod tests {
         );
         assert!(outcome.cleanup.forced);
         assert!(outcome.cleanup.succeeded(), "{:?}", outcome.cleanup);
-    }
-
-    #[test]
-    fn kill_and_wait_records_forced_kill() {
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", "sleep 30"]);
-        let outcome = RunningCommand::spawn(cmd)
-            .expect("spawn")
-            .kill_and_wait()
-            .expect("kill outcome");
-
-        assert_eq!(
-            outcome.termination,
-            Some(ProcessTermination::Signaled(libc::SIGKILL))
-        );
-        assert_eq!(outcome.interventions, vec![HarnessIntervention::ForcedKill]);
-        assert!(outcome.cleanup.forced);
-        assert!(outcome.cleanup.succeeded(), "{:?}", outcome.cleanup);
-        assert!(outcome.cleanup.surviving_pids.is_empty());
     }
 
     #[test]

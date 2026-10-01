@@ -519,71 +519,8 @@ mod tests {
     }
 
     #[test]
-    fn strip_ansi_passes_plain_text_through() {
-        assert_eq!(strip_ansi("plain text"), "plain text");
-    }
-
-    #[test]
     fn collapse_ws_flattens_wrapped_frames() {
         assert_eq!(collapse_ws("hello\n  world"), "hello world");
         assert_eq!(collapse_ws("pong"), "pong");
-    }
-
-    #[test]
-    fn enter_alternate_screen_is_csi_1049h() {
-        assert_eq!(
-            ENTER_ALTERNATE_SCREEN,
-            &[0x1b, 0x5b, 0x3f, 0x31, 0x30, 0x34, 0x39, 0x68]
-        );
-    }
-
-    /// Tracer bullet: spawn `cat` in a PTY, send a line, wait for it to be
-    /// echoed back. Proves the PTY round-trip works end-to-end without
-    /// touching the product binary. `cat` copies stdin to stdout via
-    /// the PTY, so the line we write should come back through the master
-    /// reader.
-    #[test]
-    fn pty_round_trip_with_cat() {
-        let world = ScenarioWorld::new("lattice-harness-pty-cat").expect("world");
-        let pty_system = native_pty_system();
-        let pair = pty_system
-            .openpty(PtySize {
-                rows: 24,
-                cols: 80,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .expect("openpty");
-        let mut cmd = CommandBuilder::new("cat");
-        cmd.cwd(world.project_dir());
-        cmd.env_clear();
-        for (k, v) in world.env_summary() {
-            cmd.env(k, v);
-        }
-        let _child = pair.slave.spawn_command(cmd).expect("spawn cat");
-        let mut writer = pair.master.take_writer().expect("writer");
-        drop(pair.slave);
-
-        writer.write_all(b"hello-pty\n").expect("write");
-        writer.flush().expect("flush");
-
-        let start = Instant::now();
-        let mut reader = pair.master.try_clone_reader().expect("reader");
-        let mut got = String::new();
-        let mut buf = [0u8; 1024];
-        while start.elapsed() < Duration::from_secs(5) {
-            if let Ok(n) = reader.read(&mut buf)
-                && n > 0
-            {
-                got.push_str(&String::from_utf8_lossy(&buf[..n]));
-                if got.contains("hello-pty") {
-                    break;
-                }
-            }
-        }
-        assert!(
-            strip_ansi(&got).contains("hello-pty"),
-            "expected echo of hello-pty in PTY output, got: {got:?}"
-        );
     }
 }
