@@ -30,5 +30,4 @@
 
 - `cargo test -p lattice-cli`；每次命令变更覆盖 parser/help。
 - Turn 渲染关联 API streaming 与外部 harness；环境边界关联 `fast_env_boundary`，退出码用黑盒断言。
-- audit/status 测试通过 dev-dependency 的 `lattice-session` `test-support` 使用唯一 `ScopedXdgStateHome` 串行化进程 XDG 变量，不新建 crate-local 副本。
-- `tests/cli_cutover.rs` 保留局部覆盖，release 与端到端场景遵循测试合同规定的外部归属。
+- release 与端到端场景遵循测试合同规定的外部归属。

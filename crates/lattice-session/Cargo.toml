@@ -18,7 +18,6 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
-tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
@@ -27,6 +26,5 @@ tempfile = { workspace = true }
 default = []
 # 下游隔离测试使用的存储故障接缝与消息构造。
 test-utils = []
-test-support = ["dep:tempfile"]
 # 仅显式外部故障产物复用提交失败接缝，不启用其余测试构造器。
 test-crash-barriers = []

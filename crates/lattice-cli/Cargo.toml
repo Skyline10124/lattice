@@ -31,7 +31,7 @@ lattice-api = { workspace = true, features = ["test-utils"] }
 lattice-agent = { workspace = true, features = ["test-utils"] }
 lattice-profile = { workspace = true }
 lattice-llm = { workspace = true }
-lattice-session = { workspace = true, features = ["test-utils", "test-support"] }
+lattice-session = { workspace = true, features = ["test-utils"] }
 async-trait = { workspace = true }
 tempfile = { workspace = true }
 
