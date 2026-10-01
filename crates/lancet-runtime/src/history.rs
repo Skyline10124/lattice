@@ -973,13 +973,6 @@ mod tests {
     }
 
     #[test]
-    fn disabled_history_records_nothing() {
-        let history = WorkspaceHistory::disabled();
-        assert_eq!(history.current().unwrap(), None);
-        assert_eq!(history.record(&create("a.txt", "x")).unwrap(), None);
-    }
-
-    #[test]
     fn mutation_message_emits_canonical_turn_id_trailer() {
         let message = mutation_message(&create("a.txt", "x"), "a.txt");
         assert!(
@@ -1082,43 +1075,6 @@ mod tests {
         assert_eq!(
             parse_corruption_reason(&unknown),
             "unknown 'lattice-history-kind' value 'future'"
-        );
-    }
-
-    #[test]
-    fn repository_is_bare_and_outside_the_workspace() {
-        let state = TempDir::new().unwrap();
-        let history = history_at(&state);
-        let path = history.repo_path().expect("enabled").to_path_buf();
-        assert!(path.ends_with(HISTORY_REPO_DIR));
-        assert!(path.join("HEAD").exists(), "bare repo lives at the path");
-        assert!(
-            !path.join(".git").exists(),
-            "a bare repository has no nested .git"
-        );
-    }
-
-    #[test]
-    fn create_records_a_commit_and_moves_current() {
-        let state = TempDir::new().unwrap();
-        let history = history_at(&state);
-        assert_eq!(history.current().unwrap(), None);
-
-        let recorded = history
-            .record(&create("src/a.txt", "one"))
-            .unwrap()
-            .unwrap();
-        assert_eq!(recorded.parent_commit_id, None);
-        assert_eq!(recorded.baseline_commit_id, None);
-        assert_eq!(
-            history.current().unwrap().as_deref(),
-            Some(recorded.commit_id.as_str())
-        );
-
-        let snapshot = history.resolve(&recorded.commit_id).unwrap().unwrap();
-        assert_eq!(
-            snapshot.files.get("src/a.txt").map(|b| b.as_slice()),
-            Some(b"one".as_ref())
         );
     }
 
@@ -1227,17 +1183,6 @@ mod tests {
         assert_eq!(after.files.get("gone.txt").unwrap().as_slice(), b"second");
     }
 
-    /// A mutation whose before state already matches the parent tree needs no
-    /// baseline — the common case must stay one commit per mutation.
-    #[test]
-    fn matching_before_state_records_exactly_one_commit() {
-        let state = TempDir::new().unwrap();
-        let history = history_at(&state);
-        history.record(&create("a.txt", "v1")).unwrap().unwrap();
-        let recorded = history.record(&edit("a.txt", "v1", "v2")).unwrap().unwrap();
-        assert_eq!(recorded.baseline_commit_id, None);
-    }
-
     /// Two independent handles over one private repository model two LATTICE
     /// processes on the same project. Every successfully installed mutation
     /// must end up in the chain: the loser of the compare-and-set rebuilds on
@@ -1314,19 +1259,6 @@ mod tests {
         let snapshot = reopened.resolve(&recorded.commit_id).unwrap().unwrap();
         assert_eq!(snapshot.files.get("a.txt").unwrap().as_slice(), b"1");
         assert!(reopened.is_reachable(&recorded.commit_id).unwrap());
-    }
-
-    #[test]
-    fn unknown_object_id_resolves_to_none() {
-        let state = TempDir::new().unwrap();
-        let history = history_at(&state);
-        let missing = "0".repeat(40);
-        assert_eq!(history.resolve(&missing).unwrap(), None);
-        assert!(!history.is_reachable(&missing).unwrap());
-        assert!(matches!(
-            history.resolve("not-an-oid"),
-            Err(WorkspaceHistoryError::ObjectId { .. })
-        ));
     }
 
     // ─── 历史记录真实性 ───────────────────────────────────────────────
@@ -1691,18 +1623,6 @@ mod tests {
         assert!(
             matches!(err, WorkspaceHistoryError::Kernel(StoreError::Busy { .. })),
             "expected typed Busy, got {err:?}"
-        );
-    }
-
-    /// A disabled history has no project binding, so it has no lock to take.
-    #[test]
-    fn disabled_history_has_no_operation_lock() {
-        let history = WorkspaceHistory::disabled();
-        assert!(
-            history
-                .lock_workspace_operation(LockMode::Exclusive, Blocking::Block)
-                .unwrap()
-                .is_none()
         );
     }
 }

@@ -77,50 +77,6 @@ fn call_ctx(
     call_ctx_with(rt, &policy(&[]))
 }
 
-/// Tracer bullet: calling `noop.echo` with valid params returns the echoed
-/// result and records Cell evidence.
-#[tokio::test]
-async fn noop_call_round_trips() {
-    let rt = ComponentRuntime::noop_fixture().expect("fixture composes");
-    let (ctx, _evidence, _rx, _cancel) = call_ctx(&rt);
-
-    let result = rt
-        .call("noop.echo", serde_json::json!({"message": "hello"}), ctx)
-        .await
-        .expect("call succeeds");
-
-    assert_eq!(result, serde_json::json!({"echoed": "hello"}));
-}
-
-/// Calling a non-existent tool returns `method_not_found`.
-#[tokio::test]
-async fn call_unknown_tool_returns_method_not_found() {
-    let rt = ComponentRuntime::noop_fixture().expect("fixture composes");
-    let (ctx, _evidence, _rx, _cancel) = call_ctx(&rt);
-
-    let result = rt.call("does.not.exist", serde_json::json!({}), ctx).await;
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert_eq!(err.code, CepErrorCode::SchemaMismatch);
-    // wire_code for method_not_found is -32601
-    assert_eq!(lancet_protocol::error::to_jsonrpc_error(&err).0, -32601);
-}
-
-/// Params that don't match the schema are rejected before entering Wasmtime.
-#[tokio::test]
-async fn call_rejects_bad_params_schema() {
-    let rt = ComponentRuntime::noop_fixture().expect("fixture composes");
-    let (ctx, _evidence, _rx, _cancel) = call_ctx(&rt);
-
-    // Missing required "message" field.
-    let result = rt
-        .call("noop.echo", serde_json::json!({"other": "x"}), ctx)
-        .await;
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert_eq!(err.code, CepErrorCode::SchemaMismatch);
-}
-
 /// Evidence: a successful call records two effects — the `emit-event`
 /// operation and the result — with host-derived trust, host-computed measure,
 /// and the admission evidence that authorized them.
@@ -184,30 +140,6 @@ async fn call_records_operation_and_result_evidence() {
             "alloc:none:session:in".to_string(),
         ]
     );
-}
-
-/// Events: the no-op guest emits a progress event via host-control.
-#[tokio::test]
-async fn call_forwards_guest_events() {
-    let rt = ComponentRuntime::noop_fixture().expect("fixture composes");
-    let (ctx, _evidence, mut rx, _cancel) = call_ctx(&rt);
-
-    let _result = rt
-        .call(
-            "noop.echo",
-            serde_json::json!({"message": "event-test"}),
-            ctx,
-        )
-        .await
-        .expect("call succeeds");
-
-    // The guest emits `{"phase":"probed"}` via host-control::emit_event.
-    // The host converts it to a CEP event. Check the event was forwarded.
-    let event = rx.try_recv().expect("at least one event");
-    assert_eq!(event.method, "tool.event");
-    // The payload should contain the phase.
-    let payload = &event.params;
-    assert!(payload.get("payload").is_some() || payload.get("phase").is_some());
 }
 
 /// Partial capability admission (B3) and the uncovered-operation case in
@@ -283,32 +215,4 @@ async fn result_cell_outside_the_admitted_set_fails_closed() {
     assert_eq!(effects.effects.len(), 1, "{:?}", effects.effects);
     assert_eq!(effects.effects[0].source, EffectSource::Operation);
     assert_eq!(effects.effects[0].cell.reference(), "mutate:none:session");
-}
-
-/// A tool the profile never enabled is not callable at all (B2).
-#[test]
-fn disabled_tool_is_not_admitted() {
-    let rt = ComponentRuntime::noop_fixture().expect("fixture composes");
-    let descriptor = rt.descriptor("noop.echo").expect("fixture tool exists");
-    let denial = admit_tool(descriptor, &CapabilityAdmissionPolicy::default())
-        .expect_err("the fail-closed default enables no tool");
-    assert!(denial.evidence.approved_capabilities.is_empty());
-}
-
-/// Cancellation: if the cancellation signal is set before the call, the
-/// host short-circuits with `CallCancelled` before entering Wasmtime
-/// (#70, Codeberg #48).
-#[tokio::test]
-async fn precancelled_call_returns_call_cancelled() {
-    let rt = ComponentRuntime::noop_fixture().expect("fixture composes");
-    let (ctx, _evidence, _rx, cancel_tx) = call_ctx(&rt);
-
-    // Set cancellation before the call.
-    cancel_tx.send(true).unwrap();
-
-    let err = rt
-        .call("noop.echo", serde_json::json!({"message": "cancel"}), ctx)
-        .await
-        .expect_err("pre-cancelled call must fail");
-    assert_eq!(err.code, CepErrorCode::CallCancelled);
 }

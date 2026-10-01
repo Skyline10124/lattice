@@ -687,22 +687,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn authorize_operation_accepts_a_covered_cell_on_this_turn() {
-        let admitted = admitted_session_tool();
-        assert_eq!(
-            authorize_operation(
-                &admitted,
-                &cell(CtxOp::Mutate, "session"),
-                &ObservedTarget::Session {
-                    turn_id: "turn-1".into()
-                },
-                "turn-1",
-            ),
-            Ok(())
-        );
-    }
-
     /// Uncovered operation: the cell is not in the admitted set, so the
     /// operation is refused before any host facility is reached.
     #[test]

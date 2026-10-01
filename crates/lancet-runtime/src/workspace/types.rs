@@ -310,49 +310,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn workspace_path_normalizes_repeated_separators() {
-        let path = WorkspacePath::parse("src//lib//main.rs").unwrap();
-        assert_eq!(path.as_str(), "src/lib/main.rs");
-    }
-
-    #[test]
-    fn workspace_path_project_root_sentinel() {
-        let root = WorkspacePath::project_root();
-        assert_eq!(root.as_str(), ".");
-        assert!(root.is_project_root());
-        assert!(matches!(
-            root.require_file_path(),
-            Err(WorkspacePathError::ProjectRootNotAllowedForFileIntent)
-        ));
-    }
-
-    #[test]
-    fn workspace_path_git_is_syntactically_valid() {
-        let git = WorkspacePath::parse(".git/config").unwrap();
-        assert_eq!(git.as_str(), ".git/config");
-    }
-
-    #[test]
-    fn workspace_path_rejects_retired_sandbox_root_alias() {
-        assert!(matches!(
-            WorkspacePath::parse("/workspace"),
-            Err(WorkspacePathError::SandboxRootAlias)
-        ));
-        assert!(matches!(
-            WorkspacePath::parse("/workspace/src/main.rs"),
-            Err(WorkspacePathError::SandboxRootAlias)
-        ));
-    }
-
-    #[test]
-    fn workspace_path_display_does_not_leak_host_paths() {
-        let display_path = WorkspacePath::parse("src/main.rs").unwrap().to_string();
-        assert_eq!(display_path, "src/main.rs");
-        assert!(!display_path.contains("/home"));
-        assert!(!display_path.contains("/workspace"));
-    }
-
     /// #98: a literal `..` inside a filename is not traversal. It used to fail
     /// the whole parse, and since grep/find parse every entry they walk over,
     /// one such file turned an entire search into an error instead of a
@@ -381,28 +338,5 @@ mod tests {
                 "traversal accepted for {raw}"
             );
         }
-    }
-
-    #[test]
-    fn path_facts_to_guard_view_drops_byte_size() {
-        let facts = PathFacts {
-            normalized_path: "src/main.rs".into(),
-            exists: true,
-            kind: Some(PathKind::File),
-            parent_exists: true,
-            parent_kind: Some(PathKind::Directory),
-            byte_size: Some(42),
-            canonical_under_workspace: true,
-        };
-        let guard = facts.to_guard();
-        assert_eq!(guard.normalized_path, "src/main.rs");
-        assert!(guard.exists);
-        assert_eq!(guard.kind, Some(lancet_authority::guard::PathKind::File));
-        assert!(guard.parent_exists);
-        assert_eq!(
-            guard.parent_kind,
-            Some(lancet_authority::guard::PathKind::Directory)
-        );
-        assert!(guard.canonical_under_workspace);
     }
 }

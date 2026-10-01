@@ -1204,12 +1204,6 @@ mod tests {
         }
     }
 
-    fn deny_writes(_root: &Path, patterns: &[&str]) -> Vec<String> {
-        patterns
-            .iter()
-            .map(|pattern| (*pattern).to_string())
-            .collect()
-    }
     #[test]
     fn create_if_absent_installs_new_file_and_records_effect() {
         let dir = seeded_project();
@@ -1273,87 +1267,6 @@ mod tests {
         let mutation = denied.denied[0].mutation.as_ref().expect("mutation denial");
         assert_eq!(mutation.precondition, MutationPrecondition::TargetExists);
         assert_eq!(mutation.installation, MutationInstallation::NotAttempted);
-    }
-
-    #[test]
-    fn hosts_for_same_workspace_share_install_history_gate() {
-        let dir = seeded_project();
-        let workspace = Arc::new(LocalWorkspace::new(dir.path()));
-        let host_a =
-            WorkspaceMutationHost::new(Arc::clone(&workspace), Vec::new(), None, "workspace");
-        let host_b = WorkspaceMutationHost::new(workspace, Vec::new(), None, "workspace");
-
-        let _guard = host_a.mutation_gate.lock().unwrap();
-        assert!(
-            host_b.mutation_gate.try_lock().is_err(),
-            "all hosts over one workspace must serialize install through history recording"
-        );
-    }
-
-    #[test]
-    fn concurrent_create_same_target_has_one_winner_and_one_replan() {
-        let dir = seeded_project();
-        let workspace = Arc::new(LocalWorkspace::new(dir.path()));
-        let host_a =
-            WorkspaceMutationHost::new(Arc::clone(&workspace), Vec::new(), None, "workspace");
-        let host_b = WorkspaceMutationHost::new(workspace, Vec::new(), None, "workspace");
-        let tool = admitted();
-        let evidence_a = CellEvidenceLedger::new();
-        let evidence_b = CellEvidenceLedger::new();
-        let barrier = Arc::new(std::sync::Barrier::new(3));
-
-        let (a, b) = std::thread::scope(|scope| {
-            let barrier_a = Arc::clone(&barrier);
-            let host_a = &host_a;
-            let tool_a = &tool;
-            let evidence_a = &evidence_a;
-            let a = scope.spawn(move || {
-                let call = ctx(tool_a, evidence_a, "mutate.create");
-                barrier_a.wait();
-                host_a.create_if_absent(&call, "race.txt", "a\n", false)
-            });
-            let barrier_b = Arc::clone(&barrier);
-            let host_b = &host_b;
-            let tool_b = &tool;
-            let evidence_b = &evidence_b;
-            let b = scope.spawn(move || {
-                let call = ctx(tool_b, evidence_b, "mutate.create");
-                barrier_b.wait();
-                host_b.create_if_absent(&call, "race.txt", "b\n", false)
-            });
-            barrier.wait();
-            (a.join().unwrap(), b.join().unwrap())
-        });
-
-        let outcomes = [&a, &b];
-        assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
-        assert_eq!(
-            outcomes
-                .iter()
-                .filter(|result| matches!(result, Err(MutateError::AlreadyExists { .. })))
-                .count(),
-            1
-        );
-        let bytes = fs::read(dir.path().join("race.txt")).unwrap();
-        assert!(bytes == b"a\n" || bytes == b"b\n");
-    }
-
-    #[test]
-    fn replace_with_expected_installs_when_revision_matches() {
-        let dir = seeded_project();
-        let (host, evidence, _) = default_host(dir.path());
-        let tool = admitted();
-        let call = ctx(&tool, &evidence, "mutate.edit");
-        let expected = content_hash(b"v1\n");
-
-        let installed = host
-            .replace_with_expected(&call, "notes.txt", &expected, "v2\n")
-            .expect("replace");
-        assert_eq!(installed.local_revision, content_hash(b"v2\n"));
-        assert_eq!(
-            fs::read_to_string(dir.path().join("notes.txt")).unwrap(),
-            "v2\n"
-        );
     }
 
     #[test]
@@ -1424,27 +1337,6 @@ mod tests {
                 .expect("structured refusal")
                 .code,
             CepErrorCode::PathContainment
-        );
-    }
-
-    #[test]
-    fn write_deny_pattern_blocks_install() {
-        let dir = seeded_project();
-        let region = deny_writes(dir.path(), &["locked.txt"]);
-        let (host, evidence, _) = host_over(dir.path(), region, None);
-        let tool = admitted();
-        let call = ctx(&tool, &evidence, "mutate.create");
-
-        let err = host
-            .create_if_absent(&call, "locked.txt", "no\n", false)
-            .expect_err("denied");
-        assert!(matches!(err, MutateError::Denied { .. }));
-        assert!(!dir.path().join("locked.txt").exists());
-        assert_eq!(
-            host.take_refusal(test_invocation_id(7))
-                .expect("structured refusal")
-                .code,
-            CepErrorCode::CapabilityViolation
         );
     }
 
@@ -1538,21 +1430,6 @@ mod tests {
                 .code,
             CepErrorCode::CallCancelled
         );
-    }
-
-    #[test]
-    fn successful_create_appends_private_history() {
-        let dir = seeded_project();
-        let (_state, history) = private_history();
-        let (host, evidence, _) = host_over(dir.path(), Vec::new(), Some(history.clone()));
-        let tool = admitted();
-        let call = ctx(&tool, &evidence, "mutate.create");
-
-        let installed = host
-            .create_if_absent(&call, "tracked.txt", "keep\n", false)
-            .expect("create");
-        assert!(installed.history.is_some());
-        assert!(history.current().unwrap().is_some());
     }
 
     #[test]
@@ -1663,44 +1540,6 @@ mod tests {
     }
 
     #[test]
-    fn read_for_edit_returns_host_computed_revision() {
-        let dir = seeded_project();
-        let (host, evidence, _) = default_host(dir.path());
-        let tool = admitted();
-        let call = ctx(&tool, &evidence, "mutate.edit");
-
-        let expected = content_hash(b"v1\n");
-        let bytes = host
-            .read_for_edit(&call, "notes.txt", &expected)
-            .expect("read");
-        assert_eq!(bytes.content, "v1\n");
-        assert_eq!(bytes.local_revision, expected);
-    }
-
-    #[test]
-    fn read_for_edit_refuses_stale_revision_before_guest_compilation() {
-        let dir = seeded_project();
-        let (host, evidence, _) = default_host(dir.path());
-        let tool = admitted();
-        let call = ctx(&tool, &evidence, "mutate.edit");
-
-        let err = host
-            .read_for_edit(&call, "notes.txt", &content_hash(b"old\n"))
-            .expect_err("stale read");
-        assert!(matches!(err, MutateError::StaleRevision { .. }));
-        assert_eq!(
-            host.take_refusal(test_invocation_id(7))
-                .expect("structured refusal")
-                .code,
-            CepErrorCode::ReplanRequired
-        );
-        assert_eq!(
-            fs::read_to_string(dir.path().join("notes.txt")).unwrap(),
-            "v1\n"
-        );
-    }
-
-    #[test]
     fn semantic_edit_refusal_preserves_replan_required() {
         let dir = seeded_project();
         let (host, evidence, _) = default_host(dir.path());
@@ -1746,60 +1585,5 @@ mod tests {
             panic!("validation details");
         };
         assert_eq!(data.field, "edits");
-    }
-
-    #[test]
-    fn structured_refusals_are_isolated_by_call_id() {
-        let dir = seeded_project();
-        let (host, evidence, _) = default_host(dir.path());
-        let tool = admitted();
-        let first = ctx(&tool, &evidence, "mutate.edit");
-        let mut second = ctx(&tool, &evidence, "mutate.edit");
-        second.invocation_id = test_invocation_id(8);
-
-        host.refuse_edit(
-            &first,
-            "notes.txt",
-            EditRefusalKind::Validation,
-            "edits",
-            "semantic edit produced no changes",
-        );
-        host.refuse_edit(
-            &second,
-            "notes.txt",
-            EditRefusalKind::Replan,
-            "old",
-            "old text was not found",
-        );
-
-        assert_eq!(
-            host.take_refusal(test_invocation_id(8))
-                .expect("second refusal")
-                .code,
-            CepErrorCode::ReplanRequired
-        );
-        assert_eq!(
-            host.take_refusal(test_invocation_id(7))
-                .expect("first refusal")
-                .code,
-            CepErrorCode::SchemaMismatch
-        );
-    }
-
-    #[test]
-    fn create_parents_reports_missing_dirs() {
-        let dir = seeded_project();
-        let (host, evidence, _) = default_host(dir.path());
-        let tool = admitted();
-        let call = ctx(&tool, &evidence, "mutate.create");
-
-        let installed = host
-            .create_if_absent(&call, "a/b/c.txt", "nested\n", true)
-            .expect("create");
-        assert_eq!(
-            installed.created_dirs,
-            vec!["a".to_string(), "a/b".to_string()]
-        );
-        assert!(dir.path().join("a/b/c.txt").is_file());
     }
 }

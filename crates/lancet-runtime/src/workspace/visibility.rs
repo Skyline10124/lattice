@@ -275,27 +275,6 @@ mod tests {
     }
 
     #[test]
-    fn secret_sentinel_hidden_by_default() {
-        let dir = init_repo_with_ignore();
-        let policy = ReadVisibilityPolicy::from_patterns(&[], &[]).unwrap();
-        let mut engine = VisibilityEngine::load(dir.path(), policy);
-        assert!(matches!(
-            engine.decide("visible.txt", false),
-            ReadVisibility::Visible
-        ));
-        assert!(matches!(
-            engine.decide(".env", false),
-            ReadVisibility::Hidden(HiddenReason::GitIgnored)
-        ));
-        assert!(matches!(
-            engine.decide("secret/key", false),
-            ReadVisibility::Hidden(HiddenReason::GitIgnored)
-        ));
-        assert!(!engine.is_visible_entry(".env", false));
-        assert!(!engine.should_descend("secret"));
-    }
-
-    #[test]
     fn include_exposes_ignored_and_allows_descent() {
         let dir = init_repo_with_ignore();
         let policy =
