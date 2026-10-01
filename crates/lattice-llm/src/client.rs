@@ -543,59 +543,79 @@ mod tests {
     use crate::test_env::with_env_vars;
 
     #[test]
-    fn missing_credential_error_never_leaks_key_value() {
-        with_env_vars(&[("LATTICE_TEST_OK_KEY", Some("sk-ok-value"))], || {
-            let resolved = ResolvedModel {
-                alias: "gpt-4o".to_string(),
-                provider: ProviderKind::OpenAi,
-                provider_model: "gpt-4o".to_string(),
-                base_url: OPENAI_BASE_URL.to_string(),
-                api_key_env: "LATTICE_TEST_MISSING_KEY".to_string(),
-                credential_status: CredentialStatus::Missing,
-            };
-            let result = validate_and_read_key(&resolved);
-            assert!(result.is_err());
-            let err = result.unwrap_err().to_string();
-            assert!(
-                !err.contains("sk-ok-value"),
-                "error must not leak other keys: {}",
-                err
-            );
-            assert!(
-                err.contains("LATTICE_TEST_MISSING_KEY"),
-                "error should name the missing env var"
-            );
-        });
-    }
-
-    #[test]
-    fn empty_credential_returns_error() {
-        with_env_vars(&[("LATTICE_TEST_EMPTY_KEY", Some(""))], || {
-            let resolved = ResolvedModel {
-                alias: "gpt-4o".to_string(),
-                provider: ProviderKind::OpenAi,
-                provider_model: "gpt-4o".to_string(),
-                base_url: OPENAI_BASE_URL.to_string(),
-                api_key_env: "LATTICE_TEST_EMPTY_KEY".to_string(),
-                credential_status: CredentialStatus::Missing,
-            };
-            let result = validate_and_read_key(&resolved);
-            assert!(result.is_err());
-        });
-    }
-
-    #[test]
-    fn dispatch_requires_base_url_validation() {
-        let resolved = ResolvedModel {
-            alias: "bad".to_string(),
-            provider: ProviderKind::OpenAiCompatible,
-            provider_model: "bad".to_string(),
-            base_url: "http://10.0.0.1/v1".to_string(),
-            api_key_env: "OPENAI_COMPATIBLE_API_KEY".to_string(),
-            credential_status: CredentialStatus::Missing,
-        };
-        let result = validate_and_read_key(&resolved);
-        assert!(result.is_err(), "private IP base URL should be rejected");
+    fn credential_validation_rejects_missing_keys_and_unsafe_urls() {
+        for (
+            name,
+            env_vars,
+            alias,
+            provider,
+            base_url,
+            api_key_env,
+            error_contains,
+            error_excludes,
+        ) in [
+            (
+                "missing_credential",
+                vec![("LATTICE_TEST_OK_KEY", Some("sk-ok-value"))],
+                "gpt-4o",
+                ProviderKind::OpenAi,
+                OPENAI_BASE_URL,
+                "LATTICE_TEST_MISSING_KEY",
+                Some("LATTICE_TEST_MISSING_KEY"),
+                Some("sk-ok-value"),
+            ),
+            (
+                "empty_credential",
+                vec![("LATTICE_TEST_EMPTY_KEY", Some(""))],
+                "gpt-4o",
+                ProviderKind::OpenAi,
+                OPENAI_BASE_URL,
+                "LATTICE_TEST_EMPTY_KEY",
+                None,
+                None,
+            ),
+            (
+                "private_ip_base_url",
+                vec![],
+                "bad",
+                ProviderKind::OpenAiCompatible,
+                "http://10.0.0.1/v1",
+                "OPENAI_COMPATIBLE_API_KEY",
+                None,
+                None,
+            ),
+        ] {
+            with_env_vars(&env_vars, || {
+                let resolved = ResolvedModel {
+                    alias: alias.to_string(),
+                    provider,
+                    provider_model: alias.to_string(),
+                    base_url: base_url.to_string(),
+                    api_key_env: api_key_env.to_string(),
+                    credential_status: CredentialStatus::Missing,
+                };
+                let result = validate_and_read_key(&resolved);
+                assert!(
+                    result.is_err(),
+                    "{name}: invalid credentials or base URL must be rejected"
+                );
+                if error_contains.is_some() || error_excludes.is_some() {
+                    let err = result.unwrap_err().to_string();
+                    if let Some(excluded) = error_excludes {
+                        assert!(
+                            !err.contains(excluded),
+                            "{name}: error must not leak other keys: {err}"
+                        );
+                    }
+                    if let Some(included) = error_contains {
+                        assert!(
+                            err.contains(included),
+                            "{name}: error should name the missing env var"
+                        );
+                    }
+                }
+            });
+        }
     }
 
     /// #90: URL validation and DNS pinning bind the first hop only, so a

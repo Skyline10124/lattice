@@ -47,49 +47,158 @@ fn tool_call_parts(message: &NativeMessage<UnboundToolCall>) -> Vec<(usize, &Unb
 // ─── OpenAI-compatible ────────────────────────────────────────────────────
 
 #[test]
-fn openai_part_order_and_real_ids() {
-    let native = wire_to_native(
-        ProviderOrigin::OpenAiCompatible,
-        &fixture("openai_assistant_tool_calls.json"),
-    )
-    .expect("projection succeeds");
-
-    assert_eq!(
-        native.provider_origin,
-        Some(ProviderOrigin::OpenAiCompatible)
-    );
-    assert_eq!(native.parts.len(), 4);
-    assert!(matches!(
-        &native.parts[0].semantic,
-        MessageSemantic::Reasoning { .. }
-    ));
-    assert!(matches!(
-        &native.parts[1].semantic,
-        MessageSemantic::Text { .. }
-    ));
-    let calls = tool_call_parts(&native);
-    assert_eq!(calls.len(), 2);
-    assert_eq!(calls[0].0, 2);
-    assert_eq!(calls[1].0, 3);
-    assert_eq!(
-        calls[0].1.provider_call_id.as_deref(),
-        Some("call_9f8e7d6c5b")
-    );
-    assert_eq!(
-        calls[1].1.provider_call_id.as_deref(),
-        Some("call_1a2b3c4d5e")
-    );
-    assert_eq!(calls[0].1.name, "get_weather");
-    assert_eq!(calls[1].1.name, "get_time");
+fn provider_projection_preserves_part_order_ids_and_signatures() {
+    enum SemanticCheck {
+        Reasoning,
+        Text,
+        EmptyText,
+    }
+    struct Row {
+        name: &'static str,
+        provider: ProviderOrigin,
+        fixture: &'static str,
+        origin: Option<ProviderOrigin>,
+        parts_len: usize,
+        semantic_checks: &'static [(usize, SemanticCheck)],
+        replay_state_checks: &'static [(usize, &'static str)],
+        calls: &'static [(usize, &'static str, Option<&'static str>)],
+    }
+    for row in [
+        Row {
+            name: "openai_order_and_ids",
+            provider: ProviderOrigin::OpenAiCompatible,
+            fixture: "openai_assistant_tool_calls.json",
+            origin: Some(ProviderOrigin::OpenAiCompatible),
+            parts_len: 4,
+            semantic_checks: &[(0, SemanticCheck::Reasoning), (1, SemanticCheck::Text)],
+            replay_state_checks: &[],
+            calls: &[
+                (2, "call_9f8e7d6c5b", Some("get_weather")),
+                (3, "call_1a2b3c4d5e", Some("get_time")),
+            ],
+        },
+        Row {
+            name: "anthropic_order_signature_and_ids",
+            provider: ProviderOrigin::Anthropic,
+            fixture: "anthropic_thinking_tool_use.json",
+            origin: None,
+            parts_len: 4,
+            // Wire order: thinking, text, tool_use, tool_use.
+            semantic_checks: &[(0, SemanticCheck::Reasoning), (1, SemanticCheck::Text)],
+            replay_state_checks: &[(
+                0,
+                "ErUBCkYIAxgCIkD3c2FmZGVmNTQ2Ny0xMjM0LWFiY2QtZXhhbXBsZXNpZ25hdHVyZQ==",
+            )],
+            calls: &[(2, "toolu_01AbCdEfGh", None), (3, "toolu_02BcDeFgHi", None)],
+        },
+        Row {
+            name: "gemini_signatures_at_original_ordinals",
+            provider: ProviderOrigin::Gemini,
+            fixture: "gemini_thought_signature.json",
+            origin: None,
+            parts_len: 3,
+            semantic_checks: &[
+                // Part 0: thought text with its signature.
+                (0, SemanticCheck::Reasoning),
+                // Part 1: empty text carrying a signature — preserved, not filtered.
+                (1, SemanticCheck::EmptyText),
+            ],
+            replay_state_checks: &[
+                (0, "CigIARABGkh4dGh5YnJpZC1zaWduYXR1cmUtb24tdGhvdWdodA=="),
+                (1, "CigIARABGkh4ZW1wdHktdGV4dC1wYXJ0LXNpZ25hdHVyZQ=="),
+                // Part 2: functionCall with a real id and its own signature.
+                (2, "CigIARABGkh4c2lnbmF0dXJlLW9uLWZ1bmN0aW9uLWNhbGw="),
+            ],
+            calls: &[(2, "fc-2026-08-13-001", None)],
+        },
+    ] {
+        let name = row.name;
+        let native = wire_to_native(row.provider, &fixture(row.fixture))
+            .unwrap_or_else(|error| panic!("{name}: projection failed: {error:?}"));
+        if let Some(origin) = row.origin {
+            assert_eq!(
+                native.provider_origin,
+                Some(origin),
+                "{name}: provider origin"
+            );
+        }
+        assert_eq!(native.parts.len(), row.parts_len, "{name}: part count");
+        for (ordinal, check) in row.semantic_checks {
+            let semantic = &native.parts[*ordinal].semantic;
+            let matches = match check {
+                SemanticCheck::Reasoning => matches!(semantic, MessageSemantic::Reasoning { .. }),
+                SemanticCheck::Text => matches!(semantic, MessageSemantic::Text { .. }),
+                SemanticCheck::EmptyText => {
+                    matches!(semantic, MessageSemantic::Text { text } if text.is_empty())
+                }
+            };
+            assert!(matches, "{name}: part {ordinal} semantic");
+        }
+        for (ordinal, signature) in row.replay_state_checks {
+            assert_eq!(
+                native.parts[*ordinal]
+                    .replay_state
+                    .as_ref()
+                    .map(OpaqueProviderState::as_str),
+                Some(*signature),
+                "{name}: part {ordinal} replay state"
+            );
+        }
+        let calls = tool_call_parts(&native);
+        assert_eq!(calls.len(), row.calls.len(), "{name}: call count");
+        for (index, (ordinal, id, call_name)) in row.calls.iter().enumerate() {
+            assert_eq!(
+                calls[index].0, *ordinal,
+                "{name}: call {index} part ordinal"
+            );
+            assert_eq!(
+                calls[index].1.provider_call_id.as_deref(),
+                Some(*id),
+                "{name}: call {index} provider id"
+            );
+            if let Some(call_name) = call_name {
+                assert_eq!(calls[index].1.name, *call_name, "{name}: call {index} name");
+            }
+        }
+    }
 }
 
 #[test]
-fn openai_same_provider_replay_is_exact() {
-    let fixture = fixture("openai_assistant_tool_calls.json");
-    let native = wire_to_native(ProviderOrigin::OpenAiCompatible, &fixture).expect("projection");
-    let replayed =
-        native_to_wire(ProviderOrigin::OpenAiCompatible, &native).expect("replay succeeds");
-    assert_eq!(replayed, openai_message(&fixture));
+fn same_provider_replay_is_exact() {
+    for (name, provider, extract) in [
+        (
+            "openai_assistant_tool_calls.json",
+            ProviderOrigin::OpenAiCompatible,
+            openai_message as fn(&Value) -> Value,
+        ),
+        (
+            "anthropic_thinking_tool_use.json",
+            ProviderOrigin::Anthropic,
+            anthropic_message,
+        ),
+        (
+            "anthropic_text_only.json",
+            ProviderOrigin::Anthropic,
+            anthropic_message,
+        ),
+        (
+            "gemini_thought_signature.json",
+            ProviderOrigin::Gemini,
+            gemini_content,
+        ),
+        (
+            "gemini_function_call_no_id.json",
+            ProviderOrigin::Gemini,
+            gemini_content,
+        ),
+    ] {
+        let fixture = fixture(name);
+        let native = wire_to_native(provider, &fixture)
+            .unwrap_or_else(|error| panic!("{name}: projection failed: {error:?}"));
+        let replayed = native_to_wire(provider, &native)
+            .unwrap_or_else(|error| panic!("{name}: replay failed: {error:?}"));
+        assert_eq!(replayed, extract(&fixture), "{name}");
+    }
 }
 
 #[test]
@@ -112,58 +221,6 @@ fn openai_missing_provider_id_is_none_not_synthesized() {
 // ─── Anthropic ────────────────────────────────────────────────────────────
 
 #[test]
-fn anthropic_part_order_and_signature_state() {
-    let native = wire_to_native(
-        ProviderOrigin::Anthropic,
-        &fixture("anthropic_thinking_tool_use.json"),
-    )
-    .expect("projection succeeds");
-
-    assert_eq!(native.parts.len(), 4);
-    // Wire order: thinking, text, tool_use, tool_use.
-    assert!(matches!(
-        &native.parts[0].semantic,
-        MessageSemantic::Reasoning { .. }
-    ));
-    assert_eq!(
-        native.parts[0]
-            .replay_state
-            .as_ref()
-            .map(OpaqueProviderState::as_str),
-        Some("ErUBCkYIAxgCIkD3c2FmZGVmNTQ2Ny0xMjM0LWFiY2QtZXhhbXBsZXNpZ25hdHVyZQ==")
-    );
-    assert!(matches!(
-        &native.parts[1].semantic,
-        MessageSemantic::Text { .. }
-    ));
-    let calls = tool_call_parts(&native);
-    assert_eq!(calls.len(), 2);
-    assert_eq!(calls[0].0, 2);
-    assert_eq!(calls[1].0, 3);
-    assert_eq!(
-        calls[0].1.provider_call_id.as_deref(),
-        Some("toolu_01AbCdEfGh")
-    );
-    assert_eq!(
-        calls[1].1.provider_call_id.as_deref(),
-        Some("toolu_02BcDeFgHi")
-    );
-}
-
-#[test]
-fn anthropic_same_provider_replay_is_exact() {
-    for name in [
-        "anthropic_thinking_tool_use.json",
-        "anthropic_text_only.json",
-    ] {
-        let fixture = fixture(name);
-        let native = wire_to_native(ProviderOrigin::Anthropic, &fixture).expect("projection");
-        let replayed = native_to_wire(ProviderOrigin::Anthropic, &native).expect("replay");
-        assert_eq!(replayed, anthropic_message(&fixture), "fixture {name}");
-    }
-}
-
-#[test]
 fn anthropic_thinking_without_signature_cannot_replay() {
     // Fail closed: the signature is protocol-required replay state and is
     // never fabricated.
@@ -184,69 +241,6 @@ fn anthropic_thinking_without_signature_cannot_replay() {
 }
 
 // ─── Gemini ───────────────────────────────────────────────────────────────
-
-#[test]
-fn gemini_thought_signatures_stay_in_place() {
-    let native = wire_to_native(
-        ProviderOrigin::Gemini,
-        &fixture("gemini_thought_signature.json"),
-    )
-    .expect("projection succeeds");
-
-    assert_eq!(native.parts.len(), 3);
-    // Part 0: thought text with its signature.
-    assert!(matches!(
-        &native.parts[0].semantic,
-        MessageSemantic::Reasoning { .. }
-    ));
-    assert_eq!(
-        native.parts[0]
-            .replay_state
-            .as_ref()
-            .map(OpaqueProviderState::as_str),
-        Some("CigIARABGkh4dGh5YnJpZC1zaWduYXR1cmUtb24tdGhvdWdodA==")
-    );
-    // Part 1: empty text carrying a signature — preserved, not filtered.
-    assert!(matches!(
-        &native.parts[1].semantic,
-        MessageSemantic::Text { text } if text.is_empty()
-    ));
-    assert_eq!(
-        native.parts[1]
-            .replay_state
-            .as_ref()
-            .map(OpaqueProviderState::as_str),
-        Some("CigIARABGkh4ZW1wdHktdGV4dC1wYXJ0LXNpZ25hdHVyZQ==")
-    );
-    // Part 2: functionCall with a real id and its own signature.
-    let calls = tool_call_parts(&native);
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].0, 2);
-    assert_eq!(
-        calls[0].1.provider_call_id.as_deref(),
-        Some("fc-2026-08-13-001")
-    );
-    assert_eq!(
-        native.parts[2]
-            .replay_state
-            .as_ref()
-            .map(OpaqueProviderState::as_str),
-        Some("CigIARABGkh4c2lnbmF0dXJlLW9uLWZ1bmN0aW9uLWNhbGw=")
-    );
-}
-
-#[test]
-fn gemini_same_provider_replay_is_exact() {
-    for name in [
-        "gemini_thought_signature.json",
-        "gemini_function_call_no_id.json",
-    ] {
-        let fixture = fixture(name);
-        let native = wire_to_native(ProviderOrigin::Gemini, &fixture).expect("projection");
-        let replayed = native_to_wire(ProviderOrigin::Gemini, &native).expect("replay");
-        assert_eq!(replayed, gemini_content(&fixture), "fixture {name}");
-    }
-}
 
 #[test]
 fn gemini_function_call_without_id_is_none_not_synthesized() {
@@ -628,24 +622,80 @@ fn attempt_total_limit_is_enforced_at_the_seam() {
 }
 
 #[test]
-fn tool_arguments_limit_is_enforced_for_anthropic_and_gemini() {
-    // Every provider projector meters, not just the OpenAI one.
-    let oversized = "z".repeat(MAX_TOOL_CALL_ARGUMENTS_BYTES);
-    let anthropic = serde_json::json!({"role": "assistant", "content": [
-        {"type": "tool_use", "id": "toolu_1", "name": "t", "input": {"a": oversized}}
-    ]});
-    assert_eq!(
-        limit_kind(wire_to_native(ProviderOrigin::Anthropic, &anthropic)),
-        LimitKind::ToolCallArguments
-    );
-
-    let gemini = serde_json::json!({"candidates": [{"content": {"role": "model", "parts": [
-        {"functionCall": {"name": "t", "args": {"a": oversized}}}
-    ]}}]});
-    assert_eq!(
-        limit_kind(wire_to_native(ProviderOrigin::Gemini, &gemini)),
-        LimitKind::ToolCallArguments
-    );
+fn tool_argument_limits_apply_to_every_provider() {
+    let filler = MAX_TOOL_CALL_ARGUMENTS_BYTES - r#"{"a":""}"#.len();
+    for (name, provider, filler_bytes, accepted) in [
+        // Every provider projector meters, not just the OpenAI one.
+        (
+            "anthropic_original_oversized_arguments",
+            ProviderOrigin::Anthropic,
+            MAX_TOOL_CALL_ARGUMENTS_BYTES,
+            false,
+        ),
+        (
+            "gemini_original_oversized_arguments",
+            ProviderOrigin::Gemini,
+            MAX_TOOL_CALL_ARGUMENTS_BYTES,
+            false,
+        ),
+        // 1 MiB of textual arguments lands exactly on the per-call limit.
+        (
+            "openai_exact_arguments_boundary",
+            ProviderOrigin::OpenAiCompatible,
+            filler,
+            true,
+        ),
+        (
+            "openai_arguments_boundary_plus_one",
+            ProviderOrigin::OpenAiCompatible,
+            filler + 1,
+            false,
+        ),
+        (
+            "anthropic_exact_arguments_boundary",
+            ProviderOrigin::Anthropic,
+            filler,
+            true,
+        ),
+        (
+            "gemini_exact_arguments_boundary",
+            ProviderOrigin::Gemini,
+            filler,
+            true,
+        ),
+    ] {
+        let arguments = "z".repeat(filler_bytes);
+        let wire = match provider {
+            ProviderOrigin::OpenAiCompatible => serde_json::json!({"choices": [{"message": {
+                "role": "assistant", "content": Value::Null,
+                "tool_calls": [{"id": "call_1", "type": "function", "function": {
+                    "name": "t", "arguments": format!("{{\"a\":\"{arguments}\"}}"),
+                }}],
+            }}]}),
+            ProviderOrigin::Anthropic => serde_json::json!({"role": "assistant", "content": [
+                {"type": "tool_use", "id": "toolu_1", "name": "t", "input": {"a": arguments}}
+            ]}),
+            ProviderOrigin::Gemini => {
+                serde_json::json!({"candidates": [{"content": {"role": "model", "parts": [
+                    {"functionCall": {"name": "t", "args": {"a": arguments}}}
+                ]}}]})
+            }
+        };
+        let result = wire_to_native(provider, &wire);
+        if accepted {
+            result.unwrap_or_else(|error| panic!("{name}: exact boundary rejected: {error:?}"));
+        } else {
+            let kind = match result {
+                Err(ProjectionError::OutputLimitExceeded {
+                    interruption: AttemptInterruption::OutputLimitExceeded { kind, .. },
+                    ..
+                }) => kind,
+                Ok(_) => panic!("{name}: oversized wire must not produce a message"),
+                Err(other) => panic!("{name}: expected OutputLimitExceeded, got {other:?}"),
+            };
+            assert_eq!(kind, LimitKind::ToolCallArguments, "{name}");
+        }
+    }
 }
 
 // ─── #139-B Commit 2: bound closures, ToolResult encoding, usage ──────────
@@ -997,130 +1047,90 @@ fn structured_result_fixtures_and_missing_ids() {
 }
 
 #[test]
-fn wire_usage_extracts_official_blocks() {
-    let openai = wire_usage(
-        ProviderOrigin::OpenAiCompatible,
-        &fixture("openai_usage.json"),
-    )
-    .expect("usage")
-    .expect("present");
-    assert_eq!(
+fn wire_usage_distinguishes_present_absent_and_malformed_blocks() {
+    enum Expected {
+        Present(u64, u64, u64),
+        Absent,
+        Malformed,
+    }
+    for (name, provider, wire, expected) in [
         (
-            openai.prompt_tokens,
-            openai.completion_tokens,
-            openai.total_tokens
+            "openai_usage_present",
+            ProviderOrigin::OpenAiCompatible,
+            fixture("openai_usage.json"),
+            Expected::Present(1201, 34, 1235),
         ),
-        (1201, 34, 1235)
-    );
-
-    let anthropic = wire_usage(ProviderOrigin::Anthropic, &fixture("anthropic_usage.json"))
-        .expect("usage")
-        .expect("present");
-    assert_eq!(
         (
-            anthropic.prompt_tokens,
-            anthropic.completion_tokens,
-            anthropic.total_tokens
+            "anthropic_usage_present",
+            ProviderOrigin::Anthropic,
+            fixture("anthropic_usage.json"),
+            Expected::Present(517, 62, 579),
         ),
-        (517, 62, 579)
-    );
-
-    let gemini = wire_usage(ProviderOrigin::Gemini, &fixture("gemini_usage.json"))
-        .expect("usage")
-        .expect("present");
-    assert_eq!(
         (
-            gemini.prompt_tokens,
-            gemini.completion_tokens,
-            gemini.total_tokens
+            "gemini_usage_present",
+            ProviderOrigin::Gemini,
+            fixture("gemini_usage.json"),
+            Expected::Present(811, 27, 838),
         ),
-        (811, 27, 838)
-    );
-}
-
-#[test]
-fn missing_usage_is_unknown_not_zero() {
-    // The tool-call fixtures carry no usage blocks at all.
-    for (origin, wire) in [
+        // The tool-call fixtures carry no usage blocks at all.
         (
+            "openai_usage_absent",
             ProviderOrigin::OpenAiCompatible,
             openai_message(&fixture("openai_assistant_tool_calls.json")),
+            Expected::Absent,
         ),
         (
+            "anthropic_usage_absent",
             ProviderOrigin::Anthropic,
             anthropic_message(&fixture("anthropic_thinking_tool_use.json")),
+            Expected::Absent,
         ),
         (
+            "gemini_usage_absent",
             ProviderOrigin::Gemini,
             gemini_content(&fixture("gemini_function_call_no_id.json")),
+            Expected::Absent,
+        ),
+        (
+            "openai_usage_string_tokens",
+            ProviderOrigin::OpenAiCompatible,
+            serde_json::json!({"usage": {"prompt_tokens": "many"}}),
+            Expected::Malformed,
+        ),
+        (
+            "anthropic_usage_fractional_tokens",
+            ProviderOrigin::Anthropic,
+            serde_json::json!({"usage": {"input_tokens": 1.5, "output_tokens": 2}}),
+            Expected::Malformed,
+        ),
+        (
+            "gemini_usage_null_tokens",
+            ProviderOrigin::Gemini,
+            serde_json::json!({"usageMetadata": {"promptTokenCount": null}}),
+            Expected::Malformed,
         ),
     ] {
-        assert_eq!(wire_usage(origin, &wire), Ok(None), "usage must be unknown");
+        let result = wire_usage(provider, &wire);
+        match expected {
+            Expected::Present(prompt, completion, total) => {
+                let usage = result
+                    .unwrap_or_else(|error| panic!("{name}: usage failed: {error:?}"))
+                    .unwrap_or_else(|| panic!("{name}: usage must be present"));
+                assert_eq!(
+                    (
+                        usage.prompt_tokens,
+                        usage.completion_tokens,
+                        usage.total_tokens
+                    ),
+                    (prompt, completion, total),
+                    "{name}"
+                );
+            }
+            Expected::Absent => assert_eq!(result, Ok(None), "{name}: usage must be unknown"),
+            Expected::Malformed => assert!(
+                matches!(result, Err(ProjectionError::MalformedUsage { .. })),
+                "{name}: expected malformed usage"
+            ),
+        }
     }
-}
-
-#[test]
-fn malformed_usage_fails_typed() {
-    let openai = serde_json::json!({"usage": {"prompt_tokens": "many"}});
-    assert!(matches!(
-        wire_usage(ProviderOrigin::OpenAiCompatible, &openai),
-        Err(ProjectionError::MalformedUsage { .. })
-    ));
-    let anthropic = serde_json::json!({"usage": {"input_tokens": 1.5, "output_tokens": 2}});
-    assert!(matches!(
-        wire_usage(ProviderOrigin::Anthropic, &anthropic),
-        Err(ProjectionError::MalformedUsage { .. })
-    ));
-    let gemini = serde_json::json!({"usageMetadata": {"promptTokenCount": null}});
-    assert!(matches!(
-        wire_usage(ProviderOrigin::Gemini, &gemini),
-        Err(ProjectionError::MalformedUsage { .. })
-    ));
-}
-
-#[test]
-fn tool_arguments_exact_boundary_is_accepted_for_every_provider() {
-    // 1 MiB of textual arguments lands exactly on the per-call limit; every
-    // projector must accept it. Plus-one interruption for Anthropic/Gemini is
-    // covered above; here OpenAI joins the family.
-    let overhead = r#"{"a":""}"#.len();
-    let filler = MAX_TOOL_CALL_ARGUMENTS_BYTES - overhead;
-
-    let openai = serde_json::json!({"choices": [{"message": {
-        "role": "assistant",
-        "content": Value::Null,
-        "tool_calls": [{"id": "call_1", "type": "function", "function": {
-            "name": "t",
-            "arguments": format!("{{\"a\":\"{}\"}}", "z".repeat(filler)),
-        }}]
-    }}]});
-    wire_to_native(ProviderOrigin::OpenAiCompatible, &openai).expect("exact boundary");
-
-    let openai_over = serde_json::json!({"choices": [{"message": {
-        "role": "assistant",
-        "content": Value::Null,
-        "tool_calls": [{"id": "call_1", "type": "function", "function": {
-            "name": "t",
-            "arguments": format!("{{\"a\":\"{}\"}}", "z".repeat(filler + 1)),
-        }}]
-    }}]});
-    assert_eq!(
-        limit_kind(wire_to_native(
-            ProviderOrigin::OpenAiCompatible,
-            &openai_over
-        )),
-        LimitKind::ToolCallArguments
-    );
-
-    let anthropic_input = serde_json::json!({"a": "z".repeat(filler)});
-    let anthropic = serde_json::json!({"role": "assistant", "content": [
-        {"type": "tool_use", "id": "toolu_1", "name": "t", "input": anthropic_input}
-    ]});
-    wire_to_native(ProviderOrigin::Anthropic, &anthropic).expect("exact boundary");
-
-    let gemini_args = serde_json::json!({"a": "z".repeat(filler)});
-    let gemini = serde_json::json!({"candidates": [{"content": {"role": "model", "parts": [
-        {"functionCall": {"name": "t", "args": gemini_args}}
-    ]}}]});
-    wire_to_native(ProviderOrigin::Gemini, &gemini).expect("exact boundary");
 }
