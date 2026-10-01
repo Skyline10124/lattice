@@ -1174,3 +1174,183 @@ async fn budget_refusals_distinguish_pre_and_post_io() {
     assert_eq!(network.body_bytes_received, Some(4));
     assert_eq!(network.body_bytes_returned, None);
 }
+
+/// LAN-17：一次 Tool 调用只能产生一条受限请求链。逐条对应合同列出的失败方式：
+/// 公网 `http://` 仍被连接；同一次调用成功发起第二次 network import；
+/// Host 跟随第六次重定向；每跳重新获得完整 deadline，使整条链超过调用预算。
+#[cfg(test)]
+mod request_chain {
+    use std::collections::BTreeSet;
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
+
+    use lancet_protocol::cell::Trust;
+    use lancet_protocol::evidence::CapabilityAdmissionPolicy;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    use super::*;
+
+    fn call_ctx(deadline: Duration) -> (NetworkCallContext, tokio::sync::watch::Sender<bool>) {
+        let runtime = crate::ComponentRuntime::from_embedded().unwrap();
+        let admitted = crate::admission::admit_tool(
+            runtime.descriptor(METHOD).unwrap(),
+            &CapabilityAdmissionPolicy {
+                enabled_tools: BTreeSet::from([METHOD.to_string()]),
+                denied_capabilities: BTreeSet::new(),
+                max_boundary: Trust::Ex,
+            },
+        )
+        .unwrap();
+        let evidence = CellEvidenceLedger::new();
+        evidence.set_admission(admitted.evidence.clone());
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let ctx = NetworkCallContext {
+            turn_id: "test-turn".into(),
+            admitted: Arc::new(admitted),
+            evidence,
+            cancellation: crate::control::Cancellation::new(cancel_rx),
+            deadline: Instant::now() + deadline,
+        };
+        (ctx, cancel_tx)
+    }
+
+    fn host(allowed_hosts: &[&str], allow_public_https: bool) -> NetworkFetchHost {
+        let mut policy = NetworkPolicyConfig::safe_defaults();
+        policy.allow_localhost = true;
+        policy.allow_public_https = allow_public_https;
+        policy.allowed_hosts = allowed_hosts.iter().map(|h| h.to_string()).collect();
+        NetworkFetchHost::new(
+            policy,
+            Arc::new(|_| Ok(())),
+            Arc::new(|| usize::MAX),
+            "external-host",
+            tls_config(&[]).unwrap(),
+        )
+    }
+
+    fn get(url: String) -> FetchRequest {
+        FetchRequest {
+            url,
+            headers: Vec::new(),
+        }
+    }
+
+    /// `/r/N` 在等待 `delay` 后重定向到 `/r/N-1`，`/r/0` 返回 200；返回收到的请求数。
+    async fn redirect_server(delay: Duration) -> (SocketAddr, Arc<AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&hits);
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let counter = Arc::clone(&counter);
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut chunk = [0u8; 1024];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => request.extend_from_slice(&chunk[..n]),
+                        }
+                    }
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    let left: u32 = String::from_utf8_lossy(&request)
+                        .split_whitespace()
+                        .nth(1)
+                        .and_then(|path| path.strip_prefix("/r/")?.parse().ok())
+                        .unwrap_or(0);
+                    tokio::time::sleep(delay).await;
+                    let response = if left > 0 {
+                        format!(
+                            "HTTP/1.1 302 Found\r\nLocation: /r/{}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            left - 1
+                        )
+                    } else {
+                        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".into()
+                    };
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        (addr, hits)
+    }
+
+    #[tokio::test]
+    async fn public_http_is_refused_and_a_call_gets_one_import() {
+        let (ctx, _cancel) = call_ctx(Duration::from_secs(5));
+        // 两个目标都在允许列表内，第二次被拒绝只能来自“一次调用一个 import”。
+        let host = host(&["example.com", "127.0.0.1"], true);
+
+        let first = host
+            .fetch(get("http://example.com/".into()), ctx.clone())
+            .await
+            .unwrap_err();
+        assert!(matches!(first, FetchError::Denied), "{first:?}");
+        let (_, effects, denied) = ctx.evidence.snapshot();
+        assert!(effects.effects.is_empty(), "public http must not connect");
+        let network = denied.denied[0].network.as_ref().unwrap();
+        assert_eq!(network.resolution, NetworkResolution::NotAttempted);
+
+        let (addr, hits) = redirect_server(Duration::ZERO).await;
+        let second = host
+            .fetch(get(format!("http://{addr}/r/0")), ctx)
+            .await
+            .unwrap_err();
+        assert!(matches!(second, FetchError::Denied), "{second:?}");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "second import reached the network"
+        );
+    }
+
+    #[tokio::test]
+    async fn redirect_chain_follows_five_hops_under_one_deadline() {
+        enum Expect {
+            Redirects(u32),
+            Limit,
+            Timeout,
+        }
+        // (重定向次数, 每跳延迟, 调用 deadline, 期望结果, 服务端最多收到的请求数)
+        let cases = [
+            (
+                5,
+                Duration::ZERO,
+                Duration::from_secs(5),
+                Expect::Redirects(5),
+                6,
+            ),
+            (6, Duration::ZERO, Duration::from_secs(5), Expect::Limit, 6),
+            // 每跳都短于 deadline；只有整条链共用 deadline 才会超时。
+            (
+                5,
+                Duration::from_millis(300),
+                Duration::from_secs(1),
+                Expect::Timeout,
+                4,
+            ),
+        ];
+        for (redirects, delay, deadline, expect, max_requests) in cases {
+            let (addr, hits) = redirect_server(delay).await;
+            let (ctx, _cancel) = call_ctx(deadline);
+            let result = host(&["127.0.0.1"], false)
+                .fetch(get(format!("http://{addr}/r/{redirects}")), ctx)
+                .await;
+            let matched = match (&result, &expect) {
+                (Ok(response), Expect::Redirects(n)) => response.redirect_count == *n,
+                (Err(FetchError::LimitExceeded), Expect::Limit) => true,
+                (Err(FetchError::Timeout), Expect::Timeout) => true,
+                _ => false,
+            };
+            assert!(
+                matched,
+                "{redirects} redirects, {delay:?} per hop: {result:?}"
+            );
+            let requests = hits.load(Ordering::SeqCst);
+            assert!(
+                requests <= max_requests,
+                "{redirects} redirects: server saw {requests} requests"
+            );
+        }
+    }
+}
