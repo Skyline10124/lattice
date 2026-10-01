@@ -85,7 +85,12 @@ fn direct_secrets_sentinels_never_leak_into_public_sinks() {
             &["--json", "audit", "query", "--session", sid],
         );
         let ls = cli(&world, &spec, &["--json", "lancet", "status"]);
-        for output in [&ss, &sl, &aq, &ls] {
+        // `session turn` prints the Turn's frozen configuration digest, the
+        // public output closest to the credential.
+        let tid = turn.accepted_turn_id().expect("accepted Turn");
+        let st = cli(&world, &spec, &["--json", "session", "turn", tid]);
+        let st_text = cli(&world, &spec, &["session", "turn", tid]);
+        for output in [&ss, &sl, &aq, &ls, &st, &st_text] {
             require(output.is_clean_exit(0), "public sink query succeeds")?;
         }
         require(
@@ -126,6 +131,22 @@ fn direct_secrets_sentinels_never_leak_into_public_sinks() {
             (
                 "lancet status stderr",
                 String::from_utf8_lossy(&ls.stderr).to_string(),
+            ),
+            (
+                "session turn --json",
+                String::from_utf8_lossy(&st.stdout).to_string(),
+            ),
+            (
+                "session turn --json stderr",
+                String::from_utf8_lossy(&st.stderr).to_string(),
+            ),
+            (
+                "session turn",
+                String::from_utf8_lossy(&st_text.stdout).to_string(),
+            ),
+            (
+                "session turn stderr",
+                String::from_utf8_lossy(&st_text.stderr).to_string(),
             ),
         ];
 
