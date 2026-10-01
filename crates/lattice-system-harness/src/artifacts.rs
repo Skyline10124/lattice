@@ -939,12 +939,14 @@ mod tests {
                 message_roles: vec!["system".into(), "user".into()],
                 tool_names: vec!["observe__workspace".into()],
                 raw: json!({"model": "compat:test", "messages": []}),
+                ..Default::default()
             },
             CapturedRequest {
                 model: "compat:test".into(),
                 message_roles: vec!["user".into()],
                 tool_names: vec![],
                 raw: json!({"model": "compat:test"}),
+                ..Default::default()
             },
         ];
         write_fake_llm_log(dir.path(), &captures, &[]).unwrap();
@@ -964,6 +966,7 @@ mod tests {
             message_roles: vec![],
             tool_names: vec![],
             raw: json!({"secret": "sk-super-secret-value"}),
+            ..Default::default()
         }];
         write_fake_llm_log(dir.path(), &captures, &["sk-super-secret-value"]).unwrap();
         let text = std::fs::read_to_string(dir.path().join("fake_llm_requests.txt")).unwrap();

@@ -66,8 +66,12 @@ const CREDENTIAL_ENV_VARS: &[&str] = &[
 ];
 
 /// Env vars that can move a provider endpoint. Kept beside the router's
-/// `OPENAI_COMPATIBLE_BASE_URL` read (`crates/lattice-llm/src/router.rs`).
-const ENDPOINT_ENV_VARS: &[&str] = &["OPENAI_COMPATIBLE_BASE_URL"];
+/// `*_BASE_URL` reads (`crates/lattice-llm/src/router.rs`).
+const ENDPOINT_ENV_VARS: &[&str] = &[
+    "OPENAI_COMPATIBLE_BASE_URL",
+    "ANTHROPIC_BASE_URL",
+    "GEMINI_BASE_URL",
+];
 
 /// Proxy vars `reqwest` honours by default, which reroute provider traffic just
 /// as an endpoint override does. Listed only when set, so the common no-proxy
