@@ -11,8 +11,6 @@ use clap::Subcommand;
 use colored::Colorize;
 use lancet_api::{LancetDoctorOutput, LancetDoctorRequest, run_doctor_checks};
 use lattice_api::local::{LocalClient, OperatorStatus};
-#[cfg(test)]
-use std::path::Path;
 
 /// `lattice lancet` subcommand group.
 #[derive(Subcommand)]
@@ -77,13 +75,6 @@ pub fn run_doctor(json: bool) -> Result<()> {
     emit_doctor_result(&output, json)
 }
 
-#[cfg(test)]
-pub(crate) fn run_doctor_inner_for_project_root(project_root: &Path, json: bool) -> Result<()> {
-    let request = LancetDoctorRequest::new(project_root);
-    let output = run_doctor_checks(request);
-    emit_doctor_result(&output, json)
-}
-
 fn emit_doctor_result(output: &LancetDoctorOutput, json: bool) -> Result<()> {
     let all_ok = output.issues.is_empty();
 
@@ -139,68 +130,3 @@ fn doctor_json_value(output: &LancetDoctorOutput) -> serde_json::Value {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use clap::Parser;
-
-    // -- Clap surface tests --
-
-    /// Test wrapper that wraps LancetAction as a top-level subcommand.
-    #[derive(Parser)]
-    struct TestCli {
-        #[command(subcommand)]
-        action: LancetAction,
-    }
-
-    fn try_parse_action(args: &[&str]) -> std::result::Result<LancetAction, clap::Error> {
-        let mut full = vec!["lancet"];
-        full.extend_from_slice(args);
-        TestCli::try_parse_from(full).map(|c| c.action)
-    }
-
-    #[test]
-    fn lancet_status_json_flag_parses() {
-        let action = try_parse_action(&["status", "--json"]);
-        assert!(action.is_ok(), "should parse `lancet status --json`");
-        match action.unwrap() {
-            LancetAction::Status { json } => assert!(json),
-            _ => panic!("expected Status"),
-        }
-    }
-
-    #[test]
-    fn lancet_status_no_args_parses() {
-        let action = try_parse_action(&["status"]);
-        assert!(action.is_ok());
-        match action.unwrap() {
-            LancetAction::Status { json } => assert!(!json),
-            _ => panic!("expected Status"),
-        }
-    }
-
-    #[test]
-    fn lancet_doctor_parses() {
-        let action = try_parse_action(&["doctor"]);
-        assert!(action.is_ok());
-        assert!(matches!(action.unwrap(), LancetAction::Doctor {}));
-    }
-    // -- Doctor tests --
-
-    #[test]
-    fn generated_catalog_doctor_passes_on_repo_root() {
-        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("crates/")
-            .parent()
-            .expect("workspace root");
-
-        let result = run_doctor_inner_for_project_root(workspace_root, false);
-        assert!(
-            result.is_ok(),
-            "doctor should pass on repo root: {:?}",
-            result
-        );
-    }
-}

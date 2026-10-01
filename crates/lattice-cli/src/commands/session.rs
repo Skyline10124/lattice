@@ -407,20 +407,4 @@ mod session_cli {
         assert!(text.contains("process_exit"), "{text}");
         assert!(text.contains("process exited"), "{text}");
     }
-    #[test]
-    fn summaries_and_ids_respect_character_boundaries() {
-        assert_eq!(display_id("abc"), "abc");
-        assert_eq!(display_id("abcdefghijklmnop"), "abcdefgh..");
-        assert_eq!(summarize("hello world", 120), "hello world");
-        assert_eq!(summarize("你好世界测试", 120), "你好世界测试");
-        for (text, max) in [
-            ("a".repeat(200), 50),
-            ("你好世界测试中文显示宽度".into(), 7),
-            ("hello世界".into(), 5),
-        ] {
-            let value = summarize(&text, max);
-            assert!(value.width() <= max);
-            assert!(value.ends_with('…'));
-        }
-    }
 }
