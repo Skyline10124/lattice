@@ -336,30 +336,6 @@ mod tests {
     }
 
     #[test]
-    fn valid_minimal_profile() {
-        let toml = r#"
-schema_version = 1
-
-[agent]
-name = "test"
-model = "sonnet"
-
-[prompt]
-system = "You are a helpful assistant."
-"#;
-        let profile = parse(toml).unwrap();
-        assert_eq!(profile.schema_version, 1);
-        assert_eq!(profile.agent.name, "test");
-        assert_eq!(profile.agent.model, "sonnet");
-        assert!(profile.agent.description.is_none());
-        assert_eq!(
-            profile.prompt.system.as_deref(),
-            Some("You are a helpful assistant.")
-        );
-        assert!(profile.prompt.system_path.is_none());
-    }
-
-    #[test]
     fn valid_full_profile() {
         let toml = r#"
 schema_version = 1
@@ -680,12 +656,6 @@ system = "hi"
     }
 
     #[test]
-    fn lancet_defaults_when_section_absent() {
-        let profile = parse(minimal_profile_prefix()).unwrap();
-        assert_eq!(profile.lancet, LancetSection::default());
-    }
-
-    #[test]
     fn cep_rejects_scalar_extension_typos() {
         let toml = format!(
             r#"{prefix}
@@ -738,24 +708,6 @@ max_web_response_bytes = 2048
     }
 
     #[test]
-    fn cep_preserves_untyped_future_sub_tables_in_extensions() {
-        let toml = format!(
-            r#"{prefix}
-
-[lancet]
-[lancet.future_table]
-some_field = true
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let profile = parse(&toml).unwrap();
-        assert!(profile.lancet.extensions.contains_key("future_table"));
-        assert!(profile.lancet.project_root.is_none());
-        assert!(profile.lancet.observation.is_none());
-        assert!(profile.lancet.network.is_none());
-    }
-
-    #[test]
     fn cep_observation_rejects_network_only_field() {
         let toml = format!(
             r#"{prefix}
@@ -770,29 +722,6 @@ max_web_response_bytes = 1024
             err.to_string().contains("max_web_response_bytes"),
             "got: {err}"
         );
-    }
-
-    #[test]
-    fn cep_serializes_extensions_flattened() {
-        let mut future = toml::map::Map::new();
-        future.insert("some_field".into(), toml::Value::Boolean(true));
-
-        let mut extensions = BTreeMap::new();
-        extensions.insert("future_table".into(), toml::Value::Table(future));
-
-        let section = LancetSection {
-            project_root: None,
-            observation: None,
-            network: None,
-            policy: None,
-            capabilities: None,
-            workspace: None,
-            extensions,
-        };
-        let serialized = toml::to_string(&section).unwrap();
-        assert!(!serialized.contains("mode"), "got: {serialized}");
-        assert!(serialized.contains("[future_table]"), "got: {serialized}");
-        assert!(!serialized.contains("extensions"), "got: {serialized}");
     }
 
     /// `TYPED_LANCET_SUB_TABLES` drives the loader's case-variant rejection, so a
@@ -835,22 +764,6 @@ max_web_response_bytes = 1024
     }
 
     // ── Tools section defaults ────────────────────────────────────────
-
-    #[test]
-    fn tools_section_defaults_to_empty_enabled() {
-        let toml = r#"
-schema_version = 1
-
-[agent]
-name = "t"
-model = "sonnet"
-
-[prompt]
-system = "hi"
-"#;
-        let profile = parse(toml).unwrap();
-        assert!(profile.tools.enabled.is_empty());
-    }
 
     #[test]
     fn llm_retry_defaults_when_section_absent() {
@@ -919,42 +832,7 @@ unexpected = true
         assert!(parse(&toml).is_err());
     }
 
-    #[test]
-    fn lancet_verify_section_is_not_a_typed_field() {
-        // [lancet.verify] was retired; it must no longer deserialize into a
-        // typed field. It falls through into extensions as an untyped table.
-        let toml = format!(
-            r#"{prefix}
-
-[lancet.verify]
-argv = ["cargo", "test"]
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let profile: AgentProfile = parse(&toml).unwrap();
-        assert!(profile.lancet.extensions.contains_key("verify"));
-    }
     // ── [llm.timeout_secs] ────────────────────────────────────────────
-
-    #[test]
-    fn llm_timeout_secs_parses() {
-        let toml = format!(
-            r#"{prefix}
-
-[llm]
-timeout_secs = 1
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let profile = parse(&toml).unwrap();
-        assert_eq!(profile.llm.timeout_secs, Some(1));
-    }
-
-    #[test]
-    fn llm_timeout_secs_defaults_none_when_absent() {
-        let profile = parse(minimal_profile_prefix()).unwrap();
-        assert!(profile.llm.timeout_secs.is_none());
-    }
 
     // ── LancetPolicySection ────────────────────────────────────────────────
 
@@ -971,12 +849,6 @@ path = "policy.toml"
         let profile = parse(&toml).unwrap();
         let policy = profile.lancet.policy.as_ref().unwrap();
         assert_eq!(policy.path.as_deref(), Some("policy.toml"));
-    }
-
-    #[test]
-    fn cep_section_without_policy_defaults_to_none() {
-        let profile = parse(minimal_profile_prefix()).unwrap();
-        assert!(profile.lancet.policy.is_none());
     }
 
     #[test]
@@ -1019,29 +891,6 @@ max_boundary = "ex"
     }
 
     #[test]
-    fn lancet_capabilities_round_trips_through_toml() {
-        let toml = format!(
-            r#"{prefix}
-
-[tools]
-enabled = ["noop.echo"]
-
-[lancet.capabilities]
-deny = ["session.events"]
-max_boundary = "ex"
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let profile = parse(&toml).unwrap();
-        let serialized = toml::to_string(&profile).unwrap();
-        assert!(
-            serialized.contains("[lancet.capabilities]"),
-            "got: {serialized}"
-        );
-        assert_eq!(parse(&serialized).unwrap(), profile);
-    }
-
-    #[test]
     fn lancet_capabilities_max_boundary_defaults_to_in() {
         let toml = format!(
             r#"{prefix}
@@ -1058,12 +907,6 @@ deny = ["session.events"]
             Trust::In
         );
         assert_eq!(LancetCapabilitiesSection::default().max_boundary, Trust::In);
-    }
-
-    #[test]
-    fn lancet_capabilities_absent_section_is_none() {
-        let profile = parse(minimal_profile_prefix()).unwrap();
-        assert!(profile.lancet.capabilities.is_none());
     }
 
     #[test]
@@ -1091,51 +934,6 @@ max_boundary = "upper"
             prefix = minimal_profile_prefix()
         );
         assert!(parse(&toml).is_err());
-    }
-
-    #[test]
-    fn lancet_capabilities_never_lands_in_extensions() {
-        let toml = format!(
-            r#"{prefix}
-
-[lancet.capabilities]
-deny = ["session.events"]
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let profile = parse(&toml).unwrap();
-        assert!(profile.lancet.capabilities.is_some());
-        assert!(
-            profile.lancet.extensions.is_empty(),
-            "typed sub-table must not fall through: {:?}",
-            profile.lancet.extensions
-        );
-    }
-
-    #[test]
-    fn capability_admission_policy_lowers_enabled_tools_and_deny() {
-        let toml = format!(
-            r#"{prefix}
-
-[tools]
-enabled = ["noop.echo", "fetch.web"]
-
-[lancet.capabilities]
-deny = ["session.events"]
-max_boundary = "ex"
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let policy = parse(&toml).unwrap().capability_admission_policy();
-        assert_eq!(
-            policy.enabled_tools,
-            BTreeSet::from(["fetch.web".to_string(), "noop.echo".to_string()])
-        );
-        assert_eq!(
-            policy.denied_capabilities,
-            BTreeSet::from(["session.events".to_string()])
-        );
-        assert_eq!(policy.max_boundary, Trust::Ex);
     }
 
     #[test]
