@@ -95,11 +95,13 @@ flowchart LR
 
 ### Fake provider 的确定性边界
 
-fake provider 只接受单连接单个 `POST /chat/completions HTTP/1.1`，请求头使用 CRLF，Host 非空且恰好一个，Content-Type 恰好一个且为 application/json；名称大小写不敏感，拒绝控制字符与折叠。Content-Length 须为单个非负十进制字段，拒绝 Transfer-Encoding、重复/冲突长度及非法 UTF-8，不使用 lossy 转换。合法 UTF-8 的非 JSON body 保留为诊断，不虚构有效模型请求。
+fake provider 唯一的客户端是被测产品，因此只做取出路由、凭据与 body 所需的最少解析，不防御畸形或恶意 HTTP。它对场景只承担三项保证：
 
-headers 连同终止符上限 16,384 bytes，body 声明上限 1,048,576 bytes；在扩大缓冲或分配 body 前校验，读写使用固定两秒 deadline。拒绝响应使用不回显输入的固定 ASCII body。响应头使用 CRLF 和按字节计数的 Content-Length，发送一次后关闭连接；不承诺检测未来 keep-alive/pipelining 字节，不扩展通用 HTTP 服务。
+1. 计数准确：只有发往模型端点的请求进入 request capture；其他请求得到错误响应并记为 fixture failure，不被静默接受。非 JSON body 保留为诊断，不虚构有效模型请求。
+2. 回复确定：request capture、Sequence 选择/推进与到达通知在同一临界区发生，gate 只控制交付，不重排脚本归属。超出 Sequence 重复最后一项，空 Sequence 产生 IllegalResponse。
+3. 失败有界：每个连接的读写使用固定两秒 deadline；request/stall/release/shutdown 采用有界握手，shutdown 唤醒 accept、取消 gate，确认线程完成后才 join，Drop 不作无界等待。保留首个 fixture failure，捕获已不可能时提早报告，shutdown 在有界清理后返回该错误；不另建 health 或 failure 订阅接口。
 
-验证后的 request capture、Sequence 选择/推进与到达通知在同一临界区发生，gate 只控制交付，不重排脚本归属。超出 Sequence 重复最后一项，空 Sequence 产生 IllegalResponse。request/stall/release/shutdown 采用有界握手；shutdown 唤醒 accept、取消 gate，确认线程完成后才 join，Drop 不作无界等待。保留首个 fixture failure，捕获已不可能时提早报告，shutdown 在有界清理后返回该错误；不另建 health 或 failure 订阅接口。实际接口和固定响应维护于 [`fake_llm.rs`](../../crates/lattice-system-harness/src/fake_llm.rs)。
+实际接口和固定响应维护于 [`fake_llm.rs`](../../crates/lattice-system-harness/src/fake_llm.rs)。
 
 ## 执行与资源边界
 
