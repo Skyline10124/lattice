@@ -479,73 +479,95 @@ mod tests {
         assert!(!admitted.covers(&cell(CtxOp::Mutate, "session")));
     }
 
-    /// Stage 3 with `max_boundary = in` removes every `ex` capability —
-    /// declared `ex` and undeclared-scope alike (B4).
     #[test]
-    fn boundary_excludes_ex_and_undeclared_scopes() {
-        let admitted = admit_tool(
-            descriptor(vec![
-                capability("session.result", CtxOp::Alloc, "session"),
-                capability("net.fetch", CtxOp::Alloc, "net"),
-                capability("ghost.read", CtxOp::Alloc, "undeclared"),
-            ]),
-            &policy(&[], Trust::In),
-        )
-        .expect("the session capability survives");
-
-        assert_eq!(
-            admitted.evidence.approved_capabilities,
-            vec!["session.result".to_string()]
-        );
-        assert_eq!(
-            admitted.evidence.boundary_excluded,
-            vec!["ghost.read".to_string(), "net.fetch".to_string()]
-        );
-        assert!(admitted.evidence.denied_capabilities.is_empty());
-        assert_eq!(admitted.evidence.max_boundary, Trust::In);
-    }
-
-    /// C3 pins the stage order: deny/subtract (stage 2) runs before the
-    /// boundary predicate (stage 3). A capability that is both name-denied and
-    /// `ex`-trust is therefore attributed to the operator's deny list, never
-    /// to the boundary — the evidence names the stage that actually removed it.
-    #[test]
-    fn deny_precedes_the_boundary_predicate_in_the_evidence() {
-        let admitted = admit_tool(
-            descriptor(vec![
-                capability("session.result", CtxOp::Alloc, "session"),
-                capability("net.fetch", CtxOp::Alloc, "net"),
-            ]),
-            &policy(&["net.fetch"], Trust::In),
-        )
-        .expect("the session capability survives");
-
-        assert_eq!(
-            admitted.evidence.denied_capabilities,
-            vec!["net.fetch".to_string()]
-        );
-        assert!(admitted.evidence.boundary_excluded.is_empty());
-    }
-
-    /// `max_boundary = ex` opts into external-world capabilities; the
-    /// undeclared scope is then admitted too — trust is still recorded as
-    /// `ex` wherever the effect is observed.
-    #[test]
-    fn boundary_ex_admits_external_capabilities() {
-        let admitted = admit_tool(
-            descriptor(vec![
-                capability("net.fetch", CtxOp::Alloc, "net"),
-                capability("ghost.read", CtxOp::Alloc, "undeclared"),
-            ]),
-            &policy(&[], Trust::Ex),
-        )
-        .expect("ex boundary admits ex capabilities");
-
-        assert_eq!(
-            admitted.evidence.approved_capabilities,
-            vec!["ghost.read".to_string(), "net.fetch".to_string()]
-        );
-        assert!(admitted.evidence.boundary_excluded.is_empty());
+    fn admission_evidence_tracks_policy_stages() {
+        for (
+            name,
+            capabilities,
+            deny,
+            max_boundary,
+            approved,
+            denied,
+            excluded,
+            evidence_boundary,
+        ) in [
+            // Stage 3 excludes declared ex and undeclared scopes alike.
+            (
+                "boundary_excludes_ex_and_undeclared_scopes",
+                vec![
+                    capability("session.result", CtxOp::Alloc, "session"),
+                    capability("net.fetch", CtxOp::Alloc, "net"),
+                    capability("ghost.read", CtxOp::Alloc, "undeclared"),
+                ],
+                vec![],
+                Trust::In,
+                Some(vec!["session.result"]),
+                Some(vec![]),
+                vec!["ghost.read", "net.fetch"],
+                Some(Trust::In),
+            ),
+            // Deny precedes boundary filtering: a denied ex capability is not boundary-excluded.
+            (
+                "deny_precedes_the_boundary_predicate_in_the_evidence",
+                vec![
+                    capability("session.result", CtxOp::Alloc, "session"),
+                    capability("net.fetch", CtxOp::Alloc, "net"),
+                ],
+                vec!["net.fetch"],
+                Trust::In,
+                None,
+                Some(vec!["net.fetch"]),
+                vec![],
+                None,
+            ),
+            // Ex admits even undeclared scopes; observed trust remains ex.
+            (
+                "boundary_ex_admits_external_capabilities",
+                vec![
+                    capability("net.fetch", CtxOp::Alloc, "net"),
+                    capability("ghost.read", CtxOp::Alloc, "undeclared"),
+                ],
+                vec![],
+                Trust::Ex,
+                Some(vec!["ghost.read", "net.fetch"]),
+                None,
+                vec![],
+                None,
+            ),
+            // Evidence is sorted independently of declaration order, keeping audit bytes stable.
+            (
+                "evidence_lists_are_sorted",
+                vec![
+                    capability("session.zeta", CtxOp::Alloc, "session"),
+                    capability("session.alpha", CtxOp::Mutate, "session"),
+                    capability("session.deny-b", CtxOp::Alloc, "session"),
+                    capability("session.deny-a", CtxOp::Alloc, "session"),
+                    capability("net.zeta", CtxOp::Alloc, "net"),
+                    capability("net.alpha", CtxOp::Alloc, "net"),
+                ],
+                vec!["session.deny-b", "session.deny-a"],
+                Trust::In,
+                Some(vec!["session.alpha", "session.zeta"]),
+                Some(vec!["session.deny-a", "session.deny-b"]),
+                vec!["net.alpha", "net.zeta"],
+                None,
+            ),
+        ] {
+            let admitted = admit_tool(descriptor(capabilities), &policy(&deny, max_boundary))
+                .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+            for (actual, expected) in [
+                (&admitted.evidence.approved_capabilities, approved),
+                (&admitted.evidence.denied_capabilities, denied),
+                (&admitted.evidence.boundary_excluded, Some(excluded)),
+            ] {
+                if let Some(expected) = expected {
+                    assert_eq!(*actual, expected, "{name}");
+                }
+            }
+            if let Some(expected) = evidence_boundary {
+                assert_eq!(admitted.evidence.max_boundary, expected, "{name}");
+            }
+        }
     }
 
     /// An empty remainder fails the tool closed, and the denial keeps the
@@ -598,159 +620,117 @@ mod tests {
         assert_eq!(denial.evidence.max_boundary, Trust::In);
     }
 
-    /// Evidence lists are sorted regardless of declaration order, so the
-    /// audit/evidence bytes of one call are stable.
     #[test]
-    fn evidence_lists_are_sorted() {
-        let admitted = admit_tool(
-            descriptor(vec![
-                capability("session.zeta", CtxOp::Alloc, "session"),
-                capability("session.alpha", CtxOp::Mutate, "session"),
-                capability("session.deny-b", CtxOp::Alloc, "session"),
-                capability("session.deny-a", CtxOp::Alloc, "session"),
-                capability("net.zeta", CtxOp::Alloc, "net"),
-                capability("net.alpha", CtxOp::Alloc, "net"),
-            ]),
-            &policy(&["session.deny-b", "session.deny-a"], Trust::In),
-        )
-        .expect("two session capabilities survive");
-
-        assert_eq!(
-            admitted.evidence.approved_capabilities,
-            vec!["session.alpha".to_string(), "session.zeta".to_string()]
-        );
-        assert_eq!(
-            admitted.evidence.denied_capabilities,
-            vec!["session.deny-a".to_string(), "session.deny-b".to_string()]
-        );
-        assert_eq!(
-            admitted.evidence.boundary_excluded,
-            vec!["net.alpha".to_string(), "net.zeta".to_string()]
-        );
-    }
-
-    /// C2: a deny entry naming nothing in the catalog is a startup error, and
-    /// every unknown name is reported at once.
-    #[test]
-    fn unknown_deny_names_are_a_policy_error() {
-        let policy = CapabilityAdmissionPolicy {
-            enabled_tools: BTreeSet::from(["noop.echo".to_string()]),
-            denied_capabilities: BTreeSet::from([
-                "session.events".to_string(),
-                "session.typo".to_string(),
-                "net.typo".to_string(),
-            ]),
-            max_boundary: Trust::In,
-        };
-        let error = validate_policy_against_catalog(["session.events", "session.result"], &policy)
-            .expect_err("unknown deny names fail closed");
-        assert_eq!(
-            error,
-            PolicyValidationError::UnknownDeniedCapabilities(vec![
-                "net.typo".to_string(),
-                "session.typo".to_string(),
-            ])
-        );
-
-        // Every name known → accepted.
-        assert_eq!(
-            validate_policy_against_catalog(
-                [
+    fn policy_validation_rejects_unknown_denied_capabilities() {
+        for (name, catalog, deny, expected) in [
+            // C2 reports every unknown name at startup.
+            (
+                "unknown_deny_names_are_a_policy_error/unknown",
+                vec!["session.events", "session.result"],
+                vec!["session.events", "session.typo", "net.typo"],
+                Err(PolicyValidationError::UnknownDeniedCapabilities(vec![
+                    "net.typo".into(),
+                    "session.typo".into(),
+                ])),
+            ),
+            // Every name known is accepted.
+            (
+                "unknown_deny_names_are_a_policy_error/all_known",
+                vec![
                     "session.events",
                     "session.result",
                     "session.typo",
-                    "net.typo"
+                    "net.typo",
                 ],
-                &policy,
+                vec!["session.events", "session.typo", "net.typo"],
+                Ok(()),
             ),
-            Ok(())
-        );
-    }
-
-    /// An empty catalog makes *any* deny entry a startup error — the C2
-    /// consequence the profile schema documents.
-    #[test]
-    fn empty_catalog_rejects_any_deny_entry() {
-        let error = validate_policy_against_catalog(
-            std::iter::empty(),
-            &policy(&["session.events"], Trust::In),
-        )
-        .expect_err("nothing can be denied on an empty catalog");
-        assert_eq!(
-            error,
-            PolicyValidationError::UnknownDeniedCapabilities(vec!["session.events".to_string()])
-        );
-        // An empty deny list stays valid.
-        assert_eq!(
-            validate_policy_against_catalog(std::iter::empty(), &policy(&[], Trust::In)),
-            Ok(())
-        );
-    }
-
-    /// Uncovered operation: the cell is not in the admitted set, so the
-    /// operation is refused before any host facility is reached.
-    #[test]
-    fn authorize_operation_denies_an_uncovered_cell() {
-        let admitted = admitted_session_tool();
-        assert_eq!(
-            authorize_operation(
-                &admitted,
-                &cell(CtxOp::Alloc, "session"),
-                &ObservedTarget::Session {
-                    turn_id: "turn-1".into()
-                },
-                "turn-1",
+            // An empty catalog rejects any deny entry, as the profile schema requires.
+            (
+                "empty_catalog_rejects_any_deny_entry/nonempty_deny",
+                vec![],
+                vec!["session.events"],
+                Err(PolicyValidationError::UnknownDeniedCapabilities(vec![
+                    "session.events".into(),
+                ])),
             ),
-            Err(OperationDenial::CellNotAdmitted(
-                "alloc:none:session".into()
-            ))
-        );
-    }
-
-    /// Scope escape on the cell itself: the admitted capability's `ctx_op`
-    /// and `ext_impact` on another declared scope is a different cell, and so
-    /// is a differing `ext_impact` on the admitted scope. Neither reaches a
-    /// host facility.
-    #[test]
-    fn authorize_operation_denies_a_cell_differing_only_by_scope_or_ext_impact() {
-        let admitted = admitted_session_tool();
-        let target = ObservedTarget::Session {
-            turn_id: "turn-1".into(),
-        };
-        for escape in [
-            cell(CtxOp::Mutate, "workspace"),
-            Cell {
-                ctx_op: CtxOp::Mutate,
-                ext_impact: ExtImpact::Write,
-                scope: "session".into(),
-            },
+            (
+                "empty_catalog_rejects_any_deny_entry/empty_deny",
+                vec![],
+                vec![],
+                Ok(()),
+            ),
         ] {
             assert_eq!(
-                authorize_operation(&admitted, &escape, &target, "turn-1"),
-                Err(OperationDenial::CellNotAdmitted(escape.reference()))
+                validate_policy_against_catalog(catalog, &policy(&deny, Trust::In)),
+                expected,
+                "{name}"
             );
         }
     }
 
-    /// Scope escape: a session target naming another turn is refused even
-    /// though its cell is admitted.
     #[test]
-    fn authorize_operation_denies_a_foreign_turn_id() {
+    fn authorize_operation_rejects_uncovered_cells_and_foreign_turns() {
         let admitted = admitted_session_tool();
-        assert_eq!(
-            authorize_operation(
-                &admitted,
-                &cell(CtxOp::Mutate, "session"),
-                &ObservedTarget::Session {
-                    turn_id: "other-turn".into()
+        for (name, operation_cell, target, expected) in [
+            // Uncovered cells are refused before reaching any host facility.
+            (
+                "authorize_operation_denies_an_uncovered_cell",
+                cell(CtxOp::Alloc, "session"),
+                ObservedTarget::Session {
+                    turn_id: "turn-1".into(),
                 },
-                "turn-1",
+                OperationDenial::CellNotAdmitted("alloc:none:session".into()),
             ),
-            Err(OperationDenial::TurnMismatch {
-                expected: "turn-1".into(),
-                actual: "other-turn".into(),
-            })
-        );
+            // Changing either scope or external impact escapes the exact admitted cell.
+            (
+                "authorize_operation_denies_a_cell_differing_only_by_scope_or_ext_impact/scope",
+                cell(CtxOp::Mutate, "workspace"),
+                ObservedTarget::Session {
+                    turn_id: "turn-1".into(),
+                },
+                OperationDenial::CellNotAdmitted("mutate:none:workspace".into()),
+            ),
+            (
+                "authorize_operation_denies_a_cell_differing_only_by_scope_or_ext_impact/ext_impact",
+                Cell {
+                    ctx_op: CtxOp::Mutate,
+                    ext_impact: ExtImpact::Write,
+                    scope: "session".into(),
+                },
+                ObservedTarget::Session {
+                    turn_id: "turn-1".into(),
+                },
+                OperationDenial::CellNotAdmitted("mutate:write:session".into()),
+            ),
+            // An admitted cell cannot authorize a different turn.
+            (
+                "authorize_operation_denies_a_foreign_turn_id",
+                cell(CtxOp::Mutate, "session"),
+                ObservedTarget::Session {
+                    turn_id: "other-turn".into(),
+                },
+                OperationDenial::TurnMismatch {
+                    expected: "turn-1".into(),
+                    actual: "other-turn".into(),
+                },
+            ),
+            // Cell coverage precedes path checks; an uncovered cell must not reveal path validity.
+            (
+                "path_target_still_requires_an_admitted_cell",
+                cell(CtxOp::Alloc, "workspace"),
+                ObservedTarget::Path {
+                    path: "src/lib.rs".into(),
+                },
+                OperationDenial::CellNotAdmitted("alloc:none:workspace".into()),
+            ),
+        ] {
+            assert_eq!(
+                authorize_operation(&admitted, &operation_cell, &target, "turn-1"),
+                Err(expected),
+                "{name}"
+            );
+        }
     }
 
     /// Host targets require an admitted network-channel cell; `none` remains unsupported.
@@ -956,32 +936,6 @@ mod tests {
                 "{good:?} is a legal resolved path"
             );
         }
-    }
-
-    /// Cell coverage is still checked first: a workspace-channel path target
-    /// whose cell was never admitted is refused as uncovered, not as a path
-    /// problem. Order matters — reporting the path shape for an unadmitted cell
-    /// would tell a guest its target was acceptable.
-    #[test]
-    fn path_target_still_requires_an_admitted_cell() {
-        let admitted = admit_tool(
-            descriptor(vec![capability("session.events", CtxOp::Mutate, "session")]),
-            &policy(&[], Trust::In),
-        )
-        .expect("session capability admits");
-        assert_eq!(
-            authorize_operation(
-                &admitted,
-                &cell(CtxOp::Alloc, "workspace"),
-                &ObservedTarget::Path {
-                    path: "src/lib.rs".into()
-                },
-                "turn-1"
-            ),
-            Err(OperationDenial::CellNotAdmitted(
-                "alloc:none:workspace".into()
-            ))
-        );
     }
 
     #[test]

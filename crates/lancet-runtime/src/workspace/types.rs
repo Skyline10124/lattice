@@ -287,55 +287,89 @@ mod tests {
     use super::*;
 
     #[test]
-    fn workspace_path_rejects_absolute() {
-        assert!(matches!(
-            WorkspacePath::parse("/etc/passwd"),
-            Err(WorkspacePathError::Absolute)
-        ));
-        assert!(matches!(
-            WorkspacePath::parse("src/../secret"),
-            Err(WorkspacePathError::ParentTraversal)
-        ));
-    }
-
-    #[test]
-    fn workspace_path_rejects_empty_and_nul() {
-        assert!(matches!(
-            WorkspacePath::parse(""),
-            Err(WorkspacePathError::Empty)
-        ));
-        assert!(matches!(
-            WorkspacePath::parse("src\0/main.rs"),
-            Err(WorkspacePathError::NulByte)
-        ));
-    }
-
-    /// #98: a literal `..` inside a filename is not traversal. It used to fail
-    /// the whole parse, and since grep/find parse every entry they walk over,
-    /// one such file turned an entire search into an error instead of a
-    /// result set that simply includes it.
-    #[test]
-    fn literal_dot_dot_in_a_filename_is_not_traversal() {
-        for raw in [
-            "foo..bar.rs",
-            "..gitignore",
-            "src/a..b/c.rs",
-            "release..2026",
-            "x..",
-        ] {
-            let parsed = WorkspacePath::parse(raw)
-                .unwrap_or_else(|err| panic!("legal filename {raw} rejected: {err}"));
-            assert_eq!(parsed.as_str(), raw, "normalization altered {raw}");
-        }
-    }
-
-    #[test]
-    fn parent_dir_components_are_still_rejected() {
-        for raw in ["..", "../x", "a/../b", "a/..", "./../x", "a/b/../../.."] {
-            assert_eq!(
-                WorkspacePath::parse(raw),
+    fn workspace_paths_reject_invalid_components_and_preserve_legal_names() {
+        for (name, raw, expected) in [
+            (
+                "workspace_path_rejects_absolute/absolute",
+                "/etc/passwd",
+                Err(WorkspacePathError::Absolute),
+            ),
+            (
+                "workspace_path_rejects_absolute/traversal",
+                "src/../secret",
                 Err(WorkspacePathError::ParentTraversal),
-                "traversal accepted for {raw}"
+            ),
+            (
+                "workspace_path_rejects_empty_and_nul/empty",
+                "",
+                Err(WorkspacePathError::Empty),
+            ),
+            (
+                "workspace_path_rejects_empty_and_nul/nul",
+                "src\0/main.rs",
+                Err(WorkspacePathError::NulByte),
+            ),
+            // Literal .. is not traversal: rejecting these names used to break entire grep/find searches.
+            (
+                "literal_dot_dot_in_a_filename_is_not_traversal/foo..bar.rs",
+                "foo..bar.rs",
+                Ok("foo..bar.rs"),
+            ),
+            (
+                "literal_dot_dot_in_a_filename_is_not_traversal/..gitignore",
+                "..gitignore",
+                Ok("..gitignore"),
+            ),
+            (
+                "literal_dot_dot_in_a_filename_is_not_traversal/src/a..b/c.rs",
+                "src/a..b/c.rs",
+                Ok("src/a..b/c.rs"),
+            ),
+            (
+                "literal_dot_dot_in_a_filename_is_not_traversal/release..2026",
+                "release..2026",
+                Ok("release..2026"),
+            ),
+            (
+                "literal_dot_dot_in_a_filename_is_not_traversal/x..",
+                "x..",
+                Ok("x.."),
+            ),
+            (
+                "parent_dir_components_are_still_rejected/..",
+                "..",
+                Err(WorkspacePathError::ParentTraversal),
+            ),
+            (
+                "parent_dir_components_are_still_rejected/../x",
+                "../x",
+                Err(WorkspacePathError::ParentTraversal),
+            ),
+            (
+                "parent_dir_components_are_still_rejected/a/../b",
+                "a/../b",
+                Err(WorkspacePathError::ParentTraversal),
+            ),
+            (
+                "parent_dir_components_are_still_rejected/a/..",
+                "a/..",
+                Err(WorkspacePathError::ParentTraversal),
+            ),
+            (
+                "parent_dir_components_are_still_rejected/./../x",
+                "./../x",
+                Err(WorkspacePathError::ParentTraversal),
+            ),
+            (
+                "parent_dir_components_are_still_rejected/a/b/../../..",
+                "a/b/../../..",
+                Err(WorkspacePathError::ParentTraversal),
+            ),
+        ] {
+            assert_eq!(
+                WorkspacePath::parse(raw).map(|path| path.as_str().to_owned()),
+                expected.map(str::to_owned),
+                "{name}: {raw:?}"
             );
         }
     }
