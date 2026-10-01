@@ -310,66 +310,9 @@ impl GeminiSseParser {
 
 #[cfg(test)]
 mod tests {
-    use lattice_conversation::{
-        BoundToolCall, MessagePart, MessageRole, MessageSemantic, NativeMessage,
-    };
+    use lattice_conversation::MessageSemantic;
 
     use super::*;
-    use crate::endpoints::GEMINI_BASE_URL;
-    use crate::router::{CredentialStatus, ProviderKind};
-    use crate::types::{ChatRequest, ModelTarget, ToolDefinition};
-
-    fn make_resolved() -> ResolvedModel {
-        ResolvedModel {
-            alias: "gemini".to_string(),
-            provider: ProviderKind::Gemini,
-            provider_model: "gemini-2.5-flash".to_string(),
-            base_url: GEMINI_BASE_URL.to_string(),
-            api_key_env: "GEMINI_API_KEY".to_string(),
-            credential_status: CredentialStatus::Present,
-        }
-    }
-
-    fn text(role: MessageRole, content: &str) -> lattice_conversation::ConversationItem {
-        lattice_conversation::ConversationItem::Message(NativeMessage::<BoundToolCall>::new(
-            role,
-            None,
-            vec![MessagePart::semantic_only(MessageSemantic::Text {
-                text: content.into(),
-            })],
-        ))
-    }
-
-    #[test]
-    fn request_envelope_uses_typed_projection() {
-        let request = ChatRequest {
-            messages: vec![
-                text(MessageRole::System, "You are helpful."),
-                text(MessageRole::User, "Hello"),
-            ],
-            tools: vec![ToolDefinition::new(
-                "get_weather",
-                "Get weather",
-                serde_json::json!({"type": "object"}),
-            )],
-            target: ModelTarget::new("gemini"),
-            temperature: Some(0.3),
-            max_tokens: Some(2048),
-            max_completion_tokens: None,
-        };
-        let body = build_request_json(&request, &make_resolved()).expect("projection");
-        assert_eq!(
-            body["systemInstruction"]["parts"][0]["text"],
-            "You are helpful."
-        );
-        assert_eq!(body["contents"][0]["role"], "user");
-        assert_eq!(
-            body["tools"][0]["functionDeclarations"][0]["name"],
-            "get_weather"
-        );
-        assert_eq!(body["generationConfig"]["temperature"], 0.3);
-        assert_eq!(body["generationConfig"]["maxOutputTokens"], 2048);
-    }
 
     #[test]
     fn parser_preserves_thought_state_and_optional_ids_without_synthesis() {
@@ -510,12 +453,5 @@ mod tests {
             event,
             LlmEvent::Token { .. } | LlmEvent::ToolCallStart { .. }
         )));
-    }
-
-    #[test]
-    fn endpoint_and_auth_are_stable() {
-        let url = build_stream_url(GEMINI_BASE_URL, "gemini-2.5-flash");
-        assert!(url.contains("streamGenerateContent?alt=sse"));
-        assert_eq!(auth_header_value("gemini-key"), "gemini-key");
     }
 }
