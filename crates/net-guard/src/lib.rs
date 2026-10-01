@@ -292,25 +292,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reject_file_scheme() {
-        assert!(validate_base_url("file:///etc/passwd").is_err());
-    }
-
-    #[test]
-    fn reject_userinfo() {
-        assert!(validate_base_url("https://user:pass@api.example.com/v1").is_err());
-    }
-
-    #[test]
-    fn reject_plain_http_remote() {
-        assert!(validate_base_url("http://example.com/v1").is_err());
-    }
-
-    #[test]
-    fn reject_private_ipv4() {
-        assert!(validate_base_url("https://10.0.0.1/v1").is_err());
-        assert!(validate_base_url("https://192.168.1.1/v1").is_err());
-        assert!(validate_base_url("https://172.16.0.1/v1").is_err());
+    fn base_url_rejects_unsafe_targets() {
+        for (name, url, expected_message_substring) in [
+            ("file_scheme", "file:///etc/passwd", None),
+            ("userinfo", "https://user:pass@api.example.com/v1", None),
+            ("remote_http", "http://example.com/v1", None),
+            ("private_10", "https://10.0.0.1/v1", None),
+            ("private_192", "https://192.168.1.1/v1", None),
+            ("private_172", "https://172.16.0.1/v1", None),
+            ("ftp_scheme", "ftp://example.com/v1", None),
+            ("empty_host", "https://", None),
+            ("rebinding_nip", "https://nip.io/v1", Some("rebinding")),
+            (
+                "rebinding_subdomain",
+                "https://sub.nip.io/v1",
+                Some("rebinding"),
+            ),
+            ("rebinding_xip", "https://xip.io/v1", Some("rebinding")),
+            ("rebinding_sslip", "https://sslip.io/v1", Some("rebinding")),
+            (
+                "rebinding_localtest",
+                "https://localtest.me/v1",
+                Some("rebinding"),
+            ),
+            ("rebinding_lvh", "https://lvh.me/v1", Some("rebinding")),
+            ("rebinding_vcap", "https://vcap.me/v1", Some("rebinding")),
+            (
+                "rebinding_burrow",
+                "https://burrow.io/v1",
+                Some("rebinding"),
+            ),
+            ("empty_url", "", Some("must not be empty")),
+        ] {
+            let err =
+                validate_base_url(url).expect_err(&format!("{name}: {url:?} must be rejected"));
+            if let Some(substring) = expected_message_substring {
+                assert!(
+                    err.to_string().contains(substring),
+                    "{name}: {url:?}: got {err}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -367,45 +389,5 @@ mod tests {
                 "{raw} must deny Tool egress"
             );
         }
-    }
-
-    #[test]
-    fn reject_bad_scheme() {
-        assert!(validate_base_url("ftp://example.com/v1").is_err());
-    }
-
-    #[test]
-    fn reject_empty_host_after_scheme() {
-        assert!(validate_base_url("https://").is_err());
-    }
-
-    #[test]
-    fn reject_dns_rebinding_domains_in_base_url() {
-        for host in [
-            "nip.io",
-            "sub.nip.io",
-            "xip.io",
-            "sslip.io",
-            "localtest.me",
-            "lvh.me",
-            "vcap.me",
-            "burrow.io",
-        ] {
-            let url = format!("https://{host}/v1");
-            let err = validate_base_url(&url).expect_err("rebinding domain must be rejected");
-            assert!(
-                err.to_string().contains("rebinding"),
-                "expected rebinding error for {host}, got: {err}"
-            );
-        }
-    }
-
-    #[test]
-    fn reject_empty_url() {
-        let err = validate_base_url("").expect_err("empty base_url must be rejected");
-        assert!(
-            err.to_string().contains("must not be empty"),
-            "error should explain empty url, got: {err}"
-        );
     }
 }

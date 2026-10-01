@@ -361,65 +361,71 @@ mod tests {
     }
 
     #[test]
-    fn rejects_uppercase() {
-        let upper = VALID_V4.to_uppercase();
-        assert!(matches!(
-            InvocationId::parse(&upper),
-            Err(IdParseError::InvalidCharacter { .. })
-        ));
-    }
-
-    #[test]
-    fn rejects_unhyphenated() {
-        let simple = VALID_V4.replace('-', "");
-        assert!(matches!(
-            InvocationId::parse(&simple),
-            Err(IdParseError::InvalidLength { .. })
-        ));
-    }
-
-    #[test]
-    fn rejects_misplaced_separator() {
-        let bad = "3f8b2c1a7-d4e-4f5a-8b9c-0d1e2f3a4b5c";
-        assert!(matches!(
-            InvocationId::parse(bad),
-            Err(IdParseError::InvalidSeparator { position: 8 })
-        ));
-    }
-
-    #[test]
-    fn rejects_non_hex_character() {
-        let bad = "3f8b2c1z-7d4e-4f5a-8b9c-0d1e2f3a4b5c";
-        assert!(matches!(
-            InvocationId::parse(bad),
-            Err(IdParseError::InvalidCharacter { position: 7 })
-        ));
-    }
-
-    #[test]
-    fn rejects_non_rfc4122_variant() {
-        // Variant nibble 'c' is not one of 8/9/a/b.
-        let bad = "3f8b2c1a-7d4e-4f5a-cb9c-0d1e2f3a4b5c";
-        assert!(matches!(
-            InvocationId::parse(bad),
-            Err(IdParseError::InvalidVariant { .. })
-        ));
-    }
-
-    #[test]
-    fn rejects_wrong_lengths() {
-        assert!(matches!(
-            InvocationId::parse(""),
-            Err(IdParseError::InvalidLength { .. })
-        ));
-        assert!(matches!(
-            InvocationId::parse(&format!("{VALID_V4}x")),
-            Err(IdParseError::InvalidLength { .. })
-        ));
-        assert!(matches!(
-            InvocationId::parse(&VALID_V4[..35]),
-            Err(IdParseError::InvalidLength { .. })
-        ));
+    fn invocation_id_rejects_noncanonical_spellings() {
+        enum ExpectedError {
+            Length,
+            Separator(usize),
+            Character(Option<usize>),
+            Variant,
+        }
+        for (name, input, expected) in [
+            (
+                "rejects_uppercase",
+                VALID_V4.to_uppercase(),
+                ExpectedError::Character(None),
+            ),
+            (
+                "rejects_unhyphenated",
+                VALID_V4.replace('-', ""),
+                ExpectedError::Length,
+            ),
+            (
+                "rejects_misplaced_separator",
+                "3f8b2c1a7-d4e-4f5a-8b9c-0d1e2f3a4b5c".into(),
+                ExpectedError::Separator(8),
+            ),
+            (
+                "rejects_non_hex_character",
+                "3f8b2c1z-7d4e-4f5a-8b9c-0d1e2f3a4b5c".into(),
+                ExpectedError::Character(Some(7)),
+            ),
+            // Variant nibble 'c' is not one of 8/9/a/b.
+            (
+                "rejects_non_rfc4122_variant",
+                "3f8b2c1a-7d4e-4f5a-cb9c-0d1e2f3a4b5c".into(),
+                ExpectedError::Variant,
+            ),
+            (
+                "rejects_wrong_lengths_empty",
+                "".into(),
+                ExpectedError::Length,
+            ),
+            (
+                "rejects_wrong_lengths_too_long",
+                format!("{VALID_V4}x"),
+                ExpectedError::Length,
+            ),
+            (
+                "rejects_wrong_lengths_too_short",
+                VALID_V4[..35].into(),
+                ExpectedError::Length,
+            ),
+        ] {
+            let result = InvocationId::parse(&input);
+            let matches_expected = match expected {
+                ExpectedError::Length => matches!(result, Err(IdParseError::InvalidLength { .. })),
+                ExpectedError::Separator(want) => {
+                    matches!(result, Err(IdParseError::InvalidSeparator { position }) if position == want)
+                }
+                ExpectedError::Character(want) => {
+                    matches!(result, Err(IdParseError::InvalidCharacter { position }) if want.is_none_or(|want| position == want))
+                }
+                ExpectedError::Variant => {
+                    matches!(result, Err(IdParseError::InvalidVariant { .. }))
+                }
+            };
+            assert!(matches_expected, "{name}: got {result:?}");
+        }
     }
 
     #[test]

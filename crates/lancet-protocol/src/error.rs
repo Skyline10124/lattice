@@ -403,9 +403,11 @@ mod tests {
     }
 
     #[test]
-    fn family_code_round_trips_through_jsonrpc_error_response() {
+    fn cep_error_round_trips_through_jsonrpc_response() {
         let families = [
             (
+                "validation",
+                "test",
                 CepErrorCode::SchemaMismatch,
                 CepErrorData::Validation(ValidationErrorData {
                     field: "path".into(),
@@ -413,6 +415,8 @@ mod tests {
                 }),
             ),
             (
+                "permission",
+                "test",
                 CepErrorCode::CapabilityNotGranted,
                 CepErrorData::Permission(PermissionErrorData {
                     required_capability: "write_path".into(),
@@ -420,6 +424,8 @@ mod tests {
                 }),
             ),
             (
+                "execution",
+                "test",
                 CepErrorCode::ExecutionFailed,
                 CepErrorData::Execution(ExecutionErrorData {
                     operation: "mutate.edit".into(),
@@ -427,6 +433,8 @@ mod tests {
                 }),
             ),
             (
+                "state",
+                "test",
                 CepErrorCode::ResourceConflict,
                 CepErrorData::State(StateErrorData {
                     resource: "workspace".into(),
@@ -434,6 +442,8 @@ mod tests {
                 }),
             ),
             (
+                "guard",
+                "test",
                 CepErrorCode::GuardDenied,
                 CepErrorData::Guard(GuardErrorData {
                     method: "observe.workspace".into(),
@@ -441,6 +451,8 @@ mod tests {
                 }),
             ),
             (
+                "capability",
+                "test",
                 CepErrorCode::CapabilityViolation,
                 CepErrorData::Capability(Box::new(CapabilityErrorData {
                     method: "observe.workspace".into(),
@@ -452,18 +464,30 @@ mod tests {
                 })),
             ),
             (
+                "reserved",
+                "test",
                 CepErrorCode::Reserved,
                 CepErrorData::Reserved(ReservedErrorData {
                     code: "future".into(),
                     detail: "reserved".into(),
                 }),
             ),
+            (
+                "tool_trap",
+                "guest trap",
+                CepErrorCode::ToolTrap,
+                CepErrorData::ToolExecution(ToolExecutionErrorData {
+                    method: "noop.echo".into(),
+                    category: "trap".into(),
+                    resource: None,
+                }),
+            ),
         ];
 
-        for (code, data) in families {
+        for (name, message, code, data) in families {
             let err = CepError {
                 code,
-                message: "test".into(),
+                message: message.into(),
                 data,
                 retriability: Retriability::Permanent,
             };
@@ -474,16 +498,20 @@ mod tests {
                     data: Some(err.clone()),
                 },
                 id: crate::jsonrpc::Id::parse("11111111-1111-4111-8111-111111111111")
-                    .expect("valid InvocationId"),
+                    .unwrap_or_else(|err| panic!("{name}: invalid InvocationId: {err}")),
             };
-            let serialized = serde_json::to_string(&resp).unwrap();
-            let parsed: crate::frame::ToolResult = serde_json::from_str(&serialized).unwrap();
+            let serialized = serde_json::to_string(&resp)
+                .unwrap_or_else(|err| panic!("{name}: serialization failed: {err}"));
+            let parsed: crate::frame::ToolResult = serde_json::from_str(&serialized)
+                .unwrap_or_else(|err| panic!("{name}: deserialization failed: {err}"));
             if let crate::jsonrpc::Response::Error { error, .. } = parsed {
-                let data = error.data.unwrap();
-                assert_eq!(data.code, err.code);
-                assert_eq!(data.retriability, Retriability::Permanent);
+                let data = error
+                    .data
+                    .unwrap_or_else(|| panic!("{name}: missing error data"));
+                assert_eq!(data.code, err.code, "{name}");
+                assert_eq!(data.retriability, Retriability::Permanent, "{name}");
             } else {
-                panic!("expected error response");
+                panic!("{name}: expected error response");
             }
         }
     }
@@ -608,37 +636,5 @@ mod tests {
         let res_wrapped = CepErrorData::ToolExecution(res_data);
         let res_value = serde_json::to_value(&res_wrapped).unwrap();
         assert_eq!(res_value["resource"], "memory");
-    }
-
-    #[test]
-    fn tool_execution_error_round_trips_through_jsonrpc_response() {
-        let err = CepError {
-            code: CepErrorCode::ToolTrap,
-            message: "guest trap".into(),
-            data: CepErrorData::ToolExecution(ToolExecutionErrorData {
-                method: "noop.echo".into(),
-                category: "trap".into(),
-                resource: None,
-            }),
-            retriability: Retriability::Permanent,
-        };
-        let resp: crate::frame::ToolResult = crate::jsonrpc::Response::Error {
-            error: crate::jsonrpc::ErrorObject {
-                code: err.code.as_i32(),
-                message: err.message.clone(),
-                data: Some(err.clone()),
-            },
-            id: crate::jsonrpc::Id::parse("11111111-1111-4111-8111-111111111111")
-                .expect("valid InvocationId"),
-        };
-        let serialized = serde_json::to_string(&resp).unwrap();
-        let parsed: crate::frame::ToolResult = serde_json::from_str(&serialized).unwrap();
-        if let crate::jsonrpc::Response::Error { error, .. } = parsed {
-            let data = error.data.unwrap();
-            assert_eq!(data.code, CepErrorCode::ToolTrap);
-            assert_eq!(data.retriability, Retriability::Permanent);
-        } else {
-            panic!("expected error response");
-        }
     }
 }
