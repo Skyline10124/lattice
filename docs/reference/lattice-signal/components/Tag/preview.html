@@ -1,0 +1,45 @@
+<!-- @dsCard group="Status" height=936 -->
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Tag — preview</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500&display=swap">
+<style>
+  /* each theme pinned on its own section, so both show whichever theme the page is in */
+  .theme { background: var(--paper); color: var(--ink); }
+  .theme-name { margin: 0; padding: var(--space-4) var(--space-6) 0; font-size: 12px; line-height: 16px; font-weight: 500; letter-spacing: .28em; color: var(--ink-muted); }
+  body { margin: 0; background: var(--paper); color: var(--ink); font-family: var(--font-sans); }
+  .stage { padding: var(--space-6); display: grid; gap: var(--space-4); }
+  .row { display: flex; flex-wrap: wrap; gap: var(--space-4); align-items: center; }
+  .msg { font-size: 15px; line-height: 24px; }
+  code { font-family: var(--font-mono); font-size: .93em; }
+  .k { margin: 0; font-size: 12px; line-height: 16px; font-weight: 500; letter-spacing: .28em; color: var(--ink-muted); }
+  .head { display: flex; align-items: center; gap: var(--space-2); margin: 0; font-size: 20px; line-height: 28px; font-weight: 500; }
+  .list { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
+  .list li { display: flex; align-items: center; gap: var(--space-4); font-size: 15px; line-height: 24px; }
+  .list .ls-tag { flex: none; min-width: 7.5em; text-align: center; }
+</style>
+</head>
+<body>
+<section class="theme" data-theme="light"><p class="theme-name">PAPER</p><div id="paper" class="stage"></div></section>
+<section class="theme" data-theme="tape"><p class="theme-name">TAPE</p><div id="tape" class="stage"></div></section>
+<script>
+  var L = window.LatticeSignal, h = React.createElement;
+  function line(tone, text) { return h('div', { className: 'row' }, h(L.Tag, { tone: tone }), h('span', { className: 'msg' }, text)); }
+  function item(tone, word, text) { return h('li', null, h(L.Tag, { tone: tone }, word), text); }
+  function demo() { return h(React.Fragment, null,
+      h('p', { className: 'k' }, 'STATE'),
+      h('div', { className: 'row' }, h(L.Tag, { tone: 'prompt' }), h(L.Tag, { tone: 'warn' }), h(L.Tag, { tone: 'error' }), h(L.Tag, { tone: 'ok' })),
+      line('warn', 'Context window at 92%.'),
+      line('error', ['Could not write ', h('code', { key: 'p' }, '~/.lattice/session.db'), '.']),
+      h('p', { className: 'k' }, 'EMPHASIS'),
+      h('div', { className: 'row' }, h(L.Tag, { tone: 'iris' }, 'Iris'), h(L.Tag, { tone: 'red' }, 'Red'), h(L.Tag, { tone: 'amber' }, 'Amber'), h(L.Tag, { tone: 'cyan' }, 'Cyan'), h(L.Tag, { tone: 'ink' }, 'Ink')),
+      h('h3', { className: 'head' }, 'Session replay', h(L.Tag, { tone: 'amber' }, 'New')),
+      h('ul', { className: 'list' },
+        item('red', 'Live', 'Agent run streaming from Tokyo.'),
+        item('iris', 'Tool', 'Shell, files and browser.'),
+        item('cyan', 'Memory', 'Recalled across sessions.'),
+        item('ink', 'Beta', 'Offline mode.'))); }
+  ['paper', 'tape'].forEach(function (id) { ReactDOM.createRoot(document.getElementById(id)).render(demo()); });
+</script>
+</body>
+</html>

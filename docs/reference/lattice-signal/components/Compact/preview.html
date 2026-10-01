@@ -1,0 +1,100 @@
+<!-- @dsCard group="Product" height=1016 -->
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>Compact — preview</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500&display=swap">
+<style>
+  /* each theme pinned on its own section, so both show whichever theme the page is in */
+  .theme { background: var(--field); color: var(--ink); }
+  .theme-name { margin: 0; padding: var(--space-4) var(--space-6) 0; font-family: var(--font-sans); font-size: 12px; line-height: 16px; font-weight: 500; letter-spacing: .28em; color: var(--ink-muted); }
+  body { margin: 0; background: var(--field); font-family: var(--font-sans); }
+  .stage { padding: var(--space-4) var(--space-6) var(--space-6); }
+
+  /* A session window at product density: everything inside .ls-compact */
+  .win { display: grid; grid-template-columns: 232px minmax(0, 1fr); border: var(--stroke-hairline) solid var(--line); background: var(--paper); color: var(--ink); font-family: var(--font-sans); }
+  .bar { grid-column: 1 / -1; display: flex; align-items: center; gap: var(--space-3); height: 40px; padding: 0 var(--space-3); border-bottom: var(--stroke-hairline) solid var(--line); }
+  .mark { font-family: var(--font-mono); font-size: 13px; font-weight: 500; letter-spacing: .08em; }
+  .path { font-family: var(--font-mono); font-size: 12px; line-height: 16px; color: var(--ink-muted); }
+  .grow { flex: 1; }
+  .search { width: 200px; }
+  .side { border-right: var(--stroke-hairline) solid var(--line); padding: var(--space-3) 0; }
+  .label { margin: 0; padding: 0 var(--space-3) var(--space-1); font-size: 11px; line-height: 16px; font-weight: 500; letter-spacing: .08em; color: var(--ink-muted); }
+  .list { margin: 0; padding: 0; list-style: none; }
+  .item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0 var(--space-2); width: 100%; margin: 0; padding: var(--space-1) var(--space-3); border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+  .item:hover { background: var(--control); }
+  .item[aria-current="true"] { background: var(--glow); }
+  .item:focus-visible { outline: var(--stroke-focus) solid var(--signal); outline-offset: calc(-1 * var(--stroke-focus)); }
+  .item-title { grid-column: 1; grid-row: 1; font-size: 13px; line-height: 20px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .item-meta { grid-column: 1; grid-row: 2; font-family: var(--font-mono); font-size: 12px; line-height: 16px; color: var(--ink-muted); }
+  .item .ls-tag { grid-column: 2; grid-row: 1 / span 2; align-self: center; justify-self: end; }
+  .main { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; padding: var(--space-3); }
+  .head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); }
+  .title { margin: 0; font-size: 14px; line-height: 20px; font-weight: 500; }
+  .composer { display: flex; gap: var(--space-2); align-items: flex-start; }
+  .composer .ls-field { flex: 1; }
+  .mono { font-family: var(--font-mono); }
+</style>
+</head>
+<body>
+<section class="theme" data-theme="light"><p class="theme-name">PAPER</p><div id="paper" class="stage"></div></section>
+<section class="theme" data-theme="tape"><p class="theme-name">TAPE</p><div id="tape" class="stage"></div></section>
+<script>
+  var L = window.LatticeSignal, h = React.createElement;
+  var SESSIONS = [
+    { title: '整理 README 的安装说明', meta: '7f3a · 09:14', tone: 'prompt', word: 'Run', current: true },
+    { title: '为 redb 会话库补测试', meta: 'c21e · 昨天', tone: 'ok' },
+    { title: '排查后台重连失败', meta: '9b40 · 昨天', tone: 'error' },
+    { title: '概括项目结构', meta: '2d77 · 周一', tone: 'ok' },
+    { title: '梳理工具权限配置', meta: 'e05c · 周一', tone: 'ok' }
+  ];
+  var COLS = [
+    { key: 'n', label: '#', mono: true, align: 'right' },
+    { key: 'op', label: '操作' },
+    { key: 'target', label: '目标', mono: true },
+    { key: 'state', label: '状态', render: function (r) { return h(L.Tag, { tone: r.tone }, r.word); } },
+    { key: 't', label: '用时', mono: true, align: 'right' }
+  ];
+  var ROWS = [
+    { n: '01', op: '读取', target: 'README.md', tone: 'ok', t: '0.2s' },
+    { n: '02', op: '搜索', target: '"cargo install"', tone: 'ok', t: '0.4s' },
+    { n: '03', op: '读取', target: 'rust-toolchain.toml', tone: 'ok', t: '0.1s' },
+    { n: '04', op: '编辑', target: 'docs/install.md', tone: 'error', t: '1.2s' },
+    { n: '05', op: '编辑', target: 'README.md', tone: 'prompt', word: 'Run', t: '—' }
+  ];
+  function win() {
+    return h('div', { className: 'win ls-compact' },
+      h('div', { className: 'bar' },
+        h('span', { className: 'mark' }, 'LATTICE'),
+        h('span', { className: 'path' }, '~/code/lattice'),
+        h('span', { className: 'grow' }),
+        h(L.Input, { className: 'search', placeholder: '搜索会话', 'aria-label': '搜索会话' }),
+        h(L.Button, { variant: 'secondary' }, h(L.Icon, { name: 'add', size: 16 }), '新会话')),
+      h('nav', { className: 'side', 'aria-label': '会话' },
+        h('p', { className: 'label' }, 'SESSIONS · 5'),
+        h('ul', { className: 'list' }, SESSIONS.map(function (s, i) {
+          return h('li', { key: i }, h('button', { type: 'button', className: 'item', 'aria-current': s.current ? 'true' : undefined },
+            h('span', { className: 'item-title' }, s.title),
+            h(L.Tag, { tone: s.tone }, s.word),
+            h('span', { className: 'item-meta' }, s.meta)));
+        }))),
+      h('main', { className: 'main' },
+        h('div', { className: 'head' },
+          h('h3', { className: 'title' }, '整理 README 的安装说明'),
+          h('span', { className: 'path' }, 'turn_0412'),
+          h('span', { className: 'grow' }),
+          h(L.Segmented, { options: ['全部', '工具', '错误'], 'aria-label': '筛选' }),
+          h(L.Button, { variant: 'secondary' }, h(L.Icon, { name: 'stop', size: 16 }), '取消')),
+        h(L.Progress, { label: 'CONTEXT · K TOKENS', max: 200, cells: 40, segments: [
+          { label: 'System', value: 12 }, { label: 'Tools', value: 38 }, { label: 'Conversation', value: 96 }, { label: 'Cache', value: 22 }] }),
+        h(L.Notice, { tone: 'error' }, '写入 ', h('code', null, 'docs/install.md'), ' 被拒绝：该路径不在可编辑范围内。'),
+        h(L.Table, { columns: COLS, rows: ROWS, rowKey: 'n' }),
+        h('div', { className: 'composer' },
+          h(L.Input, { placeholder: '输入下一条指令…', 'aria-label': '指令' }),
+          h(L.Button, null, h(L.Icon, { name: 'send', size: 16 }), '发送'))));
+  }
+  ['paper', 'tape'].forEach(function (id) {
+    ReactDOM.createRoot(document.getElementById(id), { identifierPrefix: id + '-' }).render(win());
+  });
+</script>
+</body>
+</html>

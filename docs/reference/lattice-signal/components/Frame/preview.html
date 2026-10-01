@@ -1,0 +1,34 @@
+<!-- @dsCard group="Layout" height=700 -->
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Frame — preview</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500&display=swap">
+<style>
+  /* each theme pinned on its own section, so both show whichever theme the page is in */
+  .theme { background: var(--field); color: var(--ink); }
+  .theme-name { margin: 0; padding: var(--space-4) var(--space-6) 0; font-size: 12px; line-height: 16px; font-weight: 500; letter-spacing: .28em; color: var(--ink-muted); }
+  body { margin: 0; background: var(--field); color: var(--ink); font-family: var(--font-sans); }
+  .stage { padding: var(--space-6); display: grid; gap: var(--space-6); }
+  .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--space-4); }
+  code { font-family: var(--font-mono); font-size: 14px; line-height: 22px; }
+  .k { margin: 0 0 var(--space-2); font-size: 12px; line-height: 16px; font-weight: 500; letter-spacing: .28em; color: var(--ink-muted); }
+  .v { margin: 0; font-size: 15px; line-height: 24px; }
+</style>
+</head>
+<body>
+<section class="theme" data-theme="light"><p class="theme-name">PAPER</p><div id="paper" class="stage"></div></section>
+<section class="theme" data-theme="tape"><p class="theme-name">TAPE</p><div id="tape" class="stage"></div></section>
+<script>
+  var L = window.LatticeSignal, h = React.createElement;
+  function panel(k, v) { return h(L.Frame, { variant: 'plain' }, h('p', { className: 'k' }, k), v); }
+  function demo() { return h(React.Fragment, null,
+      h(L.Frame, null,
+        h('p', { className: 'k' }, 'CHECKPOINT · 2026.09.29'),
+        h('p', { className: 'v' }, 'The agent resumes from its last checkpoint.')),
+      h('div', { className: 'row' },
+        panel('SESSION', h('p', { className: 'v' }, 'Running since 09:14.')),
+        panel('STORE', h('code', null, '~/.lattice/session.db')))); }
+  ['paper', 'tape'].forEach(function (id) { ReactDOM.createRoot(document.getElementById(id)).render(demo()); });
+</script>
+</body>
+</html>

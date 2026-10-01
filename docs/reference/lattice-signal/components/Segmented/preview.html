@@ -1,0 +1,27 @@
+<!-- @dsCard group="Forms" height=288 -->
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Segmented — preview</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500&display=swap">
+<style>
+  /* each theme pinned on its own section, so both show whichever theme the page is in */
+  .theme { background: var(--paper); color: var(--ink); }
+  .theme-name { margin: 0; padding: var(--space-4) var(--space-6) 0; font-family: var(--font-sans); font-size: 12px; line-height: 16px; font-weight: 500; letter-spacing: .28em; color: var(--ink-muted); }
+  body { margin: 0; background: var(--paper); font-family: var(--font-sans); }
+  .stage { padding: var(--space-6); display: flex; flex-wrap: wrap; gap: var(--space-4) var(--space-12); align-items: flex-start; }
+</style>
+</head>
+<body>
+<section class="theme" data-theme="light"><p class="theme-name">PAPER</p><div id="paper" class="stage"></div></section>
+<section class="theme" data-theme="tape"><p class="theme-name">TAPE</p><div id="tape" class="stage"></div></section>
+<script>
+  var L = window.LatticeSignal, h = React.createElement;
+  function demo() { return h(React.Fragment, null,
+    h(L.Segmented, { label: 'View', options: ['List', 'Grid', 'Timeline'], defaultValue: 'Grid' }),
+    h(L.Segmented, { label: 'Range', options: ['24h', '7d', '30d', { value: '90d', label: '90d', disabled: true }], defaultValue: '7d' })); }
+  ['paper', 'tape'].forEach(function (id) {
+    ReactDOM.createRoot(document.getElementById(id), { identifierPrefix: id + '-' }).render(demo());
+  });
+</script>
+</body>
+</html>

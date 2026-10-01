@@ -1,0 +1,102 @@
+<!-- @dsCard group="Foundations" height=1840 page -->
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Dither — preview</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@500&display=swap">
+<style>
+  /* each theme pinned on its own section, so both show whichever theme the page is in */
+  body { margin: 0; background: var(--field); }
+  .theme { background: var(--field); overflow: hidden; padding-bottom: var(--space-6); }
+  .theme-name, .use { margin: 0; padding: var(--space-4) var(--space-6) var(--space-2); font-family: var(--font-sans); font-size: 12px; line-height: 16px; font-weight: 500; letter-spacing: .28em; color: var(--ink-muted); }
+  .use { padding-top: var(--space-2); }
+  /* drawn at 1:1 so every pixel lands on whole device pixels; wider cards centre it, narrower ones crop */
+  .theme svg { display: block; margin: 0 auto; }
+  .t1 { fill: var(--haze); }
+  .t2 { fill: var(--glow); }
+  .t3 { fill: var(--signal); }
+  .t4 { fill: var(--ink); }
+  .ta { fill: var(--vhs-amber); }
+</style>
+</head>
+<body>
+<section class="theme" data-theme="light"><p class="theme-name">PAPER</p><div id="paper"></div></section>
+<section class="theme" data-theme="tape"><p class="theme-name">TAPE</p><div id="tape"></div></section>
+<script>
+  // Multi-level ordered dither on one page-wide pixel grid. A tone t in [0, 1] spans four tiers —
+  // haze, glow, signal, ink — and each pixel takes the tier below or above its tone by its Bayer
+  // threshold, so neighbouring tiers dither into each other. Tier 0 is no pixel: the field shows.
+  var BAYER = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+  function tier(t, gx, gy) {
+    var s = Math.max(0, Math.min(1, t)) * 4, k = Math.floor(s);
+    return Math.min(4, k + ((s - k) * 16 > BAYER[gy % 4][gx % 4] ? 1 : 0));
+  }
+  // paints tone(x, y) over a w x h box into four paths, one per tier; an optional accent(x, y) gives
+  // the density of one cassette colour, dithered on its own and drawn in place of the iris tiers
+  function paint(w, h, px, tone, accent) {
+    var d = ['', '', '', '', ''], a = '';
+    for (var gy = 0; gy < h / px; gy++) for (var gx = 0; gx < w / px; gx++) {
+      var ad = accent ? accent((gx + 0.5) * px, (gy + 0.5) * px) : 0;
+      if (ad > 0) {
+        if (ad * 16 > BAYER[gy % 4][gx % 4]) { a += 'M' + gx * px + ' ' + gy * px + 'h' + px + 'v' + px + 'h-' + px + 'z'; continue; }
+      }
+      var t = tone((gx + 0.5) * px, (gy + 0.5) * px);
+      if (t <= 0) continue;
+      var k = tier(t, gx, gy);
+      if (k) d[k] += 'M' + gx * px + ' ' + gy * px + 'h' + px + 'v' + px + 'h-' + px + 'z';
+    }
+    return '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '" aria-hidden="true" shape-rendering="crispEdges">' +
+      [1, 2, 3, 4].map(function (k) { return '<path class="t' + k + '" d="' + d[k] + '"/>'; }).join('') +
+      (a ? '<path class="ta" d="' + a + '"/>' : '') + '</svg>';
+  }
+
+  var W = 720;
+  // Background: glow points on a lattice, capped at 0.45 so only haze and glow appear
+  var POINTS = [[72, 70, 64], [264, 70, 26], [456, 70, 26], [648, 70, 64], [168, 190, 26], [360, 190, 40], [552, 190, 26]];
+  function background(x, y) {
+    var t = 0;
+    POINTS.forEach(function (p) {
+      var d = Math.hypot(x - p[0], y - p[1]) / p[2];
+      if (d < 1) t = Math.max(t, 0.45 * (1 - d) * (1 - d));
+    });
+    return t;
+  }
+  // Image: the full scale — a tone ramp, then a sphere lit from the upper left.
+  // Tone is distance from the ground: on Paper the shadow is furthest (darkest), on Tape the light is (brightest).
+  function ramp(x) { return x / W; }
+  var LIGHT = [-0.5, -0.6, 0.62];
+  function sphere(dark) {
+    return function (x, y) {
+      var nx = (x - 360) / 96, ny = (y - 112) / 96, r = nx * nx + ny * ny;
+      if (r >= 1) return 0;
+      var lit = Math.max(0, nx * LIGHT[0] + ny * LIGHT[1] + Math.sqrt(1 - r) * LIGHT[2]);
+      return 0.12 + 0.88 * (dark ? lit : 1 - lit);
+    };
+  }
+
+  // Picture with one accent: a sun in vhs-amber setting on an iris horizon. The sun is cut by bands that
+  // widen towards the horizon; the accent covers well under a fifth of the picture.
+  var HORIZON = 168;
+  function sunset(x, y) {
+    if (y < HORIZON) return 0.32 * Math.pow(y / HORIZON, 3);
+    return 0.5 + 0.5 * (y - HORIZON) / (224 - HORIZON);
+  }
+  function sun(x, y) {
+    var r = Math.hypot(x - 360, y - 150);
+    if (r >= 84 || y >= HORIZON) return 0;
+    var gap = Math.max(0, (y - 92) / 10);
+    // solid at the crown, thinning towards the horizon so it dithers into the sky like any other tone
+    return (y % 16) < gap ? 0 : 1 - 0.6 * Math.max(0, (y - 66) / (HORIZON - 66));
+  }
+
+  ['paper', 'tape'].forEach(function (id) {
+    var el = document.getElementById(id);
+    var px = parseFloat(getComputedStyle(el).getPropertyValue('--dither-pixel')) || 2;
+    el.innerHTML =
+      '<p class="use">BACKGROUND · HAZE AND GLOW ONLY</p>' + paint(W, 256, px, background) +
+      '<p class="use">IMAGE · FULL SCALE</p>' + paint(W, 32, px, ramp) +
+      '<div style="height: 16px"></div>' + paint(W, 224, px, sphere(id === 'tape')) +
+      '<p class="use">IMAGE · ONE CASSETTE ACCENT</p>' + paint(W, 224, px, sunset, sun);
+  });
+</script>
+</body>
+</html>

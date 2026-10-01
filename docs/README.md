@@ -36,6 +36,7 @@
 
 - [领域术语](reference/glossary.md)：项目唯一术语表，保留英文名称、中文定义、易混淆称呼及合同章节入口。
 - [Cassette Futurism 配色资产](reference/cassette-futurism-palette.md)：完整色表、色阶语义与配色示例；TUI 实际用色见其合同。
+- [Lattice Signal 设计系统](reference/lattice-signal/README.md)：网页与 GPUI 共用的视觉规范、token、两种密度和网页端参考组件。
 - [Agent 辅助资料](agents/)：任务系统、标签映射与领域文档读取资料。
 
 ## 决策与历史

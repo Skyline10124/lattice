@@ -1,0 +1,41 @@
+<!-- @dsCard group="Data" height=602 -->
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Table — preview</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500&display=swap">
+<style>
+  /* each theme pinned on its own section, so both show whichever theme the page is in */
+  .theme { background: var(--paper); color: var(--ink); }
+  .theme-name { margin: 0; padding: var(--space-4) var(--space-6) 0; font-family: var(--font-sans); font-size: 12px; line-height: 16px; font-weight: 500; letter-spacing: .28em; color: var(--ink-muted); }
+  body { margin: 0; background: var(--paper); font-family: var(--font-sans); }
+  .stage { padding: var(--space-6); overflow-x: auto; }
+</style>
+</head>
+<body>
+<section class="theme" data-theme="light"><p class="theme-name">PAPER</p><div id="paper" class="stage"></div></section>
+<section class="theme" data-theme="tape"><p class="theme-name">TAPE</p><div id="tape" class="stage"></div></section>
+<script>
+  var L = window.LatticeSignal, h = React.createElement;
+  function demo() { return h(L.Table, {
+    caption: 'Sessions',
+    rowKey: 'id',
+    columns: [
+      { key: 'id', label: 'Session', mono: true },
+      { key: 'agent', label: 'Agent' },
+      { key: 'state', label: 'State', render: function (r) { return h(L.Tag, { tone: r.state }); } },
+      { key: 'calls', label: 'Tool calls', align: 'right', mono: true },
+      { key: 'time', label: 'Duration', align: 'right', mono: true }
+    ],
+    rows: [
+      { id: 's-0412', agent: 'Nightly sync', state: 'ok', calls: 128, time: '00:14:07' },
+      { id: 's-0413', agent: 'Release notes', state: 'warn', calls: 42, time: '00:03:51' },
+      { id: 's-0414', agent: 'Index workspace', state: 'prompt', calls: 7, time: '00:00:48' },
+      { id: 's-0415', agent: 'Deploy preview', state: 'error', calls: 3, time: '00:00:09' }
+    ]
+  }); }
+  ['paper', 'tape'].forEach(function (id) {
+    ReactDOM.createRoot(document.getElementById(id), { identifierPrefix: id + '-' }).render(demo());
+  });
+</script>
+</body>
+</html>

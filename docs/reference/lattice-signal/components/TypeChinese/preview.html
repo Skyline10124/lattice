@@ -1,0 +1,43 @@
+<!-- @dsCard group="Foundations" height=1584 page -->
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>中文排版 — preview</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500&family=IBM+Plex+Serif:wght@400;500&family=Noto+Serif+SC:wght@400;500&display=swap">
+<link rel="stylesheet" href="../../fonts/sarasa-ui-sc/sarasa-ui-sc.css">
+<style>
+  /* each theme pinned on its own section, so both show whichever theme the page is in */
+  .theme { background: var(--paper); color: var(--ink); }
+  .theme-name { margin: 0; padding: var(--space-4) var(--space-6) 0; font-family: var(--font-sans); font-size: 12px; line-height: 16px; font-weight: 500; letter-spacing: .28em; color: var(--ink-muted); }
+  body { margin: 0; background: var(--paper); color: var(--ink); font-synthesis: none; }
+  .page { max-width: 880px; padding: var(--space-12) var(--space-6); margin: 0 auto; }
+  .eyebrow { margin: 0 0 var(--space-4); font-family: var(--font-sans); font-size: 12px; line-height: 16px; font-weight: 500; letter-spacing: .28em; color: var(--ink-muted); }
+  .display { margin: 0 0 var(--space-4); font-family: var(--font-serif); font-size: 44px; line-height: 56px; font-weight: 400; }
+  .lede { margin: 0 0 var(--space-6); font-family: var(--font-serif); font-size: 20px; line-height: 32px; }
+  .text { margin: 0 0 var(--space-6); font-family: var(--font-sans); font-size: 15px; line-height: 24px; }
+  .quote { margin: 0 0 var(--space-6); font-family: var(--font-serif); font-size: 20px; line-height: 32px; font-style: normal; }
+  .line { display: flex; gap: var(--space-4); align-items: center; margin-bottom: var(--space-12); font-family: var(--font-sans); font-size: 15px; line-height: 24px; }
+  code { font-family: var(--font-mono); font-size: .93em; }
+  .title { margin: 0 0 var(--space-6); text-align: center; font-family: var(--font-sans); font-size: 28px; line-height: 36px; font-weight: 500; letter-spacing: .24em; padding-left: .24em; }
+  .tagline { margin: var(--space-6) 0 0; text-align: center; font-family: var(--font-sans); font-size: 16px; line-height: 24px; font-weight: 500; letter-spacing: .32em; padding-left: .32em; }
+  @media (max-width: 560px) { .display { font-size: 32px; line-height: 44px; } .title { font-size: 22px; } }
+</style>
+</head>
+<body>
+<section class="theme" data-theme="light"><p class="theme-name">PAPER</p><div class="page" id="paper"></div></section>
+<section class="theme" data-theme="tape"><p class="theme-name">TAPE</p><div class="page" id="tape"></div></section>
+<script>
+  var L = window.LatticeSignal, h = React.createElement;
+  function demo() { return h(React.Fragment, null,
+    h('p', { className: 'eyebrow' }, '发布说明 · 2027.01.01'),
+    h('h1', { className: 'display' }, '你离开时，工作仍在继续。'),
+    h('p', { className: 'lede' }, 'Lattice 是一个信守承诺的智能体运行时：每一步都有记录，每一次工具调用都有交代。'),
+    h('p', { className: 'text' }, '会话在回合中途关闭时，智能体从最近的检查点恢复，只重放尚未确认的工具调用。不会重复执行，也不会丢失。'),
+    h('p', { className: 'quote' }, '「它说到做到，然后停了下来。」'),
+    h('div', { className: 'line' }, h(L.Tag, { tone: 'ok' }), h('span', null, '检查点 ', h('code', null, '0412'), ' 已恢复。')),
+    h('p', { className: 'title' }, '智能体 · 2027.01.01'),
+    h(L.Frame, null, h(L.Countdown, { to: '2027-01-01T00:00:00+08:00', labels: ['天', '时', '分', '秒'] })),
+    h('p', { className: 'tagline' }, '即将到来。')); }
+  ['paper', 'tape'].forEach(function (id) { ReactDOM.createRoot(document.getElementById(id)).render(demo()); });
+</script>
+</body>
+</html>

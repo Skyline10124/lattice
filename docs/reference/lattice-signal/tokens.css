@@ -1,0 +1,65 @@
+/* Lattice Signal tokens as CSS variables, generated from tokens.json; edit tokens.json, not this file.
+   Paper is the default; data-theme="tape" on any element switches it and everything inside. */
+:root {
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-12: 48px;
+  --control-compact: 28px;
+  --radius-none: 0;
+  --radius-xs: 2px;
+  --stroke-frame: 2px;
+  --stroke-hairline: 1px;
+  --mark-arm: 6px;
+  --stroke-focus: 2px;
+  --dither-pixel: 2px;
+  --font-mono: "JetBrains Mono", "Sarasa Gothic SC", "Sarasa UI SC", ui-monospace, "SF Mono", Menlo, "PingFang SC", monospace;
+  --font-sans: "IBM Plex Sans", "Sarasa Gothic SC", "Sarasa UI SC", "PingFang SC", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "IBM Plex Serif", "Noto Serif SC", "Songti SC", SimSun, ui-serif, Georgia, serif;
+}
+:root, [data-theme="light"] {
+  --paper: #fbfaf8;
+  --field: #f5f3ef;
+  --control: #dfe5fe;
+  --haze: #dfe5fe;
+  --glow: #b8c4fa;
+  --line: #a2b0f2;
+  --signal: #5965ca;
+  --on-signal: #ffffff;
+  --ink: #333a7c;
+  --ink-muted: #4a54b2;
+  --vhs-red: #cb2b31;
+  --vhs-amber: #d38926;
+  --amber: #885300;
+  --phosphor: #006f6f;
+  --on-status: #fbfaf8;
+  --on-vhs-amber: #1c293e;
+  --series-1: #5965ca;
+  --series-2: #b36e00;
+  --series-3: #009393;
+  --series-4: #cb2b31;
+}
+[data-theme="tape"] {
+  --paper: #1c293e;
+  --field: #1c293e;
+  --control: #2c4267;
+  --haze: #2c4267;
+  --glow: #416093;
+  --line: #6381b2;
+  --signal: #8695e3;
+  --on-signal: #1c293e;
+  --ink: #f5f3ef;
+  --ink-muted: #b8b3ae;
+  --vhs-red: #e8736c;
+  --vhs-amber: #d38926;
+  --amber: #e4a65f;
+  --phosphor: #2ab0b0;
+  --on-status: #1c293e;
+  --on-vhs-amber: #1c293e;
+  --series-1: #6977d1;
+  --series-2: #b36e00;
+  --series-3: #009393;
+  --series-4: #d34c49;
+}

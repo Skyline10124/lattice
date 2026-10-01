@@ -1,0 +1,217 @@
+/* Tag: the TUI's mode tags on paper; the word stays mono, as in the terminal */
+.ls-tag { display: inline-block; vertical-align: middle; white-space: nowrap; font-family: var(--font-mono); font-size: 12px; line-height: 16px; font-weight: 500; letter-spacing: .28em; text-transform: uppercase; padding: 2px calc(var(--space-2) - .28em) 2px var(--space-2); border-radius: var(--radius-none); }
+.ls-tag-prompt { background: var(--signal); color: var(--on-signal); }
+.ls-tag-warn { background: var(--amber); color: var(--on-status); }
+.ls-tag-error { background: var(--vhs-red); color: var(--on-status); }
+.ls-tag-ok { background: var(--phosphor); color: var(--on-status); }
+/* emphasis tags: the cassette palette, for words that are not states */
+.ls-tag-iris { background: var(--signal); color: var(--on-signal); }
+.ls-tag-red { background: var(--vhs-red); color: var(--on-status); }
+.ls-tag-amber { background: var(--vhs-amber); color: var(--on-vhs-amber); }
+.ls-tag-cyan { background: var(--phosphor); color: var(--on-status); }
+.ls-tag-ink { background: var(--ink); color: var(--paper); }
+
+/* Frame, marked (default): four edges broken at the corners, a plus centred in each break.
+   A plus reaches mark-arm beyond the corner; the edges start one more mark-arm further in (1:1). */
+.ls-frame { --ls-frame-inset: calc(var(--mark-arm) * 2 + var(--stroke-frame)); position: relative; padding: var(--space-12); border-radius: var(--radius-none); background: var(--paper); color: var(--ink); }
+.ls-frame::before, .ls-frame::after { content: ""; position: absolute; pointer-events: none; border: 0 solid var(--line); }
+.ls-frame::before { top: 0; bottom: 0; left: var(--ls-frame-inset); right: var(--ls-frame-inset); border-top-width: var(--stroke-frame); border-bottom-width: var(--stroke-frame); }
+.ls-frame::after { left: 0; right: 0; top: var(--ls-frame-inset); bottom: var(--ls-frame-inset); border-left-width: var(--stroke-frame); border-right-width: var(--stroke-frame); }
+.ls-frame-plus { position: absolute; width: calc(var(--mark-arm) * 2 + var(--stroke-frame)); height: calc(var(--mark-arm) * 2 + var(--stroke-frame)); pointer-events: none; }
+.ls-frame-plus::before, .ls-frame-plus::after { content: ""; position: absolute; background: var(--ink); }
+.ls-frame-plus::before { left: 0; right: 0; top: var(--mark-arm); height: var(--stroke-frame); }
+.ls-frame-plus::after { top: 0; bottom: 0; left: var(--mark-arm); width: var(--stroke-frame); }
+.ls-frame-plus-tl, .ls-frame-plus-tr { top: calc(-1 * var(--mark-arm)); }
+.ls-frame-plus-bl, .ls-frame-plus-br { bottom: calc(-1 * var(--mark-arm)); }
+.ls-frame-plus-tl, .ls-frame-plus-bl { left: calc(-1 * var(--mark-arm)); }
+.ls-frame-plus-tr, .ls-frame-plus-br { right: calc(-1 * var(--mark-arm)); }
+
+/* Frame, plain: one continuous 1px border, no marks, tighter padding */
+.ls-frame-plain { padding: var(--space-6); border: var(--stroke-hairline) solid var(--line); }
+.ls-frame-plain::before, .ls-frame-plain::after { content: none; }
+
+/* Countdown: mono numerals (tabular, they tick), sans unit labels; two by two when its container is narrow */
+.ls-countdown { container-type: inline-size; font-family: var(--font-mono); color: var(--ink); }
+.ls-countdown-grid { display: grid; grid-template-columns: repeat(4, auto); justify-content: space-around; gap: var(--space-6) var(--space-12); }
+.ls-countdown-cell { display: flex; flex-direction: column; align-items: center; gap: var(--space-2); }
+.ls-countdown-num { font-size: 96px; line-height: 96px; font-weight: 500; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.ls-countdown-unit { font-family: var(--font-sans); font-size: 12px; line-height: 16px; font-weight: 500; letter-spacing: .28em; padding-left: .28em; color: var(--ink-muted); }
+/* a Han character at 12px reads smaller than a Latin capital; one step up under lang="zh" */
+.ls-countdown-unit:lang(zh) { font-size: 14px; line-height: 20px; }
+@container (max-width: 639px) {
+  .ls-countdown-grid { grid-template-columns: repeat(2, auto); }
+  .ls-countdown-num { font-size: 64px; line-height: 64px; }
+}
+
+/* Controls: square, filled with control rather than outlined; fields keep one ink-muted rule at the bottom.
+   Frames are the only boxes drawn with lines. */
+.ls-btn, .ls-field, .ls-switch, .ls-choice { font-family: var(--font-sans); }
+.ls-btn:focus-visible, .ls-input:focus-visible, .ls-notice-action a:focus-visible, .ls-choice-input:focus-visible + .ls-choice-box, .ls-switch:focus-visible .ls-switch-track { outline: var(--stroke-focus) solid var(--signal); outline-offset: 2px; }
+.ls-switch:focus-visible { outline: none; }
+
+/* Button: 40px tall (space-6 + space-4); a leading Icon sits space-2 from the label */
+.ls-btn { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2); box-sizing: border-box; height: calc(var(--space-6) + var(--space-4)); padding: 0 var(--space-4); border: 0; border-radius: var(--radius-none); font-size: 15px; line-height: 24px; font-weight: 500; cursor: pointer; }
+.ls-btn-primary { background: var(--signal); color: var(--on-signal); }
+.ls-btn-primary:hover { background: var(--ink); color: var(--paper); }
+.ls-btn-secondary { background: var(--control); color: var(--ink); }
+.ls-btn-secondary:hover { background: var(--glow); }
+.ls-btn:disabled { opacity: .5; cursor: not-allowed; pointer-events: none; }
+
+/* Input: label above in label style, hint or error below */
+/* align-content: start keeps the box in line with its neighbours when a row is taller than this field */
+.ls-field { display: grid; align-content: start; gap: var(--space-2); color: var(--ink); }
+.ls-field-label { font-size: 12px; line-height: 16px; font-weight: 500; letter-spacing: .28em; text-transform: uppercase; color: var(--ink-muted); }
+.ls-input { box-sizing: border-box; width: 100%; height: calc(var(--space-6) + var(--space-4)); margin: 0; padding: 0 var(--space-4); border: 0; border-radius: var(--radius-none); box-shadow: inset 0 calc(-1 * var(--stroke-hairline)) 0 var(--ink-muted); background: var(--control); color: var(--ink); font: inherit; font-size: 15px; line-height: 24px; }
+.ls-input::placeholder { color: var(--ink-muted); opacity: 1; }
+/* the bottom rule is an inset shadow so hover, focus and error never move the text */
+.ls-input:hover, .ls-input:focus { box-shadow: inset 0 calc(-1 * var(--stroke-hairline)) 0 var(--signal); }
+.ls-input-mono { font-family: var(--font-mono); font-size: 14px; }
+.ls-input:disabled { opacity: .5; cursor: not-allowed; }
+.ls-field-invalid .ls-input, .ls-field-invalid .ls-input:hover, .ls-field-invalid .ls-input:focus { box-shadow: inset 0 calc(-1 * var(--stroke-focus)) 0 var(--vhs-red); }
+.ls-field-hint, .ls-field-error { margin: 0; font-size: 13px; line-height: 20px; }
+.ls-field-hint { color: var(--ink-muted); }
+.ls-field-error { color: var(--vhs-red); }
+
+/* Switch: a control-filled 36 x 18 track, the checkbox's height, so it sits within the text line;
+   a full-height bar thumb a quarter of its width, flush at the left;
+   on, the track fills with signal and the bar moves flush right in ink (on-signal would merge with the paper beyond the end). */
+.ls-switch { display: inline-flex; align-items: center; gap: var(--space-2); margin: 0; padding: 0; border: 0; background: none; color: var(--ink); font-size: 15px; line-height: 24px; text-align: left; cursor: pointer; }
+.ls-switch-track { --ls-switch-w: 36px; position: relative; flex: none; width: var(--ls-switch-w); height: 18px; background: var(--control); }
+.ls-switch-thumb { position: absolute; top: 0; left: 0; width: calc(var(--ls-switch-w) / 4); height: 100%; background: var(--ink-muted); transition: transform .12s; }
+.ls-switch:hover .ls-switch-track { background: var(--glow); }
+.ls-switch[aria-checked="true"] .ls-switch-track { background: var(--signal); }
+.ls-switch[aria-checked="true"] .ls-switch-thumb { background: var(--ink); transform: translateX(calc(var(--ls-switch-w) * 3 / 4)); }
+.ls-switch:disabled { opacity: .5; cursor: not-allowed; }
+@media (prefers-reduced-motion: reduce) { .ls-switch-thumb { transition: none; } }
+
+/* Checkbox and Radio: the native input stays for keyboard and forms; the 18px square box beside it is drawn.
+   Both are square control fills; they differ when selected: the checkbox fills with signal and shows a check,
+   the radio keeps its fill and shows a space-2 square at its centre. */
+.ls-choice { position: relative; display: inline-flex; align-items: center; gap: var(--space-2); color: var(--ink); font-size: 15px; line-height: 24px; cursor: pointer; }
+.ls-choice-input { position: absolute; width: 1px; height: 1px; margin: 0; opacity: 0; }
+.ls-choice-box { position: relative; flex: none; width: 18px; height: 18px; border-radius: var(--radius-none); background: var(--control); }
+.ls-choice:hover .ls-choice-box { background: var(--glow); }
+.ls-checkbox .ls-choice-input:checked + .ls-choice-box { background: var(--signal); }
+.ls-checkbox .ls-choice-input:checked + .ls-choice-box::after { content: ""; position: absolute; left: 6px; top: 2px; width: 5px; height: 10px; border: solid var(--on-signal); border-width: 0 2px 2px 0; transform: rotate(45deg); }
+.ls-radio .ls-choice-input:checked + .ls-choice-box::after { content: ""; position: absolute; inset: 5px; background: var(--signal); }
+.ls-choice-input:disabled + .ls-choice-box, .ls-choice-input:disabled ~ .ls-choice-label { opacity: .5; }
+.ls-choice:has(.ls-choice-input:disabled) { cursor: not-allowed; }
+
+/* Segmented: one control-filled strip, no dividers; hover fills a segment with glow, the chosen one with signal */
+.ls-seg-field { display: inline-grid; gap: var(--space-2); font-family: var(--font-sans); color: var(--ink); }
+.ls-seg { display: inline-flex; border-radius: var(--radius-none); background: var(--control); }
+.ls-seg-item { position: relative; display: inline-flex; }
+.ls-seg-input { position: absolute; width: 1px; height: 1px; margin: 0; opacity: 0; }
+.ls-seg-text { display: inline-flex; align-items: center; box-sizing: border-box; height: calc(var(--space-6) + var(--space-4)); padding: 0 var(--space-4); background: transparent; color: var(--ink); font-size: 15px; line-height: 24px; font-weight: 500; white-space: nowrap; cursor: pointer; }
+.ls-seg-item:hover .ls-seg-text { background: var(--glow); }
+.ls-seg-input:checked + .ls-seg-text { background: var(--signal); color: var(--on-signal); }
+/* the ring sits above the neighbouring segments */
+.ls-seg-input:focus-visible + .ls-seg-text { position: relative; z-index: 1; outline: var(--stroke-focus) solid var(--signal); outline-offset: 2px; }
+.ls-seg-input:disabled + .ls-seg-text { opacity: .5; cursor: not-allowed; }
+.ls-seg-item:hover .ls-seg-input:disabled + .ls-seg-text { background: transparent; }
+
+/* Textarea: the input's box, grown to its rows; resizes vertically only */
+.ls-textarea { display: block; height: auto; min-height: calc(var(--space-6) + var(--space-4)); padding: var(--space-2) var(--space-4); resize: vertical; }
+
+/* Select: the input's box with a square-capped chevron drawn at the right */
+.ls-select { position: relative; display: block; }
+.ls-select::after { content: ""; position: absolute; top: 50%; right: var(--space-4); width: 6px; height: 6px; margin-top: -5px; border: solid var(--ink-muted); border-width: 0 2px 2px 0; transform: rotate(45deg); pointer-events: none; }
+.ls-select-control { appearance: none; -webkit-appearance: none; padding-right: calc(var(--space-4) * 2 + 8px); cursor: pointer; }
+.ls-select-control:disabled { cursor: not-allowed; }
+.ls-select:has(.ls-select-control:disabled)::after { opacity: .5; }
+.ls-select:has(.ls-select-control:open)::after { margin-top: -1px; transform: rotate(-135deg); }
+/* Where the browser allows a styled list (appearance: base-select), the open list is the field's width with no edge:
+   paper rows on a control mat, row text in line with the field's, the chosen row in signal. Elsewhere it stays native. */
+@supports (appearance: base-select) {
+  .ls-select-control, .ls-select-control::picker(select) { appearance: base-select; }
+  .ls-select-control { display: flex; align-items: center; }
+  .ls-select-control::picker-icon { display: none; }
+  .ls-select-control::picker(select) { box-sizing: border-box; width: anchor-size(width); margin: 0; padding: var(--space-2); border: 0; border-radius: var(--radius-none); box-shadow: none; background: var(--control); color: var(--ink); font-family: var(--font-sans); }
+  .ls-select-control option { display: flex; align-items: center; box-sizing: border-box; min-height: calc(var(--space-6) + var(--space-4)); padding: 0 var(--space-2); background: var(--paper); color: var(--ink); font-size: 15px; line-height: 24px; }
+  .ls-select-control option::checkmark { display: none; }
+  .ls-select-control option:hover, .ls-select-control option:focus-visible { background: var(--glow); outline: 0; }
+  .ls-select-control option:checked { background: var(--signal); color: var(--on-signal); }
+  .ls-select-control option:disabled { opacity: .5; }
+}
+
+/* Notice: a plain Frame holding a tag, one sentence and at most one action, tightened to space-4 — no coloured edge */
+.ls-notice { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-4); box-sizing: border-box; padding: var(--space-4); color: var(--ink); font-family: var(--font-sans); font-size: 15px; line-height: 24px; }
+.ls-notice-text { flex: 1 1 16em; min-width: 0; }
+.ls-notice-action { flex: none; }
+.ls-notice code, .ls-table code { font-family: var(--font-mono); font-size: 14px; }
+
+/* Progress: equal square-ended cells, dither-pixel apart; lit cells are signal, unlit haze. No easing: cells light whole. */
+.ls-progress { display: grid; gap: var(--space-2); font-family: var(--font-sans); color: var(--ink); }
+.ls-progress-head { display: flex; justify-content: space-between; align-items: baseline; gap: var(--space-4); }
+.ls-progress-value { font-family: var(--font-mono); font-size: 14px; line-height: 22px; font-variant-numeric: tabular-nums; }
+.ls-progress-bar { display: flex; gap: var(--dither-pixel); height: var(--space-4); }
+.ls-progress-cell { flex: 1; background: var(--haze); }
+.ls-progress-lit { background: var(--signal); }
+/* segmented: each part lights its own run of cells in its series colour; a legend underneath names them (identity never by colour alone) */
+.ls-progress-s1 { background: var(--series-1); }
+.ls-progress-s2 { background: var(--series-2); }
+.ls-progress-s3 { background: var(--series-3); }
+.ls-progress-s4 { background: var(--series-4); }
+.ls-progress-legend { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-6); margin: 0; padding: 0; list-style: none; font-size: 13px; line-height: 20px; color: var(--ink-muted); }
+.ls-progress-legend li { display: inline-flex; align-items: center; gap: var(--space-2); }
+.ls-progress-key { flex: none; width: var(--space-2); height: var(--space-2); }
+.ls-progress-legend .ls-progress-value { font-size: 13px; line-height: 20px; color: var(--ink); }
+
+/* Stripe: the VHS bands — vhs-red, vhs-amber, signal, in that order — as three variants.
+   band: full width, space-2 bands with space-2 gaps; line: a space-2 tall trim of dither-pixel bands;
+   spine: vertical bars down the left of a key figure or title, as tall as what they mark */
+.ls-stripe { display: flex; flex-direction: column; gap: var(--space-2); }
+.ls-stripe-bar { flex: none; height: var(--space-2); }
+.ls-stripe-bar:nth-child(1) { background: var(--vhs-red); }
+.ls-stripe-bar:nth-child(2) { background: var(--vhs-amber); }
+.ls-stripe-bar:nth-child(3) { background: var(--signal); }
+.ls-stripe-line { gap: 1px; }
+.ls-stripe-line .ls-stripe-bar { height: var(--dither-pixel); }
+.ls-stripe-spine { flex-direction: row; align-items: stretch; gap: var(--space-4); }
+.ls-stripe-bars { display: flex; flex: none; gap: var(--dither-pixel); }
+.ls-stripe-spine .ls-stripe-bar { width: calc(var(--space-2) / 2); height: auto; }
+.ls-stripe-body { min-width: 0; }
+
+/* Table: a label-style head over an ink-muted rule, rows split by line rules, 40px rows; no stripes, no vertical rules */
+.ls-table { width: 100%; border-collapse: collapse; font-family: var(--font-sans); font-size: 15px; line-height: 24px; color: var(--ink); }
+.ls-table caption { padding-bottom: var(--space-4); text-align: left; font-size: 12px; line-height: 16px; font-weight: 500; letter-spacing: .28em; text-transform: uppercase; color: var(--ink-muted); }
+.ls-table th { padding: 0 var(--space-4) var(--space-2); border-bottom: var(--stroke-hairline) solid var(--ink-muted); text-align: left; font-size: 12px; line-height: 16px; font-weight: 500; letter-spacing: .28em; text-transform: uppercase; color: var(--ink-muted); white-space: nowrap; }
+.ls-table td { padding: var(--space-2) var(--space-4); border-bottom: var(--stroke-hairline) solid var(--line); vertical-align: middle; }
+.ls-table th:first-child, .ls-table td:first-child { padding-left: 0; }
+.ls-table th:last-child, .ls-table td:last-child { padding-right: 0; }
+.ls-table .ls-cell-right { text-align: right; }
+.ls-table .ls-cell-mono { font-family: var(--font-mono); font-size: 14px; font-variant-numeric: tabular-nums; }
+
+/* Icon: Carbon artwork in the current text colour; never scaled between the four sizes */
+.ls-icon { display: inline-block; flex: none; vertical-align: middle; }
+
+/* Compact: the product density. Put .ls-compact on any container (a window, a panel) and the components inside it
+   tighten: 28px controls and rows, 13px text, space-1 / space-3 steps, labels tracked at 0.08em instead of 0.28em.
+   Colours, square corners, fills and tags stay exactly as they are. The marked frame, stripe, dither and serif
+   display are expressive: keep them out of compact areas. */
+.ls-compact { font-size: 13px; line-height: 20px; }
+.ls-compact .ls-btn { height: var(--control-compact); padding: 0 var(--space-3); gap: var(--space-1); font-size: 13px; line-height: 20px; }
+.ls-compact .ls-field { gap: var(--space-1); }
+.ls-compact .ls-field-label { font-size: 11px; letter-spacing: .08em; }
+.ls-compact .ls-input { height: var(--control-compact); padding: 0 var(--space-2); font-size: 13px; line-height: 20px; }
+.ls-compact .ls-input-mono { font-size: 12px; }
+.ls-compact .ls-textarea { height: auto; min-height: var(--control-compact); padding: var(--space-1) var(--space-2); }
+.ls-compact .ls-select-control { padding-right: calc(var(--space-2) * 2 + 8px); }
+.ls-compact .ls-select::after { right: var(--space-2); }
+.ls-compact .ls-field-hint, .ls-compact .ls-field-error { font-size: 12px; line-height: 16px; }
+.ls-compact .ls-seg-field { gap: var(--space-1); }
+.ls-compact .ls-seg-text { height: var(--control-compact); padding: 0 var(--space-3); font-size: 13px; line-height: 20px; }
+.ls-compact .ls-choice, .ls-compact .ls-switch { font-size: 13px; line-height: 20px; }
+.ls-compact .ls-choice-box { width: 16px; height: 16px; }
+.ls-compact .ls-checkbox .ls-choice-input:checked + .ls-choice-box::after { left: 5px; top: 1px; width: 5px; height: 9px; }
+.ls-compact .ls-radio .ls-choice-input:checked + .ls-choice-box::after { inset: 4px; }
+.ls-compact .ls-switch-track { --ls-switch-w: 32px; height: 16px; }
+.ls-compact .ls-tag { font-size: 11px; line-height: 16px; letter-spacing: .12em; padding: 0 calc(var(--space-1) + 2px - .12em) 0 calc(var(--space-1) + 2px); }
+.ls-compact .ls-notice { gap: var(--space-1) var(--space-3); padding: var(--space-2) var(--space-3); font-size: 13px; line-height: 20px; }
+.ls-compact .ls-progress { gap: var(--space-1); }
+.ls-compact .ls-progress-bar { height: var(--space-2); }
+.ls-compact .ls-progress-value { font-size: 12px; line-height: 16px; }
+.ls-compact .ls-table { font-size: 13px; line-height: 20px; }
+.ls-compact .ls-table th { padding: 0 var(--space-2) var(--space-1); font-size: 11px; letter-spacing: .08em; }
+.ls-compact .ls-table td { padding: var(--space-1) var(--space-2); }
+.ls-compact .ls-table .ls-cell-mono, .ls-compact .ls-table code, .ls-compact .ls-notice code { font-size: 12px; }

@@ -1,0 +1,41 @@
+<!-- @dsCard group="Foundations" height=928 page -->
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Type pairing — preview</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500&family=IBM+Plex+Serif:ital,wght@0,400;0,500;1,400&display=swap">
+<style>
+  /* each theme pinned on its own section, so both show whichever theme the page is in */
+  .theme { background: var(--paper); color: var(--ink); }
+  .theme-name { margin: 0; padding: var(--space-4) var(--space-6) 0; font-family: var(--font-sans); font-size: 12px; line-height: 16px; font-weight: 500; letter-spacing: .28em; color: var(--ink-muted); }
+  body { margin: 0; background: var(--paper); color: var(--ink); }
+  .page { max-width: 720px; padding: var(--space-12) var(--space-6); margin: 0 auto; }
+  .eyebrow { margin: 0 0 var(--space-4); font-family: var(--font-sans); font-size: 12px; line-height: 16px; font-weight: 500; letter-spacing: .28em; color: var(--ink-muted); }
+  .display { margin: 0 0 var(--space-4); font-family: var(--font-serif); font-size: 44px; line-height: 52px; font-weight: 400; letter-spacing: -.01em; }
+  .lede { margin: 0 0 var(--space-6); font-family: var(--font-serif); font-size: 20px; line-height: 32px; }
+  .text { margin: 0 0 var(--space-6); font-family: var(--font-sans); font-size: 15px; line-height: 24px; }
+  .line { display: flex; gap: var(--space-4); align-items: center; font-family: var(--font-sans); font-size: 15px; line-height: 24px; }
+  code { font-family: var(--font-mono); font-size: .93em; }
+  @media (max-width: 560px) { .display { font-size: 32px; line-height: 40px; } }
+</style>
+</head>
+<body>
+<section class="theme" data-theme="light"><p class="theme-name">PAPER</p>
+<div class="page">
+  <p class="eyebrow">RELEASE NOTE · 2027.01.01</p>
+  <h1 class="display">The work continues while you are away.</h1>
+  <p class="lede">Lattice is an agent runtime that keeps its promises: every step recorded, every tool call accounted for.</p>
+  <p class="text">When a session closes mid-turn, the agent resumes from its last checkpoint and replays only the tool calls it had not confirmed. Nothing runs twice, and nothing is lost.</p>
+  <div class="line"><span class="ls-tag ls-tag-ok">OK</span><span>Checkpoint <code>0412</code> restored.</span></div>
+</div>
+</section>
+<section class="theme" data-theme="tape"><p class="theme-name">TAPE</p>
+<div class="page">
+  <p class="eyebrow">RELEASE NOTE · 2027.01.01</p>
+  <h1 class="display">The work continues while you are away.</h1>
+  <p class="lede">Lattice is an agent runtime that keeps its promises: every step recorded, every tool call accounted for.</p>
+  <p class="text">When a session closes mid-turn, the agent resumes from its last checkpoint and replays only the tool calls it had not confirmed. Nothing runs twice, and nothing is lost.</p>
+  <div class="line"><span class="ls-tag ls-tag-ok">OK</span><span>Checkpoint <code>0412</code> restored.</span></div>
+</div>
+</section>
+</body>
+</html>
