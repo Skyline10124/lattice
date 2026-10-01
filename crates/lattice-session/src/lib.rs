@@ -6,10 +6,6 @@
 pub use lattice_store::{ProjectStoreKey, StateLayout};
 
 pub mod store;
-#[cfg(any(test, feature = "test-support"))]
-mod test_support;
-#[cfg(any(test, feature = "test-support"))]
-pub use test_support::ScopedXdgStateHome;
 
 /// Shared typed transcript helpers for tests.
 #[doc(hidden)]

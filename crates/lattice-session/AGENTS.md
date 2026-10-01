@@ -8,7 +8,7 @@
 - `store/codec.rs`、`open.rs`、`validate.rs`：表与值版本、创建/严格打开、形状及跨记录一致性校验。
 - `store/write.rs`、`close.rs`：事务写入与纯关闭规划；`read.rs`：快照、树、Step 详情、分页和操作员投影。
 - `store/config.rs`、`hex_digest.rs`：冻结事实与摘要编码；`local.rs`：按 Session/Turn 等范围加载事务记录。
-- `store/tests.rs`：记录层回归；`test_support.rs`：唯一 XDG 测试 guard。
+- `store/tests.rs`：记录层回归。
 
 ## 上位文档
 

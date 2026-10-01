@@ -26,7 +26,6 @@
 - live 与自动关闭共用有序槽位终态规则；分发前取消、Deadline 和未执行原因随余下槽位与 Step/Turn 关闭同事务保存，Started 无终态按效果不确定处理，不猜 NotExecuted 或重分发。
 - 自动关闭只消费持久事实，不请求模型、重执行 Tool、读取工作区历史或取得工作区操作锁。`rewind` 移到已有 NodeId 本身，保留原分叉，不恢复文件；根节点与 agent 选择按会话合同执行。
 - Session ID 解析精确优先，再对 store.list 前缀匹配；歧义最多列 5 个候选并要求更多字符，拒绝空/全空白。规范 SessionId 仍是32位十六进制，缩写只属输入/显示。
-- XDG 测试通过 lattice-session 的 test-support dev-dependency 使用唯一 ScopedXdgStateHome，不建立本地互斥副本。
 
 ## 验证入口
 
