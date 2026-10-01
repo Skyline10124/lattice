@@ -301,26 +301,46 @@ mod tests {
     }
 
     #[test]
-    fn enter_submits_alt_enter_newlines() {
-        assert!(matches!(
-            resolve_key(key(KeyCode::Enter, KeyModifiers::NONE), false, true),
-            KeyAction::Submit
-        ));
-        assert!(matches!(
-            resolve_key(key(KeyCode::Enter, KeyModifiers::ALT), false, true),
-            KeyAction::Newline
-        ));
-    }
-
-    #[test]
-    fn shift_enter_newlines_only_with_kitty() {
-        assert!(matches!(
-            resolve_key(key(KeyCode::Enter, KeyModifiers::SHIFT), false, true),
-            KeyAction::Submit
-        ));
-        assert!(matches!(
-            resolve_key(key(KeyCode::Enter, KeyModifiers::SHIFT), true, true),
-            KeyAction::Newline
-        ));
+    fn enter_modifiers_resolve_submit_or_newline() {
+        for (name, modifiers, kitty, buffer_empty, expected) in [
+            (
+                "plain_enter_submits",
+                KeyModifiers::NONE,
+                false,
+                true,
+                KeyAction::Submit,
+            ),
+            (
+                "alt_enter_newlines",
+                KeyModifiers::ALT,
+                false,
+                true,
+                KeyAction::Newline,
+            ),
+            (
+                "shift_enter_without_kitty_submits",
+                KeyModifiers::SHIFT,
+                false,
+                true,
+                KeyAction::Submit,
+            ),
+            (
+                "shift_enter_with_kitty_newlines",
+                KeyModifiers::SHIFT,
+                true,
+                true,
+                KeyAction::Newline,
+            ),
+        ] {
+            let actual = resolve_key(key(KeyCode::Enter, modifiers), kitty, buffer_empty);
+            assert!(
+                matches!(
+                    (actual, expected),
+                    (KeyAction::Submit, KeyAction::Submit)
+                        | (KeyAction::Newline, KeyAction::Newline)
+                ),
+                "{name}"
+            );
+        }
     }
 }
