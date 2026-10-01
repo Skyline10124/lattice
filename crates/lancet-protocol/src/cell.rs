@@ -368,92 +368,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn descriptor_rejects_undeclared_scope() {
-        // capability references a scope that the descriptor never declared.
-        let desc = ToolDescriptor {
-            name: "ghost".into(),
-            version: "0.1.0".into(),
-            description: "undeclared scope".into(),
-            params_schema: serde_json::Value::Null,
-            result_schema: serde_json::Value::Null,
-            scopes: vec![ScopeDecl {
-                name: "session".into(),
-                trust: Trust::In,
-                channel: ChannelKind::Session,
-            }],
-            capabilities: vec![Capability {
-                name: "ghost.read".into(),
-                cell: Cell {
-                    ctx_op: CtxOp::Alloc,
-                    ext_impact: ExtImpact::Read,
-                    scope: "nope".into(), // not in scopes
-                },
-            }],
-            artifact: artifact(),
-            abi_version: 1,
-        };
-        assert_eq!(
-            desc.validate(),
-            Err(DescriptorError::UndeclaredScope {
-                capability: "ghost.read".into(),
-                scope: "nope".into(),
-            })
-        );
-    }
-
-    #[test]
-    fn descriptor_rejects_duplicate_names() {
-        let session_scope = ScopeDecl {
-            name: "session".into(),
-            trust: Trust::In,
-            channel: ChannelKind::Session,
-        };
-        let cell = Cell {
-            ctx_op: CtxOp::Alloc,
-            ext_impact: ExtImpact::None,
-            scope: "session".into(),
-        };
-
-        // Duplicate scope name.
-        let dup_scope = ToolDescriptor {
-            name: "dup-scope".into(),
-            version: "0.1.0".into(),
-            description: "duplicate scope".into(),
-            params_schema: serde_json::Value::Null,
-            result_schema: serde_json::Value::Null,
-            scopes: vec![session_scope.clone(), session_scope.clone()],
-            capabilities: vec![],
-            artifact: artifact(),
-            abi_version: 1,
-        };
-        assert_eq!(
-            dup_scope.validate(),
-            Err(DescriptorError::DuplicateScope("session".into()))
-        );
-
-        // Duplicate capability name.
-        let cap = Capability {
-            name: "todo.write".into(),
-            cell: cell.clone(),
-        };
-        let dup_cap = ToolDescriptor {
-            name: "dup-cap".into(),
-            version: "0.1.0".into(),
-            description: "duplicate capability".into(),
-            params_schema: serde_json::Value::Null,
-            result_schema: serde_json::Value::Null,
-            scopes: vec![session_scope],
-            capabilities: vec![cap.clone(), cap],
-            artifact: artifact(),
-            abi_version: 1,
-        };
-        assert_eq!(
-            dup_cap.validate(),
-            Err(DescriptorError::DuplicateCapability("todo.write".into()))
-        );
-    }
-
     fn descriptor_with_capability(name: &str) -> ToolDescriptor {
         ToolDescriptor {
             name: "grammar".into(),
@@ -480,60 +394,141 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_accepts_dotted_capability_names() {
-        for name in [
-            "session.result",
-            "session.events",
-            "net.fetch.web",
-            "a.b",
-            "todo_write.v2",
-            "mutate-edit.file0",
-        ] {
-            assert_eq!(
-                descriptor_with_capability(name).validate(),
+    fn descriptor_validation_enforces_scope_and_capability_rules() {
+        let mut ghost = descriptor_with_capability("ghost.read");
+        ghost.name = "ghost".into();
+        ghost.description = "undeclared scope".into();
+        ghost.capabilities[0].cell.ext_impact = ExtImpact::Read;
+        ghost.capabilities[0].cell.scope = "nope".into();
+
+        let mut dup_scope = descriptor_with_capability("todo.write");
+        dup_scope.name = "dup-scope".into();
+        dup_scope.description = "duplicate scope".into();
+        dup_scope.scopes.push(dup_scope.scopes[0].clone());
+        dup_scope.capabilities.clear();
+
+        let mut dup_cap = descriptor_with_capability("todo.write");
+        dup_cap.name = "dup-cap".into();
+        dup_cap.description = "duplicate capability".into();
+        dup_cap.capabilities.push(dup_cap.capabilities[0].clone());
+
+        let mut bad = descriptor_with_capability("BAD");
+        bad.capabilities[0].cell.scope = "nope".into();
+        bad.capabilities.push(bad.capabilities[0].clone());
+
+        for (name, descriptor, expected) in [
+            // Capability references a scope that the descriptor never declared.
+            (
+                "undeclared_scope",
+                ghost,
+                Err(DescriptorError::UndeclaredScope {
+                    capability: "ghost.read".into(),
+                    scope: "nope".into(),
+                }),
+            ),
+            // Duplicate scope name.
+            (
+                "duplicate_scope",
+                dup_scope,
+                Err(DescriptorError::DuplicateScope("session".into())),
+            ),
+            // Duplicate capability name.
+            (
+                "duplicate_capability",
+                dup_cap,
+                Err(DescriptorError::DuplicateCapability("todo.write".into())),
+            ),
+            (
+                "valid_session_result",
+                descriptor_with_capability("session.result"),
                 Ok(()),
-                "{name} conforms to the capability grammar"
-            );
-        }
-    }
-
-    #[test]
-    fn descriptor_rejects_malformed_capability_names() {
-        for name in [
-            "session",         // single segment: no namespace
-            "Session.Result",  // uppercase
-            "session..result", // empty middle segment
-            ".session",        // leading dot
-            "session.",        // trailing dot
-            "",                // empty
-            "session result",  // space
-            "session:result",  // cell-ref separator
+            ),
+            (
+                "valid_session_events",
+                descriptor_with_capability("session.events"),
+                Ok(()),
+            ),
+            (
+                "valid_net_fetch_web",
+                descriptor_with_capability("net.fetch.web"),
+                Ok(()),
+            ),
+            ("valid_a_b", descriptor_with_capability("a.b"), Ok(())),
+            (
+                "valid_todo_write_v2",
+                descriptor_with_capability("todo_write.v2"),
+                Ok(()),
+            ),
+            (
+                "valid_mutate_edit_file0",
+                descriptor_with_capability("mutate-edit.file0"),
+                Ok(()),
+            ),
+            // Single segment: no namespace.
+            (
+                "invalid_single_segment",
+                descriptor_with_capability("session"),
+                Err(DescriptorError::InvalidCapabilityName("session".into())),
+            ),
+            // Uppercase.
+            (
+                "invalid_uppercase",
+                descriptor_with_capability("Session.Result"),
+                Err(DescriptorError::InvalidCapabilityName(
+                    "Session.Result".into(),
+                )),
+            ),
+            // Empty middle segment.
+            (
+                "invalid_empty_middle_segment",
+                descriptor_with_capability("session..result"),
+                Err(DescriptorError::InvalidCapabilityName(
+                    "session..result".into(),
+                )),
+            ),
+            // Leading dot.
+            (
+                "invalid_leading_dot",
+                descriptor_with_capability(".session"),
+                Err(DescriptorError::InvalidCapabilityName(".session".into())),
+            ),
+            // Trailing dot.
+            (
+                "invalid_trailing_dot",
+                descriptor_with_capability("session."),
+                Err(DescriptorError::InvalidCapabilityName("session.".into())),
+            ),
+            // Empty.
+            (
+                "invalid_empty",
+                descriptor_with_capability(""),
+                Err(DescriptorError::InvalidCapabilityName("".into())),
+            ),
+            // Space.
+            (
+                "invalid_space",
+                descriptor_with_capability("session result"),
+                Err(DescriptorError::InvalidCapabilityName(
+                    "session result".into(),
+                )),
+            ),
+            // Cell-ref separator.
+            (
+                "invalid_cell_ref_separator",
+                descriptor_with_capability("session:result"),
+                Err(DescriptorError::InvalidCapabilityName(
+                    "session:result".into(),
+                )),
+            ),
+            // An ill-formed name must surface as InvalidCapabilityName even when
+            // it is also duplicated and roots in an undeclared scope.
+            (
+                "grammar_precedes_other_checks",
+                bad,
+                Err(DescriptorError::InvalidCapabilityName("BAD".into())),
+            ),
         ] {
-            assert_eq!(
-                descriptor_with_capability(name).validate(),
-                Err(DescriptorError::InvalidCapabilityName(name.into())),
-                "{name} violates the capability grammar"
-            );
+            assert_eq!(descriptor.validate(), expected, "{name}");
         }
-    }
-
-    #[test]
-    fn capability_grammar_precedes_other_capability_checks() {
-        // An ill-formed name must surface as InvalidCapabilityName even when
-        // it is also duplicated and roots in an undeclared scope.
-        let bad = Capability {
-            name: "BAD".into(),
-            cell: Cell {
-                ctx_op: CtxOp::Alloc,
-                ext_impact: ExtImpact::None,
-                scope: "nope".into(),
-            },
-        };
-        let mut desc = descriptor_with_capability("session.result");
-        desc.capabilities = vec![bad.clone(), bad];
-        assert_eq!(
-            desc.validate(),
-            Err(DescriptorError::InvalidCapabilityName("BAD".into()))
-        );
     }
 }

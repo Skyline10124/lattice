@@ -108,19 +108,9 @@ mod tests {
     }
 
     #[test]
-    fn array_order_is_preserved() {
-        let value = json!({"items": [3, 1, 2, {"b": 1, "a": 2}, [9, 8]]});
-        assert_eq!(
-            canonical_json(&value),
-            r#"{"items":[3,1,2,{"a":2,"b":1},[9,8]]}"#
-        );
-    }
-
-    #[test]
-    fn golden_canonical_form() {
-        // Pins whitespace, key order, escaping, and scalar rendering — the
-        // signing/measure input must not drift.
-        let value: Value = serde_json::from_str(
+    fn canonical_json_preserves_value_representation() {
+        let golden_name = "golden_canonical_form";
+        let golden: Value = serde_json::from_str(
             r#"{
                 "s": "a\"b\né",
                 "n": 1.5,
@@ -133,28 +123,34 @@ mod tests {
                 "": "empty key"
             }"#,
         )
-        .unwrap();
-        assert_eq!(
-            canonical_json(&value),
-            r#"{"":"empty key","big":9007199254740993,"empty_arr":[],"empty_obj":{},"i":-3,"n":1.5,"nil":null,"s":"a\"b\né","t":true}"#
-        );
-    }
-
-    #[test]
-    fn scalar_roots_match_serde_json() {
-        for value in [
-            json!(null),
-            json!(true),
-            json!(0),
-            json!(-1.25),
-            json!("x"),
-            json!([]),
-            json!({}),
+        .unwrap_or_else(|err| panic!("{golden_name}: {err}"));
+        for (name, input, expected) in [
+            (
+                "array_order_is_preserved",
+                json!({"items": [3, 1, 2, {"b": 1, "a": 2}, [9, 8]]}),
+                Some(r#"{"items":[3,1,2,{"a":2,"b":1},[9,8]]}"#),
+            ),
+            // Pins whitespace, key order, escaping, and scalar rendering — the
+            // signing/measure input must not drift.
+            (
+                golden_name,
+                golden,
+                Some(
+                    r#"{"":"empty key","big":9007199254740993,"empty_arr":[],"empty_obj":{},"i":-3,"n":1.5,"nil":null,"s":"a\"b\né","t":true}"#,
+                ),
+            ),
+            ("scalar_null", json!(null), None),
+            ("scalar_true", json!(true), None),
+            ("scalar_integer_zero", json!(0), None),
+            ("scalar_negative_fraction", json!(-1.25), None),
+            ("scalar_string", json!("x"), None),
+            ("scalar_empty_array", json!([]), None),
+            ("scalar_empty_object", json!({}), None),
         ] {
-            assert_eq!(
-                canonical_json(&value),
-                serde_json::to_string(&value).unwrap()
-            );
+            let expected = expected.map(str::to_owned).unwrap_or_else(|| {
+                serde_json::to_string(&input).unwrap_or_else(|err| panic!("{name}: {err}"))
+            });
+            assert_eq!(canonical_json(&input), expected, "{name}");
         }
     }
 }

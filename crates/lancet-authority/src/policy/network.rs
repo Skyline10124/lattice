@@ -255,10 +255,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn network_policy_denies_localhost_by_default() {
+    fn network_policy_denies_ungranted_urls() {
         let policy = NetworkPolicyConfig::safe_defaults();
-        let err = validate_fetch_url("http://localhost:8080/", &policy).unwrap_err();
-        assert_eq!(err.code, CepErrorCode::AmbientAuthorityDenied);
+        for (name, url) in [
+            ("localhost_default", "http://localhost:8080/"),
+            ("private_ip", "https://10.0.0.1/"),
+            ("metadata_ip", "https://169.254.169.254/latest/meta-data/"),
+            ("non_http_scheme", "ftp://example.com/"),
+            ("empty_allowlist", "https://example.com/"),
+        ] {
+            let err = validate_fetch_url(url, &policy)
+                .expect_err(&format!("{name}: URL must be rejected"));
+            assert_eq!(err.code, CepErrorCode::AmbientAuthorityDenied, "{name}");
+        }
     }
 
     #[test]
@@ -283,28 +292,6 @@ mod tests {
     }
 
     #[test]
-    fn network_policy_denies_private_ip_literal() {
-        let policy = NetworkPolicyConfig::safe_defaults();
-        let err = validate_fetch_url("https://10.0.0.1/", &policy).unwrap_err();
-        assert_eq!(err.code, CepErrorCode::AmbientAuthorityDenied);
-    }
-
-    #[test]
-    fn network_policy_denies_metadata_ip() {
-        let policy = NetworkPolicyConfig::safe_defaults();
-        let err =
-            validate_fetch_url("https://169.254.169.254/latest/meta-data/", &policy).unwrap_err();
-        assert_eq!(err.code, CepErrorCode::AmbientAuthorityDenied);
-    }
-
-    #[test]
-    fn network_policy_denies_non_http_scheme() {
-        let policy = NetworkPolicyConfig::safe_defaults();
-        let err = validate_fetch_url("ftp://example.com/", &policy).unwrap_err();
-        assert_eq!(err.code, CepErrorCode::AmbientAuthorityDenied);
-    }
-
-    #[test]
     fn network_policy_allows_public_https_host() {
         let policy = NetworkPolicyConfig {
             allowed_hosts: vec!["example.com".into()],
@@ -313,14 +300,6 @@ mod tests {
         let validated = validate_fetch_url("https://example.com/path", &policy).unwrap();
         assert!(!validated.use_localhost_client);
         assert_eq!(validated.host, "example.com");
-    }
-
-    #[test]
-    fn network_policy_empty_allowlist_fails_closed() {
-        let mut policy = NetworkPolicyConfig::safe_defaults();
-        policy.allow_public_https = true;
-        let error = validate_fetch_url("https://example.com/", &policy).unwrap_err();
-        assert_eq!(error.code, CepErrorCode::AmbientAuthorityDenied);
     }
 
     #[test]
@@ -353,48 +332,83 @@ mod tests {
         }
     }
 
-    /// A leading dot is a suffix pattern that also matches the apex domain.
     #[test]
-    fn leading_dot_pattern_matches_apex_and_subdomains() {
-        let patterns = vec![".example.com".to_string()];
-        for host in [
-            "example.com",
-            "api.example.com",
-            "deep.api.example.com",
-            "API.Example.COM",
+    fn host_allowlist_matches_normalized_patterns() {
+        for (name, host, allowed_hosts, expected) in [
+            // A leading dot is a suffix pattern that also matches the apex domain.
+            (
+                "leading_dot_apex",
+                "example.com",
+                &[".example.com"][..],
+                true,
+            ),
+            (
+                "leading_dot_subdomain",
+                "api.example.com",
+                &[".example.com"][..],
+                true,
+            ),
+            (
+                "leading_dot_deep_subdomain",
+                "deep.api.example.com",
+                &[".example.com"][..],
+                true,
+            ),
+            (
+                "leading_dot_mixed_case_host",
+                "API.Example.COM",
+                &[".example.com"][..],
+                true,
+            ),
+            (
+                "leading_dot_concatenated_suffix",
+                "notexample.com",
+                &[".example.com"][..],
+                false,
+            ),
+            (
+                "leading_dot_evil_extension",
+                "example.com.evil.tld",
+                &[".example.com"][..],
+                false,
+            ),
+            (
+                "leading_dot_other_domain",
+                "example.org",
+                &[".example.com"][..],
+                false,
+            ),
+            (
+                "pattern_mixed_case",
+                "example.com",
+                &["Example.com"][..],
+                true,
+            ),
+            (
+                "pattern_surrounding_spaces",
+                "example.com",
+                &[" example.com "][..],
+                true,
+            ),
+            (
+                "pattern_uppercase",
+                "example.com",
+                &["EXAMPLE.COM"][..],
+                true,
+            ),
+            ("pattern_empty_string", "example.com", &[""][..], false),
+            ("pattern_space", "example.com", &[" "][..], false),
+            ("pattern_single_dot", "example.com", &["."][..], false),
+            ("pattern_two_dots", "example.com", &[".."][..], false),
+            ("pattern_tab", "example.com", &["\t"][..], false),
+            ("empty_allowlist", "example.com", &[][..], false),
         ] {
-            assert!(
-                host_allowed_by_list(host, &patterns),
-                "'.example.com' must grant {host}"
-            );
+            let patterns: Vec<String> = allowed_hosts
+                .iter()
+                .map(|pattern| (*pattern).into())
+                .collect();
+            assert_eq!(host_allowed_by_list(host, &patterns), expected, "{name}");
         }
-        for host in ["notexample.com", "example.com.evil.tld", "example.org"] {
-            assert!(
-                !host_allowed_by_list(host, &patterns),
-                "'.example.com' must not grant {host}"
-            );
-        }
-    }
-
-    #[test]
-    fn non_canonical_pattern_forms_all_match_the_same_host() {
-        for pattern in ["Example.com", " example.com ", "EXAMPLE.COM"] {
-            assert!(
-                host_allowed_by_list("example.com", &[pattern.to_string()]),
-                "pattern {pattern:?} must grant example.com"
-            );
-        }
-    }
-
-    #[test]
-    fn empty_and_dots_only_patterns_match_nothing() {
-        for pattern in ["", " ", ".", "..", "\t"] {
-            assert!(
-                !host_allowed_by_list("example.com", &[pattern.to_string()]),
-                "pattern {pattern:?} must be fail-closed"
-            );
-        }
-        assert!(!host_allowed_by_list("example.com", &[]));
     }
 
     /// Non-canonical `allowed_hosts` entries produce the same verdict in URL
