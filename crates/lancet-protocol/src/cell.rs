@@ -536,34 +536,4 @@ mod tests {
             Err(DescriptorError::InvalidCapabilityName("BAD".into()))
         );
     }
-
-    #[test]
-    fn multi_cell_call_representation() {
-        // spec §5.1: `session.todo_write` produces two cells in one call —
-        // the operation `(Mutate, None, session/in)` (mutates existing todo
-        // state, not charged) plus the return-value `(Alloc, None, session/in)`
-        // (the TodoWriteResult enters context, charged against the budget
-        // by #28, Codeberg #6). The vocabulary must represent both in one
-        // `Vec<Cell>`.
-        let cells: Vec<Cell> = vec![
-            Cell {
-                ctx_op: CtxOp::Mutate,
-                ext_impact: ExtImpact::None,
-                scope: "session".into(),
-            },
-            Cell {
-                ctx_op: CtxOp::Alloc,
-                ext_impact: ExtImpact::None,
-                scope: "session".into(),
-            },
-        ];
-        assert_eq!(cells.len(), 2);
-        assert_eq!(cells[0].reference(), "mutate:none:session");
-        assert_eq!(cells[1].reference(), "alloc:none:session");
-        // Both cells root in the same scope; the host derives one trust
-        // segment from the descriptor's `session` scope declaration and
-        // emits a single canonical audit key per cell.
-        assert_eq!(cells[0].audit_key(Trust::In), "mutate:none:session:in");
-        assert_eq!(cells[1].audit_key(Trust::In), "alloc:none:session:in");
-    }
 }

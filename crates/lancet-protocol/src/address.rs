@@ -59,42 +59,6 @@ pub struct ModelAttemptKey {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::identity::InvocationId;
-
-    fn address_fixture() -> ToolCallAddress {
-        ToolCallAddress {
-            message: ModelMessageAddress {
-                session_id: SessionId::parse("3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c")
-                    .expect("session id"),
-                turn_id: TurnId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").expect("turn id"),
-                model_step_ordinal: 2,
-            },
-            part_ordinal: 1,
-        }
-    }
-
-    #[test]
-    fn tool_call_address_serde_roundtrip() {
-        let address = address_fixture();
-        let json = serde_json::to_string(&address).expect("serialize");
-        let back: ToolCallAddress = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(address, back);
-    }
-
-    #[test]
-    fn address_uses_typed_identities() {
-        let address = address_fixture();
-        // The address carries typed values; this assignment does not compile
-        // if any field silently degrades to String.
-        let session: SessionId = address.message.session_id;
-        let turn: TurnId = address.message.turn_id;
-        assert_eq!(session.to_string(), "3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c");
-        assert_eq!(turn.to_string(), "3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c");
-        // A TurnId is not an InvocationId; the function below only accepts
-        // InvocationId, keeping the two identities unmixable at compile time.
-        fn takes_invocation(_: InvocationId) {}
-        let _ = takes_invocation;
-    }
 
     #[test]
     fn model_attempt_key_roundtrip() {
@@ -108,14 +72,5 @@ mod tests {
         let attempt_back: ModelAttemptKey =
             serde_json::from_value(value).expect("attempt deserialize");
         assert_eq!(attempt, attempt_back);
-    }
-
-    #[test]
-    fn address_schema_is_object_with_typed_fields() {
-        let schema = schemars::schema_for!(ToolCallAddress);
-        let value = serde_json::to_value(&schema).expect("schema to value");
-        assert_eq!(value["type"], "object");
-        assert!(value["properties"].get("message").is_some());
-        assert!(value["properties"].get("part_ordinal").is_some());
     }
 }

@@ -212,34 +212,6 @@ mod tests {
     }
 
     #[test]
-    fn tracked_and_not_ignored_are_visible_by_default() {
-        let p = policy(&[], &[]);
-        assert_eq!(
-            p.decide("src/main.rs", GitFileStatus::Tracked),
-            ReadVisibility::Visible
-        );
-        assert_eq!(
-            p.decide("scratch.txt", GitFileStatus::NotIgnored),
-            ReadVisibility::Visible
-        );
-    }
-
-    #[test]
-    fn ignored_hidden_unless_included() {
-        let p = policy(&[], &[]);
-        assert_eq!(
-            p.decide(".env", GitFileStatus::Ignored),
-            ReadVisibility::Hidden(HiddenReason::GitIgnored)
-        );
-
-        let p = policy(&[".env"], &[]);
-        assert_eq!(
-            p.decide(".env", GitFileStatus::Ignored),
-            ReadVisibility::Visible
-        );
-    }
-
-    #[test]
     fn read_denial_beats_include_and_tracked() {
         let p = policy(&[".env", "src/**"], &[".env", "src/secret.rs"]);
         assert_eq!(

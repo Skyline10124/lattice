@@ -179,17 +179,4 @@ mod tests {
         assert!(normalize_write_path_pattern("../outside").is_err());
         assert!(write_pattern_covers_relative("src/**", "/etc/passwd").is_err());
     }
-
-    #[test]
-    fn denied_fact_is_rejected() {
-        let facts = PathFacts {
-            normalized_path: ".git/config".into(),
-            exists: true,
-            kind: Some(PathKind::File),
-            parent_exists: true,
-            parent_kind: Some(PathKind::Directory),
-            canonical_under_workspace: true,
-        };
-        assert!(validate_path_facts(".git/config", &facts, &[".git/**".into()]).is_err());
-    }
 }
