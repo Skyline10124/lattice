@@ -375,9 +375,32 @@ system_path = "{}"
     }
 
     #[test]
-    fn reject_both_system_and_system_path() {
-        let (_dir, path) = temp_profile(
-            r#"
+    fn rejects_invalid_prompt_configuration() {
+        for (name, prompt_fields, expected_error_contains) in [
+            (
+                "reject_both_system_and_system_path",
+                "system = \"inline\"\nsystem_path = \"prompt.md\"",
+                "both",
+            ),
+            ("reject_neither_system_nor_system_path", "", "neither"),
+            (
+                "reject_missing_prompt_file",
+                "system_path = \"nonexistent.md\"",
+                "nonexistent",
+            ),
+            (
+                "reject_absolute_system_path",
+                "system_path = \"/etc/passwd\"",
+                "absolute",
+            ),
+            (
+                "reject_dot_dot_traversal",
+                "system_path = \"../secret/prompt.md\"",
+                "..",
+            ),
+        ] {
+            let (_dir, path) = temp_profile(&format!(
+                r#"
 schema_version = 1
 
 [agent]
@@ -385,100 +408,15 @@ name = "test"
 model = "sonnet"
 
 [prompt]
-system = "inline"
-system_path = "prompt.md"
-
-"#,
-        );
-        let err = load_agent_profile(&path).unwrap_err();
-        assert!(err.to_string().contains("both"), "got: {err}");
-    }
-
-    #[test]
-    fn reject_neither_system_nor_system_path() {
-        let (_dir, path) = temp_profile(
-            r#"
-schema_version = 1
-
-[agent]
-name = "test"
-model = "sonnet"
-
-[prompt]
-
-"#,
-        );
-        let err = load_agent_profile(&path).unwrap_err();
-        assert!(err.to_string().contains("neither"), "got: {err}");
-    }
-
-    #[test]
-    fn reject_missing_prompt_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let toml_path = dir.path().join("agent.toml");
-        std::fs::write(
-            &toml_path,
-            r#"
-schema_version = 1
-
-[agent]
-name = "test"
-model = "sonnet"
-
-[prompt]
-system_path = "nonexistent.md"
-
-"#,
-        )
-        .unwrap();
-        let err = load_agent_profile(&toml_path).unwrap_err();
-        assert!(err.to_string().contains("nonexistent"), "got: {err}");
-    }
-
-    #[test]
-    fn reject_absolute_system_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let toml_path = dir.path().join("agent.toml");
-        std::fs::write(
-            &toml_path,
-            r#"
-schema_version = 1
-
-[agent]
-name = "test"
-model = "sonnet"
-
-[prompt]
-system_path = "/etc/passwd"
-
-"#,
-        )
-        .unwrap();
-        let err = load_agent_profile(&toml_path).unwrap_err();
-        assert!(err.to_string().contains("absolute"), "got: {err}");
-    }
-
-    #[test]
-    fn reject_dot_dot_traversal() {
-        let dir = tempfile::tempdir().unwrap();
-        let toml_path = dir.path().join("agent.toml");
-        std::fs::write(
-            &toml_path,
-            r#"
-schema_version = 1
-
-[agent]
-name = "test"
-model = "sonnet"
-
-[prompt]
-system_path = "../secret/prompt.md"
-
-"#,
-        )
-        .unwrap();
-        let err = load_agent_profile(&toml_path).unwrap_err();
-        assert!(err.to_string().contains(".."), "got: {err}");
+{prompt_fields}
+"#
+            ));
+            let err = load_agent_profile(&path).expect_err(name);
+            assert!(
+                err.to_string().contains(expected_error_contains),
+                "{name}: got: {err}"
+            );
+        }
     }
 
     #[test]
@@ -654,9 +592,31 @@ system = "hi"
     }
 
     #[test]
-    fn llm_timeout_secs_zero_rejected() {
-        let (_dir, path) = temp_profile(
-            r#"
+    fn llm_timeout_secs_enforces_bounds() {
+        enum Expected {
+            ErrorContains(&'static str),
+            LoadedTimeout(u64),
+        }
+
+        for (name, timeout_secs, expected) in [
+            (
+                "llm_timeout_secs_zero_rejected",
+                0,
+                Expected::ErrorContains("timeout_secs"),
+            ),
+            (
+                "llm_timeout_secs_over_upper_bound_rejected",
+                3601,
+                Expected::ErrorContains("timeout_secs"),
+            ),
+            (
+                "llm_timeout_secs_upper_bound_accepted",
+                3600,
+                Expected::LoadedTimeout(3600),
+            ),
+        ] {
+            let (_dir, path) = temp_profile(&format!(
+                r#"
 schema_version = 1
 
 [agent]
@@ -667,53 +627,21 @@ model = "sonnet"
 system = "hi"
 
 [llm]
-timeout_secs = 0
-"#,
-        );
-        let err = load_agent_profile(&path).unwrap_err();
-        assert!(err.to_string().contains("timeout_secs"), "got: {err}");
-    }
-
-    #[test]
-    fn llm_timeout_secs_over_upper_bound_rejected() {
-        let (_dir, path) = temp_profile(
-            r#"
-schema_version = 1
-
-[agent]
-name = "test"
-model = "sonnet"
-
-[prompt]
-system = "hi"
-
-[llm]
-timeout_secs = 3601
-"#,
-        );
-        let err = load_agent_profile(&path).unwrap_err();
-        assert!(err.to_string().contains("timeout_secs"), "got: {err}");
-    }
-
-    #[test]
-    fn llm_timeout_secs_upper_bound_accepted() {
-        let (_dir, path) = temp_profile(
-            r#"
-schema_version = 1
-
-[agent]
-name = "test"
-model = "sonnet"
-
-[prompt]
-system = "hi"
-
-[llm]
-timeout_secs = 3600
-"#,
-        );
-        let loaded = load_agent_profile(&path).unwrap();
-        assert_eq!(loaded.profile.llm.timeout_secs, Some(3600));
+timeout_secs = {timeout_secs}
+"#
+            ));
+            let result = load_agent_profile(&path);
+            match expected {
+                Expected::ErrorContains(text) => {
+                    let err = result.expect_err(name);
+                    assert!(err.to_string().contains(text), "{name}: got: {err}");
+                }
+                Expected::LoadedTimeout(timeout) => {
+                    let loaded = result.expect(name);
+                    assert_eq!(loaded.profile.llm.timeout_secs, Some(timeout), "{name}");
+                }
+            }
+        }
     }
 
     #[test]
