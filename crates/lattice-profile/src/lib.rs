@@ -13,9 +13,7 @@ mod error;
 mod load;
 mod schema;
 
-pub use defaults::{
-    default_agent_template, default_dev_template, default_editor_template, default_reader_template,
-};
+pub use defaults::default_agent_template;
 pub use discovery::{DiscoveryPaths, ProfileSource, resolve_agent_profile};
 pub use error::ProfileError;
 pub use load::{LoadedAgentProfile, load_agent_profile};

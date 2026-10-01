@@ -134,7 +134,11 @@ async fn call_records_operation_and_result_evidence() {
 
     // The audit keys carry the host-derived trust segment, in seq order.
     assert_eq!(
-        evidence.snapshot_keys(),
+        effects
+            .effects
+            .iter()
+            .map(|effect| effect.cell.audit_key(effect.scope.trust))
+            .collect::<Vec<_>>(),
         vec![
             "mutate:none:session:in".to_string(),
             "alloc:none:session:in".to_string(),
@@ -186,10 +190,13 @@ async fn partial_deny_refuses_the_operation_but_not_the_call() {
         "{}",
         denied.denied[0].reason
     );
-    // C8: `component_cells` derives from effects only — a denial contributes
-    // no cell key.
+    // Only observed effects carry host-derived trust; a denial contributes no effect.
     assert_eq!(
-        evidence.snapshot_keys(),
+        effects
+            .effects
+            .iter()
+            .map(|effect| effect.cell.audit_key(effect.scope.trust))
+            .collect::<Vec<_>>(),
         vec!["alloc:none:session:in".to_string()]
     );
 }

@@ -248,12 +248,6 @@ impl ComponentRuntime {
             .map(|tool| tool.descriptor.clone())
     }
 
-    /// Override the per-call execution limits. Used by tests to exercise
-    /// fuel/timeout/memory limits without composing a new runtime.
-    pub fn set_limits(&mut self, limits: ExecutionLimits) {
-        *self.core.limits.lock().unwrap() = limits;
-    }
-
     /// Call a Component Tool by name.
     ///
     /// 1. Look up the tool → `method_not_found` if absent.
@@ -867,3 +861,11 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "runtime/negative_tests.rs"]
+mod negative_tests;
+
+#[cfg(test)]
+#[path = "runtime/embedded_tests.rs"]
+mod embedded_tests;

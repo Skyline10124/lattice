@@ -3,19 +3,9 @@
 
 //! Construction inputs for a LANCET runtime.
 
-use std::path::Path;
-
 use lancet_authority::policy::default::PolicyConfig;
 use lancet_protocol::evidence::CapabilityAdmissionPolicy;
-use lancet_runtime::{WorkspaceHistoryBacking, WorkspaceHistoryError};
-
-/// Private workspace-history store backing under a caller-supplied state root.
-pub fn workspace_history_backing_in(
-    state_root: &Path,
-    project_root: &Path,
-) -> Result<WorkspaceHistoryBacking, WorkspaceHistoryError> {
-    WorkspaceHistoryBacking::for_project_in(state_root, project_root)
-}
+use lancet_runtime::WorkspaceHistoryBacking;
 
 /// Inputs for [`crate::LancetRuntime::build`].
 ///

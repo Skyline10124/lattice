@@ -261,7 +261,7 @@ SessionExecutionLock（会话绑定操作）
 
 | 锁类别 | 同进程语义 |
 | --- | --- |
-| 操作锁 | 无已有 guard 的获取是独立操作；共享可并存，独占与其他操作冲突。合法嵌套显式通过现有 `FlockGuard::reenter` |
+| 操作锁 | 每次获取都是独立操作；共享可并存，独占与其他操作冲突。不支持在已持有 guard 时嵌套获取 |
 | create 与 repository write lock | 严格互斥，不可重入；阻塞等待者按票号 FIFO，非阻塞获取不得插队 |
 | 会话库写事务 | 由 redb 保证同一时刻只有一个；写者等待时间取决于其他写事务的长度，所以每个写事务只覆盖一步状态变化 |
 
@@ -309,4 +309,4 @@ SIGKILL 后重开证明相应进程崩溃场景；注入屏障失败验证调用
 
 承接来源为 ADR 0005 的项目寻址、通用内核、操作锁和位置能力部分，以及 [ADR 0006](../adr/0006-tree-session-and-global-redb-store.md) 的存储布局与会话库使用条件。机制接口与实现核对位置为 [`repo.rs`](../../crates/lattice-store/src/repo.rs)、[`durability.rs`](../../crates/lattice-store/src/durability.rs)、[`lock.rs`](../../crates/lattice-store/src/lock.rs)及 [`probe.rs`](../../crates/lattice-store/src/probe.rs)。
 
-局部指引中“操作锁可重入”的概括按当前显式 guard 语义展开，不迁入旧的自动嵌套假设。创建残留的完整报告与跨位置能力覆盖仍需核验。
+创建残留的完整报告与跨位置能力覆盖仍需核验。

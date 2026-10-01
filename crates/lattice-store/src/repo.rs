@@ -445,28 +445,6 @@ impl StoreRepo {
         Ok(out)
     }
 
-    /// Newest-first rev-walk from `tips`, optionally hiding `hide`.
-    pub fn rev_walk(
-        &self,
-        tips: &[gix::ObjectId],
-        hide: &[gix::ObjectId],
-    ) -> Result<Vec<gix::ObjectId>> {
-        let repo = self.repo();
-        let mut platform = repo.rev_walk(tips.iter().copied());
-        if !hide.is_empty() {
-            platform = platform.with_hidden(hide.to_vec());
-        }
-        let walk = platform
-            .all()
-            .map_err(|e| StoreError::Git(format!("create revwalk: {e}")))?;
-        let mut ids = Vec::new();
-        for item in walk {
-            let info = item.map_err(|e| StoreError::Git(format!("revwalk error: {e}")))?;
-            ids.push(info.id);
-        }
-        Ok(ids)
-    }
-
     /// The empty tree id for this repository's object hash.
     pub fn empty_tree_oid(&self) -> gix::ObjectId {
         gix::ObjectId::empty_tree(self.repo().object_hash())

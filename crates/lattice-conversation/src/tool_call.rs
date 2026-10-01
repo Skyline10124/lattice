@@ -340,6 +340,20 @@ pub(crate) mod hex_digest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn arguments_digest_is_canonical_and_stable() {
+        // Key order and whitespace do not change the digest.
+        let a: Value = serde_json::from_str(r#"{ "b" : 2, "a" : 1 }"#).expect("value");
+        let b: Value = serde_json::from_str(r#"{"a":1,"b":2}"#).expect("value");
+        assert_eq!(arguments_digest(&a), arguments_digest(&b));
+        // Golden fixture pins the construction (domain separator + length +
+        // canonical bytes) against silent drift.
+        let golden: Value = serde_json::from_str(r#"{"path":"a.txt"}"#).expect("value");
+        let expected = "5fd582703776c899a2ecb12f3d699bd7244dff1f443ef5ae3f0067bcf3ce279e";
+        let digest = arguments_digest(&golden);
+        let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_eq!(hex, expected);
+    }
     use lancet_protocol::{ModelMessageAddress, SessionId, TurnId};
 
     fn raw(name: &str, arguments: &str) -> RawToolCall {

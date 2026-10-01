@@ -11,11 +11,11 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use crate::{Cancellation, EventSink};
+use crate::{CellEvidenceLedger, ComponentCallContext, ComponentRuntime, admit_tool};
 use lancet_protocol::cell::Trust;
 use lancet_protocol::evidence::CapabilityAdmissionPolicy;
 use lancet_protocol::{CepErrorCode, InvocationId};
-use lancet_runtime::{Cancellation, EventSink};
-use lancet_runtime::{CellEvidenceLedger, ComponentCallContext, ComponentRuntime, admit_tool};
 use tokio::sync::{mpsc, watch};
 
 /// A call context with every declared `noop.echo` capability admitted, built
@@ -75,13 +75,12 @@ fn tool_resource(err: &lancet_protocol::CepError) -> Option<&str> {
 /// Run a limited call, check its original error expectations, then prove runtime survival.
 async fn assert_resource_exhausted_then_survives(
     name: &str,
-    limits: lancet_runtime::ExecutionLimits,
+    limits: crate::ExecutionLimits,
     initial_message: &str,
     resource: Option<&str>,
 ) {
-    let mut rt =
-        ComponentRuntime::noop_fixture().unwrap_or_else(|error| panic!("{name}: {error:?}"));
-    rt.set_limits(limits);
+    let rt = ComponentRuntime::noop_fixture().unwrap_or_else(|error| panic!("{name}: {error:?}"));
+    *rt.core.limits.lock().unwrap() = limits;
     let (ctx, _rx, _cancel) = call_ctx(&rt);
     let result = rt
         .call(
@@ -107,7 +106,7 @@ async fn assert_resource_exhausted_then_survives(
         );
     }
     // Restore defaults on the same runtime, with a fresh context and live cancellation sender.
-    rt.set_limits(lancet_runtime::ExecutionLimits::default());
+    *rt.core.limits.lock().unwrap() = crate::ExecutionLimits::default();
     let (ctx2, _rx, _cancel) = call_ctx(&rt);
     let result = rt
         .call(
@@ -122,7 +121,7 @@ async fn assert_resource_exhausted_then_survives(
 
 #[tokio::test]
 async fn resource_limits_fail_calls_without_poisoning_the_runtime() {
-    use lancet_runtime::ExecutionLimits;
+    use crate::ExecutionLimits;
     for (name, limits, initial_message, resource) in [
         // Zero fuel fails immediately; the original test did not check the resource label.
         (

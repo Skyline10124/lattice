@@ -6,7 +6,7 @@
 //! This crate defines the pure protocol data layer for CEP:
 //!
 //! - **JSON-RPC 2.0** envelope types (`jsonrpc`) — domain-neutral request/response/notification.
-//! - **Frame aliases** (`frame`) — CEP-specific type aliases over JSON-RPC (`ToolCall`, `ToolResult`, `ToolEvent`).
+//! - **Frame aliases** (`frame`) — CEP-specific type aliases over JSON-RPC (`ToolEvent`).
 //! - **Cell effect model** (`cell`) — ADR 0004 `CtxOp`/`ExtImpact`/scope/trust/capability core.
 //! - **Admission evidence** (`evidence`) — approved capabilities vs observed effects.
 //! - **Canonical JSON** (`canonical`) — deterministic bytes for protocol consumers.
@@ -47,6 +47,6 @@ pub use evidence::{
     TransportEvidence, WorkspaceVisibilityEvidence,
 };
 pub use evidence_triple::CellEvidenceTriple;
-pub use frame::{ToolCall, ToolError, ToolEvent, ToolResult};
+pub use frame::ToolEvent;
 pub use identity::{IdParseError, InvocationId, SessionId, TurnId};
 pub use jsonrpc::{ErrorObject, Id, Notification, Request, Response};

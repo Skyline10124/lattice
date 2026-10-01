@@ -142,7 +142,7 @@ mod tests {
             "[network]\nallow_localhost=true\nallowed_hosts=['localhost']\n",
         )
         .unwrap();
-        let loaded = crate::load_agent_profile_path(&profile_path).unwrap();
+        let loaded = lattice_profile::load_agent_profile(&profile_path).unwrap();
         let root = crate::LocalWorkspaceRoot::from_path(project.path()).unwrap();
         let connection = lattice_llm::LlmConnection::new(
             lattice_llm::ResolvedModel {

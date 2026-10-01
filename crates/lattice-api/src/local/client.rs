@@ -156,12 +156,6 @@ impl LocalClient {
             _ => Err(protocol()),
         }
     }
-    pub async fn read_history(
-        &self,
-        view: &ObservationSnapshot,
-    ) -> std::result::Result<LocalHistory, HistoryReadError> {
-        self.read_history_with_progress(view, || {}).await
-    }
     pub(super) async fn read_history_with_progress(
         &self,
         view: &ObservationSnapshot,
@@ -273,20 +267,6 @@ impl LocalClient {
         {
             Response::Acceptance(acceptance) => Ok(acceptance),
             _ => Err(protocol()),
-        }
-    }
-    /// 加载闭包可借用，不要求 Send；后台给出最终选择的 agent 后只加载一次。
-    pub async fn submit_with<F, Fut>(&self, request: TurnRequest, load: F) -> Result<Acceptance>
-    where
-        F: FnOnce(String) -> Fut,
-        Fut: std::future::Future<Output = Result<FrozenConfiguration>>,
-    {
-        match self.submit_handshake(request, load, None).await? {
-            SubmissionReply::Accepted(acceptance) => Ok(acceptance),
-            SubmissionReply::NotSubmitted(_) => Err(protocol()),
-            SubmissionReply::ConfigurationFailed(error) | SubmissionReply::BackendFailed(error) => {
-                Err(error)
-            }
         }
     }
     pub(super) async fn submit_handshake<F, Fut>(

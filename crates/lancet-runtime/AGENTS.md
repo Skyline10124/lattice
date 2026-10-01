@@ -21,7 +21,7 @@
 - 不依赖 lancet-api 或 LATTICE session/agent/profile；authority 是合法下层。无 `wasmtime-wasi`/`wasi-common`，只链接版本化 Host imports，无 ambient WASI。
 - `from_embedded` 只消费 inventory 与生成的 EXPECTED_COMPONENTS，无运行时注册 API。`generated/host_composition.rs` 由 manifest 经 tool-codegen 生成，是生产嵌入的唯一来源；Tool 自己的 registration.rs 不单独编译接入。
 - `generated/noop_fixture.rs` 是手工维护的固定 test-utils fixture，test_helpers 只为负向测试合成身份/注册。生产不启用 test-utils，不使用固定 fixture 或调用者自造目录。
-- `call(&self)` 在阻塞 worker 运行 Wasmtime；async imports 使用有界进程级 Tokio runtime：2 个 async workers，最多 8 个阻塞 DNS task。epoch ticker 首次调用经 OnceLock 启动，需要 Tokio 上下文，组成本身不需要；共享 Arc 跨投影/执行复用，`set_limits(&mut self)` 仅测试。
+- `call(&self)` 在阻塞 worker 运行 Wasmtime；async imports 使用有界进程级 Tokio runtime：2 个 async workers，最多 8 个阻塞 DNS task。epoch ticker 首次调用经 OnceLock 启动，需要 Tokio 上下文，组成本身不需要；共享 Arc 跨投影/执行复用；资源限制的测试在 `src/runtime/` 的私有测试模块中直接设置。
 - call-scoped 状态是唯一取消权威，pre-call、guest logical error、epoch abort 汇入同一 `CallCancelled`；API 复用 `cancelled_error`，不复制代码/类别。错误脱敏，不暴露 backtrace、宿主路径或秘密。
 - 每个 effectful import 绑定 Host 确认的 Cell 与具体目标，拒绝只拒绝该操作，设施不执行，记录 DeniedOperation 而非 effect。path/host 目标分别要求 workspace/network scope；emit-event 绑定当前 Turn 的 session Cell，cancelled 是不经授权门的纯控制探测。
 - 观察四操作使用相同可见性与授权入口，Host 渲染单个可见窗口，使预算、truncation 和无内容 visibility 证据对齐；guest 只包装外层结果。

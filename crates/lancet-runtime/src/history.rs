@@ -184,14 +184,6 @@ impl WorkspaceHistoryBacking {
         Self::Project { layout, key }
     }
 
-    /// Path of the history store, when enabled.
-    pub fn store_path(&self) -> Option<PathBuf> {
-        match self {
-            Self::Disabled => None,
-            Self::Project { layout, key } => Some(layout.project_store(key, HISTORY_REPO_DIR)),
-        }
-    }
-
     /// Path of the per-project `WorkspaceOperationLock`, when enabled.
     pub fn operation_lock_path(&self) -> Option<PathBuf> {
         match self {
@@ -421,20 +413,6 @@ impl WorkspaceHistory {
             commit_id: object_id.to_string(),
             files: store.tree_files(tree)?,
         }))
-    }
-
-    /// Whether `oid` is still reachable in this history.
-    ///
-    /// 已记录提交只能是 current 本身或其祖先，不维护恢复遗留 pin。
-    pub fn is_reachable(&self, oid: &str) -> Result<bool, WorkspaceHistoryError> {
-        let Some(store) = self.store.as_ref() else {
-            return Ok(false);
-        };
-        let object_id = parse_oid(oid)?;
-        let Some(current) = store.ref_target(CURRENT_REF)? else {
-            return Ok(false);
-        };
-        Ok(current == object_id || store.rev_walk(&[current], &[])?.contains(&object_id))
     }
 }
 
@@ -1111,7 +1089,21 @@ mod tests {
         assert_eq!(before.files.get("existing.txt").unwrap().as_slice(), b"old");
         let after = history.resolve(&recorded.commit_id).unwrap().unwrap();
         assert_eq!(after.files.get("existing.txt").unwrap().as_slice(), b"new");
-        assert!(history.is_reachable(&baseline).unwrap());
+        // The baseline stays reachable from the published `current` ref: the
+        // recorded commit is the tip and its parent is the baseline.
+        assert_eq!(
+            history.current().unwrap().as_deref(),
+            Some(recorded.commit_id.as_str())
+        );
+        assert_eq!(
+            history
+                .store
+                .as_ref()
+                .unwrap()
+                .commit_parents(parse_oid(&recorded.commit_id).unwrap())
+                .unwrap(),
+            vec![parse_oid(&baseline).unwrap()]
+        );
     }
 
     /// 外部修改后的真实前态必须记录，不能沿用上次变更的陈旧后态。
@@ -1227,8 +1219,19 @@ mod tests {
         let first = history.record(&create("a.txt", "1")).unwrap().unwrap();
         let second = history.record(&create("b.txt", "2")).unwrap().unwrap();
 
-        assert!(history.is_reachable(&first.commit_id).unwrap());
-        assert!(history.is_reachable(&second.commit_id).unwrap());
+        assert_eq!(
+            history
+                .store
+                .as_ref()
+                .unwrap()
+                .commit_parents(parse_oid(&second.commit_id).unwrap())
+                .unwrap(),
+            vec![parse_oid(&first.commit_id).unwrap()]
+        );
+        assert_eq!(
+            history.current().unwrap().as_deref(),
+            Some(second.commit_id.as_str())
+        );
         assert!(history.resolve(&first.commit_id).unwrap().is_some());
     }
 
@@ -1248,7 +1251,15 @@ mod tests {
         );
         let snapshot = reopened.resolve(&recorded.commit_id).unwrap().unwrap();
         assert_eq!(snapshot.files.get("a.txt").unwrap().as_slice(), b"1");
-        assert!(reopened.is_reachable(&recorded.commit_id).unwrap());
+        assert_eq!(
+            reopened
+                .store
+                .as_ref()
+                .unwrap()
+                .ref_target(CURRENT_REF)
+                .unwrap(),
+            Some(parse_oid(&recorded.commit_id).unwrap())
+        );
     }
 
     // ─── 历史记录真实性 ───────────────────────────────────────────────
@@ -1551,7 +1562,10 @@ mod tests {
         let backing =
             WorkspaceHistoryBacking::for_project_in(&state.path().join("state"), &workspace)
                 .expect("derive backing");
-        let store_path = backing.store_path().expect("enabled backing");
+        let WorkspaceHistoryBacking::Project { layout, key } = &backing else {
+            panic!("enabled backing")
+        };
+        let history_path = layout.project_store(key, HISTORY_REPO_DIR);
 
         let err = WorkspaceHistory::open(backing).expect_err("absent store must fail");
         assert!(
@@ -1562,15 +1576,15 @@ mod tests {
             "expected typed NotInitialized, got {err:?}"
         );
         assert!(
-            !store_path.exists(),
+            !history_path.exists(),
             "strict open must not create the store"
         );
     }
 
     /// The operation lock is the per-project lock under the state layout, and
-    /// explicit guard passing is the only same-process re-entry path.
+    /// history recording may take the narrower repository write lock beneath it.
     #[test]
-    fn operation_lock_is_project_scoped_and_reentrant() {
+    fn operation_lock_is_project_scoped_and_allows_history_recording() {
         let state = TempDir::new().unwrap();
         let history = history_at(&state);
 
@@ -1584,13 +1598,6 @@ mod tests {
             guard.path().display()
         );
         assert!(guard.path().ends_with(WORKSPACE_OPERATION_LOCK));
-
-        // Re-entrant only through the explicit guard capability: a mutation
-        // that records while already holding the operation lock must not
-        // deadlock, and an independent acquire must not be mistaken for it.
-        let nested = guard.reenter().expect("explicit re-entrant acquire");
-        drop(nested);
-
         // The repository write lock is a *different*, narrower lock taken
         // underneath — recording while the operation lock is held works.
         history.record(&create("a.txt", "1")).unwrap().unwrap();

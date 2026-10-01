@@ -9,11 +9,6 @@ use crate::session::{ApiError, Result};
 
 pub use lattice_profile::LoadedAgentProfile;
 
-/// Load an agent profile from an explicit TOML path.
-pub fn load_agent_profile_path(path: &Path) -> Result<LoadedAgentProfile> {
-    lattice_profile::load_agent_profile(path).map_err(|err| ApiError::BadRequest(err.to_string()))
-}
-
 /// Resolve a named agent profile from project/global discovery roots.
 pub fn resolve_named_agent_profile(
     agent_name: &str,

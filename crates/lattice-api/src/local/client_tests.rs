@@ -1,6 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
+use super::client::SubmissionReply;
 use super::{ipc, types::*, *};
 use crate::turn::TextSegment;
 use std::time::Duration;
@@ -381,7 +382,8 @@ async fn fixed_root_path_preserves_utf8_fragments_and_agent_attribution() {
     let fixed = view(id, 2, true, false);
     let expected = history(&fixed);
     let client = peer.client.clone();
-    let reading = tokio::spawn(async move { client.read_history(&fixed).await });
+    let reading =
+        tokio::spawn(async move { client.read_history_with_progress(&fixed, || {}).await });
     let mut full = page(expected.clone());
     let last = full.fragments.pop().unwrap();
     let split = last.fragment.json_fragment.find("原").unwrap();
@@ -864,7 +866,10 @@ async fn lazy_handshake_preserves_identity_and_loads_selected_agent_once() {
                 update_until(&mut turn, |u| matches!(u, LocalUpdate::Submission { .. })).await;
                 turn.detach().await.submission.unwrap()
             } else {
-                client.submit_with(sent, load).await
+                match client.submit_handshake(sent, load, None).await? {
+                    SubmissionReply::Accepted(value) => Ok(value),
+                    _ => panic!("handshake must accept"),
+                }
             }
         });
         let mut subscriptions = Vec::new();

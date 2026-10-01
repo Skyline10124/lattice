@@ -13,7 +13,7 @@
 ## 维护边界
 
 - layout/key/meta 模块维护通用拓扑、规范根路径原始字节的域分离 SHA-256 和身份核验；领域拥有其 store 文件名、schema 和 ref 名，不在内核建中央 schema、业务 put/get、全存储注册表或可插拔后端。
-- repo/durability 维护工作区历史的严格打开、create、对象与引用发布及屏障。锁、FIFO、显式 guard 重入和精确重试的同步要求遵循存储合同；成功 CAS 已完成 pending 对象屏障，跳过 CAS 的精确重试仍须完成所需屏障。
+- repo/durability 维护工作区历史的严格打开、create、对象与引用发布及屏障。锁、FIFO 和精确重试的同步要求遵循存储合同；成功 CAS 已完成 pending 对象屏障，跳过 CAS 的精确重试仍须完成所需屏障。
 - 首次创建预建并同步全部对象 fanout，再发布目录；strict-open 验证而不修复拓扑。steady-state 只同步对象文件及精确 fanout 目录，ref-only 屏障不触碰对象空间。
 - 缺失 store 返回 `NotInitialized`；kind/version/scope 或 fanout 错误返回 `Corruption`。禁止 open-failed-init、静默修复、隔离后替换、旧路径回退或空库替代；数据重建需单独授权。
 - `create*` 是指定组成入口唯一初始化路径，使用同级临时目录与 `RENAME_NOREPLACE`，create lock 与 repository write lock 不重叠。

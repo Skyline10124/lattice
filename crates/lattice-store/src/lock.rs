@@ -17,8 +17,7 @@
 //! - [`acquire_flock`] is the **independent operation lock**: an acquisition
 //!   made without an existing guard is a new operation, even in this process.
 //!   Shared operations may coexist; an exclusive operation conflicts with any
-//!   existing operation. Legitimate nesting is explicit through
-//!   [`FlockGuard::reenter`], never inferred from a thread or task identity.
+//!   existing operation. Ownership is never inferred from a thread or task identity.
 //! - [`acquire_flock_strict`] is the **strict mutex**: first-create locks and
 //!   repository write locks must serialize even two independent operations in
 //!   one process, so a second acquisition waits on a condvar (blocking) or
@@ -100,35 +99,6 @@ impl FlockGuard {
     pub fn mode(&self) -> LockMode {
         self.mode
     }
-
-    /// Explicitly nest this operation lock.
-    ///
-    /// The guard is the ownership capability. No thread ID or task-local
-    /// bookkeeping is used, so a caller must deliberately pass the guard into
-    /// the nested operation that is allowed to re-enter it. Strict repository
-    /// and create locks cannot be re-entered.
-    pub fn reenter(&self) -> Result<Self, StoreError> {
-        let mut map = registry_lock();
-        let Some(entry) = map.get_mut(&self.path) else {
-            return Err(StoreError::Lock {
-                operation: "re-entering a released lock",
-                path: self.path.clone(),
-                source: std::io::Error::other("lock guard is no longer registered"),
-            });
-        };
-        if entry.strict {
-            return Err(StoreError::Lock {
-                operation: "re-entering a strict lock",
-                path: self.path.clone(),
-                source: std::io::Error::other("strict locks are never re-entrant"),
-            });
-        }
-        entry.holders += 1;
-        Ok(Self {
-            path: self.path.clone(),
-            mode: self.mode,
-        })
-    }
 }
 
 impl Drop for FlockGuard {
@@ -157,10 +127,10 @@ impl Drop for FlockGuard {
     }
 }
 
-/// Acquire a re-entrant operation `flock` on `path`, creating the file (and
+/// Acquire an independent operation `flock` on `path`, creating the file (and
 /// parent directories) on demand.
 ///
-/// See the module docs for the nesting matrix. `Busy` is returned for a
+/// See the module docs for the conflict rules. `Busy` is returned for a
 /// non-blocking acquire that conflicts with another operation or process.
 /// Blocking acquisitions wait for a conflicting same-process operation to
 /// release instead of treating it as an implicit re-entry.
@@ -179,8 +149,7 @@ pub fn acquire_flock(
             });
         }
         // Independent shared operations can coexist. Every other same-process
-        // acquisition is a real conflict and must wait or report Busy. The
-        // only nesting exception is the explicit `FlockGuard::reenter` path.
+        // acquisition is a real conflict and must wait or report Busy.
         if entry.mode == LockMode::Shared && mode == LockMode::Shared {
             let entry = map.get_mut(path).expect("entry remains registered");
             entry.holders += 1;
@@ -384,22 +353,6 @@ mod tests {
         assert!(matches!(err, StoreError::Busy { .. }));
         drop(g2);
         drop(g1);
-        let g3 = acquire_flock(&lock, LockMode::Exclusive, Blocking::NonBlocking).unwrap();
-        drop(g3);
-    }
-
-    #[test]
-    fn explicit_reentrant_guard_allows_legal_nesting() {
-        let dir = tempfile::tempdir().unwrap();
-        let lock = dir.path().join("explicit-reentrant.lock");
-        let g1 = acquire_flock(&lock, LockMode::Exclusive, Blocking::Block).unwrap();
-        let g2 = g1.reenter().unwrap();
-        assert_eq!(g1.mode(), LockMode::Exclusive);
-        assert_eq!(g2.mode(), LockMode::Exclusive);
-        drop(g1);
-        let err = acquire_flock(&lock, LockMode::Exclusive, Blocking::NonBlocking).unwrap_err();
-        assert!(matches!(err, StoreError::Busy { .. }));
-        drop(g2);
         let g3 = acquire_flock(&lock, LockMode::Exclusive, Blocking::NonBlocking).unwrap();
         drop(g3);
     }

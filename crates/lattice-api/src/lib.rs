@@ -26,7 +26,7 @@ pub use lancet_api::CompositionError;
 pub use lattice_session::store::{NodeId, TurnSummary, UsageSummary};
 pub use lattice_session::{ProjectStoreKey, StateLayout};
 pub use models::{ModelInfo, init_logging, list_models, resolve_model};
-pub use profile::{LoadedAgentProfile, load_agent_profile_path, resolve_named_agent_profile};
+pub use profile::{LoadedAgentProfile, resolve_named_agent_profile};
 pub use root::{LocalWorkspaceRoot, resolve_local_workspace_root};
 pub use session::{ApiError, SessionApi};
 #[cfg(any(test, feature = "test-utils"))]

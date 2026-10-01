@@ -255,20 +255,6 @@ impl CellEvidenceLedger {
             },
         )
     }
-
-    /// The 4-segment audit keys (`ctx:ext:scope:trust`) of the observed
-    /// effects, in `seq` order. Derived from the same effects the ledger
-    /// reports, so the legacy `component_cells` key can never disagree with
-    /// the versioned record (C8).
-    pub fn snapshot_keys(&self) -> Vec<String> {
-        self.inner
-            .lock()
-            .unwrap()
-            .effects
-            .iter()
-            .map(|effect| effect.cell.audit_key(effect.scope.trust))
-            .collect()
-    }
 }
 
 #[cfg(test)]

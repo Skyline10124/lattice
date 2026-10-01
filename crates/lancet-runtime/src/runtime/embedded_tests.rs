@@ -12,13 +12,13 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use crate::{Cancellation, EventSink};
+use crate::{
+    CellEvidenceLedger, ComponentCallContext, ComponentRuntime, ExecutionLimits, admit_tool,
+};
 use lancet_protocol::cell::{CtxOp, ExtImpact, Trust};
 use lancet_protocol::evidence::{CapabilityAdmissionPolicy, EffectSource};
 use lancet_protocol::{CepErrorCode, InvocationId};
-use lancet_runtime::{Cancellation, EventSink};
-use lancet_runtime::{
-    CellEvidenceLedger, ComponentCallContext, ComponentRuntime, ExecutionLimits, admit_tool,
-};
 use tokio::sync::{mpsc, watch};
 
 /// The default distribution's five built-in Components after #32.
@@ -257,11 +257,11 @@ async fn precancelled_call_reports_cancelled_and_keeps_admission_evidence() {
 /// production Component goes through it rather than around it.
 #[tokio::test]
 async fn resource_exhaustion_is_reported_and_records_no_effect() {
-    let mut rt = ComponentRuntime::from_embedded().expect("composition");
-    rt.set_limits(ExecutionLimits {
+    let rt = ComponentRuntime::from_embedded().expect("composition");
+    *rt.core.limits.lock().unwrap() = ExecutionLimits {
         fuel: 0,
         ..ExecutionLimits::default()
-    });
+    };
     let (ctx, evidence, _cancel) = call_ctx(&rt);
 
     let err = rt

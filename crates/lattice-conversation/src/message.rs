@@ -148,8 +148,7 @@ pub enum MessageRole {
 
 /// The provider-neutral semantic payload of one part.
 ///
-/// This is the only content that enters the semantic digest and the only
-/// content available to cross-provider projection.
+/// This is the only content available to cross-provider projection.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     rename_all = "snake_case",

@@ -3,11 +3,6 @@
 
 //! CEP workspace observation path policy configuration and resolution.
 
-use std::path::{Component, Path};
-
-use lancet_protocol::error::{PermissionErrorData, ValidationErrorData};
-use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability};
-
 /// Immutable observation limits derived from profile `[lancet.observation]`.
 ///
 /// Limits only — observation scope is the canonical project root plus the
@@ -46,52 +41,3 @@ impl ObservationPolicyConfig {
         }
     }
 }
-
-/// Reject explicit parent traversal in path text (Validation-family).
-pub fn reject_parent_traversal(path: &str) -> Result<(), CepError> {
-    for component in Path::new(path).components() {
-        if matches!(component, Component::ParentDir) {
-            return Err(path_containment(
-                "path",
-                format!("path traversal denied: '{path}' contains '..' component"),
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Backend safety-net denial after CEP policy allowed invocation (Permission-family).
-pub fn backend_safety_net_denial(path: &str) -> CepError {
-    project_root_violation_message(format!(
-        "backend safety net denied path '{}': outside effective observation scope",
-        path
-    ))
-}
-
-fn path_containment(field: &str, reason: impl Into<String>) -> CepError {
-    let reason = reason.into();
-    CepError::new(
-        CepErrorCode::PathContainment,
-        reason.clone(),
-        CepErrorData::Validation(ValidationErrorData {
-            field: field.into(),
-            reason,
-        }),
-        Retriability::Permanent,
-    )
-}
-
-fn project_root_violation_message(message: String) -> CepError {
-    CepError::new(
-        CepErrorCode::ProjectRootViolation,
-        message.clone(),
-        CepErrorData::Permission(PermissionErrorData {
-            required_capability: "workspace_observation".into(),
-            granted_capabilities: vec![],
-        }),
-        Retriability::Permanent,
-    )
-}
-
-#[cfg(test)]
-pub const BACKEND_SAFETY_NET_TEST_PATH: &str = "__cep_backend_safety_net__";
