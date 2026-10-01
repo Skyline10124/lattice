@@ -59,7 +59,7 @@ status: active
 会话与调用状态通过公开 CLI 读取；本地请求回执及订阅边界可通过公开 Local IPC 验证，不导入产品类型或直接调用进程内实现。既有工作区历史场景为验证私有 Git 历史，使用通用 Git 库检查对象与引用；这不授权 harness 导入产品实现或扩大为任意私有状态读取接口。
 未通过公开接口暴露的内部对象关系、引用事务与 fsync 故障由对应库测试保护。
 
-fake LLM 使用正式的 `OPENAI_COMPATIBLE_*` 配置接入。场景不增加隐藏产品参数、测试专用 provider 或绕过真实调用流程的产品分支。
+fake LLM 通过所选 provider 正式的 base URL 与凭据配置接入：OpenAI 兼容 provider 使用 `OPENAI_COMPATIBLE_*`，Anthropic 与 Gemini 分别使用 `ANTHROPIC_BASE_URL`、`GEMINI_BASE_URL` 及各自的 API key。fake LLM 按请求路由生成对应 provider 的流式协议。场景不增加隐藏产品参数、测试专用 provider 或绕过真实调用流程的产品分支。
 
 下图表示场景驱动与观察的关系：
 
@@ -97,7 +97,7 @@ flowchart LR
 
 fake provider 唯一的客户端是被测产品，因此只做取出路由、凭据与 body 所需的最少解析，不防御畸形或恶意 HTTP。它对场景只承担三项保证：
 
-1. 计数准确：只有发往模型端点的请求进入 request capture；其他请求得到错误响应并记为 fixture failure，不被静默接受。非 JSON body 保留为诊断，不虚构有效模型请求。
+1. 计数准确：只有发往三种 provider 模型端点的请求进入 request capture；其他请求得到错误响应并记为 fixture failure，不被静默接受。非 JSON body 保留为诊断，不虚构有效模型请求。
 2. 回复确定：request capture、Sequence 选择/推进与到达通知在同一临界区发生，gate 只控制交付，不重排脚本归属。超出 Sequence 重复最后一项，空 Sequence 产生 IllegalResponse。
 3. 失败有界：每个连接的读写使用固定两秒 deadline；request/stall/release/shutdown 采用有界握手，shutdown 唤醒 accept、取消 gate，确认线程完成后才 join，Drop 不作无界等待。保留首个 fixture failure，捕获已不可能时提早报告，shutdown 在有界清理后返回该错误；不另建 health 或 failure 订阅接口。
 

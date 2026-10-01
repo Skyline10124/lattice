@@ -1,12 +1,15 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Localhost OpenAI-compatible fake LLM for harness scenarios.
+//! Localhost fake LLM for harness scenarios.
 //!
 //! A minimal HTTP/SSE server bound to a scenario-local port. The product
-//! connects through the formal `OPENAI_COMPATIBLE_BASE_URL` /
-//! `OPENAI_COMPATIBLE_MODEL` / `OPENAI_COMPATIBLE_API_KEY` configuration —
-//! there is no test-only provider, hidden flag, or product-side change.
+//! connects through the selected provider's formal base URL and credential
+//! configuration (`OPENAI_COMPATIBLE_*`, `ANTHROPIC_BASE_URL`,
+//! `GEMINI_BASE_URL`) — there is no test-only provider, hidden flag, or
+//! product-side change. The request route selects the streaming protocol:
+//! OpenAI Chat Completions, Anthropic Messages, or Gemini
+//! `streamGenerateContent`.
 //!
 //! The server does two things (RFC #41, Codeberg #19, decision four):
 //!
@@ -53,6 +56,8 @@ pub struct CapturedRequest {
     /// provider adapter, e.g. `observe__workspace`). Asserted verbatim so a
     /// catalog rename surfaces.
     pub tool_names: Vec<String>,
+    /// Protocol the request used: `openai`, `anthropic` or `gemini`.
+    pub provider: String,
     /// The full decoded JSON body, for assertions on fields this struct does
     /// not surface (e.g. `temperature`, `max_tokens`).
     pub raw: Value,
@@ -129,6 +134,8 @@ pub enum ServeError {
     },
     #[error("not a model request: {0}")]
     UnexpectedRequest(String),
+    #[error("script cannot be rendered in the {0} protocol")]
+    UnsupportedScript(&'static str),
     #[error("fake-provider server thread failed: {0}")]
     ThreadFailure(String),
 }
@@ -263,7 +270,7 @@ struct ServerState {
     serve_exited: bool,
     active_handlers: usize,
     first_failure: Option<String>,
-    expected_authorization: Option<String>,
+    expected_api_key: Option<String>,
 }
 
 impl ServerState {
@@ -339,7 +346,7 @@ impl FakeLlmServer {
                 serve_exited: false,
                 active_handlers: 0,
                 first_failure: None,
-                expected_authorization: None,
+                expected_api_key: None,
             }),
             Condvar::new(),
         ));
@@ -391,7 +398,7 @@ impl FakeLlmServer {
     pub fn expect_api_key(&self, key: &str) {
         let mut state = self.state.0.lock().unwrap();
         assert!(state.requests.is_empty() && state.active_handlers == 0);
-        state.expected_authorization = Some(format!("Bearer {key}"));
+        state.expected_api_key = Some(key.to_string());
     }
 
     /// A snapshot of every request captured so far, in arrival order.
@@ -597,7 +604,8 @@ fn write_http_response(
 struct HttpRequest {
     method: String,
     path: String,
-    authorization: Option<String>,
+    /// `authorization`, `x-api-key` and `x-goog-api-key`, names lowercased.
+    credentials: Vec<(String, String)>,
     body: String,
 }
 
@@ -611,7 +619,7 @@ fn read_http_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpReque
     let mut parts = line.split_whitespace();
     let method = parts.next().unwrap_or_default().to_string();
     let path = parts.next().unwrap_or_default().to_string();
-    let (mut length, mut authorization) = (0, None);
+    let (mut length, mut credentials) = (0, Vec::new());
     loop {
         line.clear();
         if reader.read_line(&mut line)? == 0 || line.trim().is_empty() {
@@ -621,8 +629,14 @@ fn read_http_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpReque
             let value = value.trim();
             if name.eq_ignore_ascii_case("content-length") {
                 length = value.parse().unwrap_or(0);
-            } else if name.eq_ignore_ascii_case("authorization") {
-                authorization = Some(value.to_string());
+            } else {
+                let name = name.to_ascii_lowercase();
+                if matches!(
+                    name.as_str(),
+                    "authorization" | "x-api-key" | "x-goog-api-key"
+                ) {
+                    credentials.push((name, value.to_string()));
+                }
             }
         }
     }
@@ -631,9 +645,58 @@ fn read_http_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpReque
     Ok(Some(HttpRequest {
         method,
         path,
-        authorization,
+        credentials,
         body: String::from_utf8_lossy(&body).into_owned(),
     }))
+}
+
+/// Streaming protocol of one model request, chosen by its route.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Protocol {
+    OpenAi,
+    Anthropic,
+    Gemini,
+}
+
+impl Protocol {
+    /// The protocol and the model named in the path, for a model route.
+    fn route(method: &str, path: &str) -> Option<(Self, Option<String>)> {
+        if method != "POST" {
+            return None;
+        }
+        match path {
+            "/chat/completions" => Some((Self::OpenAi, None)),
+            "/v1/messages" => Some((Self::Anthropic, None)),
+            _ => {
+                let model = path
+                    .strip_prefix("/models/")?
+                    .strip_suffix(":streamGenerateContent?alt=sse")?;
+                Some((Self::Gemini, Some(model.to_string())))
+            }
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::OpenAi => "openai",
+            Self::Anthropic => "anthropic",
+            Self::Gemini => "gemini",
+        }
+    }
+
+    /// The API key in this protocol's credential header.
+    fn api_key(self, request: &HttpRequest) -> Option<&str> {
+        let (header, prefix) = match self {
+            Self::OpenAi => ("authorization", "Bearer "),
+            Self::Anthropic => ("x-api-key", ""),
+            Self::Gemini => ("x-goog-api-key", ""),
+        };
+        request
+            .credentials
+            .iter()
+            .find(|(name, _)| name == header)
+            .and_then(|(_, value)| value.strip_prefix(prefix))
+    }
 }
 
 fn handle_request(
@@ -644,11 +707,11 @@ fn handle_request(
 ) -> Result<(), ServeError> {
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
-    let expected = shared.0.lock().unwrap().expected_authorization.clone();
+    let expected = shared.0.lock().unwrap().expected_api_key.clone();
     let Some(request) = read_http_request(&mut stream)? else {
         return Ok(());
     };
-    if request.method != "POST" || request.path != "/chat/completions" {
+    let Some((protocol, path_model)) = Protocol::route(&request.method, &request.path) else {
         write_http_response(
             &mut stream,
             "404 Not Found",
@@ -659,8 +722,11 @@ fn handle_request(
             "{} {}",
             request.method, request.path
         )));
-    }
-    if expected.is_some_and(|expected| request.authorization.as_deref() != Some(&expected)) {
+    };
+    if expected
+        .as_deref()
+        .is_some_and(|expected| protocol.api_key(&request) != Some(expected))
+    {
         return write_http_response(
             &mut stream,
             "401 Unauthorized",
@@ -670,7 +736,7 @@ fn handle_request(
         .map_err(ServeError::Io);
     }
 
-    let captured = parse_chat_completions_body(&request.body);
+    let captured = parse_request_body(protocol, path_model, &request.body);
     // Script assignment and capture publication are one transaction. Capture
     // order is therefore the same order used to advance a Sequence, even if
     // gated handlers resume in a different order.
@@ -731,7 +797,15 @@ fn handle_request(
         )
         .map_err(ServeError::Io);
     }
-    let sse = render_script(&active);
+    let Some(sse) = render(protocol, &active) else {
+        write_http_response(
+            &mut stream,
+            "500 Internal Server Error",
+            "text/plain",
+            b"script not supported for this protocol\n",
+        )?;
+        return Err(ServeError::UnsupportedScript(protocol.name()));
+    };
     if !segmented {
         // 原整份响应路径保持一次写入；分段控制不改变其他场景的交付方式。
         let response = format!(
@@ -767,11 +841,16 @@ fn handle_request(
     Ok(())
 }
 
-/// Decode a Chat Completions request body into a [`CapturedRequest`]. A
-/// malformed body still records a capture with empty fields and the raw
-/// string stored under `raw["__raw_body"]` so a scenario can see what the
-/// product sent even if it was not valid JSON.
-fn parse_chat_completions_body(body: &str) -> CapturedRequest {
+/// Decode a model request body into a [`CapturedRequest`]. A malformed body
+/// still records a capture with empty fields and the raw string stored under
+/// `raw["__raw_body"]` so a scenario can see what the product sent even if it
+/// was not valid JSON.
+fn parse_request_body(
+    protocol: Protocol,
+    path_model: Option<String>,
+    body: &str,
+) -> CapturedRequest {
+    let provider = protocol.name().to_string();
     let raw: Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(_) => {
@@ -779,41 +858,191 @@ fn parse_chat_completions_body(body: &str) -> CapturedRequest {
             map.insert("__raw_body".into(), Value::String(body.to_string()));
             return CapturedRequest {
                 raw: Value::Object(map),
+                provider,
                 ..Default::default()
             };
         }
     };
-    let model = raw
-        .get("model")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let mut message_roles = Vec::new();
-    if let Some(messages) = raw.get("messages").and_then(|m| m.as_array()) {
-        for msg in messages {
-            if let Some(role) = msg.get("role").and_then(|r| r.as_str()) {
-                message_roles.push(role.to_string());
-            }
-        }
-    }
-    let mut tool_names = Vec::new();
-    if let Some(tools) = raw.get("tools").and_then(|t| t.as_array()) {
-        for tool in tools {
-            if let Some(name) = tool
-                .get("function")
-                .and_then(|f| f.get("name"))
-                .and_then(|n| n.as_str())
-            {
-                tool_names.push(name.to_string());
-            }
-        }
-    }
+    let model = path_model.unwrap_or_else(|| raw["model"].as_str().unwrap_or("").to_string());
+    let messages = match protocol {
+        Protocol::Gemini => &raw["contents"],
+        _ => &raw["messages"],
+    };
+    let message_roles = messages
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|message| message["role"].as_str())
+        .map(str::to_string)
+        .collect();
+    let tools = raw["tools"].as_array().into_iter().flatten();
+    let tool_names = match protocol {
+        Protocol::OpenAi => tools
+            .filter_map(|tool| tool["function"]["name"].as_str())
+            .map(str::to_string)
+            .collect(),
+        Protocol::Anthropic => tools
+            .filter_map(|tool| tool["name"].as_str())
+            .map(str::to_string)
+            .collect(),
+        Protocol::Gemini => tools
+            .flat_map(|tool| {
+                tool["functionDeclarations"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+            })
+            .filter_map(|declaration| declaration["name"].as_str())
+            .map(str::to_string)
+            .collect(),
+    };
     CapturedRequest {
         model,
         message_roles,
         tool_names,
+        provider,
         raw,
     }
+}
+
+/// `(call id, Tool name, arguments JSON)` of one scripted Tool call.
+type ScriptedCall = (String, String, String);
+
+/// Render `script` in `protocol`. Anthropic and Gemini render the text and
+/// Tool call scripts; the other scripts exist only in the OpenAI protocol.
+fn render(protocol: Protocol, script: &SseScript) -> Option<String> {
+    if protocol == Protocol::OpenAi {
+        return Some(render_script(script));
+    }
+    let (texts, calls, finish): (&[String], Vec<ScriptedCall>, &str) = match script {
+        SseScript::PlainText {
+            chunks,
+            finish_reason,
+        } => (chunks, Vec::new(), finish_reason),
+        SseScript::ToolCall {
+            call_id,
+            tool_name,
+            arguments_json,
+        } => (
+            &[],
+            vec![(call_id.clone(), tool_name.clone(), arguments_json.clone())],
+            "tool_calls",
+        ),
+        SseScript::ToolCalls { calls } => (&[], calls.clone(), "tool_calls"),
+        _ => return None,
+    };
+    Some(match protocol {
+        Protocol::Anthropic => render_anthropic(texts, &calls, finish),
+        _ => render_gemini(texts, &calls, finish),
+    })
+}
+
+/// Anthropic Messages stream: `message_start`, one text block, one
+/// `tool_use` block per call, `message_delta` with the stop reason.
+fn render_anthropic(texts: &[String], calls: &[ScriptedCall], finish: &str) -> String {
+    fn event(out: &mut String, name: &str, data: Value) {
+        out.push_str(&format!("event: {name}\ndata: {data}\n\n"));
+    }
+    let mut out = String::new();
+    event(
+        &mut out,
+        "message_start",
+        serde_json::json!({"type": "message_start", "message": {"usage": {"input_tokens": 1}}}),
+    );
+    let mut index = 0;
+    if !texts.is_empty() {
+        event(
+            &mut out,
+            "content_block_start",
+            serde_json::json!({"type": "content_block_start", "index": index,
+                "content_block": {"type": "text", "text": ""}}),
+        );
+        for text in texts {
+            event(
+                &mut out,
+                "content_block_delta",
+                serde_json::json!({"type": "content_block_delta", "index": index,
+                    "delta": {"type": "text_delta", "text": text}}),
+            );
+        }
+        event(
+            &mut out,
+            "content_block_stop",
+            serde_json::json!({"type": "content_block_stop", "index": index}),
+        );
+        index += 1;
+    }
+    for (id, name, arguments) in calls {
+        event(
+            &mut out,
+            "content_block_start",
+            serde_json::json!({"type": "content_block_start", "index": index,
+                "content_block": {"type": "tool_use", "id": id, "name": name, "input": {}}}),
+        );
+        event(
+            &mut out,
+            "content_block_delta",
+            serde_json::json!({"type": "content_block_delta", "index": index,
+                "delta": {"type": "input_json_delta", "partial_json": arguments}}),
+        );
+        event(
+            &mut out,
+            "content_block_stop",
+            serde_json::json!({"type": "content_block_stop", "index": index}),
+        );
+        index += 1;
+    }
+    let stop_reason = match finish {
+        "tool_calls" => "tool_use",
+        "length" => "max_tokens",
+        "stop" => "end_turn",
+        other => other,
+    };
+    event(
+        &mut out,
+        "message_delta",
+        serde_json::json!({"type": "message_delta", "delta": {"stop_reason": stop_reason},
+            "usage": {"output_tokens": texts.len().max(calls.len())}}),
+    );
+    event(
+        &mut out,
+        "message_stop",
+        serde_json::json!({"type": "message_stop"}),
+    );
+    out
+}
+
+/// Gemini `streamGenerateContent?alt=sse`: one chunk per text part or
+/// `functionCall`, then a final chunk with `finishReason` and usage.
+fn render_gemini(texts: &[String], calls: &[ScriptedCall], finish: &str) -> String {
+    let chunk = |parts: Value| serde_json::json!({"candidates": [{"content": {"role": "model", "parts": parts}}]});
+    let mut out = String::new();
+    for text in texts {
+        push_data(&mut out, &chunk(serde_json::json!([{"text": text}])));
+    }
+    for (id, name, arguments) in calls {
+        let args: Value =
+            serde_json::from_str(arguments).unwrap_or_else(|_| Value::String(arguments.clone()));
+        push_data(
+            &mut out,
+            &chunk(serde_json::json!([{"functionCall": {"id": id, "name": name, "args": args}}])),
+        );
+    }
+    let finish_reason = if finish == "length" {
+        "MAX_TOKENS"
+    } else {
+        "STOP"
+    };
+    let produced = texts.len().max(calls.len());
+    push_data(
+        &mut out,
+        &serde_json::json!({
+            "candidates": [{"content": {"role": "model", "parts": []}, "finishReason": finish_reason}],
+            "usageMetadata": {"promptTokenCount": 1, "candidatesTokenCount": produced,
+                "totalTokenCount": 1 + produced}
+        }),
+    );
+    out
 }
 
 /// Render an [`SseScript`] into the raw SSE text the server writes after the
@@ -1111,7 +1340,7 @@ mod tests {
             ]
         })
         .to_string();
-        let captured = parse_chat_completions_body(&body);
+        let captured = parse_request_body(Protocol::OpenAi, None, &body);
         assert_eq!(captured.model, "compat:test");
         assert_eq!(captured.message_roles, vec!["system", "user"]);
         assert_eq!(

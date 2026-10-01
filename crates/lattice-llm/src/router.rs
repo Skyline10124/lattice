@@ -208,11 +208,23 @@ impl ModelRouter {
             }
         };
 
+        // Anthropic and Gemini endpoints can be moved by their formal
+        // `*_BASE_URL` setting, read the same way as
+        // `OPENAI_COMPATIBLE_BASE_URL`; OpenAI keeps its fixed endpoint.
+        let override_env = match provider {
+            ProviderKind::Anthropic => Some("ANTHROPIC_BASE_URL"),
+            ProviderKind::Gemini => Some("GEMINI_BASE_URL"),
+            _ => None,
+        };
+        let base_url = override_env
+            .and_then(|name| std::env::var(name).ok())
+            .unwrap_or_else(|| base_url.to_string());
+
         Ok(ResolvedModel {
             alias: alias.to_string(),
             provider,
             provider_model: provider_model.to_string(),
-            base_url: base_url.to_string(),
+            base_url,
             api_key_env: api_key_env.to_string(),
             credential_status: CredentialStatus::from_env(api_key_env),
         })
