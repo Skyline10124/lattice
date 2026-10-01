@@ -285,6 +285,17 @@ impl RunningCommand {
             .unwrap_or(cap)
     }
 
+    /// Non-blocking check whether the direct child has already exited.
+    /// The exit status stays cached for the later `wait`.
+    pub fn has_exited(&mut self) -> std::io::Result<bool> {
+        Ok(self
+            .child
+            .as_mut()
+            .expect("running child")
+            .try_wait()?
+            .is_some())
+    }
+
     /// Deliver a controlled interrupt to the whole process group.
     pub fn interrupt(&mut self) -> std::io::Result<()> {
         interrupt_process_group(self.pgid)?;
