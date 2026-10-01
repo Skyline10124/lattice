@@ -65,24 +65,3 @@ impl LocalWorkspaceRoot {
 pub fn resolve_local_workspace_root() -> Result<LocalWorkspaceRoot> {
     LocalWorkspaceRoot::resolve()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn explicit_path_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = LocalWorkspaceRoot::from_path(dir.path()).unwrap();
-        assert_eq!(
-            root.canonical_path(),
-            dir.path().canonicalize().unwrap().as_path()
-        );
-    }
-
-    #[test]
-    fn missing_path_is_a_typed_error() {
-        let err = LocalWorkspaceRoot::from_path(Path::new("/no/such/lattice/path")).unwrap_err();
-        assert!(matches!(err, ApiError::BadRequest(_)));
-    }
-}

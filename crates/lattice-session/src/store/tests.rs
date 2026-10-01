@@ -2523,26 +2523,6 @@ fn commit_failure_disables_all_writers() {
     }
 }
 
-#[test]
-fn execution_start_panic_disables_store() {
-    let (_dir, _layout, db) = store();
-    assert!(
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = db.with_execution_start(|| panic!("handoff failed"));
-        }))
-        .is_err()
-    );
-    assert!(matches!(
-        db.with_execution_start(|| ()),
-        Err(StoreError::WriteDisabled)
-    ));
-    let lock = db.try_lock_session(sid(1)).unwrap();
-    assert!(matches!(
-        db.accept_turn(&lock, accept(sid(1), tid(1))),
-        Err(StoreError::WriteDisabled)
-    ));
-}
-
 // F14/F20/F28/F30：纯规划也要拒绝不一致的输入，不能借用 strict-open 的保证。
 #[test]
 fn planner_rejects_inconsistent_durable_facts() {

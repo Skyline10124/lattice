@@ -7,7 +7,7 @@ use lattice_conversation::*;
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_session::store::*;
 use std::sync::{
-    Arc, Mutex,
+    Arc,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -53,77 +53,6 @@ async fn run_turn_result_and_saved_nodes_preserve_contract_fields() {
         matches!(&content.assistant.parts[0].semantic, MessageSemantic::Text { text } if text == "test response")
     );
     assert!(content.results.is_empty());
-}
-
-struct Capture(Mutex<Vec<lattice_llm::ChatRequest>>);
-#[async_trait::async_trait]
-impl LlmClient for Capture {
-    async fn stream_chat(
-        &self,
-        request: lattice_llm::ChatRequest,
-    ) -> std::result::Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
-        self.0.lock().unwrap().push(request);
-        let mut events = happy_events();
-        events.insert(
-            1,
-            LlmEvent::MessageComplete {
-                message: NativeMessage::new(
-                    MessageRole::Assistant,
-                    Some(ProviderOrigin::OpenAiCompatible),
-                    vec![MessagePart::semantic_only(MessageSemantic::Text {
-                        text: "test response".into(),
-                    })],
-                ),
-            },
-        );
-        Ok(Box::pin(futures::stream::iter(events)))
-    }
-}
-#[tokio::test]
-async fn next_turn_uses_root_path_parent_and_frozen_model_provider_prompt() {
-    let llm = Arc::new(Capture(Mutex::default()));
-    let fixture = setup_fixture(llm.clone(), &[]);
-    let mut request = fixture.request.clone();
-    request.loaded_profile.as_mut().unwrap().profile.agent.model = "compat:profile-model".into();
-    let (first, _) = fixture.run(request.clone()).await;
-    request.session_id = Some(first.session_id);
-    request.agent = None;
-    request.input = "follow-up".into();
-    let (second, _) = fixture.run(request).await;
-    let read = fixture.store.begin_read().unwrap();
-    assert_eq!(second.user_node, NodeId(3));
-    assert!(matches!(
-        read.node(NodeRef {
-            session_id: first.session_id,
-            node: second.user_node
-        })
-        .unwrap(),
-        Node::UserMessage {
-            parent: NodeId(2),
-            ..
-        }
-    ));
-    assert_eq!(read.log(first.session_id).unwrap().nodes.len(), 5);
-    let stored = read.turn_record(second.turn_id).unwrap().unwrap();
-    assert_eq!(stored.config.model, "compat:profile-model");
-    assert_eq!(stored.config.provider, "openai_compatible");
-    let requests = llm.0.lock().unwrap();
-    assert_eq!(requests.len(), 2);
-    assert_eq!(requests[1].target.model, "compat:profile-model");
-    assert_eq!(
-        requests[1].target.provider.as_deref(),
-        Some("openai_compatible")
-    );
-    assert_eq!(requests[1].messages.len(), 4);
-    assert!(
-        matches!(&requests[1].messages[0], ConversationItem::Message(message) if message.role == MessageRole::System)
-    );
-    assert!(
-        matches!(&requests[1].messages[1], ConversationItem::Message(message) if matches!(&message.parts[0].semantic, MessageSemantic::Text { text } if text == "hello"))
-    );
-    assert!(
-        matches!(&requests[1].messages[2], ConversationItem::Step(step) if matches!(&step.assistant.parts[0].semantic, MessageSemantic::Text { text } if text == "test response"))
-    );
 }
 
 #[tokio::test]

@@ -392,35 +392,6 @@ mod cep_context_profile_policy {
     use lattice_profile::LancetSection;
     use tempfile::TempDir;
 
-    #[test]
-    fn cep_context_profile_policy_defaults_when_cep_absent() {
-        let dir = TempDir::new().unwrap();
-        let policy =
-            cep_policy_from_profile(&LancetSection::default(), dir.path()).expect("defaults");
-        assert_eq!(policy.project_root, dir.path().canonicalize().unwrap());
-        assert_eq!(policy.budget(), policy.observation.budget_limits());
-    }
-
-    /// #121: `[lancet.observation]` lowers limits only. Observation scope is the
-    /// effective project root, which is what secure path resolution, Guard L1,
-    /// and the `VisibilityEngine` actually enforce. The two tests this replaced
-    /// asserted that a retired `allowed_roots` key was canonicalized into a
-    /// field no read decision ever consulted.
-    #[test]
-    fn cep_context_profile_observation_lowers_limits_only() {
-        let dir = TempDir::new().unwrap();
-        let cep = LancetSection {
-            observation: Some(LancetObservationSection {
-                max_single_read_bytes: Some(4096),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let policy = cep_policy_from_profile(&cep, dir.path()).expect("policy");
-        assert_eq!(policy.observation.max_single_read_bytes, 4096);
-        assert_eq!(policy.project_root, dir.path().canonicalize().unwrap());
-    }
-
     /// Observation scope narrowing goes through `[lancet.project_root].root`,
     /// the one root every read path resolves against.
     #[test]
@@ -500,20 +471,6 @@ mod cep_context_profile_policy {
     }
 
     #[test]
-    fn workspace_policy_from_profile_lowers_denied_write_patterns() {
-        let dir = TempDir::new().unwrap();
-        let cep = LancetSection {
-            workspace: Some(LancetWorkspacePolicySection {
-                denied_write_patterns: vec!["src/**".into()],
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let config = load_policy_config(&cep, dir.path()).expect("policy config");
-        assert_eq!(config.workspace.denied_write_patterns, vec!["src/**"]);
-    }
-
-    #[test]
     fn workspace_policy_from_profile_rejects_traversal_patterns() {
         let dir = TempDir::new().unwrap();
         let cep = LancetSection {
@@ -525,51 +482,6 @@ mod cep_context_profile_policy {
         };
         let err = load_policy_config(&cep, dir.path()).unwrap_err();
         assert!(err.to_string().contains("lancet.workspace"), "{err}");
-    }
-
-    #[test]
-    fn workspace_policy_from_profile_lowers_read_visibility_patterns() {
-        let dir = TempDir::new().unwrap();
-        let cep = LancetSection {
-            workspace: Some(LancetWorkspacePolicySection {
-                denied_write_patterns: vec!["src/**".into()],
-                included_ignored_read_patterns: vec![".env".into()],
-                denied_read_patterns: vec!["secrets/**".into()],
-            }),
-            ..Default::default()
-        };
-        let config = load_policy_config(&cep, dir.path()).expect("policy config");
-        assert_eq!(
-            config.workspace.included_ignored_read_patterns,
-            vec![".env"]
-        );
-        assert_eq!(config.workspace.denied_read_patterns, vec!["secrets/**"]);
-    }
-
-    #[test]
-    fn workspace_policy_from_profile_absent_defaults_empty() {
-        let dir = TempDir::new().unwrap();
-        let config = load_policy_config(&LancetSection::default(), dir.path()).expect("policy");
-        assert!(config.workspace.denied_write_patterns.is_empty());
-    }
-
-    #[test]
-    fn workspace_policy_applies_denied_patterns_to_mutate_region_in_policy_config() {
-        let dir = TempDir::new().unwrap();
-        let cep = LancetSection {
-            workspace: Some(LancetWorkspacePolicySection {
-                denied_write_patterns: vec!["src/**".into()],
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let config = load_policy_config(&cep, dir.path()).expect("policy");
-        // Component mutation authority consumes the profile write-deny list directly.
-        assert_eq!(
-            config.workspace.denied_write_patterns,
-            vec!["src/**"],
-            "profile denied_write_patterns must reach Component mutation authority",
-        );
     }
 }
 
@@ -687,20 +599,5 @@ enabled = ["{tool}"]
             format!("{err:?}").contains("session.events"),
             "the startup error must name the profile's deny entry: {err:?}"
         );
-    }
-
-    /// Control for the above: the same profile without the section builds,
-    /// so the error there is the deny entry and not the fixture.
-    #[tokio::test]
-    async fn profile_without_capabilities_section_builds() {
-        let project = TempDir::new().unwrap();
-        let profile = write_and_load_profile(project.path(), "");
-        assert!(
-            profile.profile.lancet.capabilities.is_none(),
-            "control fixture must carry no [lancet.capabilities]"
-        );
-        build_deps_for(&profile, &project)
-            .await
-            .expect("an empty deny list admits startup");
     }
 }

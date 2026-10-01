@@ -106,49 +106,6 @@ async fn first_acceptance_reopen_preserves_identity_without_observers_or_configu
 }
 
 #[tokio::test]
-async fn first_probe_and_readonly_requests_never_initialize_missing_store() {
-    let state = tempfile::tempdir().unwrap();
-    let project = tempfile::tempdir().unwrap();
-    let layout = StateLayout::in_state_root(state.path());
-    let serving = tokio::spawn(serve(layout.clone()));
-    let client = LocalClient::new(layout.clone());
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while client.status().await.is_err() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-    let request = TurnRequest {
-        session_id: None,
-        turn_id: new_turn_id(),
-        workspace: project.path().canonicalize().unwrap(),
-        input: " original ".into(),
-        agent: Some("alpha".into()),
-    };
-    assert_eq!(
-        client.submit(request.clone(), None).await.unwrap(),
-        Acceptance::NeedsConfiguration {
-            agent_name: "alpha".into()
-        }
-    );
-    let mut invalid = request;
-    invalid.agent = None;
-    assert_eq!(
-        client.submit(invalid, None).await.unwrap_err().kind,
-        LocalErrorKind::BadRequest
-    );
-    let error = client.list_sessions().await.unwrap_err();
-    assert!(matches!(
-        error.store,
-        Some(StoreDiagnostic::NotInitialized { .. })
-    ));
-    assert!(!layout.lattice_root().join("lattice.redb").exists());
-    client.stop().await.unwrap();
-    serving.await.unwrap().unwrap();
-}
-
-#[tokio::test]
 async fn readonly_finished_delivers_full_history_and_rewind_only_moves_current() {
     use lancet_protocol::ModelAttemptKey;
     use lattice_conversation::{

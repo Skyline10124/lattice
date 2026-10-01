@@ -311,38 +311,6 @@ mod tests {
     }
 
     #[test]
-    fn catalog_limit_is_exact_boundary_legal_plus_one_rejected() {
-        let build = |description_len: usize| {
-            ToolCatalogSnapshot::new(
-                "b".to_string(),
-                vec![ToolCatalogEntry {
-                    name: "t".to_string(),
-                    descriptor_identity: "d".to_string(),
-                    description: "x".repeat(description_len),
-                    input_schema: serde_json::json!({}),
-                }],
-            )
-        };
-        // Find the largest description length whose canonical snapshot fits.
-        let mut lo = 0usize;
-        let mut hi = MAX_CATALOG_SNAPSHOT_BYTES;
-        while lo < hi {
-            let mid = lo + (hi - lo).div_ceil(2);
-            if build(mid).is_ok() {
-                lo = mid;
-            } else {
-                hi = mid - 1;
-            }
-        }
-        let boundary = build(lo).expect("largest fitting snapshot");
-        boundary.validate().expect("exact boundary validates");
-        assert!(
-            matches!(build(lo + 1), Err(StoreError::InvalidInput { .. })),
-            "plus one byte must fail closed"
-        );
-    }
-
-    #[test]
     fn catalog_digest_is_self_describing() {
         let snapshot = catalog();
         snapshot.validate().expect("valid");

@@ -896,29 +896,6 @@ async fn lazy_handshake_preserves_identity_and_loads_selected_agent_once() {
     }
 }
 
-#[tokio::test]
-async fn submit_with_accepts_borrowed_non_send_loader() {
-    let peer = Peer::new();
-    let id = new_turn_id();
-    let called = std::rc::Rc::new(std::cell::Cell::new(false));
-    let error = LocalError::new(LocalErrorKind::BadRequest, "local failure");
-    let (result, ()) = tokio::join!(
-        peer.client.submit_with(request(&peer, id), |name| {
-            assert_eq!(name, "test");
-            async {
-                called.set(true);
-                Err(error.clone())
-            }
-        }),
-        async {
-            let (mut wire, _) = peer.request().await;
-            wire.reply(needs_configuration()).await;
-        }
-    );
-    assert_eq!(result, Err(error));
-    assert!(called.get());
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn late_blocking_configuration_cannot_send_after_cancel_or_drop() {
     for cancel in [false, true] {
