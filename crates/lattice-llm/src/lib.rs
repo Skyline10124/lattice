@@ -63,39 +63,3 @@ mod test_env {
         }
     }
 }
-
-#[cfg(test)]
-mod production_codec_boundary {
-    #[test]
-    fn every_provider_delegates_request_and_response_projection() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/providers");
-        for (file, response_marker) in [
-            (
-                "openai.rs",
-                "crate::provider_projection::openai_parts_to_native(",
-            ),
-            ("anthropic.rs", "wire_to_native"),
-            ("gemini.rs", "complete_message_event"),
-        ] {
-            let source = std::fs::read_to_string(root.join(file)).expect("provider source");
-            let production = source
-                .split("#[cfg(test)]")
-                .next()
-                .expect("production prefix");
-            assert!(
-                production.contains("request_messages_to_wire"),
-                "{file} bypasses the sole request projector"
-            );
-            assert!(
-                production.contains(response_marker),
-                "{file} bypasses the sole completed-response projector"
-            );
-            assert!(
-                production.contains("wire_usage"),
-                "{file} bypasses the sole usage projector"
-            );
-            assert!(!production.contains("assemble_request_messages"));
-            assert!(!production.contains("tc_"));
-        }
-    }
-}

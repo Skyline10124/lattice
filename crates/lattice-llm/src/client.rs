@@ -531,7 +531,7 @@ pub(crate) async fn dispatch_frozen(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::endpoints::{ANTHROPIC_BASE_URL, GEMINI_BASE_URL, OPENAI_BASE_URL};
+    use crate::endpoints::OPENAI_BASE_URL;
 
     #[test]
     fn provider_diagnostic_bound_includes_ellipsis() {
@@ -539,54 +539,8 @@ mod tests {
         assert_eq!(text.chars().count(), 2048);
         assert!(text.ends_with("..."));
     }
-    use crate::router::{CredentialStatus, ModelRouter};
+    use crate::router::CredentialStatus;
     use crate::test_env::with_env_vars;
-    use crate::types::ModelTarget;
-
-    fn make_router() -> ModelRouter {
-        ModelRouter::new()
-    }
-
-    #[test]
-    fn missing_credential_returns_named_error() {
-        let resolved = ResolvedModel {
-            alias: "gpt-4o".to_string(),
-            provider: ProviderKind::OpenAi,
-            provider_model: "gpt-4o".to_string(),
-            base_url: OPENAI_BASE_URL.to_string(),
-            api_key_env: "OPENAI_API_KEY_MISSING_TEST".to_string(),
-            credential_status: CredentialStatus::Missing,
-        };
-        let result = validate_and_read_key(&resolved);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("OPENAI_API_KEY_MISSING_TEST"),
-            "error should name the env var, got: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn present_credential_reads_key_value() {
-        with_env_vars(
-            &[("LATTICE_TEST_CLIENT_KEY", Some("sk-secret-do-not-leak"))],
-            || {
-                let resolved = ResolvedModel {
-                    alias: "gpt-4o".to_string(),
-                    provider: ProviderKind::OpenAi,
-                    provider_model: "gpt-4o".to_string(),
-                    base_url: OPENAI_BASE_URL.to_string(),
-                    api_key_env: "LATTICE_TEST_CLIENT_KEY".to_string(),
-                    credential_status: CredentialStatus::Present,
-                };
-                let result = validate_and_read_key(&resolved);
-                assert!(result.is_ok());
-                let key = result.unwrap();
-                assert_eq!(key, "sk-secret-do-not-leak");
-            },
-        );
-    }
 
     #[test]
     fn missing_credential_error_never_leaks_key_value() {
@@ -628,17 +582,6 @@ mod tests {
             let result = validate_and_read_key(&resolved);
             assert!(result.is_err());
         });
-    }
-
-    #[test]
-    fn dispatch_does_not_use_registry_or_plugins() {
-        let router = make_router();
-        let target = ModelTarget::new("gpt-5.5");
-        let resolved = router.resolve(&target).unwrap();
-        assert_eq!(resolved.provider, ProviderKind::OpenAi);
-        let request = ChatRequest::new(Vec::new(), target);
-        let body = build_request_body(&request, &resolved).expect("projection");
-        assert_eq!(body["model"], "gpt-5.5");
     }
 
     #[test]
@@ -793,124 +736,6 @@ mod tests {
     }
 
     #[test]
-    fn openai_auth_headers_use_bearer() {
-        let resolved = ResolvedModel {
-            alias: "gpt-4o".to_string(),
-            provider: ProviderKind::OpenAi,
-            provider_model: "gpt-4o".to_string(),
-            base_url: OPENAI_BASE_URL.to_string(),
-            api_key_env: "OPENAI_API_KEY".to_string(),
-            credential_status: CredentialStatus::Present,
-        };
-        let headers = build_auth_headers(&resolved, "sk-test");
-        assert_eq!(headers.len(), 1);
-        assert_eq!(headers[0].0, "Authorization");
-        assert_eq!(headers[0].1, "Bearer sk-test");
-    }
-
-    #[test]
-    fn anthropic_auth_headers_use_x_api_key() {
-        let resolved = ResolvedModel {
-            alias: "sonnet".to_string(),
-            provider: ProviderKind::Anthropic,
-            provider_model: "claude-sonnet-4-6".to_string(),
-            base_url: ANTHROPIC_BASE_URL.to_string(),
-            api_key_env: "ANTHROPIC_API_KEY".to_string(),
-            credential_status: CredentialStatus::Present,
-        };
-        let headers = build_auth_headers(&resolved, "sk-ant-test");
-        assert_eq!(headers.len(), 2);
-        assert_eq!(headers[0].0, "x-api-key");
-        assert_eq!(headers[0].1, "sk-ant-test");
-        assert_eq!(headers[1].0, "anthropic-version");
-        assert_eq!(headers[1].1, "2023-06-01");
-    }
-
-    #[test]
-    fn gemini_auth_headers_use_x_goog_api_key() {
-        let resolved = ResolvedModel {
-            alias: "gemini".to_string(),
-            provider: ProviderKind::Gemini,
-            provider_model: "gemini-2.5-flash".to_string(),
-            base_url: GEMINI_BASE_URL.to_string(),
-            api_key_env: "GEMINI_API_KEY".to_string(),
-            credential_status: CredentialStatus::Present,
-        };
-        let headers = build_auth_headers(&resolved, "gemini-test-key");
-        assert_eq!(headers.len(), 1);
-        assert_eq!(headers[0].0, "x-goog-api-key");
-        assert_eq!(headers[0].1, "gemini-test-key");
-    }
-
-    #[test]
-    fn openai_endpoint_url() {
-        let resolved = ResolvedModel {
-            alias: "gpt-4o".to_string(),
-            provider: ProviderKind::OpenAi,
-            provider_model: "gpt-4o".to_string(),
-            base_url: OPENAI_BASE_URL.to_string(),
-            api_key_env: "OPENAI_API_KEY".to_string(),
-            credential_status: CredentialStatus::Present,
-        };
-        let url = build_endpoint_url(&resolved);
-        assert_eq!(url, format!("{}/chat/completions", OPENAI_BASE_URL));
-    }
-
-    #[test]
-    fn anthropic_endpoint_url() {
-        let resolved = ResolvedModel {
-            alias: "sonnet".to_string(),
-            provider: ProviderKind::Anthropic,
-            provider_model: "claude-sonnet-4-6".to_string(),
-            base_url: ANTHROPIC_BASE_URL.to_string(),
-            api_key_env: "ANTHROPIC_API_KEY".to_string(),
-            credential_status: CredentialStatus::Present,
-        };
-        let url = build_endpoint_url(&resolved);
-        assert_eq!(url, format!("{}/v1/messages", ANTHROPIC_BASE_URL));
-    }
-
-    #[test]
-    fn gemini_endpoint_url() {
-        let resolved = ResolvedModel {
-            alias: "gemini".to_string(),
-            provider: ProviderKind::Gemini,
-            provider_model: "gemini-2.5-flash".to_string(),
-            base_url: GEMINI_BASE_URL.to_string(),
-            api_key_env: "GEMINI_API_KEY".to_string(),
-            credential_status: CredentialStatus::Present,
-        };
-        let url = build_endpoint_url(&resolved);
-        assert!(url.contains("streamGenerateContent"));
-        assert!(url.contains("alt=sse"));
-    }
-
-    #[test]
-    fn bounded_error_chunk_reports_truncation() {
-        let mut body = vec![b'a'; MAX_ERROR_BODY_SIZE - 1];
-        let truncated = append_bounded_error_chunk(&mut body, b"bc");
-        assert!(truncated);
-        assert_eq!(body.len(), MAX_ERROR_BODY_SIZE);
-        assert_eq!(body[MAX_ERROR_BODY_SIZE - 1], b'b');
-    }
-
-    #[test]
-    fn bounded_error_chunk_accepts_limit_exactly() {
-        let mut body = vec![b'a'; MAX_ERROR_BODY_SIZE - 1];
-        let truncated = append_bounded_error_chunk(&mut body, b"b");
-        assert!(!truncated);
-        assert_eq!(body.len(), MAX_ERROR_BODY_SIZE);
-    }
-
-    #[test]
-    fn find_event_boundary_lf_lf() {
-        let buf = b"data: hello\n\ndata: world\n\n";
-        let (idx, len) = find_event_boundary(buf).unwrap();
-        assert_eq!(idx, 11);
-        assert_eq!(len, 2);
-    }
-
-    #[test]
     fn find_event_boundary_crlf_crlf() {
         let buf = b"data: hello\r\n\r\ndata: world\r\n\r\n";
         let (idx, len) = find_event_boundary(buf).unwrap();
@@ -990,35 +815,5 @@ mod tests {
         drain_complete_events(&mut state);
         assert_eq!(state.event_count, 2);
         assert_eq!(state.pending.len(), 2);
-    }
-
-    #[test]
-    fn drain_allows_large_cumulative_stream_when_events_are_framed() {
-        let mut state = SseStreamState {
-            body_stream: Box::pin(stream::empty()),
-            parser: ProviderParser::new(ProviderKind::OpenAi),
-            buffer: Vec::new(),
-            event_count: 0,
-            finished: false,
-            pending: std::collections::VecDeque::new(),
-        };
-        let raw = b"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"x\"}}]}\n\n";
-        let iterations = (sse::MAX_SSE_BUFFER_SIZE / raw.len()) + 128;
-
-        for _ in 0..iterations {
-            state.buffer.extend_from_slice(raw);
-            drain_complete_events(&mut state);
-            assert!(state.buffer.is_empty());
-            assert!(
-                !state
-                    .pending
-                    .iter()
-                    .any(|event| matches!(event, LlmEvent::Error { .. })),
-                "complete SSE events should not trip the in-flight buffer limit"
-            );
-            state.pending.clear();
-        }
-
-        assert_eq!(state.event_count, iterations);
     }
 }

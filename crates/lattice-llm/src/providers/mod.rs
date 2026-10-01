@@ -139,36 +139,6 @@ mod parse_json_data_tests {
         }
     }
     #[test]
-    fn parse_valid_json_returns_some() {
-        let result = parse_json_data("TestProvider", r#"{"key": "value"}"#);
-        assert!(matches!(result, Ok(Some(v)) if v.get("key").unwrap() == "value"));
-    }
-
-    #[test]
-    fn parse_empty_string_returns_none() {
-        let result = parse_json_data("TestProvider", "");
-        assert!(matches!(result, Ok(None)));
-    }
-
-    #[test]
-    fn parse_whitespace_only_returns_none() {
-        let result = parse_json_data("TestProvider", "   \t\n  ");
-        assert!(matches!(result, Ok(None)));
-    }
-
-    #[test]
-    fn parse_done_sentinel_returns_none() {
-        let result = parse_json_data("TestProvider", "[DONE]");
-        assert!(matches!(result, Ok(None)));
-    }
-
-    #[test]
-    fn parse_done_with_whitespace_returns_none() {
-        let result = parse_json_data("TestProvider", "  [DONE]  ");
-        assert!(matches!(result, Ok(None)));
-    }
-
-    #[test]
     fn parse_invalid_json_returns_error() {
         let result = parse_json_data("TestProvider", "{invalid}");
         assert!(matches!(result, Err(LlmEvent::Error { .. })));

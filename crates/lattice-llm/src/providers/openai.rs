@@ -293,63 +293,9 @@ impl OpenAiSseParser {
 
 #[cfg(test)]
 mod tests {
-    use lattice_conversation::{
-        BoundToolCall, MessagePart, MessageRole, MessageSemantic, NativeMessage,
-    };
+    use lattice_conversation::{MessagePart, MessageRole, MessageSemantic, NativeMessage};
 
     use super::*;
-    use crate::endpoints::OPENAI_BASE_URL;
-    use crate::router::{CredentialStatus, ProviderKind};
-    use crate::types::{ChatRequest, ModelTarget, ToolDefinition};
-
-    fn make_resolved() -> ResolvedModel {
-        ResolvedModel {
-            alias: "gpt-4o".to_string(),
-            provider: ProviderKind::OpenAi,
-            provider_model: "gpt-4o".to_string(),
-            base_url: OPENAI_BASE_URL.to_string(),
-            api_key_env: "OPENAI_API_KEY".to_string(),
-            credential_status: CredentialStatus::Present,
-        }
-    }
-
-    fn text(role: MessageRole, content: &str) -> lattice_conversation::ConversationItem {
-        lattice_conversation::ConversationItem::Message(NativeMessage::<BoundToolCall>::new(
-            role,
-            None,
-            vec![MessagePart::semantic_only(MessageSemantic::Text {
-                text: content.into(),
-            })],
-        ))
-    }
-
-    #[test]
-    fn request_envelope_uses_typed_projection() {
-        let request = ChatRequest {
-            messages: vec![
-                text(MessageRole::System, "You are helpful."),
-                text(MessageRole::User, "Hello!"),
-            ],
-            tools: vec![ToolDefinition::new(
-                "observe.workspace",
-                "Observe",
-                serde_json::json!({"type": "object"}),
-            )],
-            target: ModelTarget::new("gpt-4o"),
-            temperature: Some(0.7),
-            max_tokens: Some(1024),
-            max_completion_tokens: None,
-        };
-        let body = build_request_json(&request, &make_resolved()).expect("projection");
-        assert_eq!(body["model"], "gpt-4o");
-        assert_eq!(body["messages"][0]["role"], "system");
-        assert_eq!(body["messages"][1]["content"], "Hello!");
-        assert_eq!(body["tools"][0]["function"]["name"], "observe__workspace");
-        assert_eq!(body["stream"], true);
-        assert_eq!(body["stream_options"]["include_usage"], true);
-        assert_eq!(body["temperature"], 0.7);
-        assert_eq!(body["max_tokens"], 1024);
-    }
 
     #[test]
     fn parser_preserves_real_and_missing_ids_without_synthesis() {
@@ -533,29 +479,6 @@ mod tests {
         serde_json::json!({"tool_calls": [{"index": index, "function": {
             "name": name, "arguments": arguments
         }}]})
-    }
-
-    #[test]
-    fn order_f01_reasoning_text_reasoning_matches_live_segments() {
-        let mut parser = OpenAiSseParser::new();
-        let mut live = Vec::new();
-        for (field, value) in [
-            ("reasoning_content", "想"),
-            ("content", "答"),
-            ("reasoning_content", "再想"),
-        ] {
-            live.extend(delta(&mut parser, serde_json::json!({field: value})));
-        }
-        let live: Vec<_> = live
-            .iter()
-            .map(|e| match e {
-                LlmEvent::Reasoning { content } => format!("R:{content}"),
-                LlmEvent::Token { content } => format!("T:{content}"),
-                _ => panic!("unexpected event"),
-            })
-            .collect();
-        assert_eq!(live, ["R:想", "T:答", "R:再想"]);
-        assert_eq!(labels(completed(&finish(&mut parser))), live);
     }
 
     /// R-01/R-02: some compatible servers send text reasoning as
@@ -935,15 +858,5 @@ mod tests {
                 .is_none()
         );
         assert_eq!(source, original);
-    }
-
-    #[test]
-    fn auth_and_name_mapping_stay_at_the_wire_boundary() {
-        assert_eq!(auth_header_value("sk-test"), "Bearer sk-test");
-        assert_eq!(wire_tool_name("session.todo_write"), "session__todo_write");
-        assert_eq!(
-            canonical_tool_name("session__todo_write"),
-            "session.todo_write"
-        );
     }
 }

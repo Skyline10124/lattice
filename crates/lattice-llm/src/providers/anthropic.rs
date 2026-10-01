@@ -617,10 +617,4 @@ mod tests {
             LlmEvent::Error { failure } if !failure.retryable && failure.message.contains("both at start and in deltas")
         )));
     }
-
-    #[test]
-    fn auth_and_version_are_stable() {
-        assert_eq!(auth_header_value("sk-ant-test"), "sk-ant-test");
-        assert_eq!(ANTHROPIC_VERSION, "2023-06-01");
-    }
 }

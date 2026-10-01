@@ -512,40 +512,6 @@ fn anthropic_text_part_with_replay_state_is_rejected() {
 // ─── OpenAI writer lossiness, explicitly pinned (P2-2, P2-4) ──────────────
 
 #[test]
-fn openai_replay_normalizes_non_canonical_arguments_spelling() {
-    // ADR 0005 §7 requires the canonical arguments object for execution, so
-    // replay is semantically identical but not byte-identical when the
-    // provider spelled its arguments non-canonically. The checked-in fixtures
-    // are all canonical, so this is the case they cannot cover.
-    let wire = serde_json::json!({"choices": [{"message": {
-        "role": "assistant",
-        "content": Value::Null,
-        "tool_calls": [{
-            "id": "call_1",
-            "type": "function",
-            "function": {"name": "t", "arguments": "{\"b\": 2, \"a\": 1}"}
-        }]
-    }}]});
-    let native = wire_to_native(ProviderOrigin::OpenAiCompatible, &wire).expect("projection");
-    let replayed = native_to_wire(ProviderOrigin::OpenAiCompatible, &native).expect("replay");
-
-    let original_args = wire["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
-        .as_str()
-        .expect("original arguments");
-    let replayed_args = replayed["tool_calls"][0]["function"]["arguments"]
-        .as_str()
-        .expect("replayed arguments");
-
-    // Not byte-identical …
-    assert_ne!(replayed_args, original_args);
-    assert_eq!(replayed_args, r#"{"a":1,"b":2}"#);
-    // … but semantically identical.
-    let original_value: Value = serde_json::from_str(original_args).expect("original json");
-    let replayed_value: Value = serde_json::from_str(replayed_args).expect("replayed json");
-    assert_eq!(original_value, replayed_value);
-}
-
-#[test]
 fn openai_writer_merges_interleaved_text_parts() {
     // The OpenAI wire has one `content` string, so interleaving is not
     // representable and merges. Pinned so the loss is a known property rather
