@@ -26,22 +26,85 @@ fn parse(values: &[Value]) -> SendOutcome {
 }
 
 #[test]
-fn r2_summary_and_delivery_classify_three_outcomes() {
-    for (outcome, notice, code) in [
-        ("completed", Value::Null, 0),
-        ("failed", json!({"level":"error","text":"进程退出"}), 1),
-        ("cancelled", json!({"level":"info","text":"用户取消"}), 2),
+fn r2_send_exit_code_accounts_for_outcome_and_delivery() {
+    let done = terminal("completed", Value::Null);
+    let snapshot = json!({"type":"snapshot","view":{"session":{"session_id":"s","current":2},"history":{"session_id":"s","head":2},"selected_turn":{"session_id":"s","turn_id":"t","summary":done["summary"],"steps":[done["step"].clone()]}}});
+    let mut mismatched_snapshot = snapshot.clone();
+    mismatched_snapshot["view"]["history"]["head"] = json!(3);
+    mismatched_snapshot["view"]["session"]["current"] = json!(3);
+    for (name, values, expected_exit_code, expected_malformed_count) in [
+        (
+            "completed_with_history",
+            vec![done.clone(), history()],
+            0,
+            Some(0),
+        ),
+        (
+            "failed_with_history",
+            vec![
+                terminal("failed", json!({"level":"error","text":"进程退出"})),
+                history(),
+            ],
+            1,
+            Some(0),
+        ),
+        (
+            "cancelled_with_history",
+            vec![
+                terminal("cancelled", json!({"level":"info","text":"用户取消"})),
+                history(),
+            ],
+            2,
+            Some(0),
+        ),
+        ("completed_without_history", vec![done.clone()], 1, None),
+        (
+            "completed_then_history_read_error",
+            vec![
+                done.clone(),
+                history(),
+                json!({"type":"error","kind":"history","message":"unavailable"}),
+            ],
+            1,
+            None,
+        ),
+        (
+            "history_before_matching_snapshot",
+            vec![history(), snapshot],
+            0,
+            Some(0),
+        ),
+        (
+            "history_before_mismatched_snapshot",
+            vec![history(), mismatched_snapshot],
+            1,
+            None,
+        ),
+        (
+            "store_unavailable_before_accepted",
+            vec![
+                json!({"type":"error","kind":"store_unavailable","message":"session store unavailable"}),
+                json!({"type":"acceptance","result":{"acceptance":"accepted","turn":{"session_id":"s","turn_id":"t"}}}),
+                done,
+                history(),
+            ],
+            0,
+            Some(0),
+        ),
     ] {
-        let result = parse(&[terminal(outcome, notice), history()]);
-        assert!(
-            result.malformed_lines.is_empty(),
-            "{:?}",
-            result.malformed_lines
-        );
+        let result = parse(&values);
+        if let Some(count) = expected_malformed_count {
+            assert_eq!(
+                result.malformed_lines.len(),
+                count,
+                "{name}: {:?}",
+                result.malformed_lines
+            );
+        }
         assert_eq!(
             derive_send_exit_code(&result.events).as_i32(),
-            code,
-            "{outcome}"
+            expected_exit_code,
+            "{name}"
         );
     }
 }
@@ -74,21 +137,6 @@ fn r2_rejects_bad_summary_in_event_and_snapshot() {
 }
 
 #[test]
-fn r2_completed_does_not_hide_missing_history_or_read_error() {
-    let done = terminal("completed", Value::Null);
-    assert_eq!(
-        derive_send_exit_code(&parse(std::slice::from_ref(&done)).events).as_i32(),
-        1
-    );
-    let result = parse(&[
-        done,
-        history(),
-        json!({"type":"error","kind":"history","message":"unavailable"}),
-    ]);
-    assert_eq!(derive_send_exit_code(&result.events).as_i32(), 1);
-}
-
-#[test]
 fn r2_unknown_and_malformed_records_remain_observable() {
     let parsed = parse_send_stdout(
         b"{\"type\":\"future\",\"x\":4}\n{\"type\":\"token_delta\",\"content\":7}\n\xff\n",
@@ -97,31 +145,4 @@ fn r2_unknown_and_malformed_records_remain_observable() {
     assert!(matches!(&parsed.events[0],TurnEventLine::Unknown{raw,..} if raw["x"]==4));
     assert_eq!(parsed.malformed_lines.len(), 2);
     assert_eq!(parsed.malformed_lines[1].raw, vec![255]);
-}
-
-#[test]
-fn r2_history_delivery_tracks_anchor_not_snapshot_arrival() {
-    let done = terminal("completed", Value::Null);
-    let mut snapshot = json!({"type":"snapshot","view":{"session":{"session_id":"s","current":2},"history":{"session_id":"s","head":2},"selected_turn":{"session_id":"s","turn_id":"t","summary":done["summary"],"steps":[done["step"].clone()]}}});
-    let result = parse(&[history(), snapshot.clone()]);
-    assert!(result.malformed_lines.is_empty());
-    assert_eq!(derive_send_exit_code(&result.events).as_i32(), 0);
-    snapshot["view"]["history"]["head"] = json!(3);
-    snapshot["view"]["session"]["current"] = json!(3);
-    assert_eq!(
-        derive_send_exit_code(&parse(&[history(), snapshot]).events).as_i32(),
-        1
-    );
-}
-
-#[test]
-fn r2_observation_failure_before_acceptance_is_not_execution_failure() {
-    let result = parse(&[
-        json!({"type":"error","kind":"store_unavailable","message":"session store unavailable"}),
-        json!({"type":"acceptance","result":{"acceptance":"accepted","turn":{"session_id":"s","turn_id":"t"}}}),
-        terminal("completed", Value::Null),
-        history(),
-    ]);
-    assert!(result.malformed_lines.is_empty());
-    assert_eq!(derive_send_exit_code(&result.events).as_i32(), 0);
 }

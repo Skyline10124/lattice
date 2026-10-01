@@ -267,37 +267,74 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_match_requires_occurrence() {
-        let err = apply_edits("x x\n", &[replace("x", "y", None)]).unwrap_err();
-        assert!(err.replan);
-        assert_eq!(err.field, "old");
-        assert_eq!(
-            err.reason,
-            "old text matched 2 occurrences; provide occurrence"
-        );
-    }
-
-    #[test]
-    fn missing_anchor_is_replan() {
-        let err = apply_edits("hello\n", &[insert_after("missing", "!\n", None)]).unwrap_err();
-        assert!(err.replan);
-        assert_eq!(err.reason, "anchor text was not found");
-    }
-
-    #[test]
-    fn no_op_replace_is_validation_error() {
-        let err = apply_edits("same\n", &[replace("same", "same", None)]).unwrap_err();
-        assert!(!err.replan);
-        assert_eq!(err.reason, "semantic edit produced no changes");
-    }
-
-    #[test]
-    fn trailing_newline_must_be_preserved() {
-        let err = apply_edits("line\n", &[replace("line\n", "line", None)]).unwrap_err();
-        assert_eq!(
-            err.reason,
-            "semantic edits must preserve the file's trailing newline state"
-        );
+    fn apply_edits_rejects_invalid_operations_with_stable_diagnostics() {
+        for (name, before, edit, expected_reason, expected_field, expected_replan) in [
+            (
+                "ambiguous_match",
+                "x x\n",
+                replace("x", "y", None),
+                "old text matched 2 occurrences; provide occurrence",
+                Some("old"),
+                Some(true),
+            ),
+            (
+                "missing_anchor",
+                "hello\n",
+                insert_after("missing", "!\n", None),
+                "anchor text was not found",
+                None,
+                Some(true),
+            ),
+            (
+                "no_op_replace",
+                "same\n",
+                replace("same", "same", None),
+                "semantic edit produced no changes",
+                None,
+                Some(false),
+            ),
+            (
+                "trailing_newline",
+                "line\n",
+                replace("line\n", "line", None),
+                "semantic edits must preserve the file's trailing newline state",
+                None,
+                None,
+            ),
+            (
+                "empty_match_text",
+                "a\n",
+                replace("", "b", None),
+                "match text must not be empty",
+                Some("old"),
+                None,
+            ),
+            (
+                "occurrence_zero",
+                "a a\n",
+                replace("a", "b", Some(0)),
+                "occurrence is 1-based",
+                Some("occurrence"),
+                None,
+            ),
+            (
+                "occurrence_above_wasm32_index_range",
+                "a a\n",
+                replace("a", "b", Some(u64::from(u32::MAX) + 2)),
+                "occurrence exceeds the supported range",
+                Some("occurrence"),
+                Some(false),
+            ),
+        ] {
+            let err = apply_edits(before, &[edit]).expect_err(name);
+            assert_eq!(err.reason, expected_reason, "{name}");
+            if let Some(field) = expected_field {
+                assert_eq!(err.field, field, "{name}");
+            }
+            if let Some(replan) = expected_replan {
+                assert_eq!(err.replan, replan, "{name}");
+            }
+        }
     }
 
     #[test]
@@ -309,29 +346,6 @@ mod tests {
             err.reason,
             "semantic insertion into an empty existing file is not supported by hashline patch yet"
         );
-    }
-
-    #[test]
-    fn empty_match_text_is_validation_error() {
-        let err = apply_edits("a\n", &[replace("", "b", None)]).unwrap_err();
-        assert_eq!(err.field, "old");
-        assert_eq!(err.reason, "match text must not be empty");
-    }
-
-    #[test]
-    fn occurrence_zero_is_rejected() {
-        let err = apply_edits("a a\n", &[replace("a", "b", Some(0))]).unwrap_err();
-        assert_eq!(err.field, "occurrence");
-        assert_eq!(err.reason, "occurrence is 1-based");
-    }
-
-    #[test]
-    fn occurrence_above_wasm32_index_range_is_rejected() {
-        let err =
-            apply_edits("a a\n", &[replace("a", "b", Some(u64::from(u32::MAX) + 2))]).unwrap_err();
-        assert_eq!(err.field, "occurrence");
-        assert_eq!(err.reason, "occurrence exceeds the supported range");
-        assert!(!err.replan);
     }
 
     #[test]

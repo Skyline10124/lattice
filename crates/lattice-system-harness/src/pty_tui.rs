@@ -501,21 +501,18 @@ mod tests {
     }
 
     #[test]
-    fn strip_ansi_removes_color_and_cursor_codes() {
-        let raw = "\x1b[32m> \x1b[0mhello\x1b[1mworld\x1b[0m\x1b[?25h";
-        assert_eq!(strip_ansi(raw), "> helloworld");
-    }
-
-    #[test]
-    fn strip_ansi_handles_osc_title_sequence() {
-        let raw = "\x1b]0;some title\x07prompt: ";
-        assert_eq!(strip_ansi(raw), "prompt: ");
-    }
-
-    #[test]
-    fn strip_ansi_handles_st_terminated_osc() {
-        let raw = "\x1b]2;window title\x1b\\done";
-        assert_eq!(strip_ansi(raw), "done");
+    fn strip_ansi_removes_color_cursor_and_title_sequences() {
+        for (name, input, expected) in [
+            (
+                "color_and_cursor",
+                "\x1b[32m> \x1b[0mhello\x1b[1mworld\x1b[0m\x1b[?25h",
+                "> helloworld",
+            ),
+            ("osc_title", "\x1b]0;some title\x07prompt: ", "prompt: "),
+            ("st_terminated_osc", "\x1b]2;window title\x1b\\done", "done"),
+        ] {
+            assert_eq!(strip_ansi(input), expected, "{name}");
+        }
     }
 
     #[test]
