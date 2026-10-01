@@ -617,106 +617,172 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stopped_request_never_opens_provider() {
-        for cancelled in [false, true] {
+    async fn stopped_requests_respect_cancellation_and_deadline() {
+        enum Deadline {
+            None,
+            Now,
+            Past,
+        }
+        for (
+            name,
+            events,
+            cancel,
+            deadline,
+            expected_cause,
+            expected_call_count,
+            check_usage_none,
+        ) in [
+            (
+                "deadline_with_uncancelled_flag",
+                vec![LlmEvent::Done {
+                    finish_reason: "stop".into(),
+                    usage: None,
+                }],
+                Some(false),
+                Deadline::Now,
+                ModelStopCause::Deadline,
+                Some(0),
+                true,
+            ),
+            (
+                "cancel_takes_priority_over_expired_deadline",
+                vec![LlmEvent::Done {
+                    finish_reason: "stop".into(),
+                    usage: None,
+                }],
+                Some(true),
+                Deadline::Now,
+                ModelStopCause::Cancelled,
+                Some(0),
+                true,
+            ),
+            (
+                "cancel_only",
+                vec![LlmEvent::Started],
+                Some(true),
+                Deadline::None,
+                ModelStopCause::Cancelled,
+                None,
+                false,
+            ),
+            (
+                "past_deadline_only",
+                vec![LlmEvent::Started],
+                None,
+                Deadline::Past,
+                ModelStopCause::Deadline,
+                None,
+                false,
+            ),
+        ] {
             let client = Arc::new(
                 FakeStreamingLlmClient::builder()
-                    .push_events(vec![LlmEvent::Done {
-                        finish_reason: "stop".into(),
-                        usage: None,
-                    }])
+                    .push_events(events)
                     .build(),
             );
             let driver = ModelStepDriver::new(client.clone());
             let mut request = request();
-            request.cancel = Some(Arc::new(AtomicBool::new(cancelled)));
-            request.deadline = Some(Instant::now());
-            let result = driver.run(&request, None).await.unwrap();
-            assert_eq!(
-                client.call_count(),
-                0,
-                "stopped request must not open provider"
-            );
+            request.cancel = cancel.map(|cancelled| Arc::new(AtomicBool::new(cancelled)));
+            request.deadline = match deadline {
+                Deadline::None => None,
+                Deadline::Now => Some(Instant::now()),
+                Deadline::Past => Some(Instant::now() - Duration::from_millis(1)),
+            };
+            let result = driver
+                .run(&request, None)
+                .await
+                .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+            if let Some(count) = expected_call_count {
+                assert_eq!(
+                    client.call_count(),
+                    count,
+                    "{name}: stopped request must not open provider"
+                );
+            }
             assert!(
-                matches!(result, ModelStepAttempt::Stopped { cause, usage: None, .. } if cause == if cancelled { ModelStopCause::Cancelled } else { ModelStopCause::Deadline })
+                matches!(&result, ModelStepAttempt::Stopped { cause, .. } if cause == &expected_cause),
+                "{name}: expected {expected_cause:?}"
             );
+            if check_usage_none {
+                assert!(
+                    matches!(result, ModelStepAttempt::Stopped { usage: None, .. }),
+                    "{name}: usage must be unknown"
+                );
+            }
         }
     }
 
     #[test]
     fn tool_bearing_attempt_validates_the_whole_batch() {
-        let attempt = runtime()
-            .block_on(
-                driver(vec![
-                    LlmEvent::ToolCallStart {
-                        index: 0,
-                        provider_call_id: Some("call_1".to_string()),
-                        name: "observe.workspace".to_string(),
-                    },
-                    LlmEvent::ToolCallDelta {
-                        index: 0,
-                        arguments_delta: r#"{"path":"a"}"#.to_string(),
-                    },
-                    LlmEvent::ToolCallEnd { index: 0 },
-                    LlmEvent::Done {
-                        finish_reason: "tool_calls".to_string(),
-                        usage: None,
-                    },
-                ])
-                .run(&request(), None),
-            )
-            .expect("attempt runs");
-        let ModelStepAttempt::Complete { message, usage, .. } = attempt else {
-            panic!("complete message");
-        };
-        let calls: Vec<_> = message.tool_calls().collect();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].1.provider_call_id.as_deref(), Some("call_1"));
-        // Usage is unknown, not zero.
-        assert_eq!(usage, None);
-    }
-
-    #[test]
-    fn one_invalid_call_rejects_the_whole_attempt() {
-        let attempt = runtime()
-            .block_on(
-                driver(vec![
-                    LlmEvent::ToolCallStart {
-                        index: 0,
-                        provider_call_id: Some("call_1".to_string()),
-                        name: "observe.workspace".to_string(),
-                    },
-                    LlmEvent::ToolCallDelta {
-                        index: 0,
-                        arguments_delta: "not json".to_string(),
-                    },
-                    LlmEvent::ToolCallEnd { index: 0 },
-                    LlmEvent::Done {
-                        finish_reason: "tool_calls".to_string(),
-                        usage: None,
-                    },
-                ])
-                .run(&request(), None),
-            )
-            .expect("attempt runs");
-        assert!(matches!(
-            attempt,
-            ModelStepAttempt::Stopped {
-                cause: ModelStopCause::InvalidBatch,
-                diagnostic: ModelDiagnostic {
-                    invalid_batch: Some(_),
-                    ..
-                },
-                ..
+        enum Expected {
+            CompleteToolCall,
+            InvalidBatch,
+        }
+        for (name, arguments_delta, expected) in [
+            ("valid_json", r#"{"path":"a"}"#, Expected::CompleteToolCall),
+            ("invalid_json", "not json", Expected::InvalidBatch),
+        ] {
+            let attempt = runtime()
+                .block_on(
+                    driver(vec![
+                        LlmEvent::ToolCallStart {
+                            index: 0,
+                            provider_call_id: Some("call_1".to_string()),
+                            name: "observe.workspace".to_string(),
+                        },
+                        LlmEvent::ToolCallDelta {
+                            index: 0,
+                            arguments_delta: arguments_delta.to_string(),
+                        },
+                        LlmEvent::ToolCallEnd { index: 0 },
+                        LlmEvent::Done {
+                            finish_reason: "tool_calls".to_string(),
+                            usage: None,
+                        },
+                    ])
+                    .run(&request(), None),
+                )
+                .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+            match expected {
+                Expected::CompleteToolCall => {
+                    let ModelStepAttempt::Complete { message, usage, .. } = attempt else {
+                        panic!("{name}: complete message");
+                    };
+                    let calls: Vec<_> = message.tool_calls().collect();
+                    assert_eq!(calls.len(), 1, "{name}");
+                    assert_eq!(
+                        calls[0].1.provider_call_id.as_deref(),
+                        Some("call_1"),
+                        "{name}"
+                    );
+                    // Usage is unknown, not zero.
+                    assert_eq!(usage, None, "{name}");
+                }
+                Expected::InvalidBatch => assert!(
+                    matches!(
+                        attempt,
+                        ModelStepAttempt::Stopped {
+                            cause: ModelStopCause::InvalidBatch,
+                            diagnostic: ModelDiagnostic {
+                                invalid_batch: Some(_),
+                                ..
+                            },
+                            ..
+                        }
+                    ),
+                    "{name}: expected invalid batch"
+                ),
             }
-        ));
+        }
     }
 
     #[test]
-    fn assistant_content_ceiling_interrupts_on_plus_one() {
-        let exact = runtime()
-            .block_on(
-                driver(vec![
+    fn stream_completion_respects_limits_and_provider_failures() {
+        let overhead = r#"{"a":""}"#.len();
+        for (name, events, expected_cause) in [
+            (
+                "assistant_exact_limit",
+                vec![
                     LlmEvent::Token {
                         content: "x".repeat(MAX_ASSISTANT_CONTENT_BYTES),
                     },
@@ -724,15 +790,12 @@ mod tests {
                         finish_reason: "stop".to_string(),
                         usage: None,
                     },
-                ])
-                .run(&request(), None),
-            )
-            .expect("attempt runs");
-        assert!(matches!(exact, ModelStepAttempt::Complete { .. }));
-
-        let over = runtime()
-            .block_on(
-                driver(vec![
+                ],
+                None,
+            ),
+            (
+                "assistant_limit_then_one_byte",
+                vec![
                     LlmEvent::Token {
                         content: "x".repeat(MAX_ASSISTANT_CONTENT_BYTES),
                     },
@@ -743,24 +806,12 @@ mod tests {
                         finish_reason: "stop".to_string(),
                         usage: None,
                     },
-                ])
-                .run(&request(), None),
-            )
-            .expect("attempt runs");
-        assert!(matches!(
-            over,
-            ModelStepAttempt::Stopped {
-                cause: ModelStopCause::OutputLimit,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn reasoning_and_tool_argument_ceilings_interrupt() {
-        let over_reasoning = runtime()
-            .block_on(
-                driver(vec![
+                ],
+                Some(ModelStopCause::OutputLimit),
+            ),
+            (
+                "reasoning_limit_plus_one",
+                vec![
                     LlmEvent::Reasoning {
                         content: "r".repeat(MAX_REASONING_CONTENT_BYTES + 1),
                     },
@@ -768,22 +819,12 @@ mod tests {
                         finish_reason: "stop".to_string(),
                         usage: None,
                     },
-                ])
-                .run(&request(), None),
-            )
-            .expect("attempt runs");
-        assert!(matches!(
-            over_reasoning,
-            ModelStepAttempt::Stopped {
-                cause: ModelStopCause::OutputLimit,
-                ..
-            }
-        ));
-
-        let overhead = r#"{"a":""}"#.len();
-        let over_args = runtime()
-            .block_on(
-                driver(vec![
+                ],
+                Some(ModelStopCause::OutputLimit),
+            ),
+            (
+                "tool_arguments_limit_plus_one",
+                vec![
                     LlmEvent::ToolCallStart {
                         index: 0,
                         provider_call_id: Some("c".to_string()),
@@ -800,24 +841,12 @@ mod tests {
                         finish_reason: "tool_calls".to_string(),
                         usage: None,
                     },
-                ])
-                .run(&request(), None),
-            )
-            .expect("attempt runs");
-        assert!(matches!(
-            over_args,
-            ModelStepAttempt::Stopped {
-                cause: ModelStopCause::OutputLimit,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn mid_stream_error_and_missing_done_interrupt() {
-        let error = runtime()
-            .block_on(
-                driver(vec![
+                ],
+                Some(ModelStopCause::OutputLimit),
+            ),
+            (
+                "provider_error_after_partial",
+                vec![
                     LlmEvent::Token {
                         content: "par".to_string(),
                     },
@@ -827,86 +856,31 @@ mod tests {
                             retryable: false,
                         },
                     },
-                ])
-                .run(&request(), None),
-            )
-            .expect("attempt runs");
-        assert!(matches!(
-            error,
-            ModelStepAttempt::Stopped {
-                cause: ModelStopCause::ProviderError { retryable: false },
-                ..
-            }
-        ));
-
-        let no_done = runtime()
-            .block_on(
-                driver(vec![LlmEvent::Token {
+                ],
+                Some(ModelStopCause::ProviderError { retryable: false }),
+            ),
+            (
+                "stream_ends_without_done",
+                vec![LlmEvent::Token {
                     content: "par".to_string(),
-                }])
-                .run(&request(), None),
-            )
-            .expect("attempt runs");
-        assert!(matches!(
-            no_done,
-            ModelStepAttempt::Stopped {
-                cause: ModelStopCause::ProviderError { retryable: false },
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn cancellation_and_deadline_interrupt_from_the_poll_race() {
-        let cancel = Arc::new(AtomicBool::new(true));
-        let cancelled = runtime()
-            .block_on(
-                ModelStepDriver::new(Arc::new(
-                    FakeStreamingLlmClient::builder()
-                        .push_events(vec![LlmEvent::Started])
-                        .build(),
-                ))
-                .run(
-                    &ModelStepRequest {
-                        cancel: Some(cancel),
-                        ..request()
-                    },
-                    None,
+                }],
+                Some(ModelStopCause::ProviderError { retryable: false }),
+            ),
+        ] {
+            let attempt = runtime()
+                .block_on(driver(events).run(&request(), None))
+                .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+            match expected_cause {
+                None => assert!(
+                    matches!(attempt, ModelStepAttempt::Complete { .. }),
+                    "{name}: expected completion"
                 ),
-            )
-            .expect("attempt runs");
-        assert!(matches!(
-            cancelled,
-            ModelStepAttempt::Stopped {
-                cause: ModelStopCause::Cancelled,
-                ..
-            }
-        ));
-
-        let past = Instant::now() - Duration::from_millis(1);
-        let timed_out = runtime()
-            .block_on(
-                ModelStepDriver::new(Arc::new(
-                    FakeStreamingLlmClient::builder()
-                        .push_events(vec![LlmEvent::Started])
-                        .build(),
-                ))
-                .run(
-                    &ModelStepRequest {
-                        deadline: Some(past),
-                        ..request()
-                    },
-                    None,
+                Some(expected) => assert!(
+                    matches!(attempt, ModelStepAttempt::Stopped { cause, .. } if cause == expected),
+                    "{name}: expected {expected:?}"
                 ),
-            )
-            .expect("attempt runs");
-        assert!(matches!(
-            timed_out,
-            ModelStepAttempt::Stopped {
-                cause: ModelStopCause::Deadline,
-                ..
             }
-        ));
+        }
     }
 
     #[test]

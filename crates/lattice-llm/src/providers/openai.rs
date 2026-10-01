@@ -534,27 +534,73 @@ mod tests {
     }
 
     #[test]
-    fn order_f03_tool_separates_text_parts() {
-        let mut parser = OpenAiSseParser::new();
-        delta(&mut parser, serde_json::json!({"content": "A"}));
-        delta(&mut parser, call_delta(0, "t", "{}"));
-        delta(&mut parser, serde_json::json!({"content": "B"}));
-        assert_eq!(
-            labels(completed(&finish(&mut parser))),
-            ["T:A", "C:t", "T:B"]
-        );
-    }
-
-    #[test]
-    fn order_f04_sparse_indices_follow_first_arrival() {
-        let mut parser = OpenAiSseParser::new();
-        for (index, name) in [(u32::MAX, "first"), (7, "second"), (1, "third")] {
-            delta(&mut parser, call_delta(index, name, "{}"));
+    fn ordered_parts_preserve_tool_positions_and_ignore_empty_fragments() {
+        for (name, deltas, empty_event_delta_indices, expected_labels) in [
+            (
+                "tool_between_text",
+                vec![
+                    serde_json::json!({"content": "A"}),
+                    call_delta(0, "t", "{}"),
+                    serde_json::json!({"content": "B"}),
+                ],
+                &[] as &[usize],
+                vec!["T:A", "C:t", "T:B"],
+            ),
+            (
+                "sparse_indices",
+                vec![
+                    call_delta(u32::MAX, "first", "{}"),
+                    call_delta(7, "second", "{}"),
+                    call_delta(1, "third", "{}"),
+                ],
+                &[],
+                vec!["C:first", "C:second", "C:third"],
+            ),
+            (
+                "empty_fragments",
+                vec![
+                    serde_json::json!({"content": "", "reasoning_content": ""}),
+                    serde_json::json!({"content": "A"}),
+                    serde_json::json!({"reasoning_content": ""}),
+                    serde_json::json!({"content": "B"}),
+                    serde_json::json!({"reasoning_content": "R"}),
+                    serde_json::json!({"content": ""}),
+                    serde_json::json!({"reasoning_content": "S"}),
+                ],
+                &[0],
+                vec!["T:AB", "R:RS"],
+            ),
+            ("empty_stream", vec![], &[], vec![]),
+        ] {
+            let mut parser = OpenAiSseParser::new();
+            for (index, value) in deltas.into_iter().enumerate() {
+                let events = delta(&mut parser, value);
+                if empty_event_delta_indices.contains(&index) {
+                    assert!(events.is_empty(), "{name}: delta {index}");
+                }
+            }
+            let events = finish(&mut parser);
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|e| matches!(e, LlmEvent::MessageComplete { .. }))
+                    .count(),
+                1,
+                "{name}: completion count"
+            );
+            let message = events
+                .iter()
+                .find_map(|e| match e {
+                    LlmEvent::MessageComplete { message } => Some(message),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{name}: missing completed message"));
+            if expected_labels.is_empty() {
+                assert!(message.parts.is_empty(), "{name}");
+            } else {
+                assert_eq!(labels(message), expected_labels, "{name}");
+            }
         }
-        assert_eq!(
-            labels(completed(&finish(&mut parser))),
-            ["C:first", "C:second", "C:third"]
-        );
     }
 
     #[test]
@@ -651,31 +697,6 @@ mod tests {
             assert!(parser.parse_chunk(None, "[DONE]").is_empty());
             assert!(delta(&mut parser, serde_json::json!({"content": "late"})).is_empty());
         }
-    }
-
-    #[test]
-    fn order_f07_empty_fragments_do_not_split_adjacent_parts() {
-        let mut parser = OpenAiSseParser::new();
-        assert!(
-            delta(
-                &mut parser,
-                serde_json::json!({"content": "", "reasoning_content": ""})
-            )
-            .is_empty()
-        );
-        for (field, value) in [
-            ("content", "A"),
-            ("reasoning_content", ""),
-            ("content", "B"),
-            ("reasoning_content", "R"),
-            ("content", ""),
-            ("reasoning_content", "S"),
-        ] {
-            delta(&mut parser, serde_json::json!({field: value}));
-        }
-        assert_eq!(labels(completed(&finish(&mut parser))), ["T:AB", "R:RS"]);
-        let mut empty = OpenAiSseParser::new();
-        assert!(completed(&finish(&mut empty)).parts.is_empty());
     }
 
     fn assert_limit(events: &[LlmEvent], kind: &str) {
