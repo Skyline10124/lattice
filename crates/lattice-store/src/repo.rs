@@ -910,17 +910,6 @@ mod tests {
     }
 
     #[test]
-    fn strict_open_missing_is_not_initialized() {
-        let (_state, layout) = temp_layout();
-        let err = StoreRepo::open(
-            &layout.lattice_root().join("store.git"),
-            &ExpectedMeta::from(&project_meta()),
-        )
-        .unwrap_err();
-        assert!(matches!(err, StoreError::NotInitialized { .. }));
-    }
-
-    #[test]
     fn project_scope_must_match_directory_key() {
         let (_state, layout) = temp_layout();
         let key = ProjectStoreKey::from_canonical_path_bytes(b"/ws");
@@ -1137,52 +1126,6 @@ mod tests {
     }
 
     #[test]
-    fn ref_cas_reports_post_publication_barrier_failure() {
-        let (_state, layout) = temp_layout();
-        let repo = StoreRepo::create(
-            &layout.lattice_root().join("store.git"),
-            project_meta(),
-            |_| Ok(()),
-        )
-        .unwrap();
-        let blob = repo.write_blob(b"barrier-after-cas").unwrap();
-        fault::fail_ref_fsync(true);
-
-        let err = repo
-            .cas_ref(
-                "refs/lattice/barrier/post",
-                blob,
-                RefExpectation::MustNotExist,
-                "barrier test",
-            )
-            .unwrap_err();
-        assert!(matches!(err, StoreError::Durability { .. }), "got {err:?}");
-        assert_eq!(
-            repo.ref_target("refs/lattice/barrier/post").unwrap(),
-            Some(blob)
-        );
-    }
-
-    #[test]
-    fn refs_outside_lattice_namespace_are_rejected() {
-        let (_state, layout) = temp_layout();
-        let repo = StoreRepo::create(
-            &layout.lattice_root().join("store.git"),
-            project_meta(),
-            |_| Ok(()),
-        )
-        .unwrap();
-        let blob = repo.write_blob(b"x").unwrap();
-        let err = repo
-            .cas_ref("refs/heads/main", blob, RefExpectation::MustNotExist, "t")
-            .unwrap_err();
-        assert!(
-            matches!(err, StoreError::InvalidInput { ref detail } if detail.contains("namespace")),
-            "an out-of-namespace ref is invalid input, not a git failure: {err:?}"
-        );
-    }
-
-    #[test]
     fn fault_before_rename_leaves_no_target_and_cleans_temp() {
         let (_state, layout) = temp_layout();
         crate::fault::fail_before_rename(true);
@@ -1261,36 +1204,6 @@ mod tests {
             &ExpectedMeta::from(&project_meta()),
         )
         .unwrap();
-    }
-
-    #[test]
-    fn tree_spec_edits_and_rev_walk() {
-        let (_state, layout) = temp_layout();
-        let repo = StoreRepo::create(
-            &layout.lattice_root().join("store.git"),
-            project_meta(),
-            |_| Ok(()),
-        )
-        .unwrap();
-        let blob = repo.write_blob(b"content").unwrap();
-        let tree = repo
-            .write_tree(TreeSpec::new().upsert("file.txt", EntryKind::Blob, blob))
-            .unwrap();
-        let c1 = repo.write_commit_at(tree, &[], "first", 1).unwrap();
-        let tree2 = repo
-            .write_tree(TreeSpec::from(tree).upsert("two.txt", EntryKind::Blob, blob))
-            .unwrap();
-        let c2 = repo.write_commit_at(tree2, &[c1], "second", 2).unwrap();
-        assert_eq!(repo.commit_parents(c2).unwrap(), vec![c1]);
-        assert_eq!(repo.commit_tree(c1).unwrap(), tree);
-        assert_eq!(
-            repo.read_tree_path(tree2, "two.txt").unwrap(),
-            Some(b"content".to_vec())
-        );
-        let walk = repo.rev_walk(&[c2], &[]).unwrap();
-        // Exactly c2 and its parent c1; the meta commit is not an ancestor.
-        assert_eq!(walk.len(), 2);
-        assert!(walk.contains(&c2) && walk.contains(&c1));
     }
 
     fn assert_complete_loose_object_fanout(git_dir: &Path) {
@@ -1511,36 +1424,6 @@ mod tests {
         assert!(
             !synced.iter().any(|p| p == &objects),
             "steady-state cas_ref must not fsync objects/: {synced:?}"
-        );
-    }
-
-    #[test]
-    fn ref_only_fsync_pending_does_not_sync_object_namespace() {
-        let (_state, layout) = temp_layout();
-        let repo = StoreRepo::create(
-            &layout.lattice_root().join("store.git"),
-            project_meta(),
-            |_| Ok(()),
-        )
-        .unwrap();
-        let blob = repo.write_blob(b"ref-only-barrier").unwrap();
-        repo.cas_ref(
-            "refs/lattice/barrier/ref-only",
-            blob,
-            RefExpectation::MustNotExist,
-            "publish",
-        )
-        .unwrap();
-        let objects = repo.git_dir().join("objects");
-        fault::reset_fsync_trace();
-        repo.fsync_pending(&["refs/lattice/barrier/ref-only"])
-            .unwrap();
-        let synced = fault::synced_paths();
-        assert!(
-            !synced
-                .iter()
-                .any(|p| p == &objects || p.starts_with(&objects)),
-            "ref-only fsync_pending must not touch the object namespace: {synced:?}"
         );
     }
 

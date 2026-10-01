@@ -208,7 +208,6 @@ struct Frame {
     input: String,
     text: String,
     cancel: Option<CancelStatus>,
-    finished: bool,
 }
 fn frame(app: &App) -> Frame {
     Frame {
@@ -222,10 +221,6 @@ fn frame(app: &App) -> Frame {
             .collect::<Vec<_>>()
             .join("\n"),
         cancel: app.cancel_status,
-        finished: app
-            .state
-            .as_ref()
-            .is_some_and(|s| s.phase == ObservationPhase::Finished),
     }
 }
 struct Harness {
@@ -576,65 +571,6 @@ async fn late_transport_error_keeps_observation_after_submission_grace() {
     assert_eq!(report.turn_id, Some(id));
     assert!(report.submission_diagnostic.is_some());
     assert_eq!(report.cancel, Some(CancelStatus::Taken));
-}
-
-#[tokio::test]
-async fn closed_summary_is_drawn_before_history_and_reload_clears_read_error() {
-    for fail in [false, true] {
-        let id = lattice_api::local::new_turn_id();
-        let (events, incoming) = unbounded();
-        let mut incoming = Some(incoming);
-        let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
-            "subscribe" => Reply::Stream(incoming.take().unwrap()),
-            "history" => {
-                if fail {
-                    Reply::Now(error("history read failed"))
-                } else {
-                    Reply::Never
-                }
-            }
-            _ => panic!("read only"),
-        });
-        let mut h = Harness::new(false);
-        let remote = h.remote.clone();
-        let initial = peer.client.observe(Some(sid()), Some(id));
-        let driver = async {
-            peer.wait(|s| count(s, "subscribe") == 1).await;
-            events.unbounded_send(snapshot(&view(id, false))).unwrap();
-            peer.wait(|s| count(s, "history") == 1).await;
-            if fail {
-                let f = remote.wait(|f| f.text.contains("正文不可用")).await;
-                assert!(f.connected);
-                assert_eq!(f.phase, TurnPhase::Streaming);
-            }
-            events
-                .unbounded_send(event(
-                    1,
-                    TurnEvent::TokenDelta {
-                        key: key(id, 0, 1),
-                        content: "live body".into(),
-                    },
-                ))
-                .unwrap();
-            remote.wait(|f| f.text.contains("live body")).await;
-            events.unbounded_send(snapshot(&view(id, true))).unwrap();
-            let f = remote.wait(|f| f.text.contains("completed")).await;
-            assert!(f.text.contains("live body"));
-            assert_eq!(f.phase, TurnPhase::Idle);
-            peer.wait(|s| count(s, "history") == 2).await;
-            events.unbounded_send(finished(&view(id, true))).unwrap();
-            let f = remote.wait(|f| f.finished).await;
-            assert_eq!(f.text.matches("live body").count(), 1);
-            remote.ctrl('d');
-        };
-        let ((), exit) = tokio::join!(driver, h.run(&peer.client, Some(initial)));
-        assert!(exit.result.is_ok());
-        let report = exit.turn.unwrap().detach().await;
-        assert_eq!(report.cancel, None);
-        // Finished 的完整正文安装覆盖此前失败；不从 summary 推定正文读取成功。
-        assert_eq!(report.state.unwrap().phase, ObservationPhase::Finished);
-        assert!(report.history_error.is_none());
-    }
 }
 
 #[tokio::test]

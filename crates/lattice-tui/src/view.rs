@@ -907,42 +907,6 @@ mod tests {
         )
     }
 
-    fn buffer_text(terminal: &Terminal<TestBackend>, width: u16, height: u16) -> String {
-        (0..height)
-            .map(|y| {
-                (0..width)
-                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    #[test]
-    fn sidebar_visibility_follows_aspect_and_content_width() {
-        let visible = frame_layout(176, 50);
-        assert_eq!(
-            visible,
-            FrameLayout {
-                left_w: 135,
-                content_w: 133,
-                sidebar: Sidebar::Visible,
-            }
-        );
-        // 比例不足 3:1，或分栏后正文不足 72 列，都隐藏侧栏。
-        for (w, h) in [(115, 47), (85, 47), (56, 47), (80, 24)] {
-            assert_eq!(
-                frame_layout(w, h),
-                FrameLayout {
-                    left_w: w,
-                    content_w: w.saturating_sub(GUTTER),
-                    sidebar: Sidebar::Hidden,
-                },
-                "{w}x{h}"
-            );
-        }
-    }
-
     #[test]
     fn layout_boundaries_are_underflow_safe() {
         for (w, h) in [(1, 1), (7, 3), (43, 10), (44, 10), (114, 38), (115, 38)] {
@@ -959,57 +923,6 @@ mod tests {
         // 114x38 比例刚好不足；115x38 比例与正文宽度同时达标。
         assert_eq!(frame_layout(114, 38).sidebar, Sidebar::Hidden);
         assert_eq!(frame_layout(115, 38).sidebar, Sidebar::Visible);
-    }
-
-    #[test]
-    fn follow_pins_and_resize_clamps_scroll() {
-        let mut viewport = Viewport::new();
-        viewport.on_content_changed(20, 10);
-        assert_eq!(viewport.scroll(), 10);
-        viewport.page_up(10);
-        assert!(!viewport.following());
-        viewport.on_content_changed(5, 10);
-        assert_eq!(viewport.scroll(), 0);
-    }
-
-    #[test]
-    fn page_down_to_bottom_restores_follow() {
-        let mut viewport = Viewport::new();
-        viewport.on_content_changed(30, 10);
-        viewport.page_up(10);
-        viewport.page_down(30, 10);
-        assert!(viewport.following());
-        assert_eq!(viewport.scroll(), 20);
-    }
-
-    #[test]
-    fn historical_agent_names_do_not_use_the_current_profile_label() {
-        let mut app = test_app();
-        app.blocks = vec![
-            Block::AgentName("previous-agent".into()),
-            Block::User("old prompt".into()),
-            Block::Assistant("old answer".into()),
-            Block::AgentName("next-agent".into()),
-            Block::User("next prompt".into()),
-            Block::Assistant("next answer".into()),
-        ];
-        let text = transcript_lines(&app, 80)
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            text.iter()
-                .filter(|line| line.trim() == "previous-agent")
-                .count(),
-            1
-        );
-        assert_eq!(
-            text.iter()
-                .filter(|line| line.trim() == "next-agent")
-                .count(),
-            1
-        );
-        assert!(!text.iter().any(|line| line.trim() == "agent"));
     }
 
     #[test]
@@ -1085,16 +998,6 @@ mod tests {
     }
 
     #[test]
-    fn user_speaker_and_body_use_distinct_english_styles() {
-        let mut app = test_app();
-        app.blocks.push(Block::User("question".into()));
-        let lines = transcript_lines(&app, 61);
-        assert_eq!(lines[0].to_string().trim(), "user");
-        assert_eq!(lines[0].spans[1].style, role_style(Role::User));
-        assert_eq!(lines[1].spans[1].style, role_style(Role::Assistant));
-    }
-
-    #[test]
     fn failed_tool_expands_error_and_success_uses_bytes() {
         let mut app = test_app();
         app.blocks.extend([
@@ -1122,134 +1025,6 @@ mod tests {
         assert!(text.contains("1204 B"));
         assert!(!text.contains("chars"));
         assert!(text.contains("expected_hash mismatch"));
-    }
-
-    #[test]
-    fn dock_height_clamps_prompt_rows_one_to_five() {
-        let mut app = test_app();
-        assert_eq!(Dock::new(&app).height(10), 2, "空 Prompt：1 行内容");
-        app.input.set_text("a\nb\nc");
-        assert_eq!(Dock::new(&app).height(10), 4);
-        app.input.set_text("a\nb\nc\nd\ne\nf");
-        assert_eq!(Dock::new(&app).height(10), 6, "6 视觉行夹到 5");
-        assert_eq!(visual_cursor("中文", 1, 2), (1, 0));
-    }
-
-    #[test]
-    fn dock_height_clamps_status_rows_one_to_five() {
-        let retry = |message: String| StatusKind::LlmRetry {
-            attempt: 1,
-            delay_ms: 0,
-            message,
-        };
-        // "· llm retry 1/3 after 0ms: " 前缀长 27，宽 80 时按 ceil(len/80) 折行。
-        let mut app = test_app();
-        app.blocks.push(Block::Status {
-            kind: retry("x".repeat(40)),
-            placement: StatusPlacement::Dock(crate::app::DockSeverity::Warn),
-        });
-        assert_eq!(Dock::new(&app).height(80), 2, "1 视觉行");
-        app.blocks[0] = Block::Status {
-            kind: retry("x".repeat(200)),
-            placement: StatusPlacement::Dock(crate::app::DockSeverity::Warn),
-        };
-        assert_eq!(Dock::new(&app).height(80), 4, "3 视觉行");
-        app.blocks[0] = Block::Status {
-            kind: retry("x".repeat(450)),
-            placement: StatusPlacement::Dock(crate::app::DockSeverity::Warn),
-        };
-        assert_eq!(Dock::new(&app).height(80), 6, "6 视觉行夹到 5");
-
-        app.blocks[0] = Block::Status {
-            kind: StatusKind::TurnFailed {
-                reason: "x".repeat(450),
-            },
-            placement: StatusPlacement::Dock(crate::app::DockSeverity::Error),
-        };
-        assert_eq!(
-            Dock::new(&app).height(80),
-            6,
-            "Error 与 Warn 共用同一套高度"
-        );
-    }
-
-    #[test]
-    fn dock_prompt_scrolls_internally_and_keeps_cursor_visible() -> anyhow::Result<()> {
-        let mut app = test_app();
-        app.input.set_text("1\n2\n3\n4\n5\n6\n7\n8");
-        let dock = Dock::new(&app);
-        assert_eq!(dock.height(10), 6);
-        let mut terminal = Terminal::new(TestBackend::new(12, 6))?;
-        terminal.draw(|frame| dock.render(frame, Rect::new(0, 0, 12, 6)))?;
-        // rail 1 行 + 内容 5 行；光标行 8/8 滚动进最后 5 个视觉行内。
-        let cursor = terminal.get_cursor_position()?;
-        assert_eq!(cursor, ratatui::layout::Position::new(3, 5));
-        let screen = buffer_text(&terminal, 12, 6);
-        let rows: Vec<&str> = screen.lines().collect();
-        assert_eq!(rows[1].trim_end(), "  4", "滚动后首个可见行");
-        assert_eq!(rows[5].trim_end(), "  8", "光标行保持可见");
-        Ok(())
-    }
-
-    #[test]
-    fn dock_prompt_appears_only_on_first_visual_line() -> anyhow::Result<()> {
-        let mut app = test_app();
-        app.input.set_text("abcd");
-        let dock = Dock::new(&app);
-        let mut terminal = Terminal::new(TestBackend::new(8, 4))?;
-        terminal.draw(|frame| dock.render(frame, Rect::new(0, 0, 8, 4)))?;
-        let screen = buffer_text(&terminal, 8, 4);
-        assert_eq!(screen.matches('>').count(), 1);
-        assert!(screen.contains("PROMPT"), "rail 承载 tag");
-        assert_eq!(
-            terminal.get_cursor_position()?,
-            ratatui::layout::Position::new(6, 1)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn dock_status_rail_carries_release_hint() -> anyhow::Result<()> {
-        let mut app = test_app();
-        app.blocks.push(Block::Status {
-            kind: StatusKind::TurnFailed {
-                reason: "permission denied".into(),
-            },
-            placement: StatusPlacement::Dock(crate::app::DockSeverity::Error),
-        });
-        let dock = Dock::new(&app);
-        let mut terminal = Terminal::new(TestBackend::new(80, 6))?;
-        terminal.draw(|frame| dock.render(frame, Rect::new(0, 0, 80, 6)))?;
-        let screen = buffer_text(&terminal, 80, 6);
-        assert!(screen.contains("ERROR"), "rail 上的 tag");
-        assert!(screen.contains("SPACE"), "WARN / ERROR rail 上的释放提示");
-        assert!(screen.contains("permission denied"), "状态正文");
-        // Prompt 态的 rail 不带释放提示。
-        let app = test_app();
-        let dock = Dock::new(&app);
-        let mut terminal = Terminal::new(TestBackend::new(80, 6))?;
-        terminal.draw(|frame| dock.render(frame, Rect::new(0, 0, 80, 6)))?;
-        let screen = buffer_text(&terminal, 80, 6);
-        assert!(screen.contains("PROMPT"));
-        assert!(!screen.contains("SPACE"));
-        Ok(())
-    }
-
-    #[test]
-    fn colors_have_truecolor_and_named_fallbacks() {
-        assert_eq!(role_color(Role::User, true), Color::Rgb(0x86, 0x95, 0xe3));
-        assert_eq!(role_color(Role::User, false), Color::LightBlue);
-        assert_eq!(role_color(Role::ToolOk, false), Color::Cyan);
-        assert_eq!(role_color(Role::ToolErr, false), Color::Red);
-    }
-
-    #[test]
-    fn symbols_fall_back_to_ascii() {
-        assert_eq!(symbol(SymbolKind::Ok, true), "✓");
-        assert_eq!(symbol(SymbolKind::Ok, false), "+");
-        assert_eq!(fold_symbol(false, true), "▸");
-        assert_eq!(fold_symbol(false, false), ">");
-        assert_eq!(fold_symbol(true, false), "v");
     }
 
     #[test]

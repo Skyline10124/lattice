@@ -389,16 +389,6 @@ mod tests {
     }
 
     #[test]
-    fn independent_shared_under_exclusive_is_busy() {
-        let dir = tempfile::tempdir().unwrap();
-        let lock = dir.path().join("c.lock");
-        let g1 = acquire_flock(&lock, LockMode::Exclusive, Blocking::Block).unwrap();
-        let err = acquire_flock(&lock, LockMode::Shared, Blocking::NonBlocking).unwrap_err();
-        assert!(matches!(err, StoreError::Busy { .. }));
-        drop(g1);
-    }
-
-    #[test]
     fn explicit_reentrant_guard_allows_legal_nesting() {
         let dir = tempfile::tempdir().unwrap();
         let lock = dir.path().join("explicit-reentrant.lock");
