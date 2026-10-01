@@ -7,7 +7,9 @@ use lattice_system_harness::{
 };
 use serde_json::{Value, json};
 use std::{
+    fs::OpenOptions,
     io::{Read, Write},
+    os::fd::AsRawFd,
     os::unix::net::UnixStream,
     time::{Duration, Instant},
 };
@@ -941,6 +943,7 @@ fn daemon_restart_reads_closed_result_without_resubmitting() {
                         r#"{"todos":[{"content":"durable","status":"pending"}]}"#,
                     ),
                     SseScript::plain("restart answer"),
+                    SseScript::plain("answer 中"),
                 ],
             },
         );
@@ -951,7 +954,53 @@ fn daemon_restart_reads_closed_result_without_resubmitting() {
         assert_clean_send(&sent).unwrap();
         let tid = sent.accepted_turn_id().unwrap();
         let original = detail(&world, &budget, &mut evidence, tid);
+        // 同项目另建无 Tool 会话，保留空 replay 和单 Step 历史的独立信号。
+        let plain = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &[
+                "--json",
+                "session",
+                "send",
+                "question",
+                "--agent",
+                "background",
+                "--turn-id",
+                SECOND,
+            ],
+        );
+        assert!(plain.is_clean_exit(0), "{}", plain.summary());
+        let plain_before = detail(&world, &budget, &mut evidence, SECOND);
+        let sid = plain_before["session_id"].as_str().unwrap();
         world.stop_daemon().unwrap();
+        let projects: Vec<_> = std::fs::read_dir(world.session_store_dir().join("projects"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(projects.len(), 1);
+        let history_path = projects[0].join("workspace-history.git");
+        std::fs::remove_dir_all(&history_path).unwrap();
+        let sentinel = "deliberately invalid; closure must not read";
+        std::fs::write(&history_path, sentinel).unwrap();
+        let key = projects[0].file_name().unwrap();
+        let lock_path = world
+            .session_store_dir()
+            .join("locks/projects")
+            .join(key)
+            .join("workspace.lock");
+        std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        let workspace_lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::flock(workspace_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
         world.unset_env("OPENAI_COMPATIBLE_API_KEY");
         assert_eq!(detail(&world, &budget, &mut evidence, tid), original);
         let mut observer = subscribe(&world, &budget, tid, Value::Null);
@@ -968,7 +1017,81 @@ fn daemon_restart_reads_closed_result_without_resubmitting() {
             3
         );
         assert!(done.to_string().contains("restart answer"));
-        assert_eq!(server.captured_requests().len(), 2);
+        let mut plain_observer = subscribe(&world, &budget, SECOND, Value::Null);
+        let plain_snapshot = plain_observer.next();
+        assert_eq!(plain_snapshot["value"]["type"], "snapshot");
+        let selected = &plain_snapshot["value"]["view"]["selected_turn"];
+        assert_eq!(selected["steps"].as_array().unwrap().len(), 1);
+        assert_eq!(selected["summary"]["outcome"], "completed");
+        let plain_done = plain_observer.next();
+        assert_eq!(plain_done["value"]["type"], "finished");
+        let history = &plain_done["value"]["history"];
+        let entries = history["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1]["node"], 2);
+        assert_eq!(entries[1]["content"]["kind"], "step");
+        assert!(
+            entries[1]["content"]["content"]["assistant"]["parts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|part| part["semantic"]["text"]["text"] == "answer 中")
+        );
+        let followed = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &["--json", "session", "turn", SECOND, "--follow"],
+        );
+        assert!(followed.is_clean_exit(0), "{}", followed.summary());
+        // 成功退出要求收到 Finished；若它早于最终 History，CLI 不会完成退出。
+        let delivered = lines(&followed);
+        assert_eq!(
+            delivered
+                .iter()
+                .rfind(|line| line["type"] == "history")
+                .unwrap()["history"],
+            *history
+        );
+        let rewound = read(
+            &world,
+            &budget,
+            &mut evidence,
+            &["--json", "session", "rewind", sid, "0"],
+        );
+        assert_eq!(rewound["current"], 0);
+        assert_eq!(detail(&world, &budget, &mut evidence, SECOND), plain_before);
+        let log = read(
+            &world,
+            &budget,
+            &mut evidence,
+            &["--json", "session", "log", sid],
+        );
+        assert_eq!(log["nodes"].as_array().unwrap().len(), 3);
+        let replay = read(
+            &world,
+            &budget,
+            &mut evidence,
+            &[
+                "--json",
+                "audit",
+                "replay",
+                "--session",
+                sid,
+                "--turn",
+                SECOND,
+            ],
+        );
+        assert_eq!(replay["calls"], json!([]));
+        assert_eq!(std::fs::read_to_string(&history_path).unwrap(), sentinel);
+        evidence
+            .record_json(
+                "readonly-with-invalid-history",
+                &json!({"snapshot":plain_snapshot,
+            "finished":plain_done,"rewind":rewound,"log":log,"replay":replay}),
+            )
+            .unwrap();
+        assert_eq!(server.captured_requests().len(), 3);
         evidence
             .record_json("closed-subscription", &json!([snapshot, done]))
             .unwrap();
@@ -1002,8 +1125,84 @@ fn a_live_new_turn_does_not_block_old_closed_observation() {
         assert!(first.has_completed());
         let tid = first.accepted_turn_id().unwrap();
         let old = detail(&world, &budget, &mut evidence, tid);
-        let second = send.spawn("second").unwrap();
+        // 重启清除旧 Turn 的 Owner，随后四个带配置的新身份共同争抢空闲 Session。
+        world.stop_daemon().unwrap();
+        detail(&world, &budget, &mut evidence, tid);
+        let sid = old["session_id"].as_str().unwrap();
+        let config = json!({"profile_toml":std::fs::read_to_string(world.project_dir()
+            .join(".lattice/agents/background/agent.toml")).unwrap(),
+            "system_prompt":"You are a concise test agent.","connection":{"alias":"compat:background",
+            "provider":"openai_compatible","provider_model":"background","base_url":server.base_url(),
+            "api_key":FAKE_API_KEY,"roots_der":[]}});
+        let candidates = [
+            SECOND,
+            THIRD,
+            "00000000-0000-4000-8000-000000000004",
+            "00000000-0000-4000-8000-000000000005",
+        ];
+        let barrier = std::sync::Barrier::new(candidates.len());
+        let submissions = std::thread::scope(|scope| {
+            let handles: Vec<_> = candidates
+                .iter()
+                .map(|candidate| {
+                    let request = submit(&world, Some(sid), candidate, "second", config.clone());
+                    let world = &world;
+                    let budget = &budget;
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        ipc(world, budget, request)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        evidence
+            .record_json("concurrent-admission", &json!(submissions))
+            .unwrap();
+        let mut winners = Vec::new();
+        let mut rejected = Vec::new();
+        for (candidate, response) in candidates.iter().zip(&submissions) {
+            if response["response"] == "acceptance" && response["value"]["acceptance"] == "accepted"
+            {
+                winners.push(*candidate);
+            } else {
+                assert_eq!(response["value"]["kind"], "busy", "{response}");
+                rejected.push(*candidate);
+            }
+        }
+        assert_eq!((winners.len(), rejected.len()), (1, 3));
+        for candidate in rejected {
+            let absent = ipc(
+                &world,
+                &budget,
+                json!({"operation":"turn",
+                "target":{"session_id":sid,"turn_id":candidate}}),
+            );
+            assert_eq!(absent["value"]["kind"], "not_found", "{absent}");
+        }
         gate.wait_until_stalled(2, budget.cap_timeout(Duration::from_secs(30)))
+            .unwrap();
+        let blocked = ipc(
+            &world,
+            &budget,
+            json!({"operation":"rewind","session_id":sid,
+            "target":0,"workspace":world.project_dir()}),
+        );
+        assert_eq!(blocked["value"]["kind"], "busy", "{blocked}");
+        let mut retry = submit(&world, Some(sid), tid, "first", Value::Null);
+        retry["request"]["agent"] = Value::Null;
+        let found = ipc(&world, &budget, retry);
+        assert_eq!(found["value"]["acceptance"], "existing", "{found}");
+        assert_eq!(found["value"]["turn"]["turn_id"], tid);
+        evidence
+            .record_json(
+                "durable-retry-beside-live",
+                &json!({"rewind":blocked,"retry":found}),
+            )
             .unwrap();
         let before = view(&world, &budget, tid);
         assert!(!before["session"]["active_turn"].is_null());
@@ -1027,18 +1226,21 @@ fn a_live_new_turn_does_not_block_old_closed_observation() {
         assert_eq!(still["selected_turn"], old);
         gate.release_next(budget.cap_timeout(Duration::from_secs(30)))
             .unwrap();
-        let second = send.wait_spawned(second).unwrap();
-        evidence.record_command("second", &second.command);
-        assert!(second.has_completed());
+        let second = closed(&world, &budget, &mut evidence, winners[0]);
+        assert_eq!(second["summary"]["outcome"], "completed");
         assert_eq!(detail(&world, &budget, &mut evidence, tid), old);
         assert_eq!(server.captured_requests().len(), 2);
-        archive_state(
+        archive_state(&world, &budget, &mut evidence, &[tid, winners[0]]);
+        evidence.record_json("parameters", &json!({"script":"two gated answer Turns","old_turn":tid,"during_live":before,"after_observation":still})).unwrap();
+        world.stop_daemon().unwrap();
+        assert_eq!(detail(&world, &budget, &mut evidence, winners[0]), second);
+        let tree = read(
             &world,
             &budget,
             &mut evidence,
-            &[tid, second.accepted_turn_id().unwrap()],
+            &["--json", "session", "log", sid],
         );
-        evidence.record_json("parameters", &json!({"script":"two gated answer Turns","old_turn":tid,"during_live":before,"after_observation":still})).unwrap();
+        assert_eq!(tree["nodes"].as_array().unwrap().len(), 5);
         evidence.record_captures(server.captured_requests());
     }));
     support::finish_recorded(evidence, result);

@@ -1,21 +1,12 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! #59 (Codeberg #37) acceptance tests: production Turn operates directly
-//! on the Local Workspace through the closed five-method catalog.
-//!
-//! These tests exercise the real production runtime
-//! (`lancet_api::LancetRuntime::build` with a temp Local root, no Upper, no
-//! workspace override, no KVM/MSB) and assert each acceptance criterion from
-//! the #59 ticket against the canonical project root on disk:
-//!
-//! - observe reads current Local state and sees external modifications made
-//!   between Tool calls.
-//! - mutate.create rejects a pre-existing target with `ReplanRequired`.
-//! - mutate.edit checks the expected-hash precondition and atomically installs
-//!   the result; a stale hash leaves the target unchanged.
-//! - a successful mutation is NOT rolled back when a later step fails.
-//! - the closed five-method catalog is exactly what the runtime exposes.
+//! In-process acceptance for the exact error attributes and receipt evidence of
+//! Direct-Local mutations: policy denial and existing-target refusals map to
+//! the right retriability, stale hashes and edit diagnostics keep their
+//! structured codes, a failed install leaves no partial target, and receipts
+//! carry method-local MutationEvidence. Product scenarios live in the external
+//! harness; see `docs/development/testing.md`.
 
 mod support;
 
@@ -73,110 +64,6 @@ fn direct_local_runtime(root: &std::path::Path) -> ReservedRuntime {
         },
     })
     .expect("direct-local runtime builds")
-}
-
-/// The runtime exposes exactly the closed five-method Agent-visible catalog.
-#[tokio::test]
-async fn direct_local_runtime_exposes_closed_five_method_catalog() {
-    let dir = TempDir::new().unwrap();
-    let runtime = direct_local_runtime(dir.path());
-    let names: Vec<String> = runtime
-        .tool_definitions()
-        .iter()
-        .map(|t| t.name.clone())
-        .collect();
-    let mut expected = vec![
-        "observe.workspace".to_string(),
-        "mutate.create".to_string(),
-        "mutate.edit".to_string(),
-        "fetch.web".to_string(),
-        "session.todo_write".to_string(),
-    ];
-    expected.sort();
-    let mut got = names.clone();
-    got.sort();
-    assert_eq!(got, expected, "Agent-visible catalog must be exactly five");
-
-    // The Component's LLM projection carries its manifest description and schema.
-    let todo = runtime
-        .tool_definitions()
-        .iter()
-        .find(|t| t.name == TODO_WRITE)
-        .expect("the embedded Component is exposed to the Agent");
-    assert!(
-        todo.description.contains("todo list"),
-        "the projection must carry the manifest description: {}",
-        todo.description
-    );
-    assert_eq!(
-        todo.parameters["properties"]["todos"]["type"],
-        serde_json::json!("array")
-    );
-
-    // Same for the observation Tool since #30. Its params schema is the `oneOf`
-    // over four mode branches from `tools/observe-workspace/manifest.toml` — the
-    // shape a catalog type used to carry, now proving the manifest is the sole
-    // descriptor authority.
-    let observe = runtime
-        .tool_definitions()
-        .iter()
-        .find(|t| t.name == OBSERVE_WORKSPACE)
-        .expect("the migrated observation Tool is exposed to the Agent");
-    assert!(
-        observe.description.contains("content_hash"),
-        "the projection must carry the manifest description: {}",
-        observe.description
-    );
-    assert_eq!(
-        observe.parameters["oneOf"].as_array().map(Vec::len),
-        Some(4),
-        "the four observation modes must survive projection: {}",
-        observe.parameters
-    );
-}
-
-/// observe.workspace list_directory sees a file added by an external writer
-/// between two listings. Guards list/grep/find against stale snapshots.
-#[tokio::test]
-async fn observe_list_sees_external_addition_between_tool_calls() {
-    /// Entry names of a `list_directory` result, in wire order.
-    fn entry_names(result: &serde_json::Value) -> Vec<&str> {
-        result["result"]["entries"]
-            .as_array()
-            .expect("list_directory returns entries")
-            .iter()
-            .map(|entry| entry["name"].as_str().expect("entry name is a string"))
-            .collect()
-    }
-
-    let dir = TempDir::new().unwrap();
-    std::fs::write(dir.path().join("orig.txt"), "x\n").unwrap();
-    let runtime = direct_local_runtime(dir.path());
-    let client = runtime.client();
-
-    let list_root = serde_json::json!({ "mode": "list_directory", "path": "." });
-
-    let first = client
-        .call_raw(OBSERVE_WORKSPACE, list_root.clone())
-        .await
-        .expect("first list");
-    assert_eq!(first["mode"], "list_directory");
-    let first_names = entry_names(&first);
-    assert!(first_names.contains(&"orig.txt"));
-    assert!(!first_names.contains(&"added.txt"));
-
-    std::fs::write(dir.path().join("added.txt"), "new\n").unwrap();
-
-    let second = client
-        .call_raw(OBSERVE_WORKSPACE, list_root)
-        .await
-        .expect("second list");
-    assert_eq!(second["mode"], "list_directory");
-    let second_names = entry_names(&second);
-    assert!(
-        second_names.contains(&"added.txt"),
-        "second list must see the externally added file: {second_names:?}"
-    );
 }
 
 /// Policy denial: a write-deny pattern blocks mutate.create even on the
