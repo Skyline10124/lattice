@@ -1262,133 +1262,127 @@ mod tests {
     }
 
     #[test]
-    fn strict_open_rejects_missing_fanout_and_does_not_repair() {
-        let (_state, layout) = temp_layout();
-        let repo = StoreRepo::create(
-            &layout.lattice_root().join("store.git"),
-            project_meta(),
-            |_| Ok(()),
-        )
-        .unwrap();
-        let missing = repo.git_dir().join("objects").join("ff");
-        if missing.exists() {
-            std::fs::remove_dir_all(&missing).unwrap();
-        }
-        assert!(!missing.exists());
-        drop(repo);
+    fn strict_open_rejects_invalid_fanout_without_repair() {
+        for (name, prefix, replacement_bytes, expected_detail_contains) in [
+            ("missing_fanout", "ff", None, Some("objects/ff")),
+            (
+                "malformed_fanout",
+                "aa",
+                Some(b"not a directory".as_slice()),
+                None,
+            ),
+        ] {
+            let (_state, layout) = temp_layout();
+            let repo = StoreRepo::create(
+                &layout.lattice_root().join("store.git"),
+                project_meta(),
+                |_| Ok(()),
+            )
+            .unwrap_or_else(|err| panic!("{name}: create: {err:?}"));
+            let fanout = repo.git_dir().join("objects").join(prefix);
+            if replacement_bytes.is_some() && fanout.is_dir()
+                || replacement_bytes.is_none() && fanout.exists()
+            {
+                std::fs::remove_dir_all(&fanout)
+                    .unwrap_or_else(|err| panic!("{name}: remove fanout: {err}"));
+            }
+            if let Some(bytes) = replacement_bytes {
+                std::fs::write(&fanout, bytes)
+                    .unwrap_or_else(|err| panic!("{name}: replace fanout: {err}"));
+            } else {
+                assert!(
+                    !fanout.exists(),
+                    "{name}: fanout must be absent before open"
+                );
+            }
+            drop(repo);
 
-        let err = StoreRepo::open(
-            &layout.lattice_root().join("store.git"),
-            &ExpectedMeta::from(&project_meta()),
-        )
-        .unwrap_err();
-        assert!(
-            matches!(err, StoreError::Corruption { ref detail } if detail.contains("objects/ff")),
-            "missing fanout is corruption, not a repair invitation: {err:?}"
-        );
-        assert!(
-            !missing.exists(),
-            "strict open must not create a missing fanout directory"
-        );
+            let err = StoreRepo::open(
+                &layout.lattice_root().join("store.git"),
+                &ExpectedMeta::from(&project_meta()),
+            )
+            .expect_err(&format!("{name}: invalid fanout must fail open"));
+            if let Some(expected_detail) = expected_detail_contains {
+                assert!(
+                    matches!(err, StoreError::Corruption { ref detail } if detail.contains(expected_detail)),
+                    "{name}: missing fanout is corruption, not a repair invitation: {err:?}"
+                );
+            } else {
+                assert!(
+                    matches!(err, StoreError::Corruption { .. }),
+                    "{name}: a fanout file is corruption: {err:?}"
+                );
+            }
+            if replacement_bytes.is_some() {
+                let meta = std::fs::symlink_metadata(&fanout)
+                    .unwrap_or_else(|err| panic!("{name}: fanout metadata: {err}"));
+                assert!(
+                    meta.is_file(),
+                    "{name}: strict open must not replace a malformed fanout"
+                );
+            } else {
+                assert!(
+                    !fanout.exists(),
+                    "{name}: strict open must not create a missing fanout directory"
+                );
+            }
+        }
     }
 
     #[test]
-    fn strict_open_rejects_malformed_fanout_and_does_not_repair() {
-        let (_state, layout) = temp_layout();
-        let repo = StoreRepo::create(
-            &layout.lattice_root().join("store.git"),
-            project_meta(),
-            |_| Ok(()),
-        )
-        .unwrap();
-        let fanout = repo.git_dir().join("objects").join("aa");
-        if fanout.is_dir() {
-            std::fs::remove_dir_all(&fanout).unwrap();
-        }
-        std::fs::write(&fanout, b"not a directory").unwrap();
-        drop(repo);
-
-        let err = StoreRepo::open(
-            &layout.lattice_root().join("store.git"),
-            &ExpectedMeta::from(&project_meta()),
-        )
-        .unwrap_err();
-        assert!(
-            matches!(err, StoreError::Corruption { .. }),
-            "a fanout file is corruption: {err:?}"
-        );
-        let meta = std::fs::symlink_metadata(&fanout).unwrap();
-        assert!(
-            meta.is_file(),
-            "strict open must not replace a malformed fanout"
-        );
-    }
-
-    #[test]
-    fn object_file_barrier_failure_prevents_ref_cas() {
-        let (_state, layout) = temp_layout();
-        let repo = StoreRepo::create(
-            &layout.lattice_root().join("store.git"),
-            project_meta(),
-            |_| Ok(()),
-        )
-        .unwrap();
-        let blob = repo.write_blob(b"object-file-barrier").unwrap();
-        let object = crate::durability::loose_object_path(repo.git_dir(), blob);
-        fault::reset_fsync_trace();
-        fault::fail_fsync_path(&object);
-
-        let err = repo
-            .cas_ref(
+    fn object_barrier_failures_prevent_ref_cas() {
+        for (name, blob_bytes, ref_name, log_message, fail_directory) in [
+            (
+                "object_file",
+                b"object-file-barrier".as_slice(),
                 "refs/lattice/barrier/object-file",
-                blob,
-                RefExpectation::MustNotExist,
                 "object file barrier",
-            )
-            .unwrap_err();
-        match err {
-            StoreError::Durability { path, .. } => assert_eq!(path, object),
-            other => panic!("expected Durability on the object file, got {other:?}"),
-        }
-        assert_eq!(
-            repo.ref_target("refs/lattice/barrier/object-file").unwrap(),
-            None
-        );
-    }
-
-    #[test]
-    fn fanout_directory_barrier_failure_prevents_ref_cas() {
-        let (_state, layout) = temp_layout();
-        let repo = StoreRepo::create(
-            &layout.lattice_root().join("store.git"),
-            project_meta(),
-            |_| Ok(()),
-        )
-        .unwrap();
-        let blob = repo.write_blob(b"fanout-dir-barrier").unwrap();
-        let fanout = crate::durability::loose_object_path(repo.git_dir(), blob)
-            .parent()
-            .unwrap()
-            .to_path_buf();
-        fault::reset_fsync_trace();
-        fault::fail_fsync_path(&fanout);
-
-        let err = repo
-            .cas_ref(
+                false,
+            ),
+            (
+                "fanout_directory",
+                b"fanout-dir-barrier".as_slice(),
                 "refs/lattice/barrier/fanout-dir",
-                blob,
-                RefExpectation::MustNotExist,
                 "fanout dir barrier",
+                true,
+            ),
+        ] {
+            let (_state, layout) = temp_layout();
+            let repo = StoreRepo::create(
+                &layout.lattice_root().join("store.git"),
+                project_meta(),
+                |_| Ok(()),
             )
-            .unwrap_err();
-        match err {
-            StoreError::Durability { path, .. } => assert_eq!(path, fanout),
-            other => panic!("expected Durability on the fanout directory, got {other:?}"),
+            .unwrap_or_else(|err| panic!("{name}: create: {err:?}"));
+            let blob = repo
+                .write_blob(blob_bytes)
+                .unwrap_or_else(|err| panic!("{name}: write blob: {err:?}"));
+            let object = crate::durability::loose_object_path(repo.git_dir(), blob);
+            let failure_path = if fail_directory {
+                object
+                    .parent()
+                    .unwrap_or_else(|| panic!("{name}: object parent"))
+                    .to_path_buf()
+            } else {
+                object
+            };
+            fault::reset_fsync_trace();
+            fault::fail_fsync_path(&failure_path);
+
+            let err = repo
+                .cas_ref(ref_name, blob, RefExpectation::MustNotExist, log_message)
+                .expect_err(&format!("{name}: object barrier must fail"));
+            match err {
+                StoreError::Durability { path, .. } => assert_eq!(path, failure_path, "{name}"),
+                other => panic!("{name}: expected Durability on {failure_path:?}, got {other:?}"),
+            }
+            assert_eq!(
+                repo.ref_target(ref_name)
+                    .unwrap_or_else(|err| panic!("{name}: ref target: {err:?}")),
+                None,
+                "{name}"
+            );
         }
-        assert_eq!(
-            repo.ref_target("refs/lattice/barrier/fanout-dir").unwrap(),
-            None
-        );
     }
 
     #[test]

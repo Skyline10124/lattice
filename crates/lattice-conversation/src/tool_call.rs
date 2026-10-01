@@ -397,100 +397,191 @@ mod tests {
     }
 
     #[test]
-    fn empty_string_arguments_are_invalid_not_normalized() {
-        // No empty-to-`{}` normalization: empty arguments reject the batch.
-        let calls = vec![raw("read_file", "")];
-        assert!(matches!(
-            validate_tool_call_batch(&calls),
-            Err(ToolCallValidation::MalformedArguments { call_ordinal: 0 })
-        ));
-    }
-
-    #[test]
-    fn non_object_arguments_are_invalid() {
-        for arguments in ["[]", "[1]", "\"x\"", "42", "null", "true"] {
-            let calls = vec![raw("read_file", arguments)];
-            assert!(
-                matches!(
-                    validate_tool_call_batch(&calls),
-                    Err(ToolCallValidation::ArgumentsNotObject { call_ordinal: 0 })
-                ),
-                "arguments {arguments:?} must reject as non-object"
-            );
+    fn tool_call_batch_validation_preserves_rejection_reasons() {
+        struct Case {
+            name: &'static str,
+            calls: Vec<RawToolCall>,
+            expected: fn(&Result<Vec<UnboundToolCall>, ToolCallValidation>) -> bool,
         }
-    }
-
-    #[test]
-    fn malformed_arguments_are_invalid() {
-        for arguments in ["{", "{\"a\":}", "not json", "  "] {
-            let calls = vec![raw("read_file", arguments)];
-            assert!(
-                matches!(
-                    validate_tool_call_batch(&calls),
-                    Err(ToolCallValidation::MalformedArguments { .. })
-                ),
-                "arguments {arguments:?} must reject as malformed"
-            );
-        }
-    }
-
-    #[test]
-    fn duplicate_provider_call_id_rejects_batch() {
-        let mut second = raw("write_file", r#"{"path":"b"}"#);
-        second.provider_call_id = Some("call_read_file".to_string());
-        let calls = vec![raw("read_file", r#"{"path":"a"}"#), second];
-        assert!(matches!(
-            validate_tool_call_batch(&calls),
-            Err(ToolCallValidation::DuplicateToolCallId {
-                first_ordinal: 0,
-                second_ordinal: 1,
-            })
-        ));
-    }
-
-    #[test]
-    fn missing_id_is_allowed_but_empty_id_is_incomplete() {
-        let mut call = raw("read_file", r#"{"path":"a"}"#);
-        call.provider_call_id = None;
-        assert!(validate_tool_call_batch(&[call]).is_ok());
-
-        let mut call = raw("read_file", r#"{"path":"a"}"#);
-        call.provider_call_id = Some(String::new());
-        assert!(matches!(
-            validate_tool_call_batch(&[call]),
-            Err(ToolCallValidation::EmptyToolCallId { .. })
-        ));
-    }
-
-    #[test]
-    fn missing_name_is_incomplete() {
-        let calls = vec![raw("", r#"{"path":"a"}"#)];
-        assert!(matches!(
-            validate_tool_call_batch(&calls),
-            Err(ToolCallValidation::MissingToolName { .. })
-        ));
-    }
-
-    #[test]
-    fn one_invalid_call_rejects_the_whole_batch() {
-        let calls = vec![raw("read_file", r#"{"path":"a"}"#), raw("write_file", "[]")];
-        assert!(matches!(
-            validate_tool_call_batch(&calls),
-            Err(ToolCallValidation::ArgumentsNotObject { call_ordinal: 1 })
-        ));
-    }
-
-    #[test]
-    fn oversized_arguments_reject_before_parse() {
         let arguments = format!(
             "{{\"a\":\"{}\"}}",
             "x".repeat(MAX_TOOL_CALL_ARGUMENTS_BYTES)
         );
-        let calls = vec![raw("read_file", &arguments)];
-        assert!(matches!(
-            validate_tool_call_batch(&calls),
-            Err(ToolCallValidation::ArgumentsTooLarge { .. })
-        ));
+        for Case {
+            name,
+            calls,
+            expected,
+        } in [
+            // No empty-to-`{}` normalization: empty arguments reject the batch.
+            Case {
+                name: "empty_arguments",
+                calls: vec![raw("read_file", "")],
+                expected: |result| {
+                    matches!(
+                        result,
+                        Err(ToolCallValidation::MalformedArguments { call_ordinal: 0 })
+                    )
+                },
+            },
+            Case {
+                name: "empty_array",
+                calls: vec![raw("read_file", "[]")],
+                expected: |result| {
+                    matches!(
+                        result,
+                        Err(ToolCallValidation::ArgumentsNotObject { call_ordinal: 0 })
+                    )
+                },
+            },
+            Case {
+                name: "nonempty_array",
+                calls: vec![raw("read_file", "[1]")],
+                expected: |result| {
+                    matches!(
+                        result,
+                        Err(ToolCallValidation::ArgumentsNotObject { call_ordinal: 0 })
+                    )
+                },
+            },
+            Case {
+                name: "string_scalar",
+                calls: vec![raw("read_file", "\"x\"")],
+                expected: |result| {
+                    matches!(
+                        result,
+                        Err(ToolCallValidation::ArgumentsNotObject { call_ordinal: 0 })
+                    )
+                },
+            },
+            Case {
+                name: "number_scalar",
+                calls: vec![raw("read_file", "42")],
+                expected: |result| {
+                    matches!(
+                        result,
+                        Err(ToolCallValidation::ArgumentsNotObject { call_ordinal: 0 })
+                    )
+                },
+            },
+            Case {
+                name: "null_scalar",
+                calls: vec![raw("read_file", "null")],
+                expected: |result| {
+                    matches!(
+                        result,
+                        Err(ToolCallValidation::ArgumentsNotObject { call_ordinal: 0 })
+                    )
+                },
+            },
+            Case {
+                name: "boolean_scalar",
+                calls: vec![raw("read_file", "true")],
+                expected: |result| {
+                    matches!(
+                        result,
+                        Err(ToolCallValidation::ArgumentsNotObject { call_ordinal: 0 })
+                    )
+                },
+            },
+            Case {
+                name: "truncated_object",
+                calls: vec![raw("read_file", "{")],
+                expected: |result| {
+                    matches!(result, Err(ToolCallValidation::MalformedArguments { .. }))
+                },
+            },
+            Case {
+                name: "missing_property_value",
+                calls: vec![raw("read_file", "{\"a\":}")],
+                expected: |result| {
+                    matches!(result, Err(ToolCallValidation::MalformedArguments { .. }))
+                },
+            },
+            Case {
+                name: "invalid_token",
+                calls: vec![raw("read_file", "not json")],
+                expected: |result| {
+                    matches!(result, Err(ToolCallValidation::MalformedArguments { .. }))
+                },
+            },
+            Case {
+                name: "whitespace_only",
+                calls: vec![raw("read_file", "  ")],
+                expected: |result| {
+                    matches!(result, Err(ToolCallValidation::MalformedArguments { .. }))
+                },
+            },
+            Case {
+                name: "duplicate_id",
+                calls: vec![
+                    raw("read_file", "{\"path\":\"a\"}"),
+                    RawToolCall {
+                        provider_call_id: Some("call_read_file".to_string()),
+                        ..raw("write_file", "{\"path\":\"b\"}")
+                    },
+                ],
+                expected: |result| {
+                    matches!(
+                        result,
+                        Err(ToolCallValidation::DuplicateToolCallId {
+                            first_ordinal: 0,
+                            second_ordinal: 1
+                        })
+                    )
+                },
+            },
+            Case {
+                name: "absent_id_is_allowed",
+                calls: vec![RawToolCall {
+                    provider_call_id: None,
+                    ..raw("read_file", "{\"path\":\"a\"}")
+                }],
+                expected: |result| result.is_ok(),
+            },
+            Case {
+                name: "explicit_empty_id",
+                calls: vec![RawToolCall {
+                    provider_call_id: Some("".to_string()),
+                    ..raw("read_file", "{\"path\":\"a\"}")
+                }],
+                expected: |result| {
+                    matches!(result, Err(ToolCallValidation::EmptyToolCallId { .. }))
+                },
+            },
+            Case {
+                name: "empty_tool_name",
+                calls: vec![raw("", "{\"path\":\"a\"}")],
+                expected: |result| {
+                    matches!(result, Err(ToolCallValidation::MissingToolName { .. }))
+                },
+            },
+            Case {
+                name: "invalid_second_call",
+                calls: vec![
+                    raw("read_file", "{\"path\":\"a\"}"),
+                    raw("write_file", "[]"),
+                ],
+                expected: |result| {
+                    matches!(
+                        result,
+                        Err(ToolCallValidation::ArgumentsNotObject { call_ordinal: 1 })
+                    )
+                },
+            },
+            Case {
+                name: "oversized_object_arguments",
+                calls: vec![raw("read_file", &arguments)],
+                expected: |result| {
+                    matches!(result, Err(ToolCallValidation::ArgumentsTooLarge { .. }))
+                },
+            },
+        ] {
+            let result = validate_tool_call_batch(&calls);
+            assert!(
+                expected(&result),
+                "{name}: unexpected validation result: {result:?}"
+            );
+        }
     }
 
     #[test]
