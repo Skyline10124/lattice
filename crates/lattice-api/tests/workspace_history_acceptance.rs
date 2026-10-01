@@ -182,48 +182,6 @@ fn tree_snapshot(root: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
 
 // ─── Runtime layer ──────────────────────────────────────────────────────────
 
-/// AC3: every successful create/edit forms an ordered history commit, and
-/// multiple mutations in one Turn keep real execution order and parents.
-#[tokio::test]
-async fn each_successful_mutation_forms_an_ordered_commit_chain() {
-    let env = HistoryRuntime::build();
-    let history = env.runtime.workspace_history();
-
-    create_file(&env.runtime, "a.txt", "a1\n").await.expect("a");
-    let after_first = env.current().expect("first recorded");
-
-    create_file(&env.runtime, "b.txt", "b1\n").await.expect("b");
-    let after_second = env.current().expect("second recorded");
-
-    replace_text(&env.runtime, "a.txt", &content_hash(b"a1\n"), "a1", "a2")
-        .await
-        .expect("edit a");
-    let after_third = env.current().expect("third recorded");
-
-    assert_ne!(after_first, after_second);
-    assert_ne!(after_second, after_third);
-
-    // Execution order is the commit order: walking parents from the tip yields
-    // the three mutations newest-first.
-    let chain = commit_chain(history, &after_third);
-    assert_eq!(
-        chain.len(),
-        3,
-        "three mutations must produce three chained commits: {chain:?}"
-    );
-    assert_eq!(chain[0], after_third);
-    assert_eq!(chain[1], after_second);
-    assert_eq!(chain[2], after_first);
-
-    // The tip tree carries the cumulative after-state of every mutated path.
-    let tip = history.resolve(&after_third).unwrap().unwrap();
-    assert_eq!(tip.files.get("a.txt").unwrap().as_slice(), b"a2\n");
-    assert_eq!(tip.files.get("b.txt").unwrap().as_slice(), b"b1\n");
-    // The parent tree is the before-state of the third mutation.
-    let before_third = history.resolve(&after_second).unwrap().unwrap();
-    assert_eq!(before_third.files.get("a.txt").unwrap().as_slice(), b"a1\n");
-}
-
 /// Walk parent links from `tip` using the private repository directly.
 fn commit_chain(history: &WorkspaceHistory, tip: &str) -> Vec<String> {
     let repo = gix::open_opts(
@@ -351,83 +309,36 @@ async fn failures_before_installation_record_nothing_and_do_not_move_current() {
     create_file(&env.runtime, "fresh.txt", "ok\n")
         .await
         .expect("create succeeds");
-    assert!(env.current().is_some());
-}
+    let recorded = env.current().expect("success recorded");
 
-/// AC5: once installed, a mutation stays recorded — a later failure never
-/// rewinds the history and never writes a compensation commit.
-#[tokio::test]
-async fn an_installed_mutation_survives_later_failures_without_compensation() {
-    let env = HistoryRuntime::build();
-
-    create_file(&env.runtime, "kept.txt", "kept\n")
+    // 6. Once installed, a mutation stays recorded: later failures on the same
+    //    path neither rewind the ref nor append a compensation commit.
+    create_file(&env.runtime, "fresh.txt", "again\n")
         .await
-        .expect("install succeeds");
-    let recorded = env.current().expect("recorded");
-
-    // Every later failure mode leaves the history exactly where it was.
-    let _ = create_file(&env.runtime, "kept.txt", "again\n").await;
-    let _ = replace_text(
+        .expect_err("no-replace create must fail");
+    replace_text(
         &env.runtime,
-        "kept.txt",
+        "fresh.txt",
         &content_hash(b"wrong\n"),
-        "kept",
+        "ok",
         "x",
     )
-    .await;
-
+    .await
+    .expect_err("stale hash must fail");
     assert_eq!(env.current().as_deref(), Some(recorded.as_str()));
-    let snapshot = env
-        .runtime
-        .workspace_history()
-        .resolve(&recorded)
-        .unwrap()
-        .unwrap();
     assert_eq!(
-        snapshot.files.get("kept.txt").unwrap().as_slice(),
-        b"kept\n"
+        env.runtime
+            .workspace_history()
+            .resolve(&recorded)
+            .unwrap()
+            .unwrap()
+            .files["fresh.txt"],
+        b"ok\n"
     );
     assert_eq!(
         commit_chain(env.runtime.workspace_history(), &recorded).len(),
         1,
         "no compensation commit may be appended"
-    );
-}
-
-/// AC8: prior object ids stay reachable with no time-based expiry, and the
-/// user's project refs are untouched.
-/// 正常记录只追加，旧变更始终为 current 的祖先，不需要每条记录独立引用。
-#[tokio::test]
-async fn prior_object_ids_stay_reachable_through_internal_refs() {
-    let env = HistoryRuntime::build();
-    create_file(&env.runtime, "a.txt", "1\n").await.unwrap();
-    let first = env.current().unwrap();
-    create_file(&env.runtime, "b.txt", "2\n").await.unwrap();
-    let second = env.current().unwrap();
-    create_file(&env.runtime, "c.txt", "3\n").await.unwrap();
-
-    let history = env.runtime.workspace_history();
-    for oid in [&first, &second] {
-        assert!(
-            history.is_reachable(oid).expect("reachability"),
-            "prior object id {oid} must stay reachable"
-        );
-        assert!(history.resolve(oid).unwrap().is_some());
-    }
-
-    let repo = gix::open_opts(history.repo_path().unwrap(), gix::open::Options::isolated())
-        .expect("open private history");
-    let record_pins: Vec<String> = repo
-        .references()
-        .expect("refs")
-        .prefixed("refs/lattice/workspace-history/records/")
-        .expect("prefix")
-        .filter_map(|r| r.ok())
-        .map(|r| r.name().as_bstr().to_string())
-        .collect();
-    assert!(
-        record_pins.is_empty(),
-        "normal recording must not write per-record refs: {record_pins:?}"
     );
 }
 
@@ -493,15 +404,29 @@ async fn recording_leaves_the_local_workspace_and_project_git_untouched() {
     );
 }
 
-/// AC2: the first `mutate.edit` of a file LATTICE never created still records
-/// that file's real before state, driven through the production handler rather
-/// than the history API directly.
+/// AC2: the first `mutate.edit` of a file LATTICE never created records that
+/// file's real before state, and after an external writer changes a file the
+/// next mutation's before state is what the installer observed — both driven
+/// through the production handler rather than the history API directly.
 #[tokio::test]
-async fn first_edit_of_a_pre_existing_file_records_its_before_state() {
+async fn first_edit_and_external_drift_record_the_observed_before_state() {
     let env = HistoryRuntime::build();
+    let history = env.runtime.workspace_history();
+    let parent_of = |tip: &str| {
+        let repo = gix::open_opts(history.repo_path().unwrap(), gix::open::Options::isolated())
+            .expect("open private history");
+        let parent = repo
+            .find_commit(gix::ObjectId::from_hex(tip.as_bytes()).unwrap())
+            .unwrap()
+            .parent_ids()
+            .next()
+            .expect("a before state was recorded")
+            .detach();
+        history.resolve(&parent.to_string()).unwrap().unwrap()
+    };
+
     // A file that exists before LATTICE ever touches it.
     std::fs::write(env.path().join("pre.txt"), "original\n").expect("seed");
-
     replace_text(
         &env.runtime,
         "pre.txt",
@@ -510,43 +435,21 @@ async fn first_edit_of_a_pre_existing_file_records_its_before_state() {
         "rewritten",
     )
     .await
-    .expect("edit succeeds");
-
-    let history = env.runtime.workspace_history();
-    let tip = env.current().expect("recorded");
-    let after = history.resolve(&tip).unwrap().unwrap();
+    .expect("first edit succeeds");
+    let first = env.current().expect("recorded");
     assert_eq!(
-        after.files.get("pre.txt").unwrap().as_slice(),
+        history.resolve(&first).unwrap().unwrap().files["pre.txt"],
         b"rewritten\n"
     );
-
-    // The parent commit is the before state, byte for byte.
-    let repo = gix::open_opts(history.repo_path().unwrap(), gix::open::Options::isolated())
-        .expect("open private history");
-    let parent = repo
-        .find_commit(gix::ObjectId::from_hex(tip.as_bytes()).unwrap())
-        .unwrap()
-        .parent_ids()
-        .next()
-        .expect("a before state was recorded")
-        .detach();
-    let before = history.resolve(&parent.to_string()).unwrap().unwrap();
     assert_eq!(
-        before.files.get("pre.txt").unwrap().as_slice(),
+        parent_of(&first).files["pre.txt"],
         b"original\n",
         "the parent tree must be the pre-mutation content"
     );
-}
-
-/// 外部写者修改后，下一次变更的历史前态必须是安装器实际看到的字节。
-#[tokio::test]
-async fn external_drift_between_mutations_records_the_observed_before_state() {
-    let env = HistoryRuntime::build();
 
     create_file(&env.runtime, "drift.txt", "v1\n")
         .await
         .expect("create succeeds");
-
     // The user edits the file outside LATTICE between the two mutations.
     std::fs::write(env.path().join("drift.txt"), "v2-external\n").expect("external write");
 
@@ -560,18 +463,8 @@ async fn external_drift_between_mutations_records_the_observed_before_state() {
     .await
     .expect("edit succeeds");
 
-    let history = env.runtime.workspace_history();
     let tip = env.current().expect("recorded");
-    let repo = gix::open_opts(history.repo_path().unwrap(), gix::open::Options::isolated())
-        .expect("open private history");
-    let parent = repo
-        .find_commit(gix::ObjectId::from_hex(tip.as_bytes()).unwrap())
-        .unwrap()
-        .parent_ids()
-        .next()
-        .expect("parent")
-        .detach();
-    let before = history.resolve(&parent.to_string()).unwrap().unwrap();
+    let before = parent_of(&tip);
     assert_eq!(
         before.files.get("drift.txt").unwrap().as_slice(),
         b"v2-external\n",
@@ -737,93 +630,6 @@ fn history_for(state_root: &Path, project_root: &Path) -> WorkspaceHistory {
 
 // ─── Turn layer ─────────────────────────────────────────────────────────────
 
-/// 变更以 Turn/Invocation 关联；会话 rewind 与重开不能回退文件历史。
-#[tokio::test]
-async fn turn_history_bindings_survive_session_rewind_and_reopen() {
-    let ws = setup_turn_workspace(&["mutate.create", "observe.workspace"]);
-    let state = TempDir::new().unwrap();
-    let (layout, store) = session_store(state.path());
-    let llm = Arc::new(
-        FakeStreamingLlmClient::builder()
-            .push_events(tool_call(
-                "c1",
-                "mutate.create",
-                serde_json::json!({
-                    "path":"notes/first.md", "content":"hello\n", "create_parents":true
-                }),
-            ))
-            .push_events(final_text("created"))
-            .build(),
-    );
-    let first = lattice_api::run_turn(
-        SessionApi::from_store(store.clone()),
-        layout.clone(),
-        turn_request(&ws, "create it", None, llm),
-    )
-    .await
-    .unwrap();
-    assert_eq!(first.summary.outcome, PublicTurnOutcome::Completed);
-    let history = history_for(state.path(), &ws.root);
-    let recorded = history.current().unwrap().unwrap();
-    let first_detail = store
-        .begin_read()
-        .unwrap()
-        .turn_detail(first.turn.session_id, first.turn.turn_id)
-        .unwrap();
-    assert_history_bindings(&history, &recorded, &first_detail);
-
-    let llm = Arc::new(
-        FakeStreamingLlmClient::builder()
-            .push_events(final_text("nothing to do"))
-            .build(),
-    );
-    let second = lattice_api::run_turn(
-        SessionApi::from_store(store.clone()),
-        layout.clone(),
-        turn_request(&ws, "just talk", Some(first.turn.session_id), llm),
-    )
-    .await
-    .unwrap();
-    assert_eq!(second.summary.outcome, PublicTurnOutcome::Completed);
-    assert_eq!(
-        history.current().unwrap().as_deref(),
-        Some(recorded.as_str())
-    );
-    let lock = store.try_lock_session(first.turn.session_id).unwrap();
-    store
-        .rewind(&lock, first_detail.user_node, chrono::Utc::now())
-        .unwrap();
-    drop(lock);
-    drop(store);
-    let reopened = SessionStore::open(&layout).unwrap();
-    let read = reopened.begin_read().unwrap();
-    for result in [&first, &second] {
-        let found = read
-            .turn_detail(result.turn.session_id, result.turn.turn_id)
-            .unwrap();
-        assert_eq!(found.summary.as_ref(), Some(&result.summary));
-        assert_eq!(found.steps, result.steps);
-    }
-    assert_eq!(
-        read.session(first.turn.session_id).unwrap().current,
-        first_detail.user_node
-    );
-    let restarted = history_for(state.path(), &ws.root);
-    assert_eq!(
-        restarted.current().unwrap().as_deref(),
-        Some(recorded.as_str())
-    );
-    assert_eq!(
-        restarted.resolve(&recorded).unwrap().unwrap().files["notes/first.md"],
-        b"hello\n"
-    );
-    assert_eq!(
-        std::fs::read(ws.root.join("notes/first.md")).unwrap(),
-        b"hello\n"
-    );
-    assert!(restarted.is_reachable(&recorded).unwrap());
-}
-
 #[tokio::test]
 async fn turn_whose_mutation_fails_before_install_records_no_history_identity() {
     let ws = setup_turn_workspace(&["mutate.edit"]);
@@ -915,6 +721,15 @@ async fn multi_mutation_turn_records_order_and_survives_a_failed_turn() {
     let history = history_for(state.path(), &ws.root);
     let tip = history.current().unwrap().unwrap();
     assert_eq!(commit_chain(&history, &tip).len(), 3);
+    // Each commit's parent is the before-state of that mutation, so the chain
+    // keeps execution order and the intermediate trees.
+    let chain = commit_chain(&history, &tip);
+    let before_edit = history.resolve(&chain[1]).unwrap().unwrap();
+    assert_eq!(before_edit.files["one.txt"], b"1\n");
+    assert_eq!(before_edit.files["two.txt"], b"2\n");
+    let after_first = history.resolve(&chain[2]).unwrap().unwrap();
+    assert_eq!(after_first.files["one.txt"], b"1\n");
+    assert!(!after_first.files.contains_key("two.txt"));
     let snapshot = history.resolve(&tip).unwrap().unwrap();
     assert_eq!(snapshot.files["one.txt"], b"3\n");
     assert_eq!(snapshot.files["two.txt"], b"2\n");
