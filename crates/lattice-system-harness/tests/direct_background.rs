@@ -522,7 +522,7 @@ fn busy_cancel_and_stop_do_not_serialize_distinct_sessions() {
             closed(&world, &budget, &mut evidence, FIRST)["summary"]["outcome"],
             "cancelled"
         );
-        let stop = command(&world, &budget, &["--json", "daemon", "stop"]);
+        let mut stop = command(&world, &budget, &["--json", "daemon", "stop"]);
         let deadline = Instant::now() + budget.cap_timeout(Duration::from_secs(30));
         loop {
             if ipc(&world, &budget, json!({"operation":"status"}))["value"]["stopping"] == true {
@@ -539,6 +539,11 @@ fn busy_cancel_and_stop_do_not_serialize_distinct_sessions() {
             "stopping"
         );
         assert!(detail(&world, &budget, &mut evidence, SECOND)["summary"].is_null());
+        // stop 必须等待被 gate 挡住的在途 Turn，不能在释放前就返回。
+        assert!(
+            !stop.has_exited().unwrap(),
+            "daemon stop returned while taken work was still in flight"
+        );
         gate.release(budget.cap_timeout(Duration::from_secs(30)))
             .unwrap();
         let done = second.wait(None).unwrap();
