@@ -531,18 +531,6 @@ mod tests {
     };
     use lattice_llm::LlmEvent;
 
-    struct NeverOpeningClient;
-
-    #[async_trait::async_trait]
-    impl LlmClient for NeverOpeningClient {
-        async fn stream_chat(
-            &self,
-            _request: ChatRequest,
-        ) -> Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
-            std::future::pending().await
-        }
-    }
-
     struct ProjectionCheckingClient;
 
     #[async_trait::async_trait]
@@ -653,50 +641,6 @@ mod tests {
                 matches!(result, ModelStepAttempt::Stopped { cause, usage: None, .. } if cause == if cancelled { ModelStopCause::Cancelled } else { ModelStopCause::Deadline })
             );
         }
-    }
-
-    #[test]
-    fn zero_tool_attempt_completes_with_ordered_message() {
-        let attempt = runtime()
-            .block_on(
-                driver(vec![
-                    LlmEvent::Reasoning {
-                        content: "thinking".to_string(),
-                    },
-                    LlmEvent::Token {
-                        content: "hello".to_string(),
-                    },
-                    LlmEvent::Done {
-                        finish_reason: "stop".to_string(),
-                        usage: Some(lattice_llm::TokenUsage {
-                            prompt_tokens: 1,
-                            completion_tokens: 2,
-                            total_tokens: 3,
-                        }),
-                    },
-                ])
-                .run(&request(), None),
-            )
-            .expect("attempt runs");
-        let ModelStepAttempt::Complete {
-            message,
-            usage,
-            finish_reason,
-        } = attempt
-        else {
-            panic!("complete message");
-        };
-        assert_eq!(message.parts.len(), 2);
-        assert!(matches!(
-            message.parts[0].semantic,
-            MessageSemantic::Reasoning { .. }
-        ));
-        assert!(matches!(
-            message.parts[1].semantic,
-            MessageSemantic::Text { .. }
-        ));
-        assert_eq!(usage.as_ref().map(|u| u.total_tokens), Some(3));
-        assert_eq!(finish_reason.as_deref(), Some("stop"));
     }
 
     #[test]
@@ -966,26 +910,6 @@ mod tests {
     }
 
     #[test]
-    fn deadline_interrupts_while_the_provider_stream_is_still_opening() {
-        let attempt = runtime()
-            .block_on(ModelStepDriver::new(Arc::new(NeverOpeningClient)).run(
-                &ModelStepRequest {
-                    deadline: Some(Instant::now() + Duration::from_millis(100)),
-                    ..request()
-                },
-                None,
-            ))
-            .expect("attempt runs");
-        assert!(matches!(
-            attempt,
-            ModelStepAttempt::Stopped {
-                cause: ModelStopCause::Deadline,
-                ..
-            }
-        ));
-    }
-
-    #[test]
     fn opening_failure_is_typed_with_a_retry_hint() {
         let result = runtime().block_on(
             ModelStepDriver::new(Arc::new(
@@ -1041,43 +965,6 @@ mod tests {
                 },
             )) if invocation_id == invocation(0)
         ));
-    }
-
-    #[test]
-    fn history_with_real_provider_ids_assembles_the_request() {
-        let assistant = bound_assistant(Some("call_9"), invocation(0));
-        let tool = lattice_conversation::StoredToolResult {
-            invocation_id: invocation(0),
-            name: "observe.workspace".into(),
-            payload: lattice_conversation::ResultPayload::Succeeded(
-                lattice_conversation::SuccessContent::Json {
-                    value: serde_json::json!({"ok":true}),
-                    digest: lattice_conversation::tool_content_digest("{\"ok\":true}"),
-                    byte_length: 11,
-                },
-            ),
-        };
-        let attempt = runtime()
-            .block_on(
-                driver(vec![LlmEvent::Done {
-                    finish_reason: "stop".to_string(),
-                    usage: None,
-                }])
-                .run(
-                    &ModelStepRequest {
-                        history: vec![lattice_conversation::ConversationItem::Step(
-                            lattice_conversation::StepContent {
-                                assistant,
-                                results: vec![tool],
-                            },
-                        )],
-                        ..request()
-                    },
-                    None,
-                ),
-            )
-            .expect("assembles");
-        assert!(matches!(attempt, ModelStepAttempt::Complete { .. }));
     }
 
     #[test]

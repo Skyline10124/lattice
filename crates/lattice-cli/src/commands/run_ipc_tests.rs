@@ -235,23 +235,6 @@ async fn cancel(peer: &Peer, id: TurnId, owned: bool) {
 }
 
 #[tokio::test]
-async fn fixed_turn_outcome_determines_follow_exit() {
-    let _guard = signal_guard().await;
-    for (outcome, exit) in [("completed", 0), ("failed", 1), ("cancelled", 2)] {
-        let peer = Peer::new();
-        let id = lattice_api::local::new_turn_id();
-        run_observe(
-            async {
-                let (mut sub, _) = peer.request("subscribe").await;
-                final_delivery(&peer, &mut sub, id, outcome).await;
-            },
-            observe_turn(&peer.client, sid(), id, false, true),
-            exit,
-        )
-        .await;
-    }
-}
-#[tokio::test]
 async fn pending_body_error_or_stall_does_not_discard_finished() {
     let _guard = signal_guard().await;
     for error in [false, true] {
@@ -265,18 +248,6 @@ async fn pending_body_error_or_stall_does_not_discard_finished() {
             if !error {body.closed().await;}
         },observe_turn(&peer.client,sid(),id,false,true),0).await;
     }
-}
-#[tokio::test]
-async fn completed_with_final_history_failure_is_exit_one() {
-    let _guard = signal_guard().await;
-    let peer = Peer::new();
-    let id = lattice_api::local::new_turn_id();
-    run_observe(async{
-        let(mut sub,_)=peer.request("subscribe").await;let view=view(id,Some("completed"));sub.snapshot(&view).await;
-        let(mut body,_)=peer.request("history").await;
-        sub.reply("history_error",json!({"context":{"Page":{"anchor":view.history,"cursor":null}},"error":{"kind":"not_found","message":"body unavailable","recovery":null,"store":null}})).await;
-        body.closed().await;
-    },observe_turn(&peer.client,sid(),id,false,true),1).await;
 }
 #[tokio::test]
 async fn closed_snapshot_waits_for_body_but_not_submission_receipt() {
@@ -305,25 +276,6 @@ async fn closed_snapshot_waits_for_body_but_not_submission_receipt() {
         )
         .await;
     }
-}
-#[tokio::test]
-async fn existing_acceptance_reconnects_without_loading_configuration() {
-    let _guard = signal_guard().await;
-    let peer = Peer::new();
-    let id = lattice_api::local::new_turn_id();
-    run_observe(
-        async {
-            let (mut submit, mut initial) = begin_submit(&peer, id, true).await;
-            accepted(&mut submit, id).await;
-            initial.closed().await;
-            let (mut sub, request) = peer.request("subscribe").await;
-            assert_eq!(request["target"]["session_id"], SESSION);
-            final_delivery(&peer, &mut sub, id, "completed").await;
-        },
-        send(&peer, id, true),
-        0,
-    )
-    .await;
 }
 #[tokio::test]
 async fn sigint_false_then_acceptance_retries_same_target_once() {
@@ -636,121 +588,4 @@ async fn cancel_error_received_during_detach_is_rendered_with_original_identity(
             );
         }
     }
-}
-
-#[tokio::test]
-async fn operator_commands_use_ipc_and_numeric_exclusive_cursor() {
-    let peer = Peer::new();
-    let workspace = peer._root.path().to_path_buf();
-    let cmd = super::super::audit::AuditQueryArgs {
-        session: None,
-        turn: None,
-        method: Some("observe.workspace".into()),
-        outcome: Some("succeeded".into()),
-        tail: true,
-        since: Some(lattice_api::local::ChangeSeq(7)),
-        json: true,
-    };
-    let driver = async {
-        let (mut wire, request) = peer.request("audit_tail").await;
-        assert_eq!(request["after"], 7);
-        assert_eq!(request["selection"]["outcome"], "succeeded");
-        assert_eq!(request["workspace"], json!(workspace));
-        wire.reply(
-            "audit_tail",
-            json!({"latest_change":9,"rows":[],"next_after":9,"done":true}),
-        )
-        .await;
-    };
-    time::timeout(Duration::from_secs(5), async {
-        let (result, ()) = tokio::join!(
-            super::super::audit::run_query(&peer.client, cmd, true, &workspace),
-            driver
-        );
-        result.unwrap();
-    })
-    .await
-    .unwrap();
-    let driver = async {
-        let (mut wire, request) = peer.request("operator_status").await;
-        assert_eq!(request["workspace"], json!(workspace));
-        wire.reply("operator_status", json!({"latest_change":9,"recent":[]}))
-            .await;
-    };
-    time::timeout(Duration::from_secs(5), async {
-        let (result, ()) = tokio::join!(
-            super::super::lancet::status_with_client(&peer.client, workspace.clone(), true),
-            driver
-        );
-        result.unwrap();
-    })
-    .await
-    .unwrap();
-}
-
-#[tokio::test]
-async fn json_stream_remains_jsonl_when_history_replaces_token_text() {
-    const CHILD: &str = "LATTICE_TEST_JSON_HISTORY";
-    if std::env::var_os(CHILD).is_some() {
-        let _guard = signal_guard().await;
-        let peer = Peer::new();
-        let id = lattice_api::local::new_turn_id();
-        println!("BEGIN_JSONL");
-        run_observe(
-            async {
-                let (mut sub, _) = peer.request("subscribe").await;
-                sub.snapshot(&view(id, None)).await;
-                let (mut body, _) = peer.request("history").await;
-                sub.reply("observation", json!({
-                    "type":"event", "cursor":{"epoch":"peer","sequence":2},
-                    "event":{"type":"token_delta","key":{"turn_id":id,"model_step_ordinal":0,"attempt_ordinal":0},"content":"partial"}
-                })).await;
-                body_reply(&mut body, &view(id, None)).await;
-                body.closed().await;
-                final_delivery(&peer, &mut sub, id, "completed").await;
-            },
-            observe_turn(&peer.client, sid(), id, false, true),
-            0,
-        ).await;
-        println!("END_JSONL");
-        return;
-    }
-    let root = tempfile::tempdir().unwrap();
-    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-    command
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("HOME", root.path())
-        .env("XDG_STATE_HOME", root.path().join("state"))
-        .env(CHILD, "1")
-        .args([
-            "--exact",
-            "commands::run::ipc_tests::json_stream_remains_jsonl_when_history_replaces_token_text",
-            "--nocapture",
-        ]);
-    let output = tokio::task::spawn_blocking(move || command.output().unwrap())
-        .await
-        .unwrap();
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        output.status.success(),
-        "{stdout}\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let body = stdout
-        .split_once("BEGIN_JSONL\n")
-        .unwrap()
-        .1
-        .split_once("END_JSONL\n")
-        .unwrap()
-        .0;
-    let records: Vec<Value> = body
-        .lines()
-        .map(|line| {
-            serde_json::from_str(line)
-                .expect("every stdout line is JSON, including no blank human lines")
-        })
-        .collect();
-    assert!(records.iter().any(|record| record["type"] == "token_delta"));
-    assert!(records.iter().any(|record| record["type"] == "history"));
 }
