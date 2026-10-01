@@ -372,161 +372,217 @@ max_delay_ms = 1000
     // ── Top-level section rejection ───────────────────────────────────
 
     #[test]
-    fn reject_unknown_top_level_section() {
-        let toml = r#"
-schema_version = 1
-
-[agent]
-name = "t"
-model = "sonnet"
-
-[prompt]
-system = "hi"
-
-[orchestrator]
-some_field = "bad"
-"#;
-        let err = parse(toml).unwrap_err();
-        assert!(err.to_string().contains("orchestrator"), "got: {err}");
-    }
-
-    #[test]
-    fn reject_security_section() {
-        let toml = r#"
-schema_version = 1
-
-[agent]
-name = "t"
-model = "sonnet"
-
-[prompt]
-system = "hi"
-
-[security]
-sandbox_mode = "project"
-"#;
-        let err = parse(toml).unwrap_err();
-        assert!(err.to_string().contains("security"), "got: {err}");
-    }
-
-    #[test]
-    fn reject_context_section() {
-        let toml = r#"
-schema_version = 1
-
-[agent]
-name = "t"
-model = "sonnet"
-
-[prompt]
-system = "hi"
-
-[context]
-project_instructions = true
-"#;
-        let err = parse(toml).unwrap_err();
-        assert!(err.to_string().contains("context"), "got: {err}");
-    }
-
-    #[test]
-    fn reject_behavior_section() {
-        let toml = r#"
-schema_version = 1
-
-[agent]
-name = "t"
-model = "sonnet"
-
-[prompt]
-system = "hi"
-
-[behavior]
-max_turns = 10
-"#;
-        let err = parse(toml).unwrap_err();
-        assert!(err.to_string().contains("behavior"), "got: {err}");
-    }
-
-    #[test]
-    fn reject_capabilities_section() {
-        let toml = r#"
-schema_version = 1
-
-[agent]
-name = "t"
-model = "sonnet"
-
-[prompt]
-system = "hi"
-
-[capabilities]
-presets = ["coding"]
-"#;
-        let err = parse(toml).unwrap_err();
-        assert!(err.to_string().contains("capabilities"), "got: {err}");
-    }
-
-    #[test]
-    fn reject_handoff_section() {
-        let toml = r#"
-schema_version = 1
-
-[agent]
-name = "t"
-model = "sonnet"
-
-[prompt]
-system = "hi"
-
-[handoff]
-enabled = true
-"#;
-        assert!(parse(toml).is_err());
-    }
-
-    #[test]
-    fn reject_workspace_section() {
-        // The Upper microVM `[workspace]` section was removed with the
-        // Direct-Local migration (#40). Under `deny_unknown_fields`, legacy
-        // profiles that still declare it now fail to parse — the strict
-        // schema neither declares nor requires `[workspace]`.
-        let toml = r#"
-schema_version = 1
-
-[agent]
-name = "t"
-model = "sonnet"
-
-[prompt]
-system = "hi"
-
-[workspace]
-image = "docker.io/library/python:3.12-slim"
-"#;
-        let err = parse(toml).unwrap_err();
-        assert!(
-            err.to_string().contains("workspace") || err.to_string().contains("unknown field"),
-            "legacy [workspace] section must be rejected, got: {err}"
-        );
-    }
-
-    #[test]
-    fn reject_all_forbidden_top_level_sections() {
-        let forbidden = [
-            "capabilities",
-            "handoff",
-            "orchestrator",
-            "plugins",
-            "pipeline",
-            "subagents",
-            "micro_agents",
-            "memory",
-            "security",
-            "context",
-            "behavior",
-            "workspace",
+    fn rejects_unsupported_top_level_sections() {
+        let rows: &[(&str, &str, &str, &[&str])] = &[
+            (
+                "reject_unknown_top_level_section",
+                "orchestrator",
+                "some_field = \"bad\"",
+                &["orchestrator"],
+            ),
+            (
+                "reject_security_section",
+                "security",
+                "sandbox_mode = \"project\"",
+                &["security"],
+            ),
+            (
+                "reject_context_section",
+                "context",
+                "project_instructions = true",
+                &["context"],
+            ),
+            (
+                "reject_behavior_section",
+                "behavior",
+                "max_turns = 10",
+                &["behavior"],
+            ),
+            (
+                "reject_capabilities_section",
+                "capabilities",
+                "presets = [\"coding\"]",
+                &["capabilities"],
+            ),
+            ("reject_handoff_section", "handoff", "enabled = true", &[]),
+            // The Upper microVM `[workspace]` section was removed with the
+            // Direct-Local migration (#40). Under `deny_unknown_fields`, legacy
+            // profiles must fail to parse: the schema neither declares nor
+            // requires `[workspace]`.
+            (
+                "reject_workspace_section",
+                "workspace",
+                "image = \"docker.io/library/python:3.12-slim\"",
+                &["workspace", "unknown field"],
+            ),
+            (
+                "reject_all_forbidden_top_level_sections/capabilities",
+                "capabilities",
+                "x = \"y\"",
+                &[],
+            ),
+            (
+                "reject_all_forbidden_top_level_sections/handoff",
+                "handoff",
+                "x = \"y\"",
+                &[],
+            ),
+            (
+                "reject_all_forbidden_top_level_sections/orchestrator",
+                "orchestrator",
+                "x = \"y\"",
+                &[],
+            ),
+            (
+                "reject_all_forbidden_top_level_sections/plugins",
+                "plugins",
+                "x = \"y\"",
+                &[],
+            ),
+            (
+                "reject_all_forbidden_top_level_sections/pipeline",
+                "pipeline",
+                "x = \"y\"",
+                &[],
+            ),
+            (
+                "reject_all_forbidden_top_level_sections/subagents",
+                "subagents",
+                "x = \"y\"",
+                &[],
+            ),
+            (
+                "reject_all_forbidden_top_level_sections/micro_agents",
+                "micro_agents",
+                "x = \"y\"",
+                &[],
+            ),
+            (
+                "reject_all_forbidden_top_level_sections/memory",
+                "memory",
+                "x = \"y\"",
+                &[],
+            ),
+            (
+                "reject_all_forbidden_top_level_sections/security",
+                "security",
+                "x = \"y\"",
+                &[],
+            ),
+            (
+                "reject_all_forbidden_top_level_sections/context",
+                "context",
+                "x = \"y\"",
+                &[],
+            ),
+            (
+                "reject_all_forbidden_top_level_sections/behavior",
+                "behavior",
+                "x = \"y\"",
+                &[],
+            ),
+            (
+                "reject_all_forbidden_top_level_sections/workspace",
+                "workspace",
+                "x = \"y\"",
+                &[],
+            ),
         ];
-        for section in forbidden {
+        for &(name, section, body, expected_error_contains_any) in rows {
+            let toml = format!("{}\n[{section}]\n{body}\n", minimal_profile_prefix());
+            let result = parse(&toml);
+            if expected_error_contains_any.is_empty() {
+                assert!(
+                    result.is_err(),
+                    "{name}: section [{section}] should be rejected"
+                );
+            } else {
+                let err = result.expect_err(name);
+                let message = err.to_string();
+                assert!(
+                    expected_error_contains_any
+                        .iter()
+                        .any(|text| message.contains(text)),
+                    "{name}: got: {err}"
+                );
+            }
+        }
+    }
+
+    // ── Tools section rejection ───────────────────────────────────────
+
+    #[test]
+    fn rejects_unsupported_tools_and_lancet_fields() {
+        let rows: &[(&str, &str, &[&str])] = &[
+            (
+                "reject_tools_bundles",
+                "[tools]\nbundles = [\"workspace\"]",
+                &["bundles", "unknown field"],
+            ),
+            (
+                "cep_rejects_scalar_extension_typos",
+                "[lancet]\nmod = \"off\"",
+                &["lancet.mod"],
+            ),
+            (
+                "cep_observation_rejects_network_only_field",
+                "[lancet.observation]\nmax_web_response_bytes = 1024",
+                &["max_web_response_bytes"],
+            ),
+            (
+                "lancet_workspace_unknown_field_rejected",
+                "[lancet.workspace]\ndenied_write_patterns = [\".git/**\"]\nunexpected = true",
+                &[],
+            ),
+            (
+                "cep_policy_section_rejects_unknown_fields",
+                "[lancet.policy]\nunknown = true",
+                &["unknown"],
+            ),
+            (
+                "lancet_capabilities_rejects_unknown_field",
+                "[lancet.capabilities]\nallow = [\"session.events\"]",
+                &["allow"],
+            ),
+            (
+                "lancet_capabilities_rejects_unknown_boundary_value",
+                "[lancet.capabilities]\nmax_boundary = \"upper\"",
+                &[],
+            ),
+        ];
+        for &(name, toml_suffix, expected_error_contains_any) in rows {
+            let toml = format!("{}\n{toml_suffix}\n", minimal_profile_prefix());
+            let result = parse(&toml);
+            if expected_error_contains_any.is_empty() {
+                assert!(result.is_err(), "{name}");
+            } else {
+                let err = result.expect_err(name);
+                let message = err.to_string();
+                assert!(
+                    expected_error_contains_any
+                        .iter()
+                        .any(|text| message.contains(text)),
+                    "{name}: got: {err}"
+                );
+            }
+        }
+    }
+
+    // ── Agent field rejection ─────────────────────────────────────────
+
+    #[test]
+    fn rejects_unsupported_agent_fields() {
+        let rows: &[(&str, &str, &[&str])] = &[
+            (
+                "reject_agent_preset_field",
+                "preset = \"coding\"",
+                &["preset"],
+            ),
+            ("reject_agent_type_code_agent", "type = \"code_agent\"", &[]),
+            ("reject_agent_skippable", "skippable = true", &[]),
+            ("reject_agent_tags", "tags = [\"coding\"]", &[]),
+        ];
+        for &(name, agent_field, expected_error_contains_any) in rows {
             let toml = format!(
                 r#"
 schema_version = 1
@@ -534,110 +590,26 @@ schema_version = 1
 [agent]
 name = "t"
 model = "sonnet"
+{agent_field}
 
 [prompt]
 system = "hi"
-
-[{section}]
-x = "y"
 "#
             );
-            assert!(
-                parse(&toml).is_err(),
-                "section [{section}] should be rejected"
-            );
+            let result = parse(&toml);
+            if expected_error_contains_any.is_empty() {
+                assert!(result.is_err(), "{name}");
+            } else {
+                let err = result.expect_err(name);
+                let message = err.to_string();
+                assert!(
+                    expected_error_contains_any
+                        .iter()
+                        .any(|text| message.contains(text)),
+                    "{name}: got: {err}"
+                );
+            }
         }
-    }
-
-    // ── Tools section rejection ───────────────────────────────────────
-
-    #[test]
-    fn reject_tools_bundles() {
-        let toml = r#"
-schema_version = 1
-
-[agent]
-name = "t"
-model = "sonnet"
-
-[prompt]
-system = "hi"
-
-[tools]
-bundles = ["workspace"]
-"#;
-        let err = parse(toml).unwrap_err();
-        assert!(
-            err.to_string().contains("bundles") || err.to_string().contains("unknown field"),
-            "bundles must be rejected, got: {err}"
-        );
-    }
-
-    // ── Agent field rejection ─────────────────────────────────────────
-
-    #[test]
-    fn reject_agent_preset_field() {
-        let toml = r#"
-schema_version = 1
-
-[agent]
-name = "t"
-model = "sonnet"
-preset = "coding"
-
-[prompt]
-system = "hi"
-"#;
-        let err = parse(toml).unwrap_err();
-        assert!(err.to_string().contains("preset"), "got: {err}");
-    }
-
-    #[test]
-    fn reject_agent_type_code_agent() {
-        let toml = r#"
-schema_version = 1
-
-[agent]
-name = "t"
-model = "sonnet"
-type = "code_agent"
-
-[prompt]
-system = "hi"
-"#;
-        assert!(parse(toml).is_err());
-    }
-
-    #[test]
-    fn reject_agent_skippable() {
-        let toml = r#"
-schema_version = 1
-
-[agent]
-name = "t"
-model = "sonnet"
-skippable = true
-
-[prompt]
-system = "hi"
-"#;
-        assert!(parse(toml).is_err());
-    }
-
-    #[test]
-    fn reject_agent_tags() {
-        let toml = r#"
-schema_version = 1
-
-[agent]
-name = "t"
-model = "sonnet"
-tags = ["coding"]
-
-[prompt]
-system = "hi"
-"#;
-        assert!(parse(toml).is_err());
     }
 
     // ── CEP section ───────────────────────────────────────────────────
@@ -653,20 +625,6 @@ model = "sonnet"
 [prompt]
 system = "hi"
 "#
-    }
-
-    #[test]
-    fn cep_rejects_scalar_extension_typos() {
-        let toml = format!(
-            r#"{prefix}
-
-[lancet]
-mod = "off"
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let err = parse(&toml).unwrap_err();
-        assert!(err.to_string().contains("lancet.mod"), "got: {err}");
     }
 
     #[test]
@@ -705,23 +663,6 @@ max_web_response_bytes = 2048
         assert_eq!(network.allow_localhost, Some(false));
         assert_eq!(network.allowed_hosts, vec!["example.com"]);
         assert_eq!(network.max_web_response_bytes, Some(2048));
-    }
-
-    #[test]
-    fn cep_observation_rejects_network_only_field() {
-        let toml = format!(
-            r#"{prefix}
-
-[lancet.observation]
-max_web_response_bytes = 1024
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let err = parse(&toml).unwrap_err();
-        assert!(
-            err.to_string().contains("max_web_response_bytes"),
-            "got: {err}"
-        );
     }
 
     /// `TYPED_LANCET_SUB_TABLES` drives the loader's case-variant rejection, so a
@@ -818,20 +759,6 @@ denied_read_patterns = ["secrets/**"]
         assert_eq!(section.denied_read_patterns, vec!["secrets/**".to_string()]);
     }
 
-    #[test]
-    fn lancet_workspace_unknown_field_rejected() {
-        let toml = format!(
-            r#"{prefix}
-
-[lancet.workspace]
-denied_write_patterns = [".git/**"]
-unexpected = true
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        assert!(parse(&toml).is_err());
-    }
-
     // ── [llm.timeout_secs] ────────────────────────────────────────────
 
     // ── LancetPolicySection ────────────────────────────────────────────────
@@ -849,23 +776,6 @@ path = "policy.toml"
         let profile = parse(&toml).unwrap();
         let policy = profile.lancet.policy.as_ref().unwrap();
         assert_eq!(policy.path.as_deref(), Some("policy.toml"));
-    }
-
-    #[test]
-    fn cep_policy_section_rejects_unknown_fields() {
-        let toml = format!(
-            r#"{prefix}
-
-[lancet.policy]
-unknown = true
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let err = parse(&toml).unwrap_err();
-        assert!(
-            err.to_string().contains("unknown"),
-            "should reject unknown field, got: {err}"
-        );
     }
 
     // ── [lancet.capabilities] admission policy ─────────────────────────
@@ -907,33 +817,6 @@ deny = ["session.events"]
             Trust::In
         );
         assert_eq!(LancetCapabilitiesSection::default().max_boundary, Trust::In);
-    }
-
-    #[test]
-    fn lancet_capabilities_rejects_unknown_field() {
-        let toml = format!(
-            r#"{prefix}
-
-[lancet.capabilities]
-allow = ["session.events"]
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let err = parse(&toml).unwrap_err();
-        assert!(err.to_string().contains("allow"), "got: {err}");
-    }
-
-    #[test]
-    fn lancet_capabilities_rejects_unknown_boundary_value() {
-        let toml = format!(
-            r#"{prefix}
-
-[lancet.capabilities]
-max_boundary = "upper"
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        assert!(parse(&toml).is_err());
     }
 
     #[test]
