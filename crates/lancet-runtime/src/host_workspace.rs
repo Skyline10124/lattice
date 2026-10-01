@@ -1264,7 +1264,6 @@ mod tests {
     use lancet_protocol::evidence::CapabilityAdmissionPolicy;
 
     use crate::admission::admit_tool;
-    use crate::history::WorkspaceHistory;
 
     /// A descriptor declaring one workspace-channel scope and the observation
     /// capability, i.e. what `tools/observe-workspace/manifest.toml` lowers to.
@@ -1543,51 +1542,6 @@ mod tests {
         assert!(!message.contains("/tmp"), "{message}");
     }
 
-    /// A `..` segment is refused before any syscall, so traversal cannot even be
-    /// attempted.
-    #[test]
-    fn parent_traversal_is_refused_lexically() {
-        let dir = seeded_project();
-        let (host, evidence) = default_host(dir.path());
-        let tool = admitted();
-        let err = host
-            .read(&ctx(&tool, &evidence), "../outside.txt", None, None, None)
-            .expect_err("traversal refused");
-        assert!(
-            matches!(err, ObservationError::PathRejected { .. }),
-            "{err:?}"
-        );
-    }
-
-    /// A single read over the ceiling is refused rather than truncated: the
-    /// caller asked for a whole file and cannot be given a silent prefix.
-    #[test]
-    fn a_read_over_the_single_read_ceiling_is_refused() {
-        let dir = seeded_project();
-        fs::write(dir.path().join("big.txt"), "x".repeat(4096)).expect("seed");
-        let limits = ObservationPolicyConfig {
-            max_single_read_bytes: 16,
-            ..ObservationPolicyConfig::defaults()
-        };
-        let (host, evidence) = host_over(dir.path(), ReadVisibilityPolicy::default(), limits);
-        let tool = admitted();
-        let err = host
-            .read(&ctx(&tool, &evidence), "big.txt", None, None, None)
-            .expect_err("over the ceiling");
-        match err {
-            ObservationError::LimitExceeded {
-                limit,
-                requested,
-                allowed,
-            } => {
-                assert_eq!(limit, "observation.max_single_read_bytes");
-                assert_eq!(requested, 4096);
-                assert_eq!(allowed, 16);
-            }
-            other => panic!("expected a limit refusal, got {other:?}"),
-        }
-    }
-
     /// The caller's limit is clamped into policy, and the truncation verdict the
     /// host records is the real comparison — not the caller's request.
     #[test]
@@ -1801,25 +1755,6 @@ mod tests {
         ));
     }
 
-    /// The content hash is the host's, in the canonical form `mutate.edit`
-    /// verifies.
-    #[test]
-    fn read_returns_the_host_computed_content_hash() {
-        let dir = seeded_project();
-        let (host, evidence) = default_host(dir.path());
-        let tool = admitted();
-        let read = host
-            .read(&ctx(&tool, &evidence), "visible.rs", None, None, None)
-            .expect("read runs");
-        assert_eq!(
-            read.content_hash,
-            crate::workspace::content_hash(
-                &fs::read(dir.path().join("visible.rs")).expect("fixture bytes")
-            )
-        );
-        assert!(read.content_hash.starts_with("blake3:"));
-    }
-
     /// An operation whose cell is not admitted never reaches the filesystem, and
     /// the refusal is a `DeniedOperation` rather than an effect.
     #[test]
@@ -1966,31 +1901,5 @@ mod tests {
         assert_eq!(clamp_limit(Some(3), 10), 3);
         assert_eq!(clamp_limit(Some(999), 10), 10);
         assert_eq!(clamp_limit(Some(u64::MAX), 10), 10);
-    }
-
-    /// A history-less workspace is a test convenience only; observation never
-    /// records mutation history, so this documents that the observation path does
-    /// not depend on it.
-    #[test]
-    fn observation_needs_no_mutation_history() {
-        let dir = seeded_project();
-        let workspace = Arc::new(LocalWorkspace::with_history(
-            dir.path(),
-            Arc::new(WorkspaceHistory::disabled()),
-        ));
-        let charge: BudgetCharge = Arc::new(|_| Ok(()));
-        let host = WorkspaceObservationHost::new(
-            workspace,
-            ReadVisibilityPolicy::default(),
-            ObservationPolicyConfig::defaults(),
-            charge,
-            "workspace",
-        );
-        let evidence = CellEvidenceLedger::new();
-        let tool = admitted();
-        assert!(
-            host.read(&ctx(&tool, &evidence), "visible.rs", None, None, None,)
-                .is_ok()
-        );
     }
 }

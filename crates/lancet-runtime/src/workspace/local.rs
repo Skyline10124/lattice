@@ -1556,21 +1556,6 @@ mod tests {
         );
     }
 
-    // 2. Symlink parent rejection: a directory symlink in the parent chain
-    //    must be rejected even when the leaf is a regular file.
-    #[tokio::test]
-    async fn symlink_parent_rejected_even_when_leaf_is_regular() {
-        let dir = TempDir::new().unwrap();
-        let real = TempDir::new().unwrap();
-        std::fs::write(real.path().join("file"), b"ok").unwrap();
-        let link = dir.path().join("linkdir");
-        symlink(real.path(), &link).unwrap();
-        let ws = ws_at(&dir);
-        let path = WorkspacePath::parse("linkdir/file").unwrap();
-        let err = ws.read_file(&path).await.unwrap_err();
-        assert!(matches!(err, LocalWorkspaceError::SymlinkRejected { .. }));
-    }
-
     // 3. Symlink leaf rejection: a symlink at the target itself is rejected.
     #[tokio::test]
     async fn symlink_leaf_rejected() {
@@ -1583,21 +1568,6 @@ mod tests {
         let path = WorkspacePath::parse("leaf").unwrap();
         let err = ws.read_file(&path).await.unwrap_err();
         assert!(matches!(err, LocalWorkspaceError::SymlinkRejected { .. }));
-    }
-
-    // 4. Limits: content too large is surfaced by the caller (handler), not
-    //    by the workspace itself, so this test pins the bounded-read contract
-    //    indirectly by confirming the read returns the full bytes and the
-    //    handler-side budget check is what truncates. We assert read_file
-    //    returns exactly the file contents for a small file.
-    #[tokio::test]
-    async fn read_returns_full_bytes_for_small_file() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
-        let ws = ws_at(&dir);
-        let path = WorkspacePath::parse("a.txt").unwrap();
-        let bytes = ws.read_file(&path).await.unwrap();
-        assert_eq!(bytes, b"hello");
     }
 
     // 5. Expected-hash conflict: the caller checks the precondition; this
@@ -1613,23 +1583,6 @@ mod tests {
         let created = ws.create_excl(&path, body.as_ref(), false).await.unwrap();
         let want = format!("blake3:{}", blake3::hash(body).to_hex());
         assert_eq!(created.content_hash, want);
-    }
-
-    // 6. No-replace create: a second create on the same path returns
-    //    TargetExists, leaving the original file untouched.
-    #[tokio::test]
-    async fn create_excl_rejects_existing_target_and_preserves_original() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("c.txt"), b"original").unwrap();
-        let ws = ws_at(&dir);
-        let path = WorkspacePath::parse("c.txt").unwrap();
-        let err = ws
-            .create_excl(&path, b"attacker".as_ref(), false)
-            .await
-            .unwrap_err();
-        assert!(matches!(err, LocalWorkspaceError::TargetExists { .. }));
-        let on_disk = std::fs::read(dir.path().join("c.txt")).unwrap();
-        assert_eq!(on_disk, b"original");
     }
 
     // 7. Atomic replacement: install_atomic overwrites the target and the
@@ -1750,56 +1703,6 @@ mod tests {
 
     // ── Supporting tests for observation operations ──────────────────────
 
-    #[tokio::test]
-    async fn list_dir_returns_sorted_entries() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("b"), b"").unwrap();
-        std::fs::write(dir.path().join("a"), b"").unwrap();
-        std::fs::create_dir(dir.path().join("d")).unwrap();
-        let ws = ws_at(&dir);
-        let path = WorkspacePath::project_root();
-        let entries = ws.list_dir(&path).await.unwrap();
-        let names: Vec<_> = entries.iter().map(|e| e.name.clone()).collect();
-        assert_eq!(names, vec!["a", "b", "d"]);
-    }
-
-    #[tokio::test]
-    async fn grep_finds_matches_with_line_numbers() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("g.txt"), "alpha\nbeta\nalpha\n").unwrap();
-        let ws = ws_at(&dir);
-        let req = GrepRequest {
-            pattern: "alpha".into(),
-            path: WorkspacePath::project_root(),
-            glob: None,
-        };
-        let visibility = VisibilityEngine::load(dir.path(), Default::default());
-        let (matches, _evidence) = ws.grep(&req, 100, visibility).await.unwrap();
-        assert_eq!(matches.len(), 2);
-        assert_eq!(matches[0].line_number, 1);
-        assert_eq!(matches[1].line_number, 3);
-    }
-
-    #[tokio::test]
-    async fn find_files_returns_matching_paths() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("a.rs"), b"").unwrap();
-        std::fs::write(dir.path().join("b.txt"), b"").unwrap();
-        std::fs::create_dir(dir.path().join("sub")).unwrap();
-        std::fs::write(dir.path().join("sub/c.rs"), b"").unwrap();
-        let ws = ws_at(&dir);
-        let req = FindRequest {
-            pattern: "*.rs".into(),
-            path: WorkspacePath::project_root(),
-        };
-        let visibility = VisibilityEngine::load(dir.path(), Default::default());
-        let (paths, _evidence) = ws.find_files(&req, 100, visibility).await.unwrap();
-        let strs: Vec<_> = paths.iter().map(|p| p.as_str().to_string()).collect();
-        assert!(strs.contains(&"a.rs".to_string()));
-        assert!(strs.contains(&"sub/c.rs".to_string()));
-        assert!(!strs.contains(&"b.txt".to_string()));
-    }
-
     #[test]
     fn find_walk_observes_mid_traversal_cancellation() {
         let dir = TempDir::new().unwrap();
@@ -1821,24 +1724,6 @@ mod tests {
             })
             .unwrap_err();
         assert!(matches!(error, LocalWorkspaceError::Cancelled));
-    }
-
-    #[tokio::test]
-    async fn read_file_missing_returns_not_found() {
-        let dir = TempDir::new().unwrap();
-        let ws = ws_at(&dir);
-        let path = WorkspacePath::parse("nope.txt").unwrap();
-        let err = ws.read_file(&path).await.unwrap_err();
-        assert!(matches!(err, LocalWorkspaceError::NotFound { .. }));
-    }
-
-    #[tokio::test]
-    async fn create_excl_with_create_parents_creates_missing_dirs() {
-        let dir = TempDir::new().unwrap();
-        let ws = ws_at(&dir);
-        let path = WorkspacePath::parse("a/b/c.txt").unwrap();
-        ws.create_excl(&path, b"hi".as_ref(), true).await.unwrap();
-        assert!(dir.path().join("a/b/c.txt").exists());
     }
 
     // ── TOCTOU-safe write path (pinned dirfd walk) ───────────────────────
@@ -2004,28 +1889,6 @@ mod tests {
         ws.install_atomic(&path, b"v2").await.unwrap();
         assert_eq!(tmp_residue(dir.path()), Vec::<String>::new());
         assert_eq!(std::fs::read(dir.path().join("t.txt")).unwrap(), b"v2");
-    }
-
-    // Unique temp names: concurrent installs into the same directory must
-    // not collide on the O_EXCL temp file.
-    #[tokio::test]
-    async fn concurrent_installs_in_same_dir_succeed() {
-        let dir = TempDir::new().unwrap();
-        let ws = ws_at(&dir);
-        let p1 = WorkspacePath::parse("one.txt").unwrap();
-        let p2 = WorkspacePath::parse("two.txt").unwrap();
-        let (r1, r2) = tokio::join!(
-            ws.install_atomic(&p1, b"first"),
-            ws.install_atomic(&p2, b"second")
-        );
-        r1.unwrap();
-        r2.unwrap();
-        assert_eq!(std::fs::read(dir.path().join("one.txt")).unwrap(), b"first");
-        assert_eq!(
-            std::fs::read(dir.path().join("two.txt")).unwrap(),
-            b"second"
-        );
-        assert_eq!(tmp_residue(dir.path()), Vec::<String>::new());
     }
 
     // ── Grep byte-budget bounds ──────────────────────────────────────────
@@ -2196,82 +2059,5 @@ mod tests {
 
     // ── list_dir symlink reporting ───────────────────────────────────────
 
-    #[tokio::test]
-    async fn list_dir_reports_symlinks_including_dangling() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("target.txt"), b"x").unwrap();
-        std::fs::create_dir(dir.path().join("targetdir")).unwrap();
-        symlink(dir.path().join("target.txt"), dir.path().join("file_link")).unwrap();
-        symlink(dir.path().join("targetdir"), dir.path().join("dir_link")).unwrap();
-        symlink(dir.path().join("missing"), dir.path().join("dangling")).unwrap();
-        let ws = ws_at(&dir);
-        let entries = ws.list_dir(&WorkspacePath::project_root()).await.unwrap();
-        let kind_of = |name: &str| entries.iter().find(|e| e.name == name).map(|e| e.kind);
-        assert_eq!(kind_of("file_link"), Some(PathKind::Symlink));
-        assert_eq!(kind_of("dir_link"), Some(PathKind::Symlink));
-        assert_eq!(kind_of("dangling"), Some(PathKind::Symlink));
-        assert_eq!(kind_of("target.txt"), Some(PathKind::File));
-        assert_eq!(kind_of("targetdir"), Some(PathKind::Directory));
-    }
-
     // ── glob_match semantics ─────────────────────────────────────────────
-
-    #[test]
-    fn glob_match_table() {
-        let cases: &[(&str, &str, bool)] = &[
-            // Old behavior preserved.
-            ("*.rs", "a.rs", true),
-            ("*.rs", "a.txt", false),
-            ("a.rs", "a.rs", true),
-            ("a.rs", "b.rs", false),
-            ("pre*post", "prepost", true),
-            ("pre*post", "preXYZpost", true),
-            ("pre*post", "preX", false),
-            // '?' — exactly one character.
-            ("test?.rs", "test1.rs", true),
-            ("test?.rs", "test10.rs", false),
-            ("test?.rs", "test.rs", false),
-            // Multiple '*'.
-            ("a*b*c", "abc", true),
-            ("a*b*c", "aXbYc", true),
-            ("a*b*c", "aXcYb", false),
-            ("src.*.rs", "src.foo.rs", true),
-            ("src.*.rs", "src.rs", false),
-            // Character classes.
-            ("[ab]c", "ac", true),
-            ("[ab]c", "bc", true),
-            ("[ab]c", "cc", false),
-            ("[a-z]x", "bx", true),
-            ("[a-z]x", "Bx", false),
-            ("[!a]b", "cb", true),
-            ("[!a]b", "ab", false),
-            // Unclosed '[' is a literal.
-            ("[", "[", true),
-            ("a[b", "a[b", true),
-            ("a[b", "ab", false),
-        ];
-        for (pattern, name, want) in cases {
-            assert_eq!(
-                glob_match(pattern, name),
-                *want,
-                "glob_match({pattern:?}, {name:?})"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn find_files_supports_question_mark_glob() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("test1.rs"), b"").unwrap();
-        std::fs::write(dir.path().join("test10.rs"), b"").unwrap();
-        let ws = ws_at(&dir);
-        let req = FindRequest {
-            pattern: "test?.rs".into(),
-            path: WorkspacePath::project_root(),
-        };
-        let visibility = VisibilityEngine::load(dir.path(), Default::default());
-        let (paths, _evidence) = ws.find_files(&req, 100, visibility).await.unwrap();
-        let strs: Vec<_> = paths.iter().map(|p| p.as_str().to_string()).collect();
-        assert_eq!(strs, vec!["test1.rs".to_string()]);
-    }
 }

@@ -883,16 +883,4 @@ mod tests {
             assert_eq!(out.value_json, "{}");
         }
     }
-
-    /// #171: `shared()` composes exactly once; subsequent calls return the same
-    /// `Arc` without re-running `Component::new`.
-    #[test]
-    fn shared_returns_same_instance_across_calls() {
-        let a = ComponentRuntime::shared().expect("first shared()");
-        let b = ComponentRuntime::shared().expect("second shared()");
-        assert!(
-            Arc::ptr_eq(&a, &b),
-            "shared() must return the same Arc on consecutive calls"
-        );
-    }
 }

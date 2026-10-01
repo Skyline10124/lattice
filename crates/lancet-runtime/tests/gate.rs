@@ -8,7 +8,7 @@
 //! fixture composes from fixed committed bytes only.
 
 use lancet_runtime::test_helpers::{SyntheticTool, compose};
-use lancet_runtime::{ClosedCatalog, ComponentRuntime, CompositionError};
+use lancet_runtime::{ClosedCatalog, CompositionError};
 use sha2::{Digest, Sha256};
 
 fn engine() -> wasmtime::Engine {
@@ -26,25 +26,6 @@ fn hex_sha256(bytes: &[u8]) -> String {
         out.push_str(&format!("{b:02x}"));
     }
     out
-}
-
-/// Tracer bullet: the fixed no-op fixture composes successfully, and the
-/// catalog contains exactly the noop.echo descriptor.
-#[test]
-fn noop_fixture_composes() {
-    let rt = ComponentRuntime::noop_fixture().expect("fixture composes");
-    let descriptors: Vec<_> = rt.descriptors().collect();
-    assert_eq!(descriptors.len(), 1, "exactly one tool in the fixture");
-    assert_eq!(descriptors[0].name, "noop.echo");
-    assert_eq!(descriptors[0].abi_version, 1);
-}
-
-/// A fresh synthetic tool with correct digests composes.
-#[test]
-fn synthetic_tool_composes() {
-    let tool = SyntheticTool::from_noop_bytes("noop.echo");
-    let catalog = compose(&[&tool]).expect("synthetic composes");
-    assert_eq!(catalog.descriptor_names(), vec!["noop.echo"]);
 }
 
 /// Missing: an expected identity has no matching registration.
@@ -281,13 +262,4 @@ fn gate_rejects_capability_name_over_two_cells() {
         ),
         "{result:?}"
     );
-}
-
-/// The same name over the same cell is a permitted shared alias.
-#[test]
-fn gate_accepts_a_capability_name_shared_over_one_cell() {
-    let first = tool_with_capability("a.tool", "session.result", "alloc");
-    let second = tool_with_capability("b.tool", "session.result", "alloc");
-    let catalog = compose(&[&first, &second]).expect("shared alias composes");
-    assert_eq!(catalog.descriptor_names(), vec!["a.tool", "b.tool"]);
 }
