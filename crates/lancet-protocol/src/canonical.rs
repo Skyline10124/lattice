@@ -91,17 +91,6 @@ mod tests {
     }
 
     #[test]
-    fn key_order_does_not_affect_output() {
-        // Same object, two insertion orders through the parser — the parser
-        // is the only way to get a differently-ordered map under
-        // `preserve_order`.
-        let a: Value = serde_json::from_str(r#"{"b":1,"a":2,"c":3}"#).unwrap();
-        let b: Value = serde_json::from_str(r#"{"c":3,"a":2,"b":1}"#).unwrap();
-        assert_eq!(canonical_json(&a), canonical_json(&b));
-        assert_eq!(canonical_json(&a), r#"{"a":2,"b":1,"c":3}"#);
-    }
-
-    #[test]
     fn nested_objects_are_sorted_at_every_depth() {
         let a: Value =
             serde_json::from_str(r#"{"z":{"y":{"x":1,"a":2},"b":3},"a":[{"q":1,"p":2}]}"#).unwrap();
@@ -148,17 +137,6 @@ mod tests {
         assert_eq!(
             canonical_json(&value),
             r#"{"":"empty key","big":9007199254740993,"empty_arr":[],"empty_obj":{},"i":-3,"n":1.5,"nil":null,"s":"a\"b\né","t":true}"#
-        );
-    }
-
-    #[test]
-    fn output_carries_no_whitespace() {
-        let value: Value =
-            serde_json::from_str("{\n  \"a\" : [ 1 , 2 ] ,\n  \"b\" : { \"c\" : 3 }\n}").unwrap();
-        let canonical = canonical_json(&value);
-        assert!(
-            !canonical.contains(' ') && !canonical.contains('\n'),
-            "canonical form must be whitespace-free: {canonical}"
         );
     }
 

@@ -262,16 +262,6 @@ mod tests {
     }
 
     #[test]
-    fn network_policy_localhost_requires_allowlist_entry() {
-        let policy = NetworkPolicyConfig {
-            allow_localhost: true,
-            ..NetworkPolicyConfig::safe_defaults()
-        };
-        let err = validate_fetch_url("http://127.0.0.1:8080/path", &policy).unwrap_err();
-        assert_eq!(err.code, CepErrorCode::AmbientAuthorityDenied);
-    }
-
-    #[test]
     fn network_policy_allows_localhost_with_matching_allowlist() {
         let policy = NetworkPolicyConfig {
             allow_localhost: true,

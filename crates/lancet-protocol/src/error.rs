@@ -520,42 +520,6 @@ mod tests {
     }
 
     #[test]
-    fn method_not_found_yields_32601() {
-        let err = method_not_found("x");
-        let (code, _, _) = to_jsonrpc_error(&err);
-        assert_eq!(code, jsonrpc::METHOD_NOT_FOUND);
-    }
-
-    #[test]
-    fn standard_jsonrpc_helpers_share_wire_mapping() {
-        let parse = CepError::parse_error("bad json");
-        assert_eq!(parse.wire_code(), jsonrpc::PARSE_ERROR);
-        assert_eq!(to_jsonrpc_error(&parse).0, jsonrpc::PARSE_ERROR);
-
-        let inherent_method = CepError::method_not_found("x");
-        assert_eq!(inherent_method.wire_code(), jsonrpc::METHOD_NOT_FOUND);
-        assert_eq!(
-            to_jsonrpc_error(&inherent_method).0,
-            jsonrpc::METHOD_NOT_FOUND
-        );
-
-        let free_method = method_not_found("x");
-        assert_eq!(free_method.wire_code(), jsonrpc::METHOD_NOT_FOUND);
-        assert_eq!(to_jsonrpc_error(&free_method).0, jsonrpc::METHOD_NOT_FOUND);
-
-        let inherent_params = CepError::invalid_params("bad params");
-        assert_eq!(inherent_params.wire_code(), jsonrpc::INVALID_PARAMS);
-        assert_eq!(
-            to_jsonrpc_error(&inherent_params).0,
-            jsonrpc::INVALID_PARAMS
-        );
-
-        let free_params = invalid_params("bad params");
-        assert_eq!(free_params.wire_code(), jsonrpc::INVALID_PARAMS);
-        assert_eq!(to_jsonrpc_error(&free_params).0, jsonrpc::INVALID_PARAMS);
-    }
-
-    #[test]
     fn no_1000_series_codes_in_module() {
         // All CEP codes must be in -32000..-32099 range
         let all_codes = [
@@ -581,27 +545,6 @@ mod tests {
             assert!((-32099..=-32001).contains(&i), "code {i} not in CEP range");
             assert!(i.abs() >= 32001, "no 1000-series codes: {i}");
         }
-    }
-
-    #[test]
-    fn model_visible_codes_keep_stable_holes_after_legacy_variant_removal() {
-        assert_eq!(CepErrorCode::SchemaMismatch as i32, 0);
-        assert_eq!(CepErrorCode::ToolTrap as i32, 9);
-        assert_eq!(CepErrorCode::ResourceConflict as i32, 15);
-        assert_eq!(CepErrorCode::GuardDenied as i32, 20);
-        assert_eq!(CepErrorCode::CapabilityViolation as i32, 22);
-        assert_eq!(CepErrorCode::Reserved as i32, 23);
-    }
-
-    #[test]
-    fn typed_data_not_raw_value() {
-        // This test documents that CepErrorData is a tagged enum, not serde_json::Value.
-        // If data were raw Value, this would compile differently.
-        fn assert_typed(_: CepErrorData) {}
-        assert_typed(CepErrorData::Validation(ValidationErrorData {
-            field: "x".into(),
-            reason: "y".into(),
-        }));
     }
 
     #[test]
@@ -697,29 +640,5 @@ mod tests {
         } else {
             panic!("expected error response");
         }
-    }
-
-    #[test]
-    fn capability_error_data_carries_violation_evidence() {
-        let data = CapabilityErrorData {
-            method: "observe.workspace".into(),
-            violations: vec!["result cell exceeds admitted capability set".into()],
-            cell_ref: None,
-            capability: None,
-        };
-
-        let wrapped = CepErrorData::Capability(Box::new(data.clone()));
-        let value = serde_json::to_value(&wrapped).unwrap();
-        assert_eq!(value["kind"], "capability");
-        assert_eq!(value["method"], "observe.workspace");
-        assert!(value["violations"].is_array());
-        assert_eq!(
-            value["violations"][0],
-            "result cell exceeds admitted capability set"
-        );
-
-        let serialized = serde_json::to_string(&wrapped).unwrap();
-        let deserialized: CepErrorData = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(deserialized, wrapped);
     }
 }

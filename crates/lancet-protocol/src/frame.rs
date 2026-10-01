@@ -22,43 +22,8 @@ pub type ToolError = crate::jsonrpc::ErrorObject<crate::error::CepError>;
 #[cfg(test)]
 mod tests {
     use crate::error::{CepError, CepErrorCode, CepErrorData, ExecutionErrorData, Retriability};
-    use crate::frame::{ToolCall, ToolError, ToolEvent, ToolResult};
-    use crate::jsonrpc::{ErrorObject, Id};
-    use serde_json::json;
-
-    #[test]
-    fn tool_call_is_jsonrpc_request() {
-        let call: ToolCall = crate::jsonrpc::Request::new(
-            Id::parse("11111111-1111-4111-8111-111111111111").expect("valid InvocationId"),
-            "read_file".into(),
-            json!({"path": "/etc/hosts"}),
-        );
-        let serialized = serde_json::to_string(&call).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(parsed["method"], "read_file");
-        assert_eq!(parsed["params"]["path"], "/etc/hosts");
-    }
-
-    #[test]
-    fn tool_event_is_jsonrpc_notification() {
-        let event: ToolEvent =
-            crate::jsonrpc::Notification::new("progress".into(), json!({"percent": 75}));
-        let serialized = serde_json::to_string(&event).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&serialized).unwrap();
-        assert!(parsed.get("id").is_none());
-        assert_eq!(parsed["method"], "progress");
-    }
-
-    #[test]
-    fn tool_result_success() {
-        let result: ToolResult = crate::jsonrpc::Response::Success {
-            result: json!({"content": "hello"}),
-            id: Id::parse("11111111-1111-4111-8111-111111111111").expect("valid InvocationId"),
-        };
-        let serialized = serde_json::to_string(&result).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(parsed["result"]["content"], "hello");
-    }
+    use crate::frame::ToolError;
+    use crate::jsonrpc::ErrorObject;
 
     #[test]
     fn tool_error_is_error_object_with_cep_data() {

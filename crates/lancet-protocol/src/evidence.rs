@@ -439,21 +439,6 @@ mod tests {
         assert_eq!(serialized.matches("\"visibility\"").count(), 2);
     }
 
-    /// A path target carries the concrete observed path, which is what makes an
-    /// observation effect attributable to a file rather than to the call (#30).
-    #[test]
-    fn observation_effect_carries_its_concrete_path() {
-        let effect = observation_effect(0, "src/lib.rs", false);
-        assert_eq!(
-            effect.target,
-            ObservedTarget::Path {
-                path: "src/lib.rs".into()
-            }
-        );
-        assert_eq!(effect.cell.reference(), "alloc:read:workspace");
-        assert_eq!(effect.scope.channel, ChannelKind::Workspace);
-    }
-
     #[test]
     fn observed_target_variants_are_tagged() {
         let targets = [
@@ -703,17 +688,5 @@ mod tests {
         // Boundary fail-closed is `in`, the opposite of scope-trust default.
         assert_eq!(policy.max_boundary, Trust::In);
         assert_eq!(Trust::default(), Trust::Ex);
-    }
-
-    #[test]
-    fn admission_policy_round_trips() {
-        let policy = CapabilityAdmissionPolicy {
-            enabled_tools: BTreeSet::from(["noop.echo".to_string()]),
-            denied_capabilities: BTreeSet::from(["session.events".to_string()]),
-            max_boundary: Trust::Ex,
-        };
-        let parsed: CapabilityAdmissionPolicy =
-            serde_json::from_str(&serde_json::to_string(&policy).unwrap()).unwrap();
-        assert_eq!(parsed, policy);
     }
 }

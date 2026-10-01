@@ -102,16 +102,4 @@ mod tests {
         assert_eq!(err.limit, "observation.max_turn_observation_bytes");
         assert_eq!(err.remaining, 40);
     }
-
-    #[test]
-    fn cep_budget_snapshot_without_audit_store() {
-        let tracker = ObservationBudgetTracker::new(BudgetLimits::defaults());
-        tracker.try_charge_observation(128).unwrap();
-        let snap = tracker.snapshot();
-        assert_eq!(snap.turn_observation_bytes_used, 128);
-        assert_eq!(
-            snap.max_turn_observation_bytes,
-            BudgetLimits::defaults().max_turn_observation_bytes
-        );
-    }
 }

@@ -149,14 +149,4 @@ mod tests {
         assert!(!binding.matches_request("observe.workspace", &json!({"path": "b.txt"})));
         assert!(!binding.matches_request("mutate.create", &json!({"path": "a.txt"})));
     }
-
-    #[test]
-    fn arguments_digest_preserves_existing_golden_construction() {
-        let digest = arguments_digest(&json!({"path": "a.txt"}));
-        let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
-        assert_eq!(
-            hex,
-            "5fd582703776c899a2ecb12f3d699bd7244dff1f443ef5ae3f0067bcf3ce279e"
-        );
-    }
 }

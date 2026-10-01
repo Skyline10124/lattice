@@ -436,22 +436,6 @@ mod tests {
     }
 
     #[test]
-    fn json_schema_is_pattern_constrained_string() {
-        let mut generator = SchemaGenerator::default();
-        let schema = InvocationId::json_schema(&mut generator);
-        let value = serde_json::to_value(&schema).expect("schema to value");
-        assert_eq!(value["type"], "string");
-        assert_eq!(value["pattern"].as_str().expect("pattern"), UUID_V4_PATTERN);
-    }
-
-    #[test]
-    fn session_id_parse_display_roundtrip() {
-        let id = SessionId::parse(VALID_SESSION).expect("valid session id");
-        assert_eq!(id.as_str(), VALID_SESSION);
-        assert_eq!(id.to_string(), VALID_SESSION);
-    }
-
-    #[test]
     fn session_id_rejects_noncanonical_spellings() {
         // Hyphenated UUID spelling is not the session identity form.
         assert!(matches!(

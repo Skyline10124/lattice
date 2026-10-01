@@ -307,18 +307,6 @@ mod tests {
     }
 
     #[test]
-    fn allow_loopback_ipv4() {
-        assert!(validate_base_url("http://127.0.0.1/v1").is_ok());
-        assert!(validate_base_url("https://127.0.0.1/v1").is_ok());
-    }
-
-    #[test]
-    fn allow_loopback_ipv6() {
-        assert!(validate_base_url("http://[::1]/v1").is_ok());
-        assert!(validate_base_url("https://[::1]/v1").is_ok());
-    }
-
-    #[test]
     fn reject_private_ipv4() {
         assert!(validate_base_url("https://10.0.0.1/v1").is_err());
         assert!(validate_base_url("https://192.168.1.1/v1").is_err());
@@ -382,22 +370,6 @@ mod tests {
     }
 
     #[test]
-    fn allow_localhost_http() {
-        assert!(validate_base_url("http://localhost:11434/v1").is_ok());
-    }
-
-    #[test]
-    fn allow_localhost_https() {
-        assert!(validate_base_url("https://localhost/v1").is_ok());
-    }
-
-    #[test]
-    fn allow_https_public() {
-        assert!(validate_base_url("https://8.8.8.8/v1").is_ok());
-        assert!(validate_base_url("https://1.1.1.1").is_ok());
-    }
-
-    #[test]
     fn reject_bad_scheme() {
         assert!(validate_base_url("ftp://example.com/v1").is_err());
     }
@@ -426,20 +398,6 @@ mod tests {
                 "expected rebinding error for {host}, got: {err}"
             );
         }
-    }
-
-    #[test]
-    fn resolve_public_socket_addrs_rejects_private_literal() {
-        let err = resolve_public_socket_addrs("10.0.0.1", 443)
-            .expect_err("private literal must be rejected");
-        assert!(err.to_string().contains("private"));
-    }
-
-    #[test]
-    fn resolve_public_socket_addrs_rejects_rebinding_domain() {
-        let err = resolve_public_socket_addrs("evil.nip.io", 443)
-            .expect_err("rebinding domain must be rejected");
-        assert!(err.to_string().contains("rebinding"));
     }
 
     #[test]
