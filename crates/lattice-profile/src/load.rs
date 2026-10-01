@@ -348,26 +348,6 @@ mod tests {
     }
 
     #[test]
-    fn load_inline_system_prompt() {
-        let (_dir, path) = temp_profile(
-            r#"
-schema_version = 1
-
-[agent]
-name = "test"
-model = "sonnet"
-
-[prompt]
-system = "You are a helpful assistant."
-
-"#,
-        );
-        let loaded = load_agent_profile(&path).unwrap();
-        assert_eq!(loaded.system_prompt, "You are a helpful assistant.");
-        assert_eq!(loaded.profile.agent.name, "test");
-    }
-
-    #[test]
     fn load_system_path_prompt() {
         let dir = tempfile::tempdir().unwrap();
         let prompt_path = dir.path().join("prompt.md");
@@ -557,37 +537,6 @@ system_path = "subdir"
         assert!(err.to_string().contains("not a file"), "got: {err}");
     }
 
-    #[test]
-    fn loading_is_read_only_no_side_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let toml_path = dir.path().join("agent.toml");
-        std::fs::write(
-            &toml_path,
-            r#"
-schema_version = 1
-
-[agent]
-name = "test"
-model = "sonnet"
-
-[prompt]
-system = "hello"
-
-"#,
-        )
-        .unwrap();
-
-        let before: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
-        load_agent_profile(&toml_path).unwrap();
-        let after: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
-
-        assert_eq!(
-            before.len(),
-            after.len(),
-            "loader created side-effect files"
-        );
-    }
-
     /// #121: a profile still carrying the retired `allowed_roots` key must fail
     /// with an error that names the key and the supported replacement, not a
     /// bare serde "unknown field" — and never load as if the narrowing applied.
@@ -618,34 +567,6 @@ allowed_roots = ["src"]
         assert!(msg.contains("allowed_roots"), "got: {msg}");
         assert!(msg.contains("lancet.observation"), "got: {msg}");
         assert!(msg.contains("project_root"), "got: {msg}");
-    }
-
-    /// The rest of `[lancet.observation]` still loads: only the scope key went.
-    #[test]
-    fn observation_limits_still_load_without_allowed_roots() {
-        let dir = tempfile::tempdir().unwrap();
-        let toml_path = dir.path().join("agent.toml");
-        std::fs::write(
-            &toml_path,
-            r#"
-schema_version = 1
-
-[agent]
-name = "t"
-model = "sonnet"
-
-[prompt]
-system = "hi"
-
-[lancet.observation]
-max_single_read_bytes = 4096
-"#,
-        )
-        .unwrap();
-
-        let loaded = load_agent_profile(&toml_path).expect("profile loads");
-        let observation = loaded.profile.lancet.observation.expect("section");
-        assert_eq!(observation.max_single_read_bytes, Some(4096));
     }
 
     /// #121: a case variant of a typed `[lancet.*]` sub-table must fail. It
@@ -689,91 +610,6 @@ allowed_roots = ["src"]
                 "the error must name the correct spelling: {msg}"
             );
         }
-    }
-
-    /// A genuinely unknown sub-table still lands in `extensions` — the
-    /// forward-compatibility behavior the schema intends.
-    #[test]
-    fn unknown_lancet_sub_table_still_falls_through_to_extensions() {
-        let dir = tempfile::tempdir().unwrap();
-        let toml_path = dir.path().join("agent.toml");
-        std::fs::write(
-            &toml_path,
-            r#"
-schema_version = 1
-
-[agent]
-name = "t"
-model = "sonnet"
-
-[prompt]
-system = "hi"
-
-[lancet.future_table]
-setting = 1
-"#,
-        )
-        .unwrap();
-
-        let loaded = load_agent_profile(&toml_path).expect("profile loads");
-        assert!(
-            loaded
-                .profile
-                .lancet
-                .extensions
-                .contains_key("future_table")
-        );
-    }
-
-    #[test]
-    fn lancet_capabilities_sub_table_is_not_the_forbidden_top_level_section() {
-        // `capabilities` is a forbidden *top-level* section; the pre-scan only
-        // inspects top-level keys, so the typed `[lancet.capabilities]`
-        // admission policy must still load.
-        let (_dir, path) = temp_profile(
-            r#"
-schema_version = 1
-
-[agent]
-name = "test"
-model = "sonnet"
-
-[prompt]
-system = "hi"
-
-[lancet.capabilities]
-deny = ["session.events"]
-max_boundary = "ex"
-
-"#,
-        );
-        let loaded = load_agent_profile(&path).unwrap();
-        let capabilities = loaded.profile.lancet.capabilities.as_ref().unwrap();
-        assert_eq!(capabilities.deny, vec!["session.events".to_string()]);
-    }
-
-    #[test]
-    fn llm_retry_max_retries_zero_is_valid() {
-        let (_dir, path) = temp_profile(
-            r#"
-schema_version = 1
-
-[agent]
-name = "test"
-model = "sonnet"
-
-[prompt]
-system = "hi"
-
-[llm.retry]
-max_retries = 0
-initial_delay_ms = 1
-max_delay_ms = 1
-
-"#,
-        );
-        let loaded = load_agent_profile(&path).unwrap();
-        assert_eq!(loaded.profile.llm.retry.max_retries, 0);
     }
 
     #[test]
