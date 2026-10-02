@@ -1,12 +1,12 @@
 ---
-status: pending
+status: active
 ---
 
 # TUI 交互与视觉
 
 > 类型：架构合同
 > 上位依据：[项目宪章](../governance/charter.md)、[宿主平台](platform.md)
-> 修订状态：本工作分支的 Markdown 渲染、代码高亮与终端能力修订，以及标题线、Dock 与输入区、statusline、浏览光标、评论与排队修订待人类批准；生效前[原有效版本](https://github.com/Skyline10124/lattice/blob/c566eca7cc8912f336f8bb7ef13c022ff6d559df/docs/architecture/tui.md)继续适用。
+> 修订记录：Markdown 渲染、代码高亮与终端能力，以及标题线、Dock 与输入区、statusline、浏览光标、评论与排队的修订，随 PR #232 合并，2026-10-02 由维护者批准生效。
 
 ## 目的与范围
 
