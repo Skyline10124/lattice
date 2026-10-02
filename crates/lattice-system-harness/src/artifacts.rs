@@ -468,7 +468,7 @@ pub(crate) fn validate_artifact_name(name: &OsStr) -> Result<(), EvidenceError> 
 }
 
 pub(crate) struct ArtifactClaim {
-    _file: File,
+    file: File,
 }
 
 impl ArtifactClaim {
@@ -498,7 +498,18 @@ impl ArtifactClaim {
             }
             return Err(EvidenceError::Io(error));
         }
-        Ok(Self { _file: file })
+        Ok(Self { file })
+    }
+}
+
+impl Drop for ArtifactClaim {
+    fn drop(&mut self) {
+        // flock 锁属于打开文件描述（open file description），而不是某个 fd。同一进程中
+        // 其他测试并行启动子进程时，子进程在 fork 之后、exec 之前持有该描述的副本
+        // （O_CLOEXEC 要到 exec 才关闭），只关闭本 fd 不会释放锁，紧接着的重新获取会
+        // 得到 ArtifactClaimBusy（#228）。显式 LOCK_UN 作用于整个描述，副本也随之解锁。
+        // SAFETY: `self.file` 在调用期间持有有效描述符。
+        unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
     }
 }
 
@@ -1403,6 +1414,42 @@ mod tests {
         let second = ArtifactClaim::acquire(&target).unwrap();
         assert!(lock.is_file());
         drop(second);
+    }
+
+    /// 失败方式（#228）：同一进程里另一个线程 fork 出的子进程在 exec 之前共享锁文件的
+    /// 打开描述，claim 释放后锁仍被子进程的副本持有，紧接着的重新获取得到
+    /// ArtifactClaimBusy。这里用一个只 fork、不 exec 的子进程确定性地制造该窗口。
+    #[test]
+    fn released_claim_is_free_while_a_forked_child_still_shares_the_descriptor() {
+        let root = TempDir::new().unwrap();
+        let target = root.path().join("scenario");
+        let first = ArtifactClaim::acquire(&target).unwrap();
+
+        // fork 返回时子进程已经复制了全部描述符，包括锁文件的打开描述；子进程只
+        // pause()，由父进程在断言前 SIGKILL 并回收，所以不存在等待它自行退出的路径。
+        // SAFETY: 子进程只调用 async-signal-safe 的 pause 与 _exit。
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0, "fork failed");
+        if child == 0 {
+            // SAFETY: 见上。
+            unsafe {
+                libc::pause();
+                libc::_exit(0);
+            }
+        }
+
+        drop(first);
+        let second = ArtifactClaim::acquire(&target);
+
+        // SAFETY: `child` 是本测试刚 fork 出的子进程。
+        unsafe {
+            libc::kill(child, libc::SIGKILL);
+            libc::waitpid(child, std::ptr::null_mut(), 0);
+        }
+        assert!(
+            second.is_ok(),
+            "released claim must be reacquirable while a forked child shares the lock descriptor"
+        );
     }
 
     #[test]
