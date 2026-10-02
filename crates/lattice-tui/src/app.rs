@@ -208,11 +208,11 @@ impl App {
             _ => {}
         }
         // 快照可能比事件窗口领先一个提交；已装入节点的尝试不再重建临时块。
+        // 请求错误是 Dock 诊断而非正文，最后一次错误可能晚于关闭快照到达，不受此过滤。
         let key = match &event {
             TurnEvent::ModelStarted { key, .. }
             | TurnEvent::TokenDelta { key, .. }
             | TurnEvent::ReasoningDelta { key, .. }
-            | TurnEvent::LlmRequestError { key, .. }
             | TurnEvent::ModelFinished { key, .. } => Some(key),
             _ => None,
         };

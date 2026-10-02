@@ -968,11 +968,14 @@ impl Backend {
                 }),
             )
             .await;
-        } else if view
-            .selected_turn
-            .as_ref()
-            .is_some_and(|t| t.summary.is_none())
+        } else if owner.is_some()
+            || view
+                .selected_turn
+                .as_ref()
+                .is_some_and(|t| t.summary.is_none())
         {
+            // 新订阅先得到快照，再从快照的序号起接窗口中的事件。已关闭且没有观察
+            // 状态时，finish_observation 立即交付同一份快照，这里不重复。
             writer
                 .write(
                     stream,
@@ -982,46 +985,58 @@ impl Backend {
                 )
                 .await?;
         }
+        // 持有 Owner 观察状态时，关闭快照不代表窗口已交付完：交付终态事件后，或观察到 done
+        // 之后窗口再次为空，才结束。没有观察状态的订阅按快照结束。
+        let mut terminal = false;
         loop {
-            if view
+            let turn_closed = view
                 .selected_turn
                 .as_ref()
-                .is_none_or(|t| t.summary.is_some())
-            {
-                return self.finish_observation(stream, writer, view).await;
-            }
-            if !view.owned {
-                if let Some(error) = lock(&self.admission)
-                    .diagnostics
-                    .get(&target.turn_id)
-                    .cloned()
-                {
-                    return Err(error);
+                .is_none_or(|t| t.summary.is_some());
+            let Some(current) = owner.clone() else {
+                if turn_closed {
+                    return self.finish_observation(stream, writer, view).await;
                 }
-                return Ok(());
-            }
-            let Some(current) = &owner else {
+                if !view.owned {
+                    if let Some(error) = lock(&self.admission)
+                        .diagnostics
+                        .get(&target.turn_id)
+                        .cloned()
+                    {
+                        return Err(error);
+                    }
+                    return Ok(());
+                }
                 view = self.query(target.session_id, Some(target.turn_id)).await?;
                 owner = lock(&self.admission).turns.get(&target.turn_id).cloned();
                 continue;
             };
+            // 先建立接收端再检查状态；done 是状态检查，不只是唤醒源。
             let mut events_changed = current.observer.subscribe();
+            let mut done = current.done.subscribe();
+            let exited = done.borrow_and_update().is_some();
             match current.observer.events_after(sequence) {
                 None => {
                     view = self.query(target.session_id, Some(target.turn_id)).await?;
-                    sequence = view.cursor.sequence;
-                    writer
-                        .write(
-                            stream,
-                            &Response::Observation(Observation::Snapshot {
-                                view: Box::new(view.clone()),
-                            }),
-                        )
-                        .await?;
-                    continue;
+                    let retained = lock(&self.admission)
+                        .turns
+                        .get(&target.turn_id)
+                        .is_some_and(|o| Arc::ptr_eq(o, &current));
+                    if retained && view.owned {
+                        sequence = view.cursor.sequence;
+                        writer
+                            .write(
+                                stream,
+                                &Response::Observation(Observation::Snapshot {
+                                    view: Box::new(view.clone()),
+                                }),
+                            )
+                            .await?;
+                        continue;
+                    }
+                    // Owner 已退出：owned=false 快照的序号不属于旧窗口，转入快照结束路径。
                 }
                 Some(events) if !events.is_empty() => {
-                    let mut terminal = false;
                     for event in events {
                         sequence = event.sequence;
                         terminal |= matches!(
@@ -1045,17 +1060,34 @@ impl Backend {
                     }
                     continue;
                 }
-                _ => {}
+                // 已交付终态：该 observer 不会再追加事件。
+                Some(_) if terminal && turn_closed => {
+                    return self.finish_observation(stream, writer, view).await;
+                }
+                // done 在本轮读取窗口之前已观察到，此处的空窗口才证明尾部已排空。
+                Some(_) if exited => {
+                    view = self.query(target.session_id, Some(target.turn_id)).await?;
+                }
+                Some(_) => {
+                    tokio::select! {
+                        _ = events_changed.changed() => {},
+                        _ = done.changed() => {},
+                        _ = changed.changed() => {},
+                        _ = stores.changed() => {},
+                        _ = closed.changed() => return Ok(()),
+                    }
+                    view = self.query(target.session_id, Some(target.turn_id)).await?;
+                    continue;
+                }
             }
-            tokio::select! {
-                _ = events_changed.changed() => {},
-                _ = changed.changed() => {},
-                _ = stores.changed() => {},
-                _ = closed.changed() => return Ok(()),
-            }
-            view = self.query(target.session_id, Some(target.turn_id)).await?;
-            owner = lock(&self.admission).turns.get(&target.turn_id).cloned();
-            if !view.owned {
+            owner = None;
+            // 结束快照只在尾部排空后发出；已关闭的 Turn 由 finish_observation 交付快照。
+            if !view.owned
+                && view
+                    .selected_turn
+                    .as_ref()
+                    .is_some_and(|t| t.summary.is_none())
+            {
                 writer
                     .write(
                         stream,
@@ -1294,6 +1326,181 @@ mod tests {
         assert_eq!(history.anchor, view.history);
         task.await.unwrap().unwrap();
         (*view, history)
+    }
+    /// 监督者退休的同一顺序：先移出 admission，再置 done；不发 backend.changed。
+    fn retire(backend: &Backend, request: &TurnRequest, owner: &Arc<Owner>, result: Result<()>) {
+        let mut state = lock(&backend.admission);
+        state.turns.remove(&request.turn_id);
+        state.sessions.remove(&request.session_id.unwrap());
+        state.owners.retain(|o| !Arc::ptr_eq(o, owner));
+        owner.done.send_replace(Some(result));
+    }
+    /// 取自持久关闭详情的终态事件。
+    async fn terminal(backend: &Backend, request: &TurnRequest, failed: bool) -> crate::TurnEvent {
+        let (session_id, turn_id) = (request.session_id.unwrap(), request.turn_id);
+        let mut detail = backend
+            .open()
+            .await
+            .unwrap()
+            .read(move |r| r.turn_detail(session_id, turn_id))
+            .await
+            .unwrap();
+        let turn = crate::TurnRef {
+            session_id,
+            turn_id,
+        };
+        let step = detail.steps.pop().unwrap();
+        let summary = detail.summary.unwrap();
+        if failed {
+            crate::TurnEvent::TurnFailed {
+                turn,
+                step,
+                summary,
+            }
+        } else {
+            crate::TurnEvent::TurnCompleted {
+                turn,
+                step,
+                summary,
+            }
+        }
+    }
+    fn attempt(request: &TurnRequest) -> lancet_protocol::ModelAttemptKey {
+        lancet_protocol::ModelAttemptKey {
+            turn_id: request.turn_id,
+            model_step_ordinal: 0,
+            attempt_ordinal: 0,
+        }
+    }
+    /// 订阅取得 Owner 并交付首个快照后，让它唤醒并停在下一次查询中。
+    async fn park_subscriber(
+        backend: &Arc<Backend>,
+        request: &TurnRequest,
+    ) -> (
+        UnixStream,
+        ipc::ResponseReader,
+        tokio::task::JoinHandle<Result<()>>,
+        oneshot::Sender<()>,
+    ) {
+        let (mut socket, task) = subscribe(backend, request, None).await;
+        let mut reader = ipc::ResponseReader::default();
+        let Response::Observation(Observation::Snapshot { view }) =
+            response(&mut reader, &mut socket).await
+        else {
+            panic!("running snapshot")
+        };
+        assert!(view.owned && view.selected_turn.unwrap().summary.is_none());
+        let (entered, release) = cancellation_tests::arm(&backend.gates.snapshot);
+        backend.changed.send_modify(|v| *v += 1);
+        tokio::time::timeout(Duration::from_secs(5), entered)
+            .await
+            .unwrap()
+            .unwrap();
+        (socket, reader, task, release)
+    }
+    async fn event(reader: &mut ipc::ResponseReader, socket: &mut UnixStream) -> crate::TurnEvent {
+        match response(reader, socket).await {
+            Response::Observation(Observation::Event { event, .. }) => event,
+            _ => panic!("expected event"),
+        }
+    }
+    /// 关闭快照后紧接 Finished，随后连接结束。
+    async fn closing(
+        reader: &mut ipc::ResponseReader,
+        socket: &mut UnixStream,
+    ) -> ObservationSnapshot {
+        let Response::Observation(Observation::Snapshot { view }) = response(reader, socket).await
+        else {
+            panic!("closing snapshot")
+        };
+        assert!(view.selected_turn.as_ref().unwrap().summary.is_some());
+        assert!(matches!(
+            response(reader, socket).await,
+            Response::Observation(Observation::Finished { .. })
+        ));
+        assert!(reader.read::<Response>(socket).await.is_err());
+        *view
+    }
+
+    #[tokio::test]
+    async fn retained_owner_delivers_tail_and_terminal_before_finished() {
+        for failed in [false, true] {
+            let (_directory, backend, request) = pending_backend().await;
+            let owner = owner(&backend, &request);
+            let (mut socket, mut reader, task, release) = park_subscriber(&backend, &request).await;
+            // 订阅者停在唤醒后的查询中：关闭、尾部事件、终态与退休全部完成后再恢复。
+            let key = attempt(&request);
+            let tail = if failed {
+                crate::TurnEvent::LlmRequestError {
+                    key,
+                    retryable: true,
+                    will_retry: false,
+                    delay_ms: None,
+                    message: "provider down".into(),
+                }
+            } else {
+                crate::TurnEvent::ModelFinished {
+                    key,
+                    finish_reason: Some("stop".into()),
+                    usage: None,
+                }
+            };
+            close(&backend, &request).await;
+            owner.observer.emit(tail.clone());
+            let end = terminal(&backend, &request, failed).await;
+            owner.observer.emit(end.clone());
+            retire(&backend, &request, &owner, Ok(()));
+            release.send(()).unwrap();
+            assert_eq!(event(&mut reader, &mut socket).await, tail);
+            assert_eq!(event(&mut reader, &mut socket).await, end);
+            closing(&mut reader, &mut socket).await;
+            task.await.unwrap().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn done_without_terminal_drains_window_then_finishes_by_snapshot() {
+        let (_directory, backend, request) = pending_backend().await;
+        let owner = owner(&backend, &request);
+        let (mut socket, task) = subscribe(&backend, &request, None).await;
+        let mut reader = ipc::ResponseReader::default();
+        assert!(matches!(
+            response(&mut reader, &mut socket).await,
+            Response::Observation(Observation::Snapshot { .. })
+        ));
+        // 关闭已提交但执行核心随后失败：只有非终态尾部事件；退休不发 backend.changed，结束须由 done 状态推进。
+        close(&backend, &request).await;
+        let tail = crate::TurnEvent::ModelFinished {
+            key: attempt(&request),
+            finish_reason: None,
+            usage: None,
+        };
+        owner.observer.emit(tail.clone());
+        assert_eq!(event(&mut reader, &mut socket).await, tail);
+        retire(&backend, &request, &owner, Err(internal()));
+        closing(&mut reader, &mut socket).await;
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn retained_observer_out_of_window_after_exit_finishes_by_snapshot_once() {
+        let (_directory, backend, request) = pending_backend().await;
+        let owner = owner(&backend, &request);
+        let (mut socket, mut reader, task, release) = park_subscriber(&backend, &request).await;
+        for _ in 0..70 {
+            owner.observer.emit(crate::TurnEvent::ModelFinished {
+                key: attempt(&request),
+                finish_reason: None,
+                usage: None,
+            });
+        }
+        assert!(owner.observer.events_after(0).is_none());
+        close(&backend, &request).await;
+        retire(&backend, &request, &owner, Ok(()));
+        release.send(()).unwrap();
+        // owned=false 快照的序号 0 不属于旧窗口：不能对齐后重读，只能以快照结束一次。
+        assert!(!closing(&mut reader, &mut socket).await.owned);
+        task.await.unwrap().unwrap();
     }
 
     #[tokio::test]
