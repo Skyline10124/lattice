@@ -231,16 +231,7 @@ env -u LATTICE_BIN cargo xtask ci
 
 [`xtask ci`](../../xtask/src/ci.rs)依次执行工具链预检、fmt、clippy、debug CLI 构建、harness boundary、LANCET boundary、codegen check、逐 crate 测试及 Component verify。测试按依赖顺序运行，默认 `CARGO_BUILD_JOBS=4`、每 crate `LATTICE_TEST_TIMEOUT_SECS=300`；超时回收对应进程组。控制资源不能替代问题定位，运行前核对其他编译任务、内存和磁盘，不清理他人缓存来制造通过条件。
 
-[普通 CI](../../.github/workflows/ci.yml)在 main push 与 PR 上运行 fmt、clippy、debug CLI 构建、默认测试；随后按上文配方构建带屏障的二进制并运行 `direct_crash_barriers`，最后检查两个依赖边界与 codegen。它没有安装 encoder 或运行 Component verify，也不运行 `release_operator`。
-
-main push 始终检查完整 workspace。PR 先由 [`cargo xtask ci-plan`](../../xtask/src/ci_plan.rs) 比较合并提交与 base，选出改动可能影响的 package：
-
-- 改动 package 及所有依赖它的 workspace member 都进入 clippy 与测试；harness 通过 `lattice` 二进制依赖 `lattice-cli`，`tools/` 的已提交产物由 `lancet-runtime` 内嵌。
-- 根 manifest、`Cargo.lock`、工具链、`.cargo/`、`.github/`、`xtask/` 或无法归属到单个 member 的路径会选中完整 workspace。
-- 只改 `docs/`、根目录 Markdown、`AGENTS.md`/`CLAUDE.md` 等不被 Rust 检查读取的文件时，跳过全部 Rust 步骤，job 仍报告通过。
-- harness 未选中时不构建 `lattice` 二进制，也不运行 `direct_crash_barriers`；fmt 与依赖边界、codegen 检查在任何 Rust 相关改动下都运行。
-
-子集运行只在所选 package 之间统一 Cargo feature，PR 结果只覆盖所选范围；完整 workspace 的结果以合并后的 main push 和 full-gate 为准。
+[普通 CI](../../.github/workflows/ci.yml)在 main push 与 PR 上运行 fmt、clippy、debug CLI 构建、默认 workspace 测试；随后按上文配方构建带屏障的二进制并运行 `direct_crash_barriers`，最后检查两个依赖边界与 codegen。它没有安装 encoder 或运行 Component verify，也不运行 `release_operator`。PR 改动的文件全部是 Markdown 时，跳过上述 Rust 步骤，job 仍报告通过；main push 始终完整运行。
 
 [full-gate](../../.github/workflows/full-gate.yml)由手动或定时触发，另安装固定 encoder，执行 alpha rollout 和 Component verify。verify 以 `if: always()` 运行，日志保存到 `target/rollout/component-verify.log`；仅摘要漂移为 warning，其他完整性失败仍使步骤失败。不能因步骤名称含 `warn-only` 将整个步骤视为非阻塞。
 

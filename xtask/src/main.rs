@@ -1,6 +1,5 @@
 mod boundary_report;
 mod ci;
-mod ci_plan;
 mod harness_boundary;
 mod lancet_boundary;
 mod output;
@@ -24,8 +23,6 @@ struct Cli {
 enum Commands {
     /// Local CI replica (fmt, clippy, build, harness boundary, test).
     Ci(ci::CiArgs),
-    /// Select the packages a PR's changes can affect, as `$GITHUB_OUTPUT` lines.
-    CiPlan(ci_plan::CiPlanArgs),
     /// Verify lattice-system-harness has no product-crate dependencies.
     HarnessBoundary,
     /// LANCET architecture boundary gate.
@@ -45,7 +42,6 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Ci(args) => ci::run(args),
-        Commands::CiPlan(args) => ci_plan::run(args),
         Commands::HarnessBoundary => harness_boundary::run(),
         Commands::LancetBoundary => lancet_boundary::run(),
         Commands::ToolCodegen(args) => tool_codegen::run(args),

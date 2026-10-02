@@ -27,60 +27,64 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
-      # Depth 2 brings the PR merge commit's base parent (HEAD^1) for ci-plan.
+      # Depth 2 brings the PR merge commit's base parent (HEAD^1).
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 2
+      # A PR that changes only Markdown skips every Rust step below; the job
+      # still runs and passes, so `check` reports on every PR. A failed diff
+      # fails the job instead of skipping checks. main push skips this step,
+      # and the empty output keeps every step enabled.
+      - name: Detect docs-only PR
+        id: changes
+        if: github.event_name == 'pull_request'
+        run: |
+          changed=$(git diff --name-only --no-renames HEAD^1 HEAD)
+          if grep -qv '\.md$' <<<"$changed"; then
+            echo code=true >> "$GITHUB_OUTPUT"
+          else
+            echo code=false >> "$GITHUB_OUTPUT"
+          fi
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        if: steps.changes.outputs.code != 'false'
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      # PRs check only the packages their changes can affect; the selection
-      # rules live in xtask/src/ci_plan.rs. main push skips this step, so
-      # every output is empty and the steps below fall back to the full
-      # workspace. The job itself always runs, so a docs-only PR still
-      # reports a passing `check`.
-      - name: ci-plan
-        id: plan
-        if: github.event_name == 'pull_request'
-        run: cargo xtask ci-plan --base HEAD^1 >> "$GITHUB_OUTPUT"
+        if: steps.changes.outputs.code != 'false'
       - run: cargo fmt --all --check
-        if: steps.plan.outputs.rust != 'false'
-      - run: cargo clippy $PACKAGES --all-targets -- -D warnings
-        if: steps.plan.outputs.rust != 'false'
-        env:
-          PACKAGES: ${{ steps.plan.outputs.packages || '--workspace' }}
+        if: steps.changes.outputs.code != 'false'
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+        if: steps.changes.outputs.code != 'false'
       - run: cargo build -p lattice-cli --bin lattice
-        if: steps.plan.outputs.harness != 'false'
+        if: steps.changes.outputs.code != 'false'
       # One test step covers crate-local invariants AND every external-binary
       # scenario (fast_*, direct_* full-turn, pty_tui_smoke): the harness is a
       # workspace member, resolves the debug binary via LATTICE_BIN, and none
       # of its targets are #[ignore]-gated. Direct-Local scenarios run on any
       # host — no hypervisor, daemon, or container image required.
-      - run: cargo test $PACKAGES
-        if: steps.plan.outputs.rust != 'false'
+      - run: cargo test --workspace
+        if: steps.changes.outputs.code != 'false'
         env:
-          PACKAGES: ${{ steps.plan.outputs.packages || '--workspace' }}
           LATTICE_BIN: ${{ github.workspace }}/target/debug/lattice
           LATTICE_HARNESS_FAILURE_DIR: ${{ github.workspace }}/target/harness-failures
       # Crash-barrier scenarios need a product binary built with the barrier
       # feature. It overwrites target/debug/lattice, so it runs after the
       # ordinary test step that uses the plain binary.
       - run: cargo build -p lattice-cli --bin lattice --features test-crash-barriers
-        if: steps.plan.outputs.harness != 'false'
+        if: steps.changes.outputs.code != 'false'
       - run: cargo test -p lattice-system-harness --features crash-barriers --test direct_crash_barriers
-        if: steps.plan.outputs.harness != 'false'
+        if: steps.changes.outputs.code != 'false'
         env:
           LATTICE_BIN: ${{ github.workspace }}/target/debug/lattice
           LATTICE_HARNESS_FAILURE_DIR: ${{ github.workspace }}/target/harness-failures
       # Dependency / architecture boundary checks (same contracts `cargo
-      # xtask ci` runs locally). Cheap, so every Rust-affecting PR runs them.
+      # xtask ci` runs locally).
       - run: cargo xtask harness-boundary
-        if: steps.plan.outputs.rust != 'false'
+        if: steps.changes.outputs.code != 'false'
       - run: cargo xtask lancet-boundary
-        if: steps.plan.outputs.rust != 'false'
+        if: steps.changes.outputs.code != 'false'
       - run: cargo xtask tool-codegen --check
-        if: steps.plan.outputs.rust != 'false'
+        if: steps.changes.outputs.code != 'false'
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: failure()
         with:
