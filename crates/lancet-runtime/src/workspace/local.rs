@@ -13,7 +13,8 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::OwnedFd;
-use std::path::{Component, Path, PathBuf};
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 #[cfg(any(test, feature = "test-fault-injection"))]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,7 +22,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::history::{WorkspaceHistory, WorkspaceHistoryError};
 use regex::Regex;
-use rustix::fs::{AtFlags, Mode, OFlags};
+use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, ResolveFlags};
 use rustix::io::Errno;
 
 use crate::workspace::content_hash;
@@ -34,6 +35,47 @@ use super::visibility::{VisibilityEngine, VisibilityEvidence};
 
 #[cfg(any(test, feature = "test-fault-injection"))]
 type ReplaceBeforeCheck = Arc<Mutex<Option<(WorkspacePath, Vec<u8>)>>>;
+
+// #233: deterministic filesystem swaps at the check/open boundary. Kept
+// module-private and thread-local so parallel tests cannot affect each other.
+#[cfg(test)]
+type BeforeOpenHook = Box<dyn FnMut(&Path)>;
+#[cfg(test)]
+thread_local! {
+    static BEFORE_OPEN: std::cell::RefCell<Option<BeforeOpenHook>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+struct BeforeOpenGuard(std::marker::PhantomData<std::rc::Rc<()>>);
+
+#[cfg(test)]
+impl Drop for BeforeOpenGuard {
+    fn drop(&mut self) {
+        BEFORE_OPEN.with(|hook| *hook.borrow_mut() = None);
+    }
+}
+
+#[cfg(test)]
+fn set_before_open(hook: impl FnMut(&Path) + 'static) -> BeforeOpenGuard {
+    BEFORE_OPEN.with(|slot| {
+        assert!(
+            slot.borrow().is_none(),
+            "before-open hook already installed"
+        );
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+    BeforeOpenGuard(std::marker::PhantomData)
+}
+
+#[inline]
+fn before_open(_rel: &Path) {
+    #[cfg(test)]
+    BEFORE_OPEN.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().as_mut() {
+            hook(_rel);
+        }
+    });
+}
 
 /// The single concrete Local Workspace (ADR 0003 decision 3).
 ///
@@ -208,275 +250,182 @@ impl LocalWorkspace {
         Arc::clone(&self.mutation_sequence_gate)
     }
 
-    /// Per-segment secure path resolution.
+    /// Open the canonical project root as a directory handle. Every operation
+    /// opens it once and resolves all of its paths beneath it through
+    /// [`open_beneath`]. The root was canonicalized at construction, so a
+    /// failing `O_NOFOLLOW` here means the root itself was tampered with; fail
+    /// closed as plain I/O.
+    fn open_root(&self) -> Result<OwnedFd, LocalWorkspaceError> {
+        rustix::fs::open(
+            &self.root,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|e| LocalWorkspaceError::Io(e.into()))
+    }
+
+    /// Open the parent directory of a mutation target. The returned fd is the
+    /// only way the write path (create/install/replace) reaches a parent
+    /// directory; callers then act through it with single-component leaf
+    /// names. It is opened `O_RDONLY` rather than `O_PATH` because the
+    /// installed entry is made durable with `fsync` on this fd.
     ///
-    /// Walks every component of `path` beneath `root`, rejecting any segment
-    /// that is a symlink (parent or leaf) and any resolution that escapes
-    /// the canonical root. Missing intermediate parents are recorded as
-    /// `parent_exists = false`; the remaining segments are checked lexically.
-    ///
-    /// Resolution is intent-independent: the same secure walk backs read,
-    /// create, overwrite, delete, and list flows. The intent is carried as
-    /// operation vocabulary for the guard/precondition layer.
-    pub fn resolve_secure(
+    /// With `create_missing`, each missing prefix is created with `mkdirat`
+    /// under the previously opened level (`EEXIST` tolerated — losing a race
+    /// to a concurrent create is indistinguishable from the directory having
+    /// existed) and then reopened from the root, so every level that is used
+    /// was itself contained when it was opened. `mkdirat` has no resolution
+    /// constraint: if the previous level is moved out of the root just before
+    /// it, an empty directory appears there and the reopen from the root fails.
+    fn open_parent_dir(
         &self,
         path: &WorkspacePath,
-        _intent: PathIntent,
-    ) -> Result<(PathBuf, PathFacts), LocalWorkspaceError> {
-        if path.is_project_root() {
-            let meta = fs::symlink_metadata(&self.root)?;
-            let kind = metadata_kind(&meta);
-            let byte_size = if meta.is_file() {
-                Some(meta.len())
-            } else {
-                None
-            };
-            let facts = PathFacts {
-                normalized_path: path.as_str().to_string(),
-                exists: true,
-                kind: Some(kind),
-                parent_exists: true,
-                parent_kind: Some(PathKind::Directory),
-                byte_size,
-                canonical_under_workspace: true,
-            };
-            return Ok((self.root.clone(), facts));
-        }
-
-        let mut cur = self.root.clone();
-        let mut last_exists = true;
-        let mut last_meta: Option<fs::Metadata> = None;
-        for comp in Path::new(path.as_str()).components() {
-            match comp {
-                Component::Normal(part) => {
-                    cur.push(part);
-                    match fs::symlink_metadata(&cur) {
-                        Ok(meta) if meta.file_type().is_symlink() => {
-                            return Err(LocalWorkspaceError::SymlinkRejected {
-                                component: walk_component_for_error(&self.root, &cur),
-                            });
-                        }
-                        Ok(meta) => {
-                            last_meta = Some(meta);
-                            last_exists = true;
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                            last_meta = None;
-                            last_exists = false;
-                            // Remaining segments can only be lexical — keep
-                            // pushing them so the final path is well-formed,
-                            // but no further symlink_metadata checks are
-                            // meaningful until the target is created.
-                            for remaining in Path::new(path.as_str())
-                                .components()
-                                .skip(cur_strip_count(&self.root, &cur))
-                            {
-                                if let Component::Normal(p) = remaining {
-                                    cur.push(p);
-                                }
-                            }
-                            break;
-                        }
-                        Err(e) => return Err(LocalWorkspaceError::Io(e)),
-                    }
-                }
-                Component::CurDir => {}
-                Component::ParentDir => {
-                    // WorkspacePath::parse already rejected `..`, so this is
-                    // unreachable in practice; fail closed regardless.
-                    return Err(LocalWorkspaceError::RootEscape);
-                }
-                Component::RootDir | Component::Prefix(_) => {
-                    return Err(LocalWorkspaceError::RootEscape);
-                }
-            }
-        }
-
-        // Containment: lexical guarantee from WorkspacePath + per-segment
-        // symlink rejection above means cur must start with root. Confirm
-        // and fail closed if anything is inconsistent.
-        if !cur.starts_with(&self.root) {
-            return Err(LocalWorkspaceError::RootEscape);
-        }
-
-        let (kind, byte_size) = match &last_meta {
-            Some(meta) if last_exists => {
-                let kind = metadata_kind(meta);
-                let byte_size = if meta.is_file() {
-                    Some(meta.len())
-                } else {
-                    None
-                };
-                (Some(kind), byte_size)
-            }
-            _ => (None, None),
-        };
-
-        // Parent facts: walk to the parent of the resolved path.
-        let parent = cur.parent().unwrap_or(&self.root).to_path_buf();
-        let (parent_exists, parent_kind) = match fs::symlink_metadata(&parent) {
-            Ok(m) => (true, Some(metadata_kind(&m))),
-            Err(_) => (false, None),
-        };
-
-        // Containment is the lexical + per-segment-symlink guarantee that the
-        // resolved path stays beneath the canonical root. It must hold for
-        // not-yet-existing targets (creates) as well as existing ones: a
-        // create into a parent that is itself under the root is contained
-        // even though the leaf does not yet exist. `cur.starts_with(root)`
-        // was already checked above, so containment is true here regardless
-        // of whether the leaf exists.
-        let canonical_under_workspace = true;
-
-        let facts = PathFacts {
-            normalized_path: path.as_str().to_string(),
-            exists: last_exists,
-            kind,
-            parent_exists,
-            parent_kind,
-            byte_size,
-            canonical_under_workspace,
-        };
-        Ok((cur, facts))
-    }
-
-    /// Open the parent directory of a mutation target through a pinned
-    /// per-component dirfd walk. `parent_rel` is the parent directory path
-    /// relative to the workspace root; the returned fd is the ONLY way the
-    /// write path (create/install/remove) may reach a parent directory.
-    ///
-    /// Why this exists: `resolve_secure` validates a path and then hands
-    /// back a PATH, and anything that re-traverses that path afterward
-    /// (open/rename/unlink on the full path) is exposed to a TOCTOU window —
-    /// between validation and use, an already-validated directory component
-    /// can be swapped for a symlink, redirecting the mutation OUTSIDE the
-    /// workspace and bypassing deny rules.
-    ///
-    /// The Linux walk uses `O_RDONLY` directory opens: the root is opened once with
-    /// `O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC`, and every child component is opened
-    /// with `openat` relative to the already-pinned parent fd using the same
-    /// flags. Once a directory fd is open it is pinned to the inode, so a later
-    /// symlink swap of an ancestor PATH component cannot affect operations done
-    /// through the fd, and `O_NOFOLLOW|O_DIRECTORY` rejects a symlink (or
-    /// non-directory) swapped in at the component itself. Callers then act
-    /// through the returned fd with single-component leaf names, so no step
-    /// after this walk re-traverses the path.
-    ///
-    /// With `create_missing`, an absent component is created via `mkdirat`
-    /// relative to the pinned fd (`EEXIST` tolerated — losing a race to a
-    /// concurrent create is indistinguishable from the directory having
-    /// existed) and the `O_NOFOLLOW` open is retried; the retry catches a
-    /// symlink swapped in between the `mkdirat` and the `openat`.
-    ///
-    /// # What this does NOT guarantee (see docs/archive/records/FINDINGS.md L-39-04)
-    ///
-    /// This is **not** equivalent to `openat2(RESOLVE_BENEATH)`. `openat2`
-    /// resolves parent *and* leaf in one atomic kernel call; here the parent is
-    /// resolved, an fd is returned, and the leaf operation happens afterwards.
-    /// Pinning defeats symlink substitution, but it does not detect the pinned
-    /// directory being **renamed out of the workspace** between the pin and the
-    /// leaf operation: the fd follows the inode, so the leaf then lands wherever
-    /// that directory now lives. Nothing in the walk is a symlink in that
-    /// attack, so `O_NOFOLLOW` never fires, and there is no post-pin
-    /// containment re-check. Closing it needs `openat2(RESOLVE_BENEATH)` over
-    /// the whole path.
-    /// The attacker must already hold concurrent write access to the project
-    /// directory, which is why the residual is accepted rather than blocking.
-    ///
-    /// Symlink-shaped failures (`ELOOP`/`ENOTDIR`) map to
-    /// [`LocalWorkspaceError::SymlinkRejected`]; everything else maps to
-    /// `Io`.
-    fn open_parent_dir_secure(
-        &self,
-        parent_rel: &Path,
         create_missing: bool,
     ) -> Result<OwnedFd, LocalWorkspaceError> {
-        // Pin the root first. The root was canonicalized at construction,
-        // so O_NOFOLLOW failing here means the root itself was tampered
-        // with; fail closed as plain I/O.
-        let mut fd = rustix::fs::open(&self.root, dir_open_flags(), Mode::empty())
-            .map_err(|e| LocalWorkspaceError::Io(e.into()))?;
-        // `cur` mirrors the walk for error reporting only — it is never
-        // used to touch the filesystem, and it stays root-relative so a
-        // reported component cannot carry the host path (#98).
-        let mut cur = PathBuf::new();
-        for comp in parent_rel.components() {
-            match comp {
-                Component::Normal(part) => {
-                    cur.push(part);
-                    fd = open_dir_component(&fd, part, &cur, create_missing)?;
-                }
-                Component::CurDir => {}
-                // `parent_rel` derives from a resolve_secure result already
-                // contained under the root; anything non-normal here is
-                // inconsistent — fail closed.
-                _ => return Err(LocalWorkspaceError::RootEscape),
-            }
+        let (parent_rel, _) = split_parent_leaf(path);
+        before_open(Path::new(parent_rel));
+        let root = self.open_root()?;
+        if parent_rel == "." {
+            return Ok(root);
         }
-        Ok(fd)
+        let requested = path.as_str();
+        if !create_missing {
+            return open_beneath(&root, parent_rel, dir_flags(), Mode::empty())
+                .map_err(|e| resolve_error(e, requested));
+        }
+        let mut level: Option<OwnedFd> = None;
+        let mut end = 0;
+        for name in parent_rel.split('/') {
+            end += if end == 0 { name.len() } else { name.len() + 1 };
+            let prefix = &parent_rel[..end];
+            let fd = match open_beneath(&root, prefix, dir_flags(), Mode::empty()) {
+                Ok(fd) => fd,
+                Err(Errno::NOENT) => {
+                    let under = level.as_ref().unwrap_or(&root);
+                    if let Err(e) = rustix::fs::mkdirat(under, name, Mode::from_raw_mode(0o755))
+                        && e != Errno::EXIST
+                    {
+                        return Err(resolve_error(e, requested));
+                    }
+                    open_beneath(&root, prefix, dir_flags(), Mode::empty())
+                        .map_err(|e| resolve_error(e, requested))?
+                }
+                Err(e) => return Err(resolve_error(e, requested)),
+            };
+            level = Some(fd);
+        }
+        Ok(level.unwrap_or(root))
     }
 
-    /// Per-segment secure resolution returning only the observed facts.
+    /// Resolve `path` and return the observed facts.
     ///
     /// Every observation entry point and synchronous Tool Host import funnels
-    /// through this function, so path safety has one implementation.
+    /// through this function. It resolves through [`open_beneath`] like every
+    /// later open, so path safety has one implementation: a symlink anywhere
+    /// in the path is refused, and the facts come from `fstat` of the object
+    /// actually reached. A missing target reports `exists = false` with the
+    /// parent's facts resolved the same way.
+    ///
+    /// The intent is carried as operation vocabulary for the guard and
+    /// precondition layer; resolution does not depend on it.
     pub fn resolve_facts_blocking(
         &self,
         path: &WorkspacePath,
-        intent: PathIntent,
+        _intent: PathIntent,
     ) -> Result<PathFacts, LocalWorkspaceError> {
-        self.resolve_secure(path, intent).map(|(_, facts)| facts)
+        let root = self.open_root()?;
+        let facts = |exists, stat: Option<&rustix::fs::Stat>, parent: Option<PathKind>| PathFacts {
+            normalized_path: path.as_str().to_string(),
+            exists,
+            kind: stat.map(stat_kind),
+            parent_exists: parent.is_some(),
+            parent_kind: parent,
+            byte_size: stat
+                .filter(|st| FileType::from_raw_mode(st.st_mode) == FileType::RegularFile)
+                .map(|st| st.st_size as u64),
+            // Containment holds whenever resolution succeeded: openat2 with
+            // RESOLVE_BENEATH only returns objects beneath the root, and a
+            // missing leaf is contained by its lexically checked path.
+            canonical_under_workspace: true,
+        };
+        let stat_of =
+            |fd: &OwnedFd| rustix::fs::fstat(fd).map_err(|e| LocalWorkspaceError::Io(e.into()));
+        if path.is_project_root() {
+            let stat = stat_of(&root)?;
+            return Ok(facts(true, Some(&stat), Some(PathKind::Directory)));
+        }
+        let (parent_rel, _) = split_parent_leaf(path);
+        let parent_kind = open_beneath(&root, parent_rel, OFlags::PATH, Mode::empty())
+            .ok()
+            .and_then(|fd| rustix::fs::fstat(&fd).ok())
+            .map(|st| stat_kind(&st));
+        match open_beneath(&root, path.as_str(), OFlags::PATH, Mode::empty()) {
+            Ok(fd) => {
+                let stat = stat_of(&fd)?;
+                Ok(facts(true, Some(&stat), parent_kind))
+            }
+            Err(Errno::NOENT) => Ok(facts(false, None, parent_kind)),
+            Err(e) => Err(resolve_error(e, path.as_str())),
+        }
     }
 
-    /// Read a file under the workspace, returning its bytes. Synchronous form.
-    pub fn read_file_blocking(&self, path: &WorkspacePath) -> Result<Vec<u8>, LocalWorkspaceError> {
+    /// Open a regular file for reading. The open is non-blocking so a FIFO
+    /// or device cannot stall it, and anything that is not a regular file is
+    /// refused from the opened fd's own `fstat`.
+    fn open_regular_file(
+        &self,
+        path: &WorkspacePath,
+    ) -> Result<(fs::File, u64), LocalWorkspaceError> {
         path.require_file_path()?;
-        let (full, facts) = self.resolve_secure(path, PathIntent::Read)?;
-        if !facts.exists {
-            return Err(LocalWorkspaceError::NotFound {
-                normalized: path.as_str().to_string(),
-            });
-        }
-        if !matches!(facts.kind, Some(PathKind::File)) {
+        let root = self.open_root()?;
+        before_open(Path::new(path.as_str()));
+        let fd = open_beneath(&root, path.as_str(), file_read_flags(), Mode::empty())
+            .map_err(|e| resolve_error(e, path.as_str()))?;
+        let stat = rustix::fs::fstat(&fd).map_err(|e| LocalWorkspaceError::Io(e.into()))?;
+        if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
             return Err(LocalWorkspaceError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "not a regular file",
             )));
         }
-        Ok(fs::read(&full)?)
+        Ok((fs::File::from(fd), stat.st_size as u64))
+    }
+
+    /// Open an explicitly requested directory (list target or grep/find
+    /// root), returning it with the root fd that a recursive walk resolves
+    /// its children from. A symlink anywhere in the request is refused.
+    fn open_dir(&self, path: &WorkspacePath) -> Result<(OwnedFd, OwnedFd), LocalWorkspaceError> {
+        let root = self.open_root()?;
+        before_open(Path::new(path.as_str()));
+        let dir = open_beneath(&root, path.as_str(), dir_flags(), Mode::empty())
+            .map_err(|e| resolve_error(e, path.as_str()))?;
+        Ok((root, dir))
+    }
+
+    /// Read a file under the workspace, returning its bytes. Synchronous form.
+    pub fn read_file_blocking(&self, path: &WorkspacePath) -> Result<Vec<u8>, LocalWorkspaceError> {
+        let (mut file, size) = self.open_regular_file(path)?;
+        let mut bytes = Vec::with_capacity(size as usize);
+        file.read_to_end(&mut bytes)?;
+        Ok(bytes)
     }
 
     /// Read a regular file without ever allocating more than `allowed + 1`
-    /// bytes. Metadata rejects an already-oversized file before opening it;
-    /// the capped read is the post-check for a file that grows after resolution.
+    /// bytes. The opened fd's size rejects an already-oversized file before
+    /// reading; the capped read is the post-check for a file that grows
+    /// after it was opened.
     pub fn read_file_bounded_blocking(
         &self,
         path: &WorkspacePath,
         allowed: usize,
     ) -> Result<BoundedFileRead, LocalWorkspaceError> {
-        path.require_file_path()?;
-        let (full, facts) = self.resolve_secure(path, PathIntent::Read)?;
-        if !facts.exists {
-            return Err(LocalWorkspaceError::NotFound {
-                normalized: path.as_str().to_string(),
-            });
-        }
-        if !matches!(facts.kind, Some(PathKind::File)) {
-            return Err(LocalWorkspaceError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "not a regular file",
-            )));
-        }
-        if let Some(size) = facts.byte_size
-            && size as usize > allowed
-        {
+        let (file, size) = self.open_regular_file(path)?;
+        if size as usize > allowed {
             return Ok(BoundedFileRead::LimitExceeded {
                 observed: size as usize,
                 allowed,
             });
         }
-
-        let file = fs::File::open(full)?;
         let probe = allowed.saturating_add(1) as u64;
         let mut bytes = Vec::with_capacity(allowed.min(64 * 1024));
         file.take(probe).read_to_end(&mut bytes)?;
@@ -506,30 +455,22 @@ impl LocalWorkspace {
         &self,
         path: &WorkspacePath,
     ) -> Result<Vec<DirectoryEntry>, LocalWorkspaceError> {
-        let (full, facts) = self.resolve_secure(path, PathIntent::ListDirectory)?;
-        if !facts.exists {
-            return Err(LocalWorkspaceError::NotFound {
-                normalized: path.as_str().to_string(),
-            });
-        }
-        if !matches!(facts.kind, Some(PathKind::Directory)) {
-            return Err(LocalWorkspaceError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "not a directory",
-            )));
-        }
+        let (_, fd) = self.open_dir(path)?;
+        let mut dir = Dir::new(fd).map_err(|e| LocalWorkspaceError::Io(e.into()))?;
         let mut entries = Vec::new();
-        for entry in fs::read_dir(&full)? {
+        while let Some(entry) = next_entry(&mut dir) {
             let entry = entry?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            // `DirEntry::file_type` does NOT follow symlinks (unlike
-            // `DirEntry::metadata`), so symlinks — including dangling
-            // ones — list as `Symlink` instead of erroring the whole
-            // listing or masquerading as their target's kind.
-            let ft = entry.file_type()?;
+            // `d_type` (with a no-follow `statat` fallback when the
+            // filesystem does not report it) never follows symlinks, so
+            // symlinks — including dangling ones — list as `Symlink` instead
+            // of erroring the whole listing or masquerading as their target.
+            let ft = match entry.file_type() {
+                FileType::Unknown => entry_stat(&dir, &entry)?.0,
+                ft => ft,
+            };
             entries.push(DirectoryEntry {
-                name,
-                kind: file_type_kind(ft),
+                name: entry.file_name().to_string_lossy().into_owned(),
+                kind: kind_of(ft),
             });
         }
         entries.sort_by(|a, b| a.name.cmp(&b.name));
@@ -579,26 +520,16 @@ impl LocalWorkspace {
         if is_cancelled() {
             return Err(LocalWorkspaceError::Cancelled);
         }
-        let (full, facts) = self.resolve_secure(&req.path, PathIntent::ListDirectory)?;
-        if !facts.exists {
-            return Err(LocalWorkspaceError::NotFound {
-                normalized: req.path.as_str().to_string(),
-            });
-        }
-        if !matches!(facts.kind, Some(PathKind::Directory)) {
-            return Err(LocalWorkspaceError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "grep root is not a directory",
-            )));
-        }
+        let (root, dir) = self.open_dir(&req.path)?;
         let re = Regex::new(&req.pattern)
             .map_err(std::io::Error::other)
             .map_err(LocalWorkspaceError::Io)?;
         let mut out = Vec::new();
         let mut budget = GrepBudget::default();
         grep_walk(
-            &self.root,
-            &full,
+            &root,
+            dir,
+            req.path.as_str().as_ref(),
             &re,
             req.glob.as_deref(),
             max_results,
@@ -646,22 +577,12 @@ impl LocalWorkspace {
         if is_cancelled() {
             return Err(LocalWorkspaceError::Cancelled);
         }
-        let (full, facts) = self.resolve_secure(&req.path, PathIntent::ListDirectory)?;
-        if !facts.exists {
-            return Err(LocalWorkspaceError::NotFound {
-                normalized: req.path.as_str().to_string(),
-            });
-        }
-        if !matches!(facts.kind, Some(PathKind::Directory)) {
-            return Err(LocalWorkspaceError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "find root is not a directory",
-            )));
-        }
+        let (root, dir) = self.open_dir(&req.path)?;
         let mut out = Vec::new();
         find_walk(
-            &self.root,
-            &full,
+            &root,
+            dir,
+            req.path.as_str().as_ref(),
             &req.pattern,
             max_results,
             &mut visibility,
@@ -716,7 +637,7 @@ impl LocalWorkspace {
     ) -> Result<CreatedFile, ConditionalCreateError> {
         path.require_file_path()
             .map_err(LocalWorkspaceError::from)?;
-        let (full, facts) = self.resolve_secure(path, PathIntent::Create)?;
+        let facts = self.resolve_facts_blocking(path, PathIntent::Create)?;
         #[cfg(any(test, feature = "test-fault-injection"))]
         if self.fail_install.swap(false, Ordering::SeqCst) {
             return Err(
@@ -735,11 +656,11 @@ impl LocalWorkspace {
             }
             .into());
         }
-        let (parent_rel, leaf) = split_parent_leaf(&self.root, &full)?;
+        let (_, leaf) = split_parent_leaf(path);
         if is_cancelled() {
             return Err(ConditionalCreateError::Cancelled);
         }
-        let parent_fd = self.open_parent_dir_secure(&parent_rel, create_parents)?;
+        let parent_fd = self.open_parent_dir(path, create_parents)?;
         if is_cancelled() {
             return Err(ConditionalCreateError::Cancelled);
         }
@@ -758,7 +679,7 @@ impl LocalWorkspace {
                 &parent_fd,
                 tmp_name.as_str(),
                 &parent_fd,
-                leaf.as_os_str(),
+                leaf,
                 AtFlags::empty(),
             )
             .map_err(|err| {
@@ -794,7 +715,7 @@ impl LocalWorkspace {
         Ok(created)
     }
 
-    /// Non-cancellable atomic install through the pinned parent dirfd.
+    /// Non-cancellable atomic install through the opened parent directory fd.
     /// The caller must already have checked the mutation precondition.
     pub fn install_atomic_sync(
         &self,
@@ -863,17 +784,19 @@ impl LocalWorkspace {
     ) -> Result<AtomicInstallReceipt, LocalWorkspaceError> {
         path.require_file_path()?;
         let ws = self;
-        let (full, _facts) = ws.resolve_secure(path, PathIntent::Overwrite)?;
+        // Facts are unused, but resolving first keeps the static refusals
+        // (a symlink leaf or parent) ahead of any parent creation.
+        ws.resolve_facts_blocking(path, PathIntent::Overwrite)?;
         #[cfg(any(test, feature = "test-fault-injection"))]
         if ws.fail_install.swap(false, Ordering::SeqCst) {
             return Err(LocalWorkspaceError::Io(std::io::Error::other(
                 "injected install failure",
             )));
         }
-        let (parent_rel, leaf) = split_parent_leaf(&ws.root, &full)?;
+        let (_, leaf) = split_parent_leaf(path);
         // create_missing=true preserves the historical create_dir_all
-        // behavior of the install path, now through the pinned walk.
-        let parent_fd = ws.open_parent_dir_secure(&parent_rel, true)?;
+        // behavior of the install path.
+        let parent_fd = ws.open_parent_dir(path, true)?;
         // Unique single-component temp name: pid disambiguates across
         // processes sharing a workspace, the sequence number across
         // concurrent installs into the same directory in this process.
@@ -890,14 +813,13 @@ impl LocalWorkspace {
             tmp_file.write_all(content)?;
             tmp_file.sync_all()?;
             // Both names are single components relative to the same
-            // pinned fd, so no symlink traversal is possible on either
+            // parent fd, so no symlink traversal is possible on either
             // side of the rename.
-            rustix::fs::renameat(&parent_fd, tmp_name.as_str(), &parent_fd, leaf.as_os_str())
-                .map_err(|e| {
-                    LocalWorkspaceError::Io(std::io::Error::other(format!(
-                        "atomic persist failed: {e}"
-                    )))
-                })?;
+            rustix::fs::renameat(&parent_fd, tmp_name.as_str(), &parent_fd, leaf).map_err(|e| {
+                LocalWorkspaceError::Io(std::io::Error::other(format!(
+                    "atomic persist failed: {e}"
+                )))
+            })?;
             Ok(())
         })();
         if let Err(err) = installed {
@@ -907,8 +829,8 @@ impl LocalWorkspace {
             return Err(err);
         }
         drop(tmp_file);
-        // Durably record the rename in the directory itself — through
-        // the pinned fd, replacing the old path-based directory reopen.
+        // Durably record the rename in the directory itself, through the
+        // parent fd rather than by reopening the directory path.
         let installed = InstalledFile {
             path: path.clone(),
             content_hash: content_hash(content),
@@ -954,45 +876,19 @@ impl LocalWorkspace {
     }
 }
 
-fn metadata_kind(meta: &fs::Metadata) -> PathKind {
-    file_type_kind(meta.file_type())
-}
-
-/// Map a raw file type to the Local `PathKind` vocabulary.
-///
-/// Callers must obtain the `FileType` WITHOUT following symlinks
-/// (`fs::symlink_metadata` or `DirEntry::file_type`), otherwise the
-/// `Symlink` branch is dead and dangling links surface as errors instead of
-/// entries.
-fn file_type_kind(ft: fs::FileType) -> PathKind {
-    if ft.is_symlink() {
-        PathKind::Symlink
-    } else if ft.is_dir() {
-        PathKind::Directory
-    } else {
-        PathKind::File
+/// Map a raw file type to the Local `PathKind` vocabulary. Anything that is
+/// neither a symlink nor a directory is a `File`; readers additionally
+/// require a regular file before opening content.
+fn kind_of(ft: FileType) -> PathKind {
+    match ft {
+        FileType::Symlink => PathKind::Symlink,
+        FileType::Directory => PathKind::Directory,
+        _ => PathKind::File,
     }
 }
 
-/// Number of path components between `root` and `cur`, used to skip already
-/// walked components when filling in remaining segments lexically.
-fn cur_strip_count(root: &Path, cur: &Path) -> usize {
-    cur.strip_prefix(root)
-        .map(|rel| rel.components().count())
-        .unwrap_or(0)
-}
-
-fn relative_under(root: &Path, p: &Path) -> Result<String, LocalWorkspaceError> {
-    let rel = p
-        .strip_prefix(root)
-        .map_err(|_| LocalWorkspaceError::RootEscape)?;
-    let mut parts = Vec::new();
-    for c in rel.components() {
-        if let Component::Normal(n) = c {
-            parts.push(n.to_string_lossy().into_owned());
-        }
-    }
-    Ok(parts.join("/"))
+fn stat_kind(stat: &rustix::fs::Stat) -> PathKind {
+    kind_of(FileType::from_raw_mode(stat.st_mode))
 }
 
 /// Mode for files created by the write path (`0o644`, further narrowed by
@@ -1032,86 +928,130 @@ fn claim_install_temp(parent_fd: &OwnedFd) -> Result<(String, OwnedFd), LocalWor
     ))))
 }
 
-/// Directory-open flags for every step of the pinned dirfd walk: read-only,
-/// directories only, and no symlink following.
-fn dir_open_flags() -> OFlags {
-    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC
-}
-
-/// Open one child directory component relative to an already-pinned fd.
+/// The only way this module resolves a workspace path to a filesystem object
+/// (#233). `rel` is root-relative (`"."` is the root itself) and already free
+/// of `..` and leading `/` by `WorkspacePath` parsing.
 ///
-/// `cur` is the walked path for error reporting only. With
-/// `create_missing`, a missing component is `mkdirat`-created and the
-/// `O_NOFOLLOW` open retried; the retry catches a symlink swapped in
-/// between the `mkdirat` and the `openat`.
-fn open_dir_component(
-    dirfd: &OwnedFd,
-    name: &OsStr,
-    cur: &Path,
-    create_missing: bool,
-) -> Result<OwnedFd, LocalWorkspaceError> {
-    match rustix::fs::openat(dirfd, name, dir_open_flags(), Mode::empty()) {
-        Ok(fd) => Ok(fd),
-        Err(err) if err == Errno::NOENT && create_missing => {
-            // Tolerate EEXIST: losing a race to a concurrent create is
-            // indistinguishable from the directory having existed.
-            if let Err(e) = rustix::fs::mkdirat(dirfd, name, Mode::from_raw_mode(0o755))
-                && e != Errno::EXIST
-            {
-                return Err(map_walk_errno(e, cur));
-            }
-            rustix::fs::openat(dirfd, name, dir_open_flags(), Mode::empty())
-                .map_err(|e| map_walk_errno(e, cur))
-        }
-        Err(err) => Err(map_walk_errno(err, cur)),
-    }
-}
-
-/// Render a walk position for an error message with the workspace root
-/// removed.
+/// `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS` make the kernel refuse, during
+/// this one call, any component that is a symlink (`ELOOP`) or any resolution
+/// that leaves the root (`EXDEV`), so the returned fd names an object that was
+/// beneath the root, reached without a symlink, at the moment it was opened.
+/// Everything afterwards acts through that fd. If the object is later moved
+/// out of the root by another process, the fd still refers to that same
+/// object; that is the accepted boundary recorded in
+/// `docs/architecture/workspace.md`.
 ///
-/// `SymlinkRejected` is not purely internal: `host_mutate` forwards its
-/// `Display` text into the guest-visible `MutateError::PathRejected` reason,
-/// so an absolute component would hand a Tool the project's real location on
-/// disk through an error message (#98).
-fn walk_component_for_error(root: &Path, cur: &Path) -> PathBuf {
-    match cur.strip_prefix(root) {
-        Ok(relative) => relative.to_path_buf(),
-        // Unreachable — every walk starts at the root. Fall back to the leaf
-        // name rather than `cur`, because the whole point is that the host
-        // path must not reach the message.
-        Err(_) => PathBuf::from(cur.file_name().unwrap_or_default()),
+/// There is no fallback: a kernel without `openat2` (`ENOSYS`) or a sandbox
+/// that forbids it (`EPERM`) fails the operation.
+fn open_beneath(
+    root: &OwnedFd,
+    rel: impl rustix::path::Arg,
+    oflags: OFlags,
+    mode: Mode,
+) -> rustix::io::Result<OwnedFd> {
+    rustix::fs::openat2(
+        root,
+        rel,
+        oflags | OFlags::CLOEXEC,
+        mode,
+        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
+    )
+}
+
+/// Flags for opening a directory to enumerate it or act inside it.
+fn dir_flags() -> OFlags {
+    OFlags::RDONLY | OFlags::DIRECTORY
+}
+
+/// Flags for opening content to read. Non-blocking so a FIFO swapped in at
+/// open time cannot stall the open; it has no effect on regular-file reads.
+fn file_read_flags() -> OFlags {
+    OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY
+}
+
+/// Map an [`open_beneath`] failure for the request `requested`.
+///
+/// `openat2` does not say which component was a symlink, so the refusal
+/// names the whole root-relative request. It never carries a host path:
+/// `host_mutate` forwards this `Display` text to the guest (#98).
+/// `EAGAIN` (only possible with `..`, which parsing already rejected) is not
+/// retried.
+fn resolve_error(err: Errno, requested: &str) -> LocalWorkspaceError {
+    match err {
+        Errno::LOOP => LocalWorkspaceError::SymlinkRejected {
+            component: PathBuf::from(requested),
+        },
+        Errno::XDEV => LocalWorkspaceError::RootEscape,
+        Errno::NOENT => LocalWorkspaceError::NotFound {
+            normalized: requested.to_string(),
+        },
+        Errno::NOSYS => LocalWorkspaceError::Io(std::io::Error::other(
+            "openat2 unavailable: workspace access requires Linux 5.6 or later",
+        )),
+        other => LocalWorkspaceError::Io(other.into()),
     }
 }
 
-/// Map a dirfd-walk errno: symlink-shaped failures — `ELOOP` from
-/// `O_NOFOLLOW` and `ENOTDIR` from a non-directory swap — become
-/// `SymlinkRejected`; the rest stay plain I/O. `cur` is already root-relative.
-fn map_walk_errno(e: Errno, cur: &Path) -> LocalWorkspaceError {
-    if e == Errno::LOOP || e == Errno::NOTDIR {
-        LocalWorkspaceError::SymlinkRejected {
-            component: cur.to_path_buf(),
+/// Next directory entry, skipping `.` and `..` (`std::fs::read_dir` hides
+/// them; rustix's `Dir` does not).
+fn next_entry(dir: &mut Dir) -> Option<Result<rustix::fs::DirEntry, LocalWorkspaceError>> {
+    loop {
+        match dir.next()? {
+            Ok(entry) if matches!(entry.file_name().to_bytes(), b"." | b"..") => continue,
+            Ok(entry) => return Some(Ok(entry)),
+            Err(e) => return Some(Err(LocalWorkspaceError::Io(e.into()))),
         }
-    } else {
-        LocalWorkspaceError::Io(e.into())
     }
 }
 
-/// Split a `resolve_secure` result into (parent path relative to `root`,
-/// single-component leaf name) for the pinned-fd write path.
-fn split_parent_leaf(root: &Path, full: &Path) -> Result<(PathBuf, OsString), LocalWorkspaceError> {
-    let parent = full.parent().unwrap_or(root);
-    let parent_rel = parent
-        .strip_prefix(root)
-        .map_err(|_| LocalWorkspaceError::RootEscape)?
-        .to_path_buf();
-    let leaf = full
-        .file_name()
-        .ok_or_else(|| {
-            LocalWorkspaceError::Io(std::io::Error::other("mutation target has no file name"))
-        })?
-        .to_os_string();
-    Ok((parent_rel, leaf))
+/// No-follow type and size of one entry, relative to the directory being
+/// enumerated. This only classifies the entry; anything entered or read is
+/// opened again from the root through [`open_beneath`].
+fn entry_stat(
+    dir: &Dir,
+    entry: &rustix::fs::DirEntry,
+) -> Result<(FileType, u64), LocalWorkspaceError> {
+    let fd = dir.fd().map_err(|e| LocalWorkspaceError::Io(e.into()))?;
+    let stat = rustix::fs::statat(fd, entry.file_name(), AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(|e| LocalWorkspaceError::Io(e.into()))?;
+    Ok((FileType::from_raw_mode(stat.st_mode), stat.st_size as u64))
+}
+
+/// Open a child found during a grep/find walk, from the root by its full
+/// root-relative path. A child that is no longer there as a directory or
+/// file reachable without a symlink (`ELOOP`, `ENOTDIR`, `ENOENT`) is
+/// skipped (`None`), like a symlink entry seen at enumeration time.
+/// Escaping the root (`EXDEV`) and any other error fail the walk.
+fn open_walk_child(
+    root: &OwnedFd,
+    rel: &OsStr,
+    oflags: OFlags,
+) -> Result<Option<OwnedFd>, LocalWorkspaceError> {
+    match open_beneath(root, rel, oflags, Mode::empty()) {
+        Ok(fd) => Ok(Some(fd)),
+        Err(Errno::LOOP | Errno::NOTDIR | Errno::NOENT) => Ok(None),
+        Err(e) => Err(resolve_error(e, &rel.to_string_lossy())),
+    }
+}
+
+/// Root-relative path of `name` inside the walked directory `current`.
+fn child_rel(current: &OsStr, name: &std::ffi::CStr) -> OsString {
+    let name = OsStr::from_bytes(name.to_bytes());
+    if current == "." {
+        return name.to_os_string();
+    }
+    let mut rel = current.to_os_string();
+    rel.push("/");
+    rel.push(name);
+    rel
+}
+
+/// Split a workspace file path into (parent path relative to the root, `"."`
+/// for the root itself; single-component leaf name).
+fn split_parent_leaf(path: &WorkspacePath) -> (&str, &str) {
+    path.as_str()
+        .rsplit_once('/')
+        .unwrap_or((".", path.as_str()))
 }
 
 /// Per-file grep size cap. Files whose on-disk size exceeds this are skipped
@@ -1176,8 +1116,9 @@ impl Default for GrepBudget {
 // recursion, so a bundling struct would only rename the argument list.
 #[allow(clippy::too_many_arguments)]
 fn grep_walk(
-    workspace_root: &Path,
-    current: &Path,
+    root: &OwnedFd,
+    dir: OwnedFd,
+    current: &OsStr,
     re: &Regex,
     glob: Option<&str>,
     max_results: usize,
@@ -1192,7 +1133,8 @@ fn grep_walk(
     if out.len() >= max_results || budget.exhausted() {
         return Ok(());
     }
-    for entry in fs::read_dir(current)? {
+    let mut dir = Dir::new(dir).map_err(|e| LocalWorkspaceError::Io(e.into()))?;
+    while let Some(entry) = next_entry(&mut dir) {
         if is_cancelled() {
             return Err(LocalWorkspaceError::Cancelled);
         }
@@ -1200,39 +1142,67 @@ fn grep_walk(
             break;
         }
         let entry = entry?;
-        let path = entry.path();
-        let meta = fs::symlink_metadata(&path)?;
-        let rel = relative_under(workspace_root, &path)?;
-        if meta.is_dir() {
+        let (ft, size) = entry_stat(&dir, &entry)?;
+        let child = child_rel(current, entry.file_name());
+        let rel = child.to_string_lossy();
+        if ft == FileType::Directory {
             if visibility.should_descend(&rel) {
-                grep_walk(
-                    workspace_root,
-                    &path,
-                    re,
-                    glob,
-                    max_results,
-                    budget,
-                    visibility,
-                    out,
-                    is_cancelled,
-                )?;
+                before_open(Path::new(&child));
+                if let Some(fd) = open_walk_child(root, &child, dir_flags())? {
+                    grep_walk(
+                        root,
+                        fd,
+                        &child,
+                        re,
+                        glob,
+                        max_results,
+                        budget,
+                        visibility,
+                        out,
+                        is_cancelled,
+                    )?;
+                }
             }
-        } else if meta.is_file() {
+        } else if ft == FileType::RegularFile {
             if !visibility.is_visible_file(&rel) {
                 continue;
             }
             if let Some(g) = glob {
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                let name = entry.file_name().to_str().unwrap_or("");
                 if !glob_match(g, name) {
                     continue;
                 }
             }
             // Over-cap files are skipped before being opened, exactly like
             // unreadable files below.
-            if meta.len() > budget.per_file_bytes {
+            if size > budget.per_file_bytes {
                 continue;
             }
-            grep_file(&rel, &path, re, max_results, budget, out, is_cancelled)?;
+            before_open(Path::new(&child));
+            // Unreadable files are silently skipped, preserving the old
+            // semantics; that covers a file swapped for a symlink or removed
+            // since enumeration. Escaping the root still fails the walk.
+            let fd = match open_beneath(root, &child, file_read_flags(), Mode::empty()) {
+                Ok(fd) => fd,
+                Err(Errno::XDEV) => return Err(LocalWorkspaceError::RootEscape),
+                Err(_) => continue,
+            };
+            // A FIFO or device swapped in after classification is skipped
+            // like a static one.
+            let regular = rustix::fs::fstat(&fd)
+                .is_ok_and(|st| FileType::from_raw_mode(st.st_mode) == FileType::RegularFile);
+            if !regular {
+                continue;
+            }
+            grep_file(
+                &rel,
+                fs::File::from(fd),
+                re,
+                max_results,
+                budget,
+                out,
+                is_cancelled,
+            )?;
         }
     }
     Ok(())
@@ -1251,18 +1221,13 @@ fn grep_walk(
 /// match in the file.
 fn grep_file(
     rel: &str,
-    path: &Path,
+    file: fs::File,
     re: &Regex,
     max_results: usize,
     budget: &mut GrepBudget,
     out: &mut Vec<GrepMatch>,
     is_cancelled: &impl Fn() -> bool,
 ) -> Result<(), LocalWorkspaceError> {
-    // Unreadable files are silently skipped, preserving the old semantics.
-    let file = match fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return Ok(()),
-    };
     let allowance = budget.file_allowance();
     let mut reader = BufReader::new(file.take(allowance));
     let mut buf = String::new();
@@ -1314,9 +1279,12 @@ fn grep_file(
     Ok(())
 }
 
+// Recursive walk plumbing, as for `grep_walk`.
+#[allow(clippy::too_many_arguments)]
 fn find_walk(
-    workspace_root: &Path,
-    current: &Path,
+    root: &OwnedFd,
+    dir: OwnedFd,
+    current: &OsStr,
     pattern: &str,
     max_results: usize,
     visibility: &mut VisibilityEngine,
@@ -1329,7 +1297,8 @@ fn find_walk(
     if out.len() >= max_results {
         return Ok(());
     }
-    for entry in fs::read_dir(current)? {
+    let mut dir = Dir::new(dir).map_err(|e| LocalWorkspaceError::Io(e.into()))?;
+    while let Some(entry) = next_entry(&mut dir) {
         if is_cancelled() {
             return Err(LocalWorkspaceError::Cancelled);
         }
@@ -1337,25 +1306,28 @@ fn find_walk(
             break;
         }
         let entry = entry?;
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let rel = relative_under(workspace_root, &path)?;
-        let meta = fs::symlink_metadata(&path)?;
-        let is_dir = meta.is_dir();
+        let name = entry.file_name().to_string_lossy();
+        let child = child_rel(current, entry.file_name());
+        let rel = child.to_string_lossy();
+        let is_dir = entry_stat(&dir, &entry)?.0 == FileType::Directory;
         let assessment = visibility.assess(&rel, is_dir);
         if glob_match(pattern, &name) && assessment.is_visible() {
             out.push(WorkspacePath::parse(&rel).map_err(LocalWorkspaceError::Path)?);
         }
         if is_dir && assessment.should_descend() {
-            find_walk(
-                workspace_root,
-                &path,
-                pattern,
-                max_results,
-                visibility,
-                out,
-                is_cancelled,
-            )?;
+            before_open(Path::new(&child));
+            if let Some(fd) = open_walk_child(root, &child, dir_flags())? {
+                find_walk(
+                    root,
+                    fd,
+                    &child,
+                    pattern,
+                    max_results,
+                    visibility,
+                    out,
+                    is_cancelled,
+                )?;
+            }
         }
     }
     Ok(())
@@ -1483,6 +1455,478 @@ mod tests {
         LocalWorkspace::new(dir.path())
     }
 
+    // #233: swaps happen inside the public operation, after its path/type
+    // check. A pre-call swap would only exercise the existing static rejection.
+    const RACE_CANARY: &str = "I233_EXTERNAL_CANARY_7b98\n";
+    const RACE_NAME: &str = "I233_EXTERNAL_NAME_7b98.txt";
+
+    fn with_swap<T>(trigger: &str, action: impl FnOnce() + 'static, op: impl FnOnce() -> T) -> T {
+        let trigger = PathBuf::from(trigger);
+        let fired = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&fired);
+        let mut action = Some(action);
+        let _guard = set_before_open(move |rel| {
+            if rel == trigger
+                && let Some(action) = action.take()
+            {
+                observed.store(true, Ordering::Relaxed);
+                action();
+            }
+        });
+        let result = op();
+        assert!(
+            fired.load(Ordering::Relaxed),
+            "swap insertion point was not reached"
+        );
+        result
+    }
+
+    #[derive(Clone, Copy)]
+    enum Observation {
+        Read,
+        Bounded,
+        List,
+        Grep,
+        Find,
+    }
+
+    fn observe(
+        ws: &LocalWorkspace,
+        mode: Observation,
+        path: &str,
+    ) -> Result<String, LocalWorkspaceError> {
+        let path = WorkspacePath::parse(path).unwrap();
+        let visibility = || VisibilityEngine::load(ws.root(), Default::default());
+        match mode {
+            Observation::Read => ws
+                .read_file_blocking(&path)
+                .map(|bytes| String::from_utf8(bytes).unwrap()),
+            Observation::Bounded => {
+                ws.read_file_bounded_blocking(&path, 4096)
+                    .map(|read| match read {
+                        BoundedFileRead::Complete(bytes) => String::from_utf8(bytes).unwrap(),
+                        BoundedFileRead::LimitExceeded { .. } => {
+                            panic!("fixture exceeds read limit")
+                        }
+                    })
+            }
+            Observation::List => ws
+                .list_dir_blocking(&path)
+                .map(|entries| format!("{entries:?}")),
+            Observation::Grep => ws
+                .grep_blocking(
+                    &GrepRequest {
+                        path,
+                        pattern: "I233_EXTERNAL_CANARY".into(),
+                        glob: None,
+                    },
+                    100,
+                    visibility(),
+                )
+                .map(|(matches, _)| format!("{matches:?}")),
+            Observation::Find => ws
+                .find_files_blocking(
+                    &FindRequest {
+                        path,
+                        pattern: "*".into(),
+                    },
+                    100,
+                    visibility(),
+                )
+                .map(|(paths, _)| format!("{paths:?}")),
+        }
+    }
+
+    fn assert_no_host_path(error: &LocalWorkspaceError, root: &Path) {
+        let message = error.to_string();
+        assert!(
+            !message.contains(root.to_str().unwrap()),
+            "refusal leaked workspace root: {message}"
+        );
+        assert!(
+            !message.contains("/tmp"),
+            "refusal leaked host path: {message}"
+        );
+    }
+
+    fn assert_no_canary(result: &Result<String, LocalWorkspaceError>) {
+        if let Ok(output) = result {
+            assert!(
+                !output.contains(RACE_CANARY.trim()) && !output.contains(RACE_NAME),
+                "outside canary escaped: {output}"
+            );
+        }
+    }
+
+    fn symlink_swap_case(
+        mode: Observation,
+        request: &str,
+        swapped: &str,
+        file_leaf: bool,
+        suffix: &str,
+        explicit: bool,
+    ) {
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let ws = ws_at(&dir);
+        let inside = dir.path().join(swapped);
+        if matches!(mode, Observation::Read | Observation::Bounded) {
+            let file = dir.path().join(request);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, b"inside\n").unwrap();
+        } else {
+            fs::create_dir_all(dir.path().join(request)).unwrap();
+            if file_leaf {
+                fs::write(&inside, b"inside\n").unwrap();
+            } else {
+                fs::create_dir_all(&inside).unwrap();
+            }
+        }
+        let target = if file_leaf {
+            outside.path().join(RACE_NAME)
+        } else {
+            outside.path().to_path_buf()
+        };
+        let canary_file = if file_leaf {
+            target.clone()
+        } else if matches!(mode, Observation::Read | Observation::Bounded) {
+            target.join(suffix)
+        } else {
+            target.join(suffix).join(RACE_NAME)
+        };
+        fs::create_dir_all(canary_file.parent().unwrap()).unwrap();
+        fs::write(&canary_file, RACE_CANARY).unwrap();
+        let result = with_swap(
+            if explicit { request } else { swapped },
+            move || {
+                if file_leaf {
+                    fs::remove_file(&inside).unwrap();
+                } else {
+                    fs::remove_dir_all(&inside).unwrap();
+                }
+                symlink(target, inside).unwrap();
+            },
+            || observe(&ws, mode, request),
+        );
+        // Check outside integrity before the intentionally-red content assertion.
+        assert_eq!(
+            fs::read_to_string(&canary_file).unwrap(),
+            RACE_CANARY,
+            "outside file changed"
+        );
+        assert_eq!(
+            fs::read_dir(canary_file.parent().unwrap()).unwrap().count(),
+            1,
+            "outside directory changed"
+        );
+        assert_no_canary(&result);
+        if explicit {
+            let error = result.unwrap_err();
+            assert_no_host_path(&error, ws.root());
+            assert!(
+                matches!(error, LocalWorkspaceError::SymlinkRejected { .. }),
+                "expected SymlinkRejected, got {error:?}"
+            );
+        } else {
+            result.expect("recursive swapped child must be skipped, not fail the operation");
+        }
+    }
+
+    #[test]
+    fn r1_read_rejects_leaf_symlink_swap() {
+        symlink_swap_case(Observation::Read, "file", "file", true, "", true);
+    }
+
+    #[test]
+    fn r1_read_bounded_rejects_leaf_symlink_swap() {
+        symlink_swap_case(Observation::Bounded, "file", "file", true, "", true);
+    }
+
+    #[test]
+    fn r2_read_rejects_first_directory_symlink_swap() {
+        symlink_swap_case(Observation::Read, "a/file", "a", false, "file", true);
+    }
+
+    #[test]
+    fn r3_read_rejects_middle_directory_symlink_swap() {
+        symlink_swap_case(
+            Observation::Read,
+            "a/middle/file",
+            "a/middle",
+            false,
+            "file",
+            true,
+        );
+    }
+
+    #[test]
+    fn r4_list_rejects_requested_directory_symlink_swap() {
+        symlink_swap_case(Observation::List, "target", "target", false, "", true);
+    }
+
+    #[test]
+    fn r5_list_rejects_first_directory_symlink_swap() {
+        symlink_swap_case(Observation::List, "a/target", "a", false, "target", true);
+    }
+
+    #[test]
+    fn r6_grep_rejects_search_root_symlink_swap() {
+        symlink_swap_case(Observation::Grep, "scan", "scan", false, "", true);
+    }
+
+    #[test]
+    fn r7_grep_skips_recursive_directory_symlink_swap() {
+        symlink_swap_case(Observation::Grep, "scan", "scan/child", false, "", false);
+    }
+
+    #[test]
+    fn r8_grep_skips_recursive_file_symlink_swap() {
+        symlink_swap_case(Observation::Grep, "scan", "scan/file", true, "", false);
+    }
+
+    #[test]
+    fn r9_find_rejects_search_root_symlink_swap() {
+        symlink_swap_case(Observation::Find, "scan", "scan", false, "", true);
+    }
+
+    #[test]
+    fn r10_find_skips_recursive_directory_symlink_swap() {
+        symlink_swap_case(Observation::Find, "scan", "scan/child", false, "", false);
+    }
+
+    fn moved_directory_case(rename_out: bool) {
+        let dir = TempDir::new().unwrap();
+        // Same-filesystem destination for the deliberate rename out of root.
+        let outside = TempDir::new_in(dir.path().parent().unwrap()).unwrap();
+        let ws = ws_at(&dir);
+        fs::create_dir_all(dir.path().join("a/middle")).unwrap();
+        fs::write(dir.path().join("a/middle/file"), b"inside\n").unwrap();
+        fs::write(outside.path().join(RACE_NAME), RACE_CANARY).unwrap();
+        let middle = dir.path().join("a/middle");
+        let moved = outside.path().join("moved");
+        let moved_action = moved.clone();
+        let result = with_swap(
+            "a/middle/file",
+            move || {
+                if rename_out {
+                    fs::rename(&middle, moved_action).unwrap();
+                } else {
+                    fs::remove_dir_all(&middle).unwrap();
+                    fs::write(middle, b"not a directory").unwrap();
+                }
+            },
+            || observe(&ws, Observation::Read, "a/middle/file"),
+        );
+        assert_eq!(
+            fs::read_to_string(outside.path().join(RACE_NAME)).unwrap(),
+            RACE_CANARY
+        );
+        assert_eq!(
+            fs::read_dir(outside.path()).unwrap().count(),
+            if rename_out { 2 } else { 1 }
+        );
+        if rename_out {
+            assert_eq!(fs::read(moved.join("file")).unwrap(), b"inside\n");
+        }
+        assert_no_canary(&result);
+        let error = result.unwrap_err();
+        assert_no_host_path(&error, ws.root());
+        if rename_out {
+            assert!(
+                matches!(error, LocalWorkspaceError::NotFound { .. }),
+                "expected NotFound, got {error:?}"
+            );
+        } else {
+            assert!(
+                matches!(error, LocalWorkspaceError::Io(_)),
+                "expected Io, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn r11_read_rejects_middle_directory_replaced_with_file() {
+        moved_directory_case(false);
+    }
+
+    #[test]
+    fn r12_read_reports_not_found_after_middle_directory_moves_out() {
+        moved_directory_case(true);
+    }
+
+    fn make_fifo(path: &Path) {
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            path,
+            rustix::fs::FileType::Fifo,
+            Mode::RUSR | Mode::WUSR,
+            0,
+        )
+        .unwrap();
+    }
+
+    fn fifo_case(recursive: bool, swap_fifo: bool) {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        fs::write(outside.path().join(RACE_NAME), RACE_CANARY).unwrap();
+        let ws = ws_at(&dir);
+        let fifo = dir.path().join("pipe");
+        if swap_fifo {
+            fs::write(&fifo, b"inside\n").unwrap();
+        } else {
+            make_fifo(&fifo);
+        }
+        let swap_path = fifo.clone();
+        let (tx, rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = if swap_fifo {
+                // A static FIFO is already skipped by grep. Swap after file
+                // classification to exercise its actual open-time hazard.
+                with_swap(
+                    "pipe",
+                    move || {
+                        fs::remove_file(&swap_path).unwrap();
+                        make_fifo(&swap_path);
+                    },
+                    || observe(&ws, Observation::Grep, "."),
+                )
+            } else if recursive {
+                observe(&ws, Observation::Grep, ".")
+            } else {
+                observe(&ws, Observation::Read, "pipe")
+            };
+            tx.send(result).unwrap();
+        });
+        let timely = rx.recv_timeout(Duration::from_secs(2));
+        let timed_out = matches!(timely, Err(mpsc::RecvTimeoutError::Timeout));
+        let result = if timed_out {
+            // RDWR never blocks: briefly supplying a writer wakes the old
+            // blocking open; closing it lets read see EOF. No process::exit.
+            let rescue = rustix::fs::open(
+                &fifo,
+                OFlags::RDWR | OFlags::NONBLOCK | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .unwrap();
+            drop(rescue);
+            rx.recv_timeout(Duration::from_secs(2))
+        } else {
+            timely
+        };
+        if worker.is_finished() || result.is_ok() {
+            worker.join().expect("FIFO worker panicked");
+        }
+        assert_eq!(
+            fs::read_to_string(outside.path().join(RACE_NAME)).unwrap(),
+            RACE_CANARY
+        );
+        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 1);
+        let result = result.expect("FIFO worker did not finish after cleanup");
+        assert_no_canary(&result);
+        assert!(
+            !timed_out,
+            "FIFO observation hung for more than 2 seconds (worker unblocked for cleanup)"
+        );
+        if recursive {
+            result.expect("grep must skip the FIFO");
+        } else {
+            let error = result.unwrap_err();
+            assert_no_host_path(&error, dir.path());
+            assert!(
+                matches!(error, LocalWorkspaceError::Io(_)),
+                "expected special-file refusal, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn r13_read_fifo_is_rejected_without_blocking() {
+        fifo_case(false, false);
+    }
+
+    #[test]
+    fn r14_grep_fifo_swap_is_skipped_without_blocking() {
+        fifo_case(true, true);
+    }
+
+    #[test]
+    fn r14_grep_static_fifo_is_skipped_without_blocking() {
+        fifo_case(true, false);
+    }
+
+    #[test]
+    fn r15_create_rejects_parent_symlink_swap() {
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join("parent")).unwrap();
+        fs::write(outside.path().join(RACE_NAME), RACE_CANARY).unwrap();
+        let parent = dir.path().join("parent");
+        let target = outside.path().to_path_buf();
+        let ws = ws_at(&dir);
+        let result = with_swap(
+            "parent",
+            move || {
+                fs::remove_dir(&parent).unwrap();
+                symlink(target, parent).unwrap();
+            },
+            || ws.create_excl_sync(&WorkspacePath::parse("parent/new").unwrap(), b"new", false),
+        );
+        assert_eq!(
+            fs::read_to_string(outside.path().join(RACE_NAME)).unwrap(),
+            RACE_CANARY
+        );
+        assert_eq!(
+            fs::read_dir(outside.path()).unwrap().count(),
+            1,
+            "outside directory gained an entry"
+        );
+        assert!(!outside.path().join("new").exists());
+        if let Ok(created) = &result {
+            assert!(!format!("{created:?}").contains(RACE_CANARY.trim()));
+        }
+        let error = result.unwrap_err();
+        assert_no_host_path(&error, ws.root());
+        assert!(
+            matches!(error, LocalWorkspaceError::SymlinkRejected { .. }),
+            "got {error:?}"
+        );
+    }
+
+    #[test]
+    fn r16_all_static_symlink_refusals_hide_host_paths() {
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        fs::write(outside.path().join(RACE_NAME), RACE_CANARY).unwrap();
+        symlink(outside.path(), dir.path().join("link")).unwrap();
+        let ws = ws_at(&dir);
+        for (mode, path) in [
+            (Observation::Read, "link/I233_EXTERNAL_NAME_7b98.txt"),
+            (Observation::Bounded, "link/I233_EXTERNAL_NAME_7b98.txt"),
+            (Observation::List, "link"),
+            (Observation::Grep, "link"),
+            (Observation::Find, "link"),
+        ] {
+            let result = observe(&ws, mode, path);
+            assert_no_canary(&result);
+            let error = result.unwrap_err();
+            assert_no_host_path(&error, ws.root());
+            assert!(matches!(error, LocalWorkspaceError::SymlinkRejected { .. }));
+        }
+        let error = ws
+            .create_excl_sync(&WorkspacePath::parse("link/new").unwrap(), b"new", false)
+            .unwrap_err();
+        assert_no_host_path(&error, ws.root());
+        assert!(matches!(error, LocalWorkspaceError::SymlinkRejected { .. }));
+        assert_eq!(
+            fs::read_to_string(outside.path().join(RACE_NAME)).unwrap(),
+            RACE_CANARY
+        );
+        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 1);
+    }
+
     // ── ADR step 1: eight test classes ───────────────────────────────────
 
     // 1. Root escape: WorkspacePath::parse already rejects `..` and absolute
@@ -1556,7 +2000,7 @@ mod tests {
     // 8. Partial-write failure: writing into a read-only directory fails and
     //    leaves no partial target on disk (the O_EXCL temp creation itself
     //    fails, and any later failure unlinks the temp name through the
-    //    pinned parent fd). This is the real-fault approximation ADR step 1
+    //    parent fd). This is the real-fault approximation ADR step 1
     //    prescribes; the narrow fault-injection seam below covers the
     //    deterministic boundary.
     #[test]
@@ -1690,7 +2134,7 @@ mod tests {
         assert!(matches!(error, LocalWorkspaceError::Cancelled));
     }
 
-    // ── TOCTOU-safe write path (pinned dirfd walk) ───────────────────────
+    // ── TOCTOU-safe write path (parent opened through open_beneath) ──────
 
     /// Names of `.lattice-tmp-*` residue directly beneath `dir`.
     fn tmp_residue(dir: &Path) -> Vec<String> {
@@ -1702,23 +2146,22 @@ mod tests {
             .collect()
     }
 
-    // The validate→use race itself cannot be scheduled deterministically,
-    // so these tests pin the property that makes it harmless: the dirfd
-    // walk re-checks every component with O_NOFOLLOW at open time, so a
-    // directory swapped for a symlink AFTER resolve_secure passed is still
-    // rejected and nothing reaches the outside target.
+    // The facts→open race of a mutation: the parent open resolves the whole
+    // parent path again with RESOLVE_NO_SYMLINKS, so a directory swapped for
+    // a symlink AFTER the facts were taken is still rejected and nothing
+    // reaches the outside target.
     #[test]
-    fn open_parent_dir_secure_rejects_post_resolve_symlink_swap() {
+    fn open_parent_dir_rejects_post_resolve_symlink_swap() {
         let dir = TempDir::new().unwrap();
         let outside = TempDir::new().unwrap();
         std::fs::create_dir(dir.path().join("a")).unwrap();
         let ws = ws_at(&dir);
-        // At this point resolve_secure("a/…") would pass: `a` is a real
+        // At this point resolving "a/x" would pass: `a` is a real
         // directory. Simulate the post-resolve swap.
         std::fs::remove_dir(dir.path().join("a")).unwrap();
         symlink(outside.path(), dir.path().join("a")).unwrap();
         let err = ws
-            .open_parent_dir_secure(Path::new("a"), false)
+            .open_parent_dir(&WorkspacePath::parse("a/x").unwrap(), false)
             .unwrap_err();
         assert!(
             matches!(err, LocalWorkspaceError::SymlinkRejected { .. }),
@@ -1733,8 +2176,9 @@ mod tests {
 
     /// #98: `host_mutate` forwards this error's `Display` into the
     /// guest-visible `PathRejected` reason, so the reported component must be
-    /// root-relative. Covers both construction sites — the `resolve_secure`
-    /// walk and the pinned-dirfd walk in `open_parent_dir_secure`.
+    /// root-relative. `openat2` does not name the offending component, so
+    /// the refusal carries the whole request. Covers both the facts
+    /// resolution and the mutation parent open.
     #[test]
     fn symlink_rejection_reports_a_relative_component_not_the_host_path() {
         let dir = TempDir::new().unwrap();
@@ -1746,7 +2190,7 @@ mod tests {
         let root_str = root.to_str().expect("utf-8 temp path");
 
         let resolve_err = ws
-            .resolve_secure(
+            .resolve_facts_blocking(
                 &WorkspacePath::parse("nested/link/x").unwrap(),
                 PathIntent::Read,
             )
@@ -1754,19 +2198,19 @@ mod tests {
         let LocalWorkspaceError::SymlinkRejected { component } = &resolve_err else {
             panic!("expected SymlinkRejected, got {resolve_err:?}");
         };
-        assert_eq!(component, Path::new("nested/link"));
+        assert_eq!(component, Path::new("nested/link/x"));
 
         std::fs::create_dir(dir.path().join("swap")).unwrap();
         let swapped = ws_at(&dir);
         std::fs::remove_dir(dir.path().join("swap")).unwrap();
         symlink(outside.path(), dir.path().join("swap")).unwrap();
         let walk_err = swapped
-            .open_parent_dir_secure(Path::new("swap"), false)
+            .open_parent_dir(&WorkspacePath::parse("swap/new").unwrap(), false)
             .unwrap_err();
         let LocalWorkspaceError::SymlinkRejected { component } = &walk_err else {
             panic!("expected SymlinkRejected, got {walk_err:?}");
         };
-        assert_eq!(component, Path::new("swap"));
+        assert_eq!(component, Path::new("swap/new"));
 
         for err in [&resolve_err, &walk_err] {
             let message = err.to_string();
@@ -1782,15 +2226,15 @@ mod tests {
     }
 
     // create_missing must not mkdir THROUGH a symlink component either: the
-    // O_NOFOLLOW open of the symlink fails before any mkdirat can run.
+    // open of the existing symlinked prefix fails before any mkdirat can run.
     #[test]
-    fn open_parent_dir_secure_create_missing_rejects_symlink_component() {
+    fn open_parent_dir_create_missing_rejects_symlink_component() {
         let dir = TempDir::new().unwrap();
         let outside = TempDir::new().unwrap();
         let ws = ws_at(&dir);
         symlink(outside.path(), dir.path().join("a")).unwrap();
         let err = ws
-            .open_parent_dir_secure(Path::new("a/b"), true)
+            .open_parent_dir(&WorkspacePath::parse("a/b/x").unwrap(), true)
             .unwrap_err();
         assert!(
             matches!(err, LocalWorkspaceError::SymlinkRejected { .. }),
@@ -1804,7 +2248,7 @@ mod tests {
     }
 
     // End-to-end guard: every mutation entry point already rejects a
-    // symlinked parent at resolve_secure; pin that the outside target stays
+    // symlinked parent when resolving facts; pin that the outside target stays
     // byte-identical afterward for both write operations.
     #[test]
     fn write_paths_reject_symlink_parent_and_leave_outside_untouched() {
@@ -1887,8 +2331,9 @@ mod tests {
         let mut visibility = VisibilityEngine::load(dir.path(), Default::default());
         let mut out = Vec::new();
         grep_walk(
-            dir.path(),
-            dir.path(),
+            &ws_at(&dir).open_root().unwrap(),
+            ws_at(&dir).open_root().unwrap(),
+            OsStr::new("."),
             &needle_re(),
             None,
             100,
@@ -1916,8 +2361,9 @@ mod tests {
         let mut visibility = VisibilityEngine::load(dir.path(), Default::default());
         let mut out = Vec::new();
         grep_walk(
-            dir.path(),
-            dir.path(),
+            &ws_at(&dir).open_root().unwrap(),
+            ws_at(&dir).open_root().unwrap(),
+            OsStr::new("."),
             &needle_re(),
             None,
             100,
@@ -1939,7 +2385,7 @@ mod tests {
         let mut out = Vec::new();
         grep_file(
             "a.txt",
-            &a,
+            fs::File::open(&a).unwrap(),
             &needle_re(),
             100,
             &mut budget,
@@ -1951,7 +2397,7 @@ mod tests {
         assert_eq!(budget.file_allowance(), 3, "61 of 64 total consumed");
         grep_file(
             "b.txt",
-            &b,
+            fs::File::open(&b).unwrap(),
             &needle_re(),
             100,
             &mut budget,
@@ -1976,7 +2422,7 @@ mod tests {
         let mut out = Vec::new();
         grep_file(
             "c.txt",
-            &path,
+            fs::File::open(&path).unwrap(),
             &needle_re(),
             100,
             &mut budget,

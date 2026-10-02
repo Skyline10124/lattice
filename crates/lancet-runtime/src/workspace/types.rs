@@ -146,7 +146,7 @@ pub enum WorkspacePathError {
 
 /// How a path will be used by a Tool Host operation.
 ///
-/// Resolution itself is intent-independent (per-segment symlink rejection +
+/// Resolution itself is intent-independent (symlink rejection +
 /// root containment always apply); the intent is carried as operation
 /// vocabulary for the guard/precondition layer and Policy-Visible Workspace
 /// visibility checks.

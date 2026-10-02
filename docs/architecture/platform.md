@@ -14,6 +14,7 @@ status: active
 ## 平台边界
 
 - LATTICE 仅支持 Linux 宿主，所有维护文档均以 Linux 宿主为前提。
+- 工作区访问要求 Linux 5.6 及以上内核，且运行环境允许 `openat2` 系统调用；不可用时操作失败关闭，不降级到其他路径解析方式。
 - `wasm32-unknown-unknown` Source Tool 目标是 Linux 宿主内的沙箱 guest 产物格式，不代表另一个受支持的部署平台。
 - 不引入 macOS、Windows、BSD、通用 Unix 或其他宿主的兼容路径。
 - 不为可能的未来移植，用可移植、降级或空实现的回退路径削弱 Linux 实现。

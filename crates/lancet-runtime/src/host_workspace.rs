@@ -21,13 +21,13 @@
 //! 2. **Cell authorization** — the operation's host-bound Cell and its concrete
 //!    path target go through [`authorize_operation`], the same seam
 //!    `host-control`'s `emit-event` uses.
-//! 3. **Safe resolution** — [`LocalWorkspace::resolve_facts_blocking`] checks the
-//!    path one segment at a time with `lstat`, so a symlink component already
-//!    present is rejected instead of being followed. It returns facts, not an
-//!    open handle: the later read/list/grep/find re-opens the path by name, so a
-//!    component swapped for a symlink between the check and the open is
-//!    followed (#233). Mutations do not share this gap; they act through the
-//!    pinned dirfd walk in `LocalWorkspace::open_parent_dir_secure`.
+//! 3. **Safe resolution** — [`LocalWorkspace::resolve_facts_blocking`] and the
+//!    later read/list/grep/find each resolve the path from the project root fd
+//!    with one `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` call, and then
+//!    act only through the fd that call returned (#233). A symlink anywhere in
+//!    the path, or a resolution leaving the root, is refused at the open
+//!    itself, so a component swapped between the facts and the operation
+//!    cannot redirect it. Mutations open their parent directory the same way.
 //! 4. **Guard L1** — `validate_path_facts` validates the *observed* facts and
 //!    System Path Exclusions, not the requested string alone.
 //! 5. **Visibility** — one [`VisibilityEngine`], built from the turn's
@@ -1187,7 +1187,7 @@ fn wit_error(err: ObservationError) -> WitObserveError {
 
 /// Map an observed path kind onto the WIT enum.
 ///
-/// `PathKind` has no `Other`, because the workspace's own `file_type_kind`
+/// `PathKind` has no `Other`, because the workspace's own `kind_of`/`stat_kind`
 /// resolves everything it can name; the WIT enum keeps the variant so a future
 /// kind is expressible without a breaking change.
 fn wit_entry_kind(kind: PathKind) -> bindings::lattice::tool_host::workspace_observe::EntryKind {

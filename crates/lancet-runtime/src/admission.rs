@@ -199,7 +199,7 @@ pub enum OperationDenial {
     HostNotNormalized,
     /// A path target that is not in the project-relative comparison form the
     /// host produces. Structural, not a containment check: containment is
-    /// enforced by the workspace's per-segment resolution, and this refuses a
+    /// enforced by the workspace's `openat2` resolution, and this refuses a
     /// *shape* that resolution could never have emitted.
     #[error("path target {0} is not a project-relative resolved path")]
     PathNotProjectRelative(String),

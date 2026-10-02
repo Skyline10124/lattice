@@ -48,9 +48,9 @@ url = { workspace = true }
 lattice-store = { workspace = true }
 gix = { workspace = true }
 libc = { workspace = true }
-# Local Workspace filesystem primitives: `rustix` for the per-segment
-# `openat`/`AT_SYMLINK_NOFOLLOW` resolution that makes root containment
-# enforceable, `regex` for grep, `blake3` for the canonical content hash.
+# Local Workspace filesystem primitives: `rustix` for the
+# `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` resolution that makes root
+# containment enforceable, `regex` for grep, `blake3` for the canonical content hash.
 rustix = { workspace = true }
 regex = { workspace = true }
 blake3 = { workspace = true }

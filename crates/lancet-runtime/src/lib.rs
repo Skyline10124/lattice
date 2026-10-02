@@ -37,7 +37,7 @@
 //! - **The concrete Local Workspace** — [`workspace::LocalWorkspace`] and the
 //!   [`workspace::VisibilityEngine`] moved down here in GitHub #30, because the
 //!   `workspace-observe` and `workspace-mutate` Tool Host imports execute all
-//!   filesystem operations here. Secure per-segment path resolution, System Path
+//!   filesystem operations here. Secure path resolution, System Path
 //!   Exclusion, visibility, bounded reads, atomic installation and mutation history
 //!   share this one concrete module.
 //!
