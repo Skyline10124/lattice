@@ -483,8 +483,8 @@ fn direct_observation_visibility_and_bounds() {
     );
 }
 
-/// Static symlinks exercise the real Component/Host/provider wiring; the
-/// deterministic check/open races are kept in LocalWorkspace unit tests.
+/// 静态符号链接覆盖真实的 Component/Host/provider 接线；确定性的检查/打开
+/// 竞态留在 `LocalWorkspace` 单元测试中。
 #[test]
 fn direct_observation_symlinks_are_refused_without_canary_leak() {
     let driver = driver();

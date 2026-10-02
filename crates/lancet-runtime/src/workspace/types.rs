@@ -144,12 +144,10 @@ pub enum WorkspacePathError {
     ProjectRootNotAllowedForFileIntent,
 }
 
-/// How a path will be used by a Tool Host operation.
+/// Tool Host 操作将如何使用某个路径。
 ///
-/// Resolution itself is intent-independent (symlink rejection +
-/// root containment always apply); the intent is carried as operation
-/// vocabulary for the guard/precondition layer and Policy-Visible Workspace
-/// visibility checks.
+/// 解析本身与意图无关（符号链接拒绝与项目根约束始终生效）；意图作为操作词汇
+/// 传给 guard/前置条件层，并用于 Policy-Visible Workspace 可见性检查。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PathIntent {
     Read,

@@ -36,8 +36,8 @@ use super::visibility::{VisibilityEngine, VisibilityEvidence};
 #[cfg(any(test, feature = "test-fault-injection"))]
 type ReplaceBeforeCheck = Arc<Mutex<Option<(WorkspacePath, Vec<u8>)>>>;
 
-// #233: deterministic filesystem swaps at the check/open boundary. Kept
-// module-private and thread-local so parallel tests cannot affect each other.
+// #233：在检查/打开边界上确定性地替换文件系统对象。保持模块私有且线程局部，
+// 使并行测试互不影响。
 #[cfg(test)]
 type BeforeOpenHook = Box<dyn FnMut(&Path)>;
 #[cfg(test)]
@@ -250,11 +250,10 @@ impl LocalWorkspace {
         Arc::clone(&self.mutation_sequence_gate)
     }
 
-    /// Open the canonical project root as a directory handle. Every operation
-    /// opens it once and resolves all of its paths beneath it through
-    /// [`open_beneath`]. The root was canonicalized at construction, so a
-    /// failing `O_NOFOLLOW` here means the root itself was tampered with; fail
-    /// closed as plain I/O.
+    /// 以目录句柄打开规范化后的项目根。每个操作只打开一次项目根，并通过
+    /// [`open_beneath`] 在其下解析该操作的全部路径。项目根在构造时已规范化，
+    /// 因此这里若因 `O_NOFOLLOW` 失败，说明项目根本身被篡改；按普通 I/O 错误
+    /// 失败关闭。
     fn open_root(&self) -> Result<OwnedFd, LocalWorkspaceError> {
         rustix::fs::open(
             &self.root,
@@ -264,19 +263,15 @@ impl LocalWorkspace {
         .map_err(|e| LocalWorkspaceError::Io(e.into()))
     }
 
-    /// Open the parent directory of a mutation target. The returned fd is the
-    /// only way the write path (create/install/replace) reaches a parent
-    /// directory; callers then act through it with single-component leaf
-    /// names. It is opened `O_RDONLY` rather than `O_PATH` because the
-    /// installed entry is made durable with `fsync` on this fd.
+    /// 打开变更目标的父目录。写入路径（create/install/replace）只能经由返回的
+    /// fd 触及父目录，调用方随后通过它以单段叶名操作。这里用 `O_RDONLY` 而非
+    /// `O_PATH` 打开，因为安装后的条目要通过对此 fd 的 `fsync` 落盘。
     ///
-    /// With `create_missing`, each missing prefix is created with `mkdirat`
-    /// under the previously opened level (`EEXIST` tolerated — losing a race
-    /// to a concurrent create is indistinguishable from the directory having
-    /// existed) and then reopened from the root, so every level that is used
-    /// was itself contained when it was opened. `mkdirat` has no resolution
-    /// constraint: if the previous level is moved out of the root just before
-    /// it, an empty directory appears there and the reopen from the root fails.
+    /// 带 `create_missing` 时，每个缺失的前缀用 `mkdirat` 在上一层已打开的目录
+    /// 下创建（容忍 `EEXIST`：与并发创建竞争失败，和目录原本就存在无法区分），
+    /// 然后从项目根重新打开，因此用到的每一层在打开时本身都位于根内。`mkdirat`
+    /// 不带解析约束：若上一层恰在它之前被移出项目根，空目录会建在根外，随后从
+    /// 项目根的重新打开会失败。
     fn open_parent_dir(
         &self,
         path: &WorkspacePath,
@@ -317,17 +312,14 @@ impl LocalWorkspace {
         Ok(level.unwrap_or(root))
     }
 
-    /// Resolve `path` and return the observed facts.
+    /// 解析 `path` 并返回观察到的事实。
     ///
-    /// Every observation entry point and synchronous Tool Host import funnels
-    /// through this function. It resolves through [`open_beneath`] like every
-    /// later open, so path safety has one implementation: a symlink anywhere
-    /// in the path is refused, and the facts come from `fstat` of the object
-    /// actually reached. A missing target reports `exists = false` with the
-    /// parent's facts resolved the same way.
+    /// 所有观察入口和同步 Tool Host import 都经由此函数。它与之后的每次打开一样
+    /// 通过 [`open_beneath`] 解析，因此路径安全只有一份实现：路径中任一处的符号
+    /// 链接都会被拒绝，事实取自对实际到达对象的 `fstat`。目标不存在时报告
+    /// `exists = false`，父目录的事实按同样方式解析。
     ///
-    /// The intent is carried as operation vocabulary for the guard and
-    /// precondition layer; resolution does not depend on it.
+    /// 意图作为操作词汇传给 guard 与前置条件层；解析不依赖它。
     pub fn resolve_facts_blocking(
         &self,
         path: &WorkspacePath,
@@ -343,9 +335,9 @@ impl LocalWorkspace {
             byte_size: stat
                 .filter(|st| FileType::from_raw_mode(st.st_mode) == FileType::RegularFile)
                 .map(|st| st.st_size as u64),
-            // Containment holds whenever resolution succeeded: openat2 with
-            // RESOLVE_BENEATH only returns objects beneath the root, and a
-            // missing leaf is contained by its lexically checked path.
+            // 只要解析成功，根内约束就成立：带 `RESOLVE_BENEATH` 的 `openat2` 只
+            // 返回项目根下的对象，缺失的叶节点则由其经过词法检查的路径保证位于
+            // 根内。
             canonical_under_workspace: true,
         };
         let stat_of =
@@ -369,9 +361,8 @@ impl LocalWorkspace {
         }
     }
 
-    /// Open a regular file for reading. The open is non-blocking so a FIFO
-    /// or device cannot stall it, and anything that is not a regular file is
-    /// refused from the opened fd's own `fstat`.
+    /// 打开普通文件用于读取。以非阻塞方式打开，使 FIFO 或设备无法让它挂起；
+    /// 凡不是普通文件的对象，都依据已打开 fd 自身的 `fstat` 拒绝。
     fn open_regular_file(
         &self,
         path: &WorkspacePath,
@@ -391,9 +382,8 @@ impl LocalWorkspace {
         Ok((fs::File::from(fd), stat.st_size as u64))
     }
 
-    /// Open an explicitly requested directory (list target or grep/find
-    /// root), returning it with the root fd that a recursive walk resolves
-    /// its children from. A symlink anywhere in the request is refused.
+    /// 打开显式请求的目录（list 目标或 grep/find 的根），并连同项目根 fd 一起
+    /// 返回，供递归遍历从根解析子项。请求路径中任一处的符号链接都会被拒绝。
     fn open_dir(&self, path: &WorkspacePath) -> Result<(OwnedFd, OwnedFd), LocalWorkspaceError> {
         let root = self.open_root()?;
         before_open(Path::new(path.as_str()));
@@ -402,7 +392,7 @@ impl LocalWorkspace {
         Ok((root, dir))
     }
 
-    /// Read a file under the workspace, returning its bytes. Synchronous form.
+    /// 读取工作区内的文件并返回其字节。同步形式。
     pub fn read_file_blocking(&self, path: &WorkspacePath) -> Result<Vec<u8>, LocalWorkspaceError> {
         let (mut file, size) = self.open_regular_file(path)?;
         let mut bytes = Vec::with_capacity(size as usize);
@@ -410,10 +400,9 @@ impl LocalWorkspace {
         Ok(bytes)
     }
 
-    /// Read a regular file without ever allocating more than `allowed + 1`
-    /// bytes. The opened fd's size rejects an already-oversized file before
-    /// reading; the capped read is the post-check for a file that grows
-    /// after it was opened.
+    /// 读取普通文件，分配的内存绝不超过 `allowed + 1` 字节。读取前先依据已打开
+    /// fd 的大小拒绝已经超限的文件；有上限的读取则是对打开后仍在增长的文件的
+    /// 事后检查。
     pub fn read_file_bounded_blocking(
         &self,
         path: &WorkspacePath,
@@ -460,10 +449,9 @@ impl LocalWorkspace {
         let mut entries = Vec::new();
         while let Some(entry) = next_entry(&mut dir) {
             let entry = entry?;
-            // `d_type` (with a no-follow `statat` fallback when the
-            // filesystem does not report it) never follows symlinks, so
-            // symlinks — including dangling ones — list as `Symlink` instead
-            // of erroring the whole listing or masquerading as their target.
+            // `d_type`（文件系统不报告时退回不跟随链接的 `statat`）从不跟随
+            // 符号链接，因此符号链接（包括悬空链接）列为 `Symlink`，既不会让
+            // 整个列举出错，也不会伪装成其目标。
             let ft = match entry.file_type() {
                 FileType::Unknown => entry_stat(&dir, &entry)?.0,
                 ft => ft,
@@ -715,8 +703,8 @@ impl LocalWorkspace {
         Ok(created)
     }
 
-    /// Non-cancellable atomic install through the opened parent directory fd.
-    /// The caller must already have checked the mutation precondition.
+    /// 通过已打开的父目录 fd 执行不可取消的原子安装。
+    /// 调用方必须已经检查变更前置条件。
     pub fn install_atomic_sync(
         &self,
         path: &WorkspacePath,
@@ -784,8 +772,8 @@ impl LocalWorkspace {
     ) -> Result<AtomicInstallReceipt, LocalWorkspaceError> {
         path.require_file_path()?;
         let ws = self;
-        // Facts are unused, but resolving first keeps the static refusals
-        // (a symlink leaf or parent) ahead of any parent creation.
+        // 事实本身不使用，但先解析可让静态拒绝（符号链接叶节点或父目录）
+        // 先于任何父目录创建发生。
         ws.resolve_facts_blocking(path, PathIntent::Overwrite)?;
         #[cfg(any(test, feature = "test-fault-injection"))]
         if ws.fail_install.swap(false, Ordering::SeqCst) {
@@ -794,8 +782,7 @@ impl LocalWorkspace {
             )));
         }
         let (_, leaf) = split_parent_leaf(path);
-        // create_missing=true preserves the historical create_dir_all
-        // behavior of the install path.
+        // `create_missing=true` 保留安装路径历来的 `create_dir_all` 行为。
         let parent_fd = ws.open_parent_dir(path, true)?;
         // Unique single-component temp name: pid disambiguates across
         // processes sharing a workspace, the sequence number across
@@ -812,9 +799,8 @@ impl LocalWorkspace {
         let installed = (|| -> Result<(), LocalWorkspaceError> {
             tmp_file.write_all(content)?;
             tmp_file.sync_all()?;
-            // Both names are single components relative to the same
-            // parent fd, so no symlink traversal is possible on either
-            // side of the rename.
+            // 两个名称都是相对同一父目录 fd 的单段名，rename 两侧都不可能
+            // 经过符号链接。
             rustix::fs::renameat(&parent_fd, tmp_name.as_str(), &parent_fd, leaf).map_err(|e| {
                 LocalWorkspaceError::Io(std::io::Error::other(format!(
                     "atomic persist failed: {e}"
@@ -829,8 +815,8 @@ impl LocalWorkspace {
             return Err(err);
         }
         drop(tmp_file);
-        // Durably record the rename in the directory itself, through the
-        // parent fd rather than by reopening the directory path.
+        // 通过父目录 fd 把 rename 持久记录到目录本身，而不是按路径重新打开
+        // 目录。
         let installed = InstalledFile {
             path: path.clone(),
             content_hash: content_hash(content),
@@ -876,9 +862,8 @@ impl LocalWorkspace {
     }
 }
 
-/// Map a raw file type to the Local `PathKind` vocabulary. Anything that is
-/// neither a symlink nor a directory is a `File`; readers additionally
-/// require a regular file before opening content.
+/// 把原始文件类型映射到 Local 的 `PathKind` 词汇。既不是符号链接也不是目录
+/// 的一律视为 `File`；读取方在打开内容前还要求它是普通文件。
 fn kind_of(ft: FileType) -> PathKind {
     match ft {
         FileType::Symlink => PathKind::Symlink,
@@ -928,21 +913,18 @@ fn claim_install_temp(parent_fd: &OwnedFd) -> Result<(String, OwnedFd), LocalWor
     ))))
 }
 
-/// The only way this module resolves a workspace path to a filesystem object
-/// (#233). `rel` is root-relative (`"."` is the root itself) and already free
-/// of `..` and leading `/` by `WorkspacePath` parsing.
+/// 这是本模块把工作区路径解析为文件系统对象的唯一途径（#233）。`rel` 相对于
+/// 项目根（`"."` 即项目根本身），且已由 `WorkspacePath` 解析排除了 `..` 和
+/// 前导 `/`。
 ///
-/// `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS` make the kernel refuse, during
-/// this one call, any component that is a symlink (`ELOOP`) or any resolution
-/// that leaves the root (`EXDEV`), so the returned fd names an object that was
-/// beneath the root, reached without a symlink, at the moment it was opened.
-/// Everything afterwards acts through that fd. If the object is later moved
-/// out of the root by another process, the fd still refers to that same
-/// object; that is the accepted boundary recorded in
-/// `docs/architecture/workspace.md`.
+/// `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS` 让内核在这一次调用中拒绝任何符号
+/// 链接路径段（`ELOOP`）和任何离开项目根的解析（`EXDEV`），因此返回的 fd 指向
+/// 的对象在打开那一刻位于根下，且到达它的路径上没有符号链接。之后的一切操作
+/// 都通过该 fd 进行。若该对象之后被其他进程移出项目根，fd 仍指向同一对象；这是
+/// `docs/architecture/workspace.md` 中记录的已接受边界。
 ///
-/// There is no fallback: a kernel without `openat2` (`ENOSYS`) or a sandbox
-/// that forbids it (`EPERM`) fails the operation.
+/// 没有回退：内核不支持 `openat2`（`ENOSYS`）或沙箱禁止它（`EPERM`）时，操作
+/// 直接失败。
 fn open_beneath(
     root: &OwnedFd,
     rel: impl rustix::path::Arg,
@@ -958,24 +940,23 @@ fn open_beneath(
     )
 }
 
-/// Flags for opening a directory to enumerate it or act inside it.
+/// 打开目录以枚举或在其中操作时使用的标志。
 fn dir_flags() -> OFlags {
     OFlags::RDONLY | OFlags::DIRECTORY
 }
 
-/// Flags for opening content to read. Non-blocking so a FIFO swapped in at
-/// open time cannot stall the open; it has no effect on regular-file reads.
+/// 打开待读内容时使用的标志。非阻塞使打开时被换入的 FIFO 无法挂起打开操作；
+/// 它对普通文件的读取没有影响。
 fn file_read_flags() -> OFlags {
     OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY
 }
 
-/// Map an [`open_beneath`] failure for the request `requested`.
+/// 把请求 `requested` 的 [`open_beneath`] 失败映射为工作区错误。
 ///
-/// `openat2` does not say which component was a symlink, so the refusal
-/// names the whole root-relative request. It never carries a host path:
-/// `host_mutate` forwards this `Display` text to the guest (#98).
-/// `EAGAIN` (only possible with `..`, which parsing already rejected) is not
-/// retried.
+/// `openat2` 不指出哪个路径段是符号链接，因此拒绝信息给出完整的根相对请求。
+/// 它从不包含 Host 路径：`host_mutate` 会把这段 `Display` 文本转发给 guest
+/// （#98）。`EAGAIN`（只在路径含 `..` 时才可能出现，而解析阶段已拒绝 `..`）
+/// 不重试。
 fn resolve_error(err: Errno, requested: &str) -> LocalWorkspaceError {
     match err {
         Errno::LOOP => LocalWorkspaceError::SymlinkRejected {
@@ -992,8 +973,8 @@ fn resolve_error(err: Errno, requested: &str) -> LocalWorkspaceError {
     }
 }
 
-/// Next directory entry, skipping `.` and `..` (`std::fs::read_dir` hides
-/// them; rustix's `Dir` does not).
+/// 返回下一个目录条目，跳过 `.` 和 `..`（`std::fs::read_dir` 会隐藏它们，
+/// rustix 的 `Dir` 不会）。
 fn next_entry(dir: &mut Dir) -> Option<Result<rustix::fs::DirEntry, LocalWorkspaceError>> {
     loop {
         match dir.next()? {
@@ -1004,9 +985,8 @@ fn next_entry(dir: &mut Dir) -> Option<Result<rustix::fs::DirEntry, LocalWorkspa
     }
 }
 
-/// No-follow type and size of one entry, relative to the directory being
-/// enumerated. This only classifies the entry; anything entered or read is
-/// opened again from the root through [`open_beneath`].
+/// 相对正在枚举的目录，以不跟随链接的方式取得单个条目的类型和大小。这里只做
+/// 分类；任何要进入或读取的对象都会通过 [`open_beneath`] 从项目根重新打开。
 fn entry_stat(
     dir: &Dir,
     entry: &rustix::fs::DirEntry,
@@ -1017,11 +997,10 @@ fn entry_stat(
     Ok((FileType::from_raw_mode(stat.st_mode), stat.st_size as u64))
 }
 
-/// Open a child found during a grep/find walk, from the root by its full
-/// root-relative path. A child that is no longer there as a directory or
-/// file reachable without a symlink (`ELOOP`, `ENOTDIR`, `ENOENT`) is
-/// skipped (`None`), like a symlink entry seen at enumeration time.
-/// Escaping the root (`EXDEV`) and any other error fail the walk.
+/// 按完整的根相对路径，从项目根打开 grep/find 遍历中发现的子项。若该子项已
+/// 不再是可不经符号链接到达的目录或文件（`ELOOP`、`ENOTDIR`、`ENOENT`），就
+/// 跳过（返回 `None`），与枚举时遇到符号链接条目的处理一致。离开项目根
+/// （`EXDEV`）及其他任何错误都会使遍历失败。
 fn open_walk_child(
     root: &OwnedFd,
     rel: &OsStr,
@@ -1034,7 +1013,7 @@ fn open_walk_child(
     }
 }
 
-/// Root-relative path of `name` inside the walked directory `current`.
+/// 被遍历目录 `current` 中 `name` 的根相对路径。
 fn child_rel(current: &OsStr, name: &std::ffi::CStr) -> OsString {
     let name = OsStr::from_bytes(name.to_bytes());
     if current == "." {
@@ -1046,8 +1025,8 @@ fn child_rel(current: &OsStr, name: &std::ffi::CStr) -> OsString {
     rel
 }
 
-/// Split a workspace file path into (parent path relative to the root, `"."`
-/// for the root itself; single-component leaf name).
+/// 把工作区文件路径拆分为（相对项目根的父路径，项目根本身记为 `"."`；单段
+/// 叶名）。
 fn split_parent_leaf(path: &WorkspacePath) -> (&str, &str) {
     path.as_str()
         .rsplit_once('/')
@@ -1179,16 +1158,14 @@ fn grep_walk(
                 continue;
             }
             before_open(Path::new(&child));
-            // Unreadable files are silently skipped, preserving the old
-            // semantics; that covers a file swapped for a symlink or removed
-            // since enumeration. Escaping the root still fails the walk.
+            // 不可读的文件静默跳过，保持原有语义；枚举后被换成符号链接或被删除
+            // 的文件也属此类。离开项目根仍会使遍历失败。
             let fd = match open_beneath(root, &child, file_read_flags(), Mode::empty()) {
                 Ok(fd) => fd,
                 Err(Errno::XDEV) => return Err(LocalWorkspaceError::RootEscape),
                 Err(_) => continue,
             };
-            // A FIFO or device swapped in after classification is skipped
-            // like a static one.
+            // 分类之后才被换入的 FIFO 或设备，与静态存在的一样跳过。
             let regular = rustix::fs::fstat(&fd)
                 .is_ok_and(|st| FileType::from_raw_mode(st.st_mode) == FileType::RegularFile);
             if !regular {
@@ -1279,7 +1256,7 @@ fn grep_file(
     Ok(())
 }
 
-// Recursive walk plumbing, as for `grep_walk`.
+// 递归遍历的参数传递，理由同 `grep_walk`。
 #[allow(clippy::too_many_arguments)]
 fn find_walk(
     root: &OwnedFd,
@@ -1455,8 +1432,8 @@ mod tests {
         LocalWorkspace::new(dir.path())
     }
 
-    // #233: swaps happen inside the public operation, after its path/type
-    // check. A pre-call swap would only exercise the existing static rejection.
+    // #233：替换发生在公开操作内部、其路径/类型检查之后。调用前替换只会触发
+    // 已有的静态拒绝。
     const RACE_CANARY: &str = "I233_EXTERNAL_CANARY_7b98\n";
     const RACE_NAME: &str = "I233_EXTERNAL_NAME_7b98.txt";
 
@@ -1608,7 +1585,7 @@ mod tests {
             },
             || observe(&ws, mode, request),
         );
-        // Check outside integrity before the intentionally-red content assertion.
+        // 先检查外部对象完好，再断言返回内容。
         assert_eq!(
             fs::read_to_string(&canary_file).unwrap(),
             RACE_CANARY,
@@ -1696,7 +1673,7 @@ mod tests {
 
     fn moved_directory_case(rename_out: bool) {
         let dir = TempDir::new().unwrap();
-        // Same-filesystem destination for the deliberate rename out of root.
+        // 同一文件系统上的外部目录，供有意把对象 rename 出项目根时使用。
         let outside = TempDir::new_in(dir.path().parent().unwrap()).unwrap();
         let ws = ws_at(&dir);
         fs::create_dir_all(dir.path().join("a/middle")).unwrap();
@@ -1783,8 +1760,8 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let worker = std::thread::spawn(move || {
             let result = if swap_fifo {
-                // A static FIFO is already skipped by grep. Swap after file
-                // classification to exercise its actual open-time hazard.
+                // grep 本来就会跳过静态 FIFO。在文件分类之后再替换，才能触发
+                // 打开时真正的风险。
                 with_swap(
                     "pipe",
                     move || {
@@ -1803,8 +1780,8 @@ mod tests {
         let timely = rx.recv_timeout(Duration::from_secs(2));
         let timed_out = matches!(timely, Err(mpsc::RecvTimeoutError::Timeout));
         let result = if timed_out {
-            // RDWR never blocks: briefly supplying a writer wakes the old
-            // blocking open; closing it lets read see EOF. No process::exit.
+            // 以 `RDWR` 打开从不阻塞：短暂提供一个写端可唤醒旧的阻塞打开，
+            // 关闭后 `read` 会读到 EOF。不使用 `process::exit`。
             let rescue = rustix::fs::open(
                 &fifo,
                 OFlags::RDWR | OFlags::NONBLOCK | OFlags::CLOEXEC,
@@ -1997,12 +1974,10 @@ mod tests {
         assert_eq!(installed.content_hash, want);
     }
 
-    // 8. Partial-write failure: writing into a read-only directory fails and
-    //    leaves no partial target on disk (the O_EXCL temp creation itself
-    //    fails, and any later failure unlinks the temp name through the
-    //    parent fd). This is the real-fault approximation ADR step 1
-    //    prescribes; the narrow fault-injection seam below covers the
-    //    deterministic boundary.
+    // 8. 部分写入失败：向只读目录写入会失败，且磁盘上不留部分写入的目标
+    //    （`O_EXCL` 临时文件创建本身就会失败，之后的任何失败也会通过父目录 fd
+    //    `unlink` 临时名）。这是 ADR 第 1 步规定的真实故障近似；下方窄范围的
+    //    故障注入接缝覆盖确定性边界。
     #[test]
     fn install_atomic_failure_leaves_no_partial_target() {
         let dir = TempDir::new().unwrap();
@@ -2134,7 +2109,7 @@ mod tests {
         assert!(matches!(error, LocalWorkspaceError::Cancelled));
     }
 
-    // ── TOCTOU-safe write path (parent opened through open_beneath) ──────
+    // ── TOCTOU 安全的写入路径（父目录经 `open_beneath` 打开）─────────
 
     /// Names of `.lattice-tmp-*` residue directly beneath `dir`.
     fn tmp_residue(dir: &Path) -> Vec<String> {
@@ -2146,18 +2121,16 @@ mod tests {
             .collect()
     }
 
-    // The facts→open race of a mutation: the parent open resolves the whole
-    // parent path again with RESOLVE_NO_SYMLINKS, so a directory swapped for
-    // a symlink AFTER the facts were taken is still rejected and nothing
-    // reaches the outside target.
+    // 变更中的“事实→打开”竞态：父目录打开时会以 `RESOLVE_NO_SYMLINKS` 重新
+    // 解析整条父路径，因此在取得事实之后才被换成符号链接的目录仍会被拒绝，
+    // 外部目标不会被触及。
     #[test]
     fn open_parent_dir_rejects_post_resolve_symlink_swap() {
         let dir = TempDir::new().unwrap();
         let outside = TempDir::new().unwrap();
         std::fs::create_dir(dir.path().join("a")).unwrap();
         let ws = ws_at(&dir);
-        // At this point resolving "a/x" would pass: `a` is a real
-        // directory. Simulate the post-resolve swap.
+        // 此时解析 `a/x` 会成功：`a` 是真实目录。下面模拟解析后的替换。
         std::fs::remove_dir(dir.path().join("a")).unwrap();
         symlink(outside.path(), dir.path().join("a")).unwrap();
         let err = ws
@@ -2174,11 +2147,10 @@ mod tests {
         );
     }
 
-    /// #98: `host_mutate` forwards this error's `Display` into the
-    /// guest-visible `PathRejected` reason, so the reported component must be
-    /// root-relative. `openat2` does not name the offending component, so
-    /// the refusal carries the whole request. Covers both the facts
-    /// resolution and the mutation parent open.
+    /// #98：`host_mutate` 把该错误的 `Display` 转发为 guest 可见的
+    /// `PathRejected` 原因，因此报告的路径段必须是根相对的。`openat2` 不指出出错
+    /// 的路径段，所以拒绝信息携带完整请求。同时覆盖事实解析与变更时的父目录
+    /// 打开。
     #[test]
     fn symlink_rejection_reports_a_relative_component_not_the_host_path() {
         let dir = TempDir::new().unwrap();
@@ -2225,8 +2197,8 @@ mod tests {
         }
     }
 
-    // create_missing must not mkdir THROUGH a symlink component either: the
-    // open of the existing symlinked prefix fails before any mkdirat can run.
+    // `create_missing` 同样不得穿过符号链接路径段执行 mkdir：打开已存在的符号
+    // 链接前缀会先失败，任何 `mkdirat` 都没有机会执行。
     #[test]
     fn open_parent_dir_create_missing_rejects_symlink_component() {
         let dir = TempDir::new().unwrap();
@@ -2247,9 +2219,8 @@ mod tests {
         );
     }
 
-    // End-to-end guard: every mutation entry point already rejects a
-    // symlinked parent when resolving facts; pin that the outside target stays
-    // byte-identical afterward for both write operations.
+    // 端到端防护：每个写入入口在动作前解析路径时都会拒绝经由符号链接的父目录；
+    // 这里确认两种写操作被拒绝后，外部目标仍逐字节不变。
     #[test]
     fn write_paths_reject_symlink_parent_and_leave_outside_untouched() {
         let dir = TempDir::new().unwrap();

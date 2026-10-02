@@ -846,7 +846,7 @@ fn direct_mutation_tool_activity_before_commit() {
     );
 }
 
-/// An external directory symlink cannot become a mutate.create parent.
+/// 指向外部目录的符号链接不能成为 `mutate.create` 的父目录。
 #[test]
 fn direct_mutation_symlink_parent_is_refused_without_side_effect() {
     let driver = driver();
