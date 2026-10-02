@@ -64,6 +64,18 @@ impl Wire {
             }
         }
     }
+    /// `wait` 内未收到任何字节；不读取半帧，收到即失败。
+    fn assert_silent(&mut self, wait: Duration) {
+        self.stream.set_read_timeout(Some(wait)).unwrap();
+        let read = self.stream.read(&mut [0; 1]);
+        self.stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        assert!(
+            matches!(&read, Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)),
+            "unexpected delivery: {read:?}"
+        );
+    }
 }
 fn call(world: &ScenarioWorld, request: Value) -> Value {
     Wire::connect(world, request).next()
@@ -2416,11 +2428,32 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
             &world,
             json!({"operation":"subscribe","target":{"session_id":sid,"turn_id":TURN},"cursor":null}),
         );
+        // Owner 仍在、终态尚未追加：新订阅先得到关闭快照，然后等待终态交付，
+        // 不凭关闭快照提前结束。
+        assert!(!schedule.join("turn_closed.release").exists());
+        let initial = observer.next();
+        assert_eq!(initial["value"]["type"], "snapshot");
+        assert_eq!(
+            initial["value"]["view"]["selected_turn"],
+            closed["selected_turn"]
+        );
+        observer.assert_silent(Duration::from_millis(500));
+        stage(&world, &spec, &mut evidence, sid, TURN);
+        std::fs::write(schedule.join("turn_closed.release"), b"").unwrap();
+        let terminal = observer.next();
+        assert_eq!(terminal["value"]["type"], "event");
+        assert_eq!(terminal["value"]["event"]["type"], "turn_completed");
+        assert_eq!(
+            terminal["value"]["cursor"]["sequence"].as_u64().unwrap(),
+            initial["value"]["view"]["cursor"]["sequence"]
+                .as_u64()
+                .unwrap()
+                + 1
+        );
         let snapshot = observer.next();
         assert_eq!(snapshot["value"]["type"], "snapshot");
         let finished = observer.next();
         assert_eq!(finished["value"]["type"], "finished");
-        assert!(!schedule.join("turn_closed.release").exists());
         let entries = finished["value"]["history"]["entries"].as_array().unwrap();
         assert_eq!(entries.len(), 3);
         assert_paired_history(&finished["value"]["history"], &closed["selected_turn"]);
@@ -2432,9 +2465,7 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
             snapshot["value"]["view"]["selected_turn"],
             closed["selected_turn"]
         );
-        evidence.record_json("closed-before-event", &json!({"pause":closed_pause,"snapshot":snapshot,"finished":finished,"resumed_event":event})).unwrap();
-        stage(&world, &spec, &mut evidence, sid, TURN);
-        std::fs::write(schedule.join("turn_closed.release"), b"").unwrap();
+        evidence.record_json("closed-before-event", &json!({"pause":closed_pause,"terminal":terminal,"snapshot":snapshot,"finished":finished,"resumed_event":event})).unwrap();
         let done = front.wait(None).unwrap();
         evidence.record_command("front finishes after notification release", &done);
         assert!(done.is_clean_exit(0), "{}", done.summary());
@@ -2450,6 +2481,13 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
         assert_eq!(
             updates.last().unwrap()["value"]["history"],
             finished["value"]["history"]
+        );
+        assert!(
+            updates[..updates.len() - 1]
+                .iter()
+                .any(|u| u["value"]["type"] == "event"
+                    && u["value"]["event"]["type"] == "turn_completed"),
+            "slow subscriber must receive turn_completed before finished"
         );
         evidence
             .record_json("slow-through-finish", &json!(updates))

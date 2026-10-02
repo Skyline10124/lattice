@@ -246,6 +246,15 @@ fn loaded_step_and_terminal_tool_cannot_be_overwritten_by_late_events() {
         1
     );
     assert!(app.blocks.iter().any(|b|matches!(b,Block::Tool{state:ToolState::Unavailable{outcome},..} if outcome=="succeeded")));
+    // 最后一次请求错误可能晚于关闭快照；Step 已装入不能吞掉 Dock 诊断。
+    app.apply_turn_event(TurnEvent::LlmRequestError {
+        key,
+        retryable: false,
+        will_retry: false,
+        delay_ms: None,
+        message: "late failure".into(),
+    });
+    assert!(app.dock_status().is_some());
 }
 
 #[test]
