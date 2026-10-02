@@ -113,6 +113,9 @@ base64 = "0.22"
 dotenvy = "0.15"
 toml_edit = "0.25"
 ratatui = "0.30"
+pulldown-cmark = { version = "0.13.4", default-features = false }
+syntect = { version = "5.3", default-features = false }
+two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
 # Exact-pinned: 18.0.1 is <7 days old at adoption time; bump only after
 # re-reviewing the readline behavior surface.
 rustyline = "=18.0.0"

@@ -88,6 +88,1232 @@ fn finished(view: &ObservationSnapshot) -> Value {
         json!({"type":"finished","turn":{"session_id":sid(),"turn_id":view.selected_turn.as_ref().unwrap().turn_id},"cursor":view.cursor,"history":{"anchor":view.history,"entries":history_entries(view)}}),
     )
 }
+fn comment_history(app: &mut App, id: TurnId, parts: Value, closed: bool) {
+    let mut snapshot = view(id, closed);
+    snapshot.history.head = lattice_api::NodeId(2);
+    snapshot.session.current = lattice_api::NodeId(2);
+    let mut entries = history_entries(&view(id, true));
+    entries[1]["content"]["content"]["assistant"]["parts"] = parts;
+    if !closed {
+        // 已关闭的工具 Step 之后仍在请求下一步；零工具最终回复不能伪装成进行中 Step。
+        let part = entries[1]["content"]["content"]["assistant"]["parts"]
+            .as_array()
+            .unwrap()
+            .len();
+        let call = json!({
+            "invocation_id":"22222222-2222-4222-8222-222222222222", "provider_call_id":"call_1",
+            "name":"observe.workspace", "arguments":{"path":"a.txt"},
+            "arguments_digest":"5fd582703776c899a2ecb12f3d699bd7244dff1f443ef5ae3f0067bcf3ce279e",
+            "address":{"message":{"session_id":SESSION,"turn_id":id,"model_step_ordinal":0},"part_ordinal":part}
+        });
+        entries[1]["content"]["content"]["assistant"]["parts"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"semantic":{"tool_call":{"call":call}}}));
+        entries[1]["content"]["content"]["results"] = json!([{
+            "invocation_id":"22222222-2222-4222-8222-222222222222", "name":"observe.workspace",
+            "payload":{"outcome":"succeeded","payload":{"kind":"json","value":null,"digest":"4514e821d251d896aaed09c92f07abacecb5683e0714471682fa6beaca071aa2","byte_length":4}}
+        }]);
+        snapshot.active.as_mut().unwrap().key.ordinal = 1;
+        snapshot.attempt.as_mut().unwrap().key.model_step_ordinal = 1;
+    }
+    app.apply_update(LocalUpdate::State {
+        view: Box::new(snapshot.clone()),
+        phase: if closed {
+            ObservationPhase::Finished
+        } else {
+            ObservationPhase::Live
+        },
+        error: None,
+    });
+    app.apply_update(LocalUpdate::History {
+        anchor: snapshot.history.clone(),
+        generation: app.generation,
+        stale: false,
+        result: Ok(Box::new(
+            serde_json::from_value(json!({"anchor": snapshot.history, "entries": entries}))
+                .unwrap(),
+        )),
+    });
+}
+
+fn comment_browse(app: &mut App, text: &str) {
+    let transcript = app.prepare_transcript();
+    let row = transcript
+        .lines
+        .iter()
+        .position(|line| line.to_string().contains(text))
+        .expect("visible text");
+    app.focus = Focus::Transcript(transcript.cursor(row, 0).unwrap());
+    app.viewport.pause();
+}
+
+#[test]
+fn comment_history_anchor_uses_original_part_and_only_closed_single_fragment() {
+    let mut h = Harness::new(false);
+    let id = lattice_api::local::new_turn_id();
+    let parts = json!([{"semantic":{"reasoning":{"text":"hidden"}}},{"semantic":{"text":{"text":"comment target"}}}]);
+    comment_history(&mut h.app, id, parts.clone(), false);
+    comment_browse(&mut h.app, "comment target");
+    h.app.apply_action(KeyAction::Submit);
+    assert!(!h.app.queue.is_editing());
+    let mut h = Harness::new(false);
+    let id = lattice_api::local::new_turn_id();
+    comment_history(&mut h.app, id, parts, true);
+    comment_browse(&mut h.app, "comment target");
+    h.app.apply_action(KeyAction::Submit);
+    assert!(
+        h.app.queue.is_editing(),
+        "closed History text opens comment editor"
+    );
+    h.app.apply_action(KeyAction::Paste("note".into()));
+    h.app.apply_action(KeyAction::Submit);
+    h.app.focus = Focus::Dock;
+    h.app.input.set_text(" \n\t");
+    let wire = h.app.apply_action(KeyAction::Submit).unwrap();
+    let message = crate::comment::Message::parse(&wire).unwrap();
+    assert_eq!(message.comments[0].location.fragment.part, 1);
+    assert_eq!(message.comments[0].location.fragment.step, 0);
+    assert_eq!(message.comments[0].quote, "comment target");
+    assert!(message.text.is_empty());
+    assert_eq!(h.app.history.prev(), None);
+}
+
+fn comment_app() -> Harness {
+    let mut h = Harness::new(false);
+    h.app.term_width = 100;
+    h.app.term_height = 40;
+    let id = lattice_api::local::new_turn_id();
+    comment_history(
+        &mut h.app,
+        id,
+        json!([{"semantic":{"text":{"text":"comment target"}}}]),
+        true,
+    );
+    h
+}
+
+fn save_comment(app: &mut App, text: &str) {
+    comment_browse(app, "comment target");
+    app.apply_action(KeyAction::Submit);
+    assert!(app.queue.is_editing());
+    app.apply_action(KeyAction::Paste(text.into()));
+    app.apply_action(KeyAction::Submit);
+}
+
+#[test]
+fn comment_esc_delete_paths_saved_count_and_blank_save() {
+    let mut h = comment_app();
+    let app = &mut h.app;
+    comment_browse(app, "comment target");
+    app.apply_action(KeyAction::Submit);
+    app.apply_action(KeyAction::Paste("new discarded".into()));
+    assert_eq!(app.queue.draft_count(), 0, "正在写的新评论不计入待发送");
+    app.apply_action(KeyAction::Clear);
+    assert!(!frame(app).text.contains("new discarded"));
+    save_comment(app, "saved note");
+    assert_eq!(app.queue.draft_count(), 1);
+    comment_browse(app, "saved note");
+    app.apply_action(KeyAction::Submit);
+    app.apply_action(KeyAction::Paste(" discarded edit".into()));
+    app.apply_action(KeyAction::Clear);
+    assert!(frame(app).text.contains("saved note"));
+    assert!(!frame(app).text.contains("discarded edit"));
+    // 不在编辑时：可打印字符与粘贴被忽略，Esc 只回到输入区，Delete 才删除草稿。
+    comment_browse(app, "saved note");
+    app.apply_action(KeyAction::Insert('z'));
+    app.apply_action(KeyAction::Paste("pasted".into()));
+    assert!(matches!(app.focus, Focus::Transcript(_)));
+    assert!(app.input.is_empty());
+    app.apply_action(KeyAction::Clear);
+    assert_eq!(app.focus, Focus::Dock);
+    assert_eq!(app.queue.draft_count(), 1);
+    comment_browse(app, "saved note");
+    app.apply_action(KeyAction::Delete);
+    assert_eq!(app.queue.draft_count(), 0);
+    save_comment(app, " \n\t");
+    assert_eq!(app.queue.draft_count(), 0);
+}
+
+fn reject_comment(app: &mut App, id: TurnId, receipt: usize) {
+    let update = match receipt {
+        0 | 1 => LocalUpdate::Submission {
+            turn_id: id,
+            result: Err(lattice_api::local::LocalError {
+                kind: if receipt == 0 {
+                    lattice_api::local::LocalErrorKind::Busy
+                } else {
+                    lattice_api::local::LocalErrorKind::BadRequest
+                },
+                message: "rejected".into(),
+                recovery: None,
+                store: None,
+            }),
+        },
+        2 => LocalUpdate::NotSubmitted {
+            turn_id: id,
+            stage: lattice_api::local::NotSubmittedStage::FreezingConfiguration,
+        },
+        _ => LocalUpdate::Submission {
+            turn_id: id,
+            result: Ok(Acceptance::NeedsConfiguration {
+                agent_name: "unused".into(),
+            }),
+        },
+    };
+    app.apply_update(update);
+}
+
+#[test]
+fn comment_manual_rejections_keep_user_markers_and_restore_one_draft_copy() {
+    for receipt in 0..4 {
+        let mut h = comment_app();
+        let app = &mut h.app;
+        save_comment(app, "rejected note");
+        app.focus = Focus::Dock;
+        app.input.set_text("body");
+        let wire = app.apply_action(KeyAction::Submit).unwrap();
+        assert_eq!(crate::comment::Message::parse(&wire).unwrap().text, "body");
+        assert_eq!(app.history.prev(), Some("body"));
+        let id = app.current_turn.unwrap();
+        reject_comment(app, id, receipt);
+        assert_eq!(app.input.text(), if receipt == 3 { "" } else { "body" });
+        let text = frame(app).text;
+        assert_eq!(text.matches("[COMMENT 1]").count(), 1);
+        assert_eq!(
+            text.matches("rejected note").count(),
+            1,
+            "receipt {receipt}"
+        );
+        assert!(text.contains("草稿 · #1"), "receipt {receipt}: {text}");
+        comment_browse(app, "rejected note");
+        app.apply_action(KeyAction::Submit);
+        assert!(app.queue.is_editing(), "restored draft remains editable");
+        app.apply_action(KeyAction::Clear);
+        comment_browse(app, "rejected note");
+        app.apply_action(KeyAction::Delete);
+        save_comment(app, "next note");
+        assert_eq!(
+            app.queue.drafts().next().unwrap().comment().n,
+            2,
+            "retained rejected marker reserves its number"
+        );
+    }
+}
+
+#[test]
+fn comment_queue_only_edit_rejection_and_delete() {
+    for receipt in 0..4 {
+        let mut h = comment_app();
+        let app = &mut h.app;
+        app.focus = Focus::Dock;
+        app.input.set_text("running prompt");
+        app.submit().unwrap();
+        save_comment(app, "queued note");
+        app.focus = Focus::Dock;
+        app.input.set_text("queued body");
+        assert!(app.apply_action(KeyAction::Submit).is_none());
+        let message_id = app.queue.messages().next().unwrap().id;
+        assert!(frame(app).text.contains("排队 · #1"));
+        assert_eq!(app.queue.draft_count(), 0);
+        // 从队列标题进入编辑，空正文仍保留只带评论的消息。
+        let transcript = app.prepare_transcript();
+        let row = transcript
+            .owners
+            .iter()
+            .position(|o| o.id == message_id)
+            .unwrap();
+        app.focus = Focus::Transcript(transcript.cursor(row, 0).unwrap());
+        app.apply_action(KeyAction::Submit);
+        assert!(app.queue.is_editing());
+        app.apply_action(KeyAction::Home);
+        for _ in "queued body".chars() {
+            app.apply_action(KeyAction::Delete);
+        }
+        app.apply_action(KeyAction::Insert(' '));
+        app.apply_action(KeyAction::Submit);
+        assert_eq!(app.queue.messages().count(), 1);
+        let running = app.current_turn.unwrap();
+        app.apply_update(LocalUpdate::State {
+            view: Box::new(view(running, true)),
+            phase: ObservationPhase::Finished,
+            error: None,
+        });
+        let wire = app.auto_submit().unwrap();
+        assert!(!frame(app).text.contains("排队 · #1"));
+        assert_eq!(frame(app).text.matches("queued note").count(), 1);
+        assert_eq!(crate::comment::Message::parse(&wire).unwrap().text, "");
+        assert_eq!(app.history.prev(), Some("running prompt"));
+        let id = app.current_turn.unwrap();
+        reject_comment(app, id, receipt);
+        assert!(app.input.is_empty());
+        assert!(app.queue.is_paused());
+        let text = frame(app).text;
+        assert_eq!(text.matches("[COMMENT 1]").count(), 2);
+        assert_eq!(text.matches("queued note").count(), 1);
+        let transcript = app.prepare_transcript();
+        let row = transcript
+            .owners
+            .iter()
+            .position(|o| o.id == message_id)
+            .unwrap();
+        app.focus = Focus::Transcript(transcript.cursor(row, 0).unwrap());
+        app.apply_action(KeyAction::Clear);
+        assert_eq!(app.queue.messages().count(), 1, "Esc 不删除排队消息");
+        app.focus = Focus::Transcript(transcript.cursor(row, 0).unwrap());
+        app.apply_action(KeyAction::Delete);
+        assert_eq!(app.queue.messages().count(), 0);
+        assert!(!frame(app).text.contains("queued note"));
+    }
+}
+
+fn reload_comment(app: &mut App, target: TurnId, wire: &str, on_path: bool) {
+    let new_turn = lattice_api::local::new_turn_id();
+    let mut snapshot = serde_json::to_value(view(new_turn, true)).unwrap();
+    let user_node = if on_path { 3 } else { 1 };
+    let head = user_node + 1;
+    snapshot["session"]["current"] = json!(head);
+    snapshot["history"]["head"] = json!(head);
+    snapshot["selected_turn"]["user_node"] = json!(user_node);
+    snapshot["selected_turn"]["steps"][0]["state"]["end"]["node"] = json!(head);
+    let snapshot: ObservationSnapshot = serde_json::from_value(snapshot).unwrap();
+    let mut entries = if on_path {
+        let mut old = history_entries(&view(target, true));
+        old[1]["content"]["content"]["assistant"]["parts"][0]["semantic"]["text"]["text"] =
+            json!("comment target");
+        old.as_array().unwrap().clone()
+    } else {
+        vec![]
+    };
+    entries.push(json!({"node":user_node,"agent_name":"unused","content":{"kind":"user_message","parent":user_node - 1,"turn_id":new_turn,"message":{"role":"user","parts":[{"semantic":{"text":{"text":wire}}}]}}}));
+    entries.push(json!({"node":head,"agent_name":"unused","content":{"kind":"step","parent":user_node,"turn_id":new_turn,"step_ordinal":0,"content":{"assistant":{"role":"assistant","parts":[{"semantic":{"text":{"text":"following answer"}}}]},"results":[]}}}));
+    app.apply_update(LocalUpdate::State {
+        view: Box::new(snapshot.clone()),
+        phase: ObservationPhase::Finished,
+        error: None,
+    });
+    app.apply_update(LocalUpdate::History {
+        anchor: snapshot.history.clone(),
+        generation: app.generation,
+        stale: false,
+        result: Ok(Box::new(
+            serde_json::from_value(json!({"anchor":snapshot.history,"entries":entries})).unwrap(),
+        )),
+    });
+}
+
+#[test]
+fn comment_reload_attaches_or_falls_back() {
+    let mut source = comment_app();
+    save_comment(&mut source.app, "reload note");
+    source.app.focus = Focus::Dock;
+    let wire = source.app.submit().unwrap();
+    let original = crate::comment::Message::parse(&wire).unwrap();
+    let target = original.comments[0].location.fragment.turn;
+    for mismatch in 0..4 {
+        let mut message = original.clone();
+        if mismatch == 1 {
+            message.comments[0].quote = "different source".into();
+        }
+        if mismatch == 2 {
+            message.comments[0].location.range = 999..1000;
+        }
+        let mut h = Harness::new(false);
+        reload_comment(&mut h.app, target, &message.encode(), mismatch != 3);
+        let app = &mut h.app;
+        let text = frame(app).text;
+        assert_eq!(text.matches("reload note").count(), 1);
+        assert_eq!(text.contains("原文不匹配 · #1"), mismatch != 0);
+        if mismatch == 0 {
+            assert!(text.find("reload note").unwrap() < text.find("[COMMENT 1]").unwrap());
+        } else {
+            assert!(text.find("reload note").unwrap() > text.find("[COMMENT 1]").unwrap());
+        }
+    }
+}
+
+#[test]
+fn comment_missing_step_discards_drafts_and_comment_only_queue_but_keeps_text() {
+    let mut h = comment_app();
+    let app = &mut h.app;
+    app.input.set_text("running");
+    app.submit().unwrap();
+    save_comment(app, "only queued note");
+    app.focus = Focus::Dock;
+    app.submit();
+    save_comment(app, "text queued note");
+    app.focus = Focus::Dock;
+    app.input.set_text("kept text");
+    app.submit();
+    save_comment(app, "draft note");
+    let target = app
+        .queue
+        .drafts()
+        .next()
+        .unwrap()
+        .comment()
+        .location
+        .fragment
+        .turn;
+    // 退回到同一 Turn 的 UserMessage：Turn 仍在路径上，Step 已不在。
+    let mut snapshot = view(target, true);
+    snapshot.session.current = lattice_api::NodeId(1);
+    snapshot.history.head = lattice_api::NodeId(1);
+    app.apply_update(LocalUpdate::State {
+        view: Box::new(snapshot.clone()),
+        phase: ObservationPhase::Finished,
+        error: None,
+    });
+    app.apply_update(LocalUpdate::History {
+        anchor: snapshot.history.clone(),
+        generation: app.generation,
+        stale: false,
+        result: Ok(Box::new(
+            serde_json::from_value(
+                json!({"anchor":snapshot.history,"entries":history_entries(&snapshot)}),
+            )
+            .unwrap(),
+        )),
+    });
+    assert_eq!(app.queue.draft_count(), 0);
+    assert_eq!(
+        app.queue
+            .messages()
+            .map(|m| m.text.as_str())
+            .collect::<Vec<_>>(),
+        ["kept text"]
+    );
+    assert!(app.queue.messages().next().unwrap().comments.is_empty());
+    assert!(frame(app).text.contains("丢弃评论：#1、#2、#3"));
+}
+
+#[test]
+fn comment_warn_error_keeps_space_paste_and_hidden_input_untouched() {
+    for severity in [DockSeverity::Warn, DockSeverity::Error] {
+        let mut h = comment_app();
+        let app = &mut h.app;
+        app.input.set_text("hidden input");
+        comment_browse(app, "comment target");
+        app.apply_action(KeyAction::Submit);
+        app.push_dock_status(
+            StatusKind::TurnFailed {
+                reason: "blocked dock".into(),
+            },
+            severity,
+        );
+        app.apply_action(KeyAction::Insert('a'));
+        app.apply_action(KeyAction::Insert(' '));
+        app.apply_action(KeyAction::Paste("b".into()));
+        app.apply_action(KeyAction::CancelOrClear);
+        app.apply_action(KeyAction::Submit);
+        assert_eq!(app.queue.drafts().next().unwrap().comment().text, "a b");
+        assert_eq!(app.input.text(), "hidden input");
+        assert!(app.dock_status().is_some());
+    }
+}
+
+#[test]
+fn comment_adjacent_text_fragments_and_live_text_are_not_commentable() {
+    let mut h = Harness::new(false);
+    let id = lattice_api::local::new_turn_id();
+    comment_history(
+        &mut h.app,
+        id,
+        json!([{"semantic":{"text":{"text":"first "}}},{"semantic":{"text":{"text":"second"}}}]),
+        true,
+    );
+    comment_browse(&mut h.app, "first second");
+    h.app.apply_action(KeyAction::Submit);
+    assert!(!h.app.queue.is_editing());
+    h.app.focus = Focus::Dock;
+    h.app.input.set_text("run");
+    h.app.submit().unwrap();
+    let live = h.app.current_turn.unwrap();
+    h.app.apply_turn_event(TurnEvent::TokenDelta {
+        key: key(live, 0, 1),
+        content: "live comment target".into(),
+    });
+    comment_browse(&mut h.app, "live comment target");
+    h.app.apply_action(KeyAction::Submit);
+    assert!(!h.app.queue.is_editing());
+}
+
+#[test]
+fn comment_numbering_combines_history_queue_and_drafts_and_does_not_resume_with_drafts() {
+    let mut source = comment_app();
+    save_comment(&mut source.app, "history note");
+    source.app.focus = Focus::Dock;
+    let mut message = crate::comment::Message::parse(&source.app.submit().unwrap()).unwrap();
+    let target = message.comments[0].location.fragment.turn;
+    message.comments[0].n = 7;
+    let mut h = Harness::new(false);
+    let app = &mut h.app;
+    reload_comment(app, target, &message.encode(), true);
+    app.input.set_text("running");
+    app.submit().unwrap();
+    let running = app.current_turn.unwrap();
+    save_comment(app, "queue eight");
+    app.focus = Focus::Dock;
+    app.submit();
+    assert_eq!(app.queue.messages().next().unwrap().comments[0].n, 8);
+    app.apply_update(LocalUpdate::Connection(ConnectionStatus::Eof));
+    reject_comment(app, running, 0);
+    app.input.clear();
+    save_comment(app, "draft nine");
+    save_comment(app, "draft ten");
+    app.focus = Focus::Dock;
+    let outgoing = crate::comment::Message::parse(&app.submit().unwrap()).unwrap();
+    assert_eq!(
+        outgoing.comments.iter().map(|c| c.n).collect::<Vec<_>>(),
+        [9, 10]
+    );
+    assert!(app.queue.is_paused());
+    assert_eq!(app.queue.messages().count(), 1);
+    assert_eq!(
+        app.history.prev(),
+        Some("running"),
+        "comment-only input is not history"
+    );
+}
+
+#[test]
+fn dock_status_survives_r2_history_until_space() {
+    for will_retry in [true, false] {
+        let mut h = Harness::new(false);
+        let id = lattice_api::local::new_turn_id();
+        h.app.apply_update(LocalUpdate::Reset {
+            view: Box::new(view(id, false)),
+            generation: 1,
+        });
+        h.app.apply_turn_event(TurnEvent::LlmRequestError {
+            key: key(id, 0, 1),
+            retryable: will_retry,
+            will_retry,
+            delay_ms: Some(100),
+            message: "dock-marker".into(),
+        });
+        let closed = view(id, true);
+        let loaded: lattice_api::local::LocalHistory = serde_json::from_value(
+            json!({"anchor":closed.history,"entries":history_entries(&closed)}),
+        )
+        .unwrap();
+        for _ in 0..2 {
+            h.app.apply_update(LocalUpdate::History {
+                anchor: closed.history.clone(),
+                result: Ok(Box::new(loaded.clone())),
+                stale: false,
+                generation: 1,
+            });
+            assert!(
+                h.app.dock_status().is_some(),
+                "History must not release Dock"
+            );
+            assert!(!frame(&h.app).text.contains("dock-marker"));
+        }
+        h.app.apply_action(KeyAction::Insert(' '));
+        assert!(h.app.dock_status().is_none());
+        assert_eq!(frame(&h.app).text.matches("dock-marker").count(), 1);
+        h.app
+            .replace_history(crate::session::history_blocks(loaded));
+        assert_eq!(frame(&h.app).text.matches("dock-marker").count(), 1);
+    }
+}
+
+fn screen_text(buffer: &ratatui::buffer::Buffer) -> String {
+    use unicode_width::UnicodeWidthStr;
+    let mut text = String::new();
+    for row in buffer.content.chunks(usize::from(buffer.area.width).max(1)) {
+        let mut col = 0usize;
+        while let Some(cell) = row.get(col) {
+            text.push_str(cell.symbol());
+            col = col.saturating_add(cell.symbol().width().max(1));
+        }
+        text.push('\n');
+    }
+    text
+}
+
+#[test]
+fn running_enter_queues_verbatim_without_history_and_preserves_full_input() {
+    for cancelling in [false, true] {
+        let mut h = Harness::new(true);
+        let app = &mut h.app;
+        app.input.set_text("running");
+        app.apply_action(KeyAction::Submit).unwrap();
+        if cancelling {
+            app.apply_action(KeyAction::CancelOrClear);
+        }
+        app.input.set_text(" \n ");
+        assert_eq!(app.apply_action(KeyAction::Submit), None);
+        assert_eq!(app.input.text(), " \n ");
+        app.input.set_text("/help");
+        app.apply_action(KeyAction::Submit);
+        for n in 0..5 {
+            app.input.set_text(&format!("  queued {n}\n**plain**  "));
+            assert_eq!(app.apply_action(KeyAction::Submit), None);
+            assert!(
+                app.input.is_empty(),
+                "running Enter must clear enqueued input"
+            );
+        }
+        assert_eq!(app.history.prev(), Some("/help"));
+        app.input.set_text("sixth");
+        app.apply_action(KeyAction::Submit);
+        assert_eq!(app.input.text(), "sixth");
+        let text = frame(app).text;
+        assert_eq!(text.matches("排队").count(), 5);
+        assert!(text.contains("**plain**"));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 40)).unwrap();
+        terminal
+            .draw(|frame| crate::view::draw(frame, app))
+            .unwrap();
+        let screen = screen_text(terminal.backend().buffer());
+        assert!(screen.contains("Enter 排队 · 排队已满"), "{screen}");
+    }
+}
+
+#[test]
+fn queued_editor_saves_discards_deletes_and_keeps_warn_input_local() {
+    for severity in [DockSeverity::Warn, DockSeverity::Error] {
+        let mut h = Harness::new(true);
+        let app = &mut h.app;
+        app.input.set_text("running");
+        app.submit().unwrap();
+        for text in ["first", "ab中\ncd"] {
+            app.input.set_text(text);
+            app.submit();
+        }
+        app.apply_action(KeyAction::Up);
+        assert!(frame(app).text.contains("Enter 编辑 · Delete 删除"));
+        app.apply_action(KeyAction::Submit);
+        assert!(frame(app).text.contains("Enter 完成编辑"));
+        app.push_dock_status(
+            StatusKind::TurnFailed {
+                reason: "dock marker".into(),
+            },
+            severity,
+        );
+        app.apply_action(KeyAction::End);
+        app.apply_action(KeyAction::Insert(' '));
+        app.apply_action(KeyAction::Paste("e\nf".into()));
+        app.apply_action(KeyAction::Newline);
+        app.apply_action(KeyAction::Insert('g'));
+        app.apply_action(KeyAction::Home);
+        app.apply_action(KeyAction::Delete);
+        app.apply_action(KeyAction::Backspace);
+        app.apply_action(KeyAction::Insert('!'));
+        app.apply_action(KeyAction::Submit);
+        assert!(frame(app).text.contains("cd e\nf!"));
+        assert!(app.dock_status().is_some());
+        assert!(matches!(app.focus, Focus::Transcript(_)));
+        app.apply_action(KeyAction::Submit);
+        app.apply_action(KeyAction::Insert('x'));
+        app.apply_action(KeyAction::Clear);
+        assert!(!frame(app).text.contains("f!x"));
+        app.apply_action(KeyAction::Insert(' '));
+        assert!(app.dock_status().is_none());
+        app.apply_action(KeyAction::Delete);
+        assert!(!frame(app).text.contains("ab中"));
+        assert!(frame(app).text.contains("first"));
+        assert!(matches!(app.focus, Focus::Transcript(_)));
+    }
+}
+#[tokio::test]
+async fn completed_observation_sends_queue_through_real_loop_once() {
+    let id = lattice_api::local::new_turn_id();
+    let closed = view(id, true);
+    let (tx, rx) = unbounded();
+    tx.unbounded_send(snapshot(&closed)).unwrap();
+    let mut rx = Some(rx);
+    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
+        "subscribe" if r["target"]["turn_id"] == json!(id) => Reply::Stream(rx.take().unwrap()),
+        "history" => Reply::Never,
+        "submit" => Reply::Now(accepted(
+            serde_json::from_value(r["request"]["turn_id"].clone()).unwrap(),
+        )),
+        "subscribe" => Reply::Never,
+        _ => panic!("unexpected request: {r}"),
+    });
+    let mut h = Harness::new(true);
+    h.app.apply_update(LocalUpdate::State {
+        view: Box::new(view(id, false)),
+        phase: ObservationPhase::Live,
+        error: None,
+    });
+    let live = view(id, false);
+    h.app.apply_update(LocalUpdate::History {
+        anchor: live.history.clone(),
+        generation: 0,
+        stale: false,
+        result: Ok(Box::new(
+            serde_json::from_value(json!({
+                "anchor":live.history,"entries":history_entries(&live),
+            }))
+            .unwrap(),
+        )),
+    });
+    for text in ["queued via loop", "second"] {
+        h.app.input.set_text(text);
+        h.app.submit();
+    }
+    h.app.input.set_text("untouched draft");
+    let remote = h.remote.clone();
+    let driver = async {
+        let seen = peer.wait(|s| count(s, "submit") == 1).await;
+        let request = seen.iter().find(|r| r["operation"] == "submit").unwrap();
+        assert_eq!(request["request"]["input"], "queued via loop");
+        assert_ne!(submitted(&seen), id);
+        let rendered = remote.wait(|f| f.started && f.current != Some(id)).await;
+        assert_eq!(rendered.input, "untouched draft");
+        assert_eq!(
+            rendered.text.matches("排队").count(),
+            1,
+            "{}",
+            rendered.text
+        );
+        assert!(rendered.text.contains(" #2 ──"));
+        remote.press(KeyCode::Esc, KeyModifiers::NONE);
+        remote.line("/quit");
+    };
+    let (exit, ()) = tokio::join!(
+        h.run(
+            &peer.client,
+            Some(peer.client.observe(Some(sid()), Some(id)))
+        ),
+        driver,
+    );
+    assert!(exit.result.is_ok());
+    assert_eq!(count(&peer.seen.borrow(), "submit"), 1);
+}
+
+fn finish_completed(app: &mut App, id: TurnId) {
+    let mut closed = view(id, true);
+    let mut entries = Vec::new();
+    let mut turn_id = id;
+    for block in app.blocks.iter() {
+        match block {
+            Block::UserTurn(turn, _) => turn_id = *turn,
+            Block::User(text) => {
+                let node = entries.len() as u64 + 1;
+                entries.push(json!({"node":node,"agent_name":"unused","content":{
+                    "kind":"user_message","parent":node - 1,"turn_id":turn_id,
+                    "message":{"role":"user","parts":[{"semantic":{"text":{"text":text}}}]},
+                }}));
+                entries.push(json!({"node":node + 1,"agent_name":"unused","content":{
+                    "kind":"step","parent":node,"turn_id":turn_id,"step_ordinal":0,
+                    "content":{"assistant":{"role":"assistant","origin":"open_ai_compatible","parts":[{"semantic":{"text":{"text":"live body"}}}]},"results":[]},
+                }}));
+            }
+            _ => {}
+        }
+    }
+    let node = entries.len() as u64;
+    closed.session.current = lattice_api::NodeId(node);
+    closed.history.head = lattice_api::NodeId(node);
+    closed.selected_turn.as_mut().unwrap().user_node = lattice_api::NodeId(node - 1);
+    let mut serialized = serde_json::to_value(&closed).unwrap();
+    serialized["selected_turn"]["steps"][0]["state"]["end"]["node"] = json!(node);
+    closed = serde_json::from_value(serialized).unwrap();
+    app.apply_update(LocalUpdate::State {
+        view: Box::new(closed.clone()),
+        phase: ObservationPhase::NoOwner,
+        error: None,
+    });
+    app.apply_update(LocalUpdate::History {
+        anchor: closed.history.clone(),
+        generation: app.generation,
+        stale: false,
+        result: Ok(Box::new(
+            serde_json::from_value(json!({
+                "anchor":closed.history,"entries":entries,
+            }))
+            .unwrap(),
+        )),
+    });
+    app.apply_update(LocalUpdate::Finished {
+        turn: Some(lattice_api::local::TurnRef {
+            session_id: sid(),
+            turn_id: id,
+        }),
+        anchor: closed.history,
+        generation: app.generation,
+    });
+}
+
+fn queued_app() -> Harness {
+    let mut h = Harness::new(true);
+    h.app.input.set_text("running");
+    h.app.submit().unwrap();
+    let id = h.app.current_turn.unwrap();
+    h.app.apply_update(LocalUpdate::Submission {
+        turn_id: id,
+        result: Ok(Acceptance::Accepted {
+            turn: lattice_api::local::TurnView::from(
+                view(id, false).selected_turn.as_ref().unwrap(),
+            ),
+        }),
+    });
+    for n in 0..5 {
+        h.app.input.set_text(&format!(" q{n}\nraw "));
+        h.app.submit();
+    }
+    finish_completed(&mut h.app, id);
+    h
+}
+
+#[test]
+fn automatic_rejections_restore_exact_front_and_do_not_touch_input() {
+    for receipt in 0..4 {
+        let mut h = queued_app();
+        let app = &mut h.app;
+        assert_eq!(app.auto_submit(), Some(" q0\nraw ".into()));
+        let id = app.current_turn.unwrap();
+        assert!(app.queue.is_full(), "awaiting automatic prompt owns a slot");
+        app.input.set_text("user is typing");
+        app.submit();
+        assert_eq!(app.input.text(), "user is typing");
+        let update = match receipt {
+            0 | 1 => LocalUpdate::Submission {
+                turn_id: id,
+                result: Err(lattice_api::local::LocalError {
+                    kind: if receipt == 0 {
+                        lattice_api::local::LocalErrorKind::Busy
+                    } else {
+                        lattice_api::local::LocalErrorKind::BadRequest
+                    },
+                    message: "rejected".into(),
+                    recovery: None,
+                    store: None,
+                }),
+            },
+            2 => LocalUpdate::NotSubmitted {
+                turn_id: id,
+                stage: lattice_api::local::NotSubmittedStage::FreezingConfiguration,
+            },
+            _ => LocalUpdate::Submission {
+                turn_id: id,
+                result: Ok(Acceptance::NeedsConfiguration {
+                    agent_name: "unused".into(),
+                }),
+            },
+        };
+        app.apply_update(update);
+        assert_eq!(app.input.text(), "user is typing", "receipt {receipt}");
+        assert_eq!(
+            app.queue
+                .messages()
+                .map(|m| m.text.as_str())
+                .collect::<Vec<_>>(),
+            [
+                " q0\nraw ",
+                " q1\nraw ",
+                " q2\nraw ",
+                " q3\nraw ",
+                " q4\nraw "
+            ]
+        );
+        assert!(app.queue.is_full());
+        assert_eq!(frame(app).text.matches("暂停").count(), 5);
+        assert_eq!(app.auto_submit(), None);
+        assert_eq!(app.phase, TurnPhase::Idle);
+    }
+}
+
+#[test]
+fn accepting_and_unknown_receipts_release_capacity_without_requeue() {
+    for receipt in 0..4 {
+        let mut h = queued_app();
+        let app = &mut h.app;
+        app.auto_submit().unwrap();
+        let id = app.current_turn.unwrap();
+        let turn =
+            lattice_api::local::TurnView::from(view(id, false).selected_turn.as_ref().unwrap());
+        let update = match receipt {
+            0 => LocalUpdate::Submission {
+                turn_id: id,
+                result: Ok(Acceptance::Accepted { turn }),
+            },
+            1 => LocalUpdate::Submission {
+                turn_id: id,
+                result: Ok(Acceptance::Existing { turn }),
+            },
+            2 => LocalUpdate::Submission {
+                turn_id: id,
+                result: Ok(Acceptance::ConfirmationUnknown {
+                    turn_id: id,
+                    session_id: Some(sid()),
+                }),
+            },
+            _ => LocalUpdate::SubmissionUnknown {
+                turn_id: id,
+                error: None,
+            },
+        };
+        app.apply_update(update);
+        assert!(
+            !app.queue.is_full(),
+            "receipt {receipt} releases the reserved slot"
+        );
+        assert_eq!(app.queue.messages().count(), 4);
+        assert_eq!(app.queue.is_paused(), receipt >= 2);
+        app.input.set_text("new queued input");
+        app.submit();
+        assert!(app.input.is_empty());
+        assert!(app.queue.is_full());
+        assert_eq!(
+            app.queue.messages().last().unwrap().text,
+            "new queued input"
+        );
+        if receipt >= 2 {
+            // 未知之后的迟到拒绝不能重新入队或覆盖用户的新草稿。
+            app.input.set_text("new draft");
+            app.apply_update(LocalUpdate::NotSubmitted {
+                turn_id: id,
+                stage: lattice_api::local::NotSubmittedStage::NeedsConfiguration,
+            });
+            assert_eq!(app.input.text(), "new draft");
+            assert_eq!(app.queue.messages().count(), 5);
+        }
+    }
+}
+
+fn stopped_view(id: TurnId, cancelled: bool, user_node: u64) -> ObservationSnapshot {
+    let mut value = serde_json::to_value(view(id, false)).unwrap();
+    value["session"]["current"] = json!(user_node);
+    value["history"]["head"] = json!(user_node);
+    value["selected_turn"]["user_node"] = json!(user_node);
+    value["session"]["active_turn"] = Value::Null;
+    value["selected_turn"]["ended_at"] = json!("2026-01-01T00:00:01Z");
+    value["selected_turn"]["summary"] = json!({
+        "outcome":if cancelled { "cancelled" } else { "failed" },
+        "notice":{"level":if cancelled { "info" } else { "error" },"text":"stopped"},
+    });
+    value["selected_turn"]["steps"] = json!([{
+        "key":{"turn_id":id,"ordinal":0},"attempts":[],
+        "state":{"state":"closed","end":{"end":"stop","node":null,"cause":{"cause":if cancelled { "cancelled" } else { "process_exit" }}},"slots":[]},
+    }]);
+    value["active"] = Value::Null;
+    value["attempt"] = Value::Null;
+    value["owned"] = json!(false);
+    serde_json::from_value(value).unwrap()
+}
+
+#[test]
+fn queue_pauses_on_failure_cancel_and_disconnect_and_resumes_after_failed_manual_turn() {
+    for cause in 0..5 {
+        let mut h = queued_app();
+        let app = &mut h.app;
+        app.auto_submit().unwrap();
+        let id = app.current_turn.unwrap();
+        app.apply_update(LocalUpdate::Submission {
+            turn_id: id,
+            result: Ok(Acceptance::Accepted {
+                turn: lattice_api::local::TurnView::from(
+                    view(id, false).selected_turn.as_ref().unwrap(),
+                ),
+            }),
+        });
+        match cause {
+            0 | 1 => app.apply_update(LocalUpdate::State {
+                view: Box::new(stopped_view(id, cause == 1, 3)),
+                phase: ObservationPhase::NoOwner,
+                error: None,
+            }),
+            2 => app.apply_update(LocalUpdate::Connection(ConnectionStatus::Eof)),
+            3 => app.apply_update(LocalUpdate::Connection(ConnectionStatus::Idle)),
+            _ => app.apply_update(LocalUpdate::Connection(ConnectionStatus::Error(
+                lattice_api::local::LocalError::from(std::io::Error::other("offline")),
+            ))),
+        }
+        assert!(app.queue.is_paused(), "cause {cause}");
+        assert_eq!(frame(app).text.matches("暂停").count(), 4);
+        assert_eq!(app.auto_submit(), None);
+        // 断连后重连得到成功结局也不能自行恢复。
+        if cause >= 2 {
+            finish_completed(app, id);
+            assert_eq!(app.auto_submit(), None);
+        }
+        app.input.set_text("manual while paused");
+        assert_eq!(
+            app.apply_action(KeyAction::Submit),
+            Some("manual while paused".into())
+        );
+        assert!(app.queue.is_paused());
+        let manual = app.current_turn.unwrap();
+        app.apply_update(LocalUpdate::State {
+            view: Box::new(stopped_view(manual, false, if cause < 2 { 4 } else { 5 })),
+            phase: ObservationPhase::NoOwner,
+            error: None,
+        });
+        assert!(app.input.is_empty());
+        assert_eq!(
+            app.apply_action(KeyAction::Submit),
+            Some(" q1\nraw ".into()),
+            "Failed 后空输入 Enter 立即发送"
+        );
+        assert!(!app.queue.is_paused());
+    }
+}
+
+#[test]
+fn completion_waits_for_editor_then_sends_one_on_save_or_discard() {
+    // 先运行自动发出的第一条，再在编辑期间交付它的 Completed。
+    for save in [true, false] {
+        let mut h = queued_app();
+        let app = &mut h.app;
+        app.auto_submit().unwrap();
+        let first = app.current_turn.unwrap();
+        app.apply_update(LocalUpdate::Submission {
+            turn_id: first,
+            result: Ok(Acceptance::Accepted {
+                turn: lattice_api::local::TurnView::from(
+                    view(first, false).selected_turn.as_ref().unwrap(),
+                ),
+            }),
+        });
+        app.apply_action(KeyAction::Up);
+        app.apply_action(KeyAction::Submit);
+        app.apply_action(KeyAction::Insert('!'));
+        finish_completed(app, first);
+        assert_eq!(app.auto_submit(), None);
+        assert_eq!(
+            app.apply_action(if save {
+                KeyAction::Submit
+            } else {
+                KeyAction::Clear
+            }),
+            Some(" q1\nraw ".into())
+        );
+        assert_eq!(
+            app.queue.messages().last().unwrap().text,
+            if save { " q4\nraw !" } else { " q4\nraw " }
+        );
+        assert_eq!(app.auto_submit(), None);
+        let id = app.current_turn.unwrap();
+        app.apply_update(LocalUpdate::Submission {
+            turn_id: id,
+            result: Ok(Acceptance::Accepted {
+                turn: lattice_api::local::TurnView::from(
+                    view(id, false).selected_turn.as_ref().unwrap(),
+                ),
+            }),
+        });
+        finish_completed(app, id);
+        assert_eq!(app.auto_submit(), Some(" q2\nraw ".into()));
+        assert_eq!(app.auto_submit(), None);
+    }
+}
+
+#[tokio::test]
+async fn every_loop_exit_saves_queue_originals_in_order() {
+    for exit_kind in 0..6 {
+        let mut h = queued_app();
+        h.app.queue.pause();
+        std::fs::create_dir_all(&h.options.session_dir).unwrap();
+        if exit_kind >= 2 {
+            h.app.apply_action(KeyAction::Up);
+            h.app.apply_action(KeyAction::Submit);
+            h.app.apply_action(KeyAction::Insert('!'));
+        }
+        let key = |code, modifiers| Ok(Event::Key(KeyEvent::new(code, modifiers)));
+        let events = match exit_kind {
+            0 => vec![
+                Ok(Event::Paste("/quit".into())),
+                key(KeyCode::Enter, KeyModifiers::NONE),
+            ],
+            1 => vec![key(KeyCode::Char('d'), KeyModifiers::CONTROL)],
+            2 => vec![
+                key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            ],
+            3 => vec![],
+            4 => vec![Err(std::io::Error::other("input failed"))],
+            _ => vec![],
+        };
+        let events: std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Event>>>> =
+            if exit_kind == 5 {
+                Box::pin(futures::stream::pending())
+            } else {
+                Box::pin(futures::stream::iter(events))
+            };
+        let client = LocalClient::new(lattice_api::StateLayout::in_state_root(h._root.path()));
+        let exit = run_loop(&h.options, &mut h.app, &client, None, events, |_| {
+            if exit_kind == 5 {
+                anyhow::bail!("draw failed");
+            }
+            Ok(())
+        })
+        .await;
+        assert_eq!(exit.result.is_err(), exit_kind == 5);
+        let saved =
+            std::fs::read_to_string(h.options.session_dir.join("repl_history.txt")).unwrap();
+        let queued = saved
+            .lines()
+            .filter(|line| line.starts_with(" q"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            queued,
+            [" q0 raw ", " q1 raw ", " q2 raw ", " q3 raw ", " q4 raw "]
+        );
+    }
+}
+
+#[test]
+fn detached_automatic_receipt_settles_its_slot_without_touching_new_turn() {
+    for receipt in 0..4 {
+        let mut h = queued_app();
+        let app = &mut h.app;
+        app.auto_submit().unwrap();
+        let id = app.current_turn.unwrap();
+        // 只读观察可以先于迟到的提交回执读到结局。
+        finish_completed(app, id);
+        app.input.set_text("new manual");
+        app.submit().unwrap();
+        let manual = app.current_turn;
+        app.input.set_text("new draft");
+        let submission = match receipt {
+            0 => Some(Ok(Acceptance::Accepted {
+                turn: lattice_api::local::TurnView::from(
+                    view(id, true).selected_turn.as_ref().unwrap(),
+                ),
+            })),
+            1 => Some(Ok(Acceptance::ConfirmationUnknown {
+                turn_id: id,
+                session_id: Some(sid()),
+            })),
+            _ => None,
+        };
+        app.apply_handoff(DetachReport {
+            session_id: Some(sid()),
+            turn_id: Some(id),
+            submission,
+            not_submitted: (receipt == 2)
+                .then_some(lattice_api::local::NotSubmittedStage::NeedsConfiguration),
+            submission_diagnostic: None,
+            history_error: None,
+            cancel: None,
+            cancel_error: None,
+            state: None,
+        });
+        assert_eq!(app.input.text(), "new draft");
+        assert_eq!(app.current_turn, manual);
+        assert_eq!(app.phase, TurnPhase::Streaming);
+        assert_eq!(app.queue.is_full(), receipt == 2);
+        assert_eq!(app.queue.is_paused(), receipt != 0);
+    }
+}
+
+#[test]
+fn manual_rejections_keep_the_existing_restore_rules() {
+    for receipt in 0..3 {
+        let mut h = Harness::new(true);
+        let app = &mut h.app;
+        app.input.set_text(" manual\nraw ");
+        app.submit().unwrap();
+        let id = app.current_turn.unwrap();
+        app.input.set_text("new draft");
+        app.apply_update(match receipt {
+            0 => LocalUpdate::Submission {
+                turn_id: id,
+                result: Err(lattice_api::local::LocalError {
+                    kind: lattice_api::local::LocalErrorKind::Busy,
+                    message: "busy".into(),
+                    recovery: None,
+                    store: None,
+                }),
+            },
+            1 => LocalUpdate::NotSubmitted {
+                turn_id: id,
+                stage: lattice_api::local::NotSubmittedStage::FreezingConfiguration,
+            },
+            _ => LocalUpdate::Submission {
+                turn_id: id,
+                result: Ok(Acceptance::NeedsConfiguration {
+                    agent_name: "unused".into(),
+                }),
+            },
+        });
+        assert_eq!(
+            app.input.text(),
+            if receipt == 2 {
+                "new draft"
+            } else {
+                " manual\nraw "
+            }
+        );
+        assert_eq!(app.queue.messages().count(), 0);
+    }
+}
+
+#[test]
+fn empty_edit_deletes_and_ctrl_c_never_clears_hidden_input_or_editor() {
+    for severity in [DockSeverity::Warn, DockSeverity::Error] {
+        let mut h = Harness::new(true);
+        let app = &mut h.app;
+        app.input.set_text("running");
+        app.submit().unwrap();
+        let id = app.current_turn.unwrap();
+        app.input.set_text("中a");
+        app.submit();
+        app.apply_action(KeyAction::Up);
+        app.apply_action(KeyAction::Submit);
+        app.apply_update(LocalUpdate::State {
+            view: Box::new(stopped_view(id, false, 1)),
+            phase: ObservationPhase::NoOwner,
+            error: None,
+        });
+        app.input.set_text("hidden draft");
+        app.push_dock_status(
+            StatusKind::TurnFailed {
+                reason: "dock".into(),
+            },
+            severity,
+        );
+        handle_input_event(
+            app,
+            Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        );
+        assert!(app.last_ctrl_c.is_some());
+        assert!(!app.should_quit);
+        assert_eq!(app.input.text(), "hidden draft");
+        app.apply_action(KeyAction::Insert(' '));
+        assert!(app.dock_status().is_some());
+        assert_eq!(
+            app.queue
+                .editor(app.queue.messages().next().unwrap().id)
+                .unwrap()
+                .text(),
+            "中a "
+        );
+        app.apply_action(KeyAction::Home);
+        for _ in 0..3 {
+            app.apply_action(KeyAction::Delete);
+        }
+        app.apply_action(KeyAction::Insert(' '));
+        app.apply_action(KeyAction::Submit);
+        assert_eq!(
+            app.queue.messages().count(),
+            0,
+            "whitespace-only edit deletes"
+        );
+        assert_eq!(app.input.text(), "hidden draft");
+    }
+}
+
+#[test]
+fn completed_summary_dispatch_does_not_wait_for_final_history() {
+    let mut h = queued_app();
+    let app = &mut h.app;
+    let closed = app.state.as_ref().unwrap().view.clone();
+    // R2 结局在 State 中先到；Finished 要等正文读取，不能作为发送许可。
+    app.apply_update(LocalUpdate::State {
+        view: closed,
+        phase: ObservationPhase::NoOwner,
+        error: None,
+    });
+    assert_eq!(app.auto_submit(), Some(" q0\nraw ".into()));
+}
 
 enum Reply {
     Now(Value),
@@ -208,6 +1434,8 @@ struct Frame {
     input: String,
     text: String,
     cancel: Option<CancelStatus>,
+    /// 当前 Turn 已被后台接受或正在运行：助手标题线已出现。
+    started: bool,
 }
 fn frame(app: &App) -> Frame {
     Frame {
@@ -221,6 +1449,9 @@ fn frame(app: &App) -> Frame {
             .collect::<Vec<_>>()
             .join("\n"),
         cancel: app.cancel_status,
+        started: app.blocks.iter().any(|block| {
+            matches!(block, Block::AssistantStart { turn_id, .. } if Some(*turn_id) == app.current_turn)
+        }),
     }
 }
 struct Harness {
@@ -308,6 +1539,57 @@ impl Remote {
     }
 }
 
+#[test]
+fn comment_rewind_during_queue_edit_preserves_remaining_order() {
+    let mut h = comment_app();
+    let app = &mut h.app;
+    let target = app.observed_turn.unwrap();
+    app.input.set_text("running");
+    app.submit().unwrap();
+    save_comment(app, "drop this");
+    app.focus = Focus::Dock;
+    app.submit();
+    for text in ["middle", "last"] {
+        app.input.set_text(text);
+        app.submit();
+    }
+    app.apply_update(LocalUpdate::State {
+        view: Box::new(stopped_view(app.current_turn.unwrap(), false, 3)),
+        phase: ObservationPhase::Finished,
+        error: None,
+    });
+    comment_browse(app, "middle");
+    app.apply_action(KeyAction::Submit);
+    assert!(app.queue.is_editing());
+    let mut snapshot = view(target, true);
+    snapshot.session.current = lattice_api::NodeId(1);
+    snapshot.history.head = lattice_api::NodeId(1);
+    app.apply_update(LocalUpdate::State {
+        view: Box::new(snapshot.clone()),
+        phase: ObservationPhase::Finished,
+        error: None,
+    });
+    app.apply_update(LocalUpdate::History {
+        anchor: snapshot.history.clone(),
+        generation: app.generation,
+        stale: false,
+        result: Ok(Box::new(
+            serde_json::from_value(
+                json!({"anchor":snapshot.history,"entries":history_entries(&snapshot)}),
+            )
+            .unwrap(),
+        )),
+    });
+    app.apply_action(KeyAction::Clear);
+    assert_eq!(
+        app.queue
+            .messages()
+            .map(|m| m.text.as_str())
+            .collect::<Vec<_>>(),
+        ["middle", "last"]
+    );
+}
+
 #[tokio::test]
 async fn first_submission_obtains_session_only_after_acceptance_and_quit_does_not_cancel() {
     let (tx, rx) = oneshot::channel();
@@ -331,7 +1613,7 @@ async fn first_submission_obtains_session_only_after_acceptance_and_quit_does_no
             " original "
         );
         tx.send(accepted(id)).unwrap();
-        remote.wait(|f| f.text.contains("已确认接受")).await;
+        remote.wait(|f| f.started).await;
         remote.ctrl('d');
     };
     let ((), exit) = tokio::join!(driver, h.run(&peer.client, None));
@@ -369,6 +1651,7 @@ async fn cancel_receipt_orders_and_late_probe_keep_original_intent() {
             _ => panic!("no configuration reload"),
         });
         let mut h = Harness::new(false);
+        h.app.replace_history(Vec::new()); // 已装入的空路径；本测试从提交窗口开始。
         let remote = h.remote.clone();
         let driver = async {
             remote.line("hi");
@@ -377,7 +1660,7 @@ async fn cancel_receipt_orders_and_late_probe_keep_original_intent() {
             peer.wait(|s| count(s, "cancel") == 1).await;
             if order == 1 {
                 stx.send(accepted(id)).unwrap();
-                remote.wait(|f| f.text.contains("已确认接受")).await;
+                remote.wait(|f| f.started).await;
                 ctx.send(response("cancelled", json!({"owned":false})))
                     .unwrap();
             } else {
@@ -442,6 +1725,7 @@ async fn exit_before_receipt_settles_cancel_and_configuration_abandonment() {
             _ => Reply::Never,
         });
         let mut h = Harness::new(false);
+        h.app.replace_history(Vec::new()); // 已装入的空路径；本测试从提交窗口开始。
         let remote = h.remote.clone();
         let driver = async {
             remote.line("hi");
@@ -513,6 +1797,7 @@ async fn late_transport_error_keeps_observation_after_submission_grace() {
         _ => panic!("unexpected request"),
     });
     let mut h = Harness::new(false);
+    h.app.replace_history(Vec::new()); // 已装入的空路径；本测试从提交窗口开始。
     let remote = h.remote.clone();
     let driver = async {
         remote.line("hi");
@@ -610,7 +1895,8 @@ async fn idle_deadline_survives_repeated_poll_rebuilds() {
 
 #[tokio::test]
 async fn switching_targets_keeps_old_receipts_and_diagnostics_out_of_new_state() {
-    for gesture in [0, 1, 2] {
+    // Esc 只清空输入，取消与选择活动目标由首次 Ctrl+C 或 /reconnect 触发。
+    for gesture in [1, 2] {
         let old = lattice_api::local::new_turn_id();
         let active = lattice_api::local::new_turn_id();
         let (old_tx, old_rx) = unbounded();
@@ -643,15 +1929,18 @@ async fn switching_targets_keeps_old_receipts_and_diagnostics_out_of_new_state()
             peer.wait(|s| count(s, "subscribe") == 1).await;
             old_tx.unbounded_send(snapshot(&view(old, false))).unwrap();
             remote.wait(|f| f.current == Some(old)).await;
-            remote.press(KeyCode::Esc, KeyModifiers::NONE);
+            remote.ctrl('c');
             peer.wait(|s| count(s, "cancel") == 1).await;
             let mut closed = view(old, true);
             closed.session.active_turn = Some(active);
             old_tx.unbounded_send(snapshot(&closed)).unwrap();
             remote.wait(|f| f.current == Some(active)).await;
             match gesture {
-                0 => remote.press(KeyCode::Esc, KeyModifiers::NONE),
-                1 => remote.ctrl('c'),
+                1 => {
+                    // 第二次是对 B 的新取消，不是两秒窗口内的退出。
+                    tokio::time::sleep(CTRL_C_WINDOW + Duration::from_millis(50)).await;
+                    remote.ctrl('c');
+                }
                 _ => remote.line("/reconnect"),
             };
             remote
@@ -689,11 +1978,9 @@ async fn switching_targets_keeps_old_receipts_and_diagnostics_out_of_new_state()
                     Some(CancelStatus::Taken)
                 }
             );
-            assert!(
-                f.text
-                    .lines()
-                    .any(|line| line.contains("历史交接：Turn") && line.contains(&old.to_string()))
-            );
+            // 旧 Turn 的结局已实时显示，交接报告不再重述。
+            assert!(f.text.contains(&old.to_string()), "{}", f.text);
+            assert!(!f.text.contains("历史交接：Turn"), "{}", f.text);
             remote.ctrl('d');
         };
         let ((), exit) = tokio::join!(driver, h.run(&peer.client, None));
@@ -733,7 +2020,7 @@ async fn detached_cancel_keeps_original_target_diagnostic() {
     let initial = peer.client.observe(Some(sid()), Some(id));
     let driver = async {
         remote.wait(|f| f.current == Some(id)).await;
-        remote.press(KeyCode::Esc, KeyModifiers::NONE);
+        remote.ctrl('c');
         peer.wait(|s| count(s, "cancel") == 1).await;
         remote.ctrl('d');
     };
@@ -779,6 +2066,7 @@ async fn busy_submission_preserves_draft_and_can_cancel_displayed_active_turn() 
         _ => panic!("no config loading"),
     });
     let mut h = Harness::new(false);
+    h.app.replace_history(Vec::new()); // 已装入的空路径；本测试从提交窗口开始。
     let remote = h.remote.clone();
     let driver = async {
         remote.line("hi");
@@ -793,11 +2081,11 @@ async fn busy_submission_preserves_draft_and_can_cancel_displayed_active_turn() 
         remote.press(KeyCode::Esc, KeyModifiers::NONE);
         remote.line("/reconnect");
         remote.wait(|f| f.current == Some(active)).await;
-        remote.press(KeyCode::Esc, KeyModifiers::NONE);
-        let f = remote
-            .wait(|f| f.cancel == Some(CancelStatus::Taken) && f.text.contains("历史交接：请求"))
-            .await;
-        assert!(f.text.contains(&id.to_string()));
+        remote.ctrl('c');
+        let f = remote.wait(|f| f.cancel == Some(CancelStatus::Taken)).await;
+        // 被拒回执已实时显示，交接报告不再重述。
+        assert!(f.text.contains(&id.to_string()), "{}", f.text);
+        assert!(!f.text.contains("历史交接：请求"), "{}", f.text);
         remote.ctrl('d');
     };
     let ((), exit) = tokio::join!(driver, h.run(&peer.client, None));
@@ -817,6 +2105,7 @@ async fn existing_submission_keeps_explicit_agent() {
         _ => Reply::Never,
     });
     let mut h = Harness::new(false);
+    h.app.replace_history(Vec::new()); // 已装入的空路径；本测试从提交窗口开始。
     h.options.agent = "override-agent".into();
     let remote = h.remote.clone();
     let driver = async {

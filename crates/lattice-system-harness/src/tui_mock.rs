@@ -52,7 +52,7 @@ impl TuiMockScenario {
             Self::LongText => "确定性的长对话记录",
             Self::ToolCall => "session.todo_write 工具生命周期",
             Self::Disconnect => "输出部分文本后断开连接",
-            Self::Slow => "响应保持停滞，等待 Esc 取消",
+            Self::Slow => "响应保持停滞，等待 Ctrl+C 取消",
             Self::Error => "稳定返回提供方 HTTP 500",
             Self::Flaky => "首次请求返回 HTTP 500，重试后成功",
         }
@@ -170,8 +170,8 @@ pub fn run_tui_mock(scenario: TuiMockScenario) -> Result<ExitStatus, TuiMockErro
     world.set_env("OPENAI_COMPATIBLE_API_KEY", FAKE_API_KEY);
 
     // ScenarioWorld::command() 有意清空子进程环境以保证 harness 隔离；
-    // 交互式 TUI 还需要终端能力变量，否则真实的 TUI 子进程探测不到
-    // COLORTERM，会回退为 ANSI 命名色而非设计的 24-bit RGB 调色板。
+    // 交互式调试保留宿主的终端与 locale 环境；TUI 固定使用 RGB 和 Unicode，
+    // 不依赖这些变量选择颜色或符号。
     for key in ["TERM", "COLORTERM", "LANG", "LC_ALL"] {
         if let Ok(value) = std::env::var(key) {
             world.set_env(key, value);
@@ -182,7 +182,7 @@ pub fn run_tui_mock(scenario: TuiMockScenario) -> Result<ExitStatus, TuiMockErro
         "TUI mock scenario: {scenario} ({})\nSubmit any prompt to run it.{}",
         scenario.description(),
         if scenario == TuiMockScenario::Slow {
-            " Press Esc after submission to exercise cancellation."
+            " Press Ctrl+C after submission to exercise cancellation."
         } else {
             ""
         }

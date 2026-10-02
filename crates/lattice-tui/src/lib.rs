@@ -4,10 +4,15 @@
 //! Full-screen TUI shell for LATTICE.
 
 mod app;
+mod blocks;
+mod comment;
 mod connection;
 mod input;
+mod markdown;
+mod queue;
 mod session;
 mod view;
+mod wrapping;
 
 use std::path::PathBuf;
 

@@ -3,6 +3,7 @@
 
 use crate::TuiOptions;
 use crate::app::{Block, ToolSource, ToolState};
+use crate::blocks::BlockList;
 use anyhow::Context;
 use lattice_api::local::{
     LocalClient, LocalHistory, MessageRole, MessageSemantic, Node, ResultPayload, SessionId,
@@ -76,7 +77,8 @@ pub(crate) async fn freeze_configuration(
 }
 
 pub(crate) fn history_blocks(history: LocalHistory) -> Vec<Block> {
-    let mut blocks = Vec::new();
+    let mut blocks = BlockList::default();
+    let mut ordinal = std::num::NonZeroUsize::MIN;
     for entry in history.entries {
         // Turn 的 agent 在接受时冻结，同一 Turn 的 Step 不再重复标题；路径从根开始，
         // 每个 Step 前必有本 Turn 的 UserMessage。
@@ -88,7 +90,8 @@ pub(crate) fn history_blocks(history: LocalHistory) -> Vec<Block> {
             Node::UserMessage {
                 turn_id, message, ..
             } => {
-                blocks.push(Block::UserTurn(turn_id));
+                blocks.push(Block::UserTurn(turn_id, ordinal));
+                ordinal = ordinal.saturating_add(1);
                 append_messages(&mut blocks, vec![message]);
             }
             Node::Step {
@@ -101,14 +104,65 @@ pub(crate) fn history_blocks(history: LocalHistory) -> Vec<Block> {
                     turn_id,
                     ordinal: step_ordinal,
                 }));
-                append_step(&mut blocks, content);
+                append_history_step(&mut blocks, content, turn_id, step_ordinal);
             }
         }
     }
     blocks
+        .entries
+        .into_iter()
+        .map(|entry| entry.block)
+        .collect()
 }
 
-pub(crate) fn append_step(blocks: &mut Vec<Block>, content: StepContent) {
+fn append_history_step(
+    blocks: &mut BlockList,
+    content: StepContent,
+    turn: lattice_api::local::TurnId,
+    step: u32,
+) {
+    // 与 append_assistant_text 的相邻拼接规则一致；reasoning 不分块，工具调用分块。
+    let mut groups: Vec<(usize, usize)> = Vec::new();
+    let mut adjacent = false;
+    for (index, part) in content.assistant.parts.iter().enumerate() {
+        match part.semantic {
+            MessageSemantic::Text { .. } => {
+                if adjacent {
+                    if let Some((_, count)) = groups.last_mut() {
+                        *count = count.saturating_add(1);
+                    }
+                } else {
+                    groups.push((index, 1));
+                }
+                adjacent = true;
+            }
+            MessageSemantic::ToolCall { .. } => adjacent = false,
+            MessageSemantic::Reasoning { .. } => {}
+        }
+    }
+    let start = blocks.len();
+    append_step(blocks, content);
+    let mut groups = groups.into_iter();
+    for block in blocks.iter_mut().skip(start) {
+        if let Block::Assistant(text) = block
+            && let Some((part, 1)) = groups.next()
+        {
+            *block = Block::HistoryAssistant(crate::comment::HistoryText {
+                fragment: crate::comment::Fragment { turn, step, part },
+                text: std::mem::take(text).into(),
+            });
+        }
+    }
+}
+
+pub(crate) fn user_block(text: String) -> Block {
+    match crate::comment::Message::parse(&text) {
+        Some(message) => Block::CommentedUser(message),
+        None => Block::User(text),
+    }
+}
+
+pub(crate) fn append_step(blocks: &mut BlockList, content: StepContent) {
     append_messages(blocks, vec![content.assistant]);
     for result in content.results {
         let state = match &result.payload {
@@ -152,14 +206,14 @@ pub(crate) fn append_step(blocks: &mut Vec<Block>, content: StepContent) {
 }
 
 pub(crate) fn append_messages(
-    blocks: &mut Vec<Block>,
+    blocks: &mut BlockList,
     messages: Vec<lattice_api::local::NativeMessage<lattice_api::local::BoundToolCall>>,
 ) {
     for message in messages {
         for part in message.parts {
             match part.semantic {
                 MessageSemantic::Text { text } => match message.role {
-                    MessageRole::User => blocks.push(Block::User(text)),
+                    MessageRole::User => blocks.push(user_block(text)),
                     MessageRole::Assistant => append_assistant_text(blocks, text),
                     MessageRole::System | MessageRole::Tool => {}
                 },
@@ -176,7 +230,7 @@ pub(crate) fn append_messages(
 }
 
 /// 隐藏 reasoning 不应在重连或持久正文替换时引入实时流没有的换行。
-pub(crate) fn append_assistant_text(blocks: &mut Vec<Block>, text: String) {
+pub(crate) fn append_assistant_text(blocks: &mut BlockList, text: String) {
     match blocks.last_mut() {
         Some(Block::Assistant(previous)) => previous.push_str(&text),
         _ => blocks.push(Block::Assistant(text)),

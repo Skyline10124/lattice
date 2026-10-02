@@ -88,22 +88,35 @@ impl InputBuffer {
     pub(crate) fn move_right(&mut self) {
         if self.cursor.1 < char_len(&self.lines[self.cursor.0]) { self.cursor.1 += 1; }
     }
-    pub(crate) fn move_up(&mut self) -> bool {
-        if self.cursor.0 == 0 { return false; }
-        self.cursor.0 -= 1; self.clamp_col(); true
-    }
-    pub(crate) fn move_down(&mut self) -> bool {
-        if self.cursor.0 + 1 >= self.lines.len() { return false; }
-        self.cursor.0 += 1; self.clamp_col(); true
-    }
     pub(crate) fn home(&mut self) { self.cursor.1 = 0; }
     pub(crate) fn end(&mut self) { self.cursor.1 = char_len(&self.lines[self.cursor.0]); }
     /// Logical line count. The draw path deliberately does **not** use this:
-    /// it reserves *wrapped* rows via `view::input_visual_height`, so a long
+    /// it reserves *wrapped* rows via `Dock::height`, so a long
     /// single line still gets the height it actually occupies.
     #[cfg(test)]
     pub(crate) fn rows(&self) -> usize { self.lines.len().max(1) }
-    fn clamp_col(&mut self) { self.cursor.1 = self.cursor.1.min(char_len(&self.lines[self.cursor.0])); }
+}
+
+impl InputBuffer {
+    /// 纯文本编辑，不解释提交、焦点、历史或草稿归属；输入区与排队编辑器共用。
+    pub(crate) fn edit(&mut self, action: &KeyAction, width: u16) {
+        match action {
+            KeyAction::Insert(c) => self.insert_char(*c),
+            KeyAction::ModifiedSpace => self.insert_char(' '),
+            KeyAction::Paste(text) => self.insert_paste(text),
+            KeyAction::Newline => self.newline(),
+            KeyAction::Backspace => self.backspace(),
+            KeyAction::Delete => self.delete(),
+            KeyAction::Left => self.move_left(),
+            KeyAction::Right => self.move_right(),
+            KeyAction::Home => self.home(),
+            KeyAction::End => self.end(),
+            KeyAction::Up | KeyAction::Down => {
+                crate::view::move_input_vertical(self, width, matches!(action, KeyAction::Down));
+            }
+            _ => {}
+        }
+    }
 }
 
 pub(crate) struct History {
@@ -181,6 +194,7 @@ impl History {
 
 pub(crate) enum KeyAction {
     Insert(char),
+    ModifiedSpace,
     Paste(String),
     Newline,
     Submit,
@@ -190,13 +204,15 @@ pub(crate) enum KeyAction {
     Right,
     Home,
     End,
-    /// Cursor up, or history-previous when already on line 0 (§8).
     Up,
     Down,
+    HistoryPrev,
+    HistoryNext,
     ScrollPageUp,
     ScrollPageDown,
     ScrollToBottom,
-    /// Esc, and the first Ctrl+C.
+    Clear,
+    /// First Ctrl+C.
     CancelOrClear,
     /// Second Ctrl+C within `CTRL_C_WINDOW`, or Ctrl+D on an empty buffer.
     Quit,
@@ -230,6 +246,7 @@ pub(crate) fn resolve_key(key: KeyEvent, kitty: bool, buffer_empty: bool) -> Key
             _ => KeyAction::Ignored,
         },
         KeyCode::Char(_) if mods.contains(KeyModifiers::ALT) => KeyAction::Ignored,
+        KeyCode::Char(' ') if !mods.is_empty() => KeyAction::ModifiedSpace,
         KeyCode::Char(c) if !c.is_control() => KeyAction::Insert(c),
         KeyCode::Backspace => KeyAction::Backspace,
         KeyCode::Delete => KeyAction::Delete,
@@ -238,11 +255,13 @@ pub(crate) fn resolve_key(key: KeyEvent, kitty: bool, buffer_empty: bool) -> Key
         KeyCode::Home => KeyAction::Home,
         KeyCode::End if mods.contains(KeyModifiers::CONTROL) => KeyAction::ScrollToBottom,
         KeyCode::End => KeyAction::End,
+        KeyCode::Up if mods.contains(KeyModifiers::CONTROL) => KeyAction::HistoryPrev,
+        KeyCode::Down if mods.contains(KeyModifiers::CONTROL) => KeyAction::HistoryNext,
         KeyCode::Up => KeyAction::Up,
         KeyCode::Down => KeyAction::Down,
         KeyCode::PageUp => KeyAction::ScrollPageUp,
         KeyCode::PageDown => KeyAction::ScrollPageDown,
-        KeyCode::Esc => KeyAction::CancelOrClear,
+        KeyCode::Esc => KeyAction::Clear,
         _ => KeyAction::Ignored,
     }
 }

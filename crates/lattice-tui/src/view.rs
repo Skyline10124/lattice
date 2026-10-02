@@ -10,17 +10,20 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Block, DockSeverity, StatusKind, ToolState, TurnPhase};
 use crate::input::{CTRL_C_WINDOW, InputBuffer};
+use crate::wrapping;
+
+pub(crate) mod browse;
+pub(crate) use browse::Focus;
+mod comments;
+pub(crate) use comments::CommentNavigation;
+mod dock;
+mod statusline;
+pub(crate) use dock::{Dock, DockIntent};
 
 pub(crate) const SIDEBAR_W: u16 = 40;
 pub(crate) const SIDEBAR_ASPECT: u16 = 3;
 pub(crate) const MIN_CONTENT_W_WITH_SIDEBAR: u16 = 72;
 pub(crate) const GAP: u16 = 1;
-pub(crate) const GUTTER: u16 = 2;
-/// rail 下方的内容行数上下限；Dock 总高 = 1 行 rail + 1..=5 行内容。
-pub(crate) const DOCK_CONTENT_MIN_ROWS: u16 = 1;
-pub(crate) const DOCK_CONTENT_MAX_ROWS: u16 = 5;
-/// Dock tag 固定占 6 cells：`PROMPT` / `WARN··` / `ERROR·`（`·` 为 tag 内 padding）。
-const DOCK_TAG_CELLS: usize = 6;
 const CTRL_C_HINT: &str = "Ctrl+C to quit";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,22 +40,19 @@ pub(crate) struct FrameLayout {
 }
 
 pub(crate) fn frame_layout(frame_w: u16, frame_h: u16) -> FrameLayout {
-    let sidebar_content_w = frame_w
-        .saturating_sub(SIDEBAR_W)
-        .saturating_sub(GAP)
-        .saturating_sub(GUTTER);
+    let sidebar_content_w = frame_w.saturating_sub(SIDEBAR_W).saturating_sub(GAP);
     let sufficiently_landscape = frame_w >= frame_h.saturating_mul(SIDEBAR_ASPECT);
     let enough_conversation_width = sidebar_content_w >= MIN_CONTENT_W_WITH_SIDEBAR;
     if sufficiently_landscape && enough_conversation_width {
         FrameLayout {
-            left_w: frame_w.saturating_sub(SIDEBAR_W).saturating_sub(GAP),
+            left_w: sidebar_content_w,
             content_w: sidebar_content_w,
             sidebar: Sidebar::Visible,
         }
     } else {
         FrameLayout {
             left_w: frame_w,
-            content_w: frame_w.saturating_sub(GUTTER),
+            content_w: frame_w,
             sidebar: Sidebar::Hidden,
         }
     }
@@ -63,6 +63,10 @@ pub(crate) struct Viewport {
     scroll: usize,
     /// While true, `scroll` is pinned to the bottom on every content change.
     follow: bool,
+    /// 最近一次已知的对话记录行数与视口高度；statusline 据此算下方行数，
+    /// 不再为一个提示重渲染整段对话记录。
+    rows: usize,
+    height: usize,
 }
 
 impl Viewport {
@@ -70,26 +74,40 @@ impl Viewport {
         Self {
             scroll: 0,
             follow: true,
+            rows: 0,
+            height: 0,
         }
     }
 
     /// Content changed to `content_rows`; viewport height is `height`.
     pub(crate) fn on_content_changed(&mut self, content_rows: usize, height: usize) {
+        if (self.rows, self.height) == (content_rows, height) {
+            return;
+        }
+        let shrank = content_rows < self.rows || height != self.height;
+        (self.rows, self.height) = (content_rows, height);
         let max = content_rows.saturating_sub(height);
         if self.follow {
             self.scroll = max;
-        } else {
+        } else if shrank {
             self.scroll = self.scroll.min(max);
         }
     }
 
+    /// 浏览时 Dock 占位/释放不等于用户滚动：视图不动，允许底部暂留空行。
+    pub(crate) fn on_dock_changed(&mut self, content_rows: usize, height: usize) {
+        (self.rows, self.height) = (content_rows, height);
+    }
+
     pub(crate) fn page_up(&mut self, height: usize) {
+        self.height = height;
         self.follow = false;
         self.scroll = self.scroll.saturating_sub(height.saturating_sub(1));
     }
 
     #[rustfmt::skip]
     pub(crate) fn page_down(&mut self, content_rows: usize, height: usize) {
+        (self.rows, self.height) = (content_rows, height);
         if self.follow { return; }
         let max = content_rows.saturating_sub(height);
         self.scroll = self.scroll.saturating_add(height.saturating_sub(1)).min(max);
@@ -98,6 +116,7 @@ impl Viewport {
 
     #[allow(clippy::wrong_self_convention)]
     pub(crate) fn to_bottom(&mut self, content_rows: usize, height: usize) {
+        (self.rows, self.height) = (content_rows, height);
         self.follow = true;
         self.scroll = content_rows.saturating_sub(height);
     }
@@ -109,90 +128,59 @@ impl Viewport {
     pub(crate) fn following(&self) -> bool {
         self.follow
     }
+
+    /// 视图下方尚未显示的对话记录行数。
+    pub(crate) fn hidden_below(&self) -> usize {
+        self.rows
+            .saturating_sub(self.scroll.saturating_add(self.height))
+    }
 }
 
-/// Exactly five foreground roles. Truecolor changes values, not vocabulary.
+/// 合同中的六种界面前景角色；语法高亮另有配色。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Role {
     User,
     Assistant,
     ToolOk,
     ToolErr,
+    Warn,
     DimMeta,
 }
 
-fn truecolor_terminal() -> bool {
-    std::env::var("COLORTERM")
-        .ok()
-        .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "truecolor" | "24bit"))
-}
-
 #[rustfmt::skip]
-fn role_color(role: Role, truecolor: bool) -> Color {
-    match (role, truecolor) {
-        (Role::User, true) => Color::Rgb(0x86, 0x95, 0xe3),
-        (Role::Assistant, true) => Color::Rgb(0xf5, 0xf3, 0xef),
-        (Role::ToolOk, true) => Color::Rgb(0x2a, 0xb0, 0xb0),
-        (Role::ToolErr, true) => Color::Rgb(0xcb, 0x2b, 0x31),
-        (Role::DimMeta, true) => Color::Rgb(0x85, 0x7f, 0x78),
-        (Role::User, false) => Color::LightBlue,
-        (Role::Assistant, false) => Color::White,
-        (Role::ToolOk, false) => Color::Cyan,
-        (Role::ToolErr, false) => Color::Red,
-        (Role::DimMeta, false) => Color::DarkGray,
+fn role_color(role: Role) -> Color {
+    match role {
+        Role::User => Color::Rgb(0x86, 0x95, 0xe3),
+        Role::Assistant => Color::Rgb(0xf5, 0xf3, 0xef),
+        Role::ToolOk => Color::Rgb(0x2a, 0xb0, 0xb0),
+        Role::ToolErr => Color::Rgb(0xcb, 0x2b, 0x31),
+        Role::Warn => Color::Rgb(0xd3, 0x89, 0x26),
+        Role::DimMeta => Color::Rgb(0x85, 0x7f, 0x78),
     }
 }
 
 pub(crate) fn role_style(role: Role) -> Style {
-    Style::default().fg(role_color(role, truecolor_terminal()))
+    Style::default().fg(role_color(role))
 }
 
 fn status_surface_style() -> Style {
-    let bg = if truecolor_terminal() {
-        Color::Rgb(0x2c, 0x42, 0x67)
-    } else {
-        Color::Blue
-    };
-    role_style(Role::DimMeta).bg(bg)
+    role_style(Role::DimMeta).bg(Color::Rgb(0x2c, 0x42, 0x67))
 }
 
-fn prompt_style() -> Style {
-    let bg = if truecolor_terminal() {
-        Color::Rgb(0x59, 0x65, 0xca)
-    } else {
-        Color::LightBlue
-    };
-    role_style(Role::Assistant).bg(bg)
-}
+/// 挂着草稿、排队或已发送评论的锚点元素底色（iris-12）。
+pub(crate) const COMMENT_ANCHOR_BG: Color = Color::Rgb(0x1f, 0x25, 0x4b);
+/// 评论卡片底色（warm-gray-12）。
+pub(crate) const COMMENT_CARD_BG: Color = Color::Rgb(0x2b, 0x28, 0x25);
+/// COMMENT 标签底色（iris-9）。
+const COMMENT_TAG_BG: Color = Color::Rgb(0x59, 0x65, 0xca);
 
-fn warn_style() -> Style {
-    let bg = if truecolor_terminal() {
-        Color::Rgb(0x9f, 0x62, 0x00)
-    } else {
-        Color::Yellow
-    };
-    role_style(Role::Assistant).bg(bg)
-}
-
-fn error_style() -> Style {
-    let bg = if truecolor_terminal() {
-        Color::Rgb(0xcb, 0x2b, 0x31)
-    } else {
-        Color::Red
-    };
-    role_style(Role::Assistant).bg(bg)
-}
-
-/// Status symbols, with an ASCII fallback when `unicode == false`.
+/// Status symbols.
 #[rustfmt::skip]
-pub(crate) fn symbol(state: SymbolKind, unicode: bool) -> &'static str {
-    match (state, unicode) {
-        (SymbolKind::Running, true) => "·",
-        (SymbolKind::Running, false) => ".",
-        (SymbolKind::Ok, true) => "✓",
-        (SymbolKind::Ok, false) => "+",
-        (SymbolKind::Failed | SymbolKind::Cancelled, true) => "✗",
-        (SymbolKind::Failed | SymbolKind::Cancelled, false) => "x",
+pub(crate) fn symbol(state: SymbolKind) -> &'static str {
+    match state {
+        SymbolKind::Running => "·",
+        SymbolKind::Ok => "✓",
+        SymbolKind::Failed | SymbolKind::Cancelled => "✗",
     }
 }
 
@@ -204,195 +192,18 @@ pub(crate) enum SymbolKind {
     Cancelled,
 }
 
-fn fold_symbol(expanded: bool, unicode: bool) -> &'static str {
-    match (expanded, unicode) {
-        (false, true) => "▸",
-        (true, true) => "▾",
-        (false, false) => ">",
-        (true, false) => "v",
+fn fold_symbol(expanded: bool) -> &'static str {
+    match expanded {
+        false => "▸",
+        true => "▾",
     }
 }
 
-/// 统一 Dock：`PROMPT` / `WARN` / `ERROR` 是同一组件的三个互斥状态；
-/// `INFO` 不进 Dock，直接进 transcript。
-pub(crate) enum DockView<'a> {
-    Prompt,
-    Warn(&'a StatusKind),
-    Error(&'a StatusKind),
-}
-
-/// 左侧底部的完整组件。外部布局只分配一个 Dock Rect；rail、状态标签、
-/// `SPACE → PROMPT` 提示、输入 / 状态正文与光标定位全部由它内部拥有。
-pub(crate) struct Dock<'a> {
-    view: DockView<'a>,
-    input: &'a InputBuffer,
-}
-
-impl<'a> Dock<'a> {
-    pub(crate) fn new(app: &'a App) -> Self {
-        let view = match app.dock_status() {
-            Some((kind, DockSeverity::Warn)) => DockView::Warn(kind),
-            Some((kind, DockSeverity::Error)) => DockView::Error(kind),
-            None => DockView::Prompt,
-        };
-        Self {
-            view,
-            input: &app.input,
-        }
-    }
-
-    /// rail + 内容的总行数，2..=6。视口与布局共用这一个来源。
-    pub(crate) fn height(&self, width: u16) -> u16 {
-        1 + self.content_rows(width).clamp(
-            DOCK_CONTENT_MIN_ROWS as usize,
-            DOCK_CONTENT_MAX_ROWS as usize,
-        ) as u16
-    }
-
-    /// 按内容宽度折行后的视觉行数（未夹紧）。Prompt 沿用光标可见口径。
-    fn content_rows(&self, width: u16) -> usize {
-        match &self.view {
-            DockView::Prompt => {
-                let (visual, cursor_row, _) = input_visual(self.input, width);
-                visual.len().max(cursor_row + 1)
-            }
-            DockView::Warn(kind) | DockView::Error(kind) => {
-                wrap_text(&status_text(kind, locale_utf8()), width).len()
-            }
-        }
-    }
-
-    pub(crate) fn render(&self, frame: &mut Frame, area: Rect) {
-        if area.height == 0 || area.width == 0 {
-            return;
-        }
-        let content_w = area.width.saturating_sub(GUTTER);
-        self.render_rail(frame, Rect::new(area.x, area.y, area.width, 1));
-        let body_area = Rect::new(
-            area.x,
-            area.y.saturating_add(1),
-            area.width,
-            area.height.saturating_sub(1),
-        );
-        match &self.view {
-            DockView::Prompt => self.render_prompt(frame, body_area, content_w),
-            DockView::Warn(kind) => self.render_status(
-                frame,
-                body_area,
-                content_w,
-                &status_text(kind, locale_utf8()),
-                role_style(Role::Assistant),
-            ),
-            DockView::Error(kind) => self.render_status(
-                frame,
-                body_area,
-                content_w,
-                &status_text(kind, locale_utf8()),
-                role_style(Role::ToolErr),
-            ),
-        }
-    }
-
-    fn tag(&self) -> (&'static str, Style) {
-        match &self.view {
-            DockView::Prompt => ("PROMPT", prompt_style()),
-            DockView::Warn(_) => ("WARN  ", warn_style()),
-            DockView::Error(_) => ("ERROR ", error_style()),
-        }
-    }
-
-    fn render_rail(&self, frame: &mut Frame, area: Rect) {
-        let unicode = locale_utf8();
-        let unit = if unicode { "─" } else { "-" };
-        let dim = role_style(Role::DimMeta);
-        let width = area.width as usize;
-        let mut spans = Vec::new();
-        let mut used = (GUTTER as usize).min(width);
-        spans.push(Span::styled(unit.repeat(used), dim));
-        let (label, style) = self.tag();
-        let tag_room = width.saturating_sub(used).min(DOCK_TAG_CELLS);
-        let tag = truncate_display(label, tag_room);
-        used += display_width(&tag);
-        if !tag.is_empty() {
-            spans.push(Span::styled(tag, style));
-        }
-
-        let rest = width.saturating_sub(used);
-        if rest == 0 {
-            frame.render_widget(Paragraph::new(Line::from(spans)), area);
-            return;
-        }
-        match &self.view {
-            DockView::Warn(_) | DockView::Error(_) => {
-                // SPACE → PROMPT 只在 WARN / ERROR 状态显示；右锚定，
-                // 两侧各留 2 列 rail，放不下时整段 best effort 填满。
-                let hint = if unicode {
-                    "SPACE → PROMPT"
-                } else {
-                    "SPACE -> PROMPT"
-                };
-                let hint_w = display_width(hint);
-                if rest >= hint_w + 4 {
-                    spans.push(Span::styled(unit.repeat(rest - hint_w - 2), dim));
-                    spans.push(Span::styled(hint.to_string(), dim));
-                    spans.push(Span::styled(unit.repeat(2), dim));
-                } else {
-                    spans.push(Span::styled(unit.repeat(rest), dim));
-                }
-            }
-            DockView::Prompt => spans.push(Span::styled(unit.repeat(rest), dim)),
-        }
-        frame.render_widget(Paragraph::new(Line::from(spans)), area);
-    }
-
-    fn render_prompt(&self, frame: &mut Frame, area: Rect, content_w: u16) {
-        let (visual, cursor_row, cursor_col) = input_visual(self.input, content_w);
-        let height = area.height as usize;
-        let scroll = cursor_row.saturating_sub(height.saturating_sub(1));
-        let shown = visual
-            .iter()
-            .enumerate()
-            .skip(scroll)
-            .take(height)
-            .map(|(index, text)| {
-                let prompt = if index == 0 { "> " } else { "  " };
-                Line::from(vec![
-                    Span::styled(prompt, role_style(Role::User)),
-                    Span::styled(text.clone(), role_style(Role::Assistant)),
-                ])
-            })
-            .collect::<Vec<_>>();
-        frame.render_widget(Paragraph::new(shown), area);
-
-        let screen_y = cursor_row.saturating_sub(scroll) as u16;
-        let cursor_x = area
-            .x
-            .saturating_add(GUTTER)
-            .saturating_add(cursor_col as u16);
-        if screen_y < area.height && cursor_x < area.x.saturating_add(area.width) {
-            frame.set_cursor_position((cursor_x, area.y.saturating_add(screen_y)));
-        }
-    }
-
-    /// Warn / Error 正文：显示前 5 个视觉行，不给只读 Dock 增加滚动。
-    fn render_status(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        content_w: u16,
-        text: &str,
-        style: Style,
-    ) {
-        let shown = body(text, content_w, style)
-            .into_iter()
-            .take(DOCK_CONTENT_MAX_ROWS as usize)
-            .collect::<Vec<_>>();
-        frame.render_widget(Paragraph::new(shown), area);
-    }
-}
-
-pub(crate) fn draw(frame: &mut Frame, app: &App) {
+pub(crate) fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
+    app.term_width = area.width;
+    app.term_height = area.height;
+    let transcript = app.prepare_transcript();
     let geometry = frame_layout(area.width, area.height);
     match geometry.sidebar {
         Sidebar::Visible => {
@@ -402,33 +213,38 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
                 Constraint::Length(SIDEBAR_W),
             ])
             .split(area);
-            draw_left(frame, app, columns[0], geometry.content_w, false);
-            draw_right_status(frame, app, columns[2]);
+            draw_left(frame, app, columns[0], geometry.content_w, &transcript);
+            frame.render_widget(Paragraph::new("").style(status_surface_style()), columns[2]);
         }
         Sidebar::Hidden => {
-            draw_left(frame, app, area, geometry.content_w, true);
+            draw_left(frame, app, area, geometry.content_w, &transcript);
         }
     }
 }
 
-fn draw_left(frame: &mut Frame, app: &App, area: Rect, content_w: u16, bottomline: bool) {
+fn draw_left(frame: &mut Frame, app: &App, area: Rect, content_w: u16, transcript: &Transcript) {
     let dock = Dock::new(app);
-    let bottom_h = u16::from(bottomline).min(area.height);
+    let bottom_h = 1.min(area.height);
     let above = area.height.saturating_sub(bottom_h);
-    let dock_h = dock.height(content_w).min(above);
+    let dock_h = dock.height(content_w, transcript.lines.len()).min(above);
     let transcript_h = above.saturating_sub(dock_h);
+    // 对话记录与 Dock 共享 statusline 之上的高度：内容不足时 Dock 紧跟最后一行，
+    // 其下留空；填满后停在 statusline 之上。viewport 仍按可用高度 `transcript_h` 计算。
+    let remaining = transcript.lines.len().saturating_sub(app.viewport.scroll());
+    let shown = transcript_h.min(u16::try_from(remaining).unwrap_or(u16::MAX));
 
-    let dock_y = area.y.saturating_add(transcript_h);
-    let bottom_y = dock_y.saturating_add(dock_h);
+    let dock_y = area.y.saturating_add(shown);
+    let bottom_y = area.y.saturating_add(above);
     draw_transcript(
         frame,
         app,
-        Rect::new(area.x, area.y, area.width, transcript_h),
+        Rect::new(area.x, area.y, area.width, shown),
         content_w,
+        transcript,
     );
     dock.render(frame, Rect::new(area.x, dock_y, area.width, dock_h));
     if bottom_h > 0 {
-        draw_bottomline(
+        statusline::render(
             frame,
             app,
             Rect::new(area.x, bottom_y, area.width, bottom_h),
@@ -436,40 +252,173 @@ fn draw_left(frame: &mut Frame, app: &App, area: Rect, content_w: u16, bottomlin
     }
 }
 
-pub(crate) fn locale_utf8() -> bool {
-    ["LC_ALL", "LANG"].iter().any(|key| {
-        std::env::var(key)
-            .ok()
-            .is_some_and(|value| value.to_ascii_uppercase().contains("UTF-8"))
-    })
+/// One source of truth for transcript rendering and viewport row counts.
+pub(crate) struct Transcript {
+    pub(crate) lines: Vec<Line<'static>>,
+    pub(crate) owners: Vec<BlockPosition>,
+    pub(crate) editor_cursor: Option<(usize, usize)>,
+    /// 编辑器折行宽度；与 `editor_cursor` 同时设置。
+    editor_width: Option<u16>,
+    anchors: Vec<(usize, crate::comment::Anchor, usize)>,
+    ending_items: std::collections::HashMap<crate::comment::Location, usize>,
+    markers: Vec<comments::Marker>,
 }
 
-/// One source of truth for transcript rendering and viewport row counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BlockPosition {
+    pub(crate) id: crate::blocks::BlockId,
+    pub(crate) row: usize,
+}
+
+#[cfg(test)]
 pub(crate) fn transcript_lines(app: &App, content_w: u16) -> Vec<Line<'static>> {
-    let unicode = locale_utf8();
+    render_transcript(app, content_w).lines
+}
+
+pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
     let mut lines = Vec::new();
+    let mut owners = Vec::new();
+    let mut anchors = Vec::new();
+    let mut ending_items = std::collections::HashMap::new();
+    let mut markers = Vec::new();
+    let mut cache = app.markdown_cache.borrow_mut();
     let mut assistant_header = false;
-    let mut agent = app.ctx.active_agent.as_str();
-    for block in &app.blocks {
+    let mut agent: Option<&str> = None;
+    let mut turn = None;
+    for entry in &app.blocks.entries {
+        let block = &entry.block;
+        let start = lines.len();
         match block {
-            Block::Step(_) | Block::UserTurn(_) => {}
-            Block::AgentName(name) => {
-                agent = name;
-                assistant_header = false;
+            Block::UserTurn(id, ordinal) => turn = Some((*id, *ordinal)),
+            Block::Step(step) => {
+                if turn.is_some_and(|(id, _)| id != step.turn_id) {
+                    turn = None;
+                }
             }
+            Block::AgentName(name) => agent = Some(name),
             Block::User(text) => {
-                separate(&mut lines);
-                lines.extend(body("user", content_w, role_style(Role::User)));
-                lines.extend(body(text, content_w, role_style(Role::Assistant)));
+                transcript_title(
+                    &mut lines,
+                    "USER",
+                    Role::User,
+                    turn.map(|(_, n)| n),
+                    content_w,
+                );
+                lines.extend(
+                    cache
+                        .render(text, content_w)
+                        .iter()
+                        .map(|row| row.line.clone()),
+                );
                 assistant_header = false;
             }
+            Block::CommentedUser(message) | Block::RejectedUser(message) => {
+                transcript_title(
+                    &mut lines,
+                    "USER",
+                    Role::User,
+                    turn.map(|(_, n)| n),
+                    content_w,
+                );
+                if matches!(block, Block::RejectedUser(_)) {
+                    let targets = message.comments.iter().map(|comment| {
+                        let id = app
+                            .queue
+                            .pending_comment_id(comment.n)
+                            .unwrap_or_else(|| entry.id.comment(comment.n, 0));
+                        (id, comment)
+                    });
+                    comments::markers(&mut lines, &mut markers, targets, content_w);
+                } else {
+                    comments::markers(
+                        &mut lines,
+                        &mut markers,
+                        comments::identified(&message.comments, entry.id),
+                        content_w,
+                    );
+                }
+                if !message.text.is_empty() {
+                    lines.extend(
+                        cache
+                            .render(&message.text, content_w)
+                            .iter()
+                            .map(|row| row.line.clone()),
+                    );
+                }
+                assistant_header = false;
+            }
+            Block::HistoryAssistant(text) => {
+                if !text.text.is_empty() {
+                    ensure_assistant_header(
+                        &mut lines,
+                        &mut assistant_header,
+                        agent,
+                        turn.map(|(_, n)| n),
+                        content_w,
+                    );
+                    let rendered = cache.render(&text.text, content_w);
+                    if app.turn_closed(text.fragment.turn) {
+                        for (index, row) in rendered.iter().enumerate() {
+                            let at = lines.len().saturating_add(index);
+                            if let Some(element) = &row.element
+                                && let Some(anchor) = text.anchor(element.range.clone())
+                            {
+                                anchors.push((at, anchor, element.indent));
+                            }
+                            for range in &row.ending_items {
+                                ending_items.insert(
+                                    crate::comment::Location {
+                                        fragment: text.fragment.clone(),
+                                        range: range.clone(),
+                                    },
+                                    at,
+                                );
+                            }
+                        }
+                    }
+                    lines.extend(rendered.iter().map(|row| row.line.clone()));
+                }
+            }
+            Block::AssistantStart {
+                turn_id,
+                agent: name,
+            } => {
+                if turn.is_some_and(|(id, _)| id == *turn_id) {
+                    agent = Some(name);
+                    ensure_assistant_header(
+                        &mut lines,
+                        &mut assistant_header,
+                        agent,
+                        turn.map(|(_, n)| n),
+                        content_w,
+                    );
+                }
+            }
+            Block::Assistant(text) if text.is_empty() => {}
             Block::Assistant(text) => {
-                ensure_assistant_header(&mut lines, &mut assistant_header, agent, content_w);
-                lines.extend(body(text, content_w, role_style(Role::Assistant)));
+                ensure_assistant_header(
+                    &mut lines,
+                    &mut assistant_header,
+                    agent,
+                    turn.map(|(_, n)| n),
+                    content_w,
+                );
+                lines.extend(
+                    cache
+                        .render(text, content_w)
+                        .iter()
+                        .map(|row| row.line.clone()),
+                );
             }
             Block::Tool { name, state, .. } => {
-                ensure_assistant_header(&mut lines, &mut assistant_header, agent, content_w);
-                lines.extend(tool_lines(name, state, content_w, unicode));
+                ensure_assistant_header(
+                    &mut lines,
+                    &mut assistant_header,
+                    agent,
+                    turn.map(|(_, n)| n),
+                    content_w,
+                );
+                lines.extend(tool_lines(name, state, content_w));
             }
             Block::Status { kind, placement } => {
                 // 暂驻 Dock 的 Warn / Error 不重复出现在 transcript；释放后
@@ -483,20 +432,90 @@ pub(crate) fn transcript_lines(app: &App, content_w: u16) -> Vec<Line<'static>> 
                             lines.extend(body(text, content_w, role_style(Role::DimMeta)));
                         }
                     }
+                    StatusKind::Summary { turn_id, .. }
+                        if turn.is_none_or(|(id, _)| id != *turn_id) =>
+                    {
+                        lines.extend(body(
+                            &status_text(kind),
+                            content_w,
+                            role_style(Role::DimMeta),
+                        ));
+                    }
                     kind => {
                         ensure_assistant_header(
                             &mut lines,
                             &mut assistant_header,
                             agent,
+                            turn.map(|(_, n)| n),
                             content_w,
                         );
-                        lines.extend(status_lines(kind, content_w, unicode));
+                        lines.extend(status_lines(kind, content_w));
                     }
                 }
             }
         }
+        owners.extend((start..lines.len()).map(|row| BlockPosition {
+            id: entry.id,
+            row: row.saturating_sub(start),
+        }));
     }
-    lines
+    let mut editor_cursor = None;
+    for message in app.queue.messages() {
+        let start = lines.len();
+        separate(&mut lines);
+        let mut right = vec![
+            if app.queue.is_paused() {
+                "暂停"
+            } else {
+                "排队"
+            }
+            .into(),
+        ];
+        if app.queue.editor(message.id).is_some() {
+            right.push("Enter 完成编辑".into());
+        } else if matches!(app.focus, Focus::Transcript(cursor) if cursor.block.id == message.id) {
+            right.extend(["Enter 编辑".into(), "Delete 删除".into()]);
+        }
+        lines.push(title_line(
+            "USER",
+            Role::User,
+            &right,
+            usize::from(content_w),
+        ));
+        comments::markers(
+            &mut lines,
+            &mut markers,
+            comments::identified(&message.comments, message.id),
+            content_w,
+        );
+        if let Some(editor) = app.queue.editor(message.id) {
+            let (visual, row, col) = input_visual(editor, content_w);
+            editor_cursor = Some((lines.len().saturating_add(row), col));
+            lines.extend(
+                visual
+                    .into_iter()
+                    .map(|text| Line::from(Span::styled(text, role_style(Role::Assistant)))),
+            );
+        } else {
+            lines.extend(body(&message.text, content_w, role_style(Role::DimMeta)));
+        }
+        owners.extend((start..lines.len()).map(|row| BlockPosition {
+            id: message.id,
+            row: row.saturating_sub(start),
+        }));
+    }
+    cache.finish_render();
+    let mut transcript = Transcript {
+        lines,
+        owners,
+        editor_width: editor_cursor.map(|_| content_w),
+        editor_cursor,
+        anchors,
+        ending_items,
+        markers,
+    };
+    comments::attach(app, &mut transcript, content_w);
+    transcript
 }
 
 fn separate(lines: &mut Vec<Line<'static>>) {
@@ -510,38 +529,74 @@ fn separate(lines: &mut Vec<Line<'static>>) {
     }
 }
 
+fn transcript_title(
+    lines: &mut Vec<Line<'static>>,
+    title: &str,
+    role: Role,
+    ordinal: Option<std::num::NonZeroUsize>,
+    content_w: u16,
+) {
+    separate(lines);
+    let right = ordinal
+        .map(|n| format!("#{n}"))
+        .into_iter()
+        .collect::<Vec<_>>();
+    lines.push(title_line(title, role, &right, usize::from(content_w)));
+}
+
 fn ensure_assistant_header(
     lines: &mut Vec<Line<'static>>,
     shown: &mut bool,
-    agent: &str,
+    agent: Option<&str>,
+    ordinal: Option<std::num::NonZeroUsize>,
     content_w: u16,
 ) {
-    if !*shown {
-        separate(lines);
-        lines.extend(body(agent, content_w, role_style(Role::Assistant)));
+    if !*shown && let (Some(agent), Some(ordinal)) = (agent, ordinal) {
+        transcript_title(lines, agent, Role::Assistant, Some(ordinal), content_w);
         *shown = true;
     }
 }
 
 fn body(text: &str, content_w: u16, style: Style) -> Vec<Line<'static>> {
-    wrap_text(text, content_w)
+    wrapping::wrap(
+        vec![Span::styled(
+            wrapping::expand_tabs(text).into_owned(),
+            style,
+        )],
+        usize::from(content_w),
+    )
+}
+
+/// 折叠指示占工具行前两列；工具行的续行与错误详情对齐到指示之后。
+fn tool_heading(spans: Vec<Span<'static>>, expanded: bool, content_w: u16) -> Vec<Line<'static>> {
+    let fold = Span::styled(
+        format!("{} ", fold_symbol(expanded)),
+        role_style(Role::DimMeta),
+    );
+    hanging(
+        wrapping::wrap(spans, usize::from(content_w.saturating_sub(2))),
+        Some(fold),
+    )
+}
+
+fn hanging(lines: Vec<Line<'static>>, first: Option<Span<'static>>) -> Vec<Line<'static>> {
+    let mut first = first;
+    lines
         .into_iter()
-        .map(|text| {
-            if text.is_empty() {
-                Line::default()
-            } else {
-                Line::from(vec![Span::raw("  "), Span::styled(text, style)])
-            }
+        .map(|mut line| {
+            line.spans
+                .insert(0, first.take().unwrap_or_else(|| Span::raw("  ")));
+            line
         })
         .collect()
 }
 
-fn tool_lines(name: &str, state: &ToolState, content_w: u16, unicode: bool) -> Vec<Line<'static>> {
+fn tool_lines(name: &str, state: &ToolState, content_w: u16) -> Vec<Line<'static>> {
     let dim = role_style(Role::DimMeta);
     let err = role_style(Role::ToolErr);
     match state {
         ToolState::Running => body(
-            &format!("{name} · running {}", symbol(SymbolKind::Running, unicode)),
+            &format!("{name} · running {}", symbol(SymbolKind::Running)),
             content_w,
             dim,
         ),
@@ -551,19 +606,25 @@ fn tool_lines(name: &str, state: &ToolState, content_w: u16, unicode: bool) -> V
             content_w,
             dim,
         ),
-        ToolState::Ok { output_len } => vec![Line::from(vec![
-            Span::styled(format!("{} ", fold_symbol(false, unicode)), dim),
-            Span::styled(symbol(SymbolKind::Ok, unicode), role_style(Role::ToolOk)),
-            Span::styled(format!(" {name} · {output_len} B"), dim),
-        ])],
+        ToolState::Ok { output_len } => tool_heading(
+            vec![
+                Span::styled(symbol(SymbolKind::Ok), role_style(Role::ToolOk)),
+                Span::styled(format!(" {name} · {output_len} B"), dim),
+            ],
+            false,
+            content_w,
+        ),
         ToolState::Failed { error, .. } => {
-            let mut lines = vec![Line::from(vec![
-                Span::styled(format!("{} ", fold_symbol(true, unicode)), dim),
-                Span::styled(symbol(SymbolKind::Failed, unicode), err),
-                Span::styled(format!(" {name}"), dim),
-            ])];
+            let mut lines = tool_heading(
+                vec![
+                    Span::styled(symbol(SymbolKind::Failed), err),
+                    Span::styled(format!(" {name}"), dim),
+                ],
+                true,
+                content_w,
+            );
             if let Some(error) = error {
-                lines.extend(body(error, content_w, err));
+                lines.extend(hanging(body(error, content_w.saturating_sub(2), err), None));
             }
             lines
         }
@@ -572,28 +633,28 @@ fn tool_lines(name: &str, state: &ToolState, content_w: u16, unicode: bool) -> V
 
 /// 状态文本，transcript 与 Dock 共用同一措辞；样式由各自渲染层决定。
 #[rustfmt::skip]
-fn status_text(kind: &StatusKind, unicode: bool) -> String {
+fn status_text(kind: &StatusKind) -> String {
     match kind {
         StatusKind::Summary { turn_id, summary } => format!("{} turn {turn_id} {}{}",
-            symbol(match summary.outcome { lattice_api::local::PublicTurnOutcome::Completed => SymbolKind::Ok, lattice_api::local::PublicTurnOutcome::Failed => SymbolKind::Failed, lattice_api::local::PublicTurnOutcome::Cancelled => SymbolKind::Cancelled }, unicode),
+            symbol(match summary.outcome { lattice_api::local::PublicTurnOutcome::Completed => SymbolKind::Ok, lattice_api::local::PublicTurnOutcome::Failed => SymbolKind::Failed, lattice_api::local::PublicTurnOutcome::Cancelled => SymbolKind::Cancelled }),
             match summary.outcome { lattice_api::local::PublicTurnOutcome::Completed => "completed", lattice_api::local::PublicTurnOutcome::Failed => "failed", lattice_api::local::PublicTurnOutcome::Cancelled => "cancelled" },
             summary.notice.as_ref().map_or_else(String::new, |notice| format!("：{}", notice.text))),
         StatusKind::TurnFailed { reason } => format!(
-            "{} {reason}", symbol(SymbolKind::Failed, unicode)
+            "{} {reason}", symbol(SymbolKind::Failed)
         ),
         StatusKind::LlmRetry { attempt, delay_ms, message } => format!(
             "{} llm retry {attempt} after {delay_ms}ms: {message}",
-            symbol(SymbolKind::Running, unicode)
+            symbol(SymbolKind::Running)
         ),
         StatusKind::LlmFailed { attempt, message } => format!(
             "{} llm failed {attempt}: {message}",
-            symbol(SymbolKind::Failed, unicode)
+            symbol(SymbolKind::Failed)
         ),
         StatusKind::Notice(_) => String::new(),
     }
 }
 
-fn status_lines(kind: &StatusKind, content_w: u16, unicode: bool) -> Vec<Line<'static>> {
+fn status_lines(kind: &StatusKind, content_w: u16) -> Vec<Line<'static>> {
     let style = match kind {
         StatusKind::Summary { summary, .. } => {
             role_style(match summary.notice.as_ref().map(|n| &n.level) {
@@ -606,234 +667,128 @@ fn status_lines(kind: &StatusKind, content_w: u16, unicode: bool) -> Vec<Line<'s
         StatusKind::LlmRetry { .. } => role_style(Role::DimMeta),
         StatusKind::Notice(_) => return Vec::new(),
     };
-    body(&status_text(kind, unicode), content_w, style)
+    body(&status_text(kind), content_w, style)
 }
 
-fn wrap_text(text: &str, width: u16) -> Vec<String> {
-    let width = width.max(1) as usize;
-    let mut out = Vec::new();
-    for paragraph in text.split('\n') {
-        if paragraph.is_empty() {
-            out.push(String::new());
-            continue;
-        }
-        let mut current = String::new();
-        for ch in paragraph.chars() {
-            let ch_w = UnicodeWidthChar::width(ch).unwrap_or(0);
-            if !current.is_empty()
-                && UnicodeWidthStr::width(current.as_str()).saturating_add(ch_w) > width
-            {
-                out.push(std::mem::take(&mut current));
+/// 同一投影同时提供折行文字、光标与视觉行移动的源字符位置。
+struct InputVisual {
+    lines: Vec<String>,
+    positions: Vec<((usize, usize), (usize, usize))>,
+    cursor: (usize, usize),
+}
+
+impl InputVisual {
+    fn new(input: &InputBuffer, content_w: u16) -> Self {
+        let width = usize::from(content_w.max(1));
+        let mut visual = Self {
+            lines: Vec::new(),
+            positions: Vec::new(),
+            cursor: (0, 0),
+        };
+        for (source_row, line) in input.lines.iter().enumerate() {
+            visual.lines.push(String::new());
+            let mut col = 0usize;
+            let chars: Vec<_> = line.chars().collect();
+            for (source_col, ch) in chars.iter().copied().enumerate() {
+                let cells = UnicodeWidthChar::width(ch).unwrap_or(0);
+                if col > 0 && col.saturating_add(cells) > width {
+                    visual.lines.push(String::new());
+                    col = 0;
+                }
+                visual.record((source_row, source_col), col, input.cursor);
+                visual
+                    .lines
+                    .last_mut()
+                    .expect("current visual row")
+                    .push(ch);
+                col = col.saturating_add(cells);
             }
-            current.push(ch);
+            // 行尾占满时为插入光标保留下一行，与绘制和移动使用同一映射。
+            if col >= width {
+                visual.lines.push(String::new());
+                col = 0;
+            }
+            visual.record((source_row, chars.len()), col, input.cursor);
         }
-        out.push(current);
+        visual
     }
-    if out.is_empty() {
-        out.push(String::new());
-    }
-    out
-}
 
-fn visual_cursor(line: &str, char_index: usize, width: u16) -> (usize, usize) {
-    let width = width.max(1) as usize;
-    let prefix: String = line.chars().take(char_index).collect();
-    let lines = wrap_text(&prefix, width as u16);
-    let last_w = lines
-        .last()
-        .map(|line| UnicodeWidthStr::width(line.as_str()))
-        .unwrap_or(0);
-    let row = lines.len().saturating_sub(1);
-    if last_w >= width && !prefix.is_empty() {
-        (row + 1, 0)
-    } else {
-        (row, last_w)
+    fn record(&mut self, source: (usize, usize), col: usize, cursor: (usize, usize)) {
+        let position = (self.lines.len().saturating_sub(1), col);
+        self.positions.push((source, position));
+        if source == cursor {
+            self.cursor = position;
+        }
     }
 }
 
 fn input_visual(input: &InputBuffer, content_w: u16) -> (Vec<String>, usize, usize) {
-    let mut visual = Vec::new();
-    let mut cursor_row = 0usize;
-    let mut cursor_col = 0usize;
-    for (index, line) in input.lines.iter().enumerate() {
-        let wrapped = wrap_text(line, content_w);
-        if index < input.cursor.0 {
-            cursor_row += wrapped.len().max(1);
-        } else if index == input.cursor.0 {
-            let (row, col) = visual_cursor(line, input.cursor.1, content_w);
-            cursor_row += row;
-            cursor_col = col;
-        }
-        visual.extend(wrapped);
-    }
-    while visual.len() <= cursor_row {
-        visual.push(String::new());
-    }
-    (visual, cursor_row, cursor_col)
+    let visual = InputVisual::new(input, content_w);
+    (visual.lines, visual.cursor.0, visual.cursor.1)
 }
 
-fn draw_transcript(frame: &mut Frame, app: &App, area: Rect, content_w: u16) {
-    let lines = transcript_lines(app, content_w);
-    let start = app.viewport.scroll().min(lines.len());
-    let end = (start + area.height as usize).min(lines.len());
-    frame.render_widget(Paragraph::new(lines[start..end].to_vec()), area);
+pub(crate) fn input_cursor(input: &InputBuffer, content_w: u16) -> (usize, usize) {
+    InputVisual::new(input, content_w).cursor
 }
 
-fn draw_right_status(frame: &mut Frame, app: &App, area: Rect) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let available = area.width.saturating_sub(1) as usize;
-    let mut rows = vec![Line::default(); area.height as usize];
-    set_status_row(
-        &mut rows,
-        0,
-        &crate::app::session_label(app.ctx.session_id),
-        Role::DimMeta,
-        available,
-    );
-    set_status_row(
-        &mut rows,
-        1,
-        &app.ctx.active_agent,
-        Role::DimMeta,
-        available,
-    );
-    set_status_row(
-        &mut rows,
-        3,
-        &phase_and_connection(app),
-        phase_role(app.phase),
-        available,
-    );
-    if !app.viewport.following() {
-        set_status_row(&mut rows, 5, "[scroll]", Role::DimMeta, available);
-    }
-
-    let height = rows.len();
-    if ctrl_c_visible(app) {
-        set_status_row(
-            &mut rows,
-            height.saturating_sub(3),
-            CTRL_C_HINT,
-            Role::ToolErr,
-            available,
-        );
-    }
-    let key = if app.kitty_keyboard {
-        "S-Enter"
+pub(crate) fn move_input_vertical(input: &mut InputBuffer, content_w: u16, down: bool) {
+    let visual = InputVisual::new(input, content_w);
+    let (row, col) = visual.cursor;
+    let target = if down {
+        row.checked_add(1)
     } else {
-        "Alt+Enter"
+        row.checked_sub(1)
     };
-    set_status_row(
-        &mut rows,
-        height.saturating_sub(2),
-        key,
-        Role::DimMeta,
-        available,
-    );
-    set_status_row(
-        &mut rows,
-        height.saturating_sub(1),
-        "newline",
-        Role::DimMeta,
-        available,
-    );
-
-    frame.render_widget(Paragraph::new(rows).style(status_surface_style()), area);
-}
-
-fn set_status_row(
-    rows: &mut [Line<'static>],
-    row: usize,
-    text: &str,
-    role: Role,
-    available: usize,
-) {
-    if row >= rows.len() {
+    let Some(target) = target.filter(|target| *target < visual.lines.len()) else {
         return;
-    }
-    rows[row] = Line::from(vec![
-        Span::raw(" "),
-        Span::styled(truncate_display(text, available), role_style(role)),
-    ]);
-}
-
-/// 侧栏隐藏时的独立底行：整宽给状态文本，不再携带 PROMPT tag。
-fn draw_bottomline(frame: &mut Frame, app: &App, area: Rect) {
-    if area.height == 0 || area.width == 0 {
-        return;
-    }
-    let line = bottom_status_line(app, area.width as usize);
-    frame.render_widget(Paragraph::new(line).style(status_surface_style()), area);
-}
-
-fn bottom_status_line(app: &App, width: usize) -> Line<'static> {
-    let state = phase_and_connection(app);
-    let phase = state.as_str();
-    let scroll = (!app.viewport.following()).then_some("[scroll]");
-    let key = if ctrl_c_visible(app) {
-        CTRL_C_HINT
-    } else if app.kitty_keyboard {
-        "S-Enter newline"
-    } else {
-        "Alt+Enter newline"
     };
-    let session_id = crate::app::session_label(app.ctx.session_id);
-    let full = [
-        session_id.as_str(),
-        app.ctx.active_agent.as_str(),
-        phase,
-        scroll.unwrap_or(""),
-        key,
-    ];
-    let key =
-        (joined_width(full.into_iter().filter(|part| !part.is_empty())) <= width).then_some(key);
-
-    let tail = [Some(phase), scroll, key];
-    let tail_width = joined_width(tail.into_iter().flatten());
-    let agent_width = display_width(&app.ctx.active_agent);
-    let session_room = width
-        .saturating_sub(tail_width)
-        .saturating_sub(agent_width)
-        .saturating_sub(6);
-    let session = truncate_display(&session_id, session_room);
-    let session_cost = display_width(&session) + usize::from(!session.is_empty()) * 3;
-    let agent_room = width
-        .saturating_sub(tail_width)
-        .saturating_sub(session_cost)
-        .saturating_sub(3);
-    let agent = truncate_display(&app.ctx.active_agent, agent_room);
-
-    let mut spans = Vec::new();
-    for field in [&session, &agent]
-        .into_iter()
-        .filter(|field| !field.is_empty())
+    if let Some((source, _)) = visual
+        .positions
+        .iter()
+        .rev()
+        .find(|(_, (r, c))| *r == target && *c <= col)
     {
-        if !spans.is_empty() {
-            spans.push(Span::styled(" · ", role_style(Role::DimMeta)));
+        input.cursor = *source;
+    }
+}
+
+fn draw_transcript(
+    frame: &mut Frame,
+    app: &App,
+    area: Rect,
+    content_w: u16,
+    transcript: &Transcript,
+) {
+    let lines = &transcript.lines;
+    let start = app.viewport.scroll().min(lines.len());
+    let end = start
+        .saturating_add(usize::from(area.height))
+        .min(lines.len());
+    frame.render_widget(Paragraph::new(lines[start..end].to_vec()), area);
+    let cursor = transcript.editor_cursor.or_else(|| match &app.focus {
+        Focus::Transcript(cursor) => Some((cursor.row, cursor.column(lines, content_w))),
+        Focus::Dock => None,
+    });
+    if let Some((row, col)) = cursor
+        && (start..end).contains(&row)
+        && content_w > 0
+    {
+        let x = u16::try_from(col).unwrap_or(u16::MAX);
+        let y = row.saturating_sub(start) as u16;
+        if x < area.width {
+            frame.set_cursor_position((area.x.saturating_add(x), area.y.saturating_add(y)));
         }
-        spans.push(Span::styled(field.clone(), role_style(Role::DimMeta)));
     }
-    if !spans.is_empty() {
-        spans.push(Span::styled(" · ", role_style(Role::DimMeta)));
-    }
-    spans.push(Span::styled(
-        truncate_display(phase, width),
-        role_style(phase_role(app.phase)),
-    ));
-    for field in [scroll, key].into_iter().flatten() {
-        spans.push(Span::styled(
-            format!(" · {field}"),
-            role_style(Role::DimMeta),
-        ));
-    }
-    Line::from(spans)
 }
 
 fn joined_width<'a>(parts: impl Iterator<Item = &'a str>) -> usize {
     let parts = parts.collect::<Vec<_>>();
-    parts.iter().map(|part| display_width(part)).sum::<usize>() + parts.len().saturating_sub(1) * 3
+    parts
+        .iter()
+        .fold(0usize, |width, part| {
+            width.saturating_add(display_width(part))
+        })
+        .saturating_add(parts.len().saturating_sub(1).saturating_mul(3))
 }
 
 fn phase_and_connection(app: &App) -> String {
@@ -870,6 +825,44 @@ fn display_width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
 }
 
+/// 标题线从左列起点画到 `width`。
+pub(crate) fn title_line(title: &str, role: Role, right: &[String], width: usize) -> Line<'static> {
+    let dim = role_style(Role::DimMeta);
+    if width < 5 {
+        return Line::from(Span::styled("─".repeat(width), dim));
+    }
+    let mut right = right;
+    while !right.is_empty()
+        && 9usize
+            .saturating_add(display_width(title))
+            .saturating_add(joined_width(right.iter().map(String::as_str)))
+            > width
+    {
+        right = &right[1..];
+    }
+    let title = truncate_display(title, width.saturating_sub(5));
+    let mut spans = vec![
+        Span::styled("── ", dim),
+        Span::styled(
+            title.clone(),
+            role_style(role).add_modifier(ratatui::style::Modifier::BOLD),
+        ),
+        Span::styled(" ", dim),
+    ];
+    let remaining = width.saturating_sub(4usize.saturating_add(display_width(&title)));
+    if right.is_empty() {
+        spans.push(Span::styled("─".repeat(remaining), dim));
+    } else {
+        let right = right.join(" · ");
+        spans.push(Span::styled(
+            "─".repeat(remaining.saturating_sub(display_width(&right).saturating_add(4))),
+            dim,
+        ));
+        spans.push(Span::styled(format!(" {right} ──"), dim));
+    }
+    Line::from(spans)
+}
+
 fn truncate_display(text: &str, width: usize) -> String {
     if width == 0 {
         return String::new();
@@ -891,12 +884,12 @@ fn truncate_display(text: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{App, Block, StatusKind, StatusPlacement, ToolState};
+    use crate::app::{App, Block, StatusKind, StatusPlacement};
     use crate::session::SessionContext;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    fn test_app() -> App {
+    pub(super) fn test_app() -> App {
         App::new(
             SessionContext {
                 session_id: None,
@@ -909,135 +902,55 @@ mod tests {
 
     #[test]
     fn layout_boundaries_are_underflow_safe() {
-        for (w, h) in [(1, 1), (7, 3), (43, 10), (44, 10), (114, 38), (115, 38)] {
+        for (w, h) in [
+            (1, 1),
+            (7, 3),
+            (43, 10),
+            (44, 10),
+            (112, 37),
+            (113, 37),
+            (113, 38),
+        ] {
             let _ = frame_layout(w, h);
         }
         assert_eq!(
             frame_layout(1, 1),
             FrameLayout {
                 left_w: 1,
-                content_w: 0,
+                content_w: 1,
                 sidebar: Sidebar::Hidden,
             }
         );
-        // 114x38 比例刚好不足；115x38 比例与正文宽度同时达标。
-        assert_eq!(frame_layout(114, 38).sidebar, Sidebar::Hidden);
-        assert_eq!(frame_layout(115, 38).sidebar, Sidebar::Visible);
-    }
-
-    #[test]
-    fn transcript_groups_one_agent_header_and_shares_row_count() {
-        let mut app = test_app();
-        app.blocks.extend([
-            Block::User("question".into()),
-            Block::Assistant("before tool".into()),
-            Block::Tool {
-                id: "opaque-id".into(),
-                name: "observe.workspace".into(),
-                state: ToolState::Ok { output_len: 1204 },
-                source: crate::app::ToolSource::HistoryResult,
-            },
-            Block::Assistant("after tool".into()),
-            Block::Status {
-                kind: StatusKind::Summary {
-                    turn_id: lattice_api::local::new_turn_id(),
-                    summary: lattice_api::TurnSummary {
-                        outcome: lattice_api::local::PublicTurnOutcome::Completed,
-                        notice: None,
-                    },
-                },
-                placement: StatusPlacement::Transcript,
-            },
-            Block::User("next".into()),
-        ]);
-
-        let lines = transcript_lines(&app, 61);
-        let text = lines.iter().map(ToString::to_string).collect::<Vec<_>>();
-        assert_eq!(text.iter().filter(|line| line.trim() == "agent").count(), 1);
-        assert!(text.iter().any(|line| line.contains("1204 B")));
-        assert!(!text.iter().any(|line| line.contains("opaque-id")));
-        assert_eq!(lines.len(), app.content_rows(61));
-        let Some(tool) = text
-            .iter()
-            .position(|line| line.contains("observe.workspace"))
-        else {
-            panic!("tool line missing");
-        };
-        assert_eq!(text[tool - 1].trim(), "before tool");
-        assert_eq!(text[tool + 1].trim(), "after tool");
-    }
-
-    #[test]
-    fn dock_status_is_hidden_from_transcript_until_released() {
-        let mut app = test_app();
-        app.blocks.push(Block::Status {
-            kind: StatusKind::TurnFailed {
-                reason: "boom".into(),
-            },
-            placement: StatusPlacement::Dock(crate::app::DockSeverity::Error),
-        });
-        let text = transcript_lines(&app, 61)
-            .iter()
-            .map(ToString::to_string)
-            .collect::<String>();
-        assert!(
-            !text.contains("boom"),
-            "暂驻 Dock 的状态不出现在 transcript"
-        );
-
-        for block in &mut app.blocks {
-            if let Block::Status { placement, .. } = block {
-                *placement = StatusPlacement::Transcript;
-            }
-        }
-        let text = transcript_lines(&app, 61)
-            .iter()
-            .map(ToString::to_string)
-            .collect::<String>();
-        assert!(text.contains("boom"), "释放后状态回到 transcript");
-    }
-
-    #[test]
-    fn failed_tool_expands_error_and_success_uses_bytes() {
-        let mut app = test_app();
-        app.blocks.extend([
-            Block::Tool {
-                id: "ok".into(),
-                name: "observe.workspace".into(),
-                state: ToolState::Ok { output_len: 1204 },
-                source: crate::app::ToolSource::HistoryResult,
-            },
-            Block::Tool {
-                id: "failed".into(),
-                name: "mutate.edit".into(),
-                source: crate::app::ToolSource::HistoryResult,
-                state: ToolState::Failed {
-                    output_len: 0,
-                    error: Some("expected_hash mismatch".into()),
-                },
-            },
-        ]);
-        let text = transcript_lines(&app, 61)
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(text.contains("1204 B"));
-        assert!(!text.contains("chars"));
-        assert!(text.contains("expected_hash mismatch"));
+        // 正文宽 = w - 41：112x37 正文 71 列，刚好不足；113x37 比例与正文宽度同时达标；
+        // 113x38 正文够宽但比例不足 3:1。
+        assert_eq!(frame_layout(112, 37).sidebar, Sidebar::Hidden);
+        assert_eq!(frame_layout(113, 37).sidebar, Sidebar::Visible);
+        assert_eq!(frame_layout(113, 38).sidebar, Sidebar::Hidden);
     }
 
     #[test]
     fn all_frame_shapes_draw_without_panic() -> anyhow::Result<()> {
-        for (width, height) in [(1, 1), (7, 3), (56, 47), (80, 24), (115, 47), (176, 50)] {
+        for (width, height) in [
+            (0, 0),
+            (0, 1),
+            (1, 0),
+            (1, 1),
+            (7, 3),
+            (56, 47),
+            (80, 24),
+            (115, 47),
+            (176, 50),
+        ] {
             let mut app = test_app();
+            app.term_width = width;
+            app.term_height = height;
             app.blocks.push(Block::Status {
                 kind: StatusKind::Notice(vec!["hello".into()]),
                 placement: StatusPlacement::Transcript,
             });
             app.input.set_text("typed");
             let mut terminal = Terminal::new(TestBackend::new(width, height))?;
-            terminal.draw(|frame| draw(frame, &app))?;
+            terminal.draw(|frame| draw(frame, &mut app))?;
         }
         Ok(())
     }
@@ -1063,7 +976,7 @@ mod tests {
                 });
                 app.input.set_text("draft");
                 let mut terminal = Terminal::new(TestBackend::new(width, height))?;
-                terminal.draw(|frame| draw(frame, &app))?;
+                terminal.draw(|frame| draw(frame, &mut app))?;
             }
         }
         Ok(())
