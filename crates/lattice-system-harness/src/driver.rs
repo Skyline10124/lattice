@@ -1097,6 +1097,19 @@ mod tests {
                 "{dead}"
             );
         }
+        // 只有 -1 表示已退出：同样的状态字符带正常组号与会话号时仍是存活成员，
+        // 不能因为上面的放宽而被漏掉。
+        for (live, pgid, session) in [
+            ("4242 (sleep) R 1 4300 4100 0 -1 4227084", 4300, 4100),
+            ("4242 (sleep) D 1 4300 4100 0 -1 4227084", 4300, 4100),
+            ("4242 (sleep) S 1 4300 4100 0 -1 4227084", 4300, 4100),
+        ] {
+            assert_eq!(
+                parse_process_stat(4242, live).expect("live stat"),
+                Some(ProcessStat { pgid, session }),
+                "{live}"
+            );
+        }
     }
 
     /// #105: a group signal aimed at the harness's own group would interrupt
