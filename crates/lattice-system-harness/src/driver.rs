@@ -762,7 +762,7 @@ fn parse_process_stat(pid: u32, stat: &str) -> Result<Option<ProcessStat>, Clean
     let state = fields
         .next()
         .ok_or_else(|| invalid("process stat is missing state"))?;
-    // Z（僵尸）与 X（正在释放）都已退出；X 的进程组与会话字段报告为 -1，不能解析。
+    // Z（僵尸）与 X（正在释放）都已退出；它们不是存活成员。
     if matches!(state, "Z" | "X") {
         return Ok(None);
     }
@@ -771,7 +771,13 @@ fn parse_process_stat(pid: u32, stat: &str) -> Result<Option<ProcessStat>, Clean
         .ok_or_else(|| invalid("process stat is missing parent pid"))?;
     let pgid = fields
         .next()
-        .ok_or_else(|| invalid("process stat is missing process group"))?
+        .ok_or_else(|| invalid("process stat is missing process group"))?;
+    // 退出后期 sighand 已释放时，内核不论状态字符都把 pgrp/session 报告为 -1
+    // （fs/proc/array.c 的初始值）。这样的进程已经退出，不是存活成员。
+    if pgid == "-1" {
+        return Ok(None);
+    }
+    let pgid = pgid
         .parse::<u32>()
         .map_err(|_| invalid("process stat has an invalid process group"))?;
     let session = fields
@@ -1078,8 +1084,32 @@ mod tests {
             assert_eq!(error.kind, std::io::ErrorKind::InvalidData);
         }
         // 内核对正在释放的进程报告 pgrp/session 为 -1；它已退出，不是存活成员。
-        let dead = "4242 (sleep) X 0 -1 -1 0 -1 4227084";
-        assert_eq!(parse_process_stat(4242, dead).expect("dead stat"), None);
+        // 状态字符不一定是 X：退出后期 sighand 已释放时，状态可能仍是 R/D/S，
+        // 但 pgrp/session 同样是 -1（压力下偶发，曾让中断清理测试失败）。
+        for dead in [
+            "4242 (sleep) X 0 -1 -1 0 -1 4227084",
+            "4242 (sleep) R 0 -1 -1 0 -1 4227084",
+            "4242 (sleep) D 0 -1 -1 0 -1 4227084",
+        ] {
+            assert_eq!(
+                parse_process_stat(4242, dead).expect("dead stat"),
+                None,
+                "{dead}"
+            );
+        }
+        // 只有 -1 表示已退出：同样的状态字符带正常组号与会话号时仍是存活成员，
+        // 不能因为上面的放宽而被漏掉。
+        for (live, pgid, session) in [
+            ("4242 (sleep) R 1 4300 4100 0 -1 4227084", 4300, 4100),
+            ("4242 (sleep) D 1 4300 4100 0 -1 4227084", 4300, 4100),
+            ("4242 (sleep) S 1 4300 4100 0 -1 4227084", 4300, 4100),
+        ] {
+            assert_eq!(
+                parse_process_stat(4242, live).expect("live stat"),
+                Some(ProcessStat { pgid, session }),
+                "{live}"
+            );
+        }
     }
 
     /// #105: a group signal aimed at the harness's own group would interrupt
@@ -1124,10 +1154,14 @@ mod tests {
     fn interrupt_reaches_and_reaps_the_process_group() {
         let dir = tempfile::tempdir().expect("tempdir");
         let ready = dir.path().join("ready");
+        // 就绪文件由后台子进程在设置忽略 SIGINT 之后创建。若由外层在 `&` 之后创建，
+        // 中断可能赶在子进程设置忽略之前到达，子进程随之退出，进程组里没有幸存者，
+        // 也就不会出现预期的强制清理（压力下约 2%）。外层的 trap 在启动子进程之前
+        // 已经设置，所以子进程就绪时外层也已就绪。
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(format!(
-            "trap 'exit 0' INT; sh -c \"trap '' INT; sleep 30\" & \
-             touch '{}'; while :; do sleep 1; done",
+            "trap 'exit 0' INT; sh -c \"trap '' INT; touch '{}'; sleep 30\" & \
+             while :; do sleep 1; done",
             ready.display()
         ));
         let mut running = RunningCommand::spawn(cmd).expect("spawn");
