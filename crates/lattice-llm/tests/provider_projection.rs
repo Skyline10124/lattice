@@ -9,13 +9,37 @@ use lattice_conversation::{
     AttemptInterruption, LimitKind, MAX_ASSISTANT_CONTENT_BYTES, MAX_MODEL_ATTEMPT_BYTES,
     MAX_REASONING_CONTENT_BYTES, MAX_TOOL_CALL_ARGUMENTS_BYTES, MAX_TOOL_CALLS_PER_BATCH,
     MessageSemantic, NativeMessage, OpaqueProviderState, ProviderOrigin, UnboundToolCall,
-    replay_state_digest, semantic_digest,
 };
 use lattice_llm::provider_projection::{
     ProjectionError, native_to_wire, project_cross_provider, wire_to_native,
 };
 use serde_json::Value;
 
+// Compare the fields themselves: these projections only support seam assertions.
+fn semantic_view(message: &NativeMessage<UnboundToolCall>) -> Value {
+    let mut message = message.clone();
+    message.provider_origin = None;
+    for part in &mut message.parts {
+        part.replay_state = None;
+        if let MessageSemantic::ToolCall { call } = &mut part.semantic {
+            call.provider_call_id = None;
+        }
+    }
+    serde_json::to_value(message).unwrap()
+}
+
+fn replay_view(message: &NativeMessage<UnboundToolCall>) -> Value {
+    serde_json::json!({
+        "provider_origin": message.provider_origin,
+        "parts": message.parts.iter().map(|part| {
+            let id = match &part.semantic {
+                MessageSemantic::ToolCall { call } => call.provider_call_id.as_deref(),
+                _ => None,
+            };
+            (id, &part.replay_state)
+        }).collect::<Vec<_>>()
+    })
+}
 fn fixture(name: &str) -> Value {
     let path = format!(
         "{}/tests/fixtures/projection/{name}",
@@ -277,8 +301,8 @@ fn cross_provider_projection_never_leaks_source_state() {
         &fixture("anthropic_thinking_tool_use.json"),
     )
     .expect("projection");
-    let source_semantic = semantic_digest(&source);
-    let source_replay = replay_state_digest(&source);
+    let source_semantic = semantic_view(&source);
+    let source_replay = replay_view(&source);
 
     // A (Anthropic) → B (Gemini): semantics cross, opaque state does not.
     let projected = project_cross_provider(&source, ProviderOrigin::Gemini);
@@ -290,7 +314,7 @@ fn cross_provider_projection_never_leaks_source_state() {
         assert_eq!(call.provider_call_id, None);
     }
     // Reasoning does not cross providers (ADR 0005 §7), so the projection
-    // carries no Reasoning part and its semantic digest necessarily differs
+    // carries no Reasoning part and its semantic fields necessarily differ
     // from a source that had one.
     assert!(
         !projected
@@ -299,8 +323,8 @@ fn cross_provider_projection_never_leaks_source_state() {
             .any(|part| matches!(part.semantic, MessageSemantic::Reasoning { .. })),
         "projection must not carry source reasoning"
     );
-    assert_ne!(semantic_digest(&projected), source_semantic);
-    assert_ne!(replay_state_digest(&projected), source_replay);
+    assert_ne!(semantic_view(&projected), source_semantic);
+    assert_ne!(replay_view(&projected), source_replay);
 
     // No source opaque byte survives in any serialization of the projection.
     let serialized = serde_json::to_string(&projected).expect("serialize");
@@ -321,7 +345,7 @@ fn cross_provider_projection_never_leaks_source_state() {
         replayed,
         anthropic_message(&fixture("anthropic_thinking_tool_use.json"))
     );
-    assert_eq!(replay_state_digest(&source), source_replay);
+    assert_eq!(replay_view(&source), source_replay);
 }
 
 #[test]
@@ -346,7 +370,7 @@ fn cross_provider_gemini_to_openai_drops_signatures() {
             .any(|part| matches!(part.semantic, MessageSemantic::Reasoning { .. })),
         "projection must not carry source reasoning"
     );
-    assert_ne!(semantic_digest(&projected), semantic_digest(&source));
+    assert_ne!(semantic_view(&projected), semantic_view(&source));
 }
 
 #[test]
@@ -359,7 +383,7 @@ fn cross_provider_projection_preserves_non_reasoning_semantics() {
     )
     .expect("projection");
     let projected = project_cross_provider(&source, ProviderOrigin::Gemini);
-    assert_eq!(semantic_digest(&projected), semantic_digest(&source));
+    assert_eq!(semantic_view(&projected), semantic_view(&source));
     assert_eq!(projected.parts.len(), source.parts.len());
 }
 
@@ -877,7 +901,15 @@ fn structured_steps_require_exact_pairing() {
 #[test]
 fn structured_result_outcomes_and_large_success() {
     use lattice_conversation::{CepError, CepErrorCode, CepErrorData, Retriability};
-    let mut rejected = CepError::internal_error("界".repeat(2000));
+    let mut rejected = CepError::new(
+        CepErrorCode::ExecutionFailed,
+        "界".repeat(2000),
+        serde_json::from_value::<CepErrorData>(
+            serde_json::json!({"kind":"execution","operation":"internal","detail":null}),
+        )
+        .unwrap(),
+        Retriability::Transient,
+    );
     rejected.code = CepErrorCode::CapabilityNotGranted;
     let variants = [
         success(

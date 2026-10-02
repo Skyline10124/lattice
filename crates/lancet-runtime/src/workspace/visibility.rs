@@ -25,23 +25,6 @@ pub struct VisibilityEvidence {
 }
 
 impl VisibilityEvidence {
-    pub fn as_json(self) -> serde_json::Value {
-        let mut filtered_by = Vec::new();
-        if self.filtered_system_exclusion {
-            filtered_by.push("system_exclusion");
-        }
-        if self.filtered_read_denied {
-            filtered_by.push("read_denied");
-        }
-        if self.filtered_ignored_default {
-            filtered_by.push("ignored_default");
-        }
-        serde_json::json!({
-            "included_ignored": self.included_ignored,
-            "filtered_by": filtered_by,
-        })
-    }
-
     pub fn into_protocol(self) -> WorkspaceVisibilityEvidence {
         WorkspaceVisibilityEvidence {
             included_ignored: self.included_ignored,
@@ -290,7 +273,7 @@ mod tests {
         ));
         assert!(engine.is_visible_entry("secret", true));
         assert!(engine.should_descend("secret"));
-        assert_eq!(engine.evidence().as_json()["included_ignored"], true);
+        assert!(engine.evidence().into_protocol().included_ignored);
     }
 
     #[test]
@@ -304,11 +287,13 @@ mod tests {
         assert!(ancestor.should_descend());
         assert!(engine.is_visible_entry("secret/key", false));
         assert_eq!(
-            engine.evidence().as_json(),
-            serde_json::json!({
-                "included_ignored": true,
-                "filtered_by": ["ignored_default"],
-            })
+            engine.evidence().into_protocol(),
+            WorkspaceVisibilityEvidence {
+                included_ignored: true,
+                filtered_system_exclusion: false,
+                filtered_read_denied: false,
+                filtered_ignored_default: true,
+            }
         );
     }
 

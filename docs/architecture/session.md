@@ -143,7 +143,7 @@ sequenceDiagram
 | 查看会话：`list`、`log` | 无，或 SessionId | `list` 每行给出 SessionId、项目绑定、当前节点序号、节点数、是否有进行中 Turn 与更新时间；`log` 先给出当前位置、当前 agent 与进行中 Turn，再以树形列出全部节点（含不在当前分叉上的节点），标出当前位置，并在每个 Turn 的首节点注明 TurnId、结局与 notice |
 | 查看一个 Turn：`observe`、`LocalTurn::next/reconnect` | SessionId 与所选 TurnId | 返回只读 LocalTurn；未指定 Turn 时优先选进行中的 Turn，否则选当前位置所属 Turn，空会话交付空历史；重连继续原观察目标 |
 | 提交或找回请求：`start_turn_with` | 原请求身份（TurnId，已有会话时含 SessionId）、输入、规范工作区及一次性配置加载闭包；新会话或当前位置为根节点时必须指定 agent | 返回 LocalTurn，完整交付提交并衔接观察；首轮无配置探测直接返回已有 Turn 或 Busy 时不加载配置；发现崩溃遗留 Turn 时先关闭，再返回 NeedsConfiguration，最多加载一次配置并继续本次新输入。后续准入仍可能因并发变化返回已有 Turn 或 Busy |
-| 读取对话：`read_history` | 已取得的观察快照 | 读取从根到快照中 Session 当前位置的路径。页面只包含快照已有的节点 |
+| 读取对话：观察句柄内的历史读取 | 已取得的观察快照 | 读取从根到快照中 Session 当前位置的路径。页面只包含快照已有的节点 |
 | 退回：`rewind` | SessionId 与目标 NodeId | 把当前位置移到树上任意已有节点；之后的提交从那里分叉，原分支保留在树上。不修改工作区文件 |
 | 请求取消：`LocalTurn::cancel`，或独立命令的 `LocalClient::cancel` | 原目标 SessionId / TurnId | 句柄同步登记意图并管理在途回执；独立命令返回后台接管结果，持久结局另行查询 |
 | 停止后台：`stop` | 当前本地后台 | 关闭新准入并等待已接管操作收尾，返回停止时已知状态 |
@@ -160,9 +160,9 @@ CLI 的 `lattice session` 子命令为 `send`、`rewind`、`list`、`log`、`tur
 
 ### 低层接口与提交握手
 
-`query`、`subscribe` 和历史分页接口提供只读操作；query 返回的快照可直接交给 `read_history`。`submit` 与 `submit_with` 是可能写入的提交接口：它们可能关闭崩溃遗留 Turn，不能用作只读重连。前端的持续交互使用上表的具体句柄，握手、订阅与控制交接由客户端库维护。
+`query`、`subscribe` 和历史分页接口提供只读操作；观察句柄按 query 返回的快照分页读取历史。`submit` 是可能写入的提交接口：它可能关闭崩溃遗留 Turn，不能用作只读重连。前端的持续交互使用上表的具体句柄，握手、订阅与控制交接由客户端库维护。
 
-无配置探测允许旧请求找回、Busy 和崩溃遗留 Turn 的关闭先于新凭据加载发生。`NeedsConfiguration` 请求新执行输入，此时尚未接受新 Turn；共同惰性握手在库内消费它，最多调用一次加载闭包，并在配置发送关口再次检查本地放弃。`submit_with` 与 `start_turn_with` 复用该握手，前者的闭包仍可借用且不要求 Send/'static，后者为独立任务持有 Send/'static 的闭包和 future。
+无配置探测允许旧请求找回、Busy 和崩溃遗留 Turn 的关闭先于新凭据加载发生。`NeedsConfiguration` 请求新执行输入，此时尚未接受新 Turn；共同惰性握手在库内消费它，最多调用一次加载闭包，并在配置发送关口再次检查本地放弃。`start_turn_with` 使用该握手，为独立任务持有 Send/'static 的闭包和 future。
 
 ## Turn 的接受与模型步骤
 
@@ -258,17 +258,13 @@ Turn 的单调时钟 deadline 在接受事务提交后开始，限制后续 prov
 
 助手消息的 parts 按到达顺序保存正文、reasoning 与工具调用的交错：相邻同类内容合并为一段，工具调用排在它首次出现的位置。各 provider 的流解析器都按此生成 parts。Chat Completions 这类只有一个正文字段和一个 reasoning 字段的请求格式，由 provider 投影在发请求时合并同类内容，同一 provider 的回放不受影响。
 
-Tool 参数通过协议 canonical JSON 生成规范对象和摘要。有效调用要求参数为一个 JSON 对象，ToolCall 完整且无重复；单次完整响应最多 32 个 ToolCall。任一个调用无效或数量超限时拒绝整个尝试。完整 reasoning 参与持久对话及语义摘要；停止尝试的部分文本、reasoning 和调用数据保留为有界诊断。
+Tool 参数通过协议 canonical JSON 生成规范对象和摘要。有效调用要求参数为一个 JSON 对象，ToolCall 完整且无重复；单次完整响应最多 32 个 ToolCall。任一个调用无效或数量超限时拒绝整个尝试。完整 reasoning 进入持久对话；停止尝试的部分文本、reasoning 和调用数据保留为有界诊断。
 
 #### 对话与投影边界
 
 空串、数组、标量、畸形 JSON 不能作为 Tool 参数对象。拒绝尝试不产生可执行调用或 InvocationId，也不把该尝试的助手正文作为成功消息；停止尝试的部分内容只作诊断，不进入会话树。超限批次不截断为可执行批次。这些限制让每个调用槽位始终对应一条完整有效回复。
 
-### 语义与回放
-
-- `semantic_digest` 覆盖 provider-neutral 文本、完整 reasoning、规范 Tool 语义及顺序。
-- `replay_state_digest` 覆盖 provider 来源、真实 provider call ID 和片段级不透明回放状态。
-
+### 回放与跨 provider 投影
 同 provider 可使用原回放材料；跨 provider 由适配层生成中立语义投影，去除来源 reasoning、provider call ID 和回放状态，切回原 provider 时使用树中保存的原消息。不透明回放材料逐片段原样保留，单片段上限 64 KiB；即使片段正文为空，也保留其回放状态。连续两个 UserMessage 由投影按适配器要求合并或原样传递。
 
 类型和编码由 [`lattice-conversation`](../../crates/lattice-conversation/src/lib.rs) 维护。provider Tool Call ID 仅是 provider 协议材料，不参与会话登记或执行身份分配；跨 provider 投影不伪造目标 provider 身份材料。发给模型的对话是当前位置从根到该节点的路径，provider 投影是纯函数，不在请求时扫描或补齐缺失结果。
@@ -587,7 +583,7 @@ Session 永久绑定产品组合层提供的 `ProjectStoreKey`，执行请求的
 
 | 检查对象 | 入口 |
 | --- | --- |
-| 对话顺序、批次校验、语义与回放摘要 | `cargo test -p lattice-conversation` |
+| 对话顺序、批次校验、参数摘要 | `cargo test -p lattice-conversation` |
 | 流解析的到达顺序与 provider 投影 | `cargo test -p lattice-llm` |
 | 单次尝试、流中断和资源计量 | `cargo test -p lattice-agent` |
 | 会话库表编码、值版本、旧库拒绝与关闭规划 | `cargo test -p lattice-session`；隔离测试先列出全部失败方式 |

@@ -4,7 +4,8 @@
 use super::codec::*;
 use super::*;
 use lancet_protocol::{
-    CellEvidenceTriple, CepError, CepErrorCode, InvocationId, ModelAttemptKey, SessionId, TurnId,
+    CellEvidenceTriple, CepError, CepErrorCode, CepErrorData, InvocationId, ModelAttemptKey,
+    Retriability, SessionId, TurnId,
 };
 use lattice_conversation::{
     MessagePart, MessageRole, MessageSemantic, NativeMessage, OpaqueProviderState, ProviderOrigin,
@@ -241,7 +242,15 @@ fn terminal(
     let receipt = match code {
         None => Ok(json!({"secret-result":42})),
         Some(code) => {
-            let mut e = CepError::internal_error("private-error");
+            let mut e = CepError::new(
+                CepErrorCode::ExecutionFailed,
+                "private-error",
+                CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
+                    operation: "internal".into(),
+                    detail: None,
+                }),
+                Retriability::Transient,
+            );
             e.code = code;
             Err(e)
         }
@@ -2035,11 +2044,27 @@ fn payload_evidence_and_privacy() {
     for (code, payload) in [
         (
             CepErrorCode::ExecutionFailed,
-            ResultPayload::Failed(Box::new(CepError::internal_error(""))),
+            ResultPayload::Failed(Box::new(CepError::new(
+                CepErrorCode::ExecutionFailed,
+                "",
+                CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
+                    operation: "internal".into(),
+                    detail: None,
+                }),
+                Retriability::Transient,
+            ))),
         ),
         (
             CepErrorCode::GuardDenied,
-            ResultPayload::Failed(Box::new(CepError::internal_error(""))),
+            ResultPayload::Failed(Box::new(CepError::new(
+                CepErrorCode::ExecutionFailed,
+                "",
+                CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
+                    operation: "internal".into(),
+                    detail: None,
+                }),
+                Retriability::Transient,
+            ))),
         ),
         (
             CepErrorCode::CallCancelled,
@@ -2711,7 +2736,15 @@ fn input_and_evidence_boundaries() {
     evidence.effects.effects.push(effect.clone());
     let value = prepare_terminal(
         &calls.bindings[0],
-        Err(CepError::internal_error("failure")),
+        Err(CepError::new(
+            CepErrorCode::ExecutionFailed,
+            "failure",
+            CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
+                operation: "internal".into(),
+                detail: None,
+            }),
+            Retriability::Transient,
+        )),
         evidence.clone(),
     )
     .unwrap();

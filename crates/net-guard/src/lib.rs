@@ -113,11 +113,6 @@ fn is_private_or_reserved(ip: IpAddr, deny_benchmarking: bool) -> bool {
     }
 }
 
-/// Returns true for private/reserved space while preserving proxy fake-IP ranges.
-pub fn is_private_or_reserved_ip(ip: IpAddr) -> bool {
-    is_private_or_reserved(ip, false)
-}
-
 /// Strict Tool-egress classification, including the RFC 2544 benchmarking range.
 pub fn is_forbidden_tool_target_ip(ip: IpAddr) -> bool {
     is_private_or_reserved(ip, true)
@@ -358,7 +353,7 @@ mod tests {
             "fec0::1",
         ] {
             let ip: IpAddr = raw.parse().unwrap();
-            assert!(is_private_or_reserved_ip(ip), "{raw} must fail closed");
+            assert!(is_private_or_reserved(ip, false), "{raw} must fail closed");
         }
         for raw in [
             "8.8.8.8",
@@ -371,7 +366,10 @@ mod tests {
             "3fff:1000::1",
         ] {
             let ip: IpAddr = raw.parse().unwrap();
-            assert!(!is_private_or_reserved_ip(ip), "{raw} must remain public");
+            assert!(
+                !is_private_or_reserved(ip, false),
+                "{raw} must remain public"
+            );
         }
         for raw in [
             "198.18.0.1",
@@ -381,7 +379,7 @@ mod tests {
         ] {
             let ip: IpAddr = raw.parse().unwrap();
             assert!(
-                !is_private_or_reserved_ip(ip),
+                !is_private_or_reserved(ip, false),
                 "{raw} is a proxy fake-IP range"
             );
             assert!(

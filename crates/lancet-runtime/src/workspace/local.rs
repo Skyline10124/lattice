@@ -687,33 +687,7 @@ impl LocalWorkspace {
             .map_err(|e| LocalWorkspaceError::Io(std::io::Error::other(e)))?
     }
 
-    /// No-replace create (ADR 0003 decision 8).
-    ///
-    /// Prepares and syncs a same-directory temporary inode, then atomically
-    /// links it at the target name without replacement. If the target already
-    /// exists the call fails with [`LocalWorkspaceError::TargetExists`], which
-    /// the caller maps to `ReplanRequired`. Missing parent directories are
-    /// created when `create_parents` is true.
-    pub async fn create_excl(
-        &self,
-        path: &WorkspacePath,
-        content: &[u8],
-        create_parents: bool,
-    ) -> Result<CreatedFile, LocalWorkspaceError> {
-        path.require_file_path()?;
-        let ws = self.blocking_clone();
-        let path = path.clone();
-        let content = content.to_vec();
-        tokio::task::spawn_blocking(move || ws.create_excl_sync(&path, &content, create_parents))
-            .await
-            .map_err(|e| LocalWorkspaceError::Io(std::io::Error::other(e)))?
-    }
-
-    /// Synchronous core of [`LocalWorkspace::create_excl`].
-    ///
-    /// Shared by the async native mutation path and the Tool Host
-    /// `workspace-mutate` imports (#31), which run on the wasmtime host thread
-    /// and must not nest another runtime.
+    /// Non-cancellable no-replace create; maps installation errors to workspace errors.
     pub fn create_excl_sync(
         &self,
         path: &WorkspacePath,
@@ -820,34 +794,8 @@ impl LocalWorkspace {
         Ok(created)
     }
 
-    /// Atomic edit install (ADR 0003 decision 8).
-    ///
-    /// Writes a same-directory tempfile, fsyncs the data, atomically renames
-    /// over the target, then fsyncs the parent directory entry. All steps go
-    /// through the pinned parent dirfd from [`Self::open_parent_dir_secure`]
-    /// with single-component names, so no step re-traverses the validated
-    /// path. Renaming OVER a swapped-in symlink leaf replaces the symlink
-    /// ENTRY itself (which lives inside the workspace), never its target —
-    /// safe by construction. Returns the post-install content hash. The
-    /// caller must have already checked the mutation precondition (expected
-    /// hash or absence) against current Local state.
-    pub async fn install_atomic(
-        &self,
-        path: &WorkspacePath,
-        content: &[u8],
-    ) -> Result<InstalledFile, LocalWorkspaceError> {
-        path.require_file_path()?;
-        let ws = self.blocking_clone();
-        let path = path.clone();
-        let content = content.to_vec();
-        tokio::task::spawn_blocking(move || ws.install_atomic_sync(&path, &content))
-            .await
-            .map_err(|e| LocalWorkspaceError::Io(std::io::Error::other(e)))?
-    }
-
-    /// Synchronous core of [`LocalWorkspace::install_atomic`].
-    ///
-    /// 异步变更在阻塞线程复用此入口，保留 pinned-dirfd 路径核验。
+    /// Non-cancellable atomic install through the pinned parent dirfd.
+    /// The caller must already have checked the mutation precondition.
     pub fn install_atomic_sync(
         &self,
         path: &WorkspacePath,
@@ -973,8 +921,8 @@ impl LocalWorkspace {
         })
     }
 
-    /// Flip a one-shot flag so the next install (`install_atomic` or
-    /// `create_excl`) fails before any bytes are written. Narrow test-only
+    /// Flip a one-shot flag so the next create or replacement fails before
+    /// any bytes are written. Narrow test-only
     /// fault injection proving the install failure boundary leaves the
     /// target unchanged — a single boolean, not a composable plugin seam.
     #[cfg(any(test, feature = "test-fault-injection"))]
@@ -1574,26 +1522,30 @@ mod tests {
     //    test pins that the installed content hash matches a known blake3
     //    literal computed independently, so the precondition comparison is
     //    sound.
-    #[tokio::test]
-    async fn installed_content_hash_matches_independent_blake3() {
+    #[test]
+    fn installed_content_hash_matches_independent_blake3() {
         let dir = TempDir::new().unwrap();
         let body = b"lattice content hash";
         let ws = ws_at(&dir);
         let path = WorkspacePath::parse("h.txt").unwrap();
-        let created = ws.create_excl(&path, body.as_ref(), false).await.unwrap();
+        let created = ws
+            .create_excl_sync_cancellable(&path, body.as_ref(), false, || false)
+            .unwrap();
         let want = format!("blake3:{}", blake3::hash(body).to_hex());
         assert_eq!(created.content_hash, want);
     }
 
-    // 7. Atomic replacement: install_atomic overwrites the target and the
-    //    content is observable immediately afterward, atomically.
-    #[tokio::test]
-    async fn install_atomic_replaces_target_atomically() {
+    // Conditional replacement: the complete content is observable after installation.
+    #[test]
+    fn conditional_replace_installs_complete_target() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("r.txt"), b"v1").unwrap();
         let ws = ws_at(&dir);
         let path = WorkspacePath::parse("r.txt").unwrap();
-        let installed = ws.install_atomic(&path, b"v2").await.unwrap();
+        let installed = ws
+            .replace_if_revision_sync(&path, &content_hash(b"v1"), b"v2", || false)
+            .unwrap()
+            .installed;
         assert_eq!(installed.bytes_written, 2);
         let on_disk = std::fs::read(dir.path().join("r.txt")).unwrap();
         assert_eq!(on_disk, b"v2");
@@ -1607,8 +1559,8 @@ mod tests {
     //    pinned parent fd). This is the real-fault approximation ADR step 1
     //    prescribes; the narrow fault-injection seam below covers the
     //    deterministic boundary.
-    #[tokio::test]
-    async fn install_atomic_failure_leaves_no_partial_target() {
+    #[test]
+    fn install_atomic_failure_leaves_no_partial_target() {
         let dir = TempDir::new().unwrap();
         let ro = dir.path().join("ro");
         std::fs::create_dir(&ro).unwrap();
@@ -1617,7 +1569,10 @@ mod tests {
         fs::set_permissions(&ro, perms).unwrap();
         let ws = ws_at(&dir);
         let path = WorkspacePath::parse("ro/new.txt").unwrap();
-        let err = ws.install_atomic(&path, b"x").await;
+        let err = {
+            let _guard = ws.mutation_lock.lock().unwrap();
+            ws.install_atomic_sync_locked(&path, b"x")
+        };
         // Restore permissions so TempDir can clean up. Test-only restore
         // path: the TempDir parent is owner-only, so widening the child back
         // to writable here carries no production meaning.
@@ -1636,21 +1591,30 @@ mod tests {
     //     existing target byte-identical, and the flag is one-shot — the
     //     next install succeeds. This proves the atomic-install failure
     //     boundary without a composable plugin seam.
-    #[tokio::test]
-    async fn fail_next_install_leaves_target_unchanged_and_resets() {
+    #[test]
+    fn fail_next_install_leaves_target_unchanged_and_resets() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("f.txt"), b"v1").unwrap();
         let ws = ws_at(&dir);
         let path = WorkspacePath::parse("f.txt").unwrap();
 
         ws.fail_next_install();
-        let err = ws.install_atomic(&path, b"v2").await.unwrap_err();
-        assert!(matches!(err, LocalWorkspaceError::Io(_)), "got {err:?}");
+        let err = ws
+            .replace_if_revision_sync(&path, &content_hash(b"v1"), b"v2", || false)
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ConditionalReplaceError::Workspace(LocalWorkspaceError::Io(_))
+            ),
+            "got {err:?}"
+        );
         let on_disk = std::fs::read(dir.path().join("f.txt")).unwrap();
         assert_eq!(on_disk, b"v1", "failed install must not touch the target");
 
         // One-shot: the flag was consumed by the failed install.
-        ws.install_atomic(&path, b"v2").await.unwrap();
+        ws.replace_if_revision_sync(&path, &content_hash(b"v1"), b"v2", || false)
+            .unwrap();
         let on_disk = std::fs::read(dir.path().join("f.txt")).unwrap();
         assert_eq!(on_disk, b"v2");
     }
@@ -1842,8 +1806,8 @@ mod tests {
     // End-to-end guard: every mutation entry point already rejects a
     // symlinked parent at resolve_secure; pin that the outside target stays
     // byte-identical afterward for both write operations.
-    #[tokio::test]
-    async fn write_paths_reject_symlink_parent_and_leave_outside_untouched() {
+    #[test]
+    fn write_paths_reject_symlink_parent_and_leave_outside_untouched() {
         let dir = TempDir::new().unwrap();
         let outside = TempDir::new().unwrap();
         std::fs::write(outside.path().join("x"), b"keep").unwrap();
@@ -1851,14 +1815,24 @@ mod tests {
         let ws = ws_at(&dir);
         let path = WorkspacePath::parse("link/x").unwrap();
 
-        let err = ws.create_excl(&path, b"evil".as_ref(), true).await;
+        let err = ws.create_excl_sync_cancellable(&path, b"evil".as_ref(), true, || false);
         assert!(
-            matches!(err, Err(LocalWorkspaceError::SymlinkRejected { .. })),
+            matches!(
+                err,
+                Err(ConditionalCreateError::Workspace(
+                    LocalWorkspaceError::SymlinkRejected { .. }
+                ))
+            ),
             "got {err:?}"
         );
-        let err = ws.install_atomic(&path, b"evil").await;
+        let err = ws.replace_if_revision_sync(&path, &content_hash(b"keep"), b"evil", || false);
         assert!(
-            matches!(err, Err(LocalWorkspaceError::SymlinkRejected { .. })),
+            matches!(
+                err,
+                Err(ConditionalReplaceError::Workspace(
+                    LocalWorkspaceError::SymlinkRejected { .. }
+                ))
+            ),
             "got {err:?}"
         );
         assert_eq!(
@@ -1875,18 +1849,20 @@ mod tests {
 
     // Temp hygiene: neither a forced install failure nor a successful
     // install may leave `.lattice-tmp-*` residue in the parent directory.
-    #[tokio::test]
-    async fn install_atomic_leaves_no_temp_residue() {
+    #[test]
+    fn conditional_replace_leaves_no_temp_residue() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("t.txt"), b"v1").unwrap();
         let ws = ws_at(&dir);
         let path = WorkspacePath::parse("t.txt").unwrap();
 
         ws.fail_next_install();
-        ws.install_atomic(&path, b"v2").await.unwrap_err();
+        ws.replace_if_revision_sync(&path, &content_hash(b"v1"), b"v2", || false)
+            .unwrap_err();
         assert_eq!(tmp_residue(dir.path()), Vec::<String>::new());
 
-        ws.install_atomic(&path, b"v2").await.unwrap();
+        ws.replace_if_revision_sync(&path, &content_hash(b"v1"), b"v2", || false)
+            .unwrap();
         assert_eq!(tmp_residue(dir.path()), Vec::<String>::new());
         assert_eq!(std::fs::read(dir.path().join("t.txt")).unwrap(), b"v2");
     }

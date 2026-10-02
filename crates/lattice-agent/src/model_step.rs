@@ -477,9 +477,7 @@ fn interrupted(
         AttemptInterruption::Cancelled => ModelStopCause::Cancelled,
         AttemptInterruption::Timeout => ModelStopCause::Deadline,
         AttemptInterruption::OutputLimitExceeded { .. } => ModelStopCause::OutputLimit,
-        AttemptInterruption::StreamError | AttemptInterruption::ProcessInterrupted => {
-            ModelStopCause::ProviderError { retryable: false }
-        }
+        AttemptInterruption::StreamError => ModelStopCause::ProviderError { retryable: false },
     };
     let provider_error = matches!(cause, ModelStopCause::ProviderError { .. }).then(|| {
         diagnostic

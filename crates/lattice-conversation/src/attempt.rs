@@ -46,6 +46,4 @@ pub enum AttemptInterruption {
         /// The byte count that would have resulted.
         actual: usize,
     },
-    /// The process died mid-attempt (recorded by reopen reconciliation).
-    ProcessInterrupted,
 }

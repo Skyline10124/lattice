@@ -1,6 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
+use super::client::SubmissionReply;
 use super::*;
 use std::{
     sync::{
@@ -69,7 +70,7 @@ async fn private_socket_rejects_second_owner_and_oversized_frame() {
 pub(super) fn frozen(project: &std::path::Path, endpoint: &str) -> FrozenConfiguration {
     let path = project.join("agent.toml");
     std::fs::write(&path, "schema_version = 1\n[agent]\nname = 'local-test'\nmodel = 'compat:local-test'\n[prompt]\nsystem = 'test'\n").unwrap();
-    let loaded = crate::load_agent_profile_path(&path).unwrap();
+    let loaded = lattice_profile::load_agent_profile(&path).unwrap();
     let connection = lattice_llm::LlmConnection::new(
         lattice_llm::ResolvedModel {
             alias: "compat:local-test".into(),
@@ -227,7 +228,10 @@ async fn detached_owners_share_acceptance_overlap_and_drain_with_fixed_reload() 
     };
     assert!(view.owned);
     let pending_anchor = view.history.clone();
-    let pending_history = client.read_history(&view).await.unwrap();
+    let pending_history = client
+        .read_history_with_progress(&view, || {})
+        .await
+        .unwrap();
     assert_eq!(pending_history.entries.len(), 1);
     assert!(
         matches!(&pending_history.entries[0].content, Node::UserMessage { message, .. }
@@ -299,12 +303,17 @@ async fn detached_owners_share_acceptance_overlap_and_drain_with_fixed_reload() 
             .outcome,
         lattice_session::store::PublicTurnOutcome::Cancelled
     );
-    let prior = client
-        .submit_with(first.clone(), |_| async {
-            panic!("existing Turn must not load configuration")
-        })
+    let SubmissionReply::Accepted(prior) = client
+        .submit_handshake(
+            first.clone(),
+            |_| async { panic!("existing Turn must not load configuration") },
+            None,
+        )
         .await
-        .unwrap();
+        .unwrap()
+    else {
+        panic!("existing Turn must be accepted")
+    };
     assert!(
         matches!(prior, Acceptance::Existing { turn } if turn.turn_id == first.turn_id && turn.summary.is_some())
     );
@@ -312,7 +321,10 @@ async fn detached_owners_share_acceptance_overlap_and_drain_with_fixed_reload() 
         .query(Some(a.session_id), Some(first.turn_id))
         .await
         .unwrap();
-    let history = client.read_history(&view).await.unwrap();
+    let history = client
+        .read_history_with_progress(&view, || {})
+        .await
+        .unwrap();
     assert_eq!(history.entries.len(), 2);
     let encoded = serde_json::to_string(&history).unwrap();
     assert!(encoded.contains("后台结果"));
@@ -356,8 +368,8 @@ async fn query_stays_read_only_and_probe_or_write_closes_without_configuration()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn submit_with_closes_pending_before_loading_configuration_once() {
-    close_pending_through("submit_with").await;
+async fn submit_handshake_closes_pending_before_loading_configuration_once() {
+    close_pending_through("submit_handshake").await;
 }
 
 async fn close_pending_through(operation: &str) {
@@ -427,7 +439,7 @@ async fn close_pending_through(operation: &str) {
         input: "关闭旧任务后接受新输入".into(),
         agent: None,
     };
-    if operation == "submit_with" {
+    if operation == "submit_handshake" {
         // 已有会话正常新执行仍要求历史存在；关闭本身不读取它。
         lancet_api::WorkspaceHistory::create(lancet_api::WorkspaceHistoryBacking::for_key(
             layout,
@@ -436,31 +448,38 @@ async fn close_pending_through(operation: &str) {
         .unwrap();
         let provider = super::server::Provider::start().await;
         let loads = std::cell::Cell::new(0);
-        let acceptance = client
-            .submit_with(request, |agent| {
-                assert_eq!(agent, "local-test");
-                async {
-                    loads.set(loads.get() + 1);
-                    let closed = client.turn(target).await?;
-                    assert_eq!(
-                        closed.summary.as_ref().unwrap().outcome,
-                        PublicTurnOutcome::Failed
-                    );
-                    assert!(matches!(
-                        closed.steps[0].state,
-                        StepDetailState::Closed {
-                            end: StepEnd::Stop {
-                                node: None,
-                                cause: StopCause::ProcessExit
-                            },
-                            ..
-                        }
-                    ));
-                    Ok(frozen(workspace.path(), &provider.endpoint))
-                }
-            })
+        let SubmissionReply::Accepted(acceptance) = client
+            .submit_handshake(
+                request,
+                |agent| {
+                    assert_eq!(agent, "local-test");
+                    async {
+                        loads.set(loads.get() + 1);
+                        let closed = client.turn(target).await?;
+                        assert_eq!(
+                            closed.summary.as_ref().unwrap().outcome,
+                            PublicTurnOutcome::Failed
+                        );
+                        assert!(matches!(
+                            closed.steps[0].state,
+                            StepDetailState::Closed {
+                                end: StepEnd::Stop {
+                                    node: None,
+                                    cause: StopCause::ProcessExit
+                                },
+                                ..
+                            }
+                        ));
+                        Ok(frozen(workspace.path(), &provider.endpoint))
+                    }
+                },
+                None,
+            )
             .await
-            .unwrap();
+            .unwrap()
+        else {
+            panic!("new Turn must be accepted")
+        };
         assert_eq!(loads.get(), 1);
         assert!(matches!(acceptance, Acceptance::Accepted { turn } if turn.turn_id == new_id));
         let mut observation = client

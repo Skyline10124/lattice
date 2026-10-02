@@ -8,7 +8,6 @@
 //! - ordered [`NativeMessage`] / [`MessagePart`] values with the
 //!   [`UnboundToolCall`] / [`BoundToolCall`] typestates;
 //! - the provider-neutral Tool result closure ([`ToolResultOutcome`]);
-//! - semantic and replay digests ([`digest`]);
 //! - per-attempt usage and interruption/rejection records ([`attempt`]);
 //! - provider origin and bounded part-local opaque replay state;
 //! - 结构化 Step 与其调用结果，以及 provider-neutral 对话历史。
@@ -18,7 +17,6 @@
 //! client, or ID generator.
 
 pub mod attempt;
-pub mod digest;
 pub mod history;
 pub mod limits;
 pub mod message;
@@ -37,7 +35,6 @@ pub use lancet_protocol::{
 };
 
 pub use attempt::{AttemptInterruption, AttemptRejection};
-pub use digest::{replay_state_digest, semantic_digest};
 pub use history::ConversationItem;
 pub use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability};
 pub use limits::{

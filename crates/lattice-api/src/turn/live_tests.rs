@@ -106,11 +106,11 @@ async fn existing_session_requires_its_workspace_history_before_accepting_new_tu
     );
     let fixture = setup_fixture(llm.clone(), &[]);
     let (first, _) = fixture.run(fixture.request.clone()).await;
-    let backing = lancet_api::WorkspaceHistoryBacking::for_key(
-        fixture.layout.clone(),
-        fixture.root.store_key(),
-    );
-    std::fs::remove_dir_all(backing.store_path().unwrap()).unwrap();
+    std::fs::remove_dir_all(fixture.layout.project_store(
+        &fixture.root.store_key(),
+        lancet_runtime::history::HISTORY_REPO_DIR,
+    ))
+    .unwrap();
     let mut request = fixture.request.clone();
     request.session_id = Some(first.session_id);
     let (execution, _) = fixture.start(request);

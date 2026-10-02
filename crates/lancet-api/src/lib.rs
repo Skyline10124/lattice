@@ -17,7 +17,7 @@ pub use audit::{
     AuditFilter, AuditPage, AuditReplay, AuditTailPage, ChangeSeq, InvocationChange,
     OperatorInvocation, OperatorInvocationState, query_audit, replay_audit, tail_audit,
 };
-pub use config::{LancetRuntimeConfig, workspace_history_backing_in};
+pub use config::LancetRuntimeConfig;
 pub use doctor::{LancetDoctorOutput, LancetDoctorRequest, run_doctor_checks};
 pub use error::LancetError;
 pub use runtime::LancetRuntime;

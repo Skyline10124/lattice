@@ -190,19 +190,6 @@ pub(crate) fn wire_fake_llm(
     server
 }
 
-pub(crate) fn wire_logged_fake_llm(
-    world: &ScenarioWorld,
-    agent: &str,
-    script: SseScript,
-    request_log: &std::path::Path,
-) -> FakeLlmServer {
-    let server = FakeLlmServer::start_logged(script, request_log).expect("start logged fake llm");
-    world.set_env("OPENAI_COMPATIBLE_BASE_URL", server.base_url());
-    world.set_env("OPENAI_COMPATIBLE_MODEL", agent);
-    world.set_env("OPENAI_COMPATIBLE_API_KEY", FAKE_API_KEY);
-    server
-}
-
 pub(crate) fn wire_gated_fake_llm(
     world: &ScenarioWorld,
     agent: &str,

@@ -61,7 +61,7 @@ impl HistoryRuntime {
 
 /// 每个项目独立历史；新 Session 接受路径负责首次创建，已有 Session 严格打开。
 fn history_backing(state_root: &Path, workspace_root: &Path) -> WorkspaceHistoryBacking {
-    let backing = lancet_api::workspace_history_backing_in(state_root, workspace_root)
+    let backing = WorkspaceHistoryBacking::for_project_in(state_root, workspace_root)
         .expect("derive history backing");
     lancet_api::WorkspaceHistory::create(backing.clone()).expect("create history store");
     backing

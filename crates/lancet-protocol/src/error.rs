@@ -102,29 +102,6 @@ impl CepErrorCode {
             Self::Reserved => CepErrorFamily::Reserved,
         }
     }
-
-    pub fn from_i32(code: i32) -> Option<Self> {
-        Some(match code {
-            -32001 => Self::SchemaMismatch,
-            -32002 => Self::PathContainment,
-            -32003 => Self::TypeError,
-            -32010 => Self::CapabilityNotGranted,
-            -32011 => Self::ProjectRootViolation,
-            -32012 => Self::AmbientAuthorityDenied,
-            -32020 => Self::ExecutionFailed,
-            -32023 => Self::ToolTrap,
-            -32024 => Self::ToolTimeout,
-            -32025 => Self::ToolResourceExhausted,
-            -32026 => Self::CallCancelled,
-            -32027 => Self::OutcomeIndeterminate,
-            -32031 => Self::ResourceConflict,
-            -32042 => Self::GuardDenied,
-            -32043 => Self::ReplanRequired,
-            -32050 => Self::CapabilityViolation,
-            -32060 => Self::Reserved,
-            _ => return None,
-        })
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -265,23 +242,6 @@ impl CepError {
             retriability,
         )
     }
-
-    pub fn internal_error(message: impl Into<String>) -> Self {
-        Self {
-            code: CepErrorCode::ExecutionFailed,
-            message: message.into(),
-            data: CepErrorData::Execution(ExecutionErrorData {
-                operation: "internal".into(),
-                detail: None,
-            }),
-            retriability: Retriability::Transient,
-        }
-    }
-
-    /// JSON-RPC wire code for this error (includes standard JSON-RPC codes).
-    pub fn wire_code(&self) -> i32 {
-        jsonrpc_wire_code(self)
-    }
 }
 
 /// Standard JSON-RPC error codes (distinct from CEP family codes).
@@ -328,33 +288,6 @@ pub fn invalid_params(message: impl Into<String>) -> CepError {
             reason: "invalid params".into(),
         }),
         retriability: Retriability::Permanent,
-    }
-}
-
-/// Convert a CEP error to its JSON-RPC wire representation.
-pub fn to_jsonrpc_error(cep: &CepError) -> (i32, String, CepError) {
-    let code = jsonrpc_wire_code(cep);
-    (code, cep.message.clone(), cep.clone())
-}
-
-fn jsonrpc_wire_code(cep: &CepError) -> i32 {
-    match &cep.data {
-        CepErrorData::Validation(data)
-            if data.field == "jsonrpc" && data.reason == "parse error" =>
-        {
-            jsonrpc::PARSE_ERROR
-        }
-        CepErrorData::Validation(data)
-            if data.field == "method" && data.reason.starts_with("unknown method:") =>
-        {
-            jsonrpc::METHOD_NOT_FOUND
-        }
-        CepErrorData::Validation(data)
-            if data.field == "params" && data.reason == "invalid params" =>
-        {
-            jsonrpc::INVALID_PARAMS
-        }
-        _ => cep.code.as_i32(),
     }
 }
 
@@ -491,19 +424,21 @@ mod tests {
                 data,
                 retriability: Retriability::Permanent,
             };
-            let resp: crate::frame::ToolResult = crate::jsonrpc::Response::Error {
-                error: crate::jsonrpc::ErrorObject {
-                    code: err.code.as_i32(),
-                    message: err.message.clone(),
-                    data: Some(err.clone()),
-                },
-                id: crate::jsonrpc::Id::parse("11111111-1111-4111-8111-111111111111")
-                    .unwrap_or_else(|err| panic!("{name}: invalid InvocationId: {err}")),
-            };
+            let resp: crate::jsonrpc::Response<serde_json::Value, CepError> =
+                crate::jsonrpc::Response::Error {
+                    error: crate::jsonrpc::ErrorObject {
+                        code: err.code.as_i32(),
+                        message: err.message.clone(),
+                        data: Some(err.clone()),
+                    },
+                    id: crate::jsonrpc::Id::parse("11111111-1111-4111-8111-111111111111")
+                        .unwrap_or_else(|err| panic!("{name}: invalid InvocationId: {err}")),
+                };
             let serialized = serde_json::to_string(&resp)
                 .unwrap_or_else(|err| panic!("{name}: serialization failed: {err}"));
-            let parsed: crate::frame::ToolResult = serde_json::from_str(&serialized)
-                .unwrap_or_else(|err| panic!("{name}: deserialization failed: {err}"));
+            let parsed: crate::jsonrpc::Response<serde_json::Value, CepError> =
+                serde_json::from_str(&serialized)
+                    .unwrap_or_else(|err| panic!("{name}: deserialization failed: {err}"));
             if let crate::jsonrpc::Response::Error { error, .. } = parsed {
                 let data = error
                     .data
@@ -578,8 +513,8 @@ mod tests {
     #[test]
     fn tool_execution_codes_are_in_execution_family_range() {
         // #27 slice C: new Execution-family codes for Component tool failures.
-        // Each must sit in -32020..-32029, map to the Execution family, and
-        // round-trip through as_i32/from_i32.
+        // Each must map to its wire code and the Execution family, and round-trip
+        // through the production serde representation.
         let new_codes = [
             (CepErrorCode::ToolTrap, -32023),
             (CepErrorCode::ToolTimeout, -32024),
@@ -595,9 +530,10 @@ mod tests {
                 "{code:?} must be in Execution family"
             );
             assert_eq!(
-                CepErrorCode::from_i32(i),
-                Some(code),
-                "from_i32 round-trip for {code:?}"
+                serde_json::from_value::<CepErrorCode>(serde_json::to_value(code).unwrap())
+                    .unwrap(),
+                code,
+                "serde round-trip for {code:?}"
             );
         }
     }
