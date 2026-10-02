@@ -482,3 +482,115 @@ fn direct_observation_visibility_and_bounds() {
         result,
     );
 }
+
+/// 静态符号链接覆盖真实的 Component/Host/provider 接线；确定性的检查/打开
+/// 竞态留在 `LocalWorkspace` 单元测试中。
+#[test]
+fn direct_observation_symlinks_are_refused_without_canary_leak() {
+    let driver = driver();
+    let (world, spec) = observation_world("direct-observation-symlinks");
+    const CANARY: &str = "I233_E2E_EXTERNAL_CANARY_49da\n";
+    const NAME: &str = "I233_E2E_EXTERNAL_NAME_49da.txt";
+    let outside = world.root().join("outside-symlinks");
+    fs::create_dir(&outside).expect("outside directory");
+    let canary_file = outside.join(NAME);
+    fs::write(&canary_file, CANARY).expect("outside canary");
+    std::os::unix::fs::symlink(&canary_file, world.project_dir().join("file-link"))
+        .expect("file symlink");
+    std::os::unix::fs::symlink(&outside, world.project_dir().join("dir-link"))
+        .expect("directory symlink");
+    let calls = [
+        (
+            "observe.workspace",
+            r#"{"mode":"read_file","path":"file-link"}"#,
+        ),
+        (
+            "observe.workspace",
+            r#"{"mode":"list_directory","path":"dir-link"}"#,
+        ),
+        (
+            "observe.workspace",
+            r#"{"mode":"grep","pattern":"I233_E2E_EXTERNAL_CANARY","path":"dir-link"}"#,
+        ),
+        (
+            "observe.workspace",
+            r#"{"mode":"find_files","pattern":"*","path":"dir-link"}"#,
+        ),
+    ];
+    let server = wire_fake_llm(&world, "dl-obs", tool_sequence(&calls, "symlinks refused"));
+    let scenario_evidence = evidence(&world, &spec);
+    let execution = SessionSendDriver::new(&driver, &world, &spec, "dl-obs")
+        .send("observe symlink paths")
+        .expect("turn drives");
+    let captures = server.captured_requests();
+    let result: Result<(), AssertError> = (|| {
+        assert_clean_send(&execution)?;
+        require(
+            captures.len() == 5,
+            "expected four symlink results and final provider request",
+        )?;
+        let finishes: Vec<bool> = execution
+            .parsed
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                TurnEventLine::ToolCallFinished { ok, .. } => Some(*ok),
+                _ => None,
+            })
+            .collect();
+        require(
+            finishes == [false; 4],
+            format!("symlink calls were not all refused: {finishes:?}"),
+        )?;
+        for (index, path) in ["file-link", "dir-link", "dir-link", "dir-link"]
+            .iter()
+            .enumerate()
+        {
+            let error = tool_result_value(&captures[index + 1]).expect("symlink error envelope");
+            require(
+                error.pointer("/error/code").and_then(Value::as_i64) == Some(-32002),
+                format!("symlink error code mismatch: {error}"),
+            )?;
+            require(
+                error.pointer("/error/message").and_then(Value::as_str)
+                    == Some(format!("path escapes the project root: '{path}'").as_str()),
+                format!("symlink error message mismatch: {error}"),
+            )?;
+        }
+        let containment = execution
+            .parsed
+            .events
+            .iter()
+            .filter(|event| match event {
+                TurnEventLine::Unknown { type_name, raw } if type_name == "cep_call_finished" => {
+                    raw.get("ok").and_then(Value::as_bool) == Some(false)
+                        && raw.get("error_code").and_then(Value::as_str) == Some("PathContainment")
+                }
+                _ => false,
+            })
+            .count();
+        require(
+            containment == 4,
+            format!("expected four PathContainment finishes, got {containment}"),
+        )?;
+        require(
+            captures.iter().all(|capture| {
+                let raw = capture.raw.to_string();
+                !raw.contains(CANARY.trim()) && !raw.contains(NAME)
+            }),
+            "outside canary leaked into provider requests",
+        )?;
+        require(
+            fs::read_to_string(&canary_file).expect("read canary") == CANARY
+                && fs::read_dir(&outside).expect("outside entries").count() == 1,
+            "outside objects changed during observation denials",
+        )?;
+        Ok(())
+    })();
+    finish_scenario(
+        scenario_evidence,
+        &[("symlink observations", &execution.command)],
+        captures,
+        result,
+    );
+}

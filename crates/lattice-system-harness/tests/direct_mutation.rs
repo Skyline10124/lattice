@@ -845,3 +845,78 @@ fn direct_mutation_tool_activity_before_commit() {
         result,
     );
 }
+
+/// 指向外部目录的符号链接不能成为 `mutate.create` 的父目录。
+#[test]
+fn direct_mutation_symlink_parent_is_refused_without_side_effect() {
+    let driver = driver();
+    let (world, spec) = direct_world(
+        "direct-mut-symlink",
+        "dl-symlink",
+        "[\"mutate.create\"]",
+        "",
+    );
+    const CANARY: &str = "I233_MUTATION_EXTERNAL_CANARY_83bc\n";
+    let outside = world.root().join("outside-mutation");
+    fs::create_dir(&outside).expect("outside directory");
+    let canary_file = outside.join("canary.txt");
+    fs::write(&canary_file, CANARY).expect("outside canary");
+    std::os::unix::fs::symlink(&outside, world.project_dir().join("dir-link"))
+        .expect("directory symlink");
+    let server = wire_fake_llm(
+        &world,
+        "dl-symlink",
+        sequence(vec![
+            tool_call(
+                "symlink-create",
+                "mutate.create",
+                r#"{"path":"dir-link/new.txt","content":"nope","create_parents":true}"#,
+            ),
+            SseScript::plain("symlink refused"),
+        ]),
+    );
+    let scenario_evidence = evidence(&world, &spec);
+    let execution = SessionSendDriver::new(&driver, &world, &spec, "dl-symlink")
+        .send("create through symlink")
+        .expect("turn drives");
+    let captures = server.captured_requests();
+    let result: Result<(), AssertError> = (|| {
+        assert_clean_send(&execution)?;
+        require(
+            tool_failed(&execution.parsed, "mutate.create"),
+            "symlink create must fail",
+        )?;
+        require(
+            finished_with_code(&execution.parsed, "mutate.create", "PathContainment"),
+            "symlink create must be PathContainment",
+        )?;
+        require(
+            captures.len() == 2,
+            "expected symlink create result in provider capture",
+        )?;
+        let error = tool_result_value(&captures[1]).expect("symlink create error envelope");
+        require(
+            error.pointer("/error/code").and_then(Value::as_i64) == Some(-32002),
+            format!("symlink create error code mismatch: {error}"),
+        )?;
+        require(
+            captures
+                .iter()
+                .all(|capture| !capture.raw.to_string().contains(CANARY.trim())),
+            "outside canary leaked into provider requests",
+        )?;
+        require(
+            !outside.join("new.txt").exists()
+                && fs::read_to_string(&canary_file).expect("read canary") == CANARY
+                && fs::read_dir(&outside).expect("outside entries").count() == 1,
+            "outside directory changed during create denial",
+        )?;
+        Ok(())
+    })();
+    finish_scenario(
+        scenario_evidence,
+        &[("symlink create", &execution.command)],
+        captures,
+        result,
+    );
+}

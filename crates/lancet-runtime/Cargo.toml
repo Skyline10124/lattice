@@ -48,9 +48,9 @@ url = { workspace = true }
 lattice-store = { workspace = true }
 gix = { workspace = true }
 libc = { workspace = true }
-# Local Workspace filesystem primitives: `rustix` for the per-segment
-# `openat`/`AT_SYMLINK_NOFOLLOW` resolution that makes root containment
-# enforceable, `regex` for grep, `blake3` for the canonical content hash.
+# Local Workspace 的文件系统原语：`rustix` 提供
+# `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` 解析，使项目根约束得以强制执行；
+# `regex` 用于 grep，`blake3` 用于规范内容哈希。
 rustix = { workspace = true }
 regex = { workspace = true }
 blake3 = { workspace = true }

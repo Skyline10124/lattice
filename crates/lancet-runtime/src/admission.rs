@@ -197,10 +197,9 @@ pub enum OperationDenial {
     HostOutsideNetworkChannel(String),
     #[error("host target is empty or malformed")]
     HostNotNormalized,
-    /// A path target that is not in the project-relative comparison form the
-    /// host produces. Structural, not a containment check: containment is
-    /// enforced by the workspace's per-segment resolution, and this refuses a
-    /// *shape* that resolution could never have emitted.
+    /// 不是 Host 生成的项目相对比较形式的路径目标。这是结构检查而非根内约束
+    /// 检查：根内约束由工作区的 `openat2` 解析强制执行，这里拒绝的是该解析
+    /// 不可能产生的*形态*。
     #[error("path target {0} is not a project-relative resolved path")]
     PathNotProjectRelative(String),
 }

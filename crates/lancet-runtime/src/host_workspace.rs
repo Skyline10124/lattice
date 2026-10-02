@@ -1,73 +1,61 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Host-side Policy-Visible Workspace observation for the `workspace-observe`
-//! Tool Host imports (GitHub #30).
+//! `workspace-observe` Tool Host imports 在 Host 侧的 Policy-Visible Workspace
+//! 观察实现（GitHub #30）。
 //!
-//! This module is the whole filesystem authority behind `observe.workspace`.
-//! The Component that exports the method owns typed mode dispatch and result
-//! shaping and nothing else: it holds no path, no preopened directory, no file
-//! descriptor, and no handle to a workspace object. Every fact it can return
-//! came out of one of the four functions here, which is what makes "the guest
-//! cannot widen its own visibility" a structural property rather than a promise.
+//! 本模块是 `observe.workspace` 背后全部的文件系统权限。导出该方法的 Component
+//! 只负责按类型分派模式和整理结果：它不持有路径、预打开的目录或文件描述符，也
+//! 不持有任何工作区对象的句柄。它能返回的每一项事实都来自这里的四个函数，因此
+//! “guest 无法自行扩大可见范围”是结构性质，而不只是承诺。
 //!
-//! # What the host decides, per operation
+//! # Host 对每个操作的决定
 //!
-//! Each of `read` / `list` / `grep` / `find` runs the same fixed sequence, and
-//! the sequence is the reason all four modes cannot disagree:
+//! `read` / `list` / `grep` / `find` 都按同一固定顺序执行，四种模式因此不会
+//! 产生分歧：
 //!
-//! 1. **Path parse** — [`WorkspacePath::parse`] rejects `..`, absolute paths,
-//!    and NUL bytes lexically, before any syscall.
-//! 2. **Cell authorization** — the operation's host-bound Cell and its concrete
-//!    path target go through [`authorize_operation`], the same seam
-//!    `host-control`'s `emit-event` uses.
-//! 3. **Safe resolution** — [`LocalWorkspace::resolve_facts_blocking`] checks the
-//!    path one segment at a time with `lstat`, so a symlink component already
-//!    present is rejected instead of being followed. It returns facts, not an
-//!    open handle: the later read/list/grep/find re-opens the path by name, so a
-//!    component swapped for a symlink between the check and the open is
-//!    followed (#233). Mutations do not share this gap; they act through the
-//!    pinned dirfd walk in `LocalWorkspace::open_parent_dir_secure`.
-//! 4. **Guard L1** — `validate_path_facts` validates the *observed* facts and
-//!    System Path Exclusions, not the requested string alone.
-//! 5. **Visibility** — one [`VisibilityEngine`], built from the turn's
-//!    `ReadVisibilityPolicy`, decides the root and every entry/match/path the
-//!    walk produces. This is the single decision the issue's fourth criterion
-//!    asks for: the same engine instance, the same policy, and the same
-//!    [`HiddenReason`] vocabulary for all four modes.
-//! 6. **Bounds** — the per-operation ceilings in [`ObservationPolicyConfig`] clamp the
-//!    caller's requested limit, and the turn-scoped observation budget is
-//!    charged with the bytes actually returned.
-//! 7. **Evidence** — the operation's Cell, the concrete resolved path, the
-//!    truncation flag, and the policy decision are recorded through the call's
-//!    [`CellEvidenceLedger`]; a refusal records a `DeniedOperation` and the host
-//!    facility is never reached.
+//! 1. **路径解析** —— [`WorkspacePath::parse`] 在任何系统调用之前按词法拒绝
+//!    `..`、绝对路径和 NUL 字节。
+//! 2. **Cell 授权** —— 操作的 host-bound Cell 及其具体路径目标经过
+//!    [`authorize_operation`]，与 `host-control` 的 `emit-event` 使用同一接缝。
+//! 3. **安全解析** —— [`LocalWorkspace::resolve_facts_blocking`] 与之后的
+//!    read/list/grep/find 各自从项目根 fd 出发，用一次
+//!    `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` 调用解析路径，之后只通过
+//!    该调用返回的 fd 操作（#233）。路径中任一处的符号链接或离开项目根的解析都
+//!    在打开时当场拒绝，因此在取得事实与执行操作之间被替换的路径段无法改变操作
+//!    对象。变更操作也以同样方式打开父目录。
+//! 4. **Guard L1** —— `validate_path_facts` 校验*实际观察到的*事实与
+//!    System Path Exclusion，而不只是请求的字符串。
+//! 5. **可见性** —— 由该 Turn 的 `ReadVisibilityPolicy` 构建的同一个
+//!    [`VisibilityEngine`] 决定根路径，以及遍历产生的每个条目、匹配与路径。这正是
+//!    Issue 第四条标准要求的单一决策：四种模式使用同一个引擎实例、同一份策略和
+//!    同一套 [`HiddenReason`] 词汇。
+//! 6. **上限** —— [`ObservationPolicyConfig`] 中的单操作上限会压低调用方请求的
+//!    limit，Turn 级观察预算按实际返回的字节数扣减。
+//! 7. **证据** —— 操作的 Cell、解析后的具体路径、截断标志和策略决定都记录到该
+//!    调用的 [`CellEvidenceLedger`]；被拒绝的操作记录为 `DeniedOperation`，且不会
+//!    触达 Host 设施。
 //!
-//! # Hidden paths never leak
+//! # 隐藏路径绝不泄露
 //!
-//! A hidden path is reported to the guest exactly as a missing one
-//! ([`ObservationError::NotFound`]), and the *reason* goes only to evidence.
-//! Directory entries, grep matches, and find results are filtered by the same
-//! engine before they are handed over, so no mode can surface a name the read
-//! path would have refused. The guest never learns why a path is absent, so it
-//! cannot use the error shape to probe the boundary.
+//! 隐藏路径对 guest 的表现与不存在的路径完全相同（[`ObservationError::NotFound`]），
+//! *原因*只写入证据。目录条目、grep 匹配和 find 结果在交出前都经过同一个引擎
+//! 过滤，因此任何模式都无法暴露读取路径会拒绝的名称。guest 永远不知道路径为何
+//! 缺失，也就无法借错误形态探测边界。
 //!
-//! # Truncation is host-computed
+//! # 截断由 Host 计算
 //!
-//! Every bounded result's truncation state is computed from the real limit
-//! comparison and recorded in evidence. For `read`, the host also renders and
-//! charges the final content, including any truncation marker; for `list` /
-//! `grep` / `find`, the guest receives and echoes the host-computed flag. In
-//! either case, the recorded [`crate::evidence::CellEvidenceLedger`] entry is
-//! the audit trail's answer, not the guest's document.
+//! 每个有界结果的截断状态都由真实的上限比较算出，并记录到证据。对 `read`，Host
+//! 还渲染最终内容（含截断标记）并据此计费；对 `list` / `grep` / `find`，guest
+//! 接收并回传 Host 算出的标志。无论哪种情况，审计依据都是记录在
+//! [`crate::evidence::CellEvidenceLedger`] 中的条目，而不是 guest 返回的文档。
 //!
-//! # Synchronous by construction
+//! # 按构造保持同步
 //!
-//! The Tool Host linker is non-async (`build_linker` in [`crate::runtime`] uses
-//! the sync bindgen and the guest is invoked with async support disabled), so
-//! these functions are synchronous and call the Local Workspace's blocking
-//! primitives directly. Every observation mode shares those cores, so path
-//! safety has one implementation.
+//! Tool Host linker 不是异步的（[`crate::runtime`] 中的 `build_linker` 使用同步
+//! bindgen，调用 guest 时禁用异步支持），因此这些函数是同步的，直接调用
+//! Local Workspace 的阻塞原语。所有观察模式共用这些核心，路径安全因此只有一份
+//! 实现。
 
 use std::sync::Arc;
 
@@ -1185,11 +1173,11 @@ fn wit_error(err: ObservationError) -> WitObserveError {
     }
 }
 
-/// Map an observed path kind onto the WIT enum.
+/// 把观察到的路径类型映射到 WIT 枚举。
 ///
-/// `PathKind` has no `Other`, because the workspace's own `file_type_kind`
-/// resolves everything it can name; the WIT enum keeps the variant so a future
-/// kind is expressible without a breaking change.
+/// `PathKind` 没有 `Other`，因为工作区自己的 `kind_of`/`stat_kind` 会把每个对象
+/// 归入它已命名的类型；WIT 枚举保留该变体，使将来新增的类型无需破坏性变更即可
+/// 表达。
 fn wit_entry_kind(kind: PathKind) -> bindings::lattice::tool_host::workspace_observe::EntryKind {
     use bindings::lattice::tool_host::workspace_observe::EntryKind;
     match kind {

@@ -1,48 +1,40 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! `lancet-runtime` — ADR 0004 Component engine, closed composition gate,
-//! and minimal ToolHost for LATTICE Source Tools.
+//! `lancet-runtime` —— ADR 0004 的 Component 引擎、封闭组成门禁，以及供
+//! LATTICE Source Tool 使用的最小 ToolHost。
 //!
-//! This crate is the Component execution substrate (#27 slice C, Codeberg #5).
-//! It owns:
+//! 本 crate 是 Component 执行基座（#27 slice C，Codeberg #5），负责：
 //!
-//! - **Embedded tool registration** — `EmbeddedTool` (name + bytes) collected
-//!   via `inventory`. A Tool crate cannot self-approve; only the trusted host
-//!   composition step may pin identity.
-//! - **Closed composition gate** — `ClosedCatalog::compose` verifies every
-//!   registration against a host-pinned `ExpectedToolIdentity` (descriptor
-//!   digest, artifact digest, ABI, imports) at startup, before any call is
-//!   served. The catalog is immutable after composition.
-//! - **Component engine** — wasmtime with component-model, no ambient WASI
-//!   (no `wasmtime-wasi`/`wasi-common` dependency). Only versioned Tool Host
-//!   WIT imports are linked.
-//! - **Cell capability admission** — the per-call admission stages (enabled
-//!   tool → profile deny → boundary predicate) and the per-operation
-//!   authorizer are the only authorization authority for Component Tools.
-//! - **ToolHost** — `host-control` (cancellation + structured events) plus, since
-//!   GitHub #30, the `workspace-observe` domain interface, with every effectful
-//!   import gated by its host-bound Cell and concrete target. A Tool reaches the
-//!   filesystem only through these imports; there is no ambient authority and no
-//!   path a guest can name outside them.
-//! - **Call execution** — params validation, Component instantiation, result
-//!   CellRef validation against the descriptor ceiling and the admitted set,
-//!   result schema validation, host-computed context measure, and Cell
-//!   evidence recording. Errors map to structured `CepError` codes
-//!   (`ToolTrap`/`ToolTimeout`/`ToolResourceExhausted`/`CallCancelled`).
-//! - **Private workspace history** — [`history::WorkspaceHistory`] appends
-//!   every successfully installed Atomic Local Mutation to a project-scoped
-//!   `lattice-store` kernel repository that lives outside the Local Workspace
-//!   and the user's project `.git` (GitHub #63, migrated in #143).
-//! - **The concrete Local Workspace** — [`workspace::LocalWorkspace`] and the
-//!   [`workspace::VisibilityEngine`] moved down here in GitHub #30, because the
-//!   `workspace-observe` and `workspace-mutate` Tool Host imports execute all
-//!   filesystem operations here. Secure per-segment path resolution, System Path
-//!   Exclusion, visibility, bounded reads, atomic installation and mutation history
-//!   share this one concrete module.
+//! - **内嵌 Tool 注册** —— 通过 `inventory` 收集 `EmbeddedTool`（名称 + 字节）。
+//!   Tool crate 不能自我批准；只有受信任的 Host 组成步骤可以固定身份。
+//! - **封闭组成门禁** —— `ClosedCatalog::compose` 在启动时、提供任何调用之前，
+//!   按 Host 固定的 `ExpectedToolIdentity`（描述符摘要、制品摘要、ABI、imports）
+//!   校验每个注册项。组成完成后目录不可变。
+//! - **Component 引擎** —— 启用 component-model 的 wasmtime，不提供 ambient WASI
+//!   （不依赖 `wasmtime-wasi`/`wasi-common`）。只链接带版本的 Tool Host WIT
+//!   imports。
+//! - **Cell 能力准入** —— 单次调用的各准入阶段（Tool 已启用 → profile deny →
+//!   边界谓词）与单操作授权器是 Component Tool 唯一的授权权威。
+//! - **ToolHost** —— `host-control`（取消 + 结构化事件），以及自 GitHub #30 起的
+//!   `workspace-observe` 领域接口；每个有副作用的 import 都受其 host-bound Cell
+//!   与具体目标约束。Tool 只能经由这些 import 触及文件系统；不存在 ambient
+//!   authority，guest 也无法在它们之外指名任何路径。
+//! - **调用执行** —— 参数校验、Component 实例化、按描述符上限与已准入集合校验
+//!   结果 CellRef、结果 schema 校验、Host 计算的上下文度量，以及 Cell 证据记录。
+//!   错误映射为结构化的 `CepError` 代码
+//!   （`ToolTrap`/`ToolTimeout`/`ToolResourceExhausted`/`CallCancelled`）。
+//! - **私有工作区历史** —— [`history::WorkspaceHistory`] 把每个成功安装的
+//!   Atomic Local Mutation 追加到项目级 `lattice-store` 内核仓库；该仓库位于
+//!   Local Workspace 与用户项目的 `.git` 之外（GitHub #63，于 #143 迁移）。
+//! - **具体的 Local Workspace** —— [`workspace::LocalWorkspace`] 与
+//!   [`workspace::VisibilityEngine`] 在 GitHub #30 中下移到这里，因为
+//!   `workspace-observe` 和 `workspace-mutate` 这两组 Tool Host imports 的全部
+//!   文件系统操作都在这里执行。安全路径解析、System Path Exclusion、可见性、
+//!   有界读取、原子安装与变更历史共用这一个具体模块。
 //!
-//! `lancet-runtime` does **not** depend on `lancet-api` or any LATTICE
-//! session/agent/profile crate. The `lancet-authority` edge points downward.
+//! `lancet-runtime` **不**依赖 `lancet-api` 或任何 LATTICE session/agent/profile
+//! crate。与 `lancet-authority` 的依赖边指向下层。
 pub mod admission;
 pub mod bindings;
 pub mod catalog;
