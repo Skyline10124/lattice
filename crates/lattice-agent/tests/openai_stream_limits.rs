@@ -83,6 +83,7 @@ async fn run(frames: Vec<String>) -> (ModelStepAttempt, usize) {
                 max_tokens: None,
                 cancel: None,
                 deadline: None,
+                session_id: None,
             },
             None,
         )

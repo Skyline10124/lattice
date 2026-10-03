@@ -42,6 +42,8 @@ pub struct ChatRequest {
     pub max_tokens: Option<u32>,
     /// OpenAI-specific: max completion tokens (replaces max_tokens for o-series)
     pub max_completion_tokens: Option<u32>,
+    /// 作为 `x-client-request-id` 发出，取 SessionId，便于在 provider 侧关联同一会话的请求。
+    pub client_request_id: Option<String>,
 }
 
 impl ChatRequest {
@@ -53,6 +55,7 @@ impl ChatRequest {
             temperature: None,
             max_tokens: None,
             max_completion_tokens: None,
+            client_request_id: None,
         }
     }
 }

@@ -13,6 +13,7 @@ mod providers;
 mod router;
 pub mod sse;
 mod stub;
+mod transport;
 mod types;
 
 pub use lattice_conversation::TokenUsage;
@@ -22,6 +23,7 @@ pub use router::{
     ResolvedModel,
 };
 pub use stub::{LlmError, LlmStream, StubLlm, stream};
+pub use transport::{MAX_DIAGNOSTIC_CHARS, bound_diagnostic};
 pub use types::{ChatRequest, LlmEvent, ModelTarget, ProviderFailure, ToolDefinition};
 
 // Expose the real parser only for cross-crate streaming boundary tests.

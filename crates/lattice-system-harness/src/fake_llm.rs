@@ -25,6 +25,7 @@
 //! stream produces: one `data: {chunk}\n\n` per chunk, terminated by
 //! `data: [DONE]\n\n`.
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -61,6 +62,12 @@ pub struct CapturedRequest {
     /// The full decoded JSON body, for assertions on fields this struct does
     /// not surface (e.g. `temperature`, `max_tokens`).
     pub raw: Value,
+    /// 标识客户端的请求头（`user-agent`、`accept`、`x-client-request-id`），名称小写。
+    pub headers: BTreeMap<String, String>,
+    /// 承载本请求的 TCP 连接序号，按服务端接受顺序从 0 起；同号表示复用了同一条连接。
+    pub connection: usize,
+    /// 服务端启动到收到本请求的毫秒数，用于断言两次请求之间的等待。
+    pub received_ms: u64,
 }
 
 /// The kind of SSE script the fake server returns for a request.
@@ -91,9 +98,21 @@ pub enum SseScript {
     /// body (no `text/event-stream`). Simulates a provider startup failure
     /// (e.g. 429/500) so the product's retry/error path runs.
     HttpError { status: u16, body: String },
+    /// 带指定 Content-Type 与额外响应头的非 2xx 响应，用于 `retry-after`、HTML 网关错误页等形状。
+    HttpResponse {
+        status: u16,
+        content_type: String,
+        headers: Vec<(String, String)>,
+        body: String,
+    },
+    /// 交付内层脚本后由服务端关闭这条连接，且不发 `Connection: close`，模拟 provider 回收空闲连接。
+    CloseAfter { script: Box<SseScript> },
     /// Drop the connection mid-stream after emitting `chunks_before_drop`
     /// provider disconnect / aborted stream.
     Disconnect { chunks_before_drop: Vec<String> },
+    /// 与 `Disconnect` 相同，但声明了比实际更长的 `Content-Length`：HTTP 层看到的是
+    /// 响应体读到一半连接中断，而不是正常 EOF。
+    Truncated { chunks_before_drop: Vec<String> },
     /// Return a non-SSE HTTP 200 body that is not valid JSON per the OpenAI
     /// chunk schema (e.g. a plain string), exercising the parser's error
     /// path. The body still uses `text/event-stream` so the framer runs.
@@ -271,6 +290,9 @@ struct ServerState {
     active_handlers: usize,
     first_failure: Option<String>,
     expected_api_key: Option<String>,
+    /// 已接受的 TCP 连接数，也是下一条连接的序号。
+    connections: usize,
+    started: Instant,
 }
 
 impl ServerState {
@@ -347,6 +369,8 @@ impl FakeLlmServer {
                 active_handlers: 0,
                 first_failure: None,
                 expected_api_key: None,
+                connections: 0,
+                started: Instant::now(),
             }),
             Condvar::new(),
         ));
@@ -516,14 +540,16 @@ fn serve_loop(
     loop {
         match listener.accept() {
             Ok((stream, _)) => {
-                {
+                let connection = {
                     let (lock, _) = &*state;
                     let mut server = lock.lock().unwrap();
                     if server.shutdown_requested {
                         break;
                     }
                     server.active_handlers += 1;
-                }
+                    server.connections += 1;
+                    server.connections - 1
+                };
                 let handler_state = Arc::clone(&state);
                 let gate = gate.clone();
                 let request_log = request_log.clone();
@@ -531,8 +557,9 @@ fn serve_loop(
                     .name("fake-llm-handler".into())
                     .spawn(move || {
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            handle_request(
+                            handle_connection(
                                 stream,
+                                connection,
                                 &handler_state,
                                 gate.as_ref(),
                                 request_log.as_deref().map(PathBuf::as_path),
@@ -586,11 +613,16 @@ fn write_http_response(
     stream: &mut TcpStream,
     status: &str,
     content_type: &str,
+    headers: &[(String, String)],
     body: &[u8],
 ) -> std::io::Result<()> {
+    let extra: String = headers
+        .iter()
+        .map(|(name, value)| format!("{name}: {value}\r\n"))
+        .collect();
     write!(
         stream,
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{extra}Connection: close\r\n\r\n",
         body.len()
     )?;
     stream.write_all(body)?;
@@ -599,13 +631,17 @@ fn write_http_response(
 }
 
 /// One request from the product under test. The product is the fake provider's
-/// only client, so parsing extracts just the route, credential and body; it
-/// does not defend against malformed or hostile HTTP.
+/// only client, so parsing extracts just the route, credential, identifying
+/// headers and body; it does not defend against malformed or hostile HTTP.
 struct HttpRequest {
     method: String,
     path: String,
     /// `authorization`, `x-api-key` and `x-goog-api-key`, names lowercased.
     credentials: Vec<(String, String)>,
+    /// [`CapturedRequest::headers`] 收录的请求头。
+    headers: BTreeMap<String, String>,
+    /// 客户端发了 `Connection: close`：响应后结束连接。
+    close: bool,
     body: String,
 }
 
@@ -619,7 +655,8 @@ fn read_http_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpReque
     let mut parts = line.split_whitespace();
     let method = parts.next().unwrap_or_default().to_string();
     let path = parts.next().unwrap_or_default().to_string();
-    let (mut length, mut credentials) = (0, Vec::new());
+    let (mut length, mut credentials, mut headers) = (0, Vec::new(), BTreeMap::new());
+    let mut close = false;
     loop {
         line.clear();
         if reader.read_line(&mut line)? == 0 || line.trim().is_empty() {
@@ -627,16 +664,17 @@ fn read_http_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpReque
         }
         if let Some((name, value)) = line.split_once(':') {
             let value = value.trim();
-            if name.eq_ignore_ascii_case("content-length") {
-                length = value.parse().unwrap_or(0);
-            } else {
-                let name = name.to_ascii_lowercase();
-                if matches!(
-                    name.as_str(),
-                    "authorization" | "x-api-key" | "x-goog-api-key"
-                ) {
-                    credentials.push((name, value.to_string()));
+            let name = name.to_ascii_lowercase();
+            match name.as_str() {
+                "content-length" => length = value.parse().unwrap_or(0),
+                "authorization" | "x-api-key" | "x-goog-api-key" => {
+                    credentials.push((name, value.to_string()))
                 }
+                "connection" => close = value.eq_ignore_ascii_case("close"),
+                "user-agent" | "accept" | "x-client-request-id" => {
+                    headers.insert(name, value.to_string());
+                }
+                _ => {}
             }
         }
     }
@@ -646,6 +684,8 @@ fn read_http_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpReque
         method,
         path,
         credentials,
+        headers,
+        close,
         body: String::from_utf8_lossy(&body).into_owned(),
     }))
 }
@@ -699,23 +739,76 @@ impl Protocol {
     }
 }
 
-fn handle_request(
+/// 同一条连接上依次处理请求。完整的成功流式响应带 `Content-Length` 且不关闭连接，
+/// 产品可以像对待真实 provider 一样复用；错误响应、断流和 `CloseAfter` 都结束连接。
+fn handle_connection(
     mut stream: TcpStream,
+    connection: usize,
     shared: &(Mutex<ServerState>, Condvar),
     gate: Option<&ResponseGate>,
     request_log: Option<&Path>,
 ) -> Result<(), ServeError> {
-    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+    let mut first = true;
+    loop {
+        if !first && !wait_for_next_request(&stream, shared)? {
+            return Ok(());
+        }
+        first = false;
+        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+        if !handle_request(&mut stream, connection, shared, gate, request_log)? {
+            return Ok(());
+        }
+    }
+}
+
+/// 空闲连接上等待下一条请求；对端关闭、服务关停或空闲超过 5 秒时安静地结束连接。
+fn wait_for_next_request(
+    stream: &TcpStream,
+    shared: &(Mutex<ServerState>, Condvar),
+) -> Result<bool, ServeError> {
+    const IDLE_LIMIT: Duration = Duration::from_secs(5);
+    stream.set_read_timeout(Some(Duration::from_millis(100)))?;
+    let idle_since = Instant::now();
+    loop {
+        match stream.peek(&mut [0u8; 1]) {
+            Ok(0) => return Ok(false),
+            Ok(_) => return Ok(true),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                if shared.0.lock().unwrap().shutdown_requested || idle_since.elapsed() >= IDLE_LIMIT
+                {
+                    return Ok(false);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => return Ok(false),
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+/// 处理一条请求；返回这条连接能否继续承载下一条请求。
+fn handle_request(
+    stream: &mut TcpStream,
+    connection: usize,
+    shared: &(Mutex<ServerState>, Condvar),
+    gate: Option<&ResponseGate>,
+    request_log: Option<&Path>,
+) -> Result<bool, ServeError> {
     let expected = shared.0.lock().unwrap().expected_api_key.clone();
-    let Some(request) = read_http_request(&mut stream)? else {
-        return Ok(());
+    let Some(request) = read_http_request(stream)? else {
+        return Ok(false);
     };
     let Some((protocol, path_model)) = Protocol::route(&request.method, &request.path) else {
         write_http_response(
-            &mut stream,
+            stream,
             "404 Not Found",
             "text/plain",
+            &[],
             b"not a model request\n",
         )?;
         return Err(ServeError::UnexpectedRequest(format!(
@@ -727,16 +820,19 @@ fn handle_request(
         .as_deref()
         .is_some_and(|expected| protocol.api_key(&request) != Some(expected))
     {
-        return write_http_response(
-            &mut stream,
+        write_http_response(
+            stream,
             "401 Unauthorized",
             "text/plain",
+            &[],
             b"unauthorized\n",
-        )
-        .map_err(ServeError::Io);
+        )?;
+        return Ok(false);
     }
-
-    let captured = parse_request_body(protocol, path_model, &request.body);
+    let mut captured = parse_request_body(protocol, path_model, &request.body);
+    captured.headers = request.headers;
+    let client_close = request.close;
+    captured.connection = connection;
     // Script assignment and capture publication are one transaction. Capture
     // order is therefore the same order used to advance a Sequence, even if
     // gated handlers resume in a different order.
@@ -773,6 +869,7 @@ fn handle_request(
             other => (other.clone(), false),
         };
         state.next += usize::from(advance_sequence);
+        captured.received_ms = state.started.elapsed().as_millis() as u64;
         state.requests.push(captured);
         wake.notify_all();
         active
@@ -780,45 +877,103 @@ fn handle_request(
     if let Some(path) = request_log {
         append_fsynced(path, b"request\n")?;
     }
+    let (active, close_after) = match active {
+        SseScript::CloseAfter { script } => (*script, true),
+        other => (other, false),
+    };
+    let (active, truncate) = match active {
+        SseScript::Truncated { chunks_before_drop } => {
+            (SseScript::Disconnect { chunks_before_drop }, true)
+        }
+        other => (other, false),
+    };
     let segmented = gate.is_some_and(|gate| gate.segment_deadline.is_some());
     if !segmented
         && let Some(gate) = gate
         && !gate.wait()?
     {
-        return Ok(());
+        return Ok(false);
     }
     // HttpError short-circuits with a non-SSE HTTP error response.
-    if let SseScript::HttpError { status, body } = &active {
-        return write_http_response(
-            &mut stream,
-            &format!("{status} Error"),
-            "application/json",
-            body.as_bytes(),
-        )
-        .map_err(ServeError::Io);
+    match &active {
+        SseScript::HttpError { status, body } => {
+            write_http_response(
+                stream,
+                &format!("{status} Error"),
+                "application/json",
+                &[],
+                body.as_bytes(),
+            )?;
+            return Ok(false);
+        }
+        SseScript::HttpResponse {
+            status,
+            content_type,
+            headers,
+            body,
+        } => {
+            write_http_response(
+                stream,
+                &format!("{status} Error"),
+                content_type,
+                headers,
+                body.as_bytes(),
+            )?;
+            return Ok(false);
+        }
+        _ => {}
     }
     let Some(sse) = render(protocol, &active) else {
         write_http_response(
-            &mut stream,
+            stream,
             "500 Internal Server Error",
             "text/plain",
+            &[],
             b"script not supported for this protocol\n",
         )?;
         return Err(ServeError::UnsupportedScript(protocol.name()));
     };
-    if !segmented {
-        // 原整份响应路径保持一次写入；分段控制不改变其他场景的交付方式。
-        let response = format!(
+    if matches!(active, SseScript::Disconnect { .. }) {
+        // 写完半截后断开：产品只能看到流在结束事件之前中断。不声明长度时是正常 EOF，
+        // `Truncated` 声明更长的长度，让 HTTP 层报告响应体读到一半中断。
+        let length = if truncate {
+            format!("Content-Length: {}\r\n", sse.len() + 64)
+        } else {
+            String::new()
+        };
+        write!(
+            stream,
             "HTTP/1.1 200 OK\r\n\
              Content-Type: text/event-stream\r\n\
              Cache-Control: no-cache\r\n\
              Connection: close\r\n\
+             {length}\
              \r\n\
              {sse}"
-        );
-        stream.write_all(response.as_bytes())?;
+        )?;
         stream.flush()?;
-        return Ok(());
+        return Ok(false);
+    }
+    if !segmented {
+        // 原整份响应路径保持一次写入；分段控制不改变其他场景的交付方式。
+        let connection = if client_close {
+            "Connection: close\r\n"
+        } else {
+            ""
+        };
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\n\
+             Content-Type: text/event-stream\r\n\
+             Cache-Control: no-cache\r\n\
+             Content-Length: {}\r\n\
+             {connection}\
+             \r\n\
+             {sse}",
+            sse.len()
+        )?;
+        stream.flush()?;
+        return Ok(!close_after && !client_close);
     }
     write!(
         stream,
@@ -833,12 +988,12 @@ fn handle_request(
         if let Some(gate) = gate
             && !gate.wait()?
         {
-            return Ok(());
+            return Ok(false);
         }
         stream.write_all(frame.as_bytes())?;
         stream.flush()?;
     }
-    Ok(())
+    Ok(false)
 }
 
 /// Decode a model request body into a [`CapturedRequest`]. A malformed body
@@ -902,6 +1057,7 @@ fn parse_request_body(
         tool_names,
         provider,
         raw,
+        ..Default::default()
     }
 }
 
@@ -1229,9 +1385,12 @@ fn render_script(script: &SseScript) -> String {
             out.push_str("\n\n");
             out.push_str("data: [DONE]\n\n");
         }
-        SseScript::HttpError { .. } => {
-            // HttpError is short-circuited by `handle_request` before
-            // rendering; reaching this arm is a harness bug.
+        SseScript::HttpError { .. }
+        | SseScript::HttpResponse { .. }
+        | SseScript::CloseAfter { .. }
+        | SseScript::Truncated { .. } => {
+            // HTTP 错误、CloseAfter 与 Truncated 都在 `handle_request` 中先行处理；
+            // reaching this arm is a harness bug.
             out.push_str("data: fake_llm: unresolved HttpError script\n\n");
             out.push_str("data: [DONE]\n\n");
         }
@@ -1383,6 +1542,7 @@ mod tests {
                 let req = format!(
                     "POST /chat/completions HTTP/1.1\r\n\
                      Host: 127.0.0.1\r\n\
+                     Connection: close\r\n\
                      Content-Type: application/json\r\n\
                      Content-Length: {}\r\n\
                      \r\n\
@@ -1431,7 +1591,7 @@ mod tests {
             ("expected-fixture-key", "200"),
         ] {
             let request = format!(
-                "POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\nAuthorization: Bearer {key}\r\n\r\n{{}}"
+                "POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 2\r\nAuthorization: Bearer {key}\r\n\r\n{{}}"
             );
             let response = exchange_raw(server.local_addr(), request.as_bytes());
             assert!(response.starts_with(format!("HTTP/1.1 {status}").as_bytes()));
@@ -1456,7 +1616,7 @@ mod tests {
                 let model = format!("request-{index}");
                 let body = format!(r#"{{"model":"{model}","messages":[],"stream":true}}"#);
                 let request = format!(
-                    "POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                    "POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
                     body.len()
                 );
                 (model, exchange_raw(addr, request.as_bytes()))
@@ -1495,7 +1655,7 @@ mod tests {
                 let body = r#"{"model":"compat:test","messages":[],"stream":true}"#;
                 write!(
                     stream,
-                    "POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    "POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
                     body.len(),
                     body
                 )?;

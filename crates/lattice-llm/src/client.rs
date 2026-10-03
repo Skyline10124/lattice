@@ -4,7 +4,8 @@
 //! Concrete provider dispatch for LLM execution.
 
 use std::pin::Pin;
-use std::time::Duration;
+use std::sync::LazyLock;
+use std::time::{Duration, Instant};
 
 use futures::stream::{self, StreamExt};
 use net_guard::NetGuardError;
@@ -13,16 +14,27 @@ use crate::providers;
 use crate::router::{ProviderKind, ResolvedModel};
 use crate::sse;
 use crate::stub::{LlmError, LlmStream};
+use crate::transport;
 use crate::types::{ChatRequest, LlmEvent};
 
-/// Maximum time a provider request may remain open, including the streaming body.
-const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+/// 兜底总时限，与 profile `timeout_secs` 的上限一致；流的实际时限由 Turn deadline 约束。
+const HTTP_REQUEST_BACKSTOP: Duration = Duration::from_secs(3600);
 
 /// Maximum idle time allowed while connecting to, or reading from, a provider.
 const HTTP_IO_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Maximum number of bytes included from a non-success provider response body.
+/// Maximum number of bytes read from a non-success provider response body.
 const MAX_ERROR_BODY_SIZE: usize = 64 * 1024;
+
+/// 成功响应是 SSE，错误响应是 JSON；两种都声明，避免按 `Accept` 协商的网关拒绝其一。
+const ACCEPT: &str = "text/event-stream, application/json";
+
+static USER_AGENT: LazyLock<String> = LazyLock::new(|| {
+    let release = std::fs::read_to_string("/proc/sys/kernel/osrelease").ok();
+    transport::user_agent(release.as_deref())
+});
+
+type BodyStream = Pin<Box<dyn futures::Stream<Item = reqwest::Result<bytes::Bytes>> + Send>>;
 
 /// Validate base URL and read the API key from the environment.
 pub fn validate_and_read_key(resolved: &ResolvedModel) -> Result<String, LlmError> {
@@ -190,8 +202,7 @@ struct SseStreamState {
 /// across requests. Body chunks are read incrementally; if the in-flight
 /// unframed SSE buffer exceeds `MAX_SSE_BUFFER_SIZE` or the event count exceeds
 /// `MAX_SSE_EVENTS`, an error event is emitted and the stream terminates.
-async fn stream_sse_response(response: reqwest::Response, provider: ProviderKind) -> LlmStream {
-    let body_stream = Box::pin(response.bytes_stream());
+fn stream_sse_response(body_stream: BodyStream, provider: ProviderKind) -> LlmStream {
     let state = SseStreamState {
         body_stream,
         parser: ProviderParser::new(provider),
@@ -239,8 +250,10 @@ async fn stream_sse_response(response: reqwest::Response, provider: ProviderKind
                     state.finished = true;
                     return Some((
                         {
+                            // 响应已经开始后读失败就是传输中断。reqwest 把这类错误都归为
+                            // decode，不能按请求阶段的规则判断，一律可重试。
                             let error = llm_error_from_request(e);
-                            LlmEvent::error(error.to_string(), error.retryable())
+                            LlmEvent::error(error.to_string(), true)
                         },
                         state,
                     ));
@@ -359,9 +372,10 @@ fn is_localhost_request_host(host: &str) -> bool {
 fn http_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(HTTP_REQUEST_TIMEOUT)
+        .timeout(HTTP_REQUEST_BACKSTOP)
         .connect_timeout(HTTP_IO_TIMEOUT)
         .read_timeout(HTTP_IO_TIMEOUT)
+        .user_agent(USER_AGENT.as_str())
 }
 
 fn build_http_client_for_url(
@@ -390,6 +404,95 @@ fn build_http_client_for_url(
     })
 }
 
+/// 本 Turn 的 provider client：解析并校验地址、固定连接目标，并带上协议层重发策略与新建连接日志。
+/// DNS 解析是阻塞调用，必须在 blocking 线程上执行。
+fn provider_client(
+    url: &str,
+    roots: Vec<reqwest::Certificate>,
+) -> Result<reqwest::Client, LlmError> {
+    let host = parsed_request_host_port(url).map_or_else(String::new, |(host, _)| host);
+    // 当前 Cargo features 没有 system-proxy；显式禁用防止未来特性合并偷偷改变连接边界。
+    let builder = http_client_builder()
+        .no_proxy()
+        .tls_certs_only(roots)
+        .retry(protocol_nack_retry(host))
+        .connector_layer(ConnectLog);
+    build_http_client_for_url(url, builder)
+}
+
+/// 与 reqwest 默认策略的判断相同：只重发服务端明确没有处理的请求（HTTP/2 `GOAWAY(NO_ERROR)`、
+/// `REFUSED_STREAM`，RFC 9113 §8.7），最多 2 次。换成自有策略只为每次重发留下 WARN 日志；
+/// 这些重发计入同一次尝试。
+fn protocol_nack_retry(host: String) -> reqwest::retry::Builder {
+    reqwest::retry::for_host(host)
+        .no_budget()
+        .max_retries_per_request(2)
+        .classify_fn(
+            |req_rep| match req_rep.error().and_then(unprocessed_by_server) {
+                Some(reason) => {
+                    tracing::warn!(reason, "provider did not process the request; resending it");
+                    req_rep.retryable()
+                }
+                None => req_rep.success(),
+            },
+        )
+}
+
+fn unprocessed_by_server(error: &(dyn std::error::Error + 'static)) -> Option<&'static str> {
+    let mut source = Some(error);
+    while let Some(error) = source {
+        if let Some(h2) = error.downcast_ref::<h2::Error>() {
+            if !h2.is_remote() {
+                return None;
+            }
+            return match h2.reason() {
+                Some(h2::Reason::NO_ERROR) if h2.is_go_away() => Some("GOAWAY(NO_ERROR)"),
+                Some(h2::Reason::REFUSED_STREAM) if h2.is_reset() => Some("REFUSED_STREAM"),
+                _ => None,
+            };
+        }
+        source = error.source();
+    }
+    None
+}
+
+/// 每新建一条 provider 连接记一条 DEBUG。hyper-util 对“复用连接已被服务端关闭、请求尚未发出”
+/// 的重发无法关闭也无法挂钩，日志里只能间接表现为本次尝试新建了连接。
+#[derive(Clone)]
+struct ConnectLog;
+
+impl<S> tower_layer::Layer<S> for ConnectLog {
+    type Service = ConnectLogService<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        ConnectLogService(inner)
+    }
+}
+
+#[derive(Clone)]
+struct ConnectLogService<S>(S);
+
+impl<S, R> tower_service::Service<R> for ConnectLogService<S>
+where
+    S: tower_service::Service<R>,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = S::Future;
+
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        self.0.poll_ready(cx)
+    }
+
+    fn call(&mut self, request: R) -> Self::Future {
+        tracing::debug!("opening provider connection");
+        self.0.call(request)
+    }
+}
+
 fn llm_error_from_net_guard(error: NetGuardError) -> LlmError {
     match error {
         NetGuardError::Config { message } => LlmError::Config { message },
@@ -397,6 +500,7 @@ fn llm_error_from_net_guard(error: NetGuardError) -> LlmError {
     }
 }
 
+/// 只有连接、发送与读取失败可以重试；构造请求和解码出错重发也不会成功。
 fn llm_error_from_request(err: reqwest::Error) -> LlmError {
     let message = err.to_string();
     if err.is_timeout() {
@@ -404,33 +508,7 @@ fn llm_error_from_request(err: reqwest::Error) -> LlmError {
     } else {
         LlmError::Transport {
             message,
-            retryable: true,
-        }
-    }
-}
-
-fn summarize_provider_body(body: &str) -> String {
-    const MAX_PROVIDER_ERROR_CHARS: usize = 2048;
-    if body.chars().count() <= MAX_PROVIDER_ERROR_CHARS {
-        return body.to_owned();
-    }
-    let mut summary: String = body.chars().take(MAX_PROVIDER_ERROR_CHARS - 3).collect();
-    summary.push_str("...");
-    summary
-}
-
-fn llm_error_from_status(status: reqwest::StatusCode, body: String) -> LlmError {
-    let status_code = status.as_u16();
-    let message = summarize_provider_body(&body);
-    if status_code == 429 {
-        LlmError::RateLimited {
-            status_code,
-            message,
-        }
-    } else {
-        LlmError::ProviderHttp {
-            status_code,
-            message,
+            retryable: err.is_connect() || err.is_request() || err.is_body(),
         }
     }
 }
@@ -446,16 +524,15 @@ fn append_bounded_error_chunk(body: &mut Vec<u8>, chunk: &[u8]) -> bool {
     }
 }
 
-async fn read_error_body_capped(response: reqwest::Response) -> String {
+/// 读最多 64 KiB 错误正文；第二项表示读到一半连接断了。
+async fn read_error_body_capped(response: reqwest::Response) -> (String, bool) {
     let mut stream = response.bytes_stream();
     let mut body = Vec::new();
-    let mut truncated = false;
 
     while let Some(chunk_result) = stream.next().await {
         match chunk_result {
             Ok(chunk) => {
                 if append_bounded_error_chunk(&mut body, &chunk) {
-                    truncated = true;
                     break;
                 }
             }
@@ -465,19 +542,12 @@ async fn read_error_body_capped(response: reqwest::Response) -> String {
                     text.push_str("; ");
                 }
                 text.push_str(&format!("failed to read provider error body: {}", e));
-                return text;
+                return (text, true);
             }
         }
     }
 
-    let mut text = String::from_utf8_lossy(&body).into_owned();
-    if truncated {
-        text.push_str(&format!(
-            "... [provider error body truncated at {} bytes]",
-            MAX_ERROR_BODY_SIZE
-        ));
-    }
-    text
+    (String::from_utf8_lossy(&body).into_owned(), false)
 }
 
 /// 兼容单进程调用者；后台执行必须传入已经冻结的 LlmConnection。
@@ -490,42 +560,124 @@ pub async fn dispatch_stream(
         .await
 }
 
+/// 取本 Turn 缓存的 client；没有时在 blocking 线程上解析地址并构建。
+async fn turn_client(
+    connection: &crate::LlmConnection,
+    url: &str,
+) -> Result<reqwest::Client, LlmError> {
+    if let Some(client) = connection.client.lock().unwrap().clone() {
+        return Ok(client);
+    }
+    let (url, roots) = (url.to_owned(), connection.roots.clone());
+    let client = tokio::task::spawn_blocking(move || provider_client(&url, roots))
+        .await
+        .map_err(|_| LlmError::Config {
+            message: "provider client setup task failed".into(),
+        })??;
+    *connection.client.lock().unwrap() = Some(client.clone());
+    Ok(client)
+}
+
 pub(crate) async fn dispatch_frozen(
     request: ChatRequest,
     connection: &crate::LlmConnection,
 ) -> Result<LlmStream, LlmError> {
     let resolved = &connection.resolved;
+    let provider = resolved.provider.as_str();
     let url = build_endpoint_url(resolved);
     let body = build_request_body(&request, resolved)?;
     let headers = build_auth_headers(resolved, &connection.api_key);
-    // 当前 Cargo features 没有 system-proxy；显式禁用防止未来特性合并偷偷改变连接边界。
-    let builder = http_client_builder()
-        .no_proxy()
-        .tls_certs_only(connection.roots.clone());
-    let client = build_http_client_for_url(&url, builder)?;
-    let mut req_builder = client.post(&url).json(&body);
+    let client = turn_client(connection, &url).await?;
+    let mut req_builder = client
+        .post(&url)
+        .header(reqwest::header::ACCEPT, ACCEPT)
+        .json(&body);
+    if let Some(id) = &request.client_request_id {
+        req_builder = req_builder.header("x-client-request-id", id.as_str());
+    }
     for (name, value) in &headers {
         req_builder = req_builder.header(name.as_str(), value.as_str());
     }
-    let response = req_builder.send().await.map_err(llm_error_from_request)?;
+    let started = Instant::now();
+    let response = match req_builder.send().await {
+        Ok(response) => response,
+        Err(error) => {
+            let error = llm_error_from_request(error);
+            // 连接可能已不可用；下次尝试重新解析地址并新建 client。
+            connection.forget_client();
+            tracing::warn!(provider, %error, "provider request failed before a response");
+            return Err(error);
+        }
+    };
     let status = response.status();
+    let request_id = transport::provider_request_id(response.headers());
+    tracing::debug!(
+        provider,
+        status = status.as_u16(),
+        request_id = request_id.as_deref(),
+        headers_ms = started.elapsed().as_millis() as u64,
+        "provider responded"
+    );
     if !status.is_success() {
-        let status_text = read_error_body_capped(response)
-            .await
-            .replace(connection.api_key.as_str(), "[REDACTED]");
-        return Err(llm_error_from_status(status, status_text));
+        let response_headers = response.headers().clone();
+        let (body, cut) = read_error_body_capped(response).await;
+        if cut {
+            connection.forget_client();
+        }
+        let body = body.replace(connection.api_key.as_str(), "[REDACTED]");
+        let error = transport::status_error(status.as_u16(), &response_headers, &body);
+        tracing::warn!(provider, request_id = request_id.as_deref(), %error, "provider returned an error status");
+        return Err(error);
     }
-    let stream = stream_sse_response(response, resolved.provider.clone()).await;
+    let mut guard = ForgetUnlessDone {
+        client: connection.client.clone(),
+        done: false,
+    };
+    let body_stream = response.bytes_stream();
+    let stream = stream_sse_response(Box::pin(body_stream), resolved.provider.clone());
     let api_key = connection.api_key.clone();
+    let provider = provider.to_owned();
     // provider 的流内错误同样会进入公开诊断和 Turn 日志，必须在越过适配边界前脱敏。
     Ok(Box::pin(stream.map(move |event| match event {
         LlmEvent::Error { mut failure } => {
             failure.message =
-                summarize_provider_body(&failure.message.replace(api_key.as_str(), "[REDACTED]"));
+                transport::bound_diagnostic(&failure.message.replace(api_key.as_str(), "[REDACTED]"));
+            tracing::warn!(provider, request_id = request_id.as_deref(), error = %failure.message, "provider stream error");
             LlmEvent::Error { failure }
+        }
+        LlmEvent::Done { finish_reason, usage } => {
+            guard.finish();
+            tracing::debug!(
+                provider,
+                request_id = request_id.as_deref(),
+                total_ms = started.elapsed().as_millis() as u64,
+                "provider stream completed"
+            );
+            LlmEvent::Done { finish_reason, usage }
         }
         other => other,
     })))
+}
+
+/// 随响应流一起丢弃。流没交付 `Done` 就结束、出错或被提前丢弃时，这条连接的状态不可信：
+/// 丢掉本 Turn 的 client，下次尝试重新解析并固定地址。
+struct ForgetUnlessDone {
+    client: std::sync::Arc<std::sync::Mutex<Option<reqwest::Client>>>,
+    done: bool,
+}
+
+impl ForgetUnlessDone {
+    // 经方法设置而不是直接写字段：闭包按字段捕获时只会带走 `done`，guard 本身会提前丢弃。
+    fn finish(&mut self) {
+        self.done = true;
+    }
+}
+impl Drop for ForgetUnlessDone {
+    fn drop(&mut self) {
+        if !self.done {
+            self.client.lock().unwrap().take();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -533,12 +685,6 @@ mod tests {
     use super::*;
     use crate::endpoints::OPENAI_BASE_URL;
 
-    #[test]
-    fn provider_diagnostic_bound_includes_ellipsis() {
-        let text = summarize_provider_body(&"界".repeat(2049));
-        assert_eq!(text.chars().count(), 2048);
-        assert!(text.ends_with("..."));
-    }
     use crate::router::CredentialStatus;
     use crate::test_env::with_env_vars;
 
@@ -752,6 +898,106 @@ mod tests {
         assert!(
             matches!(events.as_slice(), [LlmEvent::Error { failure }] if failure.message == "API error: [REDACTED] rejected" && !failure.retryable)
         );
+        server.await.unwrap();
+    }
+
+    /// 流没有交付 `Done` 就结束、读到一半断开，或错误正文读到一半断开时，本 Turn 的 client
+    /// 必须丢弃，下次尝试才会重新解析并固定地址；完整的流保留 client 给下一 Step 复用。
+    /// E2E 观察不到地址是否重新解析，所以直接检查缓存。
+    #[tokio::test]
+    async fn turn_client_is_dropped_after_any_unfinished_response() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let done = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+        let partial = "data: {\"choices\":[{\"delta\":{\"content\":\"par\"}}]}\n\n";
+        let sse = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n";
+        let cases = [
+            (
+                "complete stream",
+                format!("{sse}Content-Length: {}\r\n\r\n{done}", done.len()),
+                true,
+            ),
+            (
+                "eof before done",
+                format!("{sse}Connection: close\r\n\r\n{partial}"),
+                false,
+            ),
+            (
+                "body cut mid-stream",
+                format!(
+                    "{sse}Content-Length: {}\r\n\r\n{partial}",
+                    partial.len() + 64
+                ),
+                false,
+            ),
+            (
+                "error body cut",
+                "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 100\r\n\r\n{\"error\"".into(),
+                false,
+            ),
+        ];
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let responses: Vec<String> = cases.iter().map(|case| case.1.clone()).collect();
+        let server = tokio::spawn(async move {
+            for response in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                // 读完整个请求再回应，关闭连接时不会因未读数据触发 RST 而吞掉响应。
+                let mut request = Vec::new();
+                let body_start = loop {
+                    let mut chunk = [0; 4096];
+                    let count = socket.read(&mut chunk).await.unwrap();
+                    assert!(count > 0);
+                    request.extend_from_slice(&chunk[..count]);
+                    if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                        break end + 4;
+                    }
+                };
+                let head = String::from_utf8_lossy(&request[..body_start]).to_ascii_lowercase();
+                let length: usize = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .map_or(0, |value| value.trim().parse().unwrap());
+                while request.len() < body_start + length {
+                    let mut chunk = [0; 4096];
+                    let count = socket.read(&mut chunk).await.unwrap();
+                    assert!(count > 0);
+                    request.extend_from_slice(&chunk[..count]);
+                }
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let resolved = ResolvedModel {
+            alias: "compat:m".into(),
+            provider: ProviderKind::OpenAiCompatible,
+            provider_model: "m".into(),
+            base_url: format!("http://{address}"),
+            api_key_env: "UNUSED".into(),
+            credential_status: crate::CredentialStatus::Missing,
+        };
+        for (name, _, keeps_client) in cases {
+            let connection =
+                crate::LlmConnection::new(resolved.clone(), "key".into(), Vec::new()).unwrap();
+            let request = ChatRequest::new(Vec::new(), crate::ModelTarget::new("compat:m"));
+            let outcome = tokio::time::timeout(Duration::from_secs(3), async {
+                match connection.stream(request).await {
+                    Ok(stream) => Ok(stream.collect::<Vec<_>>().await),
+                    Err(error) => Err(error),
+                }
+            })
+            .await
+            .unwrap();
+            if name == "body cut mid-stream" {
+                assert!(
+                    matches!(outcome.as_deref(), Ok([.., LlmEvent::Error { failure }]) if failure.retryable),
+                    "{name}: a body cut short is a retryable transport failure: {outcome:?}"
+                );
+            }
+            assert_eq!(
+                connection.client.lock().unwrap().is_some(),
+                keeps_client,
+                "{name}: {outcome:?}"
+            );
+        }
         server.await.unwrap();
     }
 

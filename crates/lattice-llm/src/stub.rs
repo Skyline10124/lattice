@@ -35,11 +35,15 @@ pub enum LlmError {
     #[error("HTTP request timed out: {message}")]
     Timeout { message: String },
 
-    #[error("provider rate limited with HTTP {status_code}: {message}")]
-    RateLimited { status_code: u16, message: String },
-
-    #[error("provider returned HTTP {status_code}: {message}")]
-    ProviderHttp { status_code: u16, message: String },
+    /// 非 2xx 响应。`message` 是已有界的一行诊断，如 `HTTP 429 rate_limit_exceeded: …`。
+    #[error("{message}")]
+    ProviderHttp {
+        status_code: u16,
+        message: String,
+        retryable: bool,
+        /// provider 通过 `retry-after`/`retry-after-ms` 给出的建议等待。
+        retry_after: Option<std::time::Duration>,
+    },
 
     #[error("HTTP response read error: {message}")]
     StreamRead { message: String },
@@ -63,7 +67,6 @@ impl LlmError {
             Self::Dns { .. } => "dns",
             Self::Transport { .. } => "transport",
             Self::Timeout { .. } => "timeout",
-            Self::RateLimited { .. } => "rate_limited",
             Self::ProviderHttp { .. } => "provider_http",
             Self::StreamRead { .. } => "stream_read",
             Self::ProtocolLimit { .. } => "protocol_limit",
@@ -74,20 +77,22 @@ impl LlmError {
 
     pub fn retryable(&self) -> bool {
         match self {
-            Self::Transport { retryable, .. } => *retryable,
-            Self::Timeout { .. } | Self::RateLimited { .. } => true,
-            Self::ProviderHttp { status_code, .. } => {
-                matches!(*status_code, 500 | 502 | 503 | 504)
-            }
+            Self::Transport { retryable, .. } | Self::ProviderHttp { retryable, .. } => *retryable,
+            Self::Timeout { .. } => true,
             _ => false,
         }
     }
 
     pub fn status_code(&self) -> Option<u16> {
         match self {
-            Self::RateLimited { status_code, .. } | Self::ProviderHttp { status_code, .. } => {
-                Some(*status_code)
-            }
+            Self::ProviderHttp { status_code, .. } => Some(*status_code),
+            _ => None,
+        }
+    }
+
+    pub fn retry_after(&self) -> Option<std::time::Duration> {
+        match self {
+            Self::ProviderHttp { retry_after, .. } => *retry_after,
             _ => None,
         }
     }
