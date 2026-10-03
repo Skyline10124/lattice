@@ -68,6 +68,8 @@ pub enum ModelStepError {
         message: String,
         /// Transport-classified retryability hint.
         retryable: bool,
+        /// provider 通过 Retry-After 给出的建议等待；是否采纳由调用方的重试策略决定。
+        retry_after: Option<Duration>,
     },
 }
 
@@ -155,6 +157,8 @@ pub struct ModelStepRequest {
     pub cancel: Option<Arc<AtomicBool>>,
     /// Cooperative deadline for this attempt only.
     pub deadline: Option<Instant>,
+    /// 本 Turn 所属 SessionId，作为 `x-client-request-id` 发给 provider。
+    pub session_id: Option<String>,
 }
 
 /// The one-attempt model step driver.
@@ -198,6 +202,7 @@ impl ModelStepDriver {
             temperature: request.temperature,
             max_tokens: request.max_tokens,
             max_completion_tokens: None,
+            client_request_id: request.session_id.clone(),
         };
 
         // 预构造请求及任务调度也可能耗尽预算，首次打开不能依赖后续轮询补救。
@@ -309,14 +314,15 @@ impl ModelStepDriver {
             };
 
             let Some(event) = next else {
-                // Stream ended without Done: an interruption, never a
-                // complete attempt.
-                return Ok(interrupted(
-                    AttemptInterruption::StreamError,
+                // 流在结束事件之前中断，通常是连接被切断；已收到多少内容不影响重试资格。
+                return Ok(ModelStepAttempt::Stopped {
+                    cause: ModelStopCause::ProviderError { retryable: true },
                     usage,
-                    finish_reason,
-                    None,
-                ));
+                    diagnostic: ModelDiagnostic {
+                        provider_error: Some("provider stream ended before completion".into()),
+                        invalid_batch: None,
+                    },
+                });
             };
 
             // `Done` is never a cancel point: the attempt finalizes before
@@ -425,7 +431,7 @@ impl ModelStepDriver {
                         },
                         usage,
                         diagnostic: ModelDiagnostic {
-                            provider_error: Some(failure.message.chars().take(2048).collect()),
+                            provider_error: Some(lattice_llm::bound_diagnostic(&failure.message)),
                             invalid_batch: None,
                         },
                     });
@@ -480,11 +486,9 @@ fn interrupted(
         AttemptInterruption::StreamError => ModelStopCause::ProviderError { retryable: false },
     };
     let provider_error = matches!(cause, ModelStopCause::ProviderError { .. }).then(|| {
-        diagnostic
-            .unwrap_or_else(|| "provider stream ended without completion".into())
-            .chars()
-            .take(2048)
-            .collect()
+        lattice_llm::bound_diagnostic(
+            &diagnostic.unwrap_or_else(|| "provider stream ended without completion".into()),
+        )
     });
     ModelStepAttempt::Stopped {
         cause,
@@ -502,21 +506,14 @@ fn model_step_opening_error(error: Box<dyn std::error::Error + Send + Sync>) -> 
     {
         return ModelStepError::Projection(projection.clone());
     }
-    ModelStepError::OpeningFailed {
-        message: error.to_string().chars().take(2048).collect(),
-        retryable: classify_retryable(error.as_ref()),
-    }
-}
-
-/// Transport retryability classification for an opening failure. The caller
-/// may still choose never to retry; this is a hint, not a policy.
-fn classify_retryable(err: &(dyn std::error::Error + Send + Sync + 'static)) -> bool {
     // Structured LLM errors carry their classification; opaque errors are
     // conservatively non-retryable.
-    if let Some(llm_error) = err.downcast_ref::<lattice_llm::LlmError>() {
-        return llm_error.retryable();
+    let llm_error = error.downcast_ref::<lattice_llm::LlmError>();
+    ModelStepError::OpeningFailed {
+        message: lattice_llm::bound_diagnostic(&error.to_string()),
+        retryable: llm_error.is_some_and(lattice_llm::LlmError::retryable),
+        retry_after: llm_error.and_then(lattice_llm::LlmError::retry_after),
     }
-    false
 }
 
 #[cfg(all(test, feature = "test-utils"))]
@@ -567,6 +564,7 @@ mod tests {
             max_tokens: None,
             cancel: None,
             deadline: None,
+            session_id: None,
         }
     }
 
@@ -862,7 +860,7 @@ mod tests {
                 vec![LlmEvent::Token {
                     content: "par".to_string(),
                 }],
-                Some(ModelStopCause::ProviderError { retryable: false }),
+                Some(ModelStopCause::ProviderError { retryable: true }),
             ),
         ] {
             let attempt = runtime()

@@ -21,8 +21,17 @@ use std::sync::{
 };
 use std::time::Duration;
 use tokio::{task::JoinHandle, time::Instant};
+use tracing::Instrument;
 
 type Result<T> = std::result::Result<T, CoordinatorIoError>;
+
+/// provider 建议等待（Retry-After）的上限。超过它或超过 Turn 剩余时间时立即以 provider
+/// 原因结束 Step，不截断后重发：日配额一类的长等待截短重试基本仍会失败。
+const MAX_PROVIDER_RETRY_AFTER: Duration = Duration::from_secs(60);
+
+fn retry_after_allowed(wait: Duration, deadline: Instant) -> bool {
+    wait <= MAX_PROVIDER_RETRY_AFTER && wait < deadline.saturating_duration_since(Instant::now())
+}
 
 pub(crate) struct LiveExecution {
     pub driver: Arc<ModelStepDriver>,
@@ -192,6 +201,7 @@ pub(crate) async fn run_coordinator_saga(
                 max_tokens: None,
                 cancel: Some(cancellation.clone()),
                 deadline: Some(live.deadline),
+                session_id: Some(session.to_string()),
             };
             let driver = live.driver.clone();
             let observer = live.observer.clone();
@@ -214,7 +224,15 @@ pub(crate) async fn run_coordinator_saga(
                                 }),
                             )
                             .await
-                    },
+                    }
+                    // lattice-llm 的请求、重发与连接日志都落在这个 span 下，可对回具体尝试。
+                    .instrument(tracing::info_span!(
+                        "model_attempt",
+                        session = %session,
+                        turn = %turn_id,
+                        step = ordinal,
+                        attempt
+                    )),
                     live.cancel.clone(),
                     live.deadline,
                 )
@@ -231,6 +249,7 @@ pub(crate) async fn run_coordinator_saga(
                     diagnostic: Default::default(),
                 }),
             };
+            let mut retry_after = None;
             let stopped = match result {
                 Ok(ModelStepAttempt::Complete {
                     message,
@@ -267,16 +286,26 @@ pub(crate) async fn run_coordinator_saga(
                         partial: Vec::new(),
                     },
                 },
-                Err(ModelStepError::OpeningFailed { message, retryable }) => AttemptStopped {
-                    key,
-                    origin,
-                    usage: None,
-                    cause: StopCause::ProviderError { retryable },
-                    diagnostic: AttemptDiagnostic {
-                        provider_error: Some(bound_provider_diagnostic(&message)),
-                        ..Default::default()
-                    },
-                },
+                Err(ModelStepError::OpeningFailed {
+                    message,
+                    retryable,
+                    retry_after: hint,
+                }) => {
+                    retry_after = hint;
+                    AttemptStopped {
+                        key,
+                        origin,
+                        usage: None,
+                        cause: StopCause::ProviderError {
+                            retryable: retryable
+                                && hint.is_none_or(|wait| retry_after_allowed(wait, live.deadline)),
+                        },
+                        diagnostic: AttemptDiagnostic {
+                            provider_error: Some(bound_provider_diagnostic(&message)),
+                            ..Default::default()
+                        },
+                    }
+                }
                 Err(ModelStepError::Projection(_)) => AttemptStopped {
                     key,
                     origin,
@@ -307,6 +336,7 @@ pub(crate) async fn run_coordinator_saga(
             )
             .await?;
             let wait = Duration::from_millis(delay)
+                .max(retry_after.unwrap_or_default())
                 .min(live.deadline.saturating_duration_since(Instant::now()));
             if provider_error {
                 let will_retry = matches!(stopped, AttemptStopResult::RetryReady { .. });

@@ -461,6 +461,7 @@ mod tests {
             temperature: Some(0.2),
             max_tokens: None,
             max_completion_tokens: None,
+            client_request_id: None,
         };
         let body = build_request_json(&request, &make_resolved()).expect("projection");
         assert_eq!(body["model"], "claude-sonnet-4-6");

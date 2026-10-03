@@ -39,6 +39,7 @@ async fn typed_stream_failure_after_delta_preserves_retryability() {
                     max_tokens: None,
                     cancel: None,
                     deadline: None,
+                    session_id: None,
                 },
                 None,
             )

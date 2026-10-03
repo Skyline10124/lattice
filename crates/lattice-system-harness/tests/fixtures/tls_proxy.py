@@ -58,7 +58,8 @@ class Handler(socketserver.BaseRequestHandler):
                         body.extend(part)
                     upstream_port = int(upstream_file.read_text())
                     with socket.create_connection(("127.0.0.1", upstream_port), timeout=30) as upstream:
-                        upstream.sendall(header + body)
+                        # 外壳每条连接只转发一个请求：要求上游响应后关闭，响应头随之告诉产品不要复用。
+                        upstream.sendall(header[:-2] + b"Connection: close\r\n\r\n" + body)
                         while part := upstream.recv(65536):
                             stream.sendall(part)
                 elif method == "GET":

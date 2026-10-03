@@ -2,9 +2,9 @@
 
 ## 职责
 
-维护 provider 请求与流交互、工具 wire 类型、SSE、模型路由、endpoint 元数据、请求时 DNS pinning 及日志设置。持久消息与 usage 直接使用 `lattice-conversation` 类型，不负责 Session 图、profile 发现、Agent 循环或 LANCET 执行。
+维护 provider 请求与流交互、工具 wire 类型、SSE、模型路由、endpoint 元数据、DNS pinning、传输层重试判断及日志设置。持久消息与 usage 直接使用 `lattice-conversation` 类型，不负责 Session 图、profile 发现、Agent 循环、重试策略或 LANCET 执行。
 
-- `types.rs`：请求信封、工具定义、流事件与目标；`client.rs`：HTTP 行为和请求时安全。
+- `types.rs`：请求信封、工具定义、流事件与目标；`client.rs`：HTTP 行为、Turn 内 client 复用和连接安全；`transport.rs`：请求标识、错误诊断、可重试判断与 Retry-After。
 - `providers/`：provider 信封、认证、SSE 累积；`provider_projection/` 是唯一生产消息 codec。
 - `sse.rs`：流解析；router/endpoints 模块：模型与 provider 解析；`stub.rs`：测试客户端；`logging.rs`：日志初始化。
 - 共享 URL/DNS/地址检查归 `net-guard`，client 将中立错误映射为 `LlmError`。
@@ -18,7 +18,9 @@
 - provider 协议差异留在 provider/client 层，高层只消费类型化 `LlmEvent`、`LlmError` 和模型元数据。
 - 所有请求 builder 经 `request_messages_to_wire`；完整消息转换集中在 `provider_projection`。OpenAI 流通过 `openai_parts_to_native` 保留到达顺序，不重造固定字段顺序；非流 wire 通过 `wire_to_native`，usage 经 `wire_usage`。不新建 ToolCall/ToolResult codec，组装经 `AttemptAssembly`，超限返回 `ProjectionError::OutputLimitExceeded`，不返回部分消息。
 - provider call ID 是可选不透明 wire 元数据，不是领域 Invocation 身份，不合成 `tc_*` 身份。same-provider 保留真实 ID、签名及 part 顺序；cross-provider 去掉 replay state、provider call ID 与 reasoning，不泄露来源 provider 状态。
-- `validate_base_url` 的 DNS 检查仅尽力而为，请求时解析地址固定才是主要 SSRF 防线。localhost、127.0.0.1、::1 使用一致的 loopback 例外，其他私有/保留 IP literal 拒绝。
+- `validate_base_url` 的 DNS 检查仅尽力而为，连接前解析并固定地址才是主要 SSRF 防线：每个 Turn 第一次请求时在 blocking 线程上解析、校验并固定地址，构建的 client 在本 Turn 内复用；响应没有完整结束（发送失败、流没交付 `Done` 就结束或出错、错误正文读到一半中断）时丢弃，下次尝试重新解析。不跨 Turn 复用（各 Turn 冻结的 TLS 根可能不同），认证头不放进 client 默认头。localhost、127.0.0.1、::1 使用一致的 loopback 例外，其他私有/保留 IP literal 拒绝。
+- 一次尝试对应一个被 provider 接收的请求。HTTP 库只重发 provider 明确没处理的请求：reqwest 那层换成自有策略（判断同默认，每次重发记 WARN），hyper-util 对未发出请求的重发无法关闭，以新建连接的 DEBUG 日志间接可见。不得让 HTTP 库重发已被处理的请求；其他重试一律由协调层按冻结策略执行并逐次记录。
+- 请求头只加 `User-Agent`（LATTICE 自己的标识，不冒充其他客户端）、`Accept` 与取 SessionId 的 `x-client-request-id`；新增发给 provider 的头先修订会话合同。
 - HTTP 默认 `redirect::Policy::none()`；重新允许重定向必须逐跳重新执行地址与 pinning 检查，避免向未经验证的主机转送 body 和密钥。不能依赖首跳校验保护后续跳。
 - DNS rebinding 防御结合连接地址固定和 `net-guard` 分类/后缀规则。扩大启发式或后缀范围须有测试，并如实报告未覆盖风险。
 - 点号工具名 `a.b` 与 wire 名 `a__b` 的编解码只属于 provider 适配，目录名仍保持点号。

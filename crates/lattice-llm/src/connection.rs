@@ -4,18 +4,37 @@
 use crate::{
     ChatRequest, CredentialStatus, LlmError, LlmStream, ModelRouter, ModelTarget, ResolvedModel,
 };
+use std::sync::{Arc, Mutex};
 use zeroize::Zeroizing;
 
 /// 单次提交冻结的连接材料。刻意不实现 Debug/serde，凭据和信任根不进入持久配置。
-#[derive(Clone)]
 pub struct LlmConnection {
     pub(crate) resolved: ResolvedModel,
     pub(crate) api_key: Zeroizing<String>,
     pub(crate) roots: Vec<reqwest::Certificate>,
     roots_der: Vec<Vec<u8>>,
+    /// 本 Turn 首次请求时解析、校验并固定地址后构建的 client，Turn 内复用；
+    /// 连接或传输错误后清空，下次尝试重新解析。
+    pub(crate) client: Arc<Mutex<Option<reqwest::Client>>>,
+}
+
+/// 克隆得到同一份冻结材料，但不共享已建立的连接。
+impl Clone for LlmConnection {
+    fn clone(&self) -> Self {
+        Self {
+            resolved: self.resolved.clone(),
+            api_key: self.api_key.clone(),
+            roots: self.roots.clone(),
+            roots_der: self.roots_der.clone(),
+            client: Arc::default(),
+        }
+    }
 }
 
 impl LlmConnection {
+    pub(crate) fn forget_client(&self) {
+        self.client.lock().unwrap().take();
+    }
     /// 显式材料入口；调用者传入证书内容，后台不再读取提交端路径或共享环境。
     pub fn new(
         mut resolved: ResolvedModel,
@@ -69,6 +88,7 @@ impl LlmConnection {
             api_key,
             roots,
             roots_der,
+            client: Arc::default(),
         })
     }
 
