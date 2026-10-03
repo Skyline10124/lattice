@@ -95,20 +95,24 @@ fn direct_turn_end_events_completed_turn_delivers_terminal_event() {
                 matches!(event, TurnEventLine::ModelFinished { .. }).then_some(index)
             })
             .collect();
+        // 订阅与执行并行（session.md「观察与重连」）：快照之前发出的事件不重发，
+        // 订阅晚于第一步时收不到它的 model_*。只在实际收到两步时核验中途 step_closed。
         require(
-            starts.len() == 2 && finishes.len() == 2,
-            format!("expected two model_started/model_finished pairs; got: {got}"),
+            starts.len() <= 2 && finishes.len() <= 2,
+            format!("expected at most two model_started/model_finished; got: {got}"),
         )?;
-        require(
-            outcome.events.iter().enumerate().any(|(index, event)| {
-                matches!(event, TurnEventLine::Unknown { type_name, raw }
-                    if type_name == "step_closed" && raw["step"]["key"]["ordinal"] == 0)
-                    && finishes[0] < index
-                    && index < starts[1]
-            }),
-            format!("expected first-step step_closed before second model_started; got: {got}"),
-        )?;
-        println!("{}: control step_closed(ordinal=0) delivered", spec.name);
+        if starts.len() == 2 && finishes.len() == 2 {
+            require(
+                outcome.events.iter().enumerate().any(|(index, event)| {
+                    matches!(event, TurnEventLine::Unknown { type_name, raw }
+                        if type_name == "step_closed" && raw["step"]["key"]["ordinal"] == 0)
+                        && finishes[0] < index
+                        && index < starts[1]
+                }),
+                format!("expected first-step step_closed before second model_started; got: {got}"),
+            )?;
+            println!("{}: control step_closed(ordinal=0) delivered", spec.name);
+        }
 
         // 只核验实际 Terminal；summary 快照不能替代结束事件。
         let terminal = outcome.events.iter().position(|event| {
@@ -116,7 +120,7 @@ fn direct_turn_end_events_completed_turn_delivers_terminal_event() {
         });
         require(
             terminal.is_some_and(|index| {
-                finishes[1] < index
+                finishes.last().is_none_or(|last| *last < index)
                     && outcome
                         .events
                         .iter()
@@ -186,15 +190,6 @@ fn direct_turn_end_events_exhausted_retries_deliver_last_error_and_turn_failed()
             format!("expected durable Failed/Error summary; got: {got}"),
         )?;
         require(captures.len() == 3, "exactly three HTTP 500 requests")?;
-        require(
-            outcome
-                .events
-                .iter()
-                .filter(|event| matches!(event, TurnEventLine::ModelStarted { .. }))
-                .count()
-                == 3,
-            format!("expected exactly three model_started; got: {got}"),
-        )?;
         let errors: Vec<_> = outcome
             .events
             .iter()
@@ -207,15 +202,19 @@ fn direct_turn_end_events_exhausted_retries_deliver_last_error_and_turn_failed()
                 }
             })
             .collect();
+        // 订阅与执行并行（session.md「观察与重连」）：快照之前的尝试不重发，
+        // 收到的错误是 [true, true, false] 的非空后缀；最后一个错误必须交付。
+        let retries: Vec<_> = errors.iter().map(|(_, retry)| *retry).collect();
         require(
-            errors.iter().map(|(_, retry)| *retry).collect::<Vec<_>>() == [true, true, false],
+            !retries.is_empty() && [true, true, false].ends_with(&retries),
             format!(
-                "expected three llm_request_error with will_retry=[true, true, false] (last error must be delivered); got: {got}"
+                "expected llm_request_error will_retry to be a non-empty suffix of [true, true, false] (last error must be delivered); got: {got}"
             ),
         )?;
+        let last_error = errors.last().unwrap().0;
         require(
             outcome.events.iter().enumerate().any(|(index, event)| {
-                index > errors[2].0
+                index > last_error
                     && matches!(event, TurnEventLine::Terminal { type_name, .. } if type_name == "turn_failed")
             }),
             format!("expected turn_failed after last llm_request_error; got: {got}"),
