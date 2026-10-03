@@ -16,6 +16,7 @@ pub mod fixture_http;
 pub mod pty_tui;
 pub mod scenario;
 pub mod session_send;
+pub mod tls;
 pub mod tui_mock;
 pub mod world;
 pub use artifacts::{
@@ -43,5 +44,6 @@ pub use session_send::{
     MalformedJsonLine, SendExecution, SendExitCode, SendOutcome, SessionSendDriver, TurnEventLine,
     assert_event_subsequence, derive_send_exit_code, parse_send_stdout,
 };
+pub use tls::TlsIdentity;
 pub use tui_mock::{TuiMockError, TuiMockScenario, run_tui_mock};
 pub use world::{ScenarioWorld, WorldError};

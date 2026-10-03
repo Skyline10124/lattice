@@ -7,6 +7,8 @@
 //! status/headers/body and records each request's method and path. It binds
 //! `127.0.0.1:0`, advertises a `localhost` base URL (product net-guard rejects
 //! private IP literals), tracks handler threads, and shuts down on drop.
+//! [`FixtureHttpServer::start_tls`] 在同一服务外包一层 TLS（HTTP/1.1，与产品
+//! `fetch.web` 一致），用于验证冻结的信任根。
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -15,6 +17,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use thiserror::Error;
+use tokio_rustls::rustls;
+
+use crate::tls::TlsIdentity;
 
 /// Fixed plain-text response the fixture serves for every request.
 #[derive(Debug, Clone)]
@@ -46,11 +51,17 @@ pub enum FixtureHttpError {
 #[derive(Default)]
 struct CaptureState {
     requests: Vec<CapturedHttpRequest>,
+    /// 客户端在 TLS 握手中拒绝了服务端证书的次数。
+    rejected_handshakes: usize,
+    /// 夹具自身的首个错误（accept 或响应写出失败）。对端拒绝证书、响应写完后的 TLS 收尾
+    /// 失败都不算。
+    first_error: Option<String>,
 }
 
 /// Localhost HTTP fixture with OS-assigned port and bounded shutdown.
 pub struct FixtureHttpServer {
     listener: TcpListener,
+    tls: bool,
     captures: Arc<(Mutex<CaptureState>, Condvar)>,
     serve_handle: Option<JoinHandle<()>>,
     handlers: Arc<Mutex<Vec<JoinHandle<()>>>>,
@@ -60,22 +71,39 @@ pub struct FixtureHttpServer {
 impl FixtureHttpServer {
     /// Bind `127.0.0.1:0` and serve `fixture` for every request until drop.
     pub fn start(fixture: HttpFixture) -> Result<Self, FixtureHttpError> {
+        Self::start_inner(fixture, None)
+    }
+
+    /// 同 [`Self::start`]，但用 `identity` 的证书提供 TLS。
+    pub fn start_tls(
+        fixture: HttpFixture,
+        identity: &TlsIdentity,
+    ) -> Result<Self, FixtureHttpError> {
+        Self::start_inner(fixture, Some(identity.server_config(&[])?))
+    }
+
+    fn start_inner(
+        fixture: HttpFixture,
+        tls: Option<Arc<rustls::ServerConfig>>,
+    ) -> Result<Self, FixtureHttpError> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         listener.set_nonblocking(true)?;
         let captures = Arc::new((Mutex::new(CaptureState::default()), Condvar::new()));
         let handlers = Arc::new(Mutex::new(Vec::new()));
         let shutdown = Arc::new(Mutex::new(false));
+        let secure = tls.is_some();
         let serve_handle = {
             let listener_clone = listener.try_clone()?;
             let captures = Arc::clone(&captures);
             let handlers = Arc::clone(&handlers);
             let shutdown = Arc::clone(&shutdown);
             thread::spawn(move || {
-                serve_loop(listener_clone, fixture, captures, handlers, shutdown);
+                serve_loop(listener_clone, fixture, tls, captures, handlers, shutdown);
             })
         };
         Ok(Self {
             listener,
+            tls: secure,
             captures,
             serve_handle: Some(serve_handle),
             handlers,
@@ -86,7 +114,8 @@ impl FixtureHttpServer {
     /// Base URL using hostname `localhost` (not `127.0.0.1`) so product
     /// net-guard accepts it when `allow_localhost` + allowlist are set.
     pub fn base_url(&self) -> String {
-        format!("http://localhost:{}", self.port())
+        let scheme = if self.tls { "https" } else { "http" };
+        format!("{scheme}://localhost:{}", self.port())
     }
 
     pub fn port(&self) -> u16 {
@@ -104,6 +133,15 @@ impl FixtureHttpServer {
 
     pub fn captured_requests(&self) -> Vec<CapturedHttpRequest> {
         self.captures.0.lock().unwrap().requests.clone()
+    }
+
+    /// 夹具自身的首个错误；场景结束时断言它为空。
+    pub fn first_error(&self) -> Option<String> {
+        self.captures.0.lock().unwrap().first_error.clone()
+    }
+    /// 客户端在 TLS 握手中拒绝服务端证书的次数。
+    pub fn rejected_handshakes(&self) -> usize {
+        self.captures.0.lock().unwrap().rejected_handshakes
     }
 
     pub fn wait_for_requests(
@@ -147,6 +185,7 @@ impl Drop for FixtureHttpServer {
 fn serve_loop(
     listener: TcpListener,
     fixture: HttpFixture,
+    tls: Option<Arc<rustls::ServerConfig>>,
     captures: Arc<(Mutex<CaptureState>, Condvar)>,
     handlers: Arc<Mutex<Vec<JoinHandle<()>>>>,
     shutdown: Arc<Mutex<bool>>,
@@ -158,10 +197,12 @@ fn serve_loop(
         match listener.accept() {
             Ok((stream, _)) => {
                 let fixture = fixture.clone();
+                let tls = tls.clone();
                 let captures = Arc::clone(&captures);
                 let handle = thread::spawn(move || {
-                    if let Err(err) = handle_request(stream, &fixture, &captures) {
-                        eprintln!("fixture_http: serve error: {err}");
+                    if let Err(err) = handle_connection(stream, &fixture, tls, &captures) {
+                        let mut state = captures.0.lock().unwrap();
+                        state.first_error.get_or_insert(format!("serve: {err}"));
                     }
                 });
                 handlers.lock().unwrap().push(handle);
@@ -170,22 +211,46 @@ fn serve_loop(
                 thread::sleep(Duration::from_millis(5));
             }
             Err(err) => {
-                eprintln!("fixture_http: accept error: {err}");
+                let mut state = captures.0.lock().unwrap();
+                state.first_error.get_or_insert(format!("accept: {err}"));
                 break;
             }
         }
     }
 }
 
-fn handle_request(
+fn handle_connection(
     mut stream: TcpStream,
     fixture: &HttpFixture,
+    tls: Option<Arc<rustls::ServerConfig>>,
     captures: &(Mutex<CaptureState>, Condvar),
 ) -> Result<(), std::io::Error> {
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+    let Some(config) = tls else {
+        return handle_request(&mut stream, fixture, captures);
+    };
+    let mut connection = rustls::ServerConnection::new(config).map_err(std::io::Error::other)?;
+    while connection.is_handshaking() {
+        if connection.complete_io(&mut stream).is_err() {
+            captures.0.lock().unwrap().rejected_handshakes += 1;
+            return Ok(());
+        }
+    }
+    let mut tls = rustls::StreamOwned::new(connection, stream);
+    handle_request(&mut tls, fixture, captures)?;
+    // 响应已完整写出；客户端读完就可能关闭连接，close_notify 失败不算夹具错误。
+    tls.conn.send_close_notify();
+    let _ = tls.flush();
+    Ok(())
+}
 
+fn handle_request(
+    stream: &mut (impl Read + Write),
+    fixture: &HttpFixture,
+    captures: &(Mutex<CaptureState>, Condvar),
+) -> Result<(), std::io::Error> {
     let mut buf = [0u8; 8192];
     let n = stream.read(&mut buf)?;
     let raw = String::from_utf8_lossy(&buf[..n]);

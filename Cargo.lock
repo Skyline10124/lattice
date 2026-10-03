@@ -3163,13 +3163,18 @@ name = "lattice-system-harness"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "bytes",
  "gix",
+ "h2",
+ "http",
  "libc",
  "portable-pty",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]

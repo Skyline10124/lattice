@@ -3,39 +3,54 @@
 
 //! Localhost fake LLM for harness scenarios.
 //!
-//! A minimal HTTP/SSE server bound to a scenario-local port. The product
-//! connects through the selected provider's formal base URL and credential
-//! configuration (`OPENAI_COMPATIBLE_*`, `ANTHROPIC_BASE_URL`,
+//! The product connects through the selected provider's formal base URL and
+//! credential configuration (`OPENAI_COMPATIBLE_*`, `ANTHROPIC_BASE_URL`,
 //! `GEMINI_BASE_URL`) — there is no test-only provider, hidden flag, or
 //! product-side change. The request route selects the streaming protocol:
 //! OpenAI Chat Completions, Anthropic Messages, or Gemini
 //! `streamGenerateContent`.
 //!
+//! 传输与官方 provider 一致：TLS + HTTP/2，ALPN 只提供 `h2`，证书来自
+//! [`TlsIdentity`]，场景经 `SSL_CERT_FILE` 信任它（见 `ScenarioWorld`）。
+//! [`FakeLlmServer::start_plain_http1`] 另起明文 HTTP/1.1，只服务本地 provider
+//! （Ollama 一类）场景，只支持完整响应。
+//!
 //! The server does two things (RFC #41, Codeberg #19, decision four):
 //!
-//! 1. Captures the real Chat Completions request (model, messages, tool names)
-//!    so scenarios can assert on what the product actually sent.
-//! 2. Returns a deterministic SSE script chosen by the scenario: plain text,
-//!    tool call, mid-stream disconnect, or illegal response.
+//! 1. Captures each model request (model, messages, tool names, identifying
+//!    headers, connection) so scenarios can assert on what the product sent.
+//! 2. Answers with the script chosen by the scenario: plain text, tool calls,
+//!    HTTP errors, or a transport failure (stream cut, reset, GOAWAY, refused
+//!    stream).
 //!
-//! SSE framing is hand-written over `std::net::TcpListener`. The product's
-//! SSE framer (`crates/lattice-llm/src/sse.rs`) accepts both `\n` and `\r\n`
-//! line endings and treats `data: [DONE]\n\n` as a no-op data event, so the
-//! fake server mirrors the exact shape the real OpenAI Chat Completions
-//! stream produces: one `data: {chunk}\n\n` per chunk, terminated by
-//! `data: [DONE]\n\n`.
+//! SSE bodies mirror the real streams: one `data: {chunk}\n\n` per chunk,
+//! terminated by `data: [DONE]\n\n` in the OpenAI protocol.
 
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::future::Future;
+use std::io::Write;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::{Arc, Condvar, Mutex};
+use std::task::{Context, Poll, ready};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
+use h2::Reason;
+use h2::server::SendResponse;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
+use tokio::io::{
+    AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf,
+};
+use tokio::net::TcpStream;
+use tokio::sync::{mpsc, watch};
+use tokio_rustls::TlsAcceptor;
+
+use crate::tls::TlsIdentity;
 
 /// Default test API key. The product requires `OPENAI_COMPATIBLE_API_KEY` to
 /// be set and non-empty (`lattice-llm/src/client.rs`), and the auth header is
@@ -105,14 +120,19 @@ pub enum SseScript {
         headers: Vec<(String, String)>,
         body: String,
     },
-    /// 交付内层脚本后由服务端关闭这条连接，且不发 `Connection: close`，模拟 provider 回收空闲连接。
+    /// 交付内层脚本后发 `GOAWAY(NO_ERROR)` 优雅关闭连接，模拟 provider 回收连接。只用于 HTTP/2。
     CloseAfter { script: Box<SseScript> },
-    /// Drop the connection mid-stream after emitting `chunks_before_drop`
-    /// provider disconnect / aborted stream.
+    /// 发出 `chunks_before_drop` 后正常结束流（END_STREAM），没有终止 chunk 与 `[DONE]`：
+    /// 产品看到的是流在结束事件之前结束。只用于 HTTP/2。
     Disconnect { chunks_before_drop: Vec<String> },
-    /// 与 `Disconnect` 相同，但声明了比实际更长的 `Content-Length`：HTTP 层看到的是
-    /// 响应体读到一半连接中断，而不是正常 EOF。
+    /// 与 `Disconnect` 相同，但以 `RST_STREAM(INTERNAL_ERROR)` 结束：HTTP 层看到的是
+    /// 响应体读到一半出错，而不是正常结束。只用于 HTTP/2。
     Truncated { chunks_before_drop: Vec<String> },
+    /// 收到请求后发 `GOAWAY(NO_ERROR)` 并关闭连接，GOAWAY 的最后流号小于本请求：
+    /// 按 RFC 9113 §6.8，客户端可确知本请求未被处理。只用于 HTTP/2。
+    GoawayUnprocessed,
+    /// 以 `RST_STREAM(REFUSED_STREAM)` 拒绝本请求（RFC 9113 §8.7：未被处理）。只用于 HTTP/2。
+    RefusedStream,
     /// Return a non-SSE HTTP 200 body that is not valid JSON per the OpenAI
     /// chunk schema (e.g. a plain string), exercising the parser's error
     /// path. The body still uses `text/event-stream` so the framer runs.
@@ -279,6 +299,14 @@ impl ResponseGate {
         wake.notify_all();
         Ok(released)
     }
+
+    /// 在阻塞线程上等待 gate，不占用异步运行时的工作线程。
+    async fn pass(&self) -> Result<bool, ServeError> {
+        let gate = self.clone();
+        tokio::task::spawn_blocking(move || gate.wait())
+            .await
+            .map_err(|_| ServeError::ThreadFailure("gate wait task failed".into()))?
+    }
 }
 
 struct ServerState {
@@ -287,11 +315,14 @@ struct ServerState {
     requests: Vec<CapturedRequest>,
     shutdown_requested: bool,
     serve_exited: bool,
+    /// 在途的连接与请求处理任务数。
     active_handlers: usize,
     first_failure: Option<String>,
     expected_api_key: Option<String>,
     /// 已接受的 TCP 连接数，也是下一条连接的序号。
     connections: usize,
+    /// 客户端在 TLS 握手中拒绝了服务端证书的次数。
+    tls_rejections: usize,
     started: Instant,
 }
 
@@ -303,33 +334,79 @@ impl ServerState {
     }
 }
 
-pub struct FakeLlmServer {
-    listener: Option<TcpListener>,
-    addr: std::net::SocketAddr,
+/// 服务线程与各处理任务共享的上下文。
+struct Shared {
     state: Arc<(Mutex<ServerState>, Condvar)>,
+    gate: Option<ResponseGate>,
+    request_log: Option<PathBuf>,
+    stop: watch::Receiver<bool>,
+}
+
+impl Shared {
+    fn segmented(&self) -> bool {
+        self.gate
+            .as_ref()
+            .is_some_and(|gate| gate.segment_deadline.is_some())
+    }
+
+    /// 整份响应 gate：返回 `false` 表示 gate 已取消，不再响应。
+    async fn pass_whole_response(&self) -> Result<bool, ServeError> {
+        match &self.gate {
+            Some(gate) if !self.segmented() => gate.pass().await,
+            _ => Ok(true),
+        }
+    }
+
+    /// 分段 gate：每帧 SSE 前等待一次。
+    async fn pass_frame(&self) -> Result<bool, ServeError> {
+        match &self.gate {
+            Some(gate) if self.segmented() => gate.pass().await,
+            _ => Ok(true),
+        }
+    }
+}
+
+pub struct FakeLlmServer {
+    addr: SocketAddr,
+    plain_http1: bool,
+    state: Arc<(Mutex<ServerState>, Condvar)>,
+    stop: watch::Sender<bool>,
     serve_handle: Option<JoinHandle<()>>,
-    handlers: Arc<Mutex<Vec<JoinHandle<()>>>>,
     gate: Option<ResponseGate>,
 }
 
 impl FakeLlmServer {
-    /// Bind a new server to `127.0.0.1:0` (OS-assigned port) and start
-    /// serving `script`. The bind address is the value to put into
-    /// `OPENAI_COMPATIBLE_BASE_URL`.
-    ///
-    /// Shutdown wakes the blocking listener with one loopback connection;
-    /// request, gate, and thread completion waits all have explicit bounds.
+    /// Bind a new TLS + HTTP/2 server to `127.0.0.1:0` (OS-assigned port) and
+    /// start serving `script` with the shared harness [`TlsIdentity`].
     pub fn start(script: SseScript) -> Result<Self, ServeError> {
-        Self::start_inner(script, None, None)
+        Self::start_inner(script, None, None, Some(TlsIdentity::shared()?))
+    }
+
+    /// 明文 HTTP/1.1，只用于本地 provider 场景；只支持完整的流式响应与 HTTP 错误响应。
+    pub fn start_plain_http1(script: SseScript) -> Result<Self, ServeError> {
+        Self::start_inner(script, None, None, None)
     }
 
     /// Start with a crash-surviving append-only request counter.
     pub fn start_logged(script: SseScript, path: &Path) -> Result<Self, ServeError> {
-        Self::start_inner(script, None, Some(Arc::new(path.to_path_buf())))
+        Self::start_inner(
+            script,
+            None,
+            Some(path.to_path_buf()),
+            Some(TlsIdentity::shared()?),
+        )
     }
 
     pub fn start_gated(script: SseScript) -> Result<(Self, ResponseGate), ServeError> {
-        Self::start_controlled(script, None)
+        Self::start_controlled(script, None, TlsIdentity::shared()?)
+    }
+
+    /// 用指定的 TLS 身份启动带 gate 的服务端，供需要不同信任根的场景使用。
+    pub fn start_gated_with(
+        script: SseScript,
+        identity: &TlsIdentity,
+    ) -> Result<(Self, ResponseGate), ServeError> {
+        Self::start_controlled(script, None, identity)
     }
 
     /// 每帧 SSE 单独放行；全部交付受同一绝对期限约束，shutdown/Drop 仍取消 gate。
@@ -337,28 +414,39 @@ impl FakeLlmServer {
         script: SseScript,
         timeout: Duration,
     ) -> Result<(Self, ResponseGate), ServeError> {
-        Self::start_controlled(script, Some(Instant::now() + timeout))
+        Self::start_controlled(
+            script,
+            Some(Instant::now() + timeout),
+            TlsIdentity::shared()?,
+        )
     }
 
     fn start_controlled(
         script: SseScript,
         segment_deadline: Option<Instant>,
+        identity: &TlsIdentity,
     ) -> Result<(Self, ResponseGate), ServeError> {
         let gate = ResponseGate {
             state: Arc::new((Mutex::new(GateState::default()), Condvar::new())),
             segment_deadline,
         };
-        let server = Self::start_inner(script, Some(gate.clone()), None)?;
+        let server = Self::start_inner(script, Some(gate.clone()), None, Some(identity))?;
         Ok((server, gate))
     }
 
     fn start_inner(
         script: SseScript,
         gate: Option<ResponseGate>,
-        request_log: Option<Arc<PathBuf>>,
+        request_log: Option<PathBuf>,
+        identity: Option<&TlsIdentity>,
     ) -> Result<Self, ServeError> {
-        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        listener.set_nonblocking(true)?;
         let addr = listener.local_addr()?;
+        let acceptor = identity
+            .map(|identity| identity.server_config(&[b"h2"]))
+            .transpose()?
+            .map(TlsAcceptor::from);
         let state = Arc::new((
             Mutex::new(ServerState {
                 script,
@@ -370,52 +458,54 @@ impl FakeLlmServer {
                 first_failure: None,
                 expected_api_key: None,
                 connections: 0,
+                tls_rejections: 0,
                 started: Instant::now(),
             }),
             Condvar::new(),
         ));
-        let handlers = Arc::new(Mutex::new(Vec::new()));
-        let handle = {
-            let listener_clone = listener.try_clone()?;
-            let thread_state = Arc::clone(&state);
-            let handlers = Arc::clone(&handlers);
-            let handler_gate = gate.clone();
-            let request_log_for_thread = request_log.clone();
-            thread::Builder::new()
-                .name("fake-llm-server".into())
-                .spawn(move || {
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        serve_loop(
-                            listener_clone,
-                            Arc::clone(&thread_state),
-                            handlers,
-                            handler_gate,
-                            request_log_for_thread,
-                        )
-                    }));
-                    let (lock, wake) = &*thread_state;
-                    let mut state = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                    if result.is_err() {
-                        state.record_failure("serve thread panicked");
-                    }
-                    state.serve_exited = true;
-                    wake.notify_all();
-                })?
-        };
+        let (stop, stop_rx) = watch::channel(false);
+        let shared = Arc::new(Shared {
+            state: Arc::clone(&state),
+            gate: gate.clone(),
+            request_log,
+            stop: stop_rx,
+        });
+        let handle = thread::Builder::new()
+            .name("fake-llm-server".into())
+            .spawn(move || {
+                let thread_state = Arc::clone(&shared.state);
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_server(listener, acceptor, shared)
+                }));
+                let (lock, wake) = &*thread_state;
+                let mut state = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => state.record_failure(error.to_string()),
+                    Err(_) => state.record_failure("serve thread panicked"),
+                }
+                state.serve_exited = true;
+                wake.notify_all();
+            })?;
         Ok(Self {
-            listener: Some(listener),
             addr,
+            plain_http1: identity.is_none(),
             state,
+            stop,
             serve_handle: Some(handle),
-            handlers,
             gate,
         })
     }
 
-    /// The base URL the product should connect to
-    /// (`OPENAI_COMPATIBLE_BASE_URL`), without a trailing slash.
+    /// The base URL the product should connect to, without a trailing slash.
+    /// HTTP/2 用 `https://127.0.0.1`（证书含该 IP）；明文 HTTP/1.1 用本地 provider
+    /// 常见的 `http://localhost`。
     pub fn base_url(&self) -> String {
-        format!("http://127.0.0.1:{}", self.local_addr().port())
+        if self.plain_http1 {
+            format!("http://localhost:{}", self.addr.port())
+        } else {
+            format!("https://127.0.0.1:{}", self.addr.port())
+        }
     }
 
     /// 仅在首个请求前设置测试凭据；只比较内存字节，不写 capture 或错误正文。
@@ -428,6 +518,11 @@ impl FakeLlmServer {
     /// A snapshot of every request captured so far, in arrival order.
     pub fn captured_requests(&self) -> Vec<CapturedRequest> {
         self.state.0.lock().unwrap().requests.clone()
+    }
+
+    /// 客户端在 TLS 握手中拒绝服务端证书的次数。
+    pub fn rejected_handshakes(&self) -> usize {
+        self.state.0.lock().unwrap().tls_rejections
     }
 
     pub fn wait_for_requests(&self, count: usize, timeout: Duration) -> Result<(), ServeError> {
@@ -456,8 +551,10 @@ impl FakeLlmServer {
         Ok(())
     }
 
+    /// 发出停止信号并有界等待服务线程收尾。超时返回错误但保留线程句柄，
+    /// 再次调用（或 Drop）会继续等待，直到线程真正 join。
     pub fn shutdown(&mut self, timeout: Duration) -> Result<(), ServeError> {
-        if self.listener.is_none() {
+        if self.serve_handle.is_none() {
             return match self.state.0.lock().unwrap().first_failure.clone() {
                 Some(failure) => Err(ServeError::ThreadFailure(failure)),
                 None => Ok(()),
@@ -472,9 +569,7 @@ impl FakeLlmServer {
         if let Some(gate) = &self.gate {
             gate.cancel();
         }
-        if !timeout.is_zero() {
-            let _ = TcpStream::connect_timeout(&self.addr, timeout.min(Duration::from_millis(100)));
-        }
+        let _ = self.stop.send(true);
 
         {
             let (lock, wake) = &*self.state;
@@ -501,23 +596,14 @@ impl FakeLlmServer {
                 .unwrap()
                 .record_failure("serve thread join failed");
         }
-        for handle in self.handlers.lock().unwrap().drain(..) {
-            if handle.join().is_err() {
-                self.state
-                    .0
-                    .lock()
-                    .unwrap()
-                    .record_failure("handler thread join failed");
-            }
-        }
-        self.listener.take();
         match self.state.0.lock().unwrap().first_failure.clone() {
             Some(failure) => Err(ServeError::ThreadFailure(failure)),
             None => Ok(()),
         }
     }
 
-    fn local_addr(&self) -> std::net::SocketAddr {
+    #[cfg(test)]
+    fn local_addr(&self) -> SocketAddr {
         self.addr
     }
 }
@@ -530,75 +616,102 @@ impl Drop for FakeLlmServer {
     }
 }
 
-fn serve_loop(
-    listener: TcpListener,
-    state: Arc<(Mutex<ServerState>, Condvar)>,
-    handlers: Arc<Mutex<Vec<JoinHandle<()>>>>,
-    gate: Option<ResponseGate>,
-    request_log: Option<Arc<PathBuf>>,
-) {
+/// 服务线程：在自己的运行时里接受连接，关停后等在途任务收尾。
+fn run_server(
+    listener: std::net::TcpListener,
+    acceptor: Option<TlsAcceptor>,
+    shared: Arc<Shared>,
+) -> Result<(), ServeError> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(accept_loop(listener, acceptor, Arc::clone(&shared)));
+    // 被 gate 卡住的任务已由 shutdown 取消 gate 放行，其余任务观察到 stop 后退出。
+    let (lock, wake) = &*shared.state;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut state = lock.lock().unwrap();
+    while state.active_handlers != 0 && Instant::now() < deadline {
+        state = wake
+            .wait_timeout(state, deadline.saturating_duration_since(Instant::now()))
+            .unwrap()
+            .0;
+    }
+    drop(state);
+    runtime.shutdown_timeout(Duration::from_secs(1));
+    let mut state = lock.lock().unwrap();
+    if state.active_handlers != 0 {
+        state.record_failure("handler task did not finish before shutdown");
+        state.active_handlers = 0;
+    }
+    result
+}
+
+async fn accept_loop(
+    listener: std::net::TcpListener,
+    acceptor: Option<TlsAcceptor>,
+    shared: Arc<Shared>,
+) -> Result<(), ServeError> {
+    let listener = tokio::net::TcpListener::from_std(listener)?;
+    let mut stop = shared.stop.clone();
     loop {
-        match listener.accept() {
-            Ok((stream, _)) => {
-                let connection = {
-                    let (lock, _) = &*state;
-                    let mut server = lock.lock().unwrap();
-                    if server.shutdown_requested {
-                        break;
-                    }
-                    server.active_handlers += 1;
-                    server.connections += 1;
-                    server.connections - 1
-                };
-                let handler_state = Arc::clone(&state);
-                let gate = gate.clone();
-                let request_log = request_log.clone();
-                let spawn = thread::Builder::new()
-                    .name("fake-llm-handler".into())
-                    .spawn(move || {
-                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            handle_connection(
-                                stream,
-                                connection,
-                                &handler_state,
-                                gate.as_ref(),
-                                request_log.as_deref().map(PathBuf::as_path),
-                            )
-                        }));
-                        let (lock, wake) = &*handler_state;
-                        let mut server =
-                            lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                        match result {
-                            Ok(Ok(())) => {}
-                            Ok(Err(error)) => server.record_failure(error.to_string()),
-                            Err(_) => server.record_failure("handler thread panicked"),
-                        }
-                        server.active_handlers -= 1;
-                        wake.notify_all();
-                    });
-                match spawn {
-                    Ok(handle) => handlers.lock().unwrap().push(handle),
-                    Err(error) => {
-                        let (lock, wake) = &*state;
-                        let mut server = lock.lock().unwrap();
-                        server.active_handlers -= 1;
-                        server.record_failure(format!("failed to spawn handler thread: {error}"));
-                        wake.notify_all();
-                    }
-                }
+        let tcp = tokio::select! {
+            accepted = listener.accept() => accepted?.0,
+            _ = stopped(&mut stop) => return Ok(()),
+        };
+        let connection = {
+            let mut state = shared.state.0.lock().unwrap();
+            if state.shutdown_requested {
+                return Ok(());
             }
-            Err(error) => {
-                let (lock, wake) = &*state;
-                lock.lock()
-                    .unwrap()
-                    .record_failure(format!("accept failed: {error}"));
-                wake.notify_all();
-                break;
-            }
+            state.connections += 1;
+            state.connections - 1
+        };
+        match &acceptor {
+            Some(acceptor) => spawn_tracked(
+                &shared,
+                serve_h2(tcp, acceptor.clone(), connection, Arc::clone(&shared)),
+            ),
+            None => spawn_tracked(&shared, serve_h1(tcp, connection, Arc::clone(&shared))),
         }
     }
 }
 
+/// 计入在途任务；任务失败或 panic 记为夹具失败。shutdown 发出停止信号时中止任务，
+/// 所以 TLS 握手、读请求等对端驱动的等待都不会拖住关停。
+fn spawn_tracked<F>(shared: &Arc<Shared>, task: F)
+where
+    F: Future<Output = Result<(), ServeError>> + Send + 'static,
+{
+    shared.state.0.lock().unwrap().active_handlers += 1;
+    let shared = Arc::clone(shared);
+    tokio::spawn(async move {
+        let mut stop = shared.stop.clone();
+        let mut handle = tokio::spawn(task);
+        let outcome = tokio::select! {
+            outcome = &mut handle => outcome,
+            _ = stopped(&mut stop) => {
+                handle.abort();
+                handle.await
+            }
+        };
+        let (lock, wake) = &*shared.state;
+        let mut state = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        match outcome {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => state.record_failure(error.to_string()),
+            Err(error) if error.is_panic() => state.record_failure("handler task panicked"),
+            Err(_) => {}
+        }
+        state.active_handlers -= 1;
+        wake.notify_all();
+    });
+}
+
+/// 等到 shutdown 发出停止信号。包一层是为了不把 watch 的读锁守卫留在 `select!` 的输出里。
+async fn stopped(stop: &mut watch::Receiver<bool>) {
+    let _ = stop.wait_for(|stop| *stop).await;
+}
 fn append_fsynced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -607,27 +720,6 @@ fn append_fsynced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     file.write_all(bytes)?;
     file.sync_all()?;
     Ok(())
-}
-
-fn write_http_response(
-    stream: &mut TcpStream,
-    status: &str,
-    content_type: &str,
-    headers: &[(String, String)],
-    body: &[u8],
-) -> std::io::Result<()> {
-    let extra: String = headers
-        .iter()
-        .map(|(name, value)| format!("{name}: {value}\r\n"))
-        .collect();
-    write!(
-        stream,
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{extra}Connection: close\r\n\r\n",
-        body.len()
-    )?;
-    stream.write_all(body)?;
-    stream.flush()?;
-    stream.shutdown(Shutdown::Write)
 }
 
 /// One request from the product under test. The product is the fake provider's
@@ -640,54 +732,34 @@ struct HttpRequest {
     credentials: Vec<(String, String)>,
     /// [`CapturedRequest::headers`] 收录的请求头。
     headers: BTreeMap<String, String>,
-    /// 客户端发了 `Connection: close`：响应后结束连接。
-    close: bool,
     body: String,
 }
 
-/// `Ok(None)` when the peer closed before sending a request line.
-fn read_http_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequest>> {
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    if reader.read_line(&mut line)? == 0 {
-        return Ok(None);
-    }
-    let mut parts = line.split_whitespace();
-    let method = parts.next().unwrap_or_default().to_string();
-    let path = parts.next().unwrap_or_default().to_string();
-    let (mut length, mut credentials, mut headers) = (0, Vec::new(), BTreeMap::new());
-    let mut close = false;
-    loop {
-        line.clear();
-        if reader.read_line(&mut line)? == 0 || line.trim().is_empty() {
-            break;
-        }
-        if let Some((name, value)) = line.split_once(':') {
-            let value = value.trim();
-            let name = name.to_ascii_lowercase();
+impl HttpRequest {
+    fn new(
+        method: &str,
+        path: String,
+        header_pairs: impl IntoIterator<Item = (String, String)>,
+        body: &[u8],
+    ) -> Self {
+        let (mut credentials, mut headers) = (Vec::new(), BTreeMap::new());
+        for (name, value) in header_pairs {
             match name.as_str() {
-                "content-length" => length = value.parse().unwrap_or(0),
-                "authorization" | "x-api-key" | "x-goog-api-key" => {
-                    credentials.push((name, value.to_string()))
-                }
-                "connection" => close = value.eq_ignore_ascii_case("close"),
+                "authorization" | "x-api-key" | "x-goog-api-key" => credentials.push((name, value)),
                 "user-agent" | "accept" | "x-client-request-id" => {
-                    headers.insert(name, value.to_string());
+                    headers.insert(name, value);
                 }
                 _ => {}
             }
         }
+        Self {
+            method: method.to_string(),
+            path,
+            credentials,
+            headers,
+            body: String::from_utf8_lossy(body).into_owned(),
+        }
     }
-    let mut body = vec![0; length];
-    reader.read_exact(&mut body)?;
-    Ok(Some(HttpRequest {
-        method,
-        path,
-        credentials,
-        headers,
-        close,
-        body: String::from_utf8_lossy(&body).into_owned(),
-    }))
 }
 
 /// Streaming protocol of one model request, chosen by its route.
@@ -739,133 +811,88 @@ impl Protocol {
     }
 }
 
-/// 同一条连接上依次处理请求。完整的成功流式响应带 `Content-Length` 且不关闭连接，
-/// 产品可以像对待真实 provider 一样复用；错误响应、断流和 `CloseAfter` 都结束连接。
-fn handle_connection(
-    mut stream: TcpStream,
-    connection: usize,
-    shared: &(Mutex<ServerState>, Condvar),
-    gate: Option<&ResponseGate>,
-    request_log: Option<&Path>,
-) -> Result<(), ServeError> {
-    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
-    let mut first = true;
-    loop {
-        if !first && !wait_for_next_request(&stream, shared)? {
-            return Ok(());
-        }
-        first = false;
-        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-        if !handle_request(&mut stream, connection, shared, gate, request_log)? {
-            return Ok(());
+/// 对一条请求的回应，与传输无关。
+enum Reply {
+    Status {
+        status: u16,
+        content_type: String,
+        headers: Vec<(String, String)>,
+        body: String,
+    },
+    Sse {
+        frames: Vec<String>,
+        end: SseEnd,
+    },
+    GoawayUnprocessed,
+    RefusedStream,
+}
+
+/// SSE 帧发完之后怎样结束。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SseEnd {
+    /// 正常结束流。
+    Complete,
+    /// 正常结束流，再优雅关闭连接。
+    CompleteThenClose,
+    /// 正常结束流，但帧里没有结束事件。
+    CleanEof,
+    /// 以 `RST_STREAM(INTERNAL_ERROR)` 结束。
+    Reset,
+}
+
+impl Reply {
+    fn text(status: u16, body: &str) -> Self {
+        Reply::Status {
+            status,
+            content_type: "text/plain".into(),
+            headers: Vec::new(),
+            body: body.into(),
         }
     }
 }
 
-/// 空闲连接上等待下一条请求；对端关闭、服务关停或空闲超过 5 秒时安静地结束连接。
-fn wait_for_next_request(
-    stream: &TcpStream,
-    shared: &(Mutex<ServerState>, Condvar),
-) -> Result<bool, ServeError> {
-    const IDLE_LIMIT: Duration = Duration::from_secs(5);
-    stream.set_read_timeout(Some(Duration::from_millis(100)))?;
-    let idle_since = Instant::now();
-    loop {
-        match stream.peek(&mut [0u8; 1]) {
-            Ok(0) => return Ok(false),
-            Ok(_) => return Ok(true),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) =>
-            {
-                if shared.0.lock().unwrap().shutdown_requested || idle_since.elapsed() >= IDLE_LIMIT
-                {
-                    return Ok(false);
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => return Ok(false),
-            Err(error) => return Err(error.into()),
-        }
-    }
-}
-
-/// 处理一条请求；返回这条连接能否继续承载下一条请求。
-fn handle_request(
-    stream: &mut TcpStream,
+/// 路由、核对凭据、登记 capture 并按脚本决定回应。第二项是回应之后要报告的夹具失败。
+/// 会写请求日志并 fsync，调用方放在阻塞线程上执行。
+fn decide(
+    shared: &Shared,
+    request: HttpRequest,
     connection: usize,
-    shared: &(Mutex<ServerState>, Condvar),
-    gate: Option<&ResponseGate>,
-    request_log: Option<&Path>,
-) -> Result<bool, ServeError> {
-    let expected = shared.0.lock().unwrap().expected_api_key.clone();
-    let Some(request) = read_http_request(stream)? else {
-        return Ok(false);
-    };
+) -> Result<(Reply, Option<ServeError>), ServeError> {
     let Some((protocol, path_model)) = Protocol::route(&request.method, &request.path) else {
-        write_http_response(
-            stream,
-            "404 Not Found",
-            "text/plain",
-            &[],
-            b"not a model request\n",
-        )?;
-        return Err(ServeError::UnexpectedRequest(format!(
-            "{} {}",
-            request.method, request.path
-        )));
+        let failure = ServeError::UnexpectedRequest(format!("{} {}", request.method, request.path));
+        return Ok((Reply::text(404, "not a model request\n"), Some(failure)));
     };
+    let expected = shared.state.0.lock().unwrap().expected_api_key.clone();
     if expected
         .as_deref()
         .is_some_and(|expected| protocol.api_key(&request) != Some(expected))
     {
-        write_http_response(
-            stream,
-            "401 Unauthorized",
-            "text/plain",
-            &[],
-            b"unauthorized\n",
-        )?;
-        return Ok(false);
+        return Ok((Reply::text(401, "unauthorized\n"), None));
     }
     let mut captured = parse_request_body(protocol, path_model, &request.body);
     captured.headers = request.headers;
-    let client_close = request.close;
     captured.connection = connection;
     // Script assignment and capture publication are one transaction. Capture
     // order is therefore the same order used to advance a Sequence, even if
     // gated handlers resume in a different order.
     let active = {
-        let (lock, wake) = shared;
+        let (lock, wake) = &*shared.state;
         let mut state = lock.lock().unwrap();
         let (active, advance_sequence) = match &state.script {
+            SseScript::Sequence { scripts } | SseScript::Cycle { scripts }
+                if scripts.is_empty() =>
+            {
+                (
+                    SseScript::IllegalResponse {
+                        body: "fake_llm: empty Sequence/Cycle script".into(),
+                    },
+                    false,
+                )
+            }
             SseScript::Sequence { scripts } => {
-                if scripts.is_empty() {
-                    (
-                        SseScript::IllegalResponse {
-                            body: "fake_llm: empty Sequence script".into(),
-                        },
-                        false,
-                    )
-                } else {
-                    let idx = state.next.min(scripts.len() - 1);
-                    (scripts[idx].clone(), true)
-                }
+                (scripts[state.next.min(scripts.len() - 1)].clone(), true)
             }
-            SseScript::Cycle { scripts } => {
-                if scripts.is_empty() {
-                    (
-                        SseScript::IllegalResponse {
-                            body: "fake_llm: empty Cycle script".into(),
-                        },
-                        false,
-                    )
-                } else {
-                    let idx = state.next % scripts.len();
-                    (scripts[idx].clone(), true)
-                }
-            }
+            SseScript::Cycle { scripts } => (scripts[state.next % scripts.len()].clone(), true),
             other => (other.clone(), false),
         };
         state.next += usize::from(advance_sequence);
@@ -874,126 +901,446 @@ fn handle_request(
         wake.notify_all();
         active
     };
-    if let Some(path) = request_log {
+    if let Some(path) = &shared.request_log {
         append_fsynced(path, b"request\n")?;
     }
-    let (active, close_after) = match active {
-        SseScript::CloseAfter { script } => (*script, true),
-        other => (other, false),
+    let (active, end) = match active {
+        SseScript::CloseAfter { script } => (*script, Some(SseEnd::CompleteThenClose)),
+        SseScript::Truncated { chunks_before_drop } => (
+            SseScript::Disconnect { chunks_before_drop },
+            Some(SseEnd::Reset),
+        ),
+        other => (other, None),
     };
-    let (active, truncate) = match active {
-        SseScript::Truncated { chunks_before_drop } => {
-            (SseScript::Disconnect { chunks_before_drop }, true)
-        }
-        other => (other, false),
-    };
-    let segmented = gate.is_some_and(|gate| gate.segment_deadline.is_some());
-    if !segmented
-        && let Some(gate) = gate
-        && !gate.wait()?
-    {
-        return Ok(false);
-    }
-    // HttpError short-circuits with a non-SSE HTTP error response.
-    match &active {
-        SseScript::HttpError { status, body } => {
-            write_http_response(
-                stream,
-                &format!("{status} Error"),
-                "application/json",
-                &[],
-                body.as_bytes(),
-            )?;
-            return Ok(false);
-        }
+    let reply = match active {
+        SseScript::HttpError { status, body } => Reply::Status {
+            status,
+            content_type: "application/json".into(),
+            headers: Vec::new(),
+            body,
+        },
         SseScript::HttpResponse {
             status,
             content_type,
             headers,
             body,
+        } => Reply::Status {
+            status,
+            content_type,
+            headers,
+            body,
+        },
+        SseScript::GoawayUnprocessed => Reply::GoawayUnprocessed,
+        SseScript::RefusedStream => Reply::RefusedStream,
+        script => {
+            let Some(sse) = render(protocol, &script) else {
+                let failure = ServeError::UnsupportedScript(protocol.name());
+                return Ok((
+                    Reply::text(500, "script not supported for this protocol\n"),
+                    Some(failure),
+                ));
+            };
+            let end = end.unwrap_or(if matches!(script, SseScript::Disconnect { .. }) {
+                SseEnd::CleanEof
+            } else {
+                SseEnd::Complete
+            });
+            Reply::Sse {
+                frames: sse.split_inclusive("\n\n").map(str::to_owned).collect(),
+                end,
+            }
+        }
+    };
+    Ok((reply, None))
+}
+
+async fn decide_blocking(
+    shared: &Arc<Shared>,
+    request: HttpRequest,
+    connection: usize,
+) -> Result<(Reply, Option<ServeError>), ServeError> {
+    let shared = Arc::clone(shared);
+    tokio::task::spawn_blocking(move || decide(&shared, request, connection))
+        .await
+        .map_err(|_| ServeError::ThreadFailure("request decision task failed".into()))?
+}
+
+/// h2 连接任务交给连接循环执行的动作；只有连接循环在驱动连接，帧的顺序由它保证。
+enum Control {
+    /// 发 `GOAWAY(NO_ERROR)` 优雅关闭。
+    Graceful,
+    /// 先把已排队的帧交给传输，再以 `RST_STREAM(INTERNAL_ERROR)` 重置该流。h2 的重置会
+    /// 丢弃该流尚未编码的 HEADERS/DATA，直接重置就可能让客户端只看到请求被重置。
+    ResetAfterFlush(h2::SendStream<Bytes>),
+    /// 在 h2 库发出任何别的帧之前，插入最后流号小于该请求的 GOAWAY，然后断开连接。
+    GoawayUnprocessed {
+        last_stream_id: u32,
+        respond: SendResponse<Bytes>,
+    },
+}
+
+async fn serve_h2(
+    tcp: TcpStream,
+    acceptor: TlsAcceptor,
+    connection: usize,
+    shared: Arc<Shared>,
+) -> Result<(), ServeError> {
+    let Ok(tls) = acceptor.accept(tcp).await else {
+        shared.state.0.lock().unwrap().tls_rejections += 1;
+        return Ok(());
+    };
+    if tls.get_ref().1.alpn_protocol() != Some(b"h2") {
+        return Err(ServeError::ThreadFailure(
+            "client did not negotiate h2 over ALPN".into(),
+        ));
+    }
+    let tap = Tap::new(tls);
+    // 产品关闭连接、重置或握手中途放弃都是对端行为，不是夹具失败。
+    let Ok(mut h2) = h2::server::handshake(tap.clone()).await else {
+        return Ok(());
+    };
+    let (control, mut controls) = mpsc::unbounded_channel();
+    let spawn_request = |next: Option<Result<_, h2::Error>>| match next {
+        Some(Ok((request, respond))) => {
+            spawn_tracked(
+                &shared,
+                h2_request(
+                    request,
+                    respond,
+                    connection,
+                    Arc::clone(&shared),
+                    control.clone(),
+                ),
+            );
+            true
+        }
+        Some(Err(_)) | None => false,
+    };
+    loop {
+        tokio::select! {
+            next = h2.accept() => if !spawn_request(next) {
+                return Ok(());
+            },
+            Some(action) = controls.recv() => match action {
+                Control::Graceful => h2.graceful_shutdown(),
+                Control::ResetAfterFlush(mut send) => {
+                    // 只有本任务驱动连接：轮询一次，让 h2 把该流已排队的帧编码进传输
+                    // （`Tap` 总是整块接收），之后的重置只能作用于流本身。
+                    let next = std::future::poll_fn(|cx| match h2.poll_accept(cx) {
+                        Poll::Pending => Poll::Ready(None),
+                        Poll::Ready(next) => Poll::Ready(Some(next)),
+                    })
+                    .await;
+                    send.send_reset(Reason::INTERNAL_ERROR);
+                    if let Some(next) = next
+                        && !spawn_request(next)
+                    {
+                        return Ok(());
+                    }
+                }
+                Control::GoawayUnprocessed { last_stream_id, respond } => {
+                    tap.inject(&goaway_frame(last_stream_id)).await?;
+                    drop(h2);
+                    drop(respond);
+                    return Ok(());
+                }
+            },
+        }
+    }
+}
+
+/// `GOAWAY(last_stream_id, NO_ERROR)`，RFC 9113 §6.8。
+fn goaway_frame(last_stream_id: u32) -> [u8; 17] {
+    let mut frame = [0u8; 17];
+    frame[2] = 8; // 负载长度
+    frame[3] = 0x7; // GOAWAY
+    frame[9..13].copy_from_slice(&(last_stream_id & 0x7fff_ffff).to_be_bytes());
+    frame
+}
+
+async fn h2_request(
+    request: http::Request<h2::RecvStream>,
+    mut respond: SendResponse<Bytes>,
+    connection: usize,
+    shared: Arc<Shared>,
+    control: mpsc::UnboundedSender<Control>,
+) -> Result<(), ServeError> {
+    let (parts, mut body) = request.into_parts();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = body.data().await {
+        let Ok(chunk) = chunk else {
+            return Ok(());
+        };
+        let _ = body.flow_control().release_capacity(chunk.len());
+        bytes.extend_from_slice(&chunk);
+    }
+    let path = parts
+        .uri
+        .path_and_query()
+        .map_or("/", |path| path.as_str())
+        .to_string();
+    let headers = parts.headers.iter().filter_map(|(name, value)| {
+        Some((name.as_str().to_string(), value.to_str().ok()?.to_string()))
+    });
+    let request = HttpRequest::new(parts.method.as_str(), path, headers, &bytes);
+    let (reply, failure) = match decide_blocking(&shared, request, connection).await {
+        Ok(decision) => decision,
+        Err(error) => {
+            respond.send_reset(Reason::INTERNAL_ERROR);
+            return Err(error);
+        }
+    };
+    if !shared.pass_whole_response().await? {
+        respond.send_reset(Reason::CANCEL);
+        return Ok(());
+    }
+    // 发送失败都来自对端已放弃本流或连接，不是夹具失败。
+    match reply {
+        Reply::Status {
+            status,
+            content_type,
+            headers,
+            body,
         } => {
-            write_http_response(
-                stream,
-                &format!("{status} Error"),
+            let mut response = http::Response::builder()
+                .status(status)
+                .header("content-type", content_type);
+            for (name, value) in headers {
+                response = response.header(name, value);
+            }
+            let response = response.body(()).expect("valid fixture response");
+            if let Ok(mut send) = respond.send_response(response, body.is_empty())
+                && !body.is_empty()
+            {
+                let _ = send.send_data(Bytes::from(body), true);
+            }
+        }
+        Reply::Sse { frames, end } => {
+            let response = http::Response::builder()
+                .status(200)
+                .header("content-type", "text/event-stream")
+                .header("cache-control", "no-cache")
+                .body(())
+                .expect("valid fixture response");
+            let Ok(mut send) = respond.send_response(response, false) else {
+                return Ok(());
+            };
+            for frame in frames {
+                if !shared.pass_frame().await? {
+                    send.send_reset(Reason::CANCEL);
+                    return Ok(());
+                }
+                if send.send_data(Bytes::from(frame), false).is_err() {
+                    return Ok(());
+                }
+            }
+            match end {
+                SseEnd::Complete | SseEnd::CleanEof => {
+                    let _ = send.send_data(Bytes::new(), true);
+                }
+                SseEnd::CompleteThenClose => {
+                    let _ = send.send_data(Bytes::new(), true);
+                    let _ = control.send(Control::Graceful);
+                }
+                SseEnd::Reset => {
+                    let _ = control.send(Control::ResetAfterFlush(send));
+                }
+            }
+        }
+        Reply::GoawayUnprocessed => {
+            let last_stream_id = u32::from(respond.stream_id()).saturating_sub(2);
+            let _ = control.send(Control::GoawayUnprocessed {
+                last_stream_id,
+                respond,
+            });
+        }
+        Reply::RefusedStream => respond.send_reset(Reason::REFUSED_STREAM),
+    }
+    failure.map_or(Ok(()), Err)
+}
+
+/// h2 连接的传输。写入先进本地缓冲、flush 时才发出，所以缓冲里总是 h2 库写完的整帧；
+/// [`Tap::inject`] 借此在帧之间插入 h2 库不会发的帧（最后流号小于在途请求的 GOAWAY）。
+#[derive(Clone)]
+struct Tap(Arc<Mutex<TapInner>>);
+
+struct TapInner {
+    io: tokio_rustls::server::TlsStream<TcpStream>,
+    pending: Vec<u8>,
+}
+
+impl Tap {
+    fn new(io: tokio_rustls::server::TlsStream<TcpStream>) -> Self {
+        Self(Arc::new(Mutex::new(TapInner {
+            io,
+            pending: Vec::new(),
+        })))
+    }
+
+    /// 只能由驱动 h2 连接的任务调用，此时 h2 库不在写帧。
+    async fn inject(&self, frame: &[u8]) -> std::io::Result<()> {
+        self.0.lock().unwrap().pending.extend_from_slice(frame);
+        self.clone().flush().await
+    }
+}
+
+impl AsyncRead for Tap {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.0.lock().unwrap().io).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for Tap {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        self.0.lock().unwrap().pending.extend_from_slice(buf);
+        Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let mut guard = self.0.lock().unwrap();
+        let inner = &mut *guard;
+        while !inner.pending.is_empty() {
+            let written = ready!(Pin::new(&mut inner.io).poll_write(cx, &inner.pending))?;
+            if written == 0 {
+                return Poll::Ready(Err(std::io::ErrorKind::WriteZero.into()));
+            }
+            inner.pending.drain(..written);
+        }
+        Pin::new(&mut inner.io).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        ready!(self.as_mut().poll_flush(cx))?;
+        Pin::new(&mut self.0.lock().unwrap().io).poll_shutdown(cx)
+    }
+}
+
+/// 明文 HTTP/1.1：同一条连接上依次处理请求，完整响应后保持连接供产品复用。
+async fn serve_h1(
+    tcp: TcpStream,
+    connection: usize,
+    shared: Arc<Shared>,
+) -> Result<(), ServeError> {
+    const IDLE_LIMIT: Duration = Duration::from_secs(5);
+    let mut stream = BufReader::new(tcp);
+    loop {
+        // 等下一条请求；对端关闭、服务关停或空闲过久时安静地结束连接。
+        tokio::select! {
+            ready = stream.fill_buf() => match ready {
+                Ok(buffer) if !buffer.is_empty() => {}
+                _ => return Ok(()),
+            },
+            _ = tokio::time::sleep(IDLE_LIMIT) => return Ok(()),
+        }
+        let Some((request, client_close)) = read_h1_request(&mut stream).await? else {
+            return Ok(());
+        };
+        let (reply, failure) = decide_blocking(&shared, request, connection).await?;
+        if !shared.pass_whole_response().await? {
+            return Ok(());
+        }
+        let keep = match reply {
+            Reply::Status {
+                status,
                 content_type,
                 headers,
-                body.as_bytes(),
-            )?;
-            return Ok(false);
-        }
-        _ => {}
-    }
-    let Some(sse) = render(protocol, &active) else {
-        write_http_response(
-            stream,
-            "500 Internal Server Error",
-            "text/plain",
-            &[],
-            b"script not supported for this protocol\n",
-        )?;
-        return Err(ServeError::UnsupportedScript(protocol.name()));
-    };
-    if matches!(active, SseScript::Disconnect { .. }) {
-        // 写完半截后断开：产品只能看到流在结束事件之前中断。不声明长度时是正常 EOF，
-        // `Truncated` 声明更长的长度，让 HTTP 层报告响应体读到一半中断。
-        let length = if truncate {
-            format!("Content-Length: {}\r\n", sse.len() + 64)
-        } else {
-            String::new()
+                body,
+            } => {
+                let extra: String = headers
+                    .iter()
+                    .map(|(name, value)| format!("{name}: {value}\r\n"))
+                    .collect();
+                let head = format!(
+                    "HTTP/1.1 {status} {}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{extra}\r\n",
+                    if status == 200 { "OK" } else { "Error" },
+                    body.len()
+                );
+                write_h1(&mut stream, &[head, body]).await
+            }
+            Reply::Sse {
+                frames,
+                end: SseEnd::Complete,
+            } => {
+                let length: usize = frames.iter().map(String::len).sum();
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nContent-Length: {length}\r\n\r\n"
+                );
+                if !write_h1(&mut stream, &[head]).await {
+                    return Ok(());
+                }
+                for frame in frames {
+                    if !shared.pass_frame().await? || !write_h1(&mut stream, &[frame]).await {
+                        return Ok(());
+                    }
+                }
+                true
+            }
+            _ => {
+                let head = "HTTP/1.1 500 Error\r\nContent-Length: 0\r\n\r\n".to_string();
+                write_h1(&mut stream, &[head]).await;
+                return Err(ServeError::UnsupportedScript("http/1.1"));
+            }
         };
-        write!(
-            stream,
-            "HTTP/1.1 200 OK\r\n\
-             Content-Type: text/event-stream\r\n\
-             Cache-Control: no-cache\r\n\
-             Connection: close\r\n\
-             {length}\
-             \r\n\
-             {sse}"
-        )?;
-        stream.flush()?;
-        return Ok(false);
-    }
-    if !segmented {
-        // 原整份响应路径保持一次写入；分段控制不改变其他场景的交付方式。
-        let connection = if client_close {
-            "Connection: close\r\n"
-        } else {
-            ""
-        };
-        write!(
-            stream,
-            "HTTP/1.1 200 OK\r\n\
-             Content-Type: text/event-stream\r\n\
-             Cache-Control: no-cache\r\n\
-             Content-Length: {}\r\n\
-             {connection}\
-             \r\n\
-             {sse}",
-            sse.len()
-        )?;
-        stream.flush()?;
-        return Ok(!close_after && !client_close);
-    }
-    write!(
-        stream,
-        "HTTP/1.1 200 OK\r\n\
-         Content-Type: text/event-stream\r\n\
-         Cache-Control: no-cache\r\n\
-         Content-Length: {}\r\n\
-         Connection: close\r\n\r\n",
-        sse.len()
-    )?;
-    for frame in sse.split_inclusive("\n\n") {
-        if let Some(gate) = gate
-            && !gate.wait()?
-        {
-            return Ok(false);
+        if let Some(failure) = failure {
+            return Err(failure);
         }
-        stream.write_all(frame.as_bytes())?;
-        stream.flush()?;
+        if !keep || client_close {
+            return Ok(());
+        }
     }
-    Ok(false)
+}
+
+/// 写出并 flush；失败只说明对端已关闭连接。
+async fn write_h1(stream: &mut BufReader<TcpStream>, parts: &[String]) -> bool {
+    for part in parts {
+        if stream.get_mut().write_all(part.as_bytes()).await.is_err() {
+            return false;
+        }
+    }
+    stream.get_mut().flush().await.is_ok()
+}
+
+/// 第二项表示客户端要求响应后关闭连接；`None` 表示对端在请求行之前关闭。
+async fn read_h1_request(
+    stream: &mut BufReader<TcpStream>,
+) -> Result<Option<(HttpRequest, bool)>, ServeError> {
+    let mut line = String::new();
+    if stream.read_line(&mut line).await? == 0 {
+        return Ok(None);
+    }
+    let mut parts = line.split_whitespace();
+    let method = parts.next().unwrap_or_default().to_string();
+    let path = parts.next().unwrap_or_default().to_string();
+    let (mut length, mut close, mut headers) = (0, false, Vec::new());
+    loop {
+        line.clear();
+        if stream.read_line(&mut line).await? == 0 || line.trim().is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            let (name, value) = (name.to_ascii_lowercase(), value.trim().to_string());
+            match name.as_str() {
+                "content-length" => length = value.parse().unwrap_or(0),
+                "connection" => close = value.eq_ignore_ascii_case("close"),
+                _ => {}
+            }
+            headers.push((name, value));
+        }
+    }
+    let mut body = vec![0; length];
+    stream.read_exact(&mut body).await?;
+    Ok(Some((
+        HttpRequest::new(&method, path, headers, &body),
+        close,
+    )))
 }
 
 /// Decode a model request body into a [`CapturedRequest`]. A malformed body
@@ -1373,7 +1720,7 @@ fn render_script(script: &SseScript) -> String {
                 });
                 push_data(&mut out, &chunk);
             }
-            // No terminal chunk, no [DONE] — the connection is simply closed
+            // No terminal chunk, no [DONE] — the stream simply ends
             // after the in-flight chunks. The product should treat this as a
             // truncated stream.
         }
@@ -1388,8 +1735,10 @@ fn render_script(script: &SseScript) -> String {
         SseScript::HttpError { .. }
         | SseScript::HttpResponse { .. }
         | SseScript::CloseAfter { .. }
-        | SseScript::Truncated { .. } => {
-            // HTTP 错误、CloseAfter 与 Truncated 都在 `handle_request` 中先行处理；
+        | SseScript::Truncated { .. }
+        | SseScript::GoawayUnprocessed
+        | SseScript::RefusedStream => {
+            // 这些脚本都在 `decide` 中先行处理；
             // reaching this arm is a harness bug.
             out.push_str("data: fake_llm: unresolved HttpError script\n\n");
             out.push_str("data: [DONE]\n\n");
@@ -1401,7 +1750,7 @@ fn render_script(script: &SseScript) -> String {
             out.push_str("data: [DONE]\n\n");
         }
         SseScript::Cycle { .. } => {
-            // Cycle 与 Sequence 一样在 handle_request 里按请求解析；
+            // Cycle 与 Sequence 一样在 `decide` 里按请求解析；
             // 走到这里说明 harness 有 bug。发出畸形载荷，让 turn 大声
             // 失败而不是悄悄通过。
             out.push_str("data: fake_llm: unresolved Cycle script\n\n");
@@ -1522,80 +1871,146 @@ mod tests {
         );
     }
 
-    /// The fake server accepts a real HTTP Chat Completions request, captures
-    /// it, and returns the script's SSE. This is the end-to-end server
-    /// tracer bullet: it proves the bind/accept/parse/serve path works and
-    /// that the product's framer-compatible framing is on the wire.
+    /// 自测中每次等待夹具的上限；夹具回归为不响应时测试失败而不是挂住。
+    async fn bounded<T>(future: impl Future<Output = T>) -> T {
+        tokio::time::timeout(Duration::from_secs(5), future)
+            .await
+            .expect("fake provider did not respond within the fixture bound")
+    }
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    /// 像产品一样经 TLS + ALPN `h2` 连接，只信任 harness CA。
+    async fn connect(addr: SocketAddr) -> h2::client::SendRequest<Bytes> {
+        use tokio_rustls::rustls;
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(rustls::pki_types::CertificateDer::from(
+                TlsIdentity::shared().unwrap().ca_der().to_vec(),
+            ))
+            .unwrap();
+        let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+        config.alpn_protocols = vec![b"h2".to_vec()];
+        let tcp = bounded(TcpStream::connect(addr)).await.unwrap();
+        let name = rustls::pki_types::ServerName::try_from("127.0.0.1").unwrap();
+        let tls = bounded(tokio_rustls::TlsConnector::from(Arc::new(config)).connect(name, tcp))
+            .await
+            .unwrap();
+        let (client, connection) = bounded(h2::client::handshake(tls)).await.unwrap();
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        client
+    }
+
+    /// 发一条请求；`Err` 表示服务端重置了流或关闭了连接。
+    async fn send(
+        client: &h2::client::SendRequest<Bytes>,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: &str,
+    ) -> Result<http::Response<h2::RecvStream>, h2::Error> {
+        let mut request = http::Request::builder()
+            .method(method)
+            .uri(format!("https://127.0.0.1{path}"));
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let mut client = bounded(client.clone().ready()).await?;
+        let (response, mut stream) =
+            client.send_request(request.body(()).unwrap(), body.is_empty())?;
+        if !body.is_empty() {
+            stream.send_data(Bytes::from(body.to_owned()), true)?;
+        }
+        bounded(response).await
+    }
+
+    async fn read_all(response: http::Response<h2::RecvStream>) -> Result<String, h2::Error> {
+        let mut body = response.into_body();
+        let mut out = Vec::new();
+        while let Some(chunk) = bounded(body.data()).await {
+            let chunk = chunk?;
+            let _ = body.flow_control().release_capacity(chunk.len());
+            out.extend_from_slice(&chunk);
+        }
+        Ok(String::from_utf8(out).unwrap())
+    }
+
+    /// 新开一条连接发一个模型请求，返回状态码与正文。
+    async fn exchange(
+        addr: SocketAddr,
+        headers: &[(&str, &str)],
+        body: &str,
+    ) -> Result<(u16, String), h2::Error> {
+        let client = connect(addr).await;
+        let response = send(&client, "POST", "/chat/completions", headers, body).await?;
+        let status = response.status().as_u16();
+        Ok((status, read_all(response).await?))
+    }
+
+    /// The fake server accepts a real HTTP/2 Chat Completions request,
+    /// captures it, and returns the script's SSE. This is the server tracer
+    /// bullet: it proves the bind/TLS/h2/parse/serve path works and that the
+    /// product's framer-compatible framing is on the wire.
     #[test]
     fn server_captures_request_and_returns_plain_text_sse() {
-        let server = FakeLlmServer::start(SseScript::plain("hi")).expect("start server");
-        let url = format!("{}/chat/completions", server.base_url());
-
-        let resp = std::net::TcpStream::connect(server.local_addr())
-            .and_then(|mut s| {
-                let body = serde_json::json!({
-                    "model": "compat:test",
-                    "messages": [{"role": "user", "content": "ping"}],
-                    "stream": true
-                })
-                .to_string();
-                let req = format!(
-                    "POST /chat/completions HTTP/1.1\r\n\
-                     Host: 127.0.0.1\r\n\
-                     Connection: close\r\n\
-                     Content-Type: application/json\r\n\
-                     Content-Length: {}\r\n\
-                     \r\n\
-                     {body}",
-                    body.len()
-                );
-                s.write_all(req.as_bytes())?;
-                s.flush()?;
-                let mut buf = Vec::new();
-                s.read_to_end(&mut buf)?;
-                Ok(buf)
-            })
-            .expect("connect + read");
-        let resp = std::str::from_utf8(&resp).expect("response must be valid UTF-8");
-
-        assert!(resp.starts_with("HTTP/1.1 200 OK"), "got: {resp}");
-        assert!(resp.contains("text/event-stream"));
-        assert!(resp.contains("data: {"));
-        assert!(resp.contains("data: [DONE]"));
+        let mut server = FakeLlmServer::start(SseScript::plain("hi")).expect("start server");
+        let body = serde_json::json!({
+            "model": "compat:test",
+            "messages": [{"role": "user", "content": "ping"}],
+            "stream": true
+        })
+        .to_string();
+        let (content_type, text) = runtime().block_on(async {
+            let client = connect(server.local_addr()).await;
+            let response = send(&client, "POST", "/chat/completions", &[], &body)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200);
+            let content_type = response.headers()["content-type"]
+                .to_str()
+                .unwrap()
+                .to_owned();
+            (content_type, read_all(response).await.unwrap())
+        });
+        assert_eq!(content_type, "text/event-stream");
+        assert!(text.contains("data: {"));
+        assert!(text.contains("data: [DONE]"));
         let captured = server.captured_requests();
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0].model, "compat:test");
         assert_eq!(captured[0].message_roles, vec!["user"]);
-
-        let _ = url;
-    }
-
-    fn exchange_raw(addr: std::net::SocketAddr, request: &[u8]) -> Vec<u8> {
-        let mut stream = TcpStream::connect(addr).expect("connect");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .expect("read timeout");
-        stream.write_all(request).expect("write request");
-        stream.flush().expect("flush request");
-        let mut response = Vec::new();
-        stream.read_to_end(&mut response).expect("read response");
-        response
+        server.shutdown(Duration::from_secs(2)).unwrap();
     }
 
     #[test]
     fn expected_api_key_rejects_foreign_credentials_without_capturing_them() {
         let mut server = FakeLlmServer::start(SseScript::plain("ok")).unwrap();
         server.expect_api_key("expected-fixture-key");
-        for (key, status) in [
-            ("foreign-fixture-key", "401"),
-            ("expected-fixture-key", "200"),
-        ] {
-            let request = format!(
-                "POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 2\r\nAuthorization: Bearer {key}\r\n\r\n{{}}"
-            );
-            let response = exchange_raw(server.local_addr(), request.as_bytes());
-            assert!(response.starts_with(format!("HTTP/1.1 {status}").as_bytes()));
-            assert!(!String::from_utf8_lossy(&response).contains(key));
+        let runtime = runtime();
+        for (key, status) in [("foreign-fixture-key", 401), ("expected-fixture-key", 200)] {
+            let authorization = format!("Bearer {key}");
+            let (got, text) = runtime
+                .block_on(exchange(
+                    server.local_addr(),
+                    &[("authorization", &authorization)],
+                    "{}",
+                ))
+                .unwrap();
+            assert_eq!(got, status);
+            assert!(!text.contains(key));
         }
         assert_eq!(server.captured_requests().len(), 1);
         server.shutdown(Duration::from_secs(2)).unwrap();
@@ -1609,17 +2024,15 @@ mod tests {
             .collect();
         let (server, gate) = FakeLlmServer::start_gated(SseScript::Sequence { scripts })
             .expect("gated sequence server");
+        let runtime = runtime();
         let mut clients = Vec::new();
         for index in 0..REQUESTS {
             let addr = server.local_addr();
-            clients.push(thread::spawn(move || {
+            clients.push(runtime.spawn(async move {
                 let model = format!("request-{index}");
                 let body = format!(r#"{{"model":"{model}","messages":[],"stream":true}}"#);
-                let request = format!(
-                    "POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-                    body.len()
-                );
-                (model, exchange_raw(addr, request.as_bytes()))
+                let (_, text) = exchange(addr, &[], &body).await.unwrap();
+                (model, text)
             }));
             server
                 .wait_for_requests(index + 1, Duration::from_secs(2))
@@ -1629,74 +2042,53 @@ mod tests {
         let capture_order = server.captured_requests();
         gate.release(Duration::from_secs(2))
             .expect("bounded concurrent release");
-        let responses: HashMap<_, _> = clients
-            .into_iter()
-            .map(|client| client.join().expect("client thread"))
-            .collect();
+        let responses: HashMap<_, _> = runtime.block_on(async {
+            let mut responses = HashMap::new();
+            for client in clients {
+                let (model, text) = bounded(client).await.expect("client task");
+                responses.insert(model, text);
+            }
+            responses
+        });
         for (sequence_index, captured) in capture_order.iter().enumerate() {
             let response = responses.get(&captured.model).expect("response by model");
             let expected = format!(r#""content":"sequence-{sequence_index}""#);
             assert!(
-                response
-                    .windows(expected.len())
-                    .any(|bytes| bytes == expected.as_bytes()),
+                response.contains(&expected),
                 "capture position {sequence_index} ({}) received the wrong Sequence script",
                 captured.model
             );
         }
     }
 
-    fn request_in_thread(
-        addr: std::net::SocketAddr,
-    ) -> std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>> {
-        let (sent, received) = std::sync::mpsc::channel();
-        thread::spawn(move || {
-            let result = TcpStream::connect(addr).and_then(|mut stream| {
-                let body = r#"{"model":"compat:test","messages":[],"stream":true}"#;
-                write!(
-                    stream,
-                    "POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                    body.len(),
-                    body
-                )?;
-                stream.flush()?;
-                let mut response = Vec::new();
-                stream.read_to_end(&mut response)?;
-                Ok(response)
-            });
-            let _ = sent.send(result);
-        });
-        received
-    }
-
     #[test]
     fn gated_response_waits_for_release_and_shutdown_joins_handlers() {
+        let runtime = runtime();
         let (server, gate) = FakeLlmServer::start_gated(SseScript::plain("gated")).expect("server");
-        let response = request_in_thread(server.local_addr());
+        let addr = server.local_addr();
+        let response = runtime.spawn(async move { exchange(addr, &[], "{}").await });
         server
             .wait_for_requests(1, Duration::from_secs(2))
             .expect("captured request");
         gate.wait_until_stalled(1, Duration::from_secs(2))
             .expect("handler reached gate");
-        assert!(matches!(
-            response.try_recv(),
-            Err(std::sync::mpsc::TryRecvError::Empty)
-        ));
+        assert!(!response.is_finished());
         gate.release(Duration::from_secs(2))
             .expect("bounded release acknowledgement");
-        let bytes = response
-            .recv_timeout(Duration::from_secs(2))
+        let (_, text) = runtime
+            .block_on(async { tokio::time::timeout(Duration::from_secs(2), response).await })
             .expect("bounded response")
-            .expect("response io");
-        assert!(
-            std::str::from_utf8(&bytes)
-                .expect("response utf-8")
-                .contains("gated")
-        );
+            .unwrap()
+            .expect("response");
+        assert!(text.contains("gated"));
 
         let (mut server, gate) =
             FakeLlmServer::start_gated(SseScript::plain("cancelled")).expect("server");
-        let response = request_in_thread(server.local_addr());
+        let addr = server.local_addr();
+        let response = runtime.spawn(async move {
+            let client = connect(addr).await;
+            send(&client, "POST", "/chat/completions", &[], "{}").await
+        });
         server
             .wait_for_requests(1, Duration::from_secs(2))
             .expect("captured request");
@@ -1705,19 +2097,15 @@ mod tests {
         server
             .shutdown(Duration::from_secs(2))
             .expect("bounded shutdown");
-        response
-            .recv_timeout(Duration::from_secs(2))
+        let outcome = runtime
+            .block_on(async { tokio::time::timeout(Duration::from_secs(2), response).await })
             .expect("cancelled handler joined")
-            .expect("client io");
+            .unwrap();
+        assert!(outcome.is_err(), "cancelled response must not be answered");
 
-        assert!(server.listener.is_none(), "listener was not removed");
         assert!(
             server.serve_handle.is_none(),
             "serve thread handle was not joined"
-        );
-        assert!(
-            server.handlers.lock().unwrap().is_empty(),
-            "handler thread handles were not joined"
         );
         let state = server.state.0.lock().unwrap();
         assert!(state.serve_exited, "serve thread did not publish exit");
@@ -1731,45 +2119,33 @@ mod tests {
 
     #[test]
     fn segmented_response_delivers_only_released_frames_and_cancels_cleanly() {
-        use std::io::{BufRead, BufReader};
         for cancel in [false, true] {
             let script = SseScript::PlainText {
                 chunks: vec!["old-token".into(), "新-token".into()],
                 finish_reason: "stop".into(),
             };
-            let expected = render_script(&script);
             let (mut server, gate) =
                 FakeLlmServer::start_segmented(script, Duration::from_secs(5)).unwrap();
-            let mut stream = TcpStream::connect(server.local_addr()).unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
-            stream.write_all(b"POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}").unwrap();
-            let mut reader = BufReader::new(stream);
-            let mut headers = String::new();
-            loop {
-                let mut line = String::new();
-                assert_ne!(reader.read_line(&mut line).unwrap(), 0);
-                headers.push_str(&line);
-                if line == "\r\n" {
-                    break;
-                }
-            }
-            assert!(headers.contains(&format!("Content-Length: {}\r\n", expected.len())));
+            let runtime = runtime();
+            let mut body = runtime.block_on(async {
+                let client = connect(server.local_addr()).await;
+                send(&client, "POST", "/chat/completions", &[], "{}")
+                    .await
+                    .unwrap()
+                    .into_body()
+            });
             for (index, token) in ["old-token", "新-token"].into_iter().enumerate() {
                 gate.wait_until_stalled(index + 1, Duration::from_secs(2))
                     .unwrap();
-                reader.get_mut().set_nonblocking(true).unwrap();
-                let error = reader.read(&mut [0u8; 1]).unwrap_err();
-                assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
-                reader.get_mut().set_nonblocking(false).unwrap();
+                let early = runtime.block_on(async {
+                    tokio::time::timeout(Duration::from_millis(100), body.data()).await
+                });
+                assert!(early.is_err(), "frame {index} arrived before its release");
                 gate.release_next(Duration::from_secs(2)).unwrap();
-                let mut frame = String::new();
-                reader.read_line(&mut frame).unwrap();
+                let frame = runtime.block_on(bounded(body.data())).unwrap().unwrap();
+                let frame = String::from_utf8(frame.to_vec()).unwrap();
                 assert!(frame.contains(token) && !frame.contains("\"finish_reason\":\"stop\""));
-                let mut separator = String::new();
-                reader.read_line(&mut separator).unwrap();
-                assert_eq!(separator, "\n");
+                assert!(frame.ends_with("\n\n"));
             }
             gate.wait_until_stalled(3, Duration::from_secs(2)).unwrap();
             if cancel {
@@ -1777,8 +2153,20 @@ mod tests {
             } else {
                 gate.release(Duration::from_secs(2)).unwrap();
             }
+            // 正常放行时读到 EOF；取消时只能是流被重置或连接关闭，不能先读到终态再出错。
             let mut terminal = String::new();
-            reader.read_to_string(&mut terminal).unwrap();
+            let mut cut = None;
+            loop {
+                match runtime.block_on(bounded(body.data())) {
+                    Some(Ok(chunk)) => terminal.push_str(std::str::from_utf8(&chunk).unwrap()),
+                    Some(Err(error)) => {
+                        cut = Some(error);
+                        break;
+                    }
+                    None => break,
+                }
+            }
+            assert_eq!(cut.is_some(), cancel, "terminal read ended with {cut:?}");
             if cancel {
                 assert!(
                     terminal.is_empty(),
@@ -1792,7 +2180,7 @@ mod tests {
                 server.shutdown(Duration::from_secs(2)).unwrap();
             }
             assert_eq!(server.captured_requests().len(), 1);
-            assert!(server.handlers.lock().unwrap().is_empty());
+            assert_eq!(server.state.0.lock().unwrap().active_handlers, 0);
         }
     }
 
@@ -1800,27 +2188,26 @@ mod tests {
     fn segmented_delivery_deadline_fails_and_joins_without_release() {
         let (mut server, gate) =
             FakeLlmServer::start_segmented(SseScript::plain("withheld"), Duration::ZERO).unwrap();
-        let response = request_in_thread(server.local_addr());
-        let bytes = response
-            .recv_timeout(Duration::from_secs(2))
-            .unwrap()
-            .unwrap();
-        assert!(!String::from_utf8(bytes).unwrap().contains("withheld"));
+        let outcome = runtime().block_on(exchange(server.local_addr(), &[], "{}"));
+        assert!(!matches!(outcome, Ok((_, ref text)) if text.contains("withheld")));
         assert!(gate.release_next(Duration::from_secs(2)).is_err());
         let error = server.shutdown(Duration::from_secs(2)).unwrap_err();
         assert!(error.to_string().contains("segment"));
-        assert!(server.handlers.lock().unwrap().is_empty());
+        assert_eq!(server.state.0.lock().unwrap().active_handlers, 0);
     }
 
     /// 只有模型请求进入 capture；其他请求不能被静默接受，必须成为夹具失败。
     #[test]
     fn non_model_request_is_a_fixture_failure_and_not_captured() {
         let mut server = FakeLlmServer::start(SseScript::plain("unused")).unwrap();
-        let response = exchange_raw(
-            server.local_addr(),
-            b"GET /models HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        );
-        assert!(response.starts_with(b"HTTP/1.1 404"));
+        let status = runtime().block_on(async {
+            let client = connect(server.local_addr()).await;
+            send(&client, "GET", "/models", &[], "")
+                .await
+                .unwrap()
+                .status()
+        });
+        assert_eq!(status, 404);
         assert!(server.captured_requests().is_empty());
         let error = server.shutdown(Duration::from_secs(2)).unwrap_err();
         assert!(
@@ -1829,20 +2216,43 @@ mod tests {
         );
     }
 
+    /// 客户端停在 TLS 握手中途时 shutdown 仍能及时结束；第一次 shutdown 超时后，
+    /// 再次调用会继续等待并 join 服务线程，而不是直接报告成功。
+    #[test]
+    fn shutdown_retries_after_timeout_and_cancels_stalled_handshakes() {
+        let mut server = FakeLlmServer::start(SseScript::plain("unused")).unwrap();
+        let stalled = std::net::TcpStream::connect(server.local_addr()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while server.state.0.lock().unwrap().active_handlers == 0 {
+            assert!(Instant::now() < deadline, "handshake task never started");
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(matches!(
+            server.shutdown(Duration::ZERO),
+            Err(ServeError::Timeout { .. })
+        ));
+        assert!(
+            server.serve_handle.is_some(),
+            "timed-out shutdown kept the thread"
+        );
+        let started = Instant::now();
+        server.shutdown(Duration::from_secs(2)).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(
+            server.serve_handle.is_none(),
+            "retry joined the serve thread"
+        );
+        assert_eq!(server.state.0.lock().unwrap().active_handlers, 0);
+        drop(stalled);
+    }
     #[test]
     fn shutdown_returns_fixture_failure() {
         let log_directory = tempfile::tempdir().expect("log directory");
         let mut server =
             FakeLlmServer::start_logged(SseScript::plain("unused"), log_directory.path())
                 .expect("server");
-        let response = exchange_raw(
-            server.local_addr(),
-            b"POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
-        );
-        assert!(
-            response.is_empty(),
-            "failed handler must not send a response"
-        );
+        let outcome = runtime().block_on(exchange(server.local_addr(), &[], "{}"));
+        assert!(outcome.is_err(), "failed handler must not send a response");
 
         let error = server
             .shutdown(Duration::from_secs(2))

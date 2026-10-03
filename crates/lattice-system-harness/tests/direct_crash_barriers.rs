@@ -281,7 +281,7 @@ fn late_successful_history_page_cannot_replace_newer_tui_snapshot() {
             "workspace":world.project_dir(),"input":"late page","agent":"history"},"configuration":{
             "profile_toml":std::fs::read_to_string(world.project_dir().join(".lattice/agents/history/agent.toml")).unwrap(),
             "system_prompt":"You are a concise test agent.","connection":{"alias":"compat:history",
-            "provider":"openai_compatible","provider_model":"history","base_url":provider.base_url(),"api_key":FAKE_API_KEY,"roots_der":[]}}});
+            "provider":"openai_compatible","provider_model":"history","base_url":provider.base_url(),"api_key":FAKE_API_KEY,"roots_der":support::harness_roots_der()}}});
         let accepted = call(&world, request);
         assert_eq!(accepted["value"]["acceptance"], "accepted", "{accepted}");
         for n in 1..=2 {

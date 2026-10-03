@@ -331,7 +331,7 @@ fn unread_acceptance_retry_and_restart_keep_one_turn() {
                     &["--json", "session", "list"],
                 );
                 assert!(bootstrap.is_clean_exit(if existing_session { 0 } else { 1 }));
-                let config = json!({"profile_toml":std::fs::read_to_string(world.project_dir().join(".lattice/agents/background/agent.toml")).unwrap(),"system_prompt":"You are a concise test agent.","connection":{"alias":"compat:background","provider":"openai_compatible","provider_model":"background","base_url":server.base_url(),"api_key":FAKE_API_KEY,"roots_der":[]}});
+                let config = json!({"profile_toml":std::fs::read_to_string(world.project_dir().join(".lattice/agents/background/agent.toml")).unwrap(),"system_prompt":"You are a concise test agent.","connection":{"alias":"compat:background","provider":"openai_compatible","provider_model":"background","base_url":server.base_url(),"api_key":FAKE_API_KEY,"roots_der":support::harness_roots_der()}});
                 let unread = Wire::new(
                     &world,
                     &budget,
@@ -1133,7 +1133,7 @@ fn a_live_new_turn_does_not_block_old_closed_observation() {
             .join(".lattice/agents/background/agent.toml")).unwrap(),
             "system_prompt":"You are a concise test agent.","connection":{"alias":"compat:background",
             "provider":"openai_compatible","provider_model":"background","base_url":server.base_url(),
-            "api_key":FAKE_API_KEY,"roots_der":[]}});
+            "api_key":FAKE_API_KEY,"roots_der":support::harness_roots_der()}});
         let candidates = [
             SECOND,
             THIRD,
@@ -1247,7 +1247,7 @@ fn a_live_new_turn_does_not_block_old_closed_observation() {
 }
 #[test]
 fn frozen_tls_roots_and_policies_are_isolated_between_concurrent_turns() {
-    use lattice_system_harness::FakeLlmServer;
+    use lattice_system_harness::{FakeLlmServer, FixtureHttpServer, HttpFixture, TlsIdentity};
     let (world, spec) = direct_world(
         "background-real-tls",
         "background",
@@ -1259,135 +1259,58 @@ fn frozen_tls_roots_and_policies_are_isolated_between_concurrent_turns() {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // 直接启动带专属环境的前端前，先经标准驱动登记产物与后台清理归属。
         assert!(run(&world, &budget, &mut evidence, &["--help"]).is_clean_exit(0));
-        let fixture =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tls_proxy.py");
-        let mut proxies = Vec::new();
+        // 两套互不相干的 CA：每个 Turn 的提交端只信任自己那一套，fetch 端点与 provider 各用其签发的证书。
+        let identities = [
+            TlsIdentity::generate().unwrap(),
+            TlsIdentity::generate().unwrap(),
+        ];
         let mut roots = Vec::new();
-        let mut urls = Vec::new();
-        for name in ["a", "b"] {
+        let mut fetch = Vec::new();
+        for (name, identity) in ["a", "b"].into_iter().zip(&identities) {
             let root = world.root().join(format!("tls-{name}"));
-            std::fs::create_dir(&root).unwrap();
-            std::fs::create_dir(root.join("empty-certs")).unwrap();
-            std::fs::write(root.join("leaf.ext"), "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost\n").unwrap();
-            for args in [
-                vec![
-                    "req",
-                    "-x509",
-                    "-newkey",
-                    "rsa:2048",
-                    "-nodes",
-                    "-keyout",
-                    "ca-key.pem",
-                    "-out",
-                    "ca.pem",
-                    "-days",
-                    "2",
-                    "-config",
-                    "/dev/null",
-                    "-subj",
-                    "/CN=Harness CA",
-                    "-addext",
-                    "basicConstraints=critical,CA:TRUE",
-                    "-addext",
-                    "keyUsage=critical,keyCertSign,cRLSign",
-                ],
-                vec![
-                    "req",
-                    "-new",
-                    "-newkey",
-                    "rsa:2048",
-                    "-nodes",
-                    "-keyout",
-                    "key.pem",
-                    "-out",
-                    "leaf.csr",
-                    "-config",
-                    "/dev/null",
-                    "-subj",
-                    "/CN=localhost",
-                ],
-                vec![
-                    "x509",
-                    "-req",
-                    "-in",
-                    "leaf.csr",
-                    "-CA",
-                    "ca.pem",
-                    "-CAkey",
-                    "ca-key.pem",
-                    "-CAcreateserial",
-                    "-out",
-                    "cert.pem",
-                    "-days",
-                    "2",
-                    "-extfile",
-                    "leaf.ext",
-                ],
-                vec!["x509", "-in", "ca.pem", "-outform", "DER", "-out", "ca.der"],
-            ] {
-                let mut cmd = world.command("openssl");
-                cmd.current_dir(&root).args(&args);
-                let out = RunningCommand::spawn(cmd)
-                    .unwrap()
-                    .wait(Some(budget.cap_timeout(spec.step_timeout())))
-                    .unwrap();
-                evidence.record_command(
-                    format!("generate ephemeral TLS {name}: {}", args.join(" ")),
-                    &out,
-                );
-                assert!(out.is_clean_exit(0), "{}", out.summary());
-            }
-            let mut cmd = world.command("python3");
-            cmd.arg(&fixture).arg(&root);
-            let proxy = RunningCommand::spawn(cmd).unwrap();
-            let deadline = Instant::now() + budget.cap_timeout(Duration::from_secs(10));
-            let port = loop {
-                if let Ok(bytes) = std::fs::read(root.join("ready.json"))
-                    && let Ok(ready) = serde_json::from_slice::<Value>(&bytes)
-                {
-                    break ready["port"].as_u64().unwrap();
-                }
-                assert!(Instant::now() < deadline, "TLS fixture not ready");
-                std::thread::sleep(Duration::from_millis(5));
-            };
-            urls.push(format!("https://localhost:{port}"));
+            std::fs::create_dir_all(root.join("empty-certs")).unwrap();
+            std::fs::write(root.join("ca.pem"), identity.ca_pem()).unwrap();
+            fetch.push(
+                FixtureHttpServer::start_tls(HttpFixture::plain("frozen TLS tool body"), identity)
+                    .unwrap(),
+            );
             roots.push(root);
-            proxies.push(proxy);
         }
-        let (a, ga) = FakeLlmServer::start_gated(support::sequence(vec![
-            SseScript::ToolCalls {
-                calls: vec![
-                    (
-                        "own".into(),
-                        "fetch.web".into(),
-                        json!({"url":format!("{}/own-a",urls[0])}).to_string(),
-                    ),
-                    (
-                        "cross".into(),
-                        "fetch.web".into(),
-                        json!({"url":format!("{}/cross-from-a",urls[1])}).to_string(),
-                    ),
-                ],
-            },
-            SseScript::plain("TLS alpha complete"),
-        ]))
+        let urls: Vec<String> = fetch.iter().map(FixtureHttpServer::base_url).collect();
+        let (a, ga) = FakeLlmServer::start_gated_with(
+            support::sequence(vec![
+                SseScript::ToolCalls {
+                    calls: vec![
+                        (
+                            "own".into(),
+                            "fetch.web".into(),
+                            json!({"url":format!("{}/own-a",urls[0])}).to_string(),
+                        ),
+                        (
+                            "cross".into(),
+                            "fetch.web".into(),
+                            json!({"url":format!("{}/cross-from-a",urls[1])}).to_string(),
+                        ),
+                    ],
+                },
+                SseScript::plain("TLS alpha complete"),
+            ]),
+            &identities[0],
+        )
         .unwrap();
-        let (b, gb) = FakeLlmServer::start_gated(support::sequence(vec![
-            tool_call(
-                "denied",
-                "fetch.web",
-                &json!({"url":format!("{}/denied-b",urls[1])}).to_string(),
-            ),
-            SseScript::plain("TLS beta complete"),
-        ]))
+        let (b, gb) = FakeLlmServer::start_gated_with(
+            support::sequence(vec![
+                tool_call(
+                    "denied",
+                    "fetch.web",
+                    &json!({"url":format!("{}/denied-b",urls[1])}).to_string(),
+                ),
+                SseScript::plain("TLS beta complete"),
+            ]),
+            &identities[1],
+        )
         .unwrap();
-        for (root, provider) in roots.iter().zip([&a, &b]) {
-            std::fs::write(
-                root.join("upstream-port"),
-                provider.base_url().rsplit(':').next().unwrap(),
-            )
-            .unwrap();
-        }
+        let provider_urls = [a.base_url(), b.base_url()];
         let profile = world
             .project_dir()
             .join(".lattice/agents/background/agent.toml");
@@ -1404,7 +1327,7 @@ fn frozen_tls_roots_and_policies_are_isolated_between_concurrent_turns() {
         let start = |index: usize, project: &std::path::Path, turn: &str| {
             let mut cmd = world.command(driver().binary_path());
             cmd.current_dir(project)
-                .env("OPENAI_COMPATIBLE_BASE_URL", &urls[index])
+                .env("OPENAI_COMPATIBLE_BASE_URL", &provider_urls[index])
                 .env("SSL_CERT_FILE", roots[index].join("ca.pem"))
                 .env("SSL_CERT_DIR", roots[index].join("empty-certs"))
                 .args([
@@ -1512,7 +1435,7 @@ fn frozen_tls_roots_and_policies_are_isolated_between_concurrent_turns() {
                 "invalid root",
                 json!({"profile_toml":allowed,"system_prompt":"You are a concise test agent.","connection":{
                 "alias":"compat:background","provider":"openai_compatible","provider_model":"background",
-                "base_url":urls[0],"api_key":FAKE_API_KEY,"roots_der":[[1,2,3]]}}),
+                "base_url":provider_urls[0],"api_key":FAKE_API_KEY,"roots_der":[[1,2,3]]}}),
             ),
         );
         assert_eq!(bad["value"]["kind"], "bad_request");
@@ -1558,33 +1481,47 @@ fn frozen_tls_roots_and_policies_are_isolated_between_concurrent_turns() {
         evidence.record_json("parameters", &json!({"test":"frozen_tls_roots_and_policies_are_isolated_between_concurrent_turns",
             "tls":"two ephemeral CAs; localhost leaves; source roots/policy swapped after both provider gates",
             "tools_a":["own-a","cross-from-a"],"tools_b":["denied-b"],"turns":[ta,tb,failed]})).unwrap();
-        for root in &roots {
-            std::fs::write(root.join("stop"), b"").unwrap();
+        // alpha 自己的 fetch 只到达 a 端点；跨根 fetch 在 b 端点握手被拒；换根后的
+        // provider 请求在 a 的 provider 端握手被拒，没有进入 capture。
+        let fetched: Vec<Vec<(String, String)>> = fetch
+            .iter()
+            .map(|server| {
+                server
+                    .captured_requests()
+                    .into_iter()
+                    .map(|request| (request.method, request.path))
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            fetched,
+            [vec![("GET".to_string(), "/own-a".to_string())], Vec::new()]
+        );
+        for server in &fetch {
+            assert_eq!(server.first_error(), None);
         }
-        for (index, proxy) in proxies.into_iter().enumerate() {
-            let out = proxy
-                .wait(Some(budget.cap_timeout(spec.step_timeout())))
-                .unwrap();
-            evidence.record_command(format!("TLS proxy {index} shutdown"), &out);
-            assert!(out.is_clean_exit(0));
-            let stats: Value = serde_json::from_slice(&out.stdout).unwrap();
-            assert_eq!(stats["errors"], json!([]));
-            assert_eq!(stats["posts"], 2);
-            assert_eq!(
-                stats["get_paths"],
-                if index == 0 {
-                    json!(["/own-a"])
-                } else {
-                    json!([])
-                }
-            );
-            assert!(stats["rejected_handshakes"].as_u64().unwrap() >= 1);
-            evidence
-                .record_json(&format!("tls-stats-{index}"), &stats)
-                .unwrap();
-        }
+        let rejected = [
+            fetch[0].rejected_handshakes(),
+            fetch[1].rejected_handshakes(),
+            a.rejected_handshakes(),
+            b.rejected_handshakes(),
+        ];
+        assert!(rejected[1] >= 1 && rejected[2] >= 1, "{rejected:?}");
+        evidence
+            .record_json(
+                "tls-stats",
+                &json!({"fetch_paths":fetched,"rejected_handshakes":{
+                "fetch_a":rejected[0],"fetch_b":rejected[1],"provider_a":rejected[2],"provider_b":rejected[3]}}),
+            )
+            .unwrap();
         evidence.record_captures(a.captured_requests());
         evidence.record_captures(b.captured_requests());
+        // 两个 provider 都没有记录夹具失败（握手被拒属于对端行为，单独计数）。
+        for mut provider in [a, b] {
+            provider
+                .shutdown(budget.cap_timeout(Duration::from_secs(5)))
+                .unwrap();
+        }
     }));
     support::finish_recorded(evidence, result);
 }

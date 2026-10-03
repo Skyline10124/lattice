@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! 模型请求传输层（#265）的真实二进制场景：请求头、Retry-After、错误诊断、
-//! 断流重试与 Turn 内连接复用。每个场景都是多次请求的 Turn，断言落在
+//! 断流重试、Turn 内连接复用、HTTP/2 对未处理请求的重发，以及明文 HTTP/1.1 的本地 provider。每个场景都是多次请求的 Turn，断言落在
 //! fake provider 收到的请求与持久 Turn 记录上。
 
 mod support;
@@ -10,8 +10,8 @@ mod support;
 use std::time::{Duration, Instant};
 
 use lattice_system_harness::{
-    AssertError, CapturedRequest, FakeLlmServer, SendExecution, SessionSendDriver, SseScript,
-    TurnEventLine,
+    AssertError, CapturedRequest, FAKE_API_KEY, FakeLlmServer, SendExecution, SessionSendDriver,
+    SseScript, TurnEventLine,
 };
 use serde_json::Value;
 use support::*;
@@ -348,7 +348,8 @@ fn stream_cut_before_completion_is_retried() {
         RETRY_FAST,
     );
     world.write_project_file("notes.txt", "cut\n").unwrap();
-    // 第二个 Step 先遇到正常 EOF 的断流，再遇到声明长度后读到一半的断流，第三次成功。
+    // 第二个 Step 先遇到正常结束却没有结束事件的流，再遇到读到一半被
+    // `RST_STREAM(INTERNAL_ERROR)` 重置的流，第三次成功。
     let server = wire_fake_llm(
         &world,
         "transport",
@@ -380,6 +381,23 @@ fn stream_cut_before_completion_is_retried() {
         require(
             captures.len() == 4,
             format!("4 model requests, got {}", captures.len()),
+        )?;
+        // 两次断流都发生在响应体中途：产品先收到部分正文，随后才报告请求错误。
+        let streamed: Vec<&str> = outcome
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                TurnEventLine::TokenDelta { content } => Some(content.as_str()),
+                TurnEventLine::LlmRequestError { .. } => Some("<error>"),
+                _ => None,
+            })
+            .collect();
+        require(
+            streamed
+                .windows(2)
+                .any(|pair| pair == ["partial", "<error>"])
+                && streamed.windows(2).any(|pair| pair == ["half", "<error>"]),
+            format!("partial bodies arrive before each cut: {streamed:?}"),
         )?;
         let turn = final_turn(&outcome);
         let step = attempts(&turn, 1);
@@ -447,7 +465,7 @@ fn multi_step_turn_reuses_one_connection_and_survives_server_close() {
         )?;
         require(
             connections[2] != connections[1],
-            format!("after the server closes it, step 2 opens a new one: {connections:?}"),
+            format!("after the server's GOAWAY, step 2 opens a new one: {connections:?}"),
         )?;
         let turn = final_turn(&outcome);
         for step in 0..3 {
@@ -462,6 +480,162 @@ fn multi_step_turn_reuses_one_connection_and_survives_server_close() {
     finish_scenario(
         evidence,
         &[("reuse turn", &outcome.command)],
+        captures,
+        result,
+    );
+}
+
+/// HTTP/2 下 provider 明确未处理的请求（GOAWAY 的最后流号小于它，或 `REFUSED_STREAM`）
+/// 由传输层重发，归在同一次尝试里：provider 收到两次，持久记录只有一条尝试。
+#[test]
+fn unprocessed_requests_are_resent_inside_one_attempt() {
+    for (case, refusal) in [
+        ("goaway", SseScript::GoawayUnprocessed),
+        ("refused", SseScript::RefusedStream),
+    ] {
+        let driver = driver();
+        // 本地重试预算为 0：若重发没有发生在传输层，第二个 Step 只能失败。
+        let (world, spec) = direct_world(
+            &format!("direct-transport-unprocessed-{case}"),
+            "transport",
+            r#"["observe.workspace"]"#,
+            "[llm.retry]\nmax_retries = 0\n",
+        );
+        world.write_project_file("notes.txt", "nack\n").unwrap();
+        // 第一个 Step 正常执行工具；第二个 Step 的请求先被拒绝，紧接着的重发得到回答。
+        let server = wire_fake_llm(
+            &world,
+            "transport",
+            sequence(vec![
+                tool_call(
+                    "call-1",
+                    "observe.workspace",
+                    r#"{"mode":"read_file","path":"notes.txt"}"#,
+                ),
+                refusal,
+                SseScript::plain("answered after resend"),
+            ]),
+        );
+        let evidence = evidence(&world, &spec);
+        let send = SessionSendDriver::new(&driver, &world, &spec, "transport");
+        let outcome = send.send("answer after a refusal").unwrap();
+        let captures = server.captured_requests();
+        let result = (|| {
+            assert_clean_send(&outcome)?;
+            require(
+                outcome.has_completed(),
+                format!("{case}: the turn completes"),
+            )?;
+            require(
+                captures.len() == 3,
+                format!(
+                    "{case}: 3 requests reach the provider, got {}",
+                    captures.len()
+                ),
+            )?;
+            require(
+                captures[1].raw == captures[2].raw,
+                format!("{case}: the resend carries the same request body"),
+            )?;
+            let connections: Vec<_> = captures.iter().map(|c| c.connection).collect();
+            require(
+                connections[0] == connections[1],
+                format!("{case}: the refused request rode the Step 0 connection: {connections:?}"),
+            )?;
+            if case == "goaway" {
+                require(
+                    connections[2] != connections[1],
+                    format!("goaway: the resend opens a new connection: {connections:?}"),
+                )?;
+            }
+            let turn = final_turn(&outcome);
+            for step in 0..2 {
+                let records = attempts(&turn, step);
+                require(
+                    records.len() == 1,
+                    format!("{case}: step {step} has exactly one attempt: {records:?}"),
+                )?;
+            }
+            Ok(())
+        })();
+        finish_scenario(
+            evidence,
+            &[("unprocessed turn", &outcome.command)],
+            captures,
+            result,
+        );
+    }
+}
+
+/// 本地 provider（Ollama 一类）走明文 HTTP/1.1：多 Step 的 Turn 完成，服务忙的 503 按可重试处理，
+/// 请求头与 HTTPS provider 相同。HTTP/1.1 下是否复用连接取决于产品读到结束事件时是否
+/// 恰好也读到了响应体结尾，不稳定，因此这里不断言连接复用。
+#[test]
+fn plaintext_local_provider_over_http1() {
+    let driver = driver();
+    let (world, spec) = direct_world(
+        "direct-transport-local-http1",
+        "transport",
+        r#"["observe.workspace"]"#,
+        RETRY_FAST,
+    );
+    world.write_project_file("a.txt", "alpha\n").unwrap();
+    world.write_project_file("b.txt", "beta\n").unwrap();
+    let server = FakeLlmServer::start_plain_http1(sequence(vec![
+        tool_call(
+            "call-1",
+            "observe.workspace",
+            r#"{"mode":"read_file","path":"a.txt"}"#,
+        ),
+        SseScript::HttpError {
+            status: 503,
+            body: r#"{"error":"server busy, please try again"}"#.into(),
+        },
+        tool_call(
+            "call-2",
+            "observe.workspace",
+            r#"{"mode":"read_file","path":"b.txt"}"#,
+        ),
+        SseScript::plain("local answer"),
+    ]))
+    .unwrap();
+    let base_url = server.base_url();
+    world.set_env("OPENAI_COMPATIBLE_BASE_URL", &base_url);
+    world.set_env("OPENAI_COMPATIBLE_MODEL", "transport");
+    world.set_env("OPENAI_COMPATIBLE_API_KEY", FAKE_API_KEY);
+    let evidence = evidence(&world, &spec);
+    let send = SessionSendDriver::new(&driver, &world, &spec, "transport");
+    let outcome = send.send("read both files locally").unwrap();
+    let captures = server.captured_requests();
+    let result = (|| {
+        require(
+            base_url.starts_with("http://localhost:"),
+            format!("plaintext loopback base URL: {base_url}"),
+        )?;
+        assert_clean_send(&outcome)?;
+        require(outcome.has_completed(), "local turn completes")?;
+        require(
+            captures.len() == 4,
+            format!("4 model requests, got {}", captures.len()),
+        )?;
+        assert_identity(&captures, send.session_id().unwrap())?;
+        let turn = final_turn(&outcome);
+        let second = attempts(&turn, 1);
+        require(
+            second.len() == 2
+                && second[0]["end"]["cause"]
+                    == serde_json::json!({"cause":"provider_error","retryable":true}),
+            format!("the 503 is one retryable attempt before success: {second:?}"),
+        )?;
+        let line = diagnostic(&second[0]);
+        require(
+            line == "HTTP 503: server busy, please try again",
+            format!("503 diagnostic: {line:?}"),
+        )
+    })();
+    finish_scenario(
+        evidence,
+        &[("local http1 turn", &outcome.command)],
         captures,
         result,
     );
