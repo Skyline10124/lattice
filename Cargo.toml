@@ -85,7 +85,15 @@ rustix = { version = "1.1.4", features = ["fs"] }
 rustls = "0.23"
 rustls-platform-verifier = "0.7"
 tokio-rustls = "0.26"
-gix = { version = "0.85", features = ["tree-editor"] }
+# Only what the code calls: object/ref/commit plumbing (always on), `sha1`,
+# `tree-editor` (`edit_tree`), and `excludes` (gitignore stack + index in
+# lancet-runtime's workspace visibility). `max-performance-safe` keeps the
+# default parallelism and pack caches. Features unify across the graph, so
+# every other `gix` declaration (the harness spells its own) must also turn
+# default features off or the defaults come back.
+gix = { version = "0.85", default-features = false, features = [
+  "sha1", "tree-editor", "excludes", "max-performance-safe"
+] }
 schemars = "1.2"
 bytes = "1"
 # Component Tool engine (ADR 0004 / #5 slice C). Pinned exactly; wasmtime
