@@ -1269,19 +1269,20 @@ async fn serve_h1(
                 frames,
                 end: SseEnd::Complete,
             } => {
-                let length: usize = frames.iter().map(String::len).sum();
-                let head = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nContent-Length: {length}\r\n\r\n"
-                );
+                // 与本地推理服务一样用分块编码流式输出。结尾的零长度块稍后单独发出：
+                // 客户端读到结束事件时响应体往往还没结束，要读到它连接才能回到连接池。
+                let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nTransfer-Encoding: chunked\r\n\r\n".to_string();
                 if !write_h1(&mut stream, &[head]).await {
                     return Ok(());
                 }
                 for frame in frames {
-                    if !shared.pass_frame().await? || !write_h1(&mut stream, &[frame]).await {
+                    let chunk = format!("{:x}\r\n{frame}\r\n", frame.len());
+                    if !shared.pass_frame().await? || !write_h1(&mut stream, &[chunk]).await {
                         return Ok(());
                     }
                 }
-                true
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                write_h1(&mut stream, &["0\r\n\r\n".to_string()]).await
             }
             _ => {
                 let head = "HTTP/1.1 500 Error\r\nContent-Length: 0\r\n\r\n".to_string();

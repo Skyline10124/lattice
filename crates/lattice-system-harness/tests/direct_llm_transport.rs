@@ -568,8 +568,8 @@ fn unprocessed_requests_are_resent_inside_one_attempt() {
 }
 
 /// 本地 provider（Ollama 一类）走明文 HTTP/1.1：多 Step 的 Turn 完成，服务忙的 503 按可重试处理，
-/// 请求头与 HTTPS provider 相同。HTTP/1.1 下是否复用连接取决于产品读到结束事件时是否
-/// 恰好也读到了响应体结尾，不稳定，因此这里不断言连接复用。
+/// 请求头与 HTTPS provider 相同。分块响应的结尾晚于结束事件到达，整个 Turn 仍只用一条连接：
+/// 产品交付结束事件前读完了响应体，连接才能回到连接池。
 #[test]
 fn plaintext_local_provider_over_http1() {
     let driver = driver();
@@ -619,6 +619,11 @@ fn plaintext_local_provider_over_http1() {
             format!("4 model requests, got {}", captures.len()),
         )?;
         assert_identity(&captures, send.session_id().unwrap())?;
+        let connections: Vec<_> = captures.iter().map(|c| c.connection).collect();
+        require(
+            connections == [0, 0, 0, 0],
+            format!("every request of the turn reuses one connection: {connections:?}"),
+        )?;
         let turn = final_turn(&outcome);
         let second = attempts(&turn, 1);
         require(
