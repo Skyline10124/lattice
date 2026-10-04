@@ -96,6 +96,13 @@ pub(crate) fn assert_forced_kill(outcome: &CommandOutcome) {
     assert!(outcome.cleanup.succeeded(), "{:?}", outcome.cleanup);
 }
 
+/// 直接经 IPC 提交时的信任根：harness CA 的 DER，与提交端从 `SSL_CERT_FILE` 读到的相同。
+pub(crate) fn harness_roots_der() -> Value {
+    serde_json::json!([lattice_system_harness::TlsIdentity::shared()
+        .expect("harness TLS identity")
+        .ca_der()])
+}
+
 pub(crate) fn require(condition: bool, expected: impl Into<String>) -> Result<(), AssertError> {
     if condition {
         Ok(())

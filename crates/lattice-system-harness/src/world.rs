@@ -122,6 +122,22 @@ impl ScenarioWorld {
             home.join(".local/state").display().to_string(),
         );
         allowed_env.insert("LATTICE_AGENTS_DIR".into(), String::new());
+        // 提交端经 rustls-native-certs 读取信任根；设了这两个变量就只信任它们指向的根。
+        // 场景默认只信任 harness CA，fake provider 与 TLS 夹具都用它签发的证书。
+        let trust = root.path().join("tls-trust");
+        std::fs::create_dir_all(trust.join("empty"))?;
+        std::fs::write(
+            trust.join("ca.pem"),
+            crate::tls::TlsIdentity::shared()?.ca_pem(),
+        )?;
+        allowed_env.insert(
+            "SSL_CERT_FILE".into(),
+            trust.join("ca.pem").display().to_string(),
+        );
+        allowed_env.insert(
+            "SSL_CERT_DIR".into(),
+            trust.join("empty").display().to_string(),
+        );
 
         Ok(Self {
             daemon: Arc::new(ScenarioDaemon::new(home.join(".local/state"))),
