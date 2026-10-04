@@ -334,14 +334,14 @@ async fn live_multicall_closes_continue_then_finish_from_structured_history() {
                         call: UnboundToolCall {
                             provider_call_id: Some("read-1".into()),
                             name: "observe.workspace".into(),
-                            arguments: json!({"mode":"read_file", "path":"visible.txt"}),
+                            arguments: json!({"request": {"mode":"read_file", "path":"visible.txt"}}),
                         },
                     }),
                     MessagePart::semantic_only(MessageSemantic::ToolCall {
                         call: UnboundToolCall {
                             provider_call_id: Some("read-2".into()),
                             name: "observe.workspace".into(),
-                            arguments: json!({"mode":"read_file", "path":"../outside.txt"}),
+                            arguments: json!({"request": {"mode":"read_file", "path":"../outside.txt"}}),
                         },
                     }),
                 ]

@@ -131,7 +131,7 @@ impl LlmClient for CancelOnDone {
                         call: UnboundToolCall {
                             provider_call_id: Some("call".into()),
                             name: "observe.workspace".into(),
-                            arguments: serde_json::json!({"mode":"read_file","path":"src/lib.rs"}),
+                            arguments: serde_json::json!({"request": {"mode":"read_file","path":"src/lib.rs"}}),
                         },
                     })],
                 ),

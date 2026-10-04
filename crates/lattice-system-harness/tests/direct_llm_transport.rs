@@ -110,7 +110,7 @@ fn retry_after_is_honoured_and_requests_identify_lattice() {
             tool_call(
                 "call-1",
                 "observe.workspace",
-                r#"{"mode":"read_file","path":"notes.txt"}"#,
+                r#"{"request":{"mode":"read_file","path":"notes.txt"}}"#,
             ),
             http(
                 429,
@@ -190,7 +190,7 @@ fn retry_after_beyond_limits_fails_at_once_with_the_provider_reason() {
                 tool_call(
                     "call-1",
                     "observe.workspace",
-                    r#"{"mode":"read_file","path":"notes.txt"}"#,
+                    r#"{"request":{"mode":"read_file","path":"notes.txt"}}"#,
                 ),
                 http(
                     429,
@@ -266,7 +266,7 @@ fn overload_and_gateway_errors_retry_with_bounded_diagnostics() {
         tool_call(
             "call-1",
             "observe.workspace",
-            r#"{"mode":"read_file","path":"notes.txt"}"#,
+            r#"{"request":{"mode":"read_file","path":"notes.txt"}}"#,
         ),
         http(
             529,
@@ -357,7 +357,7 @@ fn stream_cut_before_completion_is_retried() {
             tool_call(
                 "call-1",
                 "observe.workspace",
-                r#"{"mode":"read_file","path":"notes.txt"}"#,
+                r#"{"request":{"mode":"read_file","path":"notes.txt"}}"#,
             ),
             SseScript::Disconnect {
                 chunks_before_drop: vec!["partial".into()],
@@ -435,13 +435,13 @@ fn multi_step_turn_reuses_one_connection_and_survives_server_close() {
             tool_call(
                 "call-1",
                 "observe.workspace",
-                r#"{"mode":"read_file","path":"a.txt"}"#,
+                r#"{"request":{"mode":"read_file","path":"a.txt"}}"#,
             ),
             SseScript::CloseAfter {
                 script: Box::new(tool_call(
                     "call-2",
                     "observe.workspace",
-                    r#"{"mode":"read_file","path":"b.txt"}"#,
+                    r#"{"request":{"mode":"read_file","path":"b.txt"}}"#,
                 )),
             },
             SseScript::plain("both read"),
@@ -510,7 +510,7 @@ fn unprocessed_requests_are_resent_inside_one_attempt() {
                 tool_call(
                     "call-1",
                     "observe.workspace",
-                    r#"{"mode":"read_file","path":"notes.txt"}"#,
+                    r#"{"request":{"mode":"read_file","path":"notes.txt"}}"#,
                 ),
                 refusal,
                 SseScript::plain("answered after resend"),
@@ -585,7 +585,7 @@ fn plaintext_local_provider_over_http1() {
         tool_call(
             "call-1",
             "observe.workspace",
-            r#"{"mode":"read_file","path":"a.txt"}"#,
+            r#"{"request":{"mode":"read_file","path":"a.txt"}}"#,
         ),
         SseScript::HttpError {
             status: 503,
@@ -594,7 +594,7 @@ fn plaintext_local_provider_over_http1() {
         tool_call(
             "call-2",
             "observe.workspace",
-            r#"{"mode":"read_file","path":"b.txt"}"#,
+            r#"{"request":{"mode":"read_file","path":"b.txt"}}"#,
         ),
         SseScript::plain("local answer"),
     ]))

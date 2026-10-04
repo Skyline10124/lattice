@@ -54,54 +54,67 @@ distribution = "builtin"
 # not schema concerns — the host resolves every path per segment and clamps every
 # limit — but the schema does not pretend to accept them either, so a malformed
 # request fails at the cheapest possible point.
+#
+# The union sits under a required `request` property instead of at the top
+# level because providers validate tool definitions before any model call:
+# OpenAI and Anthropic reject a parameters schema whose top level is not
+# `type: object` or carries `oneOf`/`anyOf`/`allOf`, and DeepSeek rejects one
+# without `type: object` (#269). Nested, the union keeps every constraint above.
 schema = '''
 {
-  "oneOf": [
-    {
-      "type": "object",
-      "properties": {
-        "mode": { "const": "read_file" },
-        "path": { "type": "string", "minLength": 1 },
-        "offset": { "type": "integer", "minimum": 1 },
-        "limit": { "type": "integer", "minimum": 1 },
-        "line_numbers": { "type": "boolean" }
-      },
-      "required": ["mode", "path"],
-      "additionalProperties": false
-    },
-    {
-      "type": "object",
-      "properties": {
-        "mode": { "const": "grep" },
-        "pattern": { "type": "string", "minLength": 1 },
-        "path": { "type": "string" },
-        "max_results": { "type": "integer", "minimum": 1 }
-      },
-      "required": ["mode", "pattern"],
-      "additionalProperties": false
-    },
-    {
-      "type": "object",
-      "properties": {
-        "mode": { "const": "list_directory" },
-        "path": { "type": "string" },
-        "limit": { "type": "integer", "minimum": 1 }
-      },
-      "required": ["mode", "path"],
-      "additionalProperties": false
-    },
-    {
-      "type": "object",
-      "properties": {
-        "mode": { "const": "find_files" },
-        "pattern": { "type": "string", "minLength": 1 },
-        "path": { "type": "string" },
-        "limit": { "type": "integer", "minimum": 1 }
-      },
-      "required": ["mode", "pattern"],
-      "additionalProperties": false
+  "type": "object",
+  "properties": {
+    "request": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "mode": { "const": "read_file" },
+            "path": { "type": "string", "minLength": 1 },
+            "offset": { "type": "integer", "minimum": 1 },
+            "limit": { "type": "integer", "minimum": 1 },
+            "line_numbers": { "type": "boolean" }
+          },
+          "required": ["mode", "path"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": { "const": "grep" },
+            "pattern": { "type": "string", "minLength": 1 },
+            "path": { "type": "string" },
+            "max_results": { "type": "integer", "minimum": 1 }
+          },
+          "required": ["mode", "pattern"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": { "const": "list_directory" },
+            "path": { "type": "string" },
+            "limit": { "type": "integer", "minimum": 1 }
+          },
+          "required": ["mode", "path"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": { "const": "find_files" },
+            "pattern": { "type": "string", "minLength": 1 },
+            "path": { "type": "string" },
+            "limit": { "type": "integer", "minimum": 1 }
+          },
+          "required": ["mode", "pattern"],
+          "additionalProperties": false
+        }
+      ]
     }
-  ]
+  },
+  "required": ["request"],
+  "additionalProperties": false
 }
 '''
 
@@ -296,7 +309,7 @@ cell = "alloc:read:workspace"
 
 [artifact]
 # Written by `cargo xtask tool-build`; verified by the composition gate.
-sha256 = "14b0ea2fe0fe6d2f81827da8bec77a4270501c66ac505867f2a74026cda143ce"
+sha256 = "929bebc10aa91fe32a29fd83b6ece91975ef950ab44f884180092a825c89cb37"
 # The encoder belongs in this fingerprint: `wasm-tools component new` determines
 # the resulting Component bytes, so the sha256 above is only interpretable
 # alongside it (#80). `cargo xtask ci` asserts the installed encoder matches

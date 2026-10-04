@@ -781,7 +781,10 @@ fn direct_tools_catalog_exposure_matches_enabled() {
             format!("observe projection must carry manifest description: {observe}"),
         )?;
         require(
-            observe["parameters"]["oneOf"].as_array().map(Vec::len) == Some(4),
+            observe["parameters"]["properties"]["request"]["oneOf"]
+                .as_array()
+                .map(Vec::len)
+                == Some(4),
             format!("observe projection must retain four modes: {observe}"),
         )?;
         Ok(())

@@ -85,22 +85,26 @@ impl Guest for ObserveWorkspace {
             return Err(String::from("cancelled"));
         }
 
-        // The host validated `params_json` against the union params schema
-        // before this Component was entered, so a parse failure here means the
-        // host handed over something its own validator accepted — a host bug,
-        // not a caller error. Report it plainly rather than guessing a mode.
+        // The host validated `params_json` against the params schema before this
+        // Component was entered, so a parse failure here means the host handed
+        // over something its own validator accepted — a host bug, not a caller
+        // error. Report it plainly rather than guessing a mode. The four-mode
+        // union is the required `request` property, not the top level.
         let params: serde_json::Value =
             serde_json::from_str(&params_json).map_err(|err| format!("malformed params: {err}"))?;
+        let params = params
+            .get("request")
+            .ok_or_else(|| String::from("params carry no request"))?;
         let mode = params
             .get("mode")
             .and_then(|value| value.as_str())
             .ok_or_else(|| String::from("params carry no mode discriminant"))?;
 
         let value = match mode {
-            "read_file" => read_file(&params)?,
-            "grep" => grep(&params)?,
-            "list_directory" => list_directory(&params)?,
-            "find_files" => find_files(&params)?,
+            "read_file" => read_file(params)?,
+            "grep" => grep(params)?,
+            "list_directory" => list_directory(params)?,
+            "find_files" => find_files(params)?,
             // Unreachable through the schema, which closes `mode` to these four
             // via `const` on each branch. Refused rather than defaulted: a fifth
             // mode arriving here would mean the descriptor and this dispatch

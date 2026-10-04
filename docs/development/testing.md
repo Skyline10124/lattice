@@ -99,7 +99,7 @@ fake provider 与官方 provider 一样使用 TLS + HTTP/2：ALPN 只提供 `h2`
 
 fake provider 唯一的客户端是被测产品，因此只做取出路由、凭据与 body 所需的最少解析，不防御畸形或恶意 HTTP。它对场景只承担三项保证：
 
-1. 计数准确：只有发往三种 provider 模型端点的请求进入 request capture；其他请求得到错误响应并记为 fixture failure，不被静默接受。非 JSON body 保留为诊断，不虚构有效模型请求。对端放弃流或连接、客户端在 TLS 握手中拒绝证书都属于对端行为，不记为 fixture failure；握手被拒的次数可以查询。
+1. 计数准确：只有发往三种 provider 模型端点的请求进入 request capture；其他请求得到错误响应并记为 fixture failure，不被静默接受。工具定义按真实 provider 的规则核对：OpenAI、Anthropic 的参数 schema 顶层不是 `type: object`，或带 `oneOf`、`anyOf`、`allOf`、`enum`、`not`；Gemini 的 `parameters` 任意层级出现 `additionalProperties`、`const`、`contains`、`minContains`。违反时返回 400 并记为 fixture failure，该请求不进入 capture。非 JSON body 保留为诊断，不虚构有效模型请求。对端放弃流或连接、客户端在 TLS 握手中拒绝证书都属于对端行为，不记为 fixture failure；握手被拒的次数可以查询。
 2. 回复确定：request capture、Sequence 选择/推进与到达通知在同一临界区发生，gate 只控制交付，不重排脚本归属。超出 Sequence 重复最后一项，空 Sequence 产生 IllegalResponse。
 3. 失败有界：request/stall/release/shutdown 采用有界握手；shutdown 发出停止信号（同时中止停在握手或读请求中的连接任务）、取消 gate，等待在途任务结束后才 join 服务线程；超时返回错误但保留线程，再次调用或 Drop 继续有界等待，不作无界等待。空闲的 HTTP/1.1 连接五秒后关闭。保留首个 fixture failure，捕获已不可能时提早报告，shutdown 在有界清理后返回该错误；不另建 health 或 failure 订阅接口。
 

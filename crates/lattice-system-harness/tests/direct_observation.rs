@@ -127,79 +127,81 @@ fn direct_observation_visibility_and_bounds() {
     fs::write(&outside_file, OUTSIDE_CANARY).expect("write outside-root canary");
     let outside_file_path = outside_file.to_string_lossy().into_owned();
     let outside_root_path = world.root().to_string_lossy().into_owned();
-    let absolute_read = json!({"mode": "read_file", "path": outside_file_path}).to_string();
-    let absolute_list = json!({"mode": "list_directory", "path": outside_root_path}).to_string();
-    let absolute_grep = json!({
+    let absolute_read =
+        json!({"request": {"mode": "read_file", "path": outside_file_path}}).to_string();
+    let absolute_list =
+        json!({"request": {"mode": "list_directory", "path": outside_root_path}}).to_string();
+    let absolute_grep = json!({"request": {
         "mode": "grep",
         "pattern": "OUTSIDE_ROOT",
         "path": outside_root_path,
-    })
+    }})
     .to_string();
-    let absolute_find = json!({
+    let absolute_find = json!({"request": {
         "mode": "find_files",
         "pattern": "outside-observation.txt",
         "path": outside_root_path,
-    })
+    }})
     .to_string();
     let calls: &[(&str, &str)] = &[
         (
             "observe.workspace",
-            r#"{"mode":"read_file","path":"tracked.txt"}"#,
+            r#"{"request":{"mode":"read_file","path":"tracked.txt"}}"#,
         ),
         (
             "observe.workspace",
-            r#"{"mode":"read_file","path":"notes.txt"}"#,
+            r#"{"request":{"mode":"read_file","path":"notes.txt"}}"#,
         ),
         (
             "observe.workspace",
-            r#"{"mode":"read_file","path":"private/ignored.txt"}"#,
+            r#"{"request":{"mode":"read_file","path":"private/ignored.txt"}}"#,
         ),
         (
             "observe.workspace",
-            r#"{"mode":"read_file","path":"private/included.txt"}"#,
+            r#"{"request":{"mode":"read_file","path":"private/included.txt"}}"#,
         ),
         (
             "observe.workspace",
-            r#"{"mode":"read_file","path":"denied/hidden.txt"}"#,
+            r#"{"request":{"mode":"read_file","path":"denied/hidden.txt"}}"#,
         ),
         (
             "observe.workspace",
-            r#"{"mode":"read_file","path":".lattice/private.txt"}"#,
+            r#"{"request":{"mode":"read_file","path":".lattice/private.txt"}}"#,
         ),
         (
             "observe.workspace",
-            r#"{"mode":"read_file","path":"big.txt"}"#,
+            r#"{"request":{"mode":"read_file","path":"big.txt"}}"#,
         ),
         (
             "observe.workspace",
-            r#"{"mode":"list_directory","path":"."}"#,
+            r#"{"request":{"mode":"list_directory","path":"."}}"#,
         ),
         (
             "observe.workspace",
-            r#"{"mode":"grep","pattern":"needle","path":"."}"#,
+            r#"{"request":{"mode":"grep","pattern":"needle","path":"."}}"#,
         ),
         (
             "observe.workspace",
-            r#"{"mode":"find_files","pattern":"*.txt","path":"."}"#,
+            r#"{"request":{"mode":"find_files","pattern":"*.txt","path":"."}}"#,
         ),
         (
             "observe.workspace",
-            r#"{"mode":"read_file","path":"../outside-observation.txt"}"#,
+            r#"{"request":{"mode":"read_file","path":"../outside-observation.txt"}}"#,
         ),
         ("observe.workspace", absolute_read.as_str()),
         (
             "observe.workspace",
-            r#"{"mode":"list_directory","path":".."}"#,
+            r#"{"request":{"mode":"list_directory","path":".."}}"#,
         ),
         ("observe.workspace", absolute_list.as_str()),
         (
             "observe.workspace",
-            r#"{"mode":"grep","pattern":"OUTSIDE_ROOT","path":".."}"#,
+            r#"{"request":{"mode":"grep","pattern":"OUTSIDE_ROOT","path":".."}}"#,
         ),
         ("observe.workspace", absolute_grep.as_str()),
         (
             "observe.workspace",
-            r#"{"mode":"find_files","pattern":"outside-observation.txt","path":".."}"#,
+            r#"{"request":{"mode":"find_files","pattern":"outside-observation.txt","path":".."}}"#,
         ),
         ("observe.workspace", absolute_find.as_str()),
     ];
@@ -502,19 +504,19 @@ fn direct_observation_symlinks_are_refused_without_canary_leak() {
     let calls = [
         (
             "observe.workspace",
-            r#"{"mode":"read_file","path":"file-link"}"#,
+            r#"{"request":{"mode":"read_file","path":"file-link"}}"#,
         ),
         (
             "observe.workspace",
-            r#"{"mode":"list_directory","path":"dir-link"}"#,
+            r#"{"request":{"mode":"list_directory","path":"dir-link"}}"#,
         ),
         (
             "observe.workspace",
-            r#"{"mode":"grep","pattern":"I233_E2E_EXTERNAL_CANARY","path":"dir-link"}"#,
+            r#"{"request":{"mode":"grep","pattern":"I233_E2E_EXTERNAL_CANARY","path":"dir-link"}}"#,
         ),
         (
             "observe.workspace",
-            r#"{"mode":"find_files","pattern":"*","path":"dir-link"}"#,
+            r#"{"request":{"mode":"find_files","pattern":"*","path":"dir-link"}}"#,
         ),
     ];
     let server = wire_fake_llm(&world, "dl-obs", tool_sequence(&calls, "symlinks refused"));

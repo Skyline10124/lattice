@@ -140,7 +140,7 @@ fn direct_mutation_edit_hash_and_anchor() {
             tool_call(
                 "o1",
                 "observe.workspace",
-                r#"{"mode":"read_file","path":"tracked.txt"}"#,
+                r#"{"request":{"mode":"read_file","path":"tracked.txt"}}"#,
             ),
             // Round 2: edit with the hash from the previous tool message —
             // but the fake LLM cannot dynamically read captures. We drive
@@ -270,17 +270,17 @@ fn direct_mutation_stale_edit_and_external_visibility() {
             tool_call(
                 "o1",
                 "observe.workspace",
-                r#"{"mode":"read_file","path":"tracked.txt"}"#,
+                r#"{"request":{"mode":"read_file","path":"tracked.txt"}}"#,
             ),
             tool_call(
                 "list1",
                 "observe.workspace",
-                r#"{"mode":"list_directory","path":"."}"#,
+                r#"{"request":{"mode":"list_directory","path":"."}}"#,
             ),
             tool_call(
                 "list2",
                 "observe.workspace",
-                r#"{"mode":"list_directory","path":"."}"#,
+                r#"{"request":{"mode":"list_directory","path":"."}}"#,
             ),
             SseScript::plain("observed original and external addition"),
         ]),
@@ -380,7 +380,7 @@ fn direct_mutation_stale_edit_and_external_visibility() {
                 tool_call(
                     "o2",
                     "observe.workspace",
-                    r#"{"mode":"read_file","path":"tracked.txt"}"#,
+                    r#"{"request":{"mode":"read_file","path":"tracked.txt"}}"#,
                 ),
                 SseScript::plain("see external"),
             ]),
