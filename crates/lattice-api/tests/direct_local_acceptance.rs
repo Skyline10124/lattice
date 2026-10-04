@@ -337,7 +337,7 @@ async fn component_receipts_carry_method_local_evidence() {
     let observe = client
         .call_receipt(
             OBSERVE_WORKSPACE,
-            serde_json::json!({ "mode": "read_file", "path": "a.txt" }),
+            serde_json::json!({"request": { "mode": "read_file", "path": "a.txt" }}),
         )
         .await
         .expect("component read receipt");

@@ -56,7 +56,7 @@ fn direct_turn_end_events_completed_turn_delivers_terminal_event() {
             tool_call(
                 "observe1",
                 "observe.workspace",
-                r#"{"mode":"list_directory","path":"."}"#,
+                r#"{"request":{"mode":"list_directory","path":"."}}"#,
             ),
             SseScript::plain("workspace observed"),
         ]),

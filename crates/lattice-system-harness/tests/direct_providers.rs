@@ -120,7 +120,7 @@ fn anthropic_and_gemini_turns_call_a_tool_and_project_the_result_back() {
             tool_call(
                 "call-1",
                 "observe.workspace",
-                r#"{"mode":"read_file","path":"notes.txt"}"#,
+                r#"{"request":{"mode":"read_file","path":"notes.txt"}}"#,
             ),
             lattice_system_harness::SseScript::PlainText {
                 chunks: vec!["answer-".into(), provider.name.into()],

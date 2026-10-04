@@ -167,9 +167,9 @@ fn chunk(delta: Value) -> Value {
 }
 fn calls(prefix: &str, path: &str) -> Value {
     json!({"tool_calls":[
-        {"index":0,"id":format!("{prefix}-read"),"type":"function","function":{"name":"observe__workspace","arguments":"{\"mode\":\"read_file\",\"path\":\"seed.txt\"}"}},
+        {"index":0,"id":format!("{prefix}-read"),"type":"function","function":{"name":"observe__workspace","arguments":"{\"request\":{\"mode\":\"read_file\",\"path\":\"seed.txt\"}}"}},
         {"index":1,"id":format!("{prefix}-write"),"type":"function","function":{"name":"mutate__create","arguments":json!({"path":path,"content":"durable\n","create_parents":false}).to_string()}},
-        {"index":2,"id":format!("{prefix}-tail"),"type":"function","function":{"name":"observe__workspace","arguments":"{\"mode\":\"read_file\",\"path\":\"seed.txt\"}"}}
+        {"index":2,"id":format!("{prefix}-tail"),"type":"function","function":{"name":"observe__workspace","arguments":"{\"request\":{\"mode\":\"read_file\",\"path\":\"seed.txt\"}}"}}
     ]})
 }
 fn end() -> Value {
@@ -451,7 +451,7 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
             (
                 "missing".into(),
                 "observe.workspace".into(),
-                json!({"mode":"read_file","path":"absent-private.txt"}).to_string(),
+                json!({"request": {"mode":"read_file","path":"absent-private.txt"}}).to_string(),
             ),
         ]);
         let waiting = SseScript::ToolCalls {

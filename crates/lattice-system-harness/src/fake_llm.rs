@@ -173,6 +173,8 @@ pub enum ServeError {
     },
     #[error("not a model request: {0}")]
     UnexpectedRequest(String),
+    #[error("provider would reject the tool definitions: {0}")]
+    RejectedToolSchema(String),
     #[error("script cannot be rendered in the {0} protocol")]
     UnsupportedScript(&'static str),
     #[error("fake-provider server thread failed: {0}")]
@@ -869,6 +871,20 @@ fn decide(
     {
         return Ok((Reply::text(401, "unauthorized\n"), None));
     }
+    if let Some(rejection) = tool_schema_rejection(protocol, &request.body) {
+        let body = serde_json::json!({"error": {
+            "message": rejection,
+            "type": "invalid_request_error",
+            "code": "invalid_function_parameters",
+        }});
+        let reply = Reply::Status {
+            status: 400,
+            content_type: "application/json".into(),
+            headers: Vec::new(),
+            body: body.to_string(),
+        };
+        return Ok((reply, Some(ServeError::RejectedToolSchema(rejection))));
+    }
     let mut captured = parse_request_body(protocol, path_model, &request.body);
     captured.headers = request.headers;
     captured.connection = connection;
@@ -1409,6 +1425,40 @@ fn parse_request_body(
     }
 }
 
+/// 与 OpenAI、Anthropic 的工具定义校验一致：参数 schema 顶层必须是 `type: object`，且不能出现
+/// `oneOf`、`anyOf`、`allOf`、`enum`、`not`。真实 provider 对违反者返回 400，整个 Turn 无法开始。
+fn tool_schema_rejection(protocol: Protocol, body: &str) -> Option<String> {
+    let raw: Value = serde_json::from_str(body).ok()?;
+    let tools = raw["tools"].as_array().into_iter().flatten();
+    let schemas: Vec<(&Value, &Value)> = match protocol {
+        Protocol::OpenAi => tools
+            .map(|tool| (&tool["function"]["name"], &tool["function"]["parameters"]))
+            .collect(),
+        Protocol::Anthropic => tools
+            .map(|tool| (&tool["name"], &tool["input_schema"]))
+            .collect(),
+        Protocol::Gemini => tools
+            .flat_map(|tool| {
+                tool["functionDeclarations"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+            })
+            .map(|declaration| (&declaration["name"], &declaration["parameters"]))
+            .collect(),
+    };
+    schemas.into_iter().find_map(|(name, schema)| {
+        let combinator = ["oneOf", "anyOf", "allOf", "enum", "not"]
+            .into_iter()
+            .find(|key| schema.get(key).is_some());
+        (schema["type"] != "object" || combinator.is_some()).then(|| {
+            format!(
+                "invalid schema for function {name}: schema must have type 'object' and not have \
+                 'oneOf'/'anyOf'/'allOf'/'enum'/'not' at the top level"
+            )
+        })
+    })
+}
 /// `(call id, Tool name, arguments JSON)` of one scripted Tool call.
 type ScriptedCall = (String, String, String);
 
