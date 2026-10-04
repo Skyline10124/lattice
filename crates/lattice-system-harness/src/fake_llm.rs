@@ -1425,29 +1425,40 @@ fn parse_request_body(
     }
 }
 
-/// 与 OpenAI、Anthropic 的工具定义校验一致：参数 schema 顶层必须是 `type: object`，且不能出现
-/// `oneOf`、`anyOf`、`allOf`、`enum`、`not`。真实 provider 对违反者返回 400，整个 Turn 无法开始。
+/// 按真实 provider 的工具定义校验拒绝请求；违反者返回 400，整个 Turn 无法开始。
+///
+/// - OpenAI、Anthropic：参数 schema 顶层必须是 `type: object`，且不能出现
+///   `oneOf`、`anyOf`、`allOf`、`enum`、`not`。
+/// - Gemini：`functionDeclarations[].parameters` 只接受 OpenAPI 子集，任意层级出现
+///   `additionalProperties`、`const`、`contains`、`minContains` 都会被拒（2026-10-05 对
+///   AI Studio 与 Vertex 实测）；完整 JSON Schema 须放在 `parametersJsonSchema`。
 fn tool_schema_rejection(protocol: Protocol, body: &str) -> Option<String> {
     let raw: Value = serde_json::from_str(body).ok()?;
     let tools = raw["tools"].as_array().into_iter().flatten();
-    let schemas: Vec<(&Value, &Value)> = match protocol {
-        Protocol::OpenAi => tools
-            .map(|tool| (&tool["function"]["name"], &tool["function"]["parameters"]))
-            .collect(),
-        Protocol::Anthropic => tools
-            .map(|tool| (&tool["name"], &tool["input_schema"]))
-            .collect(),
-        Protocol::Gemini => tools
+    if protocol == Protocol::Gemini {
+        return tools
             .flat_map(|tool| {
                 tool["functionDeclarations"]
                     .as_array()
                     .into_iter()
                     .flatten()
             })
-            .map(|declaration| (&declaration["name"], &declaration["parameters"]))
-            .collect(),
-    };
-    schemas.into_iter().find_map(|(name, schema)| {
+            .find_map(|declaration| {
+                let keyword = ["additionalProperties", "const", "contains", "minContains"]
+                    .into_iter()
+                    .find(|key| has_key_anywhere(&declaration["parameters"], key))?;
+                Some(format!(
+                    "Invalid JSON payload received. Unknown name \"{keyword}\" in parameters of \
+                     function {}: Cannot find field.",
+                    declaration["name"]
+                ))
+            });
+    }
+    tools.into_iter().find_map(|tool| {
+        let (name, schema) = match protocol {
+            Protocol::OpenAi => (&tool["function"]["name"], &tool["function"]["parameters"]),
+            _ => (&tool["name"], &tool["input_schema"]),
+        };
         let combinator = ["oneOf", "anyOf", "allOf", "enum", "not"]
             .into_iter()
             .find(|key| schema.get(key).is_some());
@@ -1458,6 +1469,16 @@ fn tool_schema_rejection(protocol: Protocol, body: &str) -> Option<String> {
             )
         })
     })
+}
+
+fn has_key_anywhere(value: &Value, key: &str) -> bool {
+    match value {
+        Value::Object(map) => {
+            map.contains_key(key) || map.values().any(|nested| has_key_anywhere(nested, key))
+        }
+        Value::Array(items) => items.iter().any(|nested| has_key_anywhere(nested, key)),
+        _ => false,
+    }
 }
 /// `(call id, Tool name, arguments JSON)` of one scripted Tool call.
 type ScriptedCall = (String, String, String);

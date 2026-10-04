@@ -34,10 +34,13 @@ pub fn build_request_json(
             .tools
             .iter()
             .map(|tool| {
+                // `parameters` 只接受 OpenAPI 子集，会拒绝工具 schema 用到的
+                // `additionalProperties`、`const`、`contains` 等关键字；
+                // `parametersJsonSchema` 接受完整 JSON Schema。
                 serde_json::json!({
                     "name": tool.name,
                     "description": tool.description,
-                    "parameters": tool.parameters,
+                    "parametersJsonSchema": tool.parameters,
                 })
             })
             .collect();
