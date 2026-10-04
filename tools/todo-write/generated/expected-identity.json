@@ -1,11 +1,11 @@
 {
   "abi-version": 1,
-  "artifact-sha256": "dc63bded21194acbc693edf7fed9fec8efee395329402a867826b5bff3e676f4",
-  "descriptor-sha256": "20286e5b2960c56aed8b175f0c03b7b97a386fa9024eda86a0413dd568ac220d",
+  "artifact-sha256": "bb0d9da2d2e1dadc32e8c864212afb6c287234739227222a062cea42e8e59b76",
+  "descriptor-sha256": "5c9c9ab75791181182ca82097a82c84a531ec7e38911f30b4a7d213c79c3ed65",
   "expected-imports": [
     "lattice:tool-host/host-control@0.1.0"
   ],
   "name": "session.todo_write",
-  "toolchain": "rustc-1.96.0+wit-bindgen-0.59+wasm-tools-1.254.0",
+  "toolchain": "rustc-1.96.0+wit-bindgen-0.60+wasm-tools-1.254.0",
   "version": "0.1.0"
 }
