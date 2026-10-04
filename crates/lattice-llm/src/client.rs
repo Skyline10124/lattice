@@ -219,7 +219,7 @@ fn stream_sse_response(body_stream: BodyStream, provider: ProviderKind) -> LlmSt
 
         // Drain any pending events from the previous chunk first.
         if let Some(event) = state.pending.pop_front() {
-            return Some((event, state));
+            return Some(deliver(state, event).await);
         }
 
         // Pull more chunks until we produce at least one event or exhaust
@@ -243,7 +243,7 @@ fn stream_sse_response(body_stream: BodyStream, provider: ProviderKind) -> LlmSt
                     }
                     drain_complete_events(&mut state);
                     if let Some(event) = state.pending.pop_front() {
-                        return Some((event, state));
+                        return Some(deliver(state, event).await);
                     }
                 }
                 Some(Err(e)) => {
@@ -280,6 +280,29 @@ fn stream_sse_response(body_stream: BodyStream, provider: ProviderKind) -> LlmSt
     Box::pin(event_stream)
 }
 
+/// 交付 `Done` 之前读完响应体。调用方拿到 `Done` 就丢弃流，而 HTTP/1.1 连接只有在响应体
+/// 读到结尾后才回到连接池；分块响应的结尾常晚于最后一个事件到达，不读完同一 Turn 的下一次
+/// 请求就得新建连接。provider 在结束事件后随即结束响应体，因此只等很短时间、读很少数据：
+/// `Done` 最多推迟 0.5 秒，超出时放弃这条连接。
+async fn deliver(mut state: SseStreamState, event: LlmEvent) -> (LlmEvent, SseStreamState) {
+    const TAIL_WAIT: Duration = Duration::from_millis(500);
+    const TAIL_BYTES: usize = 64 * 1024;
+    if matches!(event, LlmEvent::Done { .. }) && !state.finished {
+        state.finished = true;
+        let body = &mut state.body_stream;
+        let _ = tokio::time::timeout(TAIL_WAIT, async {
+            let mut read = 0;
+            while let Some(Ok(chunk)) = body.next().await {
+                read += chunk.len();
+                if read > TAIL_BYTES {
+                    break;
+                }
+            }
+        })
+        .await;
+    }
+    (event, state)
+}
 /// Drain complete SSE events from the byte buffer.
 ///
 /// Recognizes `\n\n`, `\r\n\r\n`, and `\r\r` as event separators per the SSE
