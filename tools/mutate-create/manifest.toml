@@ -55,5 +55,5 @@ name = "workspace.mutation.result"
 cell = "alloc:write:workspace"
 
 [artifact]
-sha256 = "6454d321f5e6bee2f3315edf4ae1092597ae5d93e696a6c9c14b89d696b0c4a8"
-toolchain = "rustc-1.96.0+wit-bindgen-0.59+wasm-tools-1.254.0"
+sha256 = "fc850581493f0574ea4e1999d112637fe0b74d2b4fe20ab74d49a01f60016119"
+toolchain = "rustc-1.96.0+wit-bindgen-0.60+wasm-tools-1.254.0"

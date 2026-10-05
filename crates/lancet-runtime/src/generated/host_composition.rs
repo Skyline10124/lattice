@@ -73,10 +73,10 @@ pub(crate) static EXPECTED_COMPONENTS: &[ExpectedToolIdentity] = &[
     ExpectedToolIdentity {
         name: "fetch.web",
         descriptor_sha256: parse_hex_digest(
-            "f633ed1e26895be83b85b3c94856c14141e36ab6083835bc865698dcac805c10",
+            "2229f40451c2c97575ee60010a223fb9efd5b0a4994bd7001ffe457d336f91ad",
         ),
         artifact_sha256: parse_hex_digest(
-            "8c64158ccbb5a27f8a0637ea0619f4a241521bb35621e0e2735ab280dc4cd2d5",
+            "0aa8bc2c753572ad82fe5f34af76e57174536e64b5845acb92b7347d04780a03",
         ),
         abi_version: 1,
         imports: &[
@@ -87,10 +87,10 @@ pub(crate) static EXPECTED_COMPONENTS: &[ExpectedToolIdentity] = &[
     ExpectedToolIdentity {
         name: "mutate.create",
         descriptor_sha256: parse_hex_digest(
-            "89007cefe32b17fbeb479d349c8a609b6e8f7112fc25f827e555e295be18459d",
+            "f9299ecba160b40f10eea8eef244160df84f14bc8e5cba9b5dace7391de10566",
         ),
         artifact_sha256: parse_hex_digest(
-            "6454d321f5e6bee2f3315edf4ae1092597ae5d93e696a6c9c14b89d696b0c4a8",
+            "fc850581493f0574ea4e1999d112637fe0b74d2b4fe20ab74d49a01f60016119",
         ),
         abi_version: 1,
         imports: &[
@@ -101,10 +101,10 @@ pub(crate) static EXPECTED_COMPONENTS: &[ExpectedToolIdentity] = &[
     ExpectedToolIdentity {
         name: "mutate.edit",
         descriptor_sha256: parse_hex_digest(
-            "9433ba395e88c5bafc95ab2926ac355e19b3e95b4b48a9e171747c5642852aec",
+            "f0add7d54515b0a022c45cbe6dc1f4afcb209e899a87fc815a42652d5f5e375e",
         ),
         artifact_sha256: parse_hex_digest(
-            "14308ccd96a0f0f732c853ff897aa19d79b107ab8524a75c9116cc7de4340a1c",
+            "a379ce55742769b310af5a65f40b4c2646f7dfae9c17198f6c708e00a336c31b",
         ),
         abi_version: 1,
         imports: &[
@@ -115,10 +115,10 @@ pub(crate) static EXPECTED_COMPONENTS: &[ExpectedToolIdentity] = &[
     ExpectedToolIdentity {
         name: "observe.workspace",
         descriptor_sha256: parse_hex_digest(
-            "5f7e5d87fbb89dc913f1f6f64268921d4fc73f0cbb8224ff314eba3c56806221",
+            "58c15d32ee6861d793b3ddd65c670575121a406930fd09a65e6a1887ce971194",
         ),
         artifact_sha256: parse_hex_digest(
-            "929bebc10aa91fe32a29fd83b6ece91975ef950ab44f884180092a825c89cb37",
+            "f9bf926a08454f644928103e41a74b9ccef95cb63da6b17c3c9db5dc390dcd9e",
         ),
         abi_version: 1,
         imports: &[
@@ -129,10 +129,10 @@ pub(crate) static EXPECTED_COMPONENTS: &[ExpectedToolIdentity] = &[
     ExpectedToolIdentity {
         name: "session.todo_write",
         descriptor_sha256: parse_hex_digest(
-            "20286e5b2960c56aed8b175f0c03b7b97a386fa9024eda86a0413dd568ac220d",
+            "5c9c9ab75791181182ca82097a82c84a531ec7e38911f30b4a7d213c79c3ed65",
         ),
         artifact_sha256: parse_hex_digest(
-            "dc63bded21194acbc693edf7fed9fec8efee395329402a867826b5bff3e676f4",
+            "bb0d9da2d2e1dadc32e8c864212afb6c287234739227222a062cea42e8e59b76",
         ),
         abi_version: 1,
         imports: &["lattice:tool-host/host-control@0.1.0"],
