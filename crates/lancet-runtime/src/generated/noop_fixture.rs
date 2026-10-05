@@ -33,10 +33,10 @@ pub fn expected_identity() -> ExpectedToolIdentity {
         // composition gate here until both digests are copied across by hand
         // (see #103).
         descriptor_sha256: parse_hex_digest(
-            "5d9a09676e41362dfbc493f341b1bcc422488b621a570080cc2defc6f12d4e2d",
+            "bb887ef7c65ae34976ff0cc1be5e677f3067d7cfc0c96623f3b5733aee920f7e",
         ),
         artifact_sha256: parse_hex_digest(
-            "b677a9b339c4703d8a02af54def031509ff17d73c66a83fc59176a528d646f08",
+            "3c7085377ed38b68fefd38e0915377a54259eb07a68377e7fe5bcc819e37236e",
         ),
         abi_version: 1,
         // The component imports the `host-control` interface from

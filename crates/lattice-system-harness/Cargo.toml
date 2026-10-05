@@ -26,7 +26,9 @@ required-features = ["crash-barriers"]
 # Local Revision string the product computes to script `mutate.edit`
 # preconditions through the fake LLM.
 blake3 = "1"
-gix = { version = "0.85", features = ["tree-editor"] }
+# Default features off: they would re-enable gix's defaults for the whole
+# workspace through feature unification (see root `Cargo.toml`).
+gix = { version = "0.85", default-features = false, features = ["sha1", "tree-editor"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"

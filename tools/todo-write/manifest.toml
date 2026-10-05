@@ -123,9 +123,9 @@ cell = "alloc:none:session"
 
 [artifact]
 # Written by `cargo xtask tool-build`; verified by the composition gate.
-sha256 = "dc63bded21194acbc693edf7fed9fec8efee395329402a867826b5bff3e676f4"
+sha256 = "bb0d9da2d2e1dadc32e8c864212afb6c287234739227222a062cea42e8e59b76"
 # The encoder belongs in this fingerprint: `wasm-tools component new` determines
 # the resulting Component bytes, so the sha256 above is only interpretable
 # alongside it (#80). `cargo xtask ci` asserts the installed encoder matches
 # `EXPECTED_WASM_TOOLS`.
-toolchain = "rustc-1.96.0+wit-bindgen-0.59+wasm-tools-1.254.0"
+toolchain = "rustc-1.96.0+wit-bindgen-0.60+wasm-tools-1.254.0"

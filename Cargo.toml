@@ -85,13 +85,22 @@ rustix = { version = "1.1.4", features = ["fs"] }
 rustls = "0.23"
 rustls-platform-verifier = "0.7"
 tokio-rustls = "0.26"
-gix = { version = "0.85", features = ["tree-editor"] }
+# Only what the code calls: object/ref/commit plumbing (always on), `sha1`,
+# `tree-editor` (`edit_tree`), and `excludes` (gitignore stack + index in
+# lancet-runtime's workspace visibility). `max-performance-safe` keeps the
+# default parallelism and pack caches. Features unify across the graph, so
+# every other `gix` declaration (the harness spells its own) must also turn
+# default features off or the defaults come back.
+gix = { version = "0.85", default-features = false, features = [
+  "sha1", "tree-editor", "excludes", "max-performance-safe"
+] }
 schemars = "1.2"
 bytes = "1"
 # Component Tool engine (ADR 0004 / #5 slice C). Pinned exactly; wasmtime
 # major bumps change the component-model API surface. No wasmtime-wasi.
-wasmtime = { version = "=46.0.1", default-features = false, features = [
-  "async", "component-model", "cranelift", "runtime", "std", "wit-parser"
+# 48 is an LTS line (every 12th major, 24-month security support); stay on it.
+wasmtime = { version = "=48.0.5", default-features = false, features = [
+  "async", "component-model", "cranelift", "runtime", "std"
 ] }
 inventory = "=0.3.24"
 jsonschema = "=0.48.1"
@@ -99,9 +108,12 @@ jsonschema = "=0.48.1"
 # wasmtime: its `generate!` output shapes the guest's core module, so a patch
 # bump changes the committed `.wasm` bytes and the digest the composition gate
 # verifies. Declared here so the prelude and every guest Tool share one pin.
-wit-bindgen = "=0.59.0"
+# Keep it on the same wasm-tools line as wasmtime (0.254) and the pinned
+# `wasm-tools` encoder (1.254) so one wasmparser/wit-parser family is built.
+wit-bindgen = "=0.60.0"
 # Component binary parser for import inspection in the composition gate.
-wasmparser = "0.251"
+# Same minor as wasmtime's own wasmparser, so the build carries one copy.
+wasmparser = "0.254"
 
 # CLI dependencies
 clap = { version = "4", features = ["derive", "env"] }
