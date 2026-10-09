@@ -115,13 +115,13 @@ fn human_stream_keeps_stdout_reasoning_bytes_and_summary_separate() {
         assert_eq!(err.contains("thinking"), verbose);
         assert_eq!(err.contains("model openai/test-model"), verbose);
         assert_eq!(
-            err.contains("warn: llm attempt 0 failed, retrying in 10ms: retry"),
+            err.contains("warn: llm attempt 0 failed, retrying in 10 ms: retry"),
             verbose
         );
         assert!(err.contains("cancelled info: cancelled by user"));
         assert!(err.contains("70000 B"));
         assert!(err.contains("succeeded"));
-        assert!(err.contains("内容不可用"));
+        assert!(err.contains("content unavailable"));
         assert!(err.contains("cancelled by user"));
         assert_eq!(err.lines().filter(|line| line.is_empty()).count(), 1);
         assert_eq!(

@@ -582,9 +582,9 @@ async fn cancel_error_received_during_detach_is_rendered_with_original_identity(
         } else {
             assert_eq!(stderr.matches("cancel denied during detach").count(), 1);
             assert!(
-                stderr
-                    .lines()
-                    .any(|s| s.contains("取消诊断") && s.contains(SESSION) && s.contains(ID))
+                stderr.lines().any(|s| s.contains("cancel diagnostic")
+                    && s.contains(SESSION)
+                    && s.contains(ID))
             );
         }
     }

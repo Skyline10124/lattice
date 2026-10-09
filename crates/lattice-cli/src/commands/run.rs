@@ -101,9 +101,10 @@ fn render_human_event(
             notice,
         } => verbose.then(|| {
             format!(
-                "{}: llm attempt {} failed, retrying in {delay_ms}ms: {}",
+                "{}: llm attempt {} failed, retrying in {} ms: {}",
                 notice_level_label(&notice.level),
                 key.attempt_ordinal,
+                delay_ms,
                 notice.text
             )
         }),
@@ -130,9 +131,9 @@ fn render_human_event(
             let content = match material {
                 MaterialSummary::Available { byte_length, .. } => format!("{byte_length} B"),
                 MaterialSummary::OutputTooLarge { byte_length, .. } => {
-                    format!("{byte_length} B 内容不可用")
+                    format!("{byte_length} B content unavailable")
                 }
-                MaterialSummary::NoContent => "无正文".into(),
+                MaterialSummary::NoContent => "no content".into(),
             };
             Some(format!(
                 "tool {name} {} {content} {}",
@@ -283,7 +284,7 @@ async fn observe_with_signal(
             tokio::select! {
                 _=sigint.recv()=>{
                     if render.last_summary.is_some() {
-                        connection_notice("历史读取被中断；已知结局保留，请重连读取",json);
+                        connection_notice("history read interrupted; the known outcome stands; reconnect to read it",json);
                         break Ok(std::process::ExitCode::from(1));
                     }
                     if interrupted {break Ok(std::process::ExitCode::from(1));}
@@ -330,7 +331,7 @@ async fn observe_with_signal(
                         else if let Some(attempt)=&view.attempt {
                             finish_text(&mut render,&mut std::io::stdout())?;
                             println!(
-                                "--- 当前尝试 turn {} step {} attempt {} 快照 ---",
+                                "--- current attempt snapshot: turn {} step {} attempt {} ---",
                                 attempt.key.turn_id,
                                 attempt.key.model_step_ordinal,
                                 attempt.key.attempt_ordinal
@@ -434,7 +435,7 @@ async fn observe_with_signal(
             );
         } else {
             eprintln!(
-                "取消未确认：session {} turn {id}",
+                "cancel unconfirmed: session {} turn {id}",
                 session_label(report.session_id)
             );
         }
@@ -467,7 +468,7 @@ fn summary_exit(summary: Option<&TurnSummary>) -> std::process::ExitCode {
     })
 }
 fn session_label(id: Option<SessionId>) -> String {
-    id.map_or_else(|| "尚未接受".into(), |id| id.to_string())
+    id.map_or_else(|| "not yet accepted".into(), |id| id.to_string())
 }
 fn not_submitted_label(stage: NotSubmittedStage) -> &'static str {
     match stage {
@@ -483,7 +484,7 @@ fn submission_state(session_id: Option<SessionId>, turn_id: TurnId, state: &str,
         );
     } else {
         eprintln!(
-            "session {} turn {turn_id}: {state}；原身份用于查询/重发",
+            "session {} turn {turn_id}: {state}; use the same identity to query or resend",
             session_label(session_id)
         );
     }
@@ -501,16 +502,18 @@ fn render_acceptance(acceptance: &Acceptance, json: bool) -> Result<()> {
                 turn.session_id,
                 turn.turn_id,
                 if matches!(acceptance, Acceptance::Existing { .. }) {
-                    "找回既有请求；未重复执行"
+                    "existing request found; not executed again"
                 } else {
-                    "已确认接受"
+                    "acceptance confirmed"
                 }
             ),
             Acceptance::ConfirmationUnknown {
                 turn_id,
                 session_id,
             } => submission_state(*session_id, *turn_id, "unknown", false),
-            Acceptance::NeedsConfiguration { .. } => eprintln!("尚需配置；未接受"),
+            Acceptance::NeedsConfiguration { .. } => {
+                eprintln!("configuration required; not accepted")
+            }
         }
     }
     Ok(())
@@ -557,7 +560,10 @@ fn render_history(history: LocalHistory, json: bool) -> Result<()> {
         );
         return Ok(());
     }
-    println!("--- 固定根路径正文，current={} ---", history.anchor.head.0);
+    println!(
+        "--- conversation on the pinned root path, current={} ---",
+        history.anchor.head.0
+    );
     for entry in history.entries {
         let (message, results) = match entry.content {
             Node::Root => continue,
@@ -581,7 +587,10 @@ fn render_history(history: LocalHistory, json: bool) -> Result<()> {
     Ok(())
 }
 fn render_history_error(error: &HistoryReadError, json: bool) {
-    connection_notice("历史正文未读取；已知结局保留，请重连", json);
+    connection_notice(
+        "history not read; the known outcome stands; reconnect to read it",
+        json,
+    );
     report_error(
         &anyhow::Error::new(error.clone()).context(HistoryFailure),
         json,
@@ -595,9 +604,9 @@ fn render_cancel_error(
 ) {
     connection_notice(
         &format!(
-            "取消诊断：session {} turn {}",
+            "cancel diagnostic: session {} turn {}",
             session_label(session_id),
-            turn_id.map_or_else(|| "未知".into(), |id| id.to_string())
+            turn_id.map_or_else(|| "unknown".into(), |id| id.to_string())
         ),
         json,
     );
@@ -612,12 +621,15 @@ fn render_cancel(status: CancelStatus, json: bool) {
                     serde_json::json!({"type":"cancel_acknowledged","owned":true})
                 );
             } else {
-                eprintln!("后台已接管取消；持久终态仍待查询");
+                eprintln!(
+                    "daemon took over the cancel; the durable outcome is still to be queried"
+                );
             }
         }
-        CancelStatus::NotTaken => {
-            connection_notice("后台在判定点未接管本次取消；不表示没有后台工作", json)
-        }
+        CancelStatus::NotTaken => connection_notice(
+            "daemon did not take over this cancel at the decision point; background work may still exist",
+            json,
+        ),
         CancelStatus::Unknown => connection_notice("cancel acknowledgement unknown", json),
         CancelStatus::Pending | CancelStatus::Moot => {}
     }
