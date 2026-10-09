@@ -12,6 +12,8 @@ pub enum ApiError {
     NotFound(String),
     #[error("bad request: {0}")]
     BadRequest(String),
+    #[error("{0}")]
+    Configuration(crate::ConfigRejection),
     #[error("conflict: {0}")]
     Conflict(String),
     #[error("internal error: {0}")]

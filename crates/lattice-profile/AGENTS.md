@@ -4,7 +4,7 @@
 
 维护单 Agent `agent.toml` 的严格 schema、默认模板、发现、只读加载、allowlist 校验和供 API/authority 消费的纯转换数据，不负责运行时编排、会话图、CLI 或 Tool 执行。
 
-`schema.rs` 维护配置类型，`defaults.rs` 维护内置模板，`discovery.rs` 定位 profile，`load.rs` 加载与校验，`error.rs` 定义公开错误；`lib.rs` 只重导出公开 profile 接口。
+`schema.rs` 维护配置类型，`defaults.rs` 维护内置模板，`discovery.rs` 定位 profile，`load.rs` 加载与校验，`error.rs` 定义公开错误，TOML 错误携带由原始文本与 span 算出的行号；`lib.rs` 只重导出公开 profile 接口。
 
 ## 上位文档
 

@@ -4,7 +4,6 @@
 use crate::TuiOptions;
 use crate::app::{Block, ToolSource, ToolState};
 use crate::blocks::BlockList;
-use anyhow::Context;
 use lattice_api::local::{
     LocalClient, LocalHistory, MessageRole, MessageSemantic, Node, ResultPayload, SessionId,
     StepContent, SuccessContent,
@@ -45,21 +44,12 @@ pub(crate) async fn open_or_create(
 pub(crate) fn load_profile(
     options: &TuiOptions,
     active_agent: &str,
-) -> anyhow::Result<lattice_api::LoadedAgentProfile> {
-    lattice_api::validate_agents_dir(&options.agents_dir).map_err(anyhow::Error::msg)?;
-    let loaded = lattice_api::resolve_named_agent_profile(
+) -> Result<lattice_api::LoadedAgentProfile, lattice_api::ApiError> {
+    lattice_api::resolve_named_agent_profile(
         active_agent,
         &options.project_root,
         &options.agents_dir,
     )
-    .with_context(|| format!("load agent profile {active_agent}"))?;
-    if loaded.profile.agent.name != active_agent {
-        anyhow::bail!(
-            "agent profile '{active_agent}' declares agent.name='{}'; these must match",
-            loaded.profile.agent.name
-        );
-    }
-    Ok(loaded)
 }
 
 pub(crate) async fn freeze_configuration(
@@ -68,8 +58,7 @@ pub(crate) async fn freeze_configuration(
 ) -> lattice_api::local::Result<lattice_api::local::FrozenConfiguration> {
     tokio::task::spawn_blocking(move || {
         let root = lattice_api::LocalWorkspaceRoot::from_path(&options.project_root)?;
-        let loaded = load_profile(&options, &agent)
-            .map_err(|_| lattice_api::ApiError::BadRequest("新 Turn 配置无效".into()))?;
+        let loaded = load_profile(&options, &agent)?;
         lattice_api::local::FrozenConfiguration::from_env(loaded, &root)
     })
     .await
@@ -236,3 +225,7 @@ pub(crate) fn append_assistant_text(blocks: &mut BlockList, text: String) {
         _ => blocks.push(Block::Assistant(text)),
     }
 }
+
+#[cfg(test)]
+#[path = "session_config_tests.rs"]
+mod config_tests;

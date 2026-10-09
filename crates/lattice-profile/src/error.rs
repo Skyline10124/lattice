@@ -17,6 +17,7 @@ pub enum ProfileError {
         path: PathBuf,
         #[source]
         source: toml::de::Error,
+        line: Option<std::num::NonZeroU32>,
     },
 
     #[error("invalid schema_version {found} at {path}: only schema_version = 1 is supported")]

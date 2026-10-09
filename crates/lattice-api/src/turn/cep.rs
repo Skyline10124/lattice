@@ -27,9 +27,15 @@ use crate::turn::types::{RunTurnRequest, TurnEvent};
 fn map_lancet_err(err: LancetError) -> ApiError {
     match err {
         LancetError::Config(msg) => ApiError::BadRequest(msg),
-        LancetError::UnknownTools { unknown, available } => ApiError::BadRequest(format!(
-            "unknown enabled tools {unknown:?}; available catalog tools: {available:?}"
-        )),
+        LancetError::UnknownTools { unknown, available } => {
+            // 此处没有本 Turn 的 API key；不读取后台环境替代它。
+            ApiError::Configuration(crate::ConfigRejection::new(
+                &format!(
+                    "unknown enabled tools {unknown:?}; available catalog tools: {available:?}"
+                ),
+                &[],
+            ))
+        }
         LancetError::Internal(msg) => ApiError::Internal(msg),
     }
 }
@@ -599,5 +605,21 @@ enabled = ["{tool}"]
             format!("{err:?}").contains("session.events"),
             "the startup error must name the profile's deny entry: {err:?}"
         );
+    }
+
+    #[test]
+    fn unknown_tool_rejection_is_redacted_and_visible() {
+        let sentinel = "sk-unknown-tool-82ace195";
+        let error = map_lancet_err(LancetError::UnknownTools {
+            unknown: vec![sentinel.into(), "observe.typo".into()],
+            available: vec!["observe.workspace".into()],
+        });
+        let local = crate::local::LocalError::from(error);
+        assert_eq!(local.kind, crate::local::LocalErrorKind::BadRequest);
+        assert_eq!(
+            local.message,
+            "unknown enabled tools [\"[REDACTED]\", \"observe.typo\"]; available catalog tools: [\"observe.workspace\"]"
+        );
+        assert!(!local.message.contains(sentinel));
     }
 }

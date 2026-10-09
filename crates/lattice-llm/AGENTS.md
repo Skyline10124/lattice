@@ -7,7 +7,7 @@
 - `types.rs`：请求信封、工具定义、流事件与目标；`client.rs`：HTTP 行为、Turn 内 client 复用和连接安全；`transport.rs`：请求标识、错误诊断、可重试判断与 Retry-After。
 - `providers/`：provider 信封、认证、SSE 累积；`provider_projection/` 是唯一生产消息 codec。
 - `sse.rs`：流解析；router/endpoints 模块：模型与 provider 解析；`stub.rs`：测试客户端；`logging.rs`：日志初始化。
-- 共享 URL/DNS/地址检查归 `net-guard`，client 将中立错误映射为 `LlmError`。
+- 共享 URL/DNS/地址检查归 `net-guard`，client 将中立错误映射为 `LlmError`。`router` 的 `credential_env_vars()` 是路由所用凭据环境变量名的唯一名单，提交端按它读取当前值做脱敏；新增凭据变量时加入这份名单。
 
 ## 上位文档
 
