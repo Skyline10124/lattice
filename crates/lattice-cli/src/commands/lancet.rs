@@ -15,7 +15,7 @@ use lattice_api::local::{LocalClient, OperatorStatus};
 /// `lattice lancet` subcommand group.
 #[derive(Subcommand)]
 pub enum LancetAction {
-    /// 显示项目近期调用状态与全局变更高水位。
+    /// Show the project's recent invocation states and the global change high-water mark.
     Status {
         /// Emit JSON instead of human-readable output.
         #[arg(long)]

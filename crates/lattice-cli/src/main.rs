@@ -20,7 +20,7 @@ struct Cli {
         short,
         long,
         global = true,
-        help = "输出 JSONL：submission/acceptance/snapshot/history/event/connection/error，不混入人类状态行。"
+        help = "Emit JSONL (submission/acceptance/snapshot/history/event/connection/error records) without human status lines."
     )]
     json: bool,
 
@@ -35,9 +35,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// 提交请求；等同于 session send。
+    /// Submit a request; same as session send.
     Run(session_cmd::SendArgs),
-    /// 管理本用户、同一状态根的本地后台。
+    /// Manage the local daemon for this user and state root.
     Daemon {
         #[command(subcommand)]
         action: commands::daemon::DaemonAction,
@@ -70,7 +70,7 @@ enum Commands {
     },
     /// Open the terminal UI.
     Tui {
-        /// 已有会话；省略时在首次提交接受后创建。
+        /// Existing session; when omitted, a session is created once the first submission is accepted.
         session_id: Option<String>,
         #[arg(long, required_unless_present = "session_id")]
         agent: Option<String>,
