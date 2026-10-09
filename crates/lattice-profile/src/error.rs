@@ -59,6 +59,15 @@ pub enum ProfileError {
         max: u64,
     },
 
+    #[error(
+        "[llm.retry].initial_delay_ms ({initial_delay_ms}) must be <= [llm.retry].max_delay_ms ({max_delay_ms}) at {path}"
+    )]
+    RetryDelayOrder {
+        path: PathBuf,
+        initial_delay_ms: u64,
+        max_delay_ms: u64,
+    },
+
     #[error("both `system` and `system_path` set in [prompt] at {path}: exactly one is required")]
     PromptMutuallyExclusive { path: PathBuf },
 

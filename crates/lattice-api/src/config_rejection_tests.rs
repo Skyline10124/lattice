@@ -34,7 +34,7 @@ fn profile_rejections_expose_only_locations_and_typed_parameters() {
             format!(
                 "{prefix}[prompt]\nsystem='hi'\n[llm.retry]\ninitial_delay_ms=9\nmax_delay_ms=8"
             ),
-            vec!["initial_delay_ms", "9", "0..=8"],
+            vec!["[llm.retry].initial_delay_ms (9) must be <= [llm.retry].max_delay_ms (8)"],
         ),
         (
             format!("{prefix}[prompt]\nsystem='hi'\n[llm]\ntimeout_secs=0"),

@@ -108,11 +108,6 @@ fn validate_llm_retry(path: &Path, profile: &AgentProfile) -> Result<(), Profile
             60_000,
         ),
         (LlmIntegerField::MaxDelayMs, retry.max_delay_ms, 60_000),
-        (
-            LlmIntegerField::InitialDelayMs,
-            retry.initial_delay_ms,
-            retry.max_delay_ms,
-        ),
     ] {
         if value > max {
             return Err(ProfileError::InvalidInteger {
@@ -123,6 +118,13 @@ fn validate_llm_retry(path: &Path, profile: &AgentProfile) -> Result<(), Profile
                 max,
             });
         }
+    }
+    if retry.initial_delay_ms > retry.max_delay_ms {
+        return Err(ProfileError::RetryDelayOrder {
+            path: path.to_path_buf(),
+            initial_delay_ms: retry.initial_delay_ms,
+            max_delay_ms: retry.max_delay_ms,
+        });
     }
     Ok(())
 }
@@ -560,7 +562,7 @@ allowed_roots = ["src"]
             ),
             (
                 "max_retries = 1\ninitial_delay_ms = 10\nmax_delay_ms = 5",
-                "initial_delay_ms",
+                "initial_delay_ms (10) must be <= [llm.retry].max_delay_ms (5)",
             ),
         ];
         for (retry, field) in cases {

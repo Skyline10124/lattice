@@ -36,6 +36,11 @@ pub(crate) enum Reason {
         min: u64,
         max: u64,
     },
+    RetryDelayOrder {
+        path: PathBuf,
+        initial_delay_ms: u64,
+        max_delay_ms: u64,
+    },
     ProfileRule {
         path: PathBuf,
         rule: ProfileRule,
@@ -101,6 +106,15 @@ impl ConfigRejection {
                 value,
                 min,
                 max,
+            },
+            ProfileError::RetryDelayOrder {
+                path,
+                initial_delay_ms,
+                max_delay_ms,
+            } => Reason::RetryDelayOrder {
+                path,
+                initial_delay_ms,
+                max_delay_ms,
             },
             ProfileError::ProfileNotFound {
                 project_path,
@@ -237,6 +251,14 @@ impl fmt::Display for ConfigRejection {
                 max,
             } => format!(
                 "invalid value {value} for {field} at {}: expected {min}..={max}",
+                path.display()
+            ),
+            Reason::RetryDelayOrder {
+                path,
+                initial_delay_ms,
+                max_delay_ms,
+            } => format!(
+                "[llm.retry].initial_delay_ms ({initial_delay_ms}) must be <= [llm.retry].max_delay_ms ({max_delay_ms}) at {}",
                 path.display()
             ),
             Reason::ProfileRule { path, rule } => {
