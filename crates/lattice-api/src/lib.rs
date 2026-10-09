@@ -13,6 +13,7 @@
 //! facade values only.
 
 mod config_rejection;
+mod redact;
 pub use config_rejection::ConfigRejection;
 pub mod local;
 mod models;

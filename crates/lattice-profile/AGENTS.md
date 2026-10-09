@@ -17,7 +17,7 @@
 - `[tools].enabled` 是暴露与准入第一阶段。类型化 `[lancet.capabilities]` 的 `deny`、`max_boundary`（默认 `in`）与它共同转换为 `CapabilityAdmissionPolicy`；运行时组成拒绝未知 deny 名称，Component Descriptor 声明所需能力。
 - schema 命名区分工具暴露与权限策略，仅为 profile 实际拥有的选择增加字段；策略数据保持与协议、authority 和 API 转换一致。
 - canonicalization 失败返回 `ProfileError::SystemPathNotFound`，不回退不安全路径。缺失文件、含 symlink 的父路径和相对项目根解析的行为必须明确。
-- 可选 `[llm].timeout_secs` 为 `1..=3600`，越界保留字段级诊断。重试与超时的整数越界用 `InvalidInteger` 表示，只携带固定字段、数值与范围，供 API 安全展示；带任意文字的 `InvalidField` 不享有这一展示权限。
+- 可选 `[llm].timeout_secs` 为 `1..=3600`，越界保留字段级诊断。
 - 外部策略文件 `[lancet.policy].path` 的加载数据供按 Turn 组成使用，不能借此引入执行编排。
 
 ## 验证入口

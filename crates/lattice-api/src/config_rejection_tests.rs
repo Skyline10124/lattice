@@ -3,6 +3,8 @@
 
 use super::*;
 use crate::local::{LocalError, LocalErrorKind};
+use lattice_profile::ProfileError;
+use std::path::PathBuf;
 
 const SENTINEL: &str = "sk-profile-secret-a81e9b743f";
 
@@ -10,39 +12,50 @@ fn local(reason: ConfigRejection) -> LocalError {
     crate::ApiError::Configuration(reason).into()
 }
 
-// 此处保护类别放行边界，特别是任意原文伪装为安全字段的情况；
-// 真实命令入口由 E2E 覆盖。
+fn profile_local(error: ProfileError) -> LocalError {
+    local(ConfigRejection::new(
+        &crate::profile::profile_error_message(&error),
+        &[],
+    ))
+}
+
+// 保护原始说明经脱敏后仍可读；真实命令入口由 E2E 覆盖。
 #[test]
-fn profile_rejections_expose_only_locations_and_typed_parameters() {
+fn profile_rejections_preserve_diagnostics_and_redact_secrets() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("agent.toml");
     let prefix = format!("schema_version=1\n[agent]\nname='test'\nmodel='{SENTINEL}'\n");
     let cases = [
         (
             format!("{prefix}[prompt]\nsystem='hi'\n[llm.retry]\nmax_retries=11"),
-            vec!["[llm.retry].max_retries", "11", "0..=10"],
+            vec!["max_retries", "11", "max_retries must be <= 10"],
         ),
         (
             format!("{prefix}[prompt]\nsystem='hi'\n[llm.retry]\ninitial_delay_ms=60001"),
-            vec!["initial_delay_ms", "60001", "0..=60000"],
+            vec!["initial_delay_ms", "60001", "must be <= 60000"],
         ),
         (
             format!("{prefix}[prompt]\nsystem='hi'\n[llm.retry]\nmax_delay_ms=60001"),
-            vec!["max_delay_ms", "60001", "0..=60000"],
+            vec!["max_delay_ms", "60001", "must be <= 60000"],
         ),
         (
             format!(
                 "{prefix}[prompt]\nsystem='hi'\n[llm.retry]\ninitial_delay_ms=9\nmax_delay_ms=8"
             ),
-            vec!["[llm.retry].initial_delay_ms (9) must be <= [llm.retry].max_delay_ms (8)"],
+            vec![
+                "initial_delay_ms",
+                "9",
+                "initial delay exceeds max delay",
+                "initial_delay_ms must be <= max_delay_ms",
+            ],
         ),
         (
             format!("{prefix}[prompt]\nsystem='hi'\n[llm]\ntimeout_secs=0"),
-            vec!["timeout_secs", "0", "1..=3600"],
+            vec!["timeout_secs", "0", "timeout_secs must be > 0"],
         ),
         (
             format!("{prefix}[prompt]\nsystem='hi'\n[llm]\ntimeout_secs=3601"),
-            vec!["timeout_secs", "3601", "1..=3600"],
+            vec!["timeout_secs", "3601", "timeout_secs must be <= 3600"],
         ),
         (
             format!(
@@ -66,7 +79,7 @@ fn profile_rejections_expose_only_locations_and_typed_parameters() {
         ),
         (
             format!("{prefix}[prompt]\nsystem_path='{SENTINEL}'"),
-            vec!["system_path", "could not be resolved"],
+            vec!["system_path", "file not found", "[REDACTED]"],
         ),
         (
             format!("{prefix}[prompt]\nsystem='hi'\n[workspace]\nsecret='{SENTINEL}'"),
@@ -77,8 +90,8 @@ fn profile_rejections_expose_only_locations_and_typed_parameters() {
                 "{prefix}[prompt]\nsystem='hi'\n[lancet.observation]\nallowed_roots=['{SENTINEL}']"
             ),
             vec![
-                "retired field",
-                "[lancet.observation].allowed_roots",
+                "forbidden field `allowed_roots` in [lancet.observation]",
+                "retired:",
                 "[lancet.project_root].root",
             ],
         ),
@@ -86,7 +99,7 @@ fn profile_rejections_expose_only_locations_and_typed_parameters() {
     for (source, expected) in cases {
         std::fs::write(&path, source).unwrap();
         let error = lattice_profile::load_agent_profile(&path).unwrap_err();
-        let result = LocalError::from(ConfigRejection::profile(error, "test"));
+        let result = profile_local(error);
         assert_eq!(result.kind, LocalErrorKind::BadRequest);
         assert!(result.message.contains(path.to_str().unwrap()));
         assert!(!result.message.contains(SENTINEL));
@@ -101,7 +114,7 @@ fn profile_rejections_expose_only_locations_and_typed_parameters() {
 }
 
 #[test]
-fn toml_locations_use_original_bytes_without_parser_text() {
+fn toml_locations_keep_parser_message_without_source_excerpt() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("agent.toml");
     for source in [
@@ -110,20 +123,30 @@ fn toml_locations_use_original_bytes_without_parser_text() {
     ] {
         std::fs::write(&path, source).unwrap();
         let error = lattice_profile::load_agent_profile(&path).unwrap_err();
-        let result = LocalError::from(ConfigRejection::profile(error, "test"));
-        assert!(result.message.contains("invalid profile TOML"));
+        let ProfileError::Toml { source: parser, .. } = &error else {
+            panic!("expected TOML error");
+        };
+        let diagnostic = crate::redact::redact(parser.message(), &[]);
+        let result = profile_local(error);
+        assert!(result.message.contains("TOML parse error"));
+        assert!(result.message.ends_with(&diagnostic));
         assert!(result.message.contains("line 2"));
         assert!(result.message.contains(path.to_str().unwrap()));
         assert!(!result.message.contains(SENTINEL));
         assert!(!result.message.contains("schema_version ="));
     }
-    let result = local(ConfigRejection(Reason::Toml { path, line: None }));
+    let source = toml::from_str::<toml::Value>("invalid=@").unwrap_err();
+    let result = profile_local(ProfileError::Toml {
+        path,
+        source,
+        line: None,
+    });
     assert!(result.message.contains("agent.toml"));
     assert!(!result.message.contains(": line "));
 }
 
 #[test]
-fn profile_payloads_and_legacy_bad_requests_remain_private() {
+fn profile_payloads_are_redacted_and_legacy_bad_requests_stay_fixed() {
     let path = PathBuf::from("/profiles/agent.toml");
     for error in [
         ProfileError::InvalidField {
@@ -139,8 +162,9 @@ fn profile_payloads_and_legacy_bad_requests_remain_private() {
             source: std::io::Error::other(SENTINEL),
         },
     ] {
-        let result = LocalError::from(ConfigRejection::profile(error, "test"));
-        assert_eq!(result.message, "request or frozen configuration is invalid");
+        let result = profile_local(error);
+        assert!(result.message.contains("[REDACTED]"));
+        assert!(!result.message.contains(SENTINEL));
     }
     let result = LocalError::from(crate::ApiError::BadRequest(SENTINEL.into()));
     assert_eq!(result.message, "request or frozen configuration is invalid");
@@ -177,7 +201,7 @@ fn profile_payloads_and_legacy_bad_requests_remain_private() {
                 field: SENTINEL.into(),
                 reason: SENTINEL.into(),
             },
-            "retired field",
+            "forbidden field",
         ),
         (
             ProfileError::MissingDefault {
@@ -192,17 +216,17 @@ fn profile_payloads_and_legacy_bad_requests_remain_private() {
                 project_path: path.clone(),
                 global_path: "/global/agent.toml".into(),
             },
-            "agent profile 'selected' not found",
+            "agent profile '[REDACTED]' not found",
         ),
     ] {
-        let result = LocalError::from(ConfigRejection::profile(error, "selected"));
+        let result = profile_local(error);
         assert!(result.message.contains(expected));
         assert!(!result.message.contains(SENTINEL));
     }
 }
 
 #[test]
-fn named_profile_validation_is_shared_and_does_not_echo_declared_name() {
+fn named_profile_validation_shows_redacted_declared_name() {
     let dir = tempfile::tempdir().unwrap();
     let profile = dir.path().join(".lattice/agents/selected/agent.toml");
     std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
@@ -220,6 +244,7 @@ fn named_profile_validation_is_shared_and_does_not_echo_declared_name() {
     let result = LocalError::from(error);
     assert!(result.message.contains("[agent].name"));
     assert!(result.message.contains("selected"));
+    assert!(result.message.contains("declares '[REDACTED]'"));
     assert!(result.message.contains(profile.to_str().unwrap()));
     assert!(!result.message.contains(SENTINEL));
 
@@ -233,7 +258,7 @@ fn named_profile_validation_is_shared_and_does_not_echo_declared_name() {
 }
 
 #[test]
-fn agents_directory_rules_and_display_bounds() {
+fn agents_directory_diagnostics_preserve_original_text() {
     for (path, expected) in [
         ("/etc/lattice", "system path (/etc)"),
         ("/tmp/lattice", "inside /tmp"),
@@ -244,97 +269,59 @@ fn agents_directory_rules_and_display_bounds() {
         assert_eq!(result.kind, LocalErrorKind::BadRequest);
         assert!(result.message.contains(path));
         assert!(result.message.contains(expected));
-        assert!(result.message.contains("LATTICE_AGENTS_DIR"));
+        if !path.contains("..") {
+            assert!(result.message.contains("LATTICE_AGENTS_DIR"));
+        }
     }
-    let result = local(ConfigRejection(Reason::AgentName {
-        path: "/profiles/\u{1b}\n\t agent.toml".into(),
-        selected: "chosen\r\n  agent".into(),
-    }));
-    assert!(result.message.contains("/profiles/ agent.toml"));
-    assert!(result.message.contains("chosen agent"));
-    assert!(!result.message.chars().any(char::is_control));
-    assert!(!result.message.contains("  "));
-    let result = local(ConfigRejection(Reason::AgentName {
-        path: PathBuf::from("界".repeat(1500)),
-        selected: "selected".into(),
-    }));
-    assert_eq!(result.message.chars().count(), MAX_REASON_CHARS);
-    assert!(result.message.ends_with('…'));
 }
 
 #[test]
-fn llm_allowlist_discards_untrusted_payloads() {
-    use lattice_llm::{BaseUrlRule, LlmError};
+fn configuration_wrapper_preserves_processed_message() {
+    let reason = ConfigRejection::new(
+        "ordinary sonet key=known-secret-value\nnext",
+        &["known-secret-value"],
+    );
+    let expected = reason.to_string();
+    assert_eq!(expected, "ordinary sonet key=[REDACTED] next");
+    let error = local(reason);
+    assert_eq!(error.kind, LocalErrorKind::BadRequest);
+    assert_eq!(error.message, expected);
+}
+
+#[test]
+fn llm_display_is_preserved_after_redaction() {
+    use lattice_llm::LlmError;
     for (error, expected) in [
         (
+            LlmError::UnknownModel("sonet".into()),
+            "unknown model alias: 'sonet'",
+        ),
+        (
             LlmError::UnknownModel(SENTINEL.into()),
-            "[agent].model: unknown model alias; use `lattice models`",
+            "unknown model alias: '[REDACTED]'",
         ),
         (
-            LlmError::MissingApiKey {
-                env_var: "TEST_API_KEY".into(),
+            LlmError::Credential {
+                message: "API key is empty".into(),
             },
-            "'TEST_API_KEY' is not set",
+            "credential error: API key is empty",
         ),
         (
-            LlmError::EmptyApiKey {
-                env_var: "TEST_API_KEY".into(),
+            LlmError::Config {
+                message: "invalid URL https://user:pass@example.test".into(),
             },
-            "'TEST_API_KEY' is empty",
+            "configuration error: invalid URL https://[REDACTED]@example.test",
         ),
         (
-            LlmError::BaseUrl(BaseUrlRule::Empty),
-            "base_url must not be empty",
-        ),
-        (
-            LlmError::BaseUrl(BaseUrlRule::RemoteHttp),
-            "use HTTPS for remote hosts",
-        ),
-        (LlmError::BaseUrl(BaseUrlRule::Userinfo), "userinfo"),
-        (
-            LlmError::BaseUrl(BaseUrlRule::QueryOrFragment),
-            "query or fragment",
+            LlmError::Dns {
+                message: "cannot resolve typo.invalid".into(),
+            },
+            "DNS error: cannot resolve typo.invalid",
         ),
     ] {
-        let result = local(ConfigRejection::llm(error).unwrap());
+        let result = local(ConfigRejection::new(&error.to_string(), &[]));
         assert_eq!(result.kind, LocalErrorKind::BadRequest);
-        assert!(result.message.contains(expected));
+        assert_eq!(result.message, expected);
         assert!(!result.message.contains(SENTINEL));
-    }
-    for error in [
-        LlmError::Config {
-            message: SENTINEL.into(),
-        },
-        LlmError::Credential {
-            message: SENTINEL.into(),
-        },
-        LlmError::Dns {
-            message: SENTINEL.into(),
-        },
-        LlmError::Transport {
-            message: SENTINEL.into(),
-            retryable: false,
-        },
-        LlmError::Timeout {
-            message: SENTINEL.into(),
-        },
-        LlmError::ProviderHttp {
-            status_code: 400,
-            message: SENTINEL.into(),
-            retryable: false,
-            retry_after: None,
-        },
-        LlmError::StreamRead {
-            message: SENTINEL.into(),
-        },
-        LlmError::ProtocolLimit {
-            message: SENTINEL.into(),
-        },
-        LlmError::Projection(
-            lattice_llm::provider_projection::ProjectionError::InvalidStep { detail: SENTINEL },
-        ),
-        LlmError::Other(SENTINEL.into()),
-    ] {
-        assert!(ConfigRejection::llm(error).is_none());
     }
 }

@@ -24,6 +24,13 @@ fn configuration_errors_keep_reason_and_exit_two_through_anyhow() {
                 .contains("LATTICE_AGENTS_DIR")
         );
     }
+    let error = anyhow::Error::new(lattice_api::ApiError::Configuration(
+        lattice_api::ConfigRejection::new("unknown model alias: 'sonet'", &[]),
+    ));
+    let (code, record) = error_record(&error);
+    assert_eq!(code, 2);
+    assert_eq!(record["kind"], "bad_request");
+    assert_eq!(record["message"], "unknown model alias: 'sonet'");
     let error = anyhow::Error::new(lattice_api::ApiError::BadRequest("sk-private-input".into()));
     let (code, record) = error_record(&error);
     assert_eq!(code, 2);

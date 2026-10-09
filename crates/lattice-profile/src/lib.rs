@@ -15,7 +15,7 @@ mod schema;
 
 pub use defaults::default_agent_template;
 pub use discovery::{DiscoveryPaths, ProfileSource, resolve_agent_profile};
-pub use error::{LlmIntegerField, ProfileError};
+pub use error::ProfileError;
 pub use load::{LoadedAgentProfile, load_agent_profile};
 pub use schema::{
     AgentProfile, AgentSection, LancetCapabilitiesSection, LancetNetworkSection,

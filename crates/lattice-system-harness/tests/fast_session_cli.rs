@@ -189,11 +189,9 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
         ("toml", "line 2"),
         ("missing-key", "'OPENAI_COMPATIBLE_API_KEY' is not set"),
         ("empty-key", "'OPENAI_COMPATIBLE_API_KEY' is empty"),
-        ("model", "[agent].model: unknown model alias"),
-        (
-            "tools",
-            "[tools].enabled contains unknown tools at items [1] (1-based)",
-        ),
+        ("model", "unknown model alias: '[REDACTED]'"),
+        ("model-typo", "unknown model alias: 'sonet'"),
+        ("tools", "unknown enabled tools [\"[REDACTED]\"]"),
         ("agent-name", "must match selected agent 'plain'"),
     ] {
         let (world, spec) = direct_world(&format!("config-rejection-{case}"), "plain", "[]", "");
@@ -207,6 +205,9 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
             "missing-key" => world.unset_env("OPENAI_COMPATIBLE_API_KEY"),
             "empty-key" => world.set_env("OPENAI_COMPATIBLE_API_KEY", ""),
             "model" => std::fs::write(&path, original.replace("compat:plain", SENTINEL)).unwrap(),
+            "model-typo" => {
+                std::fs::write(&path, original.replace("compat:plain", "sonet")).unwrap()
+            }
             "tools" => std::fs::write(
                 &path,
                 original.replace("enabled = []", &format!("enabled = ['{SENTINEL}']")),
@@ -214,7 +215,10 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
             .unwrap(),
             "agent-name" => std::fs::write(
                 &path,
-                original.replace("name = \"plain\"", &format!("name = '{SENTINEL}'")),
+                original.replace(
+                    "name = \"plain\"",
+                    &format!("name = '{SENTINEL}:{FAKE_API_KEY}'"),
+                ),
             )
             .unwrap(),
             "missing-profile" => {}
@@ -260,6 +264,10 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
                     message.contains(expected),
                     "missing expected rejection reason"
                 );
+                if case == "agent-name" {
+                    // 测试 key 不符合形状规则，必须由提交端读取已知凭据后精确替换。
+                    assert!(message.contains("declares '[REDACTED]:[REDACTED]'"));
+                }
                 if case == "tools" {
                     assert!(message.contains("available catalog tools:"));
                     assert!(message.contains("observe.workspace"));

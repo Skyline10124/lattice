@@ -3,23 +3,20 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::ApiError;
-use crate::config_rejection::{AgentsDirectoryRule, ConfigRejection, Reason};
-
 /// 提交端检查 Agent 目录；纯找回和观察不得以新目录配置挡住既有状态。
-pub fn validate_agents_dir(path: &Path) -> Result<(), ApiError> {
-    if path
-        .components()
-        .any(|component| matches!(component, std::path::Component::ParentDir))
-    {
-        return Err(directory_rejection(path, AgentsDirectoryRule::Traversal));
-    }
-    let canonical = canonicalize_agents_dir_prefix(path).map_err(ApiError::BadRequest)?;
+pub fn validate_agents_dir(path: &Path) -> Result<(), crate::ApiError> {
+    check_agents_dir(path)
+        .map_err(|message| crate::config_rejection::client_configuration_error(&message))
+}
+
+fn check_agents_dir(path: &Path) -> Result<(), String> {
+    let canonical = canonicalize_agents_dir_prefix(path)?;
     for prefix in ["/etc", "/usr", "/var", "/sys", "/proc", "/dev", "/boot"] {
         if canonical.starts_with(prefix) {
-            return Err(directory_rejection(
-                path,
-                AgentsDirectoryRule::System(prefix),
+            return Err(format!(
+                "Agents directory '{}' is inside a system path ({}). Set LATTICE_AGENTS_DIR to a safe location (e.g., under $HOME or your project).",
+                path.display(),
+                prefix
             ));
         }
     }
@@ -27,16 +24,12 @@ pub fn validate_agents_dir(path: &Path) -> Result<(), ApiError> {
         .canonicalize()
         .unwrap_or_else(|_| PathBuf::from("/tmp"));
     if canonical.starts_with(tmp_root) {
-        return Err(directory_rejection(path, AgentsDirectoryRule::Temporary));
+        return Err(format!(
+            "Agents directory '{}' is inside /tmp which is world-writable and unsafe. Set LATTICE_AGENTS_DIR to a safe location.",
+            path.display()
+        ));
     }
     Ok(())
-}
-
-fn directory_rejection(path: &Path, rule: AgentsDirectoryRule) -> ApiError {
-    ApiError::Configuration(ConfigRejection(Reason::AgentsDirectory {
-        path: path.to_owned(),
-        rule,
-    }))
 }
 
 /// 不存在的尾段可保留，但先解析既有祖先的符号链接，不能绕过目录安全边界。

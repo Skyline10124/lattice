@@ -16,9 +16,24 @@ use crate::endpoints::{
 use crate::stub::LlmError;
 use crate::types::ModelTarget;
 
+const OPENAI_API_KEY_ENV: &str = "OPENAI_API_KEY";
+const ANTHROPIC_API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
+const GEMINI_API_KEY_ENV: &str = "GEMINI_API_KEY";
+const OPENAI_COMPATIBLE_API_KEY_ENV: &str = "OPENAI_COMPATIBLE_API_KEY";
+
+/// 路由实际使用的凭据变量名；提交端诊断据此读取当前值做精确脱敏。
+pub fn credential_env_vars() -> &'static [&'static str] {
+    &[
+        OPENAI_API_KEY_ENV,
+        ANTHROPIC_API_KEY_ENV,
+        GEMINI_API_KEY_ENV,
+        OPENAI_COMPATIBLE_API_KEY_ENV,
+    ]
+}
+
 /// 缺 `OPENAI_COMPATIBLE_MODEL` 时的固定提示：不含别名或凭据值，可直接展示。
 ///
-/// 公开 API 只按这个常量判定该分支，未知别名的文案则一律不对外透出别名原文。
+/// resolve 命令按这个常量识别该分支；提交端配置诊断统一经 redact 处理。
 pub const MISSING_OPENAI_COMPATIBLE_MODEL_HINT: &str =
     "openai-compatible requires OPENAI_COMPATIBLE_MODEL or use compat:<model>";
 /// Supported LLM provider families.
@@ -93,8 +108,8 @@ fn build_openai_compatible(alias: &str, provider_model: &str) -> ResolvedModel {
         provider: ProviderKind::OpenAiCompatible,
         provider_model: provider_model.to_string(),
         base_url,
-        api_key_env: "OPENAI_COMPATIBLE_API_KEY".to_string(),
-        credential_status: CredentialStatus::from_env("OPENAI_COMPATIBLE_API_KEY"),
+        api_key_env: OPENAI_COMPATIBLE_API_KEY_ENV.to_string(),
+        credential_status: CredentialStatus::from_env(OPENAI_COMPATIBLE_API_KEY_ENV),
     }
 }
 
@@ -157,51 +172,51 @@ impl ModelRouter {
                 ProviderKind::OpenAi,
                 "gpt-5.5",
                 OPENAI_BASE_URL,
-                "OPENAI_API_KEY",
+                OPENAI_API_KEY_ENV,
             ),
             "gpt-5.4" => (
                 ProviderKind::OpenAi,
                 "gpt-5.4",
                 OPENAI_BASE_URL,
-                "OPENAI_API_KEY",
+                OPENAI_API_KEY_ENV,
             ),
             "gpt-5.3-codex" => (
                 ProviderKind::OpenAi,
                 "gpt-5.3-codex",
                 OPENAI_BASE_URL,
-                "OPENAI_API_KEY",
+                OPENAI_API_KEY_ENV,
             ),
             "gpt-4o-mini" => (
                 ProviderKind::OpenAi,
                 "gpt-4o-mini",
                 OPENAI_BASE_URL,
-                "OPENAI_API_KEY",
+                OPENAI_API_KEY_ENV,
             ),
             // Anthropic Claude series
             "opus" => (
                 ProviderKind::Anthropic,
                 "claude-opus-4-7",
                 ANTHROPIC_BASE_URL,
-                "ANTHROPIC_API_KEY",
+                ANTHROPIC_API_KEY_ENV,
             ),
             "sonnet" => (
                 ProviderKind::Anthropic,
                 "claude-sonnet-4-6",
                 ANTHROPIC_BASE_URL,
-                "ANTHROPIC_API_KEY",
+                ANTHROPIC_API_KEY_ENV,
             ),
             "haiku" => (
                 ProviderKind::Anthropic,
                 "claude-haiku-4-5",
                 ANTHROPIC_BASE_URL,
-                "ANTHROPIC_API_KEY",
+                ANTHROPIC_API_KEY_ENV,
             ),
             // Gemini
             "gemini" => (
                 ProviderKind::Gemini,
                 "gemini-2.5-flash",
                 GEMINI_BASE_URL,
-                "GEMINI_API_KEY",
+                GEMINI_API_KEY_ENV,
             ),
             _ => {
                 return Err(LlmError::UnknownModel(alias.to_string()));
@@ -236,6 +251,26 @@ mod tests {
     use super::*;
     use crate::test_env::with_env_vars;
     use crate::types::ModelTarget;
+
+    #[test]
+    fn credential_names_cover_router_providers() {
+        let router = ModelRouter::new();
+        let routed: std::collections::BTreeSet<String> =
+            ["gpt-5.5", "sonnet", "gemini", "compat:test"]
+                .into_iter()
+                .map(|alias| {
+                    router
+                        .resolve(&ModelTarget::new(alias))
+                        .unwrap()
+                        .api_key_env
+                })
+                .collect();
+        let listed: std::collections::BTreeSet<String> = credential_env_vars()
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect();
+        assert_eq!(routed, listed);
+    }
 
     #[test]
     fn resolved_model_debug_does_not_leak_secrets() {

@@ -25,6 +25,11 @@ async fn preflight_and_submission_preserve_the_same_profile_rejection() {
             "must match selected agent 'selected'",
         ),
         ("", "schema_version=@sk-private-name-a932", "line 1"),
+        (
+            "",
+            "schema_version=1\n[agent]\nname='different'\nmodel='sonnet'\n[prompt]\nsystem='hi'",
+            "declares 'different'",
+        ),
     ] {
         options.agents_dir = agents_dir.into();
         std::fs::write(&profile, source).unwrap();

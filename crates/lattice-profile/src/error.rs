@@ -50,24 +50,6 @@ pub enum ProfileError {
         expected: Box<str>,
     },
 
-    #[error("invalid value `{value}` for `{field}` at {path}: expected {min}..={max}")]
-    InvalidInteger {
-        path: PathBuf,
-        field: LlmIntegerField,
-        value: u64,
-        min: u64,
-        max: u64,
-    },
-
-    #[error(
-        "[llm.retry].initial_delay_ms ({initial_delay_ms}) must be <= [llm.retry].max_delay_ms ({max_delay_ms}) at {path}"
-    )]
-    RetryDelayOrder {
-        path: PathBuf,
-        initial_delay_ms: u64,
-        max_delay_ms: u64,
-    },
-
     #[error("both `system` and `system_path` set in [prompt] at {path}: exactly one is required")]
     PromptMutuallyExclusive { path: PathBuf },
 
@@ -130,24 +112,4 @@ pub enum ProfileError {
         "no default agent profile found: create {dir}/agent.toml, or specify an agent with `--agent <name>`"
     )]
     MissingDefault { dir: PathBuf, template: String },
-}
-
-/// 仅 profile loader 已按整数校验的字段使用此诊断。
-#[derive(Clone, Copy, Debug)]
-pub enum LlmIntegerField {
-    MaxRetries,
-    InitialDelayMs,
-    MaxDelayMs,
-    TimeoutSecs,
-}
-
-impl std::fmt::Display for LlmIntegerField {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::MaxRetries => "[llm.retry].max_retries",
-            Self::InitialDelayMs => "[llm.retry].initial_delay_ms",
-            Self::MaxDelayMs => "[llm.retry].max_delay_ms",
-            Self::TimeoutSecs => "[llm].timeout_secs",
-        })
-    }
 }

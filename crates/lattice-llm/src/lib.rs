@@ -18,10 +18,9 @@ mod types;
 
 pub use lattice_conversation::TokenUsage;
 pub use logging::init_logging;
-pub use net_guard::BaseUrlRule;
 pub use router::{
     CredentialStatus, MISSING_OPENAI_COMPATIBLE_MODEL_HINT, ModelRouter, ProviderKind,
-    ResolvedModel,
+    ResolvedModel, credential_env_vars,
 };
 pub use stub::{LlmError, LlmStream, StubLlm, stream};
 pub use transport::{MAX_DIAGNOSTIC_CHARS, bound_diagnostic};

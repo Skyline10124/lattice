@@ -5,7 +5,8 @@
 
 use std::path::Path;
 
-use crate::session::{ApiError, Result};
+use crate::config_rejection::client_configuration_error;
+use crate::session::Result;
 
 pub use lattice_profile::LoadedAgentProfile;
 
@@ -24,14 +25,30 @@ pub fn resolve_named_agent_profile(
         lattice_profile::ProfileSource::Name(agent_name.to_string()),
         &paths,
     )
-    .map_err(|error| crate::ConfigRejection::profile(error, agent_name))?;
+    .map_err(|error| client_configuration_error(&profile_error_message(&error)))?;
     if loaded.profile.agent.name != agent_name {
-        return Err(ApiError::Configuration(crate::ConfigRejection(
-            crate::config_rejection::Reason::AgentName {
-                path: loaded.path.clone(),
-                selected: agent_name.into(),
-            },
+        return Err(client_configuration_error(&format!(
+            "[agent].name at {} declares '{}'; must match selected agent '{agent_name}'",
+            loaded.path.display(),
+            loaded.profile.agent.name,
         )));
     }
     Ok(loaded)
+}
+
+// TOML 的 Display 会附上多行源码；保留解析器说明及位置，省去源码摘录。
+pub(crate) fn profile_error_message(error: &lattice_profile::ProfileError) -> String {
+    match error {
+        lattice_profile::ProfileError::Toml { path, source, line } => {
+            let location = line
+                .map(|line| format!("line {line}: "))
+                .unwrap_or_default();
+            format!(
+                "TOML parse error at {}: {location}{}",
+                path.display(),
+                source.message()
+            )
+        }
+        other => other.to_string(),
+    }
 }

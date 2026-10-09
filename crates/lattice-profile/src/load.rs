@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::error::{LlmIntegerField, ProfileError};
+use crate::error::ProfileError;
 use crate::schema::{AgentProfile, TYPED_LANCET_SUB_TABLES};
 
 /// A loaded and validated agent profile with resolved system prompt.
@@ -96,52 +96,66 @@ fn toml_error_line(error: &toml::de::Error, content: &str) -> Option<std::num::N
 
 fn validate_llm_retry(path: &Path, profile: &AgentProfile) -> Result<(), ProfileError> {
     let retry = &profile.llm.retry;
-    for (field, value, max) in [
-        (
-            LlmIntegerField::MaxRetries,
-            u64::from(retry.max_retries),
-            10,
-        ),
-        (
-            LlmIntegerField::InitialDelayMs,
-            retry.initial_delay_ms,
-            60_000,
-        ),
-        (LlmIntegerField::MaxDelayMs, retry.max_delay_ms, 60_000),
-    ] {
-        if value > max {
-            return Err(ProfileError::InvalidInteger {
-                path: path.to_path_buf(),
-                field,
-                value,
-                min: 0,
-                max,
-            });
-        }
+    if retry.max_retries > 10 {
+        return Err(ProfileError::InvalidField {
+            path: path.to_path_buf(),
+            section: "llm.retry".into(),
+            field: "max_retries".into(),
+            value: retry.max_retries.to_string().into_boxed_str(),
+            reason: "too many LLM retry attempts".into(),
+            expected: "max_retries must be <= 10".into(),
+        });
+    }
+    if retry.initial_delay_ms > 60_000 {
+        return Err(ProfileError::InvalidField {
+            path: path.to_path_buf(),
+            section: "llm.retry".into(),
+            field: "initial_delay_ms".into(),
+            value: retry.initial_delay_ms.to_string().into_boxed_str(),
+            reason: "initial delay is too large".into(),
+            expected: "initial_delay_ms must be <= 60000".into(),
+        });
+    }
+    if retry.max_delay_ms > 60_000 {
+        return Err(ProfileError::InvalidField {
+            path: path.to_path_buf(),
+            section: "llm.retry".into(),
+            field: "max_delay_ms".into(),
+            value: retry.max_delay_ms.to_string().into_boxed_str(),
+            reason: "max delay is too large".into(),
+            expected: "max_delay_ms must be <= 60000".into(),
+        });
     }
     if retry.initial_delay_ms > retry.max_delay_ms {
-        return Err(ProfileError::RetryDelayOrder {
+        return Err(ProfileError::InvalidField {
             path: path.to_path_buf(),
-            initial_delay_ms: retry.initial_delay_ms,
-            max_delay_ms: retry.max_delay_ms,
+            section: "llm.retry".into(),
+            field: "initial_delay_ms".into(),
+            value: retry.initial_delay_ms.to_string().into_boxed_str(),
+            reason: "initial delay exceeds max delay".into(),
+            expected: "initial_delay_ms must be <= max_delay_ms".into(),
         });
     }
     Ok(())
 }
 
 fn validate_llm_timeout(path: &Path, profile: &AgentProfile) -> Result<(), ProfileError> {
-    if let Some(value) = profile.llm.timeout_secs
-        && !(1..=3600).contains(&value)
-    {
-        return Err(ProfileError::InvalidInteger {
-            path: path.to_path_buf(),
-            field: LlmIntegerField::TimeoutSecs,
-            value,
-            min: 1,
-            max: 3600,
-        });
-    }
-    Ok(())
+    let Some(secs) = profile.llm.timeout_secs else {
+        return Ok(());
+    };
+    let (reason, expected) = match secs {
+        0 => ("timeout must be nonzero", "timeout_secs must be > 0"),
+        3601.. => ("timeout is too large", "timeout_secs must be <= 3600"),
+        _ => return Ok(()),
+    };
+    Err(ProfileError::InvalidField {
+        path: path.to_path_buf(),
+        section: "llm".into(),
+        field: "timeout_secs".into(),
+        value: secs.to_string().into_boxed_str(),
+        reason: reason.into(),
+        expected: expected.into(),
+    })
 }
 
 /// Check raw TOML content for forbidden top-level sections.
@@ -562,7 +576,7 @@ allowed_roots = ["src"]
             ),
             (
                 "max_retries = 1\ninitial_delay_ms = 10\nmax_delay_ms = 5",
-                "initial_delay_ms (10) must be <= [llm.retry].max_delay_ms (5)",
+                "initial_delay_ms",
             ),
         ];
         for (retry, field) in cases {

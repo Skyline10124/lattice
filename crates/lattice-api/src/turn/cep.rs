@@ -24,11 +24,17 @@ use crate::session::ApiError;
 use crate::turn::types::{RunTurnRequest, TurnEvent};
 
 /// Map a [`LancetError`] from the runtime layer onto the API error vocabulary.
-fn map_lancet_err(err: LancetError, enabled: &[String]) -> ApiError {
+fn map_lancet_err(err: LancetError) -> ApiError {
     match err {
         LancetError::Config(msg) => ApiError::BadRequest(msg),
-        LancetError::UnknownTools { available, .. } => {
-            ApiError::Configuration(crate::ConfigRejection::unknown_tools(enabled, available))
+        LancetError::UnknownTools { unknown, available } => {
+            // 此处没有本 Turn 的 API key；不读取后台环境替代它。
+            ApiError::Configuration(crate::ConfigRejection::new(
+                &format!(
+                    "unknown enabled tools {unknown:?}; available catalog tools: {available:?}"
+                ),
+                &[],
+            ))
         }
         LancetError::Internal(msg) => ApiError::Internal(msg),
     }
@@ -333,13 +339,13 @@ pub(crate) async fn build_production_turn_deps(
             .map_err(|err| ApiError::Internal(format!("component composition: {err}")))?;
         let mut runtime = LancetRuntime::build(LancetRuntimeConfig {
             local_workspace_root: canonical_root,
-            enabled_tools: enabled_tools.clone(),
+            enabled_tools,
             policy,
             capability_admission,
             tls_roots_der,
             workspace_history,
         })
-        .map_err(|error| map_lancet_err(error, &enabled_tools))?;
+        .map_err(map_lancet_err)?;
         let tool_catalog = runtime.tool_definitions().to_vec();
         let events = runtime.take_events();
         Ok(ProductionTurnDeps {
@@ -602,24 +608,17 @@ enabled = ["{tool}"]
     }
 
     #[test]
-    fn unknown_tool_rejection_reports_positions_without_names() {
+    fn unknown_tool_rejection_is_redacted_and_visible() {
         let sentinel = "sk-unknown-tool-82ace195";
-        let enabled = vec![sentinel.into(), "observe.workspace".into(), sentinel.into()];
-        let error = map_lancet_err(
-            LancetError::UnknownTools {
-                unknown: vec![sentinel.into()],
-                available: vec!["observe.workspace".into()],
-            },
-            &enabled,
-        );
+        let error = map_lancet_err(LancetError::UnknownTools {
+            unknown: vec![sentinel.into(), "observe.typo".into()],
+            available: vec!["observe.workspace".into()],
+        });
         let local = crate::local::LocalError::from(error);
         assert_eq!(local.kind, crate::local::LocalErrorKind::BadRequest);
-        assert!(local.message.contains("[tools].enabled"));
-        assert!(local.message.contains("items [1, 3] (1-based)"));
-        assert!(
-            local
-                .message
-                .contains("available catalog tools: observe.workspace")
+        assert_eq!(
+            local.message,
+            "unknown enabled tools [\"[REDACTED]\", \"observe.typo\"]; available catalog tools: [\"observe.workspace\"]"
         );
         assert!(!local.message.contains(sentinel));
     }

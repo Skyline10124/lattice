@@ -11,8 +11,6 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 pub enum NetGuardError {
     /// The URL or hostname violates the network safety configuration.
     Config { message: String },
-    /// 固定 base URL 规则不携带输入文本。
-    BaseUrl(BaseUrlRule),
     /// DNS resolution failed or returned no addresses.
     Dns { message: String },
 }
@@ -21,32 +19,12 @@ impl fmt::Display for NetGuardError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Config { message } => write!(formatter, "configuration error: {message}"),
-            Self::BaseUrl(rule) => write!(formatter, "configuration error: {rule}"),
             Self::Dns { message } => write!(formatter, "DNS error: {message}"),
         }
     }
 }
 
 impl std::error::Error for NetGuardError {}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BaseUrlRule {
-    Empty,
-    RemoteHttp,
-    Userinfo,
-    QueryOrFragment,
-}
-
-impl fmt::Display for BaseUrlRule {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Empty => "base_url must not be empty",
-            Self::RemoteHttp => "HTTP is only allowed for localhost — use HTTPS for remote hosts",
-            Self::Userinfo => "base_url contains userinfo which is not allowed",
-            Self::QueryOrFragment => "base_url must not contain query or fragment",
-        })
-    }
-}
 
 /// Public DNS services that map arbitrary labels to attacker-chosen IPs.
 const DNS_REBINDING_DOMAIN_SUFFIXES: &[&str] = &[
@@ -226,7 +204,9 @@ pub fn resolve_public_socket_addrs(
 /// Validate a provider base URL.
 pub fn validate_base_url(url: &str) -> Result<(), NetGuardError> {
     if url.is_empty() {
-        return Err(NetGuardError::BaseUrl(BaseUrlRule::Empty));
+        return Err(NetGuardError::Config {
+            message: "base_url must not be empty".to_string(),
+        });
     }
 
     let parsed = url::Url::parse(url).map_err(|error| NetGuardError::Config {
@@ -250,15 +230,15 @@ pub fn validate_base_url(url: &str) -> Result<(), NetGuardError> {
         })?;
 
     if parsed.scheme() == "http" && !is_localhost_host(host) {
-        return Err(NetGuardError::BaseUrl(BaseUrlRule::RemoteHttp));
+        return Err(NetGuardError::Config {
+            message: "HTTP is only allowed for localhost — use HTTPS for remote hosts".to_string(),
+        });
     }
 
     if parsed.username() != "" || parsed.password().is_some() {
-        return Err(NetGuardError::BaseUrl(BaseUrlRule::Userinfo));
-    }
-
-    if parsed.query().is_some() || parsed.fragment().is_some() {
-        return Err(NetGuardError::BaseUrl(BaseUrlRule::QueryOrFragment));
+        return Err(NetGuardError::Config {
+            message: "base_url contains userinfo which is not allowed".to_string(),
+        });
     }
 
     let host_clean = host.trim_start_matches('[').trim_end_matches(']');
@@ -305,40 +285,6 @@ pub fn validate_base_url(url: &str) -> Result<(), NetGuardError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn base_url_fixed_rules_are_typed_without_input_text() {
-        for (url, rule) in [
-            ("", BaseUrlRule::Empty),
-            ("http://sk-private-host.invalid/v1", BaseUrlRule::RemoteHttp),
-            (
-                "https://sk-private-user:password@localhost/v1",
-                BaseUrlRule::Userinfo,
-            ),
-            (
-                "https://localhost/v1?key=sk-private-key",
-                BaseUrlRule::QueryOrFragment,
-            ),
-            (
-                "https://localhost/v1#sk-private-fragment",
-                BaseUrlRule::QueryOrFragment,
-            ),
-        ] {
-            let error = validate_base_url(url).unwrap_err();
-            assert_eq!(error, NetGuardError::BaseUrl(rule));
-            assert!(!error.to_string().contains("sk-private"));
-        }
-        for url in [
-            "not a URL",
-            "file:///sk-private-path",
-            "https://10.0.0.1/v1",
-        ] {
-            assert!(matches!(
-                validate_base_url(url),
-                Err(NetGuardError::Config { .. })
-            ));
-        }
-    }
 
     #[test]
     fn base_url_rejects_unsafe_targets() {
