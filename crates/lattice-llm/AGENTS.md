@@ -7,7 +7,7 @@
 - `types.rs`：请求信封、工具定义、流事件与目标；`client.rs`：HTTP 行为、Turn 内 client 复用和连接安全；`transport.rs`：请求标识、错误诊断、可重试判断与 Retry-After。
 - `providers/`：provider 信封、认证、SSE 累积；`provider_projection/` 是唯一生产消息 codec。
 - `sse.rs`：流解析；router/endpoints 模块：模型与 provider 解析；`stub.rs`：测试客户端；`logging.rs`：日志初始化。
-- 共享 URL/DNS/地址检查归 `net-guard`，client 将中立错误映射为 `LlmError`。
+- 共享 URL/DNS/地址检查归 `net-guard`，client 将中立错误映射为 `LlmError`。API key 缺失或为空、base URL 的固定规则拒绝保留为独立的类型化变体，供 API 判断能否展示；其余配置错误仍是带任意文字的变体，不得当作可展示原因。
 
 ## 上位文档
 

@@ -23,6 +23,15 @@ pub enum LlmError {
     #[error("credential error: {message}")]
     Credential { message: String },
 
+    #[error("missing API key: environment variable '{env_var}' is not set")]
+    MissingApiKey { env_var: String },
+
+    #[error("missing API key: environment variable '{env_var}' is empty")]
+    EmptyApiKey { env_var: String },
+
+    #[error("configuration error: {0}")]
+    BaseUrl(net_guard::BaseUrlRule),
+
     #[error("configuration error: {message}")]
     Config { message: String },
 
@@ -62,8 +71,10 @@ impl LlmError {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::UnknownModel(_) => "unknown_model",
-            Self::Credential { .. } => "credential",
-            Self::Config { .. } => "config",
+            Self::Credential { .. } | Self::MissingApiKey { .. } | Self::EmptyApiKey { .. } => {
+                "credential"
+            }
+            Self::Config { .. } | Self::BaseUrl(_) => "config",
             Self::Dns { .. } => "dns",
             Self::Transport { .. } => "transport",
             Self::Timeout { .. } => "timeout",

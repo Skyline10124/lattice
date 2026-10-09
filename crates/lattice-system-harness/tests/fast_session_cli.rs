@@ -178,3 +178,106 @@ fn missing_session_and_missing_profile_fail_before_dispatch() {
     evidence.record_captures(server.captured_requests());
     support::finish_recorded(evidence, result);
 }
+
+#[test]
+fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
+    use lattice_system_harness::{FAKE_API_KEY, ScenarioEvidence, assert_no_secret};
+
+    const SENTINEL: &str = "sk-config-rejection-91ac75d28e";
+    for (case, expected) in [
+        ("missing-profile", "agent profile 'missing' not found"),
+        ("toml", "line 2"),
+        ("missing-key", "'OPENAI_COMPATIBLE_API_KEY' is not set"),
+        ("empty-key", "'OPENAI_COMPATIBLE_API_KEY' is empty"),
+        ("model", "[agent].model: unknown model alias"),
+        (
+            "tools",
+            "[tools].enabled contains unknown tools at items [1] (1-based)",
+        ),
+        ("agent-name", "must match selected agent 'plain'"),
+    ] {
+        let (world, spec) = direct_world(&format!("config-rejection-{case}"), "plain", "[]", "");
+        let server = wire_fake_llm(&world, "plain", SseScript::plain("must not be requested"));
+        let path = world.project_dir().join(".lattice/agents/plain/agent.toml");
+        let original = std::fs::read_to_string(&path).unwrap();
+        match case {
+            "toml" => {
+                std::fs::write(&path, format!("# 中文\nschema_version=@{SENTINEL}\n")).unwrap()
+            }
+            "missing-key" => world.unset_env("OPENAI_COMPATIBLE_API_KEY"),
+            "empty-key" => world.set_env("OPENAI_COMPATIBLE_API_KEY", ""),
+            "model" => std::fs::write(&path, original.replace("compat:plain", SENTINEL)).unwrap(),
+            "tools" => std::fs::write(
+                &path,
+                original.replace("enabled = []", &format!("enabled = ['{SENTINEL}']")),
+            )
+            .unwrap(),
+            "agent-name" => std::fs::write(
+                &path,
+                original.replace("name = \"plain\"", &format!("name = '{SENTINEL}'")),
+            )
+            .unwrap(),
+            "missing-profile" => {}
+            _ => unreachable!(),
+        }
+        let agent = if case == "missing-profile" {
+            "missing"
+        } else {
+            "plain"
+        };
+        let mut evidence = ScenarioEvidence::new(
+            &world,
+            &spec.name,
+            [FAKE_API_KEY.to_string(), SENTINEL.to_string()],
+        )
+        .unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut commands = vec![
+                vec!["--json", "session", "send", "hello", "--agent", agent],
+                vec!["--json", "run", "hello", "--agent", agent],
+            ];
+            // 工具选择归后台接受阶段；启动预检只在进入终端前加载并冻结配置。
+            if case != "tools" {
+                commands.push(vec!["--json", "tui", "--agent", agent]);
+            }
+            let mut messages = Vec::new();
+            for args in commands {
+                let out = cli(&world, &spec, &args);
+                evidence.record_command(args.join(" "), &out);
+                assert!(out.is_clean_exit(2), "{}", out.summary());
+                assert_no_secret(&out, SENTINEL).unwrap();
+                assert_no_secret(&out, FAKE_API_KEY).unwrap();
+                let records: Vec<Value> = std::str::from_utf8(&out.stdout)
+                    .unwrap()
+                    .lines()
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect();
+                let error = records.last().expect("final error record");
+                assert_eq!(error["type"], "error");
+                assert_eq!(error["kind"], "bad_request");
+                let message = error["message"].as_str().unwrap();
+                assert!(
+                    message.contains(expected),
+                    "missing expected rejection reason"
+                );
+                if case == "tools" {
+                    assert!(message.contains("available catalog tools:"));
+                    assert!(message.contains("observe.workspace"));
+                }
+                messages.push(message.to_owned());
+                assert!(server.captured_requests().is_empty());
+            }
+            assert!(messages.windows(2).all(|pair| pair[0] == pair[1]));
+            evidence
+                .record_json(
+                    "parameters",
+                    &serde_json::json!({
+                        "case": case, "provider_requests": 0, "accepted": false
+                    }),
+                )
+                .unwrap();
+        }));
+        evidence.record_captures(server.captured_requests());
+        support::finish_recorded(evidence, result);
+    }
+}

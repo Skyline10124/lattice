@@ -24,12 +24,12 @@ use crate::session::ApiError;
 use crate::turn::types::{RunTurnRequest, TurnEvent};
 
 /// Map a [`LancetError`] from the runtime layer onto the API error vocabulary.
-fn map_lancet_err(err: LancetError) -> ApiError {
+fn map_lancet_err(err: LancetError, enabled: &[String]) -> ApiError {
     match err {
         LancetError::Config(msg) => ApiError::BadRequest(msg),
-        LancetError::UnknownTools { unknown, available } => ApiError::BadRequest(format!(
-            "unknown enabled tools {unknown:?}; available catalog tools: {available:?}"
-        )),
+        LancetError::UnknownTools { available, .. } => {
+            ApiError::Configuration(crate::ConfigRejection::unknown_tools(enabled, available))
+        }
         LancetError::Internal(msg) => ApiError::Internal(msg),
     }
 }
@@ -333,13 +333,13 @@ pub(crate) async fn build_production_turn_deps(
             .map_err(|err| ApiError::Internal(format!("component composition: {err}")))?;
         let mut runtime = LancetRuntime::build(LancetRuntimeConfig {
             local_workspace_root: canonical_root,
-            enabled_tools,
+            enabled_tools: enabled_tools.clone(),
             policy,
             capability_admission,
             tls_roots_der,
             workspace_history,
         })
-        .map_err(map_lancet_err)?;
+        .map_err(|error| map_lancet_err(error, &enabled_tools))?;
         let tool_catalog = runtime.tool_definitions().to_vec();
         let events = runtime.take_events();
         Ok(ProductionTurnDeps {
@@ -599,5 +599,28 @@ enabled = ["{tool}"]
             format!("{err:?}").contains("session.events"),
             "the startup error must name the profile's deny entry: {err:?}"
         );
+    }
+
+    #[test]
+    fn unknown_tool_rejection_reports_positions_without_names() {
+        let sentinel = "sk-unknown-tool-82ace195";
+        let enabled = vec![sentinel.into(), "observe.workspace".into(), sentinel.into()];
+        let error = map_lancet_err(
+            LancetError::UnknownTools {
+                unknown: vec![sentinel.into()],
+                available: vec!["observe.workspace".into()],
+            },
+            &enabled,
+        );
+        let local = crate::local::LocalError::from(error);
+        assert_eq!(local.kind, crate::local::LocalErrorKind::BadRequest);
+        assert!(local.message.contains("[tools].enabled"));
+        assert!(local.message.contains("items [1, 3] (1-based)"));
+        assert!(
+            local
+                .message
+                .contains("available catalog tools: observe.workspace")
+        );
+        assert!(!local.message.contains(sentinel));
     }
 }

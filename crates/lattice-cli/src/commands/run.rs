@@ -210,13 +210,7 @@ pub async fn run_session_prompt(
     let sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let turn = api.start_turn_with(request, move |name| async move {
         tokio::task::spawn_blocking(move || {
-            let loaded = load_named_profile(&name, root.canonical_path())
-                .map_err(|_| lattice_api::ApiError::BadRequest("invalid profile".into()))?;
-            if loaded.profile.agent.name != name {
-                return Err(
-                    lattice_api::ApiError::BadRequest("agent profile name differs".into()).into(),
-                );
-            }
+            let loaded = load_named_profile(&name, root.canonical_path())?;
             FrozenConfiguration::from_env(loaded, &root)
         })
         .await
@@ -666,10 +660,9 @@ pub fn report_error(error: &anyhow::Error, json: bool) -> std::process::ExitCode
 pub(crate) fn load_named_profile(
     agent_name: &str,
     project_root: &Path,
-) -> Result<LoadedAgentProfile> {
-    let global_agents_dir = safe_agents_dir(None).map_err(lattice_api::ApiError::BadRequest)?;
+) -> Result<LoadedAgentProfile, lattice_api::ApiError> {
+    let global_agents_dir = safe_agents_dir(None)?;
     lattice_api::resolve_named_agent_profile(agent_name, project_root, &global_agents_dir)
-        .map_err(Into::into)
 }
 pub(crate) fn agents_dir(override_path: Option<&str>) -> PathBuf {
     if let Some(path) = override_path {
@@ -682,7 +675,9 @@ pub(crate) fn agents_dir(override_path: Option<&str>) -> PathBuf {
         PathBuf::from(".lattice/agents")
     }
 }
-pub(crate) fn safe_agents_dir(override_path: Option<&str>) -> Result<PathBuf, String> {
+pub(crate) fn safe_agents_dir(
+    override_path: Option<&str>,
+) -> Result<PathBuf, lattice_api::ApiError> {
     let path = agents_dir(override_path);
     validate_agents_dir(&path)?;
     Ok(path)
@@ -694,3 +689,7 @@ mod ipc_tests;
 #[cfg(test)]
 #[path = "run_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "config_error_tests.rs"]
+mod config_error_tests;

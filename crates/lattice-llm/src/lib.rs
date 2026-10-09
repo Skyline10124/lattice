@@ -18,6 +18,7 @@ mod types;
 
 pub use lattice_conversation::TokenUsage;
 pub use logging::init_logging;
+pub use net_guard::BaseUrlRule;
 pub use router::{
     CredentialStatus, MISSING_OPENAI_COMPATIBLE_MODEL_HINT, ModelRouter, ProviderKind,
     ResolvedModel,

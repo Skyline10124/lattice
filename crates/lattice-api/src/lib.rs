@@ -12,6 +12,8 @@
 //! shims. Public callers receive typed request, response, event, and session
 //! facade values only.
 
+mod config_rejection;
+pub use config_rejection::ConfigRejection;
 pub mod local;
 mod models;
 mod profile;

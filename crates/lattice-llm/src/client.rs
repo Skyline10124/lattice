@@ -40,19 +40,18 @@ type BodyStream = Pin<Box<dyn futures::Stream<Item = reqwest::Result<bytes::Byte
 pub fn validate_and_read_key(resolved: &ResolvedModel) -> Result<String, LlmError> {
     net_guard::validate_base_url(&resolved.base_url).map_err(llm_error_from_net_guard)?;
 
-    let key = std::env::var(&resolved.api_key_env).map_err(|_| LlmError::Credential {
-        message: format!(
-            "missing API key: environment variable '{}' is not set",
-            resolved.api_key_env
-        ),
+    let key = std::env::var(&resolved.api_key_env).map_err(|error| match error {
+        std::env::VarError::NotPresent => LlmError::MissingApiKey {
+            env_var: resolved.api_key_env.clone(),
+        },
+        std::env::VarError::NotUnicode(_) => LlmError::Credential {
+            message: "API key is not valid Unicode".into(),
+        },
     })?;
 
     if key.is_empty() {
-        return Err(LlmError::Credential {
-            message: format!(
-                "missing API key: environment variable '{}' is empty",
-                resolved.api_key_env
-            ),
+        return Err(LlmError::EmptyApiKey {
+            env_var: resolved.api_key_env.clone(),
         });
     }
 
@@ -516,8 +515,9 @@ where
     }
 }
 
-fn llm_error_from_net_guard(error: NetGuardError) -> LlmError {
+pub(crate) fn llm_error_from_net_guard(error: NetGuardError) -> LlmError {
     match error {
+        NetGuardError::BaseUrl(rule) => LlmError::BaseUrl(rule),
         NetGuardError::Config { message } => LlmError::Config { message },
         NetGuardError::Dns { message } => LlmError::Dns { message },
     }
@@ -768,6 +768,21 @@ mod tests {
                     result.is_err(),
                     "{name}: invalid credentials or base URL must be rejected"
                 );
+                match name {
+                    "missing_credential" => assert!(matches!(
+                        &result,
+                        Err(LlmError::MissingApiKey { env_var }) if env_var == api_key_env
+                    )),
+                    "empty_credential" => assert!(matches!(
+                        &result,
+                        Err(LlmError::EmptyApiKey { env_var }) if env_var == api_key_env
+                    )),
+                    "private_ip_base_url" => assert!(matches!(
+                        &result,
+                        Err(LlmError::BaseUrl(net_guard::BaseUrlRule::RemoteHttp))
+                    )),
+                    _ => unreachable!(),
+                }
                 if error_contains.is_some() || error_excludes.is_some() {
                     let err = result.unwrap_err().to_string();
                     if let Some(excluded) = error_excludes {

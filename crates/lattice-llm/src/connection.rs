@@ -59,21 +59,8 @@ impl LlmConnection {
                 message: "API key is empty or contains control bytes".into(),
             });
         }
-        let url = url::Url::parse(&resolved.base_url).map_err(|_| LlmError::Config {
-            message: "invalid provider base URL".into(),
-        })?;
-        if !url.username().is_empty()
-            || url.password().is_some()
-            || url.query().is_some()
-            || url.fragment().is_some()
-        {
-            return Err(LlmError::Config {
-                message: "provider base URL must not contain credentials, query or fragment".into(),
-            });
-        }
-        net_guard::validate_base_url(&resolved.base_url).map_err(|_| LlmError::Config {
-            message: "provider base URL rejected by network policy".into(),
-        })?;
+        net_guard::validate_base_url(&resolved.base_url)
+            .map_err(crate::client::llm_error_from_net_guard)?;
         let roots = roots_der
             .iter()
             .map(|der| {
