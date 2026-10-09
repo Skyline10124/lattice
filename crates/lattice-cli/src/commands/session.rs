@@ -51,11 +51,13 @@ pub(crate) async fn local_client() -> Result<lattice_api::local::LocalClient> {
 #[derive(clap::Args, Debug)]
 pub struct SendArgs {
     pub prompt: String,
+    /// Existing session to continue, by ID or unique prefix; omit to start a new session.
     #[arg(long = "session")]
     pub session_id: Option<String>,
-    /// Required for a new session, and for an existing session positioned at the root node.
+    /// Agent to use. Required for a new session, and for an existing session positioned at the root node.
     #[arg(long, required_unless_present_any = ["session_id", "turn_id"])]
     pub agent: Option<String>,
+    /// Turn identity for this request; generated when omitted. Resend with the same value to recover a request whose acceptance is unknown.
     #[arg(long, value_parser = parse_turn_id)]
     pub turn_id: Option<lattice_api::local::TurnId>,
 }
