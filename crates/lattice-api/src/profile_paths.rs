@@ -4,7 +4,12 @@
 use std::path::{Path, PathBuf};
 
 /// 提交端检查 Agent 目录；纯找回和观察不得以新目录配置挡住既有状态。
-pub fn validate_agents_dir(path: &Path) -> Result<(), String> {
+pub fn validate_agents_dir(path: &Path) -> Result<(), crate::ApiError> {
+    check_agents_dir(path)
+        .map_err(|message| crate::config_rejection::client_configuration_error(&message))
+}
+
+fn check_agents_dir(path: &Path) -> Result<(), String> {
     let canonical = canonicalize_agents_dir_prefix(path)?;
     for prefix in ["/etc", "/usr", "/var", "/sys", "/proc", "/dev", "/boot"] {
         if canonical.starts_with(prefix) {

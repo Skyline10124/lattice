@@ -10,7 +10,7 @@
 
 ## 局部约束
 
-- 新会话准备在 UI 启动前报告配置问题；既有会话与重连走只读入口，新提交才冻结配置。Component 预热与执行由后台所属 API 处理。
+- 新会话准备在 UI 启动前报告配置问题，显示 API 给出的配置拒绝说明，与提交时一致；既有会话与重连走只读入口，新提交才冻结配置。Component 预热与执行由后台所属 API 处理。
 - session 负责打开已有会话、新会话的配置准备及 LocalHistory/消息到 Block 的转换；Session 在首次提交接受时创建。connection 只转换回执与退出报告文案。app 持有本客户端一次交互的具体句柄 LocalTurn，发出意图、消费更新，维护呈现与按 InvocationId/来源的工具配对；交付、取消回执、订阅和历史异步读取归 LocalClient。完整交接见 [TUI 组件接线](../../docs/architecture/tui.md#组件接线)。
 - input 负责缓冲、历史与按键，view 负责布局、折行、viewport、Dock 与 statusline。共享渲染归本 crate，目录和文件按职责组织。
 - raw 模式下 Ctrl+C 经 LocalTurn 登记取消意图，不另起 tokio::signal::ctrl_c watcher。退出、接受未知、快照重同步、尝试边界与连接中断的完整显示规则归 TUI 合同。

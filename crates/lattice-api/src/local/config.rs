@@ -24,7 +24,11 @@ impl FrozenConfiguration {
         workspace: &crate::LocalWorkspaceRoot,
     ) -> Result<Self> {
         let target = lattice_llm::ModelTarget::new(&loaded.profile.agent.model);
-        let connection = lattice_llm::LlmConnection::from_env(&target).map_err(|_| invalid())?;
+        let connection = lattice_llm::LlmConnection::from_env(&target).map_err(|error| {
+            LocalError::from(crate::config_rejection::client_configuration_error(
+                &error.to_string(),
+            ))
+        })?;
         Self::capture(loaded, workspace, connection)
     }
 

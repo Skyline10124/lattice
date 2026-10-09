@@ -293,6 +293,7 @@ impl From<crate::ApiError> for LocalError {
         use lattice_session::store::StoreError;
         let (kind, message) = match &error {
             ApiError::NotFound(_) => (NotFound, "session or Turn not found"),
+            ApiError::Configuration(reason) => return Self::new(BadRequest, &reason.to_string()),
             ApiError::BadRequest(_) => (BadRequest, "request or frozen configuration is invalid"),
             ApiError::Conflict(_) => (Conflict, "request identity or Session binding conflicts"),
             ApiError::Busy(_) => (Busy, "session is busy"),

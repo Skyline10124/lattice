@@ -54,6 +54,7 @@ pub fn load_agent_profile(path: impl AsRef<Path>) -> Result<LoadedAgentProfile, 
 
     let profile: AgentProfile = toml::from_str(&content).map_err(|source| ProfileError::Toml {
         path: path.clone(),
+        line: toml_error_line(&source, &content),
         source,
     })?;
 
@@ -80,6 +81,17 @@ pub fn load_agent_profile(path: impl AsRef<Path>) -> Result<LoadedAgentProfile, 
         profile,
         system_prompt,
     })
+}
+
+fn toml_error_line(error: &toml::de::Error, content: &str) -> Option<std::num::NonZeroU32> {
+    let start = error.span()?.start;
+    let newlines = content
+        .as_bytes()
+        .get(..start)?
+        .iter()
+        .filter(|byte| **byte == b'\n')
+        .count();
+    std::num::NonZeroU32::new(u32::try_from(newlines).ok()?.checked_add(1)?)
 }
 
 fn validate_llm_retry(path: &Path, profile: &AgentProfile) -> Result<(), ProfileError> {
@@ -150,6 +162,7 @@ fn validate_llm_timeout(path: &Path, profile: &AgentProfile) -> Result<(), Profi
 fn check_forbidden_sections(path: &Path, content: &str) -> Result<(), ProfileError> {
     let value: toml::Value = toml::from_str(content).map_err(|source| ProfileError::Toml {
         path: path.to_path_buf(),
+        line: toml_error_line(&source, content),
         source,
     })?;
 
