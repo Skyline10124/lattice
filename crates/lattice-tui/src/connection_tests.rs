@@ -127,6 +127,25 @@ fn retry_replaces_only_its_attempt_and_stale_history_cannot_replace_display() {
         key,
         content: "first attempt".into(),
     });
+    app.apply_turn_event(TurnEvent::LlmRetry {
+        key,
+        delay_ms: 100,
+        notice: lattice_api::local::Notice {
+            level: lattice_api::local::NoticeLevel::Warn,
+            text: "retry diagnostic".into(),
+        },
+    });
+    assert!(app.attempt.is_none());
+    assert!(
+        !app.blocks
+            .iter()
+            .any(|block| { matches!(block, Block::Assistant(text) if text == "first attempt") })
+    );
+    assert!(matches!(
+        app.dock_status(),
+        Some((StatusKind::LlmRetry { message, .. }, DockSeverity::Warn))
+            if message == "retry diagnostic"
+    ));
     let next = lattice_api::local::ModelAttemptKey {
         attempt_ordinal: 2,
         ..key
@@ -246,15 +265,45 @@ fn loaded_step_and_terminal_tool_cannot_be_overwritten_by_late_events() {
         1
     );
     assert!(app.blocks.iter().any(|b|matches!(b,Block::Tool{state:ToolState::Unavailable{outcome},..} if outcome=="succeeded")));
-    // 最后一次请求错误可能晚于关闭快照；Step 已装入不能吞掉 Dock 诊断。
-    app.apply_turn_event(TurnEvent::LlmRequestError {
-        key,
-        retryable: false,
-        will_retry: false,
-        delay_ms: None,
-        message: "late failure".into(),
+    // 关闭事件和快照携带同一结局，已装入的 Step 不能吞掉或重复显示说明。
+    let summary: lattice_api::local::TurnSummary = serde_json::from_value(
+        json!({"outcome":"failed","notice":{"level":"error","text":"late failure"}}),
+    )
+    .unwrap();
+    let step = serde_json::from_value(json!({
+        "key": {"turn_id": id, "ordinal": 1},
+        "attempts": [],
+        "state": {
+            "state": "closed",
+            "end": {"end": "stop", "node": null, "cause": {"cause": "process_exit"}},
+            "slots": []
+        }
+    }))
+    .unwrap();
+    app.apply_turn_event(TurnEvent::TurnFailed {
+        turn: lattice_api::local::TurnRef {
+            session_id: SID.parse().unwrap(),
+            turn_id: id,
+        },
+        step,
+        summary: summary.clone(),
     });
-    assert!(app.dock_status().is_some());
+    let mut closed = view(id, "failed");
+    closed.selected_turn.as_mut().unwrap().summary = Some(summary);
+    app.apply_update(LocalUpdate::State {
+        view: Box::new(closed),
+        phase: ObservationPhase::NoOwner,
+        error: None,
+    });
+    assert_eq!(
+        app.blocks
+            .iter()
+            .filter(|block| matches!(block, Block::Status {
+                kind: StatusKind::Summary { summary, .. }, ..
+            } if summary.notice.as_ref().is_some_and(|notice| notice.text == "late failure")))
+            .count(),
+        1
+    );
 }
 
 #[test]

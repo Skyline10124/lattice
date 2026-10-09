@@ -30,8 +30,11 @@ fn event_sequence(events: &[TurnEventLine]) -> String {
         }
         types.push(if is_summary_snapshot(&events[index]) {
             "snapshot(summary)".into()
-        } else if let TurnEventLine::LlmRequestError { will_retry, .. } = &events[index] {
-            format!("llm_request_error(will_retry={will_retry})")
+        } else if let TurnEventLine::LlmRetry {
+            attempt_ordinal, ..
+        } = &events[index]
+        {
+            format!("llm_retry(attempt={attempt_ordinal})")
         } else {
             events[index].type_name().into()
         });
@@ -153,7 +156,7 @@ fn direct_turn_end_events_completed_turn_delivers_terminal_event() {
 }
 
 #[test]
-fn direct_turn_end_events_exhausted_retries_deliver_last_error_and_turn_failed() {
+fn direct_turn_end_events_exhausted_retries_deliver_last_retry_and_turn_failed() {
     let driver = driver();
     let (world, spec) = direct_world(
         "direct-turn-end-events-exhausted-retries",
@@ -176,50 +179,83 @@ fn direct_turn_end_events_exhausted_retries_deliver_last_error_and_turn_failed()
     let got = event_sequence(&outcome.events);
     println!("{}: {got}", spec.name);
 
-    let result: Result<(), AssertError> = (|| {
-        assert_clean_send(&outcome)?;
-        assert_accepted_and_closed(&outcome)?;
-        require(outcome.command.is_clean_exit(1), "failed Turn exits 1")?;
-        require(
-            outcome.events.iter().rev().any(|event| {
-                matches!(event, TurnEventLine::Unknown { type_name, raw }
+    let result: Result<(), AssertError> =
+        (|| {
+            assert_clean_send(&outcome)?;
+            assert_accepted_and_closed(&outcome)?;
+            require(outcome.command.is_clean_exit(1), "failed Turn exits 1")?;
+            require(
+                outcome.events.iter().rev().any(|event| {
+                    matches!(event, TurnEventLine::Unknown { type_name, raw }
                     if type_name == "snapshot"
                     && raw["view"]["selected_turn"]["summary"]["outcome"] == "failed"
                     && raw["view"]["selected_turn"]["summary"]["notice"]["level"] == "error")
-            }),
-            format!("expected durable Failed/Error summary; got: {got}"),
-        )?;
-        require(captures.len() == 3, "exactly three HTTP 500 requests")?;
-        let errors: Vec<_> = outcome
-            .events
-            .iter()
-            .enumerate()
-            .filter_map(|(index, event)| {
-                if let TurnEventLine::LlmRequestError { will_retry, .. } = event {
-                    Some((index, *will_retry))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        // 订阅与执行并行（session.md「观察与重连」）：快照之前的尝试不重发，
-        // 收到的错误是 [true, true, false] 的非空后缀；最后一个错误必须交付。
-        let retries: Vec<_> = errors.iter().map(|(_, retry)| *retry).collect();
-        require(
-            !retries.is_empty() && [true, true, false].ends_with(&retries),
-            format!(
-                "expected llm_request_error will_retry to be a non-empty suffix of [true, true, false] (last error must be delivered); got: {got}"
-            ),
-        )?;
-        let last_error = errors.last().unwrap().0;
-        require(
-            outcome.events.iter().enumerate().any(|(index, event)| {
-                index > last_error
-                    && matches!(event, TurnEventLine::Terminal { type_name, .. } if type_name == "turn_failed")
-            }),
-            format!("expected turn_failed after last llm_request_error; got: {got}"),
-        )
-    })();
+                }),
+                format!("expected durable Failed/Error summary; got: {got}"),
+            )?;
+            require(captures.len() == 3, "exactly three HTTP 500 requests")?;
+            let retries: Vec<_> = outcome
+                .events
+                .iter()
+                .enumerate()
+                .filter_map(|(index, event)| {
+                    if let TurnEventLine::LlmRetry {
+                        attempt_ordinal,
+                        level,
+                        ..
+                    } = event
+                    {
+                        Some((index, *attempt_ordinal, level.as_str()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            // 快照之前的事件不重发；重试通知只能是 [0, 1] 的后缀，
+            // 最后一条重试通知与最终尝试的 model_started、turn_failed 都必须交付。
+            let ordinals: Vec<_> = retries.iter().map(|(_, attempt, _)| *attempt).collect();
+            require(
+                !ordinals.is_empty() && [0, 1].ends_with(&ordinals),
+                format!("expected a non-empty suffix of retry attempts [0, 1]; got: {got}"),
+            )?;
+            require(
+                retries.iter().all(|(_, _, level)| *level == "warn"),
+                format!("expected warn retry notices; got: {got}"),
+            )?;
+            let last_retry = retries.last().unwrap().0;
+            let terminal = outcome.events.iter().position(|event| {
+            matches!(event, TurnEventLine::Terminal { type_name, .. } if type_name == "turn_failed")
+        });
+            require(
+                terminal.is_some_and(|index| {
+                    index > last_retry + 1
+                        && outcome.events[last_retry + 1..index]
+                            .iter()
+                            .filter(|event| matches!(event, TurnEventLine::ModelStarted { .. }))
+                            .count()
+                            == 1
+                        && outcome.events[last_retry + 1..index]
+                            .iter()
+                            .all(|event| !matches!(event, TurnEventLine::LlmRetry { .. }))
+                        && outcome.events.iter().enumerate().all(|(snapshot, event)| {
+                            !is_summary_snapshot(event) || index < snapshot
+                        })
+                }),
+                format!(
+                    "expected final model_started then turn_failed after last llm_retry; got: {got}"
+                ),
+            )?;
+            let TurnEventLine::Terminal { raw, .. } = &outcome.events[terminal.unwrap()] else {
+                unreachable!()
+            };
+            let attempts = raw["step"]["attempts"].as_array().unwrap();
+            require(
+                attempts.len() == 3
+                    && raw["summary"]["notice"]["level"] == "error"
+                    && raw["summary"]["notice"]["text"] == attempts[2]["end"]["diagnostic"],
+                "terminal notice must equal the final attempt diagnostic",
+            )
+        })();
     finish_scenario(
         evidence,
         &[("exhausted retries", &outcome.command)],

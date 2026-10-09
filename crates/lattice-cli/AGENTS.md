@@ -21,7 +21,7 @@
 - 拒绝依据模式而非枚举变量名。新增依赖读取的环境变量时核对 `classify`：proxy 会影响 `hyper-util`，证书变量会让 `rustls-native-certs` 替换信任库。
 - 不增加第二个 loader 或直接调用 `dotenvy::dotenv()`。拒绝值不得进入变量替换状态；启动不打印拒绝，doctor 提供观察结果且不回显源行。
 - 环境决策进入纯 `plan_dotenv`：输入文件字节及 `already_set` 判定，返回报告与待安装键值。优先级、BOM 和解析失败在不修改测试进程环境的情况下验证，不把决策放到 `set_var` 循环。
-- JSONL 保留公开 `TurnEvent`，另含 submission、acceptance、snapshot、history、connection 与结构化 error 控制记录，stdout 不混入人类状态行。保留 0/1/2 退出契约；查询成功、Turn 结局和正文读取分别核验。
+- JSONL 保留公开 `TurnEvent`，另含 submission、acceptance、snapshot、history、connection 与结构化 error 控制记录，stdout 不混入人类状态行。人类可读输出对同一 Turn 的结局摘要只打印一次，等级等面向用户的文字用稳定的小写词，不用 `Debug` 输出。保留 0/1/2 退出契约；查询成功、Turn 结局和正文读取分别核验。
 - 开始新执行才加载并冻结 profile/provider 配置；找回、只读查询及崩溃遗留任务的自动关闭先使用原持久事实，无需当前凭据。前端保留用户输入、请求身份与退出选择，接受和取消交接遵循会话合同，不以重复补发代替后台接管保证。
 - 观察 idle 和回执等待由 LocalTurn 管理，CLI 只消费诊断并选择退出；调整时分别核对客户端等待与产品 deadline。新增命令的只读查询使用公开读取入口，不接提交或自动关闭路径，不建前端执行旁路。
 - `pre-stream` 错误分类与固定正文读取失败仍须有精确退出码回归，不能只核对可见 TurnOutcome。

@@ -64,7 +64,7 @@ impl ObserverSink {
                     }),
                 }
             }
-            TurnEvent::LlmRequestError { key, .. } => {
+            TurnEvent::LlmRetry { key, .. } => {
                 if state.attempt.as_ref().is_some_and(|a| a.key == *key) {
                     state.attempt = None;
                 }

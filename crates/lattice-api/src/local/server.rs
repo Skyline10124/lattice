@@ -1431,12 +1431,13 @@ mod tests {
             // 订阅者停在唤醒后的查询中：关闭、尾部事件、终态与退休全部完成后再恢复。
             let key = attempt(&request);
             let tail = if failed {
-                crate::TurnEvent::LlmRequestError {
+                crate::TurnEvent::LlmRetry {
                     key,
-                    retryable: true,
-                    will_retry: false,
-                    delay_ms: None,
-                    message: "provider down".into(),
+                    delay_ms: 1,
+                    notice: lattice_session::store::Notice {
+                        level: lattice_session::store::NoticeLevel::Warn,
+                        text: "provider down".into(),
+                    },
                 }
             } else {
                 crate::TurnEvent::ModelFinished {
@@ -1445,13 +1446,27 @@ mod tests {
                     usage: None,
                 }
             };
-            close(&backend, &request).await;
             owner.observer.emit(tail.clone());
+            let final_start = failed.then(|| crate::TurnEvent::ModelStarted {
+                key: lancet_protocol::ModelAttemptKey {
+                    attempt_ordinal: key.attempt_ordinal + 1,
+                    ..key
+                },
+                provider: lattice_conversation::ProviderOrigin::OpenAiCompatible,
+                model: "test".into(),
+            });
+            if let Some(start) = &final_start {
+                owner.observer.emit(start.clone());
+            }
+            close(&backend, &request).await;
             let end = terminal(&backend, &request, failed).await;
             owner.observer.emit(end.clone());
             retire(&backend, &request, &owner, Ok(()));
             release.send(()).unwrap();
             assert_eq!(event(&mut reader, &mut socket).await, tail);
+            if let Some(start) = final_start {
+                assert_eq!(event(&mut reader, &mut socket).await, start);
+            }
             assert_eq!(event(&mut reader, &mut socket).await, end);
             closing(&mut reader, &mut socket).await;
             task.await.unwrap().unwrap();

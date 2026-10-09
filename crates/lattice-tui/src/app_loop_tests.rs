@@ -578,20 +578,30 @@ fn comment_numbering_combines_history_queue_and_drafts_and_does_not_resume_with_
 
 #[test]
 fn dock_status_survives_r2_history_until_space() {
-    for will_retry in [true, false] {
+    for failed in [false, true] {
         let mut h = Harness::new(false);
         let id = lattice_api::local::new_turn_id();
         h.app.apply_update(LocalUpdate::Reset {
             view: Box::new(view(id, false)),
             generation: 1,
         });
-        h.app.apply_turn_event(TurnEvent::LlmRequestError {
-            key: key(id, 0, 1),
-            retryable: will_retry,
-            will_retry,
-            delay_ms: Some(100),
-            message: "dock-marker".into(),
-        });
+        if failed {
+            h.app.push_dock_status(
+                StatusKind::TurnFailed {
+                    reason: "dock-marker".into(),
+                },
+                DockSeverity::Error,
+            );
+        } else {
+            h.app.apply_turn_event(TurnEvent::LlmRetry {
+                key: key(id, 0, 1),
+                delay_ms: 100,
+                notice: lattice_api::local::Notice {
+                    level: lattice_api::local::NoticeLevel::Warn,
+                    text: "dock-marker".into(),
+                },
+            });
+        }
         let closed = view(id, true);
         let loaded: lattice_api::local::LocalHistory = serde_json::from_value(
             json!({"anchor":closed.history,"entries":history_entries(&closed)}),

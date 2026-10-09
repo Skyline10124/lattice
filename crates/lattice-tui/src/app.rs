@@ -98,7 +98,6 @@ pub(crate) enum StatusKind {
     Summary { turn_id: TurnId, summary: TurnSummary },
     TurnFailed { reason: String },
     LlmRetry { attempt: u32, delay_ms: u64, message: String },
-    LlmFailed { attempt: u32, message: String },
     /// `/help` output and startup banner.
     Notice(Vec<String>),
 }
@@ -261,36 +260,24 @@ impl App {
                 self.show_summary(turn.turn_id, summary);
                 self.phase = TurnPhase::Idle;
             }
-            TurnEvent::LlmRequestError {
+            TurnEvent::LlmRetry {
                 key,
-                will_retry,
                 delay_ms,
-                message,
-                ..
+                notice,
             } => {
-                if will_retry {
-                    self.remove_step(StepKey {
-                        turn_id: key.turn_id,
-                        ordinal: key.model_step_ordinal,
-                    });
-                    self.attempt = None;
-                    self.push_dock_status(
-                        StatusKind::LlmRetry {
-                            attempt: key.attempt_ordinal,
-                            delay_ms: delay_ms.unwrap_or(0),
-                            message,
-                        },
-                        DockSeverity::Warn,
-                    );
-                } else {
-                    self.push_dock_status(
-                        StatusKind::LlmFailed {
-                            attempt: key.attempt_ordinal,
-                            message,
-                        },
-                        DockSeverity::Error,
-                    );
-                }
+                self.remove_step(StepKey {
+                    turn_id: key.turn_id,
+                    ordinal: key.model_step_ordinal,
+                });
+                self.attempt = None;
+                self.push_dock_status(
+                    StatusKind::LlmRetry {
+                        attempt: key.attempt_ordinal,
+                        delay_ms,
+                        message: notice.text,
+                    },
+                    DockSeverity::Warn,
+                );
             }
             TurnEvent::StepClosed { .. } => {} // 实际正文到达前保留临时块。
             TurnEvent::TurnStarted { turn, .. } => self.ctx.session_id = Some(turn.session_id),
@@ -1911,13 +1898,14 @@ mod tests {
         lattice_api::local::InvocationId::parse(&format!("22222222-2222-4222-8222-{n:012}"))
             .unwrap()
     }
-    fn retry(message: &str, will_retry: bool) -> TurnEvent {
-        TurnEvent::LlmRequestError {
+    fn retry(message: &str) -> TurnEvent {
+        TurnEvent::LlmRetry {
             key: attempt(),
-            retryable: will_retry,
-            will_retry,
-            delay_ms: Some(100),
-            message: message.into(),
+            delay_ms: 100,
+            notice: lattice_api::local::Notice {
+                level: lattice_api::local::NoticeLevel::Warn,
+                text: message.into(),
+            },
         }
     }
     fn start_tool(app: &mut App, name: &str) {
@@ -2077,8 +2065,8 @@ mod tests {
         assert!(app.dock_status().is_none());
 
         // WARN → WARN：旧状态原位释放，新状态暂驻 Dock。
-        app.apply_turn_event(retry("retry-0", true));
-        app.apply_turn_event(retry("retry-a", true));
+        app.apply_turn_event(retry("retry-0"));
+        app.apply_turn_event(retry("retry-a"));
         let (kind, severity) = app.dock_status().expect("retry 应暂驻 Dock");
         assert!(matches!(kind, StatusKind::LlmRetry { message, .. } if message == "retry-a"));
         assert_eq!(severity, DockSeverity::Warn);
@@ -2090,12 +2078,17 @@ mod tests {
         assert!(transcript_text(&app, 78).contains("info-i"));
 
         // WARN → ERROR，再 ERROR → WARN：每次替换都把旧状态释放到原位。
-        app.apply_turn_event(retry("commit-b", false));
+        app.push_dock_status(
+            StatusKind::TurnFailed {
+                reason: "commit-b".into(),
+            },
+            DockSeverity::Error,
+        );
         assert!(matches!(
             app.dock_status(),
-            Some((StatusKind::LlmFailed { message, .. }, DockSeverity::Error)) if message == "commit-b"
+            Some((StatusKind::TurnFailed { reason }, DockSeverity::Error)) if reason == "commit-b"
         ));
-        app.apply_turn_event(retry("retry-c", true));
+        app.apply_turn_event(retry("retry-c"));
         assert!(matches!(
             app.dock_status(),
             Some((StatusKind::LlmRetry { message, .. }, DockSeverity::Warn)) if message == "retry-c"

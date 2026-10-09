@@ -45,10 +45,11 @@ pub enum TurnEventLine {
         provider: String,
         model: String,
     },
-    LlmRequestError {
-        retryable: bool,
-        will_retry: bool,
-        message: String,
+    LlmRetry {
+        attempt_ordinal: u64,
+        delay_ms: u64,
+        level: String,
+        text: String,
     },
     ReasoningDelta {
         content: String,
@@ -83,7 +84,7 @@ impl TurnEventLine {
         match self {
             Self::TurnStarted { .. } => "turn_started",
             Self::ModelStarted { .. } => "model_started",
-            Self::LlmRequestError { .. } => "llm_request_error",
+            Self::LlmRetry { .. } => "llm_retry",
             Self::ReasoningDelta { .. } => "reasoning_delta",
             Self::TokenDelta { .. } => "token_delta",
             Self::ToolCallStarted { .. } => "tool_call_started",
@@ -257,17 +258,19 @@ fn parse_event_line_checked(line: &str) -> Result<Option<TurnEventLine>, String>
                 TurnEventLine::ReasoningDelta { content }
             }
         }
-        "llm_request_error" => {
+        "llm_retry" => {
             attempt_key(&value["key"])?;
-            match value.get("delay_ms") {
-                Some(Value::Null) => {}
-                Some(n) if n.as_u64().is_some() => {}
-                _ => return Err("invalid delay_ms".into()),
+            let delay_ms = uint(&value, "delay_ms")?;
+            let notice = &value["notice"];
+            let level = string(notice, "level")?;
+            if level != "warn" {
+                return Err("retry notice must be warn".into());
             }
-            TurnEventLine::LlmRequestError {
-                retryable: boolean(&value, "retryable")?,
-                will_retry: boolean(&value, "will_retry")?,
-                message: string(&value, "message")?.into(),
+            TurnEventLine::LlmRetry {
+                attempt_ordinal: uint(&value["key"], "attempt_ordinal")?,
+                delay_ms,
+                level: level.into(),
+                text: string(notice, "text")?.into(),
             }
         }
         "model_finished" => {

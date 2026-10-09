@@ -5,7 +5,7 @@ use anyhow::Result;
 use lattice_api::local::{
     Acceptance, CancelStatus, ConnectionStatus, FrozenConfiguration, HistoryReadError, LocalClient,
     LocalErrorKind, LocalHistory, LocalState, LocalTurn, LocalUpdate, MaterialSummary,
-    MessageSemantic, Node, NotSubmittedStage, ObservationPhase, ObservationSnapshot,
+    MessageSemantic, Node, NotSubmittedStage, NoticeLevel, ObservationPhase, ObservationSnapshot,
     PublicTurnOutcome, SessionId, TurnId, TurnRequest, TurnSummary, UsageSummary,
 };
 use lattice_api::{LoadedAgentProfile, TurnEvent};
@@ -19,6 +19,7 @@ use tokio::time;
 #[derive(Default)]
 struct RunRenderState {
     last_summary: Option<TurnSummary>,
+    printed_summaries: Vec<TurnId>,
     session_id: Option<SessionId>,
     usage: Option<UsageSummary>,
     tokens_emitted_without_newline: bool,
@@ -93,18 +94,18 @@ fn render_human_event(
         }
         TurnEvent::ModelStarted {
             provider, model, ..
-        } => verbose.then(|| format!("model {provider:?}/{model}")),
-        TurnEvent::LlmRequestError {
+        } => verbose.then(|| format!("model {provider}/{model}")),
+        TurnEvent::LlmRetry {
             key,
-            will_retry,
             delay_ms,
-            message,
-            ..
+            notice,
         } => verbose.then(|| {
             format!(
-                "llm attempt {} retry={will_retry} delay={}ms: {message}",
+                "{}: llm attempt {} failed, retrying in {} ms: {}",
+                notice_level_label(&notice.level),
                 key.attempt_ordinal,
-                delay_ms.unwrap_or(0)
+                delay_ms,
+                notice.text
             )
         }),
         TurnEvent::ReasoningDelta { content, .. } => {
@@ -130,9 +131,9 @@ fn render_human_event(
             let content = match material {
                 MaterialSummary::Available { byte_length, .. } => format!("{byte_length} B"),
                 MaterialSummary::OutputTooLarge { byte_length, .. } => {
-                    format!("{byte_length} B 内容不可用")
+                    format!("{byte_length} B content unavailable")
                 }
-                MaterialSummary::NoContent => "无正文".into(),
+                MaterialSummary::NoContent => "no content".into(),
             };
             Some(format!(
                 "tool {name} {} {content} {}",
@@ -147,9 +148,11 @@ fn render_human_event(
         TurnEvent::StepClosed { step } => {
             verbose.then(|| format!("step {} closed", step.key.ordinal))
         }
-        TurnEvent::TurnCompleted { summary, .. }
-        | TurnEvent::TurnFailed { summary, .. }
-        | TurnEvent::TurnCancelled { summary, .. } => Some(summary_text(summary)),
+        TurnEvent::TurnCompleted { turn, summary, .. }
+        | TurnEvent::TurnFailed { turn, summary, .. }
+        | TurnEvent::TurnCancelled { turn, summary, .. } => {
+            summary_once(turn.turn_id, summary, state)
+        }
         TurnEvent::TokenDelta { .. } => unreachable!(),
     };
     if let Some(line) = line {
@@ -158,10 +161,32 @@ fn render_human_event(
     }
     Ok(())
 }
+fn summary_once(
+    turn_id: TurnId,
+    summary: &TurnSummary,
+    state: &mut RunRenderState,
+) -> Option<String> {
+    if state.printed_summaries.contains(&turn_id) {
+        return None;
+    }
+    state.printed_summaries.push(turn_id);
+    Some(summary_text(summary))
+}
+fn notice_level_label(level: &NoticeLevel) -> &'static str {
+    match level {
+        NoticeLevel::Info => "info",
+        NoticeLevel::Warn => "warn",
+        NoticeLevel::Error => "error",
+    }
+}
 fn summary_text(summary: &TurnSummary) -> String {
     let mut text = outcome_label(&summary.outcome).to_string();
     if let Some(notice) = &summary.notice {
-        text.push_str(&format!(" {:?}: {}", notice.level, notice.text));
+        text.push_str(&format!(
+            " {}: {}",
+            notice_level_label(&notice.level),
+            notice.text
+        ));
     }
     text
 }
@@ -259,7 +284,7 @@ async fn observe_with_signal(
             tokio::select! {
                 _=sigint.recv()=>{
                     if render.last_summary.is_some() {
-                        connection_notice("历史读取被中断；已知结局保留，请重连读取",json);
+                        connection_notice("history read interrupted; the known outcome stands; reconnect to read it",json);
                         break Ok(std::process::ExitCode::from(1));
                     }
                     if interrupted {break Ok(std::process::ExitCode::from(1));}
@@ -295,7 +320,8 @@ async fn observe_with_signal(
                             if detail.summary.is_some() {render.last_summary=detail.summary.clone();}
                             render.usage=Some(detail.usage.clone());
                         }
-                        let state=LocalState{view,phase,error};render_local_state(&state,json)?;
+                        let state = LocalState { view, phase, error };
+                        render_local_state(&state, &mut render, json)?;
                         last_state=Some(state);
                         history_ready=false;
                     }
@@ -304,7 +330,12 @@ async fn observe_with_signal(
                         if json {println!("{}",serde_json::json!({"type":"snapshot","generation":generation,"view":view}));}
                         else if let Some(attempt)=&view.attempt {
                             finish_text(&mut render,&mut std::io::stdout())?;
-                            println!("--- 当前尝试 {:?} 快照 ---",attempt.key);
+                            println!(
+                                "--- current attempt snapshot: turn {} step {} attempt {} ---",
+                                attempt.key.turn_id,
+                                attempt.key.model_step_ordinal,
+                                attempt.key.attempt_ordinal
+                            );
                             for segment in &attempt.segments {if let lattice_api::local::TextSegment::Text{text}=segment {print!("{text}");}}
                             println!();
                         }
@@ -357,7 +388,7 @@ async fn observe_with_signal(
     if let Some(state) = &report.state
         && last_state.as_ref() != Some(state)
     {
-        render_local_state(state, json)?;
+        render_local_state(state, &mut render, json)?;
     }
     if let Some(status) = report.cancel
         && last_cancel != Some(status)
@@ -404,7 +435,7 @@ async fn observe_with_signal(
             );
         } else {
             eprintln!(
-                "取消未确认：session {} turn {id}",
+                "cancel unconfirmed: session {} turn {id}",
                 session_label(report.session_id)
             );
         }
@@ -437,7 +468,7 @@ fn summary_exit(summary: Option<&TurnSummary>) -> std::process::ExitCode {
     })
 }
 fn session_label(id: Option<SessionId>) -> String {
-    id.map_or_else(|| "尚未接受".into(), |id| id.to_string())
+    id.map_or_else(|| "not yet accepted".into(), |id| id.to_string())
 }
 fn not_submitted_label(stage: NotSubmittedStage) -> &'static str {
     match stage {
@@ -453,7 +484,7 @@ fn submission_state(session_id: Option<SessionId>, turn_id: TurnId, state: &str,
         );
     } else {
         eprintln!(
-            "session {} turn {turn_id}: {state}；原身份用于查询/重发",
+            "session {} turn {turn_id}: {state}; use the same identity to query or resend",
             session_label(session_id)
         );
     }
@@ -471,41 +502,52 @@ fn render_acceptance(acceptance: &Acceptance, json: bool) -> Result<()> {
                 turn.session_id,
                 turn.turn_id,
                 if matches!(acceptance, Acceptance::Existing { .. }) {
-                    "找回既有请求；未重复执行"
+                    "existing request found; not executed again"
                 } else {
-                    "已确认接受"
+                    "acceptance confirmed"
                 }
             ),
             Acceptance::ConfirmationUnknown {
                 turn_id,
                 session_id,
             } => submission_state(*session_id, *turn_id, "unknown", false),
-            Acceptance::NeedsConfiguration { .. } => eprintln!("尚需配置；未接受"),
+            Acceptance::NeedsConfiguration { .. } => {
+                eprintln!("configuration required; not accepted")
+            }
         }
     }
     Ok(())
 }
-fn render_local_state(state: &LocalState, json: bool) -> Result<()> {
-    render_snapshot(&state.view, json)?;
+fn render_local_state(state: &LocalState, render: &mut RunRenderState, json: bool) -> Result<()> {
+    render_snapshot(&state.view, render, json, &mut std::io::stderr())?;
     if let Some(error) = &state.error {
         report_error(&error.clone().into(), json);
     }
     Ok(())
 }
-fn render_snapshot(view: &ObservationSnapshot, json: bool) -> Result<()> {
+fn render_snapshot(
+    view: &ObservationSnapshot,
+    render: &mut RunRenderState,
+    json: bool,
+    err: &mut impl Write,
+) -> Result<()> {
     if json {
         println!("{}", serde_json::json!({"type":"snapshot","view":view}));
     } else {
-        eprintln!(
+        writeln!(
+            err,
             "session {} current={} active={}",
             view.session.session_id,
             view.session.current.0,
             view.session
                 .active_turn
                 .map_or_else(|| "none".into(), |id| id.to_string())
-        );
-        if let Some(summary) = view.selected_turn.as_ref().and_then(|t| t.summary.as_ref()) {
-            eprintln!("{}", summary_text(summary));
+        )?;
+        if let Some(turn) = &view.selected_turn
+            && let Some(summary) = &turn.summary
+            && let Some(line) = summary_once(turn.turn_id, summary, render)
+        {
+            writeln!(err, "{line}")?;
         }
     }
     Ok(())
@@ -518,7 +560,10 @@ fn render_history(history: LocalHistory, json: bool) -> Result<()> {
         );
         return Ok(());
     }
-    println!("--- 固定根路径正文，current={} ---", history.anchor.head.0);
+    println!(
+        "--- conversation on the pinned root path, current={} ---",
+        history.anchor.head.0
+    );
     for entry in history.entries {
         let (message, results) = match entry.content {
             Node::Root => continue,
@@ -542,7 +587,10 @@ fn render_history(history: LocalHistory, json: bool) -> Result<()> {
     Ok(())
 }
 fn render_history_error(error: &HistoryReadError, json: bool) {
-    connection_notice("历史正文未读取；已知结局保留，请重连", json);
+    connection_notice(
+        "history not read; the known outcome stands; reconnect to read it",
+        json,
+    );
     report_error(
         &anyhow::Error::new(error.clone()).context(HistoryFailure),
         json,
@@ -556,9 +604,9 @@ fn render_cancel_error(
 ) {
     connection_notice(
         &format!(
-            "取消诊断：session {} turn {}",
+            "cancel diagnostic: session {} turn {}",
             session_label(session_id),
-            turn_id.map_or_else(|| "未知".into(), |id| id.to_string())
+            turn_id.map_or_else(|| "unknown".into(), |id| id.to_string())
         ),
         json,
     );
@@ -573,12 +621,15 @@ fn render_cancel(status: CancelStatus, json: bool) {
                     serde_json::json!({"type":"cancel_acknowledged","owned":true})
                 );
             } else {
-                eprintln!("后台已接管取消；持久终态仍待查询");
+                eprintln!(
+                    "daemon took over the cancel; the durable outcome is still to be queried"
+                );
             }
         }
-        CancelStatus::NotTaken => {
-            connection_notice("后台在判定点未接管本次取消；不表示没有后台工作", json)
-        }
+        CancelStatus::NotTaken => connection_notice(
+            "daemon did not take over this cancel at the decision point; background work may still exist",
+            json,
+        ),
         CancelStatus::Unknown => connection_notice("cancel acknowledgement unknown", json),
         CancelStatus::Pending | CancelStatus::Moot => {}
     }

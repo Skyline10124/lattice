@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use super::{observer::ObserverSink, test_support::*, types::*};
 use lattice_llm::LlmEvent;
-use lattice_session::store::{PublicTurnOutcome, StepDetailState, StepEnd, StopCause};
+use lattice_session::store::{NoticeLevel, PublicTurnOutcome, StepDetailState, StepEnd, StopCause};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -37,6 +37,11 @@ async fn stream_turn_error_after_partial_closes_without_persisting_partial() {
         })
         .collect();
     assert_eq!(deltas, "partial output before error");
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, TurnEvent::LlmRetry { .. }))
+    );
     assert!(
         matches!(&events.last().unwrap(), TurnEvent::TurnFailed { summary, .. } if summary.notice.as_ref().unwrap().text.contains("connection reset"))
     );
@@ -102,23 +107,19 @@ async fn stream_turn_retry_uses_profile_backoff_and_cap() {
     let delays: Vec<_> = events
         .iter()
         .filter_map(|event| match event {
-            TurnEvent::LlmRequestError {
+            TurnEvent::LlmRetry {
                 key,
-                will_retry,
                 delay_ms,
-                ..
-            } => Some((key.attempt_ordinal, *will_retry, *delay_ms)),
+                notice,
+            } => {
+                assert_eq!(notice.level, NoticeLevel::Warn);
+                assert!(notice.text.contains("retryable opening failure"));
+                Some((key.attempt_ordinal, *delay_ms))
+            }
             _ => None,
         })
         .collect();
-    assert_eq!(
-        delays,
-        vec![
-            (0, true, Some(40)),
-            (1, true, Some(60)),
-            (2, true, Some(60))
-        ]
-    );
+    assert_eq!(delays, vec![(0, 40), (1, 60), (2, 60)]);
     assert_eq!(detail.steps[0].attempts.len(), 4);
     let starts = llm.starts.lock().unwrap();
     assert_eq!(starts.len(), 4);
@@ -130,6 +131,70 @@ async fn stream_turn_retry_uses_profile_backoff_and_cap() {
         PublicTurnOutcome::Completed
     );
 }
+#[tokio::test(start_paused = true)]
+async fn stream_turn_final_provider_failure_only_emits_terminal_notice() {
+    for retryable in [false, true] {
+        let count = if retryable { 3 } else { 1 };
+        let mut builder = lattice_agent::testing::FakeStreamingLlmClient::builder();
+        for attempt in 0..count {
+            builder = builder.push_llm_error(lattice_llm::LlmError::Transport {
+                message: format!("provider failure {attempt}"),
+                retryable,
+            });
+        }
+        let fixture = setup_fixture(Arc::new(builder.build()), &[]);
+        let mut request = fixture.request.clone();
+        request.loaded_profile.as_mut().unwrap().profile.llm.retry =
+            lattice_profile::LlmRetrySection {
+                max_retries: 2,
+                initial_delay_ms: 1,
+                max_delay_ms: 1,
+            };
+        let (detail, events) = fixture.run(request).await;
+        let attempts = &detail.steps[0].attempts;
+        assert_eq!(attempts.len(), count);
+        let retries: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                TurnEvent::LlmRetry { key, notice, .. } => Some((key, notice)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(retries.len(), count - 1);
+        for (ordinal, (key, notice)) in retries.iter().enumerate() {
+            assert_eq!(key.attempt_ordinal as usize, ordinal);
+            assert_eq!(notice.level, NoticeLevel::Warn);
+            let lattice_session::store::AttemptEndDetail::Stopped { diagnostic, .. } =
+                &attempts[ordinal].end
+            else {
+                panic!("stopped attempt")
+            };
+            assert_eq!(Some(&notice.text), diagnostic.as_ref());
+        }
+        assert!(matches!(
+            &events[events.len() - 2],
+            TurnEvent::ModelStarted { key, .. } if key.attempt_ordinal as usize == count - 1
+        ));
+        let TurnEvent::TurnFailed { summary, .. } = events.last().unwrap() else {
+            panic!("terminal failure must follow the final request")
+        };
+        assert_eq!(Some(summary), detail.summary.as_ref());
+        let notice = summary.notice.as_ref().unwrap();
+        assert_eq!(notice.level, NoticeLevel::Error);
+        let lattice_session::store::AttemptEndDetail::Stopped { diagnostic, .. } =
+            &attempts.last().unwrap().end
+        else {
+            panic!("final stopped attempt")
+        };
+        assert_eq!(Some(&notice.text), diagnostic.as_ref());
+        assert!(
+            notice
+                .text
+                .contains(&format!("provider failure {}", count - 1))
+        );
+    }
+}
+
 async fn wait_retry(observer: &ObserverSink) {
     let mut changed = observer.subscribe();
     loop {
@@ -137,9 +202,8 @@ async fn wait_retry(observer: &ObserverSink) {
             && events.iter().any(|event| {
                 matches!(
                     event.event,
-                    TurnEvent::LlmRequestError {
-                        will_retry: true,
-                        delay_ms: Some(10_000),
+                    TurnEvent::LlmRetry {
+                        delay_ms: 10_000,
                         ..
                     }
                 )
@@ -214,13 +278,13 @@ async fn stream_turn_retry_respects_explicit_and_default_deadlines() {
         let delays: Vec<_> = events
             .iter()
             .filter_map(|event| match event {
-                TurnEvent::LlmRequestError { delay_ms, .. } => Some(*delay_ms),
+                TurnEvent::LlmRetry { delay_ms, .. } => Some(*delay_ms),
                 _ => None,
             })
             .collect();
         assert_eq!(
             delays,
-            vec![Some(seconds.min(60) * 1_000); count],
+            vec![seconds.min(60) * 1_000; count],
             "plan must be capped by remaining Turn budget"
         );
         assert_eq!(

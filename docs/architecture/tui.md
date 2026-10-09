@@ -98,7 +98,7 @@ flowchart LR
 
 `/reconnect` 在目标未变时请求 LocalTurn 重新订阅。若当前快照显示另一进行中的 Turn，用户再次 `/reconnect` 选择该目标，app 用 `observe` 创建新的只读句柄；重新打开已有 Session 也创建新观察句柄。快照或重连引起的 Reset 按新快照重建临时文字与工具观察：段列表给出当前尝试已生成的全部文字，不缺前文。后续 History 只替换持久区域；历史 I/O 和读取代次由 LocalTurn 管理。Dock 中暂驻的 Warn 与 Error 不随 History 消失，继续暂驻到用户释放；释放后作为状态提示按上述位置规则出现。
 
-模型尝试重试时，新尝试的文字从头开始；TUI 按尝试边界结束旧的临时助手块，显示新尝试的文字。Step 关闭后，临时块由 History 中的 Step 节点取代，二者合并相邻同类后内容一致。客户端接续顺序见[观察与重连](session.md#观察与重连)。
+模型尝试重试时，新尝试的文字从头开始；TUI 按尝试边界结束旧的临时助手块，显示新尝试的文字。尝试边界由 [`LlmRetry`](session.md#模型请求与执行预算) 事件给出：TUI 收到后移除该 Step 的临时块，并按事件携带的 Warn notice 显示重试提示。不再重试的失败没有单独的请求错误事件，只由 Turn 结局显示一次。Step 关闭后，临时块由 History 中的 Step 节点取代，二者合并相邻同类后内容一致。客户端接续顺序见[观察与重连](session.md#观察与重连)。
 
 Turn 观察与历史读取 idle 由 LocalTurn 管理，唯一常量为 `lattice_api::STREAM_IDLE_TIMEOUT_SECS`，触发条件和范围见[输入与传输限制](session.md#输入与传输限制)。超时、断连或 EOF 按连接/读取诊断呈现，未配对工具按观察未知显示；用户可重连读取。
 

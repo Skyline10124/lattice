@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! 模型请求传输层（#265）的真实二进制场景：请求头、Retry-After、错误诊断、
-//! 断流重试、Turn 内连接复用、HTTP/2 对未处理请求的重发，以及明文 HTTP/1.1 的本地 provider。每个场景都是多次请求的 Turn，断言落在
+//! 断流重试、Turn 内连接复用、HTTP/2 对未处理请求的重发，以及明文 HTTP/1.1 的本地 provider。断言落在
 //! fake provider 收到的请求与持久 Turn 记录上。
 
 mod support;
@@ -339,6 +339,60 @@ fn overload_and_gateway_errors_retry_with_bounded_diagnostics() {
 }
 
 #[test]
+fn unauthorized_request_fails_without_retry_notice() {
+    let driver = driver();
+    let (world, spec) = direct_world(
+        "direct-transport-unauthorized",
+        "transport",
+        "[]",
+        RETRY_FAST,
+    );
+    let server = wire_fake_llm(
+        &world,
+        "transport",
+        SseScript::HttpError {
+            status: 401,
+            body: r#"{"error":{"message":"invalid credential"}}"#.into(),
+        },
+    );
+    let evidence = evidence(&world, &spec);
+    let send = SessionSendDriver::new(&driver, &world, &spec, "transport");
+    let outcome = send.send("reject unauthorized request").unwrap();
+    let captures = server.captured_requests();
+    let result = (|| {
+        assert_clean_send(&outcome)?;
+        require(
+            outcome.command.is_clean_exit(1),
+            "unauthorized Turn exits 1",
+        )?;
+        require(captures.len() == 1, "401 must not be retried")?;
+        require(
+            !outcome
+                .events
+                .iter()
+                .any(|event| matches!(event, TurnEventLine::LlmRetry { .. })),
+            "401 must not emit a retry notice",
+        )?;
+        let turn = final_turn(&outcome);
+        let attempts = attempts(&turn, 0);
+        let notice = &turn["summary"]["notice"];
+        require(
+            attempts.len() == 1
+                && notice["level"] == "error"
+                && notice["text"] == diagnostic(&attempts[0])
+                && diagnostic(&attempts[0]).starts_with("HTTP 401"),
+            "terminal error notice must preserve the 401 diagnostic",
+        )
+    })();
+    finish_scenario(
+        evidence,
+        &[("unauthorized turn", &outcome.command)],
+        captures,
+        result,
+    );
+}
+
+#[test]
 fn stream_cut_before_completion_is_retried() {
     let driver = driver();
     let (world, spec) = direct_world(
@@ -388,15 +442,15 @@ fn stream_cut_before_completion_is_retried() {
             .iter()
             .filter_map(|event| match event {
                 TurnEventLine::TokenDelta { content } => Some(content.as_str()),
-                TurnEventLine::LlmRequestError { .. } => Some("<error>"),
+                TurnEventLine::LlmRetry { .. } => Some("<retry>"),
                 _ => None,
             })
             .collect();
         require(
             streamed
                 .windows(2)
-                .any(|pair| pair == ["partial", "<error>"])
-                && streamed.windows(2).any(|pair| pair == ["half", "<error>"]),
+                .any(|pair| pair == ["partial", "<retry>"])
+                && streamed.windows(2).any(|pair| pair == ["half", "<retry>"]),
             format!("partial bodies arrive before each cut: {streamed:?}"),
         )?;
         let turn = final_turn(&outcome);

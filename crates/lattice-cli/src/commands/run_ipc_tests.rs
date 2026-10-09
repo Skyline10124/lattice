@@ -582,9 +582,84 @@ async fn cancel_error_received_during_detach_is_rendered_with_original_identity(
         } else {
             assert_eq!(stderr.matches("cancel denied during detach").count(), 1);
             assert!(
-                stderr
+                stderr.lines().any(|s| s.contains("cancel diagnostic")
+                    && s.contains(SESSION)
+                    && s.contains(ID))
+            );
+        }
+    }
+}
+
+#[test]
+fn human_summary_is_printed_once_across_event_snapshot_and_detach() {
+    for outcome in ["completed", "failed", "cancelled"] {
+        for sources in [
+            ["event", "snapshot", "detach"],
+            ["snapshot", "event", "detach"],
+            ["detach", "snapshot", "event"],
+            ["snapshot", "snapshot", "detach"],
+            ["detach", "detach", "detach"],
+        ] {
+            let id = lattice_api::local::new_turn_id();
+            let snapshot = view(id, Some(outcome));
+            let detail = snapshot.selected_turn.as_ref().unwrap();
+            let summary = detail.summary.clone().unwrap();
+            let turn = lattice_api::local::TurnRef {
+                session_id: sid(),
+                turn_id: id,
+            };
+            let step = detail.steps[0].clone();
+            let event = match outcome {
+                "completed" => TurnEvent::TurnCompleted {
+                    turn,
+                    step,
+                    summary,
+                },
+                "failed" => TurnEvent::TurnFailed {
+                    turn,
+                    step,
+                    summary,
+                },
+                _ => TurnEvent::TurnCancelled {
+                    turn,
+                    step,
+                    summary,
+                },
+            };
+            let mut render = RunRenderState::default();
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            // State 可先记录结局；这不表示人类摘要已经打印。
+            render.last_summary = detail.summary.clone();
+            for source in sources {
+                if source == "event" {
+                    render_human_event(&event, &mut render, &mut out, &mut err, false).unwrap();
+                    apply_event_to_state(&event, &mut render);
+                } else {
+                    // State 与 detach 共用快照渲染；NoOwner/已关闭重连可完全没有事件。
+                    render_snapshot(&snapshot, &mut render, false, &mut err).unwrap();
+                }
+            }
+            let expected = summary_text(detail.summary.as_ref().unwrap());
+            assert_eq!(
+                String::from_utf8(err.clone())
+                    .unwrap()
                     .lines()
-                    .any(|s| s.contains("取消诊断") && s.contains(SESSION) && s.contains(ID))
+                    .filter(|line| *line == expected)
+                    .count(),
+                1,
+                "{outcome}: {sources:?}"
+            );
+            // 同一命令若观察到另一个 Turn，相同文案也应显示。
+            let next = view(lattice_api::local::new_turn_id(), Some(outcome));
+            render_snapshot(&next, &mut render, false, &mut err).unwrap();
+            assert_eq!(
+                String::from_utf8(err)
+                    .unwrap()
+                    .lines()
+                    .filter(|line| *line == expected)
+                    .count(),
+                2
             );
         }
     }
