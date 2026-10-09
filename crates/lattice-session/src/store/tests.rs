@@ -325,7 +325,7 @@ fn corrupt_state(layout: &StateLayout, edit: impl FnOnce(&mut Records)) {
     replace_all_for_test(&tx, &records).unwrap();
     tx.commit().unwrap();
 }
-// F37：故障仅改历史，当前槽位、末条投影和索引一致；前态不能被分页/过滤绕过。
+// 故障仅改历史，当前槽位、末条投影和索引一致；前态不能被分页/过滤绕过。
 #[test]
 fn tail_rejects_invalid_lifecycle_across_pages() {
     let mut missed = Vec::new();
@@ -407,7 +407,7 @@ fn tail_rejects_invalid_lifecycle_across_pages() {
     );
 }
 
-// F44：句柄已打开后注入可解码的坏高水位；另一 Session 的日志不得被登记覆盖。
+// 句柄已打开后注入可解码的坏高水位；另一 Session 的日志不得被登记覆盖。
 #[test]
 fn registration_rejects_corrupt_change_high_water() {
     for high_water in [0, 4] {
@@ -437,7 +437,7 @@ fn registration_rejects_corrupt_change_high_water() {
     }
 }
 
-// F44：独立核验发布边界，不能依赖局部装载已经阻止碰撞。
+// 独立核验发布边界，不能依赖局部装载已经阻止碰撞。
 #[test]
 fn change_publication_rejects_occupied_sequence() {
     let (_dir, _layout, db) = store();
@@ -460,7 +460,7 @@ fn change_publication_rejects_occupied_sequence() {
     assert!(original == load_read(&db.begin_read().unwrap().tx).unwrap());
 }
 
-// F37/F43：局部装载不能把直接引用缺失当成“尚未创建”。
+// 局部装载不能把直接引用缺失当成“尚未创建”。
 #[test]
 fn local_reads_reject_broken_references() {
     let mut missed = Vec::new();
@@ -500,7 +500,7 @@ fn local_reads_reject_broken_references() {
     );
 }
 
-// F43：打开后在自有库注入无关坏行作为读取哨兵；不得触达它，也不得修复它。
+// 打开后在自有库注入无关坏行作为读取哨兵；不得触达它，也不得修复它。
 #[test]
 fn ordinary_operations_are_local() {
     let (_dir, layout, db) = store();
@@ -578,7 +578,7 @@ fn ordinary_operations_are_local() {
     ));
 }
 
-// F17/F20/F22/F26/F28/F29：从合法事实逐一破坏事务专属形状，避免 outcome 不一致掩盖漏洞。
+// 从合法事实逐一破坏事务专属形状，避免 outcome 不一致掩盖漏洞。
 #[test]
 fn impossible_transaction_shapes_are_rejected() {
     let mut missed = Vec::new();
@@ -801,7 +801,7 @@ fn json_payload_field_names_are_not_store_records() {
     );
 }
 
-// F02/F25：持久边界必须发现复用类型丢弃的嵌套字段；任意 JSON 内容和 evidence 扩展不受此限。
+// 持久边界必须发现复用类型丢弃的嵌套字段；任意 JSON 内容和 evidence 扩展不受此限。
 #[test]
 fn nested_unknown_fields_are_rejected() {
     let mut missed = Vec::new();
@@ -883,7 +883,7 @@ fn nested_unknown_fields_are_rejected() {
     assert!(missed.is_empty(), "silently ignored fields at {missed:?}");
 }
 
-// F02：独立 JSON 合法不代表最终持久 envelope 可读；拒绝必须先于提交。
+// 独立 JSON 合法不代表最终持久 envelope 可读；拒绝必须先于提交。
 #[test]
 fn deep_arguments_are_rejected_before_commit() {
     let (_dir, layout, db) = store();
@@ -994,7 +994,7 @@ fn deep_results_are_rejected_before_commit() {
     SessionStore::open(&layout).unwrap();
 }
 
-// F01/F02：固定长度键、版本与错误定位，不接受宽松 UUID 或泄漏载荷。
+// 固定长度键、版本与错误定位，不接受宽松 UUID 或泄漏载荷。
 #[test]
 fn keys_and_versions() {
     for n in [0, 1, 255, u64::MAX] {
@@ -1031,7 +1031,7 @@ fn keys_and_versions() {
     assert!(validate::config(&serde_json::from_value(v).unwrap()).is_err());
 }
 
-// F03/F04/F05/F08：全局旧库拒绝优先于创建，损坏目标不可覆盖。
+// 全局旧库拒绝优先于创建，损坏目标不可覆盖。
 #[test]
 fn creation_and_legacy() {
     let dir = tempfile::tempdir().unwrap();
@@ -1099,7 +1099,7 @@ fn creation_and_legacy() {
     );
 }
 
-// F06/F07/F08/F40：注入发布阶段故障，不模拟 redb 的内部事务原子性。
+// 注入发布阶段故障，不模拟 redb 的内部事务原子性。
 #[test]
 fn creation_failures() {
     for point in [
@@ -1162,7 +1162,7 @@ fn creation_failures() {
     assert!(SessionStore::open(&layout).is_ok());
 }
 
-// F10/F11：找回先于新配置校验；每个非法接受均保持空库。
+// 找回先于新配置校验；每个非法接受均保持空库。
 #[test]
 fn acceptance_identity_and_limits() {
     let (_dir, _layout, db) = store();
@@ -1237,7 +1237,7 @@ fn acceptance_identity_and_limits() {
     ));
 }
 
-// F12：通过真实领域事务分配极值；只压缩测试库的序号空间，不替换分配器。
+// 通过真实领域事务分配极值；只压缩测试库的序号空间，不替换分配器。
 #[test]
 fn sequence_exhaustion_aborts_transactions() {
     for case in ["node", "change_at_max", "change_in_batch"] {
@@ -1306,7 +1306,7 @@ fn sequence_exhaustion_aborts_transactions() {
     }
 }
 
-// F13：锁能力与读取不取操作锁。
+// 锁能力与读取不取操作锁。
 #[test]
 fn sequence_and_lock_boundaries() {
     let (_dir, _layout, db) = store();
@@ -1331,7 +1331,7 @@ fn sequence_and_lock_boundaries() {
     assert_eq!(view.session(sid(1)).unwrap().current, NodeId(1));
 }
 
-// F15/F16/F17/F26/F27/F31/F32：预算、退避停止与 usage 来源组合。
+// 预算、退避停止与 usage 来源组合。
 #[test]
 fn attempts_and_step_budget() {
     let (_dir, _layout, db) = store();
@@ -1503,7 +1503,7 @@ fn attempts_and_step_budget() {
     assert!(matches!(d.usage,UsageSummary::Complete { total } if total.total_tokens==u64::MAX));
 }
 
-// F18/F19/F20/F21/F22/F26/F41：失败整批回滚、冲突重试、顺序与配对。
+// 失败整批回滚、冲突重试、顺序与配对。
 #[test]
 fn registration_and_ordering() {
     let (_dir, layout, db) = store();
@@ -1644,7 +1644,7 @@ fn registration_and_ordering() {
     assert!(matches!(node,Node::Step { content,.. } if content.results.len()==2));
 }
 
-// F14/F17/F24/F27/F28/F30：逐行闭合；非法持久终态不能顺手修复。
+// 逐行闭合；非法持久终态不能顺手修复。
 #[test]
 fn auto_close_matrix() {
     for case in 0..8 {
@@ -1987,7 +1987,7 @@ fn ordered_terminal_causes() {
     }
 }
 
-// F23/F24/F25/F31/F39：规范大小边界、真实证据与安全投影。
+// 规范大小边界、真实证据与安全投影。
 #[test]
 fn payload_evidence_and_privacy() {
     let (_dir, _layout, db) = store();
@@ -2133,7 +2133,7 @@ fn history(db: &SessionStore, anchor: &HistoryAnchor, budget: usize) -> Vec<Node
         .collect()
 }
 
-// F09/F11/F33/F34/F35/F36/F42：旧分支与固定分页同时保留，agent 仅从位置派生。
+// 旧分支与固定分页同时保留，agent 仅从位置派生。
 #[test]
 fn tree_history_and_agents() {
     let (_dir, _layout, db) = store();
@@ -2248,7 +2248,7 @@ fn tree_history_and_agents() {
     ));
 }
 
-// F38/F39：全局高水位固定，过滤空页也前进，历史日志不投影成当前终态。
+// 全局高水位固定，过滤空页也前进，历史日志不投影成当前终态。
 #[test]
 fn audit_snapshots_and_pagination() {
     let (_dir, _layout, db) = store();
@@ -2303,7 +2303,7 @@ fn audit_snapshots_and_pagination() {
     assert_eq!(p1.rows.len() + p2.rows.len(), 22);
 }
 
-// F02/F03/F09/F14/F20/F22/F32/F37：独立损坏变体均严格拒绝，无自动修复。
+// 独立损坏变体均严格拒绝，无自动修复。
 #[test]
 fn strict_open_rejects_corruption() {
     for case in 0..18 {
@@ -2406,7 +2406,7 @@ fn strict_open_rejects_corruption() {
     assert!(SessionStore::open(&layout).is_err());
 }
 
-// F40/F41/F42：真实文件事务上的前/后提交故障分类，多个等待者一致停写。
+// 真实文件事务上的前/后提交故障分类，多个等待者一致停写。
 #[test]
 fn commit_failure_disables_all_writers() {
     for point in [
@@ -2548,7 +2548,7 @@ fn commit_failure_disables_all_writers() {
     }
 }
 
-// F14/F20/F28/F30：纯规划也要拒绝不一致的输入，不能借用 strict-open 的保证。
+// 纯规划也要拒绝不一致的输入，不能借用 strict-open 的保证。
 #[test]
 fn planner_rejects_inconsistent_durable_facts() {
     let (_dir, _layout, db) = store();
@@ -2586,7 +2586,7 @@ fn planner_rejects_inconsistent_durable_facts() {
     assert!(plan_auto_close(&closed, now()).is_err());
 }
 
-// F02/F03/F04/F05/F08：表类型/版本与三种旧库形态逐项拒绝。
+// 表类型/版本与三种旧库形态逐项拒绝。
 #[test]
 fn schema_and_legacy_rejection_matrix() {
     for old_kind in 0..3 {
@@ -2666,7 +2666,7 @@ fn schema_and_legacy_rejection_matrix() {
     drop(db);
 }
 
-// F10/F16/F18/F22/F23/F25/F31/F36/F38：外部输入边界，不降低原断言。
+// 外部输入边界，不降低原断言。
 #[test]
 fn input_and_evidence_boundaries() {
     let mut c = config();
@@ -2792,7 +2792,7 @@ fn input_and_evidence_boundaries() {
     );
 }
 
-// F40/F41/F42：每一类领域事务都经过同一提交失败边界；重开不出现半组事实。
+// 每一类领域事务都经过同一提交失败边界；重开不出现半组事实。
 #[test]
 fn transaction_failure_matrix() {
     for phase in 0..11 {
