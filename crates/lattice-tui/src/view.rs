@@ -646,10 +646,6 @@ fn status_text(kind: &StatusKind) -> String {
             "{} llm retry {attempt} after {delay_ms}ms: {message}",
             symbol(SymbolKind::Running)
         ),
-        StatusKind::LlmFailed { attempt, message } => format!(
-            "{} llm failed {attempt}: {message}",
-            symbol(SymbolKind::Failed)
-        ),
         StatusKind::Notice(_) => String::new(),
     }
 }
@@ -660,10 +656,11 @@ fn status_lines(kind: &StatusKind, content_w: u16) -> Vec<Line<'static>> {
             role_style(match summary.notice.as_ref().map(|n| &n.level) {
                 Some(lattice_api::local::NoticeLevel::Error) => Role::ToolErr,
                 Some(lattice_api::local::NoticeLevel::Info) => Role::DimMeta,
+                Some(lattice_api::local::NoticeLevel::Warn) => Role::Assistant,
                 None => Role::ToolOk,
             })
         }
-        StatusKind::TurnFailed { .. } | StatusKind::LlmFailed { .. } => role_style(Role::ToolErr),
+        StatusKind::TurnFailed { .. } => role_style(Role::ToolErr),
         StatusKind::LlmRetry { .. } => role_style(Role::DimMeta),
         StatusKind::Notice(_) => return Vec::new(),
     };

@@ -72,12 +72,10 @@ pub enum TurnEvent {
         key: lancet_protocol::ModelAttemptKey,
         content: String,
     },
-    LlmRequestError {
+    LlmRetry {
         key: lancet_protocol::ModelAttemptKey,
-        retryable: bool,
-        will_retry: bool,
-        delay_ms: Option<u64>,
-        message: String,
+        delay_ms: u64,
+        notice: lattice_session::store::Notice,
     },
     ModelFinished {
         key: lancet_protocol::ModelAttemptKey,

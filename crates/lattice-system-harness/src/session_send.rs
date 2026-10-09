@@ -45,10 +45,10 @@ pub enum TurnEventLine {
         provider: String,
         model: String,
     },
-    LlmRequestError {
-        retryable: bool,
-        will_retry: bool,
-        message: String,
+    LlmRetry {
+        key: Value,
+        delay_ms: u64,
+        notice: Value,
     },
     ReasoningDelta {
         content: String,
@@ -83,7 +83,7 @@ impl TurnEventLine {
         match self {
             Self::TurnStarted { .. } => "turn_started",
             Self::ModelStarted { .. } => "model_started",
-            Self::LlmRequestError { .. } => "llm_request_error",
+            Self::LlmRetry { .. } => "llm_retry",
             Self::ReasoningDelta { .. } => "reasoning_delta",
             Self::TokenDelta { .. } => "token_delta",
             Self::ToolCallStarted { .. } => "tool_call_started",
@@ -257,17 +257,18 @@ fn parse_event_line_checked(line: &str) -> Result<Option<TurnEventLine>, String>
                 TurnEventLine::ReasoningDelta { content }
             }
         }
-        "llm_request_error" => {
+        "llm_retry" => {
             attempt_key(&value["key"])?;
-            match value.get("delay_ms") {
-                Some(Value::Null) => {}
-                Some(n) if n.as_u64().is_some() => {}
-                _ => return Err("invalid delay_ms".into()),
+            let delay_ms = uint(&value, "delay_ms")?;
+            let notice = &value["notice"];
+            if string(notice, "level")? != "warn" {
+                return Err("retry notice must be warn".into());
             }
-            TurnEventLine::LlmRequestError {
-                retryable: boolean(&value, "retryable")?,
-                will_retry: boolean(&value, "will_retry")?,
-                message: string(&value, "message")?.into(),
+            string(notice, "text")?;
+            TurnEventLine::LlmRetry {
+                key: value["key"].clone(),
+                delay_ms,
+                notice: notice.clone(),
             }
         }
         "model_finished" => {

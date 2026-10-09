@@ -136,6 +136,7 @@ pub enum StopCause {
 #[serde(rename_all = "snake_case")]
 pub enum NoticeLevel {
     Info,
+    Warn,
     Error,
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]

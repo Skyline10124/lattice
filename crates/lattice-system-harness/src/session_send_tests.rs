@@ -146,3 +146,29 @@ fn r2_unknown_and_malformed_records_remain_observable() {
     assert_eq!(parsed.malformed_lines.len(), 2);
     assert_eq!(parsed.malformed_lines[1].raw, vec![255]);
 }
+
+#[test]
+fn retry_notice_requires_warn_and_an_unsigned_delay() {
+    let value = json!({
+        "type": "llm_retry",
+        "key": {"turn_id": "t", "model_step_ordinal": 0, "attempt_ordinal": 1},
+        "delay_ms": 10,
+        "notice": {"level": "warn", "text": "provider diagnostic"}
+    });
+    let parsed = parse(std::slice::from_ref(&value));
+    assert!(parsed.malformed_lines.is_empty());
+    assert!(
+        matches!(&parsed.events[0], TurnEventLine::LlmRetry { key, delay_ms, notice }
+        if key == &value["key"] && *delay_ms == 10 && notice == &value["notice"])
+    );
+    for (field, invalid) in [
+        ("delay_ms", Value::Null),
+        ("delay_ms", json!(-1)),
+        ("notice", json!({"level":"error","text":"wrong"})),
+        ("notice", json!({"level":"warn","text":7})),
+    ] {
+        let mut bad = value.clone();
+        bad[field] = invalid;
+        assert_eq!(parse(&[bad]).malformed_lines.len(), 1);
+    }
+}

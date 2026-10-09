@@ -6,7 +6,7 @@ pub use lancet_protocol::{InvocationId, ModelAttemptKey, SessionId, TurnId};
 pub use lattice_conversation::{ResultPayload, StepContent, StoredToolResult, SuccessContent};
 pub use lattice_session::store::{
     AuditPage, AuditReplay, AuditTailPage, ChangeSeq, HistoryAnchor, HistoryCursor,
-    MaterialSummary, Node, NodeFragment, NodeId, NodeKind, NodeRef, NoticeLevel,
+    MaterialSummary, Node, NodeFragment, NodeId, NodeKind, NodeRef, Notice, NoticeLevel,
     OperatorInvocationState, OperatorStatus, Page, PublicTurnOutcome, SessionListRow, SessionLog,
     SessionRecord, StepDetail, StepDetailState, StepEnd, StepKey, TurnDetail, TurnSummary,
     UsageSummary,

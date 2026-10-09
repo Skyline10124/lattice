@@ -317,13 +317,11 @@ pub(crate) async fn run_coordinator_saga(
                     },
                 },
             };
-            let retryable = matches!(stopped.cause, StopCause::ProviderError { retryable: true });
             let message = stopped
                 .diagnostic
                 .provider_error
                 .clone()
                 .unwrap_or_default();
-            let provider_error = matches!(stopped.cause, StopCause::ProviderError { .. });
             live.healthy()?;
             let stopped = coordinator.io.stop_attempt(stopped).await?;
             #[cfg(feature = "test-crash-barriers")]
@@ -338,21 +336,19 @@ pub(crate) async fn run_coordinator_saga(
             let wait = Duration::from_millis(delay)
                 .max(retry_after.unwrap_or_default())
                 .min(live.deadline.saturating_duration_since(Instant::now()));
-            if provider_error {
-                let will_retry = matches!(stopped, AttemptStopResult::RetryReady { .. });
-                live.observer.emit(TurnEvent::LlmRequestError {
-                    key,
-                    retryable,
-                    will_retry,
-                    delay_ms: will_retry.then_some(wait.as_millis() as u64),
-                    message,
-                });
-            }
             match stopped {
                 AttemptStopResult::Closed(closed) => {
                     return publish_closed(coordinator, &live.observer, closed).await;
                 }
                 AttemptStopResult::RetryReady { next_attempt } => {
+                    live.observer.emit(TurnEvent::LlmRetry {
+                        key,
+                        delay_ms: wait.as_millis() as u64,
+                        notice: Notice {
+                            level: NoticeLevel::Warn,
+                            text: message,
+                        },
+                    });
                     live.backoff(wait).await?;
                     attempt = next_attempt;
                     delay = delay.saturating_mul(2).min(live.retry.max_delay_ms);

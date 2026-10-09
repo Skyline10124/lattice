@@ -42,12 +42,13 @@ fn events() -> Vec<TurnEvent> {
             key: key(),
             content: "thinking".into(),
         },
-        TurnEvent::LlmRequestError {
+        TurnEvent::LlmRetry {
             key: key(),
-            retryable: true,
-            will_retry: true,
-            delay_ms: Some(10),
-            message: "retry".into(),
+            delay_ms: 10,
+            notice: lattice_api::local::Notice {
+                level: NoticeLevel::Warn,
+                text: "retry".into(),
+            },
         },
         TurnEvent::ModelFinished {
             key: key(),
@@ -112,6 +113,12 @@ fn human_stream_keeps_stdout_reasoning_bytes_and_summary_separate() {
         assert_eq!(out, b"hello\n");
         let err = String::from_utf8(err).unwrap();
         assert_eq!(err.contains("thinking"), verbose);
+        assert_eq!(err.contains("model openai/test-model"), verbose);
+        assert_eq!(
+            err.contains("warn: llm attempt 0 failed, retrying in 10ms: retry"),
+            verbose
+        );
+        assert!(err.contains("cancelled info: cancelled by user"));
         assert!(err.contains("70000 B"));
         assert!(err.contains("succeeded"));
         assert!(err.contains("内容不可用"));
@@ -144,6 +151,12 @@ fn terminal_summary_is_not_recomputed_and_usage_is_durable() {
             2,
         ),
     ] {
+        let turn = TurnRef {
+            turn_id: lattice_api::local::new_turn_id(),
+            ..turn
+        };
+        let mut step = step.clone();
+        step.key.turn_id = turn.turn_id;
         let summary: TurnSummary =
             serde_json::from_value(json!({"outcome":outcome,"notice":notice})).unwrap();
         let event = match outcome {

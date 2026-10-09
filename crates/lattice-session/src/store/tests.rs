@@ -2306,7 +2306,7 @@ fn audit_snapshots_and_pagination() {
 // F02/F03/F09/F14/F20/F22/F32/F37：独立损坏变体均严格拒绝，无自动修复。
 #[test]
 fn strict_open_rejects_corruption() {
-    for case in 0..18 {
+    for case in 0..19 {
         let (_dir, layout, db) = store();
         let (lock, calls) = running(&db, sid(1), tid(1), 2, 1);
         finish(&db, &lock, &calls.bindings[0], None);
@@ -2372,6 +2372,13 @@ fn strict_open_rejects_corruption() {
             16 => {
                 r.changes.get_mut(&ChangeSeq(1)).unwrap().row.state =
                     OperatorInvocationState::Started
+            }
+            17 => {
+                if let TurnState::Closed { notice, .. } =
+                    &mut r.turns.get_mut(&tid(1)).unwrap().state
+                {
+                    notice.as_mut().unwrap().level = NoticeLevel::Warn;
+                }
             }
             _ => r.turns.get_mut(&tid(1)).unwrap().config_digest = [0; 32],
         });

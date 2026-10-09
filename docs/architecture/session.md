@@ -150,7 +150,7 @@ sequenceDiagram
 
 CLI 的 `lattice session` 子命令为 `send`、`rewind`、`list`、`log`、`turn` 和 `cancel`，顶层 `lattice run` 是 `session send` 的别名。`session send` 不带 `--session` 时创建新 Session：项目绑定从当前目录解析，`--agent` 必填；带 `--session` 时向已有 Session 提交，`--agent` 可选，当前位置为根节点时必填。`session turn` 查看单个 Turn 的详情，`--follow` 用于断线后继续观察。TUI 不带 Session 启动时，在首次提交时创建 Session。
 
-`session turn` 的详情（含 `--json`）给出 `TurnSummary`，并按步骤序号列出该 Turn 的全部 Step 记录：每次尝试的终态与原因、`end` 的类型与原因、对应的节点序号（未写节点时明确为无）；Turn 仍在进行时还列出 ActiveStep 的状态与各槽位进度。它不按路径读取对话。这是 Step 记录唯一的公开读取路径，输出不含冻结配置中的秘密。
+`session turn` 的详情（含 `--json`）给出 `TurnSummary`，并按步骤序号列出该 Turn 的全部 Step 记录：每次尝试的终态与原因、`end` 的类型与原因、对应的节点序号（未写节点时明确为无）；Turn 仍在进行时还列出 ActiveStep 的状态与各槽位进度。它不按路径读取对话。命令行按 TurnId 读取 Step 记录只有这一个入口；观察中的 Step 记录另随关闭事件与快照交付，见[观察与重连](#观察与重连)。输出不含冻结配置中的秘密。
 
 `LocalTurn::next` 交付 LocalUpdate，取消一次等待不会丢失已接收更新或半帧；已完成后句柄仍可显式重连。普通退出使用 `detach` 取得最后已知提交、取消、状态和读取诊断，或由 Drop 停止本地后续工作；两者都不新增取消。
 
@@ -226,8 +226,8 @@ cause = ProviderError { retryable }
 
 | 尝试结果 | 保存什么及下一动作 |
 | --- | --- |
-| `Stopped { ProviderError { retryable: true } }`，该步骤尝试预算未尽 | 追加终态，等待后以下一尝试序号请求。等待时间取冻结的指数退避与 provider 建议等待（`retry-after-ms` 或 `retry-after`）中较长者；`max_delay_ms` 只限制指数退避，不限制建议等待。已收到多少流内容不影响重试资格，流在结束事件之前中断也可重试 |
-| `Stopped`，原因不可重试，或可重试但该步骤尝试预算已尽 | 追加终态，以 `Stop` 关闭 Step 与 Turn，`cause` 取自该尝试 |
+| `Stopped { ProviderError { retryable: true } }`，该步骤尝试预算未尽 | 追加终态，等待后以下一尝试序号请求。等待时间取冻结的指数退避与 provider 建议等待（`retry-after-ms` 或 `retry-after`）中较长者；`max_delay_ms` 只限制指数退避，不限制建议等待。已收到多少流内容不影响重试资格，流在结束事件之前中断也可重试。终态提交后、等待开始前，协调层发出 `LlmRetry` 事件：`key` 是失败的那次尝试，`delay_ms` 是将要等待的毫秒数，`notice` 为 Warn 级，文字取该尝试的诊断。它表示重试已经安排，下一次尝试的开始仍由 `ModelStarted` 表示；等待期间收到取消或 Turn deadline 已到时不再请求，按[关闭 Step 与 Turn](#关闭-step-与-turn)以相应原因停止 |
+| `Stopped`，原因不可重试，或可重试但该步骤尝试预算已尽 | 追加终态，以 `Stop` 关闭 Step 与 Turn，`cause` 取自该尝试。这次失败不发 `LlmRetry`，由 Turn 关闭事件携带的 notice 说明，同一次失败只交付一次面向用户的说明 |
 | provider 建议等待超过 60 秒，或不短于 Turn 剩余时间 | 该尝试记为 `Stopped { ProviderError { retryable: false } }`，立即以 `Stop` 关闭，不等到 deadline，也不截短等待后重发；诊断保留 provider 的原因与建议等待，用户看到的是限流而不是超时 |
 | `Completed`，回复无工具调用 | 尝试终态与 Step 节点、`Finish` 及 Turn 关闭在同一事务写入，见[关闭 Step 与 Turn](#关闭-step-与-turn) |
 | `Completed`，回复含工具调用 | 尝试终态与完整回复、调用槽位在同一事务写入，进入[调用槽位](#调用槽位)的执行 |
@@ -376,7 +376,8 @@ TurnOutcome = Completed | Failed { reason } | Cancelled
 
 - `Finish` 得到 Completed；`Stop { cause: Cancelled }` 得到 Cancelled；其他 `Stop` 得到 Failed。
 - `notice = Option<{ level, text }>` 在写入时按结局定级：Failed 为 Error，Cancelled 为 Info，Completed 无 notice。`text` 由最后一个 Step 的 `Stop` 原因决定：`ProviderError` 取产生该原因的那次尝试的诊断，先经现有脱敏。HTTP 错误的诊断是一行文字：状态码，加上从 Anthropic、OpenAI、Gemini 错误信封解析出的类型或代码与消息，例如 `HTTP 429 rate_limit_exceeded: …`；正文不是这些格式时取开头一段；类型、代码与消息中的控制字符和空白都折成单个空格，流内错误事件的诊断同样处理；有建议等待时在末尾注明。生成时整行最多 `MAX_DIAGNOSTIC_CHARS`（256 字符），超长以 `…` 截断；provider 请求 ID 只写日志。其他原因（含 Cancelled、ProcessExit、Deadline、调用效果不确定、模型步骤上限）使用按原因固定、由代码定义的文案。存储接受的上限是 `MAX_PROVIDER_ERROR_CHARS`（2048 字符），旧记录按它校验。先前已被重试取代的失败尝试不作为 notice 来源。实时 `TurnFailed` 事件携带同一对象。
-- 公开读取投影为 `TurnSummary { outcome, notice }`，内部 `reason` 不导出给前端。
+- `level` 取 Info、Warn 或 Error，由后端给出，前端按它呈现，不从其他字段推断等级。Turn 记录的 notice 只取 Info 或 Error；Warn 只用于事件携带的提示，当前是 [`LlmRetry`](#模型请求与执行预算)，不写入 Turn 记录。读取校验按关闭原因重新推导 notice，带 Warn 的 Turn 记录与推导不符，按损坏处理。
+- 公开读取投影为 `TurnSummary { outcome, notice }`，其中不含内部 `reason`。Step 记录保留各次尝试与 `end` 的原因，随关闭事件、快照和 `session turn` 提供，供诊断与操作员查询使用；前端的对话显示只依据 `TurnSummary` 与事件携带的 notice 给出结局文字和等级，不从 Step 记录的原因推导。
 
 关闭 Turn 只写会话库，不读取工作区历史，也不取得工作区操作锁。Turn 与文件变更的关联由工作区历史中每条变更记录的 `TurnId` 与 `InvocationId` 承载，见[私有存储与数据关系](workspace.md#私有存储与数据关系)。
 
@@ -429,7 +430,7 @@ live 执行、自动关闭和读取校验使用这同一条规则：校验从已
 
 一致性要求：当前尝试的段列表与最终 Step 节点的正文/reasoning parts，合并相邻同类后序列相同，Step 关闭时显示不跳变。段列表只用于显示，不进历史、不发给 provider。
 
-LocalTurn 先交付状态与快照对应的重置，再独立推进事件和历史读取。历史读取按节点序号分页，只读取快照已有的节点：树只追加、已写入的节点不再修改，所以跨页读取得到的是同一时刻的对话。新快照取代旧历史读取时，LocalTurn 终止旧任务，已发生的读取失败作为诊断交付；新的读取挂起或失败不遮蔽已收到的结局。CLI 按最终结局、执行诊断和最终历史读取结果选择退出码；最终仍读不到内容或核验发现数据损坏时退出 1，不因已知 Completed 而忽略失败。工具按 InvocationId 配对显示，规则见 [TUI 对话记录与工具显示](tui.md#对话记录与工具显示)。
+LocalTurn 先交付状态与快照对应的重置，再独立推进事件和历史读取。历史读取按节点序号分页，只读取快照已有的节点：树只追加、已写入的节点不再修改，所以跨页读取得到的是同一时刻的对话。新快照取代旧历史读取时，LocalTurn 终止旧任务，已发生的读取失败作为诊断交付；新的读取挂起或失败不遮蔽已收到的结局。同一 Turn 的结局可能先后经关闭事件、快照和退出交接到达，CLI 的人类可读输出对同一 TurnId 只打印一次结局摘要，`--json` 仍逐条保留各记录。CLI 按最终结局、执行诊断和最终历史读取结果选择退出码；最终仍读不到内容或核验发现数据损坏时退出 1，不因已知 Completed 而忽略失败。工具按 InvocationId 配对显示，规则见 [TUI 对话记录与工具显示](tui.md#对话记录与工具显示)。
 
 #### 观察边界
 

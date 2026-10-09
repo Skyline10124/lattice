@@ -5,7 +5,7 @@ use anyhow::Result;
 use lattice_api::local::{
     Acceptance, CancelStatus, ConnectionStatus, FrozenConfiguration, HistoryReadError, LocalClient,
     LocalErrorKind, LocalHistory, LocalState, LocalTurn, LocalUpdate, MaterialSummary,
-    MessageSemantic, Node, NotSubmittedStage, ObservationPhase, ObservationSnapshot,
+    MessageSemantic, Node, NotSubmittedStage, NoticeLevel, ObservationPhase, ObservationSnapshot,
     PublicTurnOutcome, SessionId, TurnId, TurnRequest, TurnSummary, UsageSummary,
 };
 use lattice_api::{LoadedAgentProfile, TurnEvent};
@@ -19,6 +19,7 @@ use tokio::time;
 #[derive(Default)]
 struct RunRenderState {
     last_summary: Option<TurnSummary>,
+    printed_summaries: Vec<TurnId>,
     session_id: Option<SessionId>,
     usage: Option<UsageSummary>,
     tokens_emitted_without_newline: bool,
@@ -93,18 +94,17 @@ fn render_human_event(
         }
         TurnEvent::ModelStarted {
             provider, model, ..
-        } => verbose.then(|| format!("model {provider:?}/{model}")),
-        TurnEvent::LlmRequestError {
+        } => verbose.then(|| format!("model {provider}/{model}")),
+        TurnEvent::LlmRetry {
             key,
-            will_retry,
             delay_ms,
-            message,
-            ..
+            notice,
         } => verbose.then(|| {
             format!(
-                "llm attempt {} retry={will_retry} delay={}ms: {message}",
+                "{}: llm attempt {} failed, retrying in {delay_ms}ms: {}",
+                notice_level_label(&notice.level),
                 key.attempt_ordinal,
-                delay_ms.unwrap_or(0)
+                notice.text
             )
         }),
         TurnEvent::ReasoningDelta { content, .. } => {
@@ -147,9 +147,11 @@ fn render_human_event(
         TurnEvent::StepClosed { step } => {
             verbose.then(|| format!("step {} closed", step.key.ordinal))
         }
-        TurnEvent::TurnCompleted { summary, .. }
-        | TurnEvent::TurnFailed { summary, .. }
-        | TurnEvent::TurnCancelled { summary, .. } => Some(summary_text(summary)),
+        TurnEvent::TurnCompleted { turn, summary, .. }
+        | TurnEvent::TurnFailed { turn, summary, .. }
+        | TurnEvent::TurnCancelled { turn, summary, .. } => {
+            summary_once(turn.turn_id, summary, state)
+        }
         TurnEvent::TokenDelta { .. } => unreachable!(),
     };
     if let Some(line) = line {
@@ -158,10 +160,32 @@ fn render_human_event(
     }
     Ok(())
 }
+fn summary_once(
+    turn_id: TurnId,
+    summary: &TurnSummary,
+    state: &mut RunRenderState,
+) -> Option<String> {
+    if state.printed_summaries.contains(&turn_id) {
+        return None;
+    }
+    state.printed_summaries.push(turn_id);
+    Some(summary_text(summary))
+}
+fn notice_level_label(level: &NoticeLevel) -> &'static str {
+    match level {
+        NoticeLevel::Info => "info",
+        NoticeLevel::Warn => "warn",
+        NoticeLevel::Error => "error",
+    }
+}
 fn summary_text(summary: &TurnSummary) -> String {
     let mut text = outcome_label(&summary.outcome).to_string();
     if let Some(notice) = &summary.notice {
-        text.push_str(&format!(" {:?}: {}", notice.level, notice.text));
+        text.push_str(&format!(
+            " {}: {}",
+            notice_level_label(&notice.level),
+            notice.text
+        ));
     }
     text
 }
@@ -301,7 +325,8 @@ async fn observe_with_signal(
                             if detail.summary.is_some() {render.last_summary=detail.summary.clone();}
                             render.usage=Some(detail.usage.clone());
                         }
-                        let state=LocalState{view,phase,error};render_local_state(&state,json)?;
+                        let state = LocalState { view, phase, error };
+                        render_local_state(&state, &mut render, json)?;
                         last_state=Some(state);
                         history_ready=false;
                     }
@@ -310,7 +335,12 @@ async fn observe_with_signal(
                         if json {println!("{}",serde_json::json!({"type":"snapshot","generation":generation,"view":view}));}
                         else if let Some(attempt)=&view.attempt {
                             finish_text(&mut render,&mut std::io::stdout())?;
-                            println!("--- 当前尝试 {:?} 快照 ---",attempt.key);
+                            println!(
+                                "--- 当前尝试 turn {} step {} attempt {} 快照 ---",
+                                attempt.key.turn_id,
+                                attempt.key.model_step_ordinal,
+                                attempt.key.attempt_ordinal
+                            );
                             for segment in &attempt.segments {if let lattice_api::local::TextSegment::Text{text}=segment {print!("{text}");}}
                             println!();
                         }
@@ -363,7 +393,7 @@ async fn observe_with_signal(
     if let Some(state) = &report.state
         && last_state.as_ref() != Some(state)
     {
-        render_local_state(state, json)?;
+        render_local_state(state, &mut render, json)?;
     }
     if let Some(status) = report.cancel
         && last_cancel != Some(status)
@@ -491,27 +521,36 @@ fn render_acceptance(acceptance: &Acceptance, json: bool) -> Result<()> {
     }
     Ok(())
 }
-fn render_local_state(state: &LocalState, json: bool) -> Result<()> {
-    render_snapshot(&state.view, json)?;
+fn render_local_state(state: &LocalState, render: &mut RunRenderState, json: bool) -> Result<()> {
+    render_snapshot(&state.view, render, json, &mut std::io::stderr())?;
     if let Some(error) = &state.error {
         report_error(&error.clone().into(), json);
     }
     Ok(())
 }
-fn render_snapshot(view: &ObservationSnapshot, json: bool) -> Result<()> {
+fn render_snapshot(
+    view: &ObservationSnapshot,
+    render: &mut RunRenderState,
+    json: bool,
+    err: &mut impl Write,
+) -> Result<()> {
     if json {
         println!("{}", serde_json::json!({"type":"snapshot","view":view}));
     } else {
-        eprintln!(
+        writeln!(
+            err,
             "session {} current={} active={}",
             view.session.session_id,
             view.session.current.0,
             view.session
                 .active_turn
                 .map_or_else(|| "none".into(), |id| id.to_string())
-        );
-        if let Some(summary) = view.selected_turn.as_ref().and_then(|t| t.summary.as_ref()) {
-            eprintln!("{}", summary_text(summary));
+        )?;
+        if let Some(turn) = &view.selected_turn
+            && let Some(summary) = &turn.summary
+            && let Some(line) = summary_once(turn.turn_id, summary, render)
+        {
+            writeln!(err, "{line}")?;
         }
     }
     Ok(())

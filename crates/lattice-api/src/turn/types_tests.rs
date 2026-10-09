@@ -90,3 +90,27 @@ fn usage_summary_preserves_totals_and_unknown_attempts() {
         summary
     );
 }
+
+#[test]
+fn retry_event_round_trips_a_warn_notice_and_required_delay() {
+    let value = serde_json::json!({
+        "type": "llm_retry",
+        "key": {
+            "turn_id": "00000000-0000-4000-8000-000000000001",
+            "model_step_ordinal": 2,
+            "attempt_ordinal": 1
+        },
+        "delay_ms": 40,
+        "notice": {"level": "warn", "text": "provider diagnostic"}
+    });
+    let event: TurnEvent = serde_json::from_value(value.clone()).unwrap();
+    assert!(matches!(&event, TurnEvent::LlmRetry { notice, .. }
+        if notice.level == NoticeLevel::Warn && notice.text == "provider diagnostic"));
+    assert_eq!(serde_json::to_value(event).unwrap(), value);
+    let mut missing_delay = value.clone();
+    missing_delay.as_object_mut().unwrap().remove("delay_ms");
+    assert!(serde_json::from_value::<TurnEvent>(missing_delay).is_err());
+    let mut null_delay = value;
+    null_delay["delay_ms"] = serde_json::Value::Null;
+    assert!(serde_json::from_value::<TurnEvent>(null_delay).is_err());
+}
