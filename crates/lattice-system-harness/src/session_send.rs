@@ -46,9 +46,10 @@ pub enum TurnEventLine {
         model: String,
     },
     LlmRetry {
-        key: Value,
+        attempt_ordinal: u64,
         delay_ms: u64,
-        notice: Value,
+        level: String,
+        text: String,
     },
     ReasoningDelta {
         content: String,
@@ -261,14 +262,15 @@ fn parse_event_line_checked(line: &str) -> Result<Option<TurnEventLine>, String>
             attempt_key(&value["key"])?;
             let delay_ms = uint(&value, "delay_ms")?;
             let notice = &value["notice"];
-            if string(notice, "level")? != "warn" {
+            let level = string(notice, "level")?;
+            if level != "warn" {
                 return Err("retry notice must be warn".into());
             }
-            string(notice, "text")?;
             TurnEventLine::LlmRetry {
-                key: value["key"].clone(),
+                attempt_ordinal: uint(&value["key"], "attempt_ordinal")?,
                 delay_ms,
-                notice: notice.clone(),
+                level: level.into(),
+                text: string(notice, "text")?.into(),
             }
         }
         "model_finished" => {

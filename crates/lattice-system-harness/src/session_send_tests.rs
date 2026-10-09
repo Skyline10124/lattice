@@ -158,8 +158,8 @@ fn retry_notice_requires_warn_and_an_unsigned_delay() {
     let parsed = parse(std::slice::from_ref(&value));
     assert!(parsed.malformed_lines.is_empty());
     assert!(
-        matches!(&parsed.events[0], TurnEventLine::LlmRetry { key, delay_ms, notice }
-        if key == &value["key"] && *delay_ms == 10 && notice == &value["notice"])
+        matches!(&parsed.events[0], TurnEventLine::LlmRetry { attempt_ordinal, delay_ms, level, text }
+        if *attempt_ordinal == 1 && *delay_ms == 10 && level == "warn" && text == "provider diagnostic")
     );
     for (field, invalid) in [
         ("delay_ms", Value::Null),

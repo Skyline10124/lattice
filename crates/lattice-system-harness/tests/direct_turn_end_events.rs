@@ -30,8 +30,11 @@ fn event_sequence(events: &[TurnEventLine]) -> String {
         }
         types.push(if is_summary_snapshot(&events[index]) {
             "snapshot(summary)".into()
-        } else if let TurnEventLine::LlmRetry { key, .. } = &events[index] {
-            format!("llm_retry(attempt={})", key["attempt_ordinal"])
+        } else if let TurnEventLine::LlmRetry {
+            attempt_ordinal, ..
+        } = &events[index]
+        {
+            format!("llm_retry(attempt={attempt_ordinal})")
         } else {
             events[index].type_name().into()
         });
@@ -196,8 +199,13 @@ fn direct_turn_end_events_exhausted_retries_deliver_last_retry_and_turn_failed()
                 .iter()
                 .enumerate()
                 .filter_map(|(index, event)| {
-                    if let TurnEventLine::LlmRetry { key, notice, .. } = event {
-                        Some((index, key["attempt_ordinal"].as_u64().unwrap(), notice))
+                    if let TurnEventLine::LlmRetry {
+                        attempt_ordinal,
+                        level,
+                        ..
+                    } = event
+                    {
+                        Some((index, *attempt_ordinal, level.as_str()))
                     } else {
                         None
                     }
@@ -211,9 +219,7 @@ fn direct_turn_end_events_exhausted_retries_deliver_last_retry_and_turn_failed()
                 format!("expected a non-empty suffix of retry attempts [0, 1]; got: {got}"),
             )?;
             require(
-                retries
-                    .iter()
-                    .all(|(_, _, notice)| notice["level"] == "warn"),
+                retries.iter().all(|(_, _, level)| *level == "warn"),
                 format!("expected warn retry notices; got: {got}"),
             )?;
             let last_retry = retries.last().unwrap().0;
