@@ -10,15 +10,15 @@ use std::path::{Path, PathBuf};
 
 #[derive(Subcommand)]
 pub enum DaemonAction {
-    /// 前台运行后台主体；不加载工作区 dotenv 或继承提交端凭据。
+    /// Run the daemon in the foreground; it does not load the workspace dotenv or inherit the submitter's credentials.
     Serve {
-        /// XDG 状态根，必须是绝对路径；默认按提交端 HOME/XDG 解析。
+        /// XDG state root; must be an absolute path. Defaults to the submitter's HOME/XDG resolution.
         #[arg(long)]
         state_root: Option<PathBuf>,
     },
-    /// 查询已有后台，不自动启动。
+    /// Query the running daemon without starting one.
     Status,
-    /// 停止接收新任务，等待已接管任务与持久收尾完成。
+    /// Stop accepting new work and wait for taken-over work and durable closure to finish.
     Stop,
 }
 

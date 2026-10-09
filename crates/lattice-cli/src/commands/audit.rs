@@ -30,10 +30,10 @@ pub struct AuditQueryArgs {
     pub method: Option<String>,
     #[arg(long,value_parser=parse_outcome)]
     pub outcome: Option<String>,
-    /// 读取按全局 ChangeSeq 排序的调用变化。
+    /// Read invocation changes ordered by the global ChangeSeq.
     #[arg(long)]
     pub tail: bool,
-    /// 排他变更序号；仅与 --tail 一起使用。
+    /// Exclusive change sequence to start after; only valid with --tail.
     #[arg(long,requires="tail",value_parser=parse_change)]
     pub since: Option<ChangeSeq>,
     #[arg(long)]

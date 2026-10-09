@@ -51,11 +51,13 @@ pub(crate) async fn local_client() -> Result<lattice_api::local::LocalClient> {
 #[derive(clap::Args, Debug)]
 pub struct SendArgs {
     pub prompt: String,
+    /// Existing session to continue, by ID or unique prefix; omit to start a new session.
     #[arg(long = "session")]
     pub session_id: Option<String>,
-    /// 新会话必须指定；已有会话在根节点时也必须指定。
+    /// Agent to use. Required for a new session, and for an existing session positioned at the root node.
     #[arg(long, required_unless_present_any = ["session_id", "turn_id"])]
     pub agent: Option<String>,
+    /// Turn identity for this request; generated when omitted. Resend with the same value to recover a request whose acceptance is unknown.
     #[arg(long, value_parser = parse_turn_id)]
     pub turn_id: Option<lattice_api::local::TurnId>,
 }
@@ -72,26 +74,26 @@ pub(crate) fn parse_node_id(value: &str) -> Result<lattice_api::local::NodeId, S
 
 #[derive(Subcommand)]
 pub enum SessionAction {
-    /// 提交请求；不带 --session 时在接受事务中创建会话。
+    /// Submit a request; without --session the session is created in the acceptance transaction.
     Send(SendArgs),
-    /// 仅移动对话位置到节点 N；保留原分叉，不回退文件。
+    /// Move the conversation position to node N only; the original fork is kept and files are not rolled back.
     Rewind {
         session_id: String,
         #[arg(value_parser = parse_node_id)]
         target: lattice_api::local::NodeId,
     },
-    /// 列出全部会话。
+    /// List all sessions.
     List,
-    /// 显示含根节点的完整会话树。
+    /// Show the full session tree, including the root node.
     Log { session_id: String },
-    /// 按 TurnId 显示全部 Step；--follow 继续观察。
+    /// Show every Step of a Turn by TurnId; --follow keeps observing.
     Turn {
         #[arg(value_parser = parse_turn_id)]
         turn_id: lattice_api::local::TurnId,
         #[arg(long)]
         follow: bool,
     },
-    /// 取消接管不等于已持久 Cancelled；未接管不表示没有后台工作。
+    /// A taken-over cancel is not yet a durable Cancelled outcome; a cancel not taken over does not mean no background work exists.
     Cancel {
         session_id: String,
         #[arg(value_parser = parse_turn_id)]
@@ -152,9 +154,9 @@ pub async fn run(
                 println!(
                     "session {session_id} turn {turn_id}: {}",
                     if owned {
-                        "后台已接管取消；持久终态仍待查询"
+                        "daemon took over the cancel; the durable outcome is still to be queried"
                     } else {
-                        "后台在判定点未接管；不表示没有后台工作"
+                        "daemon did not take over the cancel at the decision point; background work may still exist"
                     }
                 );
             }
@@ -196,7 +198,7 @@ pub async fn run(
                 println!("{}", serde_json::to_string(&session)?);
             } else {
                 println!(
-                    "session {} current={}; 文件未回退",
+                    "session {} current={}; files were not rolled back",
                     session.session_id, session.current.0
                 );
             }
@@ -365,8 +367,8 @@ mod session_cli {
             .unwrap()
             .render_long_help()
             .to_string();
-        assert!(help.contains("不表示没有后台工作"));
-        assert!(help.contains("不等于已持久 Cancelled"));
+        assert!(help.contains("does not mean no background work exists"));
+        assert!(help.contains("not yet a durable Cancelled outcome"));
     }
     #[test]
     fn tree_output_keeps_root_branches_current_and_notice() {
