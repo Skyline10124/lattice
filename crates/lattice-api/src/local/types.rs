@@ -81,6 +81,8 @@ pub struct ObservationSnapshot {
 pub struct HistoryEntry {
     pub node: NodeId,
     pub agent_name: String,
+    /// 节点所属 Turn 在读取时的结局；Turn 仍在进行时为 `None`。
+    pub summary: Option<TurnSummary>,
     pub content: Node,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -92,6 +94,7 @@ pub struct LocalHistory {
 pub struct HistoryFragmentView {
     pub fragment: NodeFragment,
     pub agent_name: String,
+    pub summary: Option<TurnSummary>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct HistoryPageView {

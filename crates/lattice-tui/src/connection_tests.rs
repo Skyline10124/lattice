@@ -711,6 +711,86 @@ fn closing_of_a_recovered_submission_still_reaches_the_dock() {
     );
 }
 
+/// 历史带回每个 Turn 的结局：装入后每轮末尾各有一行，进行中的 Turn 没有，这些行不进 Dock。
+/// 本进程看着结束、暂驻 Dock 的结局被历史接管后仍然暂驻，释放后只出现一次。
+/// 某个 Turn 离开当前路径后，它的结局行不保留。
+#[test]
+fn history_shows_each_turn_closing_once_and_takes_over_the_live_one() {
+    let turns = [0, 1, 2].map(|_| lattice_api::local::new_turn_id());
+    let failed = json!({"outcome":"failed","notice":{"level":"error","text":"provider failure"}});
+    let completed = json!({"outcome":"completed","notice":null});
+    let history = |summaries: &[&serde_json::Value]| {
+        let entries = summaries
+            .iter()
+            .zip(turns)
+            .enumerate()
+            .map(|(n, (summary, turn))| {
+                json!({"node":n + 1,"agent_name":"test","summary":summary,"content":{
+                    "kind":"user_message","parent":n,"turn_id":turn,
+                    "message":{"role":"user","parts":[{"semantic":{"text":{"text":format!("ask-{n}")}}}]},
+                }})
+            })
+            .collect::<Vec<_>>();
+        crate::session::history_blocks(
+            serde_json::from_value(json!({
+                "anchor":{"session_id":SID,"head":entries.len()},"entries":entries,
+            }))
+            .unwrap(),
+        )
+    };
+    let lines = [
+        format!("✗ turn {} 失败：provider failure", turns[0]),
+        format!("✓ turn {} 完成", turns[1]),
+        format!("✗ turn {} 失败：provider failure", turns[2]),
+    ];
+    let rows = |app: &App| {
+        crate::view::transcript_lines(app, 200)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+    };
+    let at = |app: &App, text: &str| rows(app).iter().position(|row| row == text);
+    let count = |app: &App, text: &str| rows(app).iter().filter(|row| *row == text).count();
+
+    // 重新打开：前两轮已关闭，第三轮仍在进行。
+    let mut app = app();
+    app.replace_history(history(&[&failed, &completed, &serde_json::Value::Null]));
+    assert!(app.dock.shows_input(), "历史里的结局不进 Dock");
+    let (first, second) = (at(&app, &lines[0]).unwrap(), at(&app, &lines[1]).unwrap());
+    assert!(first < at(&app, "ask-1").unwrap() && at(&app, "ask-1").unwrap() < second);
+    assert!(second < at(&app, "ask-2").unwrap());
+    assert_eq!(count(&app, &lines[2]), 0, "进行中的 Turn 没有结局");
+
+    // 本进程看着第三轮失败：结局暂驻 Dock；随后历史带回同一结局，接管后仍暂驻。
+    app.current_turn = Some(turns[2]);
+    app.apply_update(LocalUpdate::State {
+        view: Box::new(view(turns[2], "failed")),
+        phase: ObservationPhase::Finished,
+        error: None,
+    });
+    assert!(app.dock.message_id().is_some());
+    app.replace_history(history(&[&failed, &completed, &failed]));
+    let parked = format!("turn {} 失败：provider failure", turns[2]);
+    assert_eq!(
+        app.dock
+            .message(&app.blocks)
+            .map(|status| status.text.as_str()),
+        Some(parked.as_str())
+    );
+    assert_eq!(count(&app, &lines[2]), 0);
+    app.apply_action(KeyAction::Insert(' '));
+    assert!(app.dock.shows_input());
+    for line in &lines {
+        assert_eq!(count(&app, line), 1, "{line}");
+    }
+    assert!(at(&app, "ask-2").unwrap() < at(&app, &lines[2]).unwrap());
+
+    // 回退到第一轮之后：后两轮离开当前路径，它们的结局行一起消失。
+    app.replace_history(history(&[&failed]));
+    assert_eq!(count(&app, &lines[0]), 1);
+    assert_eq!(count(&app, &lines[1]) + count(&app, &lines[2]), 0);
+}
+
 /// 退出报告只写给人看的文字：结局用中文词，读取位置用中文说明，不打印内部分类或结构体。
 #[test]
 fn detach_lines_describe_outcome_and_read_context_in_words() {
