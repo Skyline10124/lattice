@@ -111,9 +111,9 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
         // display bytes itself (RFC #41 decision three).
         tui.wait_for_ready(Duration::from_secs(30))
             .expect("tui entered alternate screen");
-        // session 与 agent 只在状态行显示，启动说明不重复；提交前状态行的 session 是“未接受”。
-        tui.wait_for(Duration::from_secs(30), |s| s.contains("show commands"))
-            .expect("startup notice appeared");
+        // session 与 agent 只在状态行显示，启动横幅不重复；提交前状态行的 session 是“未接受”。
+        tui.wait_for(Duration::from_secs(30), |s| s.contains("显示命令"))
+            .expect("startup banner appeared");
         let start = tui
             .redraw_text(Duration::from_secs(10))
             .expect("startup frame");
@@ -129,18 +129,19 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
         // Turn 关闭后，持久正文装入会替换实时块；实时事件积压被丢弃时，正文只经由这次装入到达。
         // 装入在屏幕上没有标志，整行移位后终端只重写变化的字符格，输出流里拼不出连续的文字，
         // 所以等它落定后取整帧判断。
-        tui.wait_for(Duration::from_secs(60), |s| s.contains("completed"))
+        // 完成是 Info 级结局，直接进对话记录，不占 Dock；随后的 `/quit` 仍能输入。
+        tui.wait_for(Duration::from_secs(60), |s| s.contains("完成"))
             .expect("turn summary appeared");
         std::thread::sleep(Duration::from_secs(3));
         let frame = tui
             .redraw_text(Duration::from_secs(10))
             .expect("settled frame");
-        // 启动提示按时间顺序留在本 Turn 之前，最终回答仍在屏幕上。
-        let notice = frame.find("show commands");
+        // 启动横幅固定在对话记录最上方，最终回答仍在屏幕上。
+        let banner = frame.find("显示命令");
         let answer = frame.find("mock line 03");
         assert!(
-            answer.is_some() && notice.is_none_or(|n| Some(n) < answer),
-            "final answer must stay on screen after the startup notice: {frame}"
+            answer.is_some() && banner.is_none_or(|n| Some(n) < answer),
+            "final answer must stay on screen below the startup banner: {frame}"
         );
         // 两个 Step 同属一个 Turn：助手标题线只出现一次。状态行也显示 agent 与模型名，不计入。
         assert_eq!(
@@ -301,7 +302,7 @@ fn pty_detach_reloads_pending_and_result_without_cancelling() {
         let reopened_result = (|| {
             reopened.wait_for_ready(budget.cap_timeout(spec.step_timeout()))?;
             reopened.wait_for(budget.cap_timeout(spec.step_timeout()), |text| {
-                text.contains("background reconnect answer") && text.contains("completed")
+                text.contains("background reconnect answer") && text.contains("完成")
             })?;
             reopened.send_line("/quit")?;
             reopened.wait_for_exit(budget.cap_timeout(Duration::from_secs(15)))
@@ -524,9 +525,7 @@ fn pty_mid_model_reconnect_shows_new_suffix_before_completion() {
         let reload_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             reopened.wait_for_ready(step()).unwrap();
             reopened
-                .wait_for(step(), |text| {
-                    text.contains(OLD) && text.contains("completed")
-                })
+                .wait_for(step(), |text| text.contains(OLD) && text.contains("完成"))
                 .unwrap();
             let reloaded = reopened.redraw_text(step()).unwrap();
             evidence

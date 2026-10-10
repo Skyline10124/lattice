@@ -137,6 +137,21 @@ fn comment_history(app: &mut App, id: TurnId, parts: Value, closed: bool) {
     });
 }
 
+fn status(level: NoticeLevel, text: &str) -> Status {
+    Status {
+        level,
+        text: text.into(),
+        closing: None,
+    }
+}
+
+/// Warn 与 Error 暂驻 Dock 时输入区被遮住；用无修饰 Space 释放后才能继续输入。
+fn release_dock(app: &mut App) {
+    assert!(app.dock.message_id().is_some(), "Dock 应有暂驻消息");
+    app.apply_action(KeyAction::Insert(' '));
+    assert!(app.dock.shows_input());
+}
+
 fn comment_browse(app: &mut App, text: &str) {
     let transcript = app.prepare_transcript();
     let row = transcript
@@ -484,23 +499,24 @@ fn comment_missing_step_discards_drafts_and_comment_only_queue_but_keeps_text() 
         ["kept text"]
     );
     assert!(app.queue.messages().next().unwrap().comments.is_empty());
-    assert!(frame(app).text.contains("丢弃评论：#1、#2、#3"));
+    assert_eq!(
+        app.dock.message(&app.blocks),
+        Some(&status(
+            NoticeLevel::Warn,
+            "锚点 Step 不在当前历史，丢弃评论：#1、#2、#3"
+        ))
+    );
 }
 
 #[test]
 fn comment_warn_error_keeps_space_paste_and_hidden_input_untouched() {
-    for severity in [DockSeverity::Warn, DockSeverity::Error] {
+    for level in [NoticeLevel::Warn, NoticeLevel::Error] {
         let mut h = comment_app();
         let app = &mut h.app;
         app.input.set_text("hidden input");
         comment_browse(app, "comment target");
         app.apply_action(KeyAction::Submit);
-        app.push_dock_status(
-            StatusKind::TurnFailed {
-                reason: "blocked dock".into(),
-            },
-            severity,
-        );
+        app.push_status(status(level, "blocked dock"));
         app.apply_action(KeyAction::Insert('a'));
         app.apply_action(KeyAction::Insert(' '));
         app.apply_action(KeyAction::Paste("b".into()));
@@ -508,7 +524,7 @@ fn comment_warn_error_keeps_space_paste_and_hidden_input_untouched() {
         app.apply_action(KeyAction::Submit);
         assert_eq!(app.queue.drafts().next().unwrap().comment().text, "a b");
         assert_eq!(app.input.text(), "hidden input");
-        assert!(app.dock_status().is_some());
+        assert!(app.dock.message_id().is_some());
     }
 }
 
@@ -576,32 +592,36 @@ fn comment_numbering_combines_history_queue_and_drafts_and_does_not_resume_with_
     );
 }
 
+/// Dock 中暂驻的消息不随 History 替换而消失，即使它与一条已落回对话记录的消息同文；
+/// 释放后按位置规则出现，同文的提示在显示中只保留一份。
 #[test]
-fn dock_status_survives_r2_history_until_space() {
-    for failed in [false, true] {
+fn dock_message_survives_r2_history_until_space() {
+    for (level, repeated) in [
+        (NoticeLevel::Warn, false),
+        (NoticeLevel::Error, false),
+        (NoticeLevel::Error, true),
+    ] {
         let mut h = Harness::new(false);
         let id = lattice_api::local::new_turn_id();
         h.app.apply_update(LocalUpdate::Reset {
             view: Box::new(view(id, false)),
             generation: 1,
         });
-        if failed {
-            h.app.push_dock_status(
-                StatusKind::TurnFailed {
-                    reason: "dock-marker".into(),
-                },
-                DockSeverity::Error,
-            );
-        } else {
+        if level == NoticeLevel::Warn {
             h.app.apply_turn_event(TurnEvent::LlmRetry {
                 key: key(id, 0, 1),
                 delay_ms: 100,
                 notice: lattice_api::local::Notice {
-                    level: lattice_api::local::NoticeLevel::Warn,
+                    level,
                     text: "dock-marker".into(),
                 },
             });
+        } else {
+            for _ in 0..=usize::from(repeated) {
+                h.app.push_status(status(level.clone(), "dock-marker"));
+            }
         }
+        let released = usize::from(repeated);
         let closed = view(id, true);
         let loaded: lattice_api::local::LocalHistory = serde_json::from_value(
             json!({"anchor":closed.history,"entries":history_entries(&closed)}),
@@ -615,14 +635,20 @@ fn dock_status_survives_r2_history_until_space() {
                 generation: 1,
             });
             assert!(
-                h.app.dock_status().is_some(),
+                h.app
+                    .dock
+                    .message(&h.app.blocks)
+                    .is_some_and(|status| status.text.contains("dock-marker")),
                 "History must not release Dock"
             );
-            assert!(!frame(&h.app).text.contains("dock-marker"));
+            assert_eq!(frame(&h.app).text.matches("dock-marker").count(), released);
         }
         h.app.apply_action(KeyAction::Insert(' '));
-        assert!(h.app.dock_status().is_none());
-        assert_eq!(frame(&h.app).text.matches("dock-marker").count(), 1);
+        assert!(h.app.dock.shows_input());
+        assert_eq!(
+            frame(&h.app).text.matches("dock-marker").count(),
+            released + 1
+        );
         h.app
             .replace_history(crate::session::history_blocks(loaded));
         assert_eq!(frame(&h.app).text.matches("dock-marker").count(), 1);
@@ -658,6 +684,9 @@ fn running_enter_queues_verbatim_without_history_and_preserves_full_input() {
         assert_eq!(app.input.text(), " \n ");
         app.input.set_text("/help");
         app.apply_action(KeyAction::Submit);
+        // `/help` 打开 Dock 面板并遮住输入区；Esc 关闭后才回到输入区。
+        assert!(!app.dock.shows_input());
+        app.apply_action(KeyAction::Clear);
         for n in 0..5 {
             app.input.set_text(&format!("  queued {n}\n**plain**  "));
             assert_eq!(app.apply_action(KeyAction::Submit), None);
@@ -685,7 +714,7 @@ fn running_enter_queues_verbatim_without_history_and_preserves_full_input() {
 
 #[test]
 fn queued_editor_saves_discards_deletes_and_keeps_warn_input_local() {
-    for severity in [DockSeverity::Warn, DockSeverity::Error] {
+    for level in [NoticeLevel::Warn, NoticeLevel::Error] {
         let mut h = Harness::new(true);
         let app = &mut h.app;
         app.input.set_text("running");
@@ -698,12 +727,7 @@ fn queued_editor_saves_discards_deletes_and_keeps_warn_input_local() {
         assert!(frame(app).text.contains("Enter 编辑 · Delete 删除"));
         app.apply_action(KeyAction::Submit);
         assert!(frame(app).text.contains("Enter 完成编辑"));
-        app.push_dock_status(
-            StatusKind::TurnFailed {
-                reason: "dock marker".into(),
-            },
-            severity,
-        );
+        app.push_status(status(level, "dock marker"));
         app.apply_action(KeyAction::End);
         app.apply_action(KeyAction::Insert(' '));
         app.apply_action(KeyAction::Paste("e\nf".into()));
@@ -715,14 +739,14 @@ fn queued_editor_saves_discards_deletes_and_keeps_warn_input_local() {
         app.apply_action(KeyAction::Insert('!'));
         app.apply_action(KeyAction::Submit);
         assert!(frame(app).text.contains("cd e\nf!"));
-        assert!(app.dock_status().is_some());
+        assert!(app.dock.message_id().is_some());
         assert!(matches!(app.focus, Focus::Transcript(_)));
         app.apply_action(KeyAction::Submit);
         app.apply_action(KeyAction::Insert('x'));
         app.apply_action(KeyAction::Clear);
         assert!(!frame(app).text.contains("f!x"));
         app.apply_action(KeyAction::Insert(' '));
-        assert!(app.dock_status().is_none());
+        assert!(app.dock.shows_input());
         app.apply_action(KeyAction::Delete);
         assert!(!frame(app).text.contains("ab中"));
         assert!(frame(app).text.contains("first"));
@@ -1044,6 +1068,11 @@ fn queue_pauses_on_failure_cancel_and_disconnect_and_resumes_after_failed_manual
             finish_completed(app, id);
             assert_eq!(app.auto_submit(), None);
         }
+        // 失败结局与观察中断是 Error 与 Warn，暂驻 Dock；取消结局是 Info，直接进对话记录。
+        assert_eq!(app.dock.message_id().is_some(), cause != 1, "cause {cause}");
+        if cause != 1 {
+            release_dock(app);
+        }
         app.input.set_text("manual while paused");
         assert_eq!(
             app.apply_action(KeyAction::Submit),
@@ -1059,11 +1088,47 @@ fn queue_pauses_on_failure_cancel_and_disconnect_and_resumes_after_failed_manual
         assert!(app.input.is_empty());
         assert_eq!(
             app.apply_action(KeyAction::Submit),
+            None,
+            "失败结局暂驻 Dock 时输入区不可达"
+        );
+        release_dock(app);
+        assert_eq!(
+            app.apply_action(KeyAction::Submit),
             Some(" q1\nraw ".into()),
             "Failed 后空输入 Enter 立即发送"
         );
         assert!(!app.queue.is_paused());
     }
+}
+
+#[test]
+fn reopened_session_shows_past_failure_in_transcript_without_dock() {
+    // 重新打开 Session：本进程没有提交过这个 Turn，也没有看着它运行，失败结局只是历史。
+    let mut h = Harness::new(false);
+    let app = &mut h.app;
+    let id = lattice_api::local::new_turn_id();
+    app.apply_update(LocalUpdate::State {
+        view: Box::new(stopped_view(id, false, 1)),
+        phase: ObservationPhase::NoOwner,
+        error: None,
+    });
+    assert!(app.dock.shows_input(), "旧结局不打断输入");
+    let shown = frame(app);
+    assert_eq!(
+        shown.text.matches("失败：stopped").count(),
+        1,
+        "{}",
+        shown.text
+    );
+    // 等级不变，对话记录里仍按错误显示。
+    assert!(app.blocks.iter().any(|block| matches!(
+        block,
+        Block::Status(Status {
+            level: NoticeLevel::Error,
+            closing: Some(_),
+            ..
+        })
+    )));
 }
 
 #[test]
@@ -1258,7 +1323,7 @@ fn manual_rejections_keep_the_existing_restore_rules() {
 
 #[test]
 fn empty_edit_deletes_and_ctrl_c_never_clears_hidden_input_or_editor() {
-    for severity in [DockSeverity::Warn, DockSeverity::Error] {
+    for level in [NoticeLevel::Warn, NoticeLevel::Error] {
         let mut h = Harness::new(true);
         let app = &mut h.app;
         app.input.set_text("running");
@@ -1274,12 +1339,7 @@ fn empty_edit_deletes_and_ctrl_c_never_clears_hidden_input_or_editor() {
             error: None,
         });
         app.input.set_text("hidden draft");
-        app.push_dock_status(
-            StatusKind::TurnFailed {
-                reason: "dock".into(),
-            },
-            severity,
-        );
+        app.push_status(status(level, "dock"));
         handle_input_event(
             app,
             Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
@@ -1288,7 +1348,7 @@ fn empty_edit_deletes_and_ctrl_c_never_clears_hidden_input_or_editor() {
         assert!(!app.should_quit);
         assert_eq!(app.input.text(), "hidden draft");
         app.apply_action(KeyAction::Insert(' '));
-        assert!(app.dock_status().is_some());
+        assert!(app.dock.message_id().is_some());
         assert_eq!(
             app.queue
                 .editor(app.queue.messages().next().unwrap().id)
@@ -1443,6 +1503,8 @@ struct Frame {
     connected: bool,
     input: String,
     text: String,
+    /// Dock 中暂驻的 Warn 或 Error 的文字；没有暂驻消息时为空。它不在 `text` 里。
+    dock: String,
     cancel: Option<CancelStatus>,
     /// 当前 Turn 已被后台接受或正在运行：助手标题线已出现。
     started: bool,
@@ -1458,6 +1520,10 @@ fn frame(app: &App) -> Frame {
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join("\n"),
+        dock: app
+            .dock
+            .message(&app.blocks)
+            .map_or_else(String::new, |status| status.text.clone()),
         cancel: app.cancel_status,
         started: app.blocks.iter().any(|block| {
             matches!(block, Block::AssistantStart { turn_id, .. } if Some(*turn_id) == app.current_turn)
@@ -1818,7 +1884,7 @@ async fn late_transport_error_keeps_observation_after_submission_grace() {
         );
         remote.ctrl('c');
         tokio::time::sleep(Duration::from_secs(4)).await;
-        remote.wait(|f| f.text.contains("提交结果未知")).await;
+        remote.wait(|f| f.dock.contains("提交结果未知")).await;
         peer.wait(|s| count(s, "subscribe") == 2).await;
         events.unbounded_send(snapshot(&view(id, false))).unwrap();
         events
@@ -1834,9 +1900,12 @@ async fn late_transport_error_keeps_observation_after_submission_grace() {
             .wait(|f| f.text.contains("before receipt failure"))
             .await;
         close.send(()).unwrap();
+        // 迟到的传输诊断与“提交结果未知”是同一件事：一条两行的 Warn。
         let frame = remote
-            .wait(|f| f.text.contains("local connection failed"))
+            .wait(|f| f.dock.contains("local connection failed"))
             .await;
+        assert!(frame.dock.starts_with("提交结果未知"), "{}", frame.dock);
+        assert_eq!(frame.dock.lines().count(), 2, "{}", frame.dock);
         assert_eq!(frame.current, Some(id));
         assert!(frame.input.is_empty());
         assert!(frame.connected);
@@ -1854,9 +1923,12 @@ async fn late_transport_error_keeps_observation_after_submission_grace() {
             .await;
         events.unbounded_send(snapshot(&view(id, true))).unwrap();
         events.unbounded_send(finished(&view(id, true))).unwrap();
+        let done = format!("turn {id} 完成");
         remote
-            .wait(|f| f.phase == TurnPhase::Idle && f.text.contains("completed"))
+            .wait(|f| f.phase == TurnPhase::Idle && f.text.contains(&done))
             .await;
+        // Ctrl+D 只在输入区可见且为空时退出；先释放暂驻的 Warn。
+        remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
         remote.ctrl('d');
         id
     };
@@ -1894,8 +1966,10 @@ async fn idle_deadline_survives_repeated_poll_rebuilds() {
         let frame = remote.wait(|f| !f.connected).await;
         assert_eq!(frame.current, Some(id));
         assert_eq!(frame.phase, TurnPhase::Streaming);
-        assert!(frame.text.contains("无增量"));
+        assert!(frame.dock.contains("无增量"), "{}", frame.dock);
         tokio::time::resume();
+        // Ctrl+D 只在输入区可见且为空时退出；先释放暂驻的 Warn。
+        remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
         remote.ctrl('d');
     };
     let ((), exit) = tokio::join!(driver, h.run(&peer.client, Some(initial)));
@@ -1944,7 +2018,16 @@ async fn switching_targets_keeps_old_receipts_and_diagnostics_out_of_new_state()
             let mut closed = view(old, true);
             closed.session.active_turn = Some(active);
             old_tx.unbounded_send(snapshot(&closed)).unwrap();
-            remote.wait(|f| f.current == Some(active)).await;
+            // 快照里 B 仍在进行而无人接管：一条 Warn 暂驻 Dock，释放后才能继续输入。
+            let orphaned = remote
+                .wait(|f| f.current == Some(active) && f.dock.contains("无人接管"))
+                .await;
+            assert!(
+                orphaned.dock.contains(&active.to_string()),
+                "{}",
+                orphaned.dock
+            );
+            remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
             match gesture {
                 1 => {
                     // 第二次是对 B 的新取消，不是两秒窗口内的退出。
@@ -2086,11 +2169,17 @@ async fn busy_submission_preserves_draft_and_can_cancel_displayed_active_turn() 
                 .await,
         );
         remote
-            .wait(|f| f.input == "hi" && f.text.contains("session is busy"))
+            .wait(|f| f.input == "hi" && f.dock.contains("session is busy"))
             .await;
+        // 被拒回执是 Error，暂驻 Dock；释放后回到输入区。
+        remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
         remote.press(KeyCode::Esc, KeyModifiers::NONE);
         remote.line("/reconnect");
-        remote.wait(|f| f.current == Some(active)).await;
+        // 所选目标无人接管的提示同样暂驻 Dock，释放后不妨碍后面的 Ctrl+D。
+        remote
+            .wait(|f| f.current == Some(active) && f.dock.contains("无人接管"))
+            .await;
+        remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
         remote.ctrl('c');
         let f = remote.wait(|f| f.cancel == Some(CancelStatus::Taken)).await;
         // 被拒回执已实时显示，交接报告不再重述。
@@ -2125,7 +2214,9 @@ async fn existing_submission_keeps_explicit_agent() {
             seen.iter().find(|r| r["operation"] == "submit").unwrap()["request"]["agent"],
             "override-agent"
         );
-        remote.wait(|f| f.input == "hi").await;
+        remote.wait(|f| f.input == "hi" && !f.dock.is_empty()).await;
+        // 被拒回执是 Error，暂驻 Dock；释放后回到输入区。
+        remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
         remote.press(KeyCode::Esc, KeyModifiers::NONE);
         remote.line("/quit");
     };

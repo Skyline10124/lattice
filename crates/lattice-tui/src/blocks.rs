@@ -54,7 +54,7 @@ pub(crate) fn identity_slots(entries: &[IdentifiedBlock]) -> Vec<IdentitySlot> {
                     node = Some((key.turn_id, Some(key.ordinal)));
                     position = 0;
                 }
-                Block::AgentName(_) | Block::AssistantStart { .. } | Block::Status { .. } => {
+                Block::AgentName(_) | Block::AssistantStart { .. } | Block::Status(_) => {
                     return None;
                 }
                 _ => {}

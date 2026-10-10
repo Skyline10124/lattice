@@ -8,9 +8,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, Block, DockSeverity, StatusKind, ToolState, TurnPhase};
+use crate::app::{App, Block, Status, ToolState, TurnPhase};
 use crate::input::{CTRL_C_WINDOW, InputBuffer};
 use crate::wrapping;
+use lattice_api::local::{NoticeLevel, PublicTurnOutcome};
 
 pub(crate) mod browse;
 pub(crate) use browse::Focus;
@@ -18,7 +19,7 @@ mod comments;
 pub(crate) use comments::CommentNavigation;
 mod dock;
 mod statusline;
-pub(crate) use dock::{Dock, DockIntent};
+pub(crate) use dock::{Dock, DockIntent, DockState, Panel};
 
 pub(crate) const SIDEBAR_W: u16 = 40;
 pub(crate) const SIDEBAR_ASPECT: u16 = 3;
@@ -285,6 +286,13 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
     let mut assistant_header = false;
     let mut agent: Option<&str> = None;
     let mut turn = None;
+    if let Some((id, banner)) = &app.banner {
+        for text in banner {
+            lines.extend(body(text, content_w, role_style(Role::DimMeta)));
+        }
+        owners.extend((0..lines.len()).map(|row| BlockPosition { id: *id, row }));
+    }
+    let parked = app.dock.message_id();
     for entry in &app.blocks.entries {
         let block = &entry.block;
         let start = lines.len();
@@ -420,38 +428,31 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
                 );
                 lines.extend(tool_lines(name, state, content_w));
             }
-            Block::Status { kind, placement } => {
-                // 暂驻 Dock 的 Warn / Error 不重复出现在 transcript；释放后
-                // 会在原本的时间位置出现。行数统计与 viewport 同用过滤结果。
-                if matches!(placement, crate::app::StatusPlacement::Dock(_)) {
+            Block::Status(status) => {
+                // Dock 暂驻的那一条不在对话记录重复显示；释放或被顶掉后在原本的
+                // 时间位置出现。行数统计与 viewport 同用过滤结果。
+                if parked == Some(entry.id) {
                     continue;
                 }
-                match kind {
-                    StatusKind::Notice(notice) => {
-                        for text in notice {
-                            lines.extend(body(text, content_w, role_style(Role::DimMeta)));
-                        }
-                    }
-                    StatusKind::Summary { turn_id, .. }
-                        if turn.is_none_or(|(id, _)| id != *turn_id) =>
-                    {
-                        lines.extend(body(
-                            &status_text(kind),
-                            content_w,
-                            role_style(Role::DimMeta),
-                        ));
-                    }
-                    kind => {
-                        ensure_assistant_header(
-                            &mut lines,
-                            &mut assistant_header,
-                            agent,
-                            turn.map(|(_, n)| n),
-                            content_w,
-                        );
-                        lines.extend(status_lines(kind, content_w));
-                    }
+                // 只有本轮的结局属于助手段；其余状态消息与序号未知的结局不带标题线。
+                let in_segment = status
+                    .closing
+                    .as_ref()
+                    .is_some_and(|(id, _)| turn.is_some_and(|(scope, _)| scope == *id));
+                if in_segment {
+                    ensure_assistant_header(
+                        &mut lines,
+                        &mut assistant_header,
+                        agent,
+                        turn.map(|(_, n)| n),
+                        content_w,
+                    );
                 }
+                lines.extend(body(
+                    &status_text(status),
+                    content_w,
+                    role_style(status_role(status, in_segment)),
+                ));
             }
         }
         owners.extend((start..lines.len()).map(|row| BlockPosition {
@@ -631,40 +632,31 @@ fn tool_lines(name: &str, state: &ToolState, content_w: u16) -> Vec<Line<'static
     }
 }
 
-/// 状态文本，transcript 与 Dock 共用同一措辞；样式由各自渲染层决定。
-#[rustfmt::skip]
-fn status_text(kind: &StatusKind) -> String {
-    match kind {
-        StatusKind::Summary { turn_id, summary } => format!("{} turn {turn_id} {}{}",
-            symbol(match summary.outcome { lattice_api::local::PublicTurnOutcome::Completed => SymbolKind::Ok, lattice_api::local::PublicTurnOutcome::Failed => SymbolKind::Failed, lattice_api::local::PublicTurnOutcome::Cancelled => SymbolKind::Cancelled }),
-            match summary.outcome { lattice_api::local::PublicTurnOutcome::Completed => "completed", lattice_api::local::PublicTurnOutcome::Failed => "failed", lattice_api::local::PublicTurnOutcome::Cancelled => "cancelled" },
-            summary.notice.as_ref().map_or_else(String::new, |notice| format!("：{}", notice.text))),
-        StatusKind::TurnFailed { reason } => format!(
-            "{} {reason}", symbol(SymbolKind::Failed)
+/// 状态消息的显示文字，对话记录与 Dock 共用；结局消息在行首加结局符号。
+fn status_text(status: &Status) -> String {
+    match &status.closing {
+        Some((_, outcome)) => format!(
+            "{} {}",
+            symbol(match outcome {
+                PublicTurnOutcome::Completed => SymbolKind::Ok,
+                PublicTurnOutcome::Failed => SymbolKind::Failed,
+                PublicTurnOutcome::Cancelled => SymbolKind::Cancelled,
+            }),
+            status.text
         ),
-        StatusKind::LlmRetry { attempt, delay_ms, message } => format!(
-            "{} llm retry {attempt} after {delay_ms}ms: {message}",
-            symbol(SymbolKind::Running)
-        ),
-        StatusKind::Notice(_) => String::new(),
+        None => status.text.clone(),
     }
 }
 
-fn status_lines(kind: &StatusKind, content_w: u16) -> Vec<Line<'static>> {
-    let style = match kind {
-        StatusKind::Summary { summary, .. } => {
-            role_style(match summary.notice.as_ref().map(|n| &n.level) {
-                Some(lattice_api::local::NoticeLevel::Error) => Role::ToolErr,
-                Some(lattice_api::local::NoticeLevel::Info) => Role::DimMeta,
-                Some(lattice_api::local::NoticeLevel::Warn) => Role::Assistant,
-                None => Role::ToolOk,
-            })
-        }
-        StatusKind::TurnFailed { .. } => role_style(Role::ToolErr),
-        StatusKind::LlmRetry { .. } => role_style(Role::DimMeta),
-        StatusKind::Notice(_) => return Vec::new(),
-    };
-    body(&status_text(kind), content_w, style)
+/// 对话记录中状态行的前景：完成用 ToolOk，Error 用 ToolErr，其余（含释放后的 Warn）用 DimMeta；
+/// 序号未知的结局不属于助手段，保持暗色。
+fn status_role(status: &Status, in_segment: bool) -> Role {
+    match (&status.closing, &status.level) {
+        (Some(_), _) if !in_segment => Role::DimMeta,
+        (Some((_, PublicTurnOutcome::Completed)), _) => Role::ToolOk,
+        (_, NoticeLevel::Error) => Role::ToolErr,
+        (_, NoticeLevel::Info | NoticeLevel::Warn) => Role::DimMeta,
+    }
 }
 
 /// 同一投影同时提供折行文字、光标与视觉行移动的源字符位置。
@@ -881,7 +873,7 @@ fn truncate_display(text: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{App, Block, StatusKind, StatusPlacement};
+    use crate::app::{App, Block, Status};
     use crate::session::SessionContext;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -941,10 +933,12 @@ mod tests {
             let mut app = test_app();
             app.term_width = width;
             app.term_height = height;
-            app.blocks.push(Block::Status {
-                kind: StatusKind::Notice(vec!["hello".into()]),
-                placement: StatusPlacement::Transcript,
-            });
+            app.show_banner();
+            app.blocks.push(Block::Status(Status {
+                level: NoticeLevel::Info,
+                text: "hello".into(),
+                closing: None,
+            }));
             app.input.set_text("typed");
             let mut terminal = Terminal::new(TestBackend::new(width, height))?;
             terminal.draw(|frame| draw(frame, &mut app))?;
@@ -953,25 +947,32 @@ mod tests {
     }
 
     #[test]
-    fn dock_status_frames_draw_without_panic() -> anyhow::Result<()> {
-        use crate::app::DockSeverity;
+    fn dock_module_frames_draw_without_panic() -> anyhow::Result<()> {
         for (width, height) in [(1, 1), (7, 3), (80, 24), (176, 50)] {
-            for severity in [DockSeverity::Warn, DockSeverity::Error] {
+            for top in ["warn", "error", "panel"] {
                 let mut app = test_app();
-                app.blocks.push(Block::Status {
-                    kind: match severity {
-                        DockSeverity::Warn => StatusKind::LlmRetry {
-                            attempt: 2,
-                            delay_ms: 250,
-                            message: "retrying model request".into(),
-                        },
-                        DockSeverity::Error => StatusKind::TurnFailed {
-                            reason: "permission denied".into(),
-                        },
-                    },
-                    placement: StatusPlacement::Dock(severity),
-                });
                 app.input.set_text("draft");
+                match top {
+                    "panel" => app.dock.open_panel(Panel {
+                        title: "HELP",
+                        lines: vec!["/help  显示本帮助".into(), "Enter  提交".into()],
+                    }),
+                    level => {
+                        let status = Status {
+                            level: if level == "warn" {
+                                NoticeLevel::Warn
+                            } else {
+                                NoticeLevel::Error
+                            },
+                            text: "第 3 次请求失败，250 ms 后重试：retrying\npermission denied"
+                                .into(),
+                            closing: None,
+                        };
+                        let entry = app.blocks.identify(Block::Status(status.clone()));
+                        app.dock.offer(entry.id, &status);
+                        app.blocks.entries.push(entry);
+                    }
+                }
                 let mut terminal = Terminal::new(TestBackend::new(width, height))?;
                 terminal.draw(|frame| draw(frame, &mut app))?;
             }
