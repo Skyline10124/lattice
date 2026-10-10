@@ -186,6 +186,8 @@ LANCET 返回后，终态、载荷和完整 Cell 证据在一个会话库事务�
 
 DTO 不包含参数、结果秘密或 Tool schema，只投影身份、生命周期、摘要、长度和证据。公开关联使用 `InvocationId`，变更序号只用于游标。上述操作员接口不是 Agent Tool。
 
+`--json` 输出完整的 DTO。文本模式每个调用一行，依次是 `InvocationId`、Tool 方法和状态，`--tail` 在行首另加变更序号。状态在未终结时为 `registered` 或 `started`；终结后为 `terminal outcome=<结果>`，失败时附 `code=` 与 `retriability=`，结果不确定时附 `cause=`。用词与 `--json` 的拼写相同。摘要、长度与证据只在 `--json` 中给出。
+
 ## 验证与承接
 
 ### 验证入口
