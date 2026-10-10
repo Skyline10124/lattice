@@ -4,7 +4,8 @@
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use lattice_api::local::{
-    AuditSelection, ChangeSeq, LocalClient, SessionId, ToolResultOutcome, TurnId,
+    AuditSelection, ChangeSeq, LocalClient, OperatorInvocationState, OperatorReason, SessionId,
+    ToolResultOutcome, TurnId,
 };
 use std::path::Path;
 
@@ -19,6 +20,38 @@ fn parse_outcome(value: &str) -> Result<String, String> {
 fn outcome(value: &str) -> Result<ToolResultOutcome> {
     serde_json::from_value(serde_json::Value::String(value.into()))
         .map_err(|_| lattice_api::ApiError::BadRequest("invalid outcome".into()).into())
+}
+/// 文本行沿用 `--json` 的小写拼写，不另立一套词。
+fn word(value: serde_json::Result<serde_json::Value>) -> String {
+    match value {
+        Ok(serde_json::Value::String(word)) => word,
+        _ => "unknown".into(),
+    }
+}
+/// 一行文本里的调用状态：生命周期词在前，终结后补结果与原因。
+/// 摘要、长度与证据只在 `--json` 中给出。
+pub(super) fn state_text(state: &OperatorInvocationState) -> String {
+    let (outcome, reason) = match state {
+        OperatorInvocationState::Registered => return "registered".into(),
+        OperatorInvocationState::Started => return "started".into(),
+        OperatorInvocationState::Terminal {
+            outcome, reason, ..
+        } => (outcome.as_str(), reason),
+    };
+    match reason {
+        None => format!("terminal outcome={outcome}"),
+        Some(OperatorReason::Failed { code, retriability }) => format!(
+            "terminal outcome={outcome} code={} retriability={}",
+            word(serde_json::to_value(code)),
+            word(serde_json::to_value(retriability))
+        ),
+        Some(OperatorReason::Indeterminate(cause)) => {
+            format!(
+                "terminal outcome={outcome} cause={}",
+                word(serde_json::to_value(cause))
+            )
+        }
+    }
 }
 #[derive(Args, Debug, Clone)]
 pub struct AuditQueryArgs {
@@ -82,8 +115,10 @@ pub async fn run(cmd: AuditCmd, global_json: bool) -> Result<()> {
                 );
                 for row in replay.calls {
                     println!(
-                        "{} {} {:?}",
-                        row.invocation_id, row.binding.method, row.state
+                        "{} {} {}",
+                        row.invocation_id,
+                        row.binding.method,
+                        state_text(&row.state)
                     );
                 }
             }
@@ -133,11 +168,11 @@ pub(super) async fn run_query(
             );
             for change in page.rows {
                 println!(
-                    "{} {} {} {:?}",
+                    "{} {} {} {}",
                     change.sequence.0,
                     change.row.invocation_id,
                     change.row.binding.method,
-                    change.row.state
+                    state_text(&change.row.state)
                 );
             }
         }
@@ -149,16 +184,63 @@ pub(super) async fn run_query(
             println!("{}", serde_json::to_string(&page)?);
         } else {
             println!(
-                "latest_change={} next={:?}",
-                page.latest_change.0, page.next
+                "latest_change={} next={}",
+                page.latest_change.0,
+                page.next.map_or_else(|| "none".into(), |id| id.to_string())
             );
             for row in page.rows {
                 println!(
-                    "{} {} {:?}",
-                    row.invocation_id, row.binding.method, row.state
+                    "{} {} {}",
+                    row.invocation_id,
+                    row.binding.method,
+                    state_text(&row.state)
                 );
             }
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 失败与结果不确定的原因要靠专门的失败或崩溃场景才出现；这里只保护文本拼写与 JSON 一致。
+    #[test]
+    fn state_text_spells_lifecycle_outcome_and_reason_like_json() {
+        let terminal = |outcome: &str, reason: serde_json::Value| {
+            serde_json::json!({
+                "state": "terminal", "outcome": outcome, "reason": reason,
+                "material": {"kind": "no_content"},
+                "evidence": {"kind": "unavailable", "value": {"reason": "no_result"}}
+            })
+        };
+        for (state, expected) in [
+            (serde_json::json!({"state": "registered"}), "registered"),
+            (serde_json::json!({"state": "started"}), "started"),
+            (
+                terminal("not_executed", serde_json::Value::Null),
+                "terminal outcome=not_executed",
+            ),
+            (
+                terminal(
+                    "failed",
+                    serde_json::json!({"kind": "failed", "value": {
+                        "code": "capability_not_granted", "retriability": "requires_replan"
+                    }}),
+                ),
+                "terminal outcome=failed code=capability_not_granted retriability=requires_replan",
+            ),
+            (
+                terminal(
+                    "indeterminate",
+                    serde_json::json!({"kind": "indeterminate", "value": "no_result"}),
+                ),
+                "terminal outcome=indeterminate cause=no_result",
+            ),
+        ] {
+            let state: OperatorInvocationState = serde_json::from_value(state).unwrap();
+            assert_eq!(state_text(&state), expected);
+        }
+    }
 }

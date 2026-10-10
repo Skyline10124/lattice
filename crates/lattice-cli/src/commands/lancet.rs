@@ -55,8 +55,10 @@ pub(super) async fn status_with_client(
         println!("lancet status\nlatest_change={}", output.latest_change.0);
         for row in output.recent {
             println!(
-                "{} {} {:?}",
-                row.invocation_id, row.binding.method, row.state
+                "{} {} {}",
+                row.invocation_id,
+                row.binding.method,
+                super::audit::state_text(&row.state)
             );
         }
     }
