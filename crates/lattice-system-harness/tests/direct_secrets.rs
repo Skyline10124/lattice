@@ -25,7 +25,8 @@ use support::{
 const DENIED_CONTENT_SENTINEL: &str = "sentinel-denied-content-0xDEADBEEF";
 
 /// Scan every public sink for sentinels after a turn: stdout/stderr, parsed
-/// JSONL, session list/log, audit query, and lancet status.
+/// JSONL, session list/log, audit query, lancet status, and the reason shown
+/// for a rejected configuration.
 /// The FAKE_API_KEY (provider credential) and the denied-content sentinel must
 /// not appear in any of them.
 #[test]
@@ -97,6 +98,29 @@ fn direct_secrets_sentinels_never_leak_into_public_sinks() {
             String::from_utf8_lossy(&aq.stdout).contains("session.todo_write"),
             "operator audit query must include the Tool-bearing invocation",
         )?;
+        // 配置被拒绝的说明也是公开输出：把本次请求用过的凭据写进会被引用的配置值，
+        // 先确认它到达脱敏处并被替换，再和其他输出一起扫描。
+        let profile = world
+            .project_dir()
+            .join(".lattice/agents/dl-secret/agent.toml");
+        let declared = fs::read_to_string(&profile)
+            .expect("read profile")
+            .replace("name = \"dl-secret\"", &format!("name = '{FAKE_API_KEY}'"));
+        fs::write(&profile, declared).expect("write profile");
+        let rejected = ["--json", "session", "send", "again", "--agent", "dl-secret"];
+        let rj = cli(&world, &spec, &rejected);
+        let rt = cli(&world, &spec, &rejected[1..]);
+        for (output, reason) in [(&rj, &rj.stdout), (&rt, &rt.stderr)] {
+            require(output.is_clean_exit(2), "configuration rejection exits 2")?;
+            require(
+                String::from_utf8_lossy(reason).contains("declares '[REDACTED]'"),
+                "rejection reason must show the declared name redacted",
+            )?;
+        }
+        require(
+            server.captured_requests().len() == captures.len(),
+            "rejected configuration must not reach the provider",
+        )?;
         let sinks: Vec<(&str, String)> = vec![
             ("send stdout", send_stdout.to_string()),
             ("send stderr", send_stderr.to_string()),
@@ -147,6 +171,22 @@ fn direct_secrets_sentinels_never_leak_into_public_sinks() {
             (
                 "session turn stderr",
                 String::from_utf8_lossy(&st_text.stderr).to_string(),
+            ),
+            (
+                "rejected send --json",
+                String::from_utf8_lossy(&rj.stdout).to_string(),
+            ),
+            (
+                "rejected send --json stderr",
+                String::from_utf8_lossy(&rj.stderr).to_string(),
+            ),
+            (
+                "rejected send",
+                String::from_utf8_lossy(&rt.stdout).to_string(),
+            ),
+            (
+                "rejected send stderr",
+                String::from_utf8_lossy(&rt.stderr).to_string(),
             ),
         ];
 
