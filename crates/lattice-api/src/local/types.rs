@@ -7,9 +7,9 @@ pub use lattice_conversation::{ResultPayload, StepContent, StoredToolResult, Suc
 pub use lattice_session::store::{
     AuditPage, AuditReplay, AuditTailPage, ChangeSeq, HistoryAnchor, HistoryCursor,
     MaterialSummary, Node, NodeFragment, NodeId, NodeKind, NodeRef, Notice, NoticeLevel,
-    OperatorInvocationState, OperatorStatus, Page, PublicTurnOutcome, SessionListRow, SessionLog,
-    SessionRecord, StepDetail, StepDetailState, StepEnd, StepKey, TurnDetail, TurnSummary,
-    UsageSummary,
+    OperatorInvocationState, OperatorReason, OperatorStatus, Page, PublicTurnOutcome,
+    SessionListRow, SessionLog, SessionRecord, StepDetail, StepDetailState, StepEnd, StepKey,
+    TurnDetail, TurnSummary, UsageSummary,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

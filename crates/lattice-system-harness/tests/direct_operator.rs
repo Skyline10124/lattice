@@ -145,6 +145,47 @@ fn operator_case(name: &str, methods: &[&str]) {
             filtered["rows"].as_array().unwrap().len(),
             methods.iter().filter(|m| **m == methods[0]).count()
         );
+        // 文本输出逐行对应同一批调用，状态词与 JSON 的拼写一致。
+        let mut text = |args: &[&str]| -> Vec<String> {
+            let out = cli(&world, &spec, args);
+            evidence.record_command(args.join(" "), &out);
+            assert!(out.is_clean_exit(0), "{}", out.summary());
+            let stdout = std::str::from_utf8(&out.stdout).unwrap();
+            stdout.lines().map(str::to_owned).collect()
+        };
+        let line = |row: &Value, state: &str| {
+            format!(
+                "{} {} {state}",
+                row["invocation_id"].as_str().unwrap(),
+                row["binding"]["method"].as_str().unwrap()
+            )
+        };
+        let succeeded = |row: &Value| line(row, "terminal outcome=succeeded");
+        let listed = text(&["audit", "--session", sid, "--turn", tid]);
+        assert_eq!(
+            listed[0],
+            format!("latest_change={} next=none", query["latest_change"])
+        );
+        assert_eq!(listed[1..], rows.iter().map(succeeded).collect::<Vec<_>>());
+        let replayed = text(&["audit", "replay", "--session", sid, "--turn", tid]);
+        assert_eq!(
+            replayed[1..],
+            calls.iter().map(succeeded).collect::<Vec<_>>()
+        );
+        let tailed = text(&["audit", "--session", sid, "--turn", tid, "--tail"]);
+        let expected: Vec<_> = changes
+            .iter()
+            .map(|change| {
+                let state = match change["row"]["state"]["state"].as_str().unwrap() {
+                    "terminal" => "terminal outcome=succeeded",
+                    word => word,
+                };
+                format!("{} {}", change["sequence"], line(&change["row"], state))
+            })
+            .collect();
+        assert_eq!(tailed[1..], expected);
+        let shown = text(&["lancet", "status"]);
+        assert_eq!(shown[2..], recent.iter().map(succeeded).collect::<Vec<_>>());
         assert_eq!(server.captured_requests().len(), 2);
         record_session(
             &send,
