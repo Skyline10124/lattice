@@ -2,8 +2,78 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+use crate::blocks::{BlockId, BlockList};
 
-/// 输入区常驻栈底；唯一暂驻状态由 Block placement 持有，不复制状态栈。
+/// 承载某个 slash 命令输出的面板：标题加若干行。
+pub(crate) struct Panel {
+    pub(crate) title: &'static str,
+    pub(crate) lines: Vec<String>,
+}
+
+/// Dock 的持久状态：输入区之上的模块栈。输入区常驻栈底，其上至多一个面板，
+/// 再上至多一条暂驻消息。消息只记身份，文字与等级仍归对话记录里的那个状态 block。
+#[derive(Default)]
+pub(crate) struct DockState {
+    panel: Option<Panel>,
+    message: Option<BlockId>,
+    /// 自上次取走以来栈是否变过，供 viewport 区分 Dock 变化与内容变化。
+    changed: bool,
+}
+
+impl DockState {
+    /// 新状态消息推入时由 Dock 按等级决定是否接住：Warn 与 Error 暂驻，Info 不管。
+    /// 消息之间不叠：已暂驻的那条落回对话记录，新消息成为栈顶。
+    pub(crate) fn offer(&mut self, id: BlockId, status: &Status) {
+        match status.level {
+            NoticeLevel::Warn | NoticeLevel::Error => {
+                self.message = Some(id);
+                self.changed = true;
+            }
+            NoticeLevel::Info => {}
+        }
+    }
+
+    /// 对话记录据此跳过暂驻的那一条。
+    pub(crate) fn message_id(&self) -> Option<BlockId> {
+        self.message
+    }
+
+    pub(crate) fn message<'a>(&self, blocks: &'a BlockList) -> Option<&'a Status> {
+        let id = self.message?;
+        blocks
+            .entries
+            .iter()
+            .rev()
+            .find_map(|entry| match &entry.block {
+                Block::Status(status) if entry.id == id => Some(status),
+                _ => None,
+            })
+    }
+
+    pub(crate) fn release(&mut self) {
+        self.changed |= self.message.take().is_some();
+    }
+
+    pub(crate) fn open_panel(&mut self, panel: Panel) {
+        self.panel = Some(panel);
+        self.changed = true;
+    }
+
+    pub(crate) fn close_panel(&mut self) {
+        self.changed |= self.panel.take().is_some();
+    }
+
+    /// 栈顶是输入区：输入可见且可编辑。
+    pub(crate) fn shows_input(&self) -> bool {
+        self.panel.is_none() && self.message.is_none()
+    }
+
+    pub(crate) fn take_changed(&mut self) -> bool {
+        std::mem::take(&mut self.changed)
+    }
+}
+
+/// 一帧内的 Dock：只呈现并解释栈顶模块。
 pub(crate) struct Dock<'a> {
     top: Module<'a>,
     frame_h: u16,
@@ -11,7 +81,8 @@ pub(crate) struct Dock<'a> {
 
 enum Module<'a> {
     Input(InputModule<'a>),
-    Status(StatusModule<'a>),
+    Panel(PanelModule<'a>),
+    Message(MessageModule<'a>),
 }
 
 struct InputModule<'a> {
@@ -22,22 +93,28 @@ struct InputModule<'a> {
     comments: usize,
 }
 
-struct StatusModule<'a> {
-    kind: &'a StatusKind,
-    severity: DockSeverity,
+struct PanelModule<'a> {
+    panel: &'a Panel,
 }
+
+struct MessageModule<'a> {
+    status: &'a Status,
+}
+
 pub(crate) enum DockIntent {
     Edit(crate::input::KeyAction),
     Submit,
     ReleaseStatus,
+    ClosePanel,
     None,
 }
 
 impl<'a> Dock<'a> {
     pub(crate) fn new(app: &'a App) -> Self {
-        let top = match app.dock_status() {
-            Some((kind, severity)) => Module::Status(StatusModule { kind, severity }),
-            None => Module::Input(InputModule {
+        let top = match (app.dock.message(&app.blocks), &app.dock.panel) {
+            (Some(status), _) => Module::Message(MessageModule { status }),
+            (None, Some(panel)) => Module::Panel(PanelModule { panel }),
+            (None, None) => Module::Input(InputModule {
                 input: &app.input,
                 focused: matches!(app.focus, Focus::Dock),
                 running: app.phase != TurnPhase::Idle,
@@ -54,7 +131,8 @@ impl<'a> Dock<'a> {
     pub(crate) fn route(&self, action: crate::input::KeyAction) -> DockIntent {
         match &self.top {
             Module::Input(module) => module.interpret(action),
-            Module::Status(module) => module.interpret(action),
+            Module::Panel(module) => module.interpret(action),
+            Module::Message(module) => module.interpret(action),
         }
     }
 
@@ -63,7 +141,8 @@ impl<'a> Dock<'a> {
     pub(crate) fn height(&self, content_w: u16, transcript_rows: usize) -> u16 {
         let rows = match &self.top {
             Module::Input(module) => module.rows(content_w),
-            Module::Status(module) => module.rows(content_w),
+            Module::Panel(module) => module.rows(content_w),
+            Module::Message(module) => module.rows(content_w),
         };
         let above = self.frame_h.saturating_sub(1);
         let left = above.saturating_sub(u16::try_from(transcript_rows).unwrap_or(u16::MAX));
@@ -86,7 +165,8 @@ impl<'a> Dock<'a> {
         );
         match &self.top {
             Module::Input(module) => module.render(frame, title_area, content),
-            Module::Status(module) => module.render(frame, title_area, content),
+            Module::Panel(module) => module.render(frame, title_area, content),
+            Module::Message(module) => module.render(frame, title_area, content),
         }
     }
 }
@@ -147,7 +227,39 @@ impl InputModule<'_> {
     }
 }
 
-impl StatusModule<'_> {
+impl PanelModule<'_> {
+    fn interpret(&self, action: crate::input::KeyAction) -> DockIntent {
+        match action {
+            crate::input::KeyAction::Clear => DockIntent::ClosePanel,
+            _ => DockIntent::None,
+        }
+    }
+
+    fn text(&self) -> String {
+        self.panel.lines.join("\n")
+    }
+
+    fn rows(&self, content_w: u16) -> u16 {
+        let rows = body(&self.text(), content_w, Style::default()).len();
+        u16::try_from(rows.max(1)).unwrap_or(u16::MAX)
+    }
+
+    fn render(&self, frame: &mut Frame, title: Rect, area: Rect) {
+        frame.render_widget(
+            Paragraph::new(title_line(
+                self.panel.title,
+                Role::Assistant,
+                &["Esc 关闭".into()],
+                title.width as usize,
+            )),
+            title,
+        );
+        let shown = body(&self.text(), area.width, role_style(Role::Assistant));
+        frame.render_widget(Paragraph::new(shown), area);
+    }
+}
+
+impl MessageModule<'_> {
     fn interpret(&self, action: crate::input::KeyAction) -> DockIntent {
         match action {
             crate::input::KeyAction::Insert(' ') => DockIntent::ReleaseStatus,
@@ -156,14 +268,16 @@ impl StatusModule<'_> {
     }
 
     fn rows(&self, content_w: u16) -> u16 {
-        let rows = body(&status_text(self.kind), content_w, Style::default()).len();
+        let rows = body(&status_text(self.status), content_w, Style::default()).len();
         u16::try_from(rows.max(1)).unwrap_or(u16::MAX)
     }
 
     fn render(&self, frame: &mut Frame, title: Rect, area: Rect) {
-        let (label, title_role, text_role) = match self.severity {
-            DockSeverity::Warn => ("WARN", Role::Warn, Role::Assistant),
-            DockSeverity::Error => ("ERROR", Role::ToolErr, Role::ToolErr),
+        let (label, title_role, text_role) = match self.status.level {
+            NoticeLevel::Warn => ("WARN", Role::Warn, Role::Assistant),
+            NoticeLevel::Error => ("ERROR", Role::ToolErr, Role::ToolErr),
+            // `DockState::offer` 不接 Info；这一支只为穷尽匹配，沿用对话记录中的暗色。
+            NoticeLevel::Info => ("INFO", Role::DimMeta, Role::DimMeta),
         };
         frame.render_widget(
             Paragraph::new(title_line(
@@ -174,7 +288,7 @@ impl StatusModule<'_> {
             )),
             title,
         );
-        let shown = body(&status_text(self.kind), area.width, role_style(text_role));
+        let shown = body(&status_text(self.status), area.width, role_style(text_role));
         frame.render_widget(Paragraph::new(shown), area);
     }
 }

@@ -5,13 +5,21 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::TuiOptions;
-use crate::blocks::{BlockList, IdentifiedBlock, identity_slots};
-use crate::connection::{cancel_message, detach_lines, not_submitted_notice, submission_notice};
+use crate::blocks::{BlockId, BlockList, IdentifiedBlock, identity_slots};
+use crate::connection::{
+    cancellation_status, closing_status, detach_lines, discarded_comments_status, handoff_status,
+    history_unavailable_status, not_submitted_status, observation_diagnostic_status,
+    observation_lost_status, orphaned_turn_status, rejected_status, retry_status,
+    submission_status, submission_unknown_status,
+};
 use crate::input::{CTRL_C_WINDOW, History, InputBuffer, KeyAction, resolve_key};
 use crate::session::SessionContext;
 #[cfg(test)]
 use crate::view::transcript_lines;
-use crate::view::{Dock, DockIntent, Focus, Transcript, Viewport, frame_layout, render_transcript};
+use crate::view::{
+    Dock, DockIntent, DockState, Focus, Panel, Transcript, Viewport, frame_layout,
+    render_transcript,
+};
 use crossterm::event::{
     DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyEvent,
     KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
@@ -21,27 +29,12 @@ use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered}
 use lattice_api::TurnEvent;
 use lattice_api::local::{
     Acceptance, ActiveStateView, CancelStatus, ConnectionStatus, DetachReport, LocalClient,
-    LocalState, LocalTurn, LocalUpdate, MaterialSummary, ModelAttemptKey, ObservationPhase,
-    ObservationSnapshot, SessionId, StepKey, TextSegment, ToolResultOutcome, TurnId, TurnRequest,
-    TurnSummary,
+    LocalState, LocalTurn, LocalUpdate, MaterialSummary, ModelAttemptKey, NoticeLevel,
+    ObservationPhase, ObservationSnapshot, PublicTurnOutcome, SessionId, StepKey, TextSegment,
+    ToolResultOutcome, TurnId, TurnRequest, TurnSummary,
 };
 
 const FRAME: Duration = Duration::from_millis(33);
-
-/// Dock 上 Warn / Error 两个非 Prompt 状态的严重级。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DockSeverity {
-    Warn,
-    Error,
-}
-
-/// 状态事件的展示位置：直接进 transcript，或暂驻 Dock。
-/// 不变量：`blocks` 中至多存在一个 `StatusPlacement::Dock(_)`。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum StatusPlacement {
-    Transcript,
-    Dock(DockSeverity),
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Block {
@@ -69,10 +62,17 @@ pub(crate) enum Block {
         state: ToolState,
         source: ToolSource,
     },
-    Status {
-        kind: StatusKind,
-        placement: StatusPlacement,
-    },
+    Status(Status),
+}
+
+/// 状态消息只描述自己；是否暂驻 Dock 由 Dock 按等级决定，消息上没有位置字段。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Status {
+    pub(crate) level: NoticeLevel,
+    /// 可多行，以换行分隔。
+    pub(crate) text: String,
+    /// 仅 Turn 结局消息携带所属 Turn 与结局：用于按 TurnId 去重，并决定标题线、符号与配色。
+    pub(crate) closing: Option<(TurnId, PublicTurnOutcome)>,
 }
 /// 仅用于显示合并的来源；事件成功不能覆盖持久 ToolResult 的真实 outcome 或材料。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,16 +92,6 @@ pub(crate) enum ToolState {
     Failed { output_len: usize, error: Option<String> },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[rustfmt::skip]
-pub(crate) enum StatusKind {
-    Summary { turn_id: TurnId, summary: TurnSummary },
-    TurnFailed { reason: String },
-    LlmRetry { attempt: u32, delay_ms: u64, message: String },
-    /// `/help` output and startup banner.
-    Notice(Vec<String>),
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TurnPhase {
     Idle,
@@ -113,9 +103,12 @@ pub(crate) enum TurnPhase {
 pub(crate) struct App {
     pub(crate) ctx: SessionContext,
     pub(crate) blocks: BlockList,
+    /// 启动横幅固定在对话记录最上方。它不是状态消息，也不在 `blocks` 中，
+    /// History 替换与 Dock 都碰不到它；身份只供浏览光标锚定。
+    pub(crate) banner: Option<(BlockId, Vec<String>)>,
     pub(crate) markdown_cache: std::cell::RefCell<crate::markdown::RenderCache>,
     pub(crate) focus: Focus,
-    dock_changed: bool,
+    pub(crate) dock: DockState,
     pub(crate) input: InputBuffer,
     pub(crate) queue: crate::queue::Queue,
     auto_sent_after: std::collections::HashSet<TurnId>,
@@ -157,9 +150,10 @@ impl App {
             loaded_user_count: ctx.session_id.is_none().then_some(0),
             ctx,
             blocks: BlockList::default(),
+            banner: None,
             markdown_cache: Default::default(),
             focus: Focus::Dock,
-            dock_changed: false,
+            dock: DockState::default(),
             input: InputBuffer::new(),
             queue: Default::default(),
             auto_sent_after: Default::default(),
@@ -207,7 +201,7 @@ impl App {
             _ => {}
         }
         // 快照可能比事件窗口领先一个提交；已装入节点的尝试不再重建临时块。
-        // 请求错误是 Dock 诊断而非正文，最后一次错误可能晚于关闭快照到达，不受此过滤。
+        // 重试提示是状态消息而非正文，可能晚于关闭快照到达，不受此过滤。
         let key = match &event {
             TurnEvent::ModelStarted { key, .. }
             | TurnEvent::TokenDelta { key, .. }
@@ -257,7 +251,7 @@ impl App {
             | TurnEvent::TurnFailed { turn, summary, .. }
             | TurnEvent::TurnCancelled { turn, summary, .. } => {
                 self.fail_running_tools("turn ended before tool completion");
-                self.show_summary(turn.turn_id, summary);
+                self.show_summary(turn.turn_id, summary, true);
                 self.phase = TurnPhase::Idle;
             }
             TurnEvent::LlmRetry {
@@ -270,14 +264,7 @@ impl App {
                     ordinal: key.model_step_ordinal,
                 });
                 self.attempt = None;
-                self.push_dock_status(
-                    StatusKind::LlmRetry {
-                        attempt: key.attempt_ordinal,
-                        delay_ms,
-                        message: notice.text,
-                    },
-                    DockSeverity::Warn,
-                );
+                self.push_status(retry_status(key.attempt_ordinal, delay_ms, notice));
             }
             TurnEvent::StepClosed { .. } => {} // 实际正文到达前保留临时块。
             TurnEvent::TurnStarted { turn, .. } => self.ctx.session_id = Some(turn.session_id),
@@ -322,7 +309,7 @@ impl App {
                     Block::UserTurn(..) => removing = false,
                     _ => {}
                 }
-                !removing || matches!(entry.block, Block::Status { .. })
+                !removing || matches!(entry.block, Block::Status(_))
             }));
     }
 
@@ -401,9 +388,8 @@ impl App {
                     self.viewport.reveal(row);
                 }
             }
-            KeyAction::Insert(' ') if self.dock_status().is_some() => self.release_dock_status(),
-            KeyAction::Insert(_) | KeyAction::ModifiedSpace | KeyAction::Paste(_)
-                if self.dock_status().is_some() => {}
+            // 焦点在对话记录时暂驻消息不阻断其余按键，但无修饰 Space 仍释放它。
+            KeyAction::Insert(' ') if self.dock.message_id().is_some() => self.dock.release(),
             action if matches!(self.focus, Focus::Transcript(_)) => match action {
                 KeyAction::Submit => {
                     if let Focus::Transcript(cursor) = self.focus {
@@ -461,7 +447,8 @@ impl App {
             },
             action => match Dock::new(self).route(action) {
                 DockIntent::Submit => return self.submit(),
-                DockIntent::ReleaseStatus => self.release_dock_status(),
+                DockIntent::ReleaseStatus => self.dock.release(),
+                DockIntent::ClosePanel => self.dock.close_panel(),
                 DockIntent::None => {}
                 DockIntent::Edit(action) => match action {
                     KeyAction::Clear => self.input.clear(),
@@ -531,7 +518,7 @@ impl App {
         match input {
             "/quit" | "/exit" | "/q" => { self.should_quit = true; true }
             "/reconnect" => { self.reconnect_requested = true; true }
-            "/help" | "/?" => { self.push_status(StatusKind::Notice(help_lines(self.kitty_keyboard))); true }
+            "/help" | "/?" => { self.dock.open_panel(Panel { title: "HELP", lines: help_lines(self.kitty_keyboard) }); true }
             _ => false,
         }
     }
@@ -544,8 +531,8 @@ impl App {
             Focus::Transcript(cursor) => cursor.row.saturating_sub(self.viewport.scroll()),
             Focus::Dock => 0,
         };
-        // 合同只要求浏览时 Warn/Error 不动视图；焦点在 Dock 且跟随时仍贴底，最新内容不被遮住。
-        if std::mem::take(&mut self.dock_changed) && matches!(self.focus, Focus::Transcript(_)) {
+        // 合同只要求浏览时 Dock 变化不动视图；焦点在 Dock 且跟随时仍贴底，最新内容不被遮住。
+        if self.dock.take_changed() && matches!(self.focus, Focus::Transcript(_)) {
             self.viewport.on_dock_changed(
                 transcript.lines.len(),
                 self.transcript_height(transcript.lines.len()),
@@ -587,14 +574,7 @@ impl App {
         transcript
     }
 
-    pub(crate) fn apply_stream_idle_timeout(&mut self) {
-        self.connection_lost(format!(
-            "观察 {}s 无增量；执行状态未知，/reconnect 重连",
-            lattice_api::STREAM_IDLE_TIMEOUT_SECS
-        ));
-    }
-
-    fn connection_lost(&mut self, reason: String) {
+    fn connection_lost(&mut self, cause: &ConnectionStatus) {
         self.queue.pause();
         self.connected = false;
         for block in self.blocks.iter_mut() {
@@ -606,7 +586,7 @@ impl App {
                 *state = ToolState::Unknown;
             }
         }
-        self.push_status(StatusKind::Notice(vec![reason]));
+        self.push_status(observation_lost_status(cause));
     }
 
     fn apply_handoff(&mut self, report: DetachReport) {
@@ -652,7 +632,7 @@ impl App {
             turn.summary = None;
         }
         for line in detach_lines(report) {
-            self.notice_once(format!("历史交接：{line}"));
+            self.notice_once(handoff_status(&line));
         }
     }
 
@@ -686,12 +666,7 @@ impl App {
                     self.replace_history(crate::session::history_blocks(*history))
                 }
                 Ok(_) => {}
-                Err(error) => self.push_status(StatusKind::Notice(vec![format!(
-                    "{}持久正文不可用；此次内容未验证，/reconnect 重载：{:?}：{}",
-                    if stale { "旧切点" } else { "" },
-                    error.context,
-                    error.error.message
-                )])),
+                Err(error) => self.push_status(history_unavailable_status(stale, &error)),
             },
             LocalUpdate::Finished { generation, .. } => {
                 if generation == self.generation
@@ -745,16 +720,13 @@ impl App {
                     self.delivered_submissions.insert(turn_id);
                     // 接受由助手标题线表达，不另写接受行；找回、确认未知等其余结果照常显示。
                     if !matches!(acceptance, Acceptance::Accepted { .. }) {
-                        self.push_status(StatusKind::Notice(vec![submission_notice(&acceptance)]));
+                        self.push_status(submission_status(&acceptance));
                     }
                 }
                 Err(error) => {
                     self.delivered_submissions.insert(turn_id);
                     self.reject_submission(turn_id);
-                    self.push_status(StatusKind::Notice(vec![format!(
-                        "请求 {turn_id} 被拒绝或回执失败：{}",
-                        error.message
-                    )]));
+                    self.push_status(rejected_status(turn_id, &error));
                 }
             },
             LocalUpdate::SubmissionUnknown { turn_id, error } => {
@@ -762,16 +734,11 @@ impl App {
                 if self.queue.release(turn_id) {
                     self.submitted = None;
                 }
-                self.push_status(StatusKind::Notice(vec![format!(
-                    "提交结果未知：{turn_id}；继续观察同一请求，不自动重发"
-                )]));
-                if let Some(error) = error {
-                    self.push_status(StatusKind::Notice(vec![error.message]));
-                }
+                self.push_status(submission_unknown_status(turn_id, error.as_ref()));
             }
             LocalUpdate::NotSubmitted { turn_id, .. } => {
                 self.reject_submission(turn_id);
-                self.push_status(StatusKind::Notice(vec![not_submitted_notice(turn_id)]));
+                self.push_status(not_submitted_status(turn_id));
             }
             LocalUpdate::Cancel {
                 turn_id,
@@ -779,27 +746,19 @@ impl App {
                 error,
             } => {
                 self.cancel_status = Some(status);
-                self.push_status(StatusKind::Notice(vec![format!(
-                    "{}：{turn_id}",
-                    cancel_message(status)
-                )]));
-                if let Some(error) = error {
-                    self.push_status(StatusKind::Notice(vec![format!(
-                        "取消诊断：turn {turn_id}，{:?}：{}",
-                        error.kind, error.message
-                    )]));
-                }
+                self.push_status(cancellation_status(turn_id, status, error.as_ref()));
             }
-            LocalUpdate::Connection(status) => match status {
-                ConnectionStatus::Eof => self.finish_stream(),
-                ConnectionStatus::Idle => self.apply_stream_idle_timeout(),
-                ConnectionStatus::Error(error) => self.connection_lost(error.message),
-            },
+            LocalUpdate::Connection(status) => self.connection_lost(&status),
         }
     }
 
     fn apply_state(&mut self, state: LocalState) {
         let view = &state.view;
+        // 要在下面改写 current_turn 之前判断：本进程提交过或看着它运行过的 Turn，结局才是新消息。
+        let watched = view.selected_turn.as_ref().is_some_and(|turn| {
+            self.current_turn == Some(turn.turn_id)
+                || self.delivered_submissions.contains(&turn.turn_id)
+        });
         let observed = view
             .selected_turn
             .as_ref()
@@ -835,22 +794,15 @@ impl App {
             self.current_turn = view.session.active_turn;
             self.phase = TurnPhase::Idle;
             self.fail_running_tools("turn ended before tool completion");
-            self.show_summary(turn.turn_id, summary.clone());
+            self.show_summary(turn.turn_id, summary.clone(), watched);
         }
         if let Some(id) = view.session.active_turn
             && !view.owned
         {
-            self.notice_once(format!(
-                "pending Turn {id}；无 live Owner；发送新消息前后台会自动关闭崩溃遗留任务"
-            ));
+            self.notice_once(orphaned_turn_status(id));
         }
         if let Some(error) = &state.error {
-            self.push_dock_status(
-                StatusKind::TurnFailed {
-                    reason: error.message.clone(),
-                },
-                DockSeverity::Error,
-            );
+            self.push_status(observation_diagnostic_status(error));
         }
         self.state = Some(state);
     }
@@ -866,24 +818,25 @@ impl App {
         }
     }
 
-    fn notice_once(&mut self, message: String) {
-        let kind = StatusKind::Notice(vec![message]);
+    fn notice_once(&mut self, status: Status) {
         if !self
             .blocks
             .iter()
-            .any(|block| matches!(block, Block::Status { kind:known, .. } if *known == kind))
+            .any(|block| matches!(block, Block::Status(known) if *known == status))
         {
-            self.push_status(kind);
+            self.push_status(status);
         }
     }
 
     fn summary_shown(&self, turn_id: TurnId) -> bool {
         self.blocks.iter().any(|block| {
-            matches!(block, Block::Status { kind: StatusKind::Summary { turn_id: id, .. }, .. } if *id == turn_id)
+            matches!(block, Block::Status(Status { closing: Some((id, _)), .. }) if *id == turn_id)
         })
     }
 
-    fn show_summary(&mut self, turn_id: TurnId, summary: TurnSummary) {
+    /// `watched` 表示本进程提交过或看着它运行过这个 Turn：它的结局是新消息，交给 Dock。
+    /// 重新打开 Session 时带出的旧结局只是历史，直接进对话记录，不打断输入。
+    fn show_summary(&mut self, turn_id: TurnId, summary: TurnSummary, watched: bool) {
         self.closed_turns.insert(turn_id);
         if summary.outcome != lattice_api::local::PublicTurnOutcome::Completed {
             self.queue.pause();
@@ -891,7 +844,12 @@ impl App {
         if self.summary_shown(turn_id) {
             return;
         }
-        self.push_status(StatusKind::Summary { turn_id, summary });
+        let status = closing_status(turn_id, summary);
+        if watched {
+            self.push_status(status);
+        } else {
+            self.blocks.push(Block::Status(status));
+        }
     }
 
     fn reset_display(&mut self, view: &ObservationSnapshot) {
@@ -1061,7 +1019,7 @@ impl App {
             {
                 continue;
             }
-            if matches!(block, Block::Status { .. }) {
+            if matches!(block, Block::Status(_)) {
                 pending.push(entry);
             } else if matches!(block, Block::Step(_) | Block::UserTurn(..)) {
                 if let Some(start) = start_of(block) {
@@ -1091,10 +1049,15 @@ impl App {
         );
         // 回退到其他位置后，旧节点在新历史中的顺序可能与原来不同；稳定排序保持同一位置上提示的先后。
         inserts.sort_by_key(|(at, _)| *at);
+        // 内容相同的提示只留一份；Dock 暂驻的那条按身份保留，不因与已释放的提示同文而随 History 消失。
+        let parked = self.dock.message_id();
+        let duplicate = |result: &[IdentifiedBlock], status: &IdentifiedBlock| {
+            parked != Some(status.id) && result.iter().any(|known| known.block == status.block)
+        };
         let mut inserts = inserts.into_iter().peekable();
         for (index, entry) in blocks.into_iter().enumerate() {
             while let Some((_, status)) = inserts.next_if(|(at, _)| *at == index) {
-                if !result.iter().any(|known| known.block == status.block) {
+                if !duplicate(&result, &status) {
                     result.push(status);
                 }
             }
@@ -1102,9 +1065,7 @@ impl App {
         }
         self.durable_len = result.len();
         for entry in tail {
-            if !(matches!(entry.block, Block::Status { .. })
-                && result.iter().any(|known| known.block == entry.block))
-            {
+            if !(matches!(entry.block, Block::Status(_)) && duplicate(&result, &entry)) {
                 result.push(entry);
             }
         }
@@ -1129,7 +1090,7 @@ impl App {
     }
 
     fn finish_stream(&mut self) {
-        self.connection_lost("观察连接结束；不代表 Turn 已关闭，/reconnect 重连".into());
+        self.connection_lost(&ConnectionStatus::Eof);
     }
 
     fn expire_ctrl_c_notice(&mut self, now: Instant) -> bool {
@@ -1142,50 +1103,18 @@ impl App {
         expired
     }
 
-    /// 当前 Dock 状态；`blocks` 中至多存在一个 `StatusPlacement::Dock(_)`，
-    /// 推导时直接取唯一项，不做 `rev()` 兜底。
-    pub(crate) fn dock_status(&self) -> Option<(&StatusKind, DockSeverity)> {
-        self.blocks.iter().find_map(|block| match block {
-            Block::Status {
-                kind,
-                placement: StatusPlacement::Dock(severity),
-            } => Some((kind, *severity)),
-            _ => None,
-        })
-    }
-
-    /// 直接进 transcript。
-    fn push_status(&mut self, kind: StatusKind) {
-        self.blocks.push(Block::Status {
-            kind,
-            placement: StatusPlacement::Transcript,
+    /// 新到状态消息的唯一入口：消息按时间位置进入对话记录，是否暂驻由 Dock 自己决定。
+    fn push_status(&mut self, status: Status) {
+        let id = self.blocks.allocate_id();
+        self.dock.offer(id, &status);
+        self.blocks.entries.push(IdentifiedBlock {
+            id,
+            block: Block::Status(status),
         });
     }
 
-    /// 先把当前 Dock status 的 placement 改回 `Transcript`，再以
-    /// `Dock(severity)` 追加新 status。turnover 全部在内部完成。
-    fn push_dock_status(&mut self, kind: StatusKind, severity: DockSeverity) {
-        self.dock_changed = true;
-        self.release_dock_status();
-        self.blocks.push(Block::Status {
-            kind,
-            placement: StatusPlacement::Dock(severity),
-        });
-    }
-
-    /// WARN / ERROR 状态下把当前 Dock status 释放回 transcript；它会在
-    /// 原本的时间位置出现且只出现一次。无活动状态时是空操作。
-    fn release_dock_status(&mut self) {
-        for block in self.blocks.iter_mut() {
-            if let Block::Status {
-                placement: placement @ StatusPlacement::Dock(_),
-                ..
-            } = block
-            {
-                *placement = StatusPlacement::Transcript;
-                self.dock_changed = true;
-            }
-        }
+    pub(crate) fn show_banner(&mut self) {
+        self.banner = Some((self.blocks.allocate_id(), startup_banner()));
     }
 
     fn submit(&mut self) -> Option<String> {
@@ -1272,7 +1201,7 @@ impl App {
         if self.current_turn.is_some() {
             self.cancel_requested = true;
             self.phase = TurnPhase::Cancelling;
-        } else if self.dock_status().is_none() {
+        } else if self.dock.shows_input() {
             self.input.clear();
         }
     }
@@ -1289,14 +1218,7 @@ impl App {
             .collect();
         let dropped = self.queue.retain_steps(&steps);
         if !dropped.is_empty() {
-            self.push_status(StatusKind::Notice(vec![format!(
-                "锚点 Step 不在当前历史，丢弃评论：{}",
-                dropped
-                    .iter()
-                    .map(|n| format!("#{n}"))
-                    .collect::<Vec<_>>()
-                    .join("、")
-            )]));
+            self.push_status(discarded_comments_status(&dropped));
         }
     }
 
@@ -1410,7 +1332,7 @@ pub(crate) async fn run_app(
     enable_terminal_modes(&mut std::io::stdout(), kitty)?;
 
     let mut app = App::new(ctx, kitty, &options.session_dir);
-    app.push_status(StatusKind::Notice(startup_notice()));
+    app.show_banner();
     let mut exit = run_loop(
         &options,
         &mut app,
@@ -1544,7 +1466,7 @@ fn handle_input_event(app: &mut App, event: Event) -> Option<String> {
             let action = if is_ctrl_c(&key) {
                 ctrl_c_action(app)
             } else {
-                resolve_key(key, app.kitty_keyboard, app.input.is_empty() && matches!(app.focus, Focus::Dock) && app.dock_status().is_none())
+                resolve_key(key, app.kitty_keyboard, app.input.is_empty() && matches!(app.focus, Focus::Dock) && app.dock.shows_input())
             };
             app.apply_action(action)
         }
@@ -1600,24 +1522,25 @@ fn begin_turn(
 fn help_lines(kitty: bool) -> Vec<String> {
     let nl = if kitty { "Shift+Enter  换行" } else { "Alt+Enter  换行" };
     vec![
-        "/help  this message".into(),
+        "/help  显示本帮助".into(),
         "/reconnect  只重连观察，不恢复或重新提交".into(),
-        "/quit  exit (also Ctrl+D on empty input)".into(),
-        "Esc  清空输入".into(),
+        "/quit  退出（输入为空时也可按 Ctrl+D）".into(),
+        "Esc  清空输入；关闭本面板".into(),
+        "Space  关闭警告或错误，移入对话记录".into(),
         "Ctrl+C  取消运行中 Turn；空闲清空输入；两秒内再按退出".into(),
         "Ctrl+↑/↓  输入历史".into(),
-        "Enter  submit".into(),
+        "Enter  提交".into(),
         nl.into(),
     ]
 }
 
 #[rustfmt::skip]
 /// session 与 agent 由状态行（或侧栏）显示并随接受更新，这里不重复。
-fn startup_notice() -> Vec<String> {
+fn startup_banner() -> Vec<String> {
     vec![
         "LATTICE".into(),
-        "/help  show commands".into(),
-        "/quit  exit".into(),
+        "/help  显示命令".into(),
+        "/quit  退出".into(),
         "/reconnect  重新读取状态并观察".into(),
     ]
 }
@@ -1772,12 +1695,12 @@ mod tests {
         };
         let user_id = body_id(&app, "prompt");
         let stream_id = body_id(&app, "stream");
-        app.push_status(StatusKind::Notice(vec!["notice".into()]));
+        app.push_status(status(NoticeLevel::Info, "notice"));
         let status_id = app
             .blocks
             .entries
             .iter()
-            .find(|e| matches!(e.block, Block::Status { .. }))
+            .find(|e| matches!(e.block, Block::Status(_)))
             .unwrap()
             .id;
         let history = |include_second: bool| {
@@ -1898,14 +1821,21 @@ mod tests {
         lattice_api::local::InvocationId::parse(&format!("22222222-2222-4222-8222-{n:012}"))
             .unwrap()
     }
-    fn retry(message: &str) -> TurnEvent {
+    fn retry(level: NoticeLevel, message: &str) -> TurnEvent {
         TurnEvent::LlmRetry {
             key: attempt(),
             delay_ms: 100,
             notice: lattice_api::local::Notice {
-                level: lattice_api::local::NoticeLevel::Warn,
+                level,
                 text: message.into(),
             },
+        }
+    }
+    fn status(level: NoticeLevel, text: &str) -> Status {
+        Status {
+            level,
+            text: text.into(),
+            closing: None,
         }
     }
     fn start_tool(app: &mut App, name: &str) {
@@ -2013,10 +1943,10 @@ mod tests {
         assert!(app.should_quit && app.cancel_requested);
         assert!(!app.blocks.iter().any(|block| matches!(
             block,
-            Block::Status {
-                kind: StatusKind::Summary { .. },
+            Block::Status(Status {
+                closing: Some(_),
                 ..
-            }
+            })
         )));
     }
 
@@ -2045,64 +1975,73 @@ mod tests {
         let mut app = test_app();
         app.phase = TurnPhase::Streaming;
         start_tool(&mut app, "fetch.web");
-        app.apply_stream_idle_timeout();
+        app.apply_update(LocalUpdate::Connection(ConnectionStatus::Idle));
         assert_eq!(app.phase, TurnPhase::Streaming);
-        assert!(!app.blocks.iter().any(|block| matches!(
-            block,
-            Block::Status {
-                kind: StatusKind::TurnFailed { .. },
-                ..
-            }
-        )));
+        // 无增量只是观察中断：一条 Warn，不是错误，也不是 Turn 结局。
+        let statuses = app
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                Block::Status(status) => Some(status),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            matches!(
+                statuses.as_slice(),
+                [Status {
+                    level: NoticeLevel::Warn,
+                    closing: None,
+                    ..
+                }]
+            ),
+            "{statuses:?}"
+        );
     }
 
-    /// Warn / Error 的 Dock 生命周期：替换（含同级与 ERROR→WARN）和释放都不丢状态，
-    /// 释放后回到原本的时间位置且只出现一次；草稿不受影响。
+    /// 消息之间不叠：替换（Warn→Warn、Warn→Error、Error→Warn）把旧消息落回对话记录的
+    /// 原时间位置，释放后每条恰好出现一次；Info 不进 Dock；草稿不受影响。
     #[test]
-    fn dock_lifecycle_keeps_transcript_order_and_draft() {
+    fn dock_replacement_and_release_keep_transcript_order_and_draft() {
         let mut app = test_app();
         app.input.set_text("draft");
-        assert!(app.dock_status().is_none());
+        assert!(app.dock.shows_input());
+        let docked = |app: &App| {
+            app.dock
+                .message(&app.blocks)
+                .map(|status| (status.level.clone(), status.text.clone()))
+        };
+        let docked_is = |app: &App, level: NoticeLevel, marker: &str| {
+            docked(app).is_some_and(|(known, text)| known == level && text.contains(marker))
+        };
 
-        // WARN → WARN：旧状态原位释放，新状态暂驻 Dock。
-        app.apply_turn_event(retry("retry-0"));
-        app.apply_turn_event(retry("retry-a"));
-        let (kind, severity) = app.dock_status().expect("retry 应暂驻 Dock");
-        assert!(matches!(kind, StatusKind::LlmRetry { message, .. } if message == "retry-a"));
-        assert_eq!(severity, DockSeverity::Warn);
+        app.apply_turn_event(retry(NoticeLevel::Warn, "retry-0"));
+        app.apply_turn_event(retry(NoticeLevel::Warn, "retry-a"));
+        assert!(docked_is(&app, NoticeLevel::Warn, "retry-a"));
         let text = transcript_text(&app, 78);
         assert!(text.contains("retry-0") && !text.contains("retry-a"));
 
-        // INFO 类状态直接进 transcript，Dock 不受影响。
-        app.push_status(StatusKind::Notice(vec!["info-i".into()]));
+        app.push_status(status(NoticeLevel::Info, "info-i"));
+        assert!(
+            docked_is(&app, NoticeLevel::Warn, "retry-a"),
+            "Info 不进 Dock"
+        );
         assert!(transcript_text(&app, 78).contains("info-i"));
 
-        // WARN → ERROR，再 ERROR → WARN：每次替换都把旧状态释放到原位。
-        app.push_dock_status(
-            StatusKind::TurnFailed {
-                reason: "commit-b".into(),
-            },
-            DockSeverity::Error,
-        );
-        assert!(matches!(
-            app.dock_status(),
-            Some((StatusKind::TurnFailed { reason }, DockSeverity::Error)) if reason == "commit-b"
-        ));
-        app.apply_turn_event(retry("retry-c"));
-        assert!(matches!(
-            app.dock_status(),
-            Some((StatusKind::LlmRetry { message, .. }, DockSeverity::Warn)) if message == "retry-c"
-        ));
-        assert_eq!(dock_placement_count(&app), 1, "至多一个 Dock placement");
+        app.push_status(status(NoticeLevel::Error, "commit-b"));
+        assert!(docked_is(&app, NoticeLevel::Error, "commit-b"));
+        assert!(transcript_text(&app, 78).contains("retry-a"));
+        app.apply_turn_event(retry(NoticeLevel::Warn, "retry-c"));
+        assert!(docked_is(&app, NoticeLevel::Warn, "retry-c"));
+        assert!(transcript_text(&app, 78).contains("commit-b"));
 
-        // Space：释放当前状态，Space 不进入输入，草稿不变。
+        // Space：释放当前消息，Space 不进入输入，草稿不变。
         assert!(app.apply_action(KeyAction::Insert(' ')).is_none());
-        assert!(app.dock_status().is_none());
+        assert!(app.dock.shows_input());
         assert_eq!(app.input.text(), "draft");
         assert_eq!(app.phase, TurnPhase::Idle);
-        assert_eq!(dock_placement_count(&app), 0);
 
-        // 每条状态恰好出现一次，且保持到达顺序。
+        // 每条消息恰好出现一次，且保持到达顺序。
         let lines = transcript_lines(&app, 78)
             .iter()
             .map(ToString::to_string)
@@ -2125,18 +2064,206 @@ mod tests {
         assert_eq!(order, sorted, "保持到达顺序");
     }
 
+    /// 重试提示的等级取自后端的 notice，不由前端写死；外壳为中文，诊断原文不动。
+    #[test]
+    fn llm_retry_uses_the_backend_notice_level() {
+        for (level, docked) in [
+            (NoticeLevel::Info, false),
+            (NoticeLevel::Warn, true),
+            (NoticeLevel::Error, true),
+        ] {
+            let mut app = test_app();
+            app.apply_turn_event(retry(level.clone(), "HTTP 429 rate_limit_exceeded"));
+            let pushed = app
+                .blocks
+                .iter()
+                .find_map(|block| match block {
+                    Block::Status(status) => Some(status.clone()),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(pushed.level, level);
+            assert_eq!(
+                pushed.text,
+                "第 2 次请求失败，100 ms 后重试：HTTP 429 rate_limit_exceeded"
+            );
+            assert_eq!(
+                app.dock.message(&app.blocks),
+                docked.then_some(&pushed),
+                "{level:?}"
+            );
+        }
+    }
+
+    fn dock_title(app: &mut App) -> &'static str {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::view::draw(frame, app))
+            .unwrap();
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        let shown = ["USER", "HELP", "WARN", "ERROR"]
+            .into_iter()
+            .filter(|title| screen.contains(&format!("── {title} ─")))
+            .collect::<Vec<_>>();
+        assert_eq!(shown.len(), 1, "Dock 只显示栈顶：{shown:?}");
+        shown[0]
+    }
+
+    /// Dock 模块栈的四种状态与两种按键：栈顶是面板时只有 Esc 关闭，栈顶是消息时只有
+    /// 无修饰 Space 释放；另一种按键不动栈，也不改不可见的输入。
+    #[test]
+    fn dock_stack_shows_the_top_module_and_routes_space_and_esc() {
+        #[derive(Debug)]
+        enum Step {
+            Help,
+            Notice(NoticeLevel),
+            Space,
+            Esc,
+        }
+        use Step::*;
+        let cases: [(&str, Vec<(Step, &str)>); 4] = [
+            ("输入区", vec![(Notice(NoticeLevel::Info), "USER")]),
+            (
+                "输入区、面板",
+                vec![(Help, "HELP"), (Space, "HELP"), (Esc, "USER")],
+            ),
+            (
+                "输入区、消息",
+                vec![
+                    (Notice(NoticeLevel::Warn), "WARN"),
+                    (Esc, "WARN"),
+                    (Notice(NoticeLevel::Error), "ERROR"),
+                    (Esc, "ERROR"),
+                    (Space, "USER"),
+                ],
+            ),
+            (
+                "输入区、面板、消息",
+                vec![
+                    (Help, "HELP"),
+                    (Notice(NoticeLevel::Warn), "WARN"),
+                    (Esc, "WARN"),
+                    (Space, "HELP"),
+                    (Space, "HELP"),
+                    (Esc, "USER"),
+                ],
+            ),
+        ];
+        let press = |app: &mut App, code: KeyCode| {
+            handle_input_event(app, Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+        };
+        for (name, steps) in cases {
+            let mut app = test_app();
+            app.input.set_text("draft");
+            assert_eq!(dock_title(&mut app), "USER", "{name}");
+            for (index, (step, top)) in steps.into_iter().enumerate() {
+                let label = format!("{name} 第 {index} 步 {step:?}");
+                let draft = app.input.text();
+                // `/help` 作为本地指令清空输入；其余步骤都不得改动输入缓冲。
+                let input = match step {
+                    Help => {
+                        app.input.set_text("/help");
+                        assert!(app.apply_action(KeyAction::Submit).is_none());
+                        String::new()
+                    }
+                    Notice(level) => {
+                        app.push_status(status(level, "status-marker"));
+                        draft
+                    }
+                    Space => {
+                        press(&mut app, KeyCode::Char(' '));
+                        draft
+                    }
+                    Esc => {
+                        press(&mut app, KeyCode::Esc);
+                        draft
+                    }
+                };
+                assert_eq!(app.input.text(), input, "{label}");
+                assert_eq!(dock_title(&mut app), top, "{label}");
+                assert_eq!(app.dock.shows_input(), top == "USER", "{label}");
+                assert_eq!(app.focus, Focus::Dock, "{label}");
+            }
+            // 面板不是状态消息：关闭后对话记录里没有帮助文字。
+            assert!(!transcript_text(&app, 78).contains("/reconnect"), "{name}");
+            // 回到输入区后恢复普通编辑。
+            let draft = app.input.text();
+            press(&mut app, KeyCode::Char('x'));
+            assert_eq!(app.input.text(), format!("{draft}x"), "{name}");
+        }
+    }
+
+    /// 启动横幅固定在对话记录最上方：History 装入与替换都不把它当作状态消息重新排位。
+    #[test]
+    fn startup_banner_stays_on_top_across_history_load_and_replacement() {
+        let mut app = test_app();
+        app.show_banner();
+        app.push_status(status(NoticeLevel::Info, "before-history"));
+        let turn = |n: u32| TurnId::parse(&format!("33333333-3333-4333-8333-{n:012}")).unwrap();
+        let history = |turns: u32| {
+            (1..=turns)
+                .flat_map(|n| {
+                    [
+                        Block::AgentName("agent".into()),
+                        Block::UserTurn(turn(n), std::num::NonZeroUsize::new(n as usize).unwrap()),
+                        Block::User(format!("prompt-{n}")),
+                        Block::Step(StepKey {
+                            turn_id: turn(n),
+                            ordinal: 0,
+                        }),
+                        Block::Assistant(format!("answer-{n}")),
+                    ]
+                })
+                .collect::<Vec<_>>()
+        };
+        for turns in [1, 2, 1] {
+            app.replace_history(history(turns));
+            let lines = transcript_lines(&app, 78)
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                lines.iter().take(4).map(String::as_str).collect::<Vec<_>>(),
+                [
+                    "LATTICE",
+                    "/help  显示命令",
+                    "/quit  退出",
+                    "/reconnect  重新读取状态并观察"
+                ],
+                "{turns}"
+            );
+            assert_eq!(
+                lines.iter().filter(|line| line.contains("LATTICE")).count(),
+                1
+            );
+            // 它之后没有节点的状态消息留在末尾；横幅若仍是状态消息，会与它一起落到历史之后。
+            let row = |marker: &str| lines.iter().position(|line| line.contains(marker)).unwrap();
+            assert!(row("prompt-1") < row("before-history"), "{lines:?}");
+        }
+        assert_eq!(
+            app.blocks
+                .iter()
+                .filter(|block| matches!(block, Block::Status(_)))
+                .count(),
+            1,
+            "横幅不在状态消息之列"
+        );
+    }
+
     /// §14.3：WARN / ERROR 下屏蔽不可见输入编辑，全局动作照常。
     #[test]
     fn dock_status_blocks_invisible_input_but_keeps_globals() {
-        for severity in [DockSeverity::Warn, DockSeverity::Error] {
+        for level in [NoticeLevel::Warn, NoticeLevel::Error] {
             let mut app = test_app();
             app.input.set_text("draft");
-            app.push_dock_status(
-                StatusKind::TurnFailed {
-                    reason: "blocked".into(),
-                },
-                severity,
-            );
+            app.push_status(status(level, "blocked"));
             for code in [
                 KeyCode::Char('x'),
                 KeyCode::Esc,
@@ -2179,7 +2306,7 @@ mod tests {
             handle_input_event(&mut app, Event::Paste("hidden\npaste".into()));
             assert_eq!(app.input.text(), "draft");
             assert_eq!(app.input.cursor, (0, 5));
-            assert!(app.dock_status().is_some());
+            assert!(app.dock.message_id().is_some());
             handle_input_event(
                 &mut app,
                 Event::Key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE)),
@@ -2219,7 +2346,7 @@ mod tests {
                 &mut app,
                 Event::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)),
             );
-            assert!(app.dock_status().is_none());
+            assert!(app.dock.shows_input());
             assert_eq!(app.input.text(), "draft", "释放键被消费");
             handle_input_event(
                 &mut app,
@@ -2240,20 +2367,5 @@ mod tests {
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join("\n")
-    }
-
-    fn dock_placement_count(app: &App) -> usize {
-        app.blocks
-            .iter()
-            .filter(|block| {
-                matches!(
-                    block,
-                    Block::Status {
-                        placement: StatusPlacement::Dock(_),
-                        ..
-                    }
-                )
-            })
-            .count()
     }
 }

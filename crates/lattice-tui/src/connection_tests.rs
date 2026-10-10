@@ -50,7 +50,11 @@ fn new_display_has_no_session_until_acceptance() {
 
 #[test]
 fn summary_survives_slow_failed_history_and_is_not_duplicated() {
-    for outcome in ["completed", "failed", "cancelled"] {
+    for (outcome, shown) in [
+        ("completed", "完成"),
+        ("failed", "失败：provider failure"),
+        ("cancelled", "已取消：cancelled by user"),
+    ] {
         let mut app = app();
         let id = lattice_api::local::new_turn_id();
         let key = lattice_api::local::ModelAttemptKey {
@@ -96,17 +100,29 @@ fn summary_survives_slow_failed_history_and_is_not_duplicated() {
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(text.contains(outcome), "{text}");
-        assert!(text.contains("正文不可用"), "{text}");
+        assert!(text.contains(&format!("turn {id} {shown}")), "{text}");
+        // 读取失败是最新的 Warn，暂驻 Dock；此前的观察诊断与结局已落回对话记录。
+        assert_eq!(
+            app.dock.message(&app.blocks),
+            Some(&Status {
+                level: NoticeLevel::Warn,
+                text:
+                    "持久正文不可用；此次内容未验证，/reconnect 重载：读取任务：store unavailable"
+                        .into(),
+                closing: None,
+            })
+        );
+        assert!(!text.contains("正文不可用"), "{text}");
+        assert!(text.contains("观察诊断：store unavailable"), "{text}");
         assert_eq!(
             app.blocks
                 .iter()
                 .filter(|b| matches!(
                     b,
-                    Block::Status {
-                        kind: StatusKind::Summary { .. },
+                    Block::Status(Status {
+                        closing: Some(_),
                         ..
-                    }
+                    })
                 ))
                 .count(),
             1
@@ -142,9 +158,9 @@ fn retry_replaces_only_its_attempt_and_stale_history_cannot_replace_display() {
             .any(|block| { matches!(block, Block::Assistant(text) if text == "first attempt") })
     );
     assert!(matches!(
-        app.dock_status(),
-        Some((StatusKind::LlmRetry { message, .. }, DockSeverity::Warn))
-            if message == "retry diagnostic"
+        app.dock.message(&app.blocks),
+        Some(Status { level: NoticeLevel::Warn, text, closing: None })
+            if text.ends_with("：retry diagnostic")
     ));
     let next = lattice_api::local::ModelAttemptKey {
         attempt_ordinal: 2,
@@ -298,9 +314,9 @@ fn loaded_step_and_terminal_tool_cannot_be_overwritten_by_late_events() {
     assert_eq!(
         app.blocks
             .iter()
-            .filter(|block| matches!(block, Block::Status {
-                kind: StatusKind::Summary { summary, .. }, ..
-            } if summary.notice.as_ref().is_some_and(|notice| notice.text == "late failure")))
+            .filter(|block| matches!(block, Block::Status(Status {
+                closing: Some(_), text, ..
+            }) if text.ends_with("：late failure")))
             .count(),
         1
     );
@@ -385,4 +401,388 @@ fn hidden_reasoning_does_not_change_text_on_snapshot_or_history_replacement() {
         result: Ok(Box::new(history)),
     });
     assert_eq!((resumed, render(&live)), (expected.clone(), expected));
+}
+
+/// TUI 自己产生的消息：一件事一条消息，等级按消息种类在一处决定，Warn 与 Error 才进 Dock。
+#[test]
+fn own_messages_are_single_and_carry_their_level() {
+    use NoticeLevel::{Error, Info, Warn};
+    type Trigger = Box<dyn FnOnce(&mut App)>;
+    let id = TurnId::parse("11111111-1111-4111-8111-111111111111").unwrap();
+    let turn = || TurnView::from(view(id, "completed").selected_turn.as_ref().unwrap());
+    let update = |update: LocalUpdate| -> Trigger {
+        Box::new(move |app: &mut App| app.apply_update(update))
+    };
+    let cancel = |status: CancelStatus, error: Option<LocalError>| {
+        update(LocalUpdate::Cancel {
+            turn_id: id,
+            status,
+            error,
+        })
+    };
+    let state = |view: ObservationSnapshot, error: Option<LocalError>| {
+        update(LocalUpdate::State {
+            view: Box::new(view),
+            phase: ObservationPhase::NoOwner,
+            error,
+        })
+    };
+    let mut orphan = view(id, "completed");
+    orphan.session.active_turn = Some(id);
+    let report = DetachReport {
+        session_id: None,
+        turn_id: Some(id),
+        submission: None,
+        submission_diagnostic: None,
+        not_submitted: None,
+        history_error: None,
+        cancel: Some(CancelStatus::Taken),
+        cancel_error: None,
+        state: None,
+    };
+    let handoff: Trigger = Box::new(move |app: &mut App| app.apply_handoff(report));
+    let cases: Vec<(&str, NoticeLevel, Trigger, String)> = vec![
+        (
+            "请求被拒绝或回执失败",
+            Error,
+            update(LocalUpdate::Submission {
+                turn_id: id,
+                result: Err(read_error()),
+            }),
+            format!("请求 {id} 被拒绝或回执失败：store unavailable"),
+        ),
+        (
+            "观察诊断",
+            Error,
+            state(view(id, "completed"), Some(read_error())),
+            "观察诊断：store unavailable".into(),
+        ),
+        (
+            "取消诊断",
+            Error,
+            cancel(CancelStatus::Unknown, Some(read_error())),
+            format!(
+                "取消确认未知；请按 TurnId 查询或再次明确取消：{id}\n取消诊断：store unavailable"
+            ),
+        ),
+        (
+            "本地响应异常",
+            Error,
+            update(LocalUpdate::Submission {
+                turn_id: id,
+                result: Ok(Acceptance::NeedsConfiguration {
+                    agent_name: "test".into(),
+                }),
+            }),
+            "本地响应异常".into(),
+        ),
+        (
+            "接受确认未知",
+            Warn,
+            update(LocalUpdate::Submission {
+                turn_id: id,
+                result: Ok(Acceptance::ConfirmationUnknown {
+                    turn_id: id,
+                    session_id: None,
+                }),
+            }),
+            format!("接受确认未知：{id}；保留此 ID 查询，不分配新请求"),
+        ),
+        (
+            "提交结果未知",
+            Warn,
+            update(LocalUpdate::SubmissionUnknown {
+                turn_id: id,
+                error: None,
+            }),
+            format!("提交结果未知：{id}；继续观察同一请求，不自动重发"),
+        ),
+        (
+            "提交结果未知带诊断",
+            Warn,
+            update(LocalUpdate::SubmissionUnknown {
+                turn_id: id,
+                error: Some(read_error()),
+            }),
+            format!("提交结果未知：{id}；继续观察同一请求，不自动重发\nstore unavailable"),
+        ),
+        (
+            "后台未接管本次取消",
+            Warn,
+            cancel(CancelStatus::NotTaken, None),
+            format!("后台未接管本次取消；不表示没有后台工作，请查询原 Turn：{id}"),
+        ),
+        (
+            "取消确认未知",
+            Warn,
+            cancel(CancelStatus::Unknown, None),
+            format!("取消确认未知；请按 TurnId 查询或再次明确取消：{id}"),
+        ),
+        (
+            "持久正文不可用",
+            Warn,
+            update(LocalUpdate::History {
+                anchor: orphan.history.clone(),
+                generation: 1,
+                stale: true,
+                result: Err(lattice_api::local::HistoryReadError {
+                    context: lattice_api::local::HistoryReadContext::Worker,
+                    error: read_error(),
+                }),
+            }),
+            "旧切点持久正文不可用；此次内容未验证，/reconnect 重载：读取任务：store unavailable"
+                .into(),
+        ),
+        (
+            "观察连接结束",
+            Warn,
+            update(LocalUpdate::Connection(ConnectionStatus::Eof)),
+            "观察连接结束；不代表 Turn 已关闭，/reconnect 重连".into(),
+        ),
+        (
+            "观察无增量",
+            Warn,
+            update(LocalUpdate::Connection(ConnectionStatus::Idle)),
+            format!(
+                "观察 {} s 无增量；执行状态未知，/reconnect 重连",
+                lattice_api::STREAM_IDLE_TIMEOUT_SECS
+            ),
+        ),
+        (
+            "观察连接出错",
+            Warn,
+            update(LocalUpdate::Connection(ConnectionStatus::Error(
+                read_error(),
+            ))),
+            "观察连接出错；执行状态未知，/reconnect 重连：store unavailable".into(),
+        ),
+        (
+            "遗留 Turn 无人接管",
+            Warn,
+            state(orphan.clone(), None),
+            format!("遗留 Turn {id} 无人接管；发送新消息前后台会自动关闭崩溃遗留任务"),
+        ),
+        (
+            "找回既有请求",
+            Info,
+            update(LocalUpdate::Submission {
+                turn_id: id,
+                result: Ok(Acceptance::Existing { turn: turn() }),
+            }),
+            format!("找回既有请求：session {SID} turn {id}；未重复执行"),
+        ),
+        (
+            "已请求取消",
+            Info,
+            cancel(CancelStatus::Pending, None),
+            format!("已请求取消；等待后台接管回执：{id}"),
+        ),
+        (
+            "后台已接管取消",
+            Info,
+            cancel(CancelStatus::Taken, None),
+            format!("后台已接管取消；持久终态仍待确认：{id}"),
+        ),
+        (
+            "取消交接已结束",
+            Info,
+            cancel(CancelStatus::Moot, None),
+            format!("本次取消交接已结束；不作用于其他 Turn，已知结果保持：{id}"),
+        ),
+        (
+            "本客户端已停止后续配置提交",
+            Info,
+            update(LocalUpdate::NotSubmitted {
+                turn_id: id,
+                stage: lattice_api::local::NotSubmittedStage::FreezingConfiguration,
+            }),
+            format!("本客户端已停止后续配置提交：turn {id}；不表示该身份全局未执行"),
+        ),
+        (
+            "历史交接",
+            Info,
+            handoff,
+            format!("历史交接：后台已接管取消；持久终态仍待确认：session 未接受 turn {id}"),
+        ),
+    ];
+    for (name, level, trigger, text) in cases {
+        let mut app = app();
+        trigger(&mut app);
+        // Turn 结局是后端给出等级的消息，不计入本表。
+        let pushed = app
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                Block::Status(status) if status.closing.is_none() => Some(status),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            pushed,
+            [&Status {
+                level: level.clone(),
+                text,
+                closing: None,
+            }],
+            "{name}"
+        );
+        assert_eq!(
+            app.dock.message(&app.blocks),
+            (level != Info).then_some(pushed[0]),
+            "{name}"
+        );
+    }
+}
+
+/// 本进程看着结束的 Turn，结局的等级来自 notice：失败是 Error，先暂驻 Dock，释放后在对话记录
+/// 出现一次；完成与取消是 Info，直接进对话记录。重复到达的同一结局不再显示。
+#[test]
+fn turn_closing_follows_the_notice_level() {
+    for (outcome, level, symbol, shown) in [
+        ("completed", NoticeLevel::Info, "✓", "完成"),
+        ("failed", NoticeLevel::Error, "✗", "失败：provider failure"),
+        (
+            "cancelled",
+            NoticeLevel::Info,
+            "✗",
+            "已取消：cancelled by user",
+        ),
+    ] {
+        let mut app = app();
+        let id = lattice_api::local::new_turn_id();
+        app.current_turn = Some(id);
+        let line = format!("{symbol} turn {id} {shown}");
+        let closed = LocalUpdate::State {
+            view: Box::new(view(id, outcome)),
+            phase: ObservationPhase::Finished,
+            error: None,
+        };
+        let rows = |app: &App| {
+            crate::view::transcript_lines(app, 200)
+                .iter()
+                .filter(|row| row.to_string() == line)
+                .count()
+        };
+        app.apply_update(closed.clone());
+        let docked = level == NoticeLevel::Error;
+        assert_eq!(
+            app.dock
+                .message(&app.blocks)
+                .map(|status| status.level.clone()),
+            docked.then_some(level),
+            "{outcome}"
+        );
+        assert_eq!(rows(&app), usize::from(!docked), "{outcome}");
+        if docked {
+            app.apply_action(KeyAction::Insert(' '));
+        }
+        assert!(app.dock.shows_input(), "{outcome}");
+        assert_eq!(rows(&app), 1, "{outcome}");
+        app.apply_update(closed);
+        assert!(app.dock.shows_input(), "{outcome}");
+        assert_eq!(rows(&app), 1, "{outcome}");
+    }
+}
+
+/// 提交时找回的请求早已执行完：回执已让本进程不再把它当作运行中的 Turn，
+/// 但结局仍是这次提交的结果，照常交给 Dock。
+#[test]
+fn closing_of_a_recovered_submission_still_reaches_the_dock() {
+    let mut app = app();
+    let id = lattice_api::local::new_turn_id();
+    let closed = view(id, "failed");
+    app.apply_update(LocalUpdate::Submission {
+        turn_id: id,
+        result: Ok(Acceptance::Existing {
+            turn: TurnView::from(closed.selected_turn.as_ref().unwrap()),
+        }),
+    });
+    assert_eq!(app.current_turn, None);
+    app.apply_update(LocalUpdate::State {
+        view: Box::new(closed),
+        phase: ObservationPhase::Finished,
+        error: None,
+    });
+    assert_eq!(
+        app.dock
+            .message(&app.blocks)
+            .map(|status| status.level.clone()),
+        Some(NoticeLevel::Error)
+    );
+}
+
+/// 退出报告只写给人看的文字：结局用中文词，读取位置用中文说明，不打印内部分类或结构体。
+#[test]
+fn detach_lines_describe_outcome_and_read_context_in_words() {
+    use lattice_api::local::{HistoryCursor, HistoryReadContext, NodeId, NodeRef};
+    let id = lattice_api::local::new_turn_id();
+    let anchor = view(id, "completed").history;
+    for (outcome, closing, context, place) in [
+        (
+            "completed",
+            format!("Turn {id} 完成"),
+            HistoryReadContext::Worker,
+            "读取任务",
+        ),
+        (
+            "failed",
+            format!("Turn {id} 失败：provider failure"),
+            HistoryReadContext::Page {
+                anchor: anchor.clone(),
+                cursor: None,
+            },
+            "分页（首页）",
+        ),
+        (
+            "cancelled",
+            format!("Turn {id} 已取消：cancelled by user"),
+            HistoryReadContext::Page {
+                anchor: anchor.clone(),
+                cursor: Some(HistoryCursor {
+                    anchor: anchor.clone(),
+                    node: NodeId(7),
+                    utf8_offset: 0,
+                }),
+            },
+            "分页（自节点 7 起）",
+        ),
+        (
+            "completed",
+            format!("Turn {id} 完成"),
+            HistoryReadContext::Node {
+                node: NodeRef {
+                    session_id: anchor.session_id,
+                    node: NodeId(9),
+                },
+            },
+            "节点 9",
+        ),
+    ] {
+        let lines = detach_lines(DetachReport {
+            session_id: None,
+            turn_id: Some(id),
+            submission: None,
+            submission_diagnostic: None,
+            not_submitted: None,
+            history_error: Some(lattice_api::local::HistoryReadError {
+                context,
+                error: read_error(),
+            }),
+            cancel: None,
+            cancel_error: Some(read_error()),
+            state: Some(LocalState {
+                view: Box::new(view(id, outcome)),
+                phase: ObservationPhase::Finished,
+                error: None,
+            }),
+        });
+        assert_eq!(
+            lines,
+            [
+                format!("取消诊断：session 未接受 turn {id}：store unavailable"),
+                closing,
+                format!("持久正文不可用：session 未接受 turn {id}，{place}：store unavailable"),
+            ]
+        );
+    }
 }

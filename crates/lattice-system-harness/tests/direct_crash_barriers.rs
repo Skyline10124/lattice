@@ -320,7 +320,7 @@ fn late_successful_history_page_cannot_replace_newer_tui_snapshot() {
             });
             tui.send_line("/reconnect").unwrap();
             tui.wait_for(budget.cap_timeout(spec.step_timeout()), |text| {
-                text.contains("NEW_FINAL_BODY") && text.contains("completed")
+                text.contains("NEW_FINAL_BODY") && text.contains("完成")
             })
             .unwrap();
             let newer = tui
@@ -329,7 +329,7 @@ fn late_successful_history_page_cannot_replace_newer_tui_snapshot() {
             assert!(
                 newer.contains("OLD_STEP_BODY")
                     && newer.contains("NEW_FINAL_BODY")
-                    && newer.contains("completed")
+                    && newer.contains("完成")
             );
             std::fs::write(schedule.join("history_return_2.arm"), b"").unwrap();
             std::fs::write(schedule.join("history_return_2.release"), b"").unwrap();
@@ -343,7 +343,7 @@ fn late_successful_history_page_cannot_replace_newer_tui_snapshot() {
                 .redraw_text(budget.cap_timeout(spec.step_timeout()))
                 .unwrap();
             assert!(
-                after.contains("NEW_FINAL_BODY") && after.contains("completed"),
+                after.contains("NEW_FINAL_BODY") && after.contains("完成"),
                 "{after}"
             );
             assert_eq!(after.matches("OLD_STEP_BODY").count(), 1);
@@ -2092,14 +2092,14 @@ fn history_read_failure_preserves_live_text_and_summary_then_reconnect_clears_er
             let closed = query(&world, TURN);
             assert_eq!(closed["selected_turn"]["summary"]["outcome"], "completed");
             tui.wait_for(budget.cap_timeout(spec.step_timeout()), |text| {
-                text.contains("completed")
+                text.contains("完成")
             })
             .unwrap();
             let waiting = tui
                 .redraw_text(budget.cap_timeout(spec.step_timeout()))
                 .unwrap();
             assert!(
-                waiting.contains("READ_FAULT_LIVE_BODY") && waiting.contains("completed"),
+                waiting.contains("READ_FAULT_LIVE_BODY") && waiting.contains("完成"),
                 "{waiting}"
             );
             assert_eq!(waiting.matches("READ_FAULT_LIVE_BODY").count(), 1);
@@ -2142,10 +2142,12 @@ fn history_read_failure_preserves_live_text_and_summary_then_reconnect_clears_er
                 .redraw_text(budget.cap_timeout(spec.step_timeout()))
                 .unwrap();
             assert!(
-                errored.contains("READ_FAULT_LIVE_BODY") && errored.contains("completed"),
+                errored.contains("READ_FAULT_LIVE_BODY") && errored.contains("完成"),
                 "{errored}"
             );
             std::fs::remove_file(schedule.join("history_read_2.error")).unwrap();
+            // 读取失败是 Warn，暂驻 Dock 并遮住输入区；Space 释放后才能输入 `/reconnect`。
+            tui.send_keys(b" ").unwrap();
             tui.send_line("/reconnect").unwrap();
             // 独立公开重读核验原结果未改变；同一 TUI 重载完成后退出报告不能保留当前读取错误。
             let read = cli(
@@ -2166,7 +2168,7 @@ fn history_read_failure_preserves_live_text_and_summary_then_reconnect_clears_er
                 .redraw_text(budget.cap_timeout(spec.step_timeout()))
                 .unwrap();
             assert!(
-                reloaded.contains("READ_FAULT_LIVE_BODY") && reloaded.contains("completed"),
+                reloaded.contains("READ_FAULT_LIVE_BODY") && reloaded.contains("完成"),
                 "{reloaded}"
             );
             assert_eq!(reloaded.matches("READ_FAULT_LIVE_BODY").count(), 1);
