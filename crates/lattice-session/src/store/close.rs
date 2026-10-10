@@ -191,6 +191,12 @@ pub(super) fn summary(state: &TurnState) -> Option<TurnSummary> {
         }),
     }
 }
+impl TurnRecord {
+    /// 公开读取投影：已关闭 Turn 的结局与 notice，进行中为 `None`。
+    pub fn summary(&self) -> Option<TurnSummary> {
+        summary(&self.state)
+    }
+}
 pub(super) fn outcome(step: &StepRecord) -> Result<(TurnOutcome, Option<Notice>)> {
     let StepState::Closed { end, .. } = &step.state else {
         return Err(corrupt("steps", "end", "active final step"));

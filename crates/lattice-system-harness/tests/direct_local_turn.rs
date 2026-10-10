@@ -102,8 +102,11 @@ fn assert_live_text_turn(
         entries.len() == 2
             && entries[0]["content"]["message"]["parts"] == text_parts(prompt)
             && entries[1]["content"]["content"]["assistant"]["parts"] == text_parts(reply)
-            && entries[1]["content"]["content"]["results"] == json!([]),
-        "history contains exact user and assistant text",
+            && entries[1]["content"]["content"]["results"] == json!([])
+            && entries
+                .iter()
+                .all(|entry| entry["summary"] == json!({"outcome":"completed","notice":null})),
+        "history contains exact user and assistant text with the Turn outcome",
     )?;
     require(
         log["session"]["session_id"] == session_id

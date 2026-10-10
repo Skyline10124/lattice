@@ -99,6 +99,7 @@ fn history(view: &ObservationSnapshot) -> LocalHistory {
     let mut entries = vec![lattice_api::local::HistoryEntry {
         node: lattice_api::local::NodeId(1),
         agent_name: "unused".into(),
+        summary: None,
         content: Node::UserMessage {
             parent: lattice_api::local::NodeId(0),
             turn_id: id,
@@ -109,6 +110,7 @@ fn history(view: &ObservationSnapshot) -> LocalHistory {
         entries.push(lattice_api::local::HistoryEntry {
             node: lattice_api::local::NodeId(2),
             agent_name: "unused".into(),
+            summary: None,
             content: Node::Step {
                 parent: lattice_api::local::NodeId(1),
                 turn_id: id,

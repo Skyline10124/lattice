@@ -1002,6 +1002,25 @@ impl App {
                 })
                 .map(|(_, i)| *i)
         };
+        // 结局行跟着它的 Turn 走：新历史给出这个 Turn 的结局时，旧的那条让位并把身份交给它，
+        // 暂驻 Dock 的结局因此继续暂驻；新历史里已经没有这个 Turn 时，结局行不保留。
+        let mut closings = std::collections::HashMap::new();
+        let mut loaded_turns = std::collections::HashSet::new();
+        for (at, entry) in blocks.iter().enumerate() {
+            match &entry.block {
+                Block::Status(Status {
+                    closing: Some((turn, _)),
+                    ..
+                }) => {
+                    closings.insert(*turn, at);
+                }
+                Block::UserTurn(turn, _) => {
+                    loaded_turns.insert(*turn);
+                }
+                _ => {}
+            }
+        }
+        let parked = self.dock.message_id();
         // 临时提示按时间顺序保留：放在它之后出现的第一个已装入节点之前，没有则留在末尾。
         // 旧持久块与已装入节点的实时块由新历史取代；未装入的实时块按原顺序接在末尾。
         let old = std::mem::take(&mut self.blocks.entries);
@@ -1018,6 +1037,19 @@ impl App {
             if matches!(block, Block::AssistantStart { turn_id, .. } if loaded_starts.contains(turn_id))
             {
                 continue;
+            }
+            if let Block::Status(Status {
+                closing: Some((turn, _)),
+                ..
+            }) = block
+            {
+                if let Some(taken_over) = closings.get(turn).and_then(|at| blocks.get_mut(*at)) {
+                    taken_over.id = entry.id;
+                    continue;
+                }
+                if !loaded_turns.contains(turn) && parked != Some(entry.id) {
+                    continue;
+                }
             }
             if matches!(block, Block::Status(_)) {
                 pending.push(entry);
@@ -1050,7 +1082,6 @@ impl App {
         // 回退到其他位置后，旧节点在新历史中的顺序可能与原来不同；稳定排序保持同一位置上提示的先后。
         inserts.sort_by_key(|(at, _)| *at);
         // 内容相同的提示只留一份；Dock 暂驻的那条按身份保留，不因与已释放的提示同文而随 History 消失。
-        let parked = self.dock.message_id();
         let duplicate = |result: &[IdentifiedBlock], status: &IdentifiedBlock| {
             parked != Some(status.id) && result.iter().any(|known| known.block == status.block)
         };

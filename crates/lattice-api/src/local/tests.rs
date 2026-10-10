@@ -233,6 +233,10 @@ async fn detached_owners_share_acceptance_overlap_and_drain_with_fixed_reload() 
         .await
         .unwrap();
     assert_eq!(pending_history.entries.len(), 1);
+    assert_eq!(
+        pending_history.entries[0].summary, None,
+        "进行中的 Turn 没有结局"
+    );
     assert!(
         matches!(&pending_history.entries[0].content, Node::UserMessage { message, .. }
         if matches!(&message.parts[0].semantic, MessageSemantic::Text { text } if text == "local prompt"))
@@ -326,6 +330,10 @@ async fn detached_owners_share_acceptance_overlap_and_drain_with_fixed_reload() 
         .await
         .unwrap();
     assert_eq!(history.entries.len(), 2);
+    // 历史为每个节点带回所属 Turn 的结局，与 Turn 记录一致。
+    let closed = view.selected_turn.as_ref().unwrap().summary.clone();
+    assert!(closed.is_some());
+    assert!(history.entries.iter().all(|entry| entry.summary == closed));
     let encoded = serde_json::to_string(&history).unwrap();
     assert!(encoded.contains("后台结果"));
     assert!(!encoded.contains("local-test-secret"));

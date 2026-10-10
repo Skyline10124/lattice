@@ -4,6 +4,7 @@
 use crate::TuiOptions;
 use crate::app::{Block, ToolSource, ToolState};
 use crate::blocks::BlockList;
+use crate::connection::closing_status;
 use lattice_api::local::{
     LocalClient, LocalHistory, MessageRole, MessageSemantic, Node, ResultPayload, SessionId,
     StepContent, SuccessContent,
@@ -68,7 +69,14 @@ pub(crate) async fn freeze_configuration(
 pub(crate) fn history_blocks(history: LocalHistory) -> Vec<Block> {
     let mut blocks = BlockList::default();
     let mut ordinal = std::num::NonZeroUsize::MIN;
+    // 已关闭 Turn 的结局行放在该 Turn 最后一个节点之后；结局取这个节点带回的那份。
+    let mut closing = None;
     for entry in history.entries {
+        let turn = entry.content.turn_id();
+        if let Some((id, summary)) = closing.take_if(|(id, _)| Some(*id) != turn) {
+            blocks.push(Block::Status(closing_status(id, summary)));
+        }
+        closing = turn.zip(entry.summary);
         // Turn 的 agent 在接受时冻结，同一 Turn 的 Step 不再重复标题；路径从根开始，
         // 每个 Step 前必有本 Turn 的 UserMessage。
         if !matches!(entry.content, Node::Step { .. }) {
@@ -96,6 +104,9 @@ pub(crate) fn history_blocks(history: LocalHistory) -> Vec<Block> {
                 append_history_step(&mut blocks, content, turn_id, step_ordinal);
             }
         }
+    }
+    if let Some((id, summary)) = closing {
+        blocks.push(Block::Status(closing_status(id, summary)));
     }
     blocks
         .entries

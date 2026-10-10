@@ -164,6 +164,7 @@ fn history(view: &ObservationSnapshot) -> LocalHistory {
             .map(|n| HistoryEntry {
                 node: NodeId(n),
                 agent_name: "test".into(),
+                summary: None,
                 content: Node::UserMessage {
                     parent: NodeId(n - 1),
                     turn_id: id,
@@ -190,6 +191,7 @@ fn page(history: LocalHistory) -> HistoryPageView {
             .into_iter()
             .map(|entry| HistoryFragmentView {
                 agent_name: entry.agent_name,
+                summary: entry.summary,
                 fragment: NodeFragment {
                     node: entry.node,
                     utf8_offset: 0,
@@ -380,7 +382,12 @@ async fn fixed_root_path_preserves_utf8_fragments_and_agent_attribution() {
     let peer = Peer::new();
     let id = new_turn_id();
     let fixed = view(id, 2, true, false);
-    let expected = history(&fixed);
+    let mut expected = history(&fixed);
+    // 节点 2 跨两页读取，其间 Turn 关闭：前一片不带结局，完成它的那一片带回结局。
+    expected.entries[1].summary = Some(TurnSummary {
+        outcome: PublicTurnOutcome::Completed,
+        notice: None,
+    });
     let client = peer.client.clone();
     let reading =
         tokio::spawn(async move { client.read_history_with_progress(&fixed, || {}).await });
@@ -394,6 +401,7 @@ async fn fixed_root_path_preserves_utf8_fragments_and_agent_attribution() {
     };
     full.fragments.push(HistoryFragmentView {
         agent_name: last.agent_name.clone(),
+        summary: None,
         fragment: NodeFragment {
             node: NodeId(2),
             utf8_offset: 0,
@@ -414,6 +422,7 @@ async fn fixed_root_path_preserves_utf8_fragments_and_agent_attribution() {
         next: None,
         fragments: vec![HistoryFragmentView {
             agent_name: last.agent_name,
+            summary: last.summary,
             fragment: NodeFragment {
                 node: NodeId(2),
                 utf8_offset: split as u64,

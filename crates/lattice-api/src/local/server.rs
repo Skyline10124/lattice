@@ -631,14 +631,13 @@ impl Backend {
                         let turn = node
                             .turn_id()
                             .ok_or(lattice_session::store::StoreError::InvalidCursor)?;
-                        let agent_name = read
+                        let record = read
                             .turn_record(turn)?
-                            .ok_or(lattice_session::store::StoreError::InvalidCursor)?
-                            .config
-                            .agent_name;
+                            .ok_or(lattice_session::store::StoreError::InvalidCursor)?;
                         Ok(HistoryFragmentView {
                             fragment,
-                            agent_name,
+                            summary: record.summary(),
+                            agent_name: record.config.agent_name,
                         })
                     })
                     .collect::<lattice_session::store::Result<Vec<_>>>()?;

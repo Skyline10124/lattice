@@ -555,9 +555,11 @@ impl HistoryAssembly {
                 {
                     return Err(protocol());
                 }
+                // 节点跨页读取期间 Turn 可能关闭；结局取完成这个节点的那一片带回的。
                 self.history.entries.push(HistoryEntry {
                     node,
                     agent_name,
+                    summary: part.summary,
                     content,
                 });
             }
