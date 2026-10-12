@@ -1029,6 +1029,8 @@ impl App {
         let mut pending = Vec::new();
         let mut tail = Vec::new();
         let mut replaced = false;
+        // 最近一个已装入节点之后进入 tail 的块，属于该节点所在的 Turn。
+        let mut turn_tail = 0;
         for (index, entry) in old.into_iter().enumerate() {
             let block = &entry.block;
             if index == durable_len {
@@ -1043,8 +1045,13 @@ impl App {
                 ..
             }) = block
             {
-                if let Some(taken_over) = closings.get(turn).and_then(|at| blocks.get_mut(*at)) {
-                    taken_over.id = entry.id;
+                if let Some(&at) = closings.get(turn) {
+                    if let Some(taken_over) = blocks.get_mut(at) {
+                        taken_over.id = entry.id;
+                    }
+                    // 结局行是这一轮的最后一行：此前的临时提示与未装入的实时块排在它之前，不漂到末尾。
+                    let before = tail.drain(turn_tail.min(tail.len())..);
+                    inserts.extend(before.chain(pending.drain(..)).map(|live| (at, live)));
                     continue;
                 }
                 if !loaded_turns.contains(turn) && parked != Some(entry.id) {
@@ -1057,6 +1064,7 @@ impl App {
                 if let Some(start) = start_of(block) {
                     inserts.extend(pending.drain(..).map(|status| (start, status)));
                     replaced = true;
+                    turn_tail = tail.len();
                 } else if index >= durable_len {
                     tail.append(&mut pending);
                     tail.push(entry);

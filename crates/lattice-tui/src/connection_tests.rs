@@ -761,8 +761,20 @@ fn history_shows_each_turn_closing_once_and_takes_over_the_live_one() {
     assert!(second < at(&app, "ask-2").unwrap());
     assert_eq!(count(&app, &lines[2]), 0, "进行中的 Turn 没有结局");
 
-    // 本进程看着第三轮失败：结局暂驻 Dock；随后历史带回同一结局，接管后仍暂驻。
+    // 本进程看着第三轮重试后失败：结局暂驻 Dock；随后历史带回同一结局，接管后仍暂驻。
     app.current_turn = Some(turns[2]);
+    app.apply_turn_event(TurnEvent::LlmRetry {
+        key: lattice_api::local::ModelAttemptKey {
+            turn_id: turns[2],
+            model_step_ordinal: 0,
+            attempt_ordinal: 0,
+        },
+        delay_ms: 500,
+        notice: lattice_api::local::Notice {
+            level: lattice_api::local::NoticeLevel::Warn,
+            text: "provider failure".into(),
+        },
+    });
     app.apply_update(LocalUpdate::State {
         view: Box::new(view(turns[2], "failed")),
         phase: ObservationPhase::Finished,
@@ -783,7 +795,9 @@ fn history_shows_each_turn_closing_once_and_takes_over_the_live_one() {
     for line in &lines {
         assert_eq!(count(&app, line), 1, "{line}");
     }
-    assert!(at(&app, "ask-2").unwrap() < at(&app, &lines[2]).unwrap());
+    // 这一轮的重试提示排在它的结局行之前，结局行是这一轮的最后一行。
+    let retry = at(&app, "第 1 次请求失败，500 ms 后重试：provider failure").unwrap();
+    assert!(at(&app, "ask-2").unwrap() < retry && retry < at(&app, &lines[2]).unwrap());
 
     // 回退到第一轮之后：后两轮离开当前路径，它们的结局行一起消失。
     app.replace_history(history(&[&failed]));
