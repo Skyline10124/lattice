@@ -9,6 +9,7 @@ status: accepted
 - 修订：部分取代 ADR 0005，范围见[与 ADR 0005 的关系](#与-adr-0005-的关系)；取代 ADR 0003 的“Rewind”一节
 - 依赖：ADR 0005 未被取代的部分
 - 实施跟踪：GitHub #223（路线图 #217 R2）
+- 部分被取代：ADR 0007（三层记录、ActiveStep、Turn 记录与崩溃后自动关闭等；范围见 ADR 0007 的[与 ADR 0006 的关系](0007-session-tree-as-single-authority.md#与-adr-0006-的关系)）
 
 ## 背景
 
