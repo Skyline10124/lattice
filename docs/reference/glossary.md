@@ -96,29 +96,29 @@ _Avoid_: Session History, branch, Git commit graph, workspace checkpoint lineage
 _Avoid_: Git OID, branch name, TurnId
 
 **Turn**:
-一次已接受任务：一个 UserMessage 节点加若干 Step 节点，结局记在 Turn 记录中；一个 Turn 可以有多个 Step。
+一次已接受任务：一个 UserMessage 节点加若干 Step 节点，结局由最后一个 Step 节点得出；一个 Turn 可以有多个 Step。
 见[会话、Turn 与会话树](../architecture/session.md#会话turn-与会话树)。
 _Avoid_: model attempt, single tool call, terminal lifetime
 
 **Step**:
-一次完整的模型回复及其全部 `(ToolCall, ToolResult)` 对，是会话树上的节点；关闭时未执行或未完成的调用也写入类型化终态。每次 provider 请求记在对应 Step 记录的 `attempts` 中。
-见[ActiveStep 与事务序列](../architecture/session.md#activestep-与事务序列)。
+一轮中的一个模型步骤，是会话树上的节点：在开始之前预留，记录各次 provider 请求（尝试）、完整回复、每个工具调用的槽位和结束方式。只有末端未关闭的 Step 会被改写。
+见[Step 节点与事务序列](../architecture/session.md#step-节点与事务序列)。
 _Avoid_: model attempt, partial reply, ToolCall without result
 
-**ActiveStep**:
-进行中的 Step 记录，就地更新：请求阶段保存尝试状态，收到含工具调用的完整回复后保存回复与各调用槽位的进度。关闭后记录不再修改；只有存在完整回复时，关闭事务才同时写入树上的 Step 节点。
-见[ActiveStep 与事务序列](../architecture/session.md#activestep-与事务序列)。
-_Avoid_: PendingTurn, token buffer, retry queue
+**progress**:
+Step、尝试和调用槽位最后到达的阶段，只前进。最后一个阶段带着实际结果；停在其他阶段时，结论由阶段确定。
+见[预留、progress 与结论](../architecture/session.md#预留progress-与结论)。
+_Avoid_: ActiveStep, PendingTurn, completion marker
 
-**Turn 记录**:
-每个 Turn 的独立记录，接受时与 UserMessage 节点同事务创建，关闭时补上结局、usage 与 notice；公开读取为 `TurnSummary { outcome, notice }`。它不保存工作区历史位置，Turn 与文件变更的关联记在 Workspace History 的变更记录中。
+**TurnSummary**:
+一轮结局的公开读取投影 `{ outcome, notice, progress }`，每次读取从最后一个 Step 节点得出，不另存。Turn 与文件变更的关联记在 Workspace History 的变更记录中。
 见[关闭 Step 与 Turn](../architecture/session.md#关闭-step-与-turn)。
-_Avoid_: TurnCommit, last Step, commit OID
+_Avoid_: Turn 记录, TurnCommit, commit OID
 
 **LocalTurn**:
 本客户端一次提交或观察交互的具体句柄，关联原请求身份与已收到的状态、内容和诊断；不是第二个持久 Turn 或后台执行所有者。
 主定义与生命周期见[组件与接口](../architecture/session.md#组件与接口)及[客户端操作](../architecture/session.md#实现模块与公开操作)。
-_Avoid_: ActiveStep, TurnCoordinator, durable Turn, execution owner
+_Avoid_: TurnCoordinator, durable Turn, execution owner
 
 **TurnId**:
 客户端为提交预先保留的请求身份，用于找回原请求；向已有 Session 提交时与 SessionId 一起核对，不带 Session 的首次提交按它找回所建 Session。
@@ -131,7 +131,7 @@ _Avoid_: NodeId, provider call ID, InvocationId
 _Avoid_: provider call ID, tool name, PlanKey
 
 **调用槽位**:
-模型回复中一个 ToolCall 在进行中 Step（ActiveStep）里的持久记录。登记事务为回复中的每个 ToolCall 建立一个槽位并分配 InvocationId，顺序与回复中的片段顺序一致。它先为该调用将来的 ToolResult 占住位置，故称槽位；之后依次写入 `Started`、终态、载荷与 Cell 证据。Step 只有在每个槽位都有终态后才写入会话树，所以树上不会出现有调用而无结果的节点。槽位归 `lattice-session`，与 Step 记录在同一个会话库事务里写入。
+模型回复中一个 ToolCall 在 Step 节点里的持久记录。登记事务为回复中的每个 ToolCall 建立一个槽位并分配 InvocationId，顺序与回复中的片段顺序一致。它先为该调用将来的 ToolResult 占住位置，故称槽位；之后依次推进到 `Started` 与 `Terminal`，到达 `Terminal` 时写入结果、载荷与 Cell 证据。每个阶段都有确定的结论，所以树上不会出现有调用而无结果的节点。槽位归 `lattice-session`，随 Step 节点在同一个会话库事务里写入。
 见[调用槽位](../architecture/session.md#调用槽位)。
 _Avoid_: invocation ledger, `invocations.git`, BindingPlan, provider Tool Call ID as slot identity
 
@@ -141,7 +141,7 @@ _Avoid_: invocation ledger, `invocations.git`, BindingPlan, provider Tool Call I
 _Avoid_: token replay, layout body width, frozen configuration
 
 **观察快照**:
-订阅开始或重新同步时后台交付的状态：Session 记录、Turn 记录、已写入节点、ActiveStep 与槽位状态，加上当前尝试的段列表及其事件序号；之后的事件从该序号继续，不丢内容。
+订阅开始或重新同步时后台交付的状态：Session 记录、所观察 Turn 的 `TurnSummary`、已写入的节点（含未关闭的 Step），加上当前尝试的段列表及其事件序号；之后的事件从该序号继续，不丢内容。
 见[观察与重连](../architecture/session.md#观察与重连)；它不是整个工作区的快照。
 _Avoid_: Gap, pinned view, whole-workspace snapshot
 

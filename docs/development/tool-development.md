@@ -82,7 +82,7 @@ lattice --json lancet doctor
 
 ## 开发状态诊断与重建边界
 
-先通过只读查询确认实际状态。后台在该 Session 的下一次新提交或 `rewind` 前按[自动关闭规则](../architecture/session.md#自动关闭崩溃遗留任务)处理无 Owner 的遗留 Turn，不重新联系 provider 或分发 Tool；单纯重开与观察不触发关闭。不要把删除目录重建作为普通恢复手段，旧 #139-B 的清理步骤不授权处理当前状态。
+先通过只读查询确认实际状态。没有 Owner 的遗留 Turn 停在已写入的进度，结局见[执行者消失后的 Turn](../architecture/session.md#执行者消失后的-turn)；后台不重新联系 provider 或分发 Tool，下一次新提交或 `rewind` 直接进行。不要把删除目录重建作为普通恢复手段，旧 #139-B 的清理步骤不授权处理当前状态。
 
 确需开发状态重建时，先由人类明确选择绝对 STATE_ROOT、Local Workspace、ProjectStoreKey 和数据归属，逐项列出受影响对象。全局 `lattice.redb` 保存所有项目的会话，不能为处理单个项目随意删除；项目 `workspace-history.git` 单独核验。发现旧 `sessions.git` 或任意项目 `invocations.git` 时，后台拒绝打开并列出路径，由人决定删除或存档，不迁移、不兼容读取。所需原证据先保全，任何删除、搬移、重新创建都须有对应授权，不用广泛 glob 操作其他项目。路径以[存储布局](../architecture/storage.md#私有状态根)为准，不从旧日志猜测。
 

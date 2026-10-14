@@ -23,7 +23,7 @@
 - 快速场景覆盖 help、环境和 CLI；Direct 场景覆盖真实 Turn/reopen、观察、变更、工具、失败/取消/deadline、操作员、秘密、会话隔离和工作区历史。
 - `direct_background` 与相关 PTY 场景保护前后端分离、回执丢失、Busy/并发、快照重同步与历史读取、取消与 stop；具体断言边界见[后台与重连场景](../../docs/development/testing.md#后台与重连场景)。
 - `direct_operator` 与 `release_operator` 分别保留 fetch、todo 和组合调用场景及 newest-20 断言；它们均使用 Component，不再用 native/Component/mixed 名称描述执行路径。
-- `direct_crash_barriers` 显式场景验证会话库提交后的 SIGSTOP/SIGKILL 窗口、配对完整的 Step、持久取消与 closure-only、库级故障和观察调度；普通套件不等于运行了该 feature。
+- `direct_crash_barriers` 显式场景验证会话库提交后的 SIGSTOP/SIGKILL 窗口、各阶段的结论、持久取消、库级故障和观察调度；普通套件不等于运行了该 feature。
 - `direct_tree_session` 保护 NodeId 退回分叉、根节点 agent 规则、原 Turn 的 Step 详情及文件/历史不回退，并验证旧库拒绝。未公开的表编码、值版本和事务关系由库层验证，不从 harness 直接打开 redb。
 - PTY smoke 验证同一 Direct-Local Turn 接线，不能以环境故障跳过。
 - 先按测试合同准备当前被测二进制，再运行所需 fast/direct/PTY target；`release-operator`、`crash-barriers` 必须显式说明。`LATTICE_BIN` 在测试进程 cwd 解析，绝对路径是推荐做法而非额外代码契约。
