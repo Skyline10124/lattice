@@ -4,54 +4,62 @@
 use super::*;
 use super::{codec::*, local::Selection};
 use lancet_protocol::InvocationId;
+use lattice_conversation::ToolResultOutcome;
 use lattice_store::ProjectStoreKey;
 use redb::ReadableTable;
 
+fn payload_summary(
+    payload: &ResultPayload,
+) -> (ToolResultOutcome, Option<OperatorReason>, MaterialSummary) {
+    let (reason, material) = match payload {
+        ResultPayload::Succeeded(SuccessContent::Json {
+            digest,
+            byte_length,
+            ..
+        }) => (
+            None,
+            MaterialSummary::Available {
+                digest: *digest,
+                byte_length: *byte_length,
+            },
+        ),
+        ResultPayload::Succeeded(SuccessContent::OutputTooLarge {
+            digest,
+            byte_length,
+        }) => (
+            None,
+            MaterialSummary::OutputTooLarge {
+                digest: *digest,
+                byte_length: *byte_length,
+            },
+        ),
+        ResultPayload::Failed(e) => (
+            Some(OperatorReason::Failed {
+                code: e.code,
+                retriability: e.retriability.clone(),
+            }),
+            MaterialSummary::NoContent,
+        ),
+        ResultPayload::NotExecuted => (None, MaterialSummary::NoContent),
+        ResultPayload::Indeterminate(cause) => (
+            Some(OperatorReason::Indeterminate(*cause)),
+            MaterialSummary::NoContent,
+        ),
+    };
+    (payload.outcome(), reason, material)
+}
+
 pub(super) fn operator(slot: &InvocationSlot) -> OperatorInvocation {
-    let state = match &slot.state {
-        SlotState::Registered => OperatorInvocationState::Registered,
-        SlotState::Started => OperatorInvocationState::Started,
-        SlotState::Terminal(t) => {
-            let (reason, material) = match &t.result.payload {
-                ResultPayload::Succeeded(SuccessContent::Json {
-                    digest,
-                    byte_length,
-                    ..
-                }) => (
-                    None,
-                    MaterialSummary::Available {
-                        digest: *digest,
-                        byte_length: *byte_length,
-                    },
-                ),
-                ResultPayload::Succeeded(SuccessContent::OutputTooLarge {
-                    digest,
-                    byte_length,
-                }) => (
-                    None,
-                    MaterialSummary::OutputTooLarge {
-                        digest: *digest,
-                        byte_length: *byte_length,
-                    },
-                ),
-                ResultPayload::Failed(e) => (
-                    Some(OperatorReason::Failed {
-                        code: e.code,
-                        retriability: e.retriability.clone(),
-                    }),
-                    MaterialSummary::NoContent,
-                ),
-                ResultPayload::NotExecuted => (None, MaterialSummary::NoContent),
-                ResultPayload::Indeterminate(cause) => (
-                    Some(OperatorReason::Indeterminate(*cause)),
-                    MaterialSummary::NoContent,
-                ),
-            };
+    let state = match &slot.progress {
+        SlotProgress::Registered => OperatorInvocationState::Registered,
+        SlotProgress::Started => OperatorInvocationState::Started,
+        SlotProgress::Terminal { result, evidence } => {
+            let (outcome, reason, material) = payload_summary(&result.payload);
             OperatorInvocationState::Terminal {
-                outcome: t.result.payload.outcome(),
+                outcome,
                 reason,
                 material,
-                evidence: t.evidence.clone(),
+                evidence: evidence.clone(),
             }
         }
     };
@@ -61,51 +69,74 @@ pub(super) fn operator(slot: &InvocationSlot) -> OperatorInvocation {
         state,
     }
 }
+
+fn slot_detail(slot: &InvocationSlot) -> SlotDetail {
+    let (result, evidence) = close::resolve_slot(slot);
+    let (outcome, reason, material) = payload_summary(&result.payload);
+    SlotDetail {
+        invocation_id: slot.binding.invocation_id,
+        binding: slot.binding.identity.clone(),
+        progress: operator(slot).state,
+        outcome,
+        reason,
+        material,
+        evidence,
+    }
+}
+
 fn attempt(a: &AttemptRecord) -> AttemptDetail {
+    let progress = match &a.progress {
+        AttemptProgress::Sent => AttemptProgressDetail::Sent,
+        AttemptProgress::Ended { end, diagnostic } => AttemptProgressDetail::Ended {
+            end: end.clone(),
+            diagnostic: diagnostic.provider_error.clone(),
+        },
+    };
+    let (end, diagnostic) = close::resolve_attempt(a);
+    let end = match end {
+        AttemptEnd::Completed { step } => AttemptEndDetail::Completed { step },
+        AttemptEnd::Stopped { cause } => AttemptEndDetail::Stopped {
+            cause,
+            diagnostic: diagnostic.provider_error,
+        },
+    };
     AttemptDetail {
         attempt: a.attempt,
         origin: a.origin,
         usage: a.usage,
-        end: match &a.end {
-            AttemptEnd::Completed { step } => AttemptEndDetail::Completed { step: *step },
-            AttemptEnd::Stopped { cause, diagnostic } => AttemptEndDetail::Stopped {
-                cause: cause.clone(),
-                diagnostic: diagnostic.provider_error.clone(),
-            },
-        },
+        progress,
+        end,
+        retry_delay_ms: a.retry_delay_ms,
     }
 }
-fn closed_operator(c: &ClosedInvocation) -> OperatorInvocation {
-    operator(&InvocationSlot {
-        binding: c.binding.clone(),
-        state: SlotState::Terminal(c.terminal.clone()),
+
+fn detail(node: NodeId, step: &Node) -> Result<StepDetail> {
+    let Node::Step {
+        turn_id,
+        step_ordinal,
+        progress,
+        attempts,
+        slots,
+        updated_at,
+        ..
+    } = step
+    else {
+        return Err(corrupt("nodes", &node.0.to_string(), "expected step node"));
+    };
+    Ok(StepDetail {
+        node,
+        key: StepKey {
+            turn_id: *turn_id,
+            ordinal: *step_ordinal,
+        },
+        progress: progress.clone(),
+        end: close::resolve_step(progress, slots)?,
+        attempts: attempts.iter().map(attempt).collect(),
+        slots: slots.iter().map(slot_detail).collect(),
+        updated_at: *updated_at,
     })
 }
-fn detail(step: &StepRecord) -> StepDetail {
-    StepDetail {
-        key: step.key,
-        attempts: step.attempts.iter().map(attempt).collect(),
-        state: match &step.state {
-            StepState::Active {
-                active: ActiveStep::Requesting { attempt },
-            } => StepDetailState::Requesting { attempt: *attempt },
-            StepState::Active {
-                active: ActiveStep::RetryReady { next_attempt },
-            } => StepDetailState::RetryReady {
-                next_attempt: *next_attempt,
-            },
-            StepState::Active {
-                active: ActiveStep::Executing { slots, .. },
-            } => StepDetailState::Executing {
-                slots: slots.iter().map(operator).collect(),
-            },
-            StepState::Closed { end, invocations } => StepDetailState::Closed {
-                end: end.clone(),
-                slots: invocations.iter().map(closed_operator).collect(),
-            },
-        },
-    }
-}
+
 fn positive(limit: usize) -> Result<()> {
     if limit == 0 {
         Err(invalid("limit", "page budget must be positive"))
@@ -113,6 +144,7 @@ fn positive(limit: usize) -> Result<()> {
         Ok(())
     }
 }
+
 impl Records {
     pub(super) fn current_agent(&self, s: SessionId) -> Result<Option<String>> {
         let session = self.sessions.get(&s).ok_or_else(|| missing("session", s))?;
@@ -122,36 +154,79 @@ impl Records {
             .ok_or_else(|| corrupt("nodes", &s.to_string(), "current node missing"))?;
         node.turn_id()
             .map(|t| {
-                self.turns
+                let user_ref = self
+                    .turn_index
                     .get(&t)
-                    .map(|t| t.config.agent_name.clone())
-                    .ok_or_else(|| corrupt("turns", &t.to_string(), "node turn missing"))
+                    .filter(|r| r.session_id == s)
+                    .ok_or_else(|| corrupt("turn_index", &t.to_string(), "node turn missing"))?;
+                match self.nodes.get(&(s, user_ref.node)) {
+                    Some(Node::UserMessage { agent_name, .. }) => Ok(agent_name.clone()),
+                    _ => Err(corrupt(
+                        "nodes",
+                        &format!("{s}/{}", user_ref.node.0),
+                        "missing turn user node",
+                    )),
+                }
             })
             .transpose()
     }
-    fn turn_detail(&self, s: SessionId, t: TurnId) -> Result<TurnDetail> {
-        let t = self
-            .turns
+
+    pub(super) fn turn_detail(&self, s: SessionId, t: TurnId) -> Result<TurnDetail> {
+        let user_ref = self
+            .turn_index
             .get(&t)
-            .filter(|t| t.session_id == s)
+            .filter(|r| r.session_id == s)
             .ok_or_else(|| missing("turn", t))?;
-        let steps = self.turn_steps(t.turn_id);
+        let Some(Node::UserMessage {
+            turn_id,
+            accepted_at,
+            agent_name,
+            ..
+        }) = self.nodes.get(&(s, user_ref.node))
+        else {
+            return Err(corrupt(
+                "nodes",
+                &format!("{s}/{}", user_ref.node.0),
+                "missing turn user node",
+            ));
+        };
+        let raw_steps = self.turn_steps(s, t)?;
+        let (_, last_node) = raw_steps
+            .last()
+            .ok_or_else(|| corrupt("nodes", &t.to_string(), "turn has no steps"))?;
+        let Node::Step {
+            progress,
+            attempts: last_attempts,
+            slots: last_slots,
+            updated_at: ended_at,
+            ..
+        } = last_node
+        else {
+            return Err(corrupt("nodes", &t.to_string(), "turn tip is not a step"));
+        };
+        let summary = close::summary(progress, last_attempts, last_slots)?;
+        let usage = close::usage(raw_steps.iter().flat_map(|(_, node)| match node {
+            Node::Step { attempts, .. } => attempts.as_slice(),
+            _ => &[],
+        }));
+        let steps = raw_steps
+            .iter()
+            .map(|(node_id, node)| detail(*node_id, node))
+            .collect::<Result<Vec<_>>>()?;
         Ok(TurnDetail {
-            turn_id: t.turn_id,
+            turn_id: *turn_id,
             session_id: s,
-            user_node: t.user_node,
-            agent_name: t.config.agent_name.clone(),
-            accepted_at: t.accepted_at,
-            ended_at: match t.state {
-                TurnState::Running => None,
-                TurnState::Closed { ended_at, .. } => Some(ended_at),
-            },
-            summary: close::summary(&t.state),
-            usage: close::usage(&steps),
-            steps: steps.iter().map(detail).collect(),
+            user_node: user_ref.node,
+            agent_name: agent_name.clone(),
+            accepted_at: *accepted_at,
+            ended_at: *ended_at,
+            summary,
+            usage,
+            steps,
         })
     }
 }
+
 fn matches(filter: &AuditFilter, project: &ProjectStoreKey, row: &OperatorInvocation) -> bool {
     *project == filter.project_store_key
         && filter
@@ -163,25 +238,53 @@ fn matches(filter: &AuditFilter, project: &ProjectStoreKey, row: &OperatorInvoca
             .as_ref()
             .is_none_or(|m| *m == row.binding.method)
         && filter.outcome.is_none_or(
-            |o| matches!(row.state,OperatorInvocationState::Terminal {outcome,..} if outcome==o),
+            |o| matches!(row.state, OperatorInvocationState::Terminal { outcome, .. } if outcome == o),
         )
 }
 
 impl SessionRead {
     fn local(&self, session: SessionId, selection: Selection) -> Result<Records> {
-        local::read(&self.tx, session, selection)
+        attach_path(&self.path, local::read(&self.tx, session, selection))
     }
-    fn raw_turn(&self, id: TurnId) -> Result<Option<TurnRecord>> {
+
+    fn decode<T: serde::de::DeserializeOwned + serde::Serialize>(
+        &self,
+        table: &str,
+        key: &str,
+        bytes: &[u8],
+    ) -> Result<T> {
+        attach_path(&self.path, decode(table, key, bytes))
+    }
+
+    fn raw_turn_node(&self, id: TurnId) -> Result<Option<NodeRef>> {
         self.tx
-            .open_table(TURNS)
+            .open_table(TURN_INDEX)
             .map_err(table_error)?
             .get(id.to_string().as_str())?
-            .map(|v| decode("turns", &id.to_string(), v.value()))
+            .map(|v| self.decode("turn_index", &id.to_string(), v.value()))
             .transpose()
     }
+
+    fn raw_session(&self, id: SessionId) -> Result<SessionRecord> {
+        let s: SessionRecord = self.decode(
+            "sessions",
+            &id.to_string(),
+            self.tx
+                .open_table(SESSIONS)
+                .map_err(table_error)?
+                .get(id.to_string().as_str())?
+                .ok_or_else(|| corrupt("sessions", &id.to_string(), "missing session"))?
+                .value(),
+        )?;
+        if s.session_id != id {
+            return Err(corrupt("sessions", &id.to_string(), "key/value mismatch"));
+        }
+        Ok(s)
+    }
+
     fn latest_change(&self) -> Result<ChangeSeq> {
         let meta = self.tx.open_table(META).map_err(table_error)?;
-        let seq = decode(
+        let seq = self.decode(
             "meta",
             "last_change_seq",
             meta.get("last_change_seq")?
@@ -203,36 +306,65 @@ impl SessionRead {
         }
         Ok(seq)
     }
+
     pub fn session(&self, id: SessionId) -> Result<SessionRecord> {
         self.local(id, Selection::Session)?
             .sessions
             .remove(&id)
             .ok_or_else(|| missing("session", id))
     }
-    /// 内部组合层找回请求使用；不要把冻结配置直接序列化到公开 IPC。
-    pub fn turn_record(&self, id: TurnId) -> Result<Option<TurnRecord>> {
-        let Some(t) = self.raw_turn(id)? else {
+
+    /// 按 TurnId 索引找回该轮 UserMessage 节点位置，并校验所属 Turn。
+    pub fn turn_node(&self, id: TurnId) -> Result<Option<NodeRef>> {
+        let Some(node_ref) = self.raw_turn_node(id)? else {
             return Ok(None);
         };
         Ok(self
-            .local(t.session_id, Selection::Turn(id))?
-            .turns
+            .local(node_ref.session_id, Selection::Turn(id))?
+            .turn_index
             .remove(&id))
     }
-    pub fn durable_turn(&self, session: SessionId, turn: TurnId) -> Result<DurableTurnState> {
+
+    /// 内部组合层读取冻结配置使用；不要直接序列化到公开 IPC。
+    pub fn turn_config(&self, session: SessionId, turn: TurnId) -> Result<FrozenTurnConfig> {
         self.local(session, Selection::Turn(turn))?
-            .durable(session, turn)
+            .turn_config(session, turn)
     }
+
+    pub fn turn_input(&self, session: SessionId, turn: TurnId) -> Result<String> {
+        self.local(session, Selection::Turn(turn))?
+            .turn_input(session, turn)
+    }
+
+    pub fn stored_config(&self, digest: &[u8; 32]) -> Result<StoredTurnConfig> {
+        let key = config_key(digest);
+        let stored: StoredTurnConfig = self.decode(
+            "configs",
+            &key,
+            self.tx
+                .open_table(CONFIGS)
+                .map_err(table_error)?
+                .get(key.as_str())?
+                .ok_or_else(|| missing("config", key.clone()))?
+                .value(),
+        )?;
+        validate::stored_config(digest, &stored)
+            .map_err(|_| corrupt("configs", &key, "invalid stored config"))?;
+        Ok(stored)
+    }
+
     pub fn current_agent(&self, session: SessionId) -> Result<Option<String>> {
         self.local(session, Selection::Session)?
             .current_agent(session)
     }
+
     pub fn node(&self, node: NodeRef) -> Result<Node> {
         self.local(node.session_id, Selection::Node(node.node))?
             .nodes
             .remove(&(node.session_id, node.node))
             .ok_or_else(|| missing("node", node.node.0))
     }
+
     pub fn list(
         &self,
         after: Option<SessionId>,
@@ -253,7 +385,9 @@ impl SessionRead {
             let (key, _) = entry?;
             let id = SessionId::parse(key.value())
                 .map_err(|_| corrupt("sessions", "key", "invalid id"))?;
-            let s = self.session(id)?;
+            let r = self.local(id, Selection::Session)?;
+            let unclosed_turn = r.unclosed_turn(id);
+            let s = r.sessions.get(&id).ok_or_else(|| missing("session", id))?;
             let node_count = nodes
                 .range(
                     node_key(id, NodeId(0)).as_slice()..=node_key(id, NodeId(u64::MAX)).as_slice(),
@@ -267,7 +401,7 @@ impl SessionRead {
                 project_store_key: s.project_store_key,
                 current: s.current,
                 node_count,
-                active_turn: s.active_turn,
+                unclosed_turn,
                 updated_at: s.updated_at,
             });
         }
@@ -278,8 +412,15 @@ impl SessionRead {
         };
         Ok(Page { items, next })
     }
+
     pub fn log(&self, id: SessionId) -> Result<SessionLog> {
-        let session = self.session(id)?;
+        let mut r = self.local(id, Selection::Session)?;
+        let current_agent = r.current_agent(id)?;
+        let unclosed_turn = r.unclosed_turn(id);
+        let session = r
+            .sessions
+            .remove(&id)
+            .ok_or_else(|| missing("session", id))?;
         let table = self.tx.open_table(NODES).map_err(table_error)?;
         let mut nodes = Vec::new();
         for entry in table
@@ -291,48 +432,47 @@ impl SessionRead {
                 session_id: id,
                 node: n,
             })?;
-            let node = &value;
-            let n = &n;
-            let kind = match node {
+            let kind = match &value {
                 Node::Root => NodeKind::Root,
                 Node::UserMessage { .. } => NodeKind::UserMessage,
                 Node::Step { step_ordinal, .. } => NodeKind::Step {
                     ordinal: *step_ordinal,
                 },
             };
-            let turn_start = if let Node::UserMessage { turn_id, .. } = node {
-                let t = self
-                    .turn_record(*turn_id)?
-                    .ok_or_else(|| missing("turn", turn_id))?;
+            let turn_start = if let Node::UserMessage { turn_id, .. } = &value {
+                let detail = self.turn_detail(id, *turn_id)?;
                 Some(TurnLogSummary {
                     turn_id: *turn_id,
-                    summary: close::summary(&t.state),
-                    agent_name: t.config.agent_name.clone(),
+                    summary: detail.summary,
+                    agent_name: detail.agent_name,
                 })
             } else {
                 None
             };
             nodes.push(LogRow {
                 node: NodeHeader {
-                    id: *n,
-                    parent: node.parent(),
-                    turn_id: node.turn_id(),
+                    id: n,
+                    parent: value.parent(),
+                    turn_id: value.turn_id(),
                     kind,
                 },
-                current: *n == session.current,
+                current: n == session.current,
                 turn_start,
             });
         }
         Ok(SessionLog {
-            current_agent: self.current_agent(id)?,
             session,
+            current_agent,
+            unclosed_turn,
             nodes,
         })
     }
+
     pub fn turn_detail(&self, session: SessionId, turn: TurnId) -> Result<TurnDetail> {
         self.local(session, Selection::Turn(turn))?
             .turn_detail(session, turn)
     }
+
     pub fn snapshot(
         &self,
         session: SessionId,
@@ -347,34 +487,30 @@ impl SessionRead {
             .get(&session)
             .ok_or_else(|| missing("session", session))?
             .clone();
-        let selected = selected
-            .or(s.active_turn)
-            .or_else(|| r.nodes[&(session, s.current)].turn_id());
+        let current_node = r
+            .nodes
+            .get(&(session, s.current))
+            .ok_or_else(|| corrupt("nodes", &session.to_string(), "current node missing"))?;
+        let selected = selected.or_else(|| current_node.turn_id());
         let selected_turn = selected.map(|t| r.turn_detail(session, t)).transpose()?;
-        let active = selected.and_then(|t| {
-            r.turn_steps(t).into_iter().find_map(|step| {
-                if let StepState::Active { active } = step.state {
-                    Some(ActiveStepSnapshot {
-                        key: step.key,
-                        attempts: step.attempts.iter().map(attempt).collect(),
-                        state: active,
-                    })
-                } else {
-                    None
-                }
-            })
-        });
+        let (head, unclosed_step) = match current_node {
+            Node::Step {
+                parent, progress, ..
+            } if !progress.is_closed() => (*parent, Some((s.current, current_node.clone()))),
+            _ => (s.current, None),
+        };
         Ok(DurableSnapshot {
             history: HistoryAnchor {
                 session_id: session,
-                head: s.current,
+                head,
             },
             current_agent: r.current_agent(session)?,
             session: s,
             selected_turn,
-            active,
+            unclosed_step,
         })
     }
+
     /// 返回固定父链上节点的规范 JSON UTF-8 片段；IPC 层仍须计量转义后的帧大小。
     pub fn history_page(
         &self,
@@ -383,15 +519,7 @@ impl SessionRead {
         max_bytes: usize,
     ) -> Result<HistoryPage> {
         positive(max_bytes)?;
-        if self
-            .tx
-            .open_table(SESSIONS)
-            .map_err(table_error)?
-            .get(anchor.session_id.to_string().as_str())?
-            .is_none()
-        {
-            return Err(missing("session", anchor.session_id));
-        }
+        self.session(anchor.session_id)?;
         let mut path = Vec::new();
         let mut n = anchor.head;
         while n != NodeId(0) {
@@ -404,6 +532,11 @@ impl SessionRead {
                     StoreError::NotFound { .. } => StoreError::InvalidCursor,
                     e => e,
                 })?;
+            if n == anchor.head
+                && matches!(&node, Node::Step { progress, .. } if !progress.is_closed())
+            {
+                return Err(StoreError::InvalidCursor);
+            }
             path.push(n);
             n = node.parent().ok_or(StoreError::InvalidCursor)?;
         }
@@ -428,11 +561,15 @@ impl SessionRead {
         let mut left = max_bytes;
         let mut next = None;
         for (index, n) in path.iter().enumerate().skip(start) {
-            let text = String::from_utf8(codec::canonical(&self.node(NodeRef {
+            let node = self.node(NodeRef {
                 session_id: anchor.session_id,
                 node: *n,
-            })?)?)
-            .map_err(|_| corrupt("nodes", "encoding", "non-UTF8 canonical JSON"))?;
+            })?;
+            let turn_id = node.turn_id().ok_or(StoreError::InvalidCursor)?;
+            let turn = self.turn_detail(anchor.session_id, turn_id)?;
+            let retries = node.retry_notices()?;
+            let text = String::from_utf8(codec::canonical(&node)?)
+                .map_err(|_| corrupt("nodes", "encoding", "non-UTF8 canonical JSON"))?;
             if offset >= text.len() || !text.is_char_boundary(offset) {
                 return Err(StoreError::InvalidCursor);
             }
@@ -457,6 +594,9 @@ impl SessionRead {
                 utf8_offset: offset as u64,
                 json_fragment: text[offset..end].into(),
                 complete,
+                agent_name: turn.agent_name,
+                summary: turn.summary,
+                retries,
             });
             left -= end - offset;
             if !complete {
@@ -483,9 +623,10 @@ impl SessionRead {
             next,
         })
     }
+
     fn index_entry(&self, id: InvocationId) -> Result<InvocationIndexEntry> {
         let table = self.tx.open_table(INDEX).map_err(table_error)?;
-        decode(
+        self.decode(
             "invocation_index",
             &id.to_string(),
             table
@@ -494,9 +635,10 @@ impl SessionRead {
                 .value(),
         )
     }
-    fn change(&self, seq: ChangeSeq) -> Result<InvocationChange> {
+
+    fn stored_change(&self, seq: ChangeSeq) -> Result<StoredInvocationChange> {
         let table = self.tx.open_table(CHANGES).map_err(table_error)?;
-        let change: InvocationChange = decode(
+        let change: StoredInvocationChange = self.decode(
             "invocation_changes",
             &seq.0.to_string(),
             table
@@ -513,6 +655,7 @@ impl SessionRead {
         }
         Ok(change)
     }
+
     fn checked_invocation(&self, id: InvocationId) -> Result<InvocationChange> {
         let index = self.index_entry(id)?;
         let address = index.address.message;
@@ -520,6 +663,23 @@ impl SessionRead {
         if r.index.get(&id) != Some(&index) {
             return Err(corrupt("invocation_index", &id.to_string(), "orphan index"));
         }
+        let session = r.sessions.get(&address.session_id).ok_or_else(|| {
+            corrupt(
+                "sessions",
+                &address.session_id.to_string(),
+                "missing session",
+            )
+        })?;
+        let slot = r
+            .nodes
+            .values()
+            .filter_map(|node| match node {
+                Node::Step { slots, .. } => Some(slots.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .find(|slot| slot.binding.invocation_id == id)
+            .ok_or_else(|| corrupt("invocation_index", &id.to_string(), "missing slot"))?;
         let change = r.changes.get(&index.last_change).ok_or_else(|| {
             corrupt(
                 "invocation_changes",
@@ -527,8 +687,63 @@ impl SessionRead {
                 "missing latest change",
             )
         })?;
-        Ok(change.clone())
+        if change.sequence != index.last_change
+            || change.invocation_id != id
+            || change.stage != validate::stage(&slot.progress)
+        {
+            return Err(corrupt(
+                "invocation_changes",
+                &id.to_string(),
+                "latest change mismatch",
+            ));
+        }
+        Ok(InvocationChange {
+            sequence: index.last_change,
+            project_store_key: session.project_store_key,
+            row: operator(slot),
+        })
     }
+
+    fn resolve_change(&self, stored: StoredInvocationChange) -> Result<InvocationChange> {
+        let latest = self.checked_invocation(stored.invocation_id)?;
+        let latest_stage = match &latest.row.state {
+            OperatorInvocationState::Registered => InvocationStage::Registered,
+            OperatorInvocationState::Started => InvocationStage::Started,
+            OperatorInvocationState::Terminal { .. } => InvocationStage::Terminal,
+        };
+        let valid_relation = if stored.stage == latest_stage {
+            stored.sequence == latest.sequence
+        } else {
+            matches!(
+                (stored.stage, latest_stage),
+                (InvocationStage::Registered, InvocationStage::Started)
+                    | (InvocationStage::Registered, InvocationStage::Terminal)
+                    | (InvocationStage::Started, InvocationStage::Terminal)
+            ) && stored.sequence < latest.sequence
+        };
+        if !valid_relation {
+            return Err(corrupt(
+                "invocation_changes",
+                &stored.sequence.0.to_string(),
+                "invalid change relation",
+            ));
+        }
+        let state = match stored.stage {
+            InvocationStage::Registered => OperatorInvocationState::Registered,
+            InvocationStage::Started => OperatorInvocationState::Started,
+            InvocationStage::Terminal => latest.row.state,
+        };
+        Ok(InvocationChange {
+            sequence: stored.sequence,
+            project_store_key: latest.project_store_key,
+            row: OperatorInvocation {
+                invocation_id: stored.invocation_id,
+                binding: latest.row.binding,
+                state,
+            },
+        })
+    }
+
     pub fn query_audit(
         &self,
         filter: &AuditFilter,
@@ -551,12 +766,30 @@ impl SessionRead {
             let id = InvocationId::parse(key.value())
                 .map_err(|_| corrupt("invocation_index", "key", "invalid id"))?;
             let index: InvocationIndexEntry =
-                decode("invocation_index", key.value(), value.value())?;
-            let change = self.change(index.last_change)?;
-            if !matches(filter, &change.project_store_key, &change.row) {
+                self.decode("invocation_index", key.value(), value.value())?;
+            let stored = self.stored_change(index.last_change)?;
+            if stored.invocation_id != id {
+                return Err(corrupt(
+                    "invocation_index",
+                    &id.to_string(),
+                    "latest change mismatch",
+                ));
+            }
+            let session = self.raw_session(index.address.message.session_id)?;
+            if session.project_store_key != filter.project_store_key
+                || filter
+                    .session_id
+                    .is_some_and(|s| s != index.address.message.session_id)
+                || filter
+                    .turn_id
+                    .is_some_and(|t| t != index.address.message.turn_id)
+            {
                 continue;
             }
             let change = self.checked_invocation(id)?;
+            if !matches(filter, &change.project_store_key, &change.row) {
+                continue;
+            }
             if rows.len() == limit {
                 next = rows.last().map(|r: &OperatorInvocation| r.invocation_id);
                 break;
@@ -569,6 +802,7 @@ impl SessionRead {
             next,
         })
     }
+
     pub fn tail_audit(
         &self,
         filter: &AuditFilter,
@@ -598,68 +832,55 @@ impl SessionRead {
                     "missing sequence",
                 ));
             }
-            let change: InvocationChange = decode(
+            let stored: StoredInvocationChange = self.decode(
                 "invocation_changes",
                 &key.value().to_string(),
                 value.value(),
             )?;
             next_after = ChangeSeq(key.value());
-            if change.sequence != next_after {
+            if stored.sequence != next_after {
                 return Err(corrupt(
                     "invocation_changes",
                     &key.value().to_string(),
                     "key/value mismatch",
                 ));
             }
+            let index = self.index_entry(stored.invocation_id)?;
+            let session = self.raw_session(index.address.message.session_id)?;
+            if session.project_store_key != filter.project_store_key
+                || filter
+                    .session_id
+                    .is_some_and(|s| s != index.address.message.session_id)
+                || filter
+                    .turn_id
+                    .is_some_and(|t| t != index.address.message.turn_id)
+            {
+                continue;
+            }
+            let change = self.resolve_change(stored)?;
             if matches(filter, &change.project_store_key, &change.row) {
-                let latest = self.checked_invocation(change.row.invocation_id)?;
-                let valid_state = match &change.row.state {
-                    OperatorInvocationState::Registered => true,
-                    OperatorInvocationState::Started => !matches!(
-                        latest.row.state,
-                        OperatorInvocationState::Registered
-                            | OperatorInvocationState::Terminal {
-                                outcome: lattice_conversation::ToolResultOutcome::NotExecuted,
-                                ..
-                            }
-                    ),
-                    OperatorInvocationState::Terminal { .. } => change == latest,
-                };
-                if latest.project_store_key != change.project_store_key
-                    || latest.row.binding != change.row.binding
-                    || change.sequence > latest.sequence
-                    || !valid_state
-                {
-                    return Err(corrupt(
-                        "invocation_changes",
-                        &key.value().to_string(),
-                        "invalid change relation",
-                    ));
-                }
                 rows.push(change);
             }
         }
         if let Some(last) = rows.last() {
             let mut histories: std::collections::BTreeMap<_, _> = rows
                 .iter()
-                .map(|change| (change.row.invocation_id, (change, None)))
+                .map(|change| (change.row.invocation_id, None))
                 .collect();
-            // ponytail: 无调用前态索引，跨页须扫描日志前缀；若成本成为瓶颈再加索引。
+            // 无调用前态索引，跨页须扫描日志前缀；若成本成为瓶颈再加索引。
             // 只核验本页匹配调用，不加载无关 Session/Turn，也不以 outcome 过滤前态。
             for entry in table.range(..=last.sequence.0)? {
                 let (key, value) = entry?;
-                let change: InvocationChange = decode(
+                let change: StoredInvocationChange = self.decode(
                     "invocation_changes",
                     &key.value().to_string(),
                     value.value(),
                 )?;
-                let Some((target, previous)) = histories.get_mut(&change.row.invocation_id) else {
+                let Some(previous) = histories.get_mut(&change.invocation_id) else {
                     continue;
                 };
                 if change.sequence != ChangeSeq(key.value())
-                    || change.project_store_key != target.project_store_key
-                    || change.row.binding != target.row.binding
-                    || !validate::invocation_transition(previous.as_ref(), &change.row.state)
+                    || !validate::invocation_transition(*previous, change.stage)
                 {
                     return Err(corrupt(
                         "invocation_changes",
@@ -667,7 +888,7 @@ impl SessionRead {
                         "illegal lifecycle transition or identity mismatch",
                     ));
                 }
-                *previous = Some(change.row.state);
+                *previous = Some(change.stage);
             }
         }
         Ok(AuditTailPage {
@@ -677,6 +898,7 @@ impl SessionRead {
             done: next_after == latest_change,
         })
     }
+
     pub fn replay_audit(
         &self,
         project: &ProjectStoreKey,
@@ -684,15 +906,21 @@ impl SessionRead {
         turn: TurnId,
     ) -> Result<AuditReplay> {
         let r = self.local(session, Selection::Turn(turn))?;
-        let state = r.durable(session, turn)?;
-        if state.turn.project_store_key != *project {
+        let s = r
+            .sessions
+            .get(&session)
+            .ok_or_else(|| missing("session", session))?;
+        let steps = r.turn_steps(session, turn)?;
+        if s.project_store_key != *project {
             return Err(invalid("project", "turn project mismatch"));
         }
-        let calls = state
-            .steps
+        let calls = steps
             .iter()
-            .flat_map(validate::slots)
-            .map(|s| operator(&s))
+            .flat_map(|(_, node)| match node {
+                Node::Step { slots, .. } => slots.as_slice(),
+                _ => &[],
+            })
+            .map(operator)
             .collect();
         Ok(AuditReplay {
             session_id: session,
@@ -701,6 +929,7 @@ impl SessionRead {
             calls,
         })
     }
+
     pub fn operator_status(&self, project: &ProjectStoreKey) -> Result<OperatorStatus> {
         let latest_change = self.latest_change()?;
         let table = self.tx.open_table(CHANGES).map_err(table_error)?;
@@ -708,20 +937,23 @@ impl SessionRead {
         let mut recent = Vec::new();
         for entry in table.iter()?.rev() {
             let (key, value) = entry?;
-            let change: InvocationChange = decode(
+            let stored: StoredInvocationChange = self.decode(
                 "invocation_changes",
                 &key.value().to_string(),
                 value.value(),
             )?;
-            if change.sequence != ChangeSeq(key.value()) {
+            if stored.sequence != ChangeSeq(key.value()) {
                 return Err(corrupt(
                     "invocation_changes",
                     &key.value().to_string(),
                     "key/value mismatch",
                 ));
             }
-            if change.project_store_key == *project && seen.insert(change.row.invocation_id) {
-                let latest = self.checked_invocation(change.row.invocation_id)?;
+            let index = self.index_entry(stored.invocation_id)?;
+            let session = self.raw_session(index.address.message.session_id)?;
+            if session.project_store_key == *project && seen.insert(stored.invocation_id) {
+                let latest = self.checked_invocation(stored.invocation_id)?;
+                let change = self.resolve_change(stored)?;
                 if latest != change {
                     return Err(corrupt(
                         "invocation_changes",

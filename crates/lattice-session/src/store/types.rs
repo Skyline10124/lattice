@@ -16,7 +16,8 @@ use std::path::PathBuf;
 
 pub use super::config::{
     FrozenTurnConfig, MAX_CATALOG_SNAPSHOT_BYTES, MAX_MODEL_ATTEMPTS, MAX_MODEL_STEPS,
-    MAX_USER_INPUT_BYTES, ToolCatalogEntry, ToolCatalogSnapshot, TurnExecutionLimits,
+    MAX_USER_INPUT_BYTES, StoredTurnConfig, ToolCatalogEntry, ToolCatalogSnapshot,
+    TurnExecutionLimits,
 };
 pub use lattice_conversation::MAX_TOOL_CONTENT_BYTES;
 pub type Timestamp = chrono::DateTime<chrono::Utc>;
@@ -55,13 +56,24 @@ pub enum Node {
     UserMessage {
         parent: NodeId,
         turn_id: TurnId,
+        accepted_at: Timestamp,
+        agent_name: String,
+        model: String,
+        provider: String,
+        limits: TurnExecutionLimits,
+        #[serde(with = "hex_digest")]
+        config_digest: [u8; 32],
         message: NativeMessage<BoundToolCall>,
     },
     Step {
         parent: NodeId,
         turn_id: TurnId,
         step_ordinal: u32,
-        content: StepContent,
+        progress: StepProgress,
+        attempts: Vec<AttemptRecord>,
+        reply: Option<NativeMessage<BoundToolCall>>,
+        slots: Vec<InvocationSlot>,
+        updated_at: Timestamp,
     },
 }
 impl Node {
@@ -77,6 +89,30 @@ impl Node {
             Self::UserMessage { turn_id, .. } | Self::Step { turn_id, .. } => Some(*turn_id),
         }
     }
+    /// 已有完整回复的 Step 给出结构化回复与各槽位由阶段决定的结果；无回复节点返回 None。
+    pub fn step_content(&self) -> Option<StepContent> {
+        match self {
+            Self::Step {
+                reply: Some(assistant),
+                slots,
+                ..
+            } => Some(StepContent {
+                assistant: assistant.clone(),
+                results: slots
+                    .iter()
+                    .map(|slot| super::close::resolve_slot(slot).0)
+                    .collect(),
+            }),
+            _ => None,
+        }
+    }
+    /// Step 节点中所有安排过重试的尝试提示。
+    pub fn retry_notices(&self) -> Result<Vec<RetryNotice>> {
+        match self {
+            Self::Step { attempts, .. } => super::close::retry_notices(attempts),
+            _ => Ok(Vec::new()),
+        }
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -84,34 +120,8 @@ pub struct SessionRecord {
     pub session_id: SessionId,
     pub project_store_key: ProjectStoreKey,
     pub current: NodeId,
-    pub active_turn: Option<TurnId>,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
-}
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TurnRecord {
-    pub turn_id: TurnId,
-    pub session_id: SessionId,
-    pub user_node: NodeId,
-    pub original_input: String,
-    pub project_store_key: ProjectStoreKey,
-    pub config: FrozenTurnConfig,
-    #[serde(with = "hex_digest")]
-    pub config_digest: [u8; 32],
-    pub accepted_at: Timestamp,
-    pub state: TurnState,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
-pub enum TurnState {
-    Running,
-    Closed {
-        outcome: TurnOutcome,
-        notice: Option<Notice>,
-        usage: UsageSummary,
-        ended_at: Timestamp,
-    },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
@@ -157,6 +167,14 @@ pub enum PublicTurnOutcome {
 pub struct TurnSummary {
     pub outcome: PublicTurnOutcome,
     pub notice: Option<Notice>,
+    pub progress: StepProgress,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetryNotice {
+    pub attempt: u32,
+    pub delay_ms: u64,
+    pub notice: Notice,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -170,37 +188,18 @@ pub enum UsageSummary {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StepRecord {
-    pub key: StepKey,
-    pub attempts: Vec<AttemptRecord>,
-    pub state: StepState,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "progress", rename_all = "snake_case", deny_unknown_fields)]
+pub enum StepProgress {
+    Reserved,
+    Requesting,
+    Executing,
+    Closed { end: StepEnd },
 }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
-pub enum StepState {
-    Active {
-        active: ActiveStep,
-    },
-    Closed {
-        end: StepEnd,
-        invocations: Vec<ClosedInvocation>,
-    },
-}
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ActiveStep {
-    Requesting {
-        attempt: u32,
-    },
-    RetryReady {
-        next_attempt: u32,
-    },
-    Executing {
-        reply: NativeMessage<BoundToolCall>,
-        slots: Vec<InvocationSlot>,
-    },
+impl StepProgress {
+    pub fn is_closed(&self) -> bool {
+        matches!(self, Self::Closed { .. })
+    }
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -208,18 +207,23 @@ pub struct AttemptRecord {
     pub attempt: u32,
     pub origin: ProviderOrigin,
     pub usage: Option<TokenUsage>,
-    pub end: AttemptEnd,
+    pub progress: AttemptProgress,
+    pub retry_delay_ms: Option<u64>,
 }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "end", rename_all = "snake_case", deny_unknown_fields)]
-pub enum AttemptEnd {
-    Completed {
-        step: ModelMessageAddress,
-    },
-    Stopped {
-        cause: StopCause,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "progress", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AttemptProgress {
+    Sent,
+    Ended {
+        end: AttemptEnd,
         diagnostic: AttemptDiagnostic,
     },
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "end", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AttemptEnd {
+    Completed { step: ModelMessageAddress },
+    Stopped { cause: StopCause },
 }
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -246,48 +250,25 @@ pub enum DiagnosticPart {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "end", rename_all = "snake_case", deny_unknown_fields)]
 pub enum StepEnd {
-    Continue {
-        node: NodeId,
-    },
-    Finish {
-        node: NodeId,
-    },
-    Stop {
-        node: Option<NodeId>,
-        cause: StopCause,
-    },
-}
-impl StepEnd {
-    pub fn node(&self) -> Option<NodeId> {
-        match self {
-            Self::Continue { node } | Self::Finish { node } => Some(*node),
-            Self::Stop { node, .. } => *node,
-        }
-    }
+    Continue,
+    Finish,
+    Stop { cause: StopCause },
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InvocationSlot {
     pub binding: InvocationBinding,
-    pub state: SlotState,
+    pub progress: SlotProgress,
 }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(
-    tag = "state",
-    content = "terminal",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
-pub enum SlotState {
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "progress", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SlotProgress {
     Registered,
     Started,
-    Terminal(InvocationTerminal),
-}
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ClosedInvocation {
-    pub binding: InvocationBinding,
-    pub terminal: InvocationTerminal,
+    Terminal {
+        result: StoredToolResult,
+        evidence: InvocationEvidence,
+    },
 }
 /// 真实 receipt 只能经 `prepare_terminal` 构造，调用方不能伪造摘要或缺失证据。
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -332,6 +313,20 @@ pub struct InvocationIndexEntry {
     pub address: ToolCallAddress,
     pub last_change: ChangeSeq,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InvocationStage {
+    Registered,
+    Started,
+    Terminal,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoredInvocationChange {
+    pub sequence: ChangeSeq,
+    pub invocation_id: InvocationId,
+    pub stage: InvocationStage,
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InvocationChange {
@@ -367,10 +362,10 @@ pub struct AcceptTurn {
     pub accepted_at: Timestamp,
     pub agent_selection: AgentSelection,
 }
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AcceptedTurn {
-    Accepted(TurnRecord),
-    Existing(TurnRecord),
+    Accepted(TurnDetail),
+    Existing(TurnDetail),
 }
 #[derive(Debug, Clone)]
 pub struct AttemptStopped {
@@ -379,6 +374,7 @@ pub struct AttemptStopped {
     pub usage: Option<TokenUsage>,
     pub cause: StopCause,
     pub diagnostic: AttemptDiagnostic,
+    pub retry_delay_ms: Option<u64>,
 }
 #[derive(Clone)]
 pub struct CompleteReply {
@@ -447,55 +443,30 @@ pub enum CloseStep {
     StopExecuting { key: StepKey, stop: DispatchStop },
     StopBetweenRequests { turn_id: TurnId, cause: StopCause },
 }
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClosedStep {
-    pub record: StepRecord,
-    pub node: Option<NodeRef>,
-    pub summary: Option<TurnSummary>,
+    pub step: StepDetail,
+    pub next_node: Option<NodeRef>,
+    pub summary: TurnSummary,
 }
 #[derive(Debug)]
 pub enum AttemptStopResult {
     RetryReady { next_attempt: u32 },
-    Closed(ClosedStep),
-}
-#[derive(Debug, Clone, PartialEq)]
-pub struct DurableTurnState {
-    pub session: SessionRecord,
-    pub turn: TurnRecord,
-    pub steps: Vec<StepRecord>,
-    pub next_node: NodeId,
-}
-#[derive(Debug, Clone, PartialEq)]
-pub enum AutoClosePlan {
-    AlreadyClosed { summary: TurnSummary },
-    Close(Box<ClosureWrites>),
-}
-/// 纯规划结果仅供检查；发布时由库在同一写事务重新读取并规划。
-#[derive(Debug, Clone, PartialEq)]
-pub struct ClosureWrites {
-    pub(super) closed_step: StepRecord,
-    pub(super) node: Option<(NodeId, Node)>,
-    pub(super) turn_state: TurnState,
-    pub(super) session_current: NodeId,
-    pub(super) session_updated_at: Timestamp,
-    pub(super) changed_invocations: Vec<ClosedInvocation>,
-}
-#[derive(Debug)]
-pub enum AutoCloseResult {
-    AlreadyClosed(TurnSummary),
-    Closed(ClosedStep),
+    Closed(Box<ClosedStep>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionListRow {
     pub session_id: SessionId,
     pub project_store_key: ProjectStoreKey,
     pub current: NodeId,
     pub node_count: u64,
-    pub active_turn: Option<TurnId>,
+    pub unclosed_turn: Option<TurnId>,
     pub updated_at: Timestamp,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NodeHeader {
     pub id: NodeId,
     pub parent: Option<NodeId>,
@@ -503,57 +474,79 @@ pub struct NodeHeader {
     pub kind: NodeKind,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NodeKind {
     Root,
     UserMessage,
     Step { ordinal: u32 },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LogRow {
     pub node: NodeHeader,
     pub current: bool,
     pub turn_start: Option<TurnLogSummary>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TurnLogSummary {
     pub turn_id: TurnId,
-    pub summary: Option<TurnSummary>,
+    pub summary: TurnSummary,
     pub agent_name: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionLog {
     pub session: SessionRecord,
     pub current_agent: Option<String>,
+    pub unclosed_turn: Option<TurnId>,
     pub nodes: Vec<LogRow>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TurnDetail {
     pub turn_id: TurnId,
     pub session_id: SessionId,
     pub user_node: NodeId,
     pub agent_name: String,
     pub accepted_at: Timestamp,
-    pub ended_at: Option<Timestamp>,
-    pub summary: Option<TurnSummary>,
+    pub ended_at: Timestamp,
+    pub summary: TurnSummary,
     pub usage: UsageSummary,
     pub steps: Vec<StepDetail>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StepDetail {
+    pub node: NodeId,
     pub key: StepKey,
+    pub progress: StepProgress,
+    pub end: StepEnd,
     pub attempts: Vec<AttemptDetail>,
-    pub state: StepDetailState,
+    pub slots: Vec<SlotDetail>,
+    pub updated_at: Timestamp,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AttemptDetail {
     pub attempt: u32,
     pub origin: ProviderOrigin,
     pub usage: Option<TokenUsage>,
+    pub progress: AttemptProgressDetail,
     pub end: AttemptEndDetail,
+    pub retry_delay_ms: Option<u64>,
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "end", rename_all = "snake_case")]
+#[serde(tag = "progress", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AttemptProgressDetail {
+    Sent,
+    Ended {
+        end: AttemptEnd,
+        diagnostic: Option<String>,
+    },
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "end", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AttemptEndDetail {
     Completed {
         step: ModelMessageAddress,
@@ -564,41 +557,42 @@ pub enum AttemptEndDetail {
     },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum StepDetailState {
-    Requesting {
-        attempt: u32,
-    },
-    RetryReady {
-        next_attempt: u32,
-    },
-    Executing {
-        slots: Vec<OperatorInvocation>,
-    },
-    Closed {
-        end: StepEnd,
-        slots: Vec<OperatorInvocation>,
-    },
+#[serde(deny_unknown_fields)]
+pub struct SlotDetail {
+    pub invocation_id: InvocationId,
+    pub binding: BindingIdentity,
+    pub progress: OperatorInvocationState,
+    pub outcome: ToolResultOutcome,
+    pub reason: Option<OperatorReason>,
+    pub material: MaterialSummary,
+    pub evidence: InvocationEvidence,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HistoryAnchor {
     pub session_id: SessionId,
     pub head: NodeId,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HistoryCursor {
     pub anchor: HistoryAnchor,
     pub node: NodeId,
     pub utf8_offset: u64,
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NodeFragment {
     pub node: NodeId,
     pub utf8_offset: u64,
     pub json_fragment: String,
     pub complete: bool,
+    pub agent_name: String,
+    pub summary: TurnSummary,
+    pub retries: Vec<RetryNotice>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HistoryPage {
     pub anchor: HistoryAnchor,
     pub fragments: Vec<NodeFragment>,
@@ -610,13 +604,7 @@ pub struct DurableSnapshot {
     pub current_agent: Option<String>,
     pub selected_turn: Option<TurnDetail>,
     pub history: HistoryAnchor,
-    pub active: Option<ActiveStepSnapshot>,
-}
-#[derive(Debug, Clone, PartialEq)]
-pub struct ActiveStepSnapshot {
-    pub key: StepKey,
-    pub attempts: Vec<AttemptDetail>,
-    pub state: ActiveStep,
+    pub unclosed_step: Option<(NodeId, Node)>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Page<T, C> {
@@ -708,15 +696,15 @@ pub struct OperatorStatus {
 
 redacted_debug!(
     Node,
-    TurnRecord,
     Notice,
-    ActiveStep,
+    SlotProgress,
     AttemptDiagnostic,
     DiagnosticPart,
     InvocationTerminal,
     AcceptTurn,
     CompleteReply,
     RegisteredCalls,
+    AttemptProgressDetail,
     AttemptEndDetail,
     NodeFragment
 );
@@ -732,8 +720,9 @@ pub enum StoreError {
     NotInitialized { path: PathBuf },
     #[error("legacy stores must be archived or removed by the operator: {paths:?}")]
     LegacyStores { paths: Vec<PathBuf> },
-    #[error("unsupported version in {table}/{key}: {found}, supported {supported}")]
+    #[error("unsupported version at {path} in {table}/{key}: {found}, supported {supported}")]
     UnsupportedVersion {
+        path: PathBuf,
         table: String,
         key: String,
         found: u32,
@@ -753,8 +742,6 @@ pub enum StoreError {
     Conflict { turn_id: TurnId },
     #[error("session busy: {session_id}")]
     Busy { session_id: SessionId },
-    #[error("turn requires closure: {turn_id}")]
-    RecoveryRequired { turn_id: TurnId },
     #[error("invalid session execution lock capability")]
     InvalidLockCapability,
     #[error("invalid transition for {turn_id}: {detail}")]

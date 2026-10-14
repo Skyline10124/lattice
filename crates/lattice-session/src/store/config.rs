@@ -28,26 +28,8 @@ pub const MAX_CATALOG_SNAPSHOT_BYTES: usize = 1024 * 1024;
 /// bytes of the user message's text parts.
 pub const MAX_USER_INPUT_BYTES: usize = 2 * 1024 * 1024;
 
-/// Exact credential key denylist checked against every object key of the
-/// canonical profile/policy snapshot, at any depth. Exact lowercase match
-/// only; values are never inspected (a value that merely looks like a secret
-/// is not a credential key).
-const CREDENTIAL_KEYS: &[&str] = &[
-    "api_key",
-    "apikey",
-    "secret",
-    "secret_key",
-    "password",
-    "token",
-    "access_token",
-    "refresh_token",
-    "credential",
-    "credentials",
-    "private_key",
-];
-
 const CATALOG_DOMAIN: &[u8] = b"lattice-tool-catalog-snapshot-v1\0";
-const PROFILE_DOMAIN: &[u8] = b"lattice-frozen-config-digest-v1\0";
+const CONFIG_DOMAIN: &[u8] = b"lattice-frozen-config-digest-v1\0";
 
 fn digest_with_domain(domain: &[u8], canonical_bytes: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
@@ -61,6 +43,7 @@ fn digest_with_domain(domain: &[u8], canonical_bytes: &[u8]) -> [u8; 32] {
 /// live monotonic construction over `timeout_secs` and is never persisted;
 /// reopen does not reconstruct remaining time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TurnExecutionLimits {
     /// Frozen provider/Tool deadline in seconds.
     pub timeout_secs: u64,
@@ -76,20 +59,20 @@ impl TurnExecutionLimits {
     /// the attempt budget is between one and [`MAX_MODEL_ATTEMPTS`].
     pub fn validate(&self) -> Result<()> {
         if self.max_model_steps != MAX_MODEL_STEPS {
+            let actual = self.max_model_steps;
             return Err(invalid(
                 "limits",
                 &format!(
-                    "max_model_steps must be the code-defined {MAX_MODEL_STEPS}, got {}",
-                    self.max_model_steps
+                    "max_model_steps must be the code-defined {MAX_MODEL_STEPS}, got {actual}"
                 ),
             ));
         }
         if !(1..=MAX_MODEL_ATTEMPTS).contains(&self.max_model_attempts) {
+            let actual = self.max_model_attempts;
             return Err(invalid(
                 "limits",
                 &format!(
-                    "max_model_attempts must be between 1 and {MAX_MODEL_ATTEMPTS}, got {}",
-                    self.max_model_attempts
+                    "max_model_attempts must be between 1 and {MAX_MODEL_ATTEMPTS}, got {actual}"
                 ),
             ));
         }
@@ -99,6 +82,7 @@ impl TurnExecutionLimits {
 
 /// One enabled Tool in the frozen catalog snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolCatalogEntry {
     /// Tool method name.
     pub name: String,
@@ -115,6 +99,7 @@ pub struct ToolCatalogEntry {
 /// canonical input schemas, and the runtime build identity, plus its digest.
 /// Provider wire projection is not stored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolCatalogSnapshot {
     /// Runtime build identity of the closed Tool catalog.
     pub runtime_build_id: String,
@@ -189,8 +174,37 @@ impl ToolCatalogSnapshot {
     }
 }
 
+/// 配置表按内容摘要去重保存的大体积配置：系统提示与启用工具目录。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoredTurnConfig {
+    pub system_prompt: Option<String>,
+    pub catalog: ToolCatalogSnapshot,
+}
+
+impl StoredTurnConfig {
+    pub fn digest(&self) -> Result<[u8; 32]> {
+        let value = serde_json::to_value(self)
+            .map_err(|_| invalid("config", "cannot serialize turn config"))?;
+        let canonical = lancet_protocol::canonical_json(&value);
+        Ok(digest_with_domain(CONFIG_DOMAIN, canonical.as_bytes()))
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self
+            .system_prompt
+            .as_ref()
+            .is_some_and(|s| s.len() > 2 * 1024 * 1024)
+        {
+            return Err(invalid("config", "system prompt exceeds 2 MiB bound"));
+        }
+        self.catalog.validate()
+    }
+}
+
 /// The complete frozen effective configuration one accepted Turn runs under.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FrozenTurnConfig {
     /// Turn 的 Agent 名，用于日志及当前位置的 Agent 投影。
     pub agent_name: String,
@@ -200,12 +214,6 @@ pub struct FrozenTurnConfig {
     pub provider: String,
     /// Effective system prompt, when one is configured.
     pub system_prompt: Option<String>,
-    /// Canonical JSON of the frozen effective profile snapshot; carries no
-    /// credential keys (checked at construction).
-    pub profile_snapshot_json: String,
-    /// Canonical JSON of the frozen effective policy snapshot; carries no
-    /// credential keys (checked at construction).
-    pub policy_snapshot_json: String,
     /// Frozen enabled Tool catalog.
     pub catalog: ToolCatalogSnapshot,
     /// Frozen execution limits.
@@ -213,19 +221,22 @@ pub struct FrozenTurnConfig {
 }
 
 impl FrozenTurnConfig {
-    /// Digest over the canonical bytes of the whole frozen configuration
-    /// (profile, policy, model selection, system prompt, catalog, limits).
+    /// 提取存入配置表的部分。
+    pub fn stored(&self) -> StoredTurnConfig {
+        StoredTurnConfig {
+            system_prompt: self.system_prompt.clone(),
+            catalog: self.catalog.clone(),
+        }
+    }
+
+    /// 配置表的内容摘要，由系统提示与工具目录算出。
     pub fn digest(&self) -> Result<[u8; 32]> {
-        let value = serde_json::to_value(self)
-            .map_err(|_| invalid("config", "cannot serialize frozen config"))?;
-        let canonical = lancet_protocol::canonical_json(&value);
-        Ok(digest_with_domain(PROFILE_DOMAIN, canonical.as_bytes()))
+        self.stored().digest()
     }
 
     /// Validate a deserialized configuration: limits match the code-defined
-    /// bound, the catalog snapshot is self-consistent, the profile/policy
-    /// snapshots are canonical JSON without credential keys, and every
-    /// string field is non-empty where required.
+    /// bound, the catalog snapshot is self-consistent, and every string field
+    /// is non-empty where required.
     pub fn validate(&self) -> Result<()> {
         if self.agent_name.is_empty() || self.model.is_empty() || self.provider.is_empty() {
             return Err(invalid(
@@ -234,41 +245,8 @@ impl FrozenTurnConfig {
             ));
         }
         self.limits.validate()?;
-        self.catalog.validate()?;
-        check_no_credential_keys(&self.profile_snapshot_json, "profile")?;
-        check_no_credential_keys(&self.policy_snapshot_json, "policy")?;
+        self.stored().validate()?;
         Ok(())
-    }
-}
-
-/// Parse canonical JSON and fail closed on any exact credential key at any
-/// object depth.
-fn check_no_credential_keys(json: &str, kind: &str) -> Result<Value> {
-    let value: Value =
-        serde_json::from_str(json).map_err(|_| invalid("config", "snapshot is not valid JSON"))?;
-    if let Some(key) = find_credential_key(&value) {
-        return Err(invalid(
-            "config",
-            &format!("{kind} snapshot carries credential key '{key}'"),
-        ));
-    }
-    Ok(value)
-}
-
-fn find_credential_key(value: &Value) -> Option<&'static str> {
-    match value {
-        Value::Object(map) => map.iter().find_map(|(key, inner)| {
-            CREDENTIAL_KEYS
-                .iter()
-                .find(|candidate| key.eq_ignore_ascii_case(candidate))
-                .map(|candidate| {
-                    let _ = key;
-                    *candidate
-                })
-                .or_else(|| find_credential_key(inner))
-        }),
-        Value::Array(items) => items.iter().find_map(find_credential_key),
-        _ => None,
     }
 }
 #[cfg(test)]
@@ -303,8 +281,6 @@ mod tests {
             model: "m".to_string(),
             provider: "p".to_string(),
             system_prompt: None,
-            profile_snapshot_json: "{\"model\":\"m\"}".to_string(),
-            policy_snapshot_json: "{}".to_string(),
             catalog: catalog(),
             limits: limits(),
         }
@@ -323,20 +299,21 @@ mod tests {
     }
 
     #[test]
-    fn frozen_config_rejects_credential_keys_at_any_depth() {
+    fn stored_config_digest_depends_on_prompt_and_catalog() {
+        let base = config();
+        base.validate().expect("clean config passes");
+        let mut same_stored = base.clone();
+        same_stored.agent_name = "other".to_string();
+        assert_eq!(base.digest().unwrap(), same_stored.digest().unwrap());
+        let mut different_prompt = base.clone();
+        different_prompt.system_prompt = Some("prompt".to_string());
+        assert_ne!(base.digest().unwrap(), different_prompt.digest().unwrap());
         let mut bad = config();
-        bad.profile_snapshot_json = "{\"lancet\":{\"net\":{\"api_key\":\"sk-1\"}}}".to_string();
+        bad.system_prompt = Some("x".repeat(2 * 1024 * 1024 + 1));
         assert!(matches!(
             bad.validate(),
             Err(StoreError::InvalidInput { .. })
         ));
-        let mut nested = config();
-        nested.policy_snapshot_json = "{\"a\":[{\"PASSWORD\":\"x\"}]}".to_string();
-        assert!(matches!(
-            nested.validate(),
-            Err(StoreError::InvalidInput { .. })
-        ));
-        config().validate().expect("clean config passes");
     }
 
     #[test]

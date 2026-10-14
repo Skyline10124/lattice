@@ -67,7 +67,7 @@ pub fn stops_batch(payload: &ResultPayload) -> bool {
     )
 }
 
-/// 槽位自身决定的停止原因。NotExecuted 与 NoResult 由关闭 Step 的外部停止补写，不带原因。
+/// 槽位自身决定的停止原因。NotExecuted 与 NoResult 不带原因，由 Step 的外部停止说明。
 fn own_stop(binding: &InvocationBinding, payload: &ResultPayload) -> Option<StopCause> {
     match payload {
         ResultPayload::Indeterminate(IndeterminateCause::Cancelled) => Some(StopCause::Cancelled),
@@ -80,87 +80,89 @@ fn own_stop(binding: &InvocationBinding, payload: &ResultPayload) -> Option<Stop
     }
 }
 
+/// 按对照表从槽位 `progress` 给出结果与证据。
+pub fn resolve_slot(slot: &InvocationSlot) -> (StoredToolResult, InvocationEvidence) {
+    match &slot.progress {
+        SlotProgress::Registered => (
+            StoredToolResult {
+                invocation_id: slot.binding.invocation_id,
+                name: slot.binding.identity.method.clone(),
+                payload: ResultPayload::NotExecuted,
+            },
+            InvocationEvidence::Unavailable {
+                reason: EvidenceUnavailableReason::NotDispatched,
+            },
+        ),
+        SlotProgress::Started => (
+            StoredToolResult {
+                invocation_id: slot.binding.invocation_id,
+                name: slot.binding.identity.method.clone(),
+                payload: ResultPayload::Indeterminate(IndeterminateCause::NoResult),
+            },
+            InvocationEvidence::Unavailable {
+                reason: EvidenceUnavailableReason::NoResult,
+            },
+        ),
+        SlotProgress::Terminal { result, evidence } => (result.clone(), evidence.clone()),
+    }
+}
+
+/// 按对照表从尝试 `progress` 给出终态与诊断。
+pub fn resolve_attempt(attempt: &AttemptRecord) -> (AttemptEnd, AttemptDiagnostic) {
+    match &attempt.progress {
+        AttemptProgress::Sent => (
+            AttemptEnd::Stopped {
+                cause: StopCause::ProcessExit,
+            },
+            AttemptDiagnostic::default(),
+        ),
+        AttemptProgress::Ended { end, diagnostic } => (end.clone(), diagnostic.clone()),
+    }
+}
+
 /// 按片段顺序返回第一个由槽位自身决定的停止原因。
-pub fn first_stopping_cause(slots: &[ClosedInvocation]) -> Result<Option<StopCause>> {
-    let active: Vec<_> = slots
-        .iter()
-        .map(|s| InvocationSlot {
-            binding: s.binding.clone(),
-            state: SlotState::Terminal(s.terminal.clone()),
-        })
-        .collect();
-    validate::slot_order(&active)?;
+pub fn first_stopping_cause(slots: &[InvocationSlot]) -> Result<Option<StopCause>> {
+    validate::slot_order(slots)?;
     Ok(slots
         .iter()
-        .find_map(|s| own_stop(&s.binding, &s.terminal.result.payload)))
+        .find_map(|s| own_stop(&s.binding, &resolve_slot(s).0.payload)))
 }
 
 /// Step 的停止原因：槽位自身的停止优先；否则取关闭 Step 的外部停止。
 /// 所有槽位都已有确定结果时，只有进程退出能让 Step 停下；取消或 Deadline 应先以 Continue 关闭，
-/// 再在请求之间停止，此时返回 `None`。
-pub(super) fn step_stop_cause(
-    slots: &[ClosedInvocation],
-    stop: DispatchStop,
-) -> Result<Option<StopCause>> {
+/// 再在同一事务预留并停止下一步，此时返回 `None`。
+pub fn step_stop_cause(slots: &[InvocationSlot], stop: DispatchStop) -> Result<Option<StopCause>> {
     if let Some(cause) = first_stopping_cause(slots)? {
         return Ok(Some(cause));
     }
     let unfinished = slots
         .iter()
-        .any(|s| stops_batch(&s.terminal.result.payload));
+        .any(|s| stops_batch(&resolve_slot(s).0.payload));
     Ok((unfinished || stop == DispatchStop::ProcessExit).then(|| stop.into()))
 }
 
-pub(super) fn fill_slots(
-    slots: &[InvocationSlot],
-) -> Result<(Vec<ClosedInvocation>, Vec<ClosedInvocation>)> {
-    validate::slot_order(slots)?;
-    let mut closed = Vec::with_capacity(slots.len());
-    let mut changed = Vec::new();
-    for slot in slots {
-        let (payload, reason) = match &slot.state {
-            SlotState::Terminal(t) => {
-                closed.push(ClosedInvocation {
-                    binding: slot.binding.clone(),
-                    terminal: t.clone(),
-                });
-                continue;
-            }
-            SlotState::Started => (
-                ResultPayload::Indeterminate(IndeterminateCause::NoResult),
-                EvidenceUnavailableReason::NoResult,
-            ),
-            SlotState::Registered => (
-                ResultPayload::NotExecuted,
-                EvidenceUnavailableReason::NotDispatched,
-            ),
-        };
-        let entry = ClosedInvocation {
-            binding: slot.binding.clone(),
-            terminal: InvocationTerminal {
-                result: StoredToolResult {
-                    invocation_id: slot.binding.invocation_id,
-                    name: slot.binding.identity.method.clone(),
-                    payload,
-                },
-                evidence: InvocationEvidence::Unavailable { reason },
-            },
-        };
-        changed.push(entry.clone());
-        closed.push(entry);
+/// 按对照表从 Step 的 `progress` 与槽位给出结束方式。
+pub fn resolve_step(progress: &StepProgress, slots: &[InvocationSlot]) -> Result<StepEnd> {
+    match progress {
+        StepProgress::Reserved | StepProgress::Requesting => Ok(StepEnd::Stop {
+            cause: StopCause::ProcessExit,
+        }),
+        StepProgress::Executing => Ok(StepEnd::Stop {
+            cause: step_stop_cause(slots, DispatchStop::ProcessExit)?
+                .unwrap_or(StopCause::ProcessExit),
+        }),
+        StepProgress::Closed { end } => Ok(end.clone()),
     }
-    first_stopping_cause(&closed)?;
-    Ok((closed, changed))
 }
 
-pub(super) fn usage<'a>(steps: impl IntoIterator<Item = &'a StepRecord>) -> UsageSummary {
+pub(super) fn usage<'a>(attempts: impl IntoIterator<Item = &'a AttemptRecord>) -> UsageSummary {
     let mut total = TokenUsage {
         prompt_tokens: 0,
         completion_tokens: 0,
         total_tokens: 0,
     };
     let mut unknown = 0;
-    for attempt in steps.into_iter().flat_map(|s| &s.attempts) {
+    for attempt in attempts {
         if let Some(u) = attempt.usage {
             total = total.saturating_add(u);
         } else {
@@ -176,49 +178,30 @@ pub(super) fn usage<'a>(steps: impl IntoIterator<Item = &'a StepRecord>) -> Usag
         }
     }
 }
-pub(super) fn summary(state: &TurnState) -> Option<TurnSummary> {
-    match state {
-        TurnState::Running => None,
-        TurnState::Closed {
-            outcome, notice, ..
-        } => Some(TurnSummary {
-            outcome: match outcome {
-                TurnOutcome::Completed => PublicTurnOutcome::Completed,
-                TurnOutcome::Cancelled => PublicTurnOutcome::Cancelled,
-                TurnOutcome::Failed { .. } => PublicTurnOutcome::Failed,
-            },
-            notice: notice.clone(),
-        }),
-    }
-}
-impl TurnRecord {
-    /// 公开读取投影：已关闭 Turn 的结局与 notice，进行中为 `None`。
-    pub fn summary(&self) -> Option<TurnSummary> {
-        summary(&self.state)
-    }
-}
-pub(super) fn outcome(step: &StepRecord) -> Result<(TurnOutcome, Option<Notice>)> {
-    let StepState::Closed { end, .. } = &step.state else {
-        return Err(corrupt("steps", "end", "active final step"));
-    };
-    let cause = match end {
-        StepEnd::Finish { .. } => return Ok((TurnOutcome::Completed, None)),
-        StepEnd::Stop { cause, .. } => cause,
-        StepEnd::Continue { .. } => {
-            return Err(corrupt("steps", "end", "continue is not a turn closure"));
+
+pub(super) fn outcome(
+    progress: &StepProgress,
+    attempts: &[AttemptRecord],
+    slots: &[InvocationSlot],
+) -> Result<(TurnOutcome, Option<Notice>)> {
+    let end = resolve_step(progress, slots)?;
+    let cause = match &end {
+        StepEnd::Finish => return Ok((TurnOutcome::Completed, None)),
+        StepEnd::Stop { cause } => cause,
+        StepEnd::Continue => {
+            return Err(corrupt("nodes", "end", "continue is not a turn closure"));
         }
     };
     let text = match cause {
-        StopCause::ProviderError { .. } => match step.attempts.last().map(|a| &a.end) {
-            Some(AttemptEnd::Stopped {
-                cause: actual,
-                diagnostic,
-            }) if actual == cause => diagnostic.provider_error.clone().ok_or_else(|| {
-                corrupt("steps", "diagnostic", "missing final provider diagnostic")
-            })?,
+        StopCause::ProviderError { .. } => match attempts.last().map(resolve_attempt) {
+            Some((AttemptEnd::Stopped { cause: actual }, diagnostic)) if &actual == cause => {
+                diagnostic.provider_error.ok_or_else(|| {
+                    corrupt("nodes", "diagnostic", "missing final provider diagnostic")
+                })?
+            }
             _ => {
                 return Err(corrupt(
-                    "steps",
+                    "nodes",
                     "diagnostic",
                     "provider cause does not match final attempt",
                 ));
@@ -236,7 +219,7 @@ pub(super) fn outcome(step: &StepRecord) -> Result<(TurnOutcome, Option<Notice>)
     };
     if text.chars().count() > MAX_PROVIDER_ERROR_CHARS {
         return Err(corrupt(
-            "steps",
+            "nodes",
             "diagnostic",
             "provider diagnostic exceeds bound",
         ));
@@ -253,118 +236,61 @@ pub(super) fn outcome(step: &StepRecord) -> Result<(TurnOutcome, Option<Notice>)
     };
     Ok((outcome, Some(Notice { level, text })))
 }
-pub(super) fn closing_step(state: &DurableTurnState) -> StepRecord {
-    if let Some(last) = state.steps.last()
-        && matches!(last.state, StepState::Active { .. })
-    {
-        return last.clone();
-    }
-    StepRecord {
-        key: StepKey {
-            turn_id: state.turn.turn_id,
-            ordinal: state.steps.len() as u32,
+pub(super) fn summary(
+    progress: &StepProgress,
+    attempts: &[AttemptRecord],
+    slots: &[InvocationSlot],
+) -> Result<TurnSummary> {
+    let (outcome, notice) = outcome(progress, attempts, slots)?;
+    Ok(TurnSummary {
+        outcome: match outcome {
+            TurnOutcome::Completed => PublicTurnOutcome::Completed,
+            TurnOutcome::Cancelled => PublicTurnOutcome::Cancelled,
+            TurnOutcome::Failed { .. } => PublicTurnOutcome::Failed,
         },
-        attempts: Vec::new(),
-        state: StepState::Active {
-            active: ActiveStep::RetryReady { next_attempt: 0 },
-        },
-    }
-}
-pub(super) fn closure(
-    state: &DurableTurnState,
-    mut record: StepRecord,
-    node: Option<(NodeId, Node)>,
-    invocations: Vec<ClosedInvocation>,
-    end: StepEnd,
-    changed: Vec<ClosedInvocation>,
-    now: Timestamp,
-) -> Result<ClosureWrites> {
-    record.state = StepState::Closed { end, invocations };
-    let (outcome, notice) = outcome(&record)?;
-    let earlier = state
-        .steps
-        .iter()
-        .filter(|s| s.key.ordinal < record.key.ordinal);
-    let usage = usage(earlier.chain(std::iter::once(&record)));
-    let current = node.as_ref().map_or(state.session.current, |(id, _)| *id);
-    Ok(ClosureWrites {
-        closed_step: record,
-        node,
-        turn_state: TurnState::Closed {
-            outcome,
-            notice,
-            usage,
-            ended_at: now,
-        },
-        session_current: current,
-        session_updated_at: now,
-        changed_invocations: changed,
+        notice,
+        progress: progress.clone(),
     })
 }
-pub(super) fn node_for(
-    state: &DurableTurnState,
-    record: &StepRecord,
-    reply: lattice_conversation::NativeMessage<lattice_conversation::BoundToolCall>,
-    slots: &[ClosedInvocation],
-) -> (NodeId, Node) {
-    (
-        state.next_node,
-        Node::Step {
-            parent: state.session.current,
-            turn_id: state.turn.turn_id,
-            step_ordinal: record.key.ordinal,
-            content: StepContent {
-                assistant: reply,
-                results: slots.iter().map(|s| s.terminal.result.clone()).collect(),
-            },
-        },
-    )
-}
 
-/// 只消费持久事实，不读取时钟、配置文件、工作区或执行组件。
-pub fn plan_auto_close(state: &DurableTurnState, now: Timestamp) -> Result<AutoClosePlan> {
-    validate::durable(state)?;
-    if let Some(summary) = summary(&state.turn.state) {
-        return Ok(AutoClosePlan::AlreadyClosed { summary });
-    }
-    let mut record = closing_step(state);
-    let mut node = None;
-    let mut invocations = Vec::new();
-    let mut changed = Vec::new();
-    let mut cause = StopCause::ProcessExit;
-    if let StepState::Active { active } = &record.state {
-        match active {
-            ActiveStep::Requesting { attempt } => record.attempts.push(AttemptRecord {
-                attempt: *attempt,
-                origin: validate::provider(&state.turn.config.provider)?,
-                usage: None,
-                end: AttemptEnd::Stopped {
-                    cause: StopCause::ProcessExit,
-                    diagnostic: AttemptDiagnostic::default(),
-                },
-            }),
-            ActiveStep::RetryReady { .. } => {}
-            ActiveStep::Executing { reply, slots } => {
-                (invocations, changed) = fill_slots(slots)?;
-                cause = step_stop_cause(&invocations, DispatchStop::ProcessExit)?
-                    .unwrap_or(StopCause::ProcessExit);
-                node = Some(node_for(state, &record, reply.clone(), &invocations));
-            }
+/// 为每个带等待时长的尝试生成一条 Warn 级重试提示。
+pub fn retry_notices(attempts: &[AttemptRecord]) -> Result<Vec<RetryNotice>> {
+    let mut notices = Vec::new();
+    for attempt in attempts {
+        let Some(delay_ms) = attempt.retry_delay_ms else {
+            continue;
+        };
+        let (end, diagnostic) = resolve_attempt(attempt);
+        let AttemptEnd::Stopped {
+            cause: StopCause::ProviderError { retryable: true },
+        } = end
+        else {
+            return Err(corrupt(
+                "nodes",
+                "attempts",
+                "retry delay on non-retryable attempt",
+            ));
+        };
+        let text = diagnostic
+            .provider_error
+            .ok_or_else(|| corrupt("nodes", "diagnostic", "missing retry provider diagnostic"))?;
+        if text.chars().count() > MAX_PROVIDER_ERROR_CHARS {
+            return Err(corrupt(
+                "nodes",
+                "diagnostic",
+                "provider diagnostic exceeds bound",
+            ));
         }
+        notices.push(RetryNotice {
+            attempt: attempt.attempt,
+            delay_ms,
+            notice: Notice {
+                level: NoticeLevel::Warn,
+                text,
+            },
+        });
     }
-    let end = StepEnd::Stop {
-        node: node.as_ref().map(|(id, _)| *id),
-        cause,
-    };
-    Ok(AutoClosePlan::Close(Box::new(closure(
-        state,
-        record,
-        node,
-        invocations,
-        end,
-        changed,
-        now,
-    )?)))
+    Ok(notices)
 }
 
 pub(super) fn completed(reply: &CompleteReply, session: SessionId) -> AttemptRecord {
@@ -372,12 +298,16 @@ pub(super) fn completed(reply: &CompleteReply, session: SessionId) -> AttemptRec
         attempt: reply.key.attempt_ordinal,
         origin: reply.origin,
         usage: reply.usage,
-        end: AttemptEnd::Completed {
-            step: ModelMessageAddress {
-                session_id: session,
-                turn_id: reply.key.turn_id,
-                model_step_ordinal: reply.key.model_step_ordinal,
+        progress: AttemptProgress::Ended {
+            end: AttemptEnd::Completed {
+                step: ModelMessageAddress {
+                    session_id: session,
+                    turn_id: reply.key.turn_id,
+                    model_step_ordinal: reply.key.model_step_ordinal,
+                },
             },
+            diagnostic: AttemptDiagnostic::default(),
         },
+        retry_delay_ms: None,
     }
 }

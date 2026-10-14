@@ -26,14 +26,20 @@ macro_rules! load_local {
         let mut session = $session;
         let selection = $selection;
         let sessions = $tx.open_table(SESSIONS).map_err(table_error)?;
-        let turns = $tx.open_table(TURNS).map_err(table_error)?;
         let nodes = $tx.open_table(NODES).map_err(table_error)?;
-        let steps = $tx.open_table(STEPS).map_err(table_error)?;
+        let configs = $tx.open_table(CONFIGS).map_err(table_error)?;
+        let turn_index = $tx.open_table(TURN_INDEX).map_err(table_error)?;
         let index = $tx.open_table(INDEX).map_err(table_error)?;
         let changes = $tx.open_table(CHANGES).map_err(table_error)?;
         let meta = $tx.open_table(META).map_err(table_error)?;
         let mut r = Records {
-            last_change: decode("meta", "last_change_seq", meta.get("last_change_seq")?.ok_or_else(|| corrupt("meta", "last_change_seq", "missing metadata"))?.value())?,
+            last_change: decode(
+                "meta",
+                "last_change_seq",
+                meta.get("last_change_seq")?
+                    .ok_or_else(|| corrupt("meta", "last_change_seq", "missing metadata"))?
+                    .value(),
+            )?,
             ..Default::default()
         };
         if r.last_change != ChangeSeq(changes.last()?.map_or(0, |(key, _)| key.value())) {
@@ -42,53 +48,125 @@ macro_rules! load_local {
         let turn_id = match selection {
             Selection::Turn(id) | Selection::Accept(id) => Some(id),
             Selection::Invocation(id) => {
-                let entry: InvocationIndexEntry = decode("invocation_index", &id.to_string(), index.get(id.to_string().as_str())?.ok_or_else(|| missing("invocation", id))?.value())?;
+                let entry: InvocationIndexEntry = decode(
+                    "invocation_index",
+                    &id.to_string(),
+                    index
+                        .get(id.to_string().as_str())?
+                        .ok_or_else(|| missing("invocation", id))?
+                        .value(),
+                )?;
                 Some(entry.address.message.turn_id)
             }
             _ => None,
         };
         if let Some(id) = turn_id {
-            if let Some(value) = turns.get(id.to_string().as_str())? {
-                let turn: TurnRecord = decode("turns", &id.to_string(), value.value())?;
-                if matches!(selection, Selection::Accept(_)) { session = turn.session_id; }
-                if turn.turn_id != id { return Err(corrupt("turns", &id.to_string(), "key/value mismatch")); }
-                r.turns.insert(id, turn);
+            if let Some(value) = turn_index.get(id.to_string().as_str())? {
+                let node_ref: NodeRef = decode("turn_index", &id.to_string(), value.value())?;
+                if matches!(selection, Selection::Accept(_)) {
+                    session = node_ref.session_id;
+                }
+                r.turn_index.insert(id, node_ref);
             }
         }
-        let mut scope = Scope { session, turn: turn_id, nodes: BTreeSet::from([NodeId(0)]) };
+        let mut scope = Scope {
+            session,
+            turn: turn_id,
+            nodes: BTreeSet::from([NodeId(0)]),
+        };
+        r.node_tip = nodes
+            .range(
+                node_key(session, NodeId(0)).as_slice()
+                    ..=node_key(session, NodeId(u64::MAX)).as_slice(),
+            )?
+            .next_back()
+            .transpose()?
+            .map(|(k, _)| decode_node_key(k.value()).map(|(_, n)| n))
+            .transpose()?;
+        if let Some(tip) = r.node_tip {
+            scope.nodes.insert(tip);
+        }
         if let Some(value) = sessions.get(session.to_string().as_str())? {
             let s: SessionRecord = decode("sessions", &session.to_string(), value.value())?;
-            if s.session_id != session { return Err(corrupt("sessions", &session.to_string(), "key/value mismatch")); }
+            if s.session_id != session {
+                return Err(corrupt("sessions", &session.to_string(), "key/value mismatch"));
+            }
             scope.nodes.insert(s.current);
-            if matches!(selection, Selection::Session) { scope.turn = s.active_turn; }
             r.sessions.insert(session, s);
         }
-        if let Selection::Node(node) = selection { scope.nodes.insert(node); }
+        if let Selection::Node(node) = selection {
+            scope.nodes.insert(node);
+        }
         for n in &scope.nodes {
             if let Some(value) = nodes.get(node_key(session, *n).as_slice())? {
                 let node: Node = decode("nodes", &format!("{session}/{}", n.0), value.value())?;
-                if matches!(selection, Selection::Node(target) if target == *n) || matches!(selection, Selection::Session) && scope.turn.is_none() {
+                if matches!(selection, Selection::Node(target) if target == *n)
+                    || matches!(selection, Selection::Session)
+                        && r.sessions.get(&session).is_some_and(|s| s.current == *n)
+                {
                     scope.turn = node.turn_id();
                 }
                 r.nodes.insert((session, *n), node);
             }
         }
+        let mut turns_to_load = BTreeSet::new();
+        let mut node_turns = BTreeSet::new();
         if let Some(id) = scope.turn {
-            if !r.turns.contains_key(&id) {
-                if let Some(value) = turns.get(id.to_string().as_str())? {
-                    r.turns.insert(id, decode("turns", &id.to_string(), value.value())?);
+            turns_to_load.insert(id);
+        }
+        if let Some(tip) = r.node_tip
+            && let Some(id) = r.nodes.get(&(session, tip)).and_then(Node::turn_id)
+        {
+            turns_to_load.insert(id);
+            node_turns.insert(id);
+        }
+        if let Some(s) = r.sessions.get(&session)
+            && let Some(id) = r.nodes.get(&(session, s.current)).and_then(Node::turn_id)
+        {
+            turns_to_load.insert(id);
+            node_turns.insert(id);
+        }
+        if let Selection::Node(target) = selection
+            && let Some(id) = r.nodes.get(&(session, target)).and_then(Node::turn_id)
+        {
+            node_turns.insert(id);
+        }
+        for id in turns_to_load {
+            let from_node = node_turns.contains(&id);
+            if !r.turn_index.contains_key(&id) {
+                if let Some(value) = turn_index.get(id.to_string().as_str())? {
+                    let node_ref: NodeRef = decode("turn_index", &id.to_string(), value.value())?;
+                    r.turn_index.insert(id, node_ref);
+                } else if from_node {
+                    return Err(corrupt("turn_index", &id.to_string(), "missing turn index"));
                 }
             }
-            if let Some(t) = r.turns.get(&id) {
-                if t.session_id != session { return Err(missing("turn", id)); }
-                scope.nodes.insert(t.user_node);
-                for entry in steps.range(step_key(StepKey {turn_id:id, ordinal:0}).as_slice()..=step_key(StepKey {turn_id:id, ordinal:u32::MAX}).as_slice())? {
+            if let Some(&node_ref) = r.turn_index.get(&id) {
+                if node_ref.session_id != session {
+                    if !from_node && scope.turn == Some(id) {
+                        return Err(missing("turn", id));
+                    }
+                    return Err(corrupt(
+                        "turn_index",
+                        &id.to_string(),
+                        "turn belongs to another session",
+                    ));
+                }
+                scope.nodes.insert(node_ref.node);
+                for entry in nodes.range(
+                    node_key(session, node_ref.node).as_slice()
+                        ..=node_key(session, NodeId(u64::MAX)).as_slice(),
+                )? {
                     let (key, value) = entry?;
-                    let key = decode_step_key(key.value())?;
-                    let step: StepRecord = decode("steps", &format!("{id}/{}", key.ordinal), value.value())?;
-                    if step.key != key { return Err(corrupt("steps", &id.to_string(), "key/value mismatch")); }
-                    if let StepState::Closed {end, ..} = &step.state { scope.nodes.extend(end.node()); }
-                    r.steps.insert(key, step);
+                    let (_, n) = decode_node_key(key.value())?;
+                    let decoded: Node =
+                        decode("nodes", &format!("{session}/{}", n.0), value.value())?;
+                    if n != node_ref.node && matches!(decoded, Node::UserMessage { .. } | Node::Root)
+                    {
+                        break;
+                    }
+                    scope.nodes.insert(n);
+                    r.nodes.insert((session, n), decoded);
                 }
             }
         }
@@ -99,42 +177,110 @@ macro_rules! load_local {
                 }
             }
         }
-        // 仅取直接引用的父节点和所属 Turn 头；不追读其历史 Step/调用。
+        // 仅取直接引用的父节点和所属 Turn 的 UserMessage 节点；不追读无关分支。
         let parents: BTreeSet<_> = r.nodes.values().filter_map(Node::parent).collect();
-        let mut owners: BTreeSet<_> = r.nodes.values().filter_map(Node::turn_id).collect();
-        owners.extend(r.sessions.values().filter_map(|s| s.active_turn));
         for parent in parents {
-            if let std::collections::btree_map::Entry::Vacant(entry) = r.nodes.entry((session, parent)) {
+            if let std::collections::btree_map::Entry::Vacant(entry) =
+                r.nodes.entry((session, parent))
+            {
                 if let Some(value) = nodes.get(node_key(session, parent).as_slice())? {
-                    entry.insert(decode("nodes", &format!("{session}/{}", parent.0), value.value())?);
+                    entry.insert(decode(
+                        "nodes",
+                        &format!("{session}/{}", parent.0),
+                        value.value(),
+                    )?);
                 }
             }
         }
+        let owners: BTreeSet<_> = r.nodes.values().filter_map(Node::turn_id).collect();
         for owner in owners {
-            if let std::collections::btree_map::Entry::Vacant(entry) = r.turns.entry(owner) {
-                let value = turns.get(owner.to_string().as_str())?.ok_or_else(|| corrupt("turns", &owner.to_string(), "node owner missing"))?;
-                entry.insert(decode("turns", &owner.to_string(), value.value())?);
+            if let std::collections::btree_map::Entry::Vacant(entry) = r.turn_index.entry(owner) {
+                let value = turn_index
+                    .get(owner.to_string().as_str())?
+                    .ok_or_else(|| corrupt("turn_index", &owner.to_string(), "node owner missing"))?;
+                entry.insert(decode("turn_index", &owner.to_string(), value.value())?);
+            }
+            let node_ref = r.turn_index[&owner];
+            if node_ref.session_id != session {
+                return Err(corrupt(
+                    "turn_index",
+                    &owner.to_string(),
+                    "node owner session mismatch",
+                ));
+            }
+            if let std::collections::btree_map::Entry::Vacant(entry) =
+                r.nodes.entry((session, node_ref.node))
+            {
+                let value = nodes
+                    .get(node_key(session, node_ref.node).as_slice())?
+                    .ok_or_else(|| {
+                        corrupt(
+                            "nodes",
+                            &format!("{session}/{}", node_ref.node.0),
+                            "missing turn user node",
+                        )
+                    })?;
+                entry.insert(decode(
+                    "nodes",
+                    &format!("{session}/{}", node_ref.node.0),
+                    value.value(),
+                )?);
             }
         }
-        for n in &scope.nodes {
-            if let Some(Node::Step {turn_id, step_ordinal, ..}) = r.nodes.get(&(session, *n)) {
-                let key = StepKey {turn_id:*turn_id, ordinal:*step_ordinal};
-                if let std::collections::btree_map::Entry::Vacant(entry) = r.steps.entry(key) {
-                    let value = steps.get(step_key(key).as_slice())?.ok_or_else(|| corrupt("steps", &turn_id.to_string(), "node step missing"))?;
-                    entry.insert(decode("steps", &turn_id.to_string(), value.value())?);
-                }
+        let digests: BTreeSet<_> = r
+            .nodes
+            .values()
+            .filter_map(|n| match n {
+                Node::UserMessage { config_digest, .. } => Some(*config_digest),
+                _ => None,
+            })
+            .collect();
+        for digest in digests {
+            if let std::collections::btree_map::Entry::Vacant(entry) = r.configs.entry(digest) {
+                let key = config_key(&digest);
+                let value = configs
+                    .get(key.as_str())?
+                    .ok_or_else(|| corrupt("configs", &key, "missing referenced config"))?;
+                entry.insert(decode("configs", &key, value.value())?);
             }
         }
-        r.node_tip = nodes.range(node_key(session, NodeId(0)).as_slice()..=node_key(session, NodeId(u64::MAX)).as_slice())?.next_back().transpose()?.map(|(k, _)| decode_node_key(k.value()).map(|(_, n)| n)).transpose()?;
-        for step in r.steps.values() {
-            for slot in validate::slots(step) {
-                let id = slot.binding.invocation_id;
-                let entry: InvocationIndexEntry = decode("invocation_index", &id.to_string(), index.get(id.to_string().as_str())?.ok_or_else(|| corrupt("invocation_index", &id.to_string(), "missing index"))?.value())?;
-                let seq = entry.last_change;
-                let change = decode("invocation_changes", &seq.0.to_string(), changes.get(seq.0)?.ok_or_else(|| corrupt("invocation_changes", &seq.0.to_string(), "missing latest change"))?.value())?;
-                r.index.insert(id, entry);
-                r.changes.insert(seq, change);
-            }
+        let slots: Vec<_> = r
+            .nodes
+            .values()
+            .filter_map(|n| match n {
+                Node::Step { slots, .. } => Some(slots.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .cloned()
+            .collect();
+        for slot in slots {
+            let id = slot.binding.invocation_id;
+            let entry: InvocationIndexEntry = decode(
+                "invocation_index",
+                &id.to_string(),
+                index
+                    .get(id.to_string().as_str())?
+                    .ok_or_else(|| corrupt("invocation_index", &id.to_string(), "missing index"))?
+                    .value(),
+            )?;
+            let seq = entry.last_change;
+            let change = decode(
+                "invocation_changes",
+                &seq.0.to_string(),
+                changes
+                    .get(seq.0)?
+                    .ok_or_else(|| {
+                        corrupt(
+                            "invocation_changes",
+                            &seq.0.to_string(),
+                            "missing latest change",
+                        )
+                    })?
+                    .value(),
+            )?;
+            r.index.insert(id, entry);
+            r.changes.insert(seq, change);
         }
         validate::local(&r, &scope)?;
         Ok::<_, StoreError>((r, scope))

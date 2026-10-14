@@ -5,14 +5,18 @@
 
 use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
 
-pub fn serialize<S: Serializer>(digest: &[u8; 32], serializer: S) -> Result<S::Ok, S::Error> {
+pub(super) fn encode_hex(digest: &[u8; 32]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(64);
     for byte in digest.iter() {
         out.push(HEX[(byte >> 4) as usize] as char);
         out.push(HEX[(byte & 0x0f) as usize] as char);
     }
-    serializer.serialize_str(&out)
+    out
+}
+
+pub fn serialize<S: Serializer>(digest: &[u8; 32], serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&encode_hex(digest))
 }
 
 pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<[u8; 32], D::Error> {
@@ -20,7 +24,7 @@ pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<[u8; 32
     decode_hex(&raw).ok_or_else(|| D::Error::custom("digest must be 64 lowercase hex characters"))
 }
 
-fn decode_hex(raw: &str) -> Option<[u8; 32]> {
+pub(super) fn decode_hex(raw: &str) -> Option<[u8; 32]> {
     let bytes = raw.as_bytes();
     if bytes.len() != 64 {
         return None;

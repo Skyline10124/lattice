@@ -15,7 +15,8 @@ mod types;
 mod validate;
 mod write;
 pub use close::{
-    bound_provider_diagnostic, first_stopping_cause, plan_auto_close, prepare_terminal, stops_batch,
+    bound_provider_diagnostic, first_stopping_cause, prepare_terminal, resolve_attempt,
+    resolve_slot, resolve_step, retry_notices, step_stop_cause, stops_batch,
 };
 use codec::Records;
 use lancet_protocol::{SessionId, TurnId};
@@ -35,6 +36,7 @@ pub struct SessionStore {
 /// 在观察锁中取得后即可释放观察锁；解码与传输在锁外进行。
 pub struct SessionRead {
     tx: redb::ReadTransaction,
+    path: PathBuf,
 }
 #[derive(Debug)]
 pub struct SessionExecutionLock {
