@@ -26,7 +26,7 @@ Session（会话）保存用户的一段持续对话，以 `SessionId` 标识，
 
 会话历史是一棵树。一个会话里发生过什么，以树上的节点为唯一权威：后台为这个会话提交的每一件事都写在节点上，其他表是节点的一部分、指针，或从节点得出的索引。节点有两种：
 
-- **UserMessage**：一条用户输入。一个 Turn 从它的 UserMessage 开始。接受这一轮时确定的事实，即冻结配置及其摘要和接受时间，属于这个节点；它们体积大、读取对话时用不到，所以另存为 Turn 记录，见[表、读取范围与 rewind](#表读取范围与-rewind)。
+- **UserMessage**：一条用户输入。一个 Turn 从它的 UserMessage 开始。接受这一轮时确定的事实也记在这个节点上：`turn_id`、接受时间、agent 名、模型、provider 和执行限制。体积大的系统提示与工具目录放在配置表，节点只记它们的内容摘要，见[表、读取范围与 rewind](#表读取范围与-rewind)。
 - **Step**：这一轮的一个模型步骤。它记录这一步的各次模型请求（称为尝试）、得到的模型回复、回复发出的各个工具调用及其结果（每个调用一个槽位）、这一步怎么结束，以及最后一次推进的时间。
 
 每个 Session 建立时写入根节点 `0`：它没有内容、不属于任何 Turn，代表空对话，树始终只有这一个根。其他节点记录父节点和所属 `turn_id`，Step 节点另记它是这一轮的第几步。节点身份 NodeId 是每个 Session 内单调递增的 `u64`，写入节点时分配，第一条 UserMessage 为 `1`，父节点序号恒小于子节点；跨 Session 引用写作 `(SessionId, seq)`，用户可以直接输入序号。**当前位置**是 Session 记录中的一个 NodeId：新节点以当前位置为父，写入后当前位置前移到新节点。
@@ -39,29 +39,26 @@ Session（会话）保存用户的一段持续对话，以 `SessionId` 标识，
 
 Step 节点在这一步开始之前预留。接受一轮的事务写入 UserMessage，同时预留第 0 步；一个 Step 决定继续请求模型时，关闭它的事务同时预留下一步。预留的 Step 没有尝试，也没有回复。Turn 以完成或停止结束时不再预留。
 
-Step、尝试和调用槽位都会经历几个阶段。节点为它们各保存两项，总是在同一事务中一起写入：
+Step、尝试和调用槽位都会经历几个阶段。节点为它们各保存一项 `progress`，即最后到达的阶段：它到达时写入，只前进，此后不因关闭、取消或进程退出而改动。最后一个阶段带着实际结果；停在其他阶段时，结论由阶段本身确定，不另设字段：
 
-- **`progress`**：最后到达的阶段。到达时写入，只前进，此后不因关闭、取消或进程退出而改动。
-- **结论**：停在这个阶段时的结果。到达一个阶段就写下它对应的结论，阶段前进或实际结果到达时覆写。
-
-| 对象 | `progress` | 此时的结论 |
+| 对象 | `progress` | 停在这里时的结论 |
 | --- | --- | --- |
-| Step | 已预留、请求中 | 停止，原因为进程退出 |
-| Step | 执行中 | 停止，原因由各槽位的结果推出，推不出时为进程退出 |
-| Step | 已关闭 | 继续、完成，或停止及实际原因 |
-| 尝试 | 已发出 | 停止，原因为进程退出 |
-| 尝试 | 已结束 | 完成，或停止及实际原因与诊断 |
-| 调用槽位 | 已登记 | NotExecuted |
-| 调用槽位 | 已开始 | Indeterminate，没有取得结果 |
-| 调用槽位 | 已返回 | LANCET 给出的结果 |
+| Step | `Reserved`、`Requesting` | 停止，原因为进程退出 |
+| Step | `Executing` | 停止，原因由各槽位的结果推出，推不出时为进程退出 |
+| Step | `Closed { end }` | `end`：继续、完成，或停止及实际原因 |
+| 尝试 | `Sent` | 停止，原因为进程退出 |
+| 尝试 | `Ended { end, diagnostic }` | `end`：完成，或停止及实际原因 |
+| 调用槽位 | `Registered` | NotExecuted |
+| 调用槽位 | `Started` | Indeterminate，没有取得结果 |
+| 调用槽位 | `Terminal { result, evidence }` | `result`：LANCET 给出的结局与载荷 |
 
-所以树上没有空缺：任何时刻，每个调用槽位都有结果，每次尝试都有终态，每个 Step 都有结束方式。执行者在任何时刻消失，树上已有的内容就是这一轮的结局，不需要事后补写。各阶段的事务和推导规则见 [Step 执行与结果保存](#step-执行与结果保存)。
+这张表是结论的唯一来源。会话库读取时按它给出每个对象的结论，所有读者经同一处取得。所以树上没有空缺：任何时刻，每个调用槽位都有结果，每次尝试都有终态，每个 Step 都有结束方式。执行者在任何时刻消失，树上已有的内容就是这一轮的结局，不需要事后补写。各阶段的事务和推导规则见 [Step 执行与结果保存](#step-执行与结果保存)。
 
-树只追加节点。已写入的节点里只有一个可以改写：Session 中序号最大的节点，且它是尚未到达“已关闭”的 Step。改写由执行这一轮的协调层在 `progress` 前进时提交。UserMessage、已关闭的 Step，以及之后已经写入新节点的 Step 不再改变。
+树只追加节点。已写入的节点里只有一个可以改写：Session 中序号最大的节点，且它是尚未到达 `Closed` 的 Step。改写由执行这一轮的协调层在 `progress` 前进时提交。UserMessage、已关闭的 Step，以及之后已经写入新节点的 Step 不再改变。
 
-`progress` 没有到达“已关闭”的 Step，可能仍在执行，也可能执行者已经消失、它就停在那一步。两种情况在树上没有区别，区别在于后台是否仍持有这一轮的 Owner，见[执行者消失后的 Turn](#执行者消失后的-turn)。不是 Session 最后接受的那一轮，一定不在执行。
+`progress` 没有到达 `Closed` 的 Step，可能仍在执行，也可能执行者已经消失、它就停在那一步。两种情况在树上没有区别，区别在于后台是否仍持有这一轮的 Owner，见[执行者消失后的 Turn](#执行者消失后的-turn)。不是 Session 最后接受的那一轮，一定不在执行。
 
-Turn 没有单独保存的结局，也没有单独的结束节点。它的结局由最后一个 Step 的结论决定；最后一个 Step 到达“已关闭”且结论为完成或停止时，这一轮关闭。对外的读取投影见[关闭 Step 与 Turn](#关闭-step-与-turn)。
+Turn 没有单独保存的结局，也没有单独的结束节点。它的结局由最后一个 Step 的结论决定；最后一个 Step 以完成或停止到达 `Closed` 时，这一轮关闭。对外的读取投影见[关闭 Step 与 Turn](#关闭-step-与-turn)。
 
 #### 表、读取范围与 rewind
 
@@ -70,18 +67,19 @@ Turn 没有单独保存的结局，也没有单独的结束节点。它的结局
 | 记录 | 键 | 内容 | 写入与修改 |
 | --- | --- | --- | --- |
 | 节点 | `(SessionId, seq)` | 根节点、UserMessage 与 Step，如上 | 追加；只有末端未关闭的 Step 可改写 |
-| Turn 记录 | `TurnId` | UserMessage 节点的接受部分：所属 Session、UserMessage 节点序号、冻结配置及其摘要、接受时间。同时用于按 TurnId 找回请求 | 与 UserMessage 节点同事务写入，不再修改 |
+| 配置 | 内容摘要 | 一轮所用的系统提示与工具目录，由 UserMessage 节点按摘要引用；内容相同的只存一份 | 接受时尚无同一摘要才写入，不再修改 |
+| TurnId 索引 | `TurnId` | 这一轮 UserMessage 节点的位置 `(SessionId, seq)`，用于按 TurnId 找回请求、取消和查看详情 | 与 UserMessage 节点同事务写入 |
 | Session 记录 | `SessionId` | 身份、项目绑定、创建与更新时间；当前位置这个指针 | 建立时写入；当前位置随节点写入和 `rewind` 移动 |
 | InvocationId 索引 | `InvocationId` | 调用所在的 Step 与片段位置 | 登记调用时写入 |
-| 调用变更日志 | 全局单调变更序号 | 每次槽位 `progress` 前进后的一行，供 `audit --tail` 按序读取 | 只追加 |
+| 调用变更日志 | 全局单调变更序号 | 每次槽位 `progress` 前进后的一行，只记 InvocationId 与到达的阶段，不复制槽位内容。`audit --tail` 按序读取，`Terminal` 的内容经 InvocationId 索引从节点读取 | 只追加 |
 
-Turn 记录不含接受之后发生的任何事：结局、notice、usage 汇总和结束时间都从这一轮的 Step 节点得出，见[关闭 Step 与 Turn](#关闭-step-与-turn)。InvocationId 索引与调用变更日志是派生记录，与节点在同一事务中更新。
+一轮的结局、notice、usage 汇总和结束时间都从它的 Step 节点得出，见[关闭 Step 与 Turn](#关闭-step-与-turn)。配置表以内容摘要为键，键由内容算出，不会与引用它的节点不一致。TurnId 索引、InvocationId 索引与调用变更日志是派生记录，与节点在同一事务中更新。
 
 读取对话只有一种范围：从根到 Session 当前位置的路径。发给模型的上下文取这条路径上的 UserMessage 和已有回复的 Step；没有回复的 Step 不发给 provider，历史读取照常带回。根节点 `0` 不含内容，不发给 provider。要看其他分叉上的对话，先 `rewind` 到那里。
 
-`rewind N` 只有一种语义：把当前位置移到节点 N 本身，下一次提交的新节点以 N 为父。它只移动这个指针，不在树上写入节点。改写某条用户消息就是退回到它的父节点再发送，改写第一条消息就是 `rewind 0`。退回到一个没有回复的 Step，与退回到它的父节点，发给模型的上下文相同。会话层不提供“编辑消息”等第二种入口；前端可以把选中消息并改写的交互翻译为这两步。
+`rewind N` 只有一种语义：把当前位置移到节点 N 本身，下一次提交的新节点以 N 为父。它只移动这个指针，不在树上写入节点：对树的操作不进入树的记录。改写某条用户消息就是退回到它的父节点再发送，改写第一条消息就是 `rewind 0`。退回到一个没有回复的 Step，与退回到它的父节点，发给模型的上下文相同。会话层不提供“编辑消息”等第二种入口；前端可以把选中消息并改写的交互翻译为这两步。
 
-Session 不保存“当前 agent”。agent 是 Turn 冻结配置的一部分，当前 agent 即当前位置所属 Turn 的 agent；提交时显式指定 agent 可以覆盖它。退回旧节点后，当前 agent 自然回到当时的 agent。当前位置为根节点 `0` 时没有当前 agent，提交必须指定 agent，与新建 Session 相同。
+Session 不保存“当前 agent”。agent 名记在每一轮的 UserMessage 节点上，当前 agent 即当前位置所属 Turn 的 agent；提交时显式指定 agent 可以覆盖它。退回旧节点后，当前 agent 自然回到当时的 agent。当前位置为根节点 `0` 时没有当前 agent，提交必须指定 agent，与新建 Session 相同。
 
 ### 组件与接口
 
@@ -96,7 +94,7 @@ LocalClient 用 `LocalTurn` 组织本客户端一次提交或观察交互。Loca
 | 执行协调 TurnCoordinator | 推进一次 Turn：请求模型、组织工具调用、把每一步进度写入会话库，最后关闭 Step 与 Turn |
 | 模型驱动 ModelStepDriver / LLM | 接收对话和本次配置，请求模型，将响应交回 TurnCoordinator |
 | 工具执行 LANCET | 接收已登记的工具调用，按权限执行，向 TurnCoordinator 返回执行结果、返回内容及证据 |
-| 会话库 `lattice-session` | 保存 Session 记录、会话树、Turn 记录与 InvocationId 索引；每次推进是一个事务 |
+| 会话库 `lattice-session` | 保存 Session 记录、会话树、配置表、TurnId 索引与 InvocationId 索引；每次推进是一个事务 |
 
 前端负责用户交互，LocalClient 负责操作交付与持续观察，后台负责任务生命周期，TurnCoordinator 负责持久执行流程，会话库负责事实的保存与一致性。[实现模块与公开操作](#实现模块与公开操作)进一步说明各 crate 和操作接口。
 
@@ -104,11 +102,11 @@ LocalClient 用 `LocalTurn` 组织本客户端一次提交或观察交互。Loca
 
 1. **提交任务。** CLI/TUI 收到“读取文件并解释”的输入，保留 TurnId、原始输入和工作区；向已有 Session 提交时同时保留 SessionId，新会话则留空。请求与配置来源交给 `LocalClient::start_turn_with`，前端持有返回的 LocalTurn。找回已有请求和忙时处理见[请求身份与找回](#请求身份与找回)。
 2. **准备并交付配置。** LocalClient 仅在新执行需要配置时调用前端提供的加载闭包，取得冻结的模型选择、系统提示、工具策略和连接材料，以原请求身份交付。Backend 实际接管带配置操作时建立贯穿准备与执行的取消载体，随后核验配置并交给执行核心。字段和来源见[执行配置冻结](#执行配置冻结)。
-3. **确认接受。** 执行核心核对请求身份、项目绑定和输入，在一个事务中写入 UserMessage 节点、Turn 记录和预留的第 0 步，并把 Session 的当前位置移到预留的 Step；新会话的 Session 记录也在这个事务中创建。事务提交后，后台返回接受回执，由 LocalTurn 交给前端显示；后台承担后续执行与关闭责任。精确接受条件见[请求接受](#请求接受)。
+3. **确认接受。** 执行核心核对请求身份、项目绑定和输入，在一个事务中写入 UserMessage 节点、TurnId 索引和预留的第 0 步（配置表中还没有这份配置时一并写入），并把 Session 的当前位置移到预留的 Step；新会话的 Session 记录也在这个事务中创建。事务提交后，后台返回接受回执，由 LocalTurn 交给前端显示；后台承担后续执行与关闭责任。精确接受条件见[请求接受](#请求接受)。
 4. **同时观察进度。** LocalTurn 订阅该 Turn，先得到快照，再按序接收后续事件；前端消费更新并渲染，后台同时继续执行。衔接方式见[观察与重连](#观察与重连)。
-5. **请求模型。** TurnCoordinator 把预留的 Step 推进到“请求中”并记下第一次尝试，再把当前位置的对话、本次模型参数和启用工具交给 ModelStepDriver。驱动器通过 LLM 连接请求模型；在本例中，模型返回读取文件的工具调用。
-6. **登记并执行工具。** TurnCoordinator 核验完整回复，在一个事务中把回复写入这个 Step 节点、为每个调用建立槽位并分配 InvocationId，槽位此时的结果是 NotExecuted。执行某个调用前，先把该槽位推进到“已开始”并提交；LANCET 随后按权限读取文件，返回执行结果、内容和证据。详细顺序见[调用槽位](#调用槽位)。
-7. **保存调用结果。** TurnCoordinator 把该槽位推进到“已返回”，用 LANCET 给出的结果、载荷和证据覆写它。
+5. **请求模型。** TurnCoordinator 把预留的 Step 推进到 `Requesting` 并记下第一次尝试，再把当前位置的对话、本次模型参数和启用工具交给 ModelStepDriver。驱动器通过 LLM 连接请求模型；在本例中，模型返回读取文件的工具调用。
+6. **登记并执行工具。** TurnCoordinator 核验完整回复，在一个事务中把回复写入这个 Step 节点、为每个调用建立槽位并分配 InvocationId，槽位停在 `Registered`，此时的结论是 NotExecuted。执行某个调用前，先把该槽位推进到 `Started` 并提交；LANCET 随后按权限读取文件，返回执行结果、内容和证据。详细顺序见[调用槽位](#调用槽位)。
+7. **保存调用结果。** TurnCoordinator 把该槽位推进到 `Terminal`，同时写入 LANCET 给出的结果、载荷和证据。
 8. **关闭 Step 并继续。** 全部槽位都已返回后，TurnCoordinator 在一个事务中以 `Continue` 关闭这个 Step、预留下一个 Step，并把当前位置前移到它，然后开始下一步骤。ModelStepDriver 接收带有 ToolResult 的对话，模型据文件内容生成解释。
 9. **关闭 Turn。** 模型给出不含工具调用的完整回答后，协调层在一个事务中把回复写入 Step 节点并以 `Finish` 关闭它。这个 Step 之后不再预留，Turn 随之关闭。见[关闭 Step 与 Turn](#关闭-step-与-turn)。
 10. **取得结果。** 观察者读到最新事件且 Turn 已关闭时收到结束。LocalTurn 交付结局，前端显示；此前离开的用户也可以重新连接，从同一批节点读到同一结局。
@@ -168,7 +166,7 @@ sequenceDiagram
 | `lattice-agent::ModelStepDriver` | 接收冻结请求和对话历史，驱动一次 provider 请求，向协调层返回类型化尝试结果，并发送非阻塞观察回调 |
 | `lattice-llm` | 使用本 Turn 的模型连接材料，完成 provider wire 请求、流事件适配和对话投影 |
 | `lattice-conversation` | 维护有序消息、ToolCall typestate、调用结果、双摘要、尝试诊断和 usage 等纯数据 |
-| `lattice-session` | 拥有全局会话库 `lattice.redb`：Session 记录、会话树、Turn 记录、InvocationId 索引与调用变更日志；提供带类型的事务操作、结论的推导与读取校验，以及操作员只读查询 |
+| `lattice-session` | 拥有全局会话库 `lattice.redb`：Session 记录、会话树、配置表、TurnId 索引、InvocationId 索引与调用变更日志；提供带类型的事务操作、由阶段给出结论、读取校验，以及操作员只读查询 |
 
 公开操作按用户要完成的工作划分：
 
@@ -184,7 +182,7 @@ sequenceDiagram
 
 CLI 的 `lattice session` 子命令为 `send`、`rewind`、`list`、`log`、`turn` 和 `cancel`，顶层 `lattice run` 是 `session send` 的别名。`session send` 不带 `--session` 时创建新 Session：项目绑定从当前目录解析，`--agent` 必填；带 `--session` 时向已有 Session 提交，`--agent` 可选，当前位置为根节点时必填。`session turn` 查看单个 Turn 的详情，`--follow` 用于断线后继续观察。TUI 不带 Session 启动时，在首次提交时创建 Session。
 
-`session turn` 的详情（含 `--json`）给出 `TurnSummary`，并按步骤序号列出该 Turn 的全部 Step 节点：节点序号、`progress`、`end` 的类型与原因，每次尝试的 `progress`、终态与原因，以及各槽位的 `progress` 与结果。它不按路径读取对话。命令行按 TurnId 读取一个 Turn 的全部 Step 只有这一个入口；观察中的 Step 节点另随关闭事件与快照交付，见[观察与重连](#观察与重连)。输出不含冻结配置中的秘密。
+`session turn` 的详情（含 `--json`）给出 `TurnSummary`，并按步骤序号列出该 Turn 的全部 Step 节点：节点序号、`progress` 及其给出的结束方式与原因，每次尝试的 `progress` 及其给出的终态与原因，以及各槽位的 `progress` 及其给出的结果。它不按路径读取对话。命令行按 TurnId 读取一个 Turn 的全部 Step 只有这一个入口；观察中的 Step 节点另随关闭事件与快照交付，见[观察与重连](#观察与重连)。输出不含冻结配置中的秘密。
 
 `LocalTurn::next` 交付 LocalUpdate，取消一次等待不会丢失已接收更新或半帧；已完成后句柄仍可显式重连。普通退出使用 `detach` 取得最后已知提交、取消、状态和读取诊断，或由 Drop 停止本地后续工作；两者都不新增取消。
 
@@ -205,8 +203,9 @@ CLI 的 `lattice session` 子命令为 `send`、`rewind`、`list`、`log`、`tur
 执行核心持有 SessionExecutionLock 后核对身份、项目绑定与输入；新接受还验证用户消息、工具目录及执行限制。接受事务写入以下事实：
 
 - UserMessage 节点，父节点为 Session 当前位置；新会话先写入根节点 `0`，第一条 UserMessage 为 `1`、父节点为 `0`。
-- Turn 记录：TurnId、SessionId、UserMessage 节点序号、`FrozenTurnConfig` 及其摘要和接受时间。原始输入取自 UserMessage 节点，项目绑定取自 Session 记录，Turn 记录不另存一份。
-- 预留的第 0 步，父节点为 UserMessage：没有尝试和回复，`end` 为 `Stop { ProcessExit }`。
+- UserMessage 节点同时记下 `turn_id`、接受时间、agent 名、模型、provider、执行限制和配置摘要。系统提示与工具目录按摘要写入配置表，已有同一摘要时不再写。项目绑定取自 Session 记录，不另存。
+- TurnId 索引：TurnId 指向这个 UserMessage 节点。
+- 预留的第 0 步，父节点为 UserMessage：没有尝试和回复，停在 `Reserved`。
 - Session 记录的当前位置指向预留的 Step；新会话的 Session 记录与根节点在同一事务创建。
 
 这个事务提交是请求接受的持久边界。用户消息为 User 角色的 text parts，大小规则见[输入与传输限制](#输入与传输限制)。
@@ -221,19 +220,19 @@ CLI 的 `lattice session` 子命令为 `send`、`rewind`、`list`、`log`、`tur
 
 提交端在需要新执行时读取配置来源。冻结将“以后再读某路径或环境变量”变成“这次 Turn 使用的确定值”，避免同后台的并发 Turn 相互改变配置。工作区 `.env` 的信任边界、唯一 loader 和优先级继续由 [CLI 环境边界](../../crates/lattice-cli/AGENTS.md#环境与输出边界)维护。
 
-`FrozenConfiguration` 是仅用于私有 IPC 的提交输入，含有效 `profile_toml`、已经加载的 `system_prompt` 和 `ConnectionMaterial`。后台将它转换为执行所需的 profile 和本 Turn 的 LlmConnection。`FrozenTurnConfig` 则是协调层在接受时构造并写入 Turn 记录的非秘密执行事实，供执行、结果投影、`log` 显示和当前 agent 判定使用。
+`FrozenConfiguration` 是仅用于私有 IPC 的提交输入，含有效 `profile_toml`、已经加载的 `system_prompt` 和 `ConnectionMaterial`。后台将它转换为执行所需的 profile 和本 Turn 的 LlmConnection。`FrozenTurnConfig` 则是协调层在接受时构造的非秘密执行事实，供执行、结果投影、`log` 显示和当前 agent 判定使用：agent 名、模型、provider 和执行限制记在 UserMessage 节点上，其余按内容摘要写入配置表。
 
 | 字段类别 | 来源 | 冻结时点 | 接收/持有者 | 是否持久化 | 用途 |
 | --- | --- | --- | --- | --- | --- |
-| `FrozenConfiguration.profile_toml` | 提交端加载的 AgentProfile；策略文件解析所得有效工作区、网络和观察限制填回具体字段，清除待重读的 `lancet.policy` 引用 | 新执行配置提交前 | 后台转换为 LoadedAgentProfile，交执行核心 | IPC 容器本身不保存；非秘密内容进入下述执行快照 | 固定 Agent/model 选择、LLM 重试与超时、启用工具及能力策略 |
-| `FrozenConfiguration.system_prompt` | 提交端依 profile 加载后的实际文本 | 同上 | 后台执行核心及模型请求 | 文本进入 FrozenTurnConfig 及 profile 快照 | 固定本 Turn 的系统指令，执行时使用已加载内容 |
-| `ConnectionMaterial.alias/provider/provider_model/base_url` | 提交端 ModelRouter 按模型选择及有效 endpoint 来源解析 | 同上 | 本 Turn 的 LlmConnection | 连接材料不持久化；执行模型和 provider 标识另存于 FrozenTurnConfig | 路由到确定 provider、实际模型和 endpoint；后台校验模型 alias 与 profile 一致 |
+| `FrozenConfiguration.profile_toml` | 提交端加载的 AgentProfile；策略文件解析所得有效工作区、网络和观察限制填回具体字段，清除待重读的 `lancet.policy` 引用 | 新执行配置提交前 | 后台转换为 LoadedAgentProfile，交执行核心 | IPC 容器本身不保存；执行事实按下表记在 UserMessage 节点或配置表 | 固定 Agent/model 选择、LLM 重试与超时、启用工具及能力策略 |
+| `FrozenConfiguration.system_prompt` | 提交端依 profile 加载后的实际文本 | 同上 | 后台执行核心及模型请求 | 文本进入 FrozenTurnConfig，保存在配置表 | 固定本 Turn 的系统指令，执行时使用已加载内容 |
+| `ConnectionMaterial.alias/provider/provider_model/base_url` | 提交端 ModelRouter 按模型选择及有效 endpoint 来源解析 | 同上 | 本 Turn 的 LlmConnection | 连接材料不持久化；执行模型和 provider 标识记在 UserMessage 节点上 | 路由到确定 provider、实际模型和 endpoint；后台校验模型 alias 与 profile 一致 |
 | `ConnectionMaterial.api_key` | 提交端按既有优先级读取的有效凭据值 | 同上 | 私有 IPC、后台本 Turn 的 LlmConnection | 否 | 认证 provider 请求 |
 | `ConnectionMaterial.roots_der` | 提交端读取的实际 Linux TLS 根证书内容，或显式提供的 DER 内容 | 同上 | provider 连接与本 Turn 的 Tool Host 信任配置 | 否 | 验证 TLS 连接；传递证书内容而非要求后台重读证书路径 |
-| `FrozenTurnConfig.agent_name/model/provider/system_prompt` | 已核验提交输入及模型解析结果 | 接受事务前 | TurnCoordinator、Turn 记录及投影 | 是 | 标明此次执行身份、模型与系统指令；当前 agent 由此判定 |
-| `FrozenTurnConfig.profile_snapshot_json/policy_snapshot_json` | 有效 profile 与 system prompt 的快照、有效 LANCET 配置的快照 | 同上 | TurnCoordinator、Turn 记录 | 是，非秘密 JSON | 固定配置与策略事实，参与配置摘要 |
-| `FrozenTurnConfig.catalog` | 本次运行时的启用工具目录 | 同上 | 模型投影、调用登记验证、Turn 记录 | 是 | 保存运行时构建身份、按工具名排序的 entries 及摘要；entry 含名称、Descriptor 身份、描述、规范输入 schema |
-| `FrozenTurnConfig.limits` | profile 超时、每步尝试数及代码定义的步骤上限 | 同上 | 执行核心、Turn 记录 | 秒数与计数持久化，单调时钟 deadline 不持久化 | 限制后续 provider/Tool 启动，并解释尝试预算 |
+| `FrozenTurnConfig.agent_name/model/provider` | 已核验提交输入及模型解析结果 | 接受事务前 | TurnCoordinator、UserMessage 节点及投影 | 是 | 标明此次执行身份与模型；当前 agent 由此判定 |
+| `FrozenTurnConfig.system_prompt` | 提交端加载的系统提示 | 同上 | 模型请求、配置表 | 是 | 固定本 Turn 的系统指令 |
+| `FrozenTurnConfig.catalog` | 本次运行时的启用工具目录 | 同上 | 模型投影、调用登记验证、配置表 | 是 | 保存运行时构建身份、按工具名排序的 entries 及摘要；entry 含名称、Descriptor 身份、描述、规范输入 schema |
+| `FrozenTurnConfig.limits` | profile 超时、每步尝试数及代码定义的步骤上限 | 同上 | 执行核心、UserMessage 节点 | 秒数与计数持久化，单调时钟 deadline 不持久化 | 限制后续 provider/Tool 启动，并解释尝试预算 |
 
 类型与转换来源为[私有冻结输入](../../crates/lattice-api/src/local/config.rs)、[连接材料](../../crates/lattice-llm/src/connection.rs)和[接受接线](../../crates/lattice-api/src/turn/live.rs)；持久冻结事实的类型由 `lattice-session` 维护。目录保存中立契约，provider wire 投影由 LLM 层按请求生成。
 
@@ -266,7 +265,7 @@ TOML 解析错误给出路径、行号与解析器的错误描述，不附源码
 
 ### 模型请求与执行预算
 
-一次 provider 请求以 `ModelAttemptKey` 标识，包含 TurnId、步骤序号和该步骤的尝试序号。一次尝试对应一个被 provider 接收的请求：HTTP 库对 provider 明确没有处理的请求的重发（复用的空闲连接在请求发出前已被服务端关闭；HTTP/2 `GOAWAY(NO_ERROR)` 或 `REFUSED_STREAM`，RFC 9113 §8.7）计入同一次尝试，不另记尝试，只在日志中留下记录，见 [`lattice-llm`](../../crates/lattice-llm/AGENTS.md)。协调层每次先在 Step 节点新增这次尝试并提交，此时它是“已发出”，终态为 `Stopped { ProcessExit }`；再让 ModelStepDriver 打开和消费流。请求结束时，把这次尝试推进到“已结束”，终态覆写为实际结果：
+一次 provider 请求以 `ModelAttemptKey` 标识，包含 TurnId、步骤序号和该步骤的尝试序号。一次尝试对应一个被 provider 接收的请求：HTTP 库对 provider 明确没有处理的请求的重发（复用的空闲连接在请求发出前已被服务端关闭；HTTP/2 `GOAWAY(NO_ERROR)` 或 `REFUSED_STREAM`，RFC 9113 §8.7）计入同一次尝试，不另记尝试，只在日志中留下记录，见 [`lattice-llm`](../../crates/lattice-llm/AGENTS.md)。协调层每次先在 Step 节点新增这次尝试并提交，此时它是 `Sent`，停在这里的结论为 `Stopped { ProcessExit }`；再让 ModelStepDriver 打开和消费流。请求结束时，把这次尝试推进到 `Ended`，带上实际终态：
 
 ```text
 AttemptEnd = Completed { step }
@@ -288,7 +287,7 @@ cause = ProviderError { retryable }
 | `Completed`，回复无工具调用 | 尝试终态、回复与 Step 的 `Finish` 关闭在同一事务写入，见[关闭 Step 与 Turn](#关闭-step-与-turn) |
 | `Completed`，回复含工具调用 | 尝试终态与完整回复、调用槽位在同一事务写入，进入[调用槽位](#调用槽位)的执行 |
 | 完整输出的批次校验失败 | 写入 `Stopped { InvalidBatch }`，整批拒绝、不重试，以 `Stop` 关闭 |
-| 进程突然退出，实际结果未保存 | 这次尝试停在“已发出”，终态就是发出时写下的 `Stopped { ProcessExit }`；Step 的 `end` 同为进程退出，此后没有写入，见[执行者消失后的 Turn](#执行者消失后的-turn) |
+| 进程突然退出，实际结果未保存 | 这次尝试停在 `Sent`，结论为 `Stopped { ProcessExit }`；Step 停在 `Requesting`，结论同为进程退出，此后没有写入，见[执行者消失后的 Turn](#执行者消失后的-turn) |
 
 被重试取代的失败尝试留在 Step 节点里，连同为它安排的等待时长。带有等待时长的尝试就是安排过重试的尝试：历史读取为每个这样的尝试给出一条 Warn 级 notice，文字取该尝试的诊断，并带回等待时长，所以重新打开会话后看到的重试提示与实时一致。导致 Step 停止的那次尝试没有等待时长，不另给提示，由 Turn 结局的 notice 说明。
 
@@ -336,57 +335,52 @@ Step 节点保存这一步的全部内容：
 
 | 部分 | 内容 |
 | --- | --- |
-| `progress` 与 `end` | 这一步最后到达的阶段，以及停在这个阶段时的结束方式 |
-| 尝试 | 按尝试序号排列的各次模型请求：provider 来源、usage、`progress` 与终态；失败后安排了重试的尝试另有等待时长 |
+| `progress` | 这一步最后到达的阶段；`Closed` 带结束方式 `end` |
+| 尝试 | 按尝试序号排列的各次模型请求：provider 来源、usage 与 `progress`，`Ended` 带终态与诊断；失败后安排了重试的尝试另有等待时长 |
 | 回复 | 完整模型回复；还没有完整回复时为空 |
-| 槽位 | 回复中每个工具调用一个，顺序与回复一致：调用的身份、`progress`、结果载荷与证据 |
+| 槽位 | 回复中每个工具调用一个，顺序与回复一致：调用的身份与 `progress`，`Terminal` 带结局、载荷与证据 |
 | 推进时间 | 最后一次推进这一步的时间 |
 
 ```text
 StepEnd = Continue | Finish | Stop { cause }
 ```
 
-每次推进是一个会话库事务，事务内不等待模型、Tool 或网络。事务写入到达的阶段和它对应的结论，并更新推进时间：
+每次推进是一个会话库事务，事务内不等待模型、Tool 或网络。事务写入到达的阶段，最后一个阶段连同实际结果一起写入，并更新推进时间：
 
 | 事务 | 写入内容 | 之后的状态 |
 | --- | --- | --- |
-| 接受 | UserMessage 节点、Turn 记录、预留的第 0 步 | Step“已预留”，`end` 为 `Stop { ProcessExit }` |
-| 开始请求 | Step 推进到“请求中”；新增一次尝试，“已发出”，终态为 `Stopped { ProcessExit }` | 等待 provider |
-| 尝试停止 | 该尝试推进到“已结束”，终态覆写为实际原因与诊断；安排重试时同一事务写入等待时长，不再重试时同一事务关闭 Step | 重试或关闭 |
-| 登记调用 | 该尝试推进到“已结束”，终态为 `Completed`；写入完整回复；每个调用一个槽位，“已登记”，结果为 NotExecuted；写入 InvocationId 索引；Step 推进到“执行中” | 执行中 |
-| 调用开始 | 一个槽位推进到“已开始”，结果覆写为 `Indeterminate(NoResult)` | 等待 LANCET 返回 |
-| 调用返回 | 一个槽位推进到“已返回”，结果、载荷与证据覆写为 LANCET 给出的内容；Step 的 `end` 按[执行中 Step 的停止原因](#执行中-step-的停止原因)重新得出 | 下一调用或关闭 Step |
-| 关闭 Step | Step 推进到“已关闭”，`end` 覆写为实际的结束方式；无工具调用的回复同时写入 `Completed` 与回复；`end` 为 `Continue` 时同一事务预留下一个 Step 并前移当前位置 | 下一 Step 或 Turn 结束 |
+| 接受 | UserMessage 节点、TurnId 索引、配置表中尚无的配置、预留的第 0 步 | Step `Reserved` |
+| 开始请求 | Step 推进到 `Requesting`；新增一次尝试，`Sent` | 等待 provider |
+| 尝试停止 | 该尝试推进到 `Ended`，带实际终态与诊断；安排重试时同一事务写入等待时长，不再重试时同一事务关闭 Step | 重试或关闭 |
+| 登记调用 | 该尝试推进到 `Ended`，终态为 `Completed`；写入完整回复；每个调用一个槽位，`Registered`；写入 InvocationId 索引；Step 推进到 `Executing` | `Executing` |
+| 调用开始 | 一个槽位推进到 `Started` | 等待 LANCET 返回 |
+| 调用返回 | 一个槽位推进到 `Terminal`，带 LANCET 给出的结局、载荷与证据 | 下一调用或关闭 Step |
+| 关闭 Step | Step 推进到 `Closed`，带实际的结束方式 `end`；无工具调用的回复同时写入 `Completed` 与回复；`end` 为 `Continue` 时同一事务预留下一个 Step 并前移当前位置 | 下一 Step 或 Turn 结束 |
 
 `Completed` 不单独提交：它总与登记调用或关闭 Step 在同一事务写入，所以不存在“完整回复已保存、尚未登记也未关闭”的持久状态。
 
 ```mermaid
 stateDiagram-v2
-    Reserved : 已预留
-    Requesting : 请求中
-    Executing : 执行中
-    Closed : 已关闭
     [*] --> Reserved: 接受，或上一步以 Continue 关闭
     Reserved --> Requesting: 开始请求
     Reserved --> Closed: 请求前发现取消、deadline 或步骤上限
     Requesting --> Requesting: 可重试失败，下一尝试
     Requesting --> Executing: 回复含工具调用，登记槽位
     Requesting --> Closed: 无工具调用的回复，或停止
-    Executing --> Executing: 槽位已开始 / 已返回
-    Executing --> Closed: 全部槽位已返回，或停止分发
+    Executing --> Executing: 槽位 Started / Terminal
+    Executing --> Closed: 全部槽位 Terminal，或停止分发
     Closed --> [*]: end = Continue / Finish / Stop
 ```
 
-图中“已关闭”之前的每个状态，都可能是执行者消失时 Step 停下的位置；Step 此后留在该状态。
+图中 `Closed` 之前的每个状态，都可能是执行者消失时 Step 停下的位置；Step 此后留在该状态。
 
 不变量：
 
 - 同一 Turn 的节点序号连续：UserMessage 之后依次是第 0 步、第 1 步，以此类推。执行这一轮的协调层独占该 Session 的执行锁，期间没有其他操作向这个 Session 写入节点。
-- 一个 Turn 只有最后一个 Step 的 `end` 不是 `Continue`。已关闭且 `end` 为 `Continue` 的 Step 之后，一定有同一事务预留的下一个 Step。
-- 每个 Step 的 `end`、每次尝试的终态和每个槽位的结果，都与各自的 `progress` 按[预留、progress 与结论](#预留progress-与结论)的表相符。
+- 一个 Turn 中，除最后一个 Step 外，每个 Step 都以 `Continue` 关闭，且之后有同一事务预留的下一个 Step。
 - 一个 Session 中可改写的节点至多一个，即序号最大的节点，且它是未关闭的 Step。
 
-读取校验按这些关系核对节点，并用写入时的同一套规则重新得出结论，不符即为损坏。未关闭的 Step 是合法状态，校验不把它当作损坏，也不修改它。
+读取校验按这些关系核对节点。结论由 `progress` 给出，只有这一份，读取直接使用。未关闭的 Step 是合法状态，校验不把它当作损坏，也不修改它。
 
 ### 调用槽位
 
@@ -394,18 +388,18 @@ stateDiagram-v2
 
 同一回复的调用按片段顺序逐个执行，每次只处理最低序号的未返回槽位：
 
-1. 把该槽位推进到“已开始”并提交，结果同时覆写为 `Indeterminate(NoResult)`。这是“可能已执行”的保守边界：它不证明 Tool 已开始或外部效果已发生，但越过它之后不能仅凭没有结果推定未执行。
+1. 把该槽位推进到 `Started` 并提交。从这时起，它停下时的结论是 `Indeterminate(NoResult)`。这是“可能已执行”的保守边界：它不证明 Tool 已开始或外部效果已发生，但越过它之后不能仅凭没有结果推定未执行。
 2. 把调用交给 LANCET 执行，取得执行结果、载荷与 Cell 证据。
-3. 把该槽位推进到“已返回”并提交，结果、载荷与证据覆写为 LANCET 给出的内容。
+3. 把该槽位推进到 `Terminal` 并提交，同时写入 LANCET 给出的结局、载荷与证据。
 
-每个槽位任何时刻都保存 `ToolResultOutcome` 的一种结局，以及按结局确定形状的载荷。结局与[模型尝试](#模型请求与执行预算)一样分两维：结局是结束形状，只说明 LANCET 给出了什么；原因放在载荷的 `CepError` 或 `IndeterminateCause` 里。判定只看两件事：槽位到达了哪个阶段，以及 LANCET 返回了什么。
+每个槽位任何时刻都有 `ToolResultOutcome` 的一种结局，以及按结局确定形状的载荷：`Terminal` 的槽位保存它们，其他阶段由阶段确定。结局与[模型尝试](#模型请求与执行预算)一样分两维：结局是结束形状，只说明 LANCET 给出了什么；原因放在载荷的 `CepError` 或 `IndeterminateCause` 里。判定只看两件事：槽位到达了哪个阶段，以及 LANCET 返回了什么。
 
 | 结局 | 槽位的阶段 | 判定依据 | 载荷 | 外部效果 |
 | --- | --- | --- | --- | --- |
-| Succeeded | 已返回 | LANCET 返回 JSON | 完整 JSON value | 可能已发生 |
-| Failed | 已返回 | LANCET 返回 `CepError`，且不是 `CallCancelled` 或 `OutcomeIndeterminate`；策略或校验拒绝也在其中 | 结构化 CepError，错误码与可重试性原样保存 | 可能已发生 |
-| NotExecuted | 已登记 | 调用还没有交给 LANCET；Step 在它开始之前停止时，它一直停在这里 | 无 | 保证没有 |
-| Indeterminate | 已开始，或已返回 | 越过“已开始”后没有取得确定结果 | `IndeterminateCause`，见下文 | 未知 |
+| Succeeded | `Terminal` | LANCET 返回 JSON | 完整 JSON value | 可能已发生 |
+| Failed | `Terminal` | LANCET 返回 `CepError`，且不是 `CallCancelled` 或 `OutcomeIndeterminate`；策略或校验拒绝也在其中 | 结构化 CepError，错误码与可重试性原样保存 | 可能已发生 |
+| NotExecuted | `Registered` | 调用还没有交给 LANCET；Step 在它开始之前停止时，它一直停在这里 | 无 | 保证没有 |
+| Indeterminate | `Started`，或 `Terminal` | 越过 `Started` 后没有取得确定结果 | `IndeterminateCause`，见下文 | 未知 |
 
 错误族由 [`CepErrorCode::family`](../../crates/lancet-protocol/src/error.rs) 定义，映射由 [`prepare_terminal`](../../crates/lattice-session/src/store/close.rs) 执行：返回 JSON 为 Succeeded，返回 `CallCancelled` 为 `Indeterminate(Cancelled)`，返回 `OutcomeIndeterminate` 为 `Indeterminate(Reported)`，其余任何 `CepError` 为 Failed。
 
@@ -413,13 +407,13 @@ stateDiagram-v2
 
 Indeterminate 的原因 `IndeterminateCause` 有三种：
 
-- `NoResult`：槽位停在“已开始”，还没有取得结果。它在推进到“已开始”时写下，LANCET 返回后被实际结果覆写；Step 停止或进程退出时仍在这个阶段的槽位保持这个结果。“已开始”已提交、交给 LANCET 之前发现取消或 Deadline 也属于这种情况：越过“已开始”后不能再证明未执行。
+- `NoResult`：槽位停在 `Started`，还没有取得结果。它是这个阶段的结论；Step 停止或进程退出时仍在这个阶段的槽位，结果就是它。`Started` 已提交、交给 LANCET 之前发现取消或 Deadline 也属于这种情况：越过 `Started` 后不能再证明未执行。
 - `Cancelled`：LANCET 返回 `CallCancelled`，即交出后被取消。
 - `Reported`：LANCET 返回 `OutcomeIndeterminate`，由执行方报告效果不确定。
 
 NotExecuted 不带原因。停止原因沿 Turn → Step → 槽位的嵌套只从下往上传：为什么停只在 Step 的 `end.cause` 中记录一次，不抄到每个未执行的槽位，推导规则见[执行中 Step 的停止原因](#执行中-step-的停止原因)。
 
-已返回的 Succeeded 与 Failed 是 LANCET 给出的确定结果，允许继续下一调用；已返回的 Indeterminate 停止后续分发（[`stops_batch`](../../crates/lattice-session/src/store/close.rs)），之后的槽位留在“已登记”，结果保持 NotExecuted。所以一个槽位越过“已登记”时，它之前的槽位都已返回 Succeeded 或 Failed。批次控制只由有序的槽位结果得出，执行者在哪个时刻消失不改变 Turn 结局。Failed 中拒绝类错误之后是否继续请求模型、混合批次如何执行，由 [#220](https://github.com/Skyline10124/lattice/issues/220) 另行裁决，不改变槽位形态。
+`Terminal` 中的 Succeeded 与 Failed 是 LANCET 给出的确定结果，允许继续下一调用；`Terminal` 中的 Indeterminate 停止后续分发（[`stops_batch`](../../crates/lattice-session/src/store/close.rs)），之后的槽位留在 `Registered`，结果为 NotExecuted。所以一个槽位越过 `Registered` 时，它之前的槽位都已返回 Succeeded 或 Failed。批次控制只由有序的槽位结果得出，执行者在哪个时刻消失不改变 Turn 结局。Failed 中拒绝类错误之后是否继续请求模型、混合批次如何执行，由 [#220](https://github.com/Skyline10124/lattice/issues/220) 另行裁决，不改变槽位形态。
 
 载荷还遵循：
 
@@ -429,14 +423,14 @@ NotExecuted 不带原因。停止原因沿 Turn → Step → 槽位的嵌套只�
 
 停止与收尾的写入：
 
-- 停止分发或关闭 Step 时不为槽位补写。没有返回的槽位已经带有所在阶段的结果：“已登记”为 NotExecuted，证据为 `Unavailable { NotDispatched }`；“已开始”为 `Indeterminate(NoResult)`，证据为 `Unavailable { NoResult }`。这两种结果只在推进到对应阶段时写入；已返回的结果保持原值，不伪造成功输出，也不依据缺少结果推定文件未改变。
+- 停止分发或关闭 Step 时不为槽位补写。没有返回的槽位，结果由所在阶段确定：`Registered` 为 NotExecuted，证据为 `Unavailable { NotDispatched }`；`Started` 为 `Indeterminate(NoResult)`，证据为 `Unavailable { NoResult }`。已返回的结果保持原值，不伪造成功输出，也不依据缺少结果推定文件未改变。
 - Tool 执行返回后，写入它的结果属于必要收尾，不受 Turn deadline 约束。写入失败按[事务失败](#事务与一致性)处理，后续调用不分发。
 
 LANCET 的执行、准入与证据由 [LANCET 调用流程](lancet.md#调用身份与执行流程)维护。
 
 ### 关闭 Step 与 Turn
 
-全部槽位已返回，或协调器决定停止后，协调层在一个事务中把 Step 推进到“已关闭”，并把 `end` 覆写为实际的结束方式：
+全部槽位已返回，或协调器决定停止后，协调层在一个事务中把 Step 推进到 `Closed`，带上实际的结束方式 `end`：
 
 - `Continue`：协调器决定继续请求模型。同一事务预留下一个 Step，并把当前位置前移到它。
 - `Finish`：模型给出无工具调用的完整回答。
@@ -446,9 +440,9 @@ LANCET 的执行、准入与证据由 [LANCET 调用流程](lancet.md#调用身�
   - 有完整回复、执行调用期间停止：按[执行中 Step 的停止原因](#执行中-step-的停止原因)推导。
   - 预留的 Step 的序号达到模型步骤上限：步骤上限，不开始请求。
 
-Step 没有到达“已关闭”时，`end` 是到达当前阶段时写下的 `Stop`，原因为 ProcessExit 或由槽位结果推出。它说明执行者此刻消失时这一步如何结束。
+Step 没有到达 `Closed` 时，它的结束方式是所在阶段的结论：`Stop`，原因为 ProcessExit 或由槽位结果推出。它说明执行者此刻消失时这一步如何结束。
 
-以 `Finish` 或 `Stop` 关闭的 Step 是 Turn 的最后一个 Step，Turn 随它关闭，不另写记录。Turn 的结局从最后一个 Step 的 `end` 得出，最后一个 Step 尚未关闭时用同一规则：
+以 `Finish` 或 `Stop` 关闭的 Step 是 Turn 的最后一个 Step，Turn 随它关闭，不另写记录。Turn 的结局从最后一个 Step 的结束方式得出；最后一个 Step 尚未关闭时，用它所在阶段的结论：
 
 ```text
 TurnOutcome = Completed | Failed { reason } | Cancelled
@@ -458,7 +452,7 @@ TurnOutcome = Completed | Failed { reason } | Cancelled
 - `notice = Option<{ level, text }>` 按结局定级：Failed 为 Error，Cancelled 为 Info，Completed 无 notice。`text` 由最后一个 Step 的 `Stop` 原因决定：`ProviderError` 取产生该原因的那次尝试的诊断，先经现有脱敏。HTTP 错误的诊断是一行文字：状态码，加上从 Anthropic、OpenAI、Gemini 错误信封解析出的类型或代码与消息，例如 `HTTP 429 rate_limit_exceeded: …`；正文不是这些格式时取开头一段；类型、代码与消息中的控制字符和空白都折成单个空格，流内错误事件的诊断同样处理；有建议等待时在末尾注明。生成时整行最多 `MAX_DIAGNOSTIC_CHARS`（256 字符），超长以 `…` 截断；provider 请求 ID 只写日志。其他原因（含 Cancelled、ProcessExit、Deadline、调用效果不确定、模型步骤上限）使用按原因固定、由代码定义的文案。尝试诊断的存储上限是 `MAX_PROVIDER_ERROR_CHARS`（2048 字符）。先前已被重试取代的失败尝试不作为 Turn 结局 notice 的来源。notice 不另存，每次读取用同一规则从节点得出，实时 `TurnFailed` 事件携带同一对象，所以实时与重新打开后显示同一句。
 - `level` 取 Info、Warn 或 Error，由后端给出，前端按它呈现，不从其他字段推断等级。Turn 结局的 notice 只取 Info 或 Error；Warn 只用于[重试提示](#模型请求与执行预算)。
 - 公开读取投影为 `TurnSummary { outcome, notice, progress }`，其中不含内部 `reason`。`progress` 取最后一个 Step 的 `progress`，读者据此解读 `outcome`：
-  - “已关闭”：这一轮已经结束，`outcome` 是最终结局。
+  - `Closed`：这一轮已经结束，`outcome` 是最终结局。
   - 未关闭，后台持有这一轮的 Owner：仍在执行，`outcome` 只说明此刻停下会得到什么，前端按进行中显示。
   - 未关闭，没有 Owner：执行者已消失，这一轮停在这一步，`outcome` 就是它的结局，见[执行者消失后的 Turn](#执行者消失后的-turn)。
 - Step 节点保留各次尝试与 `end` 的原因，随关闭事件、快照、历史读取和 `session turn` 提供，供诊断与操作员查询使用；前端的对话显示只依据 `TurnSummary` 与后端给出的 notice 给出文字和等级，不从 `end` 或尝试的原因推导。
@@ -470,25 +464,25 @@ TurnOutcome = Completed | Failed { reason } | Cancelled
 
 #### 执行中 Step 的停止原因
 
-执行调用期间，Step 的 `end` 是 `Stop { cause }`，`cause` 由槽位结果和外部停止共同决定（[`step_stop_cause`](../../crates/lattice-session/src/store/close.rs)）。外部停止是协调层在两次分发之间发现的取消或 Turn deadline，随关闭事务写入；关闭之前没有外部停止，按 ProcessExit 计。推导顺序：
+停在 `Executing` 的 Step，结束方式是 `Stop { cause }`，`cause` 由槽位结果和外部停止共同决定（[`step_stop_cause`](../../crates/lattice-session/src/store/close.rs)）。外部停止是协调层在两次分发之间发现的取消或 Turn deadline，只随关闭事务写入；Step 仍在 `Executing` 时没有外部停止，按 ProcessExit 计。推导顺序：
 
 1. 按片段顺序找第一个由槽位自身决定停止的结果：`Indeterminate(Cancelled)` 得到 `Cancelled`，`Indeterminate(Reported)` 得到 `InvocationIndeterminate { invocation_id }`。
 2. 找不到时，取外部停止：`Cancelled`、`Deadline` 或 `ProcessExit`。NotExecuted 与 `Indeterminate(NoResult)` 自身不带原因，由这一步说明它们为什么停下。
-3. 所有槽位都已返回确定结果（均为 Succeeded 或 Failed）时，`Stop` 的原因只能是 ProcessExit；关闭事务随后把 `end` 覆写为 `Continue`。这时发现的取消、Deadline 或步骤上限，先以 `Continue` 关闭该 Step，再把同一事务预留的下一个 Step 以 `Stop { cause }` 关闭。
+3. 所有槽位都已返回确定结果（均为 Succeeded 或 Failed）时，`Stop` 的原因只能是 ProcessExit；正常情况下关闭事务随后以 `Continue` 关闭该 Step。这时发现的取消、Deadline 或步骤上限，先以 `Continue` 关闭该 Step，再把同一事务预留的下一个 Step 以 `Stop { cause }` 关闭。
 
-登记调用、调用开始和调用返回的事务都按这条规则写入 `end`，关闭事务和读取校验使用同一条规则：校验从节点上的槽位结果重新得出 `cause`，与节点不符即为损坏。所以执行者何时消失不改变结局：进程在某个槽位推进到“已开始”之前或之后退出，该槽位分别停在 NotExecuted 或 `Indeterminate(NoResult)`，Step 原因都是 ProcessExit。
+这条规则用在两处：读取 `Executing` 的 Step 时，由它得出这一步的结论；关闭事务因槽位或外部停止而关闭 Step 时，由它得出写入的 `cause`。已关闭的 Step 带着关闭时写下的结束方式，读取直接使用。所以执行者何时消失不改变结局：进程在某个槽位推进到 `Started` 之前或之后退出，该槽位分别停在 NotExecuted 或 `Indeterminate(NoResult)`，Step 原因都是 ProcessExit。
 
 ## 重开、取消与未完成状态
 
 ### 请求身份与找回
 
-同一 TurnId、原始用户输入和项目绑定用于找回原 Turn；向已有 Session 提交时还核对 SessionId。身份相同而输入、绑定或 Session 不同返回 Conflict。新 TurnId 表示独立请求，即使文本相同。Turn 记录按 TurnId 全局查找，所以不带 SessionId 的首次提交在确认不明后，用同一 TurnId 重发会找到原请求及其 Session，不会多建 Session。退回操作不释放已用的 TurnId。
+同一 TurnId、原始用户输入和项目绑定用于找回原 Turn；向已有 Session 提交时还核对 SessionId。身份相同而输入、绑定或 Session 不同返回 Conflict。新 TurnId 表示独立请求，即使文本相同。TurnId 索引全局查找，所以不带 SessionId 的首次提交在确认不明后，用同一 TurnId 重发会找到原请求及其 Session，不会多建 Session。退回操作不释放已用的 TurnId。
 
 | 提交时找到的事实 | 后台与前端动作 |
 | --- | --- |
 | 同请求由当前 Owner 接管 | 共享正在进行的接受结果 |
 | 同 Session 有不同请求由 Owner 执行 | 非阻塞返回 Busy；前端保留未提交输入，由用户稍后发送 |
-| 同 TurnId 的 Turn 记录已存在 | 核验原输入、绑定和 Session，返回原 Turn 及其 `TurnSummary`；后台仍在执行它时衔接观察 |
+| 同 TurnId 已在 TurnId 索引中 | 核验原输入、绑定和 Session，返回原 Turn 及其 `TurnSummary`；后台仍在执行它时衔接观察 |
 | Session 最后一轮未关闭，且没有 Owner | 旧 Turn 停在已写入的进度，不需要处理；直接接受本次新输入，见[执行者消失后的 Turn](#执行者消失后的-turn) |
 
 “接受结果未知”只有一种真实来源：接受事务是否提交尚不清楚，例如回执丢失或 `commit` 返回错误。前端保留原 TurnId，查询或用同一请求重发找回；重连读取使用 query/subscribe。请求找回保证不扩展为 Tool exactly-once。
@@ -508,7 +502,7 @@ TurnOutcome = Completed | Failed { reason } | Cancelled
 - **快照切点**：会话库与内存观察状态按固定顺序衔接。
   - Owner 先提交会话库事务，再在观察锁内更新段列表并追加对应事件，例如新尝试开始时清空段列表、Step 关闭后追加 Step 关闭事件。
   - 快照在观察锁内开启会话库读事务，并复制段列表与序号。这样，序号之前各事件对应的提交必定在读事务中可见；读事务还可能多含一次刚提交、事件尚未追加的提交。
-  - 段列表标注所属步骤序号与尝试序号。快照中的节点已显示该尝试“已结束”时，这份段列表已被替代：尝试停止时半截文字只作诊断，尝试完成时节点带有同一份完整回复。客户端保留已显示的临时文字，直到对应 Step 节点的回复实际装入显示，再按步骤序号与节点身份原位替换；历史读取挂起或失败时，临时文字继续显示。之后到达的同一关闭事件幂等应用，不重复显示。
+  - 段列表标注所属步骤序号与尝试序号。快照中的节点已显示该尝试 `Ended` 时，这份段列表已被替代：尝试停止时半截文字只作诊断，尝试完成时节点带有同一份完整回复。客户端保留已显示的临时文字，直到对应 Step 节点的回复实际装入显示，再按步骤序号与节点身份原位替换；历史读取挂起或失败时，临时文字继续显示。之后到达的同一关闭事件幂等应用，不重复显示。
 - **结束**：Turn 关闭事件是该 Turn 的最后一个事件，在关闭事务提交后追加。仍持有该 Turn 观察状态的订阅者，在关闭事件交付后结束；执行任务已结束而没有关闭事件时，排空窗口后按快照结束。没有观察状态的订阅（Owner 已释放、后台重启后）直接以快照结束，不论这一轮是否已关闭：没有 Owner 就不会再有新的推进。保证是：收到结束时，客户端已收到该 Turn 的 `TurnSummary` 与 Step 节点，以及快照时从根到当前位置的对话。Turn 关闭时当前位置就是它最后写入的节点，所以观察正在执行的 Turn 时，最后一个 Step 的正文一定在内；关闭后已 `rewind` 离开时，对话仍只按当前位置读取，不另外交付该 Turn 的正文。执行诊断（如关闭写入失败）不属于快照内容，仍按[请求身份与找回](#请求身份与找回)单独交付。Turn 关闭后 Owner 释放内存观察状态，此后的订阅只从会话库取得快照并直接结束。
 - **后台重启**：内存观察状态随进程消失，未关闭的 Turn 停在已写入的进度。客户端重连后用新快照重建，`TurnSummary` 说明它停在哪个阶段和结局，见[执行者消失后的 Turn](#执行者消失后的-turn)；丢失的只有当时正在生成的半截文字，它本就只作诊断。
 - **客户端本地丢弃**：客户端自己的显示队列丢弃事件时，按已交付的最后游标重新订阅。
@@ -539,7 +533,7 @@ Backend 以实际接管的操作确定取消资格。新建带完整配置的 Su
 | 没有可接管取消的对应操作 | 查询原持久事实后返回 false，查询错误仍返回错误；执行者已消失的 Turn 不接受取消，它的结局已在树上 |
 | 请求传输失败或回执丢失、超时 | 客户端报告 Unknown，保留原身份及其他已知事实 |
 
-操作明确拒绝、可确认未建立 Turn 且监督退场后，新一轮同身份准入不继承旧取消，包括早已到达、此时才重新准入的连接。接受结果未知或 Turn 记录已存在时，仍按原 Turn 记录核验，不归入这类明确拒绝。
+操作明确拒绝、可确认未建立 Turn 且监督退场后，新一轮同身份准入不继承旧取消，包括早已到达、此时才重新准入的连接。接受结果未知或同 TurnId 已被接受时，仍按原 Turn 核验，不归入这类明确拒绝。
 
 #### 客户端意图与退出交接
 
@@ -557,7 +551,7 @@ true 后由后台履行责任，不自动补发；再次明确取消可开始新
 
 #### 取消的效果与持久边界
 
-取消控制本身在内存中，true 确认的是当前操作接管，不保证迟到取消改写已决定的结果。执行核心随后写入的尝试终态、槽位结果和 Step `end` 才是进程退出后仍能读到的事实。以取消为主因关闭的 Step 以 `Stop { cause: Cancelled }` 结束，Turn 结局为 Cancelled；已写入的节点、调用结果和已发生的效果保留，取消不回滚文件。
+取消控制本身在内存中，true 确认的是当前操作接管，不保证迟到取消改写已决定的结果。执行核心随后提交的尝试、槽位与 Step 的阶段才是进程退出后仍能读到的事实。以取消为主因关闭的 Step 以 `Stop { cause: Cancelled }` 结束，Turn 结局为 Cancelled；已写入的节点、调用结果和已发生的效果保留，取消不回滚文件。
 
 取消或失败后，Session 当前位置停在该 Turn 最后写入的节点，已完成的步骤进入之后的上下文。用户取消通常是为了换种说法继续，已完成的工具结果仍有用；需要丢弃时，退回到该用户消息之前的节点再发送。
 
@@ -565,19 +559,19 @@ true 后由后台履行责任，不自动补发；再次明确取消可开始新
 
 后台进程退出、执行任务异常结束或会话库写入失败之后，一个 Turn 可能停在未关闭的 Step 上。这时不需要任何补写。
 
-- **树上已有的内容就是结局。** 这个 Step、它的尝试和槽位各自带着到达所在阶段时写下的结论，Turn 的结局按[关闭 Step 与 Turn](#关闭-step-与-turn)从中得出。已保存的结果和已发生的效果保留；只留在进程内、尚未写入的结果无法找回。
+- **树上已有的内容就是结局。** 这个 Step、它的尝试和槽位各自停在某个阶段，阶段给出结论，Turn 的结局按[关闭 Step 与 Turn](#关闭-step-与-turn)从中得出。已保存的结果和已发生的效果保留；只留在进程内、尚未写入的结果无法找回。
 - **由后台判断它是否已经停下。** 会话库只由持有实例锁的后台进程打开，见[存储后台边界](storage.md#本地后台与访问边界)；执行一个 Turn 需要后台内存中的 Owner 和该 Session 的执行锁。后台没有这个 Turn 的 Owner 时，没有人在执行它。后台重启后，此前未关闭的 Turn 都已停下。
 - **后台不替它继续。** 后台不为停下的 Turn 请求 provider、执行 Tool 或恢复重试，也不需要当时的 profile、provider 凭据或 Component 组成。
 - **用户直接做下一件事。** 提交新请求或 `rewind` 不需要先处理旧 Turn。新的 UserMessage 接在当前位置之后；旧 Step 从此不再是末端节点，不能再改写。同一 Session 正在由 Owner 执行时，新写操作仍在后台准入阶段返回 Busy。
 
 | 停下时 Step 的 `progress` | 树上已有的内容 | Turn 结局 |
 | --- | --- | --- |
-| 已预留 | 没有尝试；`end` 为 `Stop { ProcessExit }` | Failed |
-| 请求中，最后一次尝试“已发出” | 该尝试的终态为 `Stopped { ProcessExit }`；`end` 为 `Stop { ProcessExit }` | Failed |
-| 请求中，最后一次尝试“已结束”（重试等待中） | 该尝试带实际原因；`end` 为 `Stop { ProcessExit }`，不恢复重试 | Failed |
-| 执行中 | 已返回的槽位带实际结果，“已开始”的为 `Indeterminate(NoResult)`，“已登记”的为 NotExecuted；`end` 按[执行中 Step 的停止原因](#执行中-step-的停止原因)得出，外部停止为 ProcessExit | Cancelled 或 Failed |
+| `Reserved` | 没有尝试；Step 的结论为 `Stop { ProcessExit }` | Failed |
+| `Requesting`，最后一次尝试 `Sent` | 该尝试的结论为 `Stopped { ProcessExit }`；Step 的结论为 `Stop { ProcessExit }` | Failed |
+| `Requesting`，最后一次尝试 `Ended`（重试等待中） | 该尝试带实际原因；Step 的结论为 `Stop { ProcessExit }`，不恢复重试 | Failed |
+| `Executing` | `Terminal` 的槽位带实际结果，`Started` 的为 `Indeterminate(NoResult)`，`Registered` 的为 NotExecuted；Step 的结论按[执行中 Step 的停止原因](#执行中-step-的停止原因)得出，外部停止为 ProcessExit | Cancelled 或 Failed |
 
-执行中停下的 Step，槽位自身决定的停止（LANCET 返回的取消或效果不确定）优先，其余情况得到 ProcessExit。协调层已经决定、尚未提交的取消或 Deadline 不在库中，这一步按 ProcessExit 结束；已提交的关闭保持它写入的原因。
+停在 `Executing` 的 Step，槽位自身决定的停止（LANCET 返回的取消或效果不确定）优先，其余情况得到 ProcessExit。协调层已经决定、尚未提交的取消或 Deadline 不在库中，这一步按 ProcessExit 结束；已提交的关闭保持它写入的原因。
 
 ### 停止后台
 
@@ -661,10 +655,10 @@ Session 永久绑定产品组合层提供的 `ProjectStoreKey`，执行请求的
 | 对话顺序、批次校验、参数摘要 | `cargo test -p lattice-conversation` |
 | 流解析的到达顺序与 provider 投影 | `cargo test -p lattice-llm` |
 | 单次尝试、流中断和资源计量 | `cargo test -p lattice-agent` |
-| 会话库表编码、值版本、旧库拒绝、结论推导与读取校验 | `cargo test -p lattice-session`；隔离测试先列出全部失败方式 |
+| 会话库表编码、值版本、旧库拒绝、阶段给出的结论与读取校验 | `cargo test -p lattice-session`；隔离测试先列出全部失败方式 |
 | 提交、多步 Turn、取消、退回分叉、进程退出后的结局与观察 | 真实二进制与真实状态根上的 E2E 场景，按[测试工程合同](../development/testing.md#后台与重连场景)选择 |
 
-E2E 崩溃场景在每个提交点 SIGKILL 后重开，先不做任何写入，核验：每个槽位都有结果，每次尝试都有终态，每个 Step 都有结束方式，且都与各自的 `progress` 相符；一个 Turn 只有最后一个 Step 的 `end` 不是 `Continue`；`TurnSummary` 与最后一个 Step 一致。随后核验 `send` 与 `rewind` 直接成功，旧 Turn 的节点保持原样；有 Owner 执行的 Turn 存在时 `send` 与 `rewind` 返回 Busy。观察场景核验中途新建订阅、落出窗口的慢订阅者、最后事件与 Turn 关闭同时就绪三种情况下，客户端拼出的内容与关闭后从会话库重读的一致，并核验上文的段列表一致性。
+E2E 崩溃场景在每个提交点 SIGKILL 后重开，先不做任何写入，核验：每个 Step、尝试和槽位停在崩溃前最后提交的阶段，读出的结论符合[预留、progress 与结论](#预留progress-与结论)的表；一个 Turn 中除最后一个 Step 外都以 `Continue` 关闭；`TurnSummary` 与最后一个 Step 的结论一致。随后核验 `send` 与 `rewind` 直接成功，旧 Turn 的节点保持原样；有 Owner 执行的 Turn 存在时 `send` 与 `rewind` 返回 Busy。观察场景核验中途新建订阅、落出窗口的慢订阅者、最后事件与 Turn 关闭同时就绪三种情况下，客户端拼出的内容与关闭后从会话库重读的一致，并核验上文的段列表一致性。
 
 纯文档修订静态核对职责、流程、条款承接、数值来源、引用和差异；语义审阅须能复述提交、并行观察、结果取得、退回分叉及执行者消失后的结局，链接检查不能代替它。实际测试和未验证范围记录在对应任务中。
 
