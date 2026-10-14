@@ -79,7 +79,7 @@ lattice --json session send "继续检查测试入口。" --session "$SESSION_ID
 lattice --json session send "$PROMPT" --agent reader --turn-id "$TURN_ID"
 ```
 
-不要重新运行生成 TurnId 的一行，也不要更换原输入、工作区或原有 `--session`。后台先按全局 TurnId 核验原输入及项目绑定；同请求返回原 Turn 与 Session，不加载新配置、不重跑模型或 Tool，不会多建 Session。身份或输入不符返回 Conflict。原 Turn 仍在进行时，找回只衔接观察；崩溃遗留 Turn 由后续新提交或 `rewind` 自动关闭。详见[请求身份与找回](../architecture/session.md#请求身份与找回)。
+不要重新运行生成 TurnId 的一行，也不要更换原输入、工作区或原有 `--session`。后台先按全局 TurnId 核验原输入及项目绑定；同请求返回原 Turn 与 Session，不加载新配置、不重跑模型或 Tool，不会多建 Session。身份或输入不符返回 Conflict。原 Turn 仍在进行时，找回只衔接观察；执行者已消失时，找回给出它停下时的结局。详见[请求身份与找回](../architecture/session.md#请求身份与找回)。
 
 ### 查询与继续观察
 
@@ -90,7 +90,7 @@ lattice --json session turn "$TURN_ID"
 lattice --json session turn "$TURN_ID" --follow
 ```
 
-`session turn` 按全局 TurnId 找到所属 Session，给出 TurnSummary 和全部 Step 记录，包括每次尝试、`end`、原因与节点序号；无节点的 Stop 明确显示为无。Turn 仍进行时还列 ActiveStep 与槽位进度。该详情不是按路径读取对话。已知 SessionId 时，可用 `lattice tui "$SESSION_ID"` 打开界面。
+`session turn` 按全局 TurnId 找到所属 Session，给出 TurnSummary 和全部 Step 节点：节点序号、`progress` 及其给出的结束方式与原因，以及每次尝试与各槽位的 `progress` 及其结论。未关闭的 Step 同样列出。该详情不是按路径读取对话。已知 SessionId 时，可用 `lattice tui "$SESSION_ID"` 打开界面。
 
 查询与已有会话重连无需当前 profile/provider 凭据。已关闭的 Turn 可读即已持久，没有额外完成确认或补屏障步骤；进行中的 Turn 即使当前无 Owner，读取也不替它关闭。
 
@@ -110,7 +110,7 @@ lattice session rewind "$SESSION_ID" "$NODE_ID"
 lattice session send "从这里换一种思路继续。" --session "$SESSION_ID"
 ```
 
-新消息以 N 为父，原分支仍在 `log` 中；`session turn` 始终能按原 TurnId 查看其完整 Step 记录。`rewind` 不恢复文件，不移动工作区历史 current。正在由 Owner 执行的同一 Session 返回 Busy，不存在的序号拒绝且位置不变。
+新消息以 N 为父，原分支仍在 `log` 中；`session turn` 始终能按原 TurnId 查看其全部 Step 节点。`rewind` 不恢复文件，不移动工作区历史 current。正在由 Owner 执行的同一 Session 返回 Busy，不存在的序号拒绝且位置不变。
 
 改写某条用户消息时退回到它的父节点，改写第一条消息使用根节点 `0`：
 
@@ -135,19 +135,17 @@ CLI 提交/观察期间第一次 Ctrl+C 请求取消并继续观察，再次 Ctr
 
 TUI 的 Ctrl+C 取消、Ctrl+D 或 `/quit` 退出按[键位条件](../architecture/tui.md#键盘)执行，两端共用 LocalTurn 的[回执等待预算](../architecture/session.md#输入与传输限制)。`not_sent` / `not_accepted` 只说明本客户端停止后续配置，不作为该 TurnId 全局未执行的判断；已知接受、接管和完成结果继续有效。
 
-#### 关闭崩溃遗留的 Turn
+#### 执行者消失后继续
 
-查询看到崩溃遗留的进行中 Turn 且无 live Owner 时，直接发送下一条新消息。CLI 为新任务生成新的 TurnId，后台先关闭旧 Turn，再接受并执行这条消息：
+查询看到未关闭的 Turn 且没有 live Owner 时，这一轮的执行者已经消失，它停在已写入的进度。直接发送下一条新消息：
 
 ```sh
 lattice --json session send "继续检查项目的测试入口。" --session "$SESSION_ID"
 ```
 
-`rewind` 同样先关闭旧 Turn，再移动会话位置。同一 Session 正在由 Owner 执行时，新提交和退回返回 Busy。旧 Turn 的关闭无需当前 profile/provider；发送新消息时，客户端在旧任务关闭后按需加载新执行配置。
+`rewind` 同样直接进行。同一 Session 正在由 Owner 执行时，新提交和退回返回 Busy。
 
-关闭遵循 closure-only，只依据旧持久事实收尾，不重放旧模型请求或重分发旧工具。完成后按旧 TurnId 查询结局与 Step 记录；新请求的接受回执与结果属于新 Turn。仅内存取消意图不等于持久取消，具体窗口见[自动关闭崩溃遗留任务](../architecture/session.md#自动关闭崩溃遗留任务)。
-
-关闭失败时，本次新输入或退回停止，保留实际持久状态与恢复诊断；commit 错误可能已经持久，不能宣称必然回滚。后台先停止全库写入及新的 provider/Tool 启动，排空后关闭重开，以重读事实为准。用旧 TurnId 查询诊断；再次写操作前仍须成功完成 closure-only，不能通过重新执行旧任务绕过错误。
+旧 Turn 不会被继续执行，也不会被补写。它的结局按[执行者消失后的 Turn](../architecture/session.md#执行者消失后的-turn)从已写入的内容得出，随时可以按旧 TurnId 查询；新请求的接受回执与结果属于新 Turn。只在内存中的取消意图不会写入，这样的 Turn 结局为 Failed（进程退出）。
 
 #### 查询或停止已有后台
 

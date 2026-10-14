@@ -2,7 +2,7 @@
 
 ## 职责与模块
 
-维护全局会话库 `lattice.redb`：Session、只追加的会话树、Step/Turn 记录、调用槽位、InvocationId 索引和调用变更日志。提供同步的领域事务、自动关闭规划、历史读取与操作员只读投影；对话与 usage 类型归 `lattice-conversation`。
+维护全局会话库 `lattice.redb`：Session、会话树（Step 节点内含尝试与调用槽位）、配置表、TurnId 索引、InvocationId 索引和调用变更日志。提供同步的领域事务、由阶段给出结论、历史读取与操作员只读投影；对话与 usage 类型归 `lattice-conversation`。
 
 - `store/mod.rs`、`types.rs`：SessionStore、锁凭据、领域类型、错误与公开接口。
 - `store/codec.rs`、`open.rs`、`validate.rs`：表与值版本、创建/严格打开、形状及跨记录一致性校验。
@@ -19,8 +19,8 @@
 - 会话库格式与事务由本 crate 拥有，不暴露原始表或写事务。redb 版本、文件后端、独占打开与 Immediate 提交遵循存储合同；不引入双写、旧库迁移或兼容读取。
 - Session 永久绑定组成层传入的 ProjectStoreKey，不从进程 cwd 推导。不负责 provider、profile 发现、CLI 或 Tool 执行，不依赖 runtime/API/agent/profile；操作员读取保持 runtime-free。
 - open 不初始化、不修复，损坏无关 Session 也不能忽略。类型、值版本、规范 JSON、绑定摘要与证据版本都须校验，派生索引和变更日志随权威记录在同一事务更新。
-- 树节点与已关闭记录只追加；进行中 Step 按事务推进。槽位全部有结果后才写 Step 节点，最后一个 Step 与 Turn 同时关闭。live 与自动关闭共用有序终态规则，不从缺少结果推定未执行。
-- 自动关闭只消费持久事实，不请求模型、不重执行 Tool、不采样工作区。读取不关闭遗留 Turn；退回只移动当前位置，文件及工作区历史保持原样。
+- 树只追加节点，只有末端未关闭的 Step 可改写，每次推进一个事务。Step 在开始前预留，最后一个 Step 关闭即 Turn 关闭。结论由 `progress` 给出，不从缺少结果推定未执行。
+- 执行者消失的 Turn 不被补写；读取只读，不修改未关闭的 Step。退回只移动当前位置，不写入节点，文件及工作区历史保持原样。
 - 锁范围、失败后停写与关闭重开遵循会话和存储合同。写事务内不等待外部操作；同步接口由异步调用方放入阻塞执行边界。
 - 操作员 DTO 不含参数、结果正文、schema 或冻结秘密。测试设施仅在 `cfg(test)` 或显式测试 feature 下可用，下游通过 dev-dependencies 启用，生产不得绕过领域事务。
 

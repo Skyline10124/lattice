@@ -131,7 +131,7 @@ canonical JSON 由 [`canonical.rs`](../../crates/lancet-protocol/src/canonical.r
 | 结果校验失败、trap、超限或取消 | 已记录的操作效果与拒绝继续保留，结果效果依实际校验结果产生 |
 | 没有可靠的完整执行证据 | 由调用协调依据持久事实处理，不从结果材料反推或补造执行证据 |
 
-`CellEvidenceTriple` 将三类版本化记录交给协调层，构成内部 receipt 的证据部分，不是 provider 结果字段。[LANCET](lancet.md#结果证据与失败处理)维护终态与完整证据在调用槽位中的一次写入边界；[会话合同](session.md#重开取消与未完成状态)维护自动关闭及不能持久关闭时的处理。
+`CellEvidenceTriple` 将三类版本化记录交给协调层，构成内部 receipt 的证据部分，不是 provider 结果字段。[LANCET](lancet.md#结果证据与失败处理)维护终态与完整证据在调用槽位中的一次写入边界；[会话合同](session.md#执行者消失后的-turn)维护执行者消失、Turn 未能关闭时的结局。
 调用事件、内存证据快照和操作员投影不构成持久化确认。
 
 ### 内容与版本边界
