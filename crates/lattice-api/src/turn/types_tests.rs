@@ -16,37 +16,41 @@ fn terminal_events_round_trip_the_persistent_summary_and_step() {
         PublicTurnOutcome::Failed,
         PublicTurnOutcome::Cancelled,
     ] {
+        let end = match outcome {
+            PublicTurnOutcome::Completed => StepEnd::Finish,
+            PublicTurnOutcome::Failed => StepEnd::Stop {
+                cause: StopCause::ProcessExit,
+            },
+            PublicTurnOutcome::Cancelled => StepEnd::Stop {
+                cause: StopCause::Cancelled,
+            },
+        };
         let step = StepDetail {
+            node: NodeId(2),
             key: StepKey {
                 turn_id: turn.turn_id,
                 ordinal: 0,
             },
             attempts: vec![],
-            state: StepDetailState::Closed {
-                end: match outcome {
-                    PublicTurnOutcome::Completed => StepEnd::Finish { node: NodeId(2) },
-                    PublicTurnOutcome::Failed => StepEnd::Stop {
-                        node: None,
-                        cause: StopCause::ProcessExit,
-                    },
-                    PublicTurnOutcome::Cancelled => StepEnd::Stop {
-                        node: None,
-                        cause: StopCause::Cancelled,
-                    },
-                },
-                slots: vec![],
-            },
+            progress: StepProgress::Closed { end: end.clone() },
+            end,
+            slots: vec![],
+            updated_at: chrono::Utc::now(),
         };
         let summary = TurnSummary {
             outcome: outcome.clone(),
-            notice: Some(Notice {
-                level: if outcome == PublicTurnOutcome::Failed {
-                    NoticeLevel::Error
-                } else {
-                    NoticeLevel::Info
-                },
-                text: "persistent notice".into(),
-            }),
+            progress: step.progress.clone(),
+            notice: match outcome {
+                PublicTurnOutcome::Completed => None,
+                _ => Some(Notice {
+                    level: if outcome == PublicTurnOutcome::Failed {
+                        NoticeLevel::Error
+                    } else {
+                        NoticeLevel::Info
+                    },
+                    text: "persistent notice".into(),
+                }),
+            },
         };
         let event = match outcome {
             PublicTurnOutcome::Completed => TurnEvent::TurnCompleted {

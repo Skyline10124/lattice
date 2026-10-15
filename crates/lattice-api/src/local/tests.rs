@@ -369,18 +369,18 @@ async fn detached_owners_share_acceptance_overlap_and_drain_with_fixed_reload() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn query_stays_read_only_and_probe_or_write_closes_without_configuration() {
+async fn query_probe_and_rewind_preserve_orphan_without_configuration() {
     for operation in ["probe", "write"] {
-        close_pending_through(operation).await;
+        preserve_orphan_through(operation).await;
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn submit_handshake_closes_pending_before_loading_configuration_once() {
-    close_pending_through("submit_handshake").await;
+async fn submit_handshake_preserves_orphan_and_loads_configuration_once() {
+    preserve_orphan_through("submit_handshake").await;
 }
 
-async fn close_pending_through(operation: &str) {
+async fn preserve_orphan_through(operation: &str) {
     use lattice_session::store::*;
     let state = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
@@ -405,8 +405,6 @@ async fn close_pending_through(operation: &str) {
                     model: "unconfigured-model".into(),
                     provider: "openai_compatible".into(),
                     system_prompt: None,
-                    profile_snapshot_json: "{}".into(),
-                    policy_snapshot_json: "{}".into(),
                     catalog: ToolCatalogSnapshot::new("test".into(), vec![]).unwrap(),
                     limits: TurnExecutionLimits {
                         timeout_secs: 300,
@@ -433,7 +431,15 @@ async fn close_pending_through(operation: &str) {
         turn_id: old_id,
     };
     let before = client.query(Some(session_id), Some(old_id)).await.unwrap();
-    assert!(before.selected_turn.as_ref().unwrap().summary.is_none());
+    assert!(
+        !before
+            .selected_turn
+            .as_ref()
+            .unwrap()
+            .summary
+            .progress
+            .is_closed()
+    );
     assert!(!client.cancel(target).await.unwrap());
     assert_eq!(
         before,
@@ -444,11 +450,11 @@ async fn close_pending_through(operation: &str) {
         session_id: Some(session_id),
         turn_id: new_id,
         workspace: root.canonical_path().into(),
-        input: "关闭旧任务后接受新输入".into(),
+        input: "保留旧任务并接受新输入".into(),
         agent: None,
     };
     if operation == "submit_handshake" {
-        // 已有会话正常新执行仍要求历史存在；关闭本身不读取它。
+        // 新执行要求历史存在；探测与配置加载均不改旧节点。
         lancet_api::WorkspaceHistory::create(lancet_api::WorkspaceHistoryBacking::for_key(
             layout,
             root.store_key(),
@@ -463,21 +469,8 @@ async fn close_pending_through(operation: &str) {
                     assert_eq!(agent, "local-test");
                     async {
                         loads.set(loads.get() + 1);
-                        let closed = client.turn(target).await?;
-                        assert_eq!(
-                            closed.summary.as_ref().unwrap().outcome,
-                            PublicTurnOutcome::Failed
-                        );
-                        assert!(matches!(
-                            closed.steps[0].state,
-                            StepDetailState::Closed {
-                                end: StepEnd::Stop {
-                                    node: None,
-                                    cause: StopCause::ProcessExit
-                                },
-                                ..
-                            }
-                        ));
+                        let old = client.turn(target).await?;
+                        assert_eq!(&old, before.selected_turn.as_ref().unwrap());
                         Ok(frozen(workspace.path(), &provider.endpoint))
                     }
                 },
@@ -525,7 +518,7 @@ async fn close_pending_through(operation: &str) {
                     }
                     Observation::Finished { history, .. } => {
                         assert!(summary_seen);
-                        assert_eq!(history.entries.len(), 3); // 旧 User、新 User、新 Step
+                        assert_eq!(history.entries.len(), 4); // 两轮各有 User 与 Step
                         break;
                     }
                     Observation::Event { .. } => {}
@@ -560,19 +553,7 @@ async fn close_pending_through(operation: &str) {
             .unwrap();
     }
     let after = client.query(Some(session_id), Some(old_id)).await.unwrap();
-    assert!(after.session.active_turn.is_none());
-    let old = after.selected_turn.unwrap();
-    assert_eq!(old.summary.unwrap().outcome, PublicTurnOutcome::Failed);
-    assert!(matches!(
-        old.steps[0].state,
-        StepDetailState::Closed {
-            end: StepEnd::Stop {
-                node: None,
-                cause: StopCause::ProcessExit
-            },
-            ..
-        }
-    ));
+    assert_eq!(after.selected_turn, before.selected_turn);
     client.stop().await.unwrap();
     serving.await.unwrap().unwrap();
 }

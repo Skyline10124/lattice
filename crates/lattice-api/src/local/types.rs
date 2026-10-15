@@ -230,7 +230,6 @@ pub enum RecoveryCause {
     WriteDisabled,
     WorkerFailed,
     ReopenFailed,
-    ClosureFailed,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -261,7 +260,6 @@ pub enum LocalErrorKind {
     Busy,
     Stopping,
     StoreUnavailable,
-    RecoveryRequired,
     Internal,
     NotRunning,
     Transport,
@@ -283,7 +281,7 @@ impl LocalError {
         Self {
             recovery: Some(RecoveryNeed { turn: None, cause }),
             ..Self::new(
-                LocalErrorKind::RecoveryRequired,
+                LocalErrorKind::StoreUnavailable,
                 "session store recovery required",
             )
         }
@@ -317,6 +315,7 @@ impl From<crate::ApiError> for LocalError {
                         key,
                         found,
                         supported,
+                        ..
                     } => Some(StoreDiagnostic::UnsupportedVersion {
                         table: table.clone(),
                         key: key.clone(),
@@ -335,9 +334,6 @@ impl From<crate::ApiError> for LocalError {
                     }
                     StoreError::WriteDisabled => {
                         return Self::recovery(RecoveryCause::WriteDisabled);
-                    }
-                    StoreError::RecoveryRequired { .. } => {
-                        return Self::recovery(RecoveryCause::ClosureFailed);
                     }
                     StoreError::NotFound { .. } => {
                         result.kind = NotFound;

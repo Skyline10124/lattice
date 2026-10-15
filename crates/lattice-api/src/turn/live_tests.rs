@@ -30,8 +30,6 @@ fn seed(fixture: &TestFixture) -> (lancet_protocol::SessionId, lancet_protocol::
                     model: "old-model".into(),
                     provider: "openai_compatible".into(),
                     system_prompt: None,
-                    profile_snapshot_json: "{}".into(),
-                    policy_snapshot_json: "{}".into(),
                     catalog: ToolCatalogSnapshot::new("test".into(), vec![]).unwrap(),
                     limits: TurnExecutionLimits {
                         timeout_secs: 300,
@@ -51,7 +49,7 @@ fn seed(fixture: &TestFixture) -> (lancet_protocol::SessionId, lancet_protocol::
 }
 
 #[tokio::test]
-async fn wrong_workspace_is_rejected_before_auto_close_or_provider() {
+async fn wrong_workspace_is_rejected_before_acceptance_or_provider() {
     let llm = Arc::new(
         FakeStreamingLlmClient::builder()
             .push_events(happy_events())
@@ -126,7 +124,7 @@ async fn existing_session_requires_its_workspace_history_before_accepting_new_tu
 }
 
 #[tokio::test]
-async fn new_write_closes_old_turn_without_stealing_identity_or_events() {
+async fn orphaned_turn_allows_send_without_mutating_old_facts_or_events() {
     let llm = Arc::new(
         FakeStreamingLlmClient::builder()
             .push_events(happy_events())
@@ -134,28 +132,21 @@ async fn new_write_closes_old_turn_without_stealing_identity_or_events() {
     );
     let fixture = setup_fixture(llm.clone(), &[]);
     let (sid, old) = seed(&fixture);
-    assert!(
-        fixture
-            .api
-            .read(move |read| read.turn_detail(sid, old))
-            .await
-            .unwrap()
-            .summary
-            .is_none(),
-        "read is closure-free"
-    );
+    let before = fixture
+        .api
+        .read(move |read| read.turn_detail(sid, old))
+        .await
+        .unwrap();
+    assert_eq!(before.summary.progress, StepProgress::Reserved);
     let mut request = fixture.request.clone();
     request.session_id = Some(sid);
     request.agent = None;
     let (new, events) = fixture.run(request).await;
     assert_ne!(new.turn_id, old);
     let read = fixture.store.begin_read().unwrap();
-    assert_eq!(
-        read.turn_detail(sid, old).unwrap().summary.unwrap().outcome,
-        PublicTurnOutcome::Failed
-    );
+    assert_eq!(read.turn_detail(sid, old).unwrap(), before);
     assert_eq!(llm.call_count(), 1);
-    assert_eq!(read.log(sid).unwrap().nodes.len(), 4);
+    assert_eq!(read.log(sid).unwrap().nodes.len(), 5);
     let terminal: Vec<_> = events
         .iter()
         .filter_map(|event| match event {
@@ -272,4 +263,82 @@ async fn absent_session_fails_before_startup_and_injected_store_remains_authorit
         "the execution must not silently reopen a layout-default SessionStore"
     );
     assert_eq!(llm.call_count(), 1);
+}
+
+#[tokio::test]
+async fn cancelled_before_first_request_closes_reserved_step_without_attempt() {
+    let llm = Arc::new(FakeStreamingLlmClient::builder().build());
+    let fixture = setup_fixture(llm.clone(), &[]);
+    let mut request = fixture.request.clone();
+    request.cancel_flag = Some(Arc::new(std::sync::atomic::AtomicBool::new(true)));
+    let (detail, events) = fixture.run(request).await;
+    assert_eq!(llm.call_count(), 0);
+    assert_eq!(detail.steps.len(), 1);
+    assert!(detail.steps[0].attempts.is_empty());
+    assert_eq!(
+        detail.steps[0].end,
+        StepEnd::Stop {
+            cause: StopCause::Cancelled
+        }
+    );
+    assert!(detail.summary.progress.is_closed());
+    assert!(
+        matches!(events.last(), Some(TurnEvent::TurnCancelled { step, .. }) if step == &detail.steps[0])
+    );
+}
+
+#[tokio::test]
+async fn continue_at_library_step_limit_closes_reserved_step_32_without_request() {
+    use lattice_conversation::*;
+    use lattice_llm::LlmEvent;
+    let mut builder = FakeStreamingLlmClient::builder();
+    for _ in 0..MAX_MODEL_STEPS {
+        let message = NativeMessage::new(
+            MessageRole::Assistant,
+            Some(ProviderOrigin::OpenAiCompatible),
+            vec![MessagePart::semantic_only(MessageSemantic::ToolCall {
+                call: UnboundToolCall {
+                    provider_call_id: Some("read".into()),
+                    name: "observe.workspace".into(),
+                    arguments: serde_json::json!({
+                        "request": {"mode": "read_file", "path": "src/lib.rs"}
+                    }),
+                },
+            })],
+        );
+        builder = builder.push_events(vec![
+            LlmEvent::MessageComplete { message },
+            LlmEvent::Done {
+                finish_reason: "tool_calls".into(),
+                usage: None,
+            },
+        ]);
+    }
+    let llm = Arc::new(builder.build());
+    let fixture = setup_fixture(llm.clone(), &["observe.workspace"]);
+    let (detail, events) = fixture.run(fixture.request.clone()).await;
+    assert_eq!(llm.call_count(), MAX_MODEL_STEPS as usize);
+    assert_eq!(detail.steps.len(), MAX_MODEL_STEPS as usize + 1);
+    for step in &detail.steps[..MAX_MODEL_STEPS as usize] {
+        assert_eq!(step.end, StepEnd::Continue);
+        assert!(step.progress.is_closed());
+    }
+    let limit = detail.steps.last().unwrap();
+    assert_eq!(limit.key.ordinal, MAX_MODEL_STEPS);
+    assert!(limit.attempts.is_empty());
+    assert!(limit.slots.is_empty());
+    assert_eq!(
+        limit.end,
+        StepEnd::Stop {
+            cause: StopCause::ModelStepLimit
+        }
+    );
+    assert_eq!(detail.summary.progress, limit.progress);
+    assert!(events.iter().all(|event| !matches!(event,
+        TurnEvent::ModelStarted { key, .. } if key.model_step_ordinal >= MAX_MODEL_STEPS)));
+    assert!(events.iter().any(|event| matches!(event,
+        TurnEvent::StepClosed { step } if step.key.ordinal == MAX_MODEL_STEPS - 1)));
+    assert!(
+        matches!(events.last(), Some(TurnEvent::TurnFailed { step, summary, .. }) if step == limit && summary == &detail.summary)
+    );
 }

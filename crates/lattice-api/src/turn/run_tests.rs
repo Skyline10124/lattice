@@ -40,15 +40,13 @@ async fn run_turn_result_and_saved_nodes_preserve_contract_fields() {
     assert_eq!(detail.steps, result.steps);
     assert_eq!(detail.user_node, NodeId(1));
     assert_eq!(read.log(result.turn.session_id).unwrap().nodes.len(), 3);
-    let Node::Step { content, .. } = read
+    let node = read
         .node(NodeRef {
             session_id: result.turn.session_id,
             node: NodeId(2),
         })
-        .unwrap()
-    else {
-        panic!("Step")
-    };
+        .unwrap();
+    let content = node.step_content().expect("complete reply");
     assert!(
         matches!(&content.assistant.parts[0].semantic, MessageSemantic::Text { text } if text == "test response")
     );
@@ -56,7 +54,7 @@ async fn run_turn_result_and_saved_nodes_preserve_contract_fields() {
 }
 
 #[tokio::test]
-async fn provider_failure_closes_with_the_same_persistent_notice_and_no_partial_node() {
+async fn provider_failure_preserves_notice_in_step_without_partial_reply() {
     let fixture = setup_with_events(
         vec![
             LlmEvent::Token {
@@ -72,23 +70,13 @@ async fn provider_failure_closes_with_the_same_persistent_notice_and_no_partial_
         &[],
     );
     let (detail, events) = fixture.run(fixture.request.clone()).await;
+    assert_eq!(detail.summary.outcome, PublicTurnOutcome::Failed);
     assert_eq!(
-        detail.summary.as_ref().unwrap().outcome,
-        PublicTurnOutcome::Failed
-    );
-    assert_eq!(
-        detail
-            .summary
-            .as_ref()
-            .unwrap()
-            .notice
-            .as_ref()
-            .unwrap()
-            .text,
+        detail.summary.notice.as_ref().unwrap().text,
         "provider unavailable"
     );
     assert!(
-        matches!(&events.last().unwrap(), TurnEvent::TurnFailed { summary, step, .. } if Some(summary) == detail.summary.as_ref() && step == &detail.steps[0])
+        matches!(&events.last().unwrap(), TurnEvent::TurnFailed { summary, step, .. } if summary == &detail.summary && step == &detail.steps[0])
     );
     assert_eq!(
         fixture
@@ -99,7 +87,7 @@ async fn provider_failure_closes_with_the_same_persistent_notice_and_no_partial_
             .unwrap()
             .nodes
             .len(),
-        2
+        3
     );
     assert_eq!(
         detail.usage,
@@ -164,10 +152,7 @@ async fn completed_attempt_usage_survives_cancellation_before_dispatch() {
     let mut request = fixture.request.clone();
     request.cancel_flag = Some(cancel);
     let (detail, _) = fixture.run(request).await;
-    assert_eq!(
-        detail.summary.as_ref().unwrap().outcome,
-        PublicTurnOutcome::Cancelled
-    );
+    assert_eq!(detail.summary.outcome, PublicTurnOutcome::Cancelled);
     assert_eq!(
         detail.usage,
         UsageSummary::Complete {
@@ -179,13 +164,11 @@ async fn completed_attempt_usage_survives_cancellation_before_dispatch() {
         }
     );
     assert!(matches!(
-        &detail.steps[0].state,
-        StepDetailState::Closed {
+        &detail.steps[0].progress,
+        StepProgress::Closed {
             end: StepEnd::Stop {
-                cause: StopCause::Cancelled,
-                ..
-            },
-            ..
+                cause: StopCause::Cancelled
+            }
         }
     ));
 }

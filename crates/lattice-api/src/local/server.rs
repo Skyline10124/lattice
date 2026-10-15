@@ -214,9 +214,7 @@ impl Backend {
                 if let Err(error) = &result
                     && matches!(
                         error.kind,
-                        LocalErrorKind::RecoveryRequired
-                            | LocalErrorKind::StoreUnavailable
-                            | LocalErrorKind::Internal
+                        LocalErrorKind::StoreUnavailable | LocalErrorKind::Internal
                     )
                 {
                     state.unconfirmed_operations += 1;
@@ -292,22 +290,31 @@ impl Backend {
             Err(error) => return Err(error),
         };
         let turn_id = request.turn_id;
-        let Some(original) = api.read(move |r| r.turn_record(turn_id)).await? else {
+        let Some((sid, original_input, original_project)) = api
+            .read(move |r| {
+                let Some(node) = r.turn_node(turn_id)? else {
+                    return Ok(None);
+                };
+                Ok(Some((
+                    node.session_id,
+                    r.turn_input(node.session_id, turn_id)?,
+                    r.session(node.session_id)?.project_store_key,
+                )))
+            })
+            .await?
+        else {
             return Ok(None);
         };
         let workspace = canonical_workspace(request.workspace.clone()).await?;
-        if original.original_input != request.input
-            || original.project_store_key != workspace.store_key()
-            || request
-                .session_id
-                .is_some_and(|id| id != original.session_id)
+        if original_input != request.input
+            || original_project != workspace.store_key()
+            || request.session_id.is_some_and(|id| id != sid)
         {
             return Err(LocalError::new(
                 LocalErrorKind::Conflict,
                 "TurnId identity differs",
             ));
         }
-        let sid = original.session_id;
         let detail = api.read(move |r| r.turn_detail(sid, turn_id)).await?;
         Ok(Some(TurnView::from(&detail)))
     }
@@ -350,14 +357,6 @@ impl Backend {
                     "workspace differs from Session binding",
                 ));
             }
-            let io = CoordinatorStoreIo::acquire_api(api.clone(), session_id)
-                .await
-                .map_err(crate::ApiError::from)?;
-            let coordinator = TurnCoordinator::new(io, Arc::new(RandomIdSource));
-            coordinator
-                .auto_close()
-                .await
-                .map_err(crate::ApiError::from)?;
             api.read(move |r| r.current_agent(session_id)).await?
         } else {
             None
@@ -464,7 +463,7 @@ impl Backend {
         let record = self
             .open()
             .await?
-            .read(move |r| r.turn_record(target.turn_id))
+            .read(move |r| r.turn_node(target.turn_id))
             .await?
             .ok_or_else(|| LocalError::new(LocalErrorKind::NotFound, "Turn not found"))?;
         if target.session_id.is_some_and(|id| id != record.session_id) {
@@ -737,7 +736,7 @@ impl Backend {
                 };
                 if !owned {
                     let api = self.open().await?;
-                    if let Some(turn) = api.read(move |r| r.turn_record(target.turn_id)).await?
+                    if let Some(turn) = api.read(move |r| r.turn_node(target.turn_id)).await?
                         && target.session_id.is_some_and(|id| id != turn.session_id)
                     {
                         return Err(LocalError::new(
@@ -1225,8 +1224,6 @@ mod tests {
                         model: "test".into(),
                         provider: "openai_compatible".into(),
                         system_prompt: None,
-                        profile_snapshot_json: "{}".into(),
-                        policy_snapshot_json: "{}".into(),
                         catalog: ToolCatalogSnapshot::new("test".into(), vec![]).unwrap(),
                         limits: TurnExecutionLimits {
                             timeout_secs: 300,
@@ -1250,10 +1247,12 @@ mod tests {
         )
         .await
         .unwrap();
-        TurnCoordinator::new(io, Arc::new(RandomIdSource))
-            .auto_close()
-            .await
-            .unwrap();
+        io.close_step(lattice_session::store::CloseStep::StopBetweenRequests {
+            turn_id: request.turn_id,
+            cause: lattice_session::store::StopCause::Cancelled,
+        })
+        .await
+        .unwrap();
     }
     fn owner(backend: &Backend, request: &TurnRequest) -> Arc<Owner> {
         let owner = Arc::new(Owner {
@@ -1518,16 +1517,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_close_probe_and_rewind_preserve_old_turn_without_accepting_new() {
+    async fn orphaned_turn_allows_probe_and_rewind_without_changing_facts() {
         for rewind in [false, true] {
             let (_directory, backend, old) = pending_backend().await;
+            let session_id = old.session_id.unwrap();
+            let turn_id = old.turn_id;
+            let api = backend.open().await.unwrap();
+            let before = api
+                .read(move |r| r.turn_detail(session_id, turn_id))
+                .await
+                .unwrap();
             let mut new = old.clone();
             new.turn_id = super::super::new_turn_id();
             new.input = "new".into();
             let response = backend
                 .dispatch(if rewind {
                     Request::Rewind {
-                        session_id: old.session_id.unwrap(),
+                        session_id,
                         target: NodeId(0),
                         workspace: old.workspace.clone(),
                     }
@@ -1543,29 +1549,27 @@ mod tests {
                 response,
                 Response::Rewind(_) | Response::Acceptance(Acceptance::NeedsConfiguration { .. })
             ));
-            let (view, history) = finished(&backend, &old).await;
-            let turn = view.selected_turn.unwrap();
-            assert_eq!(turn.summary.unwrap().outcome, PublicTurnOutcome::Failed);
-            assert!(matches!(
-                turn.steps[0].state,
-                StepDetailState::Closed {
-                    end: StepEnd::Stop {
-                        node: None,
-                        cause: StopCause::ProcessExit
-                    },
-                    ..
-                }
-            ));
-            assert_eq!(history.entries.len(), usize::from(!rewind));
+            let after = api
+                .read(move |r| r.turn_detail(session_id, turn_id))
+                .await
+                .unwrap();
+            assert_eq!(after, before);
+            assert_eq!(after.summary.outcome, PublicTurnOutcome::Failed);
+            assert!(!after.summary.progress.is_closed());
             assert!(
-                backend
-                    .open()
-                    .await
-                    .unwrap()
-                    .read(move |r| r.turn_record(new.turn_id))
+                api.read(move |r| r.turn_node(new.turn_id))
                     .await
                     .unwrap()
                     .is_none()
+            );
+            let session = api.read(move |r| r.session(session_id)).await.unwrap();
+            assert_eq!(
+                session.current,
+                if rewind {
+                    NodeId(0)
+                } else {
+                    before.steps[0].node
+                }
             );
         }
     }
@@ -1772,7 +1776,16 @@ mod tests {
                     let guard = api.store.try_lock_session(sid)?;
                     Ok(lattice_session::store::with_test_commit_fault(
                         fault,
-                        || api.store.auto_close(&guard, first_id, chrono::Utc::now()),
+                        || {
+                            api.store.close_step(
+                                &guard,
+                                lattice_session::store::CloseStep::StopBetweenRequests {
+                                    turn_id: first_id,
+                                    cause: StopCause::Cancelled,
+                                },
+                                chrono::Utc::now(),
+                            )
+                        },
                     )?)
                 })
                 .await
@@ -1839,17 +1852,17 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(
-                first_detail.summary.is_some(),
+                first_detail.summary.progress.is_closed(),
                 matches!(fault, TestCommitFault::UnknownAfter)
             );
             let second_detail = reopened
                 .read(move |r| r.turn_detail(turn.session_id, turn.turn_id))
                 .await
                 .unwrap();
-            assert!(second_detail.summary.is_none());
+            assert!(!second_detail.summary.progress.is_closed());
             assert!(matches!(
-                second_detail.steps[0].state,
-                StepDetailState::Requesting { attempt: 0 }
+                second_detail.steps[0].progress,
+                lattice_session::store::StepProgress::Requesting
             ));
             assert_eq!(provider.finish().await.len(), 1);
         }

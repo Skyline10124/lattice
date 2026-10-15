@@ -296,8 +296,6 @@ mod tests {
             model: "model".into(),
             provider: "openai".into(),
             system_prompt: None,
-            profile_snapshot_json: "{}".into(),
-            policy_snapshot_json: "{}".into(),
             catalog: ToolCatalogSnapshot::new(
                 "build".into(),
                 vec![ToolCatalogEntry {

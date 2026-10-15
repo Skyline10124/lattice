@@ -117,7 +117,7 @@ pub(crate) async fn run_coordinator_saga(
     let session = coordinator.io.session_id();
     let config = coordinator
         .io
-        .read(move |read| Ok(read.durable_turn(session, turn_id)?.turn.config))
+        .read(move |read| Ok(read.turn_config(session, turn_id)?))
         .await?;
     let origin = match config.provider.as_str() {
         "openai" | "openai_compatible" => ProviderOrigin::OpenAiCompatible,
@@ -146,9 +146,7 @@ pub(crate) async fn run_coordinator_saga(
     let mut ordinal = 0;
     loop {
         live.healthy()?;
-        if let Some(cause) = live.stop().or_else(|| {
-            (ordinal >= config.limits.max_model_steps).then_some(StopCause::ModelStepLimit)
-        }) {
+        if let Some(cause) = live.stop() {
             let closed = coordinator
                 .io
                 .close_step(CloseStep::StopBetweenRequests { turn_id, cause })
@@ -250,7 +248,7 @@ pub(crate) async fn run_coordinator_saga(
                 }),
             };
             let mut retry_after = None;
-            let stopped = match result {
+            let mut stopped = match result {
                 Ok(ModelStepAttempt::Complete {
                     message,
                     usage,
@@ -276,6 +274,7 @@ pub(crate) async fn run_coordinator_saga(
                     key,
                     origin,
                     usage,
+                    retry_delay_ms: None,
                     cause: map_stop(cause),
                     diagnostic: AttemptDiagnostic {
                         provider_error: diagnostic
@@ -296,6 +295,7 @@ pub(crate) async fn run_coordinator_saga(
                         key,
                         origin,
                         usage: None,
+                        retry_delay_ms: None,
                         cause: StopCause::ProviderError {
                             retryable: retryable
                                 && hint.is_none_or(|wait| retry_after_allowed(wait, live.deadline)),
@@ -310,6 +310,7 @@ pub(crate) async fn run_coordinator_saga(
                     key,
                     origin,
                     usage: None,
+                    retry_delay_ms: None,
                     cause: StopCause::ProviderError { retryable: false },
                     diagnostic: AttemptDiagnostic {
                         provider_error: Some("provider request projection failed".into()),
@@ -317,6 +318,14 @@ pub(crate) async fn run_coordinator_saga(
                     },
                 },
             };
+            // 等待计划随失败尝试提交；事件与实际退避复用同一个毫秒值。
+            let retry_delay_ms = Duration::from_millis(delay)
+                .max(retry_after.unwrap_or_default())
+                .min(live.deadline.saturating_duration_since(Instant::now()))
+                .as_millis() as u64;
+            if stopped.cause == (StopCause::ProviderError { retryable: true }) {
+                stopped.retry_delay_ms = Some(retry_delay_ms);
+            }
             let message = stopped
                 .diagnostic
                 .provider_error
@@ -333,23 +342,20 @@ pub(crate) async fn run_coordinator_saga(
                 None,
             )
             .await?;
-            let wait = Duration::from_millis(delay)
-                .max(retry_after.unwrap_or_default())
-                .min(live.deadline.saturating_duration_since(Instant::now()));
             match stopped {
                 AttemptStopResult::Closed(closed) => {
-                    return publish_closed(coordinator, &live.observer, closed).await;
+                    return publish_closed(coordinator, &live.observer, *closed).await;
                 }
                 AttemptStopResult::RetryReady { next_attempt } => {
                     live.observer.emit(TurnEvent::LlmRetry {
                         key,
-                        delay_ms: wait.as_millis() as u64,
+                        delay_ms: retry_delay_ms,
                         notice: Notice {
                             level: NoticeLevel::Warn,
                             text: message,
                         },
                     });
-                    live.backoff(wait).await?;
+                    live.backoff(Duration::from_millis(retry_delay_ms)).await?;
                     attempt = next_attempt;
                     delay = delay.saturating_mul(2).min(live.retry.max_delay_ms);
                 }
@@ -371,6 +377,7 @@ pub(crate) async fn run_coordinator_saga(
                         key,
                         origin,
                         usage,
+                        retry_delay_ms: None,
                         cause: StopCause::InvalidBatch,
                         diagnostic: AttemptDiagnostic::default(),
                     })
@@ -378,7 +385,7 @@ pub(crate) async fn run_coordinator_saga(
                 let AttemptStopResult::Closed(closed) = stopped else {
                     unreachable!("InvalidBatch is not retryable")
                 };
-                return publish_closed(coordinator, &live.observer, closed).await;
+                return publish_closed(coordinator, &live.observer, *closed).await;
             }
             Err(error) => return Err(error),
         };
@@ -493,23 +500,19 @@ pub(crate) async fn run_coordinator_saga(
                 .io
                 .read(move |read| read.turn_detail(session, turn_id))
                 .await?;
-            let StepDetailState::Executing { slots } =
-                &detail.steps.last().expect("active Step").state
-            else {
-                unreachable!()
-            };
-            let row = slots
+            let row = detail
+                .steps
+                .last()
+                .expect("active Step")
+                .slots
                 .iter()
                 .find(|slot| slot.invocation_id == binding.invocation_id)
                 .expect("committed slot");
-            let OperatorInvocationState::Terminal { material, .. } = &row.state else {
-                unreachable!()
-            };
             live.observer.emit(TurnEvent::ToolCallFinished {
                 id: binding.invocation_id,
                 name: call.name.clone(),
                 outcome,
-                material: material.clone(),
+                material: row.material.clone(),
                 error_summary,
             });
             if stop {
@@ -524,13 +527,25 @@ pub(crate) async fn run_coordinator_saga(
             }
         }
         live.healthy()?;
-        let closed = coordinator
-            .io
-            .close_step(CloseStep::Continue {
+        let close = match live.stop() {
+            Some(cause) => CloseStep::StopExecuting {
                 key: registered.key,
-            })
-            .await?;
-        publish_closed(coordinator, &live.observer, closed).await?;
+                stop: if cause == StopCause::Cancelled {
+                    DispatchStop::Cancelled
+                } else {
+                    DispatchStop::Deadline
+                },
+            },
+            None => CloseStep::Continue {
+                key: registered.key,
+            },
+        };
+        let closed = coordinator.io.close_step(close).await?;
+        let finished = closed.summary.progress.is_closed();
+        let detail = publish_closed(coordinator, &live.observer, closed).await?;
+        if finished {
+            return Ok(detail);
+        }
         ordinal += 1;
     }
 }
@@ -552,20 +567,22 @@ fn history(
     let mut current = read.session(session_id)?.current;
     let mut items = Vec::new();
     while current != NodeId(0) {
-        match read.node(NodeRef {
+        let node = read.node(NodeRef {
             session_id,
             node: current,
-        })? {
+        })?;
+        let content = node.step_content();
+        match node {
             Node::UserMessage {
                 parent, message, ..
             } => {
                 items.push(ConversationItem::Message(message));
                 current = parent;
             }
-            Node::Step {
-                parent, content, ..
-            } => {
-                items.push(ConversationItem::Step(content));
+            Node::Step { parent, .. } => {
+                if let Some(content) = content {
+                    items.push(ConversationItem::Step(content));
+                }
                 current = parent;
             }
             Node::Root => {
@@ -587,18 +604,23 @@ async fn publish_closed(
     closed: ClosedStep,
 ) -> Result<TurnDetail> {
     let session_id = coordinator.io.session_id();
-    let turn_id = closed.record.key.turn_id;
+    let turn_id = closed.step.key.turn_id;
     let detail = coordinator
         .io
         .read(move |read| read.turn_detail(session_id, turn_id))
         .await?;
-    let step = detail.steps.last().expect("closed Step exists").clone();
+    let finished = closed.summary.progress.is_closed();
+    let step = if finished {
+        detail.steps.last().expect("closed Step exists").clone()
+    } else {
+        closed.step.clone()
+    };
     #[cfg(feature = "test-crash-barriers")]
     super::crash_barrier::hit(
         &coordinator.io,
         turn_id,
         "step_closed",
-        Some(step.key.ordinal),
+        Some(closed.step.key.ordinal),
         None,
     )
     .await?;
@@ -607,7 +629,7 @@ async fn publish_closed(
         turn_id,
     };
     #[cfg(feature = "test-crash-barriers")]
-    if detail.summary.is_some() {
+    if finished {
         super::crash_barrier::schedule(
             "turn_closed",
             serde_json::json!({
@@ -616,9 +638,14 @@ async fn publish_closed(
         )
         .await;
     }
-    observer.emit(match &detail.summary {
-        None => TurnEvent::StepClosed { step },
-        Some(summary) => match summary.outcome {
+    if finished && closed.next_node.is_some() {
+        observer.emit(TurnEvent::StepClosed { step: closed.step });
+    }
+    observer.emit(if !finished {
+        TurnEvent::StepClosed { step }
+    } else {
+        let summary = &closed.summary;
+        match summary.outcome {
             PublicTurnOutcome::Completed => TurnEvent::TurnCompleted {
                 turn,
                 step,
@@ -634,7 +661,7 @@ async fn publish_closed(
                 step,
                 summary: summary.clone(),
             },
-        },
+        }
     });
     Ok(detail)
 }

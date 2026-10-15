@@ -104,7 +104,7 @@ async fn absent(backend: &Backend, request: &TurnRequest) {
             .open()
             .await
             .unwrap()
-            .read(move |r| r.turn_record(id))
+            .read(move |r| r.turn_node(id))
             .await
             .unwrap()
             .is_none()
@@ -127,11 +127,11 @@ async fn committed(backend: &Backend, request: &TurnRequest) -> TurnDetail {
         .unwrap();
     assert!(view.active.is_none());
     let turn = view.selected_turn.unwrap();
-    assert!(turn.summary.is_some());
+    assert!(turn.summary.progress.is_closed());
     turn
 }
 fn outcome(turn: &TurnDetail) -> PublicTurnOutcome {
-    turn.summary.as_ref().unwrap().outcome.clone()
+    turn.summary.outcome.clone()
 }
 async fn change_seq(backend: &Backend, request: &TurnRequest) -> ChangeSeq {
     let key = crate::LocalWorkspaceRoot::from_path(&request.workspace)
@@ -368,16 +368,16 @@ async fn c2_concurrent_configurations_share_probe_then_one_cancellable_execution
         PublicTurnOutcome::Cancelled
     );
     let id = request.turn_id;
-    let record = backend
+    let session = request.session_id.unwrap();
+    let config = backend
         .open()
         .await
         .unwrap()
-        .read(move |r| r.turn_record(id))
+        .read(move |r| r.turn_config(session, id))
         .await
-        .unwrap()
         .unwrap();
     assert!(matches!(
-        record.config.system_prompt.as_deref(),
+        config.system_prompt.as_deref(),
         Some("第一份" | "第二份")
     ));
     assert_eq!(change_seq(&backend, &request).await, before);
@@ -552,7 +552,7 @@ async fn c4_rejected_operation_does_not_cancel_configuration_already_waiting_on_
 }
 
 #[tokio::test]
-async fn c5_existing_turn_precedes_configuration_and_recovery_is_closure_only() {
+async fn c5_existing_turn_precedes_configuration_and_new_send_preserves_orphan() {
     let (dir, backend, request) = super::tests::pending_backend().await;
     let provider = Provider::start().await;
     let before = change_seq(&backend, &request).await;
@@ -598,18 +598,22 @@ async fn c5_existing_turn_precedes_configuration_and_recovery_is_closure_only() 
     assert!(!cancel(&backend, &request).await);
     release.send(()).unwrap();
     accepted(bounded(task).await.unwrap().unwrap(), new.turn_id);
-    let old = committed(&backend, &request).await;
+    idle(&backend).await;
+    let session = request.session_id.unwrap();
+    let turn_id = request.turn_id;
+    let old = backend
+        .open()
+        .await
+        .unwrap()
+        .read(move |r| r.turn_detail(session, turn_id))
+        .await
+        .unwrap();
+    assert_eq!(&old, pending.selected_turn.as_ref().unwrap());
     assert_eq!(outcome(&old), PublicTurnOutcome::Failed);
-    assert!(matches!(
-        old.steps[0].state,
-        lattice_session::store::StepDetailState::Closed {
-            end: lattice_session::store::StepEnd::Stop {
-                cause: lattice_session::store::StopCause::ProcessExit,
-                node: None
-            },
-            ..
-        }
-    ));
+    assert_eq!(
+        old.summary.progress,
+        lattice_session::store::StepProgress::Reserved
+    );
     assert_eq!(
         outcome(&committed(&backend, &new).await),
         PublicTurnOutcome::Cancelled

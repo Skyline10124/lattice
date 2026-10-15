@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use super::{observer::ObserverSink, test_support::*, types::*};
 use lattice_llm::LlmEvent;
-use lattice_session::store::{NoticeLevel, PublicTurnOutcome, StepDetailState, StepEnd, StopCause};
+use lattice_session::store::{NoticeLevel, PublicTurnOutcome, StepEnd, StepProgress, StopCause};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -45,7 +45,7 @@ async fn stream_turn_error_after_partial_closes_without_persisting_partial() {
     assert!(
         matches!(&events.last().unwrap(), TurnEvent::TurnFailed { summary, .. } if summary.notice.as_ref().unwrap().text.contains("connection reset"))
     );
-    assert_eq!(detail.summary.unwrap().outcome, PublicTurnOutcome::Failed);
+    assert_eq!(detail.summary.outcome, PublicTurnOutcome::Failed);
     assert_eq!(
         fixture
             .store
@@ -55,7 +55,7 @@ async fn stream_turn_error_after_partial_closes_without_persisting_partial() {
             .unwrap()
             .nodes
             .len(),
-        2
+        3
     );
 }
 
@@ -121,15 +121,46 @@ async fn stream_turn_retry_uses_profile_backoff_and_cap() {
         .collect();
     assert_eq!(delays, vec![(0, 40), (1, 60), (2, 60)]);
     assert_eq!(detail.steps[0].attempts.len(), 4);
+    let persisted: Vec<_> = detail.steps[0]
+        .attempts
+        .iter()
+        .filter_map(|attempt| attempt.retry_delay_ms.map(|delay| (attempt.attempt, delay)))
+        .collect();
+    assert_eq!(persisted, delays);
+    let node = fixture
+        .store
+        .begin_read()
+        .unwrap()
+        .node(lattice_session::store::NodeRef {
+            session_id: detail.session_id,
+            node: detail.steps[0].node,
+        })
+        .unwrap();
+    let notices = node.retry_notices().unwrap();
+    for (notice, event) in notices.iter().zip(
+        events
+            .iter()
+            .filter(|e| matches!(e, TurnEvent::LlmRetry { .. })),
+    ) {
+        let TurnEvent::LlmRetry {
+            key,
+            delay_ms,
+            notice: live_notice,
+        } = event
+        else {
+            unreachable!()
+        };
+        assert_eq!(notice.attempt, key.attempt_ordinal);
+        assert_eq!(&notice.delay_ms, delay_ms);
+        assert_eq!(&notice.notice, live_notice);
+    }
+    assert_eq!(notices.len(), delays.len());
     let starts = llm.starts.lock().unwrap();
     assert_eq!(starts.len(), 4);
     for (pair, delay) in starts.windows(2).zip([40, 60, 60]) {
         assert_eq!(pair[1] - pair[0], Duration::from_millis(delay));
     }
-    assert_eq!(
-        detail.summary.unwrap().outcome,
-        PublicTurnOutcome::Completed
-    );
+    assert_eq!(detail.summary.outcome, PublicTurnOutcome::Completed);
 }
 #[tokio::test(start_paused = true)]
 async fn stream_turn_final_provider_failure_only_emits_terminal_notice() {
@@ -161,6 +192,7 @@ async fn stream_turn_final_provider_failure_only_emits_terminal_notice() {
             })
             .collect();
         assert_eq!(retries.len(), count - 1);
+        assert_eq!(attempts.last().unwrap().retry_delay_ms, None);
         for (ordinal, (key, notice)) in retries.iter().enumerate() {
             assert_eq!(key.attempt_ordinal as usize, ordinal);
             assert_eq!(notice.level, NoticeLevel::Warn);
@@ -178,7 +210,7 @@ async fn stream_turn_final_provider_failure_only_emits_terminal_notice() {
         let TurnEvent::TurnFailed { summary, .. } = events.last().unwrap() else {
             panic!("terminal failure must follow the final request")
         };
-        assert_eq!(Some(summary), detail.summary.as_ref());
+        assert_eq!(summary, &detail.summary);
         let notice = summary.notice.as_ref().unwrap();
         assert_eq!(notice.level, NoticeLevel::Error);
         let lattice_session::store::AttemptEndDetail::Stopped { diagnostic, .. } =
@@ -246,10 +278,7 @@ async fn stream_turn_retry_cancellation_closes_without_another_request() {
         panic!("closed")
     };
     assert_eq!(llm.starts.lock().unwrap().len(), 1);
-    assert_eq!(
-        detail.summary.as_ref().unwrap().outcome,
-        PublicTurnOutcome::Cancelled
-    );
+    assert_eq!(detail.summary.outcome, PublicTurnOutcome::Cancelled);
 }
 #[tokio::test(start_paused = true)]
 async fn stream_turn_retry_respects_explicit_and_default_deadlines() {
@@ -287,18 +316,13 @@ async fn stream_turn_retry_respects_explicit_and_default_deadlines() {
             vec![seconds.min(60) * 1_000; count],
             "plan must be capped by remaining Turn budget"
         );
-        assert_eq!(
-            detail.summary.as_ref().unwrap().outcome,
-            PublicTurnOutcome::Failed
-        );
+        assert_eq!(detail.summary.outcome, PublicTurnOutcome::Failed);
         assert!(matches!(
-            &detail.steps[0].state,
-            StepDetailState::Closed {
+            &detail.steps[0].progress,
+            StepProgress::Closed {
                 end: StepEnd::Stop {
-                    cause: StopCause::Deadline,
-                    ..
-                },
-                ..
+                    cause: StopCause::Deadline
+                }
             }
         ));
     }
