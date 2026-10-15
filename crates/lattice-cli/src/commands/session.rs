@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Session 命令通过 LocalClient 操作后台；本层仅处理配置、参数与呈现。
-//! 找回、查询和恢复先于当前 profile/provider 校验；引用写操作不在前端执行。
+//! 找回与查询先于当前 profile/provider 校验；引用写操作不在前端执行。
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -168,12 +168,12 @@ pub async fn run(
             } else {
                 for row in rows {
                     println!(
-                        "{} project={} current={} nodes={} active={} updated={}",
+                        "{} project={} current={} nodes={} unclosed_turn={} updated={}",
                         display_id(&row.session_id.to_string()),
                         row.project_store_key,
                         row.current.0,
                         row.node_count,
-                        row.active_turn
+                        row.unclosed_turn
                             .map_or_else(|| "none".into(), |id| id.to_string()),
                         row.updated_at
                     );
@@ -210,12 +210,11 @@ pub async fn run(
 fn render_log(log: &lattice_api::local::SessionLog) -> String {
     use std::fmt::Write;
     let mut text = format!(
-        "session {} current={} agent={} active={}\n",
+        "session {} current={} agent={} unclosed_turn={}\n",
         log.session.session_id,
         log.session.current.0,
         summarize(log.current_agent.as_deref().unwrap_or("none"), 120),
-        log.session
-            .active_turn
+        log.unclosed_turn
             .map_or_else(|| "none".into(), |id| id.to_string())
     );
     let mut children = std::collections::BTreeMap::<_, Vec<_>>::new();
@@ -249,10 +248,7 @@ fn render_log(log: &lattice_api::local::SessionLog) -> String {
                 "  ".repeat(depth + 1),
                 turn.turn_id,
                 turn.agent_name,
-                turn.summary.as_ref().map_or_else(
-                    || "running".into(),
-                    |s| serde_json::to_string(s).expect("summary")
-                )
+                serde_json::to_string(&turn.summary).expect("summary")
             );
         }
         if let Some(rows) = children.get(&Some(row.node.id)) {
@@ -275,9 +271,12 @@ fn render_turn(turn: &lattice_api::local::TurnDetail) -> String {
     for step in &turn.steps {
         let _ = writeln!(
             text,
-            "step {}: {}",
+            "step {} node={} progress={} end={} updated_at={}",
             step.key.ordinal,
-            serde_json::to_string(&step.state).expect("step")
+            step.node.0,
+            serde_json::to_string(&step.progress).expect("progress"),
+            serde_json::to_string(&step.end).expect("end"),
+            step.updated_at
         );
         for attempt in &step.attempts {
             let _ = writeln!(
@@ -285,6 +284,14 @@ fn render_turn(turn: &lattice_api::local::TurnDetail) -> String {
                 "  attempt {}: {}",
                 attempt.attempt,
                 serde_json::to_string(attempt).expect("attempt")
+            );
+        }
+        for slot in &step.slots {
+            let _ = writeln!(
+                text,
+                "  slot {}: {}",
+                slot.invocation_id,
+                serde_json::to_string(slot).expect("slot")
             );
         }
     }
@@ -373,39 +380,41 @@ mod session_cli {
     #[test]
     fn tree_output_keeps_root_branches_current_and_notice() {
         let log: lattice_api::local::SessionLog = serde_json::from_value(serde_json::json!({
-            "session": {"session_id":"11111111111111111111111111111111", "project_store_key":"a".repeat(64), "current":3, "active_turn":null, "created_at":"2026-09-27T00:00:00Z", "updated_at":"2026-09-27T00:00:00Z"},
-            "current_agent":"beta",
+            "session": {"session_id":"11111111111111111111111111111111", "project_store_key":"a".repeat(64), "current":4, "created_at":"2026-09-27T00:00:00Z", "updated_at":"2026-09-27T00:00:00Z"},
+            "current_agent":"beta", "unclosed_turn":"20000000-0000-4000-8000-000000000002",
             "nodes":[
                 {"node":{"id":0,"parent":null,"turn_id":null,"kind":{"kind":"root"}},"current":false,"turn_start":null},
-                {"node":{"id":1,"parent":0,"turn_id":"10000000-0000-4000-8000-000000000001","kind":{"kind":"user_message"}},"current":false,"turn_start":{"turn_id":"10000000-0000-4000-8000-000000000001","agent_name":"alpha","summary":{"outcome":"cancelled","notice":{"level":"info","text":"cancelled notice"}}}},
+                {"node":{"id":1,"parent":0,"turn_id":"10000000-0000-4000-8000-000000000001","kind":{"kind":"user_message"}},"current":false,"turn_start":{"turn_id":"10000000-0000-4000-8000-000000000001","agent_name":"alpha","summary":{"outcome":"cancelled","progress":{"progress":"closed","end":{"end":"stop","cause":{"cause":"cancelled"}}},"notice":{"level":"info","text":"cancelled notice"}}}},
                 {"node":{"id":2,"parent":1,"turn_id":"10000000-0000-4000-8000-000000000001","kind":{"kind":"step","ordinal":0}},"current":false,"turn_start":null},
-                {"node":{"id":3,"parent":0,"turn_id":"20000000-0000-4000-8000-000000000002","kind":{"kind":"user_message"}},"current":true,"turn_start":{"turn_id":"20000000-0000-4000-8000-000000000002","agent_name":"beta","summary":null}}
+                {"node":{"id":3,"parent":0,"turn_id":"20000000-0000-4000-8000-000000000002","kind":{"kind":"user_message"}},"current":false,"turn_start":{"turn_id":"20000000-0000-4000-8000-000000000002","agent_name":"beta","summary":{"outcome":"failed","progress":{"progress":"reserved"},"notice":{"level":"error","text":"process exited"}}}},
+                {"node":{"id":4,"parent":3,"turn_id":"20000000-0000-4000-8000-000000000002","kind":{"kind":"step","ordinal":0}},"current":true,"turn_start":null}
             ]
         })).unwrap();
         let text = render_log(&log);
-        assert!(text.contains("current=3 agent=beta"));
+        assert!(text.contains("current=4 agent=beta"));
         assert!(text.contains("  0 root"));
         assert!(text.contains("    1 user"));
         assert!(text.contains("      2 step 0"));
-        assert!(text.contains("  * 3 user"));
+        assert!(text.contains("    3 user"));
+        assert!(text.contains("    * 4 step 0"));
         assert!(text.contains("cancelled notice"));
         assert!(text.contains("alpha"));
     }
     #[test]
-    fn turn_output_keeps_stop_without_node_or_attempts() {
+    fn turn_output_keeps_reserved_node_and_process_exit_conclusion() {
         let turn: lattice_api::local::TurnDetail = serde_json::from_value(serde_json::json!({
             "session_id":"11111111111141118111111111111111",
             "turn_id":"10000000-0000-4000-8000-000000000001",
             "user_node":1,"agent_name":"alpha",
             "accepted_at":"2026-09-27T00:00:00Z","ended_at":"2026-09-27T00:00:01Z",
-            "summary":{"outcome":"failed","notice":{"level":"error","text":"process exited"}},
+            "summary":{"outcome":"failed","progress":{"progress":"reserved"},"notice":{"level":"error","text":"process exited"}},
             "usage":{"kind":"complete","total":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}},
-            "steps":[{"key":{"turn_id":"10000000-0000-4000-8000-000000000001","ordinal":0},"attempts":[],"state":{"state":"closed","end":{"end":"stop","node":null,"cause":{"cause":"process_exit"}},"slots":[]}}]
+            "steps":[{"node":2,"key":{"turn_id":"10000000-0000-4000-8000-000000000001","ordinal":0},"progress":{"progress":"reserved"},"end":{"end":"stop","cause":{"cause":"process_exit"}},"attempts":[],"slots":[],"updated_at":"2026-09-27T00:00:01Z"}]
         })).unwrap();
         let text = render_turn(&turn);
-        assert!(text.contains("step 0:"), "{text}");
+        assert!(text.contains("step 0 node=2"), "{text}");
         assert!(text.contains("\"end\":\"stop\""), "{text}");
-        assert!(text.contains("\"node\":null"), "{text}");
+        assert!(text.contains("\"progress\":\"reserved\""), "{text}");
         assert!(text.contains("process_exit"), "{text}");
         assert!(text.contains("process exited"), "{text}");
     }

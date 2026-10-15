@@ -207,11 +207,11 @@ fn direct_tools_fetch_disabled_no_dispatch() {
             "rejected batch closes Failed",
         )?;
         require(
-            detail["steps"][0]["state"]["end"]["cause"]["cause"] == "invalid_batch",
+            detail["steps"][0]["end"]["cause"]["cause"] == "invalid_batch",
             "durable invalid batch",
         )?;
         require(
-            detail["steps"][0]["state"]["slots"]
+            detail["steps"][0]["slots"]
                 .as_array()
                 .is_some_and(Vec::is_empty),
             "no slots for rejected batch",

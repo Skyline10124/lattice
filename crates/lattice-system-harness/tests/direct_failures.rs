@@ -28,7 +28,7 @@ fn failed(outcome: &SendExecution, cause: &str) -> Result<(), AssertError> {
     assert_clean_send(outcome)?;
     assert_accepted_and_closed(outcome)?;
     let turn = final_turn(outcome);
-    let end = &turn["steps"].as_array().unwrap().last().unwrap()["state"]["end"];
+    let end = &turn["steps"].as_array().unwrap().last().unwrap()["end"];
     require(
         outcome.command.is_clean_exit(1)
             && turn["summary"]["outcome"] == "failed"
@@ -101,9 +101,27 @@ fn provider_failure(name: &str, test: &str, script: SseScript, partial: bool) {
             require(outcome.assistant_text().is_empty(), "no fabricated text")?;
         }
         let turn = final_turn(&outcome);
+        let history = outcome
+            .events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                TurnEventLine::Unknown { type_name, raw } if type_name == "history" => {
+                    Some(&raw["history"])
+                }
+                _ => None,
+            })
+            .expect("fixed history");
+        let entry = history["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["node"] == turn["steps"][0]["node"])
+            .expect("reserved Step persists even on failure");
         require(
-            turn["steps"][0]["state"]["end"]["node"].is_null(),
-            "failed partial is not a paired Step node",
+            entry["content"]["kind"] == "step"
+                && entry["content"].get("reply") == Some(&Value::Null),
+            "failed partial remains diagnostic, not a complete reply",
         )
     })();
     finish_failure(
@@ -205,7 +223,7 @@ fn direct_failure_sigint_while_stalled_commits_cancelled() {
         require(
             turn["summary"]["outcome"] == "cancelled"
                 && turn["summary"]["notice"]["level"] == "info"
-                && turn["steps"][0]["state"]["end"]["cause"]["cause"] == "cancelled",
+                && turn["steps"][0]["end"]["cause"]["cause"] == "cancelled",
             "Cancelled/Info with durable cancellation cause",
         )?;
         require(
@@ -283,8 +301,8 @@ fn direct_failure_mutation_survives_provider_failure() {
         failed(&outcome, "provider_error")?;
         let turn = final_turn(&outcome);
         require(
-            turn["steps"][0]["state"]["end"]["end"] == "continue"
-                && turn["steps"][0]["state"]["slots"][0]["state"]["outcome"] == "succeeded",
+            turn["steps"][0]["end"]["end"] == "continue"
+                && turn["steps"][0]["slots"][0]["outcome"] == "succeeded",
             "mutation committed before failed next request",
         )?;
         require(
@@ -347,7 +365,7 @@ fn direct_failure_session_lock_rejects_busy_then_accepts_explicit_retry() {
             log.is_clean_exit(0) && rows.len() == 7,
             "root plus exactly three complete Turns",
         )?;
-        let previous = &final_turn(&a)["steps"][0]["state"]["end"]["node"];
+        let previous = &final_turn(&a)["steps"][0]["node"];
         require(
             rows.iter().any(|r| {
                 r["turn_start"]["turn_id"] == b.accepted_turn_id().unwrap()

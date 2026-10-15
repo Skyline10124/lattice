@@ -5,8 +5,8 @@ use anyhow::Result;
 use lattice_api::local::{
     Acceptance, CancelStatus, ConnectionStatus, FrozenConfiguration, HistoryReadError, LocalClient,
     LocalErrorKind, LocalHistory, LocalState, LocalTurn, LocalUpdate, MaterialSummary,
-    MessageSemantic, Node, NotSubmittedStage, NoticeLevel, ObservationPhase, ObservationSnapshot,
-    PublicTurnOutcome, SessionId, TurnId, TurnRequest, TurnSummary, UsageSummary,
+    MessageSemantic, Node, NotSubmittedStage, NoticeLevel, ObservationSnapshot, PublicTurnOutcome,
+    SessionId, TurnId, TurnRequest, TurnSummary, UsageSummary,
 };
 use lattice_api::{LoadedAgentProfile, TurnEvent};
 use std::io::Write;
@@ -317,7 +317,7 @@ async fn observe_with_signal(
                         session_id=Some(view.session.session_id);
                         render.session_id=session_id;
                         if let Some(detail)=&view.selected_turn {
-                            if detail.summary.is_some() {render.last_summary=detail.summary.clone();}
+                            if detail.summary.progress.is_closed() || !view.owned {render.last_summary=Some(detail.summary.clone());}
                             render.usage=Some(detail.usage.clone());
                         }
                         let state = LocalState { view, phase, error };
@@ -328,7 +328,13 @@ async fn observe_with_signal(
                     Some(LocalUpdate::Reset{view,generation:new_generation})=>{
                         generation=new_generation;history_ready=false;
                         if json {println!("{}",serde_json::json!({"type":"snapshot","generation":generation,"view":view}));}
-                        else if let Some(attempt)=&view.attempt {
+                        else {
+                            if let Some((node, content)) = &view.unclosed_step {
+                                finish_text(&mut render,&mut std::io::stdout())?;
+                                println!("--- unclosed step snapshot: node {} ---", node.0);
+                                render_node(content)?;
+                            }
+                            if let Some(attempt)=&view.attempt {
                             finish_text(&mut render,&mut std::io::stdout())?;
                             println!(
                                 "--- current attempt snapshot: turn {} step {} attempt {} ---",
@@ -338,6 +344,7 @@ async fn observe_with_signal(
                             );
                             for segment in &attempt.segments {if let lattice_api::local::TextSegment::Text{text}=segment {print!("{text}");}}
                             println!();
+                            }
                         }
                     }
                     Some(LocalUpdate::History{generation:read_generation,result,stale,..})=>{
@@ -354,10 +361,6 @@ async fn observe_with_signal(
                                     if render.last_summary.is_some() {break Ok(std::process::ExitCode::from(1));}
                                 }
                             }
-                        }
-                        // 无 Owner 的 Running 不会收到 Finished；正文交付后允许离开，不伪造完成。
-                        if !awaiting && history_ready && render.last_summary.is_none() && last_state.as_ref().is_some_and(|s|s.phase==ObservationPhase::NoOwner) {
-                            break Ok(std::process::ExitCode::from(1));
                         }
                     }
                     Some(LocalUpdate::Finished{generation:finished_generation,..})=>{
@@ -536,16 +539,12 @@ fn render_snapshot(
     } else {
         writeln!(
             err,
-            "session {} current={} active={}",
-            view.session.session_id,
-            view.session.current.0,
-            view.session
-                .active_turn
-                .map_or_else(|| "none".into(), |id| id.to_string())
+            "session {} current={} owned={}",
+            view.session.session_id, view.session.current.0, view.owned
         )?;
         if let Some(turn) = &view.selected_turn
-            && let Some(summary) = &turn.summary
-            && let Some(line) = summary_once(turn.turn_id, summary, render)
+            && (turn.summary.progress.is_closed() || !view.owned)
+            && let Some(line) = summary_once(turn.turn_id, &turn.summary, render)
         {
             writeln!(err, "{line}")?;
         }
@@ -565,24 +564,39 @@ fn render_history(history: LocalHistory, json: bool) -> Result<()> {
         history.anchor.head.0
     );
     for entry in history.entries {
-        let (message, results) = match entry.content {
-            Node::Root => continue,
-            Node::UserMessage { message, .. } => (message, vec![]),
-            Node::Step { content, .. } => (content.assistant, content.results),
-        };
-        println!("node {} agent={}", entry.node.0, entry.agent_name);
-        for part in message.parts {
-            if let MessageSemantic::Text { text } = part.semantic {
-                println!("{text}");
-            }
-        }
-        for result in results {
+        for retry in entry.retries {
             println!(
-                "{} · {}",
-                result.name,
-                serde_json::to_string(&result.payload)?
+                "{}: {} (retry after {} ms)",
+                notice_level_label(&retry.notice.level),
+                retry.notice.text,
+                retry.delay_ms
             );
         }
+        println!("node {} agent={}", entry.node.0, entry.agent_name);
+        render_node(&entry.content)?;
+    }
+    Ok(())
+}
+fn render_node(node: &Node) -> Result<()> {
+    let (message, results) = match node {
+        Node::Root => return Ok(()),
+        Node::UserMessage { message, .. } => (message.clone(), vec![]),
+        Node::Step { .. } => match node.step_content() {
+            Some(content) => (content.assistant, content.results),
+            None => return Ok(()),
+        },
+    };
+    for part in message.parts {
+        if let MessageSemantic::Text { text } = part.semantic {
+            println!("{text}");
+        }
+    }
+    for result in results {
+        println!(
+            "{} · {}",
+            result.name,
+            serde_json::to_string(&result.payload)?
+        );
     }
     Ok(())
 }

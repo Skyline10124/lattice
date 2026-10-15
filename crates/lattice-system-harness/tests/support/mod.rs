@@ -48,8 +48,7 @@ pub(crate) fn assert_accepted_and_closed(outcome: &SendOutcome) -> Result<(), As
         matches!(event,
         TurnEventLine::Unknown { type_name, raw } if type_name == "snapshot"
         && raw["view"]["selected_turn"]["turn_id"].as_str() == Some(id)
-        && !raw["view"]["selected_turn"]["summary"].is_null()
-        && raw["view"]["session"]["active_turn"].is_null())
+        && raw["view"]["selected_turn"]["summary"]["progress"]["progress"] == "closed")
     });
     require(
         closed.is_some_and(|closed| accepted < closed),
