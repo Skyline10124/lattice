@@ -145,10 +145,9 @@ impl ObserverSink {
             attempt.as_ref().is_some_and(|a| {
                 a.key.turn_id == *turn_id
                     && a.key.model_step_ordinal == *step_ordinal
-                    && attempts.iter().any(|stored| {
-                        stored.attempt == a.key.attempt_ordinal
-                            && matches!(stored.progress, AttemptProgress::Sent)
-                    })
+                    && attempts
+                        .get(a.key.attempt_ordinal as usize)
+                        .is_some_and(|stored| matches!(stored.progress, AttemptProgress::Sent))
             })
         }) {
             attempt = None;

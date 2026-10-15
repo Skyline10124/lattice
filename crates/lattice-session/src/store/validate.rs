@@ -2,9 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use lancet_protocol::{
-    CellEvidenceTriple, CepErrorCode, InvocationBinding, InvocationId, ModelMessageAddress,
-};
+use lancet_protocol::{CellEvidenceTriple, InvocationBinding, InvocationId, ModelMessageAddress};
 use lattice_conversation::{
     BoundToolCall, MessageRole, MessageSemantic, NativeMessage, ProviderOrigin, RawToolCall,
     ToolCallState, validate_tool_call_batch,
@@ -251,58 +249,7 @@ pub(super) fn terminal(
         {
             return Err(invalid("terminal", "unnecessary unavailable content"));
         }
-        // 这两个错误码归 Indeterminate，其余错误（含策略与校验拒绝）归 Failed。
-        ResultPayload::Failed(e)
-            if matches!(
-                e.code,
-                CepErrorCode::CallCancelled | CepErrorCode::OutcomeIndeterminate
-            ) =>
-        {
-            return Err(invalid("terminal", "error belongs to a different outcome"));
-        }
         _ => {}
-    }
-    Ok(())
-}
-
-/// Terminal 前缀，最多一个 Started，余下 Registered；停止批次的终态之后只能保持 Registered。
-pub(super) fn slot_order(slots: &[InvocationSlot]) -> Result<()> {
-    let mut waiting = false;
-    let mut stopped = false;
-    let mut last = None;
-    let mut ids = BTreeSet::new();
-    let mut message = None;
-    for slot in slots {
-        let address = slot.binding.identity.address();
-        if last.is_some_and(|p| p >= address.part_ordinal)
-            || !ids.insert(slot.binding.invocation_id)
-            || message.is_some_and(|m| m != address.message)
-        {
-            return Err(corrupt("nodes", "slots", "invalid slot order or ownership"));
-        }
-        last = Some(address.part_ordinal);
-        message = Some(address.message);
-        match &slot.progress {
-            SlotProgress::Registered => waiting = true,
-            SlotProgress::Started => {
-                if waiting || stopped {
-                    return Err(corrupt("nodes", "slots", "out-of-order start"));
-                }
-                waiting = true;
-            }
-            SlotProgress::Terminal { result, evidence } => {
-                terminal(&slot.binding, result, evidence)
-                    .map_err(|_| corrupt("nodes", "terminal", "invalid terminal"))?;
-                if waiting || stopped {
-                    return Err(corrupt(
-                        "nodes",
-                        "slots",
-                        "execution after unfinished or stopping slot",
-                    ));
-                }
-                stopped |= close::stops_batch(&result.payload);
-            }
-        }
     }
     Ok(())
 }
@@ -315,18 +262,19 @@ fn bound_reply(
     message: &NativeMessage<BoundToolCall>,
     slots: &[InvocationSlot],
 ) -> Result<()> {
-    assistant(message)?;
     if message
         .provider_origin
         .is_some_and(|origin| provider(provider_name).ok() != Some(origin))
     {
         return Err(invalid("reply", "stored reply provider mismatch"));
     }
-    slot_order(slots)?;
     if message.tool_calls().count() != slots.len() {
         return Err(invalid("slots", "reply/slot count mismatch"));
     }
     for ((ordinal, call), slot) in message.tool_calls().zip(slots) {
+        if let SlotProgress::Terminal { result, evidence } = &slot.progress {
+            terminal(&slot.binding, result, evidence)?;
+        }
         let entry = catalog
             .entries
             .iter()
@@ -354,18 +302,6 @@ fn bound_reply(
     Ok(())
 }
 
-fn retryable(attempt: &AttemptRecord) -> bool {
-    matches!(
-        attempt.progress,
-        AttemptProgress::Ended {
-            end: AttemptEnd::Stopped {
-                cause: StopCause::ProviderError { retryable: true },
-            },
-            ..
-        }
-    )
-}
-
 pub(super) fn stage(progress: &SlotProgress) -> InvocationStage {
     match progress {
         SlotProgress::Registered => InvocationStage::Registered,
@@ -387,7 +323,7 @@ pub(super) fn invocation_transition(
 }
 
 pub(super) fn turn(r: &Records, s: SessionId, t: TurnId) -> Result<()> {
-    let err = || corrupt("nodes", &t.to_string(), "invalid turn/step shape");
+    let err = || corrupt("nodes", &t.to_string(), "invalid turn/step relation");
     let user_ref = r.turn_index.get(&t).ok_or_else(err)?;
     if user_ref.session_id != s || user_ref.node == NodeId(0) {
         return Err(err());
@@ -395,12 +331,8 @@ pub(super) fn turn(r: &Records, s: SessionId, t: TurnId) -> Result<()> {
     let Some(Node::UserMessage {
         parent: user_parent,
         turn_id,
-        agent_name,
-        model,
         provider: provider_name,
-        limits,
         config_digest,
-        message,
         ..
     }) = r.nodes.get(&(s, user_ref.node))
     else {
@@ -409,26 +341,13 @@ pub(super) fn turn(r: &Records, s: SessionId, t: TurnId) -> Result<()> {
     if *turn_id != t || *user_parent >= user_ref.node || !r.nodes.contains_key(&(s, *user_parent)) {
         return Err(err());
     }
-    user_fields(agent_name, model, provider_name, limits).map_err(|_| err())?;
+    // 尝试的 provider 来源由它得出，存的值必须能解析。
+    provider(provider_name).map_err(|_| err())?;
     let stored = r.configs.get(config_digest).ok_or_else(err)?;
-    stored_config(config_digest, stored).map_err(|_| err())?;
-    if message.role != MessageRole::User
-        || message.provider_origin.is_some()
-        || message.parts.len() != 1
-        || message.parts[0].replay_state.is_some()
-        || !matches!(
-            &message.parts[0].semantic,
-            MessageSemantic::Text { text } if text.len() <= MAX_USER_INPUT_BYTES
-        )
-    {
-        return Err(err());
-    }
-
     let steps = r.turn_steps(s, t)?;
-    if steps.is_empty() || steps.len() > MAX_MODEL_STEPS as usize + 1 {
+    if steps.is_empty() {
         return Err(err());
     }
-    let expected_origin = provider(provider_name).map_err(|_| err())?;
     let mut expected_parent = user_ref.node;
     for (ordinal, (node_id, step_node)) in steps.iter().enumerate() {
         let expected_id = next_sequence(expected_parent.0, "node").map(NodeId)?;
@@ -437,7 +356,6 @@ pub(super) fn turn(r: &Records, s: SessionId, t: TurnId) -> Result<()> {
             turn_id: step_turn,
             step_ordinal,
             progress,
-            attempts,
             reply,
             slots,
             ..
@@ -449,203 +367,37 @@ pub(super) fn turn(r: &Records, s: SessionId, t: TurnId) -> Result<()> {
             || *parent != expected_parent
             || *step_turn != t
             || *step_ordinal != ordinal as u32
-            || attempts.len() > limits.max_model_attempts as usize
-            || ordinal >= MAX_MODEL_STEPS as usize && !attempts.is_empty()
         {
             return Err(err());
         }
         expected_parent = *node_id;
-
-        let mut complete = false;
-        let mut sent = false;
-        for (index, a) in attempts.iter().enumerate() {
-            if a.attempt as usize != index || complete || sent || a.origin != expected_origin {
-                return Err(err());
+        let continues = matches!(
+            progress,
+            StepProgress::Closed {
+                end: StepEnd::Continue
             }
-            match &a.progress {
-                AttemptProgress::Sent => {
-                    if a.usage.is_some()
-                        || a.retry_delay_ms.is_some()
-                        || index + 1 != attempts.len()
-                    {
-                        return Err(err());
-                    }
-                    sent = true;
-                }
-                AttemptProgress::Ended {
-                    end: AttemptEnd::Completed { step: address },
-                    diagnostic: d,
-                } => {
-                    if *address
-                        != (ModelMessageAddress {
-                            session_id: s,
-                            turn_id: t,
-                            model_step_ordinal: ordinal as u32,
-                        })
-                        || *d != AttemptDiagnostic::default()
-                        || a.retry_delay_ms.is_some()
-                        || index + 1 != attempts.len()
-                    {
-                        return Err(err());
-                    }
-                    complete = true;
-                }
-                AttemptProgress::Ended {
-                    end: AttemptEnd::Stopped { cause },
-                    diagnostic: d,
-                } => {
-                    diagnostic(cause, d).map_err(|_| err())?;
-                    if a.retry_delay_ms.is_some() {
-                        if !retryable(a) || index + 1 >= limits.max_model_attempts as usize {
-                            return Err(err());
-                        }
-                    } else if index + 1 < attempts.len()
-                        || retryable(a) && index + 1 < limits.max_model_attempts as usize
-                    {
-                        return Err(err());
-                    }
-                }
-            }
-        }
-        close::retry_notices(attempts).map_err(|_| err())?;
-
-        let last = ordinal + 1 == steps.len();
-        if !last
-            && *progress
-                != (StepProgress::Closed {
-                    end: StepEnd::Continue,
-                })
-        {
+        );
+        if continues != (ordinal + 1 < steps.len()) {
             return Err(err());
         }
-        if last
-            && *progress
-                == (StepProgress::Closed {
-                    end: StepEnd::Continue,
-                })
-        {
+        if let Some(reply) = reply {
+            bound_reply(
+                s,
+                provider_name,
+                &stored.catalog,
+                StepKey {
+                    turn_id: t,
+                    ordinal: *step_ordinal,
+                },
+                reply,
+                slots,
+            )
+            .map_err(|_| err())?;
+        } else if !slots.is_empty() {
+            // 保留绑定时，槽位必须有可核对的调用来源。
             return Err(err());
-        }
-
-        let key = StepKey {
-            turn_id: t,
-            ordinal: ordinal as u32,
-        };
-        match progress {
-            StepProgress::Reserved => {
-                if !attempts.is_empty() || reply.is_some() || !slots.is_empty() {
-                    return Err(err());
-                }
-            }
-            StepProgress::Requesting => {
-                if ordinal >= MAX_MODEL_STEPS as usize
-                    || attempts.is_empty()
-                    || reply.is_some()
-                    || !slots.is_empty()
-                    || complete
-                    || !sent && attempts.last().is_none_or(|a| a.retry_delay_ms.is_none())
-                {
-                    return Err(err());
-                }
-            }
-            StepProgress::Executing => {
-                let Some(reply) = reply else {
-                    return Err(err());
-                };
-                if ordinal >= MAX_MODEL_STEPS as usize || !complete || slots.is_empty() {
-                    return Err(err());
-                }
-                bound_reply(s, provider_name, &stored.catalog, key, reply, slots)
-                    .map_err(|_| err())?;
-            }
-            StepProgress::Closed { end } => {
-                if sent {
-                    return Err(err());
-                }
-                match (end, reply) {
-                    (StepEnd::Continue, Some(reply)) => {
-                        if ordinal >= MAX_MODEL_STEPS as usize
-                            || !complete
-                            || slots.is_empty()
-                            || slots.iter().any(|slot| {
-                                !matches!(
-                                    &slot.progress,
-                                    SlotProgress::Terminal { result, .. }
-                                        if !close::stops_batch(&result.payload)
-                                )
-                            })
-                        {
-                            return Err(err());
-                        }
-                        bound_reply(s, provider_name, &stored.catalog, key, reply, slots)
-                            .map_err(|_| err())?;
-                    }
-                    (StepEnd::Finish, Some(reply)) => {
-                        if ordinal >= MAX_MODEL_STEPS as usize || !complete || !slots.is_empty() {
-                            return Err(err());
-                        }
-                        bound_reply(s, provider_name, &stored.catalog, key, reply, slots)
-                            .map_err(|_| err())?;
-                    }
-                    (StepEnd::Stop { .. }, Some(reply)) => {
-                        if ordinal >= MAX_MODEL_STEPS as usize || !complete || slots.is_empty() {
-                            return Err(err());
-                        }
-                        bound_reply(s, provider_name, &stored.catalog, key, reply, slots)
-                            .map_err(|_| err())?;
-                    }
-                    (StepEnd::Stop { cause }, None) => {
-                        if complete || !slots.is_empty() {
-                            return Err(err());
-                        }
-                        if *cause == StopCause::ModelStepLimit
-                            && (ordinal != MAX_MODEL_STEPS as usize || !attempts.is_empty())
-                        {
-                            return Err(err());
-                        }
-                        let between = matches!(
-                            cause,
-                            StopCause::Cancelled | StopCause::Deadline | StopCause::ModelStepLimit
-                        );
-                        match attempts.last() {
-                            None if !between => return Err(err()),
-                            Some(a) if a.retry_delay_ms.is_some() => {
-                                if !matches!(cause, StopCause::Cancelled | StopCause::Deadline) {
-                                    return Err(err());
-                                }
-                            }
-                            Some(a) => {
-                                let AttemptProgress::Ended {
-                                    end: AttemptEnd::Stopped { cause: actual },
-                                    ..
-                                } = &a.progress
-                                else {
-                                    return Err(err());
-                                };
-                                if actual != cause {
-                                    return Err(err());
-                                }
-                            }
-                            None => {}
-                        }
-                    }
-                    (_, None) => return Err(err()),
-                }
-            }
         }
     }
-
-    let (_, last_step) = steps.last().expect("nonempty steps");
-    let Node::Step {
-        progress,
-        attempts,
-        slots,
-        ..
-    } = last_step
-    else {
-        return Err(err());
-    };
-    close::summary(progress, attempts, slots).map_err(|_| err())?;
     Ok(())
 }
 

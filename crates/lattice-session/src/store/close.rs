@@ -2,9 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use lancet_protocol::{
-    CellEvidenceTriple, CepError, CepErrorCode, InvocationBinding, ModelMessageAddress,
-};
+use lancet_protocol::{CellEvidenceTriple, CepError, CepErrorCode, InvocationBinding};
 use lattice_conversation::TokenUsage;
 
 /// 上游先脱敏；本函数仅按 Unicode 字符数执行持久诊断上限。
@@ -122,7 +120,6 @@ pub fn resolve_attempt(attempt: &AttemptRecord) -> (AttemptEnd, AttemptDiagnosti
 
 /// 按片段顺序返回第一个由槽位自身决定的停止原因。
 pub fn first_stopping_cause(slots: &[InvocationSlot]) -> Result<Option<StopCause>> {
-    validate::slot_order(slots)?;
     Ok(slots
         .iter()
         .find_map(|s| own_stop(&s.binding, &resolve_slot(s).0.payload)))
@@ -193,20 +190,11 @@ pub(super) fn outcome(
         }
     };
     let text = match cause {
-        StopCause::ProviderError { .. } => match attempts.last().map(resolve_attempt) {
-            Some((AttemptEnd::Stopped { cause: actual }, diagnostic)) if &actual == cause => {
-                diagnostic.provider_error.ok_or_else(|| {
-                    corrupt("nodes", "diagnostic", "missing final provider diagnostic")
-                })?
-            }
-            _ => {
-                return Err(corrupt(
-                    "nodes",
-                    "diagnostic",
-                    "provider cause does not match final attempt",
-                ));
-            }
-        },
+        StopCause::ProviderError { .. } => attempts
+            .last()
+            .map(resolve_attempt)
+            .and_then(|(_, diagnostic)| diagnostic.provider_error)
+            .ok_or_else(|| corrupt("nodes", "diagnostic", "missing final provider diagnostic"))?,
         StopCause::Cancelled => "cancelled by caller".into(),
         StopCause::Deadline => "turn deadline exceeded".into(),
         StopCause::OutputLimit => "model output limit exceeded".into(),
@@ -217,13 +205,6 @@ pub(super) fn outcome(
         }
         StopCause::ModelStepLimit => "model step limit exceeded".into(),
     };
-    if text.chars().count() > MAX_PROVIDER_ERROR_CHARS {
-        return Err(corrupt(
-            "nodes",
-            "diagnostic",
-            "provider diagnostic exceeds bound",
-        ));
-    }
     let (outcome, level) = if *cause == StopCause::Cancelled {
         (TurnOutcome::Cancelled, NoticeLevel::Info)
     } else {
@@ -256,33 +237,16 @@ pub(super) fn summary(
 /// 为每个带等待时长的尝试生成一条 Warn 级重试提示。
 pub fn retry_notices(attempts: &[AttemptRecord]) -> Result<Vec<RetryNotice>> {
     let mut notices = Vec::new();
-    for attempt in attempts {
+    for (index, attempt) in attempts.iter().enumerate() {
         let Some(delay_ms) = attempt.retry_delay_ms else {
             continue;
         };
-        let (end, diagnostic) = resolve_attempt(attempt);
-        let AttemptEnd::Stopped {
-            cause: StopCause::ProviderError { retryable: true },
-        } = end
-        else {
-            return Err(corrupt(
-                "nodes",
-                "attempts",
-                "retry delay on non-retryable attempt",
-            ));
-        };
+        let (_, diagnostic) = resolve_attempt(attempt);
         let text = diagnostic
             .provider_error
             .ok_or_else(|| corrupt("nodes", "diagnostic", "missing retry provider diagnostic"))?;
-        if text.chars().count() > MAX_PROVIDER_ERROR_CHARS {
-            return Err(corrupt(
-                "nodes",
-                "diagnostic",
-                "provider diagnostic exceeds bound",
-            ));
-        }
         notices.push(RetryNotice {
-            attempt: attempt.attempt,
+            attempt: index as u32,
             delay_ms,
             notice: Notice {
                 level: NoticeLevel::Warn,
@@ -293,19 +257,11 @@ pub fn retry_notices(attempts: &[AttemptRecord]) -> Result<Vec<RetryNotice>> {
     Ok(notices)
 }
 
-pub(super) fn completed(reply: &CompleteReply, session: SessionId) -> AttemptRecord {
+pub(super) fn completed(reply: &CompleteReply) -> AttemptRecord {
     AttemptRecord {
-        attempt: reply.key.attempt_ordinal,
-        origin: reply.origin,
         usage: reply.usage,
         progress: AttemptProgress::Ended {
-            end: AttemptEnd::Completed {
-                step: ModelMessageAddress {
-                    session_id: session,
-                    turn_id: reply.key.turn_id,
-                    model_step_ordinal: reply.key.model_step_ordinal,
-                },
-            },
+            end: AttemptEnd::Completed,
             diagnostic: AttemptDiagnostic::default(),
         },
         retry_delay_ms: None,

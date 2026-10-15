@@ -4,7 +4,6 @@
 use super::client::SubmissionReply;
 use super::{ipc, types::*, *};
 use crate::turn::TextSegment;
-use lattice_conversation::ProviderOrigin;
 use std::time::Duration;
 use tokio::net::{UnixListener, UnixStream};
 
@@ -158,8 +157,6 @@ fn view(id: TurnId, head: u64, closed: bool, owned: bool) -> ObservationSnapshot
                     step_ordinal: 0,
                     progress: StepProgress::Requesting,
                     attempts: vec![lattice_session::store::AttemptRecord {
-                        attempt: 0,
-                        origin: ProviderOrigin::OpenAiCompatible,
                         usage: None,
                         progress: AttemptProgress::Sent,
                         retry_delay_ms: None,

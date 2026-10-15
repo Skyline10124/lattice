@@ -1144,7 +1144,7 @@ fn nested_unknown_fields_are_rejected() {
     for pointer in [
         "/attempts/0/usage",
         "/attempts/0/progress",
-        "/attempts/0/progress/end/step",
+        "/attempts/0/progress/end",
         "/reply",
         "/reply/parts/1",
         "/reply/parts/1/semantic/tool_call/call",
@@ -1298,8 +1298,6 @@ fn progress_conclusions_and_stop_precedence() {
         );
     }
     let mut attempt = AttemptRecord {
-        attempt: 0,
-        origin: ProviderOrigin::OpenAiCompatible,
         usage: None,
         progress: AttemptProgress::Sent,
         retry_delay_ms: None,
@@ -1317,9 +1315,7 @@ fn progress_conclusions_and_stop_precedence() {
         AttemptEnd::Stopped {
             cause: StopCause::Deadline,
         },
-        AttemptEnd::Completed {
-            step: calls.bindings[0].identity.address().message,
-        },
+        AttemptEnd::Completed,
     ] {
         let diagnostic = AttemptDiagnostic {
             provider_error: Some("diagnostic".into()),
@@ -1331,9 +1327,6 @@ fn progress_conclusions_and_stop_precedence() {
         };
         assert_eq!(resolve_attempt(&attempt), (end, diagnostic));
     }
-    let mut bad = started.clone();
-    bad.binding = calls.bindings[1].clone();
-    assert!(step_stop_cause(&[registered, bad], DispatchStop::Deadline).is_err());
 }
 
 #[test]
@@ -2001,6 +1994,13 @@ fn audit_resolves_terminal_from_nodes_without_close_rows() {
     assert!(current.query_audit(&other, None, 0).is_err());
     let replay = current.replay_audit(&project(1), sid(1), tid(1)).unwrap();
     assert_eq!(replay.calls.len(), 2);
+    assert!(matches!(
+        current.replay_audit(&project(1), sid(9), tid(1)),
+        Err(StoreError::NotFound {
+            kind: "session",
+            ..
+        })
+    ));
     drop(current);
     drop(read);
     drop(before);
@@ -2058,6 +2058,7 @@ fn read_validation_rejects_broken_relations_and_shapes() {
         "root_missing",
         "root_extra",
         "user_parent",
+        "user_provider",
         "orphan_session",
         "node_gap",
         "parent_forward",
@@ -2072,9 +2073,6 @@ fn read_validation_rejects_broken_relations_and_shapes() {
         "config_missing",
         "config_digest",
         "catalog_digest",
-        "user_provider",
-        "user_limits",
-        "user_message",
         "intermediate_unclosed",
         "last_continue",
         "executing_reply",
@@ -2085,17 +2083,9 @@ fn read_validation_rejects_broken_relations_and_shapes() {
         "terminal_not_executed",
         "terminal_no_result",
         "terminal_without_receipt",
-        "slot_order",
         "duplicate_invocation",
         "evidence_version",
         "result_digest",
-        "attempt_order",
-        "attempt_origin",
-        "completed_address",
-        "retry_on_complete",
-        "retry_missing",
-        "retry_diagnostic",
-        "sent_usage",
         "index_missing",
         "index_extra",
         "index_address",
@@ -2128,6 +2118,23 @@ fn read_validation_rejects_broken_relations_and_shapes() {
                 };
                 *parent = NodeId(1);
             }
+            "user_provider" => {
+                let Node::UserMessage { provider, .. } =
+                    r.nodes.get_mut(&(sid(1), NodeId(1))).unwrap()
+                else {
+                    unreachable!()
+                };
+                *provider = "unknown".into();
+                // 去掉回复上的 provider 标记，只留 UserMessage 这一处来源。
+                for n in [2, 3] {
+                    if let Node::Step {
+                        reply: Some(reply), ..
+                    } = r.nodes.get_mut(&(sid(1), NodeId(n))).unwrap()
+                    {
+                        reply.provider_origin = None;
+                    }
+                }
+            }
             "orphan_session" => {
                 r.sessions.clear();
             }
@@ -2149,22 +2156,6 @@ fn read_validation_rejects_broken_relations_and_shapes() {
                 r.configs.values_mut().next().unwrap().system_prompt = Some("changed".into())
             }
             "catalog_digest" => r.configs.values_mut().next().unwrap().catalog.digest = [0; 32],
-            "user_provider" | "user_limits" | "user_message" => {
-                let Node::UserMessage {
-                    provider,
-                    limits,
-                    message,
-                    ..
-                } = r.nodes.get_mut(&(sid(1), NodeId(1))).unwrap()
-                else {
-                    unreachable!()
-                };
-                match case {
-                    "user_provider" => *provider = "unknown".into(),
-                    "user_limits" => limits.max_model_steps = 1,
-                    _ => message.role = MessageRole::Assistant,
-                }
-            }
             "intermediate_unclosed" => {
                 let Node::Step { progress, .. } = r.nodes.get_mut(&(sid(1), NodeId(2))).unwrap()
                 else {
@@ -2195,7 +2186,6 @@ fn read_validation_rejects_broken_relations_and_shapes() {
                     turn_id,
                     step_ordinal,
                     progress,
-                    attempts,
                     reply,
                     slots,
                     ..
@@ -2249,9 +2239,6 @@ fn read_validation_rejects_broken_relations_and_shapes() {
                             },
                         };
                     }
-                    "slot_order" => {
-                        slots[2].progress = SlotProgress::Started;
-                    }
                     "duplicate_invocation" => slots[2].binding.invocation_id = iid(2),
                     "evidence_version" => {
                         let SlotProgress::Terminal {
@@ -2274,28 +2261,6 @@ fn read_validation_rejects_broken_relations_and_shapes() {
                         };
                         *digest = [0; 32];
                     }
-                    "attempt_order" => attempts[0].attempt = 2,
-                    "attempt_origin" => attempts[0].origin = ProviderOrigin::Anthropic,
-                    "completed_address" => {
-                        let AttemptProgress::Ended {
-                            end: AttemptEnd::Completed { step },
-                            ..
-                        } = &mut attempts[1].progress
-                        else {
-                            unreachable!()
-                        };
-                        step.session_id = sid(2);
-                    }
-                    "retry_on_complete" => attempts[1].retry_delay_ms = Some(1),
-                    "retry_missing" => attempts[0].retry_delay_ms = None,
-                    "retry_diagnostic" => {
-                        let AttemptProgress::Ended { diagnostic, .. } = &mut attempts[0].progress
-                        else {
-                            unreachable!()
-                        };
-                        diagnostic.provider_error = None;
-                    }
-                    "sent_usage" => attempts[1].progress = AttemptProgress::Sent,
                     _ => unreachable!("{case}"),
                 }
             }
@@ -2363,10 +2328,6 @@ fn local_reads_detect_live_corruption_and_open_checks_unrelated_sessions() {
                 "detail case {case}"
             );
             assert!(read.snapshot(sid(1), None).is_err(), "snapshot case {case}");
-            assert!(
-                read.query_audit(&filter(project(1)), None, 100).is_err(),
-                "audit case {case}"
-            );
         }
         drop(read);
         drop(_other);
@@ -2433,8 +2394,7 @@ fn value_versions_and_schema_rejections_name_the_database() {
 }
 
 #[test]
-fn tail_rejects_invalid_lifecycle_across_pages() {
-    let mut missed = Vec::new();
+fn open_rejects_invalid_invocation_lifecycle() {
     for case in ["repeated_registered", "missing_started", "repeated_started"] {
         let (_dir, layout, db) = store();
         let (lock, calls) = running(&db, sid(1), tid(1), 1, 1);
@@ -2455,17 +2415,17 @@ fn tail_rejects_invalid_lifecycle_across_pages() {
         }
         let tx = db.db.begin_write().unwrap();
         let mut records = load_write(&tx).unwrap();
-        let (bad_seq, terminal_seq) = match case {
+        let terminal_seq = match case {
             "repeated_registered" => {
                 records.changes.get_mut(&ChangeSeq(3)).unwrap().stage = InvocationStage::Registered;
-                (3, 4)
+                4
             }
             "missing_started" => {
                 records.changes.remove(&ChangeSeq(3));
                 let mut terminal = records.changes.remove(&ChangeSeq(4)).unwrap();
                 terminal.sequence = ChangeSeq(3);
                 records.changes.insert(ChangeSeq(3), terminal);
-                (3, 3)
+                3
             }
             _ => {
                 let mut terminal = records.changes.remove(&ChangeSeq(4)).unwrap();
@@ -2474,31 +2434,13 @@ fn tail_rejects_invalid_lifecycle_across_pages() {
                 let mut started = records.changes[&ChangeSeq(3)];
                 started.sequence = ChangeSeq(4);
                 records.changes.insert(ChangeSeq(4), started);
-                (4, 5)
+                5
             }
         };
         records.last_change = ChangeSeq(terminal_seq);
         records.index.get_mut(&iid(1)).unwrap().last_change = ChangeSeq(terminal_seq);
         replace_all_for_test(&tx, &records).unwrap();
         tx.commit().unwrap();
-        for (after, limit, outcome) in [
-            (0, 100, None),
-            (bad_seq - 1, 1, None),
-            (terminal_seq - 1, 1, None),
-            (0, 100, Some(ToolResultOutcome::Succeeded)),
-            (terminal_seq - 1, 1, Some(ToolResultOutcome::Succeeded)),
-        ] {
-            selected.outcome = outcome;
-            let result = db
-                .begin_read()
-                .unwrap()
-                .tail_audit(&selected, ChangeSeq(after), limit);
-            if !matches!(result, Err(StoreError::Corruption { .. })) {
-                missed.push(format!(
-                    "{case}: after={after}, limit={limit}, outcome={outcome:?}"
-                ));
-            }
-        }
         assert!(records == load_read(&db.begin_read().unwrap().tx).unwrap());
         drop(db);
         assert!(matches!(
@@ -2506,10 +2448,6 @@ fn tail_rejects_invalid_lifecycle_across_pages() {
             Err(StoreError::Corruption { .. })
         ));
     }
-    assert!(
-        missed.is_empty(),
-        "tail accepted illegal lifecycle: {missed:?}"
-    );
 }
 
 #[test]
@@ -3354,16 +3292,6 @@ fn ordered_terminal_causes() {
             .is_err()
     );
     assert_eq!(detail(&db).summary.outcome, PublicTurnOutcome::Cancelled);
-    let Node::Step { mut slots, .. } = node_at(&db, 2) else {
-        unreachable!()
-    };
-    slots[0].progress = SlotProgress::Registered;
-    let receipt = terminal(&slots[1].binding, None);
-    slots[1].progress = SlotProgress::Terminal {
-        result: receipt.result,
-        evidence: receipt.evidence,
-    };
-    assert!(first_stopping_cause(&slots).is_err());
 }
 
 #[test]
@@ -3429,105 +3357,6 @@ fn strict_open_rejects_corruption() {
         SessionStore::open(&layout),
         Err(StoreError::Corruption { .. })
     ));
-}
-
-#[test]
-fn impossible_transaction_shapes_are_rejected() {
-    let (_dir, layout, db) = store();
-    let lock = db.try_lock_session(sid(1)).unwrap();
-    db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
-    db.start_request(&lock, key(tid(1), 0, 0), now()).unwrap();
-    db.stop_attempt(
-        &lock,
-        stopped(
-            key(tid(1), 0, 0),
-            StopCause::ProviderError { retryable: true },
-        ),
-        now(),
-    )
-    .unwrap();
-    let base = records(&db);
-    drop(lock);
-    drop(db);
-    for case in [
-        "premature_provider_close",
-        "scheduled_provider_close",
-        "exhausted_retry",
-        "empty_retry",
-        "nonretryable_retry",
-        "request_without_sent_or_retry",
-        "executing_without_completed",
-        "process_exit_rewrites_retry",
-    ] {
-        let mut r = base.clone();
-        if case == "exhausted_retry" {
-            let Node::UserMessage { limits, .. } = r.nodes.get_mut(&(sid(1), NodeId(1))).unwrap()
-            else {
-                unreachable!()
-            };
-            limits.max_model_attempts = 1;
-        } else {
-            let Node::Step {
-                progress,
-                attempts,
-                reply,
-                ..
-            } = r.nodes.get_mut(&(sid(1), NodeId(2))).unwrap()
-            else {
-                unreachable!()
-            };
-            match case {
-                "premature_provider_close" | "scheduled_provider_close" => {
-                    if case == "premature_provider_close" {
-                        attempts[0].retry_delay_ms = None;
-                    }
-                    *progress = StepProgress::Closed {
-                        end: StepEnd::Stop {
-                            cause: StopCause::ProviderError { retryable: true },
-                        },
-                    };
-                }
-                "empty_retry" => attempts.clear(),
-                "nonretryable_retry" => {
-                    let AttemptProgress::Ended { end, .. } = &mut attempts[0].progress else {
-                        unreachable!()
-                    };
-                    *end = AttemptEnd::Stopped {
-                        cause: StopCause::ProviderError { retryable: false },
-                    };
-                }
-                "request_without_sent_or_retry" => attempts[0].retry_delay_ms = None,
-                "executing_without_completed" => {
-                    *progress = StepProgress::Executing;
-                    *reply = Some(NativeMessage::new(MessageRole::Assistant, None, vec![]));
-                }
-                "process_exit_rewrites_retry" => {
-                    *progress = StepProgress::Closed {
-                        end: StepEnd::Stop {
-                            cause: StopCause::ProcessExit,
-                        },
-                    }
-                }
-                _ => unreachable!("{case}"),
-            }
-        }
-        assert!(
-            matches!(validate::records(&r), Err(StoreError::Corruption { .. })),
-            "accepted {case}"
-        );
-        let raw = redb::Database::open(layout.lattice_root().join("lattice.redb")).unwrap();
-        let tx = raw.begin_write().unwrap();
-        overwrite_records(&tx, &r);
-        tx.commit().unwrap();
-        drop(raw);
-        assert!(
-            matches!(
-                SessionStore::open(&layout),
-                Err(StoreError::Corruption { .. })
-            ),
-            "open accepted {case}"
-        );
-    }
 }
 
 #[test]

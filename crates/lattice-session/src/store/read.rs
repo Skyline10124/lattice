@@ -84,7 +84,12 @@ fn slot_detail(slot: &InvocationSlot) -> SlotDetail {
     }
 }
 
-fn attempt(a: &AttemptRecord) -> AttemptDetail {
+fn attempt(
+    index: usize,
+    a: &AttemptRecord,
+    origin: lattice_conversation::ProviderOrigin,
+    address: lancet_protocol::ModelMessageAddress,
+) -> AttemptDetail {
     let progress = match &a.progress {
         AttemptProgress::Sent => AttemptProgressDetail::Sent,
         AttemptProgress::Ended { end, diagnostic } => AttemptProgressDetail::Ended {
@@ -94,15 +99,15 @@ fn attempt(a: &AttemptRecord) -> AttemptDetail {
     };
     let (end, diagnostic) = close::resolve_attempt(a);
     let end = match end {
-        AttemptEnd::Completed { step } => AttemptEndDetail::Completed { step },
+        AttemptEnd::Completed => AttemptEndDetail::Completed { step: address },
         AttemptEnd::Stopped { cause } => AttemptEndDetail::Stopped {
             cause,
             diagnostic: diagnostic.provider_error,
         },
     };
     AttemptDetail {
-        attempt: a.attempt,
-        origin: a.origin,
+        attempt: index as u32,
+        origin,
         usage: a.usage,
         progress,
         end,
@@ -110,7 +115,12 @@ fn attempt(a: &AttemptRecord) -> AttemptDetail {
     }
 }
 
-fn detail(node: NodeId, step: &Node) -> Result<StepDetail> {
+fn detail(
+    session_id: SessionId,
+    origin: lattice_conversation::ProviderOrigin,
+    node: NodeId,
+    step: &Node,
+) -> Result<StepDetail> {
     let Node::Step {
         turn_id,
         step_ordinal,
@@ -131,7 +141,22 @@ fn detail(node: NodeId, step: &Node) -> Result<StepDetail> {
         },
         progress: progress.clone(),
         end: close::resolve_step(progress, slots)?,
-        attempts: attempts.iter().map(attempt).collect(),
+        attempts: attempts
+            .iter()
+            .enumerate()
+            .map(|(index, a)| {
+                attempt(
+                    index,
+                    a,
+                    origin,
+                    lancet_protocol::ModelMessageAddress {
+                        session_id,
+                        turn_id: *turn_id,
+                        model_step_ordinal: *step_ordinal,
+                    },
+                )
+            })
+            .collect(),
         slots: slots.iter().map(slot_detail).collect(),
         updated_at: *updated_at,
     })
@@ -181,6 +206,7 @@ impl Records {
             turn_id,
             accepted_at,
             agent_name,
+            provider,
             ..
         }) = self.nodes.get(&(s, user_ref.node))
         else {
@@ -209,9 +235,11 @@ impl Records {
             Node::Step { attempts, .. } => attempts.as_slice(),
             _ => &[],
         }));
+        let origin = validate::provider(provider)
+            .map_err(|_| corrupt("nodes", &t.to_string(), "unknown provider"))?;
         let steps = raw_steps
             .iter()
-            .map(|(node_id, node)| detail(*node_id, node))
+            .map(|(node_id, node)| detail(s, origin, *node_id, node))
             .collect::<Result<Vec<_>>>()?;
         Ok(TurnDetail {
             turn_id: *turn_id,
@@ -265,21 +293,23 @@ impl SessionRead {
             .transpose()
     }
 
+    /// 由其他记录引用的 Session 必须存在，缺失即损坏。
     fn raw_session(&self, id: SessionId) -> Result<SessionRecord> {
-        let s: SessionRecord = self.decode(
-            "sessions",
-            &id.to_string(),
-            self.tx
-                .open_table(SESSIONS)
-                .map_err(table_error)?
-                .get(id.to_string().as_str())?
-                .ok_or_else(|| corrupt("sessions", &id.to_string(), "missing session"))?
-                .value(),
-        )?;
+        self.find_session(id)?
+            .ok_or_else(|| corrupt("sessions", &id.to_string(), "missing session"))
+    }
+
+    /// 调用方给出的 Session 可能不存在，由调用方报 NotFound。
+    fn find_session(&self, id: SessionId) -> Result<Option<SessionRecord>> {
+        let table = self.tx.open_table(SESSIONS).map_err(table_error)?;
+        let Some(value) = table.get(id.to_string().as_str())? else {
+            return Ok(None);
+        };
+        let s: SessionRecord = self.decode("sessions", &id.to_string(), value.value())?;
         if s.session_id != id {
             return Err(corrupt("sessions", &id.to_string(), "key/value mismatch"));
         }
-        Ok(s)
+        Ok(Some(s))
     }
 
     fn latest_change(&self) -> Result<ChangeSeq> {
@@ -636,109 +666,62 @@ impl SessionRead {
         )
     }
 
-    fn stored_change(&self, seq: ChangeSeq) -> Result<StoredInvocationChange> {
-        let table = self.tx.open_table(CHANGES).map_err(table_error)?;
-        let change: StoredInvocationChange = self.decode(
-            "invocation_changes",
-            &seq.0.to_string(),
+    // 打开时已全量核对派生关系；审计页只按索引定位节点并投影。
+    fn invocation(
+        &self,
+        id: InvocationId,
+        index: &InvocationIndexEntry,
+    ) -> Result<OperatorInvocation> {
+        let address = index.address.message;
+        let user = self
+            .raw_turn_node(address.turn_id)?
+            .ok_or_else(|| corrupt("turn_index", &address.turn_id.to_string(), "missing turn"))?;
+        let node = NodeId(
+            user.node
+                .0
+                .checked_add(1)
+                .and_then(|n| n.checked_add(u64::from(address.model_step_ordinal)))
+                .ok_or(StoreError::SequenceExhausted { kind: "node" })?,
+        );
+        let key = node_key(address.session_id, node);
+        let table = self.tx.open_table(NODES).map_err(table_error)?;
+        let step: Node = self.decode(
+            "nodes",
+            &node.0.to_string(),
             table
-                .get(seq.0)?
-                .ok_or_else(|| corrupt("invocation_changes", &seq.0.to_string(), "missing change"))?
+                .get(key.as_slice())?
+                .ok_or_else(|| corrupt("nodes", &node.0.to_string(), "missing invocation step"))?
                 .value(),
         )?;
-        if change.sequence != seq {
+        let Node::Step { slots, .. } = step else {
             return Err(corrupt(
-                "invocation_changes",
-                &seq.0.to_string(),
-                "key/value mismatch",
+                "nodes",
+                &node.0.to_string(),
+                "expected invocation step",
             ));
-        }
-        Ok(change)
-    }
-
-    fn checked_invocation(&self, id: InvocationId) -> Result<InvocationChange> {
-        let index = self.index_entry(id)?;
-        let address = index.address.message;
-        let r = self.local(address.session_id, Selection::Turn(address.turn_id))?;
-        if r.index.get(&id) != Some(&index) {
-            return Err(corrupt("invocation_index", &id.to_string(), "orphan index"));
-        }
-        let session = r.sessions.get(&address.session_id).ok_or_else(|| {
-            corrupt(
-                "sessions",
-                &address.session_id.to_string(),
-                "missing session",
-            )
-        })?;
-        let slot = r
-            .nodes
-            .values()
-            .filter_map(|node| match node {
-                Node::Step { slots, .. } => Some(slots.as_slice()),
-                _ => None,
-            })
-            .flatten()
+        };
+        slots
+            .iter()
             .find(|slot| slot.binding.invocation_id == id)
-            .ok_or_else(|| corrupt("invocation_index", &id.to_string(), "missing slot"))?;
-        let change = r.changes.get(&index.last_change).ok_or_else(|| {
-            corrupt(
-                "invocation_changes",
-                &id.to_string(),
-                "missing latest change",
-            )
-        })?;
-        if change.sequence != index.last_change
-            || change.invocation_id != id
-            || change.stage != validate::stage(&slot.progress)
-        {
-            return Err(corrupt(
-                "invocation_changes",
-                &id.to_string(),
-                "latest change mismatch",
-            ));
-        }
-        Ok(InvocationChange {
-            sequence: index.last_change,
-            project_store_key: session.project_store_key,
-            row: operator(slot),
-        })
+            .map(operator)
+            .ok_or_else(|| corrupt("nodes", &id.to_string(), "missing invocation slot"))
     }
 
     fn resolve_change(&self, stored: StoredInvocationChange) -> Result<InvocationChange> {
-        let latest = self.checked_invocation(stored.invocation_id)?;
-        let latest_stage = match &latest.row.state {
-            OperatorInvocationState::Registered => InvocationStage::Registered,
-            OperatorInvocationState::Started => InvocationStage::Started,
-            OperatorInvocationState::Terminal { .. } => InvocationStage::Terminal,
-        };
-        let valid_relation = if stored.stage == latest_stage {
-            stored.sequence == latest.sequence
-        } else {
-            matches!(
-                (stored.stage, latest_stage),
-                (InvocationStage::Registered, InvocationStage::Started)
-                    | (InvocationStage::Registered, InvocationStage::Terminal)
-                    | (InvocationStage::Started, InvocationStage::Terminal)
-            ) && stored.sequence < latest.sequence
-        };
-        if !valid_relation {
-            return Err(corrupt(
-                "invocation_changes",
-                &stored.sequence.0.to_string(),
-                "invalid change relation",
-            ));
-        }
+        let index = self.index_entry(stored.invocation_id)?;
+        let session = self.raw_session(index.address.message.session_id)?;
+        let latest = self.invocation(stored.invocation_id, &index)?;
         let state = match stored.stage {
             InvocationStage::Registered => OperatorInvocationState::Registered,
             InvocationStage::Started => OperatorInvocationState::Started,
-            InvocationStage::Terminal => latest.row.state,
+            InvocationStage::Terminal => latest.state,
         };
         Ok(InvocationChange {
             sequence: stored.sequence,
-            project_store_key: latest.project_store_key,
+            project_store_key: session.project_store_key,
             row: OperatorInvocation {
                 invocation_id: stored.invocation_id,
-                binding: latest.row.binding,
+                binding: latest.binding,
                 state,
             },
         })
@@ -767,14 +750,6 @@ impl SessionRead {
                 .map_err(|_| corrupt("invocation_index", "key", "invalid id"))?;
             let index: InvocationIndexEntry =
                 self.decode("invocation_index", key.value(), value.value())?;
-            let stored = self.stored_change(index.last_change)?;
-            if stored.invocation_id != id {
-                return Err(corrupt(
-                    "invocation_index",
-                    &id.to_string(),
-                    "latest change mismatch",
-                ));
-            }
             let session = self.raw_session(index.address.message.session_id)?;
             if session.project_store_key != filter.project_store_key
                 || filter
@@ -786,15 +761,15 @@ impl SessionRead {
             {
                 continue;
             }
-            let change = self.checked_invocation(id)?;
-            if !matches(filter, &change.project_store_key, &change.row) {
+            let row = self.invocation(id, &index)?;
+            if !matches(filter, &session.project_store_key, &row) {
                 continue;
             }
             if rows.len() == limit {
                 next = rows.last().map(|r: &OperatorInvocation| r.invocation_id);
                 break;
             }
-            rows.push(change.row);
+            rows.push(row);
         }
         Ok(AuditPage {
             latest_change,
@@ -825,26 +800,12 @@ impl SessionRead {
             .take(limit)
         {
             let (key, value) = entry?;
-            if key.value() != next_sequence(next_after.0, "change")? {
-                return Err(corrupt(
-                    "invocation_changes",
-                    &key.value().to_string(),
-                    "missing sequence",
-                ));
-            }
             let stored: StoredInvocationChange = self.decode(
                 "invocation_changes",
                 &key.value().to_string(),
                 value.value(),
             )?;
             next_after = ChangeSeq(key.value());
-            if stored.sequence != next_after {
-                return Err(corrupt(
-                    "invocation_changes",
-                    &key.value().to_string(),
-                    "key/value mismatch",
-                ));
-            }
             let index = self.index_entry(stored.invocation_id)?;
             let session = self.raw_session(index.address.message.session_id)?;
             if session.project_store_key != filter.project_store_key
@@ -862,35 +823,6 @@ impl SessionRead {
                 rows.push(change);
             }
         }
-        if let Some(last) = rows.last() {
-            let mut histories: std::collections::BTreeMap<_, _> = rows
-                .iter()
-                .map(|change| (change.row.invocation_id, None))
-                .collect();
-            // 无调用前态索引，跨页须扫描日志前缀；若成本成为瓶颈再加索引。
-            // 只核验本页匹配调用，不加载无关 Session/Turn，也不以 outcome 过滤前态。
-            for entry in table.range(..=last.sequence.0)? {
-                let (key, value) = entry?;
-                let change: StoredInvocationChange = self.decode(
-                    "invocation_changes",
-                    &key.value().to_string(),
-                    value.value(),
-                )?;
-                let Some(previous) = histories.get_mut(&change.invocation_id) else {
-                    continue;
-                };
-                if change.sequence != ChangeSeq(key.value())
-                    || !validate::invocation_transition(*previous, change.stage)
-                {
-                    return Err(corrupt(
-                        "invocation_changes",
-                        &key.value().to_string(),
-                        "illegal lifecycle transition or identity mismatch",
-                    ));
-                }
-                *previous = Some(change.stage);
-            }
-        }
         Ok(AuditTailPage {
             latest_change,
             rows,
@@ -905,27 +837,37 @@ impl SessionRead {
         session: SessionId,
         turn: TurnId,
     ) -> Result<AuditReplay> {
-        let r = self.local(session, Selection::Turn(turn))?;
-        let s = r
-            .sessions
-            .get(&session)
+        let s = self
+            .find_session(session)?
             .ok_or_else(|| missing("session", session))?;
-        let steps = r.turn_steps(session, turn)?;
         if s.project_store_key != *project {
             return Err(invalid("project", "turn project mismatch"));
         }
-        let calls = steps
-            .iter()
-            .flat_map(|(_, node)| match node {
-                Node::Step { slots, .. } => slots.as_slice(),
-                _ => &[],
-            })
-            .map(operator)
-            .collect();
+        let user = self
+            .raw_turn_node(turn)?
+            .filter(|r| r.session_id == session)
+            .ok_or_else(|| missing("turn", turn))?;
+        let table = self.tx.open_table(NODES).map_err(table_error)?;
+        let mut calls = Vec::new();
+        for entry in table.range(
+            node_key(session, user.node).as_slice()
+                ..=node_key(session, NodeId(u64::MAX)).as_slice(),
+        )? {
+            let (key, value) = entry?;
+            let (_, node) = decode_node_key(key.value())?;
+            if node == user.node {
+                continue;
+            }
+            let step: Node = self.decode("nodes", &node.0.to_string(), value.value())?;
+            match step {
+                Node::Step { slots, .. } => calls.extend(slots.iter().map(operator)),
+                _ => break,
+            }
+        }
         Ok(AuditReplay {
             session_id: session,
             turn_id: turn,
-            latest_change: r.last_change,
+            latest_change: self.latest_change()?,
             calls,
         })
     }
@@ -942,26 +884,10 @@ impl SessionRead {
                 &key.value().to_string(),
                 value.value(),
             )?;
-            if stored.sequence != ChangeSeq(key.value()) {
-                return Err(corrupt(
-                    "invocation_changes",
-                    &key.value().to_string(),
-                    "key/value mismatch",
-                ));
-            }
             let index = self.index_entry(stored.invocation_id)?;
             let session = self.raw_session(index.address.message.session_id)?;
             if session.project_store_key == *project && seen.insert(stored.invocation_id) {
-                let latest = self.checked_invocation(stored.invocation_id)?;
-                let change = self.resolve_change(stored)?;
-                if latest != change {
-                    return Err(corrupt(
-                        "invocation_changes",
-                        &key.value().to_string(),
-                        "latest change mismatch",
-                    ));
-                }
-                recent.push(latest.row);
+                recent.push(self.invocation(stored.invocation_id, &index)?);
                 if recent.len() == 20 {
                     break;
                 }

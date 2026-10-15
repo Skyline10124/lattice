@@ -204,8 +204,6 @@ impl StepProgress {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AttemptRecord {
-    pub attempt: u32,
-    pub origin: ProviderOrigin,
     pub usage: Option<TokenUsage>,
     pub progress: AttemptProgress,
     pub retry_delay_ms: Option<u64>,
@@ -222,7 +220,7 @@ pub enum AttemptProgress {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "end", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AttemptEnd {
-    Completed { step: ModelMessageAddress },
+    Completed,
     Stopped { cause: StopCause },
 }
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

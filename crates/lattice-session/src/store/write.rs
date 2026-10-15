@@ -155,7 +155,8 @@ impl Records {
             unreachable!()
         };
         let sent_matches = attempts.last().is_some_and(|a| {
-            a.attempt == key.attempt_ordinal && matches!(a.progress, AttemptProgress::Sent)
+            attempts.len() == key.attempt_ordinal as usize + 1
+                && matches!(a.progress, AttemptProgress::Sent)
         });
         if *step_ordinal != key.model_step_ordinal
             || *progress != StepProgress::Requesting
@@ -451,8 +452,6 @@ impl SessionStore {
             }
             *progress = StepProgress::Requesting;
             attempts.push(AttemptRecord {
-                attempt: key.attempt_ordinal,
-                origin: validate::provider(&config.provider)?,
                 usage: None,
                 progress: AttemptProgress::Sent,
                 retry_delay_ms: None,
@@ -568,7 +567,7 @@ impl SessionStore {
             }
             let mut bindings = Vec::new();
             let mut parts = Vec::new();
-            let completed = close::completed(&reply, lock.session_id);
+            let completed = close::completed(&reply);
             for (ordinal, part) in reply.message.parts.into_iter().enumerate() {
                 let semantic = match part.semantic {
                     MessageSemantic::Text { text } => MessageSemantic::Text { text },
@@ -736,6 +735,12 @@ impl SessionStore {
                     "receipt requires a started invocation",
                 ));
             }
+            // 错误码到结局的映射在写入入口检查，读取直接使用已保存的结局。
+            if matches!(&input.terminal.result.payload, ResultPayload::Failed(e)
+                if matches!(e.code, lancet_protocol::CepErrorCode::CallCancelled | lancet_protocol::CepErrorCode::OutcomeIndeterminate))
+            {
+                return Err(invalid("terminal", "error belongs to a different outcome"));
+            }
             validate::terminal(
                 &slot.binding,
                 &input.terminal.result,
@@ -778,7 +783,7 @@ impl SessionStore {
                 {
                     return Err(invalid("origin", "reply provider mismatch"));
                 }
-                let completed = close::completed(&reply, lock.session_id);
+                let completed = close::completed(&reply);
                 let message = reply
                     .message
                     .bind_zero_tool()
