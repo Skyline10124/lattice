@@ -613,7 +613,7 @@ async fn first_probe_and_readonly_requests_never_initialize_missing_store() {
     );
     let error = client.list_sessions().await.unwrap_err();
     assert!(matches!(
-        error.store,
+        error.store.as_deref(),
         Some(StoreDiagnostic::NotInitialized { .. })
     ));
     assert!(!layout.lattice_root().join("lattice.redb").exists());

@@ -283,7 +283,10 @@ impl Backend {
             Ok(api) => api,
             Err(error)
                 if request.session_id.is_none()
-                    && matches!(error.store, Some(StoreDiagnostic::NotInitialized { .. })) =>
+                    && matches!(
+                        error.store.as_deref(),
+                        Some(StoreDiagnostic::NotInitialized { .. })
+                    ) =>
             {
                 return Ok(None);
             }
@@ -337,7 +340,10 @@ impl Backend {
             Ok(api) => Some(api),
             Err(error)
                 if request.session_id.is_none()
-                    && matches!(error.store, Some(StoreDiagnostic::NotInitialized { .. })) =>
+                    && matches!(
+                        error.store.as_deref(),
+                        Some(StoreDiagnostic::NotInitialized { .. })
+                    ) =>
             {
                 None
             }

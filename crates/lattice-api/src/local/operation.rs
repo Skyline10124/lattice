@@ -726,7 +726,10 @@ impl Worker {
 }
 fn target_not_created(error: &LocalError) -> bool {
     error.kind == LocalErrorKind::NotFound
-        || matches!(error.store, Some(StoreDiagnostic::NotInitialized { .. }))
+        || matches!(
+            error.store.as_deref(),
+            Some(StoreDiagnostic::NotInitialized { .. })
+        )
 }
 fn worker_error() -> LocalError {
     LocalError::new(LocalErrorKind::Internal, "local worker failed")

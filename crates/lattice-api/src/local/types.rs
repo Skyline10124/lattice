@@ -192,7 +192,7 @@ pub struct LocalError {
     pub kind: LocalErrorKind,
     pub message: String,
     pub recovery: Option<RecoveryNeed>,
-    pub store: Option<StoreDiagnostic>,
+    pub store: Option<Box<StoreDiagnostic>>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RecoveryNeed {
@@ -217,6 +217,7 @@ pub enum StoreDiagnostic {
         paths: Vec<PathBuf>,
     },
     UnsupportedVersion {
+        path: PathBuf,
         table: String,
         key: String,
         found: u32,
@@ -279,7 +280,7 @@ impl From<crate::ApiError> for LocalError {
             ApiError::WorkerFailed => return Self::recovery(RecoveryCause::WorkerFailed),
             ApiError::Store(error) => {
                 let mut result = Self::new(StoreUnavailable, "session store unavailable");
-                result.store = match error.as_ref() {
+                result.store = (match error.as_ref() {
                     StoreError::NotInitialized { path } => {
                         Some(StoreDiagnostic::NotInitialized { path: path.clone() })
                     }
@@ -287,12 +288,13 @@ impl From<crate::ApiError> for LocalError {
                         paths: paths.clone(),
                     }),
                     StoreError::UnsupportedVersion {
+                        path,
                         table,
                         key,
                         found,
                         supported,
-                        ..
                     } => Some(StoreDiagnostic::UnsupportedVersion {
+                        path: path.clone(),
                         table: table.clone(),
                         key: key.clone(),
                         found: *found,
@@ -328,7 +330,8 @@ impl From<crate::ApiError> for LocalError {
                         None
                     }
                     _ => None,
-                };
+                })
+                .map(Box::new);
                 return result;
             }
         };
@@ -511,6 +514,34 @@ pub(super) enum Response {
 mod v3_tests {
     use super::*;
     #[test]
+    fn unsupported_version_preserves_store_path_through_ipc() {
+        let path = PathBuf::from("/tmp/old state/lattice.redb");
+        let error = LocalError::from(crate::ApiError::from(
+            lattice_session::store::StoreError::UnsupportedVersion {
+                path: path.clone(),
+                table: "meta".into(),
+                key: "format_version".into(),
+                found: 1,
+                supported: 2,
+            },
+        ));
+        let wire = serde_json::to_value(&error).unwrap();
+        assert_eq!(wire["store"]["path"], path.to_str().unwrap());
+        let decoded: LocalError = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded, error);
+        assert_eq!(
+            decoded.store.as_deref(),
+            Some(&StoreDiagnostic::UnsupportedVersion {
+                path,
+                table: "meta".into(),
+                key: "format_version".into(),
+                found: 1,
+                supported: 2,
+            })
+        );
+    }
+
+    #[test]
     fn first_submission_and_safe_store_diagnostics_have_v3_shapes() {
         let request: Request = serde_json::from_value(serde_json::json!({
             "operation":"submit", "request": {"session_id":null,
@@ -537,7 +568,7 @@ mod v3_tests {
             },
         ));
         assert!(
-            matches!(error.store, Some(StoreDiagnostic::LegacyStores { ref paths }) if paths.len() == 2)
+            matches!(error.store.as_deref(), Some(StoreDiagnostic::LegacyStores { paths }) if paths.len() == 2)
         );
         let error = LocalError::from(crate::ApiError::from(
             lattice_session::store::StoreError::Corruption {
@@ -549,7 +580,7 @@ mod v3_tests {
         let wire = serde_json::to_string(&error).unwrap();
         assert!(!wire.contains("secret-body"));
         assert!(matches!(
-            error.store,
+            error.store.as_deref(),
             Some(StoreDiagnostic::Corruption { .. })
         ));
     }
