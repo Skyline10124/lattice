@@ -155,12 +155,66 @@ async fn stream_turn_retry_uses_profile_backoff_and_cap() {
         assert_eq!(&notice.notice, live_notice);
     }
     assert_eq!(notices.len(), delays.len());
-    let starts = llm.starts.lock().unwrap();
-    assert_eq!(starts.len(), 4);
-    for (pair, delay) in starts.windows(2).zip([40, 60, 60]) {
-        assert_eq!(pair[1] - pair[0], Duration::from_millis(delay));
+    {
+        let starts = llm.starts.lock().unwrap();
+        assert_eq!(starts.len(), 4);
+        for (pair, delay) in starts.windows(2).zip([40, 60, 60]) {
+            assert_eq!(pair[1] - pair[0], Duration::from_millis(delay));
+        }
     }
     assert_eq!(detail.summary.outcome, PublicTurnOutcome::Completed);
+
+    // 释放原库句柄后由后台重开，核验 IPC 分页与客户端组装也保留同一重试提示。
+    let layout = fixture.layout.clone();
+    let TestFixture {
+        api,
+        store,
+        _state,
+        _project,
+        ..
+    } = fixture;
+    drop((api, store));
+    let serving = tokio::spawn(crate::local::serve(layout.clone()));
+    let client = crate::local::LocalClient::new(layout);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while client.status().await.is_err() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut subscription = client
+        .subscribe(
+            crate::local::TurnTarget {
+                session_id: Some(detail.session_id),
+                turn_id: detail.turn_id,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let Some(crate::local::Observation::Snapshot { view }) = subscription.next().await.unwrap()
+    else {
+        panic!("reopened snapshot")
+    };
+    assert!(!view.owned);
+    assert_eq!(view.selected_turn.as_ref().unwrap().summary, detail.summary);
+    let Some(crate::local::Observation::Finished { history, .. }) =
+        subscription.next().await.unwrap()
+    else {
+        panic!("reopened history")
+    };
+    assert!(subscription.next().await.unwrap().is_none());
+    let entry = history
+        .entries
+        .iter()
+        .find(|e| e.node == detail.steps[0].node)
+        .unwrap();
+    assert_eq!(entry.retries, notices);
+    assert_eq!(entry.summary, detail.summary);
+    assert_eq!(entry.agent_name, detail.agent_name);
+    client.stop().await.unwrap();
+    serving.await.unwrap().unwrap();
 }
 #[tokio::test(start_paused = true)]
 async fn stream_turn_final_provider_failure_only_emits_terminal_notice() {

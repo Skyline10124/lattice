@@ -117,7 +117,7 @@ pub(crate) async fn run_coordinator_saga(
     let session = coordinator.io.session_id();
     let config = coordinator
         .io
-        .read(move |read| Ok(read.turn_config(session, turn_id)?))
+        .read(move |read| read.turn_config(session, turn_id))
         .await?;
     let origin = match config.provider.as_str() {
         "openai" | "openai_compatible" => ProviderOrigin::OpenAiCompatible,

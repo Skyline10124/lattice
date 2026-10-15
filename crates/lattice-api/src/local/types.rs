@@ -5,11 +5,11 @@ pub use crate::turn::{AttemptSegments, TextSegment, TurnRef};
 pub use lancet_protocol::{InvocationId, ModelAttemptKey, SessionId, TurnId};
 pub use lattice_conversation::{ResultPayload, StepContent, StoredToolResult, SuccessContent};
 pub use lattice_session::store::{
-    AuditPage, AuditReplay, AuditTailPage, ChangeSeq, HistoryAnchor, HistoryCursor,
-    MaterialSummary, Node, NodeFragment, NodeId, NodeKind, NodeRef, Notice, NoticeLevel,
-    OperatorInvocationState, OperatorReason, OperatorStatus, Page, PublicTurnOutcome,
-    SessionListRow, SessionLog, SessionRecord, StepDetail, StepDetailState, StepEnd, StepKey,
-    TurnDetail, TurnSummary, UsageSummary,
+    AttemptProgress, AuditPage, AuditReplay, AuditTailPage, ChangeSeq, HistoryAnchor,
+    HistoryCursor, MaterialSummary, Node, NodeFragment, NodeId, NodeKind, NodeRef, Notice,
+    NoticeLevel, OperatorInvocationState, OperatorReason, OperatorStatus, Page, PublicTurnOutcome,
+    RetryNotice, SessionListRow, SessionLog, SessionRecord, SlotProgress, StepDetail, StepEnd,
+    StepKey, StepProgress, TurnDetail, TurnSummary, UsageSummary,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -21,8 +21,8 @@ pub struct TurnView {
     pub user_node: NodeId,
     pub agent_name: String,
     pub accepted_at: chrono::DateTime<chrono::Utc>,
-    pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub summary: Option<TurnSummary>,
+    pub ended_at: chrono::DateTime<chrono::Utc>,
+    pub summary: TurnSummary,
     pub usage: UsageSummary,
 }
 impl From<&TurnDetail> for TurnView {
@@ -41,36 +41,11 @@ impl From<&TurnDetail> for TurnView {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct ActiveStepView {
-    pub key: lattice_session::store::StepKey,
-    pub state: ActiveStateView,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum ActiveStateView {
-    Requesting {
-        attempt: u32,
-    },
-    RetryReady {
-        next_attempt: u32,
-    },
-    Executing {
-        reply: lattice_conversation::NativeMessage<lattice_conversation::BoundToolCall>,
-        slots: Vec<SlotView>,
-    },
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct SlotView {
-    pub invocation: lattice_session::store::OperatorInvocation,
-    pub result: Option<lattice_session::store::StoredToolResult>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ObservationSnapshot {
     pub session: SessionRecord,
     pub current_agent: Option<String>,
     pub selected_turn: Option<TurnDetail>,
-    pub active: Option<ActiveStepView>,
+    pub unclosed_step: Option<(NodeId, Node)>,
     pub history: HistoryAnchor,
     pub attempt: Option<AttemptSegments>,
     pub cursor: EventCursor,
@@ -81,8 +56,9 @@ pub struct ObservationSnapshot {
 pub struct HistoryEntry {
     pub node: NodeId,
     pub agent_name: String,
-    /// 节点所属 Turn 在读取时的结局；Turn 仍在进行时为 `None`。
-    pub summary: Option<TurnSummary>,
+    /// 节点所属 Turn 在读取时的结论；是否最终生效由 progress 与 Owner 决定。
+    pub summary: TurnSummary,
+    pub retries: Vec<RetryNotice>,
     pub content: Node,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -94,7 +70,7 @@ pub struct LocalHistory {
 pub struct HistoryFragmentView {
     pub fragment: NodeFragment,
     pub agent_name: String,
-    pub summary: Option<TurnSummary>,
+    pub summary: TurnSummary,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct HistoryPageView {
@@ -424,6 +400,9 @@ pub struct EventCursor {
 pub enum Observation {
     Snapshot {
         view: Box<ObservationSnapshot>,
+    },
+    Diagnostic {
+        error: LocalError,
     },
     Event {
         cursor: EventCursor,

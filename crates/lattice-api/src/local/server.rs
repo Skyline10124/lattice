@@ -543,54 +543,11 @@ impl Backend {
                 continue;
             }
             let owned = current.is_some();
-            let active = snapshot.active.map(|active| {
-                use lattice_session::store::{ActiveStep, SlotState};
-                let detail = snapshot
-                    .selected_turn
-                    .as_ref()
-                    .expect("active Turn")
-                    .steps
-                    .iter()
-                    .find(|s| s.key == active.key)
-                    .expect("active detail");
-                ActiveStepView {
-                    key: active.key,
-                    state: match active.state {
-                        ActiveStep::Requesting { attempt } => {
-                            ActiveStateView::Requesting { attempt }
-                        }
-                        ActiveStep::RetryReady { next_attempt } => {
-                            ActiveStateView::RetryReady { next_attempt }
-                        }
-                        ActiveStep::Executing { reply, slots } => {
-                            let lattice_session::store::StepDetailState::Executing { slots: rows } =
-                                &detail.state
-                            else {
-                                unreachable!("same read transaction")
-                            };
-                            ActiveStateView::Executing {
-                                reply,
-                                slots: slots
-                                    .into_iter()
-                                    .zip(rows)
-                                    .map(|(slot, row)| SlotView {
-                                        invocation: row.clone(),
-                                        result: match slot.state {
-                                            SlotState::Terminal(t) => Some(t.result().clone()),
-                                            _ => None,
-                                        },
-                                    })
-                                    .collect(),
-                            }
-                        }
-                    },
-                }
-            });
             return Ok(ObservationSnapshot {
                 session: snapshot.session,
                 current_agent: snapshot.current_agent,
                 selected_turn: snapshot.selected_turn,
-                active,
+                unclosed_step: snapshot.unclosed_step,
                 history: snapshot.history,
                 attempt: if owned { attempt } else { None },
                 cursor: self.cursor(if owned { seq } else { 0 }),
@@ -622,24 +579,12 @@ impl Backend {
                 let fragments = page
                     .fragments
                     .into_iter()
-                    .map(|fragment| {
-                        let node = read.node(NodeRef {
-                            session_id: anchor.session_id,
-                            node: fragment.node,
-                        })?;
-                        let turn = node
-                            .turn_id()
-                            .ok_or(lattice_session::store::StoreError::InvalidCursor)?;
-                        let record = read
-                            .turn_record(turn)?
-                            .ok_or(lattice_session::store::StoreError::InvalidCursor)?;
-                        Ok(HistoryFragmentView {
-                            fragment,
-                            summary: record.summary(),
-                            agent_name: record.config.agent_name,
-                        })
+                    .map(|fragment| HistoryFragmentView {
+                        agent_name: fragment.agent_name.clone(),
+                        summary: fragment.summary.clone(),
+                        fragment,
                     })
-                    .collect::<lattice_session::store::Result<Vec<_>>>()?;
+                    .collect();
                 Ok(HistoryPageView {
                     anchor,
                     fragments,
@@ -894,6 +839,17 @@ impl Backend {
                 }),
             )
             .await?;
+        // 执行诊断独立交付，不能盖掉持久结论，也不能截断固定历史的交付。
+        let diagnostic =
+            turn.and_then(|t| lock(&self.admission).diagnostics.get(&t.turn_id).cloned());
+        if let Some(error) = diagnostic {
+            writer
+                .write(
+                    stream,
+                    &Response::Observation(Observation::Diagnostic { error }),
+                )
+                .await?;
+        }
         let mut assembly = super::client::HistoryAssembly::new(anchor.clone());
         let mut next = None;
         loop {
@@ -966,14 +922,8 @@ impl Backend {
                 }),
             )
             .await;
-        } else if owner.is_some()
-            || view
-                .selected_turn
-                .as_ref()
-                .is_some_and(|t| t.summary.is_none())
-        {
-            // 新订阅先得到快照，再从快照的序号起接窗口中的事件。已关闭且没有观察
-            // 状态时，finish_observation 立即交付同一份快照，这里不重复。
+        } else if owner.is_some() {
+            // 无观察状态时由 finish_observation 一次性交付快照与历史。
             writer
                 .write(
                     stream,
@@ -990,24 +940,15 @@ impl Backend {
             let turn_closed = view
                 .selected_turn
                 .as_ref()
-                .is_none_or(|t| t.summary.is_some());
+                .is_none_or(|t| t.summary.progress.is_closed());
             let Some(current) = owner.clone() else {
-                if turn_closed {
-                    return self.finish_observation(stream, writer, view).await;
+                // 快照之后 Owner 可能刚退场，重新读取它最后提交的节点再结束。
+                if view.owned {
+                    view = self.query(target.session_id, Some(target.turn_id)).await?;
+                    owner = lock(&self.admission).turns.get(&target.turn_id).cloned();
+                    continue;
                 }
-                if !view.owned {
-                    if let Some(error) = lock(&self.admission)
-                        .diagnostics
-                        .get(&target.turn_id)
-                        .cloned()
-                    {
-                        return Err(error);
-                    }
-                    return Ok(());
-                }
-                view = self.query(target.session_id, Some(target.turn_id)).await?;
-                owner = lock(&self.admission).turns.get(&target.turn_id).cloned();
-                continue;
+                return self.finish_observation(stream, writer, view).await;
             };
             // 先建立接收端再检查状态；done 是状态检查，不只是唤醒源。
             let mut events_changed = current.observer.subscribe();
@@ -1079,22 +1020,6 @@ impl Backend {
                 }
             }
             owner = None;
-            // 结束快照只在尾部排空后发出；已关闭的 Turn 由 finish_observation 交付快照。
-            if !view.owned
-                && view
-                    .selected_turn
-                    .as_ref()
-                    .is_some_and(|t| t.summary.is_none())
-            {
-                writer
-                    .write(
-                        stream,
-                        &Response::Observation(Observation::Snapshot {
-                            view: Box::new(view.clone()),
-                        }),
-                    )
-                    .await?;
-            }
         }
     }
 }
@@ -1307,6 +1232,21 @@ mod tests {
         backend: &Arc<Backend>,
         request: &TurnRequest,
     ) -> (ObservationSnapshot, LocalHistory) {
+        let (view, history) = ended_observation(backend, request).await;
+        assert!(
+            view.selected_turn
+                .as_ref()
+                .unwrap()
+                .summary
+                .progress
+                .is_closed()
+        );
+        (view, history)
+    }
+    async fn ended_observation(
+        backend: &Arc<Backend>,
+        request: &TurnRequest,
+    ) -> (ObservationSnapshot, LocalHistory) {
         let (mut socket, task) = subscribe(backend, request, None).await;
         let mut reader = ipc::ResponseReader::default();
         let Response::Observation(Observation::Snapshot { view }) =
@@ -1314,7 +1254,24 @@ mod tests {
         else {
             panic!("final snapshot")
         };
-        assert!(view.selected_turn.as_ref().unwrap().summary.is_some());
+        assert!(
+            !view.owned
+                || view
+                    .selected_turn
+                    .as_ref()
+                    .unwrap()
+                    .summary
+                    .progress
+                    .is_closed()
+        );
+        let diagnostic = lock(&backend.admission)
+            .diagnostics
+            .get(&request.turn_id)
+            .cloned();
+        if let Some(expected) = diagnostic {
+            assert!(matches!(response(&mut reader, &mut socket).await,
+                Response::Observation(Observation::Diagnostic { error }) if error == expected));
+        }
         let Response::Observation(Observation::Finished { history, turn, .. }) =
             response(&mut reader, &mut socket).await
         else {
@@ -1324,6 +1281,40 @@ mod tests {
         assert_eq!(history.anchor, view.history);
         task.await.unwrap().unwrap();
         (*view, history)
+    }
+
+    #[tokio::test]
+    async fn unclosed_turn_without_owner_finishes_with_snapshot_and_fixed_history() {
+        let (_directory, backend, request) = pending_backend().await;
+        let before = backend
+            .query(request.session_id, Some(request.turn_id))
+            .await
+            .unwrap();
+        let (view, history) = ended_observation(&backend, &request).await;
+        assert_eq!(view, before);
+        assert!(!view.owned);
+        assert!(view.attempt.is_none());
+        assert!(matches!(&view.unclosed_step, Some((node, Node::Step {
+            progress: StepProgress::Reserved, attempts, slots, ..
+        })) if *node == view.session.current && attempts.is_empty() && slots.is_empty()));
+        let summary = &view.selected_turn.as_ref().unwrap().summary;
+        assert_eq!(summary.progress, StepProgress::Reserved);
+        assert_eq!(summary.outcome, PublicTurnOutcome::Failed);
+        assert_eq!(history.entries.len(), 1);
+        assert_eq!(history.entries[0].node, view.history.head);
+        assert_eq!(&history.entries[0].summary, summary);
+        assert!(matches!(
+            history.entries[0].content,
+            Node::UserMessage { .. }
+        ));
+        assert_eq!(
+            backend
+                .query(request.session_id, Some(request.turn_id))
+                .await
+                .unwrap(),
+            before,
+            "观察不能补写未关闭节点"
+        );
     }
     /// 监督者退休的同一顺序：先移出 admission，再置 done；不发 backend.changed。
     fn retire(backend: &Backend, request: &TurnRequest, owner: &Arc<Owner>, result: Result<()>) {
@@ -1348,7 +1339,7 @@ mod tests {
             turn_id,
         };
         let step = detail.steps.pop().unwrap();
-        let summary = detail.summary.unwrap();
+        let summary = detail.summary;
         if failed {
             crate::TurnEvent::TurnFailed {
                 turn,
@@ -1387,7 +1378,7 @@ mod tests {
         else {
             panic!("running snapshot")
         };
-        assert!(view.owned && view.selected_turn.unwrap().summary.is_none());
+        assert!(view.owned && !view.selected_turn.unwrap().summary.progress.is_closed());
         let (entered, release) = cancellation_tests::arm(&backend.gates.snapshot);
         backend.changed.send_modify(|v| *v += 1);
         tokio::time::timeout(Duration::from_secs(5), entered)
@@ -1411,7 +1402,14 @@ mod tests {
         else {
             panic!("closing snapshot")
         };
-        assert!(view.selected_turn.as_ref().unwrap().summary.is_some());
+        assert!(
+            view.selected_turn
+                .as_ref()
+                .unwrap()
+                .summary
+                .progress
+                .is_closed()
+        );
         assert!(matches!(
             response(reader, socket).await,
             Response::Observation(Observation::Finished { .. })
@@ -1646,10 +1644,10 @@ mod tests {
             let view = task.await.unwrap().unwrap();
             assert!(!view.owned);
             assert!(
-                view.selected_turn.unwrap().summary.is_some(),
+                view.selected_turn.unwrap().summary.progress.is_closed(),
                 "retired Owner must not turn an obsolete Running snapshot into NoOwner"
             );
-            assert!(view.active.is_none());
+            assert!(view.unclosed_step.is_none());
         }
     }
 
@@ -1680,7 +1678,7 @@ mod tests {
             .await
             .unwrap();
         assert!(view.owned);
-        assert!(view.selected_turn.unwrap().summary.is_none());
+        assert!(!view.selected_turn.unwrap().summary.progress.is_closed());
         release.send(()).unwrap();
         task.await.unwrap().unwrap();
         provider.finish().await;
@@ -1700,7 +1698,7 @@ mod tests {
         else {
             panic!("summary first")
         };
-        assert!(view.selected_turn.unwrap().summary.is_some());
+        assert!(view.selected_turn.unwrap().summary.progress.is_closed());
         entered.await.unwrap();
         assert!(!task.is_finished());
         backend

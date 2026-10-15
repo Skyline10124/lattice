@@ -4,7 +4,7 @@
 //! Owner 的无损内存切点：先同步更新段、窗口与序号，再发送可合并唤醒。
 
 use super::types::{AttemptSegments, SequencedTurnEvent, TextSegment, TurnEvent};
-use lattice_session::store::{ActiveStep, DurableSnapshot, SessionStore};
+use lattice_session::store::{AttemptProgress, DurableSnapshot, Node, SessionStore};
 use std::{collections::VecDeque, sync::Mutex};
 
 #[derive(Default)]
@@ -132,18 +132,23 @@ impl ObserverSink {
             (store.begin_read()?, state.attempt.clone(), state.seq)
         };
         let snapshot = read.snapshot(session, turn)?;
-        if !snapshot.active.as_ref().is_some_and(|active| {
+        if !snapshot.unclosed_step.as_ref().is_some_and(|(_, node)| {
+            let Node::Step {
+                turn_id,
+                step_ordinal,
+                attempts,
+                ..
+            } = node
+            else {
+                return false;
+            };
             attempt.as_ref().is_some_and(|a| {
-                a.key.turn_id == active.key.turn_id
-                    && a.key.model_step_ordinal == active.key.ordinal
-                    && match &active.state {
-                        ActiveStep::Requesting { attempt } => a.key.attempt_ordinal == *attempt,
-                        ActiveStep::Executing { .. } => active
-                            .attempts
-                            .last()
-                            .is_some_and(|last| last.attempt == a.key.attempt_ordinal),
-                        ActiveStep::RetryReady { .. } => false,
-                    }
+                a.key.turn_id == *turn_id
+                    && a.key.model_step_ordinal == *step_ordinal
+                    && attempts.iter().any(|stored| {
+                        stored.attempt == a.key.attempt_ordinal
+                            && matches!(stored.progress, AttemptProgress::Sent)
+                    })
             })
         }) {
             attempt = None;

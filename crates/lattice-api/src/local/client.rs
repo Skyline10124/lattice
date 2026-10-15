@@ -457,7 +457,7 @@ impl LocalSubscription {
                     Err(_)
                         | Ok(SubscriptionItem::HistoryError(_))
                         | Ok(SubscriptionItem::Observation(Observation::Finished { .. }))
-                ) || matches!(&observation, Ok(SubscriptionItem::Observation(Observation::Snapshot { view })) if !view.owned && view.selected_turn.as_ref().is_some_and(|t| t.summary.is_none()));
+                );
                 if let Err(unsent) = sender.send(observation).await {
                     return Some(unsent.0);
                 }
@@ -560,6 +560,7 @@ impl HistoryAssembly {
                     node,
                     agent_name,
                     summary: part.summary,
+                    retries: fragment.retries,
                     content,
                 });
             }

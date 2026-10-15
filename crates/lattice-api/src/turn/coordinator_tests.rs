@@ -223,11 +223,8 @@ async fn collision_retries_only_registration_and_preserves_reply() {
 }
 
 #[tokio::test]
-async fn snapshot_attempt_is_replaced_only_by_persisted_stop_or_closed_step() {
-    use super::super::{
-        observer::ObserverSink,
-        types::{TextSegment, TurnEvent},
-    };
+async fn snapshot_carries_unclosed_node_and_replaces_segments_when_attempt_ends() {
+    use super::super::{observer::ObserverSink, types::TurnEvent};
     let tmp = tempfile::tempdir().unwrap();
     let store = Arc::new(SessionStore::create(&StateLayout::in_state_root(tmp.path())).unwrap());
     let io = CoordinatorStoreIo::acquire(store.clone(), sid())
@@ -246,6 +243,17 @@ async fn snapshot_attempt_is_replaced_only_by_persisted_stop_or_closed_step() {
         key: reply.key,
         content: "旧段".into(),
     });
+    let read_store = store.clone();
+    let sink = observer.clone();
+    let (view, attempt, _) =
+        tokio::task::spawn_blocking(move || sink.snapshot(&read_store, sid(), Some(tid(1))))
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(matches!(view.unclosed_step, Some((NodeId(2), Node::Step {
+        progress: StepProgress::Requesting, attempts, ..
+    })) if matches!(attempts[0].progress, AttemptProgress::Sent)));
+    assert_eq!(attempt.unwrap().key, reply.key);
     io.stop_attempt(AttemptStopped {
         key: reply.key,
         origin: reply.origin,
@@ -267,10 +275,12 @@ async fn snapshot_attempt_is_replaced_only_by_persisted_stop_or_closed_step() {
             .await
             .unwrap()
             .unwrap();
-    assert!(matches!(
-        view.active.unwrap().state,
-        ActiveStep::RetryReady { next_attempt: 1 }
-    ));
+    assert!(
+        matches!(view.unclosed_step.as_ref(), Some((NodeId(2), Node::Step {
+        progress: StepProgress::Requesting, attempts, ..
+    })) if attempts[0].retry_delay_ms == Some(1))
+    );
+
     assert!(attempt.is_none());
     assert_eq!(seq, 2);
     reply.key.attempt_ordinal = 1;
@@ -293,14 +303,12 @@ async fn snapshot_attempt_is_replaced_only_by_persisted_stop_or_closed_step() {
             .unwrap()
             .unwrap();
     assert!(
-        matches!(view.active.unwrap().state, ActiveStep::Executing { reply, .. } if reply == registered.reply)
+        matches!(view.unclosed_step.as_ref(), Some((NodeId(2), Node::Step {
+            progress: StepProgress::Executing, reply: Some(reply), slots, ..
+        })) if reply == &registered.reply && slots.len() == 1
+            && slots[0].progress == SlotProgress::Registered)
     );
-    assert_eq!(
-        attempt.unwrap().segments,
-        vec![TextSegment::Text {
-            text: "说明".into()
-        }]
-    );
+    assert!(attempt.is_none(), "完整回复已经提交，节点取代旧段列表");
     assert_eq!(seq, 4);
     let coordinator = TurnCoordinator::new(io, Arc::new(RandomIdSource));
     coordinator
@@ -316,8 +324,8 @@ async fn snapshot_attempt_is_replaced_only_by_persisted_stop_or_closed_step() {
             .await
             .unwrap()
             .unwrap();
-    assert!(view.active.is_none());
-    assert!(view.selected_turn.unwrap().summary.is_some());
+    assert!(view.unclosed_step.is_none());
+    assert!(view.selected_turn.unwrap().summary.progress.is_closed());
     assert!(attempt.is_none());
     assert_eq!(seq, 4);
 }

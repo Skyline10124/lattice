@@ -125,7 +125,7 @@ async fn committed(backend: &Backend, request: &TurnRequest) -> TurnDetail {
         .query(request.session_id, Some(request.turn_id))
         .await
         .unwrap();
-    assert!(view.active.is_none());
+    assert!(view.unclosed_step.is_none());
     let turn = view.selected_turn.unwrap();
     assert!(turn.summary.progress.is_closed());
     turn
@@ -563,7 +563,7 @@ async fn c5_existing_turn_precedes_configuration_and_new_send_preserves_orphan()
     for config in [None, Some(invalid_configuration(dir.path()))] {
         assert!(!cancel(&backend, &request).await);
         assert!(
-            matches!(bounded(submit(&backend, &request, config)).await.unwrap().unwrap(), Response::Acceptance(Acceptance::Existing { turn }) if turn.summary.is_none())
+            matches!(bounded(submit(&backend, &request, config)).await.unwrap().unwrap(), Response::Acceptance(Acceptance::Existing { turn }) if !turn.summary.progress.is_closed())
         );
         assert_eq!(
             backend
@@ -803,7 +803,7 @@ async fn new_session_reserves_admission_before_accepted_identity_is_visible() {
     };
     idle(&backend).await;
     let durable = backend.query(None, Some(request.turn_id)).await.unwrap();
-    assert!(durable.selected_turn.unwrap().summary.is_some());
+    assert!(durable.selected_turn.unwrap().summary.progress.is_closed());
     assert_eq!(provider.finish().await.len(), 1);
     assert!(
         matches!(
