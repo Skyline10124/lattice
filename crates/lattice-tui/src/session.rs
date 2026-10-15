@@ -4,10 +4,10 @@
 use crate::TuiOptions;
 use crate::app::{Block, ToolSource, ToolState};
 use crate::blocks::BlockList;
-use crate::connection::closing_status;
+use crate::connection::{closing_status, retry_status};
 use lattice_api::local::{
-    LocalClient, LocalHistory, MessageRole, MessageSemantic, Node, ResultPayload, SessionId,
-    StepContent, SuccessContent,
+    LocalClient, LocalHistory, MessageRole, MessageSemantic, ModelAttemptKey, Node, ResultPayload,
+    SessionId, StepContent, SuccessContent, TurnId,
 };
 
 pub(crate) struct SessionContext {
@@ -66,17 +66,20 @@ pub(crate) async fn freeze_configuration(
     .map_err(|_| lattice_api::ApiError::Internal("配置工作者失败".into()))?
 }
 
-pub(crate) fn history_blocks(history: LocalHistory) -> Vec<Block> {
+/// `unfinished` 是仍可能在执行的那一轮，它没有结局行。
+pub(crate) fn history_blocks(history: LocalHistory, unfinished: Option<TurnId>) -> Vec<Block> {
     let mut blocks = BlockList::default();
     let mut ordinal = std::num::NonZeroUsize::MIN;
-    // 已关闭 Turn 的结局行放在该 Turn 最后一个节点之后；结局取这个节点带回的那份。
+    // 其余各轮已关闭或执行者已消失，结局行放在该 Turn 最后一个节点之后；结局取这个节点带回的那份。
     let mut closing = None;
     for entry in history.entries {
         let turn = entry.content.turn_id();
         if let Some((id, summary)) = closing.take_if(|(id, _)| Some(*id) != turn) {
             blocks.push(Block::Status(closing_status(id, summary)));
         }
-        closing = turn.zip(entry.summary);
+        closing = turn
+            .filter(|id| Some(*id) != unfinished)
+            .map(|id| (id, entry.summary));
         // Turn 的 agent 在接受时冻结，同一 Turn 的 Step 不再重复标题；路径从根开始，
         // 每个 Step 前必有本 Turn 的 UserMessage。
         if !matches!(entry.content, Node::Step { .. }) {
@@ -94,14 +97,29 @@ pub(crate) fn history_blocks(history: LocalHistory) -> Vec<Block> {
             Node::Step {
                 turn_id,
                 step_ordinal,
-                content,
                 ..
             } => {
                 blocks.push(Block::Step(lattice_api::local::StepKey {
                     turn_id,
                     ordinal: step_ordinal,
                 }));
-                append_history_step(&mut blocks, content, turn_id, step_ordinal);
+                // 重试提示排在这一步的回复之前，与实时显示的先后一致；它们是旧消息，直接进对话记录。
+                for retry in entry.retries {
+                    let key = ModelAttemptKey {
+                        turn_id,
+                        model_step_ordinal: step_ordinal,
+                        attempt_ordinal: retry.attempt,
+                    };
+                    blocks.push(Block::Status(retry_status(
+                        key,
+                        retry.delay_ms,
+                        retry.notice,
+                    )));
+                }
+                // 执行者消失时可能停在回复之前，这时只有重试提示。
+                if let Some(content) = entry.content.step_content() {
+                    append_history_step(&mut blocks, content, turn_id, step_ordinal);
+                }
             }
         }
     }

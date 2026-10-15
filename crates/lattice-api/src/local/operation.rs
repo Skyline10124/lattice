@@ -314,7 +314,7 @@ impl Worker {
         self.closed |= view
             .selected_turn
             .as_ref()
-            .is_some_and(|t| t.summary.is_some());
+            .is_some_and(|t| t.summary.progress.is_closed() || !view.owned);
         let phase = if view.owned {
             ObservationPhase::Live
         } else {
@@ -372,15 +372,16 @@ impl Worker {
         self.deadline = Instant::now() + Duration::from_secs(crate::STREAM_IDLE_TIMEOUT_SECS);
         match item {
             Ok(Some(SubscriptionItem::Observation(Observation::Snapshot { view }))) => {
-                let no_owner_running = !view.owned
-                    && view
-                        .selected_turn
-                        .as_ref()
-                        .is_some_and(|t| t.summary.is_none());
                 self.fixed(view).await;
-                if no_owner_running {
-                    self.subscription = None;
-                    self.progress = None;
+            }
+            Ok(Some(SubscriptionItem::Observation(Observation::Diagnostic { error }))) => {
+                if let Some(state) = &mut self.report.state {
+                    state.error = Some(error.clone());
+                    self.pending.push_back(LocalUpdate::State {
+                        view: state.view.clone(),
+                        phase: state.phase,
+                        error: Some(error),
+                    });
                 }
             }
             Ok(Some(SubscriptionItem::Observation(Observation::Finished {
@@ -399,7 +400,7 @@ impl Worker {
                             .view
                             .selected_turn
                             .as_ref()
-                            .is_none_or(|t| t.summary.is_some())
+                            .is_none_or(|t| t.summary.progress.is_closed() || !state.view.owned)
                 });
                 if !valid || validate_history(&history).is_err() {
                     self.subscription = None;
@@ -549,7 +550,7 @@ impl Worker {
             Ok(Acceptance::Accepted { turn } | Acceptance::Existing { turn }) => {
                 self.report.session_id = Some(turn.session_id);
                 self.live_evidence |= turn.turn_id == turn_id;
-                self.closed |= turn.summary.is_some();
+                self.closed |= turn.summary.progress.is_closed();
             }
             Ok(Acceptance::ConfirmationUnknown { session_id, .. }) => {
                 self.report.session_id = session_id;
@@ -725,7 +726,10 @@ impl Worker {
 }
 fn target_not_created(error: &LocalError) -> bool {
     error.kind == LocalErrorKind::NotFound
-        || matches!(error.store, Some(StoreDiagnostic::NotInitialized { .. }))
+        || matches!(
+            error.store.as_deref(),
+            Some(StoreDiagnostic::NotInitialized { .. })
+        )
 }
 fn worker_error() -> LocalError {
     LocalError::new(LocalErrorKind::Internal, "local worker failed")

@@ -59,10 +59,7 @@ async fn first_acceptance_reopen_preserves_identity_without_observers_or_configu
     let TurnCompletion::Closed(completed) = execution.completion.await.unwrap().unwrap() else {
         panic!("not closed")
     };
-    assert_eq!(
-        completed.summary.as_ref().unwrap().outcome,
-        PublicTurnOutcome::Completed
-    );
+    assert_eq!(completed.summary.outcome, PublicTurnOutcome::Completed);
     drop(execution.cancel_flag);
     drop(api);
     drop(store);
@@ -91,16 +88,9 @@ async fn first_acceptance_reopen_preserves_identity_without_observers_or_configu
     let read = store.begin_read().unwrap();
     assert_eq!(read.list(None, 10).unwrap().items.len(), 1);
     assert_eq!(read.log(session_id).unwrap().nodes.len(), 3);
-    assert_eq!(
-        read.turn_record(id).unwrap().unwrap().original_input,
-        " original \n"
-    );
-    let record = read.turn_record(id).unwrap().unwrap();
-    assert_eq!(record.config.model, "test");
-    assert_eq!(record.config.system_prompt.as_deref(), Some("frozen"));
-    let snapshot: serde_json::Value =
-        serde_json::from_str(&record.config.profile_snapshot_json).unwrap();
-    assert_eq!(snapshot["agent_profile"]["agent"]["name"], "alpha");
-    assert_eq!(snapshot["agent_profile"]["agent"]["model"], "test");
-    assert_eq!(snapshot["system_prompt"], "frozen");
+    assert_eq!(read.turn_input(session_id, id).unwrap(), " original \n");
+    let config = read.turn_config(session_id, id).unwrap();
+    assert_eq!(config.agent_name, "alpha");
+    assert_eq!(config.model, "test");
+    assert_eq!(config.system_prompt.as_deref(), Some("frozen"));
 }

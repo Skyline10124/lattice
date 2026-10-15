@@ -450,10 +450,10 @@ fn pty_mid_model_reconnect_shows_new_suffix_before_completion() {
         assert!(pending.is_clean_exit(0));
         let log: serde_json::Value = serde_json::from_slice(&pending.stdout).unwrap();
         assert!(
-            !log["session"]["active_turn"].is_null(),
+            !log["unclosed_turn"].is_null(),
             "current Turn still running"
         );
-        assert_eq!(log["nodes"].as_array().unwrap().len(), 4);
+        assert_eq!(log["nodes"].as_array().unwrap().len(), 5);
         assert_eq!(server.captured_requests().len(), 2);
         println!("PTY window: complete prefix and new suffix visible; terminal frame withheld");
 
@@ -605,7 +605,7 @@ fn pty_second_ctrl_c_preserves_cancel_acknowledgement() {
             evidence.record_command("query cancellation after TUI exit", &log);
             assert!(log.is_clean_exit(0));
             let value: serde_json::Value = serde_json::from_slice(&log.stdout).unwrap();
-            if value["session"]["active_turn"].is_null() {
+            if value["unclosed_turn"].is_null() {
                 let turn = &value["nodes"][1]["turn_start"];
                 assert_eq!(turn["summary"]["outcome"], "cancelled");
                 break;

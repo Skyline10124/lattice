@@ -158,7 +158,7 @@ impl SessionStore {
         let path = layout.lattice_root().join("lattice.redb");
         let db = redb::Database::open(&path)?;
         let read = db.begin_read()?;
-        let records = codec::load_read(&read)?;
+        let records = codec::attach_path(&path, codec::load_read(&read))?;
         validate::records(&records)?;
         drop(read);
         Ok(Self {
@@ -270,6 +270,7 @@ impl SessionStore {
     pub fn begin_read(&self) -> Result<SessionRead> {
         Ok(SessionRead {
             tx: self.db.begin_read()?,
+            path: self.path.clone(),
         })
     }
     pub fn try_lock_session(&self, id: SessionId) -> Result<SessionExecutionLock> {

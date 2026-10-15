@@ -2,9 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use lancet_protocol::{
-    CellEvidenceTriple, CepErrorCode, InvocationBinding, InvocationId, ModelMessageAddress,
-};
+use lancet_protocol::{CellEvidenceTriple, InvocationBinding, InvocationId, ModelMessageAddress};
 use lattice_conversation::{
     BoundToolCall, MessageRole, MessageSemantic, NativeMessage, ProviderOrigin, RawToolCall,
     ToolCallState, validate_tool_call_batch,
@@ -21,35 +19,21 @@ pub(super) fn provider(name: &str) -> Result<ProviderOrigin> {
         _ => Err(invalid("provider", "unsupported provider identity")),
     }
 }
-pub(super) fn config(config: &FrozenTurnConfig) -> Result<()> {
-    config
+
+pub(super) fn stored_config(digest: &[u8; 32], stored: &StoredTurnConfig) -> Result<()> {
+    stored
         .validate()
-        .map_err(|_| invalid("config", "invalid frozen configuration"))?;
-    provider(&config.provider)?;
-    if config.agent_name.len() > 128
-        || config.model.len() > 4096
-        || config
-            .system_prompt
-            .as_ref()
-            .is_some_and(|s| s.len() > 2 * 1024 * 1024)
-        || !(1..=3600).contains(&config.limits.timeout_secs)
-    {
-        return Err(invalid("config", "configuration bound exceeded"));
-    }
-    for json in [&config.profile_snapshot_json, &config.policy_snapshot_json] {
-        let v: serde_json::Value =
-            serde_json::from_str(json).map_err(|_| invalid("config", "invalid snapshot JSON"))?;
-        if lancet_protocol::canonical_json(&v) != *json {
-            return Err(invalid("config", "snapshot JSON is not canonical"));
-        }
+        .map_err(|_| invalid("config", "invalid stored configuration"))?;
+    if stored.digest()? != *digest {
+        return Err(invalid("config", "stored configuration digest mismatch"));
     }
     let rebuilt = ToolCatalogSnapshot::new(
-        config.catalog.runtime_build_id.clone(),
-        config.catalog.entries.clone(),
+        stored.catalog.runtime_build_id.clone(),
+        stored.catalog.entries.clone(),
     )
     .map_err(|_| invalid("catalog", "invalid catalog entries"))?;
-    if rebuilt != config.catalog
-        || config.catalog.entries.iter().any(|e| {
+    if rebuilt != stored.catalog
+        || stored.catalog.entries.iter().any(|e| {
             e.descriptor_identity.len() != 64
                 || !e
                     .descriptor_identity
@@ -64,6 +48,41 @@ pub(super) fn config(config: &FrozenTurnConfig) -> Result<()> {
     }
     Ok(())
 }
+
+pub(super) fn user_fields(
+    agent_name: &str,
+    model: &str,
+    provider_name: &str,
+    limits: &TurnExecutionLimits,
+) -> Result<()> {
+    if agent_name.is_empty()
+        || agent_name.len() > 128
+        || model.is_empty()
+        || model.len() > 4096
+        || !(1..=3600).contains(&limits.timeout_secs)
+    {
+        return Err(invalid("config", "configuration bound exceeded"));
+    }
+    limits.validate()?;
+    provider(provider_name)?;
+    Ok(())
+}
+
+pub(super) fn config(config: &FrozenTurnConfig) -> Result<()> {
+    config
+        .validate()
+        .map_err(|_| invalid("config", "invalid frozen configuration"))?;
+    user_fields(
+        &config.agent_name,
+        &config.model,
+        &config.provider,
+        &config.limits,
+    )?;
+    let stored = config.stored();
+    let digest = stored.digest()?;
+    stored_config(&digest, &stored)
+}
+
 pub(super) fn assistant<S: ToolCallState>(message: &NativeMessage<S>) -> Result<()> {
     if message.role != MessageRole::Assistant {
         return Err(invalid("reply", "expected assistant role"));
@@ -105,6 +124,7 @@ pub(super) fn assistant<S: ToolCallState>(message: &NativeMessage<S>) -> Result<
     validate_tool_call_batch(&calls).map_err(|_| invalid("reply", "invalid tool call batch"))?;
     Ok(())
 }
+
 pub(super) fn diagnostic(cause: &StopCause, d: &AttemptDiagnostic) -> Result<()> {
     if matches!(
         cause,
@@ -154,6 +174,7 @@ pub(super) fn diagnostic(cause: &StopCause, d: &AttemptDiagnostic) -> Result<()>
     }
     Ok(())
 }
+
 pub(super) fn evidence(binding: &InvocationBinding, e: &CellEvidenceTriple) -> Result<()> {
     use lancet_protocol::evidence::{
         ADMISSION_EVIDENCE_VERSION, DENIED_OPERATIONS_RECORD_VERSION,
@@ -189,37 +210,27 @@ pub(super) fn evidence(binding: &InvocationBinding, e: &CellEvidenceTriple) -> R
     }
     Ok(())
 }
-pub(super) fn terminal(binding: &InvocationBinding, t: &InvocationTerminal) -> Result<()> {
-    if t.result.invocation_id != binding.invocation_id || t.result.name != binding.identity.method {
+
+pub(super) fn terminal(
+    binding: &InvocationBinding,
+    result: &StoredToolResult,
+    ev: &InvocationEvidence,
+) -> Result<()> {
+    if result.invocation_id != binding.invocation_id || result.name != binding.identity.method {
         return Err(invalid("terminal", "result identity mismatch"));
     }
-    // 没有 LANCET 结果的两种终态只由关闭事务补写，证据与形状一一对应。
-    match (&t.result.payload, &t.evidence) {
-        (
-            ResultPayload::NotExecuted,
-            InvocationEvidence::Unavailable {
-                reason: EvidenceUnavailableReason::NotDispatched,
-            },
-        )
-        | (
-            ResultPayload::Indeterminate(IndeterminateCause::NoResult),
-            InvocationEvidence::Unavailable {
-                reason: EvidenceUnavailableReason::NoResult,
-            },
-        ) => {}
-        (
-            ResultPayload::NotExecuted | ResultPayload::Indeterminate(IndeterminateCause::NoResult),
-            _,
-        ) => {
+    // 槽位只在 LANCET 实际返回后推进到 Terminal；未分发或无结果的槽位停在 Registered/Started。
+    let InvocationEvidence::Recorded(e) = ev else {
+        return Err(invalid("terminal", "missing receipt evidence"));
+    };
+    evidence(binding, e)?;
+    match &result.payload {
+        ResultPayload::NotExecuted | ResultPayload::Indeterminate(IndeterminateCause::NoResult) => {
             return Err(invalid(
                 "terminal",
-                "closure-written terminal has mismatched evidence",
+                "unreturned slot state must not be stored as terminal",
             ));
         }
-        (_, InvocationEvidence::Recorded(e)) => evidence(binding, e)?,
-        _ => return Err(invalid("terminal", "missing receipt evidence")),
-    }
-    match &t.result.payload {
         ResultPayload::Succeeded(SuccessContent::Json {
             value,
             digest,
@@ -238,81 +249,33 @@ pub(super) fn terminal(binding: &InvocationBinding, t: &InvocationTerminal) -> R
         {
             return Err(invalid("terminal", "unnecessary unavailable content"));
         }
-        // 这两个错误码归 Indeterminate，其余错误（含策略与校验拒绝）归 Failed。
-        ResultPayload::Failed(e)
-            if matches!(
-                e.code,
-                CepErrorCode::CallCancelled | CepErrorCode::OutcomeIndeterminate
-            ) =>
-        {
-            return Err(invalid("terminal", "error belongs to a different outcome"));
-        }
         _ => {}
     }
     Ok(())
 }
-/// 终态前缀，最多一个 Started，余下 Registered；停止批次的终态之后只能是 NotExecuted。
-pub(super) fn slot_order(slots: &[InvocationSlot]) -> Result<()> {
-    let mut waiting = false;
-    let mut stopped = false;
-    let mut last = None;
-    let mut ids = BTreeSet::new();
-    let mut message = None;
-    for slot in slots {
-        let address = slot.binding.identity.address();
-        if last.is_some_and(|p| p >= address.part_ordinal)
-            || !ids.insert(slot.binding.invocation_id)
-            || message.is_some_and(|m| m != address.message)
-        {
-            return Err(corrupt("steps", "slots", "invalid slot order or ownership"));
-        }
-        last = Some(address.part_ordinal);
-        message = Some(address.message);
-        match &slot.state {
-            SlotState::Registered => waiting = true,
-            SlotState::Started => {
-                if waiting || stopped {
-                    return Err(corrupt("steps", "slots", "out-of-order start"));
-                }
-                waiting = true;
-            }
-            SlotState::Terminal(t) => {
-                terminal(&slot.binding, t)
-                    .map_err(|_| corrupt("steps", "terminal", "invalid terminal"))?;
-                if waiting || stopped && !matches!(t.result.payload, ResultPayload::NotExecuted) {
-                    return Err(corrupt(
-                        "steps",
-                        "slots",
-                        "execution after unfinished or stopping slot",
-                    ));
-                }
-                stopped |= close::stops_batch(&t.result.payload);
-            }
-        }
-    }
-    Ok(())
-}
+
 fn bound_reply(
-    turn: &TurnRecord,
+    session_id: SessionId,
+    provider_name: &str,
+    catalog: &ToolCatalogSnapshot,
     key: StepKey,
     message: &NativeMessage<BoundToolCall>,
     slots: &[InvocationSlot],
 ) -> Result<()> {
-    assistant(message)?;
     if message
         .provider_origin
-        .is_some_and(|origin| provider(&turn.config.provider).ok() != Some(origin))
+        .is_some_and(|origin| provider(provider_name).ok() != Some(origin))
     {
         return Err(invalid("reply", "stored reply provider mismatch"));
     }
-    slot_order(slots)?;
     if message.tool_calls().count() != slots.len() {
         return Err(invalid("slots", "reply/slot count mismatch"));
     }
     for ((ordinal, call), slot) in message.tool_calls().zip(slots) {
-        let entry = turn
-            .config
-            .catalog
+        if let SlotProgress::Terminal { result, evidence } = &slot.progress {
+            terminal(&slot.binding, result, evidence)?;
+        }
+        let entry = catalog
             .entries
             .iter()
             .find(|e| e.name == call.name)
@@ -321,8 +284,8 @@ fn bound_reply(
         let a = b.identity.address();
         if a.message
             != (ModelMessageAddress {
-                session_id: turn.session_id,
-                turn_id: turn.turn_id,
+                session_id,
+                turn_id: key.turn_id,
                 model_step_ordinal: key.ordinal,
             })
             || a.part_ordinal as usize != ordinal
@@ -338,258 +301,104 @@ fn bound_reply(
     }
     Ok(())
 }
-fn retryable(attempt: &AttemptRecord) -> bool {
+
+pub(super) fn stage(progress: &SlotProgress) -> InvocationStage {
+    match progress {
+        SlotProgress::Registered => InvocationStage::Registered,
+        SlotProgress::Started => InvocationStage::Started,
+        SlotProgress::Terminal { .. } => InvocationStage::Terminal,
+    }
+}
+
+pub(super) fn invocation_transition(
+    previous: Option<InvocationStage>,
+    next: InvocationStage,
+) -> bool {
     matches!(
-        attempt.end,
-        AttemptEnd::Stopped {
-            cause: StopCause::ProviderError { retryable: true },
-            ..
-        }
+        (previous, next),
+        (None, InvocationStage::Registered)
+            | (Some(InvocationStage::Registered), InvocationStage::Started)
+            | (Some(InvocationStage::Started), InvocationStage::Terminal)
     )
 }
-pub(super) fn durable(state: &DurableTurnState) -> Result<()> {
-    let t = &state.turn;
-    let s = &state.session;
-    let err = || corrupt("turns", &t.turn_id.to_string(), "invalid turn/step shape");
-    config(&t.config).map_err(|_| err())?;
-    if t.config.digest().map_err(|_| err())? != t.config_digest
-        || t.session_id != s.session_id
-        || t.project_store_key != s.project_store_key
-        || state.next_node.0 == 0
-        || state.next_node <= s.current
-        || state.steps.len() > MAX_MODEL_STEPS as usize + 1
-    {
+
+pub(super) fn turn(r: &Records, s: SessionId, t: TurnId) -> Result<()> {
+    let err = || corrupt("nodes", &t.to_string(), "invalid turn/step relation");
+    let user_ref = r.turn_index.get(&t).ok_or_else(err)?;
+    if user_ref.session_id != s || user_ref.node == NodeId(0) {
         return Err(err());
     }
-    if t.user_node == NodeId(0) || t.user_node >= state.next_node {
+    let Some(Node::UserMessage {
+        parent: user_parent,
+        turn_id,
+        provider: provider_name,
+        config_digest,
+        ..
+    }) = r.nodes.get(&(s, user_ref.node))
+    else {
+        return Err(err());
+    };
+    if *turn_id != t || *user_parent >= user_ref.node || !r.nodes.contains_key(&(s, *user_parent)) {
         return Err(err());
     }
-    let mut last_node = t.user_node;
-    for step in &state.steps {
-        if let StepState::Closed { end, invocations } = &step.state {
-            if let Some(node) = end.node() {
-                if node <= last_node || node >= state.next_node {
-                    return Err(err());
-                }
-                last_node = node;
-            }
-            for invocation in invocations {
-                let b = &invocation.binding.identity;
-                if b.session_id != t.session_id
-                    || b.turn_id != t.turn_id
-                    || b.model_step_ordinal != step.key.ordinal
-                    || !t.config.catalog.entries.iter().any(|e| {
-                        e.name == b.method && e.descriptor_identity == b.descriptor_identity
-                    })
-                {
-                    return Err(err());
-                }
-            }
-        }
-    }
-    if matches!(t.state, TurnState::Running) && s.current != last_node {
+    // 尝试的 provider 来源由它得出，存的值必须能解析。
+    provider(provider_name).map_err(|_| err())?;
+    let stored = r.configs.get(config_digest).ok_or_else(err)?;
+    let steps = r.turn_steps(s, t)?;
+    if steps.is_empty() {
         return Err(err());
     }
-    let running = matches!(t.state, TurnState::Running);
-    if running != (s.active_turn == Some(t.turn_id)) || (!running && state.steps.is_empty()) {
-        return Err(err());
-    }
-    for (ordinal, step) in state.steps.iter().enumerate() {
-        if step.key
-            != (StepKey {
-                turn_id: t.turn_id,
-                ordinal: ordinal as u32,
-            })
-            || step.attempts.len() > t.config.limits.max_model_attempts as usize
-            || ordinal >= MAX_MODEL_STEPS as usize && !step.attempts.is_empty()
+    let mut expected_parent = user_ref.node;
+    for (ordinal, (node_id, step_node)) in steps.iter().enumerate() {
+        let expected_id = next_sequence(expected_parent.0, "node").map(NodeId)?;
+        let Node::Step {
+            parent,
+            turn_id: step_turn,
+            step_ordinal,
+            progress,
+            reply,
+            slots,
+            ..
+        } = step_node
+        else {
+            return Err(err());
+        };
+        if *node_id != expected_id
+            || *parent != expected_parent
+            || *step_turn != t
+            || *step_ordinal != ordinal as u32
         {
             return Err(err());
         }
-        let mut complete = false;
-        for (index, a) in step.attempts.iter().enumerate() {
-            if a.attempt as usize != index
-                || complete
-                || a.origin != provider(&t.config.provider).map_err(|_| err())?
-            {
-                return Err(err());
+        expected_parent = *node_id;
+        let continues = matches!(
+            progress,
+            StepProgress::Closed {
+                end: StepEnd::Continue
             }
-            match &a.end {
-                AttemptEnd::Completed { step: address } => {
-                    if *address
-                        != (ModelMessageAddress {
-                            session_id: t.session_id,
-                            turn_id: t.turn_id,
-                            model_step_ordinal: ordinal as u32,
-                        })
-                    {
-                        return Err(err());
-                    }
-                    complete = true;
-                }
-                AttemptEnd::Stopped {
-                    cause,
-                    diagnostic: d,
-                } => {
-                    diagnostic(cause, d).map_err(|_| err())?;
-                    if index + 1 < step.attempts.len() && !retryable(a) {
-                        return Err(err());
-                    }
-                }
-            }
+        );
+        if continues != (ordinal + 1 < steps.len()) {
+            return Err(err());
         }
-        let last = ordinal + 1 == state.steps.len();
-        match &step.state {
-            StepState::Active { active } => {
-                if !running || !last || ordinal >= MAX_MODEL_STEPS as usize {
-                    return Err(err());
-                }
-                match active {
-                    ActiveStep::Requesting { attempt } => {
-                        if *attempt as usize != step.attempts.len()
-                            || *attempt >= t.config.limits.max_model_attempts
-                            || complete
-                            || step.attempts.last().is_some_and(|a| !retryable(a))
-                        {
-                            return Err(err());
-                        }
-                    }
-                    ActiveStep::RetryReady { next_attempt } => {
-                        if *next_attempt as usize != step.attempts.len()
-                            || *next_attempt >= t.config.limits.max_model_attempts
-                            || step.attempts.last().is_none_or(|a| !retryable(a))
-                        {
-                            return Err(err());
-                        }
-                    }
-                    ActiveStep::Executing { reply, slots } => {
-                        if !complete || slots.is_empty() || slots.iter().any(|slot| {
-                            matches!(&slot.state, SlotState::Terminal(t) if !matches!(t.evidence, InvocationEvidence::Recorded(_)) || matches!(t.result.payload, ResultPayload::NotExecuted))
-                        }) {
-                            // 无 receipt 的补写只能与 Step/Turn 关闭同事务发布。
-                            return Err(err());
-                        }
-                        bound_reply(t, step.key, reply, slots).map_err(|_| err())?;
-                    }
-                }
-            }
-            StepState::Closed { end, invocations } => {
-                let slots: Vec<_> = invocations
-                    .iter()
-                    .map(|s| InvocationSlot {
-                        binding: s.binding.clone(),
-                        state: SlotState::Terminal(s.terminal.clone()),
-                    })
-                    .collect();
-                slot_order(&slots)?;
-                if matches!(end, StepEnd::Continue { .. }) != (running || !last) {
-                    return Err(err());
-                }
-                if complete != end.node().is_some() || !complete && !invocations.is_empty() {
-                    return Err(err());
-                }
-                match end {
-                    StepEnd::Continue { .. } => {
-                        if invocations.is_empty()
-                            || invocations
-                                .iter()
-                                .any(|s| close::stops_batch(&s.terminal.result.payload))
-                        {
-                            return Err(err());
-                        }
-                    }
-                    StepEnd::Finish { .. } => {
-                        if !invocations.is_empty() {
-                            return Err(err());
-                        }
-                    }
-                    StepEnd::Stop {
-                        node: Some(_),
-                        cause,
-                    } => {
-                        // 与关闭时同一规则：槽位自身的停止优先，否则是关闭 Step 的外部停止。
-                        let external = match cause {
-                            StopCause::Cancelled => Some(DispatchStop::Cancelled),
-                            StopCause::Deadline => Some(DispatchStop::Deadline),
-                            StopCause::ProcessExit => Some(DispatchStop::ProcessExit),
-                            _ => None,
-                        };
-                        let derived = match external {
-                            Some(stop) => close::step_stop_cause(invocations, stop)?,
-                            None => close::first_stopping_cause(invocations)?,
-                        };
-                        if invocations.is_empty() || derived.as_ref() != Some(cause) {
-                            return Err(err());
-                        }
-                    }
-                    StepEnd::Stop { node: None, cause } => {
-                        if *cause == StopCause::ModelStepLimit
-                            && ordinal != MAX_MODEL_STEPS as usize
-                        {
-                            return Err(err());
-                        }
-                        let between = matches!(
-                            cause,
-                            StopCause::Cancelled
-                                | StopCause::Deadline
-                                | StopCause::ProcessExit
-                                | StopCause::ModelStepLimit
-                        );
-                        match step.attempts.last() {
-                            None if !between => return Err(err()),
-                            Some(a) => {
-                                if let AttemptEnd::Stopped { cause: actual, .. } = &a.end {
-                                    let exhausted = step.attempts.len()
-                                        >= t.config.limits.max_model_attempts as usize;
-                                    if if retryable(a) && !exhausted {
-                                        !between
-                                    } else {
-                                        actual != cause
-                                    } {
-                                        return Err(err());
-                                    }
-                                } else {
-                                    return Err(err());
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-    }
-    if let TurnState::Closed {
-        outcome,
-        notice,
-        usage,
-        ..
-    } = &t.state
-    {
-        let (expected, expected_notice) = close::outcome(state.steps.last().ok_or_else(err)?)?;
-        if *outcome != expected
-            || *notice != expected_notice
-            || *usage != close::usage(&state.steps)
-        {
+        if let Some(reply) = reply {
+            bound_reply(
+                s,
+                provider_name,
+                &stored.catalog,
+                StepKey {
+                    turn_id: t,
+                    ordinal: *step_ordinal,
+                },
+                reply,
+                slots,
+            )
+            .map_err(|_| err())?;
+        } else if !slots.is_empty() {
+            // 保留绑定时，槽位必须有可核对的调用来源。
             return Err(err());
         }
     }
     Ok(())
-}
-
-pub(super) fn slots(step: &StepRecord) -> Vec<InvocationSlot> {
-    match &step.state {
-        StepState::Active {
-            active: ActiveStep::Executing { slots, .. },
-        } => slots.clone(),
-        StepState::Closed { invocations, .. } => invocations
-            .iter()
-            .map(|i| InvocationSlot {
-                binding: i.binding.clone(),
-                state: SlotState::Terminal(i.terminal.clone()),
-            })
-            .collect(),
-        _ => vec![],
-    }
 }
 
 fn node(r: &Records, s: SessionId, n: NodeId) -> Result<()> {
@@ -616,45 +425,26 @@ fn node(r: &Records, s: SessionId, n: NodeId) -> Result<()> {
         return Err(err());
     }
     let id = node.turn_id().ok_or_else(err)?;
-    let t = r.turns.get(&id).ok_or_else(err)?;
-    if t.turn_id != id || t.session_id != s {
+    let user_ref = r.turn_index.get(&id).ok_or_else(err)?;
+    if user_ref.session_id != s {
         return Err(err());
     }
     match node {
-        Node::UserMessage { message, .. } => {
-            if t.user_node != n
-                || message.role != MessageRole::User
-                || message.provider_origin.is_some()
-                || message.parts.len() != 1
-                || message.parts[0].replay_state.is_some()
-                || !matches!(&message.parts[0].semantic, MessageSemantic::Text {text} if *text == t.original_input && text.len() <= MAX_USER_INPUT_BYTES)
-            {
+        Node::UserMessage { .. } => {
+            if user_ref.node != n {
                 return Err(err());
             }
         }
-        Node::Step {
-            step_ordinal,
-            content,
-            ..
-        } => {
-            let key = StepKey {
-                turn_id: id,
-                ordinal: *step_ordinal,
-            };
-            let step = r.steps.get(&key).ok_or_else(err)?;
-            let StepState::Closed { end, invocations } = &step.state else {
-                return Err(err());
-            };
-            if step.key != key
-                || end.node() != Some(n)
-                || content
-                    .results
-                    .iter()
-                    .ne(invocations.iter().map(|i| &i.terminal.result))
-            {
+        Node::Step { step_ordinal, .. } => {
+            let expected = user_ref
+                .node
+                .0
+                .checked_add(1)
+                .and_then(|base| base.checked_add(u64::from(*step_ordinal)))
+                .map(NodeId);
+            if expected != Some(n) {
                 return Err(err());
             }
-            bound_reply(t, key, &content.assistant, &slots(step)).map_err(|_| err())?;
         }
         Node::Root => return Err(err()),
     }
@@ -665,7 +455,7 @@ pub(super) fn local(r: &Records, scope: &local::Scope) -> Result<()> {
     let s = scope.session;
     let err = || corrupt("sessions", &s.to_string(), "invalid local relations");
     let Some(session) = r.sessions.get(&s) else {
-        return if r.turns.is_empty() && r.nodes.is_empty() {
+        return if r.turn_index.is_empty() && r.nodes.is_empty() {
             Ok(())
         } else {
             Err(err())
@@ -677,64 +467,55 @@ pub(super) fn local(r: &Records, scope: &local::Scope) -> Result<()> {
     {
         return Err(err());
     }
-    for (id, turn) in &r.turns {
-        if turn.turn_id != *id
-            || turn.session_id != s
-            || turn.project_store_key != session.project_store_key
-        {
-            return Err(err());
-        }
-        if matches!(turn.state, TurnState::Running) != (session.active_turn == Some(*id)) {
-            return Err(err());
-        }
-        config(&turn.config).map_err(|_| err())?;
-        if turn.config.digest().map_err(|_| err())? != turn.config_digest {
-            return Err(err());
-        }
+    for (digest, stored) in &r.configs {
+        stored_config(digest, stored).map_err(|_| err())?;
     }
     for n in &scope.nodes {
-        // 查询不存在的目标由入口返回 NotFound；根/current/Turn 引用在本函数中必须存在。
         if r.nodes.contains_key(&(s, *n)) {
             node(r, s, *n)?;
         }
     }
-    if let Some(id) = scope.turn
-        && let Some(turn) = r.turns.get(&id)
-    {
-        let state = r.durable(s, id)?;
-        durable(&state)?;
-        node(r, s, turn.user_node)?;
-        let mut parent = turn.user_node;
-        for step in &state.steps {
-            if let StepState::Closed { end, .. } = &step.state
-                && let Some(n) = end.node()
-            {
-                if !matches!(r.nodes.get(&(s,n)), Some(Node::Step {parent:p,turn_id,step_ordinal,..}) if *p==parent && *turn_id==id && *step_ordinal==step.key.ordinal)
-                {
-                    return Err(err());
-                }
-                node(r, s, n)?;
-                parent = n;
-            }
+    for (&turn_id, &node_ref) in &r.turn_index {
+        if node_ref.session_id != s
+            || !matches!(
+                r.nodes.get(&(s, node_ref.node)),
+                Some(Node::UserMessage { turn_id: actual, .. }) if *actual == turn_id
+            )
+        {
+            return Err(err());
+        }
+        if scope.turn == Some(turn_id)
+            || r.nodes.get(&(s, session.current)).and_then(Node::turn_id) == Some(turn_id)
+            || r.node_tip
+                .and_then(|tip| r.nodes.get(&(s, tip)))
+                .and_then(Node::turn_id)
+                == Some(turn_id)
+        {
+            turn(r, s, turn_id)?;
         }
     }
     let mut ids = BTreeSet::new();
-    for step in r.steps.values() {
-        for slot in slots(step) {
-            let id = slot.binding.invocation_id;
-            if !ids.insert(id) {
-                return Err(err());
-            }
-            let index = r.index.get(&id).ok_or_else(err)?;
-            let change = r.changes.get(&index.last_change).ok_or_else(err)?;
-            if index.address != slot.binding.identity.address()
-                || index.last_change.0 == 0
-                || index.last_change > r.last_change
-                || change.sequence != index.last_change
-                || change.project_store_key != session.project_store_key
-                || change.row != read::operator(&slot)
-            {
-                return Err(err());
+    for ((node_session, _), n) in &r.nodes {
+        if *node_session != s {
+            return Err(err());
+        }
+        if let Node::Step { slots, .. } = n {
+            for slot in slots {
+                let id = slot.binding.invocation_id;
+                if !ids.insert(id) {
+                    return Err(err());
+                }
+                let index = r.index.get(&id).ok_or_else(err)?;
+                let change = r.changes.get(&index.last_change).ok_or_else(err)?;
+                if index.address != slot.binding.identity.address()
+                    || index.last_change.0 == 0
+                    || index.last_change > r.last_change
+                    || change.sequence != index.last_change
+                    || change.invocation_id != id
+                    || change.stage != stage(&slot.progress)
+                {
+                    return Err(err());
+                }
             }
         }
     }
@@ -743,16 +524,14 @@ pub(super) fn local(r: &Records, scope: &local::Scope) -> Result<()> {
 
 pub(super) fn records(r: &Records) -> Result<()> {
     let err = |table: &str, key: String, detail: &str| corrupt(table, &key, detail);
-    let mut running_by_session: BTreeMap<SessionId, Vec<TurnId>> = BTreeMap::new();
-    for t in r
-        .turns
-        .values()
-        .filter(|t| matches!(t.state, TurnState::Running))
-    {
-        running_by_session
-            .entry(t.session_id)
-            .or_default()
-            .push(t.turn_id);
+    for (digest, stored) in &r.configs {
+        stored_config(digest, stored).map_err(|_| {
+            err(
+                "configs",
+                codec::config_key(digest),
+                "invalid stored config",
+            )
+        })?;
     }
     for (id, s) in &r.sessions {
         if *id != s.session_id
@@ -772,96 +551,56 @@ pub(super) fn records(r: &Records) -> Result<()> {
             }
             expected = next_sequence(expected, "node")?;
         }
-        if running_by_session
-            .get(id)
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-            != s.active_turn.as_slice()
-        {
-            return Err(err(
-                "sessions",
-                id.to_string(),
-                "active turn relation mismatch",
-            ));
-        }
     }
-    for (s, n) in r.nodes.keys() {
-        node(r, *s, *n)?;
-    }
+    let mut user_nodes = BTreeMap::new();
     let mut all_slots = BTreeMap::new();
-    for (id, t) in &r.turns {
-        if *id != t.turn_id {
-            return Err(err("turns", id.to_string(), "key/value identity mismatch"));
-        }
-        let s = r
-            .sessions
-            .get(&t.session_id)
-            .ok_or_else(|| err("turns", id.to_string(), "missing session"))?;
-        if !matches!(r.nodes.get(&(t.session_id,t.user_node)),Some(Node::UserMessage {turn_id,..}) if *turn_id==*id)
-        {
-            return Err(err("turns", id.to_string(), "missing user node"));
-        }
-        let steps = r.turn_steps(*id);
-        let next_node = r.next_node(t.session_id)?;
-        durable(&DurableTurnState {
-            session: s.clone(),
-            turn: t.clone(),
-            steps: steps.clone(),
-            next_node,
-        })?;
-        let mut parent = t.user_node;
-        for step in &steps {
-            let slots = match &step.state {
-                StepState::Active {
-                    active: ActiveStep::Executing { slots, .. },
-                } => slots.clone(),
-                StepState::Closed { end, invocations } => {
-                    if let Some(n) = end.node() {
-                        if !matches!(r.nodes.get(&(t.session_id,n)),Some(Node::Step {parent:p,turn_id,step_ordinal,..}) if *p==parent&&*turn_id==*id&&*step_ordinal==step.key.ordinal)
-                        {
-                            return Err(err("steps", id.to_string(), "node lineage mismatch"));
-                        }
-                        parent = n;
-                    }
-                    invocations
-                        .iter()
-                        .map(|s| InvocationSlot {
-                            binding: s.binding.clone(),
-                            state: SlotState::Terminal(s.terminal.clone()),
-                        })
-                        .collect()
-                }
-                _ => Vec::new(),
-            };
-            for slot in slots {
-                if all_slots
-                    .insert(slot.binding.invocation_id, (t, slot))
+    for ((s, n), value) in &r.nodes {
+        node(r, *s, *n)?;
+        match value {
+            Node::Root => {}
+            Node::UserMessage { turn_id, .. } => {
+                if user_nodes
+                    .insert(
+                        *turn_id,
+                        NodeRef {
+                            session_id: *s,
+                            node: *n,
+                        },
+                    )
                     .is_some()
                 {
                     return Err(err(
-                        "invocation_index",
-                        id.to_string(),
-                        "duplicate invocation",
+                        "nodes",
+                        turn_id.to_string(),
+                        "duplicate user message for turn",
                     ));
                 }
             }
-        }
-        if matches!(t.state, TurnState::Running) && s.current != parent {
-            return Err(err(
-                "sessions",
-                s.session_id.to_string(),
-                "running turn is not at current node",
-            ));
+            Node::Step { slots, .. } => {
+                for slot in slots {
+                    if all_slots
+                        .insert(slot.binding.invocation_id, (*s, slot))
+                        .is_some()
+                    {
+                        return Err(err(
+                            "invocation_index",
+                            slot.binding.invocation_id.to_string(),
+                            "duplicate invocation",
+                        ));
+                    }
+                }
+            }
         }
     }
-    for (key, step) in &r.steps {
-        if *key != step.key || !r.turns.contains_key(&key.turn_id) {
-            return Err(err(
-                "steps",
-                key.turn_id.to_string(),
-                "orphan step or key mismatch",
-            ));
-        }
+    if user_nodes != r.turn_index {
+        return Err(err(
+            "turn_index",
+            "set".into(),
+            "turn index differs from user message nodes",
+        ));
+    }
+    for (&turn_id, &node_ref) in &r.turn_index {
+        turn(r, node_ref.session_id, turn_id)?;
     }
     if all_slots.len() != r.index.len() {
         return Err(err(
@@ -870,8 +609,7 @@ pub(super) fn records(r: &Records) -> Result<()> {
             "index key set differs from slots",
         ));
     }
-    let mut previous: BTreeMap<InvocationId, (&OperatorInvocationState, ChangeSeq)> =
-        BTreeMap::new();
+    let mut previous: BTreeMap<InvocationId, (InvocationStage, ChangeSeq)> = BTreeMap::new();
     let mut seq = 0;
     for (key, change) in &r.changes {
         seq = next_sequence(seq, "change")?;
@@ -882,21 +620,16 @@ pub(super) fn records(r: &Records) -> Result<()> {
                 "non-contiguous changes",
             ));
         }
-        let (turn, slot) = all_slots
-            .get(&change.row.invocation_id)
-            .ok_or_else(|| err("invocation_changes", key.0.to_string(), "orphan change"))?;
-        if change.project_store_key != turn.project_store_key
-            || change.row.binding != slot.binding.identity
-        {
+        if !all_slots.contains_key(&change.invocation_id) {
             return Err(err(
                 "invocation_changes",
                 key.0.to_string(),
-                "change identity mismatch",
+                "orphan change",
             ));
         }
         let legal = invocation_transition(
-            previous.get(&change.row.invocation_id).map(|p| p.0),
-            &change.row.state,
+            previous.get(&change.invocation_id).map(|p| p.0),
+            change.stage,
         );
         if !legal {
             return Err(err(
@@ -905,7 +638,7 @@ pub(super) fn records(r: &Records) -> Result<()> {
                 "illegal lifecycle transition",
             ));
         }
-        previous.insert(change.row.invocation_id, (&change.row.state, *key));
+        previous.insert(change.invocation_id, (change.stage, *key));
     }
     if r.last_change != ChangeSeq(seq) {
         return Err(err(
@@ -919,9 +652,8 @@ pub(super) fn records(r: &Records) -> Result<()> {
             .index
             .get(&id)
             .ok_or_else(|| err("invocation_index", id.to_string(), "missing index"))?;
-        let row = read::operator(&slot);
         if index.address != slot.binding.identity.address()
-            || previous.get(&id) != Some(&(&row.state, index.last_change))
+            || previous.get(&id) != Some(&(stage(&slot.progress), index.last_change))
         {
             return Err(err(
                 "invocation_index",
@@ -931,26 +663,4 @@ pub(super) fn records(r: &Records) -> Result<()> {
         }
     }
     Ok(())
-}
-
-pub(super) fn invocation_transition(
-    previous: Option<&OperatorInvocationState>,
-    next: &OperatorInvocationState,
-) -> bool {
-    match (previous, next) {
-        (None, OperatorInvocationState::Registered) => true,
-        (Some(OperatorInvocationState::Registered), OperatorInvocationState::Started) => true,
-        (
-            Some(OperatorInvocationState::Registered),
-            OperatorInvocationState::Terminal {
-                outcome: lattice_conversation::ToolResultOutcome::NotExecuted,
-                ..
-            },
-        ) => true,
-        (
-            Some(OperatorInvocationState::Started),
-            OperatorInvocationState::Terminal { outcome, .. },
-        ) => *outcome != lattice_conversation::ToolResultOutcome::NotExecuted,
-        _ => false,
-    }
 }

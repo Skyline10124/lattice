@@ -81,7 +81,7 @@ fn closed(
     let deadline = Instant::now() + budget.cap_timeout(Duration::from_secs(30));
     loop {
         let t = detail(world, budget, evidence, turn);
-        if !t["summary"].is_null() {
+        if t["summary"]["progress"]["progress"] == "closed" {
             return t;
         }
         assert!(Instant::now() < deadline, "Turn did not close");
@@ -246,7 +246,10 @@ fn detached_cli_finishes_and_world_owns_daemon_cleanup() {
         evidence.record_command("detach CLI", &killed);
         assert_forced_kill(&killed);
         assert_eq!(world.daemon_pids().unwrap(), owners);
-        assert!(detail(&world, &budget, &mut evidence, FIRST)["summary"].is_null());
+        assert_ne!(
+            detail(&world, &budget, &mut evidence, FIRST)["summary"]["progress"]["progress"],
+            "closed"
+        );
         gate.release(budget.cap_timeout(Duration::from_secs(30)))
             .unwrap();
         assert_eq!(
@@ -346,7 +349,7 @@ fn unread_acceptance_retry_and_restart_keep_one_turn() {
                 gate.wait_until_stalled(1, budget.cap_timeout(Duration::from_secs(30)))
                     .unwrap();
                 let pending = detail(&world, &budget, &mut evidence, FIRST);
-                assert!(pending["summary"].is_null());
+                assert_ne!(pending["summary"]["progress"]["progress"], "closed");
                 let sid = pending["session_id"].as_str().unwrap();
                 if let Some(existing) = &existing {
                     assert_eq!(sid, existing);
@@ -540,7 +543,10 @@ fn busy_cancel_and_stop_do_not_serialize_distinct_sessions() {
             )["value"]["kind"],
             "stopping"
         );
-        assert!(detail(&world, &budget, &mut evidence, SECOND)["summary"].is_null());
+        assert_ne!(
+            detail(&world, &budget, &mut evidence, SECOND)["summary"]["progress"]["progress"],
+            "closed"
+        );
         // stop 必须等待被 gate 挡住的在途 Turn，不能在释放前就返回。
         assert!(
             !stop.has_exited().unwrap(),
@@ -622,7 +628,10 @@ fn concurrent_autostart_has_one_owner_and_snapshot_reloads_result() {
         );
         let snapshot = observer.next();
         assert_eq!(snapshot["value"]["type"], "snapshot");
-        assert!(snapshot["value"]["view"]["selected_turn"]["summary"].is_null());
+        assert_ne!(
+            snapshot["value"]["view"]["selected_turn"]["summary"]["progress"]["progress"],
+            "closed"
+        );
         drop(observer);
         gate.release(budget.cap_timeout(Duration::from_secs(30)))
             .unwrap();
@@ -1031,7 +1040,7 @@ fn daemon_restart_reads_closed_result_without_resubmitting() {
         assert_eq!(entries[1]["node"], 2);
         assert_eq!(entries[1]["content"]["kind"], "step");
         assert!(
-            entries[1]["content"]["content"]["assistant"]["parts"]
+            entries[1]["content"]["reply"]["parts"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -1205,7 +1214,8 @@ fn a_live_new_turn_does_not_block_old_closed_observation() {
             )
             .unwrap();
         let before = view(&world, &budget, tid);
-        assert!(!before["session"]["active_turn"].is_null());
+        assert_eq!(view(&world, &budget, winners[0])["owned"], true);
+        assert_eq!(before["owned"], false);
         let observed = run(
             &world,
             &budget,
@@ -1219,10 +1229,7 @@ fn a_live_new_turn_does_not_block_old_closed_observation() {
                 .any(|r| r["type"] == "history" && r.to_string().contains("second"))
         );
         let still = view(&world, &budget, tid);
-        assert_eq!(
-            still["session"]["active_turn"],
-            before["session"]["active_turn"]
-        );
+        assert_eq!(view(&world, &budget, winners[0])["owned"], true);
         assert_eq!(still["selected_turn"], old);
         gate.release_next(budget.cap_timeout(Duration::from_secs(30)))
             .unwrap();
@@ -1369,16 +1376,10 @@ fn frozen_tls_roots_and_policies_are_isolated_between_concurrent_turns() {
         }
         let ta = detail(&world, &budget, &mut evidence, FIRST);
         let tb = detail(&world, &budget, &mut evidence, SECOND);
-        assert_eq!(
-            ta["steps"][0]["state"]["slots"][0]["state"]["outcome"],
-            "succeeded"
-        );
-        assert_eq!(
-            ta["steps"][0]["state"]["slots"][1]["state"]["outcome"],
-            "failed"
-        );
+        assert_eq!(ta["steps"][0]["slots"][0]["outcome"], "succeeded");
+        assert_eq!(ta["steps"][0]["slots"][1]["outcome"], "failed");
         // 跨根请求被策略拒绝：结局是 Failed，错误码属于 Validation/Permission/Guard 错误族。
-        let refused = &tb["steps"][0]["state"]["slots"][0]["state"];
+        let refused = &tb["steps"][0]["slots"][0];
         assert_eq!(refused["outcome"], "failed");
         assert!(
             matches!(
@@ -1396,16 +1397,16 @@ fn frozen_tls_roots_and_policies_are_isolated_between_concurrent_turns() {
             ),
             "{refused}"
         );
-        let own = &ta["steps"][0]["state"]["slots"][0]["state"]["evidence"]["value"]["effects"]["effects"]
-            [0]["network"];
+        let own =
+            &ta["steps"][0]["slots"][0]["evidence"]["value"]["effects"]["effects"][0]["network"];
         assert_eq!(own["transport"]["tls"]["state"], "established");
         assert_eq!(own["http_status"], 200);
-        let cross = &ta["steps"][0]["state"]["slots"][1]["state"]["evidence"]["value"]["effects"]["effects"]
-            [0]["network"];
+        let cross =
+            &ta["steps"][0]["slots"][1]["evidence"]["value"]["effects"]["effects"][0]["network"];
         assert_eq!(cross["transport"]["tls"]["state"], "failed");
         assert_eq!(cross["failure_phase"], "tls");
-        let policy = &tb["steps"][0]["state"]["slots"][0]["state"]["evidence"]["value"]["denied"]["denied"]
-            [0]["network"];
+        let policy =
+            &tb["steps"][0]["slots"][0]["evidence"]["value"]["denied"]["denied"][0]["network"];
         assert_eq!(policy["policy_verdict"], "denied");
         assert_eq!(policy["resolution"], "not_attempted");
         assert_eq!(policy["transport"]["tls"]["state"], "not_attempted");
@@ -1618,8 +1619,8 @@ fn global_turn_identity_rejects_a_different_session_without_dispatch() {
         assert_eq!(detail(&world, &budget, &mut evidence, FIRST), a);
         assert_eq!(detail(&world, &budget, &mut evidence, SECOND), b);
         assert_eq!(server.captured_requests().len(), 4);
-        let inv_a = &a["steps"][0]["state"]["slots"][0]["invocation_id"];
-        let inv_b = &b["steps"][0]["state"]["slots"][0]["invocation_id"];
+        let inv_a = &a["steps"][0]["slots"][0]["invocation_id"];
+        let inv_b = &b["steps"][0]["slots"][0]["invocation_id"];
         assert_ne!(inv_a, inv_b);
         evidence.record_captures(server.captured_requests());
     }));

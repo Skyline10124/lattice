@@ -2,15 +2,22 @@ use super::*;
 use serde_json::json;
 
 fn terminal(outcome: &str, notice: Value) -> Value {
+    let end = if outcome == "completed" {
+        json!({"end":"finish"})
+    } else {
+        json!({"end":"stop","cause":{"cause":if outcome=="cancelled" {"cancelled"} else {"process_exit"}}})
+    };
+    let progress = json!({"progress":"closed","end":end});
     json!({"type":format!("turn_{outcome}"),"turn":{"session_id":"s","turn_id":"t"},
-        "step":{"key":{"turn_id":"t","ordinal":0},"attempts":[],
-            "state":{"state":"closed","end":if outcome=="completed" {json!({"end":"finish","node":2})} else {json!({"end":"stop","node":null,"cause":if outcome=="cancelled" {"cancelled"}else{"process_exit"}})},"slots":[]}},
-        "summary":{"outcome":outcome,"notice":notice}})
+        "step":{"node":2,"key":{"turn_id":"t","ordinal":0},"attempts":[],"progress":progress,
+            "end":end,"slots":[],"updated_at":"2026-09-27T00:00:01Z"},
+        "summary":{"outcome":outcome,"notice":notice,"progress":progress}})
 }
 fn history() -> Value {
+    let summary = terminal("completed", Value::Null)["summary"].clone();
     json!({"type":"history","history":{"anchor":{"session_id":"s","head":2},"entries":[
-        {"node":1,"agent_name":"reader","content":{"type":"user_message","parent":0,"turn_id":"t","message":{"parts":[]}}},
-        {"node":2,"agent_name":"reader","content":{"type":"step","parent":1,"turn_id":"t","step_ordinal":0,"content":{"assistant":{"parts":[]},"results":[]}}}
+        {"node":1,"agent_name":"reader","summary":summary,"retries":[],"content":{"kind":"user_message","parent":0,"turn_id":"t","message":{"parts":[]}}},
+        {"node":2,"agent_name":"reader","summary":summary,"retries":[],"content":{"kind":"step","parent":1,"turn_id":"t","step_ordinal":0,"reply":{"parts":[]},"slots":[],"progress":summary["progress"]}}
     ]}})
 }
 fn parse(values: &[Value]) -> SendOutcome {
@@ -28,7 +35,7 @@ fn parse(values: &[Value]) -> SendOutcome {
 #[test]
 fn r2_send_exit_code_accounts_for_outcome_and_delivery() {
     let done = terminal("completed", Value::Null);
-    let snapshot = json!({"type":"snapshot","view":{"session":{"session_id":"s","current":2},"history":{"session_id":"s","head":2},"selected_turn":{"session_id":"s","turn_id":"t","summary":done["summary"],"steps":[done["step"].clone()]}}});
+    let snapshot = json!({"type":"snapshot","view":{"owned":false,"session":{"session_id":"s","current":2},"history":{"session_id":"s","head":2},"selected_turn":{"session_id":"s","turn_id":"t","summary":done["summary"],"steps":[done["step"].clone()]}}});
     let mut mismatched_snapshot = snapshot.clone();
     mismatched_snapshot["view"]["history"]["head"] = json!(3);
     mismatched_snapshot["view"]["session"]["current"] = json!(3);
@@ -111,7 +118,7 @@ fn r2_send_exit_code_accounts_for_outcome_and_delivery() {
 
 #[test]
 fn r2_rejects_bad_summary_in_event_and_snapshot() {
-    for summary in [
+    for mut summary in [
         json!({"outcome":"completed"}),
         json!({"outcome":"completed","notice":{"level":"info","text":"wrong"}}),
         json!({"outcome":"failed","notice":null}),
@@ -121,8 +128,9 @@ fn r2_rejects_bad_summary_in_event_and_snapshot() {
         json!({"outcome":"future","notice":null}),
     ] {
         let mut event = terminal("completed", Value::Null);
+        summary["progress"] = event["step"]["progress"].clone();
         event["summary"] = summary.clone();
-        let snapshot = json!({"type":"snapshot","view":{"session":{"session_id":"s","current":2,"active_turn":null},"history":{"session_id":"s","head":2},"selected_turn":{"turn_id":"t","session_id":"s","summary":summary,"steps":[event["step"].clone()]}}});
+        let snapshot = json!({"type":"snapshot","view":{"owned":false,"session":{"session_id":"s","current":2},"history":{"session_id":"s","head":2},"selected_turn":{"turn_id":"t","session_id":"s","summary":summary,"steps":[event["step"].clone()]}}});
         for value in [event, snapshot] {
             let result = parse(&[value]);
             assert_eq!(

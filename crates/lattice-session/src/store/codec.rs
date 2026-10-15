@@ -10,11 +10,30 @@ use std::collections::BTreeMap;
 pub(super) const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 pub(super) const SESSIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("sessions");
 pub(super) const NODES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("nodes");
-pub(super) const TURNS: TableDefinition<&str, &[u8]> = TableDefinition::new("turns");
-pub(super) const STEPS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("steps");
+pub(super) const CONFIGS: TableDefinition<&str, &[u8]> = TableDefinition::new("configs");
+pub(super) const TURN_INDEX: TableDefinition<&str, &[u8]> = TableDefinition::new("turn_index");
 pub(super) const INDEX: TableDefinition<&str, &[u8]> = TableDefinition::new("invocation_index");
 pub(super) const CHANGES: TableDefinition<u64, &[u8]> = TableDefinition::new("invocation_changes");
-const VERSION: u32 = 1;
+pub(super) const VERSION: u32 = 2;
+
+pub(super) fn attach_path<T>(path: &std::path::Path, result: Result<T>) -> Result<T> {
+    result.map_err(|err| match err {
+        StoreError::UnsupportedVersion {
+            path: existing,
+            table,
+            key,
+            found,
+            supported,
+        } if existing.as_os_str().is_empty() => StoreError::UnsupportedVersion {
+            path: path.to_path_buf(),
+            table,
+            key,
+            found,
+            supported,
+        },
+        other => other,
+    })
+}
 
 pub(super) fn canonical<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     serde_json::to_value(value)
@@ -41,6 +60,7 @@ pub(super) fn decode<T: DeserializeOwned + Serialize>(
     let version = u32::from_be_bytes(head.try_into().expect("four bytes"));
     if version != VERSION {
         return Err(StoreError::UnsupportedVersion {
+            path: PathBuf::new(),
             table: table.into(),
             key: key.into(),
             found: version,
@@ -138,24 +158,11 @@ pub(super) fn decode_node_key(key: &[u8]) -> Result<(SessionId, NodeId)> {
         )),
     ))
 }
-pub(super) fn step_key(key: StepKey) -> [u8; 40] {
-    let mut bytes = [0; 40];
-    bytes[..36].copy_from_slice(key.turn_id.to_string().as_bytes());
-    bytes[36..].copy_from_slice(&key.ordinal.to_be_bytes());
-    bytes
+pub(super) fn config_key(digest: &[u8; 32]) -> String {
+    hex_digest::encode_hex(digest)
 }
-pub(super) fn decode_step_key(key: &[u8]) -> Result<StepKey> {
-    if key.len() != 40 {
-        return Err(corrupt("steps", "key", "invalid key length"));
-    }
-    let turn_id = std::str::from_utf8(&key[..36])
-        .ok()
-        .and_then(|s| TurnId::parse(s).ok())
-        .ok_or_else(|| corrupt("steps", "key", "invalid turn key"))?;
-    Ok(StepKey {
-        turn_id,
-        ordinal: u32::from_be_bytes(key[36..].try_into().expect("four bytes")),
-    })
+pub(super) fn decode_config_key(key: &str) -> Result<[u8; 32]> {
+    hex_digest::decode_hex(key).ok_or_else(|| corrupt("configs", "key", "invalid config digest"))
 }
 pub(super) fn table_error(e: redb::TableError) -> StoreError {
     match e {
@@ -174,10 +181,10 @@ pub(super) struct Records {
     pub node_tip: Option<NodeId>,
     pub sessions: BTreeMap<SessionId, SessionRecord>,
     pub nodes: BTreeMap<(SessionId, NodeId), Node>,
-    pub turns: BTreeMap<TurnId, TurnRecord>,
-    pub steps: BTreeMap<StepKey, StepRecord>,
+    pub configs: BTreeMap<[u8; 32], StoredTurnConfig>,
+    pub turn_index: BTreeMap<TurnId, NodeRef>,
     pub index: BTreeMap<InvocationId, InvocationIndexEntry>,
-    pub changes: BTreeMap<ChangeSeq, InvocationChange>,
+    pub changes: BTreeMap<ChangeSeq, StoredInvocationChange>,
     pub last_change: ChangeSeq,
 }
 
@@ -203,6 +210,7 @@ macro_rules! load_records {
         )?;
         if version != VERSION {
             return Err(StoreError::UnsupportedVersion {
+                path: PathBuf::new(),
                 table: "meta".into(),
                 key: "store_format_version".into(),
                 found: version,
@@ -228,23 +236,18 @@ macro_rules! load_records {
                 decode("nodes", &format!("{}/{}", key.0, key.1.0), v.value())?,
             );
         }
-        for entry in $tx.open_table(TURNS).map_err(table_error)?.iter()? {
+        for entry in $tx.open_table(CONFIGS).map_err(table_error)?.iter()? {
             let (k, v) = entry?;
-            let id =
-                TurnId::parse(k.value()).map_err(|_| corrupt("turns", "key", "invalid turn id"))?;
-            r.turns.insert(id, decode("turns", k.value(), v.value())?);
+            let digest = decode_config_key(k.value())?;
+            r.configs
+                .insert(digest, decode("configs", k.value(), v.value())?);
         }
-        for entry in $tx.open_table(STEPS).map_err(table_error)?.iter()? {
+        for entry in $tx.open_table(TURN_INDEX).map_err(table_error)?.iter()? {
             let (k, v) = entry?;
-            let key = decode_step_key(k.value())?;
-            r.steps.insert(
-                key,
-                decode(
-                    "steps",
-                    &format!("{}/{}", key.turn_id, key.ordinal),
-                    v.value(),
-                )?,
-            );
+            let id = TurnId::parse(k.value())
+                .map_err(|_| corrupt("turn_index", "key", "invalid turn id"))?;
+            r.turn_index
+                .insert(id, decode("turn_index", k.value(), v.value())?);
         }
         for entry in $tx.open_table(INDEX).map_err(table_error)?.iter()? {
             let (k, v) = entry?;
@@ -283,8 +286,8 @@ pub(super) fn initialize(tx: &redb::WriteTransaction) -> Result<()> {
     }
     tx.open_table(SESSIONS).map_err(table_error)?;
     tx.open_table(NODES).map_err(table_error)?;
-    tx.open_table(TURNS).map_err(table_error)?;
-    tx.open_table(STEPS).map_err(table_error)?;
+    tx.open_table(CONFIGS).map_err(table_error)?;
+    tx.open_table(TURN_INDEX).map_err(table_error)?;
     tx.open_table(INDEX).map_err(table_error)?;
     tx.open_table(CHANGES).map_err(table_error)?;
     Ok(())
@@ -313,18 +316,21 @@ pub(super) fn persist(
         }
     }
     {
-        let mut t = tx.open_table(TURNS).map_err(table_error)?;
-        for (k, v) in &after.turns {
-            if before.turns.get(k) != Some(v) {
-                t.insert(k.to_string().as_str(), encode(v)?.as_slice())?;
+        let mut t = tx.open_table(CONFIGS).map_err(table_error)?;
+        for (k, v) in &after.configs {
+            if before.configs.get(k) != Some(v) {
+                let key = config_key(k);
+                if t.get(key.as_str())?.is_none() {
+                    t.insert(key.as_str(), encode(v)?.as_slice())?;
+                }
             }
         }
     }
     {
-        let mut t = tx.open_table(STEPS).map_err(table_error)?;
-        for (k, v) in &after.steps {
-            if before.steps.get(k) != Some(v) {
-                t.insert(step_key(*k).as_slice(), encode(v)?.as_slice())?;
+        let mut t = tx.open_table(TURN_INDEX).map_err(table_error)?;
+        for (k, v) in &after.turn_index {
+            if before.turn_index.get(k) != Some(v) {
+                t.insert(k.to_string().as_str(), encode(v)?.as_slice())?;
             }
         }
     }
@@ -366,10 +372,10 @@ pub(super) fn replace_all_for_test(tx: &redb::WriteTransaction, r: &Records) -> 
     tx.open_table(NODES)
         .map_err(table_error)?
         .retain(|_, _| false)?;
-    tx.open_table(TURNS)
+    tx.open_table(CONFIGS)
         .map_err(table_error)?
         .retain(|_, _| false)?;
-    tx.open_table(STEPS)
+    tx.open_table(TURN_INDEX)
         .map_err(table_error)?
         .retain(|_, _| false)?;
     tx.open_table(INDEX)

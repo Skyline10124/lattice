@@ -129,8 +129,6 @@ impl ReservedClient {
                         model: "test".into(),
                         provider: "openai_compatible".into(),
                         system_prompt: None,
-                        profile_snapshot_json: "{}".into(),
-                        policy_snapshot_json: "{}".into(),
                         catalog: self.catalog.clone(),
                         limits: TurnExecutionLimits {
                             timeout_secs: 300,

@@ -12,21 +12,7 @@ use redb::ReadableTable;
 use std::collections::BTreeSet;
 
 impl Records {
-    pub(super) fn turn_steps(&self, t: TurnId) -> Vec<StepRecord> {
-        self.steps
-            .range(
-                StepKey {
-                    turn_id: t,
-                    ordinal: 0,
-                }..=StepKey {
-                    turn_id: t,
-                    ordinal: u32::MAX,
-                },
-            )
-            .map(|(_, s)| s.clone())
-            .collect()
-    }
-    pub(super) fn next_node(&self, s: SessionId) -> Result<NodeId> {
+    pub(super) fn max_node(&self, s: SessionId) -> Option<NodeId> {
         self.nodes
             .range((s, NodeId(0))..=(s, NodeId(u64::MAX)))
             .next_back()
@@ -34,67 +20,173 @@ impl Records {
             .into_iter()
             .chain(self.node_tip)
             .max()
+    }
+
+    pub(super) fn next_node(&self, s: SessionId) -> Result<NodeId> {
+        self.max_node(s)
             .map_or(Ok(NodeId(0)), |n| next_sequence(n.0, "node").map(NodeId))
     }
-    pub(super) fn durable(&self, s: SessionId, t: TurnId) -> Result<DurableTurnState> {
-        let session = self
-            .sessions
-            .get(&s)
-            .ok_or_else(|| missing("session", s))?
-            .clone();
-        let turn = self
-            .turns
+
+    pub(super) fn unclosed_turn(&self, s: SessionId) -> Option<TurnId> {
+        let tip = self.max_node(s)?;
+        if tip == NodeId(0) {
+            return None;
+        }
+        match self.nodes.get(&(s, tip))? {
+            Node::Step {
+                turn_id, progress, ..
+            } if !progress.is_closed() => Some(*turn_id),
+            _ => None,
+        }
+    }
+
+    pub(super) fn turn_steps(&self, s: SessionId, t: TurnId) -> Result<Vec<(NodeId, Node)>> {
+        let user_ref = self
+            .turn_index
             .get(&t)
-            .filter(|t| t.session_id == s)
-            .ok_or_else(|| missing("turn", t))?
-            .clone();
-        Ok(DurableTurnState {
-            session,
-            turn,
-            steps: self.turn_steps(t),
-            next_node: self.next_node(s)?,
+            .filter(|r| r.session_id == s)
+            .ok_or_else(|| missing("turn", t))?;
+        let start = user_ref.node.0.saturating_add(1);
+        let mut steps = Vec::new();
+        for ((_, n), node) in self.nodes.range((s, NodeId(start))..=(s, NodeId(u64::MAX))) {
+            if matches!(node, Node::UserMessage { .. } | Node::Root) {
+                break;
+            }
+            steps.push((*n, node.clone()));
+        }
+        Ok(steps)
+    }
+
+    pub(super) fn turn_config(&self, s: SessionId, t: TurnId) -> Result<FrozenTurnConfig> {
+        let user_ref = self
+            .turn_index
+            .get(&t)
+            .filter(|r| r.session_id == s)
+            .ok_or_else(|| missing("turn", t))?;
+        let Some(Node::UserMessage {
+            agent_name,
+            model,
+            provider,
+            limits,
+            config_digest,
+            ..
+        }) = self.nodes.get(&(s, user_ref.node))
+        else {
+            return Err(corrupt(
+                "nodes",
+                &format!("{s}/{}", user_ref.node.0),
+                "missing turn user node",
+            ));
+        };
+        let stored = self.configs.get(config_digest).ok_or_else(|| {
+            corrupt(
+                "configs",
+                &codec::config_key(config_digest),
+                "missing referenced config",
+            )
+        })?;
+        Ok(FrozenTurnConfig {
+            agent_name: agent_name.clone(),
+            model: model.clone(),
+            provider: provider.clone(),
+            system_prompt: stored.system_prompt.clone(),
+            catalog: stored.catalog.clone(),
+            limits: *limits,
         })
     }
-    fn running(&self, s: SessionId, t: TurnId) -> Result<DurableTurnState> {
-        let state = self.durable(s, t)?;
-        if !matches!(state.turn.state, TurnState::Running) || state.session.active_turn != Some(t) {
-            return Err(transition(t, "turn is not running"));
-        }
-        Ok(state)
+
+    pub(super) fn turn_input(&self, s: SessionId, t: TurnId) -> Result<String> {
+        let user_ref = self
+            .turn_index
+            .get(&t)
+            .filter(|r| r.session_id == s)
+            .ok_or_else(|| missing("turn", t))?;
+        let Some(Node::UserMessage { message, .. }) = self.nodes.get(&(s, user_ref.node)) else {
+            return Err(corrupt(
+                "nodes",
+                &format!("{s}/{}", user_ref.node.0),
+                "missing turn user node",
+            ));
+        };
+        let Some(MessagePart {
+            semantic: MessageSemantic::Text { text },
+            ..
+        }) = message.parts.first()
+        else {
+            return Err(corrupt(
+                "nodes",
+                &format!("{s}/{}", user_ref.node.0),
+                "invalid user message parts",
+            ));
+        };
+        Ok(text.clone())
     }
+
+    fn active_step(&self, s: SessionId, t: TurnId) -> Result<(NodeId, FrozenTurnConfig, Node)> {
+        let session = self.sessions.get(&s).ok_or_else(|| missing("session", s))?;
+        let config = self.turn_config(s, t)?;
+        let steps = self.turn_steps(s, t)?;
+        let (node_id, step) = steps
+            .last()
+            .ok_or_else(|| transition(t, "turn has no steps"))?
+            .clone();
+        let Node::Step { progress, .. } = &step else {
+            return Err(transition(t, "turn tip is not a step"));
+        };
+        if progress.is_closed() || session.current != node_id || self.max_node(s) != Some(node_id) {
+            return Err(transition(t, "step is not the mutable session tip"));
+        }
+        Ok((node_id, config, step))
+    }
+
     fn requesting(
         &self,
         s: SessionId,
         key: ModelAttemptKey,
-    ) -> Result<(DurableTurnState, StepRecord)> {
-        let state = self.running(s, key.turn_id)?;
-        let step=state.steps.last().filter(|r|r.key.ordinal==key.model_step_ordinal&&matches!(r.state,StepState::Active {active:ActiveStep::Requesting {attempt}} if attempt==key.attempt_ordinal)).ok_or_else(||transition(key.turn_id,"request key does not match active attempt"))?.clone();
-        Ok((state, step))
+    ) -> Result<(NodeId, FrozenTurnConfig, Node)> {
+        let (node_id, config, step) = self.active_step(s, key.turn_id)?;
+        let Node::Step {
+            step_ordinal,
+            progress,
+            attempts,
+            ..
+        } = &step
+        else {
+            unreachable!()
+        };
+        let sent_matches = attempts.last().is_some_and(|a| {
+            attempts.len() == key.attempt_ordinal as usize + 1
+                && matches!(a.progress, AttemptProgress::Sent)
+        });
+        if *step_ordinal != key.model_step_ordinal
+            || *progress != StepProgress::Requesting
+            || !sent_matches
+        {
+            return Err(transition(
+                key.turn_id,
+                "request key does not match active sent attempt",
+            ));
+        }
+        Ok((node_id, config, step))
     }
-    fn executing(&self, s: SessionId, key: StepKey) -> Result<(DurableTurnState, StepRecord)> {
-        let state = self.running(s, key.turn_id)?;
-        let step = state
-            .steps
-            .last()
-            .filter(|r| {
-                r.key == key
-                    && matches!(
-                        r.state,
-                        StepState::Active {
-                            active: ActiveStep::Executing { .. }
-                        }
-                    )
-            })
-            .ok_or_else(|| transition(key.turn_id, "step is not executing"))?
-            .clone();
-        Ok((state, step))
+
+    fn executing(&self, s: SessionId, key: StepKey) -> Result<(NodeId, FrozenTurnConfig, Node)> {
+        let (node_id, config, step) = self.active_step(s, key.turn_id)?;
+        let Node::Step {
+            step_ordinal,
+            progress,
+            ..
+        } = &step
+        else {
+            unreachable!()
+        };
+        if *step_ordinal != key.ordinal || *progress != StepProgress::Executing {
+            return Err(transition(key.turn_id, "step is not executing"));
+        }
+        Ok((node_id, config, step))
     }
+
     fn change(&mut self, slot: &InvocationSlot) -> Result<()> {
-        let project = self
-            .turns
-            .get(&slot.binding.identity.turn_id)
-            .ok_or_else(|| missing("turn", slot.binding.identity.turn_id))?
-            .project_store_key;
         self.last_change = ChangeSeq(next_sequence(self.last_change.0, "change")?);
         self.index.insert(
             slot.binding.invocation_id,
@@ -105,49 +197,41 @@ impl Records {
         );
         self.changes.insert(
             self.last_change,
-            InvocationChange {
+            StoredInvocationChange {
                 sequence: self.last_change,
-                project_store_key: project,
-                row: read::operator(slot),
+                invocation_id: slot.binding.invocation_id,
+                stage: validate::stage(&slot.progress),
             },
         );
         Ok(())
     }
-    fn apply_closure(&mut self, s: SessionId, w: ClosureWrites) -> Result<ClosedStep> {
-        for entry in w.changed_invocations {
-            self.change(&InvocationSlot {
-                binding: entry.binding,
-                state: SlotState::Terminal(entry.terminal),
+
+    fn closed_step(
+        &self,
+        s: SessionId,
+        t: TurnId,
+        step_node: NodeId,
+        next_node: Option<NodeRef>,
+    ) -> Result<ClosedStep> {
+        let detail = self.turn_detail(s, t)?;
+        let step = detail
+            .steps
+            .into_iter()
+            .find(|step| step.node == step_node)
+            .ok_or_else(|| {
+                corrupt(
+                    "nodes",
+                    &format!("{s}/{}", step_node.0),
+                    "closed step missing",
+                )
             })?;
-        }
-        let node = w.node.as_ref().map(|(node, _)| NodeRef {
-            session_id: s,
-            node: *node,
-        });
-        if let Some((n, value)) = w.node
-            && self.nodes.insert((s, n), value).is_some()
-        {
-            return Err(corrupt("nodes", &s.to_string(), "closure overwrites node"));
-        }
-        let summary = close::summary(&w.turn_state);
-        self.turns
-            .get_mut(&w.closed_step.key.turn_id)
-            .ok_or_else(|| missing("turn", w.closed_step.key.turn_id))?
-            .state = w.turn_state;
-        let session = self
-            .sessions
-            .get_mut(&s)
-            .ok_or_else(|| missing("session", s))?;
-        session.current = w.session_current;
-        session.updated_at = w.session_updated_at;
-        session.active_turn = None;
-        self.steps.insert(w.closed_step.key, w.closed_step.clone());
         Ok(ClosedStep {
-            record: w.closed_step,
-            node,
-            summary,
+            step,
+            next_node,
+            summary: detail.summary,
         })
     }
+
     fn touch(&mut self, s: SessionId, now: Timestamp) -> Result<()> {
         self.sessions
             .get_mut(&s)
@@ -169,14 +253,15 @@ impl SessionStore {
         let mut disabled = self.execution_health()?;
         let mut tx = self.db.begin_write()?;
         tx.set_durability(redb::Durability::Immediate)?;
-        let (before, scope) = local::write(&tx, lock.session_id, selection)?;
+        let (before, scope) =
+            codec::attach_path(&self.path, local::write(&tx, lock.session_id, selection))?;
         let mut after = before.clone();
         let value = f(&mut after, &tx)?;
         validate::local(&after, &scope)?;
         if before == after {
             return Ok(value);
         }
-        codec::persist(&tx, &before, &after)?;
+        codec::attach_path(&self.path, codec::persist(&tx, &before, &after))?;
         #[cfg(test)]
         write_probe(WriteStage::BeforeCommit);
         #[cfg(any(test, feature = "test-utils", feature = "test-crash-barriers"))]
@@ -216,6 +301,7 @@ impl SessionStore {
             }
         }
     }
+
     pub fn accept_turn(
         &self,
         lock: &SessionExecutionLock,
@@ -223,16 +309,22 @@ impl SessionStore {
     ) -> Result<AcceptedTurn> {
         self.check_lock(lock, input.session.id())?;
         self.write(lock, Selection::Accept(input.turn_id), |r, _| {
-            if let Some(t) = r.turns.get(&input.turn_id) {
-                if t.original_input != input.input
-                    || t.project_store_key != input.project_store_key
-                    || matches!(input.session,AcceptSession::Existing {id} if id!=t.session_id)
+            if let Some(&node_ref) = r.turn_index.get(&input.turn_id) {
+                let s = node_ref.session_id;
+                let existing_session = r
+                    .sessions
+                    .get(&s)
+                    .ok_or_else(|| corrupt("sessions", &s.to_string(), "missing turn session"))?;
+                let existing_input = r.turn_input(s, input.turn_id)?;
+                if existing_input != input.input
+                    || existing_session.project_store_key != input.project_store_key
+                    || matches!(input.session, AcceptSession::Existing { id } if id != s)
                 {
                     return Err(StoreError::Conflict {
                         turn_id: input.turn_id,
                     });
                 }
-                return Ok(AcceptedTurn::Existing(t.clone()));
+                return Ok(AcceptedTurn::Existing(r.turn_detail(s, input.turn_id)?));
             }
             if input.input.len() > MAX_USER_INPUT_BYTES {
                 return Err(invalid("input", "user input exceeds byte bound"));
@@ -252,7 +344,6 @@ impl SessionStore {
                         session_id: s,
                         project_store_key: input.project_store_key,
                         current: NodeId(0),
-                        active_turn: None,
                         created_at: input.accepted_at,
                         updated_at: input.accepted_at,
                     },
@@ -263,36 +354,30 @@ impl SessionStore {
             if session.project_store_key != input.project_store_key {
                 return Err(invalid("project", "session binding mismatch"));
             }
-            if let Some(turn_id) = session.active_turn {
-                return Err(StoreError::RecoveryRequired { turn_id });
-            }
             if input.agent_selection == AgentSelection::Inherited
                 && r.current_agent(s)?.as_deref() != Some(input.config.agent_name.as_str())
             {
                 return Err(invalid("agent", "agent does not match current node"));
             }
             let parent = session.current;
-            let n = r.next_node(s)?;
-            let digest = input
-                .config
+            let user_node = r.next_node(s)?;
+            let step_node = next_sequence(user_node.0, "node").map(NodeId)?;
+            let stored = input.config.stored();
+            let config_digest = stored
                 .digest()
                 .map_err(|_| invalid("config", "cannot digest frozen configuration"))?;
-            let turn = TurnRecord {
-                turn_id: input.turn_id,
-                session_id: s,
-                user_node: n,
-                original_input: input.input.clone(),
-                project_store_key: input.project_store_key,
-                config: input.config,
-                config_digest: digest,
-                accepted_at: input.accepted_at,
-                state: TurnState::Running,
-            };
+            r.configs.entry(config_digest).or_insert(stored);
             r.nodes.insert(
-                (s, n),
+                (s, user_node),
                 Node::UserMessage {
                     parent,
                     turn_id: input.turn_id,
+                    accepted_at: input.accepted_at,
+                    agent_name: input.config.agent_name,
+                    model: input.config.model,
+                    provider: input.config.provider,
+                    limits: input.config.limits,
+                    config_digest,
                     message: NativeMessage::new(
                         MessageRole::User,
                         None,
@@ -302,14 +387,33 @@ impl SessionStore {
                     ),
                 },
             );
-            r.turns.insert(input.turn_id, turn.clone());
+            r.turn_index.insert(
+                input.turn_id,
+                NodeRef {
+                    session_id: s,
+                    node: user_node,
+                },
+            );
+            r.nodes.insert(
+                (s, step_node),
+                Node::Step {
+                    parent: user_node,
+                    turn_id: input.turn_id,
+                    step_ordinal: 0,
+                    progress: StepProgress::Reserved,
+                    attempts: Vec::new(),
+                    reply: None,
+                    slots: Vec::new(),
+                    updated_at: input.accepted_at,
+                },
+            );
             let session = r.sessions.get_mut(&s).expect("session exists");
-            session.current = n;
-            session.active_turn = Some(input.turn_id);
+            session.current = step_node;
             session.updated_at = input.accepted_at;
-            Ok(AcceptedTurn::Accepted(turn))
+            Ok(AcceptedTurn::Accepted(r.turn_detail(s, input.turn_id)?))
         })
     }
+
     pub fn start_request(
         &self,
         lock: &SessionExecutionLock,
@@ -317,33 +421,47 @@ impl SessionStore {
         now: Timestamp,
     ) -> Result<()> {
         self.write(lock, Selection::Turn(key.turn_id), |r, _| {
-            let state = r.running(lock.session_id, key.turn_id)?;
+            let (node_id, config, mut step) = r.active_step(lock.session_id, key.turn_id)?;
             if key.model_step_ordinal >= MAX_MODEL_STEPS
-                || key.attempt_ordinal >= state.turn.config.limits.max_model_attempts
+                || key.attempt_ordinal >= config.limits.max_model_attempts
             {
                 return Err(transition(key.turn_id, "request budget exhausted"));
             }
-            let mut record = close::closing_step(&state);
-            if key.model_step_ordinal != record.key.ordinal
-                || key.attempt_ordinal as usize != record.attempts.len()
-                || !matches!(
-                    record.state,
-                    StepState::Active {
-                        active: ActiveStep::RetryReady { .. }
-                    }
-                )
+            let Node::Step {
+                step_ordinal,
+                progress,
+                attempts,
+                updated_at,
+                ..
+            } = &mut step
+            else {
+                unreachable!()
+            };
+            let ready = match progress {
+                StepProgress::Reserved => attempts.is_empty(),
+                StepProgress::Requesting => {
+                    attempts.last().is_some_and(|a| a.retry_delay_ms.is_some())
+                }
+                _ => false,
+            };
+            if *step_ordinal != key.model_step_ordinal
+                || key.attempt_ordinal as usize != attempts.len()
+                || !ready
             {
                 return Err(transition(key.turn_id, "request sequence mismatch"));
             }
-            record.state = StepState::Active {
-                active: ActiveStep::Requesting {
-                    attempt: key.attempt_ordinal,
-                },
-            };
-            r.steps.insert(record.key, record);
+            *progress = StepProgress::Requesting;
+            attempts.push(AttemptRecord {
+                usage: None,
+                progress: AttemptProgress::Sent,
+                retry_delay_ms: None,
+            });
+            *updated_at = now;
+            r.nodes.insert((lock.session_id, node_id), step);
             r.touch(lock.session_id, now)
         })
     }
+
     pub fn stop_attempt(
         &self,
         lock: &SessionExecutionLock,
@@ -351,49 +469,66 @@ impl SessionStore {
         now: Timestamp,
     ) -> Result<AttemptStopResult> {
         validate::diagnostic(&input.cause, &input.diagnostic)?;
+        let retryable_cause = matches!(input.cause, StopCause::ProviderError { retryable: true });
+        if !retryable_cause && input.retry_delay_ms.is_some() {
+            return Err(invalid(
+                "retry_delay_ms",
+                "non-retryable stop cause must not carry retry delay",
+            ));
+        }
         self.write(lock, Selection::Turn(input.key.turn_id), |r, _| {
-            let (state, mut record) = r.requesting(lock.session_id, input.key)?;
-            if input.origin != validate::provider(&state.turn.config.provider)? {
+            let (node_id, config, mut step) = r.requesting(lock.session_id, input.key)?;
+            if input.origin != validate::provider(&config.provider)? {
                 return Err(invalid("origin", "attempt provider mismatch"));
             }
-            let retry = matches!(input.cause, StopCause::ProviderError { retryable: true })
-                && record.attempts.len() + 1 < state.turn.config.limits.max_model_attempts as usize;
-            record.attempts.push(AttemptRecord {
-                attempt: input.key.attempt_ordinal,
-                origin: input.origin,
-                usage: input.usage,
+            let Node::Step {
+                progress,
+                attempts,
+                updated_at,
+                ..
+            } = &mut step
+            else {
+                unreachable!()
+            };
+            let retry =
+                retryable_cause && attempts.len() < config.limits.max_model_attempts as usize;
+            if retry && input.retry_delay_ms.is_none() {
+                return Err(invalid(
+                    "retry_delay_ms",
+                    "retryable provider error requires retry delay",
+                ));
+            }
+            let last = attempts.last_mut().expect("sent attempt exists");
+            last.usage = input.usage;
+            last.progress = AttemptProgress::Ended {
                 end: AttemptEnd::Stopped {
                     cause: input.cause.clone(),
-                    diagnostic: input.diagnostic,
                 },
-            });
+                diagnostic: input.diagnostic,
+            };
+            last.retry_delay_ms = if retry { input.retry_delay_ms } else { None };
+            *updated_at = now;
             if retry {
-                let next_attempt = record.attempts.len() as u32;
-                record.state = StepState::Active {
-                    active: ActiveStep::RetryReady { next_attempt },
-                };
-                r.steps.insert(record.key, record);
+                let next_attempt = attempts.len() as u32;
+                r.nodes.insert((lock.session_id, node_id), step);
                 r.touch(lock.session_id, now)?;
                 Ok(AttemptStopResult::RetryReady { next_attempt })
             } else {
-                let w = close::closure(
-                    &state,
-                    record,
+                *progress = StepProgress::Closed {
+                    end: StepEnd::Stop { cause: input.cause },
+                };
+                r.nodes.insert((lock.session_id, node_id), step);
+                r.touch(lock.session_id, now)?;
+                Ok(AttemptStopResult::Closed(Box::new(r.closed_step(
+                    lock.session_id,
+                    input.key.turn_id,
+                    node_id,
                     None,
-                    Vec::new(),
-                    StepEnd::Stop {
-                        node: None,
-                        cause: input.cause,
-                    },
-                    Vec::new(),
-                    now,
-                )?;
-                Ok(AttemptStopResult::Closed(
-                    r.apply_closure(lock.session_id, w)?,
-                ))
+                )?)))
             }
         })
     }
+
     pub fn register_calls(
         &self,
         lock: &SessionExecutionLock,
@@ -410,8 +545,8 @@ impl SessionStore {
             ));
         }
         self.write(lock, Selection::Turn(reply.key.turn_id), |r, tx| {
-            let (state, mut record) = r.requesting(lock.session_id, reply.key)?;
-            if reply.origin != validate::provider(&state.turn.config.provider)?
+            let (node_id, config, mut step) = r.requesting(lock.session_id, reply.key)?;
+            if reply.origin != validate::provider(&config.provider)?
                 || reply
                     .message
                     .provider_origin
@@ -432,15 +567,13 @@ impl SessionStore {
             }
             let mut bindings = Vec::new();
             let mut parts = Vec::new();
-            let completed = close::completed(&reply, lock.session_id);
+            let completed = close::completed(&reply);
             for (ordinal, part) in reply.message.parts.into_iter().enumerate() {
                 let semantic = match part.semantic {
                     MessageSemantic::Text { text } => MessageSemantic::Text { text },
                     MessageSemantic::Reasoning { text } => MessageSemantic::Reasoning { text },
                     MessageSemantic::ToolCall { call } => {
-                        let entry = state
-                            .turn
-                            .config
+                        let entry = config
                             .catalog
                             .entries
                             .iter()
@@ -479,33 +612,45 @@ impl SessionStore {
             }
             let bound =
                 NativeMessage::new(reply.message.role, reply.message.provider_origin, parts);
-            let slots: Vec<_> = bindings
+            let new_slots: Vec<_> = bindings
                 .iter()
                 .map(|b| InvocationSlot {
                     binding: b.clone(),
-                    state: SlotState::Registered,
+                    progress: SlotProgress::Registered,
                 })
                 .collect();
-            for slot in &slots {
+            for slot in &new_slots {
                 r.change(slot)?;
             }
-            record.attempts.push(completed);
-            record.state = StepState::Active {
-                active: ActiveStep::Executing {
-                    reply: bound.clone(),
-                    slots,
-                },
+            let Node::Step {
+                progress,
+                attempts,
+                reply: step_reply,
+                slots,
+                updated_at,
+                ..
+            } = &mut step
+            else {
+                unreachable!()
             };
-            let key = record.key;
-            r.steps.insert(key, record);
+            *attempts.last_mut().expect("sent attempt exists") = completed;
+            *step_reply = Some(bound.clone());
+            *slots = new_slots;
+            *progress = StepProgress::Executing;
+            *updated_at = now;
+            r.nodes.insert((lock.session_id, node_id), step);
             r.touch(lock.session_id, now)?;
             Ok(RegisteredCalls {
-                key,
+                key: StepKey {
+                    turn_id: reply.key.turn_id,
+                    ordinal: reply.key.model_step_ordinal,
+                },
                 reply: bound,
                 bindings,
             })
         })
     }
+
     pub fn start_invocation(
         &self,
         lock: &SessionExecutionLock,
@@ -514,13 +659,42 @@ impl SessionStore {
     ) -> Result<StartedInvocation> {
         self.check_lock(lock, binding.identity.session_id)?;
         self.write(lock, Selection::Turn(binding.identity.turn_id), |r, _| {
-            let key=StepKey {turn_id:binding.identity.turn_id,ordinal:binding.identity.model_step_ordinal};let (_,mut step)=r.executing(lock.session_id,key)?;
-            let StepState::Active {active:ActiveStep::Executing {slots,..}}=&mut step.state else {unreachable!()};
-            let position=slots.iter().position(|s|!matches!(s.state,SlotState::Terminal(_))).ok_or_else(||transition(key.turn_id,"no unfinished slot"))?;
-            if slots[..position].iter().any(|s|matches!(&s.state,SlotState::Terminal(t) if close::stops_batch(&t.result.payload)))||slots[position].binding!=*binding||!matches!(slots[position].state,SlotState::Registered) {return Err(transition(key.turn_id,"invocation cannot start"));}
-            slots[position].state=SlotState::Started;r.change(&slots[position])?;r.steps.insert(key,step);r.touch(lock.session_id,now)?;Ok(StartedInvocation {binding:binding.clone()})
+            let key = StepKey {
+                turn_id: binding.identity.turn_id,
+                ordinal: binding.identity.model_step_ordinal,
+            };
+            let (node_id, _, mut step) = r.executing(lock.session_id, key)?;
+            let Node::Step {
+                slots, updated_at, ..
+            } = &mut step
+            else {
+                unreachable!()
+            };
+            let position = slots
+                .iter()
+                .position(|s| !matches!(s.progress, SlotProgress::Terminal { .. }))
+                .ok_or_else(|| transition(key.turn_id, "no unfinished slot"))?;
+            if slots[..position].iter().any(|s| {
+                matches!(
+                    &s.progress,
+                    SlotProgress::Terminal { result, .. } if close::stops_batch(&result.payload)
+                )
+            }) || slots[position].binding != *binding
+                || !matches!(slots[position].progress, SlotProgress::Registered)
+            {
+                return Err(transition(key.turn_id, "invocation cannot start"));
+            }
+            slots[position].progress = SlotProgress::Started;
+            r.change(&slots[position])?;
+            *updated_at = now;
+            r.nodes.insert((lock.session_id, node_id), step);
+            r.touch(lock.session_id, now)?;
+            Ok(StartedInvocation {
+                binding: binding.clone(),
+            })
         })
     }
+
     pub fn finish_invocation(
         &self,
         lock: &SessionExecutionLock,
@@ -537,10 +711,10 @@ impl SessionStore {
                 turn_id: address.message.turn_id,
                 ordinal: address.message.model_step_ordinal,
             };
-            let (_, mut step) = r.executing(lock.session_id, key)?;
-            let StepState::Active {
-                active: ActiveStep::Executing { slots, .. },
-            } = &mut step.state
+            let (node_id, _, mut step) = r.executing(lock.session_id, key)?;
+            let Node::Step {
+                slots, updated_at, ..
+            } = &mut step
             else {
                 unreachable!()
             };
@@ -548,22 +722,41 @@ impl SessionStore {
                 .iter_mut()
                 .find(|s| s.binding.invocation_id == input.invocation_id)
                 .ok_or_else(|| transition(key.turn_id, "invocation not in step"))?;
-            if !matches!(slot.state, SlotState::Started)
+            if !matches!(slot.progress, SlotProgress::Started)
                 || !matches!(input.terminal.evidence, InvocationEvidence::Recorded(_))
-                || matches!(input.terminal.result.payload, ResultPayload::NotExecuted)
+                || matches!(
+                    input.terminal.result.payload,
+                    ResultPayload::NotExecuted
+                        | ResultPayload::Indeterminate(IndeterminateCause::NoResult)
+                )
             {
                 return Err(transition(
                     key.turn_id,
                     "receipt requires a started invocation",
                 ));
             }
-            validate::terminal(&slot.binding, &input.terminal)?;
-            slot.state = SlotState::Terminal(input.terminal);
+            // 错误码到结局的映射在写入入口检查，读取直接使用已保存的结局。
+            if matches!(&input.terminal.result.payload, ResultPayload::Failed(e)
+                if matches!(e.code, lancet_protocol::CepErrorCode::CallCancelled | lancet_protocol::CepErrorCode::OutcomeIndeterminate))
+            {
+                return Err(invalid("terminal", "error belongs to a different outcome"));
+            }
+            validate::terminal(
+                &slot.binding,
+                &input.terminal.result,
+                &input.terminal.evidence,
+            )?;
+            slot.progress = SlotProgress::Terminal {
+                result: input.terminal.result,
+                evidence: input.terminal.evidence,
+            };
             r.change(slot)?;
-            r.steps.insert(key, step);
+            *updated_at = now;
+            r.nodes.insert((lock.session_id, node_id), step);
             r.touch(lock.session_id, now)
         })
     }
+
     pub fn close_step(
         &self,
         lock: &SessionExecutionLock,
@@ -581,8 +774,8 @@ impl SessionStore {
                 if reply.message.tool_calls().next().is_some() {
                     return Err(invalid("reply", "finish must have no calls"));
                 }
-                let (state, mut record) = r.requesting(lock.session_id, reply.key)?;
-                if reply.origin != validate::provider(&state.turn.config.provider)?
+                let (node_id, config, mut step) = r.requesting(lock.session_id, reply.key)?;
+                if reply.origin != validate::provider(&config.provider)?
                     || reply
                         .message
                         .provider_origin
@@ -590,138 +783,146 @@ impl SessionStore {
                 {
                     return Err(invalid("origin", "reply provider mismatch"));
                 }
-                record
-                    .attempts
-                    .push(close::completed(&reply, lock.session_id));
+                let completed = close::completed(&reply);
                 let message = reply
                     .message
                     .bind_zero_tool()
                     .map_err(|_| invalid("reply", "finish contains calls"))?;
-                let node = close::node_for(&state, &record, message, &[]);
-                let end = StepEnd::Finish { node: node.0 };
-                r.apply_closure(
-                    lock.session_id,
-                    close::closure(&state, record, Some(node), Vec::new(), end, Vec::new(), now)?,
-                )
-            }
-            CloseStep::Continue { key } => {
-                let (state, mut record) = r.executing(lock.session_id, key)?;
-                let StepState::Active {
-                    active: ActiveStep::Executing { reply, slots },
-                } = &record.state
+                let Node::Step {
+                    progress,
+                    attempts,
+                    reply: step_reply,
+                    updated_at,
+                    ..
+                } = &mut step
                 else {
                     unreachable!()
                 };
-                let invocations: Vec<_> = slots
+                *attempts.last_mut().expect("sent attempt exists") = completed;
+                *step_reply = Some(message);
+                *progress = StepProgress::Closed {
+                    end: StepEnd::Finish,
+                };
+                *updated_at = now;
+                r.nodes.insert((lock.session_id, node_id), step);
+                r.touch(lock.session_id, now)?;
+                r.closed_step(lock.session_id, turn, node_id, None)
+            }
+            CloseStep::Continue { .. } | CloseStep::StopExecuting { .. } => {
+                let (key, stop) = match input {
+                    CloseStep::Continue { key } => (key, None),
+                    CloseStep::StopExecuting { key, stop } => (key, Some(stop)),
+                    _ => unreachable!(),
+                };
+                let (node_id, _, mut step) = r.executing(lock.session_id, key)?;
+                let Node::Step {
+                    progress,
+                    slots,
+                    updated_at,
+                    ..
+                } = &mut step
+                else {
+                    unreachable!()
+                };
+                if let Some(stop) = stop
+                    && let Some(cause) = close::step_stop_cause(slots, stop)?
+                {
+                    *progress = StepProgress::Closed {
+                        end: StepEnd::Stop { cause },
+                    };
+                    *updated_at = now;
+                    r.nodes.insert((lock.session_id, node_id), step);
+                    r.touch(lock.session_id, now)?;
+                    return r.closed_step(lock.session_id, key.turn_id, node_id, None);
+                }
+                if slots
                     .iter()
-                    .map(|s| match &s.state {
-                        SlotState::Terminal(t) => Ok(ClosedInvocation {
-                            binding: s.binding.clone(),
-                            terminal: t.clone(),
-                        }),
-                        _ => Err(transition(key.turn_id, "cannot continue unfinished calls")),
-                    })
-                    .collect::<Result<_>>()?;
-                if first_stopping_cause(&invocations)?.is_some()
-                    || invocations
+                    .any(|s| !matches!(s.progress, SlotProgress::Terminal { .. }))
+                {
+                    return Err(transition(key.turn_id, "cannot continue unfinished calls"));
+                }
+                if close::first_stopping_cause(slots)?.is_some()
+                    || slots
                         .iter()
-                        .any(|s| close::stops_batch(&s.terminal.result.payload))
+                        .any(|s| close::stops_batch(&close::resolve_slot(s).0.payload))
                 {
                     return Err(transition(key.turn_id, "cannot continue stopping calls"));
                 }
-                let (node, value) = close::node_for(&state, &record, reply.clone(), &invocations);
-                record.state = StepState::Closed {
-                    end: StepEnd::Continue { node },
-                    invocations,
+                *progress = StepProgress::Closed {
+                    end: StepEnd::Continue,
                 };
-                r.nodes.insert((lock.session_id, node), value);
-                r.steps.insert(key, record.clone());
+                *updated_at = now;
+                r.nodes.insert((lock.session_id, node_id), step);
+                let next_node_id = r.next_node(lock.session_id)?;
+                // 确定结果的批次继续结束；外部停止写到下一步，同次提交保留已决定的原因。
+                let next_stop = stop.map(StopCause::from).or_else(|| {
+                    (key.ordinal + 1 == MAX_MODEL_STEPS).then_some(StopCause::ModelStepLimit)
+                });
+                r.nodes.insert(
+                    (lock.session_id, next_node_id),
+                    Node::Step {
+                        parent: node_id,
+                        turn_id: key.turn_id,
+                        step_ordinal: key.ordinal + 1,
+                        progress: match next_stop {
+                            Some(cause) => StepProgress::Closed {
+                                end: StepEnd::Stop { cause },
+                            },
+                            None => StepProgress::Reserved,
+                        },
+                        attempts: Vec::new(),
+                        reply: None,
+                        slots: Vec::new(),
+                        updated_at: now,
+                    },
+                );
                 r.sessions
                     .get_mut(&lock.session_id)
                     .expect("session exists")
-                    .current = node;
+                    .current = next_node_id;
                 r.touch(lock.session_id, now)?;
-                Ok(ClosedStep {
-                    record,
-                    node: Some(NodeRef {
-                        session_id: lock.session_id,
-                        node,
-                    }),
-                    summary: None,
-                })
-            }
-            CloseStep::StopExecuting { key, stop } => {
-                let (state, record) = r.executing(lock.session_id, key)?;
-                let StepState::Active {
-                    active: ActiveStep::Executing { reply, slots },
-                } = &record.state
-                else {
-                    unreachable!()
-                };
-                let (invocations, changed) = close::fill_slots(slots)?;
-                let Some(cause) = close::step_stop_cause(&invocations, stop)? else {
-                    return Err(transition(
-                        key.turn_id,
-                        "close Continue before stopping between requests",
-                    ));
-                };
-                let node = close::node_for(&state, &record, reply.clone(), &invocations);
-                let end = StepEnd::Stop {
-                    node: Some(node.0),
-                    cause,
-                };
-                r.apply_closure(
+                r.closed_step(
                     lock.session_id,
-                    close::closure(&state, record, Some(node), invocations, end, changed, now)?,
+                    key.turn_id,
+                    node_id,
+                    Some(NodeRef {
+                        session_id: lock.session_id,
+                        node: next_node_id,
+                    }),
                 )
             }
             CloseStep::StopBetweenRequests { turn_id, cause } => {
-                let state = r.running(lock.session_id, turn_id)?;
-                let record = close::closing_step(&state);
-                if !matches!(
-                    cause,
-                    StopCause::Cancelled | StopCause::Deadline | StopCause::ModelStepLimit
-                ) || !matches!(
-                    record.state,
-                    StepState::Active {
-                        active: ActiveStep::RetryReady { .. }
+                let (node_id, _, mut step) = r.active_step(lock.session_id, turn_id)?;
+                let Node::Step {
+                    progress,
+                    attempts,
+                    updated_at,
+                    ..
+                } = &mut step
+                else {
+                    unreachable!()
+                };
+                let between_ready = match progress {
+                    StepProgress::Reserved => attempts.is_empty(),
+                    StepProgress::Requesting => {
+                        attempts.last().is_some_and(|a| a.retry_delay_ms.is_some())
                     }
-                ) || cause == StopCause::ModelStepLimit && record.key.ordinal != MAX_MODEL_STEPS
-                {
+                    _ => false,
+                };
+                if !matches!(cause, StopCause::Cancelled | StopCause::Deadline) || !between_ready {
                     return Err(transition(turn_id, "invalid between-request stop"));
                 }
-                r.apply_closure(
-                    lock.session_id,
-                    close::closure(
-                        &state,
-                        record,
-                        None,
-                        Vec::new(),
-                        StepEnd::Stop { node: None, cause },
-                        Vec::new(),
-                        now,
-                    )?,
-                )
+                *progress = StepProgress::Closed {
+                    end: StepEnd::Stop { cause },
+                };
+                *updated_at = now;
+                r.nodes.insert((lock.session_id, node_id), step);
+                r.touch(lock.session_id, now)?;
+                r.closed_step(lock.session_id, turn_id, node_id, None)
             }
         })
     }
-    pub fn auto_close(
-        &self,
-        lock: &SessionExecutionLock,
-        turn: TurnId,
-        now: Timestamp,
-    ) -> Result<AutoCloseResult> {
-        self.write(lock, Selection::Turn(turn), |r, _| {
-            match plan_auto_close(&r.durable(lock.session_id, turn)?, now)? {
-                AutoClosePlan::AlreadyClosed { summary } => {
-                    Ok(AutoCloseResult::AlreadyClosed(summary))
-                }
-                AutoClosePlan::Close(w) => Ok(AutoCloseResult::Closed(
-                    r.apply_closure(lock.session_id, *w)?,
-                )),
-            }
-        })
-    }
+
     pub fn rewind(
         &self,
         lock: &SessionExecutionLock,
@@ -733,9 +934,6 @@ impl SessionStore {
                 .sessions
                 .get_mut(&lock.session_id)
                 .ok_or_else(|| missing("session", lock.session_id))?;
-            if let Some(turn_id) = s.active_turn {
-                return Err(StoreError::RecoveryRequired { turn_id });
-            }
             if !r.nodes.contains_key(&(lock.session_id, target)) {
                 return Err(missing("node", target.0));
             }

@@ -8,7 +8,7 @@
 use crate::app::Status;
 use lattice_api::local::{
     Acceptance, CancelStatus, ConnectionStatus, DetachReport, HistoryReadContext, HistoryReadError,
-    LocalError, Notice, NoticeLevel, PublicTurnOutcome, TurnId, TurnSummary,
+    LocalError, ModelAttemptKey, Notice, NoticeLevel, PublicTurnOutcome, TurnId, TurnSummary,
 };
 
 fn status(level: NoticeLevel, text: String) -> Status {
@@ -16,6 +16,7 @@ fn status(level: NoticeLevel, text: String) -> Status {
         level,
         text,
         closing: None,
+        retry: None,
     }
 }
 
@@ -155,7 +156,7 @@ pub(crate) fn observation_diagnostic_status(error: &LocalError) -> Status {
 pub(crate) fn orphaned_turn_status(turn_id: TurnId) -> Status {
     status(
         NoticeLevel::Warn,
-        format!("遗留 Turn {turn_id} 无人接管；发送新消息前后台会自动关闭崩溃遗留任务"),
+        format!("turn {turn_id} 的执行者已经消失，它停在已写入的进度；可以直接发送新消息或退回"),
     )
 }
 
@@ -178,17 +179,20 @@ pub(crate) fn handoff_status(line: &str) -> Status {
     status(NoticeLevel::Info, format!("历史交接：{line}"))
 }
 
-/// 重试提示沿用后端给出的等级；`attempt_ordinal` 从 0 起。
-pub(crate) fn retry_status(attempt_ordinal: u32, delay_ms: u64, notice: Notice) -> Status {
-    status(
-        notice.level,
-        format!(
+/// 重试提示沿用后端给出的等级；实时 `LlmRetry` 与历史带回的提示共用这一格式。
+/// `key` 是失败的那次尝试，`attempt_ordinal` 从 0 起。
+pub(crate) fn retry_status(key: ModelAttemptKey, delay_ms: u64, notice: Notice) -> Status {
+    Status {
+        level: notice.level,
+        text: format!(
             "第 {} 次请求失败，{} ms 后重试：{}",
-            attempt_ordinal.saturating_add(1),
+            key.attempt_ordinal.saturating_add(1),
             delay_ms,
             notice.text
         ),
-    )
+        closing: None,
+        retry: Some(key),
+    }
 }
 
 /// Turn 结局沿用 notice 的等级；Completed 没有 notice，按 Info。结局符号由渲染层添加。
@@ -205,11 +209,13 @@ pub(crate) fn closing_status(turn_id: TurnId, summary: TurnSummary) -> Status {
         level,
         text,
         closing: Some((turn_id, summary.outcome)),
+        retry: None,
     }
 }
 
 /// 仅格式化共同句柄交付的退出报告；五秒交接及其判定全部属于 LocalTurn。
-pub(crate) fn detach_lines(report: DetachReport) -> Vec<String> {
+/// `closing_shown` 表示这个 Turn 的结局已显示在对话记录中，不再重述。
+pub(crate) fn detach_lines(report: DetachReport, closing_shown: bool) -> Vec<String> {
     let mut lines = Vec::new();
     let identity = format!(
         "session {} turn {}",
@@ -250,9 +256,12 @@ pub(crate) fn detach_lines(report: DetachReport) -> Vec<String> {
         ));
     }
     if let Some(state) = report.state {
+        // 未关闭且仍有 Owner 时 summary 只说明此刻停下会得到什么，不是结局。
         if let Some(turn) = &state.view.selected_turn
-            && let Some(summary) = &turn.summary
+            && (turn.summary.progress.is_closed() || !state.view.owned)
+            && !closing_shown
         {
+            let summary = &turn.summary;
             let word = outcome_word(&summary.outcome);
             lines.push(match &summary.notice {
                 Some(notice) => format!("Turn {} {}：{}", turn.turn_id, word, notice.text),

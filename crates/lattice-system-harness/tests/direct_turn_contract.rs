@@ -119,7 +119,7 @@ fn direct_turn_completed_reopen_contract() {
             list.is_clean_exit(0)
                 && listed.as_array().unwrap().len() == 1
                 && listed[0]["node_count"] == 5
-                && listed[0]["active_turn"].is_null(),
+                && listed[0]["unclosed_turn"].is_null(),
             "list reflects one closed Session",
         )?;
         let error: Value = serde_json::from_slice(&missing.stdout).unwrap();

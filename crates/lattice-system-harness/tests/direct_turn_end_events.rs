@@ -12,7 +12,7 @@ use support::{
 
 fn is_summary_snapshot(event: &TurnEventLine) -> bool {
     matches!(event, TurnEventLine::Unknown { type_name, raw }
-        if type_name == "snapshot" && raw["view"]["selected_turn"]["summary"].is_object())
+        if type_name == "snapshot" && (raw["view"]["selected_turn"]["summary"]["progress"]["progress"] == "closed" || (raw["view"]["owned"] == false && raw["view"]["selected_turn"].is_object())))
 }
 
 fn event_sequence(events: &[TurnEventLine]) -> String {

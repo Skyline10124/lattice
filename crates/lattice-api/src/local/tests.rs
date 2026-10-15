@@ -199,8 +199,29 @@ async fn detached_owners_share_acceptance_overlap_and_drain_with_fixed_reload() 
         .query(Some(a.session_id), Some(first.turn_id))
         .await
         .unwrap();
-    assert!(view.selected_turn.as_ref().unwrap().summary.is_none());
-    assert_eq!(client.log(a.session_id).await.unwrap().nodes.len(), 2);
+    assert!(
+        !view
+            .selected_turn
+            .as_ref()
+            .unwrap()
+            .summary
+            .progress
+            .is_closed()
+    );
+    let log = client.log(a.session_id).await.unwrap();
+    assert_eq!(log.nodes.len(), 3);
+    assert_eq!(log.unclosed_turn, Some(first.turn_id));
+    assert_eq!(
+        client
+            .list_sessions()
+            .await
+            .unwrap()
+            .iter()
+            .find(|row| row.session_id == a.session_id)
+            .unwrap()
+            .unclosed_turn,
+        Some(first.turn_id)
+    );
     assert_eq!(
         client
             .rewind(a.session_id, NodeId(0), root.canonical_path().into())
@@ -234,8 +255,9 @@ async fn detached_owners_share_acceptance_overlap_and_drain_with_fixed_reload() 
         .unwrap();
     assert_eq!(pending_history.entries.len(), 1);
     assert_eq!(
-        pending_history.entries[0].summary, None,
-        "进行中的 Turn 没有结局"
+        pending_history.entries[0].summary,
+        view.selected_turn.as_ref().unwrap().summary,
+        "历史携带读取时的进度与结论"
     );
     assert!(
         matches!(&pending_history.entries[0].content, Node::UserMessage { message, .. }
@@ -274,7 +296,14 @@ async fn detached_owners_share_acceptance_overlap_and_drain_with_fixed_reload() 
     // 等持久取消而不是与 provider release 竞争；控制回执不等于已关闭。
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if client.turn(cancel_target).await.unwrap().summary.is_some() {
+            if client
+                .turn(cancel_target)
+                .await
+                .unwrap()
+                .summary
+                .progress
+                .is_closed()
+            {
                 break;
             }
             tokio::task::yield_now().await;
@@ -298,13 +327,7 @@ async fn detached_owners_share_acceptance_overlap_and_drain_with_fixed_reload() 
     .await
     .unwrap();
     assert_eq!(
-        client
-            .turn(cancel_target)
-            .await
-            .unwrap()
-            .summary
-            .unwrap()
-            .outcome,
+        client.turn(cancel_target).await.unwrap().summary.outcome,
         lattice_session::store::PublicTurnOutcome::Cancelled
     );
     let SubmissionReply::Accepted(prior) = client
@@ -319,7 +342,7 @@ async fn detached_owners_share_acceptance_overlap_and_drain_with_fixed_reload() 
         panic!("existing Turn must be accepted")
     };
     assert!(
-        matches!(prior, Acceptance::Existing { turn } if turn.turn_id == first.turn_id && turn.summary.is_some())
+        matches!(prior, Acceptance::Existing { turn } if turn.turn_id == first.turn_id && turn.summary.progress.is_closed())
     );
     let view = client
         .query(Some(a.session_id), Some(first.turn_id))
@@ -330,9 +353,9 @@ async fn detached_owners_share_acceptance_overlap_and_drain_with_fixed_reload() 
         .await
         .unwrap();
     assert_eq!(history.entries.len(), 2);
-    // 历史为每个节点带回所属 Turn 的结局，与 Turn 记录一致。
+    // 历史为每个节点带回所属 Turn 的结局，与 Turn 详情投影一致。
     let closed = view.selected_turn.as_ref().unwrap().summary.clone();
-    assert!(closed.is_some());
+    assert!(closed.progress.is_closed());
     assert!(history.entries.iter().all(|entry| entry.summary == closed));
     let encoded = serde_json::to_string(&history).unwrap();
     assert!(encoded.contains("后台结果"));
@@ -369,18 +392,18 @@ async fn detached_owners_share_acceptance_overlap_and_drain_with_fixed_reload() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn query_stays_read_only_and_probe_or_write_closes_without_configuration() {
+async fn query_probe_and_rewind_preserve_orphan_without_configuration() {
     for operation in ["probe", "write"] {
-        close_pending_through(operation).await;
+        preserve_orphan_through(operation).await;
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn submit_handshake_closes_pending_before_loading_configuration_once() {
-    close_pending_through("submit_handshake").await;
+async fn submit_handshake_preserves_orphan_and_loads_configuration_once() {
+    preserve_orphan_through("submit_handshake").await;
 }
 
-async fn close_pending_through(operation: &str) {
+async fn preserve_orphan_through(operation: &str) {
     use lattice_session::store::*;
     let state = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
@@ -405,8 +428,6 @@ async fn close_pending_through(operation: &str) {
                     model: "unconfigured-model".into(),
                     provider: "openai_compatible".into(),
                     system_prompt: None,
-                    profile_snapshot_json: "{}".into(),
-                    policy_snapshot_json: "{}".into(),
                     catalog: ToolCatalogSnapshot::new("test".into(), vec![]).unwrap(),
                     limits: TurnExecutionLimits {
                         timeout_secs: 300,
@@ -433,7 +454,15 @@ async fn close_pending_through(operation: &str) {
         turn_id: old_id,
     };
     let before = client.query(Some(session_id), Some(old_id)).await.unwrap();
-    assert!(before.selected_turn.as_ref().unwrap().summary.is_none());
+    assert!(
+        !before
+            .selected_turn
+            .as_ref()
+            .unwrap()
+            .summary
+            .progress
+            .is_closed()
+    );
     assert!(!client.cancel(target).await.unwrap());
     assert_eq!(
         before,
@@ -444,11 +473,11 @@ async fn close_pending_through(operation: &str) {
         session_id: Some(session_id),
         turn_id: new_id,
         workspace: root.canonical_path().into(),
-        input: "关闭旧任务后接受新输入".into(),
+        input: "保留旧任务并接受新输入".into(),
         agent: None,
     };
     if operation == "submit_handshake" {
-        // 已有会话正常新执行仍要求历史存在；关闭本身不读取它。
+        // 新执行要求历史存在；探测与配置加载均不改旧节点。
         lancet_api::WorkspaceHistory::create(lancet_api::WorkspaceHistoryBacking::for_key(
             layout,
             root.store_key(),
@@ -463,21 +492,8 @@ async fn close_pending_through(operation: &str) {
                     assert_eq!(agent, "local-test");
                     async {
                         loads.set(loads.get() + 1);
-                        let closed = client.turn(target).await?;
-                        assert_eq!(
-                            closed.summary.as_ref().unwrap().outcome,
-                            PublicTurnOutcome::Failed
-                        );
-                        assert!(matches!(
-                            closed.steps[0].state,
-                            StepDetailState::Closed {
-                                end: StepEnd::Stop {
-                                    node: None,
-                                    cause: StopCause::ProcessExit
-                                },
-                                ..
-                            }
-                        ));
+                        let old = client.turn(target).await?;
+                        assert_eq!(&old, before.selected_turn.as_ref().unwrap());
                         Ok(frozen(workspace.path(), &provider.endpoint))
                     }
                 },
@@ -508,16 +524,10 @@ async fn close_pending_through(operation: &str) {
                         if view
                             .selected_turn
                             .as_ref()
-                            .is_some_and(|t| t.summary.is_some())
+                            .is_some_and(|t| t.summary.progress.is_closed())
                         {
                             assert_eq!(
-                                view.selected_turn
-                                    .as_ref()
-                                    .unwrap()
-                                    .summary
-                                    .as_ref()
-                                    .unwrap()
-                                    .outcome,
+                                view.selected_turn.as_ref().unwrap().summary.outcome,
                                 PublicTurnOutcome::Completed
                             );
                             summary_seen = true;
@@ -525,10 +535,13 @@ async fn close_pending_through(operation: &str) {
                     }
                     Observation::Finished { history, .. } => {
                         assert!(summary_seen);
-                        assert_eq!(history.entries.len(), 3); // 旧 User、新 User、新 Step
+                        assert_eq!(history.entries.len(), 4); // 两轮各有 User 与 Step
                         break;
                     }
                     Observation::Event { .. } => {}
+                    Observation::Diagnostic { error } => {
+                        panic!("unexpected execution diagnostic: {error}")
+                    }
                 }
             }
         })
@@ -560,19 +573,7 @@ async fn close_pending_through(operation: &str) {
             .unwrap();
     }
     let after = client.query(Some(session_id), Some(old_id)).await.unwrap();
-    assert!(after.session.active_turn.is_none());
-    let old = after.selected_turn.unwrap();
-    assert_eq!(old.summary.unwrap().outcome, PublicTurnOutcome::Failed);
-    assert!(matches!(
-        old.steps[0].state,
-        StepDetailState::Closed {
-            end: StepEnd::Stop {
-                node: None,
-                cause: StopCause::ProcessExit
-            },
-            ..
-        }
-    ));
+    assert_eq!(after.selected_turn, before.selected_turn);
     client.stop().await.unwrap();
     serving.await.unwrap().unwrap();
 }
@@ -612,7 +613,7 @@ async fn first_probe_and_readonly_requests_never_initialize_missing_store() {
     );
     let error = client.list_sessions().await.unwrap_err();
     assert!(matches!(
-        error.store,
+        error.store.as_deref(),
         Some(StoreDiagnostic::NotInitialized { .. })
     ));
     assert!(!layout.lattice_root().join("lattice.redb").exists());

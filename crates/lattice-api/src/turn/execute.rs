@@ -102,22 +102,30 @@ async fn execute_owned(
     } = input;
     let project = workspace.store_key();
     // 全局 TurnId 找回先于分配 SID、配置和工作区历史；不续跑已接受请求。
-    let original = session.read(move |read| read.turn_record(turn_id)).await?;
-    if let Some(original) = original {
-        if original.original_input != request.input
-            || original.project_store_key != project
-            || request
-                .session_id
-                .is_some_and(|sid| sid != original.session_id)
+    let original = session
+        .read(move |read| {
+            let Some(node) = read.turn_node(turn_id)? else {
+                return Ok(None);
+            };
+            Ok(Some((
+                node.session_id,
+                read.turn_input(node.session_id, turn_id)?,
+                read.session(node.session_id)?.project_store_key,
+            )))
+        })
+        .await?;
+    if let Some((sid, original_input, original_project)) = original {
+        if original_input != request.input
+            || original_project != project
+            || request.session_id.is_some_and(|id| id != sid)
         {
             return Err(ApiError::Conflict("TurnId identity differs".into()));
         }
-        let sid = original.session_id;
         let turn = session
             .read(move |read| read.turn_detail(sid, turn_id))
             .await?;
         accept(accepted, TurnAcceptance::Existing { turn: turn.clone() });
-        return Ok(if turn.summary.is_some() {
+        return Ok(if turn.summary.progress.is_closed() {
             TurnCompletion::Closed(Box::new(turn))
         } else {
             TurnCompletion::Running(TurnRef {
@@ -157,7 +165,6 @@ async fn execute_owned(
                 "workspace differs from Session binding".into(),
             ));
         }
-        coordinator.auto_close().await?;
     }
     let selected = match &request.agent {
         Some(name) if !name.trim().is_empty() => name.clone(),
@@ -276,7 +283,7 @@ async fn execute_owned(
         .await?;
     if matches!(result, AcceptedTurn::Existing(_)) {
         accept(accepted, TurnAcceptance::Existing { turn: turn.clone() });
-        return Ok(if turn.summary.is_some() {
+        return Ok(if turn.summary.progress.is_closed() {
             TurnCompletion::Closed(Box::new(turn))
         } else {
             TurnCompletion::Running(TurnRef {
@@ -344,7 +351,7 @@ pub async fn run_turn(
             session_id: detail.session_id,
             turn_id: id,
         },
-        summary: detail.summary.expect("closed summary"),
+        summary: detail.summary,
         usage: detail.usage,
         steps: detail.steps,
     })

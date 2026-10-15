@@ -18,9 +18,9 @@ fn turn_ref() -> TurnRef {
     }
 }
 fn events() -> Vec<TurnEvent> {
-    let step: lattice_api::local::StepDetail = serde_json::from_value(json!({"key":{"turn_id":key().turn_id,"ordinal":0},"attempts":[],"state":{"state":"closed","end":{"end":"stop","node":null,"cause":{"cause":"cancelled"}},"slots":[]}})).unwrap();
+    let step: lattice_api::local::StepDetail = serde_json::from_value(json!({"key":{"turn_id":key().turn_id,"ordinal":0},"node":2,"updated_at":"2026-09-27T00:00:01Z","attempts":[],"progress":{"progress":"closed","end":{"end":"stop","cause":{"cause":"cancelled"}}},"end":{"end":"stop","cause":{"cause":"cancelled"}},"slots":[]})).unwrap();
     let summary: TurnSummary = serde_json::from_value(
-        json!({"outcome":"cancelled","notice":{"level":"info","text":"cancelled by user"}}),
+        json!({"outcome":"cancelled","progress":{"progress":"closed","end":{"end":"stop","cause":{"cause":"cancelled"}}},"notice":{"level":"info","text":"cancelled by user"}}),
     )
     .unwrap();
     let id = "30000000-0000-4000-8000-000000000003".parse().unwrap();
@@ -157,8 +157,22 @@ fn terminal_summary_is_not_recomputed_and_usage_is_durable() {
         };
         let mut step = step.clone();
         step.key.turn_id = turn.turn_id;
-        let summary: TurnSummary =
-            serde_json::from_value(json!({"outcome":outcome,"notice":notice})).unwrap();
+        let end = match outcome {
+            "completed" => lattice_api::local::StepEnd::Finish,
+            _ => lattice_api::local::StepEnd::Stop {
+                cause: if outcome == "cancelled" {
+                    lattice_session::store::StopCause::Cancelled
+                } else {
+                    lattice_session::store::StopCause::ProcessExit
+                },
+            },
+        };
+        step.end = end.clone();
+        step.progress = lattice_api::local::StepProgress::Closed { end };
+        let summary: TurnSummary = serde_json::from_value(
+            json!({"outcome":outcome,"notice":notice,"progress":step.progress}),
+        )
+        .unwrap();
         let event = match outcome {
             "completed" => TurnEvent::TurnCompleted {
                 turn,

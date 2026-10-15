@@ -28,10 +28,10 @@ use crossterm::event::{
 use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use lattice_api::TurnEvent;
 use lattice_api::local::{
-    Acceptance, ActiveStateView, CancelStatus, ConnectionStatus, DetachReport, LocalClient,
-    LocalState, LocalTurn, LocalUpdate, MaterialSummary, ModelAttemptKey, NoticeLevel,
-    ObservationPhase, ObservationSnapshot, PublicTurnOutcome, SessionId, StepKey, TextSegment,
-    ToolResultOutcome, TurnId, TurnRequest, TurnSummary,
+    Acceptance, CancelStatus, ConnectionStatus, DetachReport, HistoryEntry, LocalClient,
+    LocalState, LocalTurn, LocalUpdate, MaterialSummary, ModelAttemptKey, Node, NoticeLevel,
+    ObservationPhase, ObservationSnapshot, PublicTurnOutcome, SessionId, SlotProgress, StepKey,
+    TextSegment, ToolResultOutcome, TurnId, TurnRequest, TurnSummary,
 };
 
 const FRAME: Duration = Duration::from_millis(33);
@@ -73,6 +73,8 @@ pub(crate) struct Status {
     pub(crate) text: String,
     /// 仅 Turn 结局消息携带所属 Turn 与结局：用于按 TurnId 去重，并决定标题线、符号与配色。
     pub(crate) closing: Option<(TurnId, PublicTurnOutcome)>,
+    /// 仅重试提示携带失败的那次尝试：历史带回同一提示时据此取代实时显示的那条。
+    pub(crate) retry: Option<ModelAttemptKey>,
 }
 /// 仅用于显示合并的来源；事件成功不能覆盖持久 ToolResult 的真实 outcome 或材料。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -201,7 +203,7 @@ impl App {
             _ => {}
         }
         // 快照可能比事件窗口领先一个提交；已装入节点的尝试不再重建临时块。
-        // 重试提示是状态消息而非正文，可能晚于关闭快照到达，不受此过滤。
+        // 重试提示是状态消息而非正文，可能晚于关闭快照到达，不受此过滤，按尝试去重。
         let key = match &event {
             TurnEvent::ModelStarted { key, .. }
             | TurnEvent::TokenDelta { key, .. }
@@ -264,7 +266,11 @@ impl App {
                     ordinal: key.model_step_ordinal,
                 });
                 self.attempt = None;
-                self.push_status(retry_status(key.attempt_ordinal, delay_ms, notice));
+                if !self.blocks.iter().any(|block| {
+                    matches!(block, Block::Status(Status { retry: Some(known), .. }) if *known == key)
+                }) {
+                    self.push_status(retry_status(key, delay_ms, notice));
+                }
             }
             TurnEvent::StepClosed { .. } => {} // 实际正文到达前保留临时块。
             TurnEvent::TurnStarted { turn, .. } => self.ctx.session_id = Some(turn.session_id),
@@ -623,15 +629,12 @@ impl App {
         {
             report.submission = None;
         }
-        if let Some(turn) = report
+        let closing_shown = report
             .state
-            .as_mut()
-            .and_then(|state| state.view.selected_turn.as_mut())
-            && self.summary_shown(turn.turn_id)
-        {
-            turn.summary = None;
-        }
-        for line in detach_lines(report) {
+            .as_ref()
+            .and_then(|state| state.view.selected_turn.as_ref())
+            .is_some_and(|turn| self.summary_shown(turn.turn_id));
+        for line in detach_lines(report, closing_shown) {
             self.notice_once(handoff_status(&line));
         }
     }
@@ -652,18 +655,29 @@ impl App {
                 ..
             } => match result {
                 Ok(history) if !stale && generation == self.generation => {
-                    // 只结合同一个历史切点的 Session 快照：该 Session 唯一进行中 Turn
-                    // 之外的节点都已关闭；不能由“Step 已写入”推断它自身的 Turn 关闭。
-                    if let Some(state) = &self.state
+                    // 只结合同一个历史切点的 Session 快照：仍可能在执行的那一轮之外都已结束；
+                    // 不能由“Step 已写入”推断它自身的 Turn 关闭。
+                    let mut history = *history;
+                    let unfinished = if let Some(state) = &self.state
                         && state.view.history == history.anchor
                     {
+                        let unfinished = unfinished_turn(&state.view);
+                        history.entries.extend(ended_step(&state.view));
                         self.closed_turns
                             .extend(history.entries.iter().filter_map(|entry| {
                                 let turn = entry.content.turn_id()?;
-                                (state.view.session.active_turn != Some(turn)).then_some(turn)
+                                (unfinished != Some(turn)).then_some(turn)
                             }));
-                    }
-                    self.replace_history(crate::session::history_blocks(*history))
+                        unfinished
+                    } else {
+                        // 没有同一切点的快照时不知道 Owner：路径末尾未关闭的一轮按可能在执行对待。
+                        history
+                            .entries
+                            .last()
+                            .filter(|entry| !entry.summary.progress.is_closed())
+                            .and_then(|entry| entry.content.turn_id())
+                    };
+                    self.replace_history(crate::session::history_blocks(history, unfinished))
                 }
                 Ok(_) => {}
                 Err(error) => self.push_status(history_unavailable_status(stale, &error)),
@@ -709,12 +723,11 @@ impl App {
                         self.ctx.session_id = Some(turn.session_id);
                         self.ctx.active_agent = turn.agent_name.clone();
                         self.submitted = None;
-                        if turn.summary.is_none() {
-                            self.ensure_assistant_start(turn.turn_id, &turn.agent_name);
-                        }
-                        if turn.summary.is_some() {
+                        if turn.summary.progress.is_closed() {
                             self.current_turn = None;
                             self.phase = TurnPhase::Idle;
+                        } else {
+                            self.ensure_assistant_start(turn.turn_id, &turn.agent_name);
                         }
                     }
                     self.delivered_submissions.insert(turn_id);
@@ -763,7 +776,7 @@ impl App {
             .selected_turn
             .as_ref()
             .map(|turn| turn.turn_id)
-            .or(view.session.active_turn);
+            .or_else(|| unfinished_turn(view));
         if observed.is_some() {
             self.observed_turn = observed;
         }
@@ -784,22 +797,21 @@ impl App {
                 TurnPhase::Streaming
             };
         } else if state.phase == ObservationPhase::Finished || self.submitted.is_none() {
-            self.current_turn = view.session.active_turn;
+            self.current_turn = unfinished_turn(view);
             self.phase = TurnPhase::Idle;
         }
+        // 已关闭，或未关闭而没有 Owner：这一轮已经结束，summary 就是它的结局。
         if let Some(turn) = &view.selected_turn
-            && let Some(summary) = &turn.summary
+            && (turn.summary.progress.is_closed() || !view.owned)
         {
             self.submitted = None;
-            self.current_turn = view.session.active_turn;
+            self.current_turn = unfinished_turn(view);
             self.phase = TurnPhase::Idle;
             self.fail_running_tools("turn ended before tool completion");
-            self.show_summary(turn.turn_id, summary.clone(), watched);
-        }
-        if let Some(id) = view.session.active_turn
-            && !view.owned
-        {
-            self.notice_once(orphaned_turn_status(id));
+            self.show_summary(turn.turn_id, turn.summary.clone(), watched);
+            if !turn.summary.progress.is_closed() {
+                self.notice_once(orphaned_turn_status(turn.turn_id));
+            }
         }
         if let Some(error) = &state.error {
             self.push_status(observation_diagnostic_status(error));
@@ -853,40 +865,59 @@ impl App {
     }
 
     fn reset_display(&mut self, view: &ObservationSnapshot) {
-        // 重同步只替换当前活动步骤；已关闭步骤的临时正文等待 History 实际安装。
-        if let Some(active) = &view.active {
-            self.remove_step(active.key);
-            self.attempt = None;
-            match &active.state {
-                ActiveStateView::Requesting { .. } => {
-                    if let Some(attempt) = &view.attempt {
-                        self.start_attempt(attempt.key);
-                        self.attempt = Some(attempt.clone());
-                        for segment in &attempt.segments {
-                            if let TextSegment::Text { text } = segment {
-                                crate::session::append_assistant_text(
-                                    &mut self.blocks,
-                                    text.clone(),
-                                );
-                            }
+        // 重同步只替换仍可能在执行的未关闭 Step；已关闭步骤的临时正文等待 History 实际安装。
+        // 执行者已消失的那一步不再改写，随 History 装入，此前保留已显示的内容。
+        let Some((
+            _,
+            Node::Step {
+                turn_id,
+                step_ordinal,
+                reply,
+                slots,
+                ..
+            },
+        )) = &view.unclosed_step
+        else {
+            return;
+        };
+        if unfinished_turn(view) != Some(*turn_id) {
+            return;
+        }
+        let key = StepKey {
+            turn_id: *turn_id,
+            ordinal: *step_ordinal,
+        };
+        self.remove_step(key);
+        self.attempt = None;
+        match reply {
+            None => {
+                if let Some(attempt) = &view.attempt {
+                    self.start_attempt(attempt.key);
+                    self.attempt = Some(attempt.clone());
+                    for segment in &attempt.segments {
+                        if let TextSegment::Text { text } = segment {
+                            crate::session::append_assistant_text(&mut self.blocks, text.clone());
                         }
                     }
                 }
-                ActiveStateView::RetryReady { .. } => {}
-                ActiveStateView::Executing { reply, slots } => {
-                    self.blocks.push(Block::Step(active.key));
-                    crate::session::append_step(
-                        &mut self.blocks,
-                        lattice_api::local::StepContent {
-                            assistant: reply.clone(),
-                            results: slots
-                                .iter()
-                                .filter_map(|slot| slot.result.clone())
-                                .collect(),
-                        },
-                    );
-                    self.attempt = view.attempt.clone();
-                }
+            }
+            Some(reply) => {
+                self.blocks.push(Block::Step(key));
+                // 进行中的槽位还没有结果，按工具调用显示，不取阶段推出的结论。
+                crate::session::append_step(
+                    &mut self.blocks,
+                    lattice_api::local::StepContent {
+                        assistant: reply.clone(),
+                        results: slots
+                            .iter()
+                            .filter_map(|slot| match &slot.progress {
+                                SlotProgress::Terminal { result, .. } => Some(result.clone()),
+                                SlotProgress::Registered | SlotProgress::Started => None,
+                            })
+                            .collect(),
+                    },
+                );
+                self.attempt = view.attempt.clone();
             }
         }
     }
@@ -1004,7 +1035,9 @@ impl App {
         };
         // 结局行跟着它的 Turn 走：新历史给出这个 Turn 的结局时，旧的那条让位并把身份交给它，
         // 暂驻 Dock 的结局因此继续暂驻；新历史里已经没有这个 Turn 时，结局行不保留。
+        // 重试提示同理：历史带回的那条取代实时显示的同一次尝试，暂驻 Dock 的继续暂驻。
         let mut closings = std::collections::HashMap::new();
+        let mut retries = std::collections::HashMap::new();
         let mut loaded_turns = std::collections::HashSet::new();
         for (at, entry) in blocks.iter().enumerate() {
             match &entry.block {
@@ -1013,6 +1046,11 @@ impl App {
                     ..
                 }) => {
                     closings.insert(*turn, at);
+                }
+                Block::Status(Status {
+                    retry: Some(key), ..
+                }) => {
+                    retries.insert(*key, at);
                 }
                 Block::UserTurn(turn, _) => {
                     loaded_turns.insert(*turn);
@@ -1057,6 +1095,16 @@ impl App {
                 if !loaded_turns.contains(turn) && parked != Some(entry.id) {
                     continue;
                 }
+            }
+            if let Block::Status(Status {
+                retry: Some(key), ..
+            }) = block
+                && let Some(&at) = retries.get(key)
+            {
+                if let Some(taken_over) = blocks.get_mut(at) {
+                    taken_over.id = entry.id;
+                }
+                continue;
             }
             if matches!(block, Block::Status(_)) {
                 pending.push(entry);
@@ -1187,10 +1235,8 @@ impl App {
     fn auto_submit(&mut self) -> Option<String> {
         let state = self.state.as_ref()?;
         let turn = state.view.selected_turn.as_ref()?;
-        if !turn
-            .summary
-            .as_ref()
-            .is_some_and(|s| s.outcome == lattice_api::local::PublicTurnOutcome::Completed)
+        if !(turn.summary.progress.is_closed()
+            && turn.summary.outcome == lattice_api::local::PublicTurnOutcome::Completed)
             || self.auto_sent_after.contains(&turn.turn_id)
         {
             return None;
@@ -1324,6 +1370,36 @@ impl App {
     }
 }
 
+/// 快照中仍可能在执行的 Turn。只有 Session 当前位置上未关闭的 Step 所属的那一轮可能有人执行；
+/// 它是所选 Turn 时，没有 Owner 就是执行者已消失。不是所选 Turn 时无从判断，按可能在执行对待。
+fn unfinished_turn(view: &ObservationSnapshot) -> Option<TurnId> {
+    let turn = view.unclosed_step.as_ref()?.1.turn_id()?;
+    (view.owned
+        || view
+            .selected_turn
+            .as_ref()
+            .is_none_or(|t| t.turn_id != turn))
+    .then_some(turn)
+}
+
+/// 执行者已消失的一轮停在 Session 当前位置的未关闭 Step 上。这个节点随快照交付、不经历史分页，
+/// 此后不再改写，所以作为路径的最后一个节点装入，结局行排在它之后。
+fn ended_step(view: &ObservationSnapshot) -> Option<HistoryEntry> {
+    let (node, content) = view.unclosed_step.as_ref()?;
+    let turn = view.selected_turn.as_ref()?;
+    if view.owned || content.turn_id() != Some(turn.turn_id) {
+        return None;
+    }
+    Some(HistoryEntry {
+        node: *node,
+        agent_name: turn.agent_name.clone(),
+        summary: turn.summary.clone(),
+        // 尝试记录已由后台读取校验；万一不合规只少显示重试提示，结局与正文照常。
+        retries: content.retry_notices().unwrap_or_default(),
+        content: content.clone(),
+    })
+}
+
 pub(crate) fn session_label(id: Option<SessionId>) -> String {
     id.map_or_else(|| "未接受".into(), |id| id.to_string())
 }
@@ -1390,7 +1466,7 @@ pub(crate) async fn run_app(
         exit.handoffs.push(turn.detach().boxed());
     }
     while let Some(report) = exit.handoffs.next().await {
-        for line in detach_lines(report) {
+        for line in detach_lines(report, false) {
             eprintln!("{line}");
         }
     }
@@ -1860,9 +1936,12 @@ mod tests {
         lattice_api::local::InvocationId::parse(&format!("22222222-2222-4222-8222-{n:012}"))
             .unwrap()
     }
-    fn retry(level: NoticeLevel, message: &str) -> TurnEvent {
+    fn retry(attempt_ordinal: u32, level: NoticeLevel, message: &str) -> TurnEvent {
         TurnEvent::LlmRetry {
-            key: attempt(),
+            key: ModelAttemptKey {
+                attempt_ordinal,
+                ..attempt()
+            },
             delay_ms: 100,
             notice: lattice_api::local::Notice {
                 level,
@@ -1875,6 +1954,7 @@ mod tests {
             level,
             text: text.into(),
             closing: None,
+            retry: None,
         }
     }
     fn start_tool(app: &mut App, name: &str) {
@@ -2054,8 +2134,8 @@ mod tests {
             docked(app).is_some_and(|(known, text)| known == level && text.contains(marker))
         };
 
-        app.apply_turn_event(retry(NoticeLevel::Warn, "retry-0"));
-        app.apply_turn_event(retry(NoticeLevel::Warn, "retry-a"));
+        app.apply_turn_event(retry(0, NoticeLevel::Warn, "retry-0"));
+        app.apply_turn_event(retry(1, NoticeLevel::Warn, "retry-a"));
         assert!(docked_is(&app, NoticeLevel::Warn, "retry-a"));
         let text = transcript_text(&app, 78);
         assert!(text.contains("retry-0") && !text.contains("retry-a"));
@@ -2070,7 +2150,7 @@ mod tests {
         app.push_status(status(NoticeLevel::Error, "commit-b"));
         assert!(docked_is(&app, NoticeLevel::Error, "commit-b"));
         assert!(transcript_text(&app, 78).contains("retry-a"));
-        app.apply_turn_event(retry(NoticeLevel::Warn, "retry-c"));
+        app.apply_turn_event(retry(2, NoticeLevel::Warn, "retry-c"));
         assert!(docked_is(&app, NoticeLevel::Warn, "retry-c"));
         assert!(transcript_text(&app, 78).contains("commit-b"));
 
@@ -2112,7 +2192,7 @@ mod tests {
             (NoticeLevel::Error, true),
         ] {
             let mut app = test_app();
-            app.apply_turn_event(retry(level.clone(), "HTTP 429 rate_limit_exceeded"));
+            app.apply_turn_event(retry(1, level.clone(), "HTTP 429 rate_limit_exceeded"));
             let pushed = app
                 .blocks
                 .iter()

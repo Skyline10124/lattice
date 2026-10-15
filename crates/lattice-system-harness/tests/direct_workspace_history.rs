@@ -476,9 +476,9 @@ fn direct_workspace_history_records_nothing_for_a_failed_mutation() {
             scenario_evidence.record_command("refusal persistent detail", &detail);
             require(detail.is_clean_exit(0), "refusal Turn detail readable")?;
             let detail: Value = serde_json::from_slice(&detail.stdout).unwrap();
-            let step = &detail["steps"][0]["state"];
+            let step = &detail["steps"][0];
             require(
-                step["state"] == "closed",
+                step["progress"]["progress"] == "closed",
                 "refusal first Step must be Closed",
             )?;
             let slots = step["slots"].as_array().expect("closed slots");
@@ -491,8 +491,7 @@ fn direct_workspace_history_records_nothing_for_a_failed_mutation() {
                 "refusal slot method must match",
             )?;
             require(
-                slots[0]["state"]["state"] == "terminal"
-                    && slots[0]["state"]["outcome"] == "failed",
+                slots[0]["progress"]["state"] == "terminal" && slots[0]["outcome"] == "failed",
                 "refusal slot must persist Failed (not NotExecuted/Indeterminate)",
             )?;
             require(
@@ -629,11 +628,9 @@ fn direct_workspace_history_multi_mutation_survives_provider_failure() {
         let steps = detail["steps"].as_array().unwrap();
         require(
             steps.len() == 4
-                && steps[3]["state"]["state"] == "closed"
-                && steps[3]["state"]["slots"]
-                    .as_array()
-                    .is_some_and(Vec::is_empty)
-                && steps[3]["state"]["end"]["cause"]["cause"] == "provider_error",
+                && steps[3]["progress"]["progress"] == "closed"
+                && steps[3]["slots"].as_array().is_some_and(Vec::is_empty)
+                && steps[3]["end"]["cause"]["cause"] == "provider_error",
             "three Tool steps then provider error",
         )?;
         let repo = private_history_repo(&world);
@@ -647,16 +644,16 @@ fn direct_workspace_history_multi_mutation_survives_provider_failure() {
             .zip(["mutate.create", "mutate.create", "mutate.edit"])
             .enumerate()
         {
-            let state = &steps[index]["state"];
+            let state = &steps[index];
             require(
-                state["state"] == "closed" && state["end"]["end"] == "continue",
+                state["progress"]["progress"] == "closed" && state["end"]["end"] == "continue",
                 "mutation Step must persist Closed/Continue",
             )?;
             let slots = state["slots"].as_array().unwrap();
             require(
                 slots.len() == 1
                     && slots[0]["binding"]["method"] == method
-                    && slots[0]["state"]["outcome"] == "succeeded",
+                    && slots[0]["outcome"] == "succeeded",
                 "each model Step must persist its single successful mutation",
             )?;
             let turn_id = detail["turn_id"].as_str().unwrap();

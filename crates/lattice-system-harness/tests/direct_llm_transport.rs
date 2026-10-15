@@ -210,7 +210,7 @@ fn retry_after_beyond_limits_fails_at_once_with_the_provider_reason() {
             assert_clean_send(&outcome)?;
             assert_accepted_and_closed(&outcome)?;
             let turn = final_turn(&outcome);
-            let end = &turn["steps"][1]["state"]["end"];
+            let end = &turn["steps"][1]["end"];
             require(
                 outcome.command.is_clean_exit(1)
                     && turn["summary"]["outcome"] == "failed"

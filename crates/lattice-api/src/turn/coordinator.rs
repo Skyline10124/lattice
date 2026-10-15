@@ -48,6 +48,10 @@ pub(crate) struct CoordinatorStoreIo {
     lock: Arc<SessionExecutionLock>,
     #[cfg(test)]
     pub(super) handoff_probe: Option<Arc<dyn Fn() + Send + Sync>>,
+    #[cfg(test)]
+    pub(super) finish_probe: Option<Arc<dyn Fn() + Send + Sync>>,
+    #[cfg(test)]
+    pub(super) close_fault: Option<TestCommitFault>,
 }
 
 impl CoordinatorStoreIo {
@@ -68,6 +72,10 @@ impl CoordinatorStoreIo {
             lock: Arc::new(lock),
             #[cfg(test)]
             handoff_probe: None,
+            #[cfg(test)]
+            finish_probe: None,
+            #[cfg(test)]
+            close_fault: None,
         })
     }
 
@@ -161,12 +169,31 @@ impl CoordinatorStoreIo {
             .await
     }
     pub(crate) async fn finish_invocation(&self, terminal: TerminalInput) -> Result<()> {
-        self.write(move |store, lock| store.finish_invocation(lock, terminal, chrono::Utc::now()))
-            .await
+        #[cfg(test)]
+        let probe = self.finish_probe.clone();
+        self.write(move |store, lock| {
+            store.finish_invocation(lock, terminal, chrono::Utc::now())?;
+            #[cfg(test)]
+            if let Some(probe) = probe {
+                probe();
+            }
+            Ok(())
+        })
+        .await
     }
     pub(crate) async fn close_step(&self, close: CloseStep) -> Result<ClosedStep> {
-        self.write(move |store, lock| store.close_step(lock, close, chrono::Utc::now()))
-            .await
+        #[cfg(test)]
+        let fault = self.close_fault;
+        self.write(move |store, lock| {
+            #[cfg(test)]
+            if let Some(fault) = fault {
+                return with_test_commit_fault(fault, || {
+                    store.close_step(lock, close, chrono::Utc::now())
+                });
+            }
+            store.close_step(lock, close, chrono::Utc::now())
+        })
+        .await
     }
 
     /// 预构造 future 在健康锁内仅移交运行时。返回的 JoinHandle 必须由执行监督者真实排空。
@@ -218,7 +245,7 @@ impl TurnCoordinator {
         let turn = reply.key.turn_id;
         let catalog = self
             .io
-            .read(move |read| Ok(read.durable_turn(session, turn)?.turn.config.catalog))
+            .read(move |read| Ok(read.turn_config(session, turn)?.catalog))
             .await?;
         if reply
             .message
@@ -244,25 +271,7 @@ impl TurnCoordinator {
         }
     }
 
-    /// 新 send/rewind 的唯一旧 Turn 关闭路径；不构造 runtime，也不接触工作区历史。
-    pub(crate) async fn auto_close(&self) -> Result<Option<AutoCloseResult>> {
-        self.io
-            .write(|store, lock| {
-                let active = store.begin_read()?.session(lock.session_id())?.active_turn;
-                active
-                    .map(|turn| {
-                        let close = || store.auto_close(lock, turn, chrono::Utc::now());
-                        #[cfg(feature = "test-crash-barriers")]
-                        let close = || super::crash_barrier::auto_close_fault(close);
-                        close()
-                    })
-                    .transpose()
-            })
-            .await
-    }
-
     pub(crate) async fn rewind(&self, target: NodeId) -> Result<SessionRecord> {
-        self.auto_close().await?;
         let session = self
             .io
             .write(move |store, lock| store.rewind(lock, target, chrono::Utc::now()))

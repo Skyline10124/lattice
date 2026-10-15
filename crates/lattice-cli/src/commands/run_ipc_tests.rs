@@ -78,31 +78,53 @@ impl Wire {
     }
 }
 fn view(id: TurnId, outcome: Option<&str>) -> ObservationSnapshot {
-    let summary=outcome.map(|outcome|json!({"outcome":outcome,"notice":match outcome {"completed"=>Value::Null,"cancelled"=>json!({"level":"info","text":"cancelled by user"}),_=>json!({"level":"error","text":"provider failed"})}}));
-    let steps = match outcome {
-        Some("completed") => {
-            json!([{"key":{"turn_id":id,"ordinal":0},"attempts":[],"state":{"state":"closed","end":{"end":"finish","node":2},"slots":[]}}])
+    let end = match outcome {
+        Some("completed") => json!({"end":"finish"}),
+        _ => {
+            json!({"end":"stop","cause":{"cause":if outcome == Some("cancelled") {"cancelled"} else {"process_exit"}}})
         }
-        Some(outcome) => {
-            json!([{"key":{"turn_id":id,"ordinal":0},"attempts":[],"state":{"state":"closed","end":{"end":"stop","node":null,"cause":{"cause":if outcome=="cancelled" {"cancelled"} else {"process_exit"}}},"slots":[]}}])
-        }
-        None => json!([]),
     };
+    let progress = if outcome.is_some() {
+        json!({"progress":"closed","end":end})
+    } else {
+        json!({"progress":"reserved"})
+    };
+    let summary = json!({"outcome":outcome.unwrap_or("failed"),"progress":progress,"notice":match outcome {
+        Some("completed")=>Value::Null,
+        Some("cancelled")=>json!({"level":"info","text":"cancelled by user"}),
+        _=>json!({"level":"error","text":"provider failed"}),
+    }});
+    let step = json!({"node":2,"key":{"turn_id":id,"ordinal":0},"progress":progress,"end":end,
+        "attempts":[],"slots":[],"updated_at":"2026-09-27T00:00:01Z"});
+    let unclosed = outcome.is_none().then(|| json!([2, {"kind":"step","parent":1,"turn_id":id,
+        "step_ordinal":0,"progress":progress,"attempts":[],"reply":null,"slots":[],"updated_at":"2026-09-27T00:00:01Z"}]));
     serde_json::from_value(json!({
-        "session":{"session_id":sid(),"project_store_key":"a".repeat(64),"current":if outcome==Some("completed") {2} else {1},"active_turn":if outcome.is_none(){json!(id)}else{Value::Null},"created_at":"2026-09-27T00:00:00Z","updated_at":"2026-09-27T00:00:00Z"},
-        "current_agent":"unused","selected_turn":{"session_id":sid(),"turn_id":id,"user_node":1,"agent_name":"unused","accepted_at":"2026-09-27T00:00:00Z","ended_at":outcome.map(|_|"2026-09-27T00:00:01Z"),"summary":summary,"usage":{"kind":"complete","total":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}},"steps":steps},
-        "active":null,"history":{"session_id":sid(),"head":if outcome==Some("completed"){2}else{1}},"attempt":null,"cursor":{"epoch":"peer","sequence":if outcome.is_some(){2}else{1}},"owned":outcome.is_none()
+        "session":{"session_id":sid(),"project_store_key":"a".repeat(64),"current":2,"created_at":"2026-09-27T00:00:00Z","updated_at":"2026-09-27T00:00:01Z"},
+        "current_agent":"unused","selected_turn":{"session_id":sid(),"turn_id":id,"user_node":1,"agent_name":"unused","accepted_at":"2026-09-27T00:00:00Z","ended_at":"2026-09-27T00:00:01Z","summary":summary,"usage":{"kind":"complete","total":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}},"steps":[step]},
+        "unclosed_step":unclosed,"history":{"session_id":sid(),"head":if outcome.is_some(){2}else{1}},"attempt":null,"cursor":{"epoch":"peer","sequence":if outcome.is_some(){2}else{1}},"owned":outcome.is_none()
     })).unwrap()
 }
 fn history(view: &ObservationSnapshot) -> LocalHistory {
-    let id = view.selected_turn.as_ref().unwrap().turn_id;
+    let turn = view.selected_turn.as_ref().unwrap();
+    let id = turn.turn_id;
     let mut entries = vec![lattice_api::local::HistoryEntry {
         node: lattice_api::local::NodeId(1),
         agent_name: "unused".into(),
-        summary: None,
+        summary: turn.summary.clone(),
+        retries: vec![],
         content: Node::UserMessage {
             parent: lattice_api::local::NodeId(0),
             turn_id: id,
+            accepted_at: turn.accepted_at,
+            agent_name: "unused".into(),
+            model: "test".into(),
+            provider: "openai_compatible".into(),
+            limits: lattice_session::store::TurnExecutionLimits {
+                timeout_secs: 300,
+                max_model_steps: 32,
+                max_model_attempts: 1,
+            },
+            config_digest: [0; 32],
             message: lattice_session::test_helpers::user_msg("prompt"),
         },
     }];
@@ -110,15 +132,18 @@ fn history(view: &ObservationSnapshot) -> LocalHistory {
         entries.push(lattice_api::local::HistoryEntry {
             node: lattice_api::local::NodeId(2),
             agent_name: "unused".into(),
-            summary: None,
+            summary: turn.summary.clone(),
+            retries: vec![],
             content: Node::Step {
                 parent: lattice_api::local::NodeId(1),
                 turn_id: id,
                 step_ordinal: 0,
-                content: lattice_api::local::StepContent {
-                    assistant: lattice_session::test_helpers::assistant_msg("answer"),
-                    results: vec![],
-                },
+                progress: turn.summary.progress.clone(),
+                attempts: vec![],
+                reply: (turn.summary.outcome == PublicTurnOutcome::Completed)
+                    .then(|| lattice_session::test_helpers::assistant_msg("answer")),
+                slots: vec![],
+                updated_at: turn.ended_at,
             },
         });
     }
@@ -128,7 +153,7 @@ fn history(view: &ObservationSnapshot) -> LocalHistory {
     }
 }
 async fn body_reply(wire: &mut Wire, view: &ObservationSnapshot) {
-    let fragments:Vec<_>=history(view).entries.into_iter().map(|entry|json!({"fragment":{"node":entry.node,"utf8_offset":0,"json_fragment":serde_json::to_string(&entry.content).unwrap(),"complete":true},"agent_name":entry.agent_name})).collect();
+    let fragments:Vec<_>=history(view).entries.into_iter().map(|entry|json!({"fragment":{"node":entry.node,"utf8_offset":0,"json_fragment":serde_json::to_string(&entry.content).unwrap(),"complete":true,"agent_name":entry.agent_name,"summary":entry.summary,"retries":entry.retries},"agent_name":entry.agent_name,"summary":entry.summary})).collect();
     wire.reply(
         "history",
         json!({"anchor":view.history,"fragments":fragments,"next":null}),
@@ -514,19 +539,16 @@ async fn first_sigint_unknown_submission_no_owner_is_bounded() {
     let id = lattice_api::local::new_turn_id();
     run_observe(
         async {
-            let (mut submit, mut sub) = begin_submit(&peer, id, true).await;
+            let (mut submit, _initial) = begin_submit(&peer, id, true).await;
+            interrupt();
+            cancel(&peer, id, false).await;
+            let (mut sub, _) = peer.request("subscribe").await;
             let mut view = view(id, None);
             view.owned = false;
             sub.snapshot(&view).await;
             let (mut body, _) = peer.request("history").await;
-            body_reply(&mut body, &view).await;
+            sub.finished(&view).await;
             body.closed().await;
-            interrupt();
-            cancel(&peer, id, false).await;
-            let (mut sub, _) = peer.request("subscribe").await;
-            sub.snapshot(&view).await;
-            let (mut body, _) = peer.request("history").await;
-            body_reply(&mut body, &view).await;
             submit.closed().await;
         },
         send(&peer, id, true),
@@ -605,7 +627,7 @@ fn human_summary_is_printed_once_across_event_snapshot_and_detach() {
             let id = lattice_api::local::new_turn_id();
             let snapshot = view(id, Some(outcome));
             let detail = snapshot.selected_turn.as_ref().unwrap();
-            let summary = detail.summary.clone().unwrap();
+            let summary = detail.summary.clone();
             let turn = lattice_api::local::TurnRef {
                 session_id: sid(),
                 turn_id: id,
@@ -632,7 +654,7 @@ fn human_summary_is_printed_once_across_event_snapshot_and_detach() {
             let mut out = Vec::new();
             let mut err = Vec::new();
             // State 可先记录结局；这不表示人类摘要已经打印。
-            render.last_summary = detail.summary.clone();
+            render.last_summary = Some(detail.summary.clone());
             for source in sources {
                 if source == "event" {
                     render_human_event(&event, &mut render, &mut out, &mut err, false).unwrap();
@@ -642,7 +664,7 @@ fn human_summary_is_printed_once_across_event_snapshot_and_detach() {
                     render_snapshot(&snapshot, &mut render, false, &mut err).unwrap();
                 }
             }
-            let expected = summary_text(detail.summary.as_ref().unwrap());
+            let expected = summary_text(&detail.summary);
             assert_eq!(
                 String::from_utf8(err.clone())
                     .unwrap()

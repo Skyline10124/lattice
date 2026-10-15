@@ -30,7 +30,7 @@ fn session_queries_and_rewind_preserve_the_tree_across_restart() {
         assert_eq!(list[0]["session_id"], sid);
         assert_eq!(list[0]["current"], 2);
         assert_eq!(list[0]["node_count"], 3);
-        assert!(list[0]["active_turn"].is_null());
+        assert!(list[0]["unclosed_turn"].is_null());
         let log = query(&["--json", "session", "log", sid]);
         assert_eq!(log["nodes"].as_array().unwrap().len(), 3);
         assert_eq!(log["nodes"][0]["node"]["id"], 0);

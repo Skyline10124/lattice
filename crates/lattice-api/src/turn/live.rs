@@ -23,13 +23,6 @@ pub(crate) fn freeze_config(
         model: loaded.profile.agent.model.clone(),
         provider: provider.into(),
         system_prompt: Some(loaded.system_prompt.clone()),
-        profile_snapshot_json: lancet_protocol::canonical_json(&serde_json::json!({
-            "agent_profile": loaded.profile, "system_prompt": loaded.system_prompt,
-        })),
-        policy_snapshot_json: lancet_protocol::canonical_json(
-            &serde_json::to_value(&loaded.profile.lancet)
-                .map_err(|_| ApiError::Internal("policy snapshot encoding failed".into()))?,
-        ),
         catalog: ToolCatalogSnapshot::new(
             env!("CARGO_PKG_VERSION").into(),
             catalog

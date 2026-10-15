@@ -150,6 +150,7 @@ fn usage(value: &Value) -> Result<(), String> {
     Ok(())
 }
 fn summary(value: &Value) -> Result<&str, String> {
+    step_progress(&value["progress"])?;
     let outcome = string(value, "outcome")?;
     match (outcome, value.get("notice")) {
         ("completed", Some(Value::Null)) => {}
@@ -167,58 +168,79 @@ fn summary(value: &Value) -> Result<&str, String> {
     }
     Ok(outcome)
 }
+fn step_end(value: &Value) -> Result<(), String> {
+    match string(value, "end")? {
+        "continue" | "finish" => {}
+        "stop" => {
+            string(&value["cause"], "cause")?;
+        }
+        _ => return Err("unknown step end".into()),
+    }
+    Ok(())
+}
+fn step_progress(value: &Value) -> Result<(), String> {
+    match string(value, "progress")? {
+        "reserved" | "requesting" | "executing" => {}
+        "closed" => step_end(&value["end"])?,
+        _ => return Err("unknown step progress".into()),
+    }
+    Ok(())
+}
 fn step(value: &Value) -> Result<(), String> {
     step_key(&value["key"])?;
+    uint(value, "node")?;
+    string(value, "updated_at")?;
+    step_progress(&value["progress"])?;
+    step_end(&value["end"])?;
+    if value["progress"]["progress"] == "closed" && value["progress"]["end"] != value["end"] {
+        return Err("closed step end differs from progress".into());
+    }
     for attempt in array(value, "attempts")? {
         uint(attempt, "attempt")?;
         string(attempt, "origin")?;
         usage(attempt.get("usage").ok_or("missing usage")?)?;
+        match string(&attempt["progress"], "progress")? {
+            "sent" => {}
+            "ended" => {
+                if attempt["progress"]["end"]["end"] != attempt["end"]["end"]
+                    || attempt["progress"]["end"]["cause"] != attempt["end"]["cause"]
+                {
+                    return Err("attempt progress/end mismatch".into());
+                }
+            }
+            _ => return Err("unknown attempt progress".into()),
+        }
         match string(&attempt["end"], "end")? {
             "completed" => {
                 string(&attempt["end"]["step"], "turn_id")?;
                 uint(&attempt["end"]["step"], "model_step_ordinal")?;
             }
             "stopped" => {
-                if attempt["end"].get("cause").is_none() {
-                    return Err("missing attempt cause".into());
-                }
+                string(&attempt["end"]["cause"], "cause")?;
                 nullable_string(&attempt["end"], "diagnostic")?;
             }
             _ => return Err("unknown attempt end".into()),
         }
+        match attempt.get("retry_delay_ms") {
+            Some(Value::Null) => {}
+            Some(n) if n.as_u64().is_some() => {}
+            _ => return Err("retry_delay_ms must be null or integer".into()),
+        }
     }
-    let state = &value["state"];
-    match string(state, "state")? {
-        "requesting" => {
-            uint(state, "attempt")?;
+    for slot in array(value, "slots")? {
+        string(slot, "invocation_id")?;
+        if !matches!(
+            string(&slot["progress"], "state")?,
+            "registered" | "started" | "terminal"
+        ) {
+            return Err("unknown slot progress".into());
         }
-        "retry_ready" => {
-            uint(state, "next_attempt")?;
+        if !matches!(
+            string(slot, "outcome")?,
+            "succeeded" | "failed" | "not_executed" | "indeterminate"
+        ) {
+            return Err("unknown slot outcome".into());
         }
-        "executing" => {
-            array(state, "slots")?;
-        }
-        "closed" => {
-            array(state, "slots")?;
-            let end = &state["end"];
-            match string(end, "end")? {
-                "continue" | "finish" => {
-                    uint(end, "node")?;
-                }
-                "stop" => {
-                    match end.get("node") {
-                        Some(Value::Null) => {}
-                        Some(n) if n.as_u64().is_some() => {}
-                        _ => return Err("stop needs node or null".into()),
-                    }
-                    if end.get("cause").is_none_or(Value::is_null) {
-                        return Err("stop needs cause".into());
-                    }
-                }
-                _ => return Err("unknown step end".into()),
-            }
-        }
-        _ => return Err("unknown step state".into()),
     }
     Ok(())
 }
@@ -307,12 +329,15 @@ fn parse_event_line_checked(line: &str) -> Result<Option<TurnEventLine>, String>
             step(&value["step"])?;
             let outcome = summary(&value["summary"])?;
             if kind != format!("turn_{outcome}")
-                || value["step"]["state"]["state"] != "closed"
+                || value["step"]["progress"]["progress"] != "closed"
                 || value["step"]["key"]["turn_id"] != value["turn"]["turn_id"]
             {
                 return Err("terminal identity/state/summary mismatch".into());
             }
-            let end = &value["step"]["state"]["end"];
+            if value["summary"]["progress"] != value["step"]["progress"] {
+                return Err("terminal summary progress differs".into());
+            }
+            let end = &value["step"]["end"];
             if (outcome == "completed" && end["end"] != "finish")
                 || (outcome != "completed" && end["end"] != "stop")
             {
@@ -351,24 +376,25 @@ fn parse_event_line_checked(line: &str) -> Result<Option<TurnEventLine>, String>
                         for s in steps {
                             step(s)?;
                         }
-                        let s = turn.get("summary").ok_or("missing summary")?;
-                        if !s.is_null() {
-                            let outcome = summary(s)?;
-                            let last = steps.last().ok_or("closed turn has no steps")?;
-                            if steps.iter().any(|s| s["state"]["state"] != "closed")
-                                || steps[..steps.len() - 1]
-                                    .iter()
-                                    .any(|s| s["state"]["end"]["end"] != "continue")
-                                || last["state"]["end"]["end"]
-                                    != if outcome == "completed" {
-                                        "finish"
-                                    } else {
-                                        "stop"
-                                    }
-                            {
-                                return Err("closed turn has invalid steps".into());
-                            }
+                        let outcome = summary(&turn["summary"])?;
+                        let last = steps.last().ok_or("turn has no reserved step")?;
+                        if steps[..steps.len() - 1].iter().any(|s| {
+                            s["progress"]["progress"] != "closed" || s["end"]["end"] != "continue"
+                        }) || turn["summary"]["progress"] != last["progress"]
+                        {
+                            return Err("turn has invalid step progress".into());
                         }
+                        let expected = if last["end"]["end"] == "finish" {
+                            "completed"
+                        } else if last["end"]["cause"]["cause"] == "cancelled" {
+                            "cancelled"
+                        } else {
+                            "failed"
+                        };
+                        if expected != outcome {
+                            return Err("summary differs from last step conclusion".into());
+                        }
+                        boolean(view, "owned")?;
                     }
                 }
                 "history" => {
@@ -377,6 +403,8 @@ fn parse_event_line_checked(line: &str) -> Result<Option<TurnEventLine>, String>
                     for entry in array(history, "entries")? {
                         uint(entry, "node")?;
                         string(entry, "agent_name")?;
+                        summary(&entry["summary"])?;
+                        array(entry, "retries")?;
                         if !entry["content"].is_object() {
                             return Err("invalid node content".into());
                         }
@@ -485,6 +513,9 @@ fn closed_result(events: &[TurnEventLine]) -> Option<(&str, &str, &str)> {
         )),
         TurnEventLine::Unknown { type_name, raw } if type_name == "snapshot" => {
             let t = &raw["view"]["selected_turn"];
+            if t["summary"]["progress"]["progress"] != "closed" && raw["view"]["owned"] != false {
+                return None;
+            }
             Some((
                 t["session_id"].as_str()?,
                 t["turn_id"].as_str()?,

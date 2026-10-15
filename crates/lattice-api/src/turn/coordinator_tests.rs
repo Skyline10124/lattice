@@ -31,8 +31,6 @@ fn input() -> AcceptTurn {
             model: "model".into(),
             provider: "openai".into(),
             system_prompt: None,
-            profile_snapshot_json: "{}".into(),
-            policy_snapshot_json: "{}".into(),
             catalog: ToolCatalogSnapshot::new(
                 "test-build".into(),
                 vec![ToolCatalogEntry {
@@ -99,14 +97,28 @@ async fn started_commit_precedes_execution_and_repeated_start_is_rejected() {
         .await
         .unwrap();
     let read_store = store.clone();
-    let task = io.start_execution(async move {
-        assert_eq!(started.binding().invocation_id, iid(1));
-        tokio::task::spawn_blocking(move || {
-            let read = read_store.begin_read().unwrap();
-            let state = read.durable_turn(sid(), tid(1)).unwrap();
-            assert!(matches!(&state.steps[0].state, StepState::Active { active: ActiveStep::Executing { slots, .. } } if matches!(slots[0].state, SlotState::Started)));
-        }).await.unwrap();
-    }, Arc::default(), tokio::time::Instant::now() + std::time::Duration::from_secs(30)).await.unwrap().unwrap();
+    let task = io
+        .start_execution(
+            async move {
+                assert_eq!(started.binding().invocation_id, iid(1));
+                tokio::task::spawn_blocking(move || {
+                    let read = read_store.begin_read().unwrap();
+                    let state = read.turn_detail(sid(), tid(1)).unwrap();
+                    assert_eq!(state.steps[0].progress, StepProgress::Executing);
+                    assert_eq!(
+                        state.steps[0].slots[0].progress,
+                        OperatorInvocationState::Started
+                    );
+                })
+                .await
+                .unwrap();
+            },
+            Arc::default(),
+            tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+        )
+        .await
+        .unwrap()
+        .unwrap();
     task.await.unwrap();
     assert!(
         io.start_invocation(calls.bindings[0].clone())
@@ -119,7 +131,7 @@ async fn started_commit_precedes_execution_and_repeated_start_is_rejected() {
 }
 
 #[tokio::test]
-async fn closure_and_rewind_do_not_read_or_lock_workspace_history() {
+async fn orphaned_turn_rewinds_without_reading_or_locking_workspace_history() {
     let tmp = tempfile::tempdir().unwrap();
     let layout = StateLayout::in_state_root(tmp.path());
     let input = input();
@@ -142,32 +154,24 @@ async fn closure_and_rewind_do_not_read_or_lock_workspace_history() {
         .unwrap();
     io.accept(input).await.unwrap();
     let coordinator = TurnCoordinator::new(io, Arc::new(RandomIdSource));
-    let closed = tokio::time::timeout(std::time::Duration::from_secs(3), coordinator.auto_close())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    assert!(matches!(closed, AutoCloseResult::Closed(_)));
     let before = store
         .begin_read()
         .unwrap()
         .turn_detail(sid(), tid(1))
         .unwrap();
-    assert!(matches!(
-        before.steps[0].state,
-        StepDetailState::Closed {
-            end: StepEnd::Stop {
-                node: None,
-                cause: StopCause::ProcessExit
-            },
-            ..
-        }
-    ));
-    coordinator.rewind(NodeId(0)).await.unwrap();
+    assert_eq!(before.steps[0].progress, StepProgress::Reserved);
+    assert_eq!(before.summary.outcome, PublicTurnOutcome::Failed);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        coordinator.rewind(NodeId(0)),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let read = store.begin_read().unwrap();
     assert_eq!(read.session(sid()).unwrap().current, NodeId(0));
     assert_eq!(read.turn_detail(sid(), tid(1)).unwrap(), before);
-    assert_eq!(read.log(sid()).unwrap().nodes.len(), 2);
+    assert_eq!(read.log(sid()).unwrap().nodes.len(), 3);
     assert_eq!(
         std::fs::read_to_string(history).unwrap(),
         "损坏历史，不准访问"
@@ -194,7 +198,6 @@ async fn collision_retries_only_registration_and_preserves_reply() {
     io.register_calls(first, vec![iid(1)]).await.unwrap();
     let coordinator =
         TurnCoordinator::new(io, Arc::new(Sequence(std::sync::atomic::AtomicU64::new(1))));
-    coordinator.auto_close().await.unwrap();
     let mut second = input();
     second.session = AcceptSession::Existing { id: sid() };
     second.turn_id = tid(2);
@@ -205,8 +208,11 @@ async fn collision_retries_only_registration_and_preserves_reply() {
     assert_eq!(registered.bindings[0].invocation_id, iid(2));
     let read = store.begin_read().unwrap();
     let old = read.turn_detail(sid(), tid(1)).unwrap();
-    assert!(
-        matches!(&old.steps[0].state, StepDetailState::Closed { slots, .. } if slots[0].invocation_id == iid(1))
+    assert_eq!(old.steps[0].progress, StepProgress::Executing);
+    assert_eq!(old.steps[0].slots[0].invocation_id, iid(1));
+    assert_eq!(
+        old.steps[0].slots[0].progress,
+        OperatorInvocationState::Registered
     );
     assert_eq!(
         registered.reply.parts[0].semantic,
@@ -217,11 +223,8 @@ async fn collision_retries_only_registration_and_preserves_reply() {
 }
 
 #[tokio::test]
-async fn snapshot_attempt_is_replaced_only_by_persisted_stop_or_closed_step() {
-    use super::super::{
-        observer::ObserverSink,
-        types::{TextSegment, TurnEvent},
-    };
+async fn snapshot_carries_unclosed_node_and_replaces_segments_when_attempt_ends() {
+    use super::super::{observer::ObserverSink, types::TurnEvent};
     let tmp = tempfile::tempdir().unwrap();
     let store = Arc::new(SessionStore::create(&StateLayout::in_state_root(tmp.path())).unwrap());
     let io = CoordinatorStoreIo::acquire(store.clone(), sid())
@@ -240,11 +243,23 @@ async fn snapshot_attempt_is_replaced_only_by_persisted_stop_or_closed_step() {
         key: reply.key,
         content: "旧段".into(),
     });
+    let read_store = store.clone();
+    let sink = observer.clone();
+    let (view, attempt, _) =
+        tokio::task::spawn_blocking(move || sink.snapshot(&read_store, sid(), Some(tid(1))))
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(matches!(view.unclosed_step, Some((NodeId(2), Node::Step {
+        progress: StepProgress::Requesting, attempts, ..
+    })) if matches!(attempts[0].progress, AttemptProgress::Sent)));
+    assert_eq!(attempt.unwrap().key, reply.key);
     io.stop_attempt(AttemptStopped {
         key: reply.key,
         origin: reply.origin,
         usage: None,
         cause: StopCause::ProviderError { retryable: true },
+        retry_delay_ms: Some(1),
         diagnostic: AttemptDiagnostic {
             provider_error: Some("retry".into()),
             ..Default::default()
@@ -260,10 +275,12 @@ async fn snapshot_attempt_is_replaced_only_by_persisted_stop_or_closed_step() {
             .await
             .unwrap()
             .unwrap();
-    assert!(matches!(
-        view.active.unwrap().state,
-        ActiveStep::RetryReady { next_attempt: 1 }
-    ));
+    assert!(
+        matches!(view.unclosed_step.as_ref(), Some((NodeId(2), Node::Step {
+        progress: StepProgress::Requesting, attempts, ..
+    })) if attempts[0].retry_delay_ms == Some(1))
+    );
+
     assert!(attempt.is_none());
     assert_eq!(seq, 2);
     reply.key.attempt_ordinal = 1;
@@ -286,24 +303,29 @@ async fn snapshot_attempt_is_replaced_only_by_persisted_stop_or_closed_step() {
             .unwrap()
             .unwrap();
     assert!(
-        matches!(view.active.unwrap().state, ActiveStep::Executing { reply, .. } if reply == registered.reply)
+        matches!(view.unclosed_step.as_ref(), Some((NodeId(2), Node::Step {
+            progress: StepProgress::Executing, reply: Some(reply), slots, ..
+        })) if reply == &registered.reply && slots.len() == 1
+            && slots[0].progress == SlotProgress::Registered)
     );
-    assert_eq!(
-        attempt.unwrap().segments,
-        vec![TextSegment::Text {
-            text: "说明".into()
-        }]
-    );
+    assert!(attempt.is_none(), "完整回复已经提交，节点取代旧段列表");
     assert_eq!(seq, 4);
     let coordinator = TurnCoordinator::new(io, Arc::new(RandomIdSource));
-    coordinator.auto_close().await.unwrap();
+    coordinator
+        .io
+        .close_step(CloseStep::StopExecuting {
+            key: registered.key,
+            stop: DispatchStop::Cancelled,
+        })
+        .await
+        .unwrap();
     let (view, attempt, seq) =
         tokio::task::spawn_blocking(move || observer.snapshot(&store, sid(), Some(tid(1))))
             .await
             .unwrap()
             .unwrap();
-    assert!(view.active.is_none());
-    assert!(view.selected_turn.unwrap().summary.is_some());
+    assert!(view.unclosed_step.is_none());
+    assert!(view.selected_turn.unwrap().summary.progress.is_closed());
     assert!(attempt.is_none());
     assert_eq!(seq, 4);
 }
@@ -429,20 +451,23 @@ async fn live_multicall_closes_continue_then_finish_from_structured_history() {
     )
     .await
     .unwrap();
-    assert_eq!(
-        detail.summary.as_ref().unwrap().outcome,
-        PublicTurnOutcome::Completed
-    );
+    assert_eq!(detail.summary.outcome, PublicTurnOutcome::Completed);
     assert_eq!(detail.steps.len(), 2);
-    assert!(
-        matches!(&detail.steps[0].state, StepDetailState::Closed { end: StepEnd::Continue { node: NodeId(2) }, slots }
-        if slots.len() == 2 && matches!(slots[0].state, OperatorInvocationState::Terminal { outcome: lattice_conversation::ToolResultOutcome::Succeeded, .. })
-        && matches!(&slots[1].state, OperatorInvocationState::Terminal { outcome: lattice_conversation::ToolResultOutcome::Failed, reason: Some(OperatorReason::Failed { code, .. }), .. }
-            if matches!(code.family(), lancet_protocol::CepErrorFamily::Validation | lancet_protocol::CepErrorFamily::Permission | lancet_protocol::CepErrorFamily::Guard)))
+    assert_eq!(detail.steps[0].node, NodeId(2));
+    assert_eq!(detail.steps[0].end, StepEnd::Continue);
+    let slots = &detail.steps[0].slots;
+    assert_eq!(slots.len(), 2);
+    assert_eq!(
+        slots[0].outcome,
+        lattice_conversation::ToolResultOutcome::Succeeded
     );
     assert!(
-        matches!(&detail.steps[1].state, StepDetailState::Closed { end: StepEnd::Finish { node: NodeId(3) }, slots } if slots.is_empty())
+        matches!(&slots[1].reason, Some(OperatorReason::Failed { code, .. })
+        if matches!(code.family(), lancet_protocol::CepErrorFamily::Validation | lancet_protocol::CepErrorFamily::Permission | lancet_protocol::CepErrorFamily::Guard))
     );
+    assert_eq!(detail.steps[1].node, NodeId(3));
+    assert_eq!(detail.steps[1].end, StepEnd::Finish);
+    assert!(detail.steps[1].slots.is_empty());
     assert_eq!(
         store
             .begin_read()
@@ -453,7 +478,7 @@ async fn live_multicall_closes_continue_then_finish_from_structured_history() {
     );
     let events = observer.events_after(0).unwrap();
     assert!(
-        matches!(&events.last().unwrap().event, super::super::types::TurnEvent::TurnCompleted { step, summary, .. } if step == &detail.steps[1] && Some(summary) == detail.summary.as_ref())
+        matches!(&events.last().unwrap().event, super::super::types::TurnEvent::TurnCompleted { step, summary, .. } if step == &detail.steps[1] && summary == &detail.summary)
     );
     let requests = llm.0.lock().unwrap();
     assert_eq!(requests.len(), 2);
@@ -573,13 +598,19 @@ async fn first_acceptance_allocates_session_and_same_turn_reuses_it_without_conf
     assert_eq!(llm.call_count(), 1);
     let read = store.begin_read().unwrap();
     assert_eq!(read.list(None, 100).unwrap().items.len(), 1);
-    assert_eq!(
-        read.turn_record(tid(9)).unwrap().unwrap().original_input,
-        " original \n"
-    );
+    assert_eq!(read.turn_input(sid, tid(9)).unwrap(), " original \n");
 }
 
-async fn stop_during_handoff(tool: bool, cancelled: bool) {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StopBoundary {
+    ProviderHandoff,
+    ToolHandoff,
+    CompletedBatch,
+}
+
+async fn stop_at_execution_boundary(boundary: StopBoundary, cancelled: bool) {
+    let tool = boundary != StopBoundary::ProviderHandoff;
+    let completed_batch = boundary == StopBoundary::CompletedBatch;
     use super::super::{
         observer::ObserverSink,
         saga::{LiveExecution, run_coordinator_saga},
@@ -655,7 +686,7 @@ async fn stop_during_handoff(tool: bool, cancelled: bool) {
     let calls = AtomicUsize::new(0);
     let entered_tx = Mutex::new(Some(entered_tx));
     let wait = Mutex::new(wait);
-    io.handoff_probe = Some(Arc::new(move || {
+    let probe: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
         if calls.fetch_add(1, Ordering::SeqCst) == usize::from(tool) {
             entered_tx.lock().unwrap().take().unwrap().send(()).unwrap();
             wait.lock()
@@ -663,7 +694,14 @@ async fn stop_during_handoff(tool: bool, cancelled: bool) {
                 .recv_timeout(Duration::from_secs(10))
                 .unwrap();
         }
-    }));
+    });
+    if completed_batch {
+        io.finish_probe = Some(probe);
+        // 若 saga 仍先提交 Continue，这次提交结果未知会遗留 Reserved，无法读回实际停止原因。
+        io.close_fault = Some(TestCommitFault::UnknownAfter);
+    } else {
+        io.handoff_probe = Some(probe);
+    }
     let coordinator = TurnCoordinator::new(io, Arc::new(RandomIdSource));
     let cancel = Arc::new(AtomicBool::new(false));
     let observer = Arc::new(ObserverSink::default());
@@ -687,18 +725,31 @@ async fn stop_during_handoff(tool: bool, cancelled: bool) {
     let before = store
         .begin_read()
         .unwrap()
-        .durable_turn(sid(), tid(1))
+        .turn_detail(sid(), tid(1))
         .unwrap();
-    if tool {
+    if completed_batch {
+        assert_eq!(before.steps[0].progress, StepProgress::Executing);
         assert!(
-            matches!(&before.steps[0].state, StepState::Active { active: ActiveStep::Executing { slots, .. } } if matches!(slots[0].state, SlotState::Started) && matches!(slots[1].state, SlotState::Registered))
+            before.steps[0]
+                .slots
+                .iter()
+                .all(|s| matches!(s.progress, OperatorInvocationState::Terminal { .. }))
+        );
+    } else if tool {
+        assert_eq!(before.steps[0].progress, StepProgress::Executing);
+        assert_eq!(
+            before.steps[0].slots[0].progress,
+            OperatorInvocationState::Started
+        );
+        assert_eq!(
+            before.steps[0].slots[1].progress,
+            OperatorInvocationState::Registered
         );
     } else {
+        assert_eq!(before.steps[0].progress, StepProgress::Requesting);
         assert!(matches!(
-            before.steps[0].state,
-            StepState::Active {
-                active: ActiveStep::Requesting { .. }
-            }
+            before.steps[0].attempts[0].progress,
+            AttemptProgressDetail::Sent
         ));
     }
     if cancelled {
@@ -707,40 +758,103 @@ async fn stop_during_handoff(tool: bool, cancelled: bool) {
         tokio::time::sleep_until(deadline).await;
     }
     release.send(()).unwrap();
-    let detail = tokio::time::timeout(Duration::from_secs(10), running)
+    let result = tokio::time::timeout(Duration::from_secs(10), running)
         .await
         .unwrap()
-        .unwrap()
         .unwrap();
+    let detail = if completed_batch {
+        assert!(matches!(
+            result,
+            Err(CoordinatorIoError::Store(StoreError::CommitFailed {
+                kind: CommitFailureKind::OutcomeUnknown,
+                ..
+            }))
+        ));
+        store
+            .begin_read()
+            .unwrap()
+            .turn_detail(sid(), tid(1))
+            .unwrap()
+    } else {
+        result.unwrap()
+    };
     let emitted = observer.events_after(0).unwrap();
-    assert!(
-        !emitted
-            .iter()
-            .any(|e| matches!(e.event, TurnEvent::ToolCallStarted { .. })),
-        "stopped handoff must not dispatch a Tool"
-    );
+    let starts = emitted
+        .iter()
+        .filter(|e| matches!(e.event, TurnEvent::ToolCallStarted { .. }))
+        .count();
+    assert_eq!(starts, if completed_batch { 2 } else { 0 });
     assert_eq!(
         llm.call_count(),
         usize::from(tool),
         "stopped handoff must not open provider"
     );
-    // 停止发生在交接之前：原因是真实的取消或 Deadline，已 Started 的槽位记为未取得结果。
     let expected = if cancelled {
         StopCause::Cancelled
     } else {
         StopCause::Deadline
     };
+    if completed_batch {
+        assert_eq!(detail.steps.len(), 2);
+        assert_eq!(detail.steps[0].end, StepEnd::Continue);
+        assert_eq!(detail.steps[0].slots, before.steps[0].slots);
+        assert!(detail.steps[0].progress.is_closed());
+        let last = &detail.steps[1];
+        assert_eq!(last.end, StepEnd::Stop { cause: expected });
+        assert!(last.attempts.is_empty());
+        assert!(last.slots.is_empty());
+        assert!(last.progress.is_closed());
+        assert_eq!(detail.summary.progress, last.progress);
+        assert_eq!(
+            detail.summary.outcome,
+            if cancelled {
+                PublicTurnOutcome::Cancelled
+            } else {
+                PublicTurnOutcome::Failed
+            }
+        );
+        assert_eq!(
+            store.begin_read().unwrap().session(sid()).unwrap().current,
+            last.node
+        );
+        // 只有提交回执丢失，重开不做补写也必须读出同一结局。
+        drop(store);
+        let reopened = SessionStore::open(&layout).unwrap();
+        assert_eq!(
+            reopened
+                .begin_read()
+                .unwrap()
+                .turn_detail(sid(), tid(1))
+                .unwrap(),
+            detail
+        );
+        return;
+    }
+    // 停止发生在交接之前：已 Started 的槽位仍保留 NoResult 的结论。
+    assert_eq!(
+        detail.steps[0].end,
+        StepEnd::Stop {
+            cause: expected.clone()
+        }
+    );
+    assert!(detail.steps[0].progress.is_closed());
     if tool {
-        assert!(
-            matches!(&detail.steps[0].state, StepDetailState::Closed { end: StepEnd::Stop { cause, .. }, slots } if
-            cause == &expected &&
-            matches!(slots[0].state, OperatorInvocationState::Terminal { outcome: lattice_conversation::ToolResultOutcome::Indeterminate, reason: Some(OperatorReason::Indeterminate(IndeterminateCause::NoResult)), .. }) &&
-            matches!(slots[1].state, OperatorInvocationState::Terminal { outcome: lattice_conversation::ToolResultOutcome::NotExecuted, reason: None, .. }))
+        let slots = &detail.steps[0].slots;
+        assert_eq!(slots[0].progress, OperatorInvocationState::Started);
+        assert_eq!(
+            slots[0].outcome,
+            lattice_conversation::ToolResultOutcome::Indeterminate
+        );
+        assert_eq!(
+            slots[0].reason,
+            Some(OperatorReason::Indeterminate(IndeterminateCause::NoResult))
+        );
+        assert_eq!(slots[1].progress, OperatorInvocationState::Registered);
+        assert_eq!(
+            slots[1].outcome,
+            lattice_conversation::ToolResultOutcome::NotExecuted
         );
     } else {
-        assert!(
-            matches!(&detail.steps[0].state, StepDetailState::Closed { end: StepEnd::Stop { node: None, cause }, .. } if cause == &expected)
-        );
         assert!(
             matches!(&detail.steps[0].attempts[0].end, AttemptEndDetail::Stopped { cause, .. } if cause == &expected)
         );
@@ -757,17 +871,27 @@ async fn stop_during_handoff(tool: bool, cancelled: bool) {
 
 #[tokio::test]
 async fn provider_handoff_wait_observes_deadline() {
-    stop_during_handoff(false, false).await;
+    stop_at_execution_boundary(StopBoundary::ProviderHandoff, false).await;
 }
 #[tokio::test]
 async fn provider_handoff_wait_observes_cancel() {
-    stop_during_handoff(false, true).await;
+    stop_at_execution_boundary(StopBoundary::ProviderHandoff, true).await;
 }
 #[tokio::test]
 async fn tool_handoff_wait_observes_deadline() {
-    stop_during_handoff(true, false).await;
+    stop_at_execution_boundary(StopBoundary::ToolHandoff, false).await;
 }
 #[tokio::test]
 async fn tool_handoff_wait_observes_cancel() {
-    stop_during_handoff(true, true).await;
+    stop_at_execution_boundary(StopBoundary::ToolHandoff, true).await;
+}
+
+#[tokio::test]
+async fn completed_batch_cancel_survives_unknown_close_commit() {
+    stop_at_execution_boundary(StopBoundary::CompletedBatch, true).await;
+}
+
+#[tokio::test]
+async fn completed_batch_deadline_survives_unknown_close_commit() {
+    stop_at_execution_boundary(StopBoundary::CompletedBatch, false).await;
 }

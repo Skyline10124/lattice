@@ -151,10 +151,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
             &["--json", "session", "turn", tid],
         );
         assert_eq!(original["steps"].as_array().unwrap().len(), 2);
-        assert_eq!(
-            original["steps"][0]["state"]["end"],
-            json!({"end":"continue","node":2})
-        );
+        assert_eq!(original["steps"][0]["end"], json!({"end":"continue"}));
         let original_history = current_history(&world, &spec, &mut evidence, tid);
         assert_eq!(original_history["anchor"]["head"], 3);
         let beta_turn = "00000000-0000-4000-8000-000000000003";
@@ -202,10 +199,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
             &mut evidence,
             &["--json", "session", "turn", beta_turn],
         );
-        assert_eq!(
-            beta_running["steps"][0]["state"]["slots"][0]["state"]["outcome"],
-            "succeeded"
-        );
+        assert_eq!(beta_running["steps"][0]["slots"][0]["outcome"], "succeeded");
         assert_eq!(
             std::fs::read_to_string(world.project_dir().join("cancelled.txt")).unwrap(),
             "survives cancel\n"
@@ -237,8 +231,8 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
         assert_eq!(beta_closed["summary"]["notice"]["level"], "info");
         assert_eq!(beta_closed["steps"][0], beta_running["steps"][0]);
         assert_eq!(
-            beta_closed["steps"][1]["state"]["end"],
-            json!({"end":"stop","node":null,"cause":{"cause":"cancelled"}})
+            beta_closed["steps"][1]["end"],
+            json!({"end":"stop","cause":{"cause":"cancelled"}})
         );
         let beta_requests = beta.captured_requests();
         assert_eq!(beta_requests.len(), 2);
@@ -274,7 +268,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
             &mut evidence,
             &["--json", "session", "log", sid],
         );
-        assert_eq!(before["nodes"].as_array().unwrap().len(), 6);
+        assert_eq!(before["nodes"].as_array().unwrap().len(), 7);
         assert_eq!(before["current_agent"], "beta");
         let invalid = support::cli(&world, &spec, &["--json", "session", "rewind", sid, "999"]);
         evidence.record_command("nonexistent node refusal", &invalid);
@@ -316,9 +310,9 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
             &mut evidence,
             &["--json", "session", "log", sid],
         );
-        assert_eq!(tree["nodes"].as_array().unwrap().len(), 8);
-        assert_eq!(tree["nodes"][6]["node"]["id"], 6);
-        assert_eq!(tree["nodes"][6]["node"]["parent"], 2);
+        assert_eq!(tree["nodes"].as_array().unwrap().len(), 9);
+        assert_eq!(tree["nodes"][7]["node"]["id"], 7);
+        assert_eq!(tree["nodes"][7]["node"]["parent"], 2);
         assert_eq!(tree["current_agent"], "alpha");
         assert_eq!(
             cli_json(
@@ -354,7 +348,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
             &["--json", "session", "log", sid],
         );
         assert_eq!(returned["current_agent"], "alpha");
-        assert_eq!(returned["nodes"].as_array().unwrap().len(), 8);
+        assert_eq!(returned["nodes"].as_array().unwrap().len(), 9);
         assert_eq!(
             current_history(&world, &spec, &mut evidence, tid),
             original_history
@@ -417,10 +411,10 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
             &mut evidence,
             &["--json", "session", "log", sid],
         );
-        assert_eq!(after["nodes"].as_array().unwrap().len(), 10);
-        assert_eq!(after["nodes"][8]["node"]["id"], 8);
-        assert_eq!(after["nodes"][8]["node"]["parent"], 0);
-        assert_eq!(after["session"]["current"], 9);
+        assert_eq!(after["nodes"].as_array().unwrap().len(), 11);
+        assert_eq!(after["nodes"][9]["node"]["id"], 9);
+        assert_eq!(after["nodes"][9]["node"]["parent"], 0);
+        assert_eq!(after["session"]["current"], 10);
         assert_eq!(after["current_agent"], "beta");
         assert_eq!(
             cli_json(
@@ -458,8 +452,8 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
         assert_eq!(captures[2].raw["model"], "alpha");
         assert_eq!(captures[3].raw["model"], "beta");
         // 固定夹具的规定投影：来源是公开历史；不导入产品投影器，也不使用上一请求作 oracle。
-        let step = &fork_history["entries"][1]["content"]["content"];
-        let call = &step["assistant"]["parts"][0]["semantic"]["tool_call"]["call"];
+        let step = &fork_history["entries"][1]["content"];
+        let call = &step["reply"]["parts"][0]["semantic"]["tool_call"]["call"];
         assert_eq!(call["provider_call_id"], "create");
         assert_eq!(call["name"], "mutate.create");
         assert_eq!(
@@ -467,7 +461,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
             json!({"content":"kept\n","create_parents":false,"path":"kept.txt"})
         );
         assert_eq!(
-            step["results"][0]["payload"]["payload"]["value"],
+            step["slots"][0]["progress"]["result"]["payload"]["payload"]["value"],
             json!({"bytes_written":5,"path":"kept.txt"})
         );
         let expected = json!([
@@ -475,7 +469,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
             {"role":"user","content":fork_history["entries"][0]["content"]["message"]["parts"][0]["semantic"]["text"]["text"]},
             {"role":"assistant","content":null,"tool_calls":[{"id":"create","type":"function","function":{
                 "name":"mutate__create","arguments":serde_json::to_string(&call["arguments"]).unwrap()}}]},
-            {"role":"tool","tool_call_id":"create","content":serde_json::to_string(&step["results"][0]["payload"]["payload"]["value"]).unwrap()},
+            {"role":"tool","tool_call_id":"create","content":serde_json::to_string(&step["slots"][0]["progress"]["result"]["payload"]["payload"]["value"]).unwrap()},
             {"role":"user","content":"fork"},
         ]);
         assert_eq!(captures[2].raw["messages"], expected);

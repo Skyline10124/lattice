@@ -112,8 +112,7 @@ fn view(id: TurnId, head: u64, closed: bool, owned: bool) -> ObservationSnapshot
         session: SessionRecord {
             session_id,
             project_store_key: crate::ProjectStoreKey::from_canonical_path_bytes(b"/fixture"),
-            current: NodeId(head),
-            active_turn: (!closed).then_some(id),
+            current: NodeId(if closed { head } else { head + 1 }),
             created_at: "2026-09-27T00:00:00Z".parse().unwrap(),
             updated_at: "2026-09-27T00:00:00Z".parse().unwrap(),
         },
@@ -124,11 +123,22 @@ fn view(id: TurnId, head: u64, closed: bool, owned: bool) -> ObservationSnapshot
             user_node: NodeId(1),
             agent_name: "test".into(),
             accepted_at: "2026-09-27T00:00:00Z".parse().unwrap(),
-            ended_at: closed.then(|| "2026-09-27T00:00:01Z".parse().unwrap()),
-            summary: closed.then_some(TurnSummary {
-                outcome: lattice_session::store::PublicTurnOutcome::Completed,
+            ended_at: "2026-09-27T00:00:01Z".parse().unwrap(),
+            summary: TurnSummary {
+                outcome: if closed {
+                    PublicTurnOutcome::Completed
+                } else {
+                    PublicTurnOutcome::Failed
+                },
+                progress: if closed {
+                    StepProgress::Closed {
+                        end: StepEnd::Finish,
+                    }
+                } else {
+                    StepProgress::Requesting
+                },
                 notice: None,
-            }),
+            },
             usage: UsageSummary::Complete {
                 total: lattice_conversation::TokenUsage {
                     prompt_tokens: 0,
@@ -138,12 +148,30 @@ fn view(id: TurnId, head: u64, closed: bool, owned: bool) -> ObservationSnapshot
             },
             steps: vec![],
         }),
-        active: None,
+        unclosed_step: (!closed).then(|| {
+            (
+                NodeId(head + 1),
+                Node::Step {
+                    parent: NodeId(head),
+                    turn_id: id,
+                    step_ordinal: 0,
+                    progress: StepProgress::Requesting,
+                    attempts: vec![lattice_session::store::AttemptRecord {
+                        usage: None,
+                        progress: AttemptProgress::Sent,
+                        retry_delay_ms: None,
+                    }],
+                    reply: None,
+                    slots: vec![],
+                    updated_at: "2026-09-27T00:00:01Z".parse().unwrap(),
+                },
+            )
+        }),
         history: HistoryAnchor {
             session_id,
             head: NodeId(head),
         },
-        attempt: (!closed).then_some(AttemptSegments {
+        attempt: (!closed && owned).then_some(AttemptSegments {
             key: key(id),
             segments: vec![TextSegment::Text {
                 text: "prefix".into(),
@@ -164,10 +192,21 @@ fn history(view: &ObservationSnapshot) -> LocalHistory {
             .map(|n| HistoryEntry {
                 node: NodeId(n),
                 agent_name: "test".into(),
-                summary: None,
+                summary: view.selected_turn.as_ref().unwrap().summary.clone(),
+                retries: vec![],
                 content: Node::UserMessage {
                     parent: NodeId(n - 1),
                     turn_id: id,
+                    accepted_at: "2026-09-27T00:00:00Z".parse().unwrap(),
+                    agent_name: "test".into(),
+                    model: "model".into(),
+                    provider: "openai".into(),
+                    limits: lattice_session::store::TurnExecutionLimits {
+                        timeout_secs: 300,
+                        max_model_steps: 32,
+                        max_model_attempts: 3,
+                    },
+                    config_digest: [0; 32],
                     message: NativeMessage::new(
                         MessageRole::User,
                         None,
@@ -190,13 +229,16 @@ fn page(history: LocalHistory) -> HistoryPageView {
             .entries
             .into_iter()
             .map(|entry| HistoryFragmentView {
-                agent_name: entry.agent_name,
-                summary: entry.summary,
+                agent_name: entry.agent_name.clone(),
+                summary: entry.summary.clone(),
                 fragment: NodeFragment {
                     node: entry.node,
                     utf8_offset: 0,
                     json_fragment: serde_json::to_string(&entry.content).unwrap(),
                     complete: true,
+                    agent_name: entry.agent_name,
+                    summary: entry.summary,
+                    retries: entry.retries,
                 },
             })
             .collect(),
@@ -383,11 +425,14 @@ async fn fixed_root_path_preserves_utf8_fragments_and_agent_attribution() {
     let id = new_turn_id();
     let fixed = view(id, 2, true, false);
     let mut expected = history(&fixed);
-    // 节点 2 跨两页读取，其间 Turn 关闭：前一片不带结局，完成它的那一片带回结局。
-    expected.entries[1].summary = Some(TurnSummary {
+    // 节点跨页期间 Turn 关闭，取完成节点的那一片带回的结论。
+    expected.entries[1].summary = TurnSummary {
         outcome: PublicTurnOutcome::Completed,
+        progress: StepProgress::Closed {
+            end: StepEnd::Finish,
+        },
         notice: None,
-    });
+    };
     let client = peer.client.clone();
     let reading =
         tokio::spawn(async move { client.read_history_with_progress(&fixed, || {}).await });
@@ -401,12 +446,19 @@ async fn fixed_root_path_preserves_utf8_fragments_and_agent_attribution() {
     };
     full.fragments.push(HistoryFragmentView {
         agent_name: last.agent_name.clone(),
-        summary: None,
+        summary: view(id, 2, false, true)
+            .selected_turn
+            .unwrap()
+            .summary
+            .clone(),
         fragment: NodeFragment {
             node: NodeId(2),
             utf8_offset: 0,
             json_fragment: last.fragment.json_fragment[..split].into(),
             complete: false,
+            agent_name: last.fragment.agent_name.clone(),
+            summary: view(id, 2, false, true).selected_turn.unwrap().summary,
+            retries: last.fragment.retries.clone(),
         },
     });
     full.next = Some(next.clone());
@@ -428,6 +480,9 @@ async fn fixed_root_path_preserves_utf8_fragments_and_agent_attribution() {
                 utf8_offset: split as u64,
                 json_fragment: last.fragment.json_fragment[split..].into(),
                 complete: true,
+                agent_name: last.fragment.agent_name,
+                summary: last.fragment.summary,
+                retries: last.fragment.retries,
             },
         }],
     }))
@@ -447,7 +502,7 @@ async fn summary_precedes_stalled_body_and_finished_requires_complete_history() 
     let (mut old, _) = body_request(&peer).await;
     let final_view = view(id, 2, true, false);
     stream.snapshot(final_view.clone()).await;
-    let update = update_until(&mut turn, |u| matches!(u, LocalUpdate::State { view, .. } if view.selected_turn.as_ref().unwrap().summary.is_some())).await;
+    let update = update_until(&mut turn, |u| matches!(u, LocalUpdate::State { view, .. } if view.selected_turn.as_ref().unwrap().summary.progress.is_closed())).await;
     assert!(
         matches!(update, LocalUpdate::State { view, phase: ObservationPhase::NoOwner, .. } if *view == final_view)
     );
@@ -1123,7 +1178,57 @@ async fn unknown_submission_keeps_late_transport_distinct_from_backend_errors() 
 }
 
 #[tokio::test]
-async fn unknown_submission_late_acceptance_and_no_owner_do_not_end_wait_early() {
+async fn unclosed_no_owner_delivers_diagnostic_and_history_then_finishes_without_cancel() {
+    for failed in [false, true] {
+        let peer = Peer::new();
+        let id = new_turn_id();
+        let fixed = view(id, 1, false, false);
+        let diagnostic =
+            failed.then(|| LocalError::new(LocalErrorKind::Internal, "close write failed"));
+        let mut turn = peer.client.observe(Some(sid()), Some(id));
+        let (mut stream, _) = peer.request().await;
+        stream.snapshot(fixed.clone()).await;
+        let update = update_until(&mut turn, |u| matches!(u, LocalUpdate::State { .. })).await;
+        assert!(
+            matches!(update, LocalUpdate::State { view, phase: ObservationPhase::NoOwner, .. }
+            if *view == fixed && !view.selected_turn.as_ref().unwrap().summary.progress.is_closed())
+        );
+        // 历史尚未装入也已知道执行者消失，取消不能再发给后台。
+        turn.cancel();
+        cancel_status(&mut turn, CancelStatus::Moot).await;
+        body(&peer, &fixed).await;
+        if let Some(error) = &diagnostic {
+            stream
+                .reply(Response::Observation(Observation::Diagnostic {
+                    error: error.clone(),
+                }))
+                .await;
+            let update = update_until(&mut turn, |u| {
+                matches!(u, LocalUpdate::State { error: Some(_), .. })
+            })
+            .await;
+            assert!(matches!(update, LocalUpdate::State { error, .. } if error == diagnostic));
+        }
+        stream.finished(&fixed).await;
+        let update = update_until(&mut turn, |u| {
+            matches!(u, LocalUpdate::History { result: Ok(_), .. })
+        })
+        .await;
+        assert!(
+            matches!(update, LocalUpdate::History { result: Ok(h), .. } if *h == history(&fixed))
+        );
+        update_until(&mut turn, |u| matches!(u, LocalUpdate::Finished { .. })).await;
+        let report = within(turn.detach()).await;
+        let state = report.state.unwrap();
+        assert_eq!(*state.view, fixed);
+        assert_eq!(state.phase, ObservationPhase::Finished);
+        assert_eq!(state.error, diagnostic);
+        no_cancel(&peer).await;
+    }
+}
+
+#[tokio::test]
+async fn unknown_submission_late_acceptance_and_missing_target_do_not_end_wait_early() {
     for initially_owned in [false, true] {
         let peer = Peer::new();
         let id = new_turn_id();
@@ -1132,9 +1237,19 @@ async fn unknown_submission_late_acceptance_and_no_owner_do_not_end_wait_early()
             .client
             .start_turn_with(original.clone(), |_| async { panic!("existing request") });
         let (mut probe, mut stream) = initial(&peer, &original).await;
-        stream.snapshot(view(id, 1, false, initially_owned)).await;
-        body(&peer, &view(id, 1, false, initially_owned)).await;
-        update_until(&mut turn, |u| matches!(u, LocalUpdate::History { .. })).await;
+        if initially_owned {
+            stream.snapshot(view(id, 1, false, true)).await;
+            body(&peer, &view(id, 1, false, true)).await;
+            update_until(&mut turn, |u| matches!(u, LocalUpdate::History { .. })).await;
+        } else {
+            // 尚未接受的身份可以稍后得到 Owner；已经接受但失去 Owner 的 Turn 不会复活。
+            stream
+                .reply(Response::Error(LocalError::new(
+                    LocalErrorKind::NotFound,
+                    "not accepted yet",
+                )))
+                .await;
+        }
         turn.cancel();
         let mut receipt = cancel_request(&peer, id).await;
         receipt

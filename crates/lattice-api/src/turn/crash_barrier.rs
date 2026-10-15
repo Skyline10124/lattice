@@ -194,34 +194,3 @@ pub(crate) async fn history_read_fault(anchor: &lattice_session::store::HistoryA
         .await
         .expect("read history fault")
 }
-
-/// 在真实同步事务内复用存储层故障点；文件仅选择一次注入，不承载业务状态。
-pub(crate) fn auto_close_fault<T>(operation: impl FnOnce() -> T) -> T {
-    use lattice_session::store::{TestCommitFault, with_test_commit_fault};
-    let Some(root) = std::env::var_os("LATTICE_TEST_SCHEDULE_DIR") else {
-        return operation();
-    };
-    let root = PathBuf::from(root);
-    assert!(root.is_absolute(), "schedule directory must be absolute");
-    let source = root.join("auto_close.fault");
-    let claimed = root.join("auto_close.fault-consumed");
-    match std::fs::rename(source, &claimed) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return operation(),
-        Err(error) => panic!("claim commit fault: {error}"),
-    }
-    let name = std::fs::read_to_string(claimed).expect("read commit fault");
-    let fault = match name.as_str() {
-        "poisoned" => TestCommitFault::Poisoned,
-        "unknown_before" => TestCommitFault::UnknownBefore,
-        "unknown_after" => TestCommitFault::UnknownAfter,
-        _ => panic!("unknown commit fault"),
-    };
-    let result = with_test_commit_fault(fault, operation);
-    std::fs::write(
-        root.join("auto_close.fault-hit"),
-        serde_json::to_vec(&serde_json::json!({"fault":name})).expect("encode fault marker"),
-    )
-    .expect("write fault marker");
-    result
-}
