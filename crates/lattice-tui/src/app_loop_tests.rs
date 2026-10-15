@@ -21,21 +21,39 @@ fn key(id: TurnId, step: u32, attempt: u32) -> ModelAttemptKey {
         attempt_ordinal: attempt,
     }
 }
+const AT: &str = "2026-01-01T00:00:00Z";
+pub(super) fn user_message_node(parent: u64, turn_id: TurnId, text: &str) -> Value {
+    json!({
+        "kind":"user_message","parent":parent,"turn_id":turn_id,"accepted_at":AT,"agent_name":"unused",
+        "model":"model","provider":"openai","limits":{"timeout_secs":300,"max_model_steps":32,"max_model_attempts":3},
+        "config_digest":"0".repeat(64),"message":{"role":"user","parts":[{"semantic":{"text":{"text":text}}}]}
+    })
+}
+/// 以 Finish 关闭的 Step；`parts` 是完整回复的各部分。
+pub(super) fn step_node(parent: u64, turn_id: TurnId, step_ordinal: u32, parts: Value) -> Value {
+    json!({
+        "kind":"step","parent":parent,"turn_id":turn_id,"step_ordinal":step_ordinal,
+        "progress":{"progress":"closed","end":{"end":"finish"}},"attempts":[],
+        "reply":{"role":"assistant","origin":"open_ai_compatible","parts":parts},"slots":[],"updated_at":AT
+    })
+}
+pub(super) fn completed() -> Value {
+    json!({"outcome":"completed","notice":null,"progress":{"progress":"closed","end":{"end":"finish"}}})
+}
 fn view(id: TurnId, closed: bool) -> ObservationSnapshot {
     let mut value = json!({
-        "session":{"session_id":SESSION,"project_store_key":"0".repeat(64),"current":1,"active_turn":id,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},
-        "current_agent":"unused","selected_turn":{"session_id":SESSION,"turn_id":id,"user_node":1,"agent_name":"unused","accepted_at":"2026-01-01T00:00:00Z","ended_at":null,"summary":null,"usage":{"kind":"partial","known":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0},"unknown_attempts":1},"steps":[]},
-        "active":{"key":{"turn_id":id,"ordinal":0},"state":{"state":"requesting","attempt":1}},
+        "session":{"session_id":SESSION,"project_store_key":"0".repeat(64),"current":2,"created_at":AT,"updated_at":AT},
+        "current_agent":"unused","selected_turn":{"session_id":SESSION,"turn_id":id,"user_node":1,"agent_name":"unused","accepted_at":AT,"ended_at":AT,
+            "summary":{"outcome":"failed","notice":{"level":"error","text":"process exit"},"progress":{"progress":"requesting"}},
+            "usage":{"kind":"partial","known":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0},"unknown_attempts":1},"steps":[]},
+        "unclosed_step":[2,{"kind":"step","parent":1,"turn_id":id,"step_ordinal":0,"progress":{"progress":"requesting"},"attempts":[],"reply":null,"slots":[],"updated_at":AT}],
         "history":{"session_id":SESSION,"head":1},"attempt":{"key":key(id,0,1),"segments":[]},"cursor":{"epoch":"peer","sequence":0},"owned":true
     });
     if closed {
-        value["session"]["current"] = json!(2);
         value["history"]["head"] = json!(2);
-        value["selected_turn"]["steps"] = json!([{ "key":{"turn_id":id,"ordinal":0}, "attempts":[{"attempt":1,"origin":"open_ai_compatible","usage":null,"end":{"end":"completed","step":{"session_id":SESSION,"turn_id":id,"model_step_ordinal":0}}}], "state":{"state":"closed","end":{"end":"finish","node":2},"slots":[]} }]);
-        value["session"]["active_turn"] = Value::Null;
         value["selected_turn"]["ended_at"] = json!("2026-01-01T00:00:01Z");
-        value["selected_turn"]["summary"] = json!({"outcome":"completed","notice":null});
-        value["active"] = Value::Null;
+        value["selected_turn"]["summary"] = completed();
+        value["unclosed_step"] = Value::Null;
         value["attempt"] = Value::Null;
         value["owned"] = json!(false);
     }
@@ -67,16 +85,17 @@ fn event(seq: u64, event: TurnEvent) -> Value {
 }
 fn history_entries(view: &ObservationSnapshot) -> Value {
     let id = view.selected_turn.as_ref().unwrap().turn_id;
+    let summary = &view.selected_turn.as_ref().unwrap().summary;
     let mut entries = vec![
-        json!({"node":1,"agent_name":"unused","content":{"kind":"user_message","parent":0,"turn_id":id,"message":{"role":"user","parts":[{"semantic":{"text":{"text":"original prompt"}}}]}}}),
+        json!({"node":1,"agent_name":"unused","summary":summary,"retries":[],"content":user_message_node(0, id, "original prompt")}),
     ];
     if view.history.head.0 == 2 {
-        entries.push(json!({"node":2,"agent_name":"unused","content":{"kind":"step","parent":1,"turn_id":id,"step_ordinal":0,"content":{"assistant":{"role":"assistant","origin":"open_ai_compatible","parts":[{"semantic":{"text":{"text":"live body"}}}]},"results":[]}}}));
+        entries.push(json!({"node":2,"agent_name":"unused","summary":summary,"retries":[],"content":step_node(1, id, 0, json!([{"semantic":{"text":{"text":"live body"}}}]))}));
     }
     json!(entries)
 }
 fn history(view: &ObservationSnapshot) -> Value {
-    let fragments:Vec<_>=history_entries(view).as_array().unwrap().iter().map(|entry|json!({"agent_name":entry["agent_name"],"fragment":{"node":entry["node"],"utf8_offset":0,"json_fragment":serde_json::to_string(&entry["content"]).unwrap(),"complete":true}})).collect();
+    let fragments:Vec<_>=history_entries(view).as_array().unwrap().iter().map(|entry|json!({"agent_name":entry["agent_name"],"summary":entry["summary"],"fragment":{"node":entry["node"],"utf8_offset":0,"json_fragment":serde_json::to_string(&entry["content"]).unwrap(),"complete":true,"agent_name":entry["agent_name"],"summary":entry["summary"],"retries":entry["retries"]}})).collect();
     response(
         "history",
         json!({"anchor":view.history,"fragments":fragments,"next":null}),
@@ -91,12 +110,11 @@ fn finished(view: &ObservationSnapshot) -> Value {
 fn comment_history(app: &mut App, id: TurnId, parts: Value, closed: bool) {
     let mut snapshot = view(id, closed);
     snapshot.history.head = lattice_api::NodeId(2);
-    snapshot.session.current = lattice_api::NodeId(2);
     let mut entries = history_entries(&view(id, true));
-    entries[1]["content"]["content"]["assistant"]["parts"] = parts;
+    entries[1]["content"]["reply"]["parts"] = parts;
     if !closed {
         // 已关闭的工具 Step 之后仍在请求下一步；零工具最终回复不能伪装成进行中 Step。
-        let part = entries[1]["content"]["content"]["assistant"]["parts"]
+        let part = entries[1]["content"]["reply"]["parts"]
             .as_array()
             .unwrap()
             .len();
@@ -106,15 +124,32 @@ fn comment_history(app: &mut App, id: TurnId, parts: Value, closed: bool) {
             "arguments_digest":"5fd582703776c899a2ecb12f3d699bd7244dff1f443ef5ae3f0067bcf3ce279e",
             "address":{"message":{"session_id":SESSION,"turn_id":id,"model_step_ordinal":0},"part_ordinal":part}
         });
-        entries[1]["content"]["content"]["assistant"]["parts"]
+        entries[1]["content"]["reply"]["parts"]
             .as_array_mut()
             .unwrap()
             .push(json!({"semantic":{"tool_call":{"call":call}}}));
-        entries[1]["content"]["content"]["results"] = json!([{
-            "invocation_id":"22222222-2222-4222-8222-222222222222", "name":"observe.workspace",
-            "payload":{"outcome":"succeeded","payload":{"kind":"json","value":null,"digest":"4514e821d251d896aaed09c92f07abacecb5683e0714471682fa6beaca071aa2","byte_length":4}}
+        entries[1]["content"]["progress"]["end"] = json!({"end":"continue"});
+        entries[1]["content"]["slots"] = json!([{
+            "binding":{"invocation_id":"22222222-2222-4222-8222-222222222222","identity":{
+                "session_id":SESSION,"turn_id":id,"model_step_ordinal":0,"part_ordinal":part,"method":"observe.workspace",
+                "descriptor_identity":"observe.workspace","arguments_digest":"5fd582703776c899a2ecb12f3d699bd7244dff1f443ef5ae3f0067bcf3ce279e"}},
+            "progress":{"progress":"terminal","result":{
+                "invocation_id":"22222222-2222-4222-8222-222222222222", "name":"observe.workspace",
+                "payload":{"outcome":"succeeded","payload":{"kind":"json","value":null,"digest":"4514e821d251d896aaed09c92f07abacecb5683e0714471682fa6beaca071aa2","byte_length":4}}
+            },"evidence":{"kind":"unavailable","value":{"reason":"no_result"}}}
         }]);
-        snapshot.active.as_mut().unwrap().key.ordinal = 1;
+        snapshot.session.current = lattice_api::NodeId(3);
+        let (node, step) = snapshot.unclosed_step.as_mut().unwrap();
+        *node = lattice_api::NodeId(3);
+        if let Node::Step {
+            parent,
+            step_ordinal,
+            ..
+        } = step
+        {
+            *parent = lattice_api::NodeId(2);
+            *step_ordinal = 1;
+        }
         snapshot.attempt.as_mut().unwrap().key.model_step_ordinal = 1;
     }
     app.apply_update(LocalUpdate::State {
@@ -142,6 +177,7 @@ fn status(level: NoticeLevel, text: &str) -> Status {
         level,
         text: text.into(),
         closing: None,
+        retry: None,
     }
 }
 
@@ -390,18 +426,17 @@ fn reload_comment(app: &mut App, target: TurnId, wire: &str, on_path: bool) {
     snapshot["session"]["current"] = json!(head);
     snapshot["history"]["head"] = json!(head);
     snapshot["selected_turn"]["user_node"] = json!(user_node);
-    snapshot["selected_turn"]["steps"][0]["state"]["end"]["node"] = json!(head);
     let snapshot: ObservationSnapshot = serde_json::from_value(snapshot).unwrap();
     let mut entries = if on_path {
         let mut old = history_entries(&view(target, true));
-        old[1]["content"]["content"]["assistant"]["parts"][0]["semantic"]["text"]["text"] =
+        old[1]["content"]["reply"]["parts"][0]["semantic"]["text"]["text"] =
             json!("comment target");
         old.as_array().unwrap().clone()
     } else {
         vec![]
     };
-    entries.push(json!({"node":user_node,"agent_name":"unused","content":{"kind":"user_message","parent":user_node - 1,"turn_id":new_turn,"message":{"role":"user","parts":[{"semantic":{"text":{"text":wire}}}]}}}));
-    entries.push(json!({"node":head,"agent_name":"unused","content":{"kind":"step","parent":user_node,"turn_id":new_turn,"step_ordinal":0,"content":{"assistant":{"role":"assistant","parts":[{"semantic":{"text":{"text":"following answer"}}}]},"results":[]}}}));
+    entries.push(json!({"node":user_node,"agent_name":"unused","summary":completed(),"retries":[],"content":user_message_node(user_node - 1, new_turn, wire)}));
+    entries.push(json!({"node":head,"agent_name":"unused","summary":completed(),"retries":[],"content":step_node(user_node, new_turn, 0, json!([{"semantic":{"text":{"text":"following answer"}}}]))}));
     app.apply_update(LocalUpdate::State {
         view: Box::new(snapshot.clone()),
         phase: ObservationPhase::Finished,
@@ -650,7 +685,7 @@ fn dock_message_survives_r2_history_until_space() {
             released + 1
         );
         h.app
-            .replace_history(crate::session::history_blocks(loaded));
+            .replace_history(crate::session::history_blocks(loaded, None));
         assert_eq!(frame(&h.app).text.matches("dock-marker").count(), 1);
     }
 }
@@ -830,14 +865,12 @@ fn finish_completed(app: &mut App, id: TurnId) {
             Block::UserTurn(turn, _) => turn_id = *turn,
             Block::User(text) => {
                 let node = entries.len() as u64 + 1;
-                entries.push(json!({"node":node,"agent_name":"unused","content":{
-                    "kind":"user_message","parent":node - 1,"turn_id":turn_id,
-                    "message":{"role":"user","parts":[{"semantic":{"text":{"text":text}}}]},
-                }}));
-                entries.push(json!({"node":node + 1,"agent_name":"unused","content":{
-                    "kind":"step","parent":node,"turn_id":turn_id,"step_ordinal":0,
-                    "content":{"assistant":{"role":"assistant","origin":"open_ai_compatible","parts":[{"semantic":{"text":{"text":"live body"}}}]},"results":[]},
-                }}));
+                entries.push(
+                    json!({"node":node,"agent_name":"unused","summary":completed(),"retries":[],
+                    "content":user_message_node(node - 1, turn_id, text)}),
+                );
+                entries.push(json!({"node":node + 1,"agent_name":"unused","summary":completed(),"retries":[],
+                    "content":step_node(node, turn_id, 0, json!([{"semantic":{"text":{"text":"live body"}}}]))}));
             }
             _ => {}
         }
@@ -846,9 +879,6 @@ fn finish_completed(app: &mut App, id: TurnId) {
     closed.session.current = lattice_api::NodeId(node);
     closed.history.head = lattice_api::NodeId(node);
     closed.selected_turn.as_mut().unwrap().user_node = lattice_api::NodeId(node - 1);
-    let mut serialized = serde_json::to_value(&closed).unwrap();
-    serialized["selected_turn"]["steps"][0]["state"]["end"]["node"] = json!(node);
-    closed = serde_json::from_value(serialized).unwrap();
     app.apply_update(LocalUpdate::State {
         view: Box::new(closed.clone()),
         phase: ObservationPhase::NoOwner,
@@ -1014,20 +1044,21 @@ fn accepting_and_unknown_receipts_release_capacity_without_requeue() {
 
 fn stopped_view(id: TurnId, cancelled: bool, user_node: u64) -> ObservationSnapshot {
     let mut value = serde_json::to_value(view(id, false)).unwrap();
-    value["session"]["current"] = json!(user_node);
-    value["history"]["head"] = json!(user_node);
+    value["session"]["current"] = json!(user_node + 1);
+    value["history"]["head"] = json!(user_node + 1);
     value["selected_turn"]["user_node"] = json!(user_node);
-    value["session"]["active_turn"] = Value::Null;
     value["selected_turn"]["ended_at"] = json!("2026-01-01T00:00:01Z");
+    let cause = if cancelled {
+        "cancelled"
+    } else {
+        "process_exit"
+    };
     value["selected_turn"]["summary"] = json!({
         "outcome":if cancelled { "cancelled" } else { "failed" },
         "notice":{"level":if cancelled { "info" } else { "error" },"text":"stopped"},
+        "progress":{"progress":"closed","end":{"end":"stop","cause":{"cause":cause}}},
     });
-    value["selected_turn"]["steps"] = json!([{
-        "key":{"turn_id":id,"ordinal":0},"attempts":[],
-        "state":{"state":"closed","end":{"end":"stop","node":null,"cause":{"cause":if cancelled { "cancelled" } else { "process_exit" }}},"slots":[]},
-    }]);
-    value["active"] = Value::Null;
+    value["unclosed_step"] = Value::Null;
     value["attempt"] = Value::Null;
     value["owned"] = json!(false);
     serde_json::from_value(value).unwrap()
@@ -1717,6 +1748,11 @@ async fn cancel_receipt_orders_and_late_probe_keep_original_intent() {
                 let id = serde_json::from_value(r["target"]["turn_id"].clone()).unwrap();
                 let mut fixed = view(id, false);
                 fixed.owned = order != 0 || subscriptions > 1;
+                if !fixed.owned {
+                    // 接受之前 Session 里还没有这一轮。
+                    fixed.selected_turn = None;
+                    fixed.unclosed_step = None;
+                }
                 Reply::Now(snapshot(&fixed))
             }
             "history" => Reply::Never,
@@ -2015,19 +2051,12 @@ async fn switching_targets_keeps_old_receipts_and_diagnostics_out_of_new_state()
             remote.wait(|f| f.current == Some(old)).await;
             remote.ctrl('c');
             peer.wait(|s| count(s, "cancel") == 1).await;
+            // A 已关闭，Session 当前位置停在 B 未关闭的 Step 上；快照只说明 A 的 Owner，
+            // B 按可能仍在执行对待，成为下一次取消或重连的目标。
             let mut closed = view(old, true);
-            closed.session.active_turn = Some(active);
+            closed.unclosed_step = view(active, false).unclosed_step;
             old_tx.unbounded_send(snapshot(&closed)).unwrap();
-            // 快照里 B 仍在进行而无人接管：一条 Warn 暂驻 Dock，释放后才能继续输入。
-            let orphaned = remote
-                .wait(|f| f.current == Some(active) && f.dock.contains("无人接管"))
-                .await;
-            assert!(
-                orphaned.dock.contains(&active.to_string()),
-                "{}",
-                orphaned.dock
-            );
-            remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
+            remote.wait(|f| f.current == Some(active)).await;
             match gesture {
                 1 => {
                     // 第二次是对 B 的新取消，不是两秒窗口内的退出。
@@ -2124,9 +2153,9 @@ async fn detached_cancel_keeps_original_target_diagnostic() {
     assert_eq!(report.turn_id, Some(id));
     assert_eq!(report.cancel, Some(CancelStatus::Unknown));
     assert_eq!(cancels(&peer.seen.borrow()), vec![json!(id); 2]);
-    assert!(detach_lines(report).iter().any(
-        |line| line.contains("original cancellation denied") && line.contains(&id.to_string())
-    ));
+    assert!(detach_lines(report, false).iter().any(|line| {
+        line.contains("original cancellation denied") && line.contains(&id.to_string())
+    }));
 }
 
 #[tokio::test]
@@ -2175,11 +2204,8 @@ async fn busy_submission_preserves_draft_and_can_cancel_displayed_active_turn() 
         remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
         remote.press(KeyCode::Esc, KeyModifiers::NONE);
         remote.line("/reconnect");
-        // 所选目标无人接管的提示同样暂驻 Dock，释放后不妨碍后面的 Ctrl+D。
-        remote
-            .wait(|f| f.current == Some(active) && f.dock.contains("无人接管"))
-            .await;
-        remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
+        // 被拒请求没有 Turn；Session 当前位置停在另一轮未关闭的 Step 上，它成为取消目标。
+        remote.wait(|f| f.current == Some(active)).await;
         remote.ctrl('c');
         let f = remote.wait(|f| f.cancel == Some(CancelStatus::Taken)).await;
         // 被拒回执已实时显示，交接报告不再重述。

@@ -19,12 +19,38 @@ fn app() -> App {
         Path::new("/nonexistent-tui-test-history"),
     )
 }
+/// 已关闭的 Turn 的结局；`progress` 与结局一致。
+fn summary(outcome: &str) -> serde_json::Value {
+    let (notice, end) = match outcome {
+        "failed" => (
+            json!({"level":"error","text":"provider failure"}),
+            json!({"end":"stop","cause":{"cause":"process_exit"}}),
+        ),
+        "cancelled" => (
+            json!({"level":"info","text":"cancelled by user"}),
+            json!({"end":"stop","cause":{"cause":"cancelled"}}),
+        ),
+        _ => (serde_json::Value::Null, json!({"end":"finish"})),
+    };
+    json!({"outcome":outcome,"notice":notice,"progress":{"progress":"closed","end":end}})
+}
 fn view(id: TurnId, outcome: &str) -> ObservationSnapshot {
     serde_json::from_value(json!({
-        "session":{"session_id":SID,"project_store_key":"0".repeat(64),"current":1,"active_turn":null,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},
-        "current_agent":"test","selected_turn":{"session_id":SID,"turn_id":id,"user_node":1,"agent_name":"test","accepted_at":"2026-01-01T00:00:00Z","ended_at":"2026-01-01T00:00:01Z","summary":{"outcome":outcome,"notice":match outcome { "failed" => json!({"level":"error","text":"provider failure"}), "cancelled" => json!({"level":"info","text":"cancelled by user"}), _ => serde_json::Value::Null }},"usage":{"kind":"partial","known":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0},"unknown_attempts":1},"steps":[]},
-        "active":null,"history":{"session_id":SID,"head":1},"attempt":null,"cursor":{"epoch":"test","sequence":1},"owned":false
+        "session":{"session_id":SID,"project_store_key":"0".repeat(64),"current":2,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},
+        "current_agent":"test","selected_turn":{"session_id":SID,"turn_id":id,"user_node":1,"agent_name":"test","accepted_at":"2026-01-01T00:00:00Z","ended_at":"2026-01-01T00:00:01Z","summary":summary(outcome),"usage":{"kind":"partial","known":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0},"unknown_attempts":1},"steps":[]},
+        "unclosed_step":null,"history":{"session_id":SID,"head":2},"attempt":null,"cursor":{"epoch":"test","sequence":1},"owned":false
     })).unwrap()
+}
+/// 执行者消失在 `progress` 阶段：Session 当前位置停在这一轮未关闭的 Step 上，后台没有 Owner。
+fn ownerless(id: TurnId, progress: &str, reply: serde_json::Value) -> ObservationSnapshot {
+    let mut value = serde_json::to_value(view(id, "failed")).unwrap();
+    value["selected_turn"]["summary"]["progress"] = json!({"progress":progress});
+    value["history"]["head"] = json!(1);
+    value["unclosed_step"] = json!([2, {
+        "kind":"step","parent":1,"turn_id":id,"step_ordinal":0,"progress":{"progress":progress},
+        "attempts":[],"reply":reply,"slots":[],"updated_at":"2026-01-01T00:00:01Z"
+    }]);
+    serde_json::from_value(value).unwrap()
 }
 
 #[test]
@@ -110,6 +136,7 @@ fn summary_survives_slow_failed_history_and_is_not_duplicated() {
                     "持久正文不可用；此次内容未验证，/reconnect 重载：读取任务：store unavailable"
                         .into(),
                 closing: None,
+                retry: None,
             })
         );
         assert!(!text.contains("正文不可用"), "{text}");
@@ -159,8 +186,8 @@ fn retry_replaces_only_its_attempt_and_stale_history_cannot_replace_display() {
     );
     assert!(matches!(
         app.dock.message(&app.blocks),
-        Some(Status { level: NoticeLevel::Warn, text, closing: None })
-            if text.ends_with("：retry diagnostic")
+        Some(Status { level: NoticeLevel::Warn, text, closing: None, retry: Some(known) })
+            if text.ends_with("：retry diagnostic") && *known == key
     ));
     let next = lattice_api::local::ModelAttemptKey {
         attempt_ordinal: 2,
@@ -282,18 +309,20 @@ fn loaded_step_and_terminal_tool_cannot_be_overwritten_by_late_events() {
     );
     assert!(app.blocks.iter().any(|b|matches!(b,Block::Tool{state:ToolState::Unavailable{outcome},..} if outcome=="succeeded")));
     // 关闭事件和快照携带同一结局，已装入的 Step 不能吞掉或重复显示说明。
-    let summary: lattice_api::local::TurnSummary = serde_json::from_value(
-        json!({"outcome":"failed","notice":{"level":"error","text":"late failure"}}),
-    )
+    let end = json!({"end": "stop", "cause": {"cause": "process_exit"}});
+    let summary: lattice_api::local::TurnSummary = serde_json::from_value(json!({
+        "outcome":"failed","notice":{"level":"error","text":"late failure"},
+        "progress":{"progress":"closed","end":end}
+    }))
     .unwrap();
     let step = serde_json::from_value(json!({
+        "node": 3,
         "key": {"turn_id": id, "ordinal": 1},
+        "progress": {"progress": "closed", "end": end},
+        "end": end,
         "attempts": [],
-        "state": {
-            "state": "closed",
-            "end": {"end": "stop", "node": null, "cause": {"cause": "process_exit"}},
-            "slots": []
-        }
+        "slots": [],
+        "updated_at": "2026-01-01T00:00:01Z"
     }))
     .unwrap();
     app.apply_turn_event(TurnEvent::TurnFailed {
@@ -305,7 +334,7 @@ fn loaded_step_and_terminal_tool_cannot_be_overwritten_by_late_events() {
         summary: summary.clone(),
     });
     let mut closed = view(id, "failed");
-    closed.selected_turn.as_mut().unwrap().summary = Some(summary);
+    closed.selected_turn.as_mut().unwrap().summary = summary;
     app.apply_update(LocalUpdate::State {
         view: Box::new(closed),
         phase: ObservationPhase::NoOwner,
@@ -358,19 +387,8 @@ fn hidden_reasoning_does_not_change_text_on_snapshot_or_history_replacement() {
     );
     assert!(!expected.iter().any(|line| line.contains("hidden")));
 
-    let mut snapshot = view(id, "completed");
-    snapshot.session.active_turn = Some(id);
-    let turn = snapshot.selected_turn.as_mut().unwrap();
-    turn.summary = None;
-    turn.ended_at = None;
+    let mut snapshot = ownerless(id, "requesting", serde_json::Value::Null);
     snapshot.owned = true;
-    snapshot.active = Some(
-        serde_json::from_value(json!({
-            "key":{"turn_id":id,"ordinal":0},
-            "state":{"state":"requesting","attempt":0}
-        }))
-        .unwrap(),
-    );
     snapshot.attempt = live.attempt.clone();
     let mut reconnected = app();
     reconnected.apply_update(LocalUpdate::Reset {
@@ -381,13 +399,14 @@ fn hidden_reasoning_does_not_change_text_on_snapshot_or_history_replacement() {
 
     let history = serde_json::from_value(json!({
         "anchor":{"session_id":SID,"head":2},
-        "entries":[{"node":2,"agent_name":"test","content":{
+        "entries":[{"node":2,"agent_name":"test","summary":snapshot.selected_turn.as_ref().unwrap().summary,"retries":[],"content":{
             "kind":"step","parent":1,"turn_id":id,"step_ordinal":0,
-            "content":{"assistant":{"role":"assistant","origin":"open_ai_compatible","parts":[
+            "progress":{"progress":"closed","end":{"end":"finish"}},"attempts":[],
+            "reply":{"role":"assistant","origin":"open_ai_compatible","parts":[
                 {"semantic":{"text":{"text":"before "}}},
                 {"semantic":{"reasoning":{"text":"hidden"}}},
                 {"semantic":{"text":{"text":"after"}}}
-            ]},"results":[]}
+            ]},"slots":[],"updated_at":"2026-01-01T00:00:01Z"
         }}]
     }))
     .unwrap();
@@ -427,8 +446,7 @@ fn own_messages_are_single_and_carry_their_level() {
             error,
         })
     };
-    let mut orphan = view(id, "completed");
-    orphan.session.active_turn = Some(id);
+    let orphan = ownerless(id, "requesting", serde_json::Value::Null);
     let report = DetachReport {
         session_id: None,
         turn_id: Some(id),
@@ -557,10 +575,10 @@ fn own_messages_are_single_and_carry_their_level() {
             "观察连接出错；执行状态未知，/reconnect 重连：store unavailable".into(),
         ),
         (
-            "遗留 Turn 无人接管",
+            "执行者已消失",
             Warn,
             state(orphan.clone(), None),
-            format!("遗留 Turn {id} 无人接管；发送新消息前后台会自动关闭崩溃遗留任务"),
+            format!("turn {id} 的执行者已经消失，它停在已写入的进度；可以直接发送新消息或退回"),
         ),
         (
             "找回既有请求",
@@ -623,6 +641,7 @@ fn own_messages_are_single_and_carry_their_level() {
                 level: level.clone(),
                 text,
                 closing: None,
+                retry: None,
             }],
             "{name}"
         );
@@ -717,18 +736,17 @@ fn closing_of_a_recovered_submission_still_reaches_the_dock() {
 #[test]
 fn history_shows_each_turn_closing_once_and_takes_over_the_live_one() {
     let turns = [0, 1, 2].map(|_| lattice_api::local::new_turn_id());
-    let failed = json!({"outcome":"failed","notice":{"level":"error","text":"provider failure"}});
-    let completed = json!({"outcome":"completed","notice":null});
-    let history = |summaries: &[&serde_json::Value]| {
+    let failed = summary("failed");
+    let completed = summary("completed");
+    let running = json!({"outcome":"failed","notice":{"level":"error","text":"process exit"},"progress":{"progress":"requesting"}});
+    let history = |summaries: &[&serde_json::Value], unfinished: Option<TurnId>| {
         let entries = summaries
             .iter()
             .zip(turns)
             .enumerate()
             .map(|(n, (summary, turn))| {
-                json!({"node":n + 1,"agent_name":"test","summary":summary,"content":{
-                    "kind":"user_message","parent":n,"turn_id":turn,
-                    "message":{"role":"user","parts":[{"semantic":{"text":{"text":format!("ask-{n}")}}}]},
-                }})
+                json!({"node":n + 1,"agent_name":"test","summary":summary,"retries":[],
+                    "content":super::loop_tests::user_message_node(n as u64, turn, &format!("ask-{n}"))})
             })
             .collect::<Vec<_>>();
         crate::session::history_blocks(
@@ -736,6 +754,7 @@ fn history_shows_each_turn_closing_once_and_takes_over_the_live_one() {
                 "anchor":{"session_id":SID,"head":entries.len()},"entries":entries,
             }))
             .unwrap(),
+            unfinished,
         )
     };
     let lines = [
@@ -754,7 +773,7 @@ fn history_shows_each_turn_closing_once_and_takes_over_the_live_one() {
 
     // 重新打开：前两轮已关闭，第三轮仍在进行。
     let mut app = app();
-    app.replace_history(history(&[&failed, &completed, &serde_json::Value::Null]));
+    app.replace_history(history(&[&failed, &completed, &running], Some(turns[2])));
     assert!(app.dock.shows_input(), "历史里的结局不进 Dock");
     let (first, second) = (at(&app, &lines[0]).unwrap(), at(&app, &lines[1]).unwrap());
     assert!(first < at(&app, "ask-1").unwrap() && at(&app, "ask-1").unwrap() < second);
@@ -781,7 +800,7 @@ fn history_shows_each_turn_closing_once_and_takes_over_the_live_one() {
         error: None,
     });
     assert!(app.dock.message_id().is_some());
-    app.replace_history(history(&[&failed, &completed, &failed]));
+    app.replace_history(history(&[&failed, &completed, &failed], None));
     let parked = format!("turn {} 失败：provider failure", turns[2]);
     assert_eq!(
         app.dock
@@ -800,9 +819,165 @@ fn history_shows_each_turn_closing_once_and_takes_over_the_live_one() {
     assert!(at(&app, "ask-2").unwrap() < retry && retry < at(&app, &lines[2]).unwrap());
 
     // 回退到第一轮之后：后两轮离开当前路径，它们的结局行一起消失。
-    app.replace_history(history(&[&failed]));
+    app.replace_history(history(&[&failed], None));
     assert_eq!(count(&app, &lines[0]), 1);
     assert_eq!(count(&app, &lines[1]) + count(&app, &lines[2]), 0);
+}
+
+fn transcript_rows(app: &App) -> Vec<String> {
+    crate::view::transcript_lines(app, 200)
+        .iter()
+        .map(|line| line.to_string().trim().to_owned())
+        .collect()
+}
+
+/// 重新打开时看到执行者已消失的一轮：一条 Warn 暂驻 Dock，结局行直接进对话记录。
+/// 停下的那一步只随快照交付，装入后排在结局行之前，结局行仍是这一轮的最后一行；重连不重复。
+#[test]
+fn ownerless_turn_warns_and_closes_after_its_last_step() {
+    let mut app = app();
+    let id = lattice_api::local::new_turn_id();
+    let reply = json!({"role":"assistant","origin":"open_ai_compatible",
+        "parts":[{"semantic":{"text":{"text":"partial reply"}}}]});
+    let snapshot = ownerless(id, "executing", reply);
+    let summary = &snapshot.selected_turn.as_ref().unwrap().summary;
+    let history: lattice_api::local::LocalHistory = serde_json::from_value(json!({
+        "anchor":snapshot.history,
+        "entries":[{"node":1,"agent_name":"test","summary":summary,"retries":[],
+            "content":super::loop_tests::user_message_node(0, id, "ask")}],
+    }))
+    .unwrap();
+    let warn = format!("turn {id} 的执行者已经消失，它停在已写入的进度；可以直接发送新消息或退回");
+    let closing = format!("✗ turn {id} 失败：provider failure");
+    for generation in [1, 2] {
+        app.apply_update(LocalUpdate::State {
+            view: Box::new(snapshot.clone()),
+            phase: ObservationPhase::NoOwner,
+            error: None,
+        });
+        app.apply_update(LocalUpdate::Reset {
+            view: Box::new(snapshot.clone()),
+            generation,
+        });
+        app.apply_update(LocalUpdate::History {
+            anchor: snapshot.history.clone(),
+            generation,
+            stale: false,
+            result: Ok(Box::new(history.clone())),
+        });
+        assert_eq!((app.current_turn, app.phase), (None, TurnPhase::Idle));
+        assert_eq!(
+            app.dock
+                .message(&app.blocks)
+                .map(|status| (status.level.clone(), status.text.clone())),
+            Some((NoticeLevel::Warn, warn.clone()))
+        );
+        let rows = transcript_rows(&app);
+        let at = |text: &str| rows.iter().position(|row| row == text);
+        assert_eq!(
+            rows.iter().filter(|row| **row == closing).count(),
+            1,
+            "{rows:?}"
+        );
+        assert_eq!(
+            rows.iter().filter(|row| *row == "partial reply").count(),
+            1,
+            "{rows:?}"
+        );
+        assert!(
+            at("ask") < at("partial reply") && at("partial reply") < at(&closing),
+            "{rows:?}"
+        );
+    }
+    app.apply_action(KeyAction::Insert(' '));
+    let rows = transcript_rows(&app);
+    assert_eq!(
+        rows.iter().filter(|row| **row == warn).count(),
+        1,
+        "{rows:?}"
+    );
+}
+
+/// 历史带回的重试提示与实时的同一条文字和等级相同，排在所属 Step 的回复之前；它是旧消息，不进 Dock。
+/// 实时已显示、仍暂驻 Dock 的同一提示由历史取代并继续暂驻，释放后只出现一次；迟到的实时提示不再重复。
+#[test]
+fn history_retry_notices_precede_their_step_and_replace_live_ones() {
+    let id = lattice_api::local::new_turn_id();
+    let key = ModelAttemptKey {
+        turn_id: id,
+        model_step_ordinal: 0,
+        attempt_ordinal: 0,
+    };
+    let retry = || TurnEvent::LlmRetry {
+        key,
+        delay_ms: 250,
+        notice: lattice_api::local::Notice {
+            level: NoticeLevel::Warn,
+            text: "HTTP 429 rate_limit_exceeded".into(),
+        },
+    };
+    let history = || {
+        let entries = json!([
+            {"node":1,"agent_name":"test","summary":summary("completed"),"retries":[],
+                "content":super::loop_tests::user_message_node(0, id, "ask")},
+            {"node":2,"agent_name":"test","summary":summary("completed"),
+                "retries":[{"attempt":0,"delay_ms":250,"notice":{"level":"warn","text":"HTTP 429 rate_limit_exceeded"}}],
+                "content":super::loop_tests::step_node(1, id, 0, json!([{"semantic":{"text":{"text":"answer"}}}]))},
+        ]);
+        crate::session::history_blocks(
+            serde_json::from_value(json!({"anchor":{"session_id":SID,"head":2},"entries":entries}))
+                .unwrap(),
+            None,
+        )
+    };
+    let line = "第 1 次请求失败，250 ms 后重试：HTTP 429 rate_limit_exceeded";
+    let count = |app: &App| {
+        transcript_rows(app)
+            .iter()
+            .filter(|row| *row == line)
+            .count()
+    };
+    let ordered = |app: &App| {
+        let rows = transcript_rows(app);
+        let at = |text: &str| rows.iter().position(|row| row == text);
+        at("ask") < at(line) && at(line) < at("answer")
+    };
+
+    let mut live = app();
+    live.apply_turn_event(retry());
+    let shown = live.dock.message(&live.blocks).cloned().unwrap();
+    assert_eq!(shown.text, line);
+
+    let mut reopened = app();
+    reopened.replace_history(history());
+    assert!(reopened.dock.shows_input(), "历史带回的重试提示不进 Dock");
+    let statuses = reopened
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            Block::Status(status) if status.closing.is_none() => Some(status),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(statuses, [&shown]);
+    assert!(ordered(&reopened));
+
+    live.apply_turn_event(TurnEvent::TokenDelta {
+        key: ModelAttemptKey {
+            attempt_ordinal: 1,
+            ..key
+        },
+        content: "answer".into(),
+    });
+    live.replace_history(history());
+    assert_eq!(live.dock.message(&live.blocks), Some(&shown));
+    live.apply_action(KeyAction::Insert(' '));
+    assert!(live.dock.shows_input());
+    assert_eq!(count(&live), 1);
+    assert!(ordered(&live));
+    live.apply_turn_event(retry());
+    assert!(live.dock.shows_input());
+    assert_eq!(count(&live), 1);
 }
 
 /// 退出报告只写给人看的文字：结局用中文词，读取位置用中文说明，不打印内部分类或结构体。
@@ -852,24 +1027,27 @@ fn detach_lines_describe_outcome_and_read_context_in_words() {
             "节点 9",
         ),
     ] {
-        let lines = detach_lines(DetachReport {
-            session_id: None,
-            turn_id: Some(id),
-            submission: None,
-            submission_diagnostic: None,
-            not_submitted: None,
-            history_error: Some(lattice_api::local::HistoryReadError {
-                context,
-                error: read_error(),
-            }),
-            cancel: None,
-            cancel_error: Some(read_error()),
-            state: Some(LocalState {
-                view: Box::new(view(id, outcome)),
-                phase: ObservationPhase::Finished,
-                error: None,
-            }),
-        });
+        let lines = detach_lines(
+            DetachReport {
+                session_id: None,
+                turn_id: Some(id),
+                submission: None,
+                submission_diagnostic: None,
+                not_submitted: None,
+                history_error: Some(lattice_api::local::HistoryReadError {
+                    context,
+                    error: read_error(),
+                }),
+                cancel: None,
+                cancel_error: Some(read_error()),
+                state: Some(LocalState {
+                    view: Box::new(view(id, outcome)),
+                    phase: ObservationPhase::Finished,
+                    error: None,
+                }),
+            },
+            false,
+        );
         assert_eq!(
             lines,
             [

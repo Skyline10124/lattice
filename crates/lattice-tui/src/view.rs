@@ -938,6 +938,7 @@ mod tests {
                 level: NoticeLevel::Info,
                 text: "hello".into(),
                 closing: None,
+                retry: None,
             }));
             app.input.set_text("typed");
             let mut terminal = Terminal::new(TestBackend::new(width, height))?;
@@ -967,6 +968,7 @@ mod tests {
                             text: "第 3 次请求失败，250 ms 后重试：retrying\npermission denied"
                                 .into(),
                             closing: None,
+                            retry: None,
                         };
                         let entry = app.blocks.identify(Block::Status(status.clone()));
                         app.dock.offer(entry.id, &status);
