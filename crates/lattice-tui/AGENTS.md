@@ -11,9 +11,9 @@
 ## 局部约束
 
 - 新会话准备在 UI 启动前报告配置问题，显示 API 给出的配置拒绝说明，与提交时一致；既有会话与重连走只读入口，新提交才冻结配置。Component 预热与执行由后台所属 API 处理。
-- session 负责打开已有会话、新会话的配置准备及 LocalHistory/消息到 Block 的转换；Session 在首次提交接受时创建。connection 生成状态消息的文字并定级，转换退出报告文案；等级只在这里决定，是否暂驻由 Dock 按等级判断，见[状态消息与等级](../../docs/architecture/tui.md#状态消息与等级)。app 持有本客户端一次交互的具体句柄 LocalTurn，发出意图、消费更新，维护呈现与按 InvocationId/来源的工具配对；交付、取消回执、订阅和历史异步读取归 LocalClient。完整交接见 [TUI 组件接线](../../docs/architecture/tui.md#组件接线)。
+- session 负责打开已有会话、配置加载及对话条目到 Block 的转换；新会话的 SessionId 在首次提交时生成，Session 在首次提交接受时创建。connection 生成状态消息的文字并定级，转换退出报告文案；等级只在这里决定，是否暂驻由 Dock 按等级判断，见[状态消息与等级](../../docs/architecture/tui.md#状态消息与等级)。app 持有本客户端一次提交的具体句柄 LocalTurn 与当前会话的视图，发出提交、`watch`、查询与取消，按 NodeId 维护条目的显示；连接、视图与查询的转交及分帧归 LocalClient。完整交接见 [TUI 组件接线](../../docs/architecture/tui.md#组件接线)。
 - input 负责缓冲、历史与按键，view 负责布局、折行、viewport、Dock 与 statusline。共享渲染归本 crate，目录和文件按职责组织。
-- raw 模式下 Ctrl+C 经 LocalTurn 登记取消意图，不另起 tokio::signal::ctrl_c watcher。退出、接受未知、快照重同步、尝试边界与连接中断的完整显示规则归 TUI 合同。
+- raw 模式下 Ctrl+C 按 TurnId 取消：本客户端提交的一轮经 LocalTurn 登记取消意图，不另起 tokio::signal::ctrl_c watcher。退出、接受未知、视图推送与路径替换、往上翻取更早的轮、尝试边界与连接中断的完整显示规则归 TUI 合同。
 - REPL 历史尽力写入 `<session_dir>/repl_history.txt`，保持纯文本行格式。
 - 所有布局使用统一 content_w 和安全整数运算，具体不变量引用合同；运行状态的显示不是 Invocation 持久结果权威。
 - 目录组织调整不授权新增工具卡片或其他功能；卡片接线仍须以明确数据契约为依据。
