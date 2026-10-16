@@ -2,11 +2,11 @@
 
 ## 职责与模块
 
-维护全局会话库 `lattice.redb`：Session、会话树（Step 节点内含尝试与调用槽位）、配置表、TurnId 索引、InvocationId 索引和调用变更日志。提供同步的领域事务、由阶段给出结论、历史读取与操作员只读投影；对话与 usage 类型归 `lattice-conversation`。
+维护全局会话库 `lattice.redb`：Session、会话树（Step 节点内含尝试与调用槽位）、配置表、TurnId 索引、InvocationId 索引和调用变更日志。提供同步的领域事务、由阶段给出结论、对话条目与按轮的历史查询、操作员只读投影；对话与 usage 类型归 `lattice-conversation`。
 
 - `store/mod.rs`、`types.rs`：SessionStore、锁凭据、领域类型、错误与公开接口。
 - `store/codec.rs`、`open.rs`、`validate.rs`：表与值版本、创建/严格打开、形状及跨记录一致性校验。
-- `store/write.rs`、`close.rs`：事务写入与纯关闭规划；`read.rs`：快照、树、Step 详情、分页和操作员投影。
+- `store/write.rs`、`close.rs`：事务写入与纯关闭规划；`read.rs`：树、对话条目的读取投影与轮次序号、按轮分页和操作员投影。
 - `store/config.rs`、`hex_digest.rs`：冻结事实与摘要编码；`local.rs`：按 Session/Turn 等范围加载事务记录。
 - `store/tests.rs`：记录层回归。
 

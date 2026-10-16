@@ -47,39 +47,37 @@ Session 与 TUI 命令会按需自启后台；`daemon status`、`daemon stop` �
 
 ### 提交与找回
 
-在目标项目根准备 `reader` 配置。首次提交不带 `--session`，必须指定 `--agent`；接受事务同时创建 Session 与首个 Turn。先生成并在终端外保存一次 TurnId，同时保存原输入和工作区位置：
+在目标项目根准备 `reader` 配置。首次提交不带 `--session`，必须指定 `--agent`；CLI 生成 TurnId 与新会话的 SessionId，先输出一条写明这两个身份的 `submit` 记录，再发出请求。接受事务同时创建 Session 与首个 Turn。
 
 ```sh
-read -r TURN_ID < /proc/sys/kernel/random/uuid
 PROMPT="概括这个项目的用途，并指出主要入口文件和目录。"
-printf 'turn=%s\n' "$TURN_ID"
-lattice --json session send "$PROMPT" --agent reader --turn-id "$TURN_ID"
+lattice --json session send "$PROMPT" --agent reader
 ```
 
-保存接受回执中的 SessionId。首次提交前它为空；JSONL 的 `submission` 记录保留原请求，`acceptance` 回执给出接受或找回结果及 SessionId。向已有 Session 发送新请求时，使用新的 TurnId：
+从第一条 `submit` 记录保存 TurnId 与 SessionId；收到回执后的第二条 `submit` 记录给出结果。向已有 Session 发送新请求：
 
 ```sh
-SESSION_ID="替换为接受回执中的会话 ID"
-read -r NEXT_TURN_ID < /proc/sys/kernel/random/uuid
-lattice --json session send "继续检查测试入口。" --session "$SESSION_ID" --turn-id "$NEXT_TURN_ID"
+SESSION_ID="替换为第一条 submit 记录中的会话 ID"
+lattice --json session send "继续检查测试入口。" --session "$SESSION_ID"
 ```
 
-顶层 `lattice run` 的参数与 `session send` 相同。已有 Session 默认沿用当前位置所属 Turn 的 agent，也可用 `--agent` 覆盖；当前位置为根节点 `0` 时必须指定。未指定 `--turn-id` 时，CLI 在发请求前生成并输出身份。
+顶层 `lattice run` 的参数与 `session send` 相同。已有 Session 默认沿用当前位置所属 Turn 的 agent，也可用 `--agent` 覆盖；当前位置为根节点 `0` 时必须指定。
 
 | 提交回复 | 下一步 |
 | --- | --- |
-| 已确认接受 | 继续观察，或断开后按原 TurnId 查询 |
+| 已确认接受 | 继续观察，或断开后按 TurnId 查询 |
 | Busy | 保存未接受的输入，待该 Session 空闲后发送；后台不排队 |
-| 接受确认未知 | 保存原身份，先查询事实；需要找回时显式重发原请求 |
-| 找回已有请求 | 使用返回的原 Turn 与 Session，核对进行中状态或已关闭结果 |
+| Conflict | TurnId 已被使用，或要新建的会话已存在；不重发，按 TurnId 查询 |
+| 接受确认未知 | CLI 在进程内按 TurnId 查询找回；CLI 进程本身中断时，按下文手动查询 |
 
-例如首次提交的回执未知时，恢复原变量，在同一工作区再次执行原命令：
+CLI 进程在等待回执时中断，用第一条 `submit` 记录中的 TurnId 查询：
 
 ```sh
-lattice --json session send "$PROMPT" --agent reader --turn-id "$TURN_ID"
+TURN_ID="替换为第一条 submit 记录中的 TurnId"
+lattice --json session turn "$TURN_ID"
 ```
 
-不要重新运行生成 TurnId 的一行，也不要更换原输入、工作区或原有 `--session`。后台先按全局 TurnId 核验原输入及项目绑定；同请求返回原 Turn 与 Session，不加载新配置、不重跑模型或 Tool，不会多建 Session。身份或输入不符返回 Conflict。原 Turn 仍在进行时，找回只衔接观察；执行者已消失时，找回给出它停下时的结局。详见[请求身份与找回](../architecture/session.md#请求身份与找回)。
+查到即已接受，按下一节继续观察；报告在途说明后台仍在准入这个请求，稍后再查；NotFound 说明这次请求没有被接受，可以重新发送这条消息，CLI 会生成新的身份。`submit` 只接受新请求，不用同一条命令找回。详见[请求身份与找回](../architecture/session.md#请求身份与找回)。
 
 ### 查询与继续观察
 
@@ -94,7 +92,7 @@ lattice --json session turn "$TURN_ID" --follow
 
 查询与已有会话重连无需当前 profile/provider 凭据。已关闭的 Turn 可读即已持久，没有额外完成确认或补屏障步骤；进行中的 Turn 即使当前无 Owner，读取也不替它关闭。
 
-`--follow` 与 TUI 重连按“快照 + 按序事件 + 结束”观察；慢订阅落出事件窗口时由快照中的段列表重新同步。JSONL 的 `snapshot` 表示状态，`history` 给出从根到快照中当前位置的对话；不是 Git OID、journal 或另一份执行账本。历史分页只读取快照已有的节点。后台重启后未保存的半截流式文字无法找回。
+`--follow` 与 TUI 按会话视图观察：先得到会话头与最近几轮的对话条目，之后接收变化的条目与生成中的文字；观察者变慢时只少收中间版本，不需要重新同步。`--follow` 的 JSONL 只含所跟的那一轮：`head` 是会话头，`entry` 是对话条目，按 `node` 覆盖，`text` 是生成中的文字；结局在这一轮最后一个 Step 条目的 `TurnSummary` 中。它们不是 Git OID、journal 或另一份执行账本。后台重启后未保存的半截流式文字无法找回。
 
 TUI 中用 `/reconnect` 重新观察。临时正文保留到对应 Step 节点的正文实际装入后才替换；结局先到、正文挂起或失败时继续保留已知结局。呈现见 [TUI 连接、结局与重载](../architecture/tui.md#连接结局与重载)。
 
@@ -123,17 +121,17 @@ lattice session send "改写后的第一条消息。" --session "$SESSION_ID" --
 
 #### 请求取消
 
-要取消指定请求，使用原身份：
+要取消一个会话正在执行的那一轮：
 
 ```sh
-lattice --json session cancel "$SESSION_ID" "$TURN_ID"
+lattice --json session cancel "$SESSION_ID"
 ```
 
-`owned: true` 表示后台在判定点已接管本次取消，之后独立处理和收尾；`owned: false` 表示该判定点未接管，不表示没有后台工作。按原 TurnId 查询结果，接管回复本身不是持久 Cancelled；未知回执保留原身份，必要时再次明确取消。接管区间、明确拒绝后的新准入与持久事实边界见[会话取消规则](../architecture/session.md#取消与退出)。
+CLI 先从会话头查出正在执行的那一轮，再按它的 TurnId 取消，`cancel` 记录写明这个 TurnId；没有正在执行的一轮时报告无可取消。`owned: true` 表示后台在判定点已接管本次取消，之后独立处理和收尾；`owned: false` 表示该判定点未接管，不表示没有后台工作。按原 TurnId 查询结果，接管回复本身不是持久 Cancelled；未知回执保留原身份，必要时再次明确取消。接管区间、明确拒绝后的新准入与持久事实边界见[会话取消规则](../architecture/session.md#取消与退出)。
 
-CLI 提交/观察期间第一次 Ctrl+C 请求取消并继续观察，再次 Ctrl+C 结束等待或观察；完成已知而只剩正文时，Ctrl+C 放弃读取。首次取消若仍在等提交回执，本客户端的具体交互句柄 [LocalTurn](../architecture/session.md#组件与接口) 在五秒后交付提交未知并重新固定同身份只读观察，不自动重发配置；有 Live 时继续观察，无 Owner 时 CLI 可在固定读取后退出。此次未知交接后，迟到的本地提交传输错误只保留未知诊断，独立完成及正文读取继续。
+CLI 提交/观察期间第一次 Ctrl+C 按本轮的 TurnId 请求取消并继续观察，再次 Ctrl+C 结束等待或观察。首次取消若仍在等提交回执，本次提交的句柄 [LocalTurn](../architecture/session.md#组件与接口) 在五秒后报告提交结果不明，并按 TurnId 查询；查到即继续观察，这一轮没有 Owner 时 CLI 可以退出。此次未知交接后，迟到的本地提交传输错误只保留未知诊断。
 
-TUI 的 Ctrl+C 取消、Ctrl+D 或 `/quit` 退出按[键位条件](../architecture/tui.md#键盘)执行，两端共用 LocalTurn 的[回执等待预算](../architecture/session.md#输入与传输限制)。`not_sent` / `not_accepted` 只说明本客户端停止后续配置，不作为该 TurnId 全局未执行的判断；已知接受、接管和完成结果继续有效。
+TUI 的 Ctrl+C 取消、Ctrl+D 或 `/quit` 退出按[键位条件](../architecture/tui.md#键盘)执行，两端共用 LocalTurn 的[回执等待预算](../architecture/session.md#输入与传输限制)。
 
 #### 执行者消失后继续
 
@@ -160,7 +158,7 @@ stop 先关闭新准入，再等待已接管工作及必要收尾。`unconfirmed
 
 需要显式运行后台时，使用 `lattice daemon serve --state-root <绝对状态根>`。参数指 XDG 状态根，产品在其下使用 `lattice/`。serve 前台运行且不加载工作区 dotenv；独立进程组、状态归属与清理遵循[测试合同](testing.md#超时与进程生命周期)，不在开发者真实状态上注入崩溃或执行清理。
 
-客户端与后台应来自相符构建，当前 Local IPC 标识为 `LTLOCAL3`。身份或协议不兼容时保留错误，交由用户处理；不自动终止已有后台或迁移状态。旧 `sessions.git` / `invocations.git` 在打开会话库时被拒绝并列出路径，不提供迁移或兼容读取；处理状态须另获授权，见[开发状态诊断与重建边界](tool-development.md#开发状态诊断与重建边界)。
+客户端与后台应来自相符构建，当前 Local IPC 标识为 `LTLOCAL4`。身份或协议不兼容时保留错误，交由用户处理；不自动终止已有后台或迁移状态。旧 `sessions.git` / `invocations.git` 在打开会话库时被拒绝并列出路径，不提供迁移或兼容读取；处理状态须另获授权，见[开发状态诊断与重建边界](tool-development.md#开发状态诊断与重建边界)。
 
 ### 退出码与失败后的动作
 
