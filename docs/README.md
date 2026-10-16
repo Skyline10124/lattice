@@ -20,7 +20,7 @@
 
 - [宿主平台](architecture/platform.md)：Linux 宿主支持范围与 WASM guest 边界。
 - [私有存储与持久化](architecture/storage.md)：全局 redb 会话库、每项目 Git 工作区历史、后台单例、锁序与持久性边界。
-- [会话与 Turn](architecture/session.md)：会话树、Step/Turn 与调用槽位、首次提交、配置冻结、快照观察、退回分叉及执行者消失后的结局。
+- [会话与 Turn](architecture/session.md)：会话树、Step/Turn 与调用槽位、首次提交、配置冻结、会话视图与按轮分页、退回分叉及执行者消失后的结局。
 - [本地工作区与变更历史](architecture/workspace.md)：观察、文件变更与私有变更历史。
 - [LANCET 工具执行](architecture/lancet.md)：工具组成、Host 权限、调用执行、证据与操作员读取。
 - [Cell 权限与证据](architecture/cell.md)：Cell 模型、能力准入、Host 授权、结果计量与版本化证据。

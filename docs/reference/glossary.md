@@ -116,13 +116,13 @@ _Avoid_: ActiveStep, PendingTurn, completion marker
 _Avoid_: Turn 记录, TurnCommit, commit OID
 
 **LocalTurn**:
-本客户端一次提交或观察交互的具体句柄，关联原请求身份与已收到的状态、内容和诊断；不是第二个持久 Turn 或后台执行所有者。
+本客户端一次提交的具体句柄，关联原请求身份，处理接受回执、取消意图与退出交接；不是第二个持久 Turn 或后台执行所有者。会话内容由视图交付，不经它。
 主定义与生命周期见[组件与接口](../architecture/session.md#组件与接口)及[客户端操作](../architecture/session.md#实现模块与公开操作)。
 _Avoid_: TurnCoordinator, durable Turn, execution owner
 
 **TurnId**:
-客户端为提交预先保留的请求身份，用于找回原请求；向已有 Session 提交时与 SessionId 一起核对，不带 Session 的首次提交按它找回所建 Session。
-请求重试见[请求身份与找回](../architecture/session.md#请求身份与找回)。
+客户端在提交前生成的请求身份。`submit` 只接受未用过的 TurnId，已被使用即返回 Conflict；接受结果不明时按它查询找回。
+见[请求身份与找回](../architecture/session.md#请求身份与找回)。
 _Avoid_: NodeId, provider call ID, InvocationId
 
 **InvocationId**:
@@ -136,14 +136,19 @@ _Avoid_: provider call ID, tool name, PlanKey
 _Avoid_: invocation ledger, `invocations.git`, BindingPlan, provider Tool Call ID as slot identity
 
 **持久对话内容**:
-已写入会话树的 UserMessage 与 Step 节点，供历史读取和后续模型请求使用。
+已写入会话树的 UserMessage 与 Step 节点，作为对话条目交付，也供后续模型请求使用。
 它与尚未保存的临时流式文字分开，见[用户读到的几种事实](../architecture/session.md#用户读到的几种事实)。
 _Avoid_: token replay, layout body width, frozen configuration
 
-**观察快照**:
-订阅开始或重新同步时后台交付的状态：Session 记录、所观察 Turn 的 `TurnSummary`、已写入的节点（含未关闭的 Step），加上当前尝试的段列表及其事件序号；之后的事件从该序号继续，不丢内容。
-见[观察与重连](../architecture/session.md#观察与重连)；它不是整个工作区的快照。
-_Avoid_: Gap, pinned view, whole-workspace snapshot
+**视图**:
+后台按会话推送的“这个会话现在的样子”：会话头（当前位置、当前 agent、当前位置所属那一轮有没有 Owner 及执行诊断）、当前路径上最近几轮的对话条目、之后变化的条目与生成中的文字。观察者变慢时只少收中间版本，不需要重新同步。
+见[观察与重连](../architecture/session.md#观察与重连)。
+_Avoid_: snapshot, event window, subscription cursor, Gap
+
+**对话条目**:
+视图与历史查询交付的会话内容单位，一个条目对应一个节点，以 NodeId 标识，同一节点的新值整条替换旧值。UserMessage 条目带轮次序号，Step 条目带结论与重试提示，本轮最后一步的条目另带 `TurnSummary`。
+见[观察与重连](../architecture/session.md#观察与重连)。
+_Avoid_: TurnEvent, HistoryEntry, per-call item
 
 **Workspace History**:
 LATTICE 已成功安装的 Atomic Local Mutation 的私有持久记录，使用 Git tree 表达前后状态，仅覆盖 LATTICE 变更过的路径；每条变更记录带 `TurnId` 与 `InvocationId`。

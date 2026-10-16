@@ -161,7 +161,7 @@ flowchart TD
 | 执行已返回，槽位终态写入失败 | 协调层停止后续分发，按会话合同的[事务失败](session.md#事务与一致性)处理；Turn 停在已写入的进度，该槽位停在 `Started`，结果为 Indeterminate |
 
 执行 outcome 为 `Succeeded`、`Failed`、`NotExecuted` 或 `Indeterminate`，载荷形状按 outcome 确定。从 LANCET 看，`NotExecuted` 表示调用从未交给 LANCET；其余三种都在越过 Started 后写入：`Succeeded` 与 `Failed` 是 LANCET 的确定返回，`Indeterminate` 对应返回 `CallCancelled`、`OutcomeIndeterminate` 或没有取得返回。准入或宿主操作的拒绝是 `Failed` 的错误族，不表示调用未执行。各结局的判定依据、载荷与效果保证见[调用槽位](session.md#调用槽位)。
-观察事件用于显示调用进度。缺少 finished 事件时，读者通过槽位终态核验执行结果，不能从未配对显示块推断调用失败。快照与重连由[会话观察协议](session.md#观察与重连)维护。
+调用进度随视图中 Step 条目的槽位阶段显示，执行结果以槽位终态为准，不从显示推断调用失败。视图与重连由[会话观察协议](session.md#观察与重连)维护。
 LANCET 返回后，结果、载荷和完整 Cell 证据随 `Terminal` 在一个会话库事务中写入槽位；停在 `Registered` 或 `Started` 的槽位没有 Cell 证据，证据为不可用。这一范围不扩展为文件与会话库的跨库事务。
 
 `CepError` 的 retriability 描述错误属性，不授权重新执行已越过 Started 边界的调用。执行者消失的 Turn 停在已写入的进度，结局见[执行者消失后的 Turn](session.md#执行者消失后的-turn)，LANCET 不重新执行 Tool。
