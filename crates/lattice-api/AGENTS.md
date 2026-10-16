@@ -12,7 +12,7 @@
 - `turn/live.rs`、`turn/execute.rs`：同一 live 核心及独立接受/完成结果；start_turn 用于后台执行接线，run_turn/stream_turn 仅供测试复用核心。
 - `turn/cep.rs`：profile→policy、Tool 事件映射及生产依赖接线；首次共享 Component 组成经 spawn_blocking，组装仍归 lancet-api。
 - coordinator/saga 模块：阻塞存储适配、可注入 IdSource、调用登记、顺序执行、槽位终态、Step/Turn 关闭及会话退回。
-- `stores.rs`：共享会话库句柄与库级停写、排空和重开；`turn/observer.rs`：当前尝试段列表与每个观察者的推送状态。
+- `stores.rs`：共享会话库句柄与库级停写、排空和重开；`turn/observer.rs`：当前尝试已生成的正文与 reasoning（段列表，视图从中推送生成中的文字），以及每个观察者待推送的条目与已发文字的位置。
 
 ## 上位文档
 

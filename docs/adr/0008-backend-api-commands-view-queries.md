@@ -125,7 +125,7 @@ TurnId 由 TurnId 索引和准入状态唯一定位，`session_id` 只是核对�
 
 - **`--json` 的流式输出**只有以下记录：提交记录 `submit`、取消回执 `cancel`、会话头 `head`、对话条目 `entry`、生成中的文字 `text`，以及 `connection` 与 `error`。旧的事件行格式不保留。`submit` 在发出请求前输出一条，写明 TurnId 与 SessionId，收到回执后再输出一条，写明结果。读者按 `node` 覆盖 `entry` 即可；结局在本轮最后一个 Step 条目的 `TurnSummary` 中，不另加“结束”记录；退出码规则不变。
 - **`session send --json` 只输出这一轮**：本轮的条目、会话头、文字与回执，不再输出整条路径的历史。`session turn --follow` 同样只输出所跟的那一轮。
-- **删除 `session send` 的 `--turn-id`。** 找回不再由 `send` 负责，改用 `session turn <TURN_ID>` 查询。CLI 在发出请求前生成身份并先输出，脚本从第一条记录取得 TurnId 与 SessionId；进程在发送前被终止时，请求也没有发出。`lattice run` 与 `session send` 共用参数，一并删除。
+- **删除 `session send` 的 `--turn-id`。** 找回不再由 `send` 负责，改用 `session turn <TURN_ID>` 查询。CLI 在发出请求前生成身份并先输出，脚本从第一条记录取得 TurnId 与 SessionId；进程无论在哪一步中断，都能按这个 TurnId 查询，中断在发出请求之前时查询返回“没有这个请求”。`lattice run` 与 `session send` 共用参数，一并删除。
 - **暂不提供读取历史的 CLI 命令。**
 - **`session cancel <SESSION_ID>`** 取消该会话当前正在执行的一轮。命令名指的是会话，参数就是会话：CLI 先从会话头查出那一轮的 TurnId，再按 TurnId 取消，输出写明取消的 TurnId；没有正在执行的一轮时报告无可取消。人在另一个终端里对一个会话说“停”，停掉的就是它此刻在执行的那一轮，第 8 节的竞态在这里不算问题。
 - `list`、`log`、`turn`、`audit` 的 `--json` 不变。
