@@ -2,7 +2,7 @@
 
 ## 职责
 
-`ModelStepDriver` 驱动一次 provider attempt：从类型化历史组装冻结请求、打开并消费流、执行协议上限与计量，通过同步非阻塞回调发送观察事件并返回类型化结果。调用方在任何有损通知之前维护权威段列表与事件窗口，交接规则见[会话观察](../../docs/architecture/session.md#观察与重连)。
+`ModelStepDriver` 驱动一次 provider attempt：从类型化历史组装冻结请求、打开并消费流、执行协议上限与计量，通过同步非阻塞回调发送观察事件并返回类型化结果。调用方在回调中先把正文与 reasoning delta 追加到当前尝试已生成的文字（会话合同称为段列表），再通知观察者；通知可以合并，显示用的文字不会因此缺失。交接规则见[观察与重连](../../docs/architecture/session.md#观察与重连)。
 
 - `src/model_step.rs`：请求投影、流轮询、取消与 deadline、计量和 attempt 组装。
 - `src/testing.rs`：feature 控制的确定性 provider 响应。

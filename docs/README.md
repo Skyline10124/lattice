@@ -20,7 +20,7 @@
 
 - [宿主平台](architecture/platform.md)：Linux 宿主支持范围与 WASM guest 边界。
 - [私有存储与持久化](architecture/storage.md)：全局 redb 会话库、每项目 Git 工作区历史、后台单例、锁序与持久性边界。
-- [会话与 Turn](architecture/session.md)：会话树、Step/Turn 与调用槽位、首次提交、配置冻结、快照观察、退回分叉及执行者消失后的结局。
+- [会话与 Turn](architecture/session.md)：会话树、Step/Turn 与调用槽位、首次提交、配置冻结、会话视图与按轮分页、退回分叉及执行者消失后的结局。
 - [本地工作区与变更历史](architecture/workspace.md)：观察、文件变更与私有变更历史。
 - [LANCET 工具执行](architecture/lancet.md)：工具组成、Host 权限、调用执行、证据与操作员读取。
 - [Cell 权限与证据](architecture/cell.md)：Cell 模型、能力准入、Host 授权、结果计量与版本化证据。
@@ -47,6 +47,7 @@
 - [ADR 0005](adr/0005-durable-turn-invocation-and-private-git-stores.md)：持久化 Turn、Invocation 身份与私有 Git 存储；会话/调用存储与文件 Rewind 等部分由 ADR 0006 取代。
 - [ADR 0006](adr/0006-tree-session-and-global-redb-store.md)：tree-session、全局 redb 会话库、调用槽位与快照观察，取消文件 Rewind 和 Turn checkpoint；三层记录与自动关闭等部分由 ADR 0007 取代。
 - [ADR 0007](adr/0007-session-tree-as-single-authority.md)：会话树作为会话事实的唯一权威，Step 预留、由 `progress` 给出结论，取消自动关闭。
+- [ADR 0008](adr/0008-backend-api-commands-view-queries.md)：本地后台 API 分为命令、视图与查询，按会话推送以节点为单位的对话条目，按轮分页，请求身份由客户端生成，`submit` 只接受新请求。草案，待裁决。
 - [InvocationStore 历史诊断指南](development/invocation-store-diagnostics.md)：仅解释旧 Git ledger 的测量工具、参数与保留证据，不用于 redb 资格化或当前产品验收。
 
 ADR 的用途与规则承接方式见[文档生命周期](governance/document-lifecycle.md#分类与归属)。
