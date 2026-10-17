@@ -55,11 +55,8 @@ pub struct SendArgs {
     #[arg(long = "session")]
     pub session_id: Option<String>,
     /// Agent to use. Required for a new session, and for an existing session positioned at the root node.
-    #[arg(long, required_unless_present_any = ["session_id", "turn_id"])]
+    #[arg(long, required_unless_present = "session_id")]
     pub agent: Option<String>,
-    /// Turn identity for this request; generated when omitted. Resend with the same value to recover a request whose acceptance is unknown.
-    #[arg(long, value_parser = parse_turn_id)]
-    pub turn_id: Option<lattice_api::local::TurnId>,
 }
 
 pub(crate) fn parse_node_id(value: &str) -> Result<lattice_api::local::NodeId, String> {
@@ -94,11 +91,7 @@ pub enum SessionAction {
         follow: bool,
     },
     /// A taken-over cancel is not yet a durable Cancelled outcome; a cancel not taken over does not mean no background work exists.
-    Cancel {
-        session_id: String,
-        #[arg(value_parser = parse_turn_id)]
-        turn_id: lattice_api::local::TurnId,
-    },
+    Cancel { session_id: String },
 }
 
 pub async fn run(
@@ -112,54 +105,26 @@ pub async fn run(
             return crate::commands::run::run_session_prompt(&api, args, verbose, json).await;
         }
         SessionAction::Turn { turn_id, follow } => {
-            let detail = api
-                .turn(lattice_api::local::TurnTarget {
-                    session_id: None,
-                    turn_id,
-                })
-                .await?;
-            if json {
-                println!("{}", serde_json::to_string(&detail)?);
-            } else {
-                print!("{}", render_turn(&detail));
-            }
-            if follow {
-                return crate::commands::run::observe_turn(
-                    &api,
-                    detail.session_id,
-                    turn_id,
-                    verbose,
-                    json,
-                )
-                .await;
-            }
+            return show_turn(
+                &api,
+                turn_id,
+                follow,
+                json,
+                verbose,
+                &mut std::io::stdout(),
+                &mut std::io::stderr(),
+            )
+            .await;
         }
-        SessionAction::Cancel {
-            session_id,
-            turn_id,
-        } => {
-            let session_id = api.resolve_session(&session_id).await?.session_id;
-            let owned = api
-                .cancel(lattice_api::local::TurnTarget {
-                    session_id: Some(session_id),
-                    turn_id,
-                })
-                .await?;
-            if json {
-                println!(
-                    "{}",
-                    serde_json::json!({"type":if owned {"cancel_acknowledged"} else {"cancel_not_owned"}, "session_id":session_id, "turn_id":turn_id, "owned":owned})
-                );
-            } else {
-                println!(
-                    "session {session_id} turn {turn_id}: {}",
-                    if owned {
-                        "daemon took over the cancel; the durable outcome is still to be queried"
-                    } else {
-                        "daemon did not take over the cancel at the decision point; background work may still exist"
-                    }
-                );
-            }
+        SessionAction::Cancel { session_id } => {
+            return cancel_current_turn(
+                &api,
+                &session_id,
+                json,
+                &mut std::io::stdout(),
+                &mut std::io::stderr(),
+            )
+            .await;
         }
         SessionAction::List => {
             let rows = api.list_sessions().await?;
@@ -168,14 +133,16 @@ pub async fn run(
             } else {
                 for row in rows {
                     println!(
-                        "{} project={} current={} nodes={} unclosed_turn={} updated={}",
-                        display_id(&row.session_id.to_string()),
-                        row.project_store_key,
-                        row.current.0,
-                        row.node_count,
-                        row.unclosed_turn
+                        "{} project={} current={} nodes={} unclosed_turn={} owner={} updated={}",
+                        display_id(&row.session.session_id.to_string()),
+                        row.session.project_store_key,
+                        row.session.current.0,
+                        row.session.node_count,
+                        row.session
+                            .unclosed_turn
                             .map_or_else(|| "none".into(), |id| id.to_string()),
-                        row.updated_at
+                        row.owner,
+                        row.session.updated_at
                     );
                 }
             }
@@ -205,6 +172,95 @@ pub async fn run(
         }
     }
     Ok(std::process::ExitCode::SUCCESS)
+}
+
+pub(super) async fn show_turn(
+    api: &lattice_api::local::LocalClient,
+    turn_id: lattice_api::local::TurnId,
+    follow: bool,
+    json: bool,
+    verbose: bool,
+    out: &mut impl std::io::Write,
+    err: &mut impl std::io::Write,
+) -> Result<std::process::ExitCode> {
+    let detail = if follow {
+        api.wait_for_turn(turn_id).await?
+    } else {
+        match api.turn(turn_id).await? {
+            lattice_api::local::TurnLookup::Accepted { turn } => turn,
+            lattice_api::local::TurnLookup::InFlight => {
+                if json {
+                    writeln!(
+                        out,
+                        "{}",
+                        serde_json::json!({"status":"in_flight","turn_id":turn_id})
+                    )?;
+                } else {
+                    writeln!(out, "turn {turn_id}: in flight; admission is still pending")?;
+                }
+                return Ok(std::process::ExitCode::SUCCESS);
+            }
+        }
+    };
+    if follow {
+        return super::run::follow_with_output(api, detail, verbose, json, out, err).await;
+    }
+    if json {
+        writeln!(out, "{}", serde_json::to_string(&detail)?)?;
+    } else {
+        write!(out, "{}", render_turn(&detail))?;
+    }
+    Ok(std::process::ExitCode::SUCCESS)
+}
+pub(super) async fn cancel_current_turn(
+    api: &lattice_api::local::LocalClient,
+    prefix: &str,
+    json: bool,
+    out: &mut impl std::io::Write,
+    err: &mut impl std::io::Write,
+) -> Result<std::process::ExitCode> {
+    use lattice_api::local::{CancelStatus, LocalUpdate};
+    let session_id = api.resolve_session(prefix).await?.session_id;
+    let head = api.session_head(session_id).await?;
+    // 查头后就固定目标；回执丢失不能丢掉本次取消的身份，也不能追取消新一轮。
+    let Some(turn_id) = head.turn_id.filter(|_| head.owner) else {
+        if json {
+            writeln!(
+                out,
+                "{}",
+                serde_json::json!({"type":"cancel","session_id":session_id,"turn_id":null})
+            )?;
+        } else {
+            writeln!(out, "session {session_id}: no running turn to cancel")?;
+        }
+        return Ok(std::process::ExitCode::SUCCESS);
+    };
+    let (status, owned, error) = match api.cancel(turn_id).await {
+        Ok(true) => (CancelStatus::Taken, Some(true), None),
+        Ok(false) => (CancelStatus::NotTaken, Some(false), None),
+        Err(error) => (CancelStatus::Unknown, None, Some(error)),
+    };
+    if json {
+        let mut record = serde_json::to_value(LocalUpdate::Cancel {
+            turn_id,
+            status,
+            owned,
+            error: error.clone(),
+        })?;
+        record["session_id"] = serde_json::to_value(session_id)?;
+        writeln!(out, "{record}")?;
+    } else {
+        let message = match status {
+            CancelStatus::Taken => "taken; the durable outcome is still to be queried",
+            CancelStatus::NotTaken => "not_taken; background work may still exist",
+            _ => "unknown; query the original TurnId",
+        };
+        writeln!(out, "session {session_id} turn {turn_id}: {message}")?;
+        if let Some(error) = &error {
+            super::run::render_human_error(&serde_json::to_value(error)?, err)?;
+        }
+    }
+    Ok(std::process::ExitCode::from(u8::from(error.is_some())))
 }
 
 fn render_log(log: &lattice_api::local::SessionLog) -> String {
@@ -258,7 +314,7 @@ fn render_log(log: &lattice_api::local::SessionLog) -> String {
     text
 }
 
-fn render_turn(turn: &lattice_api::local::TurnDetail) -> String {
+pub(super) fn render_turn(turn: &lattice_api::local::TurnDetail) -> String {
     use std::fmt::Write;
     let mut text = format!(
         "turn {} session={} agent={}\nsummary={}\nusage={}\n",
@@ -366,7 +422,19 @@ mod session_cli {
         assert!(TestCli::try_parse_from(["session", "rewind", "abcd"]).is_err());
         let id = "10000000-0000-4000-8000-000000000001";
         assert!(TestCli::try_parse_from(["session", "turn", id]).is_ok());
-        assert!(TestCli::try_parse_from(["session", "cancel", "abcd", id]).is_ok());
+        assert!(TestCli::try_parse_from(["session", "cancel", "abcd"]).is_ok());
+        assert!(
+            TestCli::try_parse_from([
+                "session",
+                "send",
+                "hello",
+                "--agent",
+                "coder",
+                "--turn-id",
+                id
+            ])
+            .is_err()
+        );
         assert!(TestCli::try_parse_from(["session", "cancel", "abcd", "invalid"]).is_err());
         let mut command = TestCli::command();
         let help = command
