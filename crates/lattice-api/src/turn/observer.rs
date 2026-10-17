@@ -144,6 +144,28 @@ impl ObserverSink {
         Self::mark(&mut state, &[], false);
         self.changed.send_replace(());
     }
+    pub(crate) fn diagnostic_partial(
+        &self,
+        key: lancet_protocol::ModelAttemptKey,
+    ) -> Vec<lattice_session::store::DiagnosticPart> {
+        let state = self.state.lock().expect("observation lock");
+        // 回调同步累积的当前尝试也是停止诊断的来源，不能在清空段列表后再取。
+        state
+            .attempt
+            .as_ref()
+            .filter(|attempt| attempt.key == key)
+            .into_iter()
+            .flat_map(|attempt| &attempt.segments)
+            .map(|segment| match segment {
+                TextSegment::Text { text } => {
+                    lattice_session::store::DiagnosticPart::Text { text: text.clone() }
+                }
+                TextSegment::Reasoning { text } => {
+                    lattice_session::store::DiagnosticPart::Reasoning { text: text.clone() }
+                }
+            })
+            .collect()
+    }
     /// 模型回调直接累积文字；持久推进的通知总在事务提交之后到达。
     pub(crate) fn emit(&self, event: TurnEvent) {
         let mut state = self.state.lock().expect("observation lock");

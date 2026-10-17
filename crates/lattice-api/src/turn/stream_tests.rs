@@ -10,11 +10,14 @@ use std::sync::{
 use std::time::Duration;
 
 #[tokio::test]
-async fn stream_turn_error_after_partial_closes_without_persisting_partial() {
+async fn stream_turn_error_after_partial_preserves_diagnostic_without_a_reply() {
     let fixture = setup_with_events(
         vec![
             LlmEvent::Token {
                 content: "partial output".into(),
+            },
+            LlmEvent::Reasoning {
+                content: "thinking".into(),
             },
             LlmEvent::Token {
                 content: " before error".into(),
@@ -46,6 +49,29 @@ async fn stream_turn_error_after_partial_closes_without_persisting_partial() {
         matches!(&events.last().unwrap(), TurnEvent::TurnFailed { summary, .. } if summary.notice.as_ref().unwrap().text.contains("connection reset"))
     );
     assert_eq!(detail.summary.outcome, PublicTurnOutcome::Failed);
+    let read = fixture.store.begin_read().unwrap();
+    let node = read
+        .node(lattice_session::store::NodeRef {
+            session_id: detail.session_id,
+            node: lattice_session::store::NodeId(2),
+        })
+        .unwrap();
+    let lattice_session::store::Node::Step {
+        reply, attempts, ..
+    } = node
+    else {
+        panic!("step")
+    };
+    assert!(reply.is_none(), "失败的半截输出不能变成完整回复");
+    let lattice_session::store::AttemptProgress::Ended { diagnostic, .. } = &attempts[0].progress
+    else {
+        panic!("stopped attempt")
+    };
+    assert_eq!(
+        serde_json::to_value(&diagnostic.partial).unwrap(),
+        serde_json::json!([{"kind":"text","text":"partial output"},{"kind":"reasoning","text":"thinking"},{"kind":"text","text":" before error"}]),
+        "停止尝试必须保留已收到的文字与 reasoning 作为诊断"
+    );
     assert_eq!(
         fixture
             .store

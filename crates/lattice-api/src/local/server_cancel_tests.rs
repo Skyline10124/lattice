@@ -154,6 +154,29 @@ async fn finish(backend: &Backend, task: tokio::task::JoinHandle<()>) {
     bounded(task).await.unwrap();
 }
 #[tokio::test]
+async fn legacy_store_rejection_before_execution_does_not_leave_unconfirmed_cleanup() {
+    let (dir, backend, client, task) = backend().await;
+    let legacy = backend.layout.lattice_root().join("sessions.git");
+    std::fs::create_dir_all(&legacy).unwrap();
+    let error = client
+        .submit(
+            request(dir.path()),
+            config(dir.path(), "http://127.0.0.1:1/v1"),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error.store.as_deref(), Some(StoreDiagnostic::LegacyStores { paths }) if paths == &[legacy])
+    );
+    idle(&backend).await;
+    assert_eq!(
+        client.stop().await.unwrap().unconfirmed_operations,
+        0,
+        "接受前拒绝没有需要确认的写入或收尾"
+    );
+    finish(&backend, task).await;
+}
+#[tokio::test]
 async fn admission_identity_conflicts_busy_and_departed_submitter_never_creates_session() {
     let (dir, backend, client, task) = backend().await;
     let input = request(dir.path());

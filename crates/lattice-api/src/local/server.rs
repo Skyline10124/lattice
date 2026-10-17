@@ -258,6 +258,10 @@ impl Backend {
                         error.kind,
                         LocalErrorKind::StoreUnavailable | LocalErrorKind::Internal
                     )
+                    // 提交的只读准入检查失败时尚无执行收尾；建库提交不确定仍计入。
+                    && (task_owner.identity.is_none()
+                        || task_owner.started.load(Ordering::Acquire)
+                        || error.recovery.is_some())
                 {
                     state.unconfirmed_operations += 1;
                     if let Some(request) = &task_owner.identity {
