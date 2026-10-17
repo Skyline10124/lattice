@@ -307,6 +307,70 @@ fn comment_reload_attaches_or_falls_back() {
     }
 }
 
+#[test]
+fn older_turns_keep_the_view_inside_a_reply_with_inline_comments() {
+    let mut source = comment_app();
+    save_comment(&mut source.app, "inline note");
+    source.app.focus = Focus::Dock;
+    let wire = source.app.submit().unwrap();
+    let target = crate::comment::Message::parse(&wire).unwrap().comments[0]
+        .location
+        .fragment
+        .turn;
+    let mut h = Harness::new(false);
+    let app = &mut h.app;
+    app.term_width = 80;
+    app.term_height = 12;
+    let last = lattice_api::local::new_turn_id();
+    open_view(
+        app,
+        head(8, Some(last), false),
+        vec![
+            user(5, target, 3, "prompt-3"),
+            step(6, target, 0)
+                .text("comment target\n\nlater paragraph")
+                .finished()
+                .entry(),
+            user(7, last, 4, &wire),
+            step(8, last, 0).text("answer-4").finished().entry(),
+        ],
+    );
+    let mut request = None;
+    for _ in 0..20 {
+        app.apply_action(KeyAction::ScrollPageUp);
+        request = request.or(app.older_request.take());
+    }
+    let request = request.expect("翻到顶部时查询更早的轮");
+    // 查询在途时往下翻：顶部停在这一轮回复的正文里，同一块下方穿插着内嵌评论。
+    let lines: Vec<String> = app
+        .prepare_transcript()
+        .lines
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let find = |marker: &str| lines.iter().position(|line| line.contains(marker)).unwrap();
+    let (anchor, note, later) = (
+        find("comment target"),
+        find("inline note"),
+        find("later paragraph"),
+    );
+    assert!(anchor < note && note < later, "{lines:#?}");
+    app.viewport.shift(anchor);
+    let top = |app: &mut App| {
+        let transcript = app.prepare_transcript();
+        transcript.lines[app.viewport.scroll()].to_string()
+    };
+    let before = top(app);
+    assert!(before.contains("comment target"), "{before}");
+    app.apply_older(
+        request,
+        Ok(LocalHistory {
+            entries: turns(1..=2),
+        }),
+    );
+    assert_eq!(top(app), before, "视图停在原来看到的那一行");
+}
+
 /// CLI 退回到被评论那一轮的 UserMessage：这一轮仍在路径上，被评论的 Step 已不在。
 fn rewind_to_user(app: &mut App, target: TurnId) {
     let rewound = SessionHead {
@@ -1212,26 +1276,21 @@ impl Remote {
         self.press(KeyCode::Enter, KeyModifiers::NONE);
     }
     async fn wait(&self, predicate: impl FnMut(&Frame) -> bool) -> Frame {
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            self.frames.clone().wait_for(predicate),
-        )
-        .await
-        .unwrap()
-        .unwrap()
-        .clone()
+        self.wait_within(Duration::from_secs(5), predicate).await
     }
-    /// 处理屏障，用于暂停的时钟：送一个使界面重绘的事件，再等到它之后的新帧。
-    /// 暂停的时钟只在所有任务都无事可做时才自动前进到下一帧，所以这一帧已包含此前到期的推送。
-    async fn processed(&self) -> Frame {
-        let mut frames = self.frames.clone();
-        frames.borrow_and_update();
-        self.keys.unbounded_send(Ok(Event::Resize(80, 24))).unwrap();
-        tokio::time::timeout(Duration::from_secs(5), frames.changed())
+    async fn wait_within(&self, limit: Duration, predicate: impl FnMut(&Frame) -> bool) -> Frame {
+        tokio::time::timeout(limit, self.frames.clone().wait_for(predicate))
             .await
             .unwrap()
-            .unwrap();
-        frames.borrow().clone()
+            .unwrap()
+            .clone()
+    }
+    /// 处理屏障，用于暂停的时钟。暂停的时钟只在运行时既没有就绪任务、也没有待处理的 IO 时才自动前进，
+    /// 所以这次睡眠到期一定晚于：观察任务处理完已到期的计时器，它的推送经队列被应用循环取走并应用。
+    /// 睡过两帧，应用循环已在其后的帧时刻绘出这些变化；没有变化时不重绘，帧仍是此前的状态。
+    async fn processed(&self) -> Frame {
+        tokio::time::sleep(FRAME * 2).await;
+        self.frames.borrow().clone()
     }
 }
 
@@ -1584,6 +1643,135 @@ async fn cancel_while_configuration_loads_is_not_accepted_and_keeps_the_input() 
     .await;
     assert!(exit.result.is_ok());
     assert_eq!(count(&peer.seen.borrow(), "submit"), 0);
+}
+
+#[tokio::test]
+async fn cancel_after_acceptance_reaches_the_new_turn_despite_stale_heads() {
+    let previous = numbered_turn(1);
+    let views = Views::default();
+    let view_tx = views.clone();
+    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
+        "watch" => views.subscribe(),
+        "submit" => Reply::Now(accepted_reply(r)),
+        "cancel" => Reply::Now(response("cancelled", json!({"owned":true}))),
+        _ => Reply::Never,
+    });
+    let mut h = Harness::new(false);
+    let remote = h.remote.clone();
+    let previous_step = |text: &str| step(2, previous, 0).text(text).finished().entry();
+    let driver = async {
+        view_tx.push([
+            head_reply(head(2, Some(previous), false)),
+            entry_reply(user(1, previous, 1, "before")),
+            entry_reply(previous_step("old answer")),
+        ]);
+        remote
+            .wait(|f| f.text.contains("old answer") && f.phase == TurnPhase::Idle)
+            .await;
+        remote.line("mine");
+        let seen = peer.wait(|s| count(s, "submit") == 1).await;
+        let own = request_turn(requests(&seen, "submit").next().unwrap());
+        remote
+            .wait(|f| f.text.matches("── unused ").count() == 2)
+            .await;
+        // 接受回执之后，视图里积压的上一轮会话头与当前位置条目才转给新提交的句柄。
+        view_tx.push([
+            head_reply(head(2, Some(previous), false)),
+            entry_reply(previous_step("old answer again")),
+        ]);
+        remote.wait(|f| f.text.contains("old answer again")).await;
+        remote.ctrl('c');
+        let seen = peer.wait(|s| count(s, "cancel") == 1).await;
+        assert_eq!(
+            requests(&seen, "cancel").next().unwrap()["turn_id"],
+            json!(own),
+            "取消按新提交的 TurnId 发出"
+        );
+        remote.ctrl('c');
+    };
+    let ((), exit) = bounded(LOOP_LIMIT, async {
+        tokio::join!(driver, h.run(&peer.client))
+    })
+    .await;
+    assert!(exit.result.is_ok());
+}
+
+#[tokio::test]
+async fn late_receipt_after_unknown_starts_watching_or_shows_the_rejection() {
+    for accept in [true, false] {
+        let views = Views::default();
+        let view_tx = views.clone();
+        let (submit_tx, submit_rx) = oneshot::channel();
+        let mut submit_rx = Some(submit_rx);
+        let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
+            "submit" => Reply::Hold(submit_rx.take().unwrap()),
+            "cancel" => Reply::Now(response("cancelled", json!({"owned":true}))),
+            "watch" => views.subscribe(),
+            _ => Reply::Never,
+        });
+        let mut h = Harness::new(true);
+        let remote = h.remote.clone();
+        let driver = async {
+            remote.line("first");
+            let seen = peer.wait(|s| count(s, "submit") == 1).await;
+            let submit = requests(&seen, "submit").next().unwrap().clone();
+            let turn = request_turn(&submit);
+            let SubmitSession::New(created) = request_session(&submit) else {
+                panic!("新会话首次提交写明新建：{submit}");
+            };
+            // 首次取消后提交等待到期：结果未知，句柄继续等迟到的回执。
+            remote.ctrl('c');
+            remote
+                .wait_within(Duration::from_secs(10), |f| f.dock.contains("提交结果未知"))
+                .await;
+            remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
+            for c in "new draft".chars() {
+                remote.press(KeyCode::Char(c), KeyModifiers::NONE);
+            }
+            remote.wait(|f| f.input == "new draft").await;
+            if accept {
+                submit_tx.send(accepted_reply(&submit)).unwrap();
+                // 迟到的接受：按这次提交的 SessionId 开始观察，视图照常推进。
+                let seen = peer.wait(|s| count(s, "watch") == 1).await;
+                assert_eq!(
+                    requests(&seen, "watch").next().unwrap()["session_id"],
+                    json!(created)
+                );
+                let created_head = SessionHead {
+                    session_id: created,
+                    ..head(2, Some(turn), true)
+                };
+                view_tx.push([
+                    head_reply(created_head),
+                    entry_reply(user(1, turn, 1, "first")),
+                    entry_reply(step(2, turn, 0).text("late answer").sent().entry()),
+                ]);
+                let shown = remote.wait(|f| f.text.contains("late answer")).await;
+                assert_eq!(shown.session, Some(created));
+                assert_eq!(shown.input, "new draft");
+                // 正在运行：第一次 Ctrl+C 取消这一轮，窗口内第二次退出。
+                remote.ctrl('c');
+                remote.ctrl('c');
+            } else {
+                submit_tx
+                    .send(error_reply(local_error(LocalErrorKind::Busy, "late busy")))
+                    .unwrap();
+                // 迟到的拒绝按后台错误回执显示，不改写用户的新输入，也不开始观察。
+                let shown = remote.wait(|f| f.dock.contains("late busy")).await;
+                assert_eq!(shown.input, "new draft");
+                assert_eq!(shown.session, None);
+                assert_eq!(count(&peer.seen.borrow(), "watch"), 0);
+                remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
+                remote.press(KeyCode::Esc, KeyModifiers::NONE);
+                remote.ctrl('d');
+            }
+        };
+        let ((), exit) = bounded(LOOP_LIMIT, async {
+            tokio::join!(driver, h.run(&peer.client))
+        })
+        .await;
+        assert!(exit.result.is_ok());
+    }
 }
 
 #[tokio::test]

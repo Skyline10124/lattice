@@ -592,12 +592,8 @@ impl App {
                 }
                 self.accept_session(turn.session_id);
                 self.ctx.active_agent = turn.agent_name;
-                // 视图已经推来这一轮的条目时，回执不再让界面等待会话头。
-                if !self
-                    .entries
-                    .values()
-                    .any(|entry| entry_turn(entry) == Some(turn_id))
-                {
+                // 已确认的会话头到达这一轮之前，仍按正在运行处理。
+                if !self.head_reached(turn_id) {
                     self.awaiting_head = Some(turn_id);
                 }
                 self.mark_accepted(turn_id);
@@ -1008,9 +1004,6 @@ impl App {
             self.ctx.active_agent = agent.clone();
         }
         self.connected = true;
-        if head.turn_id.is_some() && head.turn_id == self.awaiting_head {
-            self.awaiting_head = None;
-        }
         if head.diagnostic != self.diagnostic {
             if let Some(error) = &head.diagnostic {
                 self.push_status(execution_diagnostic_status(error));
@@ -1031,6 +1024,27 @@ impl App {
             self.replace_entries();
         }
         self.head = self.pending_head.take();
+        if self
+            .awaiting_head
+            .is_some_and(|turn| self.head_reached(turn))
+        {
+            self.awaiting_head = None;
+        }
+    }
+
+    /// 已确认的会话头到达了这一轮：指向它，或当前路径上已有它的 UserMessage（位置已经越过它）。
+    /// 每批推送先给会话头，再按路径顺序给到当前位置为止的条目，所以确认时这一轮的
+    /// UserMessage 若在本批中，已经到达。
+    fn head_reached(&self, turn: TurnId) -> bool {
+        self.pending_head.is_none()
+            && (self
+                .head
+                .as_ref()
+                .is_some_and(|head| head.turn_id == Some(turn))
+                || self.entries.values().any(|entry| {
+                    matches!(entry, ConversationEntry::UserMessage { .. })
+                        && entry_turn(entry) == Some(turn)
+                }))
     }
 
     /// 新视图的初始条目开始到达或路径已替换：丢弃此前的条目，迟到的历史查询结果作废。
@@ -1052,14 +1066,15 @@ impl App {
         if self.replace_pending {
             self.replace_entries();
         }
-        if self.awaiting_head == Some(turn) {
-            self.awaiting_head = None;
-        }
         let user_message = matches!(entry, ConversationEntry::UserMessage { .. });
         // 视图中出现这次提交的 UserMessage，同样说明已被接受；回执可能更晚到或者丢失。
+        // 它只证明已接受，忙状态仍保留到会话头确认。
         if user_message && self.submitted.as_ref().is_some_and(|(id, _)| *id == turn) {
             self.submitted = None;
             self.queue.release(turn);
+            if !self.head_reached(turn) {
+                self.awaiting_head = Some(turn);
+            }
         }
         let known_retries: HashSet<u32> = match self.entries.insert(node, entry) {
             Some(ConversationEntry::Step { retries, .. }) => {
@@ -1273,17 +1288,10 @@ impl App {
             return;
         };
         let width = frame_layout(self.term_width, self.term_height).content_w;
-        // 视图顶部那一行所属的块，及它离块末行的距离：块前面有了内容时开头会多出分隔空行，
-        // 从末行数起不受影响。插入后按它恢复视图。
-        let rendered = render_transcript(self, width);
-        let top = rendered.owners.get(self.viewport.scroll()).map(|top| {
-            let rows = rendered
-                .owners
-                .iter()
-                .filter(|owner| owner.id == top.id)
-                .count();
-            (top.id, rows.saturating_sub(top.row))
-        });
+        // 视图顶部那一行所属的块，及它在这个块自己的各行中的倒数序号：块前面有了内容时开头会
+        // 多出分隔空行，从末行数起不受影响；块内穿插的内嵌评论属于别的块，不计入。插入后按它恢复视图。
+        let scroll = self.viewport.scroll();
+        let top = block_rows_from_end(&render_transcript(self, width), scroll);
         for entry in history.entries {
             let node = entry.node();
             let Some(turn) = entry_turn(&entry) else {
@@ -1306,14 +1314,15 @@ impl App {
         if matches!(self.focus, Focus::Dock)
             && !self.viewport.following()
             && let Some((id, rest)) = top
-            && let Some(last) = render_transcript(self, width)
-                .owners
-                .iter()
-                .rposition(|owner| owner.id == id)
         {
-            let row = last.saturating_add(1).saturating_sub(rest);
-            self.viewport
-                .shift(row.saturating_sub(self.viewport.scroll()));
+            let rows = block_rows(&render_transcript(self, width), id);
+            if let Some(&row) = rows
+                .len()
+                .checked_sub(rest)
+                .and_then(|index| rows.get(index))
+            {
+                self.viewport.shift(row.saturating_sub(scroll));
+            }
         }
         self.settle(false);
     }
@@ -1376,6 +1385,25 @@ impl App {
             self.discard_missing_comments();
         }
     }
+}
+
+/// 块自己的各行在对话记录中的位置，按行序；不含穿插其间、属于别的块的行。
+fn block_rows(transcript: &Transcript, id: BlockId) -> Vec<usize> {
+    transcript
+        .owners
+        .iter()
+        .enumerate()
+        .filter(|(_, owner)| owner.id == id)
+        .map(|(row, _)| row)
+        .collect()
+}
+
+/// `row` 所属的块，及这一行在该块自己的各行中的倒数序号（末行为 1）。
+fn block_rows_from_end(transcript: &Transcript, row: usize) -> Option<(BlockId, usize)> {
+    let id = transcript.owners.get(row)?.id;
+    let rows = block_rows(transcript, id);
+    let index = rows.iter().position(|known| *known == row)?;
+    Some((id, rows.len().saturating_sub(index)))
 }
 
 fn entry_turn(entry: &ConversationEntry) -> Option<TurnId> {

@@ -116,6 +116,45 @@ fn own_submission_user_block_is_replaced_by_its_user_message() {
 }
 
 #[test]
+fn own_submission_stays_busy_until_its_head_is_confirmed() {
+    let mut app = test_app(true);
+    let a = turn(1);
+    open_view(
+        &mut app,
+        head(2, Some(a), false),
+        vec![
+            user(1, a, 1, "first"),
+            step(2, a, 0).text("done").finished().entry(),
+        ],
+    );
+    app.input.set_text("second");
+    app.submit().unwrap();
+    let (b, _) = app.submission_identity().unwrap();
+    app.input.set_text("queued");
+    assert!(app.submit().is_none(), "运行中 Enter 入队");
+    app.apply_submission(receipt(b, accepted(b)));
+    let busy = |app: &mut App, when: &str| {
+        assert_eq!(app.phase, TurnPhase::Streaming, "{when}");
+        assert_eq!(
+            app.auto_submit(),
+            None,
+            "{when}: 不能凭上一轮的完成发送排队"
+        );
+    };
+    // B 的会话头已到、当前位置的条目未到：已确认的会话头仍是已完成的 A。
+    app.apply_view(LocalUpdate::Head(head(4, Some(b), true)));
+    busy(&mut app, "会话头未确认");
+    // UserMessage 只证明已接受，仍等会话头确认。
+    app.apply_view(entry_update(user(3, b, 2, "second")));
+    busy(&mut app, "只有 UserMessage");
+    app.apply_action(KeyAction::CancelOrClear);
+    assert_eq!(app.cancel_requested.take(), Some(CancelTarget::Own));
+    app.apply_view(entry_update(step(4, b, 0).sent().entry()));
+    assert_eq!(app.auto_submit(), None);
+    assert_eq!(app.queue.messages().count(), 1);
+}
+
+#[test]
 fn new_view_and_path_replacement_discard_entries_but_keep_statuses_and_unaccepted_user() {
     let mut app = test_app(true);
     let (a, b) = (turn(1), turn(2));
@@ -802,6 +841,32 @@ fn detach_lines_describe_receipts_cancel_and_outcome_in_words() {
         !detach_lines(report(None, failed, true), true)
             .join("\n")
             .contains("失败")
+    );
+    // 退出报告中的未被接受同样按来源区分：不来自查询的是发出前取消。
+    let not_accepted = |recovered| {
+        detach_lines(
+            DetachReport {
+                submission: Some(SubmissionReceipt {
+                    turn_id: id,
+                    result: SubmissionResult::NotAccepted,
+                    recovered,
+                }),
+                submission_diagnostic: None,
+                cancel: None,
+                cancel_error: None,
+                ..report(None, None, true)
+            },
+            false,
+        )
+        .join("\n")
+    };
+    let cancelled = not_accepted(false);
+    assert!(cancelled.contains("提交在发出前取消"), "{cancelled}");
+    assert!(!cancelled.contains("查询"), "{cancelled}");
+    let queried = not_accepted(true);
+    assert!(
+        queried.contains("按 TurnId 查询确认后台没有这个请求"),
+        "{queried}"
     );
     let running = match step(2, id, 0).entry() {
         ConversationEntry::Step { summary, .. } => summary,

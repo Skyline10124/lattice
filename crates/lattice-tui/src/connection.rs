@@ -212,7 +212,11 @@ pub(crate) fn detach_lines(report: DetachReport, closing_shown: bool) -> Vec<Str
                 let message = &error.message;
                 format!("请求 {identity} 被拒绝或回执失败：{message}")
             }
-            SubmissionResult::NotAccepted => not_accepted_notice(receipt.turn_id),
+            // 与实时回执一样按来源区分：不来自查询的是发出前取消。
+            SubmissionResult::NotAccepted if receipt.recovered => {
+                not_accepted_notice(receipt.turn_id)
+            }
+            SubmissionResult::NotAccepted => not_submitted_notice(receipt.turn_id),
             SubmissionResult::Unknown { error } => {
                 let detail = error
                     .as_ref()
