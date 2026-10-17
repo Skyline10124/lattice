@@ -30,6 +30,7 @@ pub struct LocalTurn {
 }
 impl LocalClient {
     /// 只处理提交与控制回执；前端用 apply_view 交付已有 watch 的消息。
+    /// Unknown 之后的确定结果会再次交付回执，供前端开始观察或显示拒绝。
     pub fn start_submission(
         &self,
         request: TurnRequest,
@@ -57,6 +58,7 @@ impl LocalClient {
             true,
         );
         worker.own_view = own_view;
+        worker.awaiting_user_message = true;
         if !own_view {
             let (sender, receiver) = mpsc::channel(16);
             handle.external_view = Some(sender);
@@ -164,6 +166,8 @@ struct Worker {
     view: Option<LocalWatch>,
     progress: Option<watch::Receiver<Instant>>,
     nodes: BTreeSet<NodeId>,
+    awaiting_user_message: bool,
+    head_after_user_message: bool,
     seen_position: bool,
     observed_end: bool,
     finished: bool,
@@ -211,6 +215,8 @@ impl Worker {
             view: None,
             progress: None,
             nodes: BTreeSet::new(),
+            awaiting_user_message: false,
+            head_after_user_message: false,
             seen_position: false,
             observed_end: false,
             finished: false,
@@ -227,13 +233,20 @@ impl Worker {
     }
     fn receipt(&mut self, result: SubmissionResult, recovered: bool) {
         let first_receipt = self.report.submission.is_none();
+        let late_resolution =
+            !self.own_view
+                && self.report.submission.as_ref().is_some_and(|receipt| {
+                    matches!(receipt.result, SubmissionResult::Unknown { .. })
+                })
+                && !matches!(result, SubmissionResult::Unknown { .. });
         let receipt = SubmissionReceipt {
             turn_id: self.report.turn_id.expect("submission identity"),
             result,
             recovered,
         };
         self.report.submission = Some(receipt.clone());
-        if first_receipt {
+        // 自带视图的 CLI 仍只交付一条回执，迟到接受由后续视图推进。
+        if first_receipt || late_resolution {
             self.pending.push_back(LocalUpdate::Submit {
                 update: SubmissionUpdate::Receipt(receipt),
             });
@@ -352,6 +365,7 @@ impl Worker {
         let mut ended = false;
         let include = match &update {
             ViewUpdate::Head(head) => {
+                self.head_after_user_message = !self.awaiting_user_message;
                 // 同一位置也可能已经提交了新值，旧批次的条目不能确认这条头。
                 self.seen_position = head.position == NodeId(0);
                 if head.path_replaced {
@@ -371,6 +385,9 @@ impl Worker {
                 };
                 let selected = content.turn_id() == self.report.turn_id;
                 if selected {
+                    if matches!(entry.as_ref(), ConversationEntry::UserMessage { .. }) {
+                        self.awaiting_user_message = false;
+                    }
                     self.nodes.insert(entry.node());
                     if let ConversationEntry::Step {
                         summary: Some(summary),
@@ -409,7 +426,11 @@ impl Worker {
             .head
             .as_ref()
             .is_some_and(|h| h.turn_id == self.report.turn_id);
-        if ended || (no_owner && (resolved || selected_head)) {
+        // 提交回执与 watch 没有跨连接顺序；只有本轮 UserMessage 能排除积压的旧头。
+        // 本轮的头本身已经属于接受后的视图，其余头必须晚于这条 UserMessage。
+        let current_view =
+            !self.awaiting_user_message && (self.head_after_user_message || selected_head);
+        if ended || (no_owner && current_view && (resolved || selected_head)) {
             self.observed_end = true;
         }
         if self.following && resolved && self.observed_end {
