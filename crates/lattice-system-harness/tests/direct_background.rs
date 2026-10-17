@@ -431,8 +431,19 @@ fn disconnected_submission_settles_to_accepted_or_not_found() {
         };
         if settled["response"] == "error" {
             assert_eq!(settled["value"]["kind"], "not_found", "{settled}");
-            let again = turn_lookup(&world, wait(&budget), FIRST);
-            assert_eq!(again["value"]["kind"], "not_found", "{again}");
+            // 后台可能在断开之后才读到这个请求：读到时先登记为在途，再因连接已断开
+            // 而不准入。所以 NotFound 之后的查询可以短暂为在途，但不会变成已接受。
+            let deadline = Instant::now() + wait(&budget);
+            loop {
+                let again = turn_lookup(&world, wait(&budget), FIRST);
+                assert_ne!(again["value"]["status"], "accepted", "{again}");
+                if again["value"]["status"] != "in_flight" {
+                    assert_eq!(again["value"]["kind"], "not_found", "{again}");
+                    break;
+                }
+                assert!(Instant::now() < deadline, "submission stayed in flight");
+                std::thread::yield_now();
+            }
             assert!(server.captured_requests().is_empty());
             let list = run(
                 &world,
