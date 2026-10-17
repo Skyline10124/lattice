@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    sync::{mpsc, watch},
+    sync::{mpsc, oneshot, watch},
     task::JoinHandle,
     time::Instant,
 };
@@ -22,16 +22,33 @@ struct Commands {
 /// 提交与取消独立于观察队列推进，退出只交接已经登记的意图。
 pub struct LocalTurn {
     commands: watch::Sender<Commands>,
+    external_view: Option<mpsc::Sender<(ViewUpdate, oneshot::Sender<()>)>>,
     updates: mpsc::Receiver<LocalUpdate>,
     session_id: SessionId,
     turn_id: Option<TurnId>,
     task: Option<JoinHandle<DetachReport>>,
 }
 impl LocalClient {
+    /// 只处理提交与控制回执；前端用 apply_view 交付已有 watch 的消息。
+    pub fn start_submission(
+        &self,
+        request: TurnRequest,
+        configuration: Result<FrozenConfiguration>,
+    ) -> LocalTurn {
+        self.submission(request, configuration, false)
+    }
     pub fn start_turn(
         &self,
         request: TurnRequest,
         configuration: Result<FrozenConfiguration>,
+    ) -> LocalTurn {
+        self.submission(request, configuration, true)
+    }
+    fn submission(
+        &self,
+        request: TurnRequest,
+        configuration: Result<FrozenConfiguration>,
+        own_view: bool,
     ) -> LocalTurn {
         let (mut handle, mut worker) = LocalTurn::prepare(
             self.clone(),
@@ -39,6 +56,12 @@ impl LocalClient {
             Some(request.turn_id),
             true,
         );
+        worker.own_view = own_view;
+        if !own_view {
+            let (sender, receiver) = mpsc::channel(16);
+            handle.external_view = Some(sender);
+            worker.external_view = Some(receiver);
+        }
         worker.pending.push_back(LocalUpdate::Submit {
             update: SubmissionUpdate::Sending {
                 turn_id: request.turn_id,
@@ -64,6 +87,16 @@ impl LocalClient {
     }
 }
 impl LocalTurn {
+    /// 按原顺序交付本会话的 head、entry、text，供取消与结束判定；不再转发。
+    /// 自带 watch 的句柄忽略此输入；句柄结束后调用无效果。
+    pub async fn apply_view(&self, update: ViewUpdate) {
+        if let Some(sender) = &self.external_view {
+            let (applied, done) = oneshot::channel();
+            if sender.send((update, applied)).await.is_ok() {
+                let _ = done.await;
+            }
+        }
+    }
     fn prepare(
         client: LocalClient,
         session_id: SessionId,
@@ -76,6 +109,7 @@ impl LocalTurn {
         (
             Self {
                 commands,
+                external_view: None,
                 updates,
                 session_id,
                 turn_id,
@@ -121,14 +155,17 @@ struct Worker {
     pending: VecDeque<LocalUpdate>,
     report: DetachReport,
     following: bool,
+    own_view: bool,
+    external_view: Option<mpsc::Receiver<(ViewUpdate, oneshot::Sender<()>)>>,
     input: Option<(TurnRequest, Result<FrozenConfiguration>)>,
     submission: Option<JoinHandle<SubmissionReply>>,
-    recovery: Option<JoinHandle<Result<TurnLookup>>>,
+    recovery: Option<JoinHandle<Result<TurnDetail>>>,
     connection: Option<JoinHandle<Result<LocalWatch>>>,
     view: Option<LocalWatch>,
     progress: Option<watch::Receiver<Instant>>,
     nodes: BTreeSet<NodeId>,
     seen_position: bool,
+    observed_end: bool,
     finished: bool,
     live_evidence: bool,
     cancel_generation: u64,
@@ -154,6 +191,8 @@ impl Worker {
             commands,
             updates,
             following,
+            own_view: true,
+            external_view: None,
             pending: VecDeque::new(),
             report: DetachReport {
                 session_id,
@@ -173,6 +212,7 @@ impl Worker {
             progress: None,
             nodes: BTreeSet::new(),
             seen_position: false,
+            observed_end: false,
             finished: false,
             live_evidence: false,
             cancel_generation: 0,
@@ -201,6 +241,11 @@ impl Worker {
     }
     fn connect(&mut self) {
         self.finished = false;
+        if !self.own_view {
+            self.finished = self.observed_end;
+            return;
+        }
+        self.observed_end = false;
         self.view = None;
         self.progress = None;
         self.seen_position = false;
@@ -213,21 +258,14 @@ impl Worker {
     fn recover(&mut self) {
         let client = self.client.clone();
         let turn_id = self.report.turn_id.expect("submission identity");
-        self.recovery = Some(tokio::spawn(async move {
-            loop {
-                match client.turn(turn_id).await {
-                    Ok(TurnLookup::InFlight) => tokio::time::sleep(Duration::from_millis(25)).await,
-                    result => return result,
-                }
-            }
-        }));
+        self.recovery = Some(tokio::spawn(
+            async move { client.wait_for_turn(turn_id).await },
+        ));
     }
     fn submitted(&mut self, reply: SubmissionReply) {
         match reply {
             SubmissionReply::Accepted(Acceptance::Accepted { turn }) => {
-                self.report.summary = Some(turn.summary.clone());
-                self.receipt(SubmissionResult::Accepted { turn }, false);
-                self.connect();
+                self.accepted(turn, false);
             }
             SubmissionReply::Rejected(error) => {
                 self.receipt(SubmissionResult::Rejected { error }, false);
@@ -239,6 +277,14 @@ impl Worker {
                 self.recover();
             }
         }
+    }
+    fn accepted(&mut self, turn: TurnView, recovered: bool) {
+        // 外部视图可能先于接受回执确认结局，不能用接受时的旧投影覆盖它。
+        if self.own_view || !self.observed_end {
+            self.report.summary = Some(turn.summary.clone());
+        }
+        self.receipt(SubmissionResult::Accepted { turn }, recovered);
+        self.connect();
     }
     fn cancellation(&mut self, status: CancelStatus, error: Option<LocalError>) {
         self.report.cancel = Some(status);
@@ -301,7 +347,7 @@ impl Worker {
             }),
         ));
     }
-    fn observed(&mut self, update: ViewUpdate) {
+    fn observed(&mut self, update: ViewUpdate, forward: bool) {
         self.idle_deadline = Instant::now() + Duration::from_secs(crate::STREAM_IDLE_TIMEOUT_SECS);
         let mut ended = false;
         let include = match &update {
@@ -347,7 +393,7 @@ impl Worker {
             }
             ViewUpdate::Text(text) => !self.following || self.nodes.contains(&text.node),
         };
-        if include {
+        if include && forward {
             self.pending.push_back(update.into());
         }
         // 首条 head 先于正文到达；无 Owner 也必须先读完它指向的条目。
@@ -357,11 +403,16 @@ impl Worker {
                 .head
                 .as_ref()
                 .is_some_and(|h| !h.owner || h.turn_id != self.report.turn_id);
-        if self.following
-            && self.submission.is_none()
-            && self.recovery.is_none()
-            && (ended || no_owner)
-        {
+        let resolved = self.submission.is_none() && self.recovery.is_none();
+        let selected_head = self
+            .report
+            .head
+            .as_ref()
+            .is_some_and(|h| h.turn_id == self.report.turn_id);
+        if ended || (no_owner && (resolved || selected_head)) {
+            self.observed_end = true;
+        }
+        if self.following && resolved && self.observed_end {
             self.finished = true;
             self.view = None;
         }
@@ -369,15 +420,7 @@ impl Worker {
     async fn run(mut self) -> DetachReport {
         if let Some((request, configuration)) = self.input.take() {
             if self.commands.borrow().cancel > 0 || self.commands.borrow().stop {
-                self.receipt(
-                    SubmissionResult::Rejected {
-                        error: LocalError::new(
-                            LocalErrorKind::BadRequest,
-                            "submission cancelled before sending",
-                        ),
-                    },
-                    false,
-                );
+                self.receipt(SubmissionResult::NotAccepted, false);
                 self.finished = true;
             } else {
                 match configuration {
@@ -443,14 +486,11 @@ impl Worker {
                 result = async { self.recovery.as_mut().expect("recovering").await }, if self.recovery.is_some() => {
                     self.recovery = None;
                     match result.unwrap_or_else(|_| Err(worker_error())) {
-                        Ok(TurnLookup::Accepted { turn }) => {
-                            self.report.summary = Some(turn.summary.clone());
-                            self.receipt(SubmissionResult::Accepted { turn: TurnView::from(&turn) }, true);
-                            self.connect();
+                        Ok(turn) => {
+                            self.accepted(TurnView::from(&turn), true);
                         }
                         Err(error) if error.kind == LocalErrorKind::NotFound => { self.receipt(SubmissionResult::NotAccepted, true); self.finished = true; }
                         Err(error) => { self.receipt(SubmissionResult::Unknown { error: Some(error) }, true); self.finished = true; }
-                        Ok(TurnLookup::InFlight) => unreachable!("recovery polls until admission ends"),
                     }
                 }
                 result = async { (&mut self.cancel_task.as_mut().expect("cancelling").1).await }, if self.cancel_task.is_some() => {
@@ -483,7 +523,7 @@ impl Worker {
                 }
                 item = async { self.view.as_mut().expect("watching").next().await }, if self.view.is_some() && self.pending.len() < 32 => {
                     match item {
-                        Ok(Some(update)) => self.observed(update),
+                        Ok(Some(update)) => self.observed(update, true),
                         Ok(None) => { self.view = None; self.pending.push_back(LocalUpdate::Connection { status: ConnectionStatus::Eof }); self.finished = true; }
                         Err(error) => {
                             self.view = None;
@@ -495,6 +535,10 @@ impl Worker {
                             }
                         }
                     }
+                }
+                item = async { self.external_view.as_mut().expect("external view").recv().await }, if self.external_view.is_some() => {
+                    if let Some((update, applied)) = item { self.observed(update, false); let _ = applied.send(()); }
+                    else { self.external_view = None; }
                 }
                 progress = async { self.progress.as_mut().expect("watching progress").changed().await }, if self.progress.is_some() && self.view.is_some() => {
                     if progress.is_err() { self.progress = None; }

@@ -522,6 +522,83 @@ async fn watch_starts_with_ten_turns_history_has_whole_earlier_turns_and_rewind_
     finish(&backend, task).await;
 }
 #[tokio::test]
+async fn diagnostic_and_owner_only_heads_repeat_the_current_entry() {
+    let (dir, backend, client, task) = backend().await;
+    let mut provider = Provider::start().await;
+    provider.release.send_replace(false);
+    let input = request(dir.path());
+    let sid = input.session.id();
+    client
+        .submit(input.clone(), config(dir.path(), &provider.endpoint))
+        .await
+        .unwrap();
+    bounded(&mut provider.arrived).await.unwrap();
+    let sink = backend.observer(sid);
+    let (waiting, resume) = arm(&backend.gates.watch_wait);
+    let mut view = client.watch(sid).await.unwrap();
+    assert!(matches!(
+        view.next().await.unwrap(),
+        Some(ViewUpdate::Head(SessionHead { owner: true, .. }))
+    ));
+    view.next().await.unwrap().unwrap();
+    let initial = view.next().await.unwrap().unwrap();
+    bounded(waiting).await.unwrap();
+
+    let diagnostic = LocalError::new(LocalErrorKind::Internal, "仅诊断变化");
+    lock(&backend.admission)
+        .diagnostics
+        .insert(input.turn_id, diagnostic.clone());
+    // CEP 通知只唤醒推送，不标记任何节点；不能借节点变化掩盖缺失的补推。
+    sink.emit(crate::TurnEvent::CepCallStarted {
+        invocation_id: lancet_protocol::InvocationId::parse("00000000-0000-4000-8000-000000000001")
+            .unwrap(),
+        method: "test".into(),
+        semantic_stage: "test".into(),
+        guard_stage: "test".into(),
+    });
+    let (waiting, resume_next) = arm(&backend.gates.watch_wait);
+    resume.send(()).unwrap();
+    assert!(
+        matches!(view.next().await.unwrap(), Some(ViewUpdate::Head(SessionHead { owner: true, diagnostic: Some(error), .. })) if error == diagnostic)
+    );
+    let repeated = tokio::time::timeout(Duration::from_secs(1), view.next()).await;
+    assert!(
+        matches!(repeated, Ok(Ok(Some(ref update))) if *update == initial),
+        "仅诊断变化的 head 后也必须补推当前位置条目"
+    );
+    bounded(waiting).await.unwrap();
+
+    let (retiring, retire) = arm(&backend.gates.retire);
+    provider.release.send_replace(true);
+    bounded(retiring).await.unwrap();
+    let (waiting, resume_final) = arm(&backend.gates.watch_wait);
+    resume_next.send(()).unwrap();
+    assert!(matches!(
+        view.next().await.unwrap(),
+        Some(ViewUpdate::Head(SessionHead { owner: true, .. }))
+    ));
+    let final_entry = view.next().await.unwrap().unwrap();
+    assert!(
+        matches!(&final_entry, ViewUpdate::Entry { entry } if matches!(entry.as_ref(), ConversationEntry::Step { summary: Some(summary), .. } if summary.progress.is_closed()))
+    );
+    bounded(waiting).await.unwrap();
+    retire.send(()).unwrap();
+    idle(&backend).await;
+    resume_final.send(()).unwrap();
+    assert!(matches!(
+        view.next().await.unwrap(),
+        Some(ViewUpdate::Head(SessionHead { owner: false, .. }))
+    ));
+    assert_eq!(
+        bounded(view.next()).await.unwrap().unwrap(),
+        final_entry,
+        "仅 Owner 变化也补推同一条目"
+    );
+    drop((view, sink));
+    assert_eq!(provider.finish().await.len(), 1);
+    finish(&backend, task).await;
+}
+#[tokio::test]
 async fn slow_observer_reads_latest_entries_suffixes_and_attempt_boundaries() {
     use lattice_session::store::*;
     let (_dir, backend, _client, task) = backend().await;

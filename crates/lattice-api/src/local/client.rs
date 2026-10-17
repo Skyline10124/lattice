@@ -90,6 +90,15 @@ impl LocalClient {
             _ => Err(protocol()),
         }
     }
+    /// 按 TurnId 找回接受结果；在途时每 25ms 再查，NotFound 与其他错误原样返回。
+    pub async fn wait_for_turn(&self, turn_id: TurnId) -> Result<TurnDetail> {
+        loop {
+            match self.turn(turn_id).await? {
+                TurnLookup::Accepted { turn } => return Ok(turn),
+                TurnLookup::InFlight => tokio::time::sleep(Duration::from_millis(25)).await,
+            }
+        }
+    }
     pub async fn rewind(
         &self,
         session_id: SessionId,

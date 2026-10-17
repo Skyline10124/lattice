@@ -14,7 +14,6 @@ use std::{
 pub(crate) struct PushState {
     initial: bool,
     reload: bool,
-    refresh_position: bool,
     path_replaced: bool,
     pending: BTreeSet<NodeId>,
     sent: Option<(NodeId, u32, usize)>,
@@ -142,13 +141,7 @@ impl ObserverSink {
     pub(crate) fn release(&self) {
         let mut state = self.state.lock().expect("observation lock");
         state.attempt = None;
-        // 接受后的读取可能先于 TurnStarted 失败，退场必须按库中的当前位置补推。
-        state.watchers.retain(|watcher| {
-            watcher.upgrade().is_some_and(|watcher| {
-                watcher.lock().expect("push state lock").refresh_position = true;
-                true
-            })
-        });
+        Self::mark(&mut state, &[], false);
         self.changed.send_replace(());
     }
     /// 模型回调直接累积文字；持久推进的通知总在事务提交之后到达。
@@ -229,7 +222,7 @@ impl ObserverSink {
         session_id: lancet_protocol::SessionId,
         cursor: &Mutex<PushState>,
     ) -> lattice_session::store::Result<Vec<ViewUpdate>> {
-        let (initial, reload, replaced, refresh_position, mut pending, attempt, sent) = {
+        let (initial, reload, replaced, mut pending, attempt, sent) = {
             let state = self.state.lock().expect("observation lock");
             let mut cursor = cursor.lock().expect("push state lock");
             let initial = std::mem::take(&mut cursor.initial);
@@ -238,7 +231,6 @@ impl ObserverSink {
                 initial,
                 std::mem::take(&mut cursor.reload),
                 replaced,
-                std::mem::take(&mut cursor.refresh_position),
                 std::mem::take(&mut cursor.pending),
                 state.attempt.clone(),
                 cursor.sent,
@@ -258,7 +250,8 @@ impl ObserverSink {
             (view.session, view.current_agent, view.entries)
         } else {
             let record = read.session(session_id)?;
-            if refresh_position && record.current != NodeId(0) {
+            // head 没有批次结束标记，每批都从同一读事务补推当前位置供读者确认。
+            if record.current != NodeId(0) {
                 pending.insert(record.current);
             }
             let agent = read.current_agent(session_id)?;

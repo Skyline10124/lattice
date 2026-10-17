@@ -217,6 +217,172 @@ async fn cancellation(peer: &Peer, id: TurnId) -> Wire {
     wire
 }
 #[tokio::test]
+async fn wait_for_turn_polls_in_flight_then_returns_acceptance_or_the_original_error() {
+    for terminal in [
+        None,
+        Some(LocalErrorKind::NotFound),
+        Some(LocalErrorKind::StoreUnavailable),
+        Some(LocalErrorKind::Transport),
+    ] {
+        let peer = Peer::new();
+        let id = new_turn_id();
+        let client = peer.client.clone();
+        let mut waiting = tokio::spawn(async move { client.wait_for_turn(id).await });
+        let (mut wire, request) = peer.request().await;
+        assert!(matches!(request, Request::Turn { turn_id } if turn_id == id));
+        for _ in 0..2 {
+            let sent = tokio::time::Instant::now();
+            wire.reply(Response::Turn(TurnLookup::InFlight)).await;
+            let (next_wire, request) = tokio::select! {
+                request = peer.request() => request,
+                result = &mut waiting => panic!("在途不能结束等待：{result:?}"),
+            };
+            assert!(
+                sent.elapsed() >= Duration::from_millis(25),
+                "找回查询必须遵守共同的 25ms 节奏"
+            );
+            assert!(matches!(request, Request::Turn { turn_id } if turn_id == id));
+            wire = next_wire;
+        }
+        if terminal == Some(LocalErrorKind::Transport) {
+            drop(wire);
+        } else if let Some(kind) = terminal {
+            wire.reply(Response::Error(LocalError::new(kind, "原始查询错误")))
+                .await;
+        } else {
+            wire.reply(Response::Turn(TurnLookup::Accepted {
+                turn: detail(id, false),
+            }))
+            .await;
+        }
+        let result = within(waiting).await.unwrap();
+        match terminal {
+            None => assert_eq!(result.unwrap(), detail(id, false)),
+            Some(kind) => {
+                let error = result.unwrap_err();
+                assert_eq!(error.kind, kind);
+                if kind != LocalErrorKind::Transport {
+                    assert_eq!(error.message, "原始查询错误");
+                }
+            }
+        }
+    }
+}
+#[tokio::test]
+async fn submission_only_preserves_external_completion_before_the_late_receipt() {
+    for closed in [false, true] {
+        let peer = Peer::new();
+        let id = new_turn_id();
+        let mut turn = peer.client.start_submission(
+            request(&peer, id),
+            Ok(super::tests::frozen(
+                peer._directory.path(),
+                "http://127.0.0.1:1/v1",
+            )),
+        );
+        next(&mut turn).await;
+        let (mut wire, request) = peer.request().await;
+        assert!(matches!(request, Request::Submit { .. }));
+        turn.apply_view(ViewUpdate::Head(head(id, false))).await;
+        turn.apply_view(ViewUpdate::Entry {
+            entry: entry(id, closed),
+        })
+        .await;
+        wire.reply(accepted(id)).await;
+        assert!(matches!(
+            receipt(&mut turn).await.result,
+            SubmissionResult::Accepted { .. }
+        ));
+        let ended = tokio::time::timeout(Duration::from_secs(1), turn.next()).await;
+        assert!(
+            matches!(ended, Ok(None)),
+            "外部视图已确认结束，迟到的接受回执不能遗失结束判定"
+        );
+        assert_eq!(
+            turn.detach().await.summary,
+            Some(detail(id, closed).summary)
+        );
+    }
+}
+#[tokio::test]
+async fn submission_only_keeps_receipts_recovery_and_cancel_without_a_watch() {
+    for recovered in [false, true] {
+        for evidence_first in [false, true] {
+            let peer = Peer::new();
+            let id = new_turn_id();
+            let mut turn = peer.client.start_submission(
+                request(&peer, id),
+                Ok(super::tests::frozen(
+                    peer._directory.path(),
+                    "http://127.0.0.1:1/v1",
+                )),
+            );
+            assert!(
+                matches!(next(&mut turn).await, LocalUpdate::Submit { update: SubmissionUpdate::Sending { turn_id, .. } } if turn_id == id)
+            );
+            let (mut wire, request) = peer.request().await;
+            assert!(matches!(request, Request::Submit { .. }));
+            if recovered {
+                wire.reply(Response::Acceptance(Acceptance::ConfirmationUnknown {
+                    turn_id: id,
+                    session_id: sid(),
+                }))
+                .await;
+                let (mut lookup, request) = peer.request().await;
+                assert!(matches!(request, Request::Turn { turn_id } if turn_id == id));
+                lookup.reply(Response::Turn(TurnLookup::InFlight)).await;
+                let (mut lookup, request) = peer.request().await;
+                assert!(matches!(request, Request::Turn { turn_id } if turn_id == id));
+                lookup
+                    .reply(Response::Turn(TurnLookup::Accepted {
+                        turn: detail(id, false),
+                    }))
+                    .await;
+            } else {
+                wire.reply(accepted(id)).await;
+            }
+            let receipt = receipt(&mut turn).await;
+            assert!(matches!(receipt.result, SubmissionResult::Accepted { .. }));
+            assert_eq!(receipt.recovered, recovered);
+            turn.reconnect();
+            turn.cancel();
+            let (mut cancel, request) = peer.request().await;
+            assert!(
+                matches!(request, Request::Cancel { turn_id } if turn_id == id),
+                "提交专用句柄接受或重连后不得开启 watch"
+            );
+            if evidence_first {
+                turn.apply_view(ViewUpdate::Head(head(id, true))).await;
+            }
+            cancel.reply(Response::Cancelled { owned: false }).await;
+            cancel_status(&mut turn, CancelStatus::NotTaken).await;
+            if !evidence_first {
+                turn.apply_view(ViewUpdate::Head(head(id, true))).await;
+            }
+            let mut retry = cancellation(&peer, id).await;
+            retry.reply(Response::Cancelled { owned: true }).await;
+            cancel_status(&mut turn, CancelStatus::Taken).await;
+            turn.apply_view(ViewUpdate::Head(head(id, false))).await;
+            turn.apply_view(ViewUpdate::Entry {
+                entry: entry(id, true),
+            })
+            .await;
+            assert!(
+                within(turn.next()).await.is_none(),
+                "外部视图只供控制判定，不重复转发"
+            );
+            let report = within(turn.detach()).await;
+            assert_eq!(report.cancel, Some(CancelStatus::Taken));
+            assert_eq!(report.summary, Some(detail(id, true).summary));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(25), peer.request())
+                    .await
+                    .is_err()
+            );
+        }
+    }
+}
+#[tokio::test]
 async fn configuration_rejection_has_identity_and_exactly_one_receipt() {
     let peer = Peer::new();
     let id = new_turn_id();
@@ -984,10 +1150,12 @@ async fn cancel_before_sending_never_writes_a_submit_and_still_finishes_its_rece
             update: SubmissionUpdate::Sending { .. }
         }
     ));
-    assert!(matches!(
-        receipt(&mut turn).await.result,
-        SubmissionResult::Rejected { .. }
-    ));
+    let receipt = receipt(&mut turn).await;
+    assert!(
+        matches!(receipt.result, SubmissionResult::NotAccepted),
+        "发出前取消确定未接受，不是后台拒绝"
+    );
+    assert!(!receipt.recovered);
     assert!(within(turn.next()).await.is_none());
     assert!(
         tokio::time::timeout(Duration::from_millis(20), peer.request())
