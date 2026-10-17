@@ -3,7 +3,7 @@
 //! 公开树/详情与 provider 上下文互证；接受前拒绝不建立 Session。
 mod support;
 use lattice_system_harness::{
-    ScenarioSpec, ScenarioWorld, SessionSendDriver, SseScript, TurnEventLine,
+    ScenarioSpec, ScenarioWorld, SendRecord, SessionSendDriver, SseScript, Submit,
 };
 use serde_json::Value;
 use support::*;
@@ -172,7 +172,18 @@ fn direct_turn_sonnet_routes_but_missing_credentials_reject_before_acceptance() 
                 && send.session_id().is_none(),
             "reject before Session acceptance",
         )?;
-        require(outcome.events.iter().all(|e| matches!(e, TurnEventLine::Unknown { type_name, .. } if matches!(type_name.as_str(), "submission" | "error" | "connection"))), "no model/Tool activity")?;
+        // 身份先于配置加载输出；凭据缺失在请求写出前拒绝，这次提交以 `rejected` 回执结束，
+        // 之后没有会话头、条目或文字。
+        require(
+            matches!(
+                outcome.records.first(),
+                Some(SendRecord::Submit(Submit::Sending { new: true, .. }))
+            ) && outcome.rejection().is_some(),
+            format!(
+                "identity first, then only the rejected receipt: {:?}",
+                outcome.type_sequence()
+            ),
+        )?;
         let error: Value = serde_json::from_slice(&list.stdout).unwrap();
         require(
             list.is_clean_exit(1)

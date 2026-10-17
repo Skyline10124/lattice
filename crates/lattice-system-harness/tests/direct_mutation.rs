@@ -18,11 +18,11 @@ use std::fs;
 use std::time::Duration;
 
 use lattice_system_harness::{
-    AssertError, SendExitCode, SessionSendDriver, SseScript, assert_event_subsequence,
+    AssertError, SendExitCode, SessionSendDriver, SlotOutcome, SseScript,
 };
 use serde_json::Value;
 use support::{
-    assert_accepted_and_closed, assert_clean_send, assert_committed_view_after, direct_world,
+    assert_accepted_and_closed, assert_clean_send, assert_completed_after_tools, direct_world,
     driver, evidence, finish_scenario, finished_with_code, last_tool_content, require, sequence,
     tool_call, tool_failed, tool_ok, tool_result_value, wire_fake_llm, wire_gated_fake_llm,
 };
@@ -395,10 +395,10 @@ fn direct_mutation_stale_edit_and_external_visibility() {
         // Host `StaleRevision` records a typed refusal; runtime prefers it over
         // the guest's `Err(String)` retelling so the wire stays ReplanRequired.
         require(
-            finished_with_code(&stale.parsed, "mutate.edit", "ReplanRequired"),
+            finished_with_code(&stale.parsed, "mutate.edit", "replan_required"),
             format!(
                 "stale edit must emit ReplanRequired: {:?}",
-                stale.parsed.events
+                stale.parsed.slots()
             ),
         )?;
         require(
@@ -583,10 +583,10 @@ fn direct_mutation_denials_have_no_side_effect() {
             "write-policy denial left a file",
         )?;
         require(
-            finished_with_code(&write_deny.parsed, "mutate.create", "CapabilityViolation"),
+            finished_with_code(&write_deny.parsed, "mutate.create", "capability_violation"),
             format!(
                 "write-policy denial must be CapabilityViolation: {:?}",
-                write_deny.parsed.events
+                write_deny.parsed.slots()
             ),
         )?;
 
@@ -600,10 +600,10 @@ fn direct_mutation_denials_have_no_side_effect() {
             "system-exclusion denial left a file",
         )?;
         require(
-            finished_with_code(&sys_deny.parsed, "mutate.create", "PathContainment"),
+            finished_with_code(&sys_deny.parsed, "mutate.create", "path_containment"),
             format!(
                 "system exclusion must be PathContainment: {:?}",
-                sys_deny.parsed.events
+                sys_deny.parsed.slots()
             ),
         )?;
 
@@ -723,11 +723,13 @@ fn direct_mutation_concurrent_same_target_create_has_one_winner() {
                 b.type_sequence()
             ),
         )?;
-        // 两个 Tool 执行都真实发生过：各自都有 tool_call_started，而不是一方被 Busy 拒在门外。
+        // 两个 Tool 执行都真实发生过：各自的槽位都已交给 LANCET，而不是一方被 Busy 拒在门外。
         require(
-            [&a, &b]
-                .into_iter()
-                .all(|outcome| outcome.type_sequence().contains(&"tool_call_started")),
+            [&a, &b].into_iter().all(|outcome| {
+                outcome.slots().iter().any(|slot| {
+                    slot.method == "mutate.create" && slot.outcome != SlotOutcome::NotExecuted
+                })
+            }),
             format!(
                 "both sessions must execute the Tool; a={:?} b={:?}",
                 a.type_sequence(),
@@ -740,7 +742,7 @@ fn direct_mutation_concurrent_same_target_create_has_one_winner() {
             &b
         };
         require(
-            finished_with_code(&loser.parsed, "mutate.create", "ReplanRequired"),
+            finished_with_code(&loser.parsed, "mutate.create", "replan_required"),
             format!(
                 "same-target loser must be ReplanRequired: {:?}",
                 loser.type_sequence()
@@ -820,16 +822,10 @@ fn direct_mutation_tool_activity_before_commit() {
 
     let result: Result<(), AssertError> = (|| {
         assert_clean_send(&outcome)?;
-        // 实时工具生命周期顺序仍然独立保证（不因有损通道放弃）。
-        assert_event_subsequence(
-            &outcome.parsed,
-            &["tool_call_started", "tool_call_finished"],
-        )
-        .map_err(|e| AssertError::StdoutMissing { expected: e })?;
-        // 终态取证改为持久发布：接受回执与同 Turn 的固定 committed 视图对应，
-        // 且该视图必须出现在最后一个工具完成之后。
+        // 结局来自 Step 条目：接受回执与同一轮的结局对应，
+        // 带结局的最后一步在带 Tool 调用的步骤之后。
         assert_accepted_and_closed(&outcome.parsed)?;
-        assert_committed_view_after(&outcome.parsed, "tool_call_finished")?;
+        assert_completed_after_tools(&outcome.parsed)?;
         require(tool_ok(&outcome.parsed, "mutate.create"), "create ok")?;
         require(
             world.project_dir().join("ordered.txt").is_file(),
@@ -887,7 +883,7 @@ fn direct_mutation_symlink_parent_is_refused_without_side_effect() {
             "symlink create must fail",
         )?;
         require(
-            finished_with_code(&execution.parsed, "mutate.create", "PathContainment"),
+            finished_with_code(&execution.parsed, "mutate.create", "path_containment"),
             "symlink create must be PathContainment",
         )?;
         require(

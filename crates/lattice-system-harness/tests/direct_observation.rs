@@ -17,12 +17,12 @@ mod support;
 use std::fs;
 
 use lattice_system_harness::{
-    AssertError, ScenarioSpec, ScenarioWorld, SendExitCode, SessionSendDriver, SseScript,
-    TurnEventLine, assert_event_subsequence, derive_send_exit_code,
+    AssertError, ScenarioSpec, ScenarioWorld, SendExitCode, SessionSendDriver, SlotOutcome,
+    SseScript, derive_send_exit_code,
 };
 use serde_json::{Value, json};
 use support::{
-    assert_clean_send, assert_committed_view_after, driver, evidence, finish_scenario, require,
+    assert_clean_send, assert_completed_after_tools, driver, evidence, finish_scenario, require,
     tool_result_value, wire_fake_llm,
 };
 
@@ -219,28 +219,17 @@ fn direct_observation_visibility_and_bounds() {
         assert_clean_send(&execution)?;
         let outcome = &execution.parsed;
 
-        // --- canonical tool name and lifecycle ordering ---
-        let tool_starts: Vec<&str> = outcome
-            .events
-            .iter()
-            .filter_map(|e| match e {
-                TurnEventLine::ToolCallStarted { name, .. } => Some(name.as_str()),
-                _ => None,
-            })
-            .collect();
+        // 规范工具名与每次调用的结论都取自 Step 条目中的槽位。
+        let slots = outcome.slots();
         require(
-            tool_starts.len() == 18 && tool_starts.iter().all(|n| *n == "observe.workspace"),
-            format!("tool lifecycle names mismatch: {tool_starts:?}"),
+            slots.len() == 18 && slots.iter().all(|slot| slot.method == "observe.workspace"),
+            format!("tool slot names mismatch: {slots:?}"),
         )?;
 
         // Calls 1-10 retain their visibility/bounds results; all 8 escapes fail.
-        let ok_pattern: Vec<bool> = outcome
-            .events
+        let ok_pattern: Vec<bool> = slots
             .iter()
-            .filter_map(|e| match e {
-                TurnEventLine::ToolCallFinished { ok, .. } => Some(*ok),
-                _ => None,
-            })
+            .map(|slot| slot.outcome == SlotOutcome::Succeeded)
             .collect();
         let expected_ok = [
             true, true, false, true, false, false, false, true, true, true, false, false, false,
@@ -251,13 +240,8 @@ fn direct_observation_visibility_and_bounds() {
             format!("tool ok/fail pattern mismatch: {ok_pattern:?} expected {expected_ok:?}"),
         )?;
 
-        // tool activity and CEP lifecycle precede commit
-        // 实时工具生命周期顺序仍然独立保证（有损通道下也不放宽）。
-        assert_event_subsequence(outcome, &["tool_call_started", "tool_call_finished"])
-            .map_err(|e| AssertError::StdoutMissing { expected: e })?;
-        // 终态取证来自持久发布：固定 committed 视图带 commit id 且跟随最后一个工具完成，
-        // 而不是要求重放可能被淘汰的瞬时 turn_committed 事件。
-        assert_committed_view_after(outcome, "tool_call_finished")?;
+        // 结局取自最后一个 Step 条目，它在全部带调用的步骤之后。
+        assert_completed_after_tools(outcome)?;
 
         // turn committed completed
         require(
@@ -267,7 +251,7 @@ fn direct_observation_visibility_and_bounds() {
         let binary_exit = outcome.exit_code.expect("exit code classification");
         require(
             binary_exit == SendExitCode::Committed
-                && derive_send_exit_code(&outcome.events) == SendExitCode::Committed,
+                && derive_send_exit_code(&outcome.records) == SendExitCode::Committed,
             format!("exit mismatch: binary={binary_exit:?}"),
         )?;
 
@@ -449,28 +433,24 @@ fn direct_observation_visibility_and_bounds() {
             fs::read_to_string(&outside_file).unwrap_or_default() == OUTSIDE_CANARY,
             "outside-root file changed during observation denials",
         )?;
-        // Every escape attempt is refused as `PathContainment`, and the event
-        // stream says so.
+        // 每次越界尝试都以 `PathContainment` 拒绝，Step 条目的槽位给出同一结论。
         //
         // Cell admission precedes the Tool Host's path resolver. Lexical or
         // symlink escape therefore keeps the precise `PathContainment` code.
         let containment_denied_finishes = outcome
-            .events
+            .slots()
             .iter()
-            .filter(|event| match event {
-                TurnEventLine::Unknown { type_name, raw } if type_name == "cep_call_finished" => {
-                    raw.get("ok").and_then(Value::as_bool) == Some(false)
-                        && raw.get("error_code").and_then(Value::as_str) == Some("PathContainment")
-                }
-                _ => false,
+            .filter(|slot| {
+                slot.outcome == SlotOutcome::Failed
+                    && slot.error_code.as_deref() == Some("path_containment")
             })
             .count();
         require(
             containment_denied_finishes == 8,
             format!(
-                "expected 8 PathContainment CEP finishes, got \
+                "expected 8 PathContainment slots, got \
                  {containment_denied_finishes}: {:?}",
-                outcome.events
+                outcome.slots()
             ),
         )?;
 
@@ -532,13 +512,9 @@ fn direct_observation_symlinks_are_refused_without_canary_leak() {
             "expected four symlink results and final provider request",
         )?;
         let finishes: Vec<bool> = execution
-            .parsed
-            .events
+            .slots()
             .iter()
-            .filter_map(|event| match event {
-                TurnEventLine::ToolCallFinished { ok, .. } => Some(*ok),
-                _ => None,
-            })
+            .map(|slot| slot.outcome == SlotOutcome::Succeeded)
             .collect();
         require(
             finishes == [false; 4],
@@ -560,15 +536,11 @@ fn direct_observation_symlinks_are_refused_without_canary_leak() {
             )?;
         }
         let containment = execution
-            .parsed
-            .events
+            .slots()
             .iter()
-            .filter(|event| match event {
-                TurnEventLine::Unknown { type_name, raw } if type_name == "cep_call_finished" => {
-                    raw.get("ok").and_then(Value::as_bool) == Some(false)
-                        && raw.get("error_code").and_then(Value::as_str) == Some("PathContainment")
-                }
-                _ => false,
+            .filter(|slot| {
+                slot.outcome == SlotOutcome::Failed
+                    && slot.error_code.as_deref() == Some("path_containment")
             })
             .count();
         require(

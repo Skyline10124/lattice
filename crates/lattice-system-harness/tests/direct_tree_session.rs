@@ -39,6 +39,13 @@ fn first_prompt_is_the_only_session_creation_and_request() {
         );
         let sid = result.accepted_session_id().expect("accepted SID");
         let tid = result.accepted_turn_id().expect("accepted TurnId");
+        // CLI 在发出请求前生成并输出身份，写明新建；接受事务建立的就是这个 Session。
+        assert_eq!(result.sending(), Some((tid, sid, true)));
+        let list = send.run_command(&["--json", "session", "list"]).unwrap();
+        evidence.record_command("session list", &list);
+        let list: Value = serde_json::from_slice(&list.stdout).unwrap();
+        assert_eq!(list.as_array().unwrap().len(), 1);
+        assert_eq!(list[0]["session_id"], sid);
         let log = send
             .run_command(&["--json", "session", "log", sid])
             .unwrap();
@@ -90,28 +97,14 @@ fn cli_json(
     serde_json::from_slice(&out.stdout).unwrap()
 }
 
-fn current_history(
-    world: &ScenarioWorld,
-    spec: &ScenarioSpec,
-    evidence: &mut ScenarioEvidence,
-    tid: &str,
-) -> Value {
-    let out = support::cli(world, spec, &["--json", "session", "turn", tid, "--follow"]);
-    evidence.record_command(
-        "read current root path through completed original Turn",
-        &out,
-    );
-    assert!(out.is_clean_exit(0), "{}", out.summary());
-    std::str::from_utf8(&out.stdout)
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str::<Value>(line).unwrap())
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .find(|record| record["type"] == "history")
-        .expect("complete history")["history"]
-        .clone()
+/// 经公开视图读取当前路径上的对话：当前位置与开头给出的条目（不超过最近 10 轮）。
+fn current_history(world: &ScenarioWorld, spec: &ScenarioSpec, sid: &str) -> Value {
+    let mut watcher = support::Watcher::open(world, spec.step_timeout(), sid);
+    let view = watcher.initial();
+    serde_json::json!({
+        "position": view.head.as_ref().unwrap().position,
+        "entries": view.raw_entries(),
+    })
 }
 
 #[test]
@@ -152,9 +145,8 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
         );
         assert_eq!(original["steps"].as_array().unwrap().len(), 2);
         assert_eq!(original["steps"][0]["end"], json!({"end":"continue"}));
-        let original_history = current_history(&world, &spec, &mut evidence, tid);
-        assert_eq!(original_history["anchor"]["head"], 3);
-        let beta_turn = "00000000-0000-4000-8000-000000000003";
+        let original_history = current_history(&world, &spec, sid);
+        assert_eq!(original_history["position"], 3);
         let (mut beta, gate) = support::wire_gated_fake_llm(
             &world,
             "beta",
@@ -180,8 +172,6 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
                         sid,
                         "--agent",
                         "beta",
-                        "--turn-id",
-                        beta_turn,
                     ]
                     .into_iter()
                     .map(String::from)
@@ -193,6 +183,17 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
         gate.wait_until_stalled(1, spec.step_timeout()).unwrap();
         gate.release_next(spec.step_timeout()).unwrap();
         gate.wait_until_stalled(2, spec.step_timeout()).unwrap();
+        // 身份由 CLI 生成；会话日志给出正在执行的那一轮。
+        let beta_turn = cli_json(
+            &world,
+            &spec,
+            &mut evidence,
+            &["--json", "session", "log", sid],
+        )["unclosed_turn"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let beta_turn = beta_turn.as_str();
         let beta_running = cli_json(
             &world,
             &spec,
@@ -215,9 +216,20 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
             &world,
             &spec,
             &mut evidence,
-            &["--json", "session", "cancel", sid, beta_turn],
+            &["--json", "session", "cancel", sid],
         );
-        assert_eq!(cancel["owned"], true);
+        assert_eq!(
+            lattice_system_harness::parse_record(&cancel).unwrap(),
+            lattice_system_harness::SendRecord::Cancel(
+                lattice_system_harness::CancelRecord::Reply {
+                    session_id: Some(sid.to_owned()),
+                    turn_id: beta_turn.to_owned(),
+                    status: lattice_system_harness::CancelStatus::Taken,
+                    owned: Some(true),
+                    error: None,
+                }
+            )
+        );
         let cancelled = running.wait(None).unwrap();
         evidence.record_command("beta cancelled after real mutation", &cancelled);
         assert!(cancelled.is_clean_exit(2), "{}", cancelled.summary());
@@ -291,8 +303,8 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
             )["current"],
             2
         );
-        let fork_history = current_history(&world, &spec, &mut evidence, tid);
-        assert_eq!(fork_history["anchor"]["head"], 2);
+        let fork_history = current_history(&world, &spec, sid);
+        assert_eq!(fork_history["position"], 2);
         assert_eq!(
             fork_history["entries"],
             json!(&original_history["entries"].as_array().unwrap()[..2])
@@ -349,10 +361,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
         );
         assert_eq!(returned["current_agent"], "alpha");
         assert_eq!(returned["nodes"].as_array().unwrap().len(), 9);
-        assert_eq!(
-            current_history(&world, &spec, &mut evidence, tid),
-            original_history
-        );
+        assert_eq!(current_history(&world, &spec, sid), original_history);
         assert_eq!(
             cli_json(
                 &world,
@@ -362,9 +371,9 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
             )["current"],
             0
         );
-        let root_history = current_history(&world, &spec, &mut evidence, tid);
+        let root_history = current_history(&world, &spec, sid);
         assert_eq!(root_history["entries"], json!([]));
-        assert_eq!(root_history["anchor"]["head"], 0);
+        assert_eq!(root_history["position"], 0);
         let at_root = cli_json(
             &world,
             &spec,
@@ -597,7 +606,16 @@ fn legacy_stores_are_refused_before_any_new_database_or_request() {
                     .lines()
                     .map(|line| serde_json::from_str(line).unwrap())
                     .collect();
-                let error = records.last().unwrap();
+                // 提交被后台拒绝时，`sending` 之后只有一条 `rejected` 回执，错误在其中；
+                // 其余命令不是提交，输出 `error` 记录。
+                let error = if args[1] == "session" && args[2] == "send" {
+                    let sent =
+                        lattice_system_harness::parse_send_stdout(&out.stdout, out.exit_code());
+                    assert!(sent.rejection().is_some(), "{:?}", sent.type_sequence());
+                    &records[1]["error"]
+                } else {
+                    records.last().unwrap()
+                };
                 assert_eq!(error["kind"], "store_unavailable");
                 assert_eq!(error["store"]["type"], "legacy_stores");
                 assert_eq!(error["store"]["paths"], serde_json::json!(legacies));

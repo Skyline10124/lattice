@@ -25,7 +25,7 @@ mod support;
 
 use lattice_system_harness::{
     AssertError, CapturedRequest, ScenarioSpec, ScenarioWorld, SendExitCode, SendOutcome,
-    SessionSendDriver, SseScript, TurnEventLine, derive_send_exit_code,
+    SessionSendDriver, SlotOutcome, SseScript, derive_send_exit_code,
 };
 use serde_json::{Value, json};
 use support::{
@@ -56,12 +56,13 @@ fn turn_world(
     (world, spec)
 }
 
-/// 接受、最终根路径正文与树形日志共同证明同一个 Turn。
+/// 接受、这一轮的对话条目与树形日志共同证明同一个 Turn；`ordinal` 是从根数起的轮次。
 fn assert_live_text_turn(
     outcome: &SendOutcome,
     session_id: &str,
     prompt: &str,
     reply: &str,
+    ordinal: u64,
     log: &Value,
 ) -> Result<(), AssertError> {
     assert_accepted_and_closed(outcome)?;
@@ -75,38 +76,21 @@ fn assert_live_text_turn(
         sid == session_id
             && result == "completed"
             && outcome.exit_code == Some(SendExitCode::Committed)
-            && derive_send_exit_code(&outcome.events) == SendExitCode::Committed,
+            && derive_send_exit_code(&outcome.records) == SendExitCode::Committed,
         "completed identity and delivery must agree",
     )?;
-    let history = outcome
-        .events
-        .iter()
-        .rev()
-        .find_map(|event| match event {
-            TurnEventLine::Unknown { type_name, raw } if type_name == "history" => {
-                Some(&raw["history"])
-            }
-            _ => None,
-        })
-        .ok_or_else(|| AssertError::StdoutMissing {
-            expected: "complete history".into(),
-        })?;
-    let entries: Vec<_> = history["entries"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|entry| entry["content"]["turn_id"] == turn_id)
-        .collect();
+    let entries = outcome.entries();
     let text_parts = |text: &str| json!([{"replay_state":null,"semantic":{"text":{"text":text}}}]);
     require(
         entries.len() == 2
-            && entries[0]["content"]["message"]["parts"] == text_parts(prompt)
-            && entries[1]["content"]["reply"]["parts"] == text_parts(reply)
-            && entries[1]["content"]["slots"] == json!([])
-            && entries
-                .iter()
-                .all(|entry| entry["summary"] == json!({"outcome":"completed","notice":null,"progress":{"progress":"closed","end":{"end":"finish"}}})),
-        "history contains exact user and assistant text with the Turn outcome",
+            && entries.iter().all(|entry| entry.turn_id == turn_id)
+            && entries[0].user_ordinal() == Some(ordinal)
+            && entries[0].raw["content"]["message"]["parts"] == text_parts(prompt)
+            && entries[1].raw["content"]["reply"]["parts"] == text_parts(reply)
+            && entries[1].raw["content"]["slots"] == json!([])
+            && entries[1].raw["summary"]
+                == json!({"outcome":"completed","notice":null,"progress":{"progress":"closed","end":{"end":"finish"}}}),
+        "this Turn's entries carry the exact user and assistant text, ordinal and outcome",
     )?;
     require(
         log["session"]["session_id"] == session_id
@@ -154,7 +138,7 @@ fn direct_local_plain_text_turn_commits_and_exit_zero() {
         assert_clean_send(&execution)?;
         require(log_output.is_clean_exit(0), "session log must exit cleanly")?;
         let log: Value = serde_json::from_slice(&log_output.stdout).expect("session log JSON");
-        assert_live_text_turn(outcome, send.session_id().unwrap(), "ping", "ok", &log)?;
+        assert_live_text_turn(outcome, send.session_id().unwrap(), "ping", "ok", 1, &log)?;
         require(
             log["nodes"].as_array().is_some_and(|rows| rows.len() == 3),
             "root, user and Step only",
@@ -230,12 +214,20 @@ fn direct_local_session_reopen_after_external_change() {
         assert_clean_send(&second)?;
         require(log_output.is_clean_exit(0), "session log must exit cleanly")?;
         let log: Value = serde_json::from_slice(&log_output.stdout).expect("session log JSON");
-        assert_live_text_turn(&first, send.session_id().unwrap(), "ping", "pong-one", &log)?;
+        assert_live_text_turn(
+            &first,
+            send.session_id().unwrap(),
+            "ping",
+            "pong-one",
+            1,
+            &log,
+        )?;
         assert_live_text_turn(
             &second,
             send.session_id().unwrap(),
             "again",
             "pong-two",
+            2,
             &log,
         )?;
         require(
@@ -334,24 +326,15 @@ fn direct_local_mutate_create_denied_by_write_policy() {
 
     let result: Result<(), AssertError> = (|| {
         assert_clean_send(&outcome)?;
-        let started = outcome.events.iter().any(|event| {
-            matches!(
-                event,
-                TurnEventLine::ToolCallStarted { name, .. } if name == "mutate.create"
-            )
-        });
-        let failed_finish = outcome.events.iter().any(|event| {
-            matches!(
-                event,
-                TurnEventLine::ToolCallFinished { name, ok: false, .. }
-                    if name == "mutate.create"
-            )
-        });
+        let denied = outcome
+            .slots()
+            .iter()
+            .any(|slot| slot.method == "mutate.create" && slot.outcome == SlotOutcome::Failed);
         require(
-            started && failed_finish,
+            denied,
             format!(
-                "stream lacked failed mutate.create lifecycle: {:?}",
-                outcome.events
+                "Step entries lacked a failed mutate.create slot: {:?}",
+                outcome.slots()
             ),
         )?;
         require(

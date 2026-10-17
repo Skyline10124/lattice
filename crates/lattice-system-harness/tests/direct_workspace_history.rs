@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use lattice_system_harness::{AssertError, ScenarioWorld, SseScript};
 use support::{
     assert_clean_send, direct_world, driver, evidence, finish_scenario, finished_with_code,
-    require, sequence, tool_call, tool_failed, tool_ok, wire_fake_llm,
+    live_turn, require, same_turn, sequence, tool_call, tool_failed, tool_ok, wire_fake_llm,
 };
 
 /// Locate the private history repository under the scenario's isolated HOME.
@@ -378,27 +378,27 @@ fn direct_workspace_history_records_nothing_for_a_failed_mutation() {
     let driver = driver();
     let stale_args = r#"{"path":"tracked.txt","expected_hash":"blake3:0000000000000000000000000000000000000000000000000000000000000000","edits":[{"op":"replace_text","old":"hello","new":"goodbye"}]}"#;
     for (case, method, args, profile, code) in [
-        ("stale", "mutate.edit", stale_args, "", "ReplanRequired"),
+        ("stale", "mutate.edit", stale_args, "", "replan_required"),
         (
             "exists",
             "mutate.create",
             r#"{"path":"tracked.txt","content":"other\n","create_parents":false}"#,
             "",
-            "ReplanRequired",
+            "replan_required",
         ),
         (
             "guard",
             "mutate.create",
             r#"{"path":"blocked.txt","content":"nope\n","create_parents":false}"#,
             "[lancet.workspace]\ndenied_write_patterns = [\"blocked.txt\"]\n",
-            "CapabilityViolation",
+            "capability_violation",
         ),
         (
             "capability",
             "mutate.create",
             r#"{"path":"denied.txt","content":"nope\n","create_parents":false}"#,
             "[lancet.capabilities]\ndeny = [\"workspace.mutation\"]\n",
-            "CapabilityViolation",
+            "capability_violation",
         ),
     ] {
         let (world, spec) = direct_world(
@@ -603,22 +603,9 @@ fn direct_workspace_history_multi_mutation_survives_provider_failure() {
             detail["summary"]["outcome"] == "failed",
             "multi-mutation Turn must be Failed",
         )?;
-        let snapshot = outcome
-            .events
-            .iter()
-            .rev()
-            .find_map(|event| match event {
-                lattice_system_harness::TurnEventLine::Unknown { type_name, raw }
-                    if type_name == "snapshot" =>
-                {
-                    Some(&raw["view"]["selected_turn"])
-                }
-                _ => None,
-            })
-            .expect("final durable snapshot");
         require(
-            detail["summary"] == snapshot["summary"],
-            "reloaded summary must equal returned summary",
+            same_turn(&live_turn(&outcome), &detail),
+            "reloaded Turn must equal the live Step entries",
         )?;
         require(
             fs::read(world.project_dir().join("one.txt")).unwrap() == b"3\n"
