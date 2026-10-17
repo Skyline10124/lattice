@@ -1,18 +1,23 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-pub use crate::turn::{AttemptSegments, TextSegment, TurnRef};
+pub use crate::turn::{TextSegment, TurnRef};
 pub use lancet_protocol::{InvocationId, ModelAttemptKey, SessionId, TurnId};
 pub use lattice_conversation::{ResultPayload, StepContent, StoredToolResult, SuccessContent};
 pub use lattice_session::store::{
-    AttemptProgress, AuditPage, AuditReplay, AuditTailPage, ChangeSeq, HistoryAnchor,
-    HistoryCursor, MaterialSummary, Node, NodeFragment, NodeId, NodeKind, NodeRef, Notice,
-    NoticeLevel, OperatorInvocationState, OperatorReason, OperatorStatus, Page, PublicTurnOutcome,
-    RetryNotice, SessionListRow, SessionLog, SessionRecord, SlotProgress, StepDetail, StepEnd,
-    StepKey, StepProgress, TurnDetail, TurnSummary, UsageSummary,
+    AttemptProgress, AuditPage, AuditReplay, AuditTailPage, ChangeSeq, ConversationEntry,
+    MaterialSummary, Node, NodeId, NodeKind, NodeRef, Notice, NoticeLevel, OperatorInvocationState,
+    OperatorReason, OperatorStatus, Page, PublicTurnOutcome, RetryNotice, SessionLog,
+    SessionRecord, SlotProgress, StepDetail, StepEnd, StepKey, StepProgress, TurnDetail,
+    TurnSummary, UsageSummary,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+pub const WATCH_TURNS: u32 = 10;
+pub const HISTORY_TURNS: u32 = 10;
+
+pub use crate::session::RequestConflict as ConflictReason;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct TurnView {
@@ -39,74 +44,53 @@ impl From<&TurnDetail> for TurnView {
         }
     }
 }
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct ObservationSnapshot {
-    pub session: SessionRecord,
-    pub current_agent: Option<String>,
-    pub selected_turn: Option<TurnDetail>,
-    pub unclosed_step: Option<(NodeId, Node)>,
-    pub history: HistoryAnchor,
-    pub attempt: Option<AttemptSegments>,
-    pub cursor: EventCursor,
-    pub owned: bool,
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum TurnLookup {
+    Accepted { turn: TurnDetail },
+    InFlight,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct HistoryEntry {
+pub struct SessionHead {
+    pub session_id: SessionId,
+    pub position: NodeId,
+    pub agent: Option<String>,
+    pub turn_id: Option<TurnId>,
+    pub owner: bool,
+    pub diagnostic: Option<LocalError>,
+    pub path_replaced: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TextUpdate {
     pub node: NodeId,
-    pub agent_name: String,
-    /// 节点所属 Turn 在读取时的结论；是否最终生效由 progress 与 Owner 决定。
-    pub summary: TurnSummary,
-    pub retries: Vec<RetryNotice>,
-    pub content: Node,
+    pub attempt: u32,
+    pub offset: usize,
+    pub segments: Vec<TextSegment>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ViewUpdate {
+    Head(SessionHead),
+    Entry {
+        #[serde(flatten)]
+        entry: Box<ConversationEntry>,
+    },
+    Text(TextUpdate),
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct LocalHistory {
-    pub anchor: HistoryAnchor,
-    pub entries: Vec<HistoryEntry>,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct HistoryFragmentView {
-    pub fragment: NodeFragment,
-    pub agent_name: String,
-    pub summary: TurnSummary,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct HistoryPageView {
-    pub anchor: HistoryAnchor,
-    pub fragments: Vec<HistoryFragmentView>,
-    pub next: Option<HistoryCursor>,
+    pub entries: Vec<ConversationEntry>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub enum HistoryReadContext {
-    Worker,
-    Page {
-        anchor: HistoryAnchor,
-        cursor: Option<HistoryCursor>,
-    },
-    Node {
-        node: NodeRef,
-    },
+pub struct SessionListRow {
+    #[serde(flatten)]
+    pub session: lattice_session::store::SessionListRow,
+    pub owner: bool,
 }
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, thiserror::Error)]
-#[error("{error}")]
-pub struct HistoryReadError {
-    pub context: HistoryReadContext,
-    pub error: LocalError,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ObservationPhase {
-    Live,
-    NoOwner,
-    Finished,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NotSubmittedStage {
-    NeedsConfiguration,
-    FreezingConfiguration,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CancelStatus {
     Pending,
     Taken,
@@ -114,83 +98,102 @@ pub enum CancelStatus {
     Unknown,
     Moot,
 }
-#[derive(Clone, Debug, PartialEq)]
-pub struct LocalState {
-    pub view: Box<ObservationSnapshot>,
-    pub phase: ObservationPhase,
-    pub error: Option<LocalError>,
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", content = "error", rename_all = "snake_case")]
 pub enum ConnectionStatus {
     Eof,
     Idle,
     Error(LocalError),
 }
-
-/// 状态先交付；历史真正装入后才发布 Finished，旧代读取错误仍保留为 stale。
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum SubmissionResult {
+    Accepted {
+        turn: TurnView,
+    },
+    Rejected {
+        error: LocalError,
+    },
+    NotAccepted,
+    Unknown {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<LocalError>,
+    },
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SubmissionReceipt {
+    pub turn_id: TurnId,
+    #[serde(flatten)]
+    pub result: SubmissionResult,
+    pub recovered: bool,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "stage", rename_all = "snake_case")]
+pub enum SubmissionUpdate {
+    Sending {
+        turn_id: TurnId,
+        session_id: SessionId,
+        new: bool,
+    },
+    Receipt(SubmissionReceipt),
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum LocalUpdate {
-    Submission {
-        turn_id: TurnId,
-        result: Result<Acceptance>,
-    },
-    SubmissionUnknown {
-        turn_id: TurnId,
-        error: Option<LocalError>,
-    },
-    NotSubmitted {
-        turn_id: TurnId,
-        stage: NotSubmittedStage,
-    },
-    State {
-        view: Box<ObservationSnapshot>,
-        phase: ObservationPhase,
-        error: Option<LocalError>,
-    },
-    Reset {
-        view: Box<ObservationSnapshot>,
-        generation: u64,
-    },
-    History {
-        anchor: HistoryAnchor,
-        generation: u64,
-        result: std::result::Result<Box<LocalHistory>, HistoryReadError>,
-        stale: bool,
-    },
-    Event {
-        cursor: EventCursor,
-        event: crate::TurnEvent,
-    },
-    Finished {
-        turn: Option<TurnRef>,
-        anchor: HistoryAnchor,
-        generation: u64,
+    Submit {
+        #[serde(flatten)]
+        update: SubmissionUpdate,
     },
     Cancel {
         turn_id: TurnId,
         status: CancelStatus,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        owned: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<LocalError>,
     },
-    Connection(ConnectionStatus),
+    Head(SessionHead),
+    Entry {
+        #[serde(flatten)]
+        entry: Box<ConversationEntry>,
+    },
+    Text(TextUpdate),
+    Connection {
+        #[serde(flatten)]
+        status: ConnectionStatus,
+    },
+    Error {
+        #[serde(flatten)]
+        error: LocalError,
+    },
+}
+impl From<ViewUpdate> for LocalUpdate {
+    fn from(value: ViewUpdate) -> Self {
+        match value {
+            ViewUpdate::Head(head) => Self::Head(head),
+            ViewUpdate::Entry { entry } => Self::Entry { entry },
+            ViewUpdate::Text(text) => Self::Text(text),
+        }
+    }
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct DetachReport {
-    pub session_id: Option<SessionId>,
+    pub session_id: SessionId,
     pub turn_id: Option<TurnId>,
-    pub submission: Option<Result<Acceptance>>,
+    pub submission: Option<SubmissionReceipt>,
     pub submission_diagnostic: Option<LocalError>,
-    pub not_submitted: Option<NotSubmittedStage>,
-    pub history_error: Option<HistoryReadError>,
     pub cancel: Option<CancelStatus>,
     pub cancel_error: Option<LocalError>,
-    pub state: Option<LocalState>,
+    pub head: Option<SessionHead>,
+    pub summary: Option<TurnSummary>,
 }
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]
 pub struct LocalError {
     pub kind: LocalErrorKind,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conflict: Option<ConflictReason>,
     pub recovery: Option<RecoveryNeed>,
     pub store: Option<Box<StoreDiagnostic>>,
 }
@@ -250,6 +253,7 @@ impl LocalError {
         Self {
             kind,
             message: message.into(),
+            conflict: None,
             recovery: None,
             store: None,
         }
@@ -273,7 +277,12 @@ impl From<crate::ApiError> for LocalError {
             ApiError::NotFound(_) => (NotFound, "session or Turn not found"),
             ApiError::Configuration(reason) => return Self::new(BadRequest, &reason.to_string()),
             ApiError::BadRequest(_) => (BadRequest, "request or frozen configuration is invalid"),
-            ApiError::Conflict(_) => (Conflict, "request identity or Session binding conflicts"),
+            ApiError::Conflict(reason) => {
+                return Self {
+                    conflict: Some(*reason),
+                    ..Self::new(Conflict, "request identity or Session binding conflicts")
+                };
+            }
             ApiError::Busy(_) => (Busy, "session is busy"),
             ApiError::StoreUnavailable(_) => (StoreUnavailable, "store unavailable"),
             ApiError::Internal(_) => (Internal, "operation failed; inspect durable state"),
@@ -317,8 +326,14 @@ impl From<crate::ApiError> for LocalError {
                         result.kind = NotFound;
                         None
                     }
-                    StoreError::Conflict { .. } | StoreError::SessionCollision { .. } => {
+                    StoreError::Conflict { .. } => {
                         result.kind = Conflict;
+                        result.conflict = Some(ConflictReason::TurnIdUsed);
+                        None
+                    }
+                    StoreError::SessionCollision { .. } => {
+                        result.kind = Conflict;
+                        result.conflict = Some(ConflictReason::SessionExists);
                         None
                     }
                     StoreError::Busy { .. } => {
@@ -354,20 +369,51 @@ impl From<std::io::Error> for LocalError {
     }
 }
 
-/// 私有请求不实现正文 Debug。SID 只在首次接受后确定。
+/// 私有请求不实现正文 Debug；两种身份均在发送之前确定。
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TurnRequest {
-    pub session_id: Option<SessionId>,
     pub turn_id: TurnId,
+    pub session: SubmitSession,
     pub workspace: PathBuf,
     pub input: String,
     pub agent: Option<String>,
 }
+impl TurnRequest {
+    /// 解析已有会话后再生成身份，sending 始终含完整 SessionId。
+    pub fn new(
+        session_id: Option<SessionId>,
+        workspace: PathBuf,
+        input: String,
+        agent: Option<String>,
+    ) -> Self {
+        Self {
+            turn_id: super::new_turn_id(),
+            session: session_id.map_or_else(
+                || SubmitSession::New(super::new_session_id()),
+                SubmitSession::Existing,
+            ),
+            workspace,
+            input,
+            agent,
+        }
+    }
+}
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TurnTarget {
-    pub turn_id: TurnId,
-    pub session_id: Option<SessionId>,
+#[serde(rename_all = "snake_case")]
+pub enum SubmitSession {
+    New(SessionId),
+    Existing(SessionId),
+}
+impl SubmitSession {
+    pub fn id(self) -> SessionId {
+        match self {
+            Self::New(id) | Self::Existing(id) => id,
+        }
+    }
+    pub fn is_new(self) -> bool {
+        matches!(self, Self::New(_))
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "acceptance", rename_all = "snake_case")]
@@ -375,15 +421,9 @@ pub enum Acceptance {
     Accepted {
         turn: TurnView,
     },
-    Existing {
-        turn: TurnView,
-    },
     ConfirmationUnknown {
         turn_id: TurnId,
-        session_id: Option<SessionId>,
-    },
-    NeedsConfiguration {
-        agent_name: String,
+        session_id: SessionId,
     },
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -392,30 +432,6 @@ pub struct DaemonStatus {
     pub stopping: bool,
     pub owners: usize,
     pub unconfirmed_operations: usize,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EventCursor {
-    pub epoch: String,
-    pub sequence: u64,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum Observation {
-    Snapshot {
-        view: Box<ObservationSnapshot>,
-    },
-    Diagnostic {
-        error: LocalError,
-    },
-    Event {
-        cursor: EventCursor,
-        event: crate::TurnEvent,
-    },
-    Finished {
-        turn: Option<TurnRef>,
-        cursor: EventCursor,
-        history: LocalHistory,
-    },
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 pub struct AuditSelection {
@@ -440,12 +456,12 @@ pub(super) enum Request {
         session_id: SessionId,
     },
     Turn {
-        target: TurnTarget,
+        turn_id: TurnId,
     },
     History {
-        anchor: HistoryAnchor,
-        cursor: Option<HistoryCursor>,
-        max_bytes: u32,
+        session_id: SessionId,
+        before: NodeId,
+        turns: u32,
     },
     Rewind {
         session_id: SessionId,
@@ -454,18 +470,13 @@ pub(super) enum Request {
     },
     Submit {
         request: TurnRequest,
-        configuration: Option<Box<super::config::FrozenConfiguration>>,
-    },
-    Query {
-        session_id: Option<SessionId>,
-        turn_id: Option<TurnId>,
+        configuration: Box<super::config::FrozenConfiguration>,
     },
     Cancel {
-        target: TurnTarget,
+        turn_id: TurnId,
     },
-    Subscribe {
-        target: TurnTarget,
-        cursor: Option<EventCursor>,
+    Watch {
+        session_id: SessionId,
     },
     AuditQuery {
         workspace: PathBuf,
@@ -495,93 +506,98 @@ pub(super) enum Response {
     Session(SessionRecord),
     Sessions(Page<SessionListRow, SessionId>),
     Log(SessionLog),
-    Turn(TurnDetail),
-    History(HistoryPageView),
+    Turn(TurnLookup),
+    History(LocalHistory),
     Rewind(SessionRecord),
     Acceptance(Acceptance),
-    View(Box<ObservationSnapshot>),
-    Observation(Observation),
+    View(ViewUpdate),
     Cancelled { owned: bool },
     Audit(AuditPage),
     AuditTail(AuditTailPage),
     AuditReplay(AuditReplay),
     OperatorStatus(OperatorStatus),
     Error(LocalError),
-    HistoryError(HistoryReadError),
 }
 
 #[cfg(test)]
-mod v3_tests {
+mod tests {
     use super::*;
     #[test]
-    fn unsupported_version_preserves_store_path_through_ipc() {
-        let path = PathBuf::from("/tmp/old state/lattice.redb");
-        let error = LocalError::from(crate::ApiError::from(
-            lattice_session::store::StoreError::UnsupportedVersion {
-                path: path.clone(),
-                table: "meta".into(),
-                key: "format_version".into(),
-                found: 1,
-                supported: 2,
-            },
-        ));
-        let wire = serde_json::to_value(&error).unwrap();
-        assert_eq!(wire["store"]["path"], path.to_str().unwrap());
-        let decoded: LocalError = serde_json::from_value(wire).unwrap();
-        assert_eq!(decoded, error);
+    fn request_shapes_require_configuration_and_preserve_explicit_session_identity() {
+        let sid = super::super::new_session_id();
+        let tid = super::super::new_turn_id();
+        for session in [SubmitSession::New(sid), SubmitSession::Existing(sid)] {
+            let request = TurnRequest {
+                turn_id: tid,
+                session,
+                workspace: "/tmp/project".into(),
+                input: "original".into(),
+                agent: Some("local-test".into()),
+            };
+            let wire = serde_json::to_value(&request).unwrap();
+            assert_eq!(
+                wire["session"][if session.is_new() { "new" } else { "existing" }],
+                sid.to_string()
+            );
+            assert!(
+                serde_json::from_value::<Request>(
+                    serde_json::json!({"operation":"submit","request":wire})
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            matches!(serde_json::from_value::<Request>(serde_json::json!({"operation":"turn","turn_id":tid})).unwrap(), Request::Turn { turn_id } if turn_id == tid)
+        );
+        assert!(
+            matches!(serde_json::from_value::<Request>(serde_json::json!({"operation":"cancel","turn_id":tid})).unwrap(), Request::Cancel { turn_id } if turn_id == tid)
+        );
+        assert!(
+            serde_json::from_value::<Request>(
+                serde_json::json!({"operation":"cancel","turn_id":tid,"session_id":sid})
+            )
+            .is_err()
+        );
+        let error = LocalError::new(LocalErrorKind::Busy, "busy");
+        assert!(
+            serde_json::to_value(error)
+                .unwrap()
+                .get("conflict")
+                .is_none()
+        );
         assert_eq!(
-            decoded.store.as_deref(),
-            Some(&StoreDiagnostic::UnsupportedVersion {
-                path,
-                table: "meta".into(),
-                key: "format_version".into(),
-                found: 1,
-                supported: 2,
-            })
+            serde_json::to_value(TurnLookup::InFlight).unwrap(),
+            serde_json::json!({"status":"in_flight"})
         );
     }
-
     #[test]
-    fn first_submission_and_safe_store_diagnostics_have_v3_shapes() {
-        let request: Request = serde_json::from_value(serde_json::json!({
-            "operation":"submit", "request": {"session_id":null,
-            "turn_id":"00000000-0000-4000-8000-000000000001", "workspace":"/tmp/project", "input":" original ", "agent":"alpha"},
-            "configuration":null
-        })).expect("first submission has no SessionId");
-        assert!(matches!(
-            request,
-            Request::Submit {
-                request: TurnRequest {
-                    session_id: None,
-                    agent: Some(_),
-                    ..
-                },
-                ..
-            }
-        ));
-        let error = LocalError::from(crate::ApiError::from(
-            lattice_session::store::StoreError::LegacyStores {
-                paths: vec![
-                    "/tmp/state/sessions.git".into(),
-                    "/tmp/state/projects/p/invocations.git".into(),
-                ],
-            },
-        ));
+    fn safe_store_diagnostics_preserve_path_and_never_expose_corruption_detail() {
+        use lattice_session::store::StoreError;
+        let error = LocalError::from(crate::ApiError::from(StoreError::UnsupportedVersion {
+            path: "/tmp/old state/lattice.redb".into(),
+            table: "meta".into(),
+            key: "format_version".into(),
+            found: 1,
+            supported: 2,
+        }));
+        let wire = serde_json::to_value(&error).unwrap();
+        assert_eq!(wire["store"]["path"], "/tmp/old state/lattice.redb");
+        assert_eq!(serde_json::from_value::<LocalError>(wire).unwrap(), error);
+        let error = LocalError::from(crate::ApiError::from(StoreError::LegacyStores {
+            paths: vec!["/tmp/state/sessions.git".into()],
+        }));
         assert!(
-            matches!(error.store.as_deref(), Some(StoreDiagnostic::LegacyStores { paths }) if paths.len() == 2)
+            matches!(error.store.as_deref(), Some(StoreDiagnostic::LegacyStores { paths }) if paths.len() == 1)
         );
-        let error = LocalError::from(crate::ApiError::from(
-            lattice_session::store::StoreError::Corruption {
-                table: "nodes".into(),
-                key: "1".into(),
-                detail: "secret-body".into(),
-            },
-        ));
-        let wire = serde_json::to_string(&error).unwrap();
-        assert!(!wire.contains("secret-body"));
-        assert!(matches!(
-            error.store.as_deref(),
-            Some(StoreDiagnostic::Corruption { .. })
-        ));
+        let error = LocalError::from(crate::ApiError::from(StoreError::Corruption {
+            table: "nodes".into(),
+            key: "1".into(),
+            detail: "secret-body".into(),
+        }));
+        assert!(
+            !serde_json::to_string(&error)
+                .unwrap()
+                .contains("secret-body")
+        );
     }
 }

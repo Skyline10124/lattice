@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Session 在首次接受时原子创建；重开及同身份找回保持冻结配置和原始输入。
+//! Session 在首次接受时原子创建；重开及同身份冲突保持冻结配置和原始输入。
 use lattice_api::local::*;
 use lattice_api::{RunTurnRequest, SessionApi, StateLayout, TurnAcceptance, TurnCompletion};
 use lattice_session::store::{PublicTurnOutcome, SessionStore};
@@ -56,9 +56,7 @@ async fn first_acceptance_reopen_preserves_identity_without_observers_or_configu
         panic!("not accepted")
     };
     let session_id = turn.session_id;
-    let TurnCompletion::Closed(completed) = execution.completion.await.unwrap().unwrap() else {
-        panic!("not closed")
-    };
+    let TurnCompletion::Closed(completed) = execution.completion.await.unwrap().unwrap();
     assert_eq!(completed.summary.outcome, PublicTurnOutcome::Completed);
     drop(execution.cancel_flag);
     drop(api);
@@ -75,15 +73,19 @@ async fn first_acceptance_reopen_preserves_identity_without_observers_or_configu
     retry.agent = None;
     retry.test_llm = None;
     let execution = lattice_api::start_turn(api, layout, id, root, retry, None);
-    let TurnAcceptance::Existing { turn } = execution.acceptance.await.unwrap().unwrap() else {
-        panic!("not found")
-    };
-    assert_eq!(turn.session_id, session_id);
-    assert_eq!(turn, *completed);
     assert!(matches!(
-        execution.completion.await.unwrap().unwrap(),
-        TurnCompletion::Closed(_)
+        execution.acceptance.await.unwrap(),
+        Err(lattice_api::ApiError::Conflict(_))
     ));
+    assert!(execution.completion.await.unwrap().is_err());
+    assert_eq!(
+        store
+            .begin_read()
+            .unwrap()
+            .turn_detail(session_id, id)
+            .unwrap(),
+        *completed
+    );
     assert_eq!(llm.call_count(), 1);
     let read = store.begin_read().unwrap();
     assert_eq!(read.list(None, 10).unwrap().items.len(), 1);

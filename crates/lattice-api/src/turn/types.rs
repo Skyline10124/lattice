@@ -144,7 +144,7 @@ pub struct AttemptSegments {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TextSegment {
     Text { text: String },
     Reasoning { text: String },
@@ -155,28 +155,19 @@ pub enum TurnAcceptance {
     Accepted {
         turn: TurnDetail,
     },
-    Existing {
-        turn: TurnDetail,
-    },
     ConfirmationUnknown {
         turn_id: lancet_protocol::TurnId,
-        session_id: Option<SessionId>,
+        session_id: SessionId,
     },
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum TurnCompletion {
     Closed(Box<TurnDetail>),
-    Running(TurnRef),
 }
 
 pub struct TurnExecution {
     pub acceptance: tokio::sync::oneshot::Receiver<crate::session::Result<TurnAcceptance>>,
     pub completion: tokio::sync::oneshot::Receiver<crate::session::Result<TurnCompletion>>,
     pub cancel_flag: Arc<AtomicBool>,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct SequencedTurnEvent {
-    pub sequence: u64,
-    pub event: TurnEvent,
 }

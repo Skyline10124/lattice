@@ -84,7 +84,7 @@ impl TestFixture {
             connection: None,
             shutdown: Arc::default(),
             observer: observer.clone(),
-            reserve_session: None,
+            new_session: Some(crate::local::new_session_id()),
         });
         (execution, observer)
     }
@@ -94,29 +94,9 @@ impl TestFixture {
     ) -> (lattice_session::store::TurnDetail, Vec<TurnEvent>) {
         let (execution, observer) = self.start(request);
         execution.acceptance.await.unwrap().unwrap();
-        let mut completion = execution.completion;
-        let mut changed = observer.subscribe();
-        let mut sequence = 0;
-        let mut events = Vec::new();
-        let completed = loop {
-            for event in observer
-                .events_after(sequence)
-                .expect("small fixture stays in window")
-            {
-                sequence = event.sequence;
-                events.push(event.event);
-            }
-            tokio::select! {
-                result = &mut completion => break result.unwrap().unwrap(),
-                _ = changed.changed() => {},
-            }
-        };
-        for event in observer.events_after(sequence).expect("final events") {
-            events.push(event.event);
-        }
-        let TurnCompletion::Closed(detail) = completed else {
-            panic!("expected closed")
-        };
+        let completed = execution.completion.await.unwrap().unwrap();
+        let events = observer.events();
+        let TurnCompletion::Closed(detail) = completed;
         (*detail, events)
     }
 }

@@ -84,8 +84,8 @@ impl LocalClient {
             _ => Err(protocol()),
         }
     }
-    pub async fn turn(&self, target: TurnTarget) -> Result<TurnDetail> {
-        match self.call(Request::Turn { target }).await? {
+    pub async fn turn(&self, turn_id: TurnId) -> Result<TurnLookup> {
+        match self.call(Request::Turn { turn_id }).await? {
             Response::Turn(turn) => Ok(turn),
             _ => Err(protocol()),
         }
@@ -108,86 +108,99 @@ impl LocalClient {
             _ => Err(protocol()),
         }
     }
-    pub async fn query(
+    /// 对话向前翻页时默认取得十轮，显式轮数使用 history。
+    pub async fn history_before(
         &self,
-        session_id: Option<SessionId>,
-        turn_id: Option<TurnId>,
-    ) -> Result<ObservationSnapshot> {
+        session_id: SessionId,
+        before: NodeId,
+    ) -> Result<LocalHistory> {
+        self.history(session_id, before, HISTORY_TURNS).await
+    }
+    pub async fn history(
+        &self,
+        session_id: SessionId,
+        before: NodeId,
+        turns: u32,
+    ) -> Result<LocalHistory> {
         match self
-            .call(Request::Query {
+            .call(Request::History {
                 session_id,
-                turn_id,
+                before,
+                turns,
             })
             .await?
         {
-            Response::View(view) => Ok(*view),
+            Response::History(history) => Ok(history),
             _ => Err(protocol()),
         }
     }
-    pub async fn history_page(
+    pub async fn submit(
         &self,
-        anchor: HistoryAnchor,
-        cursor: Option<HistoryCursor>,
-        max_bytes: u32,
-    ) -> Result<HistoryPageView> {
-        self.history_page_with_progress(anchor, cursor, max_bytes, || {})
-            .await
-    }
-    async fn history_page_with_progress(
-        &self,
-        anchor: HistoryAnchor,
-        cursor: Option<HistoryCursor>,
-        max_bytes: u32,
-        progress: impl FnMut(),
-    ) -> Result<HistoryPageView> {
+        request: TurnRequest,
+        configuration: FrozenConfiguration,
+    ) -> Result<Acceptance> {
         match self
-            .response_with_progress(
-                Request::History {
-                    anchor,
-                    cursor,
-                    max_bytes,
-                },
-                progress,
-            )
+            .call(Request::Submit {
+                request,
+                configuration: Box::new(configuration),
+            })
             .await?
         {
-            Response::History(page) => Ok(page),
-            Response::Error(error) => Err(error),
+            Response::Acceptance(value) => Ok(value),
             _ => Err(protocol()),
         }
     }
-    pub(super) async fn read_history_with_progress(
+    pub(super) async fn submit_once(
         &self,
-        view: &ObservationSnapshot,
-        mut progress: impl FnMut(),
-    ) -> std::result::Result<LocalHistory, HistoryReadError> {
-        let anchor = view.history.clone();
-        let mut assembly = HistoryAssembly::new(anchor.clone());
-        let mut cursor = None;
-        loop {
-            let context = HistoryReadContext::Page {
-                anchor: anchor.clone(),
-                cursor: cursor.clone(),
-            };
-            let page = self
-                .history_page_with_progress(anchor.clone(), cursor.clone(), 65_536, &mut progress)
-                .await
-                .map_err(|error| HistoryReadError {
-                    context: context.clone(),
-                    error,
-                })?;
-            cursor = page.next.clone();
-            assembly
-                .push(page)
-                .map_err(|error| HistoryReadError { context, error })?;
-            if cursor.is_none() {
-                break;
-            }
+        request: TurnRequest,
+        configuration: FrozenConfiguration,
+    ) -> SubmissionReply {
+        let mut stream = match ipc::connect(self.layout.clone()).await {
+            Ok(stream) => stream,
+            Err(error) => return SubmissionReply::Rejected(error),
+        };
+        if let Err(error) = ipc::write(
+            &mut stream,
+            &Request::Submit {
+                request,
+                configuration: Box::new(configuration),
+            },
+        )
+        .await
+        {
+            return SubmissionReply::Disconnected(error);
         }
-        assembly.finish().map_err(|error| HistoryReadError {
-            context: HistoryReadContext::Worker,
-            error,
-        })
+        match ipc::ResponseReader::default().read(&mut stream).await {
+            Ok(Response::Acceptance(value)) => SubmissionReply::Accepted(value),
+            Ok(Response::Error(error)) => SubmissionReply::Rejected(error),
+            Ok(_) => SubmissionReply::Disconnected(protocol()),
+            Err(error) => SubmissionReply::Disconnected(error),
+        }
+    }
+    pub async fn cancel(&self, turn_id: TurnId) -> Result<bool> {
+        match self.call(Request::Cancel { turn_id }).await? {
+            Response::Cancelled { owned } => Ok(owned),
+            _ => Err(protocol()),
+        }
+    }
+    pub async fn session_head(&self, session_id: SessionId) -> Result<SessionHead> {
+        let mut view = self.watch(session_id).await?;
+        match view.next().await? {
+            Some(ViewUpdate::Head(head)) => Ok(head),
+            _ => Err(protocol()),
+        }
+    }
+    pub async fn cancel_session(&self, session_id: SessionId) -> Result<(Option<TurnId>, bool)> {
+        let head = self.session_head(session_id).await?;
+        match head.turn_id.filter(|_| head.owner) {
+            Some(turn_id) => Ok((Some(turn_id), self.cancel(turn_id).await?)),
+            None => Ok((None, false)),
+        }
+    }
+    pub async fn watch(&self, session_id: SessionId) -> Result<LocalWatch> {
+        let mut stream = ipc::connect(self.layout.clone()).await?;
+        ipc::write(&mut stream, &Request::Watch { session_id }).await?;
+        Ok(LocalWatch::from_stream(stream))
     }
     pub async fn audit_query(
         &self,
@@ -253,103 +266,6 @@ impl LocalClient {
             _ => Err(protocol()),
         }
     }
-    pub async fn submit(
-        &self,
-        request: TurnRequest,
-        configuration: Option<FrozenConfiguration>,
-    ) -> Result<Acceptance> {
-        match self
-            .call(Request::Submit {
-                request,
-                configuration: configuration.map(Box::new),
-            })
-            .await?
-        {
-            Response::Acceptance(acceptance) => Ok(acceptance),
-            _ => Err(protocol()),
-        }
-    }
-    pub(super) async fn submit_handshake<F, Fut>(
-        &self,
-        request: TurnRequest,
-        load: F,
-        mut abandon: Option<tokio::sync::watch::Receiver<bool>>,
-    ) -> Result<SubmissionReply>
-    where
-        F: FnOnce(String) -> Fut,
-        Fut: std::future::Future<Output = Result<FrozenConfiguration>>,
-    {
-        let prior = match self
-            .response(Request::Submit {
-                request: request.clone(),
-                configuration: None,
-            })
-            .await?
-        {
-            Response::Acceptance(acceptance) => acceptance,
-            Response::Error(error) => return Ok(SubmissionReply::BackendFailed(error)),
-            _ => return Err(protocol()),
-        };
-        let Acceptance::NeedsConfiguration { agent_name } = prior else {
-            return Ok(SubmissionReply::Accepted(prior));
-        };
-        if abandoned(&abandon) {
-            return Ok(SubmissionReply::NotSubmitted(
-                NotSubmittedStage::NeedsConfiguration,
-            ));
-        }
-        let configuration = tokio::select! {
-            biased;
-            _ = async {
-                match &mut abandon {
-                    Some(receiver) => { while !*receiver.borrow_and_update() { if receiver.changed().await.is_err() { break; } } }
-                    None => std::future::pending::<()>().await,
-                }
-            } => return Ok(SubmissionReply::NotSubmitted(NotSubmittedStage::FreezingConfiguration)),
-            result = load(agent_name) => match result {
-                Ok(configuration) => configuration,
-                Err(error) => return Ok(SubmissionReply::ConfigurationFailed(error)),
-            },
-        };
-        let mut stream = ipc::connect(self.layout.clone()).await?;
-        if abandoned(&abandon) {
-            return Ok(SubmissionReply::NotSubmitted(
-                NotSubmittedStage::FreezingConfiguration,
-            ));
-        }
-        ipc::write(
-            &mut stream,
-            &Request::Submit {
-                request,
-                configuration: Some(Box::new(configuration)),
-            },
-        )
-        .await?;
-        match ipc::ResponseReader::default().read(&mut stream).await? {
-            Response::Acceptance(value)
-                if !matches!(value, Acceptance::NeedsConfiguration { .. }) =>
-            {
-                Ok(SubmissionReply::Accepted(value))
-            }
-            Response::Error(error) => Ok(SubmissionReply::BackendFailed(error)),
-            _ => Err(protocol()),
-        }
-    }
-    pub async fn cancel(&self, target: TurnTarget) -> Result<bool> {
-        match self.call(Request::Cancel { target }).await? {
-            Response::Cancelled { owned } => Ok(owned),
-            _ => Err(protocol()),
-        }
-    }
-    pub async fn subscribe(
-        &self,
-        target: TurnTarget,
-        cursor: Option<EventCursor>,
-    ) -> Result<LocalSubscription> {
-        let mut stream = ipc::connect(self.layout.clone()).await?;
-        ipc::write(&mut stream, &Request::Subscribe { target, cursor }).await?;
-        Ok(LocalSubscription::from_stream(stream))
-    }
     /// 自启当前 CLI，只有端点缺失才启动；不替换不兼容后台。
     pub async fn ensure_running(&self) -> Result<DaemonStatus> {
         match self.status().await {
@@ -413,27 +329,13 @@ impl LocalClient {
     }
 }
 
-pub(super) enum SubmissionReply {
-    Accepted(Acceptance),
-    NotSubmitted(NotSubmittedStage),
-    ConfigurationFailed(LocalError),
-    BackendFailed(LocalError),
-}
-fn abandoned(receiver: &Option<tokio::sync::watch::Receiver<bool>>) -> bool {
-    receiver.as_ref().is_some_and(|r| *r.borrow())
-}
-
-/// 历史读取错误保留具体 anchor/cursor，不折叠成普通连接 EOF。
-pub(super) enum SubscriptionItem {
-    Observation(Observation),
-    HistoryError(HistoryReadError),
-}
-pub struct LocalSubscription {
-    receiver: tokio::sync::mpsc::Receiver<Result<SubscriptionItem>>,
-    reader: tokio::task::JoinHandle<Option<Result<SubscriptionItem>>>,
+/// 独立读任务保存帧的读取进度；取消一次 next 不会丢弃半帧。
+pub struct LocalWatch {
+    receiver: tokio::sync::mpsc::Receiver<Result<ViewUpdate>>,
+    reader: tokio::task::JoinHandle<()>,
     pub(super) progress: tokio::sync::watch::Receiver<tokio::time::Instant>,
 }
-impl LocalSubscription {
+impl LocalWatch {
     fn from_stream(mut stream: UnixStream) -> Self {
         let (sender, receiver) = tokio::sync::mpsc::channel(8);
         let (progress, progress_rx) = tokio::sync::watch::channel(tokio::time::Instant::now());
@@ -442,27 +344,19 @@ impl LocalSubscription {
             loop {
                 let response = tokio::select! {
                     biased;
-                    _ = sender.closed() => return None,
-                    response = frames.read_with_progress(&mut stream, || { progress.send_replace(tokio::time::Instant::now()); }) => response,
+                    _ = sender.closed() => break,
+                    response = frames.next_with_progress(&mut stream, || { progress.send_replace(tokio::time::Instant::now()); }) => response,
                 };
-                let observation = match response {
-                    Ok(Response::Observation(value)) => Ok(SubscriptionItem::Observation(value)),
-                    Ok(Response::HistoryError(error)) => Ok(SubscriptionItem::HistoryError(error)),
-                    Ok(Response::Error(error)) => Err(error),
-                    Ok(_) => Err(protocol()),
+                let update = match response {
+                    Ok(Some(Response::View(value))) => Ok(value),
+                    Ok(Some(Response::Error(error))) => Err(error),
+                    Ok(None) => break,
+                    Ok(Some(_)) => Err(protocol()),
                     Err(error) => Err(error),
                 };
-                let finished = matches!(
-                    &observation,
-                    Err(_)
-                        | Ok(SubscriptionItem::HistoryError(_))
-                        | Ok(SubscriptionItem::Observation(Observation::Finished { .. }))
-                );
-                if let Err(unsent) = sender.send(observation).await {
-                    return Some(unsent.0);
-                }
-                if finished {
-                    return None;
+                let failed = update.is_err();
+                if sender.send(update).await.is_err() || failed {
+                    break;
                 }
             }
         });
@@ -472,142 +366,23 @@ impl LocalSubscription {
             progress: progress_rx,
         }
     }
-    pub(super) async fn close(&mut self) -> Vec<Result<SubscriptionItem>> {
-        self.receiver.close();
-        let last = (&mut self.reader)
-            .await
-            .unwrap_or_else(|_| Some(Err(protocol())));
-        let mut received = Vec::new();
-        while let Ok(item) = self.receiver.try_recv() {
-            received.push(item);
-        }
-        received.extend(last);
-        received
-    }
-    pub(super) async fn next_item(&mut self) -> Result<Option<SubscriptionItem>> {
+    pub async fn next(&mut self) -> Result<Option<ViewUpdate>> {
         self.receiver.recv().await.transpose()
     }
-    pub async fn next(&mut self) -> Result<Option<Observation>> {
-        match self.next_item().await? {
-            Some(SubscriptionItem::Observation(observation)) => Ok(Some(observation)),
-            Some(SubscriptionItem::HistoryError(error)) => Err(error.error),
-            None => Ok(None),
-        }
-    }
 }
-impl Drop for LocalSubscription {
+impl Drop for LocalWatch {
     fn drop(&mut self) {
         self.reader.abort();
     }
 }
-
-/// 分片逐字重组且核对父链。服务端与客户端共用协议解码，不重新查询 current。
-pub(super) struct HistoryAssembly {
-    history: LocalHistory,
-    partial: Option<(NodeId, String, String)>,
-    next: Option<HistoryCursor>,
-}
-impl HistoryAssembly {
-    pub(super) fn new(anchor: HistoryAnchor) -> Self {
-        Self {
-            history: LocalHistory {
-                anchor,
-                entries: Vec::new(),
-            },
-            partial: None,
-            next: None,
-        }
-    }
-    pub(super) fn push(&mut self, page: HistoryPageView) -> Result<()> {
-        if page.anchor != self.history.anchor || (page.fragments.is_empty() && page.next.is_some())
-        {
-            return Err(protocol());
-        }
-        for part in page.fragments {
-            let fragment = part.fragment;
-            if let Some(next) = self.next.take()
-                && (next.node != fragment.node || next.utf8_offset != fragment.utf8_offset)
-            {
-                return Err(protocol());
-            }
-            let (id, agent, text) =
-                self.partial
-                    .get_or_insert((fragment.node, part.agent_name.clone(), String::new()));
-            if *id != fragment.node
-                || *agent != part.agent_name
-                || text.len() as u64 != fragment.utf8_offset
-                || fragment.json_fragment.is_empty()
-            {
-                return Err(protocol());
-            }
-            text.push_str(&fragment.json_fragment);
-            if fragment.complete {
-                let (node, agent_name, text) = self.partial.take().expect("partial");
-                let content: Node = serde_json::from_str(&text).map_err(|_| protocol())?;
-                let previous = self
-                    .history
-                    .entries
-                    .last()
-                    .map_or(NodeId(0), |entry| entry.node);
-                if node <= previous
-                    || content.parent() != Some(previous)
-                    || content.turn_id().is_none()
-                {
-                    return Err(protocol());
-                }
-                // 节点跨页读取期间 Turn 可能关闭；结局取完成这个节点的那一片带回的。
-                self.history.entries.push(HistoryEntry {
-                    node,
-                    agent_name,
-                    summary: part.summary,
-                    retries: fragment.retries,
-                    content,
-                });
-            }
-        }
-        if let Some(next) = &page.next {
-            if next.anchor != self.history.anchor {
-                return Err(protocol());
-            }
-            if let Some((node, _, text)) = &self.partial
-                && (next.node != *node || next.utf8_offset != text.len() as u64)
-            {
-                return Err(protocol());
-            }
-        } else if self.partial.is_some() {
-            return Err(protocol());
-        }
-        self.next = page.next;
-        Ok(())
-    }
-    pub(super) fn finish(self) -> Result<LocalHistory> {
-        if self.partial.is_some()
-            || self.next.is_some()
-            || self.history.entries.last().map_or(NodeId(0), |e| e.node) != self.history.anchor.head
-        {
-            return Err(protocol());
-        }
-        Ok(self.history)
-    }
-}
-pub(super) fn validate_history(history: &LocalHistory) -> Result<()> {
-    let mut previous = NodeId(0);
-    for entry in &history.entries {
-        if entry.node <= previous
-            || entry.content.parent() != Some(previous)
-            || entry.content.turn_id().is_none()
-        {
-            return Err(protocol());
-        }
-        previous = entry.node;
-    }
-    if previous != history.anchor.head {
-        return Err(protocol());
-    }
-    Ok(())
-}
-fn protocol() -> LocalError {
+pub(super) fn protocol() -> LocalError {
     LocalError::new(LocalErrorKind::Protocol, "unexpected local response")
+}
+
+pub(super) enum SubmissionReply {
+    Accepted(Acceptance),
+    Rejected(LocalError),
+    Disconnected(LocalError),
 }
 
 #[cfg(test)]
@@ -615,40 +390,38 @@ mod tests {
     use super::*;
     use tokio::io::AsyncWriteExt;
     #[tokio::test]
-    async fn interrupted_observation_poll_does_not_discard_a_partial_frame() {
+    async fn interrupted_view_poll_preserves_a_partial_frame() {
         let (mut writer, reader) = UnixStream::pair().unwrap();
-        let mut subscription = LocalSubscription::from_stream(reader);
+        let mut view = LocalWatch::from_stream(reader);
         writer.write_all(b"LTLO").await.unwrap();
         assert!(
-            tokio::time::timeout(Duration::from_millis(10), subscription.next())
+            tokio::time::timeout(Duration::from_millis(10), view.next())
                 .await
                 .is_err()
         );
-        let response = Response::Observation(Observation::Finished {
-            turn: None,
-            cursor: EventCursor {
-                epoch: "test".into(),
-                sequence: 4,
-            },
-            history: LocalHistory {
-                anchor: HistoryAnchor {
-                    session_id: SessionId::parse("00000000000000000000000000000001").unwrap(),
-                    head: NodeId(0),
-                },
-                entries: vec![],
-            },
-        });
+        let response = Response::View(ViewUpdate::Head(SessionHead {
+            session_id: super::super::new_session_id(),
+            position: NodeId(0),
+            agent: None,
+            turn_id: None,
+            owner: false,
+            diagnostic: None,
+            path_replaced: false,
+        }));
         let json = serde_json::to_string(&response).unwrap();
         let payload = serde_json::to_vec(
             &serde_json::json!({"message_id":0,"offset":0,"json_fragment":json,"complete":true}),
         )
         .unwrap();
-        writer.write_all(b"CAL3").await.unwrap();
+        writer.write_all(b"CAL4").await.unwrap();
         writer.write_u32(payload.len() as u32).await.unwrap();
         writer.write_all(&payload).await.unwrap();
-        assert!(
-            matches!(subscription.next().await.unwrap(), Some(Observation::Finished { cursor, .. }) if cursor.sequence == 4)
-        );
-        assert!(subscription.next().await.unwrap().is_none());
+        assert!(matches!(
+            view.next().await.unwrap(),
+            Some(ViewUpdate::Head(SessionHead {
+                position: NodeId(0),
+                ..
+            }))
+        ));
     }
 }

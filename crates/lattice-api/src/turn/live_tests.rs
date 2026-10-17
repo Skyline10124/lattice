@@ -160,7 +160,7 @@ async fn orphaned_turn_allows_send_without_mutating_old_facts_or_events() {
 }
 
 #[tokio::test]
-async fn duplicate_turn_is_readonly_without_configuration_but_different_input_conflicts() {
+async fn used_turn_conflicts_before_configuration_and_never_runs_twice() {
     let llm = Arc::new(
         FakeStreamingLlmClient::builder()
             .push_events(happy_events())
@@ -181,13 +181,11 @@ async fn duplicate_turn_is_readonly_without_configuration_but_different_input_co
         retry.clone(),
         None,
     );
-    assert!(
-        matches!(execution.acceptance.await.unwrap().unwrap(), TurnAcceptance::Existing { turn } if turn == first)
-    );
-    assert_eq!(
-        execution.completion.await.unwrap().unwrap(),
-        TurnCompletion::Closed(Box::new(first.clone()))
-    );
+    assert!(matches!(
+        execution.acceptance.await.unwrap(),
+        Err(ApiError::Conflict(_))
+    ));
+    assert!(execution.completion.await.unwrap().is_err());
     retry.input.push(' ');
     let conflict = start_turn(
         fixture.api.clone(),
@@ -240,10 +238,7 @@ async fn absent_session_fails_before_startup_and_injected_store_remains_authorit
     let TurnAcceptance::Accepted { turn } = execution.acceptance.await.unwrap().unwrap() else {
         panic!("accepted")
     };
-    assert!(matches!(
-        execution.completion.await.unwrap().unwrap(),
-        TurnCompletion::Closed(_)
-    ));
+    execution.completion.await.unwrap().unwrap();
     assert_eq!(
         fixture
             .store

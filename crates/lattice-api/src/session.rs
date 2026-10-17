@@ -6,6 +6,14 @@ use lancet_protocol::SessionId;
 use lattice_session::store::{SessionRead, SessionRecord, SessionStore, StoreError};
 use std::sync::Arc;
 
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestConflict {
+    TurnIdUsed,
+    SessionExists,
+    BindingMismatch,
+}
+
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum ApiError {
     #[error("not found: {0}")]
@@ -14,8 +22,8 @@ pub enum ApiError {
     BadRequest(String),
     #[error("{0}")]
     Configuration(crate::ConfigRejection),
-    #[error("conflict: {0}")]
-    Conflict(String),
+    #[error("conflict: {0:?}")]
+    Conflict(RequestConflict),
     #[error("internal error: {0}")]
     Internal(String),
     #[error("busy: {0}")]

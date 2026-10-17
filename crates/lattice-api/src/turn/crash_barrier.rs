@@ -166,31 +166,3 @@ pub(crate) async fn schedule(name: &str, marker: serde_json::Value) {
     .await
     .expect("schedule gate was not released");
 }
-/// 同一 anchor 的并发读取一起受控，避免另一条订阅绕过已暂停的最终页。
-pub(crate) async fn history_read_fault(anchor: &lattice_session::store::HistoryAnchor) -> bool {
-    let Some(root) = std::env::var_os("LATTICE_TEST_SCHEDULE_DIR") else {
-        return false;
-    };
-    let root = PathBuf::from(root);
-    assert!(root.is_absolute(), "schedule directory must be absolute");
-    let name = format!("history_read_{}", anchor.head.0);
-    schedule(&name, serde_json::json!({"anchor":anchor})).await;
-    if tokio::fs::try_exists(root.join(format!("{name}.arm")))
-        .await
-        .expect("read history arm")
-    {
-        tokio::time::timeout(std::time::Duration::from_secs(30), async {
-            while !tokio::fs::try_exists(root.join(format!("{name}.release")))
-                .await
-                .expect("read history release")
-            {
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("history gate was not released");
-    }
-    tokio::fs::try_exists(root.join(format!("{name}.error")))
-        .await
-        .expect("read history fault")
-}
