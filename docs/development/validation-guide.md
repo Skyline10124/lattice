@@ -129,7 +129,7 @@ lattice --json session cancel "$SESSION_ID"
 
 CLI 先从会话头查出正在执行的那一轮，再按它的 TurnId 取消，`cancel` 记录写明这个 TurnId；没有正在执行的一轮时报告无可取消。`owned: true` 表示后台在判定点已接管本次取消，之后独立处理和收尾；`owned: false` 表示该判定点未接管，不表示没有后台工作。按原 TurnId 查询结果，接管回复本身不是持久 Cancelled；未知回执保留原身份，必要时再次明确取消。接管区间、明确拒绝后的新准入与持久事实边界见[会话取消规则](../architecture/session.md#取消与退出)。
 
-CLI 提交/观察期间第一次 Ctrl+C 按本轮的 TurnId 请求取消并继续观察，再次 Ctrl+C 结束等待或观察。首次取消若仍在等提交回执，本次提交的句柄 [LocalTurn](../architecture/session.md#组件与接口) 在五秒后报告提交结果不明，并按 TurnId 查询；查到即继续观察，这一轮没有 Owner 时 CLI 可以退出。此次未知交接后，迟到的本地提交传输错误只保留未知诊断。
+CLI 提交/观察期间第一次 Ctrl+C 按本轮的 TurnId 请求取消并继续观察，再次 Ctrl+C 结束等待或观察。首次取消若仍在等提交回执，本次提交的句柄 [LocalTurn](../architecture/session.md#组件与接口) 在五秒后报告提交结果不明，继续接收迟到的回执；提交连接断开后才按 TurnId 查询，查到即继续观察，这一轮没有 Owner 时 CLI 可以退出。此次未知交接后，迟到的本地提交传输错误只保留未知诊断。
 
 TUI 的 Ctrl+C 取消、Ctrl+D 或 `/quit` 退出按[键位条件](../architecture/tui.md#键盘)执行，两端共用 LocalTurn 的[回执等待预算](../architecture/session.md#输入与传输限制)。
 
@@ -168,7 +168,7 @@ stop 先关闭新准入，再等待已接管工作及必要收尾。`unconfirmed
 | `1` | 执行、观察或内容读取等失败；结合结构化错误和已知结局定位，后台可能已保存结果或仍在收尾 |
 | `2` | 使用/前提错误，如 BadRequest、NotFound、身份冲突；提交或持续观察也用它表示 Cancelled |
 
-`session send` / `run` 与 `session turn --follow` 按 TurnSummary 及观察/读取诊断确定退出：成功 Completed 为 `0`，Failed 为 `1`，Cancelled 为 `2`。纯查询成功只说明读取成功，取消命令成功只说明取得取消回复。命令结果与 Turn outcome 分开解释。
+`session send` / `run` 与 `session turn --follow` 按 TurnSummary 及观察/读取诊断确定退出：成功 Completed 为 `0`，Failed 为 `1`，Cancelled 为 `2`。纯查询成功只说明读取成功。`session cancel` 已接管、未接管或没有可取消的一轮时为 `0`，只说明取得了取消回复；取消回复丢失、结果不明时为 `1`，取消记录带原 TurnId，状态为 `unknown`。命令结果与 Turn outcome 分开解释。
 
 即使已知 Completed，最终内容读取失败仍退出 `1` 并保留可见终态。重连读取该结果，不因这个退出码改写已完成 Turn 或重新执行任务。参数与退出分类的静态来源为 [CLI 分派](../../crates/lattice-cli/src/main.rs)、[Session 命令](../../crates/lattice-cli/src/commands/session.rs)、[提交和观察](../../crates/lattice-cli/src/commands/run.rs)及[后台命令](../../crates/lattice-cli/src/commands/daemon.rs)。
 

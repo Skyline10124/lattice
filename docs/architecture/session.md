@@ -75,7 +75,7 @@ Turn 没有单独保存的结局，也没有单独的结束节点。它的结局
 
 一轮的结局、notice、usage 汇总和结束时间都从它的 Step 节点得出，见[关闭 Step 与 Turn](#关闭-step-与-turn)。配置表以内容摘要为键，键由内容算出，不会与引用它的节点不一致。TurnId 索引、InvocationId 索引与调用变更日志是派生记录，与节点在同一事务中更新。
 
-读取对话只有一种范围：从根到 Session 当前位置的路径。发给模型的上下文取这条路径上的 UserMessage 和已有回复的 Step；没有回复的 Step 不发给 provider，对话条目照常给出。根节点 `0` 不含内容，不发给 provider。要看其他分叉上的对话，先 `rewind` 到那里。
+模型上下文与视图读取的对话只有一种范围：从根到 Session 当前位置的路径。发给模型的上下文取这条路径上的 UserMessage 和已有回复的 Step；没有回复的 Step 不发给 provider，对话条目照常给出。根节点 `0` 不含内容，不发给 provider。要让模型上下文与当前视图换到其他分叉上的对话，先 `rewind` 到那里；历史查询按 `before` 的父链读取，不受当前位置限制，见[观察与重连](#观察与重连)。
 
 `rewind N` 只有一种语义：把当前位置移到节点 N 本身，下一次提交的新节点以 N 为父。它只移动这个指针，不在树上写入节点：对树的操作不进入树的记录。改写某条用户消息就是退回到它的父节点再发送，改写第一条消息就是 `rewind 0`。退回到一个没有回复的 Step，与退回到它的父节点，发给模型的上下文相同。会话层不提供“编辑消息”等第二种入口；前端可以把选中消息并改写的交互翻译为这两步。
 
@@ -182,11 +182,15 @@ sequenceDiagram
 | 请求取消：`LocalTurn::cancel`，或独立命令的 `LocalClient::cancel` | TurnId | 句柄同步登记意图并管理在途回执；独立命令返回后台接管结果，持久结局另行查询 |
 | 停止后台：`stop` | 当前本地后台 | 关闭新准入并等待已接管操作收尾，返回停止时已知状态 |
 
-CLI 的 `lattice session` 子命令为 `send`、`rewind`、`list`、`log`、`turn` 和 `cancel`，顶层 `lattice run` 是 `session send` 的别名。`session send` 不带 `--session` 时创建新 Session：CLI 生成 SessionId，项目绑定从当前目录解析，`--agent` 必填；带 `--session` 时向已有 Session 提交，`--agent` 可选，当前位置为根节点时必填。CLI 在发出请求前生成身份并先输出，所以进程无论在哪一步中断，都能按第一条记录中的 TurnId 查询结果；中断在发出请求之前时，查询返回 NotFound。`session turn` 查看单个 Turn 的详情，请求仍在准入时报告在途，接受结果不明时用它找回；`--follow` 继续观察这一轮直至结束。`session cancel <SESSION_ID>` 取消该会话当前正在执行的一轮：CLI 从会话头查出它的 TurnId，再按 TurnId 取消，并输出该 TurnId；没有正在执行的一轮时报告无可取消。TUI 不带 Session 启动时，在首次提交时生成 SessionId 并新建 Session。
+CLI 的 `lattice session` 子命令为 `send`、`rewind`、`list`、`log`、`turn` 和 `cancel`，顶层 `lattice run` 是 `session send` 的别名。`session send` 不带 `--session` 时创建新 Session：CLI 生成 SessionId，项目绑定从当前目录解析，`--agent` 必填；带 `--session` 时向已有 Session 提交，`--agent` 可选，当前位置为根节点时必填。CLI 在发出请求前生成身份并先输出，所以进程无论在哪一步中断，都能按第一条记录中的 TurnId 查询结果；中断在发出请求之前时，查询返回 NotFound。`session turn` 查看单个 Turn 的详情，请求仍在准入时报告在途，接受结果不明时用它找回；`--follow` 遇到请求仍在准入时等准入结束，不在途中退出，已接受则继续观察这一轮直至结束，没有这个请求则报告 NotFound，退出 2。`session cancel <SESSION_ID>` 取消该会话当前正在执行的一轮：CLI 从会话头查出它的 TurnId，再按 TurnId 取消，并输出该 TurnId；没有正在执行的一轮时报告无可取消。已接管、未接管或没有可取消的一轮时退出 0；取消回复丢失、结果不明时，输出带原 TurnId 的取消记录，状态为 `unknown`，退出 1；会话不存在退出 2。TUI 不带 Session 启动时，在首次提交时生成 SessionId 并新建 Session。
 
 `session send` 与 `session turn --follow` 的 `--json` 输出 JSONL，只含所提交或所跟的那一轮，记录只有七种：`submit`（发出请求前一条写明 TurnId 与 SessionId，收到回执后一条写明结果）、`cancel`（取消回执）、`head`（会话头）、`entry`（对话条目，读者按 `node` 覆盖）、`text`（生成中的文字）、`connection` 与 `error`。结局在本轮最后一个 Step 条目的 `TurnSummary` 中，不另设结束记录。
 
-`session turn` 的详情（含 `--json`）给出 `TurnSummary`，并按步骤序号列出该 Turn 的全部 Step 节点：节点序号、`progress` 及其给出的结束方式与原因，每次尝试的 `progress` 及其给出的终态与原因，以及各槽位的 `progress` 及其给出的结果。它不按路径读取对话。命令行按 TurnId 读取一个 Turn 的全部 Step 只有这一个入口；观察中的 Step 节点随视图推送，见[观察与重连](#观察与重连)。输出不含冻结配置中的秘密。
+输出写明身份的 `submit` 之后，这次提交以一条回执结束（进程被杀除外）。回执的 `result` 为 `accepted`（带接受的这一轮）、`rejected`（带拒绝的错误）、`not_accepted` 或 `unknown`（结果不明，可带错误）；`recovered` 表示结果来自按 TurnId 查询。后台的拒绝，以及请求写出前在提交端发生的拒绝（例如配置加载失败），都是 `rejected`。`not_accepted` 表示确定未被接受，有两种来源：按 TurnId 查询为 NotFound，或取消发生在请求写出之前、请求没有发出。`error` 记录只用于不属于这次提交的错误，例如生成身份之前的使用错误、`tui --json` 启动前的配置校验、观察时后台回复的错误；`sending` 要写完整的 SessionId，`--session` 的前缀在生成身份之前解析，解析失败也是 `error` 记录。回执为 `not_accepted` 或 `unknown` 时退出 1。
+
+`session turn` 的详情（含 `--json`）给出 `TurnSummary`，并按步骤序号列出该 Turn 的全部 Step 节点：节点序号、`progress` 及其给出的结束方式与原因，每次尝试的 `progress` 及其给出的终态与原因，以及各槽位的 `progress` 及其给出的结果。它不按路径读取对话。命令行按 TurnId 读取一个 Turn 的全部 Step 只有这一个入口；观察中的 Step 节点随视图推送，见[观察与重连](#观察与重连)。输出不含冻结配置中的秘密。不带 `--follow` 而请求仍在准入时，`session turn` 输出一行在途说明，`--json` 时输出 `{"status":"in_flight","turn_id":…}`，都退出 0。
+
+`session turn --follow` 所跟的一轮有 Owner 执行时一定在当前位置（执行中 `rewind` 与同会话的新提交都返回 Busy），视图开头就给得到它的条目。这一轮已结束（已关闭，或未关闭而没有 Owner）时，若视图开头给出的条目里有它带 `TurnSummary` 的最后一步，照常输出这一轮的记录；否则（之后又跑了 10 轮以上，退回到这一轮中途，或最后一步已不在当前路径上）只给结局，不给回复正文：按 `session turn` 的详情输出（`--json` 时是同样的一行），退出码按最新结局。
 
 LocalTurn 交付提交与取消的回执。普通退出使用 `detach` 取得最后已知的提交、取消与诊断，或由 Drop 停止本地后续工作；两者都不新增取消。`LocalTurn::turn_id` 给出提交与取消共用的身份。
 
@@ -445,7 +449,7 @@ TurnOutcome = Completed | Failed { reason } | Cancelled
 ```
 
 - `Finish` 得到 Completed；`Stop { cause: Cancelled }` 得到 Cancelled；其他 `Stop` 得到 Failed。
-- `notice = Option<{ level, text }>` 按结局定级：Failed 为 Error，Cancelled 为 Info，Completed 无 notice。`text` 由最后一个 Step 的 `Stop` 原因决定：`ProviderError` 取产生该原因的那次尝试的诊断，先经现有脱敏。HTTP 错误的诊断是一行文字：状态码，加上从 Anthropic、OpenAI、Gemini 错误信封解析出的类型或代码与消息，例如 `HTTP 429 rate_limit_exceeded: …`；正文不是这些格式时取开头一段；类型、代码与消息中的控制字符和空白都折成单个空格，流内错误事件的诊断同样处理；有建议等待时在末尾注明。生成时整行最多 `MAX_DIAGNOSTIC_CHARS`（256 字符），超长以 `…` 截断；provider 请求 ID 只写日志。其他原因（含 Cancelled、ProcessExit、Deadline、调用效果不确定、模型步骤上限）使用按原因固定、由代码定义的文案。尝试诊断的存储上限是 `MAX_PROVIDER_ERROR_CHARS`（2048 字符）。先前已被重试取代的失败尝试不作为 Turn 结局 notice 的来源。notice 不另存，每次读取用同一规则从节点得出，实时 `TurnFailed` 事件携带同一对象，所以实时与重新打开后显示同一句。
+- `notice = Option<{ level, text }>` 按结局定级：Failed 为 Error，Cancelled 为 Info，Completed 无 notice。`text` 由最后一个 Step 的 `Stop` 原因决定：`ProviderError` 取产生该原因的那次尝试的诊断，先经现有脱敏。HTTP 错误的诊断是一行文字：状态码，加上从 Anthropic、OpenAI、Gemini 错误信封解析出的类型或代码与消息，例如 `HTTP 429 rate_limit_exceeded: …`；正文不是这些格式时取开头一段；类型、代码与消息中的控制字符和空白都折成单个空格，流内错误事件的诊断同样处理；有建议等待时在末尾注明。生成时整行最多 `MAX_DIAGNOSTIC_CHARS`（256 字符），超长以 `…` 截断；provider 请求 ID 只写日志。其他原因（含 Cancelled、ProcessExit、Deadline、调用效果不确定、模型步骤上限）使用按原因固定、由代码定义的文案。尝试诊断的存储上限是 `MAX_PROVIDER_ERROR_CHARS`（2048 字符）。先前已被重试取代的失败尝试不作为 Turn 结局 notice 的来源。notice 不另存，每次读取用同一规则从节点得出，最后一个 Step 条目的 `TurnSummary` 带同一对象；实时观察与重新打开会话看到的是同一种条目，所以显示同一句。
 - `level` 取 Info、Warn 或 Error，由后端给出，前端按它呈现，不从其他字段推断等级。Turn 结局的 notice 只取 Info 或 Error；Warn 只用于[重试提示](#模型请求与执行预算)。
 - 公开读取投影为 `TurnSummary { outcome, notice, progress }`，其中不含内部 `reason`。`progress` 取最后一个 Step 的 `progress`，读者据此解读 `outcome`：
   - `Closed`：这一轮已经结束，`outcome` 是最终结局。
@@ -493,7 +497,7 @@ TurnOutcome = Completed | Failed { reason } | Cancelled
 | 在途 | 后台仍在准入这个请求；稍后再查，准入结束后变为另外两种之一 |
 | NotFound | 确定未被接受；前端保留输入，由用户决定是否重发 |
 
-后台读到提交请求时先登记在途的 TurnId，上表第一行的 Conflict 用的也是这份登记；随后确认提交连接仍在，连接已断开的请求不再准入。所以连接断开后查到的 NotFound 是终局，找回不需要以同一身份重新提交。提交连接仍在且尚无回执时，LocalTurn 继续等回执，不查询。视图中出现该 TurnId 的 UserMessage，同样说明已接受。退回操作不释放已用的 TurnId。请求找回保证不扩展为 Tool exactly-once。
+后台读到提交请求时先登记在途的 TurnId，上表第一行的 Conflict 用的也是这份登记；随后确认提交连接仍在，连接已断开的请求不再准入。所以连接断开后查到的 NotFound 是终局，找回不需要以同一身份重新提交。后台也可能在连接断开之后才读到请求：它照样先登记为在途，随即因连接已断开而不准入，所以 NotFound 之后的查询可能短暂为在途，但这个请求不会再被接受。提交连接仍在且尚无回执时，LocalTurn 继续等回执，不查询。视图中出现该 TurnId 的 UserMessage，同样说明已接受。退回操作不释放已用的 TurnId。请求找回保证不扩展为 Tool exactly-once。
 
 执行核心分别给出接受结果、完成结果与推进通知；`stream_turn`、`run_turn` 复用该核心，仍须取得独立 completion。Backend 在 Owner 退场后保存本进程已知的执行诊断，例如因会话库写入失败未能关闭 Turn，由视图的会话头给出；未经核验的请求冲突不覆盖原 Turn 的诊断。
 
@@ -504,8 +508,8 @@ TurnOutcome = Completed | Failed { reason } | Cancelled
 视图按会话推送这个会话现在的样子，没有“所选 Turn”。它依次给出：
 
 1. **会话头**：当前位置、当前 agent、当前位置所属的那一轮有没有 Owner，以及后台已知的这一轮执行诊断。
-2. **最近几轮**：当前路径上最近 N 轮的对话条目，按路径顺序排列；更早的用历史查询取。
-3. **之后的变化**：变化的条目整条重推。当前位置沿路径前进时，只推新条目与会话头；当前位置移到别处（`rewind`）时，会话头标明路径已替换，随后给出新路径上最近 N 轮，前端丢弃此前的条目。
+2. **最近几轮**：当前路径上最近 10 轮（[`WATCH_TURNS`](../../crates/lattice-api/src/local/types.rs)）的对话条目，按路径顺序排列；更早的用历史查询取。
+3. **之后的变化**：变化的条目整条重推。当前位置沿路径前进时，只推新条目与会话头；当前位置移到别处（`rewind`）时，会话头标明路径已替换，随后给出新路径上最近 10 轮，前端丢弃此前的条目。
 4. **生成中的文字**：当前尝试正在生成的正文与 reasoning，见下文。
 
 **对话条目。** 一个条目对应一个节点，以 NodeId 标识；视图与历史查询给出同一种条目，同一节点的新值整条替换旧值。
@@ -520,13 +524,14 @@ TurnOutcome = Completed | Failed { reason } | Cancelled
 **推送。**
 
 - 后台为每个观察者记下哪些条目在上次推送之后变了，轮到推送时从会话库读出最新值发出。观察者变慢时只少收中间版本：同一节点收到的值只会更新、不会回退；赶上之后，它持有已收到的每个条目的最新值与最新的会话头。读得慢不会丢内容，也不需要重新同步。
+- 后台每推一条会话头，同一次推送里接着给出当前位置的条目（当前位置是根节点时除外），即使它没有变化。视图没有批次结束标记，读者无从知道一次推送的条目是否已给完；会话头与随后的当前位置条目出自同一个读事务，所以读者判断这一轮是否结束（尤其是未关闭而没有 Owner）时，以收到最新会话头之后的当前位置条目为准，不拿新会话头配旧条目。
 - Owner 先提交会话库事务，再在观察锁内更新段列表并标记变化的条目，例如新尝试开始时清空段列表。推送在观察锁内复制段列表与已发位置，再开启会话库读事务读出条目，所以文字所属的尝试一定已在条目中。读事务还可能多含一次刚提交、尚未标记的提交，之后对同一节点的推送给出同一个值，前端替换后显示不变。
 
-**这一轮是否结束。** 最后一步的 `progress` 为 `Closed`，或者它未关闭且会话头说明没有 Owner，见[执行者消失后的 Turn](#执行者消失后的-turn)。视图本身不结束，由前端决定何时停止观察；CLI 跟随一轮时，这一轮结束即停止。会话空闲时没有推送是正常的。
+**这一轮是否结束。** 最后一步的 `progress` 为 `Closed`，或者它未关闭且会话头说明没有 Owner，见[执行者消失后的 Turn](#执行者消失后的-turn)。会话头所示当前位置属于别的轮时，所跟的这一轮也已不在执行，按已结束处理：同一会话同时只执行一轮，执行中 `rewind` 与新提交都返回 Busy，所以正在执行的那一轮一定在当前位置。视图本身不结束，由前端决定何时停止观察；CLI 跟随一轮时，这一轮结束即停止。会话空闲时没有推送是正常的。
 
 **后台重启。** 段列表与观察者的推送状态随进程消失，未关闭的 Turn 停在已写入的进度。客户端重连后重新开始 `watch`：会话头说明没有 Owner，条目说明它停在哪个阶段和结局。丢失的只有当时正在生成的半截文字，它本就只作诊断。
 
-**读取更早的对话。** 历史查询 `history { session_id, before, turns }` 取节点 `before` 之前的若干轮：后台沿 `before` 的父链往回收集节点，收到第 `turns` 条 UserMessage 为止。页的边界只落在 UserMessage 之前，每页是完整的 Turn，不切节点。没有游标：路径上已关闭的节点不再改变，一个节点之前的路径就是它的父链，当前位置改变后同一请求仍然有效。前端往上翻到已装入的最早一轮时，以它的 UserMessage 为 `before` 继续取。
+**读取更早的对话。** 历史查询 `history { session_id, before, turns }` 取节点 `before` 之前的若干轮：后台沿 `before` 的父链往回收集节点，收到第 `turns` 条 UserMessage 为止。页的边界只落在 UserMessage 之前，每页是完整的 Turn，不切节点。“完整”指所选父链上这一轮的内容：退回到一轮中途的 Step 再追加时，新分支上那一轮只有退回点之前的部分，分页不再把它切开。没有游标：路径上已关闭的节点不再改变，一个节点之前的路径就是它的父链，当前位置改变后同一请求仍然有效。前端往上翻到已装入的最早一轮时，以它的 UserMessage 为 `before` 继续取，默认每次取 10 轮（[`HISTORY_TURNS`](../../crates/lattice-api/src/local/types.rs)）。
 
 CLI 的人类可读输出在一轮结束时打印一次结局摘要；`--json` 的记录见[实现模块与公开操作](#实现模块与公开操作)。CLI 按最终结局与执行诊断选择退出码；最终仍读不到内容或核验发现数据损坏时退出 1，不因已知 Completed 而忽略失败。工具按 InvocationId 配对显示，规则见 [TUI 对话记录与工具显示](tui.md#对话记录与工具显示)。
 
