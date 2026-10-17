@@ -7,8 +7,8 @@
 
 use crate::app::Status;
 use lattice_api::local::{
-    Acceptance, CancelStatus, ConnectionStatus, DetachReport, HistoryReadContext, HistoryReadError,
-    LocalError, ModelAttemptKey, Notice, NoticeLevel, PublicTurnOutcome, TurnId, TurnSummary,
+    CancelStatus, ConnectionStatus, DetachReport, LocalError, ModelAttemptKey, Notice, NoticeLevel,
+    PublicTurnOutcome, SubmissionResult, TurnId, TurnSummary,
 };
 
 fn status(level: NoticeLevel, text: String) -> Status {
@@ -20,25 +20,16 @@ fn status(level: NoticeLevel, text: String) -> Status {
     }
 }
 
-fn submission_notice(acceptance: &Acceptance) -> String {
-    match acceptance {
-        Acceptance::Accepted { turn } => format!(
-            "已确认接受：session {} turn {}",
-            turn.session_id, turn.turn_id
-        ),
-        Acceptance::Existing { turn } => format!(
-            "找回既有请求：session {} turn {}；未重复执行",
-            turn.session_id, turn.turn_id
-        ),
-        Acceptance::ConfirmationUnknown { turn_id, .. } => {
-            format!("接受确认未知：{turn_id}；保留此 ID 查询，不分配新请求")
-        }
-        Acceptance::NeedsConfiguration { .. } => "本地响应异常".into(),
-    }
+fn recovered_notice(turn_id: TurnId) -> String {
+    format!("按 TurnId 查到已接受的请求：turn {turn_id}；未重复执行")
+}
+
+fn not_accepted_notice(turn_id: TurnId) -> String {
+    format!("请求 {turn_id} 未被接受：按 TurnId 查询确认后台没有这个请求，输入已保留")
 }
 
 fn not_submitted_notice(turn_id: TurnId) -> String {
-    format!("本客户端已停止后续配置提交：turn {turn_id}；不表示该身份全局未执行")
+    format!("提交在发出前取消：turn {turn_id}；这次提交没有发出")
 }
 
 fn cancel_message(status: CancelStatus) -> &'static str {
@@ -59,26 +50,13 @@ fn outcome_word(outcome: &PublicTurnOutcome) -> &'static str {
     }
 }
 
-fn history_context(context: &HistoryReadContext) -> String {
-    match context {
-        HistoryReadContext::Worker => "读取任务".into(),
-        HistoryReadContext::Page {
-            cursor: Some(cursor),
-            ..
-        } => format!("分页（自节点 {} 起）", cursor.node.0),
-        HistoryReadContext::Page { cursor: None, .. } => "分页（首页）".into(),
-        HistoryReadContext::Node { node } => format!("节点 {}", node.node.0),
-    }
+/// 接受结果不明后按 TurnId 查到这一轮已被接受。直接收到的接受回执由助手标题线表达，不推入。
+pub(crate) fn recovered_status(turn_id: TurnId) -> Status {
+    status(NoticeLevel::Info, recovered_notice(turn_id))
 }
 
-/// 接受回执。Accepted 由助手标题线表达，调用方不推入。
-pub(crate) fn submission_status(acceptance: &Acceptance) -> Status {
-    let level = match acceptance {
-        Acceptance::Accepted { .. } | Acceptance::Existing { .. } => NoticeLevel::Info,
-        Acceptance::ConfirmationUnknown { .. } => NoticeLevel::Warn,
-        Acceptance::NeedsConfiguration { .. } => NoticeLevel::Error,
-    };
-    status(level, submission_notice(acceptance))
+pub(crate) fn not_accepted_status(turn_id: TurnId) -> Status {
+    status(NoticeLevel::Error, not_accepted_notice(turn_id))
 }
 
 pub(crate) fn rejected_status(turn_id: TurnId, error: &LocalError) -> Status {
@@ -122,14 +100,12 @@ pub(crate) fn cancellation_status(
     status(level, text)
 }
 
-pub(crate) fn history_unavailable_status(stale: bool, error: &HistoryReadError) -> Status {
+pub(crate) fn older_turns_unavailable_status(error: &LocalError) -> Status {
     status(
         NoticeLevel::Warn,
         format!(
-            "{}持久正文不可用；此次内容未验证，/reconnect 重载：{}：{}",
-            if stale { "旧切点" } else { "" },
-            history_context(&error.context),
-            error.error.message
+            "更早的轮读取失败；再次翻到顶部时重新读取：{}",
+            error.message
         ),
     )
 }
@@ -149,8 +125,9 @@ pub(crate) fn observation_lost_status(cause: &ConnectionStatus) -> Status {
     status(NoticeLevel::Warn, text)
 }
 
-pub(crate) fn observation_diagnostic_status(error: &LocalError) -> Status {
-    status(NoticeLevel::Error, format!("观察诊断：{}", error.message))
+/// 会话头中后台已知的这一轮执行诊断。
+pub(crate) fn execution_diagnostic_status(error: &LocalError) -> Status {
+    status(NoticeLevel::Error, format!("执行诊断：{}", error.message))
 }
 
 pub(crate) fn orphaned_turn_status(turn_id: TurnId) -> Status {
@@ -179,7 +156,7 @@ pub(crate) fn handoff_status(line: &str) -> Status {
     status(NoticeLevel::Info, format!("历史交接：{line}"))
 }
 
-/// 重试提示沿用后端给出的等级；实时 `LlmRetry` 与历史带回的提示共用这一格式。
+/// 重试提示沿用 Step 条目中该提示的等级。
 /// `key` 是失败的那次尝试，`attempt_ordinal` 从 0 起。
 pub(crate) fn retry_status(key: ModelAttemptKey, delay_ms: u64, notice: Notice) -> Status {
     Status {
@@ -219,77 +196,75 @@ pub(crate) fn detach_lines(report: DetachReport, closing_shown: bool) -> Vec<Str
     let mut lines = Vec::new();
     let identity = format!(
         "session {} turn {}",
-        crate::app::session_label(report.session_id),
+        report.session_id,
         report
             .turn_id
             .map_or_else(|| "未知".into(), |id| id.to_string())
     );
-    if let Some(result) = &report.submission {
-        lines.push(match result {
-            Ok(acceptance) => format!("请求 {identity}：{}", submission_notice(acceptance)),
-            Err(error) => format!("请求 {identity} 被拒绝或回执失败：{}", error.message),
+    if let Some(receipt) = &report.submission {
+        lines.push(match &receipt.result {
+            SubmissionResult::Accepted { .. } if receipt.recovered => {
+                let notice = recovered_notice(receipt.turn_id);
+                format!("请求 {identity}：{notice}")
+            }
+            SubmissionResult::Accepted { .. } => format!("请求 {identity}：已确认接受"),
+            SubmissionResult::Rejected { error } => {
+                let message = &error.message;
+                format!("请求 {identity} 被拒绝或回执失败：{message}")
+            }
+            SubmissionResult::NotAccepted => not_accepted_notice(receipt.turn_id),
+            SubmissionResult::Unknown { error } => {
+                let detail = error
+                    .as_ref()
+                    .map_or_else(String::new, |error| format!("：{}", error.message));
+                format!("提交结果未知：{identity}；请按原身份查询{detail}")
+            }
         });
-    }
-    if let (Some(id), Some(_)) = (report.turn_id, report.not_submitted) {
-        lines.push(not_submitted_notice(id));
     }
     if let Some(status) = report.cancel {
         match status {
             CancelStatus::Taken | CancelStatus::Moot => {
-                lines.push(format!("{}：{identity}", cancel_message(status)))
+                let message = cancel_message(status);
+                lines.push(format!("{message}：{identity}"))
             }
             CancelStatus::Pending | CancelStatus::Unknown | CancelStatus::NotTaken => {
+                let message = cancel_message(status);
                 lines.push(format!(
-                    "取消未确认：{identity}；{}；后台可能仍接受或执行，请按原身份查询",
-                    cancel_message(status)
+                    "取消未确认：{identity}；{message}；后台可能仍接受或执行，请按原身份查询"
                 ))
             }
         }
     }
     if let Some(error) = report.cancel_error {
-        lines.push(format!("取消诊断：{}：{}", identity, error.message));
+        let message = error.message;
+        lines.push(format!("取消诊断：{identity}：{message}"));
     }
     if let Some(error) = report.submission_diagnostic {
+        let message = error.message;
         lines.push(format!(
-            "提交结果未知：{identity}；{}；已知观察与完成结果保持",
-            error.message
+            "提交结果未知：{identity}；{message}；已知观察与完成结果保持"
         ));
     }
-    if let Some(state) = report.state {
-        // 未关闭且仍有 Owner 时 summary 只说明此刻停下会得到什么，不是结局。
-        if let Some(turn) = &state.view.selected_turn
-            && (turn.summary.progress.is_closed() || !state.view.owned)
-            && !closing_shown
-        {
-            let summary = &turn.summary;
-            let word = outcome_word(&summary.outcome);
-            lines.push(match &summary.notice {
-                Some(notice) => format!("Turn {} {}：{}", turn.turn_id, word, notice.text),
-                None => format!("Turn {} {}", turn.turn_id, word),
-            });
-        }
-        if let Some(error) = state.error {
-            let target = state
-                .view
-                .selected_turn
+    // 未关闭且仍有 Owner 时 summary 只说明此刻停下会得到什么，不是结局。
+    let ended = report.summary.as_ref().is_some_and(|summary| {
+        summary.progress.is_closed()
+            || report
+                .head
                 .as_ref()
-                .map(|turn| turn.turn_id)
-                .or(report.turn_id);
-            lines.push(format!(
-                "观察诊断：session {} turn {}：{}",
-                crate::app::session_label(report.session_id),
-                target.map_or_else(|| "未知".into(), |id| id.to_string()),
-                error.message
-            ));
-        }
-    }
-    if let Some(error) = report.history_error {
-        lines.push(format!(
-            "持久正文不可用：{}，{}：{}",
-            identity,
-            history_context(&error.context),
-            error.error.message
-        ));
+                .is_some_and(|head| head.turn_id == report.turn_id && !head.owner)
+    });
+    if ended
+        && !closing_shown
+        && let (Some(turn_id), Some(summary)) = (report.turn_id, &report.summary)
+    {
+        let word = outcome_word(&summary.outcome);
+        lines.push(match &summary.notice {
+            Some(notice) => {
+                let text = &notice.text;
+                format!("Turn {turn_id} {word}：{text}")
+            }
+            None => format!("Turn {turn_id} {word}"),
+        });
     }
     lines
 }

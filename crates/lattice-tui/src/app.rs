@@ -1,21 +1,20 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::TuiOptions;
-use crate::blocks::{BlockId, BlockList, IdentifiedBlock, identity_slots};
+use crate::blocks::{BlockId, BlockList, IdentifiedBlock};
 use crate::connection::{
-    cancellation_status, closing_status, detach_lines, discarded_comments_status, handoff_status,
-    history_unavailable_status, not_submitted_status, observation_diagnostic_status,
-    observation_lost_status, orphaned_turn_status, rejected_status, retry_status,
-    submission_status, submission_unknown_status,
+    cancellation_status, detach_lines, discarded_comments_status, execution_diagnostic_status,
+    handoff_status, not_accepted_status, not_submitted_status, observation_lost_status,
+    older_turns_unavailable_status, orphaned_turn_status, recovered_status, rejected_status,
+    submission_unknown_status,
 };
 use crate::input::{CTRL_C_WINDOW, History, InputBuffer, KeyAction, resolve_key};
-use crate::session::SessionContext;
-#[cfg(test)]
-use crate::view::transcript_lines;
+use crate::session::{Generating, SessionContext};
 use crate::view::{
     Dock, DockIntent, DockState, Focus, Panel, Transcript, Viewport, frame_layout,
     render_transcript,
@@ -26,41 +25,43 @@ use crossterm::event::{
     PushKeyboardEnhancementFlags,
 };
 use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
-use lattice_api::TurnEvent;
 use lattice_api::local::{
-    Acceptance, CancelStatus, ConnectionStatus, DetachReport, HistoryEntry, LocalClient,
-    LocalState, LocalTurn, LocalUpdate, MaterialSummary, ModelAttemptKey, Node, NoticeLevel,
-    ObservationPhase, ObservationSnapshot, PublicTurnOutcome, SessionId, SlotProgress, StepKey,
-    TextSegment, ToolResultOutcome, TurnId, TurnRequest, TurnSummary,
+    CancelStatus, ConnectionStatus, ConversationEntry, DetachReport, FrozenConfiguration,
+    LocalClient, LocalError, LocalHistory, LocalTurn, LocalUpdate, Node, NodeId, NoticeLevel,
+    PublicTurnOutcome, SessionHead, SessionId, StepKey, SubmissionReceipt, SubmissionResult,
+    SubmissionUpdate, SubmitSession, TextSegment, TextUpdate, TurnId, TurnRequest, ViewUpdate,
 };
 
 const FRAME: Duration = Duration::from_millis(33);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Block {
-    /// 无视觉内容的归属标记，用于节点正文实际到达后的替换。
-    Step(StepKey),
-    UserTurn(TurnId, std::num::NonZeroUsize),
-    /// 渲染作用域，不单独占行；历史不能被重标为当前 Agent 的发言。
-    AgentName(String),
+    /// 一轮的开头，不占行：UserMessage 条目，或本客户端尚未被条目取代的提交。
+    /// `node` 与 `ordinal` 随条目到达；`agent` 是这一轮回答的 agent。
+    UserTurn {
+        turn_id: TurnId,
+        node: Option<NodeId>,
+        ordinal: Option<std::num::NonZeroUsize>,
+        agent: String,
+    },
+    /// Step 条目的开头，不占行。
+    Step {
+        node: NodeId,
+        key: StepKey,
+    },
     User(String),
     CommentedUser(crate::comment::Message),
     /// 保留被拒提交的标记，但不重复挂载已归还的评论。
     RejectedUser(crate::comment::Message),
     HistoryAssistant(crate::comment::HistoryText),
-    /// 接受或 Live 观察的显示标记，不伪造正文，也不拥有持久节点。
-    AssistantStart {
-        turn_id: TurnId,
-        agent: String,
-    },
-    /// Accumulates `TokenDelta`. A new delta appends to the trailing
-    /// `Assistant` block when one exists, otherwise pushes a new block.
+    /// 本客户端的提交已被接受、条目尚未到达：先显示助手标题线，不伪造正文。
+    AssistantStart,
+    /// 生成中的文字，或由相邻多段拼成、不能评论的回复正文。
     Assistant(String),
     Tool {
         id: String,
         name: String,
         state: ToolState,
-        source: ToolSource,
     },
     Status(Status),
 }
@@ -71,17 +72,10 @@ pub(crate) struct Status {
     pub(crate) level: NoticeLevel,
     /// 可多行，以换行分隔。
     pub(crate) text: String,
-    /// 仅 Turn 结局消息携带所属 Turn 与结局：用于按 TurnId 去重，并决定标题线、符号与配色。
+    /// 仅 Turn 结局携带所属 Turn 与结局：它属于这一轮最后一个 Step 条目，并决定符号与配色。
     pub(crate) closing: Option<(TurnId, PublicTurnOutcome)>,
-    /// 仅重试提示携带失败的那次尝试：历史带回同一提示时据此取代实时显示的那条。
-    pub(crate) retry: Option<ModelAttemptKey>,
-}
-/// 仅用于显示合并的来源；事件成功不能覆盖持久 ToolResult 的真实 outcome 或材料。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ToolSource {
-    HistoryCall,
-    HistoryResult,
-    Event,
+    /// 仅重试提示携带它所属的尝试：它属于这个 Step 条目。
+    pub(crate) retry: Option<lattice_api::local::ModelAttemptKey>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,41 +96,85 @@ pub(crate) enum TurnPhase {
     Cancelling,
 }
 
+/// 首次 Ctrl+C 取消的那一轮。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CancelTarget {
+    /// 本客户端的提交，经它的 LocalTurn 登记取消意图；尚未发出时不再发出。
+    Own,
+    /// 其他客户端提交、会话头所示正在执行的一轮，按 TurnId 直接取消。
+    Other(TurnId),
+}
+
+/// 往上翻到已装入的最早一轮时取更早的轮；`epoch` 是发出时的视图代次。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OlderRequest {
+    pub(crate) session_id: SessionId,
+    pub(crate) before: NodeId,
+    pub(crate) epoch: u64,
+}
+
 pub(crate) struct App {
     pub(crate) ctx: SessionContext,
     pub(crate) blocks: BlockList,
     /// 启动横幅固定在对话记录最上方。它不是状态消息，也不在 `blocks` 中，
-    /// History 替换与 Dock 都碰不到它；身份只供浏览光标锚定。
+    /// 条目替换与 Dock 都碰不到它；身份只供浏览光标锚定。
     pub(crate) banner: Option<(BlockId, Vec<String>)>,
     pub(crate) markdown_cache: std::cell::RefCell<crate::markdown::RenderCache>,
     pub(crate) focus: Focus,
     pub(crate) dock: DockState,
     pub(crate) input: InputBuffer,
     pub(crate) queue: crate::queue::Queue,
-    auto_sent_after: std::collections::HashSet<TurnId>,
+    auto_sent_after: HashSet<TurnId>,
     pub(crate) history: History,
     pub(crate) viewport: Viewport,
     pub(crate) phase: TurnPhase,
-    pub(crate) current_turn: Option<TurnId>,
-    observed_turn: Option<TurnId>,
     pub(crate) connected: bool,
     pub(crate) model: Option<String>,
     pub(crate) provider: Option<String>,
     pub(crate) context_tokens: Option<u64>,
-    cancel_requested: bool,
-    reconnect_requested: bool,
+    /// 由应用循环取走并执行的请求。
+    pub(crate) cancel_requested: Option<CancelTarget>,
+    pub(crate) view_wanted: bool,
+    pub(crate) older_request: Option<OlderRequest>,
+    pub(crate) recover_request: Option<TurnId>,
+    cancelling: bool,
+    /// 已确认的会话头：它当前位置的条目已经到达。各轮是否结束与正在执行的一轮只按它判定；
+    /// 视图开始前为空。
+    pub(crate) head: Option<SessionHead>,
+    /// 刚到达、当前位置的条目尚未到达的会话头。后台在同一次推送里紧接着给出那个条目，
+    /// 收到之前不拿新会话头配旧条目。
+    pending_head: Option<SessionHead>,
+    /// 正在显示的条目，按 NodeId 维护；块序列中的段由它们生成。
+    entries: BTreeMap<NodeId, ConversationEntry>,
+    /// 生成中的文字，按所属 Step 节点。
+    texts: HashMap<NodeId, Generating>,
+    /// 已经结束的轮；由未结束变为结束的那一刻，结局才是新到的消息。
+    ended: HashSet<TurnId>,
+    /// 新视图开始后、首条会话头到达前为真：那条会话头之后是初始条目。
+    view_starting: bool,
+    /// 新视图的首条会话头已到、首个初始条目未到：重连失败时已显示的内容保留，首个条目到达才替换。
+    replace_pending: bool,
+    /// 新视图或路径替换的首条会话头到它当前位置的条目为止：其间的条目是初始条目，
+    /// 带出的提示与结局不是新消息。
+    initial: bool,
+    /// 视图代次：新视图开始或路径替换时递增，迟到的历史查询结果据此丢弃。
+    epoch: u64,
+    older_pending: bool,
+    orphan_warned: Option<TurnId>,
+    diagnostic: Option<LocalError>,
+    /// 本客户端尚未得到结果的提交。
     submitted: Option<(TurnId, crate::queue::Outgoing)>,
-    closed_turns: std::collections::HashSet<TurnId>,
-    /// 已实时交付提交回执的请求；交接报告不再重述它们的回执。
-    delivered_submissions: std::collections::HashSet<TurnId>,
-    // None 仅表示打开已有会话后尚未装入第一份路径。
-    loaded_user_count: Option<usize>,
-    durable_len: usize,
-    generation: u64,
-    attempt: Option<lattice_api::local::AttemptSegments>,
-    // 控制与观察归 LocalTurn；这里只保存当前显示。
-    state: Option<LocalState>,
-    cancel_status: Option<CancelStatus>,
+    /// 本客户端最近一次提交；会话头所示正在执行的是它时，取消经它的 LocalTurn。
+    own_turn: Option<TurnId>,
+    /// 已被接受、会话头尚未指向它的那一轮：其间仍按正在运行处理。
+    awaiting_head: Option<TurnId>,
+    /// 新会话首次提交时生成的 SessionId；确认被接受前之后的提交沿用它与 `New`。
+    new_session: Option<SessionId>,
+    /// 新会话下结果未知的提交；后台答复会话已存在时按它找回。
+    unconfirmed: Option<TurnId>,
+    /// 已实时显示的提交回执：请求与结果种类。交接报告只省略相同的事实。
+    shown_receipts: HashSet<(TurnId, std::mem::Discriminant<SubmissionResult>)>,
+    pub(crate) cancel_status: Option<CancelStatus>,
     /// Set when `supports_keyboard_enhancement()` reported true at startup.
     pub(crate) kitty_keyboard: bool,
     /// Instant of the last Ctrl+C, for the double-press exit rule.
@@ -149,7 +187,7 @@ pub(crate) struct App {
 impl App {
     pub(crate) fn new(ctx: SessionContext, kitty_keyboard: bool, session_dir: &Path) -> Self {
         Self {
-            loaded_user_count: ctx.session_id.is_none().then_some(0),
+            view_wanted: ctx.session_id.is_some(),
             ctx,
             blocks: BlockList::default(),
             banner: None,
@@ -162,187 +200,38 @@ impl App {
             history: History::load(session_dir),
             viewport: Viewport::new(),
             phase: TurnPhase::Idle,
-            current_turn: None,
-            observed_turn: None,
             connected: true,
             model: None,
             provider: None,
             context_tokens: None,
-            cancel_requested: false,
-            reconnect_requested: false,
+            cancel_requested: None,
+            older_request: None,
+            recover_request: None,
+            cancelling: false,
+            head: None,
+            pending_head: None,
+            entries: BTreeMap::new(),
+            texts: HashMap::new(),
+            ended: HashSet::new(),
+            view_starting: false,
+            replace_pending: false,
+            initial: false,
+            epoch: 0,
+            older_pending: false,
+            orphan_warned: None,
+            diagnostic: None,
             submitted: None,
-            closed_turns: Default::default(),
-            delivered_submissions: Default::default(),
-            durable_len: 0,
-            generation: 0,
-            attempt: None,
-            state: None,
+            own_turn: None,
+            awaiting_head: None,
+            new_session: None,
+            unconfirmed: None,
+            shown_receipts: Default::default(),
             cancel_status: None,
             kitty_keyboard,
             last_ctrl_c: None,
             should_quit: false,
             term_width: 80,
             term_height: 24,
-        }
-    }
-
-    pub(crate) fn apply_turn_event(&mut self, event: TurnEvent) {
-        // 状态栏消费最近事件，不受正文是否已被 History 接管影响。
-        match &event {
-            TurnEvent::ModelStarted {
-                provider, model, ..
-            } => {
-                self.model = Some(model.clone());
-                self.provider = Some(provider.as_str().to_owned());
-            }
-            TurnEvent::ModelFinished {
-                usage: Some(usage), ..
-            } => {
-                self.context_tokens = Some(usage.total_tokens);
-            }
-            _ => {}
-        }
-        // 快照可能比事件窗口领先一个提交；已装入节点的尝试不再重建临时块。
-        // 重试提示是状态消息而非正文，可能晚于关闭快照到达，不受此过滤，按尝试去重。
-        let key = match &event {
-            TurnEvent::ModelStarted { key, .. }
-            | TurnEvent::TokenDelta { key, .. }
-            | TurnEvent::ReasoningDelta { key, .. }
-            | TurnEvent::ModelFinished { key, .. } => Some(key),
-            _ => None,
-        };
-        if let Some(key) = key && self.blocks.iter().take(self.durable_len).any(|block| {
-            matches!(block, Block::Step(step) if step.turn_id == key.turn_id && step.ordinal == key.model_step_ordinal)
-        }) { return; }
-        match event {
-            TurnEvent::ModelStarted { key, .. } => self.start_attempt(key),
-            TurnEvent::TokenDelta { key, content } => {
-                self.start_attempt(key);
-                if let Some(attempt) = &mut self.attempt {
-                    attempt.segments.push(TextSegment::Text {
-                        text: content.clone(),
-                    });
-                }
-                crate::session::append_assistant_text(&mut self.blocks, content);
-            }
-            TurnEvent::ReasoningDelta { key, content } => {
-                self.start_attempt(key);
-                if let Some(attempt) = &mut self.attempt {
-                    attempt
-                        .segments
-                        .push(TextSegment::Reasoning { text: content });
-                }
-            }
-            TurnEvent::ToolCallStarted { id, name } => {
-                self.upsert_tool(id.to_string(), name, ToolState::Running)
-            }
-            TurnEvent::ToolCallFinished {
-                id,
-                name,
-                outcome,
-                material,
-                error_summary,
-            } => {
-                self.upsert_tool(
-                    id.to_string(),
-                    name,
-                    tool_state(outcome, &material, error_summary),
-                );
-            }
-            TurnEvent::TurnCompleted { turn, summary, .. }
-            | TurnEvent::TurnFailed { turn, summary, .. }
-            | TurnEvent::TurnCancelled { turn, summary, .. } => {
-                self.fail_running_tools("turn ended before tool completion");
-                self.show_summary(turn.turn_id, summary, true);
-                self.phase = TurnPhase::Idle;
-            }
-            TurnEvent::LlmRetry {
-                key,
-                delay_ms,
-                notice,
-            } => {
-                self.remove_step(StepKey {
-                    turn_id: key.turn_id,
-                    ordinal: key.model_step_ordinal,
-                });
-                self.attempt = None;
-                if !self.blocks.iter().any(|block| {
-                    matches!(block, Block::Status(Status { retry: Some(known), .. }) if *known == key)
-                }) {
-                    self.push_status(retry_status(key, delay_ms, notice));
-                }
-            }
-            TurnEvent::StepClosed { .. } => {} // 实际正文到达前保留临时块。
-            TurnEvent::TurnStarted { turn, .. } => self.ctx.session_id = Some(turn.session_id),
-            TurnEvent::CallsRegistered { .. }
-            | TurnEvent::ModelFinished { .. }
-            | TurnEvent::CepCallStarted { .. }
-            | TurnEvent::CepCallFinished { .. } => {}
-        }
-    }
-
-    fn start_attempt(&mut self, key: ModelAttemptKey) {
-        if self
-            .attempt
-            .as_ref()
-            .is_some_and(|attempt| attempt.key == key)
-        {
-            return;
-        }
-        let step = StepKey {
-            turn_id: key.turn_id,
-            ordinal: key.model_step_ordinal,
-        };
-        self.remove_step(step);
-        self.blocks.push(Block::Step(step));
-        self.attempt = Some(lattice_api::local::AttemptSegments {
-            key,
-            segments: vec![],
-        });
-    }
-
-    fn remove_step(&mut self, step: StepKey) {
-        let mut removing = false;
-        let temporary = self
-            .blocks
-            .entries
-            .split_off(self.durable_len.min(self.blocks.len()));
-        self.blocks
-            .entries
-            .extend(temporary.into_iter().filter(|entry| {
-                match &entry.block {
-                    Block::Step(key) => removing = *key == step,
-                    Block::UserTurn(..) => removing = false,
-                    _ => {}
-                }
-                !removing || matches!(entry.block, Block::Status(_))
-            }));
-    }
-
-    fn upsert_tool(&mut self, id: String, name: String, state: ToolState) {
-        if let Some(Block::Tool {
-            name: known_name,
-            state: known,
-            source,
-            ..
-        }) = self
-            .blocks
-            .iter_mut()
-            .find(|block| matches!(block, Block::Tool { id: known, .. } if *known == id))
-        {
-            if *source == ToolSource::HistoryResult {
-                return;
-            }
-            *known_name = name;
-            *known = state;
-            *source = ToolSource::Event;
-        } else {
-            self.blocks.push(Block::Tool {
-                id,
-                name,
-                state,
-                source: ToolSource::Event,
-            });
         }
     }
 
@@ -361,7 +250,10 @@ impl App {
                     return None;
                 }
                 match action {
-                    KeyAction::ScrollPageUp => self.viewport.page_up(height),
+                    KeyAction::ScrollPageUp => {
+                        self.viewport.page_up(height);
+                        self.request_older_at_top();
+                    }
                     KeyAction::ScrollPageDown => self.viewport.page_down(lines.len(), height),
                     _ => self.viewport.to_bottom(lines.len(), height),
                 }
@@ -446,6 +338,9 @@ impl App {
                             cursor.move_in(&action, lines, width);
                             cursor.reanchor(&transcript);
                             self.viewport.reveal(cursor.row);
+                            if matches!(action, KeyAction::Up) {
+                                self.request_older_at_top();
+                            }
                         }
                     }
                 }
@@ -495,8 +390,9 @@ impl App {
         None
     }
 
+    /// 已结束一轮的回复才可评论。
     pub(crate) fn turn_closed(&self, turn: TurnId) -> bool {
-        self.closed_turns.contains(&turn)
+        self.ended.contains(&turn)
     }
 
     fn focus_anchor(&mut self, location: &crate::comment::Location) {
@@ -523,7 +419,7 @@ impl App {
     pub(crate) fn apply_builtin(&mut self, input: &str) -> bool {
         match input {
             "/quit" | "/exit" | "/q" => { self.should_quit = true; true }
-            "/reconnect" => { self.reconnect_requested = true; true }
+            "/reconnect" => { self.view_wanted = self.ctx.session_id.is_some(); true }
             "/help" | "/?" => { self.dock.open_panel(Panel { title: "HELP", lines: help_lines(self.kitty_keyboard) }); true }
             _ => false,
         }
@@ -598,236 +494,305 @@ impl App {
     fn apply_handoff(&mut self, report: DetachReport) {
         // 旧句柄的回执只结清自己的名额，不覆盖新 Turn 的状态或输入。
         if let Some(id) = report.turn_id {
-            match &report.submission {
-                Some(Ok(Acceptance::Accepted { .. } | Acceptance::Existing { .. })) => {
+            match report.submission.as_ref().map(|receipt| &receipt.result) {
+                Some(SubmissionResult::Accepted { turn }) => {
                     self.queue.release(id);
+                    self.accept_session(turn.session_id);
                 }
-                Some(Err(_) | Ok(Acceptance::NeedsConfiguration { .. })) => {
+                Some(SubmissionResult::Rejected { .. } | SubmissionResult::NotAccepted) => {
                     if self.queue.reject(id) {
                         self.mark_rejected_comments(id);
                         self.discard_missing_comments();
                     }
                 }
-                None if report.not_submitted.is_some() => {
-                    if self.queue.reject(id) {
-                        self.mark_rejected_comments(id);
-                        self.discard_missing_comments();
-                    }
-                }
-                Some(Ok(Acceptance::ConfirmationUnknown { .. })) | None => {
+                Some(SubmissionResult::Unknown { .. }) | None => {
                     if self.queue.release(id) {
                         self.queue.pause();
                     }
                 }
             }
         }
-        // 已由本客户端实时交付的回执与结局不再重述；取消、诊断等新事实照常显示。
+        // 已由本客户端实时显示的同一回执与结局不再重述；未知之后的确定结果、取消与诊断照常显示。
         let mut report = report;
-        if report
-            .turn_id
-            .is_some_and(|id| self.delivered_submissions.contains(&id))
-        {
+        if report.submission.as_ref().is_some_and(|receipt| {
+            self.shown_receipts
+                .contains(&(receipt.turn_id, std::mem::discriminant(&receipt.result)))
+        }) {
             report.submission = None;
         }
-        let closing_shown = report
-            .state
-            .as_ref()
-            .and_then(|state| state.view.selected_turn.as_ref())
-            .is_some_and(|turn| self.summary_shown(turn.turn_id));
+        let closing_shown = report.turn_id.is_some_and(|id| self.summary_shown(id));
         for line in detach_lines(report, closing_shown) {
             self.notice_once(handoff_status(&line));
         }
+        self.refresh_phase();
     }
 
-    fn apply_update(&mut self, update: LocalUpdate) {
+    /// 会话视图的推送。
+    pub(crate) fn apply_view(&mut self, update: LocalUpdate) {
         match update {
-            LocalUpdate::State { view, phase, error } => {
-                self.apply_state(LocalState { view, phase, error })
-            }
-            LocalUpdate::Reset { view, generation } => {
-                self.generation = generation;
-                self.reset_display(&view);
-            }
-            LocalUpdate::History {
-                result,
-                stale,
-                generation,
-                ..
-            } => match result {
-                Ok(history) if !stale && generation == self.generation => {
-                    // 只结合同一个历史切点的 Session 快照：仍可能在执行的那一轮之外都已结束；
-                    // 不能由“Step 已写入”推断它自身的 Turn 关闭。
-                    let mut history = *history;
-                    let unfinished = if let Some(state) = &self.state
-                        && state.view.history == history.anchor
-                    {
-                        let unfinished = unfinished_turn(&state.view);
-                        history.entries.extend(ended_step(&state.view));
-                        self.closed_turns
-                            .extend(history.entries.iter().filter_map(|entry| {
-                                let turn = entry.content.turn_id()?;
-                                (unfinished != Some(turn)).then_some(turn)
-                            }));
-                        unfinished
-                    } else {
-                        // 没有同一切点的快照时不知道 Owner：路径末尾未关闭的一轮按可能在执行对待。
-                        history
-                            .entries
-                            .last()
-                            .filter(|entry| !entry.summary.progress.is_closed())
-                            .and_then(|entry| entry.content.turn_id())
-                    };
-                    self.replace_history(crate::session::history_blocks(history, unfinished))
-                }
-                Ok(_) => {}
-                Err(error) => self.push_status(history_unavailable_status(stale, &error)),
-            },
-            LocalUpdate::Finished { generation, .. } => {
-                if generation == self.generation
-                    && let Some(state) = &mut self.state
-                {
-                    state.phase = ObservationPhase::Finished;
-                }
-            }
-            LocalUpdate::Event { event, .. } => self.apply_turn_event(event),
-            LocalUpdate::Submission { turn_id, result } => match result {
-                Ok(acceptance) => {
-                    // 自动发送的一条放回队首并回到空闲；手动提交按原有行为不归还输入区。
-                    if matches!(acceptance, Acceptance::NeedsConfiguration { .. }) {
-                        if self.queue.reject(turn_id) {
-                            self.mark_rejected_comments(turn_id);
-                            self.submitted = None;
-                            self.restore_submission();
-                        } else if self
-                            .submitted
-                            .as_ref()
-                            .is_some_and(|(id, _)| *id == turn_id)
-                        {
-                            self.mark_rejected_comments(turn_id);
-                            if let Some((_, message)) = self.submitted.take() {
-                                self.queue.restore(message, &mut self.blocks);
-                            }
-                        }
-                        self.discard_missing_comments();
-                    }
-                    if matches!(acceptance, Acceptance::ConfirmationUnknown { .. }) {
-                        self.queue.pause();
-                        if self.queue.release(turn_id) {
-                            self.submitted = None;
-                        }
-                    }
-                    if let Acceptance::Accepted { turn } | Acceptance::Existing { turn } =
-                        &acceptance
-                    {
-                        self.queue.release(turn_id);
-                        self.ctx.session_id = Some(turn.session_id);
-                        self.ctx.active_agent = turn.agent_name.clone();
-                        self.submitted = None;
-                        if turn.summary.progress.is_closed() {
-                            self.current_turn = None;
-                            self.phase = TurnPhase::Idle;
-                        } else {
-                            self.ensure_assistant_start(turn.turn_id, &turn.agent_name);
-                        }
-                    }
-                    self.delivered_submissions.insert(turn_id);
-                    // 接受由助手标题线表达，不另写接受行；找回、确认未知等其余结果照常显示。
-                    if !matches!(acceptance, Acceptance::Accepted { .. }) {
-                        self.push_status(submission_status(&acceptance));
-                    }
-                }
-                Err(error) => {
-                    self.delivered_submissions.insert(turn_id);
-                    self.reject_submission(turn_id);
-                    self.push_status(rejected_status(turn_id, &error));
-                }
-            },
-            LocalUpdate::SubmissionUnknown { turn_id, error } => {
-                self.queue.pause();
-                if self.queue.release(turn_id) {
-                    self.submitted = None;
-                }
-                self.push_status(submission_unknown_status(turn_id, error.as_ref()));
-            }
-            LocalUpdate::NotSubmitted { turn_id, .. } => {
-                self.reject_submission(turn_id);
-                self.push_status(not_submitted_status(turn_id));
-            }
+            LocalUpdate::Head(head) => self.apply_head(head),
+            LocalUpdate::Entry { entry } => self.apply_entry(*entry),
+            LocalUpdate::Text(text) => self.apply_text(text),
+            LocalUpdate::Connection { status } => self.connection_lost(&status),
+            // 视图出错后不再推送，与连接出错一样是观察中断。
+            LocalUpdate::Error { error } => self.connection_lost(&ConnectionStatus::Error(error)),
+            // 只读视图既不提交也不取消。
+            LocalUpdate::Submit { .. } | LocalUpdate::Cancel { .. } => {}
+        }
+        self.settle(true);
+        if self.initial && self.pending_head.is_none() {
+            // 起始会话头当前位置的条目已经到达，初始条目给完；草稿与排队评论的锚点按新路径核对。
+            self.initial = false;
+            self.discard_missing_comments();
+        }
+        self.refresh_phase();
+    }
+
+    /// 本客户端提交句柄的推送。
+    pub(crate) fn apply_submission(&mut self, update: LocalUpdate) {
+        match update {
+            LocalUpdate::Submit {
+                update: SubmissionUpdate::Receipt(receipt),
+            } => self.apply_receipt(receipt),
+            LocalUpdate::Submit {
+                update: SubmissionUpdate::Sending { .. },
+            } => {}
             LocalUpdate::Cancel {
                 turn_id,
                 status,
                 error,
+                ..
             } => {
                 self.cancel_status = Some(status);
                 self.push_status(cancellation_status(turn_id, status, error.as_ref()));
             }
-            LocalUpdate::Connection(status) => self.connection_lost(&status),
+            // 提交句柄不开视图，不推会话内容；会话内容只取自会话视图。
+            LocalUpdate::Head(_)
+            | LocalUpdate::Entry { .. }
+            | LocalUpdate::Text(_)
+            | LocalUpdate::Connection { .. }
+            | LocalUpdate::Error { .. } => {}
+        }
+        self.refresh_phase();
+    }
+
+    fn apply_receipt(&mut self, receipt: SubmissionReceipt) {
+        let turn_id = receipt.turn_id;
+        self.shown_receipts
+            .insert((turn_id, std::mem::discriminant(&receipt.result)));
+        match receipt.result {
+            SubmissionResult::Accepted { turn } => {
+                self.queue.release(turn_id);
+                if self
+                    .submitted
+                    .as_ref()
+                    .is_some_and(|(id, _)| *id == turn_id)
+                {
+                    self.submitted = None;
+                }
+                self.accept_session(turn.session_id);
+                self.ctx.active_agent = turn.agent_name;
+                // 视图已经推来这一轮的条目时，回执不再让界面等待会话头。
+                if !self
+                    .entries
+                    .values()
+                    .any(|entry| entry_turn(entry) == Some(turn_id))
+                {
+                    self.awaiting_head = Some(turn_id);
+                }
+                self.mark_accepted(turn_id);
+                // 直接收到的接受由助手标题线表达，不另写接受行。
+                if receipt.recovered {
+                    self.push_status(recovered_status(turn_id));
+                }
+            }
+            SubmissionResult::Rejected { error } => {
+                self.session_exists(&error);
+                self.reject_submission(turn_id);
+                self.push_status(rejected_status(turn_id, &error));
+            }
+            // 不来自查询的未被接受是取消发生在请求写出之前，这次提交没有发出。
+            SubmissionResult::NotAccepted => {
+                self.reject_submission(turn_id);
+                self.push_status(if receipt.recovered {
+                    not_accepted_status(turn_id)
+                } else {
+                    not_submitted_status(turn_id)
+                });
+            }
+            SubmissionResult::Unknown { error } => {
+                // 不还原已提交的输入，避免重复提交；队列暂停到用户决定。
+                self.queue.pause();
+                self.queue.release(turn_id);
+                if self
+                    .submitted
+                    .as_ref()
+                    .is_some_and(|(id, _)| *id == turn_id)
+                {
+                    self.submitted = None;
+                }
+                if self.ctx.session_id.is_none() {
+                    self.unconfirmed = Some(turn_id);
+                }
+                self.push_status(submission_unknown_status(turn_id, error.as_ref()));
+            }
         }
     }
 
-    fn apply_state(&mut self, state: LocalState) {
-        let view = &state.view;
-        // 要在下面改写 current_turn 之前判断：本进程提交过或看着它运行过的 Turn，结局才是新消息。
-        let watched = view.selected_turn.as_ref().is_some_and(|turn| {
-            self.current_turn == Some(turn.turn_id)
-                || self.delivered_submissions.contains(&turn.turn_id)
-        });
-        let observed = view
-            .selected_turn
-            .as_ref()
-            .map(|turn| turn.turn_id)
-            .or_else(|| unfinished_turn(view));
-        if observed.is_some() {
-            self.observed_turn = observed;
+    /// 确认会话已经建立：此后的提交写 `Existing`，并开始观察它。
+    fn accept_session(&mut self, session_id: SessionId) {
+        if self.ctx.session_id.is_none() {
+            self.ctx.session_id = Some(session_id);
+            self.view_wanted = true;
         }
-        self.ctx.session_id = Some(view.session.session_id);
-        self.ctx.active_agent = view.current_agent.clone().unwrap_or_default();
-        self.connected = true;
-        if state.phase == ObservationPhase::Live {
-            self.current_turn = observed;
-            if let Some(turn) = &view.selected_turn {
-                self.ensure_assistant_start(turn.turn_id, &turn.agent_name);
+        self.new_session = None;
+        self.unconfirmed = None;
+    }
+
+    /// 接受回执先于条目到达时，在提交的 USER 块后显示助手标题线。
+    fn mark_accepted(&mut self, turn_id: TurnId) {
+        if let Some(start) = self.pending_start(turn_id) {
+            let range = self.blocks.group(start);
+            if !self.blocks.entries[range.clone()]
+                .iter()
+                .any(|entry| matches!(entry.block, Block::AssistantStart))
+            {
+                self.blocks
+                    .replace(range.end..range.end, vec![Block::AssistantStart]);
             }
-            self.phase = if matches!(
-                self.cancel_status,
-                Some(CancelStatus::Pending | CancelStatus::Taken)
-            ) {
-                TurnPhase::Cancelling
-            } else {
-                TurnPhase::Streaming
+        }
+    }
+
+    /// 本客户端提交的 USER 块，尚未被同一 TurnId 的 UserMessage 条目取代。
+    fn pending_start(&self, turn_id: TurnId) -> Option<usize> {
+        self.blocks.entries.iter().position(|entry| {
+            matches!(entry.block, Block::UserTurn { turn_id: id, node: None, .. } if id == turn_id)
+        })
+    }
+
+    /// 其他客户端提交的一轮的取消回执。
+    pub(crate) fn apply_cancel_result(
+        &mut self,
+        turn_id: TurnId,
+        result: lattice_api::local::Result<bool>,
+    ) {
+        let (status, error) = match result {
+            Ok(true) => (CancelStatus::Taken, None),
+            Ok(false) => (CancelStatus::NotTaken, None),
+            Err(error) => (CancelStatus::Unknown, Some(error)),
+        };
+        self.cancel_status = Some(status);
+        self.push_status(cancellation_status(turn_id, status, error.as_ref()));
+        self.refresh_phase();
+    }
+
+    /// 应用循环开始了新的视图：它的首条会话头之后是初始条目。
+    pub(crate) fn begin_view(&mut self) {
+        self.view_starting = true;
+    }
+
+    fn last_summary(&self, turn: TurnId) -> Option<&lattice_api::local::TurnSummary> {
+        self.entries.values().rev().find_map(|entry| match entry {
+            ConversationEntry::Step {
+                content,
+                summary: Some(summary),
+                ..
+            } if content.turn_id() == Some(turn) => Some(summary),
+            _ => None,
+        })
+    }
+
+    /// 会话头所示正在执行的那一轮：当前位置那一轮有 Owner 且尚未结束。
+    fn running_turn(&self) -> Option<TurnId> {
+        let head = self.head.as_ref()?;
+        head.turn_id
+            .filter(|turn| head.owner && !self.turn_ended(*turn))
+    }
+
+    /// 正在运行：本客户端的提交尚未得到结果，或会话头说明当前位置那一轮有 Owner 且尚未结束。
+    fn refresh_phase(&mut self) {
+        let running = self.submitted.is_some()
+            || self.awaiting_head.is_some()
+            || self.running_turn().is_some();
+        if !running {
+            self.cancelling = false;
+        }
+        self.phase = match (running, self.cancelling) {
+            (false, _) => TurnPhase::Idle,
+            (true, false) => TurnPhase::Streaming,
+            (true, true) => TurnPhase::Cancelling,
+        };
+    }
+
+    fn cancel_target(&self) -> Option<CancelTarget> {
+        if self.submitted.is_some() {
+            return Some(CancelTarget::Own);
+        }
+        let running = self.running_turn().or(self.awaiting_head)?;
+        Some(if Some(running) == self.own_turn {
+            CancelTarget::Own
+        } else {
+            CancelTarget::Other(running)
+        })
+    }
+
+    /// 新视图的初始条目到达或路径替换时丢弃此前的条目及其生成中的文字；
+    /// 状态消息与未被接受的 USER 块保留。
+    fn discard_entries(&mut self) {
+        self.entries.clear();
+        self.texts.clear();
+        self.ended.clear();
+        let mut remove = vec![false; self.blocks.len()];
+        let mut index = 0;
+        while index < self.blocks.len() {
+            let range = self.blocks.group(index);
+            let discard = match &self.blocks.entries[index].block {
+                Block::UserTurn { node: Some(_), .. } | Block::Step { .. } => true,
+                Block::UserTurn { node: None, .. } => self.blocks.entries[range.clone()]
+                    .iter()
+                    .any(|entry| matches!(entry.block, Block::AssistantStart)),
+                _ => false,
             };
-        } else if state.phase == ObservationPhase::Finished || self.submitted.is_none() {
-            self.current_turn = unfinished_turn(view);
-            self.phase = TurnPhase::Idle;
-        }
-        // 已关闭，或未关闭而没有 Owner：这一轮已经结束，summary 就是它的结局。
-        if let Some(turn) = &view.selected_turn
-            && (turn.summary.progress.is_closed() || !view.owned)
-        {
-            self.submitted = None;
-            self.current_turn = unfinished_turn(view);
-            self.phase = TurnPhase::Idle;
-            self.fail_running_tools("turn ended before tool completion");
-            self.show_summary(turn.turn_id, turn.summary.clone(), watched);
-            if !turn.summary.progress.is_closed() {
-                self.notice_once(orphaned_turn_status(turn.turn_id));
+            if discard {
+                remove[range.clone()].fill(true);
+                index = range.end;
+            } else {
+                index += 1;
             }
         }
-        if let Some(error) = &state.error {
-            self.push_status(observation_diagnostic_status(error));
-        }
-        self.state = Some(state);
+        let mut remove = remove.into_iter();
+        self.blocks
+            .entries
+            .retain(|_| !remove.next().unwrap_or(false));
     }
 
-    fn ensure_assistant_start(&mut self, turn_id: TurnId, agent: &str) {
-        if !self.blocks.iter().any(
-            |block| matches!(block, Block::AssistantStart { turn_id: id, .. } if *id == turn_id),
-        ) {
-            self.blocks.push(Block::AssistantStart {
-                turn_id,
-                agent: agent.into(),
-            });
-        }
+    /// statusline 的模型、提供商与上下文用量取自当前路径上最近的条目。
+    fn refresh_status_fields(&mut self) {
+        (self.model, self.provider) = self
+            .entries
+            .values()
+            .rev()
+            .find_map(|entry| match entry {
+                ConversationEntry::UserMessage {
+                    content:
+                        Node::UserMessage {
+                            model, provider, ..
+                        },
+                    ..
+                } => Some((model.clone(), provider.clone())),
+                _ => None,
+            })
+            .unzip();
+        self.context_tokens = self.entries.values().rev().find_map(|entry| match entry {
+            ConversationEntry::Step {
+                content: Node::Step { attempts, .. },
+                ..
+            } => attempts
+                .iter()
+                .rev()
+                .find_map(|attempt| attempt.usage.map(|usage| usage.total_tokens)),
+            _ => None,
+        });
     }
 
     fn notice_once(&mut self, status: Status) {
@@ -844,340 +809,6 @@ impl App {
         self.blocks.iter().any(|block| {
             matches!(block, Block::Status(Status { closing: Some((id, _)), .. }) if *id == turn_id)
         })
-    }
-
-    /// `watched` 表示本进程提交过或看着它运行过这个 Turn：它的结局是新消息，交给 Dock。
-    /// 重新打开 Session 时带出的旧结局只是历史，直接进对话记录，不打断输入。
-    fn show_summary(&mut self, turn_id: TurnId, summary: TurnSummary, watched: bool) {
-        self.closed_turns.insert(turn_id);
-        if summary.outcome != lattice_api::local::PublicTurnOutcome::Completed {
-            self.queue.pause();
-        }
-        if self.summary_shown(turn_id) {
-            return;
-        }
-        let status = closing_status(turn_id, summary);
-        if watched {
-            self.push_status(status);
-        } else {
-            self.blocks.push(Block::Status(status));
-        }
-    }
-
-    fn reset_display(&mut self, view: &ObservationSnapshot) {
-        // 重同步只替换仍可能在执行的未关闭 Step；已关闭步骤的临时正文等待 History 实际安装。
-        // 执行者已消失的那一步不再改写，随 History 装入，此前保留已显示的内容。
-        let Some((
-            _,
-            Node::Step {
-                turn_id,
-                step_ordinal,
-                reply,
-                slots,
-                ..
-            },
-        )) = &view.unclosed_step
-        else {
-            return;
-        };
-        if unfinished_turn(view) != Some(*turn_id) {
-            return;
-        }
-        let key = StepKey {
-            turn_id: *turn_id,
-            ordinal: *step_ordinal,
-        };
-        self.remove_step(key);
-        self.attempt = None;
-        match reply {
-            None => {
-                if let Some(attempt) = &view.attempt {
-                    self.start_attempt(attempt.key);
-                    self.attempt = Some(attempt.clone());
-                    for segment in &attempt.segments {
-                        if let TextSegment::Text { text } = segment {
-                            crate::session::append_assistant_text(&mut self.blocks, text.clone());
-                        }
-                    }
-                }
-            }
-            Some(reply) => {
-                self.blocks.push(Block::Step(key));
-                // 进行中的槽位还没有结果，按工具调用显示，不取阶段推出的结论。
-                crate::session::append_step(
-                    &mut self.blocks,
-                    lattice_api::local::StepContent {
-                        assistant: reply.clone(),
-                        results: slots
-                            .iter()
-                            .filter_map(|slot| match &slot.progress {
-                                SlotProgress::Terminal { result, .. } => Some(result.clone()),
-                                SlotProgress::Registered | SlotProgress::Started => None,
-                            })
-                            .collect(),
-                    },
-                );
-                self.attempt = view.attempt.clone();
-            }
-        }
-    }
-
-    fn replace_history(&mut self, blocks: Vec<Block>) {
-        self.loaded_user_count = Some(
-            blocks
-                .iter()
-                .rev()
-                .find_map(|block| match block {
-                    Block::UserTurn(_, ordinal) => Some(ordinal.get()),
-                    _ => None,
-                })
-                .unwrap_or(0),
-        );
-        let old_slots = identity_slots(&self.blocks.entries);
-        let mut blocks: Vec<_> = blocks
-            .into_iter()
-            .map(|block| self.blocks.identify(block))
-            .collect();
-        let new_slots = identity_slots(&blocks);
-        // 接受标记归属于 UserMessage；正文已到则由持久助手/工具接管，否则放回 USER 之后。
-        // 不把它当作状态提示，否则 History 会把它挪到下一节点之前或遗失。
-        let mut loaded_starts = std::collections::HashSet::new();
-        for marker in self
-            .blocks
-            .entries
-            .iter()
-            .filter(|entry| matches!(entry.block, Block::AssistantStart { .. }))
-        {
-            let Block::AssistantStart { turn_id, .. } = &marker.block else {
-                continue;
-            };
-            let Some(start) = blocks
-                .iter()
-                .position(|entry| matches!(&entry.block, Block::UserTurn(id, _) if id == turn_id))
-            else {
-                continue;
-            };
-            loaded_starts.insert(*turn_id);
-            let end = blocks
-                .iter()
-                .enumerate()
-                .skip(start.saturating_add(1))
-                .find(|(_, entry)| matches!(entry.block, Block::AgentName(_) | Block::UserTurn(..)))
-                .map_or(blocks.len(), |(index, _)| index);
-            if !blocks
-                .get(start..end)
-                .unwrap_or_default()
-                .iter()
-                .any(|entry| {
-                    matches!(&entry.block, Block::Assistant(text) if !text.is_empty())
-                        || matches!(&entry.block, Block::HistoryAssistant(text) if !text.text.is_empty())
-                        || matches!(entry.block, Block::Tool { .. })
-                })
-            {
-                let after_user = blocks
-                    .iter()
-                    .enumerate()
-                    .take(end)
-                    .skip(start.saturating_add(1))
-                    .take_while(|(_, entry)| matches!(entry.block, Block::User(_) | Block::CommentedUser(_)))
-                    .last()
-                    .map_or(start.saturating_add(1), |(index, _)| {
-                        index.saturating_add(1)
-                    });
-                blocks.insert(after_user.min(blocks.len()), marker.clone());
-            }
-        }
-        let events: std::collections::HashMap<_, _> = self
-            .blocks
-            .iter()
-            .filter_map(|block| match block {
-                Block::Tool {
-                    id,
-                    source: ToolSource::Event,
-                    ..
-                } => Some((id.clone(), block.clone())),
-                _ => None,
-            })
-            .collect();
-        let mut history_ids = std::collections::HashSet::new();
-        for entry in &mut blocks {
-            if let Block::Tool { id, source, .. } = &entry.block {
-                history_ids.insert(id.clone());
-                if *source == ToolSource::HistoryCall
-                    && let Some(event) = events.get(id)
-                {
-                    entry.block = event.clone();
-                }
-            }
-        }
-        // 已装入节点所在组的起点：history_blocks 在每个 UserMessage 节点前放一个 AgentName。
-        let starts: Vec<(Block, usize)> = blocks
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| matches!(entry.block, Block::Step(_) | Block::UserTurn(..)))
-            .map(|(i, entry)| {
-                let previous = i.saturating_sub(1);
-                let scoped = i > 0
-                    && blocks
-                        .get(previous)
-                        .is_some_and(|e| matches!(e.block, Block::AgentName(_)));
-                (entry.block.clone(), if scoped { previous } else { i })
-            })
-            .collect();
-        let start_of = |block: &Block| {
-            starts
-                .iter()
-                .find(|(marker, _)| match (marker, block) {
-                    (Block::UserTurn(left, _), Block::UserTurn(right, _)) => left == right,
-                    _ => marker == block,
-                })
-                .map(|(_, i)| *i)
-        };
-        // 结局行跟着它的 Turn 走：新历史给出这个 Turn 的结局时，旧的那条让位并把身份交给它，
-        // 暂驻 Dock 的结局因此继续暂驻；新历史里已经没有这个 Turn 时，结局行不保留。
-        // 重试提示同理：历史带回的那条取代实时显示的同一次尝试，暂驻 Dock 的继续暂驻。
-        let mut closings = std::collections::HashMap::new();
-        let mut retries = std::collections::HashMap::new();
-        let mut loaded_turns = std::collections::HashSet::new();
-        for (at, entry) in blocks.iter().enumerate() {
-            match &entry.block {
-                Block::Status(Status {
-                    closing: Some((turn, _)),
-                    ..
-                }) => {
-                    closings.insert(*turn, at);
-                }
-                Block::Status(Status {
-                    retry: Some(key), ..
-                }) => {
-                    retries.insert(*key, at);
-                }
-                Block::UserTurn(turn, _) => {
-                    loaded_turns.insert(*turn);
-                }
-                _ => {}
-            }
-        }
-        let parked = self.dock.message_id();
-        // 临时提示按时间顺序保留：放在它之后出现的第一个已装入节点之前，没有则留在末尾。
-        // 旧持久块与已装入节点的实时块由新历史取代；未装入的实时块按原顺序接在末尾。
-        let old = std::mem::take(&mut self.blocks.entries);
-        let durable_len = self.durable_len;
-        let mut inserts: Vec<(usize, IdentifiedBlock)> = Vec::new();
-        let mut pending = Vec::new();
-        let mut tail = Vec::new();
-        let mut replaced = false;
-        // 最近一个已装入节点之后进入 tail 的块，属于该节点所在的 Turn。
-        let mut turn_tail = 0;
-        for (index, entry) in old.into_iter().enumerate() {
-            let block = &entry.block;
-            if index == durable_len {
-                replaced = false;
-            }
-            if matches!(block, Block::AssistantStart { turn_id, .. } if loaded_starts.contains(turn_id))
-            {
-                continue;
-            }
-            if let Block::Status(Status {
-                closing: Some((turn, _)),
-                ..
-            }) = block
-            {
-                if let Some(&at) = closings.get(turn) {
-                    if let Some(taken_over) = blocks.get_mut(at) {
-                        taken_over.id = entry.id;
-                    }
-                    // 结局行是这一轮的最后一行：此前的临时提示与未装入的实时块排在它之前，不漂到末尾。
-                    let before = tail.drain(turn_tail.min(tail.len())..);
-                    inserts.extend(before.chain(pending.drain(..)).map(|live| (at, live)));
-                    continue;
-                }
-                if !loaded_turns.contains(turn) && parked != Some(entry.id) {
-                    continue;
-                }
-            }
-            if let Block::Status(Status {
-                retry: Some(key), ..
-            }) = block
-                && let Some(&at) = retries.get(key)
-            {
-                if let Some(taken_over) = blocks.get_mut(at) {
-                    taken_over.id = entry.id;
-                }
-                continue;
-            }
-            if matches!(block, Block::Status(_)) {
-                pending.push(entry);
-            } else if matches!(block, Block::Step(_) | Block::UserTurn(..)) {
-                if let Some(start) = start_of(block) {
-                    inserts.extend(pending.drain(..).map(|status| (start, status)));
-                    replaced = true;
-                    turn_tail = tail.len();
-                } else if index >= durable_len {
-                    tail.append(&mut pending);
-                    tail.push(entry);
-                    replaced = false;
-                }
-            } else if index < durable_len
-                || replaced
-                || matches!(block, Block::Tool { id, .. } if history_ids.contains(id))
-            {
-                continue;
-            } else {
-                tail.append(&mut pending);
-                tail.push(entry);
-            }
-        }
-        tail.append(&mut pending);
-        let mut result: Vec<IdentifiedBlock> = Vec::with_capacity(
-            blocks
-                .len()
-                .saturating_add(inserts.len())
-                .saturating_add(tail.len()),
-        );
-        // 回退到其他位置后，旧节点在新历史中的顺序可能与原来不同；稳定排序保持同一位置上提示的先后。
-        inserts.sort_by_key(|(at, _)| *at);
-        // 内容相同的提示只留一份；Dock 暂驻的那条按身份保留，不因与已释放的提示同文而随 History 消失。
-        let duplicate = |result: &[IdentifiedBlock], status: &IdentifiedBlock| {
-            parked != Some(status.id) && result.iter().any(|known| known.block == status.block)
-        };
-        let mut inserts = inserts.into_iter().peekable();
-        for (index, entry) in blocks.into_iter().enumerate() {
-            while let Some((_, status)) = inserts.next_if(|(at, _)| *at == index) {
-                if !duplicate(&result, &status) {
-                    result.push(status);
-                }
-            }
-            result.push(entry);
-        }
-        self.durable_len = result.len();
-        for entry in tail {
-            if !(matches!(entry.block, Block::Status(_)) && duplicate(&result, &entry)) {
-                result.push(entry);
-            }
-        }
-        self.blocks.entries = result;
-        self.blocks.inherit_discarded(old_slots, new_slots);
-        self.discard_missing_comments();
-    }
-
-    pub(crate) fn fail_running_tools(&mut self, reason: &str) {
-        for block in self.blocks.iter_mut() {
-            if let Block::Tool {
-                state: state @ ToolState::Running,
-                ..
-            } = block
-            {
-                *state = ToolState::Failed {
-                    output_len: 0,
-                    error: Some(reason.to_owned()),
-                };
-            }
-        }
-    }
-
-    fn finish_stream(&mut self) {
-        self.connection_lost(&ConnectionStatus::Eof);
     }
 
     fn expire_ctrl_c_notice(&mut self, now: Instant) -> bool {
@@ -1198,6 +829,17 @@ impl App {
             id,
             block: Block::Status(status),
         });
+    }
+
+    /// 条目中新到的重试提示或结局交给 Dock；它仍留在所属条目的位置上。
+    fn offer_in(&mut self, range: std::ops::Range<usize>, wanted: impl Fn(&Status) -> bool) {
+        if let Some(entry) = self.blocks.entries[range]
+            .iter()
+            .find(|entry| matches!(&entry.block, Block::Status(status) if wanted(status)))
+            && let Block::Status(status) = &entry.block
+        {
+            self.dock.offer(entry.id, status);
+        }
     }
 
     pub(crate) fn show_banner(&mut self) {
@@ -1225,25 +867,22 @@ impl App {
             }
             return None;
         }
-        let ordinal = std::num::NonZeroUsize::new(self.loaded_user_count?.saturating_add(1))?;
         self.input.clear();
-        let id = lattice_api::local::new_turn_id();
+        self.check_comments_before_send();
         let message = self.queue.take_message(raw);
-        Some(self.start_submission(message, id, ordinal))
+        Some(self.start_submission(message, lattice_api::local::new_turn_id()))
     }
 
     fn auto_submit(&mut self) -> Option<String> {
-        let state = self.state.as_ref()?;
-        let turn = state.view.selected_turn.as_ref()?;
-        if !(turn.summary.progress.is_closed()
-            && turn.summary.outcome == lattice_api::local::PublicTurnOutcome::Completed)
-            || self.auto_sent_after.contains(&turn.turn_id)
-        {
+        let turn = self.head.as_ref()?.turn_id?;
+        let completed = self
+            .last_summary(turn)
+            .is_some_and(|summary| summary.outcome == PublicTurnOutcome::Completed);
+        if !(completed && self.turn_ended(turn)) || self.auto_sent_after.contains(&turn) {
             return None;
         }
-        let completed = turn.turn_id;
         let raw = self.send_queue_head()?;
-        self.auto_sent_after.insert(completed);
+        self.auto_sent_after.insert(turn);
         Some(raw)
     }
 
@@ -1251,40 +890,34 @@ impl App {
         if self.should_quit || self.phase != TurnPhase::Idle {
             return None;
         }
-        let ordinal = std::num::NonZeroUsize::new(self.loaded_user_count?.saturating_add(1))?;
+        self.check_comments_before_send();
         let id = lattice_api::local::new_turn_id();
         let raw = self.queue.start_send(id)?;
-        Some(self.start_submission(raw, id, ordinal))
+        Some(self.start_submission(raw, id))
     }
 
     // 手动与排队共用提交路径，不借用或覆盖正在编辑的输入区。
-    fn start_submission(
-        &mut self,
-        message: crate::queue::Outgoing,
-        id: TurnId,
-        ordinal: std::num::NonZeroUsize,
-    ) -> String {
+    fn start_submission(&mut self, message: crate::queue::Outgoing, id: TurnId) -> String {
         self.history.push(message.text.trim());
         let raw = message.encode();
-        self.state = None;
         self.cancel_status = None;
-        self.attempt = None;
-        self.current_turn = Some(id);
-        self.observed_turn = Some(id);
+        self.own_turn = Some(id);
         self.submitted = Some((id, message));
-        // UserTurn 先于 AgentName：历史装入时以 UserTurn 定位已装入节点，其前的临时提示才会放回该轮之前。
-        self.blocks.push(Block::UserTurn(id, ordinal));
-        self.blocks
-            .push(Block::AgentName(self.ctx.active_agent.clone()));
+        self.blocks.push(Block::UserTurn {
+            turn_id: id,
+            node: None,
+            ordinal: None,
+            agent: self.ctx.active_agent.clone(),
+        });
         self.blocks.push(crate::session::user_block(raw.clone()));
-        self.phase = TurnPhase::Streaming;
+        self.refresh_phase();
         raw
     }
 
-    #[rustfmt::skip]
     fn cancel_or_clear(&mut self) {
-        if self.current_turn.is_some() {
-            self.cancel_requested = true;
+        if let Some(target) = self.cancel_target() {
+            self.cancel_requested = Some(target);
+            self.cancelling = true;
             self.phase = TurnPhase::Cancelling;
         } else if self.dock.shows_input() {
             self.input.clear();
@@ -1295,9 +928,8 @@ impl App {
         let steps = self
             .blocks
             .iter()
-            .take(self.durable_len)
             .filter_map(|block| match block {
-                Block::Step(key) => Some(*key),
+                Block::Step { key, .. } => Some(*key),
                 _ => None,
             })
             .collect();
@@ -1329,35 +961,24 @@ impl App {
     }
 
     fn mark_rejected_comments(&mut self, turn_id: TurnId) {
-        let mut scope = None;
-        for (index, entry) in self.blocks.entries.iter_mut().enumerate() {
-            if let Block::UserTurn(id, _) = &entry.block {
-                scope = Some(*id);
-            }
-            if index >= self.durable_len
-                && scope == Some(turn_id)
-                && let Block::CommentedUser(message) = &entry.block
-            {
+        let Some(start) = self.pending_start(turn_id) else {
+            return;
+        };
+        let range = self.blocks.group(start);
+        for entry in &mut self.blocks.entries[range] {
+            if let Block::CommentedUser(message) = &entry.block {
                 entry.block = Block::RejectedUser(message.clone());
             }
         }
     }
 
-    /// 只归还本客户端的草稿，不撤销已知 live、接管或完成显示。
+    /// 只归还本客户端的草稿，不撤销已知的执行、接管或完成显示。
     fn restore_submission(&mut self) {
         if let Some((_, prompt)) = self.submitted.take() {
             let text = self.queue.restore(prompt, &mut self.blocks);
             self.input.set_text(&text);
         }
-        if !self
-            .state
-            .as_ref()
-            .is_some_and(|state| state.phase == ObservationPhase::Live)
-            && self.cancel_status != Some(CancelStatus::Taken)
-        {
-            self.phase = TurnPhase::Idle;
-            self.current_turn = None;
-        }
+        self.refresh_phase();
     }
 
     /// 与绘制路径使用同一内容宽度及 Dock 高度，statusline 始终占一行；
@@ -1368,67 +989,407 @@ impl App {
             .saturating_sub(1)
             .saturating_sub(Dock::new(self).height(layout.content_w, rows)) as usize
     }
-}
 
-/// 快照中仍可能在执行的 Turn。只有 Session 当前位置上未关闭的 Step 所属的那一轮可能有人执行；
-/// 它是所选 Turn 时，没有 Owner 就是执行者已消失。不是所选 Turn 时无从判断，按可能在执行对待。
-fn unfinished_turn(view: &ObservationSnapshot) -> Option<TurnId> {
-    let turn = view.unclosed_step.as_ref()?.1.turn_id()?;
-    (view.owned
-        || view
-            .selected_turn
-            .as_ref()
-            .is_none_or(|t| t.turn_id != turn))
-    .then_some(turn)
-}
-
-/// 执行者已消失的一轮停在 Session 当前位置的未关闭 Step 上。这个节点随快照交付、不经历史分页，
-/// 此后不再改写，所以作为路径的最后一个节点装入，结局行排在它之后。
-fn ended_step(view: &ObservationSnapshot) -> Option<HistoryEntry> {
-    let (node, content) = view.unclosed_step.as_ref()?;
-    let turn = view.selected_turn.as_ref()?;
-    if view.owned || content.turn_id() != Some(turn.turn_id) {
-        return None;
+    fn apply_head(&mut self, head: SessionHead) {
+        // 新视图的首条会话头或路径已替换：之后到它当前位置的条目为止是初始条目。
+        // 路径替换立即丢弃此前的条目；新视图等首个初始条目到达再替换，重连失败时内容保留。
+        let starts = std::mem::take(&mut self.view_starting) || head.path_replaced;
+        if head.path_replaced {
+            self.replace_entries();
+            self.awaiting_head = None;
+        } else if starts {
+            self.replace_pending = true;
+        }
+        if starts {
+            self.initial = true;
+        }
+        self.ctx.session_id = Some(head.session_id);
+        if let Some(agent) = &head.agent {
+            self.ctx.active_agent = agent.clone();
+        }
+        self.connected = true;
+        if head.turn_id.is_some() && head.turn_id == self.awaiting_head {
+            self.awaiting_head = None;
+        }
+        if head.diagnostic != self.diagnostic {
+            if let Some(error) = &head.diagnostic {
+                self.push_status(execution_diagnostic_status(error));
+            }
+            self.diagnostic = head.diagnostic.clone();
+        }
+        // 当前位置是根节点时没有对应的条目，会话头立即确认。
+        let root = head.position == NodeId(0);
+        self.pending_head = Some(head);
+        if root {
+            self.confirm_head();
+        }
     }
-    Some(HistoryEntry {
-        node: *node,
-        agent_name: turn.agent_name.clone(),
-        summary: turn.summary.clone(),
-        // 尝试记录已由后台读取校验；万一不合规只少显示重试提示，结局与正文照常。
-        retries: content.retry_notices().unwrap_or_default(),
-        content: content.clone(),
-    })
-}
 
-pub(crate) fn session_label(id: Option<SessionId>) -> String {
-    id.map_or_else(|| "未接受".into(), |id| id.to_string())
-}
+    /// 收到待确认会话头当前位置的条目：之后按它判定各轮。
+    fn confirm_head(&mut self) {
+        if std::mem::take(&mut self.replace_pending) {
+            self.replace_entries();
+        }
+        self.head = self.pending_head.take();
+    }
 
-fn tool_state(
-    outcome: ToolResultOutcome,
-    material: &MaterialSummary,
-    error: Option<String>,
-) -> ToolState {
-    let output_len = match material {
-        MaterialSummary::Available { byte_length, .. } => *byte_length as usize,
-        MaterialSummary::OutputTooLarge { .. } => {
-            return ToolState::Unavailable {
-                outcome: outcome.as_str().into(),
+    /// 新视图的初始条目开始到达或路径已替换：丢弃此前的条目，迟到的历史查询结果作废。
+    fn replace_entries(&mut self) {
+        self.replace_pending = false;
+        self.discard_entries();
+        self.epoch = self.epoch.wrapping_add(1);
+        self.older_pending = false;
+        self.orphan_warned = None;
+    }
+
+    /// 同一 NodeId 原位替换；本客户端提交的 USER 块由同一 TurnId 的 UserMessage 条目取代；
+    /// 其余新条目接在末尾。
+    fn apply_entry(&mut self, entry: ConversationEntry) {
+        let node = entry.node();
+        let Some(turn) = entry_turn(&entry) else {
+            return;
+        };
+        if self.replace_pending {
+            self.replace_entries();
+        }
+        if self.awaiting_head == Some(turn) {
+            self.awaiting_head = None;
+        }
+        let user_message = matches!(entry, ConversationEntry::UserMessage { .. });
+        // 视图中出现这次提交的 UserMessage，同样说明已被接受；回执可能更晚到或者丢失。
+        if user_message && self.submitted.as_ref().is_some_and(|(id, _)| *id == turn) {
+            self.submitted = None;
+            self.queue.release(turn);
+        }
+        let known_retries: HashSet<u32> = match self.entries.insert(node, entry) {
+            Some(ConversationEntry::Step { retries, .. }) => {
+                retries.iter().map(|retry| retry.attempt).collect()
+            }
+            _ => HashSet::new(),
+        };
+        if self
+            .texts
+            .get(&node)
+            .is_some_and(|generating| crate::session::superseded(&self.entries[&node], generating))
+        {
+            self.texts.remove(&node);
+        }
+        let blocks = crate::session::entry_blocks(
+            &self.entries[&node],
+            self.ended.contains(&turn),
+            self.texts.get(&node),
+        );
+        let start = self
+            .blocks
+            .node_start(node)
+            .or_else(|| self.pending_start(turn).filter(|_| user_message));
+        let range = match start {
+            Some(start) => self.blocks.replace(self.blocks.group(start), blocks),
+            None => {
+                let end = self.blocks.len();
+                self.blocks.replace(end..end, blocks)
+            }
+        };
+        // 推送使条目多出的重试提示是新到的消息；初始条目中已有的不是。
+        if !self.initial {
+            let fresh: Vec<_> = self.blocks.entries[range.clone()]
+                .iter()
+                .filter_map(|entry| match &entry.block {
+                    Block::Status(Status {
+                        retry: Some(key), ..
+                    }) if !known_retries.contains(&key.attempt_ordinal) => Some(*key),
+                    _ => None,
+                })
+                .collect();
+            for key in fresh {
+                self.offer_in(range.clone(), |status| status.retry == Some(key));
+            }
+        }
+        if self
+            .pending_head
+            .as_ref()
+            .is_some_and(|head| head.position == node)
+        {
+            self.confirm_head();
+        }
+    }
+
+    /// 生成中的文字按所属节点与尝试累积；新的尝试从头开始。
+    fn apply_text(&mut self, update: TextUpdate) {
+        let generating = self.texts.entry(update.node).or_default();
+        if generating.attempt != update.attempt || update.offset == 0 {
+            *generating = Generating {
+                attempt: update.attempt,
+                ..Generating::default()
             };
         }
-        MaterialSummary::NoContent => 0,
-    };
-    if outcome == ToolResultOutcome::Succeeded {
-        ToolState::Ok { output_len }
-    } else {
-        ToolState::Failed {
-            output_len,
-            error: error.or_else(|| Some(outcome.as_str().into())),
+        for segment in update.segments {
+            match segment {
+                TextSegment::Text { text } => {
+                    generating.received = generating.received.saturating_add(text.len());
+                    generating.text.push_str(&text);
+                }
+                TextSegment::Reasoning { text } => {
+                    generating.received = generating.received.saturating_add(text.len());
+                }
+            }
+        }
+        if self
+            .entries
+            .get(&update.node)
+            .is_some_and(|entry| crate::session::superseded(entry, &self.texts[&update.node]))
+        {
+            self.texts.remove(&update.node);
+        }
+        self.render_node(update.node);
+    }
+
+    fn render_node(&mut self, node: NodeId) {
+        let Some(entry) = self.entries.get(&node) else {
+            return;
+        };
+        let ended = entry_turn(entry).is_some_and(|turn| self.ended.contains(&turn));
+        let blocks = crate::session::entry_blocks(entry, ended, self.texts.get(&node));
+        if let Some(start) = self.blocks.node_start(node) {
+            self.blocks.replace(self.blocks.group(start), blocks);
+        }
+    }
+
+    /// 按当前会话头与条目重新判定各轮是否结束。由未结束变为结束的一轮重画它的各段：
+    /// 槽位改按会话库给出的结论显示，最后一步带出结局；`fresh` 且不在初始条目中时结局是新到的消息。
+    fn settle(&mut self, fresh: bool) {
+        let turns: std::collections::BTreeSet<TurnId> =
+            self.entries.values().filter_map(entry_turn).collect();
+        for turn in turns {
+            let ended = self.turn_ended(turn);
+            if ended == self.ended.contains(&turn) {
+                continue;
+            }
+            if ended {
+                self.ended.insert(turn);
+            } else {
+                self.ended.remove(&turn);
+            }
+            let nodes: Vec<NodeId> = self
+                .entries
+                .iter()
+                .filter(|(_, entry)| entry_turn(entry) == Some(turn))
+                .map(|(node, _)| *node)
+                .collect();
+            for node in nodes {
+                self.render_node(node);
+            }
+            if ended && fresh && !self.initial {
+                if let Some(start) = self.last_step_start(turn) {
+                    let range = self.blocks.group(start);
+                    self.offer_in(range, |status| {
+                        status.closing.as_ref().is_some_and(|(id, _)| *id == turn)
+                    });
+                }
+                if self
+                    .last_summary(turn)
+                    .is_some_and(|summary| summary.outcome != PublicTurnOutcome::Completed)
+                {
+                    self.queue.pause();
+                }
+            }
+        }
+        // 当前位置那一轮停在未关闭的 Step 上而没有 Owner：执行者已消失，每个视图提示一次。
+        if let Some(head) = &self.head
+            && let Some(turn) = head.turn_id
+            && !head.owner
+            && self.orphan_warned != Some(turn)
+            && self
+                .last_summary(turn)
+                .is_some_and(|summary| !summary.progress.is_closed())
+        {
+            self.orphan_warned = Some(turn);
+            self.push_status(orphaned_turn_status(turn));
+        }
+        self.refresh_status_fields();
+    }
+
+    fn last_step_start(&self, turn: TurnId) -> Option<usize> {
+        let node = self
+            .entries
+            .iter()
+            .rev()
+            .find_map(|(node, entry)| match entry {
+                ConversationEntry::Step {
+                    content,
+                    summary: Some(_),
+                    ..
+                } if content.turn_id() == Some(turn) => Some(*node),
+                _ => None,
+            })?;
+        self.blocks.node_start(node)
+    }
+
+    /// 视图翻到对话记录顶部而第 1 轮尚未装入时，以已装入的最早一轮的 UserMessage 为 `before`
+    /// 取更早的轮。失败后不自动重查，等下一次翻到顶部。
+    fn request_older_at_top(&mut self) {
+        if self.viewport.scroll() != 0 || self.older_pending {
+            return;
+        }
+        let Some(session_id) = self.ctx.session_id else {
+            return;
+        };
+        let Some((before, ordinal)) = self.entries.iter().find_map(|(node, entry)| match entry {
+            ConversationEntry::UserMessage { ordinal, .. } => Some((*node, *ordinal)),
+            ConversationEntry::Step { .. } => None,
+        }) else {
+            return;
+        };
+        if ordinal <= 1 {
+            return;
+        }
+        self.older_pending = true;
+        self.older_request = Some(OlderRequest {
+            session_id,
+            before,
+            epoch: self.epoch,
+        });
+    }
+
+    /// 取到的轮插在已装入的最早一轮之前，视图停在原来看到的内容上。请求发出后路径被替换时，
+    /// 结果属于旧路径，丢弃。
+    pub(crate) fn apply_older(
+        &mut self,
+        request: OlderRequest,
+        result: lattice_api::local::Result<LocalHistory>,
+    ) {
+        if request.epoch != self.epoch {
+            return;
+        }
+        self.older_pending = false;
+        let history = match result {
+            Ok(history) => history,
+            Err(error) => {
+                self.push_status(older_turns_unavailable_status(&error));
+                return;
+            }
+        };
+        let Some(mut at) = self.blocks.node_start(request.before) else {
+            return;
+        };
+        let width = frame_layout(self.term_width, self.term_height).content_w;
+        // 视图顶部那一行所属的块，及它离块末行的距离：块前面有了内容时开头会多出分隔空行，
+        // 从末行数起不受影响。插入后按它恢复视图。
+        let rendered = render_transcript(self, width);
+        let top = rendered.owners.get(self.viewport.scroll()).map(|top| {
+            let rows = rendered
+                .owners
+                .iter()
+                .filter(|owner| owner.id == top.id)
+                .count();
+            (top.id, rows.saturating_sub(top.row))
+        });
+        for entry in history.entries {
+            let node = entry.node();
+            let Some(turn) = entry_turn(&entry) else {
+                continue;
+            };
+            if self.entries.contains_key(&node) {
+                continue;
+            }
+            self.entries.insert(node, entry);
+            // 更早的轮都已结束；它们的提示与结局不是新消息，直接进对话记录。
+            let ended = self.turn_ended(turn);
+            if ended {
+                self.ended.insert(turn);
+            }
+            let blocks = crate::session::entry_blocks(&self.entries[&node], ended, None);
+            at = self.blocks.replace(at..at, blocks).end;
+        }
+        // 浏览光标由 prepare_transcript 按所在块重新定位并保持屏幕行；焦点在 Dock 时移动视图。
+        // 只补偿插在顶部那一块之前的行：横幅或前置状态消息在插入点之前时视图不动。
+        if matches!(self.focus, Focus::Dock)
+            && !self.viewport.following()
+            && let Some((id, rest)) = top
+            && let Some(last) = render_transcript(self, width)
+                .owners
+                .iter()
+                .rposition(|owner| owner.id == id)
+        {
+            let row = last.saturating_add(1).saturating_sub(rest);
+            self.viewport
+                .shift(row.saturating_sub(self.viewport.scroll()));
+        }
+        self.settle(false);
+    }
+
+    /// 按 TurnId 查到上一次提交已被接受：会话已经建立，改为 `Existing` 并开始观察。
+    pub(crate) fn apply_recovery(
+        &mut self,
+        turn_id: TurnId,
+        result: lattice_api::local::Result<lattice_api::local::TurnDetail>,
+    ) {
+        match result {
+            Ok(turn) => {
+                self.accept_session(turn.session_id);
+                self.push_status(recovered_status(turn_id));
+            }
+            Err(error) => self.push_status(submission_unknown_status(turn_id, Some(&error))),
+        }
+        self.refresh_phase();
+    }
+
+    /// 新会话的提交得到“会话已存在”：上一次结果未知的提交实际已建立会话，按它的 TurnId 找回。
+    fn session_exists(&mut self, error: &LocalError) {
+        if error.conflict == Some(lattice_api::local::ConflictReason::SessionExists)
+            && self.ctx.session_id.is_none()
+        {
+            self.recover_request = self.unconfirmed;
+        }
+    }
+
+    /// 这次提交的身份：已有会话写 `Existing`；新会话在首次提交时生成 SessionId，
+    /// 确认被接受前之后的提交沿用它与 `New`。
+    pub(crate) fn submission_identity(&mut self) -> Option<(TurnId, SubmitSession)> {
+        let (turn_id, _) = self.submitted.as_ref()?;
+        let session = match self.ctx.session_id {
+            Some(id) => SubmitSession::Existing(id),
+            None => SubmitSession::New(
+                *self
+                    .new_session
+                    .get_or_insert_with(lattice_api::local::new_session_id),
+            ),
+        };
+        Some((*turn_id, session))
+    }
+
+    /// 这一轮已经结束：最后一步已关闭，或者会话头说明它不在执行（当前位置在别处，或没有 Owner）。
+    /// 还没有步骤的一轮没有可显示的结局，留到步骤到达再判定。
+    fn turn_ended(&self, turn: TurnId) -> bool {
+        self.last_summary(turn).is_some_and(|summary| {
+            summary.progress.is_closed()
+                || self
+                    .head
+                    .as_ref()
+                    .is_some_and(|head| head.turn_id != Some(turn) || !head.owner)
+        })
+    }
+
+    /// 路径替换后、新的初始条目尚未全部确认时提交，先按已装入的条目核对评论锚点。
+    fn check_comments_before_send(&mut self) {
+        if self.initial {
+            self.discard_missing_comments();
         }
     }
 }
 
-/// 进入 raw 模式后并行接收固定状态和正文；启动不等待整段历史读取。
+fn entry_turn(entry: &ConversationEntry) -> Option<TurnId> {
+    match entry {
+        ConversationEntry::UserMessage { content, .. }
+        | ConversationEntry::Step { content, .. } => content.turn_id(),
+    }
+}
+
+/// 提交前加载这次提交的配置；测试注入不读环境的配置。
+pub(crate) type Configure =
+    fn(String, TuiOptions) -> BoxFuture<'static, lattice_api::local::Result<FrozenConfiguration>>;
+
+/// 进入 raw 模式后并行接收视图推送与按键；启动不等待条目读取。
 pub(crate) async fn run_app(
     mut options: TuiOptions,
     ctx: SessionContext,
@@ -1437,7 +1398,6 @@ pub(crate) async fn run_app(
     let root = options.project_root.clone();
     options.project_root =
         tokio::task::spawn_blocking(move || std::fs::canonicalize(root)).await??;
-    let connection = ctx.session_id.map(|id| client.observe(Some(id), None));
     // try_init 可能在 raw/备用屏幕已改变后失败，恢复 guard 必须先于初始化。
     let mut cleanup = TerminalCleanup { kitty: false };
     let mut terminal = ratatui::try_init()?;
@@ -1452,7 +1412,7 @@ pub(crate) async fn run_app(
         &options,
         &mut app,
         &client,
-        connection,
+        |agent, options| crate::session::freeze_configuration(agent, options).boxed(),
         EventStream::new(),
         |app| {
             terminal.draw(|f| crate::view::draw(f, app))?;
@@ -1480,11 +1440,12 @@ struct LoopExit {
 }
 
 /// 产品接 crossterm/ratatui，测试注入按键并检查同一绘制回调。
+/// 会话视图与本客户端的提交句柄分开持有：内容只取自视图，提交、取消与退出交接经句柄。
 async fn run_loop<E, D>(
     options: &TuiOptions,
     app: &mut App,
     client: &LocalClient,
-    mut turn: Option<LocalTurn>,
+    configure: Configure,
     mut events: E,
     mut draw: D,
 ) -> LoopExit
@@ -1495,68 +1456,129 @@ where
     let mut ticker = tokio::time::interval(FRAME);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut handoffs = FuturesUnordered::new();
+    let mut view: Option<LocalTurn> = None;
+    let mut turn: Option<LocalTurn> = None;
+    // 句柄交付完自己的更新后仍保留，退出或换用新句柄时交给 detach。
+    let mut turn_open = false;
+    let mut preparing: Option<(
+        TurnRequest,
+        BoxFuture<'static, lattice_api::local::Result<FrozenConfiguration>>,
+    )> = None;
+    let mut cancels = FuturesUnordered::new();
+    let mut older = FuturesUnordered::new();
+    let mut recoveries = FuturesUnordered::new();
     let mut dirty = true;
     let result = loop {
-        let cancel = std::mem::take(&mut app.cancel_requested);
-        let reconnect = !app.should_quit && std::mem::take(&mut app.reconnect_requested);
-        if cancel || reconnect {
-            let target = app.current_turn.or(app.observed_turn);
-            let needs_selection = turn
-                .as_ref()
-                .is_none_or(|turn| target.is_some() && target != turn.turn_id());
-            if needs_selection {
-                // 用户选择不同目标才另建只读句柄；旧控制交接不阻塞新目标或等待旧正文。
-                if let Some(old) = turn.replace(client.observe(app.ctx.session_id, target)) {
-                    handoffs.push(old.detach().boxed());
+        if std::mem::take(&mut app.view_wanted)
+            && !app.should_quit
+            && let Some(session_id) = app.ctx.session_id
+        {
+            // 重新开始 watch 用新的句柄，旧连接上尚未读出的推送随旧句柄丢弃。
+            view = Some(client.observe(session_id));
+            app.begin_view();
+        }
+        if let Some(target) = app.cancel_requested.take() {
+            match target {
+                CancelTarget::Own => {
+                    // 句柄要拿到配置结果才创建；配置还在加载时取消，这次提交不再发出，
+                    // 与句柄在请求写出前取消得到同一个回执。
+                    if let Some((request, _)) = preparing.take() {
+                        app.apply_submission(LocalUpdate::Submit {
+                            update: SubmissionUpdate::Receipt(SubmissionReceipt {
+                                turn_id: request.turn_id,
+                                result: SubmissionResult::NotAccepted,
+                                recovered: false,
+                            }),
+                        });
+                    } else if let Some(turn) = &turn {
+                        turn.cancel();
+                    }
                 }
-                app.state = None;
-                app.cancel_status = None;
-                app.observed_turn = target;
-            } else if reconnect && let Some(turn) = &turn {
-                turn.reconnect();
+                CancelTarget::Other(turn_id) => {
+                    let client = client.clone();
+                    cancels.push(async move { (turn_id, client.cancel(turn_id).await) }.boxed());
+                }
             }
-            if cancel && let Some(turn) = &turn {
-                turn.cancel();
-            }
+            dirty = true;
+        }
+        if let Some(request) = app.older_request.take() {
+            let client = client.clone();
+            older.push(
+                async move {
+                    let result = client
+                        .history_before(request.session_id, request.before)
+                        .await;
+                    (request, result)
+                }
+                .boxed(),
+            );
+        }
+        if let Some(turn_id) = app.recover_request.take() {
+            let client = client.clone();
+            recoveries.push(async move { (turn_id, client.wait_for_turn(turn_id).await) }.boxed());
         }
         if app.should_quit {
             break Ok(());
         }
+        let mut prompt = None;
         tokio::select! {
             event = events.next() => {
                 match event {
-                    Some(Ok(event)) => {
-                        if let Some(prompt) = handle_input_event(app, event) {
-                            if let Some(old) = turn.take() { handoffs.push(old.detach().boxed()); }
-                            begin_turn(options, app, &mut turn, client, prompt);
-                        }
-                    }
+                    Some(Ok(event)) => prompt = handle_input_event(app, event),
                     Some(Err(_)) | None => app.should_quit = true,
                 }
-                dirty = true;
             }
-            Some(report) = handoffs.next(), if !handoffs.is_empty() => {
-                app.apply_handoff(report);
-                dirty = true;
+            config = async { preparing.as_mut().expect("正在加载配置").1.as_mut().await }, if preparing.is_some() => {
+                let (request, _) = preparing.take().expect("正在加载配置");
+                turn = Some(client.start_submission(request, config));
+                turn_open = true;
             }
-            update = async { turn.as_mut().expect("已有句柄").next().await }, if turn.is_some() => {
-                if let Some(update) = update { app.apply_update(update); }
-                else { turn = None; app.finish_stream(); }
-                dirty = true;
+            Some(report) = handoffs.next(), if !handoffs.is_empty() => app.apply_handoff(report),
+            update = async { turn.as_mut().expect("已有句柄").next().await }, if turn_open => {
+                match update {
+                    Some(update) => app.apply_submission(update),
+                    None => turn_open = false,
+                }
             }
+            update = async { view.as_mut().expect("已有视图").next().await }, if view.is_some() => {
+                match update {
+                    Some(update) => {
+                        // 提交句柄不开视图，取消补发与结束判定用转入的同一份视图消息。
+                        let forwarded = match &update {
+                            LocalUpdate::Head(head) => Some(ViewUpdate::Head(head.clone())),
+                            LocalUpdate::Entry { entry } => Some(ViewUpdate::Entry { entry: entry.clone() }),
+                            LocalUpdate::Text(text) => Some(ViewUpdate::Text(text.clone())),
+                            _ => None,
+                        };
+                        app.apply_view(update);
+                        if let (Some(turn), Some(forwarded)) = (&turn, forwarded) {
+                            turn.apply_view(forwarded).await;
+                        }
+                    }
+                    None => {
+                        view = None;
+                        app.connection_lost(&ConnectionStatus::Eof);
+                    }
+                }
+            }
+            Some((turn_id, result)) = cancels.next(), if !cancels.is_empty() => app.apply_cancel_result(turn_id, result),
+            Some((request, result)) = older.next(), if !older.is_empty() => app.apply_older(request, result),
+            Some((turn_id, result)) = recoveries.next(), if !recoveries.is_empty() => app.apply_recovery(turn_id, result),
             _ = ticker.tick() => {
                 dirty |= app.expire_ctrl_c_notice(Instant::now());
                 if !dirty { continue; }
                 if let Err(error) = draw(app) { break Err(error); }
                 dirty = false;
+                continue;
             }
         }
-        if let Some(prompt) = app.auto_submit() {
+        dirty = true;
+        if let Some(prompt) = prompt.or_else(|| app.auto_submit()) {
             if let Some(old) = turn.take() {
                 handoffs.push(old.detach().boxed());
             }
-            begin_turn(options, app, &mut turn, client, prompt);
-            dirty = true;
+            turn_open = false;
+            preparing = begin_turn(options, app, configure, prompt);
         }
     };
     // 输入结束、普通退出和绘制失败都保存尚未发送的原文；不保存编辑器草稿。
@@ -1616,21 +1638,26 @@ fn ctrl_c_action(app: &mut App) -> KeyAction {
 fn begin_turn(
     options: &TuiOptions,
     app: &mut App,
-    turn_stream: &mut Option<LocalTurn>,
-    client: &LocalClient,
+    configure: Configure,
     prompt: String,
-) {
+) -> Option<(
+    TurnRequest,
+    BoxFuture<'static, lattice_api::local::Result<FrozenConfiguration>>,
+)> {
+    let (turn_id, session) = app.submission_identity()?;
     let request = TurnRequest {
-        session_id: app.ctx.session_id,
-        turn_id: app.current_turn.expect("提交前已分配身份"),
+        turn_id,
+        session,
         workspace: options.project_root.clone(),
         input: prompt,
         agent: (!options.agent.is_empty()).then(|| options.agent.clone()),
     };
-    let options = options.clone();
-    *turn_stream = Some(client.start_turn_with(request, move |agent| {
-        crate::session::freeze_configuration(agent, options)
-    }));
+    // 显式指定的 agent 优先；向已有会话追加时沿用会话当前的 agent。
+    let agent = request
+        .agent
+        .clone()
+        .unwrap_or_else(|| app.ctx.active_agent.clone());
+    Some((request, configure(agent, options.clone())))
 }
 
 #[rustfmt::skip]
@@ -1717,7 +1744,12 @@ mod loop_tests;
 mod connection_tests;
 
 #[cfg(test)]
+#[path = "test_fixtures.rs"]
+mod fixtures;
+
+#[cfg(test)]
 mod tests {
+    use super::fixtures::*;
     use super::*;
     #[test]
     fn terminal_cleanup_restores_on_normal_error_and_panic_paths() {
@@ -1770,308 +1802,40 @@ mod tests {
         }
     }
 
-    use lattice_api::TurnEvent;
-    use std::time::Duration;
-
-    fn test_app() -> App {
-        App::new(
-            SessionContext {
-                session_id: None,
-                active_agent: "agent".into(),
-            },
-            false,
-            // History is not under test here; an empty dir keeps it inert.
-            Path::new("/nonexistent-tui-test-history"),
-        )
-    }
-
     #[test]
-    fn r2_history_preserves_node_ids_and_unloaded_suffix_but_not_other_turns() {
-        let mut app = test_app();
-        app.input.set_text("prompt");
-        app.apply_action(KeyAction::Submit);
-        let turn_id = app.current_turn.unwrap();
-        let key = ModelAttemptKey {
-            turn_id,
-            model_step_ordinal: 0,
-            attempt_ordinal: 1,
-        };
-        app.apply_turn_event(TurnEvent::TokenDelta {
-            key,
-            content: "stream".into(),
-        });
-        let body_id = |app: &App, text: &str| {
-            app.blocks
-                .entries
-                .iter()
-                .find(|e| matches!(&e.block, Block::User(s) | Block::Assistant(s) if s == text))
-                .unwrap()
-                .id
-        };
-        let user_id = body_id(&app, "prompt");
-        let stream_id = body_id(&app, "stream");
-        app.push_status(status(NoticeLevel::Info, "notice"));
-        let status_id = app
-            .blocks
-            .entries
-            .iter()
-            .find(|e| matches!(e.block, Block::Status(_)))
-            .unwrap()
-            .id;
-        let history = |include_second: bool| {
-            let mut blocks = vec![
-                Block::AgentName("agent".into()),
-                Block::UserTurn(turn_id, std::num::NonZeroUsize::MIN),
-                Block::User("prompt".into()),
-                Block::Step(StepKey {
-                    turn_id,
-                    ordinal: 0,
-                }),
-                Block::Assistant("stream saved".into()),
-                Block::Tool {
-                    id: invocation(1).to_string(),
-                    name: "test".into(),
-                    state: ToolState::Ok { output_len: 0 },
-                    source: ToolSource::HistoryResult,
-                },
-            ];
-            if include_second {
-                blocks.extend([
-                    Block::Step(StepKey {
-                        turn_id,
-                        ordinal: 1,
-                    }),
-                    Block::Assistant("suffix saved".into()),
-                ]);
-            }
-            blocks
-        };
-        for _ in 0..2 {
-            app.replace_history(history(false));
-            assert_eq!(
-                body_id(&app, "prompt"),
-                user_id,
-                "AgentName and statuses do not shift node positions"
-            );
-            assert_eq!(body_id(&app, "stream saved"), stream_id);
-            assert!(app.blocks.entries.iter().any(|e| e.id == status_id));
-        }
-        let later = ModelAttemptKey {
-            model_step_ordinal: 1,
-            ..key
-        };
-        app.apply_turn_event(TurnEvent::TokenDelta {
-            key: later,
-            content: "suffix".into(),
-        });
-        let suffix_id = body_id(&app, "suffix");
-        app.replace_history(history(false));
-        assert_eq!(body_id(&app, "stream saved"), stream_id);
-        assert_eq!(
-            body_id(&app, "suffix"),
-            suffix_id,
-            "unloaded node retains its id"
-        );
-        app.replace_history(history(true));
-        assert_eq!(body_id(&app, "suffix saved"), suffix_id);
-        assert_eq!(body_id(&app, "stream saved"), stream_id);
-        // CLI rewind 到根再发送另一轮，文字和位置相同也不是同一节点。
-        let other = lattice_api::local::new_turn_id();
-        app.replace_history(vec![
-            Block::AgentName("agent".into()),
-            Block::UserTurn(other, std::num::NonZeroUsize::MIN),
-            Block::User("prompt".into()),
-            Block::Step(StepKey {
-                turn_id: other,
-                ordinal: 0,
-            }),
-            Block::Assistant("stream saved".into()),
-        ]);
-        assert_ne!(body_id(&app, "prompt"), user_id);
-        assert_ne!(body_id(&app, "stream saved"), stream_id);
-        assert!(!app.blocks.entries.iter().any(|e| e.id == suffix_id));
-        let ids: std::collections::HashSet<_> = app.blocks.entries.iter().map(|e| e.id).collect();
-        assert_eq!(ids.len(), app.blocks.len());
-    }
-
-    #[test]
-    fn existing_session_preserves_input_until_history_is_loaded() {
-        let mut app = App::new(
-            SessionContext {
-                session_id: Some(SessionId::parse("11111111111141118111111111111111").unwrap()),
-                active_agent: "agent".into(),
-            },
-            false,
-            Path::new("/nonexistent-tui-test-history"),
-        );
-        app.input.set_text("kept prompt");
-        assert_eq!(app.apply_action(KeyAction::Submit), None);
-        assert_eq!(app.input.text(), "kept prompt");
-        app.input.set_text("/quit");
-        assert_eq!(app.apply_action(KeyAction::Submit), None);
-        assert!(app.should_quit);
-    }
-
-    fn assert_failed_tool(app: &App, index: usize, reason: &str) {
-        match &app.blocks[index] {
-            Block::Tool {
-                state: ToolState::Failed { output_len, error },
-                ..
-            } => {
-                assert_eq!(*output_len, 0);
-                assert!(error.as_deref().is_some_and(|error| error.contains(reason)));
-            }
-            other => panic!("expected failed tool, got {other:?}"),
-        }
-    }
-
-    fn attempt() -> ModelAttemptKey {
-        ModelAttemptKey {
-            turn_id: TurnId::parse("11111111-1111-4111-8111-111111111111").unwrap(),
-            model_step_ordinal: 0,
-            attempt_ordinal: 1,
-        }
-    }
-    fn invocation(n: u32) -> lattice_api::local::InvocationId {
-        lattice_api::local::InvocationId::parse(&format!("22222222-2222-4222-8222-{n:012}"))
-            .unwrap()
-    }
-    fn retry(attempt_ordinal: u32, level: NoticeLevel, message: &str) -> TurnEvent {
-        TurnEvent::LlmRetry {
-            key: ModelAttemptKey {
-                attempt_ordinal,
-                ..attempt()
-            },
-            delay_ms: 100,
-            notice: lattice_api::local::Notice {
-                level,
-                text: message.into(),
-            },
-        }
-    }
-    fn status(level: NoticeLevel, text: &str) -> Status {
-        Status {
-            level,
-            text: text.into(),
-            closing: None,
-            retry: None,
-        }
-    }
-    fn start_tool(app: &mut App, name: &str) {
-        app.apply_turn_event(TurnEvent::ToolCallStarted {
-            id: invocation(1),
-            name: name.into(),
-        });
-    }
-    #[test]
-    fn tool_finished_updates_the_block_with_matching_id() {
-        let mut app = test_app();
-        for (n, name) in [
-            (1, "observe.workspace"),
-            (2, "mutate.edit"),
-            (3, "fetch.web"),
-        ] {
-            app.apply_turn_event(TurnEvent::ToolCallStarted {
-                id: invocation(n),
-                name: name.into(),
-            });
-        }
-        app.apply_turn_event(TurnEvent::ToolCallFinished {
-            id: invocation(2),
-            name: "mutate.edit".into(),
-            outcome: ToolResultOutcome::Failed,
-            material: MaterialSummary::NoContent,
-            error_summary: Some("precondition failed".into()),
-        });
-        assert_eq!(app.blocks.len(), 3);
-        assert_failed_tool(&app, 1, "precondition failed");
-        for index in [0, 2] {
-            assert!(matches!(
-                &app.blocks[index],
-                Block::Tool {
-                    state: ToolState::Running,
-                    ..
-                }
-            ));
-        }
-        app.apply_turn_event(TurnEvent::ToolCallFinished {
-            id: invocation(4),
-            name: "fetch.web".into(),
-            outcome: ToolResultOutcome::Succeeded,
-            material: MaterialSummary::Available {
-                digest: [0; 32],
-                byte_length: 42,
-            },
-            error_summary: None,
-        });
-        assert!(matches!(
-            &app.blocks[3],
-            Block::Tool {
-                state: ToolState::Ok { output_len: 42 },
-                source: ToolSource::Event,
-                ..
-            }
-        ));
-        assert_eq!(app.blocks.len(), 4);
-    }
-    #[test]
-    fn stream_end_keeps_execution_state_and_marks_observation_unknown() {
-        let mut app = test_app();
-        app.phase = TurnPhase::Streaming;
+    fn ctrl_c_targets_running_turn_but_esc_only_clears_input() {
+        let mut app = test_app(true);
         let id = lattice_api::local::new_turn_id();
-        app.current_turn = Some(id);
-        start_tool(&mut app, "mutate.edit");
-        app.finish_stream();
+        open_view(
+            &mut app,
+            head(2, Some(id), true),
+            vec![user(1, id, 1, "prompt"), step(2, id, 0).entry()],
+        );
         assert_eq!(app.phase, TurnPhase::Streaming);
-        assert_eq!(app.current_turn, Some(id));
-        assert!(!app.connected);
-        assert!(matches!(
-            &app.blocks[0],
-            Block::Tool {
-                state: ToolState::Unknown,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn ctrl_c_targets_current_turn_but_esc_only_clears_input() {
-        let mut app = test_app();
-        let id = lattice_api::local::new_turn_id();
-        app.current_turn = Some(id);
-        app.phase = TurnPhase::Streaming;
         app.input.set_text("draft");
         handle_input_event(
             &mut app,
             Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
         );
         assert!(app.input.is_empty());
-        assert!(!app.cancel_requested);
+        assert_eq!(app.cancel_requested, None);
         assert_eq!(app.phase, TurnPhase::Streaming);
         handle_input_event(
             &mut app,
             Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
         );
-        assert!(app.cancel_requested);
-        assert_eq!(app.current_turn, Some(id));
+        // 其他客户端提交的一轮按会话头所示的 TurnId 直接取消。
+        assert_eq!(app.cancel_requested, Some(CancelTarget::Other(id)));
         assert_eq!(app.phase, TurnPhase::Cancelling);
         handle_input_event(
             &mut app,
             Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
         );
-        assert!(app.should_quit && app.cancel_requested);
-        assert!(!app.blocks.iter().any(|block| matches!(
-            block,
-            Block::Status(Status {
-                closing: Some(_),
-                ..
-            })
-        )));
+        assert!(app.should_quit);
     }
-
     #[test]
     fn double_ctrl_c_within_window_quits_single_does_not() {
-        let mut app = test_app();
+        let mut app = test_app(false);
         assert!(!matches!(ctrl_c_action(&mut app), KeyAction::Quit));
         app.apply_action(KeyAction::CancelOrClear);
         assert!(!app.should_quit);
@@ -2079,7 +1843,7 @@ mod tests {
         app.apply_action(KeyAction::Quit);
         assert!(app.should_quit);
 
-        let mut app = test_app();
+        let mut app = test_app(false);
         app.input.set_text("clear on first Ctrl+C");
         ctrl_c_action(&mut app);
         app.last_ctrl_c = Some(Instant::now() - Duration::from_secs(3));
@@ -2089,131 +1853,45 @@ mod tests {
         assert!(!app.should_quit);
     }
 
-    #[test]
-    fn idle_stream_timeout_keeps_execution_unconfirmed() {
-        let mut app = test_app();
-        app.phase = TurnPhase::Streaming;
-        start_tool(&mut app, "fetch.web");
-        app.apply_update(LocalUpdate::Connection(ConnectionStatus::Idle));
-        assert_eq!(app.phase, TurnPhase::Streaming);
-        // 无增量只是观察中断：一条 Warn，不是错误，也不是 Turn 结局。
-        let statuses = app
-            .blocks
-            .iter()
-            .filter_map(|block| match block {
-                Block::Status(status) => Some(status),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert!(
-            matches!(
-                statuses.as_slice(),
-                [Status {
-                    level: NoticeLevel::Warn,
-                    closing: None,
-                    ..
-                }]
-            ),
-            "{statuses:?}"
-        );
-    }
-
     /// 消息之间不叠：替换（Warn→Warn、Warn→Error、Error→Warn）把旧消息落回对话记录的
     /// 原时间位置，释放后每条恰好出现一次；Info 不进 Dock；草稿不受影响。
     #[test]
     fn dock_replacement_and_release_keep_transcript_order_and_draft() {
-        let mut app = test_app();
+        let mut app = test_app(false);
         app.input.set_text("draft");
-        assert!(app.dock.shows_input());
-        let docked = |app: &App| {
-            app.dock
-                .message(&app.blocks)
-                .map(|status| (status.level.clone(), status.text.clone()))
-        };
         let docked_is = |app: &App, level: NoticeLevel, marker: &str| {
-            docked(app).is_some_and(|(known, text)| known == level && text.contains(marker))
+            app.dock
+                .message()
+                .is_some_and(|status| status.level == level && status.text.contains(marker))
         };
-
-        app.apply_turn_event(retry(0, NoticeLevel::Warn, "retry-0"));
-        app.apply_turn_event(retry(1, NoticeLevel::Warn, "retry-a"));
-        assert!(docked_is(&app, NoticeLevel::Warn, "retry-a"));
-        let text = transcript_text(&app, 78);
-        assert!(text.contains("retry-0") && !text.contains("retry-a"));
-
+        app.push_status(status(NoticeLevel::Warn, "warn-0"));
+        app.push_status(status(NoticeLevel::Warn, "warn-a"));
+        assert!(docked_is(&app, NoticeLevel::Warn, "warn-a"));
+        let text = transcript(&app);
+        assert!(text.contains("warn-0") && !text.contains("warn-a"));
         app.push_status(status(NoticeLevel::Info, "info-i"));
         assert!(
-            docked_is(&app, NoticeLevel::Warn, "retry-a"),
+            docked_is(&app, NoticeLevel::Warn, "warn-a"),
             "Info 不进 Dock"
         );
-        assert!(transcript_text(&app, 78).contains("info-i"));
-
+        assert!(transcript(&app).contains("info-i"));
         app.push_status(status(NoticeLevel::Error, "commit-b"));
         assert!(docked_is(&app, NoticeLevel::Error, "commit-b"));
-        assert!(transcript_text(&app, 78).contains("retry-a"));
-        app.apply_turn_event(retry(2, NoticeLevel::Warn, "retry-c"));
-        assert!(docked_is(&app, NoticeLevel::Warn, "retry-c"));
-        assert!(transcript_text(&app, 78).contains("commit-b"));
-
+        assert!(transcript(&app).contains("warn-a"));
+        app.push_status(status(NoticeLevel::Warn, "warn-c"));
+        assert!(docked_is(&app, NoticeLevel::Warn, "warn-c"));
         // Space：释放当前消息，Space 不进入输入，草稿不变。
         assert!(app.apply_action(KeyAction::Insert(' ')).is_none());
         assert!(app.dock.shows_input());
         assert_eq!(app.input.text(), "draft");
-        assert_eq!(app.phase, TurnPhase::Idle);
-
-        // 每条消息恰好出现一次，且保持到达顺序。
-        let lines = transcript_lines(&app, 78)
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>();
-        let order: Vec<usize> = ["retry-0", "retry-a", "info-i", "commit-b", "retry-c"]
+        let order: Vec<usize> = ["warn-0", "warn-a", "info-i", "commit-b", "warn-c"]
             .into_iter()
-            .map(|marker| {
-                let rows = lines
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, line)| line.contains(marker))
-                    .map(|(row, _)| row)
-                    .collect::<Vec<_>>();
-                assert_eq!(rows.len(), 1, "{marker} 应恰好出现一次");
-                rows[0]
-            })
+            .map(|marker| row(&app, marker))
             .collect();
         let mut sorted = order.clone();
         sorted.sort_unstable();
         assert_eq!(order, sorted, "保持到达顺序");
     }
-
-    /// 重试提示的等级取自后端的 notice，不由前端写死；外壳为中文，诊断原文不动。
-    #[test]
-    fn llm_retry_uses_the_backend_notice_level() {
-        for (level, docked) in [
-            (NoticeLevel::Info, false),
-            (NoticeLevel::Warn, true),
-            (NoticeLevel::Error, true),
-        ] {
-            let mut app = test_app();
-            app.apply_turn_event(retry(1, level.clone(), "HTTP 429 rate_limit_exceeded"));
-            let pushed = app
-                .blocks
-                .iter()
-                .find_map(|block| match block {
-                    Block::Status(status) => Some(status.clone()),
-                    _ => None,
-                })
-                .unwrap();
-            assert_eq!(pushed.level, level);
-            assert_eq!(
-                pushed.text,
-                "第 2 次请求失败，100 ms 后重试：HTTP 429 rate_limit_exceeded"
-            );
-            assert_eq!(
-                app.dock.message(&app.blocks),
-                docked.then_some(&pushed),
-                "{level:?}"
-            );
-        }
-    }
-
     fn dock_title(app: &mut App) -> &'static str {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
@@ -2279,7 +1957,7 @@ mod tests {
             handle_input_event(app, Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
         };
         for (name, steps) in cases {
-            let mut app = test_app();
+            let mut app = test_app(false);
             app.input.set_text("draft");
             assert_eq!(dock_title(&mut app), "USER", "{name}");
             for (index, (step, top)) in steps.into_iter().enumerate() {
@@ -2311,7 +1989,7 @@ mod tests {
                 assert_eq!(app.focus, Focus::Dock, "{label}");
             }
             // 面板不是状态消息：关闭后对话记录里没有帮助文字。
-            assert!(!transcript_text(&app, 78).contains("/reconnect"), "{name}");
+            assert!(!transcript(&app).contains("/reconnect"), "{name}");
             // 回到输入区后恢复普通编辑。
             let draft = app.input.text();
             press(&mut app, KeyCode::Char('x'));
@@ -2319,68 +1997,69 @@ mod tests {
         }
     }
 
-    /// 启动横幅固定在对话记录最上方：History 装入与替换都不把它当作状态消息重新排位。
+    /// 启动横幅固定在对话记录最上方：新视图丢弃条目与插入更早的轮都不把它当作状态消息重新排位。
     #[test]
-    fn startup_banner_stays_on_top_across_history_load_and_replacement() {
-        let mut app = test_app();
+    fn startup_banner_stays_on_top_across_new_views_and_older_turns() {
+        let mut app = test_app(true);
         app.show_banner();
-        app.push_status(status(NoticeLevel::Info, "before-history"));
-        let turn = |n: u32| TurnId::parse(&format!("33333333-3333-4333-8333-{n:012}")).unwrap();
-        let history = |turns: u32| {
-            (1..=turns)
+        app.push_status(status(NoticeLevel::Info, "before-view"));
+        let turn = |n: u64| TurnId::parse(&format!("33333333-3333-4333-8333-{n:012}")).unwrap();
+        let entries = |turns: std::ops::RangeInclusive<u64>| {
+            turns
                 .flat_map(|n| {
                     [
-                        Block::AgentName("agent".into()),
-                        Block::UserTurn(turn(n), std::num::NonZeroUsize::new(n as usize).unwrap()),
-                        Block::User(format!("prompt-{n}")),
-                        Block::Step(StepKey {
-                            turn_id: turn(n),
-                            ordinal: 0,
-                        }),
-                        Block::Assistant(format!("answer-{n}")),
+                        user(2 * n - 1, turn(n), n, &format!("prompt-{n}")),
+                        step(2 * n, turn(n), 0)
+                            .text(&format!("answer-{n}"))
+                            .finished()
+                            .entry(),
                     ]
                 })
                 .collect::<Vec<_>>()
         };
-        for turns in [1, 2, 1] {
-            app.replace_history(history(turns));
-            let lines = transcript_lines(&app, 78)
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>();
-            assert_eq!(
-                lines.iter().take(4).map(String::as_str).collect::<Vec<_>>(),
-                [
-                    "LATTICE",
-                    "/help  显示命令",
-                    "/quit  退出",
-                    "/reconnect  重新读取状态并观察"
-                ],
-                "{turns}"
+        for turns in [1..=1, 2..=3] {
+            open_view(
+                &mut app,
+                head(2 * turns.end(), Some(turn(*turns.end())), false),
+                entries(turns),
             );
-            assert_eq!(
-                lines.iter().filter(|line| line.contains("LATTICE")).count(),
-                1
-            );
-            // 它之后没有节点的状态消息留在末尾；横幅若仍是状态消息，会与它一起落到历史之后。
-            let row = |marker: &str| lines.iter().position(|line| line.contains(marker)).unwrap();
-            assert!(row("prompt-1") < row("before-history"), "{lines:?}");
         }
-        assert_eq!(
-            app.blocks
-                .iter()
-                .filter(|block| matches!(block, Block::Status(_)))
-                .count(),
-            1,
-            "横幅不在状态消息之列"
+        app.term_height = 100;
+        app.apply_action(KeyAction::ScrollPageUp);
+        let request = app.older_request.take().expect("第 1 轮尚未装入");
+        app.apply_older(
+            request,
+            Ok(LocalHistory {
+                entries: entries(1..=1),
+            }),
         );
+        let lines = crate::view::transcript_lines(&app, 78)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            lines.iter().take(4).map(String::as_str).collect::<Vec<_>>(),
+            [
+                "LATTICE",
+                "/help  显示命令",
+                "/quit  退出",
+                "/reconnect  重新读取状态并观察"
+            ]
+        );
+        assert_eq!(
+            lines.iter().filter(|line| line.contains("LATTICE")).count(),
+            1
+        );
+        // 状态消息出现后不移动：它在视图开始前出现，插入的更早的轮也排在它之后。
+        assert!(row(&app, "before-view") < row(&app, "prompt-1"));
+        assert!(row(&app, "prompt-1") < row(&app, "prompt-2"));
     }
 
-    /// §14.3：WARN / ERROR 下屏蔽不可见输入编辑，全局动作照常。
+    /// WARN / ERROR 下屏蔽不可见输入编辑，全局动作照常。
     #[test]
     fn dock_status_blocks_invisible_input_but_keeps_globals() {
         for level in [NoticeLevel::Warn, NoticeLevel::Error] {
-            let mut app = test_app();
+            let mut app = test_app(true);
             app.input.set_text("draft");
             app.push_status(status(level, "blocked"));
             for code in [
@@ -2453,13 +2132,15 @@ mod tests {
             assert!(app.should_quit);
             app.should_quit = false;
             app.last_ctrl_c = None;
-            app.current_turn = Some(lattice_api::local::new_turn_id());
-            app.phase = TurnPhase::Streaming;
+            let id = lattice_api::local::new_turn_id();
+            app.apply_view(LocalUpdate::Head(head(2, Some(id), true)));
+            app.apply_view(entry_update(user(1, id, 1, "prompt")));
+            app.apply_view(entry_update(step(2, id, 0).entry()));
             handle_input_event(
                 &mut app,
                 Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
             );
-            assert!(app.cancel_requested);
+            assert_eq!(app.cancel_requested, Some(CancelTarget::Other(id)));
             assert_eq!(app.input.text(), "draft");
             handle_input_event(
                 &mut app,
@@ -2478,13 +2159,5 @@ mod tests {
             );
             assert_eq!(app.input.text(), "draftx ");
         }
-    }
-
-    fn transcript_text(app: &App, width: u16) -> String {
-        transcript_lines(app, width)
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n")
     }
 }

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::blocks::{BlockId, BlockList};
+use crate::blocks::BlockId;
 
 /// 承载某个 slash 命令输出的面板：标题加若干行。
 pub(crate) struct Panel {
@@ -11,11 +11,12 @@ pub(crate) struct Panel {
 }
 
 /// Dock 的持久状态：输入区之上的模块栈。输入区常驻栈底，其上至多一个面板，
-/// 再上至多一条暂驻消息。消息只记身份，文字与等级仍归对话记录里的那个状态 block。
+/// 再上至多一条暂驻消息。消息记下对话记录里那个状态 block 的身份与一份内容：
+/// 所属条目被丢弃时消息继续暂驻，释放后不再出现。
 #[derive(Default)]
 pub(crate) struct DockState {
     panel: Option<Panel>,
-    message: Option<BlockId>,
+    message: Option<(BlockId, Status)>,
     /// 自上次取走以来栈是否变过，供 viewport 区分 Dock 变化与内容变化。
     changed: bool,
 }
@@ -26,28 +27,41 @@ impl DockState {
     pub(crate) fn offer(&mut self, id: BlockId, status: &Status) {
         match status.level {
             NoticeLevel::Warn | NoticeLevel::Error => {
-                self.message = Some(id);
+                self.message = Some((id, status.clone()));
                 self.changed = true;
             }
             NoticeLevel::Info => {}
         }
     }
 
-    /// 对话记录据此跳过暂驻的那一条。
     pub(crate) fn message_id(&self) -> Option<BlockId> {
-        self.message
+        self.message.as_ref().map(|(id, _)| *id)
     }
 
-    pub(crate) fn message<'a>(&self, blocks: &'a BlockList) -> Option<&'a Status> {
-        let id = self.message?;
-        blocks
-            .entries
-            .iter()
-            .rev()
-            .find_map(|entry| match &entry.block {
-                Block::Status(status) if entry.id == id => Some(status),
-                _ => None,
-            })
+    /// 对话记录据此跳过暂驻的那一条。重试提示按尝试、结局按 TurnId 识别：
+    /// 条目重建后块身份变了，仍是同一条消息；其余按块身份。
+    pub(crate) fn parks(&self, id: BlockId, status: &Status) -> bool {
+        match &self.message {
+            Some((
+                _,
+                Status {
+                    retry: Some(key), ..
+                },
+            )) => status.retry == Some(*key),
+            Some((
+                _,
+                Status {
+                    closing: Some((turn, _)),
+                    ..
+                },
+            )) => status.closing.as_ref().is_some_and(|(id, _)| id == turn),
+            Some((parked, _)) => *parked == id,
+            None => false,
+        }
+    }
+
+    pub(crate) fn message(&self) -> Option<&Status> {
+        self.message.as_ref().map(|(_, status)| status)
     }
 
     pub(crate) fn release(&mut self) {
@@ -111,7 +125,7 @@ pub(crate) enum DockIntent {
 
 impl<'a> Dock<'a> {
     pub(crate) fn new(app: &'a App) -> Self {
-        let top = match (app.dock.message(&app.blocks), &app.dock.panel) {
+        let top = match (app.dock.message(), &app.dock.panel) {
             (Some(status), _) => Module::Message(MessageModule { status }),
             (None, Some(panel)) => Module::Panel(PanelModule { panel }),
             (None, None) => Module::Input(InputModule {
