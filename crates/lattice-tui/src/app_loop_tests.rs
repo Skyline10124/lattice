@@ -725,7 +725,7 @@ fn accepting_and_unknown_receipts_release_capacity_without_requeue() {
                 "new queued input"
             );
         } else {
-            // 未知之后的迟到拒绝不能重新入队或覆盖用户的新草稿。
+            // 未知之后迟到的确定拒绝与直接被拒一样放回队首并暂停，不碰用户的新草稿。
             app.apply_submission(receipt(
                 id,
                 SubmissionResult::Rejected {
@@ -733,7 +733,12 @@ fn accepting_and_unknown_receipts_release_capacity_without_requeue() {
                 },
             ));
             assert_eq!(app.input.text(), "new queued input");
-            assert_eq!(app.queue.messages().count(), 4);
+            assert_eq!(
+                app.queue.messages().next().map(|m| m.text.as_str()),
+                Some(" q0\nraw ")
+            );
+            assert_eq!(app.queue.messages().count(), 5);
+            assert!(app.queue.is_paused());
         }
     }
 }
@@ -922,16 +927,66 @@ fn handoff_reports_a_definite_result_after_a_live_unknown() {
 
 #[test]
 fn manual_rejections_restore_the_input() {
-    for how in 0..4 {
+    // 结果未知之后迟到的确定拒绝同样归还；发出前取消不会晚于未知。
+    for (how, late) in (0..4)
+        .map(|how| (how, false))
+        .chain([(0, true), (1, true), (3, true)])
+    {
         let mut h = Harness::new(true);
         let app = &mut h.app;
         app.input.set_text(" manual\nraw ");
         app.submit().unwrap();
         let id = app.own_turn.unwrap();
+        if late {
+            app.apply_submission(receipt(id, SubmissionResult::Unknown { error: None }));
+        }
+        reject(app, id, how);
+        assert_eq!(app.input.text(), " manual\nraw ", "{how} {late}");
+        assert!(!transcript(app).contains("Ctrl+↑"), "{how} {late}");
+        assert_eq!(app.queue.messages().count(), 0);
+        assert_eq!(app.phase, TurnPhase::Idle);
+    }
+}
+
+#[test]
+fn manual_rejections_keep_a_new_draft_and_point_to_the_input_history() {
+    for (how, late) in (0..4)
+        .map(|how| (how, false))
+        .chain([(0, true), (1, true), (3, true)])
+    {
+        let mut h = Harness::new(true);
+        let app = &mut h.app;
+        app.input.set_text(" manual\nraw ");
+        app.submit().unwrap();
+        let id = app.own_turn.unwrap();
+        if late {
+            app.apply_submission(receipt(id, SubmissionResult::Unknown { error: None }));
+        }
         app.input.set_text("new draft");
         reject(app, id, how);
-        assert_eq!(app.input.text(), " manual\nraw ", "{how}");
-        assert_eq!(app.queue.messages().count(), 0);
+        assert_eq!(
+            app.input.text(),
+            "new draft",
+            "{how} {late}: 不覆盖用户的草稿"
+        );
+        let hint = app
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                Block::Status(status) => Some(status.text.as_str()),
+                _ => None,
+            })
+            .next_back()
+            .unwrap();
+        assert!(
+            hint.contains("Ctrl+↑") && !hint.contains("输入已保留"),
+            "{how} {late}: {hint}"
+        );
+        assert_eq!(
+            app.history.prev(),
+            Some("manual\nraw"),
+            "原输入在输入历史中"
+        );
         assert_eq!(app.phase, TurnPhase::Idle);
     }
 }
@@ -1756,9 +1811,10 @@ async fn late_receipt_after_unknown_starts_watching_or_shows_the_rejection() {
                 submit_tx
                     .send(error_reply(local_error(LocalErrorKind::Busy, "late busy")))
                     .unwrap();
-                // 迟到的拒绝按后台错误回执显示，不改写用户的新输入，也不开始观察。
+                // 迟到的拒绝按后台错误回执显示，不开始观察；输入区已有草稿，不覆盖，原输入从输入历史找回。
                 let shown = remote.wait(|f| f.dock.contains("late busy")).await;
                 assert_eq!(shown.input, "new draft");
+                assert!(shown.dock.contains("Ctrl+↑"), "{}", shown.dock);
                 assert_eq!(shown.session, None);
                 assert_eq!(count(&peer.seen.borrow(), "watch"), 0);
                 remote.press(KeyCode::Char(' '), KeyModifiers::NONE);

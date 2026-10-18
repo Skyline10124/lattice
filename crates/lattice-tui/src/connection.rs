@@ -25,7 +25,7 @@ fn recovered_notice(turn_id: TurnId) -> String {
 }
 
 fn not_accepted_notice(turn_id: TurnId) -> String {
-    format!("请求 {turn_id} 未被接受：按 TurnId 查询确认后台没有这个请求，输入已保留")
+    format!("请求 {turn_id} 未被接受：按 TurnId 查询确认后台没有这个请求")
 }
 
 fn not_submitted_notice(turn_id: TurnId) -> String {
@@ -55,14 +55,41 @@ pub(crate) fn recovered_status(turn_id: TurnId) -> Status {
     status(NoticeLevel::Info, recovered_notice(turn_id))
 }
 
-pub(crate) fn not_accepted_status(turn_id: TurnId) -> Status {
-    status(NoticeLevel::Error, not_accepted_notice(turn_id))
+/// 确定未被接受的提交，原输入留在哪里。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KeptInput {
+    /// 放回了输入区，或自动发送的一条回到了队首。
+    Restored,
+    /// 输入区已有用户的草稿，不覆盖；原输入在输入历史中。
+    History,
 }
 
-pub(crate) fn rejected_status(turn_id: TurnId, error: &LocalError) -> Status {
+fn history_hint(kept: KeptInput) -> &'static str {
+    match kept {
+        KeptInput::Restored => "",
+        KeptInput::History => "；输入区有草稿，原输入可按 Ctrl+↑ 从输入历史找回",
+    }
+}
+
+/// 实时回执与找回时输入随即归还；退出报告与旧句柄的交接不归还，文案不写输入的去向。
+pub(crate) fn not_accepted_status(turn_id: TurnId, kept: KeptInput) -> Status {
+    let notice = not_accepted_notice(turn_id);
+    let kept = match kept {
+        KeptInput::Restored => "，输入已保留",
+        KeptInput::History => history_hint(kept),
+    };
+    status(NoticeLevel::Error, format!("{notice}{kept}"))
+}
+
+pub(crate) fn rejected_status(turn_id: TurnId, error: &LocalError, kept: KeptInput) -> Status {
     status(
         NoticeLevel::Error,
-        format!("请求 {} 被拒绝或回执失败：{}", turn_id, error.message),
+        format!(
+            "请求 {} 被拒绝或回执失败：{}{}",
+            turn_id,
+            error.message,
+            history_hint(kept)
+        ),
     )
 }
 
@@ -75,8 +102,9 @@ pub(crate) fn submission_unknown_status(turn_id: TurnId, error: Option<&LocalErr
     status(NoticeLevel::Warn, text)
 }
 
-pub(crate) fn not_submitted_status(turn_id: TurnId) -> Status {
-    status(NoticeLevel::Info, not_submitted_notice(turn_id))
+pub(crate) fn not_submitted_status(turn_id: TurnId, kept: KeptInput) -> Status {
+    let notice = not_submitted_notice(turn_id);
+    status(NoticeLevel::Info, format!("{notice}{}", history_hint(kept)))
 }
 
 /// 取消状态与它的诊断是同一件事：合成一条消息，带诊断时按 Error。
@@ -190,9 +218,19 @@ pub(crate) fn closing_status(turn_id: TurnId, summary: TurnSummary) -> Status {
     }
 }
 
+/// app 按已确认的会话头与条目对退出报告所述那一轮已知的情况。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Viewed {
+    /// 结局已显示在对话记录中，不再重述。
+    ClosingShown,
+    /// 这一轮已经结束：最后一步已关闭，或者会话头说明它不在执行（当前位置在别处，或没有 Owner）。
+    Ended,
+    /// 没有更多已知情况。
+    Unknown,
+}
+
 /// 仅格式化共同句柄交付的退出报告；五秒交接及其判定全部属于 LocalTurn。
-/// `closing_shown` 表示这个 Turn 的结局已显示在对话记录中，不再重述。
-pub(crate) fn detach_lines(report: DetachReport, closing_shown: bool) -> Vec<String> {
+pub(crate) fn detach_lines(report: DetachReport, viewed: Viewed) -> Vec<String> {
     let mut lines = Vec::new();
     let identity = format!(
         "session {} turn {}",
@@ -249,16 +287,18 @@ pub(crate) fn detach_lines(report: DetachReport, closing_shown: bool) -> Vec<Str
             "提交结果未知：{identity}；{message}；已知观察与完成结果保持"
         ));
     }
-    // 未关闭且仍有 Owner 时 summary 只说明此刻停下会得到什么，不是结局。
-    let ended = report.summary.as_ref().is_some_and(|summary| {
-        summary.progress.is_closed()
-            || report
-                .head
-                .as_ref()
-                .is_some_and(|head| head.turn_id == report.turn_id && !head.owner)
-    });
+    // 未关闭且仍有 Owner 时 summary 只说明此刻停下会得到什么，不是结局。报告中的会话头可能早于
+    // 这一轮被接受，它停在别的轮不能说明这一轮已结束，这种情况只采用 app 的判定。
+    let ended = viewed == Viewed::Ended
+        || report.summary.as_ref().is_some_and(|summary| {
+            summary.progress.is_closed()
+                || report
+                    .head
+                    .as_ref()
+                    .is_some_and(|head| head.turn_id == report.turn_id && !head.owner)
+        });
     if ended
-        && !closing_shown
+        && viewed != Viewed::ClosingShown
         && let (Some(turn_id), Some(summary)) = (report.turn_id, &report.summary)
     {
         let word = outcome_word(&summary.outcome);

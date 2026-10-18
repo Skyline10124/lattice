@@ -155,6 +155,105 @@ fn own_submission_stays_busy_until_its_head_is_confirmed() {
 }
 
 #[test]
+fn a_new_view_rejudges_the_accepted_turn_it_was_waiting_for() {
+    let mut app = test_app(true);
+    open_view(&mut app, head(2, Some(turn(1)), false), turns(1..=1));
+    app.input.set_text("mine");
+    app.submit().unwrap();
+    let (mine, _) = app.submission_identity().unwrap();
+    app.apply_submission(receipt(mine, accepted(mine)));
+    assert_eq!(app.phase, TurnPhase::Streaming, "会话头指向它之前仍在运行");
+    // 重连时这一轮已不在新窗口里：会话头在别的轮，例如它之后又跑了十轮以上。
+    open_view(&mut app, head(24, Some(turn(12)), false), turns(3..=12));
+    assert_eq!(app.phase, TurnPhase::Idle);
+    // 接受回执晚于新视图开始时，初始内容可能读于接受之前，仍等会话头。
+    app.input.set_text("next");
+    app.submit().unwrap();
+    let (next, _) = app.submission_identity().unwrap();
+    app.begin_view();
+    app.apply_submission(receipt(next, accepted(next)));
+    app.apply_view(LocalUpdate::Head(head(24, Some(turn(12)), false)));
+    for entry in turns(3..=12) {
+        app.apply_view(entry_update(entry));
+    }
+    assert_eq!(app.phase, TurnPhase::Streaming);
+}
+
+#[test]
+fn steps_after_an_unaccepted_user_block_get_their_own_assistant_title() {
+    let mut app = test_app(true);
+    open_view(&mut app, head(2, Some(turn(1)), false), turns(1..=1));
+    // 其他客户端的一轮已开始、会话头尚未确认时，本客户端照常提交，随后被拒。
+    let other = turn(2);
+    app.apply_view(LocalUpdate::Head(head(4, Some(other), true)));
+    app.apply_view(entry_update(user(3, other, 2, "other prompt")));
+    app.input.set_text("mine");
+    app.submit().unwrap();
+    let (mine, _) = app.submission_identity().unwrap();
+    app.apply_view(entry_update(step(4, other, 0).text("other answer").entry()));
+    app.apply_submission(receipt(
+        mine,
+        SubmissionResult::Rejected {
+            error: local_error(LocalErrorKind::Busy, "session is busy"),
+        },
+    ));
+    let shown = transcript(&app);
+    let lines: Vec<&str> = shown.lines().collect();
+    let titled = lines[row(&app, "mine")..row(&app, "other answer")]
+        .iter()
+        .any(|line| line.starts_with("── unused ") && line.ends_with("#2 ──"));
+    assert!(
+        titled,
+        "接在未被接受的 USER 块之后的步骤另起助手标题线：{shown}"
+    );
+}
+
+#[test]
+fn recovery_not_found_is_an_error_and_returns_the_input() {
+    for keep_draft in [false, true] {
+        let mut app = test_app(false);
+        app.input.set_text("first");
+        app.submit().unwrap();
+        let (first, _) = app.submission_identity().unwrap();
+        app.apply_submission(receipt(first, SubmissionResult::Unknown { error: None }));
+        app.input.set_text("second");
+        app.submit().unwrap();
+        let (second, _) = app.submission_identity().unwrap();
+        app.apply_submission(receipt(
+            second,
+            SubmissionResult::Rejected {
+                error: LocalError {
+                    conflict: Some(lattice_api::local::ConflictReason::SessionExists),
+                    ..local_error(LocalErrorKind::Conflict, "session exists")
+                },
+            },
+        ));
+        assert_eq!(app.recover_request.take(), Some(first));
+        // 第二条被拒后已放回输入区；用户清空时第一条才放回。
+        assert_eq!(app.input.text(), "second");
+        if !keep_draft {
+            app.input.clear();
+        }
+        app.apply_recovery(first, Err(local_error(LocalErrorKind::NotFound, "no turn")));
+        let error = app.dock.message().unwrap();
+        assert_eq!(error.level, NoticeLevel::Error);
+        assert!(
+            error.text.contains("未被接受") && error.text.contains(&first.to_string()),
+            "{}",
+            error.text
+        );
+        if keep_draft {
+            assert_eq!(app.input.text(), "second", "不覆盖输入区已有的内容");
+            assert!(error.text.contains("Ctrl+↑"), "{}", error.text);
+        } else {
+            assert_eq!(app.input.text(), "first", "提交确定未被接受，输入保留");
+            assert!(error.text.contains("输入已保留"), "{}", error.text);
+        }
+        assert_eq!(app.phase, TurnPhase::Idle);
+    }
+}
+
+#[test]
 fn new_view_and_path_replacement_discard_entries_but_keep_statuses_and_unaccepted_user() {
     let mut app = test_app(true);
     let (a, b) = (turn(1), turn(2));
@@ -253,21 +352,37 @@ fn older_turns_insert_before_the_earliest_turn_and_keep_the_view() {
 }
 
 #[test]
-fn older_turns_keep_the_banner_and_a_leading_status_in_view() {
+fn older_turns_keep_the_view_on_the_turns_below_the_banner_and_a_leading_status() {
     let mut app = test_app(true);
     app.show_banner();
     app.push_status(status(NoticeLevel::Info, "leading status"));
     let request = scrolled_to_top(&mut app);
-    let top = top_line(&mut app);
+    assert_eq!(app.focus, Focus::Dock);
+    // 产品中翻到顶部时第 0 行总是横幅；插入点在横幅与前置状态消息之后。
+    assert!(top_line(&mut app).contains("LATTICE"));
+    let below = row(&app, "leading status") + 1;
+    let screen = |app: &mut App| {
+        app.prepare_transcript();
+        let height = app.transcript_height(crate::view::transcript_lines(app, 80).len());
+        crate::view::transcript_lines(app, 80)
+            .iter()
+            .skip(app.viewport.scroll())
+            .take(height)
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+    };
+    let before = screen(&mut app);
+    assert!(below < before.len(), "第 3 轮的开头在屏幕上：{before:#?}");
     app.apply_older(
         request,
         Ok(LocalHistory {
             entries: turns(1..=2),
         }),
     );
-    // 横幅与前置状态消息在插入点之前，视图不因插入而移动。
-    assert_eq!(top_line(&mut app), top);
+    // 原来看到的第 3 轮仍在屏幕上同一位置；横幅仍在对话记录最上方，翻到顶部才看得到。
+    assert_eq!(screen(&mut app)[below..], before[below..]);
     assert!(row(&app, "leading status") < row(&app, "prompt-1"));
+    assert!(row(&app, "LATTICE") < row(&app, "leading status"));
 }
 
 #[test]
@@ -823,7 +938,7 @@ fn detach_lines_describe_receipts_cancel_and_outcome_in_words() {
             failed.clone(),
             true,
         ),
-        false,
+        Viewed::Unknown,
     );
     let text = lines.join("\n");
     for marker in [
@@ -838,7 +953,7 @@ fn detach_lines_describe_receipts_cancel_and_outcome_in_words() {
     assert!(lines.iter().all(|line| !line.contains("Some(")), "{text}");
     // 已显示的结局不重述；未关闭且仍有 Owner 时 summary 不是结局。
     assert!(
-        !detach_lines(report(None, failed, true), true)
+        !detach_lines(report(None, failed, true), Viewed::ClosingShown)
             .join("\n")
             .contains("失败")
     );
@@ -856,7 +971,7 @@ fn detach_lines_describe_receipts_cancel_and_outcome_in_words() {
                 cancel_error: None,
                 ..report(None, None, true)
             },
-            false,
+            Viewed::Unknown,
         )
         .join("\n")
     };
@@ -873,12 +988,29 @@ fn detach_lines_describe_receipts_cancel_and_outcome_in_words() {
         ConversationEntry::UserMessage { .. } => unreachable!(),
     };
     assert!(
-        !detach_lines(report(None, running.clone(), true), false)
+        !detach_lines(report(None, running.clone(), true), Viewed::Unknown)
             .join("\n")
             .contains(&format!("Turn {id}"))
     );
+    // 会话头在别的轮：app 按已确认的会话头与条目判定这一轮已不在执行时照常给出结局；
+    // 只凭报告中的会话头不算，它可能早于这一轮被接受。
+    let elsewhere = || DetachReport {
+        head: Some(head(4, Some(turn(10)), true)),
+        ..report(None, running.clone(), true)
+    };
+    let outcome = format!("Turn {id} 失败");
     assert!(
-        detach_lines(report(None, running, false), false)
+        detach_lines(elsewhere(), Viewed::Ended)
+            .join("\n")
+            .contains(&outcome)
+    );
+    assert!(
+        !detach_lines(elsewhere(), Viewed::Unknown)
+            .join("\n")
+            .contains(&outcome)
+    );
+    assert!(
+        detach_lines(report(None, running, false), Viewed::Unknown)
             .join("\n")
             .contains(&format!("Turn {id} 失败"))
     );

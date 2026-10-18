@@ -286,6 +286,8 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
     let mut assistant_header = false;
     let mut agent: Option<&str> = None;
     let mut turn = None;
+    // 已经过的各轮的序号与 agent，供被别的 USER 块隔开的步骤重画标题线。
+    let mut turns = std::collections::HashMap::new();
     if let Some((id, banner)) = &app.banner {
         for text in banner {
             lines.extend(body(text, content_w, role_style(Role::DimMeta)));
@@ -304,11 +306,25 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
             } => {
                 turn = Some((*turn_id, *ordinal));
                 agent = Some(name);
+                turns.insert(*turn_id, (*ordinal, name.as_str()));
             }
-            // 助手段标题线在这一轮第一个 Step 条目之前；其后的步骤沿用它。
+            // 助手段标题线在这一轮第一个 Step 条目之前；其后的步骤沿用它。新条目接在末尾，
+            // 这一轮的步骤可能接在别的 USER 块（例如本地未被接受的提交）之后，这时另起标题线，
+            // 不显得挂在那个 USER 之下。
             Block::Step { key, .. } => {
                 if turn.is_some_and(|(id, _)| id != key.turn_id) {
                     turn = None;
+                    if let Some(&(ordinal, name)) = turns.get(&key.turn_id) {
+                        turn = Some((key.turn_id, ordinal));
+                        agent = Some(name);
+                        ensure_assistant_header(
+                            &mut lines,
+                            &mut assistant_header,
+                            agent,
+                            turn.map(|(_, n)| n),
+                            content_w,
+                        );
+                    }
                 } else if key.ordinal == 0 {
                     ensure_assistant_header(
                         &mut lines,

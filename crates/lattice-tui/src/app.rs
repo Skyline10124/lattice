@@ -8,10 +8,10 @@ use std::time::{Duration, Instant};
 use crate::TuiOptions;
 use crate::blocks::{BlockId, BlockList, IdentifiedBlock};
 use crate::connection::{
-    cancellation_status, detach_lines, discarded_comments_status, execution_diagnostic_status,
-    handoff_status, not_accepted_status, not_submitted_status, observation_lost_status,
-    older_turns_unavailable_status, orphaned_turn_status, recovered_status, rejected_status,
-    submission_unknown_status,
+    KeptInput, Viewed, cancellation_status, detach_lines, discarded_comments_status,
+    execution_diagnostic_status, handoff_status, not_accepted_status, not_submitted_status,
+    observation_lost_status, older_turns_unavailable_status, orphaned_turn_status,
+    recovered_status, rejected_status, submission_unknown_status,
 };
 use crate::input::{CTRL_C_WINDOW, History, InputBuffer, KeyAction, resolve_key};
 use crate::session::{Generating, SessionContext};
@@ -27,9 +27,10 @@ use crossterm::event::{
 use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use lattice_api::local::{
     CancelStatus, ConnectionStatus, ConversationEntry, DetachReport, FrozenConfiguration,
-    LocalClient, LocalError, LocalHistory, LocalTurn, LocalUpdate, Node, NodeId, NoticeLevel,
-    PublicTurnOutcome, SessionHead, SessionId, StepKey, SubmissionReceipt, SubmissionResult,
-    SubmissionUpdate, SubmitSession, TextSegment, TextUpdate, TurnId, TurnRequest, ViewUpdate,
+    LocalClient, LocalError, LocalErrorKind, LocalHistory, LocalTurn, LocalUpdate, Node, NodeId,
+    NoticeLevel, PublicTurnOutcome, SessionHead, SessionId, StepKey, SubmissionReceipt,
+    SubmissionResult, SubmissionUpdate, SubmitSession, TextSegment, TextUpdate, TurnId,
+    TurnRequest, ViewUpdate,
 };
 
 const FRAME: Duration = Duration::from_millis(33);
@@ -168,6 +169,12 @@ pub(crate) struct App {
     own_turn: Option<TurnId>,
     /// 已被接受、会话头尚未指向它的那一轮：其间仍按正在运行处理。
     awaiting_head: Option<TurnId>,
+    /// 新视图开始时已在等会话头的那一轮。它的接受先于这次 `watch`，新视图的初始内容读于接受之后；
+    /// 初始条目给完仍没有到达它，它已不在执行，不再等。
+    awaiting_before_view: Option<TurnId>,
+    /// 结果未知的手动提交的原文，留到结果确定：之后确定未被接受时与直接被拒一样归还输入。
+    /// 自动发送的一条由排队保留。
+    unknown_submission: Option<(TurnId, crate::queue::Outgoing)>,
     /// 新会话首次提交时生成的 SessionId；确认被接受前之后的提交沿用它与 `New`。
     new_session: Option<SessionId>,
     /// 新会话下结果未知的提交；后台答复会话已存在时按它找回。
@@ -223,6 +230,8 @@ impl App {
             submitted: None,
             own_turn: None,
             awaiting_head: None,
+            awaiting_before_view: None,
+            unknown_submission: None,
             new_session: None,
             unconfirmed: None,
             shown_receipts: Default::default(),
@@ -506,7 +515,7 @@ impl App {
                     }
                 }
                 Some(SubmissionResult::Unknown { .. }) | None => {
-                    if self.queue.release(id) {
+                    if self.queue.set_unknown(id) {
                         self.queue.pause();
                     }
                 }
@@ -520,8 +529,12 @@ impl App {
         }) {
             report.submission = None;
         }
-        let closing_shown = report.turn_id.is_some_and(|id| self.summary_shown(id));
-        for line in detach_lines(report, closing_shown) {
+        let viewed = if report.turn_id.is_some_and(|id| self.summary_shown(id)) {
+            Viewed::ClosingShown
+        } else {
+            Viewed::Unknown
+        };
+        for line in detach_lines(report, viewed) {
             self.notice_once(handoff_status(&line));
         }
         self.refresh_phase();
@@ -544,6 +557,12 @@ impl App {
             // 起始会话头当前位置的条目已经到达，初始条目给完；草稿与排队评论的锚点按新路径核对。
             self.initial = false;
             self.discard_missing_comments();
+            if let Some(turn) = self.awaiting_before_view.take()
+                && self.awaiting_head == Some(turn)
+                && !self.head_reached(turn)
+            {
+                self.awaiting_head = None;
+            }
         }
         self.refresh_phase();
     }
@@ -604,28 +623,26 @@ impl App {
             }
             SubmissionResult::Rejected { error } => {
                 self.session_exists(&error);
-                self.reject_submission(turn_id);
-                self.push_status(rejected_status(turn_id, &error));
+                let kept = self.reject_submission(turn_id);
+                self.push_status(rejected_status(turn_id, &error, kept));
             }
             // 不来自查询的未被接受是取消发生在请求写出之前，这次提交没有发出。
             SubmissionResult::NotAccepted => {
-                self.reject_submission(turn_id);
+                let kept = self.reject_submission(turn_id);
                 self.push_status(if receipt.recovered {
-                    not_accepted_status(turn_id)
+                    not_accepted_status(turn_id, kept)
                 } else {
-                    not_submitted_status(turn_id)
+                    not_submitted_status(turn_id, kept)
                 });
             }
             SubmissionResult::Unknown { error } => {
-                // 不还原已提交的输入，避免重复提交；队列暂停到用户决定。
+                // 不还原已提交的输入，避免重复提交；队列暂停到用户决定。原文留到结果确定。
                 self.queue.pause();
-                self.queue.release(turn_id);
-                if self
-                    .submitted
-                    .as_ref()
-                    .is_some_and(|(id, _)| *id == turn_id)
+                let automatic = self.queue.set_unknown(turn_id);
+                if let Some(submitted) = self.submitted.take_if(|(id, _)| *id == turn_id)
+                    && !automatic
                 {
-                    self.submitted = None;
+                    self.unknown_submission = Some(submitted);
                 }
                 if self.ctx.session_id.is_none() {
                     self.unconfirmed = Some(turn_id);
@@ -685,6 +702,7 @@ impl App {
     /// 应用循环开始了新的视图：它的首条会话头之后是初始条目。
     pub(crate) fn begin_view(&mut self) {
         self.view_starting = true;
+        self.awaiting_before_view = self.awaiting_head;
     }
 
     fn last_summary(&self, turn: TurnId) -> Option<&lattice_api::local::TurnSummary> {
@@ -935,25 +953,34 @@ impl App {
         }
     }
 
-    /// 自动发送的一条放回队首且不进输入区；手动提交归还输入区。两者都回到空闲。
-    fn reject_submission(&mut self, turn_id: TurnId) {
+    /// 自动发送的一条放回队首且不进输入区；手动提交的文字在输入区为空时放回，
+    /// 输入区已有用户的草稿时不覆盖，原文留在提交时记下的输入历史中。两者都回到空闲。
+    /// 结果未知之后才确定未被接受的提交同样处理。只归还本客户端的草稿，
+    /// 不撤销已知的执行、接管或完成显示。
+    fn reject_submission(&mut self, turn_id: TurnId) -> KeptInput {
         let automatic = self.queue.reject(turn_id);
+        // 自动发送的一条也记在 submitted 中，原文以排队中的为准。
         let manual = self
             .submitted
-            .as_ref()
-            .is_some_and(|(id, _)| *id == turn_id);
-        if automatic || manual {
-            self.mark_rejected_comments(turn_id);
+            .take_if(|(id, _)| *id == turn_id)
+            .or_else(|| self.unknown_submission.take_if(|(id, _)| *id == turn_id))
+            .map(|(_, message)| message);
+        if !automatic && manual.is_none() {
+            return KeptInput::Restored;
         }
-        if manual {
-            if automatic {
-                self.submitted = None;
+        self.mark_rejected_comments(turn_id);
+        let mut kept = KeptInput::Restored;
+        // 评论不进输入历史，总是恢复为草稿。
+        if let Some(message) = manual.filter(|_| !automatic) {
+            let text = self.queue.restore(message, &mut self.blocks);
+            if self.input.is_empty() {
+                self.input.set_text(&text);
+            } else if !text.trim().is_empty() {
+                kept = KeptInput::History;
             }
-            self.restore_submission();
         }
-        if automatic || manual {
-            self.discard_missing_comments();
-        }
+        self.discard_missing_comments();
+        kept
     }
 
     fn mark_rejected_comments(&mut self, turn_id: TurnId) {
@@ -966,15 +993,6 @@ impl App {
                 entry.block = Block::RejectedUser(message.clone());
             }
         }
-    }
-
-    /// 只归还本客户端的草稿，不撤销已知的执行、接管或完成显示。
-    fn restore_submission(&mut self) {
-        if let Some((_, prompt)) = self.submitted.take() {
-            let text = self.queue.restore(prompt, &mut self.blocks);
-            self.input.set_text(&text);
-        }
-        self.refresh_phase();
     }
 
     /// 与绘制路径使用同一内容宽度及 Dock 高度，statusline 始终占一行；
@@ -1288,10 +1306,22 @@ impl App {
             return;
         };
         let width = frame_layout(self.term_width, self.term_height).content_w;
-        // 视图顶部那一行所属的块，及它在这个块自己的各行中的倒数序号：块前面有了内容时开头会
-        // 多出分隔空行，从末行数起不受影响；块内穿插的内嵌评论属于别的块，不计入。插入后按它恢复视图。
+        // 横幅与插入点之前的状态消息不随插入移动；翻到顶部时第 0 行总是横幅，所以以屏幕上
+        // 第一行插入点之后的内容为准。记下这一行、它所属的块，及它在这个块自己的各行中的倒数序号：
+        // 块前面有了内容时开头会多出分隔空行，从末行数起不受影响；块内穿插的内嵌评论属于别的块，
+        // 不计入。插入后按它恢复视图。
         let scroll = self.viewport.scroll();
-        let top = block_rows_from_end(&render_transcript(self, width), scroll);
+        let transcript = render_transcript(self, width);
+        let visible = scroll.saturating_add(self.transcript_height(transcript.lines.len()));
+        let fixed: HashSet<BlockId> = self
+            .banner
+            .iter()
+            .map(|(id, _)| *id)
+            .chain(self.blocks.entries[..at].iter().map(|entry| entry.id))
+            .collect();
+        let top = (scroll..visible.min(transcript.owners.len()))
+            .find(|row| !fixed.contains(&transcript.owners[*row].id))
+            .and_then(|row| Some((row, block_rows_from_end(&transcript, row)?)));
         for entry in history.entries {
             let node = entry.node();
             let Some(turn) = entry_turn(&entry) else {
@@ -1310,10 +1340,10 @@ impl App {
             at = self.blocks.replace(at..at, blocks).end;
         }
         // 浏览光标由 prepare_transcript 按所在块重新定位并保持屏幕行；焦点在 Dock 时移动视图。
-        // 只补偿插在顶部那一块之前的行：横幅或前置状态消息在插入点之前时视图不动。
+        // 屏幕上只有横幅与前置状态消息时，插入的行都在屏幕之下，视图不动。
         if matches!(self.focus, Focus::Dock)
             && !self.viewport.following()
-            && let Some((id, rest)) = top
+            && let Some((old_row, (id, rest))) = top
         {
             let rows = block_rows(&render_transcript(self, width), id);
             if let Some(&row) = rows
@@ -1321,13 +1351,14 @@ impl App {
                 .checked_sub(rest)
                 .and_then(|index| rows.get(index))
             {
-                self.viewport.shift(row.saturating_sub(scroll));
+                self.viewport.shift(row.saturating_sub(old_row));
             }
         }
         self.settle(false);
     }
 
-    /// 按 TurnId 查到上一次提交已被接受：会话已经建立，改为 `Existing` 并开始观察。
+    /// 按 TurnId 找回新会话的上一次提交。已被接受时会话已经建立，改为 `Existing` 并开始观察；
+    /// 查无此请求时它确定未被接受。
     pub(crate) fn apply_recovery(
         &mut self,
         turn_id: TurnId,
@@ -1337,6 +1368,11 @@ impl App {
             Ok(turn) => {
                 self.accept_session(turn.session_id);
                 self.push_status(recovered_status(turn_id));
+            }
+            // 按 TurnId 查询为 NotFound：提交确定未被接受，输入保留。
+            Err(error) if error.kind == LocalErrorKind::NotFound => {
+                let kept = self.reject_submission(turn_id);
+                self.push_status(not_accepted_status(turn_id, kept));
             }
             Err(error) => self.push_status(submission_unknown_status(turn_id, Some(&error))),
         }
@@ -1454,7 +1490,13 @@ pub(crate) async fn run_app(
         exit.handoffs.push(turn.detach().boxed());
     }
     while let Some(report) = exit.handoffs.next().await {
-        for line in detach_lines(report, false) {
+        // 对话记录已不在屏幕上，结局照常重述。
+        let viewed = if report.turn_id.is_some_and(|id| app.turn_ended(id)) {
+            Viewed::Ended
+        } else {
+            Viewed::Unknown
+        };
+        for line in detach_lines(report, viewed) {
             eprintln!("{line}");
         }
     }
