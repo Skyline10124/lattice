@@ -813,7 +813,7 @@ async fn taken_cancel_does_not_wait_for_view_or_retry_and_drop_does_not_cancel()
             .is_err()
     );
 }
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn cancellation_timeout_keeps_error_and_identity_in_detach() {
     let peer = Peer::new();
     let id = new_turn_id();
@@ -821,7 +821,9 @@ async fn cancellation_timeout_keeps_error_and_identity_in_detach() {
     turn.cancel();
     let _cancel = cancellation(&peer, id).await;
     let task = tokio::spawn(turn.detach());
+    tokio::time::pause();
     tokio::time::advance(Duration::from_secs(6)).await;
+    tokio::time::resume();
     let report = within(task).await.unwrap();
     assert_eq!(report.turn_id, Some(id));
     assert_eq!(report.cancel, Some(CancelStatus::Unknown));
@@ -1086,7 +1088,7 @@ async fn a_new_cancel_intent_does_not_inherit_the_previous_in_flight_receipt() {
     assert_eq!(report.cancel_error.unwrap().message, "new intent failed");
     assert_ne!(report.cancel, Some(CancelStatus::Taken));
 }
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn late_definitive_receipts_notify_submission_only_but_keep_one_receipt_with_a_watch() {
     for own_view in [false, true] {
         for outcome in ["accepted", "rejected", "not_accepted"] {
@@ -1109,7 +1111,9 @@ async fn late_definitive_receipts_notify_submission_only_but_keep_one_receipt_wi
             let mut cancel = cancellation(&peer, id).await;
             cancel.reply(Response::Cancelled { owned: false }).await;
             cancel_status(&mut turn, CancelStatus::NotTaken).await;
+            tokio::time::pause();
             tokio::time::advance(Duration::from_secs(5)).await;
+            tokio::time::resume();
             let unknown = receipt(&mut turn).await;
             assert!(matches!(unknown.result, SubmissionResult::Unknown { .. }));
             assert!(!unknown.recovered);
@@ -1188,7 +1192,7 @@ async fn late_definitive_receipts_notify_submission_only_but_keep_one_receipt_wi
         }
     }
 }
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn cancel_handoff_preserves_late_backend_rejection_separately_from_transport() {
     for transport in [false, true] {
         let peer = Peer::new();
@@ -1198,7 +1202,9 @@ async fn cancel_handoff_preserves_late_backend_rejection_separately_from_transpo
         let mut cancel = cancellation(&peer, id).await;
         cancel.reply(Response::Cancelled { owned: false }).await;
         cancel_status(&mut turn, CancelStatus::NotTaken).await;
+        tokio::time::pause();
         tokio::time::advance(Duration::from_secs(5)).await;
+        tokio::time::resume();
         assert!(matches!(
             receipt(&mut turn).await.result,
             SubmissionResult::Unknown { .. }
