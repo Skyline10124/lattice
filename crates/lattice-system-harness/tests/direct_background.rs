@@ -564,7 +564,11 @@ fn busy_cancel_and_stop_do_not_serialize_distinct_sessions() {
         watcher.until(
             deadline,
             "the cancelled turn's Owner to be removed",
-            |view| view.head.as_ref().is_some_and(|head| !head.owner),
+            |view| {
+                view.head.as_ref().is_some_and(|head| {
+                    !head.owner && head.turn_id.as_deref() == Some(first_turn.as_str())
+                })
+            },
         );
         // 另一个会话的那一轮不受影响；这个会话已没有正在执行的一轮。
         assert_ne!(
