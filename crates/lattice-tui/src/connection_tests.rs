@@ -254,6 +254,46 @@ fn recovery_not_found_is_an_error_and_returns_the_input() {
 }
 
 #[test]
+fn unknown_submission_is_dropped_once_the_result_is_definite() {
+    let handoff = |id, result| DetachReport {
+        session_id: sid(),
+        turn_id: Some(id),
+        submission: Some(SubmissionReceipt {
+            turn_id: id,
+            result,
+            recovered: false,
+        }),
+        submission_diagnostic: None,
+        cancel: None,
+        cancel_error: None,
+        head: None,
+        summary: None,
+    };
+    for how in 0..5 {
+        let mut app = test_app(true);
+        open_view(&mut app, head(2, Some(turn(1)), false), turns(1..=1));
+        app.input.set_text("mine");
+        app.submit().unwrap();
+        let (id, _) = app.submission_identity().unwrap();
+        app.apply_submission(receipt(id, SubmissionResult::Unknown { error: None }));
+        assert!(app.unknown_submission.is_some());
+        match how {
+            0 => app.apply_submission(receipt(id, accepted(id))),
+            1 => app.apply_view(entry_update(user(3, id, 2, "mine"))),
+            2 => app.apply_recovery(id, Ok(turn_detail(id))),
+            3 => app.apply_handoff(handoff(id, accepted(id))),
+            _ => app.apply_handoff(handoff(
+                id,
+                SubmissionResult::Rejected {
+                    error: local_error(LocalErrorKind::Busy, "busy"),
+                },
+            )),
+        }
+        assert!(app.unknown_submission.is_none(), "{how}");
+    }
+}
+
+#[test]
 fn new_view_and_path_replacement_discard_entries_but_keep_statuses_and_unaccepted_user() {
     let mut app = test_app(true);
     let (a, b) = (turn(1), turn(2));
@@ -1009,9 +1049,17 @@ fn detach_lines_describe_receipts_cancel_and_outcome_in_words() {
             .join("\n")
             .contains(&outcome)
     );
+    // 收到无 Owner 的会话头、同一次推送里的最终条目未到就退出：报告中的 summary 仍是
+    // 未关闭时的投影，不是结局，只有 app 确认结束才给出。
+    let headless = || report(None, running.clone(), false);
     assert!(
-        detach_lines(report(None, running, false), Viewed::Unknown)
+        !detach_lines(headless(), Viewed::Unknown)
             .join("\n")
-            .contains(&format!("Turn {id} 失败"))
+            .contains(&outcome)
+    );
+    assert!(
+        detach_lines(headless(), Viewed::Ended)
+            .join("\n")
+            .contains(&outcome)
     );
 }

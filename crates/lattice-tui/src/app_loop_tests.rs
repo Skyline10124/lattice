@@ -725,7 +725,8 @@ fn accepting_and_unknown_receipts_release_capacity_without_requeue() {
                 "new queued input"
             );
         } else {
-            // 未知之后迟到的确定拒绝与直接被拒一样放回队首并暂停，不碰用户的新草稿。
+            // 结果未知时这条已让出名额，迟到的确定拒绝不放回队首，免得队列超过上限；
+            // 只给状态消息，原输入从输入历史找回。不碰用户的新草稿。
             app.apply_submission(receipt(
                 id,
                 SubmissionResult::Rejected {
@@ -733,12 +734,18 @@ fn accepting_and_unknown_receipts_release_capacity_without_requeue() {
                 },
             ));
             assert_eq!(app.input.text(), "new queued input");
-            assert_eq!(
-                app.queue.messages().next().map(|m| m.text.as_str()),
-                Some(" q0\nraw ")
+            assert_eq!(app.queue.messages().count(), 4);
+            let error = app.dock.message().unwrap();
+            assert!(
+                error.text.contains("late") && error.text.contains("Ctrl+↑"),
+                "{}",
+                error.text
             );
-            assert_eq!(app.queue.messages().count(), 5);
-            assert!(app.queue.is_paused());
+            assert_eq!(
+                app.history.prev(),
+                Some("q0\nraw"),
+                "自动发送时已记进输入历史"
+            );
         }
     }
 }

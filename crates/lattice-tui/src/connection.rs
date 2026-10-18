@@ -60,14 +60,14 @@ pub(crate) fn recovered_status(turn_id: TurnId) -> Status {
 pub(crate) enum KeptInput {
     /// 放回了输入区，或自动发送的一条回到了队首。
     Restored,
-    /// 输入区已有用户的草稿，不覆盖；原输入在输入历史中。
+    /// 没有放回：输入区已有用户的草稿，或结果未知的自动发送不再放回队首；原输入在输入历史中。
     History,
 }
 
 fn history_hint(kept: KeptInput) -> &'static str {
     match kept {
         KeptInput::Restored => "",
-        KeptInput::History => "；输入区有草稿，原输入可按 Ctrl+↑ 从输入历史找回",
+        KeptInput::History => "；原输入未放回，可按 Ctrl+↑ 从输入历史找回",
     }
 }
 
@@ -287,16 +287,14 @@ pub(crate) fn detach_lines(report: DetachReport, viewed: Viewed) -> Vec<String> 
             "提交结果未知：{identity}；{message}；已知观察与完成结果保持"
         ));
     }
-    // 未关闭且仍有 Owner 时 summary 只说明此刻停下会得到什么，不是结局。报告中的会话头可能早于
-    // 这一轮被接受，它停在别的轮不能说明这一轮已结束，这种情况只采用 app 的判定。
+    // 未关闭时 summary 只说明执行者此刻消失会得到什么，不是结局。是否已结束只采用 app 按已确认的
+    // 会话头与条目作出的判定：报告中的会话头可能早于这一轮被接受，也可能还没等到同一次推送里的
+    // 当前位置条目。
     let ended = viewed == Viewed::Ended
-        || report.summary.as_ref().is_some_and(|summary| {
-            summary.progress.is_closed()
-                || report
-                    .head
-                    .as_ref()
-                    .is_some_and(|head| head.turn_id == report.turn_id && !head.owner)
-        });
+        || report
+            .summary
+            .as_ref()
+            .is_some_and(|summary| summary.progress.is_closed());
     if ended
         && viewed != Viewed::ClosingShown
         && let (Some(turn_id), Some(summary)) = (report.turn_id, &report.summary)

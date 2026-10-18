@@ -59,8 +59,6 @@ pub(crate) struct Queue {
     messages: VecDeque<QueuedMessage>,
     // 已离开可编辑列表，收到接受或未知回执前仍占名额。
     awaiting: Option<(lattice_api::local::TurnId, QueuedMessage)>,
-    // 结果未知、已让出名额的一条，留到结果确定：之后确定未被接受时照常放回队首。
-    unknown: Option<(lattice_api::local::TurnId, QueuedMessage)>,
     paused: bool,
     drafts: Vec<Draft>,
     editor: Option<Editor>,
@@ -97,23 +95,11 @@ impl Queue {
             false
         }
     }
-    /// 提交结果未知：让出名额，原文留到结果确定。
-    pub(crate) fn set_unknown(&mut self, turn: lattice_api::local::TurnId) -> bool {
-        if self.awaiting.as_ref().is_some_and(|(id, _)| *id == turn) {
-            self.unknown = self.awaiting.take();
-            true
-        } else {
-            false
-        }
-    }
     pub(crate) fn reject(&mut self, turn: lattice_api::local::TurnId) -> bool {
-        let Some(slot) = [&mut self.awaiting, &mut self.unknown]
-            .into_iter()
-            .find(|slot| slot.as_ref().is_some_and(|(id, _)| *id == turn))
-        else {
+        if self.awaiting.as_ref().is_none_or(|(id, _)| *id != turn) {
             return false;
-        };
-        if let Some((_, message)) = slot.take() {
+        }
+        if let Some((_, message)) = self.awaiting.take() {
             if let Some(Editor {
                 target: EditTarget::Queued { position, .. },
                 ..

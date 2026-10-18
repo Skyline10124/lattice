@@ -97,6 +97,14 @@ pub(crate) enum TurnPhase {
     Cancelling,
 }
 
+/// 结果未知的本客户端提交；确定未被接受时据此决定原输入的去向。
+enum UnknownSubmission {
+    /// 手动提交的原文：与直接被拒一样，输入区为空时放回。
+    Manual(crate::queue::Outgoing),
+    /// 自动发送的一条已让出排队名额，不再放回队首，免得队列超过上限；原文只在输入历史中。
+    Automatic,
+}
+
 /// 首次 Ctrl+C 取消的那一轮。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CancelTarget {
@@ -172,9 +180,8 @@ pub(crate) struct App {
     /// 新视图开始时已在等会话头的那一轮。它的接受先于这次 `watch`，新视图的初始内容读于接受之后；
     /// 初始条目给完仍没有到达它，它已不在执行，不再等。
     awaiting_before_view: Option<TurnId>,
-    /// 结果未知的手动提交的原文，留到结果确定：之后确定未被接受时与直接被拒一样归还输入。
-    /// 自动发送的一条由排队保留。
-    unknown_submission: Option<(TurnId, crate::queue::Outgoing)>,
+    /// 结果未知的那次提交，按 TurnId 留到收到它的确定结果为止。
+    unknown_submission: Option<(TurnId, UnknownSubmission)>,
     /// 新会话首次提交时生成的 SessionId；确认被接受前之后的提交沿用它与 `New`。
     new_session: Option<SessionId>,
     /// 新会话下结果未知的提交；后台答复会话已存在时按它找回。
@@ -506,16 +513,19 @@ impl App {
             match report.submission.as_ref().map(|receipt| &receipt.result) {
                 Some(SubmissionResult::Accepted { turn }) => {
                     self.queue.release(id);
+                    self.resolve_unknown(id);
                     self.accept_session(turn.session_id);
                 }
+                // 交接报告只生成状态消息，不归还输入。
                 Some(SubmissionResult::Rejected { .. } | SubmissionResult::NotAccepted) => {
+                    self.resolve_unknown(id);
                     if self.queue.reject(id) {
                         self.mark_rejected_comments(id);
                         self.discard_missing_comments();
                     }
                 }
                 Some(SubmissionResult::Unknown { .. }) | None => {
-                    if self.queue.set_unknown(id) {
+                    if self.queue.release(id) {
                         self.queue.pause();
                     }
                 }
@@ -602,6 +612,7 @@ impl App {
         match receipt.result {
             SubmissionResult::Accepted { turn } => {
                 self.queue.release(turn_id);
+                self.resolve_unknown(turn_id);
                 if self
                     .submitted
                     .as_ref()
@@ -636,13 +647,16 @@ impl App {
                 });
             }
             SubmissionResult::Unknown { error } => {
-                // 不还原已提交的输入，避免重复提交；队列暂停到用户决定。原文留到结果确定。
+                // 不还原已提交的输入，避免重复提交；队列暂停到用户决定。
                 self.queue.pause();
-                let automatic = self.queue.set_unknown(turn_id);
-                if let Some(submitted) = self.submitted.take_if(|(id, _)| *id == turn_id)
-                    && !automatic
-                {
-                    self.unknown_submission = Some(submitted);
+                let automatic = self.queue.release(turn_id);
+                if let Some((_, message)) = self.submitted.take_if(|(id, _)| *id == turn_id) {
+                    let held = if automatic {
+                        UnknownSubmission::Automatic
+                    } else {
+                        UnknownSubmission::Manual(message)
+                    };
+                    self.unknown_submission = Some((turn_id, held));
                 }
                 if self.ctx.session_id.is_none() {
                     self.unconfirmed = Some(turn_id);
@@ -959,19 +973,26 @@ impl App {
     /// 不撤销已知的执行、接管或完成显示。
     fn reject_submission(&mut self, turn_id: TurnId) -> KeptInput {
         let automatic = self.queue.reject(turn_id);
-        // 自动发送的一条也记在 submitted 中，原文以排队中的为准。
-        let manual = self
-            .submitted
-            .take_if(|(id, _)| *id == turn_id)
-            .or_else(|| self.unknown_submission.take_if(|(id, _)| *id == turn_id))
-            .map(|(_, message)| message);
-        if !automatic && manual.is_none() {
-            return KeptInput::Restored;
+        let mut kept = KeptInput::Restored;
+        let manual = match self.unknown_submission.take_if(|(id, _)| *id == turn_id) {
+            Some((_, UnknownSubmission::Manual(message))) => Some(message),
+            Some((_, UnknownSubmission::Automatic)) => {
+                kept = KeptInput::History;
+                None
+            }
+            // 自动发送的一条也记在 submitted 中，原文以排队中的为准。
+            None => self
+                .submitted
+                .take_if(|(id, _)| *id == turn_id)
+                .map(|(_, message)| message)
+                .filter(|_| !automatic),
+        };
+        if !automatic && manual.is_none() && kept == KeptInput::Restored {
+            return kept;
         }
         self.mark_rejected_comments(turn_id);
-        let mut kept = KeptInput::Restored;
         // 评论不进输入历史，总是恢复为草稿。
-        if let Some(message) = manual.filter(|_| !automatic) {
+        if let Some(message) = manual {
             let text = self.queue.restore(message, &mut self.blocks);
             if self.input.is_empty() {
                 self.input.set_text(&text);
@@ -981,6 +1002,17 @@ impl App {
         }
         self.discard_missing_comments();
         kept
+    }
+
+    /// 收到这次提交的确定结果：不再保留结果未知时留下的原文。
+    fn resolve_unknown(&mut self, turn_id: TurnId) {
+        if self
+            .unknown_submission
+            .as_ref()
+            .is_some_and(|(id, _)| *id == turn_id)
+        {
+            self.unknown_submission = None;
+        }
     }
 
     fn mark_rejected_comments(&mut self, turn_id: TurnId) {
@@ -1087,6 +1119,9 @@ impl App {
         let user_message = matches!(entry, ConversationEntry::UserMessage { .. });
         // 视图中出现这次提交的 UserMessage，同样说明已被接受；回执可能更晚到或者丢失。
         // 它只证明已接受，忙状态仍保留到会话头确认。
+        if user_message {
+            self.resolve_unknown(turn);
+        }
         if user_message && self.submitted.as_ref().is_some_and(|(id, _)| *id == turn) {
             self.submitted = None;
             self.queue.release(turn);
@@ -1366,6 +1401,7 @@ impl App {
     ) {
         match result {
             Ok(turn) => {
+                self.resolve_unknown(turn_id);
                 self.accept_session(turn.session_id);
                 self.push_status(recovered_status(turn_id));
             }
