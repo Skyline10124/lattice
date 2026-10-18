@@ -68,6 +68,89 @@ fn parse(values: &[Value]) -> SendOutcome {
 }
 
 #[test]
+fn nothing_to_cancel_requires_status_none_and_a_session() {
+    let record = json!({"type":"cancel","session_id":"s","turn_id":null,"status":"none"});
+    assert_eq!(
+        parse_record(&record).unwrap(),
+        SendRecord::Cancel(CancelRecord::NothingToCancel {
+            session_id: "s".into()
+        })
+    );
+    for invalid in [
+        json!({"type":"cancel","session_id":"s","turn_id":null}),
+        json!({"type":"cancel","session_id":"s","turn_id":null,"status":"taken"}),
+        json!({"type":"cancel","turn_id":null,"status":"none"}),
+        json!({"type":"cancel","session_id":"s","turn_id":"t","status":"none"}),
+    ] {
+        assert!(parse_record(&invalid).is_err(), "{invalid}");
+    }
+}
+
+#[test]
+fn not_accepted_before_request_write_is_a_valid_receipt() {
+    let parsed = parse(&[
+        sending(),
+        json!({"type":"submit","stage":"receipt","turn_id":"t","result":"not_accepted","recovered":false}),
+    ]);
+    assert!(
+        parsed.malformed_lines.is_empty(),
+        "{:?}",
+        parsed.malformed_lines
+    );
+    assert!(matches!(
+        parsed.receipt(),
+        Some(Receipt {
+            result: ReceiptResult::NotAccepted,
+            recovered: false,
+            ..
+        })
+    ));
+    assert_eq!(derive_send_exit_code(&parsed.records), SendExitCode::Failed);
+}
+
+#[test]
+fn errors_during_submission_fail_even_when_the_error_kind_is_usage() {
+    for kind in ["bad_request", "not_found", "conflict", "internal"] {
+        let error = json!({"type":"error","kind":kind,"message":"read failed",
+            "conflict":(kind == "conflict").then_some("turn_id_used")});
+        let parsed = parse(&[sending(), accepted(), error.clone()]);
+        assert_eq!(
+            derive_send_exit_code(&parsed.records),
+            SendExitCode::Failed,
+            "{kind}"
+        );
+        let before_identity = parse(&[error]);
+        assert_eq!(
+            derive_send_exit_code(&before_identity.records).as_i32(),
+            if kind == "internal" { 1 } else { 2 }
+        );
+    }
+    let mut values = vec![
+        sending(),
+        accepted(),
+        head(false),
+        step(
+            2,
+            0,
+            finish(),
+            Some(summary("completed", &finish())),
+            "answer",
+        ),
+    ];
+    values.push(json!({"type":"connection","status":"eof"}));
+    assert_eq!(
+        derive_send_exit_code(&parse(&values).records),
+        SendExitCode::Failed
+    );
+    values[1] = json!({"type":"submit","stage":"receipt","turn_id":"t","result":"unknown","recovered":false});
+    values.pop();
+    assert_eq!(
+        derive_send_exit_code(&parse(&values).records),
+        SendExitCode::Failed
+    );
+}
+
+#[test]
 fn exit_code_follows_the_latest_value_of_the_last_step() {
     let requesting = json!({"progress":"requesting"});
     let accepted_turn = vec![sending(), accepted(), head(true), user(1, 1)];

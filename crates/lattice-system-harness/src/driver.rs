@@ -135,6 +135,10 @@ impl fmt::Display for CommandOutcomeSummary<'_> {
             .field("stdout_complete", &self.outcome.stdout_complete)
             .field("stderr_bytes", &self.outcome.stderr.len())
             .field("stderr_complete", &self.outcome.stderr_complete)
+            .field(
+                "submission_receipt_error",
+                &self.outcome.submission_receipt_error(),
+            )
             .finish()
     }
 }
@@ -170,6 +174,7 @@ impl CommandOutcome {
             && self.interventions.is_empty()
             && !self.cleanup.forced
             && self.cleanup.succeeded()
+            && self.submission_receipt_error().is_none()
         {
             self.exit_code()
         } else {
@@ -179,6 +184,31 @@ impl CommandOutcome {
 
     pub fn is_clean_exit(&self, expected: i32) -> bool {
         self.clean_exit_code() == Some(expected)
+    }
+
+    fn submission_receipt_error(&self) -> Option<&'static str> {
+        // 被杀的前端可能只输出 sending；完整退出的 send/run 才必须交付唯一回执。
+        if self.exit_code().is_none() || !self.stdout_complete {
+            return None;
+        }
+        use crate::session_send::{SendRecord, Submit, parse_send_stdout};
+        let parsed = parse_send_stdout(&self.stdout, self.exit_code());
+        let mut sending = parsed.records.iter().filter_map(|record| match record {
+            SendRecord::Submit(Submit::Sending { turn_id, .. }) => Some(turn_id),
+            _ => None,
+        });
+        let turn_id = sending.next()?;
+        if sending.next().is_some() {
+            return Some("a submission must emit exactly one sending record");
+        }
+        let mut receipts = parsed.records.iter().filter_map(|record| match record {
+            SendRecord::Submit(Submit::Receipt(receipt)) => Some(receipt),
+            _ => None,
+        });
+        match (receipts.next(), receipts.next()) {
+            (Some(receipt), None) if &receipt.turn_id == turn_id => None,
+            _ => Some("sending must have exactly one receipt for the same TurnId"),
+        }
     }
 }
 
@@ -791,6 +821,44 @@ fn parse_process_stat(pid: u32, stat: &str) -> Result<Option<ProcessStat>, Clean
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clean_exit_requires_exactly_one_receipt_for_the_sending_identity() {
+        let sending = serde_json::json!({"type":"submit","stage":"sending","turn_id":"t","session_id":"s","new":true});
+        let receipt = serde_json::json!({"type":"submit","stage":"receipt","turn_id":"t","result":"not_accepted","recovered":false});
+        let other = serde_json::json!({"type":"submit","stage":"receipt","turn_id":"other","result":"unknown","recovered":false});
+        for (records, valid) in [
+            (vec![sending.clone()], false),
+            (vec![sending.clone(), receipt.clone()], true),
+            (
+                vec![sending.clone(), receipt.clone(), receipt.clone()],
+                false,
+            ),
+            (vec![sending.clone(), other], false),
+            (vec![sending.clone(), sending, receipt.clone()], false),
+            (
+                vec![serde_json::json!({"type":"connection","status":"eof"})],
+                true,
+            ),
+        ] {
+            let stdout = records
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                .into_bytes();
+            let outcome = CommandOutcome {
+                stdout,
+                stderr: Vec::new(),
+                stdout_complete: true,
+                stderr_complete: true,
+                termination: Some(ProcessTermination::Exited(1)),
+                interventions: Vec::new(),
+                cleanup: ProcessGroupCleanup::default(),
+            };
+            assert_eq!(outcome.is_clean_exit(1), valid, "{records:?}");
+        }
+    }
 
     fn process_group_members(pgid: u32) -> Vec<u32> {
         processes_in_pgid(pgid).expect("inspect process group")

@@ -388,6 +388,12 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
         );
         evidence.record_command("root rejects missing agent", &refused);
         assert!(refused.is_clean_exit(2));
+        let refusal =
+            lattice_system_harness::parse_send_stdout(&refused.stdout, refused.exit_code());
+        assert_eq!(
+            refusal.rejection().map(|error| error.message.as_str()),
+            Some("agent required at root")
+        );
         assert_eq!(
             cli_json(
                 &world,

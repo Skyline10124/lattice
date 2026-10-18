@@ -1161,6 +1161,134 @@ fn assert_paired_entries(entries: &[&Value], turn: &Value) {
 }
 
 #[test]
+fn cli_recovers_accepted_receipt_after_backend_crash() {
+    let (world, spec) = support::direct_world("cli-recovered-acceptance", "recover", "[]", "");
+    let budget = world.budget(&spec);
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        provenance(
+            &world,
+            &mut evidence,
+            json!({
+                "test":"cli_recovers_accepted_receipt_after_backend_crash",
+                "barrier":"turn_accepted", "recovery":"original CLI queries original TurnId after restart"
+            }),
+        );
+        let mut provider =
+            support::wire_fake_llm(&world, "recover", SseScript::plain("must not run"));
+        let ack = world.root().join("accepted.json");
+        world.set_env(BARRIER, "turn_accepted");
+        world.set_env(ACK, ack.display().to_string());
+        let daemon = support::crash::start(&world, &spec, &budget);
+        let frontend = support::driver()
+            .start(
+                &world,
+                &LatticeCommand {
+                    args: [
+                        "--json",
+                        "session",
+                        "send",
+                        "recover this input",
+                        "--agent",
+                        "recover",
+                    ]
+                    .into_iter()
+                    .map(String::from)
+                    .collect(),
+                    timeout: Some(budget.cap_timeout(spec.step_timeout())),
+                },
+            )
+            .unwrap();
+        let marker = wait_for_ack(&ack, budget.cap_timeout(spec.step_timeout()));
+        assert_eq!(marker["barrier"], "turn_accepted");
+        let sid = marker["session_id"].as_str().unwrap();
+        let tid = marker["turn_id"].as_str().unwrap();
+        evidence
+            .record_json("accepted-before-receipt", &marker)
+            .unwrap();
+        // CLI 尚未收到回执；暂停它直到后台重启就绪，排除找回查询撞上重启空窗。
+        let frontend_pgid = i32::try_from(frontend.pgid()).unwrap();
+        assert_ne!(frontend.pgid(), daemon.pgid());
+        // SAFETY: 驱动已核验这是场景自有前端的独立进程组。
+        assert_eq!(unsafe { libc::killpg(frontend_pgid, libc::SIGSTOP) }, 0);
+        let pause_deadline = Instant::now() + budget.cap_timeout(Duration::from_secs(2));
+        loop {
+            let stat = std::fs::read_to_string(format!("/proc/{frontend_pgid}/stat")).unwrap();
+            if stat
+                .rsplit_once(')')
+                .unwrap()
+                .1
+                .trim_start()
+                .starts_with('T')
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < pause_deadline,
+                "frontend did not enter SIGSTOP before backend crash"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        evidence
+            .record_json(
+                "recovery-window",
+                &json!({
+                    "frontend_pgid":frontend_pgid,"backend_pgid":daemon.pgid(),
+                    "frontend_state":"T","restart_before_frontend_continues":true
+                }),
+            )
+            .unwrap();
+        support::crash::kill_backend(&world, daemon, &mut evidence, &budget);
+        world.unset_env(BARRIER);
+        world.unset_env(ACK);
+        let restarted = support::crash::start(&world, &spec, &budget);
+        // SAFETY: 同一个场景自有前端仍由 RunningCommand 持有，尚未回收。
+        assert_eq!(unsafe { libc::killpg(frontend_pgid, libc::SIGCONT) }, 0);
+        let output = frontend.wait(None).unwrap();
+        evidence.record_command("original CLI recovers acceptance", &output);
+        assert!(output.is_clean_exit(1), "{}", output.summary());
+        let parsed = parse_send_stdout(&output.stdout, output.exit_code());
+        assert!(
+            parsed.malformed_lines.is_empty(),
+            "{:?}",
+            parsed.malformed_lines
+        );
+        assert_eq!(parsed.sending(), Some((tid, sid, true)));
+        let receipt = parsed.receipt().expect("one receipt");
+        assert!(receipt.recovered);
+        assert_eq!(parsed.accepted_turn_id(), Some(tid));
+        assert_eq!(parsed.accepted_session_id(), Some(sid));
+        assert_eq!(parsed.closed_result(), Some((sid, tid, "failed")));
+        let reopened = accepted_detail(&world, &spec, tid);
+        assert!(support::same_turn(&support::live_turn(&parsed), &reopened));
+        let tree = read_json(
+            &world,
+            &spec,
+            &mut evidence,
+            &["--json", "session", "log", sid],
+        );
+        assert_eq!(tree["nodes"].as_array().unwrap().len(), 3);
+        let sessions = read_json(&world, &spec, &mut evidence, &["--json", "session", "list"]);
+        assert_eq!(sessions.as_array().unwrap().len(), 1);
+        assert!(provider.captured_requests().is_empty());
+        cli(
+            &world,
+            &spec,
+            &mut evidence,
+            &["--json", "daemon", "stop"],
+            0,
+        );
+        let stopped = restarted.wait(None).unwrap();
+        evidence.record_command("restarted backend drains", &stopped);
+        assert!(stopped.is_clean_exit(0), "{}", stopped.summary());
+        provider
+            .shutdown(budget.cap_timeout(spec.step_timeout()))
+            .unwrap();
+    }));
+    support::finish_recorded(evidence, result);
+}
+
+#[test]
 fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
     for (name, barrier, mode, final_outcome, requests) in [
         ("accepted", "turn_accepted", "tool", None, 0),

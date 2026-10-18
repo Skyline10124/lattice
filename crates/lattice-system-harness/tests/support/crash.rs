@@ -100,8 +100,21 @@ pub(crate) fn kill(
         "backend_pid":daemon.pgid(),"backend_pgid":daemon.pgid(),"frontend_pgid":frontend.pgid(),
         "binary":super::driver().binary_path(),"state_root":world.session_store_dir().parent()
     })).unwrap();
-    assert_eq!(world.daemon_pids().unwrap(), vec![daemon.pgid()]);
     assert_ne!(daemon.pgid(), frontend.pgid());
+    kill_backend(world, daemon, evidence, budget);
+    let disconnected = frontend.wait(None).unwrap();
+    evidence.record_command("frontend observes backend crash", &disconnected);
+    assert!(disconnected.is_clean_exit(1), "{}", disconnected.summary());
+}
+
+/// 只杀停在屏障的自有后台，前端的调度与等待由场景控制。
+pub(crate) fn kill_backend(
+    world: &ScenarioWorld,
+    daemon: RunningCommand,
+    evidence: &mut ScenarioEvidence,
+    budget: &lattice_system_harness::ScenarioBudget,
+) {
+    assert_eq!(world.daemon_pids().unwrap(), vec![daemon.pgid()]);
     let deadline = Instant::now() + budget.cap_timeout(Duration::from_secs(2));
     loop {
         assert!(
@@ -128,7 +141,4 @@ pub(crate) fn kill(
     evidence.record_command("SIGKILL acknowledged backend barrier", &killed);
     super::assert_forced_kill(&killed);
     assert!(world.daemon_pids().unwrap().is_empty());
-    let disconnected = frontend.wait(None).unwrap();
-    evidence.record_command("frontend observes backend crash", &disconnected);
-    assert!(disconnected.is_clean_exit(1), "{}", disconnected.summary());
 }

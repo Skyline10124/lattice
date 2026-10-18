@@ -228,7 +228,7 @@ pub(super) async fn cancel_current_turn(
             writeln!(
                 out,
                 "{}",
-                serde_json::json!({"type":"cancel","session_id":session_id,"turn_id":null})
+                serde_json::json!({"type":"cancel","session_id":session_id,"turn_id":null,"status":"none"})
             )?;
         } else {
             writeln!(out, "session {session_id}: no running turn to cancel")?;

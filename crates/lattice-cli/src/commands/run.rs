@@ -273,11 +273,17 @@ pub async fn run_session_prompt(
             .map_err(LocalError::from)?;
         let agent = match args.agent {
             Some(name) => name,
-            None => api.session_head(session.id()).await?.agent.ok_or_else(|| {
-                LocalError::from(lattice_api::ApiError::BadRequest(
-                    "agent required at root".into(),
-                ))
-            })?,
+            None => api
+                .session_head(session.id())
+                .await?
+                .agent
+                .ok_or_else(|| LocalError {
+                    kind: LocalErrorKind::BadRequest,
+                    message: "agent required at root".into(),
+                    conflict: None,
+                    recovery: None,
+                    store: None,
+                })?,
         };
         let path = root.canonical_path().to_path_buf();
         let name = agent.clone();
@@ -389,20 +395,20 @@ async fn consume(
         }
     }
     let report = turn.detach().await;
-    if let Some(receipt) = report.submission {
-        if state.receipt.is_none() {
-            render_update(
-                &LocalUpdate::Submit {
-                    update: SubmissionUpdate::Receipt(receipt.clone()),
-                },
-                &mut state,
-                out,
-                err,
-                verbose,
-                json,
-            )?;
-        }
-        state.receipt = Some(receipt);
+    // 退出码依据已经输出的唯一回执；迟到结果仍可通过视图呈现。
+    if state.receipt.is_none()
+        && let Some(receipt) = report.submission
+    {
+        render_update(
+            &LocalUpdate::Submit {
+                update: SubmissionUpdate::Receipt(receipt),
+            },
+            &mut state,
+            out,
+            err,
+            verbose,
+            json,
+        )?;
     }
     if let Some(status @ (CancelStatus::Taken | CancelStatus::NotTaken | CancelStatus::Unknown)) =
         report.cancel

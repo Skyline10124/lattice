@@ -139,6 +139,7 @@ async fn session_cancel_preserves_identity_and_exit_codes_across_reply_loss() {
                 assert_eq!(value["session_id"], SESSION);
                 if case == "none" {
                     assert!(value["turn_id"].is_null());
+                    assert_eq!(value["status"], "none");
                 } else {
                     assert_eq!(value["turn_id"], id.to_string());
                     assert_eq!(value["status"], case);
@@ -684,6 +685,86 @@ async fn sigint_uses_the_original_turn_and_second_interrupt_detaches() {
 async fn signal_guard() -> tokio::sync::MutexGuard<'static, ()> {
     static SIGNALS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     SIGNALS.lock().await
+}
+
+#[tokio::test]
+async fn late_acceptance_keeps_the_printed_unknown_receipt_and_exit_one() {
+    let _guard = signal_guard().await;
+    let peer = Peer::new();
+    let id = lattice_api::local::new_turn_id();
+    let configuration = serde_json::from_value(json!({
+        "profile_toml":"schema_version=1\n[agent]\nname='test'\nmodel='compat:test'\n[prompt]\nsystem='test'\n[tools]\nenabled=[]\n",
+        "system_prompt":"test",
+        "connection":{"alias":"compat:test","provider":"openai_compatible","provider_model":"test",
+            "base_url":"http://127.0.0.1:1/v1","api_key":"test-key","roots_der":[]}
+    })).unwrap();
+    let turn = peer.client.start_turn(
+        TurnRequest {
+            turn_id: id,
+            session: SubmitSession::New(sid()),
+            workspace: peer._root.path().into(),
+            input: "input".into(),
+            agent: Some("test".into()),
+        },
+        Ok(configuration),
+    );
+    let mut submit = peer.request("submit").await;
+    turn.cancel();
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
+    let command = consume(
+        turn,
+        None,
+        RunRenderState::default(),
+        false,
+        true,
+        signal,
+        &mut out,
+        &mut err,
+    );
+    let driver = async {
+        let mut cancel = peer.request("cancel").await;
+        cancel.reply("cancelled", json!({"owned":true})).await;
+        // 首次取消等待五秒后给出 unknown，连接仍在；随后才交付迟到的接受回执。
+        let mut waiting = peer.request("watch").await;
+        waiting.view(ViewUpdate::Head(head(id, true))).await;
+        submit
+            .reply(
+                "acceptance",
+                json!({"acceptance":"accepted","turn":TurnView::from(&detail(id,"completed"))}),
+            )
+            .await;
+        let mut final_view = peer.request("watch").await;
+        final_view.view(ViewUpdate::Head(head(id, false))).await;
+        final_view
+            .view(ViewUpdate::Entry {
+                entry: entry(id, "completed"),
+            })
+            .await;
+    };
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(8), async {
+        tokio::join!(command, driver)
+    })
+    .await
+    .unwrap();
+    let records: Vec<Value> = String::from_utf8(out)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let receipts: Vec<_> = records
+        .iter()
+        .filter(|record| record["stage"] == "receipt")
+        .collect();
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0]["result"], "unknown");
+    assert!(
+        records
+            .iter()
+            .any(|record| record["summary"]["outcome"] == "completed")
+    );
+    assert_eq!(result.unwrap(), std::process::ExitCode::from(1));
 }
 
 #[tokio::test]

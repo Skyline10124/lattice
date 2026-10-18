@@ -734,8 +734,7 @@ fn submit(value: &Value) -> Result<Submit, String> {
                     }
                 }
                 "rejected" => ReceiptResult::Rejected(local_error(&value["error"])?),
-                "not_accepted" if recovered => ReceiptResult::NotAccepted,
-                "not_accepted" => return Err("not_accepted comes from a TurnId query".into()),
+                "not_accepted" => ReceiptResult::NotAccepted,
                 "unknown" => ReceiptResult::Unknown(optional_error(value, "error")?),
                 _ => return Err("unknown submit result".into()),
             };
@@ -752,8 +751,8 @@ fn cancel(value: &Value) -> Result<CancelRecord, String> {
     let session_id = optional_string(value, "session_id")?;
     Ok(match nullable_string(value, "turn_id")? {
         None => {
-            if value.get("status").is_some() {
-                return Err("nothing to cancel carries no status".into());
+            if string(value, "status")? != "none" {
+                return Err("nothing to cancel requires status none".into());
             }
             CancelRecord::NothingToCancel {
                 session_id: session_id.ok_or("nothing to cancel names the session")?,
@@ -1084,46 +1083,65 @@ fn usage_error(error: &LocalError) -> bool {
         "bad_request" | "not_found" | "conflict"
     )
 }
-/// 按记录推导退出码：结局已知时 Completed 0、Failed 1、Cancelled 2，但结构化错误或
-/// 执行诊断不因已知结局被忽略；未接受时使用/前提错误为 2，其余为 1。
+/// 按记录推导退出码：先核对观察错误和已输出的回执，再使用持久结局。
+/// 身份生成前的使用错误退出 2；进入流式观察后的 error 记录一律退出 1。
 /// 进程退出、干预、EOF 和畸形行仍必须通过 SendExecution 另外核验。
 pub fn derive_send_exit_code(records: &[SendRecord]) -> SendExitCode {
-    let mut errors = records.iter().filter_map(|record| match record {
+    let error = records.iter().rev().find_map(|record| match record {
         SendRecord::Error(error) => Some(error),
         _ => None,
     });
-    if let Some((_, turn_id, outcome)) = closed_result(records) {
-        let diagnostic = records.iter().rev().find_map(|record| match record {
-            SendRecord::Head(head) => Some(head),
-            _ => None,
+    if let Some(error) = error {
+        let streaming = records.iter().any(|record| {
+            matches!(
+                record,
+                SendRecord::Submit(_)
+                    | SendRecord::Head(_)
+                    | SendRecord::Entry(_)
+                    | SendRecord::Text(_)
+                    | SendRecord::Connection { .. }
+            )
         });
-        if errors.next().is_some()
-            || diagnostic.is_some_and(|head| {
-                head.turn_id.as_deref() == Some(turn_id) && head.diagnostic.is_some()
-            })
-        {
-            return SendExitCode::Failed;
-        }
-        return match outcome {
-            Outcome::Completed => SendExitCode::Committed,
-            Outcome::Failed => SendExitCode::Failed,
-            Outcome::Cancelled => SendExitCode::InputError,
+        return if !streaming && usage_error(error) {
+            SendExitCode::InputError
+        } else {
+            SendExitCode::Failed
         };
     }
-    let rejection = records.iter().rev().find_map(|record| match record {
-        SendRecord::Submit(Submit::Receipt(Receipt {
-            result: ReceiptResult::Rejected(error),
-            ..
-        })) => Some(error),
+    let closed = closed_result(records);
+    let target = records
+        .iter()
+        .find_map(|record| match record {
+            SendRecord::Submit(Submit::Sending { turn_id, .. }) => Some(turn_id.as_str()),
+            _ => None,
+        })
+        .or_else(|| closed.map(|(_, turn_id, _)| turn_id));
+    if records.iter().any(|record| match record {
+        SendRecord::Connection { .. } => true,
+        SendRecord::Head(head) => {
+            head.diagnostic.is_some()
+                && target.is_none_or(|target| head.turn_id.as_deref() == Some(target))
+        }
+        _ => false,
+    }) {
+        return SendExitCode::Failed;
+    }
+    if let Some(receipt) = records.iter().find_map(|record| match record {
+        SendRecord::Submit(Submit::Receipt(receipt)) => Some(receipt),
         _ => None,
-    });
-    if rejection
-        .or_else(|| errors.next_back())
-        .is_some_and(usage_error)
-    {
-        SendExitCode::InputError
-    } else {
-        SendExitCode::Failed
+    }) {
+        match &receipt.result {
+            ReceiptResult::Rejected(error) if usage_error(error) => {
+                return SendExitCode::InputError;
+            }
+            ReceiptResult::Accepted { .. } => {}
+            _ => return SendExitCode::Failed,
+        }
+    }
+    match closed.map(|(_, _, outcome)| outcome) {
+        Some(Outcome::Completed) => SendExitCode::Committed,
+        Some(Outcome::Cancelled) => SendExitCode::InputError,
+        _ => SendExitCode::Failed,
     }
 }
 pub fn parse_send_stdout(stdout: &[u8], exit_code: Option<i32>) -> SendOutcome {

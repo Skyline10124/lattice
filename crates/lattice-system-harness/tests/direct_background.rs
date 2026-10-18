@@ -427,7 +427,7 @@ fn disconnected_submission_settles_to_accepted_or_not_found() {
                 break lookup;
             }
             assert!(Instant::now() < deadline, "submission stayed in flight");
-            std::thread::yield_now();
+            std::thread::sleep(Duration::from_millis(10));
         };
         if settled["response"] == "error" {
             assert_eq!(settled["value"]["kind"], "not_found", "{settled}");
@@ -442,7 +442,7 @@ fn disconnected_submission_settles_to_accepted_or_not_found() {
                     break;
                 }
                 assert!(Instant::now() < deadline, "submission stayed in flight");
-                std::thread::yield_now();
+                std::thread::sleep(Duration::from_millis(10));
             }
             assert!(server.captured_requests().is_empty());
             let list = run(
@@ -557,6 +557,14 @@ fn busy_cancel_and_stop_do_not_serialize_distinct_sessions() {
         assert_eq!(
             closed(&world, &budget, &mut evidence, &first_turn)["summary"]["outcome"],
             "cancelled"
+        );
+        // 持久关闭先于监督者移除 Owner；无可取消的断言必须等到后台完成收尾。
+        let deadline = Instant::now() + wait(&budget);
+        let mut watcher = Watcher::open(&world, wait(&budget), &a);
+        watcher.until(
+            deadline,
+            "the cancelled turn's Owner to be removed",
+            |view| view.head.as_ref().is_some_and(|head| !head.owner),
         );
         // 另一个会话的那一轮不受影响；这个会话已没有正在执行的一轮。
         assert_ne!(
