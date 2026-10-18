@@ -2167,7 +2167,7 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
             finished.iter().all(|entry| !entry["content"]["reply"]
                 .to_string()
                 .contains("discarded partial")),
-            "stopped partial belongs only to attempt diagnostics, not the conversation reply"
+            "stopped partial text never becomes the conversation reply"
         );
         assert_eq!(closed["steps"][0]["attempts"].as_array().unwrap().len(), 2);
         evidence.record_captures(captures);

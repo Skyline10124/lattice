@@ -91,18 +91,9 @@ fn provider_failure(name: &str, test: &str, script: SseScript, partial: bool) {
             .find(|entry| entry.step().is_some())
             .expect("reserved Step persists even on failure");
         let expected = if partial { "partial" } else { "" };
-        let diagnostic: String =
-            entry.raw["content"]["attempts"][0]["progress"]["diagnostic"]["partial"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter_map(|part| part["text"].as_str())
-                .collect();
         require(
-            outcome.reply_text().is_empty()
-                && entry.raw["content"]["reply"].is_null()
-                && diagnostic == expected,
-            "failed partial remains attempt diagnostic, not a complete reply",
+            outcome.reply_text().is_empty() && entry.raw["content"]["reply"].is_null(),
+            "failed attempt does not produce a complete reply",
         )?;
         // 生成中的文字只要收到过，就是这次尝试已输出内容的前缀。
         let view = outcome

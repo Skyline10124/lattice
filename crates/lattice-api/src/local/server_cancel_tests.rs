@@ -705,9 +705,6 @@ async fn slow_observer_reads_latest_entries_suffixes_and_attempt_boundaries() {
         retry_delay_ms: Some(1),
         diagnostic: AttemptDiagnostic {
             provider_error: Some("retry".into()),
-            partial: vec![DiagnosticPart::Text {
-                text: "你好！".into(),
-            }],
             ..Default::default()
         },
     })

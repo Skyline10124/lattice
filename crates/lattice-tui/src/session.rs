@@ -75,7 +75,7 @@ pub(crate) struct Generating {
     pub(crate) text: String,
 }
 
-/// 条目显示生成中的文字所属的尝试已 Ended：完成时由条目中的回复取代，停止时半截文字只作诊断。
+/// 条目显示生成中的文字所属的尝试已 Ended：完成时由条目中的回复取代，停止时半截文字作废。
 pub(crate) fn superseded(entry: &ConversationEntry, generating: &Generating) -> bool {
     match entry {
         ConversationEntry::Step {

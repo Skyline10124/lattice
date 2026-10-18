@@ -427,26 +427,12 @@ fn stream_cut_before_completion_is_retried() {
             captures.len() == 4,
             format!("4 model requests, got {}", captures.len()),
         )?;
-        // 两次断流都发生在响应体中途：停止的尝试在节点上保留已收到的部分正文作诊断，
-        // 两次重试提示都在这一步的条目中。
+        // 两次断流都发生在响应体中途，两次重试提示都在这一步的条目中。
         let entries = outcome.entries();
         let cut = entries
             .iter()
             .find(|entry| entry.step().is_some_and(|step| step.ordinal == 1))
             .expect("second Step entry");
-        let partials: Vec<String> = cut.raw["content"]["attempts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|attempt| {
-                attempt["progress"]["diagnostic"]["partial"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|part| part["text"].as_str())
-                    .collect()
-            })
-            .collect();
         let retried: Vec<u64> = cut
             .step()
             .unwrap()
@@ -455,8 +441,8 @@ fn stream_cut_before_completion_is_retried() {
             .map(|r| r.attempt)
             .collect();
         require(
-            partials.len() == 3 && partials[..2] == ["partial", "half"] && retried == [0, 1],
-            format!("partial bodies arrive before each cut: {partials:?} {retried:?}"),
+            retried == [0, 1],
+            format!("both stopped attempts have retry notices: {retried:?}"),
         )?;
         let turn = final_turn(&outcome);
         let step = attempts(&turn, 1);

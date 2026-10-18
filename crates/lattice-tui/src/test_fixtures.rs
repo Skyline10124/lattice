@@ -151,7 +151,7 @@ fn summary(outcome: &str, progress: Value) -> Value {
 }
 
 fn diagnostic() -> Value {
-    json!({"provider_error":"HTTP 429","partial":[],"invalid_batch":null})
+    json!({"provider_error":"HTTP 429","invalid_batch":null})
 }
 
 impl StepEntry {

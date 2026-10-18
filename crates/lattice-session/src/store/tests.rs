@@ -1027,7 +1027,7 @@ fn keys_versions_and_encoding() {
         decode::<Node>("nodes", "0", &encode(&Node::Root).unwrap()).unwrap(),
         Node::Root
     );
-    for version in [0, 1, VERSION + 1, u32::MAX] {
+    for version in [0, 1, 2, VERSION + 1, u32::MAX] {
         let mut bytes = version.to_be_bytes().to_vec();
         bytes.extend(b"{\"kind\":\"root\"}");
         let error = attach_path(

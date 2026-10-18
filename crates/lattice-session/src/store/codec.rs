@@ -14,7 +14,7 @@ pub(super) const CONFIGS: TableDefinition<&str, &[u8]> = TableDefinition::new("c
 pub(super) const TURN_INDEX: TableDefinition<&str, &[u8]> = TableDefinition::new("turn_index");
 pub(super) const INDEX: TableDefinition<&str, &[u8]> = TableDefinition::new("invocation_index");
 pub(super) const CHANGES: TableDefinition<u64, &[u8]> = TableDefinition::new("invocation_changes");
-pub(super) const VERSION: u32 = 2;
+pub(super) const VERSION: u32 = 3;
 
 pub(super) fn attach_path<T>(path: &std::path::Path, result: Result<T>) -> Result<T> {
     result.map_err(|err| match err {

@@ -10,7 +10,7 @@ use std::sync::{
 use std::time::Duration;
 
 #[tokio::test]
-async fn stream_turn_error_after_partial_preserves_diagnostic_without_a_reply() {
+async fn stream_turn_error_after_partial_output_ends_attempt_without_a_reply() {
     let fixture = setup_with_events(
         vec![
             LlmEvent::Token {
@@ -63,15 +63,10 @@ async fn stream_turn_error_after_partial_preserves_diagnostic_without_a_reply() 
         panic!("step")
     };
     assert!(reply.is_none(), "失败的半截输出不能变成完整回复");
-    let lattice_session::store::AttemptProgress::Ended { diagnostic, .. } = &attempts[0].progress
-    else {
-        panic!("stopped attempt")
-    };
-    assert_eq!(
-        serde_json::to_value(&diagnostic.partial).unwrap(),
-        serde_json::json!([{"kind":"text","text":"partial output"},{"kind":"reasoning","text":"thinking"},{"kind":"text","text":" before error"}]),
-        "停止尝试必须保留已收到的文字与 reasoning 作为诊断"
-    );
+    assert!(matches!(
+        &attempts[0].progress,
+        lattice_session::store::AttemptProgress::Ended { .. }
+    ));
     assert_eq!(
         fixture
             .store

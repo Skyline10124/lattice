@@ -282,7 +282,6 @@ pub(crate) async fn run_coordinator_saga(
                             .as_deref()
                             .map(bound_provider_diagnostic),
                         invalid_batch: diagnostic.invalid_batch,
-                        partial: live.observer.diagnostic_partial(key),
                     },
                 },
                 Err(ModelStepError::OpeningFailed {

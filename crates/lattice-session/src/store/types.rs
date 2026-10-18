@@ -227,23 +227,7 @@ pub enum AttemptEnd {
 #[serde(deny_unknown_fields)]
 pub struct AttemptDiagnostic {
     pub provider_error: Option<String>,
-    pub partial: Vec<DiagnosticPart>,
     pub invalid_batch: Option<ToolCallValidation>,
-}
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum DiagnosticPart {
-    Text {
-        text: String,
-    },
-    Reasoning {
-        text: String,
-    },
-    ToolCall {
-        provider_call_id: Option<String>,
-        name: String,
-        arguments: String,
-    },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "end", rename_all = "snake_case", deny_unknown_fields)]
@@ -688,7 +672,6 @@ redacted_debug!(
     Notice,
     SlotProgress,
     AttemptDiagnostic,
-    DiagnosticPart,
     InvocationTerminal,
     AcceptTurn,
     CompleteReply,
