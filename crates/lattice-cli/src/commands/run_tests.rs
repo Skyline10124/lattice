@@ -1,210 +1,338 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 use super::*;
-use lattice_api::local::{MaterialSummary, ModelAttemptKey, SessionId, TurnRef};
 use serde_json::json;
-
-fn key() -> ModelAttemptKey {
-    ModelAttemptKey {
-        turn_id: "10000000-0000-4000-8000-000000000001".parse().unwrap(),
-        model_step_ordinal: 0,
-        attempt_ordinal: 0,
-    }
-}
-fn turn_ref() -> TurnRef {
-    TurnRef {
-        session_id: SessionId::parse("11111111111141118111111111111111").unwrap(),
-        turn_id: key().turn_id,
-    }
-}
-fn events() -> Vec<TurnEvent> {
-    let step: lattice_api::local::StepDetail = serde_json::from_value(json!({"key":{"turn_id":key().turn_id,"ordinal":0},"node":2,"updated_at":"2026-09-27T00:00:01Z","attempts":[],"progress":{"progress":"closed","end":{"end":"stop","cause":{"cause":"cancelled"}}},"end":{"end":"stop","cause":{"cause":"cancelled"}},"slots":[]})).unwrap();
-    let summary: TurnSummary = serde_json::from_value(
-        json!({"outcome":"cancelled","progress":{"progress":"closed","end":{"end":"stop","cause":{"cause":"cancelled"}}},"notice":{"level":"info","text":"cancelled by user"}}),
+#[test]
+fn json_updates_keep_submission_receipt_and_error_shapes() {
+    let id = lattice_api::local::new_turn_id();
+    let sid = lattice_api::local::new_session_id();
+    let error: LocalError = serde_json::from_value(
+        json!({"kind":"bad_request","message":"exact rejection","recovery":null,"store":null}),
     )
     .unwrap();
-    let id = "30000000-0000-4000-8000-000000000003".parse().unwrap();
-    vec![
-        TurnEvent::TurnStarted {
-            turn: turn_ref(),
-            user_node: lattice_api::local::NodeId(1),
-        },
-        TurnEvent::ModelStarted {
-            key: key(),
-            provider: serde_json::from_value(json!("open_ai_compatible")).unwrap(),
-            model: "test-model".into(),
-        },
-        TurnEvent::TokenDelta {
-            key: key(),
-            content: "hello".into(),
-        },
-        TurnEvent::ReasoningDelta {
-            key: key(),
-            content: "thinking".into(),
-        },
-        TurnEvent::LlmRetry {
-            key: key(),
-            delay_ms: 10,
-            notice: lattice_api::local::Notice {
-                level: NoticeLevel::Warn,
-                text: "retry".into(),
+    let updates = vec![
+        LocalUpdate::Submit {
+            update: SubmissionUpdate::Sending {
+                turn_id: id,
+                session_id: sid,
+                new: true,
             },
         },
-        TurnEvent::ModelFinished {
-            key: key(),
-            finish_reason: Some("stop".into()),
-            usage: Some(lattice_llm::TokenUsage {
-                prompt_tokens: 10,
-                completion_tokens: 5,
-                total_tokens: 15,
+        LocalUpdate::Submit {
+            update: SubmissionUpdate::Receipt(SubmissionReceipt {
+                turn_id: id,
+                result: SubmissionResult::Rejected {
+                    error: error.clone(),
+                },
+                recovered: false,
             }),
         },
-        TurnEvent::CallsRegistered {
-            key: step.key,
-            calls: vec![],
+        LocalUpdate::Cancel {
+            turn_id: id,
+            status: CancelStatus::Taken,
+            owned: Some(true),
+            error: None,
         },
-        TurnEvent::ToolCallStarted {
-            id,
-            name: "observe.workspace".into(),
+        LocalUpdate::Head(ipc_tests::head(id, false)),
+        LocalUpdate::Entry {
+            entry: ipc_tests::entry(id, "completed"),
         },
-        TurnEvent::ToolCallFinished {
-            id,
-            name: "observe.workspace".into(),
-            outcome: lattice_api::local::ToolResultOutcome::Succeeded,
-            material: MaterialSummary::OutputTooLarge {
-                digest: [0; 32],
-                byte_length: 70000,
-            },
-            error_summary: None,
+        LocalUpdate::Text(TextUpdate {
+            node: NodeId(2),
+            attempt: 0,
+            offset: 0,
+            segments: vec![TextSegment::Text {
+                text: "live".into(),
+            }],
+        }),
+        LocalUpdate::Connection {
+            status: ConnectionStatus::Eof,
         },
-        TurnEvent::CepCallStarted {
-            invocation_id: id,
-            method: "observe.workspace".into(),
-            semantic_stage: "observe".into(),
-            guard_stage: "allowed".into(),
-        },
-        TurnEvent::CepCallFinished {
-            invocation_id: id,
-            method: "observe.workspace".into(),
-            ok: true,
-            semantic_stage: "observe".into(),
-            guard_stage: "allowed".into(),
-            error_code: None,
-        },
-        TurnEvent::StepClosed { step: step.clone() },
-        TurnEvent::TurnCancelled {
-            turn: turn_ref(),
-            step,
-            summary,
-        },
-    ]
-}
-#[test]
-fn human_stream_keeps_stdout_reasoning_bytes_and_summary_separate() {
-    for verbose in [false, true] {
-        let mut state = RunRenderState::default();
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        for event in events() {
-            render_human_event(&event, &mut state, &mut out, &mut err, verbose).unwrap();
-            apply_event_to_state(&event, &mut state);
-        }
-        finish_text(&mut state, &mut out).unwrap();
-        assert_eq!(out, b"hello\n");
-        let err = String::from_utf8(err).unwrap();
-        assert_eq!(err.contains("thinking"), verbose);
-        assert_eq!(err.contains("model openai/test-model"), verbose);
-        assert_eq!(
-            err.contains("warn: llm attempt 0 failed, retrying in 10 ms: retry"),
-            verbose
-        );
-        assert!(err.contains("cancelled info: cancelled by user"));
-        assert!(err.contains("70000 B"));
-        assert!(err.contains("succeeded"));
-        assert!(err.contains("content unavailable"));
-        assert!(err.contains("cancelled by user"));
-        assert_eq!(err.lines().filter(|line| line.is_empty()).count(), 1);
-        assert_eq!(
-            state.last_summary.unwrap().outcome,
-            PublicTurnOutcome::Cancelled
-        );
+        LocalUpdate::Error { error },
+    ];
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut state = RunRenderState::default();
+    for update in &updates {
+        render_update(update, &mut state, &mut out, &mut err, true, true).unwrap();
     }
+    let records: Vec<serde_json::Value> = String::from_utf8(out)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        records,
+        updates
+            .iter()
+            .map(|u| serde_json::to_value(u).unwrap())
+            .collect::<Vec<_>>(),
+        "每条更新原样交付，sending 后以 receipt 结束"
+    );
+    assert!(err.is_empty());
+    assert_eq!(
+        records
+            .iter()
+            .map(|r| r["type"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "submit",
+            "submit",
+            "cancel",
+            "head",
+            "entry",
+            "text",
+            "connection",
+            "error"
+        ]
+    );
 }
+
 #[test]
-fn terminal_summary_is_not_recomputed_and_usage_is_durable() {
+fn human_rejected_receipt_keeps_legacy_store_paths() {
+    let id = lattice_api::local::new_turn_id();
+    let paths = [
+        "/home/test/state/lattice/sessions.git",
+        "/home/test/state/lattice/projects/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/invocations.git",
+    ];
+    let error:LocalError=serde_json::from_value(json!({"kind":"store_unavailable","message":"session store unavailable","store":{"type":"legacy_stores","paths":paths}})).unwrap();
+    let receipt = SubmissionReceipt {
+        turn_id: id,
+        result: SubmissionResult::Rejected { error },
+        recovered: false,
+    };
     let mut state = RunRenderState::default();
     let mut out = Vec::new();
     let mut err = Vec::new();
-    let TurnEvent::TurnCancelled { turn, step, .. } = events().pop().unwrap() else {
-        panic!()
-    };
-    for (outcome, notice, exit) in [
-        ("completed", json!(null), 0),
-        (
-            "failed",
-            json!({"level":"error","text":"exact provider message"}),
-            1,
-        ),
-        (
-            "cancelled",
-            json!({"level":"info","text":"exact cancellation"}),
-            2,
-        ),
-    ] {
-        let turn = TurnRef {
-            turn_id: lattice_api::local::new_turn_id(),
-            ..turn
-        };
-        let mut step = step.clone();
-        step.key.turn_id = turn.turn_id;
-        let end = match outcome {
-            "completed" => lattice_api::local::StepEnd::Finish,
-            _ => lattice_api::local::StepEnd::Stop {
-                cause: if outcome == "cancelled" {
-                    lattice_session::store::StopCause::Cancelled
-                } else {
-                    lattice_session::store::StopCause::ProcessExit
-                },
-            },
-        };
-        step.end = end.clone();
-        step.progress = lattice_api::local::StepProgress::Closed { end };
-        let summary: TurnSummary = serde_json::from_value(
-            json!({"outcome":outcome,"notice":notice,"progress":step.progress}),
-        )
-        .unwrap();
-        let event = match outcome {
-            "completed" => TurnEvent::TurnCompleted {
-                turn,
-                step: step.clone(),
-                summary: summary.clone(),
-            },
-            "failed" => TurnEvent::TurnFailed {
-                turn,
-                step: step.clone(),
-                summary: summary.clone(),
-            },
-            _ => TurnEvent::TurnCancelled {
-                turn,
-                step: step.clone(),
-                summary: summary.clone(),
-            },
-        };
-        render_human_event(&event, &mut state, &mut out, &mut err, false).unwrap();
-        apply_event_to_state(&event, &mut state);
-        assert_eq!(state.last_summary.as_ref(), Some(&summary));
-        assert_eq!(
-            summary_exit(Some(&summary)),
-            std::process::ExitCode::from(exit)
+    render_update(
+        &LocalUpdate::Submit {
+            update: SubmissionUpdate::Receipt(receipt.clone()),
+        },
+        &mut state,
+        &mut out,
+        &mut err,
+        false,
+        false,
+    )
+    .unwrap();
+    let text = String::from_utf8(err).unwrap();
+    for path in paths {
+        assert!(
+            text.contains(path),
+            "人类拒绝回执必须保留旧库路径 {path}：{text}"
         );
     }
-    state.usage=Some(serde_json::from_value(json!({"kind":"partial","known":{"prompt_tokens":20,"completion_tokens":10,"total_tokens":30},"unknown_attempts":1})).unwrap());
-    render_verbose_epilogue(&state, &mut err).unwrap();
+    assert!(text.contains("session store unavailable"));
+    assert!(text.contains(&id.to_string()));
+    assert!(out.is_empty());
+    assert_eq!(
+        receipt_exit(&receipt.result),
+        std::process::ExitCode::from(1)
+    );
+}
+#[test]
+fn human_entries_replace_streamed_text_and_print_one_final_summary() {
+    let id = lattice_api::local::new_turn_id();
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut state = RunRenderState::default();
+    let updates = [
+        LocalUpdate::Head(ipc_tests::head(id, true)),
+        LocalUpdate::Text(TextUpdate {
+            node: NodeId(2),
+            attempt: 0,
+            offset: 0,
+            segments: vec![
+                TextSegment::Text { text: "ans".into() },
+                TextSegment::Reasoning {
+                    text: "think".into(),
+                },
+            ],
+        }),
+        LocalUpdate::Entry {
+            entry: ipc_tests::entry(id, "completed"),
+        },
+        LocalUpdate::Entry {
+            entry: ipc_tests::entry(id, "completed"),
+        },
+    ];
+    for update in &updates {
+        render_update(update, &mut state, &mut out, &mut err, true, false).unwrap();
+    }
+    finish_human(&state, &mut out, &mut err, true).unwrap();
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "answer\n",
+        "最终条目只补流式正文的剩余部分"
+    );
+    let err = String::from_utf8(err).unwrap();
+    assert_eq!(err.lines().filter(|l| *l == "completed").count(), 1);
+    assert!(err.contains("reasoning: think"));
+    assert_eq!(
+        summary_exit(state.summary.as_ref()),
+        std::process::ExitCode::SUCCESS
+    );
+}
+#[test]
+fn durable_attempt_usage_is_reported_once_with_partial_totals() {
+    let id = lattice_api::local::new_turn_id();
+    let mut node = ipc_tests::entry(id, "completed");
+    if let ConversationEntry::Step { step, .. } = node.as_mut() {
+        let attempt = |n, usage| {
+            serde_json::from_value(json!({"attempt":n,"origin":"open_ai_compatible","usage":usage,"progress":{"progress":"ended","end":{"end":"completed"},"diagnostic":null},"end":{"end":"stopped","cause":{"cause":"process_exit"},"diagnostic":null},"retry_delay_ms":null})).unwrap()
+        };
+        step.attempts = vec![
+            attempt(
+                0,
+                json!({"prompt_tokens":20,"completion_tokens":10,"total_tokens":30}),
+            ),
+            attempt(1, serde_json::Value::Null),
+        ];
+    }
+    let mut state = RunRenderState::default();
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    for _ in 0..2 {
+        render_update(
+            &LocalUpdate::Entry {
+                entry: node.clone(),
+            },
+            &mut state,
+            &mut out,
+            &mut err,
+            true,
+            false,
+        )
+        .unwrap();
+    }
+    finish_human(&state, &mut out, &mut err, true).unwrap();
     let text = String::from_utf8(err).unwrap();
-    assert!(text.contains("exact provider message"));
-    assert!(text.contains("unknown_attempts"));
-    assert!(text.contains("30"));
-    let mut empty = Vec::new();
-    render_verbose_epilogue(&RunRenderState::default(), &mut empty).unwrap();
-    assert!(empty.is_empty());
+    assert!(
+        text.contains("\"unknown_attempts\":1"),
+        "持久 usage 不能被重复 entry 翻倍或丢弃：{text}"
+    );
+    assert!(text.contains("\"total_tokens\":30"));
+}
+
+#[test]
+fn human_tool_results_wait_for_terminal_slots_or_execution_end() {
+    let id = lattice_api::local::new_turn_id();
+    let mut node = ipc_tests::entry(id, "completed");
+    if let ConversationEntry::Step {
+        content: Node::Step {
+            progress, slots, ..
+        },
+        summary,
+        ..
+    } = node.as_mut()
+    {
+        *progress = serde_json::from_value(json!({"progress":"executing"})).unwrap();
+        *summary = None;
+        slots.push(serde_json::from_value(json!({"binding":{"invocation_id":"10000000-0000-4000-8000-000000000001","identity":{"session_id":ipc_tests::sid(),"turn_id":id,"model_step_ordinal":0,"part_ordinal":0,"method":"observe.workspace","descriptor_identity":"test","arguments_digest":"00".repeat(32)}},"progress":{"progress":"registered"}})).unwrap());
+    }
+    let mut state = RunRenderState::default();
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    render_update(
+        &LocalUpdate::Head(ipc_tests::head(id, true)),
+        &mut state,
+        &mut out,
+        &mut err,
+        false,
+        false,
+    )
+    .unwrap();
+    render_update(
+        &LocalUpdate::Entry {
+            entry: node.clone(),
+        },
+        &mut state,
+        &mut out,
+        &mut err,
+        false,
+        false,
+    )
+    .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&err).contains("tool "),
+        "运行中 Registered 不能提前打印 NotExecuted 并挡住最后结果"
+    );
+    if let ConversationEntry::Step {
+        content: Node::Step { slots, .. },
+        ..
+    } = node.as_mut()
+    {
+        slots[0].progress = SlotProgress::Started;
+    }
+    render_update(
+        &LocalUpdate::Head(ipc_tests::head(id, false)),
+        &mut state,
+        &mut out,
+        &mut err,
+        false,
+        false,
+    )
+    .unwrap();
+    for _ in 0..2 {
+        render_update(
+            &LocalUpdate::Entry {
+                entry: node.clone(),
+            },
+            &mut state,
+            &mut out,
+            &mut err,
+            false,
+            false,
+        )
+        .unwrap();
+    }
+    let text = String::from_utf8(err).unwrap();
+    assert_eq!(text.lines().filter(|l| l.starts_with("tool ")).count(), 1);
+    assert!(text.contains("indeterminate"));
+    assert!(!text.contains("not_executed"));
+    for (progress, expected) in [
+        (SlotProgress::Registered, "not_executed"),
+        (SlotProgress::Started, "indeterminate"),
+    ] {
+        let mut old = node.clone();
+        if let ConversationEntry::Step {
+            content: Node::Step { slots, .. },
+            ..
+        } = old.as_mut()
+        {
+            slots[0].progress = progress;
+        }
+        // 新观察者尚未显示旧轮的槽位；新一轮的 Owner 不能挡住旧轮的停止结果。
+        let mut state = RunRenderState::default();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let mut new_head = ipc_tests::head(lattice_api::local::new_turn_id(), true);
+        new_head.position = NodeId(4);
+        render_update(
+            &LocalUpdate::Head(new_head),
+            &mut state,
+            &mut out,
+            &mut err,
+            false,
+            false,
+        )
+        .unwrap();
+        for _ in 0..2 {
+            render_update(
+                &LocalUpdate::Entry { entry: old.clone() },
+                &mut state,
+                &mut out,
+                &mut err,
+                false,
+                false,
+            )
+            .unwrap();
+        }
+        let text = String::from_utf8(err).unwrap();
+        assert!(
+            text.contains(expected),
+            "新轮的 Owner 不能隐藏旧轮 {expected}：{text}"
+        );
+        assert_eq!(text.lines().filter(|l| l.starts_with("tool ")).count(), 1);
+    }
 }

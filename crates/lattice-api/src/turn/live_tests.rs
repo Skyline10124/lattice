@@ -160,7 +160,7 @@ async fn orphaned_turn_allows_send_without_mutating_old_facts_or_events() {
 }
 
 #[tokio::test]
-async fn duplicate_turn_is_readonly_without_configuration_but_different_input_conflicts() {
+async fn used_turn_conflicts_before_configuration_and_never_runs_twice() {
     let llm = Arc::new(
         FakeStreamingLlmClient::builder()
             .push_events(happy_events())
@@ -181,13 +181,13 @@ async fn duplicate_turn_is_readonly_without_configuration_but_different_input_co
         retry.clone(),
         None,
     );
-    assert!(
-        matches!(execution.acceptance.await.unwrap().unwrap(), TurnAcceptance::Existing { turn } if turn == first)
-    );
-    assert_eq!(
-        execution.completion.await.unwrap().unwrap(),
-        TurnCompletion::Closed(Box::new(first.clone()))
-    );
+    assert!(matches!(
+        execution.acceptance.await.unwrap(),
+        Err(ApiError::Conflict(
+            crate::session::RequestConflict::TurnIdUsed
+        ))
+    ));
+    assert!(execution.completion.await.unwrap().is_err());
     retry.input.push(' ');
     let conflict = start_turn(
         fixture.api.clone(),
@@ -199,7 +199,9 @@ async fn duplicate_turn_is_readonly_without_configuration_but_different_input_co
     );
     assert!(matches!(
         conflict.acceptance.await.unwrap(),
-        Err(ApiError::Conflict(_))
+        Err(ApiError::Conflict(
+            crate::session::RequestConflict::TurnIdUsed
+        ))
     ));
     assert!(conflict.completion.await.unwrap().is_err());
     assert_eq!(llm.call_count(), 1);
@@ -240,10 +242,7 @@ async fn absent_session_fails_before_startup_and_injected_store_remains_authorit
     let TurnAcceptance::Accepted { turn } = execution.acceptance.await.unwrap().unwrap() else {
         panic!("accepted")
     };
-    assert!(matches!(
-        execution.completion.await.unwrap().unwrap(),
-        TurnCompletion::Closed(_)
-    ));
+    execution.completion.await.unwrap().unwrap();
     assert_eq!(
         fixture
             .store
@@ -341,4 +340,62 @@ async fn continue_at_library_step_limit_closes_reserved_step_32_without_request(
     assert!(
         matches!(events.last(), Some(TurnEvent::TurnFailed { step, summary, .. }) if step == limit && summary == &detail.summary)
     );
+}
+
+#[tokio::test]
+async fn raced_existing_turn_conflicts_even_when_readback_session_does_not_exist() {
+    let llm = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_events(happy_events())
+            .build(),
+    );
+    let fixture = setup_fixture(llm.clone(), &[]);
+    let turn_id = id();
+    let observer = Arc::new(super::observer::ObserverSink::default());
+    let (entered, entry) = tokio::sync::oneshot::channel();
+    let (release, resume) = tokio::sync::oneshot::channel();
+    *observer.before_accept.lock().unwrap() = Some((entered, resume));
+    let execution = super::execute::start_execution(super::execute::ExecutionInput {
+        session: fixture.api.clone(),
+        layout: fixture.layout.clone(),
+        turn_id,
+        workspace: fixture.root.clone(),
+        request: fixture.request.clone(),
+        connection: None,
+        shutdown: Arc::default(),
+        observer,
+        new_session: Some(crate::local::new_session_id()),
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), entry)
+        .await
+        .unwrap()
+        .unwrap();
+    // 另一个 Session 的提交在前置查重之后获胜；输家 Session 尚未创建，读回必定失败。
+    let winner = start_turn(
+        fixture.api.clone(),
+        fixture.layout.clone(),
+        turn_id,
+        fixture.root.clone(),
+        fixture.request.clone(),
+        None,
+    );
+    assert!(matches!(
+        winner.acceptance.await.unwrap().unwrap(),
+        TurnAcceptance::Accepted { .. }
+    ));
+    winner.completion.await.unwrap().unwrap();
+    release.send(()).unwrap();
+    assert!(matches!(
+        execution.acceptance.await.unwrap(),
+        Err(ApiError::Conflict(
+            crate::session::RequestConflict::TurnIdUsed
+        ))
+    ));
+    assert!(matches!(
+        execution.completion.await.unwrap(),
+        Err(ApiError::Conflict(
+            crate::session::RequestConflict::TurnIdUsed
+        ))
+    ));
+    assert_eq!(llm.call_count(), 1);
 }

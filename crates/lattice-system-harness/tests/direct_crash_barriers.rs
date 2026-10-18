@@ -6,87 +6,99 @@ mod support;
 
 use lattice_system_harness::{
     CommandOutcome, FAKE_API_KEY, FakeLlmServer, LatticeCommand, ScenarioEvidence, ScenarioSpec,
-    ScenarioWorld, SseScript,
+    ScenarioWorld, Segment, SegmentKind, SseScript, StepEnd, StepProgress, ViewState,
+    merge_segments,
 };
 use serde_json::{Value, json};
 use std::{
-    io::{Read, Write},
-    os::unix::net::UnixStream,
+    io::Read,
     path::Path,
     time::{Duration, Instant},
 };
+use support::{
+    Watcher, Wire, configuration, ipc, parse_send_stdout, submit_request, turn_closed, turn_lookup,
+};
 
+/// 直接经 IPC 提交时由测试充当客户端生成的身份。
 const TURN: &str = "00000000-0000-4000-8000-000000000001";
 const OTHER: &str = "00000000-0000-4000-8000-000000000002";
+const THIRD: &str = "00000000-0000-4000-8000-000000000003";
+const SESSION: &str = "5e550000000000000000000000000001";
 const BARRIER: &str = "LATTICE_TEST_TURN_BARRIER";
 const ACK: &str = "LATTICE_TEST_TURN_BARRIER_ACK";
 
-// 每条连接独立重组 v3 ResponseFrame，不把半帧当成领域响应。
-struct Wire {
-    stream: UnixStream,
-    message: u64,
+fn timeout(world: &ScenarioWorld, spec: &ScenarioSpec) -> Duration {
+    world.budget(spec).cap_timeout(spec.step_timeout())
 }
-impl Wire {
-    fn connect(world: &ScenarioWorld, request: Value) -> Self {
-        let mut stream =
-            UnixStream::connect(world.session_store_dir().join("local/api.sock")).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .unwrap();
-        stream
-            .set_write_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        let body = serde_json::to_vec(&request).unwrap();
-        stream.write_all(b"LTLOCAL3").unwrap();
-        stream
-            .write_all(&(body.len() as u32).to_be_bytes())
-            .unwrap();
-        stream.write_all(&body).unwrap();
-        Self { stream, message: 0 }
-    }
-    fn next(&mut self) -> Value {
-        let mut logical = String::new();
-        loop {
-            let mut header = [0; 12];
-            self.stream.read_exact(&mut header).unwrap();
-            assert_eq!(&header[..8], b"LTLOCAL3");
-            let len = u32::from_be_bytes(header[8..].try_into().unwrap()) as usize;
-            assert!((1..=16 * 1024 * 1024).contains(&len));
-            let mut bytes = vec![0; len];
-            self.stream.read_exact(&mut bytes).unwrap();
-            let frame: Value = serde_json::from_slice(&bytes).unwrap();
-            assert_eq!(frame["message_id"], self.message);
-            assert_eq!(frame["offset"], logical.len());
-            logical.push_str(frame["json_fragment"].as_str().unwrap());
-            if frame["complete"].as_bool().unwrap() {
-                self.message += 1;
-                return serde_json::from_str(&logical).unwrap();
-            }
-        }
-    }
-    /// `wait` 内未收到任何字节；不读取半帧，收到即失败。
-    fn assert_silent(&mut self, wait: Duration) {
-        self.stream.set_read_timeout(Some(wait)).unwrap();
-        let read = self.stream.read(&mut [0; 1]);
-        self.stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .unwrap();
-        assert!(
-            matches!(&read, Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)),
-            "unexpected delivery: {read:?}"
-        );
-    }
+/// 一段观察等待的绝对截止时间。
+fn deadline(world: &ScenarioWorld, spec: &ScenarioSpec) -> Instant {
+    Instant::now() + timeout(world, spec)
 }
-fn call(world: &ScenarioWorld, request: Value) -> Value {
-    Wire::connect(world, request).next()
+/// 新开一次 `watch` 并读完开头的会话头与最近几轮。
+fn watch(world: &ScenarioWorld, spec: &ScenarioSpec, sid: &str) -> Watcher {
+    let mut watcher = Watcher::open(world, timeout(world, spec), sid);
+    watcher.initial();
+    watcher
 }
-fn query(world: &ScenarioWorld, tid: &str) -> Value {
-    let response = call(
+/// 按 TurnId 查询已接受的一轮，返回 TurnDetail。
+fn accepted_detail(world: &ScenarioWorld, spec: &ScenarioSpec, tid: &str) -> Value {
+    let response = turn_lookup(world, timeout(world, spec), tid);
+    assert_eq!(response["response"], "turn", "{response}");
+    assert_eq!(response["value"]["status"], "accepted", "{response}");
+    response["value"]["turn"].clone()
+}
+fn cancel(world: &ScenarioWorld, spec: &ScenarioSpec, tid: &str) -> Value {
+    ipc(
         world,
-        json!({"operation":"query","session_id":null,"turn_id":tid}),
-    );
-    assert_eq!(response["response"], "view", "{response}");
-    response["value"].clone()
+        timeout(world, spec),
+        json!({"operation":"cancel","turn_id":tid}),
+    )
+}
+/// CLI 生成的身份：从会话列表中唯一一个未关闭的最后一轮读出。
+fn running_turn(
+    world: &ScenarioWorld,
+    spec: &ScenarioSpec,
+    evidence: &mut ScenarioEvidence,
+) -> (String, String) {
+    let list = read_json(world, spec, evidence, &["--json", "session", "list"]);
+    let running: Vec<_> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|row| {
+            Some((
+                row["session_id"].as_str()?.to_owned(),
+                row["unclosed_turn"].as_str()?.to_owned(),
+            ))
+        })
+        .collect();
+    assert_eq!(running.len(), 1, "{list}");
+    running.into_iter().next().unwrap()
+}
+/// 已知会话中未关闭的最后一轮。
+fn unclosed_turn(
+    world: &ScenarioWorld,
+    spec: &ScenarioSpec,
+    evidence: &mut ScenarioEvidence,
+    sid: &str,
+) -> String {
+    read_json(world, spec, evidence, &["--json", "session", "log", sid])["unclosed_turn"]
+        .as_str()
+        .expect("unclosed turn")
+        .to_owned()
+}
+/// 观察者持有的某个 Step 条目的进度。
+fn step_progress(view: &ViewState, node: u64) -> Option<&StepProgress> {
+    view.entries
+        .get(&node)
+        .and_then(|entry| entry.step())
+        .map(|step| &step.progress)
+}
+fn segment(kind: SegmentKind, text: &str) -> Segment {
+    Segment {
+        kind,
+        text: text.into(),
+    }
 }
 fn cli(
     world: &ScenarioWorld,
@@ -133,20 +145,6 @@ fn wait_for_ack(path: &Path, timeout: Duration) -> Value {
         std::thread::sleep(Duration::from_millis(5));
     }
 }
-fn wait_view(world: &ScenarioWorld, tid: &str, predicate: impl Fn(&Value) -> bool) -> Value {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let view = query(world, tid);
-        if predicate(&view) {
-            return view;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "expected durable/observation cut not reached: {view}"
-        );
-        std::thread::yield_now();
-    }
-}
 fn history_tip(world: &ScenarioWorld) -> String {
     let paths: Vec<_> = std::fs::read_dir(world.session_store_dir().join("projects"))
         .unwrap()
@@ -174,32 +172,6 @@ fn calls(prefix: &str, path: &str) -> Value {
 }
 fn end() -> Value {
     json!({"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}})
-}
-fn segments(reply: &Value) -> Vec<Value> {
-    let mut result: Vec<Value> = vec![];
-    for part in reply["parts"].as_array().unwrap() {
-        let (kind, text) =
-            if let Some(text) = part.pointer("/semantic/text/text").and_then(Value::as_str) {
-                ("text", text)
-            } else if let Some(text) = part
-                .pointer("/semantic/reasoning/text")
-                .and_then(Value::as_str)
-            {
-                ("reasoning", text)
-            } else {
-                continue;
-            };
-        if let Some(last) = result.last_mut()
-            && last["type"] == kind
-        {
-            let mut joined = last["text"].as_str().unwrap().to_owned();
-            joined.push_str(text);
-            last["text"] = joined.into();
-        } else {
-            result.push(json!({"type":kind,"text":text}));
-        }
-    }
-    result
 }
 fn provenance(world: &ScenarioWorld, evidence: &mut ScenarioEvidence, script: Value) {
     let driver = support::driver();
@@ -244,160 +216,6 @@ fn stage(
     read_json(world, spec, evidence, &["--json", "lancet", "status"]);
     turn
 }
-#[test]
-fn late_successful_history_page_cannot_replace_newer_tui_snapshot() {
-    use lattice_system_harness::PtyTuiDriver;
-    let (world, spec) = support::direct_world(
-        "history-late-success",
-        "history",
-        "[\"observe.workspace\",\"mutate.create\"]",
-        "",
-    );
-    world.write_project_file("seed.txt", "seed\n").unwrap();
-    let budget = world.budget(&spec);
-    let mut evidence = support::evidence(&world, &spec);
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut delta = calls("late", "kept.txt");
-        delta["content"] = json!("OLD_STEP_BODY");
-        let script = support::sequence(vec![
-            SseScript::Chunks {
-                chunks: vec![chunk(delta), end()],
-            },
-            SseScript::plain("NEW_FINAL_BODY"),
-        ]);
-        provenance(
-            &world,
-            &mut evidence,
-            json!({"test":"late_successful_history_page_cannot_replace_newer_tui_snapshot",
-            "script":format!("{script:?}"),"old_anchor":2,"new_anchor":3}),
-        );
-        let (provider, gate) = FakeLlmServer::start_segmented(script, spec.step_timeout()).unwrap();
-        let schedule = world.root().join("schedule");
-        std::fs::create_dir(&schedule).unwrap();
-        std::fs::write(schedule.join("history_ready_2.arm"), b"").unwrap();
-        world.set_env("LATTICE_TEST_SCHEDULE_DIR", schedule.display().to_string());
-        let daemon = support::crash::start(&world, &spec, &budget);
-        let request = json!({"operation":"submit","request":{"session_id":null,"turn_id":TURN,
-            "workspace":world.project_dir(),"input":"late page","agent":"history"},"configuration":{
-            "profile_toml":std::fs::read_to_string(world.project_dir().join(".lattice/agents/history/agent.toml")).unwrap(),
-            "system_prompt":"You are a concise test agent.","connection":{"alias":"compat:history",
-            "provider":"openai_compatible","provider_model":"history","base_url":provider.base_url(),"api_key":FAKE_API_KEY,"roots_der":support::harness_roots_der()}}});
-        let accepted = call(&world, request);
-        assert_eq!(accepted["value"]["acceptance"], "accepted", "{accepted}");
-        for n in 1..=2 {
-            gate.wait_until_stalled(n, budget.cap_timeout(spec.step_timeout()))
-                .unwrap();
-            gate.release_next(budget.cap_timeout(spec.step_timeout()))
-                .unwrap();
-        }
-        gate.wait_until_stalled(3, budget.cap_timeout(spec.step_timeout()))
-            .unwrap();
-        let old = wait_view(&world, TURN, |v| {
-            v["history"]["head"] == 2
-                && v["selected_turn"]["summary"]["progress"]["progress"] != "closed"
-        });
-        let sid = old["session"]["session_id"].as_str().unwrap();
-        let mut tui = PtyTuiDriver::reconnect(&support::driver(), &world, sid).unwrap();
-        let observed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            tui.wait_for_ready(budget.cap_timeout(spec.step_timeout()))
-                .unwrap();
-            let ready = wait_for_ack(
-                &schedule.join("history_ready_2.ready"),
-                budget.cap_timeout(spec.step_timeout()),
-            );
-            assert_eq!(ready["anchor"], old["history"]);
-            assert!(ready["fragments"].as_u64().unwrap() > 0);
-            assert!(!schedule.join("history_ready_2.release").exists());
-            // 第二条公开读取核实旧页实际内容，首个TUI读取仍留在成功后的gate内。
-            let page = call(
-                &world,
-                json!({"operation":"history","anchor":old["history"],"cursor":null,"max_bytes":65536}),
-            );
-            assert_eq!(page["response"], "history");
-            assert!(page.to_string().contains("OLD_STEP_BODY"));
-            assert!(!page.to_string().contains("NEW_FINAL_BODY"));
-            gate.release(budget.cap_timeout(spec.step_timeout()))
-                .unwrap();
-            let closed = wait_view(&world, TURN, |v| {
-                v["selected_turn"]["summary"]["outcome"] == "completed"
-            });
-            tui.send_line("/reconnect").unwrap();
-            tui.wait_for(budget.cap_timeout(spec.step_timeout()), |text| {
-                text.contains("NEW_FINAL_BODY") && text.contains("完成")
-            })
-            .unwrap();
-            let newer = tui
-                .redraw_text(budget.cap_timeout(spec.step_timeout()))
-                .unwrap();
-            assert!(
-                newer.contains("OLD_STEP_BODY")
-                    && newer.contains("NEW_FINAL_BODY")
-                    && newer.contains("完成")
-            );
-            std::fs::write(schedule.join("history_return_2.arm"), b"").unwrap();
-            std::fs::write(schedule.join("history_return_2.release"), b"").unwrap();
-            std::fs::write(schedule.join("history_ready_2.release"), b"").unwrap();
-            let returned = wait_for_ack(
-                &schedule.join("history_return_2.ready"),
-                budget.cap_timeout(spec.step_timeout()),
-            );
-            assert_eq!(returned["anchor"], old["history"]);
-            let after = tui
-                .redraw_text(budget.cap_timeout(spec.step_timeout()))
-                .unwrap();
-            assert!(
-                after.contains("NEW_FINAL_BODY") && after.contains("完成"),
-                "{after}"
-            );
-            assert_eq!(after.matches("OLD_STEP_BODY").count(), 1);
-            assert_eq!(after.matches("NEW_FINAL_BODY").count(), 1);
-            let mut observer = Wire::connect(
-                &world,
-                json!({"operation":"subscribe","target":{"session_id":sid,"turn_id":TURN},"cursor":null}),
-            );
-            assert_eq!(observer.next()["value"]["view"]["history"]["head"], 3);
-            let finished = observer.next();
-            assert_eq!(finished["value"]["type"], "finished");
-            assert_paired_history(&finished["value"]["history"], &closed["selected_turn"]);
-            evidence
-                .record_json(
-                    "late-success-window",
-                    &json!({"ready":ready,"old_page":page,"newer_frame":newer,
-                "returned":returned,"after_frame":after,"finished":finished}),
-                )
-                .unwrap();
-            stage(&world, &spec, &mut evidence, sid, TURN);
-            evidence
-                .record_json(
-                    "state-summary",
-                    &json!({"turn":closed["selected_turn"],"provider_requests":2}),
-                )
-                .unwrap();
-            tui.send_line("/quit").unwrap();
-            tui.wait_for_exit(budget.cap_timeout(spec.step_timeout()))
-                .unwrap();
-        }));
-        evidence.record_pty(tui.output());
-        drop(tui);
-        if let Err(error) = observed {
-            std::panic::resume_unwind(error);
-        }
-        assert_eq!(provider.captured_requests().len(), 2);
-        evidence.record_captures(provider.captured_requests());
-        cli(
-            &world,
-            &spec,
-            &mut evidence,
-            &["--json", "daemon", "stop"],
-            0,
-        );
-        let stopped = daemon.wait(None).unwrap();
-        evidence.record_command("late-page backend stop", &stopped);
-        assert!(stopped.is_clean_exit(0));
-    }));
-    support::finish_recorded(evidence, result);
-}
-
 #[test]
 fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
     use lattice_system_harness::{RunningCommand, SessionSendDriver};
@@ -538,20 +356,15 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
                 "beta input",
                 "--agent",
                 "operator",
-                "--turn-id",
-                OTHER,
             ],
             &mut evidence,
         );
-        assert!(
-            std::str::from_utf8(&second.stdout)
-                .unwrap()
-                .lines()
-                .all(|l| serde_json::from_str::<Value>(l).is_ok())
-        );
+        let second = parse_send_stdout(&second.stdout, second.exit_code());
+        assert!(second.malformed_lines.is_empty());
+        let beta_tid = second.accepted_turn_id().unwrap().to_owned();
         assert_eq!(world.daemon_pids().unwrap().len(), 1);
         let beta_turn: Value = serde_json::from_slice(
-            &beta_read(&["--json", "session", "turn", OTHER], &mut evidence).stdout,
+            &beta_read(&["--json", "session", "turn", &beta_tid], &mut evidence).stdout,
         )
         .unwrap();
         let beta_sid = beta_turn["session_id"].as_str().unwrap();
@@ -579,25 +392,15 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
         assert_eq!(beta_tail["next_after"], empty["next_after"]);
         let mut turns = vec![tid.to_string()];
         let mut windows = Vec::new();
-        for (index, crash) in [false, true].into_iter().enumerate() {
-            let turn = format!("00000000-0000-4000-8000-{:012}", index + 3);
+        for crash in [false, true] {
             let front = driver
                 .start(
                     &world,
                     &LatticeCommand {
-                        args: [
-                            "--json",
-                            "session",
-                            "send",
-                            "wait fetch",
-                            "--session",
-                            sid,
-                            "--turn-id",
-                            &turn,
-                        ]
-                        .into_iter()
-                        .map(String::from)
-                        .collect(),
+                        args: ["--json", "session", "send", "wait fetch", "--session", sid]
+                            .into_iter()
+                            .map(String::from)
+                            .collect(),
                         timeout: Some(budget.cap_timeout(spec.step_timeout())),
                     },
                 )
@@ -623,6 +426,7 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
                 assert!(request.len() <= 16384);
             }
             assert!(request.starts_with(b"GET /operator-hold HTTP/1.1\r\n"));
+            let turn = unclosed_turn(&world, &spec, &mut evidence, sid);
             let active = read_json(
                 &world,
                 &spec,
@@ -671,7 +475,12 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
                     orphan["steps"][0]["slots"][0]["progress"]["state"],
                     "started"
                 );
-                let head = query(&world, &turn)["session"]["current"]
+                let head = read_json(
+                    &world,
+                    &spec,
+                    &mut evidence,
+                    &["--json", "session", "log", sid],
+                )["session"]["current"]
                     .as_u64()
                     .unwrap()
                     .to_string();
@@ -682,13 +491,7 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
                     &["--json", "session", "rewind", sid, &head],
                 );
             } else {
-                assert_eq!(
-                    call(
-                        &world,
-                        json!({"operation":"cancel","target":{"session_id":sid,"turn_id":turn}})
-                    )["value"]["owned"],
-                    true
-                );
+                assert_eq!(cancel(&world, &spec, &turn)["value"]["owned"], true);
                 let out = front.wait(None).unwrap();
                 evidence.record_command("cancelled fetch", &out);
                 assert!(out.is_clean_exit(2));
@@ -811,7 +614,7 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
                 "--session",
                 beta_sid,
                 "--turn",
-                OTHER,
+                &beta_tid,
             ],
             2,
         );
@@ -841,7 +644,7 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
                 "--session",
                 beta_sid,
                 "--turn",
-                OTHER,
+                &beta_tid,
             ],
             &mut evidence,
         );
@@ -888,7 +691,7 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
         provenance(
             &world,
             &mut evidence,
-            json!({"test":"r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step","first":first,"second":second,"turn":TURN}),
+            json!({"test":"r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step","first":first,"second":second}),
         );
         let (mut provider, gate) = FakeLlmServer::start_segmented(
             SseScript::Sequence {
@@ -919,8 +722,6 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
                         "original input".into(),
                         "--agent".into(),
                         "vertical".into(),
-                        "--turn-id".into(),
-                        TURN.into(),
                     ],
                     timeout: Some(budget.cap_timeout(spec.step_timeout())),
                 },
@@ -928,12 +729,10 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
             .unwrap();
         gate.wait_until_stalled(1, budget.cap_timeout(spec.step_timeout()))
             .unwrap();
-        let accepted = query(&world, TURN);
-        let sid = accepted["session"]["session_id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        evidence.record_json("accepted", &accepted).unwrap();
+        let (sid, tid) = running_turn(&world, &spec, &mut evidence);
+        evidence
+            .record_json("accepted", &accepted_detail(&world, &spec, &tid))
+            .unwrap();
         for i in 1..=5 {
             gate.wait_until_stalled(i, budget.cap_timeout(spec.step_timeout()))
                 .unwrap();
@@ -942,7 +741,7 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
         }
         gate.wait_until_stalled(6, budget.cap_timeout(spec.step_timeout()))
             .unwrap();
-        let first_done = stage(&world, &spec, &mut evidence, &sid, TURN);
+        let first_done = stage(&world, &spec, &mut evidence, &sid, &tid);
         assert_eq!(first_done["steps"][0]["end"], json!({"end":"continue"}));
         let slots = first_done["steps"][0]["slots"].as_array().unwrap();
         assert_eq!(slots.len(), 3);
@@ -952,15 +751,17 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
             "durable\n"
         );
         let tip = history_tip(&world);
-        let mut observer = Wire::connect(
-            &world,
-            json!({"operation":"subscribe","target":{"session_id":sid,"turn_id":TURN},"cursor":null}),
+        // 第一次观察在第二步生成前断开；之后重新开始的观察不依赖它看到过什么。
+        let cut = watch(&world, &spec, &sid);
+        assert!(cut.view.head.as_ref().unwrap().owner);
+        assert_eq!(
+            step_progress(&cut.view, 2),
+            Some(&StepProgress::Closed(StepEnd::Continue))
         );
-        let cut = observer.next();
-        assert_eq!(cut["value"]["type"], "snapshot");
-        let cursor = cut["value"]["view"]["cursor"].clone();
-        evidence.record_json("before-disconnect", &cut).unwrap();
-        drop(observer);
+        evidence
+            .record_json("before-disconnect", &json!(cut.received))
+            .unwrap();
+        drop(cut);
         let detached = frontend.kill_and_wait().unwrap();
         support::assert_forced_kill(&detached);
         assert!(detached.stdout_complete && detached.stderr_complete);
@@ -974,66 +775,91 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
         }
         gate.wait_until_stalled(76, budget.cap_timeout(spec.step_timeout()))
             .unwrap();
-        let view = wait_view(&world, TURN, |v| {
-            v["attempt"]["segments"]
-                .as_array()
-                .is_some_and(|s| s.len() == 70)
+        let mut expected: Vec<_> = (0..70)
+            .map(|i| {
+                if i % 2 == 0 {
+                    segment(SegmentKind::Text, &format!("t{i:02};"))
+                } else {
+                    segment(SegmentKind::Reasoning, &format!("r{i:02};"))
+                }
+            })
+            .collect();
+        // 新的观察者从这次尝试的开头收到已生成的文字，之后只收到接在后面的部分。
+        let mut resumed = watch(&world, &spec, &sid);
+        resumed.until(deadline(&world, &spec), "70 text segments", |view| {
+            view.texts.get(&(3, 0)).is_some_and(|text| text.len() == 70)
         });
-        assert!(
-            view["cursor"]["sequence"].as_u64().unwrap()
-                > cursor["sequence"].as_u64().unwrap() + 64
-        );
-        let mut expected: Vec<_> = (0..70).map(|i|json!({"type":if i%2==0 {"text"}else{"reasoning"},"text":format!("{}{i:02};",if i%2==0 {"t"}else{"r"})})).collect();
-        assert_eq!(view["attempt"]["segments"], json!(expected));
-        assert_eq!(
-            view["attempt"]["key"],
-            json!({"turn_id":TURN,"model_step_ordinal":1,"attempt_ordinal":0})
-        );
-        let mut resumed = Wire::connect(
-            &world,
-            json!({"operation":"subscribe","target":{"session_id":sid,"turn_id":TURN},"cursor":cursor}),
-        );
-        let reset = resumed.next();
-        assert_eq!(reset["value"]["type"], "snapshot");
-        assert_eq!(reset["value"]["view"]["attempt"], view["attempt"]);
-        assert!(
-            reset["value"]["view"]["cursor"]["sequence"]
-                .as_u64()
-                .unwrap()
-                >= view["cursor"]["sequence"].as_u64().unwrap()
-        );
+        assert_eq!(resumed.view.texts[&(3, 0)], expected);
+        let first_text = resumed
+            .received
+            .iter()
+            .find(|message| message["value"]["type"] == "text")
+            .unwrap();
+        assert_eq!(first_text["value"]["offset"], 0);
         evidence
-            .record_json("reconnected-outside-window", &reset)
+            .record_json("reconnected-midway", &json!(resumed.received))
             .unwrap();
         gate.release_next(budget.cap_timeout(spec.step_timeout()))
             .unwrap();
         gate.wait_until_stalled(77, budget.cap_timeout(spec.step_timeout()))
             .unwrap();
-        let event = resumed.next();
-        assert_eq!(event["value"]["type"], "event");
+        resumed.until(deadline(&world, &spec), "the 71st text segment", |view| {
+            view.texts[&(3, 0)].len() == 71
+        });
+        let sent: usize = expected.iter().map(|segment| segment.text.len()).sum();
+        let appended = resumed.received.last().unwrap();
         assert_eq!(
-            event["value"]["cursor"]["sequence"].as_u64().unwrap(),
-            reset["value"]["view"]["cursor"]["sequence"]
-                .as_u64()
-                .unwrap()
-                + 1
+            appended["value"],
+            json!({"type":"text","node":3,"attempt":0,"offset":sent,
+                "segments":[{"kind":"text","text":"t70;"}]})
         );
-        assert_eq!(event["value"]["event"]["type"], "token_delta");
-        assert_eq!(event["value"]["event"]["key"], view["attempt"]["key"]);
-        assert_eq!(event["value"]["event"]["content"], "t70;");
-        expected.push(json!({"type":"text","text":"t70;"}));
-        evidence.record_json("resumed-event", &event).unwrap();
+        expected.push(segment(SegmentKind::Text, "t70;"));
         drop(resumed);
-        for (index,request) in [json!({"operation":"submit","request":{"session_id":sid,"turn_id":OTHER,"workspace":world.project_dir(),"input":"must be busy","agent":"vertical"},"configuration":null}),json!({"operation":"rewind","session_id":sid,"target":2,"workspace":world.project_dir()})].into_iter().enumerate() {
-            let rejected = call(&world,request); assert_eq!(rejected["value"]["kind"],"busy"); evidence.record_json(&format!("busy-{index}"),&rejected).unwrap();
+        let configured = configuration(&world, "vertical", &provider.base_url());
+        for (index, request) in [
+            submit_request(
+                &world,
+                OTHER,
+                json!({"existing":sid}),
+                "must be busy",
+                Some("vertical"),
+                configured.clone(),
+            ),
+            json!({"operation":"rewind","session_id":sid,"target":2,"workspace":world.project_dir()}),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let rejected = ipc(&world, timeout(&world, &spec), request);
+            assert_eq!(rejected["value"]["kind"], "busy", "{rejected}");
+            evidence
+                .record_json(&format!("busy-{index}"), &rejected)
+                .unwrap();
         }
-        let existing = call(
+        // 同一 TurnId 再次提交不找回原请求，而是冲突；新会话不会因此建立。
+        let reused = ipc(
             &world,
-            json!({"operation":"submit","request":{"session_id":null,"turn_id":TURN,"workspace":world.project_dir(),"input":"original input","agent":null},"configuration":null}),
+            timeout(&world, &spec),
+            submit_request(
+                &world,
+                &tid,
+                json!({"new":SESSION}),
+                "original input",
+                Some("vertical"),
+                configured,
+            ),
         );
-        assert_eq!(existing["value"]["acceptance"], "existing");
-        assert_eq!(existing["value"]["turn"]["session_id"], sid);
-        evidence.record_json("existing", &existing).unwrap();
+        assert_eq!(reused["response"], "error", "{reused}");
+        assert_eq!(reused["value"]["kind"], "conflict");
+        assert_eq!(reused["value"]["conflict"], "turn_id_used");
+        evidence.record_json("turn-id-used", &reused).unwrap();
+        assert_eq!(
+            read_json(&world, &spec, &mut evidence, &["--json", "session", "list"])
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
         assert_eq!(provider.captured_requests().len(), 2);
         let log = read_json(
             &world,
@@ -1050,14 +876,7 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
             &spec,
             &mut evidence,
             &[
-                "--json",
-                "session",
-                "send",
-                "parallel",
-                "--agent",
-                "vertical",
-                "--turn-id",
-                OTHER,
+                "--json", "session", "send", "parallel", "--agent", "vertical",
             ],
             0,
         );
@@ -1069,7 +888,7 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
             .unwrap();
         let marker = wait_for_ack(&ack, budget.cap_timeout(spec.step_timeout()));
         assert_eq!(marker["barrier"], "invocation_started");
-        assert_eq!(marker["turn_id"], TURN);
+        assert_eq!(marker["turn_id"], tid);
         assert_eq!(marker["session_id"], sid);
         assert_eq!(marker["step"], 1);
         assert_eq!(marker["part"], 72);
@@ -1098,7 +917,7 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
         assert!(world.daemon_pids().unwrap().is_empty());
         world.unset_env(BARRIER);
         world.unset_env(ACK);
-        let reopened = stage(&world, &spec, &mut evidence, &sid, TURN);
+        let reopened = stage(&world, &spec, &mut evidence, &sid, &tid);
         assert_eq!(reopened["summary"]["outcome"], "failed");
         assert_eq!(reopened["steps"][0], first_done["steps"][0]);
         let slots = reopened["steps"][1]["slots"].as_array().unwrap();
@@ -1107,23 +926,19 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
         assert_eq!(slots[1]["progress"]["state"], "started");
         assert_eq!(slots[2]["progress"]["state"], "registered");
         assert_eq!(slots[1]["invocation_id"], marker["invocation_id"]);
-        let fresh = query(&world, TURN);
-        assert_eq!(fresh["owned"], false);
-        assert!(fresh["attempt"].is_null());
-        assert_ne!(fresh["cursor"]["epoch"], cursor["epoch"]);
-        assert_eq!(segments(&fresh["unclosed_step"][1]["reply"]), expected);
-        evidence.record_json("read-only-reopen", &fresh).unwrap();
-        let mut reconnected = Wire::connect(
-            &world,
-            json!({"operation":"subscribe","target":{"session_id":sid,"turn_id":TURN},"cursor":cursor}),
-        );
-        let restarted_snapshot = reconnected.next();
-        assert_eq!(restarted_snapshot["value"]["type"], "snapshot");
-        assert_eq!(restarted_snapshot["value"]["view"], fresh);
+        // 重启后不必先观察那一轮：会话头直接说明它没有 Owner，生成中的文字随进程消失。
+        let fresh = watch(&world, &spec, &sid);
+        let head = fresh.view.head.as_ref().unwrap();
+        assert!(!head.owner);
+        assert_eq!(head.turn_id.as_deref(), Some(tid.as_str()));
+        assert_eq!(head.position, 3);
+        assert!(fresh.view.texts.is_empty());
+        let unclosed = fresh.view.entries[&3].step().unwrap();
+        assert_eq!(merge_segments(&unclosed.reply), expected);
         evidence
-            .record_json("old-epoch-subscription", &restarted_snapshot)
+            .record_json("read-only-reopen", &json!(fresh.received))
             .unwrap();
-        drop(reconnected);
+        drop(fresh);
         assert_eq!(provider.captured_requests().len(), 2);
         assert!(!world.project_dir().join("must-not-exist.txt").exists());
         assert_eq!(history_tip(&world), tip);
@@ -1134,7 +949,7 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
             &["--json", "session", "rewind", &sid, "2"],
         );
         assert_eq!(moved["current"], 2);
-        let closed = stage(&world, &spec, &mut evidence, &sid, TURN);
+        let closed = stage(&world, &spec, &mut evidence, &sid, &tid);
         let replay = read_json(
             &world,
             &spec,
@@ -1146,7 +961,7 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
                 "--session",
                 &sid,
                 "--turn",
-                TURN,
+                &tid,
             ],
         );
         assert_eq!(closed["summary"]["outcome"], "failed");
@@ -1167,27 +982,23 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
         assert!(stopped["slots"][2]["reason"].is_null());
         // 崩溃发生在 Started 前后，停止原因都是进程退出。
         assert_eq!(stopped["end"]["cause"], json!({"cause":"process_exit"}));
-        // 未关闭节点只随快照交付；固定历史仅包含它之前的不可变节点。
+        // 未关闭的末端 Step 与它之前的节点一样作为条目给出，并带这一轮的结局。
         read_json(
             &world,
             &spec,
             &mut evidence,
             &["--json", "session", "rewind", &sid, "3"],
         );
-        let mut history = Wire::connect(
-            &world,
-            json!({"operation":"subscribe","target":{"session_id":sid,"turn_id":TURN},"cursor":null}),
-        );
-        let current_snapshot = history.next();
-        assert_eq!(current_snapshot["value"]["view"]["selected_turn"], closed);
-        let finished = history.next();
-        assert_eq!(finished["value"]["type"], "finished");
-        let entries = finished["value"]["history"]["entries"].as_array().unwrap();
-        assert_eq!(entries.len(), 2);
-        let content = &current_snapshot["value"]["view"]["unclosed_step"][1];
-        assert_eq!(content["slots"].as_array().unwrap().len(), 3);
-        assert_eq!(segments(&content["reply"]), expected);
-        evidence.record_json("complete-history", &finished).unwrap();
+        let current = watch(&world, &spec, &sid);
+        let entries = current.view.raw_entries();
+        assert_eq!(entries.len(), 3);
+        assert_paired_entries(&entries, &closed);
+        let content = current.view.entries[&3].step().unwrap();
+        assert_eq!(content.slots.len(), 3);
+        assert_eq!(merge_segments(&content.reply), expected);
+        evidence
+            .record_json("complete-entries", &json!(current.received))
+            .unwrap();
         read_json(
             &world,
             &spec,
@@ -1199,7 +1010,7 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
                 &world,
                 &spec,
                 &mut evidence,
-                &["--json", "session", "turn", TURN]
+                &["--json", "session", "turn", &tid]
             ),
             closed
         );
@@ -1215,7 +1026,7 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
                     "--session",
                     &sid,
                     "--turn",
-                    TURN
+                    &tid
                 ]
             ),
             replay
@@ -1269,25 +1080,23 @@ fn crash_start_cannot_reset_an_expired_scenario_budget() {
     assert!(world.daemon_pids().unwrap().is_empty());
 }
 
-/// 公开历史中的每个 Step 必须与详情逐槽位配对，不只比较调用数。
-fn assert_paired_history(history: &Value, turn: &Value) {
+/// 条目中这一轮的每个 Step 必须与详情逐槽位配对，不只比较调用数；未关闭的末端 Step 同样在条目中。
+fn assert_paired_entries(entries: &[&Value], turn: &Value) {
     let steps = turn["steps"].as_array().unwrap();
-    let entries = history["entries"].as_array().unwrap();
     let mut ids = std::collections::BTreeSet::new();
-    let mut expected_nodes = Vec::new();
     for (ordinal, step) in steps.iter().enumerate() {
         assert_eq!(step["key"]["ordinal"], ordinal);
+        let node = step["node"].as_u64().unwrap();
+        let entry = entries.iter().find(|entry| entry["node"] == node).unwrap();
+        // 条目带的 StepDetail 就是 `session turn` 给出的那一步；结局只随最后一步给出。
+        assert_eq!(entry["step"], *step);
         if ordinal + 1 < steps.len() {
             assert_eq!(step["progress"]["progress"], "closed");
             assert_eq!(step["end"], json!({"end":"continue"}));
+            assert!(entry.get("summary").is_none(), "{entry}");
+        } else {
+            assert_eq!(entry["summary"], turn["summary"]);
         }
-        // 可变末端只随快照交付，不在固定历史分页中。
-        if step["progress"]["progress"] != "closed" {
-            continue;
-        }
-        let node = step["node"].as_u64().unwrap();
-        expected_nodes.push(node);
-        let entry = entries.iter().find(|entry| entry["node"] == node).unwrap();
         let content = &entry["content"];
         assert_eq!(content["step_ordinal"], ordinal);
         assert_eq!(content["turn_id"], turn["turn_id"]);
@@ -1335,6 +1144,10 @@ fn assert_paired_history(history: &Value, turn: &Value) {
         })
         .map(|entry| entry["node"].as_u64().unwrap())
         .collect();
+    let expected_nodes: Vec<_> = steps
+        .iter()
+        .map(|step| step["node"].as_u64().unwrap())
+        .collect();
     assert_eq!(actual_nodes, expected_nodes);
     let last = steps.last().unwrap();
     assert_eq!(turn["summary"]["progress"], last["progress"]);
@@ -1347,6 +1160,134 @@ fn assert_paired_history(history: &Value, turn: &Value) {
         "failed"
     };
     assert_eq!(turn["summary"]["outcome"], outcome);
+}
+
+#[test]
+fn cli_recovers_accepted_receipt_after_backend_crash() {
+    let (world, spec) = support::direct_world("cli-recovered-acceptance", "recover", "[]", "");
+    let budget = world.budget(&spec);
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        provenance(
+            &world,
+            &mut evidence,
+            json!({
+                "test":"cli_recovers_accepted_receipt_after_backend_crash",
+                "barrier":"turn_accepted", "recovery":"original CLI queries original TurnId after restart"
+            }),
+        );
+        let mut provider =
+            support::wire_fake_llm(&world, "recover", SseScript::plain("must not run"));
+        let ack = world.root().join("accepted.json");
+        world.set_env(BARRIER, "turn_accepted");
+        world.set_env(ACK, ack.display().to_string());
+        let daemon = support::crash::start(&world, &spec, &budget);
+        let frontend = support::driver()
+            .start(
+                &world,
+                &LatticeCommand {
+                    args: [
+                        "--json",
+                        "session",
+                        "send",
+                        "recover this input",
+                        "--agent",
+                        "recover",
+                    ]
+                    .into_iter()
+                    .map(String::from)
+                    .collect(),
+                    timeout: Some(budget.cap_timeout(spec.step_timeout())),
+                },
+            )
+            .unwrap();
+        let marker = wait_for_ack(&ack, budget.cap_timeout(spec.step_timeout()));
+        assert_eq!(marker["barrier"], "turn_accepted");
+        let sid = marker["session_id"].as_str().unwrap();
+        let tid = marker["turn_id"].as_str().unwrap();
+        evidence
+            .record_json("accepted-before-receipt", &marker)
+            .unwrap();
+        // CLI 尚未收到回执；暂停它直到后台重启就绪，排除找回查询撞上重启空窗。
+        let frontend_pgid = i32::try_from(frontend.pgid()).unwrap();
+        assert_ne!(frontend.pgid(), daemon.pgid());
+        // SAFETY: 驱动已核验这是场景自有前端的独立进程组。
+        assert_eq!(unsafe { libc::killpg(frontend_pgid, libc::SIGSTOP) }, 0);
+        let pause_deadline = Instant::now() + budget.cap_timeout(Duration::from_secs(2));
+        loop {
+            let stat = std::fs::read_to_string(format!("/proc/{frontend_pgid}/stat")).unwrap();
+            if stat
+                .rsplit_once(')')
+                .unwrap()
+                .1
+                .trim_start()
+                .starts_with('T')
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < pause_deadline,
+                "frontend did not enter SIGSTOP before backend crash"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        evidence
+            .record_json(
+                "recovery-window",
+                &json!({
+                    "frontend_pgid":frontend_pgid,"backend_pgid":daemon.pgid(),
+                    "frontend_state":"T","restart_before_frontend_continues":true
+                }),
+            )
+            .unwrap();
+        support::crash::kill_backend(&world, daemon, &mut evidence, &budget);
+        world.unset_env(BARRIER);
+        world.unset_env(ACK);
+        let restarted = support::crash::start(&world, &spec, &budget);
+        // SAFETY: 同一个场景自有前端仍由 RunningCommand 持有，尚未回收。
+        assert_eq!(unsafe { libc::killpg(frontend_pgid, libc::SIGCONT) }, 0);
+        let output = frontend.wait(None).unwrap();
+        evidence.record_command("original CLI recovers acceptance", &output);
+        assert!(output.is_clean_exit(1), "{}", output.summary());
+        let parsed = parse_send_stdout(&output.stdout, output.exit_code());
+        assert!(
+            parsed.malformed_lines.is_empty(),
+            "{:?}",
+            parsed.malformed_lines
+        );
+        assert_eq!(parsed.sending(), Some((tid, sid, true)));
+        let receipt = parsed.receipt().expect("one receipt");
+        assert!(receipt.recovered);
+        assert_eq!(parsed.accepted_turn_id(), Some(tid));
+        assert_eq!(parsed.accepted_session_id(), Some(sid));
+        assert_eq!(parsed.closed_result(), Some((sid, tid, "failed")));
+        let reopened = accepted_detail(&world, &spec, tid);
+        assert!(support::same_turn(&support::live_turn(&parsed), &reopened));
+        let tree = read_json(
+            &world,
+            &spec,
+            &mut evidence,
+            &["--json", "session", "log", sid],
+        );
+        assert_eq!(tree["nodes"].as_array().unwrap().len(), 3);
+        let sessions = read_json(&world, &spec, &mut evidence, &["--json", "session", "list"]);
+        assert_eq!(sessions.as_array().unwrap().len(), 1);
+        assert!(provider.captured_requests().is_empty());
+        cli(
+            &world,
+            &spec,
+            &mut evidence,
+            &["--json", "daemon", "stop"],
+            0,
+        );
+        let stopped = restarted.wait(None).unwrap();
+        evidence.record_command("restarted backend drains", &stopped);
+        assert!(stopped.is_clean_exit(0), "{}", stopped.summary());
+        provider
+            .shutdown(budget.cap_timeout(spec.step_timeout()))
+            .unwrap();
+    }));
+    support::finish_recorded(evidence, result);
 }
 
 #[test]
@@ -1457,8 +1398,6 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
                             "matrix input",
                             "--agent",
                             "matrix",
-                            "--turn-id",
-                            TURN,
                         ]
                         .into_iter()
                         .map(String::from)
@@ -1469,7 +1408,7 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
                 .unwrap();
             let marker = wait_for_ack(&ack, budget.cap_timeout(spec.step_timeout()));
             assert_eq!(marker["barrier"], barrier.split(':').next().unwrap());
-            assert_eq!(marker["turn_id"], TURN);
+            let tid = marker["turn_id"].as_str().unwrap();
             if let Some(step) = barrier.split(':').nth(1) {
                 assert_eq!(marker["step"], step.parse::<u32>().unwrap());
             }
@@ -1481,24 +1420,24 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
             world.unset_env(BARRIER);
             world.unset_env(ACK);
             let sid = marker["session_id"].as_str().unwrap();
-            let before = stage(&world, &spec, &mut evidence, sid, TURN);
+            let before = stage(&world, &spec, &mut evidence, sid, tid);
             assert_eq!(provider.captured_requests().len(), requests);
             assert_eq!(
                 before["summary"]["outcome"],
                 final_outcome.unwrap_or("failed")
             );
-            let mut observer = Wire::connect(
-                &world,
-                json!({"operation":"subscribe","target":{"session_id":sid,"turn_id":TURN},"cursor":null}),
+            let observer = watch(&world, &spec, sid);
+            let head = observer.view.head.as_ref().unwrap();
+            assert!(!head.owner);
+            assert_eq!(head.turn_id.as_deref(), Some(tid));
+            let entries = observer.view.raw_entries();
+            assert_paired_entries(&entries, &before);
+            assert_eq!(accepted_detail(&world, &spec, tid), before);
+            assert_eq!(
+                watch(&world, &spec, sid).received,
+                observer.received,
+                "observation is read-only"
             );
-            let snapshot = observer.next();
-            let view = &snapshot["value"]["view"];
-            assert_eq!(view["selected_turn"], before);
-            assert_eq!(view["owned"], false);
-            let finished = observer.next();
-            assert_eq!(finished["value"]["type"], "finished");
-            assert_paired_history(&finished["value"]["history"], &before);
-            assert_eq!(query(&world, TURN), *view, "observation is read-only");
             let prior = before["steps"].as_array().unwrap();
             let last = prior.last().unwrap();
             let expected_progress = match name {
@@ -1513,19 +1452,13 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
                 assert_eq!(step["progress"]["progress"], "closed");
                 assert_eq!(step["end"], json!({"end":"continue"}));
             }
+            // 当前位置停在这一轮最后写入的 Step，无论它是否关闭。
+            assert_eq!(head.position, last["node"]);
             if final_outcome.is_none() {
                 assert_eq!(
                     last["end"],
                     json!({"end":"stop","cause":{"cause":"process_exit"}})
                 );
-                assert_eq!(view["unclosed_step"][0], last["node"]);
-                assert_eq!(view["unclosed_step"][1]["progress"], last["progress"]);
-                assert_eq!(
-                    view["history"]["head"].as_u64().unwrap() + 1,
-                    last["node"].as_u64().unwrap()
-                );
-            } else {
-                assert!(view["unclosed_step"].is_null());
             }
             if matches!(name, "accepted" | "continue") {
                 assert!(last["attempts"].as_array().unwrap().is_empty());
@@ -1652,17 +1585,7 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
             assert_eq!(world.project_dir().join("first.txt").exists(), requests > 0);
             let tip = (requests > 0).then(|| history_tip(&world));
             // 先完整读取并核验，再进行任何会话写操作；旧节点与阶段不能被补写。
-            let mut old_nodes: Vec<Value> = finished["value"]["history"]["entries"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|e| json!({"node":e["node"],"content":e["content"]}))
-                .collect();
-            if !view["unclosed_step"].is_null() {
-                old_nodes.push(
-                    json!({"node":view["unclosed_step"][0],"content":view["unclosed_step"][1]}),
-                );
-            }
+            let old_entries: Vec<Value> = entries.into_iter().cloned().collect();
             read_json(
                 &world,
                 &spec,
@@ -1672,45 +1595,31 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
                     "session",
                     "rewind",
                     sid,
-                    &view["session"]["current"].to_string(),
+                    &head.position.to_string(),
                 ],
             );
-            assert_eq!(stage(&world, &spec, &mut evidence, sid, TURN), before);
+            assert_eq!(stage(&world, &spec, &mut evidence, sid, tid), before);
             let next_provider =
                 support::wire_fake_llm(&world, "matrix", SseScript::plain("new reply"));
             cli(
                 &world,
                 &spec,
                 &mut evidence,
-                &[
-                    "--json",
-                    "session",
-                    "send",
-                    "new input",
-                    "--session",
-                    sid,
-                    "--turn-id",
-                    OTHER,
-                ],
+                &["--json", "session", "send", "new input", "--session", sid],
                 0,
             );
-            assert_eq!(stage(&world, &spec, &mut evidence, sid, TURN), before);
+            assert_eq!(stage(&world, &spec, &mut evidence, sid, tid), before);
             assert_eq!(provider.captured_requests().len(), requests);
             assert_eq!(next_provider.captured_requests().len(), 1);
-            let mut current = Wire::connect(
-                &world,
-                json!({"operation":"subscribe","target":{"session_id":sid,"turn_id":OTHER},"cursor":null}),
-            );
-            current.next();
-            let new_history = current.next();
-            let preserved: Vec<Value> = new_history["value"]["history"]["entries"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|e| e["content"]["turn_id"] == TURN)
-                .map(|e| json!({"node":e["node"],"content":e["content"]}))
+            let current = watch(&world, &spec, sid);
+            let preserved: Vec<Value> = current
+                .view
+                .entries
+                .values()
+                .filter(|entry| entry.turn_id == tid)
+                .map(|entry| entry.raw.clone())
                 .collect();
-            assert_eq!(preserved, old_nodes);
+            assert_eq!(preserved, old_entries);
             if let Some(tip) = tip {
                 assert_eq!(history_tip(&world), tip);
                 assert_eq!(
@@ -1724,7 +1633,7 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
                     "durable\n"
                 );
             }
-            evidence.record_json("state-summary", &json!({"case":name,"before":before,"snapshot":snapshot,"finished":finished,"old_nodes":old_nodes,"provider_requests_before":requests,"new_requests":1,"barrier":marker})).unwrap();
+            evidence.record_json("state-summary", &json!({"case":name,"before":before,"watch":observer.received,"old_entries":old_entries,"provider_requests_before":requests,"new_requests":1,"barrier":marker})).unwrap();
             evidence.record_captures(provider.captured_requests());
             evidence.record_captures(next_provider.captured_requests());
             provider
@@ -1777,8 +1686,6 @@ fn persisted_cancel_after_mutation_survives_crash_without_replay() {
                         "create then cancel".into(),
                         "--agent".into(),
                         "cancelled".into(),
-                        "--turn-id".into(),
-                        TURN.into(),
                     ],
                     timeout: Some(budget.cap_timeout(spec.step_timeout())),
                 },
@@ -1790,45 +1697,36 @@ fn persisted_cancel_after_mutation_survives_crash_without_replay() {
             .unwrap();
         gate.wait_until_stalled(2, budget.cap_timeout(spec.step_timeout()))
             .unwrap();
-        let before = query(&world, TURN);
-        let sid = before["session"]["session_id"].as_str().unwrap();
-        assert_eq!(
-            before["selected_turn"]["steps"][0]["slots"][0]["outcome"],
-            "succeeded"
-        );
+        let (sid, tid) = running_turn(&world, &spec, &mut evidence);
+        let (sid, tid) = (sid.as_str(), tid.as_str());
+        let before = accepted_detail(&world, &spec, tid);
+        assert_eq!(before["steps"][0]["slots"][0]["outcome"], "succeeded");
         let tip = history_tip(&world);
-        let cancel = call(
-            &world,
-            json!({"operation":"cancel","target":{"session_id":sid,"turn_id":TURN}}),
-        );
-        assert_eq!(cancel["value"]["owned"], true);
-        evidence.record_json("cancel", &cancel).unwrap();
+        let taken = cancel(&world, &spec, tid);
+        assert_eq!(taken["value"]["owned"], true);
+        evidence.record_json("cancel", &taken).unwrap();
         let marker = wait_for_ack(&ack, budget.cap_timeout(spec.step_timeout()));
         assert_eq!(marker["barrier"], "attempt_stopped");
         assert_eq!(marker["step"], 1);
-        assert_eq!(marker["turn_id"], TURN);
+        assert_eq!(marker["turn_id"], tid);
         evidence.record_json("marker", &marker).unwrap();
         support::crash::kill(&world, daemon, frontend, &mut evidence, &budget);
         world.unset_env(BARRIER);
         world.unset_env(ACK);
-        let closed = stage(&world, &spec, &mut evidence, sid, TURN);
+        let closed = stage(&world, &spec, &mut evidence, sid, tid);
         assert_eq!(closed["summary"]["outcome"], "cancelled");
         assert_eq!(closed["summary"]["notice"]["level"], "info");
-        assert_eq!(closed["steps"][0], before["selected_turn"]["steps"][0]);
+        assert_eq!(closed["steps"][0], before["steps"][0]);
         assert_eq!(
             closed["steps"][1]["end"],
             json!({"end":"stop","cause":{"cause":"cancelled"}})
         );
-        let mut observer = Wire::connect(
-            &world,
-            json!({"operation":"subscribe","target":{"session_id":sid,"turn_id":TURN},"cursor":null}),
-        );
-        assert_eq!(observer.next()["value"]["type"], "snapshot");
-        let finished = observer.next();
-        assert_eq!(finished["value"]["type"], "finished");
-        assert_paired_history(&finished["value"]["history"], &closed);
+        let observer = watch(&world, &spec, sid);
+        assert_paired_entries(&observer.view.raw_entries(), &closed);
         assert_eq!(closed["steps"][0]["slots"].as_array().unwrap().len(), 3);
-        evidence.record_json("paired-history", &finished).unwrap();
+        evidence
+            .record_json("paired-entries", &json!(observer.received))
+            .unwrap();
         read_json(
             &world,
             &spec,
@@ -1840,7 +1738,7 @@ fn persisted_cancel_after_mutation_survives_crash_without_replay() {
                 &world,
                 &spec,
                 &mut evidence,
-                &["--json", "session", "turn", TURN]
+                &["--json", "session", "turn", tid]
             ),
             closed
         );
@@ -1866,7 +1764,7 @@ fn persisted_cancel_after_mutation_survives_crash_without_replay() {
 
 #[test]
 fn rewind_commit_survives_sigkill_and_keeps_both_branches() {
-    for target in [2, 0] {
+    for target in [2u64, 0] {
         let (world, spec) = support::direct_world(
             &format!("r2-rewind-crash-{target}"),
             "rewind",
@@ -1894,25 +1792,19 @@ fn rewind_commit_survives_sigkill_and_keeps_both_branches() {
             world.set_env(BARRIER, "rewind_committed");
             world.set_env(ACK, ack.display().to_string());
             let daemon = support::crash::start(&world, &spec, &budget);
-            cli(
+            let sent = cli(
                 &world,
                 &spec,
                 &mut evidence,
-                &[
-                    "--json",
-                    "session",
-                    "send",
-                    "original",
-                    "--agent",
-                    "rewind",
-                    "--turn-id",
-                    TURN,
-                ],
+                &["--json", "session", "send", "original", "--agent", "rewind"],
                 0,
             );
-            let view = query(&world, TURN);
-            let sid = view["session"]["session_id"].as_str().unwrap();
-            let original = stage(&world, &spec, &mut evidence, sid, TURN);
+            let sent = parse_send_stdout(&sent.stdout, sent.exit_code());
+            let (sid, tid) = (
+                sent.accepted_session_id().unwrap(),
+                sent.accepted_turn_id().unwrap(),
+            );
+            let original = stage(&world, &spec, &mut evidence, sid, tid);
             let tip = history_tip(&world);
             let target_arg = target.to_string();
             let frontend = support::driver()
@@ -1935,7 +1827,7 @@ fn rewind_commit_survives_sigkill_and_keeps_both_branches() {
             support::crash::kill(&world, daemon, frontend, &mut evidence, &budget);
             world.unset_env(BARRIER);
             world.unset_env(ACK);
-            let reopened = stage(&world, &spec, &mut evidence, sid, TURN);
+            let reopened = stage(&world, &spec, &mut evidence, sid, tid);
             assert_eq!(reopened, original);
             let log = read_json(
                 &world,
@@ -1945,21 +1837,16 @@ fn rewind_commit_survives_sigkill_and_keeps_both_branches() {
             );
             assert_eq!(log["session"]["current"], target);
             assert_eq!(log["nodes"].as_array().unwrap().len(), 4);
-            let mut observer = Wire::connect(
-                &world,
-                json!({"operation":"subscribe","target":{"session_id":sid,"turn_id":TURN},"cursor":null}),
-            );
-            assert_eq!(observer.next()["value"]["type"], "snapshot");
-            let finished = observer.next();
-            assert_eq!(finished["value"]["type"], "finished");
+            // 退回后的路径是根到目标节点：节点 1..=target 各一条条目。
+            let observer = watch(&world, &spec, sid);
+            assert_eq!(observer.view.head.as_ref().unwrap().position, target);
             assert_eq!(
-                finished["value"]["history"]["entries"]
-                    .as_array()
-                    .unwrap()
-                    .len(),
-                target as usize
+                observer.view.entries.keys().copied().collect::<Vec<_>>(),
+                (1..=target).collect::<Vec<_>>()
             );
-            evidence.record_json("rewound-history", &finished).unwrap();
+            evidence
+                .record_json("rewound-entries", &json!(observer.received))
+                .unwrap();
             assert_eq!(provider.captured_requests().len(), 2);
             cli(
                 &world,
@@ -1991,18 +1878,12 @@ fn rewind_commit_survives_sigkill_and_keeps_both_branches() {
                 &mut evidence,
                 &["--json", "session", "rewind", sid, "3"],
             );
-            assert_eq!(stage(&world, &spec, &mut evidence, sid, TURN), original);
-            let mut original_reader = Wire::connect(
-                &world,
-                json!({"operation":"subscribe","target":{"session_id":sid,"turn_id":TURN},"cursor":null}),
-            );
-            assert_eq!(original_reader.next()["value"]["type"], "snapshot");
-            let original_history = original_reader.next();
-            assert_eq!(original_history["value"]["type"], "finished");
-            assert_paired_history(&original_history["value"]["history"], &original);
+            assert_eq!(stage(&world, &spec, &mut evidence, sid, tid), original);
+            let original_reader = watch(&world, &spec, sid);
+            assert_paired_entries(&original_reader.view.raw_entries(), &original);
             assert_eq!(original["steps"][0]["slots"].as_array().unwrap().len(), 3);
             evidence
-                .record_json("original-paired-history", &original_history)
+                .record_json("original-paired-entries", &json!(original_reader.received))
                 .unwrap();
             assert_eq!(history_tip(&world), tip);
             assert_eq!(
@@ -2027,211 +1908,6 @@ fn rewind_commit_survives_sigkill_and_keeps_both_branches() {
         }));
         support::finish_recorded(evidence, result);
     }
-}
-
-#[test]
-fn history_read_failure_preserves_live_text_and_summary_then_reconnect_clears_error() {
-    use lattice_system_harness::PtyTuiDriver;
-    let (world, spec) = support::direct_world("r2-history-fault", "history", "[]", "");
-    let budget = world.budget(&spec);
-    let mut evidence = support::evidence(&world, &spec);
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let chunks = vec![
-            chunk(json!({"content":"READ_FAULT_LIVE_BODY"})),
-            json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}),
-        ];
-        provenance(
-            &world,
-            &mut evidence,
-            json!({"test":"history_read_failure_preserves_live_text_and_summary_then_reconnect_clears_error",
-            "chunks":chunks,"read_anchor":2,"fault":"pause all final history reads, then error, then successful reload"}),
-        );
-        let (mut provider, gate) =
-            FakeLlmServer::start_segmented(SseScript::Chunks { chunks }, spec.step_timeout())
-                .unwrap();
-        world.set_env("OPENAI_COMPATIBLE_BASE_URL", provider.base_url());
-        world.set_env("OPENAI_COMPATIBLE_MODEL", "history");
-        world.set_env("OPENAI_COMPATIBLE_API_KEY", FAKE_API_KEY);
-        let schedule = world.root().join("schedule");
-        std::fs::create_dir(&schedule).unwrap();
-        std::fs::write(schedule.join("history_read_2.arm"), b"").unwrap();
-        std::fs::write(schedule.join("history_read_2.error"), b"").unwrap();
-        world.set_env("LATTICE_TEST_SCHEDULE_DIR", schedule.display().to_string());
-        let daemon = support::crash::start(&world, &spec, &budget);
-        let front = support::driver()
-            .start(
-                &world,
-                &LatticeCommand {
-                    args: [
-                        "--json",
-                        "session",
-                        "send",
-                        "history fault",
-                        "--agent",
-                        "history",
-                        "--turn-id",
-                        TURN,
-                    ]
-                    .into_iter()
-                    .map(String::from)
-                    .collect(),
-                    timeout: Some(budget.cap_timeout(spec.step_timeout())),
-                },
-            )
-            .unwrap();
-        gate.wait_until_stalled(1, budget.cap_timeout(spec.step_timeout()))
-            .unwrap();
-        gate.release_next(budget.cap_timeout(spec.step_timeout()))
-            .unwrap();
-        gate.wait_until_stalled(2, budget.cap_timeout(spec.step_timeout()))
-            .unwrap();
-        let partial = wait_view(&world, TURN, |v| {
-            v["attempt"]["segments"] == json!([{"type":"text","text":"READ_FAULT_LIVE_BODY"}])
-        });
-        let sid = partial["session"]["session_id"].as_str().unwrap();
-        let mut tui = PtyTuiDriver::reconnect(&support::driver(), &world, sid).unwrap();
-        let tui_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            tui.wait_for_ready(budget.cap_timeout(spec.step_timeout()))
-                .unwrap();
-            tui.wait_for(budget.cap_timeout(spec.step_timeout()), |text| {
-                text.contains("READ_FAULT_LIVE_BODY")
-            })
-            .unwrap();
-            let live = tui
-                .redraw_text(budget.cap_timeout(spec.step_timeout()))
-                .unwrap();
-            assert!(live.contains("READ_FAULT_LIVE_BODY"));
-            gate.release(budget.cap_timeout(spec.step_timeout()))
-                .unwrap();
-            let pause = wait_for_ack(
-                &schedule.join("history_read_2.ready"),
-                budget.cap_timeout(spec.step_timeout()),
-            );
-            let closed = query(&world, TURN);
-            assert_eq!(closed["selected_turn"]["summary"]["outcome"], "completed");
-            tui.wait_for(budget.cap_timeout(spec.step_timeout()), |text| {
-                text.contains("完成")
-            })
-            .unwrap();
-            let waiting = tui
-                .redraw_text(budget.cap_timeout(spec.step_timeout()))
-                .unwrap();
-            assert!(
-                waiting.contains("READ_FAULT_LIVE_BODY") && waiting.contains("完成"),
-                "{waiting}"
-            );
-            assert_eq!(waiting.matches("READ_FAULT_LIVE_BODY").count(), 1);
-            let mut observer = Wire::connect(
-                &world,
-                json!({"operation":"subscribe","target":{"session_id":sid,"turn_id":TURN},"cursor":null}),
-            );
-            let snapshot = observer.next();
-            assert_eq!(
-                snapshot["value"]["view"]["selected_turn"],
-                closed["selected_turn"]
-            );
-            assert!(!schedule.join("history_read_2.release").exists());
-            std::fs::write(schedule.join("history_read_2.release"), b"").unwrap();
-            let failed = observer.next();
-            assert_eq!(failed["response"], "history_error");
-            let done = front.wait(None).unwrap();
-            evidence.record_command("Completed but final history unavailable", &done);
-            assert!(done.is_clean_exit(1), "{}", done.summary());
-            let records: Vec<Value> = std::str::from_utf8(&done.stdout)
-                .unwrap()
-                .lines()
-                .map(|s| serde_json::from_str(s).unwrap())
-                .collect();
-            assert!(records.iter().any(|v| v["type"] == "snapshot"
-                && v["view"]["selected_turn"]["summary"]["outcome"] == "completed"));
-            assert!(records.iter().any(|v| v["type"] == "error"
-                && v["kind"] == "store_unavailable"
-                && v["message"] == "injected history read failure"));
-            assert!(
-                !records
-                    .iter()
-                    .any(|v| v["type"] == "history" && v["history"]["anchor"]["head"] == 2)
-            );
-            tui.wait_for(budget.cap_timeout(spec.step_timeout()), |text| {
-                text.contains("持久正文不可用")
-            })
-            .unwrap();
-            let errored = tui
-                .redraw_text(budget.cap_timeout(spec.step_timeout()))
-                .unwrap();
-            assert!(
-                errored.contains("READ_FAULT_LIVE_BODY") && errored.contains("完成"),
-                "{errored}"
-            );
-            std::fs::remove_file(schedule.join("history_read_2.error")).unwrap();
-            // 读取失败是 Warn，暂驻 Dock 并遮住输入区；Space 释放后才能输入 `/reconnect`。
-            tui.send_keys(b" ").unwrap();
-            tui.send_line("/reconnect").unwrap();
-            // 独立公开重读核验原结果未改变；同一 TUI 重载完成后退出报告不能保留当前读取错误。
-            let read = cli(
-                &world,
-                &spec,
-                &mut evidence,
-                &["--json", "session", "turn", TURN, "--follow"],
-                0,
-            );
-            let history = std::str::from_utf8(&read.stdout)
-                .unwrap()
-                .lines()
-                .map(|s| serde_json::from_str::<Value>(s).unwrap())
-                .find(|v| v["type"] == "history")
-                .unwrap();
-            assert_paired_history(&history["history"], &closed["selected_turn"]);
-            let reloaded = tui
-                .redraw_text(budget.cap_timeout(spec.step_timeout()))
-                .unwrap();
-            assert!(
-                reloaded.contains("READ_FAULT_LIVE_BODY") && reloaded.contains("完成"),
-                "{reloaded}"
-            );
-            assert_eq!(reloaded.matches("READ_FAULT_LIVE_BODY").count(), 1);
-            let exit_start = tui.output().len();
-            tui.send_line("/quit").unwrap();
-            tui.wait_for_exit(budget.cap_timeout(spec.step_timeout()))
-                .unwrap();
-            assert!(
-                lattice_system_harness::processes_in_pgid(tui.pgid().unwrap())
-                    .unwrap()
-                    .is_empty()
-            );
-            let exit_output = String::from_utf8_lossy(&tui.output()[exit_start..]);
-            assert!(!exit_output.contains("持久正文不可用："), "{exit_output}");
-            assert_eq!(
-                query(&world, TURN)["selected_turn"],
-                closed["selected_turn"]
-            );
-            evidence.record_json("read-windows", &json!({"pause":pause,"snapshot":snapshot,"error":failed,
-                "live":live,"waiting":waiting,"errored":errored,"reloaded":reloaded,"exit":exit_output,"history":history})).unwrap();
-            stage(&world, &spec, &mut evidence, sid, TURN);
-            evidence.record_json("state-summary", &json!({"turn":closed["selected_turn"],"provider_requests":1,"history_error_cleared":true})).unwrap();
-        }));
-        evidence.record_pty(tui.output());
-        drop(tui);
-        if let Err(error) = tui_result {
-            std::panic::resume_unwind(error);
-        }
-        evidence.record_captures(provider.captured_requests());
-        assert_eq!(provider.captured_requests().len(), 1);
-        provider
-            .shutdown(budget.cap_timeout(spec.step_timeout()))
-            .unwrap();
-        cli(
-            &world,
-            &spec,
-            &mut evidence,
-            &["--json", "daemon", "stop"],
-            0,
-        );
-        let stopped = daemon.wait(None).unwrap();
-        evidence.record_command("history fault backend shutdown", &stopped);
-        assert!(stopped.is_clean_exit(0));
-    }));
-    support::finish_recorded(evidence, result);
 }
 
 #[test]
@@ -2277,6 +1953,7 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
                 SseScript::Chunks { chunks: failed },
                 SseScript::Chunks { chunks: first },
                 SseScript::Chunks { chunks },
+                SseScript::plain("next turn"),
             ]),
             budget.cap_timeout(spec.step_timeout()),
         )
@@ -2286,7 +1963,7 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
         world.set_env("OPENAI_COMPATIBLE_API_KEY", FAKE_API_KEY);
         let schedule = world.root().join("schedule");
         std::fs::create_dir(&schedule).unwrap();
-        for name in ["subscription", "turn_closed", "invocation_started"] {
+        for name in ["turn_closed", "invocation_started"] {
             std::fs::write(schedule.join(format!("{name}.arm")), b"").unwrap();
         }
         world.set_env("LATTICE_TEST_SCHEDULE_DIR", schedule.display().to_string());
@@ -2302,8 +1979,6 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
                         "observe windows",
                         "--agent",
                         "windows",
-                        "--turn-id",
-                        TURN,
                     ]
                     .iter()
                     .map(|s| s.to_string())
@@ -2318,17 +1993,15 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
             .unwrap();
         gate.wait_until_stalled(2, budget.cap_timeout(spec.step_timeout()))
             .unwrap();
-        let partial = wait_view(&world, TURN, |v| {
-            v["attempt"]["segments"] == json!([{"type":"text","text":"discarded partial"}])
-        });
-        assert_eq!(partial["attempt"]["key"]["attempt_ordinal"], 0);
-        let mut retries = Wire::connect(
-            &world,
-            json!({"operation":"subscribe","target":{"session_id":partial["session"]["session_id"],"turn_id":TURN},"cursor":null}),
-        );
-        assert_eq!(
-            retries.next()["value"]["view"]["attempt"],
-            partial["attempt"]
+        let (sid, tid) = running_turn(&world, &spec, &mut evidence);
+        let (sid, tid) = (sid.as_str(), tid.as_str());
+        let partial = vec![segment(SegmentKind::Text, "discarded partial")];
+        let mut live = watch(&world, &spec, sid);
+        assert!(live.view.head.as_ref().unwrap().owner);
+        live.until(
+            deadline(&world, &spec),
+            "the discarded partial text",
+            |view| view.texts.get(&(2, 0)) == Some(&partial),
         );
         for i in 2..=3 {
             gate.wait_until_stalled(i, budget.cap_timeout(spec.step_timeout()))
@@ -2338,21 +2011,23 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
         }
         gate.wait_until_stalled(4, budget.cap_timeout(spec.step_timeout()))
             .unwrap();
-        let live_retry = loop {
-            let value = retries.next();
-            if value["value"]["event"]["type"] == "llm_retry" {
-                break value["value"]["event"].clone();
-            }
-        };
-        drop(retries);
-        let retry = query(&world, TURN);
-        assert_eq!(
-            retry["attempt"]["key"],
-            json!({"turn_id":TURN,"model_step_ordinal":0,"attempt_ordinal":1})
+        // 重试提示是 Step 条目的一部分，随条目推送，没有单独的事件。
+        live.until(
+            deadline(&world, &spec),
+            "a retry notice on step 0",
+            |view| {
+                view.entries
+                    .get(&2)
+                    .and_then(|entry| entry.step())
+                    .is_some_and(|step| !step.retries.is_empty())
+            },
         );
-        assert_eq!(retry["attempt"]["segments"], json!([]));
+        let live_retry = live.view.entries[&2].step().unwrap().retries.clone();
+        assert_eq!(live_retry.len(), 1);
+        assert_eq!(live_retry[0].attempt, 0);
+        let retry = accepted_detail(&world, &spec, tid);
         assert_eq!(
-            retry["selected_turn"]["steps"][0]["attempts"][0]["end"]["cause"],
+            retry["steps"][0]["attempts"][0]["end"]["cause"],
             json!({"cause":"provider_error","retryable":true})
         );
         for i in 4..=8 {
@@ -2365,54 +2040,32 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
             &schedule.join("invocation_started.ready"),
             budget.cap_timeout(spec.step_timeout()),
         );
-        let executing = query(&world, TURN);
+        // 工具执行暂停期间重新开始观察：条目说明这一步正在执行，回复已写入节点。
+        let reconnect = watch(&world, &spec, sid);
         assert_eq!(
-            executing["unclosed_step"][1]["progress"]["progress"],
-            "executing"
+            step_progress(&reconnect.view, 2),
+            Some(&StepProgress::Executing)
         );
-        assert!(executing["attempt"].is_null());
         assert_eq!(
-            segments(&executing["unclosed_step"][1]["reply"]),
+            merge_segments(&reconnect.view.entries[&2].step().unwrap().reply),
             vec![
-                json!({"type":"text","text":"tools explanation"}),
-                json!({"type":"reasoning","text":"tools reason"})
+                segment(SegmentKind::Text, "tools explanation"),
+                segment(SegmentKind::Reasoning, "tools reason"),
             ]
         );
-        let sid = executing["session"]["session_id"].as_str().unwrap();
-        let mut reconnect = Wire::connect(
-            &world,
-            json!({"operation":"subscribe","target":{"session_id":sid,"turn_id":TURN},"cursor":null}),
-        );
-        let tool_snapshot = reconnect.next();
-        assert_eq!(
-            tool_snapshot["value"]["view"]["attempt"],
-            executing["attempt"]
-        );
-        assert_eq!(
-            tool_snapshot["value"]["view"]["unclosed_step"],
-            executing["unclosed_step"]
-        );
+        evidence
+            .record_json(
+                "attempt-and-tool-windows",
+                &json!({"retry":retry,"tool_pause":tool_pause,
+            "live":live.received,"reconnected":reconnect.received}),
+            )
+            .unwrap();
         drop(reconnect);
-        evidence.record_json("attempt-and-tool-windows", &json!({"partial":partial,"retry":retry,"tool_pause":tool_pause,"executing":executing,"reconnected":tool_snapshot})).unwrap();
         std::fs::write(schedule.join("invocation_started.release"), b"").unwrap();
         gate.wait_until_stalled(9, budget.cap_timeout(spec.step_timeout()))
             .unwrap();
-        let before = query(&world, TURN);
-        let sid = before["session"]["session_id"].as_str().unwrap();
-        let mut slow = Wire::connect(
-            &world,
-            json!({"operation":"subscribe","target":{"session_id":sid,"turn_id":TURN},"cursor":before["cursor"]}),
-        );
-        let paused = wait_for_ack(
-            &schedule.join("subscription.ready"),
-            budget.cap_timeout(spec.step_timeout()),
-        );
-        assert_eq!(paused["turn_id"], TURN);
-        assert_eq!(paused["sequence"], before["cursor"]["sequence"]);
-        assert_eq!(
-            before["attempt"]["key"],
-            json!({"turn_id":TURN,"model_step_ordinal":1,"attempt_ordinal":0})
-        );
+        // 慢观察者：从此不再读取，直到这一轮关闭；它不能阻塞执行，之后读到的条目收敛到关闭后的结果。
+        let mut slow = Watcher::open(&world, timeout(&world, &spec), sid);
         for i in 9..=78 {
             gate.wait_until_stalled(i, budget.cap_timeout(spec.step_timeout()))
                 .unwrap();
@@ -2421,117 +2074,87 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
         }
         gate.wait_until_stalled(79, budget.cap_timeout(spec.step_timeout()))
             .unwrap();
-        let populated = wait_view(&world, TURN, |v| {
-            v["attempt"]["segments"]
-                .as_array()
-                .is_some_and(|s| s.len() == 70)
+        let mut reconstructed: Vec<_> = (0..70)
+            .map(|i| {
+                if i % 2 == 0 {
+                    segment(SegmentKind::Text, &format!("text-{i};"))
+                } else {
+                    segment(SegmentKind::Reasoning, &format!("reason-{i};"))
+                }
+            })
+            .collect();
+        live.until(deadline(&world, &spec), "70 text segments", |view| {
+            view.texts.get(&(3, 0)).is_some_and(|text| text.len() == 70)
         });
-        assert!(
-            populated["cursor"]["sequence"].as_u64().unwrap()
-                > paused["sequence"].as_u64().unwrap() + 64
-        );
-        std::fs::write(schedule.join("subscription.release"), b"").unwrap();
-        let reset = slow.next();
-        assert_eq!(reset["value"]["type"], "snapshot");
-        assert_eq!(reset["value"]["view"]["attempt"], populated["attempt"]);
-        evidence
-            .record_json(
-                "slow-window",
-                &json!({"before":before,"pause":paused,"populated":populated,"reset":reset}),
-            )
-            .unwrap();
+        assert_eq!(live.view.texts[&(3, 0)], reconstructed);
         gate.release_next(budget.cap_timeout(spec.step_timeout()))
             .unwrap();
         gate.wait_until_stalled(80, budget.cap_timeout(spec.step_timeout()))
             .unwrap();
-        let event = slow.next();
-        assert_eq!(event["value"]["type"], "event");
-        assert_eq!(
-            event["value"]["cursor"]["sequence"].as_u64().unwrap(),
-            reset["value"]["view"]["cursor"]["sequence"]
-                .as_u64()
-                .unwrap()
-                + 1
-        );
-        assert_eq!(event["value"]["event"]["content"], "text-70;");
-        let mut reconstructed = populated["attempt"]["segments"].as_array().unwrap().clone();
-        reconstructed.push(json!({"type":"text","text":"text-70;"}));
+        live.until(deadline(&world, &spec), "the 71st text segment", |view| {
+            view.texts[&(3, 0)].len() == 71
+        });
+        reconstructed.push(segment(SegmentKind::Text, "text-70;"));
+        assert_eq!(live.view.texts[&(3, 0)], reconstructed);
         gate.release(budget.cap_timeout(spec.step_timeout()))
             .unwrap();
         let closed_pause = wait_for_ack(
             &schedule.join("turn_closed.ready"),
             budget.cap_timeout(spec.step_timeout()),
         );
-        assert_eq!(closed_pause["turn_id"], TURN);
-        let closed = query(&world, TURN);
-        assert!(closed["owned"].as_bool().unwrap());
-        assert_eq!(closed["selected_turn"]["summary"]["outcome"], "completed");
-        let mut observer = Wire::connect(
-            &world,
-            json!({"operation":"subscribe","target":{"session_id":sid,"turn_id":TURN},"cursor":null}),
-        );
-        // Owner 仍在、终态尚未追加：新订阅先得到关闭快照，然后等待终态交付，
-        // 不凭关闭快照提前结束。
+        assert_eq!(closed_pause["turn_id"], tid);
+        let closed = accepted_detail(&world, &spec, tid);
+        assert_eq!(closed["summary"]["outcome"], "completed");
+        // 关闭事务已提交、变化尚未标记：新观察者开头的条目已带关闭的结局，Owner 仍在。
         assert!(!schedule.join("turn_closed.release").exists());
-        let initial = observer.next();
-        assert_eq!(initial["value"]["type"], "snapshot");
-        assert_eq!(
-            initial["value"]["view"]["selected_turn"],
-            closed["selected_turn"]
-        );
-        observer.assert_silent(Duration::from_millis(500));
-        stage(&world, &spec, &mut evidence, sid, TURN);
+        let mut observer = watch(&world, &spec, sid);
+        assert!(observer.view.head.as_ref().unwrap().owner);
+        assert!(turn_closed(&observer.view, tid));
+        assert_paired_entries(&observer.view.raw_entries(), &closed);
+        let paused: Vec<Value> = observer.view.raw_entries().into_iter().cloned().collect();
+        stage(&world, &spec, &mut evidence, sid, tid);
         std::fs::write(schedule.join("turn_closed.release"), b"").unwrap();
-        let terminal = observer.next();
-        assert_eq!(terminal["value"]["type"], "event");
-        assert_eq!(terminal["value"]["event"]["type"], "turn_completed");
-        assert_eq!(
-            terminal["value"]["cursor"]["sequence"].as_u64().unwrap(),
-            initial["value"]["view"]["cursor"]["sequence"]
-                .as_u64()
-                .unwrap()
-                + 1
-        );
-        let snapshot = observer.next();
-        assert_eq!(snapshot["value"]["type"], "snapshot");
-        let finished = observer.next();
-        assert_eq!(finished["value"]["type"], "finished");
-        let entries = finished["value"]["history"]["entries"].as_array().unwrap();
-        assert_eq!(entries.len(), 3);
-        assert_paired_history(&finished["value"]["history"], &closed["selected_turn"]);
-        assert_eq!(segments(&entries[2]["content"]["reply"]), reconstructed);
-        assert_eq!(
-            snapshot["value"]["view"]["selected_turn"],
-            closed["selected_turn"]
-        );
-        evidence.record_json("closed-before-event", &json!({"pause":closed_pause,"terminal":terminal,"snapshot":snapshot,"finished":finished,"resumed_event":event})).unwrap();
         let done = front.wait(None).unwrap();
         evidence.record_command("front finishes after notification release", &done);
         assert!(done.is_clean_exit(0), "{}", done.summary());
-        let mut updates = Vec::new();
-        loop {
-            let update = slow.next();
-            let finished = update["value"]["type"] == "finished";
-            updates.push(update);
-            if finished {
-                break;
-            }
-        }
-        assert_eq!(
-            updates.last().unwrap()["value"]["history"],
-            finished["value"]["history"]
-        );
+        let sent = parse_send_stdout(&done.stdout, done.exit_code());
+        assert_eq!(sent.closed_result(), Some((sid, tid, "completed")));
+        // 读事务可能提前看到尚未标记的提交，标记后对同一节点再推送同一个值：
+        // 读完放行后到达的推送，持有的条目不变。
+        observer.drain(Duration::from_millis(500));
+        let finished: Vec<Value> = observer.view.raw_entries().into_iter().cloned().collect();
+        assert_eq!(finished, paused);
+        // 前端、实时观察者与慢观察者最后持有的条目都与关闭后的条目逐字段相同。
         assert!(
-            updates[..updates.len() - 1]
+            sent.entries()
                 .iter()
-                .any(|u| u["value"]["type"] == "event"
-                    && u["value"]["event"]["type"] == "turn_completed"),
-            "slow subscriber must receive turn_completed before finished"
+                .map(|entry| &entry.raw)
+                .eq(finished.iter())
         );
+        live.until(deadline(&world, &spec), "the closed entries", |view| {
+            view.raw_entries().into_iter().eq(finished.iter())
+        });
+        slow.until(deadline(&world, &spec), "the closed entries", |view| {
+            view.raw_entries().into_iter().eq(finished.iter())
+        });
+        let reply = merge_segments(&observer.view.entries[&3].step().unwrap().reply);
+        assert_eq!(reply, reconstructed);
         evidence
-            .record_json("slow-through-finish", &json!(updates))
+            .record_json(
+                "closed-before-push",
+                &json!({"pause":closed_pause,"watch":observer.received,
+            "live":live.received}),
+            )
             .unwrap();
-        evidence.record_json("state-summary", &json!({"turn":closed["selected_turn"],"sequence_delta":populated["cursor"]["sequence"].as_u64().unwrap()-paused["sequence"].as_u64().unwrap(),"daemon":daemon.pgid(),"provider_requests":3})).unwrap();
+        evidence
+            .record_json("slow-through-close", &json!(slow.received))
+            .unwrap();
+        evidence
+            .record_json(
+                "state-summary",
+                &json!({"turn":closed,"daemon":daemon.pgid(),"provider_requests":3}),
+            )
+            .unwrap();
         let captures = provider.captured_requests();
         assert_eq!(captures.len(), 3);
         assert_eq!(captures[0].raw["messages"], captures[1].raw["messages"]);
@@ -2541,26 +2164,13 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
                 .contains("discarded partial")
         );
         assert!(
-            finished["value"]["history"]["entries"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|entry| !entry["content"]["reply"]
-                    .to_string()
-                    .contains("discarded partial")),
-            "stopped partial belongs only to attempt diagnostics, not the conversation reply"
+            finished.iter().all(|entry| !entry["content"]["reply"]
+                .to_string()
+                .contains("discarded partial")),
+            "stopped partial text never becomes the conversation reply"
         );
-        assert_eq!(
-            closed["selected_turn"]["steps"][0]["attempts"]
-                .as_array()
-                .unwrap()
-                .len(),
-            2
-        );
+        assert_eq!(closed["steps"][0]["attempts"].as_array().unwrap().len(), 2);
         evidence.record_captures(captures);
-        provider
-            .shutdown(budget.cap_timeout(spec.step_timeout()))
-            .unwrap();
         cli(
             &world,
             &spec,
@@ -2572,39 +2182,49 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
         evidence.record_command("scheduled backend shutdown", &stopped);
         assert!(stopped.is_clean_exit(0));
         world.unset_env("LATTICE_TEST_SCHEDULE_DIR");
-        // 同一重试/多调用/慢订阅脚本跨 epoch；旧游标不能把新后台当作旧事件续流。
-        let reopened = stage(&world, &spec, &mut evidence, sid, TURN);
-        assert_eq!(reopened, closed["selected_turn"]);
-        let mut after_restart = Wire::connect(
-            &world,
-            json!({"operation":"subscribe",
-            "target":{"session_id":sid,"turn_id":TURN},"cursor":event["value"]["cursor"]}),
+        // 重启后重新开始观察：条目与关闭时相同，重试提示与实时看到的一致，没有生成中的文字。
+        let reopened = stage(&world, &spec, &mut evidence, sid, tid);
+        assert_eq!(reopened, closed);
+        let after_restart = watch(&world, &spec, sid);
+        assert!(!after_restart.view.head.as_ref().unwrap().owner);
+        assert!(after_restart.view.texts.is_empty());
+        assert!(
+            after_restart
+                .view
+                .raw_entries()
+                .into_iter()
+                .eq(finished.iter())
         );
-        let new_snapshot = after_restart.next();
-        assert_eq!(new_snapshot["value"]["type"], "snapshot");
-        assert_ne!(
-            new_snapshot["value"]["view"]["cursor"]["epoch"],
-            event["value"]["cursor"]["epoch"]
-        );
-        assert!(new_snapshot["value"]["view"]["attempt"].is_null());
-        let new_finished = after_restart.next();
-        assert_eq!(new_finished["value"]["type"], "finished");
-        let notices: Vec<_> = new_finished["value"]["history"]["entries"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .flat_map(|entry| entry["retries"].as_array().unwrap())
-            .collect();
-        assert_eq!(notices.len(), 1);
-        assert_eq!(notices[0]["attempt"], live_retry["key"]["attempt_ordinal"]);
-        assert_eq!(notices[0]["delay_ms"], live_retry["delay_ms"]);
-        assert_eq!(notices[0]["notice"], live_retry["notice"]);
         assert_eq!(
-            new_finished["value"]["history"],
-            finished["value"]["history"]
+            after_restart.view.entries[&2].step().unwrap().retries,
+            live_retry
         );
         assert_eq!(provider.captured_requests().len(), 3);
-        evidence.record_json("epoch-reconnect", &json!({"old_cursor":event["value"]["cursor"],"snapshot":new_snapshot,"finished":new_finished})).unwrap();
+        evidence
+            .record_json("restart-reconnect", &json!(after_restart.received))
+            .unwrap();
+        // `history` 读不到当前最后一轮：先提交下一轮，以它的 UserMessage 为 `before` 重读这一轮，
+        // 与观察者最后持有的条目逐字段相同。
+        let next = cli(
+            &world,
+            &spec,
+            &mut evidence,
+            &["--json", "session", "send", "next turn", "--session", sid],
+            0,
+        );
+        let next = parse_send_stdout(&next.stdout, next.exit_code());
+        let next_user = &next.entries()[0];
+        assert_eq!(next_user.user_ordinal(), Some(2));
+        let reread =
+            support::history(&world, timeout(&world, &spec), sid, next_user.node, 1).unwrap();
+        assert_eq!(reread, finished);
+        evidence
+            .record_json("history-reread", &json!(reread))
+            .unwrap();
+        assert_eq!(provider.captured_requests().len(), 4);
+        provider
+            .shutdown(budget.cap_timeout(spec.step_timeout()))
+            .unwrap();
     }));
     support::finish_recorded(evidence, result);
 }
@@ -2668,8 +2288,6 @@ fn cancelled_slot_live_and_crash_share_ordered_closure() {
                             "cancel second call",
                             "--agent",
                             "slot",
-                            "--turn-id",
-                            TURN,
                         ]
                         .iter()
                         .map(|s| s.to_string())
@@ -2702,30 +2320,25 @@ fn cancelled_slot_live_and_crash_share_ordered_closure() {
                 assert!(request.len() <= 16384);
             }
             assert!(request.starts_with(b"GET /cancel HTTP/1.1\r\n"));
-            let running = query(&world, TURN);
-            let sid = running["session"]["session_id"].as_str().unwrap();
+            let (sid, tid) = running_turn(&world, &spec, &mut evidence);
+            let (sid, tid) = (sid.as_str(), tid.as_str());
+            let running = accepted_detail(&world, &spec, tid);
             let tip = history_tip(&world);
-            assert_eq!(
-                running["selected_turn"]["steps"][1]["slots"][0]["outcome"],
-                "succeeded"
-            );
-            let cancel = call(
-                &world,
-                json!({"operation":"cancel","target":{"session_id":sid,"turn_id":TURN}}),
-            );
-            assert_eq!(cancel["value"]["owned"], true);
-            evidence.record_json("cancel-taken", &cancel).unwrap();
+            assert_eq!(running["steps"][1]["slots"][0]["outcome"], "succeeded");
+            let taken = cancel(&world, &spec, tid);
+            assert_eq!(taken["value"]["owned"], true);
+            evidence.record_json("cancel-taken", &taken).unwrap();
             let mut orphan_before = None;
             if crash {
                 let marker = wait_for_ack(&ack, budget.cap_timeout(spec.step_timeout()));
                 assert_eq!(marker["barrier"], "invocation_finished");
                 assert_eq!(marker["part"], 2);
-                assert_eq!(marker["turn_id"], TURN);
+                assert_eq!(marker["turn_id"], tid);
                 evidence.record_json("marker", &marker).unwrap();
                 support::crash::kill(&world, daemon, front, &mut evidence, &budget);
                 world.unset_env(BARRIER);
                 world.unset_env(ACK);
-                let orphan = stage(&world, &spec, &mut evidence, sid, TURN);
+                let orphan = stage(&world, &spec, &mut evidence, sid, tid);
                 orphan_before = Some(orphan.clone());
                 assert_eq!(orphan["summary"]["outcome"], "cancelled");
                 assert_eq!(orphan["summary"]["progress"]["progress"], "executing");
@@ -2758,7 +2371,7 @@ fn cancelled_slot_live_and_crash_share_ordered_closure() {
                 evidence.record_command("live backend stop", &stopped);
                 assert!(stopped.is_clean_exit(0));
             }
-            let closed = stage(&world, &spec, &mut evidence, sid, TURN);
+            let closed = stage(&world, &spec, &mut evidence, sid, tid);
             if let Some(before) = orphan_before {
                 assert_eq!(
                     closed, before,
@@ -2767,7 +2380,7 @@ fn cancelled_slot_live_and_crash_share_ordered_closure() {
             }
             assert_eq!(closed["summary"]["outcome"], "cancelled");
             assert_eq!(closed["summary"]["notice"]["level"], "info");
-            assert_eq!(closed["steps"][0], running["selected_turn"]["steps"][0]);
+            assert_eq!(closed["steps"][0], running["steps"][0]);
             let state = &closed["steps"][1];
             assert_eq!(
                 state["end"],
@@ -2775,7 +2388,7 @@ fn cancelled_slot_live_and_crash_share_ordered_closure() {
             );
             let slots = state["slots"].as_array().unwrap();
             assert_eq!(slots.len(), 3);
-            assert_eq!(slots[0], running["selected_turn"]["steps"][1]["slots"][0]);
+            assert_eq!(slots[0], running["steps"][1]["slots"][0]);
             assert_eq!(slots[1]["outcome"], "indeterminate");
             assert_eq!(
                 slots[1]["reason"],
@@ -2783,22 +2396,14 @@ fn cancelled_slot_live_and_crash_share_ordered_closure() {
             );
             assert_eq!(slots[2]["outcome"], "not_executed");
             assert!(slots[2]["reason"].is_null());
-            let mut observer = Wire::connect(
-                &world,
-                json!({"operation":"subscribe","target":{"session_id":sid,"turn_id":TURN},"cursor":null}),
-            );
-            assert_eq!(observer.next()["value"]["type"], "snapshot");
-            let finished = observer.next();
-            assert_eq!(finished["value"]["type"], "finished");
-            assert_paired_history(&finished["value"]["history"], &closed);
-            assert_eq!(
-                finished["value"]["history"]["entries"]
-                    .as_array()
-                    .unwrap()
-                    .len(),
-                if crash { 2 } else { 3 }
-            );
-            evidence.record_json("paired-history", &finished).unwrap();
+            // 实时取消与崩溃后都停在第二步：用户消息与两个 Step 各一条条目，末端 Step 带结局。
+            let observer = watch(&world, &spec, sid);
+            let entries = observer.view.raw_entries();
+            assert_eq!(entries.len(), 3);
+            assert_paired_entries(&entries, &closed);
+            evidence
+                .record_json("paired-entries", &json!(observer.received))
+                .unwrap();
             assert_eq!(history_tip(&world), tip);
             assert!(!world.project_dir().join("never.txt").exists());
             assert_eq!(
@@ -2875,8 +2480,6 @@ fn dispatch_deadline_tail_is_atomic_and_survives_crash() {
                         "expire before dispatch",
                         "--agent",
                         "deadline",
-                        "--turn-id",
-                        TURN,
                     ]
                     .iter()
                     .map(|s| s.to_string())
@@ -2891,11 +2494,10 @@ fn dispatch_deadline_tail_is_atomic_and_survives_crash() {
             .unwrap();
         gate.wait_until_stalled(2, budget.cap_timeout(spec.step_timeout()))
             .unwrap();
-        let first = query(&world, TURN);
-        assert_eq!(
-            first["selected_turn"]["steps"][0]["end"],
-            json!({"end":"continue"})
-        );
+        let (sid, tid) = running_turn(&world, &spec, &mut evidence);
+        let (sid, tid) = (sid.as_str(), tid.as_str());
+        let first = accepted_detail(&world, &spec, tid);
+        assert_eq!(first["steps"][0]["end"], json!({"end":"continue"}));
         let tip = history_tip(&world);
         std::fs::write(schedule.join("calls_registered.arm"), b"").unwrap();
         gate.release_next(budget.cap_timeout(spec.step_timeout()))
@@ -2904,11 +2506,10 @@ fn dispatch_deadline_tail_is_atomic_and_survives_crash() {
             &schedule.join("calls_registered.ready"),
             budget.cap_timeout(spec.step_timeout()),
         );
-        assert_eq!(paused["turn_id"], TURN);
-        let before = query(&world, TURN);
-        let sid = before["session"]["session_id"].as_str().unwrap();
+        assert_eq!(paused["turn_id"], tid);
+        let before = accepted_detail(&world, &spec, tid);
         assert!(
-            before["selected_turn"]["steps"][1]["slots"]
+            before["steps"][1]["slots"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -2919,7 +2520,7 @@ fn dispatch_deadline_tail_is_atomic_and_survives_crash() {
         std::fs::write(schedule.join("calls_registered.release"), b"").unwrap();
         let marker = wait_for_ack(&ack, budget.cap_timeout(spec.step_timeout()));
         assert_eq!(marker["barrier"], "step_closed");
-        assert_eq!(marker["turn_id"], TURN);
+        assert_eq!(marker["turn_id"], tid);
         evidence
             .record_json(
                 "windows",
@@ -2930,28 +2531,24 @@ fn dispatch_deadline_tail_is_atomic_and_survives_crash() {
         world.unset_env(BARRIER);
         world.unset_env(ACK);
         world.unset_env("LATTICE_TEST_SCHEDULE_DIR");
-        let closed = stage(&world, &spec, &mut evidence, sid, TURN);
+        let closed = stage(&world, &spec, &mut evidence, sid, tid);
         assert_eq!(closed["summary"]["outcome"], "failed");
         assert_eq!(
             closed["steps"][1]["end"],
             json!({"end":"stop","cause":{"cause":"deadline"}})
         );
-        assert_eq!(closed["steps"][0], first["selected_turn"]["steps"][0]);
+        assert_eq!(closed["steps"][0], first["steps"][0]);
         let slots = closed["steps"][1]["slots"].as_array().unwrap();
         assert_eq!(slots.len(), 2);
         for slot in slots {
             assert_eq!(slot["outcome"], "not_executed");
             assert!(slot["reason"].is_null());
         }
-        let mut observer = Wire::connect(
-            &world,
-            json!({"operation":"subscribe","target":{"session_id":sid,"turn_id":TURN},"cursor":null}),
-        );
-        assert_eq!(observer.next()["value"]["type"], "snapshot");
-        let finished = observer.next();
-        assert_eq!(finished["value"]["type"], "finished");
-        assert_paired_history(&finished["value"]["history"], &closed);
-        evidence.record_json("paired-history", &finished).unwrap();
+        let observer = watch(&world, &spec, sid);
+        assert_paired_entries(&observer.view.raw_entries(), &closed);
+        evidence
+            .record_json("paired-entries", &json!(observer.received))
+            .unwrap();
         assert_eq!(history_tip(&world), tip);
         assert_eq!(
             std::fs::read_to_string(world.project_dir().join("prefix.txt")).unwrap(),
@@ -2963,7 +2560,7 @@ fn dispatch_deadline_tail_is_atomic_and_survives_crash() {
             &mut evidence,
             &["--json", "session", "rewind", sid, "0"],
         );
-        assert_eq!(stage(&world, &spec, &mut evidence, sid, TURN), closed);
+        assert_eq!(stage(&world, &spec, &mut evidence, sid, tid), closed);
         assert!(!world.project_dir().join("first.txt").exists());
         assert!(!world.project_dir().join("second.txt").exists());
         assert_eq!(provider.captured_requests().len(), 2);
@@ -3013,8 +2610,6 @@ fn memory_only_cancel_crash_is_process_exit_and_next_send_runs_once() {
                         "cancel input",
                         "--agent",
                         "cancel",
-                        "--turn-id",
-                        TURN,
                     ]
                     .iter()
                     .map(|s| s.to_string())
@@ -3027,24 +2622,19 @@ fn memory_only_cancel_crash_is_process_exit_and_next_send_runs_once() {
             &schedule.join("request_started.ready"),
             budget.cap_timeout(spec.step_timeout()),
         );
-        assert_eq!(pause["turn_id"], TURN);
-        let before = query(&world, TURN);
-        let sid = before["session"]["session_id"].as_str().unwrap();
-        let taken = call(
-            &world,
-            json!({"operation":"cancel","target":{"session_id":sid,"turn_id":TURN}}),
-        );
+        let (sid, tid) = running_turn(&world, &spec, &mut evidence);
+        let (sid, tid) = (sid.as_str(), tid.as_str());
+        assert_eq!(pause["turn_id"], tid);
+        let before = accepted_detail(&world, &spec, tid);
+        let taken = cancel(&world, &spec, tid);
         assert_eq!(
             taken,
             json!({"response":"cancelled","value":{"owned":true}})
         );
-        assert_eq!(
-            query(&world, TURN)["selected_turn"],
-            before["selected_turn"]
-        );
+        assert_eq!(accepted_detail(&world, &spec, tid), before);
         std::fs::write(schedule.join("request_started.release"), b"").unwrap();
         let marker = wait_for_ack(&ack, budget.cap_timeout(spec.step_timeout()));
-        assert_eq!(marker["turn_id"], TURN);
+        assert_eq!(marker["turn_id"], tid);
         evidence
             .record_json(
                 "memory-only-cancel",
@@ -3055,27 +2645,19 @@ fn memory_only_cancel_crash_is_process_exit_and_next_send_runs_once() {
         world.unset_env(BARRIER);
         world.unset_env(ACK);
         world.unset_env("LATTICE_TEST_SCHEDULE_DIR");
-        let reopened = stage(&world, &spec, &mut evidence, sid, TURN);
-        assert_eq!(reopened, before["selected_turn"]);
+        let reopened = stage(&world, &spec, &mut evidence, sid, tid);
+        assert_eq!(reopened, before);
         assert_eq!(reopened["summary"]["outcome"], "failed");
         assert!(provider.captured_requests().is_empty());
-        cli(
+        let next = cli(
             &world,
             &spec,
             &mut evidence,
-            &[
-                "--json",
-                "session",
-                "send",
-                "new input",
-                "--session",
-                sid,
-                "--turn-id",
-                OTHER,
-            ],
+            &["--json", "session", "send", "new input", "--session", sid],
             0,
         );
-        let old = stage(&world, &spec, &mut evidence, sid, TURN);
+        let next = parse_send_stdout(&next.stdout, next.exit_code());
+        let old = stage(&world, &spec, &mut evidence, sid, tid);
         assert_eq!(old, reopened, "new send must not modify the old Turn");
         assert_eq!(old["summary"]["outcome"], "failed");
         assert_eq!(old["summary"]["notice"]["level"], "error");
@@ -3087,7 +2669,13 @@ fn memory_only_cancel_crash_is_process_exit_and_next_send_runs_once() {
             old["steps"][0]["attempts"][0]["end"]["cause"]["cause"],
             "process_exit"
         );
-        let new = stage(&world, &spec, &mut evidence, sid, OTHER);
+        let new = stage(
+            &world,
+            &spec,
+            &mut evidence,
+            sid,
+            next.accepted_turn_id().unwrap(),
+        );
         assert_eq!(new["summary"]["outcome"], "completed");
         let captures = provider.captured_requests();
         assert_eq!(captures.len(), 1);
@@ -3117,6 +2705,171 @@ fn memory_only_cancel_crash_is_process_exit_and_next_send_runs_once() {
         provider
             .shutdown(budget.cap_timeout(spec.step_timeout()))
             .unwrap();
+    }));
+    support::finish_recorded(evidence, result);
+}
+
+/// 准入窗口：后台已登记在途的 TurnId、尚未确认提交连接仍在并准入之前，由 `admission_registered`
+/// 暂停这次提交的任务，后台照常服务其他连接。
+#[test]
+fn admission_window_reports_in_flight_and_a_departed_submitter_is_not_admitted() {
+    let (world, spec) = support::direct_world("admission-window", "admission", "[]", "");
+    let budget = world.budget(&spec);
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        provenance(
+            &world,
+            &mut evidence,
+            json!({"test":"admission_window_reports_in_flight_and_a_departed_submitter_is_not_admitted",
+            "pause":"admission_registered","script":"plain admitted later"}),
+        );
+        let mut provider =
+            support::wire_fake_llm(&world, "admission", SseScript::plain("admitted later"));
+        let schedule = world.root().join("schedule");
+        std::fs::create_dir(&schedule).unwrap();
+        std::fs::write(schedule.join("admission_registered.arm"), b"").unwrap();
+        world.set_env("LATTICE_TEST_SCHEDULE_DIR", schedule.display().to_string());
+        let daemon = support::crash::start(&world, &spec, &budget);
+        // 先用只读的 `status` 确认后台说同一协议；协议不符时在这里直接失败。
+        let status = ipc(
+            &world,
+            timeout(&world, &spec),
+            json!({"operation":"status"}),
+        );
+        assert_eq!(status["response"], "status", "{status}");
+        let configured = configuration(&world, "admission", &provider.base_url());
+        let request = submit_request(
+            &world,
+            TURN,
+            json!({"new":SESSION}),
+            "admission window",
+            Some("admission"),
+            configured.clone(),
+        );
+        let mut pending = Wire::connect(&world, timeout(&world, &spec), &request);
+        // 标记出现之前这次提交不能已有回执：已回复说明后台没有在准入前暂停。
+        let ready = schedule.join("admission_registered.ready");
+        let until = deadline(&world, &spec);
+        let marker = loop {
+            if let Ok(bytes) = std::fs::read(&ready)
+                && let Ok(marker) = serde_json::from_slice::<Value>(&bytes)
+            {
+                break marker;
+            }
+            if let Some(reply) = pending.next_within(Duration::from_millis(5)) {
+                panic!("submission answered without pausing at admission_registered: {reply}");
+            }
+            assert!(
+                Instant::now() < until,
+                "admission_registered marker not reached"
+            );
+        };
+        assert_eq!(marker["turn_id"], TURN);
+        assert_eq!(marker["session_id"], SESSION);
+        evidence.record_json("admission-pause", &marker).unwrap();
+        // 请求仍在准入：查询报告在途，CLI 输出在途并退出 0。
+        assert_eq!(
+            turn_lookup(&world, timeout(&world, &spec), TURN),
+            json!({"response":"turn","value":{"status":"in_flight"}})
+        );
+        let shown = cli(
+            &world,
+            &spec,
+            &mut evidence,
+            &["--json", "session", "turn", TURN],
+            0,
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&shown.stdout).unwrap(),
+            json!({"status":"in_flight","turn_id":TURN})
+        );
+        // 同一 TurnId 再提交是冲突；另一 TurnId 以 New(S) 提交同一个 S 是 Busy。
+        let reused = ipc(&world, timeout(&world, &spec), request.clone());
+        assert_eq!(reused["value"]["kind"], "conflict", "{reused}");
+        assert_eq!(reused["value"]["conflict"], "turn_id_used", "{reused}");
+        let racing = ipc(
+            &world,
+            timeout(&world, &spec),
+            submit_request(
+                &world,
+                OTHER,
+                json!({"new":SESSION}),
+                "racing",
+                Some("admission"),
+                configured.clone(),
+            ),
+        );
+        assert_eq!(racing["value"]["kind"], "busy", "{racing}");
+        evidence
+            .record_json("window-replies", &json!({"reused":reused,"racing":racing}))
+            .unwrap();
+        // 提交端断开后放行：后台确认连接已不在，不准入；在途登记随之结束。
+        drop(pending);
+        std::fs::write(schedule.join("admission_registered.release"), b"").unwrap();
+        let until = deadline(&world, &spec);
+        let settled = loop {
+            let lookup = turn_lookup(&world, timeout(&world, &spec), TURN);
+            if lookup["value"]["status"] != "in_flight" {
+                break lookup;
+            }
+            assert!(
+                Instant::now() < until,
+                "TurnId stayed in flight after the submitter left"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(settled["response"], "error", "{settled}");
+        assert_eq!(settled["value"]["kind"], "not_found", "{settled}");
+        let absent = ipc(
+            &world,
+            timeout(&world, &spec),
+            json!({"operation":"watch","session_id":SESSION}),
+        );
+        assert_eq!(absent["value"]["kind"], "not_found", "{absent}");
+        assert!(provider.captured_requests().is_empty());
+        // 之后用新的 TurnId 以 New(S) 提交，正常准入并执行。
+        let admitted = ipc(
+            &world,
+            timeout(&world, &spec),
+            submit_request(
+                &world,
+                THIRD,
+                json!({"new":SESSION}),
+                "admitted",
+                Some("admission"),
+                configured,
+            ),
+        );
+        assert_eq!(admitted["value"]["acceptance"], "accepted", "{admitted}");
+        assert_eq!(admitted["value"]["turn"]["session_id"], SESSION);
+        let mut watcher = watch(&world, &spec, SESSION);
+        watcher.until(
+            deadline(&world, &spec),
+            "the admitted Turn closes",
+            |view| turn_closed(view, THIRD),
+        );
+        assert_eq!(provider.captured_requests().len(), 1);
+        evidence
+            .record_json(
+                "after-release",
+                &json!({"lookup":settled,"absent":absent,"admitted":admitted,"watch":watcher.received}),
+            )
+            .unwrap();
+        stage(&world, &spec, &mut evidence, SESSION, THIRD);
+        evidence.record_captures(provider.captured_requests());
+        provider
+            .shutdown(budget.cap_timeout(spec.step_timeout()))
+            .unwrap();
+        cli(
+            &world,
+            &spec,
+            &mut evidence,
+            &["--json", "daemon", "stop"],
+            0,
+        );
+        let stopped = daemon.wait(None).unwrap();
+        evidence.record_command("admission window backend stop", &stopped);
+        assert!(stopped.is_clean_exit(0));
     }));
     support::finish_recorded(evidence, result);
 }

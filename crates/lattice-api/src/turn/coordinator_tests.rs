@@ -223,114 +223,6 @@ async fn collision_retries_only_registration_and_preserves_reply() {
 }
 
 #[tokio::test]
-async fn snapshot_carries_unclosed_node_and_replaces_segments_when_attempt_ends() {
-    use super::super::{observer::ObserverSink, types::TurnEvent};
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Arc::new(SessionStore::create(&StateLayout::in_state_root(tmp.path())).unwrap());
-    let io = CoordinatorStoreIo::acquire(store.clone(), sid())
-        .await
-        .unwrap();
-    io.accept(input()).await.unwrap();
-    let mut reply = reply(tid(1));
-    let observer = Arc::new(ObserverSink::default());
-    io.start_request(reply.key).await.unwrap();
-    observer.emit(TurnEvent::ModelStarted {
-        key: reply.key,
-        provider: reply.origin,
-        model: "model".into(),
-    });
-    observer.emit(TurnEvent::TokenDelta {
-        key: reply.key,
-        content: "旧段".into(),
-    });
-    let read_store = store.clone();
-    let sink = observer.clone();
-    let (view, attempt, _) =
-        tokio::task::spawn_blocking(move || sink.snapshot(&read_store, sid(), Some(tid(1))))
-            .await
-            .unwrap()
-            .unwrap();
-    assert!(matches!(view.unclosed_step, Some((NodeId(2), Node::Step {
-        progress: StepProgress::Requesting, attempts, ..
-    })) if matches!(attempts[0].progress, AttemptProgress::Sent)));
-    assert_eq!(attempt.unwrap().key, reply.key);
-    io.stop_attempt(AttemptStopped {
-        key: reply.key,
-        origin: reply.origin,
-        usage: None,
-        cause: StopCause::ProviderError { retryable: true },
-        retry_delay_ms: Some(1),
-        diagnostic: AttemptDiagnostic {
-            provider_error: Some("retry".into()),
-            ..Default::default()
-        },
-    })
-    .await
-    .unwrap();
-    // 提交成功但观察事件尚未追加：已 Stopped 的旧段不能复活。
-    let read_store = store.clone();
-    let sink = observer.clone();
-    let (view, attempt, seq) =
-        tokio::task::spawn_blocking(move || sink.snapshot(&read_store, sid(), Some(tid(1))))
-            .await
-            .unwrap()
-            .unwrap();
-    assert!(
-        matches!(view.unclosed_step.as_ref(), Some((NodeId(2), Node::Step {
-        progress: StepProgress::Requesting, attempts, ..
-    })) if attempts[0].retry_delay_ms == Some(1))
-    );
-
-    assert!(attempt.is_none());
-    assert_eq!(seq, 2);
-    reply.key.attempt_ordinal = 1;
-    io.start_request(reply.key).await.unwrap();
-    observer.emit(TurnEvent::ModelStarted {
-        key: reply.key,
-        provider: reply.origin,
-        model: "model".into(),
-    });
-    observer.emit(TurnEvent::TokenDelta {
-        key: reply.key,
-        content: "说明".into(),
-    });
-    let registered = io.register_calls(reply, vec![iid(1)]).await.unwrap();
-    let read_store = store.clone();
-    let sink = observer.clone();
-    let (view, attempt, seq) =
-        tokio::task::spawn_blocking(move || sink.snapshot(&read_store, sid(), Some(tid(1))))
-            .await
-            .unwrap()
-            .unwrap();
-    assert!(
-        matches!(view.unclosed_step.as_ref(), Some((NodeId(2), Node::Step {
-            progress: StepProgress::Executing, reply: Some(reply), slots, ..
-        })) if reply == &registered.reply && slots.len() == 1
-            && slots[0].progress == SlotProgress::Registered)
-    );
-    assert!(attempt.is_none(), "完整回复已经提交，节点取代旧段列表");
-    assert_eq!(seq, 4);
-    let coordinator = TurnCoordinator::new(io, Arc::new(RandomIdSource));
-    coordinator
-        .io
-        .close_step(CloseStep::StopExecuting {
-            key: registered.key,
-            stop: DispatchStop::Cancelled,
-        })
-        .await
-        .unwrap();
-    let (view, attempt, seq) =
-        tokio::task::spawn_blocking(move || observer.snapshot(&store, sid(), Some(tid(1))))
-            .await
-            .unwrap()
-            .unwrap();
-    assert!(view.unclosed_step.is_none());
-    assert!(view.selected_turn.unwrap().summary.progress.is_closed());
-    assert!(attempt.is_none());
-    assert_eq!(seq, 4);
-}
-
-#[tokio::test]
 async fn live_multicall_closes_continue_then_finish_from_structured_history() {
     use super::super::{
         observer::ObserverSink,
@@ -476,9 +368,9 @@ async fn live_multicall_closes_continue_then_finish_from_structured_history() {
             .unwrap(),
         detail
     );
-    let events = observer.events_after(0).unwrap();
+    let events = observer.events();
     assert!(
-        matches!(&events.last().unwrap().event, super::super::types::TurnEvent::TurnCompleted { step, summary, .. } if step == &detail.steps[1] && summary == &detail.summary)
+        matches!(&events.last().unwrap(), super::super::types::TurnEvent::TurnCompleted { step, summary, .. } if step == &detail.steps[1] && summary == &detail.summary)
     );
     let requests = llm.0.lock().unwrap();
     assert_eq!(requests.len(), 2);
@@ -529,10 +421,10 @@ async fn mixed_unknown_batch_closes_invalid_without_allocating_invocations() {
 }
 
 #[tokio::test]
-async fn first_acceptance_allocates_session_and_same_turn_reuses_it_without_configuration() {
+async fn first_acceptance_reopens_with_frozen_facts_and_used_turn_conflicts() {
     use super::super::{
         execute::start_turn,
-        types::{RunTurnRequest, TurnAcceptance, TurnCompletion},
+        types::{RunTurnRequest, TurnAcceptance},
     };
     use lattice_llm::LlmEvent;
     let state = tempfile::tempdir().unwrap();
@@ -578,23 +470,19 @@ async fn first_acceptance_allocates_session_and_same_turn_reuses_it_without_conf
     };
     let sid = turn.session_id;
     assert_eq!(turn.user_node, NodeId(1));
-    assert!(matches!(
-        execution.completion.await.unwrap().unwrap(),
-        TurnCompletion::Closed(_)
-    ));
+    execution.completion.await.unwrap().unwrap();
     let mut retry = request;
     retry.loaded_profile = None;
     retry.agent = None;
     retry.test_llm = None;
     let execution = start_turn(api, layout, tid(9), workspace, retry, None);
-    let TurnAcceptance::Existing { turn } = execution.acceptance.await.unwrap().unwrap() else {
-        panic!("not found")
-    };
-    assert_eq!(turn.session_id, sid);
     assert!(matches!(
-        execution.completion.await.unwrap().unwrap(),
-        TurnCompletion::Closed(_)
+        execution.acceptance.await.unwrap(),
+        Err(crate::ApiError::Conflict(
+            crate::session::RequestConflict::TurnIdUsed
+        ))
     ));
+    assert!(execution.completion.await.unwrap().is_err());
     assert_eq!(llm.call_count(), 1);
     let read = store.begin_read().unwrap();
     assert_eq!(read.list(None, 100).unwrap().items.len(), 1);
@@ -778,10 +666,10 @@ async fn stop_at_execution_boundary(boundary: StopBoundary, cancelled: bool) {
     } else {
         result.unwrap()
     };
-    let emitted = observer.events_after(0).unwrap();
+    let emitted = observer.events();
     let starts = emitted
         .iter()
-        .filter(|e| matches!(e.event, TurnEvent::ToolCallStarted { .. }))
+        .filter(|e| matches!(e, TurnEvent::ToolCallStarted { .. }))
         .count();
     assert_eq!(starts, if completed_batch { 2 } else { 0 });
     assert_eq!(

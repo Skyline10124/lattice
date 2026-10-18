@@ -227,23 +227,7 @@ pub enum AttemptEnd {
 #[serde(deny_unknown_fields)]
 pub struct AttemptDiagnostic {
     pub provider_error: Option<String>,
-    pub partial: Vec<DiagnosticPart>,
     pub invalid_batch: Option<ToolCallValidation>,
-}
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum DiagnosticPart {
-    Text {
-        text: String,
-    },
-    Reasoning {
-        text: String,
-    },
-    ToolCall {
-        provider_call_id: Option<String>,
-        name: String,
-        arguments: String,
-    },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "end", rename_all = "snake_case", deny_unknown_fields)]
@@ -565,44 +549,35 @@ pub struct SlotDetail {
     pub material: MaterialSummary,
     pub evidence: InvocationEvidence,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HistoryAnchor {
-    pub session_id: SessionId,
-    pub head: NodeId,
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ConversationEntry {
+    UserMessage {
+        node: NodeId,
+        content: Node,
+        ordinal: u64,
+    },
+    Step {
+        node: NodeId,
+        content: Node,
+        step: StepDetail,
+        retries: Vec<RetryNotice>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        summary: Option<TurnSummary>,
+    },
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HistoryCursor {
-    pub anchor: HistoryAnchor,
-    pub node: NodeId,
-    pub utf8_offset: u64,
-}
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NodeFragment {
-    pub node: NodeId,
-    pub utf8_offset: u64,
-    pub json_fragment: String,
-    pub complete: bool,
-    pub agent_name: String,
-    pub summary: TurnSummary,
-    pub retries: Vec<RetryNotice>,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HistoryPage {
-    pub anchor: HistoryAnchor,
-    pub fragments: Vec<NodeFragment>,
-    pub next: Option<HistoryCursor>,
+impl ConversationEntry {
+    pub fn node(&self) -> NodeId {
+        match self {
+            Self::UserMessage { node, .. } | Self::Step { node, .. } => *node,
+        }
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
-pub struct DurableSnapshot {
+pub struct SessionView {
     pub session: SessionRecord,
     pub current_agent: Option<String>,
-    pub selected_turn: Option<TurnDetail>,
-    pub history: HistoryAnchor,
-    pub unclosed_step: Option<(NodeId, Node)>,
+    pub entries: Vec<ConversationEntry>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Page<T, C> {
@@ -697,14 +672,12 @@ redacted_debug!(
     Notice,
     SlotProgress,
     AttemptDiagnostic,
-    DiagnosticPart,
     InvocationTerminal,
     AcceptTurn,
     CompleteReply,
     RegisteredCalls,
     AttemptProgressDetail,
-    AttemptEndDetail,
-    NodeFragment
+    AttemptEndDetail
 );
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

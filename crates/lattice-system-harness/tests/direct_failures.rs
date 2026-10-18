@@ -5,24 +5,14 @@
 mod support;
 use lattice_system_harness::{
     AssertError, HarnessIntervention, ProcessTermination, SendExecution, SessionSendDriver,
-    SseScript, TurnEventLine,
+    SseScript,
 };
 use serde_json::Value;
 use std::time::Duration;
 use support::*;
 
-fn final_turn(outcome: &SendExecution) -> &Value {
-    outcome
-        .events
-        .iter()
-        .rev()
-        .find_map(|event| match event {
-            TurnEventLine::Unknown { type_name, raw } if type_name == "snapshot" => {
-                Some(&raw["view"]["selected_turn"])
-            }
-            _ => None,
-        })
-        .expect("final durable snapshot")
+fn final_turn(outcome: &SendExecution) -> Value {
+    live_turn(outcome)
 }
 fn failed(outcome: &SendExecution, cause: &str) -> Result<(), AssertError> {
     assert_clean_send(outcome)?;
@@ -89,39 +79,32 @@ fn provider_failure(name: &str, test: &str, script: SseScript, partial: bool) {
         require(server.captured_requests().len() == 1, "no provider retry")?;
         require(detail.is_clean_exit(0), "failed Turn remains readable")?;
         require(
-            serde_json::from_slice::<Value>(&detail.stdout).unwrap() == *final_turn(&outcome),
-            "reloaded detail equals durable snapshot",
+            same_turn(
+                &final_turn(&outcome),
+                &serde_json::from_slice::<Value>(&detail.stdout).unwrap(),
+            ),
+            "reloaded detail equals the live Step entries",
         )?;
-        if partial {
-            require(
-                outcome.assistant_text() == "partial",
-                "partial delta is observed before failure",
-            )?;
-        } else {
-            require(outcome.assistant_text().is_empty(), "no fabricated text")?;
-        }
-        let turn = final_turn(&outcome);
-        let history = outcome
-            .events
+        let entries = outcome.entries();
+        let entry = entries
             .iter()
-            .rev()
-            .find_map(|event| match event {
-                TurnEventLine::Unknown { type_name, raw } if type_name == "history" => {
-                    Some(&raw["history"])
-                }
-                _ => None,
-            })
-            .expect("fixed history");
-        let entry = history["entries"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|entry| entry["node"] == turn["steps"][0]["node"])
+            .find(|entry| entry.step().is_some())
             .expect("reserved Step persists even on failure");
+        let expected = if partial { "partial" } else { "" };
         require(
-            entry["content"]["kind"] == "step"
-                && entry["content"].get("reply") == Some(&Value::Null),
-            "failed partial remains diagnostic, not a complete reply",
+            outcome.reply_text().is_empty() && entry.raw["content"]["reply"].is_null(),
+            "failed attempt does not produce a complete reply",
+        )?;
+        // 生成中的文字只要收到过，就是这次尝试已输出内容的前缀。
+        let view = outcome
+            .view()
+            .map_err(|e| AssertError::StdoutMissing { expected: e })?;
+        require(
+            view.texts.values().flatten().all(|segment| {
+                segment.kind == lattice_system_harness::SegmentKind::Text
+                    && expected.starts_with(&segment.text)
+            }),
+            "streamed text is a prefix of the stopped attempt output",
         )
     })();
     finish_failure(
@@ -216,7 +199,7 @@ fn direct_failure_sigint_while_stalled_commits_cancelled() {
         )?;
         assert_accepted_and_closed(&outcome)?;
         require(
-            outcome.malformed_lines.is_empty() && outcome.assistant_text().is_empty(),
+            outcome.malformed_lines.is_empty() && outcome.reply_text().is_empty(),
             "no malformed records or fabricated text",
         )?;
         let turn = final_turn(&outcome);
@@ -228,7 +211,10 @@ fn direct_failure_sigint_while_stalled_commits_cancelled() {
         )?;
         require(
             detail.is_clean_exit(0)
-                && serde_json::from_slice::<Value>(&detail.stdout).unwrap() == *turn,
+                && same_turn(
+                    &turn,
+                    &serde_json::from_slice::<Value>(&detail.stdout).unwrap(),
+                ),
             "cancellation survives reload",
         )
     })();
@@ -257,7 +243,7 @@ fn direct_failure_profile_deadline_while_stalled_commits_error() {
     let result = (|| {
         failed(&outcome, "deadline")?;
         require(
-            outcome.assistant_text().is_empty() && server.captured_requests().len() == 1,
+            outcome.reply_text().is_empty() && server.captured_requests().len() == 1,
             "one stalled request, no text",
         )
     })();
@@ -354,7 +340,13 @@ fn direct_failure_session_lock_rejects_busy_then_accepts_explicit_retry() {
                 "accepted Turn completes",
             )?;
         }
-        require(racer.command.is_clean_exit(1) && racer.accepted_turn_id().is_none() && racer.events.iter().any(|e| matches!(e, TurnEventLine::Unknown { type_name, raw } if type_name == "error" && raw["kind"] == "busy")), "Busy rejects without acceptance")?;
+        assert_clean_send(&racer)?;
+        require(
+            racer.command.is_clean_exit(1)
+                && racer.accepted_turn_id().is_none()
+                && rejected_kind(&racer) == Some("busy"),
+            "Busy rejects without acceptance",
+        )?;
         require(
             before_retry.is_empty() && racer_server.captured_requests().len() == 1,
             "Busy never queues or calls provider",
@@ -365,11 +357,11 @@ fn direct_failure_session_lock_rejects_busy_then_accepts_explicit_retry() {
             log.is_clean_exit(0) && rows.len() == 7,
             "root plus exactly three complete Turns",
         )?;
-        let previous = &final_turn(&a)["steps"][0]["node"];
+        let previous = final_turn(&a)["steps"][0]["node"].clone();
         require(
             rows.iter().any(|r| {
                 r["turn_start"]["turn_id"] == b.accepted_turn_id().unwrap()
-                    && r["node"]["parent"] == *previous
+                    && r["node"]["parent"] == previous
             }),
             "B User is parented to A final node, not stale head",
         )

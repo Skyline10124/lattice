@@ -141,37 +141,6 @@ pub(super) fn diagnostic(cause: &StopCause, d: &AttemptDiagnostic) -> Result<()>
     {
         return Err(invalid("diagnostic", "provider error too long"));
     }
-    let mut text = 0usize;
-    let mut reasoning = 0usize;
-    let mut total = 0usize;
-    for part in &d.partial {
-        let n = match part {
-            DiagnosticPart::Text { text: t } => {
-                text = text.saturating_add(t.len());
-                t.len()
-            }
-            DiagnosticPart::Reasoning { text: t } => {
-                reasoning = reasoning.saturating_add(t.len());
-                t.len()
-            }
-            DiagnosticPart::ToolCall {
-                provider_call_id,
-                name,
-                arguments,
-            } => {
-                if arguments.len() > 1024 * 1024 {
-                    return Err(invalid("diagnostic", "arguments too large"));
-                }
-                name.len()
-                    .saturating_add(arguments.len())
-                    .saturating_add(provider_call_id.as_ref().map_or(0, String::len))
-            }
-        };
-        total = total.saturating_add(n);
-    }
-    if text > 2 * 1024 * 1024 || reasoning > 2 * 1024 * 1024 || total > 16 * 1024 * 1024 {
-        return Err(invalid("diagnostic", "partial response too large"));
-    }
     Ok(())
 }
 

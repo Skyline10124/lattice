@@ -3,10 +3,58 @@
 
 use super::*;
 use super::{codec::*, local::Selection};
-use lancet_protocol::InvocationId;
+use lancet_protocol::{InvocationId, ModelAttemptKey};
 use lattice_conversation::ToolResultOutcome;
 use lattice_store::ProjectStoreKey;
 use redb::ReadableTable;
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CountedNodeKind {
+    UserMessage,
+    Step,
+}
+
+// 根节点不参与计数；扁平投影让无关字段直接跳过，避免内部标签枚举缓存整份正文。
+#[derive(serde::Deserialize)]
+struct CountedNode {
+    kind: CountedNodeKind,
+    parent: NodeId,
+    turn_id: TurnId,
+}
+
+#[derive(serde::Deserialize)]
+struct StepAttempts {
+    kind: CountedNodeKind,
+    turn_id: TurnId,
+    step_ordinal: u32,
+    attempts: Vec<AttemptState>,
+}
+
+#[derive(serde::Deserialize)]
+struct AttemptState {
+    progress: AttemptStateTag,
+}
+
+// 只读标签，跳过 Ended 的诊断；内部标签枚举会缓存整个 progress 对象。
+#[derive(serde::Deserialize)]
+struct AttemptStateTag {
+    progress: AttemptStateKind,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum AttemptStateKind {
+    Sent,
+    Ended,
+}
+
+#[derive(serde::Deserialize)]
+struct TurnAgent {
+    kind: CountedNodeKind,
+    turn_id: TurnId,
+    agent_name: String,
+}
 
 fn payload_summary(
     payload: &ResultPayload,
@@ -170,6 +218,87 @@ fn positive(limit: usize) -> Result<()> {
     }
 }
 
+fn positive_turns(turns: u32) -> Result<()> {
+    if turns == 0 {
+        Err(invalid("turns", "turn count must be positive"))
+    } else {
+        Ok(())
+    }
+}
+
+fn step_entry(
+    session: SessionId,
+    node: NodeId,
+    content: Node,
+    origin: lattice_conversation::ProviderOrigin,
+) -> Result<ConversationEntry> {
+    let Node::Step {
+        progress,
+        attempts,
+        slots,
+        ..
+    } = &content
+    else {
+        return Err(corrupt("nodes", &node.0.to_string(), "expected step node"));
+    };
+    let summary = if matches!(
+        progress,
+        StepProgress::Closed {
+            end: StepEnd::Continue
+        }
+    ) {
+        None
+    } else {
+        Some(close::summary(progress, attempts, slots)?)
+    };
+    let step = detail(session, origin, node, &content)?;
+    let retries = content.retry_notices()?;
+    Ok(ConversationEntry::Step {
+        node,
+        content,
+        step,
+        retries,
+        summary,
+    })
+}
+
+fn entries(
+    session: SessionId,
+    path: Vec<(NodeId, Node)>,
+    mut ordinal: u64,
+) -> Result<Vec<ConversationEntry>> {
+    let mut origin = None;
+    let mut entries = Vec::new();
+    for (node, content) in path {
+        match &content {
+            Node::UserMessage { provider, .. } => {
+                ordinal += 1;
+                origin = Some(
+                    validate::provider(provider)
+                        .map_err(|_| corrupt("nodes", &node.0.to_string(), "unknown provider"))?,
+                );
+                entries.push(ConversationEntry::UserMessage {
+                    node,
+                    content,
+                    ordinal,
+                });
+            }
+            Node::Step { .. } => {
+                entries.push(step_entry(
+                    session,
+                    node,
+                    content,
+                    origin.ok_or_else(|| {
+                        corrupt("nodes", &node.0.to_string(), "step has no user ancestor")
+                    })?,
+                )?);
+            }
+            Node::Root => {}
+        }
+    }
+    Ok(entries)
+}
+
 impl Records {
     pub(super) fn current_agent(&self, s: SessionId) -> Result<Option<String>> {
         let session = self.sessions.get(&s).ok_or_else(|| missing("session", s))?;
@@ -300,7 +429,7 @@ impl SessionRead {
     }
 
     /// 调用方给出的 Session 可能不存在，由调用方报 NotFound。
-    fn find_session(&self, id: SessionId) -> Result<Option<SessionRecord>> {
+    pub fn find_session(&self, id: SessionId) -> Result<Option<SessionRecord>> {
         let table = self.tx.open_table(SESSIONS).map_err(table_error)?;
         let Some(value) = table.get(id.to_string().as_str())? else {
             return Ok(None);
@@ -503,155 +632,187 @@ impl SessionRead {
             .turn_detail(session, turn)
     }
 
-    pub fn snapshot(
-        &self,
-        session: SessionId,
-        selected: Option<TurnId>,
-    ) -> Result<DurableSnapshot> {
-        let r = self.local(
-            session,
-            selected.map_or(Selection::Session, Selection::Turn),
-        )?;
-        let s = r
-            .sessions
-            .get(&session)
-            .ok_or_else(|| missing("session", session))?
-            .clone();
-        let current_node = r
-            .nodes
-            .get(&(session, s.current))
-            .ok_or_else(|| corrupt("nodes", &session.to_string(), "current node missing"))?;
-        let selected = selected.or_else(|| current_node.turn_id());
-        let selected_turn = selected.map(|t| r.turn_detail(session, t)).transpose()?;
-        let (head, unclosed_step) = match current_node {
-            Node::Step {
-                parent, progress, ..
-            } if !progress.is_closed() => (*parent, Some((s.current, current_node.clone()))),
-            _ => (s.current, None),
-        };
-        Ok(DurableSnapshot {
-            history: HistoryAnchor {
-                session_id: session,
-                head,
-            },
-            current_agent: r.current_agent(session)?,
-            session: s,
-            selected_turn,
-            unclosed_step,
+    /// 同一读事务内取得会话头与当前路径最近的若干轮，包含尚未关闭的 Step。
+    pub fn view(&self, session: SessionId, turns: u32) -> Result<SessionView> {
+        positive_turns(turns)?;
+        let record = self
+            .find_session(session)?
+            .ok_or_else(|| missing("session", session))?;
+        let (path, earlier_turns) = self.conversation_window(session, record.current, turns)?;
+        let current_agent = path.iter().rev().find_map(|(_, node)| match node {
+            Node::UserMessage { agent_name, .. } => Some(agent_name.clone()),
+            _ => None,
+        });
+        Ok(SessionView {
+            session: record,
+            current_agent,
+            entries: entries(session, path, earlier_turns)?,
         })
     }
 
-    /// 返回固定父链上节点的规范 JSON UTF-8 片段；IPC 层仍须计量转义后的帧大小。
-    pub fn history_page(
+    /// before 必须是本会话的 UserMessage；读取只取它固定父链上的更早轮次。
+    pub fn history(
         &self,
-        anchor: &HistoryAnchor,
-        cursor: Option<&HistoryCursor>,
-        max_bytes: usize,
-    ) -> Result<HistoryPage> {
-        positive(max_bytes)?;
-        self.session(anchor.session_id)?;
-        let mut path = Vec::new();
-        let mut n = anchor.head;
-        while n != NodeId(0) {
-            let node = self
-                .node(NodeRef {
-                    session_id: anchor.session_id,
-                    node: n,
+        session: SessionId,
+        before: NodeId,
+        turns: u32,
+    ) -> Result<Vec<ConversationEntry>> {
+        positive_turns(turns)?;
+        self.find_session(session)?
+            .ok_or_else(|| missing("session", session))?;
+        let Some(Node::UserMessage { parent, .. }) = self.find_node(session, before)? else {
+            return Err(invalid("before", "expected a user message in this session"));
+        };
+        let (path, earlier_turns) = self.conversation_window(session, parent, turns)?;
+        entries(session, path, earlier_turns)
+    }
+
+    /// 读取节点的最新完整条目，供观察者在节点变化后整条替换。
+    pub fn entry(&self, node: NodeRef) -> Result<ConversationEntry> {
+        self.find_session(node.session_id)?
+            .ok_or_else(|| missing("session", node.session_id))?;
+        let content = self
+            .find_node(node.session_id, node.node)?
+            .ok_or_else(|| missing("node", node.node.0))?;
+        match &content {
+            Node::Root => Err(invalid("node", "root has no conversation entry")),
+            Node::UserMessage { parent, .. } => {
+                let (_, earlier_turns) = self.conversation_window(node.session_id, *parent, 0)?;
+                Ok(ConversationEntry::UserMessage {
+                    node: node.node,
+                    content,
+                    ordinal: earlier_turns + 1,
                 })
-                .map_err(|e| match e {
-                    StoreError::NotFound { .. } => StoreError::InvalidCursor,
-                    e => e,
-                })?;
-            if n == anchor.head
-                && matches!(&node, Node::Step { progress, .. } if !progress.is_closed())
-            {
-                return Err(StoreError::InvalidCursor);
             }
-            path.push(n);
-            n = node.parent().ok_or(StoreError::InvalidCursor)?;
+            Node::Step { turn_id, .. } => {
+                let user = self.turn_user_node(node.session_id, *turn_id)?;
+                let Node::UserMessage { provider, .. } = self.path_node(node.session_id, user)?
+                else {
+                    return Err(corrupt(
+                        "nodes",
+                        &user.0.to_string(),
+                        "expected user message",
+                    ));
+                };
+                let origin = validate::provider(&provider)
+                    .map_err(|_| corrupt("nodes", &user.0.to_string(), "unknown provider"))?;
+                step_entry(node.session_id, node.node, content, origin)
+            }
+        }
+    }
+
+    fn find_node(&self, session: SessionId, node: NodeId) -> Result<Option<Node>> {
+        self.tx
+            .open_table(NODES)
+            .map_err(table_error)?
+            .get(node_key(session, node).as_slice())?
+            .map(|value| self.decode("nodes", &format!("{}/{}", session, node.0), value.value()))
+            .transpose()
+    }
+
+    /// 只解码指定路径节点；缺失表示已有路径损坏，不装载整轮配置。
+    pub fn path_node(&self, session: SessionId, node: NodeId) -> Result<Node> {
+        self.find_node(session, node)?.ok_or_else(|| {
+            corrupt(
+                "nodes",
+                &format!("{}/{}", session, node.0),
+                "missing path node",
+            )
+        })
+    }
+
+    /// 经 TurnId 索引定位本会话的 UserMessage，索引缺失或归属不符时报损坏。
+    pub fn turn_user_node(&self, session: SessionId, turn: TurnId) -> Result<NodeId> {
+        self.raw_turn_node(turn)?
+            .filter(|node| node.session_id == session)
+            .map(|node| node.node)
+            .ok_or_else(|| corrupt("turn_index", &turn.to_string(), "missing turn user node"))
+    }
+
+    /// 只读指定 Step 的尝试标签，供生成中文字的推送守卫使用。
+    pub fn attempt_is_sent(
+        &self,
+        session: SessionId,
+        node: NodeId,
+        key: ModelAttemptKey,
+    ) -> Result<bool> {
+        let step: StepAttempts = self.projected_node(session, node)?;
+        if !matches!(step.kind, CountedNodeKind::Step) {
+            return Err(corrupt(
+                "nodes",
+                &format!("{session}/{}", node.0),
+                "expected step node",
+            ));
+        }
+        Ok(step.turn_id == key.turn_id
+            && step.step_ordinal == key.model_step_ordinal
+            && step
+                .attempts
+                .get(key.attempt_ordinal as usize)
+                .is_some_and(|attempt| matches!(attempt.progress.progress, AttemptStateKind::Sent)))
+    }
+
+    /// 经 TurnId 索引只读取本轮 agent，不装载输入与冻结配置。
+    pub fn turn_agent(&self, session: SessionId, turn: TurnId) -> Result<String> {
+        let node = self.turn_user_node(session, turn)?;
+        let user: TurnAgent = self.projected_node(session, node)?;
+        if !matches!(user.kind, CountedNodeKind::UserMessage) || user.turn_id != turn {
+            return Err(corrupt(
+                "nodes",
+                &format!("{session}/{}", node.0),
+                "expected turn user message",
+            ));
+        }
+        Ok(user.agent_name)
+    }
+
+    fn projected_node<T: serde::de::DeserializeOwned>(
+        &self,
+        session: SessionId,
+        node: NodeId,
+    ) -> Result<T> {
+        let key = format!("{}/{}", session, node.0);
+        let table = self.tx.open_table(NODES).map_err(table_error)?;
+        let value = table
+            .get(node_key(session, node).as_slice())?
+            .ok_or_else(|| corrupt("nodes", &key, "missing path node"))?;
+        let bytes = attach_path(&self.path, payload("nodes", &key, value.value()))?;
+        serde_json::from_slice(bytes).map_err(|_| corrupt("nodes", &key, "invalid record encoding"))
+    }
+
+    fn conversation_window(
+        &self,
+        session: SessionId,
+        mut head: NodeId,
+        mut turns: u32,
+    ) -> Result<(Vec<(NodeId, Node)>, u64)> {
+        let mut path = Vec::new();
+        let mut earlier_turns = 0;
+        // 窗口之外只解码计数字段；经 TurnId 索引跳过同轮其余 Step。
+        while head != NodeId(0) {
+            if turns > 0 {
+                let node = self.path_node(session, head)?;
+                let Some(parent) = node.parent() else { break };
+                if matches!(node, Node::UserMessage { .. }) {
+                    turns -= 1;
+                }
+                path.push((head, node));
+                head = parent;
+            } else {
+                let node: CountedNode = self.projected_node(session, head)?;
+                match node.kind {
+                    CountedNodeKind::UserMessage => {
+                        earlier_turns += 1;
+                        head = node.parent;
+                    }
+                    CountedNodeKind::Step => {
+                        head = self.turn_user_node(session, node.turn_id)?;
+                    }
+                }
+            }
         }
         path.reverse();
-        let (start, mut offset) = match cursor {
-            None => (0, 0),
-            Some(c) => {
-                if c.anchor != *anchor {
-                    return Err(StoreError::InvalidCursor);
-                }
-                let index = path
-                    .iter()
-                    .position(|n| *n == c.node)
-                    .ok_or(StoreError::InvalidCursor)?;
-                (
-                    index,
-                    usize::try_from(c.utf8_offset).map_err(|_| StoreError::InvalidCursor)?,
-                )
-            }
-        };
-        let mut fragments = Vec::new();
-        let mut left = max_bytes;
-        let mut next = None;
-        for (index, n) in path.iter().enumerate().skip(start) {
-            let node = self.node(NodeRef {
-                session_id: anchor.session_id,
-                node: *n,
-            })?;
-            let turn_id = node.turn_id().ok_or(StoreError::InvalidCursor)?;
-            let turn = self.turn_detail(anchor.session_id, turn_id)?;
-            let retries = node.retry_notices()?;
-            let text = String::from_utf8(codec::canonical(&node)?)
-                .map_err(|_| corrupt("nodes", "encoding", "non-UTF8 canonical JSON"))?;
-            if offset >= text.len() || !text.is_char_boundary(offset) {
-                return Err(StoreError::InvalidCursor);
-            }
-            let mut end = offset.saturating_add(left).min(text.len());
-            while !text.is_char_boundary(end) {
-                end -= 1;
-            }
-            if end == offset {
-                if fragments.is_empty() {
-                    return Err(invalid("max_bytes", "page cannot fit next character"));
-                }
-                next = Some(HistoryCursor {
-                    anchor: anchor.clone(),
-                    node: *n,
-                    utf8_offset: offset as u64,
-                });
-                break;
-            }
-            let complete = end == text.len();
-            fragments.push(NodeFragment {
-                node: *n,
-                utf8_offset: offset as u64,
-                json_fragment: text[offset..end].into(),
-                complete,
-                agent_name: turn.agent_name,
-                summary: turn.summary,
-                retries,
-            });
-            left -= end - offset;
-            if !complete {
-                next = Some(HistoryCursor {
-                    anchor: anchor.clone(),
-                    node: *n,
-                    utf8_offset: end as u64,
-                });
-                break;
-            }
-            offset = 0;
-            if left == 0 {
-                next = path.get(index + 1).map(|n| HistoryCursor {
-                    anchor: anchor.clone(),
-                    node: *n,
-                    utf8_offset: 0,
-                });
-                break;
-            }
-        }
-        Ok(HistoryPage {
-            anchor: anchor.clone(),
-            fragments,
-            next,
-        })
+        Ok((path, earlier_turns))
     }
 
     fn index_entry(&self, id: InvocationId) -> Result<InvocationIndexEntry> {

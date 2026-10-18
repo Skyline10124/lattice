@@ -792,6 +792,20 @@ fn parse_process_stat(pid: u32, stat: &str) -> Result<Option<ProcessStat>, Clean
 mod tests {
     use super::*;
 
+    #[test]
+    fn human_output_with_a_sending_record_is_a_clean_exit() {
+        let outcome = CommandOutcome {
+            stdout: b"Example request:\n{\"type\":\"submit\",\"stage\":\"sending\",\"turn_id\":\"t\",\"session_id\":\"s\",\"new\":true}\n".to_vec(),
+            stderr: Vec::new(),
+            stdout_complete: true,
+            stderr_complete: true,
+            termination: Some(ProcessTermination::Exited(0)),
+            interventions: Vec::new(),
+            cleanup: ProcessGroupCleanup::default(),
+        };
+        assert!(outcome.is_clean_exit(0), "{}", outcome.summary());
+    }
+
     fn process_group_members(pgid: u32) -> Vec<u32> {
         processes_in_pgid(pgid).expect("inspect process group")
     }

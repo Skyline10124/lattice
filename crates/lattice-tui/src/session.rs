@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::TuiOptions;
-use crate::app::{Block, ToolSource, ToolState};
+use crate::app::{Block, ToolState};
 use crate::blocks::BlockList;
 use crate::connection::{closing_status, retry_status};
 use lattice_api::local::{
-    LocalClient, LocalHistory, MessageRole, MessageSemantic, ModelAttemptKey, Node, ResultPayload,
-    SessionId, StepContent, SuccessContent, TurnId,
+    AttemptProgress, ConversationEntry, LocalClient, MessageRole, MessageSemantic, ModelAttemptKey,
+    Node, ResultPayload, SessionId, SlotProgress, StepContent, SuccessContent,
 };
 
 pub(crate) struct SessionContext {
@@ -15,7 +15,7 @@ pub(crate) struct SessionContext {
     pub active_agent: String,
 }
 
-/// 只读打开；新会话在接受首个请求前没有身份。
+/// 只读打开；新会话的 SessionId 在首次提交时生成，接受前不算已建立。
 pub(crate) async fn open_or_create(
     options: &TuiOptions,
     client: &LocalClient,
@@ -66,65 +66,115 @@ pub(crate) async fn freeze_configuration(
     .map_err(|_| lattice_api::ApiError::Internal("配置工作者失败".into()))?
 }
 
-/// `unfinished` 是仍可能在执行的那一轮，它没有结局行。
-pub(crate) fn history_blocks(history: LocalHistory, unfinished: Option<TurnId>) -> Vec<Block> {
+/// 生成中的文字：所属尝试与已收到的字节数，以及其中的正文。reasoning 不显示，只计入字节数，
+/// 后台按两类文字合计的字节数续发。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Generating {
+    pub(crate) attempt: u32,
+    pub(crate) received: usize,
+    pub(crate) text: String,
+}
+
+/// 条目显示生成中的文字所属的尝试已 Ended：完成时由条目中的回复取代，停止时半截文字作废。
+pub(crate) fn superseded(entry: &ConversationEntry, generating: &Generating) -> bool {
+    match entry {
+        ConversationEntry::Step {
+            content: Node::Step { attempts, .. },
+            ..
+        } => attempts
+            .get(generating.attempt as usize)
+            .is_some_and(|attempt| matches!(attempt.progress, AttemptProgress::Ended { .. })),
+        _ => false,
+    }
+}
+
+/// 一个条目的显示块。`ended` 表示条目所在的一轮已经结束：未到 Terminal 的槽位改按会话库给出的
+/// 结论显示，最后一步带出结局；`generating` 只在它的尝试尚未 Ended 时显示在这一步的位置。
+pub(crate) fn entry_blocks(
+    entry: &ConversationEntry,
+    ended: bool,
+    generating: Option<&Generating>,
+) -> Vec<Block> {
     let mut blocks = BlockList::default();
-    let mut ordinal = std::num::NonZeroUsize::MIN;
-    // 其余各轮已关闭或执行者已消失，结局行放在该 Turn 最后一个节点之后；结局取这个节点带回的那份。
-    let mut closing = None;
-    for entry in history.entries {
-        let turn = entry.content.turn_id();
-        if let Some((id, summary)) = closing.take_if(|(id, _)| Some(*id) != turn) {
-            blocks.push(Block::Status(closing_status(id, summary)));
-        }
-        closing = turn
-            .filter(|id| Some(*id) != unfinished)
-            .map(|id| (id, entry.summary));
-        // Turn 的 agent 在接受时冻结，同一 Turn 的 Step 不再重复标题；路径从根开始，
-        // 每个 Step 前必有本 Turn 的 UserMessage。
-        if !matches!(entry.content, Node::Step { .. }) {
-            blocks.push(Block::AgentName(entry.agent_name));
-        }
-        match entry.content {
-            Node::Root => {}
-            Node::UserMessage {
-                turn_id, message, ..
-            } => {
-                blocks.push(Block::UserTurn(turn_id, ordinal));
-                ordinal = ordinal.saturating_add(1);
-                append_messages(&mut blocks, vec![message]);
+    match entry {
+        ConversationEntry::UserMessage {
+            node,
+            content,
+            ordinal,
+        } => {
+            if let Node::UserMessage {
+                turn_id,
+                agent_name,
+                message,
+                ..
+            } = content
+            {
+                blocks.push(Block::UserTurn {
+                    turn_id: *turn_id,
+                    node: Some(*node),
+                    ordinal: usize::try_from(*ordinal)
+                        .ok()
+                        .and_then(std::num::NonZeroUsize::new),
+                    agent: agent_name.clone(),
+                });
+                append_messages(&mut blocks, vec![message.clone()]);
             }
-            Node::Step {
+        }
+        ConversationEntry::Step {
+            node,
+            content,
+            retries,
+            summary,
+            ..
+        } => {
+            let Node::Step {
                 turn_id,
                 step_ordinal,
+                slots,
                 ..
-            } => {
-                blocks.push(Block::Step(lattice_api::local::StepKey {
-                    turn_id,
-                    ordinal: step_ordinal,
-                }));
-                // 重试提示排在这一步的回复之前，与实时显示的先后一致；它们是旧消息，直接进对话记录。
-                for retry in entry.retries {
-                    let key = ModelAttemptKey {
-                        turn_id,
-                        model_step_ordinal: step_ordinal,
-                        attempt_ordinal: retry.attempt,
-                    };
-                    blocks.push(Block::Status(retry_status(
-                        key,
-                        retry.delay_ms,
-                        retry.notice,
-                    )));
-                }
-                // 执行者消失时可能停在回复之前，这时只有重试提示。
-                if let Some(content) = entry.content.step_content() {
-                    append_history_step(&mut blocks, content, turn_id, step_ordinal);
-                }
+            } = content
+            else {
+                return Vec::new();
+            };
+            blocks.push(Block::Step {
+                node: *node,
+                key: lattice_api::local::StepKey {
+                    turn_id: *turn_id,
+                    ordinal: *step_ordinal,
+                },
+            });
+            // 重试提示排在这一步的回复之前，与它们发生的先后一致。
+            for retry in retries {
+                let key = ModelAttemptKey {
+                    turn_id: *turn_id,
+                    model_step_ordinal: *step_ordinal,
+                    attempt_ordinal: retry.attempt,
+                };
+                blocks.push(Block::Status(retry_status(
+                    key,
+                    retry.delay_ms,
+                    retry.notice.clone(),
+                )));
+            }
+            if let Some(step) = content.step_content() {
+                // 这一轮仍在执行时，未到 Terminal 的调用还在运行；结束后才取阶段给出的结论。
+                let running = slots
+                    .iter()
+                    .filter(|slot| {
+                        !ended && !matches!(slot.progress, SlotProgress::Terminal { .. })
+                    })
+                    .map(|slot| slot.binding.invocation_id.to_string())
+                    .collect();
+                append_history_step(&mut blocks, step, *turn_id, *step_ordinal, &running);
+            } else if let Some(generating) =
+                generating.filter(|generating| !superseded(entry, generating))
+            {
+                append_assistant_text(&mut blocks, generating.text.clone());
+            }
+            if ended && let Some(summary) = summary {
+                blocks.push(Block::Status(closing_status(*turn_id, summary.clone())));
             }
         }
-    }
-    if let Some((id, summary)) = closing {
-        blocks.push(Block::Status(closing_status(id, summary)));
     }
     blocks
         .entries
@@ -138,6 +188,7 @@ fn append_history_step(
     content: StepContent,
     turn: lattice_api::local::TurnId,
     step: u32,
+    running: &std::collections::HashSet<String>,
 ) {
     // 与 append_assistant_text 的相邻拼接规则一致；reasoning 不分块，工具调用分块。
     let mut groups: Vec<(usize, usize)> = Vec::new();
@@ -159,7 +210,7 @@ fn append_history_step(
         }
     }
     let start = blocks.len();
-    append_step(blocks, content);
+    append_step(blocks, content, running);
     let mut groups = groups.into_iter();
     for block in blocks.iter_mut().skip(start) {
         if let Block::Assistant(text) = block
@@ -180,50 +231,56 @@ pub(crate) fn user_block(text: String) -> Block {
     }
 }
 
-pub(crate) fn append_step(blocks: &mut BlockList, content: StepContent) {
+fn append_step(
+    blocks: &mut BlockList,
+    content: StepContent,
+    running: &std::collections::HashSet<String>,
+) {
     append_messages(blocks, vec![content.assistant]);
     for result in content.results {
-        let state = match &result.payload {
-            ResultPayload::Succeeded(SuccessContent::Json { byte_length, .. }) => ToolState::Ok {
-                output_len: *byte_length as usize,
-            },
-            ResultPayload::Succeeded(SuccessContent::OutputTooLarge { .. }) => {
-                ToolState::Unavailable {
-                    outcome: "succeeded".into(),
-                }
-            }
-            ResultPayload::Failed(error) => ToolState::Failed {
-                output_len: 0,
-                error: Some(error.message.clone()),
-            },
-            other => ToolState::Failed {
-                output_len: 0,
-                error: Some(other.outcome().as_str().into()),
-            },
-        };
         let id = result.invocation_id.to_string();
+        let state = if running.contains(&id) {
+            ToolState::Running
+        } else {
+            match &result.payload {
+                ResultPayload::Succeeded(SuccessContent::Json { byte_length, .. }) => {
+                    ToolState::Ok {
+                        output_len: *byte_length as usize,
+                    }
+                }
+                ResultPayload::Succeeded(SuccessContent::OutputTooLarge { .. }) => {
+                    ToolState::Unavailable {
+                        outcome: "succeeded".into(),
+                    }
+                }
+                ResultPayload::Failed(error) => ToolState::Failed {
+                    output_len: 0,
+                    error: Some(error.message.clone()),
+                },
+                other => ToolState::Failed {
+                    output_len: 0,
+                    error: Some(other.outcome().as_str().into()),
+                },
+            }
+        };
         if let Some(Block::Tool {
-            state: previous,
-            source,
-            ..
+            state: previous, ..
         }) = blocks
             .iter_mut()
             .find(|block| matches!(block, Block::Tool { id: known, .. } if *known == id))
         {
             *previous = state;
-            *source = ToolSource::HistoryResult;
         } else {
             blocks.push(Block::Tool {
                 id,
                 name: result.name,
                 state,
-                source: ToolSource::HistoryResult,
             });
         }
     }
 }
 
-pub(crate) fn append_messages(
+fn append_messages(
     blocks: &mut BlockList,
     messages: Vec<lattice_api::local::NativeMessage<lattice_api::local::BoundToolCall>>,
 ) {
@@ -239,7 +296,6 @@ pub(crate) fn append_messages(
                     id: call.invocation_id.to_string(),
                     name: call.name,
                     state: ToolState::Unknown,
-                    source: ToolSource::HistoryCall,
                 }),
                 MessageSemantic::Reasoning { .. } => {}
             }
@@ -247,9 +303,9 @@ pub(crate) fn append_messages(
     }
 }
 
-/// 隐藏 reasoning 不应在重连或持久正文替换时引入实时流没有的换行。
-pub(crate) fn append_assistant_text(blocks: &mut BlockList, text: String) {
-    match blocks.last_mut() {
+/// 隐藏 reasoning 不应在生成中的文字由回复取代时引入原来没有的换行。
+fn append_assistant_text(blocks: &mut BlockList, text: String) {
+    match blocks.entries.last_mut().map(|entry| &mut entry.block) {
         Some(Block::Assistant(previous)) => previous.push_str(&text),
         _ => blocks.push(Block::Assistant(text)),
     }

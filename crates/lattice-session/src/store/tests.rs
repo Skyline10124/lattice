@@ -14,7 +14,7 @@ use lattice_conversation::{
 use lattice_store::{ProjectStoreKey, StateLayout};
 use redb::ReadableTable;
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, fs, os::unix::fs::symlink, sync::Arc};
+use std::{fs, os::unix::fs::symlink, sync::Arc};
 
 fn now() -> Timestamp {
     "2026-09-26T00:00:00Z".parse().unwrap()
@@ -239,31 +239,6 @@ fn corrupt_json(
         tab.insert(key, encode(&v).unwrap().as_slice()).unwrap();
     }
     tx.commit().unwrap();
-}
-
-fn history(db: &SessionStore, anchor: &HistoryAnchor, budget: usize) -> Vec<Node> {
-    let mut cursor = None;
-    let mut fragments: BTreeMap<NodeId, String> = BTreeMap::new();
-    loop {
-        let page = db
-            .begin_read()
-            .unwrap()
-            .history_page(anchor, cursor.as_ref(), budget)
-            .unwrap();
-        for f in page.fragments {
-            let text = fragments.entry(f.node).or_default();
-            assert_eq!(text.len() as u64, f.utf8_offset);
-            text.push_str(&f.json_fragment);
-        }
-        cursor = page.next;
-        if cursor.is_none() {
-            break;
-        }
-    }
-    fragments
-        .into_values()
-        .map(|text| serde_json::from_str(&text).unwrap())
-        .collect()
 }
 
 #[test]
@@ -1052,7 +1027,7 @@ fn keys_versions_and_encoding() {
         decode::<Node>("nodes", "0", &encode(&Node::Root).unwrap()).unwrap(),
         Node::Root
     );
-    for version in [0, 1, VERSION + 1, u32::MAX] {
+    for version in [0, 1, 2, VERSION + 1, u32::MAX] {
         let mut bytes = version.to_be_bytes().to_vec();
         bytes.extend(b"{\"kind\":\"root\"}");
         let error = attach_path(
@@ -1629,7 +1604,35 @@ fn every_commit_reopens_with_read_only_conclusions() {
         if cut == 2 {
             assert_eq!(node_at(&db, 2).retry_notices().unwrap()[0].delay_ms, 250);
         }
-        read.snapshot(sid(1), None).unwrap();
+        let view = read.view(sid(1), 1).unwrap();
+        assert_eq!(view.entries.len(), actual.steps.len() + 1);
+        for (entry, expected_step) in view.entries.iter().skip(1).zip(&actual.steps) {
+            let ConversationEntry::Step {
+                step,
+                summary,
+                retries,
+                ..
+            } = entry
+            else {
+                panic!("expected step at cut {cut}");
+            };
+            assert_eq!(step, expected_step, "cut {cut}");
+            assert_eq!(
+                *retries,
+                read.node(NodeRef {
+                    session_id: sid(1),
+                    node: step.node
+                })
+                .unwrap()
+                .retry_notices()
+                .unwrap()
+            );
+            assert_eq!(
+                summary.as_ref(),
+                (step.node == last.node).then_some(&actual.summary),
+                "cut {cut}"
+            );
+        }
         read.log(sid(1)).unwrap();
         read.list(None, 10).unwrap();
         read.query_audit(&filter(project(1)), None, 100).unwrap();
@@ -1813,9 +1816,326 @@ fn step_budget_reserves_and_closes_limit_node() {
     assert_eq!(detail(&SessionStore::open(&layout).unwrap()), t);
 }
 
+fn conversation_tree() -> (
+    tempfile::TempDir,
+    StateLayout,
+    SessionStore,
+    SessionExecutionLock,
+) {
+    let (dir, layout, db) = store();
+    let (lock, calls) = running(&db, sid(1), tid(1), 1, 1);
+    finish(&db, &lock, &calls.bindings[0], None);
+    db.close_step(
+        &lock,
+        CloseStep::Continue {
+            key: step(tid(1), 0),
+        },
+        now(),
+    )
+    .unwrap();
+    db.start_request(&lock, key(tid(1), 1, 0), now()).unwrap();
+    db.close_step(&lock, CloseStep::Finish(reply(key(tid(1), 1, 0), 0)), now())
+        .unwrap();
+    for t in [tid(2), tid(3)] {
+        let mut next = accept(sid(1), t);
+        next.session = AcceptSession::Existing { id: sid(1) };
+        next.config.agent_name = "beta".into();
+        db.accept_turn(&lock, next).unwrap();
+        if t == tid(2) {
+            db.start_request(&lock, key(t, 0, 0), now()).unwrap();
+            db.close_step(&lock, CloseStep::Finish(reply(key(t, 0, 0), 0)), now())
+                .unwrap();
+        }
+    }
+    (dir, layout, db, lock)
+}
+
+fn entry_nodes(entries: &[ConversationEntry]) -> Vec<u64> {
+    entries.iter().map(|entry| entry.node().0).collect()
+}
+
+fn entry_ordinals(entries: &[ConversationEntry]) -> Vec<u64> {
+    entries
+        .iter()
+        .filter_map(|entry| match entry {
+            ConversationEntry::UserMessage { ordinal, .. } => Some(*ordinal),
+            ConversationEntry::Step { .. } => None,
+        })
+        .collect()
+}
+
 #[test]
-fn snapshots_history_retries_and_rewind_are_stable() {
+fn conversation_view_recent_turns_and_branch_ordinals() {
+    let (_d, _l, db, lock) = conversation_tree();
+    let read = db.begin_read().unwrap();
+    let view = read.view(sid(1), 2).unwrap();
+    assert_eq!(entry_nodes(&view.entries), vec![4, 5, 6, 7]);
+    assert_eq!(entry_ordinals(&view.entries), vec![2, 3]);
+    assert_eq!(view.session.current, NodeId(7));
+    assert_eq!(view.current_agent.as_deref(), Some("beta"));
+    assert!(
+        matches!(&view.entries[3], ConversationEntry::Step { step, summary: Some(summary), .. }
+        if step.progress == StepProgress::Reserved && summary.progress == StepProgress::Reserved)
+    );
+    assert_eq!(
+        entry_nodes(&read.view(sid(1), u32::MAX).unwrap().entries),
+        vec![1, 2, 3, 4, 5, 6, 7]
+    );
+    drop(read);
+    assert!(matches!(
+        db.rewind(&lock, NodeId(99), now()),
+        Err(StoreError::NotFound { kind: "node", .. })
+    ));
+    assert_eq!(
+        db.begin_read().unwrap().session(sid(1)).unwrap().current,
+        NodeId(7)
+    );
+    db.rewind(&lock, NodeId(2), now()).unwrap();
+    let mut branch = accept(sid(1), tid(4));
+    branch.session = AcceptSession::Existing { id: sid(1) };
+    db.accept_turn(&lock, branch).unwrap();
+    let read = db.begin_read().unwrap();
+    let view = read.view(sid(1), 10).unwrap();
+    assert_eq!(entry_nodes(&view.entries), vec![1, 2, 8, 9]);
+    assert_eq!(entry_ordinals(&view.entries), vec![1, 2]);
+    assert_eq!(
+        entry_ordinals(&[read
+            .entry(NodeRef {
+                session_id: sid(1),
+                node: NodeId(8)
+            })
+            .unwrap()]),
+        vec![2]
+    );
+    drop(read);
+    db.rewind(&lock, NodeId(1), now()).unwrap();
+    let view = db.begin_read().unwrap().view(sid(1), 1).unwrap();
+    assert_eq!(entry_nodes(&view.entries), vec![1]);
+    assert_eq!(view.current_agent.as_deref(), Some("alpha"));
+    db.rewind(&lock, NodeId(0), now()).unwrap();
+    let view = db.begin_read().unwrap().view(sid(1), 1).unwrap();
+    assert_eq!(view.session.current, NodeId(0));
+    assert!(view.entries.is_empty());
+    assert_eq!(view.current_agent, None);
+}
+
+#[test]
+fn conversation_history_pages_whole_turns_on_fixed_parent_chain() {
+    let (_d, _l, db, lock) = conversation_tree();
+    let read = db.begin_read().unwrap();
+    let recent = read.history(sid(1), NodeId(6), 1).unwrap();
+    assert_eq!(entry_nodes(&recent), vec![4, 5]);
+    assert_eq!(entry_ordinals(&recent), vec![2]);
+    let older = read.history(sid(1), NodeId(4), 1).unwrap();
+    assert_eq!(entry_nodes(&older), vec![1, 2, 3]);
+    assert_eq!(entry_ordinals(&older), vec![1]);
+    let both = read.history(sid(1), NodeId(6), 2).unwrap();
+    assert_eq!(both, [older.clone(), recent].concat());
+    assert_eq!(read.history(sid(1), NodeId(6), u32::MAX).unwrap(), both);
+    assert!(read.history(sid(1), NodeId(1), 1).unwrap().is_empty());
+    drop(read);
+    db.rewind(&lock, NodeId(2), now()).unwrap();
+    let mut branch = accept(sid(1), tid(4));
+    branch.session = AcceptSession::Existing { id: sid(1) };
+    db.accept_turn(&lock, branch).unwrap();
+    let read = db.begin_read().unwrap();
+    assert_eq!(read.history(sid(1), NodeId(6), 2).unwrap(), both);
+    assert_eq!(
+        entry_nodes(&read.history(sid(1), NodeId(8), 1).unwrap()),
+        vec![1, 2]
+    );
+    assert_eq!(
+        read.entry(NodeRef {
+            session_id: sid(1),
+            node: NodeId(3)
+        })
+        .unwrap(),
+        older[2]
+    );
+}
+
+#[test]
+fn conversation_reads_reject_invalid_boundaries_and_missing_targets() {
     let (_d, _l, db) = store();
+    let lock = db.try_lock_session(sid(1)).unwrap();
+    db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+    let other = db.try_lock_session(sid(2)).unwrap();
+    db.accept_turn(&other, accept(sid(2), tid(2))).unwrap();
+    let mut next = accept(sid(2), tid(3));
+    next.session = AcceptSession::Existing { id: sid(2) };
+    db.accept_turn(&other, next).unwrap();
+    let read = db.begin_read().unwrap();
+    for before in [NodeId(0), NodeId(2), NodeId(3), NodeId(99)] {
+        assert!(
+            matches!(
+                read.history(sid(1), before, 1),
+                Err(StoreError::InvalidInput {
+                    field: "before",
+                    ..
+                })
+            ),
+            "before {before:?}"
+        );
+    }
+    assert!(matches!(
+        read.history(sid(1), NodeId(1), 0),
+        Err(StoreError::InvalidInput { field: "turns", .. })
+    ));
+    assert!(matches!(
+        read.view(sid(1), 0),
+        Err(StoreError::InvalidInput { field: "turns", .. })
+    ));
+    assert!(matches!(
+        read.view(sid(99), 1),
+        Err(StoreError::NotFound {
+            kind: "session",
+            ..
+        })
+    ));
+    assert!(matches!(
+        read.history(sid(99), NodeId(1), 1),
+        Err(StoreError::NotFound {
+            kind: "session",
+            ..
+        })
+    ));
+    assert!(matches!(
+        read.entry(NodeRef {
+            session_id: sid(99),
+            node: NodeId(1)
+        }),
+        Err(StoreError::NotFound {
+            kind: "session",
+            ..
+        })
+    ));
+    assert!(matches!(
+        read.entry(NodeRef {
+            session_id: sid(1),
+            node: NodeId(99)
+        }),
+        Err(StoreError::NotFound { kind: "node", .. })
+    ));
+    assert!(matches!(
+        read.entry(NodeRef {
+            session_id: sid(1),
+            node: NodeId(0)
+        }),
+        Err(StoreError::InvalidInput { field: "node", .. })
+    ));
+}
+
+#[test]
+fn conversation_step_summary_moves_to_reserved_successor() {
+    let (_d, _l, db) = store();
+    let (lock, calls) = running(&db, sid(1), tid(1), 1, 1);
+    let node = NodeRef {
+        session_id: sid(1),
+        node: NodeId(2),
+    };
+    let entry = db.begin_read().unwrap().entry(node).unwrap();
+    let expected = detail(&db);
+    assert_eq!(
+        serde_json::to_value(&entry).unwrap(),
+        json!({
+            "kind": "step", "node": 2, "content": node_at(&db, 2), "step": expected.steps[0],
+            "retries": [], "summary": expected.summary,
+        })
+    );
+    finish(&db, &lock, &calls.bindings[0], None);
+    let entry = db.begin_read().unwrap().entry(node).unwrap();
+    assert!(matches!(
+        entry,
+        ConversationEntry::Step {
+            summary: Some(_),
+            ..
+        }
+    ));
+    db.close_step(
+        &lock,
+        CloseStep::Continue {
+            key: step(tid(1), 0),
+        },
+        now(),
+    )
+    .unwrap();
+    let read = db.begin_read().unwrap();
+    let continued = read.entry(node).unwrap();
+    assert!(matches!(
+        &continued,
+        ConversationEntry::Step { summary: None, .. }
+    ));
+    assert!(
+        serde_json::to_value(&continued)
+            .unwrap()
+            .get("summary")
+            .is_none()
+    );
+    let next = read
+        .entry(NodeRef {
+            node: NodeId(3),
+            ..node
+        })
+        .unwrap();
+    assert!(
+        matches!(&next, ConversationEntry::Step { step, summary: Some(summary), .. }
+        if step.progress == StepProgress::Reserved && summary.progress == StepProgress::Reserved)
+    );
+    assert_eq!(
+        read.view(sid(1), 1).unwrap().entries,
+        vec![
+            read.entry(NodeRef {
+                node: NodeId(1),
+                ..node
+            })
+            .unwrap(),
+            continued,
+            next
+        ]
+    );
+    drop(read);
+    db.start_request(&lock, key(tid(1), 1, 0), now()).unwrap();
+    db.close_step(&lock, CloseStep::Finish(reply(key(tid(1), 1, 0), 0)), now())
+        .unwrap();
+    let read = db.begin_read().unwrap();
+    let last = read
+        .entry(NodeRef {
+            node: NodeId(3),
+            ..node
+        })
+        .unwrap();
+    assert!(matches!(
+        last,
+        ConversationEntry::Step {
+            summary: Some(TurnSummary {
+                outcome: PublicTurnOutcome::Completed,
+                ..
+            }),
+            ..
+        }
+    ));
+    let user = read
+        .entry(NodeRef {
+            node: NodeId(1),
+            ..node
+        })
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&user).unwrap(),
+        json!({ "kind": "user_message", "node": 1, "content": node_at(&db, 1), "ordinal": 1 })
+    );
+    for entry in read.view(sid(1), 1).unwrap().entries {
+        assert_eq!(
+            serde_json::from_value::<ConversationEntry>(serde_json::to_value(&entry).unwrap())
+                .unwrap(),
+            entry
+        );
+    }
+}
+
+#[test]
+fn conversation_retries_and_transaction_reads_survive_reopen() {
+    let (_d, layout, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
     db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
     db.start_request(&lock, key(tid(1), 0, 0), now()).unwrap();
@@ -1828,81 +2148,415 @@ fn snapshots_history_retries_and_rewind_are_stable() {
         now(),
     )
     .unwrap();
-    let snapshot = db.begin_read().unwrap().snapshot(sid(1), None).unwrap();
-    assert_eq!(snapshot.history.head, NodeId(1));
-    assert_eq!(snapshot.unclosed_step, Some((NodeId(2), node_at(&db, 2))));
-    assert!(matches!(
-        db.begin_read().unwrap().history_page(
-            &HistoryAnchor {
-                session_id: sid(1),
-                head: NodeId(2)
-            },
-            None,
-            100
-        ),
-        Err(StoreError::InvalidCursor)
-    ));
     let old_read = db.begin_read().unwrap();
-    let old_node = node_at(&db, 2);
+    let view = old_read.view(sid(1), 1).unwrap();
+    assert_eq!(view.entries.len(), 2);
+    assert!(
+        matches!(&view.entries[1], ConversationEntry::Step { retries, .. }
+        if *retries == node_at(&db, 2).retry_notices().unwrap() && retries.len() == 1 && retries[0].notice.level == NoticeLevel::Warn)
+    );
     db.start_request(&lock, key(tid(1), 0, 1), now()).unwrap();
     db.close_step(&lock, CloseStep::Finish(reply(key(tid(1), 0, 1), 0)), now())
         .unwrap();
+    let mut next = accept(sid(1), tid(2));
+    next.session = AcceptSession::Existing { id: sid(1) };
+    db.accept_turn(&lock, next).unwrap();
+    assert_eq!(old_read.view(sid(1), 1).unwrap(), view);
     assert_eq!(
         old_read
-            .node(NodeRef {
+            .entry(NodeRef {
                 session_id: sid(1),
                 node: NodeId(2)
             })
             .unwrap(),
-        old_node
+        view.entries[1]
     );
-    assert_eq!(history(&db, &snapshot.history, 63).len(), 1);
-    let closed = db.begin_read().unwrap().snapshot(sid(1), None).unwrap();
-    assert!(closed.unclosed_step.is_none());
-    let page = db
-        .begin_read()
-        .unwrap()
-        .history_page(&closed.history, None, 10000)
-        .unwrap();
-    assert_eq!(page.fragments.len(), 2);
-    assert_eq!(page.fragments[1].retries.len(), 1);
-    assert_eq!(page.fragments[1].retries[0].notice.level, NoticeLevel::Warn);
-    assert_eq!(
-        history(&db, &closed.history, 63),
-        vec![node_at(&db, 1), node_at(&db, 2)]
+    drop(old_read);
+    let read = db.begin_read().unwrap();
+    let entries = read.history(sid(1), NodeId(3), 1).unwrap();
+    assert!(
+        matches!(&entries[1], ConversationEntry::Step { retries, summary: Some(summary), .. }
+        if retries.len() == 1 && summary.outcome == PublicTurnOutcome::Completed)
     );
     let before = records(&db);
-    db.rewind(&lock, NodeId(1), now()).unwrap();
-    assert_eq!(records(&db).nodes, before.nodes);
+    drop(read);
+    drop(lock);
+    drop(db);
+    let db = SessionStore::open(&layout).unwrap();
+    let read = db.begin_read().unwrap();
+    assert_eq!(read.history(sid(1), NodeId(3), 1).unwrap(), entries);
     assert_eq!(
-        db.begin_read()
-            .unwrap()
-            .current_agent(sid(1))
-            .unwrap()
-            .as_deref(),
-        Some("alpha")
+        read.entry(NodeRef {
+            session_id: sid(1),
+            node: NodeId(2)
+        })
+        .unwrap(),
+        entries[1]
     );
-    assert!(db.rewind(&lock, NodeId(99), now()).is_err());
-    let bad = HistoryCursor {
-        anchor: closed.history.clone(),
-        node: NodeId(2),
-        utf8_offset: u64::MAX,
-    };
-    assert!(matches!(
-        db.begin_read()
-            .unwrap()
-            .history_page(&closed.history, Some(&bad), 64),
-        Err(StoreError::InvalidCursor)
-    ));
-    let mut bad = bad;
-    bad.node = NodeId(1);
-    bad.anchor.head = NodeId(1);
-    assert!(matches!(
-        db.begin_read()
-            .unwrap()
-            .history_page(&closed.history, Some(&bad), 64),
-        Err(StoreError::InvalidCursor)
-    ));
+    assert!(before == records(&db));
+}
+
+#[test]
+fn conversation_step_entry_reads_only_its_turn() {
+    for damaged in [NodeId(2), NodeId(4)] {
+        let (_d, _l, db, _lock) = conversation_tree();
+        let node = NodeRef {
+            session_id: sid(1),
+            node: NodeId(7),
+        };
+        let expected = db.begin_read().unwrap().entry(node).unwrap();
+        let tx = db.db.begin_write().unwrap();
+        {
+            let mut nodes = tx.open_table(NODES).unwrap();
+            nodes
+                .insert(node_key(sid(1), damaged).as_slice(), b"invalid".as_slice())
+                .unwrap();
+        }
+        tx.commit().unwrap();
+        let read = db.begin_read().unwrap();
+        assert_eq!(read.entry(node).unwrap(), expected);
+        assert!(
+            read.entry(NodeRef {
+                node: NodeId(3),
+                ..node
+            })
+            .is_ok()
+        );
+    }
+}
+
+#[test]
+fn conversation_windows_skip_steps_outside_the_requested_turns() {
+    let (_d, _l, db, _lock) = conversation_tree();
+    let read = db.begin_read().unwrap();
+    let view = read.view(sid(1), 1).unwrap();
+    let history = read.history(sid(1), NodeId(6), 1).unwrap();
+    drop(read);
+    let tx = db.db.begin_write().unwrap();
+    {
+        let mut nodes = tx.open_table(NODES).unwrap();
+        nodes
+            .insert(
+                node_key(sid(1), NodeId(2)).as_slice(),
+                b"invalid".as_slice(),
+            )
+            .unwrap();
+    }
+    tx.commit().unwrap();
+    let read = db.begin_read().unwrap();
+    assert_eq!(read.view(sid(1), 1).unwrap(), view);
+    assert_eq!(read.history(sid(1), NodeId(6), 1).unwrap(), history);
+    assert_eq!(
+        entry_ordinals(&[read
+            .entry(NodeRef {
+                session_id: sid(1),
+                node: NodeId(6)
+            })
+            .unwrap()]),
+        vec![3]
+    );
+    assert!(read.view(sid(1), 3).is_err());
+}
+
+#[test]
+fn conversation_windows_count_older_turns_without_decoding_content() {
+    for (damaged, field) in [
+        (NodeId(3), "reply"),
+        (NodeId(3), "attempts"),
+        (NodeId(3), "slots"),
+        (NodeId(3), "unexpected"),
+        (NodeId(1), "message"),
+        (NodeId(1), "unexpected"),
+    ] {
+        let (_d, _l, db, _lock) = conversation_tree();
+        let tx = db.db.begin_write().unwrap();
+        {
+            let mut nodes = tx.open_table(NODES).unwrap();
+            let key = node_key(sid(1), damaged);
+            let mut wire: serde_json::Value = {
+                let value = nodes.get(key.as_slice()).unwrap().unwrap();
+                serde_json::from_slice(&value.value()[4..]).unwrap()
+            };
+            wire[field] = json!(false);
+            let mut bytes = VERSION.to_be_bytes().to_vec();
+            bytes.extend(serde_json::to_vec(&wire).unwrap());
+            nodes.insert(key.as_slice(), bytes.as_slice()).unwrap();
+        }
+        tx.commit().unwrap();
+        let read = db.begin_read().unwrap();
+        let view = read.view(sid(1), 1).unwrap();
+        assert_eq!(entry_nodes(&view.entries), vec![6, 7]);
+        assert_eq!(entry_ordinals(&view.entries), vec![3]);
+        let history = read.history(sid(1), NodeId(6), 1).unwrap();
+        assert_eq!(entry_nodes(&history), vec![4, 5]);
+        assert_eq!(entry_ordinals(&history), vec![2]);
+        assert_eq!(
+            entry_ordinals(&[read
+                .entry(NodeRef {
+                    session_id: sid(1),
+                    node: NodeId(6),
+                })
+                .unwrap()]),
+            vec![3]
+        );
+        assert!(matches!(
+            read.view(sid(1), 3),
+            Err(StoreError::Corruption { .. })
+        ));
+    }
+}
+
+#[test]
+fn observer_projections_skip_unrelated_content() {
+    for (node, pointer) in [
+        (NodeId(2), "/reply"),
+        (NodeId(2), "/slots"),
+        (NodeId(2), "/attempts/0/usage"),
+        (NodeId(2), "/attempts/0/progress/diagnostic"),
+        (NodeId(1), "/message"),
+        (NodeId(1), "/config_digest"),
+        (NodeId(1), "/limits"),
+    ] {
+        let (_d, _l, db) = store();
+        let lock = db.try_lock_session(sid(1)).unwrap();
+        db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+        db.start_request(&lock, key(tid(1), 0, 0), now()).unwrap();
+        db.stop_attempt(
+            &lock,
+            stopped(
+                key(tid(1), 0, 0),
+                StopCause::ProviderError { retryable: true },
+            ),
+            now(),
+        )
+        .unwrap();
+        db.start_request(&lock, key(tid(1), 0, 1), now()).unwrap();
+        edit_projection_node(&db, node, |wire| {
+            *wire.pointer_mut(pointer).unwrap() = json!(false);
+        });
+        let read = db.begin_read().unwrap();
+        assert!(
+            !read
+                .attempt_is_sent(sid(1), NodeId(2), key(tid(1), 0, 0))
+                .unwrap()
+        );
+        assert!(
+            read.attempt_is_sent(sid(1), NodeId(2), key(tid(1), 0, 1))
+                .unwrap()
+        );
+        for other in [key(tid(2), 0, 1), key(tid(1), 1, 1), key(tid(1), 0, 2)] {
+            assert!(!read.attempt_is_sent(sid(1), NodeId(2), other).unwrap());
+        }
+        assert_eq!(read.turn_agent(sid(1), tid(1)).unwrap(), "alpha");
+        assert!(matches!(
+            read.path_node(sid(1), node),
+            Err(StoreError::Corruption { .. })
+        ));
+    }
+}
+
+fn edit_projection_node(db: &SessionStore, node: NodeId, edit: impl FnOnce(&mut Value)) {
+    let tx = db.db.begin_write().unwrap();
+    {
+        let mut nodes = tx.open_table(NODES).unwrap();
+        let key = node_key(sid(1), node);
+        let mut wire: Value = {
+            let value = nodes.get(key.as_slice()).unwrap().unwrap();
+            serde_json::from_slice(&value.value()[4..]).unwrap()
+        };
+        edit(&mut wire);
+        nodes
+            .insert(key.as_slice(), encode(&wire).unwrap().as_slice())
+            .unwrap();
+    }
+    tx.commit().unwrap();
+}
+
+#[test]
+fn observer_projections_reject_damaged_fields() {
+    for (node, pointer) in [
+        (NodeId(2), "/kind"),
+        (NodeId(2), "/turn_id"),
+        (NodeId(2), "/step_ordinal"),
+        (NodeId(2), "/attempts"),
+        (NodeId(2), "/attempts/0/progress"),
+        (NodeId(2), "/attempts/0/progress/progress"),
+        (NodeId(1), "/kind"),
+        (NodeId(1), "/turn_id"),
+        (NodeId(1), "/agent_name"),
+    ] {
+        for replacement in [None, Some(json!(false))] {
+            let (_d, _l, db) = store();
+            let lock = db.try_lock_session(sid(1)).unwrap();
+            db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+            db.start_request(&lock, key(tid(1), 0, 0), now()).unwrap();
+            edit_projection_node(&db, node, |wire| {
+                let (parent, field) = pointer.rsplit_once('/').unwrap();
+                let object = wire.pointer_mut(parent).unwrap().as_object_mut().unwrap();
+                if let Some(value) = replacement {
+                    object.insert(field.into(), value);
+                } else {
+                    object.remove(field);
+                }
+            });
+            let read = db.begin_read().unwrap();
+            let result = if node == NodeId(2) {
+                read.attempt_is_sent(sid(1), node, key(tid(1), 0, 0))
+                    .map(|_| ())
+            } else {
+                read.turn_agent(sid(1), tid(1)).map(|_| ())
+            };
+            assert!(
+                matches!(result, Err(StoreError::Corruption { table, key, .. })
+                if table == "nodes" && key == format!("{}/{}", sid(1), node.0)),
+                "{pointer}"
+            );
+        }
+    }
+    for (node, field, value) in [
+        (NodeId(2), "kind", json!("user_message")),
+        (NodeId(1), "kind", json!("step")),
+        (NodeId(1), "turn_id", json!(tid(2))),
+    ] {
+        let (_d, _l, db) = store();
+        let lock = db.try_lock_session(sid(1)).unwrap();
+        db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+        edit_projection_node(&db, node, |wire| wire[field] = value);
+        let read = db.begin_read().unwrap();
+        let result = if node == NodeId(2) {
+            read.attempt_is_sent(sid(1), node, key(tid(1), 0, 0))
+                .map(|_| ())
+        } else {
+            read.turn_agent(sid(1), tid(1)).map(|_| ())
+        };
+        assert!(matches!(result, Err(StoreError::Corruption { .. })));
+    }
+}
+
+#[test]
+fn conversation_counts_reject_damaged_headers() {
+    for damaged in [NodeId(1), NodeId(3)] {
+        for field in ["kind", "parent", "turn_id"] {
+            for remove in [false, true] {
+                let (_d, _l, db, _lock) = conversation_tree();
+                let tx = db.db.begin_write().unwrap();
+                {
+                    let mut nodes = tx.open_table(NODES).unwrap();
+                    let key = node_key(sid(1), damaged);
+                    let mut wire: serde_json::Value = {
+                        let value = nodes.get(key.as_slice()).unwrap().unwrap();
+                        serde_json::from_slice(&value.value()[4..]).unwrap()
+                    };
+                    if remove {
+                        wire.as_object_mut().unwrap().remove(field);
+                    } else {
+                        wire[field] = json!(false);
+                    }
+                    let mut bytes = VERSION.to_be_bytes().to_vec();
+                    bytes.extend(serde_json::to_vec(&wire).unwrap());
+                    nodes.insert(key.as_slice(), bytes.as_slice()).unwrap();
+                }
+                tx.commit().unwrap();
+                let read = db.begin_read().unwrap();
+                for result in [
+                    read.view(sid(1), 1).map(|_| ()),
+                    read.history(sid(1), NodeId(6), 1).map(|_| ()),
+                    read.entry(NodeRef {
+                        session_id: sid(1),
+                        node: NodeId(6),
+                    })
+                    .map(|_| ()),
+                ] {
+                    assert!(
+                        matches!(result, Err(StoreError::Corruption { table, key, .. })
+                        if table == "nodes" && key == format!("{}/{}", sid(1), damaged.0))
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn conversation_counts_reject_invalid_value_versions() {
+    for version in [None, Some(VERSION + 1)] {
+        let (_d, layout, db, _lock) = conversation_tree();
+        let tx = db.db.begin_write().unwrap();
+        {
+            let mut nodes = tx.open_table(NODES).unwrap();
+            let key = node_key(sid(1), NodeId(3));
+            let mut bytes = nodes.get(key.as_slice()).unwrap().unwrap().value().to_vec();
+            if let Some(version) = version {
+                bytes[..4].copy_from_slice(&version.to_be_bytes());
+            } else {
+                bytes.truncate(3);
+            }
+            nodes.insert(key.as_slice(), bytes.as_slice()).unwrap();
+        }
+        tx.commit().unwrap();
+        let result = db.begin_read().unwrap().view(sid(1), 1);
+        if let Some(version) = version {
+            assert!(
+                matches!(result, Err(StoreError::UnsupportedVersion { path, table, key, found, supported: VERSION })
+                if path == layout.lattice_root().join("lattice.redb")
+                    && table == "nodes" && key == format!("{}/3", sid(1)) && found == version)
+            );
+        } else {
+            assert!(matches!(result, Err(StoreError::Corruption { .. })));
+        }
+    }
+}
+
+#[test]
+fn conversation_reads_report_missing_nodes_and_invalid_encoding() {
+    for damaged in [NodeId(1), NodeId(2)] {
+        for broken in [false, true] {
+            let (_d, _l, db) = store();
+            let lock = db.try_lock_session(sid(1)).unwrap();
+            db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+            let mut next = accept(sid(1), tid(2));
+            next.session = AcceptSession::Existing { id: sid(1) };
+            db.accept_turn(&lock, next).unwrap();
+            let tx = db.db.begin_write().unwrap();
+            {
+                let mut nodes = tx.open_table(NODES).unwrap();
+                if broken {
+                    nodes
+                        .insert(node_key(sid(1), damaged).as_slice(), b"invalid".as_slice())
+                        .unwrap();
+                } else {
+                    nodes.remove(node_key(sid(1), damaged).as_slice()).unwrap();
+                }
+            }
+            tx.commit().unwrap();
+            let read = db.begin_read().unwrap();
+            for result in [
+                read.view(sid(1), 1).map(|_| ()),
+                read.view(sid(1), 2).map(|_| ()),
+                read.history(sid(1), NodeId(3), 1).map(|_| ()),
+            ] {
+                assert!(matches!(
+                    result,
+                    Err(StoreError::Corruption { .. }) | Err(StoreError::UnsupportedVersion { .. })
+                ));
+            }
+            let entry = read.entry(NodeRef {
+                session_id: sid(1),
+                node: NodeId(2),
+            });
+            if !broken && damaged == NodeId(2) {
+                assert!(matches!(
+                    entry,
+                    Err(StoreError::NotFound { kind: "node", .. })
+                ));
+            } else {
+                assert!(matches!(
+                    entry,
+                    Err(StoreError::Corruption { .. }) | Err(StoreError::UnsupportedVersion { .. })
+                ));
+            }
+        }
+    }
 }
 
 #[test]
@@ -2327,7 +2981,6 @@ fn local_reads_detect_live_corruption_and_open_checks_unrelated_sessions() {
                 read.turn_detail(sid(1), tid(1)).is_err(),
                 "detail case {case}"
             );
-            assert!(read.snapshot(sid(1), None).is_err(), "snapshot case {case}");
         }
         drop(read);
         drop(_other);
@@ -2756,14 +3409,20 @@ fn ordinary_operations_load_only_referenced_turns() {
     assert_eq!(read.session(sid(1)).unwrap().current, NodeId(4));
     assert_eq!(read.list(None, 1).unwrap().items.len(), 1);
     assert_eq!(read.turn_detail(sid(1), tid(2)).unwrap().steps.len(), 1);
-    let snapshot = read.snapshot(sid(1), None).unwrap();
     assert_eq!(
-        read.history_page(&snapshot.history, None, 4096)
-            .unwrap()
-            .fragments
-            .len(),
-        1
+        entry_nodes(&read.view(sid(1), 1).unwrap().entries),
+        vec![3, 4]
     );
+    assert_eq!(
+        entry_ordinals(&[read
+            .entry(NodeRef {
+                session_id: sid(1),
+                node: NodeId(3)
+            })
+            .unwrap()]),
+        vec![1]
+    );
+    assert!(read.history(sid(1), NodeId(3), 1).unwrap().is_empty());
     assert!(read.turn_node(tid(1)).is_err());
     db.start_request(&lock, key(tid(2), 0, 0), now()).unwrap();
     db.close_step(&lock, CloseStep::Finish(reply(key(tid(2), 0, 0), 0)), now())

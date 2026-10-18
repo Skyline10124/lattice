@@ -1,46 +1,45 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! 连续观察真实 Turn 时，交付中途 Step 关闭和最终结束事件（#224）。
+//! 连续观察真实 Turn 时，中途以 `Continue` 关闭的 Step 与带结局的最后一步都交付到条目中，
+//! 重试提示是 Step 条目的一部分，实时观察与重新打开会话看到的条目相同。
 mod support;
 
-use lattice_system_harness::{AssertError, SessionSendDriver, SseScript, TurnEventLine};
+use lattice_system_harness::{AssertError, SendRecord, SessionSendDriver, SseScript, StepEnd};
+use serde_json::Value;
 use support::{
-    assert_accepted_and_closed, assert_clean_send, direct_world, driver, evidence, finish_scenario,
-    require, sequence, tool_call, tool_ok, wire_fake_llm,
+    Watcher, assert_accepted_and_closed, assert_clean_send, direct_world, driver, evidence,
+    finish_scenario, live_turn, require, same_turn, sequence, tool_call, tool_ok, wire_fake_llm,
 };
 
-fn is_summary_snapshot(event: &TurnEventLine) -> bool {
-    matches!(event, TurnEventLine::Unknown { type_name, raw }
-        if type_name == "snapshot" && (raw["view"]["selected_turn"]["summary"]["progress"]["progress"] == "closed" || (raw["view"]["owned"] == false && raw["view"]["selected_turn"].is_object())))
+/// `--json` 只有七种记录，第一条是写明身份的 `submit`。
+fn only_seven_records(outcome: &lattice_system_harness::SendOutcome) -> Result<(), AssertError> {
+    require(
+        !outcome
+            .records
+            .iter()
+            .any(|record| matches!(record, SendRecord::Unknown { .. }))
+            && outcome.sending().is_some()
+            && matches!(outcome.records.first(), Some(SendRecord::Submit(_))),
+        format!("unexpected record types: {:?}", outcome.type_sequence()),
+    )
 }
 
-fn event_sequence(events: &[TurnEventLine]) -> String {
-    let mut types = Vec::new();
-    let mut index = 0;
-    while index < events.len() {
-        if matches!(events[index], TurnEventLine::TokenDelta { .. }) {
-            let count = events[index..]
-                .iter()
-                .take_while(|event| matches!(event, TurnEventLine::TokenDelta { .. }))
-                .count();
-            types.push(format!("token_delta×{count}"));
-            index += count;
-            continue;
-        }
-        types.push(if is_summary_snapshot(&events[index]) {
-            "snapshot(summary)".into()
-        } else if let TurnEventLine::LlmRetry {
-            attempt_ordinal, ..
-        } = &events[index]
-        {
-            format!("llm_retry(attempt={attempt_ordinal})")
-        } else {
-            events[index].type_name().into()
-        });
-        index += 1;
-    }
-    format!("[{}]", types.join(", "))
+/// 关闭后重新打开会话：新观察者开头给出的条目与 CLI 实时持有的逐字段相同。
+/// 只比较条目：`Closed` 已足够让命令结束，Owner 在独立收尾后才移除，立即重开可能仍有 Owner。
+fn reopened_entries_match(
+    world: &lattice_system_harness::ScenarioWorld,
+    spec: &lattice_system_harness::ScenarioSpec,
+    outcome: &lattice_system_harness::SendOutcome,
+) -> Result<(), AssertError> {
+    let (sid, _, _) = outcome.closed_result().expect("closed result");
+    let mut watcher = Watcher::open(world, spec.step_timeout(), sid);
+    let reopened = watcher.initial();
+    let live: Vec<&Value> = outcome.entries().iter().map(|entry| &entry.raw).collect();
+    require(
+        reopened.raw_entries() == live,
+        "reopened entries must equal the live ones, retry notices included",
+    )
 }
 
 #[test]
@@ -69,12 +68,20 @@ fn direct_turn_end_events_completed_turn_delivers_terminal_event() {
     let outcome = send
         .send("observe the workspace then answer")
         .expect("turn");
+    let detail = send
+        .run_command(&[
+            "--json",
+            "session",
+            "turn",
+            outcome.accepted_turn_id().unwrap_or_default(),
+        ])
+        .expect("turn detail");
     let captures = server.captured_requests();
-    let got = event_sequence(&outcome.events);
-    println!("{}: {got}", spec.name);
+    println!("{}: {:?}", spec.name, outcome.type_sequence());
 
     let result: Result<(), AssertError> = (|| {
         assert_clean_send(&outcome)?;
+        only_seven_records(&outcome)?;
         assert_accepted_and_closed(&outcome)?;
         require(outcome.command.is_clean_exit(0), "completed Turn exits 0")?;
         require(captures.len() == 2, "exactly two provider requests")?;
@@ -82,74 +89,40 @@ fn direct_turn_end_events_completed_turn_delivers_terminal_event() {
             tool_ok(&outcome, "observe.workspace"),
             "observation succeeds",
         )?;
-        let starts: Vec<_> = outcome
-            .events
-            .iter()
-            .enumerate()
-            .filter_map(|(index, event)| {
-                matches!(event, TurnEventLine::ModelStarted { .. }).then_some(index)
-            })
-            .collect();
-        let finishes: Vec<_> = outcome
-            .events
-            .iter()
-            .enumerate()
-            .filter_map(|(index, event)| {
-                matches!(event, TurnEventLine::ModelFinished { .. }).then_some(index)
-            })
-            .collect();
-        // 订阅与执行并行（session.md「观察与重连」）：快照之前发出的事件不重发，
-        // 订阅晚于第一步时收不到它的 model_*。只在实际收到两步时核验中途 step_closed。
+        // 第一步以 Continue 关闭后不再带结局；结局只随最后一步给出。
+        let entries = outcome.entries();
+        let steps: Vec<_> = entries.iter().filter_map(|entry| entry.step()).collect();
         require(
-            starts.len() <= 2 && finishes.len() <= 2,
-            format!("expected at most two model_started/model_finished; got: {got}"),
-        )?;
-        if starts.len() == 2 && finishes.len() == 2 {
-            require(
-                outcome.events.iter().enumerate().any(|(index, event)| {
-                    matches!(event, TurnEventLine::Unknown { type_name, raw }
-                        if type_name == "step_closed" && raw["step"]["key"]["ordinal"] == 0)
-                        && finishes[0] < index
-                        && index < starts[1]
-                }),
-                format!("expected first-step step_closed before second model_started; got: {got}"),
-            )?;
-            println!("{}: control step_closed(ordinal=0) delivered", spec.name);
-        }
-
-        // 只核验实际 Terminal；summary 快照不能替代结束事件。
-        let terminal = outcome.events.iter().position(|event| {
-            matches!(event, TurnEventLine::Terminal { type_name, .. } if type_name == "turn_completed")
-        });
-        require(
-            terminal.is_some_and(|index| {
-                finishes.last().is_none_or(|last| *last < index)
-                    && outcome
-                        .events
-                        .iter()
-                        .enumerate()
-                        .all(|(snapshot, event)| !is_summary_snapshot(event) || index < snapshot)
-            }),
-            format!(
-                "expected turn_completed after last model_finished and before any snapshot(summary); got: {got}"
-            ),
-        )?;
-        let terminal = terminal.unwrap();
-        require(
-            matches!(&outcome.events[terminal], TurnEventLine::Terminal { raw, .. }
-                if raw["step"]["key"]["ordinal"] == 1),
-            format!("expected turn_completed with second-step ordinal=1; got: {got}"),
+            entries.len() == 3
+                && entries[0].user_ordinal() == Some(1)
+                && steps.len() == 2
+                && steps[0].progress
+                    == lattice_system_harness::StepProgress::Closed(StepEnd::Continue)
+                && steps[0].summary.is_none()
+                && steps[0].slots.len() == 1
+                && steps[1].ordinal == 1
+                && steps[1]
+                    .summary
+                    .as_ref()
+                    .is_some_and(|summary| summary.outcome.as_str() == "completed"),
+            format!("expected user, continued step and final step with summary: {entries:?}"),
         )?;
         require(
-            outcome.events[terminal + 1..].iter().all(|event| {
-                event.type_name() != "token_delta" && !event.type_name().starts_with("model_")
-            }),
-            format!("expected no token_delta/model_* after turn_completed; got: {got}"),
-        )
+            detail.is_clean_exit(0)
+                && same_turn(
+                    &live_turn(&outcome),
+                    &serde_json::from_slice::<Value>(&detail.stdout).unwrap(),
+                ),
+            "live Step entries equal the reloaded Turn detail",
+        )?;
+        reopened_entries_match(&world, &spec, &outcome)
     })();
     finish_scenario(
         evidence,
-        &[("two-step Turn", &outcome.command)],
+        &[
+            ("two-step Turn", &outcome.command),
+            ("turn detail", &detail),
+        ],
         captures,
         result,
     );
@@ -176,86 +149,41 @@ fn direct_turn_end_events_exhausted_retries_deliver_last_retry_and_turn_failed()
     let send = SessionSendDriver::new(&driver, &world, &spec, "end-errors");
     let outcome = send.send("exhaust provider retries").expect("turn");
     let captures = server.captured_requests();
-    let got = event_sequence(&outcome.events);
-    println!("{}: {got}", spec.name);
+    println!("{}: {:?}", spec.name, outcome.type_sequence());
 
-    let result: Result<(), AssertError> =
-        (|| {
-            assert_clean_send(&outcome)?;
-            assert_accepted_and_closed(&outcome)?;
-            require(outcome.command.is_clean_exit(1), "failed Turn exits 1")?;
-            require(
-                outcome.events.iter().rev().any(|event| {
-                    matches!(event, TurnEventLine::Unknown { type_name, raw }
-                    if type_name == "snapshot"
-                    && raw["view"]["selected_turn"]["summary"]["outcome"] == "failed"
-                    && raw["view"]["selected_turn"]["summary"]["notice"]["level"] == "error")
+    let result: Result<(), AssertError> = (|| {
+        assert_clean_send(&outcome)?;
+        only_seven_records(&outcome)?;
+        assert_accepted_and_closed(&outcome)?;
+        require(outcome.command.is_clean_exit(1), "failed Turn exits 1")?;
+        require(captures.len() == 3, "exactly three HTTP 500 requests")?;
+        let entries = outcome.entries();
+        let last = entries
+            .iter()
+            .rev()
+            .find(|entry| entry.step().is_some())
+            .expect("final Step entry");
+        let step = last.step().unwrap();
+        let attempts = last.raw["step"]["attempts"].as_array().unwrap();
+        // 前两次尝试安排过重试，提示随 Step 条目给出，不再有单独的事件。
+        require(
+            step.retries.iter().map(|r| r.attempt).collect::<Vec<_>>() == [0, 1]
+                && attempts.len() == 3,
+            format!(
+                "expected retry notices for attempts [0, 1]: {:?}",
+                step.retries
+            ),
+        )?;
+        let summary = step.summary.as_ref().expect("final step summary");
+        require(
+            summary.outcome.as_str() == "failed"
+                && summary.notice.as_ref().is_some_and(|notice| {
+                    notice.level == "error" && attempts[2]["end"]["diagnostic"] == notice.text
                 }),
-                format!("expected durable Failed/Error summary; got: {got}"),
-            )?;
-            require(captures.len() == 3, "exactly three HTTP 500 requests")?;
-            let retries: Vec<_> = outcome
-                .events
-                .iter()
-                .enumerate()
-                .filter_map(|(index, event)| {
-                    if let TurnEventLine::LlmRetry {
-                        attempt_ordinal,
-                        level,
-                        ..
-                    } = event
-                    {
-                        Some((index, *attempt_ordinal, level.as_str()))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            // 快照之前的事件不重发；重试通知只能是 [0, 1] 的后缀，
-            // 最后一条重试通知与最终尝试的 model_started、turn_failed 都必须交付。
-            let ordinals: Vec<_> = retries.iter().map(|(_, attempt, _)| *attempt).collect();
-            require(
-                !ordinals.is_empty() && [0, 1].ends_with(&ordinals),
-                format!("expected a non-empty suffix of retry attempts [0, 1]; got: {got}"),
-            )?;
-            require(
-                retries.iter().all(|(_, _, level)| *level == "warn"),
-                format!("expected warn retry notices; got: {got}"),
-            )?;
-            let last_retry = retries.last().unwrap().0;
-            let terminal = outcome.events.iter().position(|event| {
-            matches!(event, TurnEventLine::Terminal { type_name, .. } if type_name == "turn_failed")
-        });
-            require(
-                terminal.is_some_and(|index| {
-                    index > last_retry + 1
-                        && outcome.events[last_retry + 1..index]
-                            .iter()
-                            .filter(|event| matches!(event, TurnEventLine::ModelStarted { .. }))
-                            .count()
-                            == 1
-                        && outcome.events[last_retry + 1..index]
-                            .iter()
-                            .all(|event| !matches!(event, TurnEventLine::LlmRetry { .. }))
-                        && outcome.events.iter().enumerate().all(|(snapshot, event)| {
-                            !is_summary_snapshot(event) || index < snapshot
-                        })
-                }),
-                format!(
-                    "expected final model_started then turn_failed after last llm_retry; got: {got}"
-                ),
-            )?;
-            let TurnEventLine::Terminal { raw, .. } = &outcome.events[terminal.unwrap()] else {
-                unreachable!()
-            };
-            let attempts = raw["step"]["attempts"].as_array().unwrap();
-            require(
-                attempts.len() == 3
-                    && raw["summary"]["notice"]["level"] == "error"
-                    && raw["summary"]["notice"]["text"] == attempts[2]["end"]["diagnostic"],
-                "terminal notice must equal the final attempt diagnostic",
-            )
-        })();
+            "terminal notice must equal the final attempt diagnostic",
+        )?;
+        reopened_entries_match(&world, &spec, &outcome)
+    })();
     finish_scenario(
         evidence,
         &[("exhausted retries", &outcome.command)],

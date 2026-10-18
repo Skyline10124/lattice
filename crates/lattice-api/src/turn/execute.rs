@@ -9,8 +9,9 @@ use super::{
 };
 use crate::{
     root::LocalWorkspaceRoot,
-    session::{ApiError, Result, SessionApi},
+    session::{ApiError, RequestConflict, Result, SessionApi},
 };
+use futures::FutureExt;
 use lancet_protocol::{SessionId, TurnId};
 use lattice_session::{StateLayout, store::*};
 use std::sync::{
@@ -30,8 +31,8 @@ pub(crate) struct ExecutionInput {
     pub connection: Option<Arc<lattice_llm::LlmConnection>>,
     pub shutdown: Arc<AtomicBool>,
     pub observer: Arc<ObserverSink>,
-    /// 新 SID 在持久接受前关联原 Owner；碰撞时仅重选尚未接受的候选。
-    pub reserve_session: Option<Box<dyn Fn(SessionId) -> bool + Send + Sync>>,
+    /// 新会话身份由提交方在执行开始前给定。
+    pub new_session: Option<SessionId>,
 }
 
 /// 后台接管与持久接受不同。这个句柄的回执被释放也不撤销后台责任。
@@ -43,6 +44,10 @@ pub fn start_turn(
     request: RunTurnRequest,
     connection: Option<Arc<lattice_llm::LlmConnection>>,
 ) -> TurnExecution {
+    let new_session = request
+        .session_id
+        .is_none()
+        .then(crate::local::new_session_id);
     start_execution(ExecutionInput {
         session,
         layout,
@@ -52,7 +57,7 @@ pub fn start_turn(
         connection,
         shutdown: Arc::default(),
         observer: Arc::default(),
-        reserve_session: None,
+        new_session,
     })
 }
 
@@ -66,9 +71,25 @@ pub(crate) fn start_execution(mut input: ExecutionInput) -> TurnExecution {
     let (completed, completion) = oneshot::channel();
     tokio::spawn(async move {
         let mut accepted = Some(accepted);
-        let result = execute_owned(input, &mut accepted).await;
+        let turn_id = input.turn_id;
+        let mut accepted_session = None;
+        let result = std::panic::AssertUnwindSafe(execute_owned(
+            input,
+            &mut accepted,
+            &mut accepted_session,
+        ))
+        .catch_unwind()
+        .await
+        .unwrap_or(Err(ApiError::WorkerFailed));
         if let (Some(sender), Err(error)) = (accepted.take(), &result) {
-            let _ = sender.send(Err(error.clone()));
+            let reply = match accepted_session {
+                Some(session_id) => Ok(TurnAcceptance::ConfirmationUnknown {
+                    turn_id,
+                    session_id,
+                }),
+                None => Err(error.clone()),
+            };
+            let _ = sender.send(reply);
         }
         let _ = completed.send(result);
     });
@@ -88,6 +109,7 @@ fn accept(sender: &mut Option<oneshot::Sender<Result<TurnAcceptance>>>, value: T
 async fn execute_owned(
     input: ExecutionInput,
     accepted: &mut Option<oneshot::Sender<Result<TurnAcceptance>>>,
+    accepted_session: &mut Option<SessionId>,
 ) -> Result<TurnCompletion> {
     let ExecutionInput {
         session,
@@ -98,61 +120,20 @@ async fn execute_owned(
         connection,
         shutdown,
         observer,
-        reserve_session,
+        new_session,
     } = input;
     let project = workspace.store_key();
-    // 全局 TurnId 找回先于分配 SID、配置和工作区历史；不续跑已接受请求。
-    let original = session
-        .read(move |read| {
-            let Some(node) = read.turn_node(turn_id)? else {
-                return Ok(None);
-            };
-            Ok(Some((
-                node.session_id,
-                read.turn_input(node.session_id, turn_id)?,
-                read.session(node.session_id)?.project_store_key,
-            )))
-        })
-        .await?;
-    if let Some((sid, original_input, original_project)) = original {
-        if original_input != request.input
-            || original_project != project
-            || request.session_id.is_some_and(|id| id != sid)
-        {
-            return Err(ApiError::Conflict("TurnId identity differs".into()));
-        }
-        let turn = session
-            .read(move |read| read.turn_detail(sid, turn_id))
-            .await?;
-        accept(accepted, TurnAcceptance::Existing { turn: turn.clone() });
-        return Ok(if turn.summary.progress.is_closed() {
-            TurnCompletion::Closed(Box::new(turn))
-        } else {
-            TurnCompletion::Running(TurnRef {
-                session_id: sid,
-                turn_id,
-            })
-        });
+    if session
+        .read(move |read| read.turn_node(turn_id))
+        .await?
+        .is_some()
+    {
+        return Err(ApiError::Conflict(RequestConflict::TurnIdUsed));
     }
-    let session_id = if let Some(id) = request.session_id {
-        id
-    } else {
-        loop {
-            let id = SessionId::parse(&uuid::Uuid::new_v4().simple().to_string())
-                .expect("UUID v4 SessionId");
-            match session.read(move |read| read.session(id)).await {
-                Err(ApiError::Store(error))
-                    if matches!(error.as_ref(), StoreError::NotFound { .. }) =>
-                {
-                    if reserve_session.as_ref().is_none_or(|reserve| reserve(id)) {
-                        break id;
-                    }
-                }
-                Ok(_) => continue,
-                Err(error) => return Err(error),
-            }
-        }
-    };
+    let session_id = request
+        .session_id
+        .or(new_session)
+        .ok_or_else(|| ApiError::BadRequest("explicit SessionId required".into()))?;
     let io = CoordinatorStoreIo::acquire_api(session.clone(), session_id).await?;
     let coordinator = TurnCoordinator::new(io, Arc::new(RandomIdSource));
     if request.session_id.is_some() {
@@ -161,9 +142,7 @@ async fn execute_owned(
             .read(move |read| read.session(session_id))
             .await?;
         if record.project_store_key != project {
-            return Err(ApiError::Conflict(
-                "workspace differs from Session binding".into(),
-            ));
+            return Err(ApiError::Conflict(RequestConflict::BindingMismatch));
         }
     }
     let selected = match &request.agent {
@@ -185,14 +164,14 @@ async fn execute_owned(
         .as_ref()
         .ok_or_else(|| ApiError::BadRequest("frozen configuration required".into()))?;
     if loaded.profile.agent.name != selected {
-        return Err(ApiError::Conflict(
+        return Err(ApiError::BadRequest(
             "loaded agent differs from selection".into(),
         ));
     }
     if let Some(connection) = &connection
         && connection.model().alias != loaded.profile.agent.model
     {
-        return Err(ApiError::Conflict(
+        return Err(ApiError::BadRequest(
             "connection model differs from profile".into(),
         ));
     }
@@ -239,6 +218,18 @@ async fn execute_owned(
     if shutdown.load(Ordering::Acquire) {
         return Err(StoreError::WriteDisabled.into());
     }
+    #[cfg(test)]
+    {
+        let gate = observer
+            .before_accept
+            .lock()
+            .expect("before accept gate")
+            .take();
+        if let Some((entered, release)) = gate {
+            let _ = entered.send(());
+            release.await.expect("release accept");
+        }
+    }
     let result = coordinator
         .io
         .accept(AcceptTurn {
@@ -267,31 +258,49 @@ async fn execute_owned(
                     accepted,
                     TurnAcceptance::ConfirmationUnknown {
                         turn_id,
-                        session_id: request.session_id,
+                        session_id,
                     },
                 );
             }
             return Err(error.into());
         }
     };
+    if matches!(result, AcceptedTurn::Existing(_)) {
+        return Err(ApiError::Conflict(RequestConflict::TurnIdUsed));
+    }
+    *accepted_session = Some(session_id);
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout);
     #[cfg(feature = "test-crash-barriers")]
     super::crash_barrier::hit(&coordinator.io, turn_id, "turn_accepted", None, None).await?;
+    #[cfg(test)]
+    let fail_read = {
+        let gate = observer
+            .accepted_read_failure
+            .lock()
+            .expect("accepted read gate")
+            .take();
+        if let Some((entered, release)) = gate {
+            let _ = entered.send(());
+            release.await.expect("release accepted read");
+            true
+        } else {
+            false
+        }
+    };
     let turn = coordinator
         .io
-        .read(move |read| read.turn_detail(session_id, turn_id))
+        .read(move |read| {
+            #[cfg(test)]
+            if fail_read {
+                return Err(StoreError::Corruption {
+                    table: "test".into(),
+                    key: turn_id.to_string(),
+                    detail: "注入接受后的读取失败".into(),
+                });
+            }
+            read.turn_detail(session_id, turn_id)
+        })
         .await?;
-    if matches!(result, AcceptedTurn::Existing(_)) {
-        accept(accepted, TurnAcceptance::Existing { turn: turn.clone() });
-        return Ok(if turn.summary.progress.is_closed() {
-            TurnCompletion::Closed(Box::new(turn))
-        } else {
-            TurnCompletion::Running(TurnRef {
-                session_id,
-                turn_id,
-            })
-        });
-    }
     accept(accepted, TurnAcceptance::Accepted { turn: turn.clone() });
     observer.emit(TurnEvent::TurnStarted {
         turn: TurnRef {
@@ -342,10 +351,7 @@ pub async fn run_turn(
     let TurnCompletion::Closed(detail) = execution
         .completion
         .await
-        .map_err(|_| ApiError::WorkerFailed)??
-    else {
-        return Err(ApiError::StoreUnavailable("Turn still running".into()));
-    };
+        .map_err(|_| ApiError::WorkerFailed)??;
     Ok(RunTurnResult {
         turn: TurnRef {
             session_id: detail.session_id,

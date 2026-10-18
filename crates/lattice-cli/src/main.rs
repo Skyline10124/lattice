@@ -20,7 +20,7 @@ struct Cli {
         short,
         long,
         global = true,
-        help = "Emit JSONL (submission/acceptance/snapshot/history/event/connection/error records) without human status lines."
+        help = "Emit JSONL (submit/cancel/head/entry/text/connection/error records) without human status lines."
     )]
     json: bool,
 

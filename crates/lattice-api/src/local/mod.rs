@@ -11,12 +11,15 @@ mod operation;
 mod server;
 mod types;
 
-pub use client::{LocalClient, LocalSubscription};
+pub use client::{LocalClient, LocalWatch};
 pub use config::FrozenConfiguration;
 pub use lattice_conversation::{
     BoundToolCall, MessageRole, MessageSemantic, NativeMessage, ToolResultOutcome,
 };
 pub use operation::LocalTurn;
+pub fn new_session_id() -> SessionId {
+    SessionId::parse(&uuid::Uuid::new_v4().simple().to_string()).expect("generated SessionId")
+}
 pub use server::serve;
 /// 身份在发送之前分配，与输入文本无关；调用者负责保存并显示它。
 pub fn new_turn_id() -> TurnId {

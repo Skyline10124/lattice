@@ -130,6 +130,11 @@ impl Viewport {
         self.follow = false;
     }
 
+    /// 对话记录上方插入了 `rows` 行：视图仍停在原来看到的内容上。
+    pub(crate) fn shift(&mut self, rows: usize) {
+        self.scroll = self.scroll.saturating_add(rows);
+    }
+
     pub(crate) fn clamp_cursor(&self, cursor: &mut BrowseCursor) {
         cursor.row = cursor.row.max(self.scroll).min(
             self.scroll

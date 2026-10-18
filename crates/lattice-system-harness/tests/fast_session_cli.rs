@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! 公开 Session 查询、树形历史与输入拒绝。
 mod support;
-use lattice_system_harness::{SessionSendDriver, SseScript};
+use lattice_system_harness::{SendRecord, SessionSendDriver, SseScript};
 use serde_json::Value;
-use support::{assert_clean_send, cli, direct_world, driver, wire_fake_llm};
+use support::{assert_clean_send, cli, direct_world, driver, parse_send_stdout, wire_fake_llm};
 
 #[test]
 fn session_queries_and_rewind_preserve_the_tree_across_restart() {
@@ -159,12 +159,14 @@ fn missing_session_and_missing_profile_fail_before_dispatch() {
         );
         evidence.record_command("profile missing", &out);
         assert!(out.is_clean_exit(2));
-        let errors: Vec<Value> = std::str::from_utf8(&out.stdout)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
-        assert_eq!(errors.last().unwrap()["kind"], "bad_request");
+        // 配置在请求写出前加载失败：`sending` 之后以 `rejected` 回执结束。
+        let sent = parse_send_stdout(&out.stdout, out.exit_code());
+        assert_eq!(
+            sent.rejection().map(|error| error.kind.as_str()),
+            Some("bad_request"),
+            "{:?}",
+            sent.type_sequence()
+        );
         lattice_system_harness::assert_no_secret(&out, lattice_system_harness::FAKE_API_KEY)
             .unwrap();
         assert_eq!(server.captured_requests().len(), 1);
@@ -251,15 +253,21 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
                 assert!(out.is_clean_exit(2), "{}", out.summary());
                 assert_no_secret(&out, SENTINEL).unwrap();
                 assert_no_secret(&out, FAKE_API_KEY).unwrap();
-                let records: Vec<Value> = std::str::from_utf8(&out.stdout)
-                    .unwrap()
-                    .lines()
-                    .map(|line| serde_json::from_str(line).unwrap())
-                    .collect();
-                let error = records.last().expect("final error record");
-                assert_eq!(error["type"], "error");
-                assert_eq!(error["kind"], "bad_request");
-                let message = error["message"].as_str().unwrap();
+                // 提交在 `sending` 之后以 `rejected` 回执结束；TUI 启动预检不是提交，
+                // 输出 `error` 记录。两者给出同一个 LocalError。
+                let sent = parse_send_stdout(&out.stdout, out.exit_code());
+                let error = if args[1] == "tui" {
+                    match &sent.records[..] {
+                        [SendRecord::Error(error)] => error,
+                        _ => panic!("tui preflight emits one error: {:?}", sent.type_sequence()),
+                    }
+                } else {
+                    sent.rejection().unwrap_or_else(|| {
+                        panic!("rejected receipt expected: {:?}", sent.type_sequence())
+                    })
+                };
+                assert_eq!(error.kind, "bad_request");
+                let message = error.message.as_str();
                 assert!(
                     message.contains(expected),
                     "missing expected rejection reason"

@@ -2,186 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! 真实 LocalTurn、Unix socket 与 run_loop；对端只替代 IPC 系统边界。
+use super::fixtures::*;
 use super::*;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
+use lattice_api::local::{LocalErrorKind, ViewUpdate};
 use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{oneshot, watch};
 
-const SESSION: &str = "11111111111141118111111111111111";
-fn sid() -> SessionId {
-    SessionId::parse(SESSION).unwrap()
-}
-fn key(id: TurnId, step: u32, attempt: u32) -> ModelAttemptKey {
-    ModelAttemptKey {
-        turn_id: id,
-        model_step_ordinal: step,
-        attempt_ordinal: attempt,
-    }
-}
-const AT: &str = "2026-01-01T00:00:00Z";
-pub(super) fn user_message_node(parent: u64, turn_id: TurnId, text: &str) -> Value {
-    json!({
-        "kind":"user_message","parent":parent,"turn_id":turn_id,"accepted_at":AT,"agent_name":"unused",
-        "model":"model","provider":"openai","limits":{"timeout_secs":300,"max_model_steps":32,"max_model_attempts":3},
-        "config_digest":"0".repeat(64),"message":{"role":"user","parts":[{"semantic":{"text":{"text":text}}}]}
-    })
-}
-/// 以 Finish 关闭的 Step；`parts` 是完整回复的各部分。
-pub(super) fn step_node(parent: u64, turn_id: TurnId, step_ordinal: u32, parts: Value) -> Value {
-    json!({
-        "kind":"step","parent":parent,"turn_id":turn_id,"step_ordinal":step_ordinal,
-        "progress":{"progress":"closed","end":{"end":"finish"}},"attempts":[],
-        "reply":{"role":"assistant","origin":"open_ai_compatible","parts":parts},"slots":[],"updated_at":AT
-    })
-}
-pub(super) fn completed() -> Value {
-    json!({"outcome":"completed","notice":null,"progress":{"progress":"closed","end":{"end":"finish"}}})
-}
-fn view(id: TurnId, closed: bool) -> ObservationSnapshot {
-    let mut value = json!({
-        "session":{"session_id":SESSION,"project_store_key":"0".repeat(64),"current":2,"created_at":AT,"updated_at":AT},
-        "current_agent":"unused","selected_turn":{"session_id":SESSION,"turn_id":id,"user_node":1,"agent_name":"unused","accepted_at":AT,"ended_at":AT,
-            "summary":{"outcome":"failed","notice":{"level":"error","text":"process exit"},"progress":{"progress":"requesting"}},
-            "usage":{"kind":"partial","known":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0},"unknown_attempts":1},"steps":[]},
-        "unclosed_step":[2,{"kind":"step","parent":1,"turn_id":id,"step_ordinal":0,"progress":{"progress":"requesting"},"attempts":[],"reply":null,"slots":[],"updated_at":AT}],
-        "history":{"session_id":SESSION,"head":1},"attempt":{"key":key(id,0,1),"segments":[]},"cursor":{"epoch":"peer","sequence":0},"owned":true
-    });
-    if closed {
-        value["history"]["head"] = json!(2);
-        value["selected_turn"]["ended_at"] = json!("2026-01-01T00:00:01Z");
-        value["selected_turn"]["summary"] = completed();
-        value["unclosed_step"] = Value::Null;
-        value["attempt"] = Value::Null;
-        value["owned"] = json!(false);
-    }
-    serde_json::from_value(value).unwrap()
-}
-fn response(kind: &str, value: Value) -> Value {
-    json!({"response":kind,"value":value})
-}
-fn snapshot(view: &ObservationSnapshot) -> Value {
-    response("observation", json!({"type":"snapshot","view":view}))
-}
-fn accepted(id: TurnId) -> Value {
-    response(
-        "acceptance",
-        json!({"acceptance":"accepted","turn":lattice_api::local::TurnView::from(view(id,false).selected_turn.as_ref().unwrap())}),
-    )
-}
-fn error(message: &str) -> Value {
-    response(
-        "error",
-        json!({"kind":"store_unavailable","message":message,"recovery":null,"store":null}),
-    )
-}
-fn event(seq: u64, event: TurnEvent) -> Value {
-    response(
-        "observation",
-        json!({"type":"event","cursor":{"epoch":"peer","sequence":seq},"event":event}),
-    )
-}
-fn history_entries(view: &ObservationSnapshot) -> Value {
-    let id = view.selected_turn.as_ref().unwrap().turn_id;
-    let summary = &view.selected_turn.as_ref().unwrap().summary;
-    let mut entries = vec![
-        json!({"node":1,"agent_name":"unused","summary":summary,"retries":[],"content":user_message_node(0, id, "original prompt")}),
-    ];
-    if view.history.head.0 == 2 {
-        entries.push(json!({"node":2,"agent_name":"unused","summary":summary,"retries":[],"content":step_node(1, id, 0, json!([{"semantic":{"text":{"text":"live body"}}}]))}));
-    }
-    json!(entries)
-}
-fn history(view: &ObservationSnapshot) -> Value {
-    let fragments:Vec<_>=history_entries(view).as_array().unwrap().iter().map(|entry|json!({"agent_name":entry["agent_name"],"summary":entry["summary"],"fragment":{"node":entry["node"],"utf8_offset":0,"json_fragment":serde_json::to_string(&entry["content"]).unwrap(),"complete":true,"agent_name":entry["agent_name"],"summary":entry["summary"],"retries":entry["retries"]}})).collect();
-    response(
-        "history",
-        json!({"anchor":view.history,"fragments":fragments,"next":null}),
-    )
-}
-fn finished(view: &ObservationSnapshot) -> Value {
-    response(
-        "observation",
-        json!({"type":"finished","turn":{"session_id":sid(),"turn_id":view.selected_turn.as_ref().unwrap().turn_id},"cursor":view.cursor,"history":{"anchor":view.history,"entries":history_entries(view)}}),
-    )
-}
-fn comment_history(app: &mut App, id: TurnId, parts: Value, closed: bool) {
-    let mut snapshot = view(id, closed);
-    snapshot.history.head = lattice_api::NodeId(2);
-    let mut entries = history_entries(&view(id, true));
-    entries[1]["content"]["reply"]["parts"] = parts;
-    if !closed {
-        // 已关闭的工具 Step 之后仍在请求下一步；零工具最终回复不能伪装成进行中 Step。
-        let part = entries[1]["content"]["reply"]["parts"]
-            .as_array()
-            .unwrap()
-            .len();
-        let call = json!({
-            "invocation_id":"22222222-2222-4222-8222-222222222222", "provider_call_id":"call_1",
-            "name":"observe.workspace", "arguments":{"path":"a.txt"},
-            "arguments_digest":"5fd582703776c899a2ecb12f3d699bd7244dff1f443ef5ae3f0067bcf3ce279e",
-            "address":{"message":{"session_id":SESSION,"turn_id":id,"model_step_ordinal":0},"part_ordinal":part}
-        });
-        entries[1]["content"]["reply"]["parts"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({"semantic":{"tool_call":{"call":call}}}));
-        entries[1]["content"]["progress"]["end"] = json!({"end":"continue"});
-        entries[1]["content"]["slots"] = json!([{
-            "binding":{"invocation_id":"22222222-2222-4222-8222-222222222222","identity":{
-                "session_id":SESSION,"turn_id":id,"model_step_ordinal":0,"part_ordinal":part,"method":"observe.workspace",
-                "descriptor_identity":"observe.workspace","arguments_digest":"5fd582703776c899a2ecb12f3d699bd7244dff1f443ef5ae3f0067bcf3ce279e"}},
-            "progress":{"progress":"terminal","result":{
-                "invocation_id":"22222222-2222-4222-8222-222222222222", "name":"observe.workspace",
-                "payload":{"outcome":"succeeded","payload":{"kind":"json","value":null,"digest":"4514e821d251d896aaed09c92f07abacecb5683e0714471682fa6beaca071aa2","byte_length":4}}
-            },"evidence":{"kind":"unavailable","value":{"reason":"no_result"}}}
-        }]);
-        snapshot.session.current = lattice_api::NodeId(3);
-        let (node, step) = snapshot.unclosed_step.as_mut().unwrap();
-        *node = lattice_api::NodeId(3);
-        if let Node::Step {
-            parent,
-            step_ordinal,
-            ..
-        } = step
-        {
-            *parent = lattice_api::NodeId(2);
-            *step_ordinal = 1;
-        }
-        snapshot.attempt.as_mut().unwrap().key.model_step_ordinal = 1;
-    }
-    app.apply_update(LocalUpdate::State {
-        view: Box::new(snapshot.clone()),
-        phase: if closed {
-            ObservationPhase::Finished
-        } else {
-            ObservationPhase::Live
-        },
-        error: None,
-    });
-    app.apply_update(LocalUpdate::History {
-        anchor: snapshot.history.clone(),
-        generation: app.generation,
-        stale: false,
-        result: Ok(Box::new(
-            serde_json::from_value(json!({"anchor": snapshot.history, "entries": entries}))
-                .unwrap(),
-        )),
-    });
-}
-
-fn status(level: NoticeLevel, text: &str) -> Status {
-    Status {
-        level,
-        text: text.into(),
-        closing: None,
-        retry: None,
-    }
-}
-
-/// Warn 与 Error 暂驻 Dock 时输入区被遮住；用无修饰 Space 释放后才能继续输入。
 fn release_dock(app: &mut App) {
     assert!(app.dock.message_id().is_some(), "Dock 应有暂驻消息");
     app.apply_action(KeyAction::Insert(' '));
@@ -199,6 +29,29 @@ fn comment_browse(app: &mut App, text: &str) {
     app.viewport.pause();
 }
 
+/// 一轮带 `parts` 回复的对话。`closed` 时以 Finish 结束；否则这一步以 Continue 关闭，
+/// 下一步仍在请求中，这一轮尚未结束。
+fn comment_history(app: &mut App, id: TurnId, parts: Value, closed: bool) {
+    let first = step(2, id, 0).parts(parts);
+    if closed {
+        open_view(
+            app,
+            head(2, Some(id), false),
+            vec![user(1, id, 1, "original prompt"), first.finished().entry()],
+        );
+    } else {
+        open_view(
+            app,
+            head(3, Some(id), true),
+            vec![
+                user(1, id, 1, "original prompt"),
+                first.tool(1, true).completed_attempt(1).continued().entry(),
+                step(3, id, 1).sent().entry(),
+            ],
+        );
+    }
+}
+
 #[test]
 fn comment_history_anchor_uses_original_part_and_only_closed_single_fragment() {
     let mut h = Harness::new(false);
@@ -213,10 +66,7 @@ fn comment_history_anchor_uses_original_part_and_only_closed_single_fragment() {
     comment_history(&mut h.app, id, parts, true);
     comment_browse(&mut h.app, "comment target");
     h.app.apply_action(KeyAction::Submit);
-    assert!(
-        h.app.queue.is_editing(),
-        "closed History text opens comment editor"
-    );
+    assert!(h.app.queue.is_editing(), "closed text opens comment editor");
     h.app.apply_action(KeyAction::Paste("note".into()));
     h.app.apply_action(KeyAction::Submit);
     h.app.focus = Focus::Dock;
@@ -261,15 +111,15 @@ fn comment_esc_delete_paths_saved_count_and_blank_save() {
     app.apply_action(KeyAction::Paste("new discarded".into()));
     assert_eq!(app.queue.draft_count(), 0, "正在写的新评论不计入待发送");
     app.apply_action(KeyAction::Clear);
-    assert!(!frame(app).text.contains("new discarded"));
+    assert!(!transcript(app).contains("new discarded"));
     save_comment(app, "saved note");
     assert_eq!(app.queue.draft_count(), 1);
     comment_browse(app, "saved note");
     app.apply_action(KeyAction::Submit);
     app.apply_action(KeyAction::Paste(" discarded edit".into()));
     app.apply_action(KeyAction::Clear);
-    assert!(frame(app).text.contains("saved note"));
-    assert!(!frame(app).text.contains("discarded edit"));
+    assert!(transcript(app).contains("saved note"));
+    assert!(!transcript(app).contains("discarded edit"));
     // 不在编辑时：可打印字符与粘贴被忽略，Esc 只回到输入区，Delete 才删除草稿。
     comment_browse(app, "saved note");
     app.apply_action(KeyAction::Insert('z'));
@@ -286,38 +136,36 @@ fn comment_esc_delete_paths_saved_count_and_blank_save() {
     assert_eq!(app.queue.draft_count(), 0);
 }
 
-fn reject_comment(app: &mut App, id: TurnId, receipt: usize) {
-    let update = match receipt {
-        0 | 1 => LocalUpdate::Submission {
-            turn_id: id,
-            result: Err(lattice_api::local::LocalError {
-                kind: if receipt == 0 {
-                    lattice_api::local::LocalErrorKind::Busy
-                } else {
-                    lattice_api::local::LocalErrorKind::BadRequest
-                },
-                message: "rejected".into(),
-                recovery: None,
-                store: None,
+/// 提交未被接受的四种方式：Busy、其他拒绝、发出前取消、查询确认后台没有这个请求。
+fn reject(app: &mut App, id: TurnId, how: usize) {
+    match how {
+        0 | 1 => app.apply_submission(receipt(
+            id,
+            SubmissionResult::Rejected {
+                error: local_error(
+                    if how == 0 {
+                        LocalErrorKind::Busy
+                    } else {
+                        LocalErrorKind::BadRequest
+                    },
+                    "rejected",
+                ),
+            },
+        )),
+        // 发出前取消的回执不来自查询；查询确认没有这个请求的回执来自查询。
+        _ => app.apply_submission(LocalUpdate::Submit {
+            update: SubmissionUpdate::Receipt(SubmissionReceipt {
+                turn_id: id,
+                result: SubmissionResult::NotAccepted,
+                recovered: how == 3,
             }),
-        },
-        2 => LocalUpdate::NotSubmitted {
-            turn_id: id,
-            stage: lattice_api::local::NotSubmittedStage::FreezingConfiguration,
-        },
-        _ => LocalUpdate::Submission {
-            turn_id: id,
-            result: Ok(Acceptance::NeedsConfiguration {
-                agent_name: "unused".into(),
-            }),
-        },
-    };
-    app.apply_update(update);
+        }),
+    }
 }
 
 #[test]
 fn comment_manual_rejections_keep_user_markers_and_restore_one_draft_copy() {
-    for receipt in 0..4 {
+    for how in 0..4 {
         let mut h = comment_app();
         let app = &mut h.app;
         save_comment(app, "rejected note");
@@ -326,17 +174,13 @@ fn comment_manual_rejections_keep_user_markers_and_restore_one_draft_copy() {
         let wire = app.apply_action(KeyAction::Submit).unwrap();
         assert_eq!(crate::comment::Message::parse(&wire).unwrap().text, "body");
         assert_eq!(app.history.prev(), Some("body"));
-        let id = app.current_turn.unwrap();
-        reject_comment(app, id, receipt);
-        assert_eq!(app.input.text(), if receipt == 3 { "" } else { "body" });
-        let text = frame(app).text;
+        let id = app.own_turn.unwrap();
+        reject(app, id, how);
+        assert_eq!(app.input.text(), "body", "{how}");
+        let text = transcript(app);
         assert_eq!(text.matches("[COMMENT 1]").count(), 1);
-        assert_eq!(
-            text.matches("rejected note").count(),
-            1,
-            "receipt {receipt}"
-        );
-        assert!(text.contains("草稿 · #1"), "receipt {receipt}: {text}");
+        assert_eq!(text.matches("rejected note").count(), 1, "{how}");
+        assert!(text.contains("草稿 · #1"), "{how}: {text}");
         comment_browse(app, "rejected note");
         app.apply_action(KeyAction::Submit);
         assert!(app.queue.is_editing(), "restored draft remains editable");
@@ -354,27 +198,28 @@ fn comment_manual_rejections_keep_user_markers_and_restore_one_draft_copy() {
 
 #[test]
 fn comment_queue_only_edit_rejection_and_delete() {
-    for receipt in 0..4 {
+    for how in 0..4 {
         let mut h = comment_app();
         let app = &mut h.app;
         app.focus = Focus::Dock;
         app.input.set_text("running prompt");
         app.submit().unwrap();
+        let running = app.own_turn.unwrap();
         save_comment(app, "queued note");
         app.focus = Focus::Dock;
         app.input.set_text("queued body");
         assert!(app.apply_action(KeyAction::Submit).is_none());
         let message_id = app.queue.messages().next().unwrap().id;
-        assert!(frame(app).text.contains("排队 · #1"));
+        assert!(transcript(app).contains("排队 · #1"));
         assert_eq!(app.queue.draft_count(), 0);
         // 从队列标题进入编辑，空正文仍保留只带评论的消息。
-        let transcript = app.prepare_transcript();
-        let row = transcript
+        let rendered = app.prepare_transcript();
+        let row = rendered
             .owners
             .iter()
             .position(|o| o.id == message_id)
             .unwrap();
-        app.focus = Focus::Transcript(transcript.cursor(row, 0).unwrap());
+        app.focus = Focus::Transcript(rendered.cursor(row, 0).unwrap());
         app.apply_action(KeyAction::Submit);
         assert!(app.queue.is_editing());
         app.apply_action(KeyAction::Home);
@@ -384,72 +229,53 @@ fn comment_queue_only_edit_rejection_and_delete() {
         app.apply_action(KeyAction::Insert(' '));
         app.apply_action(KeyAction::Submit);
         assert_eq!(app.queue.messages().count(), 1);
-        let running = app.current_turn.unwrap();
-        app.apply_update(LocalUpdate::State {
-            view: Box::new(view(running, true)),
-            phase: ObservationPhase::Finished,
-            error: None,
-        });
+        app.apply_submission(receipt(running, accepted(running)));
+        finish(app, running, "running prompt");
         let wire = app.auto_submit().unwrap();
-        assert!(!frame(app).text.contains("排队 · #1"));
-        assert_eq!(frame(app).text.matches("queued note").count(), 1);
+        assert!(!transcript(app).contains("排队 · #1"));
+        assert_eq!(transcript(app).matches("queued note").count(), 1);
         assert_eq!(crate::comment::Message::parse(&wire).unwrap().text, "");
         assert_eq!(app.history.prev(), Some("running prompt"));
-        let id = app.current_turn.unwrap();
-        reject_comment(app, id, receipt);
+        let id = app.own_turn.unwrap();
+        reject(app, id, how);
         assert!(app.input.is_empty());
         assert!(app.queue.is_paused());
-        let text = frame(app).text;
+        let text = transcript(app);
         assert_eq!(text.matches("[COMMENT 1]").count(), 2);
         assert_eq!(text.matches("queued note").count(), 1);
-        let transcript = app.prepare_transcript();
-        let row = transcript
+        let rendered = app.prepare_transcript();
+        let row = rendered
             .owners
             .iter()
             .position(|o| o.id == message_id)
             .unwrap();
-        app.focus = Focus::Transcript(transcript.cursor(row, 0).unwrap());
+        app.focus = Focus::Transcript(rendered.cursor(row, 0).unwrap());
         app.apply_action(KeyAction::Clear);
         assert_eq!(app.queue.messages().count(), 1, "Esc 不删除排队消息");
-        app.focus = Focus::Transcript(transcript.cursor(row, 0).unwrap());
+        app.focus = Focus::Transcript(rendered.cursor(row, 0).unwrap());
         app.apply_action(KeyAction::Delete);
         assert_eq!(app.queue.messages().count(), 0);
-        assert!(!frame(app).text.contains("queued note"));
+        assert!(!transcript(app).contains("queued note"));
     }
 }
 
+/// 重新打开会话：`on_path` 时被评论的那一轮仍在路径上。
 fn reload_comment(app: &mut App, target: TurnId, wire: &str, on_path: bool) {
     let new_turn = lattice_api::local::new_turn_id();
-    let mut snapshot = serde_json::to_value(view(new_turn, true)).unwrap();
-    let user_node = if on_path { 3 } else { 1 };
-    let head = user_node + 1;
-    snapshot["session"]["current"] = json!(head);
-    snapshot["history"]["head"] = json!(head);
-    snapshot["selected_turn"]["user_node"] = json!(user_node);
-    let snapshot: ObservationSnapshot = serde_json::from_value(snapshot).unwrap();
-    let mut entries = if on_path {
-        let mut old = history_entries(&view(target, true));
-        old[1]["content"]["reply"]["parts"][0]["semantic"]["text"]["text"] =
-            json!("comment target");
-        old.as_array().unwrap().clone()
-    } else {
-        vec![]
-    };
-    entries.push(json!({"node":user_node,"agent_name":"unused","summary":completed(),"retries":[],"content":user_message_node(user_node - 1, new_turn, wire)}));
-    entries.push(json!({"node":head,"agent_name":"unused","summary":completed(),"retries":[],"content":step_node(user_node, new_turn, 0, json!([{"semantic":{"text":{"text":"following answer"}}}]))}));
-    app.apply_update(LocalUpdate::State {
-        view: Box::new(snapshot.clone()),
-        phase: ObservationPhase::Finished,
-        error: None,
-    });
-    app.apply_update(LocalUpdate::History {
-        anchor: snapshot.history.clone(),
-        generation: app.generation,
-        stale: false,
-        result: Ok(Box::new(
-            serde_json::from_value(json!({"anchor":snapshot.history,"entries":entries})).unwrap(),
-        )),
-    });
+    let mut entries = Vec::new();
+    if on_path {
+        entries.push(user(1, target, 1, "original prompt"));
+        entries.push(step(2, target, 0).text("comment target").finished().entry());
+    }
+    let node = entries.len() as u64 + 1;
+    entries.push(user(node, new_turn, node / 2 + 1, wire));
+    entries.push(
+        step(node + 1, new_turn, 0)
+            .text("following answer")
+            .finished()
+            .entry(),
+    );
+    open_view(app, head(node + 1, Some(new_turn), false), entries);
 }
 
 #[test]
@@ -470,8 +296,7 @@ fn comment_reload_attaches_or_falls_back() {
         }
         let mut h = Harness::new(false);
         reload_comment(&mut h.app, target, &message.encode(), mismatch != 3);
-        let app = &mut h.app;
-        let text = frame(app).text;
+        let text = transcript(&h.app);
         assert_eq!(text.matches("reload note").count(), 1);
         assert_eq!(text.contains("原文不匹配 · #1"), mismatch != 0);
         if mismatch == 0 {
@@ -480,6 +305,80 @@ fn comment_reload_attaches_or_falls_back() {
             assert!(text.find("reload note").unwrap() > text.find("[COMMENT 1]").unwrap());
         }
     }
+}
+
+#[test]
+fn older_turns_keep_the_view_inside_a_reply_with_inline_comments() {
+    let mut source = comment_app();
+    save_comment(&mut source.app, "inline note");
+    source.app.focus = Focus::Dock;
+    let wire = source.app.submit().unwrap();
+    let target = crate::comment::Message::parse(&wire).unwrap().comments[0]
+        .location
+        .fragment
+        .turn;
+    let mut h = Harness::new(false);
+    let app = &mut h.app;
+    app.term_width = 80;
+    app.term_height = 12;
+    let last = lattice_api::local::new_turn_id();
+    open_view(
+        app,
+        head(8, Some(last), false),
+        vec![
+            user(5, target, 3, "prompt-3"),
+            step(6, target, 0)
+                .text("comment target\n\nlater paragraph")
+                .finished()
+                .entry(),
+            user(7, last, 4, &wire),
+            step(8, last, 0).text("answer-4").finished().entry(),
+        ],
+    );
+    let mut request = None;
+    for _ in 0..20 {
+        app.apply_action(KeyAction::ScrollPageUp);
+        request = request.or(app.older_request.take());
+    }
+    let request = request.expect("翻到顶部时查询更早的轮");
+    // 查询在途时往下翻：顶部停在这一轮回复的正文里，同一块下方穿插着内嵌评论。
+    let lines: Vec<String> = app
+        .prepare_transcript()
+        .lines
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let find = |marker: &str| lines.iter().position(|line| line.contains(marker)).unwrap();
+    let (anchor, note, later) = (
+        find("comment target"),
+        find("inline note"),
+        find("later paragraph"),
+    );
+    assert!(anchor < note && note < later, "{lines:#?}");
+    app.viewport.shift(anchor);
+    let top = |app: &mut App| {
+        let transcript = app.prepare_transcript();
+        transcript.lines[app.viewport.scroll()].to_string()
+    };
+    let before = top(app);
+    assert!(before.contains("comment target"), "{before}");
+    app.apply_older(
+        request,
+        Ok(LocalHistory {
+            entries: turns(1..=2),
+        }),
+    );
+    assert_eq!(top(app), before, "视图停在原来看到的那一行");
+}
+
+/// CLI 退回到被评论那一轮的 UserMessage：这一轮仍在路径上，被评论的 Step 已不在。
+fn rewind_to_user(app: &mut App, target: TurnId) {
+    let rewound = SessionHead {
+        path_replaced: true,
+        ..head(1, Some(target), false)
+    };
+    app.apply_view(LocalUpdate::Head(rewound));
+    app.apply_view(entry_update(user(1, target, 1, "original prompt")));
 }
 
 #[test]
@@ -505,26 +404,7 @@ fn comment_missing_step_discards_drafts_and_comment_only_queue_but_keeps_text() 
         .location
         .fragment
         .turn;
-    // 退回到同一 Turn 的 UserMessage：Turn 仍在路径上，Step 已不在。
-    let mut snapshot = view(target, true);
-    snapshot.session.current = lattice_api::NodeId(1);
-    snapshot.history.head = lattice_api::NodeId(1);
-    app.apply_update(LocalUpdate::State {
-        view: Box::new(snapshot.clone()),
-        phase: ObservationPhase::Finished,
-        error: None,
-    });
-    app.apply_update(LocalUpdate::History {
-        anchor: snapshot.history.clone(),
-        generation: app.generation,
-        stale: false,
-        result: Ok(Box::new(
-            serde_json::from_value(
-                json!({"anchor":snapshot.history,"entries":history_entries(&snapshot)}),
-            )
-            .unwrap(),
-        )),
-    });
+    rewind_to_user(app, target);
     assert_eq!(app.queue.draft_count(), 0);
     assert_eq!(
         app.queue
@@ -535,11 +415,42 @@ fn comment_missing_step_discards_drafts_and_comment_only_queue_but_keeps_text() 
     );
     assert!(app.queue.messages().next().unwrap().comments.is_empty());
     assert_eq!(
-        app.dock.message(&app.blocks),
+        app.dock.message(),
         Some(&status(
             NoticeLevel::Warn,
             "锚点 Step 不在当前历史，丢弃评论：#1、#2、#3"
         ))
+    );
+}
+
+#[test]
+fn comment_rewind_during_queue_edit_preserves_remaining_order() {
+    let mut h = comment_app();
+    let app = &mut h.app;
+    let target = app.head.as_ref().unwrap().turn_id.unwrap();
+    app.input.set_text("running");
+    app.submit().unwrap();
+    let running = app.own_turn.unwrap();
+    save_comment(app, "drop this");
+    app.focus = Focus::Dock;
+    app.submit();
+    for text in ["middle", "last"] {
+        app.input.set_text(text);
+        app.submit();
+    }
+    app.apply_submission(receipt(running, accepted(running)));
+    stop(app, running, "running", "failed");
+    comment_browse(app, "middle");
+    app.apply_action(KeyAction::Submit);
+    assert!(app.queue.is_editing());
+    rewind_to_user(app, target);
+    app.apply_action(KeyAction::Clear);
+    assert_eq!(
+        app.queue
+            .messages()
+            .map(|m| m.text.as_str())
+            .collect::<Vec<_>>(),
+        ["middle", "last"]
     );
 }
 
@@ -564,7 +475,7 @@ fn comment_warn_error_keeps_space_paste_and_hidden_input_untouched() {
 }
 
 #[test]
-fn comment_adjacent_text_fragments_and_live_text_are_not_commentable() {
+fn comment_adjacent_text_fragments_and_generating_text_are_not_commentable() {
     let mut h = Harness::new(false);
     let id = lattice_api::local::new_turn_id();
     comment_history(
@@ -579,11 +490,15 @@ fn comment_adjacent_text_fragments_and_live_text_are_not_commentable() {
     h.app.focus = Focus::Dock;
     h.app.input.set_text("run");
     h.app.submit().unwrap();
-    let live = h.app.current_turn.unwrap();
-    h.app.apply_turn_event(TurnEvent::TokenDelta {
-        key: key(live, 0, 1),
-        content: "live comment target".into(),
-    });
+    let live = h.app.own_turn.unwrap();
+    h.app.apply_submission(receipt(live, accepted(live)));
+    h.app
+        .apply_view(LocalUpdate::Head(head(4, Some(live), true)));
+    h.app.apply_view(entry_update(user(3, live, 2, "run")));
+    h.app
+        .apply_view(entry_update(step(4, live, 0).sent().entry()));
+    h.app
+        .apply_view(text(4, 0, 0, &[("live comment target", false)]));
     comment_browse(&mut h.app, "live comment target");
     h.app.apply_action(KeyAction::Submit);
     assert!(!h.app.queue.is_editing());
@@ -602,13 +517,15 @@ fn comment_numbering_combines_history_queue_and_drafts_and_does_not_resume_with_
     reload_comment(app, target, &message.encode(), true);
     app.input.set_text("running");
     app.submit().unwrap();
-    let running = app.current_turn.unwrap();
+    let running = app.own_turn.unwrap();
     save_comment(app, "queue eight");
     app.focus = Focus::Dock;
     app.submit();
     assert_eq!(app.queue.messages().next().unwrap().comments[0].n, 8);
-    app.apply_update(LocalUpdate::Connection(ConnectionStatus::Eof));
-    reject_comment(app, running, 0);
+    app.apply_view(LocalUpdate::Connection {
+        status: ConnectionStatus::Eof,
+    });
+    reject(app, running, 0);
     app.input.clear();
     save_comment(app, "draft nine");
     save_comment(app, "draft ten");
@@ -625,69 +542,6 @@ fn comment_numbering_combines_history_queue_and_drafts_and_does_not_resume_with_
         Some("running"),
         "comment-only input is not history"
     );
-}
-
-/// Dock 中暂驻的消息不随 History 替换而消失，即使它与一条已落回对话记录的消息同文；
-/// 释放后按位置规则出现，同文的提示在显示中只保留一份。
-#[test]
-fn dock_message_survives_r2_history_until_space() {
-    for (level, repeated) in [
-        (NoticeLevel::Warn, false),
-        (NoticeLevel::Error, false),
-        (NoticeLevel::Error, true),
-    ] {
-        let mut h = Harness::new(false);
-        let id = lattice_api::local::new_turn_id();
-        h.app.apply_update(LocalUpdate::Reset {
-            view: Box::new(view(id, false)),
-            generation: 1,
-        });
-        if level == NoticeLevel::Warn {
-            h.app.apply_turn_event(TurnEvent::LlmRetry {
-                key: key(id, 0, 1),
-                delay_ms: 100,
-                notice: lattice_api::local::Notice {
-                    level,
-                    text: "dock-marker".into(),
-                },
-            });
-        } else {
-            for _ in 0..=usize::from(repeated) {
-                h.app.push_status(status(level.clone(), "dock-marker"));
-            }
-        }
-        let released = usize::from(repeated);
-        let closed = view(id, true);
-        let loaded: lattice_api::local::LocalHistory = serde_json::from_value(
-            json!({"anchor":closed.history,"entries":history_entries(&closed)}),
-        )
-        .unwrap();
-        for _ in 0..2 {
-            h.app.apply_update(LocalUpdate::History {
-                anchor: closed.history.clone(),
-                result: Ok(Box::new(loaded.clone())),
-                stale: false,
-                generation: 1,
-            });
-            assert!(
-                h.app
-                    .dock
-                    .message(&h.app.blocks)
-                    .is_some_and(|status| status.text.contains("dock-marker")),
-                "History must not release Dock"
-            );
-            assert_eq!(frame(&h.app).text.matches("dock-marker").count(), released);
-        }
-        h.app.apply_action(KeyAction::Insert(' '));
-        assert!(h.app.dock.shows_input());
-        assert_eq!(
-            frame(&h.app).text.matches("dock-marker").count(),
-            released + 1
-        );
-        h.app
-            .replace_history(crate::session::history_blocks(loaded, None));
-        assert_eq!(frame(&h.app).text.matches("dock-marker").count(), 1);
-    }
 }
 
 fn screen_text(buffer: &ratatui::buffer::Buffer) -> String {
@@ -713,6 +567,7 @@ fn running_enter_queues_verbatim_without_history_and_preserves_full_input() {
         app.apply_action(KeyAction::Submit).unwrap();
         if cancelling {
             app.apply_action(KeyAction::CancelOrClear);
+            assert_eq!(app.cancel_requested, Some(CancelTarget::Own));
         }
         app.input.set_text(" \n ");
         assert_eq!(app.apply_action(KeyAction::Submit), None);
@@ -734,7 +589,7 @@ fn running_enter_queues_verbatim_without_history_and_preserves_full_input() {
         app.input.set_text("sixth");
         app.apply_action(KeyAction::Submit);
         assert_eq!(app.input.text(), "sixth");
-        let text = frame(app).text;
+        let text = transcript(app);
         assert_eq!(text.matches("排队").count(), 5);
         assert!(text.contains("**plain**"));
         let mut terminal =
@@ -759,9 +614,9 @@ fn queued_editor_saves_discards_deletes_and_keeps_warn_input_local() {
             app.submit();
         }
         app.apply_action(KeyAction::Up);
-        assert!(frame(app).text.contains("Enter 编辑 · Delete 删除"));
+        assert!(transcript(app).contains("Enter 编辑 · Delete 删除"));
         app.apply_action(KeyAction::Submit);
-        assert!(frame(app).text.contains("Enter 完成编辑"));
+        assert!(transcript(app).contains("Enter 完成编辑"));
         app.push_status(status(level, "dock marker"));
         app.apply_action(KeyAction::End);
         app.apply_action(KeyAction::Insert(' '));
@@ -773,197 +628,49 @@ fn queued_editor_saves_discards_deletes_and_keeps_warn_input_local() {
         app.apply_action(KeyAction::Backspace);
         app.apply_action(KeyAction::Insert('!'));
         app.apply_action(KeyAction::Submit);
-        assert!(frame(app).text.contains("cd e\nf!"));
+        assert!(transcript(app).contains("cd e\nf!"));
         assert!(app.dock.message_id().is_some());
         assert!(matches!(app.focus, Focus::Transcript(_)));
         app.apply_action(KeyAction::Submit);
         app.apply_action(KeyAction::Insert('x'));
         app.apply_action(KeyAction::Clear);
-        assert!(!frame(app).text.contains("f!x"));
+        assert!(!transcript(app).contains("f!x"));
         app.apply_action(KeyAction::Insert(' '));
         assert!(app.dock.shows_input());
         app.apply_action(KeyAction::Delete);
-        assert!(!frame(app).text.contains("ab中"));
-        assert!(frame(app).text.contains("first"));
+        assert!(!transcript(app).contains("ab中"));
+        assert!(transcript(app).contains("first"));
         assert!(matches!(app.focus, Focus::Transcript(_)));
     }
-}
-#[tokio::test]
-async fn completed_observation_sends_queue_through_real_loop_once() {
-    let id = lattice_api::local::new_turn_id();
-    let closed = view(id, true);
-    let (tx, rx) = unbounded();
-    tx.unbounded_send(snapshot(&closed)).unwrap();
-    let mut rx = Some(rx);
-    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
-        "subscribe" if r["target"]["turn_id"] == json!(id) => Reply::Stream(rx.take().unwrap()),
-        "history" => Reply::Never,
-        "submit" => Reply::Now(accepted(
-            serde_json::from_value(r["request"]["turn_id"].clone()).unwrap(),
-        )),
-        "subscribe" => Reply::Never,
-        _ => panic!("unexpected request: {r}"),
-    });
-    let mut h = Harness::new(true);
-    h.app.apply_update(LocalUpdate::State {
-        view: Box::new(view(id, false)),
-        phase: ObservationPhase::Live,
-        error: None,
-    });
-    let live = view(id, false);
-    h.app.apply_update(LocalUpdate::History {
-        anchor: live.history.clone(),
-        generation: 0,
-        stale: false,
-        result: Ok(Box::new(
-            serde_json::from_value(json!({
-                "anchor":live.history,"entries":history_entries(&live),
-            }))
-            .unwrap(),
-        )),
-    });
-    for text in ["queued via loop", "second"] {
-        h.app.input.set_text(text);
-        h.app.submit();
-    }
-    h.app.input.set_text("untouched draft");
-    let remote = h.remote.clone();
-    let driver = async {
-        let seen = peer.wait(|s| count(s, "submit") == 1).await;
-        let request = seen.iter().find(|r| r["operation"] == "submit").unwrap();
-        assert_eq!(request["request"]["input"], "queued via loop");
-        assert_ne!(submitted(&seen), id);
-        let rendered = remote.wait(|f| f.started && f.current != Some(id)).await;
-        assert_eq!(rendered.input, "untouched draft");
-        assert_eq!(
-            rendered.text.matches("排队").count(),
-            1,
-            "{}",
-            rendered.text
-        );
-        assert!(rendered.text.contains(" #2 ──"));
-        remote.press(KeyCode::Esc, KeyModifiers::NONE);
-        remote.line("/quit");
-    };
-    let (exit, ()) = tokio::join!(
-        h.run(
-            &peer.client,
-            Some(peer.client.observe(Some(sid()), Some(id)))
-        ),
-        driver,
-    );
-    assert!(exit.result.is_ok());
-    assert_eq!(count(&peer.seen.borrow(), "submit"), 1);
-}
-
-fn finish_completed(app: &mut App, id: TurnId) {
-    let mut closed = view(id, true);
-    let mut entries = Vec::new();
-    let mut turn_id = id;
-    for block in app.blocks.iter() {
-        match block {
-            Block::UserTurn(turn, _) => turn_id = *turn,
-            Block::User(text) => {
-                let node = entries.len() as u64 + 1;
-                entries.push(
-                    json!({"node":node,"agent_name":"unused","summary":completed(),"retries":[],
-                    "content":user_message_node(node - 1, turn_id, text)}),
-                );
-                entries.push(json!({"node":node + 1,"agent_name":"unused","summary":completed(),"retries":[],
-                    "content":step_node(node, turn_id, 0, json!([{"semantic":{"text":{"text":"live body"}}}]))}));
-            }
-            _ => {}
-        }
-    }
-    let node = entries.len() as u64;
-    closed.session.current = lattice_api::NodeId(node);
-    closed.history.head = lattice_api::NodeId(node);
-    closed.selected_turn.as_mut().unwrap().user_node = lattice_api::NodeId(node - 1);
-    app.apply_update(LocalUpdate::State {
-        view: Box::new(closed.clone()),
-        phase: ObservationPhase::NoOwner,
-        error: None,
-    });
-    app.apply_update(LocalUpdate::History {
-        anchor: closed.history.clone(),
-        generation: app.generation,
-        stale: false,
-        result: Ok(Box::new(
-            serde_json::from_value(json!({
-                "anchor":closed.history,"entries":entries,
-            }))
-            .unwrap(),
-        )),
-    });
-    app.apply_update(LocalUpdate::Finished {
-        turn: Some(lattice_api::local::TurnRef {
-            session_id: sid(),
-            turn_id: id,
-        }),
-        anchor: closed.history,
-        generation: app.generation,
-    });
 }
 
 fn queued_app() -> Harness {
     let mut h = Harness::new(true);
     h.app.input.set_text("running");
     h.app.submit().unwrap();
-    let id = h.app.current_turn.unwrap();
-    h.app.apply_update(LocalUpdate::Submission {
-        turn_id: id,
-        result: Ok(Acceptance::Accepted {
-            turn: lattice_api::local::TurnView::from(
-                view(id, false).selected_turn.as_ref().unwrap(),
-            ),
-        }),
-    });
+    let id = h.app.own_turn.unwrap();
+    h.app.apply_submission(receipt(id, accepted(id)));
     for n in 0..5 {
         h.app.input.set_text(&format!(" q{n}\nraw "));
         h.app.submit();
     }
-    finish_completed(&mut h.app, id);
+    finish(&mut h.app, id, "running");
     h
 }
 
 #[test]
 fn automatic_rejections_restore_exact_front_and_do_not_touch_input() {
-    for receipt in 0..4 {
+    for how in 0..4 {
         let mut h = queued_app();
         let app = &mut h.app;
         assert_eq!(app.auto_submit(), Some(" q0\nraw ".into()));
-        let id = app.current_turn.unwrap();
+        let id = app.own_turn.unwrap();
         assert!(app.queue.is_full(), "awaiting automatic prompt owns a slot");
         app.input.set_text("user is typing");
         app.submit();
         assert_eq!(app.input.text(), "user is typing");
-        let update = match receipt {
-            0 | 1 => LocalUpdate::Submission {
-                turn_id: id,
-                result: Err(lattice_api::local::LocalError {
-                    kind: if receipt == 0 {
-                        lattice_api::local::LocalErrorKind::Busy
-                    } else {
-                        lattice_api::local::LocalErrorKind::BadRequest
-                    },
-                    message: "rejected".into(),
-                    recovery: None,
-                    store: None,
-                }),
-            },
-            2 => LocalUpdate::NotSubmitted {
-                turn_id: id,
-                stage: lattice_api::local::NotSubmittedStage::FreezingConfiguration,
-            },
-            _ => LocalUpdate::Submission {
-                turn_id: id,
-                result: Ok(Acceptance::NeedsConfiguration {
-                    agent_name: "unused".into(),
-                }),
-            },
-        };
-        app.apply_update(update);
-        assert_eq!(app.input.text(), "user is typing", "receipt {receipt}");
+        reject(app, id, how);
+        assert_eq!(app.input.text(), "user is typing", "{how}");
         assert_eq!(
             app.queue
                 .messages()
@@ -978,7 +685,7 @@ fn automatic_rejections_restore_exact_front_and_do_not_touch_input() {
             ]
         );
         assert!(app.queue.is_full());
-        assert_eq!(frame(app).text.matches("暂停").count(), 5);
+        assert_eq!(transcript(app).matches("暂停").count(), 5);
         assert_eq!(app.auto_submit(), None);
         assert_eq!(app.phase, TurnPhase::Idle);
     }
@@ -986,82 +693,61 @@ fn automatic_rejections_restore_exact_front_and_do_not_touch_input() {
 
 #[test]
 fn accepting_and_unknown_receipts_release_capacity_without_requeue() {
-    for receipt in 0..4 {
+    for how in 0..4 {
         let mut h = queued_app();
         let app = &mut h.app;
         app.auto_submit().unwrap();
-        let id = app.current_turn.unwrap();
-        let turn =
-            lattice_api::local::TurnView::from(view(id, false).selected_turn.as_ref().unwrap());
-        let update = match receipt {
-            0 => LocalUpdate::Submission {
-                turn_id: id,
-                result: Ok(Acceptance::Accepted { turn }),
-            },
-            1 => LocalUpdate::Submission {
-                turn_id: id,
-                result: Ok(Acceptance::Existing { turn }),
-            },
-            2 => LocalUpdate::Submission {
-                turn_id: id,
-                result: Ok(Acceptance::ConfirmationUnknown {
-                    turn_id: id,
-                    session_id: Some(sid()),
-                }),
-            },
-            _ => LocalUpdate::SubmissionUnknown {
-                turn_id: id,
-                error: None,
+        let id = app.own_turn.unwrap();
+        let result = match how {
+            0 | 1 => accepted(id),
+            2 => SubmissionResult::Unknown { error: None },
+            _ => SubmissionResult::Unknown {
+                error: Some(local_error(LocalErrorKind::Transport, "lost")),
             },
         };
-        app.apply_update(update);
-        assert!(
-            !app.queue.is_full(),
-            "receipt {receipt} releases the reserved slot"
-        );
-        assert_eq!(app.queue.messages().count(), 4);
-        assert_eq!(app.queue.is_paused(), receipt >= 2);
-        app.input.set_text("new queued input");
-        app.submit();
-        assert!(app.input.is_empty());
-        assert!(app.queue.is_full());
-        assert_eq!(
-            app.queue.messages().last().unwrap().text,
-            "new queued input"
-        );
-        if receipt >= 2 {
-            // 未知之后的迟到拒绝不能重新入队或覆盖用户的新草稿。
-            app.input.set_text("new draft");
-            app.apply_update(LocalUpdate::NotSubmitted {
+        app.apply_submission(LocalUpdate::Submit {
+            update: SubmissionUpdate::Receipt(SubmissionReceipt {
                 turn_id: id,
-                stage: lattice_api::local::NotSubmittedStage::NeedsConfiguration,
-            });
-            assert_eq!(app.input.text(), "new draft");
-            assert_eq!(app.queue.messages().count(), 5);
+                result,
+                recovered: how == 1,
+            }),
+        });
+        assert!(!app.queue.is_full(), "{how} releases the reserved slot");
+        assert_eq!(app.queue.messages().count(), 4);
+        assert_eq!(app.queue.is_paused(), how >= 2);
+        app.input.set_text("new queued input");
+        if how < 2 {
+            app.submit();
+            assert!(app.input.is_empty(), "接受后这一轮在运行，Enter 入队");
+            assert!(app.queue.is_full());
+            assert_eq!(
+                app.queue.messages().last().unwrap().text,
+                "new queued input"
+            );
+        } else {
+            // 结果未知时这条已让出名额，迟到的确定拒绝不放回队首，免得队列超过上限；
+            // 只给状态消息，原输入从输入历史找回。不碰用户的新草稿。
+            app.apply_submission(receipt(
+                id,
+                SubmissionResult::Rejected {
+                    error: local_error(LocalErrorKind::BadRequest, "late"),
+                },
+            ));
+            assert_eq!(app.input.text(), "new queued input");
+            assert_eq!(app.queue.messages().count(), 4);
+            let error = app.dock.message().unwrap();
+            assert!(
+                error.text.contains("late") && error.text.contains("Ctrl+↑"),
+                "{}",
+                error.text
+            );
+            assert_eq!(
+                app.history.prev(),
+                Some("q0\nraw"),
+                "自动发送时已记进输入历史"
+            );
         }
     }
-}
-
-fn stopped_view(id: TurnId, cancelled: bool, user_node: u64) -> ObservationSnapshot {
-    let mut value = serde_json::to_value(view(id, false)).unwrap();
-    value["session"]["current"] = json!(user_node + 1);
-    value["history"]["head"] = json!(user_node + 1);
-    value["selected_turn"]["user_node"] = json!(user_node);
-    value["selected_turn"]["ended_at"] = json!("2026-01-01T00:00:01Z");
-    let cause = if cancelled {
-        "cancelled"
-    } else {
-        "process_exit"
-    };
-    value["selected_turn"]["summary"] = json!({
-        "outcome":if cancelled { "cancelled" } else { "failed" },
-        "notice":{"level":if cancelled { "info" } else { "error" },"text":"stopped"},
-        "progress":{"progress":"closed","end":{"end":"stop","cause":{"cause":cause}}},
-    });
-    value["unclosed_step"] = Value::Null;
-    value["attempt"] = Value::Null;
-    value["owned"] = json!(false);
-    serde_json::from_value(value).unwrap()
 }
 
 #[test]
@@ -1070,33 +756,25 @@ fn queue_pauses_on_failure_cancel_and_disconnect_and_resumes_after_failed_manual
         let mut h = queued_app();
         let app = &mut h.app;
         app.auto_submit().unwrap();
-        let id = app.current_turn.unwrap();
-        app.apply_update(LocalUpdate::Submission {
-            turn_id: id,
-            result: Ok(Acceptance::Accepted {
-                turn: lattice_api::local::TurnView::from(
-                    view(id, false).selected_turn.as_ref().unwrap(),
-                ),
-            }),
-        });
+        let id = app.own_turn.unwrap();
+        app.apply_submission(receipt(id, accepted(id)));
         match cause {
-            0 | 1 => app.apply_update(LocalUpdate::State {
-                view: Box::new(stopped_view(id, cause == 1, 3)),
-                phase: ObservationPhase::NoOwner,
-                error: None,
+            0 => stop(app, id, " q0\nraw ", "failed"),
+            1 => stop(app, id, " q0\nraw ", "cancelled"),
+            _ => app.apply_view(LocalUpdate::Connection {
+                status: match cause {
+                    2 => ConnectionStatus::Eof,
+                    3 => ConnectionStatus::Idle,
+                    _ => ConnectionStatus::Error(local_error(LocalErrorKind::Transport, "offline")),
+                },
             }),
-            2 => app.apply_update(LocalUpdate::Connection(ConnectionStatus::Eof)),
-            3 => app.apply_update(LocalUpdate::Connection(ConnectionStatus::Idle)),
-            _ => app.apply_update(LocalUpdate::Connection(ConnectionStatus::Error(
-                lattice_api::local::LocalError::from(std::io::Error::other("offline")),
-            ))),
         }
         assert!(app.queue.is_paused(), "cause {cause}");
-        assert_eq!(frame(app).text.matches("暂停").count(), 4);
+        assert_eq!(transcript(app).matches("暂停").count(), 4);
         assert_eq!(app.auto_submit(), None);
-        // 断连后重连得到成功结局也不能自行恢复。
+        // 观察中断后重新观察得到成功结局也不能自行恢复。
         if cause >= 2 {
-            finish_completed(app, id);
+            finish(app, id, " q0\nraw ");
             assert_eq!(app.auto_submit(), None);
         }
         // 失败结局与观察中断是 Error 与 Warn，暂驻 Dock；取消结局是 Info，直接进对话记录。
@@ -1110,12 +788,9 @@ fn queue_pauses_on_failure_cancel_and_disconnect_and_resumes_after_failed_manual
             Some("manual while paused".into())
         );
         assert!(app.queue.is_paused());
-        let manual = app.current_turn.unwrap();
-        app.apply_update(LocalUpdate::State {
-            view: Box::new(stopped_view(manual, false, if cause < 2 { 4 } else { 5 })),
-            phase: ObservationPhase::NoOwner,
-            error: None,
-        });
+        let manual = app.own_turn.unwrap();
+        app.apply_submission(receipt(manual, accepted(manual)));
+        stop(app, manual, "manual while paused", "failed");
         assert!(app.input.is_empty());
         assert_eq!(
             app.apply_action(KeyAction::Submit),
@@ -1133,55 +808,17 @@ fn queue_pauses_on_failure_cancel_and_disconnect_and_resumes_after_failed_manual
 }
 
 #[test]
-fn reopened_session_shows_past_failure_in_transcript_without_dock() {
-    // 重新打开 Session：本进程没有提交过这个 Turn，也没有看着它运行，失败结局只是历史。
-    let mut h = Harness::new(false);
-    let app = &mut h.app;
-    let id = lattice_api::local::new_turn_id();
-    app.apply_update(LocalUpdate::State {
-        view: Box::new(stopped_view(id, false, 1)),
-        phase: ObservationPhase::NoOwner,
-        error: None,
-    });
-    assert!(app.dock.shows_input(), "旧结局不打断输入");
-    let shown = frame(app);
-    assert_eq!(
-        shown.text.matches("失败：stopped").count(),
-        1,
-        "{}",
-        shown.text
-    );
-    // 等级不变，对话记录里仍按错误显示。
-    assert!(app.blocks.iter().any(|block| matches!(
-        block,
-        Block::Status(Status {
-            level: NoticeLevel::Error,
-            closing: Some(_),
-            ..
-        })
-    )));
-}
-
-#[test]
 fn completion_waits_for_editor_then_sends_one_on_save_or_discard() {
-    // 先运行自动发出的第一条，再在编辑期间交付它的 Completed。
     for save in [true, false] {
         let mut h = queued_app();
         let app = &mut h.app;
         app.auto_submit().unwrap();
-        let first = app.current_turn.unwrap();
-        app.apply_update(LocalUpdate::Submission {
-            turn_id: first,
-            result: Ok(Acceptance::Accepted {
-                turn: lattice_api::local::TurnView::from(
-                    view(first, false).selected_turn.as_ref().unwrap(),
-                ),
-            }),
-        });
+        let first = app.own_turn.unwrap();
+        app.apply_submission(receipt(first, accepted(first)));
         app.apply_action(KeyAction::Up);
         app.apply_action(KeyAction::Submit);
         app.apply_action(KeyAction::Insert('!'));
-        finish_completed(app, first);
+        finish(app, first, " q0\nraw ");
         assert_eq!(app.auto_submit(), None);
         assert_eq!(
             app.apply_action(if save {
@@ -1196,19 +833,1177 @@ fn completion_waits_for_editor_then_sends_one_on_save_or_discard() {
             if save { " q4\nraw !" } else { " q4\nraw " }
         );
         assert_eq!(app.auto_submit(), None);
-        let id = app.current_turn.unwrap();
-        app.apply_update(LocalUpdate::Submission {
-            turn_id: id,
-            result: Ok(Acceptance::Accepted {
-                turn: lattice_api::local::TurnView::from(
-                    view(id, false).selected_turn.as_ref().unwrap(),
-                ),
-            }),
-        });
-        finish_completed(app, id);
+        let id = app.own_turn.unwrap();
+        app.apply_submission(receipt(id, accepted(id)));
+        finish(app, id, " q1\nraw ");
         assert_eq!(app.auto_submit(), Some(" q2\nraw ".into()));
         assert_eq!(app.auto_submit(), None);
     }
+}
+
+#[test]
+fn detached_automatic_receipt_settles_its_slot_without_touching_new_turn() {
+    for how in 0..4 {
+        let mut h = queued_app();
+        let app = &mut h.app;
+        app.auto_submit().unwrap();
+        let id = app.own_turn.unwrap();
+        // 会话视图可以先于迟到的提交回执读到结局。
+        finish(app, id, " q0\nraw ");
+        app.input.set_text("new manual");
+        app.submit().unwrap();
+        let manual = app.own_turn;
+        app.input.set_text("new draft");
+        let result = match how {
+            0 => Some(accepted(id)),
+            1 => Some(SubmissionResult::Unknown { error: None }),
+            2 => Some(SubmissionResult::Rejected {
+                error: local_error(LocalErrorKind::Busy, "busy"),
+            }),
+            _ => None,
+        };
+        app.apply_handoff(DetachReport {
+            session_id: sid(),
+            turn_id: Some(id),
+            submission: result.map(|result| SubmissionReceipt {
+                turn_id: id,
+                result,
+                recovered: false,
+            }),
+            submission_diagnostic: None,
+            cancel: None,
+            cancel_error: None,
+            head: None,
+            summary: None,
+        });
+        assert_eq!(app.input.text(), "new draft");
+        assert_eq!(app.own_turn, manual);
+        assert_eq!(app.phase, TurnPhase::Streaming);
+        // 视图中的 UserMessage 已经说明接受；迟到的回执不再把它放回排队，也不暂停排队。
+        assert!(!app.queue.is_full(), "{how}");
+        assert!(!app.queue.is_paused(), "{how}");
+    }
+}
+
+#[test]
+fn handoff_reports_a_definite_result_after_a_live_unknown() {
+    let mut h = Harness::new(false);
+    let app = &mut h.app;
+    app.input.set_text("first");
+    app.submit().unwrap();
+    let id = app.own_turn.unwrap();
+    app.apply_submission(receipt(id, SubmissionResult::Unknown { error: None }));
+    release_dock(app);
+    app.input.set_text("second");
+    app.submit().unwrap();
+    let next = app.own_turn;
+    app.input.set_text("new draft");
+    let report = |result| DetachReport {
+        session_id: sid(),
+        turn_id: Some(id),
+        submission: Some(SubmissionReceipt {
+            turn_id: id,
+            result,
+            recovered: false,
+        }),
+        submission_diagnostic: None,
+        cancel: None,
+        cancel_error: None,
+        head: None,
+        summary: None,
+    };
+    // 同一事实已实时显示过，不再重述。
+    app.apply_handoff(report(SubmissionResult::Unknown { error: None }));
+    assert_eq!(transcript(app).matches("提交结果未知").count(), 1);
+    // 未知之后后台明确拒绝：没有显示过，以带原身份的 Info 说明。
+    app.apply_handoff(report(SubmissionResult::Rejected {
+        error: local_error(LocalErrorKind::Busy, "backend refused"),
+    }));
+    let text = transcript(app);
+    let line = text
+        .lines()
+        .find(|line| line.contains("backend refused"))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(line.contains(&id.to_string()), "{line}");
+    assert!(app.dock.message().is_none(), "Info 不暂驻");
+    assert_eq!(app.input.text(), "new draft");
+    assert_eq!(app.own_turn, next);
+    assert_eq!(app.phase, TurnPhase::Streaming);
+    assert_eq!(app.cancel_status, None);
+}
+
+#[test]
+fn manual_rejections_restore_the_input() {
+    // 结果未知之后迟到的确定拒绝同样归还；发出前取消不会晚于未知。
+    for (how, late) in (0..4)
+        .map(|how| (how, false))
+        .chain([(0, true), (1, true), (3, true)])
+    {
+        let mut h = Harness::new(true);
+        let app = &mut h.app;
+        app.input.set_text(" manual\nraw ");
+        app.submit().unwrap();
+        let id = app.own_turn.unwrap();
+        if late {
+            app.apply_submission(receipt(id, SubmissionResult::Unknown { error: None }));
+        }
+        reject(app, id, how);
+        assert_eq!(app.input.text(), " manual\nraw ", "{how} {late}");
+        assert!(!transcript(app).contains("Ctrl+↑"), "{how} {late}");
+        assert_eq!(app.queue.messages().count(), 0);
+        assert_eq!(app.phase, TurnPhase::Idle);
+    }
+}
+
+#[test]
+fn manual_rejections_keep_a_new_draft_and_point_to_the_input_history() {
+    for (how, late) in (0..4)
+        .map(|how| (how, false))
+        .chain([(0, true), (1, true), (3, true)])
+    {
+        let mut h = Harness::new(true);
+        let app = &mut h.app;
+        app.input.set_text(" manual\nraw ");
+        app.submit().unwrap();
+        let id = app.own_turn.unwrap();
+        if late {
+            app.apply_submission(receipt(id, SubmissionResult::Unknown { error: None }));
+        }
+        app.input.set_text("new draft");
+        reject(app, id, how);
+        assert_eq!(
+            app.input.text(),
+            "new draft",
+            "{how} {late}: 不覆盖用户的草稿"
+        );
+        let hint = app
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                Block::Status(status) => Some(status.text.as_str()),
+                _ => None,
+            })
+            .next_back()
+            .unwrap();
+        assert!(
+            hint.contains("Ctrl+↑") && !hint.contains("输入已保留"),
+            "{how} {late}: {hint}"
+        );
+        assert_eq!(
+            app.history.prev(),
+            Some("manual\nraw"),
+            "原输入在输入历史中"
+        );
+        assert_eq!(app.phase, TurnPhase::Idle);
+    }
+}
+
+#[test]
+fn empty_edit_deletes_and_ctrl_c_never_clears_hidden_input_or_editor() {
+    for level in [NoticeLevel::Warn, NoticeLevel::Error] {
+        let mut h = Harness::new(true);
+        let app = &mut h.app;
+        app.input.set_text("running");
+        app.submit().unwrap();
+        let id = app.own_turn.unwrap();
+        app.input.set_text("中a");
+        app.submit();
+        app.apply_action(KeyAction::Up);
+        app.apply_action(KeyAction::Submit);
+        app.apply_submission(receipt(id, accepted(id)));
+        stop(app, id, "running", "failed");
+        app.input.set_text("hidden draft");
+        app.push_status(status(level, "dock"));
+        handle_input_event(
+            app,
+            Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        );
+        assert!(app.last_ctrl_c.is_some());
+        assert!(!app.should_quit);
+        assert_eq!(app.input.text(), "hidden draft");
+        app.apply_action(KeyAction::Insert(' '));
+        assert!(app.dock.message_id().is_some());
+        assert_eq!(
+            app.queue
+                .editor(app.queue.messages().next().unwrap().id)
+                .unwrap()
+                .text(),
+            "中a "
+        );
+        app.apply_action(KeyAction::Home);
+        for _ in 0..3 {
+            app.apply_action(KeyAction::Delete);
+        }
+        app.apply_action(KeyAction::Insert(' '));
+        app.apply_action(KeyAction::Submit);
+        assert_eq!(
+            app.queue.messages().count(),
+            0,
+            "whitespace-only edit deletes"
+        );
+        assert_eq!(app.input.text(), "hidden draft");
+    }
+}
+
+enum Reply {
+    Now(Value),
+    Hold(oneshot::Receiver<Value>),
+    Stream(UnboundedReceiver<Value>),
+    Never,
+}
+struct Peer {
+    _root: tempfile::TempDir,
+    client: LocalClient,
+    seen: watch::Receiver<Vec<Value>>,
+    task: tokio::task::JoinHandle<()>,
+}
+impl Drop for Peer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+impl Peer {
+    fn start(mut handler: impl FnMut(&Value) -> Reply + Send + 'static) -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let layout = lattice_api::StateLayout::in_state_root(root.path());
+        let local = layout.lattice_root().join("local");
+        std::fs::create_dir_all(&local).unwrap();
+        std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = local.join("api.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (record, seen) = watch::channel(Vec::new());
+        let task = tokio::spawn(async move {
+            let mut tasks = tokio::task::JoinSet::new();
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut magic = [0; 8];
+                stream.read_exact(&mut magic).await.unwrap();
+                assert_eq!(&magic, b"LTLOCAL4");
+                let len = stream.read_u32().await.unwrap();
+                assert!(len <= 16 * 1024 * 1024);
+                let mut bytes = vec![0; len as usize];
+                stream.read_exact(&mut bytes).await.unwrap();
+                let request: Value = serde_json::from_slice(&bytes).unwrap();
+                let reply = handler(&request);
+                record.send_modify(|seen| seen.push(request));
+                tasks.spawn(async move {
+                    let mut seq = 0;
+                    match reply {
+                        Reply::Now(value) => send(&mut stream, &value, &mut seq).await,
+                        Reply::Hold(receiver) => {
+                            if let Ok(value) = receiver.await {
+                                send(&mut stream, &value, &mut seq).await;
+                            }
+                        }
+                        Reply::Stream(mut receiver) => {
+                            while let Some(value) = receiver.next().await {
+                                send(&mut stream, &value, &mut seq).await;
+                            }
+                        }
+                        Reply::Never => {}
+                    }
+                    let _stream = stream;
+                    std::future::pending::<()>().await;
+                });
+            }
+        });
+        Self {
+            _root: root,
+            client: LocalClient::new(layout),
+            seen,
+            task,
+        }
+    }
+    async fn wait(&self, predicate: impl FnMut(&Vec<Value>) -> bool) -> Vec<Value> {
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            self.seen.clone().wait_for(predicate),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .clone()
+    }
+}
+/// 会话视图的推送：每个 watch 连接都收到已推送的全部内容与之后的推送。
+#[derive(Clone, Default)]
+struct Views(std::sync::Arc<std::sync::Mutex<ViewState>>);
+#[derive(Default)]
+struct ViewState {
+    pushed: Vec<Value>,
+    watchers: Vec<UnboundedSender<Value>>,
+}
+impl Views {
+    fn subscribe(&self) -> Reply {
+        let (sender, receiver) = unbounded();
+        let mut state = self.0.lock().unwrap();
+        for value in &state.pushed {
+            sender.unbounded_send(value.clone()).unwrap();
+        }
+        state.watchers.push(sender);
+        Reply::Stream(receiver)
+    }
+    fn push(&self, values: impl IntoIterator<Item = Value>) {
+        let mut state = self.0.lock().unwrap();
+        for value in values {
+            state
+                .watchers
+                .retain(|sender| sender.unbounded_send(value.clone()).is_ok());
+            state.pushed.push(value);
+        }
+    }
+}
+async fn send(stream: &mut UnixStream, value: &Value, seq: &mut u64) {
+    let bytes = serde_json::to_vec(&json!({"message_id":*seq,"offset":0,"json_fragment":serde_json::to_string(value).unwrap(),"complete":true})).unwrap();
+    *seq += 1;
+    if stream.write_all(b"LTLOCAL4").await.is_err() {
+        return;
+    }
+    let _ = stream.write_u32(bytes.len() as u32).await;
+    let _ = stream.write_all(&bytes).await;
+}
+fn response(kind: &str, value: Value) -> Value {
+    json!({"response":kind,"value":value})
+}
+fn error_reply(error: LocalError) -> Value {
+    response("error", serde_json::to_value(error).unwrap())
+}
+fn view_reply(update: ViewUpdate) -> Value {
+    response("view", serde_json::to_value(update).unwrap())
+}
+fn head_reply(head: SessionHead) -> Value {
+    view_reply(ViewUpdate::Head(head))
+}
+fn entry_reply(entry: ConversationEntry) -> Value {
+    view_reply(ViewUpdate::Entry {
+        entry: Box::new(entry),
+    })
+}
+/// 接受回执，会话取请求写明的那一个。
+fn accepted_reply(request: &Value) -> Value {
+    let mut turn = serde_json::to_value(turn_view(request_turn(request))).unwrap();
+    turn["session_id"] = json!(request_session(request).id());
+    response("acceptance", json!({"acceptance":"accepted","turn":turn}))
+}
+fn request_turn(request: &Value) -> TurnId {
+    serde_json::from_value(request["request"]["turn_id"].clone()).unwrap()
+}
+fn request_session(request: &Value) -> SubmitSession {
+    serde_json::from_value(request["request"]["session"].clone()).unwrap()
+}
+fn requests<'a>(seen: &'a [Value], op: &'a str) -> impl Iterator<Item = &'a Value> {
+    seen.iter().filter(move |r| r["operation"] == op)
+}
+fn count(seen: &[Value], op: &str) -> usize {
+    requests(seen, op).count()
+}
+
+/// 循环测试的总上限：测试端或应用循环挂住时以失败结束，不无限占用验证资源。
+const LOOP_LIMIT: Duration = Duration::from_secs(20);
+async fn bounded<T>(limit: Duration, run: impl std::future::Future<Output = T>) -> T {
+    tokio::time::timeout(limit, run)
+        .await
+        .expect("循环测试超过总上限，测试端或应用循环挂住")
+}
+
+#[derive(Clone)]
+struct Frame {
+    phase: TurnPhase,
+    session: Option<SessionId>,
+    connected: bool,
+    input: String,
+    text: String,
+    /// Dock 中暂驻的 Warn 或 Error 的文字；没有暂驻消息时为空。它不在 `text` 里。
+    dock: String,
+    cancel: Option<CancelStatus>,
+}
+fn frame(app: &App) -> Frame {
+    Frame {
+        phase: app.phase,
+        session: app.ctx.session_id,
+        connected: app.connected,
+        input: app.input.text(),
+        text: transcript(app),
+        dock: app
+            .dock
+            .message()
+            .map_or_else(String::new, |status| status.text.clone()),
+        cancel: app.cancel_status,
+    }
+}
+
+fn configured(
+    _agent: String,
+    _options: TuiOptions,
+) -> BoxFuture<'static, lattice_api::local::Result<FrozenConfiguration>> {
+    // 对端不解读配置；提交只需带上一份形状合法的冻结配置。
+    async {
+        Ok(serde_json::from_value(json!({
+            "profile_toml":"schema_version = 1","system_prompt":"test",
+            "connection":{"alias":"compat:test","provider":"openai-compatible","provider_model":"test",
+                "base_url":"http://127.0.0.1:9/v1","api_key":"test-key","roots_der":[]}
+        }))
+        .unwrap())
+    }
+    .boxed()
+}
+
+fn unconfigured(
+    agent: String,
+    _options: TuiOptions,
+) -> BoxFuture<'static, lattice_api::local::Result<FrozenConfiguration>> {
+    async move {
+        Err(local_error(
+            LocalErrorKind::BadRequest,
+            &format!("profile for {agent} is missing"),
+        ))
+    }
+    .boxed()
+}
+
+struct Harness {
+    options: TuiOptions,
+    app: App,
+    configure: Configure,
+    events: UnboundedReceiver<std::io::Result<Event>>,
+    observer: watch::Sender<Frame>,
+    remote: Remote,
+    _root: tempfile::TempDir,
+}
+#[derive(Clone)]
+struct Remote {
+    keys: UnboundedSender<std::io::Result<Event>>,
+    frames: watch::Receiver<Frame>,
+}
+impl Harness {
+    fn new(new_session: bool) -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let options = TuiOptions {
+            session_id: (!new_session).then(|| SESSION.into()),
+            agent: "unused".into(),
+            session_dir: root.path().join("history"),
+            agents_dir: root.path().join("agents"),
+            project_root: root.path().into(),
+        };
+        let app = App::new(
+            SessionContext {
+                session_id: (!new_session).then(sid),
+                active_agent: "unused".into(),
+            },
+            false,
+            &options.session_dir,
+        );
+        let (keys, events) = unbounded();
+        let (observer, frames) = watch::channel(frame(&app));
+        Self {
+            options,
+            app,
+            configure: configured,
+            events,
+            observer,
+            remote: Remote { keys, frames },
+            _root: root,
+        }
+    }
+    async fn run(&mut self, client: &LocalClient) -> LoopExit {
+        let observer = self.observer.clone();
+        run_loop(
+            &self.options,
+            &mut self.app,
+            client,
+            self.configure,
+            &mut self.events,
+            |app| {
+                observer.send_replace(frame(app));
+                Ok(())
+            },
+        )
+        .await
+    }
+}
+impl Remote {
+    fn press(&self, code: KeyCode, modifiers: KeyModifiers) {
+        self.keys
+            .unbounded_send(Ok(Event::Key(KeyEvent::new(code, modifiers))))
+            .unwrap();
+    }
+    fn ctrl(&self, c: char) {
+        self.press(KeyCode::Char(c), KeyModifiers::CONTROL);
+    }
+    fn line(&self, text: &str) {
+        for c in text.chars() {
+            self.press(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        self.press(KeyCode::Enter, KeyModifiers::NONE);
+    }
+    async fn wait(&self, predicate: impl FnMut(&Frame) -> bool) -> Frame {
+        self.wait_within(Duration::from_secs(5), predicate).await
+    }
+    async fn wait_within(&self, limit: Duration, predicate: impl FnMut(&Frame) -> bool) -> Frame {
+        tokio::time::timeout(limit, self.frames.clone().wait_for(predicate))
+            .await
+            .unwrap()
+            .unwrap()
+            .clone()
+    }
+    /// 处理屏障，用于暂停的时钟。暂停的时钟只在运行时既没有就绪任务、也没有待处理的 IO 时才自动前进，
+    /// 所以这次睡眠到期一定晚于：观察任务处理完已到期的计时器，它的推送经队列被应用循环取走并应用。
+    /// 睡过两帧，应用循环已在其后的帧时刻绘出这些变化；没有变化时不重绘，帧仍是此前的状态。
+    async fn processed(&self) -> Frame {
+        tokio::time::sleep(FRAME * 2).await;
+        self.frames.borrow().clone()
+    }
+}
+
+#[tokio::test]
+async fn new_session_submits_new_until_accepted_then_existing() {
+    let views = Views::default();
+    let view_tx = views.clone();
+    let mut submits = 0;
+    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
+        "submit" => {
+            submits += 1;
+            match submits {
+                1 | 3 => Reply::Now(error_reply(local_error(
+                    LocalErrorKind::Busy,
+                    "session is busy",
+                ))),
+                _ => Reply::Now(accepted_reply(r)),
+            }
+        }
+        "watch" => views.subscribe(),
+        _ => Reply::Never,
+    });
+    let mut h = Harness::new(true);
+    let remote = h.remote.clone();
+    let driver = async {
+        remote.line("first");
+        let seen = peer.wait(|s| count(s, "submit") == 1).await;
+        let SubmitSession::New(created) = request_session(&seen[0]) else {
+            panic!("新会话首次提交写明新建：{}", seen[0]);
+        };
+        let shown = remote
+            .wait(|f| f.input == "first" && f.dock.contains("session is busy"))
+            .await;
+        assert_eq!(shown.session, None, "被拒之前没有已建立的会话");
+        remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
+        remote.press(KeyCode::Enter, KeyModifiers::NONE);
+        let seen = peer.wait(|s| count(s, "submit") == 2).await;
+        let second = requests(&seen, "submit").nth(1).unwrap();
+        assert_eq!(
+            request_session(second),
+            SubmitSession::New(created),
+            "确认被接受前沿用同一 SessionId 与 New"
+        );
+        assert_ne!(request_turn(second), request_turn(&seen[0]));
+        remote.wait(|f| f.session == Some(created)).await;
+        let seen = peer.wait(|s| count(s, "watch") >= 1).await;
+        assert!(
+            requests(&seen, "watch").all(|r| r["session_id"] == json!(created)),
+            "接受后观察建立的会话"
+        );
+        let turn = request_turn(second);
+        let created_head = |position, owner| SessionHead {
+            session_id: created,
+            ..head(position, Some(turn), owner)
+        };
+        view_tx.push([
+            head_reply(created_head(2, false)),
+            entry_reply(user(1, turn, 1, "first")),
+            entry_reply(step(2, turn, 0).text("done").finished().entry()),
+        ]);
+        remote
+            .wait(|f| f.phase == TurnPhase::Idle && f.text.contains("done"))
+            .await;
+        assert_eq!(
+            count(&peer.seen.borrow(), "watch"),
+            1,
+            "提交句柄不另开视图，只有 TUI 自己的 watch"
+        );
+        remote.line("third");
+        let seen = peer.wait(|s| count(s, "submit") == 3).await;
+        assert_eq!(
+            request_session(requests(&seen, "submit").nth(2).unwrap()),
+            SubmitSession::Existing(created),
+            "确认被接受后改为 Existing"
+        );
+        remote.wait(|f| f.dock.contains("session is busy")).await;
+        remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
+        remote.press(KeyCode::Esc, KeyModifiers::NONE);
+        remote.ctrl('d');
+    };
+    let ((), exit) = bounded(LOOP_LIMIT, async {
+        tokio::join!(driver, h.run(&peer.client))
+    })
+    .await;
+    assert!(exit.result.is_ok());
+    assert_eq!(count(&peer.seen.borrow(), "cancel"), 0, "普通退出不取消");
+}
+
+#[tokio::test]
+async fn session_exists_conflict_recovers_the_previous_submission_by_turn_id() {
+    let mut submits = 0;
+    let mut lookups = 0;
+    let mut created = Value::Null;
+    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
+        "submit" => {
+            submits += 1;
+            created = json!(request_session(r).id());
+            if submits == 1 {
+                // 后台报告接受事务结果不明；随后的查询也失败，提交结果仍未知。
+                Reply::Now(response(
+                    "acceptance",
+                    json!({"acceptance":"confirmation_unknown","turn_id":r["request"]["turn_id"],
+                        "session_id":created}),
+                ))
+            } else {
+                let mut error = local_error(LocalErrorKind::Conflict, "session exists");
+                error.conflict = Some(lattice_api::local::ConflictReason::SessionExists);
+                Reply::Now(error_reply(error))
+            }
+        }
+        "turn" => {
+            lookups += 1;
+            if lookups == 1 {
+                Reply::Now(error_reply(local_error(
+                    LocalErrorKind::StoreUnavailable,
+                    "lookup failed",
+                )))
+            } else {
+                let turn_id = serde_json::from_value(r["turn_id"].clone()).unwrap();
+                let mut turn = serde_json::to_value(turn_detail(turn_id)).unwrap();
+                turn["session_id"] = created.clone();
+                Reply::Now(response("turn", json!({"status":"accepted","turn":turn})))
+            }
+        }
+        _ => Reply::Never,
+    });
+    let mut h = Harness::new(true);
+    let remote = h.remote.clone();
+    let driver = async {
+        remote.line("first");
+        let seen = peer.wait(|s| count(s, "turn") == 1).await;
+        let first = request_turn(&seen[0]);
+        let created = request_session(&seen[0]).id();
+        remote.wait(|f| f.dock.contains("提交结果未知")).await;
+        remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
+        remote.line("second");
+        let seen = peer.wait(|s| count(s, "turn") == 2).await;
+        assert_eq!(
+            request_session(requests(&seen, "submit").nth(1).unwrap()),
+            SubmitSession::New(created)
+        );
+        assert_eq!(
+            requests(&seen, "turn").nth(1).unwrap()["turn_id"],
+            json!(first),
+            "按上一次提交的 TurnId 找回"
+        );
+        let shown = remote
+            .wait(|f| f.text.contains("按 TurnId 查到已接受的请求") && f.session.is_some())
+            .await;
+        assert_eq!(shown.input, "second", "被拒的这一次保留输入");
+        let seen = peer.wait(|s| count(s, "watch") == 1).await;
+        assert_eq!(
+            requests(&seen, "watch").next().unwrap()["session_id"],
+            json!(created),
+            "找回后按建立的会话开始 watch"
+        );
+        remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
+        remote.press(KeyCode::Esc, KeyModifiers::NONE);
+        remote.ctrl('d');
+    };
+    let ((), exit) = bounded(LOOP_LIMIT, async {
+        tokio::join!(driver, h.run(&peer.client))
+    })
+    .await;
+    assert!(exit.result.is_ok());
+    assert_eq!(count(&peer.seen.borrow(), "submit"), 2);
+}
+
+#[tokio::test]
+async fn unknown_acceptance_is_recovered_by_turn_query_and_the_view_takes_over() {
+    let views = Views::default();
+    let view_tx = views.clone();
+    let mut lookups = 0;
+    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
+        "watch" => views.subscribe(),
+        "submit" => Reply::Now(response(
+            "acceptance",
+            json!({"acceptance":"confirmation_unknown","turn_id":r["request"]["turn_id"],"session_id":SESSION}),
+        )),
+        "turn" => {
+            lookups += 1;
+            let turn_id = serde_json::from_value(r["turn_id"].clone()).unwrap();
+            Reply::Now(if lookups == 1 {
+                response("turn", json!({"status":"in_flight"}))
+            } else {
+                response(
+                    "turn",
+                    json!({"status":"accepted","turn":turn_detail(turn_id)}),
+                )
+            })
+        }
+        _ => Reply::Never,
+    });
+    let mut h = Harness::new(false);
+    let remote = h.remote.clone();
+    let driver = async {
+        view_tx.push([head_reply(head(0, None, false))]);
+        remote.line("prompt");
+        let seen = peer.wait(|s| count(s, "turn") == 2).await;
+        let turn = request_turn(requests(&seen, "submit").next().unwrap());
+        remote
+            .wait(|f| f.text.contains("按 TurnId 查到已接受的请求"))
+            .await;
+        view_tx.push([
+            head_reply(head(2, Some(turn), true)),
+            entry_reply(user(1, turn, 1, "prompt")),
+            entry_reply(step(2, turn, 0).sent().entry()),
+        ]);
+        let shown = remote.wait(|f| f.text.contains("#1 ──")).await;
+        assert_eq!(shown.text.matches("prompt").count(), 1, "{}", shown.text);
+        assert_eq!(shown.phase, TurnPhase::Streaming);
+        remote.ctrl('c');
+        remote.ctrl('c');
+    };
+    let ((), exit) = bounded(LOOP_LIMIT, async {
+        tokio::join!(driver, h.run(&peer.client))
+    })
+    .await;
+    assert!(exit.result.is_ok());
+    assert_eq!(count(&peer.seen.borrow(), "submit"), 1, "找回不重新提交");
+}
+
+#[tokio::test]
+async fn cancel_goes_to_the_running_turn_by_turn_id() {
+    // 其他客户端提交的一轮：按会话头所示的 TurnId 直接取消。
+    let other = numbered_turn(1);
+    let views = Views::default();
+    let view_tx = views.clone();
+    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
+        "watch" => views.subscribe(),
+        "cancel" => Reply::Now(response("cancelled", json!({"owned":true}))),
+        _ => Reply::Never,
+    });
+    let mut h = Harness::new(false);
+    let remote = h.remote.clone();
+    let driver = async {
+        view_tx.push([
+            head_reply(head(2, Some(other), true)),
+            entry_reply(user(1, other, 1, "cli prompt")),
+            entry_reply(step(2, other, 0).sent().entry()),
+        ]);
+        remote.wait(|f| f.phase == TurnPhase::Streaming).await;
+        remote.ctrl('c');
+        let seen = peer.wait(|s| count(s, "cancel") == 1).await;
+        assert_eq!(
+            requests(&seen, "cancel").next().unwrap()["turn_id"],
+            json!(other)
+        );
+        remote.wait(|f| f.text.contains("后台已接管取消")).await;
+        tokio::time::sleep(CTRL_C_WINDOW + Duration::from_millis(50)).await;
+        remote.ctrl('d');
+    };
+    let ((), exit) = bounded(LOOP_LIMIT, async {
+        tokio::join!(driver, h.run(&peer.client))
+    })
+    .await;
+    assert!(exit.result.is_ok());
+    assert!(exit.turn.is_none());
+
+    // 本客户端的提交：经它的 LocalTurn 按同一 TurnId 取消。
+    let (submit_tx, submit_rx) = oneshot::channel();
+    let mut submit_rx = Some(submit_rx);
+    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
+        "submit" => Reply::Hold(submit_rx.take().unwrap()),
+        "cancel" => Reply::Now(response("cancelled", json!({"owned":true}))),
+        _ => Reply::Never,
+    });
+    let mut h = Harness::new(false);
+    let remote = h.remote.clone();
+    let driver = async {
+        remote.line("mine");
+        let seen = peer.wait(|s| count(s, "submit") == 1).await;
+        let submit = requests(&seen, "submit").next().unwrap().clone();
+        let own = request_turn(&submit);
+        remote.ctrl('c');
+        let seen = peer.wait(|s| count(s, "cancel") == 1).await;
+        assert_eq!(
+            requests(&seen, "cancel").next().unwrap()["turn_id"],
+            json!(own)
+        );
+        remote.wait(|f| f.cancel == Some(CancelStatus::Taken)).await;
+        submit_tx.send(accepted_reply(&submit)).unwrap();
+        remote.ctrl('c');
+        own
+    };
+    let (own, exit) = bounded(LOOP_LIMIT, async {
+        tokio::join!(driver, h.run(&peer.client))
+    })
+    .await;
+    assert!(exit.result.is_ok());
+    let report = exit.turn.unwrap().detach().await;
+    assert_eq!(report.turn_id, Some(own));
+    assert_eq!(report.cancel, Some(CancelStatus::Taken));
+}
+
+#[tokio::test]
+async fn configuration_failure_shows_the_error_and_keeps_the_input() {
+    let peer = Peer::start(|_| Reply::Never);
+    let mut h = Harness::new(false);
+    h.configure = unconfigured;
+    let remote = h.remote.clone();
+    let driver = async {
+        remote.line("needs config");
+        let shown = remote
+            .wait(|f| f.dock.contains("profile for unused is missing"))
+            .await;
+        assert_eq!(shown.input, "needs config");
+        assert_eq!(shown.phase, TurnPhase::Idle);
+        remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
+        remote.press(KeyCode::Esc, KeyModifiers::NONE);
+        remote.ctrl('d');
+    };
+    let ((), exit) = bounded(LOOP_LIMIT, async {
+        tokio::join!(driver, h.run(&peer.client))
+    })
+    .await;
+    assert!(exit.result.is_ok());
+    assert_eq!(count(&peer.seen.borrow(), "submit"), 0);
+}
+
+fn slow_configuration(
+    _agent: String,
+    _options: TuiOptions,
+) -> BoxFuture<'static, lattice_api::local::Result<FrozenConfiguration>> {
+    futures::future::pending().boxed()
+}
+
+#[tokio::test]
+async fn cancel_while_configuration_loads_is_not_accepted_and_keeps_the_input() {
+    let peer = Peer::start(|_| Reply::Never);
+    let mut h = Harness::new(false);
+    h.configure = slow_configuration;
+    let remote = h.remote.clone();
+    let driver = async {
+        remote.line("slow");
+        remote.wait(|f| f.phase == TurnPhase::Streaming).await;
+        remote.ctrl('c');
+        let shown = remote.wait(|f| f.text.contains("提交在发出前取消")).await;
+        assert_eq!(shown.input, "slow");
+        assert_eq!(shown.phase, TurnPhase::Idle);
+        assert!(shown.dock.is_empty(), "Info 不暂驻：{}", shown.dock);
+        tokio::time::sleep(CTRL_C_WINDOW + Duration::from_millis(50)).await;
+        // Ctrl+D 只在输入为空时退出。
+        remote.press(KeyCode::Esc, KeyModifiers::NONE);
+        remote.ctrl('d');
+    };
+    let ((), exit) = bounded(LOOP_LIMIT, async {
+        tokio::join!(driver, h.run(&peer.client))
+    })
+    .await;
+    assert!(exit.result.is_ok());
+    assert_eq!(count(&peer.seen.borrow(), "submit"), 0);
+}
+
+#[tokio::test]
+async fn cancel_after_acceptance_reaches_the_new_turn_despite_stale_heads() {
+    let previous = numbered_turn(1);
+    let views = Views::default();
+    let view_tx = views.clone();
+    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
+        "watch" => views.subscribe(),
+        "submit" => Reply::Now(accepted_reply(r)),
+        "cancel" => Reply::Now(response("cancelled", json!({"owned":true}))),
+        _ => Reply::Never,
+    });
+    let mut h = Harness::new(false);
+    let remote = h.remote.clone();
+    let previous_step = |text: &str| step(2, previous, 0).text(text).finished().entry();
+    let driver = async {
+        view_tx.push([
+            head_reply(head(2, Some(previous), false)),
+            entry_reply(user(1, previous, 1, "before")),
+            entry_reply(previous_step("old answer")),
+        ]);
+        remote
+            .wait(|f| f.text.contains("old answer") && f.phase == TurnPhase::Idle)
+            .await;
+        remote.line("mine");
+        let seen = peer.wait(|s| count(s, "submit") == 1).await;
+        let own = request_turn(requests(&seen, "submit").next().unwrap());
+        remote
+            .wait(|f| f.text.matches("── unused ").count() == 2)
+            .await;
+        // 接受回执之后，视图里积压的上一轮会话头与当前位置条目才转给新提交的句柄。
+        view_tx.push([
+            head_reply(head(2, Some(previous), false)),
+            entry_reply(previous_step("old answer again")),
+        ]);
+        remote.wait(|f| f.text.contains("old answer again")).await;
+        remote.ctrl('c');
+        let seen = peer.wait(|s| count(s, "cancel") == 1).await;
+        assert_eq!(
+            requests(&seen, "cancel").next().unwrap()["turn_id"],
+            json!(own),
+            "取消按新提交的 TurnId 发出"
+        );
+        remote.ctrl('c');
+    };
+    let ((), exit) = bounded(LOOP_LIMIT, async {
+        tokio::join!(driver, h.run(&peer.client))
+    })
+    .await;
+    assert!(exit.result.is_ok());
+}
+
+#[tokio::test]
+async fn late_receipt_after_unknown_starts_watching_or_shows_the_rejection() {
+    for accept in [true, false] {
+        let views = Views::default();
+        let view_tx = views.clone();
+        let (submit_tx, submit_rx) = oneshot::channel();
+        let mut submit_rx = Some(submit_rx);
+        let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
+            "submit" => Reply::Hold(submit_rx.take().unwrap()),
+            "cancel" => Reply::Now(response("cancelled", json!({"owned":true}))),
+            "watch" => views.subscribe(),
+            _ => Reply::Never,
+        });
+        let mut h = Harness::new(true);
+        let remote = h.remote.clone();
+        let driver = async {
+            remote.line("first");
+            let seen = peer.wait(|s| count(s, "submit") == 1).await;
+            let submit = requests(&seen, "submit").next().unwrap().clone();
+            let turn = request_turn(&submit);
+            let SubmitSession::New(created) = request_session(&submit) else {
+                panic!("新会话首次提交写明新建：{submit}");
+            };
+            // 首次取消后提交等待到期：结果未知，句柄继续等迟到的回执。
+            remote.ctrl('c');
+            remote
+                .wait_within(Duration::from_secs(10), |f| f.dock.contains("提交结果未知"))
+                .await;
+            remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
+            for c in "new draft".chars() {
+                remote.press(KeyCode::Char(c), KeyModifiers::NONE);
+            }
+            remote.wait(|f| f.input == "new draft").await;
+            if accept {
+                submit_tx.send(accepted_reply(&submit)).unwrap();
+                // 迟到的接受：按这次提交的 SessionId 开始观察，视图照常推进。
+                let seen = peer.wait(|s| count(s, "watch") == 1).await;
+                assert_eq!(
+                    requests(&seen, "watch").next().unwrap()["session_id"],
+                    json!(created)
+                );
+                let created_head = SessionHead {
+                    session_id: created,
+                    ..head(2, Some(turn), true)
+                };
+                view_tx.push([
+                    head_reply(created_head),
+                    entry_reply(user(1, turn, 1, "first")),
+                    entry_reply(step(2, turn, 0).text("late answer").sent().entry()),
+                ]);
+                let shown = remote.wait(|f| f.text.contains("late answer")).await;
+                assert_eq!(shown.session, Some(created));
+                assert_eq!(shown.input, "new draft");
+                // 正在运行：第一次 Ctrl+C 取消这一轮，窗口内第二次退出。
+                remote.ctrl('c');
+                remote.ctrl('c');
+            } else {
+                submit_tx
+                    .send(error_reply(local_error(LocalErrorKind::Busy, "late busy")))
+                    .unwrap();
+                // 迟到的拒绝按后台错误回执显示，不开始观察；输入区已有草稿，不覆盖，原输入从输入历史找回。
+                let shown = remote.wait(|f| f.dock.contains("late busy")).await;
+                assert_eq!(shown.input, "new draft");
+                assert!(shown.dock.contains("Ctrl+↑"), "{}", shown.dock);
+                assert_eq!(shown.session, None);
+                assert_eq!(count(&peer.seen.borrow(), "watch"), 0);
+                remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
+                remote.press(KeyCode::Esc, KeyModifiers::NONE);
+                remote.ctrl('d');
+            }
+        };
+        let ((), exit) = bounded(LOOP_LIMIT, async {
+            tokio::join!(driver, h.run(&peer.client))
+        })
+        .await;
+        assert!(exit.result.is_ok());
+    }
+}
+
+#[tokio::test]
+async fn paging_up_queries_turns_before_the_earliest_user_message() {
+    let views = Views::default();
+    let view_tx = views.clone();
+    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
+        "watch" => views.subscribe(),
+        "history" => Reply::Now(response(
+            "history",
+            serde_json::to_value(LocalHistory {
+                entries: turns(1..=2),
+            })
+            .unwrap(),
+        )),
+        _ => Reply::Never,
+    });
+    let mut h = Harness::new(false);
+    let remote = h.remote.clone();
+    let driver = async {
+        let last = numbered_turn(4);
+        view_tx.push([head_reply(head(8, Some(last), false))]);
+        view_tx.push(turns(3..=4).into_iter().map(entry_reply));
+        remote.wait(|f| f.text.contains("answer-4")).await;
+        for _ in 0..10 {
+            remote.press(KeyCode::PageUp, KeyModifiers::NONE);
+        }
+        let seen = peer.wait(|s| count(s, "history") == 1).await;
+        let request = requests(&seen, "history").next().unwrap();
+        assert_eq!(request["before"], json!(5));
+        assert_eq!(request["turns"], json!(lattice_api::local::HISTORY_TURNS));
+        assert_eq!(request["session_id"], json!(SESSION));
+        remote.wait(|f| f.text.contains("prompt-1")).await;
+        remote.press(KeyCode::Char('d'), KeyModifiers::CONTROL);
+    };
+    let ((), exit) = bounded(LOOP_LIMIT, async {
+        tokio::join!(driver, h.run(&peer.client))
+    })
+    .await;
+    assert!(exit.result.is_ok());
+    assert_eq!(
+        count(&peer.seen.borrow(), "history"),
+        1,
+        "第 1 轮已装入后不再查询"
+    );
+}
+
+#[tokio::test]
+async fn completed_turn_sends_the_queue_through_the_real_loop_once() {
+    let running = numbered_turn(1);
+    let views = Views::default();
+    let view_tx = views.clone();
+    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
+        "watch" => views.subscribe(),
+        "submit" => Reply::Now(accepted_reply(r)),
+        _ => Reply::Never,
+    });
+    let mut h = Harness::new(false);
+    let remote = h.remote.clone();
+    let driver = async {
+        view_tx.push([
+            head_reply(head(2, Some(running), true)),
+            entry_reply(user(1, running, 1, "other client")),
+            entry_reply(step(2, running, 0).sent().entry()),
+        ]);
+        remote.wait(|f| f.phase == TurnPhase::Streaming).await;
+        remote.line("queued via loop");
+        remote.line("second");
+        for c in "untouched draft".chars() {
+            remote.press(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        remote.wait(|f| f.input == "untouched draft").await;
+        view_tx.push([
+            head_reply(head(2, Some(running), false)),
+            entry_reply(step(2, running, 0).text("done").finished().entry()),
+        ]);
+        let seen = peer.wait(|s| count(s, "submit") == 1).await;
+        let request = requests(&seen, "submit").next().unwrap();
+        assert_eq!(request["request"]["input"], "queued via loop");
+        assert_eq!(request_session(request), SubmitSession::Existing(sid()));
+        let shown = remote
+            .wait(|f| f.phase == TurnPhase::Streaming && f.text.matches("排队").count() == 1)
+            .await;
+        assert_eq!(shown.input, "untouched draft");
+        remote.press(KeyCode::Esc, KeyModifiers::NONE);
+        remote.line("/quit");
+    };
+    let ((), exit) = bounded(LOOP_LIMIT, async {
+        tokio::join!(driver, h.run(&peer.client))
+    })
+    .await;
+    assert!(exit.result.is_ok());
+    assert_eq!(count(&peer.seen.borrow(), "submit"), 1);
+}
+
+#[tokio::test]
+async fn idle_timer_runs_only_while_the_head_shows_an_owner() {
+    for owner in [true, false] {
+        let id = numbered_turn(1);
+        let views = Views::default();
+        let view_tx = views.clone();
+        let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
+            "watch" => views.subscribe(),
+            _ => Reply::Never,
+        });
+        let mut h = Harness::new(false);
+        let remote = h.remote.clone();
+        let driver = async {
+            let step = if owner {
+                step(2, id, 0).sent()
+            } else {
+                step(2, id, 0).text("done").finished()
+            };
+            view_tx.push([
+                head_reply(head(2, Some(id), owner)),
+                entry_reply(user(1, id, 1, "prompt")),
+                entry_reply(step.entry()),
+            ]);
+            remote.wait(|f| f.text.contains("prompt")).await;
+            tokio::time::pause();
+            // 处理屏障等帧时暂停的时钟会前进几帧，判定点离空闲超时留出余量。
+            let idle = Duration::from_secs(lattice_api::STREAM_IDLE_TIMEOUT_SECS);
+            tokio::time::advance(idle - Duration::from_secs(2)).await;
+            assert!(remote.processed().await.connected);
+            tokio::time::advance(Duration::from_secs(3)).await;
+            if owner {
+                let shown = remote.wait(|f| !f.connected).await;
+                assert_eq!(shown.phase, TurnPhase::Streaming);
+                assert!(shown.dock.contains("无增量"), "{}", shown.dock);
+                remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
+            } else {
+                assert!(remote.processed().await.connected, "会话空闲时不计时");
+            }
+            tokio::time::resume();
+            remote.ctrl('d');
+        };
+        // 暂停的时钟会推进过空闲超时，上限要越过它。
+        let limit = LOOP_LIMIT + Duration::from_secs(lattice_api::STREAM_IDLE_TIMEOUT_SECS);
+        let ((), exit) = bounded(limit, async { tokio::join!(driver, h.run(&peer.client)) }).await;
+        assert!(exit.result.is_ok());
+    }
+}
+
+#[tokio::test]
+async fn existing_submission_keeps_explicit_agent() {
+    let peer = Peer::start(|r| match r["operation"].as_str().unwrap() {
+        "submit" => Reply::Now(error_reply(local_error(LocalErrorKind::Busy, "busy"))),
+        _ => Reply::Never,
+    });
+    let mut h = Harness::new(false);
+    h.options.agent = "override-agent".into();
+    let remote = h.remote.clone();
+    let driver = async {
+        remote.line("hi");
+        let seen = peer.wait(|s| count(s, "submit") == 1).await;
+        let request = requests(&seen, "submit").next().unwrap();
+        assert_eq!(request["request"]["agent"], "override-agent");
+        assert_eq!(request_session(request), SubmitSession::Existing(sid()));
+        remote.wait(|f| f.input == "hi" && !f.dock.is_empty()).await;
+        // 被拒回执是 Error，暂驻 Dock；释放后回到输入区。
+        remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
+        remote.press(KeyCode::Esc, KeyModifiers::NONE);
+        remote.line("/quit");
+    };
+    let ((), exit) = bounded(LOOP_LIMIT, async {
+        tokio::join!(driver, h.run(&peer.client))
+    })
+    .await;
+    assert!(exit.result.is_ok());
 }
 
 #[tokio::test]
@@ -1244,7 +2039,7 @@ async fn every_loop_exit_saves_queue_originals_in_order() {
                 Box::pin(futures::stream::iter(events))
             };
         let client = LocalClient::new(lattice_api::StateLayout::in_state_root(h._root.path()));
-        let exit = run_loop(&h.options, &mut h.app, &client, None, events, |_| {
+        let exit = run_loop(&h.options, &mut h.app, &client, configured, events, |_| {
             if exit_kind == 5 {
                 anyhow::bail!("draw failed");
             }
@@ -1263,989 +2058,4 @@ async fn every_loop_exit_saves_queue_originals_in_order() {
             [" q0 raw ", " q1 raw ", " q2 raw ", " q3 raw ", " q4 raw "]
         );
     }
-}
-
-#[test]
-fn detached_automatic_receipt_settles_its_slot_without_touching_new_turn() {
-    for receipt in 0..4 {
-        let mut h = queued_app();
-        let app = &mut h.app;
-        app.auto_submit().unwrap();
-        let id = app.current_turn.unwrap();
-        // 只读观察可以先于迟到的提交回执读到结局。
-        finish_completed(app, id);
-        app.input.set_text("new manual");
-        app.submit().unwrap();
-        let manual = app.current_turn;
-        app.input.set_text("new draft");
-        let submission = match receipt {
-            0 => Some(Ok(Acceptance::Accepted {
-                turn: lattice_api::local::TurnView::from(
-                    view(id, true).selected_turn.as_ref().unwrap(),
-                ),
-            })),
-            1 => Some(Ok(Acceptance::ConfirmationUnknown {
-                turn_id: id,
-                session_id: Some(sid()),
-            })),
-            _ => None,
-        };
-        app.apply_handoff(DetachReport {
-            session_id: Some(sid()),
-            turn_id: Some(id),
-            submission,
-            not_submitted: (receipt == 2)
-                .then_some(lattice_api::local::NotSubmittedStage::NeedsConfiguration),
-            submission_diagnostic: None,
-            history_error: None,
-            cancel: None,
-            cancel_error: None,
-            state: None,
-        });
-        assert_eq!(app.input.text(), "new draft");
-        assert_eq!(app.current_turn, manual);
-        assert_eq!(app.phase, TurnPhase::Streaming);
-        assert_eq!(app.queue.is_full(), receipt == 2);
-        assert_eq!(app.queue.is_paused(), receipt != 0);
-    }
-}
-
-#[test]
-fn manual_rejections_keep_the_existing_restore_rules() {
-    for receipt in 0..3 {
-        let mut h = Harness::new(true);
-        let app = &mut h.app;
-        app.input.set_text(" manual\nraw ");
-        app.submit().unwrap();
-        let id = app.current_turn.unwrap();
-        app.input.set_text("new draft");
-        app.apply_update(match receipt {
-            0 => LocalUpdate::Submission {
-                turn_id: id,
-                result: Err(lattice_api::local::LocalError {
-                    kind: lattice_api::local::LocalErrorKind::Busy,
-                    message: "busy".into(),
-                    recovery: None,
-                    store: None,
-                }),
-            },
-            1 => LocalUpdate::NotSubmitted {
-                turn_id: id,
-                stage: lattice_api::local::NotSubmittedStage::FreezingConfiguration,
-            },
-            _ => LocalUpdate::Submission {
-                turn_id: id,
-                result: Ok(Acceptance::NeedsConfiguration {
-                    agent_name: "unused".into(),
-                }),
-            },
-        });
-        assert_eq!(
-            app.input.text(),
-            if receipt == 2 {
-                "new draft"
-            } else {
-                " manual\nraw "
-            }
-        );
-        assert_eq!(app.queue.messages().count(), 0);
-    }
-}
-
-#[test]
-fn empty_edit_deletes_and_ctrl_c_never_clears_hidden_input_or_editor() {
-    for level in [NoticeLevel::Warn, NoticeLevel::Error] {
-        let mut h = Harness::new(true);
-        let app = &mut h.app;
-        app.input.set_text("running");
-        app.submit().unwrap();
-        let id = app.current_turn.unwrap();
-        app.input.set_text("中a");
-        app.submit();
-        app.apply_action(KeyAction::Up);
-        app.apply_action(KeyAction::Submit);
-        app.apply_update(LocalUpdate::State {
-            view: Box::new(stopped_view(id, false, 1)),
-            phase: ObservationPhase::NoOwner,
-            error: None,
-        });
-        app.input.set_text("hidden draft");
-        app.push_status(status(level, "dock"));
-        handle_input_event(
-            app,
-            Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-        );
-        assert!(app.last_ctrl_c.is_some());
-        assert!(!app.should_quit);
-        assert_eq!(app.input.text(), "hidden draft");
-        app.apply_action(KeyAction::Insert(' '));
-        assert!(app.dock.message_id().is_some());
-        assert_eq!(
-            app.queue
-                .editor(app.queue.messages().next().unwrap().id)
-                .unwrap()
-                .text(),
-            "中a "
-        );
-        app.apply_action(KeyAction::Home);
-        for _ in 0..3 {
-            app.apply_action(KeyAction::Delete);
-        }
-        app.apply_action(KeyAction::Insert(' '));
-        app.apply_action(KeyAction::Submit);
-        assert_eq!(
-            app.queue.messages().count(),
-            0,
-            "whitespace-only edit deletes"
-        );
-        assert_eq!(app.input.text(), "hidden draft");
-    }
-}
-
-#[test]
-fn completed_summary_dispatch_does_not_wait_for_final_history() {
-    let mut h = queued_app();
-    let app = &mut h.app;
-    let closed = app.state.as_ref().unwrap().view.clone();
-    // R2 结局在 State 中先到；Finished 要等正文读取，不能作为发送许可。
-    app.apply_update(LocalUpdate::State {
-        view: closed,
-        phase: ObservationPhase::NoOwner,
-        error: None,
-    });
-    assert_eq!(app.auto_submit(), Some(" q0\nraw ".into()));
-}
-
-enum Reply {
-    Now(Value),
-    Hold(oneshot::Receiver<Value>),
-    Close(oneshot::Receiver<()>),
-    Stream(UnboundedReceiver<Value>),
-    Never,
-}
-struct Peer {
-    _root: tempfile::TempDir,
-    client: LocalClient,
-    seen: watch::Receiver<Vec<Value>>,
-    task: tokio::task::JoinHandle<()>,
-}
-impl Drop for Peer {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-impl Peer {
-    fn start(mut handler: impl FnMut(&Value) -> Reply + Send + 'static) -> Self {
-        let root = tempfile::tempdir().unwrap();
-        let layout = lattice_api::StateLayout::in_state_root(root.path());
-        let local = layout.lattice_root().join("local");
-        std::fs::create_dir_all(&local).unwrap();
-        std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let socket = local.join("api.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
-        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let (record, seen) = watch::channel(Vec::new());
-        let task = tokio::spawn(async move {
-            let mut tasks = tokio::task::JoinSet::new();
-            loop {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut magic = [0; 8];
-                stream.read_exact(&mut magic).await.unwrap();
-                assert_eq!(&magic, b"LTLOCAL3");
-                let len = stream.read_u32().await.unwrap();
-                assert!(len <= 16 * 1024 * 1024);
-                let mut bytes = vec![0; len as usize];
-                stream.read_exact(&mut bytes).await.unwrap();
-                let request: Value = serde_json::from_slice(&bytes).unwrap();
-                let reply = handler(&request);
-                record.send_modify(|seen| seen.push(request));
-                tasks.spawn(async move {
-                    let mut seq = 0;
-                    match reply {
-                        Reply::Now(value) => send(&mut stream, &value, &mut seq).await,
-                        Reply::Hold(receiver) => {
-                            if let Ok(value) = receiver.await {
-                                send(&mut stream, &value, &mut seq).await;
-                            }
-                        }
-                        Reply::Close(receiver) => {
-                            let _ = receiver.await;
-                            return;
-                        }
-                        Reply::Stream(mut receiver) => {
-                            while let Some(value) = receiver.next().await {
-                                send(&mut stream, &value, &mut seq).await;
-                            }
-                        }
-                        Reply::Never => {}
-                    }
-                    let _stream = stream;
-                    std::future::pending::<()>().await;
-                });
-            }
-        });
-        Self {
-            _root: root,
-            client: LocalClient::new(layout),
-            seen,
-            task,
-        }
-    }
-    async fn wait(&self, predicate: impl FnMut(&Vec<Value>) -> bool) -> Vec<Value> {
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            self.seen.clone().wait_for(predicate),
-        )
-        .await
-        .unwrap()
-        .unwrap()
-        .clone()
-    }
-}
-async fn send(stream: &mut UnixStream, value: &Value, seq: &mut u64) {
-    let bytes = serde_json::to_vec(&json!({"message_id":*seq,"offset":0,"json_fragment":serde_json::to_string(value).unwrap(),"complete":true})).unwrap();
-    *seq += 1;
-    if stream.write_all(b"LTLOCAL3").await.is_err() {
-        return;
-    }
-    let _ = stream.write_u32(bytes.len() as u32).await;
-    let _ = stream.write_all(&bytes).await;
-}
-fn count(seen: &[Value], op: &str) -> usize {
-    seen.iter().filter(|r| r["operation"] == op).count()
-}
-fn cancels(seen: &[Value]) -> Vec<Value> {
-    seen.iter()
-        .filter(|r| r["operation"] == "cancel")
-        .map(|r| r["target"]["turn_id"].clone())
-        .collect()
-}
-fn submitted(seen: &[Value]) -> TurnId {
-    serde_json::from_value(
-        seen.iter().find(|r| r["operation"] == "submit").unwrap()["request"]["turn_id"].clone(),
-    )
-    .unwrap()
-}
-
-#[derive(Clone)]
-struct Frame {
-    phase: TurnPhase,
-    current: Option<TurnId>,
-    connected: bool,
-    input: String,
-    text: String,
-    /// Dock 中暂驻的 Warn 或 Error 的文字；没有暂驻消息时为空。它不在 `text` 里。
-    dock: String,
-    cancel: Option<CancelStatus>,
-    /// 当前 Turn 已被后台接受或正在运行：助手标题线已出现。
-    started: bool,
-}
-fn frame(app: &App) -> Frame {
-    Frame {
-        phase: app.phase,
-        current: app.current_turn,
-        connected: app.connected,
-        input: app.input.text(),
-        text: crate::view::transcript_lines(app, 200)
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n"),
-        dock: app
-            .dock
-            .message(&app.blocks)
-            .map_or_else(String::new, |status| status.text.clone()),
-        cancel: app.cancel_status,
-        started: app.blocks.iter().any(|block| {
-            matches!(block, Block::AssistantStart { turn_id, .. } if Some(*turn_id) == app.current_turn)
-        }),
-    }
-}
-struct Harness {
-    options: TuiOptions,
-    app: App,
-    events: UnboundedReceiver<std::io::Result<Event>>,
-    observer: watch::Sender<Frame>,
-    remote: Remote,
-    _root: tempfile::TempDir,
-}
-#[derive(Clone)]
-struct Remote {
-    keys: UnboundedSender<std::io::Result<Event>>,
-    frames: watch::Receiver<Frame>,
-}
-impl Harness {
-    fn new(new_session: bool) -> Self {
-        let root = tempfile::tempdir().unwrap();
-        let options = TuiOptions {
-            session_id: (!new_session).then(|| SESSION.into()),
-            agent: "unused".into(),
-            session_dir: root.path().join("history"),
-            agents_dir: root.path().join("agents"),
-            project_root: root.path().into(),
-        };
-        let app = App::new(
-            SessionContext {
-                session_id: (!new_session).then(sid),
-                active_agent: "unused".into(),
-            },
-            false,
-            &options.session_dir,
-        );
-        let (keys, events) = unbounded();
-        let (observer, frames) = watch::channel(frame(&app));
-        Self {
-            options,
-            app,
-            events,
-            observer,
-            remote: Remote { keys, frames },
-            _root: root,
-        }
-    }
-    async fn run(&mut self, client: &LocalClient, turn: Option<LocalTurn>) -> LoopExit {
-        let observer = self.observer.clone();
-        run_loop(
-            &self.options,
-            &mut self.app,
-            client,
-            turn,
-            &mut self.events,
-            |app| {
-                observer.send_replace(frame(app));
-                Ok(())
-            },
-        )
-        .await
-    }
-}
-impl Remote {
-    fn press(&self, code: KeyCode, modifiers: KeyModifiers) {
-        self.keys
-            .unbounded_send(Ok(Event::Key(KeyEvent::new(code, modifiers))))
-            .unwrap();
-    }
-    fn ctrl(&self, c: char) {
-        self.press(KeyCode::Char(c), KeyModifiers::CONTROL);
-    }
-    fn line(&self, text: &str) {
-        for c in text.chars() {
-            self.press(KeyCode::Char(c), KeyModifiers::NONE);
-        }
-        self.press(KeyCode::Enter, KeyModifiers::NONE);
-    }
-    async fn wait(&self, predicate: impl FnMut(&Frame) -> bool) -> Frame {
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            self.frames.clone().wait_for(predicate),
-        )
-        .await
-        .unwrap()
-        .unwrap()
-        .clone()
-    }
-}
-
-#[test]
-fn comment_rewind_during_queue_edit_preserves_remaining_order() {
-    let mut h = comment_app();
-    let app = &mut h.app;
-    let target = app.observed_turn.unwrap();
-    app.input.set_text("running");
-    app.submit().unwrap();
-    save_comment(app, "drop this");
-    app.focus = Focus::Dock;
-    app.submit();
-    for text in ["middle", "last"] {
-        app.input.set_text(text);
-        app.submit();
-    }
-    app.apply_update(LocalUpdate::State {
-        view: Box::new(stopped_view(app.current_turn.unwrap(), false, 3)),
-        phase: ObservationPhase::Finished,
-        error: None,
-    });
-    comment_browse(app, "middle");
-    app.apply_action(KeyAction::Submit);
-    assert!(app.queue.is_editing());
-    let mut snapshot = view(target, true);
-    snapshot.session.current = lattice_api::NodeId(1);
-    snapshot.history.head = lattice_api::NodeId(1);
-    app.apply_update(LocalUpdate::State {
-        view: Box::new(snapshot.clone()),
-        phase: ObservationPhase::Finished,
-        error: None,
-    });
-    app.apply_update(LocalUpdate::History {
-        anchor: snapshot.history.clone(),
-        generation: app.generation,
-        stale: false,
-        result: Ok(Box::new(
-            serde_json::from_value(
-                json!({"anchor":snapshot.history,"entries":history_entries(&snapshot)}),
-            )
-            .unwrap(),
-        )),
-    });
-    app.apply_action(KeyAction::Clear);
-    assert_eq!(
-        app.queue
-            .messages()
-            .map(|m| m.text.as_str())
-            .collect::<Vec<_>>(),
-        ["middle", "last"]
-    );
-}
-
-#[tokio::test]
-async fn first_submission_obtains_session_only_after_acceptance_and_quit_does_not_cancel() {
-    let (tx, rx) = oneshot::channel();
-    let mut rx = Some(rx);
-    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
-        "submit" => {
-            assert!(r["request"]["session_id"].is_null());
-            assert_eq!(r["request"]["agent"], "unused");
-            Reply::Hold(rx.take().unwrap())
-        }
-        _ => Reply::Never,
-    });
-    let mut h = Harness::new(true);
-    let remote = h.remote.clone();
-    let driver = async {
-        remote.line(" original ");
-        let seen = peer.wait(|s| count(s, "submit") == 1).await;
-        let id = submitted(&seen);
-        assert_eq!(
-            seen.iter().find(|r| r["operation"] == "submit").unwrap()["request"]["input"],
-            " original "
-        );
-        tx.send(accepted(id)).unwrap();
-        remote.wait(|f| f.started).await;
-        remote.ctrl('d');
-    };
-    let ((), exit) = tokio::join!(driver, h.run(&peer.client, None));
-    assert!(exit.result.is_ok());
-    assert_eq!(h.app.ctx.session_id, Some(sid()));
-    let report = tokio::time::timeout(Duration::from_secs(1), exit.turn.unwrap().detach())
-        .await
-        .unwrap();
-    assert_eq!(report.cancel, None);
-    assert!(cancels(&peer.seen.borrow()).is_empty());
-}
-
-#[tokio::test]
-async fn cancel_receipt_orders_and_late_probe_keep_original_intent() {
-    for order in [0, 1, 2] {
-        let mut subscriptions = 0;
-        let (stx, srx) = oneshot::channel();
-        let mut srx = Some(srx);
-        let (ctx, crx) = oneshot::channel();
-        let mut crx = Some(crx);
-        let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
-            "submit" => Reply::Hold(srx.take().unwrap()),
-            "subscribe" => {
-                subscriptions += 1;
-                let id = serde_json::from_value(r["target"]["turn_id"].clone()).unwrap();
-                let mut fixed = view(id, false);
-                fixed.owned = order != 0 || subscriptions > 1;
-                if !fixed.owned {
-                    // 接受之前 Session 里还没有这一轮。
-                    fixed.selected_turn = None;
-                    fixed.unclosed_step = None;
-                }
-                Reply::Now(snapshot(&fixed))
-            }
-            "history" => Reply::Never,
-            "cancel" => match crx.take() {
-                Some(rx) => Reply::Hold(rx),
-                None => Reply::Now(response("cancelled", json!({"owned":true}))),
-            },
-            _ => panic!("no configuration reload"),
-        });
-        let mut h = Harness::new(false);
-        h.app.replace_history(Vec::new()); // 已装入的空路径；本测试从提交窗口开始。
-        let remote = h.remote.clone();
-        let driver = async {
-            remote.line("hi");
-            let id = submitted(&peer.wait(|s| count(s, "submit") == 1).await);
-            remote.ctrl('c');
-            peer.wait(|s| count(s, "cancel") == 1).await;
-            if order == 1 {
-                stx.send(accepted(id)).unwrap();
-                remote.wait(|f| f.started).await;
-                ctx.send(response("cancelled", json!({"owned":false})))
-                    .unwrap();
-            } else {
-                ctx.send(response("cancelled", json!({"owned":order==2})))
-                    .unwrap();
-                remote
-                    .wait(|f| {
-                        f.cancel
-                            == Some(if order == 2 {
-                                CancelStatus::Taken
-                            } else {
-                                CancelStatus::NotTaken
-                            })
-                    })
-                    .await;
-                stx.send(if order == 2 {
-                    response(
-                        "acceptance",
-                        json!({"acceptance":"needs_configuration","agent_name":"unused"}),
-                    )
-                } else {
-                    accepted(id)
-                })
-                .unwrap();
-            }
-            remote
-                .wait(|f| {
-                    f.cancel == Some(CancelStatus::Taken)
-                        && (order != 2 || f.text.contains("已停止后续配置"))
-                })
-                .await;
-            remote.ctrl('c');
-            id
-        };
-        let (id, exit) = tokio::join!(driver, h.run(&peer.client, None));
-        assert!(exit.result.is_ok());
-        let report = tokio::time::timeout(Duration::from_secs(1), exit.turn.unwrap().detach())
-            .await
-            .unwrap();
-        assert_eq!(report.cancel, Some(CancelStatus::Taken));
-        assert_eq!(report.turn_id, Some(id));
-        assert_eq!(count(&peer.seen.borrow(), "submit"), 1);
-        assert_eq!(
-            cancels(&peer.seen.borrow()),
-            vec![json!(id); if order == 2 { 1 } else { 2 }]
-        );
-    }
-}
-
-#[tokio::test]
-async fn exit_before_receipt_settles_cancel_and_configuration_abandonment() {
-    for receipt in ["accepted", "rejected", "needs_configuration", "never"] {
-        let (tx, rx) = oneshot::channel();
-        let mut rx = Some(rx);
-        let mut count_cancel = 0;
-        let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
-            "submit" => Reply::Hold(rx.take().unwrap()),
-            "cancel" => {
-                count_cancel += 1;
-                Reply::Now(response("cancelled", json!({"owned":count_cancel>1})))
-            }
-            _ => Reply::Never,
-        });
-        let mut h = Harness::new(false);
-        h.app.replace_history(Vec::new()); // 已装入的空路径；本测试从提交窗口开始。
-        let remote = h.remote.clone();
-        let driver = async {
-            remote.line("hi");
-            let id = submitted(&peer.wait(|s| count(s, "submit") == 1).await);
-            remote.ctrl('c');
-            peer.wait(|s| count(s, "cancel") == 1).await;
-            remote.ctrl('c');
-            id
-        };
-        let (id, exit) = tokio::join!(driver, h.run(&peer.client, None));
-        assert!(exit.result.is_ok());
-        if receipt != "never" {
-            tx.send(match receipt {
-                "accepted" => accepted(id),
-                "rejected" => error("rejected"),
-                _ => response(
-                    "acceptance",
-                    json!({"acceptance":"needs_configuration","agent_name":"unused"}),
-                ),
-            })
-            .unwrap();
-        }
-        let started = Instant::now();
-        let report = tokio::time::timeout(Duration::from_secs(8), exit.turn.unwrap().detach())
-            .await
-            .unwrap();
-        assert_eq!(report.turn_id, Some(id));
-        if receipt == "never" {
-            assert!(started.elapsed() >= Duration::from_secs(4));
-            assert!(matches!(
-                report.cancel,
-                Some(CancelStatus::NotTaken | CancelStatus::Unknown)
-            ));
-        }
-        if receipt == "accepted" {
-            assert_eq!(report.cancel, Some(CancelStatus::Taken));
-        }
-        if receipt == "needs_configuration" {
-            assert!(report.not_submitted.is_some());
-        }
-        assert_eq!(count(&peer.seen.borrow(), "submit"), 1);
-        assert_eq!(
-            cancels(&peer.seen.borrow()),
-            vec![json!(id); if receipt == "accepted" { 2 } else { 1 }]
-        );
-    }
-}
-
-#[tokio::test]
-async fn late_transport_error_keeps_observation_after_submission_grace() {
-    let (close, rx) = oneshot::channel();
-    let mut rx = Some(rx);
-    let (events, incoming) = unbounded();
-    let mut incoming = Some(incoming);
-    let mut subscriptions = 0;
-    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
-        "submit" => Reply::Close(rx.take().unwrap()),
-        "subscribe" => {
-            subscriptions += 1;
-            if subscriptions == 1 {
-                let id = serde_json::from_value(r["target"]["turn_id"].clone()).unwrap();
-                Reply::Now(snapshot(&view(id, false)))
-            } else {
-                Reply::Stream(incoming.take().unwrap())
-            }
-        }
-        "history" => Reply::Never,
-        "cancel" => Reply::Now(response("cancelled", json!({"owned":true}))),
-        _ => panic!("unexpected request"),
-    });
-    let mut h = Harness::new(false);
-    h.app.replace_history(Vec::new()); // 已装入的空路径；本测试从提交窗口开始。
-    let remote = h.remote.clone();
-    let driver = async {
-        remote.line("hi");
-        let id = submitted(
-            &peer
-                .wait(|s| count(s, "submit") == 1 && count(s, "subscribe") == 1)
-                .await,
-        );
-        remote.ctrl('c');
-        tokio::time::sleep(Duration::from_secs(4)).await;
-        remote.wait(|f| f.dock.contains("提交结果未知")).await;
-        peer.wait(|s| count(s, "subscribe") == 2).await;
-        events.unbounded_send(snapshot(&view(id, false))).unwrap();
-        events
-            .unbounded_send(event(
-                1,
-                TurnEvent::TokenDelta {
-                    key: key(id, 0, 1),
-                    content: "before receipt failure".into(),
-                },
-            ))
-            .unwrap();
-        remote
-            .wait(|f| f.text.contains("before receipt failure"))
-            .await;
-        close.send(()).unwrap();
-        // 迟到的传输诊断与“提交结果未知”是同一件事：一条两行的 Warn。
-        let frame = remote
-            .wait(|f| f.dock.contains("local connection failed"))
-            .await;
-        assert!(frame.dock.starts_with("提交结果未知"), "{}", frame.dock);
-        assert_eq!(frame.dock.lines().count(), 2, "{}", frame.dock);
-        assert_eq!(frame.current, Some(id));
-        assert!(frame.input.is_empty());
-        assert!(frame.connected);
-        events
-            .unbounded_send(event(
-                2,
-                TurnEvent::TokenDelta {
-                    key: key(id, 0, 1),
-                    content: " after receipt failure".into(),
-                },
-            ))
-            .unwrap();
-        remote
-            .wait(|f| f.text.contains("after receipt failure"))
-            .await;
-        events.unbounded_send(snapshot(&view(id, true))).unwrap();
-        events.unbounded_send(finished(&view(id, true))).unwrap();
-        let done = format!("turn {id} 完成");
-        remote
-            .wait(|f| f.phase == TurnPhase::Idle && f.text.contains(&done))
-            .await;
-        // Ctrl+D 只在输入区可见且为空时退出；先释放暂驻的 Warn。
-        remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
-        remote.ctrl('d');
-        id
-    };
-    let (id, exit) = tokio::join!(driver, h.run(&peer.client, None));
-    assert!(exit.result.is_ok());
-    let report = exit.turn.unwrap().detach().await;
-    assert_eq!(report.turn_id, Some(id));
-    assert!(report.submission_diagnostic.is_some());
-    assert_eq!(report.cancel, Some(CancelStatus::Taken));
-}
-
-#[tokio::test]
-async fn idle_deadline_survives_repeated_poll_rebuilds() {
-    let id = lattice_api::local::new_turn_id();
-    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
-        "subscribe" => Reply::Now(snapshot(&view(id, false))),
-        "history" => Reply::Now(history(&view(id, false))),
-        _ => panic!("read only"),
-    });
-    let mut h = Harness::new(false);
-    let remote = h.remote.clone();
-    let initial = peer.client.observe(Some(sid()), Some(id));
-    let driver = async {
-        remote.wait(|f| f.phase == TurnPhase::Streaming).await;
-        peer.wait(|s| count(s, "history") == 1).await;
-        tokio::time::pause();
-        for _ in 0..lattice_api::STREAM_IDLE_TIMEOUT_SECS - 1 {
-            tokio::time::advance(Duration::from_secs(1)).await;
-            for _ in 0..8 {
-                tokio::task::yield_now().await;
-            }
-            assert!(remote.frames.borrow().connected);
-        }
-        tokio::time::advance(Duration::from_secs(1)).await;
-        let frame = remote.wait(|f| !f.connected).await;
-        assert_eq!(frame.current, Some(id));
-        assert_eq!(frame.phase, TurnPhase::Streaming);
-        assert!(frame.dock.contains("无增量"), "{}", frame.dock);
-        tokio::time::resume();
-        // Ctrl+D 只在输入区可见且为空时退出；先释放暂驻的 Warn。
-        remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
-        remote.ctrl('d');
-    };
-    let ((), exit) = tokio::join!(driver, h.run(&peer.client, Some(initial)));
-    assert!(exit.result.is_ok());
-    assert_eq!(exit.turn.unwrap().detach().await.cancel, None);
-}
-
-#[tokio::test]
-async fn switching_targets_keeps_old_receipts_and_diagnostics_out_of_new_state() {
-    // Esc 只清空输入，取消与选择活动目标由首次 Ctrl+C 或 /reconnect 触发。
-    for gesture in [1, 2] {
-        let old = lattice_api::local::new_turn_id();
-        let active = lattice_api::local::new_turn_id();
-        let (old_tx, old_rx) = unbounded();
-        let mut old_rx = Some(old_rx);
-        let (cancel_tx, cancel_rx) = oneshot::channel();
-        let mut cancel_rx = Some(cancel_rx);
-        let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
-            "query" => Reply::Now(response("view", json!(view(old, false)))),
-            "subscribe" if r["target"]["turn_id"] == json!(old) => {
-                Reply::Stream(old_rx.take().unwrap())
-            }
-            "subscribe" => {
-                assert_eq!(r["target"]["turn_id"], json!(active));
-                Reply::Now(snapshot(&view(active, false)))
-            }
-            "cancel" if r["target"]["turn_id"] == json!(old) => {
-                Reply::Hold(cancel_rx.take().unwrap())
-            }
-            "cancel" => {
-                assert_eq!(r["target"]["turn_id"], json!(active));
-                Reply::Now(response("cancelled", json!({"owned":true})))
-            }
-            "history" => Reply::Never,
-            _ => panic!("read only target selection"),
-        });
-        let mut h = Harness::new(false);
-        let remote = h.remote.clone();
-        let driver = async {
-            remote.line("/reconnect");
-            peer.wait(|s| count(s, "subscribe") == 1).await;
-            old_tx.unbounded_send(snapshot(&view(old, false))).unwrap();
-            remote.wait(|f| f.current == Some(old)).await;
-            remote.ctrl('c');
-            peer.wait(|s| count(s, "cancel") == 1).await;
-            // A 已关闭，Session 当前位置停在 B 未关闭的 Step 上；快照只说明 A 的 Owner，
-            // B 按可能仍在执行对待，成为下一次取消或重连的目标。
-            let mut closed = view(old, true);
-            closed.unclosed_step = view(active, false).unclosed_step;
-            old_tx.unbounded_send(snapshot(&closed)).unwrap();
-            remote.wait(|f| f.current == Some(active)).await;
-            match gesture {
-                1 => {
-                    // 第二次是对 B 的新取消，不是两秒窗口内的退出。
-                    tokio::time::sleep(CTRL_C_WINDOW + Duration::from_millis(50)).await;
-                    remote.ctrl('c');
-                }
-                _ => remote.line("/reconnect"),
-            };
-            remote
-                .wait(|f| {
-                    f.current == Some(active)
-                        && if gesture == 2 {
-                            f.phase == TurnPhase::Streaming
-                        } else {
-                            f.cancel == Some(CancelStatus::Taken)
-                        }
-                })
-                .await;
-            cancel_tx
-                .send(if gesture == 2 {
-                    response("cancelled", json!({"owned":true}))
-                } else {
-                    error("A cancellation denied")
-                })
-                .unwrap();
-            let f = remote
-                .wait(|f| {
-                    f.text.contains(if gesture == 2 {
-                        "历史交接：后台已接管取消"
-                    } else {
-                        "A cancellation denied"
-                    })
-                })
-                .await;
-            assert_eq!(f.current, Some(active));
-            assert_eq!(
-                f.cancel,
-                if gesture == 2 {
-                    None
-                } else {
-                    Some(CancelStatus::Taken)
-                }
-            );
-            // 旧 Turn 的结局已实时显示，交接报告不再重述。
-            assert!(f.text.contains(&old.to_string()), "{}", f.text);
-            assert!(!f.text.contains("历史交接：Turn"), "{}", f.text);
-            remote.ctrl('d');
-        };
-        let ((), exit) = tokio::join!(driver, h.run(&peer.client, None));
-        assert!(exit.result.is_ok());
-        assert!(exit.handoffs.is_empty());
-        let report = exit.turn.unwrap().detach().await;
-        assert_eq!(report.turn_id, Some(active));
-        assert!(report.cancel_error.is_none());
-        assert_eq!(
-            cancels(&peer.seen.borrow()),
-            if gesture == 2 {
-                vec![json!(old)]
-            } else {
-                vec![json!(old), json!(active)]
-            }
-        );
-        assert_eq!(count(&peer.seen.borrow(), "submit"), 0);
-    }
-}
-
-#[tokio::test]
-async fn detached_cancel_keeps_original_target_diagnostic() {
-    let id = lattice_api::local::new_turn_id();
-    let (tx, rx) = oneshot::channel();
-    let mut rx = Some(rx);
-    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
-        "subscribe" => Reply::Now(snapshot(&view(id, false))),
-        "history" => Reply::Now(history(&view(id, false))),
-        "cancel" => match rx.take() {
-            Some(rx) => Reply::Hold(rx),
-            None => Reply::Now(error("original cancellation denied")),
-        },
-        _ => panic!("read only"),
-    });
-    let mut h = Harness::new(false);
-    let remote = h.remote.clone();
-    let initial = peer.client.observe(Some(sid()), Some(id));
-    let driver = async {
-        remote.wait(|f| f.current == Some(id)).await;
-        remote.ctrl('c');
-        peer.wait(|s| count(s, "cancel") == 1).await;
-        remote.ctrl('d');
-    };
-    let ((), exit) = tokio::join!(driver, h.run(&peer.client, Some(initial)));
-    assert!(exit.result.is_ok());
-    tx.send(error("original cancellation denied")).unwrap();
-    let report = exit.turn.unwrap().detach().await;
-    assert_eq!(report.turn_id, Some(id));
-    assert_eq!(report.cancel, Some(CancelStatus::Unknown));
-    assert_eq!(cancels(&peer.seen.borrow()), vec![json!(id); 2]);
-    assert!(detach_lines(report, false).iter().any(|line| {
-        line.contains("original cancellation denied") && line.contains(&id.to_string())
-    }));
-}
-
-#[tokio::test]
-async fn busy_submission_preserves_draft_and_can_cancel_displayed_active_turn() {
-    let active = lattice_api::local::new_turn_id();
-    let mut subs = 0;
-    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
-        "submit" => Reply::Now(response(
-            "error",
-            json!({"kind":"busy","message":"session is busy","recovery":null,"store":null}),
-        )),
-        "subscribe" => {
-            subs += 1;
-            if subs == 1 {
-                Reply::Never
-            } else {
-                let mut v = view(active, false);
-                v.owned = r["target"]["turn_id"] == json!(active);
-                if !v.owned {
-                    v.selected_turn = None;
-                }
-                Reply::Now(snapshot(&v))
-            }
-        }
-        "history" => Reply::Never,
-        "cancel" => {
-            assert_eq!(r["target"]["turn_id"], json!(active));
-            Reply::Now(response("cancelled", json!({"owned":true})))
-        }
-        _ => panic!("no config loading"),
-    });
-    let mut h = Harness::new(false);
-    h.app.replace_history(Vec::new()); // 已装入的空路径；本测试从提交窗口开始。
-    let remote = h.remote.clone();
-    let driver = async {
-        remote.line("hi");
-        let id = submitted(
-            &peer
-                .wait(|s| count(s, "submit") == 1 && count(s, "subscribe") == 1)
-                .await,
-        );
-        remote
-            .wait(|f| f.input == "hi" && f.dock.contains("session is busy"))
-            .await;
-        // 被拒回执是 Error，暂驻 Dock；释放后回到输入区。
-        remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
-        remote.press(KeyCode::Esc, KeyModifiers::NONE);
-        remote.line("/reconnect");
-        // 被拒请求没有 Turn；Session 当前位置停在另一轮未关闭的 Step 上，它成为取消目标。
-        remote.wait(|f| f.current == Some(active)).await;
-        remote.ctrl('c');
-        let f = remote.wait(|f| f.cancel == Some(CancelStatus::Taken)).await;
-        // 被拒回执已实时显示，交接报告不再重述。
-        assert!(f.text.contains(&id.to_string()), "{}", f.text);
-        assert!(!f.text.contains("历史交接：请求"), "{}", f.text);
-        remote.ctrl('d');
-    };
-    let ((), exit) = tokio::join!(driver, h.run(&peer.client, None));
-    assert!(exit.result.is_ok());
-    assert_eq!(exit.turn.unwrap().detach().await.turn_id, Some(active));
-    assert_eq!(count(&peer.seen.borrow(), "submit"), 1);
-    assert_eq!(cancels(&peer.seen.borrow()), vec![json!(active)]);
-}
-
-#[tokio::test]
-async fn existing_submission_keeps_explicit_agent() {
-    let peer = Peer::start(|r| match r["operation"].as_str().unwrap() {
-        "submit" => Reply::Now(response(
-            "error",
-            json!({"kind":"busy","message":"busy","recovery":null,"store":null}),
-        )),
-        _ => Reply::Never,
-    });
-    let mut h = Harness::new(false);
-    h.app.replace_history(Vec::new()); // 已装入的空路径；本测试从提交窗口开始。
-    h.options.agent = "override-agent".into();
-    let remote = h.remote.clone();
-    let driver = async {
-        remote.line("hi");
-        let seen = peer.wait(|s| count(s, "submit") == 1).await;
-        assert_eq!(
-            seen.iter().find(|r| r["operation"] == "submit").unwrap()["request"]["agent"],
-            "override-agent"
-        );
-        remote.wait(|f| f.input == "hi" && !f.dock.is_empty()).await;
-        // 被拒回执是 Error，暂驻 Dock；释放后回到输入区。
-        remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
-        remote.press(KeyCode::Esc, KeyModifiers::NONE);
-        remote.line("/quit");
-    };
-    let ((), exit) = tokio::join!(driver, h.run(&peer.client, None));
-    assert!(exit.result.is_ok());
 }

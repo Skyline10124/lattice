@@ -5,7 +5,7 @@
 //!
 //! [`start_turn`] 接管同进程执行任务，分别返回持久接受和完成回执。
 //! run_turn 仅在测试或 test-utils 下复用该执行路径；
-//! Owner 同步保存观察段与有界事件窗口，持久执行与关闭由 TurnCoordinator 独占负责。
+//! Owner 同步保存当前尝试的观察段，持久执行与关闭由 TurnCoordinator 独占负责。
 
 pub(crate) mod cep;
 pub(crate) mod coordinator;
@@ -38,6 +38,6 @@ pub use execute::run_turn;
 pub(crate) use execute::start_execution;
 pub use execute::{STREAM_IDLE_TIMEOUT_SECS, start_turn};
 pub use types::{
-    AttemptSegments, RunTurnRequest, RunTurnResult, SequencedTurnEvent, TextSegment,
-    TurnAcceptance, TurnCompletion, TurnEvent, TurnExecution, TurnRef,
+    AttemptSegments, RunTurnRequest, RunTurnResult, TextSegment, TurnAcceptance, TurnCompletion,
+    TurnEvent, TurnExecution, TurnRef,
 };

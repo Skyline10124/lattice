@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use lattice_system_harness::{
     AssertError, CapturedRequest, FAKE_API_KEY, FakeLlmServer, SendExecution, SessionSendDriver,
-    SseScript, TurnEventLine,
+    SseScript,
 };
 use serde_json::Value;
 use support::*;
@@ -20,17 +20,7 @@ const ACCEPT: &str = "text/event-stream, application/json";
 const RETRY_FAST: &str = "[llm.retry]\nmax_retries = 3\ninitial_delay_ms = 1\nmax_delay_ms = 1\n";
 
 fn final_turn(outcome: &SendExecution) -> Value {
-    outcome
-        .events
-        .iter()
-        .rev()
-        .find_map(|event| match event {
-            TurnEventLine::Unknown { type_name, raw } if type_name == "snapshot" => {
-                Some(raw["view"]["selected_turn"].clone())
-            }
-            _ => None,
-        })
-        .expect("final durable snapshot")
+    live_turn(outcome)
 }
 
 /// 第 `step` 个 Step 的全部尝试记录。
@@ -367,11 +357,12 @@ fn unauthorized_request_fails_without_retry_notice() {
         )?;
         require(captures.len() == 1, "401 must not be retried")?;
         require(
-            !outcome
-                .events
+            outcome
+                .entries()
                 .iter()
-                .any(|event| matches!(event, TurnEventLine::LlmRetry { .. })),
-            "401 must not emit a retry notice",
+                .filter_map(|entry| entry.step())
+                .all(|step| step.retries.is_empty()),
+            "401 must not carry a retry notice",
         )?;
         let turn = final_turn(&outcome);
         let attempts = attempts(&turn, 0);
@@ -436,22 +427,22 @@ fn stream_cut_before_completion_is_retried() {
             captures.len() == 4,
             format!("4 model requests, got {}", captures.len()),
         )?;
-        // 两次断流都发生在响应体中途：产品先收到部分正文，随后才报告请求错误。
-        let streamed: Vec<&str> = outcome
-            .events
+        // 两次断流都发生在响应体中途，两次重试提示都在这一步的条目中。
+        let entries = outcome.entries();
+        let cut = entries
             .iter()
-            .filter_map(|event| match event {
-                TurnEventLine::TokenDelta { content } => Some(content.as_str()),
-                TurnEventLine::LlmRetry { .. } => Some("<retry>"),
-                _ => None,
-            })
+            .find(|entry| entry.step().is_some_and(|step| step.ordinal == 1))
+            .expect("second Step entry");
+        let retried: Vec<u64> = cut
+            .step()
+            .unwrap()
+            .retries
+            .iter()
+            .map(|r| r.attempt)
             .collect();
         require(
-            streamed
-                .windows(2)
-                .any(|pair| pair == ["partial", "<retry>"])
-                && streamed.windows(2).any(|pair| pair == ["half", "<retry>"]),
-            format!("partial bodies arrive before each cut: {streamed:?}"),
+            retried == [0, 1],
+            format!("both stopped attempts have retry notices: {retried:?}"),
         )?;
         let turn = final_turn(&outcome);
         let step = attempts(&turn, 1);

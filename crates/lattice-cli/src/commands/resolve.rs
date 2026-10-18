@@ -15,6 +15,7 @@ fn resolve_error(error: lattice_api::ApiError) -> anyhow::Error {
             anyhow::Error::new(lattice_api::local::LocalError {
                 kind: lattice_api::local::LocalErrorKind::BadRequest,
                 message: reason,
+                conflict: None,
                 recovery: None,
                 store: None,
             })

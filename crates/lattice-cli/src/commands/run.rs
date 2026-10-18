@@ -1,466 +1,476 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
-//! CLI 只提交意图和呈现事实；完整 History 后的 Finished 才结束观察交付。
+//! CLI 消费提交回执与会话视图，执行与取消交接由 LocalTurn 管理。
 use anyhow::Result;
-use lattice_api::local::{
-    Acceptance, CancelStatus, ConnectionStatus, FrozenConfiguration, HistoryReadError, LocalClient,
-    LocalErrorKind, LocalHistory, LocalState, LocalTurn, LocalUpdate, MaterialSummary,
-    MessageSemantic, Node, NotSubmittedStage, NoticeLevel, ObservationSnapshot, PublicTurnOutcome,
-    SessionId, TurnId, TurnRequest, TurnSummary, UsageSummary,
+use lattice_api::LoadedAgentProfile;
+use lattice_api::local::*;
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
 };
-use lattice_api::{LoadedAgentProfile, TurnEvent};
-use std::io::Write;
-use std::path::{Path, PathBuf};
-#[cfg(test)]
-use std::time::Duration;
-#[cfg(test)]
-use tokio::time;
 
 #[derive(Default)]
 struct RunRenderState {
-    last_summary: Option<TurnSummary>,
-    printed_summaries: Vec<TurnId>,
-    session_id: Option<SessionId>,
-    usage: Option<UsageSummary>,
-    tokens_emitted_without_newline: bool,
-    mid_token_stderr_newline_applied: bool,
-    tool_finished_count: usize,
+    target: Option<TurnId>,
+    summary: Option<TurnSummary>,
+    head: Option<SessionHead>,
+    receipt: Option<SubmissionReceipt>,
+    cancel: Option<(CancelStatus, Option<LocalError>)>,
+    failed: bool,
+    text: std::collections::BTreeMap<NodeId, (u32, String)>,
+    retries: std::collections::BTreeSet<(NodeId, u32)>,
+    results: std::collections::BTreeSet<InvocationId>,
+    steps: std::collections::BTreeMap<NodeId, StepDetail>,
+    newline: bool,
 }
-fn apply_event_to_state(event: &TurnEvent, state: &mut RunRenderState) {
-    match event {
-        TurnEvent::TurnStarted { turn, .. } => state.session_id = Some(turn.session_id),
-        TurnEvent::TurnCompleted { turn, summary, .. }
-        | TurnEvent::TurnFailed { turn, summary, .. }
-        | TurnEvent::TurnCancelled { turn, summary, .. } => {
-            state.session_id = Some(turn.session_id);
-            state.last_summary = Some(summary.clone());
-        }
-        TurnEvent::TokenDelta { content, .. } if !content.is_empty() => {
-            state.tokens_emitted_without_newline = !content.ends_with('\n');
-            if !state.tokens_emitted_without_newline {
-                state.mid_token_stderr_newline_applied = false;
-            }
-        }
-        TurnEvent::ToolCallFinished { .. } => state.tool_finished_count += 1,
-        _ => {}
-    }
-}
-fn outcome_label(outcome: &PublicTurnOutcome) -> &'static str {
-    match outcome {
-        PublicTurnOutcome::Completed => "completed",
-        PublicTurnOutcome::Failed => "failed",
-        PublicTurnOutcome::Cancelled => "cancelled",
-    }
-}
-fn render_json_event(event: &TurnEvent, out: &mut impl Write) -> std::io::Result<()> {
-    writeln!(
-        out,
-        "{}",
-        serde_json::to_string(event).map_err(std::io::Error::other)?
-    )
-}
-fn flush_before_status(
-    out: &mut impl Write,
-    err: &mut impl Write,
-    state: &mut RunRenderState,
-) -> std::io::Result<()> {
-    if state.tokens_emitted_without_newline && !state.mid_token_stderr_newline_applied {
-        out.flush()?;
-        writeln!(err)?;
-        state.mid_token_stderr_newline_applied = true;
-    }
-    Ok(())
-}
-fn finish_text(state: &mut RunRenderState, out: &mut impl Write) -> std::io::Result<()> {
-    if state.tokens_emitted_without_newline {
-        writeln!(out)?;
-        state.tokens_emitted_without_newline = false;
-    }
-    Ok(())
-}
-fn render_human_event(
-    event: &TurnEvent,
+fn render_update(
+    update: &LocalUpdate,
     state: &mut RunRenderState,
     out: &mut impl Write,
     err: &mut impl Write,
     verbose: bool,
-) -> std::io::Result<()> {
-    if let TurnEvent::TokenDelta { content, .. } = event {
-        return write!(out, "{content}");
+    json: bool,
+) -> Result<()> {
+    match update {
+        LocalUpdate::Submit {
+            update: SubmissionUpdate::Receipt(receipt),
+        } => state.receipt = Some(receipt.clone()),
+        LocalUpdate::Head(head) => {
+            if head.diagnostic.is_some() && state.target.is_none_or(|id| head.turn_id == Some(id)) {
+                state.failed = true;
+            }
+            state.head = Some(head.clone());
+        }
+        LocalUpdate::Entry { entry } => {
+            if let ConversationEntry::Step {
+                node,
+                step,
+                summary,
+                ..
+            } = entry.as_ref()
+            {
+                state.steps.insert(*node, step.clone());
+                if let Some(summary) = summary {
+                    state.summary = Some(summary.clone());
+                }
+            }
+        }
+        LocalUpdate::Cancel { status, error, .. } => state.cancel = Some((*status, error.clone())),
+        LocalUpdate::Connection { .. } | LocalUpdate::Error { .. } => state.failed = true,
+        _ => {}
     }
-    let line = match event {
-        TurnEvent::TurnStarted { turn, .. } => {
-            verbose.then(|| format!("session {} turn {}", turn.session_id, turn.turn_id))
+    if json {
+        writeln!(out, "{}", serde_json::to_string(update)?)?;
+        out.flush()?;
+        return Ok(());
+    }
+    match update {
+        LocalUpdate::Submit {
+            update:
+                SubmissionUpdate::Sending {
+                    turn_id,
+                    session_id,
+                    ..
+                },
+        } => writeln!(err, "session {session_id} turn {turn_id}: sending")?,
+        LocalUpdate::Submit {
+            update: SubmissionUpdate::Receipt(receipt),
+        } => match &receipt.result {
+            SubmissionResult::Accepted { .. } => writeln!(
+                err,
+                "turn {}: accepted{}",
+                receipt.turn_id,
+                if receipt.recovered {
+                    " (recovered)"
+                } else {
+                    ""
+                }
+            )?,
+            SubmissionResult::Rejected { error } => {
+                writeln!(err, "turn {}: rejected", receipt.turn_id)?;
+                render_human_error(&serde_json::to_value(error)?, err)?;
+            }
+            SubmissionResult::NotAccepted => {
+                writeln!(err, "turn {}: not accepted", receipt.turn_id)?
+            }
+            SubmissionResult::Unknown { error } => writeln!(
+                err,
+                "turn {}: acceptance unknown{}",
+                receipt.turn_id,
+                error
+                    .as_ref()
+                    .map_or_else(String::new, |e| format!(": {}", e.message))
+            )?,
+        },
+        LocalUpdate::Text(text) => {
+            let value = state
+                .text
+                .entry(text.node)
+                .or_insert((text.attempt, String::new()));
+            if value.0 != text.attempt {
+                *value = (text.attempt, String::new());
+            }
+            for segment in &text.segments {
+                match segment {
+                    TextSegment::Text { text } => {
+                        write!(out, "{text}")?;
+                        value.1.push_str(text);
+                        state.newline = !text.ends_with('\n');
+                    }
+                    TextSegment::Reasoning { text } if verbose => {
+                        writeln!(err, "reasoning: {text}")?
+                    }
+                    _ => {}
+                }
+            }
         }
-        TurnEvent::ModelStarted {
-            provider, model, ..
-        } => verbose.then(|| format!("model {provider}/{model}")),
-        TurnEvent::LlmRetry {
-            key,
-            delay_ms,
-            notice,
-        } => verbose.then(|| {
-            format!(
-                "{}: llm attempt {} failed, retrying in {} ms: {}",
-                notice_level_label(&notice.level),
-                key.attempt_ordinal,
-                delay_ms,
-                notice.text
-            )
-        }),
-        TurnEvent::ReasoningDelta { content, .. } => {
-            verbose.then(|| format!("reasoning: {content}"))
+        LocalUpdate::Entry { entry } => {
+            if let ConversationEntry::Step {
+                node,
+                content,
+                retries,
+                ..
+            } = entry.as_ref()
+            {
+                if verbose {
+                    for retry in retries {
+                        if state.retries.insert((*node, retry.attempt)) {
+                            writeln!(
+                                err,
+                                "{}: {} (retry after {} ms)",
+                                level(&retry.notice.level),
+                                retry.notice.text,
+                                retry.delay_ms
+                            )?;
+                        }
+                    }
+                }
+                if let Node::Step {
+                    turn_id,
+                    progress,
+                    slots,
+                    ..
+                } = content
+                    && let Some(content) = content.step_content()
+                {
+                    let ended = progress.is_closed()
+                        || state
+                            .head
+                            .as_ref()
+                            .is_some_and(|head| !head.owner || head.turn_id != Some(*turn_id));
+                    let final_text = content
+                        .assistant
+                        .parts
+                        .iter()
+                        .filter_map(|part| match &part.semantic {
+                            MessageSemantic::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<String>();
+                    let printed = state.text.entry(*node).or_default();
+                    if let Some(rest) = final_text.strip_prefix(&printed.1) {
+                        if !rest.is_empty() {
+                            write!(out, "{rest}")?;
+                            state.newline = !rest.ends_with('\n');
+                        }
+                    } else if printed.1 != final_text {
+                        if state.newline {
+                            writeln!(out)?;
+                        }
+                        write!(out, "{final_text}")?;
+                        state.newline = !final_text.ends_with('\n');
+                    }
+                    printed.1 = final_text;
+                    // 运行中的 Registered/Started 只是进度；推定结果只在执行结束后呈现。
+                    for (result, slot) in content.results.into_iter().zip(slots) {
+                        if (ended || matches!(slot.progress, SlotProgress::Terminal { .. }))
+                            && state.results.insert(result.invocation_id)
+                        {
+                            writeln!(
+                                err,
+                                "tool {} {}",
+                                result.name,
+                                serde_json::to_string(&result.payload)?
+                            )?;
+                        }
+                    }
+                }
+            }
         }
-        TurnEvent::ModelFinished { finish_reason, .. } => verbose.then(|| {
-            format!(
-                "model finished {}",
-                finish_reason.as_deref().unwrap_or("unknown")
-            )
-        }),
-        TurnEvent::CallsRegistered { calls, .. } => {
-            verbose.then(|| format!("registered {} calls", calls.len()))
+        LocalUpdate::Head(head) => {
+            if let Some(error) = &head.diagnostic {
+                writeln!(err, "execution diagnostic: {}", error.message)?;
+            }
         }
-        TurnEvent::ToolCallStarted { name, .. } => Some(format!("tool {name}")),
-        TurnEvent::ToolCallFinished {
-            name,
-            outcome,
-            material,
-            error_summary,
+        LocalUpdate::Cancel {
+            turn_id,
+            status,
+            error,
             ..
         } => {
-            let content = match material {
-                MaterialSummary::Available { byte_length, .. } => format!("{byte_length} B"),
-                MaterialSummary::OutputTooLarge { byte_length, .. } => {
-                    format!("{byte_length} B content unavailable")
+            writeln!(
+                err,
+                "turn {turn_id}: cancel {}",
+                match status {
+                    CancelStatus::Taken => "taken; the durable outcome is still to be queried",
+                    CancelStatus::NotTaken => "not taken; background work may still exist",
+                    CancelStatus::Unknown => "unknown",
+                    CancelStatus::Pending => "pending",
+                    CancelStatus::Moot => "moot",
                 }
-                MaterialSummary::NoContent => "no content".into(),
-            };
-            Some(format!(
-                "tool {name} {} {content} {}",
-                outcome.as_str(),
-                error_summary.as_deref().unwrap_or("")
-            ))
+            )?;
+            if let Some(error) = error {
+                writeln!(err, "cancel diagnostic: turn {turn_id}: {}", error.message)?;
+            }
         }
-        TurnEvent::CepCallStarted { method, .. } => verbose.then(|| format!("cep {method}")),
-        TurnEvent::CepCallFinished { method, ok, .. } => {
-            verbose.then(|| format!("cep {method} ok={ok}"))
-        }
-        TurnEvent::StepClosed { step } => {
-            verbose.then(|| format!("step {} closed", step.key.ordinal))
-        }
-        TurnEvent::TurnCompleted { turn, summary, .. }
-        | TurnEvent::TurnFailed { turn, summary, .. }
-        | TurnEvent::TurnCancelled { turn, summary, .. } => {
-            summary_once(turn.turn_id, summary, state)
-        }
-        TurnEvent::TokenDelta { .. } => unreachable!(),
-    };
-    if let Some(line) = line {
-        flush_before_status(out, err, state)?;
-        writeln!(err, "{line}")?;
+        LocalUpdate::Connection { status } => match status {
+            ConnectionStatus::Eof => writeln!(err, "observation ended; query the original TurnId")?,
+            ConnectionStatus::Idle => {
+                writeln!(err, "observation timed out; query the original TurnId")?
+            }
+            ConnectionStatus::Error(error) => {
+                writeln!(err, "observation error: {}", error.message)?
+            }
+        },
+        LocalUpdate::Error { error } => writeln!(err, "error: {}", error.message)?,
     }
+    out.flush()?;
+    err.flush()?;
     Ok(())
 }
-fn summary_once(
-    turn_id: TurnId,
-    summary: &TurnSummary,
-    state: &mut RunRenderState,
-) -> Option<String> {
-    if state.printed_summaries.contains(&turn_id) {
-        return None;
-    }
-    state.printed_summaries.push(turn_id);
-    Some(summary_text(summary))
-}
-fn notice_level_label(level: &NoticeLevel) -> &'static str {
-    match level {
-        NoticeLevel::Info => "info",
-        NoticeLevel::Warn => "warn",
-        NoticeLevel::Error => "error",
-    }
-}
-fn summary_text(summary: &TurnSummary) -> String {
-    let mut text = outcome_label(&summary.outcome).to_string();
-    if let Some(notice) = &summary.notice {
-        text.push_str(&format!(
-            " {}: {}",
-            notice_level_label(&notice.level),
-            notice.text
-        ));
-    }
-    text
-}
-fn render_verbose_epilogue(state: &RunRenderState, err: &mut impl Write) -> std::io::Result<()> {
-    if let Some(id) = state.session_id {
-        writeln!(err, "session: {id}")?;
-    }
-    if let Some(summary) = &state.last_summary {
-        writeln!(err, "outcome: {}", summary_text(summary))?;
-    }
-    if let Some(usage) = &state.usage {
-        writeln!(
-            err,
-            "usage: {}",
-            serde_json::to_string(usage).map_err(std::io::Error::other)?
-        )?;
-    }
-    if state.tool_finished_count > 0 {
-        writeln!(err, "tools: {} executed", state.tool_finished_count)?;
-    }
-    Ok(())
-}
-
 pub async fn run_session_prompt(
     api: &LocalClient,
     args: super::session::SendArgs,
     verbose: bool,
     json: bool,
 ) -> Result<std::process::ExitCode> {
-    let session_id = match args.session_id {
-        Some(prefix) => Some(api.resolve_session(&prefix).await?.session_id),
-        None => None,
+    let session = match &args.session_id {
+        Some(prefix) => SubmitSession::Existing(api.resolve_session(prefix).await?.session_id),
+        None => SubmitSession::New(lattice_api::local::new_session_id()),
     };
-    let turn_id = args.turn_id.unwrap_or_else(lattice_api::local::new_turn_id);
-    submission_state(session_id, turn_id, "submitting", json);
-    std::io::stdout().flush()?;
-    std::io::stderr().flush()?;
-    let root = tokio::task::spawn_blocking(lattice_api::resolve_local_workspace_root).await??;
-    let request = TurnRequest {
-        session_id,
-        turn_id,
-        workspace: root.canonical_path().into(),
-        input: args.prompt,
-        agent: args.agent,
-    };
-    let sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-    let turn = api.start_turn_with(request, move |name| async move {
-        tokio::task::spawn_blocking(move || {
+    let id = lattice_api::local::new_turn_id();
+    let mut state = RunRenderState::default();
+    render_update(
+        &LocalUpdate::Submit {
+            update: SubmissionUpdate::Sending {
+                turn_id: id,
+                session_id: session.id(),
+                new: session.is_new(),
+            },
+        },
+        &mut state,
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+        verbose,
+        json,
+    )?;
+    let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let requested_agent = args.agent.clone();
+    let prepare = async {
+        let root = tokio::task::spawn_blocking(lattice_api::resolve_local_workspace_root)
+            .await
+            .map_err(|_| local_error("configuration worker failed"))?
+            .map_err(LocalError::from)?;
+        let agent = match args.agent {
+            Some(name) => name,
+            None => api
+                .session_head(session.id())
+                .await?
+                .agent
+                .ok_or_else(|| LocalError {
+                    kind: LocalErrorKind::BadRequest,
+                    message: "agent required at root".into(),
+                    conflict: None,
+                    recovery: None,
+                    store: None,
+                })?,
+        };
+        let path = root.canonical_path().to_path_buf();
+        let name = agent.clone();
+        let configuration = tokio::task::spawn_blocking(move || {
             let loaded = load_named_profile(&name, root.canonical_path())?;
             FrozenConfiguration::from_env(loaded, &root)
         })
         .await
-        .map_err(|_| lattice_api::ApiError::Internal("configuration worker failed".into()))?
-    });
-    observe_with_signal(turn, session_id, true, verbose, json, sigint).await
-}
-pub async fn observe_turn(
-    api: &LocalClient,
-    session_id: SessionId,
-    turn_id: TurnId,
-    verbose: bool,
-    json: bool,
-) -> Result<std::process::ExitCode> {
-    let sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-    observe_with_signal(
-        api.observe(Some(session_id), Some(turn_id)),
-        Some(session_id),
-        false,
+        .map_err(|_| local_error("configuration worker failed"))??;
+        Ok::<_, LocalError>((path, configuration))
+    };
+    let prepared = tokio::select! {biased;_=signal.recv()=>None,result=prepare=>Some(result)};
+    let (workspace, configuration) = match prepared {
+        Some(Ok(value)) => value,
+        result => {
+            let result = match result {
+                Some(Err(error)) => SubmissionResult::Rejected { error },
+                _ => SubmissionResult::NotAccepted,
+            };
+            let code = receipt_exit(&result);
+            render_update(
+                &LocalUpdate::Submit {
+                    update: SubmissionUpdate::Receipt(SubmissionReceipt {
+                        turn_id: id,
+                        result,
+                        recovered: false,
+                    }),
+                },
+                &mut state,
+                &mut std::io::stdout(),
+                &mut std::io::stderr(),
+                verbose,
+                json,
+            )?;
+            return Ok(code);
+        }
+    };
+    let request = TurnRequest {
+        turn_id: id,
+        session,
+        workspace,
+        input: args.prompt,
+        agent: requested_agent,
+    };
+    let turn = api.start_turn(request, Ok(configuration));
+    consume(
+        turn,
+        None,
+        state,
         verbose,
         json,
-        sigint,
+        signal,
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
     )
     .await
 }
-async fn observe_with_signal(
-    mut turn: LocalTurn,
-    mut session_id: Option<SessionId>,
-    submitting: bool,
+pub(super) async fn follow_with_output(
+    api: &LocalClient,
+    detail: TurnDetail,
     verbose: bool,
     json: bool,
-    mut sigint: tokio::signal::unix::Signal,
+    out: &mut impl Write,
+    err: &mut impl Write,
 ) -> Result<std::process::ExitCode> {
-    let mut render = RunRenderState::default();
-    let mut awaiting = submitting;
+    let signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    consume(
+        api.follow_turn(detail.clone()),
+        Some((api.clone(), detail)),
+        RunRenderState::default(),
+        verbose,
+        json,
+        signal,
+        out,
+        err,
+    )
+    .await
+}
+#[allow(clippy::too_many_arguments)]
+async fn consume(
+    mut turn: LocalTurn,
+    fallback: Option<(LocalClient, TurnDetail)>,
+    mut state: RunRenderState,
+    verbose: bool,
+    json: bool,
+    mut signal: tokio::signal::unix::Signal,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> Result<std::process::ExitCode> {
+    state.target = turn.turn_id();
     let mut interrupted = false;
-    let mut last_state: Option<LocalState> = None;
-    let mut last_cancel = None;
-    let mut last_cancel_error = None;
-    let mut last_history_error = None;
-    let mut last_submission_diagnostic = None;
-    let mut generation = 0;
-    let mut history_ready = false;
-    let result=async {
-        loop {
-            tokio::select! {
-                _=sigint.recv()=>{
-                    if render.last_summary.is_some() {
-                        connection_notice("history read interrupted; the known outcome stands; reconnect to read it",json);
-                        break Ok(std::process::ExitCode::from(1));
-                    }
-                    if interrupted {break Ok(std::process::ExitCode::from(1));}
-                    interrupted=true;turn.cancel();
+    let mut buffered = Vec::new();
+    let mut body = fallback.is_none();
+    let mut sending_printed = body;
+    loop {
+        tokio::select! {biased;
+            _=signal.recv()=>{if interrupted{state.failed=true;break;}interrupted=true;turn.cancel();}
+            update=turn.next()=>{
+                let Some(update)=update else{break};
+                if matches!(update,LocalUpdate::Submit{update:SubmissionUpdate::Sending{..}}) {if sending_printed{continue;}sending_printed=true;}
+                if !body {
+                    // 中途退回也会给出本轮的部分条目；收到带结局的最后一步后才能输出正文。
+                    if matches!(&update,LocalUpdate::Entry{entry} if matches!(entry.as_ref(),ConversationEntry::Step{summary:Some(_),..})) {body=true;for update in buffered.drain(..){render_update(&update,&mut state,out,err,verbose,json)?;}}
+                    else if matches!(&update,LocalUpdate::Connection{..}|LocalUpdate::Error{..}) {state.failed=true;}
+                    if !body {buffered.push(update);continue;}
                 }
-                update=turn.next()=>match update {
-                    Some(LocalUpdate::Submission{result,..})=>{
-                        awaiting=false;
-                        match result {
-                            Ok(acceptance)=>{
-                                if let Acceptance::Accepted{turn}|Acceptance::Existing{turn}=&acceptance {session_id=Some(turn.session_id);}
-                                render_acceptance(&acceptance,json)?;
-                            }
-                            Err(error)=>{
-                                if render.last_summary.is_some() {report_error(&submission_error(error),json);}
-                                else {break Err(submission_error(error));}
-                            }
-                        }
-                    }
-                    Some(LocalUpdate::SubmissionUnknown{turn_id,error})=>{
-                        awaiting=false;submission_state(session_id,turn_id,"unknown",json);
-                        if let Some(error)=error {report_error(&error.clone().into(),json);last_submission_diagnostic=Some(error);}
-                    }
-                    Some(LocalUpdate::NotSubmitted{turn_id,stage})=>{
-                        awaiting=false;
-                        submission_state(session_id,turn_id,not_submitted_label(stage),json);
-                        if render.last_summary.is_none() {break Ok(std::process::ExitCode::from(1));}
-                    }
-                    Some(LocalUpdate::State{view,phase,error})=>{
-                        session_id=Some(view.session.session_id);
-                        render.session_id=session_id;
-                        if let Some(detail)=&view.selected_turn {
-                            if detail.summary.progress.is_closed() || !view.owned {render.last_summary=Some(detail.summary.clone());}
-                            render.usage=Some(detail.usage.clone());
-                        }
-                        let state = LocalState { view, phase, error };
-                        render_local_state(&state, &mut render, json)?;
-                        last_state=Some(state);
-                        history_ready=false;
-                    }
-                    Some(LocalUpdate::Reset{view,generation:new_generation})=>{
-                        generation=new_generation;history_ready=false;
-                        if json {println!("{}",serde_json::json!({"type":"snapshot","generation":generation,"view":view}));}
-                        else {
-                            if let Some((node, content)) = &view.unclosed_step {
-                                finish_text(&mut render,&mut std::io::stdout())?;
-                                println!("--- unclosed step snapshot: node {} ---", node.0);
-                                render_node(content)?;
-                            }
-                            if let Some(attempt)=&view.attempt {
-                            finish_text(&mut render,&mut std::io::stdout())?;
-                            println!(
-                                "--- current attempt snapshot: turn {} step {} attempt {} ---",
-                                attempt.key.turn_id,
-                                attempt.key.model_step_ordinal,
-                                attempt.key.attempt_ordinal
-                            );
-                            for segment in &attempt.segments {if let lattice_api::local::TextSegment::Text{text}=segment {print!("{text}");}}
-                            println!();
-                            }
-                        }
-                    }
-                    Some(LocalUpdate::History{generation:read_generation,result,stale,..})=>{
-                        match result {
-                            Ok(history) if !stale && read_generation==generation => {
-                                if !json { finish_text(&mut render,&mut std::io::stdout())?; }
-                                render_history(*history,json)?;history_ready=true;last_history_error=None;
-                            }
-                            Ok(_)=>{},
-                            Err(error)=>{
-                                render_history_error(&error,json);
-                                if !stale {
-                                    last_history_error=Some(error);history_ready=true;
-                                    if render.last_summary.is_some() {break Ok(std::process::ExitCode::from(1));}
-                                }
-                            }
-                        }
-                    }
-                    Some(LocalUpdate::Finished{generation:finished_generation,..})=>{
-                        if history_ready && finished_generation==generation {
-                            break Ok(summary_exit(render.last_summary.as_ref()));
-                        }
-                    }
-                    Some(LocalUpdate::Event{event,..})=>{
-                        if json {render_json_event(&event,&mut std::io::stdout())?;}
-                        else {render_human_event(&event,&mut render,&mut std::io::stdout(),&mut std::io::stderr(),verbose)?;}
-                        apply_event_to_state(&event,&mut render);std::io::stdout().flush()?;
-                    }
-                    Some(LocalUpdate::Cancel{turn_id,status,error})=>{
-                        render_cancel(status,json);
-                        if let Some(error)=&error {render_cancel_error(session_id,Some(turn_id),error,json);}
-                        last_cancel=Some(status);last_cancel_error=error;
-                    }
-                    Some(LocalUpdate::Connection(status))=>{
-                        match status {ConnectionStatus::Error(error)=>{report_error(&error.into(),json);},ConnectionStatus::Eof=>connection_notice("observation ended; reconnect with the same TurnId",json),ConnectionStatus::Idle=>connection_notice("observation timed out; reconnect with the same TurnId",json)}
-                        if !awaiting {break Ok(std::process::ExitCode::from(1));}
-                    }
-                    None=>break Ok(std::process::ExitCode::from(1)),
-                }
+                render_update(&update,&mut state,out,err,verbose,json)?;
             }
         }
-    }.await;
+    }
     let report = turn.detach().await;
-    if let Some(state) = &report.state
-        && last_state.as_ref() != Some(state)
+    // 退出码依据已经输出的唯一回执；迟到结果仍可通过视图呈现。
+    if state.receipt.is_none()
+        && let Some(receipt) = report.submission
     {
-        render_local_state(state, &mut render, json)?;
+        render_update(
+            &LocalUpdate::Submit {
+                update: SubmissionUpdate::Receipt(receipt),
+            },
+            &mut state,
+            out,
+            err,
+            verbose,
+            json,
+        )?;
     }
-    if let Some(status) = report.cancel
-        && last_cancel != Some(status)
+    if let Some(status @ (CancelStatus::Taken | CancelStatus::NotTaken | CancelStatus::Unknown)) =
+        report.cancel
+        && state.cancel.as_ref() != Some(&(status, report.cancel_error.clone()))
     {
-        render_cancel(status, json);
+        render_update(
+            &LocalUpdate::Cancel {
+                turn_id: report.turn_id.expect("cancel identity"),
+                status,
+                owned: match status {
+                    CancelStatus::Taken => Some(true),
+                    CancelStatus::NotTaken => Some(false),
+                    _ => None,
+                },
+                error: report.cancel_error,
+            },
+            &mut state,
+            out,
+            err,
+            verbose,
+            json,
+        )?;
     }
-    if let Some(error) = &report.cancel_error
-        && last_cancel_error.as_ref() != Some(error)
-    {
-        render_cancel_error(report.session_id, report.turn_id, error, json);
-    }
-    if let Some(stage) = report.not_submitted
-        && let Some(id) = report.turn_id
-    {
-        submission_state(report.session_id, id, not_submitted_label(stage), json);
-    }
-    if awaiting {
-        match &report.submission {
-            Some(Ok(acceptance)) => render_acceptance(acceptance, json)?,
-            Some(Err(error)) => {
-                report_error(&submission_error(error.clone()), json);
+    if !body {
+        if state.failed {
+            for update in buffered {
+                render_update(&update, &mut state, out, err, verbose, json)?;
             }
-            None => {
-                if let Some(id) = report.turn_id {
-                    submission_state(report.session_id, id, "unknown", json);
-                }
+        } else if let Some((api, initial)) = fallback {
+            // 打开视图前的详情可能仍在途；缺少最后一步时只交付重新查询的持久结局。
+            let detail = api.wait_for_turn(initial.turn_id).await?;
+            if json {
+                writeln!(out, "{}", serde_json::to_string(&detail)?)?;
+            } else {
+                write!(out, "{}", super::session::render_turn(&detail))?;
             }
+            return Ok(summary_exit(Some(&detail.summary)));
         }
     }
-    if let Some(error) = report.submission_diagnostic
-        && last_submission_diagnostic.as_ref() != Some(&error)
-    {
-        report_error(&error.into(), json);
-    }
-    if matches!(
-        report.cancel,
-        Some(CancelStatus::Pending | CancelStatus::NotTaken | CancelStatus::Unknown)
-    ) && let Some(id) = report.turn_id
-    {
-        if json {
-            println!(
-                "{}",
-                serde_json::json!({"type":"cancel_unconfirmed","session_id":report.session_id,"turn_id":id})
-            );
-        } else {
-            eprintln!(
-                "cancel unconfirmed: session {} turn {id}",
-                session_label(report.session_id)
-            );
-        }
-    }
-    if let Some(error) = &report.history_error
-        && last_history_error.as_ref() != Some(error)
-    {
-        render_history_error(error, json);
+    if state.summary.is_none() {
+        state.summary = report.summary;
     }
     if !json {
-        finish_text(&mut render, &mut std::io::stdout())?;
-        if verbose {
-            render_verbose_epilogue(&render, &mut std::io::stderr())?;
-        }
+        finish_human(&state, out, err, verbose)?;
     }
-    if report.history_error.is_some()
-        || last_history_error.is_some()
-        || report.state.is_some_and(|s| s.error.is_some())
+    if state.failed {
+        return Ok(std::process::ExitCode::from(1));
+    }
+    if let Some(receipt) = state.receipt.as_ref()
+        && !matches!(receipt.result, SubmissionResult::Accepted { .. })
     {
-        Ok(std::process::ExitCode::from(1))
-    } else {
-        result
+        return Ok(receipt_exit(&receipt.result));
+    }
+    Ok(summary_exit(state.summary.as_ref()))
+}
+fn local_error(message: &str) -> LocalError {
+    LocalError {
+        kind: LocalErrorKind::Internal,
+        message: message.into(),
+        conflict: None,
+        recovery: None,
+        store: None,
     }
 }
 fn summary_exit(summary: Option<&TurnSummary>) -> std::process::ExitCode {
@@ -470,235 +480,96 @@ fn summary_exit(summary: Option<&TurnSummary>) -> std::process::ExitCode {
         _ => 1,
     })
 }
-fn session_label(id: Option<SessionId>) -> String {
-    id.map_or_else(|| "not yet accepted".into(), |id| id.to_string())
-}
-fn not_submitted_label(stage: NotSubmittedStage) -> &'static str {
-    match stage {
-        NotSubmittedStage::NeedsConfiguration => "not_accepted",
-        NotSubmittedStage::FreezingConfiguration => "not_sent",
+fn receipt_exit(result: &SubmissionResult) -> std::process::ExitCode {
+    match result {
+        SubmissionResult::Rejected { error } => std::process::ExitCode::from(match error.kind {
+            LocalErrorKind::BadRequest | LocalErrorKind::NotFound | LocalErrorKind::Conflict => 2,
+            _ => 1,
+        }),
+        _ => std::process::ExitCode::from(1),
     }
 }
-fn submission_state(session_id: Option<SessionId>, turn_id: TurnId, state: &str, json: bool) {
-    if json {
-        println!(
-            "{}",
-            serde_json::json!({"type":"submission","session_id":session_id,"turn_id":turn_id,"state":state})
-        );
-    } else {
-        eprintln!(
-            "session {} turn {turn_id}: {state}; use the same identity to query or resend",
-            session_label(session_id)
-        );
+fn level(level: &NoticeLevel) -> &'static str {
+    match level {
+        NoticeLevel::Info => "info",
+        NoticeLevel::Warn => "warn",
+        NoticeLevel::Error => "error",
     }
 }
-fn render_acceptance(acceptance: &Acceptance, json: bool) -> Result<()> {
-    if json {
-        println!(
-            "{}",
-            serde_json::json!({"type":"acceptance","result":acceptance})
-        );
-    } else {
-        match acceptance {
-            Acceptance::Accepted { turn } | Acceptance::Existing { turn } => eprintln!(
-                "session {} turn {}: {}",
-                turn.session_id,
-                turn.turn_id,
-                if matches!(acceptance, Acceptance::Existing { .. }) {
-                    "existing request found; not executed again"
-                } else {
-                    "acceptance confirmed"
-                }
-            ),
-            Acceptance::ConfirmationUnknown {
-                turn_id,
-                session_id,
-            } => submission_state(*session_id, *turn_id, "unknown", false),
-            Acceptance::NeedsConfiguration { .. } => {
-                eprintln!("configuration required; not accepted")
-            }
-        }
-    }
-    Ok(())
-}
-fn render_local_state(state: &LocalState, render: &mut RunRenderState, json: bool) -> Result<()> {
-    render_snapshot(&state.view, render, json, &mut std::io::stderr())?;
-    if let Some(error) = &state.error {
-        report_error(&error.clone().into(), json);
-    }
-    Ok(())
-}
-fn render_snapshot(
-    view: &ObservationSnapshot,
-    render: &mut RunRenderState,
-    json: bool,
+fn finish_human(
+    state: &RunRenderState,
+    out: &mut impl Write,
     err: &mut impl Write,
+    verbose: bool,
 ) -> Result<()> {
-    if json {
-        println!("{}", serde_json::json!({"type":"snapshot","view":view}));
-    } else {
-        writeln!(
+    if state.newline {
+        writeln!(out)?;
+    }
+    if let Some(summary) = &state.summary {
+        write!(
             err,
-            "session {} current={} owned={}",
-            view.session.session_id, view.session.current.0, view.owned
-        )?;
-        if let Some(turn) = &view.selected_turn
-            && (turn.summary.progress.is_closed() || !view.owned)
-            && let Some(line) = summary_once(turn.turn_id, &turn.summary, render)
-        {
-            writeln!(err, "{line}")?;
-        }
-    }
-    Ok(())
-}
-fn render_history(history: LocalHistory, json: bool) -> Result<()> {
-    if json {
-        println!(
             "{}",
-            serde_json::json!({"type":"history","history":history})
-        );
-        return Ok(());
-    }
-    println!(
-        "--- conversation on the pinned root path, current={} ---",
-        history.anchor.head.0
-    );
-    for entry in history.entries {
-        for retry in entry.retries {
-            println!(
-                "{}: {} (retry after {} ms)",
-                notice_level_label(&retry.notice.level),
-                retry.notice.text,
-                retry.delay_ms
-            );
+            match summary.outcome {
+                PublicTurnOutcome::Completed => "completed",
+                PublicTurnOutcome::Failed => "failed",
+                PublicTurnOutcome::Cancelled => "cancelled",
+            }
+        )?;
+        if let Some(notice) = &summary.notice {
+            write!(err, " {}: {}", level(&notice.level), notice.text)?;
         }
-        println!("node {} agent={}", entry.node.0, entry.agent_name);
-        render_node(&entry.content)?;
+        writeln!(err)?;
     }
-    Ok(())
-}
-fn render_node(node: &Node) -> Result<()> {
-    let (message, results) = match node {
-        Node::Root => return Ok(()),
-        Node::UserMessage { message, .. } => (message.clone(), vec![]),
-        Node::Step { .. } => match node.step_content() {
-            Some(content) => (content.assistant, content.results),
-            None => return Ok(()),
-        },
-    };
-    for part in message.parts {
-        if let MessageSemantic::Text { text } = part.semantic {
-            println!("{text}");
+    if verbose {
+        if let Some(head) = &state.head {
+            writeln!(err, "session: {}", head.session_id)?;
         }
-    }
-    for result in results {
-        println!(
-            "{} · {}",
-            result.name,
-            serde_json::to_string(&result.payload)?
-        );
-    }
-    Ok(())
-}
-fn render_history_error(error: &HistoryReadError, json: bool) {
-    connection_notice(
-        "history not read; the known outcome stands; reconnect to read it",
-        json,
-    );
-    report_error(
-        &anyhow::Error::new(error.clone()).context(HistoryFailure),
-        json,
-    );
-}
-fn render_cancel_error(
-    session_id: Option<SessionId>,
-    turn_id: Option<TurnId>,
-    error: &lattice_api::local::LocalError,
-    json: bool,
-) {
-    connection_notice(
-        &format!(
-            "cancel diagnostic: session {} turn {}",
-            session_label(session_id),
-            turn_id.map_or_else(|| "unknown".into(), |id| id.to_string())
-        ),
-        json,
-    );
-    report_error(&error.clone().into(), json);
-}
-fn render_cancel(status: CancelStatus, json: bool) {
-    match status {
-        CancelStatus::Taken => {
-            if json {
-                println!(
-                    "{}",
-                    serde_json::json!({"type":"cancel_acknowledged","owned":true})
-                );
-            } else {
-                eprintln!(
-                    "daemon took over the cancel; the durable outcome is still to be queried"
-                );
+        let mut known = None;
+        let mut unknown_attempts = 0;
+        for attempt in state.steps.values().flat_map(|s| &s.attempts) {
+            match attempt.usage {
+                Some(usage) => {
+                    known = Some(match known {
+                        Some(total) => usage.saturating_add(total),
+                        None => usage,
+                    })
+                }
+                None => unknown_attempts += 1,
             }
         }
-        CancelStatus::NotTaken => connection_notice(
-            "daemon did not take over this cancel at the decision point; background work may still exist",
-            json,
-        ),
-        CancelStatus::Unknown => connection_notice("cancel acknowledgement unknown", json),
-        CancelStatus::Pending | CancelStatus::Moot => {}
-    }
-}
-fn connection_notice(message: &str, json: bool) {
-    if json {
-        println!(
-            "{}",
-            serde_json::json!({"type":"connection","message":message})
+        let known = known.map(serde_json::to_value).transpose()?.unwrap_or_else(
+            || serde_json::json!({"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}),
         );
-    } else {
-        eprintln!("{message}");
+        let usage = if unknown_attempts == 0 {
+            serde_json::json!({"kind":"complete","total":known})
+        } else {
+            serde_json::json!({"kind":"partial","known":known,"unknown_attempts":unknown_attempts})
+        };
+        writeln!(err, "usage: {}", serde_json::to_string(&usage)?)?;
+        if !state.results.is_empty() {
+            writeln!(err, "tools: {} results", state.results.len())?;
+        }
     }
-}
-#[derive(Debug)]
-struct HistoryFailure;
-impl std::fmt::Display for HistoryFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("fixed history read")
-    }
-}
-#[derive(Debug)]
-struct Submission;
-impl std::fmt::Display for Submission {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Turn submission")
-    }
-}
-fn submission_error(error: lattice_api::local::LocalError) -> anyhow::Error {
-    anyhow::Error::new(error).context(Submission)
+    out.flush()?;
+    err.flush()?;
+    Ok(())
 }
 fn error_record(error: &anyhow::Error) -> (u8, serde_json::Value) {
-    let local = error
-        .downcast_ref::<lattice_api::local::LocalError>()
-        .cloned()
-        .or_else(|| {
-            error
-                .downcast_ref::<HistoryReadError>()
-                .map(|e| e.error.clone())
-        })
-        .or_else(|| {
-            error
-                .downcast_ref::<lattice_api::ApiError>()
-                .cloned()
-                .map(Into::into)
-        });
+    let local = error.downcast_ref::<LocalError>().cloned().or_else(|| {
+        error
+            .downcast_ref::<lattice_api::ApiError>()
+            .cloned()
+            .map(Into::into)
+    });
     let code = match local.as_ref().map(|e| e.kind) {
-        _ if error.is::<HistoryFailure>() => 1,
-        Some(LocalErrorKind::BadRequest | LocalErrorKind::NotFound) => 2,
-        Some(LocalErrorKind::Conflict) if error.is::<Submission>() => 2,
+        Some(LocalErrorKind::BadRequest | LocalErrorKind::NotFound | LocalErrorKind::Conflict) => 2,
         _ => 1,
     };
     let record = match local {
-        Some(e) => {
-            serde_json::json!({"type":"error","kind":e.kind,"message":e.message,"recovery":e.recovery,"store":e.store})
+        Some(error) => {
+            let mut value = serde_json::to_value(error).expect("local error");
+            value["type"] = serde_json::json!("error");
+            value
         }
         None => {
             serde_json::json!({"type":"error","kind":"internal","message":"command failed; inspect configuration and durable state"})
@@ -706,21 +577,29 @@ fn error_record(error: &anyhow::Error) -> (u8, serde_json::Value) {
     };
     (code, record)
 }
+pub(super) fn render_human_error(value: &serde_json::Value, err: &mut impl Write) -> Result<()> {
+    writeln!(
+        err,
+        "error: {}",
+        value["message"].as_str().unwrap_or("command failed")
+    )?;
+    if !value["store"].is_null() {
+        writeln!(err, "{}", value["store"])?;
+    }
+    Ok(())
+}
 pub fn report_error(error: &anyhow::Error, json: bool) -> std::process::ExitCode {
     let (code, value) = error_record(error);
     if json {
         let _ = writeln!(std::io::stdout(), "{value}");
     } else {
-        let _ = writeln!(
-            std::io::stderr(),
-            "error: {}",
-            value["message"].as_str().unwrap_or("command failed")
-        );
-        if !value["store"].is_null() {
-            let _ = writeln!(std::io::stderr(), "{}", value["store"]);
-        }
+        let _ = render_human_error(&value, &mut std::io::stderr());
     }
     std::process::ExitCode::from(code)
+}
+#[cfg(test)]
+fn submission_error(error: LocalError) -> anyhow::Error {
+    anyhow::Error::new(error).context("Turn submission")
 }
 pub(crate) fn load_named_profile(
     agent_name: &str,
@@ -748,13 +627,13 @@ pub(crate) fn safe_agents_dir(
     Ok(path)
 }
 pub(crate) use lattice_api::validate_agents_dir;
+
+#[cfg(test)]
+#[path = "config_error_tests.rs"]
+mod config_error_tests;
 #[cfg(test)]
 #[path = "run_ipc_tests.rs"]
 mod ipc_tests;
 #[cfg(test)]
 #[path = "run_tests.rs"]
 mod tests;
-
-#[cfg(test)]
-#[path = "config_error_tests.rs"]
-mod config_error_tests;

@@ -20,7 +20,7 @@ use tokio::{
 };
 use zeroize::Zeroizing;
 
-const MAGIC: &[u8; 8] = b"LTLOCAL3";
+const MAGIC: &[u8; 8] = b"LTLOCAL4";
 pub(super) const MAX_FRAME: usize = 16 * 1024 * 1024;
 pub(super) const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -206,8 +206,20 @@ pub(super) async fn connect(layout: crate::StateLayout) -> Result<UnixStream> {
 }
 
 pub(super) async fn read<T: serde::de::DeserializeOwned>(stream: &mut UnixStream) -> Result<T> {
+    read_frame(stream).await?.ok_or_else(eof)
+}
+fn eof() -> LocalError {
+    LocalError::new(
+        LocalErrorKind::Transport,
+        "local connection ended before the message was complete",
+    )
+}
+async fn read_frame<T: serde::de::DeserializeOwned>(stream: &mut UnixStream) -> Result<Option<T>> {
     let mut magic = [0; 8];
-    stream.read_exact(&mut magic).await?;
+    if stream.read(&mut magic[..1]).await? == 0 {
+        return Ok(None);
+    }
+    stream.read_exact(&mut magic[1..]).await?;
     if &magic != MAGIC {
         return Err(protocol());
     }
@@ -217,7 +229,9 @@ pub(super) async fn read<T: serde::de::DeserializeOwned>(stream: &mut UnixStream
     }
     let mut bytes = Zeroizing::new(vec![0; len]);
     stream.read_exact(&mut bytes).await?;
-    serde_json::from_slice(&bytes).map_err(|_| protocol())
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|_| protocol())
 }
 
 struct Frame(Zeroizing<Vec<u8>>);
@@ -315,12 +329,28 @@ impl ResponseReader {
     pub(super) async fn read_with_progress<T: serde::de::DeserializeOwned>(
         &mut self,
         stream: &mut UnixStream,
-        mut progress: impl FnMut(),
+        progress: impl FnMut(),
     ) -> Result<T> {
+        self.next_with_progress(stream, progress)
+            .await?
+            .ok_or_else(eof)
+    }
+    /// 只有完整消息之间的 EOF 是正常结束，半帧或半条消息仍是传输失败。
+    pub(super) async fn next_with_progress<T: serde::de::DeserializeOwned>(
+        &mut self,
+        stream: &mut UnixStream,
+        mut progress: impl FnMut(),
+    ) -> Result<Option<T>> {
         let next_message = self.next_message.checked_add(1).ok_or_else(protocol)?;
         let mut json = String::new();
         loop {
-            let frame: ResponseFrame = read(stream).await?;
+            let Some(frame) = read_frame::<ResponseFrame>(stream).await? else {
+                return if json.is_empty() {
+                    Ok(None)
+                } else {
+                    Err(eof())
+                };
+            };
             if frame.message_id != self.next_message
                 || frame.offset != json.len() as u64
                 || frame.json_fragment.is_empty()
@@ -332,7 +362,7 @@ impl ResponseReader {
             if frame.complete {
                 let response = serde_json::from_str(&json).map_err(|_| protocol())?;
                 self.next_message = next_message;
-                return Ok(response);
+                return Ok(Some(response));
             }
         }
     }
@@ -343,12 +373,12 @@ mod frame_tests {
     use super::*;
 
     #[tokio::test]
-    async fn v3_accepts_current_frames_and_rejects_old_empty_and_oversized_frames() {
+    async fn v4_accepts_current_frames_and_rejects_old_empty_and_oversized_frames() {
         for (magic, length, payload, valid) in [
-            (*b"LTLOCAL3", 4_u32, b"null".as_slice(), true),
+            (*b"LTLOCAL4", 4_u32, b"null".as_slice(), true),
             (*b"LTLOCAL2", 4, b"null".as_slice(), false),
-            (*b"LTLOCAL3", 0, b"".as_slice(), false),
-            (*b"LTLOCAL3", (MAX_FRAME + 1) as u32, b"".as_slice(), false),
+            (*b"LTLOCAL4", 0, b"".as_slice(), false),
+            (*b"LTLOCAL4", (MAX_FRAME + 1) as u32, b"".as_slice(), false),
         ] {
             let (mut sender, mut receiver) = UnixStream::pair().unwrap();
             sender.write_all(&magic).await.unwrap();

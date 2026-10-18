@@ -1,1060 +1,1144 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
+//! 视图推送、历史查询与回执的消费：条目按 NodeId 维护，状态消息按是否新到进入 Dock 或对话记录。
+use super::fixtures::*;
 use super::*;
-use lattice_api::local::{LocalError, ObservationSnapshot, TurnView};
-use serde_json::json;
+use lattice_api::local::LocalErrorKind;
 
-const SID: &str = "11111111111141118111111111111111";
-fn read_error() -> LocalError {
-    lattice_api::ApiError::StoreUnavailable("persistent history read failed".into()).into()
+fn turn(n: u64) -> TurnId {
+    numbered_turn(n)
 }
-fn app() -> App {
-    App::new(
-        SessionContext {
-            session_id: None,
-            active_agent: "test".into(),
-        },
-        false,
-        Path::new("/nonexistent-tui-test-history"),
-    )
+
+fn block_id(app: &App, marker: &str) -> BlockId {
+    app.blocks
+        .entries
+        .iter()
+        .find(|entry| match &entry.block {
+            Block::User(text) | Block::Assistant(text) => text.contains(marker),
+            Block::HistoryAssistant(text) => text.text.contains(marker),
+            _ => false,
+        })
+        .unwrap_or_else(|| panic!("no block with {marker}"))
+        .id
 }
-/// 已关闭的 Turn 的结局；`progress` 与结局一致。
-fn summary(outcome: &str) -> serde_json::Value {
-    let (notice, end) = match outcome {
-        "failed" => (
-            json!({"level":"error","text":"provider failure"}),
-            json!({"end":"stop","cause":{"cause":"process_exit"}}),
-        ),
-        "cancelled" => (
-            json!({"level":"info","text":"cancelled by user"}),
-            json!({"end":"stop","cause":{"cause":"cancelled"}}),
-        ),
-        _ => (serde_json::Value::Null, json!({"end":"finish"})),
+
+fn docked(app: &App) -> String {
+    app.dock
+        .message()
+        .map_or_else(String::new, |status| status.text.clone())
+}
+
+fn tool_states(app: &App) -> Vec<ToolState> {
+    app.blocks
+        .iter()
+        .filter_map(|block| match block {
+            Block::Tool { state, .. } => Some(state.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn entries_replace_by_node_in_place_and_new_ones_append() {
+    let mut app = test_app(true);
+    let t = turn(1);
+    open_view(
+        &mut app,
+        head(2, Some(t), true),
+        vec![user(1, t, 1, "prompt"), step(2, t, 0).sent().entry()],
+    );
+    app.apply_view(text(2, 0, 0, &[("draft answer", false)]));
+    let draft = block_id(&app, "draft answer");
+    app.push_status(status(NoticeLevel::Info, "between"));
+    let closed = || {
+        step(2, t, 0)
+            .text("draft answer final")
+            .tool(1, true)
+            .completed_attempt(1234)
+            .continued()
+            .entry()
     };
-    json!({"outcome":outcome,"notice":notice,"progress":{"progress":"closed","end":end}})
-}
-fn view(id: TurnId, outcome: &str) -> ObservationSnapshot {
-    serde_json::from_value(json!({
-        "session":{"session_id":SID,"project_store_key":"0".repeat(64),"current":2,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},
-        "current_agent":"test","selected_turn":{"session_id":SID,"turn_id":id,"user_node":1,"agent_name":"test","accepted_at":"2026-01-01T00:00:00Z","ended_at":"2026-01-01T00:00:01Z","summary":summary(outcome),"usage":{"kind":"partial","known":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0},"unknown_attempts":1},"steps":[]},
-        "unclosed_step":null,"history":{"session_id":SID,"head":2},"attempt":null,"cursor":{"epoch":"test","sequence":1},"owned":false
-    })).unwrap()
-}
-/// 执行者消失在 `progress` 阶段：Session 当前位置停在这一轮未关闭的 Step 上，后台没有 Owner。
-fn ownerless(id: TurnId, progress: &str, reply: serde_json::Value) -> ObservationSnapshot {
-    let mut value = serde_json::to_value(view(id, "failed")).unwrap();
-    value["selected_turn"]["summary"]["progress"] = json!({"progress":progress});
-    value["history"]["head"] = json!(1);
-    value["unclosed_step"] = json!([2, {
-        "kind":"step","parent":1,"turn_id":id,"step_ordinal":0,"progress":{"progress":progress},
-        "attempts":[],"reply":reply,"slots":[],"updated_at":"2026-01-01T00:00:01Z"
-    }]);
-    serde_json::from_value(value).unwrap()
-}
-
-#[test]
-fn new_display_has_no_session_until_acceptance() {
-    let mut app = app();
-    app.input.set_text(" original ");
-    assert_eq!(app.submit().as_deref(), Some(" original "));
-    assert!(app.ctx.session_id.is_none());
-    let id = app.current_turn.unwrap();
-    app.apply_update(LocalUpdate::Submission {
-        turn_id: id,
-        result: Err(read_error()),
-    });
-    assert_eq!(app.input.text(), " original ");
-    assert!(app.ctx.session_id.is_none());
-    let accepted = TurnView::from(view(id, "completed").selected_turn.as_ref().unwrap());
-    app.apply_update(LocalUpdate::Submission {
-        turn_id: id,
-        result: Ok(Acceptance::Accepted { turn: accepted }),
-    });
-    assert_eq!(app.ctx.session_id.unwrap().as_str(), SID);
+    app.apply_view(LocalUpdate::Head(head(3, Some(t), true)));
+    app.apply_view(entry_update(closed()));
+    app.apply_view(entry_update(step(3, t, 1).sent().entry()));
+    app.apply_view(text(3, 0, 0, &[("second step", false)]));
+    // 同一节点再推一次（例如推送读到了多一次提交）：显示不变。
+    app.apply_view(entry_update(closed()));
+    assert_eq!(transcript(&app).matches("prompt").count(), 1);
+    assert_eq!(transcript(&app).matches("draft answer").count(), 1);
+    assert_eq!(
+        block_id(&app, "draft answer final"),
+        draft,
+        "同一 NodeId 原位替换，块身份不变"
+    );
+    // 状态消息出现后不移动：第 2 步原位更新，第 3 步接在提示之后。
+    assert!(row(&app, "draft answer final") < row(&app, "between"));
+    assert!(row(&app, "between") < row(&app, "second step"));
+    assert_eq!(app.model.as_deref(), Some("model-a"));
+    assert_eq!(app.provider.as_deref(), Some("openai"));
+    assert_eq!(app.context_tokens, Some(1234));
 }
 
 #[test]
-fn summary_survives_slow_failed_history_and_is_not_duplicated() {
-    for (outcome, shown) in [
-        ("completed", "完成"),
-        ("failed", "失败：provider failure"),
-        ("cancelled", "已取消：cancelled by user"),
-    ] {
-        let mut app = app();
-        let id = lattice_api::local::new_turn_id();
-        let key = lattice_api::local::ModelAttemptKey {
-            turn_id: id,
-            model_step_ordinal: 0,
-            attempt_ordinal: 1,
-        };
-        app.apply_turn_event(TurnEvent::TokenDelta {
-            key,
-            content: "live answer".into(),
-        });
-        let view = view(id, outcome);
-        app.apply_update(LocalUpdate::State {
-            view: Box::new(view.clone()),
-            phase: ObservationPhase::NoOwner,
-            error: Some(read_error()),
-        });
-        app.apply_update(LocalUpdate::Reset {
-            view: Box::new(view.clone()),
-            generation: 1,
-        });
-        app.apply_update(LocalUpdate::History {
-            anchor: view.history.clone(),
-            generation: 1,
-            stale: false,
-            result: Err(lattice_api::local::HistoryReadError {
-                context: lattice_api::local::HistoryReadContext::Worker,
-                error: read_error(),
-            }),
-        });
+fn own_submission_user_block_is_replaced_by_its_user_message() {
+    let mut app = test_app(true);
+    open_view(&mut app, head(0, None, false), Vec::new());
+    app.input.set_text("hello there");
+    assert_eq!(app.submit().as_deref(), Some("hello there"));
+    let (t, session) = app.submission_identity().unwrap();
+    assert_eq!(session, SubmitSession::Existing(sid()));
+    let user_line = |app: &App| {
+        transcript(app)
+            .lines()
+            .find(|line| line.contains("── USER "))
+            .unwrap()
+            .to_owned()
+    };
+    assert!(!user_line(&app).contains('#'), "条目未到的一轮还没有序号");
+    let pending = block_id(&app, "hello there");
+    app.push_status(status(NoticeLevel::Info, "after submit"));
+    app.apply_submission(receipt(t, accepted(t)));
+    assert!(
+        transcript(&app).contains("── unused "),
+        "接受即显示助手标题线"
+    );
+    assert_eq!(app.phase, TurnPhase::Streaming, "会话头指向它之前仍在运行");
+    app.apply_view(LocalUpdate::Head(head(2, Some(t), true)));
+    app.apply_view(entry_update(user(1, t, 7, "hello there")));
+    app.apply_view(entry_update(step(2, t, 0).sent().entry()));
+    let shown = transcript(&app);
+    assert_eq!(shown.matches("hello there").count(), 1, "{shown}");
+    assert_eq!(block_id(&app, "hello there"), pending, "原位取代");
+    assert!(row(&app, "hello there") < row(&app, "after submit"));
+    assert!(user_line(&app).ends_with("#7 ──"), "序号取自条目");
+    assert_eq!(shown.matches("── unused ").count(), 1);
+}
+
+#[test]
+fn own_submission_stays_busy_until_its_head_is_confirmed() {
+    let mut app = test_app(true);
+    let a = turn(1);
+    open_view(
+        &mut app,
+        head(2, Some(a), false),
+        vec![
+            user(1, a, 1, "first"),
+            step(2, a, 0).text("done").finished().entry(),
+        ],
+    );
+    app.input.set_text("second");
+    app.submit().unwrap();
+    let (b, _) = app.submission_identity().unwrap();
+    app.input.set_text("queued");
+    assert!(app.submit().is_none(), "运行中 Enter 入队");
+    app.apply_submission(receipt(b, accepted(b)));
+    let busy = |app: &mut App, when: &str| {
+        assert_eq!(app.phase, TurnPhase::Streaming, "{when}");
+        assert_eq!(
+            app.auto_submit(),
+            None,
+            "{when}: 不能凭上一轮的完成发送排队"
+        );
+    };
+    // B 的会话头已到、当前位置的条目未到：已确认的会话头仍是已完成的 A。
+    app.apply_view(LocalUpdate::Head(head(4, Some(b), true)));
+    busy(&mut app, "会话头未确认");
+    // UserMessage 只证明已接受，仍等会话头确认。
+    app.apply_view(entry_update(user(3, b, 2, "second")));
+    busy(&mut app, "只有 UserMessage");
+    app.apply_action(KeyAction::CancelOrClear);
+    assert_eq!(app.cancel_requested.take(), Some(CancelTarget::Own));
+    app.apply_view(entry_update(step(4, b, 0).sent().entry()));
+    assert_eq!(app.auto_submit(), None);
+    assert_eq!(app.queue.messages().count(), 1);
+}
+
+#[test]
+fn a_new_view_rejudges_the_accepted_turn_it_was_waiting_for() {
+    let mut app = test_app(true);
+    open_view(&mut app, head(2, Some(turn(1)), false), turns(1..=1));
+    app.input.set_text("mine");
+    app.submit().unwrap();
+    let (mine, _) = app.submission_identity().unwrap();
+    app.apply_submission(receipt(mine, accepted(mine)));
+    assert_eq!(app.phase, TurnPhase::Streaming, "会话头指向它之前仍在运行");
+    // 重连时这一轮已不在新窗口里：会话头在别的轮，例如它之后又跑了十轮以上。
+    open_view(&mut app, head(24, Some(turn(12)), false), turns(3..=12));
+    assert_eq!(app.phase, TurnPhase::Idle);
+    // 接受回执晚于新视图开始时，初始内容可能读于接受之前，仍等会话头。
+    app.input.set_text("next");
+    app.submit().unwrap();
+    let (next, _) = app.submission_identity().unwrap();
+    app.begin_view();
+    app.apply_submission(receipt(next, accepted(next)));
+    app.apply_view(LocalUpdate::Head(head(24, Some(turn(12)), false)));
+    for entry in turns(3..=12) {
+        app.apply_view(entry_update(entry));
+    }
+    assert_eq!(app.phase, TurnPhase::Streaming);
+}
+
+#[test]
+fn steps_after_an_unaccepted_user_block_get_their_own_assistant_title() {
+    let mut app = test_app(true);
+    open_view(&mut app, head(2, Some(turn(1)), false), turns(1..=1));
+    // 其他客户端的一轮已开始、会话头尚未确认时，本客户端照常提交，随后被拒。
+    let other = turn(2);
+    app.apply_view(LocalUpdate::Head(head(4, Some(other), true)));
+    app.apply_view(entry_update(user(3, other, 2, "other prompt")));
+    app.input.set_text("mine");
+    app.submit().unwrap();
+    let (mine, _) = app.submission_identity().unwrap();
+    app.apply_view(entry_update(step(4, other, 0).text("other answer").entry()));
+    app.apply_submission(receipt(
+        mine,
+        SubmissionResult::Rejected {
+            error: local_error(LocalErrorKind::Busy, "session is busy"),
+        },
+    ));
+    let shown = transcript(&app);
+    let lines: Vec<&str> = shown.lines().collect();
+    let titled = lines[row(&app, "mine")..row(&app, "other answer")]
+        .iter()
+        .any(|line| line.starts_with("── unused ") && line.ends_with("#2 ──"));
+    assert!(
+        titled,
+        "接在未被接受的 USER 块之后的步骤另起助手标题线：{shown}"
+    );
+}
+
+#[test]
+fn recovery_not_found_is_an_error_and_returns_the_input() {
+    for keep_draft in [false, true] {
+        let mut app = test_app(false);
+        app.input.set_text("first");
+        app.submit().unwrap();
+        let (first, _) = app.submission_identity().unwrap();
+        app.apply_submission(receipt(first, SubmissionResult::Unknown { error: None }));
+        app.input.set_text("second");
+        app.submit().unwrap();
+        let (second, _) = app.submission_identity().unwrap();
+        app.apply_submission(receipt(
+            second,
+            SubmissionResult::Rejected {
+                error: LocalError {
+                    conflict: Some(lattice_api::local::ConflictReason::SessionExists),
+                    ..local_error(LocalErrorKind::Conflict, "session exists")
+                },
+            },
+        ));
+        assert_eq!(app.recover_request.take(), Some(first));
+        // 第二条被拒后已放回输入区；用户清空时第一条才放回。
+        assert_eq!(app.input.text(), "second");
+        if !keep_draft {
+            app.input.clear();
+        }
+        app.apply_recovery(first, Err(local_error(LocalErrorKind::NotFound, "no turn")));
+        let error = app.dock.message().unwrap();
+        assert_eq!(error.level, NoticeLevel::Error);
         assert!(
-            app.blocks
-                .iter()
-                .any(|b| matches!(b, Block::Assistant(text) if text == "live answer"))
+            error.text.contains("未被接受") && error.text.contains(&first.to_string()),
+            "{}",
+            error.text
         );
-        app.apply_update(LocalUpdate::State {
-            view: Box::new(view.clone()),
-            phase: ObservationPhase::Finished,
-            error: None,
-        });
-        let text = crate::view::transcript_lines(&app, 200)
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(text.contains(&format!("turn {id} {shown}")), "{text}");
-        // 读取失败是最新的 Warn，暂驻 Dock；此前的观察诊断与结局已落回对话记录。
-        assert_eq!(
-            app.dock.message(&app.blocks),
-            Some(&Status {
-                level: NoticeLevel::Warn,
-                text:
-                    "持久正文不可用；此次内容未验证，/reconnect 重载：读取任务：store unavailable"
-                        .into(),
-                closing: None,
-                retry: None,
-            })
-        );
-        assert!(!text.contains("正文不可用"), "{text}");
-        assert!(text.contains("观察诊断：store unavailable"), "{text}");
-        assert_eq!(
-            app.blocks
-                .iter()
-                .filter(|b| matches!(
-                    b,
-                    Block::Status(Status {
-                        closing: Some(_),
-                        ..
-                    })
-                ))
-                .count(),
-            1
+        if keep_draft {
+            assert_eq!(app.input.text(), "second", "不覆盖输入区已有的内容");
+            assert!(error.text.contains("Ctrl+↑"), "{}", error.text);
+        } else {
+            assert_eq!(app.input.text(), "first", "提交确定未被接受，输入保留");
+            assert!(error.text.contains("输入已保留"), "{}", error.text);
+        }
+        assert_eq!(app.phase, TurnPhase::Idle);
+        // 查无此请求的一次没有建立会话：之后的提交再遇到会话已存在，不再找回它。
+        app.submit().unwrap();
+        let (third, _) = app.submission_identity().unwrap();
+        app.apply_submission(receipt(
+            third,
+            SubmissionResult::Rejected {
+                error: LocalError {
+                    conflict: Some(lattice_api::local::ConflictReason::SessionExists),
+                    ..local_error(LocalErrorKind::Conflict, "session exists")
+                },
+            },
+        ));
+        assert_eq!(app.recover_request, None);
+        // 再次查到它不存在时已没有可归还的输入，提示不写输入的去向。
+        app.apply_recovery(first, Err(local_error(LocalErrorKind::NotFound, "no turn")));
+        let error = app.dock.message().unwrap();
+        assert!(error.text.contains("未被接受"), "{}", error.text);
+        assert!(
+            !error.text.contains("输入已保留") && !error.text.contains("Ctrl+↑"),
+            "{}",
+            error.text
         );
     }
 }
 
 #[test]
-fn retry_replaces_only_its_attempt_and_stale_history_cannot_replace_display() {
-    let mut app = app();
-    let id = lattice_api::local::new_turn_id();
-    let key = lattice_api::local::ModelAttemptKey {
-        turn_id: id,
-        model_step_ordinal: 0,
-        attempt_ordinal: 1,
+fn unknown_submission_is_dropped_once_the_result_is_definite() {
+    let handoff = |id, result| DetachReport {
+        session_id: sid(),
+        turn_id: Some(id),
+        submission: Some(SubmissionReceipt {
+            turn_id: id,
+            result,
+            recovered: false,
+        }),
+        submission_diagnostic: None,
+        cancel: None,
+        cancel_error: None,
+        head: None,
+        summary: None,
     };
-    app.apply_turn_event(TurnEvent::TokenDelta {
-        key,
-        content: "first attempt".into(),
-    });
-    app.apply_turn_event(TurnEvent::LlmRetry {
-        key,
-        delay_ms: 100,
-        notice: lattice_api::local::Notice {
-            level: lattice_api::local::NoticeLevel::Warn,
-            text: "retry diagnostic".into(),
+    for how in 0..5 {
+        let mut app = test_app(true);
+        open_view(&mut app, head(2, Some(turn(1)), false), turns(1..=1));
+        app.input.set_text("mine");
+        app.submit().unwrap();
+        let (id, _) = app.submission_identity().unwrap();
+        app.apply_submission(receipt(id, SubmissionResult::Unknown { error: None }));
+        assert!(app.unknown_submission.is_some());
+        match how {
+            0 => app.apply_submission(receipt(id, accepted(id))),
+            1 => app.apply_view(entry_update(user(3, id, 2, "mine"))),
+            2 => app.apply_recovery(id, Ok(turn_detail(id))),
+            3 => app.apply_handoff(handoff(id, accepted(id))),
+            _ => app.apply_handoff(handoff(
+                id,
+                SubmissionResult::Rejected {
+                    error: local_error(LocalErrorKind::Busy, "busy"),
+                },
+            )),
+        }
+        assert!(app.unknown_submission.is_none(), "{how}");
+    }
+}
+
+#[test]
+fn new_view_and_path_replacement_discard_entries_but_keep_statuses_and_unaccepted_user() {
+    let mut app = test_app(true);
+    let (a, b) = (turn(1), turn(2));
+    open_view(&mut app, head(2, Some(a), false), turns(1..=1));
+    app.push_status(status(NoticeLevel::Info, "kept status"));
+    app.input.set_text("rejected input");
+    app.submit().unwrap();
+    let (rejected, _) = app.submission_identity().unwrap();
+    app.apply_submission(receipt(
+        rejected,
+        SubmissionResult::Rejected {
+            error: local_error(LocalErrorKind::Busy, "session is busy"),
         },
-    });
-    assert!(app.attempt.is_none());
-    assert!(
-        !app.blocks
-            .iter()
-            .any(|block| { matches!(block, Block::Assistant(text) if text == "first attempt") })
-    );
-    assert!(matches!(
-        app.dock.message(&app.blocks),
-        Some(Status { level: NoticeLevel::Warn, text, closing: None, retry: Some(known) })
-            if text.ends_with("：retry diagnostic") && *known == key
     ));
-    let next = lattice_api::local::ModelAttemptKey {
-        attempt_ordinal: 2,
-        ..key
+    assert_eq!(app.input.text(), "rejected input");
+    app.input.clear();
+    let replaced = SessionHead {
+        path_replaced: true,
+        ..head(4, Some(b), true)
     };
-    app.apply_turn_event(TurnEvent::TokenDelta {
-        key: next,
-        content: "retry answer".into(),
-    });
-    let view = view(id, "completed");
-    app.apply_update(LocalUpdate::Reset {
-        view: Box::new(view.clone()),
-        generation: 2,
-    });
-    app.apply_update(LocalUpdate::History {
-        anchor: view.history.clone(),
-        generation: 1,
-        stale: true,
-        result: Ok(Box::new(lattice_api::local::LocalHistory {
-            anchor: view.history,
-            entries: vec![],
-        })),
-    });
-    let text = crate::view::transcript_lines(&app, 200)
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(text.contains("retry answer"), "{text}");
-    assert!(!text.contains("first attempt"), "{text}");
+    app.apply_view(LocalUpdate::Head(replaced));
+    app.apply_view(entry_update(user(3, b, 1, "new prompt")));
+    app.apply_view(entry_update(step(4, b, 0).sent().entry()));
+    app.apply_view(text(4, 0, 0, &[("partial", false)]));
+    let shown = transcript(&app);
+    assert!(
+        !shown.contains("prompt-1") && !shown.contains("answer-1"),
+        "{shown}"
+    );
+    for kept in ["kept status", "rejected input", "new prompt", "partial"] {
+        assert_eq!(shown.matches(kept).count(), 1, "{kept}: {shown}");
+    }
+    // 重新开始 watch：生成中的文字随旧条目丢弃，等新视图从头给出。
+    open_view(
+        &mut app,
+        head(4, Some(b), true),
+        vec![user(3, b, 1, "new prompt"), step(4, b, 0).sent().entry()],
+    );
+    let shown = transcript(&app);
+    assert!(!shown.contains("partial"), "{shown}");
+    for kept in ["kept status", "rejected input", "new prompt"] {
+        assert_eq!(shown.matches(kept).count(), 1, "{kept}: {shown}");
+    }
+    assert!(row(&app, "kept status") < row(&app, "new prompt"));
+}
+
+/// 打开第 3、4 轮并翻到顶部；返回发出的历史查询。
+fn scrolled_to_top(app: &mut App) -> OlderRequest {
+    app.term_width = 80;
+    app.term_height = 12;
+    open_view(app, head(8, Some(turn(4)), false), turns(3..=4));
+    for _ in 0..20 {
+        app.apply_action(KeyAction::ScrollPageUp);
+        if let Some(request) = app.older_request.take() {
+            return request;
+        }
+    }
+    panic!("翻到顶部而第 1 轮尚未装入时应查询更早的轮");
+}
+
+fn top_line(app: &mut App) -> String {
+    app.prepare_transcript();
+    crate::view::transcript_lines(app, 80)[app.viewport.scroll()].to_string()
 }
 
 #[test]
-fn closed_owned_snapshot_is_idle_before_history_and_finished_is_separate() {
-    let mut app = app();
-    app.input.set_text("prompt");
-    app.submit();
-    let id = app.current_turn.unwrap();
-    let mut view = view(id, "completed");
-    view.owned = true;
-    app.apply_update(LocalUpdate::State {
-        view: Box::new(view.clone()),
-        phase: ObservationPhase::Live,
-        error: None,
-    });
-    assert_eq!(app.phase, TurnPhase::Idle);
-    assert_eq!(app.current_turn, None);
-    assert_ne!(
-        app.state.as_ref().unwrap().phase,
-        ObservationPhase::Finished
+fn older_turns_insert_before_the_earliest_turn_and_keep_the_view() {
+    let mut app = test_app(true);
+    let request = scrolled_to_top(&mut app);
+    assert_eq!(
+        request.before,
+        NodeId(5),
+        "以已装入的最早一轮的 UserMessage 为 before"
     );
-    app.apply_update(LocalUpdate::Reset {
-        view: Box::new(view.clone()),
-        generation: 1,
-    });
-    app.apply_update(LocalUpdate::Finished {
-        turn: Some(lattice_api::local::TurnRef {
-            session_id: view.session.session_id,
-            turn_id: id,
+    assert_eq!(request.session_id, sid());
+    let top = top_line(&mut app);
+    app.apply_older(
+        request,
+        Ok(LocalHistory {
+            entries: turns(1..=2),
         }),
-        anchor: view.history,
-        generation: 1,
-    });
-    assert_eq!(
-        app.state.as_ref().unwrap().phase,
-        ObservationPhase::Finished
     );
+    assert_eq!(top_line(&mut app), top, "视图停在原来看到的内容上");
+    assert!(row(&app, "prompt-1") < row(&app, "answer-2"));
+    assert!(row(&app, "answer-2") < row(&app, "prompt-3"));
+    // 查询带来的结局不是新消息，直接进对话记录。
+    assert!(app.dock.message().is_none(), "{}", docked(&app));
+    assert_eq!(
+        transcript(&app).matches("失败：provider failure").count(),
+        4
+    );
+    for _ in 0..20 {
+        app.apply_action(KeyAction::ScrollPageUp);
+    }
+    assert_eq!(app.older_request, None, "第 1 轮已装入");
 }
 
 #[test]
-fn loaded_step_and_terminal_tool_cannot_be_overwritten_by_late_events() {
-    let mut app = app();
-    let id = lattice_api::local::new_turn_id();
-    let key = ModelAttemptKey {
-        turn_id: id,
-        model_step_ordinal: 0,
-        attempt_ordinal: 0,
-    };
-    let invocation = "30000000-0000-4000-8000-000000000003".to_string();
-    app.replace_history(vec![
-        Block::Step(StepKey {
-            turn_id: id,
-            ordinal: 0,
-        }),
-        Block::Assistant("saved".into()),
-        Block::Tool {
-            id: invocation.clone(),
-            name: "observe.workspace".into(),
-            state: ToolState::Unavailable {
-                outcome: "succeeded".into(),
-            },
-            source: ToolSource::HistoryResult,
-        },
-    ]);
-    app.apply_turn_event(TurnEvent::TokenDelta {
-        key,
-        content: "saved".into(),
-    });
-    app.apply_turn_event(TurnEvent::ToolCallFinished {
-        id: invocation.parse().unwrap(),
-        name: "observe.workspace".into(),
-        outcome: ToolResultOutcome::Failed,
-        material: MaterialSummary::NoContent,
-        error_summary: Some("late".into()),
-    });
-    assert_eq!(
-        app.blocks
-            .iter()
-            .filter(|b| matches!(b, Block::Assistant(_)))
-            .count(),
-        1
-    );
-    assert_eq!(
-        app.blocks
-            .iter()
-            .filter(|b| matches!(b, Block::Tool { .. }))
-            .count(),
-        1
-    );
-    assert!(app.blocks.iter().any(|b|matches!(b,Block::Tool{state:ToolState::Unavailable{outcome},..} if outcome=="succeeded")));
-    // 关闭事件和快照携带同一结局，已装入的 Step 不能吞掉或重复显示说明。
-    let end = json!({"end": "stop", "cause": {"cause": "process_exit"}});
-    let summary: lattice_api::local::TurnSummary = serde_json::from_value(json!({
-        "outcome":"failed","notice":{"level":"error","text":"late failure"},
-        "progress":{"progress":"closed","end":end}
-    }))
-    .unwrap();
-    let step = serde_json::from_value(json!({
-        "node": 3,
-        "key": {"turn_id": id, "ordinal": 1},
-        "progress": {"progress": "closed", "end": end},
-        "end": end,
-        "attempts": [],
-        "slots": [],
-        "updated_at": "2026-01-01T00:00:01Z"
-    }))
-    .unwrap();
-    app.apply_turn_event(TurnEvent::TurnFailed {
-        turn: lattice_api::local::TurnRef {
-            session_id: SID.parse().unwrap(),
-            turn_id: id,
-        },
-        step,
-        summary: summary.clone(),
-    });
-    let mut closed = view(id, "failed");
-    closed.selected_turn.as_mut().unwrap().summary = summary;
-    app.apply_update(LocalUpdate::State {
-        view: Box::new(closed),
-        phase: ObservationPhase::NoOwner,
-        error: None,
-    });
-    assert_eq!(
-        app.blocks
-            .iter()
-            .filter(|block| matches!(block, Block::Status(Status {
-                closing: Some(_), text, ..
-            }) if text.ends_with("：late failure")))
-            .count(),
-        1
-    );
-}
-
-#[test]
-fn hidden_reasoning_does_not_change_text_on_snapshot_or_history_replacement() {
-    let id = lattice_api::local::new_turn_id();
-    let key = ModelAttemptKey {
-        turn_id: id,
-        model_step_ordinal: 0,
-        attempt_ordinal: 0,
-    };
-    let mut live = app();
-    live.apply_turn_event(TurnEvent::TokenDelta {
-        key,
-        content: "before ".into(),
-    });
-    live.apply_turn_event(TurnEvent::ReasoningDelta {
-        key,
-        content: "hidden".into(),
-    });
-    live.apply_turn_event(TurnEvent::TokenDelta {
-        key,
-        content: "after".into(),
-    });
-    let render = |app: &App| {
+fn older_turns_keep_the_view_on_the_turns_below_the_banner_and_a_leading_status() {
+    let mut app = test_app(true);
+    app.show_banner();
+    app.push_status(status(NoticeLevel::Info, "leading status"));
+    let request = scrolled_to_top(&mut app);
+    assert_eq!(app.focus, Focus::Dock);
+    // 产品中翻到顶部时第 0 行总是横幅；插入点在横幅与前置状态消息之后。
+    assert!(top_line(&mut app).contains("LATTICE"));
+    let below = row(&app, "leading status") + 1;
+    let screen = |app: &mut App| {
+        app.prepare_transcript();
+        let height = app.transcript_height(crate::view::transcript_lines(app, 80).len());
         crate::view::transcript_lines(app, 80)
             .iter()
+            .skip(app.viewport.scroll())
+            .take(height)
             .map(ToString::to_string)
             .collect::<Vec<_>>()
     };
-    let expected = render(&live);
-    assert!(
-        expected
-            .iter()
-            .any(|line| line.trim_start() == "before after"),
-        "{expected:?}"
+    let before = screen(&mut app);
+    assert!(below < before.len(), "第 3 轮的开头在屏幕上：{before:#?}");
+    app.apply_older(
+        request,
+        Ok(LocalHistory {
+            entries: turns(1..=2),
+        }),
     );
-    assert!(!expected.iter().any(|line| line.contains("hidden")));
-
-    let mut snapshot = ownerless(id, "requesting", serde_json::Value::Null);
-    snapshot.owned = true;
-    snapshot.attempt = live.attempt.clone();
-    let mut reconnected = app();
-    reconnected.apply_update(LocalUpdate::Reset {
-        view: Box::new(snapshot.clone()),
-        generation: 1,
-    });
-    let resumed = render(&reconnected);
-
-    let history = serde_json::from_value(json!({
-        "anchor":{"session_id":SID,"head":2},
-        "entries":[{"node":2,"agent_name":"test","summary":snapshot.selected_turn.as_ref().unwrap().summary,"retries":[],"content":{
-            "kind":"step","parent":1,"turn_id":id,"step_ordinal":0,
-            "progress":{"progress":"closed","end":{"end":"finish"}},"attempts":[],
-            "reply":{"role":"assistant","origin":"open_ai_compatible","parts":[
-                {"semantic":{"text":{"text":"before "}}},
-                {"semantic":{"reasoning":{"text":"hidden"}}},
-                {"semantic":{"text":{"text":"after"}}}
-            ]},"slots":[],"updated_at":"2026-01-01T00:00:01Z"
-        }}]
-    }))
-    .unwrap();
-    live.apply_update(LocalUpdate::History {
-        anchor: lattice_api::local::HistoryAnchor {
-            session_id: SID.parse().unwrap(),
-            head: lattice_api::local::NodeId(2),
-        },
-        generation: 0,
-        stale: false,
-        result: Ok(Box::new(history)),
-    });
-    assert_eq!((resumed, render(&live)), (expected.clone(), expected));
+    // 原来看到的第 3 轮仍在屏幕上同一位置；横幅仍在对话记录最上方，翻到顶部才看得到。
+    assert_eq!(screen(&mut app)[below..], before[below..]);
+    assert!(row(&app, "leading status") < row(&app, "prompt-1"));
+    assert!(row(&app, "LATTICE") < row(&app, "leading status"));
 }
 
-/// TUI 自己产生的消息：一件事一条消息，等级按消息种类在一处决定，Warn 与 Error 才进 Dock。
 #[test]
-fn own_messages_are_single_and_carry_their_level() {
-    use NoticeLevel::{Error, Info, Warn};
-    type Trigger = Box<dyn FnOnce(&mut App)>;
-    let id = TurnId::parse("11111111-1111-4111-8111-111111111111").unwrap();
-    let turn = || TurnView::from(view(id, "completed").selected_turn.as_ref().unwrap());
-    let update = |update: LocalUpdate| -> Trigger {
-        Box::new(move |app: &mut App| app.apply_update(update))
+fn older_turns_failure_warns_and_requeries_on_the_next_top() {
+    let mut app = test_app(true);
+    let request = scrolled_to_top(&mut app);
+    app.apply_older(
+        request,
+        Err(local_error(
+            LocalErrorKind::StoreUnavailable,
+            "history read failed",
+        )),
+    );
+    let warn = app.dock.message().unwrap();
+    assert_eq!(warn.level, NoticeLevel::Warn);
+    assert!(warn.text.contains("history read failed"), "{}", warn.text);
+    assert_eq!(app.older_request, None, "失败后不自动重查");
+    app.apply_action(KeyAction::Insert(' '));
+    app.apply_action(KeyAction::ScrollPageUp);
+    assert_eq!(app.older_request, Some(request), "下次翻到顶部时重新查询");
+}
+
+#[test]
+fn older_turns_arriving_after_path_replacement_are_dropped() {
+    let mut app = test_app(true);
+    let request = scrolled_to_top(&mut app);
+    app.apply_view(LocalUpdate::Head(SessionHead {
+        path_replaced: true,
+        ..head(8, Some(turn(4)), false)
+    }));
+    for entry in turns(3..=4) {
+        app.apply_view(entry_update(entry));
+    }
+    app.apply_older(
+        request,
+        Ok(LocalHistory {
+            entries: turns(1..=2),
+        }),
+    );
+    assert!(!transcript(&app).contains("prompt-1"));
+    for _ in 0..20 {
+        app.apply_action(KeyAction::ScrollPageUp);
+    }
+    let again = app.older_request.expect("新路径照常往上翻");
+    assert_ne!(again.epoch, request.epoch);
+}
+
+#[test]
+fn older_turns_arriving_while_a_new_head_is_pending_are_already_ended() {
+    let mut app = test_app(true);
+    let request = scrolled_to_top(&mut app);
+    // 新一轮的会话头已到、当前位置的条目未到时，查询带来一轮执行者已消失、最后一步未关闭的旧轮。
+    app.apply_view(LocalUpdate::Head(head(9, Some(turn(5)), true)));
+    app.apply_older(
+        request,
+        Ok(LocalHistory {
+            entries: vec![user(1, turn(1), 1, "prompt-1"), step(2, turn(1), 0).entry()],
+        }),
+    );
+    // 会话头随当前位置的条目确认后，旧轮的结局仍不是新消息，也不暂停队列。
+    app.apply_view(entry_update(user(9, turn(5), 5, "prompt-5")));
+    assert!(app.dock.message().is_none(), "{}", docked(&app));
+    assert!(!app.queue.is_paused());
+}
+
+#[test]
+fn generating_text_is_replaced_by_the_entry_and_restarts_on_retry() {
+    let mut app = test_app(true);
+    let t = turn(1);
+    open_view(
+        &mut app,
+        head(2, Some(t), true),
+        vec![user(1, t, 1, "prompt"), step(2, t, 0).sent().entry()],
+    );
+    // reasoning 不显示，但计入续发的字节位置。
+    app.apply_view(text(2, 0, 0, &[("Hel", false), ("think", true)]));
+    app.apply_view(text(2, 0, 8, &[("lo", false)]));
+    let shown = transcript(&app);
+    assert!(
+        shown.contains("Hello") && !shown.contains("think"),
+        "{shown}"
+    );
+    app.push_status(status(NoticeLevel::Info, "after text"));
+    let retrying = || step(2, t, 0).retried("info", "HTTP 429");
+    app.apply_view(LocalUpdate::Head(head(2, Some(t), true)));
+    app.apply_view(entry_update(retrying().sent().entry()));
+    assert!(
+        !transcript(&app).contains("Hello"),
+        "失败的尝试的文字随之移除"
+    );
+    app.apply_view(text(2, 1, 0, &[("New", false)]));
+    app.apply_view(text(2, 1, 3, &[(" answer", false)]));
+    assert!(
+        row(&app, "New answer") < row(&app, "after text"),
+        "显示在所属 Step 的位置"
+    );
+    app.apply_view(entry_update(
+        retrying()
+            .completed_attempt(10)
+            .text("New answer")
+            .finished()
+            .entry(),
+    ));
+    app.apply_view(text(2, 1, 10, &[("!", false)]));
+    let shown = transcript(&app);
+    assert_eq!(shown.matches("New answer").count(), 1, "{shown}");
+    assert!(!shown.contains("New answer!"), "{shown}");
+    assert!(row(&app, "New answer") < row(&app, "after text"));
+}
+
+#[test]
+fn retry_notices_and_closings_reach_the_dock_only_when_new() {
+    let mut app = test_app(true);
+    let (a, b) = (turn(1), turn(2));
+    let running = |retries: &[(&str, &str)]| {
+        let mut step = step(4, b, 0);
+        for (level, text) in retries {
+            step = step.retried(level, text);
+        }
+        step
     };
-    let cancel = |status: CancelStatus, error: Option<LocalError>| {
-        update(LocalUpdate::Cancel {
-            turn_id: id,
-            status,
-            error,
-        })
+    open_view(
+        &mut app,
+        head(4, Some(b), true),
+        vec![
+            user(1, a, 1, "first"),
+            step(2, a, 0)
+                .retried("warn", "old retry")
+                .completed_attempt(1)
+                .text("first answer")
+                .stopped("failed")
+                .entry(),
+            user(3, b, 2, "second"),
+            running(&[("warn", "initial retry")]).sent().entry(),
+        ],
+    );
+    assert!(
+        app.dock.message().is_none(),
+        "初始条目中的提示与结局不打断输入"
+    );
+    let shown = transcript(&app);
+    for old in ["old retry", "initial retry", "失败：provider failure"] {
+        assert_eq!(shown.matches(old).count(), 1, "{old}: {shown}");
+    }
+    let retries = [
+        ("warn", "initial retry"),
+        ("info", "info retry"),
+        ("error", "fresh retry"),
+    ];
+    app.apply_view(LocalUpdate::Head(head(4, Some(b), true)));
+    app.apply_view(entry_update(running(&retries).sent().entry()));
+    // 等级取自条目：Info 直接进对话记录，Error 暂驻 Dock 且不在条目中重复。
+    assert!(docked(&app).contains("fresh retry"), "{}", docked(&app));
+    assert_eq!(app.dock.message().unwrap().level, NoticeLevel::Error);
+    assert!(transcript(&app).contains("info retry"));
+    assert!(!transcript(&app).contains("fresh retry"));
+    app.apply_view(entry_update(running(&retries).sent().entry()));
+    assert!(
+        !transcript(&app).contains("fresh retry"),
+        "再推同一条目不重复"
+    );
+    app.apply_action(KeyAction::Insert(' '));
+    assert!(
+        row(&app, "info retry") < row(&app, "fresh retry"),
+        "释放后回到条目中的原位"
+    );
+    app.apply_view(entry_update(
+        running(&retries)
+            .completed_attempt(1)
+            .text("second answer")
+            .stopped("failed")
+            .entry(),
+    ));
+    assert!(
+        docked(&app).contains(&format!("turn {b} 失败")),
+        "{}",
+        docked(&app)
+    );
+    assert!(!transcript(&app).contains(&format!("turn {b} 失败")));
+    app.apply_action(KeyAction::Insert(' '));
+    assert!(row(&app, "second answer") < row(&app, &format!("turn {b} 失败")));
+    // 暂驻的提示不随条目丢弃而消失；释放后所属条目已不在，不再出现。
+    let c = turn(3);
+    app.apply_view(LocalUpdate::Head(head(6, Some(c), true)));
+    app.apply_view(entry_update(user(5, c, 3, "third")));
+    app.apply_view(entry_update(
+        step(6, c, 0)
+            .retried("warn", "dropped retry")
+            .sent()
+            .entry(),
+    ));
+    assert!(docked(&app).contains("dropped retry"));
+    open_view(&mut app, head(2, Some(a), false), turns(1..=1));
+    assert!(docked(&app).contains("dropped retry"));
+    app.apply_action(KeyAction::Insert(' '));
+    assert!(!transcript(&app).contains("dropped retry"));
+}
+
+#[test]
+fn reconnect_keeps_shown_content_until_the_first_initial_entry() {
+    let mut app = test_app(true);
+    let (a, b) = (turn(1), turn(2));
+    let mut entries = turns(1..=1);
+    entries.push(user(3, b, 2, "second"));
+    entries.push(step(4, b, 0).sent().entry());
+    open_view(&mut app, head(4, Some(b), true), entries);
+    app.apply_view(text(4, 0, 0, &[("partial", false)]));
+    // 重连后只收到会话头就断开：已显示的条目、结局与生成中的文字保留。
+    app.begin_view();
+    app.apply_view(LocalUpdate::Head(head(4, Some(b), true)));
+    app.apply_view(LocalUpdate::Connection {
+        status: ConnectionStatus::Eof,
+    });
+    let shown = transcript(&app);
+    let closing = format!("turn {a} 失败");
+    for kept in [
+        "prompt-1",
+        "answer-1",
+        closing.as_str(),
+        "second",
+        "partial",
+    ] {
+        assert_eq!(shown.matches(kept).count(), 1, "{kept}: {shown}");
+    }
+    // 再次重连：首个初始条目到达时才按新视图替换。
+    app.begin_view();
+    app.apply_view(LocalUpdate::Head(head(4, Some(b), true)));
+    assert!(transcript(&app).contains("prompt-1"));
+    app.apply_view(entry_update(user(3, b, 2, "second")));
+    let shown = transcript(&app);
+    assert!(
+        !shown.contains("prompt-1") && !shown.contains("partial"),
+        "{shown}"
+    );
+    app.apply_view(entry_update(step(4, b, 0).sent().entry()));
+    assert_eq!(transcript(&app).matches("second").count(), 1);
+}
+
+#[test]
+fn parked_message_reloaded_with_a_new_path_is_not_shown_twice() {
+    let mut app = test_app(true);
+    let t = turn(1);
+    let running = |retried: bool| {
+        let step = step(2, t, 0);
+        let step = if retried {
+            step.retried("error", "parked retry")
+        } else {
+            step
+        };
+        step.sent().entry()
     };
-    let state = |view: ObservationSnapshot, error: Option<LocalError>| {
-        update(LocalUpdate::State {
-            view: Box::new(view),
-            phase: ObservationPhase::NoOwner,
-            error,
-        })
+    open_view(
+        &mut app,
+        head(2, Some(t), true),
+        vec![user(1, t, 1, "prompt"), running(false)],
+    );
+    app.apply_view(LocalUpdate::Head(head(2, Some(t), true)));
+    app.apply_view(entry_update(running(true)));
+    assert!(docked(&app).contains("parked retry"), "{}", docked(&app));
+    // 新路径仍含这个节点与尝试：条目重建后，暂驻期间仍不在条目中重复显示。
+    app.apply_view(LocalUpdate::Head(SessionHead {
+        path_replaced: true,
+        ..head(2, Some(t), true)
+    }));
+    app.apply_view(entry_update(user(1, t, 1, "prompt")));
+    app.apply_view(entry_update(running(true)));
+    assert!(docked(&app).contains("parked retry"));
+    assert!(
+        !transcript(&app).contains("parked retry"),
+        "{}",
+        transcript(&app)
+    );
+    app.apply_action(KeyAction::Insert(' '));
+    assert_eq!(transcript(&app).matches("parked retry").count(), 1);
+    // 结局按 TurnId：暂驻时重连，新视图再给出同一轮的结局也不重复显示。
+    let stopped = || step(2, t, 0).text("answer").stopped("failed").entry();
+    app.apply_view(LocalUpdate::Head(head(2, Some(t), false)));
+    app.apply_view(entry_update(stopped()));
+    let closing = format!("turn {t} 失败");
+    assert!(docked(&app).contains(&closing), "{}", docked(&app));
+    open_view(
+        &mut app,
+        head(2, Some(t), false),
+        vec![user(1, t, 1, "prompt"), stopped()],
+    );
+    assert!(docked(&app).contains(&closing));
+    assert!(!transcript(&app).contains(&closing), "{}", transcript(&app));
+    app.apply_action(KeyAction::Insert(' '));
+    assert_eq!(transcript(&app).matches(&closing).count(), 1);
+}
+
+#[test]
+fn ownerless_head_ends_the_turn_and_warns_once_per_view() {
+    let mut app = test_app(true);
+    let t = turn(1);
+    let entries = || {
+        vec![
+            user(1, t, 1, "prompt"),
+            step(2, t, 0)
+                .text("calling")
+                .tool(1, false)
+                .completed_attempt(1)
+                .executing()
+                .entry(),
+        ]
     };
-    let orphan = ownerless(id, "requesting", serde_json::Value::Null);
+    open_view(&mut app, head(2, Some(t), true), entries());
+    assert_eq!(tool_states(&app), [ToolState::Running]);
+    assert_eq!(app.phase, TurnPhase::Streaming);
+    // 会话头之后紧接着给出当前位置的条目；收到它之前不拿新会话头配旧条目判定。
+    app.apply_view(LocalUpdate::Head(head(2, Some(t), false)));
+    assert_eq!(app.phase, TurnPhase::Streaming);
+    assert!(app.dock.message().is_none(), "{}", docked(&app));
+    app.apply_view(entry_update(entries().pop().unwrap()));
+    assert_eq!(app.phase, TurnPhase::Idle);
+    assert!(
+        matches!(tool_states(&app)[..], [ToolState::Failed { .. }]),
+        "结束后按会话库给出的结论显示：{:?}",
+        tool_states(&app)
+    );
+    let warn = app.dock.message().unwrap().clone();
+    assert_eq!(warn.level, NoticeLevel::Warn);
+    assert!(warn.text.contains("执行者已经消失"), "{}", warn.text);
+    // 结局先作为新消息暂驻，随后被 Warn 顶替，落回所属条目。
+    assert_eq!(
+        transcript(&app).matches(&format!("turn {t} 失败")).count(),
+        1
+    );
+    app.apply_view(LocalUpdate::Head(head(2, Some(t), false)));
+    app.apply_view(entry_update(entries().pop().unwrap()));
+    app.apply_action(KeyAction::Insert(' '));
+    assert_eq!(transcript(&app).matches("执行者已经消失").count(), 1);
+    open_view(&mut app, head(2, Some(t), false), entries());
+    assert!(
+        docked(&app).contains("执行者已经消失"),
+        "新视图开始时再提示一次"
+    );
+    assert_eq!(
+        transcript(&app).matches(&format!("turn {t} 失败")).count(),
+        1
+    );
+
+    // 没有 Owner 的会话头先于关闭这一步的条目逐条到达：等到当前位置的条目再判定，不误报。
+    let mut app = test_app(true);
+    open_view(&mut app, head(2, Some(t), true), entries());
+    app.apply_view(LocalUpdate::Head(head(2, Some(t), false)));
+    app.apply_view(entry_update(step(2, t, 0).text("done").finished().entry()));
+    assert_eq!(app.phase, TurnPhase::Idle);
+    assert!(!docked(&app).contains("执行者已经消失"), "{}", docked(&app));
+    assert!(!transcript(&app).contains("执行者已经消失"));
+    assert!(!transcript(&app).contains(&format!("turn {t} 失败")));
+}
+
+#[test]
+fn pending_head_does_not_end_turns_by_the_superseded_head() {
+    let mut app = test_app(true);
+    let (a, b) = (turn(1), turn(2));
+    // 上一轮停在未关闭的一步、没有 Owner：按会话头判为结束。
+    open_view(
+        &mut app,
+        head(2, Some(a), false),
+        vec![user(1, a, 1, "first"), step(2, a, 0).sent().entry()],
+    );
+    assert!(app.turn_ended(a));
+    // 新一轮的会话头已到、条目尚未全部确认时退出：已确认的会话头仍指向上一轮，
+    // 不据它把这一轮判为结束，未关闭的 summary 不作结局输出。
+    app.apply_view(LocalUpdate::Head(head(5, Some(b), true)));
+    app.apply_view(entry_update(user(3, b, 2, "second")));
+    let running = step(4, b, 0).sent().entry();
+    let ConversationEntry::Step { summary, .. } = running.clone() else {
+        unreachable!()
+    };
+    app.apply_view(entry_update(running));
     let report = DetachReport {
-        session_id: None,
-        turn_id: Some(id),
+        session_id: sid(),
+        turn_id: Some(b),
         submission: None,
         submission_diagnostic: None,
-        not_submitted: None,
-        history_error: None,
-        cancel: Some(CancelStatus::Taken),
+        cancel: None,
         cancel_error: None,
-        state: None,
+        head: Some(head(5, Some(b), true)),
+        summary,
     };
-    let handoff: Trigger = Box::new(move |app: &mut App| app.apply_handoff(report));
-    let cases: Vec<(&str, NoticeLevel, Trigger, String)> = vec![
+    let lines = detach_lines(report, app.exit_viewed(Some(b))).join("\n");
+    assert!(!lines.contains(&format!("Turn {b}")), "{lines}");
+    assert!(app.turn_ended(a), "已结束的一轮在会话头待确认时不反复");
+    // 当前位置的条目到达后按新会话头判定。
+    app.apply_view(entry_update(step(5, b, 1).sent().entry()));
+    assert!(!app.turn_ended(b));
+    assert!(app.turn_ended(a));
+}
+
+#[test]
+fn head_diagnostic_is_one_error() {
+    let mut app = test_app(true);
+    let diagnosed = SessionHead {
+        diagnostic: Some(local_error(
+            LocalErrorKind::StoreUnavailable,
+            "commit failed",
+        )),
+        ..head(0, None, false)
+    };
+    open_view(&mut app, diagnosed.clone(), Vec::new());
+    app.apply_view(LocalUpdate::Head(diagnosed));
+    let error = app.dock.message().unwrap();
+    assert_eq!(error.level, NoticeLevel::Error);
+    assert!(error.text.contains("commit failed"));
+    app.apply_action(KeyAction::Insert(' '));
+    assert_eq!(transcript(&app).matches("commit failed").count(), 1);
+}
+
+#[test]
+fn lost_observation_marks_running_tools_unknown_and_keeps_the_turn_running() {
+    let mut app = test_app(true);
+    let t = turn(1);
+    open_view(
+        &mut app,
+        head(2, Some(t), true),
+        vec![
+            user(1, t, 1, "prompt"),
+            step(2, t, 0)
+                .tool(1, false)
+                .completed_attempt(1)
+                .executing()
+                .entry(),
+        ],
+    );
+    app.apply_view(LocalUpdate::Connection {
+        status: ConnectionStatus::Idle,
+    });
+    assert_eq!(app.phase, TurnPhase::Streaming);
+    assert!(!app.connected);
+    assert!(app.queue.is_paused());
+    assert_eq!(tool_states(&app), [ToolState::Unknown]);
+    let warn = app.dock.message().unwrap();
+    assert_eq!(
+        (warn.level.clone(), warn.closing.clone()),
+        (NoticeLevel::Warn, None)
+    );
+}
+
+#[test]
+fn own_messages_carry_their_level() {
+    use CancelStatus::*;
+    type Apply = Box<dyn Fn(&mut App, TurnId)>;
+    let cases: Vec<(&str, Apply, NoticeLevel, &str)> = vec![
         (
-            "请求被拒绝或回执失败",
-            Error,
-            update(LocalUpdate::Submission {
-                turn_id: id,
-                result: Err(read_error()),
+            "rejected",
+            Box::new(|app, id| {
+                app.apply_submission(receipt(
+                    id,
+                    SubmissionResult::Rejected {
+                        error: local_error(LocalErrorKind::BadRequest, "bad profile"),
+                    },
+                ))
             }),
-            format!("请求 {id} 被拒绝或回执失败：store unavailable"),
+            NoticeLevel::Error,
+            "bad profile",
         ),
         (
-            "观察诊断",
-            Error,
-            state(view(id, "completed"), Some(read_error())),
-            "观察诊断：store unavailable".into(),
-        ),
-        (
-            "取消诊断",
-            Error,
-            cancel(CancelStatus::Unknown, Some(read_error())),
-            format!(
-                "取消确认未知；请按 TurnId 查询或再次明确取消：{id}\n取消诊断：store unavailable"
-            ),
-        ),
-        (
-            "本地响应异常",
-            Error,
-            update(LocalUpdate::Submission {
-                turn_id: id,
-                result: Ok(Acceptance::NeedsConfiguration {
-                    agent_name: "test".into(),
-                }),
+            "not accepted",
+            // 按 TurnId 查询确认后台没有这个请求。
+            Box::new(|app, id| {
+                app.apply_submission(LocalUpdate::Submit {
+                    update: SubmissionUpdate::Receipt(SubmissionReceipt {
+                        turn_id: id,
+                        result: SubmissionResult::NotAccepted,
+                        recovered: true,
+                    }),
+                })
             }),
-            "本地响应异常".into(),
+            NoticeLevel::Error,
+            "未被接受",
         ),
         (
-            "接受确认未知",
-            Warn,
-            update(LocalUpdate::Submission {
-                turn_id: id,
-                result: Ok(Acceptance::ConfirmationUnknown {
-                    turn_id: id,
-                    session_id: None,
-                }),
+            "unknown",
+            Box::new(|app, id| {
+                app.apply_submission(receipt(
+                    id,
+                    SubmissionResult::Unknown {
+                        error: Some(local_error(LocalErrorKind::Transport, "socket closed")),
+                    },
+                ))
             }),
-            format!("接受确认未知：{id}；保留此 ID 查询，不分配新请求"),
+            NoticeLevel::Warn,
+            "socket closed",
         ),
         (
-            "提交结果未知",
-            Warn,
-            update(LocalUpdate::SubmissionUnknown {
-                turn_id: id,
-                error: None,
+            "recovered",
+            Box::new(|app, id| {
+                app.apply_submission(LocalUpdate::Submit {
+                    update: SubmissionUpdate::Receipt(SubmissionReceipt {
+                        turn_id: id,
+                        result: accepted(id),
+                        recovered: true,
+                    }),
+                })
             }),
-            format!("提交结果未知：{id}；继续观察同一请求，不自动重发"),
+            NoticeLevel::Info,
+            "按 TurnId 查到已接受的请求",
         ),
         (
-            "提交结果未知带诊断",
-            Warn,
-            update(LocalUpdate::SubmissionUnknown {
-                turn_id: id,
-                error: Some(read_error()),
+            "cancelled before sending",
+            Box::new(|app, id| {
+                app.apply_submission(LocalUpdate::Submit {
+                    update: SubmissionUpdate::Receipt(SubmissionReceipt {
+                        turn_id: id,
+                        result: SubmissionResult::NotAccepted,
+                        recovered: false,
+                    }),
+                })
             }),
-            format!("提交结果未知：{id}；继续观察同一请求，不自动重发\nstore unavailable"),
+            NoticeLevel::Info,
+            "提交在发出前取消",
         ),
         (
-            "后台未接管本次取消",
-            Warn,
-            cancel(CancelStatus::NotTaken, None),
-            format!("后台未接管本次取消；不表示没有后台工作，请查询原 Turn：{id}"),
-        ),
-        (
-            "取消确认未知",
-            Warn,
-            cancel(CancelStatus::Unknown, None),
-            format!("取消确认未知；请按 TurnId 查询或再次明确取消：{id}"),
-        ),
-        (
-            "持久正文不可用",
-            Warn,
-            update(LocalUpdate::History {
-                anchor: orphan.history.clone(),
-                generation: 1,
-                stale: true,
-                result: Err(lattice_api::local::HistoryReadError {
-                    context: lattice_api::local::HistoryReadContext::Worker,
-                    error: read_error(),
-                }),
-            }),
-            "旧切点持久正文不可用；此次内容未验证，/reconnect 重载：读取任务：store unavailable"
-                .into(),
-        ),
-        (
-            "观察连接结束",
-            Warn,
-            update(LocalUpdate::Connection(ConnectionStatus::Eof)),
-            "观察连接结束；不代表 Turn 已关闭，/reconnect 重连".into(),
-        ),
-        (
-            "观察无增量",
-            Warn,
-            update(LocalUpdate::Connection(ConnectionStatus::Idle)),
-            format!(
-                "观察 {} s 无增量；执行状态未知，/reconnect 重连",
-                lattice_api::STREAM_IDLE_TIMEOUT_SECS
-            ),
-        ),
-        (
-            "观察连接出错",
-            Warn,
-            update(LocalUpdate::Connection(ConnectionStatus::Error(
-                read_error(),
-            ))),
-            "观察连接出错；执行状态未知，/reconnect 重连：store unavailable".into(),
-        ),
-        (
-            "执行者已消失",
-            Warn,
-            state(orphan.clone(), None),
-            format!("turn {id} 的执行者已经消失，它停在已写入的进度；可以直接发送新消息或退回"),
-        ),
-        (
-            "找回既有请求",
-            Info,
-            update(LocalUpdate::Submission {
-                turn_id: id,
-                result: Ok(Acceptance::Existing { turn: turn() }),
-            }),
-            format!("找回既有请求：session {SID} turn {id}；未重复执行"),
-        ),
-        (
-            "已请求取消",
-            Info,
-            cancel(CancelStatus::Pending, None),
-            format!("已请求取消；等待后台接管回执：{id}"),
-        ),
-        (
+            "cancel taken",
+            Box::new(|app, id| app.apply_cancel_result(id, Ok(true))),
+            NoticeLevel::Info,
             "后台已接管取消",
-            Info,
-            cancel(CancelStatus::Taken, None),
-            format!("后台已接管取消；持久终态仍待确认：{id}"),
         ),
         (
-            "取消交接已结束",
-            Info,
-            cancel(CancelStatus::Moot, None),
-            format!("本次取消交接已结束；不作用于其他 Turn，已知结果保持：{id}"),
+            "cancel not taken",
+            Box::new(|app, id| app.apply_cancel_result(id, Ok(false))),
+            NoticeLevel::Warn,
+            "后台未接管本次取消",
         ),
         (
-            "本客户端已停止后续配置提交",
-            Info,
-            update(LocalUpdate::NotSubmitted {
-                turn_id: id,
-                stage: lattice_api::local::NotSubmittedStage::FreezingConfiguration,
+            "cancel error",
+            Box::new(|app, id| {
+                app.apply_cancel_result(
+                    id,
+                    Err(local_error(LocalErrorKind::Internal, "cancel denied")),
+                )
             }),
-            format!("本客户端已停止后续配置提交：turn {id}；不表示该身份全局未执行"),
+            NoticeLevel::Error,
+            "cancel denied",
         ),
         (
-            "历史交接",
-            Info,
-            handoff,
-            format!("历史交接：后台已接管取消；持久终态仍待确认：session 未接受 turn {id}"),
+            "own cancel unknown",
+            Box::new(|app, id| {
+                app.apply_submission(LocalUpdate::Cancel {
+                    turn_id: id,
+                    status: Unknown,
+                    owned: None,
+                    error: None,
+                })
+            }),
+            NoticeLevel::Warn,
+            "取消确认未知",
         ),
     ];
-    for (name, level, trigger, text) in cases {
-        let mut app = app();
-        trigger(&mut app);
-        // Turn 结局是后端给出等级的消息，不计入本表。
+    for (name, apply, level, marker) in cases {
+        let mut app = test_app(false);
+        app.input.set_text("prompt");
+        app.submit().unwrap();
+        let (id, _) = app.submission_identity().unwrap();
+        apply(&mut app, id);
         let pushed = app
             .blocks
             .iter()
             .filter_map(|block| match block {
-                Block::Status(status) if status.closing.is_none() => Some(status),
+                Block::Status(status) => Some(status.clone()),
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(
-            pushed,
-            [&Status {
-                level: level.clone(),
-                text,
-                closing: None,
-                retry: None,
-            }],
-            "{name}"
-        );
-        assert_eq!(
-            app.dock.message(&app.blocks),
-            (level != Info).then_some(pushed[0]),
-            "{name}"
-        );
-    }
-}
-
-/// 本进程看着结束的 Turn，结局的等级来自 notice：失败是 Error，先暂驻 Dock，释放后在对话记录
-/// 出现一次；完成与取消是 Info，直接进对话记录。重复到达的同一结局不再显示。
-#[test]
-fn turn_closing_follows_the_notice_level() {
-    for (outcome, level, symbol, shown) in [
-        ("completed", NoticeLevel::Info, "✓", "完成"),
-        ("failed", NoticeLevel::Error, "✗", "失败：provider failure"),
-        (
-            "cancelled",
-            NoticeLevel::Info,
-            "✗",
-            "已取消：cancelled by user",
-        ),
-    ] {
-        let mut app = app();
-        let id = lattice_api::local::new_turn_id();
-        app.current_turn = Some(id);
-        let line = format!("{symbol} turn {id} {shown}");
-        let closed = LocalUpdate::State {
-            view: Box::new(view(id, outcome)),
-            phase: ObservationPhase::Finished,
-            error: None,
-        };
-        let rows = |app: &App| {
-            crate::view::transcript_lines(app, 200)
-                .iter()
-                .filter(|row| row.to_string() == line)
-                .count()
-        };
-        app.apply_update(closed.clone());
-        let docked = level == NoticeLevel::Error;
-        assert_eq!(
-            app.dock
-                .message(&app.blocks)
-                .map(|status| status.level.clone()),
-            docked.then_some(level),
-            "{outcome}"
-        );
-        assert_eq!(rows(&app), usize::from(!docked), "{outcome}");
-        if docked {
-            app.apply_action(KeyAction::Insert(' '));
-        }
-        assert!(app.dock.shows_input(), "{outcome}");
-        assert_eq!(rows(&app), 1, "{outcome}");
-        app.apply_update(closed);
-        assert!(app.dock.shows_input(), "{outcome}");
-        assert_eq!(rows(&app), 1, "{outcome}");
-    }
-}
-
-/// 提交时找回的请求早已执行完：回执已让本进程不再把它当作运行中的 Turn，
-/// 但结局仍是这次提交的结果，照常交给 Dock。
-#[test]
-fn closing_of_a_recovered_submission_still_reaches_the_dock() {
-    let mut app = app();
-    let id = lattice_api::local::new_turn_id();
-    let closed = view(id, "failed");
-    app.apply_update(LocalUpdate::Submission {
-        turn_id: id,
-        result: Ok(Acceptance::Existing {
-            turn: TurnView::from(closed.selected_turn.as_ref().unwrap()),
-        }),
-    });
-    assert_eq!(app.current_turn, None);
-    app.apply_update(LocalUpdate::State {
-        view: Box::new(closed),
-        phase: ObservationPhase::Finished,
-        error: None,
-    });
-    assert_eq!(
-        app.dock
-            .message(&app.blocks)
-            .map(|status| status.level.clone()),
-        Some(NoticeLevel::Error)
-    );
-}
-
-/// 历史带回每个 Turn 的结局：装入后每轮末尾各有一行，进行中的 Turn 没有，这些行不进 Dock。
-/// 本进程看着结束、暂驻 Dock 的结局被历史接管后仍然暂驻，释放后只出现一次。
-/// 某个 Turn 离开当前路径后，它的结局行不保留。
-#[test]
-fn history_shows_each_turn_closing_once_and_takes_over_the_live_one() {
-    let turns = [0, 1, 2].map(|_| lattice_api::local::new_turn_id());
-    let failed = summary("failed");
-    let completed = summary("completed");
-    let running = json!({"outcome":"failed","notice":{"level":"error","text":"process exit"},"progress":{"progress":"requesting"}});
-    let history = |summaries: &[&serde_json::Value], unfinished: Option<TurnId>| {
-        let entries = summaries
-            .iter()
-            .zip(turns)
-            .enumerate()
-            .map(|(n, (summary, turn))| {
-                json!({"node":n + 1,"agent_name":"test","summary":summary,"retries":[],
-                    "content":super::loop_tests::user_message_node(n as u64, turn, &format!("ask-{n}"))})
-            })
-            .collect::<Vec<_>>();
-        crate::session::history_blocks(
-            serde_json::from_value(json!({
-                "anchor":{"session_id":SID,"head":entries.len()},"entries":entries,
-            }))
-            .unwrap(),
-            unfinished,
-        )
-    };
-    let lines = [
-        format!("✗ turn {} 失败：provider failure", turns[0]),
-        format!("✓ turn {} 完成", turns[1]),
-        format!("✗ turn {} 失败：provider failure", turns[2]),
-    ];
-    let rows = |app: &App| {
-        crate::view::transcript_lines(app, 200)
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-    };
-    let at = |app: &App, text: &str| rows(app).iter().position(|row| row == text);
-    let count = |app: &App, text: &str| rows(app).iter().filter(|row| *row == text).count();
-
-    // 重新打开：前两轮已关闭，第三轮仍在进行。
-    let mut app = app();
-    app.replace_history(history(&[&failed, &completed, &running], Some(turns[2])));
-    assert!(app.dock.shows_input(), "历史里的结局不进 Dock");
-    let (first, second) = (at(&app, &lines[0]).unwrap(), at(&app, &lines[1]).unwrap());
-    assert!(first < at(&app, "ask-1").unwrap() && at(&app, "ask-1").unwrap() < second);
-    assert!(second < at(&app, "ask-2").unwrap());
-    assert_eq!(count(&app, &lines[2]), 0, "进行中的 Turn 没有结局");
-
-    // 本进程看着第三轮重试后失败：结局暂驻 Dock；随后历史带回同一结局，接管后仍暂驻。
-    app.current_turn = Some(turns[2]);
-    app.apply_turn_event(TurnEvent::LlmRetry {
-        key: lattice_api::local::ModelAttemptKey {
-            turn_id: turns[2],
-            model_step_ordinal: 0,
-            attempt_ordinal: 0,
-        },
-        delay_ms: 500,
-        notice: lattice_api::local::Notice {
-            level: lattice_api::local::NoticeLevel::Warn,
-            text: "provider failure".into(),
-        },
-    });
-    app.apply_update(LocalUpdate::State {
-        view: Box::new(view(turns[2], "failed")),
-        phase: ObservationPhase::Finished,
-        error: None,
-    });
-    assert!(app.dock.message_id().is_some());
-    app.replace_history(history(&[&failed, &completed, &failed], None));
-    let parked = format!("turn {} 失败：provider failure", turns[2]);
-    assert_eq!(
-        app.dock
-            .message(&app.blocks)
-            .map(|status| status.text.as_str()),
-        Some(parked.as_str())
-    );
-    assert_eq!(count(&app, &lines[2]), 0);
-    app.apply_action(KeyAction::Insert(' '));
-    assert!(app.dock.shows_input());
-    for line in &lines {
-        assert_eq!(count(&app, line), 1, "{line}");
-    }
-    // 这一轮的重试提示排在它的结局行之前，结局行是这一轮的最后一行。
-    let retry = at(&app, "第 1 次请求失败，500 ms 后重试：provider failure").unwrap();
-    assert!(at(&app, "ask-2").unwrap() < retry && retry < at(&app, &lines[2]).unwrap());
-
-    // 回退到第一轮之后：后两轮离开当前路径，它们的结局行一起消失。
-    app.replace_history(history(&[&failed], None));
-    assert_eq!(count(&app, &lines[0]), 1);
-    assert_eq!(count(&app, &lines[1]) + count(&app, &lines[2]), 0);
-}
-
-fn transcript_rows(app: &App) -> Vec<String> {
-    crate::view::transcript_lines(app, 200)
-        .iter()
-        .map(|line| line.to_string().trim().to_owned())
-        .collect()
-}
-
-/// 重新打开时看到执行者已消失的一轮：一条 Warn 暂驻 Dock，结局行直接进对话记录。
-/// 停下的那一步只随快照交付，装入后排在结局行之前，结局行仍是这一轮的最后一行；重连不重复。
-#[test]
-fn ownerless_turn_warns_and_closes_after_its_last_step() {
-    let mut app = app();
-    let id = lattice_api::local::new_turn_id();
-    let reply = json!({"role":"assistant","origin":"open_ai_compatible",
-        "parts":[{"semantic":{"text":{"text":"partial reply"}}}]});
-    let snapshot = ownerless(id, "executing", reply);
-    let summary = &snapshot.selected_turn.as_ref().unwrap().summary;
-    let history: lattice_api::local::LocalHistory = serde_json::from_value(json!({
-        "anchor":snapshot.history,
-        "entries":[{"node":1,"agent_name":"test","summary":summary,"retries":[],
-            "content":super::loop_tests::user_message_node(0, id, "ask")}],
-    }))
-    .unwrap();
-    let warn = format!("turn {id} 的执行者已经消失，它停在已写入的进度；可以直接发送新消息或退回");
-    let closing = format!("✗ turn {id} 失败：provider failure");
-    for generation in [1, 2] {
-        app.apply_update(LocalUpdate::State {
-            view: Box::new(snapshot.clone()),
-            phase: ObservationPhase::NoOwner,
-            error: None,
-        });
-        app.apply_update(LocalUpdate::Reset {
-            view: Box::new(snapshot.clone()),
-            generation,
-        });
-        app.apply_update(LocalUpdate::History {
-            anchor: snapshot.history.clone(),
-            generation,
-            stale: false,
-            result: Ok(Box::new(history.clone())),
-        });
-        assert_eq!((app.current_turn, app.phase), (None, TurnPhase::Idle));
-        assert_eq!(
-            app.dock
-                .message(&app.blocks)
-                .map(|status| (status.level.clone(), status.text.clone())),
-            Some((NoticeLevel::Warn, warn.clone()))
-        );
-        let rows = transcript_rows(&app);
-        let at = |text: &str| rows.iter().position(|row| row == text);
-        assert_eq!(
-            rows.iter().filter(|row| **row == closing).count(),
-            1,
-            "{rows:?}"
-        );
-        assert_eq!(
-            rows.iter().filter(|row| *row == "partial reply").count(),
-            1,
-            "{rows:?}"
-        );
+        assert_eq!(pushed.len(), 1, "{name}: 一件事一条消息 {pushed:?}");
+        assert_eq!(pushed[0].level, level, "{name}");
         assert!(
-            at("ask") < at("partial reply") && at("partial reply") < at(&closing),
-            "{rows:?}"
-        );
-    }
-    app.apply_action(KeyAction::Insert(' '));
-    let rows = transcript_rows(&app);
-    assert_eq!(
-        rows.iter().filter(|row| **row == warn).count(),
-        1,
-        "{rows:?}"
-    );
-}
-
-/// 历史带回的重试提示与实时的同一条文字和等级相同，排在所属 Step 的回复之前；它是旧消息，不进 Dock。
-/// 实时已显示、仍暂驻 Dock 的同一提示由历史取代并继续暂驻，释放后只出现一次；迟到的实时提示不再重复。
-#[test]
-fn history_retry_notices_precede_their_step_and_replace_live_ones() {
-    let id = lattice_api::local::new_turn_id();
-    let key = ModelAttemptKey {
-        turn_id: id,
-        model_step_ordinal: 0,
-        attempt_ordinal: 0,
-    };
-    let retry = || TurnEvent::LlmRetry {
-        key,
-        delay_ms: 250,
-        notice: lattice_api::local::Notice {
-            level: NoticeLevel::Warn,
-            text: "HTTP 429 rate_limit_exceeded".into(),
-        },
-    };
-    let history = || {
-        let entries = json!([
-            {"node":1,"agent_name":"test","summary":summary("completed"),"retries":[],
-                "content":super::loop_tests::user_message_node(0, id, "ask")},
-            {"node":2,"agent_name":"test","summary":summary("completed"),
-                "retries":[{"attempt":0,"delay_ms":250,"notice":{"level":"warn","text":"HTTP 429 rate_limit_exceeded"}}],
-                "content":super::loop_tests::step_node(1, id, 0, json!([{"semantic":{"text":{"text":"answer"}}}]))},
-        ]);
-        crate::session::history_blocks(
-            serde_json::from_value(json!({"anchor":{"session_id":SID,"head":2},"entries":entries}))
-                .unwrap(),
-            None,
-        )
-    };
-    let line = "第 1 次请求失败，250 ms 后重试：HTTP 429 rate_limit_exceeded";
-    let count = |app: &App| {
-        transcript_rows(app)
-            .iter()
-            .filter(|row| *row == line)
-            .count()
-    };
-    let ordered = |app: &App| {
-        let rows = transcript_rows(app);
-        let at = |text: &str| rows.iter().position(|row| row == text);
-        at("ask") < at(line) && at(line) < at("answer")
-    };
-
-    let mut live = app();
-    live.apply_turn_event(retry());
-    let shown = live.dock.message(&live.blocks).cloned().unwrap();
-    assert_eq!(shown.text, line);
-
-    let mut reopened = app();
-    reopened.replace_history(history());
-    assert!(reopened.dock.shows_input(), "历史带回的重试提示不进 Dock");
-    let statuses = reopened
-        .blocks
-        .iter()
-        .filter_map(|block| match block {
-            Block::Status(status) if status.closing.is_none() => Some(status),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(statuses, [&shown]);
-    assert!(ordered(&reopened));
-
-    live.apply_turn_event(TurnEvent::TokenDelta {
-        key: ModelAttemptKey {
-            attempt_ordinal: 1,
-            ..key
-        },
-        content: "answer".into(),
-    });
-    live.replace_history(history());
-    assert_eq!(live.dock.message(&live.blocks), Some(&shown));
-    live.apply_action(KeyAction::Insert(' '));
-    assert!(live.dock.shows_input());
-    assert_eq!(count(&live), 1);
-    assert!(ordered(&live));
-    live.apply_turn_event(retry());
-    assert!(live.dock.shows_input());
-    assert_eq!(count(&live), 1);
-}
-
-/// 退出报告只写给人看的文字：结局用中文词，读取位置用中文说明，不打印内部分类或结构体。
-#[test]
-fn detach_lines_describe_outcome_and_read_context_in_words() {
-    use lattice_api::local::{HistoryCursor, HistoryReadContext, NodeId, NodeRef};
-    let id = lattice_api::local::new_turn_id();
-    let anchor = view(id, "completed").history;
-    for (outcome, closing, context, place) in [
-        (
-            "completed",
-            format!("Turn {id} 完成"),
-            HistoryReadContext::Worker,
-            "读取任务",
-        ),
-        (
-            "failed",
-            format!("Turn {id} 失败：provider failure"),
-            HistoryReadContext::Page {
-                anchor: anchor.clone(),
-                cursor: None,
-            },
-            "分页（首页）",
-        ),
-        (
-            "cancelled",
-            format!("Turn {id} 已取消：cancelled by user"),
-            HistoryReadContext::Page {
-                anchor: anchor.clone(),
-                cursor: Some(HistoryCursor {
-                    anchor: anchor.clone(),
-                    node: NodeId(7),
-                    utf8_offset: 0,
-                }),
-            },
-            "分页（自节点 7 起）",
-        ),
-        (
-            "completed",
-            format!("Turn {id} 完成"),
-            HistoryReadContext::Node {
-                node: NodeRef {
-                    session_id: anchor.session_id,
-                    node: NodeId(9),
-                },
-            },
-            "节点 9",
-        ),
-    ] {
-        let lines = detach_lines(
-            DetachReport {
-                session_id: None,
-                turn_id: Some(id),
-                submission: None,
-                submission_diagnostic: None,
-                not_submitted: None,
-                history_error: Some(lattice_api::local::HistoryReadError {
-                    context,
-                    error: read_error(),
-                }),
-                cancel: None,
-                cancel_error: Some(read_error()),
-                state: Some(LocalState {
-                    view: Box::new(view(id, outcome)),
-                    phase: ObservationPhase::Finished,
-                    error: None,
-                }),
-            },
-            false,
+            pushed[0].text.contains(marker),
+            "{name}: {}",
+            pushed[0].text
         );
         assert_eq!(
-            lines,
-            [
-                format!("取消诊断：session 未接受 turn {id}：store unavailable"),
-                closing,
-                format!("持久正文不可用：session 未接受 turn {id}，{place}：store unavailable"),
-            ]
+            app.dock.message().is_some(),
+            level != NoticeLevel::Info,
+            "{name}"
         );
+        if ["rejected", "not accepted", "cancelled before sending"].contains(&name) {
+            assert_eq!(app.input.text(), "prompt", "{name}: 未被接受的输入归还");
+        }
     }
+}
+
+#[test]
+fn detach_lines_describe_receipts_cancel_and_outcome_in_words() {
+    let id = turn(9);
+    let report =
+        |submission, summary: Option<lattice_api::local::TurnSummary>, owner| DetachReport {
+            session_id: sid(),
+            turn_id: Some(id),
+            submission,
+            submission_diagnostic: Some(local_error(LocalErrorKind::Transport, "late failure")),
+            cancel: Some(CancelStatus::Unknown),
+            cancel_error: Some(local_error(LocalErrorKind::Internal, "cancel denied")),
+            head: Some(head(2, Some(id), owner)),
+            summary,
+        };
+    let failed = match step(2, id, 0).stopped("failed").entry() {
+        ConversationEntry::Step { summary, .. } => summary,
+        ConversationEntry::UserMessage { .. } => unreachable!(),
+    };
+    let lines = detach_lines(
+        report(
+            Some(SubmissionReceipt {
+                turn_id: id,
+                result: SubmissionResult::Unknown { error: None },
+                recovered: false,
+            }),
+            failed.clone(),
+            true,
+        ),
+        Viewed::Unknown,
+    );
+    let text = lines.join("\n");
+    for marker in [
+        "提交结果未知",
+        "late failure",
+        "取消未确认",
+        "cancel denied",
+        "失败：provider failure",
+    ] {
+        assert!(text.contains(marker), "{marker}: {text}");
+    }
+    assert!(lines.iter().all(|line| !line.contains("Some(")), "{text}");
+    // 已显示的结局不重述；未关闭且仍有 Owner 时 summary 不是结局。
+    assert!(
+        !detach_lines(report(None, failed, true), Viewed::ClosingShown)
+            .join("\n")
+            .contains("失败")
+    );
+    // 退出报告中的未被接受同样按来源区分：不来自查询的是发出前取消。
+    let not_accepted = |recovered| {
+        detach_lines(
+            DetachReport {
+                submission: Some(SubmissionReceipt {
+                    turn_id: id,
+                    result: SubmissionResult::NotAccepted,
+                    recovered,
+                }),
+                submission_diagnostic: None,
+                cancel: None,
+                cancel_error: None,
+                ..report(None, None, true)
+            },
+            Viewed::Unknown,
+        )
+        .join("\n")
+    };
+    let cancelled = not_accepted(false);
+    assert!(cancelled.contains("提交在发出前取消"), "{cancelled}");
+    assert!(!cancelled.contains("查询"), "{cancelled}");
+    let queried = not_accepted(true);
+    assert!(
+        queried.contains("按 TurnId 查询确认后台没有这个请求"),
+        "{queried}"
+    );
+    let running = match step(2, id, 0).entry() {
+        ConversationEntry::Step { summary, .. } => summary,
+        ConversationEntry::UserMessage { .. } => unreachable!(),
+    };
+    assert!(
+        !detach_lines(report(None, running.clone(), true), Viewed::Unknown)
+            .join("\n")
+            .contains(&format!("Turn {id}"))
+    );
+    // 会话头在别的轮：app 按已确认的会话头与条目判定这一轮已不在执行时照常给出结局；
+    // 只凭报告中的会话头不算，它可能早于这一轮被接受。
+    let elsewhere = || DetachReport {
+        head: Some(head(4, Some(turn(10)), true)),
+        ..report(None, running.clone(), true)
+    };
+    let outcome = format!("Turn {id} 失败");
+    assert!(
+        detach_lines(elsewhere(), Viewed::Ended)
+            .join("\n")
+            .contains(&outcome)
+    );
+    assert!(
+        !detach_lines(elsewhere(), Viewed::Unknown)
+            .join("\n")
+            .contains(&outcome)
+    );
+    // 收到无 Owner 的会话头、同一次推送里的最终条目未到就退出：报告中的 summary 仍是
+    // 未关闭时的投影，不是结局，只有 app 确认结束才给出。
+    let headless = || report(None, running.clone(), false);
+    assert!(
+        !detach_lines(headless(), Viewed::Unknown)
+            .join("\n")
+            .contains(&outcome)
+    );
+    assert!(
+        detach_lines(headless(), Viewed::Ended)
+            .join("\n")
+            .contains(&outcome)
+    );
 }

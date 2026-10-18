@@ -15,12 +15,12 @@ mod support;
 use std::time::Duration;
 
 use lattice_system_harness::{
-    AssertError, CapturedRequest, FixtureHttpServer, HttpFixture, SessionSendDriver, SseScript,
-    TurnEventLine,
+    AssertError, CapturedRequest, FixtureHttpServer, HttpFixture, SendOutcome, SessionSendDriver,
+    SlotOutcome, SseScript,
 };
 use serde_json::Value;
 use support::{
-    assert_clean_send, assert_committed_view_after, cli, direct_world, driver, evidence,
+    assert_clean_send, assert_completed_after_tools, cli, direct_world, driver, evidence,
     finish_scenario, last_tool_content, require, sequence, tool_call, tool_failed, tool_ok,
     tool_result_value, wire_fake_llm,
 };
@@ -29,6 +29,24 @@ fn fetch_network_profile(max_bytes: u64) -> String {
     format!(
         "\n[lancet.network]\nallow_localhost = true\nallowed_hosts = [\"localhost\"]\nmax_web_response_bytes = {max_bytes}\n\n[lancet.capabilities]\nmax_boundary = \"ex\"\n"
     )
+}
+
+/// `method` 第一次调用在 Step 条目中的原始槽位详情，以及回复里同一调用的 InvocationId。
+fn slot_detail<'a>(outcome: &'a SendOutcome, method: &str) -> Option<(&'a Value, &'a Value)> {
+    outcome.entries().into_iter().find_map(|entry| {
+        let slot = entry.raw["step"]["slots"]
+            .as_array()?
+            .iter()
+            .find(|slot| slot["binding"]["method"] == method)?;
+        let call = entry.raw["content"]["reply"]["parts"]
+            .as_array()?
+            .iter()
+            .find(|part| part["semantic"]["tool_call"]["call"]["name"] == method)?;
+        Some((
+            slot,
+            &call["semantic"]["tool_call"]["call"]["invocation_id"],
+        ))
+    })
 }
 
 /// Encoded tool names as advertised on the Chat Completions wire (`a.b` → `a__b`).
@@ -166,18 +184,14 @@ fn direct_tools_fetch_disabled_no_dispatch() {
                 web.captured_requests()
             ),
         )?;
-        // Disabled tool must not reach CEP dispatch (no cep_call_started for fetch.web).
-        let cep_fetch = outcome.events.iter().any(|e| match e {
-            TurnEventLine::Unknown { type_name, raw }
-                if type_name == "cep_call_started" || type_name == "cep.call_started" =>
-            {
-                raw.get("method").and_then(Value::as_str) == Some("fetch.web")
-            }
-            _ => false,
-        });
+        // 未启用的工具不得进入 CEP 分发：fetch.web 槽位都没有开始执行。
         require(
-            !cep_fetch,
-            "disabled fetch.web must not emit cep_call_started",
+            outcome
+                .slots()
+                .iter()
+                .filter(|slot| slot.method == "fetch.web")
+                .all(|slot| slot.outcome == SlotOutcome::NotExecuted),
+            "disabled fetch.web must not be dispatched",
         )?;
         // 目录外调用整批拒绝，保存类型化原因并将 Turn 正常关闭为失败，
         // 不留下未关闭任务，也不为该批次追加模型请求。
@@ -320,26 +334,25 @@ fn direct_tools_fetch_capability_denial_with_public_https() {
             tool_failed(&outcome.parsed, "fetch.web"),
             "fetch.web must fail when network.fetch is denied",
         )?;
-        let cep_started_raw = outcome.events.iter().find_map(|event| match event {
-            TurnEventLine::Unknown { type_name, raw }
-                if type_name == "cep_call_started"
-                    && raw.get("method").and_then(Value::as_str) == Some("fetch.web") =>
-            {
-                Some(raw)
-            }
-            _ => None,
-        });
+        // 准入证据随槽位保存：调用身份是类型化 InvocationId，准入移除了唯一的能力。
+        let slot = slot_detail(&outcome, "fetch.web");
         require(
-            cep_started_raw.is_some_and(|raw| {
-                raw.get("invocation_id")
-                    .and_then(Value::as_str)
+            slot.is_some_and(|(slot, call_id)| {
+                slot["invocation_id"]
+                    .as_str()
                     .is_some_and(|id| id.len() == 36)
-                    && raw.get("semantic_stage").and_then(Value::as_str) == Some("cell_component")
-                    && raw.get("guard_stage").and_then(Value::as_str) == Some("cell_admission")
+                    && slot["invocation_id"] == *call_id
+                    && slot["evidence"]["kind"] == "recorded"
+                    && slot["evidence"]["value"]["admission"]["tool"] == "fetch.web"
+                    && slot["evidence"]["value"]["admission"]["approved_capabilities"]
+                        .as_array()
+                        .is_some_and(|approved| {
+                            !approved
+                                .iter()
+                                .any(|capability| capability == "network.fetch")
+                        })
             }),
-            format!(
-                "fetch.web cep_call_started must carry typed identity and Component stages: {cep_started_raw:?}"
-            ),
+            format!("fetch.web slot must carry typed identity and admission evidence: {slot:?}"),
         )?;
         // The Component never reaches the network host import when admission removes
         // its sole capability.
@@ -357,8 +370,8 @@ fn direct_tools_fetch_capability_denial_with_public_https() {
             !tool_ok(&outcome.parsed, "fetch.web"),
             "capability denial must not succeed fetch.web",
         )?;
-        // 关闭快照核验本次 Turn 的真实结局，不依赖必须收到瞬时终结事件。
-        assert_committed_view_after(&outcome.parsed, "tool_call_finished")?;
+        // 最后一个 Step 条目核验本次 Turn 的真实结局，不依赖瞬时终结事件。
+        assert_completed_after_tools(&outcome.parsed)?;
         Ok(())
     })();
 
@@ -412,83 +425,20 @@ fn direct_tools_todo_write_success() {
             "todo_write ok",
         )?;
         require(outcome.has_completed(), "turn completed")?;
-        let cep_started = outcome.events.iter().position(|event| match event {
-            TurnEventLine::Unknown { type_name, raw } if type_name == "cep_call_started" => {
-                raw.get("method").and_then(Value::as_str) == Some("session.todo_write")
-            }
-            _ => false,
-        });
-        let cep_finished = outcome.events.iter().position(|event| match event {
-            TurnEventLine::Unknown { type_name, raw } if type_name == "cep_call_finished" => {
-                raw.get("method").and_then(Value::as_str) == Some("session.todo_write")
-            }
-            _ => false,
-        });
-        let tool_finished = outcome.events.iter().position(|event| {
-            matches!(
-                event,
-                TurnEventLine::ToolCallFinished { name, .. } if name == "session.todo_write"
-            )
-        });
-        // The ordered emitter holds public completion until both host-bound
-        // runtime lifecycle events have been observed for the same invocation.
+        // 公开的调用身份是类型化 InvocationId：槽位与回复中的调用一致，
+        // 槽位停在 Terminal 并带有经 Cell 准入的证据。
+        let slot = slot_detail(&outcome, "session.todo_write");
         require(
-            cep_started
-                .zip(cep_finished)
-                .zip(tool_finished)
-                .is_some_and(|((started, finished), tool)| started < finished && finished < tool),
-            format!(
-                "todo CEP/tool lifecycle ordering missing: {:?}",
-                outcome.events
-            ),
-        )?;
-        let cep_started_raw = outcome.events.iter().find_map(|event| match event {
-            TurnEventLine::Unknown { type_name, raw }
-                if type_name == "cep_call_started"
-                    && raw.get("method").and_then(Value::as_str) == Some("session.todo_write") =>
-            {
-                Some(raw)
-            }
-            _ => None,
-        });
-        let public_started_id = outcome.events.iter().find_map(|event| match event {
-            TurnEventLine::ToolCallStarted { id, name } if name == "session.todo_write" => {
-                Some(id.as_str())
-            }
-            _ => None,
-        });
-        let public_finished_id = outcome.events.iter().find_map(|event| match event {
-            TurnEventLine::ToolCallFinished { id, name, .. } if name == "session.todo_write" => {
-                Some(id.as_str())
-            }
-            _ => None,
-        });
-        let cep_invocation_id = cep_started_raw
-            .and_then(|raw| raw.get("invocation_id"))
-            .and_then(Value::as_str);
-        require(
-            cep_invocation_id.is_some()
-                && public_started_id == cep_invocation_id
-                && public_finished_id == cep_invocation_id,
-            format!(
-                "public Tool events must use the typed InvocationId: \
-                 started={public_started_id:?} finished={public_finished_id:?} \
-                 cep={cep_invocation_id:?}"
-            ),
-        )?;
-
-        require(
-            cep_started_raw.is_some_and(|raw| {
-                raw.get("invocation_id")
-                    .and_then(Value::as_str)
+            slot.is_some_and(|(slot, call_id)| {
+                slot["invocation_id"]
+                    .as_str()
                     .is_some_and(|id| id.len() == 36)
-                    && raw.get("semantic_stage").and_then(Value::as_str) == Some("cell_component")
-                    && raw.get("guard_stage").and_then(Value::as_str) == Some("cell_admission")
+                    && slot["invocation_id"] == *call_id
+                    && slot["progress"]["state"] == "terminal"
+                    && slot["evidence"]["kind"] == "recorded"
+                    && slot["evidence"]["value"]["admission"]["tool"] == "session.todo_write"
             }),
-            format!(
-                "todo_write must be dispatched to the embedded Component \
-                 (cell_component/cell_admission), got: {cep_started_raw:?}"
-            ),
+            format!("todo_write slot must carry typed identity and admission evidence: {slot:?}"),
         )?;
         require(captures.len() >= 2, "need tool result in next request")?;
         let todos = tool_result_value(&captures[1]).expect("todo result JSON");

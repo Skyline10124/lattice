@@ -160,45 +160,47 @@ fn fast_dotenv_agents_dir_cannot_redirect_profile_lookup() {
         .unwrap();
     let args = &["--json", "run", "boundary control", "--agent", "evil"];
     let from_dotenv = run(&world, &spec, args);
-    let result = lattice_system_harness::assert_exit_code(&from_dotenv, 2)
-        .and_then(|_| {
-            let records = String::from_utf8_lossy(&from_dotenv.stdout)
-                .lines()
-                .map(serde_json::from_str::<Value>)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| AssertError::StdoutMissing {
-                    expected: format!("valid JSONL: {e}"),
-                })?;
-            require(
-                !records
-                    .iter()
-                    .any(|v| v["type"] == "acceptance" && v["result"]["acceptance"] == "accepted"),
-                "invalid directory must not accept a Turn",
-            )?;
-            require(
-                server.captured_requests().is_empty(),
-                "invalid directory must not dispatch",
-            )?;
-            Ok(records.last().expect("typed error").clone())
-        })
-        .and_then(|value| {
-            require(
-                value["kind"] == "bad_request",
-                "refused dotenv override must retain directory validation",
-            )
-        });
+    let result = lattice_system_harness::assert_exit_code(&from_dotenv, 2).and_then(|_| {
+        let sent =
+            lattice_system_harness::parse_send_stdout(&from_dotenv.stdout, from_dotenv.exit_code());
+        require(
+            sent.receipt_error.is_none(),
+            format!("valid submission receipt: {:?}", sent.receipt_error),
+        )?;
+        require(
+            sent.malformed_lines.is_empty(),
+            format!("valid JSONL: {:?}", sent.malformed_lines),
+        )?;
+        require(
+            sent.accepted_turn_id().is_none(),
+            "invalid directory must not accept a Turn",
+        )?;
+        require(
+            server.captured_requests().is_empty(),
+            "invalid directory must not dispatch",
+        )?;
+        // 配置在请求写出前加载失败：拒绝在 `sending` 之后的 `rejected` 回执中。
+        require(
+            sent.rejection()
+                .is_some_and(|error| error.kind == "bad_request"),
+            "refused dotenv override must retain directory validation",
+        )
+    });
     assert_result(&world, "fast-dotenv-agents-dir", &from_dotenv, result);
     // 相同值只有明确来自提交进程时才生效，避免全部禁用变量造成假绿。
     world.set_env("LATTICE_AGENTS_DIR", "");
     let from_process = run(&world, &spec, args);
     let control = assert_exit_success(&from_process).and_then(|_| {
+        let sent = lattice_system_harness::parse_send_stdout(
+            &from_process.stdout,
+            from_process.exit_code(),
+        );
         require(
-            String::from_utf8_lossy(&from_process.stdout)
-                .lines()
-                .map(|line| serde_json::from_str::<Value>(line).expect("JSONL"))
-                .any(|value| {
-                    value["type"] == "acceptance" && value["result"]["acceptance"] == "accepted"
-                }),
+            sent.receipt_error.is_none(),
+            format!("valid submission receipt: {:?}", sent.receipt_error),
+        )?;
+        require(
+            sent.accepted_turn_id().is_some(),
             "process override must permit the selected project profile",
         )
     });

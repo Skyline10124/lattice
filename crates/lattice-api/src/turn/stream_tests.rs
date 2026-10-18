@@ -10,11 +10,14 @@ use std::sync::{
 use std::time::Duration;
 
 #[tokio::test]
-async fn stream_turn_error_after_partial_closes_without_persisting_partial() {
+async fn stream_turn_error_after_partial_output_ends_attempt_without_a_reply() {
     let fixture = setup_with_events(
         vec![
             LlmEvent::Token {
                 content: "partial output".into(),
+            },
+            LlmEvent::Reasoning {
+                content: "thinking".into(),
             },
             LlmEvent::Token {
                 content: " before error".into(),
@@ -46,6 +49,24 @@ async fn stream_turn_error_after_partial_closes_without_persisting_partial() {
         matches!(&events.last().unwrap(), TurnEvent::TurnFailed { summary, .. } if summary.notice.as_ref().unwrap().text.contains("connection reset"))
     );
     assert_eq!(detail.summary.outcome, PublicTurnOutcome::Failed);
+    let read = fixture.store.begin_read().unwrap();
+    let node = read
+        .node(lattice_session::store::NodeRef {
+            session_id: detail.session_id,
+            node: lattice_session::store::NodeId(2),
+        })
+        .unwrap();
+    let lattice_session::store::Node::Step {
+        reply, attempts, ..
+    } = node
+    else {
+        panic!("step")
+    };
+    assert!(reply.is_none(), "失败的半截输出不能变成完整回复");
+    assert!(matches!(
+        &attempts[0].progress,
+        lattice_session::store::AttemptProgress::Ended { .. }
+    ));
     assert_eq!(
         fixture
             .store
@@ -183,36 +204,24 @@ async fn stream_turn_retry_uses_profile_backoff_and_cap() {
     })
     .await
     .unwrap();
-    let mut subscription = client
-        .subscribe(
-            crate::local::TurnTarget {
-                session_id: Some(detail.session_id),
-                turn_id: detail.turn_id,
-            },
-            None,
-        )
-        .await
-        .unwrap();
-    let Some(crate::local::Observation::Snapshot { view }) = subscription.next().await.unwrap()
-    else {
-        panic!("reopened snapshot")
+    let mut view = client.watch(detail.session_id).await.unwrap();
+    let Some(crate::local::ViewUpdate::Head(head)) = view.next().await.unwrap() else {
+        panic!("reopened head")
     };
-    assert!(!view.owned);
-    assert_eq!(view.selected_turn.as_ref().unwrap().summary, detail.summary);
-    let Some(crate::local::Observation::Finished { history, .. }) =
-        subscription.next().await.unwrap()
-    else {
-        panic!("reopened history")
+    assert!(!head.owner);
+    view.next().await.unwrap().unwrap();
+    let Some(crate::local::ViewUpdate::Entry { entry }) = view.next().await.unwrap() else {
+        panic!("reopened entry")
     };
-    assert!(subscription.next().await.unwrap().is_none());
-    let entry = history
-        .entries
-        .iter()
-        .find(|e| e.node == detail.steps[0].node)
-        .unwrap();
-    assert_eq!(entry.retries, notices);
-    assert_eq!(entry.summary, detail.summary);
-    assert_eq!(entry.agent_name, detail.agent_name);
+    let lattice_session::store::ConversationEntry::Step {
+        retries, summary, ..
+    } = *entry
+    else {
+        panic!("reopened step")
+    };
+    assert_eq!(retries, notices);
+    assert_eq!(summary, Some(detail.summary));
+    drop(view);
     client.stop().await.unwrap();
     serving.await.unwrap().unwrap();
 }
@@ -284,17 +293,15 @@ async fn stream_turn_final_provider_failure_only_emits_terminal_notice() {
 async fn wait_retry(observer: &ObserverSink) {
     let mut changed = observer.subscribe();
     loop {
-        if let Some(events) = observer.events_after(0)
-            && events.iter().any(|event| {
-                matches!(
-                    event.event,
-                    TurnEvent::LlmRetry {
-                        delay_ms: 10_000,
-                        ..
-                    }
-                )
-            })
-        {
+        if observer.events().iter().any(|event| {
+            matches!(
+                event,
+                TurnEvent::LlmRetry {
+                    delay_ms: 10_000,
+                    ..
+                }
+            )
+        }) {
             break;
         }
         changed.changed().await.unwrap();
@@ -327,10 +334,7 @@ async fn stream_turn_retry_cancellation_closes_without_another_request() {
             .await
             .expect("cancel must interrupt backoff")
             .unwrap()
-            .unwrap()
-    else {
-        panic!("closed")
-    };
+            .unwrap();
     assert_eq!(llm.starts.lock().unwrap().len(), 1);
     assert_eq!(detail.summary.outcome, PublicTurnOutcome::Cancelled);
 }

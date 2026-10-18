@@ -286,30 +286,61 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
     let mut assistant_header = false;
     let mut agent: Option<&str> = None;
     let mut turn = None;
+    // 已经过的各轮的序号与 agent，供被别的 USER 块隔开的步骤重画标题线。
+    let mut turns = std::collections::HashMap::new();
     if let Some((id, banner)) = &app.banner {
         for text in banner {
             lines.extend(body(text, content_w, role_style(Role::DimMeta)));
         }
         owners.extend((0..lines.len()).map(|row| BlockPosition { id: *id, row }));
     }
-    let parked = app.dock.message_id();
     for entry in &app.blocks.entries {
         let block = &entry.block;
         let start = lines.len();
         match block {
-            Block::UserTurn(id, ordinal) => turn = Some((*id, *ordinal)),
-            Block::Step(step) => {
-                if turn.is_some_and(|(id, _)| id != step.turn_id) {
+            Block::UserTurn {
+                turn_id,
+                ordinal,
+                agent: name,
+                ..
+            } => {
+                turn = Some((*turn_id, *ordinal));
+                agent = Some(name);
+                turns.insert(*turn_id, (*ordinal, name.as_str()));
+            }
+            // 助手段标题线在这一轮第一个 Step 条目之前；其后的步骤沿用它。新条目接在末尾，
+            // 这一轮的步骤可能接在别的 USER 块（例如本地未被接受的提交）之后，这时另起标题线，
+            // 不显得挂在那个 USER 之下。
+            Block::Step { key, .. } => {
+                if turn.is_some_and(|(id, _)| id != key.turn_id) {
                     turn = None;
+                    if let Some(&(ordinal, name)) = turns.get(&key.turn_id) {
+                        turn = Some((key.turn_id, ordinal));
+                        agent = Some(name);
+                        ensure_assistant_header(
+                            &mut lines,
+                            &mut assistant_header,
+                            agent,
+                            turn.map(|(_, n)| n),
+                            content_w,
+                        );
+                    }
+                } else if key.ordinal == 0 {
+                    ensure_assistant_header(
+                        &mut lines,
+                        &mut assistant_header,
+                        agent,
+                        turn.map(|(_, n)| n),
+                        content_w,
+                    );
                 }
             }
-            Block::AgentName(name) => agent = Some(name),
             Block::User(text) => {
                 transcript_title(
                     &mut lines,
                     "USER",
                     Role::User,
-                    turn.map(|(_, n)| n),
+                    turn.and_then(|(_, n)| n),
                     content_w,
                 );
                 lines.extend(
@@ -325,7 +356,7 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
                     &mut lines,
                     "USER",
                     Role::User,
-                    turn.map(|(_, n)| n),
+                    turn.and_then(|(_, n)| n),
                     content_w,
                 );
                 if matches!(block, Block::RejectedUser(_)) {
@@ -387,21 +418,13 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
                     lines.extend(rendered.iter().map(|row| row.line.clone()));
                 }
             }
-            Block::AssistantStart {
-                turn_id,
-                agent: name,
-            } => {
-                if turn.is_some_and(|(id, _)| id == *turn_id) {
-                    agent = Some(name);
-                    ensure_assistant_header(
-                        &mut lines,
-                        &mut assistant_header,
-                        agent,
-                        turn.map(|(_, n)| n),
-                        content_w,
-                    );
-                }
-            }
+            Block::AssistantStart => ensure_assistant_header(
+                &mut lines,
+                &mut assistant_header,
+                agent,
+                turn.map(|(_, n)| n),
+                content_w,
+            ),
             Block::Assistant(text) if text.is_empty() => {}
             Block::Assistant(text) => {
                 ensure_assistant_header(
@@ -431,7 +454,7 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
             Block::Status(status) => {
                 // Dock 暂驻的那一条不在对话记录重复显示；释放或被顶掉后在原本的
                 // 时间位置出现。行数统计与 viewport 同用过滤结果。
-                if parked == Some(entry.id) {
+                if app.dock.parks(entry.id, status) {
                     continue;
                 }
                 // 只有本轮的结局属于助手段；其余状态消息与序号未知的结局不带标题线。
@@ -545,15 +568,16 @@ fn transcript_title(
     lines.push(title_line(title, role, &right, usize::from(content_w)));
 }
 
+/// `turn` 为所在一轮的序号；不在任何一轮之内时为 None，刚提交、条目未到的一轮还没有序号。
 fn ensure_assistant_header(
     lines: &mut Vec<Line<'static>>,
     shown: &mut bool,
     agent: Option<&str>,
-    ordinal: Option<std::num::NonZeroUsize>,
+    turn: Option<Option<std::num::NonZeroUsize>>,
     content_w: u16,
 ) {
-    if !*shown && let (Some(agent), Some(ordinal)) = (agent, ordinal) {
-        transcript_title(lines, agent, Role::Assistant, Some(ordinal), content_w);
+    if !*shown && let (Some(agent), Some(ordinal)) = (agent, turn) {
+        transcript_title(lines, agent, Role::Assistant, ordinal, content_w);
         *shown = true;
     }
 }
