@@ -325,8 +325,8 @@ The ordered part vector is durable conversation order. A complete reasoning part
 is stored and participates in the provider-neutral semantic digest, but LANCET
 does not interpret it and cross-provider projection does not replay source
 reasoning. Protocol-required signatures remain part-local opaque replay state.
-Partial reasoning or assistant output from an interrupted attempt is diagnostic
-state, not committed conversation.
+Partial reasoning or assistant output from an interrupted attempt is not
+committed conversation and is not stored.
 
 Two digests remain distinct:
 
@@ -346,11 +346,11 @@ domain separator, an explicit byte length, and those canonical bytes. Execution
 uses the canonical object, not the provider's textual spelling.
 
 If any ToolCall in a completed provider batch is invalid, the entire attempt is
-`ModelAttemptRejected(InvalidToolCall)`. Its bounded assembled assistant,
-reasoning, ToolCall data, usage, and diagnostics are retained for Session
-diagnosis, but it does not create `MessageComplete`, `BindingPlanned`, an
-`InvocationId`, or transcript content. The current behavior that drops the
-invalid ToolCall and commits only assistant text is removed.
+`ModelAttemptRejected(InvalidToolCall)`. Its usage and the validation failure
+are retained for Session diagnosis, but it does not create `MessageComplete`,
+`BindingPlanned`, an `InvocationId`, or transcript content. The current
+behavior that drops the invalid ToolCall and commits only assistant text is
+removed.
 
 ### 8. `TurnStarted` is the durable request-acceptance boundary
 
@@ -488,8 +488,8 @@ one ModelAttempt total       16 MiB
 ```
 
 Exceeding a limit stops consumption and records
-`ModelAttemptInterrupted(OutputLimitExceeded)` with bounded diagnostics. No
-partial conversation or InvocationId is produced.
+`ModelAttemptInterrupted(OutputLimitExceeded)`. No partial conversation or
+InvocationId is produced.
 
 Each attempt stores provider-reported `Option<TokenUsage>`. Missing usage is
 unknown, not zero; failed/interrupted attempts retain usage if supplied. Retry
