@@ -1144,6 +1144,8 @@ pub fn derive_send_exit_code(records: &[SendRecord]) -> SendExitCode {
         _ => SendExitCode::Failed,
     }
 }
+/// 仅用于 JSON 模式的 send/run/follow 输出；正常退出的提交必须交付唯一回执。
+/// `exit_code` 为 None 表示进程未正常退出，允许保留缺少回执的部分输出。
 pub fn parse_send_stdout(stdout: &[u8], exit_code: Option<i32>) -> SendOutcome {
     let mut result = SendOutcome {
         exit_code: SendExitCode::from_code(exit_code),
@@ -1165,6 +1167,27 @@ pub fn parse_send_stdout(stdout: &[u8], exit_code: Option<i32>) -> SendOutcome {
                 raw: raw.to_vec(),
                 reason,
             }),
+        }
+    }
+    // 在明确解析 JSON 记录的入口核验，避免把人类正文中的 JSON 示例当成控制记录。
+    if exit_code.is_some() {
+        let mut sending = result.records.iter().filter_map(|record| match record {
+            SendRecord::Submit(Submit::Sending { turn_id, .. }) => Some(turn_id),
+            _ => None,
+        });
+        if let Some(turn_id) = sending.next() {
+            assert!(
+                sending.next().is_none(),
+                "a submission must emit exactly one sending record"
+            );
+            let mut receipts = result.records.iter().filter_map(|record| match record {
+                SendRecord::Submit(Submit::Receipt(receipt)) => Some(receipt),
+                _ => None,
+            });
+            assert!(
+                matches!((receipts.next(), receipts.next()), (Some(receipt), None) if &receipt.turn_id == turn_id),
+                "sending must have exactly one receipt for the same TurnId"
+            );
         }
     }
     result

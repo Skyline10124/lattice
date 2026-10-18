@@ -233,6 +233,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
         let cancelled = running.wait(None).unwrap();
         evidence.record_command("beta cancelled after real mutation", &cancelled);
         assert!(cancelled.is_clean_exit(2), "{}", cancelled.summary());
+        lattice_system_harness::parse_send_stdout(&cancelled.stdout, cancelled.exit_code());
         let beta_closed = cli_json(
             &world,
             &spec,
@@ -316,6 +317,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
         );
         evidence.record_command("fork inherits alpha at target node", &fork);
         assert!(fork.is_clean_exit(0), "{}", fork.summary());
+        lattice_system_harness::parse_send_stdout(&fork.stdout, fork.exit_code());
         let tree = cli_json(
             &world,
             &spec,
@@ -420,6 +422,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
         );
         evidence.record_command("beta rewrites first message", &root);
         assert!(root.is_clean_exit(0));
+        lattice_system_harness::parse_send_stdout(&root.stdout, root.exit_code());
         let after = cli_json(
             &world,
             &spec,

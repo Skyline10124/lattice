@@ -417,7 +417,12 @@ fn conflict_reason_accompanies_exactly_the_conflict_kind() {
             .rejection()
             .is_none()
     );
-    assert!(parse(&[sending(), extra]).rejection().is_none());
+    let partial = format!("{}\n{extra}\n", sending());
+    assert!(
+        parse_send_stdout(partial.as_bytes(), None)
+            .rejection()
+            .is_none()
+    );
 }
 
 #[test]
@@ -534,5 +539,37 @@ fn view_state_keeps_written_facts_and_allows_repeated_values() {
         let mut value = started.clone();
         *value.pointer_mut(pointer).unwrap() = changed;
         assert!(view.clone().apply(&parsed(&value)).is_err(), "{pointer}");
+    }
+}
+
+#[test]
+fn json_output_requires_exactly_one_receipt_for_the_sending_identity() {
+    let sending = serde_json::json!({"type":"submit","stage":"sending","turn_id":"t","session_id":"s","new":true});
+    let receipt = serde_json::json!({"type":"submit","stage":"receipt","turn_id":"t","result":"not_accepted","recovered":false});
+    let other = serde_json::json!({"type":"submit","stage":"receipt","turn_id":"other","result":"unknown","recovered":false});
+    for (records, valid) in [
+        (vec![sending.clone()], false),
+        (vec![sending.clone(), receipt.clone()], true),
+        (
+            vec![sending.clone(), receipt.clone(), receipt.clone()],
+            false,
+        ),
+        (vec![sending.clone(), other], false),
+        (vec![sending.clone(), sending, receipt.clone()], false),
+        (
+            vec![serde_json::json!({"type":"connection","status":"eof"})],
+            true,
+        ),
+    ] {
+        let stdout = records
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .into_bytes();
+        let parsed = std::panic::catch_unwind(|| parse_send_stdout(&stdout, Some(1)));
+        assert_eq!(parsed.is_ok(), valid, "{records:?}");
+        // 进程被杀时这些序列都可以作为部分输出保留。
+        assert!(parse_send_stdout(&stdout, None).malformed_lines.is_empty());
     }
 }
