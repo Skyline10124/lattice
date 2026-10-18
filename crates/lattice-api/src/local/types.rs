@@ -16,6 +16,7 @@ use std::path::PathBuf;
 
 pub const WATCH_TURNS: u32 = 10;
 pub const HISTORY_TURNS: u32 = 10;
+pub const MAX_HISTORY_TURNS: u32 = 100;
 
 pub use crate::session::RequestConflict as ConflictReason;
 
@@ -458,6 +459,9 @@ pub(super) enum Request {
     Turn {
         turn_id: TurnId,
     },
+    Head {
+        session_id: SessionId,
+    },
     History {
         session_id: SessionId,
         before: NodeId,
@@ -507,6 +511,7 @@ pub(super) enum Response {
     Sessions(Page<SessionListRow, SessionId>),
     Log(SessionLog),
     Turn(TurnLookup),
+    Head(SessionHead),
     History(LocalHistory),
     Rewind(SessionRecord),
     Acceptance(Acceptance),
@@ -557,6 +562,35 @@ mod tests {
                 serde_json::json!({"operation":"cancel","turn_id":tid,"session_id":sid})
             )
             .is_err()
+        );
+        assert_eq!(
+            serde_json::to_value(Request::Head { session_id: sid }).unwrap(),
+            serde_json::json!({"operation":"head", "session_id":sid})
+        );
+        assert!(
+            matches!(serde_json::from_value::<Request>(serde_json::json!({"operation":"head", "session_id":sid})).unwrap(), Request::Head { session_id } if session_id == sid)
+        );
+        assert!(
+            serde_json::from_value::<Request>(
+                serde_json::json!({"operation":"head", "session_id":sid, "turn_id":tid})
+            )
+            .is_err()
+        );
+        assert_eq!(
+            serde_json::to_value(Response::Head(SessionHead {
+                session_id: sid,
+                position: NodeId(0),
+                agent: None,
+                turn_id: None,
+                owner: false,
+                diagnostic: None,
+                path_replaced: false,
+            }))
+            .unwrap(),
+            serde_json::json!({"response":"head", "value":{
+                "session_id":sid, "position":0, "agent":null, "turn_id":null,
+                "owner":false, "diagnostic":null, "path_replaced":false,
+            }})
         );
         let error = LocalError::new(LocalErrorKind::Busy, "busy");
         assert!(

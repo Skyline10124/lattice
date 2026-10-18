@@ -47,7 +47,7 @@ impl Peer {
         stream.read_exact(&mut bytes).await.unwrap();
         let request: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(request["operation"], op);
-        if op == "watch" {
+        if op == "watch" || op == "head" {
             assert_eq!(request["session_id"], SESSION);
         }
         Wire {
@@ -65,6 +65,10 @@ impl Wire {
         self.stream.write_all(b"LTLOCAL4").await.unwrap();
         self.stream.write_u32(bytes.len() as u32).await.unwrap();
         self.stream.write_all(&bytes).await.unwrap();
+    }
+    async fn reply_head(&mut self, head: SessionHead) {
+        self.reply("head", serde_json::to_value(head).unwrap())
+            .await;
     }
     async fn view(&mut self, update: ViewUpdate) {
         self.reply("view", serde_json::to_value(update).unwrap())
@@ -102,8 +106,8 @@ async fn session_cancel_preserves_identity_and_exit_codes_across_reply_loss() {
                     return;
                 }
                 resolve_session(&peer).await;
-                let mut view = peer.request("watch").await;
-                view.view(ViewUpdate::Head(head(id, case != "none"))).await;
+                let mut wire = peer.request("head").await;
+                wire.reply_head(head(id, case != "none")).await;
                 if case != "none" {
                     let mut cancel = peer.request("cancel").await;
                     assert_eq!(cancel.request["turn_id"], id.to_string());
@@ -787,12 +791,9 @@ async fn submission_identity_and_inherited_selection_are_kept_in_the_wire_reques
             if existing {
                 let mut resolve = peer.request("resolve_session").await;
                 resolve.reply("session",json!({"session_id":sid(),"project_store_key":"a".repeat(64),"current":2,"created_at":"2026-10-17T00:00:00Z","updated_at":"2026-10-17T00:00:01Z"})).await;
-                let mut view = peer.request("watch").await;
-                view.view(ViewUpdate::Head(head(
-                    lattice_api::local::new_turn_id(),
-                    false,
-                )))
-                .await;
+                let mut wire = peer.request("head").await;
+                wire.reply_head(head(lattice_api::local::new_turn_id(), false))
+                    .await;
             }
             let mut wire = peer.request("submit").await;
             let request = &wire.request["request"];

@@ -107,7 +107,26 @@ async fn lookup_and_watch_an_orphan_without_changing_its_facts() {
             .kind,
         LocalErrorKind::BadRequest
     );
+    assert!(
+        client
+            .history(session_id(), NodeId(1), 100)
+            .await
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+    for turns in [101, u32::MAX] {
+        assert_eq!(
+            client
+                .history(session_id(), NodeId(1), turns)
+                .await
+                .unwrap_err()
+                .kind,
+            LocalErrorKind::BadRequest
+        );
+    }
     assert!(!client.list_sessions().await.unwrap()[0].owner);
+    assert_eq!(client.turn(turn_id()).await.unwrap(), lookup.unwrap());
     drop(view);
     client.stop().await.unwrap();
     serving.await.unwrap().unwrap();

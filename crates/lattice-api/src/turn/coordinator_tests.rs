@@ -478,7 +478,9 @@ async fn first_acceptance_reopens_with_frozen_facts_and_used_turn_conflicts() {
     let execution = start_turn(api, layout, tid(9), workspace, retry, None);
     assert!(matches!(
         execution.acceptance.await.unwrap(),
-        Err(crate::ApiError::Conflict(_))
+        Err(crate::ApiError::Conflict(
+            crate::session::RequestConflict::TurnIdUsed
+        ))
     ));
     assert!(execution.completion.await.unwrap().is_err());
     assert_eq!(llm.call_count(), 1);

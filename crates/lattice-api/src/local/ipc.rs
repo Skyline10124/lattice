@@ -22,6 +22,7 @@ use zeroize::Zeroizing;
 
 const MAGIC: &[u8; 8] = b"LTLOCAL4";
 pub(super) const MAX_FRAME: usize = 16 * 1024 * 1024;
+const MAX_RESPONSE: usize = 256 * 1024 * 1024;
 pub(super) const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn permission() -> LocalError {
@@ -311,9 +312,18 @@ impl ResponseWriter {
     }
 }
 
-#[derive(Default)]
 pub(super) struct ResponseReader {
     next_message: u64,
+    max_response: usize,
+}
+
+impl Default for ResponseReader {
+    fn default() -> Self {
+        Self {
+            next_message: 0,
+            max_response: MAX_RESPONSE,
+        }
+    }
 }
 
 impl ResponseReader {
@@ -354,6 +364,7 @@ impl ResponseReader {
             if frame.message_id != self.next_message
                 || frame.offset != json.len() as u64
                 || frame.json_fragment.is_empty()
+                || frame.json_fragment.len() > self.max_response.saturating_sub(json.len())
             {
                 return Err(protocol());
             }
@@ -371,6 +382,57 @@ impl ResponseReader {
 #[cfg(test)]
 mod frame_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn response_reassembly_bounds_total_utf8_bytes() {
+        // 缩小测试预算，仍经真实分帧验证拼接总量的两个边界。
+        let limit = 32;
+        for extra in [0, 1] {
+            let (mut sender, mut receiver) = UnixStream::pair().unwrap();
+            let writer = tokio::spawn(async move {
+                let fragment = " ".repeat(8);
+                let mut offset = 0;
+                while offset < limit - 4 {
+                    let size = fragment.len().min(limit - 4 - offset);
+                    write(
+                        &mut sender,
+                        &ResponseFrame {
+                            message_id: 0,
+                            offset: offset as u64,
+                            json_fragment: fragment[..size].to_owned(),
+                            complete: false,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    offset += size;
+                }
+                write(
+                    &mut sender,
+                    &ResponseFrame {
+                        message_id: 0,
+                        offset: offset as u64,
+                        json_fragment: if extra == 0 { "null" } else { " null" }.into(),
+                        complete: true,
+                    },
+                )
+                .await
+                .unwrap();
+            });
+            let result = ResponseReader {
+                max_response: limit,
+                ..Default::default()
+            }
+            .read::<serde_json::Value>(&mut receiver)
+            .await;
+            if extra == 0 {
+                assert_eq!(result.unwrap(), serde_json::Value::Null);
+            } else {
+                assert_eq!(result.unwrap_err().kind, LocalErrorKind::Protocol);
+            }
+            writer.await.unwrap();
+        }
+    }
 
     #[tokio::test]
     async fn v4_accepts_current_frames_and_rejects_old_empty_and_oversized_frames() {

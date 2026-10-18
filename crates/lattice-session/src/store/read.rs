@@ -396,7 +396,7 @@ impl SessionRead {
     }
 
     /// 调用方给出的 Session 可能不存在，由调用方报 NotFound。
-    fn find_session(&self, id: SessionId) -> Result<Option<SessionRecord>> {
+    pub fn find_session(&self, id: SessionId) -> Result<Option<SessionRecord>> {
         let table = self.tx.open_table(SESSIONS).map_err(table_error)?;
         let Some(value) = table.get(id.to_string().as_str())? else {
             return Ok(None);
@@ -677,7 +677,8 @@ impl SessionRead {
             .transpose()
     }
 
-    fn path_node(&self, session: SessionId, node: NodeId) -> Result<Node> {
+    /// 只解码指定路径节点；缺失表示已有路径损坏，不装载整轮配置。
+    pub fn path_node(&self, session: SessionId, node: NodeId) -> Result<Node> {
         self.find_node(session, node)?.ok_or_else(|| {
             corrupt(
                 "nodes",
@@ -687,7 +688,8 @@ impl SessionRead {
         })
     }
 
-    fn turn_user_node(&self, session: SessionId, turn: TurnId) -> Result<NodeId> {
+    /// 经 TurnId 索引定位本会话的 UserMessage，索引缺失或归属不符时报损坏。
+    pub fn turn_user_node(&self, session: SessionId, turn: TurnId) -> Result<NodeId> {
         self.raw_turn_node(turn)?
             .filter(|node| node.session_id == session)
             .map(|node| node.node)

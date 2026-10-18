@@ -695,7 +695,7 @@ async fn slow_observer_reads_latest_entries_suffixes_and_attempt_boundaries() {
     });
     let batch = capture(fast.clone()).await;
     assert!(
-        matches!(batch.last(), Some(ViewUpdate::Text(TextUpdate { offset: 6, segments, .. })) if segments == &[TextSegment::Text { text: "！".into() }])
+        matches!(batch.as_slice(), [ViewUpdate::Text(TextUpdate { offset: 6, segments, .. })] if segments == &[TextSegment::Text { text: "！".into() }])
     );
     io.stop_attempt(AttemptStopped {
         key,
@@ -705,6 +705,9 @@ async fn slow_observer_reads_latest_entries_suffixes_and_attempt_boundaries() {
         retry_delay_ms: Some(1),
         diagnostic: AttemptDiagnostic {
             provider_error: Some("retry".into()),
+            partial: vec![DiagnosticPart::Text {
+                text: "你好！".into(),
+            }],
             ..Default::default()
         },
     })
@@ -733,6 +736,18 @@ async fn slow_observer_reads_latest_entries_suffixes_and_attempt_boundaries() {
     assert!(batch.iter().any(|update| matches!(update, ViewUpdate::Entry { entry } if matches!(entry.as_ref(), ConversationEntry::Step { step, retries, .. } if step.attempts.len() == 2 && retries.len() == 1))));
     assert!(
         matches!(batch.last(), Some(ViewUpdate::Text(TextUpdate { attempt: 1, offset: 0, segments, .. })) if segments == &[TextSegment::Reasoning { text: "新尝试".into() }])
+    );
+    let ViewUpdate::Text(text) = batch.last().unwrap() else {
+        panic!("text")
+    };
+    sink.sent(&slow, text);
+    sink.emit(crate::TurnEvent::TokenDelta {
+        key,
+        content: "继续".into(),
+    });
+    let batch = capture(slow.clone()).await;
+    assert!(
+        matches!(batch.as_slice(), [ViewUpdate::Text(TextUpdate { attempt: 1, offset: 9, segments, .. })] if segments == &[TextSegment::Text { text: "继续".into() }])
     );
     // 关闭已提交但变化尚未标记，初次推送必须读到最终节点，旧尝试的文字不能复活。
     let simultaneous = sink.register();
@@ -990,10 +1005,11 @@ async fn accepted_read_failure_before_turn_started_republishes_position_after_re
         }
         bounded(waiting).await.unwrap();
         fail_read.send(()).unwrap();
-        assert_eq!(
-            bounded(submitting).await.unwrap().unwrap_err().kind,
-            LocalErrorKind::StoreUnavailable
-        );
+        assert!(matches!(
+            bounded(submitting).await.unwrap().unwrap(),
+            Acceptance::ConfirmationUnknown { turn_id, session_id }
+                if turn_id == input.turn_id && session_id == sid
+        ));
         idle(&backend).await;
         // 退场已经完成，才开始下一次 capture；前后代次相同，不能借重试补齐条目。
         let (capturing, resume_capture) = arm(&backend.gates.capture_before);
@@ -1431,9 +1447,16 @@ async fn preparation_disconnect_and_forwarding_panic_keep_independent_cancelled_
             let config = config(dir.path(), &provider.endpoint);
             tokio::spawn(async move { client.submit(input, config).await })
         };
+        let mut release = Some(release);
         bounded(entered).await.unwrap();
         if forwarding_panic {
             bounded(&mut provider.arrived).await.unwrap();
+            release.take().unwrap().send(()).unwrap();
+            assert!(matches!(
+                bounded(submit).await.unwrap().unwrap(),
+                Acceptance::ConfirmationUnknown { turn_id, session_id }
+                    if turn_id == input.turn_id && session_id == input.session.id()
+            ));
         } else {
             submit.abort();
             assert!(submit.await.unwrap_err().is_cancelled());
@@ -1450,17 +1473,110 @@ async fn preparation_disconnect_and_forwarding_panic_keep_independent_cancelled_
         .await;
         assert!(!stop.is_finished());
         assert!(client.cancel(input.turn_id).await.unwrap());
-        release.send(()).unwrap();
+        if let Some(release) = release {
+            release.send(()).unwrap();
+        }
         let status = bounded(stop).await.unwrap().unwrap();
         assert_eq!(status.owners, 0);
         assert_eq!(status.unconfirmed_operations, usize::from(forwarding_panic));
-        let TurnLookup::Accepted { turn } = client.turn(input.turn_id).await.unwrap() else {
-            panic!("accepted")
-        };
-        assert_eq!(turn.summary.outcome, PublicTurnOutcome::Cancelled);
-        assert!(turn.summary.progress.is_closed());
+        if forwarding_panic {
+            let TurnLookup::Accepted { turn } = client.turn(input.turn_id).await.unwrap() else {
+                panic!("accepted")
+            };
+            assert_eq!(turn.summary.outcome, PublicTurnOutcome::Cancelled);
+            assert!(turn.summary.progress.is_closed());
+        } else {
+            assert_eq!(
+                client.turn(input.turn_id).await.unwrap_err().kind,
+                LocalErrorKind::NotFound
+            );
+        }
         provider.release.send_replace(true);
         assert_eq!(provider.finish().await.len(), usize::from(forwarding_panic));
         finish(&backend, task).await;
     }
+}
+
+#[tokio::test]
+async fn session_head_and_cancel_do_not_need_observation_permits() {
+    let (dir, backend, client, task) = backend().await;
+    let mut provider = Provider::start().await;
+    provider.release.send_replace(false);
+    let input = request(dir.path());
+    client
+        .submit(input.clone(), config(dir.path(), &provider.endpoint))
+        .await
+        .unwrap();
+    bounded(&mut provider.arrived).await.unwrap();
+    let permits = backend.subscriptions.acquire_many(32).await.unwrap();
+    let head = client.session_head(input.session.id()).await.unwrap();
+    assert_eq!(head.turn_id, Some(input.turn_id));
+    assert!(head.owner);
+    assert!(!head.path_replaced);
+    assert_eq!(
+        client.cancel_session(input.session.id()).await.unwrap(),
+        (Some(input.turn_id), true)
+    );
+    assert_eq!(
+        client
+            .session_head(super::super::new_session_id())
+            .await
+            .unwrap_err()
+            .kind,
+        LocalErrorKind::NotFound
+    );
+    idle(&backend).await;
+    assert!(!client.session_head(input.session.id()).await.unwrap().owner);
+    assert_eq!(
+        client.cancel_session(input.session.id()).await.unwrap(),
+        (None, false)
+    );
+    drop(permits);
+    provider.release.send_replace(true);
+    assert_eq!(provider.finish().await.len(), 1);
+    finish(&backend, task).await;
+}
+
+#[tokio::test]
+async fn dispatch_submit_without_submitter_is_an_internal_error() {
+    let (dir, backend, client, task) = backend().await;
+    client.status().await.unwrap();
+    let result = backend
+        .dispatch(Request::Submit {
+            request: request(dir.path()),
+            configuration: Box::new(invalid(dir.path())),
+        })
+        .await;
+    assert!(matches!(
+        result,
+        Err(LocalError {
+            kind: LocalErrorKind::Internal,
+            ..
+        })
+    ));
+    assert_eq!(backend.status().owners, 0);
+    finish(&backend, task).await;
+}
+
+#[tokio::test]
+async fn invalid_request_is_rejected_before_claiming_a_new_session() {
+    let (dir, backend, client, task) = backend().await;
+    let mut input = request(dir.path());
+    input.input = "x".repeat(2 * 1024 * 1024 + 1);
+    let sid = input.session.id();
+    let (entered, release) = arm(&backend.gates.registered);
+    let submitting = {
+        let client = client.clone();
+        let configuration = invalid(dir.path());
+        tokio::spawn(async move { client.submit(input, configuration).await })
+    };
+    tokio::select! {
+        result = submitting => assert_eq!(result.unwrap().unwrap_err().kind, LocalErrorKind::BadRequest),
+        _ = entered => {
+            release.send(()).unwrap();
+            panic!("无效输入占住了 New(SessionId)");
+        }
+    }
+    assert!(!lock(&backend.admission).sessions.contains_key(&sid));
+    finish(&backend, task).await;
 }

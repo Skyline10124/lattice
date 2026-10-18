@@ -14,6 +14,16 @@ pub enum RequestConflict {
     BindingMismatch,
 }
 
+impl std::fmt::Display for RequestConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::TurnIdUsed => "TurnId is already in use",
+            Self::SessionExists => "session already exists",
+            Self::BindingMismatch => "session is bound to another workspace",
+        })
+    }
+}
+
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum ApiError {
     #[error("not found: {0}")]
@@ -22,7 +32,7 @@ pub enum ApiError {
     BadRequest(String),
     #[error("{0}")]
     Configuration(crate::ConfigRejection),
-    #[error("conflict: {0:?}")]
+    #[error("conflict: {0}")]
     Conflict(RequestConflict),
     #[error("internal error: {0}")]
     Internal(String),
@@ -194,5 +204,26 @@ fn resolve_session(read: &SessionRead, prefix: &str) -> Result<SessionRecord> {
                 .collect::<Vec<_>>()
                 .join(", ")
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn request_conflicts_have_readable_english_messages() {
+        for (reason, text) in [
+            (RequestConflict::TurnIdUsed, "TurnId is already in use"),
+            (RequestConflict::SessionExists, "session already exists"),
+            (
+                RequestConflict::BindingMismatch,
+                "session is bound to another workspace",
+            ),
+        ] {
+            assert_eq!(
+                ApiError::Conflict(reason).to_string(),
+                format!("conflict: {text}")
+            );
+        }
     }
 }

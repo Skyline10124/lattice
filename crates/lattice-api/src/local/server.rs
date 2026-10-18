@@ -234,6 +234,20 @@ impl Backend {
                     .await
                     .unwrap_or_else(|_| Err(internal()));
             let completion = lock(&task_owner.core).take();
+            // 回执转交失败不能等待模型或工具排空，也不能否认可能已提交的接受事务。
+            if task_owner.reply.borrow().is_none() {
+                let response = if let Some(request) = &task_owner.identity
+                    && completion.is_some()
+                {
+                    Response::Acceptance(Acceptance::ConfirmationUnknown {
+                        turn_id: request.turn_id,
+                        session_id: request.session.id(),
+                    })
+                } else {
+                    Response::Error(result.clone().err().unwrap_or_else(internal))
+                };
+                task_owner.reply(response);
+            }
             if let Some(completion) = completion {
                 match completion
                     .await
@@ -243,11 +257,6 @@ impl Backend {
                     Ok(crate::TurnCompletion::Closed(_)) => {}
                     Err(error) => result = Err(error),
                 }
-            }
-            if task_owner.reply.borrow().is_none() {
-                task_owner.reply(Response::Error(
-                    result.clone().err().unwrap_or_else(internal),
-                ));
             }
             #[cfg(test)]
             tests::pause(&backend.gates.retire).await;
@@ -380,6 +389,30 @@ impl Backend {
             if state.sessions.contains_key(&sid) {
                 return Err(busy());
             }
+            // 身份、绑定与 Busy 的优先级不变；廉价拒绝不能占住新会话身份。
+            if request.input.len() > lattice_session::store::MAX_USER_INPUT_BYTES
+                || !request.workspace.is_absolute()
+            {
+                return Err(LocalError::new(
+                    LocalErrorKind::BadRequest,
+                    "invalid Turn request",
+                ));
+            }
+            if request
+                .agent
+                .as_ref()
+                .is_some_and(|name| name.trim().is_empty() || name.len() > 128)
+                || (request.agent.is_none()
+                    && (request.session.is_new()
+                        || record
+                            .as_ref()
+                            .is_some_and(|record| record.current == NodeId(0))))
+            {
+                return Err(LocalError::new(
+                    LocalErrorKind::BadRequest,
+                    "new Session or root requires explicit agent",
+                ));
+            }
             state.sessions.insert(sid, owner.clone());
             owner.observer.owner_changed();
         }
@@ -391,20 +424,7 @@ impl Backend {
         .await;
         #[cfg(test)]
         tests::pause(&self.gates.registered).await;
-        if let Some(submitter) = submitter
-            && !connected(&submitter)?
-        {
-            return Err(LocalError::new(
-                LocalErrorKind::BadRequest,
-                "submitter departed before admission",
-            ));
-        }
-        if request.input.len() > 2 * 1024 * 1024 || !request.workspace.is_absolute() {
-            return Err(LocalError::new(
-                LocalErrorKind::BadRequest,
-                "invalid Turn request",
-            ));
-        }
+        check_submitter(submitter.as_ref())?;
         let inherited = if !request.session.is_new() {
             api.as_ref()
                 .expect("existing Session store")
@@ -413,17 +433,12 @@ impl Backend {
         } else {
             None
         };
-        let selected = request
-            .agent
-            .clone()
-            .or(inherited)
-            .filter(|n| !n.trim().is_empty() && n.len() <= 128)
-            .ok_or_else(|| {
-                LocalError::new(
-                    LocalErrorKind::BadRequest,
-                    "new Session or root requires explicit agent",
-                )
-            })?;
+        let selected = request.agent.clone().or(inherited).ok_or_else(|| {
+            LocalError::new(
+                LocalErrorKind::BadRequest,
+                "current agent could not be inherited",
+            )
+        })?;
         #[cfg(test)]
         tests::pause(&self.gates.prepare).await;
         let (loaded_profile, connection) = blocking(move || configuration.into_execution()).await?;
@@ -450,7 +465,12 @@ impl Backend {
         };
         *lock(&owner.store) = Some(api.clone());
         let shutdown = api.shutdown();
-        owner.started.store(true, Ordering::Release);
+        check_submitter(submitter.as_ref())?;
+        {
+            let _state = lock(&self.admission);
+            owner.started.store(true, Ordering::Release);
+            owner.observer.owner_changed();
+        }
         let execution = crate::turn::start_execution(crate::turn::execute::ExecutionInput {
             session: api,
             layout: self.layout.clone(),
@@ -473,7 +493,21 @@ impl Backend {
             connection: Some(connection),
         });
         *lock(&owner.core) = Some(execution.completion);
-        let accepted = execution.acceptance.await.map_err(|_| internal())??;
+        let accepted = match execution.acceptance.await {
+            Ok(Ok(accepted)) => accepted,
+            Ok(Err(error)) => {
+                let error = LocalError::from(error);
+                owner.reply(Response::Error(error.clone()));
+                return Err(error);
+            }
+            Err(_) => {
+                owner.reply(Response::Acceptance(Acceptance::ConfirmationUnknown {
+                    turn_id: request.turn_id,
+                    session_id: sid,
+                }));
+                return Err(internal());
+            }
+        };
         #[cfg(test)]
         tests::fail_forwarding(&self.gates.forward_panic).await;
         owner.reply(Response::Acceptance(match accepted {
@@ -508,6 +542,41 @@ impl Backend {
             // 准入可能在读事务之后完成；撤销登记时必须重读，NotFound 才能是终局。
             if candidate.is_none() {
                 return Err(not_found());
+            }
+        }
+    }
+    async fn session_head(&self, session_id: SessionId) -> Result<SessionHead> {
+        let observer = self.observer(session_id);
+        loop {
+            let generation = {
+                let _state = lock(&self.admission);
+                observer.owner_generation()
+            };
+            let api = self.optional_store().await?.ok_or_else(not_found)?;
+            let mut head = api
+                .read(move |read| crate::turn::observer::session_head(read, session_id))
+                .await?;
+            let (same_generation, rewinding) = {
+                let state = lock(&self.admission);
+                (head.owner, head.diagnostic) = head_status(&state, head.turn_id);
+                (
+                    generation == observer.owner_generation(),
+                    state
+                        .sessions
+                        .get(&session_id)
+                        .filter(|owner| owner.identity.is_none())
+                        .cloned(),
+                )
+            };
+            if let Some(owner) = rewinding {
+                let mut done = owner.done.subscribe();
+                while done.borrow_and_update().is_none() {
+                    done.changed().await.map_err(|_| internal())?;
+                }
+                continue;
+            }
+            if same_generation {
+                return Ok(head);
             }
         }
     }
@@ -553,17 +622,28 @@ impl Backend {
                 self.open().await?.read(move |r| r.log(session_id)).await?,
             )),
             Request::Turn { turn_id } => Ok(Response::Turn(self.lookup(turn_id).await?)),
+            Request::Head { session_id } => {
+                Ok(Response::Head(self.session_head(session_id).await?))
+            }
             Request::History {
                 session_id,
                 before,
                 turns,
-            } => Ok(Response::History(LocalHistory {
-                entries: self
-                    .open()
-                    .await?
-                    .read(move |r| r.history(session_id, before, turns))
-                    .await?,
-            })),
+            } => {
+                if !(1..=MAX_HISTORY_TURNS).contains(&turns) {
+                    return Err(LocalError::new(
+                        LocalErrorKind::BadRequest,
+                        "history turns must be between 1 and 100",
+                    ));
+                }
+                Ok(Response::History(LocalHistory {
+                    entries: self
+                        .open()
+                        .await?
+                        .read(move |r| r.history(session_id, before, turns))
+                        .await?,
+                }))
+            }
             Request::Cancel { turn_id } => {
                 let owned = {
                     let state = lock(&self.admission);
@@ -577,9 +657,8 @@ impl Backend {
                 }
                 Ok(Response::Cancelled { owned })
             }
-            request @ (Request::Submit { .. } | Request::Rewind { .. }) => {
-                self.wait_reply(self.claim(request, None)?).await
-            }
+            Request::Submit { .. } => Err(internal()),
+            request @ Request::Rewind { .. } => self.wait_reply(self.claim(request, None)?).await,
             Request::AuditQuery {
                 workspace,
                 selection,
@@ -661,6 +740,7 @@ impl Backend {
         let mut changed = observer.subscribe();
         let mut closed = self.closed.subscribe();
         let mut first = true;
+        let mut last_head: Option<SessionHead> = None;
         loop {
             if *closed.borrow() {
                 return Ok(());
@@ -682,20 +762,18 @@ impl Backend {
             #[cfg(test)]
             tests::pause(&self.gates.capture).await;
             // 代次识别完整的接管/退场；rewind 提交到发布之间也不能交付新位置。
-            let head_turn = updates.first().and_then(|u| match u {
-                ViewUpdate::Head(h) => h.turn_id,
-                _ => None,
-            });
+            let has_head = matches!(updates.first(), Some(ViewUpdate::Head(_)));
+            let head_turn = if let Some(ViewUpdate::Head(head)) = updates.first() {
+                head.turn_id
+            } else {
+                last_head.as_ref().and_then(|head| head.turn_id)
+            };
             let (owned, diagnostic, same_generation, rewinding) = {
                 let state = lock(&self.admission);
+                let (owned, diagnostic) = head_status(&state, head_turn);
                 (
-                    head_turn.is_some_and(|turn| {
-                        state
-                            .turns
-                            .get(&turn)
-                            .is_some_and(|o| o.started.load(Ordering::Acquire))
-                    }),
-                    head_turn.and_then(|turn| state.diagnostics.get(&turn).cloned()),
+                    owned,
+                    diagnostic,
                     generation == observer.owner_generation(),
                     state
                         .sessions
@@ -719,6 +797,15 @@ impl Backend {
                 }
                 continue;
             }
+            // 诊断也可能独立于节点变化发布；比较已交付的头，不读取会话库来探测。
+            if !has_head
+                && last_head
+                    .as_ref()
+                    .is_some_and(|head| head.owner != owned || head.diagnostic != diagnostic)
+            {
+                observer.refresh_head(&cursor);
+                continue;
+            }
             if let Some(ViewUpdate::Head(head)) = updates.first_mut() {
                 head.owner = owned;
                 head.diagnostic = diagnostic;
@@ -727,8 +814,10 @@ impl Backend {
                 writer
                     .write(stream, &Response::View(update.clone()))
                     .await?;
-                if let ViewUpdate::Text(text) = &update {
-                    observer.sent(&cursor, text);
+                match &update {
+                    ViewUpdate::Head(head) => last_head = Some(head.clone()),
+                    ViewUpdate::Text(text) => observer.sent(&cursor, text),
+                    ViewUpdate::Entry { .. } => {}
                 }
             }
             first = false;
@@ -749,6 +838,28 @@ impl Backend {
             }
         }
     }
+}
+fn head_status(state: &Admission, turn: Option<TurnId>) -> (bool, Option<LocalError>) {
+    (
+        turn.is_some_and(|turn| {
+            state
+                .turns
+                .get(&turn)
+                .is_some_and(|owner| owner.started.load(Ordering::Acquire))
+        }),
+        turn.and_then(|turn| state.diagnostics.get(&turn).cloned()),
+    )
+}
+fn check_submitter(submitter: Option<&UnixStream>) -> Result<()> {
+    if let Some(submitter) = submitter
+        && !connected(submitter)?
+    {
+        return Err(LocalError::new(
+            LocalErrorKind::BadRequest,
+            "submitter departed before admission",
+        ));
+    }
+    Ok(())
 }
 fn connected(stream: &UnixStream) -> Result<bool> {
     use std::os::fd::AsRawFd;

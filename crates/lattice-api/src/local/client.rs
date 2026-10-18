@@ -193,9 +193,8 @@ impl LocalClient {
         }
     }
     pub async fn session_head(&self, session_id: SessionId) -> Result<SessionHead> {
-        let mut view = self.watch(session_id).await?;
-        match view.next().await? {
-            Some(ViewUpdate::Head(head)) => Ok(head),
+        match self.call(Request::Head { session_id }).await? {
+            Response::Head(head) => Ok(head),
             _ => Err(protocol()),
         }
     }

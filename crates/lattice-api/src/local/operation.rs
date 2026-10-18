@@ -373,9 +373,6 @@ impl Worker {
                 }
                 self.live_evidence |= head.owner && head.turn_id == self.report.turn_id;
                 self.report.head = Some(head.clone());
-                if head.position == NodeId(0) {
-                    self.seen_position = true;
-                }
                 true
             }
             ViewUpdate::Entry { entry } => {

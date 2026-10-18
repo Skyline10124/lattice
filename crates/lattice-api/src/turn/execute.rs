@@ -11,6 +11,7 @@ use crate::{
     root::LocalWorkspaceRoot,
     session::{ApiError, RequestConflict, Result, SessionApi},
 };
+use futures::FutureExt;
 use lancet_protocol::{SessionId, TurnId};
 use lattice_session::{StateLayout, store::*};
 use std::sync::{
@@ -70,9 +71,25 @@ pub(crate) fn start_execution(mut input: ExecutionInput) -> TurnExecution {
     let (completed, completion) = oneshot::channel();
     tokio::spawn(async move {
         let mut accepted = Some(accepted);
-        let result = execute_owned(input, &mut accepted).await;
+        let turn_id = input.turn_id;
+        let mut accepted_session = None;
+        let result = std::panic::AssertUnwindSafe(execute_owned(
+            input,
+            &mut accepted,
+            &mut accepted_session,
+        ))
+        .catch_unwind()
+        .await
+        .unwrap_or(Err(ApiError::WorkerFailed));
         if let (Some(sender), Err(error)) = (accepted.take(), &result) {
-            let _ = sender.send(Err(error.clone()));
+            let reply = match accepted_session {
+                Some(session_id) => Ok(TurnAcceptance::ConfirmationUnknown {
+                    turn_id,
+                    session_id,
+                }),
+                None => Err(error.clone()),
+            };
+            let _ = sender.send(reply);
         }
         let _ = completed.send(result);
     });
@@ -92,6 +109,7 @@ fn accept(sender: &mut Option<oneshot::Sender<Result<TurnAcceptance>>>, value: T
 async fn execute_owned(
     input: ExecutionInput,
     accepted: &mut Option<oneshot::Sender<Result<TurnAcceptance>>>,
+    accepted_session: &mut Option<SessionId>,
 ) -> Result<TurnCompletion> {
     let ExecutionInput {
         session,
@@ -200,6 +218,18 @@ async fn execute_owned(
     if shutdown.load(Ordering::Acquire) {
         return Err(StoreError::WriteDisabled.into());
     }
+    #[cfg(test)]
+    {
+        let gate = observer
+            .before_accept
+            .lock()
+            .expect("before accept gate")
+            .take();
+        if let Some((entered, release)) = gate {
+            let _ = entered.send(());
+            release.await.expect("release accept");
+        }
+    }
     let result = coordinator
         .io
         .accept(AcceptTurn {
@@ -235,6 +265,10 @@ async fn execute_owned(
             return Err(error.into());
         }
     };
+    if matches!(result, AcceptedTurn::Existing(_)) {
+        return Err(ApiError::Conflict(RequestConflict::TurnIdUsed));
+    }
+    *accepted_session = Some(session_id);
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout);
     #[cfg(feature = "test-crash-barriers")]
     super::crash_barrier::hit(&coordinator.io, turn_id, "turn_accepted", None, None).await?;
@@ -267,9 +301,6 @@ async fn execute_owned(
             read.turn_detail(session_id, turn_id)
         })
         .await?;
-    if matches!(result, AcceptedTurn::Existing(_)) {
-        return Err(ApiError::Conflict(RequestConflict::TurnIdUsed));
-    }
     accept(accepted, TurnAcceptance::Accepted { turn: turn.clone() });
     observer.emit(TurnEvent::TurnStarted {
         turn: TurnRef {

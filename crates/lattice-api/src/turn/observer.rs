@@ -4,7 +4,10 @@
 //! 观察者只保存待读取节点与已发位置；正文只有当前尝试的一份累积。
 use super::types::{AttemptSegments, TextSegment, TurnEvent};
 use crate::local::{SessionHead, TextUpdate, ViewUpdate, WATCH_TURNS};
-use lattice_session::store::{AttemptProgress, Node, NodeId, NodeRef, SessionStore};
+use lattice_session::store::{
+    AttemptProgress, ConversationEntry, Node, NodeId, NodeRef, SessionRead, SessionStore,
+    StoreError,
+};
 use std::{
     collections::BTreeSet,
     sync::{Arc, Mutex, Weak},
@@ -16,6 +19,7 @@ pub(crate) struct PushState {
     reload: bool,
     path_replaced: bool,
     pending: BTreeSet<NodeId>,
+    head_changed: bool,
     sent: Option<(NodeId, u32, usize)>,
 }
 #[derive(Default)]
@@ -38,6 +42,8 @@ pub(crate) struct ObserverSink {
     changed: tokio::sync::watch::Sender<()>,
     #[cfg(test)]
     pub(crate) accepted_read_failure: Mutex<Option<AcceptedReadFailure>>,
+    #[cfg(test)]
+    pub(crate) before_accept: Mutex<Option<AcceptedReadFailure>>,
 }
 impl Default for ObserverSink {
     fn default() -> Self {
@@ -46,6 +52,8 @@ impl Default for ObserverSink {
             changed: tokio::sync::watch::channel(()).0,
             #[cfg(test)]
             accepted_read_failure: Mutex::default(),
+            #[cfg(test)]
+            before_accept: Mutex::default(),
         }
     }
 }
@@ -57,10 +65,21 @@ impl ObserverSink {
             .owner_generation
     }
     pub(crate) fn owner_changed(&self) {
-        self.state
-            .lock()
-            .expect("observation lock")
-            .owner_generation += 1;
+        let mut state = self.state.lock().expect("observation lock");
+        state.owner_generation += 1;
+        // Owner 与诊断不在会话库里；每次接管或退场都重读，不能走纯文字分支。
+        state.watchers.retain(|watcher| {
+            let Some(watcher) = watcher.upgrade() else {
+                return false;
+            };
+            watcher.lock().expect("push state lock").head_changed = true;
+            true
+        });
+        self.changed.send_replace(());
+    }
+    pub(crate) fn refresh_head(&self, cursor: &Mutex<PushState>) {
+        let _state = self.state.lock().expect("observation lock");
+        cursor.lock().expect("push state lock").head_changed = true;
     }
     pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<()> {
         self.changed.subscribe()
@@ -141,7 +160,8 @@ impl ObserverSink {
     pub(crate) fn release(&self) {
         let mut state = self.state.lock().expect("observation lock");
         state.attempt = None;
-        Self::mark(&mut state, &[], false);
+        let nodes: Vec<_> = state.current.into_iter().collect();
+        Self::mark(&mut state, &nodes, false);
         self.changed.send_replace(());
     }
     pub(crate) fn diagnostic_partial(
@@ -237,91 +257,124 @@ impl ObserverSink {
         state.events.push(event);
         self.changed.send_replace(());
     }
-    /// 复制段列表与位置后才开读事务；事务可能比标记多看到一次提交，不能反向拼回旧值。
+    /// 锁内只复制尚未发送的文字，再开启读事务，避免阻塞模型回调。
     pub(crate) fn capture(
         &self,
         store: &SessionStore,
         session_id: lancet_protocol::SessionId,
         cursor: &Mutex<PushState>,
     ) -> lattice_session::store::Result<Vec<ViewUpdate>> {
-        let (initial, reload, replaced, mut pending, attempt, sent) = {
+        let (initial, reload, replaced, mut pending, attempt, head_changed) = {
             let state = self.state.lock().expect("observation lock");
             let mut cursor = cursor.lock().expect("push state lock");
             let initial = std::mem::take(&mut cursor.initial);
             let replaced = std::mem::take(&mut cursor.path_replaced) && !initial;
+            let attempt = state
+                .attempt
+                .as_ref()
+                .zip(state.current)
+                .map(|(attempt, node)| {
+                    let offset = cursor
+                        .sent
+                        .filter(|(sent_node, sent_attempt, _)| {
+                            *sent_node == node && *sent_attempt == attempt.key.attempt_ordinal
+                        })
+                        .map_or(0, |(_, _, offset)| offset);
+                    (
+                        attempt.key,
+                        node,
+                        offset,
+                        suffix(&attempt.segments, offset).0,
+                    )
+                });
             (
                 initial,
                 std::mem::take(&mut cursor.reload),
                 replaced,
                 std::mem::take(&mut cursor.pending),
-                state.attempt.clone(),
-                cursor.sent,
+                attempt,
+                std::mem::take(&mut cursor.head_changed),
             )
         };
         let read = store.begin_read()?;
-        let (record, agent, entries) = if initial || reload || replaced {
-            let mut view = read.view(session_id, WATCH_TURNS)?;
-            if reload && !initial && !replaced {
-                for node in pending {
-                    if !view.entries.iter().any(|entry| entry.node() == node) {
-                        view.entries.push(read.entry(NodeRef { session_id, node })?);
+        let mut updates = Vec::new();
+        if initial || reload || replaced || !pending.is_empty() || head_changed {
+            let (head, entries) = if initial || reload || replaced {
+                let mut view = read.view(session_id, WATCH_TURNS)?;
+                if reload && !initial && !replaced {
+                    for node in pending {
+                        if !view.entries.iter().any(|entry| entry.node() == node) {
+                            view.entries.push(read.entry(NodeRef { session_id, node })?);
+                        }
                     }
+                    view.entries.sort_by_key(|entry| entry.node());
                 }
-                view.entries.sort_by_key(|entry| entry.node());
-            }
-            (view.session, view.current_agent, view.entries)
-        } else {
-            let record = read.session(session_id)?;
-            // head 没有批次结束标记，每批都从同一读事务补推当前位置供读者确认。
-            if record.current != NodeId(0) {
-                pending.insert(record.current);
-            }
-            let agent = read.current_agent(session_id)?;
-            let entries = pending
-                .into_iter()
-                .map(|node| read.entry(NodeRef { session_id, node }))
-                .collect::<lattice_session::store::Result<Vec<_>>>()?;
-            (record, agent, entries)
-        };
-        let current = read.node(NodeRef {
-            session_id,
-            node: record.current,
-        })?;
-        let mut updates = vec![ViewUpdate::Head(SessionHead {
-            session_id,
-            position: record.current,
-            agent,
-            turn_id: current.turn_id(),
-            owner: false,
-            diagnostic: None,
-            path_replaced: replaced,
-        })];
-        updates.extend(entries.into_iter().map(|entry| ViewUpdate::Entry {
-            entry: Box::new(entry),
-        }));
-        if let Some(attempt) = attempt {
-            let Some(user) = read.turn_node(attempt.key.turn_id)? else {
-                return Ok(updates);
+                let turn_id = view
+                    .entries
+                    .iter()
+                    .find(|entry| entry.node() == view.session.current)
+                    .and_then(|entry| content(entry).turn_id());
+                (
+                    SessionHead {
+                        session_id,
+                        position: view.session.current,
+                        agent: view.current_agent,
+                        turn_id,
+                        owner: false,
+                        diagnostic: None,
+                        path_replaced: replaced,
+                    },
+                    view.entries,
+                )
+            } else {
+                let record = session_record(&read, session_id)?;
+                // 只要推 head，就从同一事务补上当前位置，供读者确认这一轮是否结束。
+                if record.current != NodeId(0) {
+                    pending.insert(record.current);
+                }
+                let entries = pending
+                    .into_iter()
+                    .map(|node| read.entry(NodeRef { session_id, node }))
+                    .collect::<lattice_session::store::Result<Vec<_>>>()?;
+                let current = entries
+                    .iter()
+                    .find(|entry| entry.node() == record.current)
+                    .map_or(&Node::Root, content);
+                (
+                    head_from_node(&read, session_id, record.current, current)?,
+                    entries,
+                )
             };
-            let node = NodeId(user.node.0 + 1 + u64::from(attempt.key.model_step_ordinal));
-            let content = read.node(NodeRef { session_id, node })?;
+            updates.push(ViewUpdate::Head(head));
+            updates.extend(entries.into_iter().map(|entry| ViewUpdate::Entry {
+                entry: Box::new(entry),
+            }));
+        }
+        if let Some((key, node, offset, segments)) = attempt
+            && !segments.is_empty()
+        {
+            let captured = updates.iter().find_map(|update| match update {
+                ViewUpdate::Entry { entry } if entry.node() == node => Some(content(entry)),
+                _ => None,
+            });
+            let current;
+            let value = if let Some(value) = captured {
+                value
+            } else {
+                current = read.path_node(session_id, node)?;
+                &current
+            };
             // 事务已提交而标记未到时，已 Ended 的尝试也不能重新发出半截文字。
-            if matches!(content, Node::Step { ref attempts, .. } if attempts.get(attempt.key.attempt_ordinal as usize).is_some_and(|a| matches!(a.progress, AttemptProgress::Sent)))
+            if matches!(value, Node::Step { turn_id, step_ordinal, attempts, .. }
+                if *turn_id == key.turn_id && *step_ordinal == key.model_step_ordinal
+                && attempts.get(key.attempt_ordinal as usize).is_some_and(|a| matches!(a.progress, AttemptProgress::Sent)))
             {
-                let offset = sent
-                    .filter(|(sent_node, sent_attempt, _)| {
-                        *sent_node == node && *sent_attempt == attempt.key.attempt_ordinal
-                    })
-                    .map_or(0, |(_, _, offset)| offset);
-                let (segments, _) = suffix(&attempt.segments, offset);
-                if !segments.is_empty() {
-                    updates.push(ViewUpdate::Text(TextUpdate {
-                        node,
-                        attempt: attempt.key.attempt_ordinal,
-                        offset,
-                        segments,
-                    }));
-                }
+                updates.push(ViewUpdate::Text(TextUpdate {
+                    node,
+                    attempt: key.attempt_ordinal,
+                    offset,
+                    segments,
+                }));
             }
         }
         Ok(updates)
@@ -330,6 +383,67 @@ impl ObserverSink {
     pub(crate) fn events(&self) -> Vec<TurnEvent> {
         self.state.lock().unwrap().events.clone()
     }
+}
+fn content(entry: &ConversationEntry) -> &Node {
+    match entry {
+        ConversationEntry::UserMessage { content, .. }
+        | ConversationEntry::Step { content, .. } => content,
+    }
+}
+fn session_record(
+    read: &SessionRead,
+    session_id: lancet_protocol::SessionId,
+) -> lattice_session::store::Result<lattice_session::store::SessionRecord> {
+    read.find_session(session_id)?
+        .ok_or_else(|| StoreError::NotFound {
+            kind: "session",
+            id: session_id.to_string(),
+        })
+}
+pub(crate) fn session_head(
+    read: &SessionRead,
+    session_id: lancet_protocol::SessionId,
+) -> lattice_session::store::Result<SessionHead> {
+    let record = session_record(read, session_id)?;
+    let current = read.path_node(session_id, record.current)?;
+    head_from_node(read, session_id, record.current, &current)
+}
+fn head_from_node(
+    read: &SessionRead,
+    session_id: lancet_protocol::SessionId,
+    position: NodeId,
+    current: &Node,
+) -> lattice_session::store::Result<SessionHead> {
+    let agent = match current {
+        Node::Root => None,
+        Node::UserMessage { agent_name, .. } => Some(agent_name.clone()),
+        Node::Step { turn_id, .. } => {
+            let node = read.turn_user_node(session_id, *turn_id)?;
+            match read.path_node(session_id, node)? {
+                Node::UserMessage {
+                    agent_name,
+                    turn_id: id,
+                    ..
+                } if id == *turn_id => Some(agent_name),
+                _ => {
+                    return Err(StoreError::Corruption {
+                        table: "nodes".into(),
+                        key: node.0.to_string(),
+                        detail: "expected turn user message".into(),
+                    });
+                }
+            }
+        }
+    };
+    Ok(SessionHead {
+        session_id,
+        position,
+        agent,
+        turn_id: current.turn_id(),
+        owner: false,
+        diagnostic: None,
+        path_replaced: false,
+    })
 }
 fn suffix(segments: &[TextSegment], offset: usize) -> (Vec<TextSegment>, usize) {
     let mut total = 0;

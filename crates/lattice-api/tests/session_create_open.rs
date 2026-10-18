@@ -75,7 +75,9 @@ async fn first_acceptance_reopen_preserves_identity_without_observers_or_configu
     let execution = lattice_api::start_turn(api, layout, id, root, retry, None);
     assert!(matches!(
         execution.acceptance.await.unwrap(),
-        Err(lattice_api::ApiError::Conflict(_))
+        Err(lattice_api::ApiError::Conflict(
+            lattice_api::local::ConflictReason::TurnIdUsed
+        ))
     ));
     assert!(execution.completion.await.unwrap().is_err());
     assert_eq!(
