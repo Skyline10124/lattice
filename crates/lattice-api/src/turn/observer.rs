@@ -335,18 +335,15 @@ impl ObserverSink {
                 ViewUpdate::Entry { entry } if entry.node() == node => Some(content(entry)),
                 _ => None,
             });
-            let current;
-            let value = if let Some(value) = captured {
-                value
+            let sent = if let Some(value) = captured {
+                matches!(value, Node::Step { turn_id, step_ordinal, attempts, .. }
+                    if *turn_id == key.turn_id && *step_ordinal == key.model_step_ordinal
+                    && attempts.get(key.attempt_ordinal as usize).is_some_and(|a| matches!(a.progress, AttemptProgress::Sent)))
             } else {
-                current = read.path_node(session_id, node)?;
-                &current
+                read.attempt_is_sent(session_id, node, key)?
             };
             // 事务已提交而标记未到时，已 Ended 的尝试也不能重新发出半截文字。
-            if matches!(value, Node::Step { turn_id, step_ordinal, attempts, .. }
-                if *turn_id == key.turn_id && *step_ordinal == key.model_step_ordinal
-                && attempts.get(key.attempt_ordinal as usize).is_some_and(|a| matches!(a.progress, AttemptProgress::Sent)))
-            {
+            if sent {
                 updates.push(ViewUpdate::Text(TextUpdate {
                     node,
                     attempt: key.attempt_ordinal,
@@ -395,23 +392,7 @@ fn head_from_node(
     let agent = match current {
         Node::Root => None,
         Node::UserMessage { agent_name, .. } => Some(agent_name.clone()),
-        Node::Step { turn_id, .. } => {
-            let node = read.turn_user_node(session_id, *turn_id)?;
-            match read.path_node(session_id, node)? {
-                Node::UserMessage {
-                    agent_name,
-                    turn_id: id,
-                    ..
-                } if id == *turn_id => Some(agent_name),
-                _ => {
-                    return Err(StoreError::Corruption {
-                        table: "nodes".into(),
-                        key: node.0.to_string(),
-                        detail: "expected turn user message".into(),
-                    });
-                }
-            }
-        }
+        Node::Step { turn_id, .. } => Some(read.turn_agent(session_id, *turn_id)?),
     };
     Ok(SessionHead {
         session_id,

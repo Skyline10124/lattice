@@ -779,6 +779,9 @@ async fn slow_observer_reads_latest_entries_suffixes_and_attempt_boundaries() {
             .iter()
             .any(|update| matches!(update, ViewUpdate::Text(_)))
     );
+    // 已有观察者的纯文字推送同样必须以已提交的 Ended 为准。
+    let batch = capture(slow).await;
+    assert!(batch.is_empty());
     drop((api, io));
     finish(&backend, task).await;
 }

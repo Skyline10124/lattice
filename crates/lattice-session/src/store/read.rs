@@ -3,7 +3,7 @@
 
 use super::*;
 use super::{codec::*, local::Selection};
-use lancet_protocol::InvocationId;
+use lancet_protocol::{InvocationId, ModelAttemptKey};
 use lattice_conversation::ToolResultOutcome;
 use lattice_store::ProjectStoreKey;
 use redb::ReadableTable;
@@ -21,6 +21,39 @@ struct CountedNode {
     kind: CountedNodeKind,
     parent: NodeId,
     turn_id: TurnId,
+}
+
+#[derive(serde::Deserialize)]
+struct StepAttempts {
+    kind: CountedNodeKind,
+    turn_id: TurnId,
+    step_ordinal: u32,
+    attempts: Vec<AttemptState>,
+}
+
+#[derive(serde::Deserialize)]
+struct AttemptState {
+    progress: AttemptStateTag,
+}
+
+// 只读标签，跳过 Ended 的诊断；内部标签枚举会缓存整个 progress 对象。
+#[derive(serde::Deserialize)]
+struct AttemptStateTag {
+    progress: AttemptStateKind,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum AttemptStateKind {
+    Sent,
+    Ended,
+}
+
+#[derive(serde::Deserialize)]
+struct TurnAgent {
+    kind: CountedNodeKind,
+    turn_id: TurnId,
+    agent_name: String,
 }
 
 fn payload_summary(
@@ -696,7 +729,48 @@ impl SessionRead {
             .ok_or_else(|| corrupt("turn_index", &turn.to_string(), "missing turn user node"))
     }
 
-    fn counted_node(&self, session: SessionId, node: NodeId) -> Result<CountedNode> {
+    /// 只读指定 Step 的尝试标签，供生成中文字的推送守卫使用。
+    pub fn attempt_is_sent(
+        &self,
+        session: SessionId,
+        node: NodeId,
+        key: ModelAttemptKey,
+    ) -> Result<bool> {
+        let step: StepAttempts = self.projected_node(session, node)?;
+        if !matches!(step.kind, CountedNodeKind::Step) {
+            return Err(corrupt(
+                "nodes",
+                &format!("{session}/{}", node.0),
+                "expected step node",
+            ));
+        }
+        Ok(step.turn_id == key.turn_id
+            && step.step_ordinal == key.model_step_ordinal
+            && step
+                .attempts
+                .get(key.attempt_ordinal as usize)
+                .is_some_and(|attempt| matches!(attempt.progress.progress, AttemptStateKind::Sent)))
+    }
+
+    /// 经 TurnId 索引只读取本轮 agent，不装载输入与冻结配置。
+    pub fn turn_agent(&self, session: SessionId, turn: TurnId) -> Result<String> {
+        let node = self.turn_user_node(session, turn)?;
+        let user: TurnAgent = self.projected_node(session, node)?;
+        if !matches!(user.kind, CountedNodeKind::UserMessage) || user.turn_id != turn {
+            return Err(corrupt(
+                "nodes",
+                &format!("{session}/{}", node.0),
+                "expected turn user message",
+            ));
+        }
+        Ok(user.agent_name)
+    }
+
+    fn projected_node<T: serde::de::DeserializeOwned>(
+        &self,
+        session: SessionId,
+        node: NodeId,
+    ) -> Result<T> {
         let key = format!("{}/{}", session, node.0);
         let table = self.tx.open_table(NODES).map_err(table_error)?;
         let value = table
@@ -725,7 +799,7 @@ impl SessionRead {
                 path.push((head, node));
                 head = parent;
             } else {
-                let node = self.counted_node(session, head)?;
+                let node: CountedNode = self.projected_node(session, head)?;
                 match node.kind {
                     CountedNodeKind::UserMessage => {
                         earlier_turns += 1;
