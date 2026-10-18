@@ -49,11 +49,7 @@ pub(super) fn encode<T: Serialize + DeserializeOwned>(value: &T) -> Result<Vec<u
         .map_err(|_| invalid("record", "encoded record exceeds decoding conditions"))?;
     Ok(out)
 }
-pub(super) fn decode<T: DeserializeOwned + Serialize>(
-    table: &str,
-    key: &str,
-    bytes: &[u8],
-) -> Result<T> {
+pub(super) fn payload<'a>(table: &str, key: &str, bytes: &'a [u8]) -> Result<&'a [u8]> {
     let head = bytes
         .get(..4)
         .ok_or_else(|| corrupt(table, key, "missing value version"))?;
@@ -67,10 +63,19 @@ pub(super) fn decode<T: DeserializeOwned + Serialize>(
             supported: VERSION,
         });
     }
+    Ok(&bytes[4..])
+}
+
+pub(super) fn decode<T: DeserializeOwned + Serialize>(
+    table: &str,
+    key: &str,
+    bytes: &[u8],
+) -> Result<T> {
+    let bytes = payload(table, key, bytes)?;
     // 不回显 serde 错误：错误消息可能包含完整的未知枚举值或字段。
     let error = || corrupt(table, key, "invalid record encoding");
-    let wire: serde_json::Value = serde_json::from_slice(&bytes[4..]).map_err(|_| error())?;
-    let record: T = serde_json::from_slice(&bytes[4..]).map_err(|_| error())?;
+    let wire: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| error())?;
+    let record: T = serde_json::from_slice(bytes).map_err(|_| error())?;
     let known = serde_json::to_value(&record).map_err(|_| error())?;
     if !retains_fields(&wire, &known) {
         return Err(error());

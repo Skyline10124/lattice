@@ -2259,6 +2259,128 @@ fn conversation_windows_skip_steps_outside_the_requested_turns() {
 }
 
 #[test]
+fn conversation_windows_count_older_turns_without_decoding_content() {
+    for (damaged, field) in [
+        (NodeId(3), "reply"),
+        (NodeId(3), "attempts"),
+        (NodeId(3), "slots"),
+        (NodeId(3), "unexpected"),
+        (NodeId(1), "message"),
+        (NodeId(1), "unexpected"),
+    ] {
+        let (_d, _l, db, _lock) = conversation_tree();
+        let tx = db.db.begin_write().unwrap();
+        {
+            let mut nodes = tx.open_table(NODES).unwrap();
+            let key = node_key(sid(1), damaged);
+            let mut wire: serde_json::Value = {
+                let value = nodes.get(key.as_slice()).unwrap().unwrap();
+                serde_json::from_slice(&value.value()[4..]).unwrap()
+            };
+            wire[field] = json!(false);
+            let mut bytes = VERSION.to_be_bytes().to_vec();
+            bytes.extend(serde_json::to_vec(&wire).unwrap());
+            nodes.insert(key.as_slice(), bytes.as_slice()).unwrap();
+        }
+        tx.commit().unwrap();
+        let read = db.begin_read().unwrap();
+        let view = read.view(sid(1), 1).unwrap();
+        assert_eq!(entry_nodes(&view.entries), vec![6, 7]);
+        assert_eq!(entry_ordinals(&view.entries), vec![3]);
+        let history = read.history(sid(1), NodeId(6), 1).unwrap();
+        assert_eq!(entry_nodes(&history), vec![4, 5]);
+        assert_eq!(entry_ordinals(&history), vec![2]);
+        assert_eq!(
+            entry_ordinals(&[read
+                .entry(NodeRef {
+                    session_id: sid(1),
+                    node: NodeId(6),
+                })
+                .unwrap()]),
+            vec![3]
+        );
+        assert!(matches!(
+            read.view(sid(1), 3),
+            Err(StoreError::Corruption { .. })
+        ));
+    }
+}
+
+#[test]
+fn conversation_counts_reject_damaged_headers() {
+    for damaged in [NodeId(1), NodeId(3)] {
+        for field in ["kind", "parent", "turn_id"] {
+            for remove in [false, true] {
+                let (_d, _l, db, _lock) = conversation_tree();
+                let tx = db.db.begin_write().unwrap();
+                {
+                    let mut nodes = tx.open_table(NODES).unwrap();
+                    let key = node_key(sid(1), damaged);
+                    let mut wire: serde_json::Value = {
+                        let value = nodes.get(key.as_slice()).unwrap().unwrap();
+                        serde_json::from_slice(&value.value()[4..]).unwrap()
+                    };
+                    if remove {
+                        wire.as_object_mut().unwrap().remove(field);
+                    } else {
+                        wire[field] = json!(false);
+                    }
+                    let mut bytes = VERSION.to_be_bytes().to_vec();
+                    bytes.extend(serde_json::to_vec(&wire).unwrap());
+                    nodes.insert(key.as_slice(), bytes.as_slice()).unwrap();
+                }
+                tx.commit().unwrap();
+                let read = db.begin_read().unwrap();
+                for result in [
+                    read.view(sid(1), 1).map(|_| ()),
+                    read.history(sid(1), NodeId(6), 1).map(|_| ()),
+                    read.entry(NodeRef {
+                        session_id: sid(1),
+                        node: NodeId(6),
+                    })
+                    .map(|_| ()),
+                ] {
+                    assert!(
+                        matches!(result, Err(StoreError::Corruption { table, key, .. })
+                        if table == "nodes" && key == format!("{}/{}", sid(1), damaged.0))
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn conversation_counts_reject_invalid_value_versions() {
+    for version in [None, Some(VERSION + 1)] {
+        let (_d, layout, db, _lock) = conversation_tree();
+        let tx = db.db.begin_write().unwrap();
+        {
+            let mut nodes = tx.open_table(NODES).unwrap();
+            let key = node_key(sid(1), NodeId(3));
+            let mut bytes = nodes.get(key.as_slice()).unwrap().unwrap().value().to_vec();
+            if let Some(version) = version {
+                bytes[..4].copy_from_slice(&version.to_be_bytes());
+            } else {
+                bytes.truncate(3);
+            }
+            nodes.insert(key.as_slice(), bytes.as_slice()).unwrap();
+        }
+        tx.commit().unwrap();
+        let result = db.begin_read().unwrap().view(sid(1), 1);
+        if let Some(version) = version {
+            assert!(
+                matches!(result, Err(StoreError::UnsupportedVersion { path, table, key, found, supported: VERSION })
+                if path == layout.lattice_root().join("lattice.redb")
+                    && table == "nodes" && key == format!("{}/3", sid(1)) && found == version)
+            );
+        } else {
+            assert!(matches!(result, Err(StoreError::Corruption { .. })));
+        }
+    }
+}
+
+#[test]
 fn conversation_reads_report_missing_nodes_and_invalid_encoding() {
     for damaged in [NodeId(1), NodeId(2)] {
         for broken in [false, true] {
@@ -2282,6 +2404,7 @@ fn conversation_reads_report_missing_nodes_and_invalid_encoding() {
             tx.commit().unwrap();
             let read = db.begin_read().unwrap();
             for result in [
+                read.view(sid(1), 1).map(|_| ()),
                 read.view(sid(1), 2).map(|_| ()),
                 read.history(sid(1), NodeId(3), 1).map(|_| ()),
             ] {

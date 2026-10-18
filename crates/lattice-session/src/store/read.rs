@@ -8,6 +8,21 @@ use lattice_conversation::ToolResultOutcome;
 use lattice_store::ProjectStoreKey;
 use redb::ReadableTable;
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CountedNodeKind {
+    UserMessage,
+    Step,
+}
+
+// 根节点不参与计数；扁平投影让无关字段直接跳过，避免内部标签枚举缓存整份正文。
+#[derive(serde::Deserialize)]
+struct CountedNode {
+    kind: CountedNodeKind,
+    parent: NodeId,
+    turn_id: TurnId,
+}
+
 fn payload_summary(
     payload: &ResultPayload,
 ) -> (ToolResultOutcome, Option<OperatorReason>, MaterialSummary) {
@@ -679,6 +694,16 @@ impl SessionRead {
             .ok_or_else(|| corrupt("turn_index", &turn.to_string(), "missing turn user node"))
     }
 
+    fn counted_node(&self, session: SessionId, node: NodeId) -> Result<CountedNode> {
+        let key = format!("{}/{}", session, node.0);
+        let table = self.tx.open_table(NODES).map_err(table_error)?;
+        let value = table
+            .get(node_key(session, node).as_slice())?
+            .ok_or_else(|| corrupt("nodes", &key, "missing path node"))?;
+        let bytes = attach_path(&self.path, payload("nodes", &key, value.value()))?;
+        serde_json::from_slice(bytes).map_err(|_| corrupt("nodes", &key, "invalid record encoding"))
+    }
+
     fn conversation_window(
         &self,
         session: SessionId,
@@ -687,10 +712,10 @@ impl SessionRead {
     ) -> Result<(Vec<(NodeId, Node)>, u64)> {
         let mut path = Vec::new();
         let mut earlier_turns = 0;
-        // 窗口之外只数轮次，不保留正文；经 TurnId 索引跳过同轮其余 Step。
+        // 窗口之外只解码计数字段；经 TurnId 索引跳过同轮其余 Step。
         while head != NodeId(0) {
-            let node = self.path_node(session, head)?;
             if turns > 0 {
+                let node = self.path_node(session, head)?;
                 let Some(parent) = node.parent() else { break };
                 if matches!(node, Node::UserMessage { .. }) {
                     turns -= 1;
@@ -698,15 +723,15 @@ impl SessionRead {
                 path.push((head, node));
                 head = parent;
             } else {
-                match node {
-                    Node::UserMessage { parent, .. } => {
+                let node = self.counted_node(session, head)?;
+                match node.kind {
+                    CountedNodeKind::UserMessage => {
                         earlier_turns += 1;
-                        head = parent;
+                        head = node.parent;
                     }
-                    Node::Step { turn_id, .. } => {
-                        head = self.turn_user_node(session, turn_id)?;
+                    CountedNodeKind::Step => {
+                        head = self.turn_user_node(session, node.turn_id)?;
                     }
-                    Node::Root => break,
                 }
             }
         }
