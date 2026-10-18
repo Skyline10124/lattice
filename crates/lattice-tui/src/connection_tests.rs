@@ -250,6 +250,28 @@ fn recovery_not_found_is_an_error_and_returns_the_input() {
             assert!(error.text.contains("输入已保留"), "{}", error.text);
         }
         assert_eq!(app.phase, TurnPhase::Idle);
+        // 查无此请求的一次没有建立会话：之后的提交再遇到会话已存在，不再找回它。
+        app.submit().unwrap();
+        let (third, _) = app.submission_identity().unwrap();
+        app.apply_submission(receipt(
+            third,
+            SubmissionResult::Rejected {
+                error: LocalError {
+                    conflict: Some(lattice_api::local::ConflictReason::SessionExists),
+                    ..local_error(LocalErrorKind::Conflict, "session exists")
+                },
+            },
+        ));
+        assert_eq!(app.recover_request, None);
+        // 再次查到它不存在时已没有可归还的输入，提示不写输入的去向。
+        app.apply_recovery(first, Err(local_error(LocalErrorKind::NotFound, "no turn")));
+        let error = app.dock.message().unwrap();
+        assert!(error.text.contains("未被接受"), "{}", error.text);
+        assert!(
+            !error.text.contains("输入已保留") && !error.text.contains("Ctrl+↑"),
+            "{}",
+            error.text
+        );
     }
 }
 
@@ -468,6 +490,24 @@ fn older_turns_arriving_after_path_replacement_are_dropped() {
     }
     let again = app.older_request.expect("新路径照常往上翻");
     assert_ne!(again.epoch, request.epoch);
+}
+
+#[test]
+fn older_turns_arriving_while_a_new_head_is_pending_are_already_ended() {
+    let mut app = test_app(true);
+    let request = scrolled_to_top(&mut app);
+    // 新一轮的会话头已到、当前位置的条目未到时，查询带来一轮执行者已消失、最后一步未关闭的旧轮。
+    app.apply_view(LocalUpdate::Head(head(9, Some(turn(5)), true)));
+    app.apply_older(
+        request,
+        Ok(LocalHistory {
+            entries: vec![user(1, turn(1), 1, "prompt-1"), step(2, turn(1), 0).entry()],
+        }),
+    );
+    // 会话头随当前位置的条目确认后，旧轮的结局仍不是新消息，也不暂停队列。
+    app.apply_view(entry_update(user(9, turn(5), 5, "prompt-5")));
+    assert!(app.dock.message().is_none(), "{}", docked(&app));
+    assert!(!app.queue.is_paused());
 }
 
 #[test]
@@ -756,6 +796,45 @@ fn ownerless_head_ends_the_turn_and_warns_once_per_view() {
     assert!(!docked(&app).contains("执行者已经消失"), "{}", docked(&app));
     assert!(!transcript(&app).contains("执行者已经消失"));
     assert!(!transcript(&app).contains(&format!("turn {t} 失败")));
+}
+
+#[test]
+fn pending_head_does_not_end_turns_by_the_superseded_head() {
+    let mut app = test_app(true);
+    let (a, b) = (turn(1), turn(2));
+    // 上一轮停在未关闭的一步、没有 Owner：按会话头判为结束。
+    open_view(
+        &mut app,
+        head(2, Some(a), false),
+        vec![user(1, a, 1, "first"), step(2, a, 0).sent().entry()],
+    );
+    assert!(app.turn_ended(a));
+    // 新一轮的会话头已到、条目尚未全部确认时退出：已确认的会话头仍指向上一轮，
+    // 不据它把这一轮判为结束，未关闭的 summary 不作结局输出。
+    app.apply_view(LocalUpdate::Head(head(5, Some(b), true)));
+    app.apply_view(entry_update(user(3, b, 2, "second")));
+    let running = step(4, b, 0).sent().entry();
+    let ConversationEntry::Step { summary, .. } = running.clone() else {
+        unreachable!()
+    };
+    app.apply_view(entry_update(running));
+    let report = DetachReport {
+        session_id: sid(),
+        turn_id: Some(b),
+        submission: None,
+        submission_diagnostic: None,
+        cancel: None,
+        cancel_error: None,
+        head: Some(head(5, Some(b), true)),
+        summary,
+    };
+    let lines = detach_lines(report, app.exit_viewed(Some(b))).join("\n");
+    assert!(!lines.contains(&format!("Turn {b}")), "{lines}");
+    assert!(app.turn_ended(a), "已结束的一轮在会话头待确认时不反复");
+    // 当前位置的条目到达后按新会话头判定。
+    app.apply_view(entry_update(step(5, b, 1).sent().entry()));
+    assert!(!app.turn_ended(b));
+    assert!(app.turn_ended(a));
 }
 
 #[test]

@@ -62,21 +62,24 @@ pub(crate) enum KeptInput {
     Restored,
     /// 没有放回：输入区已有用户的草稿，或结果未知的自动发送不再放回队首；原输入在输入历史中。
     History,
+    /// 没有可归还的输入：这次提交已经有过确定结果，或不是本客户端在等结果的提交。
+    Nothing,
 }
 
 fn history_hint(kept: KeptInput) -> &'static str {
     match kept {
-        KeptInput::Restored => "",
+        KeptInput::Restored | KeptInput::Nothing => "",
         KeptInput::History => "；原输入未放回，可按 Ctrl+↑ 从输入历史找回",
     }
 }
 
 /// 实时回执与找回时输入随即归还；退出报告与旧句柄的交接不归还，文案不写输入的去向。
+/// 没有可归还的输入时同样不写，只说这次请求未被接受。
 pub(crate) fn not_accepted_status(turn_id: TurnId, kept: KeptInput) -> Status {
     let notice = not_accepted_notice(turn_id);
     let kept = match kept {
         KeptInput::Restored => "，输入已保留",
-        KeptInput::History => history_hint(kept),
+        KeptInput::History | KeptInput::Nothing => history_hint(kept),
     };
     status(NoticeLevel::Error, format!("{notice}{kept}"))
 }

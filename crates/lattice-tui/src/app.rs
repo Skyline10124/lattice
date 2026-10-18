@@ -988,7 +988,7 @@ impl App {
                 .filter(|_| !automatic),
         };
         if !automatic && manual.is_none() && kept == KeptInput::Restored {
-            return kept;
+            return KeptInput::Nothing;
         }
         self.mark_rejected_comments(turn_id);
         // 评论不进输入历史，总是恢复为草稿。
@@ -1366,8 +1366,9 @@ impl App {
                 continue;
             }
             self.entries.insert(node, entry);
-            // 更早的轮都已结束；它们的提示与结局不是新消息，直接进对话记录。
-            let ended = self.turn_ended(turn);
+            // 更早的轮都已结束：当前位置所属的那一轮总在已装入的部分里。不按会话头判定，
+            // 新会话头待确认时也一样；它们的提示与结局不是新消息，直接进对话记录。
+            let ended = self.last_summary(turn).is_some();
             if ended {
                 self.ended.insert(turn);
             }
@@ -1405,8 +1406,12 @@ impl App {
                 self.accept_session(turn.session_id);
                 self.push_status(recovered_status(turn_id));
             }
-            // 按 TurnId 查询为 NotFound：提交确定未被接受，输入保留。
+            // 按 TurnId 查询为 NotFound：提交确定未被接受，归还输入。它没有建立会话，
+            // 之后的提交再遇到会话已存在时不再找回它。
             Err(error) if error.kind == LocalErrorKind::NotFound => {
+                if self.unconfirmed == Some(turn_id) {
+                    self.unconfirmed = None;
+                }
                 let kept = self.reject_submission(turn_id);
                 self.push_status(not_accepted_status(turn_id, kept));
             }
@@ -1440,15 +1445,27 @@ impl App {
     }
 
     /// 这一轮已经结束：最后一步已关闭，或者会话头说明它不在执行（当前位置在别处，或没有 Owner）。
+    /// 新会话头待确认时，已确认的那条早于本批条目，不据它作新的判定：本批中刚到的一轮会被它
+    /// 当成已在别处结束。其间沿用确认时的结论，确认后再按新会话头判定，已结束的轮也不因此反复。
     /// 还没有步骤的一轮没有可显示的结局，留到步骤到达再判定。
     fn turn_ended(&self, turn: TurnId) -> bool {
         self.last_summary(turn).is_some_and(|summary| {
             summary.progress.is_closed()
-                || self
-                    .head
-                    .as_ref()
-                    .is_some_and(|head| head.turn_id != Some(turn) || !head.owner)
+                || match (&self.pending_head, &self.head) {
+                    (Some(_), _) => self.ended.contains(&turn),
+                    (None, Some(head)) => head.turn_id != Some(turn) || !head.owner,
+                    (None, None) => false,
+                }
         })
+    }
+
+    /// 退出报告所述那一轮已知的情况。对话记录已不在屏幕上，结局照常重述。
+    fn exit_viewed(&self, turn: Option<TurnId>) -> Viewed {
+        if turn.is_some_and(|id| self.turn_ended(id)) {
+            Viewed::Ended
+        } else {
+            Viewed::Unknown
+        }
     }
 
     /// 路径替换后、新的初始条目尚未全部确认时提交，先按已装入的条目核对评论锚点。
@@ -1526,12 +1543,7 @@ pub(crate) async fn run_app(
         exit.handoffs.push(turn.detach().boxed());
     }
     while let Some(report) = exit.handoffs.next().await {
-        // 对话记录已不在屏幕上，结局照常重述。
-        let viewed = if report.turn_id.is_some_and(|id| app.turn_ended(id)) {
-            Viewed::Ended
-        } else {
-            Viewed::Unknown
-        };
+        let viewed = app.exit_viewed(report.turn_id);
         for line in detach_lines(report, viewed) {
             eprintln!("{line}");
         }
