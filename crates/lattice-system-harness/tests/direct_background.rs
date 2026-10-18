@@ -7,7 +7,7 @@ mod support;
 use lattice_system_harness::{
     CancelRecord, CancelStatus, CommandOutcome, FAKE_API_KEY, LatticeCommand, RunningCommand,
     ScenarioBudget, ScenarioEvidence, ScenarioWorld, SendOutcome, SendRecord, SessionSendDriver,
-    SseScript, StepProgress, merge_segments, parse_send_stdout,
+    SseScript, StepProgress, merge_segments,
 };
 use serde_json::{Value, json};
 use std::{
@@ -17,8 +17,8 @@ use std::{
 };
 use support::{
     Watcher, Wire, assert_accepted_and_closed, assert_clean_send, assert_forced_kill,
-    configuration, direct_world, driver, history, ipc, submit_request, tool_call, turn_closed,
-    turn_lookup, wire_fake_llm, wire_gated_fake_llm,
+    configuration, direct_world, driver, history, ipc, parse_send_stdout, submit_request,
+    tool_call, turn_closed, turn_lookup, wire_fake_llm, wire_gated_fake_llm,
 };
 const FIRST: &str = "00000000-0000-4000-8000-000000000001";
 const SECOND: &str = "00000000-0000-4000-8000-000000000002";
@@ -1235,6 +1235,7 @@ fn a_live_new_turn_does_not_block_old_closed_observation() {
         gate.release_next(wait(&budget)).unwrap();
         let first = send.wait_spawned(first).unwrap();
         evidence.record_command("first", &first.command);
+        assert_clean_send(&first).unwrap();
         assert!(first.has_completed());
         let tid = first.accepted_turn_id().unwrap();
         let old = detail(&world, &budget, &mut evidence, tid);

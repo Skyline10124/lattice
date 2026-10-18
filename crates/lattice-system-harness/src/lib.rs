@@ -44,9 +44,9 @@ pub use session_send::{
     AttemptState, CancelRecord, CancelStatus, ConnectionStatus, Entry, EntryContent, Head,
     LocalError, MalformedJsonLine, Outcome, Receipt, ReceiptResult, RetryNotice, Segment,
     SegmentKind, SendExecution, SendExitCode, SendOutcome, SendRecord, SessionSendDriver, Slot,
-    SlotOutcome, SlotState, StepEnd, StepEntry, StepProgress, Submit, TextChunk, TurnSummary,
-    ViewState, derive_send_exit_code, merge_segments, parse_entry, parse_record, parse_send_stdout,
-    push_segment,
+    SlotOutcome, SlotState, StepEnd, StepEntry, StepProgress, SubmissionReceiptError, Submit,
+    TextChunk, TurnSummary, ViewState, derive_send_exit_code, merge_segments, parse_entry,
+    parse_record, parse_send_stdout, push_segment,
 };
 pub use tls::TlsIdentity;
 pub use tui_mock::{TuiMockError, TuiMockScenario, run_tui_mock};

@@ -7,7 +7,7 @@ mod support;
 use lattice_system_harness::{
     CommandOutcome, FAKE_API_KEY, FakeLlmServer, LatticeCommand, ScenarioEvidence, ScenarioSpec,
     ScenarioWorld, Segment, SegmentKind, SseScript, StepEnd, StepProgress, ViewState,
-    merge_segments, parse_send_stdout,
+    merge_segments,
 };
 use serde_json::{Value, json};
 use std::{
@@ -15,7 +15,9 @@ use std::{
     path::Path,
     time::{Duration, Instant},
 };
-use support::{Watcher, Wire, configuration, ipc, submit_request, turn_closed, turn_lookup};
+use support::{
+    Watcher, Wire, configuration, ipc, parse_send_stdout, submit_request, turn_closed, turn_lookup,
+};
 
 /// 直接经 IPC 提交时由测试充当客户端生成的身份。
 const TURN: &str = "00000000-0000-4000-8000-000000000001";

@@ -349,6 +349,7 @@ fn direct_failure_session_lock_rejects_busy_then_accepts_explicit_retry() {
                 "accepted Turn completes",
             )?;
         }
+        assert_clean_send(&racer)?;
         require(
             racer.command.is_clean_exit(1)
                 && racer.accepted_turn_id().is_none()

@@ -918,16 +918,46 @@ pub struct MalformedJsonLine {
     pub raw: Vec<u8>,
     pub reason: String,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum SubmissionReceiptError {
+    #[error("expected exactly one sending record, got {actual}")]
+    SendingCount { actual: usize },
+    #[error("expected exactly one submission receipt, got {actual}")]
+    ReceiptCount { actual: usize },
+    #[error("submission receipt does not match the sending TurnId")]
+    TurnIdMismatch,
+}
 #[derive(Debug, Clone, Default)]
 pub struct SendOutcome {
     pub records: Vec<SendRecord>,
     pub malformed_lines: Vec<MalformedJsonLine>,
+    /// 正常退出时的提交回执违规；保留记录与命令证据供场景诊断。
+    pub receipt_error: Option<SubmissionReceiptError>,
     pub exit_code: Option<SendExitCode>,
 }
 #[derive(Debug)]
 pub struct SendExecution {
     pub command: CommandOutcome,
     pub parsed: SendOutcome,
+}
+impl SendExecution {
+    pub fn clean_exit_code(&self) -> Option<i32> {
+        if self.receipt_error.is_none() {
+            self.command.clean_exit_code()
+        } else {
+            None
+        }
+    }
+    pub fn is_clean_exit(&self, expected: i32) -> bool {
+        self.clean_exit_code() == Some(expected)
+    }
+    /// 诊断只含进程元信息与回执规则错误；原始输出由场景另行脱敏保存。
+    pub fn summary(&self) -> String {
+        match &self.receipt_error {
+            Some(error) => format!("{}; {error}", self.command.summary()),
+            None => self.command.summary().to_string(),
+        }
+    }
 }
 impl std::ops::Deref for SendExecution {
     type Target = SendOutcome;
@@ -1085,7 +1115,7 @@ fn usage_error(error: &LocalError) -> bool {
 }
 /// 按记录推导退出码：先核对观察错误和已输出的回执，再使用持久结局。
 /// 身份生成前的使用错误退出 2；进入流式观察后的 error 记录一律退出 1。
-/// 进程退出、干预、EOF 和畸形行仍必须通过 SendExecution 另外核验。
+/// 进程退出、干预、EOF、回执规则和畸形行仍必须另外核验。
 pub fn derive_send_exit_code(records: &[SendRecord]) -> SendExitCode {
     let error = records.iter().rev().find_map(|record| match record {
         SendRecord::Error(error) => Some(error),
@@ -1169,28 +1199,36 @@ pub fn parse_send_stdout(stdout: &[u8], exit_code: Option<i32>) -> SendOutcome {
             }),
         }
     }
-    // 在明确解析 JSON 记录的入口核验，避免把人类正文中的 JSON 示例当成控制记录。
+    // 返回违规而非 panic，让场景先保存命令证据，再判定失败。
     if exit_code.is_some() {
-        let mut sending = result.records.iter().filter_map(|record| match record {
-            SendRecord::Submit(Submit::Sending { turn_id, .. }) => Some(turn_id),
-            _ => None,
-        });
-        if let Some(turn_id) = sending.next() {
-            assert!(
-                sending.next().is_none(),
-                "a submission must emit exactly one sending record"
-            );
-            let mut receipts = result.records.iter().filter_map(|record| match record {
-                SendRecord::Submit(Submit::Receipt(receipt)) => Some(receipt),
-                _ => None,
-            });
-            assert!(
-                matches!((receipts.next(), receipts.next()), (Some(receipt), None) if &receipt.turn_id == turn_id),
-                "sending must have exactly one receipt for the same TurnId"
-            );
-        }
+        result.receipt_error = submission_receipt_error(&result.records);
     }
     result
+}
+
+fn submission_receipt_error(records: &[SendRecord]) -> Option<SubmissionReceiptError> {
+    let mut sending = records.iter().filter_map(|record| match record {
+        SendRecord::Submit(Submit::Sending { turn_id, .. }) => Some(turn_id),
+        _ => None,
+    });
+    let turn_id = sending.next()?;
+    let actual = 1 + sending.count();
+    if actual != 1 {
+        return Some(SubmissionReceiptError::SendingCount { actual });
+    }
+    let mut receipts = records.iter().filter_map(|record| match record {
+        SendRecord::Submit(Submit::Receipt(receipt)) => Some(receipt),
+        _ => None,
+    });
+    let receipt = receipts.next();
+    let actual = usize::from(receipt.is_some()) + receipts.count();
+    if actual != 1 {
+        return Some(SubmissionReceiptError::ReceiptCount { actual });
+    }
+    if receipt.is_some_and(|receipt| &receipt.turn_id != turn_id) {
+        return Some(SubmissionReceiptError::TurnIdMismatch);
+    }
+    None
 }
 
 /// 首次提交由 CLI 生成 SessionId；驱动在接受回执之后才把它用于 `--session`。
@@ -1243,7 +1281,9 @@ impl<'a> SessionSendDriver<'a> {
     }
     fn record(&self, command: CommandOutcome) -> SendExecution {
         let parsed = parse_send_stdout(&command.stdout, command.exit_code());
-        if let Some(id) = parsed.accepted_session_id() {
+        if parsed.receipt_error.is_none()
+            && let Some(id) = parsed.accepted_session_id()
+        {
             if let Some(previous) = self.session_id() {
                 assert_eq!(previous, id, "accepted Session changed");
             } else {

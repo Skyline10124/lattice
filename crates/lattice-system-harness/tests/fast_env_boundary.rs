@@ -161,7 +161,12 @@ fn fast_dotenv_agents_dir_cannot_redirect_profile_lookup() {
     let args = &["--json", "run", "boundary control", "--agent", "evil"];
     let from_dotenv = run(&world, &spec, args);
     let result = lattice_system_harness::assert_exit_code(&from_dotenv, 2).and_then(|_| {
-        let sent = lattice_system_harness::parse_send_stdout(&from_dotenv.stdout, None);
+        let sent =
+            lattice_system_harness::parse_send_stdout(&from_dotenv.stdout, from_dotenv.exit_code());
+        require(
+            sent.receipt_error.is_none(),
+            format!("valid submission receipt: {:?}", sent.receipt_error),
+        )?;
         require(
             sent.malformed_lines.is_empty(),
             format!("valid JSONL: {:?}", sent.malformed_lines),
@@ -186,10 +191,16 @@ fn fast_dotenv_agents_dir_cannot_redirect_profile_lookup() {
     world.set_env("LATTICE_AGENTS_DIR", "");
     let from_process = run(&world, &spec, args);
     let control = assert_exit_success(&from_process).and_then(|_| {
+        let sent = lattice_system_harness::parse_send_stdout(
+            &from_process.stdout,
+            from_process.exit_code(),
+        );
         require(
-            lattice_system_harness::parse_send_stdout(&from_process.stdout, None)
-                .accepted_turn_id()
-                .is_some(),
+            sent.receipt_error.is_none(),
+            format!("valid submission receipt: {:?}", sent.receipt_error),
+        )?;
+        require(
+            sent.accepted_turn_id().is_some(),
             "process override must permit the selected project profile",
         )
     });

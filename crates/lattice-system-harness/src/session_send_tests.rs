@@ -543,22 +543,77 @@ fn view_state_keeps_written_facts_and_allows_repeated_values() {
 }
 
 #[test]
+fn receipt_violations_preserve_command_evidence() {
+    for (records, reason) in [
+        (
+            vec![sending()],
+            "expected exactly one submission receipt, got 0",
+        ),
+        (
+            vec![sending(), accepted(), accepted()],
+            "expected exactly one submission receipt, got 2",
+        ),
+    ] {
+        let stdout = records
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .into_bytes();
+        let stderr = b"submission diagnostic\n".to_vec();
+        let command = CommandOutcome {
+            stdout: stdout.clone(),
+            stderr: stderr.clone(),
+            stdout_complete: true,
+            stderr_complete: true,
+            termination: Some(crate::ProcessTermination::Exited(0)),
+            interventions: Vec::new(),
+            cleanup: crate::ProcessGroupCleanup::default(),
+        };
+        let parsed = parse_send_stdout(&command.stdout, command.exit_code());
+        let execution = SendExecution { command, parsed };
+        assert_eq!(execution.command.stdout, stdout);
+        assert_eq!(execution.command.stderr, stderr);
+        assert_eq!(execution.command.exit_code(), Some(0));
+        assert_eq!(execution.records.len(), records.len());
+        assert!(execution.command.is_clean_exit(0));
+        assert!(!execution.is_clean_exit(0));
+        assert_eq!(execution.clean_exit_code(), None);
+        assert!(
+            execution.summary().contains(reason),
+            "{}",
+            execution.summary()
+        );
+        assert!(!execution.summary().contains("submission diagnostic"));
+    }
+}
+
+#[test]
 fn json_output_requires_exactly_one_receipt_for_the_sending_identity() {
     let sending = serde_json::json!({"type":"submit","stage":"sending","turn_id":"t","session_id":"s","new":true});
     let receipt = serde_json::json!({"type":"submit","stage":"receipt","turn_id":"t","result":"not_accepted","recovered":false});
     let other = serde_json::json!({"type":"submit","stage":"receipt","turn_id":"other","result":"unknown","recovered":false});
-    for (records, valid) in [
-        (vec![sending.clone()], false),
-        (vec![sending.clone(), receipt.clone()], true),
+    for (records, error) in [
+        (
+            vec![sending.clone()],
+            Some(SubmissionReceiptError::ReceiptCount { actual: 0 }),
+        ),
+        (vec![sending.clone(), receipt.clone()], None),
         (
             vec![sending.clone(), receipt.clone(), receipt.clone()],
-            false,
+            Some(SubmissionReceiptError::ReceiptCount { actual: 2 }),
         ),
-        (vec![sending.clone(), other], false),
-        (vec![sending.clone(), sending, receipt.clone()], false),
+        (
+            vec![sending.clone(), other],
+            Some(SubmissionReceiptError::TurnIdMismatch),
+        ),
+        (
+            vec![sending.clone(), sending, receipt.clone()],
+            Some(SubmissionReceiptError::SendingCount { actual: 2 }),
+        ),
         (
             vec![serde_json::json!({"type":"connection","status":"eof"})],
-            true,
+            None,
         ),
     ] {
         let stdout = records
@@ -567,9 +622,31 @@ fn json_output_requires_exactly_one_receipt_for_the_sending_identity() {
             .collect::<Vec<_>>()
             .join("\n")
             .into_bytes();
-        let parsed = std::panic::catch_unwind(|| parse_send_stdout(&stdout, Some(1)));
-        assert_eq!(parsed.is_ok(), valid, "{records:?}");
+        for code in [0, 1, 2] {
+            let parsed = parse_send_stdout(&stdout, Some(code));
+            assert_eq!(parsed.receipt_error, error, "{records:?}");
+            let execution = SendExecution {
+                command: CommandOutcome {
+                    stdout: stdout.clone(),
+                    stderr: Vec::new(),
+                    stdout_complete: true,
+                    stderr_complete: true,
+                    termination: Some(crate::ProcessTermination::Exited(code)),
+                    interventions: Vec::new(),
+                    cleanup: crate::ProcessGroupCleanup::default(),
+                },
+                parsed,
+            };
+            assert_eq!(
+                execution.is_clean_exit(code),
+                error.is_none(),
+                "{}",
+                execution.summary()
+            );
+        }
         // 进程被杀时这些序列都可以作为部分输出保留。
-        assert!(parse_send_stdout(&stdout, None).malformed_lines.is_empty());
+        let partial = parse_send_stdout(&stdout, None);
+        assert!(partial.malformed_lines.is_empty());
+        assert_eq!(partial.receipt_error, None);
     }
 }

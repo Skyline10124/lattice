@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! 公开 Session 查询、树形历史与输入拒绝。
 mod support;
-use lattice_system_harness::{SendRecord, SessionSendDriver, SseScript, parse_send_stdout};
+use lattice_system_harness::{SendRecord, SessionSendDriver, SseScript};
 use serde_json::Value;
-use support::{assert_clean_send, cli, direct_world, driver, wire_fake_llm};
+use support::{assert_clean_send, cli, direct_world, driver, parse_send_stdout, wire_fake_llm};
 
 #[test]
 fn session_queries_and_rewind_preserve_the_tree_across_restart() {

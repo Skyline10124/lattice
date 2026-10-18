@@ -31,6 +31,7 @@ fn first_prompt_is_the_only_session_creation_and_request() {
         );
         let result = send.send("first real input").unwrap();
         evidence.record_command("first send", &result.command);
+        support::assert_clean_send(&result).unwrap();
         assert!(result.command.is_clean_exit(0), "{:?}", result.command);
         assert!(
             result.malformed_lines.is_empty(),
@@ -134,6 +135,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let first = send.send("original").unwrap();
         evidence.record_command("multi-step original", &first.command);
+        support::assert_clean_send(&first).unwrap();
         assert!(first.command.is_clean_exit(0));
         let sid = send.session_id().unwrap();
         let tid = first.accepted_turn_id().unwrap();
@@ -233,7 +235,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
         let cancelled = running.wait(None).unwrap();
         evidence.record_command("beta cancelled after real mutation", &cancelled);
         assert!(cancelled.is_clean_exit(2), "{}", cancelled.summary());
-        lattice_system_harness::parse_send_stdout(&cancelled.stdout, cancelled.exit_code());
+        support::parse_send_stdout(&cancelled.stdout, cancelled.exit_code());
         let beta_closed = cli_json(
             &world,
             &spec,
@@ -317,7 +319,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
         );
         evidence.record_command("fork inherits alpha at target node", &fork);
         assert!(fork.is_clean_exit(0), "{}", fork.summary());
-        lattice_system_harness::parse_send_stdout(&fork.stdout, fork.exit_code());
+        support::parse_send_stdout(&fork.stdout, fork.exit_code());
         let tree = cli_json(
             &world,
             &spec,
@@ -390,8 +392,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
         );
         evidence.record_command("root rejects missing agent", &refused);
         assert!(refused.is_clean_exit(2));
-        let refusal =
-            lattice_system_harness::parse_send_stdout(&refused.stdout, refused.exit_code());
+        let refusal = support::parse_send_stdout(&refused.stdout, refused.exit_code());
         assert_eq!(
             refusal.rejection().map(|error| error.message.as_str()),
             Some("agent required at root")
@@ -422,7 +423,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
         );
         evidence.record_command("beta rewrites first message", &root);
         assert!(root.is_clean_exit(0));
-        lattice_system_harness::parse_send_stdout(&root.stdout, root.exit_code());
+        support::parse_send_stdout(&root.stdout, root.exit_code());
         let after = cli_json(
             &world,
             &spec,
@@ -618,8 +619,7 @@ fn legacy_stores_are_refused_before_any_new_database_or_request() {
                 // 提交被后台拒绝时，`sending` 之后只有一条 `rejected` 回执，错误在其中；
                 // 其余命令不是提交，输出 `error` 记录。
                 let error = if args[1] == "session" && args[2] == "send" {
-                    let sent =
-                        lattice_system_harness::parse_send_stdout(&out.stdout, out.exit_code());
+                    let sent = support::parse_send_stdout(&out.stdout, out.exit_code());
                     assert!(sent.rejection().is_some(), "{:?}", sent.type_sequence());
                     &records[1]["error"]
                 } else {

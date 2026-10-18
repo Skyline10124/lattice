@@ -22,13 +22,17 @@ pub(crate) fn driver() -> LatticeDriver {
     LatticeDriver::from_env().expect("LATTICE_BIN must point to a built lattice binary")
 }
 
+/// 调用者先记录原始命令，再核验 JSON 提交回执，避免失败时丢失证据。
+pub(crate) fn parse_send_stdout(stdout: &[u8], exit_code: Option<i32>) -> SendOutcome {
+    let parsed = lattice_system_harness::parse_send_stdout(stdout, exit_code);
+    assert_eq!(parsed.receipt_error, None);
+    parsed
+}
+
 pub(crate) fn assert_clean_send(execution: &SendExecution) -> Result<(), AssertError> {
-    if execution.command.clean_exit_code().is_none() {
+    if execution.clean_exit_code().is_none() {
         return Err(AssertError::StdoutMissing {
-            expected: format!(
-                "session send did not exit cleanly: {}",
-                execution.command.summary()
-            ),
+            expected: format!("session send did not exit cleanly: {}", execution.summary()),
         });
     }
     if !execution.malformed_lines.is_empty() {
@@ -44,6 +48,10 @@ pub(crate) fn assert_clean_send(execution: &SendExecution) -> Result<(), AssertE
 
 /// 第一条记录写明身份，回执接受同一身份，结局属于这一轮，且输出只含这一轮的条目。
 pub(crate) fn assert_accepted_and_closed(outcome: &SendOutcome) -> Result<(), AssertError> {
+    require(
+        outcome.receipt_error.is_none(),
+        format!("invalid submission receipt: {:?}", outcome.receipt_error),
+    )?;
     let Some(SendRecord::Submit(Submit::Sending {
         turn_id,
         session_id,
