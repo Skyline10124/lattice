@@ -77,6 +77,7 @@ pub(super) fn text(
 
 pub(super) fn user(node: u64, turn_id: TurnId, ordinal: u64, text: &str) -> ConversationEntry {
     serde_json::from_value(json!({
+        "kind": "user_message",
         "node": node,
         "ordinal": ordinal,
         "content": {
@@ -250,6 +251,7 @@ impl StepEntry {
             .parts
             .map(|parts| json!({"role":"assistant","origin":"open_ai_compatible","parts":parts}));
         let mut value = json!({
+            "kind": "step",
             "node": self.node,
             "content": {
                 "kind":"step","parent":self.node.saturating_sub(1),"turn_id":self.turn_id,

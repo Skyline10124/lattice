@@ -566,7 +566,7 @@ pub struct SlotDetail {
     pub evidence: InvocationEvidence,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged, deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ConversationEntry {
     UserMessage {
         node: NodeId,

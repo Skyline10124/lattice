@@ -19,7 +19,7 @@ fn summary(outcome: &str, progress: &Value) -> Value {
     json!({"outcome":outcome,"notice":notice,"progress":progress})
 }
 fn user(node: u64, ordinal: u64) -> Value {
-    json!({"type":"entry","node":node,"ordinal":ordinal,"content":{"kind":"user_message","parent":node - 1,
+    json!({"type":"entry","kind":"user_message","node":node,"ordinal":ordinal,"content":{"kind":"user_message","parent":node - 1,
         "turn_id":"t","accepted_at":"2026-10-16T00:00:00Z","agent_name":"reader","model":"m","provider":"p",
         "limits":{},"config_digest":"00","message":{"role":"user","parts":[{"semantic":{"text":{"text":"hi"}},"replay_state":null}]}}})
 }
@@ -29,7 +29,7 @@ fn step(node: u64, ordinal: u64, progress: Value, summary: Option<Value>, reply:
         Value::Null => json!({"end":"stop","cause":{"cause":"process_exit"}}),
         end => end.clone(),
     };
-    let mut entry = json!({"type":"entry","node":node,"retries":[],
+    let mut entry = json!({"type":"entry","kind":"step","node":node,"retries":[],
         "content":{"kind":"step","parent":node - 1,"turn_id":"t","step_ordinal":ordinal,"progress":progress,
             "attempts":[],"slots":[],"updated_at":"2026-10-16T00:00:01Z",
             "reply":{"role":"assistant","parts":[{"semantic":{"text":{"text":reply}},"replay_state":null}]}},
@@ -251,6 +251,9 @@ fn summaries_are_checked_and_only_the_last_step_carries_one() {
     let mut zero = user(1, 1);
     zero["ordinal"] = json!(0);
     bad.push(zero);
+    let mut mislabeled = step(2, 0, finish(), Some(summary("completed", &finish())), "");
+    mislabeled["kind"] = json!("user_message");
+    bad.push(mislabeled);
     for value in bad {
         let parsed = parse(&[sending(), accepted(), head(true), user(1, 1), value.clone()]);
         assert_eq!(parsed.malformed_lines.len(), 1, "accepted {value}");

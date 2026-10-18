@@ -605,7 +605,11 @@ pub fn parse_entry(value: &Value) -> Result<Entry, String> {
     let content = &value["content"];
     let parent = uint(content, "parent")?;
     let turn_id = string(content, "turn_id")?.to_owned();
-    let parsed = match string(content, "kind")? {
+    let kind = string(value, "kind")?;
+    if kind != string(content, "kind")? {
+        return Err("entry kind differs from its node".into());
+    }
+    let parsed = match kind {
         "user_message" => {
             for field in ["step", "retries", "summary"] {
                 if value.get(field).is_some() {

@@ -2038,7 +2038,7 @@ fn conversation_step_summary_moves_to_reserved_successor() {
     assert_eq!(
         serde_json::to_value(&entry).unwrap(),
         json!({
-            "node": 2, "content": node_at(&db, 2), "step": expected.steps[0],
+            "kind": "step", "node": 2, "content": node_at(&db, 2), "step": expected.steps[0],
             "retries": [], "summary": expected.summary,
         })
     );
@@ -2122,7 +2122,7 @@ fn conversation_step_summary_moves_to_reserved_successor() {
         .unwrap();
     assert_eq!(
         serde_json::to_value(&user).unwrap(),
-        json!({ "node": 1, "content": node_at(&db, 1), "ordinal": 1 })
+        json!({ "kind": "user_message", "node": 1, "content": node_at(&db, 1), "ordinal": 1 })
     );
     for entry in read.view(sid(1), 1).unwrap().entries {
         assert_eq!(
