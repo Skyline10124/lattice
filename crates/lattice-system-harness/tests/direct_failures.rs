@@ -90,22 +90,34 @@ fn provider_failure(name: &str, test: &str, script: SseScript, partial: bool) {
             .iter()
             .find(|entry| entry.step().is_some())
             .expect("reserved Step persists even on failure");
-        let expected = if partial { "partial" } else { "" };
         require(
             outcome.reply_text().is_empty() && entry.raw["content"]["reply"].is_null(),
             "failed attempt does not produce a complete reply",
         )?;
-        // 生成中的文字只要收到过，就是这次尝试已输出内容的前缀。
+        // 停止尝试的半截文字不持久化；只从本次连接收到的实时文字证明输出。
         let view = outcome
             .view()
             .map_err(|e| AssertError::StdoutMissing { expected: e })?;
-        require(
-            view.texts.values().flatten().all(|segment| {
-                segment.kind == lattice_system_harness::SegmentKind::Text
-                    && expected.starts_with(&segment.text)
-            }),
-            "streamed text is a prefix of the stopped attempt output",
-        )
+        let segments: Vec<_> = view.texts.values().flatten().collect();
+        if partial {
+            let text: String = segments
+                .iter()
+                .map(|segment| segment.text.as_str())
+                .collect();
+            require(
+                !text.is_empty()
+                    && "partial".starts_with(&text)
+                    && segments
+                        .iter()
+                        .all(|segment| segment.kind == lattice_system_harness::SegmentKind::Text),
+                format!("partial attempt must stream a nonempty prefix of partial: {segments:?}"),
+            )
+        } else {
+            require(
+                segments.is_empty(),
+                "pre-output failure must have no text segments",
+            )
+        }
     })();
     finish_failure(
         evidence,
