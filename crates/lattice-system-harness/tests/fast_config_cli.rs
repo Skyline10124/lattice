@@ -14,8 +14,8 @@
 
 use lattice_system_harness::{
     AssertError, CommandOutcome, LatticeCommand, LatticeDriver, ScenarioSpec, ScenarioWorld,
-    assert_exit_code, assert_exit_success, assert_no_secret, assert_stderr_contains,
-    assert_stdout_contains, assert_stdout_contains_all, assert_with_failure_artifacts,
+    assert_exit_code, assert_exit_success, assert_stderr_contains, assert_stdout_contains,
+    assert_with_failure_artifacts,
 };
 use serde_json::Value;
 
@@ -23,9 +23,10 @@ fn driver() -> LatticeDriver {
     LatticeDriver::from_env().expect("LATTICE_BIN must point to a built lattice binary")
 }
 
-/// A recognisable credential sentinel. Scenarios set it as an API key value
-/// and then assert it never appears in any command output: the public surface
-/// may name the env var (`ANTHROPIC_API_KEY`) but must never echo the value.
+/// A recognisable credential sentinel. Scenarios set it as an API key value;
+/// `ok_or_artifacts` hands it to the finalizer, which scans every command's
+/// raw output for it whatever the assertion result: the public surface may
+/// name the env var (`ANTHROPIC_API_KEY`) but must never echo the value.
 const SECRET_SENTINEL: &str = "sk-ant-harness-sentinel-7c3f";
 
 fn run(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> CommandOutcome {
@@ -51,6 +52,56 @@ fn ok_or_artifacts(
         .unwrap_or_else(|e| panic!("{e}"));
 }
 
+/// `doctor` 文本输出 `Credentials:` 段中每个变量及其状态词，例如
+/// `✗ ANTHROPIC_API_KEY: missing (source: unset)` 解析为
+/// `("ANTHROPIC_API_KEY", "missing")`。段缺失、为空或有无法解析的行都算失败。
+fn doctor_credential_statuses(
+    output: &CommandOutcome,
+) -> Result<Vec<(String, String)>, AssertError> {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout
+        .lines()
+        .skip_while(|line| *line != "Credentials:")
+        .skip(1)
+        .take_while(|line| !line.trim().is_empty())
+        .collect();
+    if lines.is_empty() {
+        return Err(AssertError::StdoutMissing {
+            expected: "non-empty Credentials: section".into(),
+        });
+    }
+    lines
+        .iter()
+        .map(|line| {
+            line.trim()
+                .split_once(' ')
+                .and_then(|(_icon, entry)| entry.split_once(": "))
+                .and_then(|(env_var, rest)| {
+                    Some((
+                        env_var.to_string(),
+                        rest.split_whitespace().next()?.to_string(),
+                    ))
+                })
+                .ok_or_else(|| AssertError::StdoutMissing {
+                    expected: format!("`<icon> NAME: status ...` credential line, got {line:?}"),
+                })
+        })
+        .collect()
+}
+
+fn require_status(
+    statuses: &[(String, String)],
+    env_var: &str,
+    expected: &str,
+) -> Result<(), AssertError> {
+    match statuses.iter().find(|(name, _)| name == env_var) {
+        Some((_, status)) if status == expected => Ok(()),
+        found => Err(AssertError::StdoutMissing {
+            expected: format!("{env_var}: {expected}, got {found:?}"),
+        }),
+    }
+}
+
 fn parse_json<T: serde::de::DeserializeOwned>(output: &CommandOutcome) -> Result<T, AssertError> {
     serde_json::from_slice(&output.stdout).map_err(|error| AssertError::StdoutMissing {
         expected: format!("valid JSON output: {error}"),
@@ -63,8 +114,39 @@ fn fast_models_lists_all_aliases_one_per_line() {
     let world = ScenarioWorld::new(&spec.name).expect("world");
     let out = run(&world, &spec, &["models"]);
 
+    // 每个非空行恰好是一个别名；只做子串检查的话，`models --json` 这类别的格式也能通过。
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines: Vec<&str> = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
     let result = assert_exit_success(&out).and_then(|_| {
-        assert_stdout_contains_all(&out, &["sonnet", "opus", "gpt-5.5", "gemini", "haiku"])
+        if let Some(line) = lines.iter().find(|line| {
+            !line
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+        }) {
+            return Err(AssertError::StdoutMissing {
+                expected: format!("one bare alias per line, got {line:?}"),
+            });
+        }
+        let aliases: std::collections::HashSet<&str> = lines.iter().copied().collect();
+        if aliases.len() != lines.len() {
+            return Err(AssertError::StdoutMissing {
+                expected: format!("no duplicate alias lines, got {lines:?}"),
+            });
+        }
+        let missing: Vec<&str> = ["sonnet", "opus", "gpt-5.5", "gemini", "haiku"]
+            .into_iter()
+            .filter(|alias| !aliases.contains(alias))
+            .collect();
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(AssertError::StdoutMissing {
+                expected: format!("an alias line for each of {missing:?}"),
+            })
+        }
     });
     ok_or_artifacts(&world, "fast-models-list", "lattice models", &out, result);
 }
@@ -96,8 +178,7 @@ fn fast_models_json_is_valid_array_with_credential_status() {
                 }
             }
             Ok(())
-        })
-        .and_then(|_| assert_no_secret(&out, SECRET_SENTINEL));
+        });
     ok_or_artifacts(
         &world,
         "fast-models-json",
@@ -202,8 +283,7 @@ fn fast_models_auth_with_anthropic_key_lists_anthropic_aliases_only() {
                 });
             }
             Ok(())
-        })
-        .and_then(|_| assert_no_secret(&out, SECRET_SENTINEL));
+        });
     ok_or_artifacts(
         &world,
         "fast-models-auth-keyed",
@@ -266,8 +346,7 @@ fn fast_resolve_json_includes_fields_and_excludes_secret_value() {
                 });
             }
             Ok(())
-        })
-        .and_then(|_| assert_no_secret(&out, SECRET_SENTINEL));
+        });
     ok_or_artifacts(
         &world,
         "fast-resolve-json",
@@ -286,8 +365,7 @@ fn fast_resolve_verbose_includes_auth_env_and_credential_status() {
 
     let result = assert_exit_success(&out)
         .and_then(|_| assert_stdout_contains(&out, "Auth Env: ANTHROPIC_API_KEY"))
-        .and_then(|_| assert_stdout_contains(&out, "Credential Status: Present"))
-        .and_then(|_| assert_no_secret(&out, SECRET_SENTINEL));
+        .and_then(|_| assert_stdout_contains(&out, "Credential Status: Present"));
     ok_or_artifacts(
         &world,
         "fast-resolve-verbose",
@@ -305,16 +383,17 @@ fn fast_resolve_unknown_model_errors() {
     let alias = "private-alias-do-not-echo";
     let out = run(&world, &spec, &["resolve", alias]);
 
-    let result = assert_exit_code(&out, 2)
-        .and_then(|_| assert_stderr_contains(&out, "unknown model alias"))
-        .and_then(|_| assert_no_secret(&out, alias));
-    ok_or_artifacts(
+    let result =
+        assert_exit_code(&out, 2).and_then(|_| assert_stderr_contains(&out, "unknown model alias"));
+    assert_with_failure_artifacts(
         &world,
         "fast-resolve-unknown",
         "lattice resolve <unknown alias>",
         &out,
+        &[SECRET_SENTINEL, alias],
         result,
-    );
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
 }
 
 #[test]
@@ -324,12 +403,13 @@ fn fast_doctor_text_lists_env_var_names_not_values() {
     world.set_env("ANTHROPIC_API_KEY", SECRET_SENTINEL);
     let out = run(&world, &spec, &["doctor"]);
 
+    // 凭据确实被读到，“只报变量名、不报值”才有意义；没读到时输出本来就没有值。
     let result = assert_exit_success(&out)
-        .and_then(|_| assert_stdout_contains(&out, "ANTHROPIC_API_KEY"))
+        .and_then(|_| doctor_credential_statuses(&out))
+        .and_then(|statuses| require_status(&statuses, "ANTHROPIC_API_KEY", "set"))
         .and_then(|_| assert_stdout_contains(&out, "Session Store"))
         .and_then(|_| assert_stdout_contains(&out, "Dir:"))
-        .and_then(|_| assert_stdout_contains(&out, "aliases"))
-        .and_then(|_| assert_no_secret(&out, SECRET_SENTINEL));
+        .and_then(|_| assert_stdout_contains(&out, "aliases"));
     ok_or_artifacts(&world, "fast-doctor-text", "lattice doctor", &out, result);
 }
 
@@ -389,8 +469,7 @@ fn fast_doctor_json_does_not_leak_secrets() {
                 });
             }
             Ok(())
-        })
-        .and_then(|_| assert_no_secret(&out, SECRET_SENTINEL));
+        });
     ok_or_artifacts(
         &world,
         "fast-doctor-json",
@@ -412,9 +491,8 @@ fn fast_models_lists_openai_compatible_when_configured() {
     world.set_env("OPENAI_COMPATIBLE_MODEL", "compat-model");
     let out = run(&world, &spec, &["models"]);
 
-    let result = assert_exit_success(&out)
-        .and_then(|_| assert_stdout_contains(&out, "openai-compatible"))
-        .and_then(|_| assert_no_secret(&out, SECRET_SENTINEL));
+    let result =
+        assert_exit_success(&out).and_then(|_| assert_stdout_contains(&out, "openai-compatible"));
     ok_or_artifacts(
         &world,
         "fast-models-compat",
@@ -433,8 +511,16 @@ fn fast_doctor_text_shows_missing_status_without_credentials() {
     let out = run(&world, &spec, &["doctor"]);
 
     let result = assert_exit_success(&out)
-        .and_then(|_| assert_stdout_contains(&out, "ANTHROPIC_API_KEY"))
-        .and_then(|_| assert_stdout_contains(&out, "missing"));
+        .and_then(|_| doctor_credential_statuses(&out))
+        .and_then(|statuses| {
+            require_status(&statuses, "ANTHROPIC_API_KEY", "missing")?;
+            match statuses.iter().find(|(_, status)| status != "missing") {
+                Some((env_var, status)) => Err(AssertError::StdoutMissing {
+                    expected: format!("{env_var}: missing, got {status}"),
+                }),
+                None => Ok(()),
+            }
+        });
     ok_or_artifacts(
         &world,
         "fast-doctor-missing",

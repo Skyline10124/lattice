@@ -141,6 +141,10 @@ pub fn assert_no_secret(output: &CommandOutcome, secret: &str) -> Result<(), Ass
 }
 
 /// Finalize one fast-path assertion without letting artifact failures replace it.
+///
+/// The raw stdout/stderr are scanned for every secret whatever the assertion
+/// result, so a leak is reported next to the primary assertion instead of
+/// depending on it passing first.
 pub fn finalize_with_failure_artifacts(
     world: &ScenarioWorld,
     scenario_name: &str,
@@ -171,8 +175,15 @@ fn finalize_with_failure_artifacts_at_target(
     target: Result<PathBuf, EvidenceError>,
 ) -> Result<(), FailureReport> {
     let primary_assertion = result.err().map(|error| error.to_string());
-    let failed = primary_assertion.is_some();
+    let mut failed = primary_assertion.is_some();
     let mut report = FailureReport::new(primary_assertion, secrets);
+    // 产物里的副本已脱敏，扫描产物发现不了泄漏，所以在这里扫描原始输出。
+    for (stream, bytes) in [("stdout", &output.stdout), ("stderr", &output.stderr)] {
+        if contains_secret(bytes, secrets) {
+            report.add_secret_location(format!("command {stream}"), secrets);
+            failed = true;
+        }
+    }
     let cleanup = world.stop_daemon();
     let failed = failed || cleanup.is_err();
     if let Err(errors) = cleanup {
@@ -221,6 +232,15 @@ fn finalize_with_failure_artifacts_at_target(
         &mut report,
     );
     report.finish()
+}
+
+fn contains_secret(bytes: &[u8], secrets: &[&str]) -> bool {
+    secrets.iter().any(|secret| {
+        !secret.is_empty()
+            && bytes
+                .windows(secret.len())
+                .any(|window| window == secret.as_bytes())
+    })
 }
 
 fn persist_fast_failure_bundle(
@@ -438,6 +458,47 @@ mod tests {
             std::fs::read_to_string(artifacts.dir.join("leak.txt")).unwrap(),
             "leak [REDACTED]"
         );
+    }
+
+    #[test]
+    fn fast_finalizer_scans_raw_output_whatever_the_assertion_result() {
+        let secret = "fast-finalizer-secret";
+        let world = ScenarioWorld::new("fast-finalizer-raw-scan").unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        for (primary, stream) in [(None, "stdout"), (Some("business failed"), "stderr")] {
+            let mut value = outcome(ProcessTermination::Exited(0));
+            let leaked = format!("leaked {secret}").into_bytes();
+            if stream == "stdout" {
+                value.stdout = leaked;
+            } else {
+                value.stderr = leaked;
+            }
+            let result = primary.map_or(Ok(()), |expected: &str| {
+                Err(AssertError::StdoutMissing {
+                    expected: expected.into(),
+                })
+            });
+
+            let report = finalize_with_failure_artifacts_at_target(
+                &world,
+                "scenario",
+                "lattice doctor",
+                &value,
+                &[secret],
+                result,
+                Ok(root.path().join(stream)),
+            )
+            .unwrap_err();
+
+            let text = report.to_string();
+            assert!(text.contains(&format!("- command {stream}")), "{text}");
+            assert_eq!(
+                text.contains("business failed"),
+                primary.is_some(),
+                "{text}"
+            );
+            assert!(!text.contains(secret), "{text}");
+        }
     }
 
     #[test]
