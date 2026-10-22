@@ -30,7 +30,7 @@ use lattice_system_harness::{
 use serde_json::{Value, json};
 use support::{
     assert_accepted_and_closed, assert_clean_send, driver, evidence, finish_scenario, require,
-    wire_fake_llm,
+    tool_failure, wire_fake_llm,
 };
 
 /// A Direct-Local project world with a fake-LLM-backed agent profile.
@@ -352,13 +352,20 @@ fn direct_local_mutate_create_denied_by_write_policy() {
             captures.len() == 2,
             format!("expected Tool round + recovery round, got: {captures:?}"),
         )?;
-        let second_body = captures
-            .get(1)
-            .map(|capture| capture.raw.to_string())
-            .unwrap_or_default();
+        let failure = tool_failure(&outcome.parsed, "mutate.create");
         require(
-            second_body.contains("denied") || second_body.contains("tool"),
-            format!("second request lacked Tool denial result: {second_body}"),
+            failure.is_some_and(|(slot, error)| {
+                error["code"] == "capability_violation"
+                    && error["data"]["kind"] == "capability"
+                    && error["data"]["capability"] == "mutate:write:workspace"
+                    && error["data"]["violations"] == json!(["denied"])
+                    && slot["progress"]["evidence"]["value"]["admission"]["denied_capabilities"]
+                        == json!([])
+                    && slot["progress"]["evidence"]["value"]["admission"]["approved_capabilities"]
+                        .as_array()
+                        .is_some_and(|caps| caps.iter().any(|cap| cap == "workspace.mutation"))
+            }),
+            format!("write-policy refusal with admitted workspace.mutation required: {failure:?}"),
         )?;
         Ok(())
     })();

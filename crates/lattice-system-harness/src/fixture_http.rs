@@ -10,8 +10,9 @@
 //! [`FixtureHttpServer::start_tls`] 在同一服务外包一层 TLS（HTTP/1.1，与产品
 //! `fetch.web` 一致），用于验证冻结的信任根。
 
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -25,11 +26,21 @@ use crate::tls::TlsIdentity;
 #[derive(Debug, Clone)]
 pub struct HttpFixture {
     body: String,
+    content_type: Option<String>,
 }
 
 impl HttpFixture {
     pub fn plain(body: impl Into<String>) -> Self {
-        Self { body: body.into() }
+        Self {
+            body: body.into(),
+            content_type: Some("text/plain".into()),
+        }
+    }
+
+    /// 设置响应类型；None 表示省略 Content-Type。
+    pub fn with_content_type(mut self, content_type: Option<&str>) -> Self {
+        self.content_type = content_type.map(str::to_owned);
+        self
     }
 }
 
@@ -51,6 +62,8 @@ pub enum FixtureHttpError {
 #[derive(Default)]
 struct CaptureState {
     requests: Vec<CapturedHttpRequest>,
+    accepts: usize,
+    probes: BTreeMap<SocketAddr, Option<usize>>,
     /// 客户端在 TLS 握手中拒绝了服务端证书的次数。
     rejected_handshakes: usize,
     /// 夹具自身的首个错误（accept 或响应写出失败）。对端拒绝证书、响应写完后的 TLS 收尾
@@ -131,6 +144,33 @@ impl FixtureHttpServer {
         format!("{}{path}", self.base_url())
     }
 
+    /// 等服务线程 accept 探针后，读取此前的连接数；探针不计入连接、请求或错误。
+    /// 调用前须已结束被测操作；Linux accept 队列中此前完成握手的连接先于探针出队。
+    pub fn accepted_connections_after_probe(
+        &self,
+        timeout: Duration,
+    ) -> Result<usize, FixtureHttpError> {
+        let deadline = Instant::now() + timeout;
+        let (lock, wake) = &*self.captures;
+        let mut state = lock.lock().unwrap();
+        // accept 后的分类也持此锁，保证服务线程不会在登记地址之前处理探针。
+        let probe = TcpStream::connect_timeout(&self.listener.local_addr()?, timeout)?;
+        let address = probe.local_addr()?;
+        state.probes.insert(address, None);
+        loop {
+            if let Some(Some(count)) = state.probes.get(&address) {
+                let count = *count;
+                state.probes.remove(&address);
+                return Ok(count);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(FixtureHttpError::Timeout(timeout));
+            }
+            state = wake.wait_timeout(state, remaining).unwrap().0;
+        }
+    }
+
     pub fn captured_requests(&self) -> Vec<CapturedHttpRequest> {
         self.captures.0.lock().unwrap().requests.clone()
     }
@@ -195,7 +235,17 @@ fn serve_loop(
             break;
         }
         match listener.accept() {
-            Ok((stream, _)) => {
+            Ok((stream, address)) => {
+                {
+                    let mut state = captures.0.lock().unwrap();
+                    let count = state.accepts;
+                    if let Some(probe) = state.probes.get_mut(&address) {
+                        *probe = Some(count);
+                        captures.1.notify_all();
+                        continue;
+                    }
+                    state.accepts += 1;
+                }
                 let fixture = fixture.clone();
                 let tls = tls.clone();
                 let captures = Arc::clone(&captures);
@@ -253,6 +303,10 @@ fn handle_request(
 ) -> Result<(), std::io::Error> {
     let mut buf = [0u8; 8192];
     let n = stream.read(&mut buf)?;
+    // 已连接即断开的客户端仍计入 accept，但没有 HTTP 请求可记录或响应。
+    if n == 0 {
+        return Ok(());
+    }
     let raw = String::from_utf8_lossy(&buf[..n]);
     let request_line = raw.lines().next().unwrap_or("");
     let mut parts = request_line.split_whitespace();
@@ -267,9 +321,14 @@ fn handle_request(
     }
 
     let body = fixture.body.as_bytes();
+    let content_type = fixture
+        .content_type
+        .as_ref()
+        .map(|value| format!("Content-Type: {value}\r\n"))
+        .unwrap_or_default();
     let response = format!(
         "HTTP/1.1 200 OK\r\n\
-         Content-Type: text/plain\r\n\
+         {content_type}\
          Content-Length: {}\r\n\
          Connection: close\r\n\
          \r\n",
@@ -288,6 +347,32 @@ mod tests {
     use std::net::TcpStream;
 
     #[test]
+    fn fixture_http_counts_immediately_closed_connections() {
+        let server = FixtureHttpServer::start(HttpFixture::plain("unused")).expect("start");
+        assert_eq!(
+            server
+                .accepted_connections_after_probe(Duration::from_secs(2))
+                .expect("empty barrier"),
+            0
+        );
+        drop(TcpStream::connect(("127.0.0.1", server.port())).expect("connect"));
+        assert_eq!(
+            server
+                .accepted_connections_after_probe(Duration::from_secs(2))
+                .expect("closed client barrier"),
+            1
+        );
+        assert_eq!(
+            server
+                .accepted_connections_after_probe(Duration::from_secs(2))
+                .expect("second barrier"),
+            1
+        );
+        assert!(server.captured_requests().is_empty());
+        assert!(server.first_error().is_none());
+    }
+
+    #[test]
     fn fixture_http_captures_request_and_returns_body() {
         let server = FixtureHttpServer::start(HttpFixture::plain("fixture body")).expect("start");
         let url = server.url_path("/hello");
@@ -300,6 +385,13 @@ mod tests {
         let mut resp = String::new();
         stream.read_to_string(&mut resp).expect("read");
         assert!(resp.contains("200 OK"));
+        assert!(resp.contains("\r\nContent-Type: text/plain\r\n"));
+        assert_eq!(
+            server
+                .accepted_connections_after_probe(Duration::from_secs(2))
+                .expect("accept barrier"),
+            1
+        );
         assert!(resp.contains("fixture body"));
         server
             .wait_for_requests(1, Duration::from_secs(2))

@@ -21,7 +21,7 @@ use lattice_system_harness::{
 use serde_json::Value;
 use support::{
     assert_clean_send, assert_completed_after_tools, cli, direct_world, driver, evidence,
-    finish_scenario, last_tool_content, require, sequence, tool_call, tool_failed, tool_ok,
+    finish_scenario, require, sequence, tool_call, tool_failed, tool_failure, tool_ok,
     tool_result_value, wire_fake_llm,
 };
 
@@ -54,14 +54,23 @@ fn wire_tool_names(capture: &CapturedRequest) -> Vec<String> {
     capture.tool_names.clone()
 }
 
-/// `fetch.web` success against localhost fixture: request path, status/body/type,
-/// optional truncation, and no public Internet (fixture only).
+/// 两次真实本地 GET 分别证明完整响应和按字节截断；类型必须原样保留。
 #[test]
 fn direct_tools_fetch_web_localhost_success_and_cap() {
     let driver = driver();
-    let web = FixtureHttpServer::start(HttpFixture::plain("fixture body for fetch"))
-        .expect("fixture http");
+    let web = FixtureHttpServer::start(
+        HttpFixture::plain("fixture body for fetch")
+            .with_content_type(Some("text/plain; charset=utf-8")),
+    )
+    .expect("fixture http");
+    // 第 64 字节落在多字节字符内，产品须退回 UTF-8 边界，不加省略标记。
+    let capped_web = FixtureHttpServer::start(
+        HttpFixture::plain(format!("{}界z", "a".repeat(63)))
+            .with_content_type(Some("text/plain; charset=utf-8")),
+    )
+    .expect("capped fixture http");
     let url = web.url_path("/fixture-path");
+    let capped_url = capped_web.url_path("/capped-path");
     let (world, spec) = direct_world(
         "direct-tools-fetch-ok",
         "dl-fetch",
@@ -69,72 +78,86 @@ fn direct_tools_fetch_web_localhost_success_and_cap() {
         &fetch_network_profile(64),
     );
     let args = format!(r#"{{"url":"{url}"}}"#);
+    let capped_args = format!(r#"{{"url":"{capped_url}"}}"#);
     let server = wire_fake_llm(
         &world,
         "dl-fetch",
         sequence(vec![
             tool_call("f1", "fetch.web", &args),
             SseScript::plain("fetched"),
+            tool_call("f2", "fetch.web", &capped_args),
+            SseScript::plain("capped"),
         ]),
     );
     let scenario_evidence = evidence(&world, &spec);
     let send = SessionSendDriver::new(&driver, &world, &spec, "dl-fetch");
     let outcome = send.send("fetch the fixture").expect("turn");
+    let capped = send.send("fetch the capped fixture").expect("capped turn");
     let captures = server.captured_requests();
 
     let result: Result<(), AssertError> = (|| {
         assert_clean_send(&outcome)?;
+        assert_clean_send(&capped)?;
         require(tool_ok(&outcome.parsed, "fetch.web"), "fetch.web ok")?;
-        require(outcome.has_completed(), "turn completed")?;
-        web.wait_for_requests(1, Duration::from_secs(5))
-            .map_err(|e| AssertError::StdoutMissing {
-                expected: format!("fixture did not receive request: {e}"),
-            })?;
-        let http = web.captured_requests();
+        require(tool_ok(&capped.parsed, "fetch.web"), "capped fetch.web ok")?;
         require(
-            http.len() == 1,
-            format!("expected 1 http capture, got {http:?}"),
+            outcome.has_completed() && capped.has_completed(),
+            "both fetch turns completed",
         )?;
+        for (fixture, path) in [(&web, "/fixture-path"), (&capped_web, "/capped-path")] {
+            fixture
+                .wait_for_requests(1, Duration::from_secs(5))
+                .map_err(|e| AssertError::StdoutMissing {
+                    expected: format!("fixture request: {e}"),
+                })?;
+            let http = fixture.captured_requests();
+            require(
+                http.len() == 1,
+                format!("expected one HTTP request: {http:?}"),
+            )?;
+            require(
+                http[0].method == "GET" && http[0].path == path,
+                format!("unexpected fixture request: {http:?}"),
+            )?;
+            require(
+                fixture.first_error().is_none(),
+                format!("HTTP fixture failed: {:?}", fixture.first_error()),
+            )?;
+        }
         require(
-            http[0].method == "GET" && http[0].path == "/fixture-path",
-            format!("unexpected fixture request: {:?}", http[0]),
+            captures.len() == 4,
+            "two fetch rounds and two recovery requests required",
         )?;
-        require(captures.len() >= 2, "need tool result capture")?;
-        let fetched = tool_result_value(&captures[1]).expect("fetch result JSON");
-        let status = fetched
-            .get("status")
-            .or_else(|| fetched.pointer("/result/status"))
-            .and_then(Value::as_u64);
-        let body = fetched
-            .get("body")
-            .or_else(|| fetched.pointer("/result/body"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let content_type = fetched
-            .get("content_type")
-            .or_else(|| fetched.pointer("/result/content_type"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let truncated = fetched
-            .get("truncated")
-            .or_else(|| fetched.pointer("/result/truncated"))
-            .and_then(Value::as_bool);
-        require(status == Some(200), format!("status not 200: {fetched}"))?;
-        // Body is longer than max_web_response_bytes=64 → truncated.
-        require(
-            body.contains("fixture") || truncated == Some(true),
-            format!("body/truncation missing: body={body:?} truncated={truncated:?} raw={fetched}"),
-        )?;
-        require(
-            content_type.contains("text/plain") || content_type.is_empty(),
-            format!("content_type unexpected: {content_type}"),
-        )?;
+        for (index, expected_body, truncated) in [
+            (1, "fixture body for fetch".to_string(), false),
+            (3, "a".repeat(63), true),
+        ] {
+            let fetched = tool_result_value(&captures[index]).expect("fetch result JSON");
+            require(
+                fetched["status"] == 200,
+                format!("status not 200: {fetched}"),
+            )?;
+            require(
+                fetched["content_type"] == "text/plain; charset=utf-8",
+                format!("exact Content-Type required: {fetched}"),
+            )?;
+            require(
+                fetched["truncated"].as_bool() == Some(truncated),
+                format!("fetch {index} truncation must be {truncated}: {fetched}"),
+            )?;
+            require(
+                fetched["body"].as_str() == Some(expected_body.as_str()),
+                format!("fetch {index} exact body required: {fetched}"),
+            )?;
+        }
         Ok(())
     })();
-
     finish_scenario(
         scenario_evidence,
-        &[("fetch.web success", &outcome.command)],
+        &[
+            ("fetch.web complete", &outcome.command),
+            ("fetch.web capped", &capped.command),
+        ],
         captures,
         result,
     );
@@ -281,18 +304,41 @@ fn direct_tools_fetch_host_policy_denial() {
                 web.captured_requests()
             ),
         )?;
-        if captures.len() >= 2 {
-            let msg = last_tool_content(&captures[1]).unwrap_or_default();
-            require(
-                msg.to_lowercase().contains("allow")
-                    || msg.to_lowercase().contains("denied")
-                    || msg.to_lowercase().contains("not allowed")
-                    || msg.to_lowercase().contains("host")
-                    || msg.to_lowercase().contains("policy")
-                    || msg.to_lowercase().contains("localhost"),
-                format!("denial message weak: {msg}"),
-            )?;
-        }
+        let accepts = web
+            .accepted_connections_after_probe(Duration::from_secs(5))
+            .map_err(|error| AssertError::StdoutMissing {
+                expected: format!("accept barrier failed: {error}"),
+            })?;
+        require(
+            accepts == 0,
+            format!("host denial must have zero accepts, got {accepts}"),
+        )?;
+        require(
+            web.first_error().is_none(),
+            format!("HTTP fixture failed: {:?}", web.first_error()),
+        )?;
+        require(
+            captures.len() == 2,
+            format!(
+                "host denial requires exactly two provider requests, got {}",
+                captures.len()
+            ),
+        )?;
+        let error = tool_result_value(&captures[1]).expect("host denial tool-role JSON");
+        require(
+            error["error"]["code"] == -32012,
+            format!("host policy must return AmbientAuthorityDenied in tool result: {error}"),
+        )?;
+        let failure = tool_failure(&outcome.parsed, "fetch.web");
+        require(
+            failure.is_some_and(|(_, error)| {
+                error["code"] == "ambient_authority_denied"
+                    && error["data"]["kind"] == "permission"
+                    && error["data"]["required_capability"] == "network.fetch"
+            }),
+            format!("typed host-policy denial required: {failure:?}"),
+        )?;
+        assert_completed_after_tools(&outcome.parsed)?;
         Ok(())
     })();
 
@@ -307,29 +353,52 @@ fn direct_tools_fetch_host_policy_denial() {
 /// Explicit `network.fetch` denial rejects the Component at Cell admission before outbound I/O.
 /// Distinct from host-policy denial (`allow_localhost=false` against a localhost URL).
 #[test]
-fn direct_tools_fetch_capability_denial_with_public_https() {
+fn direct_tools_fetch_capability_denial_without_outbound_io() {
     let driver = driver();
+    let web = FixtureHttpServer::start(HttpFixture::plain("must not be fetched")).expect("http");
+    let url = web.url_path("/capability-denied");
+    let args = format!(r#"{{"url":"{url}"}}"#);
     let (world, spec) = direct_world(
         "direct-tools-fetch-cap",
         "dl-fcap",
         "[\"fetch.web\"]",
-        "\n[lancet.network]\nallow_public_https = true\nallow_localhost = false\nallowed_hosts = []\n\n[lancet.capabilities]\ndeny = [\"network.fetch\"]\nmax_boundary = \"ex\"\n",
+        "\n[lancet.network]\nallow_localhost = true\nallowed_hosts = [\"localhost\"]\n\n[lancet.capabilities]\ndeny = [\"network.fetch\"]\nmax_boundary = \"ex\"\n",
     );
     let server = wire_fake_llm(
         &world,
         "dl-fcap",
         sequence(vec![
-            tool_call("f1", "fetch.web", r#"{"url":"https://example.com/"}"#),
+            tool_call("f1", "fetch.web", &args),
             SseScript::plain("denied without fetch capability"),
         ]),
     );
     let scenario_evidence = evidence(&world, &spec);
     let send = SessionSendDriver::new(&driver, &world, &spec, "dl-fcap");
-    let outcome = send.send("fetch example.com").expect("turn");
+    let outcome = send.send("fetch the local fixture").expect("turn");
     let captures = server.captured_requests();
 
     let result: Result<(), AssertError> = (|| {
         assert_clean_send(&outcome)?;
+        let accepts = web
+            .accepted_connections_after_probe(Duration::from_secs(5))
+            .map_err(|error| AssertError::StdoutMissing {
+                expected: format!("accept barrier failed: {error}"),
+            })?;
+        require(
+            accepts == 0,
+            format!("capability denial must have zero accepts, got {accepts}"),
+        )?;
+        require(
+            web.captured_requests().is_empty(),
+            format!(
+                "capability denial must have zero requests: {:?}",
+                web.captured_requests()
+            ),
+        )?;
+        require(
+            web.first_error().is_none(),
+            format!("HTTP fixture failed: {:?}", web.first_error()),
+        )?;
         require(
             tool_failed(&outcome.parsed, "fetch.web"),
             "fetch.web must fail when network.fetch is denied",
@@ -357,14 +426,23 @@ fn direct_tools_fetch_capability_denial_with_public_https() {
         // The Component never reaches the network host import when admission removes
         // its sole capability.
         require(
-            captures.len() >= 2,
+            captures.len() == 2,
             "capability denial needs tool result capture",
         )?;
-        let err_text = last_tool_content(&captures[1]).unwrap_or_default();
-        let err_lower = err_text.to_lowercase();
+        let error = tool_result_value(&captures[1]).expect("capability denial tool-role JSON");
         require(
-            err_lower.contains("fetch.web") && err_lower.contains("has no admitted capability"),
-            format!("network.fetch admission denial mismatch: {err_text}"),
+            error["error"]["code"] == -32010,
+            format!("network.fetch admission must return CapabilityNotGranted: {error}"),
+        )?;
+        let failure = tool_failure(&outcome.parsed, "fetch.web");
+        require(
+            failure.is_some_and(|(slot, error)| {
+                error["code"] == "capability_not_granted"
+                    && error["data"]["kind"] == "permission"
+                    && slot["progress"]["evidence"]["value"]["admission"]["denied_capabilities"]
+                        == serde_json::json!(["network.fetch"])
+            }),
+            format!("typed network.fetch admission refusal required: {failure:?}"),
         )?;
         require(
             !tool_ok(&outcome.parsed, "fetch.web"),
@@ -535,19 +613,38 @@ fn direct_tools_todo_write_validation_rejection() {
             tool_failed(&outcome.parsed, "session.todo_write"),
             "two in_progress must fail validation",
         )?;
-        // Turn may still complete after recovery reply.
-        if captures.len() >= 2 {
-            let msg = last_tool_content(&captures[1]).unwrap_or_default();
-            require(
-                msg.to_lowercase().contains("in_progress")
-                    || msg.to_lowercase().contains("todo")
-                    || msg.to_lowercase().contains("invalid")
-                    || msg.to_lowercase().contains("denied")
-                    || msg.to_lowercase().contains("error")
-                    || !msg.starts_with('{'),
-                format!("validation error message weak: {msg}"),
-            )?;
-        }
+        require(
+            captures.len() == 2,
+            format!(
+                "todo rejection requires exactly two provider requests, got {}",
+                captures.len()
+            ),
+        )?;
+        let error = tool_result_value(&captures[1]).expect("todo validation tool-role JSON");
+        require(
+            error["error"]["code"] == -32001,
+            format!("todo schema error code required: {error}"),
+        )?;
+        let failure = tool_failure(&outcome.parsed, "session.todo_write");
+        require(
+            failure.is_some_and(|(_, error)| {
+                error["code"] == "schema_mismatch"
+                    && error["data"]["kind"] == "validation"
+                    && error["data"]["field"] == "params"
+                    && error["data"]["reason"] == "invalid params"
+            }),
+            format!("typed todo schema mismatch required: {failure:?}"),
+        )?;
+        // validation 数据只有通用参数分类；两个位置才区分双 in_progress 与其他 schema 拒绝。
+        let locations = error["error"]["message"].as_str().and_then(|message| {
+            let (instance, schema) = message.split_once(" at ")?.1.split_once(" (schema ")?;
+            Some((instance, schema.strip_suffix(')')?))
+        });
+        require(
+            locations == Some(("/todos", "/properties/todos/not")),
+            format!("two in_progress schema locations required: {locations:?}; {error}"),
+        )?;
+        assert_completed_after_tools(&outcome.parsed)?;
         Ok(())
     })();
 
@@ -609,17 +706,47 @@ fn direct_tools_todo_write_result_survives_session_reopen() {
         // Request 1: the tool call. Request 2: the tool result. Request 3: the
         // reopened turn, which must still carry the tool-role message.
         require(
-            captures.len() >= 3,
+            captures.len() == 3,
             format!("expected three provider requests, got {}", captures.len()),
         )?;
-        let reopened = captures[2].raw.to_string();
+        let messages = captures[2].raw["messages"]
+            .as_array()
+            .expect("reopened messages");
         require(
-            reopened.contains("remember me"),
-            format!("the reopened turn lost the Component result: {reopened}"),
+            messages
+                .iter()
+                .rev()
+                .find(|message| message["role"] == "user")
+                .is_some_and(|message| message["content"] == "what was the plan"),
+            "reopened request must carry the second Turn user input",
         )?;
+        let calls: Vec<_> = messages
+            .iter()
+            .filter(|message| message["role"] == "assistant")
+            .filter_map(|message| message["tool_calls"].as_array())
+            .flatten()
+            .filter(|call| call["function"]["name"] == "session__todo_write")
+            .collect();
         require(
-            reopened.contains("in_progress"),
-            format!("the reopened transcript lost the todo status: {reopened}"),
+            calls.len() == 1,
+            format!("one persisted todo call required: {calls:?}"),
+        )?;
+        let call_id = calls[0]["id"].as_str().expect("persisted tool call id");
+        let results: Vec<_> = messages
+            .iter()
+            .filter(|message| message["role"] == "tool" && message["tool_call_id"] == call_id)
+            .collect();
+        require(
+            results.len() == 1,
+            format!("one matching persisted tool result required: {results:?}"),
+        )?;
+        let reopened: Value =
+            serde_json::from_str(results[0]["content"].as_str().expect("tool content"))
+                .expect("persisted todo JSON");
+        require(
+            reopened
+                == serde_json::json!({"todos":[{"content":"remember me","status":"in_progress"}]}),
+            format!("reopened tool-role result lost exact todo content/status: {reopened}"),
         )?;
         Ok(())
     })();
