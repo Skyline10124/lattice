@@ -120,7 +120,8 @@ pub enum SseScript {
         headers: Vec<(String, String)>,
         body: String,
     },
-    /// 交付内层脚本后发 `GOAWAY(NO_ERROR)` 优雅关闭连接，模拟 provider 回收连接。只用于 HTTP/2。
+    /// 交付内层脚本的事件后先发 `GOAWAY(NO_ERROR)` 优雅关闭连接，再结束流，模拟 provider
+    /// 回收连接。只用于 HTTP/2。
     CloseAfter { script: Box<SseScript> },
     /// 发出 `chunks_before_drop` 后正常结束流（END_STREAM），没有终止 chunk 与 `[DONE]`：
     /// 产品看到的是流在结束事件之前结束。只用于 HTTP/2。
@@ -834,8 +835,8 @@ enum Reply {
 enum SseEnd {
     /// 正常结束流。
     Complete,
-    /// 正常结束流，再优雅关闭连接。
-    CompleteThenClose,
+    /// 先优雅关闭连接，再正常结束流。
+    CloseThenComplete,
     /// 正常结束流，但帧里没有结束事件。
     CleanEof,
     /// 以 `RST_STREAM(INTERNAL_ERROR)` 结束。
@@ -921,7 +922,7 @@ fn decide(
         append_fsynced(path, b"request\n")?;
     }
     let (active, end) = match active {
-        SseScript::CloseAfter { script } => (*script, Some(SseEnd::CompleteThenClose)),
+        SseScript::CloseAfter { script } => (*script, Some(SseEnd::CloseThenComplete)),
         SseScript::Truncated { chunks_before_drop } => (
             SseScript::Disconnect { chunks_before_drop },
             Some(SseEnd::Reset),
@@ -983,8 +984,10 @@ async fn decide_blocking(
 
 /// h2 连接任务交给连接循环执行的动作；只有连接循环在驱动连接，帧的顺序由它保证。
 enum Control {
-    /// 发 `GOAWAY(NO_ERROR)` 优雅关闭。
-    Graceful,
+    /// 发 `GOAWAY(NO_ERROR)` 优雅关闭，再结束该流。h2 每次轮询连接都先写出待发的 GOAWAY，
+    /// 再编码各流排队的帧，所以客户端先处理 GOAWAY、后读到流结束，此后不会在这条连接上
+    /// 开新流。若结束流在前，客户端可能在 GOAWAY 到达前就在这条连接上发出下一个请求。
+    GracefulThenEnd(h2::SendStream<Bytes>),
     /// 先把已排队的帧交给传输，再以 `RST_STREAM(INTERNAL_ERROR)` 重置该流。h2 的重置会
     /// 丢弃该流尚未编码的 HEADERS/DATA，直接重置就可能让客户端只看到请求被重置。
     ResetAfterFlush(h2::SendStream<Bytes>),
@@ -1038,7 +1041,10 @@ async fn serve_h2(
                 return Ok(());
             },
             Some(action) = controls.recv() => match action {
-                Control::Graceful => h2.graceful_shutdown(),
+                Control::GracefulThenEnd(mut send) => {
+                    h2.graceful_shutdown();
+                    let _ = send.send_data(Bytes::new(), true);
+                }
                 Control::ResetAfterFlush(mut send) => {
                     // 只有本任务驱动连接：轮询一次，让 h2 把该流已排队的帧编码进传输
                     // （`Tap` 总是整块接收），之后的重置只能作用于流本身。
@@ -1154,9 +1160,8 @@ async fn h2_request(
                 SseEnd::Complete | SseEnd::CleanEof => {
                     let _ = send.send_data(Bytes::new(), true);
                 }
-                SseEnd::CompleteThenClose => {
-                    let _ = send.send_data(Bytes::new(), true);
-                    let _ = control.send(Control::Graceful);
+                SseEnd::CloseThenComplete => {
+                    let _ = control.send(Control::GracefulThenEnd(send));
                 }
                 SseEnd::Reset => {
                     let _ = control.send(Control::ResetAfterFlush(send));
