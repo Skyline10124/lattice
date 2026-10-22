@@ -3,13 +3,10 @@
 
 //! Shared helpers for fast binary black-box CLI scenario tests.
 //!
-//! Every `tests/fast_*.rs` target drives the built `lattice` binary the same
-//! way: resolve `LATTICE_BIN`, invoke it inside the scenario world with the
-//! spec's per-command timeout, and route assertion failures through the
-//! failure-artifact bundle before panicking. Centralising those three steps
-//! here keeps each per-target file focused on its own CLI contract.
+//! Resolve `LATTICE_BIN` and invoke it inside a scenario world with the
+//! spec's per-command timeout. Scenario-specific finalizers retain the
+//! assertion and failure-artifact responsibilities.
 
-use crate::assert::{AssertError, assert_with_failure_artifacts};
 use crate::driver::{CommandOutcome, LatticeCommand, LatticeDriver};
 use crate::scenario::ScenarioSpec;
 use crate::world::ScenarioWorld;
@@ -31,17 +28,4 @@ pub fn run(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> Command
             },
         )
         .expect("drive lattice")
-}
-
-/// Unwrap an assertion result, writing the failure-artifact bundle (redacted
-/// stdout/stderr + world context, no extra secrets) before panicking.
-pub fn ok_or_artifacts(
-    world: &ScenarioWorld,
-    name: &str,
-    summary: &str,
-    out: &CommandOutcome,
-    result: Result<(), AssertError>,
-) {
-    assert_with_failure_artifacts(world, name, summary, out, &[], result)
-        .unwrap_or_else(|e| panic!("{e}"));
 }

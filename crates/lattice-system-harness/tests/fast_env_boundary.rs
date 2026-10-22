@@ -24,12 +24,13 @@
 use lattice_system_harness::cli::run;
 use lattice_system_harness::{
     AssertError, CommandOutcome, ScenarioSpec, ScenarioWorld, assert_exit_success,
-    assert_no_secret, assert_stdout_contains,
+    assert_stdout_contains,
 };
 use serde_json::Value;
 
 /// A credential sentinel written into `.env`. Public output may name the env
-/// var but must never echo the value.
+/// var but must never echo the value; `assert_result` hands it to the
+/// finalizer, which scans the raw output whatever the assertion result.
 const SECRET_SENTINEL: &str = "sk-ant-dotenv-sentinel-4b91";
 
 /// The endpoint a hostile `.env` tries to install. Chosen so that if it ever
@@ -134,8 +135,7 @@ fn fast_dotenv_lattice_keys_are_refused() {
                     .any(|key| key.as_str() == Some("LATTICE_AGENTS_DIR")),
                 "LATTICE_AGENTS_DIR must never appear in dotenv.applied",
             )
-        })
-        .and_then(|_| assert_no_secret(&out, SECRET_SENTINEL));
+        });
     assert_result(&world, "fast-dotenv-lattice-keys", &out, result);
 }
 
@@ -220,30 +220,32 @@ fn fast_dotenv_provider_endpoint_keys_are_refused() {
     // workspace `.env` asked for.
     let spec = ScenarioSpec::fast("fast-dotenv-endpoint");
     let world = hostile_world(&spec.name);
-    // A model is required for the bare `openai-compatible` alias; supply it
-    // from the process environment so the alias resolves and its `base_url`
-    // becomes observable.
-    world.set_env("OPENAI_COMPATIBLE_MODEL", "compat-model");
+    // 裸 `openai-compatible` 别名需要模型才能解析。模型放在同一个 `.env` 里，
+    // 它出现在结果中就证明这条命令读到了该文件，默认 `base_url` 才是拒绝的结果，
+    // 而不是 `.env` 根本没被读取。
+    let dotenv = std::fs::read_to_string(world.project_dir().join(".env")).expect("read .env");
+    world
+        .write_project_file(
+            ".env",
+            &format!("{dotenv}OPENAI_COMPATIBLE_MODEL=compat-model-from-dotenv\n"),
+        )
+        .expect("extend .env");
     let out = run(&world, &spec, &["--json", "resolve", "openai-compatible"]);
 
     let result = assert_exit_success(&out)
         .and_then(|_| parse_json(&out))
         .and_then(|parsed| {
-            let base_url = parsed
-                .get("base_url")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
+            let model = parsed.get("provider_model").and_then(Value::as_str);
             require(
-                base_url != ATTACKER_BASE_URL,
-                format!("resolved base_url must not be the .env value, got {base_url}"),
+                model == Some("compat-model-from-dotenv"),
+                format!("the .env model must reach resolve, got {model:?}"),
             )?;
+            let base_url = parsed.get("base_url").and_then(Value::as_str);
             require(
-                base_url == "http://localhost:11434/v1",
-                format!("resolved base_url must be the built-in default, got {base_url}"),
+                base_url == Some("http://localhost:11434/v1"),
+                format!("resolved base_url must be the built-in default, got {base_url:?}"),
             )
-        })
-        .and_then(|_| assert_no_secret(&out, SECRET_SENTINEL));
+        });
     assert_result(&world, "fast-dotenv-endpoint", &out, result);
 }
 
@@ -283,16 +285,13 @@ fn fast_dotenv_proxy_and_home_keys_are_refused() {
             }
             // The session store still resolves under the scenario HOME, not the
             // one the `.env` named.
-            let session_dir = parsed
-                .get("session_dir")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
+            let session_dir = parsed.get("session_dir").and_then(Value::as_str);
+            let expected = world.session_store_dir().join("lattice.redb");
             require(
-                !session_dir.starts_with("/tmp/attacker-home"),
-                format!("session dir must ignore the .env HOME, got {session_dir}"),
+                session_dir == expected.to_str(),
+                format!("session dir must stay at {expected:?}, got {session_dir:?}"),
             )
-        })
-        .and_then(|_| assert_no_secret(&out, SECRET_SENTINEL));
+        });
     assert_result(&world, "fast-dotenv-proxy-home", &out, result);
 }
 
@@ -331,8 +330,7 @@ fn fast_dotenv_api_key_still_applies_with_visible_source() {
                 dotenv_path.ends_with(".env"),
                 format!("doctor must name the .env path, got {dotenv_path:?}"),
             )
-        })
-        .and_then(|_| assert_no_secret(&out, SECRET_SENTINEL));
+        });
     assert_result(&world, "fast-dotenv-api-key", &out, result);
 }
 
@@ -373,8 +371,7 @@ fn fast_doctor_reports_process_and_unset_sources() {
                 endpoint.get("value") == Some(&Value::Null),
                 "absent endpoint override must report a null value",
             )
-        })
-        .and_then(|_| assert_no_secret(&out, SECRET_SENTINEL));
+        });
     assert_result(&world, "fast-dotenv-source-process", &out, result);
 }
 
@@ -430,8 +427,7 @@ fn fast_dotenv_with_utf8_bom_still_applies_credentials() {
                     == Some("Present"),
                 "the credential from a BOM-prefixed .env must read Present",
             )
-        })
-        .and_then(|_| assert_no_secret(&out, SECRET_SENTINEL));
+        });
     assert_result(&world, "fast-dotenv-bom", &out, result);
 }
 
@@ -483,9 +479,14 @@ fn fast_dotenv_never_overrides_the_process_environment() {
                     == Some("dotenv"),
                 "a key absent from the process env is still applied from .env",
             )
-        })
-        .and_then(|_| assert_no_secret(&out, "sk-ant-from-dotenv-loses"));
-    assert_result(&world, "fast-dotenv-shadowed", &out, result);
+        });
+    assert_result_with_secrets(
+        &world,
+        "fast-dotenv-shadowed",
+        &out,
+        &[SECRET_SENTINEL, "sk-ant-from-dotenv-loses"],
+        result,
+    );
 }
 
 #[test]
@@ -504,8 +505,7 @@ fn fast_doctor_redacts_proxy_credentials() {
 
     let result = assert_exit_success(&out)
         .and_then(|_| assert_stdout_contains(&out, "proxy.internal:8080"))
-        .and_then(|_| assert_stdout_contains(&out, "***@"))
-        .and_then(|_| assert_no_secret(&out, PROXY_PASSWORD));
+        .and_then(|_| assert_stdout_contains(&out, "***@"));
     assert_result_with_secrets(
         &world,
         "fast-dotenv-proxy-redaction",
@@ -520,7 +520,6 @@ fn fast_doctor_redacts_proxy_credentials() {
     );
     let json_out = run(&world, &spec, &["--json", "doctor"]);
     let json_result = assert_exit_success(&json_out)
-        .and_then(|_| assert_no_secret(&json_out, PROXY_PASSWORD))
         .and_then(|_| parse_json(&json_out))
         .and_then(|parsed| {
             let value = endpoint_entry(&parsed, "HTTPS_PROXY")
@@ -547,7 +546,6 @@ fn fast_doctor_redacts_proxy_credentials() {
     );
     let normalized_out = run(&world, &spec, &["--json", "doctor"]);
     let normalized_result = assert_exit_success(&normalized_out)
-        .and_then(|_| assert_no_secret(&normalized_out, PROXY_PASSWORD))
         .and_then(|_| assert_stdout_contains(&normalized_out, "***@proxy.internal:8080"));
     assert_result_with_secrets(
         &world,
@@ -569,12 +567,15 @@ fn fast_doctor_never_echoes_a_malformed_dotenv_line() {
     let out = run(&world, &spec, &["--json", "doctor"]);
 
     let result = assert_exit_success(&out)
-        .and_then(|_| assert_no_secret(&out, MALFORMED_SECRET))
         .and_then(|_| parse_json(&out))
         .and_then(|parsed| {
+            let error = parsed
+                .get("dotenv")
+                .and_then(|dotenv| dotenv.get("error"))
+                .and_then(Value::as_str);
             require(
-                parsed.get("dotenv").and_then(|dotenv| dotenv.get("error")) != Some(&Value::Null),
-                "doctor must report a safe parse diagnostic",
+                error == Some("invalid .env syntax at byte offset 18"),
+                format!("doctor must report a safe parse diagnostic, got {error:?}"),
             )
         });
     assert_result_with_secrets(
@@ -602,12 +603,27 @@ fn fast_dotenv_substitution_cannot_launder_a_refused_endpoint() {
     let result = assert_exit_success(&out)
         .and_then(|_| parse_json(&out))
         .and_then(|parsed| {
+            // 正向见证：替换确实被识别并拒绝。只看“没有应用”的话，
+            // 这两行没被读到也同样成立。
+            require(
+                ignored_reason(&parsed, "OPENAI_COMPATIBLE_BASE_URL") == Some("provider_endpoint"),
+                "doctor dotenv.ignored must list OPENAI_COMPATIBLE_BASE_URL as provider_endpoint",
+            )?;
+            let error = parsed
+                .get("dotenv")
+                .and_then(|dotenv| dotenv.get("error"))
+                .and_then(Value::as_str);
+            require(
+                error == Some("unsafe .env substitution into OPENAI_COMPATIBLE_MODEL was refused"),
+                format!("doctor must report the refused substitution, got {error:?}"),
+            )?;
             let applied = parsed
                 .get("dotenv")
                 .and_then(|dotenv| dotenv.get("applied"))
                 .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
+                .ok_or_else(|| AssertError::StdoutMissing {
+                    expected: "doctor dotenv.applied array".into(),
+                })?;
             require(
                 !applied
                     .iter()
@@ -663,8 +679,7 @@ fn fast_doctor_reports_every_provider_credential_source() {
                     compat.get("source")
                 ),
             )
-        })
-        .and_then(|_| assert_no_secret(&out, SECRET_SENTINEL));
+        });
     assert_result(&world, "fast-dotenv-all-credentials", &out, result);
 }
 
@@ -681,8 +696,7 @@ fn fast_doctor_text_shows_env_sources_and_dropped_keys() {
         .and_then(|_| assert_stdout_contains(&out, "LATTICE runtime switch"))
         .and_then(|_| assert_stdout_contains(&out, "provider endpoint override"))
         .and_then(|_| assert_stdout_contains(&out, "TLS trust anchor override"))
-        .and_then(|_| assert_stdout_contains(&out, "workspace .env"))
-        .and_then(|_| assert_no_secret(&out, SECRET_SENTINEL));
+        .and_then(|_| assert_stdout_contains(&out, "workspace .env"));
     assert_result(&world, "fast-dotenv-text", &out, result);
 }
 
