@@ -625,6 +625,40 @@ impl ScenarioEvidence {
     ) -> Result<(), FailureReport> {
         let secrets: Vec<&str> = self.sentinels.iter().map(String::as_str).collect();
         let mut report = FailureReport::new(primary_assertion, &secrets);
+        let mut persist = persist;
+        // 产物副本已经脱敏，必须在业务断言之外扫描原始证据。
+        for (index, command) in self.commands.iter().enumerate() {
+            for (stream, bytes) in [
+                ("stdout", &command.outcome.stdout),
+                ("stderr", &command.outcome.stderr),
+            ] {
+                if crate::assert::contains_secret(bytes, &secrets) {
+                    report.add_secret_location(format!("command {index} {stream}"), &secrets);
+                    persist = true;
+                }
+            }
+        }
+        for (index, bytes) in self.pty_output.iter().enumerate() {
+            if crate::assert::contains_secret(bytes, &secrets) {
+                report.add_secret_location(format!("PTY {index}"), &secrets);
+                persist = true;
+            }
+        }
+        for (name, value) in &self.attachments {
+            if crate::assert::contains_secret(value.to_string().as_bytes(), &secrets) {
+                report.add_secret_location(format!("JSON {name}"), &secrets);
+                persist = true;
+            }
+        }
+        // Captures omit credential headers; bodies and retained client identity
+        // headers have no legitimate use for a scenario's secret sentinels.
+        for (index, capture) in self.captures.iter().enumerate() {
+            let bytes = serde_json::to_vec(capture).expect("serialize captured request");
+            if crate::assert::contains_secret(&bytes, &secrets) {
+                report.add_secret_location(format!("capture {index}"), &secrets);
+                persist = true;
+            }
+        }
         let cleanup = self.daemon.cleanup(self.budget.normal_stop_deadline());
         let persist = persist || cleanup.is_err();
         if let Err(errors) = cleanup {
@@ -1241,7 +1275,10 @@ mod tests {
         };
 
         evidence.record_command("lattice test", &outcome);
-        evidence.finish(true).unwrap();
+        let report = evidence.finish(true).unwrap_err().to_string();
+        assert!(report.contains("- command 0 stdout"), "{report}");
+        assert!(report.contains("- command 0 stderr"), "{report}");
+        assert!(!report.contains(secret), "{report}");
 
         for entry in std::fs::read_dir(&failure_dir).unwrap() {
             let path = entry.unwrap().path();
@@ -1532,6 +1569,63 @@ mod tests {
         let cut: serde_json::Value =
             serde_json::from_slice(&std::fs::read(failure.join("cut.json")).unwrap()).unwrap();
         assert_eq!(cut, json!({"marker":"[REDACTED]","sequence":65}));
+    }
+
+    #[test]
+    fn direct_finalizer_scans_raw_evidence_whatever_the_assertion_result() {
+        let secret = "direct-finalizer-secret";
+        let world = ScenarioWorld::new("direct-finalizer-raw-scan").unwrap();
+        let root = TempDir::new().unwrap();
+        for primary in [None, Some("business failed")] {
+            for location in [
+                "command 0 stdout",
+                "command 0 stderr",
+                "PTY 0",
+                "JSON cut",
+                "capture 0",
+            ] {
+                let failure = root
+                    .path()
+                    .join(format!("{}-{location}", primary.is_some()));
+                let mut evidence =
+                    ScenarioEvidence::new_at_dir(&world, failure.clone(), [secret.to_string()])
+                        .unwrap();
+                let mut command = report_test_outcome("clean");
+                let mut bytes = vec![0xff];
+                bytes.extend_from_slice(secret.as_bytes());
+                match location {
+                    "command 0 stdout" => command.stdout = bytes,
+                    "command 0 stderr" => command.stderr = bytes,
+                    "PTY 0" => evidence.record_pty(&bytes),
+                    "JSON cut" => evidence
+                        .record_json("cut", &json!({"secret":secret}))
+                        .unwrap(),
+                    "capture 0" => evidence.record_captures(vec![CapturedRequest {
+                        raw: json!({"messages":[{"role":"tool","content":secret}]}),
+                        ..Default::default()
+                    }]),
+                    _ => unreachable!(),
+                }
+                evidence.record_command("lattice test", &command);
+                let report = evidence
+                    .finish_report(primary.map(str::to_string))
+                    .unwrap_err();
+                let text = report.to_string();
+                assert!(text.contains(&format!("- {location}\n")), "{text}");
+                assert_eq!(
+                    text.contains("business failed"),
+                    primary.is_some(),
+                    "{text}"
+                );
+                assert!(!text.contains(secret), "{text}");
+                assert!(failure.join("0-stdout.txt").is_file());
+                assert!(
+                    scan_artifacts_for_secrets(&failure, &[secret])
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+        }
     }
 
     #[test]

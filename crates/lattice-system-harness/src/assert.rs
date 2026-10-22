@@ -234,7 +234,7 @@ fn finalize_with_failure_artifacts_at_target(
     report.finish()
 }
 
-fn contains_secret(bytes: &[u8], secrets: &[&str]) -> bool {
+pub(crate) fn contains_secret(bytes: &[u8], secrets: &[&str]) -> bool {
     secrets.iter().any(|secret| {
         !secret.is_empty()
             && bytes
