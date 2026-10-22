@@ -24,7 +24,7 @@
 //!   chain (the fake LLM receives the request).
 //! - `/quit` exits the TUI cleanly (exit within the timeout, no hang).
 //! - After exit, the TUI's process group has no live members (no orphaned
-//!   TUI / fake-LLM children).
+//!   frontend children). The scenario owns the backend group separately.
 
 use std::time::Duration;
 
@@ -172,18 +172,24 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
             .expect("/quit must exit the TUI without being killed");
 
         evidence.record_pty(tui.output());
-        let pgid = tui.pgid();
+        // The backend has a separate group owned by ScenarioWorld; only the
+        // frontend group must be empty here. Drop would kill residual children
+        // and conceal an orphan, so inspect before handing cleanup to Drop.
+        let pgid = tui.pgid().expect("TUI has a frontend process group");
+        let deadline = std::time::Instant::now() + budget.cap_timeout(Duration::from_secs(2));
+        loop {
+            let survivors = processes_in_pgid(pgid).expect("inspect TUI process group");
+            if survivors.is_empty() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "TUI process group {pgid} still has live members after /quit before Drop: {survivors:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
         drop(tui);
 
-        // Then verify the whole group is gone (no orphaned lattice/fake-LLM children).
-        std::thread::sleep(Duration::from_millis(400));
-        if let Some(pgid) = pgid {
-            let survivors = processes_in_pgid(pgid).expect("inspect TUI process group");
-            assert!(
-                survivors.is_empty(),
-                "TUI process group {pgid} still has live members after quit+drop: {survivors:?}"
-            );
-        }
         let session =
             lattice_system_harness::SessionSendDriver::new(&driver, &world, &spec, "tui-smoke");
         let out = session.run_command(&["--json", "session", "list"]).unwrap();

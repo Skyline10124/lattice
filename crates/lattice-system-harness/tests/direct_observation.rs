@@ -30,7 +30,7 @@ use support::{
 /// bounded observation policy.
 fn observation_world(prefix: &str) -> (ScenarioWorld, ScenarioSpec) {
     let mut spec = ScenarioSpec::direct_local(prefix);
-    // This scenario performs 18 sequential Tool calls and captures 19 provider
+    // This scenario performs 20 sequential Tool calls and captures 22 provider
     // requests; its 29.80-second passing runtime leaves no useful margin under
     // the 30-second per-step default. Keep the 180-second total timeout.
     spec.step_timeout_secs = 60;
@@ -79,7 +79,7 @@ max_find_paths = 3\n";
         .write_project_file(".lattice/agents/dl-obs/agent.toml", profile)
         .expect("write profile");
     world
-        .write_project_file(".lattice/private.txt", "LATTICE_SECRET\n")
+        .write_project_file(".lattice/private.txt", "needle LATTICE_SECRET\n")
         .expect("write .lattice/private.txt");
 
     world.init_git_project().expect("init git project");
@@ -95,7 +95,7 @@ max_find_paths = 3\n";
         .write_project_file("private/included.txt", "included content\n")
         .expect("write private/included.txt");
     world
-        .write_project_file("denied/hidden.txt", "denied content\n")
+        .write_project_file("denied/hidden.txt", "needle denied content\n")
         .expect("write denied/hidden.txt");
 
     (world, spec)
@@ -122,6 +122,10 @@ fn tool_sequence(calls: &[(&str, &str)], terminator: &str) -> SseScript {
 fn direct_observation_visibility_and_bounds() {
     let driver = driver();
     let (world, spec) = observation_world("direct-observation");
+    // Both full queries must exercise system exclusion for Git metadata too.
+    world
+        .write_project_file(".git/observation.txt", "needle git metadata\n")
+        .expect("write system-excluded Git fixture");
     const OUTSIDE_CANARY: &str = "OUTSIDE_ROOT_SECRET_24_01\n";
     let outside_file = world.root().join("outside-observation.txt");
     fs::write(&outside_file, OUTSIDE_CANARY).expect("write outside-root canary");
@@ -205,15 +209,56 @@ fn direct_observation_visibility_and_bounds() {
         ),
         ("observe.workspace", absolute_find.as_str()),
     ];
-    let server = wire_fake_llm(
-        &world,
-        "dl-obs",
-        tool_sequence(calls, "observation complete"),
-    );
-    let scenario_evidence = evidence(&world, &spec);
+    let visibility_calls = [
+        (
+            "observe.workspace",
+            r#"{"request":{"mode":"grep","pattern":"needle","path":"."}}"#,
+        ),
+        (
+            "observe.workspace",
+            r#"{"request":{"mode":"find_files","pattern":"*.txt","path":"."}}"#,
+        ),
+    ];
+    let SseScript::Sequence { mut scripts } = tool_sequence(calls, "bounds complete") else {
+        unreachable!("tool_sequence returns Sequence");
+    };
+    let SseScript::Sequence {
+        scripts: visibility_scripts,
+    } = tool_sequence(&visibility_calls, "visibility complete")
+    else {
+        unreachable!("tool_sequence returns Sequence");
+    };
+    scripts.extend(visibility_scripts);
+    let server = wire_fake_llm(&world, "dl-obs", SseScript::Sequence { scripts });
+    let mut scenario_evidence = evidence(&world, &spec);
     let send = SessionSendDriver::new(&driver, &world, &spec, "dl-obs");
     let execution = send.send("observe the workspace").expect("turn drives");
+    // Keep the original profile-bound truncation checks. A second Turn freezes
+    // a larger bound so visibility is checked against the complete workspace.
+    let profile_path = world
+        .project_dir()
+        .join(".lattice/agents/dl-obs/agent.toml");
+    let profile = fs::read_to_string(&profile_path)
+        .expect("read observation profile")
+        .replace("max_grep_matches = 2", "max_grep_matches = 100")
+        .replace("max_find_paths = 3", "max_find_paths = 100");
+    fs::write(profile_path, profile).expect("raise visibility query bounds");
+    let visibility = send
+        .send("check complete workspace visibility")
+        .expect("visibility Turn");
     let captures = server.captured_requests();
+    let audit = send
+        .run_command(&[
+            "--json",
+            "audit",
+            "replay",
+            "--session",
+            send.session_id().unwrap(),
+            "--turn",
+            visibility.accepted_turn_id().unwrap(),
+        ])
+        .expect("read observation evidence");
+    scenario_evidence.record_command("observation audit replay", &audit);
 
     let result: Result<(), AssertError> = (|| {
         assert_clean_send(&execution)?;
@@ -256,10 +301,10 @@ fn direct_observation_visibility_and_bounds() {
         )?;
 
         // --- captured tool result inspection ---
-        // 18 tool calls + 1 plain text = 19 captures; result_i in captures[i].
+        // Bounds: 18 calls + plain text; visibility: 2 calls + plain text.
         require(
-            captures.len() == 19,
-            format!("expected 19 captures, got: {}", captures.len()),
+            captures.len() == 22,
+            format!("expected 22 captures, got: {}", captures.len()),
         )?;
 
         // 1. tracked.txt -> visible, content present
@@ -355,7 +400,7 @@ fn direct_observation_visibility_and_bounds() {
             format!("system-excluded dirs in listing: {names:?}"),
         )?;
 
-        // 9. grep "needle" "." -> truncated, no hidden paths
+        // 9. grep "needle" "." -> truncated; visibility is checked in the next Turn.
         let r9 = tool_result_value(&captures[9]).expect("grep result");
         require(
             r9.get("mode").and_then(Value::as_str) == Some("grep"),
@@ -377,7 +422,7 @@ fn direct_observation_visibility_and_bounds() {
             format!("grep returned hidden/denied paths: {match_paths:?}"),
         )?;
 
-        // 10. find_files "*.txt" "." -> truncated, no hidden paths
+        // 10. find_files "*.txt" "." -> truncated; visibility is checked in the next Turn.
         let r10 = tool_result_value(&captures[10]).expect("find_files result");
         require(
             r10.get("mode").and_then(Value::as_str) == Some("find_files"),
@@ -394,6 +439,135 @@ fn direct_observation_visibility_and_bounds() {
                 .iter()
                 .any(|p| p.contains("private/ignored") || p.contains("denied/")),
             format!("find_files returned hidden/denied paths: {path_strs:?}"),
+        )?;
+
+        // Truncated walks can omit a leaked path. Check visibility only with
+        // complete results against the fixture, independent of traversal order.
+        // Tool results omit false truncation flags. Public audit preserves the
+        // Host's explicit verdict, paired to each result by InvocationId.
+        require(audit.is_clean_exit(0), "observation audit replay succeeds")?;
+        let audit: Value =
+            serde_json::from_slice(&audit.stdout).map_err(|e| AssertError::StdoutMissing {
+                expected: format!("observation audit JSON: {e}"),
+            })?;
+        let calls = audit["calls"]
+            .as_array()
+            .ok_or_else(|| AssertError::StdoutMissing {
+                expected: "observation audit calls array".into(),
+            })?;
+        assert_clean_send(&visibility)?;
+        assert_completed_after_tools(&visibility.parsed)?;
+        let visibility_slots = visibility.slots();
+        require(
+            visibility_slots.len() == 2
+                && visibility_slots.iter().all(|slot| {
+                    slot.method == "observe.workspace" && slot.outcome == SlotOutcome::Succeeded
+                }),
+            "both complete visibility queries must succeed",
+        )?;
+        for (index, slot) in visibility_slots.iter().enumerate() {
+            let invocation = &slot.invocation_id;
+            let row = calls
+                .iter()
+                .find(|row| row["invocation_id"] == *invocation)
+                .ok_or_else(|| AssertError::StdoutMissing {
+                    expected: format!("audit row for visibility query {invocation}"),
+                })?;
+            let effects = row
+                .pointer("/state/evidence/value/effects/effects")
+                .and_then(Value::as_array)
+                .ok_or_else(|| AssertError::StdoutMissing {
+                    expected: format!("Host effects for visibility query {invocation}"),
+                })?;
+            let observations: Vec<_> = effects
+                .iter()
+                .filter(|effect| effect["source"] == "operation")
+                .collect();
+            require(
+                observations.len() == 1
+                    && observations[0]["target"] == json!({"kind":"path","path":"."})
+                    && observations[0]["truncated"].as_bool() == Some(false),
+                format!(
+                    "visibility query {index} must have explicit untruncated Host evidence: {observations:?}"
+                ),
+            )?;
+        }
+        let complete_grep = tool_result_value(&captures[20]).expect("complete grep result");
+        require(
+            complete_grep["mode"] == "grep",
+            format!("complete grep mode mismatch: {complete_grep}"),
+        )?;
+        let matches = complete_grep["result"]["matches"]
+            .as_array()
+            .ok_or_else(|| AssertError::StdoutMissing {
+                expected: "complete grep matches array".into(),
+            })?;
+        let mut actual_matches = matches
+            .iter()
+            .map(|entry| {
+                let path = entry["path"]
+                    .as_str()
+                    .ok_or_else(|| AssertError::StdoutMissing {
+                        expected: "complete grep match path".into(),
+                    })?;
+                let line = entry["line"]
+                    .as_u64()
+                    .ok_or_else(|| AssertError::StdoutMissing {
+                        expected: "complete grep match line".into(),
+                    })?;
+                let text = entry["text"]
+                    .as_str()
+                    .ok_or_else(|| AssertError::StdoutMissing {
+                        expected: "complete grep match text".into(),
+                    })?;
+                Ok((path, line, text))
+            })
+            .collect::<Result<Vec<_>, AssertError>>()?;
+        actual_matches.sort_unstable();
+        let expected_matches = [
+            ("g1.txt", 1, "needle one"),
+            ("g2.txt", 1, "needle two"),
+            ("g3.txt", 1, "needle three"),
+        ];
+        require(
+            actual_matches == expected_matches,
+            format!(
+                "complete grep exact fixture matches: expected {expected_matches:?}, got {actual_matches:?}"
+            ),
+        )?;
+        let complete_find = tool_result_value(&captures[21]).expect("complete find result");
+        require(
+            complete_find["mode"] == "find_files",
+            format!("complete find mode mismatch: {complete_find}"),
+        )?;
+        let paths = complete_find["result"]["paths"].as_array().ok_or_else(|| {
+            AssertError::StdoutMissing {
+                expected: "complete find paths array".into(),
+            }
+        })?;
+        let mut actual_paths = paths
+            .iter()
+            .map(|path| {
+                path.as_str().ok_or_else(|| AssertError::StdoutMissing {
+                    expected: "complete find path string".into(),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        actual_paths.sort_unstable();
+        let expected_paths = [
+            "big.txt",
+            "g1.txt",
+            "g2.txt",
+            "g3.txt",
+            "notes.txt",
+            "private/included.txt",
+            "tracked.txt",
+        ];
+        require(
+            actual_paths == expected_paths,
+            format!(
+                "complete find exact fixture paths: expected {expected_paths:?}, got {actual_paths:?}"
+            ),
         )?;
 
         // 11-18. Every observation mode rejects traversal and absolute paths.
@@ -459,7 +633,10 @@ fn direct_observation_visibility_and_bounds() {
 
     finish_scenario(
         scenario_evidence,
-        &[("observation turn", &execution.command)],
+        &[
+            ("observation turn", &execution.command),
+            ("visibility turn", &visibility.command),
+        ],
         captures,
         result,
     );

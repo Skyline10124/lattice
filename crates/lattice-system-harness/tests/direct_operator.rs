@@ -3,7 +3,9 @@
 
 //! 公开 IPC 操作员读取：当前状态、ChangeSeq、顺序 replay 与 recent20。
 mod support;
-use lattice_system_harness::{FixtureHttpServer, HttpFixture, SessionSendDriver, SseScript};
+use lattice_system_harness::{
+    AssertError, FixtureHttpServer, HttpFixture, SessionSendDriver, SseScript,
+};
 use serde_json::Value;
 use std::{collections::HashSet, time::Duration};
 use support::*;
@@ -227,16 +229,9 @@ fn direct_operator_unknown_typed_session_is_empty() {
     let mut evidence = evidence(&world, &spec);
     let send = SessionSendDriver::new(&driver, &world, &spec, "operator");
     let seed = send.send("seed").unwrap();
-    let query = cli(
-        &world,
-        &spec,
-        &[
-            "--json",
-            "audit",
-            "--session",
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        ],
-    );
+    let unknown = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let listed = cli(&world, &spec, &["--json", "session", "list"]);
+    let query = cli(&world, &spec, &["--json", "audit", "--session", unknown]);
     let zero = cli(
         &world,
         &spec,
@@ -252,21 +247,47 @@ fn direct_operator_unknown_typed_session_is_empty() {
     );
     let result = (|| {
         assert_clean_send(&seed)?;
+        require(seed.has_completed(), "seed Session completed")?;
+        require(listed.is_clean_exit(0), "session list succeeds")?;
+        let sessions: Value =
+            serde_json::from_slice(&listed.stdout).map_err(|e| AssertError::StdoutMissing {
+                expected: format!("session list JSON: {e}"),
+            })?;
+        let sessions = sessions
+            .as_array()
+            .ok_or_else(|| AssertError::StdoutMissing {
+                expected: "session list array".into(),
+            })?;
         require(
-            query.is_clean_exit(0)
-                && serde_json::from_slice::<Value>(&query.stdout).unwrap()["rows"]
-                    == serde_json::json!([]),
+            sessions.len() == 1 && sessions[0]["session_id"] == send.session_id().unwrap(),
+            "session list must contain the known zero-call Session",
+        )?;
+        require(
+            sessions
+                .iter()
+                .all(|session| session["session_id"] != unknown),
+            "queried SessionId must be absent from the complete session list",
+        )?;
+        let query_json: Value =
+            serde_json::from_slice(&query.stdout).map_err(|e| AssertError::StdoutMissing {
+                expected: format!("audit JSON: {e}"),
+            })?;
+        let zero_json: Value =
+            serde_json::from_slice(&zero.stdout).map_err(|e| AssertError::StdoutMissing {
+                expected: format!("replay JSON: {e}"),
+            })?;
+        require(
+            query.is_clean_exit(0) && query_json["rows"] == serde_json::json!([]),
             "unknown Session has no calls",
         )?;
         require(
-            zero.is_clean_exit(0)
-                && serde_json::from_slice::<Value>(&zero.stdout).unwrap()["calls"]
-                    == serde_json::json!([]),
+            zero.is_clean_exit(0) && zero_json["calls"] == serde_json::json!([]),
             "zero-call Turn replay is valid",
         )
     })();
     for (label, out) in [
         ("seed", &seed.command),
+        ("session list", &listed),
         ("unknown session", &query),
         ("zero replay", &zero),
     ] {
@@ -279,7 +300,7 @@ fn direct_operator_unknown_typed_session_is_empty() {
             &send,
             &mut evidence,
             send.session_id().unwrap(),
-            serde_json::json!({"prompt":"seed","unknown_session":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","zero_call_replay":true}),
+            serde_json::json!({"prompt":"seed","unknown_session":unknown,"zero_call_replay":true}),
         );
     }));
     finish_recorded(evidence, result);
