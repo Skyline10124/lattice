@@ -15,7 +15,7 @@
 use lattice_system_harness::{
     AssertError, CommandOutcome, LatticeCommand, LatticeDriver, ScenarioSpec, ScenarioWorld,
     assert_exit_code, assert_exit_success, assert_stderr_contains, assert_stdout_contains,
-    assert_with_failure_artifacts,
+    finalize_with_failure_artifacts,
 };
 use serde_json::Value;
 
@@ -48,8 +48,8 @@ fn ok_or_artifacts(
     output: &CommandOutcome,
     result: Result<(), AssertError>,
 ) {
-    assert_with_failure_artifacts(world, name, summary, output, &[SECRET_SENTINEL], result)
-        .unwrap_or_else(|e| panic!("{e}"));
+    finalize_with_failure_artifacts(world, name, summary, output, &[SECRET_SENTINEL], result)
+        .unwrap_or_else(|report| panic!("{report}"));
 }
 
 /// `doctor` 文本输出 `Credentials:` 段中每个变量及其状态词，例如
@@ -385,7 +385,7 @@ fn fast_resolve_unknown_model_errors() {
 
     let result =
         assert_exit_code(&out, 2).and_then(|_| assert_stderr_contains(&out, "unknown model alias"));
-    assert_with_failure_artifacts(
+    finalize_with_failure_artifacts(
         &world,
         "fast-resolve-unknown",
         "lattice resolve <unknown alias>",
@@ -393,7 +393,7 @@ fn fast_resolve_unknown_model_errors() {
         &[SECRET_SENTINEL, alias],
         result,
     )
-    .unwrap_or_else(|e| panic!("{e}"));
+    .unwrap_or_else(|report| panic!("{report}"));
 }
 
 #[test]

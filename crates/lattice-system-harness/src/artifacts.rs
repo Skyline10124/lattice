@@ -447,8 +447,6 @@ pub enum EvidenceError {
     ArtifactClaimBusy,
     #[error("evidence I/O failed: {0}")]
     Io(#[from] std::io::Error),
-    #[error("{0}")]
-    FailureReport(String),
 }
 
 pub(crate) fn validate_artifact_name(name: &OsStr) -> Result<(), EvidenceError> {
@@ -611,11 +609,6 @@ impl ScenarioEvidence {
     pub fn finish_report(self, primary_assertion: Option<String>) -> Result<(), FailureReport> {
         let persist = primary_assertion.is_some();
         self.finish_internal(primary_assertion, persist)
-    }
-
-    pub fn finish(self, failed: bool) -> Result<(), EvidenceError> {
-        self.finish_internal(None, failed)
-            .map_err(|report| EvidenceError::FailureReport(report.to_string()))
     }
 
     fn finish_internal(
@@ -1178,13 +1171,15 @@ mod tests {
             !failure_dir.exists(),
             "constructor must clear stale evidence"
         );
-        evidence.finish(false).unwrap();
+        evidence.finish_report(None).unwrap();
         assert!(!failure_dir.exists(), "passing scenarios write no bundle");
 
         let evidence =
             ScenarioEvidence::new_at_dir(&world, failure_dir.clone(), Vec::<String>::new())
                 .unwrap();
-        evidence.finish(true).unwrap();
+        evidence
+            .finish_report(Some("scenario failed".into()))
+            .unwrap_err();
         assert!(failure_dir.join("workspace_diff.txt").is_file());
     }
 
@@ -1229,7 +1224,9 @@ mod tests {
         };
 
         evidence.record_command("lattice test", &outcome);
-        evidence.finish(true).unwrap();
+        evidence
+            .finish_report(Some("scenario failed".into()))
+            .unwrap_err();
 
         let command = std::fs::read_to_string(failure_dir.join("0-command.txt")).unwrap();
         for fact in [
@@ -1275,7 +1272,10 @@ mod tests {
         };
 
         evidence.record_command("lattice test", &outcome);
-        let report = evidence.finish(true).unwrap_err().to_string();
+        let report = evidence
+            .finish_report(Some("scenario failed".into()))
+            .unwrap_err()
+            .to_string();
         assert!(report.contains("- command 0 stdout"), "{report}");
         assert!(report.contains("- command 0 stderr"), "{report}");
         assert!(!report.contains(secret), "{report}");

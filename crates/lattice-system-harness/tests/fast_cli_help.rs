@@ -6,7 +6,7 @@
 use lattice_system_harness::{
     LatticeCommand, LatticeDriver, ScenarioSpec, ScenarioWorld, assert_exit_code,
     assert_exit_success, assert_stderr_contains, assert_stdout_contains_all,
-    assert_with_failure_artifacts,
+    finalize_with_failure_artifacts,
 };
 
 fn driver() -> LatticeDriver {
@@ -44,8 +44,8 @@ fn fast_cli_help_lists_public_commands() {
     // public-commands loop below panicked without writing any artifacts.
     let result = assert_exit_success(&output)
         .and_then(|_| assert_stdout_contains_all(&output, EXPECTED_PUBLIC_COMMANDS));
-    assert_with_failure_artifacts(&world, &spec.name, "lattice --help", &output, &[], result)
-        .expect("help exits 0 and lists all public commands");
+    finalize_with_failure_artifacts(&world, &spec.name, "lattice --help", &output, &[], result)
+        .unwrap_or_else(|report| panic!("help exits 0 and lists all public commands\n{report}"));
 }
 
 #[test]
@@ -56,8 +56,8 @@ fn fast_bare_lattice_prints_help_and_exits_zero() {
 
     let result = assert_exit_success(&output)
         .and_then(|_| assert_stdout_contains_all(&output, &["session"]));
-    assert_with_failure_artifacts(&world, &spec.name, "lattice", &output, &[], result)
-        .expect("bare lattice exits 0 and mentions session");
+    finalize_with_failure_artifacts(&world, &spec.name, "lattice", &output, &[], result)
+        .unwrap_or_else(|report| panic!("bare lattice exits 0 and mentions session\n{report}"));
 }
 
 #[test]
@@ -76,7 +76,7 @@ fn fast_unknown_command_rejected() {
 
     let result = assert_exit_code(&output, 2)
         .and_then(|_| assert_stderr_contains(&output, "unrecognized subcommand"));
-    assert_with_failure_artifacts(
+    finalize_with_failure_artifacts(
         &world,
         &spec.name,
         "lattice not-a-real-command",
@@ -84,5 +84,7 @@ fn fast_unknown_command_rejected() {
         &[],
         result,
     )
-    .expect("unknown command exits 2 with 'unrecognized subcommand'");
+    .unwrap_or_else(|report| {
+        panic!("unknown command exits 2 with 'unrecognized subcommand'\n{report}")
+    });
 }
