@@ -318,6 +318,25 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
         assert_eq!(slots[19]["material"]["kind"], "output_too_large");
         assert!(slots[19]["material"]["byte_length"].as_u64().unwrap() > 65536);
         assert_eq!(slots[20]["outcome"], "failed");
+        assert_eq!(
+            slots[20]["reason"],
+            json!({"kind":"failed","value":{"code":"execution_failed","retriability":"transient"}})
+        );
+        // 网络不可用也包含连接失败；公开 Host 证据必须见证已连接后在 TLS 阶段失败。
+        assert_eq!(slots[20]["evidence"]["kind"], "recorded");
+        let effects = slots[20]["evidence"]["value"]["effects"]["effects"]
+            .as_array()
+            .expect("bad-TLS call must expose recorded effects");
+        assert_eq!(effects.len(), 1);
+        assert_eq!(effects[0]["source"], "operation");
+        let network = &effects[0]["network"];
+        assert_eq!(network["failure_phase"], "tls", "bad-TLS failure phase");
+        assert_eq!(network["transport"]["tls"], json!({"state":"failed"}));
+        assert_eq!(network["policy_verdict"], "allowed");
+        assert_eq!(
+            network["transport"]["connected_peer"],
+            json!({"ip":"127.0.0.1","port":bad_tls.port()})
+        );
         // 策略或校验拒绝不再是独立结局：它是 Failed 里的错误族，错误码与可重试性原样保留。
         assert_eq!(slots[21]["outcome"], "failed");
         assert_eq!(
@@ -1076,7 +1095,31 @@ fn crash_start_cannot_reset_an_expired_scenario_budget() {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         support::crash::start(&world, &spec, &budget)
     }));
-    assert!(result.is_err());
+    let panic = result
+        .err()
+        .expect("crash start must reject the expired scenario budget");
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .expect("scenario budget panic must carry a text message");
+    // 只允许实际耗时变化；场景身份、预算和完整诊断都必须来自预算检查。
+    let prefix = format!(
+        "scenario '{}' exceeded total timeout 0ns (elapsed ",
+        spec.name
+    );
+    let elapsed = message
+        .strip_prefix(&prefix)
+        .and_then(|rest| {
+            rest.strip_suffix(
+                "); a multi-step sequence must terminate within the whole-scenario budget",
+            )
+        })
+        .expect("crash start must panic specifically because the scenario budget expired");
+    assert!(
+        !elapsed.is_empty(),
+        "budget panic must report the elapsed time"
+    );
     assert!(world.daemon_pids().unwrap().is_empty());
 }
 
