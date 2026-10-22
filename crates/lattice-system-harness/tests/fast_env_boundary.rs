@@ -716,8 +716,8 @@ fn assert_result_with_secrets(
     secrets: &[&str],
     result: Result<(), AssertError>,
 ) {
-    lattice_system_harness::assert_with_failure_artifacts(
+    lattice_system_harness::finalize_with_failure_artifacts(
         world, name, name, output, secrets, result,
     )
-    .unwrap_or_else(|e| panic!("{e}"));
+    .unwrap_or_else(|report| panic!("{report}"));
 }

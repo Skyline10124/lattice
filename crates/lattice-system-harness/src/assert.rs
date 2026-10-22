@@ -41,8 +41,6 @@ pub enum AssertError {
     StderrMissing { expected: String },
     #[error("output contained forbidden secret sentinel at {location}")]
     SecretLeak { location: String },
-    #[error(transparent)]
-    FailureReport(FailureReport),
 }
 
 pub fn assert_exit_success(output: &CommandOutcome) -> Result<(), AssertError> {
@@ -95,7 +93,7 @@ pub fn assert_stdout_contains(output: &CommandOutcome, needle: &str) -> Result<(
 /// Assert stdout contains every needle, returning the comma-joined list of
 /// missing needles on failure. This is the semantic-assertion helper meant to
 /// be combined with `assert_exit_success` and fed to
-/// `assert_with_failure_artifacts` so a semantic failure also captures
+/// `finalize_with_failure_artifacts` so a semantic failure also captures
 /// stdout/stderr for post-mortem.
 pub fn assert_stdout_contains_all(
     output: &CommandOutcome,
@@ -262,25 +260,6 @@ fn persist_fast_failure_bundle(
         report.add_evidence_error("write world.txt", error, secrets);
     }
     scan_bundle_into_report(&artifacts.dir, secrets, report);
-}
-
-pub fn assert_with_failure_artifacts(
-    world: &ScenarioWorld,
-    scenario_name: &str,
-    command_summary: &str,
-    output: &CommandOutcome,
-    secrets: &[&str],
-    result: Result<(), AssertError>,
-) -> Result<(), AssertError> {
-    finalize_with_failure_artifacts(
-        world,
-        scenario_name,
-        command_summary,
-        output,
-        secrets,
-        result,
-    )
-    .map_err(AssertError::FailureReport)
 }
 
 #[cfg(test)]
