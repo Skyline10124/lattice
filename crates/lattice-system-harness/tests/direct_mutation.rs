@@ -6,8 +6,8 @@
 //!
 //! Covers `mutate.create` / `mutate.edit` operating on current Local state:
 //! success paths leave bytes immediately; denials and stale preconditions
-//! never change the target; a later provider failure does not roll back a
-//! successful mutation; preflight effect-kind denial never calls the backend.
+//! never change the target; preflight effect-kind denial never calls the backend.
+//! Mutation retention after provider failure is covered by `direct_failures`.
 //!
 //! Tool results are inspected in the next captured provider request (the
 //! product feeds the CEP result back as a `tool` role message).
@@ -23,8 +23,8 @@ use lattice_system_harness::{
 use serde_json::Value;
 use support::{
     assert_accepted_and_closed, assert_clean_send, assert_completed_after_tools, direct_world,
-    driver, evidence, finish_scenario, finished_with_code, last_tool_content, require, sequence,
-    tool_call, tool_failed, tool_ok, tool_result_value, wire_fake_llm, wire_gated_fake_llm,
+    driver, evidence, finish_scenario, finished_with_code, require, sequence, tool_call,
+    tool_failed, tool_failure, tool_ok, tool_result_value, wire_fake_llm, wire_gated_fake_llm,
 };
 
 fn is_non_completed_terminal(outcome: &lattice_system_harness::SendOutcome) -> bool {
@@ -91,6 +91,16 @@ fn direct_mutation_create_atomic_and_existing_target() {
         require(
             fs::read_to_string(&path).unwrap_or_default() == "created-v1\n",
             "failed create must preserve existing bytes",
+        )?;
+
+        let failure = tool_failure(&second.parsed, "mutate.create");
+        require(
+            failure.is_some_and(|(_, error)| {
+                error["code"] == "replan_required"
+                    && error["data"]["kind"] == "guard"
+                    && error["data"]["reason"] == "ReplanRequired: already-exists"
+            }),
+            format!("existing-target reason required: {failure:?}"),
         )?;
 
         // Successful create result JSON in next provider request.
@@ -216,6 +226,15 @@ fn direct_mutation_edit_hash_and_anchor() {
             "failed edit must preserve original bytes",
         )?;
         require(bad.has_completed(), "bad-edit turn completes")?;
+        let failure = tool_failure(&bad.parsed, "mutate.edit");
+        require(
+            failure.is_some_and(|(_, error)| {
+                error["code"] == "replan_required"
+                    && error["data"]["kind"] == "guard"
+                    && error["data"]["reason"] == "ReplanRequired: semantic-replan"
+            }),
+            format!("anchor replan reason required: {failure:?}"),
+        )?;
 
         let good = send.send("edit with good anchor").expect("good edit turn");
         let captures_edit = server2.captured_requests();
@@ -436,69 +455,6 @@ fn direct_mutation_stale_edit_and_external_visibility() {
     );
 }
 
-/// Successful create followed by provider disconnect commits an error Turn
-/// but retains the Local mutation (no implicit rollback).
-#[test]
-fn direct_mutation_no_rollback_after_provider_failure() {
-    let driver = driver();
-    let (world, spec) = direct_world(
-        "direct-mut-norollback",
-        "dl-noroll",
-        "[\"mutate.create\"]",
-        "",
-    );
-    let server = wire_fake_llm(
-        &world,
-        "dl-noroll",
-        sequence(vec![
-            tool_call(
-                "c1",
-                "mutate.create",
-                r#"{"path":"kept.txt","content":"must-remain\n","create_parents":false}"#,
-            ),
-            SseScript::Disconnect {
-                chunks_before_drop: vec!["partial".into()],
-            },
-        ]),
-    );
-    let scenario_evidence = evidence(&world, &spec);
-    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-noroll");
-    let outcome = send.send("create then die").expect("turn drives");
-    let captures = server.captured_requests();
-
-    let result: Result<(), AssertError> = (|| {
-        assert_clean_send(&outcome)?;
-        require(tool_ok(&outcome.parsed, "mutate.create"), "create ran")?;
-        let path = world.project_dir().join("kept.txt");
-        require(
-            path.is_file() && fs::read_to_string(&path).unwrap_or_default() == "must-remain\n",
-            "successful mutation must remain after provider failure",
-        )?;
-        let completed = outcome.has_completed();
-        let failed_or_error = is_non_completed_terminal(&outcome.parsed);
-        require(
-            !completed || failed_or_error,
-            format!(
-                "expected non-completed terminal after disconnect: {:?}",
-                outcome.type_sequence()
-            ),
-        )?;
-        require(
-            outcome.exit_code == Some(SendExitCode::Failed)
-                || outcome.exit_code == Some(SendExitCode::Committed),
-            format!("unexpected exit: {:?}", outcome.exit_code),
-        )?;
-        Ok(())
-    })();
-
-    finish_scenario(
-        scenario_evidence,
-        &[("create then disconnect", &outcome.command)],
-        captures,
-        result,
-    );
-}
-
 /// Write policy, system exclusion, and Cell capability denial produce no
 /// filesystem side effect.
 #[test]
@@ -567,12 +523,12 @@ fn direct_mutation_denials_have_no_side_effect() {
             SseScript::plain("effect denied"),
         ]),
     );
-    let evidence3 = evidence(&world3, &spec3);
+    let mut evidence3 = evidence(&world3, &spec3);
     let send3 = SessionSendDriver::new(&driver, &world3, &spec3, "dl-deff");
     let effect_deny = send3.send("effect denied create").expect("turn");
     let caps3 = server3.captured_requests();
 
-    let result: Result<(), AssertError> = (|| {
+    let write_result: Result<(), AssertError> = (|| {
         assert_clean_send(&write_deny)?;
         require(
             tool_failed(&write_deny.parsed, "mutate.create"),
@@ -590,6 +546,30 @@ fn direct_mutation_denials_have_no_side_effect() {
             ),
         )?;
 
+        let failure = tool_failure(&write_deny.parsed, "mutate.create");
+        require(
+            failure.is_some_and(|(slot, error)| {
+                error["code"] == "capability_violation"
+                    && error["data"]["kind"] == "capability"
+                    && error["data"]["capability"] == "mutate:write:workspace"
+                    && error["data"]["violations"] == serde_json::json!(["denied"])
+                    && slot["progress"]["evidence"]["value"]["admission"]["denied_capabilities"]
+                        == serde_json::json!([])
+                    && slot["progress"]["evidence"]["value"]["admission"]["approved_capabilities"]
+                        .as_array()
+                        .is_some_and(|caps| caps.iter().any(|cap| cap == "workspace.mutation"))
+            }),
+            format!(
+                "typed write-policy source with admitted workspace.mutation required: {failure:?}"
+            ),
+        )?;
+        require(
+            caps1.len() == 2,
+            "write denial requires tool + recovery requests",
+        )?;
+        Ok(())
+    })();
+    let sys_result: Result<(), AssertError> = (|| {
         assert_clean_send(&sys_deny)?;
         require(
             tool_failed(&sys_deny.parsed, "mutate.create"),
@@ -607,6 +587,30 @@ fn direct_mutation_denials_have_no_side_effect() {
             ),
         )?;
 
+        let failure = tool_failure(&sys_deny.parsed, "mutate.create");
+        require(
+            failure.is_some_and(|(slot, error)| {
+                error["code"] == "path_containment"
+                    && error["data"]["kind"] == "validation"
+                    && error["data"]["field"] == "path"
+                    && error["data"]["reason"] == "path-rejected"
+                    && slot["progress"]["evidence"]["value"]["admission"]["denied_capabilities"]
+                        == serde_json::json!([])
+                    && slot["progress"]["evidence"]["value"]["admission"]["approved_capabilities"]
+                        .as_array()
+                        .is_some_and(|caps| caps.iter().any(|cap| cap == "workspace.mutation"))
+            }),
+            format!(
+                "typed system-exclusion source with admitted workspace.mutation required: {failure:?}"
+            ),
+        )?;
+        require(
+            caps2.len() == 2,
+            "system denial requires tool + recovery requests",
+        )?;
+        Ok(())
+    })();
+    let effect_result: Result<(), AssertError> = (|| {
         assert_clean_send(&effect_deny)?;
         require(
             tool_failed(&effect_deny.parsed, "mutate.create"),
@@ -617,32 +621,48 @@ fn direct_mutation_denials_have_no_side_effect() {
             "capability denial left a file",
         )?;
         require(
-            caps3.len() >= 2,
+            caps3.len() == 2,
             "capability denial needs tool result capture",
         )?;
-        let err_text = last_tool_content(&caps3[1]).unwrap_or_default();
+        let failure = tool_failure(&effect_deny.parsed, "mutate.create");
         require(
-            err_text.to_lowercase().contains("capability")
-                || err_text.to_lowercase().contains("denied")
-                || err_text.to_lowercase().contains("not granted")
-                || err_text.to_lowercase().contains("policy"),
-            format!("capability denial tool message weak: {err_text}"),
+            failure.is_some_and(|(slot, error)| {
+                error["code"] == "capability_violation"
+                    && error["data"]["kind"] == "capability"
+                    && slot["progress"]["evidence"]["value"]["admission"]["denied_capabilities"]
+                        == serde_json::json!(["workspace.mutation"])
+            }),
+            format!("workspace.mutation admission denial required: {failure:?}"),
         )?;
         Ok(())
     })();
 
     scenario_evidence.record_command("write deny", &write_deny.command);
     scenario_evidence.record_captures(caps1);
-    let _ = scenario_evidence.finish(false);
     evidence2.record_command("sys deny", &sys_deny.command);
     evidence2.record_captures(caps2);
-    let _ = evidence2.finish(false);
-    finish_scenario(
-        evidence3,
-        &[("capability deny", &effect_deny.command)],
-        caps3,
-        result,
-    );
+    evidence3.record_command("capability deny", &effect_deny.command);
+    evidence3.record_captures(caps3);
+    // 每个 world 都独立扫描并收尾，再汇总报告，避免首个失败跳过其余清理。
+    let reports: Vec<_> = [scenario_evidence, evidence2, evidence3]
+        .into_iter()
+        .zip([write_result, sys_result, effect_result])
+        .filter_map(|(evidence, result)| {
+            evidence
+                .finish_report(result.err().map(|error| error.to_string()))
+                .err()
+        })
+        .collect();
+    if !reports.is_empty() {
+        panic!(
+            "{}",
+            reports
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        );
+    }
 }
 
 /// 同一项目的两个 Session 创建同一尚不存在的目标；两个 Turn 都停在 provider 闸口，

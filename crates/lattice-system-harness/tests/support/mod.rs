@@ -327,6 +327,28 @@ pub(crate) fn finished_with_code(outcome: &SendOutcome, method: &str, code: &str
     })
 }
 
+/// 公开会话条目中同一失败调用的原始槽位和完整 CEP 错误。
+pub(crate) fn tool_failure<'a>(
+    outcome: &'a SendOutcome,
+    method: &str,
+) -> Option<(&'a Value, &'a Value)> {
+    outcome.entries().into_iter().find_map(|entry| {
+        entry
+            .raw
+            .pointer("/content/slots")?
+            .as_array()?
+            .iter()
+            .find_map(|slot| {
+                let result = slot.pointer("/progress/result")?;
+                (slot.pointer("/binding/identity/method")?.as_str()? == method
+                    && result["name"] == method
+                    && slot["progress"]["progress"] == "terminal"
+                    && result["payload"]["outcome"] == "failed")
+                    .then(|| (slot, &result["payload"]["payload"]))
+            })
+    })
+}
+
 pub(crate) fn tool_call(id: &str, name: &str, args: &str) -> SseScript {
     SseScript::ToolCall {
         call_id: id.into(),
