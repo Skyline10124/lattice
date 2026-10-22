@@ -65,6 +65,12 @@ impl ApiError {
             || matches!(self, Self::Store(error) if matches!(error.as_ref(),
             StoreError::CommitFailed { .. } | StoreError::WriteDisabled | StoreError::CreationDurabilityUnknown { .. }))
     }
+    /// 失败的写入可能已经生效。禁写在写事务开始前拒绝，确定未生效，不属于此类。
+    pub(crate) fn outcome_unknown(&self) -> bool {
+        matches!(self, Self::WorkerFailed)
+            || matches!(self, Self::Store(error) if matches!(error.as_ref(),
+            StoreError::CommitFailed { .. } | StoreError::CreationDurabilityUnknown { .. }))
+    }
 }
 pub type Result<T> = std::result::Result<T, ApiError>;
 

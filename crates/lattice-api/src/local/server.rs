@@ -453,7 +453,7 @@ impl Backend {
             None => match self.stores.acquire(true).await {
                 Ok(api) => api,
                 Err(error) => {
-                    if error.requires_reopen() {
+                    if error.outcome_unknown() {
                         owner.reply(Response::Acceptance(Acceptance::ConfirmationUnknown {
                             turn_id: request.turn_id,
                             session_id: sid,
