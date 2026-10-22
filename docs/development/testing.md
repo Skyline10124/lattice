@@ -95,7 +95,7 @@ flowchart LR
 
 ### Fake provider 的确定性边界
 
-fake provider 与官方 provider 一样使用 TLS + HTTP/2：ALPN 只提供 `h2`，证书由 harness 生成的临时 CA 签发，场景默认经 `SSL_CERT_FILE`/`SSL_CERT_DIR` 只信任该 CA。明文 HTTP/1.1 只保留给本地 provider 场景，只支持完整的流式响应与 HTTP 错误响应。传输层故障在 HTTP/2 上构造：流在结束事件前正常结束、`RST_STREAM(INTERNAL_ERROR)`、响应后 `GOAWAY(NO_ERROR)`、最后流号小于在途请求的 `GOAWAY`，以及 `REFUSED_STREAM`。
+fake provider 与官方 provider 一样使用 TLS + HTTP/2：ALPN 只提供 `h2`，证书由 harness 生成的临时 CA 签发，场景默认经 `SSL_CERT_FILE`/`SSL_CERT_DIR` 只信任该 CA。明文 HTTP/1.1 只保留给本地 provider 场景，只支持完整的流式响应与 HTTP 错误响应。传输层故障在 HTTP/2 上构造：流在结束事件前正常结束、`RST_STREAM(INTERNAL_ERROR)`、响应事件之后 `GOAWAY(NO_ERROR)`、最后流号小于在途请求的 `GOAWAY`，以及 `REFUSED_STREAM`。
 
 fake provider 唯一的客户端是被测产品，因此只做取出路由、凭据与 body 所需的最少解析，不防御畸形或恶意 HTTP。它对场景只承担三项保证：
 
