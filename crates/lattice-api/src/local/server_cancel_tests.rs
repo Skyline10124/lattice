@@ -1363,6 +1363,27 @@ async fn write_disabled_before_acceptance_is_rejected_not_unknown() {
     }
 }
 #[tokio::test]
+async fn store_creation_failure_rejects_the_first_submission() {
+    let (dir, backend, client, task) = backend().await;
+    // 建库的父目录同步失败，库是否持久不明；这一轮尚未进入接受事务。
+    *lock(&backend.stores.creation_sync_probe) = Some(Arc::new(|| true));
+    let error = client
+        .submit(
+            request(dir.path()),
+            config(dir.path(), "http://127.0.0.1:1/v1"),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .recovery
+            .as_ref()
+            .is_some_and(|r| r.cause == RecoveryCause::CommitFailed),
+        "{error:?}"
+    );
+    finish(&backend, task).await;
+}
+#[tokio::test]
 async fn different_sessions_overlap_and_keep_their_frozen_configuration() {
     let (dir, backend, client, task) = backend().await;
     let mut first_provider = Provider::start().await;

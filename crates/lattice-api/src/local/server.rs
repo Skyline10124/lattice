@@ -450,18 +450,8 @@ impl Backend {
         }
         let api = match api {
             Some(api) => api,
-            None => match self.stores.acquire(true).await {
-                Ok(api) => api,
-                Err(error) => {
-                    if error.outcome_unknown() {
-                        owner.reply(Response::Acceptance(Acceptance::ConfirmationUnknown {
-                            turn_id: request.turn_id,
-                            session_id: sid,
-                        }));
-                    }
-                    return Err(error.into());
-                }
-            },
+            // 建库在接受事务之前；任何失败都说明这一轮确定未被接受，按拒绝返回。
+            None => self.stores.acquire(true).await?,
         };
         *lock(&owner.store) = Some(api.clone());
         let shutdown = api.shutdown();
