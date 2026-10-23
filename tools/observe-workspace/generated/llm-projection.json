@@ -1,7 +1,7 @@
 {
   "function": {
-    "description": "Observe workspace content in one of four fixed modes: read_file for one path, grep for regex search under a root, list_directory for one directory, or find_files for glob-like path search under a root. read_file returns content_hash; copy that exact value into mutate.edit expected_hash when editing, and do not compute, transform, or narrate the hash.",
-    "name": "observe.workspace",
+    "description": "Observe workspace content in one of four fixed modes: read_file for one path, grep for regex search under a root, list_directory for one directory, or find_files for glob-like path search under a root. read_file returns content_hash; copy that exact value into mutate__edit expected_hash when editing, and do not compute, transform, or narrate the hash.",
+    "name": "observe__workspace",
     "parameters": {
       "additionalProperties": false,
       "properties": {

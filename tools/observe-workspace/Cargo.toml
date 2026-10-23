@@ -1,6 +1,6 @@
 [package]
 # `cargo xtask tool-build` derives the package name from the manifest's tool name
-# by replacing dots with dashes (`observe.workspace` -> `observe-workspace`), and
+# by replacing `__` with a dash (`observe__workspace` -> `observe-workspace`), and
 # the cdylib artifact name from that. The name is therefore not free-form.
 name = "observe-workspace"
 version = "0.1.0"
@@ -8,7 +8,7 @@ license.workspace = true
 edition.workspace = true
 authors.workspace = true
 publish = false
-description = "observe.workspace Source Tool: typed mode dispatch and result shaping over the Policy-Visible Workspace host imports."
+description = "observe__workspace Source Tool: typed mode dispatch and result shaping over the Policy-Visible Workspace host imports."
 
 [lib]
 crate-type = ["cdylib"]

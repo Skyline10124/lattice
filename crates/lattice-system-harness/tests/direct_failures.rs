@@ -274,7 +274,7 @@ fn direct_failure_mutation_survives_provider_failure() {
     let (world, spec) = direct_world(
         "direct-failure-mutation-survives",
         "mutation",
-        "[\"mutate.create\"]",
+        "[\"mutate__create\"]",
         "[llm.retry]\nmax_retries = 0\ninitial_delay_ms = 1\nmax_delay_ms = 1\n",
     );
     let server = wire_fake_llm(
@@ -283,7 +283,7 @@ fn direct_failure_mutation_survives_provider_failure() {
         sequence(vec![
             tool_call(
                 "c1",
-                "mutate.create",
+                "mutate__create",
                 r#"{"path":"survivor.txt","content":"bytes\n","create_parents":false}"#,
             ),
             SseScript::HttpError {

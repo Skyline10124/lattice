@@ -490,7 +490,7 @@ mod tests {
         );
         parser.parse_chunk(
             "content_block_start",
-            r#"{"index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"observe.workspace","input":{}}}"#,
+            r#"{"index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"observe__workspace","input":{}}}"#,
         );
         parser.parse_chunk(
             "content_block_delta",
@@ -529,7 +529,7 @@ mod tests {
         start_message(&mut parser);
         let started = parser.parse_chunk(
             "content_block_start",
-            r#"{"index":0,"content_block":{"type":"tool_use","name":"observe.workspace","input":{}}}"#,
+            r#"{"index":0,"content_block":{"type":"tool_use","name":"observe__workspace","input":{}}}"#,
         );
         assert!(started.iter().any(|event| matches!(
             event,
@@ -579,7 +579,7 @@ mod tests {
         start_message(&mut parser);
         parser.parse_chunk(
             "content_block_start",
-            r#"{"index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"observe.workspace","input":{}}}"#,
+            r#"{"index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"observe__workspace","input":{}}}"#,
         );
         parser.parse_chunk(
             "content_block_delta",
@@ -607,7 +607,7 @@ mod tests {
         start_message(&mut parser);
         parser.parse_chunk(
             "content_block_start",
-            r#"{"index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"observe.workspace","input":{"path":"already complete"}}}"#,
+            r#"{"index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"observe__workspace","input":{"path":"already complete"}}}"#,
         );
         let events = parser.parse_chunk(
             "content_block_delta",

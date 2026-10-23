@@ -12,13 +12,13 @@ fn release_case(name: &str, methods: &[&str], turns: usize) {
     let (world, spec) = direct_world(
         name,
         "release-operator",
-        "[\"fetch.web\",\"session.todo_write\"]",
+        "[\"fetch__web\",\"session__todo_write\"]",
         "\n[lancet.network]\nallow_localhost = true\nallowed_hosts = [\"localhost\"]\nmax_web_response_bytes = 1024\n\n[lancet.capabilities]\nmax_boundary = \"ex\"\n",
     );
     let mut scripts = Vec::new();
     for i in 0..turns {
         for method in methods {
-            let arguments = if *method == "fetch.web" {
+            let arguments = if *method == "fetch__web" {
                 serde_json::json!({"url":web.url_path("/release")})
             } else {
                 serde_json::json!({"todos":[{"content":format!("release {i}"),"status":"pending"}]})
@@ -44,7 +44,7 @@ fn release_case(name: &str, methods: &[&str], turns: usize) {
             tids.push(turn.accepted_turn_id().unwrap().to_owned());
         }
         let sid = send.session_id().unwrap();
-        let fetches = methods.iter().filter(|m| **m == "fetch.web").count() * turns;
+        let fetches = methods.iter().filter(|m| **m == "fetch__web").count() * turns;
         if fetches > 0 {
             web.wait_for_requests(fetches, Duration::from_secs(5))
                 .unwrap();
@@ -167,11 +167,11 @@ fn release_case(name: &str, methods: &[&str], turns: usize) {
 }
 #[test]
 fn release_operator_component_matrix() {
-    release_case("release-operator-fetch", &["fetch.web"], 1);
-    release_case("release-operator-component", &["session.todo_write"], 1);
+    release_case("release-operator-fetch", &["fetch__web"], 1);
+    release_case("release-operator-component", &["session__todo_write"], 1);
     release_case(
         "release-operator-mixed",
-        &["fetch.web", "session.todo_write"],
+        &["fetch__web", "session__todo_write"],
         11,
     );
 }

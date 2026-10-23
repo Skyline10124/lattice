@@ -60,7 +60,7 @@ fn config() -> FrozenTurnConfig {
         catalog: ToolCatalogSnapshot::new(
             "build".into(),
             vec![ToolCatalogEntry {
-                name: "observe.workspace".into(),
+                name: "observe__workspace".into(),
                 descriptor_identity: "a".repeat(64),
                 description: "observe".into(),
                 input_schema: json!({"type":"object"}),
@@ -96,7 +96,7 @@ fn reply(k: ModelAttemptKey, count: usize) -> CompleteReply {
             semantic: MessageSemantic::ToolCall {
                 call: UnboundToolCall {
                     provider_call_id: Some(format!("call-{n}")),
-                    name: "observe.workspace".into(),
+                    name: "observe__workspace".into(),
                     arguments: json!({"path":"private-input"}),
                 },
             },
@@ -245,7 +245,7 @@ fn corrupt_json(
 fn structured_result_wire() {
     let wire = json!({
         "invocation_id": "00000000-0000-4000-8000-000000000001",
-        "name": "observe.workspace",
+        "name": "observe__workspace",
         "payload": {"outcome":"succeeded", "payload": {
             "kind":"output_too_large", "digest":"ab".repeat(32), "byte_length":65537
         }}
@@ -455,7 +455,7 @@ fn deep_results_are_rejected_before_commit() {
         let terminal = prepare_terminal(
             &calls.bindings[0],
             Ok(value.clone()),
-            CellEvidenceTriple::refused_before_admission("observe.workspace"),
+            CellEvidenceTriple::refused_before_admission("observe__workspace"),
         )
         .unwrap();
         let result = db.finish_invocation(
@@ -691,7 +691,7 @@ fn input_and_evidence_boundaries() {
     .unwrap();
     let e = json!({"seq":0,"cell":{"ctx_op":"alloc","ext_impact":"none","scope":"workspace"},"scope":{"scope":"workspace","trust":"in","channel":"workspace"},"target":{"kind":"path","path":"a"},"source":"operation"});
     let effect: lancet_protocol::evidence::ObservedEffect = serde_json::from_value(e).unwrap();
-    let mut evidence = CellEvidenceTriple::refused_before_admission("observe.workspace");
+    let mut evidence = CellEvidenceTriple::refused_before_admission("observe__workspace");
     evidence.effects.effects.push(effect.clone());
     let value = prepare_terminal(
         &calls.bindings[0],
@@ -713,7 +713,7 @@ fn input_and_evidence_boundaries() {
     evidence.effects.effects.push(effect);
     assert!(prepare_terminal(&calls.bindings[0], Ok(json!({})), evidence).is_err());
     let mut ev = serde_json::to_value(CellEvidenceTriple::refused_before_admission(
-        "observe.workspace",
+        "observe__workspace",
     ))
     .unwrap();
     ev["admission"]["max_boundary"] = json!("unknown_trust");
@@ -1196,7 +1196,7 @@ fn progress_conclusions_and_stop_precedence() {
             (
                 StoredToolResult {
                     invocation_id: iid(1),
-                    name: "observe.workspace".into(),
+                    name: "observe__workspace".into(),
                     payload
                 },
                 InvocationEvidence::Unavailable { reason }
@@ -3963,7 +3963,7 @@ fn json_payload_field_names_are_not_store_records() {
     let terminal = prepare_terminal(
         &calls.bindings[0],
         Ok(value.clone()),
-        CellEvidenceTriple::refused_before_admission("observe.workspace"),
+        CellEvidenceTriple::refused_before_admission("observe__workspace"),
     )
     .unwrap();
     db.finish_invocation(

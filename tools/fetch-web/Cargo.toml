@@ -5,7 +5,7 @@ license.workspace = true
 edition.workspace = true
 authors.workspace = true
 publish = false
-description = "fetch.web Source Tool: typed request and result shaping over the GET-only network-fetch host import."
+description = "fetch__web Source Tool: typed request and result shaping over the GET-only network-fetch host import."
 
 [lib]
 crate-type = ["cdylib"]

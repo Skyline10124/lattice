@@ -23,7 +23,7 @@ required-features = ["crash-barriers"]
 
 [dependencies]
 # General hashing library (not a product crate): scenarios need the same
-# Local Revision string the product computes to script `mutate.edit`
+# Local Revision string the product computes to script `mutate__edit`
 # preconditions through the fake LLM.
 blake3 = "1"
 # Default features off: they would re-enable gix's defaults for the whole
@@ -46,7 +46,7 @@ thiserror = "2"
 portable-pty = "0.9"
 libc = "0.2"
 
-# fake provider 与真实 provider 一样跑 TLS + HTTP/2；`fetch.web` 夹具可选 TLS。
+# fake provider 与真实 provider 一样跑 TLS + HTTP/2；`fetch__web` 夹具可选 TLS。
 # 都是通用网络库，版本已在锁文件里。
 bytes = "1"
 h2 = "0.4"

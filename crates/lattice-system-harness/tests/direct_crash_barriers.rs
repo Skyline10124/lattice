@@ -223,7 +223,7 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
     let (world, spec) = support::direct_world(
         "operator-global-matrix",
         "operator",
-        "[\"observe.workspace\",\"session.todo_write\",\"fetch.web\"]",
+        "[\"observe__workspace\",\"session__todo_write\",\"fetch__web\"]",
         "\n[lancet.capabilities]\nmax_boundary = \"ex\"\n[lancet.network]\nallow_localhost = true\nallowed_hosts = [\"localhost\"]\n",
     );
     let budget = world.budget(&spec);
@@ -251,7 +251,7 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
             .map(|i| {
                 (
                     format!("small-{i}"),
-                    "session.todo_write".into(),
+                    "session__todo_write".into(),
                     json!({"todos":[{"content":format!("private-small-{i}"),"status":"pending"}]})
                         .to_string(),
                 )
@@ -260,18 +260,18 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
         batch.extend([
             (
                 "large".into(),
-                "session.todo_write".into(),
+                "session__todo_write".into(),
                 json!({"todos":[{"content":"private-large-".repeat(6000),"status":"pending"}]})
                     .to_string(),
             ),
             (
                 "bad-tls".into(),
-                "fetch.web".into(),
+                "fetch__web".into(),
                 json!({"url":bad_tls.url_path("/tls").replacen("http:", "https:", 1)}).to_string(),
             ),
             (
                 "missing".into(),
-                "observe.workspace".into(),
+                "observe__workspace".into(),
                 json!({"request": {"mode":"read_file","path":"absent-private.txt"}}).to_string(),
             ),
         ]);
@@ -279,12 +279,12 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
             calls: vec![
                 (
                     "fetch".into(),
-                    "fetch.web".into(),
+                    "fetch__web".into(),
                     json!({"url":url}).to_string(),
                 ),
                 (
                     "tail".into(),
-                    "session.todo_write".into(),
+                    "session__todo_write".into(),
                     json!({"todos":[{"content":"never-private","status":"pending"}]}).to_string(),
                 ),
             ],
@@ -348,7 +348,7 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
         let beta_provider = FakeLlmServer::start(support::sequence(vec![
             support::tool_call(
                 "beta",
-                "session.todo_write",
+                "session__todo_write",
                 r#"{"todos":[{"content":"beta-private","status":"pending"}]}"#,
             ),
             SseScript::plain("beta complete"),
@@ -682,7 +682,7 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
     let (world, spec) = support::direct_world(
         "r2-s2-vertical",
         "vertical",
-        "[\"observe.workspace\",\"mutate.create\"]",
+        "[\"observe__workspace\",\"mutate__create\"]",
         "",
     );
     world.write_project_file("seed.txt", "seed\n").unwrap();
@@ -1359,7 +1359,7 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
         let (world, spec) = support::direct_world(
             &format!("r2-crash-{name}"),
             "matrix",
-            "[\"observe.workspace\",\"mutate.create\",\"session.todo_write\"]",
+            "[\"observe__workspace\",\"mutate__create\",\"session__todo_write\"]",
             "\n[llm.retry]\nmax_retries = 1\n",
         );
         world.write_project_file("seed.txt", "seed\n").unwrap();
@@ -1692,7 +1692,7 @@ fn persisted_cancel_after_mutation_survives_crash_without_replay() {
     let (world, spec) = support::direct_world(
         "r2-crash-cancelled",
         "cancelled",
-        "[\"observe.workspace\",\"mutate.create\"]",
+        "[\"observe__workspace\",\"mutate__create\"]",
         "",
     );
     world.write_project_file("seed.txt", "seed\n").unwrap();
@@ -1811,7 +1811,7 @@ fn rewind_commit_survives_sigkill_and_keeps_both_branches() {
         let (world, spec) = support::direct_world(
             &format!("r2-rewind-crash-{target}"),
             "rewind",
-            "[\"observe.workspace\",\"mutate.create\"]",
+            "[\"observe__workspace\",\"mutate__create\"]",
             "",
         );
         world.write_project_file("seed.txt", "seed\n").unwrap();
@@ -1958,7 +1958,7 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
     let (world, spec) = support::direct_world(
         "r2-observation-windows",
         "windows",
-        "[\"observe.workspace\",\"mutate.create\"]",
+        "[\"observe__workspace\",\"mutate__create\"]",
         "\n[llm.retry]\nmax_retries = 1\n",
     );
     world.write_project_file("seed.txt", "seed\n").unwrap();
@@ -2278,7 +2278,7 @@ fn cancelled_slot_live_and_crash_share_ordered_closure() {
         let (world, spec) = support::direct_world(
             &format!("r2-cancel-slot-{crash}"),
             "slot",
-            "[\"observe.workspace\",\"mutate.create\",\"fetch.web\"]",
+            "[\"observe__workspace\",\"mutate__create\",\"fetch__web\"]",
             "\n[lancet.capabilities]\nmax_boundary = \"ex\"\n[lancet.network]\nallow_localhost = true\nallowed_hosts = [\"localhost\"]\n",
         );
         world.write_project_file("seed.txt", "seed\n").unwrap();
@@ -2476,7 +2476,7 @@ fn dispatch_deadline_tail_is_atomic_and_survives_crash() {
     let (world, spec) = support::direct_world(
         "r2-dispatch-deadline",
         "deadline",
-        "[\"observe.workspace\",\"mutate.create\"]",
+        "[\"observe__workspace\",\"mutate__create\"]",
         "\n[llm]\ntimeout_secs = 2\n",
     );
     world.write_project_file("seed.txt", "seed\n").unwrap();

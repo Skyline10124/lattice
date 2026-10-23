@@ -106,7 +106,7 @@ pub struct LancetObservationSection {
     pub max_find_paths: Option<usize>,
 }
 
-/// `[lancet.network]` — `fetch.web` host policy and response size cap.
+/// `[lancet.network]` — `fetch__web` host policy and response size cap.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct LancetNetworkSection {
@@ -349,7 +349,7 @@ description = "A full-featured agent"
 system_path = "prompt.md"
 
 [tools]
-enabled = ["observe.workspace", "mutate.create"]
+enabled = ["observe__workspace", "mutate__create"]
 
 [llm.retry]
 max_retries = 2
@@ -363,7 +363,7 @@ max_delay_ms = 1000
         );
         assert_eq!(profile.prompt.system_path.as_deref(), Some("prompt.md"));
         let tools = &profile.tools;
-        assert_eq!(tools.enabled, vec!["observe.workspace", "mutate.create"]);
+        assert_eq!(tools.enabled, vec!["observe__workspace", "mutate__create"]);
         assert_eq!(profile.llm.retry.max_retries, 2);
         assert_eq!(profile.llm.retry.initial_delay_ms, 250);
         assert_eq!(profile.llm.retry.max_delay_ms, 1000);
@@ -825,14 +825,14 @@ deny = ["session.events"]
             r#"{prefix}
 
 [tools]
-enabled = ["noop.echo"]
+enabled = ["noop__echo"]
 "#,
             prefix = minimal_profile_prefix()
         );
         let policy = parse(&toml).unwrap().capability_admission_policy();
         assert_eq!(
             policy.enabled_tools,
-            BTreeSet::from(["noop.echo".to_string()])
+            BTreeSet::from(["noop__echo".to_string()])
         );
         assert!(policy.denied_capabilities.is_empty());
         assert_eq!(policy.max_boundary, Trust::In);

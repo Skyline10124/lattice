@@ -19,14 +19,14 @@ fn operator_case(name: &str, methods: &[&str]) {
     let (world, spec) = direct_world(
         name,
         "operator",
-        "[\"fetch.web\",\"session.todo_write\"]",
+        "[\"fetch__web\",\"session__todo_write\"]",
         network(),
     );
     let calls = methods
         .iter()
         .enumerate()
         .map(|(i, method)| {
-            let args = if *method == "fetch.web" {
+            let args = if *method == "fetch__web" {
                 serde_json::json!({"url":web.url_path("/operator")}).to_string()
             } else {
                 serde_json::json!({"todos":[{"content":format!("task {i}"),"status":"pending"}]})
@@ -52,7 +52,7 @@ fn operator_case(name: &str, methods: &[&str]) {
         assert!(turn.has_completed());
         let sid = send.session_id().unwrap();
         let tid = turn.accepted_turn_id().unwrap();
-        let fetches = methods.iter().filter(|m| **m == "fetch.web").count();
+        let fetches = methods.iter().filter(|m| **m == "fetch__web").count();
         if fetches > 0 {
             web.wait_for_requests(fetches, Duration::from_secs(5))
                 .unwrap();
@@ -201,24 +201,24 @@ fn operator_case(name: &str, methods: &[&str]) {
 }
 #[test]
 fn direct_operator_fetch_terminal_contract() {
-    operator_case("direct-operator-fetch", &["fetch.web"]);
+    operator_case("direct-operator-fetch", &["fetch__web"]);
 }
 #[test]
 fn direct_operator_component_terminal_contract() {
-    operator_case("direct-operator-component", &["session.todo_write"]);
+    operator_case("direct-operator-component", &["session__todo_write"]);
 }
 #[test]
 fn direct_operator_mixed_query_tail_replay_and_status() {
     operator_case(
         "direct-operator-cross",
-        &["fetch.web", "session.todo_write"],
+        &["fetch__web", "session__todo_write"],
     );
 }
 #[test]
 fn direct_operator_status_bounds_twenty_newest_invocations() {
     operator_case(
         "direct-operator-status-bound",
-        &["fetch.web", "session.todo_write"].repeat(11),
+        &["fetch__web", "session__todo_write"].repeat(11),
     );
 }
 #[test]

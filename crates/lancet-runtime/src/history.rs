@@ -44,13 +44,13 @@
 //! the history's idea of a path can be stale (the user edited the file in
 //! their editor, a `git checkout` swapped branch contents, the file was
 //! deleted outside LATTICE) and a path can be missing entirely the first time
-//! `mutate.edit` touches a pre-existing file.
+//! `mutate__edit` touches a pre-existing file.
 //!
 //! Before appending, the recorder compares the parent tree's bytes at the path
 //! against the before state the installer actually observed. When they differ
 //! it writes a preceding **baseline** commit that makes the parent tree exact
 //! — setting the path to the observed pre-mutation bytes, or *removing* it
-//! when the real before state was absence (a `mutate.create` after an external
+//! when the real before state was absence (a `mutate__create` after an external
 //! delete). A baseline commit is not a mutation commit: it is labelled
 //! `lattice-history-kind: baseline`, and `current` still advances exactly once
 //! per recorded mutation.
@@ -198,7 +198,7 @@ impl WorkspaceHistoryBacking {
 /// One successfully installed Atomic Local Mutation, ready to record.
 #[derive(Debug, Clone)]
 pub struct MutationRecord {
-    /// CEP method that installed the mutation (`mutate.create` / `mutate.edit`).
+    /// CEP method that installed the mutation (`mutate__create` / `mutate__edit`).
     pub method: String,
     /// Turn this mutation belongs to.
     pub turn_id: TurnId,
@@ -208,7 +208,7 @@ pub struct MutationRecord {
     pub path: String,
     /// Pre-mutation bytes, when the mutation replaced existing content.
     ///
-    /// `None` for `mutate.create`, whose before state is "absent".
+    /// `None` for `mutate__create`, whose before state is "absent".
     pub before: Option<Vec<u8>>,
     /// Bytes that were installed.
     pub after: Vec<u8>,
@@ -460,16 +460,16 @@ fn validate_history(
             let parent_tree = parent.map(|p| commit_tree_id(store, p)).transpose()?;
             let before = tree_blob(store, parent_tree, &step.path)?;
             match (step.method.as_str(), before.is_some()) {
-                ("mutate.create", true) => {
+                ("mutate__create", true) => {
                     return Err(history_corruption(
                         &oid,
-                        "mutate.create parent state must not contain the target path",
+                        "mutate__create parent state must not contain the target path",
                     ));
                 }
-                ("mutate.edit", false) => {
+                ("mutate__edit", false) => {
                     return Err(history_corruption(
                         &oid,
-                        "mutate.edit parent state must contain the target path",
+                        "mutate__edit parent state must contain the target path",
                     ));
                 }
                 _ => {}
@@ -586,7 +586,7 @@ fn parse_history_commit(
     }
 
     let method = required_history_trailer(oid, "lattice-method", &method)?.to_string();
-    if !matches!(method.as_str(), "mutate.create" | "mutate.edit") {
+    if !matches!(method.as_str(), "mutate__create" | "mutate__edit") {
         return Err(history_corruption(
             oid,
             format!("invalid 'lattice-method' trailer '{method}'"),
@@ -914,7 +914,7 @@ mod tests {
 
     fn create(path: &str, after: &str) -> MutationRecord {
         MutationRecord {
-            method: "mutate.create".into(),
+            method: "mutate__create".into(),
             turn_id: test_turn_id(1),
             invocation_id: test_invocation_id(1),
             path: path.into(),
@@ -927,7 +927,7 @@ mod tests {
 
     fn edit(path: &str, before: &str, after: &str) -> MutationRecord {
         MutationRecord {
-            method: "mutate.edit".into(),
+            method: "mutate__edit".into(),
             turn_id: test_turn_id(1),
             invocation_id: test_invocation_id(2),
             path: path.into(),
@@ -970,7 +970,7 @@ mod tests {
         let canonical = mutation_message(&create("a.txt", "x"), "a.txt");
         let oid = parse_oid(&"f".repeat(40)).expect("object id");
         for (key, value) in [
-            ("lattice-method", "fetch.web"),
+            ("lattice-method", "fetch__web"),
             ("lattice-turn-id", "turn-1"),
             ("lattice-invocation-id", "invocation-1"),
             ("lattice-path", "../escape.txt"),
@@ -1390,7 +1390,7 @@ mod tests {
         .unwrap();
         assert_history_corruption(
             history.current().unwrap_err(),
-            "mutate.edit parent state must contain the target path",
+            "mutate__edit parent state must contain the target path",
         );
 
         let wrong_hash = mutation_message(&record, "existing.txt")
@@ -1433,7 +1433,7 @@ mod tests {
         };
         assert_eq!(parsed.turn_id, test_turn_id(1));
         assert_eq!(parsed.invocation_id, test_invocation_id(1));
-        assert_eq!(parsed.method, "mutate.create");
+        assert_eq!(parsed.method, "mutate__create");
         assert_eq!(parsed.path, "a.txt");
         assert_eq!(parsed.recorded_content_hash, record.content_hash);
     }

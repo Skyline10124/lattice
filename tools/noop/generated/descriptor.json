@@ -1,5 +1,5 @@
 {
-  "name": "noop.echo",
+  "name": "noop__echo",
   "version": "0.1.0",
   "description": "Tracer no-op: emits progress/cancellation and echoes params.",
   "params_schema": {

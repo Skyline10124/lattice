@@ -161,7 +161,7 @@ enum DomainImport {
     /// replace-with-expected / refuse-edit, with path safety, precondition,
     /// install, structured diagnostics, and evidence host-side (#31).
     WorkspaceMutate,
-    /// GET-only host network channel for `fetch.web` (#32).
+    /// GET-only host network channel for `fetch__web` (#32).
     NetworkFetch,
 }
 
@@ -199,7 +199,7 @@ impl DomainImport {
 /// only ever an argument the host resolves and never a handle the guest holds.
 ///
 /// Every result carries the host's `truncated` verdict. `read` returns the
-/// host-computed content hash, so the value `mutate.edit` verifies cannot
+/// host-computed content hash, so the value `mutate__edit` verifies cannot
 /// originate in a guest.
 const WORKSPACE_OBSERVE_WIT: &str = "\
 interface workspace-observe {
@@ -356,7 +356,7 @@ interface workspace-mutate {
 }
 ";
 
-/// The narrow, GET-only host network interface used by `fetch.web` (#32).
+/// The narrow, GET-only host network interface used by `fetch__web` (#32).
 const NETWORK_FETCH_WIT: &str = "\
 interface network-fetch {
     variant fetch-error {
@@ -912,14 +912,14 @@ fn write_or_check_host_composition(
 // Naming helpers
 // ---------------------------------------------------------------------------
 
-/// `noop.echo` -> `NOOP_ECHO` (Rust static identifier).
+/// `noop__echo` -> `NOOP_ECHO` (Rust static identifier).
 fn descriptor_static_ident(name: &str) -> String {
-    name.to_uppercase().replace('.', "_")
+    name.to_uppercase().replace("__", "_")
 }
 
-/// `noop.echo` -> `noop_echo.component.wasm`.
+/// `noop__echo` -> `noop_echo.component.wasm`.
 pub(crate) fn component_filename(name: &str) -> String {
-    format!("{}.component.wasm", name.replace('.', "_"))
+    format!("{}.component.wasm", name.replace("__", "_"))
 }
 
 /// Canonical SHA-256 over bytes, hex-lowercase. The identity candidate
@@ -1134,7 +1134,7 @@ toolchain = "t"
     fn manifest_pair() -> (Manifest, Manifest) {
         const BASE: &str = r#"
 [tool]
-name = "noop.echo"
+name = "noop__echo"
 version = "0.1.0"
 description = "Tracer no-op."
 abi-version = 1

@@ -6,7 +6,7 @@
 //!
 //! Completes built-binary coverage of the default five-Tool distribution.
 //!
-//! `fetch.web` is driven against a harness-only localhost HTTP fixture
+//! `fetch__web` is driven against a harness-only localhost HTTP fixture
 //! (not the OpenAI-compatible fake LLM). Tool results are inspected in the
 //! next captured provider request.
 
@@ -74,7 +74,7 @@ fn direct_tools_fetch_web_localhost_success_and_cap() {
     let (world, spec) = direct_world(
         "direct-tools-fetch-ok",
         "dl-fetch",
-        "[\"fetch.web\"]",
+        "[\"fetch__web\"]",
         &fetch_network_profile(64),
     );
     let args = format!(r#"{{"url":"{url}"}}"#);
@@ -83,9 +83,9 @@ fn direct_tools_fetch_web_localhost_success_and_cap() {
         &world,
         "dl-fetch",
         sequence(vec![
-            tool_call("f1", "fetch.web", &args),
+            tool_call("f1", "fetch__web", &args),
             SseScript::plain("fetched"),
-            tool_call("f2", "fetch.web", &capped_args),
+            tool_call("f2", "fetch__web", &capped_args),
             SseScript::plain("capped"),
         ]),
     );
@@ -98,8 +98,11 @@ fn direct_tools_fetch_web_localhost_success_and_cap() {
     let result: Result<(), AssertError> = (|| {
         assert_clean_send(&outcome)?;
         assert_clean_send(&capped)?;
-        require(tool_ok(&outcome.parsed, "fetch.web"), "fetch.web ok")?;
-        require(tool_ok(&capped.parsed, "fetch.web"), "capped fetch.web ok")?;
+        require(tool_ok(&outcome.parsed, "fetch__web"), "fetch__web ok")?;
+        require(
+            tool_ok(&capped.parsed, "fetch__web"),
+            "capped fetch__web ok",
+        )?;
         require(
             outcome.has_completed() && capped.has_completed(),
             "both fetch turns completed",
@@ -155,15 +158,15 @@ fn direct_tools_fetch_web_localhost_success_and_cap() {
     finish_scenario(
         scenario_evidence,
         &[
-            ("fetch.web complete", &outcome.command),
-            ("fetch.web capped", &capped.command),
+            ("fetch__web complete", &outcome.command),
+            ("fetch__web capped", &capped.command),
         ],
         captures,
         result,
     );
 }
 
-/// `fetch.web` omitted from enabled tools: forced model call fails before CEP
+/// `fetch__web` omitted from enabled tools: forced model call fails before CEP
 /// dispatch and the fixture receives no request.
 #[test]
 fn direct_tools_fetch_disabled_no_dispatch() {
@@ -182,7 +185,7 @@ fn direct_tools_fetch_disabled_no_dispatch() {
         &world,
         "dl-foff",
         sequence(vec![
-            tool_call("f1", "fetch.web", &args),
+            tool_call("f1", "fetch__web", &args),
             SseScript::plain("could not fetch"),
         ]),
     );
@@ -197,8 +200,8 @@ fn direct_tools_fetch_disabled_no_dispatch() {
         // methods fail closed before binding/CEP dispatch and need not emit a
         // synthetic ToolCallFinished event.
         require(
-            !tool_ok(&outcome.parsed, "fetch.web"),
-            "disabled fetch.web must not succeed",
+            !tool_ok(&outcome.parsed, "fetch__web"),
+            "disabled fetch__web must not succeed",
         )?;
         require(
             web.captured_requests().is_empty(),
@@ -207,14 +210,14 @@ fn direct_tools_fetch_disabled_no_dispatch() {
                 web.captured_requests()
             ),
         )?;
-        // 未启用的工具不得进入 CEP 分发：fetch.web 槽位都没有开始执行。
+        // 未启用的工具不得进入 CEP 分发：fetch__web 槽位都没有开始执行。
         require(
             outcome
                 .slots()
                 .iter()
-                .filter(|slot| slot.method == "fetch.web")
+                .filter(|slot| slot.method == "fetch__web")
                 .all(|slot| slot.outcome == SlotOutcome::NotExecuted),
-            "disabled fetch.web must not be dispatched",
+            "disabled fetch__web must not be dispatched",
         )?;
         // 目录外调用整批拒绝，保存类型化原因并将 Turn 正常关闭为失败，
         // 不留下未关闭任务，也不为该批次追加模型请求。
@@ -222,7 +225,7 @@ fn direct_tools_fetch_disabled_no_dispatch() {
             outcome
                 .closed_result()
                 .is_some_and(|(_, _, result)| result == "failed"),
-            format!("disabled fetch.web must close the Turn failed: {outcome:?}"),
+            format!("disabled fetch__web must close the Turn failed: {outcome:?}"),
         )?;
         require(
             !outcome.has_completed(),
@@ -274,7 +277,7 @@ fn direct_tools_fetch_host_policy_denial() {
     let (world, spec) = direct_world(
         "direct-tools-fetch-deny",
         "dl-fdeny",
-        "[\"fetch.web\"]",
+        "[\"fetch__web\"]",
         "\n[lancet.network]\nallow_localhost = false\nallowed_hosts = []\n\n[lancet.capabilities]\nmax_boundary = \"ex\"\n",
     );
     let args = format!(r#"{{"url":"{url}"}}"#);
@@ -282,7 +285,7 @@ fn direct_tools_fetch_host_policy_denial() {
         &world,
         "dl-fdeny",
         sequence(vec![
-            tool_call("f1", "fetch.web", &args),
+            tool_call("f1", "fetch__web", &args),
             SseScript::plain("denied"),
         ]),
     );
@@ -294,7 +297,7 @@ fn direct_tools_fetch_host_policy_denial() {
     let result: Result<(), AssertError> = (|| {
         assert_clean_send(&outcome)?;
         require(
-            tool_failed(&outcome.parsed, "fetch.web"),
+            tool_failed(&outcome.parsed, "fetch__web"),
             "policy-denied fetch must fail tool",
         )?;
         require(
@@ -329,7 +332,7 @@ fn direct_tools_fetch_host_policy_denial() {
             error["error"]["code"] == -32012,
             format!("host policy must return AmbientAuthorityDenied in tool result: {error}"),
         )?;
-        let failure = tool_failure(&outcome.parsed, "fetch.web");
+        let failure = tool_failure(&outcome.parsed, "fetch__web");
         require(
             failure.is_some_and(|(_, error)| {
                 error["code"] == "ambient_authority_denied"
@@ -361,14 +364,14 @@ fn direct_tools_fetch_capability_denial_without_outbound_io() {
     let (world, spec) = direct_world(
         "direct-tools-fetch-cap",
         "dl-fcap",
-        "[\"fetch.web\"]",
+        "[\"fetch__web\"]",
         "\n[lancet.network]\nallow_localhost = true\nallowed_hosts = [\"localhost\"]\n\n[lancet.capabilities]\ndeny = [\"network.fetch\"]\nmax_boundary = \"ex\"\n",
     );
     let server = wire_fake_llm(
         &world,
         "dl-fcap",
         sequence(vec![
-            tool_call("f1", "fetch.web", &args),
+            tool_call("f1", "fetch__web", &args),
             SseScript::plain("denied without fetch capability"),
         ]),
     );
@@ -400,11 +403,11 @@ fn direct_tools_fetch_capability_denial_without_outbound_io() {
             format!("HTTP fixture failed: {:?}", web.first_error()),
         )?;
         require(
-            tool_failed(&outcome.parsed, "fetch.web"),
-            "fetch.web must fail when network.fetch is denied",
+            tool_failed(&outcome.parsed, "fetch__web"),
+            "fetch__web must fail when network.fetch is denied",
         )?;
         // 准入证据随槽位保存：调用身份是类型化 InvocationId，准入移除了唯一的能力。
-        let slot = slot_detail(&outcome, "fetch.web");
+        let slot = slot_detail(&outcome, "fetch__web");
         require(
             slot.is_some_and(|(slot, call_id)| {
                 slot["invocation_id"]
@@ -412,7 +415,7 @@ fn direct_tools_fetch_capability_denial_without_outbound_io() {
                     .is_some_and(|id| id.len() == 36)
                     && slot["invocation_id"] == *call_id
                     && slot["evidence"]["kind"] == "recorded"
-                    && slot["evidence"]["value"]["admission"]["tool"] == "fetch.web"
+                    && slot["evidence"]["value"]["admission"]["tool"] == "fetch__web"
                     && slot["evidence"]["value"]["admission"]["approved_capabilities"]
                         .as_array()
                         .is_some_and(|approved| {
@@ -421,7 +424,7 @@ fn direct_tools_fetch_capability_denial_without_outbound_io() {
                                 .any(|capability| capability == "network.fetch")
                         })
             }),
-            format!("fetch.web slot must carry typed identity and admission evidence: {slot:?}"),
+            format!("fetch__web slot must carry typed identity and admission evidence: {slot:?}"),
         )?;
         // The Component never reaches the network host import when admission removes
         // its sole capability.
@@ -434,7 +437,7 @@ fn direct_tools_fetch_capability_denial_without_outbound_io() {
             error["error"]["code"] == -32010,
             format!("network.fetch admission must return CapabilityNotGranted: {error}"),
         )?;
-        let failure = tool_failure(&outcome.parsed, "fetch.web");
+        let failure = tool_failure(&outcome.parsed, "fetch__web");
         require(
             failure.is_some_and(|(slot, error)| {
                 error["code"] == "capability_not_granted"
@@ -445,8 +448,8 @@ fn direct_tools_fetch_capability_denial_without_outbound_io() {
             format!("typed network.fetch admission refusal required: {failure:?}"),
         )?;
         require(
-            !tool_ok(&outcome.parsed, "fetch.web"),
-            "capability denial must not succeed fetch.web",
+            !tool_ok(&outcome.parsed, "fetch__web"),
+            "capability denial must not succeed fetch__web",
         )?;
         // 最后一个 Step 条目核验本次 Turn 的真实结局，不依赖瞬时终结事件。
         assert_completed_after_tools(&outcome.parsed)?;
@@ -461,7 +464,7 @@ fn direct_tools_fetch_capability_denial_without_outbound_io() {
     );
 }
 
-/// `session.todo_write` success echoes canonical todo JSON into the next model
+/// `session__todo_write` success echoes canonical todo JSON into the next model
 /// request — executed by the **default binary** through its embedded WASM
 /// Component (#29 criterion 9).
 ///
@@ -473,7 +476,7 @@ fn direct_tools_todo_write_success() {
     let (world, spec) = direct_world(
         "direct-tools-todo-ok",
         "dl-todo",
-        "[\"session.todo_write\"]",
+        "[\"session__todo_write\"]",
         "",
     );
     let server = wire_fake_llm(
@@ -482,7 +485,7 @@ fn direct_tools_todo_write_success() {
         sequence(vec![
             tool_call(
                 "t1",
-                "session.todo_write",
+                "session__todo_write",
                 r#"{"todos":[{"content":"step one","status":"pending"},{"content":"step two","status":"in_progress"}]}"#,
             ),
             SseScript::plain("todos recorded"),
@@ -499,13 +502,13 @@ fn direct_tools_todo_write_success() {
     let result: Result<(), AssertError> = (|| {
         assert_clean_send(&outcome)?;
         require(
-            tool_ok(&outcome.parsed, "session.todo_write"),
+            tool_ok(&outcome.parsed, "session__todo_write"),
             "todo_write ok",
         )?;
         require(outcome.has_completed(), "turn completed")?;
         // 公开的调用身份是类型化 InvocationId：槽位与回复中的调用一致，
         // 槽位停在 Terminal 并带有经 Cell 准入的证据。
-        let slot = slot_detail(&outcome, "session.todo_write");
+        let slot = slot_detail(&outcome, "session__todo_write");
         require(
             slot.is_some_and(|(slot, call_id)| {
                 slot["invocation_id"]
@@ -514,7 +517,7 @@ fn direct_tools_todo_write_success() {
                     && slot["invocation_id"] == *call_id
                     && slot["progress"]["state"] == "terminal"
                     && slot["evidence"]["kind"] == "recorded"
-                    && slot["evidence"]["value"]["admission"]["tool"] == "session.todo_write"
+                    && slot["evidence"]["value"]["admission"]["tool"] == "session__todo_write"
             }),
             format!("todo_write slot must carry typed identity and admission evidence: {slot:?}"),
         )?;
@@ -560,7 +563,7 @@ fn direct_tools_todo_write_success() {
         require(
             recent_calls.iter().any(|call| {
                 call.pointer("/binding/method").and_then(Value::as_str)
-                    == Some("session.todo_write")
+                    == Some("session__todo_write")
                     && call.pointer("/state/outcome").and_then(Value::as_str) == Some("succeeded")
             }) && status_json["recent"][0]["state"]["outcome"] == "succeeded",
             format!("lancet status omitted typed todo terminal: {status_json}"),
@@ -587,7 +590,7 @@ fn direct_tools_todo_write_validation_rejection() {
     let (world, spec) = direct_world(
         "direct-tools-todo-bad",
         "dl-todobad",
-        "[\"session.todo_write\"]",
+        "[\"session__todo_write\"]",
         "",
     );
     let server = wire_fake_llm(
@@ -596,7 +599,7 @@ fn direct_tools_todo_write_validation_rejection() {
         sequence(vec![
             tool_call(
                 "t1",
-                "session.todo_write",
+                "session__todo_write",
                 r#"{"todos":[{"content":"a","status":"in_progress"},{"content":"b","status":"in_progress"}]}"#,
             ),
             SseScript::plain("rejected"),
@@ -610,7 +613,7 @@ fn direct_tools_todo_write_validation_rejection() {
     let result: Result<(), AssertError> = (|| {
         assert_clean_send(&outcome)?;
         require(
-            tool_failed(&outcome.parsed, "session.todo_write"),
+            tool_failed(&outcome.parsed, "session__todo_write"),
             "two in_progress must fail validation",
         )?;
         require(
@@ -625,7 +628,7 @@ fn direct_tools_todo_write_validation_rejection() {
             error["error"]["code"] == -32001,
             format!("todo schema error code required: {error}"),
         )?;
-        let failure = tool_failure(&outcome.parsed, "session.todo_write");
+        let failure = tool_failure(&outcome.parsed, "session__todo_write");
         require(
             failure.is_some_and(|(_, error)| {
                 error["code"] == "schema_mismatch"
@@ -669,7 +672,7 @@ fn direct_tools_todo_write_result_survives_session_reopen() {
     let (world, spec) = direct_world(
         "direct-tools-todo-reopen",
         "dl-todoreopen",
-        "[\"session.todo_write\"]",
+        "[\"session__todo_write\"]",
         "",
     );
     let server = wire_fake_llm(
@@ -678,7 +681,7 @@ fn direct_tools_todo_write_result_survives_session_reopen() {
         sequence(vec![
             tool_call(
                 "t1",
-                "session.todo_write",
+                "session__todo_write",
                 r#"{"todos":[{"content":"remember me","status":"in_progress"}]}"#,
             ),
             SseScript::plain("plan recorded"),
@@ -696,7 +699,7 @@ fn direct_tools_todo_write_result_survives_session_reopen() {
         assert_clean_send(&first)?;
         assert_clean_send(&second)?;
         require(
-            tool_ok(&first.parsed, "session.todo_write"),
+            tool_ok(&first.parsed, "session__todo_write"),
             "the Component call must succeed on the first turn",
         )?;
         require(
@@ -769,7 +772,7 @@ fn direct_tools_catalog_exposure_matches_enabled() {
     let (world, spec) = direct_world(
         "direct-tools-catalog",
         "dl-cat",
-        "[\"observe.workspace\", \"mutate.create\", \"session.todo_write\"]",
+        "[\"observe__workspace\", \"mutate__create\", \"session__todo_write\"]",
         "",
     );
     let server = wire_fake_llm(&world, "dl-cat", SseScript::plain("no tools needed"));
@@ -786,8 +789,8 @@ fn direct_tools_catalog_exposure_matches_enabled() {
         .write_project_file(
             ".lattice/agents/dl-cat/agent.toml",
             &profile.replace(
-                "[\"observe.workspace\", \"mutate.create\", \"session.todo_write\"]",
-                "[\"observe.workspace\", \"mutate.create\", \"mutate.edit\", \"fetch.web\", \"session.todo_write\"]",
+                "[\"observe__workspace\", \"mutate__create\", \"session__todo_write\"]",
+                "[\"observe__workspace\", \"mutate__create\", \"mutate__edit\", \"fetch__web\", \"session__todo_write\"]",
             ),
         )
         .expect("enable all five tools");

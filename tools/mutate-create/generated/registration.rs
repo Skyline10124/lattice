@@ -3,7 +3,7 @@
 // self-approve its identity; only the trusted host composition step may
 // pin descriptor/artifact digest, ABI, and imports.
 pub static MUTATE_CREATE: lancet_runtime::EmbeddedTool = lancet_runtime::EmbeddedTool {
-    name: "mutate.create",
+    name: "mutate__create",
     descriptor_json: include_bytes!("descriptor.json"),
     component_bytes: include_bytes!("mutate_create.component.wasm"),
 };

@@ -3,7 +3,7 @@
 // self-approve its identity; only the trusted host composition step may
 // pin descriptor/artifact digest, ABI, and imports.
 pub static SESSION_TODO_WRITE: lancet_runtime::EmbeddedTool = lancet_runtime::EmbeddedTool {
-    name: "session.todo_write",
+    name: "session__todo_write",
     descriptor_json: include_bytes!("descriptor.json"),
     component_bytes: include_bytes!("session_todo_write.component.wasm"),
 };

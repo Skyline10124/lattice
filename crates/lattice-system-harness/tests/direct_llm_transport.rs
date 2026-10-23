@@ -86,7 +86,7 @@ fn retry_after_is_honoured_and_requests_identify_lattice() {
     let (world, spec) = direct_world(
         "direct-transport-retry-after",
         "transport",
-        r#"["observe.workspace"]"#,
+        r#"["observe__workspace"]"#,
         RETRY_FAST,
     );
     world
@@ -99,7 +99,7 @@ fn retry_after_is_honoured_and_requests_identify_lattice() {
         sequence(vec![
             tool_call(
                 "call-1",
-                "observe.workspace",
+                "observe__workspace",
                 r#"{"request":{"mode":"read_file","path":"notes.txt"}}"#,
             ),
             http(
@@ -168,7 +168,7 @@ fn retry_after_beyond_limits_fails_at_once_with_the_provider_reason() {
         let (world, spec) = direct_world(
             &format!("direct-transport-long-retry-{case}"),
             "transport",
-            r#"["observe.workspace"]"#,
+            r#"["observe__workspace"]"#,
             &format!("{limits}{RETRY_FAST}"),
         );
         world.write_project_file("notes.txt", "quota\n").unwrap();
@@ -179,7 +179,7 @@ fn retry_after_beyond_limits_fails_at_once_with_the_provider_reason() {
             sequence(vec![
                 tool_call(
                     "call-1",
-                    "observe.workspace",
+                    "observe__workspace",
                     r#"{"request":{"mode":"read_file","path":"notes.txt"}}"#,
                 ),
                 http(
@@ -241,7 +241,7 @@ fn overload_and_gateway_errors_retry_with_bounded_diagnostics() {
             ".lattice/agents/overload/agent.toml",
             "schema_version = 1\n\n[agent]\nname = \"overload\"\nmodel = \"sonnet\"\n\n\
              [prompt]\nsystem = \"You are a concise test agent.\"\n\n\
-             [tools]\nenabled = [\"observe.workspace\"]\n\n\
+             [tools]\nenabled = [\"observe__workspace\"]\n\n\
              [llm.retry]\nmax_retries = 1\ninitial_delay_ms = 1\nmax_delay_ms = 1\n",
         )
         .unwrap();
@@ -255,7 +255,7 @@ fn overload_and_gateway_errors_retry_with_bounded_diagnostics() {
     let server = FakeLlmServer::start(sequence(vec![
         tool_call(
             "call-1",
-            "observe.workspace",
+            "observe__workspace",
             r#"{"request":{"mode":"read_file","path":"notes.txt"}}"#,
         ),
         http(
@@ -389,7 +389,7 @@ fn stream_cut_before_completion_is_retried() {
     let (world, spec) = direct_world(
         "direct-transport-cut",
         "transport",
-        r#"["observe.workspace"]"#,
+        r#"["observe__workspace"]"#,
         RETRY_FAST,
     );
     world.write_project_file("notes.txt", "cut\n").unwrap();
@@ -401,7 +401,7 @@ fn stream_cut_before_completion_is_retried() {
         sequence(vec![
             tool_call(
                 "call-1",
-                "observe.workspace",
+                "observe__workspace",
                 r#"{"request":{"mode":"read_file","path":"notes.txt"}}"#,
             ),
             SseScript::Disconnect {
@@ -468,7 +468,7 @@ fn multi_step_turn_reuses_one_connection_and_survives_server_close() {
     let (world, spec) = direct_world(
         "direct-transport-reuse",
         "transport",
-        r#"["observe.workspace"]"#,
+        r#"["observe__workspace"]"#,
         RETRY_FAST,
     );
     world.write_project_file("a.txt", "alpha\n").unwrap();
@@ -479,13 +479,13 @@ fn multi_step_turn_reuses_one_connection_and_survives_server_close() {
         sequence(vec![
             tool_call(
                 "call-1",
-                "observe.workspace",
+                "observe__workspace",
                 r#"{"request":{"mode":"read_file","path":"a.txt"}}"#,
             ),
             SseScript::CloseAfter {
                 script: Box::new(tool_call(
                     "call-2",
-                    "observe.workspace",
+                    "observe__workspace",
                     r#"{"request":{"mode":"read_file","path":"b.txt"}}"#,
                 )),
             },
@@ -543,7 +543,7 @@ fn unprocessed_requests_are_resent_inside_one_attempt() {
         let (world, spec) = direct_world(
             &format!("direct-transport-unprocessed-{case}"),
             "transport",
-            r#"["observe.workspace"]"#,
+            r#"["observe__workspace"]"#,
             "[llm.retry]\nmax_retries = 0\n",
         );
         world.write_project_file("notes.txt", "nack\n").unwrap();
@@ -554,7 +554,7 @@ fn unprocessed_requests_are_resent_inside_one_attempt() {
             sequence(vec![
                 tool_call(
                     "call-1",
-                    "observe.workspace",
+                    "observe__workspace",
                     r#"{"request":{"mode":"read_file","path":"notes.txt"}}"#,
                 ),
                 refusal,
@@ -621,7 +621,7 @@ fn plaintext_local_provider_over_http1() {
     let (world, spec) = direct_world(
         "direct-transport-local-http1",
         "transport",
-        r#"["observe.workspace"]"#,
+        r#"["observe__workspace"]"#,
         RETRY_FAST,
     );
     world.write_project_file("a.txt", "alpha\n").unwrap();
@@ -629,7 +629,7 @@ fn plaintext_local_provider_over_http1() {
     let server = FakeLlmServer::start_plain_http1(sequence(vec![
         tool_call(
             "call-1",
-            "observe.workspace",
+            "observe__workspace",
             r#"{"request":{"mode":"read_file","path":"a.txt"}}"#,
         ),
         SseScript::HttpError {
@@ -638,7 +638,7 @@ fn plaintext_local_provider_over_http1() {
         },
         tool_call(
             "call-2",
-            "observe.workspace",
+            "observe__workspace",
             r#"{"request":{"mode":"read_file","path":"b.txt"}}"#,
         ),
         SseScript::plain("local answer"),

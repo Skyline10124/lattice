@@ -17,11 +17,11 @@ use tempfile::TempDir;
 
 /// The five embedded Component Tools of the default distribution.
 const COMPONENT_TOOLS: [&str; 5] = [
-    "observe.workspace",
-    "mutate.create",
-    "mutate.edit",
-    "fetch.web",
-    "session.todo_write",
+    "observe__workspace",
+    "mutate__create",
+    "mutate__edit",
+    "fetch__web",
+    "session__todo_write",
 ];
 
 // ─── Runtime-layer harness ──────────────────────────────────────────────────
@@ -107,7 +107,7 @@ async fn create_file(
     runtime
         .client()
         .call_raw(
-            "mutate.create",
+            "mutate__create",
             serde_json::json!({"path": path, "content": content, "create_parents": true}),
         )
         .await
@@ -124,13 +124,13 @@ async fn replace_text(
 ) -> Result<(), CepErrorCode> {
     runtime
         .client()
-        .call_raw("mutate.edit", serde_json::json!({"path": path, "expected_hash": expected_hash, "edits": [{"op": "replace_text", "old": old, "new": new}]}))
+        .call_raw("mutate__edit", serde_json::json!({"path": path, "expected_hash": expected_hash, "edits": [{"op": "replace_text", "old": old, "new": new}]}))
         .await
         .map(|_| ())
         .map_err(|err| err.code)
 }
 
-/// AC2: the first `mutate.edit` of a file LATTICE never created records that
+/// AC2: the first `mutate__edit` of a file LATTICE never created records that
 /// file's real before state, and after an external writer changes a file the
 /// next mutation's before state is what the installer observed — both driven
 /// through the production handler rather than the history API directly.

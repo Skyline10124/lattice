@@ -1,14 +1,14 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Harness-only HTTP fixture for `fetch.web` scenarios.
+//! Harness-only HTTP fixture for `fetch__web` scenarios.
 //!
 //! Separate from the OpenAI-compatible fake LLM: this server returns a fixed
 //! status/headers/body and records each request's method and path. It binds
 //! `127.0.0.1:0`, advertises a `localhost` base URL (product net-guard rejects
 //! private IP literals), tracks handler threads, and shuts down on drop.
 //! [`FixtureHttpServer::start_tls`] 在同一服务外包一层 TLS（HTTP/1.1，与产品
-//! `fetch.web` 一致），用于验证冻结的信任根。
+//! `fetch__web` 一致），用于验证冻结的信任根。
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};

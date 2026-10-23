@@ -18,7 +18,7 @@ use lancet_protocol::evidence::CapabilityAdmissionPolicy;
 use lancet_protocol::{CepErrorCode, InvocationId};
 use tokio::sync::{mpsc, watch};
 
-/// A call context with every declared `noop.echo` capability admitted, built
+/// A call context with every declared `noop__echo` capability admitted, built
 /// the way the transport builds it: admission runs per call, before `call`.
 fn call_ctx(
     rt: &ComponentRuntime,
@@ -29,16 +29,16 @@ fn call_ctx(
 ) {
     let (tx, rx) = mpsc::unbounded_channel();
     let (cancel_tx, cancel_rx) = watch::channel(false);
-    let descriptor = rt.descriptor("noop.echo").expect("fixture tool exists");
+    let descriptor = rt.descriptor("noop__echo").expect("fixture tool exists");
     let admitted = admit_tool(
         descriptor,
         &CapabilityAdmissionPolicy {
-            enabled_tools: BTreeSet::from(["noop.echo".to_string()]),
+            enabled_tools: BTreeSet::from(["noop__echo".to_string()]),
             denied_capabilities: BTreeSet::new(),
             max_boundary: Trust::In,
         },
     )
-    .expect("noop.echo is admitted");
+    .expect("noop__echo is admitted");
     let invocation_id = InvocationId::parse("00000000-0000-4000-8000-000000000001").unwrap();
     let ctx = ComponentCallContext {
         invocation_id,
@@ -84,7 +84,7 @@ async fn assert_resource_exhausted_then_survives(
     let (ctx, _rx, _cancel) = call_ctx(&rt);
     let result = rt
         .call(
-            "noop.echo",
+            "noop__echo",
             serde_json::json!({"message": initial_message}),
             ctx,
         )
@@ -110,7 +110,7 @@ async fn assert_resource_exhausted_then_survives(
     let (ctx2, _rx, _cancel) = call_ctx(&rt);
     let result = rt
         .call(
-            "noop.echo",
+            "noop__echo",
             serde_json::json!({"message": "survived"}),
             ctx2,
         )

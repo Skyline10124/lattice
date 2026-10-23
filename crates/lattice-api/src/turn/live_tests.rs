@@ -298,7 +298,7 @@ async fn continue_at_library_step_limit_closes_reserved_step_32_without_request(
             vec![MessagePart::semantic_only(MessageSemantic::ToolCall {
                 call: UnboundToolCall {
                     provider_call_id: Some("read".into()),
-                    name: "observe.workspace".into(),
+                    name: "observe__workspace".into(),
                     arguments: serde_json::json!({
                         "request": {"mode": "read_file", "path": "src/lib.rs"}
                     }),
@@ -314,7 +314,7 @@ async fn continue_at_library_step_limit_closes_reserved_step_32_without_request(
         ]);
     }
     let llm = Arc::new(builder.build());
-    let fixture = setup_fixture(llm.clone(), &["observe.workspace"]);
+    let fixture = setup_fixture(llm.clone(), &["observe__workspace"]);
     let (detail, events) = fixture.run(fixture.request.clone()).await;
     assert_eq!(llm.call_count(), MAX_MODEL_STEPS as usize);
     assert_eq!(detail.steps.len(), MAX_MODEL_STEPS as usize + 1);

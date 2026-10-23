@@ -3,7 +3,7 @@
 // self-approve its identity; only the trusted host composition step may
 // pin descriptor/artifact digest, ABI, and imports.
 pub static FETCH_WEB: lancet_runtime::EmbeddedTool = lancet_runtime::EmbeddedTool {
-    name: "fetch.web",
+    name: "fetch__web",
     descriptor_json: include_bytes!("descriptor.json"),
     component_bytes: include_bytes!("fetch_web.component.wasm"),
 };

@@ -17,7 +17,7 @@
 ## 局部约束
 
 - 工具暴露不授予权限；Component 只声明请求的 Cell，Host 准入及每次 import 的操作授权共同把关。
-- `fetch.web` 需要启用且以 `Trust::Ex` 准入、`allow_public_https = true`、主机匹配非空 `allowed_hosts`。localhost 另需 `allow_localhost = true` 及精确 allowlist 匹配；URL、DNS、重定向和连接端点仍须通过地址策略。
+- `fetch__web` 需要启用且以 `Trust::Ex` 准入、`allow_public_https = true`、主机匹配非空 `allowed_hosts`。localhost 另需 `allow_localhost = true` 及精确 allowlist 匹配；URL、DNS、重定向和连接端点仍须通过地址策略。
 - `host_allowed_by_list` 是唯一主机模式匹配器：trim、ASCII 小写化，前导点匹配 apex 与子域，空或全点模式不匹配。URL 策略与 runtime host-target scope 共用此函数。
 - DNS、socket、TLS、重定向和响应整形不进入本 crate。策略 reader 与配置键一同维护，不接受执行端会忽略的键。
 

@@ -41,7 +41,7 @@ model = {model}
 system = "You are a helpful assistant. Be concise and accurate."
 
 [tools]
-enabled = ["session.todo_write"]
+enabled = ["session__todo_write"]
 
 [llm.retry]
 max_retries = 3

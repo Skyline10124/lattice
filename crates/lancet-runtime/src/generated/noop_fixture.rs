@@ -12,9 +12,9 @@ use crate::composition::{
     _parse_hex_digest as parse_hex_digest, EmbeddedTool, ExpectedToolIdentity,
 };
 
-/// Fixed registration: the committed `noop.echo` descriptor + component bytes.
+/// Fixed registration: the committed `noop__echo` descriptor + component bytes.
 static NOOP_FIXTURE: EmbeddedTool = EmbeddedTool {
-    name: "noop.echo",
+    name: "noop__echo",
     descriptor_json: include_bytes!("../../../../tools/noop/generated/descriptor.json"),
     component_bytes: include_bytes!("../../../../tools/noop/generated/noop_echo.component.wasm"),
 };
@@ -25,7 +25,7 @@ pub fn registration() -> &'static EmbeddedTool {
 
 pub fn expected_identity() -> ExpectedToolIdentity {
     ExpectedToolIdentity {
-        name: "noop.echo",
+        name: "noop__echo",
         // These must equal `descriptor-sha256` / `artifact-sha256` in
         // `tools/noop/generated/expected-identity.json`. Despite living under
         // `generated/`, this file is hand-maintained and nothing regenerates or
@@ -33,7 +33,7 @@ pub fn expected_identity() -> ExpectedToolIdentity {
         // composition gate here until both digests are copied across by hand
         // (see #103).
         descriptor_sha256: parse_hex_digest(
-            "bb887ef7c65ae34976ff0cc1be5e677f3067d7cfc0c96623f3b5733aee920f7e",
+            "709a4e536f842f80bf493f03ec636fe94ab7798271370d86542a66169f8f8843",
         ),
         artifact_sha256: parse_hex_digest(
             "3c7085377ed38b68fefd38e0915377a54259eb07a68377e7fe5bcc819e37236e",

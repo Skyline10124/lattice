@@ -63,7 +63,9 @@ flowchart LR
 
 组成校验拒绝缺失、重复、未经批准的注册，以及 Descriptor、产物摘要、实际 imports、ABI 或预期身份不一致。能力名称与 Cell 的一致性遵循 [Cell 声明校验](cell.md#声明来源与校验)。
 
-默认发行包含 `observe.workspace`、`mutate.create`、`mutate.edit`、`fetch.web` 和 `session.todo_write`。增加 Source Tool 需要在新运行时构建前完成准入；每个运行进程保持原有目录，不能动态加载更多代码。
+工具名只用 ASCII 字母、数字、`_` 和 `-`，长度 1～64，命名空间与操作之间用 `__` 分隔，例如 `mutate__create`。这是各 provider 工具名规则的交集：OpenAI 允许这些字符、最长 64，Anthropic 最长 128，Gemini 另外接受点号与冒号。工具名原样作为模型可见的工具名发给每个 provider，不做映射，所以模型、profile、界面和会话记录用的是同一个名字。组成校验拒绝不符合这条规则的 Descriptor。
+
+默认发行包含 `observe__workspace`、`mutate__create`、`mutate__edit`、`fetch__web` 和 `session__todo_write`。增加 Source Tool 需要在新运行时构建前完成准入；每个运行进程保持原有目录，不能动态加载更多代码。
 启用列表仅过滤固定目录；未知工具名和未知被拒绝能力名导致构造失败。
 
 ### Bundle 安装设计
@@ -109,7 +111,7 @@ Cell 模型、能力匹配、scope/trust 解析及拒绝证据由该合同集中
 
 ### 网络获取
 
-`fetch.web` 仅通过 `network-fetch` Host 发出 GET 请求，供 Tool 在获准目标上取得受限响应。每次请求及重定向由 Host 核验允许主机、协议和地址策略，解析 DNS，固定连接地址，再完成 TLS 验证与读取。
+`fetch__web` 仅通过 `network-fetch` Host 发出 GET 请求，供 Tool 在获准目标上取得受限响应。每次请求及重定向由 Host 核验允许主机、协议和地址策略，解析 DNS，固定连接地址，再完成 TLS 验证与读取。
 Tool Host 接收[提交端冻结配置](session.md#执行配置冻结)中的实际 TLS 根证书内容，以 Turn 专属信任配置验证 HTTPS 连接；本 Turn 的 provider 连接使用同一份冻结根内容。材料的来源、冻结时点与持久化边界由会话合同维护。Host 在每一跳继续执行本节的目标授权、地址固定和证据记录。
 公网访问采用 HTTPS；显式 localhost 策略作为受控例外处理，其余私有、保留和特殊地址拒绝。跨源重定向移除调用方请求头，响应头、响应体、重定向次数和 deadline 均受限制，取消与 Turn 观察预算参与执行。
 调用须同时通过 `ex` 能力边界和非空 `allowed_hosts` 目标策略；空允许列表拒绝全部网络，`allow_public_https` 只是公网 HTTPS 开关。localhost 还须显式启用并列入允许主机。每次调用最多一次网络 import，Host 内部处理重定向，不由 guest 发起第二条独立网络操作。最多跟随 5 次重定向，初始请求计数为 0；DNS、连接、TLS、各跳与 body 共用一次调用 deadline 和取消身份，不逐跳重置。

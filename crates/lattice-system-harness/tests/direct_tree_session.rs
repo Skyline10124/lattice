@@ -112,16 +112,16 @@ fn current_history(world: &ScenarioWorld, spec: &ScenarioSpec, sid: &str) -> Val
 fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
     use serde_json::json;
     let (world, spec) =
-        support::direct_world("tree-two-agents", "alpha", "[\"mutate.create\"]", "");
+        support::direct_world("tree-two-agents", "alpha", "[\"mutate__create\"]", "");
     world.write_project_file(".lattice/agents/beta/agent.toml",
-        "schema_version = 1\n[agent]\nname = \"beta\"\nmodel = \"compat:beta\"\n[prompt]\nsystem = \"Beta isolated prompt.\"\n[tools]\nenabled = [\"mutate.create\"]\n").unwrap();
+        "schema_version = 1\n[agent]\nname = \"beta\"\nmodel = \"compat:beta\"\n[prompt]\nsystem = \"Beta isolated prompt.\"\n[tools]\nenabled = [\"mutate__create\"]\n").unwrap();
     let mut server = support::wire_fake_llm(
         &world,
         "alpha",
         support::sequence(vec![
             support::tool_call(
                 "create",
-                "mutate.create",
+                "mutate__create",
                 r#"{"path":"kept.txt","content":"kept\n","create_parents":false}"#,
             ),
             SseScript::plain("old final"),
@@ -155,7 +155,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
             support::sequence(vec![
                 support::tool_call(
                     "beta-create",
-                    "mutate.create",
+                    "mutate__create",
                     r#"{"path":"cancelled.txt","content":"survives cancel\n","create_parents":false}"#,
                 ),
                 SseScript::plain("must not arrive"),
@@ -474,7 +474,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
         let step = &fork_history["entries"][1]["content"];
         let call = &step["reply"]["parts"][0]["semantic"]["tool_call"]["call"];
         assert_eq!(call["provider_call_id"], "create");
-        assert_eq!(call["name"], "mutate.create");
+        assert_eq!(call["name"], "mutate__create");
         assert_eq!(
             call["arguments"],
             json!({"content":"kept\n","create_parents":false,"path":"kept.txt"})

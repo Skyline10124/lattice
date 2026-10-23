@@ -585,7 +585,7 @@ mod tests {
         };
         let call = lattice_conversation::UnboundToolCall {
             provider_call_id: provider_call_id.map(str::to_string),
-            name: "observe.workspace".to_string(),
+            name: "observe__workspace".to_string(),
             arguments: serde_json::json!({}),
         }
         .bind(invocation, address);
@@ -724,7 +724,7 @@ mod tests {
                         LlmEvent::ToolCallStart {
                             index: 0,
                             provider_call_id: Some("call_1".to_string()),
-                            name: "observe.workspace".to_string(),
+                            name: "observe__workspace".to_string(),
                         },
                         LlmEvent::ToolCallDelta {
                             index: 0,
@@ -903,7 +903,7 @@ mod tests {
         let assistant = bound_assistant(None, invocation(0));
         let tool = lattice_conversation::StoredToolResult {
             invocation_id: invocation(0),
-            name: "observe.workspace".into(),
+            name: "observe__workspace".into(),
             payload: lattice_conversation::ResultPayload::Succeeded(
                 lattice_conversation::SuccessContent::Json {
                     value: serde_json::json!({}),

@@ -278,7 +278,7 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
                 }
                 if case == "tools" {
                     assert!(message.contains("available catalog tools:"));
-                    assert!(message.contains("observe.workspace"));
+                    assert!(message.contains("observe__workspace"));
                 }
                 messages.push(message.to_owned());
                 assert!(server.captured_requests().is_empty());

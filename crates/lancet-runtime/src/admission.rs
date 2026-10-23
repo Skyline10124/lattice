@@ -336,7 +336,7 @@ mod tests {
     /// coverage observable.
     fn descriptor(capabilities: Vec<Capability>) -> Arc<ToolDescriptor> {
         Arc::new(ToolDescriptor {
-            name: "noop.echo".into(),
+            name: "noop__echo".into(),
             version: "0.1.0".into(),
             description: "admission fixture".into(),
             params_schema: serde_json::Value::Null,
@@ -376,7 +376,7 @@ mod tests {
 
     fn policy(deny: &[&str], max_boundary: Trust) -> CapabilityAdmissionPolicy {
         CapabilityAdmissionPolicy {
-            enabled_tools: BTreeSet::from(["noop.echo".to_string()]),
+            enabled_tools: BTreeSet::from(["noop__echo".to_string()]),
             denied_capabilities: deny.iter().map(|s| (*s).to_string()).collect(),
             max_boundary,
         }
@@ -584,7 +584,7 @@ mod tests {
 
         assert_eq!(
             denial.reason,
-            AdmissionDenialReason::NoAdmittedCapabilities("noop.echo".into())
+            AdmissionDenialReason::NoAdmittedCapabilities("noop__echo".into())
         );
         assert!(denial.evidence.approved_capabilities.is_empty());
         assert_eq!(
@@ -609,9 +609,9 @@ mod tests {
 
         assert_eq!(
             denial.reason,
-            AdmissionDenialReason::ToolNotEnabled("noop.echo".into())
+            AdmissionDenialReason::ToolNotEnabled("noop__echo".into())
         );
-        assert_eq!(denial.evidence.tool, "noop.echo");
+        assert_eq!(denial.evidence.tool, "noop__echo");
         assert_eq!(denial.evidence.version, ADMISSION_EVIDENCE_VERSION);
         assert!(denial.evidence.approved_capabilities.is_empty());
         assert!(denial.evidence.denied_capabilities.is_empty());

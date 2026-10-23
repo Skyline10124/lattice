@@ -228,7 +228,7 @@ fn human_tool_results_wait_for_terminal_slots_or_execution_end() {
     {
         *progress = serde_json::from_value(json!({"progress":"executing"})).unwrap();
         *summary = None;
-        slots.push(serde_json::from_value(json!({"binding":{"invocation_id":"10000000-0000-4000-8000-000000000001","identity":{"session_id":ipc_tests::sid(),"turn_id":id,"model_step_ordinal":0,"part_ordinal":0,"method":"observe.workspace","descriptor_identity":"test","arguments_digest":"00".repeat(32)}},"progress":{"progress":"registered"}})).unwrap());
+        slots.push(serde_json::from_value(json!({"binding":{"invocation_id":"10000000-0000-4000-8000-000000000001","identity":{"session_id":ipc_tests::sid(),"turn_id":id,"model_step_ordinal":0,"part_ordinal":0,"method":"observe__workspace","descriptor_identity":"test","arguments_digest":"00".repeat(32)}},"progress":{"progress":"registered"}})).unwrap());
     }
     let mut state = RunRenderState::default();
     let mut out = Vec::new();

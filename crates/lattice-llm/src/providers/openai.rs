@@ -17,15 +17,6 @@ use crate::provider_projection::{
 use crate::router::ResolvedModel;
 use crate::types::{ChatRequest, LlmEvent};
 
-/// Encode/decode CEP dotted Tool names at the OpenAI wire boundary.
-pub(crate) fn wire_tool_name(canonical: &str) -> String {
-    crate::provider_projection::openai_wire_tool_name(canonical)
-}
-
-pub(crate) fn canonical_tool_name(wire: &str) -> String {
-    crate::provider_projection::openai_canonical_tool_name(wire)
-}
-
 /// Build the JSON body for an OpenAI Chat Completions request.
 ///
 /// LATTICE's provider response path is SSE-only — `dispatch_stream` parses
@@ -58,7 +49,7 @@ pub fn build_request_json(
                 serde_json::json!({
                     "type": "function",
                     "function": {
-                        "name": wire_tool_name(&tool.name),
+                        "name": tool.name,
                         "description": tool.description,
                         "parameters": tool.parameters,
                     }
@@ -242,7 +233,7 @@ impl OpenAiSseParser {
                             .and_then(|value| value.as_str())
                             && !name.is_empty()
                         {
-                            call.name = canonical_tool_name(name);
+                            call.name = name.to_string();
                         }
                         if !slot.started && !call.name.is_empty() {
                             slot.started = true;
@@ -312,7 +303,7 @@ mod tests {
                     index: 0,
                     provider_call_id,
                     name,
-                } if provider_call_id.as_deref() == expected_id && name == "observe.workspace"
+                } if provider_call_id.as_deref() == expected_id && name == "observe__workspace"
             )));
             let message = events
                 .iter()
@@ -368,7 +359,7 @@ mod tests {
                 index: 0,
                 provider_call_id: Some(id),
                 name,
-            } if id == "call_1" && name == "observe.workspace"
+            } if id == "call_1" && name == "observe__workspace"
         )));
         assert!(
             !first
@@ -390,7 +381,7 @@ mod tests {
             .expect("complete message");
         let call = message.tool_calls().next().expect("ToolCall").1;
         assert_eq!(call.provider_call_id.as_deref(), Some("call_1"));
-        assert_eq!(call.name, "observe.workspace");
+        assert_eq!(call.name, "observe__workspace");
         assert_eq!(call.arguments, serde_json::json!({"path": "a"}));
     }
 
@@ -635,7 +626,7 @@ mod tests {
         let message = completed(&events);
         assert_eq!(
             labels(message),
-            ["C:observe.workspace", "T:between", "C:second"]
+            ["C:observe__workspace", "T:between", "C:second"]
         );
         let calls: Vec<_> = message.tool_calls().collect();
         assert_eq!(calls.len(), 2);
@@ -837,7 +828,7 @@ mod tests {
                 MessagePart::semantic_only(MessageSemantic::ToolCall {
                     call: UnboundToolCall {
                         provider_call_id: Some("real".into()),
-                        name: "observe.workspace".into(),
+                        name: "observe__workspace".into(),
                         arguments: serde_json::json!({"z": 1, "a": 2}),
                     },
                 }),
@@ -868,7 +859,7 @@ mod tests {
         let original = source.clone();
         let projected =
             crate::provider_projection::project_cross_provider(&source, ProviderOrigin::Gemini);
-        assert_eq!(labels(&projected), ["T:A", "C:observe.workspace", "T:B"]);
+        assert_eq!(labels(&projected), ["T:A", "C:observe__workspace", "T:B"]);
         assert!(
             projected
                 .tool_calls()

@@ -495,7 +495,7 @@ fn view_state_keeps_written_facts_and_allows_repeated_values() {
         "progress":{"progress":"ended","end":{"end":"completed"},"diagnostic":null},
         "end":{"end":"completed","step":{"turn_id":"t","model_step_ordinal":0}},"retry_delay_ms":null});
     let slot = |id: &str, state: &str, outcome: &str| {
-        json!({"invocation_id":id,"binding":{"method":"observe.workspace"},
+        json!({"invocation_id":id,"binding":{"method":"observe__workspace"},
             "progress":{"state":state},"outcome":outcome,"reason":null})
     };
     let mut base = step(

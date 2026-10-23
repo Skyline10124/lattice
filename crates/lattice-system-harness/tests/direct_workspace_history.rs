@@ -210,7 +210,7 @@ fn direct_workspace_history_records_installed_mutation() {
     let (world, spec) = direct_world(
         "direct-wshist-create",
         "dl-wshist",
-        "[\"mutate.create\",\"mutate.edit\"]",
+        "[\"mutate__create\",\"mutate__edit\"]",
         "",
     );
     world
@@ -231,10 +231,10 @@ fn direct_workspace_history_records_installed_mutation() {
         sequence(vec![
             tool_call(
                 "c1",
-                "mutate.create",
+                "mutate__create",
                 r#"{"path":"notes/history.md","content":"recorded\n","create_parents":true}"#,
             ),
-            tool_call("e1", "mutate.edit", &edit_args),
+            tool_call("e1", "mutate__edit", &edit_args),
             SseScript::plain("created"),
         ]),
     );
@@ -253,7 +253,7 @@ fn direct_workspace_history_records_installed_mutation() {
     let result: Result<(), AssertError> = (|| {
         assert_clean_send(&turn)?;
         require(
-            tool_ok(&turn.parsed, "mutate.create"),
+            tool_ok(&turn.parsed, "mutate__create"),
             "create must succeed",
         )?;
         require(
@@ -297,7 +297,7 @@ fn direct_workspace_history_records_installed_mutation() {
             recorded[0].0 == "notes/history.md" && recorded[0].1 == b"edited\n",
             format!("recorded entry wrong: {:?}", recorded[0].0),
         )?;
-        require(tool_ok(&turn.parsed, "mutate.edit"), "edit must succeed")?;
+        require(tool_ok(&turn.parsed, "mutate__edit"), "edit must succeed")?;
         require(
             tree_snapshot(&project_git) == git_before,
             "history must preserve every project .git path and byte",
@@ -378,24 +378,24 @@ fn direct_workspace_history_records_nothing_for_a_failed_mutation() {
     let driver = driver();
     let stale_args = r#"{"path":"tracked.txt","expected_hash":"blake3:0000000000000000000000000000000000000000000000000000000000000000","edits":[{"op":"replace_text","old":"hello","new":"goodbye"}]}"#;
     for (case, method, args, profile, code) in [
-        ("stale", "mutate.edit", stale_args, "", "replan_required"),
+        ("stale", "mutate__edit", stale_args, "", "replan_required"),
         (
             "exists",
-            "mutate.create",
+            "mutate__create",
             r#"{"path":"tracked.txt","content":"other\n","create_parents":false}"#,
             "",
             "replan_required",
         ),
         (
             "guard",
-            "mutate.create",
+            "mutate__create",
             r#"{"path":"blocked.txt","content":"nope\n","create_parents":false}"#,
             "[lancet.workspace]\ndenied_write_patterns = [\"blocked.txt\"]\n",
             "capability_violation",
         ),
         (
             "capability",
-            "mutate.create",
+            "mutate__create",
             r#"{"path":"denied.txt","content":"nope\n","create_parents":false}"#,
             "[lancet.capabilities]\ndeny = [\"workspace.mutation\"]\n",
             "capability_violation",
@@ -404,7 +404,7 @@ fn direct_workspace_history_records_nothing_for_a_failed_mutation() {
         let (world, spec) = direct_world(
             &format!("direct-wshist-fail-{case}"),
             "history-refusal",
-            "[\"mutate.create\",\"mutate.edit\"]",
+            "[\"mutate__create\",\"mutate__edit\"]",
             profile,
         );
         world
@@ -420,19 +420,19 @@ fn direct_workspace_history_records_nothing_for_a_failed_mutation() {
                 SseScript::plain("could not mutate"),
                 tool_call(
                     "success",
-                    "mutate.create",
+                    "mutate__create",
                     r#"{"path":"fresh.txt","content":"ok\n","create_parents":false}"#,
                 ),
                 SseScript::plain("created"),
                 tool_call(
                     "exists-again",
-                    "mutate.create",
+                    "mutate__create",
                     r#"{"path":"fresh.txt","content":"again\n","create_parents":false}"#,
                 ),
                 SseScript::plain("refused again"),
                 tool_call(
                     "stale-again",
-                    "mutate.edit",
+                    "mutate__edit",
                     r#"{"path":"fresh.txt","expected_hash":"blake3:0000000000000000000000000000000000000000000000000000000000000000","edits":[{"op":"replace_text","old":"ok","new":"x"}]}"#,
                 ),
                 SseScript::plain("refused stale again"),
@@ -511,11 +511,11 @@ fn direct_workspace_history_records_nothing_for_a_failed_mutation() {
                 scenario_evidence.record_command("subsequent success", &success.command);
                 assert_clean_send(&success)?;
                 require(
-                    tool_ok(&success.parsed, "mutate.create"),
+                    tool_ok(&success.parsed, "mutate__create"),
                     "subsequent create succeeds",
                 )?;
                 let tip = current_tip(&repo).expect("success must record current");
-                for method in ["mutate.create", "mutate.edit"] {
+                for method in ["mutate__create", "mutate__edit"] {
                     let retry = send.send("refuse after success").unwrap();
                     scenario_evidence.record_command(method, &retry.command);
                     assert_clean_send(&retry)?;
@@ -551,7 +551,7 @@ fn direct_workspace_history_multi_mutation_survives_provider_failure() {
     let (world, spec) = direct_world(
         "direct-wshist-multi-failure",
         "history-multi",
-        "[\"mutate.create\",\"mutate.edit\"]",
+        "[\"mutate__create\",\"mutate__edit\"]",
         "[llm.retry]\nmax_retries = 0\ninitial_delay_ms = 1\nmax_delay_ms = 1\n",
     );
     let hash = format!("blake3:{}", blake3::hash(b"1\n").to_hex());
@@ -564,15 +564,15 @@ fn direct_workspace_history_multi_mutation_survives_provider_failure() {
         sequence(vec![
             tool_call(
                 "c1",
-                "mutate.create",
+                "mutate__create",
                 r#"{"path":"one.txt","content":"1\n","create_parents":false}"#,
             ),
             tool_call(
                 "c2",
-                "mutate.create",
+                "mutate__create",
                 r#"{"path":"two.txt","content":"2\n","create_parents":false}"#,
             ),
-            tool_call("c3", "mutate.edit", &edit),
+            tool_call("c3", "mutate__edit", &edit),
             SseScript::HttpError {
                 status: 400,
                 body: r#"{"error":{"message":"failed after installed mutations"}}"#.into(),
@@ -628,7 +628,7 @@ fn direct_workspace_history_multi_mutation_survives_provider_failure() {
         )?;
         for (index, ((oid, message), method)) in chain
             .iter()
-            .zip(["mutate.create", "mutate.create", "mutate.edit"])
+            .zip(["mutate__create", "mutate__create", "mutate__edit"])
             .enumerate()
         {
             let state = &steps[index];

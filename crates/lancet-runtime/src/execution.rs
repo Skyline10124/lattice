@@ -183,7 +183,7 @@ impl RuntimeExecution {
         descriptor: &ToolDescriptor,
         method: &str,
     ) -> Option<Arc<WorkspaceMutationHost>> {
-        if !matches!(method, "mutate.create" | "mutate.edit") {
+        if !matches!(method, "mutate__create" | "mutate__edit") {
             return None;
         }
         let scope = single_scope(descriptor, ChannelKind::Workspace)?;
@@ -200,7 +200,7 @@ impl RuntimeExecution {
         descriptor: &ToolDescriptor,
         method: &str,
     ) -> Option<Arc<NetworkFetchHost>> {
-        if method != "fetch.web" {
+        if method != "fetch__web" {
             return None;
         }
         let scope = single_scope(descriptor, ChannelKind::Network)?;

@@ -361,7 +361,7 @@ mod tests {
                 "test",
                 CepErrorCode::ExecutionFailed,
                 CepErrorData::Execution(ExecutionErrorData {
-                    operation: "mutate.edit".into(),
+                    operation: "mutate__edit".into(),
                     detail: Some("install failed".into()),
                 }),
             ),
@@ -379,7 +379,7 @@ mod tests {
                 "test",
                 CepErrorCode::GuardDenied,
                 CepErrorData::Guard(GuardErrorData {
-                    method: "observe.workspace".into(),
+                    method: "observe__workspace".into(),
                     reason: "path denied".into(),
                 }),
             ),
@@ -388,7 +388,7 @@ mod tests {
                 "test",
                 CepErrorCode::CapabilityViolation,
                 CepErrorData::Capability(Box::new(CapabilityErrorData {
-                    method: "observe.workspace".into(),
+                    method: "observe__workspace".into(),
                     violations: vec![
                         "observed workspace_mutation not in declared effect ceiling".into(),
                     ],
@@ -410,7 +410,7 @@ mod tests {
                 "guest trap",
                 CepErrorCode::ToolTrap,
                 CepErrorData::ToolExecution(ToolExecutionErrorData {
-                    method: "noop.echo".into(),
+                    method: "noop__echo".into(),
                     category: "trap".into(),
                     resource: None,
                 }),
@@ -543,14 +543,14 @@ mod tests {
         // The data carries method + category + optional resource, never a
         // guest backtrace, host path, or secret.
         let data = ToolExecutionErrorData {
-            method: "noop.echo".into(),
+            method: "noop__echo".into(),
             category: "trap".into(),
             resource: None,
         };
         let wrapped = CepErrorData::ToolExecution(data.clone());
         let value = serde_json::to_value(&wrapped).unwrap();
         assert_eq!(value["kind"], "tool_execution");
-        assert_eq!(value["method"], "noop.echo");
+        assert_eq!(value["method"], "noop__echo");
         assert_eq!(value["category"], "trap");
         assert!(value["resource"].is_null());
 
@@ -565,7 +565,7 @@ mod tests {
 
         // Resource-exhausted variant carries the resource name.
         let res_data = ToolExecutionErrorData {
-            method: "noop.echo".into(),
+            method: "noop__echo".into(),
             category: "resource_exhausted".into(),
             resource: Some("memory".into()),
         };

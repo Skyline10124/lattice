@@ -330,6 +330,7 @@ fn read_tool_name(manifest_path: &Path) -> anyhow::Result<String> {
     Ok(name.to_owned())
 }
 
+/// `mutate__create` -> `mutate-create`.
 fn crate_name(tool_name: &str) -> String {
-    tool_name.replace('.', "-")
+    tool_name.replace("__", "-")
 }

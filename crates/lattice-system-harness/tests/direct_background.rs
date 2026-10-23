@@ -725,7 +725,7 @@ fn shared_daemon_keeps_project_endpoints_keys_and_profiles_frozen() {
     let (world, spec) = direct_world(
         "background-project-config",
         "background",
-        "[\"session.todo_write\"]",
+        "[\"session__todo_write\"]",
         "",
     );
     let budget = world.budget(&spec);
@@ -738,7 +738,7 @@ fn shared_daemon_keeps_project_endpoints_keys_and_profiles_frozen() {
             scripts: vec![
                 tool_call(
                     "todo",
-                    "session.todo_write",
+                    "session__todo_write",
                     r#"{"todos":[{"content":"isolation","status":"pending"}]}"#,
                 ),
                 SseScript::plain("frozen result"),
@@ -855,7 +855,7 @@ fn shared_daemon_keeps_project_endpoints_keys_and_profiles_frozen() {
             assert!(out.is_clean_exit(0), "{}", out.summary());
         }
         evidence.record_json("beta-state", &beta).unwrap();
-        evidence.record_json("parameters", &json!({"turns":[alpha_turn,beta_turn],"prompts":["alpha","beta"],"methods":["session.todo_write"],"final_reply":"frozen result","provider_requests":[2,2],"source_changed_after_both_gates":true})).unwrap();
+        evidence.record_json("parameters", &json!({"turns":[alpha_turn,beta_turn],"prompts":["alpha","beta"],"methods":["session__todo_write"],"final_reply":"frozen result","provider_requests":[2,2],"source_changed_after_both_gates":true})).unwrap();
     }));
     support::finish_recorded(evidence, result);
 }
@@ -928,7 +928,7 @@ fn daemon_restart_reads_closed_result_without_resubmitting() {
     let (world, spec) = direct_world(
         "background-restart-read",
         "background",
-        "[\"session.todo_write\"]",
+        "[\"session__todo_write\"]",
         "",
     );
     let budget = world.budget(&spec);
@@ -941,7 +941,7 @@ fn daemon_restart_reads_closed_result_without_resubmitting() {
                 scripts: vec![
                     tool_call(
                         "todo",
-                        "session.todo_write",
+                        "session__todo_write",
                         r#"{"todos":[{"content":"durable","status":"pending"}]}"#,
                     ),
                     SseScript::plain("restart answer"),
@@ -1292,7 +1292,7 @@ fn frozen_tls_roots_and_policies_are_isolated_between_concurrent_turns() {
     let (world, spec) = direct_world(
         "background-real-tls",
         "background",
-        "[\"fetch.web\"]",
+        "[\"fetch__web\"]",
         "\n[llm.retry]\nmax_retries = 0\n[lancet.capabilities]\nmax_boundary = \"ex\"\n[lancet.network]\nallow_localhost = true\nallowed_hosts = [\"localhost\"]\n",
     );
     let budget = world.budget(&spec);
@@ -1324,12 +1324,12 @@ fn frozen_tls_roots_and_policies_are_isolated_between_concurrent_turns() {
                     calls: vec![
                         (
                             "own".into(),
-                            "fetch.web".into(),
+                            "fetch__web".into(),
                             json!({"url":format!("{}/own-a",urls[0])}).to_string(),
                         ),
                         (
                             "cross".into(),
-                            "fetch.web".into(),
+                            "fetch__web".into(),
                             json!({"url":format!("{}/cross-from-a",urls[1])}).to_string(),
                         ),
                     ],
@@ -1343,7 +1343,7 @@ fn frozen_tls_roots_and_policies_are_isolated_between_concurrent_turns() {
             support::sequence(vec![
                 tool_call(
                     "denied",
-                    "fetch.web",
+                    "fetch__web",
                     &json!({"url":format!("{}/denied-b",urls[1])}).to_string(),
                 ),
                 SseScript::plain("TLS beta complete"),
@@ -1778,7 +1778,7 @@ fn turn_and_session_identity_conflicts_are_rejected_without_dispatch() {
     let (world, spec) = direct_world(
         "background-global-turn-identity",
         "background",
-        "[\"session.todo_write\"]",
+        "[\"session__todo_write\"]",
         "",
     );
     let budget = world.budget(&spec);
@@ -1791,7 +1791,7 @@ fn turn_and_session_identity_conflicts_are_rejected_without_dispatch() {
                 scripts: vec![
                     tool_call(
                         "todo",
-                        "session.todo_write",
+                        "session__todo_write",
                         r#"{"todos":[{"content":"shared","status":"pending"}]}"#,
                     ),
                     SseScript::plain("answer"),

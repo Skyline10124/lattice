@@ -48,7 +48,7 @@ fn direct_turn_end_events_completed_turn_delivers_terminal_event() {
     let (world, spec) = direct_world(
         "direct-turn-end-events-completed",
         "end-events",
-        "[\"observe.workspace\"]",
+        "[\"observe__workspace\"]",
         "",
     );
     let server = wire_fake_llm(
@@ -57,7 +57,7 @@ fn direct_turn_end_events_completed_turn_delivers_terminal_event() {
         sequence(vec![
             tool_call(
                 "observe1",
-                "observe.workspace",
+                "observe__workspace",
                 r#"{"request":{"mode":"list_directory","path":"."}}"#,
             ),
             SseScript::plain("workspace observed"),
@@ -86,7 +86,7 @@ fn direct_turn_end_events_completed_turn_delivers_terminal_event() {
         require(outcome.command.is_clean_exit(0), "completed Turn exits 0")?;
         require(captures.len() == 2, "exactly two provider requests")?;
         require(
-            tool_ok(&outcome, "observe.workspace"),
+            tool_ok(&outcome, "observe__workspace"),
             "observation succeeds",
         )?;
         // 第一步以 Continue 关闭后不再带结局；结局只随最后一步给出。

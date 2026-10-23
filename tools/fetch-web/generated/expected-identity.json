@@ -1,12 +1,12 @@
 {
   "abi-version": 1,
   "artifact-sha256": "0aa8bc2c753572ad82fe5f34af76e57174536e64b5845acb92b7347d04780a03",
-  "descriptor-sha256": "2229f40451c2c97575ee60010a223fb9efd5b0a4994bd7001ffe457d336f91ad",
+  "descriptor-sha256": "c25fd376b4811b43dbb433fd75d6f85d7de67d3634f62c8a560abfce26b88d02",
   "expected-imports": [
     "lattice:tool-host/host-control@0.1.0",
     "lattice:tool-host/network-fetch@0.1.0"
   ],
-  "name": "fetch.web",
+  "name": "fetch__web",
   "toolchain": "rustc-1.96.0+wit-bindgen-0.60+wasm-tools-1.254.0",
   "version": "0.1.0"
 }

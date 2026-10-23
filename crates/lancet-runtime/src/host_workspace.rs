@@ -4,7 +4,7 @@
 //! `workspace-observe` Tool Host imports 在 Host 侧的 Policy-Visible Workspace
 //! 观察实现（GitHub #30）。
 //!
-//! 本模块是 `observe.workspace` 背后全部的文件系统权限。导出该方法的 Component
+//! 本模块是 `observe__workspace` 背后全部的文件系统权限。导出该方法的 Component
 //! 只负责按类型分派模式和整理结果：它不持有路径、预打开的目录或文件描述符，也
 //! 不持有任何工作区对象的句柄。它能返回的每一项事实都来自这里的四个函数，因此
 //! “guest 无法自行扩大可见范围”是结构性质，而不只是承诺。
@@ -234,7 +234,7 @@ pub struct ReadOutcome {
     /// byte length is charged to the Turn budget and persisted in evidence.
     pub content: String,
     /// Canonical `blake3:<64 hex>` of the bytes read. Host-computed, because
-    /// this is the value `mutate.edit` later verifies — a guest must not be able
+    /// this is the value `mutate__edit` later verifies — a guest must not be able
     /// to invent it.
     pub content_hash: String,
 }
@@ -1257,7 +1257,7 @@ mod tests {
     /// capability, i.e. what `tools/observe-workspace/manifest.toml` lowers to.
     fn observe_descriptor() -> Arc<ToolDescriptor> {
         Arc::new(ToolDescriptor {
-            name: "observe.workspace".into(),
+            name: "observe__workspace".into(),
             version: "0.1.0".into(),
             description: "observation fixture".into(),
             params_schema: serde_json::Value::Null,
@@ -1287,7 +1287,7 @@ mod tests {
         admit_tool(
             observe_descriptor(),
             &CapabilityAdmissionPolicy {
-                enabled_tools: BTreeSet::from(["observe.workspace".to_string()]),
+                enabled_tools: BTreeSet::from(["observe__workspace".to_string()]),
                 denied_capabilities: BTreeSet::new(),
                 max_boundary: Trust::In,
             },
@@ -1737,7 +1737,7 @@ mod tests {
         let denied_tool = admit_tool(
             observe_descriptor(),
             &CapabilityAdmissionPolicy {
-                enabled_tools: BTreeSet::from(["observe.workspace".to_string()]),
+                enabled_tools: BTreeSet::from(["observe__workspace".to_string()]),
                 denied_capabilities: BTreeSet::from(["workspace.observation".to_string()]),
                 max_boundary: Trust::In,
             },
@@ -1770,7 +1770,7 @@ mod tests {
         let tool = admit_tool(
             session_only,
             &CapabilityAdmissionPolicy {
-                enabled_tools: BTreeSet::from(["observe.workspace".to_string()]),
+                enabled_tools: BTreeSet::from(["observe__workspace".to_string()]),
                 denied_capabilities: BTreeSet::new(),
                 max_boundary: Trust::In,
             },

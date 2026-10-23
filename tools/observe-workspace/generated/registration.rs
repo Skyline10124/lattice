@@ -3,7 +3,7 @@
 // self-approve its identity; only the trusted host composition step may
 // pin descriptor/artifact digest, ABI, and imports.
 pub static OBSERVE_WORKSPACE: lancet_runtime::EmbeddedTool = lancet_runtime::EmbeddedTool {
-    name: "observe.workspace",
+    name: "observe__workspace",
     descriptor_json: include_bytes!("descriptor.json"),
     component_bytes: include_bytes!("observe_workspace.component.wasm"),
 };

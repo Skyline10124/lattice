@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! `observe.workspace` — Policy-Visible Workspace observation as a Component
+//! `observe__workspace` — Policy-Visible Workspace observation as a Component
 //! Tool (#30).
 //!
 //! This guest owns typed mode dispatch and the outer union result document.
@@ -138,7 +138,7 @@ fn read_file(params: &serde_json::Value) -> Result<serde_json::Value, String> {
         "result": {
             "content": result.content,
             // Echoed from the host. This Tool cannot compute it: the value
-            // `mutate.edit` verifies must originate host-side or the precondition
+            // `mutate__edit` verifies must originate host-side or the precondition
             // would be checking the guest against itself.
             "content_hash": result.content_hash,
         }

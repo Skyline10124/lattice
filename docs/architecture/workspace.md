@@ -90,7 +90,7 @@ Host 负责计算可见内容、内容身份、遍历限制和截断结果，并
 
 ### 请求与安装
 
-`mutate.create` 安装一个新文件，目标存在时拒绝覆盖；`mutate.edit` 对已有文件生成最终内容，并携带所依据的内容身份。
+`mutate__create` 安装一个新文件，目标存在时拒绝覆盖；`mutate__edit` 对已有文件生成最终内容，并携带所依据的内容身份。
 Host 负责写入大小限制、路径与策略核验、取消检查及最终 Mutation Precondition 核验。
 语义编辑使用 replace/insert 和可选的 occurrence 选择。匹配缺失、歧义及指定 occurrence 不存在保留可供重新规划的诊断；空匹配文本、非法 occurrence 属于输入验证错误。操作成功应用后依次拒绝 no-op、trailing newline 状态改变，以及向已有空文件插入内容；传输格式变化不得丢失这些行为或诊断。共享语义与参数用法见[工具开发指南](../development/tool-development.md#语义编辑)。Host 在安装前执行 WriteLimits 字节限制，不信任 guest 已校验的声明。
 本地文件变更模块统一负责内容准备、目标安装、持久化、辅助资源清理及效果报告，供 Host 变更使用。历史记录与会话协调由调用方所属领域负责，依据模块返回的实际效果继续处理。

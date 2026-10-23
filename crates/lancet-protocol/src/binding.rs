@@ -121,7 +121,7 @@ mod tests {
                 turn_id: TurnId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").expect("turn"),
                 model_step_ordinal: 2,
                 part_ordinal: 1,
-                method: "observe.workspace".to_string(),
+                method: "observe__workspace".to_string(),
                 descriptor_identity: "d".repeat(64),
                 arguments_digest: arguments_digest(&arguments),
             },
@@ -145,8 +145,8 @@ mod tests {
                 part_ordinal: 1,
             }
         );
-        assert!(binding.matches_request("observe.workspace", &json!({"path": "a.txt"})));
-        assert!(!binding.matches_request("observe.workspace", &json!({"path": "b.txt"})));
-        assert!(!binding.matches_request("mutate.create", &json!({"path": "a.txt"})));
+        assert!(binding.matches_request("observe__workspace", &json!({"path": "a.txt"})));
+        assert!(!binding.matches_request("observe__workspace", &json!({"path": "b.txt"})));
+        assert!(!binding.matches_request("mutate__create", &json!({"path": "a.txt"})));
     }
 }

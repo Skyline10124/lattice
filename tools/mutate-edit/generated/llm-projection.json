@@ -1,7 +1,7 @@
 {
   "function": {
-    "description": "Edit an existing file with semantic text operations. The target path must be permitted by policy: use a 'dir/**' pattern to cover a directory (a pattern without /** matches only one exact file). Provide the path, the observe.workspace content_hash as expected_hash, and an edits array where every operation object includes op plus its required fields: replace_text uses old/new, insert_before and insert_after use anchor/content. Put multiple changes to the same file in one mutate.edit edits array. LANCET computes hashline anchors internally. This method never deletes files.",
-    "name": "mutate.edit",
+    "description": "Edit an existing file with semantic text operations. The target path must be permitted by policy: use a 'dir/**' pattern to cover a directory (a pattern without /** matches only one exact file). Provide the path, the observe__workspace content_hash as expected_hash, and an edits array where every operation object includes op plus its required fields: replace_text uses old/new, insert_before and insert_after use anchor/content. Put multiple changes to the same file in one mutate__edit edits array. LANCET computes hashline anchors internally. This method never deletes files.",
+    "name": "mutate__edit",
     "parameters": {
       "additionalProperties": false,
       "properties": {

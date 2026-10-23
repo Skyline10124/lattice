@@ -34,39 +34,39 @@ fn gate_rejects_invalid_catalog_names() {
         // An expected identity without a registration is missing.
         (
             "missing_expected_name",
-            "noop.echo",
+            "noop__echo",
             0,
             1,
             0,
-            (|error: &CompositionError| matches!(error, CompositionError::MissingNames(n) if n == &vec!["noop.echo".to_string()]))
+            (|error: &CompositionError| matches!(error, CompositionError::MissingNames(n) if n == &vec!["noop__echo".to_string()]))
                 as fn(&CompositionError) -> bool,
         ),
         // A single expected pin ensures the duplicate-registration check fires, not duplicate-expected.
         (
             "duplicate_name",
-            "noop.echo",
+            "noop__echo",
             2,
             1,
             0,
-            |error: &CompositionError| matches!(error, CompositionError::DuplicateName(n) if n == "noop.echo"),
+            |error: &CompositionError| matches!(error, CompositionError::DuplicateName(n) if n == "noop__echo"),
         ),
         // Same name with different digests must not silently adopt a last-wins pin; checked before registrations.
         (
             "duplicate_expected_name",
-            "noop.echo",
+            "noop__echo",
             1,
             2,
             0xff,
-            |error: &CompositionError| matches!(error, CompositionError::DuplicateExpectedName(n) if n == "noop.echo"),
+            |error: &CompositionError| matches!(error, CompositionError::DuplicateExpectedName(n) if n == "noop__echo"),
         ),
         // A registration outside the expected set is unapproved.
         (
             "unapproved_name",
-            "rogue.tool",
+            "rogue__tool",
             1,
             0,
             0,
-            |error: &CompositionError| matches!(error, CompositionError::UnapprovedName(n) if n == "rogue.tool"),
+            |error: &CompositionError| matches!(error, CompositionError::UnapprovedName(n) if n == "rogue__tool"),
         ),
     ] {
         let tool = SyntheticTool::from_noop_bytes(tool_name);
@@ -120,7 +120,7 @@ fn gate_rejects_tool_identity_drift() {
             |error: &CompositionError| matches!(error, CompositionError::UnsupportedAbi(_)),
         ),
     ] {
-        let mut tool = SyntheticTool::from_noop_bytes("noop.echo");
+        let mut tool = SyntheticTool::from_noop_bytes("noop__echo");
         mutate_identity(&mut tool);
         let result = compose(&[&tool]);
         assert!(
@@ -145,13 +145,13 @@ fn gate_rejects_ambient_wasi_import() {
 
     // Build a descriptor with artifact.sha256 matching the actual wasm hash.
     let artifact_hash = hex_sha256(wasm);
-    let mut descriptor_json = lancet_runtime::test_helpers::noop_descriptor_json("wasi.tool", 1);
+    let mut descriptor_json = lancet_runtime::test_helpers::noop_descriptor_json("wasi__tool", 1);
     let mut value: serde_json::Value = serde_json::from_slice(&descriptor_json).unwrap();
     value["artifact"]["sha256"] = serde_json::json!(artifact_hash);
     descriptor_json = serde_json::to_vec(&value).unwrap();
     let descriptor_json: &'static [u8] = Box::leak(descriptor_json.into_boxed_slice());
 
-    let tool = SyntheticTool::new("wasi.tool", descriptor_json, wasm, 1, &[]);
+    let tool = SyntheticTool::new("wasi__tool", descriptor_json, wasm, 1, &[]);
     let result = compose(&[&tool]);
     assert!(
         matches!(result, Err(CompositionError::AmbientImport(ref imports)) if imports.iter().any(|n| n.starts_with("wasi:"))),
@@ -164,7 +164,7 @@ fn gate_rejects_ambient_wasi_import() {
 #[test]
 fn gate_rejects_missing_channel_adapter() {
     // Build a descriptor that requires a Workspace channel scope.
-    let mut descriptor_json = lancet_runtime::test_helpers::noop_descriptor_json("ws.tool", 1);
+    let mut descriptor_json = lancet_runtime::test_helpers::noop_descriptor_json("ws__tool", 1);
     let mut value: serde_json::Value = serde_json::from_slice(&descriptor_json).unwrap();
     // Replace the session scope with a workspace scope.
     value["scopes"] = serde_json::json!([
@@ -192,7 +192,7 @@ fn gate_rejects_missing_channel_adapter() {
     let descriptor_json: &'static [u8] = Box::leak(descriptor_json.into_boxed_slice());
 
     let tool = SyntheticTool::new(
-        "ws.tool",
+        "ws__tool",
         descriptor_json,
         component_bytes,
         1,
@@ -237,14 +237,14 @@ fn tool_with_capability(name: &'static str, capability: &str, ctx_op: &str) -> S
 /// which tool a profile enabled.
 #[test]
 fn gate_rejects_capability_name_over_two_cells() {
-    let alloc = tool_with_capability("a.tool", "session.result", "alloc");
-    let mutate = tool_with_capability("b.tool", "session.result", "mutate");
+    let alloc = tool_with_capability("a__tool", "session.result", "alloc");
+    let mutate = tool_with_capability("b__tool", "session.result", "mutate");
     let result = compose(&[&alloc, &mutate]);
     assert!(
         matches!(
             result,
             Err(CompositionError::CapabilityConflict { ref name, ref tools })
-                if name == "session.result" && tools == &["a.tool".to_string(), "b.tool".to_string()]
+                if name == "session.result" && tools == &["a__tool".to_string(), "b__tool".to_string()]
         ),
         "{result:?}"
     );
