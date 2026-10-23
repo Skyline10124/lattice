@@ -16,21 +16,6 @@ pub(crate) enum CoordinatorIoError {
     Worker(#[from] tokio::task::JoinError),
 }
 
-impl CoordinatorIoError {
-    /// 写结果未知与库禁写均交 Backend 唯一监督者恢复，不能在旧代重试。
-    pub(crate) fn requires_reopen(&self) -> bool {
-        matches!(
-            self,
-            Self::Worker(_)
-                | Self::Store(
-                    StoreError::CommitFailed { .. }
-                        | StoreError::WriteDisabled
-                        | StoreError::CreationDurabilityUnknown { .. }
-                )
-        )
-    }
-}
-
 type Result<T> = std::result::Result<T, CoordinatorIoError>;
 
 pub(crate) trait IdSource: Send + Sync {

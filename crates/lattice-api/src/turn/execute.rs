@@ -253,7 +253,8 @@ async fn execute_owned(
     let result = match result {
         Ok(result) => result,
         Err(error) => {
-            if error.requires_reopen() {
+            let error = ApiError::from(error);
+            if error.outcome_unknown() {
                 accept(
                     accepted,
                     TurnAcceptance::ConfirmationUnknown {
@@ -262,7 +263,7 @@ async fn execute_owned(
                     },
                 );
             }
-            return Err(error.into());
+            return Err(error);
         }
     };
     if matches!(result, AcceptedTurn::Existing(_)) {

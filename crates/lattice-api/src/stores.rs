@@ -47,7 +47,7 @@ pub(crate) struct StoreManager {
     opening: Arc<tokio::sync::Mutex<()>>,
     changed: watch::Sender<u64>,
     #[cfg(test)]
-    creation_sync_probe: Mutex<Option<CreationSyncProbe>>,
+    pub(crate) creation_sync_probe: Mutex<Option<CreationSyncProbe>>,
 }
 
 impl StoreManager {

@@ -1294,6 +1294,96 @@ async fn commit_fault_drains_real_reader_and_owner_before_reopening_the_store() 
     }
 }
 #[tokio::test]
+async fn write_disabled_before_acceptance_is_rejected_not_unknown() {
+    use lattice_session::store::*;
+    // 已开库时停在接受事务之前，未建库时停在建库之前；两处都已通过停机检查。
+    for store_open in [true, false] {
+        let (dir, backend, client, task) = backend().await;
+        let other = super::super::new_session_id();
+        let seeded = if store_open {
+            Some(seed_round(&backend, other, true).await)
+        } else {
+            None
+        };
+        let provider = Provider::start().await;
+        let input = request(dir.path());
+        let sink = backend.observer(input.session.id());
+        let (paused, resume) = arm(if store_open {
+            &sink.before_accept
+        } else {
+            &backend.gates.prepare
+        });
+        let submitting = {
+            let client = client.clone();
+            let input = input.clone();
+            let configuration = config(dir.path(), &provider.endpoint);
+            tokio::spawn(async move { client.submit(input, configuration).await })
+        };
+        bounded(paused).await.unwrap();
+        let seeded = match seeded {
+            Some(id) => id,
+            None => seed_round(&backend, other, true).await,
+        };
+        // 另一个会话的提交失败使库转为禁写；持有租约，恢复在本请求回复前不能重开。
+        let api = backend.open().await.unwrap();
+        let error = api
+            .blocking(move |api| {
+                let guard = api.store.try_lock_session(other)?;
+                Ok(with_test_commit_fault(
+                    TestCommitFault::UnknownBefore,
+                    || {
+                        api.store.close_step(
+                            &guard,
+                            CloseStep::StopBetweenRequests {
+                                turn_id: seeded,
+                                cause: StopCause::Cancelled,
+                            },
+                            chrono::Utc::now(),
+                        )
+                    },
+                )?)
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, crate::ApiError::Store(ref e) if matches!(e.as_ref(), StoreError::CommitFailed { .. }))
+        );
+        resume.send(()).unwrap();
+        let rejected = bounded(submitting).await.unwrap().unwrap_err();
+        assert!(
+            rejected
+                .recovery
+                .as_ref()
+                .is_some_and(|r| r.cause == RecoveryCause::WriteDisabled),
+            "事务前因禁写被拒，确定未被接受，不能回复结果不明：{rejected:?}"
+        );
+        drop(api);
+        assert_eq!(provider.finish().await.len(), 0);
+        finish(&backend, task).await;
+    }
+}
+#[tokio::test]
+async fn store_creation_failure_rejects_the_first_submission() {
+    let (dir, backend, client, task) = backend().await;
+    // 建库的父目录同步失败，库是否持久不明；这一轮尚未进入接受事务。
+    *lock(&backend.stores.creation_sync_probe) = Some(Arc::new(|| true));
+    let error = client
+        .submit(
+            request(dir.path()),
+            config(dir.path(), "http://127.0.0.1:1/v1"),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .recovery
+            .as_ref()
+            .is_some_and(|r| r.cause == RecoveryCause::CommitFailed),
+        "{error:?}"
+    );
+    finish(&backend, task).await;
+}
+#[tokio::test]
 async fn different_sessions_overlap_and_keep_their_frozen_configuration() {
     let (dir, backend, client, task) = backend().await;
     let mut first_provider = Provider::start().await;
