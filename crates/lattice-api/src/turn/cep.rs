@@ -502,7 +502,7 @@ mod turn_wiring {
             "cep.call_finished".to_string(),
             serde_json::json!({
                 "invocation_id": invocation,
-                "method": "fetch.web",
+                "method": "fetch__web",
                 "ok": true,
                 "semantic_stage": "cell_component",
                 "guard_stage": "cell_admission",
@@ -512,7 +512,7 @@ mod turn_wiring {
         assert!(matches!(
             map_cep_tool_event(event),
             Some(TurnEvent::CepCallFinished { invocation_id, method, ok: true, .. })
-                if invocation_id.to_string() == invocation && method == "fetch.web"
+                if invocation_id.to_string() == invocation && method == "fetch__web"
         ));
     }
 
@@ -541,7 +541,7 @@ enabled = ["{tool}"]
 {capabilities}"#,
                 // A manifest-owned Component name proves the production available set
                 // comes from generated descriptors and remains profile-selectable.
-                tool = "session.todo_write",
+                tool = "session__todo_write",
             ),
         )
         .unwrap();
@@ -570,7 +570,7 @@ enabled = ["{tool}"]
             test_llm: Some((llm.clone(), lattice_llm::ProviderKind::OpenAiCompatible)),
             test_project_root: Some(project.path().to_string_lossy().into()),
         };
-        let enabled_tools = ["session.todo_write".to_string()];
+        let enabled_tools = ["session__todo_write".to_string()];
         build_production_turn_deps(ProductionTurnDepsInput {
             request: &request,
             project_root: project.path().to_str().unwrap(),
@@ -595,7 +595,7 @@ enabled = ["{tool}"]
         );
         assert_eq!(
             profile.profile.capability_admission_policy().enabled_tools,
-            std::collections::BTreeSet::from(["session.todo_write".to_string()])
+            std::collections::BTreeSet::from(["session__todo_write".to_string()])
         );
 
         let Err(err) = build_deps_for(&profile, &project).await else {
@@ -612,13 +612,13 @@ enabled = ["{tool}"]
         let sentinel = "sk-unknown-tool-82ace195";
         let error = map_lancet_err(LancetError::UnknownTools {
             unknown: vec![sentinel.into(), "observe.typo".into()],
-            available: vec!["observe.workspace".into()],
+            available: vec!["observe__workspace".into()],
         });
         let local = crate::local::LocalError::from(error);
         assert_eq!(local.kind, crate::local::LocalErrorKind::BadRequest);
         assert_eq!(
             local.message,
-            "unknown enabled tools [\"[REDACTED]\", \"observe.typo\"]; available catalog tools: [\"observe.workspace\"]"
+            "unknown enabled tools [\"[REDACTED]\", \"observe.typo\"]; available catalog tools: [\"observe__workspace\"]"
         );
         assert!(!local.message.contains(sentinel));
     }

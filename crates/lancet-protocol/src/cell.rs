@@ -109,6 +109,8 @@ pub enum CellKeyError {
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum DescriptorError {
+    #[error("tool name {0} must be 1-64 characters of [A-Za-z0-9_-]")]
+    InvalidToolName(String),
     #[error("capability name {0} must be lowercase dotted with at least two [a-z0-9_-] segments")]
     InvalidCapabilityName(String),
     #[error("capability {capability} references undeclared scope {scope}")]
@@ -227,15 +229,31 @@ fn is_valid_capability_name(name: &str) -> bool {
     segments >= 2
 }
 
+/// Tool-name grammar `^[A-Za-z0-9_-]{1,64}$`. The name reaches every
+/// provider unchanged as the model-visible function name, so it must satisfy
+/// the strictest rule: OpenAI allows these characters up to 64, Anthropic up
+/// to 128, and Gemini additionally accepts dots and colons. Namespaces are
+/// separated with `__` (`mutate__create`).
+fn is_valid_tool_name(name: &str) -> bool {
+    (1..=64).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
 impl ToolDescriptor {
-    /// Registration-time consistency: every capability cell must root in a
-    /// declared scope; names must be unique. Channels derive from scopes —
+    /// Registration-time consistency: the tool name follows the provider-safe
+    /// grammar; every capability cell must root in a declared scope; names
+    /// must be unique. Channels derive from scopes —
     /// there is no independent channels field (spec §11.3).
     ///
     /// Per-capability check order is fixed: grammar, then duplicate name,
     /// then undeclared scope — an ill-formed name is reported as such and
     /// never as a downstream scope or duplication problem.
     pub fn validate(&self) -> Result<(), DescriptorError> {
+        if !is_valid_tool_name(&self.name) {
+            return Err(DescriptorError::InvalidToolName(self.name.clone()));
+        }
         // Duplicate scope names first, so undeclared-scope lookups below
         // never silently match the wrong copy of a duplicated name.
         let mut seen_scopes = BTreeSet::new();
@@ -529,6 +547,30 @@ mod tests {
             ),
         ] {
             assert_eq!(descriptor.validate(), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn tool_name_grammar_is_accepted_by_every_provider() {
+        let with_name = |name: &str| ToolDescriptor {
+            name: name.into(),
+            ..descriptor_with_capability("session.result")
+        };
+        for valid in ["session__todo_write", "fetch-web", &"a".repeat(64)] {
+            assert_eq!(with_name(valid).validate(), Ok(()), "{valid}");
+        }
+        for invalid in [
+            "mutate.create",
+            "",
+            &"a".repeat(65),
+            "ns:tool",
+            "mutate create",
+        ] {
+            assert_eq!(
+                with_name(invalid).validate(),
+                Err(DescriptorError::InvalidToolName(invalid.into())),
+                "{invalid:?}"
+            );
         }
     }
 }

@@ -1,10 +1,10 @@
-# Sole Tool Descriptor authority (ADR 0004 §2) for `mutate.create`.
+# Sole Tool Descriptor authority (ADR 0004 §2) for `mutate__create`.
 # Everything else is generated from this file by `cargo xtask tool-codegen`.
 
 imports = ["workspace-mutate"]
 
 [tool]
-name = "mutate.create"
+name = "mutate__create"
 version = "0.1.0"
 description = "Create a new file under the workspace write scope. The target path must be permitted by policy: use a 'dir/**' pattern to cover a directory. The target file must not already exist. Set create_parents=true to create missing parent directories required for path; otherwise parent directories must already exist."
 abi-version = 1

@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! `session.todo_write` — the first production Source Tool guest (#29).
+//! `session__todo_write` — the first production Source Tool guest (#29).
 //!
 //! Behavior is the one the native handler had: validate a structured todo plan
 //! and echo the normalized result. There is no session store behind it and this

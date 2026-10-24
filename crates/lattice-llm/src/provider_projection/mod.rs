@@ -34,13 +34,6 @@ mod openai;
 
 pub(crate) use openai::{OpenAiPart, parts_to_native as openai_parts_to_native};
 
-pub(crate) fn openai_wire_tool_name(canonical: &str) -> String {
-    canonical.replace('.', "__")
-}
-
-pub(crate) fn openai_canonical_tool_name(wire: &str) -> String {
-    wire.replace("__", ".")
-}
 use std::collections::BTreeSet;
 
 use lattice_conversation::{

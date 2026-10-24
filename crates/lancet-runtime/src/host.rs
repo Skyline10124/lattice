@@ -141,7 +141,7 @@ mod tests {
     /// binding under test.
     fn descriptor(scopes: Vec<ScopeDecl>, cell_scope: &str) -> Arc<ToolDescriptor> {
         Arc::new(ToolDescriptor {
-            name: "synthetic.tool".into(),
+            name: "synthetic__tool".into(),
             version: "0.1.0".into(),
             description: "operation-binding fixture".into(),
             params_schema: serde_json::Value::Null,
@@ -171,7 +171,7 @@ mod tests {
         let admitted = admit_tool(
             descriptor,
             &CapabilityAdmissionPolicy {
-                enabled_tools: BTreeSet::from(["synthetic.tool".to_string()]),
+                enabled_tools: BTreeSet::from(["synthetic__tool".to_string()]),
                 denied_capabilities: BTreeSet::new(),
                 max_boundary: Trust::In,
             },

@@ -836,7 +836,7 @@ fn check_annotation(
             // "this field is an enum". A closed value set is the common case
             // (`TodoStatus`, a serde tag) and lets a consumer exhaustively map
             // values to chrome, but an open scalar is a real status too:
-            // `fetch.web`'s HTTP code is the most natural status that call has,
+            // `fetch__web`'s HTTP code is the most natural status that call has,
             // and requiring an `enum` would leave it with no spelling at all.
             // A non-scalar is still rejected — a status is one value, not a
             // structure.

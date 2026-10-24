@@ -20,18 +20,18 @@ use lancet_runtime::{Cancellation, EventSink};
 use lancet_runtime::{CellEvidenceLedger, ComponentCallContext, ComponentRuntime, admit_tool};
 use tokio::sync::{mpsc, watch};
 
-/// The profile policy a turn carries: `noop.echo` enabled, nothing denied,
+/// The profile policy a turn carries: `noop__echo` enabled, nothing denied,
 /// `in` boundary. `deny` lists capability names the profile subtracts.
 fn policy(deny: &[&str]) -> CapabilityAdmissionPolicy {
     CapabilityAdmissionPolicy {
-        enabled_tools: BTreeSet::from(["noop.echo".to_string()]),
+        enabled_tools: BTreeSet::from(["noop__echo".to_string()]),
         denied_capabilities: deny.iter().map(|name| (*name).to_string()).collect(),
         max_boundary: Trust::In,
     }
 }
 
 /// Build a call context with fresh event/cancellation channels, admitting
-/// `noop.echo` under `policy` exactly as the transport does before `call`.
+/// `noop__echo` under `policy` exactly as the transport does before `call`.
 /// The returned ledger clone survives the call and carries its evidence.
 fn call_ctx_with(
     rt: &ComponentRuntime,
@@ -44,8 +44,8 @@ fn call_ctx_with(
 ) {
     let (tx, rx) = mpsc::unbounded_channel();
     let (cancel_tx, cancel_rx) = watch::channel(false);
-    let descriptor = rt.descriptor("noop.echo").expect("fixture tool exists");
-    let admitted = admit_tool(descriptor, policy).expect("noop.echo is admitted");
+    let descriptor = rt.descriptor("noop__echo").expect("fixture tool exists");
+    let admitted = admit_tool(descriptor, policy).expect("noop__echo is admitted");
     let evidence = CellEvidenceLedger::new();
     evidence.set_admission(admitted.evidence.clone());
     let invocation_id = InvocationId::parse("00000000-0000-4000-8000-000000000001").unwrap();
@@ -87,7 +87,7 @@ async fn call_records_operation_and_result_evidence() {
 
     let result = rt
         .call(
-            "noop.echo",
+            "noop__echo",
             serde_json::json!({"message": "evidence-test"}),
             ctx,
         )
@@ -97,7 +97,7 @@ async fn call_records_operation_and_result_evidence() {
 
     let (admission, effects, denied) = evidence.snapshot();
     let admission = admission.expect("admission evidence recorded");
-    assert_eq!(admission.tool, "noop.echo");
+    assert_eq!(admission.tool, "noop__echo");
     assert_eq!(
         admission.approved_capabilities,
         vec!["session.events".to_string(), "session.result".to_string()]
@@ -156,7 +156,7 @@ async fn partial_deny_refuses_the_operation_but_not_the_call() {
     let (ctx, evidence, mut rx, _cancel) = call_ctx_with(&rt, &policy(&["session.events"]));
 
     let result = rt
-        .call("noop.echo", serde_json::json!({"message": "partial"}), ctx)
+        .call("noop__echo", serde_json::json!({"message": "partial"}), ctx)
         .await
         .expect("the call itself still succeeds");
     assert_eq!(result, serde_json::json!({"echoed": "partial"}));
@@ -210,7 +210,7 @@ async fn result_cell_outside_the_admitted_set_fails_closed() {
     let (ctx, evidence, mut rx, _cancel) = call_ctx_with(&rt, &policy(&["session.result"]));
 
     let err = rt
-        .call("noop.echo", serde_json::json!({"message": "ceiling"}), ctx)
+        .call("noop__echo", serde_json::json!({"message": "ceiling"}), ctx)
         .await
         .expect_err("an unadmitted result cell must fail the call");
     assert_eq!(err.code, CepErrorCode::CapabilityViolation);

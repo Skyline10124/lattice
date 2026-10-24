@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Direct-Local workspace observation visibility and bounds (issue #46,
-//! Codeberg #24, slice 2): proves all four `observe.workspace` modes share the
+//! Codeberg #24, slice 2): proves all four `observe__workspace` modes share the
 //! same Policy-Visible Workspace visibility and bounds through the built
 //! binary.
 //!
@@ -67,7 +67,7 @@ fn observation_world(prefix: &str) -> (ScenarioWorld, ScenarioSpec) {
 schema_version = 1\n\n\
 [agent]\nname = \"dl-obs\"\nmodel = \"compat:dl-obs\"\n\n\
 [prompt]\nsystem = \"You are a concise test agent.\"\n\n\
-[tools]\nenabled = [\"observe.workspace\"]\n\n\
+[tools]\nenabled = [\"observe__workspace\"]\n\n\
 [lancet.workspace]\nincluded_ignored_read_patterns = [\"private/included.txt\"]\n\
 denied_read_patterns = [\"denied/**\"]\n\n\
 [lancet.observation]\n\
@@ -149,73 +149,73 @@ fn direct_observation_visibility_and_bounds() {
     .to_string();
     let calls: &[(&str, &str)] = &[
         (
-            "observe.workspace",
+            "observe__workspace",
             r#"{"request":{"mode":"read_file","path":"tracked.txt"}}"#,
         ),
         (
-            "observe.workspace",
+            "observe__workspace",
             r#"{"request":{"mode":"read_file","path":"notes.txt"}}"#,
         ),
         (
-            "observe.workspace",
+            "observe__workspace",
             r#"{"request":{"mode":"read_file","path":"private/ignored.txt"}}"#,
         ),
         (
-            "observe.workspace",
+            "observe__workspace",
             r#"{"request":{"mode":"read_file","path":"private/included.txt"}}"#,
         ),
         (
-            "observe.workspace",
+            "observe__workspace",
             r#"{"request":{"mode":"read_file","path":"denied/hidden.txt"}}"#,
         ),
         (
-            "observe.workspace",
+            "observe__workspace",
             r#"{"request":{"mode":"read_file","path":".lattice/private.txt"}}"#,
         ),
         (
-            "observe.workspace",
+            "observe__workspace",
             r#"{"request":{"mode":"read_file","path":"big.txt"}}"#,
         ),
         (
-            "observe.workspace",
+            "observe__workspace",
             r#"{"request":{"mode":"list_directory","path":"."}}"#,
         ),
         (
-            "observe.workspace",
+            "observe__workspace",
             r#"{"request":{"mode":"grep","pattern":"needle","path":"."}}"#,
         ),
         (
-            "observe.workspace",
+            "observe__workspace",
             r#"{"request":{"mode":"find_files","pattern":"*.txt","path":"."}}"#,
         ),
         (
-            "observe.workspace",
+            "observe__workspace",
             r#"{"request":{"mode":"read_file","path":"../outside-observation.txt"}}"#,
         ),
-        ("observe.workspace", absolute_read.as_str()),
+        ("observe__workspace", absolute_read.as_str()),
         (
-            "observe.workspace",
+            "observe__workspace",
             r#"{"request":{"mode":"list_directory","path":".."}}"#,
         ),
-        ("observe.workspace", absolute_list.as_str()),
+        ("observe__workspace", absolute_list.as_str()),
         (
-            "observe.workspace",
+            "observe__workspace",
             r#"{"request":{"mode":"grep","pattern":"OUTSIDE_ROOT","path":".."}}"#,
         ),
-        ("observe.workspace", absolute_grep.as_str()),
+        ("observe__workspace", absolute_grep.as_str()),
         (
-            "observe.workspace",
+            "observe__workspace",
             r#"{"request":{"mode":"find_files","pattern":"outside-observation.txt","path":".."}}"#,
         ),
-        ("observe.workspace", absolute_find.as_str()),
+        ("observe__workspace", absolute_find.as_str()),
     ];
     let visibility_calls = [
         (
-            "observe.workspace",
+            "observe__workspace",
             r#"{"request":{"mode":"grep","pattern":"needle","path":"."}}"#,
         ),
         (
-            "observe.workspace",
+            "observe__workspace",
             r#"{"request":{"mode":"find_files","pattern":"*.txt","path":"."}}"#,
         ),
     ];
@@ -267,7 +267,7 @@ fn direct_observation_visibility_and_bounds() {
         // 规范工具名与每次调用的结论都取自 Step 条目中的槽位。
         let slots = outcome.slots();
         require(
-            slots.len() == 18 && slots.iter().all(|slot| slot.method == "observe.workspace"),
+            slots.len() == 18 && slots.iter().all(|slot| slot.method == "observe__workspace"),
             format!("tool slot names mismatch: {slots:?}"),
         )?;
 
@@ -461,7 +461,7 @@ fn direct_observation_visibility_and_bounds() {
         require(
             visibility_slots.len() == 2
                 && visibility_slots.iter().all(|slot| {
-                    slot.method == "observe.workspace" && slot.outcome == SlotOutcome::Succeeded
+                    slot.method == "observe__workspace" && slot.outcome == SlotOutcome::Succeeded
                 }),
             "both complete visibility queries must succeed",
         )?;
@@ -660,19 +660,19 @@ fn direct_observation_symlinks_are_refused_without_canary_leak() {
         .expect("directory symlink");
     let calls = [
         (
-            "observe.workspace",
+            "observe__workspace",
             r#"{"request":{"mode":"read_file","path":"file-link"}}"#,
         ),
         (
-            "observe.workspace",
+            "observe__workspace",
             r#"{"request":{"mode":"list_directory","path":"dir-link"}}"#,
         ),
         (
-            "observe.workspace",
+            "observe__workspace",
             r#"{"request":{"mode":"grep","pattern":"I233_E2E_EXTERNAL_CANARY","path":"dir-link"}}"#,
         ),
         (
-            "observe.workspace",
+            "observe__workspace",
             r#"{"request":{"mode":"find_files","pattern":"*","path":"dir-link"}}"#,
         ),
     ];

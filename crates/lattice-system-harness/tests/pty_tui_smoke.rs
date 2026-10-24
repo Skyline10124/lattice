@@ -34,7 +34,7 @@ use lattice_system_harness::{
 };
 
 /// Minimal project-local agent profile for the TUI smoke: the Direct-Local
-/// end-state shape — no `[workspace]` section. `session.todo_write` gives the
+/// end-state shape — no `[workspace]` section. `session__todo_write` gives the
 /// Turn a Tool Step before the final text Step, so one Turn spans two Steps.
 /// Hand-written TOML, not serde — the harness boundary forbids `lattice-profile`.
 const AGENT_TOML: &str = r#"schema_version = 1
@@ -47,7 +47,7 @@ model = "compat:tui-smoke"
 system = "You are a concise test agent. Reply briefly."
 
 [tools]
-enabled = ["session.todo_write"]
+enabled = ["session__todo_write"]
 "#;
 
 /// 一个 Turn 两个 Step：先调用工具，再输出三行最终回答。
@@ -57,7 +57,7 @@ fn two_step_script() -> lattice_system_harness::SseScript {
         scripts: vec![
             SseScript::ToolCall {
                 call_id: "smoke-call-1".into(),
-                tool_name: "session.todo_write".into(),
+                tool_name: "session__todo_write".into(),
                 arguments_json: r#"{"todos":[{"content":"smoke","status":"in_progress"}]}"#.into(),
             },
             SseScript::PlainText {

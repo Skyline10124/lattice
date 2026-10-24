@@ -474,7 +474,7 @@ mod tests {
     fn admission_and_denial_records_round_trip() {
         let admission = AdmissionEvidence {
             version: ADMISSION_EVIDENCE_VERSION,
-            tool: "noop.echo".into(),
+            tool: "noop__echo".into(),
             approved_capabilities: vec!["session.result".into()],
             denied_capabilities: vec!["session.events".into()],
             boundary_excluded: vec!["net.fetch".into()],
@@ -526,7 +526,7 @@ mod tests {
             .unwrap(),
             serde_json::to_value(AdmissionEvidence {
                 version: ADMISSION_EVIDENCE_VERSION,
-                tool: "noop.echo".into(),
+                tool: "noop__echo".into(),
                 approved_capabilities: Vec::new(),
                 denied_capabilities: Vec::new(),
                 boundary_excluded: Vec::new(),
@@ -566,7 +566,7 @@ mod tests {
 
         let admission: AdmissionEvidence = serde_json::from_value(json!({
             "version": 1,
-            "tool": "noop.echo",
+            "tool": "noop__echo",
             "approved_capabilities": ["session.result"],
             "denied_capabilities": [],
             "boundary_excluded": [],

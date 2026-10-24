@@ -19,16 +19,16 @@ use tempfile::TempDir;
 
 /// The migrated Component Tool's method name (#29). Not a catalog constant: its
 /// descriptor authority is `tools/todo-write/manifest.toml`.
-const TODO_WRITE: &str = "session.todo_write";
+const TODO_WRITE: &str = "session__todo_write";
 
 /// The second migrated Component Tool (#30). Same reason it is a literal: its
 /// contract lives solely in `tools/observe-workspace/manifest.toml`.
-const OBSERVE_WORKSPACE: &str = "observe.workspace";
+const OBSERVE_WORKSPACE: &str = "observe__workspace";
 
 /// The five embedded Component Tools of the default distribution.
-const MUTATE_CREATE: &str = "mutate.create";
-const MUTATE_EDIT: &str = "mutate.edit";
-const FETCH_WEB: &str = "fetch.web";
+const MUTATE_CREATE: &str = "mutate__create";
+const MUTATE_EDIT: &str = "mutate__edit";
+const FETCH_WEB: &str = "fetch__web";
 const COMPONENT_TOOLS: [&str; 5] = [
     OBSERVE_WORKSPACE,
     MUTATE_CREATE,
@@ -66,7 +66,7 @@ fn direct_local_runtime(root: &std::path::Path) -> ReservedRuntime {
     .expect("direct-local runtime builds")
 }
 
-/// Policy denial: a write-deny pattern blocks mutate.create even on the
+/// Policy denial: a write-deny pattern blocks mutate__create even on the
 /// Direct-Local path. Authority policy + Guard L1 + effect checks still
 /// cover all mutations.
 #[tokio::test]
@@ -96,7 +96,7 @@ async fn policy_deny_blocks_create_on_direct_local() {
 
     let err = client
         .call_raw(
-            "mutate.create",
+            "mutate__create",
             serde_json::json!({"path": "secret/leak.txt", "content": "x", "create_parents": true}),
         )
         .await
@@ -109,7 +109,7 @@ async fn policy_deny_blocks_create_on_direct_local() {
     );
 }
 
-/// mutate.create rejects a target that already exists on Local with
+/// mutate__create rejects a target that already exists on Local with
 /// `ReplanRequired` (the no-replace precondition, ADR 0003 decision 7+8).
 #[tokio::test]
 async fn create_rejects_existing_target_with_replan_required() {
@@ -120,7 +120,7 @@ async fn create_rejects_existing_target_with_replan_required() {
 
     let err = client
         .call_raw(
-            "mutate.create",
+            "mutate__create",
             serde_json::json!({"path": "exists.txt", "content": "second", "create_parents": false}),
         )
         .await
@@ -211,7 +211,7 @@ async fn edit_failures_preserve_diagnostics_and_target_contents() {
         for case in cases {
             let case_name = case.name;
             let err = client
-                .call_raw("mutate.edit", serde_json::json!({"path": path, "expected_hash": expected_hash, "edits": case.edits}))
+                .call_raw("mutate__edit", serde_json::json!({"path": path, "expected_hash": expected_hash, "edits": case.edits}))
                 .await
                 .expect_err(&format!("{name}/{case_name}: edit must fail"));
             if let Some(code) = case.code {

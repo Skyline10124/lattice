@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! `mutate.edit` — semantic edit + replace-with-expected as a Component Tool (#31).
+//! `mutate__edit` — semantic edit + replace-with-expected as a Component Tool (#31).
 //!
 //! The guest asks `read-for-edit` to validate the planning revision before
 //! applying pure semantic ops via `mutate-shared`. Successful compilation then

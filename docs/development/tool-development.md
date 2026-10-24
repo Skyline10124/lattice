@@ -49,7 +49,7 @@ cargo xtask lancet-boundary
 
 ## 语义编辑
 
-`mutate.create` 用于目标尚不存在的新文件，`create_parents` 的用法见 [create manifest](../../tools/mutate-create/manifest.toml)。`mutate.edit` 用于已有文件，不删除文件；从 `observe.workspace` 的结果原样复制 `content_hash` 到 `expected_hash`。
+`mutate__create` 用于目标尚不存在的新文件，`create_parents` 的用法见 [create manifest](../../tools/mutate-create/manifest.toml)。`mutate__edit` 用于已有文件，不删除文件；从 `observe__workspace` 的结果原样复制 `content_hash` 到 `expected_hash`。
 
 [edit manifest](../../tools/mutate-edit/manifest.toml)维护实际参数形状：`replace_text` 使用 `old/new`，`insert_before`、`insert_after` 使用 `anchor/content`，`occurrence` 从 1 开始。同一文件的多个修改放入一次 `edits` 数组，按顺序应用。
 

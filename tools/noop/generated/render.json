@@ -7,5 +7,5 @@
   ],
   "arms": [],
   "render-schema-version": 1,
-  "tool": "noop.echo"
+  "tool": "noop__echo"
 }

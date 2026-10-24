@@ -62,7 +62,7 @@ model = "sonnet"
 system = "请用中文回答。先读取相关文件，再根据实际内容说明项目结构与实现。"
 
 [tools]
-enabled = ["observe.workspace"]
+enabled = ["observe__workspace"]
 ```
 
 配置目录名称与 `[agent].name` 保持一致。

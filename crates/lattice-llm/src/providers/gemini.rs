@@ -322,7 +322,7 @@ mod tests {
         for (id_field, expected_id) in [(",\"id\":\"real-id\"", Some("real-id")), ("", None)] {
             let mut parser = GeminiSseParser::new();
             let chunk = format!(
-                r#"{{"candidates":[{{"content":{{"role":"model","parts":[{{"text":"reason","thought":true,"thoughtSignature":"sig"}},{{"functionCall":{{"name":"observe.workspace","args":{{}}{id_field}}}}}]}},"finishReason":"STOP"}}]}}"#
+                r#"{{"candidates":[{{"content":{{"role":"model","parts":[{{"text":"reason","thought":true,"thoughtSignature":"sig"}},{{"functionCall":{{"name":"observe__workspace","args":{{}}{id_field}}}}}]}},"finishReason":"STOP"}}]}}"#
             );
             let events = parser.parse_chunk(None, &chunk);
             let message = events
@@ -446,7 +446,7 @@ mod tests {
         let mut parser = GeminiSseParser::new();
         let events = parser.parse_chunk(
             None,
-            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"x","functionCall":{"name":"observe.workspace","args":{}}}]}}]}"#,
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"x","functionCall":{"name":"observe__workspace","args":{}}}]}}]}"#,
         );
         assert!(events.iter().any(|event| matches!(
             event,

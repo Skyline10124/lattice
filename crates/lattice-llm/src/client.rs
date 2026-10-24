@@ -390,7 +390,7 @@ fn is_localhost_request_host(host: &str) -> bool {
 /// 307/308 would replay the request body (the whole conversation, including
 /// workspace file contents the agent just read). Provider-specific auth
 /// headers make it worse: reqwest strips `Authorization` across hosts but not
-/// `x-api-key` (Anthropic) or `x-goog-api-key` (Gemini). `fetch.web` disables
+/// `x-api-key` (Anthropic) or `x-goog-api-key` (Gemini). `fetch__web` disables
 /// redirects for the same reason.
 fn http_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()

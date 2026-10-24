@@ -118,7 +118,7 @@ impl LlmClient for CancelOnDone {
                     vec![MessagePart::semantic_only(MessageSemantic::ToolCall {
                         call: UnboundToolCall {
                             provider_call_id: Some("call".into()),
-                            name: "observe.workspace".into(),
+                            name: "observe__workspace".into(),
                             arguments: serde_json::json!({"request": {"mode":"read_file","path":"src/lib.rs"}}),
                         },
                     })],
@@ -147,7 +147,7 @@ async fn completed_attempt_usage_survives_cancellation_before_dispatch() {
     let cancel = Arc::new(AtomicBool::new(false));
     let fixture = setup_fixture(
         Arc::new(CancelOnDone(cancel.clone())),
-        &["observe.workspace"],
+        &["observe__workspace"],
     );
     let mut request = fixture.request.clone();
     request.cancel_flag = Some(cancel);

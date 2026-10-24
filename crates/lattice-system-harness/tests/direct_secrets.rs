@@ -43,7 +43,7 @@ fn direct_secrets_sentinels_never_leak_into_public_sinks() {
     let (world, spec) = direct_world(
         "direct-secrets",
         "dl-secret",
-        "[\"observe.workspace\"]",
+        "[\"observe__workspace\"]",
         "\n[lancet.workspace]\ndenied_read_patterns = [\"private.txt\"]\n",
     );
     let unique = world.root().file_name().unwrap().to_str().unwrap();
@@ -62,7 +62,7 @@ fn direct_secrets_sentinels_never_leak_into_public_sinks() {
         sequence(vec![
             tool_call(
                 "secret-read",
-                "observe.workspace",
+                "observe__workspace",
                 r#"{"request":{"mode":"read_file","path":"private.txt"}}"#,
             ),
             SseScript::plain("hello"),
@@ -92,7 +92,7 @@ fn direct_secrets_sentinels_never_leak_into_public_sinks() {
             1,
             "protected read must be attempted exactly once"
         );
-        assert_eq!(slots[0].method, "observe.workspace");
+        assert_eq!(slots[0].method, "observe__workspace");
         assert_eq!(slots[0].outcome, SlotOutcome::Failed);
         let captures = server.captured_requests();
         assert_eq!(captures.len(), 2, "refusal recovery must reach provider");
@@ -132,7 +132,7 @@ fn direct_secrets_sentinels_never_leak_into_public_sinks() {
         let rows = audit["rows"].as_array().expect("audit rows");
         assert_eq!(rows.len(), 1, "audit must contain the protected read");
         let row = &rows[0];
-        assert_eq!(row["binding"]["method"], "observe.workspace");
+        assert_eq!(row["binding"]["method"], "observe__workspace");
         assert_eq!(row["binding"]["session_id"], sid);
         assert_eq!(row["binding"]["turn_id"], tid);
         assert_eq!(row["state"]["state"], "terminal");

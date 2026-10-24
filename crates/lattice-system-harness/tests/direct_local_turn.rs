@@ -16,7 +16,7 @@
 //! - **session reopen** — a second `session send` on the same session
 //!   succeeds after an external (non-LATTICE) edit + commit changed the
 //!   Local state, and carries the first turn's transcript context.
-//! - **policy denial** — a `mutate.create` call on a
+//! - **policy denial** — a `mutate__create` call on a
 //!   `[lancet.workspace].denied_write_patterns` path is denied, surfaces as
 //!   a failed tool event in the public stream, leaves no file on disk, and
 //!   the turn still completes on the model's recovery reply.
@@ -288,7 +288,7 @@ fn direct_local_session_reopen_after_external_change() {
     );
 }
 
-/// Policy denial over the Direct-Local runtime: `mutate.create` targeting a
+/// Policy denial over the Direct-Local runtime: `mutate__create` targeting a
 /// `[lancet.workspace].denied_write_patterns` path is rejected by the
 /// guarded Local Workspace, surfaces as a failed tool event in the public
 /// stream, and leaves nothing on disk; the model's recovery reply completes
@@ -300,7 +300,7 @@ fn direct_local_mutate_create_denied_by_write_policy() {
     let (world, spec) = turn_world(
         "direct-local-policy-denial",
         "dl-deny",
-        "[\"mutate.create\"]",
+        "[\"mutate__create\"]",
         "\n[lancet.workspace]\ndenied_write_patterns = [\"blocked/**\"]\n",
     );
     let server = wire_fake_llm(
@@ -310,7 +310,7 @@ fn direct_local_mutate_create_denied_by_write_policy() {
             scripts: vec![
                 SseScript::ToolCall {
                     call_id: "call_1".into(),
-                    tool_name: "mutate.create".into(),
+                    tool_name: "mutate__create".into(),
                     arguments_json:
                         r#"{"path":"blocked/denied.txt","content":"must not land","create_parents":true}"#
                             .into(),
@@ -329,17 +329,17 @@ fn direct_local_mutate_create_denied_by_write_policy() {
         let denied = outcome
             .slots()
             .iter()
-            .any(|slot| slot.method == "mutate.create" && slot.outcome == SlotOutcome::Failed);
+            .any(|slot| slot.method == "mutate__create" && slot.outcome == SlotOutcome::Failed);
         require(
             denied,
             format!(
-                "Step entries lacked a failed mutate.create slot: {:?}",
+                "Step entries lacked a failed mutate__create slot: {:?}",
                 outcome.slots()
             ),
         )?;
         require(
             !world.project_dir().join("blocked/denied.txt").exists(),
-            "denied mutate.create left a file on disk",
+            "denied mutate__create left a file on disk",
         )?;
         require(
             outcome.has_completed(),
@@ -352,7 +352,7 @@ fn direct_local_mutate_create_denied_by_write_policy() {
             captures.len() == 2,
             format!("expected Tool round + recovery round, got: {captures:?}"),
         )?;
-        let failure = tool_failure(&outcome.parsed, "mutate.create");
+        let failure = tool_failure(&outcome.parsed, "mutate__create");
         require(
             failure.is_some_and(|(slot, error)| {
                 error["code"] == "capability_violation"
@@ -372,7 +372,7 @@ fn direct_local_mutate_create_denied_by_write_policy() {
 
     finish_scenario(
         scenario_evidence,
-        &[("denied mutate.create turn", &outcome.command)],
+        &[("denied mutate__create turn", &outcome.command)],
         captures,
         result,
     );

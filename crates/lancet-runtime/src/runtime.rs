@@ -493,7 +493,7 @@ fn record_result_effect(
 ///
 /// Branching on the declared `ctx_op` would make metering guest-switchable —
 /// a tool declaring an `alloc` and a `mutate` capability over one scope (the
-/// shipped `noop.echo` does) could relabel its result cell and be recorded
+/// shipped `noop__echo` does) could relabel its result cell and be recorded
 /// unmeasured. The declared `ctx_op` states charge intent for #6's
 /// charge/credit seam only. Operation effects carry no measure: they return
 /// no value.
@@ -674,7 +674,7 @@ mod tests {
     /// `in` scopes are declared so scope-crossing cases are expressible.
     fn descriptor(capability: &str, ctx_op: CtxOp) -> Arc<ToolDescriptor> {
         Arc::new(ToolDescriptor {
-            name: "synthetic.tool".into(),
+            name: "synthetic__tool".into(),
             version: "0.1.0".into(),
             description: "result-cell fixture".into(),
             params_schema: serde_json::Value::Null,
@@ -729,13 +729,18 @@ mod tests {
         let descriptor = descriptor("session.free", CtxOp::Free);
         let admitted = admitted(descriptor.clone(), &[]);
         assert_eq!(
-            check_result_cell("synthetic.tool", &descriptor, &admitted, &cell(CtxOp::Free)),
+            check_result_cell(
+                "synthetic__tool",
+                &descriptor,
+                &admitted,
+                &cell(CtxOp::Free)
+            ),
             Ok(())
         );
         assert_eq!(recorded_measure(&descriptor, cell(CtxOp::Free)), Some(18));
     }
 
-    /// A3: the shipped `noop.echo` declares an `alloc` **and** a `mutate`
+    /// A3: the shipped `noop__echo` declares an `alloc` **and** a `mutate`
     /// capability over one scope, and both are admitted — so a guest can
     /// relabel its result cell and still pass the ceiling. Metering is not
     /// its to switch off: the relabelled result is measured all the same.
@@ -755,7 +760,7 @@ mod tests {
 
         let relabelled = cell(CtxOp::Mutate);
         assert_eq!(
-            check_result_cell("noop.echo", &descriptor, &admitted, &relabelled),
+            check_result_cell("noop__echo", &descriptor, &admitted, &relabelled),
             Ok(())
         );
         assert_eq!(recorded_measure(&descriptor, relabelled), Some(18));
@@ -814,7 +819,7 @@ mod tests {
             }
             let descriptor = Arc::new(descriptor);
             let Err(err) = check_result_cell(
-                "synthetic.tool",
+                "synthetic__tool",
                 &descriptor,
                 &admitted(descriptor.clone(), &deny),
                 &result_cell,
@@ -836,26 +841,26 @@ mod tests {
     /// error string plays no role.
     #[test]
     fn guest_error_with_cancellation_set_maps_to_call_cancelled() {
-        let err = map_guest_logical_result("noop.echo", Err("cancelled".into()), true)
+        let err = map_guest_logical_result("noop__echo", Err("cancelled".into()), true)
             .expect_err("cancelled guest error must fail");
         assert_eq!(err.code, CepErrorCode::CallCancelled);
-        assert_eq!(err.message, "tool noop.echo failed: cancelled");
+        assert_eq!(err.message, "tool noop__echo failed: cancelled");
     }
 
     /// #70: a guest logical error without cancellation keeps the
     /// `ExecutionFailed` semantics.
     #[test]
     fn guest_error_without_cancellation_stays_execution_failed() {
-        let err = map_guest_logical_result("noop.echo", Err("boom".into()), false)
+        let err = map_guest_logical_result("noop__echo", Err("boom".into()), false)
             .expect_err("guest error must fail");
         assert_eq!(err.code, CepErrorCode::ExecutionFailed);
-        assert_eq!(err.message, "tool noop.echo guest error: boom");
+        assert_eq!(err.message, "tool noop__echo guest error: boom");
     }
 
     #[test]
     fn guest_ok_passes_through_regardless_of_cancellation() {
         for cancelled in [false, true] {
-            let out = map_guest_logical_result("noop.echo", Ok(tool_output()), cancelled)
+            let out = map_guest_logical_result("noop__echo", Ok(tool_output()), cancelled)
                 .expect("ok passes through");
             assert_eq!(out.value_json, "{}");
         }

@@ -289,7 +289,7 @@ mod tests {
             .runtime
             .tool_definitions()
             .iter()
-            .find(|t| t.name == "mutate.create")
+            .find(|t| t.name == "mutate__create")
             .unwrap();
         let config = FrozenTurnConfig {
             agent_name: "test".into(),
@@ -351,7 +351,7 @@ mod tests {
                         vec![MessagePart::semantic_only(MessageSemantic::ToolCall {
                             call: UnboundToolCall {
                                 provider_call_id: Some("call".into()),
-                                name: "mutate.create".into(),
+                                name: "mutate__create".into(),
                                 arguments: params.clone(),
                             },
                         })],
@@ -369,7 +369,7 @@ mod tests {
     #[tokio::test]
     async fn started_cancellation_is_synchronous() {
         let _guard = DISPATCH_TEST_LOCK.lock().await;
-        let env = test_runtime(&["mutate.create"]);
+        let env = test_runtime(&["mutate__create"]);
         let params =
             serde_json::json!({"path":"cancelled.txt","content":"no\n","create_parents":false});
         let started = start(&env, 1, &params, false);
@@ -378,7 +378,7 @@ mod tests {
             .runtime
             .dispatch(
                 started,
-                "mutate.create".into(),
+                "mutate__create".into(),
                 params,
                 Some(Arc::new(AtomicBool::new(true))),
             )
@@ -395,15 +395,15 @@ mod tests {
     #[tokio::test]
     async fn started_dispatch_checks_binding_and_records_mutation() {
         let _guard = DISPATCH_TEST_LOCK.lock().await;
-        let env = test_runtime(&["mutate.create"]);
+        let env = test_runtime(&["mutate__create"]);
         let params =
             serde_json::json!({"path":"created.txt","content":"yes\n","create_parents":false});
         for n in 1..=3 {
             let started = start(&env, n, &params, n == 3);
             let method = if n == 1 {
-                "mutate.edit"
+                "mutate__edit"
             } else {
-                "mutate.create"
+                "mutate__create"
             };
             let actual = if n == 2 {
                 serde_json::json!({"path":"other.txt"})
@@ -424,7 +424,7 @@ mod tests {
         let started = start(&env, 4, &params, false);
         let receipt = env
             .runtime
-            .dispatch(started, "mutate.create".into(), params, None)
+            .dispatch(started, "mutate__create".into(), params, None)
             .await;
         assert!(receipt.result.is_ok(), "{:?}", receipt.result);
         assert_eq!(
@@ -437,7 +437,7 @@ mod tests {
 
     #[test]
     fn operator_facade_uses_supplied_snapshot() {
-        let env = test_runtime(&["mutate.create"]);
+        let env = test_runtime(&["mutate__create"]);
         let project = lattice_store::ProjectStoreKey::derive(env.workspace.path()).unwrap();
         let read = env.db.begin_read().unwrap();
         let filter = AuditFilter {

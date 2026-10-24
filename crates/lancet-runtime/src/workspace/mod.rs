@@ -32,7 +32,7 @@ pub const MAX_WORKSPACE_WRITE_BYTES: usize = 1024 * 1024;
 /// Canonical content hash for a byte slice.
 ///
 /// `blake3:<64 hex>` is the one hash form the workspace speaks: `read_file`
-/// observation returns it as `content_hash`, and `mutate.edit` verifies the
+/// observation returns it as `content_hash`, and `mutate__edit` verifies the
 /// caller's `expected_hash` against it. Observation and mutation share this
 /// exact implementation.
 pub fn content_hash(bytes: &[u8]) -> String {
@@ -43,8 +43,8 @@ pub fn content_hash(bytes: &[u8]) -> String {
 mod tests {
     use super::content_hash;
 
-    /// The digest form is a wire contract: `observe.workspace` hands this exact
-    /// string to the model and `mutate.edit` compares it byte-for-byte, so the
+    /// The digest form is a wire contract: `observe__workspace` hands this exact
+    /// string to the model and `mutate__edit` compares it byte-for-byte, so the
     /// prefix and hex width are pinned, not incidental.
     #[test]
     fn content_hash_is_prefixed_lowercase_blake3_hex() {

@@ -68,5 +68,5 @@
     }
   ],
   "render-schema-version": 1,
-  "tool": "observe.workspace"
+  "tool": "observe__workspace"
 }

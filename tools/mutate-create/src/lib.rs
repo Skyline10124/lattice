@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! `mutate.create` — create-if-absent install as a Component Tool (#31).
+//! `mutate__create` — create-if-absent install as a Component Tool (#31).
 //!
 //! The guest holds no filesystem path and no write handle. Its whole reach is
 //! the `workspace-mutate` import: `create-if-absent` re-enters the host, which

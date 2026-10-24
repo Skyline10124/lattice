@@ -1,8 +1,8 @@
-# Sole Tool Descriptor authority (ADR 0004 §2) for `fetch.web`.
+# Sole Tool Descriptor authority (ADR 0004 §2) for `fetch__web`.
 imports = ["network-fetch"]
 
 [tool]
-name = "fetch.web"
+name = "fetch__web"
 version = "0.1.0"
 description = "Fetch a URL over HTTP(S) and return its text content. The URL host must be permitted by the profile network allowlist. A blocked host is a policy decision, not a transient error: do not retry the same host; use an allowed host or request the host be added to the profile network allowlist."
 abi-version = 1

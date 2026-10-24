@@ -48,7 +48,7 @@ const MAX_WRITE_SIZE: usize = crate::workspace::MAX_WORKSPACE_WRITE_BYTES;
 pub struct MutationCallContext<'a> {
     pub invocation_id: InvocationId,
     pub turn_id: &'a str,
-    /// CEP method name recorded into private history (`mutate.create` / `mutate.edit`).
+    /// CEP method name recorded into private history (`mutate__create` / `mutate__edit`).
     pub method: &'a str,
     pub admitted: &'a AdmittedTool,
     pub evidence: &'a CellEvidenceLedger,
@@ -162,14 +162,14 @@ impl MutateError {
         match self {
             Self::NotFound { requested } => format!("path not found: {requested}"),
             Self::AlreadyExists { requested } => {
-                format!("mutate target '{requested}' already exists; observe.workspace and replan")
+                format!("mutate target '{requested}' already exists; observe__workspace and replan")
             }
             Self::StaleRevision {
                 requested,
                 expected,
                 observed,
             } => format!(
-                "expected_hash for '{requested}' is stale: expected {expected}, current {observed}; observe.workspace read_file again"
+                "expected_hash for '{requested}' is stale: expected {expected}, current {observed}; observe__workspace read_file again"
             ),
             Self::SemanticReplan { reason, .. } => reason.clone(),
             Self::Validation { reason, .. } => reason.clone(),
@@ -944,7 +944,7 @@ impl bindings::lattice::tool_host::workspace_mutate::Host for StoreState {
         path: String,
         expected_revision: String,
     ) -> Result<bindings::lattice::tool_host::workspace_mutate::FileBytes, WitMutateError> {
-        let (host, ctx) = self.mutation("mutate.edit")?;
+        let (host, ctx) = self.mutation("mutate__edit")?;
         host.read_for_edit(&ctx, &path, &expected_revision)
             .map(
                 |outcome| bindings::lattice::tool_host::workspace_mutate::FileBytes {
@@ -961,7 +961,7 @@ impl bindings::lattice::tool_host::workspace_mutate::Host for StoreState {
         content: String,
         create_parents: bool,
     ) -> Result<bindings::lattice::tool_host::workspace_mutate::CreateResult, WitMutateError> {
-        let (host, ctx) = self.mutation("mutate.create")?;
+        let (host, ctx) = self.mutation("mutate__create")?;
         host.create_if_absent(&ctx, &path, &content, create_parents)
             .map(
                 |outcome| bindings::lattice::tool_host::workspace_mutate::CreateResult {
@@ -980,7 +980,7 @@ impl bindings::lattice::tool_host::workspace_mutate::Host for StoreState {
         expected_revision: String,
         content: String,
     ) -> Result<bindings::lattice::tool_host::workspace_mutate::ReplaceResult, WitMutateError> {
-        let (host, ctx) = self.mutation("mutate.edit")?;
+        let (host, ctx) = self.mutation("mutate__edit")?;
         host.replace_with_expected(&ctx, &path, &expected_revision, &content)
             .map(
                 |outcome| bindings::lattice::tool_host::workspace_mutate::ReplaceResult {
@@ -999,7 +999,7 @@ impl bindings::lattice::tool_host::workspace_mutate::Host for StoreState {
         field: String,
         reason: String,
     ) -> WitMutateError {
-        let (host, ctx) = match self.mutation("mutate.edit") {
+        let (host, ctx) = match self.mutation("mutate__edit") {
             Ok(authority) => authority,
             Err(err) => return err,
         };
@@ -1079,7 +1079,7 @@ mod tests {
 
     fn mutate_descriptor() -> Arc<ToolDescriptor> {
         Arc::new(ToolDescriptor {
-            name: "mutate.create".into(),
+            name: "mutate__create".into(),
             version: "0.1.0".into(),
             description: "mutation fixture".into(),
             params_schema: serde_json::Value::Null,
@@ -1109,7 +1109,7 @@ mod tests {
         admit_tool(
             mutate_descriptor(),
             &CapabilityAdmissionPolicy {
-                enabled_tools: BTreeSet::from(["mutate.create".to_string()]),
+                enabled_tools: BTreeSet::from(["mutate__create".to_string()]),
                 denied_capabilities: BTreeSet::new(),
                 max_boundary: Trust::In,
             },
@@ -1209,7 +1209,7 @@ mod tests {
         let dir = seeded_project();
         let (host, evidence, _) = default_host(dir.path());
         let tool = admitted();
-        let call = ctx(&tool, &evidence, "mutate.create");
+        let call = ctx(&tool, &evidence, "mutate__create");
 
         let installed = host
             .create_if_absent(&call, "fresh.txt", "hello\n", false)
@@ -1245,7 +1245,7 @@ mod tests {
         let dir = seeded_project();
         let (host, evidence, _) = default_host(dir.path());
         let tool = admitted();
-        let call = ctx(&tool, &evidence, "mutate.create");
+        let call = ctx(&tool, &evidence, "mutate__create");
 
         let err = host
             .create_if_absent(&call, "notes.txt", "nope\n", false)
@@ -1256,7 +1256,7 @@ mod tests {
             "v1\n"
         );
         assert_eq!(
-            mutate_cep_error("mutate.create", &err).code,
+            mutate_cep_error("mutate__create", &err).code,
             CepErrorCode::ReplanRequired
         );
 
@@ -1274,7 +1274,7 @@ mod tests {
         let dir = seeded_project();
         let (host, evidence, _) = default_host(dir.path());
         let tool = admitted();
-        let call = ctx(&tool, &evidence, "mutate.edit");
+        let call = ctx(&tool, &evidence, "mutate__edit");
 
         let err = host
             .replace_with_expected(&call, "notes.txt", &content_hash(b"wrong\n"), "v2\n")
@@ -1285,7 +1285,7 @@ mod tests {
             "v1\n"
         );
         assert_eq!(
-            mutate_cep_error("mutate.edit", &err).code,
+            mutate_cep_error("mutate__edit", &err).code,
             CepErrorCode::ReplanRequired
         );
         let (_, effects, denied) = evidence.snapshot();
@@ -1305,7 +1305,7 @@ mod tests {
         let dir = seeded_project();
         let (host, evidence, workspace) = default_host(dir.path());
         let tool = admitted();
-        let call = ctx(&tool, &evidence, "mutate.edit");
+        let call = ctx(&tool, &evidence, "mutate__edit");
         workspace.replace_target_before_next_revision_check(
             WorkspacePath::parse("notes.txt").unwrap(),
             b"external\n".to_vec(),
@@ -1326,7 +1326,7 @@ mod tests {
         let dir = seeded_project();
         let (host, evidence, _) = default_host(dir.path());
         let tool = admitted();
-        let call = ctx(&tool, &evidence, "mutate.create");
+        let call = ctx(&tool, &evidence, "mutate__create");
 
         let err = host
             .create_if_absent(&call, "../escape.txt", "x\n", false)
@@ -1346,7 +1346,7 @@ mod tests {
         let (host, evidence, _) = default_host(dir.path());
         let host = host.with_max_write_size(4);
         let tool = admitted();
-        let call = ctx(&tool, &evidence, "mutate.create");
+        let call = ctx(&tool, &evidence, "mutate__create");
 
         let err = host
             .create_if_absent(&call, "big.txt", "12345", false)
@@ -1373,7 +1373,7 @@ mod tests {
         let dir = seeded_project();
         let (host, evidence, workspace) = default_host(dir.path());
         let tool = admitted();
-        let call = ctx(&tool, &evidence, "mutate.edit");
+        let call = ctx(&tool, &evidence, "mutate__edit");
         workspace.fail_next_install();
 
         let err = host
@@ -1394,7 +1394,7 @@ mod tests {
         let dir = seeded_project();
         let (host, evidence, _) = default_host(dir.path());
         let tool = admitted();
-        let call = cancelled_ctx(&tool, &evidence, "mutate.create");
+        let call = cancelled_ctx(&tool, &evidence, "mutate__create");
 
         let err = host
             .create_if_absent(&call, "cancelled.txt", "no\n", false)
@@ -1414,7 +1414,7 @@ mod tests {
         let dir = seeded_project();
         let (host, evidence, _) = default_host(dir.path());
         let tool = admitted();
-        let call = cancelled_ctx(&tool, &evidence, "mutate.edit");
+        let call = cancelled_ctx(&tool, &evidence, "mutate__edit");
 
         let err = host
             .replace_with_expected(&call, "notes.txt", &content_hash(b"v1\n"), "v2\n")
@@ -1439,7 +1439,7 @@ mod tests {
         history.fail_next_record();
         let (host, evidence, _) = host_over(dir.path(), Vec::new(), Some(history.clone()));
         let tool = admitted();
-        let call = ctx(&tool, &evidence, "mutate.create");
+        let call = ctx(&tool, &evidence, "mutate__create");
 
         let err = host
             .create_if_absent(&call, "installed.txt", "keep\n", false)
@@ -1483,7 +1483,7 @@ mod tests {
         let (_state, history) = private_history();
         let (host, evidence, workspace) = host_over(dir.path(), Vec::new(), Some(history.clone()));
         let tool = admitted();
-        let call = ctx(&tool, &evidence, "mutate.create");
+        let call = ctx(&tool, &evidence, "mutate__create");
         workspace.fail_next_parent_fsync();
 
         let err = host
@@ -1514,7 +1514,7 @@ mod tests {
         let (_state, history) = private_history();
         let (host, evidence, workspace) = host_over(dir.path(), Vec::new(), Some(history.clone()));
         let tool = admitted();
-        let call = ctx(&tool, &evidence, "mutate.edit");
+        let call = ctx(&tool, &evidence, "mutate__edit");
         workspace.fail_next_parent_fsync();
 
         let err = host
@@ -1544,7 +1544,7 @@ mod tests {
         let dir = seeded_project();
         let (host, evidence, _) = default_host(dir.path());
         let tool = admitted();
-        let call = ctx(&tool, &evidence, "mutate.edit");
+        let call = ctx(&tool, &evidence, "mutate__edit");
 
         let err = host.refuse_edit(
             &call,
@@ -1567,7 +1567,7 @@ mod tests {
         let dir = seeded_project();
         let (host, evidence, _) = default_host(dir.path());
         let tool = admitted();
-        let call = ctx(&tool, &evidence, "mutate.edit");
+        let call = ctx(&tool, &evidence, "mutate__edit");
 
         let err = host.refuse_edit(
             &call,

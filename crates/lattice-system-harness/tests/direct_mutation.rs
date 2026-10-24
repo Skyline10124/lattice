@@ -4,7 +4,7 @@
 //! Direct-Local atomic mutation, external concurrency, and effect denial
 //! (issue #46 slice 3, Codeberg #24).
 //!
-//! Covers `mutate.create` / `mutate.edit` operating on current Local state:
+//! Covers `mutate__create` / `mutate__edit` operating on current Local state:
 //! success paths leave bytes immediately; denials and stale preconditions
 //! never change the target; preflight effect-kind denial never calls the backend.
 //! Mutation retention after provider failure is covered by `direct_failures`.
@@ -34,25 +34,25 @@ fn is_non_completed_terminal(outcome: &lattice_system_harness::SendOutcome) -> b
         || outcome.exit_code == Some(SendExitCode::Failed)
 }
 
-/// `mutate.create` succeeds only while the target is absent; bytes appear
+/// `mutate__create` succeeds only while the target is absent; bytes appear
 /// immediately. A second create of the same path fails and preserves bytes.
 #[test]
 fn direct_mutation_create_atomic_and_existing_target() {
     let driver = driver();
-    let (world, spec) = direct_world("direct-mut-create", "dl-create", "[\"mutate.create\"]", "");
+    let (world, spec) = direct_world("direct-mut-create", "dl-create", "[\"mutate__create\"]", "");
     let server = wire_fake_llm(
         &world,
         "dl-create",
         sequence(vec![
             tool_call(
                 "c1",
-                "mutate.create",
+                "mutate__create",
                 r#"{"path":"new.txt","content":"created-v1\n","create_parents":false}"#,
             ),
             SseScript::plain("created"),
             tool_call(
                 "c2",
-                "mutate.create",
+                "mutate__create",
                 r#"{"path":"new.txt","content":"created-v2\n","create_parents":false}"#,
             ),
             SseScript::plain("second create failed as expected"),
@@ -68,7 +68,7 @@ fn direct_mutation_create_atomic_and_existing_target() {
     let result: Result<(), AssertError> = (|| {
         assert_clean_send(&first)?;
         assert_clean_send(&second)?;
-        require(tool_ok(&first.parsed, "mutate.create"), "first create ok")?;
+        require(tool_ok(&first.parsed, "mutate__create"), "first create ok")?;
         require(
             first.has_completed(),
             format!("first turn incomplete: {:?}", first.type_sequence()),
@@ -81,7 +81,7 @@ fn direct_mutation_create_atomic_and_existing_target() {
         )?;
 
         require(
-            tool_failed(&second.parsed, "mutate.create"),
+            tool_failed(&second.parsed, "mutate__create"),
             "second create of existing target must fail",
         )?;
         require(
@@ -93,7 +93,7 @@ fn direct_mutation_create_atomic_and_existing_target() {
             "failed create must preserve existing bytes",
         )?;
 
-        let failure = tool_failure(&second.parsed, "mutate.create");
+        let failure = tool_failure(&second.parsed, "mutate__create");
         require(
             failure.is_some_and(|(_, error)| {
                 error["code"] == "replan_required"
@@ -126,7 +126,7 @@ fn direct_mutation_create_atomic_and_existing_target() {
     );
 }
 
-/// `mutate.edit` with a known Local Revision succeeds; a nonmatching anchor
+/// `mutate__edit` with a known Local Revision succeeds; a nonmatching anchor
 /// fails before install and preserves bytes.
 #[test]
 fn direct_mutation_edit_hash_and_anchor() {
@@ -134,7 +134,7 @@ fn direct_mutation_edit_hash_and_anchor() {
     let (world, spec) = direct_world(
         "direct-mut-edit",
         "dl-edit",
-        "[\"observe.workspace\", \"mutate.edit\"]",
+        "[\"observe__workspace\", \"mutate__edit\"]",
         "",
     );
     world
@@ -149,7 +149,7 @@ fn direct_mutation_edit_hash_and_anchor() {
             // Round 1: observe to learn content_hash
             tool_call(
                 "o1",
-                "observe.workspace",
+                "observe__workspace",
                 r#"{"request":{"mode":"read_file","path":"tracked.txt"}}"#,
             ),
             // Round 2: edit with the hash from the previous tool message —
@@ -176,7 +176,7 @@ fn direct_mutation_edit_hash_and_anchor() {
 
     let result: Result<(), AssertError> = (|| {
         assert_clean_send(&observe)?;
-        require(tool_ok(&observe.parsed, "observe.workspace"), "observe ok")?;
+        require(tool_ok(&observe.parsed, "observe__workspace"), "observe ok")?;
         require(captures_obs.len() >= 2, "observe needs tool result capture")?;
         let observed = tool_result_value(&captures_obs[1]).expect("observe result");
         let hash = observed
@@ -204,9 +204,9 @@ fn direct_mutation_edit_hash_and_anchor() {
             &world,
             "dl-edit",
             sequence(vec![
-                tool_call("e_bad", "mutate.edit", &bad_args),
+                tool_call("e_bad", "mutate__edit", &bad_args),
                 SseScript::plain("bad anchor denied"),
-                tool_call("e_good", "mutate.edit", &good_args),
+                tool_call("e_good", "mutate__edit", &good_args),
                 SseScript::plain("edited"),
             ]),
         );
@@ -214,7 +214,7 @@ fn direct_mutation_edit_hash_and_anchor() {
         let bad = send.send("edit with bad anchor").expect("bad edit turn");
         assert_clean_send(&bad)?;
         require(
-            tool_failed(&bad.parsed, "mutate.edit"),
+            tool_failed(&bad.parsed, "mutate__edit"),
             format!(
                 "nonmatching anchor must fail; events={:?}",
                 bad.type_sequence()
@@ -226,7 +226,7 @@ fn direct_mutation_edit_hash_and_anchor() {
             "failed edit must preserve original bytes",
         )?;
         require(bad.has_completed(), "bad-edit turn completes")?;
-        let failure = tool_failure(&bad.parsed, "mutate.edit");
+        let failure = tool_failure(&bad.parsed, "mutate__edit");
         require(
             failure.is_some_and(|(_, error)| {
                 error["code"] == "replan_required"
@@ -240,7 +240,7 @@ fn direct_mutation_edit_hash_and_anchor() {
         let captures_edit = server2.captured_requests();
 
         assert_clean_send(&good)?;
-        require(tool_ok(&good.parsed, "mutate.edit"), "good edit ok")?;
+        require(tool_ok(&good.parsed, "mutate__edit"), "good edit ok")?;
         require(
             fs::read_to_string(world.project_dir().join("tracked.txt")).unwrap_or_default()
                 == "hello lattice\n",
@@ -271,7 +271,7 @@ fn direct_mutation_stale_edit_and_external_visibility() {
     let (world, spec) = direct_world(
         "direct-mut-stale",
         "dl-stale",
-        "[\"observe.workspace\", \"mutate.edit\"]",
+        "[\"observe__workspace\", \"mutate__edit\"]",
         "",
     );
     world
@@ -288,17 +288,17 @@ fn direct_mutation_stale_edit_and_external_visibility() {
         sequence(vec![
             tool_call(
                 "o1",
-                "observe.workspace",
+                "observe__workspace",
                 r#"{"request":{"mode":"read_file","path":"tracked.txt"}}"#,
             ),
             tool_call(
                 "list1",
-                "observe.workspace",
+                "observe__workspace",
                 r#"{"request":{"mode":"list_directory","path":"."}}"#,
             ),
             tool_call(
                 "list2",
-                "observe.workspace",
+                "observe__workspace",
                 r#"{"request":{"mode":"list_directory","path":"."}}"#,
             ),
             SseScript::plain("observed original and external addition"),
@@ -394,11 +394,11 @@ fn direct_mutation_stale_edit_and_external_visibility() {
             &world,
             "dl-stale",
             sequence(vec![
-                tool_call("e_stale", "mutate.edit", &stale_args),
+                tool_call("e_stale", "mutate__edit", &stale_args),
                 SseScript::plain("stale denied"),
                 tool_call(
                     "o2",
-                    "observe.workspace",
+                    "observe__workspace",
                     r#"{"request":{"mode":"read_file","path":"tracked.txt"}}"#,
                 ),
                 SseScript::plain("see external"),
@@ -408,13 +408,13 @@ fn direct_mutation_stale_edit_and_external_visibility() {
         let stale = send.send("edit with stale hash").expect("stale edit");
         assert_clean_send(&stale)?;
         require(
-            tool_failed(&stale.parsed, "mutate.edit"),
+            tool_failed(&stale.parsed, "mutate__edit"),
             "stale edit must fail",
         )?;
         // Host `StaleRevision` records a typed refusal; runtime prefers it over
         // the guest's `Err(String)` retelling so the wire stays ReplanRequired.
         require(
-            finished_with_code(&stale.parsed, "mutate.edit", "replan_required"),
+            finished_with_code(&stale.parsed, "mutate__edit", "replan_required"),
             format!(
                 "stale edit must emit ReplanRequired: {:?}",
                 stale.parsed.slots()
@@ -430,7 +430,7 @@ fn direct_mutation_stale_edit_and_external_visibility() {
         let captures2 = server2.captured_requests();
         assert_clean_send(&reobserve)?;
         require(
-            tool_ok(&reobserve.parsed, "observe.workspace"),
+            tool_ok(&reobserve.parsed, "observe__workspace"),
             "reobserve ok",
         )?;
         let base = captures2.len().saturating_sub(2);
@@ -464,7 +464,7 @@ fn direct_mutation_denials_have_no_side_effect() {
     let (world, spec) = direct_world(
         "direct-mut-deny-write",
         "dl-dwrite",
-        "[\"mutate.create\"]",
+        "[\"mutate__create\"]",
         "\n[lancet.workspace]\ndenied_write_patterns = [\"blocked/**\"]\n",
     );
     let server = wire_fake_llm(
@@ -473,7 +473,7 @@ fn direct_mutation_denials_have_no_side_effect() {
         sequence(vec![
             tool_call(
                 "c1",
-                "mutate.create",
+                "mutate__create",
                 r#"{"path":"blocked/x.txt","content":"nope","create_parents":true}"#,
             ),
             SseScript::plain("denied"),
@@ -485,14 +485,15 @@ fn direct_mutation_denials_have_no_side_effect() {
     let caps1 = server.captured_requests();
     drop(server);
 
-    let (world2, spec2) = direct_world("direct-mut-deny-sys", "dl-dsys", "[\"mutate.create\"]", "");
+    let (world2, spec2) =
+        direct_world("direct-mut-deny-sys", "dl-dsys", "[\"mutate__create\"]", "");
     let server2 = wire_fake_llm(
         &world2,
         "dl-dsys",
         sequence(vec![
             tool_call(
                 "c2",
-                "mutate.create",
+                "mutate__create",
                 r#"{"path":".lattice/evil.txt","content":"nope","create_parents":true}"#,
             ),
             SseScript::plain("denied"),
@@ -508,7 +509,7 @@ fn direct_mutation_denials_have_no_side_effect() {
     let (world3, spec3) = direct_world(
         "direct-mut-deny-effect",
         "dl-deff",
-        "[\"mutate.create\"]",
+        "[\"mutate__create\"]",
         "\n[lancet.capabilities]\ndeny = [\"workspace.mutation\"]\n",
     );
     let server3 = wire_fake_llm(
@@ -517,7 +518,7 @@ fn direct_mutation_denials_have_no_side_effect() {
         sequence(vec![
             tool_call(
                 "c3",
-                "mutate.create",
+                "mutate__create",
                 r#"{"path":"effect-denied.txt","content":"nope","create_parents":false}"#,
             ),
             SseScript::plain("effect denied"),
@@ -531,7 +532,7 @@ fn direct_mutation_denials_have_no_side_effect() {
     let write_result: Result<(), AssertError> = (|| {
         assert_clean_send(&write_deny)?;
         require(
-            tool_failed(&write_deny.parsed, "mutate.create"),
+            tool_failed(&write_deny.parsed, "mutate__create"),
             "write policy must fail tool",
         )?;
         require(
@@ -539,14 +540,14 @@ fn direct_mutation_denials_have_no_side_effect() {
             "write-policy denial left a file",
         )?;
         require(
-            finished_with_code(&write_deny.parsed, "mutate.create", "capability_violation"),
+            finished_with_code(&write_deny.parsed, "mutate__create", "capability_violation"),
             format!(
                 "write-policy denial must be CapabilityViolation: {:?}",
                 write_deny.parsed.slots()
             ),
         )?;
 
-        let failure = tool_failure(&write_deny.parsed, "mutate.create");
+        let failure = tool_failure(&write_deny.parsed, "mutate__create");
         require(
             failure.is_some_and(|(slot, error)| {
                 error["code"] == "capability_violation"
@@ -572,7 +573,7 @@ fn direct_mutation_denials_have_no_side_effect() {
     let sys_result: Result<(), AssertError> = (|| {
         assert_clean_send(&sys_deny)?;
         require(
-            tool_failed(&sys_deny.parsed, "mutate.create"),
+            tool_failed(&sys_deny.parsed, "mutate__create"),
             "system exclusion must fail tool",
         )?;
         require(
@@ -580,14 +581,14 @@ fn direct_mutation_denials_have_no_side_effect() {
             "system-exclusion denial left a file",
         )?;
         require(
-            finished_with_code(&sys_deny.parsed, "mutate.create", "path_containment"),
+            finished_with_code(&sys_deny.parsed, "mutate__create", "path_containment"),
             format!(
                 "system exclusion must be PathContainment: {:?}",
                 sys_deny.parsed.slots()
             ),
         )?;
 
-        let failure = tool_failure(&sys_deny.parsed, "mutate.create");
+        let failure = tool_failure(&sys_deny.parsed, "mutate__create");
         require(
             failure.is_some_and(|(slot, error)| {
                 error["code"] == "path_containment"
@@ -613,7 +614,7 @@ fn direct_mutation_denials_have_no_side_effect() {
     let effect_result: Result<(), AssertError> = (|| {
         assert_clean_send(&effect_deny)?;
         require(
-            tool_failed(&effect_deny.parsed, "mutate.create"),
+            tool_failed(&effect_deny.parsed, "mutate__create"),
             "capability denial must fail tool",
         )?;
         require(
@@ -624,7 +625,7 @@ fn direct_mutation_denials_have_no_side_effect() {
             caps3.len() == 2,
             "capability denial needs tool result capture",
         )?;
-        let failure = tool_failure(&effect_deny.parsed, "mutate.create");
+        let failure = tool_failure(&effect_deny.parsed, "mutate__create");
         require(
             failure.is_some_and(|(slot, error)| {
                 error["code"] == "capability_violation"
@@ -674,7 +675,7 @@ fn direct_mutation_denials_have_no_side_effect() {
 #[test]
 fn direct_mutation_concurrent_same_target_create_has_one_winner() {
     let driver = driver();
-    let (world, spec) = direct_world("direct-mut-race", "dl-race", "[\"mutate.create\"]", "");
+    let (world, spec) = direct_world("direct-mut-race", "dl-race", "[\"mutate__create\"]", "");
 
     // Sequence 按请求到达顺序供稿：前两个请求（两个 Session 各一）都拿到同一目标的 create，
     // 后两个是工具回合后的收尾文本。
@@ -684,12 +685,12 @@ fn direct_mutation_concurrent_same_target_create_has_one_winner() {
         sequence(vec![
             tool_call(
                 "r1",
-                "mutate.create",
+                "mutate__create",
                 r#"{"path":"race.txt","content":"a\n","create_parents":false}"#,
             ),
             tool_call(
                 "r2",
-                "mutate.create",
+                "mutate__create",
                 r#"{"path":"race.txt","content":"b\n","create_parents":false}"#,
             ),
             SseScript::plain("a done"),
@@ -729,11 +730,11 @@ fn direct_mutation_concurrent_same_target_create_has_one_winner() {
         assert_clean_send(&b)?;
         let tool_successes = [&a, &b]
             .into_iter()
-            .filter(|outcome| tool_ok(&outcome.parsed, "mutate.create"))
+            .filter(|outcome| tool_ok(&outcome.parsed, "mutate__create"))
             .count();
         let tool_failures = [&a, &b]
             .into_iter()
-            .filter(|outcome| tool_failed(&outcome.parsed, "mutate.create"))
+            .filter(|outcome| tool_failed(&outcome.parsed, "mutate__create"))
             .count();
         require(
             tool_successes == 1 && tool_failures == 1,
@@ -747,7 +748,7 @@ fn direct_mutation_concurrent_same_target_create_has_one_winner() {
         require(
             [&a, &b].into_iter().all(|outcome| {
                 outcome.slots().iter().any(|slot| {
-                    slot.method == "mutate.create" && slot.outcome != SlotOutcome::NotExecuted
+                    slot.method == "mutate__create" && slot.outcome != SlotOutcome::NotExecuted
                 })
             }),
             format!(
@@ -756,13 +757,13 @@ fn direct_mutation_concurrent_same_target_create_has_one_winner() {
                 b.type_sequence()
             ),
         )?;
-        let loser = if tool_failed(&a.parsed, "mutate.create") {
+        let loser = if tool_failed(&a.parsed, "mutate__create") {
             &a
         } else {
             &b
         };
         require(
-            finished_with_code(&loser.parsed, "mutate.create", "replan_required"),
+            finished_with_code(&loser.parsed, "mutate__create", "replan_required"),
             format!(
                 "same-target loser must be ReplanRequired: {:?}",
                 loser.type_sequence()
@@ -800,7 +801,7 @@ fn direct_mutation_concurrent_same_target_create_has_one_winner() {
         let race_path = world.project_dir().join("race.txt");
         require(
             race_path.is_file(),
-            "successful mutate.create must leave race.txt",
+            "successful mutate__create must leave race.txt",
         )?;
         let bytes = fs::read_to_string(&race_path).unwrap_or_default();
         require(
@@ -822,14 +823,14 @@ fn direct_mutation_concurrent_same_target_create_has_one_winner() {
 #[test]
 fn direct_mutation_tool_activity_before_commit() {
     let driver = driver();
-    let (world, spec) = direct_world("direct-mut-order", "dl-order", "[\"mutate.create\"]", "");
+    let (world, spec) = direct_world("direct-mut-order", "dl-order", "[\"mutate__create\"]", "");
     let server = wire_fake_llm(
         &world,
         "dl-order",
         sequence(vec![
             tool_call(
                 "c1",
-                "mutate.create",
+                "mutate__create",
                 r#"{"path":"ordered.txt","content":"ok\n","create_parents":false}"#,
             ),
             SseScript::plain("done"),
@@ -846,7 +847,7 @@ fn direct_mutation_tool_activity_before_commit() {
         // 带结局的最后一步在带 Tool 调用的步骤之后。
         assert_accepted_and_closed(&outcome.parsed)?;
         assert_completed_after_tools(&outcome.parsed)?;
-        require(tool_ok(&outcome.parsed, "mutate.create"), "create ok")?;
+        require(tool_ok(&outcome.parsed, "mutate__create"), "create ok")?;
         require(
             world.project_dir().join("ordered.txt").is_file(),
             "ordered.txt missing",
@@ -862,14 +863,14 @@ fn direct_mutation_tool_activity_before_commit() {
     );
 }
 
-/// 指向外部目录的符号链接不能成为 `mutate.create` 的父目录。
+/// 指向外部目录的符号链接不能成为 `mutate__create` 的父目录。
 #[test]
 fn direct_mutation_symlink_parent_is_refused_without_side_effect() {
     let driver = driver();
     let (world, spec) = direct_world(
         "direct-mut-symlink",
         "dl-symlink",
-        "[\"mutate.create\"]",
+        "[\"mutate__create\"]",
         "",
     );
     const CANARY: &str = "I233_MUTATION_EXTERNAL_CANARY_83bc\n";
@@ -885,7 +886,7 @@ fn direct_mutation_symlink_parent_is_refused_without_side_effect() {
         sequence(vec![
             tool_call(
                 "symlink-create",
-                "mutate.create",
+                "mutate__create",
                 r#"{"path":"dir-link/new.txt","content":"nope","create_parents":true}"#,
             ),
             SseScript::plain("symlink refused"),
@@ -899,11 +900,11 @@ fn direct_mutation_symlink_parent_is_refused_without_side_effect() {
     let result: Result<(), AssertError> = (|| {
         assert_clean_send(&execution)?;
         require(
-            tool_failed(&execution.parsed, "mutate.create"),
+            tool_failed(&execution.parsed, "mutate__create"),
             "symlink create must fail",
         )?;
         require(
-            finished_with_code(&execution.parsed, "mutate.create", "path_containment"),
+            finished_with_code(&execution.parsed, "mutate__create", "path_containment"),
             "symlink create must be PathContainment",
         )?;
         require(

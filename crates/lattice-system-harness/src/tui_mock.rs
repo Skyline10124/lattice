@@ -50,7 +50,7 @@ impl TuiMockScenario {
     pub const fn description(self) -> &'static str {
         match self {
             Self::LongText => "确定性的长对话记录",
-            Self::ToolCall => "session.todo_write 工具生命周期",
+            Self::ToolCall => "session__todo_write 工具生命周期",
             Self::Disconnect => "输出部分文本后断开连接",
             Self::Slow => "响应保持停滞，等待 Ctrl+C 取消",
             Self::Error => "稳定返回提供方 HTTP 500",
@@ -72,7 +72,7 @@ impl TuiMockScenario {
                 scripts: vec![
                     SseScript::ToolCall {
                         call_id: "mock-tool-call-1".into(),
-                        tool_name: "session.todo_write".into(),
+                        tool_name: "session__todo_write".into(),
                         arguments_json:
                             r#"{"todos":[{"content":"inspect mock TUI","status":"in_progress"}]}"#
                                 .into(),
@@ -114,7 +114,7 @@ impl TuiMockScenario {
 
     fn enabled_tools(self) -> &'static str {
         match self {
-            Self::ToolCall => r#"["session.todo_write"]"#,
+            Self::ToolCall => r#"["session__todo_write"]"#,
             _ => "[]",
         }
     }

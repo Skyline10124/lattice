@@ -258,7 +258,7 @@ mod tests {
         ToolCatalogSnapshot::new(
             "build-1".to_string(),
             vec![ToolCatalogEntry {
-                name: "observe.workspace".to_string(),
+                name: "observe__workspace".to_string(),
                 descriptor_identity: "a".repeat(64),
                 description: "observe".to_string(),
                 input_schema: serde_json::json!({"type": "object"}),

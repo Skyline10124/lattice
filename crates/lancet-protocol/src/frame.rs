@@ -19,7 +19,7 @@ mod tests {
             code: CepErrorCode::ExecutionFailed,
             message: "runtime operation failed".into(),
             data: CepErrorData::Execution(ExecutionErrorData {
-                operation: "mutate.edit".into(),
+                operation: "mutate__edit".into(),
                 detail: Some("installation failed".into()),
             }),
             retriability: Retriability::Transient,

@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Shared semantic-edit logic for `mutate.create` / `mutate.edit` (#31).
+//! Shared semantic-edit logic for `mutate__create` / `mutate__edit` (#31).
 //!
 //! This crate owns the pure text transforms and the diagnostic messages the
 //! model sees when an edit cannot be applied. It performs no I/O and imports
@@ -22,7 +22,7 @@ use alloc::vec::Vec;
 
 use serde::Deserialize;
 
-/// One semantic edit operation, matching the catalog/`mutate.edit` wire shape.
+/// One semantic edit operation, matching the catalog/`mutate__edit` wire shape.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum EditOp {
@@ -85,7 +85,7 @@ pub fn apply_edits(before: &str, edits: &[EditOp]) -> Result<String, EditDiag> {
     if edits.is_empty() {
         return Err(EditDiag::validation(
             "edits",
-            "mutate.edit requires at least one edit operation",
+            "mutate__edit requires at least one edit operation",
         ));
     }
 

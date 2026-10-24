@@ -34,7 +34,7 @@ fn input() -> AcceptTurn {
             catalog: ToolCatalogSnapshot::new(
                 "test-build".into(),
                 vec![ToolCatalogEntry {
-                    name: "observe.workspace".into(),
+                    name: "observe__workspace".into(),
                     descriptor_identity: "a".repeat(64),
                     description: "读取".into(),
                     input_schema: json!({"type":"object"}),
@@ -68,7 +68,7 @@ fn reply(turn_id: TurnId) -> CompleteReply {
                 MessagePart::semantic_only(MessageSemantic::ToolCall {
                     call: UnboundToolCall {
                         provider_call_id: Some("call-1".into()),
-                        name: "observe.workspace".into(),
+                        name: "observe__workspace".into(),
                         arguments: json!({}),
                     },
                 }),
@@ -126,7 +126,7 @@ async fn started_commit_precedes_execution_and_repeated_start_is_rejected() {
             .is_err()
     );
     let mut wrong = calls.bindings[0].clone();
-    wrong.identity.method = "mutate.create".into();
+    wrong.identity.method = "mutate__create".into();
     assert!(io.start_invocation(wrong).await.is_err());
 }
 
@@ -247,14 +247,14 @@ async fn live_multicall_closes_continue_then_finish_from_structured_history() {
                     MessagePart::semantic_only(MessageSemantic::ToolCall {
                         call: UnboundToolCall {
                             provider_call_id: Some("read-1".into()),
-                            name: "observe.workspace".into(),
+                            name: "observe__workspace".into(),
                             arguments: json!({"request": {"mode":"read_file", "path":"visible.txt"}}),
                         },
                     }),
                     MessagePart::semantic_only(MessageSemantic::ToolCall {
                         call: UnboundToolCall {
                             provider_call_id: Some("read-2".into()),
-                            name: "observe.workspace".into(),
+                            name: "observe__workspace".into(),
                             arguments: json!({"request": {"mode":"read_file", "path":"../outside.txt"}}),
                         },
                     }),
@@ -289,10 +289,10 @@ async fn live_multicall_closes_continue_then_finish_from_structured_history() {
     lancet_api::WorkspaceHistory::create(backing.clone()).unwrap();
     let mut runtime = lancet_api::LancetRuntime::build(lancet_api::LancetRuntimeConfig {
         local_workspace_root: root.clone(),
-        enabled_tools: vec!["observe.workspace".into()],
+        enabled_tools: vec!["observe__workspace".into()],
         policy: lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(root),
         capability_admission: lancet_protocol::evidence::CapabilityAdmissionPolicy {
-            enabled_tools: ["observe.workspace".into()].into(),
+            enabled_tools: ["observe__workspace".into()].into(),
             denied_capabilities: Default::default(),
             max_boundary: lancet_protocol::cell::Trust::Ex,
         },
@@ -520,10 +520,10 @@ async fn stop_at_execution_boundary(boundary: StopBoundary, cancelled: bool) {
     lancet_api::WorkspaceHistory::create(backing.clone()).unwrap();
     let mut runtime = lancet_api::LancetRuntime::build(lancet_api::LancetRuntimeConfig {
         local_workspace_root: root.clone(),
-        enabled_tools: vec!["observe.workspace".into()],
+        enabled_tools: vec!["observe__workspace".into()],
         policy: lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(root),
         capability_admission: lancet_protocol::evidence::CapabilityAdmissionPolicy {
-            enabled_tools: ["observe.workspace".into()].into(),
+            enabled_tools: ["observe__workspace".into()].into(),
             denied_capabilities: Default::default(),
             max_boundary: lancet_protocol::cell::Trust::Ex,
         },

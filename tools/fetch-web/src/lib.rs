@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! `fetch.web` Component guest: typed request and result shaping only.
+//! `fetch__web` Component guest: typed request and result shaping only.
 
 #![no_std]
 extern crate alloc;

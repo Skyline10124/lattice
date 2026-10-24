@@ -1,6 +1,6 @@
 [package]
 # `cargo xtask tool-build` derives the package name from the manifest's tool
-# name by replacing dots with dashes (`session.todo_write` ->
+# name by replacing `__` with a dash (`session__todo_write` ->
 # `session-todo_write`), and the cdylib artifact name from that. The name is
 # therefore not free-form.
 name = "session-todo_write"
@@ -9,7 +9,7 @@ license.workspace = true
 edition.workspace = true
 authors.workspace = true
 publish = false
-description = "session.todo_write Source Tool: validates and echoes a structured todo plan."
+description = "session__todo_write Source Tool: validates and echoes a structured todo plan."
 
 [lib]
 crate-type = ["cdylib"]

@@ -23,16 +23,16 @@ use tokio::sync::{mpsc, watch};
 
 /// The default distribution's five built-in Components after #32.
 const EXPECTED_BUILTIN_TOOLS: [&str; 5] = [
-    "fetch.web",
-    "mutate.create",
-    "mutate.edit",
-    "observe.workspace",
-    "session.todo_write",
+    "fetch__web",
+    "mutate__create",
+    "mutate__edit",
+    "observe__workspace",
+    "session__todo_write",
 ];
 
 fn policy() -> CapabilityAdmissionPolicy {
     CapabilityAdmissionPolicy {
-        enabled_tools: BTreeSet::from(["session.todo_write".to_string()]),
+        enabled_tools: BTreeSet::from(["session__todo_write".to_string()]),
         denied_capabilities: BTreeSet::new(),
         max_boundary: Trust::In,
     }
@@ -48,7 +48,7 @@ fn call_ctx(
     let (tx, _rx) = mpsc::unbounded_channel();
     let (cancel_tx, cancel_rx) = watch::channel(false);
     let descriptor = rt
-        .descriptor("session.todo_write")
+        .descriptor("session__todo_write")
         .expect("the embedded Tool is in the closed catalog");
     let admitted = admit_tool(descriptor, &policy()).expect("admitted");
     let evidence = CellEvidenceLedger::new();
@@ -78,7 +78,7 @@ fn from_embedded_composes_the_default_tool_bundle() {
     let rt = ComponentRuntime::from_embedded().expect("production composition succeeds");
     let names: Vec<&str> = rt.descriptors().map(|d| d.name.as_str()).collect();
     assert_eq!(names, EXPECTED_BUILTIN_TOOLS);
-    assert!(rt.descriptor("session.todo_write").is_some());
+    assert!(rt.descriptor("session__todo_write").is_some());
 }
 
 /// The embedded descriptor is the manifest's, in full: contract, description,
@@ -86,7 +86,7 @@ fn from_embedded_composes_the_default_tool_bundle() {
 #[test]
 fn the_embedded_descriptor_is_the_manifest_contract() {
     let rt = ComponentRuntime::from_embedded().expect("composition");
-    let descriptor = rt.descriptor("session.todo_write").expect("descriptor");
+    let descriptor = rt.descriptor("session__todo_write").expect("descriptor");
 
     assert_eq!(descriptor.version, "0.1.0");
     assert_eq!(
@@ -140,7 +140,7 @@ async fn embedded_tool_validates_and_echoes_the_plan() {
         ]
     });
     let result = rt
-        .call("session.todo_write", params.clone(), ctx)
+        .call("session__todo_write", params.clone(), ctx)
         .await
         .expect("a valid plan is accepted");
 
@@ -191,7 +191,7 @@ async fn a_schema_refusal_does_not_leak_todo_content() {
         let (ctx, _evidence, _cancel) = call_ctx(&rt);
         let err = match rt
             .call(
-                "session.todo_write",
+                "session__todo_write",
                 serde_json::json!({"todos": todos}),
                 ctx,
             )
@@ -214,7 +214,7 @@ async fn a_schema_refusal_does_not_leak_todo_content() {
         );
         // It must still say enough to act on: the method and where it failed.
         assert!(
-            err.message.contains("session.todo_write") && err.message.contains("schema"),
+            err.message.contains("session__todo_write") && err.message.contains("schema"),
             "{name}: the refusal must still name the method and the violation: {}",
             err.message
         );
@@ -231,7 +231,7 @@ async fn precancelled_call_reports_cancelled_and_keeps_admission_evidence() {
 
     let err = rt
         .call(
-            "session.todo_write",
+            "session__todo_write",
             serde_json::json!({"todos": [{"content": "a", "status": "pending"}]}),
             ctx,
         )
@@ -266,7 +266,7 @@ async fn resource_exhaustion_is_reported_and_records_no_effect() {
 
     let err = rt
         .call(
-            "session.todo_write",
+            "session__todo_write",
             serde_json::json!({"todos": [{"content": "starved", "status": "pending"}]}),
             ctx,
         )
@@ -291,7 +291,7 @@ async fn resource_exhaustion_is_reported_and_records_no_effect() {
 #[test]
 fn unenabled_embedded_tool_is_not_admitted() {
     let rt = ComponentRuntime::from_embedded().expect("composition");
-    let descriptor = rt.descriptor("session.todo_write").expect("descriptor");
+    let descriptor = rt.descriptor("session__todo_write").expect("descriptor");
     let denial = admit_tool(descriptor, &CapabilityAdmissionPolicy::default())
         .expect_err("the fail-closed default enables no tool");
     assert!(

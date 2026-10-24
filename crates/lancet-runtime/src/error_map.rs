@@ -127,7 +127,7 @@ pub(crate) fn schema_mismatch(method: &str, detail: impl Into<String>) -> CepErr
 /// value that failed.
 ///
 /// `jsonschema`'s `Display` embeds the offending instance — for a rejected
-/// `session.todo_write` call that is the user's whole todo list, which then lands
+/// `session__todo_write` call that is the user's whole todo list, which then lands
 /// verbatim in `cep_audit_entries.result_or_error`. The instance pointer and the
 /// schema keyword are enough for a caller to fix the call and for an operator to
 /// see what was refused.

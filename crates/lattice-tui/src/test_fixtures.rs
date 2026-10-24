@@ -221,13 +221,13 @@ impl StepEntry {
         let parts = self.parts.get_or_insert_with(Vec::new);
         let part = parts.len();
         parts.push(json!({"semantic":{"tool_call":{"call":{
-            "invocation_id":id,"provider_call_id":format!("call_{n}"),"name":"observe.workspace",
+            "invocation_id":id,"provider_call_id":format!("call_{n}"),"name":"observe__workspace",
             "arguments":{"path":"a.txt"},"arguments_digest":DIGEST,
             "address":{"message":{"session_id":SESSION,"turn_id":self.turn_id,"model_step_ordinal":self.ordinal},"part_ordinal":part}
         }}}}));
         let progress = if terminal {
             json!({"progress":"terminal","result":{
-                "invocation_id":id,"name":"observe.workspace",
+                "invocation_id":id,"name":"observe__workspace",
                 "payload":{"outcome":"succeeded","payload":{"kind":"json","value":null,
                     "digest":"4514e821d251d896aaed09c92f07abacecb5683e0714471682fa6beaca071aa2","byte_length":4}}
             },"evidence":{"kind":"unavailable","value":{"reason":"no_result"}}})
@@ -237,7 +237,7 @@ impl StepEntry {
         self.slots.push(json!({
             "binding":{"invocation_id":id,"identity":{
                 "session_id":SESSION,"turn_id":self.turn_id,"model_step_ordinal":self.ordinal,"part_ordinal":part,
-                "method":"observe.workspace","descriptor_identity":"observe.workspace","arguments_digest":DIGEST}},
+                "method":"observe__workspace","descriptor_identity":"observe__workspace","arguments_digest":DIGEST}},
             "progress":progress
         }));
         self

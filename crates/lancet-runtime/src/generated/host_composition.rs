@@ -15,9 +15,9 @@ use crate::composition::{
     _parse_hex_digest as parse_hex_digest, EmbeddedTool, ExpectedToolIdentity,
 };
 
-/// Embedded `fetch.web` v0.1.0: name plus the committed descriptor and Component bytes.
+/// Embedded `fetch__web` v0.1.0: name plus the committed descriptor and Component bytes.
 static FETCH_WEB: EmbeddedTool = EmbeddedTool {
-    name: "fetch.web",
+    name: "fetch__web",
     descriptor_json: include_bytes!("../../../../tools/fetch-web/generated/descriptor.json"),
     component_bytes: include_bytes!(
         "../../../../tools/fetch-web/generated/fetch_web.component.wasm"
@@ -25,9 +25,9 @@ static FETCH_WEB: EmbeddedTool = EmbeddedTool {
 };
 inventory::submit!(&FETCH_WEB);
 
-/// Embedded `mutate.create` v0.1.0: name plus the committed descriptor and Component bytes.
+/// Embedded `mutate__create` v0.1.0: name plus the committed descriptor and Component bytes.
 static MUTATE_CREATE: EmbeddedTool = EmbeddedTool {
-    name: "mutate.create",
+    name: "mutate__create",
     descriptor_json: include_bytes!("../../../../tools/mutate-create/generated/descriptor.json"),
     component_bytes: include_bytes!(
         "../../../../tools/mutate-create/generated/mutate_create.component.wasm"
@@ -35,9 +35,9 @@ static MUTATE_CREATE: EmbeddedTool = EmbeddedTool {
 };
 inventory::submit!(&MUTATE_CREATE);
 
-/// Embedded `mutate.edit` v0.1.0: name plus the committed descriptor and Component bytes.
+/// Embedded `mutate__edit` v0.1.0: name plus the committed descriptor and Component bytes.
 static MUTATE_EDIT: EmbeddedTool = EmbeddedTool {
-    name: "mutate.edit",
+    name: "mutate__edit",
     descriptor_json: include_bytes!("../../../../tools/mutate-edit/generated/descriptor.json"),
     component_bytes: include_bytes!(
         "../../../../tools/mutate-edit/generated/mutate_edit.component.wasm"
@@ -45,9 +45,9 @@ static MUTATE_EDIT: EmbeddedTool = EmbeddedTool {
 };
 inventory::submit!(&MUTATE_EDIT);
 
-/// Embedded `observe.workspace` v0.1.0: name plus the committed descriptor and Component bytes.
+/// Embedded `observe__workspace` v0.1.0: name plus the committed descriptor and Component bytes.
 static OBSERVE_WORKSPACE: EmbeddedTool = EmbeddedTool {
-    name: "observe.workspace",
+    name: "observe__workspace",
     descriptor_json: include_bytes!(
         "../../../../tools/observe-workspace/generated/descriptor.json"
     ),
@@ -57,9 +57,9 @@ static OBSERVE_WORKSPACE: EmbeddedTool = EmbeddedTool {
 };
 inventory::submit!(&OBSERVE_WORKSPACE);
 
-/// Embedded `session.todo_write` v0.1.0: name plus the committed descriptor and Component bytes.
+/// Embedded `session__todo_write` v0.1.0: name plus the committed descriptor and Component bytes.
 static SESSION_TODO_WRITE: EmbeddedTool = EmbeddedTool {
-    name: "session.todo_write",
+    name: "session__todo_write",
     descriptor_json: include_bytes!("../../../../tools/todo-write/generated/descriptor.json"),
     component_bytes: include_bytes!(
         "../../../../tools/todo-write/generated/session_todo_write.component.wasm"
@@ -71,9 +71,9 @@ inventory::submit!(&SESSION_TODO_WRITE);
 /// composition step; a Tool crate cannot self-approve.
 pub(crate) static EXPECTED_COMPONENTS: &[ExpectedToolIdentity] = &[
     ExpectedToolIdentity {
-        name: "fetch.web",
+        name: "fetch__web",
         descriptor_sha256: parse_hex_digest(
-            "2229f40451c2c97575ee60010a223fb9efd5b0a4994bd7001ffe457d336f91ad",
+            "c25fd376b4811b43dbb433fd75d6f85d7de67d3634f62c8a560abfce26b88d02",
         ),
         artifact_sha256: parse_hex_digest(
             "0aa8bc2c753572ad82fe5f34af76e57174536e64b5845acb92b7347d04780a03",
@@ -85,9 +85,9 @@ pub(crate) static EXPECTED_COMPONENTS: &[ExpectedToolIdentity] = &[
         ],
     },
     ExpectedToolIdentity {
-        name: "mutate.create",
+        name: "mutate__create",
         descriptor_sha256: parse_hex_digest(
-            "f9299ecba160b40f10eea8eef244160df84f14bc8e5cba9b5dace7391de10566",
+            "963665bc7371335b355849ca268c8b67646befc9eb0fcc221a4d96be84f2c859",
         ),
         artifact_sha256: parse_hex_digest(
             "fc850581493f0574ea4e1999d112637fe0b74d2b4fe20ab74d49a01f60016119",
@@ -99,12 +99,12 @@ pub(crate) static EXPECTED_COMPONENTS: &[ExpectedToolIdentity] = &[
         ],
     },
     ExpectedToolIdentity {
-        name: "mutate.edit",
+        name: "mutate__edit",
         descriptor_sha256: parse_hex_digest(
-            "f0add7d54515b0a022c45cbe6dc1f4afcb209e899a87fc815a42652d5f5e375e",
+            "eb4f0dea3b7e7bbe297d74a94b5d3598557b68af0617dbc5b91d1f628acabf59",
         ),
         artifact_sha256: parse_hex_digest(
-            "a379ce55742769b310af5a65f40b4c2646f7dfae9c17198f6c708e00a336c31b",
+            "01b47176fdb0f663fdfb4cc38c9e5c0311cedacc603bd171ded788b68ec8e7d9",
         ),
         abi_version: 1,
         imports: &[
@@ -113,9 +113,9 @@ pub(crate) static EXPECTED_COMPONENTS: &[ExpectedToolIdentity] = &[
         ],
     },
     ExpectedToolIdentity {
-        name: "observe.workspace",
+        name: "observe__workspace",
         descriptor_sha256: parse_hex_digest(
-            "58c15d32ee6861d793b3ddd65c670575121a406930fd09a65e6a1887ce971194",
+            "9981da4ebd6f85ab5bc20cab9139a02af0b7756d10bc9c67ebff09dac0f28d8d",
         ),
         artifact_sha256: parse_hex_digest(
             "f9bf926a08454f644928103e41a74b9ccef95cb63da6b17c3c9db5dc390dcd9e",
@@ -127,9 +127,9 @@ pub(crate) static EXPECTED_COMPONENTS: &[ExpectedToolIdentity] = &[
         ],
     },
     ExpectedToolIdentity {
-        name: "session.todo_write",
+        name: "session__todo_write",
         descriptor_sha256: parse_hex_digest(
-            "5c9c9ab75791181182ca82097a82c84a531ec7e38911f30b4a7d213c79c3ed65",
+            "6327a84d7caf7dc7fe5bd7767fa95d66fde8c07e3be72cb04729a0bccc3114ad",
         ),
         artifact_sha256: parse_hex_digest(
             "bb0d9da2d2e1dadc32e8c864212afb6c287234739227222a062cea42e8e59b76",

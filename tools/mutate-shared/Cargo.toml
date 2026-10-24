@@ -5,7 +5,7 @@ license.workspace = true
 edition.workspace = true
 authors.workspace = true
 publish = false
-description = "Shared no_std semantic-edit logic for mutate.create / mutate.edit Component Tools (#31)."
+description = "Shared no_std semantic-edit logic for mutate__create / mutate__edit Component Tools (#31)."
 
 [lib]
 crate-type = ["lib"]

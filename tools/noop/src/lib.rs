@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! `noop.echo` — the tracer Source Tool guest (ADR 0004 / #5 slice B).
+//! `noop__echo` — the tracer Source Tool guest (ADR 0004 / #5 slice B).
 //!
 //! Exercises the Tool Host control surface (cancellation probe + structured
 //! progress event) and echoes its `message` param back as a structured

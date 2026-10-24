@@ -145,7 +145,7 @@ pub fn wire_to_native(wire: &Value) -> Result<NativeMessage<UnboundToolCall>, Pr
                 };
                 parts.push(OpenAiPart::ToolCall(RawToolCall {
                     provider_call_id,
-                    name: super::openai_canonical_tool_name(name),
+                    name: name.to_string(),
                     arguments: arguments.to_string(),
                 }));
             }
@@ -186,7 +186,7 @@ pub fn native_to_wire<S: ToolCallState>(
                 let mut function_call = json!({
                     "type": "function",
                     "function": {
-                        "name": super::openai_wire_tool_name(call.name()),
+                        "name": call.name(),
                         "arguments": lattice_conversation::canonical_json(call.arguments()),
                     },
                 });

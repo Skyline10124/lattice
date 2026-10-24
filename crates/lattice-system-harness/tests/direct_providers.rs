@@ -6,7 +6,7 @@
 //! The product reaches each provider through its formal base URL setting
 //! (`ANTHROPIC_BASE_URL` / `GEMINI_BASE_URL`) and credential; the fake provider
 //! answers in that provider's streaming protocol. Each scenario is a two-step
-//! Turn: the model calls `observe.workspace`, the Tool result is projected back
+//! Turn: the model calls `observe__workspace`, the Tool result is projected back
 //! in the provider's own shape, and the model then answers in text.
 
 mod support;
@@ -53,7 +53,7 @@ fn provider_world(provider: &Provider) -> (ScenarioWorld, ScenarioSpec) {
         "schema_version = 1\n\n\
          [agent]\nname = \"{name}\"\nmodel = \"{alias}\"\n\n\
          [prompt]\nsystem = \"You are a concise test agent.\"\n\n\
-         [tools]\nenabled = [\"observe.workspace\"]\n",
+         [tools]\nenabled = [\"observe__workspace\"]\n",
         name = provider.name,
         alias = provider.alias,
     );
@@ -119,7 +119,7 @@ fn anthropic_and_gemini_turns_call_a_tool_and_project_the_result_back() {
         let server = FakeLlmServer::start(sequence(vec![
             tool_call(
                 "call-1",
-                "observe.workspace",
+                "observe__workspace",
                 r#"{"request":{"mode":"read_file","path":"notes.txt"}}"#,
             ),
             lattice_system_harness::SseScript::PlainText {
@@ -141,8 +141,8 @@ fn anthropic_and_gemini_turns_call_a_tool_and_project_the_result_back() {
         let result: Result<(), AssertError> = (|| {
             assert_clean_send(&outcome)?;
             require(
-                tool_ok(&outcome.parsed, "observe.workspace"),
-                "observe.workspace ok",
+                tool_ok(&outcome.parsed, "observe__workspace"),
+                "observe__workspace ok",
             )?;
             require(outcome.has_completed(), "turn completed")?;
             let stdout = String::from_utf8_lossy(&outcome.command.stdout);

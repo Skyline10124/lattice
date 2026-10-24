@@ -94,8 +94,8 @@ mod tests {
     #[test]
     fn enabled_projection_rejects_unknown_names() {
         let runtime = ComponentRuntime::noop_fixture().unwrap();
-        let error = enabled_tool_definitions(&runtime, &["unknown.tool".into()]).unwrap_err();
-        assert_eq!(error.unknown, vec!["unknown.tool"]);
-        assert_eq!(error.available, vec!["noop.echo"]);
+        let error = enabled_tool_definitions(&runtime, &["unknown__tool".into()]).unwrap_err();
+        assert_eq!(error.unknown, vec!["unknown__tool"]);
+        assert_eq!(error.available, vec!["noop__echo"]);
     }
 }

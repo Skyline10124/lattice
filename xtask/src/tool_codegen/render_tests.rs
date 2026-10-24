@@ -592,7 +592,7 @@ path = "result.content_type"
 
 /// An internally tagged union puts the branch payload in a `$ref` **sibling**
 /// of `properties: {tag}`. Without merging siblings, no params field of
-/// `observe.workspace` is reachable at all.
+/// `observe__workspace` is reachable at all.
 #[test]
 fn internally_tagged_branch_payload_is_reachable() {
     check(
@@ -611,7 +611,7 @@ path = "params.path"
 }
 
 /// `status` declares "this field is the call's lifecycle status", not "this
-/// field is an enum". `fetch.web`'s HTTP code is an open integer and is the most
+/// field is an enum". `fetch__web`'s HTTP code is an open integer and is the most
 /// natural status that call has; requiring a closed value set would leave it
 /// with no spelling at all. A closed set stays the common case and is what lets
 /// a consumer dispatch exhaustively.
@@ -715,7 +715,7 @@ path = "result.result.content"
 }
 
 /// A union nested inside an array element is addressable, which is what
-/// `mutate.edit`'s `diff` needs: the two sides live in a `replace_text` element
+/// `mutate__edit`'s `diff` needs: the two sides live in a `replace_text` element
 /// of `params.edits`.
 #[test]
 fn nested_union_inside_array_items_is_addressable() {
@@ -1298,7 +1298,7 @@ path = "result.maybe"
 /// A doc comment on a field makes schemars emit `description` as a **sibling**
 /// of `$ref`. A strict "the `$ref` is the whole node" rule would stop
 /// dereferencing there and report every documented field as dangling — and
-/// `mutate.edit`'s `expected_hash` and `observe.workspace`'s descriptions are
+/// `mutate__edit`'s `expected_hash` and `observe__workspace`'s descriptions are
 /// exactly that shape.
 #[test]
 fn a_ref_beside_a_description_still_dereferences() {

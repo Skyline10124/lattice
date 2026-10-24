@@ -3,7 +3,7 @@
 // self-approve its identity; only the trusted host composition step may
 // pin descriptor/artifact digest, ABI, and imports.
 pub static NOOP_ECHO: lancet_runtime::EmbeddedTool = lancet_runtime::EmbeddedTool {
-    name: "noop.echo",
+    name: "noop__echo",
     descriptor_json: include_bytes!("descriptor.json"),
     component_bytes: include_bytes!("noop_echo.component.wasm"),
 };

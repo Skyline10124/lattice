@@ -3,7 +3,7 @@
 // self-approve its identity; only the trusted host composition step may
 // pin descriptor/artifact digest, ABI, and imports.
 pub static MUTATE_EDIT: lancet_runtime::EmbeddedTool = lancet_runtime::EmbeddedTool {
-    name: "mutate.edit",
+    name: "mutate__edit",
     descriptor_json: include_bytes!("descriptor.json"),
     component_bytes: include_bytes!("mutate_edit.component.wasm"),
 };

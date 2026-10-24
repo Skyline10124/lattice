@@ -42,7 +42,7 @@ use crate::evidence::CellEvidenceLedger;
 use crate::host_workspace::{BudgetCharge, BudgetRefusal};
 use crate::runtime::StoreState;
 
-const METHOD: &str = "fetch.web";
+const METHOD: &str = "fetch__web";
 const MAX_REDIRECTS: u32 = 5;
 const MAX_URL_BYTES: usize = 8 * 1024;
 const MAX_REQUEST_HEADERS: usize = 32;

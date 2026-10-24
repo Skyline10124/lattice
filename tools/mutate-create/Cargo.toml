@@ -1,13 +1,13 @@
 [package]
 # `cargo xtask tool-build` derives the package name from the manifest's tool
-# name by replacing dots with dashes (`mutate.create` -> `mutate-create`).
+# name by replacing `__` with a dash (`mutate__create` -> `mutate-create`).
 name = "mutate-create"
 version = "0.1.0"
 license.workspace = true
 edition.workspace = true
 authors.workspace = true
 publish = false
-description = "mutate.create Source Tool: create-if-absent install over the workspace-mutate host imports."
+description = "mutate__create Source Tool: create-if-absent install over the workspace-mutate host imports."
 
 [lib]
 crate-type = ["cdylib"]

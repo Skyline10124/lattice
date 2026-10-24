@@ -1,13 +1,13 @@
 [package]
 # `cargo xtask tool-build` derives the package name from the manifest's tool
-# name by replacing dots with dashes (`mutate.edit` -> `mutate-edit`).
+# name by replacing `__` with a dash (`mutate__edit` -> `mutate-edit`).
 name = "mutate-edit"
 version = "0.1.0"
 license.workspace = true
 edition.workspace = true
 authors.workspace = true
 publish = false
-description = "mutate.edit Source Tool: semantic edits then replace-with-expected over workspace-mutate."
+description = "mutate__edit Source Tool: semantic edits then replace-with-expected over workspace-mutate."
 
 [lib]
 crate-type = ["cdylib"]
