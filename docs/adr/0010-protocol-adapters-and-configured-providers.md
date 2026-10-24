@@ -6,7 +6,7 @@ status: proposed
 
 - 状态：Proposed（草案，待维护者批准）
 - 日期：2026-10-24
-- 修订：细化 ADR 0005 第 7 节“同 provider 回放”中来源的粒度；部分取代 ADR 0006 第 4 节中“当前 agent 即当前位置所属 Turn 的 agent”的规则。范围见[与 ADR 0005、ADR 0006、ADR 0007 的关系](#与-adr-0005adr-0006adr-0007-的关系)
+- 修订：细化 ADR 0005 第 7 节“同 provider 回放”中来源的粒度；部分取代 ADR 0006 第 4 节中“当前 agent 即当前位置所属 Turn 的 agent”的规则，以及 ADR 0008 第 10 节中由客户端读取配置与凭据的规则。范围见[与 ADR 0005、ADR 0006、ADR 0007、ADR 0008 的关系](#与-adr-0005adr-0006adr-0007adr-0008-的关系)
 - 依赖：ADR 0007（接受时确定的模型与 provider 记在 UserMessage 节点上）
 - 实施跟踪：GitHub #315
 
@@ -18,18 +18,18 @@ status: proposed
 - **模型靠写死的别名表选择。** 可选的只有 `gpt-5.5`、`gpt-5.4`、`gpt-5.3-codex`、`gpt-4o-mini`、`opus`、`sonnet`、`haiku`、`gemini`，以及 `compat:<模型>`。新模型上线或旧模型下线都要改代码：#269 中 `gemini` 指向的模型对新用户已不可用；`gpt-5.3-codex` 只能走 Responses API，按现有路径请求返回 404（#271 的评论）。
 - **会话中不能切换模型。** 模型只在 profile 中设定，CLI 的 `session send` 只能换 agent，TUI 没有切换模型或推理强度的入口。
 - **每次提交都重读 profile。** 提交端在每次提交前从磁盘读取所选 agent 的 `agent.toml` 并解析外部策略文件，冻结进这一轮；会话本身不保存配置，当前 agent 是当前位置所属 Turn 的 agent。改动 `agent.toml` 会改变已有会话下一轮的行为。
+- **配置与凭据由提交端读取。** CLI 或 TUI 进程在提交前读取 profile、解析模型与 endpoint，从自己的环境变量或工作区 `.env` 读取 key，冻结进连接材料，经私有 IPC 交给后台（`crates/lattice-api/src/turn/live.rs`，ADR 0008 第 10 节）。R1 引入后台（`19e388fb`）时，配置加载留在了提交端。后台启动时不继承前端的环境；凭据只在内存与私有 IPC 中流转，不持久化。
 - **endpoint 与凭据每家固定一套。** 每个 provider 一个固定的 key 环境变量；OpenAI 兼容只能配置一个 endpoint；官方 OpenAI 的 endpoint 不能改写。
 - **厂商差异散在代码里。** 例如 Chat Completions 解析同时读取 `reasoning_content` 与 `reasoning` 两个字段；Gemini 的工具 schema 改用 `parametersJsonSchema`（#270）。这些差异不能按 provider 配置，新增一家有差异的兼容厂商就要加分支。
 - **没有模型元数据。** 不知道上下文窗口、输出上限和推理能力。Anthropic 的 `max_tokens` 用固定默认值；请求从不带推理参数，`gpt-6-luna` 在 Chat Completions 上不关闭推理就不能使用工具（#226 的评论）。
 - **用量只有三项。** `TokenUsage` 只有 `prompt_tokens`、`completion_tokens`、`total_tokens`，按尝试保存在会话库中；推理与缓存 token 不区分，请求也不开启缓存。
 - **回放来源按协议记录。** `ProviderOrigin` 只有 `OpenAiCompatible`、`Anthropic`、`Gemini`，所有 OpenAI 兼容厂商共用一个来源。
-- **凭据只在内存中流转。** key 由提交端读取，冻结进本 Turn 的连接材料，经私有 IPC 交给后台，不持久化（`docs/architecture/session.md` 的配置安全边界）。
 
 外部条件也在变化：
 
 - OpenAI 的新模型和部分能力只在 Responses API 上提供。
 - Google 的 Interactions API 于 2026 年 6 月 GA，是 Google 推荐的接口，新模型与新功能先在这里上线；`generateContent` 仍完整支持。
-- OpenAI 于 2026-09-29 推出 Sign in with ChatGPT（SIWC），开源与本地运行的工具可以让用户用 ChatGPT 订阅额度调用 Responses API。它要求客户端持久保存登录材料。
+- OpenAI 于 2026-09-29 推出 Sign in with ChatGPT（SIWC），开源与本地运行的工具可以让用户用 ChatGPT 订阅额度调用 Responses API。它要求客户端持久保存登录材料，access token 的有效期为 1 小时。
 
 ## 决策
 
@@ -55,15 +55,14 @@ provider 由以下字段描述，不对应单独的代码：
 
 | 字段 | 含义 |
 | --- | --- |
-| `id` | provider 标识，用于模型引用、节点记录与回放来源 |
+| `id` | provider 标识，用于模型引用、节点记录、回放来源与凭据查找 |
 | `protocol` | 第 1 节的五个协议之一 |
 | `base_url` | endpoint |
 | `auth` | 认证方式：`bearer`、`x-api-key`、`x-goog-api-key`、`oauth:chatgpt` 或 `none`（本地服务），默认值随协议 |
-| `api_key_env` | key 所在的环境变量名；`oauth:*` 与 `none` 认证不使用 |
 | `features` | 第 3 节 |
 | `catalog` | 对应的 models.dev provider 条目，用于取模型元数据 |
 
-官方厂商与兼容厂商用同一种描述。例如 DeepSeek 是 `protocol = "chat-completions"`、`base_url = "https://api.deepseek.com"`、`api_key_env = "DEEPSEEK_API_KEY"`，再加上它需要的 features。
+官方厂商与兼容厂商用同一种描述。例如 DeepSeek 是 `protocol = "chat-completions"`、`base_url = "https://api.deepseek.com"`，再加上它需要的 features。凭据不属于 provider 配置，按 provider `id` 保存在 `auth.json` 中（第 4 节）。
 
 ### 3. 厂商差异用 features 表达
 
@@ -79,11 +78,11 @@ feature 是某个协议适配器支持的一项可选行为。
 
 各协议的 feature 清单由合同维护，见第 15 节。
 
-### 4. endpoint 与凭据的来源
+### 4. 全局配置与凭据
 
-key 会发到 endpoint，所以 endpoint 只来自经过审查或用户自己写的配置。
+provider 配置、凭据与模型元数据是用户级的全局状态，不随提交它的 shell、项目或前端变化。key 会发到 endpoint，所以 endpoint 只来自经过审查或用户自己写的配置。
 
-- **内置 provider 表。** 手工维护，提交进仓库，编译进程序。每一家的协议、endpoint、认证方式、key 环境变量名与 features 对照厂商文档核对，变化在 PR 中审查；models.dev 只通过 `catalog` 字段提供模型元数据。第一轮收录 20 家常用 provider：
+- **内置 provider 表。** 手工维护，提交进仓库，编译进程序。每一家的协议、endpoint、认证方式与 features 对照厂商文档核对，变化在 PR 中审查；models.dev 只通过 `catalog` 字段提供模型元数据。第一轮收录 20 家常用 provider：
 
   | 分组 | provider |
   | --- | --- |
@@ -99,7 +98,6 @@ key 会发到 endpoint，所以 endpoint 只来自经过审查或用户自己写
   [providers.my-vllm]                   # 新增自建服务
   protocol = "chat-completions"
   base_url = "https://vllm.example.com/v1"
-  api_key_env = "MY_VLLM_KEY"
 
   [providers.my-vllm.models."qwen3-32b"] # 元数据中没有的模型，手写元数据
   context = 131072
@@ -113,13 +111,19 @@ key 会发到 endpoint，所以 endpoint 只来自经过审查或用户自己写
   ```
 
   完整字段由合同规定。
-- **不读项目目录。** 项目目录随仓库检出，其中的配置不可信，不能改变 endpoint 或认证方式。这与工作区 `.env` 不能设置 endpoint（#99）是同一条边界；工作区 `.env` 仍可按现有规则提供 key。
-- **配置中不写 key 明文。** 只写环境变量名；订阅登录的材料见第 11 节。
-- **环境变量只提供 key。** endpoint 与模型不再从环境变量读取：`OPENAI_COMPATIBLE_BASE_URL`、`OPENAI_COMPATIBLE_MODEL`、`OPENAI_COMPATIBLE_API_KEY`、`ANTHROPIC_BASE_URL`、`GEMINI_BASE_URL` 删除，内置的 `openai-compatible` provider 与 `compat:<模型>` 写法一并删除。本地服务使用内置的 `ollama`、`lmstudio`，或在 `providers.toml` 中配置。每个 provider 只有一个 key 环境变量名。
+- **凭据保存在 `~/.lattice/auth.json`。** API key 按 provider `id` 保存，SIWC 的登录材料也在这里（第 11 节）。文件权限 0600，由 `lattice auth` 命令写入与删除；key 从终端或标准输入读取，不作为命令行参数。配置文件中不写 key；凭据不写入会话库、profile 副本、日志、诊断或公开输出。
+- **环境变量与项目目录不提供配置。**
+  - 项目目录随仓库检出，其中的配置不可信，不读取其中的 `providers.toml`。agent profile 仍按现有规则可以放在项目内，它只能选择 `<provider>/<model>`，不能改变 endpoint 或认证方式。
+  - 环境变量与工作区 `.env` 不再提供 key、endpoint 与模型：`OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、`GEMINI_API_KEY`、`OPENAI_COMPATIBLE_BASE_URL`、`OPENAI_COMPATIBLE_MODEL`、`OPENAI_COMPATIBLE_API_KEY`、`ANTHROPIC_BASE_URL`、`GEMINI_BASE_URL` 删除。工作区 `.env` 的正当用途只是提供 provider key（`crates/lattice-cli/src/env_boundary.rs`），它的加载随之删除。
+  - 内置的 `openai-compatible` provider 与 `compat:<模型>` 写法一并删除。本地服务使用内置的 `ollama`、`lmstudio`，或在 `providers.toml` 中配置。
+- **由后台读取。** 内置表、`providers.toml`、元数据与 `auth.json` 由后台读取，agent profile 也由后台按现有查找规则（先项目内 `.lattice/agents`，再全局目录）读取。提交端只交消息、工作区与用户的选择（第 13 节）。后台在接受时解析配置、读取凭据并冻结进这一轮：API key 随这一轮冻结在后台内存中，SIWC 的 access token 由后台在执行中按需刷新（第 11 节）。配置错误由后台在接受前拒绝，诊断随拒绝带回前端。
+- **配置目录与 TLS 根证书在启动后台时确定。** 后台仍不继承前端的环境。配置目录（默认 `~/.lattice`）与 `SSL_CERT_FILE`、`SSL_CERT_DIR` 由启动后台的前端在启动时交给它，此后不随提交变化，连接到同一后台的前端共用这份配置。现有的 `LATTICE_AGENTS_DIR` 如何对应，以及前端与运行中的后台不一致时如何处理，由合同规定。
 - **非 loopback 的 endpoint 必须使用 HTTPS。** 沿用现有规则，对内置表与 `providers.toml` 同样适用。
 - **元数据不提供 endpoint。** 第 6 节的元数据（内置快照与缓存）中即使有 endpoint、环境变量名或协议字段也不使用。
 
-provider 配置在提交端解析，写入会话的 profile 副本（第 13 节）；每一轮从副本冻结进连接材料。
+这改变了现行的凭据边界：凭据原来由提交端从环境读取、只在内存与私有 IPC 中流转，现在保存在 `auth.json`，由后台读取。
+
+provider 配置由后台在接受时解析，写入会话的 profile 副本（第 13 节）；每一轮从副本冻结进连接材料。
 
 ### 5. 模型写作 `<provider>/<model>`
 
@@ -135,7 +139,7 @@ provider 配置在提交端解析，写入会话的 profile 副本（第 13 节�
 - **内置快照。** xtask 从 models.dev 生成内置 provider 所对应条目的元数据快照，提交进仓库审查并编译进程序。首次运行与离线时使用它。
 - **定时刷新的缓存。** 后台进程启动时与此后每 24 小时从 `https://models.dev/api.json` 拉取一次，写入 `~/.lattice/cache/models.json`。拉取失败只记日志，继续使用上一份数据。`lattice models refresh` 立即刷新一次。缓存没有过期的概念：数据旧了只影响列表与价格的准确性，不影响请求发往哪里。
 - **取值优先级。** `providers.toml` 中手写的元数据优先，其次是缓存，再次是内置快照。
-- **请求路径上不联网。** 提交 Turn 时只读上述数据；本 Turn 用到的值（如输出上限、可用推理档位）随连接材料冻结。
+- **请求路径上不联网。** 接受 Turn 时只读上述数据；本 Turn 用到的值（如输出上限、可用推理档位）随连接材料冻结。
 - **没有元数据的模型仍可使用。** 只是没有价格与推理档位。
 
 ### 7. 推理强度
@@ -174,15 +178,12 @@ provider 配置在提交端解析，写入会话的 profile 副本（第 13 节�
 SIWC 是一种认证方式：`protocol = "responses"`、`auth = "oauth:chatgpt"`，加上 SIWC 要求的 features（固定 `store: false`，不发送 `temperature`、`max_output_tokens` 等不支持的参数）。它不需要单独的协议适配器。
 
 - **固定的 provider 与 endpoint。** SIWC 只用内置 provider `chatgpt`，endpoint 固定为 `https://api.openai.com/v1`：OpenAI 的接入文档只给出这一个 endpoint，token 的 audience 也是它。`providers.toml` 不能覆盖 `chatgpt` 的协议、endpoint、认证方式与上述 features，也不能给其他 provider 设置 `oauth:chatgpt`；违反时在接受前按配置错误拒绝。推理档位与价格取 models.dev 中 `openai` 条目的元数据。
-- **登录。** 新增登录命令，按 OpenAI 开源工具接入方式完成授权码加 PKCE 流程，回调地址为 `http://127.0.0.1:1455`；无头机器可以粘贴浏览器最终跳转的 URL。首次登录时注册客户端，取得 `client_id`；本机的 host ID 生成后保持不变。再次登录复用同一个 `client_id` 与 host ID，不重新注册。
-- **登录材料落盘。** `client_id`、host ID 与 access、refresh、id token 保存在 `~/.lattice/auth.json`，文件权限 0600。不写入会话库、日志、诊断或公开输出。
-- **刷新在提交端。** access token 的有效期为 1 小时。提交端在冻结配置前检查它的剩余有效期，短于 Turn deadline 加余量时先刷新；刷新后仍不够（例如 `timeout_secs` 设为 3600）时，在接受前按配置错误拒绝，提示调低 `timeout_secs`。余量由合同规定。刷新用文件锁串行化，同一份登录材料同一时间只有一个进程在刷新。
-- **后台不接触登录材料。** 冻结的 access token 与现有 API key 一样经私有 IPC 交给后台，只在内存中使用。
+- **登录。** `lattice auth` 的登录子命令在前端按 OpenAI 开源工具接入方式完成授权码加 PKCE 流程，回调地址为 `http://127.0.0.1:1455`；无头机器可以粘贴浏览器最终跳转的 URL。首次登录时注册客户端，取得 `client_id`；本机的 host ID 生成后保持不变。再次登录复用同一个 `client_id` 与 host ID，不重新注册。
+- **登录材料。** `client_id`、host ID 与 access、refresh、id token 保存在 `auth.json`（第 4 节）。
+- **刷新在后台。** 后台在每次模型请求前检查 access token 的剩余有效期，短于余量时先刷新再发请求，所以 Turn 的时长不受 token 有效期限制。refresh token 每次刷新都会更换，刷新结果立即写回 `auth.json`。刷新在文件锁下进行，同一份登录材料同一时间只有一个进程在刷新。余量由合同规定。
 - **登出。** 撤销 refresh token 后删除本地的 access、refresh 与 id token，保留 `client_id` 与 host ID 供再次登录。撤销未确认时仍删除这些 token，并提示用户远端撤销未确认。
-- **模型列表。** `chatgpt` 可用的模型以 `GET /v1/models` 的结果为准，在登录与 `lattice models refresh` 时由提交端拉取并保存；推理档位与价格仍取第 6 节的元数据。
+- **模型列表。** `chatgpt` 可用的模型以 `GET /v1/models` 的结果为准，由后台拉取并保存，随第 6 节的元数据刷新与 `lattice models refresh` 更新；还没有列表时（例如刚登录），列出候选前先拉取。推理档位与价格仍取第 6 节的元数据。
 - **用量超限。** SIWC 的用量超限（例如 `subscription_sharing_usage_limit_exceeded`，可能在流中途出现）按不可重试的 provider 错误处理。
-
-这改变了“凭据不落盘”的现行边界：落盘的只有 SIWC 登录材料，API key 仍只从环境变量读取。
 
 ### 12. Google 内置 provider 的默认协议
 
@@ -192,10 +193,10 @@ Interactions 适配器上线后，内置 `google` provider 默认使用 Interact
 
 会话建立时取一份 profile 副本，此后只用副本，不再读取原 profile。
 
-- **创建。** 新会话首次提交时，提交端读取所选 agent 的 profile（解析外部策略文件、加载 system prompt）和所选模型的 provider 配置，随提交交给后台；后台在接受事务中把它写成这个会话的 profile 副本。
-- **内容。** 有效 profile、provider 配置（协议、endpoint、认证方式、features、key 环境变量名）、当前模型与推理档位。不含 key 与订阅登录材料，副本可以持久化而不改变凭据边界。
-- **使用。** 已有会话的后续提交只用副本，提交端不再读取原 `agent.toml`。提交端从会话头取得副本中的 provider 与认证方式，据此读取 key 或刷新 SIWC token，随提交交给后台。
-- **修改。** `/model`、`/effort` 与 CLI 的 `--model`、`--effort` 选择的值随下一次提交交给后台，在接受事务中写回副本。换到另一个 provider 的模型时，提交端按当时的内置表与 `providers.toml` 解析该 provider 的配置，一并写入。`--agent` 换 agent 时，用该 agent 的 profile 重新生成副本。
+- **创建。** 新会话首次提交时，提交端交所选 agent 的名字，以及可选的模型与推理档位；后台读取该 agent 的 profile（解析外部策略文件、加载 system prompt）与所选模型的 provider 配置，在接受事务中写成这个会话的 profile 副本。
+- **内容。** 有效 profile、provider 配置（协议、endpoint、认证方式、features）、当前模型与推理档位。不含凭据。
+- **使用。** 已有会话的后续提交只用副本，不再读取原 `agent.toml`。后台按副本中的 provider 从 `auth.json` 取凭据。
+- **修改。** `/model`、`/effort` 与 CLI 的 `--model`、`--effort` 选择的值随下一次提交交给后台，在接受事务中写回副本。换到另一个 provider 的模型时，后台按当时的内置表与 `providers.toml` 解析该 provider 的配置，一并写入。`--agent` 换 agent 时，后台用该 agent 的 profile 重新生成副本。
 - **选择随提交生效。** 选择后未发送就退出，这次选择不保留。所以副本中的模型与档位总是最后一轮实际使用的，重新打开会话时沿用最后一轮的模型与档位。
 - **rewind 不改变副本。** 副本属于会话，不属于节点；当前 agent 是副本中的 agent。每一轮实际使用的 agent、模型、provider 与档位仍记在它的 UserMessage 节点上。
 - **原 profile 的修改只对新会话生效。** 包括收紧的 LANCET 策略（写权限、网络白名单）；要让已有会话使用新策略，需要开新会话。
@@ -211,22 +212,23 @@ TUI 用 slash 命令选择模型与推理强度，选择界面是 Dock 中的面
 - **作用范围。** 选择由 TUI 进程持有，随下一次提交写回会话的 profile 副本，不写回原 profile（第 13 节）。
 - **statusline。** 显示下一次提交将使用的模型、provider 与档位：有未提交的选择时显示所选值，否则显示副本中的值。
 
-候选列表与 provider 配置、元数据缓存一样由 TUI 所在的提交端进程读取，不新增后台接口。
+候选列表由后台的查询给出：后台按第 4、6、11 节列出可用的模型、各自支持的档位与凭据是否就绪。这是 ADR 0008 的查询之外新增的一个查询；CLI 列出模型的命令使用同一个查询。
 
 ### 15. 合同先行
 
 实施前先完成以下合同修订并获批准：
 
-- 新增 `docs/architecture/llm.md`，作为协议、provider 配置、features 清单、元数据、推理档位映射、用量换算与订阅登录规则的唯一出处。
-- `docs/architecture/session.md`：会话的 profile 副本、当前 agent 的判定与提交流程（第 13 节），会话头新增的副本摘要，冻结配置表（provider、模型、推理档位、连接材料），配置安全边界（第 4、11 节），回放与跨 provider 投影（第 10 节），用量记录（第 8 节）。
-- `docs/architecture/tui.md`：打开已有会话不再加载 profile，可交互的面板、`/model` 与 `/effort`、statusline 字段（第 13、14 节）。
-- `docs/development/testing.md` 与 `crates/lattice-system-harness/AGENTS.md`：fake provider 改为经测试目录中的 `providers.toml` 接入，不再经环境变量。
+- 新增 `docs/architecture/llm.md`，作为协议、provider 配置、features 清单、元数据、推理档位映射、用量换算、凭据保存与订阅登录规则的唯一出处。
+- `docs/architecture/session.md`：配置由后台读取，提交只带消息、工作区与选择，冻结配置表与配置错误的展示随之修改（第 4 节）；会话的 profile 副本、当前 agent 的判定与提交流程（第 13 节），会话头新增的副本摘要；配置安全边界与凭据边界（第 4、11 节）；回放与跨 provider 投影（第 10 节）；用量记录（第 8 节）；模型候选查询（第 14 节）。
+- `docs/architecture/tui.md`：打开已有会话不再加载 profile，可交互的面板、`/model` 与 `/effort`、候选列表来自后台查询、statusline 字段（第 13、14 节）。
+- `crates/lattice-cli/AGENTS.md`：删除工作区 `.env` 的环境边界，新增 `lattice auth`（第 4、11 节）。
+- `docs/development/testing.md` 与 `crates/lattice-system-harness/AGENTS.md`：fake provider 改为经测试目录中的 `providers.toml` 与 `auth.json` 接入，不再经环境变量；测试 CA 在启动后台时交给它（第 4 节）。
 
 ### 16. 旧数据
 
 - 旧会话可以继续读取与续接。节点上旧的 provider 值映射到内置 provider：`openai`、`anthropic` 保持不变，`gemini` 映射为 `google`；`openai_compatible` 无法确定是哪一家，按未知来源处理，续接时按跨来源规则投影。
 - 旧的用量记录中 `prompt_tokens`、`completion_tokens` 读作输入与输出，缓存与推理细分为未知。OpenAI 兼容的旧记录中输入含缓存命中，已无法拆分。
-- 旧会话没有 profile 副本。升级后第一次提交时，按当前位置所属 Turn 的 agent 读取 `agent.toml`，生成副本。
+- 旧会话没有 profile 副本。升级后第一次提交时，后台按当前位置所属 Turn 的 agent 读取 `agent.toml`，生成副本。
 - 新版本写入的记录，旧版本无法读取。
 
 ### 17. 验证方式
@@ -234,38 +236,46 @@ TUI 用 slash 命令选择模型与推理强度，选择界面是 Dock 中的面
 - 每个协议适配器有基于官方文档的请求体与流式事件夹具，覆盖文字、推理、多个工具调用、用量与错误事件。
 - 每个 feature 取值有请求体断言，默认值与标准协议形状一致。
 - 元数据的取值优先级与刷新：手写值、缓存与内置快照的覆盖顺序；后台刷新失败时继续使用上一份数据。
-- endpoint 来源的负向测试：项目目录中的 `providers.toml` 不被读取，元数据缓存中的 endpoint 不被使用，环境变量与工作区 `.env` 都不能改变 endpoint。
-- SIWC：`providers.toml` 改写 `chatgpt` 的 endpoint，或给其他 provider 设置 `oauth:chatgpt` 时，在接受前被拒绝；access token 剩余有效期不足时先刷新，刷新后仍不足时拒绝；登出后 `client_id` 与 host ID 保留，再次登录复用它们。
+- endpoint 与凭据来源的负向测试：项目目录中的 `providers.toml` 不被读取，元数据缓存中的 endpoint 不被使用，环境变量与工作区 `.env` 既不能改变 endpoint，也不能提供 key。
+- 配置由后台读取：从环境变量不同的两个 shell 提交到同一后台，使用同一份配置与凭据；配置错误在接受前拒绝，诊断带回前端；凭据不出现在会话库、profile 副本、日志与公开输出中，`auth.json` 的权限为 0600。
+- SIWC：`providers.toml` 改写 `chatgpt` 的 endpoint，或给其他 provider 设置 `oauth:chatgpt` 时，在接受前被拒绝；执行中 access token 的剩余有效期短于余量时，后台刷新并写回 `auth.json`，超过 1 小时的 Turn 不中断；两个进程同时需要刷新时只有一个在刷新；登出后 `client_id` 与 host ID 保留，再次登录复用它们。
 - TUI 的选择面板由 pty 场景覆盖选择、过滤与取消；选择后提交的请求体带上所选模型与档位。没有元数据缓存时 `/model` 列出内置快照中的模型，`chatgpt` 只列出账号模型列表中的模型。
 - 已有会话在原 `agent.toml` 修改或删除后仍按副本执行；切换模型后重新打开会话，沿用最后一轮的模型与档位；rewind 不改变副本。
 - 有凭据时用真实 provider 验证：OpenAI API key（Chat Completions、Responses、推理、缓存），ChatGPT 订阅账号（SIWC），Gemini API key（generateContent、Interactions）。没有凭据的 provider 只按文档与夹具验证，并在交付时说明。
 
-## 与 ADR 0005、ADR 0006、ADR 0007 的关系
+## 与 ADR 0005、ADR 0006、ADR 0007、ADR 0008 的关系
 
 - **ADR 0005 第 7 节。** 同 provider 回放可以使用不透明回放材料，跨 provider 投影只使用中立语义。本 ADR 保留这条规则，把其中的“provider”细化为“协议 + provider `id`”（第 10 节）。
 - **ADR 0006 第 4 节。** “不设 Session 级当前 agent 字段，当前 agent 即当前位置所属 Turn 的 agent，rewind 后回到当时的 agent”由第 13 节取代：当前 agent 是会话 profile 副本中的 agent，rewind 不改变它。`send --agent` 仍可换 agent，改为重新生成副本。
 - **ADR 0007 第 6 节。** 接受时确定的事实仍记在 UserMessage 节点上，配置表不变。该节删除的是每一轮各存一份的 profile 快照与策略快照，理由是它们没有读者、内容与节点重复。本 ADR 的副本每个会话一份，是后续提交的配置来源，两者不冲突。
+- **ADR 0008 第 10 节。** “读取 profile、系统提示与连接凭据，加载好之后提交一次；凭据来自前端进程的环境与 `.env`”由第 4、13 节取代：客户端只提交消息、工作区与选择，配置与凭据由后台读取。该节其余各项（连接后台、未运行时启动它，提交与取消，连接中断提示，分帧）不变。第 14 节新增的模型候选查询加入 ADR 0008 的查询。
 
-三份 ADR 的其余内容不受影响。
+四份 ADR 的其余内容不受影响。
 
 ## 后果
 
 **收益**
 
-- 接入一家使用已有协议的厂商只需写配置；常见厂商由内置表直接提供，用户只设 key 环境变量。
+- 接入一家使用已有协议的厂商只需写配置；常见厂商由内置表直接提供，用户只需用 `lattice auth` 录入 key。
+- 配置与凭据只在后台一处读取，前端只交选择；同一后台上的会话不会因为提交它的 shell 不同而用到不同的配置。
 - 厂商差异集中在协议适配器的 features 中，每项有名字和测试，不再散在代码分支里。
 - 模型随 provider 上线即可使用，不再依赖别名表更新。
 - 推理强度、用量细分、缓存与费用估算有了统一的来源与口径。
-- Responses、Interactions 与 SIWC 共用同一套 provider 与组装机制。
+- Responses、Interactions 与 SIWC 共用同一套 provider 与组装机制；SIWC 的 token 在执行中刷新，Turn 的时长不受 token 有效期限制。
 
 **代价**
 
-- 破坏性变化：现有 profile 中的别名失效，须改为 `<provider>/<model>`；用环境变量配置 endpoint 或 OpenAI 兼容服务的用户须改写为 `providers.toml`；会话库记录格式变化，旧版本读不了新库。
+- 破坏性变化：
+  - 现有 profile 中的别名失效，须改为 `<provider>/<model>`。
+  - 环境变量与工作区 `.env` 中的 key 不再生效，须用 `lattice auth` 录入。
+  - 用环境变量配置 endpoint 或 OpenAI 兼容服务的用户须改写为 `providers.toml`。
+  - 会话库记录格式变化，旧版本读不了新库。
+- API key 与 SIWC 登录材料保存在磁盘上的 `auth.json`，这是一类需要保护的本地文件；后台进程持有凭据。
+- 配置目录与 TLS 根证书在启动后台时确定，改动它们要重启后台。
 - harness 的 fake provider 目前经环境变量接入，要随之迁移。
 - 内置表需要手工维护；厂商改了 endpoint 或协议细节，要发新版本更新。内置表之外的 provider 由用户在 `providers.toml` 中自行添加。
 - 后台每天访问一次 models.dev。
 - feature 集合会随接入的厂商增长。
-- SIWC 让登录材料落盘，增加了一类需要保护的本地文件。
 - 修改 `agent.toml`（包括收紧 LANCET 策略）不再影响已有会话，要开新会话才生效。
 
 ## 否决的方案
@@ -282,13 +292,16 @@ TUI 用 slash 命令选择模型与推理强度，选择界面是 Dock 中的面
 - **依赖服务端会话状态。** 会与会话树形成两份权威；SIWC 也不允许。
 - **推理档位不支持时降级到相近档位。** 会在用户不知情时改变行为。
 - **SIWC 作为 `openai` provider 的第二种认证方式。** 同一个 `openai/<model>` 会对应两种凭据与两份模型列表，回放来源也无法区分；单独的 `chatgpt` provider 让每个 provider 只有一种认证方式，endpoint 也能单独固定。
-- **登录材料存入系统密钥环。** 无头机器通常没有可用的密钥环；本 ADR 采用权限受限的本地文件。
+- **提交端读取配置与凭据，经私有 IPC 交给后台（现状）。** 配置是全局状态，提交端读取后再交给后台是多余的一圈；会话的 profile 副本在后台，提交端还要先取回副本；SIWC 的 token 在执行中会过期，而执行时提交端可能已经退出。
+- **key 继续由环境变量提供。** 后台常驻且不继承前端环境。由后台读自己的环境，key 取决于谁启动了后台，改 key 要重启后台；由提交端随提交附带，又留下一处按提交者变化的来源。
+- **凭据存入系统密钥环。** 无头机器通常没有可用的密钥环；本 ADR 采用权限受限的本地文件。
 - **每次提交都重读原 profile（现状）。** 已有会话的行为会随 profile 的修改而变化，重新打开会话时无法确定接下来用什么配置。
 - **选择后立即写回副本。** 需要新增一条后台命令，且副本可能与最后一轮实际使用的模型不同；随提交写回则两者始终一致。
 
 ## 不在本文决定的事项
 
-- 各协议 feature 的完整清单及现有厂商差异的迁移对照，`providers.toml`、`auth.json` 与 SIWC 模型列表的完整格式和保存位置，各家 endpoint 与 key 环境变量名，用量换算与缓存断点，SIWC 刷新的余量：由 `llm.md` 规定。
+- 各协议 feature 的完整清单及现有厂商差异的迁移对照，`providers.toml`、`auth.json` 与 SIWC 模型列表的完整格式和保存位置，`lattice auth` 的命令形式，各家 endpoint，用量换算与缓存断点，SIWC 刷新的余量：由 `llm.md` 规定。
+- 配置目录与 `LATTICE_AGENTS_DIR` 的对应关系，前端与运行中的后台配置不一致时的处理，模型候选查询的形状：由 `session.md` 规定。
 - 选择面板的具体键位、候选项排序与显示宽度：由 `tui.md` 规定。
 - Vertex AI、Bedrock、Azure 等其他协议或认证方式，以及其他订阅登录。
 - 从原 profile 重新生成副本的命令：确实需要时再加。
