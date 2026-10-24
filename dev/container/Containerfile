@@ -1,0 +1,39 @@
+# Rust 1.96.0 官方 Debian trixie 镜像，固定内容摘要。
+FROM docker.io/library/rust:1.96.0-trixie@sha256:477cee146d00e0dd888ce66a279ff78ccfd6fdf265e83414a4264652643c881a
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       cmake pkg-config python3 time procps ripgrep openssh-client less util-linux \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN rustup component add --toolchain 1.96.0 rustfmt clippy rust-analyzer \
+    && rustup target add --toolchain 1.96.0 wasm32-unknown-unknown
+
+# 上游 v1.254.0 的 Linux x86_64 发布资产；校验失败时停止构建。
+RUN curl --fail --location --retry 3 \
+      https://github.com/bytecodealliance/wasm-tools/releases/download/v1.254.0/wasm-tools-1.254.0-x86_64-linux.tar.gz \
+      --output /tmp/wasm-tools.tar.gz \
+    && echo 'd0efb16c9c859137b7ab3e99151c299cd47caee106ed4594561002f7a04945bd  /tmp/wasm-tools.tar.gz' | sha256sum --check --strict \
+    && tar -xzf /tmp/wasm-tools.tar.gz -C /tmp \
+    && install -m 755 /tmp/wasm-tools-1.254.0-x86_64-linux/wasm-tools /usr/local/bin/wasm-tools \
+    && rm -rf /tmp/wasm-tools.tar.gz /tmp/wasm-tools-1.254.0-x86_64-linux \
+    && wasm-tools --version
+
+RUN groupadd --gid 1000 developer \
+    && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash developer \
+    && mkdir -p /home/developer/.cargo /workspace/target \
+    && chown -R developer:developer /home/developer /workspace
+
+ENV HOME=/home/developer \
+    CARGO_HOME=/home/developer/.cargo \
+    CARGO_TARGET_DIR=/workspace/target \
+    CARGO_BUILD_JOBS=2 \
+    CARGO_PROFILE_DEV_DEBUG=0 \
+    CARGO_PROFILE_TEST_DEBUG=0 \
+    RUST_TEST_THREADS=2 \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
+
+USER developer
+WORKDIR /workspace
+CMD ["sleep", "infinity"]
