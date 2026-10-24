@@ -92,8 +92,8 @@ key 会发到 endpoint，所以 endpoint 只来自经过审查或用户自己写
   | 聚合 | `openrouter`、`groq` |
   | 本地 | `ollama`、`lmstudio`（`auth = "none"`） |
 
-  国际站与国内站 endpoint 不同的厂商各算一家。表中不记录某一家是否经过实测；实际验证范围写在实现 PR 的验证记录中。
-- **用户全局 `~/.lattice/providers.toml`。** 新增 provider，或覆盖内置 provider 的字段。一个 provider 一张表，`models` 子表按模型补充元数据，`features` 子表设置厂商差异，例如：
+  国际站与国内站 endpoint 不同的厂商各算一家。表中不记录某一家是否经过实测；实际验证范围写在实现 PR 的验证记录中。SIWC 另用内置 provider `chatgpt`，见第 11 节。
+- **用户全局 `~/.lattice/providers.toml`。** 新增 provider，或覆盖内置 provider 的字段（`chatgpt` 的限制见第 11 节）。一个 provider 一张表，`models` 子表按模型补充元数据，`features` 子表设置厂商差异，例如：
 
   ```toml
   [providers.my-vllm]                   # 新增自建服务
@@ -173,12 +173,13 @@ provider 配置在提交端解析，写入会话的 profile 副本（第 13 节�
 
 SIWC 是一种认证方式：`protocol = "responses"`、`auth = "oauth:chatgpt"`，加上 SIWC 要求的 features（固定 `store: false`，不发送 `temperature`、`max_output_tokens` 等不支持的参数）。它不需要单独的协议适配器。
 
-- **登录。** 新增登录命令，按 OpenAI 开源工具接入方式完成授权码加 PKCE 流程，回调地址为 `http://127.0.0.1:1455`；无头机器可以粘贴浏览器最终跳转的 URL。
+- **固定的 provider 与 endpoint。** SIWC 只用内置 provider `chatgpt`，endpoint 固定为 `https://api.openai.com/v1`：OpenAI 的接入文档只给出这一个 endpoint，token 的 audience 也是它。`providers.toml` 不能覆盖 `chatgpt` 的协议、endpoint、认证方式与上述 features，也不能给其他 provider 设置 `oauth:chatgpt`；违反时在接受前按配置错误拒绝。推理档位与价格取 models.dev 中 `openai` 条目的元数据。
+- **登录。** 新增登录命令，按 OpenAI 开源工具接入方式完成授权码加 PKCE 流程，回调地址为 `http://127.0.0.1:1455`；无头机器可以粘贴浏览器最终跳转的 URL。首次登录时注册客户端，取得 `client_id`；本机的 host ID 生成后保持不变。再次登录复用同一个 `client_id` 与 host ID，不重新注册。
 - **登录材料落盘。** `client_id`、host ID 与 access、refresh、id token 保存在 `~/.lattice/auth.json`，文件权限 0600。不写入会话库、日志、诊断或公开输出。
-- **刷新在提交端。** 提交端在冻结配置前检查 access token；剩余有效期短于 Turn deadline 加余量时先刷新。刷新用文件锁串行化，同一份登录材料同一时间只有一个进程在刷新。
+- **刷新在提交端。** access token 的有效期为 1 小时。提交端在冻结配置前检查它的剩余有效期，短于 Turn deadline 加余量时先刷新；刷新后仍不够（例如 `timeout_secs` 设为 3600）时，在接受前按配置错误拒绝，提示调低 `timeout_secs`。余量由合同规定。刷新用文件锁串行化，同一份登录材料同一时间只有一个进程在刷新。
 - **后台不接触登录材料。** 冻结的 access token 与现有 API key 一样经私有 IPC 交给后台，只在内存中使用。
-- **登出。** 撤销 refresh token 后删除本地材料；撤销未确认时仍删除本地材料，并提示用户在 ChatGPT 设置中断开应用。
-- **模型列表。** SIWC 账号可用的模型以 `GET /v1/models` 的结果为准，在登录与 `lattice models refresh` 时由提交端拉取；推理档位与价格仍取第 6 节的元数据。
+- **登出。** 撤销 refresh token 后删除本地的 access、refresh 与 id token，保留 `client_id` 与 host ID 供再次登录。撤销未确认时仍删除这些 token，并提示用户远端撤销未确认。
+- **模型列表。** `chatgpt` 可用的模型以 `GET /v1/models` 的结果为准，在登录与 `lattice models refresh` 时由提交端拉取并保存；推理档位与价格仍取第 6 节的元数据。
 - **用量超限。** SIWC 的用量超限（例如 `subscription_sharing_usage_limit_exceeded`，可能在流中途出现）按不可重试的 provider 错误处理。
 
 这改变了“凭据不落盘”的现行边界：落盘的只有 SIWC 登录材料，API key 仍只从环境变量读取。
@@ -204,7 +205,7 @@ Interactions 适配器上线后，内置 `google` provider 默认使用 Interact
 TUI 用 slash 命令选择模型与推理强度，选择界面是 Dock 中的面板。
 
 - **面板可以交互。** 现有面板只显示 `/help` 的输出；选择面板在 Dock 中列出候选项，输入文字过滤，↑↓ 移动，Enter 选定，Esc 取消。焦点在面板时由面板解释按键。
-- **`/model`。** 列出可用的 `<provider>/<model>`：provider 来自内置表与 `providers.toml`，模型来自元数据缓存与 `providers.toml` 中手写的模型。候选项标明凭据是否就绪。
+- **`/model`。** 列出可用的 `<provider>/<model>`：provider 来自内置表与 `providers.toml`；模型来自第 6 节的元数据，取值优先级相同，没有缓存时使用内置快照；`chatgpt` 的模型只取第 11 节的账号模型列表。候选项标明凭据是否就绪。
 - **`/effort`。** 只列出当前所选模型支持的档位。模型没有元数据时，面板说明该模型不能选择推理强度，可以在 `providers.toml` 中为它手写档位。
 - **切换模型时。** 当前档位新模型不支持时，改回副本中 profile 的默认档位；默认档位也不支持时清除，由状态消息说明。
 - **作用范围。** 选择由 TUI 进程持有，随下一次提交写回会话的 profile 副本，不写回原 profile（第 13 节）。
@@ -234,7 +235,8 @@ TUI 用 slash 命令选择模型与推理强度，选择界面是 Dock 中的面
 - 每个 feature 取值有请求体断言，默认值与标准协议形状一致。
 - 元数据的取值优先级与刷新：手写值、缓存与内置快照的覆盖顺序；后台刷新失败时继续使用上一份数据。
 - endpoint 来源的负向测试：项目目录中的 `providers.toml` 不被读取，元数据缓存中的 endpoint 不被使用，环境变量与工作区 `.env` 都不能改变 endpoint。
-- TUI 的选择面板由 pty 场景覆盖选择、过滤与取消；选择后提交的请求体带上所选模型与档位。
+- SIWC：`providers.toml` 改写 `chatgpt` 的 endpoint，或给其他 provider 设置 `oauth:chatgpt` 时，在接受前被拒绝；access token 剩余有效期不足时先刷新，刷新后仍不足时拒绝；登出后 `client_id` 与 host ID 保留，再次登录复用它们。
+- TUI 的选择面板由 pty 场景覆盖选择、过滤与取消；选择后提交的请求体带上所选模型与档位。没有元数据缓存时 `/model` 列出内置快照中的模型，`chatgpt` 只列出账号模型列表中的模型。
 - 已有会话在原 `agent.toml` 修改或删除后仍按副本执行；切换模型后重新打开会话，沿用最后一轮的模型与档位；rewind 不改变副本。
 - 有凭据时用真实 provider 验证：OpenAI API key（Chat Completions、Responses、推理、缓存），ChatGPT 订阅账号（SIWC），Gemini API key（generateContent、Interactions）。没有凭据的 provider 只按文档与夹具验证，并在交付时说明。
 
@@ -279,13 +281,14 @@ TUI 用 slash 命令选择模型与推理强度，选择界面是 Dock 中的面
 - **读取项目目录中的 provider 配置。** 检出的仓库可以借此改变 endpoint。
 - **依赖服务端会话状态。** 会与会话树形成两份权威；SIWC 也不允许。
 - **推理档位不支持时降级到相近档位。** 会在用户不知情时改变行为。
+- **SIWC 作为 `openai` provider 的第二种认证方式。** 同一个 `openai/<model>` 会对应两种凭据与两份模型列表，回放来源也无法区分；单独的 `chatgpt` provider 让每个 provider 只有一种认证方式，endpoint 也能单独固定。
 - **登录材料存入系统密钥环。** 无头机器通常没有可用的密钥环；本 ADR 采用权限受限的本地文件。
 - **每次提交都重读原 profile（现状）。** 已有会话的行为会随 profile 的修改而变化，重新打开会话时无法确定接下来用什么配置。
 - **选择后立即写回副本。** 需要新增一条后台命令，且副本可能与最后一轮实际使用的模型不同；随提交写回则两者始终一致。
 
 ## 不在本文决定的事项
 
-- 各协议 feature 的完整清单及现有厂商差异的迁移对照，`providers.toml` 与 `auth.json` 的完整格式，各家 endpoint 与 key 环境变量名，用量换算与缓存断点：由 `llm.md` 规定。
+- 各协议 feature 的完整清单及现有厂商差异的迁移对照，`providers.toml`、`auth.json` 与 SIWC 模型列表的完整格式和保存位置，各家 endpoint 与 key 环境变量名，用量换算与缓存断点，SIWC 刷新的余量：由 `llm.md` 规定。
 - 选择面板的具体键位、候选项排序与显示宽度：由 `tui.md` 规定。
 - Vertex AI、Bedrock、Azure 等其他协议或认证方式，以及其他订阅登录。
 - 从原 profile 重新生成副本的命令：确实需要时再加。
