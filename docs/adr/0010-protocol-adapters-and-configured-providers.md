@@ -183,19 +183,22 @@ SIWC 是一种认证方式：`protocol = "responses"`、`auth = "oauth:chatgpt"`
 
 - **固定的 provider 与 endpoint。** SIWC 只用内置 provider `chatgpt`，endpoint 固定为 `https://api.openai.com/v1`：OpenAI 的接入文档只给出这一个 endpoint，token 的 audience 也是它。`providers.toml` 不能覆盖 `chatgpt` 的协议、endpoint、认证方式与上述 features，也不能给其他 provider 设置 `oauth:chatgpt`；违反时在接受前按配置错误拒绝。推理档位与价格取 models.dev 中 `openai` 条目的元数据。
 - **登录在后台执行。** 按 OpenAI 开源工具接入方式完成授权码加 PKCE 流程，前端只负责界面：
-  1. 后台生成 PKCE 参数，首次登录时注册客户端、取得 `client_id`，在 `127.0.0.1:1455` 监听回调，把授权 URL 交给前端。
+  1. 后台生成 state、nonce 与 PKCE 参数，在 `127.0.0.1:1455` 启动回调监听，把授权 URL 交给前端。首次登录时，URL 中的 `client_id` 是注册入口 `dynamic_agent_client`，它不保存、也不用于换取 token；再次登录时用已保存的 `client_id`。
   2. 前端打开浏览器或显示 URL。无头机器上，用户把浏览器最终跳转的 URL 粘贴给前端，由前端转交后台。
-  3. 后台换取 token，写入 `auth.json`，并拉取账号的模型列表。
-  4. 前端取消或断开时，后台中止这次登录并关闭监听。
+  3. 后台校验回调。首次登录的回调带回正式的 `client_id`，后台保存它，再用它换取 token；没有带回时登录不成立。再次登录的回调可能不带 `client_id`，沿用已保存的值；带回不同的值时拒绝。
+  4. 后台写入 `auth.json`，并拉取账号的模型列表。
+  5. 前端取消或断开时，后台中止这次登录并关闭监听。
 
-  本机的 host ID 生成后保持不变。再次登录复用同一个 `client_id` 与 host ID，不重新注册。
+  本机的 host ID 在首次登录前生成并保存，此后保持不变。再次登录复用同一个 `client_id` 与 host ID，不重新注册。
 - **登录材料。** `client_id`、host ID 与 access、refresh、id token 保存在 `auth.json`（第 4 节）。
 - **按需刷新。**
   - 后台只在每次模型请求前检查 access token 的剩余有效期，短于余量（包括已经过期）时先刷新再发请求，所以 Turn 的时长不受 token 有效期限制。不设定时刷新。余量由合同规定。
   - 接受 Turn 时只确认已经登录，不检查有效期，也不刷新。
   - 有效期取 token 响应中的 `expires_in`（现为 1 小时），不写死。
   - refresh token 每次刷新都会更换，刷新结果立即写回 `auth.json`。同一时刻需要刷新的多个 Turn 只发起一次刷新，其余等待它的结果。
-  - 刷新失败（例如 refresh token 已被撤销）时，这次尝试按不可重试的认证错误停止，提示重新登录。
+  - 刷新失败按原因区分：
+    - token 端点确认 refresh token 已失效（例如 `invalid_grant`、`refresh_token_expired`、`refresh_token_reused`）时，清除失效的 token，这次尝试按认证错误停止，提示重新登录；`client_id` 与 host ID 保留。
+    - 网络故障、服务端临时错误等不代表凭据失效，保留凭据与真实的错误原因，恢复方式由合同规定。
 - **登出在后台执行。** 撤销 refresh token 后删除本地的 access、refresh 与 id token，保留 `client_id` 与 host ID 供再次登录。撤销未确认时仍删除这些 token，并提示用户远端撤销未确认。
 - **模型列表。** `chatgpt` 可用的模型以 `GET /v1/models` 的结果为准，由后台拉取并保存，随第 6 节的元数据刷新与 `lattice models refresh` 更新；还没有列表时（例如刚登录），列出候选前先拉取。推理档位与价格仍取第 6 节的元数据。
 - **用量超限。** SIWC 的用量超限（例如 `subscription_sharing_usage_limit_exceeded`，可能在流中途出现）按不可重试的 provider 错误处理。
@@ -260,9 +263,9 @@ TUI 用 slash 命令选择模型与推理强度，选择界面是 Dock 中的面
 - SIWC 的配置：`providers.toml` 改写 `chatgpt` 的 endpoint，或给其他 provider 设置 `oauth:chatgpt` 时，在接受前被拒绝。
 - SIWC 的刷新用短有效期的 token 测试：
   - 测试用的 OAuth 与 Responses 服务签发有效期只有几秒的 token，拒绝过期的 access token 与用过的 refresh token。
-  - 跨过有效期的多步 Turn 在步骤之间刷新并完成；在有效期内开始与结束的 Turn 不发起刷新；同时运行的多个 Turn 只刷新一次；刷新失败时这次尝试按认证错误停止。
+  - 跨过有效期的多步 Turn 在步骤之间刷新并完成；在有效期内开始与结束的 Turn 不发起刷新；同时运行的多个 Turn 只刷新一次；refresh token 被判失效时清除 token 并按认证错误停止，token 端点暂时不可用时保留凭据。
   - harness 经测试构建的 feature（与现有 `test-crash-barriers` 同类）把 `chatgpt` 指向测试服务。发布构建没有这个入口，第 11 节的固定 endpoint 规则不受影响。
-- SIWC 的登录：前端不直接写 `auth.json`；登录中途取消时，后台关闭回调监听；登出后 `client_id` 与 host ID 保留，再次登录复用它们。
+- SIWC 的登录：首次登录用 `dynamic_agent_client` 打开授权页，保存回调带回的 `client_id`；再次登录的回调带回不同的 `client_id` 时拒绝；前端不直接写 `auth.json`；登录中途取消时，后台关闭回调监听；登出后 `client_id` 与 host ID 保留，再次登录复用它们。
 - TUI 的选择面板由 pty 场景覆盖选择、过滤与取消；选择后提交的请求体带上所选模型与档位。没有元数据缓存时 `/model` 列出内置快照中的模型，`chatgpt` 只列出账号模型列表中的模型。
 - 已有会话在原 `agent.toml` 修改或删除后仍按副本执行；切换模型后重新打开会话，沿用最后一轮的模型与档位；rewind 不改变副本。
 - 有凭据时用真实 provider 验证：OpenAI API key（Chat Completions、Responses、推理、缓存），ChatGPT 订阅账号（SIWC），Gemini API key（generateContent、Interactions）。没有凭据的 provider 只按文档与夹具验证，并在交付时说明。
@@ -334,7 +337,7 @@ TUI 用 slash 命令选择模型与推理强度，选择界面是 Dock 中的面
 
 ## 不在本文决定的事项
 
-- 各协议 feature 的完整清单及现有厂商差异的迁移对照，`providers.toml`、`auth.json` 与 SIWC 模型列表的完整格式和保存位置，`lattice auth` 的命令形式，各家 endpoint，用量换算与缓存断点，SIWC 刷新的余量：由 `llm.md` 规定。
+- 各协议 feature 的完整清单及现有厂商差异的迁移对照，`providers.toml`、`auth.json` 与 SIWC 模型列表的完整格式和保存位置，`lattice auth` 的命令形式，各家 endpoint，用量换算与缓存断点，SIWC 刷新的余量、刷新失败的错误码对照与临时故障的恢复方式：由 `llm.md` 规定。
 - 配置目录与 `LATTICE_AGENTS_DIR` 的对应关系，前端与运行中的后台配置不一致时的处理，模型候选查询的形状：由 `session.md` 规定。
 - 选择面板的具体键位、候选项排序与显示宽度：由 `tui.md` 规定。
 - Turn deadline 的粒度、默认值与到点后的结局：由 #222 裁决。
