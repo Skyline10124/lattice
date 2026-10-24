@@ -113,7 +113,7 @@ provider 配置、凭据与模型元数据是用户级的全局状态，不随�
   完整字段由合同规定。
 - **凭据保存在 `~/.lattice/auth.json`。** API key 按 provider `id` 保存，SIWC 的登录材料也在这里（第 11 节）。文件权限 0600，只由后台读写。
   - `lattice auth` 是前端命令，只负责界面：录入与删除 key、登录与登出都经私有 IPC 交给后台执行。key 从终端或标准输入读取，不作为命令行参数。
-  - 状态查询只返回每个 provider 的凭据是否就绪，不返回凭据本身。
+  - 状态查询只返回每个 provider 的凭据是否就绪，不返回凭据本身；`chatgpt` 另给出 access token 的到期时间。
   - 写入在后台进程内串行，先写临时文件再改名替换，后台中途退出也不会留下写了一半的文件。
   - 配置文件中不写 key；凭据不写入会话库、profile 副本、日志、诊断或公开输出。
 - **环境变量与项目目录不提供配置。**
@@ -191,7 +191,7 @@ SIWC 是一种认证方式：`protocol = "responses"`、`auth = "oauth:chatgpt"`
   本机的 host ID 生成后保持不变。再次登录复用同一个 `client_id` 与 host ID，不重新注册。
 - **登录材料。** `client_id`、host ID 与 access、refresh、id token 保存在 `auth.json`（第 4 节）。
 - **按需刷新。**
-  - 后台只在每次模型请求前检查 access token 的剩余有效期，短于余量时先刷新再发请求，所以 Turn 的时长不受 token 有效期限制。余量由合同规定。
+  - 后台只在每次模型请求前检查 access token 的剩余有效期，短于余量（包括已经过期）时先刷新再发请求，所以 Turn 的时长不受 token 有效期限制。不设定时刷新。余量由合同规定。
   - 接受 Turn 时只确认已经登录，不检查有效期，也不刷新。
   - 有效期取 token 响应中的 `expires_in`（现为 1 小时），不写死。
   - refresh token 每次刷新都会更换，刷新结果立即写回 `auth.json`。同一时刻需要刷新的多个 Turn 只发起一次刷新，其余等待它的结果。
@@ -265,7 +265,10 @@ TUI 用 slash 命令选择模型与推理强度，选择界面是 Dock 中的面
 - SIWC 的登录：前端不直接写 `auth.json`；登录中途取消时，后台关闭回调监听；登出后 `client_id` 与 host ID 保留，再次登录复用它们。
 - TUI 的选择面板由 pty 场景覆盖选择、过滤与取消；选择后提交的请求体带上所选模型与档位。没有元数据缓存时 `/model` 列出内置快照中的模型，`chatgpt` 只列出账号模型列表中的模型。
 - 已有会话在原 `agent.toml` 修改或删除后仍按副本执行；切换模型后重新打开会话，沿用最后一轮的模型与档位；rewind 不改变副本。
-- 有凭据时用真实 provider 验证：OpenAI API key（Chat Completions、Responses、推理、缓存），ChatGPT 订阅账号（SIWC，包括一次超过 1 小时的 Turn），Gemini API key（generateContent、Interactions）。没有凭据的 provider 只按文档与夹具验证，并在交付时说明。
+- 有凭据时用真实 provider 验证：OpenAI API key（Chat Completions、Responses、推理、缓存），ChatGPT 订阅账号（SIWC），Gemini API key（generateContent、Interactions）。没有凭据的 provider 只按文档与夹具验证，并在交付时说明。
+- SIWC 的真实账号按时机验证，不需要超过 1 小时的 Turn：
+  - 跨刷新：access token 的剩余有效期略长于余量时，提交一轮多步 Turn，让后面某一步的请求前触发刷新；这一轮正常完成，`auth.json` 中的 refresh token 已经更换。
+  - 跨过期：剩余有效期只比余量多几十秒时，发一个输出很长的请求，让流持续到过期之后，确认 provider 会不会断开它。
 
 ## 与 ADR 0005、ADR 0006、ADR 0007、ADR 0008 的关系
 
@@ -323,6 +326,7 @@ TUI 用 slash 命令选择模型与推理强度，选择界面是 Dock 中的面
 - **key 继续由环境变量提供。** 后台常驻且不继承前端环境。由后台读自己的环境，key 取决于谁启动了后台，改 key 要重启后台；由提交端随提交附带，又留下一处按提交者变化的来源。
 - **前端命令直接写 `auth.json`。** 前端与后台都会写这个文件，要靠文件锁协调；前端还要自己确定配置目录，可能与运行中的后台不一致。
 - **接受 Turn 时强制刷新 token。** 每一轮都多一次刷新请求；超过有效期的 Turn 仍要在执行中刷新，请求前的检查省不掉。
+- **定时刷新 token。** 机器休眠或进程挂起时定时器会错过，请求前的检查仍然省不掉；后台常驻时，定时刷新让登录永不失效，绕过了 refresh token 30 天不用即失效的设计。
 - **保持 3600 秒的 Turn deadline 上限，SIWC 的 Turn 不超过 token 有效期。** 执行中的刷新没有实际用到的场景，只能靠测试证明。
 - **凭据存入系统密钥环。** 无头机器通常没有可用的密钥环；本 ADR 采用权限受限的本地文件。
 - **每次提交都重读原 profile（现状）。** 已有会话的行为会随 profile 的修改而变化，重新打开会话时无法确定接下来用什么配置。
