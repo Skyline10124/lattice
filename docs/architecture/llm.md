@@ -402,8 +402,6 @@ SIWC 按 OpenAI 的[开源工具接入方式](https://developers.openai.com/siwc
 
 `chatgpt` 的协议、endpoint 与认证方式固定为表中的值：OpenAI 的接入文档只给出 `https://api.openai.com/v1`，token 的 audience 也是它。`providers.toml` 不能改写它们，见[用户配置](#用户配置-providerstoml)。
 
-测试构建另有 `test-chatgpt-endpoints` feature（与现有 `test-crash-barriers` 同类），让 harness 把 `chatgpt` 的 API 与授权服务地址指向测试服务，回调监听改用操作系统分配的端口；发布构建没有这个入口。
-
 ### 登录
 
 登录在后台执行，前端只负责界面。整个登录是一次 IPC 交换，前端断开或取消即中止：
@@ -465,8 +463,8 @@ Turn deadline 的范围由[会话合同](session.md#输入与传输限制)维护
 | 用量换算与费用估算，包括缺失项 | 同上 |
 | `auth.json`：权限检查、原子写入、严格解析、凭据不进入日志与公开输出 | 同上 |
 | endpoint 与凭据来源的负向测试：项目目录中的 `providers.toml` 不被读取，环境变量与工作区 `.env` 既不能改变 endpoint、也不能提供 key | harness 的 fast 场景 |
-| SIWC：测试服务签发几秒有效的 token，拒绝过期的 access token 与用过的 refresh token；跨过有效期的多步 Turn 在步骤之间刷新并完成，有效期内的 Turn 不刷新，并发只刷新一次，各类刷新失败按上文处理；首次登录保存回调带回的 `client_id`，再次登录带回不同值时拒绝，登录中途取消关闭监听 | `lattice-llm` 局部测试与 harness 的 [SIWC 场景](../development/testing.md#sign-in-with-chatgpt) |
-| 真实 provider | 有凭据时验证 OpenAI（Chat Completions、Responses、推理、缓存）、ChatGPT 订阅（SIWC）、Gemini（generateContent、Interactions）；SIWC 的真实账号按 access token 的到期时间选时机，验证 Turn 中途的刷新，以及流跨过过期时刻会不会被断开。没有凭据的 provider 只按文档与夹具验证，交付时说明 |
+| SIWC 的本地逻辑：用注入的时钟与构造的短有效期 token 记录，核对剩余有效期短于余量（包括已经过期）时先刷新、有效期内不刷新，并发的请求只刷新一次，刷新失败按上文三类处理并写回 `auth.json`；回调的 `state` 与 `client_id` 校验，登录中途取消时关闭监听。不模拟 OpenAI 的授权服务 | `lattice-llm` 局部测试 |
+| 真实 provider | 有凭据时验证 OpenAI（Chat Completions、Responses、推理、缓存）、ChatGPT 订阅（SIWC）、Gemini（generateContent、Interactions）；SIWC 与 OpenAI 的交互（登录、id token 校验、刷新、登出与账号模型列表）只由真实账号验证，CI 不覆盖；按 access token 的到期时间选时机，验证 Turn 中途的刷新，以及流跨过过期时刻会不会被断开。没有凭据的 provider 只按文档与夹具验证，交付时说明 |
 
 内置表与 features 的依据：OpenAI [推理](https://developers.openai.com/api/docs/guides/reasoning)与[缓存](https://developers.openai.com/api/docs/guides/prompt-caching)，OpenAI SIWC [登录](https://developers.openai.com/siwc/token-sharing-open-source/sign-in)、[账户与会话](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions)、[模型与推理](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference)、[错误与恢复](https://developers.openai.com/siwc/token-sharing-open-source/errors-and-recovery)，Google [Interactions API](https://ai.google.dev/api/interactions-api) 与 [generateContent](https://ai.google.dev/api/generate-content)，xAI [推理](https://docs.x.ai/docs/guides/reasoning)，Mistral [推理](https://docs.mistral.ai/capabilities/reasoning/)，DeepSeek [思考模式](https://api-docs.deepseek.com/guides/thinking_mode)与[上下文缓存](https://api-docs.deepseek.com/guides/kv_cache)，Kimi [思考模型](https://platform.kimi.ai/docs/guide/use-kimi-k2-thinking-model)，Z.ai [思考模式](https://docs.z.ai/guides/capabilities/thinking-mode)，智谱 [思考模式](https://docs.bigmodel.cn/cn/guide/capabilities/thinking-mode)，阿里云 [深度思考](https://www.alibabacloud.com/help/en/model-studio/deep-thinking)、[上下文缓存](https://www.alibabacloud.com/help/en/model-studio/context-cache)与 [OpenAI 兼容](https://www.alibabacloud.com/help/en/model-studio/compatibility-of-openai-with-dashscope)，MiniMax [国际站](https://platform.minimax.io/docs/api-reference/text-anthropic-api)与[国内站](https://platform.minimax.cn/docs/api-reference/text-anthropic-api)，硅基流动 [推理](https://docs.siliconflow.cn/cn/userguide/capabilities/reasoning)，OpenRouter [推理](https://openrouter.ai/docs/use-cases/reasoning-tokens)，Groq [推理](https://console.groq.com/docs/reasoning)，均于 2026-10-25 查阅。火山方舟的推理参数没有取得官方文档，`volcengine` 的 features 与 Anthropic 兼容厂商的缓存支持在实现时核对，结论写回本表。
 

@@ -59,7 +59,7 @@ status: active
 会话与调用状态通过公开 CLI 读取；本地请求回执及视图边界可通过公开 Local IPC 验证，不导入产品类型或直接调用进程内实现。既有工作区历史场景为验证私有 Git 历史，使用通用 Git 库检查对象与引用；这不授权 harness 导入产品实现或扩大为任意私有状态读取接口。
 未通过公开接口暴露的内部对象关系、引用事务与 fsync 故障由对应库测试保护。
 
-fake LLM 经正式的配置入口接入：场景在自己的 HOME 下写 `~/.lattice/providers.toml`，把所测 provider 的 `base_url` 指向 fake LLM，或新增一个使用所测协议的 provider；key 经 `lattice auth set` 从标准输入录入。fake LLM 按请求路由生成[模型接入合同](../architecture/llm.md#端点与认证)中五种协议的流式响应。`chatgpt` 的 endpoint 不能由配置改写，SIWC 场景使用带测试 feature 的被测二进制，见[验证集与显式 feature](#验证集与显式-feature)。除显式 feature 外，场景不增加隐藏产品参数、测试专用 provider 或绕过真实调用流程的产品分支。
+fake LLM 经正式的配置入口接入：场景在自己的 HOME 下写 `~/.lattice/providers.toml`，把所测 provider 的 `base_url` 指向 fake LLM，或新增一个使用所测协议的 provider；key 经 `lattice auth set` 从标准输入录入。fake LLM 按请求路由生成[模型接入合同](../architecture/llm.md#端点与认证)中五种协议的流式响应。`chatgpt` 的 endpoint 不能由配置改写，harness 不覆盖 SIWC，它的验证见[模型接入合同](../architecture/llm.md#验证与承接)。场景不增加隐藏产品参数、测试专用 provider 或绕过真实调用流程的产品分支。
 
 后台启动时与此后每 24 小时从 models.dev 拉取模型元数据。场景只信任 harness 的 CA，这次拉取不会成功，场景使用内置快照或场景写入的元数据缓存，不依赖拉取结果；拉取本身由 `lattice-llm` 局部测试对本地服务验证。
 
@@ -225,20 +225,11 @@ Direct-Local 使用场景自有的产品后台，可以通过正式入口自动�
 5. 断言：已有会话的第二次提交仍用副本中的模型、策略与 endpoint，新会话使用修改后的配置；选择写回副本，之后不带选择的提交沿用；不支持的档位在接受前拒绝，副本不变；换 provider 后副本中的 provider 配置随之替换；并发 Turn 的 endpoint 与凭据互不污染；场景项目中的 `.env`、`providers.toml` 与前端环境变量既不改变 endpoint，也不提供 key；证书不受信任时握手失败，这一轮按 provider 错误结束；信任材料或配置目录不同的前端在接受前被拒绝，提示 `lattice daemon stop`；信任材料不能加载的后台在接受前拒绝每一次提交。HTTP 场景不能替代 TLS 验证。
 6. 清理：关闭自有 provider、gate 和产品进程，按证据合同处理临时凭据与状态，不将秘密写入报告。
 
-#### Sign in with ChatGPT
-
-1. 目标：验证 SIWC 的登录、刷新与登出在后台完成，access token 在 Turn 中途过期时在步骤之间刷新。
-2. 准备：使用带 `test-chatgpt-endpoints` 的被测二进制；harness 的测试服务代替授权服务与 `chatgpt` 的 API，签发几秒有效的 access token，拒绝过期的 access token 与用过的 refresh token；回调监听使用操作系统分配的端口。
-3. 操作：执行 `lattice auth login chatgpt`，场景按输出的授权 URL 访问测试服务完成授权；提交一个用 gate 拖过 access token 有效期的多步 Turn，再提交一个在有效期内完成的 Turn；token 将到期时两个会话并发提交；让刷新分别返回终止错误码、`invalid_client`、网络失败与 5xx；登出后再次登录，另让一次登录的回调带回不同的 `client_id`；登录中途断开前端。
-4. 观察：记录测试服务收到的授权、token、revoke 与 API 请求，`lattice auth status` 的输出，各轮结局，以及 `auth.json` 的权限与字段，不记录 token 值。
-5. 断言：首次登录使用 `dynamic_agent_client` 并保存回调带回的 `client_id`，再次登录使用它并带 `id_token_hint`，带回不同 `client_id` 的登录被拒绝；过期的 access token 不被发出；跨过有效期的 Turn 在步骤之间刷新并完成，有效期内的 Turn 不刷新；并发提交只刷新一次；刷新失败按[模型接入合同](../architecture/llm.md#刷新)分类：终止错误码清除 token、这一轮按认证错误结束，`invalid_client` 按不可重试错误结束，网络失败与 5xx 按可重试的 provider 错误处理；登出调用 revoke 并保留 `client_id`；登录中途断开时监听关闭，`auth.json` 不变。
-6. 清理：按共同规则停止后台与测试服务；token 与授权码不进入证据。
-
-外部入口为 `direct_background`、`direct_tree_session`、相关 `pty_tui_smoke`、崩溃屏障目标 `direct_crash_barriers` 与 SIWC 目标 `direct_chatgpt_login`。产品内部交接由相应 crate 局部测试保护；必须隔离测试的部分，如会话库表编码、值版本解析与旧库检测，先列出全部失败方式再写实现。实际覆盖、未覆盖窗口、构建身份、失败与待裁决项留在任务交接或验证证据中，不以场景规格代替执行结果。
+外部入口为 `direct_background`、`direct_tree_session`、相关 `pty_tui_smoke` 与崩溃屏障目标 `direct_crash_barriers`。产品内部交接由相应 crate 局部测试保护；必须隔离测试的部分，如会话库表编码、值版本解析与旧库检测，先列出全部失败方式再写实现。实际覆盖、未覆盖窗口、构建身份、失败与待裁决项留在任务交接或验证证据中，不以场景规格代替执行结果。
 
 ### 验证集与显式 feature
 
-普通验证包含默认启用的快速、Direct-Local 和 PTY 场景。崩溃屏障目标使用 `crash-barriers` feature，并需要带 `test-crash-barriers` 的被测二进制；普通 CI 在默认测试后构建该二进制并运行它。SIWC 目标使用 `chatgpt-login` feature，需要带 `test-chatgpt-endpoints` 的被测二进制，该 feature 把 `chatgpt` 的 API 与授权服务地址指向测试服务；普通 CI 构建带屏障的二进制时一并启用它并运行该目标。`release_operator` 使用 `release-operator` feature，普通 CI 不运行。未启用的 feature 目标不代表已运行。
+普通验证包含默认启用的快速、Direct-Local 和 PTY 场景。崩溃屏障目标使用 `crash-barriers` feature，并需要带 `test-crash-barriers` 的被测二进制；普通 CI 在默认测试后构建该二进制并运行它。`release_operator` 使用 `release-operator` feature，普通 CI 不运行。未启用的 feature 目标不代表已运行。
 选用故障注入场景时，被测二进制和测试目标须具备所需配置，不能用普通产物冒充带屏障的故障验证。
 
 本地选择局部验证与远程门禁分别处理。报告列明测试目标、feature、构建模式和实际结果，不能将普通套件通过推广为所有显式 feature 均已验证。
