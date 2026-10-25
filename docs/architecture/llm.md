@@ -190,7 +190,7 @@ feature 由协议适配器的代码定义，配置只能在已有取值中选择
 | feature | 取值 | 默认 | 作用 |
 | --- | --- | --- | --- |
 | `effort_param` | `reasoning-effort`、`reasoning-object` | `reasoning-effort` | 推理档位写作顶层 `reasoning_effort: "<档位>"`，或 OpenRouter 的 `reasoning: {"effort": "<档位>"}`；`off` 写作 `"none"` |
-| `thinking_toggle` | `none`、`thinking-type`、`enable-thinking` | `none` | 关闭与开启推理的写法：`none` 时 `off` 只能经 `effort_param` 写作 `"none"`；`thinking-type` 写 `thinking: {"type": "enabled" \| "disabled"}`；`enable-thinking` 写 `enable_thinking: true \| false` |
+| `thinking_toggle` | `none`、`thinking-type`、`enable-thinking` | `none` | 关闭与开启推理的写法：`none` 时来自 toggle 项的 `off` 与 `high` 不可用；`thinking-type` 写 `thinking: {"type": "enabled" \| "disabled"}`；`enable-thinking` 写 `enable_thinking: true \| false` |
 | `thinking_budget` | `none`、`thinking-budget`、`reasoning-max-tokens` | `none` | 按 token 数限制推理的写法：顶层 `thinking_budget: N`，或 OpenRouter 的 `reasoning: {"max_tokens": N}` |
 | `reasoning_replay` | `none`、`reasoning-content`、`content-chunks` | `none` | 同来源回放时，助手消息中的 reasoning 怎样发回：不发；写作 `reasoning_content` 字段；写作 Mistral 的 `content` 分块（`thinking` 块在前） |
 | `cache_markers` | 布尔 | `false` | 在系统提示与最后一条消息的末尾内容块上加 `cache_control: {"type": "ephemeral"}`，用于阿里云的显式缓存 |
@@ -262,9 +262,10 @@ feature 由协议适配器的代码定义，配置只能在已有取值中选择
 | `reasoning_options` 中的项 | 增加的档位 |
 | --- | --- |
 | `{"type": "effort", "values": [...]}` | 列出的档位；`none` 记作 `off`，`default` 忽略 |
-| `{"type": "toggle"}` | `off`；同一模型没有 `effort` 或 `budget_tokens` 项时，另加 `high`，表示开启推理、深度由 provider 决定 |
+| `{"type": "toggle"}` | `off`；同一模型没有 `effort` 或 `budget_tokens` 项时，另加 `high`，表示只写开启、不写深度，由服务端按默认深度推理 |
 | `{"type": "budget_tokens", "min": …, "max": …}`，且同一模型没有 `effort` 项 | `low`、`medium`、`high`、`max`，按下文的预算去掉重复的档位 |
 
+- 每个档位只用产生它的那一项对应的字段表达，不跨类型回退：来自 toggle 项的 `off` 与 `high` 只写开关字段，来自 effort 项的档位（包括取值 `none` 得到的 `off`）只写档位字段，来自 budget_tokens 项的档位只写预算字段。所选协议与 features 写不出某一档时，它不出现在可用档位中。
 - `reasoning` 为 true 而没有 `reasoning_options` 的模型总在推理，没有可选档位。
 - 选了模型不支持的档位时，在接受前按配置错误拒绝，不降级到相近档位。
 - profile 的 `[agent].effort` 设默认档位；没有档位时不发送任何推理参数，由 provider 使用默认行为。
@@ -286,8 +287,8 @@ feature 由协议适配器的代码定义，配置只能在已有取值中选择
 
 | 协议 | 档位来自 `effort` 项 | 档位来自 `budget_tokens` 项 | 开启（toggle 项另加的 `high`） | 关闭（`off`） |
 | --- | --- | --- | --- | --- |
-| Chat Completions | 按 `effort_param` 写档位名 | 按 `thinking_budget` 写预算；`thinking_budget` 为 `none` 时这些档位不可用 | 按 `thinking_toggle` 写开启 | 来自 toggle 项且 `thinking_toggle` 不为 `none` 时写关闭，否则按 `effort_param` 写 `"none"` |
-| Responses | `reasoning: {"effort": "<档位>"}` | 不可用 | 不可用 | `reasoning: {"effort": "none"}` |
+| Chat Completions | 按 `effort_param` 写档位名 | 按 `thinking_budget` 写预算；`thinking_budget` 为 `none` 时这些档位不可用 | 按 `thinking_toggle` 写开启；`thinking_toggle` 为 `none` 时不可用 | 来自 toggle 项时按 `thinking_toggle` 写关闭，`thinking_toggle` 为 `none` 时不可用；来自 effort 项时按 `effort_param` 写 `"none"` |
+| Responses | `reasoning: {"effort": "<档位>"}` | 不可用 | 不可用 | 来自 effort 项时 `reasoning: {"effort": "none"}`；来自 toggle 项时不可用 |
 | Anthropic Messages | `thinking: {"type": "adaptive"}` 与 `output_config: {"effort": "<档位>"}` | `thinking: {"type": "enabled", "budget_tokens": N}` | `thinking: {"type": "adaptive"}` | `thinking: {"type": "disabled"}` |
 | generateContent | `generationConfig.thinkingConfig.thinkingLevel` | `thinkingConfig.thinkingBudget: N` | `thinkingConfig.thinkingBudget: -1` | `thinkingConfig.thinkingBudget: 0` |
 | Interactions | `generation_config.thinking_level` | 不可用 | 不可用 | 不可用 |
