@@ -9,6 +9,7 @@ status: accepted
 - 修订：部分取代 ADR 0006 第 4、10 节与 ADR 0007 第 8 节，范围见[与 ADR 0006、ADR 0007 的关系](#与-adr-0006adr-0007-的关系)
 - 依赖：ADR 0007
 - 实施跟踪：GitHub #294（已完成，实现见 #296；设计讨论见 #288）
+- 部分被取代：ADR 0010（第 10 节中由客户端读取 profile、系统提示与连接凭据的规则；范围见 ADR 0010 的[与 ADR 0005、ADR 0006、ADR 0007、ADR 0008 的关系](0010-protocol-adapters-and-configured-providers.md#与-adr-0005adr-0006adr-0007adr-0008-的关系)）
 
 ## 背景
 
