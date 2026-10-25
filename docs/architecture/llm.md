@@ -339,11 +339,12 @@ Chat Completions 中，模型的 `reasoning_options` 含 toggle 项且 `thinking
 
 ```text
 未命中输入 = input − cache_read − cache_write（缺失项按 0）
-费用 = 未命中输入 × cost.input
-     + cache_read × (cost.cache_read，没有时用 cost.input)
-     + cache_write × (cost.cache_write，没有时用 cost.input)
-     + (output − reasoning) × cost.output
-     + reasoning × (cost.reasoning，没有时用 cost.output)
+费用（美元）= ( 未命中输入 × cost.input
+             + cache_read × (cost.cache_read，没有时用 cost.input)
+             + cache_write × (cost.cache_write，没有时用 cost.input)
+             + (output − reasoning) × cost.output
+             + reasoning × (cost.reasoning，没有时用 cost.output)
+             ) ÷ 1,000,000
 ```
 
 - `input` 或 `output` 未知、或模型没有 `cost.input` 与 `cost.output` 时，这次尝试没有费用。

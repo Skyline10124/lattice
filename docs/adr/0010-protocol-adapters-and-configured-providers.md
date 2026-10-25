@@ -255,7 +255,7 @@ TUI 用 slash 命令选择模型与推理强度，选择界面是 Dock 中的面
 
 - 旧会话可以继续读取与续接。节点上旧的 provider 值映射到内置 provider：`openai`、`anthropic` 保持不变，`gemini` 映射为 `google`；`openai_compatible` 无法确定是哪一家，按未知来源处理，续接时按跨来源规则投影。
 - 旧的用量记录中 `prompt_tokens`、`completion_tokens` 读作输入与输出，缓存与推理细分为未知。OpenAI 兼容的旧记录中输入含缓存命中，已无法拆分。
-- 旧会话没有 profile 副本。升级后第一次提交时，后台按当前位置所属 Turn 的 agent 读取 `agent.toml`，生成副本。
+- 旧会话没有 profile 副本。升级后第一次提交时，后台按当前位置所属 Turn 的 agent 读取 `agent.toml`，生成副本；当前位置为根节点 `0` 时没有这样的 Turn，提交必须指定 agent。
 - 新版本写入的记录，旧版本无法读取。
 
 ### 17. 验证方式

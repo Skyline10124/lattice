@@ -196,7 +196,7 @@ sequenceDiagram
 | 观察会话：`watch` | SessionId | 推送会话头、当前路径上最近几轮的对话条目、之后变化的条目与生成中的文字，见[观察与重连](#观察与重连)；当前位置为根节点时只有会话头，会话不存在时返回 NotFound |
 | 查看会话头：`head` | SessionId | 返回与视图开头相同的会话头：当前位置、当前 agent、profile 副本中的模型、provider、推理档位与 profile 的默认档位、当前位置所属的那一轮及其有没有 Owner，以及后台已知的执行诊断；不读条目，不占观察许可。会话不存在时返回 NotFound |
 | 查看一个 Turn：`turn` | TurnId | 返回这一轮的 `TurnSummary` 与全部 Step 节点；请求仍在准入时返回在途，没有这个请求时返回 NotFound。接受结果不明时用它找回 |
-| 提交：`submit` | TurnId，`New(SessionId)` 或 `Existing(SessionId)`，输入、规范工作区，以及可选的 agent、模型与推理档位；会话没有 profile 副本时必须指定 agent，见[会话的 profile 副本](#会话的-profile-副本) | 接受一轮并返回 LocalTurn；TurnId 已被使用返回 Conflict，同 Session 有不同请求在执行时返回 Busy，见[请求身份与找回](#请求身份与找回) |
+| 提交：`submit` | TurnId，`New(SessionId)` 或 `Existing(SessionId)`，输入、规范工作区，以及可选的 agent、模型与推理档位；新会话，以及没有 profile 副本且当前位置为根节点 `0` 的会话必须指定 agent，见[会话的 profile 副本](#会话的-profile-副本) | 接受一轮并返回 LocalTurn；TurnId 已被使用返回 Conflict，同 Session 有不同请求在执行时返回 Busy，见[请求身份与找回](#请求身份与找回) |
 | 查看用量：`usage` | SessionId | 当前路径上逐轮的用量与费用估算，以及合计；用量口径与费用规则见[模型接入合同](llm.md#用量缓存与费用) |
 | 模型候选：`models` | 无，或 provider | 可用的 `<provider>/<model>` 及各自的上下文窗口、输出上限、可用档位、价格与凭据是否就绪，见[模型候选](llm.md#模型候选) |
 | 凭据与元数据：`auth` 与 `models_refresh` 各命令 | 见[凭据命令](llm.md#凭据命令) | 录入与删除 key、SIWC 登录与登出、凭据状态；立即刷新模型元数据与账号模型列表 |
@@ -205,7 +205,7 @@ sequenceDiagram
 | 请求取消：`LocalTurn::cancel`，或独立命令的 `LocalClient::cancel` | TurnId | 句柄同步登记意图并管理在途回执；独立命令返回后台接管结果，持久结局另行查询 |
 | 停止后台：`stop` | 当前本地后台 | 关闭新准入并等待已接管操作收尾，返回停止时已知状态 |
 
-CLI 的 `lattice session` 子命令为 `send`、`rewind`、`list`、`log`、`turn`、`usage` 和 `cancel`，顶层 `lattice run` 是 `session send` 的别名；凭据与模型的命令 `lattice auth`、`lattice models` 见[模型接入合同](llm.md#凭据命令)。`session send` 不带 `--session` 时创建新 Session：CLI 生成 SessionId，项目绑定从当前目录解析，`--agent` 必填；带 `--session` 时向已有 Session 提交，`--agent` 可选，会话没有 profile 副本时必填。`--model <provider>/<model>` 与 `--effort <档位>` 选择这一轮的模型与推理档位，随提交写回 profile 副本。`session usage <SESSION_ID>` 逐轮列出用量与费用估算并给出合计，支持 `--json`。CLI 在发出请求前生成身份并先输出，所以进程无论在哪一步中断，都能按第一条记录中的 TurnId 查询结果；中断在发出请求之前时，查询返回 NotFound。`session turn` 查看单个 Turn 的详情，请求仍在准入时报告在途，接受结果不明时用它找回；`--follow` 遇到请求仍在准入时等准入结束，不在途中退出，已接受则继续观察这一轮直至结束，没有这个请求则报告 NotFound，退出 2。`session cancel <SESSION_ID>` 取消该会话当前正在执行的一轮：CLI 用 `head` 查出会话头所示那一轮的 TurnId，再按 TurnId 取消，并输出该 TurnId；没有正在执行的一轮时报告无可取消。已接管、未接管或没有可取消的一轮时退出 0；取消回复丢失、结果不明时，输出带原 TurnId 的取消记录，状态为 `unknown`，退出 1；会话不存在退出 2。TUI 不带 Session 启动时，在首次提交时生成 SessionId 并新建 Session。
+CLI 的 `lattice session` 子命令为 `send`、`rewind`、`list`、`log`、`turn`、`usage` 和 `cancel`，顶层 `lattice run` 是 `session send` 的别名；凭据与模型的命令 `lattice auth`、`lattice models` 见[模型接入合同](llm.md#凭据命令)。`session send` 不带 `--session` 时创建新 Session：CLI 生成 SessionId，项目绑定从当前目录解析，`--agent` 必填；带 `--session` 时向已有 Session 提交，`--agent` 可选，会话没有 profile 副本且当前位置为根节点 `0` 时必填。`--model <provider>/<model>` 与 `--effort <档位>` 选择这一轮的模型与推理档位，随提交写回 profile 副本。`session usage <SESSION_ID>` 逐轮列出用量与费用估算并给出合计，支持 `--json`。CLI 在发出请求前生成身份并先输出，所以进程无论在哪一步中断，都能按第一条记录中的 TurnId 查询结果；中断在发出请求之前时，查询返回 NotFound。`session turn` 查看单个 Turn 的详情，请求仍在准入时报告在途，接受结果不明时用它找回；`--follow` 遇到请求仍在准入时等准入结束，不在途中退出，已接受则继续观察这一轮直至结束，没有这个请求则报告 NotFound，退出 2。`session cancel <SESSION_ID>` 取消该会话当前正在执行的一轮：CLI 用 `head` 查出会话头所示那一轮的 TurnId，再按 TurnId 取消，并输出该 TurnId；没有正在执行的一轮时报告无可取消。已接管、未接管或没有可取消的一轮时退出 0；取消回复丢失、结果不明时，输出带原 TurnId 的取消记录，状态为 `unknown`，退出 1；会话不存在退出 2。TUI 不带 Session 启动时，在首次提交时生成 SessionId 并新建 Session。
 
 `session send` 与 `session turn --follow` 的 `--json` 输出 JSONL，只含所提交或所跟的那一轮，记录只有七种：`submit`（发出请求前一条写明 TurnId 与 SessionId，收到回执后一条写明结果）、`cancel`（取消回执）、`head`（会话头）、`entry`（对话条目，读者按 `node` 覆盖）、`text`（生成中的文字）、`connection` 与 `error`。结局在本轮最后一个 Step 条目的 `TurnSummary` 中，不另设结束记录。
 
@@ -733,7 +733,7 @@ Session 永久绑定产品组合层提供的 `ProjectStoreKey`，执行请求的
 
 E2E 崩溃场景在每个提交点 SIGKILL 后重开，先不做任何写入，核验：每个 Step、尝试和槽位停在崩溃前最后提交的阶段，读出的结论符合[预留、progress 与结论](#预留progress-与结论)的表；一个 Turn 中除最后一个 Step 外都以 `Continue` 关闭；`TurnSummary` 与最后一个 Step 的结论一致。随后核验 `send` 与 `rewind` 直接成功，旧 Turn 的节点保持原样；有 Owner 执行的 Turn 存在时 `send` 与 `rewind` 返回 Busy。
 
-观察场景核验：中途开始的观察、变慢的观察者、空闲时 `rewind` 替换路径、Turn 关闭与最后一次推送同时就绪，各情况下观察者最后持有的条目与关闭后用历史查询重读的一致，并核验上文的段列表一致性；实时观察与重新打开会话看到的条目相同，包括重试提示；执行者消失后重新打开，会话头直接说明没有 Owner。历史查询的页边界只落在 UserMessage 之前，轮次序号与从根数起的结果相同。profile 副本场景核验：原 `agent.toml` 修改或删除后，已有会话仍按副本执行；`--model`、`--effort` 选择后重新打开会话，沿用最后一轮的模型与档位；`rewind` 不改变副本与当前 agent；配置来源与后台启动时不一致时，提交在接受前被拒绝。提交场景覆盖[请求身份与找回](#请求身份与找回)表中的每一行，以及接受结果不明时按 TurnId 查询找回。CLI 场景核验 `--json` 只出现七种记录，第一条是写明身份的 `submit`，此后恰好有一条同一 TurnId 的回执，`session send --json` 只输出本轮，`session cancel <SESSION_ID>` 取消正在执行的一轮、没有时报告无可取消。
+观察场景核验：中途开始的观察、变慢的观察者、空闲时 `rewind` 替换路径、Turn 关闭与最后一次推送同时就绪，各情况下观察者最后持有的条目与关闭后用历史查询重读的一致，并核验上文的段列表一致性；实时观察与重新打开会话看到的条目相同，包括重试提示；执行者消失后重新打开，会话头直接说明没有 Owner。历史查询的页边界只落在 UserMessage 之前，轮次序号与从根数起的结果相同。profile 副本场景核验：原 `agent.toml` 修改或删除后，已有会话仍按副本执行；`--model`、`--effort` 选择后重新打开会话，沿用最后一轮的模型与档位；`rewind` 不改变副本与当前 agent；前端的环境与后台启动时不同时，后台继续使用启动时的配置。提交场景覆盖[请求身份与找回](#请求身份与找回)表中的每一行，以及接受结果不明时按 TurnId 查询找回。CLI 场景核验 `--json` 只出现七种记录，第一条是写明身份的 `submit`，此后恰好有一条同一 TurnId 的回执，`session send --json` 只输出本轮，`session cancel <SESSION_ID>` 取消正在执行的一轮、没有时报告无可取消。
 
 纯文档修订静态核对职责、流程、条款承接、数值来源、引用和差异；语义审阅须能复述提交、并行观察、结果取得、退回分叉及执行者消失后的结局，链接检查不能代替它。实际测试和未验证范围记录在对应任务中。
 
