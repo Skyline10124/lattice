@@ -1,5 +1,5 @@
 ---
-status: draft
+status: active
 ---
 
 # 模型接入
@@ -7,6 +7,7 @@ status: draft
 > 类型：架构合同
 > 上位依据：[项目宪章](../governance/charter.md)、[宿主平台](platform.md)
 > 决策记录：[ADR 0010](../adr/0010-protocol-adapters-and-configured-providers.md)
+> 修订记录：2026-10-25 由维护者批准，随 PR #317 合并生效。
 
 ## 目的与范围
 
