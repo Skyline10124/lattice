@@ -19,4 +19,5 @@
 
 ## 验证入口
 
-`cargo test -p lattice-conversation`。参数摘要或构造变化核对 `src/tool_call.rs` 的 golden fixture；golden 值变化是 wire-breaking 事件，不能机械更新期望值消除失败。
+- 运行 `cargo test -p lattice-conversation`。
+- 改了参数摘要或构造方式时，核对 `src/tool_call.rs` 中的 golden fixture。golden 值变化意味着 wire 格式不兼容，不能为了让测试通过直接改期望值。

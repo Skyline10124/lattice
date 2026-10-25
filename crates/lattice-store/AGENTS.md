@@ -24,7 +24,6 @@
 
 ## 验证入口
 
-- `cargo test -p lattice-store`。
-- `cargo clippy -p lattice-store --all-targets -- -D warnings`。
-- `cargo tree -p lattice-store --edges normal`：不出现 lattice/lancet/net-guard 工作区依赖。
-- 机制变化按影响验证 session、runtime 及协调层；fault seam 仅用于测试，`lattice-store-probe` 仅在另外获准的位置运行。
+- 运行 `cargo test -p lattice-store` 与 `cargo clippy -p lattice-store --all-targets -- -D warnings`。
+- 运行 `cargo tree -p lattice-store --edges normal`，确认没有 lattice、lancet 或 net-guard 的工作区依赖。
+- 改了存储机制时，按影响验证 session、runtime 与协调层。fault seam 只用于测试；`lattice-store-probe` 只在另行获准的位置运行。

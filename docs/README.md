@@ -20,11 +20,12 @@
 
 - [宿主平台](architecture/platform.md)：Linux 宿主支持范围与 WASM guest 边界。
 - [私有存储与持久化](architecture/storage.md)：全局 redb 会话库、每项目 Git 工作区历史、后台单例、锁序与持久性边界。
-- [会话与 Turn](architecture/session.md)：会话树、Step/Turn 与调用槽位、首次提交、配置冻结、会话视图与按轮分页、退回分叉及执行者消失后的结局。
+- [会话与 Turn](architecture/session.md)：会话树、Step/Turn 与调用槽位、首次提交、配置来源与 profile 副本、会话视图与按轮分页、退回分叉及执行者消失后的结局。
+- [模型接入](architecture/llm.md)：协议适配器、provider 配置与 features、模型引用与元数据、推理档位、用量与费用估算、凭据与 Sign in with ChatGPT。
 - [本地工作区与变更历史](architecture/workspace.md)：观察、文件变更与私有变更历史。
 - [LANCET 工具执行](architecture/lancet.md)：工具组成、Host 权限、调用执行、证据与操作员读取。
 - [Cell 权限与证据](architecture/cell.md)：Cell 模型、能力准入、Host 授权、结果计量与版本化证据。
-- [TUI 交互与视觉](architecture/tui.md)：持久对话与临时文字、输入和后台接线、重连与取消、工具显示、键位、布局与配色。
+- [TUI 交互与视觉](architecture/tui.md)：持久对话与临时文字、输入和后台接线、模型与推理档位的选择、重连与取消、工具显示、键位、布局与配色。
 
 ## 开发与验证
 

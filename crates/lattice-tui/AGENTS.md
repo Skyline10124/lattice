@@ -10,8 +10,9 @@
 
 ## 局部约束
 
-- 新会话准备在 UI 启动前报告配置问题，显示 API 给出的配置拒绝说明，与提交时一致；既有会话与重连走只读入口，新提交才冻结配置。Component 预热与执行由后台所属 API 处理。
-- session 负责打开已有会话、配置加载及对话条目到 Block 的转换；新会话的 SessionId 在首次提交时生成，Session 在首次提交接受时创建。connection 生成状态消息的文字并定级，转换退出报告文案；等级只在这里决定，是否暂驻由 Dock 按等级判断，见[状态消息与等级](../../docs/architecture/tui.md#状态消息与等级)。app 持有本客户端一次提交的具体句柄 LocalTurn 与当前会话的视图，发出提交、`watch`、查询与取消，按 NodeId 维护条目的显示；连接、视图与查询的转交及分帧归 LocalClient。完整交接见 [TUI 组件接线](../../docs/architecture/tui.md#组件接线)。
+- TUI 不读取 profile、provider 配置或凭据；配置问题在提交时由后台拒绝，显示 API 给出的配置拒绝说明，输入保留。既有会话与重连走只读入口。Component 预热与执行由后台所属 API 处理。
+- `/model` 与 `/effort` 的选择由 app 持有，随下一次提交交出，候选项来自后台的模型候选查询；面板、档位回退与 statusline 的规则见[选择面板](../../docs/architecture/tui.md#选择面板)。
+- session 负责打开已有会话及对话条目到 Block 的转换；新会话的 SessionId 在首次提交时生成，Session 在首次提交接受时创建。connection 生成状态消息的文字并定级，转换退出报告文案；等级只在这里决定，是否暂驻由 Dock 按等级判断，见[状态消息与等级](../../docs/architecture/tui.md#状态消息与等级)。app 持有本客户端一次提交的具体句柄 LocalTurn 与当前会话的视图，发出提交、`watch`、查询与取消，按 NodeId 维护条目的显示；连接、视图与查询的转交及分帧归 LocalClient。完整交接见 [TUI 组件接线](../../docs/architecture/tui.md#组件接线)。
 - input 负责缓冲、历史与按键，view 负责布局、折行、viewport、Dock 与 statusline。共享渲染归本 crate，目录和文件按职责组织。
 - raw 模式下 Ctrl+C 按 TurnId 取消：本客户端提交的一轮经 LocalTurn 登记取消意图，不另起 tokio::signal::ctrl_c watcher。退出、接受未知、视图推送与路径替换、往上翻取更早的轮、尝试边界与连接中断的完整显示规则归 TUI 合同。
 - REPL 历史尽力写入 `<session_dir>/repl_history.txt`，保持纯文本行格式。
@@ -20,6 +21,6 @@
 
 ## 验证入口
 
-- `cargo test -p lattice-tui`。
-- UI 接线变化重建 lattice-cli，指向当前产物运行 `pty_tui_smoke`；CLI 面变化关联 `cargo test -p lattice-cli`。
-- 视觉与交互按合同进行必要人工终端核验，不以布局算术或快照替代体验判断；操作配方见[验证指南](../../docs/development/validation-guide.md)。
+- 运行 `cargo test -p lattice-tui`。
+- 改了 UI 接线时，重新构建 lattice-cli，用当前产物运行 `pty_tui_smoke`；改了 CLI 表面时，再运行 `cargo test -p lattice-cli`。
+- 视觉与交互按合同在真实终端中人工核验，不能用布局计算或快照代替体验判断；操作步骤见[验证指南](../../docs/development/validation-guide.md)。

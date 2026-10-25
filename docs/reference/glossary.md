@@ -141,7 +141,7 @@ _Avoid_: invocation ledger, `invocations.git`, BindingPlan, provider Tool Call I
 _Avoid_: token replay, layout body width, frozen configuration
 
 **视图**:
-后台按会话推送的“这个会话现在的样子”：会话头（当前位置、当前 agent、当前位置所属那一轮有没有 Owner 及执行诊断）、当前路径上最近几轮的对话条目、之后变化的条目与生成中的文字。观察者变慢时只少收中间版本，不需要重新同步。
+后台按会话推送的“这个会话现在的样子”：会话头（当前位置、当前 agent、profile 副本中的模型与推理档位、当前位置所属那一轮有没有 Owner 及执行诊断）、当前路径上最近几轮的对话条目、之后变化的条目与生成中的文字。观察者变慢时只少收中间版本，不需要重新同步。
 见[观察与重连](../architecture/session.md#观察与重连)。
 _Avoid_: snapshot, event window, subscription cursor, Gap
 
@@ -160,3 +160,28 @@ receipt store
 把 Session 当前位置移到会话树上任意已有节点本身；之后的提交以该节点为父分叉，原分支保留。改写一条用户消息即退回到它的父节点再提交（第一条消息为 `rewind 0`）。它只切换对话位置，不恢复工作区文件。
 见[实现模块与公开操作](../architecture/session.md#实现模块与公开操作)。
 _Avoid_: branch, checkout, reset, file restore, workspace rollback
+
+**provider**:
+一个可以接收模型请求的服务，由配置描述：标识、协议、endpoint、认证方式、features 与元数据条目。来自内置表与用户全局的 `providers.toml`；官方厂商、兼容厂商与本地服务用同一种描述，代码中没有厂商类型。
+见[provider 配置](../architecture/llm.md#provider-配置)。
+_Avoid_: vendor type, alias, router entry, URL-detected vendor
+
+**feature**:
+某个协议适配器支持的一项可选行为，表达厂商对协议的改动，取值是布尔量或有限枚举，默认值等于标准协议行为。每个协议的 features 是封闭集合，不能用它注入任意请求字段；与构建用的 Cargo feature 无关。
+见[features](../architecture/llm.md#features)。
+_Avoid_: compat flag, extra body, request patch
+
+**请求网关**:
+`lattice-llm` 对外唯一的模型请求入口：调用方给出 provider `id`、模型 `id`、推理档位与请求内容，得到流式事件、用量与费用估算；provider 解析、凭据、协议适配与传输都在它内部，每次请求按当前配置解析。
+见[组成与归属](../architecture/llm.md#组成与归属)。
+_Avoid_: ModelRouter, connection material, per-Turn LlmConnection
+
+**推理档位**:
+`off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max` 七档之一，表示一轮使用的推理强度；适配器按协议与 features 换成请求参数，模型不支持的档位不可选。
+见[推理档位](../architecture/llm.md#推理档位)。
+_Avoid_: thinking budget, reasoning mode, effort string
+
+**profile 副本**:
+会话持有的一份有效 profile，以及当前的 provider `id`、模型 `id` 与推理档位，新会话首次被接受时写入；之后的提交只用副本，原 profile 的修改只对新会话生效。provider 配置与凭据不在副本中。
+见[会话的 profile 副本](../architecture/session.md#会话的-profile-副本)。
+_Avoid_: frozen configuration, current agent lookup, session config cache

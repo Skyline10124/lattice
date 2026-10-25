@@ -22,6 +22,6 @@
 
 ## 验证入口
 
-- `cargo test -p lattice-profile`，覆盖严格解析、默认值、发现及 LANCET 配置节。
-- 策略配置变更关联 authority 默认值与 API 转换、Turn 组成测试。
-- 路径安全变更覆盖缺失、symlink 前缀和拼写错误拒绝。
+- 运行 `cargo test -p lattice-profile`，覆盖严格解析、默认值、profile 发现与 LANCET 配置节。
+- 改了策略配置时，再检查 authority 的默认值、API 的转换与 Turn 组成测试。
+- 改了路径安全时，测试要覆盖路径缺失、symlink 前缀与拼写错误被拒绝。

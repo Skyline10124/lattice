@@ -21,5 +21,5 @@
 
 ## 验证入口
 
-- `cargo test -p lancet-protocol`。
-- schema/wire 变化增加必要序列化或 schemars 断言，并检查受影响的 authority、session、runtime、API 和 CLI。
+- 运行 `cargo test -p lancet-protocol`。
+- 改了 schema 或 wire 格式时，补上必要的序列化或 schemars 断言，并检查受影响的 authority、session、runtime、API 与 CLI。
