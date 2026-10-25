@@ -38,7 +38,7 @@ provider 配置、凭据与模型元数据是用户级的全局状态，由后�
 
 | 部分 | 负责的工作 |
 | --- | --- |
-| 请求网关（`lattice-llm`） | 对外唯一的模型请求入口：调用方给出 provider `id`、模型 `id`、推理档位、对话与工具定义、SessionId 及取消与 deadline，得到流式事件与用量。下面四项都在网关内部 |
+| 请求网关（`lattice-llm`） | 对外唯一的模型请求入口：调用方给出 provider `id`、模型 `id`、推理档位、对话与工具定义、SessionId 及取消与 deadline，得到流式事件、用量与费用估算。下面四项都在网关内部 |
 | 协议适配器（网关内部） | 按协议与 features 构造请求、解析流式事件、换算用量；把线上事件翻译为部件增量，交给回复组装 |
 | provider 注册表（网关内部） | 合并内置表与 `providers.toml`，校验字段，按 `id` 找到 provider |
 | 元数据（网关内部） | 合并内置快照、缓存与 `providers.toml` 中手写的元数据；后台定时刷新缓存 |
@@ -334,7 +334,7 @@ Chat Completions 中，模型的 `reasoning_options` 含 toggle 项且 `thinking
 
 ### 费用估算
 
-只保存 token 数；费用在读取时按模型的当前价格计算，标为估算。价格是美元每百万 token：
+每次请求结束时，请求网关按当时的模型价格估算这次尝试的费用，随用量交给调用方，保存在这次尝试上，标为估算。存下的是当时的估算值，之后价格变化（包括在 `providers.toml` 中修正）不回头修改旧记录；新版本之前的记录没有费用，显示为未知，不补算。价格是美元每百万 token：
 
 ```text
 未命中输入 = input − cache_read − cache_write（缺失项按 0）

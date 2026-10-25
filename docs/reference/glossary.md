@@ -172,7 +172,7 @@ _Avoid_: vendor type, alias, router entry, URL-detected vendor
 _Avoid_: compat flag, extra body, request patch
 
 **请求网关**:
-`lattice-llm` 对外唯一的模型请求入口：调用方给出 provider `id`、模型 `id`、推理档位与请求内容，得到流式事件与用量；provider 解析、凭据、协议适配与传输都在它内部，每次请求按当前配置解析。
+`lattice-llm` 对外唯一的模型请求入口：调用方给出 provider `id`、模型 `id`、推理档位与请求内容，得到流式事件、用量与费用估算；provider 解析、凭据、协议适配与传输都在它内部，每次请求按当前配置解析。
 见[组成与归属](../architecture/llm.md#组成与归属)。
 _Avoid_: ModelRouter, connection material, per-Turn LlmConnection
 
