@@ -270,16 +270,17 @@ LocalTurn 交付提交与取消的回执。普通退出使用 `detach` 取得最
 
 #### 配置来源与后台启动
 
-后台不继承前端的环境。它要读取的配置位置在启动时由启动它的前端给出，此后不随提交变化，连接到同一后台的前端共用这份配置：
+后台使用启动它的进程的环境，在启动时读一次，此后不随提交变化，连接到同一后台的前端共用这份配置。显式运行 `lattice daemon serve` 与前端自动启动的后台行为相同，自动启动的后台继承拉起它的前端的环境。
 
-| 项 | 前端如何得出 |
+| 项 | 来源 |
 | --- | --- |
-| 配置目录 | `$HOME/.lattice`；其中有 `providers.toml`、`auth.json`、`cache/` 与默认的 agents 目录 |
-| agents 目录 | 设置了 `LATTICE_AGENTS_DIR` 时用它，否则为配置目录下的 `agents` |
-| TLS 根证书来源 | 前端进程中的 `SSL_CERT_FILE`、`SSL_CERT_DIR`；都没有时用平台根证书 |
+| 配置目录 | 后台环境中的 `$HOME/.lattice`；其中有 `providers.toml`、`auth.json`、`cache/` 与 `agents/` |
+| agents 目录 | 项目内的 `.lattice/agents` 与配置目录下的 `agents`，查找顺序见[执行配置冻结](#执行配置冻结)；没有其他覆盖方式 |
+| TLS 根证书 | 平台根证书，按 `rustls-native-certs` 的规则从后台环境加载，所以 `SSL_CERT_FILE`、`SSL_CERT_DIR` 有效 |
 
-- 后台启动时按这些来源载入 TLS 根证书，保存在内存中直到退出。载入失败时后台照常启动、照常回答查询，但在每次接受前按配置错误拒绝并说明原因；空根集合拒绝 TLS 证书，不回退到平台根。
-- 需要读取配置的请求（提交、凭据命令、模型候选与刷新）带上前端按上表得出的值。后台发现与自己启动时的值不同，就在读取任何配置之前按配置错误拒绝，说明两边的值，并提示用 `lattice daemon stop` 停止后台后重试。
+- 后台启动时载入 TLS 根证书，保存在内存中直到退出。载入失败时后台照常启动、照常回答查询，但在每次接受前按配置错误拒绝并说明原因；空根集合拒绝 TLS 证书，不回退到平台根。
+- 请求不带配置来源。后台运行期间，前端环境的变化不影响它；要让新的环境生效，用 `lattice daemon stop` 停止后台后重新启动。前端的 `HOME` 或 `XDG_STATE_HOME` 不同时通常解析出另一个状态根，连到的是另一个后台。
+- 后台不清空、也不替换启动环境。所以后台创建或打开 Git 库时一律使用隔离方式，不读用户与全局的 Git 配置。
 - 工作区 `.env` 不再加载；环境变量不提供 key、endpoint 或模型，见[endpoint 的来源](llm.md#endpoint-的来源)。
 
 #### 配置安全边界
@@ -290,7 +291,7 @@ provider 与 Tool Host 共享后台启动时载入的 TLS 根内容，各 Turn �
 
 #### 配置拒绝的原因
 
-新执行的配置在接受前被拒绝时，用户需要知道该改哪里。配置由后台读取，报错面向的是配置的主人，所以后台把原始诊断经脱敏后带回前端，包括 agents 目录校验、profile 的查找与解析、`agent.name` 与所选不一致、`providers.toml` 与 `auth.json` 的解析、模型引用与推理档位、缺少凭据、TLS 根证书载入失败与配置来源不一致。后台在接受前发现启用了目录外的工具时，同样把说明带回前端。`session send`、`run` 与 TUI 内提交对同一问题给出同一句说明，`kind` 为 `bad_request`，CLI 退出 2。
+新执行的配置在接受前被拒绝时，用户需要知道该改哪里。配置由后台读取，报错面向的是配置的主人，所以后台把原始诊断经脱敏后带回前端，包括 agents 目录校验、profile 的查找与解析、`agent.name` 与所选不一致、`providers.toml` 与 `auth.json` 的解析、模型引用与推理档位、缺少凭据与 TLS 根证书载入失败。后台在接受前发现启用了目录外的工具时，同样把说明带回前端。`session send`、`run` 与 TUI 内提交对同一问题给出同一句说明，`kind` 为 `bad_request`，CLI 退出 2。
 
 说明由 [`ConfigRejection`](../../crates/lattice-api/src/config_rejection.rs) 承载。它只有一个构造入口，文字在其中经 [`redact`](../../crates/lattice-api/src/redact.rs) 处理，被替换处写作 `[REDACTED]`。脱敏按以下顺序执行：
 
