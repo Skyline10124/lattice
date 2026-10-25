@@ -260,20 +260,24 @@ feature 由协议适配器的代码定义，配置只能在已有取值中选择
 | --- | --- |
 | `{"type": "effort", "values": [...]}` | 列出的档位；`none` 记作 `off`，`default` 忽略 |
 | `{"type": "toggle"}` | `off`；同一模型没有 `effort` 或 `budget_tokens` 项时，另加 `high`，表示开启推理、深度由 provider 决定 |
-| `{"type": "budget_tokens", "min": …, "max": …}`，且同一模型没有 `effort` 项 | `low`、`medium`、`high`、`max` |
+| `{"type": "budget_tokens", "min": …, "max": …}`，且同一模型没有 `effort` 项 | `low`、`medium`、`high`、`max`，按下文的预算去掉重复的档位 |
 
 - `reasoning` 为 true 而没有 `reasoning_options` 的模型总在推理，没有可选档位。
 - 选了模型不支持的档位时，在接受前按配置错误拒绝，不降级到相近档位。
 - profile 的 `[agent].effort` 设默认档位；没有档位时不发送任何推理参数，由 provider 使用默认行为。
 
-按 token 数限制的档位取以下预算，再夹到 `[min, max]` 之内，并小于模型的输出上限：
+按 token 数限制的档位取以下预算：
 
 | 档位 | 预算 |
 | --- | --- |
 | `low` | 2,048 |
 | `medium` | 8,192 |
 | `high` | 16,384 |
-| `max` | `max`；没有 `max` 时取输出上限减 1 |
+| `max` | 32,768 |
+
+- 预算先夹到模型的 `[min, max]` 之内（缺的一端不限），再限制为不超过输出上限的一半，给正文留出空间；没有输出上限时按 32,768 计，即最多 16,384。限制后低于 `min` 时，这些档位都不可用。
+- 夹紧后与低一档预算相同的档位不列出。例如输出上限为 8,192 时，只有 `low`（2,048）与 `medium`（4,096）。
+- `max` 档不取模型的上限：models.dev 中 Claude 的预算上限是输出上限减 1，用满就不剩正文的空间；多数模型也没有写上限。
 
 ### 档位映射
 
