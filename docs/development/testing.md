@@ -59,7 +59,9 @@ status: active
 会话与调用状态通过公开 CLI 读取；本地请求回执及视图边界可通过公开 Local IPC 验证，不导入产品类型或直接调用进程内实现。既有工作区历史场景为验证私有 Git 历史，使用通用 Git 库检查对象与引用；这不授权 harness 导入产品实现或扩大为任意私有状态读取接口。
 未通过公开接口暴露的内部对象关系、引用事务与 fsync 故障由对应库测试保护。
 
-fake LLM 通过所选 provider 正式的 base URL 与凭据配置接入：OpenAI 兼容 provider 使用 `OPENAI_COMPATIBLE_*`，Anthropic 与 Gemini 分别使用 `ANTHROPIC_BASE_URL`、`GEMINI_BASE_URL` 及各自的 API key。fake LLM 按请求路由生成对应 provider 的流式协议。场景不增加隐藏产品参数、测试专用 provider 或绕过真实调用流程的产品分支。
+fake LLM 经正式的配置入口接入：场景在自己的 HOME 下写 `~/.lattice/providers.toml`，把所测 provider 的 `base_url` 指向 fake LLM，或新增一个使用所测协议的 provider；key 经 `lattice auth set` 从标准输入录入。fake LLM 按请求路由生成[模型接入合同](../architecture/llm.md#端点与认证)中五种协议的流式响应。`chatgpt` 的 endpoint 不能由配置改写，SIWC 场景使用带测试 feature 的被测二进制，见[验证集与显式 feature](#验证集与显式-feature)。除显式 feature 外，场景不增加隐藏产品参数、测试专用 provider 或绕过真实调用流程的产品分支。
+
+后台启动时与此后每 24 小时从 models.dev 拉取模型元数据。场景只信任 harness 的 CA，这次拉取不会成功，场景使用内置快照或场景写入的元数据缓存，不依赖拉取结果；拉取本身由 `lattice-llm` 局部测试对本地服务验证。
 
 下图表示场景驱动与观察的关系：
 
@@ -86,7 +88,7 @@ flowchart LR
 
 ### 场景隔离
 
-每个场景持有独立的临时项目、HOME/XDG 和会话状态，使用操作系统分配的端口。场景项目的 `.env` 默认为空；环境注入专项测试只写入本场景构造的数据。
+每个场景持有独立的临时项目、HOME/XDG 和会话状态，使用操作系统分配的端口。产品不读取场景项目的 `.env`；配置来源的负向测试在场景项目中写入 `.env` 与 `providers.toml`，确认它们不起作用。
 
 `git` 与 `lattice` 子进程均从 `env_clear()` 后的明确允许列表启动，不继承开发者 HOME、Git 配置、凭据或无关 provider 环境。
 需要测试变量不存在时，移除变量；将值设为空仍表示变量已定义，不能代替不存在状态。
@@ -95,11 +97,11 @@ flowchart LR
 
 ### Fake provider 的确定性边界
 
-fake provider 与官方 provider 一样使用 TLS + HTTP/2：ALPN 只提供 `h2`，证书由 harness 生成的临时 CA 签发，场景默认经 `SSL_CERT_FILE`/`SSL_CERT_DIR` 只信任该 CA。明文 HTTP/1.1 只保留给本地 provider 场景，只支持完整的流式响应与 HTTP 错误响应。传输层故障在 HTTP/2 上构造：流在结束事件前正常结束、`RST_STREAM(INTERNAL_ERROR)`、响应事件之后 `GOAWAY(NO_ERROR)`、最后流号小于在途请求的 `GOAWAY`，以及 `REFUSED_STREAM`。
+fake provider 与官方 provider 一样使用 TLS + HTTP/2：ALPN 只提供 `h2`，证书由 harness 生成的临时 CA 签发，场景默认经 `SSL_CERT_FILE`/`SSL_CERT_DIR` 只信任该 CA；这两个变量在后台启动时交给后台，见[配置来源与后台启动](../architecture/session.md#配置来源与后台启动)。明文 HTTP/1.1 只保留给本地 provider 场景，只支持完整的流式响应与 HTTP 错误响应。传输层故障在 HTTP/2 上构造：流在结束事件前正常结束、`RST_STREAM(INTERNAL_ERROR)`、响应事件之后 `GOAWAY(NO_ERROR)`、最后流号小于在途请求的 `GOAWAY`，以及 `REFUSED_STREAM`。
 
 fake provider 唯一的客户端是被测产品，因此只做取出路由、凭据与 body 所需的最少解析，不防御畸形或恶意 HTTP。它对场景只承担三项保证：
 
-1. 计数准确：只有发往三种 provider 模型端点的请求进入 request capture；其他请求得到错误响应并记为 fixture failure，不被静默接受。工具定义按真实 provider 的规则核对：OpenAI、Anthropic 的参数 schema 顶层不是 `type: object`，或带 `oneOf`、`anyOf`、`allOf`、`enum`、`not`；Gemini 的 `parameters` 任意层级出现 `additionalProperties`、`const`、`contains`、`minContains`。违反时返回 400 并记为 fixture failure，该请求不进入 capture。非 JSON body 保留为诊断，不虚构有效模型请求。对端放弃流或连接、客户端在 TLS 握手中拒绝证书都属于对端行为，不记为 fixture failure；握手被拒的次数可以查询。
+1. 计数准确：只有发往五种协议模型端点的请求进入 request capture；其他请求得到错误响应并记为 fixture failure，不被静默接受。工具定义按真实 provider 的规则核对：Chat Completions、Responses 与 Anthropic Messages 的参数 schema 顶层不是 `type: object`，或带 `oneOf`、`anyOf`、`allOf`、`enum`、`not`；generateContent 的 `parameters` 任意层级出现 `additionalProperties`、`const`、`contains`、`minContains`；Interactions 的规则在实现时按官方文档核对后写入本条。违反时返回 400 并记为 fixture failure，该请求不进入 capture。非 JSON body 保留为诊断，不虚构有效模型请求。对端放弃流或连接、客户端在 TLS 握手中拒绝证书都属于对端行为，不记为 fixture failure；握手被拒的次数可以查询。
 2. 回复确定：request capture、Sequence 选择/推进与到达通知在同一临界区发生，gate 只控制交付，不重排脚本归属。超出 Sequence 重复最后一项，空 Sequence 产生 IllegalResponse。
 3. 失败有界：request/stall/release/shutdown 采用有界握手；shutdown 发出停止信号（同时中止停在握手或读请求中的连接任务）、取消 gate，等待在途任务结束后才 join 服务线程；超时返回错误但保留线程，再次调用或 Drop 继续有界等待，不作无界等待。空闲的 HTTP/1.1 连接五秒后关闭。保留首个 fixture failure，捕获已不可能时提早报告，shutdown 在有界清理后返回该错误；不另建 health 或 failure 订阅接口。
 
@@ -127,7 +129,7 @@ Direct-Local 使用场景自有的产品后台，可以通过正式入口自动�
 
 ### 后台与重连场景
 
-这些场景检验同一条提交链上的不同边界：提交端加载配置后提交一次，后台接管执行并把每一步写入会话库，前端经视图与查询独立读取与观察。正常协作见[从提交到结果可见](../architecture/session.md#从提交到结果可见)；测试不负责另立提交协议。观察按会话视图进行：会话头、最近几轮的对话条目、之后变化的条目与生成中的文字，见[观察与重连](../architecture/session.md#观察与重连)。
+这些场景检验同一条提交链上的不同边界：前端提交一次，后台读取配置、接管执行并把每一步写入会话库，前端经视图与查询独立读取与观察。正常协作见[从提交到结果可见](../architecture/session.md#从提交到结果可见)；测试不负责另立提交协议。观察按会话视图进行：会话头、最近几轮的对话条目、之后变化的条目与生成中的文字，见[观察与重连](../architecture/session.md#观察与重连)。
 
 提交、双向取消回执交接与结局分类由 API 的具体交互句柄 [LocalTurn](../architecture/session.md#组件与接口) 局部测试保护。CLI IPC 回归核验真实信号、记录与退出选择；TUI run_loop 回归核验按键、按 NodeId 替换条目、尝试边界及按 InvocationId 配对的绘制。局部测试控制真实接口的回执、读取和调度窗口；前端实际入口仍需下面的外部场景核验。
 
@@ -172,10 +174,10 @@ Direct-Local 使用场景自有的产品后台，可以通过正式入口自动�
 #### 退回与分叉
 
 1. 目标：验证 `rewind` 到树上任意节点后提交会从该节点分叉，原分支保留，发给模型的上下文是根到该节点的路径。
-2. 准备：一个多步且写过文件的 Turn，一个在工具执行后被取消的 Turn；两个 Turn 使用不同 agent。
-3. 操作：`rewind` 到前一 Turn 中部的 Step 节点，先读取对话再 `send`；分叉后用 `session turn` 查看原 Turn；再 `rewind` 回原 Turn 的最后一个节点并读取对话；`rewind 0` 后不带 `--agent` 发送一次、再带 `--agent` 改写第一条消息；在一个 Turn 进行中时 `rewind`；`rewind` 到不存在的序号。
-4. 观察：记录树形 `log`、当前位置与当前 agent、每次读取的对话、fake provider 捕获的请求上下文、原 Turn 的 `session turn` 输出以及工作区文件。
-5. 断言：原分支节点仍在 `log` 中，新节点以目标节点为父；每次读取的对话都是根到当时当前位置的路径（退回后、发送前止于目标节点；退回原 Turn 后恢复原对话；`rewind 0` 后为空）；请求的对话部分等于发送前读取的对话加上本次 UserMessage，经所选 provider 的规定投影（系统提示与工具定义单独核对），改写第一条消息的请求对话只含新消息，新消息的父节点为 `0`；当前位置为 `0` 时不带 `--agent` 的发送在接受前被拒绝、树不变；未指定 agent 时使用目标节点所属 Turn 的 agent；原 Turn 的 `session turn` 仍给出它自己的结局与 Step 节点；工作区文件不变。进行中的 `rewind` 返回 Busy，不存在的序号被拒绝且当前位置不变。场景记录 `log`、对话读取、`session turn` 输出、请求捕获与文件摘要。
+2. 准备：一个多步且写过文件的 Turn，一个在工具执行后被取消的 Turn；两个 Turn 使用不同 agent，后一个 Turn 的 agent 因此在 profile 副本中。
+3. 操作：`rewind` 到前一 Turn 中部的 Step 节点，先读取对话再 `send`；分叉后用 `session turn` 查看原 Turn；再 `rewind` 回原 Turn 的最后一个节点并读取对话；退回到前一 Turn 后不带 `--agent` 发送；`rewind 0` 后不带 `--agent` 发送一次、再带 `--agent` 改写第一条消息；在一个 Turn 进行中时 `rewind`；`rewind` 到不存在的序号。
+4. 观察：记录树形 `log`、当前位置与会话头中的副本摘要、每次读取的对话、fake provider 捕获的请求上下文、原 Turn 的 `session turn` 输出以及工作区文件。
+5. 断言：原分支节点仍在 `log` 中，新节点以目标节点为父；每次读取的对话都是根到当时当前位置的路径（退回后、发送前止于目标节点；退回原 Turn 后恢复原对话；`rewind 0` 后为空）；请求的对话部分等于发送前读取的对话加上本次 UserMessage，经所选 provider 的规定投影（系统提示与工具定义单独核对），改写第一条消息的请求对话只含新消息，新消息的父节点为 `0`；`rewind` 不改变 profile 副本，未指定 agent 的发送（包括当前位置为 `0` 时）使用副本中的 agent，而不是目标节点所属 Turn 的 agent；带 `--agent` 的发送按该 agent 重新生成副本；原 Turn 的 `session turn` 仍给出它自己的结局与 Step 节点；工作区文件不变。进行中的 `rewind` 返回 Busy，不存在的序号被拒绝且当前位置不变。场景记录 `log`、对话读取、`session turn` 输出、请求捕获与文件摘要。
 6. 清理：按共同规则停止自有后台。
 
 #### 旧库拒绝
@@ -214,20 +216,29 @@ Direct-Local 使用场景自有的产品后台，可以通过正式入口自动�
 5. 断言：查询保持只读；重开后不经任何写入即可读到结局，不重新请求旧任务的模型或分发工具；新消息一次被接受并执行，provider 请求只因新任务增加。每个提交点重开后，每个 Step、尝试和槽位停在崩溃前最后提交的阶段，读出的结论符合[阶段与结论的对照表](../architecture/session.md#预留progress-与结论)；一个 Turn 中除最后一个 Step 外都以 `Continue` 关闭；`TurnSummary` 与最后一个 Step 的结论一致；停在 `Started` 的槽位结果为 Indeterminate。仅内存取消得到 Failed（进程退出），已写入的取消原因得到 Cancelled。发送新消息或退回之后，旧 Turn 的节点不变。场景记录每个提交点的状态摘要、树形 `log`、`session turn --json` 与 `audit` 输出。
 6. 清理：同时检查崩溃前后自有进程组及 stdout/stderr EOF；必要状态和原始失败进入证据后，才按共同规则清理。
 
-#### 并发配置与 TLS 隔离
+#### 配置来源与 profile 副本
 
-1. 目标：验证同后台各 Turn 使用提交端冻结的独立 endpoint、策略和 TLS 信任材料。
-2. 准备：配置可区分的 provider/策略，准备可信根与不匹配根，使用正式配置入口和真实 TLS 握手。
-3. 操作：并发提交不同 Session，在冻结后改变来源；分别提交无效根、有效根及跨根请求。
-4. 观察：记录实际到达的 endpoint、策略允许/拒绝、接受结果与握手结果，证据保持脱敏。
-5. 断言：冻结后源变化不改变已接管输入，各 Turn 配置互不污染；无效根在接受前拒绝，有效根握手成功，跨根拒绝。HTTP 场景不能替代 TLS 验证。
+1. 目标：验证后台从启动时给定的配置目录读取 profile、`providers.toml` 与 `auth.json`，已有会话按 profile 副本执行，各 Turn 的 endpoint、凭据与 TLS 信任互不污染；TLS 信任材料来自后台启动时的 `SSL_CERT_FILE`/`SSL_CERT_DIR`。
+2. 准备：场景 HOME 下两个 agent 的 profile；`providers.toml` 中两个指向不同 fake provider 的 provider，其中一个的证书由不受信任的根签发；key 经 `lattice auth set` 从标准输入录入。场景项目中另放一份 `.env` 与 `providers.toml`，写入其他 endpoint 与 key；前端环境中设置各厂商的 API key 变量。
+3. 操作：新会话提交后修改 profile 的模型与策略及 `providers.toml` 中该 provider 的 `base_url`，再向同一会话提交，另开新会话提交；用 `--model`、`--effort` 提交，再不带选择提交；提交新模型不支持的档位；换到另一 provider 的模型；两个会话并发提交到不同 provider；提交到证书不受信任的 provider；后台运行时，以不同的 `SSL_CERT_FILE` 或配置目录启动前端提交；另起一个后台，以不能加载的 `SSL_CERT_FILE` 启动后提交。
+4. 观察：记录 fake provider 收到的请求（endpoint、模型、推理参数、认证头是否为录入的 key）、`head` 中的副本摘要、接受结果与握手结果，证据保持脱敏。
+5. 断言：已有会话的第二次提交仍用副本中的模型、策略与 endpoint，新会话使用修改后的配置；选择写回副本，之后不带选择的提交沿用；不支持的档位在接受前拒绝，副本不变；换 provider 后副本中的 provider 配置随之替换；并发 Turn 的 endpoint 与凭据互不污染；场景项目中的 `.env`、`providers.toml` 与前端环境变量既不改变 endpoint，也不提供 key；证书不受信任时握手失败，这一轮按 provider 错误结束；信任材料或配置目录不同的前端在接受前被拒绝，提示 `lattice daemon stop`；信任材料不能加载的后台在接受前拒绝每一次提交。HTTP 场景不能替代 TLS 验证。
 6. 清理：关闭自有 provider、gate 和产品进程，按证据合同处理临时凭据与状态，不将秘密写入报告。
 
-外部入口为 `direct_background`、`direct_tree_session`、相关 `pty_tui_smoke` 与崩溃屏障目标 `direct_crash_barriers`。产品内部交接由相应 crate 局部测试保护；必须隔离测试的部分，如会话库表编码、值版本解析与旧库检测，先列出全部失败方式再写实现。实际覆盖、未覆盖窗口、构建身份、失败与待裁决项留在任务交接或验证证据中，不以场景规格代替执行结果。
+#### Sign in with ChatGPT
+
+1. 目标：验证 SIWC 的登录、刷新与登出在后台完成，access token 在 Turn 中途过期时在步骤之间刷新。
+2. 准备：使用带 `test-chatgpt-endpoints` 的被测二进制；harness 的测试服务代替授权服务与 `chatgpt` 的 API，签发几秒有效的 access token，拒绝过期的 access token 与用过的 refresh token；回调监听使用操作系统分配的端口。
+3. 操作：执行 `lattice auth login chatgpt`，场景按输出的授权 URL 访问测试服务完成授权；提交一个用 gate 拖过 access token 有效期的多步 Turn，再提交一个在有效期内完成的 Turn；token 将到期时两个会话并发提交；让刷新分别返回终止错误码、`invalid_client`、网络失败与 5xx；登出后再次登录，另让一次登录的回调带回不同的 `client_id`；登录中途断开前端。
+4. 观察：记录测试服务收到的授权、token、revoke 与 API 请求，`lattice auth status` 的输出，各轮结局，以及 `auth.json` 的权限与字段，不记录 token 值。
+5. 断言：首次登录使用 `dynamic_agent_client` 并保存回调带回的 `client_id`，再次登录使用它并带 `id_token_hint`，带回不同 `client_id` 的登录被拒绝；过期的 access token 不被发出；跨过有效期的 Turn 在步骤之间刷新并完成，有效期内的 Turn 不刷新；并发提交只刷新一次；刷新失败按[模型接入合同](../architecture/llm.md#刷新)分类：终止错误码清除 token、这一轮按认证错误结束，`invalid_client` 按不可重试错误结束，网络失败与 5xx 按可重试的 provider 错误处理；登出调用 revoke 并保留 `client_id`；登录中途断开时监听关闭，`auth.json` 不变。
+6. 清理：按共同规则停止后台与测试服务；token 与授权码不进入证据。
+
+外部入口为 `direct_background`、`direct_tree_session`、相关 `pty_tui_smoke`、崩溃屏障目标 `direct_crash_barriers` 与 SIWC 目标 `direct_chatgpt_login`。产品内部交接由相应 crate 局部测试保护；必须隔离测试的部分，如会话库表编码、值版本解析与旧库检测，先列出全部失败方式再写实现。实际覆盖、未覆盖窗口、构建身份、失败与待裁决项留在任务交接或验证证据中，不以场景规格代替执行结果。
 
 ### 验证集与显式 feature
 
-普通验证包含默认启用的快速、Direct-Local 和 PTY 场景。崩溃屏障目标使用 `crash-barriers` feature，并需要带 `test-crash-barriers` 的被测二进制；普通 CI 在默认测试后构建该二进制并运行它。`release_operator` 使用 `release-operator` feature，普通 CI 不运行。未启用的 feature 目标不代表已运行。
+普通验证包含默认启用的快速、Direct-Local 和 PTY 场景。崩溃屏障目标使用 `crash-barriers` feature，并需要带 `test-crash-barriers` 的被测二进制；普通 CI 在默认测试后构建该二进制并运行它。SIWC 目标使用 `chatgpt-login` feature，需要带 `test-chatgpt-endpoints` 的被测二进制，该 feature 把 `chatgpt` 的 API 与授权服务地址指向测试服务；普通 CI 构建带屏障的二进制时一并启用它并运行该目标。`release_operator` 使用 `release-operator` feature，普通 CI 不运行。未启用的 feature 目标不代表已运行。
 选用故障注入场景时，被测二进制和测试目标须具备所需配置，不能用普通产物冒充带屏障的故障验证。
 
 本地选择局部验证与远程门禁分别处理。报告列明测试目标、feature、构建模式和实际结果，不能将普通套件通过推广为所有显式 feature 均已验证。
