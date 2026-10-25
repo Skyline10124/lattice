@@ -2,7 +2,7 @@
 
 ## 职责
 
-`ModelStepDriver` 驱动一次 provider attempt：从类型化历史组装冻结请求、打开并消费流、执行协议上限与计量，通过同步非阻塞回调发送观察事件并返回类型化结果。调用方在回调中先把正文与 reasoning delta 追加到当前尝试已生成的文字（会话合同称为段列表），再通知观察者；通知可以合并，显示用的文字不会因此缺失。交接规则见[观察与重连](../../docs/architecture/session.md#观察与重连)。
+`ModelStepDriver` 驱动一次 provider attempt：从类型化历史组装请求，按 provider `id`、模型 `id` 与推理档位经 `lattice-llm` 的请求网关打开并消费流，执行协议上限与计量，通过同步非阻塞回调发送观察事件并返回类型化结果。调用方在回调中先把正文与 reasoning delta 追加到当前尝试已生成的文字（会话合同称为段列表），再通知观察者；通知可以合并，显示用的文字不会因此缺失。交接规则见[观察与重连](../../docs/architecture/session.md#观察与重连)。
 
 - `src/model_step.rs`：请求投影、流轮询、取消与 deadline、计量和 attempt 组装。
 - `src/testing.rs`：feature 控制的确定性 provider 响应。
@@ -10,7 +10,7 @@
 
 ## 上位文档
 
-修改前读取[会话合同](../../docs/architecture/session.md)的模型请求、执行预算及事件语义；验证选择遵循[测试工程](../../docs/development/testing.md)。
+修改前读取[会话合同](../../docs/architecture/session.md)的模型请求、执行预算及事件语义，以及[模型接入合同](../../docs/architecture/llm.md#组成与归属)的请求网关；验证选择遵循[测试工程](../../docs/development/testing.md)。
 
 ## 边界
 

@@ -171,12 +171,17 @@ _Avoid_: vendor type, alias, router entry, URL-detected vendor
 见[features](../architecture/llm.md#features)。
 _Avoid_: compat flag, extra body, request patch
 
+**请求网关**:
+`lattice-llm` 对外唯一的模型请求入口：调用方给出 provider `id`、模型 `id`、推理档位与请求内容，得到流式事件与用量；provider 解析、凭据、协议适配与传输都在它内部，每次请求按当前配置解析。
+见[组成与归属](../architecture/llm.md#组成与归属)。
+_Avoid_: ModelRouter, connection material, per-Turn LlmConnection
+
 **推理档位**:
 `off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max` 七档之一，表示一轮使用的推理强度；适配器按协议与 features 换成请求参数，模型不支持的档位不可选。
 见[推理档位](../architecture/llm.md#推理档位)。
 _Avoid_: thinking budget, reasoning mode, effort string
 
 **profile 副本**:
-会话持有的一份有效 profile、当前模型所在 provider 的配置以及当前模型与推理档位，新会话首次被接受时写入；之后的提交只用副本，原 profile 的修改只对新会话生效。
+会话持有的一份有效 profile，以及当前的 provider `id`、模型 `id` 与推理档位，新会话首次被接受时写入；之后的提交只用副本，原 profile 的修改只对新会话生效。provider 配置与凭据不在副本中。
 见[会话的 profile 副本](../architecture/session.md#会话的-profile-副本)。
 _Avoid_: frozen configuration, current agent lookup, session config cache

@@ -70,7 +70,7 @@ Turn 没有单独保存的结局，也没有单独的结束节点。它的结局
 | 配置 | 内容摘要 | 一轮所用的系统提示与工具目录，由 UserMessage 节点按摘要引用；内容相同的只存一份 | 接受时尚无同一摘要才写入，不再修改 |
 | TurnId 索引 | `TurnId` | 这一轮 UserMessage 节点的位置 `(SessionId, seq)`，用于按 TurnId 找回请求、取消和查看详情 | 与 UserMessage 节点同事务写入 |
 | Session 记录 | `SessionId` | 身份、项目绑定、创建与更新时间；当前位置这个指针 | 建立时写入；当前位置随节点写入和 `rewind` 移动 |
-| profile 副本 | `SessionId` | 会话的有效 profile、provider 配置、当前模型与推理档位，见[会话的 profile 副本](#会话的-profile-副本) | 首次接受时写入；之后由接受事务按提交的选择改写；`rewind` 不改 |
+| profile 副本 | `SessionId` | 会话的有效 profile、当前的 provider `id`、模型 `id` 与推理档位，见[会话的 profile 副本](#会话的-profile-副本) | 首次接受时写入；之后由接受事务按提交的选择改写；`rewind` 不改 |
 | InvocationId 索引 | `InvocationId` | 调用所在的 Step 与片段位置 | 登记调用时写入 |
 | 调用变更日志 | 全局单调变更序号 | 每次槽位 `progress` 前进后的一行，只记 InvocationId 与到达的阶段，不复制槽位内容。`audit --tail` 按序读取，`Terminal` 的内容经 InvocationId 索引从节点读取 | 只追加 |
 
@@ -86,13 +86,13 @@ Turn 没有单独保存的结局，也没有单独的结束节点。它的结局
 
 会话持有一份 profile 副本，此后只用副本，不再读取原 `agent.toml`。这样已有会话的行为不随 profile 文件的修改而变化，重新打开会话时也能确定接下来用什么配置。
 
-- **内容。** 有效 profile（外部策略文件解析所得的工作区、网络和观察限制填回具体字段）；系统提示，按内容摘要引用配置表；当前模型所在 provider 的完整配置条目（字段、features 与 `models` 下的手写元数据和覆盖）；当前模型与推理档位。副本不含凭据。
-- **创建。** 新会话首次被接受时，后台读取提交所指定 agent 的 profile 与所选模型的 provider 配置，在接受事务中写入副本。
-- **使用。** 之后的提交只用副本。模型元数据不在副本中，每一轮从元数据取得；凭据每一轮从 `auth.json` 取得，见[模型接入合同](llm.md#凭据)。
-- **修改。** 提交带有模型或推理档位的选择时，选择在这一轮的接受事务中写回副本。换到副本以外的 provider 的模型时，后台按当时的内置表与 `providers.toml` 解析该 provider，替换副本中的 provider 配置。提交指定了 agent 时，用该 agent 的 profile 重新生成副本，提交没有选择模型或档位时取该 profile 的值。
+- **内容。** 有效 profile（外部策略文件解析所得的工作区、网络和观察限制填回具体字段）；系统提示，按内容摘要引用配置表；当前的 provider `id`、模型 `id` 与推理档位。副本不含 provider 配置、模型元数据与凭据，它们由请求网关每次请求时取得，见[模型接入合同](llm.md#组成与归属)。
+- **创建。** 新会话首次被接受时，后台读取提交所指定 agent 的 profile，核对所选的 provider 与模型可用，在接受事务中写入副本。
+- **使用。** 之后的提交只用副本。
+- **修改。** 提交带有模型或推理档位的选择时，选择在这一轮的接受事务中写回副本。提交指定了 agent 时，用该 agent 的 profile 重新生成副本，提交没有选择模型或档位时取该 profile 的值。
 - **选择随提交生效。** 选择没有随提交发出就不保留。所以副本中的模型与档位总是最后一次被接受的提交所用的值，重新打开会话时沿用它们。
 - **`rewind` 不改变副本。** 副本属于会话，不属于节点。每一轮实际使用的 agent、模型、provider 与档位仍记在它的 UserMessage 节点上。
-- **原 profile 的修改只对新会话生效。** 包括收紧的 LANCET 策略（写权限、网络白名单）、`providers.toml` 中已在副本里的 provider 的修改，以及新版本内置表中这些 provider 的变化；要让已有会话使用新配置，开新会话，或提交时重新指定 agent、换到另一个 provider。
+- **原 profile 的修改只对新会话生效。** 包括收紧的 LANCET 策略（写权限、网络白名单）；要让已有会话使用新的 profile，开新会话或提交时重新指定 agent。provider 配置、元数据与凭据不在副本中，它们的修改从下一次请求起对所有会话生效。
 - **没有副本的会话。** 新会话必须指定 agent。新版本之前建立的会话没有副本：第一次提交时不指定 agent，后台按当前位置所属 Turn 的 agent 读取 profile 生成副本；当前位置为根节点 `0` 时必须指定。在此之前，会话头中的当前 agent 是当前位置所属 Turn 的 agent。
 
 一轮的模型与推理档位按以下顺序取得：
@@ -120,7 +120,7 @@ Turn 没有单独保存的结局，也没有单独的结束节点。它的结局
 ## 从提交到结果可见
 
 1. **提交任务。** CLI/TUI 收到“读取文件并解释”的输入，生成 TurnId，保留原始输入和工作区；向已有 Session 提交时写明追加（`Existing(SessionId)`），新会话则生成 SessionId 并写明新建（`New(SessionId)`）。前端带上用户的选择（agent、模型、推理档位，都可以不选）经 LocalClient 提交一次，持有返回的 LocalTurn。身份规则、忙时处理与接受结果不明时的找回见[请求身份与找回](#请求身份与找回)。
-2. **解析配置。** Backend 实际接管提交时建立贯穿准备与执行的取消载体，从会话的 profile 副本（新会话或指定了 agent 时从 agent 的 profile）、provider 配置、模型元数据与凭据得出这一轮的配置，核验后交给执行核心。字段和来源见[执行配置冻结](#执行配置冻结)。
+2. **解析配置。** Backend 实际接管提交时建立贯穿准备与执行的取消载体，从会话的 profile 副本（新会话或指定了 agent 时从 agent 的 profile）得出这一轮的配置，核对 provider、模型、档位与凭据可用，交给执行核心。字段和来源见[执行配置冻结](#执行配置冻结)。
 3. **确认接受。** 执行核心核对请求身份、项目绑定和输入，在一个事务中写入 UserMessage 节点、TurnId 索引和预留的第 0 步（配置表中还没有这份配置时一并写入），写入或改写 profile 副本，并把 Session 的当前位置移到预留的 Step；新会话的 Session 记录也在这个事务中创建。事务提交后，后台返回接受回执，由 LocalTurn 交给前端显示；后台承担后续执行与关闭责任。精确接受条件见[请求接受](#请求接受)。
 4. **同时观察进度。** 前端以 `watch` 观察这个会话：先得到会话头与最近几轮的对话条目，之后接收变化的条目与生成中的文字；前端按 NodeId 替换条目并渲染，后台同时继续执行。见[观察与重连](#观察与重连)。
 5. **请求模型。** TurnCoordinator 把预留的 Step 推进到 `Requesting` 并记下第一次尝试，再把当前位置的对话、本次模型参数和启用工具交给 ModelStepDriver。驱动器通过 LLM 连接请求模型；在本例中，模型返回读取文件的工具调用。
@@ -184,7 +184,7 @@ sequenceDiagram
 | `lattice-api::SessionApi` | 列表、日志、退回、对话条目与历史查询的领域入口，向后台返回会话事实和对话内容 |
 | `lattice-api::TurnCoordinator` 及执行核心 | 唯一持久 Turn 协调者，持有全 Turn 执行锁，核验冻结输入，推进模型循环、调用执行、Step 与 Turn 关闭；会话库写入经 `lattice-session` 的领域接口完成 |
 | `lattice-agent::ModelStepDriver` | 接收冻结请求和对话历史，驱动一次 provider 请求，向协调层返回类型化尝试结果，并发送非阻塞观察回调 |
-| `lattice-llm` | 使用本 Turn 的模型连接材料，完成 provider wire 请求、流事件适配和对话投影 |
+| `lattice-llm` | 请求网关：按 provider `id` 与模型 `id` 解析配置、取得凭据，完成 provider wire 请求、流事件适配和对话投影 |
 | `lattice-conversation` | 维护有序消息、ToolCall typestate、调用结果、双摘要、尝试诊断和 usage 等纯数据 |
 | `lattice-session` | 拥有全局会话库 `lattice.redb`：Session 记录、会话树、配置表、TurnId 索引、InvocationId 索引与调用变更日志；提供带类型的事务操作、由阶段给出结论、读取校验，以及操作员只读查询 |
 
@@ -242,14 +242,14 @@ LocalTurn 交付提交与取消的回执。普通退出使用 `detach` 取得最
 
 ### 执行配置冻结
 
-后台在准入时读取配置，冻结进这一轮。冻结把“以后再读某个文件”变成“这次 Turn 使用的确定值”，避免同一后台的并发 Turn 相互改变配置，也使执行中的一轮不受配置文件修改的影响。前端只交出选择，不读取 profile、provider 配置、元数据或凭据。
+后台在准入时读取 profile，冻结进这一轮。冻结把“以后再读某个文件”变成“这次 Turn 使用的确定值”，使执行中的一轮不受 profile 文件修改的影响。provider 配置、模型元数据与凭据是后台持有的全局状态，不冻结：请求网关每次请求时按当前值解析，见[模型接入合同](llm.md#组成与归属)。前端只交出选择，不读取 profile、provider 配置、元数据或凭据。
 
 配置的来源：
 
 - **profile。** 会话的 profile 副本；新会话、没有副本的旧会话或提交指定了 agent 时，读取该 agent 的 profile：先查项目内的 `.lattice/agents/<名字>/agent.toml`，再查配置目录下的 agents 目录，解析外部策略文件并加载系统提示。
-- **provider 配置。** 副本中的 provider 配置；需要解析新的 provider 时，取内置表与 `providers.toml`，规则见[模型接入合同](llm.md#provider-配置)。
-- **模型元数据。** 每一轮从内置快照、缓存与手写值合并得出，本轮用到的值（输出上限、可用档位）随连接材料冻结，见[元数据的来源与合并](llm.md#元数据的来源与合并)。
-- **凭据。** 每一轮从 `auth.json` 取得，见[凭据](llm.md#凭据)。
+- **provider 与模型。** 提交的选择或副本中的 provider `id` 与模型 `id`；接受时核对 provider 存在，规则见[模型接入合同](llm.md#provider-配置)。
+- **模型元数据。** 接受时用来核对推理档位；输出上限与推理预算由网关每次请求时取，见[元数据的来源与合并](llm.md#元数据的来源与合并)。
+- **凭据。** 接受时核对已录入或已登录；由网关每次请求时取得，见[凭据](llm.md#凭据)。
 - **TLS 根证书。** 后台启动时载入，见[配置来源与后台启动](#配置来源与后台启动)。
 
 `FrozenTurnConfig` 是协调层在接受时构造的非秘密执行事实，供执行、结果投影、`log` 显示使用：agent 名、模型、provider、推理档位和执行限制记在 UserMessage 节点上，其余按内容摘要写入配置表。
@@ -258,8 +258,7 @@ LocalTurn 交付提交与取消的回执。普通退出使用 `detach` 取得最
 | --- | --- | --- | --- | --- | --- |
 | 提交的选择 | 前端：agent、模型、推理档位，都可以不选 | 提交时 | 后台准入 | 不单独保存；生效的值写入副本与 UserMessage 节点 | 用户在本次提交中的选择 |
 | 有效 profile | profile 副本，或 agent 的 profile；策略文件解析所得有效工作区、网络和观察限制填回具体字段 | 接受事务前 | 执行核心 | 是，在 profile 副本中 | 固定 agent、LLM 重试与超时、启用工具及能力策略 |
-| 连接材料 | provider 配置、模型名，以及元数据中本轮用到的值 | 同上 | 本 Turn 的 LlmConnection | provider 配置在 profile 副本中；provider `id` 与模型记在 UserMessage 节点上 | 确定协议、endpoint、认证方式、features 与请求参数 |
-| 凭据 | `auth.json` | API key 在接受事务前；SIWC 的 access token 在每次模型请求前，见[刷新](llm.md#刷新) | LlmConnection，只在内存中 | 否 | 认证 provider 请求 |
+| 凭据 | `auth.json` | 不冻结；请求网关每次请求时取得，SIWC 的 access token 按需刷新，见[刷新](llm.md#刷新) | 请求网关，只在内存中 | 否 | 认证 provider 请求 |
 | TLS 根证书 | 后台启动时载入的内容 | 后台启动时 | provider 连接与本 Turn 的 Tool Host 信任配置 | 否 | 验证 TLS 连接 |
 | `FrozenTurnConfig.agent_name/model/provider/effort` | 有效 profile、模型解析与档位选择的结果 | 接受事务前 | TurnCoordinator、UserMessage 节点及投影 | 是 | 标明此次执行身份、模型与推理档位 |
 | `FrozenTurnConfig.system_prompt` | 有效 profile 加载的系统提示 | 同上 | 模型请求、配置表 | 是 | 固定本 Turn 的系统指令 |
@@ -285,7 +284,7 @@ LocalTurn 交付提交与取消的回执。普通退出使用 `detach` 取得最
 
 #### 配置安全边界
 
-后台按 Turn 冻结配置，执行中不重读 profile、provider 配置或 API key，不切换共享环境或 cwd。唯一的例外是 SIWC 的 access token，它在每次模型请求前按需刷新，见[模型接入合同](llm.md#刷新)。凭据只在 `auth.json` 与后台内存中，不进入会话库、profile 副本、公开 DTO、Debug、错误回显或日志。
+后台按 Turn 冻结 profile，执行中不重读它，不切换共享环境或 cwd。provider 配置与凭据由请求网关每次请求时取得，SIWC 的 access token 在请求前按需刷新，见[模型接入合同](llm.md#刷新)。凭据只在 `auth.json` 与后台内存中，不进入会话库、profile 副本、公开 DTO、Debug、错误回显或日志。
 
 provider 与 Tool Host 共享后台启动时载入的 TLS 根内容，各 Turn 独立构造信任配置。Tool 网络继续遵守 [LANCET 逐跳授权与地址固定](lancet.md#网络获取)。
 
@@ -708,7 +707,7 @@ Session 永久绑定产品组合层提供的 `ProjectStoreKey`，执行请求的
 | 工具目录快照 | 运行时构建身份与按工具名排序 entries 的规范 JSON，最多 1 MiB，即 1,048,576 字节；新快照超限拒绝，已存快照不合法时报损坏 | `lattice-session` 的 `MAX_CATALOG_SNAPSHOT_BYTES`；ADR 0005 请求接受协议。计量对象不是文件目录或 provider wire |
 | 调用结果载荷 | Succeeded 载荷规范 JSON 最多 65,536 字节；超过时不保存正文，记录摘要与长度，内容不可用 | `lattice-session` 的 `MAX_TOOL_CONTENT_BYTES`；见[调用槽位](#调用槽位) |
 | 有效 profile | system prompt 最多 2 MiB，Agent 名 128 字节，模型引用 4,096 字节；schema_version 为 1，策略已解析；max_retries ≤ 10，退避初始/最大值均 ≤ 60,000 毫秒且最大值不小于初始值，显式 timeout（Turn deadline）为 1–86,400 秒；无效时在接受前按配置错误拒绝 | 当前输入校验。上限 86,400 秒由 ADR 0010 第 11 节确定，使超过 SIWC token 有效期的 Turn 成为实际用法；未设置时使用 300 秒，与观察 idle 分开；粒度与默认值由 #222 裁决 |
-| 连接材料 | key 见[模型接入合同的限制](llm.md#限制)；模型名 ≤ 4,096 字节，base_url ≤ 8,192 字节；根证书 ≤ 1,024 个、单个 DER ≤ 65,536 字节、DER 总量 ≤ 4 MiB；URL/证书等校验失败在接受前拒绝 | [LlmConnection](../../crates/lattice-llm/src/connection.rs)，当前实现限制；URL 禁止凭据、query、fragment 并通过 provider 网络策略校验 |
+| provider 与 TLS 根 | key 见[模型接入合同的限制](llm.md#限制)；模型名 ≤ 4,096 字节，base_url ≤ 8,192 字节；根证书 ≤ 1,024 个、单个 DER ≤ 65,536 字节、DER 总量 ≤ 4 MiB；接受时能发现的问题在接受前拒绝，执行中发现的按不可重试的配置错误停止 | [connection.rs](../../crates/lattice-llm/src/connection.rs) 的当前实现限制；URL 禁止凭据、query、fragment 并通过 provider 网络策略校验 |
 | 模型 HTTP 传输 | 建连 30 秒、读空闲 30 秒；不设单独的请求总时限，流由 Turn deadline 约束，另有 86,400 秒兜底，与 Turn deadline 的上限一致；非 2xx 正文最多读 64 KiB，诊断最多 256 字符；provider 建议等待最多采纳 60 秒。每个 Turn 第一次请求时解析、校验并固定地址，Turn 内复用连接：交付结束事件前最多再等 0.5 秒、读 64 KiB 把响应体读完，连接才能回到连接池；连接或传输错误后重新解析。请求除认证与协议头外只带 `User-Agent: lattice/<版本> (linux <内核版本>; <架构>)`、`Accept: text/event-stream, application/json` 与 `x-client-request-id`（取 SessionId，provider 由此可知哪些请求属于同一会话） | [client.rs](../../crates/lattice-llm/src/client.rs)、[transport.rs](../../crates/lattice-llm/src/transport.rs) 与 [saga.rs](../../crates/lattice-api/src/turn/saga.rs) 的 MAX_PROVIDER_RETRY_AFTER；256 依据 #265 收集的 146 条真实 provider 错误消息（整行 P90 为 252 字符），其余为实现常量 |
 | IPC 帧 | 单帧 JSON payload 最多 16 MiB，不含 8 字节 magic 和 4 字节长度头；零长度或超限读取拒绝，编码超限拒绝 | [ipc.rs](../../crates/lattice-api/src/local/ipc.rs) 的 MAX_FRAME、read/write；超过单帧的消息由连接层分帧传输 |
 | IPC 等待 | 单帧 socket 写入最多 5 秒，超时返回传输错误和回执可能未知；后台首请求整帧读取最多 10 秒，超时结束该连接处理 | 同文件 WRITE_TIMEOUT 和 [server.rs::connection](../../crates/lattice-api/src/local/server.rs)，不是 Turn 总时限 |

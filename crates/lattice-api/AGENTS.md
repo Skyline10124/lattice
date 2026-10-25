@@ -2,7 +2,7 @@
 
 ## 职责
 
-提供 SessionApi、LocalClient、本地后台及公开的视图、查询与结果；读取并冻结配置、维护会话的 profile 副本、承接凭据与模型命令，并驱动 TurnCoordinator 经会话库事务推进执行。Component 组成在 lancet-api，执行在 runtime；本 crate 拥有跨领域协调而非下层机制。
+提供 SessionApi、LocalClient、本地后台及公开的视图、查询与结果；读取并冻结 profile、维护会话的 profile 副本、经 `lattice-llm` 的请求网关发出模型请求、承接凭据与模型命令，并驱动 TurnCoordinator 经会话库事务推进执行。Component 组成在 lancet-api，执行在 runtime；本 crate 拥有跨领域协调而非下层机制。
 
 - `local/client.rs`：LocalClient 的连接与分帧，转交视图与查询。
 - `local/operation.rs`：LocalTurn 是本客户端一次提交的具体句柄，管理提交、在途取消与退出交接；前端生成身份、交出 agent、模型与推理档位的选择并消费视图，配置由后台读取，持久 Turn 仍由后台执行。接口分层见[公开操作](../../docs/architecture/session.md#实现模块与公开操作)。

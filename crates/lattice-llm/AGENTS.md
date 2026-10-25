@@ -2,7 +2,7 @@
 
 ## 职责
 
-维护协议适配器（请求构造、流式事件解析、用量换算）、provider 注册表、模型元数据、凭据库与 Sign in with ChatGPT、工具 wire 类型、SSE、DNS pinning、传输层重试判断及日志设置。持久消息与 usage 直接使用 `lattice-conversation` 类型，不负责 Session 图、profile 发现、Agent 循环、重试策略或 LANCET 执行。
+维护请求网关，它是对外唯一的模型请求入口，内部包含协议适配器（请求构造、流式事件解析、用量换算）、provider 注册表、模型元数据、凭据库与 Sign in with ChatGPT、工具 wire 类型、SSE、DNS pinning 与传输层重试判断；另维护日志设置。持久消息与 usage 直接使用 `lattice-conversation` 类型，不负责 Session 图、profile 发现、Agent 循环、重试策略或 LANCET 执行。
 
 - `types.rs`：请求信封、工具定义、流事件与目标；`client.rs`：HTTP 行为、Turn 内 client 复用和连接安全；`transport.rs`：请求标识、错误诊断、可重试判断与 Retry-After。
 - `providers/`：各协议的信封、认证、SSE 累积；`provider_projection/` 是唯一生产消息 codec。
@@ -15,6 +15,7 @@
 
 ## 局部约束
 
+- 调用方只给出 provider `id`、模型 `id`、推理档位与请求内容，不接触 endpoint、key 与 features；网关不向外暴露连接材料，每次请求按当前配置与凭据解析。
 - 协议差异留在适配器与 client 层，高层只消费类型化 `LlmEvent`、`LlmError` 和模型元数据。适配器按协议划分，厂商差异只用该协议的 features 表达，不按 URL 或 provider `id` 判断厂商；新增 feature 先修订模型接入合同。
 - 所有请求 builder 经 `request_messages_to_wire`；完整消息转换集中在 `provider_projection`。OpenAI 流通过 `openai_parts_to_native` 保留到达顺序，不重造固定字段顺序；非流 wire 通过 `wire_to_native`，usage 经 `wire_usage`。不新建 ToolCall/ToolResult codec，组装经 `AttemptAssembly`，超限返回 `ProjectionError::OutputLimitExceeded`，不返回部分消息。
 - provider call ID 是可选不透明 wire 元数据，不是领域 Invocation 身份，不合成 `tc_*` 身份。回放来源（协议与 provider `id`）相同时保留真实 ID、签名及 part 顺序；来源不同时去掉 replay state、provider call ID 与 reasoning，不泄露来源 provider 状态。

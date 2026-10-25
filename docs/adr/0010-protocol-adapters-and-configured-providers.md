@@ -9,7 +9,7 @@ status: accepted
 - 修订：细化 ADR 0005 第 7 节“同 provider 回放”中来源的粒度；部分取代 ADR 0006 第 4 节中“当前 agent 即当前位置所属 Turn 的 agent”的规则，以及 ADR 0008 第 10 节中由客户端读取配置与凭据的规则。范围见[与 ADR 0005、ADR 0006、ADR 0007、ADR 0008 的关系](#与-adr-0005adr-0006adr-0007adr-0008-的关系)
 - 依赖：ADR 0007（接受时确定的模型与 provider 记在 UserMessage 节点上）
 - 实施跟踪：GitHub #315
-- 修正：2026-10-25 起草合同（#317）时，维护者裁决后台直接使用启动环境、删除 `LATTICE_AGENTS_DIR`，SIWC 不设模拟授权服务的测试；第 4、11、15、17 节，后果，否决的方案与“不在本文决定的事项”随之修正
+- 修正：2026-10-25 起草合同（#317）时，维护者裁决后台直接使用启动环境、删除 `LATTICE_AGENTS_DIR`，SIWC 不设模拟授权服务的测试，`lattice-llm` 对外改为请求网关、profile 副本只记 provider 与模型的 `id`；第 1、4、6、11、13、15、17 节，后果，否决的方案与“不在本文决定的事项”随之修正
 
 ## 背景
 
@@ -49,6 +49,8 @@ status: accepted
 回复组装不随协议变化：适配器把线上事件翻译为部件增量，由 #312 的累积器组装完整回复。
 
 `ProviderKind` 删除。增加协议需要新的 ADR 或对本 ADR 的修订。
+
+`lattice-llm` 对外只提供请求网关：调用方给出 provider `id`、模型 `id`、推理档位、对话与工具定义，得到流式事件与用量。provider 的解析、凭据（含 SIWC 的刷新）、协议适配与传输都在网关内部完成，调用方不接触 endpoint、key 与 features。网关每次请求按当前的配置与凭据解析，不按 Turn 冻结它们。
 
 ### 2. provider 是配置
 
@@ -130,7 +132,7 @@ provider 配置、凭据与模型元数据是用户级的全局状态，不随�
 
 这改变了现行的凭据边界：凭据原来由提交端从环境读取、只在内存与私有 IPC 中流转，现在保存在 `auth.json`，由后台读取。
 
-provider 配置由后台在接受时解析，写入会话的 profile 副本（第 13 节）；每一轮从副本冻结进连接材料。
+provider 配置不写入会话，也不按 Turn 冻结：请求网关每次请求按当前配置解析（第 1 节），`providers.toml` 的修改从下一次请求起对所有会话生效。
 
 ### 5. 模型写作 `<provider>/<model>`
 
@@ -146,7 +148,7 @@ provider 配置由后台在接受时解析，写入会话的 profile 副本（�
 - **内置快照。** xtask 从 models.dev 生成内置 provider 所对应条目的元数据快照，提交进仓库审查并编译进程序。首次运行与离线时使用它。
 - **定时刷新的缓存。** 后台进程启动时与此后每 24 小时从 `https://models.dev/api.json` 拉取一次，写入 `~/.lattice/cache/models.json`。拉取失败只记日志，继续使用上一份数据。`lattice models refresh` 立即刷新一次。缓存没有过期的概念：数据旧了只影响列表与价格的准确性，不影响请求发往哪里。
 - **取值优先级。** `providers.toml` 中手写的元数据优先，其次是缓存，再次是内置快照。
-- **请求路径上不联网。** 接受 Turn 时只读上述数据；本 Turn 用到的值（如输出上限、可用推理档位）随连接材料冻结。
+- **请求路径上不联网。** 接受 Turn 与每次请求时只读上述数据。
 - **没有元数据的模型仍可使用。** 只是没有价格与推理档位。
 
 ### 7. 推理强度
@@ -218,10 +220,10 @@ Interactions 适配器上线后，内置 `google` provider 默认使用 Interact
 
 会话建立时取一份 profile 副本，此后只用副本，不再读取原 profile。
 
-- **创建。** 新会话首次提交时，提交端交所选 agent 的名字，以及可选的模型与推理档位；后台读取该 agent 的 profile（解析外部策略文件、加载 system prompt）与所选模型的 provider 配置，在接受事务中写成这个会话的 profile 副本。
-- **内容。** 有效 profile、provider 配置（协议、endpoint、认证方式、features）、当前模型与推理档位。不含凭据。
-- **使用。** 已有会话的后续提交只用副本，不再读取原 `agent.toml`。后台按副本中的 provider 从 `auth.json` 取凭据。
-- **修改。** `/model`、`/effort` 与 CLI 的 `--model`、`--effort` 选择的值随下一次提交交给后台，在接受事务中写回副本。换到另一个 provider 的模型时，后台按当时的内置表与 `providers.toml` 解析该 provider 的配置，一并写入。`--agent` 换 agent 时，后台用该 agent 的 profile 重新生成副本。
+- **创建。** 新会话首次提交时，提交端交所选 agent 的名字，以及可选的模型与推理档位；后台读取该 agent 的 profile（解析外部策略文件、加载 system prompt），核对所选的 provider 与模型可用，在接受事务中写成这个会话的 profile 副本。
+- **内容。** 有效 profile、当前的 provider `id` 与模型 `id`、推理档位。不含 provider 配置与凭据，它们由请求网关每次请求时取得（第 1 节）。
+- **使用。** 已有会话的后续提交只用副本，不再读取原 `agent.toml`。模型请求经请求网关按副本中的 provider `id` 与模型 `id` 发出。
+- **修改。** `/model`、`/effort` 与 CLI 的 `--model`、`--effort` 选择的值随下一次提交交给后台，在接受事务中写回副本。`--agent` 换 agent 时，后台用该 agent 的 profile 重新生成副本。
 - **选择随提交生效。** 选择后未发送就退出，这次选择不保留。所以副本中的模型与档位总是最后一轮实际使用的，重新打开会话时沿用最后一轮的模型与档位。
 - **rewind 不改变副本。** 副本属于会话，不属于节点；当前 agent 是副本中的 agent。每一轮实际使用的 agent、模型、provider 与档位仍记在它的 UserMessage 节点上。
 - **原 profile 的修改只对新会话生效。** 包括收紧的 LANCET 策略（写权限、网络白名单）；要让已有会话使用新策略，需要开新会话。
@@ -305,6 +307,7 @@ TUI 用 slash 命令选择模型与推理强度，选择界面是 Dock 中的面
 - Turn deadline 上限提高后，配置错误的超长 deadline 最多让一轮跑 24 小时才停。
 - SIWC 与 OpenAI 授权服务的交互没有自动化测试，回归只能在真实账号验证时发现。
 - 配置目录与 TLS 根证书由后台的启动环境确定，改动环境要重启后台才生效。
+- provider 配置不按 Turn 冻结，修改从下一次请求起生效；执行中的一轮可能前后两次请求发往不同的 endpoint。
 - harness 的 fake provider 目前经环境变量接入，要随之迁移。
 - 内置表需要手工维护；厂商改了 endpoint 或协议细节，要发新版本更新。内置表之外的 provider 由用户在 `providers.toml` 中自行添加。
 - 后台每天访问一次 models.dev。

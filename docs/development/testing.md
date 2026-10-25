@@ -220,9 +220,9 @@ Direct-Local 使用场景自有的产品后台，可以通过正式入口自动�
 
 1. 目标：验证后台从启动时给定的配置目录读取 profile、`providers.toml` 与 `auth.json`，已有会话按 profile 副本执行，各 Turn 的 endpoint、凭据与 TLS 信任互不污染；TLS 信任材料来自后台启动时的 `SSL_CERT_FILE`/`SSL_CERT_DIR`。
 2. 准备：场景 HOME 下两个 agent 的 profile；`providers.toml` 中两个指向不同 fake provider 的 provider，其中一个的证书由不受信任的根签发；key 经 `lattice auth set` 从标准输入录入。场景项目中另放一份 `.env` 与 `providers.toml`，写入其他 endpoint 与 key；前端环境中设置各厂商的 API key 变量。
-3. 操作：新会话提交后修改 profile 的模型与策略及 `providers.toml` 中该 provider 的 `base_url`，再向同一会话提交，另开新会话提交；用 `--model`、`--effort` 提交，再不带选择提交；提交新模型不支持的档位；换到另一 provider 的模型；两个会话并发提交到不同 provider；提交到证书不受信任的 provider；后台运行时，以不同的 `SSL_CERT_FILE` 启动前端提交，再停止后台后由该前端提交；另起一个后台，以不能加载的 `SSL_CERT_FILE` 启动后提交。
+3. 操作：新会话提交后修改 profile 的模型与策略及 `providers.toml` 中该 provider 的 `base_url`，再向同一会话提交，另开新会话提交；在多步 Turn 进行中修改 `base_url`；用 `--model`、`--effort` 提交，再不带选择提交；提交新模型不支持的档位；换到另一 provider 的模型；两个会话并发提交到不同 provider；提交到证书不受信任的 provider；后台运行时，以不同的 `SSL_CERT_FILE` 启动前端提交，再停止后台后由该前端提交；另起一个后台，以不能加载的 `SSL_CERT_FILE` 启动后提交。
 4. 观察：记录 fake provider 收到的请求（endpoint、模型、推理参数、认证头是否为录入的 key）、`head` 中的副本摘要、接受结果与握手结果，证据保持脱敏。
-5. 断言：已有会话的第二次提交仍用副本中的模型、策略与 endpoint，新会话使用修改后的配置；选择写回副本，之后不带选择的提交沿用；不支持的档位在接受前拒绝，副本不变；换 provider 后副本中的 provider 配置随之替换；并发 Turn 的 endpoint 与凭据互不污染；场景项目中的 `.env`、`providers.toml` 与前端环境变量既不改变 endpoint，也不提供 key；证书不受信任时握手失败，这一轮按 provider 错误结束；后台运行时前端改用的信任材料不生效，停止后台、由新前端自动启动后才生效；信任材料不能加载的后台在接受前拒绝每一次提交。HTTP 场景不能替代 TLS 验证。
+5. 断言：已有会话的第二次提交仍用副本中的模型与策略，endpoint 已是修改后的值，新会话使用修改后的 profile；进行中的 Turn 在修改之后的请求发往新的 endpoint；选择写回副本，之后不带选择的提交沿用；不支持的档位在接受前拒绝，副本不变；换 provider 后副本记下新的 provider `id`；并发 Turn 的 endpoint 与凭据互不污染；场景项目中的 `.env`、`providers.toml` 与前端环境变量既不改变 endpoint，也不提供 key；证书不受信任时握手失败，这一轮按 provider 错误结束；后台运行时前端改用的信任材料不生效，停止后台、由新前端自动启动后才生效；信任材料不能加载的后台在接受前拒绝每一次提交。HTTP 场景不能替代 TLS 验证。
 6. 清理：关闭自有 provider、gate 和产品进程，按证据合同处理临时凭据与状态，不将秘密写入报告。
 
 外部入口为 `direct_background`、`direct_tree_session`、相关 `pty_tui_smoke` 与崩溃屏障目标 `direct_crash_barriers`。产品内部交接由相应 crate 局部测试保护；必须隔离测试的部分，如会话库表编码、值版本解析与旧库检测，先列出全部失败方式再写实现。实际覆盖、未覆盖窗口、构建身份、失败与待裁决项留在任务交接或验证证据中，不以场景规格代替执行结果。

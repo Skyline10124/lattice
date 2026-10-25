@@ -17,7 +17,7 @@ status: draft
 - 用户用 `lattice auth set deepseek` 录入 DeepSeek 的 key，在 profile 中写 `model = "deepseek/deepseek-v4-pro"`、`effort = "high"`，然后提交任务。后台按内置表找到 DeepSeek 的协议与 endpoint，从 `auth.json` 取 key，把档位换成 DeepSeek 的推理参数，请求结束后把用量换算为统一口径并估算费用。
 - 用户用 `lattice auth login chatgpt` 登录 ChatGPT 账号，在 TUI 中用 `/model` 选 `chatgpt/<模型>`。后台用订阅登录的 access token 请求 Responses API，快过期时在请求前刷新。
 
-本合同是协议、provider 配置、features、模型元数据、推理档位、用量换算、凭据保存与订阅登录规则的唯一出处。会话如何持有配置（profile 副本）、一轮何时冻结配置，以及用量如何保存在节点上，由[会话合同](session.md)维护；TUI 的选择面板由 [TUI 合同](tui.md)维护。
+本合同是协议、provider 配置、features、模型元数据、推理档位、用量换算、凭据保存与订阅登录规则的唯一出处。会话如何持有配置（profile 副本）、一轮冻结哪些配置，以及用量如何保存在节点上，由[会话合同](session.md)维护；TUI 的选择面板由 [TUI 合同](tui.md)维护。
 
 ## 概念
 
@@ -38,12 +38,15 @@ provider 配置、凭据与模型元数据是用户级的全局状态，由后�
 
 | 部分 | 负责的工作 |
 | --- | --- |
-| 协议适配器（`lattice-llm`） | 按协议与 features 构造请求、解析流式事件、换算用量；把线上事件翻译为部件增量，交给回复组装 |
-| provider 注册表（`lattice-llm`） | 合并内置表与 `providers.toml`，校验字段，按模型引用找到 provider |
-| 元数据（`lattice-llm`） | 合并内置快照、缓存与 `providers.toml` 中手写的元数据；后台定时刷新缓存 |
-| 凭据库（`lattice-llm`） | 读写 `auth.json`；SIWC 的登录、刷新与撤销 |
-| 后台（`lattice-api`） | 接受 Turn 时解析配置、取凭据并冻结进这一轮；提供凭据、登录、模型候选与元数据刷新的命令和查询 |
+| 请求网关（`lattice-llm`） | 对外唯一的模型请求入口：调用方给出 provider `id`、模型 `id`、推理档位、对话与工具定义、SessionId 及取消与 deadline，得到流式事件与用量。下面四项都在网关内部 |
+| 协议适配器（网关内部） | 按协议与 features 构造请求、解析流式事件、换算用量；把线上事件翻译为部件增量，交给回复组装 |
+| provider 注册表（网关内部） | 合并内置表与 `providers.toml`，校验字段，按 `id` 找到 provider |
+| 元数据（网关内部） | 合并内置快照、缓存与 `providers.toml` 中手写的元数据；后台定时刷新缓存 |
+| 凭据库（网关内部） | 读写 `auth.json`；SIWC 的登录、刷新与撤销 |
+| 后台（`lattice-api`） | 接受 Turn 时读取 profile，核对 provider、模型、档位与凭据可用；执行中经请求网关发出模型请求；提供凭据、登录、模型候选与元数据刷新的命令和查询 |
 | 前端（CLI、TUI） | 交出用户的选择；凭据录入与登录只负责界面，经私有 IPC 交给后台 |
+
+调用方不接触 endpoint、key 与 features。网关每次请求按当前的内置表、`providers.toml`、元数据与凭据解析，不按 Turn 冻结；一轮固定的只有记在 UserMessage 节点上的 provider `id`、模型 `id` 与推理档位，见[会话合同](session.md#执行配置冻结)。地址固定与连接复用由网关内部按 Turn 维护，规则见[会话合同的模型 HTTP 传输](session.md#输入与传输限制)。
 
 前端不读 provider 配置、元数据或凭据。后台按启动时的环境确定配置目录与 TLS 根证书，此后不随提交变化，见[会话合同的配置来源](session.md#配置来源与后台启动)。
 
@@ -166,7 +169,7 @@ reasoning_replay = "none"              # 按模型覆盖 feature
 - **文件不存在**等于空配置，只使用内置表。
 - **`chatgpt` 不能改写。** 文件中出现 `[providers.chatgpt]` 的 `protocol`、`base_url`、`auth` 或 `features`，或其他 provider 设置 `auth = "oauth:chatgpt"`，整个文件无效。`chatgpt` 只能写 `models` 下的手写元数据。
 - **不写凭据。** 文件中没有 key 字段；凭据只在 `auth.json` 中。
-- **读取时机。** 后台在接受 Turn、列出模型候选与刷新时读取，不缓存解析结果；已有会话使用 profile 副本中的 provider 配置，见[会话合同](session.md#会话的-profile-副本)。
+- **生效时机。** 请求网关每次请求、后台接受 Turn 与列出模型候选时，都按文件的当前内容解析，修改从下一次请求起对所有会话生效；执行中的一轮可能前后两次请求发往不同的 endpoint。文件在执行中变为无效时，下一次请求按不可重试的配置错误停止。
 
 ### endpoint 的来源
 
@@ -240,7 +243,7 @@ feature 由协议适配器的代码定义，配置只能在已有取值中选择
 - **保留的字段。** 模型 `id`、`name`、`limit.context`、`limit.output`、`reasoning`、`reasoning_options`、`tool_call`、`modalities.input`、`cost.input`、`cost.output`、`cost.cache_read`、`cost.cache_write`、`cost.reasoning` 与 `status`。其余字段丢弃。
 - **没有过期的概念。** 缓存旧了只影响列表与价格的准确性，不影响请求发往哪里，不提示过期。
 - **刷新失败**只记日志，继续使用上一份数据；`lattice models refresh` 把失败原因返回给用户。拉取使用 HTTPS 与固定地址的连接，响应最多 32 MiB，30 秒内没有读完即放弃。新缓存先写临时文件再改名替换。
-- **请求路径上不联网。** 接受 Turn 时只读上述数据，本轮用到的值随连接材料冻结。
+- **请求路径上不联网。** 接受 Turn 与每次请求时只读上述数据。
 
 ### 模型候选
 
