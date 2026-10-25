@@ -13,6 +13,6 @@
 
 ## 验证入口
 
-- 本地：`cargo test -p net-guard`。
-- 依赖边界：`cargo tree -p net-guard --depth 1`。
-- 跨 crate 影响：按调用路径验证 `lattice-llm`、`lancet-authority` 和 `lancet-runtime`。
+- 运行 `cargo test -p net-guard`。
+- 运行 `cargo tree -p net-guard --depth 1`，检查依赖边界。
+- 影响到其他 crate 时，按调用路径验证 `lattice-llm`、`lancet-authority` 与 `lancet-runtime`。

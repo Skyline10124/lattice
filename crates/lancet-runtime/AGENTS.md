@@ -34,7 +34,10 @@
 
 ## 验证入口
 
-- `cargo test -p lancet-runtime`、`cargo clippy -p lancet-runtime --all-targets -- -D warnings`。
-- 观察：`--lib host_workspace::` 与 `direct_observation`；网络：`--lib host_network::` 与 Tool round-trip。
-- 变更：`--lib host_mutate::` 与 direct_mutation/direct_failures/direct_workspace_history；历史：`--lib history::` 与 API workspace_history_acceptance；会话退回不改变文件的外部断言在 direct_tree_session。
-- 协议错误码关联 lancet-protocol。依赖树应无 ambient WASI；harness 使用当前构建产物并按影响选择，不默认启动全仓验证。
+- 运行 `cargo test -p lancet-runtime` 与 `cargo clippy -p lancet-runtime --all-targets -- -D warnings`。
+- 改了观察时，运行 `cargo test -p lancet-runtime --lib host_workspace::` 与 harness 场景 `direct_observation`。
+- 改了网络时，运行 `--lib host_network::` 与 Tool 往返（round-trip）测试。
+- 改了文件变更时，运行 `--lib host_mutate::` 与 harness 场景 `direct_mutation`、`direct_failures`、`direct_workspace_history`。
+- 改了工作区历史时，运行 `--lib history::` 与 API 的 `workspace_history_acceptance`。会话退回不改变文件，这条外部断言在 `direct_tree_session` 中。
+- 改了协议错误码时，同时检查 lancet-protocol。
+- 依赖树中不得出现 ambient WASI。harness 使用当前构建的二进制，按影响范围选择场景，不默认运行全仓验证。

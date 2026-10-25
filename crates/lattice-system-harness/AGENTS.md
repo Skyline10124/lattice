@@ -20,12 +20,12 @@
 
 ## 场景与验证入口
 
-- 快速场景覆盖 help、环境和 CLI；Direct 场景覆盖真实 Turn/reopen、观察、变更、工具、失败/取消/deadline、操作员、秘密、会话隔离和工作区历史。
-- `direct_background` 与相关 PTY 场景保护前后端分离、回执丢失与按 TurnId 找回、Busy/并发、视图推送与历史查询、取消与 stop；具体断言边界见[后台与重连场景](../../docs/development/testing.md#后台与重连场景)。
-- `direct_operator` 与 `release_operator` 分别保留 fetch、todo 和组合调用场景及 newest-20 断言；它们均使用 Component，不再用 native/Component/mixed 名称描述执行路径。
-- `direct_crash_barriers` 显式场景验证会话库提交后的 SIGSTOP/SIGKILL 窗口、各阶段的结论、持久取消、库级故障和观察调度；普通套件不等于运行了该 feature。
-- `direct_tree_session` 保护 NodeId 退回分叉、profile 副本与 agent 规则、原 Turn 的 Step 详情及文件/历史不回退，并验证旧库拒绝。未公开的表编码、值版本和事务关系由库层验证，不从 harness 直接打开 redb。
+- 快速场景覆盖 help、环境变量与 CLI。Direct 场景覆盖真实 Turn 与重新打开、观察、变更、工具、失败、取消与 deadline、操作员、秘密、会话隔离和工作区历史。
+- `direct_background` 与相关 PTY 场景保护前后端分离、回执丢失后按 TurnId 找回、Busy 与并发、视图推送与历史查询、取消与 stop；断言的边界见[后台与重连场景](../../docs/development/testing.md#后台与重连场景)。
+- `direct_operator` 与 `release_operator` 各自保留 fetch、todo 与组合调用的场景，以及 `newest-20` 断言。两者都使用 Component，不再用 native、Component、mixed 区分执行路径。
+- `direct_crash_barriers` 是显式 feature 场景，验证会话库提交后的 SIGSTOP 与 SIGKILL 窗口、各阶段的结论、持久取消、库级故障与观察调度。普通套件通过不代表运行过它。
+- `direct_tree_session` 保护按 NodeId 退回分叉、profile 副本与 agent 规则、原 Turn 的 Step 详情，以及文件与历史不回退，并验证旧库被拒绝。未公开的表编码、值版本与事务关系由库层测试验证，harness 不直接打开 redb。
 - 配置来源与 profile 副本的场景要求见[测试合同](../../docs/development/testing.md#配置来源与-profile-副本)。
-- PTY smoke 验证同一 Direct-Local Turn 接线及模型与档位的选择，不能以环境故障跳过。
-- 先按测试合同准备当前被测二进制，再运行所需 fast/direct/PTY target；`release-operator`、`crash-barriers` 必须显式说明。`LATTICE_BIN` 在测试进程 cwd 解析，绝对路径是推荐做法而非额外代码契约。
-- 全量 harness 仅在影响范围需要时执行，不作为每次局部修改的默认命令。
+- PTY smoke 验证同一个 Direct-Local Turn 的接线，以及模型与档位的选择；环境故障不能当作跳过。
+- 先按测试合同准备当前的被测二进制，再运行需要的 fast、direct 或 PTY 目标；运行 `release-operator`、`crash-barriers` 时要明确说明。`LATTICE_BIN` 按测试进程的工作目录解析，推荐用绝对路径，但这不是额外的代码约束。
+- 只在影响范围需要时运行全量 harness，它不是每次局部修改的默认命令。

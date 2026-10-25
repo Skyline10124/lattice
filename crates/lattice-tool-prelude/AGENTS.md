@@ -18,6 +18,6 @@
 
 ## 验证入口
 
-- `cargo test -p lattice-tool-prelude`。
-- `cargo tree -p lattice-tool-prelude`：无 `lancet-*` 依赖。
-- guest 构建由 `cargo xtask tool-build` 驱动，对应 `cargo build -p <tool> --target wasm32-unknown-unknown`。
+- 运行 `cargo test -p lattice-tool-prelude`。
+- 运行 `cargo tree -p lattice-tool-prelude`，确认没有 `lancet-*` 依赖。
+- guest 构建由 `cargo xtask tool-build` 驱动，相当于 `cargo build -p <tool> --target wasm32-unknown-unknown`。

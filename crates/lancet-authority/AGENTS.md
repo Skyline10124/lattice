@@ -23,6 +23,6 @@
 
 ## 验证入口
 
-- `cargo test -p lancet-authority`。
-- 网络变化关联 `cargo test -p lancet-runtime --lib host_network::`。
-- Guard 变化同时覆盖允许与拒绝的 runtime 场景；资源选择见[测试工程](../../docs/development/testing.md)。
+- 运行 `cargo test -p lancet-authority`。
+- 改了网络策略时，再运行 `cargo test -p lancet-runtime --lib host_network::`。
+- 改了 Guard 时，runtime 场景要同时覆盖允许与拒绝两种结果；测试资源的选择见[测试工程](../../docs/development/testing.md)。

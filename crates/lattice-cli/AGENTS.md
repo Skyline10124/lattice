@@ -21,13 +21,14 @@
 - key 只从不回显的终端或标准输入读取，不作为命令行参数，不进入日志、错误、文本或 JSONL 输出；SIWC 登录只显示授权 URL 与结果。
 - `--model` 与 `--effort` 只检查写法（`<provider>/<model>` 与档位名），provider、模型与档位是否可用由后台在接受前判定。
 - 流式命令的 JSONL 只含所提交或所跟的那一轮，记录只有 `submit`、`cancel`、`head`、`entry`、`text`、`connection` 与结构化 `error` 七种，见[公开操作](../../docs/architecture/session.md#实现模块与公开操作)；stdout 不混入人类状态行。人类可读输出在一轮结束时打印一次结局摘要，等级等面向用户的文字用稳定的小写词，不用 `Debug` 输出。保留 0/1/2 退出契约；查询成功、Turn 结局和正文读取分别核验。
-- 提交前生成请求身份（新会话含 SessionId）并先输出，再连同选择提交一次；找回经按 TurnId 查询，与只读查询一样只使用原持久事实，无需当前凭据。前端保留用户输入与退出选择，接受和取消交接遵循会话合同，不以重复补发代替后台接管保证。
+- 提交前先生成请求身份（新会话还要生成 SessionId）并输出，再把请求连同用户选的 agent、模型与推理档位（`--agent`、`--model`、`--effort`，都可以不选）提交一次；找回经按 TurnId 查询，与只读查询一样只使用原持久事实，无需当前凭据。前端保留用户输入与退出选择，接受和取消交接遵循会话合同，不以重复补发代替后台接管保证。
 - 观察 idle 由客户端库管理，回执等待由 LocalTurn 管理，CLI 只消费诊断并选择退出；调整时分别核对客户端等待与产品 deadline。新增命令的只读查询使用公开读取入口，不接提交路径，不建前端执行旁路。
 - `pre-stream` 错误分类与固定正文读取失败仍须有精确退出码回归，不能只核对可见 TurnOutcome。
 - 配置拒绝的 `message` 取自 API 的 `ConfigRejection`，已经脱敏；CLI 不把它换成固定文本，也不另拼未脱敏的原始错误；退出 2。
 
 ## 验证入口
 
-- `cargo test -p lattice-cli`；每次命令变更覆盖 parser/help。
-- Turn 渲染关联 API streaming 与外部 harness；配置来源的负向测试关联 `fast_env_boundary`，退出码用黑盒断言。
-- release 与端到端场景遵循测试合同规定的外部归属。
+- 运行 `cargo test -p lattice-cli`；改了命令时，测试要覆盖参数解析与 help 输出。
+- 改了 Turn 的渲染时，再运行 API 的流式测试与外部 harness 场景。
+- 改了配置来源的负向检查时，运行 harness 场景 `fast_env_boundary`；退出码用黑盒方式断言。
+- release 与端到端场景归外部 harness，按测试合同执行。

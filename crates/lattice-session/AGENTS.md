@@ -26,6 +26,6 @@
 
 ## 验证入口
 
-- `cargo test -p lattice-session`；须隔离测试的部分按[测试合同](../../docs/development/testing.md)先列出全部失败方式，再观察红后实现。
-- 格式、树、事务或读取变化关联 API/CLI；真实提交、退回分叉、旧库拒绝和崩溃关闭使用当前二进制的外部 harness，不以纯 planner 测试代替提交窗口。
-- `cargo xtask lancet-boundary` 检查 session 的 runtime-free 边界与生产测试 feature 隔离。
+- 运行 `cargo test -p lattice-session`。必须隔离测试的部分，按[测试合同](../../docs/development/testing.md)先列出全部失败方式，看到测试失败后再实现。
+- 改了记录格式、会话树、事务或读取时，再检查 API 与 CLI。真实提交、退回分叉、旧库拒绝与崩溃后的关闭，用当前构建的二进制运行外部 harness 验证，不能用纯 planner 测试代替提交窗口。
+- `cargo xtask lancet-boundary` 检查 session 不依赖 runtime，以及生产代码不启用测试 feature。

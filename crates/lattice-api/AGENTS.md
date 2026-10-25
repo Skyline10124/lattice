@@ -30,4 +30,6 @@
 
 ## 验证入口
 
-`cargo test -p lattice-api`。按变化关联 runtime、agent、session、CLI；覆盖提交、取消、读取与控制交接、观察切点、库级故障和执行者消失后的结局，文件关联由 workspace_history_acceptance 保护。被测产物与外部场景选择遵循[测试工程](../../docs/development/testing.md)。
+- 运行 `cargo test -p lattice-api`。测试要覆盖提交、取消、读取与控制的交接、观察切点、库级故障和执行者消失后的结局；与工作区文件的关联由 `workspace_history_acceptance` 保护。
+- 按改动的影响，再检查 runtime、agent、session 与 CLI 的测试。
+- 被测产物与外部场景的选择遵循[测试工程](../../docs/development/testing.md)。

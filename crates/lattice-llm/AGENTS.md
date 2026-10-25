@@ -4,9 +4,15 @@
 
 维护请求网关，它是对外唯一的模型请求入口，内部包含协议适配器（请求构造、流式事件解析、用量换算）、provider 注册表、模型元数据、凭据库与 Sign in with ChatGPT、工具 wire 类型、SSE、DNS pinning 与传输层重试判断；另维护日志设置。持久消息与 usage 直接使用 `lattice-conversation` 类型，不负责 Session 图、profile 发现、Agent 循环、重试策略或 LANCET 执行。
 
-- `types.rs`：请求信封、工具定义、流事件与目标；`client.rs`：HTTP 行为、Turn 内 client 复用和连接安全；`transport.rs`：请求标识、错误诊断、可重试判断与 Retry-After。
-- `providers/`：各协议的信封、认证、SSE 累积；`provider_projection/` 是唯一生产消息 codec。
-- `sse.rs`：流解析；provider 注册表与元数据：内置表、`providers.toml`、模型引用解析与元数据合并；凭据库：`auth.json` 与 SIWC；`stub.rs`：测试客户端；`logging.rs`：日志初始化。
+目录按职责划分，协议与 provider 分开。下面是目标结构，实现时把现有的 `providers/`、`provider_projection/`、`router.rs`、`endpoints.rs` 与 `connection.rs` 拆入对应位置：
+
+- `gateway.rs`：请求网关，对外唯一的请求入口。
+- `protocol/`：协议适配器，每个协议一个模块（`chat_completions`、`responses`、`anthropic_messages`、`generate_content`、`interactions`），负责该协议的请求体、流式事件、用量换算与 features；各适配器共用的消息投影 `protocol/projection/` 是唯一的生产消息 codec。这里不出现任何厂商名。
+- `provider/`：provider 注册表，包括内置表、`providers.toml` 的解析与合并、按 `id` 查找。这里不含协议代码。
+- `metadata/`：内置快照、缓存与手写元数据的合并与刷新。
+- `auth/`：凭据库，`auth.json` 与 Sign in with ChatGPT。
+- `transport.rs`：请求标识、错误诊断、可重试判断与 Retry-After；`client.rs`：HTTP 行为、Turn 内 client 复用与连接安全；`sse.rs`：流解析；`types.rs`：请求信封、工具定义与流事件。
+- `stub.rs`：测试客户端；`logging.rs`：日志初始化。
 - 共享 URL/DNS/地址检查归 `net-guard`，client 将中立错误映射为 `LlmError`。凭据只经凭据库读写，脱敏所用的已知值也取自凭据库；新增凭据种类时一并纳入脱敏。
 
 ## 上位文档
@@ -29,6 +35,6 @@
 
 ## 验证入口
 
-- `cargo test -p lattice-llm`；projection 对照 `tests/fixtures/projection/` 的正式 wire fixtures。
-- 协议适配器或 feature 新增、修改时覆盖流、Tool call、usage、错误映射与该 feature 每个取值的请求体，并关联 agent/API streaming；其余检查对象见[模型接入合同](../../docs/architecture/llm.md#验证与承接)。
-- URL/DNS 变化覆盖私网、localhost、rebinding、redirect 与 pinning。
+- 运行 `cargo test -p lattice-llm`；消息投影的测试对照 `tests/fixtures/projection/` 中的正式 wire fixtures。
+- 新增或修改协议适配器、feature 时，测试要覆盖流、Tool call、用量、错误映射，以及该 feature 每个取值的请求体；再运行 agent 与 API 的流式测试。其余检查对象见[模型接入合同](../../docs/architecture/llm.md#验证与承接)。
+- 改了 URL 或 DNS 处理时，测试要覆盖私网地址、localhost、DNS rebinding、重定向与地址固定。

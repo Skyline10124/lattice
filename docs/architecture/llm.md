@@ -177,7 +177,7 @@ key 会发到 endpoint，所以 endpoint 只来自内置表与用户全局的 `p
 
 - 项目目录中的任何文件都不提供 provider 配置。agent profile 可以放在项目内，它只能写模型引用，不能改变 endpoint 或认证方式。
 - 环境变量与工作区 `.env` 不提供 key、endpoint 或模型。原有的 `OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、`GEMINI_API_KEY`、`OPENAI_COMPATIBLE_BASE_URL`、`OPENAI_COMPATIBLE_MODEL`、`OPENAI_COMPATIBLE_API_KEY`、`ANTHROPIC_BASE_URL`、`GEMINI_BASE_URL` 不再读取。
-- 模型元数据（内置快照与缓存）中的 `api`、`env`、`npm` 与模型级 `provider` 字段在生成快照和写入缓存时丢弃，任何时候都不用于请求。
+- 模型元数据只有[元数据的来源与合并](#元数据的来源与合并)中列出的字段，不含 endpoint。
 
 地址检查与连接时的地址固定沿用[会话合同的模型 HTTP 传输](session.md#输入与传输限制)与 `net-guard` 的规则：localhost、127.0.0.1、::1 是 loopback，其他私有与保留地址拒绝。
 
@@ -462,7 +462,7 @@ Turn deadline 的范围由[会话合同](session.md#输入与传输限制)维护
 | 各协议的请求体与流式事件：文字、推理、多个工具调用、用量、错误事件 | `cargo test -p lattice-llm`，夹具取自官方文档 |
 | 每个 feature 取值的请求体，默认值与标准协议形状一致 | 同上 |
 | provider 注册表：内置表与 `providers.toml` 的合并、严格解析、`chatgpt` 不能改写、非 loopback 必须 HTTPS | 同上 |
-| 元数据：来源的选择与按字段覆盖、丢弃 endpoint 类字段、刷新失败继续使用上一份 | 同上 |
+| 元数据：来源的选择与按字段覆盖、只保留列出的字段、刷新失败继续使用上一份 | 同上 |
 | 档位：可用档位的推导、按 token 数的预算、各协议的映射、不支持的档位被拒绝 | 同上 |
 | 用量换算与费用估算，包括缺失项 | 同上 |
 | `auth.json`：权限检查、原子写入、严格解析、凭据不进入日志与公开输出 | 同上 |

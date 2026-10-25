@@ -23,4 +23,7 @@
 
 ## 验证入口
 
-`cargo test -p lancet-api`。组成变化关联 runtime/API Component 测试；操作员变化关联 `cargo test -p lattice-session` 及使用当前二进制的外部 `direct_operator` 场景。生产测试 feature 隔离由 `cargo xtask lancet-boundary` 检查。
+- 运行 `cargo test -p lancet-api`。
+- 改了 Component 组成时，再运行 runtime 与 API 中的 Component 测试。
+- 改了操作员接口时，再运行 `cargo test -p lattice-session`，并用当前构建的二进制运行外部场景 `direct_operator`。
+- 生产代码不得启用测试 feature，由 `cargo xtask lancet-boundary` 检查。

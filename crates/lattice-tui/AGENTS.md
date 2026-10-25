@@ -21,6 +21,6 @@
 
 ## 验证入口
 
-- `cargo test -p lattice-tui`。
-- UI 接线变化重建 lattice-cli，指向当前产物运行 `pty_tui_smoke`；CLI 面变化关联 `cargo test -p lattice-cli`。
-- 视觉与交互按合同进行必要人工终端核验，不以布局算术或快照替代体验判断；操作配方见[验证指南](../../docs/development/validation-guide.md)。
+- 运行 `cargo test -p lattice-tui`。
+- 改了 UI 接线时，重新构建 lattice-cli，用当前产物运行 `pty_tui_smoke`；改了 CLI 表面时，再运行 `cargo test -p lattice-cli`。
+- 视觉与交互按合同在真实终端中人工核验，不能用布局计算或快照代替体验判断；操作步骤见[验证指南](../../docs/development/validation-guide.md)。

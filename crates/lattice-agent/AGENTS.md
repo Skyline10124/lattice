@@ -21,6 +21,6 @@
 
 ## 验证入口
 
-- `cargo test -p lattice-agent`。
-- 测试设施：`cargo test -p lattice-agent --features test-utils`。
-- 请求或结果变化：相关 API Turn 测试及使用当前二进制的 `direct_failures` 场景。
+- 运行 `cargo test -p lattice-agent`。
+- 测试设施要启用 feature：`cargo test -p lattice-agent --features test-utils`。
+- 改了请求或结果时，再运行相关的 API Turn 测试，并用当前构建的二进制运行 harness 场景 `direct_failures`。
