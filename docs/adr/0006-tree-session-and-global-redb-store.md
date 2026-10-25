@@ -9,7 +9,7 @@ status: accepted
 - 修订：部分取代 ADR 0005，范围见[与 ADR 0005 的关系](#与-adr-0005-的关系)；取代 ADR 0003 的“Rewind”一节
 - 依赖：ADR 0005 未被取代的部分
 - 实施跟踪：GitHub #223（路线图 #217 R2）
-- 部分被取代：ADR 0007（三层记录、ActiveStep、Turn 记录与崩溃后自动关闭等；范围见 ADR 0007 的[与 ADR 0006 的关系](0007-session-tree-as-single-authority.md#与-adr-0006-的关系)）；ADR 0008（第 4 节的新会话 SessionId、`--turn-id` 找回与 `session cancel` 参数，第 10 节的事件窗口、事件游标与重新同步；范围见 ADR 0008 的[与 ADR 0006、ADR 0007 的关系](0008-backend-api-commands-view-queries.md#与-adr-0006adr-0007-的关系)）
+- 部分被取代：ADR 0007（三层记录、ActiveStep、Turn 记录与崩溃后自动关闭等；范围见 ADR 0007 的[与 ADR 0006 的关系](0007-session-tree-as-single-authority.md#与-adr-0006-的关系)）；ADR 0008（第 4 节的新会话 SessionId、`--turn-id` 找回与 `session cancel` 参数，第 10 节的事件窗口、事件游标与重新同步；范围见 ADR 0008 的[与 ADR 0006、ADR 0007 的关系](0008-backend-api-commands-view-queries.md#与-adr-0006adr-0007-的关系)）；ADR 0010（第 4 节中当前 agent 即当前位置所属 Turn 的 agent 的规则；范围见 ADR 0010 的[与 ADR 0005、ADR 0006、ADR 0007、ADR 0008 的关系](0010-protocol-adapters-and-configured-providers.md#与-adr-0005adr-0006adr-0007adr-0008-的关系)）
 
 ## 背景
 

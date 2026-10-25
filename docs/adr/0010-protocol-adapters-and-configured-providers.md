@@ -1,10 +1,10 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # ADR 0010：模型接入按协议适配，provider 改为配置
 
-- 状态：Proposed（草案，待维护者批准）
+- 状态：Accepted（2026-10-25 维护者批准，记录见 #316）
 - 日期：2026-10-24
 - 修订：细化 ADR 0005 第 7 节“同 provider 回放”中来源的粒度；部分取代 ADR 0006 第 4 节中“当前 agent 即当前位置所属 Turn 的 agent”的规则，以及 ADR 0008 第 10 节中由客户端读取配置与凭据的规则。范围见[与 ADR 0005、ADR 0006、ADR 0007、ADR 0008 的关系](#与-adr-0005adr-0006adr-0007adr-0008-的关系)
 - 依赖：ADR 0007（接受时确定的模型与 provider 记在 UserMessage 节点上）
