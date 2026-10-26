@@ -11,7 +11,7 @@
 use lattice_conversation::{ProviderOrigin, ToolCallValidation};
 use std::collections::BTreeMap;
 
-use crate::provider_projection::{ProjectionError, request_messages_to_wire, wire_usage};
+use crate::protocol::projection::{ProjectionError, request_messages_to_wire, wire_usage};
 use crate::router::ResolvedModel;
 use crate::types::{ChatRequest, LlmEvent};
 
@@ -169,7 +169,7 @@ impl AnthropicSseParser {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        crate::provider_projection::wire_to_native(
+        crate::protocol::projection::wire_to_native(
             ProviderOrigin::Anthropic,
             &serde_json::json!({"role": "assistant", "content": blocks}),
         )
@@ -179,7 +179,7 @@ impl AnthropicSseParser {
         if self.completed {
             return Vec::new();
         }
-        let root = match super::parse_json_data("Anthropic", data) {
+        let root = match super::common::parse_json_data("Anthropic", data) {
             Ok(Some(v)) => v,
             Ok(None) => return vec![],
             Err(e) => return vec![e],
@@ -375,7 +375,7 @@ impl AnthropicSseParser {
                         return vec![LlmEvent::error(error.to_string(), false)];
                     }
                 };
-                let completion = super::projection_result_event(self.complete_message());
+                let completion = super::common::projection_result_event(self.complete_message());
                 if matches!(
                     completion,
                     LlmEvent::Error { .. } | LlmEvent::OutputLimit { .. }
@@ -393,7 +393,7 @@ impl AnthropicSseParser {
             }
             "message_stop" | "ping" => vec![],
             "error" => vec![
-                super::extract_api_error(ProviderOrigin::Anthropic, &root)
+                super::common::extract_api_error(ProviderOrigin::Anthropic, &root)
                     .unwrap_or_else(|| LlmEvent::error("unknown Anthropic streaming error", false)),
             ],
             _ => vec![],

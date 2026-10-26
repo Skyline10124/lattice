@@ -24,15 +24,15 @@
 //! a valid conversation fact: when the target provider cannot encode a
 //! recorded closure without one, the projection fails with a typed
 //! [`ProjectionError::ToolResultWithoutProviderCallId`] rather than
-//! synthesizing an ID. The production adapters in [`crate::providers`] own
+//! synthesizing an ID. The production adapters in [`crate::protocol`] own
 //! HTTP/SSE envelopes but delegate every request-message and completed-response
 //! projection to this seam.
 
-mod anthropic;
-mod gemini;
-mod openai;
+mod anthropic_messages;
+mod chat_completions;
+mod generate_content;
 
-pub(crate) use openai::{OpenAiPart, parts_to_native as openai_parts_to_native};
+pub(crate) use chat_completions::{OpenAiPart, parts_to_native as openai_parts_to_native};
 
 use std::collections::BTreeSet;
 
@@ -140,9 +140,9 @@ pub fn wire_to_native(
     wire: &Value,
 ) -> Result<NativeMessage<UnboundToolCall>, ProjectionError> {
     match origin {
-        ProviderOrigin::OpenAiCompatible => openai::wire_to_native(wire),
-        ProviderOrigin::Anthropic => anthropic::wire_to_native(wire),
-        ProviderOrigin::Gemini => gemini::wire_to_native(wire),
+        ProviderOrigin::OpenAiCompatible => chat_completions::wire_to_native(wire),
+        ProviderOrigin::Anthropic => anthropic_messages::wire_to_native(wire),
+        ProviderOrigin::Gemini => generate_content::wire_to_native(wire),
     }
 }
 
@@ -164,9 +164,9 @@ pub fn native_to_wire<S: ToolCallState>(
         });
     }
     match origin {
-        ProviderOrigin::OpenAiCompatible => openai::native_to_wire(message),
-        ProviderOrigin::Anthropic => anthropic::native_to_wire(message),
-        ProviderOrigin::Gemini => gemini::native_to_wire(message),
+        ProviderOrigin::OpenAiCompatible => chat_completions::native_to_wire(message),
+        ProviderOrigin::Anthropic => anthropic_messages::native_to_wire(message),
+        ProviderOrigin::Gemini => generate_content::native_to_wire(message),
     }
 }
 
@@ -404,9 +404,9 @@ pub fn tool_results_to_wire(
         return Ok(Vec::new());
     }
     match origin {
-        ProviderOrigin::OpenAiCompatible => openai::tool_result_messages(&closures),
-        ProviderOrigin::Anthropic => anthropic::tool_result_messages(&closures),
-        ProviderOrigin::Gemini => gemini::tool_result_messages(&closures),
+        ProviderOrigin::OpenAiCompatible => chat_completions::tool_result_messages(&closures),
+        ProviderOrigin::Anthropic => anthropic_messages::tool_result_messages(&closures),
+        ProviderOrigin::Gemini => generate_content::tool_result_messages(&closures),
     }
 }
 
@@ -419,8 +419,8 @@ pub fn wire_usage(
     wire: &Value,
 ) -> Result<Option<TokenUsage>, ProjectionError> {
     match origin {
-        ProviderOrigin::OpenAiCompatible => openai::usage(wire),
-        ProviderOrigin::Anthropic => anthropic::usage(wire),
-        ProviderOrigin::Gemini => gemini::usage(wire),
+        ProviderOrigin::OpenAiCompatible => chat_completions::usage(wire),
+        ProviderOrigin::Anthropic => anthropic_messages::usage(wire),
+        ProviderOrigin::Gemini => generate_content::usage(wire),
     }
 }

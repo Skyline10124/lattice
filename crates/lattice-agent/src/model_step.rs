@@ -61,7 +61,7 @@ pub trait LlmClient: Send + Sync {
 pub enum ModelStepError {
     /// Provider request projection failed before transport; exact typed cause is
     /// retained so missing IDs and replay-state failures are not flattened.
-    Projection(lattice_llm::provider_projection::ProjectionError),
+    Projection(lattice_llm::protocol::projection::ProjectionError),
     /// The provider request failed before any stream event. `retryable` is a
     /// hint from the transport classification; the caller owns retry policy.
     OpeningFailed {
@@ -534,7 +534,7 @@ mod tests {
             &self,
             request: ChatRequest,
         ) -> Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
-            lattice_llm::provider_projection::request_messages_to_wire(
+            lattice_llm::protocol::projection::request_messages_to_wire(
                 lattice_conversation::ProviderOrigin::OpenAiCompatible,
                 &request.messages,
             )
@@ -929,7 +929,7 @@ mod tests {
         assert!(matches!(
             result,
             Err(ModelStepError::Projection(
-                lattice_llm::provider_projection::ProjectionError::ToolResultWithoutProviderCallId {
+                lattice_llm::protocol::projection::ProjectionError::ToolResultWithoutProviderCallId {
                     invocation_id,
                     ..
                 },

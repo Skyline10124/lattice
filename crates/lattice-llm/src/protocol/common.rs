@@ -7,10 +7,6 @@
 //! and auth header logic for a specific provider family.
 //! No provider registry, plugin trait, or `lattice-core` dependency exists here.
 
-pub mod anthropic;
-pub mod gemini;
-pub mod openai;
-
 use crate::types::LlmEvent;
 
 /// Parse `data` into a JSON value.
@@ -66,17 +62,17 @@ pub(crate) fn extract_api_error(
 pub(crate) fn projection_result_event(
     result: Result<
         lattice_conversation::NativeMessage<lattice_conversation::UnboundToolCall>,
-        crate::provider_projection::ProjectionError,
+        crate::protocol::projection::ProjectionError,
     >,
 ) -> LlmEvent {
     match result {
         Ok(message) => LlmEvent::MessageComplete { message },
-        Err(crate::provider_projection::ProjectionError::InvalidToolCall(validation)) => {
+        Err(crate::protocol::projection::ProjectionError::InvalidToolCall(validation)) => {
             LlmEvent::MessageRejected {
                 rejection: lattice_conversation::AttemptRejection::InvalidToolCall { validation },
             }
         }
-        Err(crate::provider_projection::ProjectionError::OutputLimitExceeded {
+        Err(crate::protocol::projection::ProjectionError::OutputLimitExceeded {
             interruption,
             ..
         }) => LlmEvent::OutputLimit { interruption },
@@ -88,7 +84,7 @@ pub(crate) fn complete_message_event(
     provider: lattice_conversation::ProviderOrigin,
     wire: &serde_json::Value,
 ) -> LlmEvent {
-    projection_result_event(crate::provider_projection::wire_to_native(provider, wire))
+    projection_result_event(crate::protocol::projection::wire_to_native(provider, wire))
 }
 
 #[cfg(test)]

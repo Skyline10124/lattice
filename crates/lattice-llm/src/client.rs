@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use futures::stream::{self, StreamExt};
 use net_guard::NetGuardError;
 
-use crate::providers;
+use crate::protocol;
 use crate::router::{ProviderKind, ResolvedModel};
 use crate::sse;
 use crate::stub::{LlmError, LlmStream};
@@ -65,25 +65,25 @@ fn build_auth_headers(resolved: &ResolvedModel, api_key: &str) -> Vec<(String, S
         ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => {
             vec![(
                 "Authorization".to_string(),
-                providers::openai::auth_header_value(api_key),
+                protocol::chat_completions::auth_header_value(api_key),
             )]
         }
         ProviderKind::Anthropic => {
             vec![
                 (
                     "x-api-key".to_string(),
-                    providers::anthropic::auth_header_value(api_key),
+                    protocol::anthropic_messages::auth_header_value(api_key),
                 ),
                 (
                     "anthropic-version".to_string(),
-                    providers::anthropic::ANTHROPIC_VERSION.to_string(),
+                    protocol::anthropic_messages::ANTHROPIC_VERSION.to_string(),
                 ),
             ]
         }
         ProviderKind::Gemini => {
             vec![(
                 "x-goog-api-key".to_string(),
-                providers::gemini::auth_header_value(api_key),
+                protocol::generate_content::auth_header_value(api_key),
             )]
         }
     }
@@ -96,13 +96,13 @@ fn build_request_body(
 ) -> Result<serde_json::Value, LlmError> {
     match resolved.provider {
         ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => {
-            providers::openai::build_request_json(request, resolved).map_err(Into::into)
+            protocol::chat_completions::build_request_json(request, resolved).map_err(Into::into)
         }
         ProviderKind::Anthropic => {
-            providers::anthropic::build_request_json(request, resolved).map_err(Into::into)
+            protocol::anthropic_messages::build_request_json(request, resolved).map_err(Into::into)
         }
         ProviderKind::Gemini => {
-            providers::gemini::build_request_json(request, resolved).map_err(Into::into)
+            protocol::generate_content::build_request_json(request, resolved).map_err(Into::into)
         }
     }
 }
@@ -119,9 +119,10 @@ fn build_endpoint_url(resolved: &ResolvedModel) -> String {
         ProviderKind::Anthropic => {
             format!("{}/v1/messages", resolved.base_url.trim_end_matches('/'))
         }
-        ProviderKind::Gemini => {
-            providers::gemini::build_stream_url(&resolved.base_url, &resolved.provider_model)
-        }
+        ProviderKind::Gemini => protocol::generate_content::build_stream_url(
+            &resolved.base_url,
+            &resolved.provider_model,
+        ),
     }
 }
 
@@ -129,22 +130,22 @@ fn build_endpoint_url(resolved: &ResolvedModel) -> String {
 /// owns its own parser, preventing state leakage across concurrent or
 /// sequential requests on the same tokio worker thread.
 enum ProviderParser {
-    OpenAi(providers::openai::OpenAiSseParser),
-    Anthropic(providers::anthropic::AnthropicSseParser),
-    Gemini(providers::gemini::GeminiSseParser),
+    OpenAi(protocol::chat_completions::OpenAiSseParser),
+    Anthropic(protocol::anthropic_messages::AnthropicSseParser),
+    Gemini(protocol::generate_content::GeminiSseParser),
 }
 
 impl ProviderParser {
     fn new(provider: ProviderKind) -> Self {
         match provider {
             ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => {
-                ProviderParser::OpenAi(providers::openai::OpenAiSseParser::new())
+                ProviderParser::OpenAi(protocol::chat_completions::OpenAiSseParser::new())
             }
             ProviderKind::Anthropic => {
-                ProviderParser::Anthropic(providers::anthropic::AnthropicSseParser::new())
+                ProviderParser::Anthropic(protocol::anthropic_messages::AnthropicSseParser::new())
             }
             ProviderKind::Gemini => {
-                ProviderParser::Gemini(providers::gemini::GeminiSseParser::new())
+                ProviderParser::Gemini(protocol::generate_content::GeminiSseParser::new())
             }
         }
     }

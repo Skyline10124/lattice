@@ -9,7 +9,7 @@
 
 use lattice_conversation::ProviderOrigin;
 
-use crate::provider_projection::{ProjectionError, request_messages_to_wire, wire_usage};
+use crate::protocol::projection::{ProjectionError, request_messages_to_wire, wire_usage};
 use crate::router::ResolvedModel;
 use crate::types::{ChatRequest, LlmEvent};
 
@@ -149,13 +149,13 @@ impl GeminiSseParser {
         if self.completed {
             return Vec::new();
         }
-        let root = match super::parse_json_data("Gemini", data) {
+        let root = match super::common::parse_json_data("Gemini", data) {
             Ok(Some(v)) => v,
             Ok(None) => return vec![],
             Err(e) => return vec![e],
         };
 
-        if let Some(error_event) = super::extract_api_error(ProviderOrigin::Gemini, &root) {
+        if let Some(error_event) = super::common::extract_api_error(ProviderOrigin::Gemini, &root) {
             return vec![error_event];
         }
 
@@ -289,7 +289,7 @@ impl GeminiSseParser {
 
                 let complete_root = self.completion_root(&root);
                 let completion =
-                    super::complete_message_event(ProviderOrigin::Gemini, &complete_root);
+                    super::common::complete_message_event(ProviderOrigin::Gemini, &complete_root);
                 self.parts.clear();
                 self.tool_call_indices.clear();
                 let failed = matches!(

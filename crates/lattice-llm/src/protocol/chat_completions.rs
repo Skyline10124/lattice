@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use lattice_conversation::{ProviderOrigin, RawToolCall, TokenUsage};
 
-use crate::provider_projection::{
+use crate::protocol::projection::{
     OpenAiPart, ProjectionError, request_messages_to_wire, wire_usage,
 };
 use crate::router::ResolvedModel;
@@ -100,7 +100,7 @@ impl OpenAiSseParser {
         lattice_conversation::NativeMessage<lattice_conversation::UnboundToolCall>,
         ProjectionError,
     > {
-        crate::provider_projection::openai_parts_to_native(std::mem::take(&mut self.parts))
+        crate::protocol::projection::openai_parts_to_native(std::mem::take(&mut self.parts))
     }
     fn finish(&mut self, usage: Option<TokenUsage>) -> Vec<LlmEvent> {
         self.completed = true;
@@ -115,7 +115,7 @@ impl OpenAiSseParser {
                 index: *index as usize,
             })
             .collect::<Vec<_>>();
-        let completion = super::projection_result_event(self.complete_message());
+        let completion = super::common::projection_result_event(self.complete_message());
         let failed = matches!(
             completion,
             LlmEvent::Error { .. } | LlmEvent::OutputLimit { .. }
@@ -142,13 +142,14 @@ impl OpenAiSseParser {
                 Vec::new()
             };
         }
-        let root = match super::parse_json_data("OpenAI", data) {
+        let root = match super::common::parse_json_data("OpenAI", data) {
             Ok(Some(v)) => v,
             Ok(None) => return vec![],
             Err(e) => return vec![e],
         };
 
-        if let Some(error_event) = super::extract_api_error(ProviderOrigin::OpenAiCompatible, &root)
+        if let Some(error_event) =
+            super::common::extract_api_error(ProviderOrigin::OpenAiCompatible, &root)
         {
             return vec![error_event];
         }
@@ -842,7 +843,7 @@ mod tests {
     fn order_f11_request_merges_without_changing_wire_shape() {
         let message = ordered_native();
         let wire =
-            crate::provider_projection::native_to_wire(ProviderOrigin::OpenAiCompatible, &message)
+            crate::protocol::projection::native_to_wire(ProviderOrigin::OpenAiCompatible, &message)
                 .unwrap();
         assert_eq!(
             wire,
@@ -858,7 +859,7 @@ mod tests {
         let source = ordered_native();
         let original = source.clone();
         let projected =
-            crate::provider_projection::project_cross_provider(&source, ProviderOrigin::Gemini);
+            crate::protocol::projection::project_cross_provider(&source, ProviderOrigin::Gemini);
         assert_eq!(labels(&projected), ["T:A", "C:observe__workspace", "T:B"]);
         assert!(
             projected

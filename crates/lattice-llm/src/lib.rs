@@ -8,8 +8,7 @@ mod connection;
 pub use connection::{ConnectionMaterial, LlmConnection};
 mod endpoints;
 mod logging;
-pub mod provider_projection;
-mod providers;
+pub mod protocol;
 mod router;
 pub mod sse;
 mod stub;
@@ -28,7 +27,7 @@ pub use types::{ChatRequest, LlmEvent, ModelTarget, ProviderFailure, ToolDefinit
 
 // Expose the real parser only for cross-crate streaming boundary tests.
 #[cfg(feature = "test-utils")]
-pub use providers::openai::OpenAiSseParser;
+pub use protocol::chat_completions::OpenAiSseParser;
 
 #[cfg(test)]
 mod test_env {

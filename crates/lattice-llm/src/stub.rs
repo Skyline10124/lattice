@@ -52,7 +52,7 @@ pub enum LlmError {
     ProtocolLimit { message: String },
 
     #[error("provider projection error: {0}")]
-    Projection(#[from] crate::provider_projection::ProjectionError),
+    Projection(#[from] crate::protocol::projection::ProjectionError),
 
     #[error("LLM error: {0}")]
     Other(String),
