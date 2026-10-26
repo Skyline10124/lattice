@@ -8,6 +8,12 @@ mod connection;
 pub use connection::{ConnectionMaterial, LlmConnection};
 mod endpoints;
 mod logging;
+// #315 L2 的网关接线 PR 将接上这两个模块。
+#[allow(dead_code)]
+pub(crate) mod protocol;
+#[allow(dead_code)]
+pub(crate) mod provider;
+pub use provider::{ModelRef, ModelRefError};
 pub mod provider_projection;
 mod providers;
 mod router;
