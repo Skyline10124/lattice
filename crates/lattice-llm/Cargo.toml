@@ -28,5 +28,8 @@ h2 = "0.4"
 tower-layer = "0.3"
 tower-service = "0.3"
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
 [features]
 test-utils = []

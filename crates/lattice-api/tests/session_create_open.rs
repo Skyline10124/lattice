@@ -4,6 +4,7 @@
 //! Session 在首次接受时原子创建；重开及同身份冲突保持冻结配置和原始输入。
 use lattice_api::local::*;
 use lattice_api::{RunTurnRequest, SessionApi, StateLayout, TurnAcceptance, TurnCompletion};
+use lattice_llm::testing::ScriptEvent;
 use lattice_session::store::{PublicTurnOutcome, SessionStore};
 use std::sync::Arc;
 
@@ -23,10 +24,10 @@ async fn first_acceptance_reopen_preserves_identity_without_observers_or_configu
     let llm = Arc::new(
         lattice_agent::testing::FakeStreamingLlmClient::builder()
             .push_events(vec![
-                lattice_llm::LlmEvent::Token {
+                ScriptEvent::Text {
                     content: "answer".into(),
                 },
-                lattice_llm::LlmEvent::Done {
+                ScriptEvent::Done {
                     finish_reason: "stop".into(),
                     usage: None,
                 },

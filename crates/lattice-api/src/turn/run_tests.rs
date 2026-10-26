@@ -4,7 +4,8 @@
 use super::{test_support::*, types::TurnEvent};
 use lattice_agent::LlmClient;
 use lattice_conversation::*;
-use lattice_llm::{LlmEvent, TokenUsage};
+use lattice_llm::TokenUsage;
+use lattice_llm::testing::ScriptEvent;
 use lattice_session::store::*;
 use std::sync::{
     Arc,
@@ -57,10 +58,10 @@ async fn run_turn_result_and_saved_nodes_preserve_contract_fields() {
 async fn provider_failure_preserves_notice_in_step_without_partial_reply() {
     let fixture = setup_with_events(
         vec![
-            LlmEvent::Token {
+            ScriptEvent::Text {
                 content: "partial".into(),
             },
-            LlmEvent::Error {
+            ScriptEvent::Failure {
                 failure: lattice_llm::ProviderFailure {
                     message: "provider unavailable".into(),
                     retryable: false,
@@ -108,37 +109,37 @@ impl LlmClient for CancelOnDone {
     async fn stream_chat(
         &self,
         _: lattice_llm::ChatRequest,
+        control: lattice_llm::StreamControl,
     ) -> std::result::Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
         let cancel = self.0.clone();
-        let events = vec![
-            LlmEvent::MessageComplete {
-                message: NativeMessage::new(
-                    MessageRole::Assistant,
-                    Some(ProviderOrigin::OpenAiCompatible),
-                    vec![MessagePart::semantic_only(MessageSemantic::ToolCall {
-                        call: UnboundToolCall {
-                            provider_call_id: Some("call".into()),
-                            name: "observe__workspace".into(),
-                            arguments: serde_json::json!({"request": {"mode":"read_file","path":"src/lib.rs"}}),
-                        },
-                    })],
-                ),
-            },
-            LlmEvent::Done {
-                finish_reason: "tool_calls".into(),
-                usage: Some(TokenUsage {
-                    prompt_tokens: 5,
-                    completion_tokens: 2,
-                    total_tokens: 7,
-                }),
-            },
-        ];
-        Ok(Box::pin(futures::stream::iter(events).map(move |event| {
-            if matches!(event, LlmEvent::Done { .. }) {
-                cancel.store(true, Ordering::Release);
-            }
-            event
-        })))
+        let message = NativeMessage::new(
+            MessageRole::Assistant,
+            Some(ProviderOrigin::OpenAiCompatible),
+            vec![MessagePart::semantic_only(MessageSemantic::ToolCall {
+                call: UnboundToolCall {
+                    provider_call_id: Some("call".into()),
+                    name: "observe__workspace".into(),
+                    arguments: serde_json::json!({"request": {"mode":"read_file","path":"src/lib.rs"}}),
+                },
+            })],
+        );
+        let mut events = lattice_llm::testing::parts_events(message.parts);
+        events.push(ScriptEvent::Done {
+            finish_reason: "tool_calls".into(),
+            usage: Some(TokenUsage {
+                prompt_tokens: 5,
+                completion_tokens: 2,
+                total_tokens: 7,
+            }),
+        });
+        Ok(Box::pin(
+            lattice_llm::testing::script_stream(events, control).map(move |event| {
+                if matches!(event, lattice_llm::LlmEvent::Finished { .. }) {
+                    cancel.store(true, Ordering::Release);
+                }
+                event
+            }),
+        ))
     }
 }
 use futures::StreamExt;

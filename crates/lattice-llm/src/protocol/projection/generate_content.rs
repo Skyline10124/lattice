@@ -24,20 +24,14 @@
 //! fails the whole body closed rather than returning a partial message.
 
 use lattice_conversation::{
-    AttemptAssembly, MessagePart, MessageRole, MessageSemantic, NativeMessage, OpaqueProviderState,
-    ProviderOrigin, RawToolCall, TokenUsage, ToolCallState, ToolResultOutcome, UnboundToolCall,
-    validate_tool_call_batch,
+    MessageSemantic, NativeMessage, ProviderOrigin, TokenUsage, ToolCallState, ToolResultOutcome,
+    UnboundToolCall,
 };
 use serde_json::{Value, json};
 
 use super::{ProjectionError, ToolResultClosure};
-
-fn limit_exceeded(interruption: lattice_conversation::AttemptInterruption) -> ProjectionError {
-    ProjectionError::OutputLimitExceeded {
-        provider: ProviderOrigin::Gemini,
-        interruption,
-    }
-}
+use crate::protocol::generate_content::unsupported_part_type;
+use crate::reply::{PartDelta, PartKind, StringPatch};
 
 fn malformed(detail: impl Into<String>) -> ProjectionError {
     ProjectionError::MalformedWire {
@@ -46,19 +40,8 @@ fn malformed(detail: impl Into<String>) -> ProjectionError {
     }
 }
 
-fn replay_state_of(part: &Value) -> Result<Option<OpaqueProviderState>, ProjectionError> {
-    match part.get("thoughtSignature") {
-        Some(Value::String(signature)) => Ok(Some(
-            OpaqueProviderState::new(signature.clone())
-                .map_err(|_| malformed("thoughtSignature exceeds replay-state bound"))?,
-        )),
-        Some(Value::Null) | None => Ok(None),
-        _ => Err(malformed("thoughtSignature is not a string")),
-    }
-}
-
 pub fn wire_to_native(wire: &Value) -> Result<NativeMessage<UnboundToolCall>, ProjectionError> {
-    let wire_parts = wire
+    let parts = wire
         .get("candidates")
         .and_then(Value::as_array)
         .and_then(|candidates| candidates.first())
@@ -66,103 +49,76 @@ pub fn wire_to_native(wire: &Value) -> Result<NativeMessage<UnboundToolCall>, Pr
         .and_then(|content| content.get("parts"))
         .and_then(Value::as_array)
         .ok_or_else(|| malformed("missing candidates[0].content.parts"))?;
-
-    // Two-phase assembly, same as the Anthropic projector: parse in wire
-    // order, validate ToolCalls as one batch, splice back at wire positions.
-    enum Pending {
-        Ready(MessagePart<UnboundToolCall>),
-        Call(usize),
-        /// A call part carrying its own thoughtSignature.
-        SignedCall(usize, OpaqueProviderState),
-    }
-
-    let mut pending: Vec<Pending> = Vec::new();
-    let mut raw_calls: Vec<RawToolCall> = Vec::new();
-    let mut assembly = AttemptAssembly::new();
-    for part in wire_parts {
-        let replay_state = replay_state_of(part)?;
-        let thought = part.get("thought").and_then(Value::as_bool) == Some(true);
-
-        if let Some(function_call) = part.get("functionCall") {
-            let name = function_call
-                .get("name")
-                .and_then(Value::as_str)
+    let mut reply = super::WireReply::new(ProviderOrigin::Gemini);
+    for (index, part) in parts.iter().enumerate() {
+        if part.get("text").is_some() && part.get("functionCall").is_some() {
+            return Err(malformed("one part contains text and functionCall"));
+        }
+        if part.get("text").is_none() && part.get("functionCall").is_none() {
+            return Err(ProjectionError::Protocol(
+                crate::ReplyProtocolError::unsupported(
+                    "generate-content",
+                    index,
+                    unsupported_part_type(part),
+                ),
+            ));
+        }
+        let kind = if part.get("functionCall").is_some() {
+            PartKind::ToolCall
+        } else if part["thought"].as_bool() == Some(true) {
+            PartKind::Reasoning
+        } else {
+            PartKind::Text
+        };
+        reply.push(PartDelta::Begin { index, kind })?;
+        if let Some(function) = part.get("functionCall") {
+            let name = function["name"]
+                .as_str()
                 .ok_or_else(|| malformed("functionCall missing name"))?;
-            let arguments = match function_call.get("args") {
-                Some(args) => serde_json::to_string(args)
-                    .map_err(|_| malformed("functionCall args not serializable"))?,
-                // Gemini may omit `args` for a parameterless function call; its
-                // documented meaning is the empty input object.
-                None => "{}".to_string(),
-            };
-            let provider_call_id = match function_call.get("id") {
-                Some(Value::String(id)) => Some(id.to_string()),
+            let arguments = function
+                .get("args")
+                .map_or_else(|| "{}".into(), ToString::to_string);
+            let provider_call_id = match function.get("id") {
+                Some(Value::String(id)) => Some(StringPatch::Set(id.clone())),
                 Some(Value::Null) | None => None,
                 _ => return Err(malformed("functionCall id is not a string")),
             };
-            assembly.begin_tool_call();
-            assembly
-                .push_tool_arguments(&arguments)
-                .map_err(limit_exceeded)?;
-            raw_calls.push(RawToolCall {
+            reply.push(PartDelta::ToolMetadata {
+                index,
+                name: Some(StringPatch::Set(name.into())),
                 provider_call_id,
-                name: name.to_string(),
-                arguments,
-            });
-            // A signature on a call part stays attached to that call part.
-            let index = raw_calls.len() - 1;
-            match replay_state {
-                Some(state) => pending.push(Pending::SignedCall(index, state)),
-                None => pending.push(Pending::Call(index)),
-            }
-            continue;
+            })?;
+            reply.push(PartDelta::ToolArguments {
+                index,
+                delta: arguments,
+            })?;
+        } else {
+            let text = part["text"]
+                .as_str()
+                .ok_or_else(|| malformed("part has no string text or functionCall"))?;
+            reply.push(if kind == PartKind::Reasoning {
+                PartDelta::Reasoning {
+                    index,
+                    delta: text.into(),
+                }
+            } else {
+                PartDelta::Text {
+                    index,
+                    delta: text.into(),
+                }
+            })?;
         }
-
-        match part.get("text") {
-            Some(Value::String(text)) => {
-                let semantic = if thought {
-                    assembly.push_reasoning(text).map_err(limit_exceeded)?;
-                    MessageSemantic::Reasoning { text: text.clone() }
-                } else {
-                    assembly.push_assistant(text).map_err(limit_exceeded)?;
-                    MessageSemantic::Text { text: text.clone() }
-                };
-                // An empty text part with a signature is preserved, not
-                // filtered (grill R7).
-                pending.push(Pending::Ready(MessagePart {
-                    semantic,
-                    replay_state,
-                }));
-            }
-            Some(_) => return Err(malformed("text part is not a string")),
-            None => return Err(malformed("part has neither text nor functionCall")),
+        match part.get("thoughtSignature") {
+            Some(Value::String(signature)) => reply.push(PartDelta::ReplayState {
+                index,
+                patch: StringPatch::Set(signature.clone()),
+            })?,
+            Some(Value::Null) | None => {}
+            _ => return Err(malformed("thoughtSignature is not a string")),
         }
+        reply.push(PartDelta::End { index })?;
     }
-
-    let validated = validate_tool_call_batch(&raw_calls)?;
-    let mut parts: Vec<MessagePart<UnboundToolCall>> = Vec::with_capacity(pending.len());
-    for slot in pending {
-        match slot {
-            Pending::Ready(part) => parts.push(part),
-            Pending::Call(index) => {
-                parts.push(MessagePart::semantic_only(MessageSemantic::ToolCall {
-                    call: validated[index].clone(),
-                }))
-            }
-            Pending::SignedCall(index, state) => parts.push(MessagePart {
-                semantic: MessageSemantic::ToolCall {
-                    call: validated[index].clone(),
-                },
-                replay_state: Some(state),
-            }),
-        }
-    }
-
-    Ok(NativeMessage::new(
-        MessageRole::Assistant,
-        Some(ProviderOrigin::Gemini),
-        parts,
-    ))
+    reply.finish()
 }
 
 pub fn native_to_wire<S: ToolCallState>(

@@ -87,40 +87,20 @@ pub(super) fn assistant<S: ToolCallState>(message: &NativeMessage<S>) -> Result<
     if message.role != MessageRole::Assistant {
         return Err(invalid("reply", "expected assistant role"));
     }
-    let mut text = 0usize;
-    let mut reasoning = 0usize;
-    let mut total = 0usize;
-    let mut calls = Vec::new();
-    for part in &message.parts {
-        match &part.semantic {
-            MessageSemantic::Text { text: t } => {
-                text = text.saturating_add(t.len());
-                total = total.saturating_add(t.len());
-            }
-            MessageSemantic::Reasoning { text: t } => {
-                reasoning = reasoning.saturating_add(t.len());
-                total = total.saturating_add(t.len());
-            }
-            MessageSemantic::ToolCall { call } => {
-                let arguments = lancet_protocol::canonical_json(call.arguments());
-                total = total
-                    .saturating_add(arguments.len())
-                    .saturating_add(call.name().len())
-                    .saturating_add(call.provider_call_id().map_or(0, str::len));
-                calls.push(RawToolCall {
-                    provider_call_id: call.provider_call_id().map(str::to_owned),
-                    name: call.name().into(),
-                    arguments,
-                });
-            }
-        }
-        if let Some(replay) = &part.replay_state {
-            total = total.saturating_add(replay.as_str().len());
-        }
-    }
-    if text > 2 * 1024 * 1024 || reasoning > 2 * 1024 * 1024 || total > 16 * 1024 * 1024 {
-        return Err(invalid("reply", "response byte limit exceeded"));
-    }
+    lattice_conversation::validate_assistant_bounds(message)
+        .map_err(|_| invalid("reply", "response byte limit exceeded"))?;
+    let calls: Vec<_> = message
+        .parts
+        .iter()
+        .filter_map(|part| match &part.semantic {
+            MessageSemantic::ToolCall { call } => Some(RawToolCall {
+                provider_call_id: call.provider_call_id().map(str::to_owned),
+                name: call.name().into(),
+                arguments: lancet_protocol::canonical_json(call.arguments()),
+            }),
+            _ => None,
+        })
+        .collect();
     validate_tool_call_batch(&calls).map_err(|_| invalid("reply", "invalid tool call batch"))?;
     Ok(())
 }

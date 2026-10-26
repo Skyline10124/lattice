@@ -9,9 +9,10 @@ impl lattice_agent::LlmClient for RealLlmClient {
     async fn stream_chat(
         &self,
         request: lattice_llm::ChatRequest,
+        control: lattice_llm::StreamControl,
     ) -> std::result::Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
         self.0
-            .stream(request)
+            .stream(request, control)
             .await
             .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { Box::new(error) })
     }

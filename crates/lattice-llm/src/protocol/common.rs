@@ -7,18 +7,18 @@
 //! and auth header logic for a specific provider family.
 //! No provider registry, plugin trait, or `lattice-core` dependency exists here.
 
-use crate::types::LlmEvent;
+use crate::reply::ProtocolEvent;
 
 /// Parse `data` into a JSON value.
 ///
 /// Returns:
 /// - `Ok(Some(value))` for parsed JSON
 /// - `Ok(None)` for empty data or `[DONE]`
-/// - `Err(LlmEvent::Error)` for parse errors
+/// - `Err(ProtocolEvent::Failed)` for parse errors
 pub(crate) fn parse_json_data(
     provider: &str,
     data: &str,
-) -> Result<Option<serde_json::Value>, LlmEvent> {
+) -> Result<Option<serde_json::Value>, ProtocolEvent> {
     let trimmed = data.trim();
 
     if trimmed.is_empty() || trimmed == "[DONE]" {
@@ -27,7 +27,7 @@ pub(crate) fn parse_json_data(
 
     serde_json::from_str(trimmed)
         .map(Some)
-        .map_err(|e| LlmEvent::error(format!("{provider} SSE JSON parse error: {e}"), false))
+        .map_err(|e| ProtocolEvent::error(format!("{provider} SSE JSON parse error: {e}"), false))
 }
 
 /// Extract an API-level error event from a response JSON value.
@@ -35,7 +35,7 @@ pub(crate) fn parse_json_data(
 pub(crate) fn extract_api_error(
     provider: lattice_conversation::ProviderOrigin,
     root: &serde_json::Value,
-) -> Option<LlmEvent> {
+) -> Option<ProtocolEvent> {
     use lattice_conversation::ProviderOrigin;
     let error = root.get("error")?;
     let message = error
@@ -56,40 +56,16 @@ pub(crate) fn extract_api_error(
             Some("UNAVAILABLE" | "INTERNAL" | "RESOURCE_EXHAUSTED")
         ),
     };
-    Some(LlmEvent::error(format!("API error: {message}"), retryable))
-}
-
-pub(crate) fn projection_result_event(
-    result: Result<
-        lattice_conversation::NativeMessage<lattice_conversation::UnboundToolCall>,
-        crate::protocol::projection::ProjectionError,
-    >,
-) -> LlmEvent {
-    match result {
-        Ok(message) => LlmEvent::MessageComplete { message },
-        Err(crate::protocol::projection::ProjectionError::InvalidToolCall(validation)) => {
-            LlmEvent::MessageRejected {
-                rejection: lattice_conversation::AttemptRejection::InvalidToolCall { validation },
-            }
-        }
-        Err(crate::protocol::projection::ProjectionError::OutputLimitExceeded {
-            interruption,
-            ..
-        }) => LlmEvent::OutputLimit { interruption },
-        Err(error) => LlmEvent::error(error.to_string(), false),
-    }
-}
-
-pub(crate) fn complete_message_event(
-    provider: lattice_conversation::ProviderOrigin,
-    wire: &serde_json::Value,
-) -> LlmEvent {
-    projection_result_event(crate::protocol::projection::wire_to_native(provider, wire))
+    Some(ProtocolEvent::error(
+        format!("API error: {message}"),
+        retryable,
+    ))
 }
 
 #[cfg(test)]
 mod parse_json_data_tests {
     use super::*;
+    use crate::StreamStop;
 
     #[test]
     fn streaming_retryability_uses_provider_fields_not_message() {
@@ -126,7 +102,7 @@ mod parse_json_data_tests {
                 false,
             ),
         ] {
-            let LlmEvent::Error { failure } =
+            let ProtocolEvent::Failed(StreamStop::Provider(failure)) =
                 extract_api_error(provider, &serde_json::json!({"error":error})).unwrap()
             else {
                 panic!("typed failure");
@@ -137,6 +113,6 @@ mod parse_json_data_tests {
     #[test]
     fn parse_invalid_json_returns_error() {
         let result = parse_json_data("TestProvider", "{invalid}");
-        assert!(matches!(result, Err(LlmEvent::Error { .. })));
+        assert!(matches!(result, Err(ProtocolEvent::Failed(_))));
     }
 }

@@ -18,7 +18,7 @@
 //! the same provider. It is never fabricated: a thinking part without replay
 //! state cannot be written back to Anthropic wire.
 //!
-//! `signature` belongs only to `thinking` (and `redacted_thinking`) blocks. A
+//! `signature` belongs only to supported `thinking` blocks. A
 //! `text` part carrying replay state has nowhere to go on this wire, so the
 //! writer rejects it rather than emitting a field the reader would silently
 //! drop on the way back.
@@ -27,20 +27,12 @@
 //! fails the whole body closed rather than returning a partial message.
 
 use lattice_conversation::{
-    AttemptAssembly, MessagePart, MessageRole, MessageSemantic, NativeMessage, OpaqueProviderState,
-    ProviderOrigin, RawToolCall, TokenUsage, ToolCallState, UnboundToolCall,
-    validate_tool_call_batch,
+    MessageSemantic, NativeMessage, ProviderOrigin, TokenUsage, ToolCallState, UnboundToolCall,
 };
 use serde_json::{Value, json};
 
 use super::{ProjectionError, ToolResultClosure};
-
-fn limit_exceeded(interruption: lattice_conversation::AttemptInterruption) -> ProjectionError {
-    ProjectionError::OutputLimitExceeded {
-        provider: ProviderOrigin::Anthropic,
-        interruption,
-    }
-}
+use crate::reply::{PartDelta, PartKind, StringPatch};
 
 fn malformed(detail: impl Into<String>) -> ProjectionError {
     ProjectionError::MalformedWire {
@@ -54,109 +46,77 @@ pub fn wire_to_native(wire: &Value) -> Result<NativeMessage<UnboundToolCall>, Pr
         .get("content")
         .and_then(Value::as_array)
         .ok_or_else(|| malformed("missing content blocks"))?;
-
-    // Two-phase assembly: parse blocks in wire order, validating ToolCalls as
-    // one batch, then splice validated calls back at their wire positions.
-    enum Pending {
-        Ready(MessagePart<UnboundToolCall>),
-        Call(usize),
-    }
-
-    let mut pending: Vec<Pending> = Vec::new();
-    let mut raw_calls: Vec<RawToolCall> = Vec::new();
-    let mut assembly = AttemptAssembly::new();
-    for block in blocks {
+    let mut reply = super::WireReply::new(ProviderOrigin::Anthropic);
+    for (index, block) in blocks.iter().enumerate() {
         let block_type = block
             .get("type")
             .and_then(Value::as_str)
             .ok_or_else(|| malformed("content block missing type"))?;
-        match block_type {
-            "text" => {
-                let text = block
-                    .get("text")
-                    .and_then(Value::as_str)
+        let kind = match block_type {
+            "text" => PartKind::Text,
+            "thinking" => PartKind::Reasoning,
+            "tool_use" => PartKind::ToolCall,
+            other => {
+                return Err(ProjectionError::Protocol(
+                    crate::ReplyProtocolError::unsupported("anthropic-messages", index, other),
+                ));
+            }
+        };
+        reply.push(PartDelta::Begin { index, kind })?;
+        match kind {
+            PartKind::Text => {
+                let text = block["text"]
+                    .as_str()
                     .ok_or_else(|| malformed("text block missing text"))?;
-                assembly.push_assistant(text).map_err(limit_exceeded)?;
-                pending.push(Pending::Ready(MessagePart::semantic_only(
-                    MessageSemantic::Text {
-                        text: text.to_string(),
-                    },
-                )));
+                reply.push(PartDelta::Text {
+                    index,
+                    delta: text.into(),
+                })?;
             }
-            "thinking" => {
-                let thinking = block
-                    .get("thinking")
-                    .and_then(Value::as_str)
+            PartKind::Reasoning => {
+                let text = block["thinking"]
+                    .as_str()
                     .ok_or_else(|| malformed("thinking block missing thinking"))?;
-                assembly.push_reasoning(thinking).map_err(limit_exceeded)?;
-                let replay_state = match block.get("signature") {
-                    Some(Value::String(signature)) => {
-                        Some(OpaqueProviderState::new(signature.clone()).map_err(|_| {
-                            malformed("thinking signature exceeds replay-state bound")
-                        })?)
-                    }
-                    Some(Value::Null) | None => None,
+                reply.push(PartDelta::Reasoning {
+                    index,
+                    delta: text.into(),
+                })?;
+                match block.get("signature") {
+                    Some(Value::String(signature)) => reply.push(PartDelta::ReplayState {
+                        index,
+                        patch: StringPatch::Set(signature.clone()),
+                    })?,
+                    Some(Value::Null) | None => {}
                     _ => return Err(malformed("thinking signature is not a string")),
-                };
-                pending.push(Pending::Ready(MessagePart {
-                    semantic: MessageSemantic::Reasoning {
-                        text: thinking.to_string(),
-                    },
-                    replay_state,
-                }));
+                }
             }
-            "tool_use" => {
-                let name = block
-                    .get("name")
-                    .and_then(Value::as_str)
+            PartKind::ToolCall => {
+                let name = block["name"]
+                    .as_str()
                     .ok_or_else(|| malformed("tool_use block missing name"))?;
-                let input = block
+                let arguments = block
                     .get("input")
-                    .ok_or_else(|| malformed("tool_use block missing input"))?;
+                    .ok_or_else(|| malformed("tool_use block missing input"))?
+                    .to_string();
                 let provider_call_id = match block.get("id") {
-                    Some(Value::String(id)) => Some(id.to_string()),
+                    Some(Value::String(id)) => Some(StringPatch::Set(id.clone())),
                     Some(Value::Null) | None => None,
                     _ => return Err(malformed("tool_use id is not a string")),
                 };
-                let arguments = serde_json::to_string(input)
-                    .map_err(|_| malformed("tool_use input is not serializable"))?;
-                assembly.begin_tool_call();
-                assembly
-                    .push_tool_arguments(&arguments)
-                    .map_err(limit_exceeded)?;
-                raw_calls.push(RawToolCall {
+                reply.push(PartDelta::ToolMetadata {
+                    index,
+                    name: Some(StringPatch::Set(name.into())),
                     provider_call_id,
-                    name: name.to_string(),
-                    arguments,
-                });
-                pending.push(Pending::Call(raw_calls.len() - 1));
-            }
-            other => {
-                return Err(malformed(format!(
-                    "unsupported content block type {other:?}"
-                )));
+                })?;
+                reply.push(PartDelta::ToolArguments {
+                    index,
+                    delta: arguments,
+                })?;
             }
         }
+        reply.push(PartDelta::End { index })?;
     }
-
-    let validated = validate_tool_call_batch(&raw_calls)?;
-    let mut parts: Vec<MessagePart<UnboundToolCall>> = Vec::with_capacity(pending.len());
-    for slot in pending {
-        match slot {
-            Pending::Ready(part) => parts.push(part),
-            Pending::Call(index) => {
-                parts.push(MessagePart::semantic_only(MessageSemantic::ToolCall {
-                    call: validated[index].clone(),
-                }))
-            }
-        }
-    }
-
-    Ok(NativeMessage::new(
-        MessageRole::Assistant,
-        Some(ProviderOrigin::Anthropic),
-        parts,
-    ))
+    reply.finish()
 }
 
 pub fn native_to_wire<S: ToolCallState>(

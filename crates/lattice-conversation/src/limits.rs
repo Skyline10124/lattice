@@ -9,6 +9,7 @@
 //! `InvocationId` is produced from an interrupted attempt.
 
 use crate::attempt::AttemptInterruption;
+use std::collections::BTreeMap;
 
 /// Maximum number of ToolCalls in one complete provider batch.
 ///
@@ -65,12 +66,12 @@ impl LimitKind {
 /// [`AttemptInterruption::OutputLimitExceeded`] and leaves the accountant
 /// unchanged; the caller stops consumption and records the interruption. A
 /// value that lands exactly on a limit is accepted.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct AttemptAssembly {
     assistant_bytes: usize,
     reasoning_bytes: usize,
-    current_tool_arguments_bytes: usize,
     total_bytes: usize,
+    tool_arguments: BTreeMap<usize, usize>,
 }
 
 impl AttemptAssembly {
@@ -94,16 +95,6 @@ impl AttemptAssembly {
         self.total_bytes
     }
 
-    /// Bytes accumulated for the ToolCall arguments currently streaming.
-    pub fn current_tool_arguments_bytes(&self) -> usize {
-        self.current_tool_arguments_bytes
-    }
-
-    /// Start a new ToolCall's arguments stream (per-call limit resets).
-    pub fn begin_tool_call(&mut self) {
-        self.current_tool_arguments_bytes = 0;
-    }
-
     /// Account one assistant content delta.
     pub fn push_assistant(&mut self, delta: &str) -> Result<(), AttemptInterruption> {
         let next = self.assistant_bytes.saturating_add(delta.len());
@@ -124,15 +115,53 @@ impl AttemptAssembly {
         Ok(())
     }
 
-    /// Account one ToolCall arguments delta for the current call.
-    pub fn push_tool_arguments(&mut self, delta: &str) -> Result<(), AttemptInterruption> {
+    /// 按线上调用 index 计量；交错片段共享尝试总量，并分别保留单调用预算。
+    pub fn push_tool_arguments(
+        &mut self,
+        index: usize,
+        delta: &str,
+    ) -> Result<(), AttemptInterruption> {
         let next = self
-            .current_tool_arguments_bytes
+            .tool_arguments
+            .get(&index)
+            .copied()
+            .unwrap_or(0)
             .saturating_add(delta.len());
         self.check(LimitKind::ToolCallArguments, next)?;
         self.check_total(delta.len())?;
-        self.current_tool_arguments_bytes = next;
+        self.tool_arguments.insert(index, next);
         self.total_bytes += delta.len();
+        Ok(())
+    }
+
+    /// 参数只解析一次；规范形式变长时补计正差额，保留已经消费的原文字节。
+    pub fn finish_tool_arguments(
+        &mut self,
+        index: usize,
+        canonical_bytes: usize,
+    ) -> Result<(), AttemptInterruption> {
+        let raw = self.tool_arguments.get(&index).copied().unwrap_or(0);
+        let next = raw.max(canonical_bytes);
+        self.check(LimitKind::ToolCallArguments, next)?;
+        self.check_total(next - raw)?;
+        self.tool_arguments.insert(index, next);
+        self.total_bytes += next - raw;
+        Ok(())
+    }
+
+    /// 替换已计入的元数据长度；相同快照幂等，缩短时释放其净占用。
+    pub fn replace_metadata(
+        &mut self,
+        previous: usize,
+        next: usize,
+    ) -> Result<(), AttemptInterruption> {
+        let total = self
+            .total_bytes
+            .checked_sub(previous)
+            .expect("previous metadata was accounted")
+            .saturating_add(next);
+        self.check(LimitKind::ModelAttemptTotal, total)?;
+        self.total_bytes = total;
         Ok(())
     }
 
@@ -160,6 +189,32 @@ impl AttemptAssembly {
         }
         Ok(())
     }
+}
+
+/// 持久边界独立核对完整消息；参数使用规范形式，复用流组装的常量与计量算法。
+pub fn validate_assistant_bounds<S: crate::ToolCallState>(
+    message: &crate::NativeMessage<S>,
+) -> Result<(), AttemptInterruption> {
+    let mut assembly = AttemptAssembly::new();
+    for (index, part) in message.parts.iter().enumerate() {
+        match &part.semantic {
+            crate::MessageSemantic::Text { text } => assembly.push_assistant(text)?,
+            crate::MessageSemantic::Reasoning { text } => assembly.push_reasoning(text)?,
+            crate::MessageSemantic::ToolCall { call } => {
+                assembly.push_tool_arguments(index, &crate::canonical_json(call.arguments()))?;
+                assembly.replace_metadata(
+                    0,
+                    call.name()
+                        .len()
+                        .saturating_add(call.provider_call_id().map_or(0, str::len)),
+                )?;
+            }
+        }
+        if let Some(replay) = &part.replay_state {
+            assembly.replace_metadata(0, replay.as_str().len())?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -207,23 +262,39 @@ mod tests {
     fn tool_arguments_limit_is_per_call() {
         let chunk = "a".repeat(MAX_TOOL_CALL_ARGUMENTS_BYTES / 2);
         let mut assembly = AttemptAssembly::new();
-        assembly.begin_tool_call();
         assembly
-            .push_tool_arguments(&chunk)
+            .push_tool_arguments(0, &chunk)
             .expect("first call chunk");
         // A second call gets its own per-call budget.
-        assembly.begin_tool_call();
         assembly
-            .push_tool_arguments(&chunk)
+            .push_tool_arguments(1, &chunk)
             .expect("second call chunk");
 
         // Per-call plus-one fails even with total headroom remaining.
         let mut per_call = AttemptAssembly::new();
-        per_call.begin_tool_call();
         let exact = "t".repeat(MAX_TOOL_CALL_ARGUMENTS_BYTES);
-        per_call.push_tool_arguments(&exact).expect("fill");
-        let (kind, _, _) = exceeded(per_call.push_tool_arguments("b"));
+        per_call.push_tool_arguments(9, &exact).expect("fill");
+        let (kind, _, _) = exceeded(per_call.push_tool_arguments(9, "b"));
         assert_eq!(kind, LimitKind::ToolCallArguments);
+    }
+
+    #[test]
+    fn interleaved_arguments_keep_each_index_budget() {
+        let mut assembly = AttemptAssembly::new();
+        assembly
+            .push_tool_arguments(9, &"x".repeat(MAX_TOOL_CALL_ARGUMENTS_BYTES))
+            .unwrap();
+        assembly.push_tool_arguments(2, "{}").unwrap();
+        assert_eq!(
+            exceeded(assembly.push_tool_arguments(9, "!")),
+            (
+                LimitKind::ToolCallArguments,
+                MAX_TOOL_CALL_ARGUMENTS_BYTES,
+                MAX_TOOL_CALL_ARGUMENTS_BYTES + 1
+            ),
+        );
+        assembly.push_tool_arguments(usize::MAX, "{}").unwrap();
+        assert_eq!(assembly.total_bytes(), MAX_TOOL_CALL_ARGUMENTS_BYTES + 4);
     }
 
     #[test]
@@ -236,26 +307,23 @@ mod tests {
         assembly
             .push_reasoning(&"r".repeat(MAX_REASONING_CONTENT_BYTES))
             .expect("reasoning");
-        assembly.begin_tool_call();
         assembly
-            .push_tool_arguments(&"t".repeat(MAX_TOOL_CALL_ARGUMENTS_BYTES))
+            .push_tool_arguments(0, &"t".repeat(MAX_TOOL_CALL_ARGUMENTS_BYTES))
             .expect("arguments");
         // Fill the remaining headroom with further ToolCalls, each within the
-        // per-call limit (which resets per call), so only the total can trip.
+        // per-call limit (tracked independently by index), so only the total can trip.
         let mut headroom = MAX_MODEL_ATTEMPT_BYTES - assembly.total_bytes();
+        let mut index = 1;
         while headroom > 0 {
             let chunk = headroom.min(MAX_TOOL_CALL_ARGUMENTS_BYTES);
-            assembly.begin_tool_call();
             assembly
-                .push_tool_arguments(&"u".repeat(chunk))
+                .push_tool_arguments(index, &"u".repeat(chunk))
                 .expect("fill remaining headroom");
             headroom -= chunk;
+            index += 1;
         }
         assert_eq!(assembly.total_bytes(), MAX_MODEL_ATTEMPT_BYTES);
-        let (kind, limit, _) = exceeded({
-            assembly.begin_tool_call();
-            assembly.push_tool_arguments("!")
-        });
+        let (kind, limit, _) = exceeded(assembly.push_tool_arguments(index, "!"));
         assert_eq!(kind, LimitKind::ModelAttemptTotal);
         assert_eq!(limit, MAX_MODEL_ATTEMPT_BYTES);
     }

@@ -360,7 +360,7 @@ Turn 的单调时钟 deadline 在接受事务提交后开始，限制后续 prov
 
 `NativeMessage<ToolCallState>` 用有序 `MessagePart` 保存消息。`UnboundToolCall` 表示模型生成、待登记的调用，`BoundToolCall` 表示协调层已经分配 InvocationId 的调用；登记保留原片段顺序。
 
-助手消息的 parts 按到达顺序保存正文、reasoning 与工具调用的交错：相邻同类内容合并为一段，工具调用排在它首次出现的位置。各 provider 的流解析器都按此生成 parts。Chat Completions 这类只有一个正文字段和一个 reasoning 字段的请求格式，由 provider 投影在发请求时合并同类内容，同一 provider 的回放不受影响。
+助手消息的 parts 按到达顺序保存正文、reasoning 与工具调用的交错：相邻同类内容合并为一段，工具调用排在它首次出现的位置。各协议解析器把部件增量交给同一个回复累积器，由它按此生成 parts 并投影显示增量。Chat Completions 这类只有一个正文字段和一个 reasoning 字段的请求格式，由 provider 投影在发请求时合并同类内容，同一 provider 的回放不受影响。
 
 Tool 参数通过协议 canonical JSON 生成规范对象和摘要。有效调用要求参数为一个 JSON 对象，ToolCall 完整且无重复；单次完整响应最多 32 个 ToolCall。任一个调用无效或数量超限时拒绝整个尝试。完整 reasoning 进入持久对话；停止的尝试只记原因与诊断（provider 错误或批次校验结果），不保存已收到的部分文本、reasoning 和调用数据。
 
@@ -712,7 +712,7 @@ Session 永久绑定产品组合层提供的 `ProjectStoreKey`，执行请求的
 | IPC 帧 | 单帧 JSON payload 最多 16 MiB，不含 8 字节 magic 和 4 字节长度头；零长度或超限读取拒绝，编码超限拒绝 | [ipc.rs](../../crates/lattice-api/src/local/ipc.rs) 的 MAX_FRAME、read/write；超过单帧的消息由连接层分帧传输 |
 | IPC 等待 | 单帧 socket 写入最多 5 秒，超时返回传输错误和回执可能未知；后台首请求整帧读取最多 10 秒，超时结束该连接处理 | 同文件 WRITE_TIMEOUT 和 [server.rs::connection](../../crates/lattice-api/src/local/server.rs)，不是 Turn 总时限 |
 | 后台资源槽 | 同时处理连接最多 64，满时关闭新接入连接；观察者许可最多 32，不足返回 Busy，`head` 等查询不占观察许可；已接管 Owner 最多 32，准入不足返回 Busy | server.rs 的 serve、Backend::new/claim、Owner::new。限制各自对象，观察者额度为查询/取消留连接空间，不承诺延迟 |
-| 内存观察状态 | 每个正在执行的 Turn 一份当前尝试的段列表，受助手正文与 reasoning 上限约束，至多约 4 MiB，同时进行的 Turn 受 Owner 上限约束；每个观察者一份待推送条目的集合与文字的已发位置，受观察者许可约束 | 见[观察与重连](#观察与重连)；段列表是 provider 解析器已有累积文字的一份拷贝 |
+| 内存观察状态 | 每个正在执行的 Turn 一份当前尝试的段列表，受助手正文与 reasoning 上限约束，至多约 4 MiB，同时进行的 Turn 受 Owner 上限约束；每个观察者一份待推送条目的集合与文字的已发位置，受观察者许可约束 | 见[观察与重连](#观察与重连)；段列表保存共同回复累积器发出的显示增量，与它组装的完整回复共享来源 |
 | 客户端观察 idle | 当前位置那一轮有 Owner 执行时，300 秒没有任何推送即终止当前观察，交付连接诊断，保留已知结局；会话空闲时不计时；每次建连及收到推送重置期限 | [STREAM_IDLE_TIMEOUT_SECS](../../crates/lattice-api/src/turn/execute.rs) 与 [LocalClient](../../crates/lattice-api/src/local/client.rs)；与后台执行及收尾独立 |
 | 客户端取消回执 | 每次 Cancel 最多等待 5 秒，超时为 Unknown；一次补发条件由[客户端意图与退出交接](#客户端意图与退出交接)限定 | LocalTurn 的 drive_cancel；两个前端共用 |
 | 首次取消时提交仍在途 | 从首次取消起等待提交回执 5 秒，到期报告提交结果不明，原提交任务继续接收迟到回执；提交连接断开后才按 TurnId 查询 | LocalTurn 的 run / handoff_submission；不是普通提交总时限，也不自动重发请求 |
@@ -726,7 +726,8 @@ Session 永久绑定产品组合层提供的 `ProjectStoreKey`，执行请求的
 | --- | --- |
 | 对话顺序、批次校验、参数摘要 | `cargo test -p lattice-conversation` |
 | 流解析的到达顺序与 provider 投影 | `cargo test -p lattice-llm` |
-| 单次尝试、流中断和资源计量 | `cargo test -p lattice-agent` |
+| 回复累积、流中断与资源计量 | `cargo test -p lattice-llm` |
+| 单次尝试结果的映射 | `cargo test -p lattice-agent --features test-utils` |
 | 会话库表编码、值版本、旧库拒绝、阶段给出的结论与读取校验 | `cargo test -p lattice-session`；隔离测试先列出全部失败方式 |
 | 提交、多步 Turn、取消、退回分叉、进程退出后的结局与观察 | 真实二进制与真实状态根上的 E2E 场景，按[测试工程合同](../development/testing.md#后台与重连场景)选择 |
 | 配置读取与 profile 副本 | 局部测试覆盖模型与档位的取值顺序及副本的写入条件；E2E 场景见[测试工程合同](../development/testing.md#配置来源与-profile-副本) |

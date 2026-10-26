@@ -9,21 +9,34 @@ pub use connection::{ConnectionMaterial, LlmConnection};
 mod endpoints;
 mod logging;
 pub mod protocol;
+mod reply;
+mod reply_stream;
 mod router;
 pub mod sse;
 mod stub;
+#[cfg(test)]
+mod test_reply;
 mod transport;
 mod types;
 
 pub use lattice_conversation::TokenUsage;
 pub use logging::init_logging;
+pub use reply::{
+    AccumulatedReply, LiveDelta, ReplyOutcome, ReplyProtocolError, ReplyStop, StreamStop,
+};
+pub use reply_stream::{CONTROL_POLL_INTERVAL, StreamControl};
 pub use router::{
     CredentialStatus, MISSING_OPENAI_COMPATIBLE_MODEL_HINT, ModelRouter, ProviderKind,
     ResolvedModel, credential_env_vars,
 };
 pub use stub::{LlmError, LlmStream, StubLlm, stream};
 pub use transport::{MAX_DIAGNOSTIC_CHARS, bound_diagnostic};
-pub use types::{ChatRequest, LlmEvent, ModelTarget, ProviderFailure, ToolDefinition};
+pub use types::{
+    AttemptReport, ChatRequest, LlmEvent, ModelTarget, ProviderFailure, ToolDefinition,
+};
+
+#[cfg(feature = "test-utils")]
+pub mod testing;
 
 // Expose the real parser only for cross-crate streaming boundary tests.
 #[cfg(feature = "test-utils")]

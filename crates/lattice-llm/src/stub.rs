@@ -8,6 +8,7 @@
 
 use lattice_conversation::{MessageRole, MessageSemantic};
 
+use crate::reply::{PartDelta, PartKind, ProtocolEvent};
 use crate::router::ModelRouter;
 use crate::types::{ChatRequest, LlmEvent};
 use futures::stream::{self, Stream};
@@ -147,29 +148,25 @@ impl StubLlm {
             format!("stub response: {}", last_user_msg)
         };
 
-        let events: Vec<LlmEvent> = vec![
-            LlmEvent::Started,
-            LlmEvent::Token {
-                content: token_content.clone(),
-            },
-            LlmEvent::MessageComplete {
-                message: lattice_conversation::NativeMessage::new(
-                    MessageRole::Assistant,
-                    None,
-                    vec![lattice_conversation::MessagePart::semantic_only(
-                        MessageSemantic::Text {
-                            text: token_content,
-                        },
-                    )],
-                ),
-            },
-            LlmEvent::Done {
-                finish_reason: "stop".to_string(),
-                usage: None,
+        let events = vec![
+            ProtocolEvent::Part(PartDelta::Begin {
+                index: 0,
+                kind: PartKind::Text,
+            }),
+            ProtocolEvent::Part(PartDelta::Text {
+                index: 0,
+                delta: token_content,
+            }),
+            ProtocolEvent::Part(PartDelta::End { index: 0 }),
+            ProtocolEvent::Done {
+                finish_reason: "stop".into(),
             },
         ];
-
-        Ok(Box::pin(stream::iter(events)))
+        Ok(crate::reply_stream::assemble_reply_stream(
+            None,
+            Box::pin(stream::iter(events)),
+            crate::StreamControl::default(),
+        ))
     }
 }
 

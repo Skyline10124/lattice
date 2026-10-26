@@ -36,19 +36,13 @@
 //! fails the whole body closed rather than returning a partial message.
 
 use lattice_conversation::{
-    AttemptAssembly, MessagePart, MessageRole, MessageSemantic, NativeMessage, ProviderOrigin,
-    RawToolCall, TokenUsage, ToolCallState, UnboundToolCall, validate_tool_call_batch,
+    MessageSemantic, NativeMessage, ProviderOrigin, TokenUsage, ToolCallState, UnboundToolCall,
 };
 use serde_json::{Value, json};
 
 use super::{ProjectionError, ToolResultClosure};
-
-fn limit_exceeded(interruption: lattice_conversation::AttemptInterruption) -> ProjectionError {
-    ProjectionError::OutputLimitExceeded {
-        provider: ProviderOrigin::OpenAiCompatible,
-        interruption,
-    }
-}
+use crate::protocol::chat_completions::{ContentError, visit_content};
+use crate::reply::{PartDelta, PartKind, StringPatch};
 
 fn malformed(detail: impl Into<String>) -> ProjectionError {
     ProjectionError::MalformedWire {
@@ -57,49 +51,15 @@ fn malformed(detail: impl Into<String>) -> ProjectionError {
     }
 }
 
-/// 流解析器按首次到达位置保存的原始段；调用参数在整批验证前保持原文。
-pub(crate) enum OpenAiPart {
-    Text(String),
-    Reasoning(String),
-    ToolCall(RawToolCall),
-}
-
-pub(crate) fn parts_to_native(
-    parts: Vec<OpenAiPart>,
-) -> Result<NativeMessage<UnboundToolCall>, ProjectionError> {
-    let mut assembly = AttemptAssembly::new();
-    let mut raw_calls = Vec::new();
-    for part in &parts {
-        match part {
-            OpenAiPart::Text(text) => assembly.push_assistant(text).map_err(limit_exceeded)?,
-            OpenAiPart::Reasoning(text) => assembly.push_reasoning(text).map_err(limit_exceeded)?,
-            OpenAiPart::ToolCall(call) => {
-                assembly.begin_tool_call();
-                assembly
-                    .push_tool_arguments(&call.arguments)
-                    .map_err(limit_exceeded)?;
-                raw_calls.push(call.clone());
-            }
+impl From<ContentError> for ProjectionError {
+    fn from(error: ContentError) -> Self {
+        match error {
+            ContentError::Unsupported { index, block_type } => Self::Protocol(
+                crate::ReplyProtocolError::unsupported("chat-completions", index, &block_type),
+            ),
+            ContentError::Malformed(detail) => malformed(detail),
         }
     }
-    let mut calls = validate_tool_call_batch(&raw_calls)?.into_iter();
-    let parts = parts
-        .into_iter()
-        .map(|part| {
-            MessagePart::semantic_only(match part {
-                OpenAiPart::Text(text) => MessageSemantic::Text { text },
-                OpenAiPart::Reasoning(text) => MessageSemantic::Reasoning { text },
-                OpenAiPart::ToolCall(_) => MessageSemantic::ToolCall {
-                    call: calls.next().expect("one validated call per raw part"),
-                },
-            })
-        })
-        .collect();
-    Ok(NativeMessage::new(
-        MessageRole::Assistant,
-        Some(ProviderOrigin::OpenAiCompatible),
-        parts,
-    ))
 }
 
 pub fn wire_to_native(wire: &Value) -> Result<NativeMessage<UnboundToolCall>, ProjectionError> {
@@ -109,51 +69,88 @@ pub fn wire_to_native(wire: &Value) -> Result<NativeMessage<UnboundToolCall>, Pr
         .and_then(|choices| choices.first())
         .and_then(|choice| choice.get("message"))
         .ok_or_else(|| malformed("missing choices[0].message"))?;
-
-    // 完整 response body 不携带交错信息；仅 SSE 路径能保留到达顺序。
-    let mut parts = Vec::new();
-    if let Some(reasoning) = message.get("reasoning_content").and_then(Value::as_str) {
-        parts.push(OpenAiPart::Reasoning(reasoning.to_string()));
-    }
-    match message.get("content") {
-        Some(Value::String(text)) => {
-            parts.push(OpenAiPart::Text(text.clone()));
+    let mut reply = super::WireReply::new(ProviderOrigin::OpenAiCompatible);
+    let mut index = 0;
+    {
+        let mut emit = |kind, text: &str| {
+            reply.push(PartDelta::Begin { index, kind })?;
+            reply.push(if kind == PartKind::Text {
+                PartDelta::Text {
+                    index,
+                    delta: text.into(),
+                }
+            } else {
+                PartDelta::Reasoning {
+                    index,
+                    delta: text.into(),
+                }
+            })?;
+            reply.push(PartDelta::End { index })?;
+            index += 1;
+            Ok::<_, ProjectionError>(())
+        };
+        match message.get("reasoning_content") {
+            Some(Value::String(text)) => emit(PartKind::Reasoning, text)?,
+            Some(Value::Null) | None => {}
+            _ => {
+                return Err(malformed(
+                    "message reasoning_content is not a string or null",
+                ));
+            }
         }
-        // Explicit null or absent content carries no text part.
-        Some(Value::Null) | None => {}
-        _ => return Err(malformed("message.content is not a string or null")),
+        if let Some(content) = message.get("content") {
+            visit_content(content, &mut emit)?;
+        }
     }
-
     match message.get("tool_calls") {
         Some(Value::Array(calls)) => {
-            for call in calls {
+            for (call_index, call) in calls.iter().enumerate() {
+                if let Some(kind) = call.get("type")
+                    && kind.as_str() != Some("function")
+                {
+                    return Err(ProjectionError::Protocol(
+                        crate::ReplyProtocolError::unsupported(
+                            "chat-completions",
+                            call_index,
+                            kind.as_str().unwrap_or("<non-string>"),
+                        ),
+                    ));
+                }
                 let function = call
                     .get("function")
                     .ok_or_else(|| malformed("tool_calls[] missing function"))?;
-                let name = function
-                    .get("name")
-                    .and_then(Value::as_str)
+                let name = function["name"]
+                    .as_str()
                     .ok_or_else(|| malformed("tool_calls[].function missing name"))?;
-                let arguments = function
-                    .get("arguments")
-                    .and_then(Value::as_str)
+                let arguments = function["arguments"]
+                    .as_str()
                     .ok_or_else(|| malformed("tool_calls[].function missing arguments"))?;
                 let provider_call_id = match call.get("id") {
-                    Some(Value::String(id)) => Some(id.to_string()),
+                    Some(Value::String(id)) => Some(StringPatch::Set(id.clone())),
                     Some(Value::Null) | None => None,
                     _ => return Err(malformed("tool_calls[].id is not a string")),
                 };
-                parts.push(OpenAiPart::ToolCall(RawToolCall {
+                reply.push(PartDelta::Begin {
+                    index,
+                    kind: PartKind::ToolCall,
+                })?;
+                reply.push(PartDelta::ToolMetadata {
+                    index,
+                    name: Some(StringPatch::Set(name.into())),
                     provider_call_id,
-                    name: name.to_string(),
-                    arguments: arguments.to_string(),
-                }));
+                })?;
+                reply.push(PartDelta::ToolArguments {
+                    index,
+                    delta: arguments.into(),
+                })?;
+                reply.push(PartDelta::End { index })?;
+                index += 1;
             }
         }
         Some(Value::Null) | None => {}
         _ => return Err(malformed("message.tool_calls is not an array")),
     }
-    parts_to_native(parts)
+    reply.finish()
 }
 
 pub fn native_to_wire<S: ToolCallState>(

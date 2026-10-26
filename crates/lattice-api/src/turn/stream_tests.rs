@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 use super::{observer::ObserverSink, test_support::*, types::*};
-use lattice_llm::LlmEvent;
+use lattice_llm::testing::ScriptEvent;
 use lattice_session::store::{NoticeLevel, PublicTurnOutcome, StepEnd, StepProgress, StopCause};
 use std::sync::{
     Arc, Mutex,
@@ -13,16 +13,16 @@ use std::time::Duration;
 async fn stream_turn_error_after_partial_output_ends_attempt_without_a_reply() {
     let fixture = setup_with_events(
         vec![
-            LlmEvent::Token {
+            ScriptEvent::Text {
                 content: "partial output".into(),
             },
-            LlmEvent::Reasoning {
+            ScriptEvent::Reasoning {
                 content: "thinking".into(),
             },
-            LlmEvent::Token {
+            ScriptEvent::Text {
                 content: " before error".into(),
             },
-            LlmEvent::Error {
+            ScriptEvent::Failure {
                 failure: lattice_llm::ProviderFailure {
                     message: "connection reset".into(),
                     retryable: false,
@@ -89,12 +89,13 @@ impl lattice_agent::LlmClient for TimedLlm {
     async fn stream_chat(
         &self,
         request: lattice_llm::ChatRequest,
+        control: lattice_llm::StreamControl,
     ) -> Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
         self.starts
             .lock()
             .unwrap()
             .push(tokio::time::Instant::now());
-        self.inner.stream_chat(request).await
+        self.inner.stream_chat(request, control).await
     }
 }
 fn opening_failure() -> lattice_llm::LlmError {

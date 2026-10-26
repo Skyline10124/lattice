@@ -24,15 +24,14 @@
 //! a valid conversation fact: when the target provider cannot encode a
 //! recorded closure without one, the projection fails with a typed
 //! [`ProjectionError::ToolResultWithoutProviderCallId`] rather than
-//! synthesizing an ID. The production adapters in [`crate::protocol`] own
-//! HTTP/SSE envelopes but delegate every request-message and completed-response
-//! projection to this seam.
+//! synthesizing an ID. 生产适配器在此投影请求消息；`wire_to_native` 只用于完整 wire
+//! 夹具的解码，并复用共同回复累积器。
 
 mod anthropic_messages;
 mod chat_completions;
 mod generate_content;
 
-pub(crate) use chat_completions::{OpenAiPart, parts_to_native as openai_parts_to_native};
+use crate::reply::{PartDelta, ReplyAccumulator, ReplyOutcome, ReplyStop, StreamStop, Update};
 
 use std::collections::BTreeSet;
 
@@ -52,6 +51,8 @@ use thiserror::Error;
 /// message, no fabricated identity, no guessed replay state.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ProjectionError {
+    #[error("{0}")]
+    Protocol(crate::ReplyProtocolError),
     #[error("invalid structured step: {detail}")]
     InvalidStep { detail: &'static str },
     /// The wire JSON does not match the provider's official shape.
@@ -133,8 +134,59 @@ pub enum ProjectionError {
     },
 }
 
-/// Extract a provider-neutral unbound message from an official wire
-/// response body, preserving part order and part-local replay state.
+/// 完整 wire 也逐块走同一累积器；这里仅把其终态映射为投影错误。
+struct WireReply {
+    origin: ProviderOrigin,
+    accumulator: ReplyAccumulator,
+}
+impl WireReply {
+    fn new(origin: ProviderOrigin) -> Self {
+        Self {
+            origin,
+            accumulator: ReplyAccumulator::new(Some(origin)),
+        }
+    }
+    fn push(&mut self, delta: PartDelta) -> Result<(), ProjectionError> {
+        match self
+            .accumulator
+            .push(delta)
+            .expect("wire decoding stops at the first failure")
+        {
+            Update::Accepted { .. } => Ok(()),
+            Update::Ended => self.outcome().map(|_| ()),
+        }
+    }
+    fn finish(mut self) -> Result<NativeMessage<UnboundToolCall>, ProjectionError> {
+        self.accumulator.finish().expect("open wire reply");
+        self.outcome()
+    }
+    fn outcome(&mut self) -> Result<NativeMessage<UnboundToolCall>, ProjectionError> {
+        match self
+            .accumulator
+            .take_outcome()
+            .expect("one terminal outcome")
+        {
+            ReplyOutcome::Complete { message } => Ok(message.into_message()),
+            ReplyOutcome::Rejected {
+                rejection: lattice_conversation::AttemptRejection::InvalidToolCall { validation },
+            } => Err(ProjectionError::InvalidToolCall(validation)),
+            ReplyOutcome::Interrupted {
+                reason: ReplyStop::OutputLimit(interruption),
+            } => Err(ProjectionError::OutputLimitExceeded {
+                provider: self.origin,
+                interruption,
+            }),
+            ReplyOutcome::Interrupted {
+                reason: ReplyStop::Stream(StreamStop::Protocol(error)),
+            } => Err(ProjectionError::Protocol(error)),
+            ReplyOutcome::Interrupted { .. } => {
+                unreachable!("synchronous wire decoder has no transport")
+            }
+        }
+    }
+}
+
+/// 只用于完整 wire 夹具的解码，保留部件顺序与逐部件回放状态。
 pub fn wire_to_native(
     origin: ProviderOrigin,
     wire: &Value,

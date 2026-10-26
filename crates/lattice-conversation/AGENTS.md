@@ -15,7 +15,7 @@
 - 完整 provider 批次须通过 `validate_tool_call_batch`，公开上限 `MAX_TOOL_CALLS_PER_BATCH = 32`，超限拒绝整次 attempt，不截断；会话库登记时再次核验批次与绑定。
 - 参数摘要为 SHA-256(domain separator + u64_be 字节长度 + canonical bytes)。BoundToolCall 反序列化时从参数重算摘要，不一致报 `ArgumentsDigestMismatch`。
 - replay state 按 part 原样保留，上限 64 KiB；即使 part 其他内容为空也不删。`Option<TokenUsage>` 缺失表示未知，不当作零。
-- 所有完整 attempt 组装，包括 `lattice-llm::provider_projection`，均经 `AttemptAssembly` 持续计量，不先组装再检查。
+- `AttemptAssembly` 提供按调用 index 的参数计量及共享总量算法；流式组装由 `lattice-llm` 的共同累积器独占。`validate_assistant_bounds` 用同一组常量与算法核对完整消息，供会话库在持久边界独立检查，参数按规范形式计量。
 
 ## 验证入口
 

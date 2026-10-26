@@ -616,7 +616,8 @@ fn attempt_total_limit_is_enforced_at_the_seam() {
     let build = |extra: usize| {
         let tool_calls: Vec<_> = (0..calls)
             .map(|i| {
-                let len = per_call - overhead + if i + 1 == calls { extra } else { 0 };
+                let metadata = 1 + format!("call_{}", i + 1).len();
+                let len = per_call - overhead - metadata + if i + 1 == calls { extra } else { 0 };
                 serde_json::json!({
                     "id": format!("call_{}", i + 1),
                     "type": "function",

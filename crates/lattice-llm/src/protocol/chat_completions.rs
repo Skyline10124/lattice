@@ -9,13 +9,12 @@
 
 use std::collections::BTreeMap;
 
-use lattice_conversation::{ProviderOrigin, RawToolCall, TokenUsage};
+use lattice_conversation::ProviderOrigin;
 
-use crate::protocol::projection::{
-    OpenAiPart, ProjectionError, request_messages_to_wire, wire_usage,
-};
+use crate::protocol::projection::{ProjectionError, request_messages_to_wire, wire_usage};
+use crate::reply::{PartDelta, PartKind, ProtocolEvent, StringPatch};
 use crate::router::ResolvedModel;
-use crate::types::{ChatRequest, LlmEvent};
+use crate::types::ChatRequest;
 
 /// Build the JSON body for an OpenAI Chat Completions request.
 ///
@@ -76,15 +75,83 @@ pub fn auth_header_value(api_key: &str) -> String {
     format!("Bearer {}", api_key)
 }
 
-struct OpenAiToolCall {
-    part_ordinal: usize,
-    started: bool,
+pub(super) enum ContentError {
+    Unsupported { index: usize, block_type: String },
+    Malformed(&'static str),
+}
+
+impl From<ContentError> for ProtocolEvent {
+    fn from(error: ContentError) -> Self {
+        match error {
+            ContentError::Unsupported { index, block_type } => {
+                Self::unsupported("chat-completions", index, &block_type)
+            }
+            ContentError::Malformed(detail) => {
+                Self::error(format!("malformed Chat Completions wire: {detail}"), false)
+            }
+        }
+    }
+}
+
+fn chunk_text(chunk: &serde_json::Value) -> Result<&str, ContentError> {
+    chunk["text"]
+        .as_str()
+        .ok_or(ContentError::Malformed("text chunk missing string text"))
+}
+
+/// 字符串与分块 content 共用翻译；thinking 内只接收 TextChunk，直接交付文字，不另存缓冲。
+/// 格式依据 https://docs.mistral.ai/studio/conversations/reasoning#handling-thinking-chunks 。
+pub(super) fn visit_content<E: From<ContentError>>(
+    content: &serde_json::Value,
+    mut emit: impl FnMut(PartKind, &str) -> Result<(), E>,
+) -> Result<(), E> {
+    let chunks = match content {
+        serde_json::Value::Null => return Ok(()),
+        serde_json::Value::String(text) => return emit(PartKind::Text, text),
+        serde_json::Value::Array(chunks) => chunks,
+        _ => {
+            return Err(ContentError::Unsupported {
+                index: 0,
+                block_type: "content".into(),
+            }
+            .into());
+        }
+    };
+    for (index, chunk) in chunks.iter().enumerate() {
+        match chunk["type"].as_str() {
+            Some("text") => emit(PartKind::Text, chunk_text(chunk)?)?,
+            Some("thinking") => {
+                let inner = chunk["thinking"].as_array().ok_or(ContentError::Malformed(
+                    "thinking chunk missing text chunk list",
+                ))?;
+                for text in inner {
+                    if text["type"].as_str() != Some("text") {
+                        return Err(ContentError::Unsupported {
+                            index,
+                            block_type: text["type"].as_str().unwrap_or("<missing>").into(),
+                        }
+                        .into());
+                    }
+                    emit(PartKind::Reasoning, chunk_text(text)?)?;
+                }
+            }
+            other => {
+                return Err(ContentError::Unsupported {
+                    index,
+                    block_type: other.unwrap_or("<missing>").into(),
+                }
+                .into());
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Default)]
 pub struct OpenAiSseParser {
-    parts: Vec<OpenAiPart>,
-    tool_calls: BTreeMap<u32, OpenAiToolCall>,
+    tool_calls: BTreeMap<u32, usize>,
+    current: Option<(usize, PartKind)>,
+    next_index: usize,
     pending_finish_reason: Option<String>,
     completed: bool,
 }
@@ -94,429 +161,516 @@ impl OpenAiSseParser {
         Self::default()
     }
 
-    fn complete_message(
-        &mut self,
-    ) -> Result<
-        lattice_conversation::NativeMessage<lattice_conversation::UnboundToolCall>,
-        ProjectionError,
-    > {
-        crate::protocol::projection::openai_parts_to_native(std::mem::take(&mut self.parts))
-    }
-    fn finish(&mut self, usage: Option<TokenUsage>) -> Vec<LlmEvent> {
-        self.completed = true;
-        let finish_reason = self
-            .pending_finish_reason
-            .take()
-            .unwrap_or_else(|| "stop".to_string());
-        let mut events = self
-            .tool_calls
-            .keys()
-            .map(|index| LlmEvent::ToolCallEnd {
-                index: *index as usize,
-            })
-            .collect::<Vec<_>>();
-        let completion = super::common::projection_result_event(self.complete_message());
-        let failed = matches!(
-            completion,
-            LlmEvent::Error { .. } | LlmEvent::OutputLimit { .. }
-        );
-        events.push(completion);
-        if !failed {
-            events.push(LlmEvent::Done {
-                finish_reason,
-                usage,
-            });
+    fn close_text(&mut self, events: &mut Vec<ProtocolEvent>) {
+        if let Some((index, _)) = self.current.take() {
+            events.push(ProtocolEvent::Part(PartDelta::End { index }));
         }
-        events
     }
 
-    /// Parse a single SSE data chunk into [`LlmEvent`] values.
-    pub fn parse_chunk(&mut self, _event_type: Option<&str>, data: &str) -> Vec<LlmEvent> {
+    fn text(&mut self, kind: PartKind, text: &str, events: &mut Vec<ProtocolEvent>) {
+        if text.is_empty() {
+            return;
+        }
+        let index = if let Some((index, _)) = self.current.filter(|(_, current)| *current == kind) {
+            index
+        } else {
+            self.close_text(events);
+            let index = self.next_index;
+            self.next_index += 1;
+            self.current = Some((index, kind));
+            events.push(ProtocolEvent::Part(PartDelta::Begin { index, kind }));
+            index
+        };
+        events.push(ProtocolEvent::Part(match kind {
+            PartKind::Text => PartDelta::Text {
+                index,
+                delta: text.into(),
+            },
+            PartKind::Reasoning => PartDelta::Reasoning {
+                index,
+                delta: text.into(),
+            },
+            PartKind::ToolCall => unreachable!(),
+        }));
+    }
+
+    fn finish(&mut self, events: &mut Vec<ProtocolEvent>) {
+        self.completed = true;
+        self.close_text(events);
+        for index in self.tool_calls.values() {
+            events.push(ProtocolEvent::Part(PartDelta::End { index: *index }));
+        }
+        events.push(ProtocolEvent::Done {
+            finish_reason: self
+                .pending_finish_reason
+                .take()
+                .unwrap_or_else(|| "stop".into()),
+        });
+    }
+
+    /// 只维护线上键映射与协议控制状态，内容直接交给共同累积器。
+    pub fn parse_chunk(&mut self, _event_type: Option<&str>, data: &str) -> Vec<ProtocolEvent> {
         if self.completed {
             return Vec::new();
         }
+        let mut events = Vec::new();
         if data.trim() == "[DONE]" {
-            return if self.pending_finish_reason.is_some() {
-                self.finish(None)
-            } else {
-                Vec::new()
-            };
+            if self.pending_finish_reason.is_some() {
+                self.finish(&mut events);
+            }
+            return events;
         }
-        let root = match super::common::parse_json_data("OpenAI", data) {
-            Ok(Some(v)) => v,
-            Ok(None) => return vec![],
-            Err(e) => return vec![e],
+        let root = match super::common::parse_json_data("Chat Completions", data) {
+            Ok(Some(root)) => root,
+            Ok(None) => return events,
+            Err(error) => return vec![error],
         };
-
-        if let Some(error_event) =
+        if let Some(error) =
             super::common::extract_api_error(ProviderOrigin::OpenAiCompatible, &root)
         {
-            return vec![error_event];
+            return vec![error];
         }
-
-        let mut events = Vec::new();
-
-        if let Some(choices) = root.get("choices").and_then(|c| c.as_array()) {
+        if let Some(choices) = root.get("choices").and_then(|value| value.as_array()) {
             for choice in choices {
                 let delta = &choice["delta"];
-                let finish_reason = choice["finish_reason"].as_str();
-
-                // Some compatible servers name the text field `reasoning`;
-                // when both are present they carry the same segment, so
-                // `reasoning_content` wins and only one is counted.
-                let reasoning = ["reasoning_content", "reasoning"]
+                if let Some(reasoning) = ["reasoning_content", "reasoning"]
                     .into_iter()
-                    .find_map(|key| {
-                        delta
-                            .get(key)
-                            .and_then(|value| value.as_str())
-                            .filter(|text| !text.is_empty())
-                    });
-                if let Some(reasoning) = reasoning {
-                    if let Some(OpenAiPart::Reasoning(text)) = self.parts.last_mut() {
-                        text.push_str(reasoning);
-                    } else {
-                        self.parts
-                            .push(OpenAiPart::Reasoning(reasoning.to_string()));
-                    }
-                    events.push(LlmEvent::Reasoning {
-                        content: reasoning.to_string(),
-                    });
-                }
-
-                if let Some(content) = delta.get("content").and_then(|value| value.as_str())
-                    && !content.is_empty()
+                    .find_map(|key| delta[key].as_str().filter(|text| !text.is_empty()))
                 {
-                    if let Some(OpenAiPart::Text(text)) = self.parts.last_mut() {
-                        text.push_str(content);
-                    } else {
-                        self.parts.push(OpenAiPart::Text(content.to_string()));
-                    }
-                    events.push(LlmEvent::Token {
-                        content: content.to_string(),
-                    });
+                    self.text(PartKind::Reasoning, reasoning, &mut events);
                 }
-
-                if let Some(tool_calls) = delta.get("tool_calls").and_then(|value| value.as_array())
+                if let Some(content) = delta.get("content")
+                    && let Err(error) = visit_content(content, |kind, text| {
+                        self.text(kind, text, &mut events);
+                        Ok::<_, ProtocolEvent>(())
+                    })
                 {
-                    for tool_call in tool_calls {
-                        let Some(index) = tool_call
+                    return vec![error];
+                }
+                if let Some(calls) = delta.get("tool_calls").and_then(|value| value.as_array()) {
+                    for call in calls {
+                        let Some(wire_index) = call
                             .get("index")
                             .and_then(|value| value.as_u64())
                             .and_then(|value| u32::try_from(value).ok())
                         else {
-                            return vec![LlmEvent::error(
-                                "malformed OpenAI wire: tool call index is missing or too large",
+                            return vec![ProtocolEvent::error(
+                                "malformed Chat Completions wire: tool call index is missing or too large",
                                 false,
                             )];
                         };
-                        let slot = self.tool_calls.entry(index).or_insert_with(|| {
-                            let part_ordinal = self.parts.len();
-                            self.parts.push(OpenAiPart::ToolCall(RawToolCall {
-                                provider_call_id: None,
-                                name: String::new(),
-                                arguments: String::new(),
+                        if let Some(kind) = call.get("type")
+                            && kind.as_str() != Some("function")
+                        {
+                            return vec![ProtocolEvent::unsupported(
+                                "chat-completions",
+                                wire_index as usize,
+                                kind.as_str().unwrap_or("<non-string>"),
+                            )];
+                        }
+                        let index = if let Some(index) = self.tool_calls.get(&wire_index) {
+                            *index
+                        } else {
+                            self.close_text(&mut events);
+                            let index = self.next_index;
+                            self.next_index += 1;
+                            self.tool_calls.insert(wire_index, index);
+                            events.push(ProtocolEvent::Part(PartDelta::Begin {
+                                index,
+                                kind: PartKind::ToolCall,
                             }));
-                            OpenAiToolCall {
-                                part_ordinal,
-                                started: false,
-                            }
-                        });
-                        let OpenAiPart::ToolCall(call) = &mut self.parts[slot.part_ordinal] else {
-                            unreachable!("tool index always points to its original call part");
+                            index
                         };
-                        if let Some(id) = tool_call.get("id").and_then(|value| value.as_str()) {
-                            call.provider_call_id = Some(id.to_string());
+                        let name = call["function"]["name"]
+                            .as_str()
+                            .filter(|name| !name.is_empty())
+                            .map(|name| StringPatch::Set(name.into()));
+                        let provider_call_id =
+                            call["id"].as_str().map(|id| StringPatch::Set(id.into()));
+                        if name.is_some() || provider_call_id.is_some() {
+                            events.push(ProtocolEvent::Part(PartDelta::ToolMetadata {
+                                index,
+                                name,
+                                provider_call_id,
+                            }));
                         }
-                        if let Some(name) = tool_call
-                            .get("function")
-                            .and_then(|function| function.get("name"))
-                            .and_then(|value| value.as_str())
-                            && !name.is_empty()
+                        if let Some(arguments) = call["function"]["arguments"]
+                            .as_str()
+                            .filter(|text| !text.is_empty())
                         {
-                            call.name = name.to_string();
-                        }
-                        if !slot.started && !call.name.is_empty() {
-                            slot.started = true;
-                            events.push(LlmEvent::ToolCallStart {
-                                index: index as usize,
-                                provider_call_id: call.provider_call_id.clone(),
-                                name: call.name.clone(),
-                            });
-                        }
-                        if let Some(arguments) = tool_call
-                            .get("function")
-                            .and_then(|function| function.get("arguments"))
-                            .and_then(|value| value.as_str())
-                            && !arguments.is_empty()
-                        {
-                            call.arguments.push_str(arguments);
-                            events.push(LlmEvent::ToolCallDelta {
-                                index: index as usize,
-                                arguments_delta: arguments.to_string(),
-                            });
+                            events.push(ProtocolEvent::Part(PartDelta::ToolArguments {
+                                index,
+                                delta: arguments.into(),
+                            }));
                         }
                     }
                 }
-
-                if let Some(reason) = finish_reason
-                    && !reason.is_empty()
+                if let Some(reason) = choice["finish_reason"]
+                    .as_str()
+                    .filter(|reason| !reason.is_empty())
                 {
-                    self.pending_finish_reason = Some(reason.to_string());
+                    self.pending_finish_reason = Some(reason.into());
                 }
             }
         }
-
-        if self.pending_finish_reason.is_some()
-            && root.get("usage").is_some_and(|usage| !usage.is_null())
-        {
+        if root.get("usage").is_some_and(|usage| !usage.is_null()) {
             match wire_usage(ProviderOrigin::OpenAiCompatible, &root) {
-                Ok(usage) => events.extend(self.finish(usage)),
+                Ok(Some(usage)) => events.push(ProtocolEvent::Usage(usage)),
+                Ok(None) => {}
                 Err(error) => {
                     self.completed = true;
-                    events.push(LlmEvent::error(error.to_string(), false));
+                    events.push(ProtocolEvent::error(error.to_string(), false));
+                    return events;
                 }
             }
+            if self.pending_finish_reason.is_some() {
+                self.finish(&mut events);
+            }
         }
-
         events
     }
 }
-
 #[cfg(test)]
 mod tests {
-    use lattice_conversation::{MessagePart, MessageRole, MessageSemantic, NativeMessage};
-
     use super::*;
+    use crate::test_reply::{Parser, completed, failure};
+    use crate::{LiveDelta, LlmEvent, ReplyOutcome, ReplyProtocolError, ReplyStop, StreamStop};
+    use lattice_conversation::{
+        MessagePart, MessageRole, MessageSemantic, NativeMessage, TokenUsage,
+    };
+    use serde_json::json;
 
-    #[test]
-    fn parser_preserves_real_and_missing_ids_without_synthesis() {
-        for (id_fragment, expected_id) in [(",\"id\":\"call_abc\"", Some("call_abc")), ("", None)] {
-            let mut parser = OpenAiSseParser::new();
-            let chunk = format!(
-                r#"{{"choices":[{{"delta":{{"tool_calls":[{{"index":0{id_fragment},"type":"function","function":{{"name":"observe__workspace","arguments":"{{}}"}}}}]}},"finish_reason":"tool_calls"}}]}}"#
-            );
-            let mut events = parser.parse_chunk(None, &chunk);
-            events.extend(parser.parse_chunk(None, "[DONE]"));
-            assert!(events.iter().any(|event| matches!(
-                event,
-                LlmEvent::ToolCallStart {
-                    index: 0,
-                    provider_call_id,
-                    name,
-                } if provider_call_id.as_deref() == expected_id && name == "observe__workspace"
-            )));
-            let message = events
-                .iter()
-                .find_map(|event| match event {
-                    LlmEvent::MessageComplete { message } => Some(message),
-                    _ => None,
-                })
-                .expect("complete message");
-            let call = message.tool_calls().next().expect("ToolCall").1;
-            assert_eq!(call.provider_call_id.as_deref(), expected_id);
-            assert!(!serde_json::to_string(message).unwrap().contains("tc_"));
-        }
+    fn parser() -> Parser {
+        Parser::new(ProviderOrigin::OpenAiCompatible)
     }
-
-    #[test]
-    fn parser_completes_text_and_usage() {
-        let mut parser = OpenAiSseParser::new();
-        let finish_events = parser.parse_chunk(
-            None,
-            r#"{"choices":[{"delta":{"content":"hello"},"finish_reason":"stop"}],"usage":null}"#,
-        );
-        assert!(!finish_events.iter().any(|event| matches!(
-            event,
-            LlmEvent::MessageComplete { .. } | LlmEvent::Done { .. }
-        )));
-
-        let events = parser.parse_chunk(
-            None,
-            r#"{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}"#,
-        );
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, LlmEvent::MessageComplete { .. }))
-        );
-        assert!(events.iter().any(|event| matches!(
-            event,
-            LlmEvent::Done { usage: Some(usage), .. } if usage.total_tokens == 3
-        )));
-        assert!(parser.parse_chunk(None, "[DONE]").is_empty());
+    fn delta(parser: &mut Parser, value: serde_json::Value) -> Vec<LlmEvent> {
+        parser.parse_chunk(None, &json!({"choices": [{"delta": value}]}).to_string())
     }
-
-    #[test]
-    fn parser_accumulates_multichunk_name_id_and_arguments() {
-        let mut parser = OpenAiSseParser::new();
-        let first = parser.parse_chunk(
-            None,
-            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"observe__workspace","arguments":"{\"path\""}}]},"finish_reason":null}]}"#,
-        );
-        assert!(first.iter().any(|event| matches!(
-            event,
-            LlmEvent::ToolCallStart {
-                index: 0,
-                provider_call_id: Some(id),
-                name,
-            } if id == "call_1" && name == "observe__workspace"
-        )));
-        assert!(
-            !first
-                .iter()
-                .any(|event| matches!(event, LlmEvent::MessageComplete { .. }))
-        );
-
-        let mut second = parser.parse_chunk(
-            None,
-            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\"a\"}"}}]},"finish_reason":"tool_calls"}]}"#,
-        );
-        second.extend(parser.parse_chunk(None, "[DONE]"));
-        let message = second
-            .iter()
-            .find_map(|event| match event {
-                LlmEvent::MessageComplete { message } => Some(message),
-                _ => None,
-            })
-            .expect("complete message");
-        let call = message.tool_calls().next().expect("ToolCall").1;
-        assert_eq!(call.provider_call_id.as_deref(), Some("call_1"));
-        assert_eq!(call.name, "observe__workspace");
-        assert_eq!(call.arguments, serde_json::json!({"path": "a"}));
-    }
-
-    #[test]
-    fn parser_rejects_malformed_usage_and_missing_tool_index() {
-        let mut parser = OpenAiSseParser::new();
-        let finish = parser.parse_chunk(
-            None,
-            r#"{"choices":[{"delta":{"content":"x"},"finish_reason":"stop"}],"usage":null}"#,
-        );
-        assert!(
-            !finish
-                .iter()
-                .any(|event| matches!(event, LlmEvent::MessageComplete { .. }))
-        );
-        let events = parser.parse_chunk(
-            None,
-            r#"{"choices":[],"usage":{"prompt_tokens":"bad","completion_tokens":2,"total_tokens":3}}"#,
-        );
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, LlmEvent::Error { .. }))
-        );
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, LlmEvent::MessageComplete { .. }))
-        );
-
-        let mut parser = OpenAiSseParser::new();
-        let events = parser.parse_chunk(
-            None,
-            r#"{"choices":[{"delta":{"tool_calls":[{"function":{"name":"observe__workspace","arguments":"{}"}}]},"finish_reason":null}]}"#,
-        );
-        assert!(events.iter().any(|event| matches!(
-            event,
-            LlmEvent::Error { failure } if !failure.retryable && failure.message.contains("index")
-        )));
-    }
-
-    fn delta(parser: &mut OpenAiSseParser, delta: serde_json::Value) -> Vec<LlmEvent> {
-        parser.parse_chunk(
-            None,
-            &serde_json::json!({"choices": [{"delta": delta}]}).to_string(),
-        )
-    }
-
-    fn finish(parser: &mut OpenAiSseParser) -> Vec<LlmEvent> {
+    fn finish(parser: &mut Parser) -> Vec<LlmEvent> {
         let mut events =
             parser.parse_chunk(None, r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#);
         events.extend(parser.parse_chunk(None, "[DONE]"));
         events
     }
-
-    fn completed(events: &[LlmEvent]) -> &NativeMessage<lattice_conversation::UnboundToolCall> {
-        assert_eq!(
-            events
-                .iter()
-                .filter(|e| matches!(e, LlmEvent::MessageComplete { .. }))
-                .count(),
-            1,
-        );
-        events
-            .iter()
-            .find_map(|e| match e {
-                LlmEvent::MessageComplete { message } => Some(message),
-                _ => None,
-            })
-            .unwrap()
-    }
-
     fn labels(message: &NativeMessage<lattice_conversation::UnboundToolCall>) -> Vec<String> {
         message
             .parts
             .iter()
-            .map(|p| match &p.semantic {
+            .map(|part| match &part.semantic {
                 MessageSemantic::Text { text } => format!("T:{text}"),
                 MessageSemantic::Reasoning { text } => format!("R:{text}"),
                 MessageSemantic::ToolCall { call } => format!("C:{}", call.name),
             })
             .collect()
     }
-
     fn call_delta(index: u32, name: &str, arguments: &str) -> serde_json::Value {
-        serde_json::json!({"tool_calls": [{"index": index, "function": {
-            "name": name, "arguments": arguments
-        }}]})
+        json!({"tool_calls": [{"index": index, "function": {"name": name, "arguments": arguments}}]})
+    }
+    fn assert_limit(events: &[LlmEvent], kind: lattice_conversation::LimitKind) {
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, LlmEvent::Finished { .. }))
+                .count(),
+            1
+        );
+        assert!(events.iter().any(|event| matches!(event,
+            LlmEvent::Finished { outcome: ReplyOutcome::Interrupted {
+                reason: ReplyStop::OutputLimit(lattice_conversation::AttemptInterruption::OutputLimitExceeded { kind: actual, .. })
+            }, .. } if *actual == kind
+        )), "{events:?}");
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            LlmEvent::Finished {
+                outcome: ReplyOutcome::Complete { .. },
+                ..
+            }
+        )));
     }
 
-    /// R-01/R-02: some compatible servers send text reasoning as
-    /// `delta.reasoning`; it must take the same ordered path, and a delta
-    /// carrying both fields counts the segment once (`reasoning_content` wins).
+    #[tokio::test]
+    async fn mistral_content_chunks_preserve_reasoning_text_and_transition_order() {
+        use futures::{StreamExt, stream};
+        let frames = vec![
+            json!({"choices":[{"delta":{"content":[{"type":"thinking","thinking":[{"type":"text","text":"R"}]}]}}]}).to_string(),
+            json!({"choices":[{"delta":{"content":[{"type":"thinking","thinking":[{"type":"text","text":"S"}]},{"type":"text","text":"A"}]}}]}).to_string(),
+            json!({"choices":[{"delta":{"content":"B"},"finish_reason":"stop"}]}).to_string(),
+            "[DONE]".into(),
+        ];
+        let mut parser = OpenAiSseParser::new();
+        let input = stream::iter(frames)
+            .flat_map(move |frame| stream::iter(parser.parse_chunk(None, &frame)));
+        let events = crate::reply_stream::assemble_reply_stream(
+            Some(ProviderOrigin::OpenAiCompatible),
+            Box::pin(input),
+            crate::StreamControl::default(),
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let message = completed(&events);
+        assert_eq!(labels(message), ["R:RS", "T:AB"]);
+        let live: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                LlmEvent::Delta(delta) => Some(delta.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            live,
+            [
+                LiveDelta::Reasoning("R".into()),
+                LiveDelta::Reasoning("S".into()),
+                LiveDelta::Text("A".into()),
+                LiveDelta::Text("B".into())
+            ]
+        );
+        let wire = json!({"choices":[{"message":{"content":[
+            {"type":"thinking","thinking":[{"type":"text","text":"R"},{"type":"text","text":"S"}]},
+            {"type":"text","text":"A"}, {"type":"text","text":"B"}
+        ]}}]});
+        assert_eq!(
+            crate::protocol::projection::wire_to_native(ProviderOrigin::OpenAiCompatible, &wire)
+                .unwrap(),
+            *message
+        );
+    }
+
+    #[test]
+    fn mistral_unknown_content_chunks_fail_typed_in_both_paths() {
+        for (chunk, expected) in [
+            (
+                json!({"type":"image_url","image_url":"private-payload"}),
+                "image_url",
+            ),
+            (
+                json!({"type":"thinking","thinking":[{"type":"future_inner","data":"private-payload"}]}),
+                "future_inner",
+            ),
+        ] {
+            let content = json!([{"type":"text","text":"prefix"},chunk]);
+            let error = ReplyProtocolError::UnsupportedContentBlock {
+                protocol: "chat-completions".into(),
+                index: 1,
+                block_type: expected.into(),
+            };
+            let mut parser = parser();
+            let events = delta(&mut parser, json!({"content":content}));
+            assert!(matches!(events.as_slice(), [LlmEvent::Finished {
+                outcome: ReplyOutcome::Interrupted { reason: ReplyStop::Stream(StreamStop::Protocol(actual)) }, ..
+            }] if actual == &error));
+            assert!(
+                finish(&mut parser).is_empty(),
+                "unknown chunks cannot publish a complete reply"
+            );
+            assert!(!format!("{events:?}").contains("private-payload"));
+            let wire = json!({"choices":[{"message":{"content":content}}]});
+            assert_eq!(
+                crate::protocol::projection::wire_to_native(
+                    ProviderOrigin::OpenAiCompatible,
+                    &wire
+                ),
+                Err(ProjectionError::Protocol(error))
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_tool_types_fail_in_stream_and_complete_wire() {
+        for (kind, expected) in [
+            (json!("future_tool"), "future_tool".into()),
+            (json!("x".repeat(80)), "x".repeat(64)),
+            (json!(null), "<non-string>".into()),
+        ] {
+            let error = ReplyProtocolError::UnsupportedContentBlock {
+                protocol: "chat-completions".into(),
+                index: 9,
+                block_type: expected.clone(),
+            };
+            for late in [false, true] {
+                let mut parser = parser();
+                if late {
+                    assert!(delta(&mut parser, json!({"tool_calls":[{"index":9,"type":"function","function":{"name":"f","arguments":"{"}}]})).is_empty());
+                }
+                let events = delta(
+                    &mut parser,
+                    json!({"tool_calls":[{"index":9,"type":kind,"function":{"name":"f","arguments":"{}"},"payload":"private-payload"}]}),
+                );
+                assert!(matches!(&events[..], [LlmEvent::Finished {
+                    outcome: ReplyOutcome::Interrupted { reason: ReplyStop::Stream(StreamStop::Protocol(actual)) }, ..
+                }] if actual == &error));
+                assert!(
+                    finish(&mut parser).is_empty(),
+                    "no complete message after rejection"
+                );
+                assert!(!format!("{events:?}").contains("private-payload"));
+            }
+            assert_eq!(
+                crate::protocol::projection::wire_to_native(
+                    ProviderOrigin::OpenAiCompatible,
+                    &json!({"choices":[{"message":{"tool_calls":[{"type":kind,"function":{"name":"f","arguments":"{}"}}]}}]}),
+                ),
+                Err(ProjectionError::Protocol(
+                    ReplyProtocolError::UnsupportedContentBlock {
+                        protocol: "chat-completions".into(),
+                        index: 0,
+                        block_type: expected,
+                    }
+                )),
+            );
+        }
+    }
+
+    #[test]
+    fn function_tool_type_can_be_omitted_from_following_deltas() {
+        let mut parser = parser();
+        delta(
+            &mut parser,
+            json!({"tool_calls":[{"index":9,"type":"function","function":{"name":"f","arguments":"{"}}]}),
+        );
+        delta(
+            &mut parser,
+            json!({"tool_calls":[{"index":9,"function":{"arguments":"}"}}]}),
+        );
+        let events = finish(&mut parser);
+        let message = completed(&events);
+        let calls: Vec<_> = message.tool_calls().collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1.name, "f");
+        assert_eq!(calls[0].1.arguments, json!({}));
+    }
+
+    #[test]
+    fn parser_preserves_real_and_missing_ids_without_synthesis() {
+        for id in [Some("call_abc"), None] {
+            let mut parser = parser();
+            let mut call = call_delta(0, "observe__workspace", "{}");
+            if let Some(id) = id {
+                call["tool_calls"][0]["id"] = json!(id);
+            }
+            delta(&mut parser, call);
+            assert!(parser.raw.iter().any(|event| matches!(event, ProtocolEvent::Part(PartDelta::ToolMetadata { name: Some(StringPatch::Set(name)), provider_call_id, .. })
+                if name == "observe__workspace" && provider_call_id.as_ref() == id.map(|id| StringPatch::Set(id.into())).as_ref())));
+            let events = finish(&mut parser);
+            let message = completed(&events);
+            assert_eq!(
+                message
+                    .tool_calls()
+                    .next()
+                    .unwrap()
+                    .1
+                    .provider_call_id
+                    .as_deref(),
+                id
+            );
+            assert!(!serde_json::to_string(message).unwrap().contains("tc_"));
+        }
+    }
+    #[test]
+    fn parser_completes_text_and_usage() {
+        let mut parser = parser();
+        let events = parser.parse_chunk(
+            None,
+            r#"{"choices":[{"delta":{"content":"hello"},"finish_reason":"stop"}],"usage":null}"#,
+        );
+        assert_eq!(events, [LlmEvent::Delta(LiveDelta::Text("hello".into()))]);
+        let events = parser.parse_chunk(
+            None,
+            r#"{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}"#,
+        );
+        assert_eq!(labels(completed(&events)), ["T:hello"]);
+        assert!(
+            matches!(&events[..], [LlmEvent::Finished { report, .. }] if report.usage.unwrap().total_tokens == 3 && report.finish_reason.as_deref() == Some("stop"))
+        );
+        assert!(parser.parse_chunk(None, "[DONE]").is_empty());
+    }
+    #[test]
+    fn parser_accumulates_multichunk_name_id_and_arguments() {
+        let mut parser = parser();
+        let first = parser.parse_chunk(None, r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"observe__workspace","arguments":"{\"path\""}}]}}]}"#);
+        assert!(first.is_empty());
+        assert!(parser.raw.iter().any(|event| matches!(event, ProtocolEvent::Part(PartDelta::ToolMetadata { name: Some(StringPatch::Set(name)), provider_call_id: Some(StringPatch::Set(id)), .. }) if name == "observe__workspace" && id == "call_1")));
+        delta(&mut parser, call_delta(0, "", ":\"a\"}"));
+        let events = finish(&mut parser);
+        let call = completed(&events).tool_calls().next().unwrap().1;
+        assert_eq!(call.name, "observe__workspace");
+        assert_eq!(call.provider_call_id.as_deref(), Some("call_1"));
+        assert_eq!(call.arguments, json!({"path":"a"}));
+    }
+    #[test]
+    fn parser_rejects_malformed_usage_and_missing_tool_index() {
+        let mut parser = parser();
+        let events = parser.parse_chunk(
+            None,
+            r#"{"choices":[{"delta":{"content":"x"},"finish_reason":"stop"}],"usage":null}"#,
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, LlmEvent::Finished { .. }))
+        );
+        let events = parser.parse_chunk(None, r#"{"choices":[],"usage":{"prompt_tokens":"bad","completion_tokens":2,"total_tokens":3}}"#);
+        assert!(failure(&events).unwrap().contains("usage"));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            LlmEvent::Finished {
+                outcome: ReplyOutcome::Complete { .. },
+                ..
+            }
+        )));
+        let mut parser = self::parser();
+        let events = delta(
+            &mut parser,
+            json!({"tool_calls":[{"function":{"name":"observe__workspace","arguments":"{}"}}]}),
+        );
+        assert!(failure(&events).unwrap().contains("index"));
+    }
     #[test]
     fn reasoning_alias_keeps_order_and_is_not_double_counted() {
-        let mut parser = OpenAiSseParser::new();
-        let mut live = Vec::new();
+        let mut parser = parser();
+        let mut live = vec![];
         for value in [
-            serde_json::json!({"reasoning": "想"}),
-            serde_json::json!({"content": "答"}),
-            serde_json::json!({"reasoning_content": "再想", "reasoning": "再想"}),
+            json!({"reasoning":"想"}),
+            json!({"content":"答"}),
+            json!({"reasoning_content":"再想", "reasoning":"再想"}),
         ] {
             live.extend(delta(&mut parser, value));
         }
         let live: Vec<_> = live
-            .iter()
-            .map(|e| match e {
-                LlmEvent::Reasoning { content } => format!("R:{content}"),
-                LlmEvent::Token { content } => format!("T:{content}"),
-                _ => panic!("unexpected event"),
+            .into_iter()
+            .map(|event| match event {
+                LlmEvent::Delta(LiveDelta::Text(text)) => format!("T:{text}"),
+                LlmEvent::Delta(LiveDelta::Reasoning(text)) => format!("R:{text}"),
+                other => panic!("unexpected event {other:?}"),
             })
             .collect();
         assert_eq!(live, ["R:想", "T:答", "R:再想"]);
         assert_eq!(labels(completed(&finish(&mut parser))), live);
     }
-
     #[test]
     fn order_f02_same_chunk_follows_emitted_order() {
-        let mut parser = OpenAiSseParser::new();
-        delta(&mut parser, serde_json::json!({"content": "A"}));
+        let mut parser = parser();
+        delta(&mut parser, json!({"content":"A"}));
         let events = delta(
             &mut parser,
-            serde_json::json!({
-                "content": "B", "reasoning_content": "R",
-                "tool_calls": [{"index": 8, "function": {"name": "t", "arguments": "{}"}}]
-            }),
+            json!({"content":"B","reasoning_content":"R","tool_calls":[{"index":8,"function":{"name":"t","arguments":"{}"}}]}),
+        );
+        assert_eq!(
+            events,
+            [
+                LlmEvent::Delta(LiveDelta::Reasoning("R".into())),
+                LlmEvent::Delta(LiveDelta::Text("B".into()))
+            ]
         );
         assert!(matches!(
-            &events[..],
+            &parser.raw[parser.raw.len() - 3..],
             [
-                LlmEvent::Reasoning { .. },
-                LlmEvent::Token { .. },
-                LlmEvent::ToolCallStart { index: 8, .. },
-                LlmEvent::ToolCallDelta { index: 8, .. }
+                ProtocolEvent::Part(PartDelta::Begin {
+                    kind: PartKind::ToolCall,
+                    ..
+                }),
+                ProtocolEvent::Part(PartDelta::ToolMetadata { .. }),
+                ProtocolEvent::Part(PartDelta::ToolArguments { .. })
             ]
         ));
         assert_eq!(
@@ -524,103 +678,80 @@ mod tests {
             ["T:A", "R:R", "T:B", "C:t"]
         );
     }
-
     #[test]
     fn ordered_parts_preserve_tool_positions_and_ignore_empty_fragments() {
-        for (name, deltas, empty_event_delta_indices, expected_labels) in [
+        for (deltas, expected) in [
             (
-                "tool_between_text",
                 vec![
-                    serde_json::json!({"content": "A"}),
+                    json!({"content":"A"}),
                     call_delta(0, "t", "{}"),
-                    serde_json::json!({"content": "B"}),
+                    json!({"content":"B"}),
                 ],
-                &[] as &[usize],
                 vec!["T:A", "C:t", "T:B"],
             ),
             (
-                "sparse_indices",
                 vec![
                     call_delta(u32::MAX, "first", "{}"),
                     call_delta(7, "second", "{}"),
                     call_delta(1, "third", "{}"),
                 ],
-                &[],
                 vec!["C:first", "C:second", "C:third"],
             ),
             (
-                "empty_fragments",
                 vec![
-                    serde_json::json!({"content": "", "reasoning_content": ""}),
-                    serde_json::json!({"content": "A"}),
-                    serde_json::json!({"reasoning_content": ""}),
-                    serde_json::json!({"content": "B"}),
-                    serde_json::json!({"reasoning_content": "R"}),
-                    serde_json::json!({"content": ""}),
-                    serde_json::json!({"reasoning_content": "S"}),
+                    json!({"content":"","reasoning_content":""}),
+                    json!({"content":"A"}),
+                    json!({"reasoning_content":""}),
+                    json!({"content":"B"}),
+                    json!({"reasoning_content":"R"}),
+                    json!({"content":""}),
+                    json!({"reasoning_content":"S"}),
                 ],
-                &[0],
                 vec!["T:AB", "R:RS"],
             ),
-            ("empty_stream", vec![], &[], vec![]),
+            (vec![], vec![]),
         ] {
-            let mut parser = OpenAiSseParser::new();
-            for (index, value) in deltas.into_iter().enumerate() {
+            let mut parser = parser();
+            for value in deltas {
+                let empty = value == json!({"content":"","reasoning_content":""});
                 let events = delta(&mut parser, value);
-                if empty_event_delta_indices.contains(&index) {
-                    assert!(events.is_empty(), "{name}: delta {index}");
+                if empty {
+                    assert!(events.is_empty());
+                    assert!(parser.raw.is_empty());
                 }
             }
-            let events = finish(&mut parser);
-            assert_eq!(
-                events
-                    .iter()
-                    .filter(|e| matches!(e, LlmEvent::MessageComplete { .. }))
-                    .count(),
-                1,
-                "{name}: completion count"
-            );
-            let message = events
-                .iter()
-                .find_map(|e| match e {
-                    LlmEvent::MessageComplete { message } => Some(message),
-                    _ => None,
-                })
-                .unwrap_or_else(|| panic!("{name}: missing completed message"));
-            if expected_labels.is_empty() {
-                assert!(message.parts.is_empty(), "{name}");
-            } else {
-                assert_eq!(labels(message), expected_labels, "{name}");
-            }
+            assert_eq!(labels(completed(&finish(&mut parser))), expected);
         }
     }
-
     #[test]
     fn order_f05_late_metadata_and_fragments_fill_original_slot() {
-        let mut parser = OpenAiSseParser::new();
-        let first = delta(
+        let mut parser = parser();
+        let events = delta(
             &mut parser,
-            serde_json::json!({"tool_calls": [{
-                "index": 9, "function": {"arguments": "{\"path\":"}
-            }]}),
+            json!({"tool_calls":[{"index":9,"function":{"arguments":"{\"path\":"}}]}),
         );
+        assert!(events.is_empty());
         assert!(matches!(
-            &first[..],
-            [LlmEvent::ToolCallDelta { index: 9, .. }]
-        ));
-        delta(&mut parser, serde_json::json!({"content": "between"}));
-        delta(&mut parser, call_delta(2, "second", "{}"));
-        let later = delta(
-            &mut parser,
-            serde_json::json!({"tool_calls": [{
-                "index": 9, "id": "real-id", "function": {"name": "observe__workspace", "arguments": "\"a\"}"}
-            }]}),
-        );
-        assert!(matches!(
-            &later[..],
+            &parser.raw[..],
             [
-                LlmEvent::ToolCallStart { index: 9, .. },
-                LlmEvent::ToolCallDelta { index: 9, .. }
+                ProtocolEvent::Part(PartDelta::Begin {
+                    index: 0,
+                    kind: PartKind::ToolCall
+                }),
+                ProtocolEvent::Part(PartDelta::ToolArguments { index: 0, .. })
+            ]
+        ));
+        delta(&mut parser, json!({"content":"between"}));
+        delta(&mut parser, call_delta(2, "second", "{}"));
+        delta(
+            &mut parser,
+            json!({"tool_calls":[{"index":9,"id":"real-id","function":{"name":"observe__workspace","arguments":"\"a\"}"}}]}),
+        );
+        assert!(matches!(
+            &parser.raw[..],
+            [
+                ProtocolEvent::Part(PartDelta::ToolMetadata { index: 0, .. }),
+                ProtocolEvent::Part(PartDelta::ToolArguments { index: 0, .. })
             ]
         ));
         let events = finish(&mut parser);
@@ -629,197 +760,86 @@ mod tests {
             labels(message),
             ["C:observe__workspace", "T:between", "C:second"]
         );
-        let calls: Vec<_> = message.tool_calls().collect();
+        let calls: Vec<_> = message.tool_calls().map(|(_, call)| call).collect();
         assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].1.provider_call_id.as_deref(), Some("real-id"));
-        assert_eq!(calls[0].1.arguments, serde_json::json!({"path": "a"}));
-        assert_eq!(calls[1].1.arguments, serde_json::json!({}));
+        assert_eq!(calls[0].provider_call_id.as_deref(), Some("real-id"));
+        assert_eq!(calls[0].arguments, json!({"path":"a"}));
+        assert_eq!(calls[1].arguments, json!({}));
     }
-
     #[test]
     fn order_f06_usage_and_done_complete_once() {
         for mode in 0..3 {
-            let mut parser = OpenAiSseParser::new();
-            let mut chunk = serde_json::json!({"choices": [{"delta": {"content": "A"}, "finish_reason": "stop"}]});
-            let usage =
-                serde_json::json!({"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3});
+            let mut parser = parser();
+            let usage = json!({"prompt_tokens":1,"completion_tokens":2,"total_tokens":3});
+            let mut chunk = json!({"choices":[{"delta":{"content":"A"},"finish_reason":"stop"}]});
             if mode == 0 {
                 chunk["usage"] = usage.clone();
             }
             let mut events = parser.parse_chunk(None, &chunk.to_string());
             if mode != 0 {
-                assert!(!events.iter().any(|e| matches!(
-                    e,
-                    LlmEvent::MessageComplete { .. } | LlmEvent::Done { .. }
-                )));
+                assert!(
+                    !events
+                        .iter()
+                        .any(|event| matches!(event, LlmEvent::Finished { .. }))
+                );
             }
             if mode == 1 {
-                events.extend(parser.parse_chunk(
-                    None,
-                    &serde_json::json!({"choices": [], "usage": usage}).to_string(),
-                ));
+                events.extend(
+                    parser.parse_chunk(None, &json!({"choices":[],"usage":usage}).to_string()),
+                );
             }
             events.extend(parser.parse_chunk(None, "[DONE]"));
             assert_eq!(labels(completed(&events)), ["T:A"]);
-            let done: Vec<_> = events
+            let reports: Vec<_> = events
                 .iter()
-                .filter_map(|e| match e {
-                    LlmEvent::Done {
-                        finish_reason,
-                        usage,
-                    } => Some((finish_reason.as_str(), *usage)),
+                .filter_map(|event| match event {
+                    LlmEvent::Finished { report, .. } => Some(report),
                     _ => None,
                 })
                 .collect();
+            assert_eq!(reports.len(), 1);
+            assert_eq!(reports[0].finish_reason.as_deref(), Some("stop"));
             assert_eq!(
-                done,
-                vec![(
-                    "stop",
-                    if mode == 2 {
-                        None
-                    } else {
-                        Some(TokenUsage {
-                            prompt_tokens: 1,
-                            completion_tokens: 2,
-                            total_tokens: 3,
-                        })
-                    }
-                )]
+                reports[0].usage,
+                if mode == 2 {
+                    None
+                } else {
+                    Some(TokenUsage {
+                        prompt_tokens: 1,
+                        completion_tokens: 2,
+                        total_tokens: 3,
+                    })
+                }
             );
             assert!(parser.parse_chunk(None, "[DONE]").is_empty());
-            assert!(delta(&mut parser, serde_json::json!({"content": "late"})).is_empty());
+            assert!(delta(&mut parser, json!({"content":"late"})).is_empty());
         }
     }
-
-    fn assert_limit(events: &[LlmEvent], kind: &str) {
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, LlmEvent::OutputLimit { interruption } if format!("{interruption:?}").contains(kind))),
-            "expected limit {kind}"
-        );
-        assert!(
-            !events
-                .iter()
-                .any(|e| matches!(e, LlmEvent::MessageComplete { .. } | LlmEvent::Done { .. }))
-        );
-    }
-
     #[test]
-    fn order_f08_text_and_reasoning_limits_span_parts() {
-        use lattice_conversation::{MAX_ASSISTANT_CONTENT_BYTES, MAX_REASONING_CONTENT_BYTES};
-        for (field, other, limit, kind) in [
-            (
-                "content",
-                "reasoning_content",
-                MAX_ASSISTANT_CONTENT_BYTES,
-                "AssistantContent",
-            ),
-            (
-                "reasoning_content",
-                "content",
-                MAX_REASONING_CONTENT_BYTES,
-                "ReasoningContent",
-            ),
-        ] {
-            for extra in ["", "!"] {
-                let mut parser = OpenAiSseParser::new();
-                delta(
-                    &mut parser,
-                    serde_json::json!({field: "é".repeat(limit / 4)}),
-                );
-                delta(&mut parser, serde_json::json!({other: "separator"}));
-                delta(
-                    &mut parser,
-                    serde_json::json!({field: format!("{}{extra}", "é".repeat(limit / 4))}),
-                );
-                let events = finish(&mut parser);
-                if extra.is_empty() {
-                    completed(&events);
-                } else {
-                    assert_limit(&events, kind);
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn order_f09_interleaved_call_and_total_limits() {
-        use lattice_conversation::{MAX_MODEL_ATTEMPT_BYTES, MAX_TOOL_CALL_ARGUMENTS_BYTES};
-        let limit = MAX_TOOL_CALL_ARGUMENTS_BYTES;
-        let args = format!("{{\"x\":\"{}\"}}", "z".repeat(limit - 8));
-        assert_eq!(args.len(), limit);
+    fn order_f09_interleaved_wire_indexes_keep_separate_budgets() {
+        use lattice_conversation::{LimitKind, MAX_TOOL_CALL_ARGUMENTS_BYTES};
+        let maximum = MAX_TOOL_CALL_ARGUMENTS_BYTES;
+        let arguments = format!("{{\"x\":\"{}\"}}", "z".repeat(maximum - 8));
         for extra in ["", " "] {
-            let mut parser = OpenAiSseParser::new();
-            delta(&mut parser, call_delta(9, "first", &args[..limit / 2]));
-            delta(&mut parser, call_delta(2, "second", "{}"));
+            let mut parser = parser();
             delta(
                 &mut parser,
-                call_delta(9, "", &format!("{}{extra}", &args[limit / 2..])),
+                call_delta(9, "first", &arguments[..maximum / 2]),
             );
-            let events = finish(&mut parser);
+            delta(&mut parser, call_delta(2, "second", "{}"));
+            let mut events = delta(
+                &mut parser,
+                call_delta(9, "", &format!("{}{extra}", &arguments[maximum / 2..])),
+            );
+            events.extend(finish(&mut parser));
             if extra.is_empty() {
                 completed(&events);
             } else {
-                assert_limit(&events, "ToolCallArguments");
-            }
-        }
-        for extra in [false, true] {
-            let mut parser = OpenAiSseParser::new();
-            for index in 0..(MAX_MODEL_ATTEMPT_BYTES / limit) as u32 {
-                delta(&mut parser, call_delta(index, "t", &args));
-            }
-            if extra {
-                delta(&mut parser, serde_json::json!({"content": "!"}));
-            }
-            let events = finish(&mut parser);
-            if extra {
-                assert_limit(&events, "ModelAttemptTotal");
-            } else {
-                completed(&events);
+                assert_limit(&events, LimitKind::ToolCallArguments);
             }
         }
     }
-
-    #[test]
-    fn order_f10_invalid_batches_never_publish_partial_messages() {
-        use lattice_conversation::MAX_TOOL_CALLS_PER_BATCH;
-        for case in 0..3 {
-            let mut parser = OpenAiSseParser::new();
-            delta(&mut parser, serde_json::json!({"content": "prefix"}));
-            let count = if case == 2 {
-                MAX_TOOL_CALLS_PER_BATCH + 1
-            } else {
-                2
-            };
-            for index in 0..count {
-                let mut call = call_delta(
-                    index as u32,
-                    "t",
-                    if case == 0 && index == 1 { "{" } else { "{}" },
-                );
-                if case == 1 {
-                    call["tool_calls"][0]["id"] = serde_json::json!("duplicate");
-                }
-                delta(&mut parser, call);
-            }
-            let events = finish(&mut parser);
-            assert!(
-                events
-                    .iter()
-                    .any(|e| matches!(e, LlmEvent::MessageRejected { .. })),
-                "case {case}"
-            );
-            assert!(
-                !events
-                    .iter()
-                    .any(|e| matches!(e, LlmEvent::MessageComplete { .. }))
-            );
-        }
-    }
-
     fn ordered_native() -> NativeMessage<lattice_conversation::UnboundToolCall> {
-        use lattice_conversation::UnboundToolCall;
         NativeMessage::new(
             MessageRole::Assistant,
             Some(ProviderOrigin::OpenAiCompatible),
@@ -827,10 +847,10 @@ mod tests {
                 MessagePart::semantic_only(MessageSemantic::Text { text: "A".into() }),
                 MessagePart::semantic_only(MessageSemantic::Reasoning { text: "R".into() }),
                 MessagePart::semantic_only(MessageSemantic::ToolCall {
-                    call: UnboundToolCall {
+                    call: lattice_conversation::UnboundToolCall {
                         provider_call_id: Some("real".into()),
                         name: "observe__workspace".into(),
-                        arguments: serde_json::json!({"z": 1, "a": 2}),
+                        arguments: json!({"z":1,"a":2}),
                     },
                 }),
                 MessagePart::semantic_only(MessageSemantic::Text { text: "B".into() }),
@@ -838,22 +858,18 @@ mod tests {
             ],
         )
     }
-
     #[test]
     fn order_f11_request_merges_without_changing_wire_shape() {
-        let message = ordered_native();
-        let wire =
-            crate::protocol::projection::native_to_wire(ProviderOrigin::OpenAiCompatible, &message)
-                .unwrap();
+        let wire = crate::protocol::projection::native_to_wire(
+            ProviderOrigin::OpenAiCompatible,
+            &ordered_native(),
+        )
+        .unwrap();
         assert_eq!(
             wire,
-            serde_json::json!({
-                "role": "assistant", "content": "AB", "reasoning_content": "RS",
-                "tool_calls": [{"id": "real", "type": "function", "function": {"name": "observe__workspace", "arguments": "{\"a\":2,\"z\":1}"}}]
-            })
+            json!({"role":"assistant","content":"AB","reasoning_content":"RS","tool_calls":[{"id":"real","type":"function","function":{"name":"observe__workspace","arguments":"{\"a\":2,\"z\":1}"}}]})
         );
     }
-
     #[test]
     fn order_f12_cross_provider_preserves_remaining_order() {
         let source = ordered_native();
