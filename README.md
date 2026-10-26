@@ -70,7 +70,7 @@ enabled = ["observe__workspace"]
 
 ### 2. 配置模型凭据
 
-在当前终端设置服务商密钥：
+在当前终端导出服务商密钥；工作区 `.env` 不会被加载：
 
 ```sh
 export ANTHROPIC_API_KEY="替换为你的密钥"
@@ -104,6 +104,10 @@ lattice tui "$SESSION_ID"
 ## 后台执行与重连
 
 Session 命令和 TUI 首次使用时会自动启动本地后台。请求被接受后，即使关闭终端，任务也会在后台继续执行。
+
+自动启动与显式运行 `lattice daemon serve` 都继承启动进程的环境。后台运行期间不随后续前端的环境变化；要更新后台环境，先执行 `lattice daemon stop` 再启动。
+
+当前版本中，密钥、endpoint 与 TLS 信任仍在每次提交时从运行提交命令的终端读取，修改后不需要重启后台。
 
 TUI 中，输入框为空时按 Ctrl+D 或输入 `/quit` 只退出界面；任务运行时按 Esc 或 Ctrl+C 请求取消。之后用 `lattice tui <session_id>` 重新打开会话，在界面内输入 `/reconnect` 重新连接。
 

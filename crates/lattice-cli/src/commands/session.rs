@@ -33,11 +33,6 @@ pub(crate) fn state_layout() -> Result<lattice_session::StateLayout> {
     Ok(lattice_session::StateLayout::resolve()?)
 }
 
-/// 全局会话库路径，仅供诊断显示；前端不打开该文件。
-pub(crate) fn session_store_path() -> Result<PathBuf> {
-    Ok(state_layout()?.lattice_root().join("lattice.redb"))
-}
-
 pub(crate) fn parse_turn_id(value: &str) -> Result<lattice_api::local::TurnId, String> {
     lattice_api::local::TurnId::parse(value).map_err(|_| "expected canonical TurnId UUID".into())
 }

@@ -749,16 +749,7 @@ fn shared_daemon_keeps_project_endpoints_keys_and_profiles_frozen() {
         a.expect_api_key(key_a);
         b.expect_api_key(key_b);
         world.set_env("OPENAI_COMPATIBLE_BASE_URL", a.base_url());
-        world.unset_env("OPENAI_COMPATIBLE_API_KEY");
-        world
-            .write_project_file(
-                ".env",
-                &format!(
-                    "OPENAI_COMPATIBLE_API_KEY={key_a}\nOPENAI_COMPATIBLE_BASE_URL={}\n",
-                    b.base_url()
-                ),
-            )
-            .unwrap();
+        world.set_env("OPENAI_COMPATIBLE_API_KEY", key_a);
         let project = world.root().join("second-project");
         std::fs::create_dir_all(project.join(".lattice/agents/background")).unwrap();
         let profile = world
@@ -769,14 +760,6 @@ fn shared_daemon_keeps_project_endpoints_keys_and_profiles_frozen() {
             std::fs::read_to_string(&profile)
                 .unwrap()
                 .replace("concise test agent", "beta test agent"),
-        )
-        .unwrap();
-        std::fs::write(
-            project.join(".env"),
-            format!(
-                "OPENAI_COMPATIBLE_API_KEY={key_b}\nOPENAI_COMPATIBLE_BASE_URL={}\n",
-                a.base_url()
-            ),
         )
         .unwrap();
         gix::init(&project).unwrap();
@@ -790,15 +773,14 @@ fn shared_daemon_keeps_project_endpoints_keys_and_profiles_frozen() {
         let mut cmd = world.command(driver().binary_path());
         cmd.current_dir(&project)
             .env("OPENAI_COMPATIBLE_BASE_URL", b.base_url())
+            .env("OPENAI_COMPATIBLE_API_KEY", key_b)
             .args(["--json", "run", "beta", "--agent", "background"]);
         let second = RunningCommand::spawn(cmd).unwrap();
         gb.wait_until_stalled(1, budget.cap_timeout(Duration::from_secs(30)))
             .unwrap();
         assert_eq!(world.daemon_pids().unwrap().len(), 1);
         std::fs::write(profile, "invalid changed profile").unwrap();
-        world
-            .write_project_file(".env", &format!("OPENAI_COMPATIBLE_API_KEY={key_b}\n"))
-            .unwrap();
+        world.set_env("OPENAI_COMPATIBLE_API_KEY", key_b);
         ga.release(budget.cap_timeout(Duration::from_secs(30)))
             .unwrap();
         gb.release(budget.cap_timeout(Duration::from_secs(30)))
@@ -1361,7 +1343,6 @@ fn frozen_tls_roots_and_policies_are_isolated_between_concurrent_turns() {
         std::fs::create_dir_all(beta.join(".lattice/agents/background")).unwrap();
         let beta_profile = beta.join(".lattice/agents/background/agent.toml");
         std::fs::write(&beta_profile, &denied).unwrap();
-        std::fs::write(beta.join(".env"), "").unwrap();
         gix::init(&beta).unwrap();
         world.set_env("OPENAI_COMPATIBLE_MODEL", "background");
         world.set_env("OPENAI_COMPATIBLE_API_KEY", FAKE_API_KEY);
@@ -1838,7 +1819,6 @@ fn turn_and_session_identity_conflicts_are_rejected_without_dispatch() {
         assert_eq!(missing["value"]["kind"], "not_found", "{missing}");
         let project = world.root().join("different-project");
         std::fs::create_dir(&project).unwrap();
-        std::fs::write(project.join(".env"), "").unwrap();
         gix::init(&project).unwrap();
         let mut elsewhere = submit_request(
             &world,

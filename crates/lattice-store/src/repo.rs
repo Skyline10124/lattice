@@ -670,8 +670,14 @@ fn classify_ref_error(ref_name: &str, error: gix::reference::edit::Error) -> Sto
 /// required environment, creation fails as a typed Git error; it never changes
 /// another task's working directory or retries based on rendered debug text.
 fn init_bare(temp: &Path) -> Result<gix::Repository> {
-    gix::init_bare(temp)
-        .map_err(|e| StoreError::Git(format!("init bare repository in '{}': {e}", temp.display())))
+    gix::ThreadSafeRepository::init_opts(
+        temp,
+        gix::create::Kind::Bare,
+        gix::create::Options::default(),
+        gix::open::Options::isolated(),
+    )
+    .map(Into::into)
+    .map_err(|e| StoreError::Git(format!("init bare repository in '{}': {e}", temp.display())))
 }
 
 fn write_meta_commit(repo: &gix::Repository, meta: &StoreMeta) -> Result<gix::ObjectId> {

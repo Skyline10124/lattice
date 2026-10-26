@@ -122,7 +122,6 @@ dirs = "6"
 colored = "3.1"
 anyhow = "1"
 base64 = "0.22"
-dotenvy = "0.15"
 toml_edit = "0.25"
 ratatui = "0.30"
 pulldown-cmark = { version = "0.13.4", default-features = false }

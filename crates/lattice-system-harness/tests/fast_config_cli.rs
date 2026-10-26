@@ -6,11 +6,10 @@
 //! replacement target `planned_config_cli`).
 //!
 //! These scenarios drive the built `lattice` binary for the no-turn config
-//! surface (`models`, `resolve`, `doctor`). They assert public stdout/JSON
+//! surface (`models`, `resolve`). They assert public stdout/JSON
 //! fields and that no credential value ever appears in output - only env-var
 //! names. No turn is executed, so these need no turn runtime at all. They supersede
-//! the crate-internal `cli_diagnostics_models_*`, `cli_diagnostics_resolve_*`,
-//! and `doctor_*` unit tests in `lattice-cli` (see `docs/TEST-TRIAGE.md`).
+//! the crate-internal `cli_diagnostics_models_*` and `cli_diagnostics_resolve_*` tests.
 
 use lattice_system_harness::{
     AssertError, CommandOutcome, LatticeCommand, LatticeDriver, ScenarioSpec, ScenarioWorld,
@@ -50,56 +49,6 @@ fn ok_or_artifacts(
 ) {
     finalize_with_failure_artifacts(world, name, summary, output, &[SECRET_SENTINEL], result)
         .unwrap_or_else(|report| panic!("{report}"));
-}
-
-/// `doctor` 文本输出 `Credentials:` 段中每个变量及其状态词，例如
-/// `✗ ANTHROPIC_API_KEY: missing (source: unset)` 解析为
-/// `("ANTHROPIC_API_KEY", "missing")`。段缺失、为空或有无法解析的行都算失败。
-fn doctor_credential_statuses(
-    output: &CommandOutcome,
-) -> Result<Vec<(String, String)>, AssertError> {
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let lines: Vec<&str> = stdout
-        .lines()
-        .skip_while(|line| *line != "Credentials:")
-        .skip(1)
-        .take_while(|line| !line.trim().is_empty())
-        .collect();
-    if lines.is_empty() {
-        return Err(AssertError::StdoutMissing {
-            expected: "non-empty Credentials: section".into(),
-        });
-    }
-    lines
-        .iter()
-        .map(|line| {
-            line.trim()
-                .split_once(' ')
-                .and_then(|(_icon, entry)| entry.split_once(": "))
-                .and_then(|(env_var, rest)| {
-                    Some((
-                        env_var.to_string(),
-                        rest.split_whitespace().next()?.to_string(),
-                    ))
-                })
-                .ok_or_else(|| AssertError::StdoutMissing {
-                    expected: format!("`<icon> NAME: status ...` credential line, got {line:?}"),
-                })
-        })
-        .collect()
-}
-
-fn require_status(
-    statuses: &[(String, String)],
-    env_var: &str,
-    expected: &str,
-) -> Result<(), AssertError> {
-    match statuses.iter().find(|(name, _)| name == env_var) {
-        Some((_, status)) if status == expected => Ok(()),
-        found => Err(AssertError::StdoutMissing {
-            expected: format!("{env_var}: {expected}, got {found:?}"),
-        }),
-    }
 }
 
 fn parse_json<T: serde::de::DeserializeOwned>(output: &CommandOutcome) -> Result<T, AssertError> {
@@ -397,89 +346,6 @@ fn fast_resolve_unknown_model_errors() {
 }
 
 #[test]
-fn fast_doctor_text_lists_env_var_names_not_values() {
-    let spec = ScenarioSpec::fast("fast-doctor-text");
-    let world = ScenarioWorld::new(&spec.name).expect("world");
-    world.set_env("ANTHROPIC_API_KEY", SECRET_SENTINEL);
-    let out = run(&world, &spec, &["doctor"]);
-
-    // 凭据确实被读到，“只报变量名、不报值”才有意义；没读到时输出本来就没有值。
-    let result = assert_exit_success(&out)
-        .and_then(|_| doctor_credential_statuses(&out))
-        .and_then(|statuses| require_status(&statuses, "ANTHROPIC_API_KEY", "set"))
-        .and_then(|_| assert_stdout_contains(&out, "Session Store"))
-        .and_then(|_| assert_stdout_contains(&out, "Dir:"))
-        .and_then(|_| assert_stdout_contains(&out, "aliases"));
-    ok_or_artifacts(&world, "fast-doctor-text", "lattice doctor", &out, result);
-}
-
-#[test]
-fn fast_doctor_json_does_not_leak_secrets() {
-    let spec = ScenarioSpec::fast("fast-doctor-json");
-    let world = ScenarioWorld::new(&spec.name).expect("world");
-    world.set_env("ANTHROPIC_API_KEY", SECRET_SENTINEL);
-    let out = run(&world, &spec, &["--json", "doctor"]);
-
-    let result = assert_exit_success(&out)
-        .and_then(|_| parse_json::<Value>(&out))
-        .and_then(|parsed| {
-            let credentials = parsed.get("credentials").and_then(|v| v.as_array());
-            let creds = match credentials {
-                Some(a) if !a.is_empty() => a,
-                _ => {
-                    return Err(AssertError::StdoutMissing {
-                        expected: "credentials non-empty array".into(),
-                    });
-                }
-            };
-            // Every credential entry is an object with `env_var`/`status`
-            // strings; status uses the public Present/Missing vocabulary
-            // (renderer at `crates/lattice-cli/src/commands/doctor.rs:67-79`).
-            for cred in creds {
-                let env_var = cred.get("env_var").and_then(|v| v.as_str());
-                let status = cred.get("status").and_then(|v| v.as_str());
-                if env_var.map(|s| s.is_empty()).unwrap_or(true) || status.is_none() {
-                    return Err(AssertError::StdoutMissing {
-                        expected: "every credential has env_var + status strings".into(),
-                    });
-                }
-                if !matches!(status, Some("Present") | Some("Missing")) {
-                    return Err(AssertError::StdoutMissing {
-                        expected: format!("status in {{Present, Missing}}, got {status:?}"),
-                    });
-                }
-            }
-            // The Anthropic credential is set (world injects the sentinel),
-            // so it must report Present.
-            let anthropic = creds
-                .iter()
-                .find(|c| c.get("env_var").and_then(|v| v.as_str()) == Some("ANTHROPIC_API_KEY"));
-            if !matches!(
-                anthropic,
-                Some(c) if c.get("status").and_then(|v| v.as_str()) == Some("Present")
-            ) {
-                return Err(AssertError::StdoutMissing {
-                    expected: format!("ANTHROPIC_API_KEY credential Present, got {anthropic:?}"),
-                });
-            }
-            // Keep the existing alias_count numeric gate.
-            if parsed.get("alias_count").and_then(|v| v.as_i64()).is_none() {
-                return Err(AssertError::StdoutMissing {
-                    expected: "alias_count integer".into(),
-                });
-            }
-            Ok(())
-        });
-    ok_or_artifacts(
-        &world,
-        "fast-doctor-json",
-        "lattice --json doctor",
-        &out,
-        result,
-    );
-}
-
-#[test]
 fn fast_models_lists_openai_compatible_when_configured() {
     // The `openai-compatible` alias is gated on OPENAI_COMPATIBLE_BASE_URL
     // (and a model); without it the alias is absent, so `models` must list it
@@ -497,34 +363,6 @@ fn fast_models_lists_openai_compatible_when_configured() {
         &world,
         "fast-models-compat",
         "lattice models (compat configured)",
-        &out,
-        result,
-    );
-}
-
-#[test]
-fn fast_doctor_text_shows_missing_status_without_credentials() {
-    // With the env cleared and no API keys set, every credential must report
-    // Missing (covers the crate-internal `doctor_credentials_reflect_missing_status`).
-    let spec = ScenarioSpec::fast("fast-doctor-missing");
-    let world = ScenarioWorld::new(&spec.name).expect("world");
-    let out = run(&world, &spec, &["doctor"]);
-
-    let result = assert_exit_success(&out)
-        .and_then(|_| doctor_credential_statuses(&out))
-        .and_then(|statuses| {
-            require_status(&statuses, "ANTHROPIC_API_KEY", "missing")?;
-            match statuses.iter().find(|(_, status)| status != "missing") {
-                Some((env_var, status)) => Err(AssertError::StdoutMissing {
-                    expected: format!("{env_var}: missing, got {status}"),
-                }),
-                None => Ok(()),
-            }
-        });
-    ok_or_artifacts(
-        &world,
-        "fast-doctor-missing",
-        "lattice doctor (no creds)",
         &out,
         result,
     );

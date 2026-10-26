@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Subcommand)]
 pub enum DaemonAction {
-    /// Run the daemon in the foreground; it does not load the workspace dotenv or inherit the submitter's credentials.
+    /// Run the daemon in the foreground, inheriting the launching process's environment, just like automatic startup.
     Serve {
         /// XDG state root; must be an absolute path. Defaults to the submitter's HOME/XDG resolution.
         #[arg(long)]
@@ -22,7 +22,7 @@ pub enum DaemonAction {
     Stop,
 }
 
-pub fn state_root(explicit: Option<&Path>) -> anyhow::Result<PathBuf> {
+fn state_root(explicit: Option<&Path>) -> anyhow::Result<PathBuf> {
     if let Some(root) = explicit {
         if !root.is_absolute() {
             return Err(
