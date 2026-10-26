@@ -93,7 +93,7 @@ Turn 没有单独保存的结局，也没有单独的结束节点。它的结局
 - **选择随提交生效。** 选择没有随提交发出就不保留。所以副本中的模型与档位总是最后一次被接受的提交所用的值，重新打开会话时沿用它们。
 - **`rewind` 不改变副本。** 副本属于会话，不属于节点。每一轮实际使用的 agent、模型、provider 与档位仍记在它的 UserMessage 节点上。
 - **原 profile 的修改只对新会话生效。** 包括收紧的 LANCET 策略（写权限、网络白名单）；要让已有会话使用新的 profile，开新会话或提交时重新指定 agent。provider 配置、元数据与凭据不在副本中，它们的修改从下一次请求起对所有会话生效。
-- **没有副本的会话。** 新会话必须指定 agent。新版本之前建立的会话没有副本：第一次提交时不指定 agent，后台按当前位置所属 Turn 的 agent 读取 profile 生成副本；当前位置为根节点 `0` 时必须指定。在此之前，会话头中的当前 agent 是当前位置所属 Turn 的 agent。
+- **新会话必须指定 agent。** 副本在会话第一次被接受时写入，此后每个会话都有副本。
 
 一轮的模型与推理档位按以下顺序取得：
 
@@ -196,7 +196,7 @@ sequenceDiagram
 | 观察会话：`watch` | SessionId | 推送会话头、当前路径上最近几轮的对话条目、之后变化的条目与生成中的文字，见[观察与重连](#观察与重连)；当前位置为根节点时只有会话头，会话不存在时返回 NotFound |
 | 查看会话头：`head` | SessionId | 返回与视图开头相同的会话头：当前位置、当前 agent、profile 副本中的模型、provider、推理档位与 profile 的默认档位、当前位置所属的那一轮及其有没有 Owner，以及后台已知的执行诊断；不读条目，不占观察许可。会话不存在时返回 NotFound |
 | 查看一个 Turn：`turn` | TurnId | 返回这一轮的 `TurnSummary` 与全部 Step 节点；请求仍在准入时返回在途，没有这个请求时返回 NotFound。接受结果不明时用它找回 |
-| 提交：`submit` | TurnId，`New(SessionId)` 或 `Existing(SessionId)`，输入、规范工作区，以及可选的 agent、模型与推理档位；新会话，以及没有 profile 副本且当前位置为根节点 `0` 的会话必须指定 agent，见[会话的 profile 副本](#会话的-profile-副本) | 接受一轮并返回 LocalTurn；TurnId 已被使用返回 Conflict，同 Session 有不同请求在执行时返回 Busy，见[请求身份与找回](#请求身份与找回) |
+| 提交：`submit` | TurnId，`New(SessionId)` 或 `Existing(SessionId)`，输入、规范工作区，以及可选的 agent、模型与推理档位；新会话必须指定 agent，见[会话的 profile 副本](#会话的-profile-副本) | 接受一轮并返回 LocalTurn；TurnId 已被使用返回 Conflict，同 Session 有不同请求在执行时返回 Busy，见[请求身份与找回](#请求身份与找回) |
 | 查看用量：`usage` | SessionId | 当前路径上逐轮的用量与费用估算，以及合计；用量口径与费用规则见[模型接入合同](llm.md#用量缓存与费用) |
 | 模型候选：`models` | 无，或 provider | 可用的 `<provider>/<model>` 及各自的上下文窗口、输出上限、可用档位、价格与凭据是否就绪，见[模型候选](llm.md#模型候选) |
 | 凭据与元数据：`auth` 与 `models_refresh` 各命令 | 见[凭据命令](llm.md#凭据命令) | 录入与删除 key、SIWC 登录与登出、凭据状态；立即刷新模型元数据与账号模型列表 |
@@ -205,7 +205,7 @@ sequenceDiagram
 | 请求取消：`LocalTurn::cancel`，或独立命令的 `LocalClient::cancel` | TurnId | 句柄同步登记意图并管理在途回执；独立命令返回后台接管结果，持久结局另行查询 |
 | 停止后台：`stop` | 当前本地后台 | 关闭新准入并等待已接管操作收尾，返回停止时已知状态 |
 
-CLI 的 `lattice session` 子命令为 `send`、`rewind`、`list`、`log`、`turn`、`usage` 和 `cancel`，顶层 `lattice run` 是 `session send` 的别名；凭据与模型的命令 `lattice auth`、`lattice models` 见[模型接入合同](llm.md#凭据命令)。`session send` 不带 `--session` 时创建新 Session：CLI 生成 SessionId，项目绑定从当前目录解析，`--agent` 必填；带 `--session` 时向已有 Session 提交，`--agent` 可选，会话没有 profile 副本且当前位置为根节点 `0` 时必填。`--model <provider>/<model>` 与 `--effort <档位>` 选择这一轮的模型与推理档位，随提交写回 profile 副本。`session usage <SESSION_ID>` 逐轮列出用量与费用估算并给出合计，支持 `--json`。CLI 在发出请求前生成身份并先输出，所以进程无论在哪一步中断，都能按第一条记录中的 TurnId 查询结果；中断在发出请求之前时，查询返回 NotFound。`session turn` 查看单个 Turn 的详情，请求仍在准入时报告在途，接受结果不明时用它找回；`--follow` 遇到请求仍在准入时等准入结束，不在途中退出，已接受则继续观察这一轮直至结束，没有这个请求则报告 NotFound，退出 2。`session cancel <SESSION_ID>` 取消该会话当前正在执行的一轮：CLI 用 `head` 查出会话头所示那一轮的 TurnId，再按 TurnId 取消，并输出该 TurnId；没有正在执行的一轮时报告无可取消。已接管、未接管或没有可取消的一轮时退出 0；取消回复丢失、结果不明时，输出带原 TurnId 的取消记录，状态为 `unknown`，退出 1；会话不存在退出 2。TUI 不带 Session 启动时，在首次提交时生成 SessionId 并新建 Session。
+CLI 的 `lattice session` 子命令为 `send`、`rewind`、`list`、`log`、`turn`、`usage` 和 `cancel`，顶层 `lattice run` 是 `session send` 的别名；凭据与模型的命令 `lattice auth`、`lattice models` 见[模型接入合同](llm.md#凭据命令)。`session send` 不带 `--session` 时创建新 Session：CLI 生成 SessionId，项目绑定从当前目录解析，`--agent` 必填；带 `--session` 时向已有 Session 提交，`--agent` 可选。`--model <provider>/<model>` 与 `--effort <档位>` 选择这一轮的模型与推理档位，随提交写回 profile 副本。`session usage <SESSION_ID>` 逐轮列出用量与费用估算并给出合计，支持 `--json`。CLI 在发出请求前生成身份并先输出，所以进程无论在哪一步中断，都能按第一条记录中的 TurnId 查询结果；中断在发出请求之前时，查询返回 NotFound。`session turn` 查看单个 Turn 的详情，请求仍在准入时报告在途，接受结果不明时用它找回；`--follow` 遇到请求仍在准入时等准入结束，不在途中退出，已接受则继续观察这一轮直至结束，没有这个请求则报告 NotFound，退出 2。`session cancel <SESSION_ID>` 取消该会话当前正在执行的一轮：CLI 用 `head` 查出会话头所示那一轮的 TurnId，再按 TurnId 取消，并输出该 TurnId；没有正在执行的一轮时报告无可取消。已接管、未接管或没有可取消的一轮时退出 0；取消回复丢失、结果不明时，输出带原 TurnId 的取消记录，状态为 `unknown`，退出 1；会话不存在退出 2。TUI 不带 Session 启动时，在首次提交时生成 SessionId 并新建 Session。
 
 `session send` 与 `session turn --follow` 的 `--json` 输出 JSONL，只含所提交或所跟的那一轮，记录只有七种：`submit`（发出请求前一条写明 TurnId 与 SessionId，收到回执后一条写明结果）、`cancel`（取消回执）、`head`（会话头）、`entry`（对话条目，读者按 `node` 覆盖）、`text`（生成中的文字）、`connection` 与 `error`。结局在本轮最后一个 Step 条目的 `TurnSummary` 中，不另设结束记录。
 
@@ -230,7 +230,7 @@ LocalTurn 交付提交与取消的回执。普通退出使用 `detach` 取得最
 - TurnId 索引：TurnId 指向这个 UserMessage 节点。
 - 预留的第 0 步，父节点为 UserMessage：没有尝试和回复，停在 `Reserved`。
 - Session 记录的当前位置指向预留的 Step；新会话的 Session 记录与根节点在同一事务创建。
-- profile 副本：会话还没有副本、提交指定了 agent，或这一轮的模型与档位和副本中的不同时，写入这一轮所用的副本，规则见[会话的 profile 副本](#会话的-profile-副本)。
+- profile 副本：新会话、提交指定了 agent，或这一轮的模型与档位和副本中的不同时，写入这一轮所用的副本，规则见[会话的 profile 副本](#会话的-profile-副本)。
 
 这个事务提交是请求接受的持久边界。用户消息为 User 角色的 text parts，大小规则见[输入与传输限制](#输入与传输限制)。
 
@@ -246,7 +246,7 @@ LocalTurn 交付提交与取消的回执。普通退出使用 `detach` 取得最
 
 配置的来源：
 
-- **profile。** 会话的 profile 副本；新会话、没有副本的旧会话或提交指定了 agent 时，读取该 agent 的 profile：先查项目内的 `.lattice/agents/<名字>/agent.toml`，再查配置目录下的 agents 目录，解析外部策略文件并加载系统提示。
+- **profile。** 会话的 profile 副本；新会话或提交指定了 agent 时，读取该 agent 的 profile：先查项目内的 `.lattice/agents/<名字>/agent.toml`，再查配置目录下的 agents 目录，解析外部策略文件并加载系统提示。
 - **provider 与模型。** 提交的选择或副本中的 provider `id` 与模型 `id`；接受时核对 provider 存在，规则见[模型接入合同](llm.md#provider-配置)。
 - **模型元数据。** 接受时用来核对推理档位；输出上限与推理预算由网关每次请求时取，见[元数据的来源与合并](llm.md#元数据的来源与合并)。
 - **凭据。** 接受时核对已录入或已登录；由网关每次请求时取得，见[凭据](llm.md#凭据)。
@@ -277,7 +277,7 @@ LocalTurn 交付提交与取消的回执。普通退出使用 `detach` 取得最
 | agents 目录 | 项目内的 `.lattice/agents` 与配置目录下的 `agents`，查找顺序见[执行配置冻结](#执行配置冻结)；没有其他覆盖方式 |
 | TLS 根证书 | 平台根证书，按 `rustls-native-certs` 的规则从后台环境加载，所以 `SSL_CERT_FILE`、`SSL_CERT_DIR` 有效 |
 
-- 后台启动时载入 TLS 根证书，保存在内存中直到退出。载入失败时后台照常启动、照常回答查询，但在每次接受前按配置错误拒绝并说明原因；空根集合拒绝 TLS 证书，不回退到平台根。
+- 后台启动时载入 TLS 根证书，保存在内存中直到退出。一张可用的根证书都没有时算载入失败；个别证书文件读不出时只记 WARN，其余照常使用。载入失败时后台照常启动、照常回答查询，但在每次接受前按配置错误拒绝并说明原因，不区分所选 provider 是否使用 TLS；不回退到平台根。
 - 请求不带配置来源。后台运行期间，前端环境的变化不影响它；要让新的环境生效，用 `lattice daemon stop` 停止后台后重新启动。前端的 `HOME` 或 `XDG_STATE_HOME` 不同时通常解析出另一个状态根，连到的是另一个后台。
 - 后台不清空、也不替换启动环境。所以后台创建或打开 Git 库时一律使用隔离方式，不读用户与全局的 Git 配置。
 - 工作区 `.env` 不再加载；环境变量不提供 key、endpoint 或模型，见[endpoint 的来源](llm.md#endpoint-的来源)。
@@ -290,7 +290,7 @@ provider 与 Tool Host 共享后台启动时载入的 TLS 根内容，各 Turn �
 
 #### 配置拒绝的原因
 
-新执行的配置在接受前被拒绝时，用户需要知道该改哪里。配置由后台读取，报错面向的是配置的主人，所以后台把原始诊断经脱敏后带回前端，包括 agents 目录校验、profile 的查找与解析、`agent.name` 与所选不一致、`providers.toml` 与 `auth.json` 的解析、模型引用与推理档位、缺少凭据与 TLS 根证书载入失败。后台在接受前发现启用了目录外的工具时，同样把说明带回前端。`session send`、`run` 与 TUI 内提交对同一问题给出同一句说明，`kind` 为 `bad_request`，CLI 退出 2。
+新执行的配置在接受前被拒绝时，用户需要知道该改哪里。配置由后台读取，报错面向的是配置的主人，所以后台把原始诊断经脱敏后带回前端，包括 profile 的查找与解析、`agent.name` 与所选不一致、`providers.toml` 与 `auth.json` 的解析、模型引用与推理档位、缺少凭据与 TLS 根证书载入失败。后台在接受前发现启用了目录外的工具时，同样把说明带回前端。`session send`、`run` 与 TUI 内提交对同一问题给出同一句说明，`kind` 为 `bad_request`，CLI 退出 2。
 
 说明由 [`ConfigRejection`](../../crates/lattice-api/src/config_rejection.rs) 承载。它只有一个构造入口，文字在其中经 [`redact`](../../crates/lattice-api/src/redact.rs) 处理，被替换处写作 `[REDACTED]`。脱敏按以下顺序执行：
 
@@ -348,9 +348,9 @@ cause = ProviderError { retryable }
 | 单 ToolCall 参数 | 1 MiB |
 | 助手正文 | 2 MiB |
 | reasoning | 2 MiB |
-| 一次尝试总量 | 16 MiB |
+| 一次尝试总量：正文、reasoning、各调用的参数、工具名与 provider call ID，以及各片段的回放状态之和 | 16 MiB |
 
-超限立即停止消费，记录 `OutputLimit`。这些是对话协议与组装器的限制，计量类型在 [`lattice-conversation`](../../crates/lattice-conversation/src/lib.rs)，不能解释为容量或延迟的测量结论。单 ToolCall 参数上限与 LANCET 单文件工作区写入上限 `MAX_WORKSPACE_WRITE_BYTES`（1 MiB）一致：写入内容随参数传入，超过该大小的调用无法成功执行。
+参数在流式阶段按收到的原文计量；回复结束、参数解析为规范对象后，规范形式比原文长的部分补入总量。同一元数据重复给出相同的值时不重复计入。超限立即停止消费，记录 `OutputLimit`。写入会话库时按同一算法、同一组常量对完整回复独立核对一次，参数按规范形式计量；这是持久边界上的检查，超限的回复不写入。这些是对话协议与组装器的限制，计量类型在 [`lattice-conversation`](../../crates/lattice-conversation/src/lib.rs)，不能解释为容量或延迟的测量结论。单 ToolCall 参数上限与 LANCET 单文件工作区写入上限 `MAX_WORKSPACE_WRITE_BYTES`（1 MiB）一致：写入内容随参数传入，超过该大小的调用无法成功执行。
 
 Turn 的单调时钟 deadline 在接受事务提交后开始，限制后续 provider 请求与 Tool 分发。槽位结果与 Step 关闭等必要写入不受 Turn deadline 约束；后台重启后不继续执行未关闭的 Turn，也不重建剩余执行时间。每次尝试分别保存按[用量换算](llm.md#用量换算)得出的用量：输入、缓存读、缓存写、输出与其中的推理，各项都可以缺失，缺失表示未知；失败与重试尝试的已知用量也保留，Turn 汇总派生为 Complete 或 Partial。每次尝试同时保存请求网关给出的费用估算，可以缺失，规则见[费用估算](llm.md#费用估算)。
 
@@ -369,7 +369,7 @@ Tool 参数通过协议 canonical JSON 生成规范对象和摘要。有效调�
 空串、数组、标量、畸形 JSON 不能作为 Tool 参数对象。拒绝尝试不产生可执行调用或 InvocationId，也不把该尝试的助手正文作为成功消息；停止尝试的部分内容不保存，不成为回复，也不发给 provider。超限批次不截断为可执行批次。这些限制让每个调用槽位始终对应一条完整有效回复。
 
 ### 回放与跨 provider 投影
-每次尝试记录来源：协议与 provider `id`。来源相同时可使用原回放材料；来源不同时由适配层生成中立语义投影，去除来源 reasoning、provider call ID 和回放状态，切回原来源时使用树中保存的原消息。旧记录的来源只有协议：Anthropic 与 Gemini 分别读作 `(anthropic-messages, anthropic)` 与 `(generate-content, google)`，OpenAI 兼容读作未知来源，按来源不同处理。不透明回放材料逐片段原样保留，单片段上限 64 KiB；即使片段正文为空，也保留其回放状态。连续两个 UserMessage 由投影按适配器要求合并或原样传递。
+每次尝试记录来源：协议与 provider `id`。来源相同时可使用原回放材料；来源不同时由适配层生成中立语义投影，去除来源 reasoning、provider call ID 和回放状态，切回原来源时使用树中保存的原消息。不透明回放材料逐片段原样保留，单片段上限 64 KiB；即使片段正文为空，也保留其回放状态。连续两个 UserMessage 由投影按适配器要求合并或原样传递。
 
 类型和编码由 [`lattice-conversation`](../../crates/lattice-conversation/src/lib.rs) 维护。provider Tool Call ID 仅是 provider 协议材料，不参与会话登记或执行身份分配；跨 provider 投影不伪造目标 provider 身份材料。发给模型的对话是当前位置从根到该节点的路径，provider 投影是纯函数，不在请求时扫描或补齐缺失结果。
 
@@ -707,7 +707,7 @@ Session 永久绑定产品组合层提供的 `ProjectStoreKey`，执行请求的
 | 工具目录快照 | 运行时构建身份与按工具名排序 entries 的规范 JSON，最多 1 MiB，即 1,048,576 字节；新快照超限拒绝，已存快照不合法时报损坏 | `lattice-session` 的 `MAX_CATALOG_SNAPSHOT_BYTES`；ADR 0005 请求接受协议。计量对象不是文件目录或 provider wire |
 | 调用结果载荷 | Succeeded 载荷规范 JSON 最多 65,536 字节；超过时不保存正文，记录摘要与长度，内容不可用 | `lattice-session` 的 `MAX_TOOL_CONTENT_BYTES`；见[调用槽位](#调用槽位) |
 | 有效 profile | system prompt 最多 2 MiB，Agent 名 128 字节，模型引用 4,096 字节；schema_version 为 1，策略已解析；max_retries ≤ 10，退避初始/最大值均 ≤ 60,000 毫秒且最大值不小于初始值，显式 timeout（Turn deadline）为 1–86,400 秒；无效时在接受前按配置错误拒绝 | 当前输入校验。上限 86,400 秒由 ADR 0010 第 11 节确定，使超过 SIWC token 有效期的 Turn 成为实际用法；未设置时使用 300 秒，与观察 idle 分开；粒度与默认值由 #222 裁决 |
-| provider 与 TLS 根 | key 见[模型接入合同的限制](llm.md#限制)；模型名 ≤ 4,096 字节，base_url ≤ 8,192 字节；根证书 ≤ 1,024 个、单个 DER ≤ 65,536 字节、DER 总量 ≤ 4 MiB；接受时能发现的问题在接受前拒绝，执行中发现的按不可重试的配置错误停止 | [connection.rs](../../crates/lattice-llm/src/connection.rs) 的当前实现限制；URL 禁止凭据、query、fragment 并通过 provider 网络策略校验 |
+| provider 与 TLS 根 | key 见[模型接入合同的限制](llm.md#限制)；模型名 ≤ 4,096 字节，base_url ≤ 8,192 字节；根证书 ≤ 1,024 个、单个 DER ≤ 65,536 字节、DER 总量 ≤ 4 MiB；接受时能发现的问题在接受前拒绝，执行中发现的按 `ProviderError { retryable: false }` 停止，诊断写明是配置问题 | [connection.rs](../../crates/lattice-llm/src/connection.rs) 的当前实现限制；URL 禁止凭据、query、fragment 并通过 provider 网络策略校验 |
 | 模型 HTTP 传输 | 建连 30 秒、读空闲 30 秒；不设单独的请求总时限，流由 Turn deadline 约束，另有 86,400 秒兜底，与 Turn deadline 的上限一致；非 2xx 正文最多读 64 KiB，诊断最多 256 字符；provider 建议等待最多采纳 60 秒。每个 Turn 第一次请求时解析、校验并固定地址，Turn 内复用连接：交付结束事件前最多再等 0.5 秒、读 64 KiB 把响应体读完，连接才能回到连接池；连接或传输错误后重新解析。请求除认证与协议头外只带 `User-Agent: lattice/<版本> (linux <内核版本>; <架构>)`、`Accept: text/event-stream, application/json` 与 `x-client-request-id`（取 SessionId，provider 由此可知哪些请求属于同一会话） | [client.rs](../../crates/lattice-llm/src/client.rs)、[transport.rs](../../crates/lattice-llm/src/transport.rs) 与 [saga.rs](../../crates/lattice-api/src/turn/saga.rs) 的 MAX_PROVIDER_RETRY_AFTER；256 依据 #265 收集的 146 条真实 provider 错误消息（整行 P90 为 252 字符），其余为实现常量 |
 | IPC 帧 | 单帧 JSON payload 最多 16 MiB，不含 8 字节 magic 和 4 字节长度头；零长度或超限读取拒绝，编码超限拒绝 | [ipc.rs](../../crates/lattice-api/src/local/ipc.rs) 的 MAX_FRAME、read/write；超过单帧的消息由连接层分帧传输 |
 | IPC 等待 | 单帧 socket 写入最多 5 秒，超时返回传输错误和回执可能未知；后台首请求整帧读取最多 10 秒，超时结束该连接处理 | 同文件 WRITE_TIMEOUT 和 [server.rs::connection](../../crates/lattice-api/src/local/server.rs)，不是 Turn 总时限 |
