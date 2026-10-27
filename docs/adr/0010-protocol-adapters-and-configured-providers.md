@@ -10,6 +10,7 @@ status: accepted
 - 依赖：ADR 0007（接受时确定的模型与 provider 记在 UserMessage 节点上）
 - 实施跟踪：GitHub #315
 - 修正：2026-10-25 起草合同（#317）时，维护者裁决后台直接使用启动环境、删除 `LATTICE_AGENTS_DIR`，SIWC 不设模拟授权服务的测试，`lattice-llm` 对外改为请求网关、profile 副本只记 provider 与模型的 `id`，费用由请求网关在请求结束时估算并保存；第 1、4、6、8、11、13、15、16、17 节，后果，否决的方案与“不在本文决定的事项”随之修正
+- 修正：2026-10-25 实施 L1、L2 时，维护者裁决会话库升版本后直接拒绝旧库，不兼容读取；第 8、16 节与后果随之修正。第 4 节中“API key 随这一轮冻结”一句是起草合同时漏改的，按合同改为每次请求时取得
 
 ## 背景
 
@@ -123,7 +124,7 @@ provider 配置、凭据与模型元数据是用户级的全局状态，不随�
   - 项目目录随仓库检出，其中的配置不可信，不读取其中的 `providers.toml`。agent profile 仍按现有规则可以放在项目内，它只能选择 `<provider>/<model>`，不能改变 endpoint 或认证方式。
   - 环境变量与工作区 `.env` 不再提供 key、endpoint 与模型：`OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、`GEMINI_API_KEY`、`OPENAI_COMPATIBLE_BASE_URL`、`OPENAI_COMPATIBLE_MODEL`、`OPENAI_COMPATIBLE_API_KEY`、`ANTHROPIC_BASE_URL`、`GEMINI_BASE_URL` 删除。工作区 `.env` 的正当用途只是提供 provider key（`crates/lattice-cli/src/env_boundary.rs`），它的加载随之删除。
   - 内置的 `openai-compatible` provider 与 `compat:<模型>` 写法一并删除。本地服务使用内置的 `ollama`、`lmstudio`，或在 `providers.toml` 中配置。
-- **由后台读取。** 内置表、`providers.toml`、元数据与 `auth.json` 由后台读取，agent profile 也由后台按现有查找规则（先项目内 `.lattice/agents`，再全局目录）读取。提交端只交消息、工作区与用户的选择（第 13 节）。后台在接受时解析配置、读取凭据并冻结进这一轮：API key 随这一轮冻结在后台内存中，SIWC 的 access token 由后台在执行中按需刷新（第 11 节）。配置错误由后台在接受前拒绝，诊断随拒绝带回前端。
+- **由后台读取。** 内置表、`providers.toml`、元数据与 `auth.json` 由后台读取，agent profile 也由后台按现有查找规则（先项目内 `.lattice/agents`，再全局目录）读取。提交端只交消息、工作区与用户的选择（第 13 节）。后台在接受时解析配置并核对凭据可用；provider 配置与凭据不按 Turn 冻结，由请求网关每次请求时按当前值取得，SIWC 的 access token 由后台在执行中按需刷新（第 11 节）。配置错误由后台在接受前拒绝，诊断随拒绝带回前端。
 - **配置目录与 TLS 根证书由后台的启动环境确定。** 后台使用启动它的进程的环境，启动时读一次，不清空、不替换；显式启动与前端自动启动行为相同，自动启动的后台继承拉起它的前端的环境。配置目录为 `$HOME/.lattice`，TLS 根证书按 `rustls-native-certs` 的规则从这份环境加载。此后不随提交变化，连接到同一后台的前端共用这份配置；请求不带配置来源，环境变化在重启后台后生效。
 - **agents 目录固定。** 项目内的 `.lattice/agents` 与配置目录下的 `agents`，`LATTICE_AGENTS_DIR` 删除。
 - **Git 库一律隔离。** 后台不再替换 `HOME`，所以创建或打开 Git 库时一律使用隔离方式，不读用户与全局的 Git 配置。
@@ -162,7 +163,7 @@ provider 配置不写入会话，也不按 Turn 冻结：请求网关每次请�
 
 - 每次尝试的用量细分为输入、缓存读、缓存写、输出与其中的推理。各协议的报告口径不同（例如 OpenAI 的输入含缓存命中，Anthropic 不含），由协议适配器换算为统一口径，换算规则写入合同。
 - provider 没有报告的细分项为未知，不记为 0，与现有“缺失的用量为未知”一致。
-- 每次请求结束时，请求网关按当时的模型价格估算费用，随用量一起保存在这次尝试上，标为估算；没有价格时这次尝试没有费用。存下的是当时的估算值，之后价格变化不回头修改；新版本之前的记录没有费用。费用只按模型价格计算，不因 provider 或认证方式区别，SIWC 同样显示。
+- 每次请求结束时，请求网关按当时的模型价格估算费用，随用量一起保存在这次尝试上，标为估算；没有价格时这次尝试没有费用。存下的是当时的估算值，之后价格变化不回头修改。费用只按模型价格计算，不因 provider 或认证方式区别，SIWC 同样显示。
 - 用量在两处查看：TUI 的 statusline 显示本轮的 token、缓存命中与费用估算；`lattice session usage <SESSION_ID>` 逐轮列出用量与费用估算并给出合计，支持 `--json`。
 - 缓存的开启与检测一起做：适配器按协议开启缓存（Anthropic 的 `cache_control`，OpenAI 的 `prompt_cache_key` 等），显示每轮的缓存命中。缓存键不含用户内容。
 
@@ -253,10 +254,8 @@ TUI 用 slash 命令选择模型与推理强度，选择界面是 Dock 中的面
 
 ### 16. 旧数据
 
-- 旧会话可以继续读取与续接。节点上旧的 provider 值映射到内置 provider：`openai`、`anthropic` 保持不变，`gemini` 映射为 `google`；`openai_compatible` 无法确定是哪一家，按未知来源处理，续接时按跨来源规则投影。
-- 旧的用量记录中 `prompt_tokens`、`completion_tokens` 读作输入与输出，缓存与推理细分为未知。OpenAI 兼容的旧记录中输入含缓存命中，已无法拆分。
-- 旧会话没有 profile 副本。升级后第一次提交时，后台按当前位置所属 Turn 的 agent 读取 `agent.toml`，生成副本；当前位置为根节点 `0` 时没有这样的 Turn，提交必须指定 agent。
-- 新版本写入的记录，旧版本无法读取。
+- 会话库的记录格式变化，格式版本随之提升。新版本打开旧库时按版本不兼容拒绝，错误列出库的路径，由人删除或存档；不提供迁移，也不兼容读取旧记录，规则见[存储合同](../architecture/storage.md#身份版本与打开)。
+- 旧版本打开新库时同样拒绝。
 
 ### 17. 验证方式
 
@@ -301,7 +300,7 @@ TUI 用 slash 命令选择模型与推理强度，选择界面是 Dock 中的面
   - 现有 profile 中的别名失效，须改为 `<provider>/<model>`。
   - 环境变量与工作区 `.env` 中的 key 不再生效，须用 `lattice auth` 录入。
   - 用环境变量配置 endpoint 或 OpenAI 兼容服务的用户须改写为 `providers.toml`。
-  - 会话库记录格式变化，旧版本读不了新库。
+  - 会话库格式版本提升，旧库打开时被拒绝，已有会话须删除或存档。
 - API key 与 SIWC 登录材料保存在磁盘上的 `auth.json`，这是一类需要保护的本地文件；后台进程持有凭据。
 - 接受 Turn 时不刷新 token，登录失效要到这一轮第一次需要刷新时才发现，这一轮以认证错误结束。
 - Turn deadline 上限提高后，配置错误的超长 deadline 最多让一轮跑 24 小时才停。
