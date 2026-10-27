@@ -14,9 +14,8 @@ fn driver() -> LatticeDriver {
 }
 
 /// Public subcommands the `lattice --help` surface must advertise.
-const EXPECTED_PUBLIC_COMMANDS: &[&str] = &[
-    "models", "resolve", "session", "doctor", "audit", "lancet", "tui",
-];
+const EXPECTED_PUBLIC_COMMANDS: &[&str] =
+    &["models", "resolve", "session", "audit", "lancet", "tui"];
 
 #[test]
 fn fast_home_xdg_isolated_from_developer_home() {
@@ -28,7 +27,6 @@ fn fast_home_xdg_isolated_from_developer_home() {
     assert!(world.session_store_dir().starts_with(world.home()));
     // OS-assigned ephemeral port (non-zero means the OS reserved one).
     assert!(world.port() != 0, "scenario must hold an OS-assigned port");
-    assert!(world.project_dir().join(".env").is_file());
 }
 
 #[test]

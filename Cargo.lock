@@ -1027,12 +1027,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dotenvy"
-version = "0.15.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
-
-[[package]]
 name = "downcast-rs"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2804,7 +2798,6 @@ dependencies = [
  "clap",
  "colored",
  "dirs",
- "dotenvy",
  "futures",
  "lancet-api",
  "lattice-agent",
@@ -2817,7 +2810,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "unicode-width",
- "url",
 ]
 
 [[package]]
@@ -2845,8 +2837,10 @@ dependencies = [
  "rustls-native-certs",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "toml",
  "tower-layer",
  "tower-service",
  "tracing",

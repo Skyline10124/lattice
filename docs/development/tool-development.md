@@ -41,11 +41,11 @@ cargo xtask lancet-boundary
 
 启用工具不等于允许其全部 Host 操作。具体准入顺序和未知名称拒绝见 [Cell 准入](../architecture/cell.md#调用准入)，路径可见性与写权限见[工作区路径策略](../architecture/workspace.md#路径策略)。不要使用已退役的 `[workspace]`、`lancet.mode` 或 `[lancet.effects]` 配置。
 
-### 配置与凭据诊断
+### 配置与启动环境
 
-工作区 `.env` 不能覆盖已有进程环境，也不能设置 `LATTICE_*`、provider endpoint 后缀 `*_BASE_URL` / `*_API_BASE` / `*_API_URL` / `*_ENDPOINT`、`*_PROXY`、`HOME` / `XDG_*`、`SSL_CERT_FILE` / `SSL_CERT_DIR`。匹配不区分大小写。受信 shell/CI 进程环境与检出仓库的 `.env` 不是同一信任来源；API key 的允许加载不授权仓库改写策略、端点、代理或证书信任。
+工作区 `.env` 不再加载，不能提供凭据、endpoint、模型或 `LATTICE_*` 配置。当前凭据与连接仍由前端从 shell/CI 进程环境读取并随提交冻结；密钥须在运行提交命令的终端中导出，用法见[根 README](../../README.md#2-配置模型凭据)。模型解析可通过 `lattice resolve` 与 `lattice models` 查看。
 
-使用顶层 `lattice doctor` 检查 credential/endpoint 来源、applied/shadowed/dropped 键与解析错误，不通过启动告警回显敌意输入。输出不能泄露 credential 值，代理 URL 的 userinfo 须脱敏。读取行为与诊断实现见 [`env_boundary.rs`](../../crates/lattice-cli/src/env_boundary.rs)和 [`commands/doctor.rs`](../../crates/lattice-cli/src/commands/doctor.rs)。旧记录中的改用 HOME `.env` 或新增 `--env-file` 方案并非现行授权。
+后台启动与 Git 隔离规则见[会话合同](../architecture/session.md#配置来源与后台启动)。
 
 ## 语义编辑
 
@@ -78,7 +78,7 @@ lattice lancet doctor
 lattice --json lancet doctor
 ```
 
-`lancet doctor` 检查 Local Workspace 规范化与生成封闭目录的组成，任一检查失败以非零状态退出。JSON 是同一检查的结构化输出。它不验证完整 Tool 调用、持久终态、Bundle 安装或实际权限配置，也不同于顶层 `lattice doctor` 的配置诊断。
+`lancet doctor` 检查 Local Workspace 规范化与生成封闭目录的组成，任一检查失败以非零状态退出。JSON 是同一检查的结构化输出。它不验证完整 Tool 调用、持久终态、Bundle 安装或实际权限配置。
 
 ## 开发状态诊断与重建边界
 

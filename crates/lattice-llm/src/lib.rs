@@ -9,6 +9,8 @@ pub use connection::{ConnectionMaterial, LlmConnection};
 mod endpoints;
 mod logging;
 pub mod protocol;
+pub(crate) mod provider;
+pub use provider::{ModelRef, ModelRefError};
 mod reply;
 mod reply_stream;
 mod router;

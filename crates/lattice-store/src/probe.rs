@@ -178,7 +178,14 @@ pub fn probe_location_report(location: &Path) -> ProbeReport {
     record("minimal repository round-trip", &mut || {
         let staging = scratch.join("mini-staging.git");
         let published = scratch.join("mini.git");
-        let repo = gix::init_bare(&staging).map_err(|e| format!("init: {e}"))?;
+        let repo = gix::ThreadSafeRepository::init_opts(
+            &staging,
+            gix::create::Kind::Bare,
+            gix::create::Options::default(),
+            gix::open::Options::isolated(),
+        )
+        .map_err(|e| format!("init: {e}"))?
+        .to_thread_local();
         let blob = repo
             .write_blob(b"probe")
             .map(|id| id.detach())

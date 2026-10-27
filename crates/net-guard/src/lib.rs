@@ -201,11 +201,23 @@ pub fn resolve_public_socket_addrs(
     Ok(addrs)
 }
 
-/// Validate a provider base URL.
-pub fn validate_base_url(url: &str) -> Result<(), NetGuardError> {
+/// provider base_url 的 UTF-8 字节上限，按 URL 规范化前的原文计量。
+const MAX_BASE_URL_BYTES: usize = 8_192;
+
+/// 仅校验 URL 语法和静态地址策略，不查询 DNS 或访问网络。
+pub fn validate_base_url_static(url: &str) -> Result<(), NetGuardError> {
+    parse_base_url(url).map(|_| ())
+}
+
+fn parse_base_url(url: &str) -> Result<url::Url, NetGuardError> {
     if url.is_empty() {
         return Err(NetGuardError::Config {
             message: "base_url must not be empty".to_string(),
+        });
+    }
+    if url.len() > MAX_BASE_URL_BYTES {
+        return Err(NetGuardError::Config {
+            message: format!("base_url exceeds {MAX_BASE_URL_BYTES} bytes"),
         });
     }
 
@@ -240,6 +252,11 @@ pub fn validate_base_url(url: &str) -> Result<(), NetGuardError> {
             message: "base_url contains userinfo which is not allowed".to_string(),
         });
     }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(NetGuardError::Config {
+            message: "base_url must not contain query or fragment".to_string(),
+        });
+    }
 
     let host_clean = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = host_clean.parse::<IpAddr>()
@@ -259,8 +276,17 @@ pub fn validate_base_url(url: &str) -> Result<(), NetGuardError> {
         });
     }
 
-    // Best-effort DNS check when resolution is available. Request-time pinning
-    // by callers remains authoritative.
+    Ok(parsed)
+}
+
+/// 校验 provider 的 base_url，并在可解析时尽力检查 DNS 结果。
+pub fn validate_base_url(url: &str) -> Result<(), NetGuardError> {
+    let parsed = parse_base_url(url)?;
+    let host = parsed
+        .host_str()
+        .expect("static URL validation requires a host");
+
+    // DNS 检查仅尽力而为；调用方仍须在请求时解析并固定已校验的地址。
     if !host.ends_with(".local") && !is_localhost_host(host) {
         let port = parsed
             .port()
@@ -291,10 +317,35 @@ mod tests {
         for (name, url, expected_message_substring) in [
             ("file_scheme", "file:///etc/passwd", None),
             ("userinfo", "https://user:pass@api.example.com/v1", None),
+            ("username_only", "https://user@localhost", Some("userinfo")),
+            (
+                "password_only",
+                "https://:password@localhost",
+                Some("userinfo"),
+            ),
+            (
+                "query",
+                "https://api.example.com/v1?token=value",
+                Some("query"),
+            ),
+            ("empty_query", "https://api.example.com/v1?", Some("query")),
+            (
+                "fragment",
+                "https://api.example.com/v1#part",
+                Some("fragment"),
+            ),
+            (
+                "empty_fragment",
+                "https://api.example.com/v1#",
+                Some("fragment"),
+            ),
             ("remote_http", "http://example.com/v1", None),
             ("private_10", "https://10.0.0.1/v1", None),
             ("private_192", "https://192.168.1.1/v1", None),
             ("private_172", "https://172.16.0.1/v1", None),
+            ("private_ipv6", "https://[fc00::1]/v1", None),
+            ("reserved_ipv6", "https://[2001:db8::1]/v1", None),
+            ("other_loopback", "https://127.0.0.2/v1", None),
             ("ftp_scheme", "ftp://example.com/v1", None),
             ("empty_host", "https://", None),
             ("rebinding_nip", "https://nip.io/v1", Some("rebinding")),
@@ -319,8 +370,9 @@ mod tests {
             ),
             ("empty_url", "", Some("must not be empty")),
         ] {
-            let err =
-                validate_base_url(url).expect_err(&format!("{name}: {url:?} must be rejected"));
+            let err = validate_base_url_static(url)
+                .expect_err(&format!("{name}: {url:?} must be rejected"));
+            assert_eq!(validate_base_url(url), Err(err.clone()), "{name}");
             if let Some(substring) = expected_message_substring {
                 assert!(
                     err.to_string().contains(substring),
@@ -328,6 +380,35 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn static_base_url_accepts_public_hosts_and_loopback_without_resolving() {
+        for url in [
+            "https://unresolvable.invalid/v1",
+            "https://8.8.8.8/v1",
+            "https://[2606:4700:4700::1111]/v1",
+            "http://localhost/v1",
+            "http://127.0.0.1:8000/v1",
+            "http://[::1]:8000/v1",
+        ] {
+            validate_base_url_static(url).unwrap();
+        }
+    }
+
+    #[test]
+    fn static_base_url_byte_limit_is_inclusive() {
+        let prefix = "https://localhost/";
+        let mut url = format!(
+            "{prefix}{}",
+            "é".repeat((MAX_BASE_URL_BYTES - prefix.len()) / 2)
+        );
+        assert_eq!(url.len(), MAX_BASE_URL_BYTES);
+        validate_base_url_static(&url).unwrap();
+        url.push('a');
+        let error = validate_base_url_static(&url).unwrap_err();
+        assert!(error.to_string().contains("8192 bytes"));
+        assert_eq!(validate_base_url(&url), Err(error));
     }
 
     #[test]

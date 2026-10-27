@@ -78,7 +78,7 @@ provider 配置、凭据与模型元数据是用户级的全局状态，由后�
 ### 适配器的职责
 
 - **请求。** 把当前路径上的对话、系统提示、工具定义和推理档位按协议与 features 写成请求体。投影规则与回放材料的处理由[会话合同的回放与跨 provider 投影](session.md#回放与跨-provider-投影)维护。
-- **流式事件。** 把线上事件翻译为正文、reasoning 与工具调用的部件增量，交给 #312 的累积器组装完整回复。解析端对无歧义的厂商差异直接兼容，例如 `reasoning_content` 与 `reasoning` 两种字段都读取，Mistral 的 `content` 为分块数组时读取其中的 `thinking` 块。
+- **流式事件。** 把线上事件翻译为正文、reasoning 与工具调用的部件增量，交给 #312 的累积器组装完整回复。解析端对无歧义的厂商差异直接兼容，例如 `reasoning_content` 与 `reasoning` 两种字段都读取，Mistral 的 `content` 为分块数组时读取其中的 `thinking` 块。不认识的内容块或增量类型按不可重试的协议错误停止这次尝试，不静默丢弃；诊断只写协议、位置与类型名。
 - **用量。** 按[用量换算](#用量换算)得出统一口径。
 - **不使用服务端会话状态。** Responses 与 Interactions 固定发送 `store: false`，每次发送完整历史，不发送 `previous_response_id`、`previous_interaction_id`，不使用后台执行。
 
@@ -130,7 +130,7 @@ provider 配置、凭据与模型元数据是用户级的全局状态，由后�
 | `ollama` | `chat-completions` | `http://127.0.0.1:11434/v1` | `none` | — | — |
 | `lmstudio` | `chat-completions` | `http://127.0.0.1:1234/v1` | `none` | `lmstudio` | — |
 
-- `google` 的 `generate-content` 保留，可在 `providers.toml` 中切换。OpenAI 的新模型在 Chat Completions 上不能使用工具（[OpenAI 推理指南](https://developers.openai.com/api/docs/guides/reasoning)），所以 `openai` 以 Responses 为准。
+- `generate-content` 协议保留，需要它的用户在 `providers.toml` 中新增一个使用该协议的 provider；内置 `google` 不能改 `protocol`。OpenAI 的新模型在 Chat Completions 上不能使用工具（[OpenAI 推理指南](https://developers.openai.com/api/docs/guides/reasoning)），所以 `openai` 以 Responses 为准。
 - `chatgpt` 是 OpenAI 的订阅通道，不计入第一轮收录的 20 家，限制见 [Sign in with ChatGPT](#sign-in-with-chatgpt)。
 - 阿里云的文档推荐按工作空间区分的域名（`https://{WorkspaceId}.<地域>.maas.aliyuncs.com/compatible-mode/v1`），表中用的是仍可使用的旧域名；使用工作空间域名的用户在 `providers.toml` 中覆盖 `base_url`。
 - `ollama` 在 models.dev 中没有条目，它的模型没有元数据，可以在 `providers.toml` 中手写。
@@ -161,16 +161,17 @@ reasoning_replay = "none"              # 按模型覆盖 feature
 
 | 字段 | 位置 | 说明 |
 | --- | --- | --- |
-| `protocol`、`base_url`、`auth`、`catalog` | provider 表 | 见[字段](#字段)；覆盖内置 provider 时只写要改的字段 |
+| `protocol`、`base_url`、`auth`、`catalog` | provider 表 | 见[字段](#字段)；覆盖内置 provider 时只写要改的字段，不能写 `protocol` |
 | `features` | provider 子表 | 覆盖或补充 provider 级 features |
 | `models."<模型>"` | provider 子表 | 手写元数据：`context`、`output`（token 数），`effort`（可用档位列表），`tools`（布尔，默认 true），`cost`（`input`、`output`、`cache_read`、`cache_write`，美元每百万 token） |
 | `models."<模型>".features` | 模型子表 | 按模型覆盖 features |
 
 - **严格解析。** 未知字段、未知 feature 或取值、类型不符、格式错误都使整个文件无效。文件无效时，用到 provider 配置的操作在接受前按配置错误拒绝，诊断写明文件路径、行号与原因；不使用部分有效的内容。
 - **文件不存在**等于空配置，只使用内置表。
+- **内置 provider 不能改协议。** 覆盖内置 provider 的表写了 `protocol` 时，即使取值与内置相同，整个文件也无效；要用其他协议，新建一个 provider `id`。
 - **`chatgpt` 不能改写。** 文件中出现 `[providers.chatgpt]` 的 `protocol`、`base_url`、`auth` 或 `features`，或其他 provider 设置 `auth = "oauth:chatgpt"`，整个文件无效。`chatgpt` 只能写 `models` 下的手写元数据。
 - **不写凭据。** 文件中没有 key 字段；凭据只在 `auth.json` 中。
-- **生效时机。** 请求网关每次请求、后台接受 Turn 与列出模型候选时，都按文件的当前内容解析，修改从下一次请求起对所有会话生效；执行中的一轮可能前后两次请求发往不同的 endpoint。文件在执行中变为无效时，下一次请求按不可重试的配置错误停止。
+- **生效时机。** 请求网关每次请求、后台接受 Turn 与列出模型候选时，都按文件的当前内容解析，修改从下一次请求起对所有会话生效；执行中的一轮可能前后两次请求发往不同的 endpoint。文件在执行中变为无效时，下一次请求按 `ProviderError { retryable: false }` 停止，诊断写明是配置问题，见[会话合同](session.md#模型请求与执行预算)。
 
 ### endpoint 的来源
 
@@ -321,7 +322,6 @@ Chat Completions 中，模型的 `reasoning_options` 含 toggle 项且 `thinking
 - 解析端两种 cache_read 字段都读取，属于无歧义的兼容。
 - 求和的项中有一项缺失时，和按已有的项计算；全部缺失时为未知。
 - Interactions 的 `total_output_tokens` 是否含推理，Google 文档没有写明；表中按不含处理，实现时用真实响应核对，结论写回本表。
-- 旧记录的 `prompt_tokens`、`completion_tokens` 读作 `input`、`output`，其余为未知。
 
 ### 缓存的开启与检测
 
@@ -336,7 +336,7 @@ Chat Completions 中，模型的 `reasoning_options` 含 toggle 项且 `thinking
 
 ### 费用估算
 
-每次请求结束时，请求网关按当时的模型价格估算这次尝试的费用，随用量交给调用方，保存在这次尝试上，标为估算。存下的是当时的估算值，之后价格变化（包括在 `providers.toml` 中修正）不回头修改旧记录；新版本之前的记录没有费用，显示为未知，不补算。价格是美元每百万 token：
+每次请求结束时，请求网关按当时的模型价格估算这次尝试的费用，随用量交给调用方，保存在这次尝试上，标为估算。存下的是当时的估算值，之后价格变化（包括在 `providers.toml` 中修正）不回头修改旧记录。价格是美元每百万 token：
 
 ```text
 未命中输入 = input − cache_read − cache_write（缺失项按 0）
@@ -394,11 +394,11 @@ Chat Completions 中，模型的 `reasoning_options` 含 toggle 项且 `thinking
 | `lattice auth remove <provider>` | 删除该 provider 的 key；对 `chatgpt` 先按[登出](#登出)处理，再删除 `client_id` 与账号信息，保留 host ID |
 | `lattice auth login chatgpt` | SIWC 登录，见下节 |
 | `lattice auth logout chatgpt` | SIWC 登出 |
-| `lattice auth status` | 每个 provider 的凭据是否就绪；`chatgpt` 另给账号邮箱与 access token 的到期时间。不返回凭据本身 |
+| `lattice auth status` | 每个 provider 的凭据状态：`ready`（已录入或已登录）、`missing`（没有凭据）或 `invalid`（`auth.json` 无效）；`chatgpt` 另给账号邮箱与 access token 的到期时间。不返回凭据本身 |
 
 只有 `auth` 为 `bearer`、`x-api-key` 或 `x-goog-api-key` 的 provider 能 `set`。
 
-原顶层命令 `lattice doctor` 只诊断环境变量与工作区 `.env` 中的凭据与 endpoint 来源，随这两个来源一起删除；凭据状态由 `lattice auth status` 给出，可用的 provider 与模型由 `lattice models` 给出。
+原顶层命令 `lattice doctor` 只诊断环境变量与工作区 `.env` 中的凭据与 endpoint 来源，随这两个来源一起删除；按别名解析 endpoint 的 `lattice resolve` 随别名表一起删除；凭据状态由 `lattice auth status` 给出，可用的 provider 与模型由 `lattice models` 给出。
 
 ## Sign in with ChatGPT
 
@@ -450,7 +450,7 @@ SIWC 按 OpenAI 的[开源工具接入方式](https://developers.openai.com/siwc
 
 | 对象 | 限制 | 依据 |
 | --- | --- | --- |
-| `providers.toml` | 最多 1 MiB；provider 最多 256 个，每个 provider 手写的模型最多 1,024 个 | 实现常量，防止异常文件占用内存 |
+| `providers.toml` | 最多 1 MiB；文件中的 provider 表最多 256 个（覆盖内置 provider 的表也算），每个 provider 手写的模型最多 1,024 个 | 实现常量，防止异常文件占用内存 |
 | `auth.json` | 最多 1 MiB；key 1～16,384 字节 | 沿用现有连接材料的 key 上限 |
 | models.dev 拉取 | 响应最多 32 MiB，30 秒内读完 | 2026-10-24 的 `api.json` 约 5.9 MB |
 | SIWC 刷新余量 | 剩余有效期短于 300 秒时刷新 | access token 有效期 1 小时；余量覆盖发请求的时间与时钟偏差 |

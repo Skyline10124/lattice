@@ -83,7 +83,7 @@ pub enum WorldError {
 }
 
 impl ScenarioWorld {
-    /// Build an isolated HOME/XDG/project tree with an empty project-root `.env`.
+    /// 创建隔离的 HOME/XDG 与项目目录。
     pub fn new(prefix: &str) -> Result<Self, WorldError> {
         let root = tempfile::TempDir::with_prefix(prefix)?;
         let home = root.path().join("home");
@@ -93,7 +93,6 @@ impl ScenarioWorld {
         std::fs::create_dir_all(&home)?;
         std::fs::create_dir_all(&session_store)?;
         std::fs::create_dir_all(project.join(".lattice"))?;
-        std::fs::write(project.join(".env"), "")?;
 
         let port = os_free_port()?;
 
@@ -180,13 +179,8 @@ impl ScenarioWorld {
             .insert(key.into(), value.into());
     }
 
-    /// Drop a key from the allow-list so the child process does not see it at
-    /// all — distinct from `set_env(key, "")`, which still defines the variable.
-    ///
-    /// Needed by `.env` trust-boundary scenarios: a key the parent already
-    /// defines can never be injected from a `.env` (non-override load), so
-    /// asserting that the boundary refused it requires the key to be genuinely
-    /// absent from the process environment.
+    /// 从允许列表移除变量，使子进程中该变量不存在。
+    /// 将值设为空串仍表示变量已定义，不能代替不存在状态。
     pub fn unset_env(&self, key: &str) {
         self.allowed_env
             .lock()

@@ -32,7 +32,7 @@ impl FrozenConfiguration {
         Self::capture(loaded, workspace, connection)
     }
 
-    /// 提交端先执行已有 dotenv/profile 优先级，再调用此方法；后台不运行环境安装器。
+    /// 提交端加载 profile 与连接后调用；连接仍由提交进程的环境冻结。
     /// 文件读取与 TLS 根读取是阻塞操作，应在提交端 spawn_blocking 内调用。
     pub fn capture(
         mut loaded: crate::LoadedAgentProfile,
