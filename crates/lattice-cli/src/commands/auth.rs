@@ -163,8 +163,9 @@ mod tests {
         assert_eq!(input.position(), 16_387);
     }
 
-    #[test]
-    fn terminal_preserves_canonical_editing_and_restores_settings_after_read() {
+    #[tokio::test]
+    async fn terminal_preserves_canonical_editing_and_restores_settings_after_read() {
+        let _guard = crate::test_support::signal_guard().await;
         use std::{fs::File, os::fd::FromRawFd};
         let (mut master, mut slave) = (-1, -1);
         // openpty 成功后两个描述符均由 File 独占并在测试结束时关闭。

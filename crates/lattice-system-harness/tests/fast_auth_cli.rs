@@ -163,6 +163,15 @@ fn fast_auth_stdin_status_permissions_and_rejections() {
             }
         }
         let path = world.home().join(".lattice/auth.json");
+        if fs::metadata(path.parent().unwrap())
+            .map_err(|error| error.to_string())?
+            .permissions()
+            .mode()
+            & 0o777
+            != 0o700
+        {
+            return Err("new credential directory must be 0700".into());
+        }
         let metadata = fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
         if !metadata.is_file() || metadata.permissions().mode() & 0o777 != 0o600 {
             return Err("credential file must be regular and 0600".into());

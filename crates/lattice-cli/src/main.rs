@@ -5,6 +5,8 @@ use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 
 mod commands;
+#[cfg(test)]
+mod test_support;
 use commands::{audit, lancet as lancet_cmd, models, resolve, session as session_cmd};
 
 #[derive(Parser)]

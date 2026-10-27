@@ -36,13 +36,17 @@ fn check_metadata(meta: &fs::Metadata, directory: bool, owner: u32) -> Result<()
         ));
     }
     if directory {
-        return if meta.is_dir() {
-            Ok(())
-        } else {
-            Err(AuthError::InvalidFile(
+        if !meta.is_dir() {
+            return Err(AuthError::InvalidFile(
                 "configuration directory must be a directory",
-            ))
-        };
+            ));
+        }
+        if meta.mode() & 0o077 != 0 {
+            return Err(AuthError::InvalidFile(
+                "configuration directory permissions are too broad; group and other permissions must be absent; permissions were not changed",
+            ));
+        }
+        return Ok(());
     }
     if !meta.is_file() {
         return Err(AuthError::InvalidFile(

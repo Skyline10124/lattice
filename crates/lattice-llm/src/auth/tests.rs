@@ -4,7 +4,7 @@
 use super::*;
 use std::{
     fs,
-    os::unix::fs::{PermissionsExt, symlink},
+    os::unix::fs::{DirBuilderExt, PermissionsExt, symlink},
 };
 
 const KEY: &str = "credential-test-secret-7J29";
@@ -16,7 +16,11 @@ fn fixture() -> (tempfile::TempDir, AuthStore) {
 }
 
 fn write(store: &AuthStore, bytes: impl AsRef<[u8]>) {
-    fs::create_dir_all(&store.directory).unwrap();
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&store.directory)
+        .unwrap();
     let path = store.directory.join("auth.json");
     fs::write(&path, bytes).unwrap();
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
@@ -63,7 +67,10 @@ fn credential_entries_validate_the_entire_provider_id() {
 #[test]
 fn provider_configuration_errors_keep_path_line_and_reason() {
     let (_directory, store) = fixture();
-    fs::create_dir(&store.directory).unwrap();
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&store.directory)
+        .unwrap();
     let path = store.directory.join("providers.toml");
     fs::write(
         &path,
@@ -180,6 +187,47 @@ fn owner_read_only_credentials_are_accepted_without_permission_changes() {
         fs::metadata(path).unwrap().permissions().mode() & 0o777,
         0o400
     );
+}
+
+#[test]
+fn configuration_directory_permissions_are_private_and_not_repaired() {
+    let (_directory, store) = fixture();
+    assert!(!store.directory.exists());
+    store.set("openai", KEY).unwrap();
+    assert_eq!(
+        fs::metadata(&store.directory).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    let path = store.directory.join("auth.json");
+    let original = fs::read(&path).unwrap();
+    fs::set_permissions(&store.directory, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(state(&store, "openai"), AuthState::Invalid);
+    let reason = "configuration directory permissions are too broad; group and other permissions must be absent; permissions were not changed";
+    assert_eq!(
+        store.status().unwrap().error.unwrap(),
+        format!("auth.json: {reason}")
+    );
+    for error in [
+        store.set("openai", "replacement").unwrap_err(),
+        store.remove("openai").unwrap_err(),
+    ] {
+        assert!(matches!(error, AuthError::InvalidFile(message) if message == reason));
+    }
+    assert_eq!(
+        fs::metadata(&store.directory).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+    assert!(fs::read(&path).unwrap() == original);
+    for mode in [0o700, 0o500, 0o700] {
+        fs::set_permissions(&store.directory, fs::Permissions::from_mode(mode)).unwrap();
+        assert_eq!(state(&store, "openai"), AuthState::Ready);
+        assert_eq!(
+            fs::metadata(&store.directory).unwrap().permissions().mode() & 0o777,
+            mode
+        );
+    }
+    store.set("openai", "replacement").unwrap();
+    assert!(store.remove("openai").unwrap());
 }
 
 #[test]

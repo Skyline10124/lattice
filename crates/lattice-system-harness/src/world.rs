@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::net::TcpListener;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -90,7 +91,7 @@ impl ScenarioWorld {
         let project = root.path().join("project");
         // #143: durable session state lives under the XDG *state* root.
         let session_store = home.join(".local/state").join("lattice");
-        std::fs::create_dir_all(&home)?;
+        std::fs::DirBuilder::new().mode(0o700).create(&home)?;
         std::fs::create_dir_all(&session_store)?;
         std::fs::create_dir_all(project.join(".lattice"))?;
 
