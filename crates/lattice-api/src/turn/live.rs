@@ -5,13 +5,49 @@
 
 use super::types::RunTurnRequest;
 use crate::session::{ApiError, Result};
+use lattice_conversation::ProviderOrigin;
+use lattice_llm::ProviderKind;
 use lattice_session::store::{
-    FrozenTurnConfig, MAX_MODEL_STEPS, ToolCatalogEntry, ToolCatalogSnapshot, TurnExecutionLimits,
+    AttemptOrigin, AttemptProtocol, FrozenTurnConfig, MAX_MODEL_STEPS, ToolCatalogEntry,
+    ToolCatalogSnapshot, TurnExecutionLimits,
 };
+
+/// ProviderKind 接入使用的持久来源与消息协议标记。
+pub(super) fn provider_origin(provider: &ProviderKind) -> (AttemptOrigin, ProviderOrigin) {
+    let (provider_id, protocol, message_origin) = match provider {
+        ProviderKind::OpenAi => (
+            "openai",
+            AttemptProtocol::ChatCompletions,
+            ProviderOrigin::OpenAiCompatible,
+        ),
+        ProviderKind::OpenAiCompatible => (
+            "openai-compatible",
+            AttemptProtocol::ChatCompletions,
+            ProviderOrigin::OpenAiCompatible,
+        ),
+        ProviderKind::Anthropic => (
+            "anthropic",
+            AttemptProtocol::AnthropicMessages,
+            ProviderOrigin::Anthropic,
+        ),
+        ProviderKind::Gemini => (
+            "google",
+            AttemptProtocol::GenerateContent,
+            ProviderOrigin::Gemini,
+        ),
+    };
+    (
+        AttemptOrigin {
+            protocol,
+            provider_id: provider_id.into(),
+        },
+        message_origin,
+    )
+}
 
 pub(crate) fn freeze_config(
     request: &RunTurnRequest,
-    provider: &str,
+    provider: &ProviderKind,
     catalog: &[lancet_api::ToolDefinition],
 ) -> Result<FrozenTurnConfig> {
     let loaded = request
@@ -21,7 +57,7 @@ pub(crate) fn freeze_config(
     let config = FrozenTurnConfig {
         agent_name: loaded.profile.agent.name.clone(),
         model: loaded.profile.agent.model.clone(),
-        provider: provider.into(),
+        provider: provider_origin(provider).0.provider_id,
         system_prompt: Some(loaded.system_prompt.clone()),
         catalog: ToolCatalogSnapshot::new(
             env!("CARGO_PKG_VERSION").into(),

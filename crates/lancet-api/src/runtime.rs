@@ -336,14 +336,20 @@ mod tests {
             model_step_ordinal: 0,
             attempt_ordinal: 0,
         };
-        env.db.start_request(&lock, key, now).unwrap();
+        let origin = lattice_session::store::AttemptOrigin {
+            protocol: lattice_session::store::AttemptProtocol::ChatCompletions,
+            provider_id: "openai".into(),
+        };
+        env.db
+            .start_request(&lock, key, origin.clone(), now)
+            .unwrap();
         let calls = env
             .db
             .register_calls(
                 &lock,
                 CompleteReply {
                     key,
-                    origin: ProviderOrigin::OpenAiCompatible,
+                    origin,
                     usage: None,
                     message: NativeMessage::new(
                         MessageRole::Assistant,

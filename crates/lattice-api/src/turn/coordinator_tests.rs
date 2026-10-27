@@ -49,6 +49,12 @@ fn input() -> AcceptTurn {
         },
     }
 }
+fn origin() -> AttemptOrigin {
+    AttemptOrigin {
+        protocol: AttemptProtocol::ChatCompletions,
+        provider_id: "openai".into(),
+    }
+}
 fn reply(turn_id: TurnId) -> CompleteReply {
     CompleteReply {
         key: ModelAttemptKey {
@@ -56,7 +62,7 @@ fn reply(turn_id: TurnId) -> CompleteReply {
             model_step_ordinal: 0,
             attempt_ordinal: 0,
         },
-        origin: ProviderOrigin::OpenAiCompatible,
+        origin: origin(),
         usage: None,
         message: NativeMessage::new(
             MessageRole::Assistant,
@@ -90,7 +96,9 @@ async fn started_commit_precedes_execution_and_repeated_start_is_rejected() {
         AcceptedTurn::Accepted(_)
     ));
     let reply = reply(tid(1));
-    io.start_request(reply.key).await.unwrap();
+    io.start_request(reply.key, reply.origin.clone())
+        .await
+        .unwrap();
     let calls = io.register_calls(reply, vec![iid(1)]).await.unwrap();
     let started = io
         .start_invocation(calls.bindings[0].clone())
@@ -194,7 +202,9 @@ async fn collision_retries_only_registration_and_preserves_reply() {
         .unwrap();
     io.accept(input()).await.unwrap();
     let first = reply(tid(1));
-    io.start_request(first.key).await.unwrap();
+    io.start_request(first.key, first.origin.clone())
+        .await
+        .unwrap();
     io.register_calls(first, vec![iid(1)]).await.unwrap();
     let coordinator =
         TurnCoordinator::new(io, Arc::new(Sequence(std::sync::atomic::AtomicU64::new(1))));
@@ -203,7 +213,11 @@ async fn collision_retries_only_registration_and_preserves_reply() {
     second.turn_id = tid(2);
     coordinator.io.accept(second).await.unwrap();
     let reply = reply(tid(2));
-    coordinator.io.start_request(reply.key).await.unwrap();
+    coordinator
+        .io
+        .start_request(reply.key, reply.origin.clone())
+        .await
+        .unwrap();
     let registered = coordinator.register(reply).await.unwrap();
     assert_eq!(registered.bindings[0].invocation_id, iid(2));
     let read = store.begin_read().unwrap();
@@ -302,7 +316,7 @@ async fn live_multicall_closes_continue_then_finish_from_structured_history() {
         .unwrap();
     let mut accepted = input();
     accepted.project_store_key = key;
-    accepted.config.provider = "openai_compatible".into();
+    accepted.config.provider = "openai-compatible".into();
     accepted.config.system_prompt = Some("冻结提示".into());
     accepted.config.catalog = ToolCatalogSnapshot::new(
         "actual-build".into(),
@@ -326,6 +340,7 @@ async fn live_multicall_closes_continue_then_finish_from_structured_history() {
         &coordinator,
         tid(1),
         LiveExecution {
+            provider: lattice_llm::ProviderKind::OpenAiCompatible,
             driver: Arc::new(ModelStepDriver::new(llm.clone())),
             runtime: Arc::new(runtime),
             events,
@@ -394,7 +409,9 @@ async fn mixed_unknown_batch_closes_invalid_without_allocating_invocations() {
                 arguments: json!({}),
             },
         }));
-    io.start_request(reply.key).await.unwrap();
+    io.start_request(reply.key, reply.origin.clone())
+        .await
+        .unwrap();
     let ids = Arc::new(Sequence(std::sync::atomic::AtomicU64::new(100)));
     let coordinator = TurnCoordinator::new(io, ids.clone());
     assert!(matches!(
@@ -592,6 +609,7 @@ async fn stop_at_execution_boundary(boundary: StopBoundary, cancelled: bool) {
     let observer = Arc::new(ObserverSink::default());
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     let live = LiveExecution {
+        provider: lattice_llm::ProviderKind::OpenAi,
         driver: Arc::new(ModelStepDriver::new(llm.clone())),
         runtime: Arc::new(runtime),
         events,

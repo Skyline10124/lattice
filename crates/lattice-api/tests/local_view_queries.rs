@@ -30,7 +30,7 @@ fn seed(layout: &StateLayout, root: &std::path::Path) {
                 config: FrozenTurnConfig {
                     agent_name: "alpha".into(),
                     model: "test".into(),
-                    provider: "openai_compatible".into(),
+                    provider: "openai-compatible".into(),
                     system_prompt: None,
                     catalog: ToolCatalogSnapshot::new("test".into(), vec![]).unwrap(),
                     limits: TurnExecutionLimits {

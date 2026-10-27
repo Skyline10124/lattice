@@ -444,7 +444,7 @@ async fn seed_round(backend: &Backend, sid: SessionId, fresh: bool) -> TurnId {
                 config: FrozenTurnConfig {
                     agent_name: "local-test".into(),
                     model: "test".into(),
-                    provider: "openai_compatible".into(),
+                    provider: "openai-compatible".into(),
                     system_prompt: None,
                     catalog: ToolCatalogSnapshot::new("test".into(), vec![]).unwrap(),
                     limits: TurnExecutionLimits {
@@ -646,7 +646,11 @@ async fn slow_observer_reads_latest_entries_suffixes_and_attempt_boundaries() {
         attempt_ordinal: 0,
     };
     let origin = lattice_conversation::ProviderOrigin::OpenAiCompatible;
-    io.start_request(key).await.unwrap();
+    let attempt_origin = AttemptOrigin {
+        protocol: AttemptProtocol::ChatCompletions,
+        provider_id: "openai-compatible".into(),
+    };
+    io.start_request(key, attempt_origin.clone()).await.unwrap();
     sink.emit(crate::TurnEvent::ModelStarted {
         key,
         provider: origin,
@@ -699,7 +703,7 @@ async fn slow_observer_reads_latest_entries_suffixes_and_attempt_boundaries() {
     );
     io.stop_attempt(AttemptStopped {
         key,
-        origin,
+        origin: attempt_origin.clone(),
         usage: None,
         cause: StopCause::ProviderError { retryable: true },
         retry_delay_ms: Some(1),
@@ -719,7 +723,7 @@ async fn slow_observer_reads_latest_entries_suffixes_and_attempt_boundaries() {
         },
     });
     key.attempt_ordinal = 1;
-    io.start_request(key).await.unwrap();
+    io.start_request(key, attempt_origin.clone()).await.unwrap();
     sink.emit(crate::TurnEvent::ModelStarted {
         key,
         provider: origin,
@@ -750,7 +754,7 @@ async fn slow_observer_reads_latest_entries_suffixes_and_attempt_boundaries() {
     let simultaneous = sink.register();
     io.stop_attempt(AttemptStopped {
         key,
-        origin,
+        origin: attempt_origin.clone(),
         usage: None,
         cause: StopCause::Cancelled,
         retry_delay_ms: None,

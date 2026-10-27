@@ -28,7 +28,7 @@ fn seed(fixture: &TestFixture) -> (lancet_protocol::SessionId, lancet_protocol::
                 config: FrozenTurnConfig {
                     agent_name: "test".into(),
                     model: "old-model".into(),
-                    provider: "openai_compatible".into(),
+                    provider: "openai-compatible".into(),
                     system_prompt: None,
                     catalog: ToolCatalogSnapshot::new("test".into(), vec![]).unwrap(),
                     limits: TurnExecutionLimits {

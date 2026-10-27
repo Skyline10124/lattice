@@ -193,14 +193,17 @@ impl StepEntry {
         self
     }
     pub(super) fn sent(mut self) -> Self {
-        self.attempts
-            .push(json!({"usage":null,"progress":{"progress":"sent"},"retry_delay_ms":null}));
+        self.attempts.push(
+            json!({"origin":{"protocol":"chat-completions","provider_id":"openai"},
+                "usage":null,"progress":{"progress":"sent"},"retry_delay_ms":null}),
+        );
         self
     }
     /// 一次失败并安排了重试的尝试，带后端给出的重试提示。
     pub(super) fn retried(mut self, level: &str, text: &str) -> Self {
         let attempt = self.attempts.len();
         self.attempts.push(json!({
+            "origin":{"protocol":"chat-completions","provider_id":"openai"},
             "usage":null,"retry_delay_ms":100,
             "progress":{"progress":"ended","end":{"end":"stopped","cause":{"cause":"provider_error","retryable":true}},"diagnostic":diagnostic()}
         }));
@@ -210,6 +213,7 @@ impl StepEntry {
     }
     pub(super) fn completed_attempt(mut self, total_tokens: u64) -> Self {
         self.attempts.push(json!({
+            "origin":{"protocol":"chat-completions","provider_id":"openai"},
             "usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":total_tokens},"retry_delay_ms":null,
             "progress":{"progress":"ended","end":{"end":"completed"},"diagnostic":diagnostic()}
         }));

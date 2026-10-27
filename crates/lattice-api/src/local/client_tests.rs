@@ -839,7 +839,7 @@ fn user_entry(id: TurnId) -> Box<ConversationEntry> {
             accepted_at: detail(id, true).accepted_at,
             agent_name: "local-test".into(),
             model: "test".into(),
-            provider: "openai_compatible".into(),
+            provider: "openai-compatible".into(),
             limits: lattice_session::store::TurnExecutionLimits {
                 timeout_secs: 300,
                 max_model_steps: 32,

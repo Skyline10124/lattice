@@ -73,6 +73,12 @@ fn direct_turn_completed_reopen_contract() {
             before.is_clean_exit(0) && after.is_clean_exit(0) && before.stdout == after.stdout,
             "closed Turn unchanged after new Turn",
         )?;
+        let detail: Value = serde_json::from_slice(&before.stdout).unwrap();
+        require(
+            detail["steps"][0]["attempts"][0]["origin"]
+                == serde_json::json!({"protocol":"chat-completions","provider_id":"openai-compatible"}),
+            "completed attempt records protocol and provider id",
+        )?;
         let captures = server.captured_requests();
         require(
             captures.len() == 2 && captures.iter().all(|c| c.model == "dl-contract"),

@@ -213,7 +213,7 @@ async fn execute_owned(
         lancet: Some(&loaded.profile.lancet),
     })
     .await?;
-    let config = super::live::freeze_config(&request, provider.as_str(), &deps.tool_catalog)?;
+    let config = super::live::freeze_config(&request, &provider, &deps.tool_catalog)?;
     let timeout = config.limits.timeout_secs;
     if shutdown.load(Ordering::Acquire) {
         return Err(StoreError::WriteDisabled.into());
@@ -314,6 +314,7 @@ async fn execute_owned(
         &coordinator,
         turn_id,
         super::saga::LiveExecution {
+            provider,
             driver: Arc::new(deps.model_driver),
             runtime: Arc::new(deps.runtime),
             events: deps.events,

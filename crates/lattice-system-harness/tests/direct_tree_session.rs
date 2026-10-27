@@ -147,6 +147,12 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
         );
         assert_eq!(original["steps"].as_array().unwrap().len(), 2);
         assert_eq!(original["steps"][0]["end"], json!({"end":"continue"}));
+        for step in original["steps"].as_array().unwrap() {
+            assert_eq!(
+                step["attempts"][0]["origin"],
+                json!({"protocol":"chat-completions","provider_id":"openai-compatible"})
+            );
+        }
         let original_history = current_history(&world, &spec, sid);
         assert_eq!(original_history["position"], 3);
         let (mut beta, gate) = support::wire_gated_fake_llm(
