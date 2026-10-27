@@ -32,7 +32,8 @@ const THINKING_BUDGET: ChatCompletionsFeatures = ChatCompletionsFeatures {
 pub(super) fn providers() -> Vec<Provider> {
     use Auth::{Bearer, None as NoAuth, OauthChatgpt, XApiKey, XGoogApiKey};
 
-    // #315 L5 合并前，openai、xai 暂用 chat-completions，google 暂用 generate-content；L5 承接切回合同协议。
+    // 合同中 openai、xai 使用 responses，google 使用 interactions；
+    // 这两个协议的适配器尚未实现（#315 L5），所以这里使用 chat-completions 与 generate-content。
     vec![
         provider(
             "openai",

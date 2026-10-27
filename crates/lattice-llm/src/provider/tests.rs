@@ -334,7 +334,7 @@ fn strict_errors_report_path_line_and_reason() {
     ] {
         assert_invalid(source, line, reason);
     }
-    // A valid override before an error cannot produce a partially usable registry.
+    // 有效配置之后出现错误也必须拒绝整份文件，不能返回部分注册表。
     assert_invalid(
         "[providers.deepseek]\nbase_url = 'http://localhost'\n[providers.openai]\nunknown = true",
         4,
@@ -681,7 +681,7 @@ fn model_reference_rejects_missing_parts_invalid_provider_and_control_characters
     ] {
         assert!(ModelRef::parse(source).is_err(), "{source:?}");
     }
-    // Spaces, Unicode, and further slashes are opaque model data, not control characters.
+    // 空格、Unicode 与后续斜杠都是不透明模型名的一部分，不属于控制字符。
     assert_eq!(
         ModelRef::parse("openai/ 模型 /suffix").unwrap().model(),
         " 模型 /suffix"
@@ -692,6 +692,8 @@ fn model_reference_rejects_missing_parts_invalid_provider_and_control_characters
 fn model_reference_model_byte_limit_is_independent_of_provider_length() {
     let provider = "a".repeat(MAX_PROVIDER_ID_BYTES);
     let model = "é".repeat(MAX_MODEL_ID_BYTES / 2);
-    ModelRef::parse(&format!("{provider}/{model}")).unwrap();
-    assert!(ModelRef::parse(&format!("{provider}/{model}a")).is_err());
+    let reference = format!("{provider}/{model}");
+    assert_eq!(reference.len(), MAX_PROVIDER_ID_BYTES + 1 + 4_096);
+    ModelRef::parse(&reference).unwrap();
+    assert!(ModelRef::parse(&format!("{reference}a")).is_err());
 }

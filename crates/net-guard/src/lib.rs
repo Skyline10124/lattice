@@ -201,10 +201,10 @@ pub fn resolve_public_socket_addrs(
     Ok(addrs)
 }
 
-/// Maximum UTF-8 length of a provider base URL, measured before URL normalization.
+/// provider base_url 的 UTF-8 字节上限，按 URL 规范化前的原文计量。
 const MAX_BASE_URL_BYTES: usize = 8_192;
 
-/// Validate URL syntax and static address policy without DNS or other network I/O.
+/// 仅校验 URL 语法和静态地址策略，不查询 DNS 或访问网络。
 pub fn validate_base_url_static(url: &str) -> Result<(), NetGuardError> {
     parse_base_url(url).map(|_| ())
 }
@@ -279,15 +279,14 @@ fn parse_base_url(url: &str) -> Result<url::Url, NetGuardError> {
     Ok(parsed)
 }
 
-/// Validate a provider base URL, including best-effort DNS checks when resolution is available.
+/// 校验 provider 的 base_url，并在可解析时尽力检查 DNS 结果。
 pub fn validate_base_url(url: &str) -> Result<(), NetGuardError> {
     let parsed = parse_base_url(url)?;
     let host = parsed
         .host_str()
         .expect("static URL validation requires a host");
 
-    // Best-effort DNS check when resolution is available. Request-time pinning
-    // by callers remains authoritative.
+    // DNS 检查仅尽力而为；调用方仍须在请求时解析并固定已校验的地址。
     if !host.ends_with(".local") && !is_localhost_host(host) {
         let port = parsed
             .port()

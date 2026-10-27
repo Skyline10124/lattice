@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Protocol identities and their supported optional behavior.
+//! 协议标识与各协议支持的可选行为。
 
 use serde::Deserialize;
 

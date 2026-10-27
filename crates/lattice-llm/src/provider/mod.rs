@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Built-in providers and strictly validated user overrides. No request dispatch lives here.
+//! 维护内置 provider、用户配置的严格解析与合并。
 
 use std::collections::BTreeMap;
 
@@ -48,7 +48,7 @@ pub(crate) enum Effort {
     Max,
 }
 
-/// Handwritten prices in USD per million tokens, retaining unspecified fields for metadata merging.
+/// 手写价格以美元/百万 token 计；缺失字段保留，供元数据层按字段合并。
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct ModelCost {
@@ -58,16 +58,16 @@ pub(crate) struct ModelCost {
     pub(crate) cache_write: Option<f64>,
 }
 
-/// Only handwritten metadata is stored here; missing values are left for the metadata layer.
+/// 这里只保存手写元数据，缺失值由元数据层补齐。
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ModelMetadata {
     pub(crate) context: Option<u64>,
     pub(crate) output: Option<u64>,
     pub(crate) effort: Option<Vec<Effort>>,
-    /// Inherit metadata when absent; tool support defaults to true if no source specifies it.
+    /// 未指定时继承元数据；所有来源都未指定时，默认支持工具。
     pub(crate) tools: Option<bool>,
     pub(crate) cost: Option<ModelCost>,
-    /// Effective features after applying this model's overrides to its provider's features.
+    /// 模型级覆盖与 provider 配置合并后的有效 features。
     pub(crate) features: Features,
 }
 

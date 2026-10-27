@@ -15,7 +15,7 @@ use super::{Auth, ModelCost, ModelMetadata, Provider, builtins, model_ref};
 use crate::protocol::Features;
 
 pub(crate) const MAX_PROVIDERS_FILE_BYTES: usize = 1_048_576;
-/// Counts tables declared in providers.toml, including overrides of built-in providers.
+/// 按 providers.toml 中声明的表计数，对内置 provider 的覆盖也计入。
 pub(crate) const MAX_PROVIDERS: usize = 256;
 pub(crate) const MAX_MODELS_PER_PROVIDER: usize = 1_024;
 
@@ -23,7 +23,7 @@ pub(crate) const MAX_MODELS_PER_PROVIDER: usize = 1_024;
 #[error("{path}:{line}: {reason}", path = .path.display())]
 pub(crate) struct ProviderConfigError {
     pub(crate) path: PathBuf,
-    /// One-based source line; file-level I/O failures use line 1.
+    /// 源码行号从 1 开始；文件读取错误使用第 1 行。
     pub(crate) line: usize,
     pub(crate) reason: String,
 }
@@ -56,7 +56,14 @@ impl ProviderRegistry {
         }
     }
 
-    /// Read an explicit user configuration path. A missing file means no overrides.
+    /// 从指定的用户配置路径读取，文件不存在时只使用内置表。
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "#315 L2 网关接线前，provider 与 protocol 只有 ModelRef 对外使用"
+        )
+    )]
     pub(crate) fn load(path: impl AsRef<Path>) -> Result<Self, ProviderConfigError> {
         let path = path.as_ref();
         let file = match File::open(path) {
@@ -80,7 +87,7 @@ impl ProviderRegistry {
         Self::parse(path, source)
     }
 
-    /// Parse the entire file and merge it atomically with the built-in table.
+    /// 整份配置通过校验后才返回合并结果，避免部分配置生效。
     pub(crate) fn parse(path: impl AsRef<Path>, source: &str) -> Result<Self, ProviderConfigError> {
         let path = path.as_ref();
         let raw: RawConfig = toml::from_str(source).map_err(|error: toml::de::Error| {
@@ -234,10 +241,24 @@ impl ProviderRegistry {
         Ok(registry)
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "#315 L2 网关接线前，provider 与 protocol 只有 ModelRef 对外使用"
+        )
+    )]
     pub(crate) fn get(&self, id: &str) -> Option<&Provider> {
         self.providers.get(id)
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "#315 L2 网关接线前，provider 与 protocol 只有 ModelRef 对外使用"
+        )
+    )]
     pub(crate) fn iter(&self) -> impl Iterator<Item = &Provider> {
         self.providers.values()
     }
@@ -257,7 +278,7 @@ fn check_file_size(path: &Path, bytes: &[u8]) -> Result<(), ProviderConfigError>
 
 type RawFeatures = BTreeMap<Spanned<String>, Spanned<toml::Value>>;
 
-/// Serde's derived struct visitor also accepts sequences; configuration records must be tables.
+/// Serde 派生的结构体也接受序列；配置记录必须是表。
 struct Table<T>(T);
 
 impl<'de, T: Deserialize<'de>> Deserialize<'de> for Table<T> {

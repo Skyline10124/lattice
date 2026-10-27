@@ -64,7 +64,7 @@ pub(crate) struct MessagesFeatures {
     pub(crate) cache: Cache,
 }
 
-/// Fully resolved features; protocols without optional behavior carry no fields.
+/// 合并覆盖后的完整 features；没有可选行为的协议不携带配置字段。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Features {
     ChatCompletions(ChatCompletionsFeatures),
@@ -97,7 +97,7 @@ impl Features {
 
     pub(crate) fn apply(&mut self, name: &str, value: toml::Value) -> Result<(), String> {
         fn parse<T: serde::de::DeserializeOwned>(value: toml::Value) -> Result<T, String> {
-            // TOML also supports externally tagged enum tables; feature values do not.
+            // TOML 支持用表表示枚举，但 feature 只接受字符串或布尔量。
             if !matches!(value, toml::Value::String(_) | toml::Value::Boolean(_)) {
                 return Err("invalid type: feature values must be strings or booleans".to_owned());
             }
