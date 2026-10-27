@@ -30,25 +30,30 @@ use std::time::Duration;
 
 use lattice_system_harness::processes_in_pgid;
 use lattice_system_harness::{
-    LatticeDriver, PtyTuiDriver, ScenarioLayer, ScenarioSpec, ScenarioWorld,
+    LatticeDriver, ProviderFixture, PtyTuiDriver, ScenarioLayer, ScenarioSpec, ScenarioWorld,
 };
 
-/// Minimal project-local agent profile for the TUI smoke: the Direct-Local
-/// end-state shape — no `[workspace]` section. `session__todo_write` gives the
-/// Turn a Tool Step before the final text Step, so one Turn spans two Steps.
-/// Hand-written TOML, not serde — the harness boundary forbids `lattice-profile`.
-const AGENT_TOML: &str = r#"schema_version = 1
+/// TUI smoke 的项目 profile，启用 `session__todo_write`；调用顺序由 `two_step_script` 决定。
+/// 手写 TOML，不用 serde，因为 harness 边界禁止依赖 `lattice-profile`。
+fn agent_toml() -> String {
+    let model = ProviderFixture::chat_completions("tui-smoke")
+        .model_ref()
+        .unwrap();
+    format!(
+        r#"schema_version = 1
 
 [agent]
 name = "tui-smoke"
-model = "compat:tui-smoke"
+model = "{model}"
 
 [prompt]
 system = "You are a concise test agent. Reply briefly."
 
 [tools]
 enabled = ["session__todo_write"]
-"#;
+"#
+    )
+}
 
 /// 一个 Turn 两个 Step：先调用工具，再输出三行最终回答。
 fn two_step_script() -> lattice_system_harness::SseScript {
@@ -87,19 +92,20 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
     let world = ScenarioWorld::new(&spec.name).expect("world");
     let budget = world.budget(&spec);
     world
-        .write_project_file(".lattice/agents/tui-smoke/agent.toml", AGENT_TOML)
+        .write_project_file(".lattice/agents/tui-smoke/agent.toml", &agent_toml())
         .expect("write agent.toml");
     world.init_git_project().expect("init git project");
     budget.check(&spec.name);
 
     let server =
         lattice_system_harness::FakeLlmServer::start(two_step_script()).expect("start fake llm");
-    world.set_env("OPENAI_COMPATIBLE_BASE_URL", server.base_url());
-    world.set_env("OPENAI_COMPATIBLE_MODEL", "tui-smoke");
-    world.set_env(
-        "OPENAI_COMPATIBLE_API_KEY",
-        lattice_system_harness::FAKE_API_KEY,
-    );
+    world
+        .wire_provider(
+            ProviderFixture::chat_completions("tui-smoke"),
+            &server,
+            lattice_system_harness::FAKE_API_KEY,
+        )
+        .unwrap();
 
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -362,12 +368,13 @@ fn pty_mid_model_reconnect_shows_new_suffix_before_completion() {
         step(),
     )
     .unwrap();
-    world.set_env("OPENAI_COMPATIBLE_BASE_URL", server.base_url());
-    world.set_env("OPENAI_COMPATIBLE_MODEL", "tui-smoke");
-    world.set_env(
-        "OPENAI_COMPATIBLE_API_KEY",
-        lattice_system_harness::FAKE_API_KEY,
-    );
+    world
+        .wire_provider(
+            ProviderFixture::chat_completions("tui-smoke"),
+            &server,
+            lattice_system_harness::FAKE_API_KEY,
+        )
+        .unwrap();
     let mut original = None;
     let mut replacement = None;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -416,7 +423,7 @@ fn pty_mid_model_reconnect_shows_new_suffix_before_completion() {
         assert_eq!(world.daemon_pids().unwrap(), owners);
         println!("PTY window: original frontend exited; same backend remains");
 
-        // 重连读取不需要 provider 配置，且不得触发第二次模型执行。
+        // 重连读取不依赖前端的 provider 环境，且不得触发第二次模型执行。
         world.unset_env("OPENAI_COMPATIBLE_BASE_URL");
         world.unset_env("OPENAI_COMPATIBLE_MODEL");
         world.unset_env("OPENAI_COMPATIBLE_API_KEY");

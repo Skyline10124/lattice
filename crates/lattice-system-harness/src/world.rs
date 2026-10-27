@@ -80,6 +80,8 @@ impl BudgetSlot {
 pub enum WorldError {
     #[error("failed to create scenario world: {0}")]
     Io(#[from] std::io::Error),
+    #[error("fake provider wiring is unavailable: {0}")]
+    Provider(&'static str),
 }
 
 impl ScenarioWorld {

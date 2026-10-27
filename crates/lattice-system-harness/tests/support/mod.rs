@@ -7,9 +7,9 @@
 pub(crate) mod crash;
 use lattice_system_harness::{
     AssertError, CapturedRequest, CommandOutcome, FAKE_API_KEY, FakeLlmServer, HarnessIntervention,
-    LatticeCommand, LatticeDriver, ProcessTermination, ReceiptResult, ResponseGate,
-    ScenarioEvidence, ScenarioSpec, ScenarioWorld, SendExecution, SendOutcome, SendRecord,
-    SlotOutcome, SseScript, Submit, ViewState, parse_record,
+    LatticeCommand, LatticeDriver, ProcessTermination, ProviderFixture, ReceiptResult,
+    ResponseGate, ScenarioEvidence, ScenarioSpec, ScenarioWorld, SendExecution, SendOutcome,
+    SendRecord, SlotOutcome, SseScript, Submit, ViewState, parse_record,
 };
 use serde_json::{Value, json};
 use std::{
@@ -145,13 +145,6 @@ pub(crate) fn assert_forced_kill(outcome: &CommandOutcome) {
     assert!(outcome.cleanup.succeeded(), "{:?}", outcome.cleanup);
 }
 
-/// 直接经 IPC 提交时的信任根：harness CA 的 DER，与提交端从 `SSL_CERT_FILE` 读到的相同。
-pub(crate) fn harness_roots_der() -> Value {
-    serde_json::json!([lattice_system_harness::TlsIdentity::shared()
-        .expect("harness TLS identity")
-        .ca_der()])
-}
-
 pub(crate) fn require(condition: bool, expected: impl Into<String>) -> Result<(), AssertError> {
     if condition {
         Ok(())
@@ -240,9 +233,13 @@ pub(crate) fn wire_fake_llm(
     script: SseScript,
 ) -> FakeLlmServer {
     let server = FakeLlmServer::start(script).expect("start fake llm");
-    world.set_env("OPENAI_COMPATIBLE_BASE_URL", server.base_url());
-    world.set_env("OPENAI_COMPATIBLE_MODEL", agent);
-    world.set_env("OPENAI_COMPATIBLE_API_KEY", FAKE_API_KEY);
+    world
+        .wire_provider(
+            ProviderFixture::chat_completions(agent),
+            &server,
+            FAKE_API_KEY,
+        )
+        .expect("wire fake provider");
     server
 }
 
@@ -252,9 +249,13 @@ pub(crate) fn wire_gated_fake_llm(
     script: SseScript,
 ) -> (FakeLlmServer, ResponseGate) {
     let (server, gate) = FakeLlmServer::start_gated(script).expect("start gated fake llm");
-    world.set_env("OPENAI_COMPATIBLE_BASE_URL", server.base_url());
-    world.set_env("OPENAI_COMPATIBLE_MODEL", agent);
-    world.set_env("OPENAI_COMPATIBLE_API_KEY", FAKE_API_KEY);
+    world
+        .wire_provider(
+            ProviderFixture::chat_completions(agent),
+            &server,
+            FAKE_API_KEY,
+        )
+        .expect("wire gated fake provider");
     (server, gate)
 }
 
@@ -266,9 +267,12 @@ pub(crate) fn direct_world(
 ) -> (ScenarioWorld, ScenarioSpec) {
     let spec = ScenarioSpec::direct_local(prefix);
     let world = ScenarioWorld::new(&spec.name).expect("world");
+    let model = ProviderFixture::chat_completions(agent)
+        .model_ref()
+        .unwrap();
     let toml = format!(
         "schema_version = 1\n\n\
-         [agent]\nname = \"{agent}\"\nmodel = \"compat:{agent}\"\n\n\
+         [agent]\nname = \"{agent}\"\nmodel = \"{model}\"\n\n\
          [prompt]\nsystem = \"You are a concise test agent.\"\n\n\
          [tools]\nenabled = {tools}\n{extra_profile}"
     );
@@ -457,11 +461,20 @@ pub(crate) fn ipc(world: &ScenarioWorld, timeout: Duration, request: Value) -> V
 
 /// 提交端加载好的冻结配置：项目中的 profile 原文与指向 fake provider 的连接材料。
 pub(crate) fn configuration(world: &ScenarioWorld, agent: &str, base_url: &str) -> Value {
-    json!({"profile_toml":std::fs::read_to_string(world.project_dir()
-        .join(format!(".lattice/agents/{agent}/agent.toml"))).unwrap(),
-        "system_prompt":"You are a concise test agent.","connection":{"alias":format!("compat:{agent}"),
-        "provider":"openai_compatible","provider_model":agent,"base_url":base_url,
-        "api_key":FAKE_API_KEY,"roots_der":harness_roots_der()}})
+    let profile = std::fs::read_to_string(
+        world
+            .project_dir()
+            .join(format!(".lattice/agents/{agent}/agent.toml")),
+    )
+    .unwrap();
+    let connection = ProviderFixture::chat_completions(agent)
+        .configuration(base_url, FAKE_API_KEY)
+        .unwrap();
+    json!({
+        "profile_toml": profile,
+        "system_prompt": "You are a concise test agent.",
+        "connection": connection,
+    })
 }
 
 /// `session` 写作 `{"new": S}` 或 `{"existing": S}`；身份都由客户端生成。

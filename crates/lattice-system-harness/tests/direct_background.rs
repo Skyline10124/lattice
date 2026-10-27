@@ -577,6 +577,10 @@ fn concurrent_autostart_has_one_owner_and_midway_watch_matches_history() {
                 SseScript::plain("after"),
             ]),
         );
+        assert!(
+            world.daemon_pids().unwrap().is_empty(),
+            "concurrent autostart requires no running daemon"
+        );
         let a = command(
             &world,
             &budget,
@@ -985,7 +989,12 @@ fn daemon_restart_reads_closed_result_without_resubmitting() {
             unsafe { libc::flock(workspace_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
             0
         );
-        world.unset_env("OPENAI_COMPATIBLE_API_KEY");
+        world
+            .register_key(
+                lattice_system_harness::ProviderFixture::chat_completions("background"),
+                None,
+            )
+            .unwrap();
         assert_eq!(detail(&world, &budget, &mut evidence, tid), original);
         // 重启后重新打开会话：会话头说明没有 Owner，条目给出这一轮的全部节点。
         let mut observer = Watcher::open(&world, wait(&budget), tool_session);

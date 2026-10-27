@@ -63,9 +63,13 @@ fn observation_world(prefix: &str) -> (ScenarioWorld, ScenarioSpec) {
         .expect("write big.txt");
 
     // Agent profile + LATTICE private state (system-excluded).
-    let profile = "\
+    let model = lattice_system_harness::ProviderFixture::chat_completions("dl-obs")
+        .model_ref()
+        .unwrap();
+    let profile = format!(
+        "\
 schema_version = 1\n\n\
-[agent]\nname = \"dl-obs\"\nmodel = \"compat:dl-obs\"\n\n\
+[agent]\nname = \"dl-obs\"\nmodel = \"{model}\"\n\n\
 [prompt]\nsystem = \"You are a concise test agent.\"\n\n\
 [tools]\nenabled = [\"observe__workspace\"]\n\n\
 [lancet.workspace]\nincluded_ignored_read_patterns = [\"private/included.txt\"]\n\
@@ -74,9 +78,10 @@ denied_read_patterns = [\"denied/**\"]\n\n\
 max_single_read_bytes = 32\n\
 max_grep_matches = 2\n\
 max_list_entries = 3\n\
-max_find_paths = 3\n";
+max_find_paths = 3\n"
+    );
     world
-        .write_project_file(".lattice/agents/dl-obs/agent.toml", profile)
+        .write_project_file(".lattice/agents/dl-obs/agent.toml", &profile)
         .expect("write profile");
     world
         .write_project_file(".lattice/private.txt", "needle LATTICE_SECRET\n")

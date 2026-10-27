@@ -10,8 +10,8 @@ use std::str::FromStr;
 use thiserror::Error;
 
 use crate::{
-    DriverError, FAKE_API_KEY, FakeLlmServer, LatticeDriver, ScenarioWorld, ServeError, SseScript,
-    WorldError,
+    DriverError, FAKE_API_KEY, FakeLlmServer, LatticeDriver, ProviderFixture, ScenarioWorld,
+    ServeError, SseScript, WorldError,
 };
 
 const AGENT: &str = "tui-mock";
@@ -154,20 +154,21 @@ pub enum TuiMockError {
 pub fn run_tui_mock(scenario: TuiMockScenario) -> Result<ExitStatus, TuiMockError> {
     let driver = LatticeDriver::from_env()?;
     let world = ScenarioWorld::new("tui-mock")?;
+    let server = scenario.start_server()?;
+    let model = world.wire_provider(
+        ProviderFixture::chat_completions(AGENT),
+        &server,
+        FAKE_API_KEY,
+    )?;
     let profile = format!(
         "schema_version = 1\n\n\
-         [agent]\nname = \"{AGENT}\"\nmodel = \"compat:{AGENT}\"\n\n\
+         [agent]\nname = \"{AGENT}\"\nmodel = \"{model}\"\n\n\
          [prompt]\nsystem = \"Respond according to the deterministic mock script.\"\n\n\
          [tools]\nenabled = {}\n",
         scenario.enabled_tools()
     );
     world.write_project_file(&format!(".lattice/agents/{AGENT}/agent.toml"), &profile)?;
     world.init_git_project()?;
-
-    let server = scenario.start_server()?;
-    world.set_env("OPENAI_COMPATIBLE_BASE_URL", server.base_url());
-    world.set_env("OPENAI_COMPATIBLE_MODEL", AGENT);
-    world.set_env("OPENAI_COMPATIBLE_API_KEY", FAKE_API_KEY);
 
     // ScenarioWorld::command() 有意清空子进程环境以保证 harness 隔离；
     // 交互式调试保留宿主的终端与 locale 环境；TUI 固定使用 RGB 和 Unicode，

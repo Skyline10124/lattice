@@ -13,6 +13,7 @@ mod daemon;
 pub mod driver;
 pub mod fake_llm;
 pub mod fixture_http;
+pub mod provider;
 pub mod pty_tui;
 pub mod scenario;
 pub mod session_send;
@@ -38,6 +39,7 @@ pub use fake_llm::{
     CapturedRequest, FAKE_API_KEY, FakeLlmServer, ResponseGate, ServeError, SseScript,
 };
 pub use fixture_http::{CapturedHttpRequest, FixtureHttpError, FixtureHttpServer, HttpFixture};
+pub use provider::{ProviderFixture, ProviderProtocol, ProviderTarget};
 pub use pty_tui::{PtyError, PtyTuiDriver};
 pub use scenario::{ScenarioBudget, ScenarioError, ScenarioLayer, ScenarioSpec};
 pub use session_send::{

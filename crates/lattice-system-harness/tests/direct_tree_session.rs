@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use lattice_system_harness::{
-    FAKE_API_KEY, FakeLlmServer, LatticeDriver, ScenarioEvidence, ScenarioSpec, ScenarioWorld,
-    SessionSendDriver, SseScript,
+    FAKE_API_KEY, FakeLlmServer, LatticeDriver, ProviderFixture, ScenarioEvidence, ScenarioSpec,
+    ScenarioWorld, SessionSendDriver, SseScript,
 };
 use serde_json::Value;
 
@@ -11,14 +11,15 @@ use serde_json::Value;
 fn first_prompt_is_the_only_session_creation_and_request() {
     let spec = ScenarioSpec::direct_local("r2-first-prompt");
     let world = ScenarioWorld::new(&spec.name).unwrap();
+    let fixture = ProviderFixture::chat_completions("reader");
     world
-        .write_agent_profile("reader", "compat:reader")
+        .write_agent_profile("reader", &fixture.model_ref().unwrap())
         .unwrap();
     world.init_git_project().unwrap();
     let mut provider = FakeLlmServer::start(SseScript::plain("answer")).unwrap();
-    world.set_env("OPENAI_COMPATIBLE_BASE_URL", provider.base_url());
-    world.set_env("OPENAI_COMPATIBLE_MODEL", "reader");
-    world.set_env("OPENAI_COMPATIBLE_API_KEY", FAKE_API_KEY);
+    world
+        .wire_provider(fixture, &provider, FAKE_API_KEY)
+        .unwrap();
     let driver = LatticeDriver::from_env().unwrap();
     let mut evidence =
         ScenarioEvidence::new(&world, &spec.name, [FAKE_API_KEY.to_owned()]).unwrap();
@@ -113,8 +114,11 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
     use serde_json::json;
     let (world, spec) =
         support::direct_world("tree-two-agents", "alpha", "[\"mutate__create\"]", "");
+    let model = ProviderFixture::chat_completions("beta")
+        .model_ref()
+        .unwrap();
     world.write_project_file(".lattice/agents/beta/agent.toml",
-        "schema_version = 1\n[agent]\nname = \"beta\"\nmodel = \"compat:beta\"\n[prompt]\nsystem = \"Beta isolated prompt.\"\n[tools]\nenabled = [\"mutate__create\"]\n").unwrap();
+        &format!("schema_version = 1\n[agent]\nname = \"beta\"\nmodel = \"{model}\"\n[prompt]\nsystem = \"Beta isolated prompt.\"\n[tools]\nenabled = [\"mutate__create\"]\n")).unwrap();
     let mut server = support::wire_fake_llm(
         &world,
         "alpha",
@@ -260,8 +264,13 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
         }
         evidence.record_captures(beta_requests.clone());
         beta.shutdown(spec.step_timeout()).unwrap();
-        world.set_env("OPENAI_COMPATIBLE_BASE_URL", server.base_url());
-        world.set_env("OPENAI_COMPATIBLE_MODEL", "alpha");
+        world
+            .wire_provider(
+                ProviderFixture::chat_completions("alpha"),
+                &server,
+                FAKE_API_KEY,
+            )
+            .unwrap();
         let history_snapshot = || {
             let path = std::fs::read_dir(world.session_store_dir().join("projects"))
                 .unwrap()
