@@ -18,6 +18,7 @@ use tokio::{
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
 
 use super::*;
+use crate::metadata::Metadata;
 
 const PREVIOUS: &[u8] = br#"{"openai":{"models":{"old":{"id":"old"}}}}"#;
 
@@ -289,7 +290,9 @@ async fn refresh_filters_and_replaces_cache_only_after_a_complete_https_response
     let mut old_file = std::fs::File::open(dir.path().join("cache/models.json")).unwrap();
     let config_dir = dir.path().to_owned();
     let url = server.url.clone();
-    let refresh = tokio::spawn(async move { refresh(&config_dir, &url, &roots()).await });
+    let refresh = tokio::spawn(async move {
+        refresh(&config_dir, &ProviderRegistry::builtins(), &url, &roots()).await
+    });
     started_rx.await.unwrap();
     assert_previous(dir.path());
     finish_tx.send(()).unwrap();
@@ -308,17 +311,107 @@ async fn refresh_filters_and_replaces_cache_only_after_a_complete_https_response
 }
 
 #[tokio::test]
+async fn refresh_keeps_builtin_and_configured_catalogs_and_missing_entries_are_empty() {
+    let registry = ProviderRegistry::parse(
+        "providers.toml",
+        r#"
+        [providers.anthropic]
+        catalog = "togetherai"
+        [providers.custom]
+        protocol = "chat-completions"
+        base_url = "https://example.com/v1"
+        catalog = "togetherai"
+        [providers.missing]
+        protocol = "chat-completions"
+        base_url = "https://example.com/v1"
+        catalog = "does-not-exist"
+    "#,
+    )
+    .unwrap();
+    let source = serde_json::json!({
+        "anthropic": {"models": {"native": {"id": "native"}}},
+        "togetherai": {"env": ["OTHER_KEY"], "api": "https://untrusted.invalid", "models": {
+            "org/model": {"id": "org/model", "limit": {"context": 32768, "output": 4096, "input": 1},
+                          "cost": {"input": 0.1}, "tool_call": false,
+                          "endpoint": "https://untrusted.invalid", "env": ["OTHER_KEY"],
+                          "protocol": "ignored"}
+        }},
+        "not-selected": false
+    });
+    let bytes = serde_json::to_vec(&source).unwrap();
+    let snapshot: serde_json::Value =
+        serde_json::from_slice(&snapshot_from_json(&bytes).unwrap()).unwrap();
+    assert_eq!(
+        snapshot,
+        serde_json::json!({"anthropic": source["anthropic"]})
+    );
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        bytes.len(),
+        source
+    );
+    let server = Server::response(response.into_bytes()).await;
+    let dir = prior_cache();
+    let custom = registry.get("custom").unwrap();
+    let missing = registry.get("missing").unwrap();
+    let before = Metadata::load(dir.path());
+    assert!(before.merge(custom).is_empty());
+    assert!(before.merge(missing).is_empty());
+    refresh(dir.path(), &registry, &server.url, &roots())
+        .await
+        .unwrap();
+    let cached: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("cache/models.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        cached,
+        serde_json::json!({
+            "anthropic": {"models": {"native": {"id": "native"}}},
+            "togetherai": {"models": {"org/model": {
+                "id": "org/model", "limit": {"context": 32768, "output": 4096},
+                "cost": {"input": 0.1}, "tool_call": false
+            }}}
+        })
+    );
+    let metadata = Metadata::load(dir.path());
+    let models = metadata.merge(custom);
+    assert_eq!(models.len(), 1);
+    let model = &models["org/model"];
+    assert_eq!(model.limit.as_ref().unwrap().context, Some(32768));
+    assert_eq!(model.limit.as_ref().unwrap().output, Some(4096));
+    assert_eq!(model.cost.as_ref().unwrap().input, Some(0.1));
+    assert_eq!(model.tool_call, Some(false));
+    assert_eq!(metadata.merge(registry.get("anthropic").unwrap()), models);
+    assert!(metadata.merge(missing).is_empty());
+}
+
+#[tokio::test]
 async fn failed_fetch_or_parse_keeps_the_previous_cache() {
+    let registry = ProviderRegistry::parse(
+        "providers.toml",
+        r#"
+        [providers.custom]
+        protocol = "chat-completions"
+        base_url = "https://example.com/v1"
+        catalog = "togetherai"
+    "#,
+    )
+    .unwrap();
     for response in [
         b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n".as_slice(),
         b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n{",
         b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{}",
         b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\n{\"openai\":{}}",
         b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\n{\"openai\":[{}]}",
+        b"HTTP/1.1 200 OK\r\nContent-Length: 19\r\n\r\n{\"togetherai\":[{}]}",
     ] {
         let server = Server::response(response.to_vec()).await;
         let dir = prior_cache();
-        assert!(refresh(dir.path(), &server.url, &roots()).await.is_err());
+        assert!(
+            refresh(dir.path(), &registry, &server.url, &roots())
+                .await
+                .is_err()
+        );
         assert_previous(dir.path());
     }
 }
@@ -355,9 +448,14 @@ async fn redirects_are_rejected_before_contacting_the_target() {
     );
     let server = Server::response(response.into_bytes()).await;
     let dir = prior_cache();
-    let error = refresh(dir.path(), &server.url, &roots())
-        .await
-        .unwrap_err();
+    let error = refresh(
+        dir.path(),
+        &ProviderRegistry::builtins(),
+        &server.url,
+        &roots(),
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(
         error,
         MetadataError::Status(reqwest::StatusCode::TEMPORARY_REDIRECT)
@@ -374,7 +472,9 @@ async fn redirects_are_rejected_before_contacting_the_target() {
 async fn tls_trust_is_limited_to_the_supplied_roots() {
     let server = Server::response(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}".to_vec()).await;
     let dir = prior_cache();
-    let error = refresh(dir.path(), &server.url, &[]).await.unwrap_err();
+    let error = refresh(dir.path(), &ProviderRegistry::builtins(), &server.url, &[])
+        .await
+        .unwrap_err();
     assert!(matches!(error, MetadataError::Http(_)));
     assert_previous(dir.path());
 }
@@ -393,7 +493,9 @@ async fn unsafe_urls_are_rejected_without_changing_cache() {
         "https://localhost/api.json?key=value",
         "https://localhost/api.json#fragment",
     ] {
-        let error = refresh(dir.path(), url, &roots()).await.unwrap_err();
+        let error = refresh(dir.path(), &ProviderRegistry::builtins(), url, &roots())
+            .await
+            .unwrap_err();
         assert!(
             matches!(
                 error,
@@ -414,7 +516,13 @@ async fn declared_or_streamed_responses_above_32_mib_are_abandoned() {
     let server = Server::response(header.into_bytes()).await;
     let dir = prior_cache();
     assert!(matches!(
-        refresh(dir.path(), &server.url, &roots()).await,
+        refresh(
+            dir.path(),
+            &ProviderRegistry::builtins(),
+            &server.url,
+            &roots()
+        )
+        .await,
         Err(MetadataError::TooLarge)
     ));
     assert_previous(dir.path());
@@ -436,7 +544,13 @@ async fn declared_or_streamed_responses_above_32_mib_are_abandoned() {
         })
         .await;
         let dir = prior_cache();
-        let result = refresh(dir.path(), &server.url, &roots()).await;
+        let result = refresh(
+            dir.path(),
+            &ProviderRegistry::builtins(),
+            &server.url,
+            &roots(),
+        )
+        .await;
         if size == 32 * 1024 * 1024 {
             result.unwrap();
             assert_eq!(
@@ -468,7 +582,9 @@ async fn an_incomplete_body_is_abandoned_at_the_total_deadline() {
     let url = server.url.clone();
     tokio::time::pause();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    let mut refresh = tokio::spawn(async move { refresh(&config_dir, &url, &roots()).await });
+    let mut refresh = tokio::spawn(async move {
+        refresh(&config_dir, &ProviderRegistry::builtins(), &url, &roots()).await
+    });
     ready_without_advancing_time(started_rx).await.unwrap();
     advance_to(tokio::time::Instant::now()).await;
     advance_to(deadline - Duration::from_millis(1)).await;
@@ -513,7 +629,9 @@ async fn ongoing_body_data_does_not_extend_the_30_second_deadline() {
     let url = server.url.clone();
     tokio::time::pause();
     let started = tokio::time::Instant::now();
-    let mut refresh = tokio::spawn(async move { refresh(&config_dir, &url, &roots()).await });
+    let mut refresh = tokio::spawn(async move {
+        refresh(&config_dir, &ProviderRegistry::builtins(), &url, &roots()).await
+    });
     ready_without_advancing_time(started_rx).await.unwrap();
     advance_to(started).await;
     for second in [10, 20, 29] {

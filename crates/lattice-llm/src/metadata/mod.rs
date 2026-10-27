@@ -108,7 +108,7 @@ impl Model {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct CatalogEntry {
-    #[serde(deserialize_with = "models_from_objects")]
+    #[serde(deserialize_with = "objects_by_id")]
     models: BTreeMap<String, Model>,
 }
 
@@ -144,25 +144,30 @@ fn optional_object<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
     Option::<Object<T>>::deserialize(deserializer).map(|value| value.map(|object| object.0))
 }
 
-fn models_from_objects<'de, D: serde::Deserializer<'de>>(
+fn objects_by_id<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
     deserializer: D,
-) -> Result<BTreeMap<String, Model>, D::Error> {
-    BTreeMap::<String, Object<Model>>::deserialize(deserializer).map(|models| {
-        models
+) -> Result<BTreeMap<String, T>, D::Error> {
+    BTreeMap::<String, Object<T>>::deserialize(deserializer).map(|objects| {
+        objects
             .into_iter()
-            .map(|(id, model)| (id, model.0))
+            .map(|(id, object)| (id, object.0))
             .collect()
     })
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
-struct Catalog(BTreeMap<String, CatalogEntry>);
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct Catalog(#[serde(deserialize_with = "objects_by_id")] BTreeMap<String, CatalogEntry>);
 
 impl Catalog {
     fn parse(source: &[u8]) -> Result<Self, serde_json::Error> {
+        serde_json::from_slice(source)
+    }
+
+    fn filtered(source: &[u8], registry: &ProviderRegistry) -> Result<Self, serde_json::Error> {
         let mut raw: BTreeMap<String, serde_json::Value> = serde_json::from_slice(source)?;
         let mut entries = BTreeMap::new();
-        for provider in ProviderRegistry::builtins().iter() {
+        let builtins = ProviderRegistry::builtins();
+        for provider in builtins.iter().chain(registry.iter()) {
             if let Some(id) = &provider.catalog
                 && let Some(value) = raw.remove(id)
             {
@@ -172,16 +177,20 @@ impl Catalog {
         }
         Ok(Self(entries))
     }
+
+    fn to_json(&self) -> Result<Vec<u8>, serde_json::Error> {
+        let mut value = serde_json::to_value(self)?;
+        value.sort_all_objects();
+        let mut bytes = serde_json::to_vec_pretty(&value)?;
+        bytes.push(b'\n');
+        Ok(bytes)
+    }
 }
 
 /// 将 models.dev 原始 JSON 过滤为可审查的快照；对象键排序，末尾保留换行。
 pub(crate) fn snapshot_from_json(source: &[u8]) -> Result<Vec<u8>, MetadataError> {
-    let catalog = Catalog::parse(source)?;
-    let mut value = serde_json::to_value(catalog)?;
-    value.sort_all_objects();
-    let mut bytes = serde_json::to_vec_pretty(&value)?;
-    bytes.push(b'\n');
-    Ok(bytes)
+    let catalog = Catalog::filtered(source, &ProviderRegistry::builtins())?;
+    Ok(catalog.to_json()?)
 }
 
 pub(crate) struct Metadata {
@@ -189,7 +198,7 @@ pub(crate) struct Metadata {
 }
 
 impl Metadata {
-    /// 缓存条目整份替代快照条目；仅缺失的 catalog 回落，不补回缓存删除的模型或字段。
+    /// 缓存保留全部 catalog；缺失的内置条目回落快照，不补回缓存删除的模型或字段。
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "#315 L2 元数据尚未接入请求网关")

@@ -143,6 +143,56 @@ fn cache_replaces_whole_entries_and_missing_catalogs_fall_back() {
 }
 
 #[test]
+fn cached_custom_catalogs_are_loaded_without_a_registry_filter() {
+    let dir = tempfile::tempdir().unwrap();
+    cache(
+        dir.path(),
+        &json!({"togetherai": {"models": {
+            "org/model": {"id": "org/model", "limit": {"context": 32768},
+                          "endpoint": "https://untrusted.invalid", "env": ["OTHER_KEY"]}
+        }}}),
+    );
+    let metadata = Metadata::load(dir.path());
+    let registry = ProviderRegistry::parse(
+        "providers.toml",
+        r#"
+        [providers.custom]
+        protocol = "chat-completions"
+        base_url = "https://example.com/v1"
+        catalog = "togetherai"
+        [providers.missing]
+        protocol = "chat-completions"
+        base_url = "https://example.com/v1"
+        catalog = "does-not-exist"
+    "#,
+    )
+    .unwrap();
+    let models = metadata.merge(registry.get("custom").unwrap());
+    assert_eq!(models.len(), 1);
+    assert_eq!(
+        models["org/model"].limit.as_ref().unwrap().context,
+        Some(32768)
+    );
+    assert!(metadata.merge(registry.get("missing").unwrap()).is_empty());
+}
+
+#[test]
+fn an_invalid_custom_catalog_invalidates_the_entire_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = ProviderRegistry::builtins();
+    let provider = registry.get("openai").unwrap();
+    let baseline = Metadata::load(dir.path()).merge(provider);
+    cache(
+        dir.path(),
+        &json!({
+            "openai": {"models": {"cached": {"id": "cached"}}},
+            "togetherai": [{}]
+        }),
+    );
+    assert_eq!(Metadata::load(dir.path()).merge(provider), baseline);
+}
+
+#[test]
 fn handwritten_values_override_individual_fields_and_can_define_models_alone() {
     let dir = tempfile::tempdir().unwrap();
     cache(

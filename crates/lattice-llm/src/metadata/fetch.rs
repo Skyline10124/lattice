@@ -3,7 +3,8 @@
 
 use std::{io::Write, path::Path, time::Duration};
 
-use super::snapshot_from_json;
+use super::{Catalog, snapshot_from_json};
+use crate::provider::config::ProviderRegistry;
 
 const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -52,10 +53,15 @@ fn client(url: &url::Url, roots_der: &[Vec<u8>]) -> Result<reqwest::Client, Meta
 
 /// 拉取完整响应后按快照白名单过滤；TLS 根完全由调用方提供。
 pub async fn fetch_snapshot(url: &str, roots_der: &[Vec<u8>]) -> Result<Vec<u8>, MetadataError> {
+    let source = fetch_source(url, roots_der).await?;
+    snapshot_from_json(&source)
+}
+
+async fn fetch_source(url: &str, roots_der: &[Vec<u8>]) -> Result<Vec<u8>, MetadataError> {
     let url = url::Url::parse(url).map_err(|error| net_guard::NetGuardError::Config {
         message: format!("invalid metadata URL: {error}"),
     })?;
-    let source = tokio::time::timeout(FETCH_TIMEOUT, async {
+    tokio::time::timeout(FETCH_TIMEOUT, async {
         let worker_url = url.clone();
         let roots_der = roots_der.to_vec();
         let client = tokio::task::spawn_blocking(move || client(&worker_url, &roots_der)).await??;
@@ -83,21 +89,22 @@ pub async fn fetch_snapshot(url: &str, roots_der: &[Vec<u8>]) -> Result<Vec<u8>,
         Ok(bytes)
     })
     .await
-    .map_err(|_| MetadataError::Timeout)??;
-    snapshot_from_json(&source)
+    .map_err(|_| MetadataError::Timeout)?
 }
 
-/// 同目录临时文件完成写入后再替换，拉取、解析或写入失败都保留上一份缓存。
+/// 按内置表与当前注册表的 catalog 过滤；同目录写完临时文件后替换，失败保留旧缓存。
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "#315 L2 元数据刷新尚未接入后台")
 )]
 pub(crate) async fn refresh(
     config_dir: &Path,
+    registry: &ProviderRegistry,
     url: &str,
     roots_der: &[Vec<u8>],
 ) -> Result<(), MetadataError> {
-    let snapshot = fetch_snapshot(url, roots_der).await?;
+    let source = fetch_source(url, roots_der).await?;
+    let snapshot = Catalog::filtered(&source, registry)?.to_json()?;
     let cache_dir = config_dir.join("cache");
     tokio::task::spawn_blocking(move || {
         std::fs::create_dir_all(&cache_dir)?;
