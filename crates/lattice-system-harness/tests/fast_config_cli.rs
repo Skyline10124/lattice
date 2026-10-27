@@ -1,15 +1,12 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Fast binary black-box: model resolution, config discovery, and secret
-//! redaction (issue #40, Codeberg #18, "fast binary black-box" matrix; triage
-//! replacement target `planned_config_cli`).
+//! 通过已构建的 `lattice` 二进制验证 `models` 与 `resolve` 的公开输出。
 //!
-//! These scenarios drive the built `lattice` binary for the no-turn config
-//! surface (`models`, `resolve`). They assert public stdout/JSON
-//! fields and that no credential value ever appears in output - only env-var
-//! names. No turn is executed, so these need no turn runtime at all. They supersede
-//! the crate-internal `cli_diagnostics_models_*` and `cli_diagnostics_resolve_*` tests.
+//! 场景覆盖别名列表、凭据筛选、兼容端点配置、模型解析与详细输出，
+//! 并检查未知别名和缺失凭据时的诊断。
+//! 文本与 JSON 输出须包含相应的模型信息、凭据环境变量名和状态，
+//! 不回显凭据值或私有别名。场景只执行查询命令，不提交 Turn。
 
 use lattice_system_harness::{
     AssertError, CommandOutcome, LatticeCommand, LatticeDriver, ScenarioSpec, ScenarioWorld,
