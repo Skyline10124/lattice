@@ -10,7 +10,7 @@ status: accepted
 - 依赖：ADR 0007（接受时确定的模型与 provider 记在 UserMessage 节点上）
 - 实施跟踪：GitHub #315
 - 修正：2026-10-25 起草合同（#317）时，维护者裁决后台直接使用启动环境、删除 `LATTICE_AGENTS_DIR`，SIWC 不设模拟授权服务的测试，`lattice-llm` 对外改为请求网关、profile 副本只记 provider 与模型的 `id`，费用由请求网关在请求结束时估算并保存；第 1、4、6、8、11、13、15、16、17 节，后果，否决的方案与“不在本文决定的事项”随之修正
-- 修正：2026-10-25 实施 L1、L2 时，维护者裁决会话库升版本后直接拒绝旧库，不兼容读取；第 8、16 节与后果随之修正。第 4 节中“API key 随这一轮冻结”一句是起草合同时漏改的，按合同改为每次请求时取得
+- 修正：2026-10-25 实施 L1、L2 时，维护者裁决会话库升版本后直接拒绝旧库，不兼容读取，内置 provider 不能改 `protocol`；第 8、12、16 节与后果随之修正。第 4 节中“API key 随这一轮冻结”一句是起草合同时漏改的，按合同改为每次请求时取得
 
 ## 背景
 
@@ -215,7 +215,7 @@ SIWC 是一种认证方式：`protocol = "responses"`、`auth = "oauth:chatgpt"`
 
 ### 12. Google 内置 provider 的默认协议
 
-Interactions 适配器上线后，内置 `google` provider 默认使用 Interactions；`generateContent` 保留，可在 `providers.toml` 中切换。
+Interactions 适配器上线后，内置 `google` provider 使用 Interactions。内置 provider 不能改 `protocol`；`generateContent` 保留，需要它时在 `providers.toml` 中新增一个使用 `generate-content` 的 provider。
 
 ### 13. 会话持有 profile 副本
 
