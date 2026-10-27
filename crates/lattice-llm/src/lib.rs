@@ -6,9 +6,11 @@
 pub mod auth;
 mod client;
 mod connection;
-pub use connection::{ConnectionMaterial, LlmConnection};
+pub use connection::{ConnectionMaterial, LlmConnection, load_tls_roots_der};
 mod endpoints;
 mod logging;
+pub(crate) mod metadata;
+pub use metadata::{MODELS_URL, MetadataError, fetch_snapshot};
 pub mod protocol;
 pub(crate) mod provider;
 pub use provider::{ModelRef, ModelRefError};

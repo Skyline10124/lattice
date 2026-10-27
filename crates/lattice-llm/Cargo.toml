@@ -25,14 +25,16 @@ rustls-native-certs = "0.8.4"
 tokio = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
+tempfile = { workspace = true }
 # reqwest 已经依赖它们：自有协议层重发策略要识别 h2 错误，连接日志层要实现 tower 的 trait。
 h2 = "0.4"
 tower-layer = "0.3"
 tower-service = "0.3"
 
 [dev-dependencies]
-tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
 
 [features]
 test-utils = []

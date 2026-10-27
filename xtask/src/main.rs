@@ -2,6 +2,8 @@ mod boundary_report;
 mod ci;
 mod harness_boundary;
 mod lancet_boundary;
+#[cfg(feature = "model-metadata")]
+mod model_metadata;
 mod output;
 mod path_norm;
 mod repo_root;
@@ -27,6 +29,9 @@ enum Commands {
     HarnessBoundary,
     /// LANCET architecture boundary gate.
     LancetBoundary,
+    /// Generate the built-in model metadata snapshot from models.dev.
+    #[cfg(feature = "model-metadata")]
+    ModelMetadata,
     /// Generate (or check) Source Tool artifacts from manifests.
     ToolCodegen(tool_codegen::ToolCodegenArgs),
     /// Build a Source Tool's WASM Component and pin its artifact hash.
@@ -44,6 +49,8 @@ fn main() -> anyhow::Result<()> {
         Commands::Ci(args) => ci::run(args),
         Commands::HarnessBoundary => harness_boundary::run(),
         Commands::LancetBoundary => lancet_boundary::run(),
+        #[cfg(feature = "model-metadata")]
+        Commands::ModelMetadata => model_metadata::run(),
         Commands::ToolCodegen(args) => tool_codegen::run(args),
         Commands::ToolBuild(args) => tool_build::run(args),
         Commands::TuiMock(args) => tui_mock::run(args),

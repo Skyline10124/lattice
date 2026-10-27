@@ -7,6 +7,24 @@ use crate::{
 use std::sync::{Arc, Mutex};
 use zeroize::Zeroizing;
 
+/// 按当前启动环境读取平台信任根，个别证书读取失败时记录警告；空集合按配置错误拒绝。
+pub fn load_tls_roots_der() -> Result<Vec<Vec<u8>>, LlmError> {
+    let roots = rustls_native_certs::load_native_certs();
+    for error in roots.errors {
+        tracing::warn!(%error, "failed to load a TLS root certificate");
+    }
+    if roots.certs.is_empty() {
+        return Err(LlmError::Config {
+            message: "no usable TLS root certificates".into(),
+        });
+    }
+    Ok(roots
+        .certs
+        .into_iter()
+        .map(|cert| cert.as_ref().to_vec())
+        .collect())
+}
+
 /// 单次提交冻结的连接材料。刻意不实现 Debug/serde，凭据和信任根不进入持久配置。
 pub struct LlmConnection {
     pub(crate) resolved: ResolvedModel,
@@ -99,22 +117,11 @@ impl LlmConnection {
 
     pub(crate) fn from_resolved_env(resolved: ResolvedModel) -> Result<Self, LlmError> {
         let key = crate::client::validate_and_read_key(&resolved)?;
-        let roots = rustls_native_certs::load_native_certs();
-        // 与平台 verifier 一样，部分可用根可继续；完全无法建立 HTTPS 信任时 fail closed。
-        if resolved.base_url.starts_with("https:") && roots.certs.is_empty() {
-            return Err(LlmError::Config {
-                message: "no usable TLS root certificates".into(),
-            });
-        }
-        Self::new(
-            resolved,
-            key,
-            roots
-                .certs
-                .into_iter()
-                .map(|cert| cert.as_ref().to_vec())
-                .collect(),
-        )
+        let roots = match load_tls_roots_der() {
+            Err(error) if resolved.base_url.starts_with("https:") => return Err(error),
+            result => result.unwrap_or_default(),
+        };
+        Self::new(resolved, key, roots)
     }
 
     /// 同一次提交的 Tool Host 复用这些根；空集合拒绝全部 TLS 证书，不回退宿主信任库。
