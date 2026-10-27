@@ -5,8 +5,7 @@ use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 
 mod commands;
-mod env_boundary;
-use commands::{audit, doctor, lancet as lancet_cmd, models, resolve, session as session_cmd};
+use commands::{audit, lancet as lancet_cmd, models, resolve, session as session_cmd};
 
 #[derive(Parser)]
 #[command(name = "lattice")]
@@ -59,8 +58,6 @@ enum Commands {
         #[command(subcommand)]
         action: session_cmd::SessionAction,
     },
-    /// Run diagnostics.
-    Doctor,
     /// Inspect CEP invocation records (registered, started and terminal).
     Audit(Box<audit::AuditCmd>),
     /// LANCET inspection and self-check subcommands.
@@ -96,19 +93,6 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::from(if help { 0 } else { 2 });
         }
     };
-    if let Some(Commands::Daemon {
-        action: commands::daemon::DaemonAction::Serve { state_root },
-    }) = &cli.command
-    {
-        let root = match commands::daemon::state_root(state_root.as_deref()) {
-            Ok(root) => root,
-            Err(error) => return commands::run::report_error(&error, cli.json),
-        };
-        env_boundary::prepare_daemon_environment(&root);
-    } else {
-        // dotenv 仅在提交端、运行时创建前安装；后台不运行工作区环境加载器。
-        env_boundary::load_workspace_dotenv();
-    }
     async_main(cli)
 }
 
@@ -143,9 +127,6 @@ async fn run_commands(cli: Cli) -> Result<std::process::ExitCode> {
         }
         Some(Commands::Session { action }) => {
             return session_cmd::run(action, cli.json, cli.verbose).await;
-        }
-        Some(Commands::Doctor) => {
-            doctor::run(cli.json)?;
         }
         Some(Commands::Audit(cmd)) => {
             audit::run(*cmd, cli.json).await?;

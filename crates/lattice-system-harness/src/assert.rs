@@ -461,7 +461,7 @@ mod tests {
             let report = finalize_with_failure_artifacts_at_target(
                 &world,
                 "scenario",
-                "lattice doctor",
+                "lattice models",
                 &value,
                 &[secret],
                 result,

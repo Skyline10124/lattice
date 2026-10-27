@@ -235,7 +235,6 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
         let beta = world.root().join("beta");
         std::fs::create_dir_all(beta.join(".lattice/agents/operator")).unwrap();
         std::fs::copy(&profile, beta.join(".lattice/agents/operator/agent.toml")).unwrap();
-        std::fs::write(beta.join(".env"), "").unwrap();
         gix::init(&beta).unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();

@@ -18,6 +18,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use lattice_system_harness::{AssertError, ScenarioWorld, SseScript};
@@ -369,6 +370,122 @@ fn direct_workspace_history_records_installed_mutation() {
         captures,
         result,
     );
+}
+
+/// 继承的 HOME 含敌意 Git 配置时，历史仍能首次创建、写入及重开后继续写入。
+#[test]
+fn direct_workspace_history_ignores_hostile_user_git_config() {
+    let driver = driver();
+    let (world, spec) = direct_world(
+        "direct-wshist-git-config",
+        "history-isolation",
+        "[\"mutate__create\",\"mutate__edit\"]",
+        "",
+    );
+    fs::write(
+        world.home().join(".gitconfig"),
+        "[init]\n defaultBranch = hostile branch\n[core]\n logAllRefUpdates = true\n",
+    )
+    .unwrap();
+    let hash = format!("blake3:{}", blake3::hash(b"first\n").to_hex());
+    let edit = format!(
+        r#"{{"path":"history.txt","expected_hash":"{hash}","edits":[{{"op":"replace_text","old":"first","new":"second"}}]}}"#
+    );
+    let server = wire_fake_llm(
+        &world,
+        "history-isolation",
+        sequence(vec![
+            tool_call(
+                "create",
+                "mutate__create",
+                r#"{"path":"history.txt","content":"first\n","create_parents":false}"#,
+            ),
+            SseScript::plain("created"),
+            tool_call("edit", "mutate__edit", &edit),
+            SseScript::plain("edited"),
+        ]),
+    );
+    let mut scenario_evidence = evidence(&world, &spec);
+    let send =
+        lattice_system_harness::SessionSendDriver::new(&driver, &world, &spec, "history-isolation");
+    let created = send.send("create history").unwrap();
+    scenario_evidence.record_command("create with hostile Git config", &created.command);
+    let result: Result<(), AssertError> = (|| {
+        assert_clean_send(&created)?;
+        require(
+            created.is_clean_exit(0) && created.has_completed(),
+            "creation Turn must complete successfully",
+        )?;
+        let pids = world
+            .daemon_pids()
+            .map_err(|error| AssertError::StdoutMissing {
+                expected: format!("inspect the scenario daemon: {error}"),
+            })?;
+        require(pids.len() == 1, "one automatically started daemon")?;
+        let environment = fs::read(format!("/proc/{}/environ", pids[0])).map_err(|error| {
+            AssertError::StdoutMissing {
+                expected: format!("read the scenario daemon environment: {error}"),
+            }
+        })?;
+        let home = environment
+            .split(|byte| *byte == 0)
+            .find_map(|entry| entry.strip_prefix(b"HOME="));
+        require(
+            home == Some(world.home().as_os_str().as_bytes()),
+            "automatic startup must inherit the scenario HOME",
+        )?;
+        require(
+            tool_ok(&created.parsed, "mutate__create"),
+            "create must succeed",
+        )?;
+        let repo = private_history_repo(&world);
+        let first_tip = current_tip(&repo).expect("created history tip");
+        require(
+            recorded_files(&repo).expect("created history")
+                == vec![("history.txt".into(), b"first\n".to_vec())],
+            "history must record the first mutation",
+        )?;
+        require(
+            fs::read(repo.join("HEAD")).unwrap() == b"ref: refs/heads/main\n",
+            "user init.defaultBranch must not change history initialization",
+        )?;
+
+        world.stop_daemon().expect("stop before reopening history");
+        // 与初始化分开见证：非隔离的重开会改读另一命名空间，找不到已有身份与历史。
+        fs::write(
+            world.home().join(".gitconfig"),
+            "[gitoxide \"core\"]\n refsNamespace = hostile-open\n",
+        )
+        .unwrap();
+        let edited = send.send("edit after reopening history").unwrap();
+        scenario_evidence
+            .record_command("reopen and edit with hostile Git config", &edited.command);
+        assert_clean_send(&edited)?;
+        require(
+            edited.is_clean_exit(0) && edited.has_completed(),
+            "editing Turn must complete successfully",
+        )?;
+        require(tool_ok(&edited.parsed, "mutate__edit"), "edit must succeed")?;
+        require(
+            fs::read(world.project_dir().join("history.txt")).unwrap() == b"second\n",
+            "reopened history must allow the next file mutation",
+        )?;
+        require(
+            recorded_files(&repo).expect("edited history")
+                == vec![("history.txt".into(), b"second\n".to_vec())],
+            "history must record the second mutation",
+        )?;
+        let chain = mutation_chain(&repo);
+        require(
+            chain.len() == 2 && chain[0].0 == first_tip,
+            "reopening must preserve the first mutation as an ancestor",
+        )?;
+        require(
+            server.captured_requests().len() == 4,
+            "both turns must complete",
+        )
+    })();
+    finish_scenario(scenario_evidence, &[], server.captured_requests(), result);
 }
 
 /// Refusals preserve a readable empty history; later success and refusals keep

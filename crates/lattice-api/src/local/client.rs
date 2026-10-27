@@ -294,11 +294,6 @@ impl LocalClient {
             command
                 .args(["daemon", "serve", "--state-root"])
                 .arg(&state_root)
-                .env_clear()
-                .env("LANG", "C.UTF-8")
-                .env("HOME", state_root.join("lattice/local"))
-                .env("XDG_CONFIG_HOME", state_root.join("lattice/local/config"))
-                .env("XDG_STATE_HOME", &state_root)
                 .current_dir("/")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
