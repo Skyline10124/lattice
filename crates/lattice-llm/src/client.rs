@@ -10,12 +10,14 @@ use std::time::{Duration, Instant};
 use futures::stream::{self, StreamExt};
 use net_guard::NetGuardError;
 
-use crate::providers;
+use crate::protocol;
+use crate::reply::{ProtocolEvent, ReplyProtocolError, StreamStop};
+use crate::reply_stream::{ProtocolStream, StreamControl, assemble_reply_stream};
 use crate::router::{ProviderKind, ResolvedModel};
 use crate::sse;
 use crate::stub::{LlmError, LlmStream};
 use crate::transport;
-use crate::types::{ChatRequest, LlmEvent};
+use crate::types::ChatRequest;
 
 /// 兜底总时限，与 profile `timeout_secs` 的上限一致；流的实际时限由 Turn deadline 约束。
 const HTTP_REQUEST_BACKSTOP: Duration = Duration::from_secs(3600);
@@ -65,25 +67,25 @@ fn build_auth_headers(resolved: &ResolvedModel, api_key: &str) -> Vec<(String, S
         ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => {
             vec![(
                 "Authorization".to_string(),
-                providers::openai::auth_header_value(api_key),
+                protocol::chat_completions::auth_header_value(api_key),
             )]
         }
         ProviderKind::Anthropic => {
             vec![
                 (
                     "x-api-key".to_string(),
-                    providers::anthropic::auth_header_value(api_key),
+                    protocol::anthropic_messages::auth_header_value(api_key),
                 ),
                 (
                     "anthropic-version".to_string(),
-                    providers::anthropic::ANTHROPIC_VERSION.to_string(),
+                    protocol::anthropic_messages::ANTHROPIC_VERSION.to_string(),
                 ),
             ]
         }
         ProviderKind::Gemini => {
             vec![(
                 "x-goog-api-key".to_string(),
-                providers::gemini::auth_header_value(api_key),
+                protocol::generate_content::auth_header_value(api_key),
             )]
         }
     }
@@ -96,13 +98,13 @@ fn build_request_body(
 ) -> Result<serde_json::Value, LlmError> {
     match resolved.provider {
         ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => {
-            providers::openai::build_request_json(request, resolved).map_err(Into::into)
+            protocol::chat_completions::build_request_json(request, resolved).map_err(Into::into)
         }
         ProviderKind::Anthropic => {
-            providers::anthropic::build_request_json(request, resolved).map_err(Into::into)
+            protocol::anthropic_messages::build_request_json(request, resolved).map_err(Into::into)
         }
         ProviderKind::Gemini => {
-            providers::gemini::build_request_json(request, resolved).map_err(Into::into)
+            protocol::generate_content::build_request_json(request, resolved).map_err(Into::into)
         }
     }
 }
@@ -119,9 +121,10 @@ fn build_endpoint_url(resolved: &ResolvedModel) -> String {
         ProviderKind::Anthropic => {
             format!("{}/v1/messages", resolved.base_url.trim_end_matches('/'))
         }
-        ProviderKind::Gemini => {
-            providers::gemini::build_stream_url(&resolved.base_url, &resolved.provider_model)
-        }
+        ProviderKind::Gemini => protocol::generate_content::build_stream_url(
+            &resolved.base_url,
+            &resolved.provider_model,
+        ),
     }
 }
 
@@ -129,27 +132,27 @@ fn build_endpoint_url(resolved: &ResolvedModel) -> String {
 /// owns its own parser, preventing state leakage across concurrent or
 /// sequential requests on the same tokio worker thread.
 enum ProviderParser {
-    OpenAi(providers::openai::OpenAiSseParser),
-    Anthropic(providers::anthropic::AnthropicSseParser),
-    Gemini(providers::gemini::GeminiSseParser),
+    OpenAi(protocol::chat_completions::OpenAiSseParser),
+    Anthropic(protocol::anthropic_messages::AnthropicSseParser),
+    Gemini(protocol::generate_content::GeminiSseParser),
 }
 
 impl ProviderParser {
     fn new(provider: ProviderKind) -> Self {
         match provider {
             ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => {
-                ProviderParser::OpenAi(providers::openai::OpenAiSseParser::new())
+                ProviderParser::OpenAi(protocol::chat_completions::OpenAiSseParser::new())
             }
             ProviderKind::Anthropic => {
-                ProviderParser::Anthropic(providers::anthropic::AnthropicSseParser::new())
+                ProviderParser::Anthropic(protocol::anthropic_messages::AnthropicSseParser::new())
             }
             ProviderKind::Gemini => {
-                ProviderParser::Gemini(providers::gemini::GeminiSseParser::new())
+                ProviderParser::Gemini(protocol::generate_content::GeminiSseParser::new())
             }
         }
     }
 
-    fn parse_event(&mut self, event_text: &str) -> Vec<LlmEvent> {
+    fn parse_event(&mut self, event_text: &str) -> Vec<ProtocolEvent> {
         let (event_type, data) = parse_sse_event_block(event_text);
         if data.is_empty() {
             return Vec::new();
@@ -193,16 +196,15 @@ struct SseStreamState {
     buffer: Vec<u8>,
     event_count: usize,
     finished: bool,
-    pending: std::collections::VecDeque<LlmEvent>,
+    pending: std::collections::VecDeque<ProtocolEvent>,
 }
 
-/// Stream SSE events incrementally from an HTTP response into [`LlmEvent`] values.
+/// 将 HTTP 响应中的 SSE 事件逐步解析为 [`ProtocolEvent`]。
 ///
-/// Each call creates its own parser instance — no thread-local state leaks
-/// across requests. Body chunks are read incrementally; if the in-flight
-/// unframed SSE buffer exceeds `MAX_SSE_BUFFER_SIZE` or the event count exceeds
-/// `MAX_SSE_EVENTS`, an error event is emitted and the stream terminates.
-fn stream_sse_response(body_stream: BodyStream, provider: ProviderKind) -> LlmStream {
+/// 每个请求独享解析器，避免请求间共享状态。响应体按块读取；
+/// 未完成分帧的 SSE 缓冲超过 `MAX_SSE_BUFFER_SIZE`，
+/// 或事件数超过 `MAX_SSE_EVENTS` 时，发出错误事件并终止流。
+fn stream_sse_response(body_stream: BodyStream, provider: ProviderKind) -> ProtocolStream {
     let state = SseStreamState {
         body_stream,
         parser: ProviderParser::new(provider),
@@ -231,7 +233,7 @@ fn stream_sse_response(body_stream: BodyStream, provider: ProviderKind) -> LlmSt
                     if state.buffer.len() > sse::MAX_SSE_BUFFER_SIZE {
                         state.finished = true;
                         return Some((
-                            LlmEvent::error(
+                            ProtocolEvent::error(
                                 format!(
                                     "SSE in-flight buffer size exceeded: {} bytes",
                                     state.buffer.len()
@@ -253,7 +255,7 @@ fn stream_sse_response(body_stream: BodyStream, provider: ProviderKind) -> LlmSt
                             // 响应已经开始后读失败就是传输中断。reqwest 把这类错误都归为
                             // decode，不能按请求阶段的规则判断，一律可重试。
                             let error = llm_error_from_request(e);
-                            LlmEvent::error(error.to_string(), true)
+                            ProtocolEvent::error(error.to_string(), true)
                         },
                         state,
                     ));
@@ -284,10 +286,13 @@ fn stream_sse_response(body_stream: BodyStream, provider: ProviderKind) -> LlmSt
 /// 读到结尾后才回到连接池；分块响应的结尾常晚于最后一个事件到达，不读完同一 Turn 的下一次
 /// 请求就得新建连接。provider 在结束事件后随即结束响应体，因此只等很短时间、读很少数据：
 /// `Done` 最多推迟 0.5 秒，超出时放弃这条连接。
-async fn deliver(mut state: SseStreamState, event: LlmEvent) -> (LlmEvent, SseStreamState) {
+async fn deliver(
+    mut state: SseStreamState,
+    event: ProtocolEvent,
+) -> (ProtocolEvent, SseStreamState) {
     const TAIL_WAIT: Duration = Duration::from_millis(500);
     const TAIL_BYTES: usize = 64 * 1024;
-    if matches!(event, LlmEvent::Done { .. }) && !state.finished {
+    if matches!(event, ProtocolEvent::Done { .. }) && !state.finished {
         state.finished = true;
         let body = &mut state.body_stream;
         let _ = tokio::time::timeout(TAIL_WAIT, async {
@@ -325,7 +330,7 @@ fn drain_complete_events(state: &mut SseStreamState) {
             continue;
         }
         if state.event_count >= sse::MAX_SSE_EVENTS {
-            state.pending.push_back(LlmEvent::error(
+            state.pending.push_back(ProtocolEvent::error(
                 format!("SSE event count exceeded: {}", sse::MAX_SSE_EVENTS),
                 false,
             ));
@@ -579,7 +584,7 @@ pub async fn dispatch_stream(
     resolved: ResolvedModel,
 ) -> Result<LlmStream, LlmError> {
     crate::LlmConnection::from_resolved_env(resolved)?
-        .stream(request)
+        .stream(request, StreamControl::default())
         .await
 }
 
@@ -604,6 +609,7 @@ async fn turn_client(
 pub(crate) async fn dispatch_frozen(
     request: ChatRequest,
     connection: &crate::LlmConnection,
+    control: StreamControl,
 ) -> Result<LlmStream, LlmError> {
     let resolved = &connection.resolved;
     let provider = resolved.provider.as_str();
@@ -661,14 +667,20 @@ pub(crate) async fn dispatch_frozen(
     let api_key = connection.api_key.clone();
     let provider = provider.to_owned();
     // provider 的流内错误同样会进入公开诊断和 Turn 日志，必须在越过适配边界前脱敏。
-    Ok(Box::pin(stream.map(move |event| match event {
-        LlmEvent::Error { mut failure } => {
+    let input = Box::pin(stream.map(move |event| match event {
+        ProtocolEvent::Failed(StreamStop::Provider(mut failure)) => {
             failure.message =
                 transport::bound_diagnostic(&failure.message.replace(api_key.as_str(), "[REDACTED]"));
             tracing::warn!(provider, request_id = request_id.as_deref(), error = %failure.message, "provider stream error");
-            LlmEvent::Error { failure }
+            ProtocolEvent::Failed(StreamStop::Provider(failure))
         }
-        LlmEvent::Done { finish_reason, usage } => {
+        ProtocolEvent::UnsupportedContentBlock { protocol, index, block_type } =>
+            ProtocolEvent::Failed(StreamStop::Protocol(ReplyProtocolError::unsupported(
+            protocol,
+            index,
+            &block_type.replace(api_key.as_str(), "[REDACTED]"),
+        ))),
+        ProtocolEvent::Done { finish_reason } => {
             guard.finish();
             tracing::debug!(
                 provider,
@@ -676,10 +688,18 @@ pub(crate) async fn dispatch_frozen(
                 total_ms = started.elapsed().as_millis() as u64,
                 "provider stream completed"
             );
-            LlmEvent::Done { finish_reason, usage }
+            ProtocolEvent::Done { finish_reason }
         }
         other => other,
-    })))
+    }));
+    let origin = match resolved.provider {
+        ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => {
+            lattice_conversation::ProviderOrigin::OpenAiCompatible
+        }
+        ProviderKind::Anthropic => lattice_conversation::ProviderOrigin::Anthropic,
+        ProviderKind::Gemini => lattice_conversation::ProviderOrigin::Gemini,
+    };
+    Ok(assemble_reply_stream(Some(origin), input, control))
 }
 
 /// 随响应流一起丢弃。流没交付 `Done` 就结束、出错或被提前丢弃时，这条连接的状态不可信：
@@ -707,6 +727,7 @@ impl Drop for ForgetUnlessDone {
 mod tests {
     use super::*;
     use crate::endpoints::OPENAI_BASE_URL;
+    use crate::{LlmEvent, ReplyOutcome, ReplyStop};
 
     use crate::router::CredentialStatus;
     use crate::test_env::with_env_vars;
@@ -859,11 +880,21 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            for (status, body) in [
-                ("401 Unauthorized", "frozen-secret rejected"),
+            for (status, body, auth) in [
+                (
+                    "401 Unauthorized",
+                    "frozen-secret rejected",
+                    "authorization: bearer frozen-secret",
+                ),
                 (
                     "200 OK",
                     "data: {\"error\":{\"message\":\"frozen-secret rejected\"}}\n\n",
+                    "authorization: bearer frozen-secret",
+                ),
+                (
+                    "200 OK",
+                    "event: content_block_start\ndata: {\"index\":9,\"content_block\":{\"type\":\"frozen-secret\",\"data\":\"private-payload\"}}\n\n",
+                    "x-api-key: frozen-secret",
                 ),
             ] {
                 let (mut socket, _) = listener.accept().await.unwrap();
@@ -879,11 +910,7 @@ mod tests {
                     }
                 }
                 let request = String::from_utf8(request).unwrap();
-                assert!(
-                    request
-                        .to_ascii_lowercase()
-                        .contains("authorization: bearer frozen-secret")
-                );
+                assert!(request.to_ascii_lowercase().contains(auth));
                 socket.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
             }
         });
@@ -896,11 +923,15 @@ mod tests {
             credential_status: crate::CredentialStatus::Missing,
         };
         let connection =
-            crate::LlmConnection::new(resolved, "frozen-secret".into(), Vec::new()).unwrap();
+            crate::LlmConnection::new(resolved.clone(), "frozen-secret".into(), Vec::new())
+                .unwrap();
         let request = ChatRequest::new(Vec::new(), crate::ModelTarget::new("compat:frozen-model"));
-        let error = match tokio::time::timeout(Duration::from_secs(3), connection.stream(request))
-            .await
-            .unwrap()
+        let error = match tokio::time::timeout(
+            Duration::from_secs(3),
+            connection.stream(request, StreamControl::default()),
+        )
+        .await
+        .unwrap()
         {
             Ok(_) => panic!("expected provider failure"),
             Err(error) => error,
@@ -910,7 +941,7 @@ mod tests {
         let request = ChatRequest::new(Vec::new(), crate::ModelTarget::new("compat:frozen-model"));
         let events = tokio::time::timeout(Duration::from_secs(3), async {
             connection
-                .stream(request)
+                .stream(request, StreamControl::default())
                 .await
                 .unwrap()
                 .collect::<Vec<_>>()
@@ -919,9 +950,129 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            matches!(events.as_slice(), [LlmEvent::Error { failure }] if failure.message == "API error: [REDACTED] rejected" && !failure.retryable)
+            matches!(events.as_slice(), [LlmEvent::Started, LlmEvent::Finished { outcome: ReplyOutcome::Interrupted { reason: ReplyStop::Stream(StreamStop::Provider(failure)) }, .. }] if failure.message == "API error: [REDACTED] rejected" && !failure.retryable)
         );
+        let connection = crate::LlmConnection::new(
+            ResolvedModel {
+                provider: ProviderKind::Anthropic,
+                ..resolved
+            },
+            "frozen-secret".into(),
+            Vec::new(),
+        )
+        .unwrap();
+        let events = tokio::time::timeout(Duration::from_secs(3), async {
+            connection
+                .stream(
+                    ChatRequest::new(Vec::new(), crate::ModelTarget::default()),
+                    StreamControl::default(),
+                )
+                .await
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            events.as_slice(),
+            [LlmEvent::Started, LlmEvent::Finished {
+                outcome: ReplyOutcome::Interrupted {
+                    reason: ReplyStop::Stream(StreamStop::Protocol(
+                        crate::ReplyProtocolError::UnsupportedContentBlock { protocol, index: 9, block_type }
+                    ))
+                }, ..
+            }] if protocol == "anthropic-messages" && block_type == "[REDACTED]"
+        ));
+        assert!(!format!("{events:?}").contains("private-payload"));
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unsupported_type_redacts_full_credentials_before_bounding() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for (key, prefix, expected_type) in [
+            (
+                "secret-long-".repeat(8),
+                String::new(),
+                "[REDACTED]-tail".into(),
+            ),
+            (
+                "secret-crosses-the-boundary".into(),
+                "p".repeat(60),
+                format!("{}[RED", "p".repeat(60)),
+            ),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let body = format!(
+                "event: content_block_start\ndata: {}\n\n",
+                serde_json::json!({"index":9,"content_block":{"type":format!("{prefix}{key}-tail"),"data":"private-payload"}})
+            );
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let mut chunk = [0; 1024];
+                    let count = socket.read(&mut chunk).await.unwrap();
+                    assert!(count > 0);
+                    request.extend_from_slice(&chunk[..count]);
+                    assert!(request.len() <= 8192);
+                }
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            });
+            let connection = crate::LlmConnection::new(
+                ResolvedModel {
+                    alias: "frozen".into(),
+                    provider: ProviderKind::Anthropic,
+                    provider_model: "frozen".into(),
+                    base_url: format!("http://{address}"),
+                    api_key_env: "UNUSED_FROZEN_CREDENTIAL".into(),
+                    credential_status: CredentialStatus::Missing,
+                },
+                key,
+                Vec::new(),
+            )
+            .unwrap();
+            let events = tokio::time::timeout(Duration::from_secs(3), async {
+                connection
+                    .stream(
+                        ChatRequest::new(Vec::new(), crate::ModelTarget::default()),
+                        StreamControl::default(),
+                    )
+                    .await
+                    .unwrap()
+                    .collect::<Vec<_>>()
+                    .await
+            })
+            .await
+            .unwrap();
+            let [
+                LlmEvent::Started,
+                LlmEvent::Finished {
+                    outcome:
+                        ReplyOutcome::Interrupted {
+                            reason:
+                                ReplyStop::Stream(StreamStop::Protocol(
+                                    error @ ReplyProtocolError::UnsupportedContentBlock {
+                                        protocol,
+                                        index: 9,
+                                        block_type,
+                                    },
+                                )),
+                        },
+                    ..
+                },
+            ] = events.as_slice()
+            else {
+                panic!("typed protocol failure");
+            };
+            assert_eq!(protocol, "anthropic-messages");
+            assert_eq!(block_type, &expected_type);
+            assert!(!error.to_string().contains("secret-"));
+            assert!(!format!("{events:?}").contains("private-payload"));
+            server.await.unwrap();
+        }
     }
 
     /// 流没有交付 `Done` 就结束、读到一半断开，或错误正文读到一半断开时，本 Turn 的 client
@@ -1002,7 +1153,7 @@ mod tests {
                 crate::LlmConnection::new(resolved.clone(), "key".into(), Vec::new()).unwrap();
             let request = ChatRequest::new(Vec::new(), crate::ModelTarget::new("compat:m"));
             let outcome = tokio::time::timeout(Duration::from_secs(3), async {
-                match connection.stream(request).await {
+                match connection.stream(request, StreamControl::default()).await {
                     Ok(stream) => Ok(stream.collect::<Vec<_>>().await),
                     Err(error) => Err(error),
                 }
@@ -1011,7 +1162,7 @@ mod tests {
             .unwrap();
             if name == "body cut mid-stream" {
                 assert!(
-                    matches!(outcome.as_deref(), Ok([.., LlmEvent::Error { failure }]) if failure.retryable),
+                    matches!(outcome.as_deref(), Ok([.., LlmEvent::Finished { outcome: ReplyOutcome::Interrupted { reason: ReplyStop::Stream(StreamStop::Provider(failure)) }, .. }]) if failure.retryable),
                     "{name}: a body cut short is a retryable transport failure: {outcome:?}"
                 );
             }
@@ -1081,8 +1232,20 @@ mod tests {
         drain_complete_events(&mut state);
         assert!(!state.pending.is_empty());
 
-        match &state.pending[0] {
-            LlmEvent::Token { content, .. } => assert!(content.contains(han)),
+        match state
+            .pending
+            .iter()
+            .find(|event| {
+                matches!(
+                    event,
+                    ProtocolEvent::Part(crate::reply::PartDelta::Text { .. })
+                )
+            })
+            .expect("one translated text delta")
+        {
+            ProtocolEvent::Part(crate::reply::PartDelta::Text { delta: content, .. }) => {
+                assert!(content.contains(han))
+            }
             other => panic!("expected Token event, got: {:?}", other),
         }
     }
@@ -1103,6 +1266,16 @@ mod tests {
         state.buffer.extend_from_slice(raw);
         drain_complete_events(&mut state);
         assert_eq!(state.event_count, 2);
-        assert_eq!(state.pending.len(), 2);
+        assert_eq!(
+            state
+                .pending
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    ProtocolEvent::Part(crate::reply::PartDelta::Text { .. })
+                ))
+                .count(),
+            2
+        );
     }
 }

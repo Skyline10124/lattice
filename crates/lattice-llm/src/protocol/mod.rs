@@ -1,11 +1,17 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! 协议标识与各协议支持的可选行为。
+//! 按协议组织的流解析与消息投影，以及协议标识与各协议支持的可选行为。
 
 use serde::Deserialize;
 
+pub(crate) mod anthropic_messages;
+pub(crate) mod chat_completions;
+mod common;
 mod features;
+pub(crate) mod generate_content;
+pub mod projection;
+
 pub(crate) use features::{
     Cache, ChatCompletionsFeatures, EffortParam, Features, MessagesFeatures, ReasoningReplay,
     ThinkingBudget, ThinkingToggle,

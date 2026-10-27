@@ -20,6 +20,163 @@ fn now() -> Timestamp {
     "2026-09-26T00:00:00Z".parse().unwrap()
 }
 
+/// 直接构造 CompleteReply 绕过流层，分别覆盖正文、reasoning、参数、
+/// 共享总量和批次边界。外部场景不能注入未经累积器核验的完整消息。
+#[test]
+fn oversized_complete_replies_are_rejected_without_partial_records() {
+    use lattice_conversation::{
+        MAX_ASSISTANT_CONTENT_BYTES, MAX_MODEL_ATTEMPT_BYTES, MAX_OPAQUE_REPLAY_STATE_BYTES,
+        MAX_REASONING_CONTENT_BYTES, MAX_TOOL_CALL_ARGUMENTS_BYTES,
+    };
+    let (_dir, layout, db) = store();
+    let lock = db.try_lock_session(sid(1)).unwrap();
+    db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+    db.start_request(&lock, key(tid(1), 0, 0), now()).unwrap();
+    for registration in [true, false] {
+        for case in 0..if registration { 6 } else { 3 } {
+            let mut input = reply(key(tid(1), 0, 0), usize::from(registration));
+            match (registration, case) {
+                (_, 0) => {
+                    input.message.parts[0].semantic = MessageSemantic::Text {
+                        text: "x".repeat(MAX_ASSISTANT_CONTENT_BYTES + 1),
+                    }
+                }
+                (_, 1) => {
+                    input.message.parts[0].semantic = MessageSemantic::Reasoning {
+                        text: "r".repeat(MAX_REASONING_CONTENT_BYTES + 1),
+                    }
+                }
+                (true, 2) => {
+                    let MessageSemantic::ToolCall { call } = &mut input.message.parts[1].semantic
+                    else {
+                        unreachable!()
+                    };
+                    call.arguments = json!({"x":"a".repeat(MAX_TOOL_CALL_ARGUMENTS_BYTES)});
+                }
+                (true, 3) => {
+                    input = reply(key(tid(1), 0, 0), 16);
+                    for part in &mut input.message.parts {
+                        if let MessageSemantic::ToolCall { call } = &mut part.semantic {
+                            call.arguments =
+                                json!({"x":"a".repeat(MAX_TOOL_CALL_ARGUMENTS_BYTES - 8)});
+                        }
+                    }
+                }
+                (true, 4) | (false, 2) => {
+                    input.message.parts.extend(
+                        (0..=MAX_MODEL_ATTEMPT_BYTES / MAX_OPAQUE_REPLAY_STATE_BYTES).map(|_| {
+                            MessagePart {
+                                semantic: MessageSemantic::Text {
+                                    text: String::new(),
+                                },
+                                replay_state: Some(
+                                    OpaqueProviderState::new(
+                                        "s".repeat(MAX_OPAQUE_REPLAY_STATE_BYTES),
+                                    )
+                                    .unwrap(),
+                                ),
+                            }
+                        }),
+                    );
+                }
+                (true, 5) => input = reply(key(tid(1), 0, 0), 33),
+                _ => unreachable!(),
+            }
+            let before = records(&db);
+            let result = if registration {
+                let ids: Vec<_> = (1..=input.message.tool_calls().count() as u64)
+                    .map(iid)
+                    .collect();
+                db.register_calls(&lock, input, &ids, now()).map(|_| ())
+            } else {
+                db.close_step(&lock, CloseStep::Finish(input), now())
+                    .map(|_| ())
+            };
+            let expected = if registration && case == 5 {
+                "invalid tool call batch"
+            } else {
+                "response byte limit exceeded"
+            };
+            assert!(
+                matches!(&result, Err(StoreError::InvalidInput { field: "reply", detail }) if detail == expected),
+                "registration={registration} case={case}: {result:?}"
+            );
+            assert!(
+                before == records(&db),
+                "registration={registration} case={case}: partial records"
+            );
+        }
+    }
+    let before = records(&db);
+    drop(lock);
+    drop(db);
+    let reopened = SessionStore::open(&layout).unwrap();
+    assert!(
+        before == records(&reopened),
+        "reopening reveals no partial persistent writes"
+    );
+}
+
+#[test]
+fn reply_total_includes_names_and_ids_with_an_exact_boundary_control() {
+    use lattice_conversation::MAX_TOOL_CALL_ARGUMENTS_BYTES;
+    let (_dir, layout, db) = store();
+    let lock = db.try_lock_session(sid(1)).unwrap();
+    db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+    db.start_request(&lock, key(tid(1), 0, 0), now()).unwrap();
+    let input = |extra| {
+        let mut input = reply(key(tid(1), 0, 0), 16);
+        input
+            .message
+            .parts
+            .retain(|part| matches!(part.semantic, MessageSemantic::ToolCall { .. }));
+        for (index, part) in input.message.parts.iter_mut().enumerate() {
+            let MessageSemantic::ToolCall { call } = &mut part.semantic else {
+                unreachable!()
+            };
+            // 每个调用连名称和 ID 恰好 1 MiB；去掉其中任何一项都会低于总量上限。
+            let metadata = call.name.len() + call.provider_call_id.as_ref().unwrap().len();
+            let filler =
+                MAX_TOOL_CALL_ARGUMENTS_BYTES - 8 - metadata + usize::from(index == 0) * extra;
+            call.arguments = json!({"x":"a".repeat(filler)});
+            part.replay_state = None;
+        }
+        input
+    };
+    let ids: Vec<_> = (1..=16).map(iid).collect();
+    let before = records(&db);
+    let result = db.register_calls(&lock, input(1), &ids, now());
+    assert!(
+        matches!(result, Err(StoreError::InvalidInput { field: "reply", detail }) if detail == "response byte limit exceeded")
+    );
+    assert!(
+        before == records(&db),
+        "one excess metadata byte must leave no partial writes"
+    );
+    let registered = db
+        .register_calls(&lock, input(0), &ids, now())
+        .expect("16 MiB including names and IDs is accepted");
+    assert_eq!(registered.bindings.len(), 16);
+    let Node::Step {
+        reply: Some(saved),
+        slots,
+        ..
+    } = node_at(&db, 2)
+    else {
+        panic!("registered reply")
+    };
+    assert!(saved == registered.reply);
+    assert_eq!(slots.len(), 16);
+    let after = records(&db);
+    drop(lock);
+    drop(db);
+    let reopened = SessionStore::open(&layout).unwrap();
+    assert!(
+        after == records(&reopened),
+        "the accepted boundary reply survives reopening"
+    );
+}
+
 fn sid(n: u64) -> SessionId {
     SessionId::parse(&format!("{n:032x}")).unwrap()
 }

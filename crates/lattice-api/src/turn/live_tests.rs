@@ -289,7 +289,7 @@ async fn cancelled_before_first_request_closes_reserved_step_without_attempt() {
 #[tokio::test]
 async fn continue_at_library_step_limit_closes_reserved_step_32_without_request() {
     use lattice_conversation::*;
-    use lattice_llm::LlmEvent;
+    use lattice_llm::testing::ScriptEvent;
     let mut builder = FakeStreamingLlmClient::builder();
     for _ in 0..MAX_MODEL_STEPS {
         let message = NativeMessage::new(
@@ -305,13 +305,15 @@ async fn continue_at_library_step_limit_closes_reserved_step_32_without_request(
                 },
             })],
         );
-        builder = builder.push_events(vec![
-            LlmEvent::MessageComplete { message },
-            LlmEvent::Done {
-                finish_reason: "tool_calls".into(),
-                usage: None,
-            },
-        ]);
+        builder = builder.push_events(
+            lattice_llm::testing::parts_events(message.parts)
+                .into_iter()
+                .chain([ScriptEvent::Done {
+                    finish_reason: "tool_calls".into(),
+                    usage: None,
+                }])
+                .collect(),
+        );
     }
     let llm = Arc::new(builder.build());
     let fixture = setup_fixture(llm.clone(), &["observe__workspace"]);

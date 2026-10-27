@@ -4,7 +4,7 @@
 //! These types define the direct wire contract for LATTICE LLM calls
 //! and are independent of `lattice-core`.
 
-use lattice_conversation::{ConversationItem, NativeMessage, TokenUsage};
+use lattice_conversation::{ConversationItem, TokenUsage};
 use serde::{Deserialize, Serialize};
 
 /// A tool definition providing a function specification to the model.
@@ -67,76 +67,22 @@ pub struct ProviderFailure {
     pub retryable: bool,
 }
 
-/// A streaming LLM event for the API.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+/// 同一次累积产生的实时投影和唯一终态。
+#[derive(Clone, Debug, PartialEq)]
 pub enum LlmEvent {
     Started,
-    Token {
-        content: String,
-    },
-    Reasoning {
-        content: String,
-    },
-    ToolCallStart {
-        /// Provider message-part/tool-call ordinal used only for stream assembly.
-        index: usize,
-        /// Provider-native correlation ID; never synthesized.
-        provider_call_id: Option<String>,
-        name: String,
-    },
-    ToolCallDelta {
-        index: usize,
-        arguments_delta: String,
-    },
-    ToolCallEnd {
-        index: usize,
-    },
-    /// Authoritative complete provider message projected from official wire.
-    MessageComplete {
-        message: NativeMessage<lattice_conversation::UnboundToolCall>,
-    },
-    /// Provider completed a whole message whose Tool batch failed validation.
-    MessageRejected {
-        rejection: lattice_conversation::AttemptRejection,
-    },
-    Done {
-        finish_reason: String,
-        usage: Option<TokenUsage>,
-    },
-    Error {
-        failure: ProviderFailure,
-    },
-    OutputLimit {
-        interruption: lattice_conversation::AttemptInterruption,
-    },
-    Citation {
-        index: usize,
-        cite_text: String,
-    },
-    /// Part-local opaque provider state observed while streaming.
-    Signature {
-        index: usize,
-        signature: String,
-    },
-    GroundingChunk {
-        text: String,
-        url: Option<String>,
-    },
-    SafetyRating {
-        category: String,
-        probability: String,
+    Delta(crate::LiveDelta),
+    Finished {
+        outcome: crate::ReplyOutcome,
+        report: AttemptReport,
     },
 }
 
-impl LlmEvent {
-    pub(crate) fn error(message: impl Into<String>, retryable: bool) -> Self {
-        Self::Error {
-            failure: ProviderFailure {
-                message: message.into(),
-                retryable,
-            },
-        }
-    }
+/// `Finished` 的报告只携带 provider 已报告的结束原因和用量。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AttemptReport {
+    pub finish_reason: Option<String>,
+    pub usage: Option<TokenUsage>,
 }
 
 /// A model target specifying which model alias to route to.

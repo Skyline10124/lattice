@@ -126,8 +126,12 @@ impl LlmConnection {
         &self.resolved
     }
 
-    pub async fn stream(&self, request: ChatRequest) -> Result<LlmStream, LlmError> {
-        crate::client::dispatch_frozen(request, self).await
+    pub async fn stream(
+        &self,
+        request: ChatRequest,
+        control: crate::StreamControl,
+    ) -> Result<LlmStream, LlmError> {
+        crate::client::dispatch_frozen(request, self, control).await
     }
 }
 

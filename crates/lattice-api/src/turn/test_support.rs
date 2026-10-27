@@ -4,7 +4,8 @@
 use super::{observer::ObserverSink, types::*};
 use lattice_agent::LlmClient;
 use lattice_agent::testing::FakeStreamingLlmClient;
-use lattice_llm::{LlmEvent, TokenUsage};
+use lattice_llm::TokenUsage;
+use lattice_llm::testing::ScriptEvent;
 use lattice_session::store::SessionStore;
 use std::sync::Arc;
 
@@ -18,12 +19,12 @@ pub(super) struct TestFixture {
     pub _state: tempfile::TempDir,
     pub _project: tempfile::TempDir,
 }
-pub(super) fn happy_events() -> Vec<LlmEvent> {
+pub(super) fn happy_events() -> Vec<ScriptEvent> {
     vec![
-        LlmEvent::Token {
+        ScriptEvent::Text {
             content: "test response".into(),
         },
-        LlmEvent::Done {
+        ScriptEvent::Done {
             finish_reason: "stop".into(),
             usage: Some(TokenUsage {
                 prompt_tokens: 10,
@@ -62,7 +63,7 @@ pub(super) fn setup_fixture(llm: Arc<dyn LlmClient>, enabled_tools: &[&str]) -> 
         _project: project,
     }
 }
-pub(super) fn setup_with_events(events: Vec<LlmEvent>, tools: &[&str]) -> TestFixture {
+pub(super) fn setup_with_events(events: Vec<ScriptEvent>, tools: &[&str]) -> TestFixture {
     setup_fixture(
         Arc::new(
             FakeStreamingLlmClient::builder()

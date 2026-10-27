@@ -218,7 +218,7 @@ feature 由协议适配器的代码定义，配置只能在已有取值中选择
 | 现有代码中的行为 | 迁移后 |
 | --- | --- |
 | `ProviderKind` 决定认证头与请求路径（`crates/lattice-llm/src/client.rs`） | 由 `protocol` 与 `auth` 决定 |
-| Chat Completions 总是在助手消息中发回 `reasoning_content`（`provider_projection/openai.rs`） | 由 `reasoning_replay` 决定，默认不发；内置表中需要它的厂商启用 `reasoning-content` |
+| Chat Completions 总是在助手消息中发回 `reasoning_content`（`protocol/projection/chat_completions.rs`） | 由 `reasoning_replay` 决定，默认不发；内置表中需要它的厂商启用 `reasoning-content` |
 | Chat Completions 同时读取 `reasoning_content` 与 `reasoning` | 保持，属于解析端的兼容 |
 | Chat Completions 总是发送 `stream_options: {"include_usage": true}` | 保持，属于标准协议行为 |
 | Anthropic `max_tokens` 固定为 32,768 | 取模型元数据的输出上限，没有元数据时为 32,768 |

@@ -10,7 +10,7 @@ use lattice_conversation::{
     MAX_REASONING_CONTENT_BYTES, MAX_TOOL_CALL_ARGUMENTS_BYTES, MAX_TOOL_CALLS_PER_BATCH,
     MessageSemantic, NativeMessage, OpaqueProviderState, ProviderOrigin, UnboundToolCall,
 };
-use lattice_llm::provider_projection::{
+use lattice_llm::protocol::projection::{
     ProjectionError, native_to_wire, project_cross_provider, wire_to_native,
 };
 use serde_json::Value;
@@ -616,7 +616,8 @@ fn attempt_total_limit_is_enforced_at_the_seam() {
     let build = |extra: usize| {
         let tool_calls: Vec<_> = (0..calls)
             .map(|i| {
-                let len = per_call - overhead + if i + 1 == calls { extra } else { 0 };
+                let metadata = 1 + format!("call_{}", i + 1).len();
+                let len = per_call - overhead - metadata + if i + 1 == calls { extra } else { 0 };
                 serde_json::json!({
                     "id": format!("call_{}", i + 1),
                     "type": "function",
@@ -728,7 +729,7 @@ use lattice_conversation::{
     BoundToolCall, InvocationId, MessagePart, MessageRole, ModelMessageAddress, SessionId,
     ToolCallAddress, ToolResultOutcome, TurnId,
 };
-use lattice_llm::provider_projection::{tool_results_to_wire, wire_usage};
+use lattice_llm::protocol::projection::{tool_results_to_wire, wire_usage};
 
 fn invocation(index: usize) -> InvocationId {
     InvocationId::parse(&format!("00000000-0000-4000-8000-{index:012x}")).unwrap()
@@ -877,7 +878,7 @@ fn structured_steps_require_exact_pairing() {
             }
         }
         assert!(
-            lattice_llm::provider_projection::request_messages_to_wire(
+            lattice_llm::protocol::projection::request_messages_to_wire(
                 origin,
                 &[ConversationItem::Step(step)]
             )
@@ -889,7 +890,7 @@ fn structured_steps_require_exact_pairing() {
         let mut message = assistant.clone();
         message.role = role;
         assert!(
-            lattice_llm::provider_projection::request_messages_to_wire(
+            lattice_llm::protocol::projection::request_messages_to_wire(
                 origin,
                 &[ConversationItem::Message(message)]
             )
@@ -1064,7 +1065,7 @@ fn structured_result_fixtures_and_missing_ids() {
             results,
         };
         let saved = step.clone();
-        let projected = lattice_llm::provider_projection::request_messages_to_wire(
+        let projected = lattice_llm::protocol::projection::request_messages_to_wire(
             ProviderOrigin::Gemini,
             &[ConversationItem::Step(step.clone())],
         )

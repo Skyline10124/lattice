@@ -27,15 +27,19 @@ impl LlmClient for OpenAiFrames {
     async fn stream_chat(
         &self,
         _: ChatRequest,
+        control: lattice_llm::StreamControl,
     ) -> Result<LlmStream, Box<dyn std::error::Error + Send + Sync>> {
         let mut parser = OpenAiSseParser::new();
         let consumed = self.consumed.clone();
-        Ok(Box::pin(stream::iter(self.frames.clone()).flat_map(
-            move |frame| {
-                consumed.fetch_add(1, Ordering::SeqCst);
-                stream::iter(parser.parse_chunk(None, &frame))
-            },
-        )))
+        let input = Box::pin(stream::iter(self.frames.clone()).flat_map(move |frame| {
+            consumed.fetch_add(1, Ordering::SeqCst);
+            stream::iter(parser.parse_chunk(None, &frame))
+        }));
+        Ok(lattice_llm::testing::assemble_reply_stream(
+            Some(lattice_conversation::ProviderOrigin::OpenAiCompatible),
+            input,
+            control,
+        ))
     }
 }
 
@@ -161,19 +165,24 @@ async fn interleaved_arguments_share_total_with_text_and_reasoning() {
             frames.push(delta(json!({field: "a".repeat(128 * 1024)})));
         }
     }
-    // 12 calls, each exactly 1 MiB, plus 4 MiB text/reasoning = 16 MiB.
-    let payload = format!("{{\"x\":\"{}\"}}", "a".repeat(1_048_568));
+    // 12 个调用的名称与 ID 也计入 16 MiB 共享总量。
+    let payload = |index| {
+        format!(
+            "{{\"x\":\"{}\"}}",
+            "a".repeat(1_048_576 - 8 - "observe__workspace".len() - format!("call-{index}").len(),)
+        )
+    };
     for index in 0..12 {
         metadata(&mut frames, index);
-        arguments(&mut frames, index, &payload[..8]);
+        arguments(&mut frames, index, &payload(index)[..8]);
     }
     for index in (0..12).rev() {
-        arguments(&mut frames, index, &payload[8..]);
+        arguments(&mut frames, index, &payload(index)[8..]);
     }
-    // A new call has per-call headroom, but not a separate total allowance.
+    // 总量恰好达到上限时，下一个调用的元数据也应触发停止消费。
     metadata(&mut frames, 12);
-    arguments(&mut frames, 12, "{");
     let crossing_frame = frames.len();
+    arguments(&mut frames, 12, "{");
     arguments(&mut frames, 12, "}");
     finish(&mut frames);
     let (attempt, consumed) = run(frames).await;

@@ -229,13 +229,15 @@ async fn live_multicall_closes_continue_then_finish_from_structured_history() {
         saga::{LiveExecution, run_coordinator_saga},
     };
     use lattice_agent::{LlmClient, ModelStepDriver};
-    use lattice_llm::{ChatRequest, LlmEvent, LlmStream};
+    use lattice_llm::testing::ScriptEvent;
+    use lattice_llm::{ChatRequest, LlmStream};
     struct Model(std::sync::Mutex<Vec<ChatRequest>>);
     #[async_trait::async_trait]
     impl LlmClient for Model {
         async fn stream_chat(
             &self,
             request: ChatRequest,
+            control: lattice_llm::StreamControl,
         ) -> std::result::Result<LlmStream, Box<dyn std::error::Error + Send + Sync>> {
             let mut requests = self.0.lock().unwrap();
             requests.push(request);
@@ -264,19 +266,12 @@ async fn live_multicall_closes_continue_then_finish_from_structured_history() {
                     text: "已解释".into(),
                 })]
             };
-            Ok(Box::pin(futures::stream::iter(vec![
-                LlmEvent::MessageComplete {
-                    message: NativeMessage::new(
-                        MessageRole::Assistant,
-                        Some(ProviderOrigin::OpenAiCompatible),
-                        parts,
-                    ),
-                },
-                LlmEvent::Done {
-                    finish_reason: "stop".into(),
-                    usage: None,
-                },
-            ])))
+            let mut events = lattice_llm::testing::parts_events(parts);
+            events.push(ScriptEvent::Done {
+                finish_reason: "stop".into(),
+                usage: None,
+            });
+            Ok(lattice_llm::testing::script_stream(events, control))
         }
     }
     let workspace = tempfile::tempdir().unwrap();
@@ -426,7 +421,7 @@ async fn first_acceptance_reopens_with_frozen_facts_and_used_turn_conflicts() {
         execute::start_turn,
         types::{RunTurnRequest, TurnAcceptance},
     };
-    use lattice_llm::LlmEvent;
+    use lattice_llm::testing::ScriptEvent;
     let state = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
     let layout = StateLayout::in_state_root(state.path());
@@ -437,10 +432,10 @@ async fn first_acceptance_reopens_with_frozen_facts_and_used_turn_conflicts() {
     let llm = Arc::new(
         lattice_agent::testing::FakeStreamingLlmClient::builder()
             .push_events(vec![
-                LlmEvent::Token {
+                ScriptEvent::Text {
                     content: "answer".into(),
                 },
-                LlmEvent::Done {
+                ScriptEvent::Done {
                     finish_reason: "stop".into(),
                     usage: None,
                 },
@@ -505,7 +500,7 @@ async fn stop_at_execution_boundary(boundary: StopBoundary, cancelled: bool) {
         types::TurnEvent,
     };
     use lattice_agent::{ModelStepDriver, testing::FakeStreamingLlmClient};
-    use lattice_llm::LlmEvent;
+    use lattice_llm::testing::ScriptEvent;
     use std::sync::{
         Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -560,13 +555,15 @@ async fn stop_at_execution_boundary(boundary: StopBoundary, cancelled: bool) {
     }
     let llm = Arc::new(
         FakeStreamingLlmClient::builder()
-            .push_events(vec![
-                LlmEvent::MessageComplete { message },
-                LlmEvent::Done {
-                    finish_reason: "tool_calls".into(),
-                    usage: None,
-                },
-            ])
+            .push_events(
+                lattice_llm::testing::parts_events(message.parts)
+                    .into_iter()
+                    .chain([ScriptEvent::Done {
+                        finish_reason: "tool_calls".into(),
+                        usage: None,
+                    }])
+                    .collect(),
+            )
             .build(),
     );
     let (entered_tx, entered) = tokio::sync::oneshot::channel();

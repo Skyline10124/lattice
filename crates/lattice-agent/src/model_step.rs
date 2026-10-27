@@ -1,49 +1,39 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! One-attempt model step driver (ADR 0005 §10, #139-B Commit 4).
+//! 单次模型尝试驱动，职责边界见 ADR 0005 §10。
 //!
-//! `ModelStepDriver` executes exactly one provider attempt per call: it
-//! assembles the frozen request, streams one provider response, meters every
-//! delta against the ADR 0005 §10 protocol ceilings through
-//! [`lattice_conversation::AttemptAssembly`], and returns one typed attempt
-//! outcome with the authoritative ordered message assembly.
+//! `ModelStepDriver` 每次调用执行一次模型尝试：
+//! 组装冻结请求，消费 lattice-llm 共同累积器的实时投影与唯一终态，
+//! 返回一次尝试的类型化结果；流式计量和完整消息组装由 lattice-llm 负责。
 //!
-//! It owns no session or invocation store, no UUID generation, no multi-step
-//! loop, no tool executor, no retry policy, and no Turn-commit authority:
-//! those moved to the composition layer. Opening failures are surfaced as
-//! [`ModelStepError::OpeningFailed`]；流内失败同样保留可重试性，由调用方按预算决定。
+//! 本模块不负责会话或调用存储、UUID 生成、多步循环、工具执行、重试策略或 Turn 提交。
+//! 打开失败通过 [`ModelStepError::OpeningFailed`] 返回；
+//! 流内失败同样保留可重试性，由调用方按预算决定。
 //!
-//! Every provider Tool Call ID is preserved verbatim when the provider
-//! supplies one and is never synthesized. A conversation ToolResult closure
-//! whose closing call carries no provider ID fails the request assembly with
-//! a typed error (plan decision 9) instead of inventing an ID.
+//! provider 提供的工具调用 ID 原样保留，缺失时不补造。
+//! 若对话中的 ToolResult 对应的调用缺少 provider ID，请求组装返回类型化错误。
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use futures::StreamExt;
 use lattice_conversation::{
-    AttemptAssembly, AttemptInterruption, AttemptRejection, MessagePart, MessageRole,
-    MessageSemantic, NativeMessage, UnboundToolCall,
+    AttemptRejection, MessagePart, MessageRole, MessageSemantic, NativeMessage, UnboundToolCall,
 };
-use lattice_llm::{ChatRequest, LlmEvent, ModelTarget, ToolDefinition};
+use lattice_llm::{
+    CONTROL_POLL_INTERVAL, ChatRequest, LiveDelta, LlmEvent, ModelTarget, ReplyOutcome, ReplyStop,
+    StreamControl, StreamStop, ToolDefinition,
+};
 use tokio::time::Instant;
 
-/// Polling interval for cooperative cancellation while a provider stream is
-/// stalled (no events arriving). The driver races `stream.next()` against
-/// both the deadline and this poll so a cancel during a stall is observed
-/// within this bound even when no deadline is configured.
-const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(50);
-
-/// Injectable LLM client seam: the provider boundary the driver streams one
-/// attempt through.
+/// 可注入的 LLM 客户端接口，供驱动发起一次模型尝试。
 ///
-/// Production implementations call real providers through `lattice-llm`.
-/// Test implementations return deterministic fake responses
-/// ([`crate::testing::FakeStreamingLlmClient`]).
+/// 生产实现通过 `lattice-llm` 调用真实 provider；
+/// 测试实现返回确定性响应，见 [`crate::testing::FakeStreamingLlmClient`]。
+/// 实现必须把 `control` 交给 `assemble_reply_stream`；流中的取消与 deadline 由包装器处理。
+/// 打开阶段的取消与 deadline 由驱动轮询。
 #[async_trait::async_trait]
 pub trait LlmClient: Send + Sync {
     /// Execute one chat completion as a provider stream.
@@ -53,6 +43,7 @@ pub trait LlmClient: Send + Sync {
     async fn stream_chat(
         &self,
         request: ChatRequest,
+        control: StreamControl,
     ) -> Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>>;
 }
 
@@ -61,7 +52,7 @@ pub trait LlmClient: Send + Sync {
 pub enum ModelStepError {
     /// Provider request projection failed before transport; exact typed cause is
     /// retained so missing IDs and replay-state failures are not flattened.
-    Projection(lattice_llm::provider_projection::ProjectionError),
+    Projection(lattice_llm::protocol::projection::ProjectionError),
     /// The provider request failed before any stream event. `retryable` is a
     /// hint from the transport classification; the caller owns retry policy.
     OpeningFailed {
@@ -205,27 +196,15 @@ impl ModelStepDriver {
             client_request_id: request.session_id.clone(),
         };
 
-        // 预构造请求及任务调度也可能耗尽预算，首次打开不能依赖后续轮询补救。
-        if request
-            .cancel
-            .as_ref()
-            .is_some_and(|flag| flag.load(Ordering::Acquire))
-        {
-            return Ok(interrupted(
-                AttemptInterruption::Cancelled,
-                None,
-                None,
-                None,
-            ));
-        }
-        if request
-            .deadline
-            .is_some_and(|deadline| Instant::now() >= deadline)
-        {
-            return Ok(interrupted(AttemptInterruption::Timeout, None, None, None));
+        let control = StreamControl {
+            cancel: request.cancel.clone(),
+            deadline: request.deadline,
+        };
+        if let Some(reason) = control.stop() {
+            return Ok(stopped(ReplyStop::Stream(reason), None));
         }
 
-        let opening = self.llm.stream_chat(chat);
+        let opening = self.llm.stream_chat(chat, control.clone());
         tokio::pin!(opening);
         let stream = loop {
             tokio::select! {
@@ -235,27 +214,8 @@ impl ModelStepDriver {
                         Err(err) => return Err(model_step_opening_error(err)),
                     };
                 }
-                _ = tokio::time::sleep(CANCEL_POLL_INTERVAL), if request.deadline.is_some() || request.cancel.is_some() => {
-                    if let Some(flag) = &request.cancel
-                        && flag.load(Ordering::Relaxed)
-                    {
-                        return Ok(interrupted(
-                            AttemptInterruption::Cancelled,
-                            None,
-                            None,
-                            None,
-                        ));
-                    }
-                    if let Some(deadline) = request.deadline
-                        && Instant::now() >= deadline
-                    {
-                        return Ok(interrupted(
-                            AttemptInterruption::Timeout,
-                            None,
-                            None,
-                            None,
-                        ));
-                    }
+                _ = tokio::time::sleep(CONTROL_POLL_INTERVAL), if request.deadline.is_some() || request.cancel.is_some() => {
+                    if let Some(reason) = control.stop() { return Ok(stopped(ReplyStop::Stream(reason), None)); }
                 }
             }
         };
@@ -263,238 +223,87 @@ impl ModelStepDriver {
         self.consume(stream, request, live).await
     }
 
-    /// Consume one opened provider stream to its typed outcome.
+    /// 只转交共同包装器的实时投影与唯一终态。
     async fn consume(
         &self,
         mut stream: lattice_llm::LlmStream,
         request: &ModelStepRequest,
         mut live: Option<&mut (dyn FnMut(ModelStepEvent) + Send)>,
     ) -> Result<ModelStepAttempt, ModelStepError> {
-        // 同步交给协调器的非阻塞观察入口，避免在它编号之前无声丢弃增量。
-        let mut emit = |event: ModelStepEvent| {
-            if let Some(observer) = live.as_deref_mut() {
-                observer(event);
-            }
-        };
-
-        let mut assembly = AttemptAssembly::new();
-        let mut tool_arguments = BTreeMap::<usize, AttemptAssembly>::new();
-        let mut complete_message: Option<NativeMessage<UnboundToolCall>> = None;
-        let mut rejection: Option<AttemptRejection> = None;
-        let mut saw_stream_event = false;
-        let mut usage: Option<lattice_conversation::TokenUsage> = None;
-        let mut finish_reason: Option<String> = None;
-
-        loop {
-            let next = tokio::select! {
-                event = stream.next() => event,
-                _ = tokio::time::sleep(CANCEL_POLL_INTERVAL), if request.deadline.is_some() || request.cancel.is_some() => {
-                    if let Some(flag) = &request.cancel
-                        && flag.load(Ordering::Relaxed)
-                    {
-                        return Ok(interrupted(
-                            AttemptInterruption::Cancelled,
-                            usage,
-                            finish_reason,
-                            None,
-                        ));
-                    }
-                    if let Some(deadline) = request.deadline
-                        && Instant::now() >= deadline
-                    {
-                        return Ok(interrupted(
-                            AttemptInterruption::Timeout,
-                            usage,
-                            finish_reason,
-                            None,
-                        ));
-                    }
-                    continue;
-                }
-            };
-
-            let Some(event) = next else {
-                // 流在结束事件之前中断，通常是连接被切断；已收到多少内容不影响重试资格。
-                return Ok(ModelStepAttempt::Stopped {
-                    cause: ModelStopCause::ProviderError { retryable: true },
-                    usage,
-                    diagnostic: ModelDiagnostic {
-                        provider_error: Some("provider stream ended before completion".into()),
-                        invalid_batch: None,
-                    },
-                });
-            };
-
-            // `Done` is never a cancel point: the attempt finalizes before
-            // any post-event observation (pre-cut loop parity).
-            if !matches!(event, LlmEvent::Done { .. }) {
-                if let Some(deadline) = request.deadline
-                    && Instant::now() >= deadline
-                {
-                    return Ok(interrupted(
-                        AttemptInterruption::Timeout,
-                        usage,
-                        finish_reason,
-                        None,
-                    ));
-                }
-                if let Some(flag) = &request.cancel
-                    && flag.load(Ordering::Relaxed)
-                {
-                    return Ok(interrupted(
-                        AttemptInterruption::Cancelled,
-                        usage,
-                        finish_reason,
-                        None,
-                    ));
-                }
-            }
-
-            if !saw_stream_event {
-                saw_stream_event = true;
-                emit(ModelStepEvent::Opened {
-                    provider: request.provider.clone(),
-                    model: request.model.clone(),
-                });
-            }
-
-            match event {
-                LlmEvent::Started => {}
-                LlmEvent::Token { content } => {
-                    if let Err(interruption) = assembly.push_assistant(&content) {
-                        return Ok(interrupted(interruption, usage, finish_reason, None));
-                    }
-                    emit(ModelStepEvent::TokenDelta { content });
-                }
-                LlmEvent::Reasoning { content } => {
-                    if let Err(interruption) = assembly.push_reasoning(&content) {
-                        return Ok(interrupted(interruption, usage, finish_reason, None));
-                    }
-                    emit(ModelStepEvent::ReasoningDelta { content });
-                }
-                LlmEvent::ToolCallStart { .. } => {}
-                LlmEvent::ToolCallDelta {
-                    index,
-                    arguments_delta,
-                } => {
-                    // Deltas may interleave or precede metadata; Start must not
-                    // reset an index's allowance. Keep the attempt total shared.
-                    if let Err(interruption) = tool_arguments
-                        .entry(index)
-                        .or_default()
-                        .push_tool_arguments(&arguments_delta)
-                    {
-                        return Ok(interrupted(interruption, usage, finish_reason, None));
-                    }
-                    // The per-index accountant checked the call limit above.
-                    // Reset only this fragment counter, not the shared total.
-                    assembly.begin_tool_call();
-                    if let Err(interruption) = assembly.push_tool_arguments(&arguments_delta) {
-                        return Ok(interrupted(interruption, usage, finish_reason, None));
-                    }
-                }
-                LlmEvent::ToolCallEnd { .. } => {}
-                LlmEvent::MessageComplete { message } => {
-                    if complete_message.replace(message).is_some() {
-                        return Ok(interrupted(
-                            AttemptInterruption::StreamError,
-                            usage,
-                            finish_reason,
-                            Some("provider emitted more than one complete message".to_string()),
-                        ));
-                    }
-                }
-                LlmEvent::MessageRejected {
-                    rejection: rejected,
-                } => {
-                    if rejection.replace(rejected).is_some() {
-                        return Ok(interrupted(
-                            AttemptInterruption::StreamError,
-                            usage,
-                            finish_reason,
-                            Some("provider emitted more than one rejection".to_string()),
-                        ));
-                    }
-                }
-                LlmEvent::Done {
-                    finish_reason: reason,
-                    usage: reported,
-                } => {
-                    usage = reported;
-                    finish_reason = Some(reason);
-                    break;
-                }
-                LlmEvent::Error { failure } => {
-                    return Ok(ModelStepAttempt::Stopped {
-                        cause: ModelStopCause::ProviderError {
-                            retryable: failure.retryable,
-                        },
-                        usage,
-                        diagnostic: ModelDiagnostic {
-                            provider_error: Some(lattice_llm::bound_diagnostic(&failure.message)),
-                            invalid_batch: None,
-                        },
+        let mut opened = false;
+        while let Some(event) = stream.next().await {
+            if !opened {
+                opened = true;
+                if let Some(observer) = live.as_deref_mut() {
+                    observer(ModelStepEvent::Opened {
+                        provider: request.provider.clone(),
+                        model: request.model.clone(),
                     });
                 }
-                LlmEvent::OutputLimit { interruption } => {
-                    return Ok(interrupted(interruption, usage, finish_reason, None));
+            }
+            match event {
+                LlmEvent::Started => {}
+                LlmEvent::Delta(delta) => {
+                    if let Some(observer) = live.as_deref_mut() {
+                        observer(match delta {
+                            LiveDelta::Text(content) => ModelStepEvent::TokenDelta { content },
+                            LiveDelta::Reasoning(content) => {
+                                ModelStepEvent::ReasoningDelta { content }
+                            }
+                        });
+                    }
                 }
-                LlmEvent::Citation { .. }
-                | LlmEvent::Signature { .. }
-                | LlmEvent::GroundingChunk { .. }
-                | LlmEvent::SafetyRating { .. } => {}
+                LlmEvent::Finished { outcome, report } => {
+                    return Ok(match outcome {
+                        ReplyOutcome::Complete { message } => ModelStepAttempt::Complete {
+                            message: message.into_message(),
+                            usage: report.usage,
+                            finish_reason: report.finish_reason,
+                        },
+                        ReplyOutcome::Rejected {
+                            rejection: AttemptRejection::InvalidToolCall { validation },
+                        } => ModelStepAttempt::Stopped {
+                            cause: ModelStopCause::InvalidBatch,
+                            usage: report.usage,
+                            diagnostic: ModelDiagnostic {
+                                provider_error: None,
+                                invalid_batch: Some(validation),
+                            },
+                        },
+                        ReplyOutcome::Interrupted { reason } => stopped(reason, report.usage),
+                    });
+                }
             }
         }
-
-        if let Some(AttemptRejection::InvalidToolCall { validation }) = rejection {
-            return Ok(ModelStepAttempt::Stopped {
-                cause: ModelStopCause::InvalidBatch,
-                usage,
-                diagnostic: ModelDiagnostic {
-                    provider_error: None,
-                    invalid_batch: Some(validation),
-                },
-            });
-        }
-
-        let Some(message) = complete_message else {
-            return Ok(interrupted(
-                AttemptInterruption::StreamError,
-                usage,
-                finish_reason,
-                Some("provider completed without an authoritative message".to_string()),
-            ));
-        };
-        Ok(ModelStepAttempt::Complete {
-            message,
-            usage,
-            finish_reason,
-        })
+        Ok(stopped(ReplyStop::Stream(StreamStop::UnexpectedEof), None))
     }
 }
 
-fn interrupted(
-    interruption: AttemptInterruption,
-    usage: Option<lattice_conversation::TokenUsage>,
-    _finish_reason: Option<String>,
-    diagnostic: Option<String>,
-) -> ModelStepAttempt {
-    let cause = match interruption {
-        AttemptInterruption::Cancelled => ModelStopCause::Cancelled,
-        AttemptInterruption::Timeout => ModelStopCause::Deadline,
-        AttemptInterruption::OutputLimitExceeded { .. } => ModelStopCause::OutputLimit,
-        AttemptInterruption::StreamError => ModelStopCause::ProviderError { retryable: false },
+fn stopped(reason: ReplyStop, usage: Option<lattice_conversation::TokenUsage>) -> ModelStepAttempt {
+    let (cause, message) = match reason {
+        ReplyStop::OutputLimit(_) => (ModelStopCause::OutputLimit, None),
+        ReplyStop::Stream(StreamStop::Cancelled) => (ModelStopCause::Cancelled, None),
+        ReplyStop::Stream(StreamStop::Deadline) => (ModelStopCause::Deadline, None),
+        ReplyStop::Stream(StreamStop::Provider(failure)) => (
+            ModelStopCause::ProviderError {
+                retryable: failure.retryable,
+            },
+            Some(failure.message),
+        ),
+        ReplyStop::Stream(StreamStop::UnexpectedEof) => (
+            ModelStopCause::ProviderError { retryable: true },
+            Some("provider stream ended before completion".into()),
+        ),
+        ReplyStop::Stream(StreamStop::Protocol(error)) => (
+            ModelStopCause::ProviderError { retryable: false },
+            Some(error.to_string()),
+        ),
     };
-    let provider_error = matches!(cause, ModelStopCause::ProviderError { .. }).then(|| {
-        lattice_llm::bound_diagnostic(
-            &diagnostic.unwrap_or_else(|| "provider stream ended without completion".into()),
-        )
-    });
     ModelStepAttempt::Stopped {
         cause,
         usage,
         diagnostic: ModelDiagnostic {
-            provider_error,
+            provider_error: message.map(|message| lattice_llm::bound_diagnostic(&message)),
             invalid_batch: None,
         },
     }
@@ -520,11 +329,8 @@ fn model_step_opening_error(error: Box<dyn std::error::Error + Send + Sync>) -> 
 mod tests {
     use super::*;
     use crate::testing::FakeStreamingLlmClient;
-    use lattice_conversation::{
-        InvocationId, MAX_ASSISTANT_CONTENT_BYTES, MAX_REASONING_CONTENT_BYTES,
-        MAX_TOOL_CALL_ARGUMENTS_BYTES, ToolCallAddress,
-    };
-    use lattice_llm::LlmEvent;
+    use lattice_conversation::{InvocationId, MAX_ASSISTANT_CONTENT_BYTES, ToolCallAddress};
+    use lattice_llm::testing::ScriptEvent;
 
     struct ProjectionCheckingClient;
 
@@ -533,8 +339,9 @@ mod tests {
         async fn stream_chat(
             &self,
             request: ChatRequest,
+            control: StreamControl,
         ) -> Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
-            lattice_llm::provider_projection::request_messages_to_wire(
+            lattice_llm::protocol::projection::request_messages_to_wire(
                 lattice_conversation::ProviderOrigin::OpenAiCompatible,
                 &request.messages,
             )
@@ -542,10 +349,10 @@ mod tests {
                 Box::new(lattice_llm::LlmError::Projection(error))
                     as Box<dyn std::error::Error + Send + Sync>
             })?;
-            Ok(Box::pin(futures::stream::empty()))
+            Ok(lattice_llm::testing::script_stream(vec![], control))
         }
     }
-    fn driver(events: Vec<LlmEvent>) -> ModelStepDriver {
+    fn driver(events: Vec<ScriptEvent>) -> ModelStepDriver {
         ModelStepDriver::new(Arc::new(
             FakeStreamingLlmClient::builder()
                 .push_events(events)
@@ -630,7 +437,7 @@ mod tests {
         ) in [
             (
                 "deadline_with_uncancelled_flag",
-                vec![LlmEvent::Done {
+                vec![ScriptEvent::Done {
                     finish_reason: "stop".into(),
                     usage: None,
                 }],
@@ -642,7 +449,7 @@ mod tests {
             ),
             (
                 "cancel_takes_priority_over_expired_deadline",
-                vec![LlmEvent::Done {
+                vec![ScriptEvent::Done {
                     finish_reason: "stop".into(),
                     usage: None,
                 }],
@@ -654,7 +461,7 @@ mod tests {
             ),
             (
                 "cancel_only",
-                vec![LlmEvent::Started],
+                vec![],
                 Some(true),
                 Deadline::None,
                 ModelStopCause::Cancelled,
@@ -663,7 +470,7 @@ mod tests {
             ),
             (
                 "past_deadline_only",
-                vec![LlmEvent::Started],
+                vec![],
                 None,
                 Deadline::Past,
                 ModelStopCause::Deadline,
@@ -721,17 +528,17 @@ mod tests {
             let attempt = runtime()
                 .block_on(
                     driver(vec![
-                        LlmEvent::ToolCallStart {
+                        ScriptEvent::ToolMetadata {
                             index: 0,
                             provider_call_id: Some("call_1".to_string()),
                             name: "observe__workspace".to_string(),
                         },
-                        LlmEvent::ToolCallDelta {
+                        ScriptEvent::ToolArguments {
                             index: 0,
                             arguments_delta: arguments_delta.to_string(),
                         },
-                        LlmEvent::ToolCallEnd { index: 0 },
-                        LlmEvent::Done {
+                        ScriptEvent::ToolEnd { index: 0 },
+                        ScriptEvent::Done {
                             finish_reason: "tool_calls".to_string(),
                             usage: None,
                         },
@@ -773,109 +580,54 @@ mod tests {
     }
 
     #[test]
-    fn stream_completion_respects_limits_and_provider_failures() {
-        let overhead = r#"{"a":""}"#.len();
+    fn stream_stops_map_output_limit_provider_failure_and_eof() {
         for (name, events, expected_cause) in [
-            (
-                "assistant_exact_limit",
-                vec![
-                    LlmEvent::Token {
-                        content: "x".repeat(MAX_ASSISTANT_CONTENT_BYTES),
-                    },
-                    LlmEvent::Done {
-                        finish_reason: "stop".to_string(),
-                        usage: None,
-                    },
-                ],
-                None,
-            ),
             (
                 "assistant_limit_then_one_byte",
                 vec![
-                    LlmEvent::Token {
+                    ScriptEvent::Text {
                         content: "x".repeat(MAX_ASSISTANT_CONTENT_BYTES),
                     },
-                    LlmEvent::Token {
+                    ScriptEvent::Text {
                         content: "y".to_string(),
                     },
-                    LlmEvent::Done {
+                    ScriptEvent::Done {
                         finish_reason: "stop".to_string(),
                         usage: None,
                     },
                 ],
-                Some(ModelStopCause::OutputLimit),
-            ),
-            (
-                "reasoning_limit_plus_one",
-                vec![
-                    LlmEvent::Reasoning {
-                        content: "r".repeat(MAX_REASONING_CONTENT_BYTES + 1),
-                    },
-                    LlmEvent::Done {
-                        finish_reason: "stop".to_string(),
-                        usage: None,
-                    },
-                ],
-                Some(ModelStopCause::OutputLimit),
-            ),
-            (
-                "tool_arguments_limit_plus_one",
-                vec![
-                    LlmEvent::ToolCallStart {
-                        index: 0,
-                        provider_call_id: Some("c".to_string()),
-                        name: "t".to_string(),
-                    },
-                    LlmEvent::ToolCallDelta {
-                        index: 0,
-                        arguments_delta: format!(
-                            "{{\"a\":\"{}\"}}",
-                            "z".repeat(MAX_TOOL_CALL_ARGUMENTS_BYTES - overhead + 1)
-                        ),
-                    },
-                    LlmEvent::Done {
-                        finish_reason: "tool_calls".to_string(),
-                        usage: None,
-                    },
-                ],
-                Some(ModelStopCause::OutputLimit),
+                ModelStopCause::OutputLimit,
             ),
             (
                 "provider_error_after_partial",
                 vec![
-                    LlmEvent::Token {
+                    ScriptEvent::Text {
                         content: "par".to_string(),
                     },
-                    LlmEvent::Error {
+                    ScriptEvent::Failure {
                         failure: lattice_llm::ProviderFailure {
                             message: "boom".into(),
                             retryable: false,
                         },
                     },
                 ],
-                Some(ModelStopCause::ProviderError { retryable: false }),
+                ModelStopCause::ProviderError { retryable: false },
             ),
             (
                 "stream_ends_without_done",
-                vec![LlmEvent::Token {
+                vec![ScriptEvent::Text {
                     content: "par".to_string(),
                 }],
-                Some(ModelStopCause::ProviderError { retryable: true }),
+                ModelStopCause::ProviderError { retryable: true },
             ),
         ] {
             let attempt = runtime()
                 .block_on(driver(events).run(&request(), None))
                 .unwrap_or_else(|error| panic!("{name}: {error:?}"));
-            match expected_cause {
-                None => assert!(
-                    matches!(attempt, ModelStepAttempt::Complete { .. }),
-                    "{name}: expected completion"
-                ),
-                Some(expected) => assert!(
-                    matches!(attempt, ModelStepAttempt::Stopped { cause, .. } if cause == expected),
-                    "{name}: expected {expected:?}"
-                ),
-            }
+            assert!(
+                matches!(attempt, ModelStepAttempt::Stopped { cause, .. } if cause == expected_cause),
+                "{name}: expected {expected_cause:?}"
+            );
         }
     }
 
@@ -929,7 +681,7 @@ mod tests {
         assert!(matches!(
             result,
             Err(ModelStepError::Projection(
-                lattice_llm::provider_projection::ProjectionError::ToolResultWithoutProviderCallId {
+                lattice_llm::protocol::projection::ProjectionError::ToolResultWithoutProviderCallId {
                     invocation_id,
                     ..
                 },
@@ -940,11 +692,11 @@ mod tests {
     #[test]
     fn live_events_mirror_the_stream() {
         let mut seen = Vec::new();
-        let mut events = vec![LlmEvent::Started];
-        events.extend((0..1600).map(|_| LlmEvent::Token {
+        let mut events = vec![];
+        events.extend((0..1600).map(|_| ScriptEvent::Text {
             content: "hi".into(),
         }));
-        events.push(LlmEvent::Done {
+        events.push(ScriptEvent::Done {
             finish_reason: "stop".into(),
             usage: None,
         });
