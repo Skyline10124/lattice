@@ -48,6 +48,7 @@ struct Admission {
 }
 struct Backend {
     layout: crate::StateLayout,
+    home: Option<std::path::PathBuf>,
     epoch: String,
     admission: Mutex<Admission>,
     changed: watch::Sender<u64>,
@@ -118,8 +119,9 @@ async fn blocking<T: Send + 'static>(
         .map_err(|_| internal())?
 }
 impl Backend {
-    fn new(layout: crate::StateLayout) -> Arc<Self> {
+    fn new(layout: crate::StateLayout, home: Option<std::path::PathBuf>) -> Arc<Self> {
         Arc::new(Self {
+            home,
             stores: crate::stores::StoreManager::new(layout.clone()),
             layout,
             epoch: uuid::Uuid::new_v4().to_string(),
@@ -573,6 +575,31 @@ impl Backend {
     async fn dispatch(self: &Arc<Self>, request: Request) -> Result<Response> {
         match request {
             Request::Status => Ok(Response::Status(self.status())),
+            Request::AuthSet { provider, key } => {
+                let auth = super::auth::store(self.home.as_deref())?;
+                blocking(move || {
+                    auth.set(&provider, &key.0).map_err(super::auth::error)?;
+                    Ok(Response::AuthUpdated)
+                })
+                .await
+            }
+            Request::AuthRemove { provider } => {
+                let auth = super::auth::store(self.home.as_deref())?;
+                blocking(move || {
+                    let removed = auth.remove(&provider).map_err(super::auth::error)?;
+                    Ok(Response::AuthRemoved { removed })
+                })
+                .await
+            }
+            Request::AuthStatus {} => {
+                let auth = super::auth::store(self.home.as_deref())?;
+                blocking(move || {
+                    auth.status()
+                        .map(Response::AuthStatus)
+                        .map_err(super::auth::error)
+                })
+                .await
+            }
             Request::Stop => {
                 let mut changed = self.changed.subscribe();
                 lock(&self.admission).stopping = true;
@@ -929,11 +956,12 @@ async fn connection(backend: Arc<Backend>, mut stream: UnixStream) -> Result<()>
         .await
 }
 /// 实例锁唯一持有者；正常停止排空后台执行与读取，不创建领域库。
-pub async fn serve(layout: crate::StateLayout) -> Result<()> {
+/// HOME 原值随后台保存，只在凭据操作中解析配置目录。
+pub async fn serve(layout: crate::StateLayout, home: Option<std::path::PathBuf>) -> Result<()> {
     let binding_layout = layout.clone();
     let (instance, listener) = blocking(move || ipc::Instance::bind(&binding_layout)).await?;
     let listener = UnixListener::from_std(listener)?;
-    let backend = Backend::new(layout);
+    let backend = Backend::new(layout, home);
     let mut connections = JoinSet::new();
     let mut failure = None;
     loop {

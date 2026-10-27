@@ -3,6 +3,7 @@
 
 //! LATTICE LLM vocabulary and functional call facade.
 
+pub mod auth;
 mod client;
 mod connection;
 pub use connection::{ConnectionMaterial, LlmConnection};

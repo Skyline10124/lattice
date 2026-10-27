@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fmt;
-use std::io::Read;
+use std::io::{Read, Seek, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
@@ -237,12 +237,17 @@ impl RunningCommand {
         Ok(running)
     }
 
-    fn spawn_with_timeout(
+    fn spawn_with_timeout(command: Command, timeout: Option<Duration>) -> std::io::Result<Self> {
+        Self::spawn_with_input(command, timeout, Stdio::null())
+    }
+
+    fn spawn_with_input(
         mut command: Command,
         timeout: Option<Duration>,
+        stdin: Stdio,
     ) -> std::io::Result<Self> {
         let started_at = Instant::now();
-        command.stdin(Stdio::null());
+        command.stdin(stdin);
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
         set_new_process_group(&mut command);
@@ -441,6 +446,22 @@ impl LatticeDriver {
         command: &LatticeCommand,
     ) -> Result<CommandOutcome, DriverError> {
         self.start(world, command)?.wait(None)
+    }
+
+    /// 用匿名临时文件提供标准输入，秘密不进入参数、Debug 或场景证据。
+    pub fn run_with_stdin(
+        &self,
+        world: &ScenarioWorld,
+        command: &LatticeCommand,
+        input: &[u8],
+    ) -> Result<CommandOutcome, DriverError> {
+        world.daemon.register(&self.binary)?;
+        let mut stdin = tempfile::tempfile()?;
+        stdin.write_all(input)?;
+        stdin.rewind()?;
+        let mut cmd = world.command(&self.binary);
+        cmd.args(&command.args);
+        RunningCommand::spawn_with_input(cmd, command.timeout, Stdio::from(stdin))?.wait(None)
     }
 
     pub fn help(

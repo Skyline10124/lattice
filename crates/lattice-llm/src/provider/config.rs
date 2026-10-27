@@ -57,13 +57,6 @@ impl ProviderRegistry {
     }
 
     /// 从指定的用户配置路径读取，文件不存在时只使用内置表。
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "#315 L2 网关接线前，provider 与 protocol 只有 ModelRef 对外使用"
-        )
-    )]
     pub(crate) fn load(path: impl AsRef<Path>) -> Result<Self, ProviderConfigError> {
         let path = path.as_ref();
         let file = match File::open(path) {
@@ -241,24 +234,10 @@ impl ProviderRegistry {
         Ok(registry)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "#315 L2 网关接线前，provider 与 protocol 只有 ModelRef 对外使用"
-        )
-    )]
     pub(crate) fn get(&self, id: &str) -> Option<&Provider> {
         self.providers.get(id)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "#315 L2 网关接线前，provider 与 protocol 只有 ModelRef 对外使用"
-        )
-    )]
     pub(crate) fn iter(&self) -> impl Iterator<Item = &Provider> {
         self.providers.values()
     }

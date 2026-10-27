@@ -104,7 +104,7 @@ async fn backend() -> (
     let layout = crate::StateLayout::in_state_root(dir.path());
     let (instance, listener) = ipc::Instance::bind(&layout).unwrap();
     let listener = UnixListener::from_std(listener).unwrap();
-    let backend = Backend::new(layout.clone());
+    let backend = Backend::new(layout.clone(), Some(dir.path().into()));
     let server = backend.clone();
     let task = tokio::spawn(async move {
         let mut connections = JoinSet::new();

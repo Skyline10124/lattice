@@ -4,6 +4,7 @@
 //! Linux 单用户本地控制面。后台只持有接管任务与观察连接，Turn saga 仍归 TurnCoordinator。
 //! 公共视图不暴露 Pending 内部记录，协议版本只影响 IPC，不改变已有持久 schema。
 
+mod auth;
 mod client;
 mod config;
 mod ipc;

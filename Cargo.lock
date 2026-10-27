@@ -2806,10 +2806,12 @@ dependencies = [
  "lattice-profile",
  "lattice-session",
  "lattice-tui",
+ "libc",
  "serde_json",
  "tempfile",
  "tokio",
  "unicode-width",
+ "zeroize",
 ]
 
 [[package]]
@@ -2834,6 +2836,7 @@ dependencies = [
  "lattice-conversation",
  "net-guard",
  "reqwest",
+ "rustix",
  "rustls-native-certs",
  "serde",
  "serde_json",
