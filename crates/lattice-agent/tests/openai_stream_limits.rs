@@ -165,7 +165,7 @@ async fn interleaved_arguments_share_total_with_text_and_reasoning() {
             frames.push(delta(json!({field: "a".repeat(128 * 1024)})));
         }
     }
-    // 12 calls include their names and IDs in the shared 16 MiB total.
+    // 12 个调用的名称与 ID 也计入 16 MiB 共享总量。
     let payload = |index| {
         format!(
             "{{\"x\":\"{}\"}}",
@@ -179,7 +179,7 @@ async fn interleaved_arguments_share_total_with_text_and_reasoning() {
     for index in (0..12).rev() {
         arguments(&mut frames, index, &payload(index)[8..]);
     }
-    // At the exact total, even the next call's metadata must stop consumption.
+    // 总量恰好达到上限时，下一个调用的元数据也应触发停止消费。
     metadata(&mut frames, 12);
     let crossing_frame = frames.len();
     arguments(&mut frames, 12, "{");

@@ -199,12 +199,11 @@ struct SseStreamState {
     pending: std::collections::VecDeque<ProtocolEvent>,
 }
 
-/// Stream SSE events incrementally from an HTTP response into [`ProtocolEvent`] values.
+/// 将 HTTP 响应中的 SSE 事件逐步解析为 [`ProtocolEvent`]。
 ///
-/// Each call creates its own parser instance — no thread-local state leaks
-/// across requests. Body chunks are read incrementally; if the in-flight
-/// unframed SSE buffer exceeds `MAX_SSE_BUFFER_SIZE` or the event count exceeds
-/// `MAX_SSE_EVENTS`, an error event is emitted and the stream terminates.
+/// 每个请求独享解析器，避免请求间共享状态。响应体按块读取；
+/// 未完成分帧的 SSE 缓冲超过 `MAX_SSE_BUFFER_SIZE`，
+/// 或事件数超过 `MAX_SSE_EVENTS` 时，发出错误事件并终止流。
 fn stream_sse_response(body_stream: BodyStream, provider: ProviderKind) -> ProtocolStream {
     let state = SseStreamState {
         body_stream,

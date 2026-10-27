@@ -1,21 +1,18 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! One-attempt model step driver (ADR 0005 §10, #139-B Commit 4).
+//! 单次模型尝试驱动，职责边界见 ADR 0005 §10。
 //!
-//! `ModelStepDriver` 每次调用执行一次 provider attempt：
+//! `ModelStepDriver` 每次调用执行一次模型尝试：
 //! 组装冻结请求，消费 lattice-llm 共同累积器的实时投影与唯一终态，
 //! 返回一次尝试的类型化结果；流式计量和完整消息组装由 lattice-llm 负责。
 //!
-//! It owns no session or invocation store, no UUID generation, no multi-step
-//! loop, no tool executor, no retry policy, and no Turn-commit authority:
-//! those moved to the composition layer. Opening failures are surfaced as
-//! [`ModelStepError::OpeningFailed`]；流内失败同样保留可重试性，由调用方按预算决定。
+//! 本模块不负责会话或调用存储、UUID 生成、多步循环、工具执行、重试策略或 Turn 提交。
+//! 打开失败通过 [`ModelStepError::OpeningFailed`] 返回；
+//! 流内失败同样保留可重试性，由调用方按预算决定。
 //!
-//! Every provider Tool Call ID is preserved verbatim when the provider
-//! supplies one and is never synthesized. A conversation ToolResult closure
-//! whose closing call carries no provider ID fails the request assembly with
-//! a typed error (plan decision 9) instead of inventing an ID.
+//! provider 提供的工具调用 ID 原样保留，缺失时不补造。
+//! 若对话中的 ToolResult 对应的调用缺少 provider ID，请求组装返回类型化错误。
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -31,12 +28,10 @@ use lattice_llm::{
 };
 use tokio::time::Instant;
 
-/// Injectable LLM client seam: the provider boundary the driver streams one
-/// attempt through.
+/// 可注入的 LLM 客户端接口，供驱动发起一次模型尝试。
 ///
-/// Production implementations call real providers through `lattice-llm`.
-/// Test implementations return deterministic fake responses
-/// ([`crate::testing::FakeStreamingLlmClient`]).
+/// 生产实现通过 `lattice-llm` 调用真实 provider；
+/// 测试实现返回确定性响应，见 [`crate::testing::FakeStreamingLlmClient`]。
 /// 实现必须把 `control` 交给 `assemble_reply_stream`；流中的取消与 deadline 由包装器处理。
 /// 打开阶段的取消与 deadline 由驱动轮询。
 #[async_trait::async_trait]
@@ -228,7 +223,7 @@ impl ModelStepDriver {
         self.consume(stream, request, live).await
     }
 
-    /// 只转交共同包装器的实时投影与唯一结局，不再组装或计量。
+    /// 只转交共同包装器的实时投影与唯一终态。
     async fn consume(
         &self,
         mut stream: lattice_llm::LlmStream,

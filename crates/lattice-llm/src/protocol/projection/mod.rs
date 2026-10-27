@@ -1,31 +1,24 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Provider replay/projection seam (GitHub #142, grill §5; #139-B Commit 2).
+//! 模型消息的回放与投影。
 //!
-//! Pure data functions mapping official provider wire JSON to and from the
-//! provider-neutral [`NativeMessage`] contract. This module owns the
-//! provider-boundary rules:
+//! 纯数据函数负责 provider 官方 JSON 格式与中立 [`NativeMessage`] 之间的转换。
+//! 生产适配器在此投影请求消息；`wire_to_native` 只用于完整 wire 夹具的解码，
+//! 并复用共同回复累积器。本模块负责以下边界：
 //!
-//! 1. validate and preserve provider-native assistant message state
-//!    (provider call IDs, signatures, thought state) as part-local opaque
-//!    replay state;
-//! 2. replay it exactly for the same provider — the persisted closure
-//!    vocabulary is `NativeMessage<BoundToolCall>`, so replay and projection
-//!    are generic over the [`ToolCallState`] typestate;
-//! 3. project it to plain provider-neutral semantics across providers;
-//! 4. restore the original native state when switching back;
-//! 5. encode conversation ToolResult closures into the next request's wire
-//!    shape, joining each closure to its closing bound ToolCall, and extract
-//!    provider-reported usage from official response bodies.
+//! 1. 校验并保留 provider 原生助手消息中的调用 ID、签名与思考状态，
+//!    将它们按部件保存为不透明回放状态；
+//! 2. 对同一 provider 原样回放。持久消息使用 `NativeMessage<BoundToolCall>`，
+//!    因此回放与投影都对 [`ToolCallState`] 类型状态泛型化；
+//! 3. 跨 provider 时只投影中立语义；
+//! 4. 切回来源 provider 时恢复其原生状态；
+//! 5. 将对话中的 ToolResult 与其对应的绑定 ToolCall 关联，编码为下一次请求的格式，
+//!    并从官方响应正文提取 provider 报告的用量。
 //!
-//! It never generates, encodes, or rewrites a provider Tool Call ID, and
-//! never fabricates target-provider identity. A missing provider call ID is
-//! a valid conversation fact: when the target provider cannot encode a
-//! recorded closure without one, the projection fails with a typed
-//! [`ProjectionError::ToolResultWithoutProviderCallId`] rather than
-//! synthesizing an ID. 生产适配器在此投影请求消息；`wire_to_native` 只用于完整 wire
-//! 夹具的解码，并复用共同回复累积器。
+//! provider 工具调用 ID 不生成、不编码、不改写，也不补造目标 provider 的身份。
+//! 缺少 provider 调用 ID 是有效的对话事实；若目标 provider 无法据此编码已记录的结果，
+//! 投影返回类型化的 [`ProjectionError::ToolResultWithoutProviderCallId`] 错误。
 
 mod anthropic_messages;
 mod chat_completions;

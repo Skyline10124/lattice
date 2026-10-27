@@ -399,7 +399,7 @@ impl ReplyAccumulator {
                 call_ordinal += 1;
             }
         }
-        // 移出原文再校验整批，避免为了第二条组装路径复制参数缓冲。
+        // 移出参数原文后校验整批，避免复制整批参数缓冲。
         let mut raw_calls = Vec::new();
         for part in &mut self.parts {
             if let PendingData::Call(call) = &mut part.data {

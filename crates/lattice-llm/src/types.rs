@@ -78,7 +78,7 @@ pub enum LlmEvent {
     },
 }
 
-/// 本阶段只携带 provider 已报告的结束原因和用量。
+/// `Finished` 的报告只携带 provider 已报告的结束原因和用量。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AttemptReport {
     pub finish_reason: Option<String>,

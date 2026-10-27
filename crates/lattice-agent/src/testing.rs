@@ -20,11 +20,11 @@ enum FakeStreamingResponse {
     LlmError(lattice_llm::LlmError),
 }
 
-/// Deterministic streaming LLM test double.
+/// 按脚本返回确定性流响应的 LLM 测试客户端。
 ///
-/// Responses are queued FIFO. `push_error` creates a startup-style
-/// `Result::Err`; `ScriptEvent::Failure` inside `push_events` remains an in-band
-/// stream item so tests can distinguish startup and mid-stream failures.
+/// 响应按先进先出顺序交付。`push_error` 通过 `Result::Err` 表示打开失败；
+/// `push_events` 中的 `ScriptEvent::Failure` 通过流内事件交付，
+/// 使测试能区分打开失败与流中失败。
 pub struct FakeStreamingLlmClient {
     queue: Mutex<VecDeque<FakeStreamingResponse>>,
     call_count: AtomicUsize,

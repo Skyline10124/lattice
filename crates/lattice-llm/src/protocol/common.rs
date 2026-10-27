@@ -9,12 +9,12 @@
 
 use crate::reply::ProtocolEvent;
 
-/// Parse `data` into a JSON value.
+/// 将 `data` 解析为 JSON 值。
 ///
-/// Returns:
-/// - `Ok(Some(value))` for parsed JSON
-/// - `Ok(None)` for empty data or `[DONE]`
-/// - `Err(ProtocolEvent::Failed)` for parse errors
+/// 返回值：
+/// - `Ok(Some(value))`：有效 JSON；
+/// - `Ok(None)`：空内容或 `[DONE]`；
+/// - `Err(ProtocolEvent::Failed)`：解析失败。
 pub(crate) fn parse_json_data(
     provider: &str,
     data: &str,

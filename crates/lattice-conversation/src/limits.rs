@@ -310,8 +310,8 @@ mod tests {
         assembly
             .push_tool_arguments(0, &"t".repeat(MAX_TOOL_CALL_ARGUMENTS_BYTES))
             .expect("arguments");
-        // Fill the remaining headroom with further ToolCalls, each within the
-        // per-call limit (tracked independently by index), so only the total can trip.
+        // 用按 index 独立计量的调用参数填满剩余总量；
+        // 各调用都在单调用限额内，确保只触发总量限额。
         let mut headroom = MAX_MODEL_ATTEMPT_BYTES - assembly.total_bytes();
         let mut index = 1;
         while headroom > 0 {

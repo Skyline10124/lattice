@@ -1,9 +1,9 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Anthropic messages assistant wire projection.
+//! Anthropic Messages 的助手消息投影。
 //!
-//! Wire shape (official response body):
+//! 官方响应正文格式：
 //!
 //! ```json
 //! {"role": "assistant", "content": [
@@ -13,18 +13,14 @@
 //! ]}
 //! ```
 //!
-//! The thinking block's `signature` is protocol-required replay state: it is
-//! preserved verbatim as part-local opaque state and replayed in place for
-//! the same provider. It is never fabricated: a thinking part without replay
-//! state cannot be written back to Anthropic wire.
+//! `thinking` 块的 `signature` 是协议要求的回放状态，按部件原样保存，
+//! 并在同一 provider 的请求中原位回放。缺少回放状态的 `thinking` 部件
+//! 无法写回 Anthropic 消息，投影器不会补造签名。
 //!
-//! `signature` belongs only to supported `thinking` blocks. A
-//! `text` part carrying replay state has nowhere to go on this wire, so the
-//! writer rejects it rather than emitting a field the reader would silently
-//! drop on the way back.
+//! `signature` 仅属于受支持的 `thinking` 块。协议无法表达 `text` 部件的回放状态，
+//! 因此写入时拒绝携带回放状态的 `text` 部件，不写出读回时会被静默丢弃的字段。
 //!
-//! Assembly is metered against the ADR 0005 §10 protocol limits; crossing one
-//! fails the whole body closed rather than returning a partial message.
+//! 组装遵循 ADR 0005 §10 的协议限额；超限拒绝整个响应，不返回部分消息。
 
 use lattice_conversation::{
     MessageSemantic, NativeMessage, ProviderOrigin, TokenUsage, ToolCallState, UnboundToolCall,
