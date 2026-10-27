@@ -130,7 +130,7 @@ provider 配置、凭据与模型元数据是用户级的全局状态，由后�
 | `ollama` | `chat-completions` | `http://127.0.0.1:11434/v1` | `none` | — | — |
 | `lmstudio` | `chat-completions` | `http://127.0.0.1:1234/v1` | `none` | `lmstudio` | — |
 
-- `google` 的 `generate-content` 保留，可在 `providers.toml` 中切换。OpenAI 的新模型在 Chat Completions 上不能使用工具（[OpenAI 推理指南](https://developers.openai.com/api/docs/guides/reasoning)），所以 `openai` 以 Responses 为准。
+- `generate-content` 协议保留，需要它的用户在 `providers.toml` 中新增一个使用该协议的 provider；内置 `google` 不能改 `protocol`。OpenAI 的新模型在 Chat Completions 上不能使用工具（[OpenAI 推理指南](https://developers.openai.com/api/docs/guides/reasoning)），所以 `openai` 以 Responses 为准。
 - `chatgpt` 是 OpenAI 的订阅通道，不计入第一轮收录的 20 家，限制见 [Sign in with ChatGPT](#sign-in-with-chatgpt)。
 - 阿里云的文档推荐按工作空间区分的域名（`https://{WorkspaceId}.<地域>.maas.aliyuncs.com/compatible-mode/v1`），表中用的是仍可使用的旧域名；使用工作空间域名的用户在 `providers.toml` 中覆盖 `base_url`。
 - `ollama` 在 models.dev 中没有条目，它的模型没有元数据，可以在 `providers.toml` 中手写。
