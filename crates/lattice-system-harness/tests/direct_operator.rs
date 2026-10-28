@@ -64,7 +64,12 @@ fn operator_case(name: &str, methods: &[&str]) {
                 .join(".lattice/agents/operator/agent.toml"),
         )
         .unwrap();
-        world.unset_env("OPENAI_COMPATIBLE_API_KEY");
+        world
+            .register_key(
+                lattice_system_harness::ProviderFixture::chat_completions("operator"),
+                None,
+            )
+            .unwrap();
         let mut read = |args: &[&str]| -> Value {
             let out = cli(&world, &spec, args);
             evidence.record_command(args.join(" "), &out);

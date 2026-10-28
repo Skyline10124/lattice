@@ -200,16 +200,17 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
         let server = wire_fake_llm(&world, "plain", SseScript::plain("must not be requested"));
         let path = world.project_dir().join(".lattice/agents/plain/agent.toml");
         let original = std::fs::read_to_string(&path).unwrap();
+        let provider = lattice_system_harness::ProviderFixture::chat_completions("plain");
+        let model = provider.model_ref().unwrap();
         match case {
             "toml" => {
                 std::fs::write(&path, format!("# 中文\nschema_version=@{SENTINEL}\n")).unwrap()
             }
+            // 这两个分支验证环境变量不存在与定义为空时各自的拒绝诊断。
             "missing-key" => world.unset_env("OPENAI_COMPATIBLE_API_KEY"),
             "empty-key" => world.set_env("OPENAI_COMPATIBLE_API_KEY", ""),
-            "model" => std::fs::write(&path, original.replace("compat:plain", SENTINEL)).unwrap(),
-            "model-typo" => {
-                std::fs::write(&path, original.replace("compat:plain", "sonet")).unwrap()
-            }
+            "model" => std::fs::write(&path, original.replace(&model, SENTINEL)).unwrap(),
+            "model-typo" => std::fs::write(&path, original.replace(&model, "sonet")).unwrap(),
             "tools" => std::fs::write(
                 &path,
                 original.replace("enabled = []", &format!("enabled = ['{SENTINEL}']")),

@@ -24,8 +24,8 @@
 mod support;
 
 use lattice_system_harness::{
-    AssertError, CapturedRequest, ScenarioSpec, ScenarioWorld, SendExitCode, SendOutcome,
-    SessionSendDriver, SlotOutcome, SseScript, derive_send_exit_code,
+    AssertError, CapturedRequest, ProviderFixture, ScenarioSpec, ScenarioWorld, SendExitCode,
+    SendOutcome, SessionSendDriver, SlotOutcome, SseScript, derive_send_exit_code,
 };
 use serde_json::{Value, json};
 use support::{
@@ -46,8 +46,11 @@ fn turn_world(
 ) -> (ScenarioWorld, ScenarioSpec) {
     let spec = ScenarioSpec::direct_local(prefix);
     let world = ScenarioWorld::new(&spec.name).expect("world");
+    let model = ProviderFixture::chat_completions(agent)
+        .model_ref()
+        .unwrap();
     let toml = format!(
-        "schema_version = 1\n\n[agent]\nname = \"{agent}\"\nmodel = \"compat:{agent}\"\n\n[prompt]\nsystem = \"You are a concise test agent. Reply briefly.\"\n\n[tools]\nenabled = {tools}\n{extra_profile}"
+        "schema_version = 1\n\n[agent]\nname = \"{agent}\"\nmodel = \"{model}\"\n\n[prompt]\nsystem = \"You are a concise test agent. Reply briefly.\"\n\n[tools]\nenabled = {tools}\n{extra_profile}"
     );
     world
         .write_project_file(&format!(".lattice/agents/{agent}/agent.toml"), &toml)

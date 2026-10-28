@@ -236,13 +236,21 @@ fn overload_and_gateway_errors_retry_with_bounded_diagnostics() {
     let driver = driver();
     let spec = lattice_system_harness::ScenarioSpec::direct_local("direct-transport-overload");
     let world = lattice_system_harness::ScenarioWorld::new(&spec.name).expect("world");
+    let provider = lattice_system_harness::ProviderFixture {
+        protocol: lattice_system_harness::ProviderProtocol::AnthropicMessages,
+        target: lattice_system_harness::ProviderTarget::Builtin("anthropic"),
+        model: "claude-sonnet-4-6",
+    };
+    let model = provider.model_ref().unwrap();
     world
         .write_project_file(
             ".lattice/agents/overload/agent.toml",
-            "schema_version = 1\n\n[agent]\nname = \"overload\"\nmodel = \"sonnet\"\n\n\
+            &format!(
+                "schema_version = 1\n\n[agent]\nname = \"overload\"\nmodel = \"{model}\"\n\n\
              [prompt]\nsystem = \"You are a concise test agent.\"\n\n\
              [tools]\nenabled = [\"observe__workspace\"]\n\n\
-             [llm.retry]\nmax_retries = 1\ninitial_delay_ms = 1\nmax_delay_ms = 1\n",
+             [llm.retry]\nmax_retries = 1\ninitial_delay_ms = 1\nmax_delay_ms = 1\n"
+            ),
         )
         .unwrap();
     world.write_project_file("notes.txt", "load\n").unwrap();
@@ -269,8 +277,7 @@ fn overload_and_gateway_errors_retry_with_bounded_diagnostics() {
     .unwrap();
     let key = "anthropic-transport-key";
     server.expect_api_key(key);
-    world.set_env("ANTHROPIC_BASE_URL", server.base_url());
-    world.set_env("ANTHROPIC_API_KEY", key);
+    world.wire_provider(provider, &server, key).unwrap();
     let evidence =
         lattice_system_harness::ScenarioEvidence::new(&world, &spec.name, [key.to_string()])
             .unwrap();
@@ -645,9 +652,13 @@ fn plaintext_local_provider_over_http1() {
     ]))
     .unwrap();
     let base_url = server.base_url();
-    world.set_env("OPENAI_COMPATIBLE_BASE_URL", &base_url);
-    world.set_env("OPENAI_COMPATIBLE_MODEL", "transport");
-    world.set_env("OPENAI_COMPATIBLE_API_KEY", FAKE_API_KEY);
+    world
+        .wire_provider(
+            lattice_system_harness::ProviderFixture::chat_completions("transport"),
+            &server,
+            FAKE_API_KEY,
+        )
+        .unwrap();
     let evidence = evidence(&world, &spec);
     let send = SessionSendDriver::new(&driver, &world, &spec, "transport");
     let outcome = send.send("read both files locally").unwrap();

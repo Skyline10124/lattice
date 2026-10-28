@@ -3,12 +3,9 @@
 
 //! Localhost fake LLM for harness scenarios.
 //!
-//! The product connects through the selected provider's formal base URL and
-//! credential configuration (`OPENAI_COMPATIBLE_*`, `ANTHROPIC_BASE_URL`,
-//! `GEMINI_BASE_URL`) — there is no test-only provider, hidden flag, or
-//! product-side change. The request route selects the streaming protocol:
-//! OpenAI Chat Completions, Anthropic Messages, or Gemini
-//! `streamGenerateContent`.
+//! 场景经 [`ScenarioWorld::wire_provider`](crate::ScenarioWorld::wire_provider)
+//! 把模型与凭据接到 fake server。请求路由选择响应协议：OpenAI Chat Completions、
+//! Anthropic Messages 或 Gemini `streamGenerateContent`。
 //!
 //! 传输与官方 provider 一致：TLS + HTTP/2，ALPN 只提供 `h2`，证书来自
 //! [`TlsIdentity`]，场景经 `SSL_CERT_FILE` 信任它（见 `ScenarioWorld`）。
@@ -52,10 +49,7 @@ use tokio_rustls::TlsAcceptor;
 
 use crate::tls::TlsIdentity;
 
-/// Default test API key. The product requires `OPENAI_COMPATIBLE_API_KEY` to
-/// be set and non-empty (`lattice-llm/src/client.rs`), and the auth header is
-/// `Bearer <key>`. Scenarios put this sentinel into the env allow-list; it is
-/// also the value redaction scanners strip from artifacts.
+/// 默认场景 API key，由 provider 接线入口录入，也作为产物脱敏扫描的已知秘密。
 pub const FAKE_API_KEY: &str = "harness-fake-key-do-not-ship";
 
 /// A captured Chat Completions request body, decoded for scenario assertions.

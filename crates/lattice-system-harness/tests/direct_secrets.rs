@@ -68,7 +68,12 @@ fn direct_secrets_sentinels_never_leak_into_public_sinks() {
             SseScript::plain("hello"),
         ]),
     );
-    world.set_env("OPENAI_COMPATIBLE_API_KEY", &credential);
+    world
+        .register_key(
+            lattice_system_harness::ProviderFixture::chat_completions("dl-secret"),
+            Some(&credential),
+        )
+        .unwrap();
     server.expect_api_key(&credential);
     let mut evidence = ScenarioEvidence::new(
         &world,
@@ -220,7 +225,12 @@ fn direct_secrets_failure_bundle_redacts_sentinels() {
         ("injected", injected.as_str()),
     ];
     let server = wire_fake_llm(&world, "dl-sec-b", SseScript::plain(&reply));
-    world.set_env("OPENAI_COMPATIBLE_API_KEY", &credential);
+    world
+        .register_key(
+            lattice_system_harness::ProviderFixture::chat_completions("dl-sec-b"),
+            Some(&credential),
+        )
+        .unwrap();
     server.expect_api_key(&credential);
     let scenario_evidence =
         ScenarioEvidence::new(&world, &spec.name, [credential.clone()]).unwrap();

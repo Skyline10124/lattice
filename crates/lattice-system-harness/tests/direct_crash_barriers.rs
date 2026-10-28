@@ -353,11 +353,16 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
             SseScript::plain("beta complete"),
         ]))
         .unwrap();
+        world
+            .wire_provider(
+                lattice_system_harness::ProviderFixture::chat_completions("operator"),
+                &beta_provider,
+                FAKE_API_KEY,
+            )
+            .unwrap();
         let beta_read = |args: &[&str], evidence: &mut ScenarioEvidence| {
             let mut cmd = world.command(driver.binary_path());
-            cmd.current_dir(&beta)
-                .env("OPENAI_COMPATIBLE_BASE_URL", beta_provider.base_url())
-                .args(args);
+            cmd.current_dir(&beta).args(args);
             let out = RunningCommand::spawn(cmd)
                 .unwrap()
                 .wait(Some(budget.cap_timeout(spec.step_timeout())))
@@ -408,6 +413,13 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
         .unwrap();
         assert_eq!(beta_tail["rows"].as_array().unwrap().len(), 3);
         assert_eq!(beta_tail["next_after"], empty["next_after"]);
+        world
+            .wire_provider(
+                lattice_system_harness::ProviderFixture::chat_completions("operator"),
+                &provider,
+                FAKE_API_KEY,
+            )
+            .unwrap();
         let mut turns = vec![tid.to_string()];
         let mut windows = Vec::new();
         for crash in [false, true] {
@@ -535,7 +547,12 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
         }
         std::fs::remove_file(&profile).unwrap();
         std::fs::remove_file(beta.join(".lattice/agents/operator/agent.toml")).unwrap();
-        world.unset_env("OPENAI_COMPATIBLE_API_KEY");
+        world
+            .register_key(
+                lattice_system_harness::ProviderFixture::chat_completions("operator"),
+                None,
+            )
+            .unwrap();
         let alpha = read_json(&world, &spec, &mut evidence, &["--json", "audit"]);
         let alpha_tail = read_json(&world, &spec, &mut evidence, &["--json", "audit", "--tail"]);
         let beta_query: Value =
@@ -722,9 +739,13 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
             budget.cap_timeout(spec.step_timeout()),
         )
         .unwrap();
-        world.set_env("OPENAI_COMPATIBLE_BASE_URL", provider.base_url());
-        world.set_env("OPENAI_COMPATIBLE_MODEL", "vertical");
-        world.set_env("OPENAI_COMPATIBLE_API_KEY", FAKE_API_KEY);
+        world
+            .wire_provider(
+                lattice_system_harness::ProviderFixture::chat_completions("vertical"),
+                &provider,
+                FAKE_API_KEY,
+            )
+            .unwrap();
         let ack = world.root().join("barrier.json");
         world.set_env(BARRIER, "invocation_started:1:72");
         world.set_env(ACK, ack.display().to_string());
@@ -901,7 +922,13 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
         assert_eq!(peer.captured_requests().len(), 1);
         peer.shutdown(budget.cap_timeout(spec.step_timeout()))
             .unwrap();
-        world.set_env("OPENAI_COMPATIBLE_BASE_URL", provider.base_url());
+        world
+            .wire_provider(
+                lattice_system_harness::ProviderFixture::chat_completions("vertical"),
+                &provider,
+                FAKE_API_KEY,
+            )
+            .unwrap();
         gate.release(budget.cap_timeout(spec.step_timeout()))
             .unwrap();
         let marker = wait_for_ack(&ack, budget.cap_timeout(spec.step_timeout()));
@@ -2000,9 +2027,13 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
             budget.cap_timeout(spec.step_timeout()),
         )
         .unwrap();
-        world.set_env("OPENAI_COMPATIBLE_BASE_URL", provider.base_url());
-        world.set_env("OPENAI_COMPATIBLE_MODEL", "windows");
-        world.set_env("OPENAI_COMPATIBLE_API_KEY", FAKE_API_KEY);
+        world
+            .wire_provider(
+                lattice_system_harness::ProviderFixture::chat_completions("windows"),
+                &provider,
+                FAKE_API_KEY,
+            )
+            .unwrap();
         let schedule = world.root().join("schedule");
         std::fs::create_dir(&schedule).unwrap();
         for name in ["turn_closed", "invocation_started"] {
