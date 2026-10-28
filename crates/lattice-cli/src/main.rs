@@ -5,6 +5,8 @@ use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 
 mod commands;
+#[cfg(test)]
+mod test_support;
 use commands::{audit, lancet as lancet_cmd, models, resolve, session as session_cmd};
 
 #[derive(Parser)]
@@ -40,6 +42,11 @@ enum Commands {
     Daemon {
         #[command(subcommand)]
         action: commands::daemon::DaemonAction,
+    },
+    /// Manage provider API keys and credential status.
+    Auth {
+        #[command(subcommand)]
+        action: commands::auth::AuthAction,
     },
     /// List available models.
     Models {
@@ -87,6 +94,14 @@ fn main() -> std::process::ExitCode {
                     "{}",
                     serde_json::json!({"type":"error", "kind":"bad_request", "message":"invalid command; use --help"})
                 );
+            } else if !help
+                && std::env::args_os()
+                    .skip(1)
+                    .find(|arg| !arg.as_encoded_bytes().starts_with(b"-") && arg != "help")
+                    .is_some_and(|arg| arg == "auth")
+            {
+                // 包括 help auth 路径在内，clap 错误都可能回显误放在参数中的 key。
+                eprintln!("error: invalid auth command; use lattice auth --help");
             } else {
                 let _ = error.print();
             }
@@ -118,6 +133,9 @@ async fn run_commands(cli: Cli) -> Result<std::process::ExitCode> {
         }
         Some(Commands::Daemon { action }) => {
             return commands::daemon::run(action, cli.json).await;
+        }
+        Some(Commands::Auth { action }) => {
+            commands::auth::run(action, cli.json).await?;
         }
         Some(Commands::Models { auth }) => {
             models::run(auth, cli.json)?;
@@ -158,6 +176,35 @@ async fn run_commands(cli: Cli) -> Result<std::process::ExitCode> {
 mod tests {
     use super::{Cli, Commands};
     use clap::Parser;
+
+    #[test]
+    fn auth_surface_accepts_only_provider_arguments_and_lists_commands() {
+        for args in [
+            vec!["auth", "set", "openai"],
+            vec!["auth", "remove", "openai"],
+            vec!["auth", "status"],
+        ] {
+            assert!(Cli::try_parse_from(std::iter::once("lattice").chain(args)).is_ok());
+        }
+        for args in [
+            vec!["auth", "set"],
+            vec!["auth", "set", "openai", "key"],
+            vec!["auth", "login", "chatgpt"],
+            vec!["auth", "logout", "chatgpt"],
+        ] {
+            assert!(Cli::try_parse_from(std::iter::once("lattice").chain(args)).is_err());
+        }
+        use clap::CommandFactory;
+        let mut command = Cli::command();
+        let auth = command
+            .find_subcommand_mut("auth")
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        for word in ["set", "remove", "status"] {
+            assert!(auth.contains(word));
+        }
+    }
 
     #[test]
     fn r2_send_run_and_node_surface() {

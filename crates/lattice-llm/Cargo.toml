@@ -20,6 +20,7 @@ urlencoding = { workspace = true }
 reqwest = { workspace = true }
 bytes = { workspace = true }
 zeroize = { workspace = true }
+rustix = { workspace = true }
 rustls-native-certs = "0.8.4"
 tokio = { workspace = true }
 tracing = { workspace = true }

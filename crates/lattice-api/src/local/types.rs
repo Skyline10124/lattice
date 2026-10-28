@@ -4,6 +4,7 @@
 pub use crate::turn::{TextSegment, TurnRef};
 pub use lancet_protocol::{InvocationId, ModelAttemptKey, SessionId, TurnId};
 pub use lattice_conversation::{ResultPayload, StepContent, StoredToolResult, SuccessContent};
+pub use lattice_llm::auth::{AuthState, AuthStatus, ProviderAuthStatus};
 pub use lattice_session::store::{
     AttemptProgress, AuditPage, AuditReplay, AuditTailPage, ChangeSeq, ConversationEntry,
     MaterialSummary, Node, NodeId, NodeKind, NodeRef, Notice, NoticeLevel, OperatorInvocationState,
@@ -446,6 +447,15 @@ pub struct AuditSelection {
 pub(super) enum Request {
     Status,
     Stop,
+    AuthSet {
+        provider: String,
+        key: super::auth::AuthKey,
+    },
+    AuthRemove {
+        provider: String,
+    },
+    // 空结构让 serde 拒绝额外字段，避免静默忽略误发给查询的 key。
+    AuthStatus {},
     ResolveSession {
         prefix: String,
     },
@@ -507,6 +517,9 @@ pub(super) enum Request {
 #[serde(tag = "response", content = "value", rename_all = "snake_case")]
 pub(super) enum Response {
     Status(DaemonStatus),
+    AuthUpdated,
+    AuthRemoved { removed: bool },
+    AuthStatus(AuthStatus),
     Session(SessionRecord),
     Sessions(Page<SessionListRow, SessionId>),
     Log(SessionLog),

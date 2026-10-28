@@ -1,6 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 use super::*;
+use crate::test_support::signal_guard;
 use serde_json::{Value, json};
 use std::{os::unix::fs::PermissionsExt, time::Duration};
 use tokio::{
@@ -684,11 +685,6 @@ async fn sigint_uses_the_original_turn_and_second_interrupt_detaches() {
             .count(),
         1
     );
-}
-
-async fn signal_guard() -> tokio::sync::MutexGuard<'static, ()> {
-    static SIGNALS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    SIGNALS.lock().await
 }
 
 #[tokio::test]

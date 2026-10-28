@@ -23,6 +23,8 @@ colored = { workspace = true }
 anyhow = { workspace = true }
 futures = { workspace = true }
 unicode-width = { workspace = true }
+libc = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 lattice-api = { workspace = true, features = ["test-utils"] }

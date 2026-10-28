@@ -14,8 +14,9 @@ fn driver() -> LatticeDriver {
 }
 
 /// Public subcommands the `lattice --help` surface must advertise.
-const EXPECTED_PUBLIC_COMMANDS: &[&str] =
-    &["models", "resolve", "session", "audit", "lancet", "tui"];
+const EXPECTED_PUBLIC_COMMANDS: &[&str] = &[
+    "auth", "models", "resolve", "session", "audit", "lancet", "tui",
+];
 
 #[test]
 fn fast_home_xdg_isolated_from_developer_home() {

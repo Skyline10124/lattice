@@ -41,7 +41,11 @@ fn state_root(explicit: Option<&Path>) -> anyhow::Result<PathBuf> {
 pub async fn run(action: DaemonAction, json: bool) -> anyhow::Result<std::process::ExitCode> {
     let status = match action {
         DaemonAction::Serve { state_root: root } => {
-            local::serve(StateLayout::in_state_root(&state_root(root.as_deref())?)).await?;
+            local::serve(
+                StateLayout::in_state_root(&state_root(root.as_deref())?),
+                std::env::var_os("HOME").map(PathBuf::from),
+            )
+            .await?;
             return Ok(std::process::ExitCode::SUCCESS);
         }
         DaemonAction::Status => LocalClient::new(StateLayout::resolve()?).status().await?,

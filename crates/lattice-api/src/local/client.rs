@@ -49,6 +49,35 @@ impl LocalClient {
             _ => Err(protocol()),
         }
     }
+    pub async fn auth_set(&self, provider: &str, key: String) -> Result<()> {
+        match self
+            .call(Request::AuthSet {
+                provider: provider.into(),
+                key: super::auth::AuthKey(key),
+            })
+            .await?
+        {
+            Response::AuthUpdated => Ok(()),
+            _ => Err(protocol()),
+        }
+    }
+    pub async fn auth_remove(&self, provider: &str) -> Result<bool> {
+        match self
+            .call(Request::AuthRemove {
+                provider: provider.into(),
+            })
+            .await?
+        {
+            Response::AuthRemoved { removed } => Ok(removed),
+            _ => Err(protocol()),
+        }
+    }
+    pub async fn auth_status(&self) -> Result<AuthStatus> {
+        match self.call(Request::AuthStatus {}).await? {
+            Response::AuthStatus(status) => Ok(status),
+            _ => Err(protocol()),
+        }
+    }
     pub async fn resolve_session(&self, prefix: &str) -> Result<SessionRecord> {
         match self
             .call(Request::ResolveSession {
