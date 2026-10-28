@@ -4,7 +4,7 @@
 use crate::{
     ChatRequest, CredentialStatus, LlmError, LlmStream, ModelRouter, ModelTarget, ResolvedModel,
 };
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use zeroize::Zeroizing;
 
 /// 按当前启动环境读取平台信任根，个别证书读取失败时记录警告；空集合按配置错误拒绝。
@@ -33,7 +33,7 @@ pub struct LlmConnection {
     roots_der: Vec<Vec<u8>>,
     /// 本 Turn 首次请求时解析、校验并固定地址后构建的 client，Turn 内复用；
     /// 连接或传输错误后清空，下次尝试重新解析。
-    pub(crate) client: Arc<Mutex<Option<reqwest::Client>>>,
+    pub(crate) client: Arc<crate::client::TurnClient>,
 }
 
 /// 克隆得到同一份冻结材料，但不共享已建立的连接。
@@ -50,9 +50,6 @@ impl Clone for LlmConnection {
 }
 
 impl LlmConnection {
-    pub(crate) fn forget_client(&self) {
-        self.client.lock().unwrap().take();
-    }
     /// 显式材料入口；调用者传入证书内容，后台不再读取提交端路径或共享环境。
     pub fn new(
         mut resolved: ResolvedModel,
@@ -64,9 +61,6 @@ impl LlmConnection {
             || resolved.alias.len() > 4096
             || resolved.provider_model.len() > 4096
             || resolved.base_url.len() > 8192
-            || roots_der.len() > 1024
-            || roots_der.iter().any(|root| root.len() > 65_536)
-            || roots_der.iter().map(Vec::len).sum::<usize>() > 4 * 1024 * 1024
         {
             return Err(LlmError::Config {
                 message: "connection material exceeds limit".into(),
@@ -92,14 +86,7 @@ impl LlmConnection {
         net_guard::validate_base_url(&resolved.base_url).map_err(|_| LlmError::Config {
             message: "provider base URL rejected by network policy".into(),
         })?;
-        let roots = roots_der
-            .iter()
-            .map(|der| {
-                reqwest::Certificate::from_der(der).map_err(|_| LlmError::Config {
-                    message: "invalid TLS root certificate".into(),
-                })
-            })
-            .collect::<Result<_, _>>()?;
+        let roots = crate::client::tls_certificates(&roots_der)?;
         resolved.credential_status = CredentialStatus::Present;
         Ok(Self {
             resolved,
@@ -138,7 +125,31 @@ impl LlmConnection {
         request: ChatRequest,
         control: crate::StreamControl,
     ) -> Result<LlmStream, LlmError> {
-        crate::client::dispatch_frozen(request, self, control).await
+        use crate::protocol::Protocol;
+        use crate::provider::Auth;
+        let (protocol, auth) = match self.resolved.provider {
+            crate::ProviderKind::OpenAi | crate::ProviderKind::OpenAiCompatible => {
+                (Protocol::ChatCompletions, Auth::Bearer)
+            }
+            crate::ProviderKind::Anthropic => (Protocol::Messages, Auth::XApiKey),
+            crate::ProviderKind::Gemini => (Protocol::GenerateContent, Auth::XGoogApiKey),
+        };
+        let provider = self.resolved.provider.as_str();
+        crate::client::dispatch(
+            request,
+            crate::client::RequestEndpoint {
+                provider,
+                model: &self.resolved.provider_model,
+                base_url: &self.resolved.base_url,
+                protocol,
+                auth,
+                credentials: crate::auth::Credentials::for_api_key(provider, &self.api_key),
+                roots: &self.roots,
+                client: self.client.clone(),
+            },
+            control,
+        )
+        .await
     }
 }
 

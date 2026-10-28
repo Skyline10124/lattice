@@ -1,19 +1,21 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Concrete provider dispatch for LLM execution.
+//! 按协议构造与解析请求，按认证方式附加凭据，并维护 Turn 内连接。
 
 use std::pin::Pin;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use futures::stream::{self, StreamExt};
 use net_guard::NetGuardError;
 
-use crate::protocol;
+use crate::auth::Credentials;
+use crate::protocol::{self, Protocol};
+use crate::provider::Auth;
 use crate::reply::{ProtocolEvent, ReplyProtocolError, StreamStop};
 use crate::reply_stream::{ProtocolStream, StreamControl, assemble_reply_stream};
-use crate::router::{ProviderKind, ResolvedModel};
+use crate::router::ResolvedModel;
 use crate::sse;
 use crate::stub::{LlmError, LlmStream};
 use crate::transport;
@@ -38,7 +40,7 @@ static USER_AGENT: LazyLock<String> = LazyLock::new(|| {
 
 type BodyStream = Pin<Box<dyn futures::Stream<Item = reqwest::Result<bytes::Bytes>> + Send>>;
 
-/// Validate base URL and read the API key from the environment.
+/// 校验 base_url 并从指定环境变量读取 API key。
 pub fn validate_and_read_key(resolved: &ResolvedModel) -> Result<String, LlmError> {
     net_guard::validate_base_url(&resolved.base_url).map_err(llm_error_from_net_guard)?;
 
@@ -61,94 +63,90 @@ pub fn validate_and_read_key(resolved: &ResolvedModel) -> Result<String, LlmErro
     Ok(key)
 }
 
-/// Build provider-specific HTTP headers from a resolved model and API key.
-fn build_auth_headers(resolved: &ResolvedModel, api_key: &str) -> Vec<(String, String)> {
-    match resolved.provider {
-        ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => {
-            vec![(
-                "Authorization".to_string(),
-                protocol::chat_completions::auth_header_value(api_key),
-            )]
+/// 认证与协议独立选择；无认证时不构造任何认证头。
+fn build_auth_headers(
+    auth: Auth,
+    api_key: Option<&str>,
+) -> Result<Vec<(&'static str, String)>, LlmError> {
+    let name = match auth {
+        Auth::Bearer => "Authorization",
+        Auth::XApiKey => "x-api-key",
+        Auth::XGoogApiKey => "x-goog-api-key",
+        Auth::None => return Ok(Vec::new()),
+        Auth::OauthChatgpt => {
+            return Err(LlmError::Config {
+                message: "auth oauth:chatgpt is not implemented".into(),
+            });
         }
-        ProviderKind::Anthropic => {
-            vec![
-                (
-                    "x-api-key".to_string(),
-                    protocol::anthropic_messages::auth_header_value(api_key),
-                ),
-                (
-                    "anthropic-version".to_string(),
-                    protocol::anthropic_messages::ANTHROPIC_VERSION.to_string(),
-                ),
-            ]
-        }
-        ProviderKind::Gemini => {
-            vec![(
-                "x-goog-api-key".to_string(),
-                protocol::generate_content::auth_header_value(api_key),
-            )]
+    };
+    let key = api_key.ok_or_else(|| LlmError::Config {
+        message: "provider credentials are missing from auth.json".into(),
+    })?;
+    let value = if auth == Auth::Bearer {
+        format!("Bearer {key}")
+    } else {
+        key.to_owned()
+    };
+    Ok(vec![(name, value)])
+}
+
+/// 每个响应独享解析状态，协议同时决定请求路径、请求体与回复来源。
+enum ProtocolParser {
+    ChatCompletions(protocol::chat_completions::OpenAiSseParser),
+    Messages(protocol::anthropic_messages::AnthropicSseParser),
+    GenerateContent(protocol::generate_content::GeminiSseParser),
+}
+
+impl ProtocolParser {
+    fn new(protocol: Protocol) -> Result<Self, LlmError> {
+        match protocol {
+            Protocol::ChatCompletions => Ok(Self::ChatCompletions(
+                protocol::chat_completions::OpenAiSseParser::new(),
+            )),
+            Protocol::Messages => Ok(Self::Messages(
+                protocol::anthropic_messages::AnthropicSseParser::new(),
+            )),
+            Protocol::GenerateContent => Ok(Self::GenerateContent(
+                protocol::generate_content::GeminiSseParser::new(),
+            )),
+            Protocol::Responses | Protocol::Interactions => Err(LlmError::Config {
+                message: format!("protocol {} is not implemented", protocol.as_str()),
+            }),
         }
     }
-}
 
-/// Build the request body JSON for a given provider kind.
-fn build_request_body(
-    request: &ChatRequest,
-    resolved: &ResolvedModel,
-) -> Result<serde_json::Value, LlmError> {
-    match resolved.provider {
-        ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => {
-            protocol::chat_completions::build_request_json(request, resolved).map_err(Into::into)
-        }
-        ProviderKind::Anthropic => {
-            protocol::anthropic_messages::build_request_json(request, resolved).map_err(Into::into)
-        }
-        ProviderKind::Gemini => {
-            protocol::generate_content::build_request_json(request, resolved).map_err(Into::into)
+    fn endpoint_url(&self, base_url: &str, model: &str) -> String {
+        match self {
+            Self::ChatCompletions(_) => {
+                format!("{}/chat/completions", base_url.trim_end_matches('/'))
+            }
+            Self::Messages(_) => format!("{}/v1/messages", base_url.trim_end_matches('/')),
+            Self::GenerateContent(_) => {
+                protocol::generate_content::build_stream_url(base_url, model)
+            }
         }
     }
-}
 
-/// Build the endpoint URL for a given provider kind.
-fn build_endpoint_url(resolved: &ResolvedModel) -> String {
-    match resolved.provider {
-        ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => {
-            format!(
-                "{}/chat/completions",
-                resolved.base_url.trim_end_matches('/')
-            )
+    fn request_body(
+        &self,
+        request: &ChatRequest,
+        model: &str,
+    ) -> Result<serde_json::Value, LlmError> {
+        match self {
+            Self::ChatCompletions(_) => {
+                protocol::chat_completions::build_request_json(request, model)
+            }
+            Self::Messages(_) => protocol::anthropic_messages::build_request_json(request, model),
+            Self::GenerateContent(_) => protocol::generate_content::build_request_json(request),
         }
-        ProviderKind::Anthropic => {
-            format!("{}/v1/messages", resolved.base_url.trim_end_matches('/'))
-        }
-        ProviderKind::Gemini => protocol::generate_content::build_stream_url(
-            &resolved.base_url,
-            &resolved.provider_model,
-        ),
+        .map_err(Into::into)
     }
-}
 
-/// Per-request provider parser state. Each `stream_sse_response` call
-/// owns its own parser, preventing state leakage across concurrent or
-/// sequential requests on the same tokio worker thread.
-enum ProviderParser {
-    OpenAi(protocol::chat_completions::OpenAiSseParser),
-    Anthropic(protocol::anthropic_messages::AnthropicSseParser),
-    Gemini(protocol::generate_content::GeminiSseParser),
-}
-
-impl ProviderParser {
-    fn new(provider: ProviderKind) -> Self {
-        match provider {
-            ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => {
-                ProviderParser::OpenAi(protocol::chat_completions::OpenAiSseParser::new())
-            }
-            ProviderKind::Anthropic => {
-                ProviderParser::Anthropic(protocol::anthropic_messages::AnthropicSseParser::new())
-            }
-            ProviderKind::Gemini => {
-                ProviderParser::Gemini(protocol::generate_content::GeminiSseParser::new())
-            }
+    fn origin(&self) -> lattice_conversation::ProviderOrigin {
+        match self {
+            Self::ChatCompletions(_) => lattice_conversation::ProviderOrigin::OpenAiCompatible,
+            Self::Messages(_) => lattice_conversation::ProviderOrigin::Anthropic,
+            Self::GenerateContent(_) => lattice_conversation::ProviderOrigin::Gemini,
         }
     }
 
@@ -158,9 +156,9 @@ impl ProviderParser {
             return Vec::new();
         }
         match self {
-            ProviderParser::OpenAi(p) => p.parse_chunk(event_type, &data),
-            ProviderParser::Anthropic(p) => p.parse_chunk(event_type.unwrap_or(""), &data),
-            ProviderParser::Gemini(p) => p.parse_chunk(event_type, &data),
+            Self::ChatCompletions(p) => p.parse_chunk(event_type, &data),
+            Self::Messages(p) => p.parse_chunk(event_type.unwrap_or(""), &data),
+            Self::GenerateContent(p) => p.parse_chunk(event_type, &data),
         }
     }
 }
@@ -192,7 +190,8 @@ fn parse_sse_event_block(event_text: &str) -> (Option<&str>, String) {
 /// State carried by the streaming SSE unfold loop.
 struct SseStreamState {
     body_stream: Pin<Box<dyn futures::Stream<Item = reqwest::Result<bytes::Bytes>> + Send>>,
-    parser: ProviderParser,
+    parser: ProtocolParser,
+    client: Arc<TurnClient>,
     buffer: Vec<u8>,
     event_count: usize,
     finished: bool,
@@ -204,10 +203,15 @@ struct SseStreamState {
 /// 每个请求独享解析器，避免请求间共享状态。响应体按块读取；
 /// 未完成分帧的 SSE 缓冲超过 `MAX_SSE_BUFFER_SIZE`，
 /// 或事件数超过 `MAX_SSE_EVENTS` 时，发出错误事件并终止流。
-fn stream_sse_response(body_stream: BodyStream, provider: ProviderKind) -> ProtocolStream {
+fn stream_sse_response(
+    body_stream: BodyStream,
+    parser: ProtocolParser,
+    client: Arc<TurnClient>,
+) -> ProtocolStream {
     let state = SseStreamState {
         body_stream,
-        parser: ProviderParser::new(provider),
+        parser,
+        client,
         buffer: Vec::new(),
         event_count: 0,
         finished: false,
@@ -295,16 +299,24 @@ async fn deliver(
     if matches!(event, ProtocolEvent::Done { .. }) && !state.finished {
         state.finished = true;
         let body = &mut state.body_stream;
-        let _ = tokio::time::timeout(TAIL_WAIT, async {
+        let complete = tokio::time::timeout(TAIL_WAIT, async {
             let mut read = 0;
-            while let Some(Ok(chunk)) = body.next().await {
+            while let Some(chunk) = body.next().await {
+                let Ok(chunk) = chunk else {
+                    return false;
+                };
                 read += chunk.len();
                 if read > TAIL_BYTES {
-                    break;
+                    return false;
                 }
             }
+            true
         })
-        .await;
+        .await
+        .unwrap_or(false);
+        if !complete {
+            state.client.forget();
+        }
     }
     (event, state)
 }
@@ -550,6 +562,24 @@ fn llm_error_from_request(err: reqwest::Error) -> LlmError {
     }
 }
 
+/// 保留错误种类与重试属性，只替换诊断中的已知凭据。
+fn redact_error(mut error: LlmError, credentials: &Credentials) -> LlmError {
+    match &mut error {
+        LlmError::UnknownModel(message)
+        | LlmError::Credential { message }
+        | LlmError::Config { message }
+        | LlmError::Dns { message }
+        | LlmError::Transport { message, .. }
+        | LlmError::Timeout { message }
+        | LlmError::ProviderHttp { message, .. }
+        | LlmError::StreamRead { message }
+        | LlmError::ProtocolLimit { message }
+        | LlmError::Other(message) => *message = credentials.redact(message),
+        LlmError::Projection(_) => {}
+    }
+    error
+}
+
 fn append_bounded_error_chunk(body: &mut Vec<u8>, chunk: &[u8]) -> bool {
     let remaining = MAX_ERROR_BODY_SIZE.saturating_sub(body.len());
     if chunk.len() <= remaining {
@@ -561,7 +591,7 @@ fn append_bounded_error_chunk(body: &mut Vec<u8>, chunk: &[u8]) -> bool {
     }
 }
 
-/// 读最多 64 KiB 错误正文；第二项表示读到一半连接断了。
+/// 读最多 64 KiB 错误正文；第二项表示响应体未完整读完。
 async fn read_error_body_capped(response: reqwest::Response) -> (String, bool) {
     let mut stream = response.bytes_stream();
     let mut body = Vec::new();
@@ -570,7 +600,7 @@ async fn read_error_body_capped(response: reqwest::Response) -> (String, bool) {
         match chunk_result {
             Ok(chunk) => {
                 if append_bounded_error_chunk(&mut body, &chunk) {
-                    break;
+                    return (String::from_utf8_lossy(&body).into_owned(), true);
                 }
             }
             Err(e) => {
@@ -597,58 +627,132 @@ pub async fn dispatch_stream(
         .await
 }
 
-/// 取本 Turn 缓存的 client；没有时在 blocking 线程上解析地址并构建。
-async fn turn_client(
-    connection: &crate::LlmConnection,
-    url: &str,
-) -> Result<reqwest::Client, LlmError> {
-    if let Some(client) = connection.client.lock().unwrap().clone() {
-        return Ok(client);
-    }
-    let (url, roots) = (url.to_owned(), connection.roots.clone());
-    let client = tokio::task::spawn_blocking(move || provider_client(&url, roots))
-        .await
-        .map_err(|_| LlmError::Config {
-            message: "provider client setup task failed".into(),
-        })??;
-    *connection.client.lock().unwrap() = Some(client.clone());
-    Ok(client)
+/// 地址固定后的 client 只在所属 Turn 与 endpoint 内复用。
+#[derive(Default)]
+pub(crate) struct TurnClient {
+    cached: Mutex<Option<reqwest::Client>>,
 }
 
-pub(crate) async fn dispatch_frozen(
+impl TurnClient {
+    pub(crate) fn forget(&self) {
+        self.cached.lock().unwrap().take();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_cached(&self) -> bool {
+        self.cached.lock().unwrap().is_some()
+    }
+
+    async fn get(
+        &self,
+        url: &str,
+        roots: &[reqwest::Certificate],
+    ) -> Result<reqwest::Client, LlmError> {
+        if let Some(client) = self.cached.lock().unwrap().clone() {
+            return Ok(client);
+        }
+        let (url, roots) = (url.to_owned(), roots.to_vec());
+        let client = tokio::task::spawn_blocking(move || provider_client(&url, roots))
+            .await
+            .map_err(|_| LlmError::Config {
+                message: "provider client setup task failed".into(),
+            })??;
+        *self.cached.lock().unwrap() = Some(client.clone());
+        Ok(client)
+    }
+}
+
+pub(crate) fn tls_certificates(
+    roots_der: &[Vec<u8>],
+) -> Result<Vec<reqwest::Certificate>, LlmError> {
+    if roots_der.len() > 1024
+        || roots_der.iter().any(|root| root.len() > 65_536)
+        || roots_der.iter().map(Vec::len).sum::<usize>() > 4 * 1024 * 1024
+    {
+        return Err(LlmError::Config {
+            message: "connection material exceeds limit".into(),
+        });
+    }
+    roots_der
+        .iter()
+        .map(|der| {
+            reqwest::Certificate::from_der(der).map_err(|_| LlmError::Config {
+                message: "invalid TLS root certificate".into(),
+            })
+        })
+        .collect()
+}
+
+/// 网关与冻结连接为单次请求提供的连接材料，包含该 Turn 对应 endpoint 的 client。
+pub(crate) struct RequestEndpoint<'a> {
+    pub(crate) provider: &'a str,
+    pub(crate) model: &'a str,
+    pub(crate) base_url: &'a str,
+    pub(crate) protocol: Protocol,
+    pub(crate) auth: Auth,
+    pub(crate) credentials: Credentials,
+    pub(crate) roots: &'a [reqwest::Certificate],
+    pub(crate) client: Arc<TurnClient>,
+}
+
+pub(crate) async fn dispatch(
     request: ChatRequest,
-    connection: &crate::LlmConnection,
+    endpoint: RequestEndpoint<'_>,
     control: StreamControl,
 ) -> Result<LlmStream, LlmError> {
-    let resolved = &connection.resolved;
-    let provider = resolved.provider.as_str();
-    let url = build_endpoint_url(resolved);
-    let body = build_request_body(&request, resolved)?;
-    let headers = build_auth_headers(resolved, &connection.api_key);
-    let client = turn_client(connection, &url).await?;
+    let parser = match (endpoint.protocol, endpoint.auth) {
+        (_, Auth::OauthChatgpt) => {
+            return Err(LlmError::Config {
+                message: "auth oauth:chatgpt is not implemented".into(),
+            });
+        }
+        (protocol, _) => ProtocolParser::new(protocol)?,
+    };
+    let headers = build_auth_headers(
+        endpoint.auth,
+        endpoint.credentials.api_key(endpoint.provider),
+    )?;
+    let provider = endpoint.credentials.redact(endpoint.provider);
+    let origin = parser.origin();
+    let url = parser.endpoint_url(endpoint.base_url, endpoint.model);
+    let body = parser.request_body(&request, endpoint.model)?;
+    let client = endpoint
+        .client
+        .get(&url, endpoint.roots)
+        .await
+        .map_err(|error| redact_error(error, &endpoint.credentials))?;
     let mut req_builder = client
         .post(&url)
         .header(reqwest::header::ACCEPT, ACCEPT)
         .json(&body);
+    if endpoint.protocol == Protocol::Messages {
+        req_builder = req_builder.header(
+            "anthropic-version",
+            protocol::anthropic_messages::ANTHROPIC_VERSION,
+        );
+    }
     if let Some(id) = &request.client_request_id {
         req_builder = req_builder.header("x-client-request-id", id.as_str());
     }
-    for (name, value) in &headers {
-        req_builder = req_builder.header(name.as_str(), value.as_str());
+    for (name, value) in headers {
+        req_builder = req_builder.header(name, value);
     }
     let started = Instant::now();
+    let mut guard = ForgetUnlessDone {
+        client: endpoint.client.clone(),
+        done: false,
+    };
     let response = match req_builder.send().await {
         Ok(response) => response,
         Err(error) => {
-            let error = llm_error_from_request(error);
-            // 连接可能已不可用；下次尝试重新解析地址并新建 client。
-            connection.forget_client();
+            let error = redact_error(llm_error_from_request(error), &endpoint.credentials);
             tracing::warn!(provider, %error, "provider request failed before a response");
             return Err(error);
         }
     };
     let status = response.status();
-    let request_id = transport::provider_request_id(response.headers());
+    let request_id = transport::provider_request_id(response.headers())
+        .map(|id| endpoint.credentials.redact(&id));
     tracing::debug!(
         provider,
         status = status.as_u16(),
@@ -659,27 +763,22 @@ pub(crate) async fn dispatch_frozen(
     if !status.is_success() {
         let response_headers = response.headers().clone();
         let (body, cut) = read_error_body_capped(response).await;
-        if cut {
-            connection.forget_client();
+        if !cut {
+            guard.finish();
         }
-        let body = body.replace(connection.api_key.as_str(), "[REDACTED]");
+        let body = endpoint.credentials.redact(&body);
         let error = transport::status_error(status.as_u16(), &response_headers, &body);
         tracing::warn!(provider, request_id = request_id.as_deref(), %error, "provider returned an error status");
         return Err(error);
     }
-    let mut guard = ForgetUnlessDone {
-        client: connection.client.clone(),
-        done: false,
-    };
     let body_stream = response.bytes_stream();
-    let stream = stream_sse_response(Box::pin(body_stream), resolved.provider.clone());
-    let api_key = connection.api_key.clone();
-    let provider = provider.to_owned();
+    let stream = stream_sse_response(Box::pin(body_stream), parser, endpoint.client.clone());
+    let credentials = endpoint.credentials;
     // provider 的流内错误同样会进入公开诊断和 Turn 日志，必须在越过适配边界前脱敏。
     let input = Box::pin(stream.map(move |event| match event {
         ProtocolEvent::Failed(StreamStop::Provider(mut failure)) => {
             failure.message =
-                transport::bound_diagnostic(&failure.message.replace(api_key.as_str(), "[REDACTED]"));
+                transport::bound_diagnostic(&credentials.redact(&failure.message));
             tracing::warn!(provider, request_id = request_id.as_deref(), error = %failure.message, "provider stream error");
             ProtocolEvent::Failed(StreamStop::Provider(failure))
         }
@@ -687,7 +786,7 @@ pub(crate) async fn dispatch_frozen(
             ProtocolEvent::Failed(StreamStop::Protocol(ReplyProtocolError::unsupported(
             protocol,
             index,
-            &block_type.replace(api_key.as_str(), "[REDACTED]"),
+            &credentials.redact(&block_type),
         ))),
         ProtocolEvent::Done { finish_reason } => {
             guard.finish();
@@ -701,20 +800,14 @@ pub(crate) async fn dispatch_frozen(
         }
         other => other,
     }));
-    let origin = match resolved.provider {
-        ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => {
-            lattice_conversation::ProviderOrigin::OpenAiCompatible
-        }
-        ProviderKind::Anthropic => lattice_conversation::ProviderOrigin::Anthropic,
-        ProviderKind::Gemini => lattice_conversation::ProviderOrigin::Gemini,
-    };
     Ok(assemble_reply_stream(Some(origin), input, control))
 }
 
-/// 随响应流一起丢弃。流没交付 `Done` 就结束、出错或被提前丢弃时，这条连接的状态不可信：
-/// 丢掉本 Turn 的 client，下次尝试重新解析并固定地址。
+/// 发送请求前开始守护 client；发送失败或被中止、错误正文未读完，以及 SSE 未交付
+/// `Done` 就结束、出错或被丢弃时，清空 Turn client，使下次请求重新解析并固定地址。
+/// 完整读完错误正文或交付 `Done` 后解除守护。
 struct ForgetUnlessDone {
-    client: std::sync::Arc<std::sync::Mutex<Option<reqwest::Client>>>,
+    client: Arc<TurnClient>,
     done: bool,
 }
 
@@ -727,7 +820,7 @@ impl ForgetUnlessDone {
 impl Drop for ForgetUnlessDone {
     fn drop(&mut self) {
         if !self.done {
-            self.client.lock().unwrap().take();
+            self.client.forget();
         }
     }
 }
@@ -738,7 +831,7 @@ mod tests {
     use crate::endpoints::OPENAI_BASE_URL;
     use crate::{LlmEvent, ReplyOutcome, ReplyStop};
 
-    use crate::router::CredentialStatus;
+    use crate::router::{CredentialStatus, ProviderKind};
     use crate::test_env::with_env_vars;
 
     #[test]
@@ -1206,7 +1299,7 @@ mod tests {
                 );
             }
             assert_eq!(
-                connection.client.lock().unwrap().is_some(),
+                connection.client.is_cached(),
                 keeps_client,
                 "{name}: {outcome:?}"
             );
@@ -1254,7 +1347,8 @@ mod tests {
 
         let mut state = SseStreamState {
             body_stream: Box::pin(stream::empty()),
-            parser: ProviderParser::new(ProviderKind::OpenAi),
+            parser: ProtocolParser::new(Protocol::ChatCompletions).unwrap(),
+            client: Arc::default(),
             buffer: Vec::new(),
             event_count: 0,
             finished: false,
@@ -1293,7 +1387,8 @@ mod tests {
     fn drain_handles_crlf_event_separator() {
         let mut state = SseStreamState {
             body_stream: Box::pin(stream::empty()),
-            parser: ProviderParser::new(ProviderKind::OpenAi),
+            parser: ProtocolParser::new(Protocol::ChatCompletions).unwrap(),
+            client: Arc::default(),
             buffer: Vec::new(),
             event_count: 0,
             finished: false,

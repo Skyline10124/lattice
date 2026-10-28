@@ -8,6 +8,7 @@ mod client;
 mod connection;
 pub use connection::{ConnectionMaterial, LlmConnection, load_tls_roots_der};
 mod endpoints;
+pub(crate) mod gateway;
 mod logging;
 pub(crate) mod metadata;
 pub use metadata::{MODELS_URL, MetadataError, fetch_snapshot};
@@ -21,6 +22,8 @@ pub mod sse;
 mod stub;
 #[cfg(test)]
 mod test_reply;
+#[cfg(test)]
+mod test_tls;
 mod transport;
 mod types;
 

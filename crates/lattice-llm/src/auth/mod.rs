@@ -120,6 +120,14 @@ impl AuthStore {
         Self { directory }
     }
 
+    pub(crate) fn load(&self) -> Result<Credentials, AuthError> {
+        let document = file::Directory::open(&self.directory, false)?.map_or_else(
+            || Ok(format::Document::default()),
+            |directory| directory.read(),
+        )?;
+        Ok(Credentials(document))
+    }
+
     fn registry(&self) -> Result<ProviderRegistry, AuthError> {
         ProviderRegistry::load(self.directory.join("providers.toml")).map_err(|error| {
             AuthError::Providers {
@@ -199,13 +207,8 @@ impl AuthStore {
 
     pub fn status(&self) -> Result<AuthStatus, AuthError> {
         let registry = self.registry()?;
-        let document = file::Directory::open(&self.directory, false).and_then(|directory| {
-            directory.map_or_else(
-                || Ok(format::Document::default()),
-                |directory| directory.read(),
-            )
-        });
-        let error = document.as_ref().err().map(ToString::to_string);
+        let credentials = self.load();
+        let error = credentials.as_ref().err().map(ToString::to_string);
         let providers = registry
             .iter()
             .map(|provider| {
@@ -217,8 +220,8 @@ impl AuthStore {
                 };
                 if provider.auth == Auth::None {
                     row.status = AuthState::Ready;
-                } else if let Ok(document) = &document {
-                    match document.providers.get(&provider.id) {
+                } else if let Ok(credentials) = &credentials {
+                    match credentials.0.providers.get(&provider.id) {
                         Some(format::Credential::ApiKey { .. })
                             if provider.auth != Auth::OauthChatgpt =>
                         {
@@ -243,6 +246,34 @@ impl AuthStore {
             })
             .collect();
         Ok(AuthStatus { providers, error })
+    }
+}
+
+/// 一次请求使用的凭据快照；已知值只供内部认证与诊断脱敏。
+#[derive(Default)]
+pub(crate) struct Credentials(format::Document);
+
+impl Credentials {
+    pub(crate) fn api_key(&self, provider: &str) -> Option<&str> {
+        match self.0.providers.get(provider) {
+            Some(format::Credential::ApiKey { key }) => Some(&key.0),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn for_api_key(provider: &str, key: &str) -> Self {
+        let mut credentials = Self::default();
+        credentials.0.providers.insert(
+            provider.into(),
+            format::Credential::ApiKey {
+                key: Secret(key.into()),
+            },
+        );
+        credentials
+    }
+
+    pub(crate) fn redact(&self, message: &str) -> String {
+        self.0.redact(message)
     }
 }
 
