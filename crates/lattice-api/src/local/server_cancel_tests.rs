@@ -104,7 +104,11 @@ async fn backend() -> (
     let layout = crate::StateLayout::in_state_root(dir.path());
     let (instance, listener) = ipc::Instance::bind(&layout).unwrap();
     let listener = UnixListener::from_std(listener).unwrap();
-    let backend = Backend::new(layout.clone(), Some(dir.path().into()));
+    let backend = Backend::with_tls_roots(
+        layout.clone(),
+        Some(dir.path().into()),
+        Ok(vec![include_bytes!("test_root.der").to_vec()]),
+    );
     let server = backend.clone();
     let task = tokio::spawn(async move {
         let mut connections = JoinSet::new();
@@ -645,7 +649,6 @@ async fn slow_observer_reads_latest_entries_suffixes_and_attempt_boundaries() {
         model_step_ordinal: 0,
         attempt_ordinal: 0,
     };
-    let origin = lattice_conversation::ProviderOrigin::OpenAiCompatible;
     let attempt_origin = AttemptOrigin {
         protocol: AttemptProtocol::ChatCompletions,
         provider_id: "openai-compatible".into(),
@@ -653,7 +656,7 @@ async fn slow_observer_reads_latest_entries_suffixes_and_attempt_boundaries() {
     io.start_request(key, attempt_origin.clone()).await.unwrap();
     sink.emit(crate::TurnEvent::ModelStarted {
         key,
-        provider: origin,
+        origin: attempt_origin.clone(),
         model: "test".into(),
     });
     sink.emit(crate::TurnEvent::TokenDelta {
@@ -726,7 +729,7 @@ async fn slow_observer_reads_latest_entries_suffixes_and_attempt_boundaries() {
     io.start_request(key, attempt_origin.clone()).await.unwrap();
     sink.emit(crate::TurnEvent::ModelStarted {
         key,
-        provider: origin,
+        origin: attempt_origin.clone(),
         model: "test".into(),
     });
     sink.emit(crate::TurnEvent::ReasoningDelta {

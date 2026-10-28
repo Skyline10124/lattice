@@ -8,6 +8,7 @@ use std::{
 };
 
 use futures::StreamExt;
+use std::os::unix::fs::PermissionsExt;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpListener,
@@ -24,6 +25,13 @@ use crate::{ChatRequest, LlmEvent, ModelTarget, ReplyOutcome, StreamControl};
 const DONE: &str = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
 const MESSAGES_DONE: &str = "event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"ok\"}}\n\nevent: content_block_stop\ndata: {\"index\":0}\n\nevent: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\nevent: message_stop\ndata: {}\n\n";
 const CONTENT_DONE: &str = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}\n\n";
+
+fn private_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    // 临时目录权限取决于 umask，这里固定为 0700，避免结果随环境变化。
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    dir
+}
 
 struct Received {
     connection: usize,
@@ -200,7 +208,7 @@ fn request(provider: &str) -> ChatRequest {
         Vec::new(),
         ModelTarget {
             model: "model-id".into(),
-            provider: Some(provider.into()),
+            provider: provider.into(),
         },
     );
     request.client_request_id = Some("session-id".into());
@@ -257,7 +265,7 @@ async fn capture_logs<T>(future: impl std::future::Future<Output = T>) -> (T, St
 #[tokio::test]
 async fn none_sends_protocol_request_without_credentials() {
     let mut server = Server::start(true).await;
-    let directory = tempfile::tempdir().unwrap();
+    let directory = private_dir();
     configure(directory.path(), &server.url, "chat-completions", "none");
     let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
     let turn = gateway.open_turn();
@@ -280,7 +288,7 @@ async fn none_sends_protocol_request_without_credentials() {
 #[tokio::test]
 async fn protocol_and_auth_independently_select_wire_requests() {
     let mut server = Server::start(true).await;
-    let directory = tempfile::tempdir().unwrap();
+    let directory = private_dir();
     let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
     let turn = gateway.open_turn();
     for protocol in ["chat-completions", "anthropic-messages", "generate-content"] {
@@ -293,9 +301,6 @@ async fn protocol_and_auth_independently_select_wire_requests() {
             }
             let mut request = request("test");
             request.target.model = "family/model id".into();
-            request.temperature = Some(0.5);
-            request.max_tokens = Some(1);
-            request.max_completion_tokens = Some(2);
             request
                 .messages
                 .push(lattice_conversation::ConversationItem::Message(
@@ -408,79 +413,60 @@ async fn protocol_and_auth_independently_select_wire_requests() {
 }
 
 #[tokio::test]
-async fn frozen_connection_preserves_sampling_output_limits_and_usage_request() {
-    let mut server = Server::start(true).await;
-    for (provider, model) in [
-        (crate::ProviderKind::OpenAi, "gpt-model"),
-        (crate::ProviderKind::OpenAiCompatible, "compatible-model"),
-        (crate::ProviderKind::Anthropic, "claude-model"),
-        (crate::ProviderKind::Gemini, "gemini-model"),
-    ] {
-        let connection = crate::LlmConnection::new(
-            crate::ResolvedModel {
-                alias: model.into(),
-                provider: provider.clone(),
-                provider_model: model.into(),
-                base_url: server.url.clone(),
-                api_key_env: String::new(),
-                credential_status: crate::CredentialStatus::Present,
-            },
-            "frozen-key".into(),
-            vec![TLS.ca_der.clone()],
-        )
-        .unwrap();
-        for max_completion_tokens in [None, Some(123)] {
-            let mut request = request("test");
-            request.temperature = Some(0.25);
-            request.max_tokens = Some(456);
-            request.max_completion_tokens = max_completion_tokens;
-            complete(
-                connection
-                    .stream(request, StreamControl::default())
-                    .await
-                    .unwrap(),
-            )
-            .await;
-            let received = server.next().await;
-            match provider {
-                crate::ProviderKind::OpenAi | crate::ProviderKind::OpenAiCompatible => {
-                    assert_eq!(received.body["model"], model);
-                    assert_eq!(received.body["temperature"], 0.25);
-                    assert_eq!(received.body["stream"], true);
-                    assert_eq!(received.body["stream_options"]["include_usage"], true);
-                    if let Some(limit) = max_completion_tokens {
-                        assert_eq!(received.body["max_completion_tokens"], limit);
-                        assert!(received.body.get("max_tokens").is_none());
-                    } else {
-                        assert_eq!(received.body["max_tokens"], 456);
-                        assert!(received.body.get("max_completion_tokens").is_none());
-                    }
-                }
-                crate::ProviderKind::Anthropic => {
-                    assert_eq!(received.body["model"], model);
-                    assert_eq!(received.body["temperature"], 0.25);
-                    assert_eq!(received.body["max_tokens"], 456);
-                    assert!(received.body.get("max_completion_tokens").is_none());
-                }
-                crate::ProviderKind::Gemini => {
-                    assert!(
-                        received
-                            .path
-                            .contains("/models/gemini-model:streamGenerateContent")
-                    );
-                    assert_eq!(received.body["generationConfig"]["temperature"], 0.25);
-                    assert_eq!(received.body["generationConfig"]["maxOutputTokens"], 456);
-                }
-            }
-        }
-    }
+async fn resolved_request_keeps_its_protocol_endpoint_and_credentials_until_sent() {
+    let mut first = Server::start(true).await;
+    let mut second = Server::start(true).await;
+    let directory = private_dir();
+    configure(directory.path(), &first.url, "chat-completions", "bearer");
+    let auth = crate::auth::AuthStore::new(directory.path().into());
+    auth.set("test", "first-key").unwrap();
+    let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+    let turn = gateway.open_turn();
+    let request = request("test");
+    let resolved = turn.resolve(&request.target).await.unwrap();
+    assert_eq!(
+        resolved.protocol(),
+        crate::protocol::Protocol::ChatCompletions
+    );
+    configure(
+        directory.path(),
+        &second.url,
+        "generate-content",
+        "x-goog-api-key",
+    );
+    auth.set("test", "second-key").unwrap();
+    complete(
+        resolved
+            .stream_chat(request.clone(), StreamControl::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    let received = first.next().await;
+    assert_eq!(received.path, "/v1/chat/completions");
+    assert_eq!(received.headers["authorization"], "Bearer first-key");
+    let resolved = turn.resolve(&request.target).await.unwrap();
+    assert_eq!(
+        resolved.protocol(),
+        crate::protocol::Protocol::GenerateContent
+    );
+    complete(
+        resolved
+            .stream_chat(request, StreamControl::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    let received = second.next().await;
+    assert!(received.path.contains(":streamGenerateContent"));
+    assert_eq!(received.headers["x-goog-api-key"], "second-key");
 }
 
 #[tokio::test]
 async fn next_request_uses_current_endpoint_protocol_auth_and_key() {
     let mut first = Server::start(true).await;
     let mut second = Server::start(true).await;
-    let directory = tempfile::tempdir().unwrap();
+    let directory = private_dir();
     configure(directory.path(), &first.url, "chat-completions", "bearer");
     let auth = crate::auth::AuthStore::new(directory.path().into());
     auth.set("test", "first-key").unwrap();
@@ -540,11 +526,8 @@ async fn configuration_failure(
     provider: &str,
     contains: &str,
 ) -> crate::LlmError {
-    let error = match turn
-        .stream_chat(request(provider), StreamControl::default())
-        .await
-    {
-        Ok(_) => panic!("invalid configuration opened a stream"),
+    let error = match turn.resolve(&request(provider).target).await {
+        Ok(_) => panic!("invalid configuration resolved a request"),
         Err(error) => error,
     };
     assert!(matches!(error, crate::LlmError::Config { .. }), "{error}");
@@ -557,7 +540,7 @@ async fn configuration_failure(
 #[tokio::test]
 async fn invalid_configuration_only_blocks_requests_that_depend_on_it() {
     let mut server = Server::start(false).await;
-    let directory = tempfile::tempdir().unwrap();
+    let directory = private_dir();
     configure(directory.path(), &server.url, "chat-completions", "bearer");
     let auth = crate::auth::AuthStore::new(directory.path().into());
     auth.set("test", "test-key").unwrap();
@@ -602,10 +585,9 @@ async fn invalid_configuration_only_blocks_requests_that_depend_on_it() {
         "[providers.test]\nprotocol = 'untrusted-value'\n",
     )
     .unwrap();
-    let error = configuration_failure(&turn, "test", "invalid provider configuration").await;
+    let error = configuration_failure(&turn, "test", "providers.toml:2:").await;
     assert!(error.to_string().contains("providers.toml:2:"));
-    assert!(error.to_string().contains("auth.json"));
-    assert!(!error.to_string().contains("untrusted-value"));
+    assert!(error.to_string().contains("untrusted-value"));
     configure(directory.path(), &server.url, "chat-completions", "bearer");
     std::fs::remove_file(directory.path().join("auth.json")).unwrap();
     configuration_failure(&turn, "test", "credentials are missing").await;
@@ -614,7 +596,7 @@ async fn invalid_configuration_only_blocks_requests_that_depend_on_it() {
 
 #[tokio::test]
 async fn unimplemented_protocols_and_auth_are_configuration_errors() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = private_dir();
     let gateway = RequestGateway::new(directory.path().into(), Vec::new()).unwrap();
     let turn = gateway.open_turn();
     for protocol in ["responses", "interactions"] {
@@ -634,7 +616,7 @@ async fn unimplemented_protocols_and_auth_are_configuration_errors() {
 #[tokio::test]
 async fn clients_are_reused_only_within_the_same_turn_provider_and_base_url() {
     let mut server = Server::start(true).await;
-    let directory = tempfile::tempdir().unwrap();
+    let directory = private_dir();
     configure(directory.path(), &server.url, "chat-completions", "none");
     let mut config = std::fs::read_to_string(directory.path().join("providers.toml")).unwrap();
     config.push_str(&format!(
@@ -684,7 +666,7 @@ async fn clients_are_reused_only_within_the_same_turn_provider_and_base_url() {
 #[tokio::test]
 async fn unfinished_transport_discards_pinned_client_before_the_next_request() {
     let mut server = Server::start(true).await;
-    let directory = tempfile::tempdir().unwrap();
+    let directory = private_dir();
     configure(directory.path(), &server.url, "chat-completions", "none");
     let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
     let turn = gateway.open_turn();
@@ -790,7 +772,7 @@ async fn unfinished_transport_discards_pinned_client_before_the_next_request() {
 #[tokio::test]
 async fn done_tail_above_64_kib_discards_the_pinned_client() {
     let mut server = Server::start(true).await;
-    let directory = tempfile::tempdir().unwrap();
+    let directory = private_dir();
     configure(directory.path(), &server.url, "chat-completions", "none");
     let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
     let turn = gateway.open_turn();
@@ -834,7 +816,7 @@ async fn done_tail_above_64_kib_discards_the_pinned_client() {
 #[tokio::test]
 async fn dropping_an_opening_request_discards_its_pinned_client() {
     let mut server = Server::start(false).await;
-    let directory = tempfile::tempdir().unwrap();
+    let directory = private_dir();
     configure(directory.path(), &server.url, "chat-completions", "none");
     let gateway = RequestGateway::new(directory.path().into(), Vec::new()).unwrap();
     let turn = gateway.open_turn();
@@ -866,7 +848,7 @@ async fn dropping_an_opening_request_discards_its_pinned_client() {
 
 #[tokio::test]
 async fn client_setup_errors_redact_credentials_in_the_hostname() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = private_dir();
     let key = "misplaced-test-key";
     let url = format!("https://{key}.{}.invalid", "x".repeat(64));
     configure(directory.path(), &url, "chat-completions", "bearer");
@@ -894,15 +876,16 @@ async fn client_setup_errors_redact_credentials_in_the_hostname() {
 #[tokio::test]
 async fn diagnostics_redact_all_current_credentials_before_bounding() {
     let server = Server::start(false).await;
-    let directory = tempfile::tempdir().unwrap();
+    let directory = private_dir();
     configure(directory.path(), &server.url, "chat-completions", "bearer");
     let auth = crate::auth::AuthStore::new(directory.path().into());
     let long_key = "other-secret-".repeat(100);
     auth.set("test", "current-key").unwrap();
     auth.set("deepseek", &long_key).unwrap();
+    auth.set("xai", "EMPTY").unwrap();
     let gateway = RequestGateway::new(directory.path().into(), Vec::new()).unwrap();
     let turn = gateway.open_turn();
-    let body = format!("current-key {long_key}");
+    let body = format!("current-key {long_key} EMPTY");
     server.respond(format!("HTTP/1.1 401 Unauthorized\r\nx-request-id: req-current-key-123\r\nContent-Length: {}\r\n\r\n{body}", body.len()), false);
     let (result, logs) =
         capture_logs(turn.stream_chat(request("test"), StreamControl::default())).await;
@@ -912,13 +895,14 @@ async fn diagnostics_redact_all_current_credentials_before_bounding() {
     };
     assert!(!error.to_string().contains("current-key"));
     assert!(!error.to_string().contains("other-secret"));
+    assert!(!error.to_string().contains("EMPTY"));
     assert!(error.to_string().contains("[REDACTED]"));
     assert!(logs.contains("provider responded"));
     assert!(logs.contains("provider returned an error status"));
     assert!(logs.contains("request_id=\"req-[REDACTED]-123\""));
     assert!(!logs.contains("current-key"));
     assert!(!logs.contains("other-secret"));
-    let body = format!("data: {{\"error\":{{\"message\":\"{long_key} current-key\"}}}}\n\n");
+    let body = format!("data: {{\"error\":{{\"message\":\"{long_key} current-key EMPTY\"}}}}\n\n");
     server.respond(
         format!(
             "HTTP/1.1 200 OK\r\nx-request-id: req-current-key-456\r\nContent-Length: {}\r\n\r\n{body}",
@@ -946,34 +930,20 @@ async fn diagnostics_redact_all_current_credentials_before_bounding() {
     };
     assert!(!failure.message.contains("current-key"));
     assert!(!failure.message.contains("other-secret"));
+    assert!(!failure.message.contains("EMPTY"));
     assert!(failure.message.contains("[REDACTED]"));
     assert!(failure.message.chars().count() <= crate::MAX_DIAGNOSTIC_CHARS);
     assert!(logs.contains("provider stream error"));
     assert!(logs.contains("request_id=\"req-[REDACTED]-456\""));
     assert!(!logs.contains("current-key"));
     assert!(!logs.contains("other-secret"));
-    configure(directory.path(), &server.url, "chat-completions", "bearer");
-    std::fs::write(
-        directory.path().join("providers.toml"),
-        "[providers.test]\nprotocol = 'current-key'\n",
-    )
-    .unwrap();
-    let error = match turn
-        .stream_chat(request("test"), StreamControl::default())
-        .await
-    {
-        Ok(_) => panic!("invalid provider configuration"),
-        Err(error) => error,
-    };
-    assert!(!error.to_string().contains("current-key"));
-    assert!(error.to_string().contains("providers.toml:2:"));
 }
 
 #[tokio::test]
 async fn stream_control_reaches_the_shared_reply_assembler() {
     use std::sync::atomic::{AtomicBool, Ordering};
     let server = Server::start(false).await;
-    let directory = tempfile::tempdir().unwrap();
+    let directory = private_dir();
     configure(directory.path(), &server.url, "chat-completions", "none");
     let gateway = RequestGateway::new(directory.path().into(), Vec::new()).unwrap();
     let turn = gateway.open_turn();

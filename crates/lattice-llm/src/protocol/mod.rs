@@ -19,7 +19,7 @@ pub(crate) use features::{
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum Protocol {
+pub enum Protocol {
     ChatCompletions,
     Responses,
     #[serde(rename = "anthropic-messages")]
@@ -29,7 +29,7 @@ pub(crate) enum Protocol {
 }
 
 impl Protocol {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::ChatCompletions => "chat-completions",
             Self::Responses => "responses",

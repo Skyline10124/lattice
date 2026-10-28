@@ -74,7 +74,6 @@ async fn wrong_workspace_is_rejected_before_acceptance_or_provider() {
         id(),
         crate::LocalWorkspaceRoot::from_path(elsewhere.path()).unwrap(),
         request,
-        None,
     );
     assert!(matches!(
         execution.acceptance.await.unwrap(),
@@ -179,7 +178,6 @@ async fn used_turn_conflicts_before_configuration_and_never_runs_twice() {
         first.turn_id,
         fixture.root.clone(),
         retry.clone(),
-        None,
     );
     assert!(matches!(
         execution.acceptance.await.unwrap(),
@@ -195,7 +193,6 @@ async fn used_turn_conflicts_before_configuration_and_never_runs_twice() {
         first.turn_id,
         fixture.root.clone(),
         retry,
-        None,
     );
     assert!(matches!(
         conflict.acceptance.await.unwrap(),
@@ -237,7 +234,6 @@ async fn absent_session_fails_before_startup_and_injected_store_remains_authorit
         id(),
         fixture.root.clone(),
         fixture.request.clone(),
-        None,
     );
     let TurnAcceptance::Accepted { turn } = execution.acceptance.await.unwrap().unwrap() else {
         panic!("accepted")
@@ -363,7 +359,7 @@ async fn raced_existing_turn_conflicts_even_when_readback_session_does_not_exist
         turn_id,
         workspace: fixture.root.clone(),
         request: fixture.request.clone(),
-        connection: None,
+        prepared_model: None,
         shutdown: Arc::default(),
         observer,
         new_session: Some(crate::local::new_session_id()),
@@ -379,7 +375,6 @@ async fn raced_existing_turn_conflicts_even_when_readback_session_does_not_exist
         turn_id,
         fixture.root.clone(),
         fixture.request.clone(),
-        None,
     );
     assert!(matches!(
         winner.acceptance.await.unwrap().unwrap(),

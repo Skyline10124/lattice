@@ -1079,7 +1079,7 @@ impl Peer {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut magic = [0; 8];
                 stream.read_exact(&mut magic).await.unwrap();
-                assert_eq!(&magic, b"LTLOCAL5");
+                assert_eq!(&magic, b"LTLOCAL6");
                 let len = stream.read_u32().await.unwrap();
                 assert!(len <= 16 * 1024 * 1024);
                 let mut bytes = vec![0; len as usize];
@@ -1157,7 +1157,7 @@ impl Views {
 async fn send(stream: &mut UnixStream, value: &Value, seq: &mut u64) {
     let bytes = serde_json::to_vec(&json!({"message_id":*seq,"offset":0,"json_fragment":serde_json::to_string(value).unwrap(),"complete":true})).unwrap();
     *seq += 1;
-    if stream.write_all(b"LTLOCAL5").await.is_err() {
+    if stream.write_all(b"LTLOCAL6").await.is_err() {
         return;
     }
     let _ = stream.write_u32(bytes.len() as u32).await;
@@ -1236,13 +1236,12 @@ fn frame(app: &App) -> Frame {
 fn configured(
     _agent: String,
     _options: TuiOptions,
+    _client: LocalClient,
 ) -> BoxFuture<'static, lattice_api::local::Result<FrozenConfiguration>> {
     // 对端不解读配置；提交只需带上一份形状合法的冻结配置。
     async {
         Ok(serde_json::from_value(json!({
-            "profile_toml":"schema_version = 1","system_prompt":"test",
-            "connection":{"alias":"compat:test","provider":"openai-compatible","provider_model":"test",
-                "base_url":"http://127.0.0.1:9/v1","api_key":"test-key","roots_der":[]}
+            "profile_toml":"schema_version = 1","system_prompt":"test"
         }))
         .unwrap())
     }
@@ -1252,6 +1251,7 @@ fn configured(
 fn unconfigured(
     agent: String,
     _options: TuiOptions,
+    _client: LocalClient,
 ) -> BoxFuture<'static, lattice_api::local::Result<FrozenConfiguration>> {
     async move {
         Err(local_error(
@@ -1676,6 +1676,7 @@ async fn configuration_failure_shows_the_error_and_keeps_the_input() {
 fn slow_configuration(
     _agent: String,
     _options: TuiOptions,
+    _client: LocalClient,
 ) -> BoxFuture<'static, lattice_api::local::Result<FrozenConfiguration>> {
     futures::future::pending().boxed()
 }

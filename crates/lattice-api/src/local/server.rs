@@ -49,6 +49,7 @@ struct Admission {
 struct Backend {
     layout: crate::StateLayout,
     home: Option<std::path::PathBuf>,
+    gateway: std::result::Result<Arc<lattice_llm::RequestGateway>, crate::ConfigRejection>,
     epoch: String,
     admission: Mutex<Admission>,
     changed: watch::Sender<u64>,
@@ -120,8 +121,26 @@ async fn blocking<T: Send + 'static>(
 }
 impl Backend {
     fn new(layout: crate::StateLayout, home: Option<std::path::PathBuf>) -> Arc<Self> {
+        Self::with_tls_roots(layout, home, lattice_llm::load_tls_roots_der())
+    }
+
+    fn with_tls_roots(
+        layout: crate::StateLayout,
+        home: Option<std::path::PathBuf>,
+        roots: std::result::Result<Vec<Vec<u8>>, lattice_llm::LlmError>,
+    ) -> Arc<Self> {
+        let gateway = super::auth::directory(home.as_deref())
+            .map_err(|error| crate::ConfigRejection::new(&error.message, None))
+            .and_then(|directory| {
+                let auth = lattice_llm::auth::AuthStore::new(directory.clone());
+                roots
+                    .and_then(|roots| lattice_llm::RequestGateway::new(directory, roots))
+                    .map(Arc::new)
+                    .map_err(|error| crate::ConfigRejection::new(&error.to_string(), Some(&auth)))
+            });
         Arc::new(Self {
             home,
+            gateway,
             stores: crate::stores::StoreManager::new(layout.clone()),
             layout,
             epoch: uuid::Uuid::new_v4().to_string(),
@@ -443,13 +462,22 @@ impl Backend {
         })?;
         #[cfg(test)]
         tests::pause(&self.gates.prepare).await;
-        let (loaded_profile, connection) = blocking(move || configuration.into_execution()).await?;
+        let loaded_profile = blocking(move || configuration.into_execution()).await?;
+        let gateway = self
+            .gateway
+            .clone()
+            .map_err(crate::ApiError::Configuration)?;
         if loaded_profile.profile.agent.name != selected {
             return Err(LocalError::new(
                 LocalErrorKind::BadRequest,
                 "loaded agent differs from selection",
             ));
         }
+        let prepared_model = crate::turn::execute::PreparedModel::resolve(
+            &gateway,
+            &loaded_profile.profile.agent.model,
+        )
+        .await?;
         let api = match api {
             Some(api) => api,
             // 建库在接受事务之前；任何失败都说明这一轮确定未被接受，按拒绝返回。
@@ -482,7 +510,7 @@ impl Backend {
                 #[cfg(any(test, feature = "test-utils"))]
                 test_project_root: None,
             },
-            connection: Some(connection),
+            prepared_model: Some(prepared_model),
         });
         *lock(&owner.core) = Some(execution.completion);
         let accepted = match execution.acceptance.await {
@@ -597,6 +625,38 @@ impl Backend {
                     auth.status()
                         .map(Response::AuthStatus)
                         .map_err(super::auth::error)
+                })
+                .await
+            }
+            Request::ConfigurationError { message } => {
+                let auth = super::auth::store(self.home.as_deref()).ok();
+                blocking(move || {
+                    Ok(Response::ConfigurationError {
+                        message: crate::ConfigRejection::new(&message, auth.as_ref()).to_string(),
+                    })
+                })
+                .await
+            }
+            Request::Models { provider } => {
+                let directory = super::auth::directory(self.home.as_deref())?;
+                blocking(move || {
+                    let auth = lattice_llm::auth::AuthStore::new(directory.clone());
+                    lattice_llm::model_candidates(&directory, provider.as_deref())
+                        .map(|mut candidates| {
+                            for warning in &mut candidates.warnings {
+                                warning.message =
+                                    crate::ConfigRejection::new(&warning.message, Some(&auth))
+                                        .to_string();
+                            }
+                            Response::Models(candidates)
+                        })
+                        .map_err(|error| {
+                            crate::ApiError::Configuration(crate::ConfigRejection::new(
+                                &error.to_string(),
+                                Some(&auth),
+                            ))
+                            .into()
+                        })
                 })
                 .await
             }
@@ -956,12 +1016,12 @@ async fn connection(backend: Arc<Backend>, mut stream: UnixStream) -> Result<()>
         .await
 }
 /// 实例锁唯一持有者；正常停止排空后台执行与读取，不创建领域库。
-/// HOME 原值随后台保存，只在凭据操作中解析配置目录。
+/// 后台保存 HOME 配置目录与启动时 TLS 根；配置错误只拒绝需要它们的操作。
 pub async fn serve(layout: crate::StateLayout, home: Option<std::path::PathBuf>) -> Result<()> {
     let binding_layout = layout.clone();
     let (instance, listener) = blocking(move || ipc::Instance::bind(&binding_layout)).await?;
     let listener = UnixListener::from_std(listener)?;
-    let backend = Backend::new(layout, home);
+    let backend = blocking(move || Ok(Backend::new(layout, home))).await?;
     let mut connections = JoinSet::new();
     let mut failure = None;
     loop {

@@ -42,17 +42,6 @@ pub fn build_request_json(request: &ChatRequest) -> Result<serde_json::Value, Pr
         }]);
     }
 
-    let mut generation_config = serde_json::Map::new();
-    if let Some(temperature) = request.temperature {
-        generation_config.insert("temperature".to_string(), serde_json::json!(temperature));
-    }
-    if let Some(max_tokens) = request.max_tokens {
-        generation_config.insert("maxOutputTokens".to_string(), serde_json::json!(max_tokens));
-    }
-    if !generation_config.is_empty() {
-        body["generationConfig"] = serde_json::Value::Object(generation_config);
-    }
-
     Ok(body)
 }
 

@@ -81,7 +81,7 @@ fn provider_failure(name: &str, test: &str, script: SseScript, partial: bool) {
         let persisted: Value = serde_json::from_slice(&detail.stdout).unwrap();
         require(
             persisted["steps"][0]["attempts"][0]["origin"]
-                == serde_json::json!({"protocol":"chat-completions","provider_id":"openai-compatible"}),
+                == serde_json::json!({"protocol":"chat-completions","provider_id":"local"}),
             "failed attempt records protocol and provider id",
         )?;
         require(

@@ -54,7 +54,10 @@ pub fn resolve_agent_profile(
         ProfileSource::Default => match resolve_named("default", paths) {
             Ok(loaded) => Ok(loaded),
             Err(ProfileError::ProfileNotFound { .. }) => {
-                let template = crate::defaults::default_agent_template("default", "sonnet");
+                let template = crate::defaults::default_agent_template(
+                    "default",
+                    "anthropic/claude-sonnet-4-6",
+                );
                 Err(ProfileError::MissingDefault {
                     dir: paths.project_agents_dir().join("default"),
                     template,

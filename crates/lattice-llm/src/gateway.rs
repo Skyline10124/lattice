@@ -5,18 +5,19 @@
 
 use std::{
     collections::BTreeMap,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
-use crate::auth::{AuthStore, Credentials};
+use crate::auth::{AuthError, AuthStore, Credentials};
 use crate::client::{self, RequestEndpoint, TurnClient};
 use crate::provider::{Auth, Provider, config::ProviderRegistry, validate_model_id};
-use crate::{ChatRequest, LlmError, LlmStream, StreamControl};
+use crate::{ChatRequest, LlmError, LlmStream, ModelTarget, StreamControl};
 
 struct Configuration {
     directory: PathBuf,
     roots: Vec<reqwest::Certificate>,
+    roots_der: Vec<Vec<u8>>,
 }
 
 /// 持有配置目录与给定的 TLS 根，按 Turn 创建连接句柄。
@@ -25,24 +26,26 @@ pub struct RequestGateway {
 }
 
 impl RequestGateway {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "#315 第 8 个 PR 接入后台请求网关")
-    )]
     pub fn new(config_dir: PathBuf, roots_der: Vec<Vec<u8>>) -> Result<Self, LlmError> {
         Ok(Self {
             configuration: Arc::new(Configuration {
                 directory: config_dir,
                 roots: client::tls_certificates(&roots_der)?,
+                roots_der,
             }),
         })
     }
 
+    /// Tool Host 使用同一份启动时信任根，每个 Turn 独立构造信任配置。
+    pub fn tls_roots_der(&self) -> &[Vec<u8>] {
+        &self.configuration.roots_der
+    }
+
+    pub fn auth_store(&self) -> AuthStore {
+        AuthStore::new(self.configuration.directory.clone())
+    }
+
     /// 新句柄独占一轮的连接缓存；网关本身不跨 Turn 保存 client。
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "#315 第 8 个 PR 接入后台请求网关")
-    )]
     pub fn open_turn(&self) -> GatewayTurn {
         GatewayTurn {
             configuration: self.configuration.clone(),
@@ -58,29 +61,15 @@ pub struct GatewayTurn {
 }
 
 impl GatewayTurn {
-    /// target 必须分别给出 provider id 与模型 id，client_request_id 承载 SessionId。
-    /// 只发送对话与工具；采样及可选输出上限沿用服务端默认值。
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "#315 第 8 个 PR 注入 lattice-agent 的 LlmClient")
-    )]
-    pub async fn stream_chat(
-        &self,
-        mut request: ChatRequest,
-        control: StreamControl,
-    ) -> Result<LlmStream, LlmError> {
-        let provider_id = request
-            .target
-            .provider
-            .as_deref()
-            .ok_or_else(|| configuration_error("gateway requests require a provider id"))?;
+    pub fn auth_store(&self) -> AuthStore {
+        AuthStore::new(self.configuration.directory.clone())
+    }
+
+    /// 每次解析读取当前配置与凭据；发送句柄独占这一次解析结果。
+    pub async fn resolve(&self, target: &ModelTarget) -> Result<ResolvedRequest, LlmError> {
+        let provider_id = target.provider.as_str();
         lattice_conversation::validate_provider_id(provider_id).map_err(configuration_error)?;
-        validate_model_id(&request.target.model).map_err(configuration_error)?;
-        if request.client_request_id.is_none() {
-            return Err(configuration_error(
-                "gateway requests require a SessionId in client_request_id",
-            ));
-        }
+        validate_model_id(&target.model).map_err(configuration_error)?;
         let directory = self.configuration.directory.clone();
         let provider_id = provider_id.to_owned();
         let (provider, credentials) =
@@ -94,21 +83,73 @@ impl GatewayTurn {
             .entry((provider.id.clone(), provider.base_url.clone()))
             .or_default()
             .clone();
-        request.temperature = None;
-        request.max_tokens = None;
-        request.max_completion_tokens = None;
-        let model = request.target.model.clone();
+        client::validate_configuration(
+            provider.protocol,
+            provider.auth,
+            credentials.api_key(&provider.id),
+        )?;
+        Ok(ResolvedRequest {
+            configuration: self.configuration.clone(),
+            provider,
+            credentials: Arc::new(credentials),
+            client,
+            target: target.clone(),
+        })
+    }
+
+    #[cfg(test)]
+    async fn stream_chat(
+        &self,
+        request: ChatRequest,
+        control: StreamControl,
+    ) -> Result<LlmStream, LlmError> {
+        self.resolve(&request.target)
+            .await?
+            .stream_chat(request, control)
+            .await
+    }
+}
+
+/// 一次请求的解析结果；连接材料与秘密始终封装在网关中。
+pub struct ResolvedRequest {
+    configuration: Arc<Configuration>,
+    provider: Provider,
+    credentials: Arc<Credentials>,
+    client: Arc<TurnClient>,
+    target: ModelTarget,
+}
+
+impl ResolvedRequest {
+    pub fn protocol(&self) -> crate::protocol::Protocol {
+        self.provider.protocol
+    }
+
+    pub fn provider_id(&self) -> &str {
+        &self.provider.id
+    }
+
+    /// 发送沿用解析时取得的配置；调用方不能替换模型或省去 SessionId。
+    pub async fn stream_chat(
+        &self,
+        request: ChatRequest,
+        control: StreamControl,
+    ) -> Result<LlmStream, LlmError> {
+        if request.target != self.target || request.client_request_id.is_none() {
+            return Err(configuration_error(
+                "resolved request requires its original target and a SessionId",
+            ));
+        }
         client::dispatch(
             request,
             RequestEndpoint {
-                provider: &provider.id,
-                model: &model,
-                base_url: &provider.base_url,
-                protocol: provider.protocol,
-                auth: provider.auth,
-                credentials,
+                provider: &self.provider.id,
+                model: &self.target.model,
+                base_url: &self.provider.base_url,
+                protocol: self.provider.protocol,
+                auth: self.provider.auth,
+                credentials: self.credentials.clone(),
                 roots: &self.configuration.roots,
-                client,
+                client: self.client.clone(),
             },
             control,
         )
@@ -122,32 +163,38 @@ fn configuration_error(message: impl std::fmt::Display) -> LlmError {
     }
 }
 
+pub(crate) fn load_configuration(
+    directory: &Path,
+) -> Result<(ProviderRegistry, Result<Credentials, AuthError>), LlmError> {
+    let credentials = AuthStore::new(directory.to_owned()).load();
+    let registry =
+        ProviderRegistry::load(directory.join("providers.toml")).map_err(configuration_error)?;
+    Ok((registry, credentials))
+}
+
 fn load_provider(directory: PathBuf, id: &str) -> Result<(Provider, Credentials), LlmError> {
-    let credentials = AuthStore::new(directory.clone()).load();
-    let registry = ProviderRegistry::load(directory.join("providers.toml")).map_err(|error| {
-        let message = match &credentials {
-            Ok(credentials) => credentials.redact(&error.to_string()),
-            Err(auth_error) => format!(
-                "{}:{}: invalid provider configuration; {auth_error}",
-                error.path.display(),
-                error.line,
-            ),
-        };
-        configuration_error(message)
-    })?;
-    let provider = registry.get(id).cloned().ok_or_else(|| {
-        let message = credentials.as_ref().map_or_else(
-            |_| "requested provider is not registered".into(),
-            |credentials| credentials.redact(&format!("provider {id:?} is not registered")),
-        );
-        configuration_error(message)
-    })?;
+    let (registry, credentials) = load_configuration(&directory)?;
+    let provider = registry
+        .get(id)
+        .cloned()
+        .ok_or_else(|| missing_provider_error(&registry, id))?;
     let credentials = match credentials {
         Ok(credentials) => credentials,
         Err(_) if provider.auth == Auth::None => Credentials::default(),
         Err(error) => return Err(configuration_error(error)),
     };
     Ok((provider, credentials))
+}
+
+pub(crate) fn missing_provider_error(registry: &ProviderRegistry, id: &str) -> LlmError {
+    configuration_error(format!(
+        "provider {id:?} is not registered; available providers: {}",
+        registry
+            .iter()
+            .map(|provider| provider.id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
 }
 
 #[cfg(test)]

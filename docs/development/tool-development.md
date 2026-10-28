@@ -43,7 +43,7 @@ cargo xtask lancet-boundary
 
 ### 配置与启动环境
 
-工作区 `.env` 不再加载，不能提供凭据、endpoint、模型或 `LATTICE_*` 配置。当前凭据与连接仍由前端从 shell/CI 进程环境读取并随提交冻结；密钥须在运行提交命令的终端中导出，用法见[根 README](../../README.md#2-配置模型凭据)。模型解析可通过 `lattice resolve` 与 `lattice models` 查看。
+后台从用户级 `~/.lattice/providers.toml` 读取 provider 配置，从 `~/.lattice/auth.json` 读取凭据；key 用 `lattice auth set` 录入，用法见[根 README](../../README.md#2-配置模型凭据)。环境变量与工作区 `.env` 不提供 key、endpoint 或模型，项目中的 `providers.toml` 不被读取。`lattice models` 经后台列出模型候选、限制、价格与凭据状态。
 
 后台启动与 Git 隔离规则见[会话合同](../architecture/session.md#配置来源与后台启动)。
 

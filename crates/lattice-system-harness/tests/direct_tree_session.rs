@@ -154,7 +154,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
         for step in original["steps"].as_array().unwrap() {
             assert_eq!(
                 step["attempts"][0]["origin"],
-                json!({"protocol":"chat-completions","provider_id":"openai-compatible"})
+                json!({"protocol":"chat-completions","provider_id":"local"})
             );
         }
         let original_history = current_history(&world, &spec, sid);

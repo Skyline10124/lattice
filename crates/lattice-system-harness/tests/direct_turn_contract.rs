@@ -76,7 +76,7 @@ fn direct_turn_completed_reopen_contract() {
         let detail: Value = serde_json::from_slice(&before.stdout).unwrap();
         require(
             detail["steps"][0]["attempts"][0]["origin"]
-                == serde_json::json!({"protocol":"chat-completions","provider_id":"openai-compatible"}),
+                == serde_json::json!({"protocol":"chat-completions","provider_id":"local"}),
             "completed attempt records protocol and provider id",
         )?;
         let captures = server.captured_requests();
@@ -150,15 +150,19 @@ fn direct_turn_completed_reopen_contract() {
 }
 
 #[test]
-fn direct_turn_sonnet_routes_but_missing_credentials_reject_before_acceptance() {
+fn direct_turn_registered_model_with_missing_credentials_rejects_before_acceptance() {
     let driver = driver();
     let spec = ScenarioSpec::direct_local("direct-turn-sonnet-route");
     let world = ScenarioWorld::new(&spec.name).unwrap();
-    world.write_agent_profile("dl-sonnet", "sonnet").unwrap();
+    world
+        .write_agent_profile("dl-sonnet", "anthropic/claude-sonnet-4-6")
+        .unwrap();
     world.init_git_project().unwrap();
     let evidence = evidence(&world, &spec);
     let send = SessionSendDriver::new(&driver, &world, &spec, "dl-sonnet");
-    let resolved = send.run_command(&["--json", "resolve", "sonnet"]).unwrap();
+    let resolved = send
+        .run_command(&["--json", "models", "--provider", "anthropic"])
+        .unwrap();
     let outcome = send.send("route sonnet").unwrap();
     let list = send.run_command(&["--json", "session", "list"]).unwrap();
     let result = (|| {
@@ -166,10 +170,11 @@ fn direct_turn_sonnet_routes_but_missing_credentials_reject_before_acceptance() 
         let routing: Value = serde_json::from_slice(&resolved.stdout).unwrap();
         require(
             resolved.is_clean_exit(0)
-                && routing["provider"] == "Anthropic"
-                && routing["alias"] == "sonnet"
-                && routing["api_key_env"] == "ANTHROPIC_API_KEY"
-                && routing["credential_status"] == "Missing",
+                && routing["models"].as_array().unwrap().iter().any(|model| {
+                    model["provider"] == "anthropic"
+                        && model["model"] == "claude-sonnet-4-6"
+                        && model["credential_status"] == "missing"
+                }),
             "formal sonnet routing with missing credential",
         )?;
         require(
@@ -178,7 +183,7 @@ fn direct_turn_sonnet_routes_but_missing_credentials_reject_before_acceptance() 
                 && send.session_id().is_none(),
             "reject before Session acceptance",
         )?;
-        // 身份先于配置加载输出；凭据缺失在请求写出前拒绝，这次提交以 `rejected` 回执结束，
+        // 身份先于提交输出；后台在接受前拒绝缺少凭据，这次提交以 `rejected` 回执结束，
         // 之后没有会话头、条目或文字。
         require(
             matches!(
@@ -201,7 +206,7 @@ fn direct_turn_sonnet_routes_but_missing_credentials_reject_before_acceptance() 
     finish_scenario(
         evidence,
         &[
-            ("resolve", &resolved),
+            ("models", &resolved),
             ("rejection", &outcome.command),
             ("list", &list),
         ],

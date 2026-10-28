@@ -7,7 +7,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 mod commands;
 #[cfg(test)]
 mod test_support;
-use commands::{audit, lancet as lancet_cmd, models, resolve, session as session_cmd};
+use commands::{audit, lancet as lancet_cmd, models, session as session_cmd};
 
 #[derive(Parser)]
 #[command(name = "lattice")]
@@ -25,12 +25,7 @@ struct Cli {
     )]
     json: bool,
 
-    #[arg(
-        short,
-        long,
-        global = true,
-        help = "Verbose output (show resolve trace)"
-    )]
+    #[arg(short, long, global = true, help = "Verbose logging")]
     verbose: bool,
 }
 
@@ -53,11 +48,9 @@ enum Commands {
         /// Only show authenticated models.
         #[arg(long)]
         auth: bool,
-    },
-    /// Resolve a model alias to provider details.
-    Resolve {
-        /// Model alias to resolve.
-        model: String,
+        /// Only list models from this configured provider.
+        #[arg(long)]
+        provider: Option<String>,
     },
     /// Manage sessions.
     #[command(disable_help_subcommand = true)]
@@ -137,11 +130,8 @@ async fn run_commands(cli: Cli) -> Result<std::process::ExitCode> {
         Some(Commands::Auth { action }) => {
             commands::auth::run(action, cli.json).await?;
         }
-        Some(Commands::Models { auth }) => {
-            models::run(auth, cli.json)?;
-        }
-        Some(Commands::Resolve { model }) => {
-            resolve::run(&model, cli.verbose, cli.json)?;
+        Some(Commands::Models { auth, provider }) => {
+            models::run(provider, auth, cli.json).await?;
         }
         Some(Commands::Session { action }) => {
             return session_cmd::run(action, cli.json, cli.verbose).await;
@@ -175,7 +165,32 @@ async fn run_commands(cli: Cli) -> Result<std::process::ExitCode> {
 #[cfg(test)]
 mod tests {
     use super::{Cli, Commands};
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
+
+    #[test]
+    fn models_accepts_provider_and_auth_filters_and_documents_them() {
+        let cli = Cli::try_parse_from([
+            "lattice",
+            "--json",
+            "models",
+            "--provider",
+            "local",
+            "--auth",
+        ])
+        .unwrap();
+        assert!(cli.json);
+        assert!(
+            matches!(cli.command, Some(Commands::Models { auth: true, provider: Some(provider) }) if provider == "local")
+        );
+        let mut command = Cli::command();
+        let help = command
+            .find_subcommand_mut("models")
+            .unwrap()
+            .render_help()
+            .to_string();
+        assert!(help.contains("--provider"));
+        assert!(help.contains("--auth"));
+    }
 
     #[test]
     fn auth_surface_accepts_only_provider_arguments_and_lists_commands() {

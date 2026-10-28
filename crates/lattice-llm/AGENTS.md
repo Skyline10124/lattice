@@ -4,12 +4,13 @@
 
 维护请求网关，它是对外唯一的模型请求入口，内部包含协议适配器（请求构造、流式事件解析、用量换算）、provider 注册表、模型元数据、凭据库与 Sign in with ChatGPT、工具 wire 类型、SSE、DNS pinning 与传输层重试判断；另维护日志设置。持久消息与 usage 直接使用 `lattice-conversation` 类型，不负责 Session 图、profile 发现、Agent 循环、重试策略或 LANCET 执行。
 
-目录按职责划分，协议与 provider 分开。解析器与完整消息投影已搬入 `protocol/`；其余目标结构仍需把现有的 `router.rs`、`endpoints.rs` 与 `connection.rs` 拆入对应位置：
+目录按职责划分，协议与 provider 分开：
 
-- `gateway.rs`：请求网关，对外唯一的请求入口。
+- `gateway.rs`：`GatewayTurn::resolve` 读取当前注册表与凭据，返回封装协议与认证的 `ResolvedRequest`；发送沿用该结果。`tls.rs` 载入启动时可用根，后台将同一份 DER 交给网关与 Tool Host。
 - `protocol/`：协议适配器，每个协议一个模块（`chat_completions`、`responses`、`anthropic_messages`、`generate_content`、`interactions`），负责该协议的请求体、流式事件、用量换算与 features；各适配器共用的消息投影 `protocol/projection/` 是唯一的生产消息 codec。这里不出现任何厂商名。
 - `provider/`：provider 注册表，包括内置表、`providers.toml` 的解析与合并、按 `id` 查找。这里不含协议代码。
 - `metadata/`：内置快照、缓存与手写元数据的合并与刷新。
+- `src/models.rs`：候选、限制、价格、凭据状态与缺失元数据提示。
 - `auth/`：凭据库，`auth.json` 与 Sign in with ChatGPT。
 - `transport.rs`：请求标识、错误诊断、可重试判断与 Retry-After；`client.rs`：HTTP 行为、Turn 内 client 复用与连接安全；`sse.rs`：流解析；`types.rs`：请求信封、工具定义与流事件。
 - `reply.rs`：同步回复累积器，统一有序部件、实时文字投影、限额与完整消息；`reply_stream.rs`：惰性流消费、取消与 deadline、唯一终态交付。

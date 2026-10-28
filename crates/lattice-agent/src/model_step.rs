@@ -47,6 +47,17 @@ pub trait LlmClient: Send + Sync {
     ) -> Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>>;
 }
 
+#[async_trait::async_trait]
+impl LlmClient for lattice_llm::ResolvedRequest {
+    async fn stream_chat(
+        &self,
+        request: ChatRequest,
+        control: StreamControl,
+    ) -> Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(lattice_llm::ResolvedRequest::stream_chat(self, request, control).await?)
+    }
+}
+
 /// Why a model step could not even start streaming.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelStepError {
@@ -134,16 +145,12 @@ pub struct ModelStepRequest {
     pub system_prompt: Option<String>,
     /// Assembled provider-neutral history of completed (bound) messages.
     pub history: Vec<lattice_conversation::ConversationItem>,
-    /// Model alias.
+    /// provider 内的模型标识。
     pub model: String,
-    /// Optional provider override.
-    pub provider: Option<String>,
+    /// 模型引用指定的 provider 标识。
+    pub provider: String,
     /// Frozen tool definitions.
     pub tools: Vec<ToolDefinition>,
-    /// Sampling temperature, when configured.
-    pub temperature: Option<f64>,
-    /// Output token bound, when configured.
-    pub max_tokens: Option<u32>,
     /// Cooperative cancellation flag.
     pub cancel: Option<Arc<AtomicBool>>,
     /// Cooperative deadline for this attempt only.
@@ -190,9 +197,6 @@ impl ModelStepDriver {
                 model: request.model.clone(),
                 provider: request.provider.clone(),
             },
-            temperature: request.temperature,
-            max_tokens: request.max_tokens,
-            max_completion_tokens: None,
             client_request_id: request.session_id.clone(),
         };
 
@@ -236,7 +240,7 @@ impl ModelStepDriver {
                 opened = true;
                 if let Some(observer) = live.as_deref_mut() {
                     observer(ModelStepEvent::Opened {
-                        provider: request.provider.clone(),
+                        provider: Some(request.provider.clone()),
                         model: request.model.clone(),
                     });
                 }
@@ -365,10 +369,8 @@ mod tests {
             system_prompt: None,
             history: Vec::new(),
             model: "test-model".to_string(),
-            provider: None,
+            provider: "test".into(),
             tools: Vec::new(),
-            temperature: None,
-            max_tokens: None,
             cancel: None,
             deadline: None,
             session_id: None,

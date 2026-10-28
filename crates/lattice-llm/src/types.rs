@@ -38,10 +38,6 @@ pub struct ChatRequest {
     pub messages: Vec<ConversationItem>,
     pub tools: Vec<ToolDefinition>,
     pub target: ModelTarget,
-    pub temperature: Option<f64>,
-    pub max_tokens: Option<u32>,
-    /// OpenAI-specific: max completion tokens (replaces max_tokens for o-series)
-    pub max_completion_tokens: Option<u32>,
     /// 作为 `x-client-request-id` 发出，取 SessionId，便于在 provider 侧关联同一会话的请求。
     pub client_request_id: Option<String>,
 }
@@ -52,9 +48,6 @@ impl ChatRequest {
             messages: messages.into(),
             tools: Vec::new(),
             target,
-            temperature: None,
-            max_tokens: None,
-            max_completion_tokens: None,
             client_request_id: None,
         }
     }
@@ -85,27 +78,18 @@ pub struct AttemptReport {
     pub usage: Option<TokenUsage>,
 }
 
-/// A model target specifying which model alias to route to.
+/// 请求明确给出 provider id 与模型 id，不提供默认模型。
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelTarget {
     pub model: String,
-    pub provider: Option<String>,
-}
-
-impl Default for ModelTarget {
-    fn default() -> Self {
-        ModelTarget {
-            model: "sonnet".to_string(),
-            provider: None,
-        }
-    }
+    pub provider: String,
 }
 
 impl ModelTarget {
-    pub fn new(model: impl Into<String>) -> Self {
-        ModelTarget {
+    pub fn new(provider: impl Into<String>, model: impl Into<String>) -> Self {
+        Self {
+            provider: provider.into(),
             model: model.into(),
-            provider: None,
         }
     }
 }

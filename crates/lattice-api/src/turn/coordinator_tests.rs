@@ -340,8 +340,13 @@ async fn live_multicall_closes_continue_then_finish_from_structured_history() {
         &coordinator,
         tid(1),
         LiveExecution {
-            provider: lattice_llm::ProviderKind::OpenAiCompatible,
-            driver: Arc::new(ModelStepDriver::new(llm.clone())),
+            model: crate::turn::saga::ModelExecution::Injected {
+                driver: Arc::new(ModelStepDriver::new(llm.clone())),
+                origin: AttemptOrigin {
+                    provider_id: "openai-compatible".into(),
+                    protocol: AttemptProtocol::ChatCompletions,
+                },
+            },
             runtime: Arc::new(runtime),
             events,
             observer: observer.clone(),
@@ -445,7 +450,7 @@ async fn first_acceptance_reopens_with_frozen_facts_and_used_turn_conflicts() {
     let store = Arc::new(SessionStore::create(&layout).unwrap());
     let api = crate::session::SessionApi::from_store(store.clone());
     let profile = project.path().join("agent.toml");
-    std::fs::write(&profile, "schema_version = 1\n[agent]\nname = 'alpha'\nmodel = 'test'\n[prompt]\nsystem = 'frozen'\n[tools]\nenabled = []\n").unwrap();
+    std::fs::write(&profile, "schema_version = 1\n[agent]\nname = 'alpha'\nmodel = 'local/test'\n[prompt]\nsystem = 'frozen'\n[tools]\nenabled = []\n").unwrap();
     let llm = Arc::new(
         lattice_agent::testing::FakeStreamingLlmClient::builder()
             .push_events(vec![
@@ -465,7 +470,10 @@ async fn first_acceptance_reopens_with_frozen_facts_and_used_turn_conflicts() {
         agent: Some("alpha".into()),
         loaded_profile: Some(lattice_profile::load_agent_profile(&profile).unwrap()),
         cancel_flag: None,
-        test_llm: Some((llm.clone(), lattice_llm::ProviderKind::OpenAiCompatible)),
+        test_llm: Some((
+            llm.clone(),
+            lattice_session::store::AttemptProtocol::ChatCompletions,
+        )),
         test_project_root: None,
     };
     let workspace = crate::root::LocalWorkspaceRoot::from_path(project.path()).unwrap();
@@ -475,7 +483,6 @@ async fn first_acceptance_reopens_with_frozen_facts_and_used_turn_conflicts() {
         tid(9),
         workspace.clone(),
         request.clone(),
-        None,
     );
     let TurnAcceptance::Accepted { turn } = execution.acceptance.await.unwrap().unwrap() else {
         panic!("not accepted")
@@ -487,7 +494,7 @@ async fn first_acceptance_reopens_with_frozen_facts_and_used_turn_conflicts() {
     retry.loaded_profile = None;
     retry.agent = None;
     retry.test_llm = None;
-    let execution = start_turn(api, layout, tid(9), workspace, retry, None);
+    let execution = start_turn(api, layout, tid(9), workspace, retry);
     assert!(matches!(
         execution.acceptance.await.unwrap(),
         Err(crate::ApiError::Conflict(
@@ -609,8 +616,13 @@ async fn stop_at_execution_boundary(boundary: StopBoundary, cancelled: bool) {
     let observer = Arc::new(ObserverSink::default());
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     let live = LiveExecution {
-        provider: lattice_llm::ProviderKind::OpenAi,
-        driver: Arc::new(ModelStepDriver::new(llm.clone())),
+        model: crate::turn::saga::ModelExecution::Injected {
+            driver: Arc::new(ModelStepDriver::new(llm.clone())),
+            origin: AttemptOrigin {
+                provider_id: "openai".into(),
+                protocol: AttemptProtocol::ChatCompletions,
+            },
+        },
         runtime: Arc::new(runtime),
         events,
         observer: observer.clone(),

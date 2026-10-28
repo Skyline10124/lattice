@@ -28,11 +28,50 @@ pub(crate) struct ExecutionInput {
     pub turn_id: TurnId,
     pub workspace: LocalWorkspaceRoot,
     pub request: RunTurnRequest,
-    pub connection: Option<Arc<lattice_llm::LlmConnection>>,
+    pub prepared_model: Option<PreparedModel>,
     pub shutdown: Arc<AtomicBool>,
     pub observer: Arc<ObserverSink>,
     /// 新会话身份由提交方在执行开始前给定。
     pub new_session: Option<SessionId>,
+}
+
+pub(crate) struct PreparedModel {
+    target: lattice_llm::ModelTarget,
+    execution: super::saga::ModelExecution,
+    gateway: Arc<lattice_llm::RequestGateway>,
+}
+
+impl PreparedModel {
+    /// 在建库与接受前完成解析；同一 Turn 随后沿用这个网关句柄。
+    pub(crate) async fn resolve(
+        gateway: &Arc<lattice_llm::RequestGateway>,
+        model: &str,
+    ) -> Result<Self> {
+        let auth = gateway.auth_store();
+        let target = model_target(model, Some(&auth))?;
+        let turn = gateway.open_turn();
+        let resolved = turn.resolve(&target).await.map_err(|error| {
+            ApiError::Configuration(crate::ConfigRejection::new(&error.to_string(), Some(&auth)))
+        })?;
+        Ok(Self {
+            target,
+            execution: super::saga::ModelExecution::gateway(turn, &resolved),
+            gateway: gateway.clone(),
+        })
+    }
+}
+
+fn model_target(
+    model: &str,
+    auth: Option<&lattice_llm::auth::AuthStore>,
+) -> Result<lattice_llm::ModelTarget> {
+    let reference = lattice_llm::ModelRef::parse(model).map_err(|error| {
+        ApiError::Configuration(crate::ConfigRejection::new(&error.to_string(), auth))
+    })?;
+    Ok(lattice_llm::ModelTarget::new(
+        reference.provider(),
+        reference.model(),
+    ))
 }
 
 /// 后台接管与持久接受不同。这个句柄的回执被释放也不撤销后台责任。
@@ -42,7 +81,6 @@ pub fn start_turn(
     turn_id: TurnId,
     workspace: LocalWorkspaceRoot,
     request: RunTurnRequest,
-    connection: Option<Arc<lattice_llm::LlmConnection>>,
 ) -> TurnExecution {
     let new_session = request
         .session_id
@@ -54,7 +92,7 @@ pub fn start_turn(
         turn_id,
         workspace,
         request,
-        connection,
+        prepared_model: None,
         shutdown: Arc::default(),
         observer: Arc::default(),
         new_session,
@@ -117,7 +155,7 @@ async fn execute_owned(
         turn_id,
         workspace,
         request,
-        connection,
+        prepared_model,
         shutdown,
         observer,
         new_session,
@@ -168,22 +206,33 @@ async fn execute_owned(
             "loaded agent differs from selection".into(),
         ));
     }
-    if let Some(connection) = &connection
-        && connection.model().alias != loaded.profile.agent.model
-    {
-        return Err(ApiError::BadRequest(
-            "connection model differs from profile".into(),
-        ));
-    }
-    let (llm, provider): (Arc<dyn lattice_agent::LlmClient>, _) =
-        match (request.injected_llm(), &connection) {
-            (Some((client, provider)), _) => (client, provider),
-            (_, Some(connection)) => (
-                Arc::new(super::llm::RealLlmClient(connection.clone())),
-                connection.model().provider.clone(),
-            ),
-            _ => return Err(ApiError::BadRequest("frozen connection required".into())),
-        };
+    let (target, model, gateway) = match prepared_model {
+        Some(PreparedModel {
+            target,
+            execution,
+            gateway,
+        }) => (target, execution, Some(gateway)),
+        None => match request.injected_llm() {
+            Some((client, protocol)) => {
+                let target = model_target(&loaded.profile.agent.model, None)?;
+                let origin = lattice_session::store::AttemptOrigin {
+                    provider_id: target.provider.clone(),
+                    protocol,
+                };
+                (
+                    target,
+                    super::saga::ModelExecution::Injected {
+                        driver: Arc::new(lattice_agent::ModelStepDriver::new(client)),
+                        origin,
+                    },
+                    None,
+                )
+            }
+            None => {
+                return Err(ApiError::BadRequest("prepared model required".into()));
+            }
+        },
+    };
     if shutdown.load(Ordering::Acquire) {
         return Err(StoreError::WriteDisabled.into());
     }
@@ -208,12 +257,11 @@ async fn execute_owned(
         project_store_key: project,
         state_layout: layout,
         enabled_tools: &loaded.profile.tools.enabled,
-        tls_roots_der: connection.as_ref().map_or(&[], |c| c.tls_roots_der()),
-        llm,
+        gateway: gateway.clone(),
         lancet: Some(&loaded.profile.lancet),
     })
     .await?;
-    let config = super::live::freeze_config(&request, &provider, &deps.tool_catalog)?;
+    let config = super::live::freeze_config(&request, &target, &deps.tool_catalog)?;
     let timeout = config.limits.timeout_secs;
     if shutdown.load(Ordering::Acquire) {
         return Err(StoreError::WriteDisabled.into());
@@ -314,8 +362,7 @@ async fn execute_owned(
         &coordinator,
         turn_id,
         super::saga::LiveExecution {
-            provider,
-            driver: Arc::new(deps.model_driver),
+            model,
             runtime: Arc::new(deps.runtime),
             events: deps.events,
             observer,
@@ -345,7 +392,7 @@ pub async fn run_turn(
     .await
     .map_err(|_| ApiError::WorkerFailed)??;
     let id = TurnId::parse(&uuid::Uuid::new_v4().to_string()).expect("UUID v4");
-    let execution = start_turn(session, layout, id, workspace, request, None);
+    let execution = start_turn(session, layout, id, workspace, request);
     execution
         .acceptance
         .await

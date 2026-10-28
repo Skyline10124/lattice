@@ -1,11 +1,9 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! 场景 provider 接线：协议、配置目标、模型与凭据由同一个入口转换为产品配置。
+//! 场景 provider 通过用户级配置与公开凭据命令接入后台。
 
-use serde_json::{Value, json};
-
-use crate::{FakeLlmServer, ScenarioWorld, TlsIdentity, WorldError};
+use crate::{FakeLlmServer, LatticeCommand, LatticeDriver, ScenarioWorld, WorldError};
 
 /// 场景使用的模型流式协议。
 #[derive(Clone, Copy, Debug)]
@@ -41,80 +39,57 @@ impl<'a> ProviderFixture<'a> {
 
     /// profile 与接线使用同一模型引用；profile 可以先于 fake server 创建。
     pub fn model_ref(self) -> Result<String, WorldError> {
-        Ok(self.legacy()?.model_ref)
+        Ok(format!("{}/{}", self.id(), self.model))
     }
 
-    /// 公开 IPC 提交中的 provider 连接材料，与 CLI 接线使用相同的模型、provider 映射和信任根。
-    pub fn configuration(self, base_url: &str, key: &str) -> Result<Value, WorldError> {
-        let legacy = self.legacy()?;
-        require_non_empty_key(key)?;
-        Ok(json!({
-            "alias": legacy.model_ref,
-            "provider": legacy.provider,
-            "provider_model": self.model,
-            "base_url": base_url,
-            "api_key": key,
-            "roots_der": [TlsIdentity::shared()?.ca_der()],
-        }))
+    fn id(self) -> &'a str {
+        match self.target {
+            ProviderTarget::Builtin(id) | ProviderTarget::Custom(id) => id,
+        }
     }
 
-    fn legacy(self) -> Result<LegacyProvider, WorldError> {
-        use ProviderProtocol::*;
-        use ProviderTarget::*;
-        let (provider, endpoint_env, key_env, model_ref) = match (self.protocol, self.target) {
-            (ChatCompletions, Custom(_)) => (
-                "openai_compatible",
-                "OPENAI_COMPATIBLE_BASE_URL",
-                "OPENAI_COMPATIBLE_API_KEY",
-                format!("compat:{}", self.model),
-            ),
-            (AnthropicMessages, Builtin("anthropic")) => (
-                "anthropic",
-                "ANTHROPIC_BASE_URL",
-                "ANTHROPIC_API_KEY",
-                match self.model {
-                    "claude-sonnet-4-6" => "sonnet",
-                    _ => return Err(WorldError::Provider("unsupported Anthropic model alias")),
-                }
-                .into(),
-            ),
-            (GenerateContent, Custom(_)) => (
-                "gemini",
-                "GEMINI_BASE_URL",
-                "GEMINI_API_KEY",
-                match self.model {
-                    "gemini-2.5-flash" => "gemini",
-                    _ => {
-                        return Err(WorldError::Provider(
-                            "unsupported generateContent model alias",
-                        ));
-                    }
-                }
-                .into(),
-            ),
-            _ => return Err(WorldError::Provider("unsupported provider wiring")),
+    /// 内置 provider 只覆盖地址；自定义 provider 显式声明协议与认证。
+    pub fn configure(self, world: &ScenarioWorld, base_url: &str) -> Result<(), WorldError> {
+        let directory = world.home().join(".lattice");
+        std::fs::create_dir_all(&directory)?;
+        let path = directory.join("providers.toml");
+        let mut config: toml::Table = match std::fs::read_to_string(&path) {
+            Ok(source) => toml::from_str(&source)
+                .map_err(|_| WorldError::Provider("invalid fixture providers.toml"))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
+            Err(error) => return Err(error.into()),
         };
-        Ok(LegacyProvider {
-            provider,
-            endpoint_env,
-            key_env,
-            model_ref,
-        })
+        let providers = config
+            .entry("providers")
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+            .as_table_mut()
+            .ok_or(WorldError::Provider("invalid fixture providers table"))?;
+        let mut entry = providers
+            .get(self.id())
+            .and_then(toml::Value::as_table)
+            .cloned()
+            .unwrap_or_default();
+        entry.insert("base_url".into(), base_url.into());
+        if matches!(self.target, ProviderTarget::Custom(_)) {
+            let protocol = match self.protocol {
+                ProviderProtocol::ChatCompletions => "chat-completions",
+                ProviderProtocol::AnthropicMessages => "anthropic-messages",
+                ProviderProtocol::GenerateContent => "generate-content",
+            };
+            entry.insert("protocol".into(), protocol.into());
+            let auth = match self.protocol {
+                ProviderProtocol::ChatCompletions => "bearer",
+                ProviderProtocol::AnthropicMessages => "x-api-key",
+                ProviderProtocol::GenerateContent => "x-goog-api-key",
+            };
+            entry.insert("auth".into(), auth.into());
+        }
+        providers.insert(self.id().into(), toml::Value::Table(entry));
+        let source = toml::to_string(&config)
+            .map_err(|_| WorldError::Provider("cannot serialize fixture provider"))?;
+        std::fs::write(path, source)?;
+        Ok(())
     }
-}
-
-struct LegacyProvider {
-    provider: &'static str,
-    endpoint_env: &'static str,
-    key_env: &'static str,
-    model_ref: String,
-}
-
-fn require_non_empty_key(key: &str) -> Result<(), WorldError> {
-    if key.is_empty() {
-        return Err(WorldError::Provider("provider key must not be empty"));
-    }
-    Ok(())
 }
 
 impl ScenarioWorld {
@@ -125,28 +100,41 @@ impl ScenarioWorld {
         server: &FakeLlmServer,
         key: &str,
     ) -> Result<String, WorldError> {
-        let legacy = provider.legacy()?;
+        provider.configure(self, &server.base_url())?;
         self.register_key(provider, Some(key))?;
-        self.set_env(legacy.endpoint_env, server.base_url());
-        if matches!(provider.protocol, ProviderProtocol::ChatCompletions) {
-            self.set_env("OPENAI_COMPATIBLE_MODEL", provider.model);
-        }
-        Ok(legacy.model_ref)
+        provider.model_ref()
     }
 
     /// 设置非空 provider 凭据；`None` 移除已有凭据。
+    /// key 只通过标准输入录入，不进入参数或证据。
     pub fn register_key(
         &self,
         provider: ProviderFixture<'_>,
         key: Option<&str>,
     ) -> Result<(), WorldError> {
-        let legacy = provider.legacy()?;
-        match key {
-            Some(key) => {
-                require_non_empty_key(key)?;
-                self.set_env(legacy.key_env, key);
-            }
-            None => self.unset_env(legacy.key_env),
+        if key.is_some_and(str::is_empty) {
+            return Err(WorldError::Provider("provider key must not be empty"));
+        }
+        let driver = LatticeDriver::from_env().map_err(|_| {
+            WorldError::Provider("LATTICE_BIN must point to the built lattice binary")
+        })?;
+        let command = LatticeCommand {
+            args: vec![
+                "auth".into(),
+                if key.is_some() { "set" } else { "remove" }.into(),
+                provider.id().into(),
+            ],
+            timeout: Some(
+                self.budget_slot()
+                    .normal_stop_deadline()
+                    .saturating_duration_since(std::time::Instant::now()),
+            ),
+        };
+        let outcome = driver
+            .run_with_stdin(self, &command, key.unwrap_or_default().as_bytes())
+            .map_err(|_| WorldError::Provider("credential command failed"))?;
+        if !outcome.is_clean_exit(0) {
+            return Err(WorldError::Provider("credential command was rejected"));
         }
         Ok(())
     }

@@ -94,6 +94,9 @@ impl ScenarioWorld {
         // #143: durable session state lives under the XDG *state* root.
         let session_store = home.join(".local/state").join("lattice");
         std::fs::DirBuilder::new().mode(0o700).create(&home)?;
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(home.join(".lattice"))?;
         std::fs::create_dir_all(&session_store)?;
         std::fs::create_dir_all(project.join(".lattice"))?;
 
@@ -124,7 +127,7 @@ impl ScenarioWorld {
             home.join(".local/state").display().to_string(),
         );
         allowed_env.insert("LATTICE_AGENTS_DIR".into(), String::new());
-        // 提交端经 rustls-native-certs 读取信任根；设了这两个变量就只信任它们指向的根。
+        // 后台启动时经 rustls-native-certs 读取信任根；设了这两个变量就只信任它们指向的根。
         // 场景默认只信任 harness CA，fake provider 与 TLS 夹具都用它签发的证书。
         let trust = root.path().join("tls-trust");
         std::fs::create_dir_all(trust.join("empty"))?;

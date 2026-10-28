@@ -128,6 +128,15 @@ impl AuthStore {
         Ok(Credentials(document))
     }
 
+    /// 临时借用当前凭据值供后台处理，回调结束即释放快照，不复制凭据内容。
+    pub fn with_credential_values<T>(
+        &self,
+        operation: impl FnOnce(&[&str]) -> T,
+    ) -> Result<T, AuthError> {
+        let credentials = self.load()?;
+        Ok(operation(&credentials.0.values()))
+    }
+
     fn registry(&self) -> Result<ProviderRegistry, AuthError> {
         ProviderRegistry::load(self.directory.join("providers.toml")).map_err(|error| {
             AuthError::Providers {
@@ -211,42 +220,44 @@ impl AuthStore {
         let error = credentials.as_ref().err().map(ToString::to_string);
         let providers = registry
             .iter()
-            .map(|provider| {
-                let mut row = ProviderAuthStatus {
-                    provider: provider.id.clone(),
-                    status: AuthState::Missing,
-                    email: None,
-                    expires_at: None,
-                };
-                if provider.auth == Auth::None {
-                    row.status = AuthState::Ready;
-                } else if let Ok(credentials) = &credentials {
-                    match credentials.0.providers.get(&provider.id) {
-                        Some(format::Credential::ApiKey { .. })
-                            if provider.auth != Auth::OauthChatgpt =>
-                        {
-                            row.status = AuthState::Ready
-                        }
-                        Some(format::Credential::Chatgpt {
-                            account, tokens, ..
-                        }) if provider.auth == Auth::OauthChatgpt => {
-                            row.email = account.as_ref().map(|account| account.email.clone());
-                            row.expires_at =
-                                tokens.as_ref().map(|tokens| tokens.expires_at.clone());
-                            if tokens.is_some() {
-                                row.status = AuthState::Ready;
-                            }
-                        }
-                        _ => {}
-                    }
-                } else {
-                    row.status = AuthState::Invalid;
-                }
-                row
-            })
+            .map(|provider| provider_status(provider, credentials.as_ref()))
             .collect();
         Ok(AuthStatus { providers, error })
     }
+}
+
+pub(crate) fn provider_status(
+    provider: &crate::provider::Provider,
+    credentials: Result<&Credentials, &AuthError>,
+) -> ProviderAuthStatus {
+    let mut row = ProviderAuthStatus {
+        provider: provider.id.clone(),
+        status: AuthState::Missing,
+        email: None,
+        expires_at: None,
+    };
+    if provider.auth == Auth::None {
+        row.status = AuthState::Ready;
+    } else if let Ok(credentials) = credentials {
+        match credentials.0.providers.get(&provider.id) {
+            Some(format::Credential::ApiKey { .. }) if provider.auth != Auth::OauthChatgpt => {
+                row.status = AuthState::Ready
+            }
+            Some(format::Credential::Chatgpt {
+                account, tokens, ..
+            }) if provider.auth == Auth::OauthChatgpt => {
+                row.email = account.as_ref().map(|account| account.email.clone());
+                row.expires_at = tokens.as_ref().map(|tokens| tokens.expires_at.clone());
+                if tokens.is_some() {
+                    row.status = AuthState::Ready;
+                }
+            }
+            _ => {}
+        }
+    } else {
+        row.status = AuthState::Invalid;
+    }
+    row
 }
 
 /// 一次请求使用的凭据快照；已知值只供内部认证与诊断脱敏。
@@ -259,17 +270,6 @@ impl Credentials {
             Some(format::Credential::ApiKey { key }) => Some(&key.0),
             _ => None,
         }
-    }
-
-    pub(crate) fn for_api_key(provider: &str, key: &str) -> Self {
-        let mut credentials = Self::default();
-        credentials.0.providers.insert(
-            provider.into(),
-            format::Credential::ApiKey {
-                key: Secret(key.into()),
-            },
-        );
-        credentials
     }
 
     pub(crate) fn redact(&self, message: &str) -> String {

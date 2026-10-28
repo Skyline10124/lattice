@@ -24,7 +24,7 @@ async fn private_socket_rejects_second_owner_and_oversized_frame() {
     );
     let (mut writer, mut reader) = tokio::net::UnixStream::pair().unwrap();
     ipc::check_peer(&writer).unwrap();
-    writer.write_all(b"LTLOCAL5").await.unwrap();
+    writer.write_all(b"LTLOCAL6").await.unwrap();
     writer.write_u32((ipc::MAX_FRAME + 1) as u32).await.unwrap();
     let result = ipc::read::<serde_json::Value>(&mut reader).await;
     assert!(matches!(
@@ -48,25 +48,28 @@ async fn private_socket_rejects_second_owner_and_oversized_frame() {
 
 pub(super) fn frozen(project: &std::path::Path, endpoint: &str) -> FrozenConfiguration {
     let path = project.join("agent.toml");
-    std::fs::write(&path, "schema_version = 1\n[agent]\nname = 'local-test'\nmodel = 'compat:local-test'\n[prompt]\nsystem = 'test'\n").unwrap();
+    std::fs::write(&path, "schema_version = 1\n[agent]\nname = 'local-test'\nmodel = 'local/local-test'\n[prompt]\nsystem = 'test'\n").unwrap();
     let loaded = lattice_profile::load_agent_profile(&path).unwrap();
-    let connection = lattice_llm::LlmConnection::new(
-        lattice_llm::ResolvedModel {
-            alias: "compat:local-test".into(),
-            provider: lattice_llm::ProviderKind::OpenAiCompatible,
-            provider_model: "local-test".into(),
-            base_url: endpoint.into(),
-            api_key_env: String::new(),
-            credential_status: lattice_llm::CredentialStatus::Present,
-        },
-        "local-test-secret".into(),
-        vec![],
+    let directory = project.join(".lattice");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::set_permissions(
+        &directory,
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
     )
     .unwrap();
+    std::fs::write(
+        directory.join("providers.toml"),
+        format!(
+            "[providers.local]\nprotocol='chat-completions'\nbase_url='{endpoint}'\nauth='bearer'\n"
+        ),
+    )
+    .unwrap();
+    lattice_llm::auth::AuthStore::new(directory)
+        .set("local", "local-test-secret")
+        .unwrap();
     FrozenConfiguration::capture(
         loaded,
         &crate::LocalWorkspaceRoot::from_path(project).unwrap(),
-        connection,
     )
     .unwrap()
 }

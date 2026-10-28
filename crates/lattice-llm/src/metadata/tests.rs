@@ -17,6 +17,49 @@ fn cache(dir: &Path, source: &serde_json::Value) {
 }
 
 #[test]
+fn candidates_merge_metadata_filter_deprecated_and_report_missing_catalogs() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(
+        directory.path(),
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+    )
+    .unwrap();
+    std::fs::write(directory.path().join("providers.toml"), "[providers.local]\nprotocol='chat-completions'\nbase_url='http://localhost:1'\nauth='none'\ncatalog='custom-catalog'\n[providers.local.models.active]\ncontext=456\n[providers.empty]\nprotocol='chat-completions'\nbase_url='http://localhost:2'\ncatalog='absent-catalog'\n[providers.empty.models.handwritten]\noutput=12\n").unwrap();
+    cache(
+        directory.path(),
+        &json!({"custom-catalog":{"models":{
+            "active":{"id":"active","limit":{"context":123,"output":45},"cost":{"input":1,"output":2}},
+            "old":{"id":"old","status":"deprecated"}
+        }}}),
+    );
+    let candidates = crate::model_candidates(directory.path(), Some("local")).unwrap();
+    assert_eq!(candidates.models.len(), 1);
+    let model = &candidates.models[0];
+    assert_eq!((&*model.provider, &*model.model), ("local", "active"));
+    assert_eq!((model.context, model.output), (Some(456), Some(45)));
+    assert_eq!(model.cost.as_ref().unwrap().input, Some(1.0));
+    assert_eq!(model.credential_status, crate::auth::AuthState::Ready);
+    let empty = crate::model_candidates(directory.path(), Some("empty")).unwrap();
+    assert_eq!(empty.models[0].model, "handwritten");
+    assert!(
+        empty
+            .warnings
+            .iter()
+            .any(|warning| warning.provider.as_deref() == Some("empty")
+                && warning.message.contains("absent-catalog"))
+    );
+    let chatgpt = crate::model_candidates(directory.path(), Some("chatgpt")).unwrap();
+    assert!(chatgpt.models.is_empty());
+    assert!(
+        chatgpt
+            .warnings
+            .iter()
+            .any(|warning| warning.provider.as_deref() == Some("chatgpt")
+                && warning.message.contains("not implemented"))
+    );
+}
+
+#[test]
 fn conversion_keeps_only_the_allowlist_and_preserves_raw_reasoning() {
     let source = json!({
         "openai": {

@@ -185,3 +185,61 @@ fn anthropic_and_gemini_turns_call_a_tool_and_project_the_result_back() {
         );
     }
 }
+
+#[test]
+fn implemented_builtin_protocols_accept_and_record_the_protocol_actually_sent() {
+    use lattice_system_harness::{FAKE_API_KEY, SseScript};
+    for (id, protocol, wire, stored) in [
+        (
+            "openai",
+            ProviderProtocol::ChatCompletions,
+            "openai",
+            "chat-completions",
+        ),
+        (
+            "xai",
+            ProviderProtocol::ChatCompletions,
+            "openai",
+            "chat-completions",
+        ),
+        (
+            "google",
+            ProviderProtocol::GenerateContent,
+            "gemini",
+            "generate-content",
+        ),
+    ] {
+        let spec = ScenarioSpec::direct_local(format!("builtin-{id}"));
+        let world = ScenarioWorld::new(&spec.name).unwrap();
+        world.budget(&spec);
+        world.init_git_project().unwrap();
+        let fixture = ProviderFixture {
+            protocol,
+            target: ProviderTarget::Builtin(id),
+            model: "fixture-model",
+        };
+        world
+            .write_agent_profile("builtin", &fixture.model_ref().unwrap())
+            .unwrap();
+        let server = FakeLlmServer::start(SseScript::plain("builtin works")).unwrap();
+        world.wire_provider(fixture, &server, FAKE_API_KEY).unwrap();
+        let driver = driver();
+        let send = SessionSendDriver::new(&driver, &world, &spec, "builtin");
+        let mut evidence = support::evidence(&world, &spec);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let sent = send.send("builtin").unwrap();
+            evidence.record_command("builtin Turn", &sent.command);
+            assert!(sent.command.is_clean_exit(0));
+            let captures = server.captured_requests();
+            assert_eq!(captures.len(), 1);
+            assert_eq!(captures[0].provider, wire);
+            let turn = support::live_turn(&sent.parsed);
+            assert_eq!(
+                turn["steps"][0]["attempts"][0]["origin"],
+                serde_json::json!({"provider_id":id,"protocol":stored})
+            );
+            evidence.record_captures(captures);
+        }));
+        support::finish_recorded(evidence, result);
+    }
+}

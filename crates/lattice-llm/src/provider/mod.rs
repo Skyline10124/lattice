@@ -14,7 +14,7 @@ pub(crate) mod config;
 mod model_ref;
 
 pub(crate) use model_ref::validate_model_id;
-pub use model_ref::{ModelRef, ModelRefError};
+pub use model_ref::{MAX_MODEL_ID_BYTES, ModelRef, ModelRefError};
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]

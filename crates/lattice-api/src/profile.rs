@@ -5,7 +5,6 @@
 
 use std::path::Path;
 
-use crate::config_rejection::client_configuration_error;
 use crate::session::Result;
 
 pub use lattice_profile::LoadedAgentProfile;
@@ -25,13 +24,19 @@ pub fn resolve_named_agent_profile(
         lattice_profile::ProfileSource::Name(agent_name.to_string()),
         &paths,
     )
-    .map_err(|error| client_configuration_error(&profile_error_message(&error)))?;
+    .map_err(|error| {
+        crate::ApiError::FrontendConfiguration(crate::ConfigurationDiagnostic::new(
+            profile_error_message(&error),
+        ))
+    })?;
     if loaded.profile.agent.name != agent_name {
-        return Err(client_configuration_error(&format!(
-            "[agent].name at {} declares '{}'; must match selected agent '{agent_name}'",
-            loaded.path.display(),
-            loaded.profile.agent.name,
-        )));
+        return Err(crate::ApiError::FrontendConfiguration(
+            crate::ConfigurationDiagnostic::new(format!(
+                "[agent].name at {} declares '{}'; must match selected agent '{agent_name}'",
+                loaded.path.display(),
+                loaded.profile.agent.name,
+            )),
+        ));
     }
     Ok(loaded)
 }
