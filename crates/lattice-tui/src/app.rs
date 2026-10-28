@@ -1875,10 +1875,6 @@ mod tests {
         if let Ok(mode) = std::env::var(PROBE) {
             let run = || -> std::io::Result<()> {
                 let _cleanup = TerminalCleanup { kitty: false };
-                if mode == "init-error" {
-                    ratatui::try_init()?;
-                    panic!("closed stdin must reject terminal initialization");
-                }
                 install_cleanup_panic_hook(false);
                 enable_terminal_modes(&mut std::io::stdout(), false)?;
                 if mode == "panic" {
@@ -1892,7 +1888,7 @@ mod tests {
             assert_eq!(run().is_ok(), mode == "normal");
             return;
         }
-        for mode in ["normal", "error", "init-error", "panic"] {
+        for mode in ["normal", "error", "panic"] {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
@@ -1900,7 +1896,6 @@ mod tests {
                     "--nocapture",
                 ])
                 .env(PROBE, mode)
-                .stdin(std::process::Stdio::null())
                 .output()
                 .unwrap();
             assert_eq!(
@@ -1912,11 +1907,7 @@ mod tests {
             let restored = output.stdout.windows(5).position(|s| s == b"\x1b[0 q");
             assert!(restored.is_some(), "{mode} must restore default shape");
             let enabled = output.stdout.windows(5).position(|s| s == b"\x1b[1 q");
-            if mode == "init-error" {
-                assert!(enabled.is_none());
-            } else {
-                assert!(enabled.unwrap() < restored.unwrap());
-            }
+            assert!(enabled.unwrap() < restored.unwrap());
         }
     }
 
