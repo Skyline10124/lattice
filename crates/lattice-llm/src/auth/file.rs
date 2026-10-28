@@ -217,12 +217,14 @@ impl Drop for Temporary<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn ownership_requires_the_effective_user_for_both_files_and_directories() {
-        use std::os::unix::fs::PermissionsExt;
         let current = effective_uid();
         let root = tempfile::tempdir().unwrap();
+        // 临时目录的权限取决于 umask，这里固定为 0700，只考察属主检查。
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let path = root.path().join("auth.json");
         fs::write(&path, b"{}").unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
@@ -244,6 +246,8 @@ mod tests {
     #[test]
     fn unpublished_temporary_is_private_and_removed_on_failure() {
         let root = tempfile::tempdir().unwrap();
+        // 同上，固定目录权限，避免结果随 umask 变化。
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let directory = Directory::open(root.path(), false).unwrap().unwrap();
         let temporary = directory.temporary().unwrap();
         let name = temporary.name.clone();
