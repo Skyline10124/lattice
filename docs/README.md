@@ -50,6 +50,7 @@
 - [ADR 0007](adr/0007-session-tree-as-single-authority.md)：会话树作为会话事实的唯一权威，Step 预留、由 `progress` 给出结论，取消自动关闭；读取时的交付方式由 ADR 0008 取代。
 - [ADR 0008](adr/0008-backend-api-commands-view-queries.md)：本地后台 API 分为命令、视图与查询，按会话推送以节点为单位的对话条目，按轮分页，请求身份由客户端生成，`submit` 只接受新请求；由客户端读取配置与凭据的规则由 ADR 0010 取代。
 - [ADR 0010](adr/0010-protocol-adapters-and-configured-providers.md)：模型接入按协议适配，provider 改为配置，厂商差异用 features 表达；模型写作 `<provider>/<model>`，元数据取自 models.dev，新增推理强度、用量细分与缓存、Responses、Interactions、Sign in with ChatGPT，配置与凭据由后台读取、key 保存在 `auth.json`，会话持有 profile 副本，以及 TUI 的 `/model` 与 `/effort`。
+- [ADR 0011](adr/0011-im-gateway-inside-backend.md)：提议中。IM 网关在本地后台内运行，是与 `lattice-llm` 同层的向外适配；后台核心先与 IPC 传输解耦（纯重构，先于 #315 合并），v1 只接 Telegram 私聊，凭据保存在 `~/.lattice/im/auth.json`，不执行工具。
 - [InvocationStore 历史诊断指南](development/invocation-store-diagnostics.md)：仅解释旧 Git ledger 的测量工具、参数与保留证据，不用于 redb 资格化或当前产品验收。
 
 ADR 的用途与规则承接方式见[文档生命周期](governance/document-lifecycle.md#分类与归属)。
