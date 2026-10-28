@@ -9,17 +9,22 @@ rust-version = "1.94"
 name = "xtask"
 path = "src/main.rs"
 
+[features]
+model-metadata = ["dep:lattice-llm", "dep:tokio"]
+
 [dependencies]
 anyhow = { workspace = true }
 cargo_metadata = "0.19"
 chrono = { workspace = true }
 clap = { workspace = true }
 lancet-protocol = { workspace = true }
+lattice-llm = { workspace = true, optional = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 tempfile = { workspace = true }
+tokio = { workspace = true, optional = true }
 toml = { workspace = true }
 toml_edit = { workspace = true }
 walkdir = "2"

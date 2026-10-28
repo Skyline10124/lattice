@@ -410,26 +410,35 @@ fn build_http_client_for_url(
     url: &str,
     builder: reqwest::ClientBuilder,
 ) -> Result<reqwest::Client, LlmError> {
+    pin_http_client(url, builder)
+        .map_err(llm_error_from_net_guard)?
+        .build()
+        .map_err(|_| LlmError::Config {
+            message: "failed to build HTTP client".into(),
+        })
+}
+
+/// 在 blocking 线程上解析并固定公网地址；精确的 loopback 主机沿用本地连接例外。
+pub(crate) fn pin_http_client(
+    url: &str,
+    builder: reqwest::ClientBuilder,
+) -> Result<reqwest::ClientBuilder, NetGuardError> {
     let Some((host, port)) = parsed_request_host_port(url) else {
-        return Err(LlmError::Config {
-            message: "invalid provider URL".into(),
+        return Err(NetGuardError::Config {
+            message: "invalid HTTP URL".into(),
         });
     };
     if net_guard::host_is_dns_rebinding_domain(&host) {
-        return Err(LlmError::Config {
+        return Err(NetGuardError::Config {
             message: "DNS rebinding hostname is not allowed".into(),
         });
     }
-    let builder = if is_localhost_request_host(&host) {
-        builder
+    if is_localhost_request_host(&host) {
+        Ok(builder)
     } else {
-        let pinned = net_guard::resolve_public_socket_addrs(&host, port)
-            .map_err(llm_error_from_net_guard)?;
-        builder.resolve_to_addrs(host.as_str(), &pinned)
-    };
-    builder.build().map_err(|_| LlmError::Config {
-        message: "failed to build HTTP client".into(),
-    })
+        let pinned = net_guard::resolve_public_socket_addrs(&host, port)?;
+        Ok(builder.resolve_to_addrs(host.as_str(), &pinned))
+    }
 }
 
 /// 本 Turn 的 provider client：解析并校验地址、固定连接目标，并带上协议层重发策略与新建连接日志。
@@ -805,6 +814,36 @@ mod tests {
                     }
                 }
             });
+        }
+    }
+
+    #[test]
+    fn request_pinning_uses_exact_loopback_exceptions_and_rejects_unsafe_addresses() {
+        for url in [
+            "http://localhost:8080/models/m?alt=sse",
+            "https://127.0.0.1:8443/models/m?alt=sse",
+            "http://[::1]:8080/models/m?alt=sse",
+            "https://8.8.8.8/models/m?alt=sse",
+        ] {
+            pin_http_client(url, reqwest::Client::builder())
+                .unwrap()
+                .build()
+                .unwrap();
+        }
+        for url in [
+            "https://10.0.0.1/models/m?alt=sse",
+            "https://127.0.0.2/models/m?alt=sse",
+            "https://[fc00::1]/models/m?alt=sse",
+            "https://[2001:db8::1]/models/m?alt=sse",
+            "https://127.0.0.1.nip.io/models/m?alt=sse",
+        ] {
+            assert!(
+                matches!(
+                    pin_http_client(url, reqwest::Client::builder()),
+                    Err(NetGuardError::Config { .. })
+                ),
+                "{url}"
+            );
         }
     }
 

@@ -99,7 +99,7 @@ provider 配置、凭据与模型元数据是用户级的全局状态，由后�
 | `base_url` | endpoint | 必填；不含用户名密码、query 与 fragment；非 loopback 地址必须是 `https`；最长 8,192 字节 |
 | `auth` | 认证方式 | 默认随协议；`oauth:chatgpt` 只用于内置的 `chatgpt` |
 | `features` | 见 [features](#features) | 只能取该协议已定义的 feature 与取值 |
-| `catalog` | 对应的 models.dev provider 条目 | 可选；只用于取元数据 |
+| `catalog` | 对应的 models.dev provider 条目 | 可选；只用于取元数据。可以是 models.dev 的任意 provider 条目，不限于内置表中出现的；models.dev 中没有这个条目时，这个 provider 没有元数据，不按错误处理 |
 | `models` | 按模型手写的元数据与 features 覆盖 | 可选 |
 
 ### 内置 provider 表
@@ -238,10 +238,10 @@ feature 由协议适配器的代码定义，配置只能在已有取值中选择
 | 来源 | 内容 | 更新 |
 | --- | --- | --- |
 | 内置快照 | xtask 从 models.dev 生成，只含内置表 `catalog` 所列的条目 | 随版本发布，变化在 PR 中审查 |
-| 缓存 `cache/models.json` | 后台从 `https://models.dev/api.json` 拉取并按快照的规则过滤 | 后台启动时与此后每 24 小时；`lattice models refresh` 立即刷新 |
+| 缓存 `cache/models.json` | 后台从 `https://models.dev/api.json` 拉取，保留内置表与 `providers.toml` 中 `catalog` 所列的条目，字段规则与快照相同 | 后台启动时与此后每 24 小时；`lattice models refresh` 立即刷新 |
 | `providers.toml` 的 `models` | 用户手写 | 用户编辑 |
 
-- **选择来源。** 缓存存在且能解析时整份使用缓存，否则使用内置快照；缓存中缺少某个 `catalog` 条目时，这个条目使用快照。手写的元数据按字段覆盖上述结果，只写在 `providers.toml` 中的模型由手写值单独构成。
+- **选择来源。** 缓存存在且能解析时整份使用缓存，否则使用内置快照；缓存中缺少某个 `catalog` 条目时，这个条目使用快照。`providers.toml` 中的 `catalog` 在缓存与快照中都没有时，要等下一次刷新才有元数据；在此之前，以及 models.dev 中没有这个条目时，这个 provider 只有手写的元数据。手写的元数据按字段覆盖上述结果，只写在 `providers.toml` 中的模型由手写值单独构成。
 - **保留的字段。** 模型 `id`、`name`、`limit.context`、`limit.output`、`reasoning`、`reasoning_options`、`tool_call`、`modalities.input`、`cost.input`、`cost.output`、`cost.cache_read`、`cost.cache_write`、`cost.reasoning` 与 `status`。其余字段丢弃。
 - **没有过期的概念。** 缓存旧了只影响列表与价格的准确性，不影响请求发往哪里，不提示过期。
 - **刷新失败**只记日志，继续使用上一份数据；`lattice models refresh` 把失败原因返回给用户。拉取使用 HTTPS 与固定地址的连接，响应最多 32 MiB，30 秒内没有读完即放弃。新缓存先写临时文件再改名替换。
@@ -253,6 +253,7 @@ feature 由协议适配器的代码定义，配置只能在已有取值中选择
 
 - provider 来自内置表与 `providers.toml`，模型来自上述合并结果；`chatgpt` 只列出[账号模型列表](#账号模型列表)中的模型。
 - `status` 为 `deprecated` 的模型不列出，仍可按名字使用。
+- provider 写了 `catalog`，元数据中却没有对应条目时，候选查询为它给出提示。
 - 每个候选带上下文窗口、输出上限、可用的推理档位、价格，以及凭据是否就绪（`auth = "none"` 的 provider 总是就绪）。
 
 ## 推理档位
@@ -464,7 +465,7 @@ Turn deadline 的范围由[会话合同](session.md#输入与传输限制)维护
 | 各协议的请求体与流式事件：文字、推理、多个工具调用、用量、错误事件 | `cargo test -p lattice-llm`，夹具取自官方文档 |
 | 每个 feature 取值的请求体，默认值与标准协议形状一致 | 同上 |
 | provider 注册表：内置表与 `providers.toml` 的合并、严格解析、`chatgpt` 不能改写、非 loopback 必须 HTTPS | 同上 |
-| 元数据：来源的选择与按字段覆盖、只保留列出的字段、刷新失败继续使用上一份 | 同上 |
+| 元数据：来源的选择与按字段覆盖、只保留列出的字段、缓存保留 `providers.toml` 中的 `catalog` 条目、刷新失败继续使用上一份 | 同上 |
 | 档位：可用档位的推导、按 token 数的预算、各协议的映射、不支持的档位被拒绝 | 同上 |
 | 用量换算与费用估算，包括缺失项 | 同上 |
 | `auth.json`：权限检查、原子写入、严格解析、凭据不进入日志与公开输出 | 同上 |
