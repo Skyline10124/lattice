@@ -13,7 +13,6 @@ mod builtins;
 pub(crate) mod config;
 mod model_ref;
 
-pub(crate) use model_ref::validate_provider_id;
 pub use model_ref::{ModelRef, ModelRefError};
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]

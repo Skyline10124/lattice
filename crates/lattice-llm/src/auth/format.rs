@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+use lattice_conversation::validate_provider_id;
 use serde::de::{MapAccess, Visitor, value::MapAccessDeserializer};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -130,8 +131,7 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Document, AuthError> {
         return Err(AuthError::InvalidFile("unsupported version (expected 1)"));
     }
     for (id, credential) in &document.providers {
-        crate::provider::validate_provider_id(id)
-            .map_err(|_| AuthError::InvalidFile("invalid provider id"))?;
+        validate_provider_id(id).map_err(|_| AuthError::InvalidFile("invalid provider id"))?;
         match credential {
             Credential::ApiKey { key } => {
                 if id == "chatgpt" {
