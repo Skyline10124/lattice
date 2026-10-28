@@ -116,7 +116,7 @@ impl ProviderRegistry {
 
         let mut registry = Self::builtins();
         for (id, raw) in raw.providers {
-            model_ref::validate_provider_id(id.get_ref())
+            lattice_conversation::validate_provider_id(id.get_ref())
                 .map_err(|error| error_at(id.span().start, error.to_string()))?;
             let offset = id.span().start;
             let raw = raw.into_inner().0;

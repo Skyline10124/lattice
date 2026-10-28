@@ -10,16 +10,8 @@ use lattice_conversation::{
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) fn provider_id(id: &str) -> Result<()> {
-    if id.is_empty()
-        || id.len() > 64
-        || !id.as_bytes()[0].is_ascii_lowercase() && !id.as_bytes()[0].is_ascii_digit()
-        || !id
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-    {
-        return Err(invalid("provider", "invalid provider id"));
-    }
-    Ok(())
+    lattice_conversation::validate_provider_id(id)
+        .map_err(|error| invalid("provider", &error.to_string()))
 }
 
 pub(super) fn attempt_origin(origin: &AttemptOrigin, provider: &str) -> Result<()> {

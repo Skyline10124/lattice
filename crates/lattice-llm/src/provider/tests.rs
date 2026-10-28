@@ -3,6 +3,8 @@
 
 use std::{collections::BTreeSet, fs};
 
+use lattice_conversation::{MAX_PROVIDER_ID_BYTES, validate_provider_id};
+
 use crate::protocol::{
     Cache, ChatCompletionsFeatures, EffortParam, Features, MessagesFeatures, Protocol,
     ReasoningReplay, ThinkingBudget, ThinkingToggle,
@@ -10,7 +12,7 @@ use crate::protocol::{
 
 use super::{
     config::{MAX_MODELS_PER_PROVIDER, MAX_PROVIDERS, MAX_PROVIDERS_FILE_BYTES, ProviderRegistry},
-    model_ref::{MAX_MODEL_ID_BYTES, MAX_PROVIDER_ID_BYTES, validate_provider_id},
+    model_ref::MAX_MODEL_ID_BYTES,
     *,
 };
 
@@ -642,29 +644,11 @@ fn model_reference_splits_once_and_round_trips() {
 }
 
 #[test]
-fn provider_ids_enforce_alphabet_and_inclusive_length_limit() {
-    for id in [
-        "a".to_owned(),
-        "0".to_owned(),
-        "a-b-9-".to_owned(),
-        "a".repeat(MAX_PROVIDER_ID_BYTES),
-    ] {
-        validate_provider_id(&id).unwrap();
-        ModelRef::parse(&format!("{id}/model")).unwrap();
-    }
-    for id in [
-        "".to_owned(),
-        "-a".to_owned(),
-        "A".to_owned(),
-        "a_b".to_owned(),
-        "a.b".to_owned(),
-        "a b".to_owned(),
-        "é".to_owned(),
-        "a/".to_owned(),
-        "a".repeat(MAX_PROVIDER_ID_BYTES + 1),
-    ] {
-        assert!(validate_provider_id(&id).is_err(), "{id:?}");
-    }
+fn model_reference_preserves_provider_id_validation_errors() {
+    assert_eq!(
+        ModelRef::parse("bad_id/model").unwrap_err().to_string(),
+        "provider id must contain only [a-z0-9-]"
+    );
 }
 
 #[test]
@@ -674,7 +658,6 @@ fn model_reference_rejects_missing_parts_invalid_provider_and_control_characters
         "openai",
         "/model",
         "openai/",
-        "bad_id/model",
         "openai/m\0",
         "openai/m\u{7f}",
         "openai/m\u{85}",
