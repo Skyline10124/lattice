@@ -20,7 +20,7 @@ use tokio::{
 };
 use zeroize::Zeroizing;
 
-const MAGIC: &[u8; 8] = b"LTLOCAL4";
+const MAGIC: &[u8; 8] = b"LTLOCAL5";
 pub(super) const MAX_FRAME: usize = 16 * 1024 * 1024;
 pub(super) const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -373,12 +373,13 @@ mod frame_tests {
     use super::*;
 
     #[tokio::test]
-    async fn v4_accepts_current_frames_and_rejects_old_empty_and_oversized_frames() {
+    async fn v5_accepts_current_frames_and_rejects_old_empty_and_oversized_frames() {
         for (magic, length, payload, valid) in [
-            (*b"LTLOCAL4", 4_u32, b"null".as_slice(), true),
+            (*b"LTLOCAL5", 4_u32, b"null".as_slice(), true),
+            (*b"LTLOCAL4", 4, b"null".as_slice(), false),
             (*b"LTLOCAL2", 4, b"null".as_slice(), false),
-            (*b"LTLOCAL4", 0, b"".as_slice(), false),
-            (*b"LTLOCAL4", (MAX_FRAME + 1) as u32, b"".as_slice(), false),
+            (*b"LTLOCAL5", 0, b"".as_slice(), false),
+            (*b"LTLOCAL5", (MAX_FRAME + 1) as u32, b"".as_slice(), false),
         ] {
             let (mut sender, mut receiver) = UnixStream::pair().unwrap();
             sender.write_all(&magic).await.unwrap();

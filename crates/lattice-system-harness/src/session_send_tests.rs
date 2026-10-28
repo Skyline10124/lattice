@@ -491,7 +491,7 @@ fn view_state_appends_text_and_rejects_regression() {
 #[test]
 fn view_state_keeps_written_facts_and_allows_repeated_values() {
     let executing = json!({"progress":"executing"});
-    let attempt = json!({"attempt":0,"origin":"primary","usage":null,
+    let attempt = json!({"attempt":0,"origin":{"protocol":"chat-completions","provider_id":"primary"},"usage":null,
         "progress":{"progress":"ended","end":{"end":"completed"},"diagnostic":null},
         "end":{"end":"completed","step":{"turn_id":"t","model_step_ordinal":0}},"retry_delay_ms":null});
     let slot = |id: &str, state: &str, outcome: &str| {
@@ -511,6 +511,17 @@ fn view_state_keeps_written_facts_and_allows_repeated_values() {
         slot("a", "terminal", "succeeded"),
         slot("b", "registered", "not_executed")
     ]);
+    for origin in [
+        json!(null),
+        json!({"provider_id":"primary"}),
+        json!({"protocol":"chat-completions"}),
+        json!({"protocol":"unknown","provider_id":"primary"}),
+        json!({"protocol":"chat-completions","provider_id":"Bad_id"}),
+    ] {
+        let mut invalid = base.clone();
+        invalid["step"]["attempts"][0]["origin"] = origin;
+        assert!(parse_record(&invalid).is_err());
+    }
     let parsed = |value: &Value| parse_record(value).unwrap();
     // 记录去掉 `type` 后就是历史查询给出的同一个 Entry。
     let SendRecord::Entry(entry) = parsed(&base) else {

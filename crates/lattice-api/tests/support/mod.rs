@@ -9,9 +9,10 @@ use lattice_conversation::{
     MessagePart, MessageRole, MessageSemantic, NativeMessage, ProviderOrigin, UnboundToolCall,
 };
 use lattice_session::store::{
-    AcceptSession, AcceptTurn, AgentSelection, CloseStep, CompleteReply, DispatchStop,
-    FrozenTurnConfig, SessionExecutionLock, SessionStore, StartedInvocation, StepKey,
-    TerminalInput, ToolCatalogEntry, ToolCatalogSnapshot, TurnExecutionLimits, prepare_terminal,
+    AcceptSession, AcceptTurn, AgentSelection, AttemptOrigin, AttemptProtocol, CloseStep,
+    CompleteReply, DispatchStop, FrozenTurnConfig, SessionExecutionLock, SessionStore,
+    StartedInvocation, StepKey, TerminalInput, ToolCatalogEntry, ToolCatalogSnapshot,
+    TurnExecutionLimits, prepare_terminal,
 };
 
 mod git_fixture;
@@ -127,7 +128,7 @@ impl ReservedClient {
                     config: FrozenTurnConfig {
                         agent_name: "test".into(),
                         model: "test".into(),
-                        provider: "openai_compatible".into(),
+                        provider: "openai-compatible".into(),
                         system_prompt: None,
                         catalog: self.catalog.clone(),
                         limits: TurnExecutionLimits {
@@ -144,8 +145,12 @@ impl ReservedClient {
             model_step_ordinal: 0,
             attempt_ordinal: 0,
         };
+        let origin = AttemptOrigin {
+            protocol: AttemptProtocol::ChatCompletions,
+            provider_id: "openai-compatible".into(),
+        };
         self.store
-            .start_request(&lock, key, chrono::Utc::now())
+            .start_request(&lock, key, origin.clone(), chrono::Utc::now())
             .unwrap();
         let registered = self
             .store
@@ -153,7 +158,7 @@ impl ReservedClient {
                 &lock,
                 CompleteReply {
                     key,
-                    origin: ProviderOrigin::OpenAiCompatible,
+                    origin,
                     usage: None,
                     message: NativeMessage::new(
                         MessageRole::Assistant,

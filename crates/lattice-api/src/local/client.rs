@@ -416,7 +416,7 @@ mod tests {
             &serde_json::json!({"message_id":0,"offset":0,"json_fragment":json,"complete":true}),
         )
         .unwrap();
-        writer.write_all(b"CAL4").await.unwrap();
+        writer.write_all(b"CAL5").await.unwrap();
         writer.write_u32(payload.len() as u32).await.unwrap();
         writer.write_all(&payload).await.unwrap();
         assert!(matches!(

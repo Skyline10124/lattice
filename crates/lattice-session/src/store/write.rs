@@ -418,10 +418,12 @@ impl SessionStore {
         &self,
         lock: &SessionExecutionLock,
         key: ModelAttemptKey,
+        origin: AttemptOrigin,
         now: Timestamp,
     ) -> Result<()> {
         self.write(lock, Selection::Turn(key.turn_id), |r, _| {
             let (node_id, config, mut step) = r.active_step(lock.session_id, key.turn_id)?;
+            validate::attempt_origin(&origin, &config.provider)?;
             if key.model_step_ordinal >= MAX_MODEL_STEPS
                 || key.attempt_ordinal >= config.limits.max_model_attempts
             {
@@ -452,6 +454,7 @@ impl SessionStore {
             }
             *progress = StepProgress::Requesting;
             attempts.push(AttemptRecord {
+                origin,
                 usage: None,
                 progress: AttemptProgress::Sent,
                 retry_delay_ms: None,
@@ -478,9 +481,6 @@ impl SessionStore {
         }
         self.write(lock, Selection::Turn(input.key.turn_id), |r, _| {
             let (node_id, config, mut step) = r.requesting(lock.session_id, input.key)?;
-            if input.origin != validate::provider(&config.provider)? {
-                return Err(invalid("origin", "attempt provider mismatch"));
-            }
             let Node::Step {
                 progress,
                 attempts,
@@ -499,6 +499,9 @@ impl SessionStore {
                 ));
             }
             let last = attempts.last_mut().expect("sent attempt exists");
+            if input.origin != last.origin {
+                return Err(invalid("origin", "attempt source mismatch"));
+            }
             last.usage = input.usage;
             last.progress = AttemptProgress::Ended {
                 end: AttemptEnd::Stopped {
@@ -546,14 +549,12 @@ impl SessionStore {
         }
         self.write(lock, Selection::Turn(reply.key.turn_id), |r, tx| {
             let (node_id, config, mut step) = r.requesting(lock.session_id, reply.key)?;
-            if reply.origin != validate::provider(&config.provider)?
-                || reply
-                    .message
-                    .provider_origin
-                    .is_some_and(|p| p != reply.origin)
+            if let Node::Step { attempts, .. } = &step
+                && attempts.last().expect("sent attempt exists").origin != reply.origin
             {
-                return Err(invalid("origin", "reply provider mismatch"));
+                return Err(invalid("origin", "reply source mismatch"));
             }
+            validate::reply_protocol(&reply.origin, &reply.message)?;
             let mut seen = BTreeSet::new();
             let index = tx.open_table(codec::INDEX).map_err(codec::table_error)?;
             let mut collisions = Vec::new();
@@ -774,15 +775,13 @@ impl SessionStore {
                 if reply.message.tool_calls().next().is_some() {
                     return Err(invalid("reply", "finish must have no calls"));
                 }
-                let (node_id, config, mut step) = r.requesting(lock.session_id, reply.key)?;
-                if reply.origin != validate::provider(&config.provider)?
-                    || reply
-                        .message
-                        .provider_origin
-                        .is_some_and(|p| p != reply.origin)
+                let (node_id, _, mut step) = r.requesting(lock.session_id, reply.key)?;
+                if let Node::Step { attempts, .. } = &step
+                    && attempts.last().expect("sent attempt exists").origin != reply.origin
                 {
-                    return Err(invalid("origin", "reply provider mismatch"));
+                    return Err(invalid("origin", "reply source mismatch"));
                 }
+                validate::reply_protocol(&reply.origin, &reply.message)?;
                 let completed = close::completed(&reply);
                 let message = reply
                     .message

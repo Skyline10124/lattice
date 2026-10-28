@@ -13,7 +13,7 @@ use lattice_agent::{
     ModelStepAttempt, ModelStepDriver, ModelStepError, ModelStepEvent, ModelStepRequest,
     ModelStopCause,
 };
-use lattice_conversation::{ConversationItem, ProviderOrigin};
+use lattice_conversation::ConversationItem;
 use lattice_session::store::*;
 use std::sync::{
     Arc,
@@ -34,6 +34,7 @@ fn retry_after_allowed(wait: Duration, deadline: Instant) -> bool {
 }
 
 pub(crate) struct LiveExecution {
+    pub provider: lattice_llm::ProviderKind,
     pub driver: Arc<ModelStepDriver>,
     pub runtime: Arc<lancet_api::LancetRuntime>,
     pub events: tokio::sync::mpsc::UnboundedReceiver<lancet_protocol::ToolEvent>,
@@ -119,18 +120,7 @@ pub(crate) async fn run_coordinator_saga(
         .io
         .read(move |read| read.turn_config(session, turn_id))
         .await?;
-    let origin = match config.provider.as_str() {
-        "openai" | "openai_compatible" => ProviderOrigin::OpenAiCompatible,
-        "anthropic" => ProviderOrigin::Anthropic,
-        "gemini" => ProviderOrigin::Gemini,
-        _ => {
-            return Err(StoreError::InvalidInput {
-                field: "provider",
-                detail: "unknown frozen provider".into(),
-            }
-            .into());
-        }
-    };
+    let (origin, message_origin) = super::live::provider_origin(&live.provider);
     let tools = config
         .catalog
         .entries
@@ -173,7 +163,7 @@ pub(crate) async fn run_coordinator_saga(
                 model_step_ordinal: ordinal,
                 attempt_ordinal: attempt,
             };
-            coordinator.io.start_request(key).await?;
+            coordinator.io.start_request(key, origin.clone()).await?;
             #[cfg(feature = "test-crash-barriers")]
             super::crash_barrier::hit(
                 &coordinator.io,
@@ -185,7 +175,7 @@ pub(crate) async fn run_coordinator_saga(
             .await?;
             live.observer.emit(TurnEvent::ModelStarted {
                 key,
-                provider: origin,
+                provider: message_origin,
                 model: config.model.clone(),
             });
             let cancellation = Arc::new(AtomicBool::new(live.cancel.load(Ordering::Acquire)));
@@ -261,7 +251,7 @@ pub(crate) async fn run_coordinator_saga(
                     });
                     break CompleteReply {
                         key,
-                        origin,
+                        origin: origin.clone(),
                         message,
                         usage,
                     };
@@ -272,7 +262,7 @@ pub(crate) async fn run_coordinator_saga(
                     diagnostic,
                 }) => AttemptStopped {
                     key,
-                    origin,
+                    origin: origin.clone(),
                     usage,
                     retry_delay_ms: None,
                     cause: map_stop(cause),
@@ -292,7 +282,7 @@ pub(crate) async fn run_coordinator_saga(
                     retry_after = hint;
                     AttemptStopped {
                         key,
-                        origin,
+                        origin: origin.clone(),
                         usage: None,
                         retry_delay_ms: None,
                         cause: StopCause::ProviderError {
@@ -307,7 +297,7 @@ pub(crate) async fn run_coordinator_saga(
                 }
                 Err(ModelStepError::Projection(_)) => AttemptStopped {
                     key,
-                    origin,
+                    origin: origin.clone(),
                     usage: None,
                     retry_delay_ms: None,
                     cause: StopCause::ProviderError { retryable: false },
@@ -374,7 +364,7 @@ pub(crate) async fn run_coordinator_saga(
                     .io
                     .stop_attempt(AttemptStopped {
                         key,
-                        origin,
+                        origin: origin.clone(),
                         usage,
                         retry_delay_ms: None,
                         cause: StopCause::InvalidBatch,

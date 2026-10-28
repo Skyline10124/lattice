@@ -78,11 +78,14 @@ fn provider_failure(name: &str, test: &str, script: SseScript, partial: bool) {
         failed(&outcome, "provider_error")?;
         require(server.captured_requests().len() == 1, "no provider retry")?;
         require(detail.is_clean_exit(0), "failed Turn remains readable")?;
+        let persisted: Value = serde_json::from_slice(&detail.stdout).unwrap();
         require(
-            same_turn(
-                &final_turn(&outcome),
-                &serde_json::from_slice::<Value>(&detail.stdout).unwrap(),
-            ),
+            persisted["steps"][0]["attempts"][0]["origin"]
+                == serde_json::json!({"protocol":"chat-completions","provider_id":"openai-compatible"}),
+            "failed attempt records protocol and provider id",
+        )?;
+        require(
+            same_turn(&final_turn(&outcome), &persisted),
             "reloaded detail equals the live Step entries",
         )?;
         let entries = outcome.entries();

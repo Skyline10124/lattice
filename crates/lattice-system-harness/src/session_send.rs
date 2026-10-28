@@ -489,7 +489,28 @@ fn step_detail(value: &Value) -> Result<(Vec<AttemptState>, Vec<Slot>), String> 
     let mut attempts = Vec::new();
     for attempt in array(value, "attempts")? {
         uint(attempt, "attempt")?;
-        string(attempt, "origin")?;
+        let origin = &attempt["origin"];
+        if !matches!(
+            string(origin, "protocol")?,
+            "chat-completions"
+                | "responses"
+                | "anthropic-messages"
+                | "generate-content"
+                | "interactions"
+        ) {
+            return Err("unknown attempt protocol".into());
+        }
+        let provider = string(origin, "provider_id")?;
+        if provider.is_empty()
+            || provider.len() > 64
+            || !provider.as_bytes()[0].is_ascii_lowercase()
+                && !provider.as_bytes()[0].is_ascii_digit()
+            || !provider
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        {
+            return Err("invalid attempt provider id".into());
+        }
         usage(attempt.get("usage").ok_or("missing usage")?)?;
         attempts.push(match string(&attempt["progress"], "progress")? {
             "sent" => AttemptState::Sent,

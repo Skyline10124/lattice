@@ -135,7 +135,6 @@ fn slot_detail(slot: &InvocationSlot) -> SlotDetail {
 fn attempt(
     index: usize,
     a: &AttemptRecord,
-    origin: lattice_conversation::ProviderOrigin,
     address: lancet_protocol::ModelMessageAddress,
 ) -> AttemptDetail {
     let progress = match &a.progress {
@@ -155,7 +154,7 @@ fn attempt(
     };
     AttemptDetail {
         attempt: index as u32,
-        origin,
+        origin: a.origin.clone(),
         usage: a.usage,
         progress,
         end,
@@ -163,12 +162,7 @@ fn attempt(
     }
 }
 
-fn detail(
-    session_id: SessionId,
-    origin: lattice_conversation::ProviderOrigin,
-    node: NodeId,
-    step: &Node,
-) -> Result<StepDetail> {
+fn detail(session_id: SessionId, node: NodeId, step: &Node) -> Result<StepDetail> {
     let Node::Step {
         turn_id,
         step_ordinal,
@@ -193,18 +187,20 @@ fn detail(
             .iter()
             .enumerate()
             .map(|(index, a)| {
-                attempt(
+                validate::provider_id(&a.origin.provider_id).map_err(|_| {
+                    corrupt("nodes", &node.0.to_string(), "invalid attempt provider id")
+                })?;
+                Ok(attempt(
                     index,
                     a,
-                    origin,
                     lancet_protocol::ModelMessageAddress {
                         session_id,
                         turn_id: *turn_id,
                         model_step_ordinal: *step_ordinal,
                     },
-                )
+                ))
             })
-            .collect(),
+            .collect::<Result<_>>()?,
         slots: slots.iter().map(slot_detail).collect(),
         updated_at: *updated_at,
     })
@@ -226,12 +222,7 @@ fn positive_turns(turns: u32) -> Result<()> {
     }
 }
 
-fn step_entry(
-    session: SessionId,
-    node: NodeId,
-    content: Node,
-    origin: lattice_conversation::ProviderOrigin,
-) -> Result<ConversationEntry> {
+fn step_entry(session: SessionId, node: NodeId, content: Node) -> Result<ConversationEntry> {
     let Node::Step {
         progress,
         attempts,
@@ -251,7 +242,7 @@ fn step_entry(
     } else {
         Some(close::summary(progress, attempts, slots)?)
     };
-    let step = detail(session, origin, node, &content)?;
+    let step = detail(session, node, &content)?;
     let retries = content.retry_notices()?;
     Ok(ConversationEntry::Step {
         node,
@@ -267,16 +258,15 @@ fn entries(
     path: Vec<(NodeId, Node)>,
     mut ordinal: u64,
 ) -> Result<Vec<ConversationEntry>> {
-    let mut origin = None;
+    let mut has_user = false;
     let mut entries = Vec::new();
     for (node, content) in path {
         match &content {
             Node::UserMessage { provider, .. } => {
                 ordinal += 1;
-                origin = Some(
-                    validate::provider(provider)
-                        .map_err(|_| corrupt("nodes", &node.0.to_string(), "unknown provider"))?,
-                );
+                validate::provider_id(provider)
+                    .map_err(|_| corrupt("nodes", &node.0.to_string(), "invalid provider id"))?;
+                has_user = true;
                 entries.push(ConversationEntry::UserMessage {
                     node,
                     content,
@@ -284,14 +274,14 @@ fn entries(
                 });
             }
             Node::Step { .. } => {
-                entries.push(step_entry(
-                    session,
-                    node,
-                    content,
-                    origin.ok_or_else(|| {
-                        corrupt("nodes", &node.0.to_string(), "step has no user ancestor")
-                    })?,
-                )?);
+                if !has_user {
+                    return Err(corrupt(
+                        "nodes",
+                        &node.0.to_string(),
+                        "step has no user ancestor",
+                    ));
+                }
+                entries.push(step_entry(session, node, content)?);
             }
             Node::Root => {}
         }
@@ -335,7 +325,6 @@ impl Records {
             turn_id,
             accepted_at,
             agent_name,
-            provider,
             ..
         }) = self.nodes.get(&(s, user_ref.node))
         else {
@@ -364,11 +353,9 @@ impl Records {
             Node::Step { attempts, .. } => attempts.as_slice(),
             _ => &[],
         }));
-        let origin = validate::provider(provider)
-            .map_err(|_| corrupt("nodes", &t.to_string(), "unknown provider"))?;
         let steps = raw_steps
             .iter()
-            .map(|(node_id, node)| detail(s, origin, *node_id, node))
+            .map(|(node_id, node)| detail(s, *node_id, node))
             .collect::<Result<Vec<_>>>()?;
         Ok(TurnDetail {
             turn_id: *turn_id,
@@ -694,9 +681,9 @@ impl SessionRead {
                         "expected user message",
                     ));
                 };
-                let origin = validate::provider(&provider)
-                    .map_err(|_| corrupt("nodes", &user.0.to_string(), "unknown provider"))?;
-                step_entry(node.session_id, node.node, content, origin)
+                validate::provider_id(&provider)
+                    .map_err(|_| corrupt("nodes", &user.0.to_string(), "invalid provider id"))?;
+                step_entry(node.session_id, node.node, content)
             }
         }
     }

@@ -43,8 +43,9 @@ pub use limits::{
     validate_assistant_bounds,
 };
 pub use message::{
-    MAX_OPAQUE_REPLAY_STATE_BYTES, MessagePart, MessageRole, MessageSemantic, NativeMessage,
-    OpaqueProviderState, OpaqueReplayStateError, ProviderOrigin, ToolCallState,
+    MAX_OPAQUE_REPLAY_STATE_BYTES, MAX_PROVIDER_ID_BYTES, MessagePart, MessageRole,
+    MessageSemantic, NativeMessage, OpaqueProviderState, OpaqueReplayStateError, ProviderIdError,
+    ProviderOrigin, ToolCallState, validate_provider_id,
 };
 pub use outcome::ToolResultOutcome;
 pub use result::{

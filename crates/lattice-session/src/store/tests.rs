@@ -31,7 +31,8 @@ fn oversized_complete_replies_are_rejected_without_partial_records() {
     let (_dir, layout, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
     db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
-    db.start_request(&lock, key(tid(1), 0, 0), now()).unwrap();
+    db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
+        .unwrap();
     for registration in [true, false] {
         for case in 0..if registration { 6 } else { 3 } {
             let mut input = reply(key(tid(1), 0, 0), usize::from(registration));
@@ -123,7 +124,8 @@ fn reply_total_includes_names_and_ids_with_an_exact_boundary_control() {
     let (_dir, layout, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
     db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
-    db.start_request(&lock, key(tid(1), 0, 0), now()).unwrap();
+    db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
+        .unwrap();
     let input = |extra| {
         let mut input = reply(key(tid(1), 0, 0), 16);
         input
@@ -244,6 +246,13 @@ fn accept(s: SessionId, t: TurnId) -> AcceptTurn {
     }
 }
 
+fn origin() -> AttemptOrigin {
+    AttemptOrigin {
+        protocol: AttemptProtocol::ChatCompletions,
+        provider_id: "openai".into(),
+    }
+}
+
 fn reply(k: ModelAttemptKey, count: usize) -> CompleteReply {
     let mut parts = vec![MessagePart::semantic_only(MessageSemantic::Text {
         text: "正文🌳".into(),
@@ -265,7 +274,7 @@ fn reply(k: ModelAttemptKey, count: usize) -> CompleteReply {
     }
     CompleteReply {
         key: k,
-        origin: ProviderOrigin::OpenAiCompatible,
+        origin: origin(),
         usage: Some(TokenUsage {
             prompt_tokens: 2,
             completion_tokens: 3,
@@ -282,7 +291,7 @@ fn reply(k: ModelAttemptKey, count: usize) -> CompleteReply {
 fn stopped(k: ModelAttemptKey, cause: StopCause) -> AttemptStopped {
     AttemptStopped {
         key: k,
-        origin: ProviderOrigin::OpenAiCompatible,
+        origin: origin(),
         usage: None,
         diagnostic: AttemptDiagnostic {
             provider_error: matches!(cause, StopCause::ProviderError { .. })
@@ -311,7 +320,8 @@ fn running(
 ) -> (SessionExecutionLock, RegisteredCalls) {
     let lock = db.try_lock_session(s).unwrap();
     db.accept_turn(&lock, accept(s, t)).unwrap();
-    db.start_request(&lock, key(t, 0, 0), now()).unwrap();
+    db.start_request(&lock, key(t, 0, 0), origin(), now())
+        .unwrap();
     let calls = db
         .register_calls(
             &lock,
@@ -556,7 +566,8 @@ fn deep_arguments_are_rejected_before_commit() {
     let (_dir, layout, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
     db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
-    db.start_request(&lock, key(tid(1), 0, 0), now()).unwrap();
+    db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
+        .unwrap();
     let before = load_read(&db.begin_read().unwrap().tx).unwrap();
     let mut input = reply(key(tid(1), 0, 0), 1);
     let json = format!("{}0{}", "{\"a\":".repeat(126), "}".repeat(126));
@@ -1078,7 +1089,7 @@ fn schema_and_legacy_rejection_matrix() {
             assert!(!layout.lattice_root().join("lattice.redb").exists());
         }
     }
-    for case in 0..5 {
+    for case in 0..6 {
         let (_d, layout, db) = store();
         drop(db);
         let raw = redb::Database::open(layout.lattice_root().join("lattice.redb")).unwrap();
@@ -1110,6 +1121,20 @@ fn schema_and_legacy_rejection_matrix() {
             3 => {
                 tx.delete_table(CONFIGS).unwrap();
             }
+            4 => {
+                let mut meta = tx.open_table(META).unwrap();
+                // 固定的 v3 元信息与空表构成旧格式库，编码独立于当前版本常量。
+                for (key, bytes) in [
+                    (
+                        "store_kind",
+                        b"\x00\x00\x00\x03\"lattice-session\"".as_slice(),
+                    ),
+                    ("store_format_version", b"\x00\x00\x00\x033".as_slice()),
+                    ("last_change_seq", b"\x00\x00\x00\x030".as_slice()),
+                ] {
+                    meta.insert(key, bytes).unwrap();
+                }
+            }
             _ => {
                 tx.open_table(META)
                     .unwrap()
@@ -1119,7 +1144,18 @@ fn schema_and_legacy_rejection_matrix() {
         }
         tx.commit().unwrap();
         drop(raw);
-        assert!(SessionStore::open(&layout).is_err(), "case {case}");
+        let error = SessionStore::open(&layout)
+            .err()
+            .unwrap_or_else(|| panic!("case {case}"));
+        if case == 4 {
+            let path = layout.lattice_root().join("lattice.redb");
+            assert!(error.to_string().contains(&path.display().to_string()));
+            assert!(matches!(
+                error,
+                StoreError::UnsupportedVersion { path: found_path, found: 3, supported: 4, .. }
+                    if found_path == path
+            ));
+        }
     }
     let (_d, layout, db) = store();
     assert!(matches!(
@@ -1184,7 +1220,7 @@ fn keys_versions_and_encoding() {
         decode::<Node>("nodes", "0", &encode(&Node::Root).unwrap()).unwrap(),
         Node::Root
     );
-    for version in [0, 1, 2, VERSION + 1, u32::MAX] {
+    for version in (0..VERSION).chain([VERSION + 1, u32::MAX]) {
         let mut bytes = version.to_be_bytes().to_vec();
         bytes.extend(b"{\"kind\":\"root\"}");
         let error = attach_path(
@@ -1214,6 +1250,14 @@ fn keys_versions_and_encoding() {
         assert!(decode::<Node>("nodes", "0", &bytes).is_err());
     }
     let (_d, _l, db) = store();
+    {
+        let read = db.begin_read().unwrap();
+        let meta = read.tx.open_table(META).unwrap();
+        assert_eq!(
+            meta.get("store_format_version").unwrap().unwrap().value(),
+            b"\x00\x00\x00\x044"
+        );
+    }
     let (_lock, calls) = running(&db, sid(1), tid(1), 1, 1);
     let r = records(&db);
     assert_eq!(
@@ -1274,6 +1318,7 @@ fn nested_unknown_fields_are_rejected() {
     );
     let original = serde_json::to_value(node_at(&db, 2)).unwrap();
     for pointer in [
+        "/attempts/0/origin",
         "/attempts/0/usage",
         "/attempts/0/progress",
         "/attempts/0/progress/end",
@@ -1302,6 +1347,21 @@ fn nested_unknown_fields_are_rejected() {
             "{pointer}"
         );
     }
+    for pointer in [
+        "/attempts/0/origin",
+        "/attempts/0/origin/protocol",
+        "/attempts/0/origin/provider_id",
+    ] {
+        let mut value = original.clone();
+        *value.pointer_mut(pointer).unwrap() = serde_json::Value::Null;
+        assert!(
+            decode::<Node>("nodes", "2", &encode(&value).unwrap()).is_err(),
+            "{pointer}"
+        );
+    }
+    let mut value = original.clone();
+    value["attempts"][0]["origin"]["protocol"] = json!("unknown");
+    assert!(decode::<Node>("nodes", "2", &encode(&value).unwrap()).is_err());
     let mut extended = original;
     extended
         .pointer_mut("/slots/0/progress/evidence/value/admission")
@@ -1430,6 +1490,7 @@ fn progress_conclusions_and_stop_precedence() {
         );
     }
     let mut attempt = AttemptRecord {
+        origin: origin(),
         usage: None,
         progress: AttemptProgress::Sent,
         retry_delay_ms: None,
@@ -1482,7 +1543,7 @@ fn acceptance_deduplicates_configs_and_preserves_abandoned_nodes() {
         Some("beta")
     );
     assert!(matches!(
-        db.start_request(&lock, key(tid(1), 0, 0), now()),
+        db.start_request(&lock, key(tid(1), 0, 0), origin(), now()),
         Err(StoreError::InvalidTransition { .. })
     ));
     let mut retry = accept(sid(2), tid(1));
@@ -1539,7 +1600,7 @@ fn invalid_acceptance_and_lock_capabilities_leave_no_facts() {
             0 => a.input = "x".repeat(MAX_USER_INPUT_BYTES + 1),
             1 => a.agent_selection = AgentSelection::Inherited,
             2 => a.config.system_prompt = Some("x".repeat(2 * 1024 * 1024 + 1)),
-            3 => a.config.provider = "unknown".into(),
+            3 => a.config.provider = "Bad_id".into(),
             4 => a
                 .config
                 .catalog
@@ -1590,7 +1651,8 @@ fn every_commit_reopens_with_read_only_conclusions() {
         let lock = db.try_lock_session(sid(1)).unwrap();
         db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
         if cut >= 1 {
-            db.start_request(&lock, key(tid(1), 0, 0), now()).unwrap();
+            db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
+                .unwrap();
         }
         if cut == 2 {
             db.stop_attempt(
@@ -1807,12 +1869,183 @@ fn every_commit_reopens_with_read_only_conclusions() {
 }
 
 #[test]
+fn attempt_sources_survive_retry_and_reopen() {
+    let (_dir, layout, db) = store();
+    let lock = db.try_lock_session(sid(1)).unwrap();
+    let mut input = accept(sid(1), tid(1));
+    input.config.provider = "edge-1".into();
+    db.accept_turn(&lock, input).unwrap();
+    let first = AttemptOrigin {
+        protocol: AttemptProtocol::ChatCompletions,
+        provider_id: "edge-1".into(),
+    };
+    let second = AttemptOrigin {
+        protocol: AttemptProtocol::AnthropicMessages,
+        provider_id: "edge-1".into(),
+    };
+    db.start_request(&lock, key(tid(1), 0, 0), first.clone(), now())
+        .unwrap();
+    let mut stop = stopped(
+        key(tid(1), 0, 0),
+        StopCause::ProviderError { retryable: true },
+    );
+    stop.origin = first;
+    db.stop_attempt(&lock, stop, now()).unwrap();
+    db.start_request(&lock, key(tid(1), 0, 1), second.clone(), now())
+        .unwrap();
+    let turn = detail(&db);
+    let expected = [
+        json!({"protocol":"chat-completions","provider_id":"edge-1"}),
+        json!({"protocol":"anthropic-messages","provider_id":"edge-1"}),
+    ];
+    let stored = serde_json::to_value(node_at(&db, 2)).unwrap();
+    for (i, expected) in expected.iter().enumerate() {
+        assert_eq!(
+            serde_json::to_value(&turn.steps[0].attempts[i]).unwrap()["origin"],
+            *expected
+        );
+        assert_eq!(stored["attempts"][i]["origin"], *expected);
+    }
+    drop(lock);
+    drop(db);
+    let db = SessionStore::open(&layout).unwrap();
+    assert_eq!(detail(&db), turn);
+    let lock = db.try_lock_session(sid(1)).unwrap();
+    let mut complete = reply(key(tid(1), 0, 1), 1);
+    complete.origin = second;
+    complete.message.provider_origin = Some(ProviderOrigin::Anthropic);
+    let calls = db
+        .register_calls(&lock, complete, &[iid(1)], now())
+        .unwrap();
+    finish(&db, &lock, &calls.bindings[0], None);
+    db.close_step(
+        &lock,
+        CloseStep::Continue {
+            key: step(tid(1), 0),
+        },
+        now(),
+    )
+    .unwrap();
+    let third = AttemptOrigin {
+        protocol: AttemptProtocol::GenerateContent,
+        provider_id: "edge-1".into(),
+    };
+    db.start_request(&lock, key(tid(1), 1, 0), third.clone(), now())
+        .unwrap();
+    let mut complete = reply(key(tid(1), 1, 0), 0);
+    complete.origin = third.clone();
+    complete.message.provider_origin = Some(ProviderOrigin::Gemini);
+    db.close_step(&lock, CloseStep::Finish(complete), now())
+        .unwrap();
+    let turn = detail(&db);
+    assert_eq!(turn.summary.outcome, PublicTurnOutcome::Completed);
+    assert_eq!(turn.steps[1].attempts[0].origin, third);
+    let read = db.begin_read().unwrap();
+    let ConversationEntry::Step { step, .. } = read
+        .entry(NodeRef {
+            session_id: sid(1),
+            node: NodeId(2),
+        })
+        .unwrap()
+    else {
+        panic!("step entry")
+    };
+    assert_eq!(step, turn.steps[0]);
+    drop(read);
+    drop(lock);
+    drop(db);
+    assert_eq!(detail(&SessionStore::open(&layout).unwrap()), turn);
+}
+
+#[test]
+fn provider_id_and_attempt_source_boundaries() {
+    for protocol in [
+        AttemptProtocol::ChatCompletions,
+        AttemptProtocol::AnthropicMessages,
+        AttemptProtocol::GenerateContent,
+        AttemptProtocol::Responses,
+        AttemptProtocol::Interactions,
+    ] {
+        let (_dir, layout, db) = store();
+        let lock = db.try_lock_session(sid(1)).unwrap();
+        let mut input = accept(sid(1), tid(1));
+        input.config.provider = "edge-1".into();
+        let origin = AttemptOrigin {
+            protocol,
+            provider_id: input.config.provider.clone(),
+        };
+        db.accept_turn(&lock, input).unwrap();
+        db.start_request(&lock, key(tid(1), 0, 0), origin.clone(), now())
+            .unwrap();
+        drop(lock);
+        drop(db);
+        let reopened = SessionStore::open(&layout).unwrap();
+        assert_eq!(detail(&reopened).steps[0].attempts[0].origin, origin);
+    }
+    let (_dir, _layout, db) = store();
+    let lock = db.try_lock_session(sid(1)).unwrap();
+    let mut input = accept(sid(1), tid(1));
+    input.config.provider = "bad_id".into();
+    assert!(matches!(
+        db.accept_turn(&lock, input),
+        Err(StoreError::InvalidInput {
+            field: "provider",
+            ..
+        })
+    ));
+    assert!(records(&db).nodes.is_empty());
+    db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+    let before = records(&db);
+    for id in ["bad_id", "other-provider"] {
+        let mut source = origin();
+        source.provider_id = id.into();
+        assert!(matches!(
+            db.start_request(&lock, key(tid(1), 0, 0), source, now()),
+            Err(StoreError::InvalidInput { .. })
+        ));
+        assert!(before == records(&db));
+    }
+    db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
+        .unwrap();
+    let before = records(&db);
+    for (source, message_origin) in [
+        (
+            AttemptOrigin {
+                protocol: AttemptProtocol::AnthropicMessages,
+                ..origin()
+            },
+            ProviderOrigin::Anthropic,
+        ),
+        (
+            AttemptOrigin {
+                provider_id: "other-provider".into(),
+                ..origin()
+            },
+            ProviderOrigin::OpenAiCompatible,
+        ),
+    ] {
+        let mut stop = stopped(key(tid(1), 0, 0), StopCause::Cancelled);
+        stop.origin = source.clone();
+        assert!(db.stop_attempt(&lock, stop, now()).is_err());
+        let mut complete = reply(key(tid(1), 0, 0), 0);
+        complete.origin = source;
+        complete.message.provider_origin = Some(message_origin);
+        assert!(matches!(
+            db.close_step(&lock, CloseStep::Finish(complete), now()),
+            Err(StoreError::InvalidInput { field: "origin", detail }) if detail == "reply source mismatch"
+        ));
+        assert!(before == records(&db));
+    }
+}
+
+#[test]
 fn retries_usage_and_between_request_stops() {
     for cause in [StopCause::Cancelled, StopCause::Deadline] {
         let (_d, _l, db) = store();
         let lock = db.try_lock_session(sid(1)).unwrap();
         db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
-        db.start_request(&lock, key(tid(1), 0, 0), now()).unwrap();
+        db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
+            .unwrap();
         let mut stop = stopped(
             key(tid(1), 0, 0),
             StopCause::ProviderError { retryable: true },
@@ -1874,7 +2107,8 @@ fn retries_usage_and_between_request_stops() {
     let lock = db.try_lock_session(sid(1)).unwrap();
     db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
     for a in 0..3 {
-        db.start_request(&lock, key(tid(1), 0, a), now()).unwrap();
+        db.start_request(&lock, key(tid(1), 0, a), origin(), now())
+            .unwrap();
         let result = db
             .stop_attempt(
                 &lock,
@@ -1908,7 +2142,10 @@ fn retries_usage_and_between_request_stops() {
             text: "old provider diagnostic".into()
         }
     );
-    assert!(db.start_request(&lock, key(tid(1), 0, 3), now()).is_err());
+    assert!(
+        db.start_request(&lock, key(tid(1), 0, 3), origin(), now())
+            .is_err()
+    );
 }
 
 #[test]
@@ -1917,7 +2154,7 @@ fn step_budget_reserves_and_closes_limit_node() {
     let lock = db.try_lock_session(sid(1)).unwrap();
     db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
     for ordinal in 0..MAX_MODEL_STEPS {
-        db.start_request(&lock, key(tid(1), ordinal, 0), now())
+        db.start_request(&lock, key(tid(1), ordinal, 0), origin(), now())
             .unwrap();
         let calls = db
             .register_calls(
@@ -1955,7 +2192,7 @@ fn step_budget_reserves_and_closes_limit_node() {
     );
     assert!(last.attempts.is_empty());
     assert!(
-        db.start_request(&lock, key(tid(1), MAX_MODEL_STEPS, 0), now())
+        db.start_request(&lock, key(tid(1), MAX_MODEL_STEPS, 0), origin(), now())
             .is_err()
     );
     assert_eq!(
@@ -1990,7 +2227,8 @@ fn conversation_tree() -> (
         now(),
     )
     .unwrap();
-    db.start_request(&lock, key(tid(1), 1, 0), now()).unwrap();
+    db.start_request(&lock, key(tid(1), 1, 0), origin(), now())
+        .unwrap();
     db.close_step(&lock, CloseStep::Finish(reply(key(tid(1), 1, 0), 0)), now())
         .unwrap();
     for t in [tid(2), tid(3)] {
@@ -1999,7 +2237,8 @@ fn conversation_tree() -> (
         next.config.agent_name = "beta".into();
         db.accept_turn(&lock, next).unwrap();
         if t == tid(2) {
-            db.start_request(&lock, key(t, 0, 0), now()).unwrap();
+            db.start_request(&lock, key(t, 0, 0), origin(), now())
+                .unwrap();
             db.close_step(&lock, CloseStep::Finish(reply(key(t, 0, 0), 0)), now())
                 .unwrap();
         }
@@ -2251,7 +2490,8 @@ fn conversation_step_summary_moves_to_reserved_successor() {
         ]
     );
     drop(read);
-    db.start_request(&lock, key(tid(1), 1, 0), now()).unwrap();
+    db.start_request(&lock, key(tid(1), 1, 0), origin(), now())
+        .unwrap();
     db.close_step(&lock, CloseStep::Finish(reply(key(tid(1), 1, 0), 0)), now())
         .unwrap();
     let read = db.begin_read().unwrap();
@@ -2295,7 +2535,8 @@ fn conversation_retries_and_transaction_reads_survive_reopen() {
     let (_d, layout, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
     db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
-    db.start_request(&lock, key(tid(1), 0, 0), now()).unwrap();
+    db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
+        .unwrap();
     db.stop_attempt(
         &lock,
         stopped(
@@ -2312,7 +2553,8 @@ fn conversation_retries_and_transaction_reads_survive_reopen() {
         matches!(&view.entries[1], ConversationEntry::Step { retries, .. }
         if *retries == node_at(&db, 2).retry_notices().unwrap() && retries.len() == 1 && retries[0].notice.level == NoticeLevel::Warn)
     );
-    db.start_request(&lock, key(tid(1), 0, 1), now()).unwrap();
+    db.start_request(&lock, key(tid(1), 0, 1), origin(), now())
+        .unwrap();
     db.close_step(&lock, CloseStep::Finish(reply(key(tid(1), 0, 1), 0)), now())
         .unwrap();
     let mut next = accept(sid(1), tid(2));
@@ -2477,7 +2719,8 @@ fn observer_projections_skip_unrelated_content() {
         let (_d, _l, db) = store();
         let lock = db.try_lock_session(sid(1)).unwrap();
         db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
-        db.start_request(&lock, key(tid(1), 0, 0), now()).unwrap();
+        db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
+            .unwrap();
         db.stop_attempt(
             &lock,
             stopped(
@@ -2487,7 +2730,8 @@ fn observer_projections_skip_unrelated_content() {
             now(),
         )
         .unwrap();
-        db.start_request(&lock, key(tid(1), 0, 1), now()).unwrap();
+        db.start_request(&lock, key(tid(1), 0, 1), origin(), now())
+            .unwrap();
         edit_projection_node(&db, node, |wire| {
             *wire.pointer_mut(pointer).unwrap() = json!(false);
         });
@@ -2546,7 +2790,8 @@ fn observer_projections_reject_damaged_fields() {
             let (_d, _l, db) = store();
             let lock = db.try_lock_session(sid(1)).unwrap();
             db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
-            db.start_request(&lock, key(tid(1), 0, 0), now()).unwrap();
+            db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
+                .unwrap();
             edit_projection_node(&db, node, |wire| {
                 let (parent, field) = pointer.rsplit_once('/').unwrap();
                 let object = wire.pointer_mut(parent).unwrap().as_object_mut().unwrap();
@@ -2830,7 +3075,8 @@ fn corruptible_fixture(db: &SessionStore) -> SessionExecutionLock {
         now(),
     )
     .unwrap();
-    db.start_request(&lock, key(tid(1), 1, 0), now()).unwrap();
+    db.start_request(&lock, key(tid(1), 1, 0), origin(), now())
+        .unwrap();
     db.stop_attempt(
         &lock,
         stopped(
@@ -2840,7 +3086,8 @@ fn corruptible_fixture(db: &SessionStore) -> SessionExecutionLock {
         now(),
     )
     .unwrap();
-    db.start_request(&lock, key(tid(1), 1, 1), now()).unwrap();
+    db.start_request(&lock, key(tid(1), 1, 1), origin(), now())
+        .unwrap();
     let calls = db
         .register_calls(
             &lock,
@@ -2889,6 +3136,8 @@ fn read_validation_rejects_broken_relations_and_shapes() {
         "executing_reply",
         "reply_binding",
         "reply_provider",
+        "attempt_provider",
+        "attempt_protocol",
         "reply_slot_count",
         "slot_turn",
         "terminal_not_executed",
@@ -2935,8 +3184,8 @@ fn read_validation_rejects_broken_relations_and_shapes() {
                 else {
                     unreachable!()
                 };
-                *provider = "unknown".into();
-                // 去掉回复上的 provider 标记，只留 UserMessage 这一处来源。
+                *provider = "Bad_id".into();
+                // 去掉回复上的协议标记，仍须拒绝非法的 provider 标识。
                 for n in [2, 3] {
                     if let Node::Step {
                         reply: Some(reply), ..
@@ -2997,6 +3246,7 @@ fn read_validation_rejects_broken_relations_and_shapes() {
                     turn_id,
                     step_ordinal,
                     progress,
+                    attempts,
                     reply,
                     slots,
                     ..
@@ -3022,6 +3272,13 @@ fn read_validation_rejects_broken_relations_and_shapes() {
                             unreachable!()
                         };
                         call.arguments_digest = [0; 32];
+                    }
+                    "attempt_provider" => {
+                        attempts[0].origin.provider_id = "another-provider".into()
+                    }
+                    "attempt_protocol" => {
+                        attempts.last_mut().unwrap().origin.protocol =
+                            AttemptProtocol::AnthropicMessages
                     }
                     "reply_provider" => {
                         reply.as_mut().unwrap().provider_origin = Some(ProviderOrigin::Gemini)
@@ -3269,7 +3526,8 @@ fn registration_rejects_corrupt_change_high_water() {
 
         let lock = db.try_lock_session(sid(2)).unwrap();
         db.accept_turn(&lock, accept(sid(2), tid(2))).unwrap();
-        db.start_request(&lock, key(tid(2), 0, 0), now()).unwrap();
+        db.start_request(&lock, key(tid(2), 0, 0), origin(), now())
+            .unwrap();
         let tx = db.db.begin_write().unwrap();
         tx.open_table(META)
             .unwrap()
@@ -3319,7 +3577,8 @@ fn transaction_failure_matrix() {
             let lock = db.try_lock_session(sid(1)).unwrap();
             db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
             if phase > 0 && phase != 10 {
-                db.start_request(&lock, key(tid(1), 0, 0), now()).unwrap();
+                db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
+                    .unwrap();
             }
             let calls = if phase >= 4 && phase != 8 && phase != 10 {
                 Some(
@@ -3350,7 +3609,7 @@ fn transaction_failure_matrix() {
             let read = db.begin_read().unwrap();
             let before = codec::load_read(&read.tx).unwrap();
             let result = with_fault(point, || match phase {
-                0 => db.start_request(&lock, key(tid(1), 0, 0), now()),
+                0 => db.start_request(&lock, key(tid(1), 0, 0), origin(), now()),
                 1 => db
                     .stop_attempt(
                         &lock,
@@ -3581,7 +3840,8 @@ fn ordinary_operations_load_only_referenced_turns() {
     );
     assert!(read.history(sid(1), NodeId(3), 1).unwrap().is_empty());
     assert!(read.turn_node(tid(1)).is_err());
-    db.start_request(&lock, key(tid(2), 0, 0), now()).unwrap();
+    db.start_request(&lock, key(tid(2), 0, 0), origin(), now())
+        .unwrap();
     db.close_step(&lock, CloseStep::Finish(reply(key(tid(2), 0, 0), 0)), now())
         .unwrap();
     assert_eq!(
@@ -3606,17 +3866,27 @@ fn invocation_registration_and_transitions_are_atomic() {
     let (_d, _l, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
     db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
-    assert!(db.start_request(&lock, key(tid(1), 0, 1), now()).is_err());
-    db.start_request(&lock, key(tid(1), 0, 0), now()).unwrap();
-    assert!(db.start_request(&lock, key(tid(1), 0, 0), now()).is_err());
-    for case in 0..9 {
+    assert!(
+        db.start_request(&lock, key(tid(1), 0, 1), origin(), now())
+            .is_err()
+    );
+    db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
+        .unwrap();
+    assert!(
+        db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
+            .is_err()
+    );
+    for case in 0..11 {
         let before = records(&db);
         let mut input = reply(key(tid(1), 0, 0), 2);
         let mut candidates = vec![iid(1), iid(2)];
         match case {
             0 => candidates.pop().map(|_| ()).unwrap(),
             1 => candidates[1] = iid(1),
-            2 => input.origin = ProviderOrigin::Anthropic,
+            2 => {
+                input.origin.protocol = AttemptProtocol::AnthropicMessages;
+                input.message.provider_origin = Some(ProviderOrigin::Anthropic);
+            }
             3 => input.message.role = MessageRole::User,
             4 => {
                 let MessageSemantic::ToolCall { call } = &mut input.message.parts[1].semantic
@@ -3640,6 +3910,8 @@ fn invocation_registration_and_transitions_are_atomic() {
                 };
                 call.provider_call_id = Some("call-0".into());
             }
+            9 => input.origin.provider_id = "another-provider".into(),
+            10 => input.message.provider_origin = Some(ProviderOrigin::Anthropic),
             _ => {
                 input = reply(key(tid(1), 0, 0), 33);
                 candidates = (1..=33).map(iid).collect();
@@ -3666,7 +3938,10 @@ fn invocation_registration_and_transitions_are_atomic() {
         original.message.parts[1].replay_state
     );
     assert_eq!(calls.bindings[1].identity.part_ordinal, 3);
-    assert!(db.start_request(&lock, key(tid(1), 0, 1), now()).is_err());
+    assert!(
+        db.start_request(&lock, key(tid(1), 0, 1), origin(), now())
+            .is_err()
+    );
     assert!(
         db.close_step(&lock, CloseStep::Finish(reply(key(tid(1), 0, 0), 0)), now())
             .is_err()
@@ -3795,7 +4070,7 @@ fn completed_batch_stop_is_atomic_and_survives_reopen() {
             let lock = db.try_lock_session(sid(1)).unwrap();
             db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
             for index in 0..=ordinal {
-                db.start_request(&lock, key(tid(1), index, 0), now())
+                db.start_request(&lock, key(tid(1), index, 0), origin(), now())
                     .unwrap();
                 let base = u64::from(index) * 2 + 1;
                 let calls = db
@@ -3944,7 +4219,8 @@ fn sequence_exhaustion_aborts_transactions() {
         let lock = db.try_lock_session(sid(1)).unwrap();
         db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
         let calls = if matches!(case, "continue_node" | "stop_node") {
-            db.start_request(&lock, key(tid(1), 0, 0), now()).unwrap();
+            db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
+                .unwrap();
             let calls = db
                 .register_calls(&lock, reply(key(tid(1), 0, 0), 1), &[iid(1)], now())
                 .unwrap();
@@ -3954,7 +4230,8 @@ fn sequence_exhaustion_aborts_transactions() {
             None
         };
         if case.starts_with("change") {
-            db.start_request(&lock, key(tid(1), 0, 0), now()).unwrap();
+            db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
+                .unwrap();
             let (_other, _) = running(&db, sid(2), tid(2), 1, 99);
             let tx = db.db.begin_write().unwrap();
             let mut r = load_write(&tx).unwrap();

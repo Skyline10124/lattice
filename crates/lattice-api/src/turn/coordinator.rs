@@ -128,8 +128,12 @@ impl CoordinatorStoreIo {
         self.write(move |store, lock| store.accept_turn(lock, input))
             .await
     }
-    pub(crate) async fn start_request(&self, key: ModelAttemptKey) -> Result<()> {
-        self.write(move |store, lock| store.start_request(lock, key, chrono::Utc::now()))
+    pub(crate) async fn start_request(
+        &self,
+        key: ModelAttemptKey,
+        origin: AttemptOrigin,
+    ) -> Result<()> {
+        self.write(move |store, lock| store.start_request(lock, key, origin, chrono::Utc::now()))
             .await
     }
     pub(crate) async fn stop_attempt(&self, stopped: AttemptStopped) -> Result<AttemptStopResult> {

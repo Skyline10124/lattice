@@ -9,15 +9,32 @@ use lattice_conversation::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(super) fn provider(name: &str) -> Result<ProviderOrigin> {
-    match name {
-        "openai" | "openai-compatible" | "openai_compatible" => {
-            Ok(ProviderOrigin::OpenAiCompatible)
-        }
-        "anthropic" => Ok(ProviderOrigin::Anthropic),
-        "gemini" => Ok(ProviderOrigin::Gemini),
-        _ => Err(invalid("provider", "unsupported provider identity")),
+pub(super) fn provider_id(id: &str) -> Result<()> {
+    lattice_conversation::validate_provider_id(id)
+        .map_err(|error| invalid("provider", &error.to_string()))
+}
+
+pub(super) fn attempt_origin(origin: &AttemptOrigin, provider: &str) -> Result<()> {
+    provider_id(&origin.provider_id)?;
+    if origin.provider_id != provider {
+        return Err(invalid("origin", "attempt provider mismatch"));
     }
+    Ok(())
+}
+
+pub(super) fn reply_protocol<S: ToolCallState>(
+    origin: &AttemptOrigin,
+    message: &NativeMessage<S>,
+) -> Result<()> {
+    let protocol = message.provider_origin.map(|origin| match origin {
+        ProviderOrigin::OpenAiCompatible => AttemptProtocol::ChatCompletions,
+        ProviderOrigin::Anthropic => AttemptProtocol::AnthropicMessages,
+        ProviderOrigin::Gemini => AttemptProtocol::GenerateContent,
+    });
+    if protocol.is_some_and(|p| p != origin.protocol) {
+        return Err(invalid("origin", "reply protocol mismatch"));
+    }
+    Ok(())
 }
 
 pub(super) fn stored_config(digest: &[u8; 32], stored: &StoredTurnConfig) -> Result<()> {
@@ -64,7 +81,7 @@ pub(super) fn user_fields(
         return Err(invalid("config", "configuration bound exceeded"));
     }
     limits.validate()?;
-    provider(provider_name)?;
+    provider_id(provider_name)?;
     Ok(())
 }
 
@@ -205,18 +222,13 @@ pub(super) fn terminal(
 
 fn bound_reply(
     session_id: SessionId,
-    provider_name: &str,
+    origin: &AttemptOrigin,
     catalog: &ToolCatalogSnapshot,
     key: StepKey,
     message: &NativeMessage<BoundToolCall>,
     slots: &[InvocationSlot],
 ) -> Result<()> {
-    if message
-        .provider_origin
-        .is_some_and(|origin| provider(provider_name).ok() != Some(origin))
-    {
-        return Err(invalid("reply", "stored reply provider mismatch"));
-    }
+    reply_protocol(origin, message)?;
     if message.tool_calls().count() != slots.len() {
         return Err(invalid("slots", "reply/slot count mismatch"));
     }
@@ -290,8 +302,7 @@ pub(super) fn turn(r: &Records, s: SessionId, t: TurnId) -> Result<()> {
     if *turn_id != t || *user_parent >= user_ref.node || !r.nodes.contains_key(&(s, *user_parent)) {
         return Err(err());
     }
-    // 尝试的 provider 来源由它得出，存的值必须能解析。
-    provider(provider_name).map_err(|_| err())?;
+    provider_id(provider_name).map_err(|_| err())?;
     let stored = r.configs.get(config_digest).ok_or_else(err)?;
     let steps = r.turn_steps(s, t)?;
     if steps.is_empty() {
@@ -305,6 +316,7 @@ pub(super) fn turn(r: &Records, s: SessionId, t: TurnId) -> Result<()> {
             turn_id: step_turn,
             step_ordinal,
             progress,
+            attempts,
             reply,
             slots,
             ..
@@ -329,10 +341,14 @@ pub(super) fn turn(r: &Records, s: SessionId, t: TurnId) -> Result<()> {
         if continues != (ordinal + 1 < steps.len()) {
             return Err(err());
         }
+        for attempt in attempts {
+            attempt_origin(&attempt.origin, provider_name).map_err(|_| err())?;
+        }
         if let Some(reply) = reply {
+            let completed = attempts.last().ok_or_else(err)?;
             bound_reply(
                 s,
-                provider_name,
+                &completed.origin,
                 &stored.catalog,
                 StepKey {
                     turn_id: t,

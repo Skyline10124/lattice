@@ -259,6 +259,7 @@ pub fn retry_notices(attempts: &[AttemptRecord]) -> Result<Vec<RetryNotice>> {
 
 pub(super) fn completed(reply: &CompleteReply) -> AttemptRecord {
     AttemptRecord {
+        origin: reply.origin.clone(),
         usage: reply.usage,
         progress: AttemptProgress::Ended {
             end: AttemptEnd::Completed,

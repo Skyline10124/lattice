@@ -7,8 +7,8 @@ use lancet_protocol::{
     ModelAttemptKey, ModelMessageAddress, Retriability, SessionId, ToolCallAddress, TurnId,
 };
 use lattice_conversation::{
-    BoundToolCall, NativeMessage, ProviderOrigin, TokenUsage, ToolCallValidation,
-    ToolResultOutcome, UnboundToolCall,
+    BoundToolCall, NativeMessage, TokenUsage, ToolCallValidation, ToolResultOutcome,
+    UnboundToolCall,
 };
 use lattice_store::ProjectStoreKey;
 use serde::{Deserialize, Serialize};
@@ -204,9 +204,26 @@ impl StepProgress {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AttemptRecord {
+    pub origin: AttemptOrigin,
     pub usage: Option<TokenUsage>,
     pub progress: AttemptProgress,
     pub retry_delay_ms: Option<u64>,
+}
+/// 尝试实际使用的协议与 provider 标识。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttemptOrigin {
+    pub protocol: AttemptProtocol,
+    pub provider_id: String,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AttemptProtocol {
+    ChatCompletions,
+    Responses,
+    AnthropicMessages,
+    GenerateContent,
+    Interactions,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "progress", rename_all = "snake_case", deny_unknown_fields)]
@@ -352,7 +369,7 @@ pub enum AcceptedTurn {
 #[derive(Debug, Clone)]
 pub struct AttemptStopped {
     pub key: ModelAttemptKey,
-    pub origin: ProviderOrigin,
+    pub origin: AttemptOrigin,
     pub usage: Option<TokenUsage>,
     pub cause: StopCause,
     pub diagnostic: AttemptDiagnostic,
@@ -361,7 +378,7 @@ pub struct AttemptStopped {
 #[derive(Clone)]
 pub struct CompleteReply {
     pub key: ModelAttemptKey,
-    pub origin: ProviderOrigin,
+    pub origin: AttemptOrigin,
     pub usage: Option<TokenUsage>,
     pub message: NativeMessage<UnboundToolCall>,
 }
@@ -512,7 +529,7 @@ pub struct StepDetail {
 #[serde(deny_unknown_fields)]
 pub struct AttemptDetail {
     pub attempt: u32,
-    pub origin: ProviderOrigin,
+    pub origin: AttemptOrigin,
     pub usage: Option<TokenUsage>,
     pub progress: AttemptProgressDetail,
     pub end: AttemptEndDetail,

@@ -20,6 +20,46 @@ use thiserror::Error;
 /// Maximum byte length of one part-local opaque replay state (64 KiB).
 pub const MAX_OPAQUE_REPLAY_STATE_BYTES: usize = 64 * 1024;
 
+/// provider 标识的最大字节数。
+pub const MAX_PROVIDER_ID_BYTES: usize = 64;
+
+/// provider 标识不符合语法规则的原因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum ProviderIdError {
+    /// 标识为空。
+    #[error("provider id must not be empty")]
+    Empty,
+    /// 标识超过字节上限。
+    #[error("provider id must be at most {MAX_PROVIDER_ID_BYTES} bytes")]
+    TooLong,
+    /// 首字符不是 ASCII 小写字母或数字。
+    #[error("provider id must start with [a-z0-9]")]
+    InvalidStart,
+    /// 标识含 ASCII 小写字母、数字和连字符以外的字符。
+    #[error("provider id must contain only [a-z0-9-]")]
+    InvalidCharacter,
+}
+
+/// 校验 provider 标识的长度、首字符与 ASCII 字符范围。
+pub fn validate_provider_id(id: &str) -> Result<(), ProviderIdError> {
+    let Some(first) = id.as_bytes().first() else {
+        return Err(ProviderIdError::Empty);
+    };
+    if id.len() > MAX_PROVIDER_ID_BYTES {
+        return Err(ProviderIdError::TooLong);
+    }
+    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
+        return Err(ProviderIdError::InvalidStart);
+    }
+    if !id
+        .bytes()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return Err(ProviderIdError::InvalidCharacter);
+    }
+    Ok(())
+}
+
 /// The provider wire family a message or replay state originates from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -262,6 +302,28 @@ impl NativeMessage<crate::UnboundToolCall> {
 mod tests {
     use super::*;
     use crate::tool_call::UnboundToolCall;
+
+    #[test]
+    fn provider_ids_enforce_alphabet_and_inclusive_byte_limit() {
+        for id in ["a".into(), "0".into(), "a-b-9-".into(), "a".repeat(64)] {
+            crate::validate_provider_id(&id).unwrap();
+        }
+        for (id, error) in [
+            ("".into(), ProviderIdError::Empty),
+            ("-a".into(), ProviderIdError::InvalidStart),
+            ("A".into(), ProviderIdError::InvalidStart),
+            ("aB".into(), ProviderIdError::InvalidCharacter),
+            ("a_b".into(), ProviderIdError::InvalidCharacter),
+            ("a.b".into(), ProviderIdError::InvalidCharacter),
+            ("a b".into(), ProviderIdError::InvalidCharacter),
+            ("é".into(), ProviderIdError::InvalidStart),
+            ("aé".into(), ProviderIdError::InvalidCharacter),
+            ("a/".into(), ProviderIdError::InvalidCharacter),
+            ("a".repeat(65), ProviderIdError::TooLong),
+        ] {
+            assert_eq!(crate::validate_provider_id(&id), Err(error), "{id:?}");
+        }
+    }
 
     fn text_part(text: &str) -> MessagePart<UnboundToolCall> {
         MessagePart::semantic_only(MessageSemantic::Text {

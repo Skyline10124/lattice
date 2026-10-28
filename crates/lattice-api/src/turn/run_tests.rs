@@ -39,6 +39,20 @@ async fn run_turn_result_and_saved_nodes_preserve_contract_fields() {
         .turn_detail(result.turn.session_id, result.turn.turn_id)
         .unwrap();
     assert_eq!(detail.steps, result.steps);
+    assert_eq!(
+        serde_json::to_value(&detail.steps[0].attempts[0].origin).unwrap(),
+        serde_json::json!({"protocol":"chat-completions","provider_id":"openai-compatible"})
+    );
+    let Node::UserMessage { provider, .. } = read
+        .node(NodeRef {
+            session_id: result.turn.session_id,
+            node: detail.user_node,
+        })
+        .unwrap()
+    else {
+        panic!("user message")
+    };
+    assert_eq!(provider, "openai-compatible");
     assert_eq!(detail.user_node, NodeId(1));
     assert_eq!(read.log(result.turn.session_id).unwrap().nodes.len(), 3);
     let node = read
@@ -72,6 +86,10 @@ async fn provider_failure_preserves_notice_in_step_without_partial_reply() {
     );
     let (detail, events) = fixture.run(fixture.request.clone()).await;
     assert_eq!(detail.summary.outcome, PublicTurnOutcome::Failed);
+    assert_eq!(
+        serde_json::to_value(&detail.steps[0].attempts[0].origin).unwrap(),
+        serde_json::json!({"protocol":"chat-completions","provider_id":"openai-compatible"})
+    );
     assert_eq!(
         detail.summary.notice.as_ref().unwrap().text,
         "provider unavailable"
