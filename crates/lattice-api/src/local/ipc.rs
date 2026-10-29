@@ -555,6 +555,26 @@ mod frame_tests {
         let mut reply = [0; 8];
         client.read_exact(&mut reply).await.unwrap();
         assert_eq!(&reply, MAGIC, "backend must announce its own magic");
+        let len = client.read_u32().await.unwrap() as usize;
+        client.read_exact(&mut vec![0; len]).await.unwrap();
+        // 后台没读完的请求留在它的接收队列里，Linux 让这一端读到 ECONNRESET；两者都表示已关闭。
+        let closed = client.read(&mut [0; 1]).await;
+        assert!(
+            matches!(&closed, Ok(0))
+                || matches!(&closed, Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset),
+            "connection must close after the announcement: {closed:?}"
+        );
+    }
+
+    /// harness 不能依赖产品 crate，只能写死魔数；升级时在这里失败并指出要改哪个文件。
+    #[test]
+    fn harness_frame_magic_tracks_the_current_magic() {
+        let harness = include_str!("../../../lattice-system-harness/tests/support/mod.rs");
+        let current = std::str::from_utf8(MAGIC).unwrap();
+        assert!(
+            harness.contains(&format!("const FRAME_MAGIC: &[u8; 8] = b\"{current}\";")),
+            "update FRAME_MAGIC in crates/lattice-system-harness/tests/support/mod.rs to {current}"
+        );
     }
 
     /// 远大于套接字缓冲区的请求，对端只读魔数就关闭。

@@ -1449,7 +1449,7 @@ async fn status_hints_at_an_older_backend_that_drops_the_connection_mid_request(
 }
 
 #[tokio::test]
-async fn status_hints_at_an_older_backend_that_reads_the_request_and_closes() {
+async fn status_hints_when_the_backend_reads_the_request_and_closes_without_replying() {
     let error = status_against(|mut stream| {
         Box::pin(async move {
             let mut magic = [0; 8];

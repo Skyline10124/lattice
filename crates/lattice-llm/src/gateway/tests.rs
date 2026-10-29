@@ -639,8 +639,9 @@ async fn replay_source_matrix_reaches_each_protocol_request_body() {
         let decoded = wire_to_native(&origin, &serde_json::from_str(fixture).unwrap()).unwrap();
         let (assistant, results) = bind_replay_step(decoded);
         for target_protocol in protocols {
-            for provider in ["test", "other", "test"] {
-                let cell = format!("{protocol} -> {target_protocol}/{provider}");
+            // 第三格在写过 other 的配置后回到同一 provider，标签带序号以免重名。
+            for (round, provider) in ["test", "other", "test"].into_iter().enumerate() {
+                let cell = format!("{protocol} -> {target_protocol}/{provider}#{round}");
                 let same_provider = target_protocol == protocol && provider == "test";
                 let same_protocol = target_protocol == protocol;
                 // Chat Completions 与 Messages 没有 call ID 就无法编码工具结果。
@@ -1250,9 +1251,10 @@ async fn unfinished_transport_discards_pinned_client_before_the_next_request() {
                     // 其余传输失败仍按真实 I/O 结束。
                     tokio::time::pause();
                     let _resume = ResumeClock;
+                    let started = tokio::time::Instant::now();
                     let mut pending = std::pin::pin!(stream.collect::<Vec<_>>());
                     let mut steps = 0;
-                    loop {
+                    let events = loop {
                         tokio::select! {
                             biased;
                             events = &mut pending => break events,
@@ -1261,7 +1263,14 @@ async fn unfinished_transport_discards_pinned_client_before_the_next_request() {
                                 assert!(steps < 20, "{name} did not finish");
                             }
                         }
-                    }
+                    };
+                    // 与 client.rs 的 TAIL_WAIT（500ms）一致：提前结束说明没在等收尾。
+                    assert!(
+                        started.elapsed() >= Duration::from_millis(500),
+                        "{name} finished after {:?}, before the tail wait",
+                        started.elapsed()
+                    );
+                    events
                 } else {
                     stream.collect::<Vec<_>>().await
                 };
