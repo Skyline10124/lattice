@@ -281,7 +281,9 @@ impl NetworkFetchHost {
             }
         };
 
-        if parsed.scheme() == "https" && self.tls.is_none() {
+        // 失败即关闭：没有可用根时只放行 http。URL 已在上面解析成功（解析失败已拒绝），
+        // 且 validate_fetch_url 只允许 http/https；这里仍不以 "== https" 判断，避免漏放其他 scheme。
+        if parsed.scheme() != "http" && self.tls.is_none() {
             self.record_policy_denial(&parsed, &host, hop, ctx, "tls_roots_unavailable");
             self.remember(denied_error(NO_TLS_ROOTS));
             return Err(FetchError::Denied);
