@@ -1193,10 +1193,12 @@ mod tests {
         // 中断可能赶在子进程设置忽略之前到达，子进程随之退出，进程组里没有幸存者，
         // 也就不会出现预期的强制清理（压力下约 2%）。外层的 trap 在启动子进程之前
         // 已经设置，所以子进程就绪时外层也已就绪。
+        // 外层用 `sleep 1 & wait`：trap 只在前台命令结束后运行，`wait` 被信号打断后
+        // 立即运行 trap，不必等当前的 sleep 结束。
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(format!(
             "trap 'exit 0' INT; sh -c \"trap '' INT; touch '{}'; sleep 30\" & \
-             while :; do sleep 1; done",
+             while :; do sleep 1 & wait $!; done",
             ready.display()
         ));
         let mut running = RunningCommand::spawn(cmd).expect("spawn");
@@ -1207,8 +1209,9 @@ mod tests {
         }
         assert!(ready.exists(), "child never reached interrupt gate");
         running.interrupt().expect("interrupt group");
+        // 时限从启动算起，含等待就绪的时间；放宽到 10 秒，负载下也不会误判超时。
         let outcome = running
-            .wait(Some(Duration::from_secs(2)))
+            .wait(Some(Duration::from_secs(10)))
             .expect("interrupt outcome");
         assert_eq!(outcome.termination, Some(ProcessTermination::Exited(0)));
         assert_eq!(
