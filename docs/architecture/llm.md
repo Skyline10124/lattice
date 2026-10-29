@@ -82,11 +82,11 @@ provider 配置、凭据与模型元数据是用户级的全局状态，由后�
 - **用量。** 按[用量换算](#用量换算)得出统一口径。
 - **不使用服务端会话状态。** Responses 与 Interactions 固定发送 `store: false`，每次发送完整历史，不发送 `previous_response_id`、`previous_interaction_id`，不使用后台执行。
 
-适配器不发送采样参数（`temperature`、`top_p` 等），也不发送输出上限（例如 Responses 的 `max_output_tokens`），由服务端按模型的默认值处理；只有 Anthropic Messages 的 `max_tokens` 是必填字段，取模型元数据的输出上限，没有元数据时为 32,768。
+适配器不发送采样参数（`temperature`、`top_p` 等），也不发送输出上限（例如 Responses 的 `max_output_tokens`），由服务端按模型的默认值处理；只有 Anthropic Messages 的 `max_tokens` 是必填字段，取模型元数据的输出上限，输出上限缺失或为 0 时为 32,768。元数据有上下文窗口时，再把它夹到窗口减去提示后的剩余空间：提示按 3 个 UTF-8 字节计 1 个 token 并向上取整，中日韩文字基本准确，英文偏多约三分之一，宁可少给输出也不让请求超窗。这只是估算，不是 provider 的分词结果。估算的提示已占满窗口、放不下任何输出时，不发送请求，这次尝试以 `context_window_exceeded` 错误失败，不重试。
 
 ### 回放来源
 
-每次尝试记录来源 `(protocol, provider id)`。reasoning、签名、加密 reasoning 与逐片段回放状态只在协议和 provider `id` 都相同时回放；任一不同时去除这些材料。provider call ID 按协议判定：协议相同时保留，包括 provider `id` 不同的情况；协议不同时去除，目标协议无法在缺少 call ID 时编码工具结果的，返回投影错误。跨来源投影保留中立语义，切回原来源时使用树中保存的原消息。Responses 请求带 `include: ["reasoning.encrypted_content"]`，使 `store: false` 时也能取得可回放的加密 reasoning。
+每次尝试记录来源 `(protocol, provider id, base_url)`。reasoning、签名、加密 reasoning 与逐片段回放状态只在协议、provider `id` 与 `base_url` 都相同时回放；任一不同时去除这些材料，所以在 `providers.toml` 中改了 `base_url` 之后，此前的签名不再回放。provider call ID 按协议判定：协议相同时保留，包括 provider `id` 不同的情况；协议不同时去除，目标协议无法在缺少 call ID 时编码工具结果的，返回投影错误。跨来源投影保留中立语义，切回原来源时使用树中保存的原消息。Responses 请求带 `include: ["reasoning.encrypted_content"]`，使 `store: false` 时也能取得可回放的加密 reasoning。
 
 ## provider 配置
 
@@ -225,7 +225,7 @@ feature 由协议适配器的代码定义，配置只能在已有取值中选择
 | Chat Completions 总是在助手消息中发回 `reasoning_content`（`protocol/projection/chat_completions.rs`） | 由 `reasoning_replay` 决定，默认不发；内置表中需要它的厂商启用 `reasoning-content` |
 | Chat Completions 同时读取 `reasoning_content` 与 `reasoning` | 保持，属于解析端的兼容 |
 | Chat Completions 总是发送 `stream_options: {"include_usage": true}` | 保持，属于标准协议行为 |
-| Anthropic `max_tokens` 固定为 32,768 | 取模型元数据的输出上限，没有元数据时为 32,768 |
+| Anthropic `max_tokens` 固定为 32,768 | 取模型元数据的输出上限，缺失或为 0 时为 32,768；有上下文窗口时按估算的提示夹进剩余空间，放不下时报 `context_window_exceeded`，见[适配器的职责](#适配器的职责) |
 | generateContent 的工具 schema 用 `parametersJsonSchema`（#270） | 保持，属于该协议的写法 |
 | OpenAI 兼容路径的工具名映射 | 已由 #311 删除，工具名原样发送 |
 
