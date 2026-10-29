@@ -1404,13 +1404,11 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
                         ],
                     }
                 }
-                "nonretry" => SseScript::HttpError {
-                    status: 400,
-                    body: r#"{"error":{"message":"nonretry"}}"#.into(),
-                },
-                "retry" => SseScript::HttpError {
-                    status: 503,
-                    body: r#"{"error":{"message":"retry"}}"#.into(),
+                "nonretry" | "retry" => SseScript::Chunks {
+                    chunks: vec![
+                        json!({"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":3}}),
+                        json!({"error":{"type":if mode == "retry" {"server_error"} else {"invalid_request_error"},"message":mode}}),
+                    ],
                 },
                 "invalid" => {
                     let mut rejected_end = end();
@@ -1442,6 +1440,12 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
                 "case":name,"barrier":barrier,"script":format!("{script:?}")}),
             );
             let mut provider = support::wire_fake_llm(&world, "matrix", script);
+            let configuration = world.home().join(".lattice/providers.toml");
+            let source = std::fs::read_to_string(&configuration).unwrap();
+            let set_price = |input, output| {
+                std::fs::write(&configuration, format!("{source}\n[providers.local.models.matrix.cost]\ninput = {input}\noutput = {output}\n")).unwrap();
+            };
+            set_price(2, 10);
             let ack = world.root().join("marker.json");
             world.set_env(BARRIER, barrier);
             world.set_env(ACK, ack.display().to_string());
@@ -1478,6 +1482,7 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
             support::crash::kill(&world, daemon, frontend, &mut evidence, &budget);
             world.unset_env(BARRIER);
             world.unset_env(ACK);
+            set_price(200, 1000);
             let sid = marker["session_id"].as_str().unwrap();
             let before = stage(&world, &spec, &mut evidence, sid, tid);
             assert_eq!(provider.captured_requests().len(), requests);
@@ -1498,6 +1503,26 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
                 "observation is read-only"
             );
             let prior = before["steps"].as_array().unwrap();
+            for (index, step) in prior.iter().enumerate() {
+                for attempt in step["attempts"].as_array().unwrap() {
+                    if attempt["progress"]["progress"] == "sent" {
+                        assert!(attempt["usage"].is_null());
+                        assert!(attempt["estimated_cost_usd"].is_null());
+                    } else {
+                        let expected = if index == 1 && matches!(mode, "retry" | "nonretry") {
+                            0.000034
+                        } else if index == 1 && mode == "invalid" {
+                            0.000070
+                        } else {
+                            0.000012
+                        };
+                        let fee = attempt["estimated_cost_usd"]
+                            .as_f64()
+                            .expect("committed attempt cost");
+                        assert!((fee - expected).abs() < 1e-15, "{name}: {attempt}");
+                    }
+                }
+            }
             let last = prior.last().unwrap();
             let expected_progress = match name {
                 "accepted" | "continue" => "reserved",
@@ -1625,15 +1650,22 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
                     last["end"],
                     json!({"end":"stop","cause":{"cause":"invalid_batch"}})
                 );
+                let mut usage = before["usage"].clone();
+                let amount = usage["estimated_cost_usd"]["known"].take();
+                let amount = amount.as_f64().expect("known aggregate cost");
+                assert!(
+                    (amount - 0.000082).abs() < 1e-15,
+                    "invalid batch cost: {amount}"
+                );
                 assert_eq!(
-                    before["usage"],
+                    usage,
                     json!({"attempts":2,"kind":"partial",
                         "input":{"known":11,"unknown_attempts":0,"overflowed":false},
                         "cache_read":{"known":null,"unknown_attempts":2,"overflowed":false},
                         "cache_write":{"known":null,"unknown_attempts":2,"overflowed":false},
                         "output":{"known":6,"unknown_attempts":0,"overflowed":false},
                         "reasoning":{"known":null,"unknown_attempts":2,"overflowed":false},
-                        "estimated_cost_usd":{"known":null,"unknown_attempts":2,"overflowed":false}})
+                        "estimated_cost_usd":{"known":null,"unknown_attempts":0,"overflowed":false}})
                 );
             }
             if name == "nonretry" {

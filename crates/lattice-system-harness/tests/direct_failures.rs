@@ -4,11 +4,11 @@
 //! provider 失败、SIGINT、deadline、文件不回滚与 Busy 的真实二进制场景。
 mod support;
 use lattice_system_harness::{
-    AssertError, HarnessIntervention, ProcessTermination, SendExecution, SessionSendDriver,
-    SseScript,
+    AssertError, FAKE_API_KEY, FakeLlmServer, HarnessIntervention, ProcessTermination,
+    ProviderFixture, SendExecution, SessionSendDriver, SseScript,
 };
-use serde_json::Value;
-use std::time::Duration;
+use serde_json::{Value, json};
+use std::time::{Duration, Instant};
 use support::*;
 
 fn final_turn(outcome: &SendExecution) -> Value {
@@ -141,26 +141,98 @@ fn reported_usage_survives_failed_attempt_and_retry_without_partial_reply() {
     let (world, spec) = direct_world(
         "failure-usage-retry",
         "failure",
-        "[]",
+        "[\"observe__workspace\"]",
         "[llm.retry]\nmax_retries = 1\ninitial_delay_ms = 1\nmax_delay_ms = 1\n",
     );
-    let server = wire_fake_llm(
+    world
+        .write_project_file("notes.txt", "persisted tool result\n")
+        .unwrap();
+    let usage = json!({"prompt_tokens":1000,"completion_tokens":100,"prompt_tokens_details":{"cached_tokens":200,"cache_creation_input_tokens":100},"completion_tokens_details":{"reasoning_tokens":20}});
+    let priced = |script| SseScript::WithUsage {
+        script: Box::new(script),
+        usage: lattice_system_harness::NativeUsage::ChatCompletions(usage.clone()),
+    };
+    let (server, gate) = wire_gated_fake_llm(
         &world,
         "failure",
         sequence(vec![
             SseScript::Chunks {
                 chunks: vec![
-                    json!({"choices":[{"delta":{"content":"partial"}}],"usage":{"prompt_tokens":10,"prompt_tokens_details":{"cached_tokens":0},"completion_tokens":2}}),
+                    json!({"choices":[{"delta":{"content":"partial"}}],"usage":usage}),
                     json!({"error":{"type":"server_error","message":"retry this attempt"}}),
                 ],
             },
-            SseScript::plain("complete"),
+            priced(tool_call(
+                "call",
+                "observe__workspace",
+                r#"{"request":{"mode":"read_file","path":"notes.txt"}}"#,
+            )),
+            priced(SseScript::plain("complete")),
         ]),
     );
+    let configuration = world.home().join(".lattice/providers.toml");
+    let baseline = std::fs::read_to_string(&configuration).unwrap();
+    let set_price = |prices: &str| {
+        std::fs::write(
+            &configuration,
+            format!("{baseline}\n[providers.local.models.failure.cost]\n{prices}\n"),
+        )
+        .unwrap();
+    };
+    set_price("input = 99\noutput = 99");
     let evidence = evidence(&world, &spec);
     let send = SessionSendDriver::new(&driver, &world, &spec, "failure");
-    let outcome = send.send("retry after reporting usage").unwrap();
+    let running = send
+        .spawn("retry after reporting usage, then read notes.txt")
+        .unwrap();
+    for (count, prices) in [
+        (
+            1,
+            "input = 2\noutput = 10\ncache_read = 0.5\ncache_write = 3",
+        ),
+        (2, "input = 2"),
+        (3, "input = 4\noutput = 20\ncache_read = 1\ncache_write = 6"),
+    ] {
+        gate.wait_until_stalled(count, running.remaining_timeout(Duration::from_secs(30)))
+            .unwrap();
+        set_price(prices);
+        gate.release_next(running.remaining_timeout(Duration::from_secs(30)))
+            .unwrap();
+    }
+    let outcome = send.wait_spawned(running).unwrap();
     let detail = send
+        .run_command(&[
+            "--json",
+            "session",
+            "turn",
+            outcome.accepted_turn_id().unwrap(),
+        ])
+        .unwrap();
+    set_price("input = 6\noutput = 30\ncache_read = 1.5\ncache_write = 9");
+    let stopped = send.run_command(&["daemon", "stop"]).unwrap();
+    let reopened = send
+        .run_command(&[
+            "--json",
+            "session",
+            "turn",
+            outcome.accepted_turn_id().unwrap(),
+        ])
+        .unwrap();
+    let running = send.spawn("use the latest price").unwrap();
+    gate.wait_until_stalled(4, running.remaining_timeout(Duration::from_secs(30)))
+        .unwrap();
+    gate.release_next(running.remaining_timeout(Duration::from_secs(30)))
+        .unwrap();
+    let next = send.wait_spawned(running).unwrap();
+    let next_detail = send
+        .run_command(&[
+            "--json",
+            "session",
+            "turn",
+            next.accepted_turn_id().unwrap(),
+        ])
+        .unwrap();
+    let old_detail = send
         .run_command(&[
             "--json",
             "session",
@@ -170,24 +242,62 @@ fn reported_usage_survives_failed_attempt_and_retry_without_partial_reply() {
         .unwrap();
     let result = (|| {
         assert_clean_send(&outcome)?;
+        assert_clean_send(&next)?;
+        require(next.is_clean_exit(0), "new turn exits 0")?;
         require(
-            outcome.has_completed() && server.captured_requests().len() == 2,
-            "failed attempt retried once",
+            outcome.has_completed()
+                && next.has_completed()
+                && server.captured_requests().len() == 4,
+            "failed attempt retried once, tool step completed, and one new request sent",
+        )?;
+        require(
+            [&detail, &stopped, &reopened, &next_detail, &old_detail]
+                .iter()
+                .all(|command| command.is_clean_exit(0)),
+            "query, stop and reopen succeed",
         )?;
         let saved: Value = serde_json::from_slice(&detail.stdout).unwrap();
         let attempts = saved["steps"][0]["attempts"].as_array().unwrap();
         require(
             attempts.len() == 2
                 && attempts[0]["usage"]
-                    == json!({"input":10,"cache_read":0,"cache_write":null,"output":2,"reasoning":null})
-                && attempts[0]["estimated_cost_usd"].is_null(),
-            "failed attempt retains reported counters and unknown fee",
+                    == json!({"input":1000,"cache_read":200,"cache_write":100,"output":100,"reasoning":20})
+                && attempts[0]["estimated_cost_usd"]
+                    .as_f64()
+                    .is_some_and(|fee| (fee - 0.0028).abs() < 1e-15)
+                && attempts[1]["estimated_cost_usd"].is_null(),
+            "failed attempt retains counters and end-time price; missing base price stays unknown",
+        )?;
+        require(
+            saved["steps"][1]["attempts"][0]["estimated_cost_usd"]
+                .as_f64()
+                .is_some_and(|fee| (fee - 0.0056).abs() < 1e-15),
+            "next step uses its end-time price",
+        )?;
+        require(
+            saved["usage"]["estimated_cost_usd"]["unknown_attempts"] == 1
+                && saved["usage"]["estimated_cost_usd"]["known"]
+                    .as_f64()
+                    .is_some_and(|fee| (fee - 0.0084).abs() < 1e-15),
+            "fees aggregate independently of token completeness",
+        )?;
+        require(
+            saved == serde_json::from_slice::<Value>(&reopened.stdout).unwrap()
+                && saved == serde_json::from_slice::<Value>(&old_detail.stdout).unwrap(),
+            "repricing, reopening and a new attempt do not rewrite prior fees",
+        )?;
+        let latest: Value = serde_json::from_slice(&next_detail.stdout).unwrap();
+        require(
+            latest["steps"][0]["attempts"][0]["estimated_cost_usd"]
+                .as_f64()
+                .is_some_and(|fee| (fee - 0.0084).abs() < 1e-15),
+            "new attempt after reopening uses the latest price",
         )?;
         let entries = outcome.entries();
         let entry = entries.iter().find(|entry| entry.step().is_some()).unwrap();
         let reply = &entry.raw["content"]["reply"];
         require(
-            saved["steps"][0]["end"]["end"] == "finish"
+            saved["steps"][0]["end"]["end"] == "continue"
                 && reply.is_object()
                 && !reply.to_string().contains("partial"),
             "partial reply does not enter history",
@@ -200,7 +310,15 @@ fn reported_usage_survives_failed_attempt_and_retry_without_partial_reply() {
     finish_failure(
         evidence,
         &send,
-        &[("retry turn", &outcome.command), ("turn detail", &detail)],
+        &[
+            ("retry turn", &outcome.command),
+            ("turn detail", &detail),
+            ("stop", &stopped),
+            ("reopened", &reopened),
+            ("new turn", &next.command),
+            ("new detail", &next_detail),
+            ("old detail", &old_detail),
+        ],
         server.captured_requests(),
         result,
         "reported_usage_survives_failed_attempt_and_retry_without_partial_reply",
@@ -254,67 +372,9 @@ fn direct_failure_malformed_sse_commits_error() {
 }
 #[test]
 fn direct_failure_sigint_while_stalled_commits_cancelled() {
-    let driver = driver();
-    let (world, spec) = direct_world("direct-failure-sigint-stall", "cancel", "[]", "");
-    let (server, gate) = wire_gated_fake_llm(&world, "cancel", SseScript::plain("never-served"));
-    let evidence = evidence(&world, &spec);
-    let send = SessionSendDriver::new(&driver, &world, &spec, "cancel");
-    let mut running = send.spawn("stall then cancel").unwrap();
-    gate.wait_until_stalled(1, running.remaining_timeout(Duration::from_secs(30)))
-        .unwrap();
-    running.interrupt().unwrap();
-    let outcome = send.wait_spawned(running).unwrap();
-    let detail = send
-        .run_command(&[
-            "--json",
-            "session",
-            "turn",
-            outcome.accepted_turn_id().unwrap(),
-        ])
-        .unwrap();
-    let result = (|| {
-        require(
-            outcome.command.termination == Some(ProcessTermination::Exited(2)),
-            "cooperative cancellation exits 2",
-        )?;
-        require(
-            outcome.command.interventions == vec![HarnessIntervention::InterruptRequested]
-                && !outcome.command.cleanup.forced
-                && outcome.command.cleanup.succeeded()
-                && outcome.command.stdout_complete
-                && outcome.command.stderr_complete,
-            "SIGINT only, complete output and group cleanup",
-        )?;
-        assert_accepted_and_closed(&outcome)?;
-        require(
-            outcome.malformed_lines.is_empty() && outcome.reply_text().is_empty(),
-            "no malformed records or fabricated text",
-        )?;
-        let turn = final_turn(&outcome);
-        require(
-            turn["summary"]["outcome"] == "cancelled"
-                && turn["summary"]["notice"]["level"] == "info"
-                && turn["steps"][0]["end"]["cause"]["cause"] == "cancelled",
-            "Cancelled/Info with durable cancellation cause",
-        )?;
-        require(
-            detail.is_clean_exit(0)
-                && same_turn(
-                    &turn,
-                    &serde_json::from_slice::<Value>(&detail.stdout).unwrap(),
-                ),
-            "cancellation survives reload",
-        )
-    })();
-    finish_failure(
-        evidence,
-        &send,
-        &[("SIGINT", &outcome.command), ("reloaded Turn", &detail)],
-        server.captured_requests(),
-        result,
-        "direct_failure_sigint_while_stalled_commits_cancelled",
-    );
+    stopped_after_reported_usage(false);
 }
+
 #[test]
 fn direct_failure_profile_deadline_while_stalled_commits_error() {
     let driver = driver();
@@ -324,24 +384,222 @@ fn direct_failure_profile_deadline_while_stalled_commits_error() {
         "[]",
         "[llm]\ntimeout_secs = 1\n",
     );
-    let (server, _gate) = wire_gated_fake_llm(&world, "deadline", SseScript::plain("never-served"));
+    // 整份响应的 gate 在发送响应头之前等待，保护打开阶段的 deadline 轮询。
+    let (server, gate) = wire_gated_fake_llm(&world, "deadline", SseScript::plain("never-served"));
     let evidence = evidence(&world, &spec);
     let send = SessionSendDriver::new(&driver, &world, &spec, "deadline");
-    let outcome = send.send("stall then deadline").unwrap();
+    let running = send
+        .spawn("wait for response headers then deadline")
+        .unwrap();
+    gate.wait_until_stalled(1, running.remaining_timeout(Duration::from_secs(30)))
+        .unwrap();
+    let outcome = send.wait_spawned(running).unwrap();
     let result = (|| {
         failed(&outcome, "deadline")?;
         require(
             outcome.reply_text().is_empty() && server.captured_requests().len() == 1,
-            "one stalled request, no text",
+            "one request waiting for response headers, no text",
+        )?;
+        let turn = final_turn(&outcome);
+        let attempts = turn["steps"][0]["attempts"].as_array().unwrap();
+        require(
+            attempts.len() == 1
+                && attempts[0]["usage"].is_null()
+                && attempts[0]["estimated_cost_usd"].is_null(),
+            "opening deadline has no reported usage or estimated cost",
         )
     })();
     finish_failure(
         evidence,
         &send,
-        &[("deadline", &outcome.command)],
+        &[("opening deadline", &outcome.command)],
         server.captured_requests(),
         result,
         "direct_failure_profile_deadline_while_stalled_commits_error",
+    );
+}
+
+#[test]
+fn direct_failure_deadline_after_reported_usage_preserves_cost() {
+    stopped_after_reported_usage(true);
+}
+
+fn stopped_after_reported_usage(deadline: bool) {
+    let (prefix, agent, test) = if deadline {
+        (
+            "direct-failure-deadline-usage",
+            "deadline",
+            "direct_failure_deadline_after_reported_usage_preserves_cost",
+        )
+    } else {
+        (
+            "direct-failure-sigint-stall",
+            "cancel",
+            "direct_failure_sigint_while_stalled_commits_cancelled",
+        )
+    };
+    let driver = driver();
+    // 请求预算需容纳分段交付与公开观察确认，再在终态帧被阻塞时等待 deadline。
+    let (world, spec) = direct_world(
+        prefix,
+        agent,
+        "[]",
+        if deadline {
+            "[llm]\ntimeout_secs = 5\n"
+        } else {
+            ""
+        },
+    );
+    let (server, gate) = FakeLlmServer::start_segmented(
+        SseScript::Chunks { chunks: vec![
+            json!({"choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":100,"prompt_tokens_details":{"cached_tokens":200,"cache_creation_input_tokens":100},"completion_tokens_details":{"reasoning_tokens":20}}}),
+            json!({"choices":[{"delta":{"content":"usage-delivered"}}]}),
+            json!({"choices":[{"delta":{},"finish_reason":"stop"}]}),
+        ] },
+        spec.step_timeout(),
+    ).unwrap();
+    world
+        .wire_provider(
+            ProviderFixture::chat_completions(agent),
+            &server,
+            FAKE_API_KEY,
+        )
+        .unwrap();
+    let configuration = world.home().join(".lattice/providers.toml");
+    let source = std::fs::read_to_string(&configuration).unwrap();
+    std::fs::write(&configuration, format!("{source}\n[providers.local.models.{agent}.cost]\ninput = 2\noutput = 10\ncache_read = 0.5\ncache_write = 3\n")).unwrap();
+    let mut evidence = evidence(&world, &spec);
+    let send = SessionSendDriver::new(&driver, &world, &spec, agent);
+    let mut running = send.spawn("report usage then stall").unwrap();
+    gate.wait_until_stalled(1, running.remaining_timeout(Duration::from_secs(30)))
+        .unwrap();
+    let list = send.run_command(&["--json", "session", "list"]).unwrap();
+    assert!(list.is_clean_exit(0), "{}", list.summary());
+    let sessions: Value = serde_json::from_slice(&list.stdout).unwrap();
+    let [session] = sessions.as_array().unwrap().as_slice() else {
+        panic!("{sessions}")
+    };
+    let sid = session["session_id"].as_str().unwrap();
+    let mut watcher = Watcher::open(
+        &world,
+        running.remaining_timeout(Duration::from_secs(30)),
+        sid,
+    );
+    watcher.initial();
+    for delivered in 1..=2 {
+        gate.release_next(running.remaining_timeout(Duration::from_secs(30)))
+            .unwrap();
+        gate.wait_until_stalled(
+            delivered + 1,
+            running.remaining_timeout(Duration::from_secs(30)),
+        )
+        .unwrap();
+    }
+    // 文字在用量之后：观察到它即可确认用量已被产品消费，终态帧仍被阻塞。
+    watcher.until(
+        Instant::now() + running.remaining_timeout(Duration::from_secs(30)),
+        "text after reported usage",
+        |view| {
+            view.texts
+                .values()
+                .flatten()
+                .any(|segment| segment.text == "usage-delivered")
+        },
+    );
+    evidence
+        .record_json("usage-delivered-view", &json!(&watcher.received))
+        .unwrap();
+    drop(watcher);
+    if !deadline {
+        running.interrupt().unwrap();
+    }
+    let outcome = send.wait_spawned(running).unwrap();
+    let detail = send
+        .run_command(&[
+            "--json",
+            "session",
+            "turn",
+            outcome.accepted_turn_id().unwrap(),
+        ])
+        .unwrap();
+    let stopped = send.run_command(&["daemon", "stop"]).unwrap();
+    let reopened = send
+        .run_command(&[
+            "--json",
+            "session",
+            "turn",
+            outcome.accepted_turn_id().unwrap(),
+        ])
+        .unwrap();
+    let result = (|| {
+        if deadline {
+            failed(&outcome, "deadline")?;
+        } else {
+            require(
+                outcome.command.termination == Some(ProcessTermination::Exited(2)),
+                "cooperative cancellation exits 2",
+            )?;
+            require(
+                outcome.command.interventions == vec![HarnessIntervention::InterruptRequested]
+                    && !outcome.command.cleanup.forced
+                    && outcome.command.cleanup.succeeded()
+                    && outcome.command.stdout_complete
+                    && outcome.command.stderr_complete,
+                "SIGINT only, complete output and group cleanup",
+            )?;
+            assert_accepted_and_closed(&outcome)?;
+        }
+        require(
+            outcome.malformed_lines.is_empty() && outcome.reply_text().is_empty(),
+            "no malformed records or fabricated text",
+        )?;
+        let turn = final_turn(&outcome);
+        require(
+            turn["summary"]["outcome"] == if deadline { "failed" } else { "cancelled" }
+                && turn["summary"]["notice"]["level"] == if deadline { "error" } else { "info" }
+                && turn["steps"][0]["end"]["cause"]["cause"]
+                    == if deadline { "deadline" } else { "cancelled" },
+            "true deadline or cancellation outcome is durable",
+        )?;
+        let attempts = turn["steps"][0]["attempts"].as_array().unwrap();
+        require(
+            attempts.len() == 1 && server.captured_requests().len() == 1,
+            "one stopped attempt and one provider request",
+        )?;
+        require(
+            attempts[0]["usage"]
+                == json!({"input":1000,"cache_read":200,"cache_write":100,"output":100,"reasoning":20})
+                && attempts[0]["estimated_cost_usd"]
+                    .as_f64()
+                    .is_some_and(|fee| (fee - 0.0028).abs() < 1e-15),
+            "stopped attempt keeps reported usage and its estimated cost",
+        )?;
+        require(
+            detail.is_clean_exit(0)
+                && stopped.is_clean_exit(0)
+                && reopened.is_clean_exit(0)
+                && serde_json::from_slice::<Value>(&detail.stdout).unwrap()
+                    == serde_json::from_slice::<Value>(&reopened.stdout).unwrap()
+                && same_turn(
+                    &turn,
+                    &serde_json::from_slice::<Value>(&detail.stdout).unwrap(),
+                ),
+            "stopped attempt metering and outcome survive backend reopening without another provider request",
+        )
+    })();
+    finish_failure(
+        evidence,
+        &send,
+        &[
+            ("in-flight sessions", &list),
+            ("stopped request", &outcome.command),
+            ("reloaded Turn", &detail),
+            ("stop backend", &stopped),
+            ("reopened Turn", &reopened),
+        ],
+        server.captured_requests(),
+        result,
+        test,
     );
 }
 #[test]

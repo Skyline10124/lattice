@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use std::os::unix::fs::PermissionsExt;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -263,6 +263,202 @@ async fn complete(stream: crate::LlmStream) {
         ),
         "{events:?}"
     );
+}
+
+fn price_configuration(directory: &std::path::Path, url: &str, prices: &str) {
+    configure(directory, url, "chat-completions", "none");
+    let path = directory.join("providers.toml");
+    let mut source = std::fs::read_to_string(&path).unwrap();
+    source.push_str("catalog = 'pricing-fixture'\n[providers.test.models.model-id.cost]\n");
+    source.push_str(prices);
+    std::fs::write(path, source).unwrap();
+}
+
+fn price_response(server: &Server, tail: &str) -> oneshot::Sender<()> {
+    // 用量先于可观察文字交付，收到文字即可确定取消前已有用量。
+    let prefix = concat!(
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":100,\"prompt_tokens_details\":{\"cached_tokens\":200,\"cache_creation_input_tokens\":100},\"completion_tokens_details\":{\"reasoning_tokens\":20}}}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"priced\"}}]}\n\n"
+    );
+    server.respond_with_tail(
+        format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{prefix}", prefix.len() + tail.len()),
+        tail.into(),
+    )
+}
+
+#[tokio::test]
+async fn finished_cost_uses_current_merged_prices_without_requiring_current_credentials() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut server = Server::start(false).await;
+        let directory = private_dir();
+        price_configuration(directory.path(), &server.url, "input = 99\noutput = 99\n");
+        let cache = directory.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        std::fs::write(cache.join("models.json"), r#"{"pricing-fixture":{"models":{"model-id":{"id":"model-id","cost":{"input":88,"output":88,"cache_read":88,"cache_write":88,"reasoning":88}}}}}"#).unwrap();
+        let release = price_response(&server, DONE);
+        let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
+        let resolved = gateway.open_turn().resolve(&request("test").target).await.unwrap();
+        let mut stream = resolved.stream_chat(request("test"), StreamControl::default()).await.unwrap();
+        assert_eq!(stream.next().await, Some(LlmEvent::Started));
+        assert_eq!(stream.next().await, Some(LlmEvent::Delta(crate::LiveDelta::Text("priced".into()))));
+        price_configuration(directory.path(), &server.url, "input = 2\noutput = 10\ncache_read = 0.5\n");
+        std::fs::write(cache.join("models.json"), r#"{"pricing-fixture":{"models":{"model-id":{"id":"model-id","cost":{"input":77,"output":77,"cache_read":77,"cache_write":3,"reasoning":20}}}}}"#).unwrap();
+        std::fs::write(directory.path().join("auth.json"), "invalid credentials file").unwrap();
+        release.send(()).unwrap();
+        let events = stream.collect::<Vec<_>>().await;
+        let [LlmEvent::Delta(_), LlmEvent::Finished { outcome: ReplyOutcome::Complete { .. }, report }] = events.as_slice() else {
+            panic!("{events:?}");
+        };
+        assert!((report.estimated_cost_usd.unwrap() - 0.003).abs() < 1e-15);
+        assert_eq!(report.usage.unwrap().input, Some(1000));
+        server.next().await;
+        assert!(server.received.try_recv().is_err(), "pricing does not issue another request");
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn finished_cost_is_delivered_once_for_each_terminal_outcome() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    tokio::time::pause();
+    let _resume = ResumeClock;
+    let exercise = tokio::time::timeout(Duration::from_secs(15), async {
+        for ending in ["complete", "cancel", "deadline", "error", "rejected"] {
+            let server = Server::start(false).await;
+            let directory = private_dir();
+            price_configuration(
+                directory.path(),
+                &server.url,
+                "input = 2\noutput = 10\ncache_read = 0.5\ncache_write = 3\n",
+            );
+            let tail = match ending {
+                "error" => {
+                    "data: {\"error\":{\"message\":\"retryable failure\",\"type\":\"server_error\"}}\n\n"
+                }
+                "rejected" => {
+                    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call\",\"function\":{\"name\":\"tool\",\"arguments\":\"{\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n"
+                }
+                _ => DONE,
+            };
+            let release = price_response(&server, tail);
+            let cancel = Arc::new(AtomicBool::new(false));
+            let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
+            let before_open = tokio::time::Instant::now();
+            let mut stream = gateway
+                .open_turn()
+                .stream_chat(
+                    request("test"),
+                    StreamControl {
+                        cancel: Some(cancel.clone()),
+                        deadline: (ending == "deadline")
+                            .then(|| tokio::time::Instant::now() + Duration::from_secs(1)),
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(stream.next().await, Some(LlmEvent::Started));
+            assert!(matches!(stream.next().await, Some(LlmEvent::Delta(_))));
+            assert_eq!(
+                tokio::time::Instant::now(),
+                before_open,
+                "opening and usage delivery do not advance time"
+            );
+            if ending == "cancel" {
+                cancel.store(true, Ordering::Release);
+            } else if ending == "deadline" {
+                tokio::time::advance(Duration::from_secs(1)).await;
+            } else {
+                release.send(()).unwrap();
+            }
+            let events = stream.collect::<Vec<_>>().await;
+            let finished: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    LlmEvent::Finished { outcome, report } => Some((outcome, report)),
+                    _ => None,
+                })
+                .collect();
+            let [(outcome, report)] = finished.as_slice() else {
+                panic!("{ending}: {events:?}")
+            };
+            let correct = match ending {
+                "complete" => matches!(outcome, ReplyOutcome::Complete { .. }),
+                "cancel" => matches!(
+                    outcome,
+                    ReplyOutcome::Interrupted {
+                        reason: crate::ReplyStop::Stream(crate::StreamStop::Cancelled)
+                    }
+                ),
+                "deadline" => matches!(
+                    outcome,
+                    ReplyOutcome::Interrupted {
+                        reason: crate::ReplyStop::Stream(crate::StreamStop::Deadline)
+                    }
+                ),
+                "error" => {
+                    matches!(outcome, ReplyOutcome::Interrupted { reason: crate::ReplyStop::Stream(crate::StreamStop::Provider(failure)) } if failure.retryable)
+                }
+                _ => matches!(outcome, ReplyOutcome::Rejected { .. }),
+            };
+            assert!(correct, "{ending}: {outcome:?}");
+            // 没有 reasoning 专价时回退到输出单价。
+            assert!(
+                (report.estimated_cost_usd.unwrap() - 0.0028).abs() < 1e-15,
+                "{ending}"
+            );
+            assert_eq!(report.usage.unwrap().reasoning, Some(20), "{ending}");
+        }
+    });
+    tokio::pin!(exercise);
+    let wall_deadline = std::time::Instant::now() + Duration::from_secs(15);
+    // 持续让出执行权且保持可运行，避免本地 I/O 等待让暂停的时钟自动推进。
+    loop {
+        if let Some(result) = exercise.as_mut().now_or_never() {
+            result.unwrap();
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < wall_deadline,
+            "terminal cost test exceeded its wall-clock timeout"
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
+#[tokio::test]
+async fn finished_price_read_failures_keep_the_reply_and_only_log_safe_reasons() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        for (failure, reason) in [
+            ("syntax", "provider configuration unavailable"),
+            ("unreadable", "provider configuration unavailable"),
+            ("invalid price", "invalid model price"),
+        ] {
+            let server = Server::start(false).await;
+            let directory = private_dir();
+            price_configuration(directory.path(), &server.url, "input = 2\noutput = 10\n");
+            let release = price_response(&server, DONE);
+            let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
+            let mut stream = gateway.open_turn().stream_chat(request("test"), StreamControl::default()).await.unwrap();
+            assert_eq!(stream.next().await, Some(LlmEvent::Started));
+            assert!(matches!(stream.next().await, Some(LlmEvent::Delta(_))));
+            let path = directory.path().join("providers.toml");
+            match failure {
+                "unreadable" => {
+                    std::fs::remove_file(&path).unwrap();
+                    std::fs::create_dir(&path).unwrap();
+                }
+                "invalid price" => price_configuration(directory.path(), &server.url, "input = nan\noutput = 10\n"),
+                _ => std::fs::write(&path, "secret-key-in-invalid-configuration = [").unwrap(),
+            }
+            release.send(()).unwrap();
+            let (events, logs) = capture_logs(stream.collect::<Vec<_>>()).await;
+            let Some(LlmEvent::Finished { outcome: ReplyOutcome::Complete { message }, report }) = events.last() else { panic!("{events:?}") };
+            assert!(message.as_message().parts.iter().any(|part| matches!(&part.semantic, lattice_conversation::MessageSemantic::Text { text } if text == "pricedok")));
+            assert_eq!(report.usage.unwrap().input, Some(1000));
+            assert_eq!(report.estimated_cost_usd, None);
+            assert!(logs.contains(reason), "{logs}");
+            assert!(!logs.contains("secret-key-in-invalid-configuration"), "{logs}");
+        }
+    }).await.unwrap();
 }
 
 #[derive(Clone, Default)]

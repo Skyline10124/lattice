@@ -175,7 +175,7 @@ reasoning_replay = "none"              # 按模型覆盖 feature
 - **内置 provider 不能改协议。** 覆盖内置 provider 的表写了 `protocol` 时，即使取值与内置相同，整个文件也无效；要用其他协议，新建一个 provider `id`。
 - **`chatgpt` 不能改写。** 文件中出现 `[providers.chatgpt]` 的 `protocol`、`base_url`、`auth` 或 `features`，或其他 provider 设置 `auth = "oauth:chatgpt"`，整个文件无效。`chatgpt` 只能写 `models` 下的手写元数据。
 - **不写凭据。** 文件中没有 key 字段；凭据只在 `auth.json` 中。
-- **生效时机。** 请求网关每次请求、后台接受 Turn 与列出模型候选时，都按文件的当前内容解析，修改从下一次请求起对所有会话生效；执行中的一轮可能前后两次请求发往不同的 endpoint。文件在执行中变为无效时，下一次请求按 `ProviderError { retryable: false }` 停止，诊断写明是配置问题，见[会话合同](session.md#模型请求与执行预算)。
+- **生效时机。** 请求网关每次请求、后台接受 Turn 与列出模型候选时，都按文件的当前内容解析。用于请求发送的配置修改从下一次请求起对所有会话生效；执行中的一轮可能前后两次请求发往不同的 endpoint。价格的生效时机见[费用估算](#费用估算)。文件在执行中变为无效时，下一次发送请求按 `ProviderError { retryable: false }` 停止，诊断写明是配置问题，见[会话合同](session.md#模型请求与执行预算)。
 
 ### endpoint 的来源
 
@@ -345,20 +345,22 @@ Chat Completions 中，模型的 `reasoning_options` 含 toggle 项且 `thinking
 
 ### 费用估算
 
-每次请求结束时，请求网关按当时的模型价格估算这次尝试的费用，随用量交给调用方，保存在这次尝试上，标为估算。存下的是当时的估算值，之后价格变化（包括在 `providers.toml` 中修正）不回头修改旧记录。价格是美元每百万 token：
+每次请求结束时，请求网关在交付终态报告前，按这次请求固定的 provider 与模型标识重读当前有效价格，估算这次尝试的费用，随用量交给调用方，保存在这次尝试上，标为估算。取价沿用[元数据的来源与合并](#元数据的来源与合并)，本地文件读取放在阻塞执行边界。存下的是当时的估算值，之后价格变化（包括在 `providers.toml` 中修正）不回头修改旧记录。价格是美元每百万 token：
 
 ```text
-未命中输入 = input − cache_read − cache_write（缺失项按 0）
+未命中输入 = max(0, input − cache_read − cache_write)（缓存与推理计数缺失时仅在公式内按 0）
 费用（美元）= ( 未命中输入 × cost.input
              + cache_read × (cost.cache_read，没有时用 cost.input)
              + cache_write × (cost.cache_write，没有时用 cost.input)
-             + (output − reasoning) × cost.output
+             + max(0, output − reasoning) × cost.output
              + reasoning × (cost.reasoning，没有时用 cost.output)
              ) ÷ 1,000,000
 ```
 
 - 估算值以 `f64` 美元保存，必须有限且非负，保存时不按美分舍入。
 - `input` 或 `output` 未知、或模型没有 `cost.input` 与 `cost.output` 时，这次尝试没有费用。
+- 基础单价与已提供的缓存、推理单价必须有限且非负，明确的 0 有效；专价只有缺失时才回退。任一单价无效或计算结果超出有限金额范围时，费用未知。计费差额钳到 0，原始用量保持不变，计算不得下溢或溢出崩溃。
+- 完整回复与已报告用量的停止、失败、批次拒绝使用同一估算规则。结束时配置读取失败或无法取得有效价格时，费用未知，保留用量、正文与真实结局，只记录脱敏诊断；不回退到请求开始时的价格，不因估价失败重试模型。
 - 一轮的费用是各尝试之和；有尝试没有费用时，一轮的费用标为部分。
 - 按上下文长度分档的价格（models.dev 的 `tiers`、`context_over_200k`）不计入，所以是估算。
 - 费用只按模型价格计算，不因 provider 或认证方式区别；`chatgpt` 的模型取 `openai` 条目的价格，同样显示。
