@@ -846,8 +846,11 @@ async fn messages_max_tokens(
         }
         Err(error) => {
             assert!(
-                server.received.try_recv().is_err(),
-                "a request rejected before sending must not reach the provider"
+                matches!(
+                    server.received.try_recv(),
+                    Err(mpsc::error::TryRecvError::Empty)
+                ),
+                "a request rejected before sending must not reach the provider: the mock server must have seen zero requests"
             );
             Err(error)
         }
@@ -950,9 +953,79 @@ async fn messages_output_floor_is_capped_by_the_lower_estimate_room() {
 }
 
 #[tokio::test]
+async fn messages_output_floor_is_capped_to_a_lower_room_below_the_floor() {
+    // 7_192 字节正文加 "user"、"text" 共 7_200 字节：按 3 字节估 2_400，正好占满
+    // 2_400 的窗口；按 4 字节估 1_800，剩 600。600 小于 1_024，下限夹到 600。
+    let max_tokens = messages_max_tokens(
+        serde_json::json!({"context":2_400,"output":64_000}),
+        Some(&"a".repeat(7_192)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        max_tokens, 600,
+        "the floor must be capped to the 600 tokens left by the 4 bytes/token estimate"
+    );
+}
+
+#[tokio::test]
+async fn messages_chinese_prompt_keeps_a_conservative_room_below_the_floor() {
+    // 1_000 个汉字共 3_000 字节，加 "user"、"text" 共 3_008 字节：按 3 字节估 1_003，
+    // 窗口 1_503 剩 500；按 4 字节估 752，剩 751。保守估算还有空间，就发 500，
+    // 不抬到下限：中文的保守估算基本准确，发 751 或 1_024 会超窗。
+    let max_tokens = messages_max_tokens(
+        serde_json::json!({"context":1_503,"output":64_000}),
+        Some(&"中".repeat(1_000)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        max_tokens, 500,
+        "a positive conservative room below the floor must be sent unchanged"
+    );
+}
+
+#[tokio::test]
+async fn messages_prompt_at_the_lower_estimate_boundary_is_sent() {
+    // 388 字节正文加 "user"、"text" 共 396 字节：按 4 字节估 99，窗口 100 还剩 1，
+    // 照常发送；按 3 字节估 132 已无空间，下限夹到 1。
+    let max_tokens = messages_max_tokens(
+        serde_json::json!({"context":100,"output":64_000}),
+        Some(&"a".repeat(388)),
+    )
+    .await
+    .expect("a prompt that leaves one token at 4 bytes/token must be sent");
+    assert_eq!(
+        max_tokens, 1,
+        "boundary prompt must get the single remaining token"
+    );
+}
+
+#[tokio::test]
+async fn messages_one_byte_past_the_lower_estimate_boundary_is_rejected() {
+    // 多 1 字节，共 397 字节：按 4 字节估 100，占满 100 的窗口，发送前拒绝。
+    // messages_max_tokens 断言被拒绝时 provider 没有收到请求。
+    let error = messages_max_tokens(
+        serde_json::json!({"context":100,"output":64_000}),
+        Some(&"a".repeat(389)),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(error, crate::LlmError::ContextWindowExceeded { .. }),
+        "one byte past the boundary must fail as context_window_exceeded, got {error:?}"
+    );
+    assert!(
+        error.to_string().contains("at least 100 tokens"),
+        "diagnostic must name the 100-token lower estimate, got {error}"
+    );
+}
+
+#[tokio::test]
 async fn messages_full_window_is_rejected_before_sending() {
     // 400 字节正文加 "user"、"text" 共 408 字节，按 4 字节一个 token 也有 102，
     // 超过 100 的窗口。
+    // messages_max_tokens 断言被拒绝时 provider 没有收到请求。
     let error = messages_max_tokens(
         serde_json::json!({"context":100,"output":64_000}),
         Some(&"a".repeat(400)),

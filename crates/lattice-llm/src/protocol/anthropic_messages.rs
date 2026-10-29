@@ -96,7 +96,7 @@ struct ContextExceeded {
     context: u64,
 }
 
-/// 上限估算放不下、下限估算还有空间时发送的输出上限。
+/// 上限估算已无剩余空间、下限估算还有空间时发送的输出上限。
 ///
 /// 1,024 个 token 足以容纳一段简短回答或一次带参数的工具调用；再小，对端即使
 /// 接受请求也多半在输出中途以 `max_tokens` 截断。它同时受下限估算剩余空间与
@@ -113,8 +113,11 @@ const MIN_OUTPUT_TOKENS: u64 = 1_024;
 /// - 下限估算：4 字节计 1 个 token。只用它判断是否发送前拒绝：连它都放不下
 ///   任何输出时，提示几乎肯定超窗，返回错误。
 ///
-/// 上限估算的剩余空间不足 [`MIN_OUTPUT_TOKENS`] 时（包括已无空间），改用
-/// `MIN_OUTPUT_TOKENS` 与下限估算剩余空间中的较小者，由对端判断是否放得下。
+/// 上限估算还有剩余空间时只用它，即使不足 [`MIN_OUTPUT_TOKENS`] 也不抬高：
+/// 中日韩提示的上限估算基本准确，抬高会让请求超窗。只有上限估算已无空间、
+/// 下限估算还有空间时，才改用 `MIN_OUTPUT_TOKENS` 与下限估算剩余空间中的较小者，
+/// 由对端判断是否放得下。剩余空间从 1 降到 0 时输出上限会跳到下限，这是有意的：
+/// 剩余空间为正说明提示按保守估算放得下，应该相信它。
 fn fit_max_tokens(
     output_limit: Option<u64>,
     context_limit: Option<u64>,
@@ -138,7 +141,11 @@ fn fit_max_tokens(
         }
     };
     let upper_room = context.saturating_sub(prompt_bytes.div_ceil(3));
-    let room = upper_room.max(MIN_OUTPUT_TOKENS.min(lower_room));
+    let room = if upper_room > 0 {
+        upper_room
+    } else {
+        MIN_OUTPUT_TOKENS.min(lower_room)
+    };
     Ok(requested.min(room))
 }
 

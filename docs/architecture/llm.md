@@ -82,7 +82,7 @@ provider 配置、凭据与模型元数据是用户级的全局状态，由后�
 - **用量。** 按[用量换算](#用量换算)得出统一口径。
 - **不使用服务端会话状态。** Responses 与 Interactions 固定发送 `store: false`，每次发送完整历史，不发送 `previous_response_id`、`previous_interaction_id`，不使用后台执行。
 
-适配器不发送采样参数（`temperature`、`top_p` 等），也不发送输出上限（例如 Responses 的 `max_output_tokens`），由服务端按模型的默认值处理；只有 Anthropic Messages 的 `max_tokens` 是必填字段，取模型元数据的输出上限，输出上限缺失或为 0 时为 32,768。元数据有上下文窗口时，按提示的 UTF-8 字节数做两个估算（都向上取整，都不是 provider 的分词结果）：上限估算按 3 字节计 1 个 token，中日韩文字基本准确，英文偏多约三分之一；下限估算按 4 字节计 1 个 token。`max_tokens` 夹到窗口减去上限估算后的剩余空间，宁可少给输出也不让请求超窗。这个剩余空间不足 `MIN_OUTPUT_TOKENS`（1,024，见 [anthropic_messages.rs](../../crates/lattice-llm/src/protocol/anthropic_messages.rs)）时（包括已无空间），改为 `MIN_OUTPUT_TOKENS` 与窗口减去下限估算后剩余空间中的较小者，照常发送，由 provider 判断是否放得下。只有按下限估算也已占满窗口时，才不发送请求，这次尝试以 `context_window_exceeded` 错误失败，不重试。
+适配器不发送采样参数（`temperature`、`top_p` 等），也不发送输出上限（例如 Responses 的 `max_output_tokens`），由服务端按模型的默认值处理；只有 Anthropic Messages 的 `max_tokens` 是必填字段，取模型元数据的输出上限，输出上限缺失或为 0 时为 32,768。元数据有上下文窗口时，按提示的 UTF-8 字节数做两个估算（都向上取整，都不是 provider 的分词结果）：上限估算按 3 字节计 1 个 token，中日韩文字基本准确，英文偏多约三分之一；下限估算按 4 字节计 1 个 token。`max_tokens` 夹到窗口减去上限估算后的剩余空间，宁可少给输出也不让请求超窗。这个剩余空间只要大于 0 就照用，即使小于下限也不抬高，因为中日韩提示的上限估算基本准确，抬高会超窗。`MIN_OUTPUT_TOKENS`（1,024，见 [anthropic_messages.rs](../../crates/lattice-llm/src/protocol/anthropic_messages.rs)）只在按 3 字节/token 估算已无剩余空间时使用，且不超过窗口减去下限估算（4 字节/token）后的剩余空间与模型输出上限，照常发送，由 provider 判断是否放得下；剩余空间从 1 降到 0 时输出上限会跳到这个下限，这是有意的。只有按下限估算也已占满窗口时，才不发送请求，这次尝试以 `context_window_exceeded` 错误失败，不重试。
 
 ### 回放来源
 
@@ -225,7 +225,7 @@ feature 由协议适配器的代码定义，配置只能在已有取值中选择
 | Chat Completions 总是在助手消息中发回 `reasoning_content`（`protocol/projection/chat_completions.rs`） | 由 `reasoning_replay` 决定，默认不发；内置表中需要它的厂商启用 `reasoning-content` |
 | Chat Completions 同时读取 `reasoning_content` 与 `reasoning` | 保持，属于解析端的兼容 |
 | Chat Completions 总是发送 `stream_options: {"include_usage": true}` | 保持，属于标准协议行为 |
-| Anthropic `max_tokens` 固定为 32,768 | 取模型元数据的输出上限，缺失或为 0 时为 32,768；有上下文窗口时按 3 字节/token 估算的提示夹进剩余空间，不足时最少给 `MIN_OUTPUT_TOKENS`（1,024）；按 4 字节/token 估算也放不下时报 `context_window_exceeded`，见[适配器的职责](#适配器的职责) |
+| Anthropic `max_tokens` 固定为 32,768 | 取模型元数据的输出上限，缺失或为 0 时为 32,768；有上下文窗口时按 3 字节/token 估算的提示夹进剩余空间，剩余空间大于 0 时照用；只有按 3 字节/token 估算已无空间时才给 `MIN_OUTPUT_TOKENS`（1,024，不超过按 4 字节/token 估算的剩余空间与模型输出上限）；按 4 字节/token 估算也放不下时报 `context_window_exceeded`，见[适配器的职责](#适配器的职责) |
 | generateContent 的工具 schema 用 `parametersJsonSchema`（#270） | 保持，属于该协议的写法 |
 | OpenAI 兼容路径的工具名映射 | 已由 #311 删除，工具名原样发送 |
 
