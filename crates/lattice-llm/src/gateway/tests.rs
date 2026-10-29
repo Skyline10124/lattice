@@ -553,49 +553,61 @@ async fn chat_replay_defaults_to_no_reasoning() {
 
 #[tokio::test]
 async fn replay_source_matrix_reaches_each_protocol_request_body() {
-    use crate::protocol::projection::{native_to_wire, project_cross_provider, wire_to_native};
-    use lattice_conversation::{
-        ConversationItem, MessageSemantic, Protocol, ReplayOrigin, StepContent,
-    };
+    use crate::protocol::projection::{ProjectionError, wire_to_native};
+    use lattice_conversation::{ConversationItem, Protocol, ReplayOrigin, StepContent};
 
-    let mut server = Server::start(true).await;
-    let directory = private_dir();
-    let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+    // 期望来自夹具里的原文，不经过 project_cross_provider / native_to_wire 再算一遍。
+    let cases = [
+        (
+            Protocol::ChatCompletions,
+            include_str!("../../tests/fixtures/projection/openai_assistant_tool_calls.json"),
+            &["call_9f8e7d6c5b", "call_1a2b3c4d5e"][..],
+            &["The user wants the weather; call get_weather first, then get_time."][..],
+        ),
+        (
+            Protocol::Messages,
+            include_str!("../../tests/fixtures/projection/anthropic_thinking_tool_use.json"),
+            &["toolu_01AbCdEfGh", "toolu_02BcDeFgHi"][..],
+            &[
+                "Need the weather first, then the time; both are independent calls.",
+                "ErUBCkYIAxgCIkD3c2FmZGVmNTQ2Ny0xMjM0LWFiY2QtZXhhbXBsZXNpZ25hdHVyZQ==",
+            ][..],
+        ),
+        (
+            Protocol::GenerateContent,
+            include_str!("../../tests/fixtures/projection/gemini_thought_signature.json"),
+            &["fc-2026-08-13-001"][..],
+            &[
+                "Plan: check weather, then time.",
+                "CigIARABGkh4dGh5YnJpZC1zaWduYXR1cmUtb24tdGhvdWdodA==",
+                "CigIARABGkh4ZW1wdHktdGV4dC1wYXJ0LXNpZ25hdHVyZQ==",
+                "CigIARABGkh4c2lnbmF0dXJlLW9uLWZ1bmN0aW9uLWNhbGw=",
+            ][..],
+        ),
+    ];
     let protocols = [
         Protocol::ChatCompletions,
         Protocol::Messages,
         Protocol::GenerateContent,
     ];
-    for (protocol, fixture) in [
-        (
-            Protocol::ChatCompletions,
-            include_str!("../../tests/fixtures/projection/openai_assistant_tool_calls.json"),
-        ),
-        (
-            Protocol::Messages,
-            include_str!("../../tests/fixtures/projection/anthropic_thinking_tool_use.json"),
-        ),
-        (
-            Protocol::GenerateContent,
-            include_str!("../../tests/fixtures/projection/gemini_thought_signature.json"),
-        ),
-    ] {
+    let mut server = Server::start(true).await;
+    let directory = private_dir();
+    let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+    for (protocol, fixture, call_ids, replay_material) in cases {
         let origin = ReplayOrigin {
             protocol,
             provider_id: "test".into(),
         };
-        let mut source = wire_to_native(&origin, &serde_json::from_str(fixture).unwrap()).unwrap();
-        source
-            .parts
-            .retain(|part| !matches!(part.semantic, MessageSemantic::ToolCall { .. }));
-        let source = source.bind_zero_tool().unwrap();
-        let original = native_to_wire(&origin, &source).unwrap();
+        let decoded = wire_to_native(&origin, &serde_json::from_str(fixture).unwrap()).unwrap();
+        let (assistant, results) = bind_replay_step(decoded);
         for target_protocol in protocols {
             for provider in ["test", "other", "test"] {
-                let target = ReplayOrigin {
-                    protocol: target_protocol,
-                    provider_id: provider.into(),
-                };
+                let cell = format!("{protocol} -> {target_protocol}/{provider}");
+                let same_provider = target_protocol == protocol && provider == "test";
+                let same_protocol = target_protocol == protocol;
+                // Chat Completions 与 Messages 没有 call ID 就无法编码工具结果。
+                // generateContent 按工具名关联，请求仍会发出，但不得带上来源 call ID。
+                let sends = same_protocol || target_protocol == Protocol::GenerateContent;
                 let feature = if target_protocol == Protocol::ChatCompletions {
                     format!(
                         "[providers.{provider}.features]\nreasoning_replay='reasoning-content'\n"
@@ -605,52 +617,125 @@ async fn replay_source_matrix_reaches_each_protocol_request_body() {
                 };
                 std::fs::write(directory.path().join("providers.toml"), format!(
                     "[providers.{provider}]\nprotocol='{target_protocol}'\nbase_url='{}'\nauth='none'\n{feature}", server.url)).unwrap();
-                let body = match target_protocol {
-                    Protocol::ChatCompletions => DONE,
-                    Protocol::Messages => MESSAGES_DONE,
-                    Protocol::GenerateContent => CONTENT_DONE,
-                    _ => unreachable!(),
-                };
-                server.respond(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}", body.len()), false);
+                if sends {
+                    let body = match target_protocol {
+                        Protocol::ChatCompletions => DONE,
+                        Protocol::Messages => MESSAGES_DONE,
+                        Protocol::GenerateContent => CONTENT_DONE,
+                        _ => unreachable!(),
+                    };
+                    server.respond(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}", body.len()), false);
+                }
                 let mut request = self::request(provider);
                 request.messages.push(ConversationItem::Step(StepContent {
-                    assistant: source.clone(),
-                    results: vec![],
+                    assistant: assistant.clone(),
+                    results: results.clone(),
                 }));
-                complete(
-                    gateway
-                        .open_turn()
-                        .stream_chat(request, StreamControl::default())
-                        .await
-                        .unwrap(),
-                )
-                .await;
-                let wire = server.next().await.body;
-                let message = if target_protocol == Protocol::GenerateContent {
-                    &wire["contents"][0]
-                } else {
-                    &wire["messages"][0]
-                };
-                assert_eq!(
-                    *message,
-                    native_to_wire(&target, &project_cross_provider(&source, &target)).unwrap()
-                );
-                if target == origin {
-                    assert_eq!(*message, original);
-                } else {
-                    let serialized = wire.to_string();
-                    for part in &source.parts {
-                        if let MessageSemantic::Reasoning { text } = &part.semantic {
-                            assert!(!serialized.contains(text));
+                match gateway
+                    .open_turn()
+                    .stream_chat(request, StreamControl::default())
+                    .await
+                {
+                    Ok(stream) => {
+                        assert!(sends, "{cell}: sent a request that should have been rejected");
+                        complete(stream).await;
+                        let serialized = server.next().await.body.to_string();
+                        for id in call_ids {
+                            assert_eq!(
+                                serialized.contains(id),
+                                same_protocol,
+                                "{cell}: provider call id {id}"
+                            );
                         }
-                        if let Some(state) = &part.replay_state {
-                            assert!(!serialized.contains(state.as_str()));
+                        for material in replay_material {
+                            assert_eq!(
+                                serialized.contains(material),
+                                same_provider,
+                                "{cell}: replay material"
+                            );
                         }
+                    }
+                    Err(error) => {
+                        assert!(!sends, "{cell}: {error}");
+                        assert!(
+                            matches!(
+                                error,
+                                crate::LlmError::Projection(
+                                    ProjectionError::ToolResultWithoutProviderCallId { .. }
+                                )
+                            ),
+                            "{cell}: {error}"
+                        );
+                        assert!(
+                            server.received.try_recv().is_err(),
+                            "{cell}: rejected projection still reached the server"
+                        );
                     }
                 }
             }
         }
     }
+}
+
+fn bind_replay_step(
+    message: lattice_conversation::NativeMessage<lattice_conversation::UnboundToolCall>,
+) -> (
+    lattice_conversation::NativeMessage<lattice_conversation::BoundToolCall>,
+    Vec<lattice_conversation::StoredToolResult>,
+) {
+    use lattice_conversation::{
+        MessagePart, MessageSemantic, ModelMessageAddress, NativeMessage, ResultPayload, SessionId,
+        StoredToolResult, SuccessContent, ToolCallAddress, TurnId, canonical_json,
+        tool_content_digest,
+    };
+    let mut parts = Vec::new();
+    let mut results = Vec::new();
+    let mut index = 0usize;
+    for part in message.parts {
+        let semantic = match part.semantic {
+            MessageSemantic::ToolCall { call } => {
+                let invocation_id = lattice_conversation::InvocationId::parse(&format!(
+                    "00000000-0000-4000-8000-{index:012x}"
+                ))
+                .unwrap();
+                index += 1;
+                let name = call.name.clone();
+                let bound = call.bind(
+                    invocation_id,
+                    ToolCallAddress {
+                        message: ModelMessageAddress {
+                            session_id: SessionId::parse("3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c").unwrap(),
+                            turn_id: TurnId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").unwrap(),
+                            model_step_ordinal: 0,
+                        },
+                        part_ordinal: 0,
+                    },
+                );
+                let value = serde_json::json!({"ok": true});
+                let bytes = canonical_json(&value);
+                results.push(StoredToolResult {
+                    invocation_id,
+                    name,
+                    payload: ResultPayload::Succeeded(SuccessContent::Json {
+                        value,
+                        digest: tool_content_digest(&bytes),
+                        byte_length: bytes.len() as u64,
+                    }),
+                });
+                MessageSemantic::ToolCall { call: bound }
+            }
+            MessageSemantic::Text { text } => MessageSemantic::Text { text },
+            MessageSemantic::Reasoning { text } => MessageSemantic::Reasoning { text },
+        };
+        parts.push(MessagePart {
+            semantic,
+            replay_state: part.replay_state,
+        });
+    }
+    (
+        NativeMessage::new(message.role, message.provider_origin, parts),
+        results,
+    )
 }
 
 #[tokio::test]
