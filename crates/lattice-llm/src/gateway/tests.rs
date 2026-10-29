@@ -1395,7 +1395,7 @@ async fn without_usable_tls_roots_https_is_a_configuration_error_and_http_is_ser
         );
         assert!(gateway.tls_roots_der().is_empty(), "{case}: no roots kept");
         let turn = gateway.open_turn();
-        configuration_failure(&turn, "test", "no usable TLS root certificates").await;
+        configuration_failure(&turn, "test", "no usable TLS root certificates", case).await;
         let error = match turn
             .stream_chat(request("test"), StreamControl::default())
             .await
