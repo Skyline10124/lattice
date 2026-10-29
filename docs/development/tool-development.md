@@ -48,7 +48,7 @@ agent 名必须是单个普通路径段。profile、外部提示与外部策略�
 
 后台从用户级 `~/.lattice/providers.toml` 读取 provider 配置，从 `~/.lattice/auth.json` 读取凭据；key 用 `lattice auth set` 录入，用法见[根 README](../../README.md#2-配置模型凭据)。环境变量与工作区 `.env` 不提供 key、endpoint 或模型，项目中的 `providers.toml` 不被读取。`lattice models` 经后台列出模型候选、限制、价格与凭据状态。
 
-后台在 `~/.lattice/cache/models.json` 新于 24 小时时不重复拉取；缓存缺失或更旧时在启动时拉取，成功后每 24 小时再拉取。拉取失败从 1 分钟起倍增重试，上限 1 小时。用户级 `providers.toml` 的 `[metadata] auto_refresh = false` 可关闭自动刷新，后台每次触发时读取当前设置，无需重启；配置无效时本次自动刷新算作失败，记录原因并按上述退避重试，修正配置后在下一次重试时生效。手动更新使用 `lattice models refresh`，不受开关影响。Anthropic Messages 的 `max_tokens` 使用合并后模型元数据中的输出上限，缺少或为 0 时使用 32,768；有上下文窗口时按每 3 字节 1 个 token 估算提示并夹进剩余空间，放不下时不发送请求、报 `context_window_exceeded`，见[模型接入合同](../architecture/llm.md#适配器的职责)。
+后台在 `~/.lattice/cache/models.json` 新于 24 小时时不重复拉取；缓存缺失或更旧时在启动时拉取，成功后每 24 小时再拉取。拉取失败从 1 分钟起倍增重试，上限 1 小时。用户级 `providers.toml` 的 `[metadata] auto_refresh = false` 可关闭自动刷新，后台每次触发时读取当前设置，无需重启；配置无效时本次自动刷新算作失败，记录原因并按上述退避重试，修正配置后在下一次重试时生效。手动更新使用 `lattice models refresh`，不受开关影响。Anthropic Messages 的 `max_tokens` 使用合并后模型元数据中的输出上限，缺少或为 0 时使用 32,768；有上下文窗口时按每 3 字节 1 个 token 估算提示并夹进剩余空间，不足时最少给 `MIN_OUTPUT_TOKENS`（1,024，不超过按每 4 字节 1 个 token 估算的剩余空间）；按每 4 字节 1 个 token 估算也放不下时不发送请求、报 `context_window_exceeded`，见[模型接入合同](../architecture/llm.md#适配器的职责)。
 
 后台启动与 Git 隔离规则见[会话合同](../architecture/session.md#配置来源与后台启动)。
 

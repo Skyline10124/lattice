@@ -37,7 +37,7 @@ fn map_stop_reason(reason: &str) -> String {
 ///
 /// `max_tokens` 必填。输出上限缺失或为 0 时用 [`DEFAULT_MAX_OUTPUT_TOKENS`]；
 /// 有上下文窗口时再夹到该请求放得下的范围，避免提示与输出之和超出窗口后被拒绝；
-/// 估算的提示已占满窗口时返回 [`LlmError::ContextWindowExceeded`]，不发送请求。
+/// 按下限估算的提示也已占满窗口时返回 [`LlmError::ContextWindowExceeded`]，不发送请求。
 pub fn build_request_json(
     request: &ChatRequest,
     model: &str,
@@ -57,7 +57,7 @@ pub fn build_request_json(
     )
     .map_err(|exceeded| LlmError::ContextWindowExceeded {
         message: format!(
-            "estimated prompt of {} tokens leaves no room for output in the {}-token context window of {model}",
+            "estimated prompt of at least {} tokens leaves no room for output in the {}-token context window of {model}",
             exceeded.prompt_tokens, exceeded.context
         ),
     })?;
@@ -90,18 +90,31 @@ pub fn build_request_json(
     Ok(body)
 }
 
-/// 估算的提示 token 数已不小于上下文窗口。
+/// 按下限估算的提示 token 数也已不小于上下文窗口。
 struct ContextExceeded {
     prompt_tokens: u64,
     context: u64,
 }
 
+/// 上限估算放不下、下限估算还有空间时发送的输出上限。
+///
+/// 1,024 个 token 足以容纳一段简短回答或一次带参数的工具调用；再小，对端即使
+/// 接受请求也多半在输出中途以 `max_tokens` 截断。它同时受下限估算剩余空间与
+/// 模型输出上限约束，所以不会让下限估算下的提示与输出之和超出窗口。
+const MIN_OUTPUT_TOKENS: u64 = 1_024;
+
 /// 输出上限缺失或为 0 时回落到默认值，再按提示占用夹进上下文窗口。
 ///
-/// 提示按 3 个 UTF-8 字节计 1 个 token 并向上取整。英文约 4 字节一个 token，
-/// 这样多估约三分之一；中日韩文字每字 3 字节、约 1 个 token，按 4 字节会少估
-/// 约 25%，夹完仍可能超窗。宁可少给输出，也不让对端以不可重试的 400 拒绝。
-/// 这只是估算，不是 provider 的分词结果。窗口放不下任何输出时返回错误，不发送 1。
+/// 提示长度用两个估算，都按 UTF-8 字节数向上取整，都不是 provider 的分词结果：
+///
+/// - 上限估算：3 字节计 1 个 token。中日韩文字每字 3 字节、约 1 个 token，
+///   基本准确；英文约 4 字节一个 token，多估约三分之一。用它夹 `max_tokens`，
+///   宁可少给输出，也不让提示与输出之和超窗后被对端以 400 拒绝。
+/// - 下限估算：4 字节计 1 个 token。只用它判断是否发送前拒绝：连它都放不下
+///   任何输出时，提示几乎肯定超窗，返回错误。
+///
+/// 上限估算的剩余空间不足 [`MIN_OUTPUT_TOKENS`] 时（包括已无空间），改用
+/// `MIN_OUTPUT_TOKENS` 与下限估算剩余空间中的较小者，由对端判断是否放得下。
 fn fit_max_tokens(
     output_limit: Option<u64>,
     context_limit: Option<u64>,
@@ -114,14 +127,19 @@ fn fit_max_tokens(
     let Some(context) = context_limit.filter(|limit| *limit > 0) else {
         return Ok(requested);
     };
-    let prompt_tokens = prompt_bytes.div_ceil(3);
-    match context.checked_sub(prompt_tokens) {
-        Some(room) if room > 0 => Ok(requested.min(room)),
-        _ => Err(ContextExceeded {
-            prompt_tokens,
-            context,
-        }),
-    }
+    let lower = prompt_bytes.div_ceil(4);
+    let lower_room = match context.checked_sub(lower) {
+        Some(room) if room > 0 => room,
+        _ => {
+            return Err(ContextExceeded {
+                prompt_tokens: lower,
+                context,
+            });
+        }
+    };
+    let upper_room = context.saturating_sub(prompt_bytes.div_ceil(3));
+    let room = upper_room.max(MIN_OUTPUT_TOKENS.min(lower_room));
+    Ok(requested.min(room))
 }
 
 fn prompt_bytes(
