@@ -8,6 +8,7 @@ use lattice_profile::{
     LancetNetworkSection, LancetObservationSection, LancetProjectRootSection,
     LancetWorkspacePolicySection,
 };
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 pub use lattice_profile::LoadedAgentProfile;
@@ -30,6 +31,9 @@ pub(crate) fn load_for_turn(
         &paths,
     )
     .map_err(|error| reject(&profile_error_message(&error)))?;
+    if let Err(message) = ensure_global_profile_private(&paths.global_agents_dir, &loaded) {
+        return Err(reject(&message));
+    }
     if loaded.profile.agent.name != agent_name {
         return Err(reject(&format!(
             "[agent].name at {} declares '{}'; must match selected agent '{agent_name}'",
@@ -78,6 +82,86 @@ pub(crate) fn load_for_turn(
         max_find_paths: Some(policy.observation.max_find_paths),
     });
     Ok(loaded)
+}
+
+fn effective_uid() -> u32 {
+    // Linux geteuid 无参数、无内存访问，与本地 IPC 的对端检查相同。
+    unsafe { libc::geteuid() }
+}
+
+/// 全局 agents 目录与其中的 profile 文件沿用配置目录的属主和权限规则。
+/// 项目内 profile 由仓库权限管理，不在这里拒绝。
+fn ensure_global_profile_private(
+    global_agents_dir: &Path,
+    loaded: &LoadedAgentProfile,
+) -> std::result::Result<(), String> {
+    if !loaded.path.starts_with(global_agents_dir) {
+        return Ok(());
+    }
+    let owner = effective_uid();
+    check_private(global_agents_dir, true, owner)?;
+    check_private(&loaded.package_dir, true, owner)?;
+    check_private(&loaded.path, false, owner)?;
+    if let Some(relative) = loaded.profile.prompt.system_path.as_deref() {
+        let prompt = loaded.package_dir.join(relative);
+        if prompt.starts_with(global_agents_dir) {
+            check_private(&prompt, false, owner)?;
+        }
+    }
+    Ok(())
+}
+
+fn check_private(path: &Path, directory: bool, owner: u32) -> std::result::Result<(), String> {
+    let label = if directory {
+        "global agents directory"
+    } else {
+        "profile file"
+    };
+    // symlink_metadata 不跟随最后一级符号链接，避免把链接目标当成配置本身。
+    let meta = std::fs::symlink_metadata(path).map_err(|error| {
+        format!(
+            "{}: cannot inspect {label} ({})",
+            path.display(),
+            error.kind()
+        )
+    })?;
+    if meta.file_type().is_symlink() {
+        return Err(format!(
+            "{}: {label} must not be a symbolic link; permissions were not changed",
+            path.display()
+        ));
+    }
+    if meta.uid() != owner {
+        return Err(format!(
+            "{}: {label} must belong to the current user",
+            path.display()
+        ));
+    }
+    if directory {
+        if !meta.is_dir() {
+            return Err(format!("{}: {label} must be a directory", path.display()));
+        }
+        if meta.mode() & 0o077 != 0 {
+            return Err(format!(
+                "{}: {label} permissions are too broad; group and other permissions must be absent; permissions were not changed",
+                path.display()
+            ));
+        }
+        return Ok(());
+    }
+    if !meta.is_file() {
+        return Err(format!(
+            "{}: {label} must be a regular file",
+            path.display()
+        ));
+    }
+    if meta.mode() & 0o077 != 0 {
+        return Err(format!(
+            "{}: {label} must not grant group or other permissions; permissions were not changed",
+            path.display()
+        ));
+    }
+    Ok(())
 }
 
 fn invalid_profile() -> ApiError {
@@ -170,5 +254,145 @@ mod tests {
             })
         );
         assert!(lancet.policy.is_none());
+    }
+
+    fn private_configuration(
+        root: &std::path::Path,
+    ) -> (std::path::PathBuf, crate::LocalWorkspaceRoot) {
+        let configuration_dir = root.join("home/.lattice");
+        std::fs::create_dir_all(&configuration_dir).unwrap();
+        std::fs::set_permissions(&configuration_dir, std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let workspace = crate::LocalWorkspaceRoot::from_path(&project).unwrap();
+        (configuration_dir, workspace)
+    }
+
+    fn write_global_agent(agents: &std::path::Path, file_mode: u32) {
+        let package = agents.join("test");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::set_permissions(&package, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let profile = package.join("agent.toml");
+        std::fs::write(
+            &profile,
+            "schema_version=1\n[agent]\nname='test'\nmodel='local/test'\n[prompt]\nsystem='hi'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(file_mode)).unwrap();
+    }
+
+    #[test]
+    fn global_agents_directory_rejects_group_or_other_permissions() {
+        let root = tempfile::tempdir().unwrap();
+        let (configuration_dir, workspace) = private_configuration(root.path());
+        let agents = configuration_dir.join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_global_agent(&agents, 0o600);
+        let message = load_for_turn("test", &workspace, &configuration_dir)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.contains("permissions are too broad"),
+            "mode 0755 must be rejected, got {message}"
+        );
+        assert!(
+            message.contains("group and other permissions must be absent"),
+            "rejection must match the configuration directory rule, got {message}"
+        );
+    }
+
+    #[test]
+    fn global_profile_file_rejects_group_or_other_permissions() {
+        let root = tempfile::tempdir().unwrap();
+        let (configuration_dir, workspace) = private_configuration(root.path());
+        let agents = configuration_dir.join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o700)).unwrap();
+        write_global_agent(&agents, 0o644);
+        let message = load_for_turn("test", &workspace, &configuration_dir)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.contains("profile file must not grant group or other permissions"),
+            "mode 0644 profile must be rejected, got {message}"
+        );
+    }
+
+    #[test]
+    fn global_prompt_file_rejects_group_or_other_permissions() {
+        let root = tempfile::tempdir().unwrap();
+        let (configuration_dir, workspace) = private_configuration(root.path());
+        let agents = configuration_dir.join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let package = agents.join("test");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::set_permissions(&package, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let prompt = package.join("prompt.md");
+        std::fs::write(&prompt, "hi").unwrap();
+        std::fs::set_permissions(&prompt, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let profile = package.join("agent.toml");
+        std::fs::write(
+            &profile,
+            "schema_version=1\n[agent]\nname='test'\nmodel='local/test'\n[prompt]\nsystem_path='prompt.md'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let message = load_for_turn("test", &workspace, &configuration_dir)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.contains("profile file must not grant group or other permissions"),
+            "mode 0644 prompt must be rejected, got {message}"
+        );
+        assert!(
+            message.contains("prompt.md"),
+            "rejection must name the prompt file, got {message}"
+        );
+    }
+
+    #[test]
+    fn global_agents_directory_rejects_a_symbolic_link() {
+        let root = tempfile::tempdir().unwrap();
+        let (configuration_dir, workspace) = private_configuration(root.path());
+        let real = root.path().join("real-agents");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o700)).unwrap();
+        write_global_agent(&real, 0o600);
+        std::os::unix::fs::symlink(&real, configuration_dir.join("agents")).unwrap();
+        let message = load_for_turn("test", &workspace, &configuration_dir)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.contains("symbolic link"),
+            "a symlinked agents directory must be rejected, got {message}"
+        );
+    }
+
+    #[test]
+    fn global_profile_rejects_a_different_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let (configuration_dir, _workspace) = private_configuration(root.path());
+        let agents = configuration_dir.join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let message = check_private(&agents, true, effective_uid().wrapping_add(1)).unwrap_err();
+        assert!(
+            message.contains("must belong to the current user"),
+            "a different owner must be rejected, got {message}"
+        );
+    }
+
+    #[test]
+    fn private_global_profile_loads() {
+        let root = tempfile::tempdir().unwrap();
+        let (configuration_dir, workspace) = private_configuration(root.path());
+        let agents = configuration_dir.join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o700)).unwrap();
+        write_global_agent(&agents, 0o600);
+        assert!(load_for_turn("test", &workspace, &configuration_dir).is_ok());
     }
 }
