@@ -66,12 +66,12 @@ enabled = ["observe__workspace"]
 ```
 
 配置目录名称与 `[agent].name` 保持一致。
-后台在每次提交接受前读取 profile，先查项目内的 `.lattice/agents`，再查后台启动环境中 `$HOME/.lattice/agents`。连接同一后台的前端共用这一全局目录；固定 `XDG_STATE_HOME` 时，更换前端 HOME 不会改变它。
+后台在每次提交接受前读取 profile，先查项目内的 `.lattice/agents`，再查后台启动环境中 `$HOME/.lattice/agents`。全局目录与其中的 profile 须属于当前用户、不可被同组或其他用户写入（默认的 0755/0644 即可），路径最后一段不能是符号链接，否则提交时按配置错误拒绝。连接同一后台的前端共用这一全局目录；固定 `XDG_STATE_HOME` 时，更换前端 HOME 不会改变它。
 这里仅启用工作区读取工具，不授予创建、编辑文件或抓取网页的工具权限。
 
 ### 2. 配置模型凭据
 
-通过终端录入服务商密钥（输入不回显），后台保存到用户级 `~/.lattice/auth.json`：
+通过终端录入服务商密钥（输入不回显），后台保存到用户级 `~/.lattice/auth.json`。配置目录 `~/.lattice` 属于当前用户，新建时为 0700，不能向同组或其他用户开放；`auth.json` 为 0600。权限更宽、属主不符或是符号链接时，`lattice auth set` 与需要 key 的提交会被拒绝，后台不自动修改权限。
 
 ```sh
 lattice auth set anthropic
@@ -80,7 +80,7 @@ lattice models --provider anthropic
 
 provider 来自内置表与用户级 `~/.lattice/providers.toml`；环境变量、工作区 `.env` 和项目中的 `providers.toml` 不提供凭据或连接配置。
 
-后台默认在启动时与此后每 24 小时刷新模型元数据。在 `~/.lattice/providers.toml` 中写入以下设置可关闭自动刷新，修改后无需重启；手动执行 `lattice models refresh` 仍会刷新。
+后台在 `~/.lattice/cache/models.json` 新于 24 小时时不重复拉取；缓存缺失或更旧时在启动时拉取，成功后每 24 小时再拉取。拉取失败从 1 分钟起倍增重试，上限 1 小时。在 `~/.lattice/providers.toml` 中写入以下设置可关闭自动刷新，修改后无需重启；文件无效时该次自动刷新算作失败，按 1 分钟起倍增、上限 1 小时的退避重试，修正文件后在下一次重试时生效。手动执行 `lattice models refresh` 仍会刷新。
 
 ```toml
 [metadata]
@@ -114,11 +114,11 @@ lattice tui "$SESSION_ID"
 
 ## 后台执行与重连
 
-Session 命令和 TUI 首次使用时会自动启动本地后台。请求被接受后，即使关闭终端，任务也会在后台继续执行。
+Session 命令、TUI、`auth` 与 `models` 首次使用时会自动启动本地后台。请求被接受后，即使关闭终端，任务也会在后台继续执行。
 
-自动启动与显式运行 `lattice daemon serve` 都继承启动进程的环境。后台运行期间不随后续前端的环境变化；要更新后台环境，先执行 `lattice daemon stop` 再启动。
+自动启动与显式运行 `lattice daemon serve` 都继承启动进程的环境。后台在启动时按这份环境确定配置目录的位置（默认 `$HOME/.lattice`，其中有 `providers.toml`、凭据与全局 agents 目录），并载入 TLS 根证书。目录位置与 TLS 根在运行期间保持不变。换了决定目录位置或 TLS 根的环境后，先执行 `lattice daemon stop` 再启动。
 
-provider 配置与凭据由后台在每次模型请求时重读，修改 `providers.toml` 或通过 `lattice auth set` 更新凭据后不需要重启。TLS 根只在后台启动时载入；修改 TLS 信任后需要重启后台。
+配置目录里的 `providers.toml` 与凭据在每次模型请求时重读。修改这些文件，或通过 `lattice auth set` 更新凭据，下一次请求即使用新内容。TLS 根只在后台启动时载入；修改 TLS 信任后需要重启后台。
 
 TUI 中，输入框为空时按 Ctrl+D 或输入 `/quit` 只退出界面；任务运行时按 Esc 或 Ctrl+C 请求取消。之后用 `lattice tui <session_id>` 重新打开会话，在界面内输入 `/reconnect` 重新连接。
 

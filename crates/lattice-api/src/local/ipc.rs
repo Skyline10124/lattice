@@ -63,7 +63,7 @@ fn check_magic(magic: &[u8; 8]) -> Result<()> {
     }
 }
 
-pub(super) fn uid() -> u32 {
+pub(crate) fn uid() -> u32 {
     // Linux geteuid 无参数、无内存访问；通信两端必须匹配实际有效 UID。
     unsafe { libc::geteuid() }
 }

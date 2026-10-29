@@ -31,7 +31,7 @@ pub struct RuntimeExecution {
     visibility_policy: ReadVisibilityPolicy,
     workspace: Arc<LocalWorkspace>,
     history: Arc<WorkspaceHistory>,
-    tls: Arc<rustls::ClientConfig>,
+    tls: Option<Arc<rustls::ClientConfig>>,
     events: mpsc::UnboundedSender<ToolEvent>,
 }
 
@@ -226,7 +226,7 @@ impl RuntimeExecution {
             charge,
             remaining,
             scope,
-            Arc::clone(&self.tls),
+            self.tls.clone(),
         )))
     }
 }

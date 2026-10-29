@@ -128,14 +128,14 @@ impl Backend {
     fn with_tls_roots(
         layout: crate::StateLayout,
         home: Option<std::path::PathBuf>,
-        roots: std::result::Result<Vec<Vec<u8>>, lattice_llm::LlmError>,
+        roots: Vec<Vec<u8>>,
     ) -> Arc<Self> {
         let directory = super::auth::directory(home.as_deref())
             .map_err(|error| crate::ConfigRejection::new(&error.message, None));
         let gateway = directory.clone().and_then(|directory| {
             let auth = lattice_llm::auth::AuthStore::new(directory.clone());
-            roots
-                .and_then(|roots| lattice_llm::RequestGateway::new(directory, roots))
+            // 没有可用根证书不是整个后台的配置错误：网关照常构造，只拒绝 https 端点。
+            lattice_llm::RequestGateway::new(directory, roots)
                 .map(Arc::new)
                 .map_err(|error| crate::ConfigRejection::new(&error.to_string(), Some(&auth)))
         });

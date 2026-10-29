@@ -6,7 +6,7 @@
 
 mod auth;
 mod client;
-mod ipc;
+pub(crate) mod ipc;
 mod metadata;
 mod operation;
 mod server;

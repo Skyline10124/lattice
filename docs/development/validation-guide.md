@@ -43,9 +43,9 @@ cargo xtask tool-build --verify
 
 以下是公开 CLI 的后台与重连用法，操作示例不代表产品验收。提交新请求时，在目标项目根准备有效 profile 与凭据。找回和重连时使用原用户、状态根及会话身份；显式重试原请求还须保持原工作区和输入。状态根按[私有状态根](../architecture/storage.md#私有状态根)解析。
 
-profile 由后台在接受前读取：项目内的 `.lattice/agents` 优先，其次是后台启动时 HOME 下的 `.lattice/agents`。固定 `XDG_STATE_HOME` 而更换前端 HOME 时仍连接同一后台，使用同一全局 agents 目录；更换后台的 HOME 需要停止后重新启动。TUI 启动不检查 profile，配置拒绝在提交时显示并保留输入。
+profile 由后台在接受前读取：项目内的 `.lattice/agents` 优先，其次是后台启动时 HOME 下的 `.lattice/agents`；全局目录与 profile 须属于当前用户且不可被同组或其他用户写入，0755 目录与 0644 文件可用。固定 `XDG_STATE_HOME` 而更换前端 HOME 时仍连接同一后台，使用同一全局 agents 目录；更换后台的 HOME 需要停止后重新启动。TUI 启动不检查 profile，配置拒绝在提交时显示并保留输入。
 
-Session 与 TUI 命令会按需自启后台；`daemon status`、`daemon stop` 只联系已有后台，不自启。纯查询可建立连接所需运行资源，领域数据保持只读。
+Session、TUI、`auth` 与 `models` 会按需自启后台；`daemon status`、`daemon stop` 只联系已有后台，不自启。后台在启动时按自己的环境确定配置目录与全局 agents 目录的位置，并载入 TLS 根证书。目录位置与 TLS 根随后保持不变。目录里的 `providers.toml` 与凭据在每次请求时重读，修改这些文件后下一次请求即使用新内容。换了决定目录位置或 TLS 根的环境后，先执行 `lattice daemon stop` 再启动。纯查询可建立连接所需运行资源，领域数据保持只读。
 
 ### 提交与找回
 
@@ -182,7 +182,7 @@ lattice models refresh
 lattice --json models refresh
 ```
 
-后台默认在启动时与此后每 24 小时更新本地元数据缓存。用户级 `~/.lattice/providers.toml` 的 `[metadata] auto_refresh = false` 可关闭自动刷新；后台每次自动触发时读取当前设置，修改后无需重启，配置无效时跳过本次自动刷新。`refresh` 不受开关影响，不接受列表过滤参数 `--provider` 或 `--auth`；`chatgpt` 的账号模型列表尚未接入。
+后台在本地元数据缓存新于 24 小时时不重复拉取；缓存缺失或更旧时在启动时拉取，成功后每 24 小时再拉取。拉取失败从 1 分钟起倍增重试，上限 1 小时。用户级 `~/.lattice/providers.toml` 的 `[metadata] auto_refresh = false` 可关闭自动刷新；后台每次自动触发时读取当前设置，修改后无需重启；配置无效时本次自动刷新算作失败，按上述退避重试。`refresh` 不受开关影响，不接受列表过滤参数 `--provider` 或 `--auth`；`chatgpt` 的账号模型列表尚未接入。
 
 ## 日常验证
 

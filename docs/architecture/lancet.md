@@ -112,7 +112,7 @@ Cell 模型、能力匹配、scope/trust 解析及拒绝证据由该合同集中
 ### 网络获取
 
 `fetch__web` 仅通过 `network-fetch` Host 发出 GET 请求，供 Tool 在获准目标上取得受限响应。每次请求及重定向由 Host 核验允许主机、协议和地址策略，解析 DNS，固定连接地址，再完成 TLS 验证与读取。
-Tool Host 接收[冻结配置](session.md#执行配置冻结)中的实际 TLS 根证书内容，即后台启动时载入的根，以 Turn 专属信任配置验证 HTTPS 连接；本 Turn 的 provider 连接使用同一份根内容。材料的来源、冻结时点与持久化边界由会话合同维护。Host 在每一跳继续执行本节的目标授权、地址固定和证据记录。
+Tool Host 接收[冻结配置](session.md#执行配置冻结)中的实际 TLS 根证书内容，即后台启动时载入的根，以 Turn 专属信任配置验证 HTTPS 连接；本 Turn 的 provider 连接使用同一份根内容。没有可用的根证书时，Host 在通过网络策略与单元授权后、解析与连接前拒绝 https 请求（证据原因 `tls_roots_unavailable`）；不在允许名单或未授权的目标仍记为策略拒绝（`network_policy` 或 `cell_denied`），http 请求照常，不回退系统根。材料的来源、冻结时点与持久化边界由会话合同维护。Host 在每一跳继续执行本节的目标授权、地址固定和证据记录。
 公网访问采用 HTTPS；显式 localhost 策略作为受控例外处理，其余私有、保留和特殊地址拒绝。跨源重定向移除调用方请求头，响应头、响应体、重定向次数和 deadline 均受限制，取消与 Turn 观察预算参与执行。
 调用须同时通过 `ex` 能力边界和非空 `allowed_hosts` 目标策略；空允许列表拒绝全部网络，`allow_public_https` 只是公网 HTTPS 开关。localhost 还须显式启用并列入允许主机。每次调用最多一次网络 import，Host 内部处理重定向，不由 guest 发起第二条独立网络操作。最多跟随 5 次重定向，初始请求计数为 0；DNS、连接、TLS、各跳与 body 共用一次调用 deadline 和取消身份，不逐跳重置。
 
