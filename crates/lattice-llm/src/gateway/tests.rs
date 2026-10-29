@@ -1111,30 +1111,61 @@ async fn configuration_failure(
     error
 }
 
+/// 以测试 CA 为模板生成彼此不同的真实根：把主题与颁发者中的 "LATTICE test CA"
+/// 换成等长的 "LATTICE NNNN CA"。DER 结构不变，仍能通过 rustls 信任锚解析；
+/// 主题不同，所以不能为测试服务器的证书链作信任锚。
+fn renamed_test_ca(index: u16) -> Vec<u8> {
+    const NAME: &[u8] = b"LATTICE test CA";
+    let renamed = format!("LATTICE {index:04} CA");
+    assert_eq!(
+        renamed.len(),
+        NAME.len(),
+        "renamed subject must keep the DER length"
+    );
+    let mut der = TLS.ca_der.clone();
+    let mut replaced = 0;
+    let mut at = 0;
+    while let Some(offset) = der[at..].windows(NAME.len()).position(|w| w == NAME) {
+        let start = at + offset;
+        der[start..start + NAME.len()].copy_from_slice(renamed.as_bytes());
+        at = start + NAME.len();
+        replaced += 1;
+    }
+    assert_eq!(
+        replaced, 2,
+        "test CA subject and issuer must both be renamed"
+    );
+    der
+}
+
 #[tokio::test]
 async fn invalid_tls_root_near_the_count_limit_is_skipped_without_using_a_slot() {
-    // 1_023 个有效根之后是一张无法解析的根，再接两个有效根。无效根不占名额时，
-    // 保留 1_024 个有效根、截掉最后一个；它若被保留或占名额，结果都不同，
-    // 被保留时 rustls 构建 client 也会以 BadEncoding 失败。
+    // 1_023 个彼此不同的有效根之后是一张无法解析的根，再接真正的测试 CA 与另一张有效根。
+    // 无效根不占名额时保留 1_023 个改名根与测试 CA（按原顺序），截掉最后一张；
+    // 它若占名额，测试 CA 会被截掉，HTTPS 请求无法建立。改名根的主题不同，
+    // 不能替测试 CA 完成验证，所以请求成功说明恰好保留了测试 CA。
     let mut server = Server::start(true).await;
     let directory = private_dir();
     configure(directory.path(), &server.url, "chat-completions", "none");
-    let mut roots = vec![TLS.ca_der.clone(); 1_023];
+    let mut roots: Vec<Vec<u8>> = (0..1_023).map(renamed_test_ca).collect();
     roots.push(vec![1, 2, 3]);
-    roots.extend([TLS.ca_der.clone(), TLS.ca_der.clone()]);
+    roots.push(TLS.ca_der.clone());
+    roots.push(renamed_test_ca(1_023));
+    let mut expected = roots[..1_023].to_vec();
+    expected.push(TLS.ca_der.clone());
     let gateway = RequestGateway::new(directory.path().into(), roots).unwrap();
     let kept = gateway.tls_roots_der();
+    assert_eq!(kept.len(), 1_024, "kept root count");
     assert!(
-        kept.len() == 1_024 && kept.iter().all(|der| *der == TLS.ca_der),
-        "the invalid root must be skipped without using one of the 1024 slots: kept {} roots, {} of them valid",
-        kept.len(),
-        kept.iter().filter(|der| **der == TLS.ca_der).count()
+        kept == expected.as_slice(),
+        "kept roots must be the 1_023 renamed roots then the test CA, in original order; first mismatch at {:?}",
+        kept.iter().zip(&expected).position(|(a, b)| a != b)
     );
     let stream = gateway
         .open_turn()
         .stream_chat(request("test"), StreamControl::default())
         .await
-        .expect("the provider client must build from the kept roots");
+        .expect("the test CA kept after the invalid root must verify the TLS server");
     complete(stream).await;
     server.next().await;
 }
