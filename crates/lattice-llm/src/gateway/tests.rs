@@ -331,19 +331,32 @@ async fn protocol_and_auth_independently_select_wire_requests() {
                     .unwrap(),
             )
             .await;
+            let cell = format!("{protocol}/{auth}");
             let received = server.next().await;
-            assert!(received.body.get("temperature").is_none());
-            assert!(received.body.get("max_completion_tokens").is_none());
+            assert!(
+                received.body.get("temperature").is_none(),
+                "{cell}: temperature"
+            );
+            assert!(
+                received.body.get("max_completion_tokens").is_none(),
+                "{cell}: max_completion_tokens"
+            );
             if protocol != "anthropic-messages" {
-                assert!(received.body.get("max_tokens").is_none());
-                assert!(received.body.get("generationConfig").is_none());
+                assert!(
+                    received.body.get("max_tokens").is_none(),
+                    "{cell}: max_tokens"
+                );
+                assert!(
+                    received.body.get("generationConfig").is_none(),
+                    "{cell}: generationConfig"
+                );
             }
             let expected_path = match protocol {
                 "chat-completions" => "/v1/chat/completions",
                 "anthropic-messages" => "/v1/v1/messages",
                 _ => "/v1/models/family%2Fmodel%20id:streamGenerateContent?alt=sse",
             };
-            assert_eq!(received.path, expected_path, "{protocol} {auth}");
+            assert_eq!(received.path, expected_path, "{cell}: path");
             for (header, expected_auth) in [
                 ("authorization", "bearer"),
                 ("x-api-key", "x-api-key"),
@@ -357,7 +370,7 @@ async fn protocol_and_auth_independently_select_wire_requests() {
                 assert_eq!(
                     received.headers.get(header).map(String::as_str),
                     expected,
-                    "{protocol} {auth} {header}"
+                    "{cell}: {header}"
                 );
             }
             assert_eq!(
@@ -365,14 +378,21 @@ async fn protocol_and_auth_independently_select_wire_requests() {
                     .headers
                     .get("anthropic-version")
                     .map(String::as_str),
-                (protocol == "anthropic-messages").then_some("2023-06-01")
+                (protocol == "anthropic-messages").then_some("2023-06-01"),
+                "{cell}: anthropic-version"
             );
             assert_eq!(
-                received.headers["accept"],
-                "text/event-stream, application/json"
+                received.headers["accept"], "text/event-stream, application/json",
+                "{cell}: accept"
             );
-            assert!(received.headers["user-agent"].starts_with("lattice/"));
-            assert_eq!(received.headers["x-client-request-id"], "session-id");
+            assert!(
+                received.headers["user-agent"].starts_with("lattice/"),
+                "{cell}: user-agent"
+            );
+            assert_eq!(
+                received.headers["x-client-request-id"], "session-id",
+                "{cell}: client request id"
+            );
             for header in received.headers.keys() {
                 assert!(
                     [
@@ -388,29 +408,47 @@ async fn protocol_and_auth_independently_select_wire_requests() {
                         "x-client-request-id"
                     ]
                     .contains(&header.as_str()),
-                    "unexpected header {header}"
+                    "{cell}: unexpected header {header}"
                 );
             }
             match protocol {
                 "chat-completions" => {
-                    assert_eq!(received.body["model"], "family/model id");
-                    assert_eq!(received.body["messages"][0]["content"], "hello");
-                    assert_eq!(received.body["tools"][0]["function"]["name"], "tool_name");
-                    assert_eq!(received.body["stream"], true);
-                    assert_eq!(received.body["stream_options"]["include_usage"], true);
+                    assert_eq!(received.body["model"], "family/model id", "{cell}: model");
+                    assert_eq!(
+                        received.body["messages"][0]["content"], "hello",
+                        "{cell}: message"
+                    );
+                    assert_eq!(
+                        received.body["tools"][0]["function"]["name"], "tool_name",
+                        "{cell}: tool"
+                    );
+                    assert_eq!(received.body["stream"], true, "{cell}: stream");
+                    assert_eq!(
+                        received.body["stream_options"]["include_usage"], true,
+                        "{cell}: usage"
+                    );
                 }
                 "anthropic-messages" => {
-                    assert_eq!(received.body["model"], "family/model id");
-                    assert_eq!(received.body["messages"][0]["content"][0]["text"], "hello");
-                    assert_eq!(received.body["tools"][0]["name"], "tool_name");
-                    assert_eq!(received.body["max_tokens"], 32_768);
-                    assert_eq!(received.body["stream"], true);
+                    assert_eq!(received.body["model"], "family/model id", "{cell}: model");
+                    assert_eq!(
+                        received.body["messages"][0]["content"][0]["text"], "hello",
+                        "{cell}: message"
+                    );
+                    assert_eq!(
+                        received.body["tools"][0]["name"], "tool_name",
+                        "{cell}: tool"
+                    );
+                    assert_eq!(received.body["max_tokens"], 32_768, "{cell}: max_tokens");
+                    assert_eq!(received.body["stream"], true, "{cell}: stream");
                 }
                 _ => {
-                    assert_eq!(received.body["contents"][0]["parts"][0]["text"], "hello");
                     assert_eq!(
-                        received.body["tools"][0]["functionDeclarations"][0]["name"],
-                        "tool_name"
+                        received.body["contents"][0]["parts"][0]["text"], "hello",
+                        "{cell}: message"
+                    );
+                    assert_eq!(
+                        received.body["tools"][0]["functionDeclarations"][0]["name"], "tool_name",
+                        "{cell}: tool"
                     );
                 }
             }
@@ -637,7 +675,10 @@ async fn replay_source_matrix_reaches_each_protocol_request_body() {
                     .await
                 {
                     Ok(stream) => {
-                        assert!(sends, "{cell}: sent a request that should have been rejected");
+                        assert!(
+                            sends,
+                            "{cell}: sent a request that should have been rejected"
+                        );
                         complete(stream).await;
                         let serialized = server.next().await.body.to_string();
                         for id in call_ids {
@@ -704,7 +745,8 @@ fn bind_replay_step(
                     invocation_id,
                     ToolCallAddress {
                         message: ModelMessageAddress {
-                            session_id: SessionId::parse("3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c").unwrap(),
+                            session_id: SessionId::parse("3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c")
+                                .unwrap(),
                             turn_id: TurnId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").unwrap(),
                             model_step_ordinal: 0,
                         },
@@ -940,15 +982,22 @@ async fn configuration_failure(
     turn: &super::GatewayTurn,
     provider: &str,
     contains: &str,
+    stage: &str,
 ) -> crate::LlmError {
     let error = match turn.resolve(&request(provider).target).await {
-        Ok(_) => panic!("invalid configuration resolved a request"),
+        Ok(_) => panic!("{stage}: invalid configuration resolved a request"),
         Err(error) => error,
     };
-    assert!(matches!(error, crate::LlmError::Config { .. }), "{error}");
-    assert!(!error.retryable());
-    assert!(error.to_string().contains("configuration error"));
-    assert!(error.to_string().contains(contains), "{error}");
+    assert!(
+        matches!(error, crate::LlmError::Config { .. }),
+        "{stage}: {error}"
+    );
+    assert!(!error.retryable(), "{stage}: {error}");
+    assert!(
+        error.to_string().contains("configuration error"),
+        "{stage}: {error}"
+    );
+    assert!(error.to_string().contains(contains), "{stage}: {error}");
     error
 }
 
@@ -974,16 +1023,19 @@ async fn invalid_configuration_only_blocks_requests_that_depend_on_it() {
         "[providers.test]\nprotocol = 'broken'\n",
     )
     .unwrap();
-    configuration_failure(&turn, "test", "providers.toml:2:").await;
+    configuration_failure(&turn, "test", "providers.toml:2:", "broken protocol").await;
     std::fs::write(directory.path().join("providers.toml"), "").unwrap();
-    configuration_failure(&turn, "test", "not registered").await;
+    configuration_failure(&turn, "test", "not registered", "empty registry").await;
     configure(directory.path(), &server.url, "chat-completions", "bearer");
     auth.remove("test").unwrap();
-    configuration_failure(&turn, "test", "credentials are missing").await;
+    configuration_failure(&turn, "test", "credentials are missing", "removed key").await;
     auth.set("test", "restored-key").unwrap();
     std::fs::write(directory.path().join("auth.json"), "{invalid").unwrap();
-    configuration_failure(&turn, "test", "auth.json").await;
-    assert!(server.received.try_recv().is_err());
+    configuration_failure(&turn, "test", "auth.json", "malformed auth file").await;
+    assert!(
+        server.received.try_recv().is_err(),
+        "malformed auth file: request reached the server"
+    );
     configure(directory.path(), &server.url, "chat-completions", "none");
     complete(
         turn.stream_chat(request("test"), StreamControl::default())
@@ -992,21 +1044,51 @@ async fn invalid_configuration_only_blocks_requests_that_depend_on_it() {
     )
     .await;
     let no_auth = server.next().await;
-    assert!(!no_auth.headers.contains_key("authorization"));
-    assert!(!no_auth.headers.contains_key("x-api-key"));
-    assert!(!no_auth.headers.contains_key("x-goog-api-key"));
+    assert!(
+        !no_auth.headers.contains_key("authorization"),
+        "restored none auth: authorization"
+    );
+    assert!(
+        !no_auth.headers.contains_key("x-api-key"),
+        "restored none auth: x-api-key"
+    );
+    assert!(
+        !no_auth.headers.contains_key("x-goog-api-key"),
+        "restored none auth: x-goog-api-key"
+    );
     std::fs::write(
         directory.path().join("providers.toml"),
         "[providers.test]\nprotocol = 'untrusted-value'\n",
     )
     .unwrap();
-    let error = configuration_failure(&turn, "test", "providers.toml:2:").await;
-    assert!(error.to_string().contains("providers.toml:2:"));
-    assert!(error.to_string().contains("untrusted-value"));
+    let error = configuration_failure(
+        &turn,
+        "test",
+        "providers.toml:2:",
+        "untrusted protocol value",
+    )
+    .await;
+    assert!(
+        error.to_string().contains("providers.toml:2:"),
+        "untrusted protocol value: {error}"
+    );
+    assert!(
+        error.to_string().contains("untrusted-value"),
+        "untrusted protocol value: {error}"
+    );
     configure(directory.path(), &server.url, "chat-completions", "bearer");
     std::fs::remove_file(directory.path().join("auth.json")).unwrap();
-    configuration_failure(&turn, "test", "credentials are missing").await;
-    assert!(server.received.try_recv().is_err());
+    configuration_failure(
+        &turn,
+        "test",
+        "credentials are missing",
+        "deleted auth file",
+    )
+    .await;
+    assert!(
+        server.received.try_recv().is_err(),
+        "deleted auth file: request reached the server"
+    );
 }
 
 #[tokio::test]
@@ -1021,11 +1103,18 @@ async fn unimplemented_protocols_and_auth_are_configuration_errors() {
                 &turn,
                 "test",
                 &format!("protocol {protocol} is not implemented"),
+                &format!("{protocol}/{auth}"),
             )
             .await;
         }
     }
-    configuration_failure(&turn, "chatgpt", "auth oauth:chatgpt is not implemented").await;
+    configuration_failure(
+        &turn,
+        "chatgpt",
+        "auth oauth:chatgpt is not implemented",
+        "chatgpt",
+    )
+    .await;
 }
 
 #[tokio::test]
