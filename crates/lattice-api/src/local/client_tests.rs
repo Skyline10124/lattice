@@ -4,7 +4,7 @@
 use super::{ipc, types::*, *};
 use std::time::Duration;
 use tokio::{
-    io::AsyncWriteExt,
+    io::{AsyncReadExt, AsyncWriteExt},
     net::{UnixListener, UnixStream},
 };
 
@@ -1408,27 +1408,99 @@ async fn reconnect_after_idle_starts_a_fresh_session_watch() {
     assert_eq!(within(turn.detach()).await.head.unwrap().turn_id, Some(id));
 }
 
-#[tokio::test]
-async fn status_reports_an_incompatible_older_backend() {
+async fn status_against(
+    backend: impl FnOnce(
+        tokio::net::UnixStream,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+    + Send
+    + 'static,
+) -> LocalError {
     let directory = tempfile::tempdir().unwrap();
     let layout = crate::StateLayout::in_state_root(directory.path());
     let (_instance, listener) = ipc::Instance::bind(&layout).unwrap();
     let listener = UnixListener::from_std(listener).unwrap();
     let server = tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
-        // 字面量不能从当前魔数推导，否则以后升级会把这条回归一起改掉。
-        stream.write_all(b"LTLOCAL5").await.unwrap();
-        stream.write_u32(4).await.unwrap();
-        stream.write_all(b"null").await.unwrap();
-        let _held = stream;
+        let (stream, _) = listener.accept().await.unwrap();
+        backend(stream).await;
     });
     let error = LocalClient::new(layout).status().await.unwrap_err();
+    server.await.unwrap();
+    error
+}
+
+const OLDER_BACKEND: &str = "the running backend is an incompatible older version; stop it with the older binary's `lattice daemon stop`";
+const SILENT_CLOSE: &str = "the backend closed the connection without replying; if an older backend is still running, stop it with the older binary's `lattice daemon stop`";
+
+/// 已发布的旧后台读到不认识的魔数就关连接，不回写任何字节；请求剩下的部分留在它的接收队列里。
+#[tokio::test]
+async fn status_hints_at_an_older_backend_that_drops_the_connection_mid_request() {
+    let error = status_against(|mut stream| {
+        Box::pin(async move {
+            let mut magic = [0; 8];
+            stream.read_exact(&mut magic).await.unwrap();
+            drop(stream);
+        })
+    })
+    .await;
+    assert_eq!(
+        (error.kind, error.message.as_str()),
+        (LocalErrorKind::Transport, SILENT_CLOSE)
+    );
+}
+
+#[tokio::test]
+async fn status_hints_at_an_older_backend_that_reads_the_request_and_closes() {
+    let error = status_against(|mut stream| {
+        Box::pin(async move {
+            let mut magic = [0; 8];
+            stream.read_exact(&mut magic).await.unwrap();
+            let len = stream.read_u32().await.unwrap() as usize;
+            stream.read_exact(&mut vec![0; len]).await.unwrap();
+            drop(stream);
+        })
+    })
+    .await;
+    assert_eq!(
+        (error.kind, error.message.as_str()),
+        (LocalErrorKind::Transport, SILENT_CLOSE)
+    );
+}
+
+/// 从本版本起，后台读到别的魔数会先回写自己的魔数；更旧的魔数要明确报版本不兼容。
+#[tokio::test]
+async fn status_reports_an_older_backend_that_announces_its_magic() {
+    let error = status_against(|mut stream| {
+        Box::pin(async move {
+            // 字面量不能从当前魔数推导，否则以后升级会把这条回归一起改掉。
+            stream.write_all(b"LTLOCAL5").await.unwrap();
+            stream.write_u32(4).await.unwrap();
+            stream.write_all(b"null").await.unwrap();
+            let _held = stream;
+        })
+    })
+    .await;
+    assert_eq!(
+        (error.kind, error.message.as_str()),
+        (LocalErrorKind::IncompatibleBackend, OLDER_BACKEND)
+    );
+}
+
+#[tokio::test]
+async fn status_reports_a_backend_newer_than_the_client() {
+    let error = status_against(|mut stream| {
+        Box::pin(async move {
+            stream.write_all(b"LTLOCAL9").await.unwrap();
+            stream.write_u32(4).await.unwrap();
+            stream.write_all(b"null").await.unwrap();
+            let _held = stream;
+        })
+    })
+    .await;
     assert_eq!(
         (error.kind, error.message.as_str()),
         (
             LocalErrorKind::IncompatibleBackend,
-            "the running backend is an incompatible older version; stop it with the older binary's `lattice daemon stop`",
+            "the running backend is newer than this client; use the newer binary",
         )
     );
-    server.await.unwrap();
 }
