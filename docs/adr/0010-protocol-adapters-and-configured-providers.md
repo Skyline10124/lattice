@@ -185,8 +185,6 @@ provider 配置不写入会话，也不按 Turn 冻结：请求网关每次请�
 - 来源相同时保留不透明回放材料；来源不同时按跨来源规则投影：去除来源 reasoning、provider call ID 与回放状态，只保留中立语义。
 - 2026-10-29 修订：provider call ID 改按协议判定。协议相同时保留 call ID，provider 不同也保留；协议不同时去除，目标协议无法在缺少 call ID 时编码工具结果的，返回投影错误。reasoning、签名、加密 reasoning 与回放状态仍只在协议与 provider 都相同时回放。现行规则见 [LLM 合同](../architecture/llm.md#回放来源)。
 
-> 修订：#337 起，协议相同时保留 provider call ID，包括 provider `id` 不同的情况。现行规则见[模型接入合同的回放来源](../architecture/llm.md#回放来源)。
-
 ### 11. Sign in with ChatGPT
 
 SIWC 是一种认证方式：`protocol = "responses"`、`auth = "oauth:chatgpt"`，Responses 适配器本就固定发送 `store: false`（第 9 节），也不发送 `temperature`、`max_output_tokens` 等参数（见 `llm.md`），满足 SIWC 的要求，所以它既不需要单独的协议适配器，也不需要专用的 feature。
