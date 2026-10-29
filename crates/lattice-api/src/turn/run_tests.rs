@@ -41,7 +41,7 @@ async fn run_turn_result_and_saved_nodes_preserve_contract_fields() {
     assert_eq!(detail.steps, result.steps);
     assert_eq!(
         serde_json::to_value(&detail.steps[0].attempts[0].origin).unwrap(),
-        serde_json::json!({"protocol":"chat-completions","provider_id":"local"})
+        serde_json::json!({"base_url":"https://provider.example","protocol":"chat-completions","provider_id":"local"})
     );
     let Node::UserMessage { provider, .. } = read
         .node(NodeRef {
@@ -88,7 +88,7 @@ async fn provider_failure_preserves_notice_in_step_without_partial_reply() {
     assert_eq!(detail.summary.outcome, PublicTurnOutcome::Failed);
     assert_eq!(
         serde_json::to_value(&detail.steps[0].attempts[0].origin).unwrap(),
-        serde_json::json!({"protocol":"chat-completions","provider_id":"local"})
+        serde_json::json!({"base_url":"https://provider.example","protocol":"chat-completions","provider_id":"local"})
     );
     assert_eq!(
         detail.summary.notice.as_ref().unwrap().text,
@@ -133,6 +133,7 @@ impl LlmClient for CancelOnDone {
         let message = NativeMessage::new(
             MessageRole::Assistant,
             Some(lattice_conversation::ReplayOrigin {
+                base_url: "https://provider.example".into(),
                 protocol: Protocol::ChatCompletions,
                 provider_id: "local".into(),
             }),
@@ -158,6 +159,7 @@ impl LlmClient for CancelOnDone {
                 ReplayOrigin {
                     protocol: Protocol::ChatCompletions,
                     provider_id: request.target.provider,
+                    base_url: "https://provider.example".into(),
                 },
                 events,
                 control,

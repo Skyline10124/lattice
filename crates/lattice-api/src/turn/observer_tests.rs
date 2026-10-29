@@ -18,6 +18,7 @@ fn adjacent_text_merges_and_each_attempt_replaces_the_previous_segments() {
         origin: AttemptOrigin {
             provider_id: "local".into(),
             protocol: AttemptProtocol::ChatCompletions,
+            base_url: "https://provider.example".into(),
         },
         model: "test".into(),
     });
@@ -64,6 +65,7 @@ fn adjacent_text_merges_and_each_attempt_replaces_the_previous_segments() {
         origin: AttemptOrigin {
             provider_id: "local".into(),
             protocol: AttemptProtocol::ChatCompletions,
+            base_url: "https://provider.example".into(),
         },
         model: "test".into(),
     });

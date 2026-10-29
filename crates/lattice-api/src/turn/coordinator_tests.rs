@@ -53,6 +53,7 @@ fn origin() -> AttemptOrigin {
     AttemptOrigin {
         protocol: AttemptProtocol::ChatCompletions,
         provider_id: "openai".into(),
+        base_url: "https://provider.example".into(),
     }
 }
 fn reply(turn_id: TurnId) -> CompleteReply {
@@ -69,6 +70,7 @@ fn reply(turn_id: TurnId) -> CompleteReply {
             Some(lattice_conversation::ReplayOrigin {
                 protocol: Protocol::ChatCompletions,
                 provider_id: "openai".into(),
+                base_url: "https://provider.example".into(),
             }),
             vec![
                 MessagePart::semantic_only(MessageSemantic::Text {
@@ -260,6 +262,7 @@ async fn live_multicall_closes_continue_then_finish_from_structured_history() {
             let source = lattice_conversation::ReplayOrigin {
                 protocol: Protocol::ChatCompletions,
                 provider_id: request.target.provider.clone(),
+                base_url: "https://provider.example".into(),
             };
             requests.push(request);
             let parts = if requests.len() == 1 {
@@ -352,6 +355,7 @@ async fn live_multicall_closes_continue_then_finish_from_structured_history() {
                 origin: AttemptOrigin {
                     provider_id: "openai-compatible".into(),
                     protocol: AttemptProtocol::ChatCompletions,
+                    base_url: "https://provider.example".into(),
                 },
             },
             runtime: Arc::new(runtime),
@@ -628,6 +632,7 @@ async fn stop_at_execution_boundary(boundary: StopBoundary, cancelled: bool) {
             origin: AttemptOrigin {
                 provider_id: "openai".into(),
                 protocol: AttemptProtocol::ChatCompletions,
+                base_url: "https://provider.example".into(),
             },
         },
         runtime: Arc::new(runtime),

@@ -358,6 +358,7 @@ fn replay_origin_matrix_separates_opaque_state_from_call_ids() {
                 let target = ReplayOrigin {
                     protocol: target_protocol,
                     provider_id: provider.into(),
+                    base_url: "https://provider.example".into(),
                 };
                 let same_provider = target_protocol == protocol && provider == "test";
                 let same_protocol = target_protocol == protocol;
@@ -1391,5 +1392,6 @@ fn replay_origin(protocol: Protocol) -> ReplayOrigin {
     ReplayOrigin {
         protocol,
         provider_id: "test".into(),
+        base_url: "https://provider.example".into(),
     }
 }

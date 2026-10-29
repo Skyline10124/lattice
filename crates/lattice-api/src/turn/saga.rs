@@ -77,6 +77,7 @@ impl ModelExecution {
                         let origin = AttemptOrigin {
                             provider_id: target.provider.clone(),
                             protocol: last_origin.protocol,
+                            base_url: last_origin.base_url.clone(),
                         };
                         (
                             origin,

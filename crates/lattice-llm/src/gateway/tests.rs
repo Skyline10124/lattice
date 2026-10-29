@@ -476,15 +476,15 @@ async fn chat_replay_defaults_to_no_reasoning() {
     configure(directory.path(), &server.url, "chat-completions", "none");
     let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
     let mut request = request("test");
-    let assistant = crate::test_reply::wire_to_native(
+    let mut assistant = crate::test_reply::wire_to_native(
         Protocol::ChatCompletions,
         &serde_json::json!({"choices":[{"message":{
             "content":"answer", "reasoning_content":"private reasoning"
         }}]}),
     )
-    .unwrap()
-    .bind_zero_tool()
     .unwrap();
+    assistant.provider_origin.as_mut().unwrap().base_url = server.url.clone();
+    let assistant = assistant.bind_zero_tool().unwrap();
     request.messages.push(ConversationItem::Step(StepContent {
         assistant,
         results: vec![],
@@ -533,9 +533,14 @@ async fn chat_replay_defaults_to_no_reasoning() {
         )
         .unwrap();
         let mut request = self::request("test");
+        let mut assistant = crate::test_reply::wire_to_native(
+            Protocol::ChatCompletions,
+            &serde_json::json!({"choices":[{"message":{"content":"answer", "reasoning_content":"private reasoning"}}]}),
+        )
+        .unwrap();
+        assistant.provider_origin.as_mut().unwrap().base_url = server.url.clone();
         request.messages.push(ConversationItem::Step(StepContent {
-            assistant: crate::test_reply::wire_to_native(Protocol::ChatCompletions,
-                &serde_json::json!({"choices":[{"message":{"content":"answer", "reasoning_content":"private reasoning"}}]})).unwrap().bind_zero_tool().unwrap(),
+            assistant: assistant.bind_zero_tool().unwrap(),
             results: vec![],
         }));
         let resolved = gateway.open_turn().resolve(&request.target).await.unwrap();
@@ -583,6 +588,7 @@ async fn replay_source_matrix_reaches_each_protocol_request_body() {
         let origin = ReplayOrigin {
             protocol,
             provider_id: "test".into(),
+            base_url: server.url.clone(),
         };
         let mut source = wire_to_native(&origin, &serde_json::from_str(fixture).unwrap()).unwrap();
         source
@@ -595,6 +601,7 @@ async fn replay_source_matrix_reaches_each_protocol_request_body() {
                 let target = ReplayOrigin {
                     protocol: target_protocol,
                     provider_id: provider.into(),
+                    base_url: server.url.clone(),
                 };
                 let feature = if target_protocol == Protocol::ChatCompletions {
                     format!(
@@ -707,6 +714,99 @@ async fn messages_use_merged_output_limits_at_resolution_and_reload_on_the_next_
     )
     .await;
     assert_eq!(server.next().await.body["max_tokens"], 32768);
+}
+
+#[tokio::test]
+async fn changed_base_url_does_not_replay_a_reasoning_signature() {
+    const SIGNATURE: &str = "sig-endpoint-a";
+    let signed = format!(
+        "event: message_start\ndata: {{\"message\":{{\"usage\":{{\"input_tokens\":1}}}}}}\n\n\
+         event: content_block_start\ndata: {{\"index\":0,\"content_block\":{{\"type\":\"thinking\",\"thinking\":\"because\",\"signature\":\"{SIGNATURE}\"}}}}\n\n\
+         event: content_block_stop\ndata: {{\"index\":0}}\n\n\
+         event: content_block_start\ndata: {{\"index\":1,\"content_block\":{{\"type\":\"text\",\"text\":\"ok\"}}}}\n\n\
+         event: content_block_stop\ndata: {{\"index\":1}}\n\n\
+         event: message_delta\ndata: {{\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":{{\"output_tokens\":2}}}}\n\n\
+         event: message_stop\ndata: {{}}\n\n"
+    );
+    let mut origin_server = Server::start(true).await;
+    let mut other_server = Server::start(true).await;
+    let directory = private_dir();
+    configure(
+        directory.path(),
+        &origin_server.url,
+        "anthropic-messages",
+        "none",
+    );
+    origin_server.respond(
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{signed}",
+            signed.len()
+        ),
+        false,
+    );
+    let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+    let turn = gateway.open_turn();
+    let events = tokio::time::timeout(
+        Duration::from_secs(5),
+        turn.stream_chat(request("test"), StreamControl::default())
+            .await
+            .unwrap()
+            .collect::<Vec<_>>(),
+    )
+    .await
+    .unwrap();
+    let assistant = events
+        .iter()
+        .find_map(|event| match event {
+            LlmEvent::Finished {
+                outcome: ReplyOutcome::Complete { message },
+                ..
+            } => Some(message.as_message().clone().bind_zero_tool().unwrap()),
+            _ => None,
+        })
+        .expect("signed reply");
+    origin_server.next().await;
+    let mut replay = request("test");
+    replay
+        .messages
+        .push(lattice_conversation::ConversationItem::Step(
+            lattice_conversation::StepContent {
+                assistant: assistant.clone(),
+                results: Vec::new(),
+            },
+        ));
+    complete(
+        turn.stream_chat(replay.clone(), StreamControl::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    let same_endpoint = origin_server.next().await.body.to_string();
+    assert!(
+        same_endpoint.contains(SIGNATURE),
+        "the same endpoint must replay the reasoning signature"
+    );
+    configure(
+        directory.path(),
+        &other_server.url,
+        "anthropic-messages",
+        "none",
+    );
+    complete(
+        turn.stream_chat(replay, StreamControl::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    let other_endpoint = other_server.next().await.body.to_string();
+    assert!(
+        !other_endpoint.contains(SIGNATURE),
+        "a different base_url must not replay the previous endpoint's signature, got {other_endpoint}"
+    );
+    assert!(
+        other_endpoint.contains("ok"),
+        "the visible reply text must still be sent"
+    );
 }
 
 #[tokio::test]

@@ -348,6 +348,7 @@ mod tests {
             let origin = lattice_conversation::ReplayOrigin {
                 protocol: lattice_conversation::Protocol::ChatCompletions,
                 provider_id: request.target.provider.clone(),
+                base_url: "https://provider.example".into(),
             };
             lattice_llm::protocol::projection::request_messages_to_wire(&origin, &request.messages)
                 .map_err(|error| {

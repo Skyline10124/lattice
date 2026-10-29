@@ -250,6 +250,7 @@ fn origin() -> AttemptOrigin {
     AttemptOrigin {
         protocol: AttemptProtocol::ChatCompletions,
         provider_id: "openai".into(),
+        base_url: "https://api.openai.com/v1".into(),
     }
 }
 
@@ -1259,7 +1260,7 @@ fn keys_versions_and_encoding() {
         let meta = read.tx.open_table(META).unwrap();
         assert_eq!(
             meta.get("store_format_version").unwrap().unwrap().value(),
-            b"\x00\x00\x00\x055"
+            b"\x00\x00\x00\x066"
         );
     }
     let (_lock, calls) = running(&db, sid(1), tid(1), 1, 1);
@@ -1882,10 +1883,12 @@ fn attempt_sources_survive_retry_and_reopen() {
     let first = AttemptOrigin {
         protocol: AttemptProtocol::ChatCompletions,
         provider_id: "edge-1".into(),
+        base_url: "https://api.openai.com/v1".into(),
     };
     let second = AttemptOrigin {
         protocol: AttemptProtocol::Messages,
         provider_id: "edge-1".into(),
+        base_url: "https://api.openai.com/v1".into(),
     };
     db.start_request(&lock, key(tid(1), 0, 0), first.clone(), now())
         .unwrap();
@@ -1899,8 +1902,8 @@ fn attempt_sources_survive_retry_and_reopen() {
         .unwrap();
     let turn = detail(&db);
     let expected = [
-        json!({"protocol":"chat-completions","provider_id":"edge-1"}),
-        json!({"protocol":"anthropic-messages","provider_id":"edge-1"}),
+        json!({"base_url":"https://api.openai.com/v1","protocol":"chat-completions","provider_id":"edge-1"}),
+        json!({"base_url":"https://api.openai.com/v1","protocol":"anthropic-messages","provider_id":"edge-1"}),
     ];
     let stored = serde_json::to_value(node_at(&db, 2)).unwrap();
     for (i, expected) in expected.iter().enumerate() {
@@ -1933,6 +1936,7 @@ fn attempt_sources_survive_retry_and_reopen() {
     let third = AttemptOrigin {
         protocol: AttemptProtocol::GenerateContent,
         provider_id: "edge-1".into(),
+        base_url: "https://api.openai.com/v1".into(),
     };
     db.start_request(&lock, key(tid(1), 1, 0), third.clone(), now())
         .unwrap();
@@ -2005,6 +2009,7 @@ fn provider_id_and_attempt_source_boundaries() {
         let origin = AttemptOrigin {
             protocol,
             provider_id: input.config.provider.clone(),
+            base_url: "https://api.openai.com/v1".into(),
         };
         db.accept_turn(&lock, input).unwrap();
         db.start_request(&lock, key(tid(1), 0, 0), origin.clone(), now())

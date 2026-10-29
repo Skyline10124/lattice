@@ -90,6 +90,7 @@ impl LlmClient for FakeStreamingLlmClient {
                 lattice_conversation::ReplayOrigin {
                     protocol: lattice_conversation::Protocol::ChatCompletions,
                     provider_id: request.target.provider,
+                    base_url: "https://provider.example".into(),
                 },
                 events,
                 control,

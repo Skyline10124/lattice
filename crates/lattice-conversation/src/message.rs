@@ -90,16 +90,19 @@ impl fmt::Display for Protocol {
     }
 }
 
-/// 一次请求的实际来源；不含模型、endpoint、认证或 features。
+/// 一次请求的实际来源。含协议、provider 与 endpoint；不含模型、认证或 features。
+///
+/// `base_url` 是当时配置里的 endpoint。改了地址之后，旧的 reasoning 签名不再回放。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReplayOrigin {
     pub protocol: Protocol,
     pub provider_id: String,
+    pub base_url: String,
 }
 
 impl ReplayOrigin {
-    /// 完整来源相同才保留 reasoning 与逐片段回放状态。
+    /// 协议、provider 与 endpoint 都相同才保留 reasoning 与逐片段回放状态。
     pub fn same_provider(&self, other: &Self) -> bool {
         self == other
     }
@@ -388,6 +391,7 @@ mod tests {
             Some(ReplayOrigin {
                 protocol: Protocol::GenerateContent,
                 provider_id: "test".into(),
+                base_url: "https://provider.example".into(),
             }),
             vec![part],
         );
@@ -405,6 +409,7 @@ mod tests {
             Some(ReplayOrigin {
                 protocol: Protocol::Messages,
                 provider_id: "test".into(),
+                base_url: "https://provider.example".into(),
             }),
             vec![
                 text_part("hello"),

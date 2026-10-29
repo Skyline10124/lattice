@@ -91,6 +91,7 @@ pub(crate) fn replay_origin(protocol: Protocol) -> ReplayOrigin {
     ReplayOrigin {
         protocol,
         provider_id: "test".into(),
+        base_url: "https://provider.example".into(),
     }
 }
 

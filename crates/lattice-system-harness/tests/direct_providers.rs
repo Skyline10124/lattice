@@ -254,7 +254,7 @@ fn implemented_builtin_protocols_accept_and_record_the_protocol_actually_sent() 
             let turn = support::live_turn(&sent.parsed);
             assert_eq!(
                 turn["steps"][0]["attempts"][0]["origin"],
-                serde_json::json!({"provider_id":id,"protocol":stored})
+                serde_json::json!({"base_url": server.base_url(), "provider_id":id,"protocol":stored})
             );
             evidence.record_captures(captures);
         }));
