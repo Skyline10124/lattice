@@ -164,7 +164,7 @@ reasoning_replay = "none"              # 按模型覆盖 feature
 
 | 字段 | 位置 | 说明 |
 | --- | --- | --- |
-| `auto_refresh` | 顶层 `metadata` 表 | 布尔，默认 true。每次自动触发都读取当前文件：false 或文件无效时跳过本次拉取。`lattice models refresh` 不受影响 |
+| `auto_refresh` | 顶层 `metadata` 表 | 布尔，默认 true。每次自动触发都读取当前文件：false 时跳过本次拉取；文件无效时本次自动刷新算作失败，按拉取失败的退避重试。`lattice models refresh` 不受影响 |
 | `protocol`、`base_url`、`auth`、`catalog` | provider 表 | 见[字段](#字段)；覆盖内置 provider 时只写要改的字段，不能写 `protocol` |
 | `features` | provider 子表 | 覆盖或补充 provider 级 features |
 | `models."<模型>"` | provider 子表 | 手写元数据：`context`、`output`（token 数），`effort`（可用档位列表），`tools`（布尔，默认 true），`cost`（`input`、`output`、`cache_read`、`cache_write`，美元每百万 token） |
