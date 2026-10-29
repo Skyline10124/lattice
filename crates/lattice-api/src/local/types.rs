@@ -249,7 +249,7 @@ pub enum LocalErrorKind {
     Protocol,
     Permission,
     AlreadyRunning,
-    /// 已有后台使用更旧的 IPC 魔数。客户端不替换它，也不保留旧协议。
+    /// 已有后台的 IPC 魔数版本与本端不同（更旧或更新）。客户端不替换它，也不兼容其他版本的协议。
     IncompatibleBackend,
 }
 pub type Result<T> = std::result::Result<T, LocalError>;
