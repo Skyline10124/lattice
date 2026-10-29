@@ -49,6 +49,8 @@ struct Response {
 struct Server {
     url: String,
     received: mpsc::UnboundedReceiver<Received>,
+    address: std::net::SocketAddr,
+    peers: mpsc::UnboundedReceiver<std::net::SocketAddr>,
     task: JoinHandle<()>,
     responses: Arc<Mutex<VecDeque<Response>>>,
 }
@@ -58,6 +60,7 @@ impl Server {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (tx, received) = mpsc::unbounded_channel();
+        let (peers_tx, peers) = mpsc::unbounded_channel();
         let responses = Arc::new(Mutex::new(VecDeque::new()));
         let queued = responses.clone();
         let task = tokio::spawn(async move {
@@ -66,7 +69,8 @@ impl Server {
             loop {
                 tokio::select! {
                     accepted = listener.accept() => {
-                        let (socket, _) = accepted.unwrap();
+                        let (socket, peer) = accepted.unwrap();
+                        let _ = peers_tx.send(peer);
                         id += 1;
                         let tx = tx.clone();
                         let queued = queued.clone();
@@ -92,8 +96,28 @@ impl Server {
                 address.port()
             ),
             received,
+            address,
+            peers,
             task,
             responses,
+        }
+    }
+
+    /// 被测请求返回后再连一次探针：内核按到达顺序交出已完成握手的连接，
+    /// 所以探针之前被接受的连接数就是被测代码对这个服务器发起的连接数。
+    async fn connections_before_probe(&mut self) -> usize {
+        let probe = tokio::net::TcpStream::connect(self.address).await.unwrap();
+        let probe_addr = probe.local_addr().unwrap();
+        let mut before = 0;
+        loop {
+            let peer = tokio::time::timeout(Duration::from_secs(5), self.peers.recv())
+                .await
+                .expect("probe connection was accepted")
+                .expect("server is still running");
+            if peer == probe_addr {
+                return before;
+            }
+            before += 1;
         }
     }
 
@@ -1258,6 +1282,11 @@ async fn without_usable_tls_roots_https_is_a_configuration_error_and_http_is_ser
                 Err(mpsc::error::TryRecvError::Empty)
             ),
             "{case}: the https mock provider must have received zero requests"
+        );
+        assert_eq!(
+            https.connections_before_probe().await,
+            0,
+            "{case}: the https mock provider must have accepted zero TCP connections"
         );
 
         let mut http = Server::start(false).await;
