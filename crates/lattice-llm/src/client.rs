@@ -108,6 +108,7 @@ impl ProtocolParser {
         request: &ChatRequest,
         model: &str,
         output_limit: Option<u64>,
+        context_limit: Option<u64>,
         features: Features,
         origin: &lattice_conversation::ReplayOrigin,
     ) -> Result<serde_json::Value, LlmError> {
@@ -127,6 +128,7 @@ impl ProtocolParser {
                 request,
                 model,
                 output_limit,
+                context_limit,
                 origin,
             ),
             Self::GenerateContent(_) => {
@@ -669,6 +671,7 @@ pub(crate) struct RequestEndpoint<'a> {
     pub(crate) roots: &'a [reqwest::Certificate],
     pub(crate) client: Arc<TurnClient>,
     pub(crate) output_limit: Option<u64>,
+    pub(crate) context_limit: Option<u64>,
     pub(crate) features: Features,
 }
 
@@ -714,6 +717,7 @@ pub(crate) async fn dispatch(
         &request,
         endpoint.model,
         endpoint.output_limit,
+        endpoint.context_limit,
         endpoint.features,
         &origin,
     )?;

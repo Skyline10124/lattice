@@ -710,6 +710,84 @@ async fn messages_use_merged_output_limits_at_resolution_and_reload_on_the_next_
 }
 
 #[tokio::test]
+async fn messages_max_tokens_stays_inside_the_context_window() {
+    let mut server = Server::start(true).await;
+    let directory = private_dir();
+    configure(directory.path(), &server.url, "anthropic-messages", "none");
+    let config = directory.path().join("providers.toml");
+    let base = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(&config, format!("{base}catalog = 'custom'\n")).unwrap();
+    std::fs::create_dir(directory.path().join("cache")).unwrap();
+    // 600_000 字节正文，加上 Messages 用户消息里的 "user" 与 "text"，
+    // 字符串共 600_008 字节。按 4 字节一个 token 向上取整是 150_002。
+    // 上下文 200_000，输出上限 64_000，能放下的输出是 49_998。
+    std::fs::write(
+        directory.path().join("cache/models.json"),
+        serde_json::to_vec(&serde_json::json!({"custom":{"models":{"model-id":{"id":"model-id","limit":{"context":200_000,"output":64_000}}}}})).unwrap(),
+    )
+    .unwrap();
+    let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+    let mut request = request("test");
+    request.messages.push(user_message(&"a".repeat(600_000)));
+    complete(
+        gateway
+            .open_turn()
+            .stream_chat(request, StreamControl::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        server.next().await.body["max_tokens"],
+        49_998,
+        "max_tokens must leave the prompt inside the context window"
+    );
+}
+
+#[tokio::test]
+async fn messages_max_tokens_does_not_send_a_zero_output_limit() {
+    let mut server = Server::start(true).await;
+    let directory = private_dir();
+    configure(directory.path(), &server.url, "anthropic-messages", "none");
+    let config = directory.path().join("providers.toml");
+    let base = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(&config, format!("{base}catalog = 'custom'\n")).unwrap();
+    std::fs::create_dir(directory.path().join("cache")).unwrap();
+    std::fs::write(
+        directory.path().join("cache/models.json"),
+        serde_json::to_vec(&serde_json::json!({"custom":{"models":{"model-id":{"id":"model-id","limit":{"context":100,"output":0}}}}})).unwrap(),
+    )
+    .unwrap();
+    let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+    complete(
+        gateway
+            .open_turn()
+            .stream_chat(request("test"), StreamControl::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        server.next().await.body["max_tokens"],
+        100,
+        "an output limit of 0 must not be sent; the fallback is clamped to the context window"
+    );
+}
+
+fn user_message(text: &str) -> lattice_conversation::ConversationItem {
+    use lattice_conversation::{
+        BoundToolCall, ConversationItem, MessagePart, MessageRole, MessageSemantic, NativeMessage,
+    };
+    ConversationItem::Message(NativeMessage::<BoundToolCall>::new(
+        MessageRole::User,
+        None,
+        vec![MessagePart::semantic_only(MessageSemantic::Text {
+            text: text.to_owned(),
+        })],
+    ))
+}
+
+#[tokio::test]
 async fn metadata_refresh_with_no_roots_fails_before_network_or_directory_creation() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();

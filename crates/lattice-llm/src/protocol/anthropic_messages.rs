@@ -33,17 +33,30 @@ fn map_stop_reason(reason: &str) -> String {
 }
 
 /// 按模型名构造 Messages 流式请求。
+///
+/// `max_tokens` 必填。输出上限缺失或为 0 时用 [`DEFAULT_MAX_OUTPUT_TOKENS`]；
+/// 有上下文窗口时再夹到该请求放得下的范围，避免提示与输出之和超出窗口后被拒绝。
 pub fn build_request_json(
     request: &ChatRequest,
     model: &str,
     output_limit: Option<u64>,
+    context_limit: Option<u64>,
     origin: &ReplayOrigin,
 ) -> Result<serde_json::Value, ProjectionError> {
     let projected = request_messages_to_wire(origin, &request.messages)?;
+    let max_tokens = fit_max_tokens(
+        output_limit,
+        context_limit,
+        prompt_bytes(
+            projected.system.as_deref(),
+            &projected.messages,
+            &request.tools,
+        ),
+    );
     let mut body = serde_json::json!({
         "model": model,
         "messages": projected.messages,
-        "max_tokens": output_limit.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS),
+        "max_tokens": max_tokens,
         "stream": true,
     });
 
@@ -67,6 +80,46 @@ pub fn build_request_json(
     }
 
     Ok(body)
+}
+
+/// 输出上限缺失或为 0 时回落到默认值，再按提示占用夹进上下文窗口。
+/// 提示按 4 个 UTF-8 字节计 1 个 token 并向上取整，这是 Anthropic 对英文的约算；
+/// 窗口放不下时发送 1，不发送 0。
+fn fit_max_tokens(output_limit: Option<u64>, context_limit: Option<u64>, prompt_bytes: u64) -> u64 {
+    let requested = match output_limit {
+        Some(0) | None => DEFAULT_MAX_OUTPUT_TOKENS,
+        Some(limit) => limit,
+    };
+    let Some(context) = context_limit.filter(|limit| *limit > 0) else {
+        return requested;
+    };
+    let prompt_tokens = prompt_bytes.div_ceil(4);
+    let room = context.saturating_sub(prompt_tokens);
+    if room == 0 { 1 } else { requested.min(room) }
+}
+
+fn prompt_bytes(
+    system: Option<&str>,
+    messages: &[serde_json::Value],
+    tools: &[crate::types::ToolDefinition],
+) -> u64 {
+    let mut bytes = system.map(str::len).unwrap_or(0) as u64;
+    bytes += messages.iter().map(json_string_bytes).sum::<u64>();
+    for tool in tools {
+        bytes += tool.name.len() as u64;
+        bytes += tool.description.len() as u64;
+        bytes += json_string_bytes(&tool.parameters);
+    }
+    bytes
+}
+
+fn json_string_bytes(value: &serde_json::Value) -> u64 {
+    match value {
+        serde_json::Value::String(text) => text.len() as u64,
+        serde_json::Value::Array(items) => items.iter().map(json_string_bytes).sum(),
+        serde_json::Value::Object(fields) => fields.values().map(json_string_bytes).sum(),
+        _ => 0,
+    }
 }
 
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -432,6 +485,7 @@ mod tests {
         let body = build_request_json(
             &request,
             "claude-sonnet-4-6",
+            None,
             None,
             &crate::test_reply::replay_origin(Protocol::Messages),
         )

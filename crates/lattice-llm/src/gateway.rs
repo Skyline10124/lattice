@@ -118,7 +118,7 @@ impl GatewayTurn {
         let directory = self.configuration.directory.clone();
         let provider_id = provider_id.to_owned();
         let model_id = target.model.clone();
-        let (provider, credentials, output_limit) =
+        let (provider, credentials, output_limit, context_limit) =
             tokio::task::spawn_blocking(move || load_provider(directory, &provider_id, &model_id))
                 .await
                 .map_err(|_| configuration_error("provider configuration task failed"))??;
@@ -141,6 +141,7 @@ impl GatewayTurn {
             client,
             target: target.clone(),
             output_limit,
+            context_limit,
         })
     }
 
@@ -165,6 +166,7 @@ pub struct ResolvedRequest {
     client: Arc<TurnClient>,
     target: ModelTarget,
     output_limit: Option<u64>,
+    context_limit: Option<u64>,
 }
 
 impl ResolvedRequest {
@@ -202,6 +204,7 @@ impl ResolvedRequest {
                 roots: &self.configuration.roots,
                 client: self.client.clone(),
                 output_limit: self.output_limit,
+                context_limit: self.context_limit,
                 features: self
                     .provider
                     .models
@@ -233,7 +236,7 @@ fn load_provider(
     directory: PathBuf,
     id: &str,
     model_id: &str,
-) -> Result<(Provider, Credentials, Option<u64>), LlmError> {
+) -> Result<(Provider, Credentials, Option<u64>, Option<u64>), LlmError> {
     let (registry, credentials) = load_configuration(&directory)?;
     let provider = registry
         .get(id)
@@ -244,11 +247,13 @@ fn load_provider(
         Err(_) if provider.auth == Auth::None => Credentials::default(),
         Err(error) => return Err(configuration_error(error)),
     };
-    let output_limit = crate::metadata::Metadata::load(&directory)
+    let limits = crate::metadata::Metadata::load(&directory)
         .merge(&provider)
         .get(model_id)
-        .and_then(|model| model.limit.as_ref().and_then(|limit| limit.output));
-    Ok((provider, credentials, output_limit))
+        .and_then(|model| model.limit.clone());
+    let output_limit = limits.as_ref().and_then(|limit| limit.output);
+    let context_limit = limits.as_ref().and_then(|limit| limit.context);
+    Ok((provider, credentials, output_limit, context_limit))
 }
 
 pub(crate) fn missing_provider_error(registry: &ProviderRegistry, id: &str) -> LlmError {
