@@ -23,7 +23,7 @@ fn backend_startup_observably_skips_disabled_automatic_metadata_refresh() {
     let log_path = world.root().join("daemon.stderr");
     let mut evidence = ScenarioEvidence::new(&world, &spec.name, Vec::<String>::new()).unwrap();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // 经驱动登记场景产物，使显式 serve 也属于场景清理范围。
+        // 经驱动登记场景产物，使显式 serve 的产物也纳入场景清理；它不受进程组等待覆盖，见下方 stop 处。
         let help = cli(&world, &spec, &["--help"]);
         evidence.record_command("register binary", &help);
         assert!(help.is_clean_exit(0));
