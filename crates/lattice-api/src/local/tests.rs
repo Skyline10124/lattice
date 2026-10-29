@@ -24,7 +24,7 @@ async fn private_socket_rejects_second_owner_and_oversized_frame() {
     );
     let (mut writer, mut reader) = tokio::net::UnixStream::pair().unwrap();
     ipc::check_peer(&writer).unwrap();
-    writer.write_all(b"LTLOCAL8").await.unwrap();
+    writer.write_all(super::test_support::FRAME_MAGIC).await.unwrap();
     writer.write_u32((ipc::MAX_FRAME + 1) as u32).await.unwrap();
     let result = ipc::read::<serde_json::Value>(&mut reader).await;
     assert!(matches!(

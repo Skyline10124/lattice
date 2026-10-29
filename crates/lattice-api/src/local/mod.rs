@@ -30,6 +30,12 @@ pub fn new_turn_id() -> TurnId {
 
 pub use types::*;
 
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_support {
+    /// 当前 Local IPC 帧魔数。测试替身用它收发帧，协议升级时不必手改字面量。
+    pub const FRAME_MAGIC: &[u8; 8] = super::ipc::MAGIC;
+}
+
 #[cfg(test)]
 mod tests;
 
