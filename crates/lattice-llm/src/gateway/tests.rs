@@ -1167,6 +1167,13 @@ async fn clients_are_reused_only_within_the_same_turn_provider_and_base_url() {
     assert_eq!(changed.path, "/changed/chat/completions");
 }
 
+struct ResumeClock;
+impl Drop for ResumeClock {
+    fn drop(&mut self) {
+        tokio::time::resume();
+    }
+}
+
 #[tokio::test]
 async fn unfinished_transport_discards_pinned_client_before_the_next_request() {
     let mut server = Server::start(true).await;
@@ -1238,7 +1245,26 @@ async fn unfinished_transport_discards_pinned_client_before_the_next_request() {
         match result {
             Err(error) => assert!(error.retryable(), "{name}: {error}"),
             Ok(stream) => {
-                let events = stream.collect::<Vec<_>>().await;
+                let events = if name == "body tail timeout after Done" {
+                    // 连接保持打开，收尾读取要等 TAIL_WAIT。只在这一段暂停时钟，
+                    // 其余传输失败仍按真实 I/O 结束。
+                    tokio::time::pause();
+                    let _resume = ResumeClock;
+                    let mut pending = std::pin::pin!(stream.collect::<Vec<_>>());
+                    let mut steps = 0;
+                    loop {
+                        tokio::select! {
+                            biased;
+                            events = &mut pending => break events,
+                            _ = tokio::time::advance(Duration::from_millis(100)) => {
+                                steps += 1;
+                                assert!(steps < 20, "{name} did not finish");
+                            }
+                        }
+                    }
+                } else {
+                    stream.collect::<Vec<_>>().await
+                };
                 assert_eq!(
                     matches!(
                         events.last(),
