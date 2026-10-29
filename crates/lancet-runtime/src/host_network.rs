@@ -59,7 +59,8 @@ pub type BudgetRemaining = Arc<dyn Fn() -> usize + Send + Sync>;
 /// Call-scoped host authority. A Component gets one instance and may call it once.
 pub struct NetworkFetchHost {
     policy: NetworkPolicyConfig,
-    tls: Arc<ClientConfig>,
+    /// `None` 表示没有可用的 TLS 根：https 请求在解析与连接前拒绝，http 照常。
+    tls: Option<Arc<ClientConfig>>,
     charge: BudgetCharge,
     remaining: BudgetRemaining,
     scope_name: String,
@@ -73,7 +74,7 @@ impl NetworkFetchHost {
         charge: BudgetCharge,
         remaining: BudgetRemaining,
         scope_name: impl Into<String>,
-        tls: Arc<ClientConfig>,
+        tls: Option<Arc<ClientConfig>>,
     ) -> Self {
         Self {
             policy,
@@ -280,6 +281,12 @@ impl NetworkFetchHost {
             }
         };
 
+        if parsed.scheme() == "https" && self.tls.is_none() {
+            self.record_policy_denial(&parsed, &host, hop, ctx, "tls_roots_unavailable");
+            self.remember(denied_error(NO_TLS_ROOTS));
+            return Err(FetchError::Denied);
+        }
+
         if let Err(denial) = authorize_operation(&ctx.admitted, &self.cell(), &target, &ctx.turn_id)
         {
             ctx.evidence.record_network_denied(
@@ -403,7 +410,12 @@ impl NetworkFetchHost {
                     return Err(FetchError::Unavailable);
                 }
             };
-            let connector = TlsConnector::from(Arc::clone(&self.tls));
+            let Some(tls) = self.tls.as_ref() else {
+                // validate_url 已在解析前拒绝；这里只防止无根时继续握手。
+                self.remember(denied_error(NO_TLS_ROOTS));
+                return Err(FetchError::Denied);
+            };
+            let connector = TlsConnector::from(Arc::clone(tls));
             let tls = match controlled(ctx, connector.connect(server_name, stream)).await {
                 Ok(Ok(tls)) => tls,
                 Ok(Err(_)) => {
@@ -695,14 +707,22 @@ async fn connect_candidates(
     Err(WaitFailure::Unavailable)
 }
 
-pub(crate) fn tls_config(roots_der: &[Vec<u8>]) -> Result<Arc<ClientConfig>, String> {
+/// 没有可用 TLS 根时 https 请求的拒绝说明，与模型请求的规则一致：https 拒绝，http 照常。
+const NO_TLS_ROOTS: &str =
+    "no usable TLS root certificates: https requests are refused, http requests are allowed";
+
+/// 空集合返回 `None`：没有信任根时不构造 TLS 配置，https 请求由 Host 直接拒绝，
+/// 不回退后台的系统根。
+pub(crate) fn tls_config(roots_der: &[Vec<u8>]) -> Result<Option<Arc<ClientConfig>>, String> {
+    if roots_der.is_empty() {
+        return Ok(None);
+    }
     let mut roots = rustls::RootCertStore::empty();
     for der in roots_der {
         roots
             .add(der.as_slice().into())
             .map_err(|_| "invalid Tool TLS root certificate".to_string())?;
     }
-    // 空集合保留为无信任根，不能因缺失或错误材料回退后台的系统根。
     let mut config =
         ClientConfig::builder_with_provider(rustls::crypto::aws_lc_rs::default_provider().into())
             .with_safe_default_protocol_versions()
@@ -710,7 +730,7 @@ pub(crate) fn tls_config(roots_der: &[Vec<u8>]) -> Result<Arc<ClientConfig>, Str
             .with_root_certificates(roots)
             .with_no_client_auth();
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
-    Ok(Arc::new(config))
+    Ok(Some(Arc::new(config)))
 }
 
 async fn send_request<I>(
@@ -1301,6 +1321,68 @@ mod request_chain {
             hits.load(Ordering::SeqCst),
             0,
             "second import reached the network"
+        );
+    }
+
+    /// 没有可用 TLS 根时，Tool Host 与模型请求同一规则：https 在解析与连接前拒绝，
+    /// 不回退系统根；http 照常放行。旧实现会先连上再在握手失败（Unavailable）。
+    #[tokio::test]
+    async fn without_tls_roots_https_is_refused_before_connect_and_http_is_allowed() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let tls_addr = listener.local_addr().unwrap();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&accepted);
+        tokio::spawn(async move {
+            while let Ok((_stream, _)) = listener.accept().await {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        assert!(
+            tls_config(&[]).unwrap().is_none(),
+            "empty roots build no TLS config"
+        );
+
+        let (ctx, _cancel) = call_ctx(Duration::from_secs(5));
+        let https_host = host(&["127.0.0.1"], false);
+        let error = https_host
+            .fetch(get(format!("https://{tls_addr}/")), ctx.clone())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, FetchError::Denied),
+            "https error kind: {error:?}"
+        );
+        let refusal = format!("{:?}", https_host.take_refusal());
+        assert!(
+            refusal.contains("no usable TLS root certificates"),
+            "refusal must name the missing roots: {refusal}"
+        );
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            0,
+            "https without roots must not open a connection"
+        );
+        let (_, effects, denied) = ctx.evidence.snapshot();
+        assert!(
+            effects.effects.is_empty(),
+            "https without roots recorded an effect"
+        );
+        assert_eq!(denied.denied.len(), 1, "one denial for the https request");
+        assert_eq!(denied.denied[0].reason, "tls_roots_unavailable");
+        let network = denied.denied[0].network.as_ref().unwrap();
+        assert_eq!(network.resolution, NetworkResolution::NotAttempted);
+
+        let (http_addr, hits) = redirect_server(Duration::ZERO).await;
+        let (ctx, _cancel) = call_ctx(Duration::from_secs(5));
+        let response = host(&["127.0.0.1"], false)
+            .fetch(get(format!("http://{http_addr}/r/0")), ctx)
+            .await
+            .expect("http without roots is allowed");
+        assert_eq!(response.redirect_count, 0);
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "http request reached the server"
         );
     }
 
