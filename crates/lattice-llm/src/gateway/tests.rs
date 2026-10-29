@@ -107,8 +107,8 @@ impl Server {
     /// 所以探针之前被接受的连接数就是被测代码对这个服务器发起的连接数。
     ///
     /// 前提：只统计被测代码在探针之前已完成（connect 已 await 返回）的连接。
-    /// 被测代码若 spawn 一个不等待的连接，它可能在探针之后才连上，这里会计为 0；
-    /// 所以被测代码不能这样发起连接，否则本计数会漏掉它。
+    /// 被测代码若 spawn 一个不等待的连接，它可能在探针之后才连上而被漏计，计数偏少；
+    /// 探针之前已完成的连接仍会计入。所以被测代码不能这样发起连接。
     async fn connections_before_probe(&mut self) -> usize {
         let probe = tokio::net::TcpStream::connect(self.address).await.unwrap();
         let probe_addr = probe.local_addr().unwrap();

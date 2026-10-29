@@ -63,6 +63,9 @@ fn check_magic(magic: &[u8; 8]) -> Result<()> {
     }
 }
 
+// 这里仍用 libc::geteuid：lattice-api 的 flock、recv、setsid 等也直接用 libc，
+// rustix 在本 crate 只是 dev-dependency；只换这一处没有意义，也不为此新增常规依赖。
+// 整体改用 rustix 留到之后拆分 lattice-api 时再做。
 pub(crate) fn uid() -> u32 {
     // Linux geteuid 无参数、无内存访问；通信两端必须匹配实际有效 UID。
     unsafe { libc::geteuid() }
