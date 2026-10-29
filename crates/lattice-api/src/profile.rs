@@ -31,7 +31,11 @@ pub(crate) fn load_for_turn(
         &paths,
     )
     .map_err(|error| reject(&profile_error_message(&error)))?;
-    if let Err(message) = ensure_global_profile_private(&paths.global_agents_dir, &loaded) {
+    if let Err(message) = ensure_global_profile_private(
+        &paths.global_agents_dir,
+        &paths.project_agents_dir(),
+        &loaded,
+    ) {
         return Err(reject(&message));
     }
     if loaded.profile.agent.name != agent_name {
@@ -93,9 +97,12 @@ fn effective_uid() -> u32 {
 /// 项目内 profile 由仓库权限管理，不在这里拒绝。
 fn ensure_global_profile_private(
     global_agents_dir: &Path,
+    project_agents_dir: &Path,
     loaded: &LoadedAgentProfile,
 ) -> std::result::Result<(), String> {
-    if !loaded.path.starts_with(global_agents_dir) {
+    // 项目 profile 优先，并且测试里配置目录可能就放在项目的 .lattice 下。
+    // 只约束用户全局目录，不把仓库里的 agent.toml 当成私有配置。
+    if !loaded.path.starts_with(global_agents_dir) || loaded.path.starts_with(project_agents_dir) {
         return Ok(());
     }
     let owner = effective_uid();
