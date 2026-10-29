@@ -5,14 +5,18 @@ use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub(super) fn store(home: Option<&std::path::Path>) -> super::Result<lattice_llm::auth::AuthStore> {
+    Ok(lattice_llm::auth::AuthStore::new(directory(home)?))
+}
+
+pub(super) fn directory(home: Option<&std::path::Path>) -> super::Result<std::path::PathBuf> {
     let reason = match home {
         Some(home) if home.is_absolute() => {
-            return Ok(lattice_llm::auth::AuthStore::new(home.join(".lattice")));
+            return Ok(home.join(".lattice"));
         }
         Some(_) => "HOME must be an absolute path",
         None => "HOME is not set",
     };
-    Err(crate::ApiError::Configuration(crate::ConfigRejection::new(reason, &[])).into())
+    Err(crate::ApiError::Configuration(crate::ConfigRejection::new(reason, None)).into())
 }
 
 /// 私有 IPC 录入材料，不提供 Debug，也不进入公开响应。

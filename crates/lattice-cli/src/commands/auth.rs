@@ -92,7 +92,7 @@ fn finish_key(mut bytes: Zeroizing<Vec<u8>>) -> anyhow::Result<String> {
     let key = std::str::from_utf8(&bytes).map_err(|_| {
         lattice_api::ApiError::Configuration(lattice_api::ConfigRejection::new(
             "API key input must be valid UTF-8",
-            &[],
+            None,
         ))
     })?;
     Ok(key.to_owned())

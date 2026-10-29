@@ -577,6 +577,7 @@ fn concurrent_autostart_has_one_owner_and_midway_watch_matches_history() {
                 SseScript::plain("after"),
             ]),
         );
+        world.stop_daemon().unwrap();
         assert!(
             world.daemon_pids().unwrap().is_empty(),
             "concurrent autostart requires no running daemon"
@@ -724,7 +725,7 @@ fn slow_watcher_cannot_block_execution_and_converges_to_history() {
     support::finish_recorded(evidence, result);
 }
 #[test]
-fn shared_daemon_keeps_project_endpoints_keys_and_profiles_frozen() {
+fn shared_daemon_uses_registered_providers_and_freezes_profiles() {
     use lattice_system_harness::{FakeLlmServer, assert_no_secret};
     let (world, spec) = direct_world(
         "background-project-config",
@@ -752,18 +753,36 @@ fn shared_daemon_keeps_project_endpoints_keys_and_profiles_frozen() {
         let (b, gb) = FakeLlmServer::start_gated(script).unwrap();
         a.expect_api_key(key_a);
         b.expect_api_key(key_b);
-        world.set_env("OPENAI_COMPATIBLE_BASE_URL", a.base_url());
-        world.set_env("OPENAI_COMPATIBLE_API_KEY", key_a);
+        use lattice_system_harness::{ProviderFixture, ProviderProtocol, ProviderTarget};
+        let alpha = ProviderFixture {
+            protocol: ProviderProtocol::ChatCompletions,
+            target: ProviderTarget::Custom("alpha"),
+            model: "background",
+        };
+        let beta = ProviderFixture {
+            target: ProviderTarget::Custom("beta"),
+            ..alpha
+        };
+        world.wire_provider(alpha, &a, key_a).unwrap();
+        world.wire_provider(beta, &b, key_b).unwrap();
         let project = world.root().join("second-project");
         std::fs::create_dir_all(project.join(".lattice/agents/background")).unwrap();
         let profile = world
             .project_dir()
             .join(".lattice/agents/background/agent.toml");
         std::fs::write(
+            &profile,
+            std::fs::read_to_string(&profile)
+                .unwrap()
+                .replace("local/background", "alpha/background"),
+        )
+        .unwrap();
+        std::fs::write(
             project.join(".lattice/agents/background/agent.toml"),
             std::fs::read_to_string(&profile)
                 .unwrap()
-                .replace("concise test agent", "beta test agent"),
+                .replace("concise test agent", "beta test agent")
+                .replace("alpha/background", "beta/background"),
         )
         .unwrap();
         gix::init(&project).unwrap();
@@ -776,15 +795,12 @@ fn shared_daemon_keeps_project_endpoints_keys_and_profiles_frozen() {
             .unwrap();
         let mut cmd = world.command(driver().binary_path());
         cmd.current_dir(&project)
-            .env("OPENAI_COMPATIBLE_BASE_URL", b.base_url())
-            .env("OPENAI_COMPATIBLE_API_KEY", key_b)
             .args(["--json", "run", "beta", "--agent", "background"]);
         let second = RunningCommand::spawn(cmd).unwrap();
         gb.wait_until_stalled(1, budget.cap_timeout(Duration::from_secs(30)))
             .unwrap();
         assert_eq!(world.daemon_pids().unwrap().len(), 1);
         std::fs::write(profile, "invalid changed profile").unwrap();
-        world.set_env("OPENAI_COMPATIBLE_API_KEY", key_b);
         ga.release(budget.cap_timeout(Duration::from_secs(30)))
             .unwrap();
         gb.release(budget.cap_timeout(Duration::from_secs(30)))
@@ -1278,277 +1294,335 @@ fn a_live_new_turn_does_not_block_old_closed_observation() {
     support::finish_recorded(evidence, result);
 }
 #[test]
-fn frozen_tls_roots_and_policies_are_isolated_between_concurrent_turns() {
-    use lattice_system_harness::{FakeLlmServer, FixtureHttpServer, HttpFixture, TlsIdentity};
+fn backend_tls_roots_are_shared_with_tools_and_fixed_until_restart() {
+    use lattice_system_harness::{
+        FakeLlmServer, FixtureHttpServer, HttpFixture, ProviderFixture, TlsIdentity,
+    };
     let (world, spec) = direct_world(
-        "background-real-tls",
+        "background-startup-tls",
         "background",
         "[\"fetch__web\"]",
-        "\n[llm.retry]\nmax_retries = 0\n[lancet.capabilities]\nmax_boundary = \"ex\"\n[lancet.network]\nallow_localhost = true\nallowed_hosts = [\"localhost\"]\n",
+        "\n[llm.retry]\nmax_retries=0\n[lancet.capabilities]\nmax_boundary=\"ex\"\n[lancet.network]\nallow_localhost=true\nallowed_hosts=[\"localhost\"]\n",
     );
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // 直接启动带专属环境的前端前，先经标准驱动登记产物与后台清理归属。
-        assert!(run(&world, &budget, &mut evidence, &["--help"]).is_clean_exit(0));
-        // 两套互不相干的 CA：每个 Turn 的提交端只信任自己那一套，fetch 端点与 provider 各用其签发的证书。
-        let identities = [
-            TlsIdentity::generate().unwrap(),
-            TlsIdentity::generate().unwrap(),
-        ];
-        let mut roots = Vec::new();
-        let mut fetch = Vec::new();
-        for (name, identity) in ["a", "b"].into_iter().zip(&identities) {
-            let root = world.root().join(format!("tls-{name}"));
-            std::fs::create_dir_all(root.join("empty-certs")).unwrap();
-            std::fs::write(root.join("ca.pem"), identity.ca_pem()).unwrap();
-            fetch.push(
-                FixtureHttpServer::start_tls(HttpFixture::plain("frozen TLS tool body"), identity)
-                    .unwrap(),
-            );
-            roots.push(root);
-        }
-        let urls: Vec<String> = fetch.iter().map(FixtureHttpServer::base_url).collect();
-        let (a, ga) = FakeLlmServer::start_gated_with(
+        let trusted = TlsIdentity::generate().unwrap();
+        let foreign = TlsIdentity::generate().unwrap();
+        let own = FixtureHttpServer::start_tls(HttpFixture::plain("trusted tool body"), &trusted)
+            .unwrap();
+        let cross = FixtureHttpServer::start_tls(HttpFixture::plain("foreign tool body"), &foreign)
+            .unwrap();
+        let root = world.root().join("startup-ca.pem");
+        // 一张可用根与一张损坏证书并存时，后台仍使用可用根。
+        let mut certificates = trusted.ca_pem().to_vec();
+        certificates
+            .extend_from_slice(b"\n-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n");
+        std::fs::write(&root, certificates).unwrap();
+        world.set_env("SSL_CERT_FILE", root.display().to_string());
+        let (server, gate) = FakeLlmServer::start_gated_with(
             support::sequence(vec![
                 SseScript::ToolCalls {
                     calls: vec![
                         (
                             "own".into(),
                             "fetch__web".into(),
-                            json!({"url":format!("{}/own-a",urls[0])}).to_string(),
+                            json!({"url":own.base_url()}).to_string(),
                         ),
                         (
                             "cross".into(),
                             "fetch__web".into(),
-                            json!({"url":format!("{}/cross-from-a",urls[1])}).to_string(),
+                            json!({"url":cross.base_url()}).to_string(),
                         ),
                     ],
                 },
-                SseScript::plain("TLS alpha complete"),
+                SseScript::plain("shared startup roots"),
+                SseScript::plain("still trusted"),
             ]),
-            &identities[0],
+            &trusted,
         )
         .unwrap();
-        let (b, gb) = FakeLlmServer::start_gated_with(
-            support::sequence(vec![
-                tool_call(
-                    "denied",
-                    "fetch__web",
-                    &json!({"url":format!("{}/denied-b",urls[1])}).to_string(),
-                ),
-                SseScript::plain("TLS beta complete"),
-            ]),
-            &identities[1],
-        )
-        .unwrap();
-        let provider_urls = [a.base_url(), b.base_url()];
-        let profile = world
-            .project_dir()
-            .join(".lattice/agents/background/agent.toml");
-        let allowed = std::fs::read_to_string(&profile).unwrap();
-        let denied = allowed.replace("allowed_hosts = [\"localhost\"]", "allowed_hosts = []");
-        let beta = world.root().join("beta");
-        std::fs::create_dir_all(beta.join(".lattice/agents/background")).unwrap();
-        let beta_profile = beta.join(".lattice/agents/background/agent.toml");
-        std::fs::write(&beta_profile, &denied).unwrap();
-        gix::init(&beta).unwrap();
-        world.set_env("OPENAI_COMPATIBLE_MODEL", "background");
-        world.set_env("OPENAI_COMPATIBLE_API_KEY", FAKE_API_KEY);
-        let start = |index: usize, project: &std::path::Path| {
-            let mut cmd = world.command(driver().binary_path());
-            cmd.current_dir(project)
-                .env("OPENAI_COMPATIBLE_BASE_URL", &provider_urls[index])
-                .env("SSL_CERT_FILE", roots[index].join("ca.pem"))
-                .env("SSL_CERT_DIR", roots[index].join("empty-certs"))
-                .args([
-                    "--json",
-                    "session",
-                    "send",
-                    "frozen TLS",
-                    "--agent",
-                    "background",
-                ]);
-            RunningCommand::spawn(cmd).unwrap()
-        };
-        let first = start(0, world.project_dir());
-        ga.wait_until_stalled(1, budget.cap_timeout(spec.step_timeout()))
+        world
+            .wire_provider(
+                ProviderFixture::chat_completions("background"),
+                &server,
+                FAKE_API_KEY,
+            )
             .unwrap();
-        let second = start(1, &beta);
-        gb.wait_until_stalled(1, budget.cap_timeout(spec.step_timeout()))
-            .unwrap();
-        assert_eq!(world.daemon_pids().unwrap().len(), 1);
-        let original_a = std::fs::read(roots[0].join("ca.pem")).unwrap();
-        let original_b = std::fs::read(roots[1].join("ca.pem")).unwrap();
-        std::fs::write(roots[0].join("ca.pem"), &original_b).unwrap();
-        std::fs::write(roots[1].join("ca.pem"), &original_a).unwrap();
-        std::fs::write(&profile, &denied).unwrap();
-        std::fs::write(&beta_profile, &allowed).unwrap();
-        evidence.record_json("frozen-window", &json!({"both_providers_arrived":true,"daemon_pids":world.daemon_pids().unwrap(),
-            "endpoint_a":urls[0],"endpoint_b":urls[1],"root_a_blake3":blake3::hash(&original_a).to_hex().to_string(),
-            "root_b_blake3":blake3::hash(&original_b).to_hex().to_string(),"sources_swapped_after_acceptance":true})).unwrap();
-        ga.release(budget.cap_timeout(spec.step_timeout())).unwrap();
-        gb.release(budget.cap_timeout(spec.step_timeout())).unwrap();
-        let mut turns = Vec::new();
-        for (label, front) in [("alpha frozen TLS", first), ("beta frozen TLS", second)] {
-            let out = front
-                .wait(Some(budget.cap_timeout(spec.step_timeout())))
-                .unwrap();
-            evidence.record_command(label, &out);
-            assert!(out.is_clean_exit(0), "{}", out.summary());
-            turns.push(accepted_turn(&out));
-        }
-        let ta = detail(&world, &budget, &mut evidence, &turns[0]);
-        let tb = detail(&world, &budget, &mut evidence, &turns[1]);
-        assert_eq!(ta["steps"][0]["slots"][0]["outcome"], "succeeded");
-        assert_eq!(ta["steps"][0]["slots"][1]["outcome"], "failed");
-        // 跨根请求被策略拒绝：结局是 Failed，错误码属于 Validation/Permission/Guard 错误族。
-        let refused = &tb["steps"][0]["slots"][0];
-        assert_eq!(refused["outcome"], "failed");
-        assert!(
-            matches!(
-                refused["reason"]["value"]["code"].as_str(),
-                Some(
-                    "schema_mismatch"
-                        | "path_containment"
-                        | "type_error"
-                        | "capability_not_granted"
-                        | "project_root_violation"
-                        | "ambient_authority_denied"
-                        | "guard_denied"
-                        | "replan_required"
-                )
-            ),
-            "{refused}"
+        let first = command(
+            &world,
+            &budget,
+            &["--json", "run", "TLS", "--agent", "background"],
         );
-        let own =
-            &ta["steps"][0]["slots"][0]["evidence"]["value"]["effects"]["effects"][0]["network"];
-        assert_eq!(own["transport"]["tls"]["state"], "established");
-        assert_eq!(own["http_status"], 200);
+        gate.wait_until_stalled(1, wait(&budget)).unwrap();
+        // 后台已持有 DER；文件与后续前端环境的变化都不替换这份信任。
+        std::fs::write(&root, foreign.ca_pem()).unwrap();
+        gate.release(wait(&budget)).unwrap();
+        let out = first.wait(Some(wait(&budget))).unwrap();
+        evidence.record_command("provider and Tool startup roots", &out);
+        assert!(out.is_clean_exit(0), "{}", out.summary());
+        let turn = detail(&world, &budget, &mut evidence, &accepted_turn(&out));
+        assert_eq!(turn["steps"][0]["slots"][0]["outcome"], "succeeded");
+        assert_eq!(turn["steps"][0]["slots"][1]["outcome"], "failed");
         let cross =
-            &ta["steps"][0]["slots"][1]["evidence"]["value"]["effects"]["effects"][0]["network"];
+            &turn["steps"][0]["slots"][1]["evidence"]["value"]["effects"]["effects"][0]["network"];
         assert_eq!(cross["transport"]["tls"]["state"], "failed");
         assert_eq!(cross["failure_phase"], "tls");
-        let policy =
-            &tb["steps"][0]["slots"][0]["evidence"]["value"]["denied"]["denied"][0]["network"];
-        assert_eq!(policy["policy_verdict"], "denied");
-        assert_eq!(policy["resolution"], "not_attempted");
-        assert_eq!(policy["transport"]["tls"]["state"], "not_attempted");
-        assert_eq!(a.captured_requests().len(), 2);
-        assert_eq!(b.captured_requests().len(), 2);
-        // 换根后的新请求不能借用同后台另一个 Turn 的信任。
-        let crossed = start(0, world.project_dir())
-            .wait(Some(budget.cap_timeout(spec.step_timeout())))
-            .unwrap();
-        evidence.record_command("cross-root provider rejected", &crossed);
-        assert!(crossed.is_clean_exit(1));
-        let third = accepted_turn(&crossed);
-        let failed = closed(&world, &budget, &mut evidence, &third);
-        assert_eq!(failed["summary"]["outcome"], "failed");
+        let next = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &["--json", "run", "same roots", "--agent", "background"],
+        );
+        assert!(next.is_clean_exit(0));
+        assert_eq!(server.captured_requests().len(), 3);
+        world.stop_daemon().unwrap();
+        let changed = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &["--json", "run", "new roots", "--agent", "background"],
+        );
+        assert!(changed.is_clean_exit(1));
+        let turn = closed(&world, &budget, &mut evidence, &accepted_turn(&changed));
         assert_eq!(
-            failed["steps"][0]["attempts"][0]["end"]["cause"]["cause"],
+            turn["steps"][0]["attempts"][0]["end"]["cause"]["cause"],
             "provider_error"
         );
-        assert_eq!(a.captured_requests().len(), 2);
-        let bad_id = "00000000-0000-4000-8000-000000000004";
-        let mut invalid = configuration(&world, "background", &provider_urls[0]);
-        invalid["profile_toml"] = json!(allowed);
-        invalid["connection"]["roots_der"] = json!([[1, 2, 3]]);
-        let bad = ipc(
-            &world,
-            wait(&budget),
-            submit_request(
-                &world,
-                bad_id,
-                json!({"new": NEW_SESSION}),
-                "invalid root",
-                Some("background"),
-                invalid,
-            ),
-        );
-        assert_eq!(bad["value"]["kind"], "bad_request");
-        let missing = turn_lookup(&world, wait(&budget), bad_id);
-        assert_eq!(missing["value"]["kind"], "not_found");
-        evidence
-            .record_json(
-                "invalid-root-before-acceptance",
-                &json!({"submit":bad,"query":missing}),
-            )
-            .unwrap();
-        archive_state(&world, &budget, &mut evidence, &[&turns[0], &third]);
-        let beta_sid = tb["session_id"].as_str().unwrap();
-        for args in [
-            vec!["--json", "audit", "--tail"],
-            vec!["session", "log", beta_sid],
-            vec!["--json", "session", "log", beta_sid],
-            vec!["--json", "session", "turn", &turns[1]],
-            vec![
-                "--json",
-                "audit",
-                "replay",
-                "--session",
-                beta_sid,
-                "--turn",
-                &turns[1],
-            ],
-            vec!["--json", "lancet", "status"],
-        ] {
-            let mut cmd = world.command(driver().binary_path());
-            cmd.current_dir(&beta).args(&args);
-            let out = RunningCommand::spawn(cmd)
-                .unwrap()
-                .wait(Some(budget.cap_timeout(spec.step_timeout())))
-                .unwrap();
-            evidence.record_command(format!("beta {}", args.join(" ")), &out);
-            assert!(out.is_clean_exit(0));
-        }
-        evidence.record_json("parameters", &json!({"test":"frozen_tls_roots_and_policies_are_isolated_between_concurrent_turns",
-            "tls":"two ephemeral CAs; localhost leaves; source roots/policy swapped after both provider gates",
-            "tools_a":["own-a","cross-from-a"],"tools_b":["denied-b"],"turns":[ta,tb,failed]})).unwrap();
-        // alpha 自己的 fetch 只到达 a 端点；跨根 fetch 在 b 端点握手被拒；换根后的
-        // provider 请求在 a 的 provider 端握手被拒，没有进入 capture。
-        let fetched: Vec<Vec<(String, String)>> = fetch
-            .iter()
-            .map(|server| {
-                server
-                    .captured_requests()
-                    .into_iter()
-                    .map(|request| (request.method, request.path))
-                    .collect()
-            })
-            .collect();
-        assert_eq!(
-            fetched,
-            [vec![("GET".to_string(), "/own-a".to_string())], Vec::new()]
-        );
-        for server in &fetch {
-            assert_eq!(server.first_error(), None);
-        }
-        let rejected = [
-            fetch[0].rejected_handshakes(),
-            fetch[1].rejected_handshakes(),
-            a.rejected_handshakes(),
-            b.rejected_handshakes(),
-        ];
-        assert!(rejected[1] >= 1 && rejected[2] >= 1, "{rejected:?}");
-        evidence
-            .record_json(
-                "tls-stats",
-                &json!({"fetch_paths":fetched,"rejected_handshakes":{
-                "fetch_a":rejected[0],"fetch_b":rejected[1],"provider_a":rejected[2],"provider_b":rejected[3]}}),
-            )
-            .unwrap();
-        evidence.record_captures(a.captured_requests());
-        evidence.record_captures(b.captured_requests());
-        // 两个 provider 都没有记录夹具失败（握手被拒属于对端行为，单独计数）。
-        for mut provider in [a, b] {
-            provider
-                .shutdown(budget.cap_timeout(Duration::from_secs(5)))
-                .unwrap();
-        }
+        assert_eq!(server.captured_requests().len(), 3);
+        evidence.record_captures(server.captured_requests());
     }));
     support::finish_recorded(evidence, result);
 }
+
+#[test]
+fn concurrent_turns_keep_frozen_network_policies_with_shared_startup_roots() {
+    use lattice_system_harness::{
+        FakeLlmServer, FixtureHttpServer, HttpFixture, ProviderFixture, ProviderTarget, TlsIdentity,
+    };
+    let (world, spec) = direct_world(
+        "background-network-isolation",
+        "background",
+        "[\"fetch__web\"]",
+        "\n[lancet.capabilities]\nmax_boundary=\"ex\"\n[lancet.network]\nallow_localhost=true\nallowed_hosts=[\"localhost\"]\n",
+    );
+    let budget = world.budget(&spec);
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let identity = TlsIdentity::generate().unwrap();
+        let root = world.root().join("common-ca.pem");
+        std::fs::write(&root, identity.ca_pem()).unwrap();
+        world.set_env("SSL_CERT_FILE", root.display().to_string());
+        let web =
+            FixtureHttpServer::start_tls(HttpFixture::plain("allowed fetch"), &identity).unwrap();
+        let script = || {
+            support::sequence(vec![
+                tool_call(
+                    "fetch",
+                    "fetch__web",
+                    &json!({"url":web.base_url()}).to_string(),
+                ),
+                SseScript::plain("policy observed"),
+            ])
+        };
+        let (allowed, allowed_gate) = FakeLlmServer::start_gated_with(script(), &identity).unwrap();
+        let (denied, denied_gate) = FakeLlmServer::start_gated_with(script(), &identity).unwrap();
+        let fixture = ProviderFixture {
+            target: ProviderTarget::Custom("allowed"),
+            ..ProviderFixture::chat_completions("background")
+        };
+        world
+            .wire_provider(fixture, &allowed, FAKE_API_KEY)
+            .unwrap();
+        world
+            .wire_provider(
+                ProviderFixture {
+                    target: ProviderTarget::Custom("denied"),
+                    ..fixture
+                },
+                &denied,
+                FAKE_API_KEY,
+            )
+            .unwrap();
+        let allowed_path = world
+            .project_dir()
+            .join(".lattice/agents/background/agent.toml");
+        let allowed_source = std::fs::read_to_string(&allowed_path)
+            .unwrap()
+            .replace("local/background", "allowed/background");
+        let denied_source = allowed_source
+            .replace("name = \"background\"", "name = \"denied\"")
+            .replace("allowed/background", "denied/background")
+            .replace("allow_localhost=true", "allow_localhost=false");
+        std::fs::write(&allowed_path, &allowed_source).unwrap();
+        world
+            .write_project_file(".lattice/agents/denied/agent.toml", &denied_source)
+            .unwrap();
+        let first = command(
+            &world,
+            &budget,
+            &["--json", "run", "allow", "--agent", "background"],
+        );
+        allowed_gate.wait_until_stalled(1, wait(&budget)).unwrap();
+        let second = command(
+            &world,
+            &budget,
+            &["--json", "run", "deny", "--agent", "denied"],
+        );
+        denied_gate.wait_until_stalled(1, wait(&budget)).unwrap();
+        assert_eq!(world.daemon_pids().unwrap().len(), 1);
+        // 两轮已接受；互换源文件中的策略不改变各自冻结的网络权限。
+        std::fs::write(
+            &allowed_path,
+            allowed_source.replace("allow_localhost=true", "allow_localhost=false"),
+        )
+        .unwrap();
+        world
+            .write_project_file(
+                ".lattice/agents/denied/agent.toml",
+                &denied_source.replace("allow_localhost=false", "allow_localhost=true"),
+            )
+            .unwrap();
+        allowed_gate.release(wait(&budget)).unwrap();
+        denied_gate.release(wait(&budget)).unwrap();
+        let first = first.wait(Some(wait(&budget))).unwrap();
+        let second = second.wait(Some(wait(&budget))).unwrap();
+        evidence.record_command("allowed Turn", &first);
+        evidence.record_command("denied Turn", &second);
+        assert!(first.is_clean_exit(0));
+        assert!(second.is_clean_exit(0));
+        let allowed_turn = closed(&world, &budget, &mut evidence, &accepted_turn(&first));
+        let denied_turn = closed(&world, &budget, &mut evidence, &accepted_turn(&second));
+        assert_eq!(allowed_turn["steps"][0]["slots"][0]["outcome"], "succeeded");
+        let denied_slot = &denied_turn["steps"][0]["slots"][0];
+        assert_eq!(denied_slot["outcome"], "failed");
+        let network = &denied_slot["evidence"]["value"]["denied"]["denied"][0]["network"];
+        assert_eq!(network["policy_verdict"], "denied");
+        assert_eq!(network["resolution"], "not_attempted");
+        assert_eq!(network["dns_candidates"], json!([]));
+        assert_eq!(network["transport"]["tls"]["state"], "not_attempted");
+        assert!(network["transport"].get("connected_peer").is_none());
+        assert_eq!(
+            web.accepted_connections_after_probe(wait(&budget)).unwrap(),
+            1
+        );
+        assert_eq!(web.captured_requests().len(), 1);
+        assert_eq!(web.rejected_handshakes(), 0);
+        assert_eq!(allowed.captured_requests().len(), 2);
+        assert_eq!(denied.captured_requests().len(), 2);
+        evidence.record_captures(allowed.captured_requests());
+        evidence.record_captures(denied.captured_requests());
+    }));
+    support::finish_recorded(evidence, result);
+}
+
+#[test]
+fn no_usable_startup_tls_root_rejects_all_submissions_before_acceptance() {
+    let (world, spec) = direct_world("background-no-tls-root", "background", "[]", "");
+    let budget = world.budget(&spec);
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let root = world.root().join("invalid-ca.pem");
+        std::fs::write(&root, "invalid certificate").unwrap();
+        world.set_env("SSL_CERT_FILE", root.display().to_string());
+        let directory = world.home().join(".lattice");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("providers.toml"), "[providers.local]\nprotocol='chat-completions'\nbase_url='http://localhost:9/v1'\nauth='none'\n").unwrap();
+        let out = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &["--json", "run", "no roots", "--agent", "background"],
+        );
+        assert!(out.is_clean_exit(2));
+        let sent = records(&out);
+        let error = sent.rejection().unwrap();
+        assert_eq!(error.kind, "bad_request");
+        assert!(error.message.contains("no usable TLS root"));
+        assert!(sent.accepted_turn_id().is_none());
+    }));
+    support::finish_recorded(evidence, result);
+}
+
+#[test]
+fn invalidated_provider_configuration_records_last_resolved_origin_without_sending() {
+    for removed in [false, true] {
+        let (world, spec) = direct_world(
+            if removed {
+                "provider-deleted"
+            } else {
+                "provider-invalid"
+            },
+            "background",
+            "[\"session__todo_write\"]",
+            "\n[llm.retry]\nmax_retries=3\n",
+        );
+        let budget = world.budget(&spec);
+        let mut evidence = support::evidence(&world, &spec);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (server, gate) = wire_gated_fake_llm(
+                &world,
+                "background",
+                support::sequence(vec![
+                    tool_call(
+                        "todo",
+                        "session__todo_write",
+                        r#"{"todos":[{"content":"configured","status":"pending"}]}"#,
+                    ),
+                    SseScript::plain("must not receive another request"),
+                ]),
+            );
+            let front = command(
+                &world,
+                &budget,
+                &[
+                    "--json",
+                    "run",
+                    "configuration changed",
+                    "--agent",
+                    "background",
+                ],
+            );
+            gate.wait_until_stalled(1, wait(&budget)).unwrap();
+            std::fs::write(
+                world.home().join(".lattice/providers.toml"),
+                if removed {
+                    ""
+                } else {
+                    "[providers.local]\nprotocol='sk-invalid-config-diagnostic-a19bd57f'\n"
+                },
+            )
+            .unwrap();
+            gate.release(wait(&budget)).unwrap();
+            let out = front.wait(Some(wait(&budget))).unwrap();
+            evidence.record_command("configuration invalidated during Turn", &out);
+            assert!(out.is_clean_exit(1));
+            let turn = closed(&world, &budget, &mut evidence, &accepted_turn(&out));
+            assert_eq!(turn["steps"].as_array().unwrap().len(), 2);
+            let first = &turn["steps"][0]["attempts"][0];
+            let attempts = turn["steps"][1]["attempts"].as_array().unwrap();
+            assert_eq!(attempts.len(), 1);
+            assert_eq!(attempts[0]["origin"], first["origin"]);
+            assert_eq!(attempts[0]["origin"]["provider_id"], "local");
+            assert_eq!(attempts[0]["origin"]["protocol"], "chat-completions");
+            assert_eq!(attempts[0]["end"]["cause"]["cause"], "provider_error");
+            assert_eq!(attempts[0]["end"]["cause"]["retryable"], false);
+            let diagnostic = attempts[0]["end"]["diagnostic"].as_str().unwrap();
+            assert!(diagnostic.contains("configuration error"));
+            assert!(!diagnostic.contains("sk-invalid-config-diagnostic-a19bd57f"));
+            assert!(
+                turn["summary"]["notice"]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains(diagnostic)
+            );
+            assert_eq!(server.captured_requests().len(), 1);
+            evidence.record_captures(server.captured_requests());
+        }));
+        support::finish_recorded(evidence, result);
+    }
+}
+
 #[test]
 fn long_session_pages_by_turn_and_rewind_replaces_the_path() {
     let (world, spec) = direct_world("background-history-pages", "background", "[]", "");
@@ -1686,6 +1760,7 @@ fn vanished_owner_is_reported_by_the_session_head() {
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let (server, gate) = wire_gated_fake_llm(&world, "background", SseScript::plain("next"));
+        world.stop_daemon().unwrap();
         let root = world
             .session_store_dir()
             .parent()

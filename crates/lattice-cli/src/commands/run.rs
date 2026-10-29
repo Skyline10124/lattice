@@ -289,10 +289,14 @@ pub async fn run_session_prompt(
         let name = agent.clone();
         let configuration = tokio::task::spawn_blocking(move || {
             let loaded = load_named_profile(&name, root.canonical_path())?;
-            FrozenConfiguration::from_env(loaded, &root)
+            FrozenConfiguration::capture(loaded, &root)
         })
         .await
-        .map_err(|_| local_error("configuration worker failed"))??;
+        .map_err(|_| local_error("configuration worker failed"))?;
+        let configuration = match configuration {
+            Ok(configuration) => configuration,
+            Err(error) => return Err(api.redact_configuration_error(error).await),
+        };
         Ok::<_, LocalError>((path, configuration))
     };
     let prepared = tokio::select! {biased;_=signal.recv()=>None,result=prepare=>Some(result)};

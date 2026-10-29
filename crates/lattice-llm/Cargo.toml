@@ -22,6 +22,7 @@ bytes = { workspace = true }
 zeroize = { workspace = true }
 rustix = { workspace = true }
 rustls-native-certs = "0.8.4"
+rustls = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
@@ -33,7 +34,6 @@ tower-service = "0.3"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
-rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 
 [features]

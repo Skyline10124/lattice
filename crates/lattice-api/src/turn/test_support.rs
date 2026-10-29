@@ -40,7 +40,7 @@ pub(super) fn setup_fixture(llm: Arc<dyn LlmClient>, enabled_tools: &[&str]) -> 
     std::fs::create_dir_all(project.path().join("src")).unwrap();
     std::fs::write(project.path().join("src/lib.rs"), "pub fn hello() {}").unwrap();
     let path = project.path().join("agent.toml");
-    std::fs::write(&path, format!("schema_version=1\n[agent]\nname='test'\nmodel='sonnet'\n[prompt]\nsystem='System from profile.'\n[tools]\nenabled={enabled_tools:?}\n")).unwrap();
+    std::fs::write(&path, format!("schema_version=1\n[agent]\nname='test'\nmodel='local/sonnet'\n[prompt]\nsystem='System from profile.'\n[tools]\nenabled={enabled_tools:?}\n")).unwrap();
     let layout = crate::StateLayout::in_state_root(state.path());
     let store = Arc::new(SessionStore::create(&layout).unwrap());
     let root = crate::LocalWorkspaceRoot::from_path(project.path()).unwrap();
@@ -50,7 +50,10 @@ pub(super) fn setup_fixture(llm: Arc<dyn LlmClient>, enabled_tools: &[&str]) -> 
         agent: Some("test".into()),
         loaded_profile: Some(lattice_profile::load_agent_profile(&path).unwrap()),
         cancel_flag: None,
-        test_llm: Some((llm, lattice_llm::ProviderKind::OpenAiCompatible)),
+        test_llm: Some((
+            llm,
+            lattice_session::store::AttemptProtocol::ChatCompletions,
+        )),
         test_project_root: Some(root.canonical_path().to_str().unwrap().into()),
     };
     TestFixture {
@@ -82,7 +85,7 @@ impl TestFixture {
             turn_id: lancet_protocol::TurnId::parse(&uuid::Uuid::new_v4().to_string()).unwrap(),
             workspace: self.root.clone(),
             request,
-            connection: None,
+            prepared_model: None,
             shutdown: Arc::default(),
             observer: observer.clone(),
             new_session: Some(crate::local::new_session_id()),

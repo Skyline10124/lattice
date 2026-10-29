@@ -373,7 +373,7 @@ schema_version = 1
 
 [agent]
 name = "test"
-model = "sonnet"
+model = "anthropic/claude-sonnet-4-6"
 
 [prompt]
 system_path = "{}"
@@ -418,7 +418,7 @@ schema_version = 1
 
 [agent]
 name = "test"
-model = "sonnet"
+model = "anthropic/claude-sonnet-4-6"
 
 [prompt]
 {prompt_fields}
@@ -450,7 +450,7 @@ schema_version = 1
 
 [agent]
 name = "test"
-model = "sonnet"
+model = "anthropic/claude-sonnet-4-6"
 
 [prompt]
 system_path = "escape/secret.md"
@@ -476,7 +476,7 @@ schema_version = 1
 
 [agent]
 name = "test"
-model = "sonnet"
+model = "anthropic/claude-sonnet-4-6"
 
 [prompt]
 system_path = "subdir"
@@ -502,7 +502,7 @@ schema_version = 1
 
 [agent]
 name = "t"
-model = "sonnet"
+model = "anthropic/claude-sonnet-4-6"
 
 [prompt]
 system = "hi"
@@ -541,7 +541,7 @@ schema_version = 1
 
 [agent]
 name = "t"
-model = "sonnet"
+model = "anthropic/claude-sonnet-4-6"
 
 [prompt]
 system = "hi"
@@ -586,7 +586,7 @@ schema_version = 1
 
 [agent]
 name = "test"
-model = "sonnet"
+model = "anthropic/claude-sonnet-4-6"
 
 [prompt]
 system = "hi"
@@ -634,7 +634,7 @@ schema_version = 1
 
 [agent]
 name = "test"
-model = "sonnet"
+model = "anthropic/claude-sonnet-4-6"
 
 [prompt]
 system = "hi"
@@ -666,7 +666,7 @@ schema_version = {}
 
 [agent]
 name = "test"
-model = "sonnet"
+model = "anthropic/claude-sonnet-4-6"
 
 [prompt]
 system = "hi"
@@ -708,7 +708,7 @@ schema_version = 1
 
 [agent]
 name = "t"
-model = "sonnet"
+model = "anthropic/claude-sonnet-4-6"
 
 [prompt]
 system = "hi"

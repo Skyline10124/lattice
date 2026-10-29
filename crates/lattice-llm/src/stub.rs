@@ -9,7 +9,6 @@
 use lattice_conversation::{MessageRole, MessageSemantic};
 
 use crate::reply::{PartDelta, PartKind, ProtocolEvent};
-use crate::router::ModelRouter;
 use crate::types::{ChatRequest, LlmEvent};
 use futures::stream::{self, Stream};
 use std::pin::Pin;
@@ -18,9 +17,6 @@ use thiserror::Error;
 /// Errors that can occur during LLM operations.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum LlmError {
-    #[error("unknown model alias: '{0}'")]
-    UnknownModel(String),
-
     #[error("credential error: {message}")]
     Credential { message: String },
 
@@ -62,7 +58,6 @@ pub enum LlmError {
 impl LlmError {
     pub fn kind(&self) -> &'static str {
         match self {
-            Self::UnknownModel(_) => "unknown_model",
             Self::Credential { .. } => "credential",
             Self::Config { .. } => "config",
             Self::Dns { .. } => "dns",
@@ -115,19 +110,15 @@ fn native_text(
 }
 /// A deterministic stub LLM that returns fake chat and stream responses.
 #[derive(Clone, Debug, Default)]
-pub struct StubLlm {
-    pub router: ModelRouter,
-}
+pub struct StubLlm;
 
 impl StubLlm {
     pub fn new() -> Self {
-        StubLlm::default()
+        Self
     }
 
     /// Return a fake streaming response as a boxed stream of [`LlmEvent`] values.
     pub fn stream(&self, request: ChatRequest) -> Result<LlmStream, LlmError> {
-        let _resolved = self.router.resolve(&request.target)?;
-
         let last_user_msg = request
             .messages
             .iter()
@@ -168,10 +159,4 @@ impl StubLlm {
             crate::StreamControl::default(),
         ))
     }
-}
-
-/// Convenience function: stream a completion through the real client.
-pub async fn stream(request: ChatRequest) -> Result<LlmStream, LlmError> {
-    let resolved = ModelRouter::new().resolve(&request.target)?;
-    crate::client::dispatch_stream(request, resolved).await
 }

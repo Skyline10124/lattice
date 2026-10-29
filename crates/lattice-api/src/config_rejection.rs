@@ -8,8 +8,14 @@ use std::fmt;
 pub struct ConfigRejection(String);
 
 impl ConfigRejection {
-    pub fn new(message: &str, known_secrets: &[&str]) -> Self {
-        Self(crate::redact::redact(message, known_secrets))
+    pub fn new(message: &str, auth: Option<&lattice_llm::auth::AuthStore>) -> Self {
+        let reason = auth
+            .and_then(|auth| {
+                auth.with_credential_values(|known| crate::redact::redact(message, known))
+                    .ok()
+            })
+            .unwrap_or_else(|| crate::redact::redact(message, &[]));
+        Self(reason)
     }
 }
 
@@ -19,14 +25,30 @@ impl fmt::Display for ConfigRejection {
     }
 }
 
-/// 仅用于提交端配置加载；后台不能用自己的环境代替本 Turn 的凭据。
-pub(crate) fn client_configuration_error(message: &str) -> crate::ApiError {
-    let secrets: Vec<String> = lattice_llm::credential_env_vars()
-        .iter()
-        .filter_map(|name| std::env::var(name).ok())
-        .collect();
-    let known: Vec<&str> = secrets.iter().map(String::as_str).collect();
-    crate::ApiError::Configuration(ConfigRejection::new(message, &known))
+/// 前端尚未交后台脱敏的诊断；Display 与 Debug 不展示其原文。
+#[derive(Clone)]
+pub struct ConfigurationDiagnostic(String);
+
+impl ConfigurationDiagnostic {
+    pub(crate) fn new(message: String) -> Self {
+        Self(message)
+    }
+
+    pub(crate) fn into_message(self) -> String {
+        self.0
+    }
+}
+
+impl fmt::Display for ConfigurationDiagnostic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("configuration diagnostic requires backend redaction")
+    }
+}
+
+impl fmt::Debug for ConfigurationDiagnostic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
 }
 
 #[cfg(test)]

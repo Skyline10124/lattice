@@ -1504,7 +1504,11 @@ fn entry_turn(entry: &ConversationEntry) -> Option<TurnId> {
 
 /// 提交前加载这次提交的配置；测试注入不读环境的配置。
 pub(crate) type Configure =
-    fn(String, TuiOptions) -> BoxFuture<'static, lattice_api::local::Result<FrozenConfiguration>>;
+    fn(
+        String,
+        TuiOptions,
+        LocalClient,
+    ) -> BoxFuture<'static, lattice_api::local::Result<FrozenConfiguration>>;
 
 /// 进入 raw 模式后并行接收视图推送与按键；启动不等待条目读取。
 pub(crate) async fn run_app(
@@ -1529,7 +1533,9 @@ pub(crate) async fn run_app(
         &options,
         &mut app,
         &client,
-        |agent, options| crate::session::freeze_configuration(agent, options).boxed(),
+        |agent, options, client| {
+            crate::session::freeze_configuration(agent, options, client).boxed()
+        },
         EventStream::new(),
         |app| {
             terminal.draw(|f| crate::view::draw(f, app))?;
@@ -1696,7 +1702,7 @@ where
                 handoffs.push(old.detach().boxed());
             }
             turn_open = false;
-            preparing = begin_turn(options, app, configure, prompt);
+            preparing = begin_turn(options, app, configure, client, prompt);
         }
     };
     // 输入结束、普通退出和绘制失败都保存尚未发送的原文；不保存编辑器草稿。
@@ -1757,6 +1763,7 @@ fn begin_turn(
     options: &TuiOptions,
     app: &mut App,
     configure: Configure,
+    client: &LocalClient,
     prompt: String,
 ) -> Option<(
     TurnRequest,
@@ -1775,7 +1782,7 @@ fn begin_turn(
         .agent
         .clone()
         .unwrap_or_else(|| app.ctx.active_agent.clone());
-    Some((request, configure(agent, options.clone())))
+    Some((request, configure(agent, options.clone(), client.clone())))
 }
 
 #[rustfmt::skip]

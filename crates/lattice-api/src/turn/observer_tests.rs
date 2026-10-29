@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 use super::*;
-use lattice_conversation::ProviderOrigin;
+use lattice_session::store::{AttemptOrigin, AttemptProtocol};
 fn key(attempt_ordinal: u32) -> lancet_protocol::ModelAttemptKey {
     lancet_protocol::ModelAttemptKey {
         turn_id: crate::local::new_turn_id(),
@@ -15,7 +15,10 @@ fn adjacent_text_merges_and_each_attempt_replaces_the_previous_segments() {
     let first = key(0);
     observer.emit(TurnEvent::ModelStarted {
         key: first,
-        provider: ProviderOrigin::OpenAiCompatible,
+        origin: AttemptOrigin {
+            provider_id: "local".into(),
+            protocol: AttemptProtocol::ChatCompletions,
+        },
         model: "test".into(),
     });
     observer.emit(TurnEvent::TokenDelta {
@@ -58,7 +61,10 @@ fn adjacent_text_merges_and_each_attempt_replaces_the_previous_segments() {
     };
     observer.emit(TurnEvent::ModelStarted {
         key: second,
-        provider: ProviderOrigin::OpenAiCompatible,
+        origin: AttemptOrigin {
+            provider_id: "local".into(),
+            protocol: AttemptProtocol::ChatCompletions,
+        },
         model: "test".into(),
     });
     observer.emit(TurnEvent::TokenDelta {

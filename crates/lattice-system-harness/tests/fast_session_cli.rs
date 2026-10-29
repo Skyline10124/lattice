@@ -186,15 +186,27 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
     use lattice_system_harness::{FAKE_API_KEY, ScenarioEvidence, assert_no_secret};
 
     const SENTINEL: &str = "sk-config-rejection-91ac75d28e";
+    const ORDINARY_KEY: &str = "ordinary.secret.value";
+    const LONG_FRAGMENT: &str = "ordinary.long.profile.fragment";
+    let long_key = format!("{LONG_FRAGMENT}.").repeat(100);
     for (case, expected) in [
         ("missing-profile", "agent profile 'missing' not found"),
         ("toml", "line 2"),
-        ("missing-key", "'OPENAI_COMPATIBLE_API_KEY' is not set"),
-        ("empty-key", "'OPENAI_COMPATIBLE_API_KEY' is empty"),
-        ("model", "unknown model alias: '[REDACTED]'"),
-        ("model-typo", "unknown model alias: 'sonet'"),
+        ("missing-key", "credentials are missing"),
+        ("invalid-auth", "auth.json:"),
+        ("provider-missing-invalid-auth", "available providers:"),
+        ("provider-config", "providers.toml"),
+        ("provider-config-known-key", "providers.toml"),
+        ("model", "model reference must be <provider>/<model>"),
+        ("model-typo", "model reference must be <provider>/<model>"),
         ("tools", "unknown enabled tools [\"[REDACTED]\"]"),
+        ("tools-known-key", "unknown enabled tools [\"[REDACTED]\"]"),
+        ("short-key", "unknown enabled tools [\"EMPTY\"]"),
         ("agent-name", "must match selected agent 'plain'"),
+        ("long-profile", "declares '[REDACTED]'"),
+        ("responses", "protocol responses is not implemented"),
+        ("interactions", "protocol interactions is not implemented"),
+        ("oauth-chatgpt", "auth oauth:chatgpt is not implemented"),
     ] {
         let (world, spec) = direct_world(&format!("config-rejection-{case}"), "plain", "[]", "");
         let server = wire_fake_llm(&world, "plain", SseScript::plain("must not be requested"));
@@ -206,9 +218,28 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
             "toml" => {
                 std::fs::write(&path, format!("# 中文\nschema_version=@{SENTINEL}\n")).unwrap()
             }
-            // 这两个分支验证环境变量不存在与定义为空时各自的拒绝诊断。
-            "missing-key" => world.unset_env("OPENAI_COMPATIBLE_API_KEY"),
-            "empty-key" => world.set_env("OPENAI_COMPATIBLE_API_KEY", ""),
+            // 分别验证凭据缺失与凭据文件损坏的拒绝诊断。
+            "missing-key" => world.register_key(provider, None).unwrap(),
+            "invalid-auth" => {
+                std::fs::write(world.home().join(".lattice/auth.json"), "invalid").unwrap()
+            }
+            "provider-missing-invalid-auth" => {
+                std::fs::write(world.home().join(".lattice/auth.json"), "invalid").unwrap();
+                std::fs::write(&path, original.replace(&model, "absent/model")).unwrap();
+            }
+            "provider-config" => std::fs::write(
+                world.home().join(".lattice/providers.toml"),
+                format!("[providers.local]\nprotocol='{SENTINEL}:{FAKE_API_KEY}'\n"),
+            )
+            .unwrap(),
+            "provider-config-known-key" => {
+                world.register_key(provider, Some(ORDINARY_KEY)).unwrap();
+                std::fs::write(
+                    world.home().join(".lattice/providers.toml"),
+                    format!("[providers.local]\nprotocol='{ORDINARY_KEY}'\n"),
+                )
+                .unwrap();
+            }
             "model" => std::fs::write(&path, original.replace(&model, SENTINEL)).unwrap(),
             "model-typo" => std::fs::write(&path, original.replace(&model, "sonet")).unwrap(),
             "tools" => std::fs::write(
@@ -224,6 +255,44 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
                 ),
             )
             .unwrap(),
+            "long-profile" => {
+                world.register_key(provider, Some(&long_key)).unwrap();
+                std::fs::write(
+                    &path,
+                    original.replace("name = \"plain\"", &format!("name = '{long_key}'")),
+                )
+                .unwrap();
+            }
+            "tools-known-key" => {
+                world.register_key(provider, Some(ORDINARY_KEY)).unwrap();
+                std::fs::write(
+                    &path,
+                    original.replace("enabled = []", &format!("enabled = ['{ORDINARY_KEY}']")),
+                )
+                .unwrap();
+            }
+            "short-key" => {
+                world.register_key(provider, Some("EMPTY")).unwrap();
+                std::fs::write(
+                    &path,
+                    original.replace("enabled = []", "enabled = ['EMPTY']"),
+                )
+                .unwrap();
+            }
+            "responses" | "interactions" => {
+                std::fs::write(
+                    world.home().join(".lattice/providers.toml"),
+                    format!(
+                        "[providers.local]\nprotocol='{case}'\nbase_url='{}'\nauth='none'\n",
+                        server.base_url()
+                    ),
+                )
+                .unwrap();
+            }
+            "oauth-chatgpt" => {
+                std::fs::write(world.home().join(".lattice/providers.toml"), "").unwrap();
+                std::fs::write(&path, original.replace(&model, "chatgpt/plain")).unwrap();
+            }
             "missing-profile" => {}
             _ => unreachable!(),
         }
@@ -235,7 +304,13 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
         let mut evidence = ScenarioEvidence::new(
             &world,
             &spec.name,
-            [FAKE_API_KEY.to_string(), SENTINEL.to_string()],
+            [
+                FAKE_API_KEY.to_string(),
+                SENTINEL.to_string(),
+                ORDINARY_KEY.into(),
+                long_key.clone(),
+                LONG_FRAGMENT.into(),
+            ],
         )
         .unwrap();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -244,7 +319,10 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
                 vec!["--json", "run", "hello", "--agent", agent],
             ];
             // 工具选择归后台接受阶段；启动预检只在进入终端前加载并冻结配置。
-            if case != "tools" {
+            if matches!(
+                case,
+                "missing-profile" | "toml" | "agent-name" | "long-profile"
+            ) {
                 commands.push(vec!["--json", "tui", "--agent", agent]);
             }
             let mut messages = Vec::new();
@@ -254,6 +332,9 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
                 assert!(out.is_clean_exit(2), "{}", out.summary());
                 assert_no_secret(&out, SENTINEL).unwrap();
                 assert_no_secret(&out, FAKE_API_KEY).unwrap();
+                assert_no_secret(&out, ORDINARY_KEY).unwrap();
+                assert_no_secret(&out, &long_key).unwrap();
+                assert_no_secret(&out, LONG_FRAGMENT).unwrap();
                 // 提交在 `sending` 之后以 `rejected` 回执结束；TUI 启动预检不是提交，
                 // 输出 `error` 记录。两者给出同一个 LocalError。
                 let sent = parse_send_stdout(&out.stdout, out.exit_code());
@@ -271,20 +352,49 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
                 let message = error.message.as_str();
                 assert!(
                     message.contains(expected),
-                    "missing expected rejection reason"
+                    "{case}: missing expected rejection reason"
                 );
                 if case == "agent-name" {
-                    // 测试 key 不符合形状规则，必须由提交端读取已知凭据后精确替换。
+                    // 后台按已知凭据值和密钥形状脱敏，前端不读取 key。
                     assert!(message.contains("declares '[REDACTED]:[REDACTED]'"));
                 }
-                if case == "tools" {
+                if matches!(case, "tools" | "tools-known-key") {
                     assert!(message.contains("available catalog tools:"));
                     assert!(message.contains("observe__workspace"));
                 }
+                if case == "provider-missing-invalid-auth" {
+                    for provider in ["anthropic", "openai", "google", "local"] {
+                        assert!(message.contains(provider));
+                    }
+                }
+                if case == "provider-config-known-key" {
+                    assert!(message.contains("[REDACTED]"));
+                }
                 messages.push(message.to_owned());
+                assert!(sent.accepted_turn_id().is_none());
                 assert!(server.captured_requests().is_empty());
             }
             assert!(messages.windows(2).all(|pair| pair[0] == pair[1]));
+            if matches!(case, "long-profile" | "tools-known-key") {
+                let out = cli(
+                    &world,
+                    &spec,
+                    &["session", "send", "hello", "--agent", agent],
+                );
+                evidence.record_command("configuration rejection text", &out);
+                assert!(out.is_clean_exit(2));
+                assert_no_secret(&out, ORDINARY_KEY).unwrap();
+                assert_no_secret(&out, &long_key).unwrap();
+                assert_no_secret(&out, LONG_FRAGMENT).unwrap();
+                assert!(String::from_utf8_lossy(&out.stderr).contains(expected));
+            }
+            if world.session_store_dir().join("lattice.redb").exists() {
+                let sessions = cli(&world, &spec, &["--json", "session", "list"]);
+                evidence.record_command("no Session before acceptance", &sessions);
+                assert!(sessions.is_clean_exit(0));
+                let sessions: serde_json::Value = serde_json::from_slice(&sessions.stdout).unwrap();
+                assert!(sessions.as_array().unwrap().is_empty());
+            }
             evidence
                 .record_json(
                     "parameters",

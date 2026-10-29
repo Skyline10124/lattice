@@ -29,13 +29,16 @@ pub(crate) async fn open_or_create(
         });
     }
     let prepared = options.clone();
-    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+    let checked = tokio::task::spawn_blocking(move || -> Result<(), lattice_api::ApiError> {
         let loaded = load_profile(&prepared, &prepared.agent)?;
         let root = lattice_api::LocalWorkspaceRoot::from_path(&prepared.project_root)?;
-        lattice_api::local::FrozenConfiguration::from_env(loaded, &root)?;
+        lattice_api::local::FrozenConfiguration::capture(loaded, &root)?;
         Ok(())
     })
-    .await??;
+    .await?;
+    if let Err(error) = checked {
+        return Err(client.redact_configuration_error(error).await.into());
+    }
     Ok(SessionContext {
         session_id: None,
         active_agent: options.agent.clone(),
@@ -56,14 +59,19 @@ pub(crate) fn load_profile(
 pub(crate) async fn freeze_configuration(
     agent: String,
     options: TuiOptions,
+    client: LocalClient,
 ) -> lattice_api::local::Result<lattice_api::local::FrozenConfiguration> {
-    tokio::task::spawn_blocking(move || {
+    let loaded = tokio::task::spawn_blocking(move || {
         let root = lattice_api::LocalWorkspaceRoot::from_path(&options.project_root)?;
         let loaded = load_profile(&options, &agent)?;
-        lattice_api::local::FrozenConfiguration::from_env(loaded, &root)
+        lattice_api::local::FrozenConfiguration::capture(loaded, &root)
     })
     .await
-    .map_err(|_| lattice_api::ApiError::Internal("配置工作者失败".into()))?
+    .map_err(|_| lattice_api::ApiError::Internal("配置工作者失败".into()))?;
+    match loaded {
+        Ok(configuration) => Ok(configuration),
+        Err(error) => Err(client.redact_configuration_error(error).await),
+    }
 }
 
 /// 生成中的文字：所属尝试与已收到的字节数，以及其中的正文。reasoning 不显示，只计入字节数，

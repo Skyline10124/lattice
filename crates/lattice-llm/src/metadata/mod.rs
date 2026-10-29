@@ -198,11 +198,10 @@ pub(crate) struct Metadata {
 }
 
 impl Metadata {
+    pub(crate) fn has_catalog(&self, id: &str) -> bool {
+        self.catalog.0.contains_key(id)
+    }
     /// 缓存保留全部 catalog；缺失的内置条目回落快照，不补回缓存删除的模型或字段。
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "#315 L2 元数据尚未接入请求网关")
-    )]
     pub(crate) fn load(config_dir: &Path) -> Self {
         let mut catalog = std::fs::read(config_dir.join("cache/models.json"))
             .ok()
@@ -214,10 +213,6 @@ impl Metadata {
         Self { catalog }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "#315 L2 元数据尚未接入请求网关")
-    )]
     pub(crate) fn merge(&self, provider: &Provider) -> BTreeMap<String, Model> {
         let mut models = provider
             .catalog

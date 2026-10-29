@@ -23,7 +23,7 @@ impl Default for Document {
 }
 
 impl Document {
-    pub(super) fn redact(&self, message: &str) -> String {
+    pub(super) fn values(&self) -> Vec<&str> {
         let mut values = Vec::new();
         for credential in self.providers.values() {
             match credential {
@@ -55,6 +55,10 @@ impl Document {
         values.sort_unstable_by_key(|value| std::cmp::Reverse(value.len()));
         values.dedup();
         values
+    }
+
+    pub(super) fn redact(&self, message: &str) -> String {
+        self.values()
             .into_iter()
             .filter(|value| !value.is_empty())
             .fold(message.to_owned(), |text, value| {

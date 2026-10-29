@@ -12,7 +12,7 @@ use crate::reply::{
 };
 use crate::types::ChatRequest;
 
-/// 未指定输出上限时使用 32,768；Messages 协议要求 max_tokens。
+/// Messages 协议要求 max_tokens，使用 32,768。
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 32_768;
 
 /// Maps Anthropic stop reasons to OpenAI-style finish reasons.
@@ -38,11 +38,10 @@ pub fn build_request_json(
     model: &str,
 ) -> Result<serde_json::Value, ProjectionError> {
     let projected = request_messages_to_wire(ProviderOrigin::Anthropic, &request.messages)?;
-    let max_tokens = request.max_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
     let mut body = serde_json::json!({
         "model": model,
         "messages": projected.messages,
-        "max_tokens": max_tokens,
+        "max_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
         "stream": true,
     });
 
@@ -63,10 +62,6 @@ pub fn build_request_json(
             })
             .collect();
         body["tools"] = serde_json::Value::Array(tools);
-    }
-
-    if let Some(temperature) = request.temperature {
-        body["temperature"] = serde_json::json!(temperature);
     }
 
     Ok(body)
@@ -429,10 +424,7 @@ mod tests {
                 "Get weather",
                 serde_json::json!({"type": "object"}),
             )],
-            target: ModelTarget::new("sonnet"),
-            temperature: Some(0.2),
-            max_tokens: None,
-            max_completion_tokens: None,
+            target: ModelTarget::new("anthropic", "claude-sonnet-4-6"),
             client_request_id: None,
         };
         let body = build_request_json(&request, "claude-sonnet-4-6").expect("projection");

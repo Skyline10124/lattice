@@ -15,8 +15,15 @@ fn local(reason: ConfigRejection) -> LocalError {
 fn profile_local(error: ProfileError) -> LocalError {
     local(ConfigRejection::new(
         &crate::profile::profile_error_message(&error),
-        &[],
+        None,
     ))
+}
+
+fn frontend_local(error: crate::ApiError) -> LocalError {
+    let crate::ApiError::FrontendConfiguration(reason) = error else {
+        panic!("expected a frontend configuration diagnostic");
+    };
+    local(ConfigRejection::new(&reason.into_message(), None))
 }
 
 // 保护原始说明经脱敏后仍可读；真实命令入口由 E2E 覆盖。
@@ -233,7 +240,7 @@ fn named_profile_validation_shows_redacted_declared_name() {
     std::fs::write(
         &profile,
         format!(
-            "schema_version=1\n[agent]\nname='{SENTINEL}'\nmodel='sonnet'\n[prompt]\nsystem='hi'\n"
+            "schema_version=1\n[agent]\nname='{SENTINEL}'\nmodel='anthropic/claude-sonnet-4-6'\n[prompt]\nsystem='hi'\n"
         ),
     )
     .unwrap();
@@ -241,14 +248,15 @@ fn named_profile_validation_shows_redacted_declared_name() {
     let error =
         crate::resolve_named_agent_profile("selected", dir.path(), std::path::Path::new(""))
             .unwrap_err();
-    let result = LocalError::from(error);
+    assert!(!format!("{error:?}").contains(SENTINEL));
+    let result = frontend_local(error);
     assert!(result.message.contains("[agent].name"));
     assert!(result.message.contains("selected"));
     assert!(result.message.contains("declares '[REDACTED]'"));
     assert!(result.message.contains(profile.to_str().unwrap()));
     assert!(!result.message.contains(SENTINEL));
 
-    let result = LocalError::from(
+    let result = frontend_local(
         crate::resolve_named_agent_profile("missing", dir.path(), std::path::Path::new(""))
             .unwrap_err(),
     );
@@ -265,7 +273,7 @@ fn agents_directory_diagnostics_preserve_original_text() {
         ("/safe/../agents", "path traversal"),
     ] {
         let result =
-            LocalError::from(crate::validate_agents_dir(std::path::Path::new(path)).unwrap_err());
+            frontend_local(crate::validate_agents_dir(std::path::Path::new(path)).unwrap_err());
         assert_eq!(result.kind, LocalErrorKind::BadRequest);
         assert!(result.message.contains(path));
         assert!(result.message.contains(expected));
@@ -277,15 +285,40 @@ fn agents_directory_diagnostics_preserve_original_text() {
 
 #[test]
 fn configuration_wrapper_preserves_processed_message() {
-    let reason = ConfigRejection::new(
-        "ordinary sonet key=known-secret-value\nnext",
-        &["known-secret-value"],
-    );
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(
+        directory.path(),
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+    )
+    .unwrap();
+    let auth = lattice_llm::auth::AuthStore::new(directory.path().into());
+    auth.set("openai", "known-secret-value").unwrap();
+    let reason = ConfigRejection::new("ordinary sonet key=known-secret-value\nnext", Some(&auth));
     let expected = reason.to_string();
     assert_eq!(expected, "ordinary sonet key=[REDACTED] next");
     let error = local(reason);
     assert_eq!(error.kind, LocalErrorKind::BadRequest);
     assert_eq!(error.message, expected);
+    auth.set("openai", "EMPTY").unwrap();
+    assert_eq!(
+        ConfigRejection::new("unknown enabled tools [EMPTY]", Some(&auth)).to_string(),
+        "unknown enabled tools [EMPTY]"
+    );
+    for invalid_directory in [false, true] {
+        if invalid_directory {
+            std::fs::set_permissions(
+                directory.path(),
+                <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+            )
+            .unwrap();
+        } else {
+            std::fs::write(directory.path().join("auth.json"), "invalid auth").unwrap();
+        }
+        let reason =
+            ConfigRejection::new(&format!("agent profile missing: {SENTINEL}"), Some(&auth))
+                .to_string();
+        assert_eq!(reason, "agent profile missing: [REDACTED]");
+    }
 }
 
 #[test]
@@ -293,12 +326,16 @@ fn llm_display_is_preserved_after_redaction() {
     use lattice_llm::LlmError;
     for (error, expected) in [
         (
-            LlmError::UnknownModel("sonet".into()),
-            "unknown model alias: 'sonet'",
+            LlmError::Config {
+                message: "provider sonet is not registered".into(),
+            },
+            "configuration error: provider sonet is not registered",
         ),
         (
-            LlmError::UnknownModel(SENTINEL.into()),
-            "unknown model alias: '[REDACTED]'",
+            LlmError::Config {
+                message: format!("provider {SENTINEL} is not registered"),
+            },
+            "configuration error: provider [REDACTED] is not registered",
         ),
         (
             LlmError::Credential {
@@ -319,7 +356,7 @@ fn llm_display_is_preserved_after_redaction() {
             "DNS error: cannot resolve typo.invalid",
         ),
     ] {
-        let result = local(ConfigRejection::new(&error.to_string(), &[]));
+        let result = local(ConfigRejection::new(&error.to_string(), None));
         assert_eq!(result.kind, LocalErrorKind::BadRequest);
         assert_eq!(result.message, expected);
         assert!(!result.message.contains(SENTINEL));

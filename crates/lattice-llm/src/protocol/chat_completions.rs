@@ -49,16 +49,6 @@ pub fn build_request_json(
         body["tools"] = serde_json::Value::Array(tools_array);
     }
 
-    if let Some(temperature) = request.temperature {
-        body["temperature"] = serde_json::json!(temperature);
-    }
-
-    if let Some(max_comp_tokens) = request.max_completion_tokens {
-        body["max_completion_tokens"] = serde_json::json!(max_comp_tokens);
-    } else if let Some(max_tokens) = request.max_tokens {
-        body["max_tokens"] = serde_json::json!(max_tokens);
-    }
-
     Ok(body)
 }
 

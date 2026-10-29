@@ -5,8 +5,6 @@ pub mod audit;
 pub mod auth;
 pub mod daemon;
 pub mod lancet;
-pub(crate) mod model_render;
 pub mod models;
-pub mod resolve;
 pub mod run;
 pub mod session;

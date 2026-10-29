@@ -15,7 +15,6 @@ use crate::protocol::{self, Protocol};
 use crate::provider::Auth;
 use crate::reply::{ProtocolEvent, ReplyProtocolError, StreamStop};
 use crate::reply_stream::{ProtocolStream, StreamControl, assemble_reply_stream};
-use crate::router::ResolvedModel;
 use crate::sse;
 use crate::stub::{LlmError, LlmStream};
 use crate::transport;
@@ -39,29 +38,6 @@ static USER_AGENT: LazyLock<String> = LazyLock::new(|| {
 });
 
 type BodyStream = Pin<Box<dyn futures::Stream<Item = reqwest::Result<bytes::Bytes>> + Send>>;
-
-/// 校验 base_url 并从指定环境变量读取 API key。
-pub fn validate_and_read_key(resolved: &ResolvedModel) -> Result<String, LlmError> {
-    net_guard::validate_base_url(&resolved.base_url).map_err(llm_error_from_net_guard)?;
-
-    let key = std::env::var(&resolved.api_key_env).map_err(|_| LlmError::Credential {
-        message: format!(
-            "missing API key: environment variable '{}' is not set",
-            resolved.api_key_env
-        ),
-    })?;
-
-    if key.is_empty() {
-        return Err(LlmError::Credential {
-            message: format!(
-                "missing API key: environment variable '{}' is empty",
-                resolved.api_key_env
-            ),
-        });
-    }
-
-    Ok(key)
-}
 
 /// 认证与协议独立选择；无认证时不构造任何认证头。
 fn build_auth_headers(
@@ -565,8 +541,7 @@ fn llm_error_from_request(err: reqwest::Error) -> LlmError {
 /// 保留错误种类与重试属性，只替换诊断中的已知凭据。
 fn redact_error(mut error: LlmError, credentials: &Credentials) -> LlmError {
     match &mut error {
-        LlmError::UnknownModel(message)
-        | LlmError::Credential { message }
+        LlmError::Credential { message }
         | LlmError::Config { message }
         | LlmError::Dns { message }
         | LlmError::Transport { message, .. }
@@ -617,16 +592,6 @@ async fn read_error_body_capped(response: reqwest::Response) -> (String, bool) {
     (String::from_utf8_lossy(&body).into_owned(), false)
 }
 
-/// 兼容单进程调用者；后台执行必须传入已经冻结的 LlmConnection。
-pub async fn dispatch_stream(
-    request: ChatRequest,
-    resolved: ResolvedModel,
-) -> Result<LlmStream, LlmError> {
-    crate::LlmConnection::from_resolved_env(resolved)?
-        .stream(request, StreamControl::default())
-        .await
-}
-
 /// 地址固定后的 client 只在所属 Turn 与 endpoint 内复用。
 #[derive(Default)]
 pub(crate) struct TurnClient {
@@ -670,7 +635,7 @@ pub(crate) fn tls_certificates(
         || roots_der.iter().map(Vec::len).sum::<usize>() > 4 * 1024 * 1024
     {
         return Err(LlmError::Config {
-            message: "connection material exceeds limit".into(),
+            message: "TLS roots exceed certificate count or size limits".into(),
         });
     }
     roots_der
@@ -683,16 +648,31 @@ pub(crate) fn tls_certificates(
         .collect()
 }
 
-/// 网关与冻结连接为单次请求提供的连接材料，包含该 Turn 对应 endpoint 的 client。
+/// 网关为单次请求提供解析结果，包含该 Turn 对应 endpoint 的 client。
 pub(crate) struct RequestEndpoint<'a> {
     pub(crate) provider: &'a str,
     pub(crate) model: &'a str,
     pub(crate) base_url: &'a str,
     pub(crate) protocol: Protocol,
     pub(crate) auth: Auth,
-    pub(crate) credentials: Credentials,
+    pub(crate) credentials: Arc<Credentials>,
     pub(crate) roots: &'a [reqwest::Certificate],
     pub(crate) client: Arc<TurnClient>,
+}
+
+pub(crate) fn validate_configuration(
+    protocol: Protocol,
+    auth: Auth,
+    api_key: Option<&str>,
+) -> Result<(), LlmError> {
+    if auth == Auth::OauthChatgpt {
+        return Err(LlmError::Config {
+            message: "auth oauth:chatgpt is not implemented".into(),
+        });
+    }
+    ProtocolParser::new(protocol)?;
+    build_auth_headers(auth, api_key)?;
+    Ok(())
 }
 
 pub(crate) async fn dispatch(
@@ -828,86 +808,42 @@ impl Drop for ForgetUnlessDone {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::endpoints::OPENAI_BASE_URL;
     use crate::{LlmEvent, ReplyOutcome, ReplyStop};
 
-    use crate::router::{CredentialStatus, ProviderKind};
-    use crate::test_env::with_env_vars;
+    fn chat_request() -> ChatRequest {
+        let mut request = ChatRequest::new(Vec::new(), crate::ModelTarget::new("test", "model"));
+        request.client_request_id = Some("test-session".into());
+        request
+    }
 
-    #[test]
-    fn credential_validation_rejects_missing_keys_and_unsafe_urls() {
-        for (
-            name,
-            env_vars,
-            alias,
-            provider,
-            base_url,
-            api_key_env,
-            error_contains,
-            error_excludes,
-        ) in [
-            (
-                "missing_credential",
-                vec![("LATTICE_TEST_OK_KEY", Some("sk-ok-value"))],
-                "gpt-4o",
-                ProviderKind::OpenAi,
-                OPENAI_BASE_URL,
-                "LATTICE_TEST_MISSING_KEY",
-                Some("LATTICE_TEST_MISSING_KEY"),
-                Some("sk-ok-value"),
-            ),
-            (
-                "empty_credential",
-                vec![("LATTICE_TEST_EMPTY_KEY", Some(""))],
-                "gpt-4o",
-                ProviderKind::OpenAi,
-                OPENAI_BASE_URL,
-                "LATTICE_TEST_EMPTY_KEY",
-                None,
-                None,
-            ),
-            (
-                "private_ip_base_url",
-                vec![],
-                "bad",
-                ProviderKind::OpenAiCompatible,
-                "http://10.0.0.1/v1",
-                "OPENAI_COMPATIBLE_API_KEY",
-                None,
-                None,
-            ),
-        ] {
-            with_env_vars(&env_vars, || {
-                let resolved = ResolvedModel {
-                    alias: alias.to_string(),
-                    provider,
-                    provider_model: alias.to_string(),
-                    base_url: base_url.to_string(),
-                    api_key_env: api_key_env.to_string(),
-                    credential_status: CredentialStatus::Missing,
-                };
-                let result = validate_and_read_key(&resolved);
-                assert!(
-                    result.is_err(),
-                    "{name}: invalid credentials or base URL must be rejected"
-                );
-                if error_contains.is_some() || error_excludes.is_some() {
-                    let err = result.unwrap_err().to_string();
-                    if let Some(excluded) = error_excludes {
-                        assert!(
-                            !err.contains(excluded),
-                            "{name}: error must not leak other keys: {err}"
-                        );
-                    }
-                    if let Some(included) = error_contains {
-                        assert!(
-                            err.contains(included),
-                            "{name}: error should name the missing env var"
-                        );
-                    }
+    async fn resolved_request(protocol: &str, url: &str, key: &str) -> crate::ResolvedRequest {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(
+            directory.path(),
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .unwrap();
+        std::fs::write(
+            directory.path().join("providers.toml"),
+            format!(
+                "[providers.test]\nprotocol='{protocol}'\nbase_url='{url}'\nauth='{}'\n",
+                if protocol == "anthropic-messages" {
+                    "x-api-key"
+                } else {
+                    "bearer"
                 }
-            });
-        }
+            ),
+        )
+        .unwrap();
+        crate::auth::AuthStore::new(directory.path().into())
+            .set("test", key)
+            .unwrap();
+        crate::RequestGateway::new(directory.path().into(), vec![])
+            .unwrap()
+            .open_turn()
+            .resolve(&crate::ModelTarget::new("test", "model"))
+            .await
+            .unwrap()
     }
 
     #[test]
@@ -1007,7 +943,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_connection_freezes_endpoint_credentials_and_redacts_errors() {
+    async fn resolved_request_redacts_http_stream_and_unknown_blocks() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -1046,21 +982,16 @@ mod tests {
                 socket.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
             }
         });
-        let resolved = ResolvedModel {
-            alias: "compat:frozen-model".into(),
-            provider: ProviderKind::OpenAiCompatible,
-            provider_model: "frozen-model".into(),
-            base_url: format!("http://{address}"),
-            api_key_env: "UNUSED_FROZEN_CREDENTIAL".into(),
-            credential_status: crate::CredentialStatus::Missing,
-        };
-        let connection =
-            crate::LlmConnection::new(resolved.clone(), "frozen-secret".into(), Vec::new())
-                .unwrap();
-        let request = ChatRequest::new(Vec::new(), crate::ModelTarget::new("compat:frozen-model"));
+        let connection = resolved_request(
+            "chat-completions",
+            &format!("http://{address}"),
+            "frozen-secret",
+        )
+        .await;
+        let request = chat_request();
         let error = match tokio::time::timeout(
             Duration::from_secs(3),
-            connection.stream(request, StreamControl::default()),
+            connection.stream_chat(request, StreamControl::default()),
         )
         .await
         .unwrap()
@@ -1070,10 +1001,10 @@ mod tests {
         };
         assert_eq!(error.status_code(), Some(401));
         assert!(!format!("{error:?}").contains("frozen-secret"));
-        let request = ChatRequest::new(Vec::new(), crate::ModelTarget::new("compat:frozen-model"));
+        let request = chat_request();
         let events = tokio::time::timeout(Duration::from_secs(3), async {
             connection
-                .stream(request, StreamControl::default())
+                .stream_chat(request, StreamControl::default())
                 .await
                 .unwrap()
                 .collect::<Vec<_>>()
@@ -1084,21 +1015,15 @@ mod tests {
         assert!(
             matches!(events.as_slice(), [LlmEvent::Started, LlmEvent::Finished { outcome: ReplyOutcome::Interrupted { reason: ReplyStop::Stream(StreamStop::Provider(failure)) }, .. }] if failure.message == "API error: [REDACTED] rejected" && !failure.retryable)
         );
-        let connection = crate::LlmConnection::new(
-            ResolvedModel {
-                provider: ProviderKind::Anthropic,
-                ..resolved
-            },
-            "frozen-secret".into(),
-            Vec::new(),
+        let connection = resolved_request(
+            "anthropic-messages",
+            &format!("http://{address}"),
+            "frozen-secret",
         )
-        .unwrap();
+        .await;
         let events = tokio::time::timeout(Duration::from_secs(3), async {
             connection
-                .stream(
-                    ChatRequest::new(Vec::new(), crate::ModelTarget::default()),
-                    StreamControl::default(),
-                )
+                .stream_chat(chat_request(), StreamControl::default())
                 .await
                 .unwrap()
                 .collect::<Vec<_>>()
@@ -1153,25 +1078,11 @@ mod tests {
                 }
                 socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
             });
-            let connection = crate::LlmConnection::new(
-                ResolvedModel {
-                    alias: "frozen".into(),
-                    provider: ProviderKind::Anthropic,
-                    provider_model: "frozen".into(),
-                    base_url: format!("http://{address}"),
-                    api_key_env: "UNUSED_FROZEN_CREDENTIAL".into(),
-                    credential_status: CredentialStatus::Missing,
-                },
-                key,
-                Vec::new(),
-            )
-            .unwrap();
+            let connection =
+                resolved_request("anthropic-messages", &format!("http://{address}"), &key).await;
             let events = tokio::time::timeout(Duration::from_secs(3), async {
                 connection
-                    .stream(
-                        ChatRequest::new(Vec::new(), crate::ModelTarget::default()),
-                        StreamControl::default(),
-                    )
+                    .stream_chat(chat_request(), StreamControl::default())
                     .await
                     .unwrap()
                     .collect::<Vec<_>>()
@@ -1205,106 +1116,6 @@ mod tests {
             assert!(!format!("{events:?}").contains("private-payload"));
             server.await.unwrap();
         }
-    }
-
-    /// 流没有交付 `Done` 就结束、读到一半断开，或错误正文读到一半断开时，本 Turn 的 client
-    /// 必须丢弃，下次尝试才会重新解析并固定地址；完整的流保留 client 给下一 Step 复用。
-    /// E2E 观察不到地址是否重新解析，所以直接检查缓存。
-    #[tokio::test]
-    async fn turn_client_is_dropped_after_any_unfinished_response() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let done = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
-        let partial = "data: {\"choices\":[{\"delta\":{\"content\":\"par\"}}]}\n\n";
-        let sse = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n";
-        let cases = [
-            (
-                "complete stream",
-                format!("{sse}Content-Length: {}\r\n\r\n{done}", done.len()),
-                true,
-            ),
-            (
-                "eof before done",
-                format!("{sse}Connection: close\r\n\r\n{partial}"),
-                false,
-            ),
-            (
-                "body cut mid-stream",
-                format!(
-                    "{sse}Content-Length: {}\r\n\r\n{partial}",
-                    partial.len() + 64
-                ),
-                false,
-            ),
-            (
-                "error body cut",
-                "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 100\r\n\r\n{\"error\"".into(),
-                false,
-            ),
-        ];
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let responses: Vec<String> = cases.iter().map(|case| case.1.clone()).collect();
-        let server = tokio::spawn(async move {
-            for response in responses {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                // 读完整个请求再回应，关闭连接时不会因未读数据触发 RST 而吞掉响应。
-                let mut request = Vec::new();
-                let body_start = loop {
-                    let mut chunk = [0; 4096];
-                    let count = socket.read(&mut chunk).await.unwrap();
-                    assert!(count > 0);
-                    request.extend_from_slice(&chunk[..count]);
-                    if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
-                        break end + 4;
-                    }
-                };
-                let head = String::from_utf8_lossy(&request[..body_start]).to_ascii_lowercase();
-                let length: usize = head
-                    .lines()
-                    .find_map(|line| line.strip_prefix("content-length:"))
-                    .map_or(0, |value| value.trim().parse().unwrap());
-                while request.len() < body_start + length {
-                    let mut chunk = [0; 4096];
-                    let count = socket.read(&mut chunk).await.unwrap();
-                    assert!(count > 0);
-                    request.extend_from_slice(&chunk[..count]);
-                }
-                socket.write_all(response.as_bytes()).await.unwrap();
-            }
-        });
-        let resolved = ResolvedModel {
-            alias: "compat:m".into(),
-            provider: ProviderKind::OpenAiCompatible,
-            provider_model: "m".into(),
-            base_url: format!("http://{address}"),
-            api_key_env: "UNUSED".into(),
-            credential_status: crate::CredentialStatus::Missing,
-        };
-        for (name, _, keeps_client) in cases {
-            let connection =
-                crate::LlmConnection::new(resolved.clone(), "key".into(), Vec::new()).unwrap();
-            let request = ChatRequest::new(Vec::new(), crate::ModelTarget::new("compat:m"));
-            let outcome = tokio::time::timeout(Duration::from_secs(3), async {
-                match connection.stream(request, StreamControl::default()).await {
-                    Ok(stream) => Ok(stream.collect::<Vec<_>>().await),
-                    Err(error) => Err(error),
-                }
-            })
-            .await
-            .unwrap();
-            if name == "body cut mid-stream" {
-                assert!(
-                    matches!(outcome.as_deref(), Ok([.., LlmEvent::Finished { outcome: ReplyOutcome::Interrupted { reason: ReplyStop::Stream(StreamStop::Provider(failure)) }, .. }]) if failure.retryable),
-                    "{name}: a body cut short is a retryable transport failure: {outcome:?}"
-                );
-            }
-            assert_eq!(
-                connection.client.is_cached(),
-                keeps_client,
-                "{name}: {outcome:?}"
-            );
-        }
-        server.await.unwrap();
     }
 
     #[test]

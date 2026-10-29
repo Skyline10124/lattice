@@ -78,6 +78,27 @@ impl LocalClient {
             _ => Err(protocol()),
         }
     }
+    /// 前端配置错误经后台按当前凭据脱敏后才显示；失败时只返回后台或连接诊断。
+    pub async fn redact_configuration_error(&self, error: crate::ApiError) -> LocalError {
+        let message = match error {
+            crate::ApiError::FrontendConfiguration(reason) => reason.into_message(),
+            crate::ApiError::Configuration(reason) => reason.to_string(),
+            other => return other.into(),
+        };
+        match self.call(Request::ConfigurationError { message }).await {
+            Ok(Response::ConfigurationError { message }) => {
+                LocalError::new(LocalErrorKind::BadRequest, &message)
+            }
+            Ok(_) => protocol(),
+            Err(error) => error,
+        }
+    }
+    pub async fn models(&self, provider: Option<String>) -> Result<ModelCandidates> {
+        match self.call(Request::Models { provider }).await? {
+            Response::Models(models) => Ok(models),
+            _ => Err(protocol()),
+        }
+    }
     pub async fn resolve_session(&self, prefix: &str) -> Result<SessionRecord> {
         match self
             .call(Request::ResolveSession {
@@ -445,7 +466,7 @@ mod tests {
             &serde_json::json!({"message_id":0,"offset":0,"json_fragment":json,"complete":true}),
         )
         .unwrap();
-        writer.write_all(b"CAL5").await.unwrap();
+        writer.write_all(b"CAL6").await.unwrap();
         writer.write_u32(payload.len() as u32).await.unwrap();
         writer.write_all(&payload).await.unwrap();
         assert!(matches!(

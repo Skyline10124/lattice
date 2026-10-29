@@ -377,7 +377,7 @@ pub(crate) fn cli(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> 
         .expect("drive lattice")
 }
 
-/// 公开 Local IPC 的一条连接：请求写成一帧，回复按 `LTLOCAL5` 帧重组为逻辑消息。
+/// 公开 Local IPC 的一条连接：请求写成一帧，回复按 `LTLOCAL6` 帧重组为逻辑消息。
 pub(crate) struct Wire {
     stream: UnixStream,
     message: u64,
@@ -390,7 +390,7 @@ impl Wire {
         stream.set_read_timeout(Some(timeout)).unwrap();
         stream.set_write_timeout(Some(timeout)).unwrap();
         let body = serde_json::to_vec(request).unwrap();
-        stream.write_all(b"LTLOCAL5").unwrap();
+        stream.write_all(b"LTLOCAL6").unwrap();
         stream
             .write_all(&(body.len() as u32).to_be_bytes())
             .unwrap();
@@ -420,7 +420,7 @@ impl Wire {
             {
                 None
             }
-            other => panic!("read an LTLOCAL5 frame header: {other:?}"),
+            other => panic!("read an LTLOCAL6 frame header: {other:?}"),
         }
     }
     /// 读一条逻辑消息；`first` 是已读出的帧头首字节。
@@ -437,8 +437,8 @@ impl Wire {
             };
             self.stream
                 .read_exact(rest)
-                .expect("read an LTLOCAL5 frame header");
-            assert_eq!(&header[..8], b"LTLOCAL5");
+                .expect("read an LTLOCAL6 frame header");
+            assert_eq!(&header[..8], b"LTLOCAL6");
             let length = u32::from_be_bytes(header[8..].try_into().unwrap()) as usize;
             assert!((1..=16 * 1024 * 1024).contains(&length));
             let mut bytes = vec![0; length];
@@ -459,7 +459,7 @@ pub(crate) fn ipc(world: &ScenarioWorld, timeout: Duration, request: Value) -> V
     Wire::connect(world, timeout, &request).next()
 }
 
-/// 提交端加载好的冻结配置：项目中的 profile 原文与指向 fake provider 的连接材料。
+/// 提交端只冻结 profile 与提示；provider 配置由后台读取。
 pub(crate) fn configuration(world: &ScenarioWorld, agent: &str, base_url: &str) -> Value {
     let profile = std::fs::read_to_string(
         world
@@ -467,13 +467,12 @@ pub(crate) fn configuration(world: &ScenarioWorld, agent: &str, base_url: &str) 
             .join(format!(".lattice/agents/{agent}/agent.toml")),
     )
     .unwrap();
-    let connection = ProviderFixture::chat_completions(agent)
-        .configuration(base_url, FAKE_API_KEY)
+    ProviderFixture::chat_completions(agent)
+        .configure(world, base_url)
         .unwrap();
     json!({
         "profile_toml": profile,
         "system_prompt": "You are a concise test agent.",
-        "connection": connection,
     })
 }
 

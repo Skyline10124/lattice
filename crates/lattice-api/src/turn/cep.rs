@@ -7,7 +7,6 @@
 #[cfg(test)]
 use lancet_api::WorkspaceHistory;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use lancet_api::{
     ComponentRuntime, LancetError, LancetRuntime, LancetRuntimeConfig, WorkspaceHistoryBacking,
@@ -23,29 +22,23 @@ use serde_json::Value;
 use crate::session::ApiError;
 use crate::turn::types::{RunTurnRequest, TurnEvent};
 
-/// Map a [`LancetError`] from the runtime layer onto the API error vocabulary.
-fn map_lancet_err(err: LancetError) -> ApiError {
+/// 运行时错误在构造公开配置诊断前，先按后台当前凭据脱敏。
+fn map_lancet_err(err: LancetError, gateway: Option<&lattice_llm::RequestGateway>) -> ApiError {
     match err {
         LancetError::Config(msg) => ApiError::BadRequest(msg),
         LancetError::UnknownTools { unknown, available } => {
-            // 此处没有本 Turn 的 API key；不读取后台环境替代它。
-            ApiError::Configuration(crate::ConfigRejection::new(
-                &format!(
-                    "unknown enabled tools {unknown:?}; available catalog tools: {available:?}"
-                ),
-                &[],
-            ))
+            let message = format!(
+                "unknown enabled tools {unknown:?}; available catalog tools: {available:?}"
+            );
+            let auth = gateway.map(lattice_llm::RequestGateway::auth_store);
+            ApiError::Configuration(crate::ConfigRejection::new(&message, auth.as_ref()))
         }
         LancetError::Internal(msg) => ApiError::Internal(msg),
     }
 }
 
-/// Resolved production turn dependencies assembled by the API layer.
-///
-/// The generated Component runtime plus one-attempt model driver and
-/// descriptor-pinned Tool catalog consumed by the production TurnCoordinator.
+/// API 层为 TurnCoordinator 组成的 Component runtime、固定 descriptor 的 Tool 目录与事件流。
 pub(crate) struct ProductionTurnDeps {
-    pub model_driver: lattice_agent::ModelStepDriver,
     pub tool_catalog: Vec<lancet_api::ToolDefinition>,
     pub runtime: LancetRuntime,
     pub events: tokio::sync::mpsc::UnboundedReceiver<ToolEvent>,
@@ -58,8 +51,7 @@ pub(crate) struct ProductionTurnDepsInput<'a> {
     pub project_store_key: lattice_session::ProjectStoreKey,
     pub state_layout: lattice_session::StateLayout,
     pub enabled_tools: &'a [String],
-    pub tls_roots_der: &'a [Vec<u8>],
-    pub llm: Arc<dyn lattice_agent::LlmClient>,
+    pub gateway: Option<std::sync::Arc<lattice_llm::RequestGateway>>,
     pub lancet: Option<&'a LancetSection>,
 }
 
@@ -311,13 +303,14 @@ pub(crate) async fn build_production_turn_deps(
         project_store_key,
         state_layout,
         enabled_tools,
-        tls_roots_der,
-        llm,
+        gateway,
         lancet,
     } = input;
     let project_root = PathBuf::from(project_root);
     let enabled_tools = enabled_tools.to_vec();
-    let tls_roots_der = tls_roots_der.to_vec();
+    let tls_roots_der = gateway
+        .as_ref()
+        .map_or_else(Vec::new, |gateway| gateway.tls_roots_der().to_vec());
     let lancet = lancet.cloned();
     let capability_admission = request
         .loaded_profile
@@ -345,11 +338,10 @@ pub(crate) async fn build_production_turn_deps(
             tls_roots_der,
             workspace_history,
         })
-        .map_err(map_lancet_err)?;
+        .map_err(|error| map_lancet_err(error, gateway.as_deref()))?;
         let tool_catalog = runtime.tool_definitions().to_vec();
         let events = runtime.take_events();
         Ok(ProductionTurnDeps {
-            model_driver: lattice_agent::ModelStepDriver::new(llm),
             tool_catalog,
             runtime,
             events,
@@ -531,7 +523,7 @@ mod turn_wiring {
 
 [agent]
 name = "t"
-model = "m"
+model = "local/m"
 
 [prompt]
 system = "sys"
@@ -559,15 +551,18 @@ enabled = ["{tool}"]
             project_key,
         ))
         .expect("create fixture workspace history");
-        let llm: Arc<dyn lattice_agent::LlmClient> =
-            Arc::new(FakeStreamingLlmClient::builder().build());
+        let llm: std::sync::Arc<dyn lattice_agent::LlmClient> =
+            std::sync::Arc::new(FakeStreamingLlmClient::builder().build());
         let request = RunTurnRequest {
             input: "hi".into(),
             session_id: None,
             agent: Some(profile.profile.agent.name.clone()),
             loaded_profile: Some(profile.clone()),
             cancel_flag: None,
-            test_llm: Some((llm.clone(), lattice_llm::ProviderKind::OpenAiCompatible)),
+            test_llm: Some((
+                llm.clone(),
+                lattice_session::store::AttemptProtocol::ChatCompletions,
+            )),
             test_project_root: Some(project.path().to_string_lossy().into()),
         };
         let enabled_tools = ["session__todo_write".to_string()];
@@ -577,8 +572,7 @@ enabled = ["{tool}"]
             project_store_key: project_key,
             state_layout: layout,
             enabled_tools: &enabled_tools,
-            tls_roots_der: &[],
-            llm,
+            gateway: None,
             lancet: Some(&profile.profile.lancet),
         })
         .await
@@ -610,10 +604,13 @@ enabled = ["{tool}"]
     #[test]
     fn unknown_tool_rejection_is_redacted_and_visible() {
         let sentinel = "sk-unknown-tool-82ace195";
-        let error = map_lancet_err(LancetError::UnknownTools {
-            unknown: vec![sentinel.into(), "observe.typo".into()],
-            available: vec!["observe__workspace".into()],
-        });
+        let error = map_lancet_err(
+            LancetError::UnknownTools {
+                unknown: vec![sentinel.into(), "observe.typo".into()],
+                available: vec!["observe__workspace".into()],
+            },
+            None,
+        );
         let local = crate::local::LocalError::from(error);
         assert_eq!(local.kind, crate::local::LocalErrorKind::BadRequest);
         assert_eq!(

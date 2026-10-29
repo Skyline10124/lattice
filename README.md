@@ -37,7 +37,7 @@ lattice --help
 
 ## 快速开始
 
-以下示例创建一个只允许读取项目文件的 Agent，使用 Anthropic 的 `sonnet` 模型别名。
+以下示例创建一个只允许读取项目文件的 Agent，使用模型引用 `anthropic/claude-sonnet-4-6`。
 
 ### 1. 准备配置
 
@@ -56,7 +56,7 @@ schema_version = 1
 
 [agent]
 name = "reader"
-model = "sonnet"
+model = "anthropic/claude-sonnet-4-6"
 
 [prompt]
 system = "请用中文回答。先读取相关文件，再根据实际内容说明项目结构与实现。"
@@ -70,11 +70,14 @@ enabled = ["observe__workspace"]
 
 ### 2. 配置模型凭据
 
-在当前终端导出服务商密钥；工作区 `.env` 不会被加载：
+通过终端录入服务商密钥（输入不回显），后台保存到用户级 `~/.lattice/auth.json`：
 
 ```sh
-export ANTHROPIC_API_KEY="替换为你的密钥"
+lattice auth set anthropic
+lattice models --provider anthropic
 ```
+
+provider 来自内置表与用户级 `~/.lattice/providers.toml`；环境变量、工作区 `.env` 和项目中的 `providers.toml` 不提供凭据或连接配置。
 
 > 密钥不要写入提交到仓库的文件。只读工具配置不代表离线运行，
 > 对话仍需要调用模型服务。
@@ -107,7 +110,7 @@ Session 命令和 TUI 首次使用时会自动启动本地后台。请求被接�
 
 自动启动与显式运行 `lattice daemon serve` 都继承启动进程的环境。后台运行期间不随后续前端的环境变化；要更新后台环境，先执行 `lattice daemon stop` 再启动。
 
-当前版本中，密钥、endpoint 与 TLS 信任仍在每次提交时从运行提交命令的终端读取，修改后不需要重启后台。
+provider 配置与凭据由后台在每次模型请求时重读，修改 `providers.toml` 或通过 `lattice auth set` 更新凭据后不需要重启。TLS 根只在后台启动时载入；修改 TLS 信任后需要重启后台。
 
 TUI 中，输入框为空时按 Ctrl+D 或输入 `/quit` 只退出界面；任务运行时按 Esc 或 Ctrl+C 请求取消。之后用 `lattice tui <session_id>` 重新打开会话，在界面内输入 `/reconnect` 重新连接。
 

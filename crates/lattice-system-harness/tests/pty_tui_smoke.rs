@@ -423,10 +423,13 @@ fn pty_mid_model_reconnect_shows_new_suffix_before_completion() {
         assert_eq!(world.daemon_pids().unwrap(), owners);
         println!("PTY window: original frontend exited; same backend remains");
 
-        // 重连读取不依赖前端的 provider 环境，且不得触发第二次模型执行。
-        world.unset_env("OPENAI_COMPATIBLE_BASE_URL");
-        world.unset_env("OPENAI_COMPATIBLE_MODEL");
-        world.unset_env("OPENAI_COMPATIBLE_API_KEY");
+        // 重连读取不依赖当前凭据，且不得触发第二次模型执行。
+        world
+            .register_key(
+                lattice_system_harness::ProviderFixture::chat_completions("reconnect"),
+                None,
+            )
+            .unwrap();
         replacement =
             Some(PtyTuiDriver::reconnect(&driver, &world, session.session_id().unwrap()).unwrap());
         let tui = replacement.as_mut().unwrap();

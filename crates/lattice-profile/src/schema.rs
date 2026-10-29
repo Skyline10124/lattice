@@ -342,7 +342,7 @@ schema_version = 1
 
 [agent]
 name = "full"
-model = "opus"
+model = "anthropic/claude-opus-4-6"
 description = "A full-featured agent"
 
 [prompt]
@@ -589,7 +589,7 @@ schema_version = 1
 
 [agent]
 name = "t"
-model = "sonnet"
+model = "anthropic/claude-sonnet-4-6"
 {agent_field}
 
 [prompt]
@@ -620,7 +620,7 @@ schema_version = 1
 
 [agent]
 name = "t"
-model = "sonnet"
+model = "anthropic/claude-sonnet-4-6"
 
 [prompt]
 system = "hi"

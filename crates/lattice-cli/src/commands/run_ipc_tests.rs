@@ -42,7 +42,7 @@ impl Peer {
         let (mut stream, _) = self.listener.accept().await.unwrap();
         let mut magic = [0; 8];
         stream.read_exact(&mut magic).await.unwrap();
-        assert_eq!(&magic, b"LTLOCAL5");
+        assert_eq!(&magic, b"LTLOCAL6");
         let length = stream.read_u32().await.unwrap();
         let mut bytes = vec![0; length as usize];
         stream.read_exact(&mut bytes).await.unwrap();
@@ -63,7 +63,7 @@ impl Wire {
         let fragment = serde_json::to_string(&json!({"response":response,"value":value})).unwrap();
         let bytes=serde_json::to_vec(&json!({"message_id":self.sequence,"offset":0,"json_fragment":fragment,"complete":true})).unwrap();
         self.sequence += 1;
-        self.stream.write_all(b"LTLOCAL5").await.unwrap();
+        self.stream.write_all(b"LTLOCAL6").await.unwrap();
         self.stream.write_u32(bytes.len() as u32).await.unwrap();
         self.stream.write_all(&bytes).await.unwrap();
     }
@@ -693,10 +693,8 @@ async fn late_acceptance_keeps_the_printed_unknown_receipt_and_exit_one() {
     let peer = Peer::new();
     let id = lattice_api::local::new_turn_id();
     let configuration = serde_json::from_value(json!({
-        "profile_toml":"schema_version=1\n[agent]\nname='test'\nmodel='compat:test'\n[prompt]\nsystem='test'\n[tools]\nenabled=[]\n",
-        "system_prompt":"test",
-        "connection":{"alias":"compat:test","provider":"openai_compatible","provider_model":"test",
-            "base_url":"http://127.0.0.1:1/v1","api_key":"test-key","roots_der":[]}
+        "profile_toml":"schema_version=1\n[agent]\nname='test'\nmodel='local/test'\n[prompt]\nsystem='test'\n[tools]\nenabled=[]\n",
+        "system_prompt":"test"
     })).unwrap();
     let turn = peer.client.start_turn(
         TurnRequest {
@@ -819,9 +817,9 @@ async fn submission_identity_and_inherited_selection_are_kept_in_the_wire_reques
         let root = tempfile::tempdir().unwrap();
         let agent = root.path().join(".lattice/agents/test");
         std::fs::create_dir_all(&agent).unwrap();
-        std::fs::write(agent.join("agent.toml"),"schema_version=1\n[agent]\nname='test'\nmodel='compat:test'\n[prompt]\nsystem='test'\n[tools]\nenabled=[]\n").unwrap();
+        std::fs::write(agent.join("agent.toml"),"schema_version=1\n[agent]\nname='test'\nmodel='local/test'\n[prompt]\nsystem='test'\n[tools]\nenabled=[]\n").unwrap();
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-        command.env_clear().env("PATH","/usr/bin:/bin").env("HOME",root.path()).env("LATTICE_AGENTS_DIR","/home/lattice-cli-test-unused-agents").env("OPENAI_COMPATIBLE_BASE_URL","http://127.0.0.1:1/v1").env("OPENAI_COMPATIBLE_MODEL","test").env("OPENAI_COMPATIBLE_API_KEY","test-key").env(MODE,mode).current_dir(root.path()).args(["--exact","commands::run::ipc_tests::submission_identity_and_inherited_selection_are_kept_in_the_wire_request","--nocapture"]);
+        command.env_clear().env("PATH","/usr/bin:/bin").env("HOME",root.path()).env("LATTICE_AGENTS_DIR","/home/lattice-cli-test-unused-agents").env(MODE,mode).current_dir(root.path()).args(["--exact","commands::run::ipc_tests::submission_identity_and_inherited_selection_are_kept_in_the_wire_request","--nocapture"]);
         let output = tokio::task::spawn_blocking(move || command.output().unwrap())
             .await
             .unwrap();

@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::types::{LocalError, LocalErrorKind, Result};
+use lattice_conversation::MAX_PROVIDER_ID_BYTES;
+use lattice_llm::MAX_MODEL_ID_BYTES;
 use lattice_profile::{
     LancetNetworkSection, LancetObservationSection, LancetProjectRootSection,
     LancetWorkspacePolicySection,
 };
-use std::{path::PathBuf, sync::Arc};
+use std::path::PathBuf;
 
 /// 仅供私有 IPC 的冻结输入；路径已解引用，秘密不进入 profile 或公开 DTO。
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -14,31 +16,14 @@ use std::{path::PathBuf, sync::Arc};
 pub struct FrozenConfiguration {
     profile_toml: String,
     system_prompt: String,
-    connection: lattice_llm::ConnectionMaterial,
 }
 
 impl FrozenConfiguration {
-    /// 供仅依赖 lattice-api 的提交端冻结当前有效连接环境；后台不得调用。
-    pub fn from_env(
-        loaded: crate::LoadedAgentProfile,
-        workspace: &crate::LocalWorkspaceRoot,
-    ) -> Result<Self> {
-        let target = lattice_llm::ModelTarget::new(&loaded.profile.agent.model);
-        let connection = lattice_llm::LlmConnection::from_env(&target).map_err(|error| {
-            LocalError::from(crate::config_rejection::client_configuration_error(
-                &error.to_string(),
-            ))
-        })?;
-        Self::capture(loaded, workspace, connection)
-    }
-
-    /// 提交端加载 profile 与连接后调用；连接仍由提交进程的环境冻结。
-    /// 文件读取与 TLS 根读取是阻塞操作，应在提交端 spawn_blocking 内调用。
+    /// 提交端冻结已加载的 profile、提示和有效策略。
     pub fn capture(
         mut loaded: crate::LoadedAgentProfile,
         workspace: &crate::LocalWorkspaceRoot,
-        connection: lattice_llm::LlmConnection,
-    ) -> Result<Self> {
+    ) -> crate::session::Result<Self> {
         let policy = crate::turn::cep::load_policy_config(
             &loaded.profile.lancet,
             workspace.canonical_path(),
@@ -47,7 +32,13 @@ impl FrozenConfiguration {
         // 将有效策略填回已有具体字段，避免另立一份会被后台文件覆盖的策略权威。
         lancet.policy = None;
         lancet.project_root = Some(LancetProjectRootSection {
-            root: Some(policy.project_root.to_str().ok_or_else(invalid)?.into()),
+            root: Some(
+                policy
+                    .project_root
+                    .to_str()
+                    .ok_or_else(invalid_capture)?
+                    .into(),
+            ),
         });
         lancet.network = Some(LancetNetworkSection {
             allow_public_https: Some(policy.network.allow_public_https),
@@ -67,13 +58,12 @@ impl FrozenConfiguration {
             max_list_entries: Some(policy.observation.max_list_entries),
             max_find_paths: Some(policy.observation.max_find_paths),
         });
-        let profile_toml = toml::to_string(&loaded.profile).map_err(|_| invalid())?;
+        let profile_toml = toml::to_string(&loaded.profile).map_err(|_| invalid_capture())?;
         let frozen = Self {
             profile_toml,
             system_prompt: loaded.system_prompt,
-            connection: connection.transport_material(),
         };
-        frozen.validate_profile()?;
+        frozen.validate_profile().map_err(|_| invalid_capture())?;
         Ok(frozen)
     }
 
@@ -87,7 +77,7 @@ impl FrozenConfiguration {
         if profile.schema_version != 1
             || profile.lancet.policy.is_some()
             || profile.agent.name.len() > 128
-            || profile.agent.model.len() > 4096
+            || profile.agent.model.len() > MAX_PROVIDER_ID_BYTES + 1 + MAX_MODEL_ID_BYTES
             || retry.max_retries > 10
             || retry.initial_delay_ms > 60_000
             || retry.max_delay_ms > 60_000
@@ -102,25 +92,19 @@ impl FrozenConfiguration {
         Ok(profile)
     }
 
-    pub(super) fn into_execution(
-        self,
-    ) -> Result<(crate::LoadedAgentProfile, Arc<lattice_llm::LlmConnection>)> {
+    pub(super) fn into_execution(self) -> Result<crate::LoadedAgentProfile> {
         let profile = self.validate_profile()?;
-        let connection =
-            lattice_llm::LlmConnection::from_transport(self.connection).map_err(|_| invalid())?;
-        if profile.agent.model != connection.model().alias {
-            return Err(invalid());
-        }
-        Ok((
-            crate::LoadedAgentProfile {
-                path: PathBuf::new(),
-                package_dir: PathBuf::new(),
-                profile,
-                system_prompt: self.system_prompt,
-            },
-            Arc::new(connection),
-        ))
+        Ok(crate::LoadedAgentProfile {
+            path: PathBuf::new(),
+            package_dir: PathBuf::new(),
+            profile,
+            system_prompt: self.system_prompt,
+        })
     }
+}
+
+fn invalid_capture() -> crate::ApiError {
+    crate::ApiError::BadRequest(invalid().message)
 }
 
 fn invalid() -> LocalError {
@@ -140,7 +124,7 @@ mod tests {
         let profile_path = project.path().join("agent.toml");
         let policy_path = project.path().join("policy.toml");
         let prompt = "中".repeat(100 * 1024);
-        std::fs::write(&profile_path, format!("schema_version=1\n[agent]\nname='test'\nmodel='compat:test'\n[prompt]\nsystem='{prompt}'\n[lancet.policy]\npath='policy.toml'\n")).unwrap();
+        std::fs::write(&profile_path, format!("schema_version=1\n[agent]\nname='test'\nmodel='local/test'\n[prompt]\nsystem='{prompt}'\n[lancet.policy]\npath='policy.toml'\n")).unwrap();
         std::fs::write(
             &policy_path,
             "[network]\nallow_localhost=true\nallowed_hosts=['localhost']\n",
@@ -148,23 +132,10 @@ mod tests {
         .unwrap();
         let loaded = lattice_profile::load_agent_profile(&profile_path).unwrap();
         let root = crate::LocalWorkspaceRoot::from_path(project.path()).unwrap();
-        let connection = lattice_llm::LlmConnection::new(
-            lattice_llm::ResolvedModel {
-                alias: "compat:test".into(),
-                provider: lattice_llm::ProviderKind::OpenAiCompatible,
-                provider_model: "test".into(),
-                base_url: "http://127.0.0.1:12345/v1".into(),
-                api_key_env: String::new(),
-                credential_status: lattice_llm::CredentialStatus::Present,
-            },
-            "test-private-key".into(),
-            vec![],
-        )
-        .unwrap();
-        let frozen = FrozenConfiguration::capture(loaded, &root, connection).unwrap();
+        let frozen = FrozenConfiguration::capture(loaded, &root).unwrap();
         let transport = serde_json::to_vec(&frozen).unwrap();
         std::fs::remove_file(policy_path).unwrap();
-        let (loaded, connection) = serde_json::from_slice::<FrozenConfiguration>(&transport)
+        let loaded = serde_json::from_slice::<FrozenConfiguration>(&transport)
             .unwrap()
             .into_execution()
             .unwrap();
@@ -174,7 +145,6 @@ mod tests {
         assert_eq!(loaded.system_prompt, prompt);
         assert!(policy.network.allow_localhost);
         assert_eq!(policy.network.allowed_hosts, vec!["localhost"]);
-        assert_eq!(connection.model().base_url, "http://127.0.0.1:12345/v1");
         assert!(loaded.profile.lancet.policy.is_none());
     }
 }

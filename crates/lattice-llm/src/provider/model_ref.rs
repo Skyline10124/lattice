@@ -3,7 +3,8 @@
 
 use std::{fmt, str::FromStr};
 
-pub(crate) const MAX_MODEL_ID_BYTES: usize = 4_096;
+/// 模型 id 的字节数上限。
+pub const MAX_MODEL_ID_BYTES: usize = 4_096;
 
 #[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
 #[error("{0}")]

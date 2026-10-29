@@ -18,7 +18,7 @@ async fn first_acceptance_reopen_preserves_identity_without_observers_or_configu
     let profile = project.path().join("agent.toml");
     std::fs::write(
         &profile,
-        "schema_version=1\n[agent]\nname='alpha'\nmodel='test'\n[prompt]\nsystem='frozen'\n",
+        "schema_version=1\n[agent]\nname='alpha'\nmodel='local/test'\n[prompt]\nsystem='frozen'\n",
     )
     .unwrap();
     let llm = Arc::new(
@@ -40,7 +40,10 @@ async fn first_acceptance_reopen_preserves_identity_without_observers_or_configu
         agent: Some("alpha".into()),
         loaded_profile: Some(lattice_profile::load_agent_profile(&profile).unwrap()),
         cancel_flag: None,
-        test_llm: Some((llm.clone(), lattice_llm::ProviderKind::OpenAiCompatible)),
+        test_llm: Some((
+            llm.clone(),
+            lattice_session::store::AttemptProtocol::ChatCompletions,
+        )),
         test_project_root: None,
     };
     let root = lattice_api::LocalWorkspaceRoot::from_path(project.path()).unwrap();
@@ -51,7 +54,6 @@ async fn first_acceptance_reopen_preserves_identity_without_observers_or_configu
         id,
         root.clone(),
         request.clone(),
-        None,
     );
     let TurnAcceptance::Accepted { turn } = execution.acceptance.await.unwrap().unwrap() else {
         panic!("not accepted")
@@ -64,7 +66,7 @@ async fn first_acceptance_reopen_preserves_identity_without_observers_or_configu
     drop(store);
     std::fs::write(
         &profile,
-        "schema_version=1\n[agent]\nname='alpha'\nmodel='changed'\n[prompt]\nsystem='changed'\n",
+        "schema_version=1\n[agent]\nname='alpha'\nmodel='local/changed'\n[prompt]\nsystem='changed'\n",
     )
     .unwrap();
     let store = Arc::new(SessionStore::open(&layout).unwrap());
@@ -73,7 +75,7 @@ async fn first_acceptance_reopen_preserves_identity_without_observers_or_configu
     retry.loaded_profile = None;
     retry.agent = None;
     retry.test_llm = None;
-    let execution = lattice_api::start_turn(api, layout, id, root, retry, None);
+    let execution = lattice_api::start_turn(api, layout, id, root, retry);
     assert!(matches!(
         execution.acceptance.await.unwrap(),
         Err(lattice_api::ApiError::Conflict(

@@ -1,6 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
+pub use crate::models::ModelCandidates;
 pub use crate::turn::{TextSegment, TurnRef};
 pub use lancet_protocol::{InvocationId, ModelAttemptKey, SessionId, TurnId};
 pub use lattice_conversation::{ResultPayload, StepContent, StoredToolResult, SuccessContent};
@@ -278,6 +279,9 @@ impl From<crate::ApiError> for LocalError {
         let (kind, message) = match &error {
             ApiError::NotFound(_) => (NotFound, "session or Turn not found"),
             ApiError::Configuration(reason) => return Self::new(BadRequest, &reason.to_string()),
+            ApiError::FrontendConfiguration(reason) => {
+                return Self::new(BadRequest, &reason.to_string());
+            }
             ApiError::BadRequest(_) => (BadRequest, "request or frozen configuration is invalid"),
             ApiError::Conflict(reason) => {
                 return Self {
@@ -456,6 +460,12 @@ pub(super) enum Request {
     },
     // 空结构让 serde 拒绝额外字段，避免静默忽略误发给查询的 key。
     AuthStatus {},
+    Models {
+        provider: Option<String>,
+    },
+    ConfigurationError {
+        message: String,
+    },
     ResolveSession {
         prefix: String,
     },
@@ -520,6 +530,8 @@ pub(super) enum Response {
     AuthUpdated,
     AuthRemoved { removed: bool },
     AuthStatus(AuthStatus),
+    Models(ModelCandidates),
+    ConfigurationError { message: String },
     Session(SessionRecord),
     Sessions(Page<SessionListRow, SessionId>),
     Log(SessionLog),

@@ -13,7 +13,6 @@ pub(crate) mod coordinator;
 pub(crate) mod crash_barrier;
 pub(crate) mod execute;
 mod live;
-mod llm;
 pub(crate) mod observer;
 mod saga;
 mod types;

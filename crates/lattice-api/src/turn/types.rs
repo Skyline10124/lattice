@@ -9,7 +9,7 @@ use lancet_protocol::SessionId;
 use lattice_profile::LoadedAgentProfile;
 use lattice_session::store::{TurnDetail, TurnSummary, UsageSummary};
 
-/// 执行核心的冻结输入；凭据通过独立连接参数传入。
+/// 执行核心的冻结输入；请求配置与凭据由后台网关读取。
 #[derive(Clone)]
 pub struct RunTurnRequest {
     pub input: String,
@@ -18,7 +18,10 @@ pub struct RunTurnRequest {
     pub loaded_profile: Option<LoadedAgentProfile>,
     pub cancel_flag: Option<Arc<AtomicBool>>,
     #[cfg(any(test, feature = "test-utils"))]
-    pub test_llm: Option<(Arc<dyn lattice_agent::LlmClient>, lattice_llm::ProviderKind)>,
+    pub test_llm: Option<(
+        Arc<dyn lattice_agent::LlmClient>,
+        lattice_session::store::AttemptProtocol,
+    )>,
     #[cfg(any(test, feature = "test-utils"))]
     pub test_project_root: Option<String>,
 }
@@ -26,7 +29,10 @@ pub struct RunTurnRequest {
 impl RunTurnRequest {
     pub(crate) fn injected_llm(
         &self,
-    ) -> Option<(Arc<dyn lattice_agent::LlmClient>, lattice_llm::ProviderKind)> {
+    ) -> Option<(
+        Arc<dyn lattice_agent::LlmClient>,
+        lattice_session::store::AttemptProtocol,
+    )> {
         #[cfg(any(test, feature = "test-utils"))]
         return self.test_llm.clone();
         #[cfg(not(any(test, feature = "test-utils")))]
@@ -61,7 +67,7 @@ pub enum TurnEvent {
     },
     ModelStarted {
         key: lancet_protocol::ModelAttemptKey,
-        provider: lattice_conversation::ProviderOrigin,
+        origin: lattice_session::store::AttemptOrigin,
         model: String,
     },
     TokenDelta {
