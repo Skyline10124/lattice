@@ -5,7 +5,7 @@ use super::types::{LocalError, LocalErrorKind, Result};
 use std::{
     fs::{self, File, OpenOptions},
     os::{
-        fd::{AsRawFd, FromRawFd},
+        fd::AsRawFd,
         unix::{
             fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
             net::UnixListener,
@@ -222,74 +222,33 @@ pub(super) fn check_peer(stream: &UnixStream) -> Result<()> {
     Ok(())
 }
 
-/// stop 回执只说明后台已排空；回执之后它还要关闭 listener、删除 socket、释放实例锁并退出。
-/// 停止方在发出请求前记下对端进程，回执之后等这两件事都发生，再交还给调用方。
+/// stop 回执只说明后台已排空；回执之后它还要关闭 listener、删除 socket 并释放实例锁。
+/// 停止方在回执之后等实例锁可取得，再交还给调用方；不等待后台进程退出。
 pub(super) struct Departure {
     layout: crate::StateLayout,
-    /// 对端与本进程相同（同进程后台）或已经退出时为 None，只看实例锁。
-    process: Option<std::os::fd::OwnedFd>,
 }
 
 impl Departure {
-    /// 必须在连接仍然存活时调用：对端尚未退出，取得的 pidfd 不会指向复用同一 PID 的其他进程。
-    pub(super) fn of(stream: &UnixStream, layout: crate::StateLayout) -> Result<Self> {
-        let pid = stream
-            .peer_cred()?
-            .pid()
-            .filter(|pid| u32::try_from(*pid).ok() != Some(std::process::id()));
-        let process = match pid {
-            None => None,
-            // SAFETY: pidfd_open 不接收指针；成功返回本函数独占的新 fd。
-            Some(pid) => match unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } {
-                fd if fd >= 0 => {
-                    // SAFETY: syscall 成功，fd 的唯一所有权移交给 OwnedFd。
-                    Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) })
-                }
-                _ => {
-                    let error = std::io::Error::last_os_error();
-                    if error.raw_os_error() != Some(libc::ESRCH) {
-                        return Err(error.into());
-                    }
-                    None
-                }
-            },
-        };
-        Ok(Self { layout, process })
+    pub(super) fn new(layout: crate::StateLayout) -> Self {
+        Self { layout }
     }
 
-    /// 在 `timeout` 内等旧后台释放实例锁并退出；超时报 Stopping，后台可能仍在退出。
+    /// 在 `timeout` 内等旧后台释放实例锁；超时报 Stopping，后台可能仍在收尾。
     pub(super) async fn wait(self, timeout: Duration) -> Result<()> {
         // 用真实时钟计上限：测试运行时的暂停时钟不应让等待提前判为超时。
         let deadline = std::time::Instant::now() + timeout;
         loop {
-            if self.exited()? && self.released().await? {
+            if self.released().await? {
                 return Ok(());
             }
             if std::time::Instant::now() >= deadline {
                 return Err(LocalError::new(
                     LocalErrorKind::Stopping,
-                    "the backend acknowledged stop but has not released STATE_ROOT and exited in time; check again with `lattice daemon status`",
+                    "the backend acknowledged stop but has not released STATE_ROOT in time; check again with `lattice daemon status`",
                 ));
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    }
-
-    fn exited(&self) -> Result<bool> {
-        let Some(process) = &self.process else {
-            return Ok(true);
-        };
-        let mut poll = libc::pollfd {
-            fd: process.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        // SAFETY: poll 指向一个有效 pollfd；零超时只查询进程是否已退出，僵尸也算退出。
-        let result = unsafe { libc::poll(&mut poll, 1, 0) };
-        if result < 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        Ok(result > 0)
     }
 
     /// 以非阻塞共享 flock 试探实例锁并立即放开，不创建锁文件。

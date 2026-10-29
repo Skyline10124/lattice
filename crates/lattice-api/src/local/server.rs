@@ -1073,7 +1073,7 @@ async fn serve_with_backend(
     #[cfg(test)]
     let lock_release = Mutex::new(lock(&backend.gates.lock_release).take());
     drop(backend);
-    // socket 先撤下，实例锁随 instance 最后释放；stop 方以锁释放和进程退出判定退场。
+    // socket 先撤下，实例锁随 instance 最后释放；stop 方以实例锁可取得判定退场。
     let instance = blocking(move || instance.cleanup().map(|()| instance)).await?;
     #[cfg(test)]
     tests::pause(&lock_release).await;

@@ -5,8 +5,8 @@ use super::{ipc, types::*};
 use std::time::Duration;
 use tokio::net::UnixStream;
 
-/// stop 回执后等待旧后台退场的上限；覆盖回执后收尾连接时的请求读取与写出超时。
-const STOP_EXIT_TIMEOUT: Duration = Duration::from_secs(30);
+/// stop 回执后等待旧后台释放实例锁的上限；覆盖回执后收尾连接时的请求读取与写出超时。
+const STOP_RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 每个操作一个连接；持续读取任务拥有分帧进度，UI 的 next 可取消。
 #[derive(Clone)]
@@ -46,12 +46,12 @@ impl LocalClient {
             _ => Err(protocol()),
         }
     }
-    /// 回执之后再等旧后台释放实例锁并退出才返回，调用方随即可在同一 STATE_ROOT 启动新后台。
-    /// 超过 `STOP_EXIT_TIMEOUT` 仍未退场时报 Stopping；后台可能仍在退出，需用 status 复核。
+    /// 回执之后再等 socket 撤下、`owner.lock` 可取得才返回，调用方随即可在同一 STATE_ROOT 启动新后台。
+    /// 不等待后台进程退出。超过 `STOP_RELEASE_TIMEOUT` 仍未放开时报 Stopping，需用 status 复核。
     pub async fn stop(&self) -> Result<DaemonStatus> {
-        self.stop_within(STOP_EXIT_TIMEOUT).await
+        self.stop_within(STOP_RELEASE_TIMEOUT).await
     }
-    /// 等待上限由调用方给出；正式入口固定用 `STOP_EXIT_TIMEOUT`，测试以短上限核验超时报错。
+    /// 等待上限由调用方给出；正式入口固定用 `STOP_RELEASE_TIMEOUT`，测试以短上限核验超时报错。
     pub(super) async fn stop_within(&self, timeout: Duration) -> Result<DaemonStatus> {
         let (status, departure) = self.request_stop().await?;
         departure.wait(timeout).await?;
@@ -60,14 +60,12 @@ impl LocalClient {
     /// 只取得 stop 回执：后台已排空，但 listener、socket 与实例锁可能尚未放开。
     pub(super) async fn request_stop(&self) -> Result<(DaemonStatus, ipc::Departure)> {
         let mut stream = ipc::connect(self.layout.clone()).await?;
-        // 发请求前记下对端进程；回执之后它可能随时退出。
-        let departure = ipc::Departure::of(&stream, self.layout.clone())?;
         ipc::write_request(&mut stream, &Request::Stop).await?;
         let response = ipc::ResponseReader::default().read(&mut stream).await?;
         // 先放开连接，后台排空连接时不必等本端。
         drop(stream);
         match response {
-            Response::Status(status) => Ok((status, departure)),
+            Response::Status(status) => Ok((status, ipc::Departure::new(self.layout.clone()))),
             Response::Error(error) => Err(error),
             _ => Err(protocol()),
         }

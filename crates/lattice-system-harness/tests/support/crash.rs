@@ -25,7 +25,7 @@ pub(crate) fn start(
             )
             .expect("stop previous scenario daemon");
         assert!(stopped.is_clean_exit(0), "{}", stopped.summary());
-        // stop 返回即须已退场；立即核验，不等待旧后台。
+        // stop 返回即须已放开实例（锁与 socket 立即核验）；旧后台组退出另做有界等待。
         world
             .daemon_departed()
             .expect("daemon stop returned before the previous backend departed");

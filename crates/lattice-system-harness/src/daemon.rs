@@ -14,8 +14,10 @@ use crate::driver::{CleanupError, RunningCommand, process_stat, processes_in_pgi
 /// 强制 SIGKILL 之后核验组已空的独立有界等待；只用于安全清理，不替代或放宽正常 stop 的预算。
 const FORCED_CLEANUP_GRACE: Duration = Duration::from_secs(2);
 /// 收尾 stop 未干净返回（not_running 或失败）时，等待已识别后台组自行退出的上限，不超过剩余正常预算。
-/// 干净返回的 stop 已保证后台退场，那条路径立即核验、不等待。
+/// 干净返回的 stop 走 `departed`：实例锁与 socket 立即核验，进程组只在 `DEPARTURE_EXIT_WINDOW` 内有界等待。
 const STOP_DRAIN_WINDOW: Duration = Duration::from_secs(2);
+/// stop 干净返回、实例锁已放开后，等待自有后台组退空的上限；超时即判失败，不再追加排空窗口。
+const DEPARTURE_EXIT_WINDOW: Duration = Duration::from_secs(5);
 
 /// 前台进程组不包含 setsid 后的后台；场景必须另持清理归属。
 pub(crate) struct ScenarioDaemon {
@@ -211,7 +213,9 @@ impl ScenarioDaemon {
         }
     }
 
-    /// `daemon stop` 干净返回后立即核验、不轮询：自有后台组已无存活成员，`owner.lock` 已可取得。
+    /// `daemon stop` 干净返回后的退场核验。stop 只承诺放开实例：`owner.lock` 可取得、`api.sock` 已撤下，
+    /// 这两项立即核验、不轮询。进程退出不在 stop 的承诺内，锁放开后进程仍可短暂存在，
+    /// 因此按 harness 自己确认过的 PGID 在 `DEPARTURE_EXIT_WINDOW` 内有界等待组退空。
     pub(crate) fn departed(&self) -> Result<(), Vec<String>> {
         self.departed_with_inspection(&mut processes_in_pgid)
     }
@@ -221,28 +225,54 @@ impl ScenarioDaemon {
         inspect: &mut impl FnMut(u32) -> Result<Vec<u32>, CleanupError>,
     ) -> Result<(), Vec<String>> {
         let mut errors = Vec::new();
-        // 扫描后 confirmed 只剩仍有成员的组，包括本次新识别的首领。
-        match self.owners_with_inspection(inspect) {
-            Ok(_) => {
-                let live: Vec<u32> = self
-                    .confirmed
-                    .lock()
-                    .expect("daemon confirmed lock")
-                    .keys()
-                    .copied()
-                    .collect();
-                if !live.is_empty() {
-                    errors.push(format!(
-                        "daemon stop returned before the backend group exited: {live:?}"
-                    ));
-                }
-            }
-            Err(_) => errors.push("daemon ownership inspection failed".into()),
-        }
         match owner_lock_held(&self.state_root) {
             Ok(false) => {}
             Ok(true) => errors.push("daemon stop returned while owner.lock is still held".into()),
             Err(error) => errors.push(format!("owner.lock inspection failed: {error}")),
+        }
+        match std::fs::symlink_metadata(self.state_root.join("lattice/local/api.sock")) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => errors.push("daemon stop returned while api.sock still exists".into()),
+            Err(error) => errors.push(format!("api.sock inspection failed: {error}")),
+        }
+        // 扫描后 confirmed 只剩仍有成员的组，包括本次新识别的首领。
+        if self.owners_with_inspection(inspect).is_err() {
+            errors.push("daemon ownership inspection failed".into());
+            return finish(errors);
+        }
+        let groups: Vec<u32> = self
+            .confirmed
+            .lock()
+            .expect("daemon confirmed lock")
+            .keys()
+            .copied()
+            .collect();
+        let deadline = Instant::now() + DEPARTURE_EXIT_WINDOW;
+        loop {
+            let mut live = Vec::new();
+            for &pgid in &groups {
+                match inspect(pgid) {
+                    Ok(members) if members.is_empty() => {}
+                    Ok(_) => live.push(pgid),
+                    Err(error) => {
+                        errors.push(format!(
+                            "daemon group inspection failed: pgid={pgid} {}",
+                            error.message
+                        ));
+                        return finish(errors);
+                    }
+                }
+            }
+            if live.is_empty() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                errors.push(format!(
+                    "backend process group did not exit within {DEPARTURE_EXIT_WINDOW:?} after daemon stop returned: {live:?}"
+                ));
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
         finish(errors)
     }
@@ -328,7 +358,7 @@ impl ScenarioDaemon {
                 errors.push("scenario budget exhausted during normal daemon stop".into());
             }
             if returned {
-                // stop 干净返回即承诺旧后台已退场：立即核验，不再等待，早返回的回归不会被收尾掩盖。
+                // stop 干净返回即承诺实例已放开：锁与 socket 立即核验，组退出只做有界等待，早返回的回归不会被收尾掩盖。
                 match self.departed_with_inspection(inspect) {
                     Ok(()) => return finish(errors),
                     Err(found) => errors.extend(found),
