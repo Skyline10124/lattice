@@ -3,9 +3,9 @@
 
 //! 定时与手动刷新共享一次在途操作；停止信号独立于 Turn 排空。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use futures::{FutureExt, future::BoxFuture};
 use lattice_llm::MetadataRefreshControl;
@@ -14,6 +14,37 @@ use tokio::sync::watch;
 use super::{LocalError, LocalErrorKind, Result};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+const INITIAL_BACKOFF: Duration = Duration::from_secs(60);
+const MAX_BACKOFF: Duration = Duration::from_secs(60 * 60);
+
+enum AutoRefresh {
+    Ran,
+    Fresh,
+    Idle,
+    Failed,
+    Stopped,
+}
+
+fn backoff(failures: u32) -> Duration {
+    let shift = failures.saturating_sub(1).min(16);
+    INITIAL_BACKOFF
+        .saturating_mul(1_u32 << shift)
+        .min(MAX_BACKOFF)
+}
+
+/// 缓存文件仍在刷新间隔内时返回剩余时间。缺失、读不出或已到期都视为需要刷新。
+fn cache_freshness(directory: &Path) -> Option<Duration> {
+    let modified = std::fs::metadata(directory.join("cache/models.json"))
+        .ok()?
+        .modified()
+        .ok()?;
+    let age = SystemTime::now()
+        .duration_since(modified)
+        .unwrap_or(Duration::ZERO);
+    REFRESH_INTERVAL
+        .checked_sub(age)
+        .filter(|remaining| !remaining.is_zero())
+}
 type Work = dyn Fn(Arc<MetadataRefreshControl>) -> BoxFuture<'static, Result<()>> + Send + Sync;
 type Completion = watch::Receiver<Option<Result<()>>>;
 
@@ -96,7 +127,7 @@ impl MetadataRefresh {
         Self::with_work(None, |_| Box::pin(async { Ok(()) }))
     }
 
-    async fn automatic_refresh(self: &Arc<Self>) {
+    async fn automatic_refresh(self: &Arc<Self>) -> AutoRefresh {
         let enabled = match self.directory.clone() {
             Some(directory) => tokio::task::spawn_blocking(move || {
                 let directory = directory
@@ -120,29 +151,65 @@ impl MetadataRefresh {
         };
         match enabled {
             Ok(true) => {
-                let _ = self.refresh().await;
+                if self.cache_freshness().await.is_some() {
+                    return AutoRefresh::Fresh;
+                }
+                match self.refresh().await {
+                    Ok(()) => AutoRefresh::Ran,
+                    Err(error) if error.kind == LocalErrorKind::Stopping => AutoRefresh::Stopped,
+                    Err(_) => AutoRefresh::Failed,
+                }
             }
-            Ok(false) => tracing::info!("automatic model metadata refresh disabled"),
-            Err(error) => tracing::warn!(%error, "automatic model metadata refresh skipped"),
+            Ok(false) => {
+                tracing::info!("automatic model metadata refresh disabled");
+                AutoRefresh::Idle
+            }
+            Err(error) => {
+                tracing::warn!(%error, "automatic model metadata refresh skipped");
+                AutoRefresh::Idle
+            }
         }
+    }
+
+    async fn cache_freshness(&self) -> Option<Duration> {
+        let directory = self.directory.clone()?;
+        tokio::task::spawn_blocking(move || cache_freshness(directory.ok()?.as_path()))
+            .await
+            .ok()
+            .flatten()
     }
 
     pub(super) fn start(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let refresh = self.clone();
         tokio::spawn(async move {
             let mut stopped = refresh.stopped.subscribe();
-            let mut timer = tokio::time::interval(REFRESH_INTERVAL);
-            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut failures = 0_u32;
+            let mut delay = Duration::ZERO;
             loop {
-                tokio::select! {
-                    biased;
-                    _ = stopped.wait_for(|stopped| *stopped) => break,
-                    _ = timer.tick() => {},
+                if failures > 0 {
+                    if refresh.cache_freshness().await.is_some() {
+                        failures = 0;
+                        continue;
+                    }
+                    delay = backoff(failures);
+                } else if let Some(remaining) = refresh.cache_freshness().await {
+                    delay = remaining;
                 }
                 tokio::select! {
                     biased;
                     _ = stopped.wait_for(|stopped| *stopped) => break,
-                    _ = refresh.automatic_refresh() => {},
+                    _ = tokio::time::sleep(delay) => {},
+                }
+                if *stopped.borrow() {
+                    break;
+                }
+                match refresh.automatic_refresh().await {
+                    AutoRefresh::Stopped => break,
+                    AutoRefresh::Failed => failures = failures.saturating_add(1),
+                    AutoRefresh::Ran | AutoRefresh::Fresh | AutoRefresh::Idle => {
+                        failures = 0;
+                        delay = REFRESH_INTERVAL;
+                    }
                 }
             }
         })
