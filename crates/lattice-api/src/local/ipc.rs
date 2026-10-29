@@ -5,7 +5,7 @@ use super::types::{LocalError, LocalErrorKind, Result};
 use std::{
     fs::{self, File, OpenOptions},
     os::{
-        fd::AsRawFd,
+        fd::{AsRawFd, FromRawFd},
         unix::{
             fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
             net::UnixListener,
@@ -162,7 +162,8 @@ impl Instance {
         ))
     }
 
-    pub(super) fn cleanup(self) -> Result<()> {
+    /// 只删除本实例发布的 socket；实例锁随 Instance 释放，调用方决定释放的时机。
+    pub(super) fn cleanup(&self) -> Result<()> {
         let meta = fs::symlink_metadata(&self.socket)?;
         if meta.uid() != uid() {
             return Err(permission());
@@ -219,6 +220,106 @@ pub(super) fn check_peer(stream: &UnixStream) -> Result<()> {
         return Err(permission());
     }
     Ok(())
+}
+
+/// stop 回执只说明后台已排空；回执之后它还要关闭 listener、删除 socket、释放实例锁并退出。
+/// 停止方在发出请求前记下对端进程，回执之后等这两件事都发生，再交还给调用方。
+pub(super) struct Departure {
+    layout: crate::StateLayout,
+    /// 对端与本进程相同（同进程后台）或已经退出时为 None，只看实例锁。
+    process: Option<std::os::fd::OwnedFd>,
+}
+
+impl Departure {
+    /// 必须在连接仍然存活时调用：对端尚未退出，取得的 pidfd 不会指向复用同一 PID 的其他进程。
+    pub(super) fn of(stream: &UnixStream, layout: crate::StateLayout) -> Result<Self> {
+        let pid = stream
+            .peer_cred()?
+            .pid()
+            .filter(|pid| u32::try_from(*pid).ok() != Some(std::process::id()));
+        let process = match pid {
+            None => None,
+            // SAFETY: pidfd_open 不接收指针；成功返回本函数独占的新 fd。
+            Some(pid) => match unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } {
+                fd if fd >= 0 => {
+                    // SAFETY: syscall 成功，fd 的唯一所有权移交给 OwnedFd。
+                    Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) })
+                }
+                _ => {
+                    let error = std::io::Error::last_os_error();
+                    if error.raw_os_error() != Some(libc::ESRCH) {
+                        return Err(error.into());
+                    }
+                    None
+                }
+            },
+        };
+        Ok(Self { layout, process })
+    }
+
+    /// 在 `timeout` 内等旧后台释放实例锁并退出；超时报 Stopping，后台可能仍在退出。
+    pub(super) async fn wait(self, timeout: Duration) -> Result<()> {
+        // 用真实时钟计上限：测试运行时的暂停时钟不应让等待提前判为超时。
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if self.exited()? && self.released().await? {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(LocalError::new(
+                    LocalErrorKind::Stopping,
+                    "the backend acknowledged stop but has not released STATE_ROOT and exited in time; check again with `lattice daemon status`",
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    fn exited(&self) -> Result<bool> {
+        let Some(process) = &self.process else {
+            return Ok(true);
+        };
+        let mut poll = libc::pollfd {
+            fd: process.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: poll 指向一个有效 pollfd；零超时只查询进程是否已退出，僵尸也算退出。
+        let result = unsafe { libc::poll(&mut poll, 1, 0) };
+        if result < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(result > 0)
+    }
+
+    /// 以非阻塞共享 flock 试探实例锁并立即放开，不创建锁文件。
+    async fn released(&self) -> Result<bool> {
+        let layout = self.layout.clone();
+        tokio::task::spawn_blocking(move || {
+            let lock = endpoint(&layout)?.with_file_name("owner.lock");
+            let file = match OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(lock)
+            {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+                Err(error) => return Err(error.into()),
+            };
+            // SAFETY: flock 只作用于本函数打开的 fd；关闭 fd 即释放试探取得的锁。
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } == 0 {
+                return Ok(true);
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                Ok(false)
+            } else {
+                Err(error.into())
+            }
+        })
+        .await
+        .map_err(|_| LocalError::new(LocalErrorKind::Internal, "endpoint worker failed"))?
+    }
 }
 
 pub(super) async fn connect(layout: crate::StateLayout) -> Result<UnixStream> {

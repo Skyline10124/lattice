@@ -13,7 +13,8 @@ use crate::driver::{CleanupError, RunningCommand, process_stat, processes_in_pgi
 
 /// 强制 SIGKILL 之后核验组已空的独立有界等待；只用于安全清理，不替代或放宽正常 stop 的预算。
 const FORCED_CLEANUP_GRACE: Duration = Duration::from_secs(2);
-/// 正常 stop 回执早于 serve 退出；等待已识别后台组自行退出的上限，不超过剩余正常预算。
+/// 收尾 stop 未干净返回（not_running 或失败）时，等待已识别后台组自行退出的上限，不超过剩余正常预算。
+/// 干净返回的 stop 已保证后台退场，那条路径立即核验、不等待。
 const STOP_DRAIN_WINDOW: Duration = Duration::from_secs(2);
 
 /// 前台进程组不包含 setsid 后的后台；场景必须另持清理归属。
@@ -210,6 +211,42 @@ impl ScenarioDaemon {
         }
     }
 
+    /// `daemon stop` 干净返回后立即核验、不轮询：自有后台组已无存活成员，`owner.lock` 已可取得。
+    pub(crate) fn departed(&self) -> Result<(), Vec<String>> {
+        self.departed_with_inspection(&mut processes_in_pgid)
+    }
+
+    fn departed_with_inspection(
+        &self,
+        inspect: &mut impl FnMut(u32) -> Result<Vec<u32>, CleanupError>,
+    ) -> Result<(), Vec<String>> {
+        let mut errors = Vec::new();
+        // 扫描后 confirmed 只剩仍有成员的组，包括本次新识别的首领。
+        match self.owners_with_inspection(inspect) {
+            Ok(_) => {
+                let live: Vec<u32> = self
+                    .confirmed
+                    .lock()
+                    .expect("daemon confirmed lock")
+                    .keys()
+                    .copied()
+                    .collect();
+                if !live.is_empty() {
+                    errors.push(format!(
+                        "daemon stop returned before the backend group exited: {live:?}"
+                    ));
+                }
+            }
+            Err(_) => errors.push("daemon ownership inspection failed".into()),
+        }
+        match owner_lock_held(&self.state_root) {
+            Ok(false) => {}
+            Ok(true) => errors.push("daemon stop returned while owner.lock is still held".into()),
+            Err(error) => errors.push(format!("owner.lock inspection failed: {error}")),
+        }
+        finish(errors)
+    }
+
     /// 正常收尾用场景剩余预算发出 `daemon stop` 并等待退出；预算耗尽时记录失败。
     /// 之后只对归属复核通过且仍有成员的自有组强制清理，并在独立有界宽限内核验。
     pub(crate) fn cleanup(&self, normal_deadline: Instant) -> Result<(), Vec<String>> {
@@ -269,22 +306,40 @@ impl ScenarioDaemon {
             command.env("HOME", self.state_root.join("cleanup-home"));
             let stop = RunningCommand::spawn_until(command, normal_deadline)
                 .and_then(|running| running.wait(None).map_err(std::io::Error::other));
-            match stop {
-                Ok(outcome) if outcome.is_clean_exit(0) => {}
-                // 场景自己的 stop 已排空时，后台可能在归属扫描后、连接前退出；
-                // not_running 只说明连接已无人接收，组是否排空仍由下方排空检查裁决。
-                Ok(outcome) if already_stopped(&outcome) => {}
-                Ok(outcome) => errors.push(format!("daemon stop: {}", outcome.summary())),
+            let returned = match stop {
+                Ok(outcome) if outcome.is_clean_exit(0) => true,
+                // 后台可能在归属扫描后、连接前已由别处停止；not_running 只说明连接已无人接收，
+                // 组是否排空仍由下方排空检查裁决。
+                Ok(outcome) if already_stopped(&outcome) => false,
+                Ok(outcome) => {
+                    errors.push(format!("daemon stop: {}", outcome.summary()));
+                    false
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
                     errors.push("scenario budget exhausted before normal daemon stop".into());
+                    false
                 }
-                Err(_) => errors.push("daemon stop command failed".into()),
-            }
+                Err(_) => {
+                    errors.push("daemon stop command failed".into());
+                    false
+                }
+            };
             if Instant::now() >= normal_deadline {
                 errors.push("scenario budget exhausted during normal daemon stop".into());
             }
+            if returned {
+                // stop 干净返回即承诺旧后台已退场：立即核验，不再等待，早返回的回归不会被收尾掩盖。
+                match self.departed_with_inspection(inspect) {
+                    Ok(()) => return finish(errors),
+                    Err(found) => errors.extend(found),
+                }
+            }
             // 只等已识别的后台组，不把前台 EOF 当作排空；等待不超过剩余正常预算。
-            let deadline = (Instant::now() + STOP_DRAIN_WINDOW).min(normal_deadline);
+            let deadline = if returned {
+                Instant::now()
+            } else {
+                (Instant::now() + STOP_DRAIN_WINDOW).min(normal_deadline)
+            };
             while Instant::now() < deadline {
                 let scanned: Result<Vec<_>, _> = groups.iter().map(|pgid| inspect(*pgid)).collect();
                 let remaining = match scanned {
@@ -374,6 +429,30 @@ impl ScenarioDaemon {
             }
         }
         Ok(None)
+    }
+}
+
+/// 以非阻塞 flock 试探存储布局公开的实例锁并立即放开；锁文件不存在视为已释放。
+fn owner_lock_held(state_root: &Path) -> std::io::Result<bool> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(state_root.join("lattice/local/owner.lock"))
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    // SAFETY: flock 只作用于本函数打开的 fd；关闭 fd 即释放试探取得的锁。
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Ok(false);
+    }
+    let error = std::io::Error::last_os_error();
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        Ok(true)
+    } else {
+        Err(error)
     }
 }
 

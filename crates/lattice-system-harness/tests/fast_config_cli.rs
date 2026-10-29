@@ -63,6 +63,7 @@ fn backend_startup_observably_skips_disabled_automatic_metadata_refresh() {
         let stop = cli(&world, &spec, &["daemon", "stop"]);
         evidence.record_command("stop disabled refresh backend", &stop);
         assert!(stop.is_clean_exit(0));
+        world.daemon_departed().unwrap();
         let stopped = daemon
             .wait(Some(budget.cap_timeout(spec.step_timeout())))
             .unwrap();

@@ -14,6 +14,10 @@ pub(super) struct Gates {
     pub capture_checked: Mutex<Option<Gate>>,
     pub watch_wait: Mutex<Option<Gate>>,
     pub watch_done: Mutex<Option<Gate>>,
+    /// 回执与排空之后、关闭 listener 之前。
+    pub listener_close: Mutex<Option<Gate>>,
+    /// socket 已撤下、实例锁尚未释放。
+    pub lock_release: Mutex<Option<Gate>>,
 }
 pub(super) fn arm(slot: &Mutex<Option<Gate>>) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
     let (entered, entry) = oneshot::channel();
@@ -345,7 +349,12 @@ async fn legacy_store_rejection_before_execution_does_not_leave_unconfirmed_clea
     );
     idle(&backend).await;
     assert_eq!(
-        client.stop().await.unwrap().unconfirmed_operations,
+        client
+            .request_stop()
+            .await
+            .unwrap()
+            .0
+            .unconfirmed_operations,
         0,
         "接受前拒绝没有需要确认的写入或收尾"
     );
@@ -583,7 +592,7 @@ async fn owner_retirement_updates_watch_and_stop_drains_the_same_cancellation_ca
     ));
     let stop = {
         let client = client.clone();
-        tokio::spawn(async move { client.stop().await })
+        tokio::spawn(async move { client.request_stop().await.map(|(status, _)| status) })
     };
     let mut changed = backend.changed.subscribe();
     bounded(async {
@@ -1803,7 +1812,7 @@ async fn preparation_disconnect_and_forwarding_panic_keep_independent_cancelled_
         }
         let stop = {
             let client = client.clone();
-            tokio::spawn(async move { client.stop().await })
+            tokio::spawn(async move { client.request_stop().await.map(|(status, _)| status) })
         };
         bounded(async {
             while !backend.status().stopping {
@@ -1921,4 +1930,82 @@ async fn invalid_request_is_rejected_before_claiming_a_new_session() {
     }
     assert!(!lock(&backend.admission).sessions.contains_key(&sid));
     finish(&backend, task).await;
+}
+
+type GateSlot = fn(&Gates) -> &Mutex<Option<Gate>>;
+type GatedServe = (
+    tempfile::TempDir,
+    crate::StateLayout,
+    super::super::LocalClient,
+    oneshot::Receiver<()>,
+    oneshot::Sender<()>,
+    tokio::task::JoinHandle<Result<()>>,
+);
+/// 以正式 serve 收尾路径起后台，构造 Backend 时在指定退场窗口装 gate。
+async fn serve_gated(slot: GateSlot) -> GatedServe {
+    let dir = tempfile::tempdir().unwrap();
+    let layout = crate::StateLayout::in_state_root(dir.path());
+    let (armed, gate) = oneshot::channel();
+    let (backend_layout, home) = (layout.clone(), dir.path().to_path_buf());
+    let serving = tokio::spawn(serve_with_backend(layout.clone(), move || {
+        let mut backend = Backend::new(backend_layout, Some(home));
+        Arc::get_mut(&mut backend)
+            .expect("unshared test backend")
+            .metadata = super::super::metadata::MetadataRefresh::without_network();
+        let _ = armed.send(arm(slot(&backend.gates)));
+        backend
+    }));
+    let (entry, release) = bounded(gate).await.unwrap();
+    let client = super::super::LocalClient::new(layout.clone());
+    (dir, layout, client, entry, release, serving)
+}
+/// 另开文件描述做非阻塞 flock；同进程内的后台锁同样会冲突。
+fn owner_lock_free(layout: &crate::StateLayout) -> bool {
+    use std::os::fd::AsRawFd;
+    let file = std::fs::File::open(layout.lattice_root().join("local/owner.lock")).unwrap();
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+}
+/// stop 回执之后后台停在退场窗口：stop 不能先返回，放行后返回时实例锁已释放、socket 已撤下。
+async fn stop_waits_for_departure(slot: GateSlot) {
+    let (_dir, layout, client, entry, release, serving) = serve_gated(slot).await;
+    let stop = {
+        let client = client.clone();
+        tokio::spawn(async move { client.stop().await })
+    };
+    bounded(entry).await.unwrap();
+    assert!(!owner_lock_free(&layout));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!stop.is_finished(), "实例锁仍被持有时 stop 已返回");
+    release.send(()).unwrap();
+    let status = bounded(stop).await.unwrap().unwrap();
+    assert_eq!(status.owners, 0);
+    assert!(owner_lock_free(&layout), "stop 返回时实例锁尚未释放");
+    assert!(!layout.lattice_root().join("local/api.sock").exists());
+    bounded(serving).await.unwrap().unwrap();
+}
+#[tokio::test]
+async fn stop_waits_while_listener_close_is_delayed() {
+    stop_waits_for_departure(|gates| &gates.listener_close).await;
+}
+#[tokio::test]
+async fn stop_waits_while_lock_release_is_delayed() {
+    stop_waits_for_departure(|gates| &gates.lock_release).await;
+}
+#[tokio::test]
+async fn stop_reports_timeout_when_lock_is_never_released() {
+    let (_dir, layout, client, entry, release, serving) =
+        serve_gated(|gates| &gates.lock_release).await;
+    let started = std::time::Instant::now();
+    let error = bounded(client.stop_within(Duration::from_millis(200)))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, LocalErrorKind::Stopping);
+    assert!(error.message.contains("lattice daemon status"));
+    assert!(started.elapsed() < Duration::from_secs(5));
+    // 超时报错时后台仍停在锁释放之前，说明报错不是因为锁恰好放开。
+    bounded(entry).await.unwrap();
+    assert!(!owner_lock_free(&layout));
+    release.send(()).unwrap();
+    bounded(serving).await.unwrap().unwrap();
+    assert!(owner_lock_free(&layout));
 }

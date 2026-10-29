@@ -1338,6 +1338,7 @@ fn cli_recovers_accepted_receipt_after_backend_crash() {
             &["--json", "daemon", "stop"],
             0,
         );
+        world.daemon_departed().unwrap();
         let stopped = restarted.wait(None).unwrap();
         evidence.record_command("restarted backend drains", &stopped);
         assert!(stopped.is_clean_exit(0), "{}", stopped.summary());

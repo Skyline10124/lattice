@@ -203,7 +203,7 @@ sequenceDiagram
 | 读取更早的对话：`history` | SessionId、节点 `before` 与轮数（1 到 100，超出返回 BadRequest） | 沿 `before` 的父链往回取完整的若干轮，条目与视图中的相同，见[观察与重连](#观察与重连) |
 | 退回：`rewind` | SessionId 与目标 NodeId | 把当前位置移到树上任意已有节点；之后的提交从那里分叉，原分支保留在树上。不修改工作区文件 |
 | 请求取消：`LocalTurn::cancel`，或独立命令的 `LocalClient::cancel` | TurnId | 句柄同步登记意图并管理在途回执；独立命令返回后台接管结果，持久结局另行查询 |
-| 停止后台：`stop` | 当前本地后台 | 关闭新准入并等待已接管操作收尾，返回停止时已知状态 |
+| 停止后台：`stop` | 当前本地后台 | 关闭新准入并等待已接管操作收尾，再等后台释放实例锁并退出，返回停止时已知状态；回执后限时内未退场报 Stopping |
 
 CLI 的 `lattice session` 子命令为 `send`、`rewind`、`list`、`log`、`turn`、`usage` 和 `cancel`，顶层 `lattice run` 是 `session send` 的别名；凭据与模型的命令 `lattice auth`、`lattice models` 见[模型接入合同](llm.md#凭据命令)。`session send` 不带 `--session` 时创建新 Session：CLI 生成 SessionId，项目绑定从当前目录解析，`--agent` 必填；带 `--session` 时向已有 Session 提交，`--agent` 可选。`--model <provider>/<model>` 与 `--effort <档位>` 选择这一轮的模型与推理档位，随提交写回 profile 副本。`session usage <SESSION_ID>` 逐轮列出用量与费用估算并给出合计，支持 `--json`。CLI 在发出请求前生成身份并先输出，所以进程无论在哪一步中断，都能按第一条记录中的 TurnId 查询结果；中断在发出请求之前时，查询返回 NotFound。`session turn` 查看单个 Turn 的详情，请求仍在准入时报告在途，接受结果不明时用它找回；`--follow` 遇到请求仍在准入时等准入结束，不在途中退出，已接受则继续观察这一轮直至结束，没有这个请求则报告 NotFound，退出 2。`session cancel <SESSION_ID>` 取消该会话当前正在执行的一轮：CLI 用 `head` 查出会话头所示那一轮的 TurnId，再按 TurnId 取消，并输出该 TurnId；没有正在执行的一轮时报告无可取消。已接管、未接管或没有可取消的一轮时退出 0；取消回复丢失、结果不明时，输出带原 TurnId 的取消记录，状态为 `unknown`，退出 1；会话不存在退出 2。TUI 不带 Session 启动时，在首次提交时生成 SessionId 并新建 Session。
 

@@ -380,6 +380,7 @@ fn same_protocol_provider_switch_preserves_tool_ids_and_restores_source_reasonin
         let stop = support::cli(&world, &spec, &["daemon", "stop"]);
         evidence.record_command("stop before reopening", &stop);
         assert!(stop.is_clean_exit(0));
+        world.daemon_departed().unwrap();
         let third = support::cli(
             &world,
             &spec,
