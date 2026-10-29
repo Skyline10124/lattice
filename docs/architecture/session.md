@@ -371,7 +371,7 @@ Tool 参数通过协议 canonical JSON 生成规范对象和摘要。有效调�
 空串、数组、标量、畸形 JSON 不能作为 Tool 参数对象。拒绝尝试不产生可执行调用或 InvocationId，也不把该尝试的助手正文作为成功消息；停止尝试的部分内容不保存，不成为回复，也不发给 provider。超限批次不截断为可执行批次。这些限制让每个调用槽位始终对应一条完整有效回复。
 
 ### 回放与跨 provider 投影
-每次尝试记录来源：协议、provider `id` 与 `base_url`。适配层按[回放来源](llm.md#回放来源)的两级规则生成投影：三者都相同时保留 reasoning 和回放状态，否则去除，所以改了 `base_url` 之后不再回放此前的签名；provider call ID 在协议相同时保留，协议不同时去除，目标协议无法在缺少 call ID 时编码工具结果的，返回投影错误。切回原来源时使用树中保存的原消息。会话库写入与读取时校验尝试来源：`base_url` 不能为空、不超过 8,192 字节、不含控制字符（0x00–0x1F 与 0x7F），provider `id` 须与这一轮的 provider 相同，否则按无效数据拒绝，见 [store/validate.rs 的 attempt_origin](../../crates/lattice-session/src/store/validate.rs)。不透明回放材料逐片段原样保留，单片段上限 64 KiB；即使片段正文为空，也保留其回放状态。连续两个 UserMessage 由投影按适配器要求合并或原样传递。
+每次尝试记录来源：协议、provider `id` 与 `base_url`。适配层按[回放来源](llm.md#回放来源)的两级规则生成投影：三者都相同时保留 reasoning 和回放状态，否则去除，所以改了 `base_url` 之后不再回放此前的签名；provider call ID 在协议相同时保留，协议不同时去除，目标协议无法在缺少 call ID 时编码工具结果的，返回投影错误。切回原来源时使用树中保存的原消息。打开会话库时与写入时完整校验尝试来源：`base_url` 不能为空、不超过 8,192 字节、不含控制字符（0x00–0x1F 与 0x7F），provider `id` 须与这一轮的 provider 相同，否则按无效数据拒绝；普通读取只检查 provider `id`。见 [store/validate.rs 的 attempt_origin](../../crates/lattice-session/src/store/validate.rs)。不透明回放材料逐片段原样保留，单片段上限 64 KiB；即使片段正文为空，也保留其回放状态。连续两个 UserMessage 由投影按适配器要求合并或原样传递。
 
 类型和编码由 [`lattice-conversation`](../../crates/lattice-conversation/src/lib.rs) 维护。provider Tool Call ID 仅是 provider 协议材料，不参与会话登记或执行身份分配；跨 provider 投影不伪造目标 provider 身份材料。发给模型的对话是当前位置从根到该节点的路径，provider 投影是纯函数，不在请求时扫描或补齐缺失结果。
 

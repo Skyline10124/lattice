@@ -73,7 +73,7 @@ impl ModelExecution {
                         )
                     }
                     Err(error) => {
-                        // #331：解析失败尚无本次协议，暂按最近一次成功解析的协议记失败尝试，不发送请求。
+                        // #331：解析失败尚无本次来源，provider 取自模型引用，协议与 base_url 暂按最近一次成功解析的结果记失败尝试，不发送请求。
                         let origin = AttemptOrigin {
                             provider_id: target.provider.clone(),
                             protocol: last_origin.protocol,
