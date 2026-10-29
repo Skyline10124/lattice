@@ -1171,6 +1171,43 @@ async fn invalid_tls_root_near_the_count_limit_is_skipped_without_using_a_slot()
     server.next().await;
 }
 
+/// 没有可用根证书时，无法解析的端点不能被当成 http 放行（失败即关闭）。provider 载入已用
+/// `validate_base_url_static` 保证地址能解析，经 `providers.toml` 构造不出这种地址，所以直接检查
+/// `resolve` 在建立客户端之前调用的守卫：它返回错误时 `resolve` 不会构造客户端，也不会发出请求。
+#[test]
+fn without_usable_tls_roots_an_unparseable_endpoint_is_a_configuration_error() {
+    for base_url in [
+        "",
+        "not a url",
+        "https://[::1",
+        "http://exa mple.invalid",
+        "//localhost/v1",
+    ] {
+        let error = super::require_endpoint_without_tls_roots(base_url).expect_err(&format!(
+            "unparseable endpoint {base_url:?} must be rejected"
+        ));
+        assert!(
+            matches!(error, crate::LlmError::Config { .. }),
+            "{base_url:?} is a configuration error: {error}"
+        );
+        assert!(!error.retryable(), "{base_url:?} is not retryable");
+        assert!(
+            error.to_string().contains("invalid provider endpoint URL"),
+            "{base_url:?} says the endpoint URL is invalid: {error}"
+        );
+    }
+    let other_scheme = super::require_endpoint_without_tls_roots("ftp://localhost/v1")
+        .expect_err("a non-http scheme needs TLS roots too");
+    assert!(
+        other_scheme
+            .to_string()
+            .contains("no usable TLS root certificates"),
+        "non-http scheme names the missing roots: {other_scheme}"
+    );
+    super::require_endpoint_without_tls_roots("http://localhost:1/v1")
+        .expect("a parseable http endpoint is still allowed");
+}
+
 #[tokio::test]
 async fn without_usable_tls_roots_https_is_a_configuration_error_and_http_is_served() {
     // 选根经过真实的 parse_root：超过 64 KiB 的根先被跳过，无法解析的根被丢弃。

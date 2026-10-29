@@ -133,8 +133,8 @@ impl GatewayTurn {
                 .await
                 .map_err(|_| configuration_error("provider configuration task failed"))??;
         // 没有可用根证书时 https 端点按配置错误拒绝，不回退平台根；http 端点照常。
-        if self.configuration.roots_der.is_empty() && is_https(&provider.base_url) {
-            return Err(configuration_error(NO_USABLE_TLS_ROOTS));
+        if self.configuration.roots_der.is_empty() {
+            require_endpoint_without_tls_roots(&provider.base_url)?;
         }
         let client = self
             .clients
@@ -231,8 +231,19 @@ impl ResolvedRequest {
     }
 }
 
-fn is_https(base_url: &str) -> bool {
-    url::Url::parse(base_url).is_ok_and(|url| url.scheme() == "https")
+/// 没有可用根证书时只放行能解析且 scheme 为 http 的端点，其余一律按配置错误拒绝（失败即关闭）。
+///
+/// provider 载入时已用 `net_guard::validate_base_url_static` 校验 `base_url`（能解析、只允许
+/// http/https），按现有代码路径这里不会遇到无法解析的地址；仍按失败即关闭处理，避免日后载入
+/// 规则变化时把无法解析的地址当成 http 放行。
+fn require_endpoint_without_tls_roots(base_url: &str) -> Result<(), LlmError> {
+    match url::Url::parse(base_url) {
+        Ok(url) if url.scheme() == "http" => Ok(()),
+        Ok(_) => Err(configuration_error(NO_USABLE_TLS_ROOTS)),
+        Err(error) => Err(configuration_error(format!(
+            "invalid provider endpoint URL ({error}); {NO_USABLE_TLS_ROOTS}"
+        ))),
+    }
 }
 
 fn configuration_error(message: impl std::fmt::Display) -> LlmError {
