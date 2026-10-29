@@ -3,7 +3,7 @@
 
 //! Messages 的请求构造与 SSE 解析。
 
-use lattice_conversation::ProviderOrigin;
+use lattice_conversation::{Protocol, ReplayOrigin};
 use std::collections::BTreeMap;
 
 use crate::protocol::projection::{ProjectionError, request_messages_to_wire, wire_usage};
@@ -37,8 +37,9 @@ pub fn build_request_json(
     request: &ChatRequest,
     model: &str,
     output_limit: Option<u64>,
+    origin: &ReplayOrigin,
 ) -> Result<serde_json::Value, ProjectionError> {
-    let projected = request_messages_to_wire(ProviderOrigin::Anthropic, &request.messages)?;
+    let projected = request_messages_to_wire(origin, &request.messages)?;
     let mut body = serde_json::json!({
         "model": model,
         "messages": projected.messages,
@@ -256,7 +257,7 @@ impl AnthropicSseParser {
                 let message = &root["message"];
                 self.input_tokens = message["usage"]["input_tokens"].as_u64();
                 if message["usage"].get("output_tokens").is_some() {
-                    match wire_usage(ProviderOrigin::Anthropic, message) {
+                    match wire_usage(Protocol::Messages, message) {
                         Ok(Some(usage)) => events.push(ProtocolEvent::Usage(usage)),
                         Ok(None) => {}
                         Err(error) => events.push(ProtocolEvent::error(error.to_string(), false)),
@@ -268,7 +269,7 @@ impl AnthropicSseParser {
                     "input_tokens": self.input_tokens,
                     "output_tokens": root["usage"].get("output_tokens"),
                 }});
-                match wire_usage(ProviderOrigin::Anthropic, &usage_wire) {
+                match wire_usage(Protocol::Messages, &usage_wire) {
                     Ok(Some(usage)) => events.push(ProtocolEvent::Usage(usage)),
                     Ok(None) => {}
                     Err(error) => return vec![ProtocolEvent::error(error.to_string(), false)],
@@ -281,9 +282,9 @@ impl AnthropicSseParser {
                 }
             }
             "error" => events.push(
-                super::common::extract_api_error(ProviderOrigin::Anthropic, &root).unwrap_or_else(
-                    || ProtocolEvent::error("unknown Anthropic streaming error", false),
-                ),
+                super::common::extract_api_error(Protocol::Messages, &root).unwrap_or_else(|| {
+                    ProtocolEvent::error("unknown Anthropic streaming error", false)
+                }),
             ),
             "message_stop" | "ping" => {}
             _ => {}
@@ -322,7 +323,7 @@ mod tests {
                 serde_json::json!({"index":9,"delta":{"type":"x".repeat(4096),"data":"private-payload"}}),
             ),
         ] {
-            let mut parser = Parser::new(ProviderOrigin::Anthropic);
+            let mut parser = Parser::new(Protocol::Messages);
             let events = parser.parse_chunk(event_type, &payload.to_string());
             let [
                 LlmEvent::Finished {
@@ -357,8 +358,8 @@ mod tests {
             );
         }
         assert!(matches!(
-            crate::protocol::projection::wire_to_native(
-                ProviderOrigin::Anthropic,
+            crate::test_reply::wire_to_native(
+                Protocol::Messages,
                 &serde_json::json!({"content":[{"type":"redacted_thinking","data":"private-payload"}]})
             ),
             Err(ProjectionError::Protocol(
@@ -369,7 +370,7 @@ mod tests {
 
     #[test]
     fn thinking_signature_fragments_share_one_part_and_keep_the_next_signature_separate() {
-        let mut parser = Parser::new(ProviderOrigin::Anthropic);
+        let mut parser = Parser::new(Protocol::Messages);
         start_message(&mut parser);
         for index in [0, 1] {
             parser.parse_chunk("content_block_start",&serde_json::json!({"index":index,"content_block":{"type":"thinking","thinking":"r","signature":""}}).to_string());
@@ -428,7 +429,13 @@ mod tests {
             target: ModelTarget::new("anthropic", "claude-sonnet-4-6"),
             client_request_id: None,
         };
-        let body = build_request_json(&request, "claude-sonnet-4-6", None).expect("projection");
+        let body = build_request_json(
+            &request,
+            "claude-sonnet-4-6",
+            None,
+            &crate::test_reply::replay_origin(Protocol::Messages),
+        )
+        .expect("projection");
         assert_eq!(body["model"], "claude-sonnet-4-6");
         assert_eq!(body["system"], "First prompt.\n\nSecond prompt.");
         assert_eq!(body["messages"][0]["content"][0]["text"], "Hello");
@@ -439,7 +446,7 @@ mod tests {
 
     #[test]
     fn parser_persists_signature_and_real_tool_id() {
-        let mut parser = Parser::new(ProviderOrigin::Anthropic);
+        let mut parser = Parser::new(Protocol::Messages);
         start_message(&mut parser);
         parser.parse_chunk(
             "content_block_start",
@@ -495,7 +502,7 @@ mod tests {
 
     #[test]
     fn parser_preserves_missing_tool_id() {
-        let mut parser = Parser::new(ProviderOrigin::Anthropic);
+        let mut parser = Parser::new(Protocol::Messages);
         start_message(&mut parser);
         let started = parser.parse_chunk(
             "content_block_start",
@@ -546,7 +553,7 @@ mod tests {
 
     #[test]
     fn malformed_argument_delta_rejects_the_whole_message() {
-        let mut parser = Parser::new(ProviderOrigin::Anthropic);
+        let mut parser = Parser::new(Protocol::Messages);
         start_message(&mut parser);
         parser.parse_chunk(
             "content_block_start",
@@ -580,7 +587,7 @@ mod tests {
             }
         )));
 
-        let mut parser = Parser::new(ProviderOrigin::Anthropic);
+        let mut parser = Parser::new(Protocol::Messages);
         start_message(&mut parser);
         parser.parse_chunk(
             "content_block_start",

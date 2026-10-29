@@ -554,7 +554,7 @@ impl SessionStore {
             {
                 return Err(invalid("origin", "reply source mismatch"));
             }
-            validate::reply_protocol(&reply.origin, &reply.message)?;
+            validate::reply_origin(&reply.origin, &reply.message)?;
             let mut seen = BTreeSet::new();
             let index = tx.open_table(codec::INDEX).map_err(codec::table_error)?;
             let mut collisions = Vec::new();
@@ -781,7 +781,7 @@ impl SessionStore {
                 {
                     return Err(invalid("origin", "reply source mismatch"));
                 }
-                validate::reply_protocol(&reply.origin, &reply.message)?;
+                validate::reply_origin(&reply.origin, &reply.message)?;
                 let completed = close::completed(&reply);
                 let message = reply
                     .message

@@ -230,7 +230,7 @@ mod tests {
         evidence::CapabilityAdmissionPolicy,
     };
     use lattice_conversation::{
-        MessagePart, MessageRole, MessageSemantic, NativeMessage, ProviderOrigin, UnboundToolCall,
+        MessagePart, MessageRole, MessageSemantic, NativeMessage, Protocol, UnboundToolCall,
     };
     use lattice_session::store::*;
     use tempfile::TempDir;
@@ -353,7 +353,10 @@ mod tests {
                     usage: None,
                     message: NativeMessage::new(
                         MessageRole::Assistant,
-                        Some(ProviderOrigin::OpenAiCompatible),
+                        Some(lattice_conversation::ReplayOrigin {
+                            protocol: Protocol::ChatCompletions,
+                            provider_id: "openai".into(),
+                        }),
                         vec![MessagePart::semantic_only(MessageSemantic::ToolCall {
                             call: UnboundToolCall {
                                 provider_call_id: Some("call".into()),

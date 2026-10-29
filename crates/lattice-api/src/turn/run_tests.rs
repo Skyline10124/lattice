@@ -126,13 +126,16 @@ struct CancelOnDone(Arc<AtomicBool>);
 impl LlmClient for CancelOnDone {
     async fn stream_chat(
         &self,
-        _: lattice_llm::ChatRequest,
+        request: lattice_llm::ChatRequest,
         control: lattice_llm::StreamControl,
     ) -> std::result::Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
         let cancel = self.0.clone();
         let message = NativeMessage::new(
             MessageRole::Assistant,
-            Some(ProviderOrigin::OpenAiCompatible),
+            Some(lattice_conversation::ReplayOrigin {
+                protocol: Protocol::ChatCompletions,
+                provider_id: "local".into(),
+            }),
             vec![MessagePart::semantic_only(MessageSemantic::ToolCall {
                 call: UnboundToolCall {
                     provider_call_id: Some("call".into()),
@@ -151,7 +154,15 @@ impl LlmClient for CancelOnDone {
             }),
         });
         Ok(Box::pin(
-            lattice_llm::testing::script_stream(events, control).map(move |event| {
+            lattice_llm::testing::script_stream(
+                ReplayOrigin {
+                    protocol: Protocol::ChatCompletions,
+                    provider_id: request.target.provider,
+                },
+                events,
+                control,
+            )
+            .map(move |event| {
                 if matches!(event, lattice_llm::LlmEvent::Finished { .. }) {
                     cancel.store(true, Ordering::Release);
                 }

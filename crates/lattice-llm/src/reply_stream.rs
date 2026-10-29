@@ -7,7 +7,7 @@ use crate::LlmStream;
 use crate::reply::{ProtocolEvent, ReplyAccumulator, ReplyProtocolError, StreamStop, Update};
 use crate::types::{AttemptReport, LlmEvent};
 use futures::{Stream, StreamExt, stream};
-use lattice_conversation::ProviderOrigin;
+use lattice_conversation::ReplayOrigin;
 use std::pin::Pin;
 use std::sync::{
     Arc,
@@ -50,7 +50,7 @@ pub(crate) struct ReplyDelivery {
     report: AttemptReport,
 }
 impl ReplyDelivery {
-    pub(crate) fn new(origin: Option<ProviderOrigin>) -> Self {
+    pub(crate) fn new(origin: Option<ReplayOrigin>) -> Self {
         Self {
             accumulator: ReplyAccumulator::new(origin),
             report: AttemptReport::default(),
@@ -96,7 +96,7 @@ impl ReplyDelivery {
 
 /// 生产协议、stub 和测试输入都通过这个包装器进入同一个累积器。
 pub fn assemble_reply_stream(
-    origin: Option<ProviderOrigin>,
+    origin: Option<ReplayOrigin>,
     input: ProtocolStream,
     control: StreamControl,
 ) -> LlmStream {

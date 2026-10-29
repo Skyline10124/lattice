@@ -4,8 +4,8 @@
 use super::*;
 use lancet_protocol::{CellEvidenceTriple, InvocationBinding, InvocationId, ModelMessageAddress};
 use lattice_conversation::{
-    BoundToolCall, MessageRole, MessageSemantic, NativeMessage, ProviderOrigin, RawToolCall,
-    ToolCallState, validate_tool_call_batch,
+    BoundToolCall, MessageRole, MessageSemantic, NativeMessage, RawToolCall, ToolCallState,
+    validate_tool_call_batch,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -22,17 +22,13 @@ pub(super) fn attempt_origin(origin: &AttemptOrigin, provider: &str) -> Result<(
     Ok(())
 }
 
-pub(super) fn reply_protocol<S: ToolCallState>(
+pub(super) fn reply_origin<S: ToolCallState>(
     origin: &AttemptOrigin,
     message: &NativeMessage<S>,
 ) -> Result<()> {
-    let protocol = message.provider_origin.map(|origin| match origin {
-        ProviderOrigin::OpenAiCompatible => AttemptProtocol::ChatCompletions,
-        ProviderOrigin::Anthropic => AttemptProtocol::AnthropicMessages,
-        ProviderOrigin::Gemini => AttemptProtocol::GenerateContent,
-    });
-    if protocol.is_some_and(|p| p != origin.protocol) {
-        return Err(invalid("origin", "reply protocol mismatch"));
+    provider_id(&origin.provider_id)?;
+    if message.provider_origin.as_ref() != Some(origin) {
+        return Err(invalid("origin", "reply source mismatch"));
     }
     Ok(())
 }
@@ -228,7 +224,7 @@ fn bound_reply(
     message: &NativeMessage<BoundToolCall>,
     slots: &[InvocationSlot],
 ) -> Result<()> {
-    reply_protocol(origin, message)?;
+    reply_origin(origin, message)?;
     if message.tool_calls().count() != slots.len() {
         return Err(invalid("slots", "reply/slot count mismatch"));
     }
@@ -346,6 +342,15 @@ pub(super) fn turn(r: &Records, s: SessionId, t: TurnId) -> Result<()> {
         }
         if let Some(reply) = reply {
             let completed = attempts.last().ok_or_else(err)?;
+            if !matches!(
+                completed.progress,
+                AttemptProgress::Ended {
+                    end: AttemptEnd::Completed,
+                    ..
+                }
+            ) {
+                return Err(err());
+            }
             bound_reply(
                 s,
                 &completed.origin,

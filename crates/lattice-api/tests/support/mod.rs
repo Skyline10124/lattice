@@ -6,7 +6,7 @@
 
 use lancet_protocol::{CepError, InvocationId, ModelAttemptKey, SessionId, TurnId};
 use lattice_conversation::{
-    MessagePart, MessageRole, MessageSemantic, NativeMessage, ProviderOrigin, UnboundToolCall,
+    MessagePart, MessageRole, MessageSemantic, NativeMessage, Protocol, UnboundToolCall,
 };
 use lattice_session::store::{
     AcceptSession, AcceptTurn, AgentSelection, AttemptOrigin, AttemptProtocol, CloseStep,
@@ -162,7 +162,10 @@ impl ReservedClient {
                     usage: None,
                     message: NativeMessage::new(
                         MessageRole::Assistant,
-                        Some(ProviderOrigin::OpenAiCompatible),
+                        Some(lattice_conversation::ReplayOrigin {
+                            protocol: Protocol::ChatCompletions,
+                            provider_id: "openai-compatible".into(),
+                        }),
                         vec![MessagePart::semantic_only(MessageSemantic::ToolCall {
                             call: UnboundToolCall {
                                 provider_call_id: Some("fixture-call".into()),

@@ -23,7 +23,8 @@
 //! 组装遵循 ADR 0005 §10 的协议限额；超限拒绝整个响应，不返回部分消息。
 
 use lattice_conversation::{
-    MessageSemantic, NativeMessage, ProviderOrigin, TokenUsage, ToolCallState, UnboundToolCall,
+    MessageSemantic, NativeMessage, Protocol, ReplayOrigin, TokenUsage, ToolCallState,
+    UnboundToolCall,
 };
 use serde_json::{Value, json};
 
@@ -32,17 +33,20 @@ use crate::reply::{PartDelta, PartKind, StringPatch};
 
 fn malformed(detail: impl Into<String>) -> ProjectionError {
     ProjectionError::MalformedWire {
-        provider: ProviderOrigin::Anthropic,
+        provider: Protocol::Messages,
         detail: detail.into(),
     }
 }
 
-pub fn wire_to_native(wire: &Value) -> Result<NativeMessage<UnboundToolCall>, ProjectionError> {
+pub fn wire_to_native(
+    origin: &ReplayOrigin,
+    wire: &Value,
+) -> Result<NativeMessage<UnboundToolCall>, ProjectionError> {
     let blocks = wire
         .get("content")
         .and_then(Value::as_array)
         .ok_or_else(|| malformed("missing content blocks"))?;
-    let mut reply = super::WireReply::new(ProviderOrigin::Anthropic);
+    let mut reply = super::WireReply::new(origin);
     for (index, block) in blocks.iter().enumerate() {
         let block_type = block
             .get("type")
@@ -127,7 +131,7 @@ pub fn native_to_wire<S: ToolCallState>(
                 // losing the state on round-trip.
                 if part.replay_state.is_some() {
                     return Err(ProjectionError::UnsupportedPart {
-                        provider: ProviderOrigin::Anthropic,
+                        provider: Protocol::Messages,
                         part_ordinal: ordinal,
                     });
                 }
@@ -138,7 +142,7 @@ pub fn native_to_wire<S: ToolCallState>(
                     part.replay_state
                         .as_ref()
                         .ok_or(ProjectionError::MissingReplayState {
-                            provider: ProviderOrigin::Anthropic,
+                            provider: Protocol::Messages,
                             part_ordinal: ordinal,
                         })?;
                 blocks.push(json!({
@@ -177,7 +181,7 @@ pub(crate) fn tool_result_messages(
     for closure in closures {
         let Some(tool_use_id) = closure.provider_call_id.as_deref() else {
             return Err(ProjectionError::ToolResultWithoutProviderCallId {
-                provider: ProviderOrigin::Anthropic,
+                provider: Protocol::Messages,
                 invocation_id: closure.invocation_id,
             });
         };
@@ -211,7 +215,7 @@ pub(crate) fn usage(wire: &Value) -> Result<Option<TokenUsage>, ProjectionError>
         return Ok(None);
     }
     let malformed = |detail: String| ProjectionError::MalformedUsage {
-        provider: ProviderOrigin::Anthropic,
+        provider: Protocol::Messages,
         detail,
     };
     let field = |name: &str| -> Result<u64, ProjectionError> {

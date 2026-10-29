@@ -3,15 +3,18 @@
 
 //! generateContent 的请求构造与 SSE 解析。
 
-use lattice_conversation::ProviderOrigin;
+use lattice_conversation::{Protocol, ReplayOrigin};
 
 use crate::protocol::projection::{ProjectionError, request_messages_to_wire, wire_usage};
 use crate::reply::{PartDelta, PartKind, ProtocolEvent, StringPatch};
 use crate::types::ChatRequest;
 
 /// 构造 generateContent 请求；模型名由端点路径指定。
-pub fn build_request_json(request: &ChatRequest) -> Result<serde_json::Value, ProjectionError> {
-    let projected = request_messages_to_wire(ProviderOrigin::Gemini, &request.messages)?;
+pub fn build_request_json(
+    request: &ChatRequest,
+    origin: &ReplayOrigin,
+) -> Result<serde_json::Value, ProjectionError> {
+    let projected = request_messages_to_wire(origin, &request.messages)?;
     let mut body = serde_json::json!({
         "contents": projected.messages,
     });
@@ -101,7 +104,7 @@ impl GeminiSseParser {
             Ok(None) => return vec![],
             Err(error) => return vec![error],
         };
-        if let Some(error) = super::common::extract_api_error(ProviderOrigin::Gemini, &root) {
+        if let Some(error) = super::common::extract_api_error(Protocol::GenerateContent, &root) {
             return vec![error];
         }
         let mut events = Vec::new();
@@ -228,7 +231,7 @@ impl GeminiSseParser {
             if let Some(reason) = candidate["finishReason"].as_str() {
                 self.close_text(&mut events);
                 self.completed = true;
-                match wire_usage(ProviderOrigin::Gemini, &root) {
+                match wire_usage(Protocol::GenerateContent, &root) {
                     Ok(Some(usage)) => events.push(ProtocolEvent::Usage(usage)),
                     Ok(None) => {}
                     Err(error) => {
@@ -246,7 +249,7 @@ impl GeminiSseParser {
                 return events;
             }
         }
-        match wire_usage(ProviderOrigin::Gemini, &root) {
+        match wire_usage(Protocol::GenerateContent, &root) {
             Ok(Some(usage)) => events.push(ProtocolEvent::Usage(usage)),
             Ok(None) => {}
             Err(error) => events.push(ProtocolEvent::error(error.to_string(), false)),
@@ -284,7 +287,7 @@ mod tests {
         let input = stream::iter(frames)
             .flat_map(move |frame| stream::iter(parser.parse_chunk(None, &frame)));
         let events = crate::reply_stream::assemble_reply_stream(
-            Some(ProviderOrigin::Gemini),
+            Some(crate::test_reply::replay_origin(Protocol::GenerateContent)),
             Box::pin(input),
             crate::StreamControl::default(),
         )
@@ -338,7 +341,7 @@ mod tests {
                 index: 2,
                 block_type: expected,
             };
-            let mut parser = Parser::new(ProviderOrigin::Gemini);
+            let mut parser = Parser::new(Protocol::GenerateContent);
             let events = parser.parse_chunk(None, &wire.to_string());
             assert!(matches!(&events[..], [LlmEvent::Finished {
                 outcome: ReplyOutcome::Interrupted { reason: ReplyStop::Stream(StreamStop::Protocol(error)) }, ..
@@ -351,7 +354,7 @@ mod tests {
             );
             assert!(!format!("{events:?}").contains("private-payload"));
             assert_eq!(
-                crate::protocol::projection::wire_to_native(ProviderOrigin::Gemini, &wire),
+                crate::test_reply::wire_to_native(Protocol::GenerateContent, &wire),
                 Err(ProjectionError::Protocol(expected_error)),
             );
         }
@@ -360,7 +363,7 @@ mod tests {
     #[test]
     fn parser_preserves_thought_state_and_optional_ids_without_synthesis() {
         for (id_field, expected_id) in [(",\"id\":\"real-id\"", Some("real-id")), ("", None)] {
-            let mut parser = Parser::new(ProviderOrigin::Gemini);
+            let mut parser = Parser::new(Protocol::GenerateContent);
             let chunk = format!(
                 r#"{{"candidates":[{{"content":{{"role":"model","parts":[{{"text":"reason","thought":true,"thoughtSignature":"sig"}},{{"functionCall":{{"name":"observe__workspace","args":{{}}{id_field}}}}}]}},"finishReason":"STOP"}}]}}"#
             );
@@ -395,7 +398,7 @@ mod tests {
 
     #[test]
     fn parser_completes_usage() {
-        let mut parser = Parser::new(ProviderOrigin::Gemini);
+        let mut parser = Parser::new(Protocol::GenerateContent);
         let events = parser.parse_chunk(
             None,
             r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"Done"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":20,"totalTokenCount":30}}"#,
@@ -421,7 +424,7 @@ mod tests {
 
     #[test]
     fn parser_accumulates_multichunk_reasoning_text_and_signature() {
-        let mut parser = Parser::new(ProviderOrigin::Gemini);
+        let mut parser = Parser::new(Protocol::GenerateContent);
         for chunk in [
             r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"rea","thought":true}]}}]}"#,
             r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"son","thought":true,"thoughtSignature":"sig"}]}}]}"#,
@@ -471,7 +474,7 @@ mod tests {
 
     #[test]
     fn parser_preserves_distinct_signatures_and_rejects_union_parts() {
-        let mut parser = Parser::new(ProviderOrigin::Gemini);
+        let mut parser = Parser::new(Protocol::GenerateContent);
         parser.parse_chunk(
             None,
             r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"a","thought":true,"thoughtSignature":"sig-a"}]}}]}"#,
@@ -500,7 +503,7 @@ mod tests {
             "sig-b"
         );
 
-        let mut parser = Parser::new(ProviderOrigin::Gemini);
+        let mut parser = Parser::new(Protocol::GenerateContent);
         let events = parser.parse_chunk(
             None,
             r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"x","functionCall":{"name":"observe__workspace","args":{}}}]}}]}"#,

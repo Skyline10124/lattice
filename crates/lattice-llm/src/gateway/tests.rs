@@ -469,6 +469,191 @@ async fn resolved_request_keeps_its_protocol_endpoint_and_credentials_until_sent
 }
 
 #[tokio::test]
+async fn chat_replay_defaults_to_no_reasoning() {
+    use lattice_conversation::{ConversationItem, Protocol, StepContent};
+    let mut server = Server::start(true).await;
+    let directory = private_dir();
+    configure(directory.path(), &server.url, "chat-completions", "none");
+    let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+    let mut request = request("test");
+    let assistant = crate::test_reply::wire_to_native(
+        Protocol::ChatCompletions,
+        &serde_json::json!({"choices":[{"message":{
+            "content":"answer", "reasoning_content":"private reasoning"
+        }}]}),
+    )
+    .unwrap()
+    .bind_zero_tool()
+    .unwrap();
+    request.messages.push(ConversationItem::Step(StepContent {
+        assistant,
+        results: vec![],
+    }));
+    complete(
+        gateway
+            .open_turn()
+            .stream_chat(request, StreamControl::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    let message = &server.next().await.body["messages"][0];
+    assert_eq!(message["content"], "answer");
+    assert!(message.get("reasoning_content").is_none(), "{message}");
+
+    let base = std::fs::read_to_string(directory.path().join("providers.toml")).unwrap();
+    for (provider, model, expected) in [
+        (
+            "reasoning-content",
+            None,
+            serde_json::json!({"role":"assistant", "content":"answer", "reasoning_content":"private reasoning"}),
+        ),
+        (
+            "content-chunks",
+            None,
+            serde_json::json!({"role":"assistant", "content":[{"type":"thinking", "thinking":[{"type":"text", "text":"private reasoning"}]}, {"type":"text", "text":"answer"}]}),
+        ),
+        (
+            "reasoning-content",
+            Some("none"),
+            serde_json::json!({"role":"assistant", "content":"answer"}),
+        ),
+        (
+            "none",
+            Some("reasoning-content"),
+            serde_json::json!({"role":"assistant", "content":"answer", "reasoning_content":"private reasoning"}),
+        ),
+    ] {
+        let overlay = model.map_or(String::new(), |value| {
+            format!("[providers.test.models.model-id.features]\nreasoning_replay = '{value}'\n")
+        });
+        std::fs::write(
+            directory.path().join("providers.toml"),
+            format!("{base}[providers.test.features]\nreasoning_replay = '{provider}'\n{overlay}"),
+        )
+        .unwrap();
+        let mut request = self::request("test");
+        request.messages.push(ConversationItem::Step(StepContent {
+            assistant: crate::test_reply::wire_to_native(Protocol::ChatCompletions,
+                &serde_json::json!({"choices":[{"message":{"content":"answer", "reasoning_content":"private reasoning"}}]})).unwrap().bind_zero_tool().unwrap(),
+            results: vec![],
+        }));
+        let resolved = gateway.open_turn().resolve(&request.target).await.unwrap();
+        std::fs::write(directory.path().join("providers.toml"), &base).unwrap();
+        complete(
+            resolved
+                .stream_chat(request, StreamControl::default())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(server.next().await.body["messages"][0], expected);
+    }
+}
+
+#[tokio::test]
+async fn replay_source_matrix_reaches_each_protocol_request_body() {
+    use crate::protocol::projection::{native_to_wire, project_cross_provider, wire_to_native};
+    use lattice_conversation::{
+        ConversationItem, MessageSemantic, Protocol, ReplayOrigin, StepContent,
+    };
+
+    let mut server = Server::start(true).await;
+    let directory = private_dir();
+    let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+    let protocols = [
+        Protocol::ChatCompletions,
+        Protocol::Messages,
+        Protocol::GenerateContent,
+    ];
+    for (protocol, fixture) in [
+        (
+            Protocol::ChatCompletions,
+            include_str!("../../tests/fixtures/projection/openai_assistant_tool_calls.json"),
+        ),
+        (
+            Protocol::Messages,
+            include_str!("../../tests/fixtures/projection/anthropic_thinking_tool_use.json"),
+        ),
+        (
+            Protocol::GenerateContent,
+            include_str!("../../tests/fixtures/projection/gemini_thought_signature.json"),
+        ),
+    ] {
+        let origin = ReplayOrigin {
+            protocol,
+            provider_id: "test".into(),
+        };
+        let mut source = wire_to_native(&origin, &serde_json::from_str(fixture).unwrap()).unwrap();
+        source
+            .parts
+            .retain(|part| !matches!(part.semantic, MessageSemantic::ToolCall { .. }));
+        let source = source.bind_zero_tool().unwrap();
+        let original = native_to_wire(&origin, &source).unwrap();
+        for target_protocol in protocols {
+            for provider in ["test", "other", "test"] {
+                let target = ReplayOrigin {
+                    protocol: target_protocol,
+                    provider_id: provider.into(),
+                };
+                let feature = if target_protocol == Protocol::ChatCompletions {
+                    format!(
+                        "[providers.{provider}.features]\nreasoning_replay='reasoning-content'\n"
+                    )
+                } else {
+                    String::new()
+                };
+                std::fs::write(directory.path().join("providers.toml"), format!(
+                    "[providers.{provider}]\nprotocol='{target_protocol}'\nbase_url='{}'\nauth='none'\n{feature}", server.url)).unwrap();
+                let body = match target_protocol {
+                    Protocol::ChatCompletions => DONE,
+                    Protocol::Messages => MESSAGES_DONE,
+                    Protocol::GenerateContent => CONTENT_DONE,
+                    _ => unreachable!(),
+                };
+                server.respond(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}", body.len()), false);
+                let mut request = self::request(provider);
+                request.messages.push(ConversationItem::Step(StepContent {
+                    assistant: source.clone(),
+                    results: vec![],
+                }));
+                complete(
+                    gateway
+                        .open_turn()
+                        .stream_chat(request, StreamControl::default())
+                        .await
+                        .unwrap(),
+                )
+                .await;
+                let wire = server.next().await.body;
+                let message = if target_protocol == Protocol::GenerateContent {
+                    &wire["contents"][0]
+                } else {
+                    &wire["messages"][0]
+                };
+                assert_eq!(
+                    *message,
+                    native_to_wire(&target, &project_cross_provider(&source, &target)).unwrap()
+                );
+                if target == origin {
+                    assert_eq!(*message, original);
+                } else {
+                    let serialized = wire.to_string();
+                    for part in &source.parts {
+                        if let MessageSemantic::Reasoning { text } = &part.semantic {
+                            assert!(!serialized.contains(text));
+                        }
+                        if let Some(state) = &part.replay_state {
+                            assert!(!serialized.contains(state.as_str()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn messages_use_merged_output_limits_at_resolution_and_reload_on_the_next_request() {
     let mut server = Server::start(true).await;
     let directory = private_dir();
