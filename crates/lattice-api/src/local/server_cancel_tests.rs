@@ -100,15 +100,21 @@ async fn backend() -> (
     super::super::LocalClient,
     tokio::task::JoinHandle<()>,
 ) {
+    backend_with_roots(vec![include_bytes!("test_root.der").to_vec()]).await
+}
+async fn backend_with_roots(
+    roots: Vec<Vec<u8>>,
+) -> (
+    tempfile::TempDir,
+    Arc<Backend>,
+    super::super::LocalClient,
+    tokio::task::JoinHandle<()>,
+) {
     let dir = tempfile::tempdir().unwrap();
     let layout = crate::StateLayout::in_state_root(dir.path());
     let (instance, listener) = ipc::Instance::bind(&layout).unwrap();
     let listener = UnixListener::from_std(listener).unwrap();
-    let backend = Backend::with_tls_roots(
-        layout.clone(),
-        Some(dir.path().into()),
-        Ok(vec![include_bytes!("test_root.der").to_vec()]),
-    );
+    let backend = Backend::with_tls_roots(layout.clone(), Some(dir.path().into()), roots);
     let server = backend.clone();
     let task = tokio::spawn(async move {
         let mut connections = JoinSet::new();
@@ -219,6 +225,69 @@ async fn prompt_byte_limits_are_checked_before_acceptance_and_dispatch() {
         assert_eq!(provider.finish().await.len(), usize::from(accepted));
         finish(&backend, task).await;
     }
+}
+
+/// 没有可用的根证书时后台照常启动、照常回答查询；https 端点在接受前按配置错误拒绝，
+/// http 端点照常放行。旧实现把整个网关置为配置错误，http 提交也会被拒绝。
+#[tokio::test]
+async fn without_tls_roots_status_answers_http_is_accepted_and_https_is_rejected() {
+    let (dir, backend, client, task) = backend_with_roots(Vec::new()).await;
+    bounded(client.status())
+        .await
+        .expect("status must answer without usable TLS roots");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let https = format!("https://{}/v1", listener.local_addr().unwrap());
+    let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = connections.clone();
+    let accepting = tokio::spawn(async move {
+        while let Ok(_socket) = listener.accept().await {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+    config(dir.path(), &https);
+    let input = request(dir.path());
+    let error = bounded(client.submit(input.clone())).await.unwrap_err();
+    idle(&backend).await;
+    assert_eq!(
+        error.kind,
+        LocalErrorKind::BadRequest,
+        "https without roots must be rejected before acceptance: {error}"
+    );
+    assert!(
+        error.message.contains("configuration error")
+            && error.message.contains("no usable TLS root certificates"),
+        "rejection must be the configuration error naming the missing roots: {error}"
+    );
+    assert_eq!(
+        client.turn(input.turn_id).await.unwrap_err().kind,
+        LocalErrorKind::NotFound,
+        "rejected https submit must not create a Turn"
+    );
+    assert_eq!(
+        connections.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "https provider must not be contacted"
+    );
+    accepting.abort();
+
+    let provider = Provider::start().await;
+    config(dir.path(), &provider.endpoint);
+    let accepted = bounded(client.submit(request(dir.path()))).await;
+    idle(&backend).await;
+    assert!(
+        matches!(accepted, Ok(Acceptance::Accepted { .. })),
+        "http submit must be accepted without TLS roots: {accepted:?}"
+    );
+    assert_eq!(
+        provider.finish().await.len(),
+        1,
+        "http provider received the request"
+    );
+    bounded(client.status())
+        .await
+        .expect("status still answers after the rejection");
+    finish(&backend, task).await;
 }
 
 #[tokio::test]

@@ -3,9 +3,9 @@
 
 //! 定时与手动刷新共享一次在途操作；停止信号独立于 Turn 排空。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use futures::{FutureExt, future::BoxFuture};
 use lattice_llm::MetadataRefreshControl;
@@ -14,8 +14,50 @@ use tokio::sync::watch;
 use super::{LocalError, LocalErrorKind, Result};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+const INITIAL_BACKOFF: Duration = Duration::from_secs(60);
+const MAX_BACKOFF: Duration = Duration::from_secs(60 * 60);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AutoRefresh {
+    Ran,
+    Fresh,
+    Idle,
+    Failed,
+    Stopped,
+}
+
+/// 测试用：定时任务每次进入等待与每次触发结束时报告的事件。
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TimerEvent {
+    /// 已开始等待，到给定时刻触发。
+    Armed(tokio::time::Instant),
+    /// 一次定时触发结束。
+    Fired(AutoRefresh),
+}
+
+fn backoff(failures: u32) -> Duration {
+    let shift = failures.saturating_sub(1).min(16);
+    INITIAL_BACKOFF
+        .saturating_mul(1_u32 << shift)
+        .min(MAX_BACKOFF)
+}
+
+/// 缓存文件仍在刷新间隔内时返回剩余时间。缺失、读不出或已到期都视为需要刷新。
+/// `now` 由调用方传入，测试可以让它跟随暂停的 tokio 时钟。
+fn cache_freshness(directory: &Path, now: SystemTime) -> Option<Duration> {
+    let modified = std::fs::metadata(directory.join("cache/models.json"))
+        .ok()?
+        .modified()
+        .ok()?;
+    let age = now.duration_since(modified).unwrap_or(Duration::ZERO);
+    REFRESH_INTERVAL
+        .checked_sub(age)
+        .filter(|remaining| !remaining.is_zero())
+}
 type Work = dyn Fn(Arc<MetadataRefreshControl>) -> BoxFuture<'static, Result<()>> + Send + Sync;
 type Completion = watch::Receiver<Option<Result<()>>>;
+type Clock = dyn Fn() -> SystemTime + Send + Sync;
 
 pub(super) struct MetadataRefresh {
     directory: Option<std::result::Result<PathBuf, crate::ConfigRejection>>,
@@ -23,6 +65,10 @@ pub(super) struct MetadataRefresh {
     flight: Mutex<Option<Completion>>,
     cancel: Arc<MetadataRefreshControl>,
     stopped: watch::Sender<bool>,
+    clock: Box<Clock>,
+    /// 测试用：报告每次进入等待的截止时刻与每次定时触发的结果，代替真实等待。
+    #[cfg(test)]
+    outcomes: Mutex<Option<tokio::sync::mpsc::UnboundedSender<TimerEvent>>>,
 }
 
 fn stopping() -> LocalError {
@@ -88,6 +134,9 @@ impl MetadataRefresh {
             flight: Mutex::new(None),
             cancel: Arc::new(MetadataRefreshControl::default()),
             stopped: watch::channel(false).0,
+            clock: Box::new(SystemTime::now),
+            #[cfg(test)]
+            outcomes: Mutex::new(None),
         })
     }
 
@@ -96,7 +145,7 @@ impl MetadataRefresh {
         Self::with_work(None, |_| Box::pin(async { Ok(()) }))
     }
 
-    async fn automatic_refresh(self: &Arc<Self>) {
+    async fn automatic_refresh(self: &Arc<Self>) -> AutoRefresh {
         let enabled = match self.directory.clone() {
             Some(directory) => tokio::task::spawn_blocking(move || {
                 let directory = directory
@@ -120,10 +169,40 @@ impl MetadataRefresh {
         };
         match enabled {
             Ok(true) => {
-                let _ = self.refresh().await;
+                if self.cache_freshness().await.is_some() {
+                    return AutoRefresh::Fresh;
+                }
+                match self.refresh().await {
+                    Ok(()) => AutoRefresh::Ran,
+                    Err(error) if error.kind == LocalErrorKind::Stopping => AutoRefresh::Stopped,
+                    Err(_) => AutoRefresh::Failed,
+                }
             }
-            Ok(false) => tracing::info!("automatic model metadata refresh disabled"),
-            Err(error) => tracing::warn!(%error, "automatic model metadata refresh skipped"),
+            Ok(false) => {
+                tracing::info!("automatic model metadata refresh disabled");
+                AutoRefresh::Idle
+            }
+            // 配置无效时按失败退避重试，而不是等到下一个 24 小时周期。
+            Err(error) => {
+                tracing::warn!(%error, "automatic model metadata refresh failed: invalid configuration");
+                AutoRefresh::Failed
+            }
+        }
+    }
+
+    async fn cache_freshness(&self) -> Option<Duration> {
+        let directory = self.directory.clone()?;
+        let now = (self.clock)();
+        tokio::task::spawn_blocking(move || cache_freshness(directory.ok()?.as_path(), now))
+            .await
+            .ok()
+            .flatten()
+    }
+
+    #[cfg(test)]
+    fn report(&self, event: TimerEvent) {
+        if let Some(outcomes) = &*self.outcomes.lock().expect("metadata outcomes lock") {
+            let _ = outcomes.send(event);
         }
     }
 
@@ -131,18 +210,47 @@ impl MetadataRefresh {
         let refresh = self.clone();
         tokio::spawn(async move {
             let mut stopped = refresh.stopped.subscribe();
-            let mut timer = tokio::time::interval(REFRESH_INTERVAL);
-            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut failures = 0_u32;
+            // 等待从 anchor 起算：失败退避与 24 小时周期从上次触发结束时计，缓存剩余
+            // 时间从读取新鲜度时计，不受读取本身耗时的影响。
+            let mut anchor = tokio::time::Instant::now();
+            let mut delay = Duration::ZERO;
             loop {
-                tokio::select! {
-                    biased;
-                    _ = stopped.wait_for(|stopped| *stopped) => break,
-                    _ = timer.tick() => {},
+                let checked = tokio::time::Instant::now();
+                let freshness = refresh.cache_freshness().await;
+                if failures > 0 {
+                    if freshness.is_some() {
+                        failures = 0;
+                        continue;
+                    }
+                    delay = backoff(failures);
+                } else if let Some(remaining) = freshness {
+                    anchor = checked;
+                    delay = remaining;
                 }
+                let sleep = tokio::time::sleep_until(anchor + delay);
+                // 报告的是这次等待本身的截止时刻，测试据此确认任务停在哪个时刻之前。
+                #[cfg(test)]
+                refresh.report(TimerEvent::Armed(sleep.deadline()));
                 tokio::select! {
                     biased;
                     _ = stopped.wait_for(|stopped| *stopped) => break,
-                    _ = refresh.automatic_refresh() => {},
+                    _ = sleep => {},
+                }
+                if *stopped.borrow() {
+                    break;
+                }
+                let outcome = refresh.automatic_refresh().await;
+                anchor = tokio::time::Instant::now();
+                #[cfg(test)]
+                refresh.report(TimerEvent::Fired(outcome));
+                match outcome {
+                    AutoRefresh::Stopped => break,
+                    AutoRefresh::Failed => failures = failures.saturating_add(1),
+                    AutoRefresh::Ran | AutoRefresh::Fresh | AutoRefresh::Idle => {
+                        failures = 0;
+                        delay = REFRESH_INTERVAL;
+                    }
                 }
             }
         })

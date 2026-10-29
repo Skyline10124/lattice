@@ -49,6 +49,8 @@ struct Response {
 struct Server {
     url: String,
     received: mpsc::UnboundedReceiver<Received>,
+    address: std::net::SocketAddr,
+    peers: mpsc::UnboundedReceiver<std::net::SocketAddr>,
     task: JoinHandle<()>,
     responses: Arc<Mutex<VecDeque<Response>>>,
 }
@@ -58,6 +60,7 @@ impl Server {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (tx, received) = mpsc::unbounded_channel();
+        let (peers_tx, peers) = mpsc::unbounded_channel();
         let responses = Arc::new(Mutex::new(VecDeque::new()));
         let queued = responses.clone();
         let task = tokio::spawn(async move {
@@ -66,7 +69,8 @@ impl Server {
             loop {
                 tokio::select! {
                     accepted = listener.accept() => {
-                        let (socket, _) = accepted.unwrap();
+                        let (socket, peer) = accepted.unwrap();
+                        let _ = peers_tx.send(peer);
                         id += 1;
                         let tx = tx.clone();
                         let queued = queued.clone();
@@ -92,8 +96,28 @@ impl Server {
                 address.port()
             ),
             received,
+            address,
+            peers,
             task,
             responses,
+        }
+    }
+
+    /// 被测请求返回后再连一次探针：内核按到达顺序交出已完成握手的连接，
+    /// 所以探针之前被接受的连接数就是被测代码对这个服务器发起的连接数。
+    async fn connections_before_probe(&mut self) -> usize {
+        let probe = tokio::net::TcpStream::connect(self.address).await.unwrap();
+        let probe_addr = probe.local_addr().unwrap();
+        let mut before = 0;
+        loop {
+            let peer = tokio::time::timeout(Duration::from_secs(5), self.peers.recv())
+                .await
+                .expect("probe connection was accepted")
+                .expect("server is still running");
+            if peer == probe_addr {
+                return before;
+            }
+            before += 1;
         }
     }
 
@@ -709,6 +733,251 @@ async fn messages_use_merged_output_limits_at_resolution_and_reload_on_the_next_
     assert_eq!(server.next().await.body["max_tokens"], 32768);
 }
 
+/// 以给定的模型限制发送一次 Messages 请求，返回请求体里的 `max_tokens`。
+/// 网关在发送前拒绝时返回错误，并确认 provider 没有收到请求。
+async fn messages_max_tokens(
+    limit: serde_json::Value,
+    text: Option<&str>,
+) -> Result<u64, crate::LlmError> {
+    let mut server = Server::start(true).await;
+    let directory = private_dir();
+    configure(directory.path(), &server.url, "anthropic-messages", "none");
+    let config = directory.path().join("providers.toml");
+    let base = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(&config, format!("{base}catalog = 'custom'\n")).unwrap();
+    std::fs::create_dir(directory.path().join("cache")).unwrap();
+    std::fs::write(
+        directory.path().join("cache/models.json"),
+        serde_json::to_vec(
+            &serde_json::json!({"custom":{"models":{"model-id":{"id":"model-id","limit":limit}}}}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+    let mut request = request("test");
+    if let Some(text) = text {
+        request.messages.push(user_message(text));
+    }
+    match gateway
+        .open_turn()
+        .stream_chat(request, StreamControl::default())
+        .await
+    {
+        Ok(stream) => {
+            complete(stream).await;
+            Ok(server.next().await.body["max_tokens"].as_u64().unwrap())
+        }
+        Err(error) => {
+            assert!(
+                matches!(
+                    server.received.try_recv(),
+                    Err(mpsc::error::TryRecvError::Empty)
+                ),
+                "a request rejected before sending must not reach the provider: the mock server must have seen zero requests"
+            );
+            Err(error)
+        }
+    }
+}
+
+#[tokio::test]
+async fn messages_zero_output_limit_without_a_window_sends_the_default() {
+    let max_tokens = messages_max_tokens(serde_json::json!({"output":0}), Some("hi"))
+        .await
+        .unwrap();
+    assert_eq!(
+        max_tokens, 32_768,
+        "output limit 0 must fall back to 32,768"
+    );
+}
+
+#[tokio::test]
+async fn messages_output_limit_that_fits_the_window_is_sent_unchanged() {
+    let max_tokens = messages_max_tokens(
+        serde_json::json!({"context":200_000,"output":64_000}),
+        Some("hi"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        max_tokens, 64_000,
+        "a short prompt must keep the full output limit"
+    );
+}
+
+#[tokio::test]
+async fn messages_max_tokens_is_clamped_into_the_remaining_window() {
+    // 420_000 字节英文正文，加上 Messages 用户消息里的 "user" 与 "text"，
+    // 字符串共 420_008 字节（与下面中文用例的 450_008 字节不同）。
+    // 按 3 字节一个 token 向上取整是 140_003；上下文 200_000，输出上限 64_000，
+    // 能放下的输出是 59_997。
+    let max_tokens = messages_max_tokens(
+        serde_json::json!({"context":200_000,"output":64_000}),
+        Some(&"a".repeat(420_000)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        max_tokens, 59_997,
+        "max_tokens must leave the estimated prompt inside the context window"
+    );
+}
+
+#[tokio::test]
+async fn messages_max_tokens_leaves_room_for_a_chinese_prompt() {
+    // 150_000 个汉字，每字 3 字节、约 1 个 token。加上 "user" 与 "text"
+    // 共 450_008 字节，估算 150_003 token，夹到 49_997。按 4 字节一个 token
+    // 只估 112_502，会发送 64_000，与实际约 150_000 的提示相加超出窗口。
+    let max_tokens = messages_max_tokens(
+        serde_json::json!({"context":200_000,"output":64_000}),
+        Some(&"中".repeat(150_000)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        max_tokens, 49_997,
+        "Chinese prompt must be clamped by the 3 bytes/token estimate"
+    );
+}
+
+#[tokio::test]
+async fn messages_english_prompt_between_the_estimates_is_sent_with_the_floor() {
+    // 640_000 字节英文加 "user"、"text" 共 640_008 字节，约 160_000 个实际 token。
+    // 按 3 字节估 213_336，超过 200_000 的窗口；按 4 字节估 160_002，还剩 39_998。
+    // 这种提示要发送，max_tokens 取下限 1_024，由对端判断，不在发送前拒绝。
+    let max_tokens = messages_max_tokens(
+        serde_json::json!({"context":200_000,"output":64_000}),
+        Some(&"a".repeat(640_000)),
+    )
+    .await
+    .expect("a prompt that fits at 4 bytes/token must be sent, not rejected");
+    assert_eq!(
+        max_tokens, 1_024,
+        "between the estimates max_tokens must be the 1,024 floor"
+    );
+}
+
+#[tokio::test]
+async fn messages_output_floor_is_capped_by_the_model_output_limit() {
+    // 与上一个用例同样的 640_008 字节英文、200_000 窗口，但模型输出上限只有 500：
+    // 下限 1_024 也不能超过它，发送 500。
+    let max_tokens = messages_max_tokens(
+        serde_json::json!({"context":200_000,"output":500}),
+        Some(&"a".repeat(640_000)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        max_tokens, 500,
+        "the floor must not exceed the 500-token model output limit"
+    );
+}
+
+#[tokio::test]
+async fn messages_one_token_of_conservative_room_is_sent_without_the_floor() {
+    // 289 字节正文加 "user"、"text" 共 297 字节：按 3 字节估 99，窗口 100 剩 1；
+    // 按 4 字节估 75，剩 25。保守估算还剩 1 就发 1，不改用下限（那会是 25）。
+    let max_tokens = messages_max_tokens(
+        serde_json::json!({"context":100,"output":64_000}),
+        Some(&"a".repeat(289)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        max_tokens, 1,
+        "one token of conservative room must be sent as 1, not raised to the floor"
+    );
+}
+
+#[tokio::test]
+async fn messages_output_floor_is_capped_to_a_lower_room_below_the_floor() {
+    // 7_192 字节正文加 "user"、"text" 共 7_200 字节：按 3 字节估 2_400，正好占满
+    // 2_400 的窗口；按 4 字节估 1_800，剩 600。600 小于 1_024，下限夹到 600。
+    let max_tokens = messages_max_tokens(
+        serde_json::json!({"context":2_400,"output":64_000}),
+        Some(&"a".repeat(7_192)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        max_tokens, 600,
+        "the floor must be capped to the 600 tokens left by the 4 bytes/token estimate"
+    );
+}
+
+#[tokio::test]
+async fn messages_chinese_prompt_keeps_a_conservative_room_below_the_floor() {
+    // 1_000 个汉字共 3_000 字节，加 "user"、"text" 共 3_008 字节：按 3 字节估 1_003，
+    // 窗口 1_503 剩 500；按 4 字节估 752，剩 751。保守估算还有空间，就发 500，
+    // 不抬到下限：中文的保守估算基本准确，发 751 或 1_024 会超窗。
+    let max_tokens = messages_max_tokens(
+        serde_json::json!({"context":1_503,"output":64_000}),
+        Some(&"中".repeat(1_000)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        max_tokens, 500,
+        "a positive conservative room below the floor must be sent unchanged"
+    );
+}
+
+#[tokio::test]
+async fn messages_prompt_at_the_lower_estimate_boundary_is_sent() {
+    // 388 字节正文加 "user"、"text" 共 396 字节：按 4 字节估 99，窗口 100 还剩 1，
+    // 照常发送；按 3 字节估 132 已无空间，下限夹到 1。
+    let max_tokens = messages_max_tokens(
+        serde_json::json!({"context":100,"output":64_000}),
+        Some(&"a".repeat(388)),
+    )
+    .await
+    .expect("a prompt that leaves one token at 4 bytes/token must be sent");
+    assert_eq!(
+        max_tokens, 1,
+        "boundary prompt must get the single remaining token"
+    );
+}
+
+#[tokio::test]
+async fn messages_one_byte_past_the_lower_estimate_boundary_is_rejected() {
+    // 比上一个用例多 1 字节，共 397 字节：按 4 字节估 100，占满 100 的窗口，发送前拒绝。
+    // messages_max_tokens 断言被拒绝时 provider 没有收到请求。
+    let error = messages_max_tokens(
+        serde_json::json!({"context":100,"output":64_000}),
+        Some(&"a".repeat(389)),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        error.kind(),
+        "context_window_exceeded",
+        "one byte past the boundary must fail as context_window_exceeded, got {error:?}"
+    );
+    assert!(
+        !error.retryable(),
+        "context window exceeded must not be retried"
+    );
+    assert!(
+        error.to_string().contains("at least 100 tokens")
+            && error.to_string().contains("100-token"),
+        "diagnostic must name the 100-token lower estimate and the 100-token window, got {error}"
+    );
+}
+
+fn user_message(text: &str) -> lattice_conversation::ConversationItem {
+    use lattice_conversation::{
+        BoundToolCall, ConversationItem, MessagePart, MessageRole, MessageSemantic, NativeMessage,
+    };
+    ConversationItem::Message(NativeMessage::<BoundToolCall>::new(
+        MessageRole::User,
+        None,
+        vec![MessagePart::semantic_only(MessageSemantic::Text {
+            text: text.to_owned(),
+        })],
+    ))
+}
+
 #[tokio::test]
 async fn metadata_refresh_with_no_roots_fails_before_network_or_directory_creation() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -867,6 +1136,208 @@ async fn configuration_failure(
     error
 }
 
+/// 以测试 CA 为模板生成彼此不同的真实根：把主题与颁发者中的 "LATTICE test CA"
+/// 换成等长的 "LATTICE NNNN CA"。DER 结构不变，仍能通过 rustls 信任锚解析；
+/// 主题不同，所以不能为测试服务器的证书链作信任锚。
+fn renamed_test_ca(index: u16) -> Vec<u8> {
+    const NAME: &[u8] = b"LATTICE test CA";
+    let renamed = format!("LATTICE {index:04} CA");
+    assert_eq!(
+        renamed.len(),
+        NAME.len(),
+        "renamed subject must keep the DER length"
+    );
+    let mut der = TLS.ca_der.clone();
+    let mut replaced = 0;
+    let mut at = 0;
+    while let Some(offset) = der[at..].windows(NAME.len()).position(|w| w == NAME) {
+        let start = at + offset;
+        der[start..start + NAME.len()].copy_from_slice(renamed.as_bytes());
+        at = start + NAME.len();
+        replaced += 1;
+    }
+    assert_eq!(
+        replaced, 2,
+        "test CA subject and issuer must both be renamed"
+    );
+    der
+}
+
+#[tokio::test]
+async fn invalid_tls_root_near_the_count_limit_is_skipped_without_using_a_slot() {
+    // 1_023 个彼此不同的有效根之后是一张无法解析的根，再接真正的测试 CA 与另一张有效根。
+    // 无效根不占名额时保留 1_023 个改名根与测试 CA（按原顺序），截掉最后一张；
+    // 它若占名额，测试 CA 会被截掉，HTTPS 请求无法建立。改名根的主题不同，
+    // 不能替测试 CA 完成验证，所以请求成功说明恰好保留了测试 CA。
+    let mut server = Server::start(true).await;
+    let directory = private_dir();
+    configure(directory.path(), &server.url, "chat-completions", "none");
+    let mut roots: Vec<Vec<u8>> = (0..1_023).map(renamed_test_ca).collect();
+    roots.push(vec![1, 2, 3]);
+    roots.push(TLS.ca_der.clone());
+    roots.push(renamed_test_ca(1_023));
+    let mut expected = roots[..1_023].to_vec();
+    expected.push(TLS.ca_der.clone());
+    let gateway = RequestGateway::new(directory.path().into(), roots).unwrap();
+    let kept = gateway.tls_roots_der();
+    assert_eq!(kept.len(), 1_024, "kept root count");
+    assert!(
+        kept == expected.as_slice(),
+        "kept roots must be the 1_023 renamed roots then the test CA, in original order; first mismatch at {:?}",
+        kept.iter().zip(&expected).position(|(a, b)| a != b)
+    );
+    let stream = gateway
+        .open_turn()
+        .stream_chat(request("test"), StreamControl::default())
+        .await
+        .expect("the test CA kept after the invalid root must verify the TLS server");
+    complete(stream).await;
+    server.next().await;
+}
+
+/// 没有可用根证书时，无法解析的端点不能被当成 http 放行（失败即关闭）。provider 载入已用
+/// `validate_base_url_static` 保证地址能解析，经 `providers.toml` 构造不出这种地址，所以直接检查
+/// `resolve` 在建立客户端之前调用的守卫：它返回错误时 `resolve` 不会构造客户端，也不会发出请求。
+#[test]
+fn without_usable_tls_roots_an_unparseable_endpoint_is_a_configuration_error() {
+    for base_url in [
+        "",
+        "not a url",
+        "https://[::1",
+        "http://exa mple.invalid",
+        "//localhost/v1",
+    ] {
+        let error = super::require_endpoint_without_tls_roots(base_url).expect_err(&format!(
+            "unparseable endpoint {base_url:?} must be rejected"
+        ));
+        assert!(
+            matches!(error, crate::LlmError::Config { .. }),
+            "{base_url:?} is a configuration error: {error}"
+        );
+        assert!(!error.retryable(), "{base_url:?} is not retryable");
+        assert!(
+            error.to_string().contains("invalid provider endpoint URL"),
+            "{base_url:?} says the endpoint URL is invalid: {error}"
+        );
+    }
+    let other_scheme = super::require_endpoint_without_tls_roots("ftp://localhost/v1")
+        .expect_err("a non-http scheme needs TLS roots too");
+    assert!(
+        other_scheme
+            .to_string()
+            .contains("no usable TLS root certificates"),
+        "non-http scheme names the missing roots: {other_scheme}"
+    );
+    super::require_endpoint_without_tls_roots("http://localhost:1/v1")
+        .expect("a parseable http endpoint is still allowed");
+}
+
+#[tokio::test]
+async fn without_usable_tls_roots_https_is_a_configuration_error_and_http_is_served() {
+    // 选根经过真实的 parse_root：超过 64 KiB 的根先被跳过，无法解析的根被丢弃。
+    let mut oversized = TLS.ca_der.clone();
+    oversized.resize(65_537, 0);
+    let cases = [
+        (
+            "all roots larger than 64 KiB",
+            vec![oversized.clone(), oversized],
+        ),
+        (
+            "all roots invalid",
+            vec![vec![1, 2, 3], b"not a certificate".to_vec()],
+        ),
+        ("empty root set", Vec::new()),
+    ];
+    for (case, roots) in cases {
+        let mut https = Server::start(true).await;
+        let directory = private_dir();
+        configure(directory.path(), &https.url, "chat-completions", "none");
+        let gateway = RequestGateway::new(directory.path().into(), roots)
+            .unwrap_or_else(|error| panic!("{case}: gateway must still be constructed: {error}"));
+        assert!(
+            !gateway.has_usable_tls_roots(),
+            "{case}: gateway must record that no TLS roots are usable"
+        );
+        assert!(gateway.tls_roots_der().is_empty(), "{case}: no roots kept");
+        let turn = gateway.open_turn();
+        configuration_failure(&turn, "test", "no usable TLS root certificates").await;
+        let error = match turn
+            .stream_chat(request("test"), StreamControl::default())
+            .await
+        {
+            Ok(_) => panic!("{case}: https endpoint without usable roots was dispatched"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, crate::LlmError::Config { .. }),
+            "{case}: https without roots must be a configuration error: {error}"
+        );
+        assert!(
+            !error.retryable(),
+            "{case}: configuration error must not be retried"
+        );
+        assert!(
+            matches!(
+                https.received.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ),
+            "{case}: the https mock provider must have received zero requests"
+        );
+        assert_eq!(
+            https.connections_before_probe().await,
+            0,
+            "{case}: the https mock provider must have accepted zero TCP connections"
+        );
+
+        let mut http = Server::start(false).await;
+        configure(directory.path(), &http.url, "chat-completions", "none");
+        complete(
+            turn.stream_chat(request("test"), StreamControl::default())
+                .await
+                .unwrap_or_else(|error| panic!("{case}: http endpoint must be served: {error}")),
+        )
+        .await;
+        assert_eq!(
+            http.next().await.path,
+            "/v1/chat/completions",
+            "{case}: http request reached the provider"
+        );
+    }
+}
+
+#[tokio::test]
+async fn oversized_tls_roots_still_serve_plain_http() {
+    let mut server = Server::start(false).await;
+    let directory = private_dir();
+    configure(directory.path(), &server.url, "chat-completions", "none");
+    let mut roots = vec![vec![0_u8; 65_537]];
+    for _ in 0..1025 {
+        roots.push(TLS.ca_der.clone());
+    }
+    let gateway = RequestGateway::new(directory.path().into(), roots).unwrap();
+    assert_eq!(
+        gateway.tls_roots_der().len(),
+        1024,
+        "an oversized root set must be truncated to 1024 certificates"
+    );
+    assert!(
+        gateway
+            .tls_roots_der()
+            .iter()
+            .all(|der| der.len() <= 65_536),
+        "a root larger than 65536 bytes must not be loaded"
+    );
+    complete(
+        gateway
+            .open_turn()
+            .stream_chat(request("test"), StreamControl::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(server.next().await.path, "/v1/chat/completions");
+}
+
 #[tokio::test]
 async fn invalid_configuration_only_blocks_requests_that_depend_on_it() {
     let mut server = Server::start(false).await;
@@ -927,7 +1398,7 @@ async fn invalid_configuration_only_blocks_requests_that_depend_on_it() {
 #[tokio::test]
 async fn unimplemented_protocols_and_auth_are_configuration_errors() {
     let directory = private_dir();
-    let gateway = RequestGateway::new(directory.path().into(), Vec::new()).unwrap();
+    let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
     let turn = gateway.open_turn();
     for protocol in ["responses", "interactions"] {
         for auth in ["none", "bearer"] {
@@ -1185,7 +1656,7 @@ async fn client_setup_errors_redact_credentials_in_the_hostname() {
     crate::auth::AuthStore::new(directory.path().into())
         .set("test", key)
         .unwrap();
-    let gateway = RequestGateway::new(directory.path().into(), Vec::new()).unwrap();
+    let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
     let turn = gateway.open_turn();
     let error = match tokio::time::timeout(
         Duration::from_secs(5),

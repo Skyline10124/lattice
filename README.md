@@ -66,7 +66,7 @@ enabled = ["observe__workspace"]
 ```
 
 配置目录名称与 `[agent].name` 保持一致。
-后台在每次提交接受前读取 profile，先查项目内的 `.lattice/agents`，再查后台启动环境中 `$HOME/.lattice/agents`。连接同一后台的前端共用这一全局目录；固定 `XDG_STATE_HOME` 时，更换前端 HOME 不会改变它。
+后台在每次提交接受前读取 profile，先查项目内的 `.lattice/agents`，再查后台启动环境中 `$HOME/.lattice/agents`。全局目录与其中的 profile 须属于当前用户、不可被同组或其他用户写入（默认的 0755/0644 即可），路径最后一段不能是符号链接，否则提交时按配置错误拒绝。连接同一后台的前端共用这一全局目录；固定 `XDG_STATE_HOME` 时，更换前端 HOME 不会改变它。
 这里仅启用工作区读取工具，不授予创建、编辑文件或抓取网页的工具权限。
 
 ### 2. 配置模型凭据
@@ -80,7 +80,7 @@ lattice models --provider anthropic
 
 provider 来自内置表与用户级 `~/.lattice/providers.toml`；环境变量、工作区 `.env` 和项目中的 `providers.toml` 不提供凭据或连接配置。
 
-后台默认在启动时与此后每 24 小时刷新模型元数据。在 `~/.lattice/providers.toml` 中写入以下设置可关闭自动刷新，修改后无需重启；手动执行 `lattice models refresh` 仍会刷新。
+后台在 `~/.lattice/cache/models.json` 新于 24 小时时不重复拉取；缓存缺失或更旧时在启动时拉取，成功后每 24 小时再拉取。拉取失败从 1 分钟起倍增重试，上限 1 小时。在 `~/.lattice/providers.toml` 中写入以下设置可关闭自动刷新，修改后无需重启；文件无效时该次自动刷新算作失败，按 1 分钟起倍增、上限 1 小时的退避重试，修正文件后在下一次重试时生效。手动执行 `lattice models refresh` 仍会刷新。
 
 ```toml
 [metadata]

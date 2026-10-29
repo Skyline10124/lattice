@@ -22,22 +22,39 @@ struct Configuration {
     metadata_url: Option<String>,
 }
 
+impl Configuration {
+    /// 选根之后是否还有可用的根证书；网关各处的“没有可用的根证书”都由这里判定。
+    fn has_usable_roots(&self) -> bool {
+        !self.roots_der.is_empty()
+    }
+}
+
 /// 持有配置目录与给定的 TLS 根，按 Turn 创建连接句柄。
 pub struct RequestGateway {
     configuration: Arc<Configuration>,
 }
 
+/// 没有可用根证书时对 https 端点的拒绝说明；http 端点不受影响。
+const NO_USABLE_TLS_ROOTS: &str = "no usable TLS root certificates: https provider endpoints are rejected, http endpoints are allowed";
+
 impl RequestGateway {
+    /// 选根之后集合为空也照常构造：此时记为“没有可用的根证书”，只拒绝依赖 TLS 的请求。
     pub fn new(config_dir: PathBuf, roots_der: Vec<Vec<u8>>) -> Result<Self, LlmError> {
+        let (roots_der, roots) = client::load_bounded_roots(roots_der);
         Ok(Self {
             configuration: Arc::new(Configuration {
                 directory: config_dir,
-                roots: client::tls_certificates(&roots_der)?,
+                roots,
                 roots_der,
                 #[cfg(test)]
                 metadata_url: None,
             }),
         })
+    }
+
+    /// 选根之后是否还有可用的根证书（元数据刷新据此拒绝；`GatewayTurn::resolve` 用同一判定）。
+    pub fn has_usable_tls_roots(&self) -> bool {
+        self.configuration.has_usable_roots()
     }
 
     /// Tool Host 使用同一份启动时信任根，每个 Turn 独立构造信任配置。
@@ -54,7 +71,7 @@ impl RequestGateway {
         &self,
         cancel: Arc<crate::MetadataRefreshControl>,
     ) -> Result<(), crate::MetadataError> {
-        if self.configuration.roots_der.is_empty() {
+        if !self.has_usable_tls_roots() {
             return Err(crate::MetadataError::Configuration(
                 "no usable TLS root certificates".into(),
             ));
@@ -118,10 +135,14 @@ impl GatewayTurn {
         let directory = self.configuration.directory.clone();
         let provider_id = provider_id.to_owned();
         let model_id = target.model.clone();
-        let (provider, credentials, output_limit) =
+        let (provider, credentials, output_limit, context_limit) =
             tokio::task::spawn_blocking(move || load_provider(directory, &provider_id, &model_id))
                 .await
                 .map_err(|_| configuration_error("provider configuration task failed"))??;
+        // 没有可用根证书时 https 端点按配置错误拒绝，不回退平台根；http 端点照常。
+        if !self.configuration.has_usable_roots() {
+            require_endpoint_without_tls_roots(&provider.base_url)?;
+        }
         let client = self
             .clients
             .lock()
@@ -141,6 +162,7 @@ impl GatewayTurn {
             client,
             target: target.clone(),
             output_limit,
+            context_limit,
         })
     }
 
@@ -165,6 +187,7 @@ pub struct ResolvedRequest {
     client: Arc<TurnClient>,
     target: ModelTarget,
     output_limit: Option<u64>,
+    context_limit: Option<u64>,
 }
 
 impl ResolvedRequest {
@@ -202,6 +225,7 @@ impl ResolvedRequest {
                 roots: &self.configuration.roots,
                 client: self.client.clone(),
                 output_limit: self.output_limit,
+                context_limit: self.context_limit,
                 features: self
                     .provider
                     .models
@@ -211,6 +235,21 @@ impl ResolvedRequest {
             control,
         )
         .await
+    }
+}
+
+/// 没有可用根证书时只放行能解析且 scheme 为 http 的端点，其余一律按配置错误拒绝（失败即关闭）。
+///
+/// provider 载入时已用 `net_guard::validate_base_url_static` 校验 `base_url`（能解析、只允许
+/// http/https），按现有代码路径这里不会遇到无法解析的地址；仍按失败即关闭处理，避免日后载入
+/// 规则变化时把无法解析的地址当成 http 放行。
+fn require_endpoint_without_tls_roots(base_url: &str) -> Result<(), LlmError> {
+    match url::Url::parse(base_url) {
+        Ok(url) if url.scheme() == "http" => Ok(()),
+        Ok(_) => Err(configuration_error(NO_USABLE_TLS_ROOTS)),
+        Err(error) => Err(configuration_error(format!(
+            "invalid provider endpoint URL ({error}); {NO_USABLE_TLS_ROOTS}"
+        ))),
     }
 }
 
@@ -233,7 +272,7 @@ fn load_provider(
     directory: PathBuf,
     id: &str,
     model_id: &str,
-) -> Result<(Provider, Credentials, Option<u64>), LlmError> {
+) -> Result<(Provider, Credentials, Option<u64>, Option<u64>), LlmError> {
     let (registry, credentials) = load_configuration(&directory)?;
     let provider = registry
         .get(id)
@@ -244,11 +283,13 @@ fn load_provider(
         Err(_) if provider.auth == Auth::None => Credentials::default(),
         Err(error) => return Err(configuration_error(error)),
     };
-    let output_limit = crate::metadata::Metadata::load(&directory)
+    let limits = crate::metadata::Metadata::load(&directory)
         .merge(&provider)
         .get(model_id)
-        .and_then(|model| model.limit.as_ref().and_then(|limit| limit.output));
-    Ok((provider, credentials, output_limit))
+        .and_then(|model| model.limit.clone());
+    let output_limit = limits.as_ref().and_then(|limit| limit.output);
+    let context_limit = limits.as_ref().and_then(|limit| limit.context);
+    Ok((provider, credentials, output_limit, context_limit))
 }
 
 pub(crate) fn missing_provider_error(registry: &ProviderRegistry, id: &str) -> LlmError {

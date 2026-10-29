@@ -82,11 +82,11 @@ provider 配置、凭据与模型元数据是用户级的全局状态，由后�
 - **用量。** 按[用量换算](#用量换算)得出统一口径。
 - **不使用服务端会话状态。** Responses 与 Interactions 固定发送 `store: false`，每次发送完整历史，不发送 `previous_response_id`、`previous_interaction_id`，不使用后台执行。
 
-适配器不发送采样参数（`temperature`、`top_p` 等），也不发送输出上限（例如 Responses 的 `max_output_tokens`），由服务端按模型的默认值处理；只有 Anthropic Messages 的 `max_tokens` 是必填字段，取模型元数据的输出上限，没有元数据时为 32,768。
+适配器不发送采样参数（`temperature`、`top_p` 等），也不发送输出上限（例如 Responses 的 `max_output_tokens`），由服务端按模型的默认值处理；只有 Anthropic Messages 的 `max_tokens` 是必填字段，取模型元数据的输出上限，输出上限缺失或为 0 时为 32,768。元数据有上下文窗口时，按提示的 UTF-8 字节数做两个估算（都向上取整，都不是 provider 的分词结果）：上限估算按 3 字节计 1 个 token，中日韩文字基本准确，英文偏多约三分之一；下限估算按 4 字节计 1 个 token。`max_tokens` 夹到窗口减去上限估算后的剩余空间，宁可少给输出也不让请求超窗。这个剩余空间只要大于 0 就照用，即使小于下限也不抬高，因为中日韩提示的上限估算基本准确，抬高会超窗。`MIN_OUTPUT_TOKENS`（1,024，见 [anthropic_messages.rs](../../crates/lattice-llm/src/protocol/anthropic_messages.rs)）只在按 3 字节/token 估算已无剩余空间时使用，且不超过窗口减去下限估算（4 字节/token）后的剩余空间与模型输出上限，照常发送，由 provider 判断是否放得下；剩余空间从 1 降到 0 时输出上限会跳到这个下限，这是有意的。只有按下限估算也已占满窗口时，才不发送请求，这次尝试以 `context_window_exceeded` 错误失败，不重试。下限估算对中日韩提示约少算四分之一，所以按 4 字节/token 未被拒绝的中日韩长提示仍可能被 provider 以超窗拒绝；这里只拦截按最宽松估算也放不下的请求。
 
 ### 回放来源
 
-每次尝试记录来源 `(protocol, provider id)`。reasoning、签名、加密 reasoning 与逐片段回放状态只在协议和 provider `id` 都相同时回放；任一不同时去除这些材料。provider call ID 按协议判定：协议相同时保留，包括 provider `id` 不同的情况；协议不同时去除，目标协议无法在缺少 call ID 时编码工具结果的，返回投影错误。跨来源投影保留中立语义，切回原来源时使用树中保存的原消息。Responses 请求带 `include: ["reasoning.encrypted_content"]`，使 `store: false` 时也能取得可回放的加密 reasoning。
+每次尝试记录来源 `(protocol, provider id)`。reasoning、签名、加密 reasoning 与逐片段回放状态只在协议和 provider `id` 都相同时回放；任一不同时去除这些材料。来源不含 endpoint：同一 provider `id` 在 `providers.toml` 中改了 `base_url` 之后仍回放此前的签名，新 endpoint 可能拒绝这些签名；要换 endpoint 时使用新的 provider `id`。provider call ID 按协议判定：协议相同时保留，包括 provider `id` 不同的情况；协议不同时去除，目标协议无法在缺少 call ID 时编码工具结果的，返回投影错误。跨来源投影保留中立语义，切回原来源时使用树中保存的原消息。Responses 请求带 `include: ["reasoning.encrypted_content"]`，使 `store: false` 时也能取得可回放的加密 reasoning。
 
 ## provider 配置
 
@@ -164,7 +164,7 @@ reasoning_replay = "none"              # 按模型覆盖 feature
 
 | 字段 | 位置 | 说明 |
 | --- | --- | --- |
-| `auto_refresh` | 顶层 `metadata` 表 | 布尔，默认 true；后台每次自动触发时读取当前值，false 时跳过本次刷新，`lattice models refresh` 不受影响 |
+| `auto_refresh` | 顶层 `metadata` 表 | 布尔，默认 true。每次自动触发都读取当前文件：false 时跳过本次拉取；文件无效时本次自动刷新算作失败，按拉取失败的退避重试。`lattice models refresh` 不受影响 |
 | `protocol`、`base_url`、`auth`、`catalog` | provider 表 | 见[字段](#字段)；覆盖内置 provider 时只写要改的字段，不能写 `protocol` |
 | `features` | provider 子表 | 覆盖或补充 provider 级 features |
 | `models."<模型>"` | provider 子表 | 手写元数据：`context`、`output`（token 数），`effort`（可用档位列表），`tools`（布尔，默认 true），`cost`（`input`、`output`、`cache_read`、`cache_write`，美元每百万 token） |
@@ -225,7 +225,7 @@ feature 由协议适配器的代码定义，配置只能在已有取值中选择
 | Chat Completions 总是在助手消息中发回 `reasoning_content`（`protocol/projection/chat_completions.rs`） | 已由 #337 改为由 `reasoning_replay` 决定，默认不发；内置表中需要它的厂商启用 `reasoning-content` |
 | Chat Completions 同时读取 `reasoning_content` 与 `reasoning` | 保持，属于解析端的兼容 |
 | Chat Completions 总是发送 `stream_options: {"include_usage": true}` | 保持，属于标准协议行为 |
-| Anthropic `max_tokens` 固定为 32,768 | 已由 #336 改为取模型元数据的输出上限，没有元数据时为 32,768 |
+| Anthropic `max_tokens` 固定为 32,768 | 已由 #336 改为取模型元数据的输出上限，缺失或为 0 时为 32,768；有上下文窗口时按 3 字节/token 估算的提示夹进剩余空间，剩余空间大于 0 时照用；只有按 3 字节/token 估算已无空间时才给 `MIN_OUTPUT_TOKENS`（1,024，不超过按 4 字节/token 估算的剩余空间与模型输出上限）；按 4 字节/token 估算也放不下时报 `context_window_exceeded`，见[适配器的职责](#适配器的职责) |
 | generateContent 的工具 schema 用 `parametersJsonSchema`（#270） | 保持，属于该协议的写法 |
 | OpenAI 兼容路径的工具名映射 | 已由 #311 删除，工具名原样发送 |
 
@@ -242,13 +242,13 @@ feature 由协议适配器的代码定义，配置只能在已有取值中选择
 | 来源 | 内容 | 更新 |
 | --- | --- | --- |
 | 内置快照 | xtask 从 models.dev 生成，只含内置表 `catalog` 所列的条目 | 随版本发布，变化在 PR 中审查 |
-| 缓存 `cache/models.json` | 后台从 `https://models.dev/api.json` 拉取，保留内置表与 `providers.toml` 中 `catalog` 所列的条目，字段规则与快照相同 | 后台启动时与此后每 24 小时；`metadata.auto_refresh = false` 时不自动刷新，`lattice models refresh` 仍可立即刷新 |
+| 缓存 `cache/models.json` | 后台从 `https://models.dev/api.json` 拉取，保留内置表与 `providers.toml` 中 `catalog` 所列的条目，字段规则与快照相同 | 文件新于 24 小时则跳过自动拉取。缺失或更旧时在启动时拉取，成功后再隔 24 小时。失败从 1 分钟起倍增重试，上限 1 小时。`metadata.auto_refresh = false` 时跳过该次触发；`providers.toml` 无效时该次触发算作失败，按上述退避重试。每次触发都读当前配置。`lattice models refresh` 仍可立即刷新 |
 | `providers.toml` 的 `models` | 用户手写 | 用户编辑 |
 
 - **选择来源。** 缓存存在且能解析时整份使用缓存，否则使用内置快照；缓存中缺少某个 `catalog` 条目时，这个条目使用快照。`providers.toml` 中的 `catalog` 在缓存与快照中都没有时，要等下一次刷新才有元数据；在此之前，以及 models.dev 中没有这个条目时，这个 provider 只有手写的元数据。手写的元数据按字段覆盖上述结果，只写在 `providers.toml` 中的模型由手写值单独构成。
 - **保留的字段。** 模型 `id`、`name`、`limit.context`、`limit.output`、`reasoning`、`reasoning_options`、`tool_call`、`modalities.input`、`cost.input`、`cost.output`、`cost.cache_read`、`cost.cache_write`、`cost.reasoning` 与 `status`。其余字段丢弃。
 - **没有过期的概念。** 缓存旧了只影响列表与价格的准确性，不影响请求发往哪里，不提示过期。
-- **刷新失败**只记日志，继续使用上一份数据；`lattice models refresh` 把失败原因返回给用户。拉取使用 HTTPS 与固定地址的连接，响应最多 32 MiB，30 秒内没有读完即放弃。新缓存先写临时文件再改名替换。
+- **刷新失败**只记日志，继续使用上一份数据，并从 1 分钟起倍增重试，上限 1 小时。`lattice models refresh` 把失败原因返回给用户。拉取使用 HTTPS 与固定地址的连接，响应最多 32 MiB，30 秒内没有读完即放弃。新缓存先写临时文件再改名替换。
 - **请求路径上不联网。** 接受 Turn 与每次请求时只读上述数据。
 
 ### 模型候选

@@ -1371,6 +1371,137 @@ fn backend_tls_roots_are_shared_with_tools_and_fixed_until_restart() {
     support::finish_recorded(evidence, result);
 }
 
+/// 把任意字节编成 PEM 证书块；只用于构造超过 64 KiB 的“证书”，大小检查先于解析。
+fn pem_certificate(der: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::new();
+    for chunk in der.chunks(3) {
+        let bytes = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let group = u32::from_be_bytes([0, bytes[0], bytes[1], bytes[2]]);
+        for index in 0..4 {
+            if index <= chunk.len() {
+                encoded.push(TABLE[(group >> (18 - 6 * index) & 0x3f) as usize] as char);
+            } else {
+                encoded.push('=');
+            }
+        }
+    }
+    let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
+    for line in encoded.as_bytes().chunks(64) {
+        pem.push_str(std::str::from_utf8(line).unwrap());
+        pem.push('\n');
+    }
+    pem.push_str("-----END CERTIFICATE-----\n");
+    pem
+}
+
+/// 启动时的根证书全都超过 64 KiB：后台照常启动，https provider 的 `session send`
+/// 在接受前按配置错误拒绝且不发请求；同一后台换成 http provider 照常接受并完成。
+#[test]
+fn oversized_startup_roots_reject_https_provider_at_submit_and_serve_http() {
+    use lattice_system_harness::{FakeLlmServer, ProviderFixture};
+    let (world, spec) = direct_world(
+        "background-oversized-roots",
+        "background",
+        "[]",
+        "\n[llm.retry]\nmax_retries=0\n",
+    );
+    let budget = world.budget(&spec);
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let root = world.root().join("oversized-roots.pem");
+        let oversized = pem_certificate(&[0x30; 65_537]);
+        std::fs::write(&root, format!("{oversized}{oversized}")).unwrap();
+        world.set_env("SSL_CERT_FILE", root.display().to_string());
+
+        let https = FakeLlmServer::start(SseScript::plain("must not be requested")).unwrap();
+        world
+            .wire_provider(
+                ProviderFixture::chat_completions("background"),
+                &https,
+                FAKE_API_KEY,
+            )
+            .unwrap();
+        let rejected = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &[
+                "--json",
+                "session",
+                "send",
+                "https",
+                "--agent",
+                "background",
+            ],
+        );
+        assert!(
+            rejected.is_clean_exit(2),
+            "https provider without usable roots must be rejected at submit: {}",
+            rejected.summary()
+        );
+        let outcome = records(&rejected);
+        assert_eq!(
+            support::rejected_kind(&outcome),
+            Some("bad_request"),
+            "rejection must carry the configuration-error kind"
+        );
+        assert!(
+            outcome.accepted_turn_id().is_none(),
+            "rejected submit must not accept a Turn"
+        );
+        let stdout = String::from_utf8_lossy(&rejected.stdout);
+        assert!(
+            stdout.contains("configuration error")
+                && stdout.contains("no usable TLS root certificates"),
+            "rejection must explain the missing roots: {stdout}"
+        );
+        assert!(
+            https.captured_requests().is_empty(),
+            "https provider must not receive a request"
+        );
+
+        let http = FakeLlmServer::start_plain_http1(SseScript::plain("plain http answer")).unwrap();
+        world
+            .wire_provider(
+                ProviderFixture::chat_completions("background"),
+                &http,
+                FAKE_API_KEY,
+            )
+            .unwrap();
+        let served = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &["--json", "session", "send", "http", "--agent", "background"],
+        );
+        assert!(
+            served.is_clean_exit(0),
+            "http provider must be served without usable roots: {}",
+            served.summary()
+        );
+        assert!(
+            records(&served).accepted_turn_id().is_some(),
+            "http submit must be accepted"
+        );
+        assert_eq!(
+            http.captured_requests().len(),
+            1,
+            "http provider received exactly one request"
+        );
+        assert!(
+            https.captured_requests().is_empty(),
+            "https provider still untouched"
+        );
+        evidence.record_captures(http.captured_requests());
+    }));
+    support::finish_recorded(evidence, result);
+}
+
 #[test]
 fn concurrent_turns_keep_frozen_network_policies_with_shared_startup_roots() {
     use lattice_system_harness::{
@@ -1493,7 +1624,9 @@ fn concurrent_turns_keep_frozen_network_policies_with_shared_startup_roots() {
 }
 
 #[test]
-fn no_usable_startup_tls_root_rejects_all_submissions_before_acceptance() {
+/// 启动时的 `SSL_CERT_FILE` 里没有一张证书：没有可用的根证书，https provider 的提交在接受前
+/// 按配置错误拒绝（http 端点照常放行，见 `oversized_startup_roots_reject_https_provider_at_submit_and_serve_http`）。
+fn no_usable_startup_tls_root_rejects_https_submissions_before_acceptance() {
     let (world, spec) = direct_world("background-no-tls-root", "background", "[]", "");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
@@ -1503,18 +1636,29 @@ fn no_usable_startup_tls_root_rejects_all_submissions_before_acceptance() {
         world.set_env("SSL_CERT_FILE", root.display().to_string());
         let directory = world.home().join(".lattice");
         std::fs::create_dir_all(&directory).unwrap();
-        std::fs::write(directory.join("providers.toml"), "[metadata]\nauto_refresh=false\n[providers.local]\nprotocol='chat-completions'\nbase_url='http://localhost:9/v1'\nauth='none'\n").unwrap();
+        std::fs::write(directory.join("providers.toml"), "[metadata]\nauto_refresh=false\n[providers.local]\nprotocol='chat-completions'\nbase_url='https://localhost:9/v1'\nauth='none'\n").unwrap();
         let out = run(
             &world,
             &budget,
             &mut evidence,
             &["--json", "run", "no roots", "--agent", "background"],
         );
-        assert!(out.is_clean_exit(2));
+        assert!(
+            out.is_clean_exit(2),
+            "https provider without usable roots exits 2"
+        );
         let sent = records(&out);
         let error = sent.rejection().unwrap();
-        assert_eq!(error.kind, "bad_request");
-        assert!(error.message.contains("no usable TLS root"));
+        assert_eq!(
+            error.kind, "bad_request",
+            "rejected as a configuration error"
+        );
+        assert!(
+            error.message.contains("configuration error")
+                && error.message.contains("no usable TLS root"),
+            "rejection names the missing roots: {}",
+            error.message
+        );
         assert!(sent.accepted_turn_id().is_none());
     }));
     support::finish_recorded(evidence, result);
