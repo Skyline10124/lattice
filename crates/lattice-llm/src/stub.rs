@@ -48,6 +48,10 @@ pub enum LlmError {
     #[error("protocol limit exceeded: {message}")]
     ProtocolLimit { message: String },
 
+    /// 估算的提示已占满上下文窗口，发送前就停止；重试同一请求不会改变结果。
+    #[error("context window exceeded: {message}")]
+    ContextWindowExceeded { message: String },
+
     #[error("provider projection error: {0}")]
     Projection(#[from] crate::protocol::projection::ProjectionError),
 
@@ -66,6 +70,7 @@ impl LlmError {
             Self::ProviderHttp { .. } => "provider_http",
             Self::StreamRead { .. } => "stream_read",
             Self::ProtocolLimit { .. } => "protocol_limit",
+            Self::ContextWindowExceeded { .. } => "context_window_exceeded",
             Self::Projection(_) => "projection",
             Self::Other(_) => "other",
         }

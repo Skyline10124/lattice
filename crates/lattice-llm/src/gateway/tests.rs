@@ -809,8 +809,12 @@ async fn changed_base_url_does_not_replay_a_reasoning_signature() {
     );
 }
 
-#[tokio::test]
-async fn messages_max_tokens_stays_inside_the_context_window() {
+/// 以给定的模型限制发送一次 Messages 请求，返回请求体里的 `max_tokens`。
+/// 网关在发送前拒绝时返回错误，并确认 provider 没有收到请求。
+async fn messages_max_tokens(
+    limit: serde_json::Value,
+    text: Option<&str>,
+) -> Result<u64, crate::LlmError> {
     let mut server = Server::start(true).await;
     let directory = private_dir();
     configure(directory.path(), &server.url, "anthropic-messages", "none");
@@ -818,59 +822,120 @@ async fn messages_max_tokens_stays_inside_the_context_window() {
     let base = std::fs::read_to_string(&config).unwrap();
     std::fs::write(&config, format!("{base}catalog = 'custom'\n")).unwrap();
     std::fs::create_dir(directory.path().join("cache")).unwrap();
-    // 600_000 字节正文，加上 Messages 用户消息里的 "user" 与 "text"，
-    // 字符串共 600_008 字节。按 4 字节一个 token 向上取整是 150_002。
-    // 上下文 200_000，输出上限 64_000，能放下的输出是 49_998。
     std::fs::write(
         directory.path().join("cache/models.json"),
-        serde_json::to_vec(&serde_json::json!({"custom":{"models":{"model-id":{"id":"model-id","limit":{"context":200_000,"output":64_000}}}}})).unwrap(),
+        serde_json::to_vec(
+            &serde_json::json!({"custom":{"models":{"model-id":{"id":"model-id","limit":limit}}}}),
+        )
+        .unwrap(),
     )
     .unwrap();
     let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
     let mut request = request("test");
-    request.messages.push(user_message(&"a".repeat(600_000)));
-    complete(
-        gateway
-            .open_turn()
-            .stream_chat(request, StreamControl::default())
-            .await
-            .unwrap(),
-    )
-    .await;
+    if let Some(text) = text {
+        request.messages.push(user_message(text));
+    }
+    match gateway
+        .open_turn()
+        .stream_chat(request, StreamControl::default())
+        .await
+    {
+        Ok(stream) => {
+            complete(stream).await;
+            Ok(server.next().await.body["max_tokens"].as_u64().unwrap())
+        }
+        Err(error) => {
+            assert!(
+                server.received.try_recv().is_err(),
+                "a request rejected before sending must not reach the provider"
+            );
+            Err(error)
+        }
+    }
+}
+
+#[tokio::test]
+async fn messages_zero_output_limit_without_a_window_sends_the_default() {
+    let max_tokens = messages_max_tokens(serde_json::json!({"output":0}), Some("hi"))
+        .await
+        .unwrap();
     assert_eq!(
-        server.next().await.body["max_tokens"],
-        49_998,
-        "max_tokens must leave the prompt inside the context window"
+        max_tokens, 32_768,
+        "output limit 0 must fall back to 32,768"
     );
 }
 
 #[tokio::test]
-async fn messages_max_tokens_does_not_send_a_zero_output_limit() {
-    let mut server = Server::start(true).await;
-    let directory = private_dir();
-    configure(directory.path(), &server.url, "anthropic-messages", "none");
-    let config = directory.path().join("providers.toml");
-    let base = std::fs::read_to_string(&config).unwrap();
-    std::fs::write(&config, format!("{base}catalog = 'custom'\n")).unwrap();
-    std::fs::create_dir(directory.path().join("cache")).unwrap();
-    std::fs::write(
-        directory.path().join("cache/models.json"),
-        serde_json::to_vec(&serde_json::json!({"custom":{"models":{"model-id":{"id":"model-id","limit":{"context":100,"output":0}}}}})).unwrap(),
+async fn messages_output_limit_that_fits_the_window_is_sent_unchanged() {
+    let max_tokens = messages_max_tokens(
+        serde_json::json!({"context":200_000,"output":64_000}),
+        Some("hi"),
     )
+    .await
     .unwrap();
-    let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
-    complete(
-        gateway
-            .open_turn()
-            .stream_chat(request("test"), StreamControl::default())
-            .await
-            .unwrap(),
-    )
-    .await;
     assert_eq!(
-        server.next().await.body["max_tokens"],
-        100,
-        "an output limit of 0 must not be sent; the fallback is clamped to the context window"
+        max_tokens, 64_000,
+        "a short prompt must keep the full output limit"
+    );
+}
+
+#[tokio::test]
+async fn messages_max_tokens_is_clamped_into_the_remaining_window() {
+    // 450_000 字节正文，加上 Messages 用户消息里的 "user" 与 "text"，
+    // 字符串共 450_008 字节。按 3 字节一个 token 向上取整是 150_003。
+    // 上下文 200_000，输出上限 64_000，能放下的输出是 49_997。
+    let max_tokens = messages_max_tokens(
+        serde_json::json!({"context":200_000,"output":64_000}),
+        Some(&"a".repeat(450_000)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        max_tokens, 49_997,
+        "max_tokens must leave the estimated prompt inside the context window"
+    );
+}
+
+#[tokio::test]
+async fn messages_max_tokens_leaves_room_for_a_chinese_prompt() {
+    // 150_000 个汉字，每字 3 字节、约 1 个 token。加上 "user" 与 "text"
+    // 共 450_008 字节，估算 150_003 token，夹到 49_997。按 4 字节一个 token
+    // 只估 112_502，会发送 64_000，与实际约 150_000 的提示相加超出窗口。
+    const CHARS: u64 = 150_000;
+    const CONTEXT: u64 = 200_000;
+    let max_tokens = messages_max_tokens(
+        serde_json::json!({"context":CONTEXT,"output":64_000}),
+        Some(&"中".repeat(CHARS as usize)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(max_tokens, 49_997, "Chinese prompt clamp");
+    assert!(
+        max_tokens + CHARS <= CONTEXT,
+        "max_tokens {max_tokens} plus ~{CHARS} prompt tokens must fit the {CONTEXT}-token window"
+    );
+}
+
+#[tokio::test]
+async fn messages_full_window_is_rejected_before_sending() {
+    // 300 字节正文加 "user"、"text" 共 308 字节，估算 103 token，超过 100 的窗口。
+    let error = messages_max_tokens(
+        serde_json::json!({"context":100,"output":64_000}),
+        Some(&"a".repeat(300)),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(error, crate::LlmError::ContextWindowExceeded { .. }),
+        "a full window must fail as context_window_exceeded, got {error:?}"
+    );
+    assert!(
+        !error.retryable(),
+        "context window exceeded must not be retried"
+    );
+    assert!(
+        error.to_string().contains("103 tokens") && error.to_string().contains("100-token"),
+        "diagnostic must name the estimate and the window, got {error}"
     );
 }
 

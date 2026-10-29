@@ -6,7 +6,8 @@
 use lattice_conversation::{Protocol, ReplayOrigin};
 use std::collections::BTreeMap;
 
-use crate::protocol::projection::{ProjectionError, request_messages_to_wire, wire_usage};
+use crate::LlmError;
+use crate::protocol::projection::{request_messages_to_wire, wire_usage};
 use crate::reply::{
     PartDelta, PartKind, ProtocolEvent, ReplyProtocolError, StreamStop, StringPatch,
 };
@@ -35,14 +36,15 @@ fn map_stop_reason(reason: &str) -> String {
 /// 按模型名构造 Messages 流式请求。
 ///
 /// `max_tokens` 必填。输出上限缺失或为 0 时用 [`DEFAULT_MAX_OUTPUT_TOKENS`]；
-/// 有上下文窗口时再夹到该请求放得下的范围，避免提示与输出之和超出窗口后被拒绝。
+/// 有上下文窗口时再夹到该请求放得下的范围，避免提示与输出之和超出窗口后被拒绝；
+/// 估算的提示已占满窗口时返回 [`LlmError::ContextWindowExceeded`]，不发送请求。
 pub fn build_request_json(
     request: &ChatRequest,
     model: &str,
     output_limit: Option<u64>,
     context_limit: Option<u64>,
     origin: &ReplayOrigin,
-) -> Result<serde_json::Value, ProjectionError> {
+) -> Result<serde_json::Value, LlmError> {
     let projected = request_messages_to_wire(origin, &request.messages)?;
     let max_tokens = fit_max_tokens(
         output_limit,
@@ -52,7 +54,13 @@ pub fn build_request_json(
             &projected.messages,
             &request.tools,
         ),
-    );
+    )
+    .map_err(|exceeded| LlmError::ContextWindowExceeded {
+        message: format!(
+            "estimated prompt of {} tokens leaves no room for output in the {}-token context window of {model}",
+            exceeded.prompt_tokens, exceeded.context
+        ),
+    })?;
     let mut body = serde_json::json!({
         "model": model,
         "messages": projected.messages,
@@ -82,20 +90,38 @@ pub fn build_request_json(
     Ok(body)
 }
 
+/// 估算的提示 token 数已不小于上下文窗口。
+struct ContextExceeded {
+    prompt_tokens: u64,
+    context: u64,
+}
+
 /// 输出上限缺失或为 0 时回落到默认值，再按提示占用夹进上下文窗口。
-/// 提示按 4 个 UTF-8 字节计 1 个 token 并向上取整，这是 Anthropic 对英文的约算；
-/// 窗口放不下时发送 1，不发送 0。
-fn fit_max_tokens(output_limit: Option<u64>, context_limit: Option<u64>, prompt_bytes: u64) -> u64 {
+///
+/// 提示按 3 个 UTF-8 字节计 1 个 token 并向上取整。英文约 4 字节一个 token，
+/// 这样多估约三分之一；中日韩文字每字 3 字节、约 1 个 token，按 4 字节会少估
+/// 约 25%，夹完仍可能超窗。宁可少给输出，也不让对端以不可重试的 400 拒绝。
+/// 这只是估算，不是 provider 的分词结果。窗口放不下任何输出时返回错误，不发送 1。
+fn fit_max_tokens(
+    output_limit: Option<u64>,
+    context_limit: Option<u64>,
+    prompt_bytes: u64,
+) -> Result<u64, ContextExceeded> {
     let requested = match output_limit {
         Some(0) | None => DEFAULT_MAX_OUTPUT_TOKENS,
         Some(limit) => limit,
     };
     let Some(context) = context_limit.filter(|limit| *limit > 0) else {
-        return requested;
+        return Ok(requested);
     };
-    let prompt_tokens = prompt_bytes.div_ceil(4);
-    let room = context.saturating_sub(prompt_tokens);
-    if room == 0 { 1 } else { requested.min(room) }
+    let prompt_tokens = prompt_bytes.div_ceil(3);
+    match context.checked_sub(prompt_tokens) {
+        Some(room) if room > 0 => Ok(requested.min(room)),
+        _ => Err(ContextExceeded {
+            prompt_tokens,
+            context,
+        }),
+    }
 }
 
 fn prompt_bytes(
@@ -352,6 +378,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::protocol::projection::ProjectionError;
     use crate::test_reply::Parser;
     use crate::types::{ChatRequest, ModelTarget, ToolDefinition};
     use crate::{LlmEvent, ReplyOutcome, ReplyStop, StreamStop};

@@ -124,13 +124,15 @@ impl ProtocolParser {
                     origin,
                 )
             }
-            Self::Messages(_) => protocol::anthropic_messages::build_request_json(
-                request,
-                model,
-                output_limit,
-                context_limit,
-                origin,
-            ),
+            Self::Messages(_) => {
+                return protocol::anthropic_messages::build_request_json(
+                    request,
+                    model,
+                    output_limit,
+                    context_limit,
+                    origin,
+                );
+            }
             Self::GenerateContent(_) => {
                 protocol::generate_content::build_request_json(request, origin)
             }
@@ -561,6 +563,7 @@ fn redact_error(mut error: LlmError, credentials: &Credentials) -> LlmError {
         | LlmError::ProviderHttp { message, .. }
         | LlmError::StreamRead { message }
         | LlmError::ProtocolLimit { message }
+        | LlmError::ContextWindowExceeded { message }
         | LlmError::Other(message) => *message = credentials.redact(message),
         LlmError::Projection(_) => {}
     }
