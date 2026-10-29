@@ -286,12 +286,9 @@ fn models_redact_catalog_ids_that_match_a_known_credential() {
     world.budget(&spec);
     let directory = world.home().join(".lattice");
     write_credential_providers(&directory);
-    let mut evidence = lattice_system_harness::ScenarioEvidence::new(
-        &world,
-        &spec.name,
-        [CATALOG_KEY.to_owned()],
-    )
-    .unwrap();
+    let mut evidence =
+        lattice_system_harness::ScenarioEvidence::new(&world, &spec.name, [CATALOG_KEY.to_owned()])
+            .unwrap();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         world
             .register_key(
