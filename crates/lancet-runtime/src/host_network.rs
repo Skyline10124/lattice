@@ -281,14 +281,6 @@ impl NetworkFetchHost {
             }
         };
 
-        // 失败即关闭：没有可用根时只放行 http。URL 已在上面解析成功（解析失败已拒绝），
-        // 且 validate_fetch_url 只允许 http/https；这里仍不以 "== https" 判断，避免漏放其他 scheme。
-        if parsed.scheme() != "http" && self.tls.is_none() {
-            self.record_policy_denial(&parsed, &host, hop, ctx, "tls_roots_unavailable");
-            self.remember(denied_error(NO_TLS_ROOTS));
-            return Err(FetchError::Denied);
-        }
-
         if let Err(denial) = authorize_operation(&ctx.admitted, &self.cell(), &target, &ctx.turn_id)
         {
             ctx.evidence.record_network_denied(
@@ -299,6 +291,16 @@ impl NetworkFetchHost {
                 empty_network_evidence(hop, &parsed, NetworkPolicyVerdict::Denied),
             );
             self.remember(effect_error(denial.to_string()));
+            return Err(FetchError::Denied);
+        }
+
+        // 放在网络策略与单元授权之后、解析与连接之前：不在允许范围内的目标照常按策略拒绝，
+        // 只有本来会被放行的 https 请求才报告缺少根证书。
+        // 失败即关闭：没有可用根时只放行 http。URL 已在上面解析成功（解析失败已拒绝），
+        // 且 validate_fetch_url 只允许 http/https；这里仍不以 "== https" 判断，避免漏放其他 scheme。
+        if parsed.scheme() != "http" && self.tls.is_none() {
+            self.record_policy_denial(&parsed, &host, hop, ctx, "tls_roots_unavailable");
+            self.remember(denied_error(NO_TLS_ROOTS));
             return Err(FetchError::Denied);
         }
 
@@ -1385,6 +1387,73 @@ mod request_chain {
             hits.load(Ordering::SeqCst),
             1,
             "http request reached the server"
+        );
+    }
+
+    /// 没有可用 TLS 根时，策略或单元授权不允许的 https 目标仍按原因报告拒绝，
+    /// 只有本来会被放行的目标才报告 `tls_roots_unavailable`；三种情况都不解析、不连接。
+    #[tokio::test]
+    async fn without_tls_roots_policy_denials_take_precedence_over_missing_roots() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&accepted);
+        tokio::spawn(async move {
+            while let Ok((_stream, _)) = listener.accept().await {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let not_allowlisted = host(&[], false);
+        let mut not_admitted = host(&["127.0.0.1"], false);
+        not_admitted.scope_name = "unadmitted-scope".into();
+        let allowed = host(&["127.0.0.1"], false);
+        for (name, fetch_host, url, reason) in [
+            (
+                "https target outside the allowlist",
+                &not_allowlisted,
+                "https://192.0.2.1/".to_string(),
+                "network_policy",
+            ),
+            (
+                "https target in a scope the tool was not admitted for",
+                &not_admitted,
+                format!("https://{addr}/"),
+                "cell_denied",
+            ),
+            (
+                "allowlisted and admitted https target",
+                &allowed,
+                format!("https://{addr}/"),
+                "tls_roots_unavailable",
+            ),
+        ] {
+            let (ctx, _cancel) = call_ctx(Duration::from_secs(5));
+            let error = fetch_host.fetch(get(url), ctx.clone()).await.unwrap_err();
+            assert!(
+                matches!(error, FetchError::Denied),
+                "{name}: error kind {error:?}"
+            );
+            let (_, effects, denied) = ctx.evidence.snapshot();
+            assert!(effects.effects.is_empty(), "{name}: recorded an effect");
+            assert_eq!(denied.denied.len(), 1, "{name}: one denial");
+            assert_eq!(denied.denied[0].reason, reason, "{name}: denial reason");
+            let network = denied.denied[0].network.as_ref().unwrap();
+            assert_eq!(
+                network.resolution,
+                NetworkResolution::NotAttempted,
+                "{name}: no resolution"
+            );
+            let refusal = format!("{:?}", fetch_host.take_refusal());
+            assert_eq!(
+                refusal.contains("no usable TLS root certificates"),
+                reason == "tls_roots_unavailable",
+                "{name}: only the allowed target names the missing roots: {refusal}"
+            );
+        }
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            0,
+            "no https request without roots opens a connection"
         );
     }
 
