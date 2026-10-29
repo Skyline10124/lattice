@@ -339,7 +339,6 @@ mod tests {
         let origin = lattice_session::store::AttemptOrigin {
             protocol: lattice_session::store::AttemptProtocol::ChatCompletions,
             provider_id: "openai".into(),
-            base_url: "https://provider.example".into(),
         };
         env.db
             .start_request(&lock, key, origin.clone(), now)
@@ -357,7 +356,6 @@ mod tests {
                         Some(lattice_conversation::ReplayOrigin {
                             protocol: Protocol::ChatCompletions,
                             provider_id: "openai".into(),
-                            base_url: "https://provider.example".into(),
                         }),
                         vec![MessagePart::semantic_only(MessageSemantic::ToolCall {
                             call: UnboundToolCall {

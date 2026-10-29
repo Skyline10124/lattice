@@ -86,7 +86,7 @@ provider 配置、凭据与模型元数据是用户级的全局状态，由后�
 
 ### 回放来源
 
-每次尝试记录来源 `(protocol, provider id, base_url)`。reasoning、签名、加密 reasoning 与逐片段回放状态只在协议、provider `id` 与 `base_url` 都相同时回放；任一不同时去除这些材料，所以在 `providers.toml` 中改了 `base_url` 之后，此前的签名不再回放。provider call ID 按协议判定：协议相同时保留，包括 provider `id` 不同的情况；协议不同时去除，目标协议无法在缺少 call ID 时编码工具结果的，返回投影错误。跨来源投影保留中立语义，切回原来源时使用树中保存的原消息。Responses 请求带 `include: ["reasoning.encrypted_content"]`，使 `store: false` 时也能取得可回放的加密 reasoning。
+每次尝试记录来源 `(protocol, provider id)`。reasoning、签名、加密 reasoning 与逐片段回放状态只在协议和 provider `id` 都相同时回放；任一不同时去除这些材料。来源不含 endpoint：同一 provider `id` 在 `providers.toml` 中改了 `base_url` 之后仍回放此前的签名，新 endpoint 可能拒绝这些签名；要换 endpoint 时使用新的 provider `id`。provider call ID 按协议判定：协议相同时保留，包括 provider `id` 不同的情况；协议不同时去除，目标协议无法在缺少 call ID 时编码工具结果的，返回投影错误。跨来源投影保留中立语义，切回原来源时使用树中保存的原消息。Responses 请求带 `include: ["reasoning.encrypted_content"]`，使 `store: false` 时也能取得可回放的加密 reasoning。
 
 ## provider 配置
 

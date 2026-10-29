@@ -792,7 +792,6 @@ async fn slow_observer_reads_latest_entries_suffixes_and_attempt_boundaries() {
     let attempt_origin = AttemptOrigin {
         protocol: AttemptProtocol::ChatCompletions,
         provider_id: "openai-compatible".into(),
-        base_url: "https://provider.example".into(),
     };
     io.start_request(key, attempt_origin.clone()).await.unwrap();
     sink.emit(crate::TurnEvent::ModelStarted {

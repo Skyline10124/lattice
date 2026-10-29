@@ -148,7 +148,6 @@ impl ReservedClient {
         let origin = AttemptOrigin {
             protocol: AttemptProtocol::ChatCompletions,
             provider_id: "openai-compatible".into(),
-            base_url: "https://provider.example".into(),
         };
         self.store
             .start_request(&lock, key, origin.clone(), chrono::Utc::now())
@@ -166,7 +165,6 @@ impl ReservedClient {
                         Some(lattice_conversation::ReplayOrigin {
                             protocol: Protocol::ChatCompletions,
                             provider_id: "openai-compatible".into(),
-                            base_url: "https://provider.example".into(),
                         }),
                         vec![MessagePart::semantic_only(MessageSemantic::ToolCall {
                             call: UnboundToolCall {

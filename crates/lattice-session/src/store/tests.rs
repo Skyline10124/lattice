@@ -250,7 +250,6 @@ fn origin() -> AttemptOrigin {
     AttemptOrigin {
         protocol: AttemptProtocol::ChatCompletions,
         provider_id: "openai".into(),
-        base_url: "https://api.openai.com/v1".into(),
     }
 }
 
@@ -1873,6 +1872,45 @@ fn every_commit_reopens_with_read_only_conclusions() {
     }
 }
 
+/// 回放来源只记录协议与 provider ID：DTO、会话记录与节点记录的序列化中
+/// 都不得出现 endpoint / base_url 字段；格式版本仍为 5。
+#[test]
+fn replay_origin_records_no_endpoint() {
+    fn assert_no_endpoint(label: &str, text: &str) {
+        for field in ["base_url", "endpoint"] {
+            assert!(
+                !text.contains(field),
+                "{label} 不应包含 {field} 字段: {text}"
+            );
+        }
+    }
+    let dto = serde_json::to_value(origin()).unwrap();
+    assert_eq!(
+        dto,
+        json!({"protocol":"chat-completions","provider_id":"openai"}),
+        "回放来源 DTO 只含协议与 provider ID"
+    );
+    assert_no_endpoint("回放来源 DTO", &dto.to_string());
+
+    let (_d, _l, db) = store();
+    let (_lock, _calls) = running(&db, sid(1), tid(1), 1, 1);
+    let r = records(&db);
+    let session = encode(&r.sessions[&sid(1)]).unwrap();
+    assert_eq!(&session[..4], &5u32.to_be_bytes(), "会话记录格式版本为 5");
+    assert_no_endpoint("会话记录", &String::from_utf8_lossy(&session[4..]));
+    let mut origins = 0;
+    for ((_, id), node) in &r.nodes {
+        let bytes = encode(node).unwrap();
+        assert_eq!(&bytes[..4], &5u32.to_be_bytes(), "节点 {id:?} 格式版本为 5");
+        let text = String::from_utf8_lossy(&bytes[4..]).into_owned();
+        origins += text.matches("\"origin\"").count();
+        assert_no_endpoint(&format!("节点 {id:?}"), &text);
+    }
+    assert!(origins > 0, "至少一条节点记录写入了回放来源");
+    let detail = serde_json::to_string(&detail(&db)).unwrap();
+    assert_no_endpoint("turn 详情", &detail);
+}
+
 #[test]
 fn attempt_sources_survive_retry_and_reopen() {
     let (_dir, layout, db) = store();
@@ -1883,12 +1921,10 @@ fn attempt_sources_survive_retry_and_reopen() {
     let first = AttemptOrigin {
         protocol: AttemptProtocol::ChatCompletions,
         provider_id: "edge-1".into(),
-        base_url: "https://api.openai.com/v1".into(),
     };
     let second = AttemptOrigin {
         protocol: AttemptProtocol::Messages,
         provider_id: "edge-1".into(),
-        base_url: "https://api.openai.com/v1".into(),
     };
     db.start_request(&lock, key(tid(1), 0, 0), first.clone(), now())
         .unwrap();
@@ -1902,8 +1938,8 @@ fn attempt_sources_survive_retry_and_reopen() {
         .unwrap();
     let turn = detail(&db);
     let expected = [
-        json!({"base_url":"https://api.openai.com/v1","protocol":"chat-completions","provider_id":"edge-1"}),
-        json!({"base_url":"https://api.openai.com/v1","protocol":"anthropic-messages","provider_id":"edge-1"}),
+        json!({"protocol":"chat-completions","provider_id":"edge-1"}),
+        json!({"protocol":"anthropic-messages","provider_id":"edge-1"}),
     ];
     let stored = serde_json::to_value(node_at(&db, 2)).unwrap();
     for (i, expected) in expected.iter().enumerate() {
@@ -1936,7 +1972,6 @@ fn attempt_sources_survive_retry_and_reopen() {
     let third = AttemptOrigin {
         protocol: AttemptProtocol::GenerateContent,
         provider_id: "edge-1".into(),
-        base_url: "https://api.openai.com/v1".into(),
     };
     db.start_request(&lock, key(tid(1), 1, 0), third.clone(), now())
         .unwrap();
@@ -1994,58 +2029,6 @@ fn attempts_without_reply_allow_sent_and_stopped_on_reopen() {
 }
 
 #[test]
-fn attempt_origin_rejects_invalid_endpoints() {
-    let long = format!("https://{}", "a".repeat(8_193 - "https://".len()));
-    for (case, base_url) in [
-        ("empty", String::new()),
-        ("longer than 8192 bytes", long),
-        ("newline", "https://api.example\n/v1".to_owned()),
-        ("NUL", "https://api.example\0/v1".to_owned()),
-        ("0x1f", "https://api.example\x1f/v1".to_owned()),
-        ("DEL", "https://api.example\x7f/v1".to_owned()),
-    ] {
-        let (_dir, _layout, db) = store();
-        let lock = db.try_lock_session(sid(1)).unwrap();
-        db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
-        let before = records(&db);
-        let source = AttemptOrigin {
-            base_url,
-            ..origin()
-        };
-        let result = db.start_request(&lock, key(tid(1), 0, 0), source, now());
-        assert!(
-            matches!(
-                &result,
-                Err(StoreError::InvalidInput { field: "origin", detail }) if detail == "invalid endpoint"
-            ),
-            "{case}: endpoint must be rejected, got {result:?}"
-        );
-        assert!(before == records(&db), "{case}: rejection must not write");
-    }
-    for (case, base_url) in [
-        (
-            "8192 bytes",
-            format!("https://{}", "a".repeat(8_192 - "https://".len())),
-        ),
-        ("0x20", "https://api.example /v1".to_owned()),
-        ("non-ASCII", "https://例え.jp/v1".to_owned()),
-    ] {
-        let (_dir, _layout, db) = store();
-        let lock = db.try_lock_session(sid(1)).unwrap();
-        db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
-        let source = AttemptOrigin {
-            base_url,
-            ..origin()
-        };
-        let result = db.start_request(&lock, key(tid(1), 0, 0), source, now());
-        assert!(
-            result.is_ok(),
-            "{case}: endpoint must be accepted, got {result:?}"
-        );
-    }
-}
-
-#[test]
 fn provider_id_and_attempt_source_boundaries() {
     for protocol in [
         AttemptProtocol::ChatCompletions,
@@ -2061,7 +2044,6 @@ fn provider_id_and_attempt_source_boundaries() {
         let origin = AttemptOrigin {
             protocol,
             provider_id: input.config.provider.clone(),
-            base_url: "https://api.openai.com/v1".into(),
         };
         db.accept_turn(&lock, input).unwrap();
         db.start_request(&lock, key(tid(1), 0, 0), origin.clone(), now())

@@ -16,15 +16,6 @@ pub(super) fn provider_id(id: &str) -> Result<()> {
 
 pub(super) fn attempt_origin(origin: &AttemptOrigin, provider: &str) -> Result<()> {
     provider_id(&origin.provider_id)?;
-    if origin.base_url.is_empty()
-        || origin.base_url.len() > 8_192
-        || origin
-            .base_url
-            .bytes()
-            .any(|byte| byte < 0x20 || byte == 0x7f)
-    {
-        return Err(invalid("origin", "invalid endpoint"));
-    }
     if origin.provider_id != provider {
         return Err(invalid("origin", "attempt provider mismatch"));
     }

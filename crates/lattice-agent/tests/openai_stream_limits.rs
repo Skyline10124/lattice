@@ -39,7 +39,6 @@ impl LlmClient for OpenAiFrames {
             Some(lattice_conversation::ReplayOrigin {
                 protocol: lattice_conversation::Protocol::ChatCompletions,
                 provider_id: request.target.provider,
-                base_url: "https://provider.example".into(),
             }),
             input,
             control,

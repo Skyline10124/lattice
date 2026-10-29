@@ -777,7 +777,6 @@ pub(crate) async fn dispatch(
     let origin = lattice_conversation::ReplayOrigin {
         protocol: endpoint.protocol,
         provider_id: endpoint.provider.into(),
-        base_url: endpoint.base_url.into(),
     };
     let url = parser.endpoint_url(endpoint.base_url, endpoint.model);
     let body = parser.request_body(

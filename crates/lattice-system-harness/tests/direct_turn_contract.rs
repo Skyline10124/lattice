@@ -76,7 +76,7 @@ fn direct_turn_completed_reopen_contract() {
         let detail: Value = serde_json::from_slice(&before.stdout).unwrap();
         require(
             detail["steps"][0]["attempts"][0]["origin"]
-                == serde_json::json!({"base_url": server.base_url(), "protocol":"chat-completions","provider_id":"local"}),
+                == serde_json::json!({"protocol":"chat-completions","provider_id":"local"}),
             "completed attempt records protocol and provider id",
         )?;
         let captures = server.captured_requests();

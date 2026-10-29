@@ -175,7 +175,6 @@ impl ResolvedRequest {
         lattice_conversation::ReplayOrigin {
             protocol: self.provider.protocol,
             provider_id: self.provider.id.clone(),
-            base_url: self.provider.base_url.clone(),
         }
     }
 

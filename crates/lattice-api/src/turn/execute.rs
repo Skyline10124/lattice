@@ -218,7 +218,6 @@ async fn execute_owned(
                 let origin = lattice_session::store::AttemptOrigin {
                     provider_id: target.provider.clone(),
                     protocol,
-                    base_url: "https://provider.example".into(),
                 };
                 (
                     target,
