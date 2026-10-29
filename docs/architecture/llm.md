@@ -221,11 +221,11 @@ feature 由协议适配器的代码定义，配置只能在已有取值中选择
 
 | 现有代码中的行为 | 迁移后 |
 | --- | --- |
-| `ProviderKind` 决定认证头与请求路径（`crates/lattice-llm/src/client.rs`） | 由 `protocol` 与 `auth` 决定 |
-| Chat Completions 总是在助手消息中发回 `reasoning_content`（`protocol/projection/chat_completions.rs`） | 由 `reasoning_replay` 决定，默认不发；内置表中需要它的厂商启用 `reasoning-content` |
+| `ProviderKind` 决定认证头与请求路径（`crates/lattice-llm/src/client.rs`） | 已由 #334 删除，认证头与请求路径由 `protocol` 与 `auth` 决定 |
+| Chat Completions 总是在助手消息中发回 `reasoning_content`（`protocol/projection/chat_completions.rs`） | 已由 #337 改为由 `reasoning_replay` 决定，默认不发；内置表中需要它的厂商启用 `reasoning-content` |
 | Chat Completions 同时读取 `reasoning_content` 与 `reasoning` | 保持，属于解析端的兼容 |
 | Chat Completions 总是发送 `stream_options: {"include_usage": true}` | 保持，属于标准协议行为 |
-| Anthropic `max_tokens` 固定为 32,768 | 取模型元数据的输出上限，没有元数据时为 32,768 |
+| Anthropic `max_tokens` 固定为 32,768 | 已由 #336 改为取模型元数据的输出上限，没有元数据时为 32,768 |
 | generateContent 的工具 schema 用 `parametersJsonSchema`（#270） | 保持，属于该协议的写法 |
 | OpenAI 兼容路径的工具名映射 | 已由 #311 删除，工具名原样发送 |
 
@@ -383,7 +383,7 @@ Chat Completions 中，模型的 `reasoning_options` 含 toggle 项且 `thinking
 }
 ```
 
-- **权限。** 文件与所在目录属于当前用户，文件权限 0600。后台读取时发现属主不符、权限更宽或是符号链接，就拒绝使用并说明原因，不自动修改。
+- **权限。** 文件与所在目录属于当前用户。配置目录（默认 `~/.lattice`）新建时为 0700，`auth.json` 为 0600；二者都不能向同组或其他用户开放。属主不符、权限更宽或是符号链接时，后台拒绝使用并说明原因，不自动修改。目录不满足时，`lattice auth set` 与需要 key 的提交被拒绝。
 - **写入。** 后台进程内串行写入：先在同目录写临时文件（0600）并 fsync，再改名替换，最后 fsync 目录。
 - **大小。** 文件最多 1 MiB；单个 key 1～16,384 字节，不含控制字符。
 - **严格解析。** 不认识的 `version` 或结构错误时整个文件无效，所有需要凭据的操作按配置错误拒绝；`lattice auth status` 报告文件无效。

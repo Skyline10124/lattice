@@ -194,8 +194,9 @@ pub fn wire_to_native(
     }
 }
 
-/// 把完整 wire 夹具的消息还原为原生助手对象；Chat Completions 使用 reasoning_content。
-/// 生产请求由 request_messages_to_wire 按当前 features 决定 reasoning 编码。
+/// 把完整 wire 夹具的消息还原为原生助手对象。本函数对 Chat Completions 固定写成 reasoning_content。
+/// 按 features 决定 reasoning 编码的生产入口是 request_messages_with_replay。
+/// request_messages_to_wire 固定传入 ReasoningReplay::None。
 /// 绑定前后的消息共用规则，来源与协议必需的回放状态必须完整。
 pub fn native_to_wire<S: ToolCallState>(
     origin: &ReplayOrigin,
@@ -267,8 +268,9 @@ pub struct RequestMessages {
     pub messages: Vec<Value>,
 }
 
-/// 生产 ToolCall/ToolResult 的唯一请求编码入口；默认不回放 Chat Completions reasoning。
-/// 按完整来源决定回放材料，按协议决定 call ID，不补造目标 provider 身份。
+/// 请求编码入口，固定不回放 Chat Completions reasoning（ReasoningReplay::None）。
+/// 按 features 选择回放方式时用 request_messages_with_replay；Chat Completions 请求构造走那条入口。
+/// 两条入口都按完整来源决定回放材料，按协议决定 call ID，不补造目标 provider 身份。
 pub fn request_messages_to_wire(
     origin: &ReplayOrigin,
     history: &[ConversationItem],
@@ -276,6 +278,7 @@ pub fn request_messages_to_wire(
     request_messages_with_replay(origin, history, ReasoningReplay::None)
 }
 
+/// 按调用方给出的 ReasoningReplay 编码请求。Chat Completions 构造按 features 传入回放方式。
 pub(crate) fn request_messages_with_replay(
     origin: &ReplayOrigin,
     history: &[ConversationItem],
