@@ -946,6 +946,39 @@ async fn configuration_failure(
 }
 
 #[tokio::test]
+async fn oversized_tls_roots_still_serve_plain_http() {
+    let mut server = Server::start(false).await;
+    let directory = private_dir();
+    configure(directory.path(), &server.url, "chat-completions", "none");
+    let mut roots = vec![vec![0_u8; 65_537]];
+    for _ in 0..1025 {
+        roots.push(TLS.ca_der.clone());
+    }
+    let gateway = RequestGateway::new(directory.path().into(), roots).unwrap();
+    assert_eq!(
+        gateway.tls_roots_der().len(),
+        1024,
+        "an oversized root set must be truncated to 1024 certificates"
+    );
+    assert!(
+        gateway
+            .tls_roots_der()
+            .iter()
+            .all(|der| der.len() <= 65_536),
+        "a root larger than 65536 bytes must not be loaded"
+    );
+    complete(
+        gateway
+            .open_turn()
+            .stream_chat(request("test"), StreamControl::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(server.next().await.path, "/v1/chat/completions");
+}
+
+#[tokio::test]
 async fn invalid_configuration_only_blocks_requests_that_depend_on_it() {
     let mut server = Server::start(false).await;
     let directory = private_dir();

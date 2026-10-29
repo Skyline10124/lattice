@@ -29,10 +29,11 @@ pub struct RequestGateway {
 
 impl RequestGateway {
     pub fn new(config_dir: PathBuf, roots_der: Vec<Vec<u8>>) -> Result<Self, LlmError> {
+        let (roots_der, roots) = client::load_bounded_roots(roots_der);
         Ok(Self {
             configuration: Arc::new(Configuration {
                 directory: config_dir,
-                roots: client::tls_certificates(&roots_der)?,
+                roots,
                 roots_der,
                 #[cfg(test)]
                 metadata_url: None,

@@ -639,25 +639,65 @@ impl TurnClient {
     }
 }
 
-pub(crate) fn tls_certificates(
-    roots_der: &[Vec<u8>],
-) -> Result<Vec<reqwest::Certificate>, LlmError> {
-    if roots_der.len() > 1024
-        || roots_der.iter().any(|root| root.len() > 65_536)
-        || roots_der.iter().map(Vec::len).sum::<usize>() > 4 * 1024 * 1024
-    {
-        return Err(LlmError::Config {
-            message: "TLS roots exceed certificate count or size limits".into(),
-        });
+const MAX_TLS_ROOTS: usize = 1024;
+const MAX_TLS_ROOT_BYTES: usize = 65_536;
+const MAX_TLS_ROOT_TOTAL_BYTES: usize = 4 * 1024 * 1024;
+
+/// 按个数、单张大小与总字节保留前缀内的根。
+/// 超限的根记警告后丢弃，不让整份信任集拖垮不需要 TLS 的端点。
+/// 截断只减少信任锚。
+pub(crate) fn select_root_ders(roots_der: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+    let mut kept = Vec::new();
+    let mut total = 0usize;
+    let mut skipped_large = 0usize;
+    let mut truncated = 0usize;
+    for der in roots_der {
+        if der.len() > MAX_TLS_ROOT_BYTES {
+            skipped_large += 1;
+            continue;
+        }
+        if kept.len() == MAX_TLS_ROOTS || total.saturating_add(der.len()) > MAX_TLS_ROOT_TOTAL_BYTES
+        {
+            truncated += 1;
+            continue;
+        }
+        total += der.len();
+        kept.push(der);
     }
-    roots_der
-        .iter()
-        .map(|der| {
-            reqwest::Certificate::from_der(der).map_err(|_| LlmError::Config {
-                message: "invalid TLS root certificate".into(),
-            })
-        })
-        .collect()
+    if skipped_large > 0 {
+        tracing::warn!(
+            skipped_large,
+            "skipped TLS roots larger than {MAX_TLS_ROOT_BYTES} bytes"
+        );
+    }
+    if truncated > 0 {
+        tracing::warn!(
+            kept = kept.len(),
+            total,
+            truncated,
+            "truncated TLS roots to the certificate limits"
+        );
+    }
+    kept
+}
+
+pub(crate) fn load_bounded_roots(
+    roots_der: Vec<Vec<u8>>,
+) -> (Vec<Vec<u8>>, Vec<reqwest::Certificate>) {
+    let mut ders = Vec::new();
+    let mut certificates = Vec::new();
+    for der in select_root_ders(roots_der) {
+        match reqwest::Certificate::from_der(&der) {
+            Ok(certificate) => {
+                ders.push(der);
+                certificates.push(certificate);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "skipping invalid TLS root certificate");
+            }
+        }
+    }
+    (ders, certificates)
 }
 
 /// 网关为单次请求提供解析结果，包含该 Turn 对应 endpoint 的 client。
@@ -869,6 +909,20 @@ mod tests {
             .resolve(&crate::ModelTarget::new("test", "model"))
             .await
             .unwrap()
+    }
+
+    #[test]
+    fn root_selection_keeps_a_prefix_inside_the_count_and_size_limits() {
+        let mut counted = vec![vec![9_u8; 65_537]];
+        counted.extend(std::iter::repeat_n(vec![1_u8; 4_096], 2_000));
+        let kept = super::select_root_ders(counted);
+        assert_eq!(kept.len(), 1_024, "count limit is 1024");
+        assert!(kept.iter().all(|der| der.len() == 4_096));
+
+        // 60_000 * 69 = 4_140_000，60_000 * 70 = 4_200_000，4 MiB 是 4_194_304。
+        let kept = super::select_root_ders(std::iter::repeat_n(vec![2_u8; 60_000], 100).collect());
+        assert_eq!(kept.len(), 69, "total DER size must stay within 4 MiB");
+        assert_eq!(kept.iter().map(Vec::len).sum::<usize>(), 4_140_000);
     }
 
     #[test]
