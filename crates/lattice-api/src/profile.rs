@@ -35,6 +35,8 @@ pub(crate) fn load_for_turn(
         &paths.global_agents_dir,
         &paths.project_agents_dir(),
         &loaded,
+        // 与本地 IPC 的属主检查共用同一个有效 UID 来源。
+        crate::local::ipc::uid(),
     ) {
         return Err(reject(&message));
     }
@@ -88,26 +90,22 @@ pub(crate) fn load_for_turn(
     Ok(loaded)
 }
 
-fn effective_uid() -> u32 {
-    // Linux geteuid 无参数、无内存访问，与本地 IPC 的对端检查相同。
-    unsafe { libc::geteuid() }
-}
-
 /// 全局 agents 目录与其中的 profile 文件只能由当前用户改写。
 /// profile 不是秘密，group/other 可读（默认 umask 022 的 0755/0644）照常接受；
 /// 风险是被他人改写，所以只拒绝 group/other 写位。auth.json 的 0600/0700 规则另行维护。
 /// 项目内 profile 由仓库权限管理，不在这里拒绝。
+/// `owner` 是期望的属主 UID，生产路径传入当前有效 UID。
 fn ensure_global_profile_protected(
     global_agents_dir: &Path,
     project_agents_dir: &Path,
     loaded: &LoadedAgentProfile,
+    owner: u32,
 ) -> std::result::Result<(), String> {
     // 项目 profile 优先，并且测试里配置目录可能就放在项目的 .lattice 下。
     // 只约束用户全局目录，不把仓库里的 agent.toml 当成全局配置。
     if !loaded.path.starts_with(global_agents_dir) || loaded.path.starts_with(project_agents_dir) {
         return Ok(());
     }
-    let owner = effective_uid();
     check_protected(global_agents_dir, true, owner)?;
     check_protected(&loaded.package_dir, true, owner)?;
     check_protected(&loaded.path, false, owner)?;
@@ -429,19 +427,36 @@ mod tests {
         }
     }
 
-    // 非 root 无法创建属于他人的文件，load_for_turn 走不到属主分支；
-    // 这里直接以 euid+1 调用同一检查，root 与非 root 结论一致。
+    // 非 root 无法创建属于他人的文件；期望属主作为参数传入同一校验函数，
+    // 以不等于当前 euid 的值调用，root 与非 root 结论一致。
     #[test]
     fn global_profile_rejects_a_different_owner() {
         let root = tempfile::tempdir().unwrap();
-        let (configuration_dir, _workspace) = private_configuration(root.path());
-        let agents = configuration_dir.join("agents");
-        std::fs::create_dir_all(&agents).unwrap();
-        std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let message = check_protected(&agents, true, effective_uid().wrapping_add(1)).unwrap_err();
+        let (configuration_dir, workspace) = private_configuration(root.path());
+        let agents = global_agents_dir(&configuration_dir, 0o755);
+        write_global_agent(&agents, 0o755, 0o644, 0o644);
+        let paths = lattice_profile::DiscoveryPaths {
+            project_root: workspace.canonical_path().to_owned(),
+            global_agents_dir: agents.clone(),
+        };
+        let loaded = lattice_profile::resolve_agent_profile(
+            lattice_profile::ProfileSource::Name("test".into()),
+            &paths,
+        )
+        .unwrap();
+        let euid = crate::local::ipc::uid();
+        assert_eq!(
+            ensure_global_profile_protected(&agents, &paths.project_agents_dir(), &loaded, euid),
+            Ok(()),
+            "属主等于当前 euid 时应通过"
+        );
+        let other = euid.wrapping_add(1);
+        let message =
+            ensure_global_profile_protected(&agents, &paths.project_agents_dir(), &loaded, other)
+                .unwrap_err();
         assert!(
-            message.contains("must belong to the current user"),
-            "a different owner must be rejected, got {message}"
+            message.contains("/agents: global agents directory must belong to the current user"),
+            "期望属主 {other} ≠ 当前 euid {euid} 时必须拒绝，实际 {message}"
         );
     }
 }
