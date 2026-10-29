@@ -904,18 +904,15 @@ async fn messages_max_tokens_leaves_room_for_a_chinese_prompt() {
     // 150_000 个汉字，每字 3 字节、约 1 个 token。加上 "user" 与 "text"
     // 共 450_008 字节，估算 150_003 token，夹到 49_997。按 4 字节一个 token
     // 只估 112_502，会发送 64_000，与实际约 150_000 的提示相加超出窗口。
-    const CHARS: u64 = 150_000;
-    const CONTEXT: u64 = 200_000;
     let max_tokens = messages_max_tokens(
-        serde_json::json!({"context":CONTEXT,"output":64_000}),
-        Some(&"中".repeat(CHARS as usize)),
+        serde_json::json!({"context":200_000,"output":64_000}),
+        Some(&"中".repeat(150_000)),
     )
     .await
     .unwrap();
-    assert_eq!(max_tokens, 49_997, "Chinese prompt clamp");
-    assert!(
-        max_tokens + CHARS <= CONTEXT,
-        "max_tokens {max_tokens} plus ~{CHARS} prompt tokens must fit the {CONTEXT}-token window"
+    assert_eq!(
+        max_tokens, 49_997,
+        "Chinese prompt must be clamped by the 3 bytes/token estimate"
     );
 }
 
@@ -937,18 +934,34 @@ async fn messages_english_prompt_between_the_estimates_is_sent_with_the_floor() 
 }
 
 #[tokio::test]
-async fn messages_output_floor_is_capped_by_the_lower_estimate_room() {
-    // 380 字节正文加 "user"、"text" 共 388 字节：按 3 字节估 130，超过 100 的窗口；
-    // 按 4 字节估 97，只剩 3。下限 1_024 夹到 3。
+async fn messages_output_floor_is_capped_by_the_model_output_limit() {
+    // 与上一个用例同样的 640_008 字节英文、200_000 窗口，但模型输出上限只有 500：
+    // 下限 1_024 也不能超过它，发送 500。
     let max_tokens = messages_max_tokens(
-        serde_json::json!({"context":100,"output":64_000}),
-        Some(&"a".repeat(380)),
+        serde_json::json!({"context":200_000,"output":500}),
+        Some(&"a".repeat(640_000)),
     )
     .await
     .unwrap();
     assert_eq!(
-        max_tokens, 3,
-        "the floor must not exceed the room left by the 4 bytes/token estimate"
+        max_tokens, 500,
+        "the floor must not exceed the 500-token model output limit"
+    );
+}
+
+#[tokio::test]
+async fn messages_one_token_of_conservative_room_is_sent_without_the_floor() {
+    // 289 字节正文加 "user"、"text" 共 297 字节：按 3 字节估 99，窗口 100 剩 1；
+    // 按 4 字节估 75，剩 25。保守估算还剩 1 就发 1，不改用下限（那会是 25）。
+    let max_tokens = messages_max_tokens(
+        serde_json::json!({"context":100,"output":64_000}),
+        Some(&"a".repeat(289)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        max_tokens, 1,
+        "one token of conservative room must be sent as 1, not raised to the floor"
     );
 }
 
@@ -1003,7 +1016,7 @@ async fn messages_prompt_at_the_lower_estimate_boundary_is_sent() {
 
 #[tokio::test]
 async fn messages_one_byte_past_the_lower_estimate_boundary_is_rejected() {
-    // 多 1 字节，共 397 字节：按 4 字节估 100，占满 100 的窗口，发送前拒绝。
+    // 比上一个用例多 1 字节，共 397 字节：按 4 字节估 100，占满 100 的窗口，发送前拒绝。
     // messages_max_tokens 断言被拒绝时 provider 没有收到请求。
     let error = messages_max_tokens(
         serde_json::json!({"context":100,"output":64_000}),
@@ -1011,39 +1024,19 @@ async fn messages_one_byte_past_the_lower_estimate_boundary_is_rejected() {
     )
     .await
     .unwrap_err();
-    assert!(
-        matches!(error, crate::LlmError::ContextWindowExceeded { .. }),
+    assert_eq!(
+        error.kind(),
+        "context_window_exceeded",
         "one byte past the boundary must fail as context_window_exceeded, got {error:?}"
-    );
-    assert!(
-        error.to_string().contains("at least 100 tokens"),
-        "diagnostic must name the 100-token lower estimate, got {error}"
-    );
-}
-
-#[tokio::test]
-async fn messages_full_window_is_rejected_before_sending() {
-    // 400 字节正文加 "user"、"text" 共 408 字节，按 4 字节一个 token 也有 102，
-    // 超过 100 的窗口。
-    // messages_max_tokens 断言被拒绝时 provider 没有收到请求。
-    let error = messages_max_tokens(
-        serde_json::json!({"context":100,"output":64_000}),
-        Some(&"a".repeat(400)),
-    )
-    .await
-    .unwrap_err();
-    assert!(
-        matches!(error, crate::LlmError::ContextWindowExceeded { .. }),
-        "a prompt over the window even at 4 bytes/token must fail as context_window_exceeded, got {error:?}"
     );
     assert!(
         !error.retryable(),
         "context window exceeded must not be retried"
     );
     assert!(
-        error.to_string().contains("at least 102 tokens")
+        error.to_string().contains("at least 100 tokens")
             && error.to_string().contains("100-token"),
-        "diagnostic must name the lower estimate and the window, got {error}"
+        "diagnostic must name the 100-token lower estimate and the 100-token window, got {error}"
     );
 }
 
