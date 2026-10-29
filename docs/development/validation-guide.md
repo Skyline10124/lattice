@@ -182,7 +182,7 @@ lattice models refresh
 lattice --json models refresh
 ```
 
-后台默认在启动时与此后每 24 小时更新本地元数据缓存。用户级 `~/.lattice/providers.toml` 的 `[metadata] auto_refresh = false` 可关闭自动刷新；后台每次自动触发时读取当前设置，修改后无需重启，配置无效时跳过本次自动刷新。`refresh` 不受开关影响，不接受列表过滤参数 `--provider` 或 `--auth`；`chatgpt` 的账号模型列表尚未接入。
+后台在本地元数据缓存新于 24 小时时不重复拉取；缓存缺失或更旧时在启动时拉取，成功后每 24 小时再拉取。拉取失败从 1 分钟起倍增重试，上限 1 小时。用户级 `~/.lattice/providers.toml` 的 `[metadata] auto_refresh = false` 可关闭自动刷新；后台每次自动触发时读取当前设置，修改后无需重启，配置无效时跳过本次自动刷新。`refresh` 不受开关影响，不接受列表过滤参数 `--provider` 或 `--auth`；`chatgpt` 的账号模型列表尚未接入。
 
 ## 日常验证
 

@@ -164,7 +164,7 @@ reasoning_replay = "none"              # 按模型覆盖 feature
 
 | 字段 | 位置 | 说明 |
 | --- | --- | --- |
-| `auto_refresh` | 顶层 `metadata` 表 | 布尔，默认 true；后台每次自动触发时读取当前值，false 时跳过本次刷新，`lattice models refresh` 不受影响 |
+| `auto_refresh` | 顶层 `metadata` 表 | 布尔，默认 true。每次自动触发都读取当前文件：false 或文件无效时跳过本次拉取。`lattice models refresh` 不受影响 |
 | `protocol`、`base_url`、`auth`、`catalog` | provider 表 | 见[字段](#字段)；覆盖内置 provider 时只写要改的字段，不能写 `protocol` |
 | `features` | provider 子表 | 覆盖或补充 provider 级 features |
 | `models."<模型>"` | provider 子表 | 手写元数据：`context`、`output`（token 数），`effort`（可用档位列表），`tools`（布尔，默认 true），`cost`（`input`、`output`、`cache_read`、`cache_write`，美元每百万 token） |
@@ -242,13 +242,13 @@ feature 由协议适配器的代码定义，配置只能在已有取值中选择
 | 来源 | 内容 | 更新 |
 | --- | --- | --- |
 | 内置快照 | xtask 从 models.dev 生成，只含内置表 `catalog` 所列的条目 | 随版本发布，变化在 PR 中审查 |
-| 缓存 `cache/models.json` | 后台从 `https://models.dev/api.json` 拉取，保留内置表与 `providers.toml` 中 `catalog` 所列的条目，字段规则与快照相同 | 后台启动时与此后每 24 小时；`metadata.auto_refresh = false` 时不自动刷新，`lattice models refresh` 仍可立即刷新 |
+| 缓存 `cache/models.json` | 后台从 `https://models.dev/api.json` 拉取，保留内置表与 `providers.toml` 中 `catalog` 所列的条目，字段规则与快照相同 | 文件新于 24 小时则跳过自动拉取。缺失或更旧时在启动时拉取，成功后再隔 24 小时。失败从 1 分钟起倍增重试，上限 1 小时。`metadata.auto_refresh = false` 或 `providers.toml` 无效时跳过该次触发，下次触发再读当前配置。`lattice models refresh` 仍可立即刷新 |
 | `providers.toml` 的 `models` | 用户手写 | 用户编辑 |
 
 - **选择来源。** 缓存存在且能解析时整份使用缓存，否则使用内置快照；缓存中缺少某个 `catalog` 条目时，这个条目使用快照。`providers.toml` 中的 `catalog` 在缓存与快照中都没有时，要等下一次刷新才有元数据；在此之前，以及 models.dev 中没有这个条目时，这个 provider 只有手写的元数据。手写的元数据按字段覆盖上述结果，只写在 `providers.toml` 中的模型由手写值单独构成。
 - **保留的字段。** 模型 `id`、`name`、`limit.context`、`limit.output`、`reasoning`、`reasoning_options`、`tool_call`、`modalities.input`、`cost.input`、`cost.output`、`cost.cache_read`、`cost.cache_write`、`cost.reasoning` 与 `status`。其余字段丢弃。
 - **没有过期的概念。** 缓存旧了只影响列表与价格的准确性，不影响请求发往哪里，不提示过期。
-- **刷新失败**只记日志，继续使用上一份数据；`lattice models refresh` 把失败原因返回给用户。拉取使用 HTTPS 与固定地址的连接，响应最多 32 MiB，30 秒内没有读完即放弃。新缓存先写临时文件再改名替换。
+- **刷新失败**只记日志，继续使用上一份数据，并从 1 分钟起倍增重试，上限 1 小时。`lattice models refresh` 把失败原因返回给用户。拉取使用 HTTPS 与固定地址的连接，响应最多 32 MiB，30 秒内没有读完即放弃。新缓存先写临时文件再改名替换。
 - **请求路径上不联网。** 接受 Turn 与每次请求时只读上述数据。
 
 ### 模型候选

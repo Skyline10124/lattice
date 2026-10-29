@@ -120,6 +120,56 @@ async fn automatic_refresh_reloads_configuration_and_manual_refresh_ignores_the_
 }
 
 #[tokio::test(start_paused = true)]
+async fn each_scheduled_trigger_skips_when_auto_refresh_is_disabled_or_invalid() {
+    let directory = tempfile::tempdir().unwrap();
+    write_cache(
+        directory.path(),
+        std::time::SystemTime::now() - Duration::from_secs(25 * 60 * 60),
+    );
+    let path = directory.path().join("providers.toml");
+    std::fs::write(&path, "[metadata]\nauto_refresh = false\n").unwrap();
+    let (started, mut calls) = mpsc::unbounded_channel();
+    let refresh = scheduled(directory.path(), started);
+    let timer = refresh.start();
+    settle().await;
+    assert!(
+        calls.try_recv().is_err(),
+        "auto_refresh = false skips the startup trigger"
+    );
+    tokio::time::advance(Duration::from_secs(24 * 60 * 60)).await;
+    settle().await;
+    assert!(
+        calls.try_recv().is_err(),
+        "auto_refresh = false skips the following daily trigger"
+    );
+    std::fs::write(&path, "[metadata]\nauto_refresh = true\nunknown = true\n").unwrap();
+    tokio::time::advance(Duration::from_secs(24 * 60 * 60)).await;
+    settle().await;
+    assert!(
+        calls.try_recv().is_err(),
+        "invalid providers.toml skips that trigger"
+    );
+    std::fs::write(&path, "[metadata]\nauto_refresh = true\n").unwrap();
+    tokio::time::advance(Duration::from_secs(24 * 60 * 60)).await;
+    settle().await;
+    assert!(
+        calls.try_recv().is_ok(),
+        "a later trigger reads the enabled switch and refreshes a stale cache"
+    );
+    assert!(calls.try_recv().is_err(), "one trigger refreshes once");
+    refresh.stop();
+    timer.await.unwrap();
+}
+
+async fn settle() {
+    // spawn_blocking 在独立线程上完成；暂停的 tokio 时钟不会替它推进。
+    for _ in 0..10 {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        tokio::task::yield_now().await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn automatic_refresh_skips_a_fresh_cache_and_fetches_a_stale_one() {
     let fresh = tempfile::tempdir().unwrap();
     write_cache(fresh.path(), std::time::SystemTime::now());
