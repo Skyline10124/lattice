@@ -179,6 +179,58 @@ pub(crate) fn render_command_text(
     )
 }
 
+/// 失败诊断里每个输出流最多显示的已脱敏字节数；完整的脱敏副本在证据目录里。
+const DIAGNOSTIC_EXCERPT_BYTES: usize = 2048;
+
+/// 先用写入证据文件时相同的 [`redact`] 脱敏，再截取开头部分，
+/// 截断不会把被替换前的秘密切成两半而漏过替换。
+fn redacted_excerpt(bytes: &[u8], secrets: &[&str]) -> String {
+    let text = redact(&String::from_utf8_lossy(bytes), secrets);
+    if text.is_empty() {
+        return "(empty)\n".into();
+    }
+    let mut end = text.len().min(DIAGNOSTIC_EXCERPT_BYTES);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut excerpt = text[..end].to_string();
+    if !excerpt.ends_with('\n') {
+        excerpt.push('\n');
+    }
+    if end < text.len() {
+        excerpt.push_str(&format!(
+            "... [{} more bytes truncated]\n",
+            text.len() - end
+        ));
+    }
+    excerpt
+}
+
+/// 失败命令的诊断：元数据加上已脱敏 stdout/stderr 的开头部分，以及完整副本的路径。
+pub(crate) fn render_failed_command_text(
+    summary: &str,
+    outcome: &CommandOutcome,
+    secrets: &[&str],
+    stdout_copy: &Path,
+    stderr_copy: &Path,
+) -> String {
+    let mut text = render_command_text(summary, outcome, secrets);
+    for (stream, bytes, copy) in [
+        ("stdout", &outcome.stdout, stdout_copy),
+        ("stderr", &outcome.stderr, stderr_copy),
+    ] {
+        text.push_str(&redact(
+            &format!(
+                "{stream} (redacted, first {DIAGNOSTIC_EXCERPT_BYTES} bytes at most; full redacted copy: {}):\n",
+                copy.display()
+            ),
+            secrets,
+        ));
+        text.push_str(&redacted_excerpt(bytes, secrets));
+    }
+    text
+}
+
 pub(crate) fn capture_from_output(
     dir: PathBuf,
     output: &CommandOutcome,
@@ -659,11 +711,20 @@ impl ScenarioEvidence {
                 report.add_evidence_error("daemon cleanup", error, &secrets);
             }
         }
-        for command in &self.commands {
-            report.add_command_diagnostic(
-                render_command_text(&command.summary, &command.outcome, &secrets),
-                &secrets,
-            );
+        for (index, command) in self.commands.iter().enumerate() {
+            // 只有失败时才写证据，也才在诊断里显示已脱敏的输出开头。
+            let diagnostic = if persist {
+                render_failed_command_text(
+                    &command.summary,
+                    &command.outcome,
+                    &secrets,
+                    &self.failure_dir.join(format!("{index}-stdout.txt")),
+                    &self.failure_dir.join(format!("{index}-stderr.txt")),
+                )
+            } else {
+                render_command_text(&command.summary, &command.outcome, &secrets)
+            };
+            report.add_command_diagnostic(diagnostic, &secrets);
         }
         if !persist {
             return report.finish();
@@ -1301,6 +1362,60 @@ mod tests {
         let command = std::fs::read_to_string(failure_dir.join("0-command.txt")).unwrap();
         assert!(command.contains("stdout_bytes: 18"));
         assert!(command.contains("stderr_bytes: 18"));
+    }
+
+    #[test]
+    fn scenario_failure_diagnostic_shows_redacted_output_head_and_evidence_path() {
+        let secret = "scenario-excerpt-secret";
+        let world = ScenarioWorld::new("evidence-command-excerpt").unwrap();
+        let root = TempDir::new().unwrap();
+        let failure_dir = root.path().join("scenario");
+        let outcome = CommandOutcome {
+            stdout: format!("{{\"error\":\"{secret} rejected\"}}").into_bytes(),
+            stderr: Vec::new(),
+            stdout_complete: true,
+            stderr_complete: true,
+            termination: Some(ProcessTermination::Exited(2)),
+            interventions: Vec::new(),
+            cleanup: ProcessGroupCleanup::default(),
+        };
+
+        let mut passing =
+            ScenarioEvidence::new_at_dir(&world, failure_dir.clone(), [secret.to_string()])
+                .unwrap();
+        let clean = CommandOutcome {
+            stdout: b"ok".to_vec(),
+            ..outcome.clone()
+        };
+        passing.record_command("lattice send", &clean);
+        passing
+            .finish_report(None)
+            .expect("a passing scenario has no diagnostic");
+
+        let mut evidence =
+            ScenarioEvidence::new_at_dir(&world, failure_dir.clone(), [secret.to_string()])
+                .unwrap();
+        evidence.record_command("lattice send", &outcome);
+        let report = evidence
+            .finish_report(Some("scenario failed".into()))
+            .unwrap_err()
+            .to_string();
+        assert!(!report.contains(secret), "{report}");
+        assert!(
+            report.contains("{\"error\":\"[REDACTED] rejected\"}"),
+            "diagnostic must show the redacted stdout: {report}"
+        );
+        assert!(
+            report.contains(&format!(
+                "full redacted copy: {}",
+                failure_dir.join("0-stdout.txt").display()
+            )),
+            "diagnostic must point at the evidence copy: {report}"
+        );
+        assert!(
+            report.contains("(empty)"),
+            "empty stderr is labelled: {report}"
+        );
     }
 
     fn report_test_outcome(secret: &str) -> CommandOutcome {
