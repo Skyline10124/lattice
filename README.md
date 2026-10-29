@@ -80,7 +80,7 @@ lattice models --provider anthropic
 
 provider 来自内置表与用户级 `~/.lattice/providers.toml`；环境变量、工作区 `.env` 和项目中的 `providers.toml` 不提供凭据或连接配置。
 
-后台在 `~/.lattice/cache/models.json` 新于 24 小时时不重复拉取；缓存缺失或更旧时在启动时拉取，成功后每 24 小时再拉取。拉取失败从 1 分钟起倍增重试，上限 1 小时。在 `~/.lattice/providers.toml` 中写入以下设置可关闭自动刷新，修改后无需重启；文件无效时跳过该次自动刷新。手动执行 `lattice models refresh` 仍会刷新。
+后台在 `~/.lattice/cache/models.json` 新于 24 小时时不重复拉取；缓存缺失或更旧时在启动时拉取，成功后每 24 小时再拉取。拉取失败从 1 分钟起倍增重试，上限 1 小时。在 `~/.lattice/providers.toml` 中写入以下设置可关闭自动刷新，修改后无需重启；文件无效时该次自动刷新算作失败，按 1 分钟起倍增、上限 1 小时的退避重试，修正文件后在下一次重试时生效。手动执行 `lattice models refresh` 仍会刷新。
 
 ```toml
 [metadata]

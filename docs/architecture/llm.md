@@ -242,7 +242,7 @@ feature 由协议适配器的代码定义，配置只能在已有取值中选择
 | 来源 | 内容 | 更新 |
 | --- | --- | --- |
 | 内置快照 | xtask 从 models.dev 生成，只含内置表 `catalog` 所列的条目 | 随版本发布，变化在 PR 中审查 |
-| 缓存 `cache/models.json` | 后台从 `https://models.dev/api.json` 拉取，保留内置表与 `providers.toml` 中 `catalog` 所列的条目，字段规则与快照相同 | 文件新于 24 小时则跳过自动拉取。缺失或更旧时在启动时拉取，成功后再隔 24 小时。失败从 1 分钟起倍增重试，上限 1 小时。`metadata.auto_refresh = false` 或 `providers.toml` 无效时跳过该次触发，下次触发再读当前配置。`lattice models refresh` 仍可立即刷新 |
+| 缓存 `cache/models.json` | 后台从 `https://models.dev/api.json` 拉取，保留内置表与 `providers.toml` 中 `catalog` 所列的条目，字段规则与快照相同 | 文件新于 24 小时则跳过自动拉取。缺失或更旧时在启动时拉取，成功后再隔 24 小时。失败从 1 分钟起倍增重试，上限 1 小时。`metadata.auto_refresh = false` 时跳过该次触发；`providers.toml` 无效时该次触发算作失败，按上述退避重试。每次触发都读当前配置。`lattice models refresh` 仍可立即刷新 |
 | `providers.toml` 的 `models` | 用户手写 | 用户编辑 |
 
 - **选择来源。** 缓存存在且能解析时整份使用缓存，否则使用内置快照；缓存中缺少某个 `catalog` 条目时，这个条目使用快照。`providers.toml` 中的 `catalog` 在缓存与快照中都没有时，要等下一次刷新才有元数据；在此之前，以及 models.dev 中没有这个条目时，这个 provider 只有手写的元数据。手写的元数据按字段覆盖上述结果，只写在 `providers.toml` 中的模型由手写值单独构成。
