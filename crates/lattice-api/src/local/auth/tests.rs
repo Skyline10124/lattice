@@ -11,7 +11,10 @@ async fn auth_ipc_uses_current_files_and_never_returns_credentials() {
     let directory = tempfile::tempdir().unwrap();
     let layout = crate::StateLayout::in_state_root(directory.path());
     let config = directory.path().join(".lattice");
-    let server = tokio::spawn(local::serve(layout.clone(), Some(directory.path().into())));
+    let server = tokio::spawn(local::serve_for_test(
+        layout.clone(),
+        Some(directory.path().into()),
+    ));
     let client = LocalClient::new(layout);
     tokio::time::timeout(Duration::from_secs(5), async {
         while client.status().await.is_err() {
@@ -139,7 +142,7 @@ async fn invalid_home_only_rejects_operations_that_need_configuration() {
     ] {
         let directory = tempfile::tempdir().unwrap();
         let layout = crate::StateLayout::in_state_root(directory.path());
-        let server = tokio::spawn(local::serve(layout.clone(), home));
+        let server = tokio::spawn(local::serve_for_test(layout.clone(), home));
         let client = LocalClient::new(layout);
         tokio::time::timeout(Duration::from_secs(5), async {
             while client.status().await.is_err() {

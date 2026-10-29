@@ -82,6 +82,66 @@ async fn resolve_session(peer: &Peer) {
 }
 
 #[tokio::test]
+async fn models_refresh_renders_confirmation_and_preserves_failure_reason_and_exit_class() {
+    for json_mode in [false, true] {
+        for (kind, expected_code) in [
+            (None, 0),
+            (Some("transport"), 1),
+            (Some("internal"), 1),
+            (Some("stopping"), 1),
+            (Some("bad_request"), 2),
+        ] {
+            let peer = Peer::new();
+            let mut out = Vec::new();
+            let command = super::super::models::refresh(&peer.client, json_mode, &mut out);
+            let reply = async {
+                let mut wire = peer.request("models_refresh").await;
+                assert_eq!(wire.request, json!({"operation":"models_refresh"}));
+                if let Some(kind) = kind {
+                    wire.reply(
+                        "error",
+                        json!({"kind":kind,"message":"specific refresh failure"}),
+                    )
+                    .await;
+                } else {
+                    wire.reply("models_refreshed", Value::Null).await;
+                }
+            };
+            let (result, ()) = tokio::join!(command, reply);
+            match result {
+                Ok(()) => {
+                    assert_eq!(expected_code, 0);
+                    if json_mode {
+                        assert_eq!(
+                            serde_json::from_slice::<Value>(&out).unwrap(),
+                            json!({"type":"models_refresh","status":"refreshed"})
+                        );
+                    } else {
+                        assert_eq!(
+                            String::from_utf8(out).unwrap(),
+                            "Model metadata refreshed.\n"
+                        );
+                    }
+                }
+                Err(error) => {
+                    assert!(out.is_empty());
+                    let (code, value) = error_record(&error);
+                    assert_eq!(code, expected_code);
+                    assert_eq!(value["kind"], kind.unwrap());
+                    assert_eq!(value["message"], "specific refresh failure");
+                    let mut human = Vec::new();
+                    render_human_error(&value, &mut human).unwrap();
+                    assert_eq!(
+                        String::from_utf8(human).unwrap(),
+                        "error: specific refresh failure\n"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn session_cancel_preserves_identity_and_exit_codes_across_reply_loss() {
     for json_mode in [true, false] {
         for case in ["unknown", "taken", "not_taken", "none", "missing"] {

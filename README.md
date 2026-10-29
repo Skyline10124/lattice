@@ -80,6 +80,13 @@ lattice models --provider anthropic
 
 provider 来自内置表与用户级 `~/.lattice/providers.toml`；环境变量、工作区 `.env` 和项目中的 `providers.toml` 不提供凭据或连接配置。
 
+后台默认在启动时与此后每 24 小时刷新模型元数据。在 `~/.lattice/providers.toml` 中写入以下设置可关闭自动刷新，修改后无需重启；手动执行 `lattice models refresh` 仍会刷新。
+
+```toml
+[metadata]
+auto_refresh = false
+```
+
 > 密钥不要写入提交到仓库的文件。只读工具配置不代表离线运行，
 > 对话仍需要调用模型服务。
 
@@ -149,6 +156,9 @@ lattice session --help
 
 # 查看已配置凭据的模型
 lattice models --auth
+
+# 立即刷新模型元数据
+lattice models refresh
 
 # 工具调用审计
 lattice audit --help

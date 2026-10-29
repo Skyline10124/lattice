@@ -1,7 +1,12 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{io::Write, path::Path, time::Duration};
+use std::{
+    io::Write,
+    path::Path,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use super::{Catalog, snapshot_from_json};
 use crate::provider::config::ProviderRegistry;
@@ -9,8 +14,28 @@ use crate::provider::config::ProviderRegistry;
 const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// 取消与最终改名共用一把锁；取消返回后不再开始新的缓存发布。
+#[derive(Default)]
+pub struct MetadataRefreshControl {
+    cancelled: Mutex<bool>,
+}
+
+impl MetadataRefreshControl {
+    pub fn cancel(&self) {
+        *self.cancelled.lock().expect("metadata publication lock") = true;
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        *self.cancelled.lock().expect("metadata publication lock")
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum MetadataError {
+    #[error("{0}")]
+    Configuration(String),
+    #[error("metadata refresh was cancelled")]
+    Cancelled,
     #[error("metadata I/O failed: {0}")]
     Io(#[from] std::io::Error),
     #[error("invalid model metadata: {0}")]
@@ -93,35 +118,55 @@ async fn fetch_source(url: &str, roots_der: &[Vec<u8>]) -> Result<Vec<u8>, Metad
 }
 
 /// 按内置表与当前注册表的 catalog 过滤；同目录写完临时文件后替换，失败保留旧缓存。
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "#315 L2 元数据刷新尚未接入后台")
-)]
-pub(crate) async fn refresh(
+pub(crate) async fn refresh_cancellable(
     config_dir: &Path,
     registry: &ProviderRegistry,
     url: &str,
     roots_der: &[Vec<u8>],
+    cancel: Arc<MetadataRefreshControl>,
 ) -> Result<(), MetadataError> {
     let source = fetch_source(url, roots_der).await?;
     let snapshot = Catalog::filtered(&source, registry)?.to_json()?;
+    let config_dir = config_dir.to_owned();
     let cache_dir = config_dir.join("cache");
     tokio::task::spawn_blocking(move || {
+        if cancel.is_cancelled() {
+            return Err(MetadataError::Cancelled);
+        }
+        crate::auth::ensure_configuration_directory(&config_dir)
+            .map_err(|error| MetadataError::Configuration(error.to_string()))?;
         std::fs::create_dir_all(&cache_dir)?;
         let temporary = tempfile::NamedTempFile::new_in(&cache_dir)?;
-        write_and_replace(temporary, &cache_dir.join("models.json"), &snapshot)
+        write_and_replace_cancellable(
+            temporary,
+            &cache_dir.join("models.json"),
+            &snapshot,
+            &cancel,
+            #[cfg(test)]
+            None,
+        )
     })
     .await??;
     Ok(())
 }
 
-fn write_and_replace(
+fn write_and_replace_cancellable(
     mut temporary: tempfile::NamedTempFile,
     destination: &Path,
     snapshot: &[u8],
-) -> std::io::Result<()> {
+    cancel: &MetadataRefreshControl,
+    #[cfg(test)] before_rename: Option<&dyn Fn()>,
+) -> Result<(), MetadataError> {
     temporary.write_all(snapshot)?;
     temporary.as_file().sync_all()?;
+    let cancelled = cancel.cancelled.lock().expect("metadata publication lock");
+    if *cancelled {
+        return Err(MetadataError::Cancelled);
+    }
+    #[cfg(test)]
+    if let Some(before_rename) = before_rename {
+        before_rename();
+    }
     temporary
         .persist(destination)
         .map_err(|error| error.error)?;

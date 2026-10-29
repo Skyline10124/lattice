@@ -128,6 +128,18 @@ fn anthropic_and_gemini_turns_call_a_tool_and_project_the_result_back() {
         world
             .wire_provider(provider.fixture, &server, &key)
             .unwrap();
+        if provider.name == "anthropic" {
+            let cache = world.home().join(".lattice/cache");
+            std::fs::create_dir_all(&cache).unwrap();
+            std::fs::write(
+                cache.join("models.json"),
+                serde_json::to_vec(&serde_json::json!({"anthropic":{"models":{
+                    provider.fixture.model:{"id":provider.fixture.model,"limit":{"output":8192}}
+                }}}))
+                .unwrap(),
+            )
+            .unwrap();
+        }
         let scenario_evidence =
             ScenarioEvidence::new(&world, &spec.name, [key.clone()]).expect("evidence");
 
@@ -152,6 +164,12 @@ fn anthropic_and_gemini_turns_call_a_tool_and_project_the_result_back() {
                 format!("expected 2 model requests, got {}", captures.len()),
             )?;
             for capture in &captures {
+                if provider.name == "anthropic" {
+                    require(
+                        capture.raw["max_tokens"] == 8192,
+                        "Messages output limit comes from cached metadata",
+                    )?;
+                }
                 require(
                     capture.provider == provider.name,
                     format!(

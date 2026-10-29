@@ -140,6 +140,9 @@ provider 配置、凭据与模型元数据是用户级的全局状态，由后�
 用户全局配置位于配置目录下的 `providers.toml`（默认 `~/.lattice/providers.toml`）。一个 provider 一张表：表名是内置 `id` 时覆盖该 provider 的字段，否则新增一个 provider。
 
 ```toml
+[metadata]
+auto_refresh = false                   # 关闭自动刷新，默认 true
+
 [providers.my-vllm]                    # 新增自建服务
 protocol = "chat-completions"
 base_url = "https://vllm.example.com/v1"
@@ -161,6 +164,7 @@ reasoning_replay = "none"              # 按模型覆盖 feature
 
 | 字段 | 位置 | 说明 |
 | --- | --- | --- |
+| `auto_refresh` | 顶层 `metadata` 表 | 布尔，默认 true；后台每次自动触发时读取当前值，false 时跳过本次刷新，`lattice models refresh` 不受影响 |
 | `protocol`、`base_url`、`auth`、`catalog` | provider 表 | 见[字段](#字段)；覆盖内置 provider 时只写要改的字段，不能写 `protocol` |
 | `features` | provider 子表 | 覆盖或补充 provider 级 features |
 | `models."<模型>"` | provider 子表 | 手写元数据：`context`、`output`（token 数），`effort`（可用档位列表），`tools`（布尔，默认 true），`cost`（`input`、`output`、`cache_read`、`cache_write`，美元每百万 token） |
@@ -238,7 +242,7 @@ feature 由协议适配器的代码定义，配置只能在已有取值中选择
 | 来源 | 内容 | 更新 |
 | --- | --- | --- |
 | 内置快照 | xtask 从 models.dev 生成，只含内置表 `catalog` 所列的条目 | 随版本发布，变化在 PR 中审查 |
-| 缓存 `cache/models.json` | 后台从 `https://models.dev/api.json` 拉取，保留内置表与 `providers.toml` 中 `catalog` 所列的条目，字段规则与快照相同 | 后台启动时与此后每 24 小时；`lattice models refresh` 立即刷新 |
+| 缓存 `cache/models.json` | 后台从 `https://models.dev/api.json` 拉取，保留内置表与 `providers.toml` 中 `catalog` 所列的条目，字段规则与快照相同 | 后台启动时与此后每 24 小时；`metadata.auto_refresh = false` 时不自动刷新，`lattice models refresh` 仍可立即刷新 |
 | `providers.toml` 的 `models` | 用户手写 | 用户编辑 |
 
 - **选择来源。** 缓存存在且能解析时整份使用缓存，否则使用内置快照；缓存中缺少某个 `catalog` 条目时，这个条目使用快照。`providers.toml` 中的 `catalog` 在缓存与快照中都没有时，要等下一次刷新才有元数据；在此之前，以及 models.dev 中没有这个条目时，这个 provider 只有手写的元数据。手写的元数据按字段覆盖上述结果，只写在 `providers.toml` 中的模型由手写值单独构成。

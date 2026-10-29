@@ -13,6 +13,11 @@ use crate::provider::{Auth, config::ProviderRegistry};
 mod file;
 mod format;
 
+/// 元数据缓存与凭据共用配置目录的创建和安全检查，不读取凭据文件。
+pub(crate) fn ensure_configuration_directory(path: &std::path::Path) -> Result<(), AuthError> {
+    file::Directory::open(path, true).map(|_| ())
+}
+
 const MAX_KEY_BYTES: usize = 16_384;
 const MAX_FILE_BYTES: usize = 1_048_576;
 // 锁覆盖读取、修改和发布；多个库句柄也不能覆盖彼此的更新。

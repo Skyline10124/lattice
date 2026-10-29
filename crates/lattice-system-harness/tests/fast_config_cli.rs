@@ -8,6 +8,121 @@ use serde_json::{Value, json};
 use support::{cli, finish_recorded};
 
 #[test]
+fn backend_startup_observably_skips_disabled_automatic_metadata_refresh() {
+    use lattice_system_harness::{LatticeDriver, RunningCommand, ScenarioEvidence};
+    use std::time::Instant;
+
+    let spec = ScenarioSpec::fast("metadata-auto-refresh-disabled");
+    let world = ScenarioWorld::new(&spec.name).unwrap();
+    let budget = world.budget(&spec);
+    world.set_env("LATTICE_LOG", "info");
+    let driver = LatticeDriver::from_env().unwrap();
+    let log_path = world.root().join("daemon.stderr");
+    let mut evidence = ScenarioEvidence::new(&world, &spec.name, Vec::<String>::new()).unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // 经驱动登记场景产物，使显式 serve 也属于场景清理范围。
+        let help = cli(&world, &spec, &["--help"]);
+        evidence.record_command("register binary", &help);
+        assert!(help.is_clean_exit(0));
+        // exec 保留驱动创建的进程组；独立日志文件可观察自动刷新分支完成。
+        let mut command = world.command("/bin/sh");
+        command
+            .args([
+                "-c",
+                "exec \"$1\" --verbose daemon serve --state-root \"$2\" 2>\"$3\"",
+                "metadata-daemon",
+            ])
+            .arg(driver.binary_path())
+            .arg(world.session_store_dir().parent().unwrap())
+            .arg(&log_path);
+        let mut daemon = RunningCommand::spawn(command).unwrap();
+        let deadline = Instant::now() + budget.cap_timeout(spec.step_timeout());
+        let log = loop {
+            let log = match std::fs::read_to_string(&log_path) {
+                Ok(log) => log,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+                Err(error) => panic!("daemon log: {error}"),
+            };
+            // 以跳过日志检查禁用分支的接线。
+            if log.contains("automatic model metadata refresh disabled") {
+                break log;
+            }
+            assert!(!daemon.has_exited().unwrap(), "daemon exited: {log}");
+            assert!(
+                Instant::now() < deadline,
+                "automatic refresh did not report skipping: {log}"
+            );
+            std::thread::yield_now();
+        };
+        evidence
+            .record_json("automatic refresh skipped", &json!({"log":log}))
+            .unwrap();
+        let stop = cli(&world, &spec, &["daemon", "stop"]);
+        evidence.record_command("stop disabled refresh backend", &stop);
+        assert!(stop.is_clean_exit(0));
+        let stopped = daemon
+            .wait(Some(budget.cap_timeout(spec.step_timeout())))
+            .unwrap();
+        evidence.record_command("disabled refresh backend", &stopped);
+        assert!(stopped.is_clean_exit(0));
+        assert!(!world.home().join(".lattice/cache/models.json").exists());
+    }));
+    finish_recorded(evidence, result);
+}
+
+#[test]
+fn refresh_without_tls_roots_reports_the_reason_and_preserves_cached_candidates() {
+    let spec = ScenarioSpec::fast("models-refresh-no-roots");
+    let world = ScenarioWorld::new(&spec.name).unwrap();
+    world.budget(&spec);
+    world.set_env(
+        "SSL_CERT_FILE",
+        world.root().join("missing-root.pem").display().to_string(),
+    );
+    let directory = world.home().join(".lattice");
+    std::fs::create_dir_all(directory.join("cache")).unwrap();
+    let previous = br#"{"anthropic":{"models":{"cached-model":{"id":"cached-model","limit":{"output":8192}}}}}"#;
+    std::fs::write(directory.join("cache/models.json"), previous).unwrap();
+    let mut evidence =
+        lattice_system_harness::ScenarioEvidence::new(&world, &spec.name, Vec::<String>::new())
+            .unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let refresh = cli(&world, &spec, &["--json", "models", "refresh"]);
+        evidence.record_command("refresh without roots", &refresh);
+        assert!(refresh.is_clean_exit(2));
+        let error: Value = serde_json::from_slice(&refresh.stdout).unwrap();
+        assert_eq!(error["kind"], "bad_request");
+        assert!(
+            error["message"]
+                .as_str()
+                .unwrap()
+                .contains("no usable TLS root certificates")
+        );
+        let refresh = cli(&world, &spec, &["models", "refresh"]);
+        evidence.record_command("refresh failure text", &refresh);
+        assert!(refresh.is_clean_exit(2));
+        assert!(
+            String::from_utf8_lossy(&refresh.stderr).contains("no usable TLS root certificates")
+        );
+        let models = cli(
+            &world,
+            &spec,
+            &["--json", "models", "--provider", "anthropic"],
+        );
+        evidence.record_command("candidates after failed refresh", &models);
+        assert!(models.is_clean_exit(0));
+        let models: Value = serde_json::from_slice(&models.stdout).unwrap();
+        assert_eq!(models["models"][0]["model"], "cached-model");
+        assert_eq!(models["models"][0]["output"], 8192);
+        assert_eq!(
+            std::fs::read(directory.join("cache/models.json")).unwrap(),
+            previous
+        );
+    }));
+    finish_recorded(evidence, result);
+}
+
+#[test]
 fn models_merge_metadata_and_render_readiness_without_secrets() {
     const CATALOG_KEY: &str = "ordinary.catalog.credential";
     let spec = ScenarioSpec::fast("models-candidates");
@@ -18,6 +133,8 @@ fn models_merge_metadata_and_render_readiness_without_secrets() {
     std::fs::write(
         directory.join("providers.toml"),
         r#"
+[metadata]
+auto_refresh = false
 [providers.local]
 protocol = "chat-completions"
 base_url = "http://localhost:9/v1"

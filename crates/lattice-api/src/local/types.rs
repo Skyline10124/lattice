@@ -460,6 +460,7 @@ pub(super) enum Request {
     Models {
         provider: Option<String>,
     },
+    ModelsRefresh {},
     ResolveSession {
         prefix: String,
     },
@@ -524,6 +525,7 @@ pub(super) enum Response {
     AuthRemoved { removed: bool },
     AuthStatus(AuthStatus),
     Models(ModelCandidates),
+    ModelsRefreshed,
     Session(SessionRecord),
     Sessions(Page<SessionListRow, SessionId>),
     Log(SessionLog),

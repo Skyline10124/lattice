@@ -196,7 +196,7 @@ async fn stream_turn_retry_uses_profile_backoff_and_cap() {
         ..
     } = fixture;
     drop((api, store));
-    let serving = tokio::spawn(crate::local::serve(
+    let serving = tokio::spawn(crate::local::serve_for_test(
         layout.clone(),
         Some(_state.path().into()),
     ));

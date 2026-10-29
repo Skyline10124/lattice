@@ -84,6 +84,14 @@ impl LocalClient {
             _ => Err(protocol()),
         }
     }
+
+    /// 立即刷新模型元数据，并等待缓存替换或返回具体失败原因。
+    pub async fn models_refresh(&self) -> Result<()> {
+        match self.call(Request::ModelsRefresh {}).await? {
+            Response::ModelsRefreshed => Ok(()),
+            _ => Err(protocol()),
+        }
+    }
     pub async fn resolve_session(&self, prefix: &str) -> Result<SessionRecord> {
         match self
             .call(Request::ResolveSession {

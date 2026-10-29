@@ -107,12 +107,15 @@ impl ProtocolParser {
         &self,
         request: &ChatRequest,
         model: &str,
+        output_limit: Option<u64>,
     ) -> Result<serde_json::Value, LlmError> {
         match self {
             Self::ChatCompletions(_) => {
                 protocol::chat_completions::build_request_json(request, model)
             }
-            Self::Messages(_) => protocol::anthropic_messages::build_request_json(request, model),
+            Self::Messages(_) => {
+                protocol::anthropic_messages::build_request_json(request, model, output_limit)
+            }
             Self::GenerateContent(_) => protocol::generate_content::build_request_json(request),
         }
         .map_err(Into::into)
@@ -658,6 +661,7 @@ pub(crate) struct RequestEndpoint<'a> {
     pub(crate) credentials: Arc<Credentials>,
     pub(crate) roots: &'a [reqwest::Certificate],
     pub(crate) client: Arc<TurnClient>,
+    pub(crate) output_limit: Option<u64>,
 }
 
 pub(crate) fn validate_configuration(
@@ -695,7 +699,7 @@ pub(crate) async fn dispatch(
     let provider = endpoint.credentials.redact(endpoint.provider);
     let origin = parser.origin();
     let url = parser.endpoint_url(endpoint.base_url, endpoint.model);
-    let body = parser.request_body(&request, endpoint.model)?;
+    let body = parser.request_body(&request, endpoint.model, endpoint.output_limit)?;
     let client = endpoint
         .client
         .get(&url, endpoint.roots)

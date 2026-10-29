@@ -61,7 +61,7 @@ status: active
 
 fake LLM 经正式的配置入口接入：场景在自己的 HOME 下写 `~/.lattice/providers.toml`，把所测 provider 的 `base_url` 指向 fake LLM，或新增一个使用所测协议的 provider；key 经 `lattice auth set` 从标准输入录入。fake LLM 按请求路由生成[模型接入合同](../architecture/llm.md#端点与认证)中五种协议的流式响应。`chatgpt` 的 endpoint 不能由配置改写，harness 不覆盖 SIWC，它的验证见[模型接入合同](../architecture/llm.md#验证与承接)。场景不增加隐藏产品参数、测试专用 provider 或绕过真实调用流程的产品分支。
 
-后台启动时与此后每 24 小时从 models.dev 拉取模型元数据。场景只信任 harness 的 CA，这次拉取不会成功，场景使用内置快照或场景写入的元数据缓存，不依赖拉取结果；拉取本身由 `lattice-llm` 局部测试对本地服务验证。
+场景 HOME 中的 `providers.toml` 默认写入 `[metadata] auto_refresh = false`，后台不自动从 models.dev 拉取元数据；场景使用内置快照或场景写入的元数据缓存。拉取与写缓存由 `lattice-llm` 局部测试对本地服务验证；触发时机、共享与开关由 `lattice-api` 局部测试验证。
 
 下图表示场景驱动与观察的关系：
 

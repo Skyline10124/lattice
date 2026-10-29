@@ -1503,7 +1503,7 @@ fn no_usable_startup_tls_root_rejects_all_submissions_before_acceptance() {
         world.set_env("SSL_CERT_FILE", root.display().to_string());
         let directory = world.home().join(".lattice");
         std::fs::create_dir_all(&directory).unwrap();
-        std::fs::write(directory.join("providers.toml"), "[providers.local]\nprotocol='chat-completions'\nbase_url='http://localhost:9/v1'\nauth='none'\n").unwrap();
+        std::fs::write(directory.join("providers.toml"), "[metadata]\nauto_refresh=false\n[providers.local]\nprotocol='chat-completions'\nbase_url='http://localhost:9/v1'\nauth='none'\n").unwrap();
         let out = run(
             &world,
             &budget,
@@ -1563,9 +1563,9 @@ fn invalidated_provider_configuration_records_last_resolved_origin_without_sendi
             std::fs::write(
                 world.home().join(".lattice/providers.toml"),
                 if removed {
-                    ""
+                    "[metadata]\nauto_refresh=false\n"
                 } else {
-                    "[providers.local]\nprotocol='sk-invalid-config-diagnostic-a19bd57f'\n"
+                    "[metadata]\nauto_refresh=false\n[providers.local]\nprotocol='sk-invalid-config-diagnostic-a19bd57f'\n"
                 },
             )
             .unwrap();

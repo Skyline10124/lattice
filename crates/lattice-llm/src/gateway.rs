@@ -18,6 +18,8 @@ struct Configuration {
     directory: PathBuf,
     roots: Vec<reqwest::Certificate>,
     roots_der: Vec<Vec<u8>>,
+    #[cfg(test)]
+    metadata_url: Option<String>,
 }
 
 /// 持有配置目录与给定的 TLS 根，按 Turn 创建连接句柄。
@@ -32,6 +34,8 @@ impl RequestGateway {
                 directory: config_dir,
                 roots: client::tls_certificates(&roots_der)?,
                 roots_der,
+                #[cfg(test)]
+                metadata_url: None,
             }),
         })
     }
@@ -43,6 +47,47 @@ impl RequestGateway {
 
     pub fn auth_store(&self) -> AuthStore {
         AuthStore::new(self.configuration.directory.clone())
+    }
+
+    /// 刷新只读取当前注册表，固定使用正式元数据源与启动时的信任根。
+    pub async fn refresh_metadata(
+        &self,
+        cancel: Arc<crate::MetadataRefreshControl>,
+    ) -> Result<(), crate::MetadataError> {
+        if self.configuration.roots_der.is_empty() {
+            return Err(crate::MetadataError::Configuration(
+                "no usable TLS root certificates".into(),
+            ));
+        }
+        let directory = self.configuration.directory.clone();
+        let registry = tokio::task::spawn_blocking(move || {
+            ProviderRegistry::load(directory.join("providers.toml"))
+                .map_err(|error| crate::MetadataError::Configuration(error.to_string()))
+        })
+        .await??;
+        let metadata_url = crate::MODELS_URL;
+        #[cfg(test)]
+        let metadata_url = self
+            .configuration
+            .metadata_url
+            .as_deref()
+            .unwrap_or(metadata_url);
+        crate::metadata::fetch::refresh_cancellable(
+            &self.configuration.directory,
+            &registry,
+            metadata_url,
+            &self.configuration.roots_der,
+            cancel,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    fn with_metadata_url(mut self, url: String) -> Self {
+        Arc::get_mut(&mut self.configuration)
+            .expect("unshared test gateway")
+            .metadata_url = Some(url);
+        self
     }
 
     /// 新句柄独占一轮的连接缓存；网关本身不跨 Turn 保存 client。
@@ -72,8 +117,9 @@ impl GatewayTurn {
         validate_model_id(&target.model).map_err(configuration_error)?;
         let directory = self.configuration.directory.clone();
         let provider_id = provider_id.to_owned();
-        let (provider, credentials) =
-            tokio::task::spawn_blocking(move || load_provider(directory, &provider_id))
+        let model_id = target.model.clone();
+        let (provider, credentials, output_limit) =
+            tokio::task::spawn_blocking(move || load_provider(directory, &provider_id, &model_id))
                 .await
                 .map_err(|_| configuration_error("provider configuration task failed"))??;
         let client = self
@@ -94,6 +140,7 @@ impl GatewayTurn {
             credentials: Arc::new(credentials),
             client,
             target: target.clone(),
+            output_limit,
         })
     }
 
@@ -117,6 +164,7 @@ pub struct ResolvedRequest {
     credentials: Arc<Credentials>,
     client: Arc<TurnClient>,
     target: ModelTarget,
+    output_limit: Option<u64>,
 }
 
 impl ResolvedRequest {
@@ -150,6 +198,7 @@ impl ResolvedRequest {
                 credentials: self.credentials.clone(),
                 roots: &self.configuration.roots,
                 client: self.client.clone(),
+                output_limit: self.output_limit,
             },
             control,
         )
@@ -172,7 +221,11 @@ pub(crate) fn load_configuration(
     Ok((registry, credentials))
 }
 
-fn load_provider(directory: PathBuf, id: &str) -> Result<(Provider, Credentials), LlmError> {
+fn load_provider(
+    directory: PathBuf,
+    id: &str,
+    model_id: &str,
+) -> Result<(Provider, Credentials, Option<u64>), LlmError> {
     let (registry, credentials) = load_configuration(&directory)?;
     let provider = registry
         .get(id)
@@ -183,7 +236,11 @@ fn load_provider(directory: PathBuf, id: &str) -> Result<(Provider, Credentials)
         Err(_) if provider.auth == Auth::None => Credentials::default(),
         Err(error) => return Err(configuration_error(error)),
     };
-    Ok((provider, credentials))
+    let output_limit = crate::metadata::Metadata::load(&directory)
+        .merge(&provider)
+        .get(model_id)
+        .and_then(|model| model.limit.as_ref().and_then(|limit| limit.output));
+    Ok((provider, credentials, output_limit))
 }
 
 pub(crate) fn missing_provider_error(registry: &ProviderRegistry, id: &str) -> LlmError {
