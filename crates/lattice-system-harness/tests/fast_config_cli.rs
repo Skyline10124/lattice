@@ -3,7 +3,8 @@
 
 //! 经后台查询候选，保护凭据过滤、脱敏和失败说明。
 //! 元数据合并、废弃模型与缺失 catalog 的合并规则由 lattice-llm 的
-//! `candidates_merge_metadata_filter_deprecated_and_report_missing_catalogs` 覆盖。
+//! `candidates_merge_metadata_filter_deprecated_and_report_missing_catalogs` 覆盖；
+//! 这里只核对 `lattice models` 显示了合并结果。
 mod support;
 use lattice_system_harness::{FAKE_API_KEY, ProviderFixture, ScenarioSpec, ScenarioWorld};
 use serde_json::{Value, json};
@@ -119,6 +120,95 @@ fn refresh_without_tls_roots_reports_the_reason_and_preserves_cached_candidates(
         assert_eq!(
             std::fs::read(directory.join("cache/models.json")).unwrap(),
             previous
+        );
+    }));
+    finish_recorded(evidence, result);
+}
+
+#[test]
+fn models_display_merged_metadata_hide_deprecated_and_warn_missing_catalog() {
+    let spec = ScenarioSpec::fast("models-metadata-display");
+    let world = ScenarioWorld::new(&spec.name).unwrap();
+    world.budget(&spec);
+    let directory = world.home().join(".lattice");
+    std::fs::create_dir_all(directory.join("cache")).unwrap();
+    std::fs::write(
+        directory.join("providers.toml"),
+        r#"
+[metadata]
+auto_refresh = false
+[providers.local]
+protocol = "chat-completions"
+base_url = "http://localhost:9/v1"
+auth = "none"
+catalog = "arbitrary-entry"
+[providers.local.models.current]
+context = 999
+[providers.empty]
+protocol = "chat-completions"
+base_url = "http://localhost:9/v1"
+auth = "none"
+catalog = "absent-entry"
+[providers.empty.models.listed]
+"#,
+    )
+    .unwrap();
+    std::fs::write(directory.join("cache/models.json"), serde_json::to_vec(&json!({
+        "arbitrary-entry":{"models":{
+            "current":{"id":"current","name":"Current","limit":{"context":100,"output":200},"cost":{"input":1.2,"output":3.4,"cache_read":0.1}},
+            "retired":{"id":"retired","status":"deprecated"}
+        }}
+    })).unwrap()).unwrap();
+    let mut evidence = lattice_system_harness::ScenarioEvidence::new(
+        &world,
+        &spec.name,
+        [FAKE_API_KEY.to_owned()],
+    )
+    .unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let local = cli(&world, &spec, &["--json", "models", "--provider", "local"]);
+        evidence.record_command("models merged metadata", &local);
+        assert!(local.is_clean_exit(0), "merged metadata query failed");
+        let local: Value = serde_json::from_slice(&local.stdout).unwrap();
+        let models = local["models"].as_array().unwrap();
+        let current = models
+            .iter()
+            .find(|model| model["model"] == "current")
+            .expect("merged: current model listed");
+        assert_eq!(current["context"], 999, "merged: handwritten context wins");
+        assert_eq!(current["output"], 200, "merged: output from metadata");
+        assert_eq!(current["cost"]["input"], 1.2, "merged: cost from metadata");
+        assert!(
+            !models.iter().any(|model| model["model"] == "retired"),
+            "deprecated: retired model must be hidden, got {models:?}"
+        );
+        let text = cli(&world, &spec, &["models", "--provider", "local"]);
+        evidence.record_command("models merged metadata text", &text);
+        assert!(text.is_clean_exit(0), "merged text query failed");
+        let text = String::from_utf8(text.stdout).unwrap();
+        for value in ["local/current", "999", "200", "1.2/3.4/0.1"] {
+            assert!(
+                text.contains(value),
+                "merged text: missing {value} in {text}"
+            );
+        }
+        assert!(
+            !text.contains("retired"),
+            "deprecated text: retired model shown in {text}"
+        );
+        let empty = cli(&world, &spec, &["--json", "models", "--provider", "empty"]);
+        evidence.record_command("models missing catalog", &empty);
+        assert!(empty.is_clean_exit(0), "missing catalog query failed");
+        let empty: Value = serde_json::from_slice(&empty.stdout).unwrap();
+        assert!(
+            empty["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|warning| warning["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("no metadata"))),
+            "no metadata: missing catalog warning absent, got {empty}"
         );
     }));
     finish_recorded(evidence, result);
