@@ -189,6 +189,9 @@ async fn next_armed(timer: &mut Timer) -> tokio::time::Instant {
     }
 }
 
+/// 断言“尚未触发”前让定时器任务运行的轮数。
+const SETTLE_ROUNDS: usize = 16;
+
 /// 断言定时器下一次等待到 `at`：到 `at` 前 1ms 尚未触发，到 `at` 时恰好触发一次并得到
 /// `expected`，随后进入更晚的下一次等待。
 async fn assert_fires_once_at(
@@ -205,12 +208,17 @@ async fn assert_fires_once_at(
         at.as_secs()
     );
     tokio::time::advance(armed - Duration::from_millis(1) - tokio::time::Instant::now()).await;
-    tokio::task::yield_now().await;
-    assert!(
-        timer.events.try_recv().is_err(),
-        "trigger must not fire 1ms before {}s",
-        at.as_secs()
-    );
+    // 多轮让出并推进 0 时长，让定时器任务把能做的都做完，再断言仍未触发；
+    // 只让出一次时，晚一轮才发出的错误触发会被漏看。
+    for round in 0..SETTLE_ROUNDS {
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::ZERO).await;
+        assert!(
+            timer.events.try_recv().is_err(),
+            "trigger must not fire 1ms before {}s (settle round {round})",
+            at.as_secs()
+        );
+    }
     tokio::time::advance(Duration::from_millis(1)).await;
     match next_event(timer).await {
         TimerEvent::Fired(outcome) => assert_eq!(
