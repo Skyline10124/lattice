@@ -1994,6 +1994,48 @@ fn attempts_without_reply_allow_sent_and_stopped_on_reopen() {
 }
 
 #[test]
+fn attempt_origin_rejects_invalid_endpoints() {
+    let long = format!("https://{}", "a".repeat(8_193 - "https://".len()));
+    for (case, base_url) in [
+        ("empty", String::new()),
+        ("longer than 8192 bytes", long),
+        ("newline", "https://api.example\n/v1".to_owned()),
+        ("NUL", "https://api.example\0/v1".to_owned()),
+        ("DEL", "https://api.example\x7f/v1".to_owned()),
+    ] {
+        let (_dir, _layout, db) = store();
+        let lock = db.try_lock_session(sid(1)).unwrap();
+        db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+        let before = records(&db);
+        let source = AttemptOrigin {
+            base_url,
+            ..origin()
+        };
+        let result = db.start_request(&lock, key(tid(1), 0, 0), source, now());
+        assert!(
+            matches!(
+                &result,
+                Err(StoreError::InvalidInput { field: "origin", detail }) if detail == "invalid endpoint"
+            ),
+            "{case}: endpoint must be rejected, got {result:?}"
+        );
+        assert!(before == records(&db), "{case}: rejection must not write");
+    }
+    let (_dir, _layout, db) = store();
+    let lock = db.try_lock_session(sid(1)).unwrap();
+    db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+    let longest = AttemptOrigin {
+        base_url: format!("https://{}", "a".repeat(8_192 - "https://".len())),
+        ..origin()
+    };
+    let result = db.start_request(&lock, key(tid(1), 0, 0), longest, now());
+    assert!(
+        result.is_ok(),
+        "8192-byte endpoint must be accepted, got {result:?}"
+    );
+}
+
+#[test]
 fn provider_id_and_attempt_source_boundaries() {
     for protocol in [
         AttemptProtocol::ChatCompletions,
