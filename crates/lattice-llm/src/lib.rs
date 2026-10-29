@@ -14,7 +14,10 @@ mod logging;
 mod models;
 pub use models::{ModelCandidate, ModelCandidates, ModelPrice, ModelWarning, model_candidates};
 pub(crate) mod metadata;
-pub use metadata::{MODELS_URL, MetadataError, fetch_snapshot};
+pub use metadata::{
+    MODELS_URL, MetadataError, MetadataRefreshControl, fetch_snapshot,
+    metadata_auto_refresh_enabled,
+};
 pub mod protocol;
 pub(crate) mod provider;
 pub use provider::{MAX_MODEL_ID_BYTES, ModelRef, ModelRefError};

@@ -2,14 +2,30 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
+use clap::Subcommand;
 use lattice_api::{
     StateLayout,
     local::{AuthState, LocalClient},
 };
+use std::io::Write;
 
-pub async fn run(provider: Option<String>, auth_only: bool, json: bool) -> Result<()> {
+#[derive(Subcommand)]
+pub enum ModelsAction {
+    /// Refresh model metadata from models.dev.
+    Refresh,
+}
+
+pub async fn run(
+    provider: Option<String>,
+    auth_only: bool,
+    action: Option<ModelsAction>,
+    json: bool,
+) -> Result<()> {
     let client = LocalClient::new(StateLayout::resolve()?);
     client.ensure_running().await?;
+    if let Some(ModelsAction::Refresh) = action {
+        return refresh(&client, json, &mut std::io::stdout()).await;
+    }
     let mut candidates = client.models(provider).await?;
     if auth_only {
         candidates
@@ -53,5 +69,19 @@ pub async fn run(provider: Option<String>, auth_only: bool, json: bool) -> Resul
         }
     }
 
+    Ok(())
+}
+
+pub(super) async fn refresh(client: &LocalClient, json: bool, out: &mut impl Write) -> Result<()> {
+    client.models_refresh().await?;
+    if json {
+        writeln!(
+            out,
+            "{}",
+            serde_json::json!({"type":"models_refresh","status":"refreshed"})
+        )?;
+    } else {
+        writeln!(out, "Model metadata refreshed.")?;
+    }
     Ok(())
 }

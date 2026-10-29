@@ -10,10 +10,17 @@ use serde::{Deserialize, Serialize};
 use crate::provider::{Effort, ModelMetadata, Provider, config::ProviderRegistry};
 
 pub(crate) mod fetch;
-pub use fetch::{MetadataError, fetch_snapshot};
+pub use fetch::{MetadataError, MetadataRefreshControl, fetch_snapshot};
 
 /// 正式元数据源。
 pub const MODELS_URL: &str = "https://models.dev/api.json";
+
+/// 每次自动触发都按当前完整配置决定是否刷新；无效配置不发起网络请求。
+pub fn metadata_auto_refresh_enabled(config_dir: &Path) -> Result<bool, MetadataError> {
+    ProviderRegistry::load(config_dir.join("providers.toml"))
+        .map(|registry| registry.auto_refresh_enabled())
+        .map_err(|error| MetadataError::Configuration(error.to_string()))
+}
 
 const SNAPSHOT: &[u8] = include_bytes!("snapshot.json");
 static BUILTIN_SNAPSHOT: LazyLock<Catalog> = LazyLock::new(|| {

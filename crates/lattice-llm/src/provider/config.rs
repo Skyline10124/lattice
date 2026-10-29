@@ -44,11 +44,13 @@ impl ProviderConfigError {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ProviderRegistry {
     providers: BTreeMap<String, Provider>,
+    auto_refresh: bool,
 }
 
 impl ProviderRegistry {
     pub(crate) fn builtins() -> Self {
         Self {
+            auto_refresh: true,
             providers: builtins::providers()
                 .into_iter()
                 .map(|provider| (provider.id.clone(), provider))
@@ -108,6 +110,7 @@ impl ProviderRegistry {
         }
 
         let mut registry = Self::builtins();
+        registry.auto_refresh = raw.metadata.is_none_or(|metadata| metadata.0.auto_refresh);
         for (id, raw) in raw.providers {
             lattice_conversation::validate_provider_id(id.get_ref())
                 .map_err(|error| error_at(id.span().start, error.to_string()))?;
@@ -241,6 +244,10 @@ impl ProviderRegistry {
     pub(crate) fn iter(&self) -> impl Iterator<Item = &Provider> {
         self.providers.values()
     }
+
+    pub(crate) fn auto_refresh_enabled(&self) -> bool {
+        self.auto_refresh
+    }
 }
 
 fn check_file_size(path: &Path, bytes: &[u8]) -> Result<(), ProviderConfigError> {
@@ -311,7 +318,20 @@ fn apply_features(
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct RawConfig {
+    metadata: Option<Table<RawMetadata>>,
     providers: BTreeMap<Spanned<String>, Spanned<Table<RawProvider>>>,
+}
+
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RawMetadata {
+    auto_refresh: bool,
+}
+
+impl Default for RawMetadata {
+    fn default() -> Self {
+        Self { auto_refresh: true }
+    }
 }
 
 #[derive(Default, Deserialize)]

@@ -43,7 +43,7 @@ enum Commands {
         #[command(subcommand)]
         action: commands::auth::AuthAction,
     },
-    /// List available models.
+    /// List available models or refresh model metadata.
     Models {
         /// Only show authenticated models.
         #[arg(long)]
@@ -51,6 +51,8 @@ enum Commands {
         /// Only list models from this configured provider.
         #[arg(long)]
         provider: Option<String>,
+        #[command(subcommand)]
+        action: Option<models::ModelsAction>,
     },
     /// Manage sessions.
     #[command(disable_help_subcommand = true)]
@@ -74,8 +76,27 @@ enum Commands {
     },
 }
 
+fn parse_cli(
+    args: impl IntoIterator<Item = impl Into<std::ffi::OsString> + Clone>,
+) -> Result<Cli, clap::Error> {
+    let cli = Cli::try_parse_from(args)?;
+    if let Some(Commands::Models {
+        auth,
+        provider,
+        action: Some(_),
+    }) = &cli.command
+        && (*auth || provider.is_some())
+    {
+        return Err(Cli::command().error(
+            clap::error::ErrorKind::ArgumentConflict,
+            "--auth and --provider cannot be used with models refresh",
+        ));
+    }
+    Ok(cli)
+}
+
 fn main() -> std::process::ExitCode {
-    let cli = match Cli::try_parse() {
+    let cli = match parse_cli(std::env::args_os()) {
         Ok(cli) => cli,
         Err(error) => {
             let help = matches!(
@@ -130,8 +151,12 @@ async fn run_commands(cli: Cli) -> Result<std::process::ExitCode> {
         Some(Commands::Auth { action }) => {
             commands::auth::run(action, cli.json).await?;
         }
-        Some(Commands::Models { auth, provider }) => {
-            models::run(provider, auth, cli.json).await?;
+        Some(Commands::Models {
+            auth,
+            provider,
+            action,
+        }) => {
+            models::run(provider, auth, action, cli.json).await?;
         }
         Some(Commands::Session { action }) => {
             return session_cmd::run(action, cli.json, cli.verbose).await;
@@ -162,7 +187,7 @@ async fn run_commands(cli: Cli) -> Result<std::process::ExitCode> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Commands};
+    use super::{Cli, Commands, parse_cli};
     use clap::{CommandFactory, Parser};
 
     #[test]
@@ -178,7 +203,7 @@ mod tests {
         .unwrap();
         assert!(cli.json);
         assert!(
-            matches!(cli.command, Some(Commands::Models { auth: true, provider: Some(provider) }) if provider == "local")
+            matches!(cli.command, Some(Commands::Models { auth: true, provider: Some(provider), action: None }) if provider == "local")
         );
         let mut command = Cli::command();
         let help = command
@@ -188,6 +213,46 @@ mod tests {
             .to_string();
         assert!(help.contains("--provider"));
         assert!(help.contains("--auth"));
+    }
+
+    #[test]
+    fn models_refresh_is_separate_from_list_filters() {
+        assert!(matches!(
+            parse_cli(["lattice", "models", "refresh"]).unwrap().command,
+            Some(Commands::Models {
+                action: Some(crate::commands::models::ModelsAction::Refresh),
+                ..
+            })
+        ));
+        for args in [
+            vec!["lattice", "models", "--auth", "refresh"],
+            vec!["lattice", "models", "--provider", "anthropic", "refresh"],
+            vec!["lattice", "models", "refresh", "--auth"],
+        ] {
+            assert!(parse_cli(args).is_err());
+        }
+    }
+
+    #[test]
+    fn models_refresh_accepts_global_flags_before_and_after_the_subcommand() {
+        for flag in ["--json", "--verbose"] {
+            for args in [
+                vec!["lattice", flag, "models", "refresh"],
+                vec!["lattice", "models", flag, "refresh"],
+                vec!["lattice", "models", "refresh", flag],
+            ] {
+                let cli = parse_cli(args).unwrap();
+                assert_eq!(cli.json, flag == "--json");
+                assert_eq!(cli.verbose, flag == "--verbose");
+                assert!(matches!(
+                    cli.command,
+                    Some(Commands::Models {
+                        action: Some(crate::commands::models::ModelsAction::Refresh),
+                        ..
+                    })
+                ));
+            }
+        }
     }
 
     #[test]

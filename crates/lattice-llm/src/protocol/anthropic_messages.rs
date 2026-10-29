@@ -12,8 +12,8 @@ use crate::reply::{
 };
 use crate::types::ChatRequest;
 
-/// Messages 协议要求 max_tokens，使用 32,768。
-const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 32_768;
+/// Messages 必须发送输出上限；元数据没有给出时使用此值。
+const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 32_768;
 
 /// Maps Anthropic stop reasons to OpenAI-style finish reasons.
 const STOP_REASON_MAP: &[(&str, &str)] = &[
@@ -36,12 +36,13 @@ fn map_stop_reason(reason: &str) -> String {
 pub fn build_request_json(
     request: &ChatRequest,
     model: &str,
+    output_limit: Option<u64>,
 ) -> Result<serde_json::Value, ProjectionError> {
     let projected = request_messages_to_wire(ProviderOrigin::Anthropic, &request.messages)?;
     let mut body = serde_json::json!({
         "model": model,
         "messages": projected.messages,
-        "max_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
+        "max_tokens": output_limit.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS),
         "stream": true,
     });
 
@@ -427,13 +428,13 @@ mod tests {
             target: ModelTarget::new("anthropic", "claude-sonnet-4-6"),
             client_request_id: None,
         };
-        let body = build_request_json(&request, "claude-sonnet-4-6").expect("projection");
+        let body = build_request_json(&request, "claude-sonnet-4-6", None).expect("projection");
         assert_eq!(body["model"], "claude-sonnet-4-6");
         assert_eq!(body["system"], "First prompt.\n\nSecond prompt.");
         assert_eq!(body["messages"][0]["content"][0]["text"], "Hello");
         assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
         assert_eq!(body["stream"], true);
-        assert!(body["max_tokens"].as_u64().unwrap() > 4096);
+        assert_eq!(body["max_tokens"], 32_768);
     }
 
     #[test]

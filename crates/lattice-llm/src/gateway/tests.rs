@@ -158,10 +158,16 @@ async fn serve(
             .filter_map(|line| line.split_once(':'))
             .map(|(key, value)| (key.to_ascii_lowercase(), value.trim().to_owned()))
             .collect();
-        let length = headers["content-length"].parse().unwrap();
+        let length = headers
+            .get("content-length")
+            .map_or(0, |length| length.parse().unwrap());
         let mut body = vec![0; length];
         socket.read_exact(&mut body).await.unwrap();
-        let body = serde_json::from_slice(&body).unwrap();
+        let body = if body.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&body).unwrap()
+        };
         let response_body = if path.ends_with("/messages") {
             MESSAGES_DONE
         } else if path.contains(":streamGenerateContent") {
@@ -460,6 +466,145 @@ async fn resolved_request_keeps_its_protocol_endpoint_and_credentials_until_sent
     let received = second.next().await;
     assert!(received.path.contains(":streamGenerateContent"));
     assert_eq!(received.headers["x-goog-api-key"], "second-key");
+}
+
+#[tokio::test]
+async fn messages_use_merged_output_limits_at_resolution_and_reload_on_the_next_request() {
+    let mut server = Server::start(true).await;
+    let directory = private_dir();
+    configure(directory.path(), &server.url, "anthropic-messages", "none");
+    let config = directory.path().join("providers.toml");
+    let base = std::fs::read_to_string(&config).unwrap();
+    std::fs::create_dir(directory.path().join("cache")).unwrap();
+    let cache = directory.path().join("cache/models.json");
+    let write_cache = |output| {
+        std::fs::write(&cache, serde_json::to_vec(&serde_json::json!({"custom":{"models":{"model-id":{"id":"model-id","limit":{"output":output}}}}})).unwrap()).unwrap();
+    };
+    std::fs::write(&config, format!("{base}catalog = 'custom'\n")).unwrap();
+    write_cache(8192);
+    let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+    let turn = gateway.open_turn();
+    let request = request("test");
+    let old = turn.resolve(&request.target).await.unwrap();
+    write_cache(65536);
+    complete(
+        old.stream_chat(request.clone(), StreamControl::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(server.next().await.body["max_tokens"], 8192);
+    for (handwritten, expected) in [(None, 65536_u64), (Some(4096), 4096)] {
+        let overlay = handwritten.map_or(String::new(), |value| {
+            format!("[providers.test.models.model-id]\noutput = {value}\n")
+        });
+        std::fs::write(&config, format!("{base}catalog = 'custom'\n{overlay}")).unwrap();
+        complete(
+            turn.stream_chat(request.clone(), StreamControl::default())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(server.next().await.body["max_tokens"], expected);
+        assert_eq!(
+            crate::model_candidates(directory.path(), Some("test"))
+                .unwrap()
+                .models[0]
+                .output,
+            Some(expected)
+        );
+    }
+    std::fs::write(&config, &base).unwrap();
+    complete(
+        turn.stream_chat(request, StreamControl::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(server.next().await.body["max_tokens"], 32768);
+}
+
+#[tokio::test]
+async fn metadata_refresh_with_no_roots_fails_before_network_or_directory_creation() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let directory = home.path().join(".lattice");
+    let gateway = RequestGateway::new(directory.clone(), Vec::new())
+        .unwrap()
+        .with_metadata_url(format!(
+            "https://{}/api.json",
+            listener.local_addr().unwrap()
+        ));
+    assert!(matches!(
+        gateway
+            .refresh_metadata(Arc::new(crate::MetadataRefreshControl::default()))
+            .await,
+        Err(crate::MetadataError::Configuration(_))
+    ));
+    assert!(matches!(
+        listener.accept(),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+    ));
+    assert!(!directory.exists());
+}
+
+#[tokio::test]
+async fn refresh_metadata_uses_startup_roots_and_updates_candidates_and_messages() {
+    let mut source = Server::start(true).await;
+    let mut messages = Server::start(true).await;
+    let directory = private_dir();
+    configure(
+        directory.path(),
+        &messages.url,
+        "anthropic-messages",
+        "none",
+    );
+    let config = directory.path().join("providers.toml");
+    let provider = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        config,
+        format!("[metadata]\nauto_refresh = false\n{provider}catalog = 'refresh-entry'\n"),
+    )
+    .unwrap();
+    let before = crate::model_candidates(directory.path(), Some("test")).unwrap();
+    assert!(before.models.is_empty());
+    let metadata = serde_json::json!({"refresh-entry":{"models":{"model-id":{
+        "id":"model-id","limit":{"output":65536}
+    }}}});
+    let body = serde_json::to_string(&metadata).unwrap();
+    source.respond(
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        ),
+        true,
+    );
+    let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()])
+        .unwrap()
+        .with_metadata_url(format!("{}/api.json", source.url));
+    gateway
+        .refresh_metadata(Arc::new(crate::MetadataRefreshControl::default()))
+        .await
+        .unwrap();
+    assert_eq!(source.next().await.path, "/v1/api.json");
+    let cached: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(directory.path().join("cache/models.json")).unwrap())
+            .unwrap();
+    assert_eq!(cached, metadata);
+    let after = crate::model_candidates(directory.path(), Some("test")).unwrap();
+    assert_eq!(after.models.len(), 1);
+    assert_eq!(after.models[0].model, "model-id");
+    assert_eq!(after.models[0].output, Some(65536));
+    complete(
+        gateway
+            .open_turn()
+            .stream_chat(request("test"), StreamControl::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(messages.next().await.body["max_tokens"], 65536);
 }
 
 #[tokio::test]

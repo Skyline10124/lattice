@@ -222,6 +222,10 @@ fn chatgpt_allows_only_handwritten_model_metadata() {
 fn strict_errors_report_path_line_and_reason() {
     for (source, line, reason) in [
         ("\nunknown = true", 2, "unknown field"),
+        ("metadata = []", 1, "table"),
+        ("[metadata]\nunknown = true", 2, "unknown field"),
+        ("[metadata]\nauto_refresh = 'false'", 2, "invalid type"),
+        ("[metadata]\nauto_refresh = 0", 2, "invalid type"),
         ("providers = []", 1, "invalid type"),
         ("[providers]\nopenai = []", 2, "table"),
         (
@@ -342,6 +346,32 @@ fn strict_errors_report_path_line_and_reason() {
         4,
         "unknown field",
     );
+}
+
+#[test]
+fn metadata_auto_refresh_defaults_to_true_and_loads_current_strict_configuration() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("providers.toml");
+    assert!(crate::metadata_auto_refresh_enabled(directory.path()).unwrap());
+    for source in ["", "[metadata]", "[metadata]\nauto_refresh = true"] {
+        fs::write(&path, source).unwrap();
+        assert!(crate::metadata_auto_refresh_enabled(directory.path()).unwrap());
+    }
+    fs::write(&path, "[metadata]\nauto_refresh = false").unwrap();
+    assert!(!crate::metadata_auto_refresh_enabled(directory.path()).unwrap());
+    assert_eq!(
+        parse("[metadata]\nauto_refresh = false").iter().count(),
+        ProviderRegistry::builtins().iter().count()
+    );
+    fs::write(
+        &path,
+        "[metadata]\nauto_refresh = false\n[providers.openai]\nunknown = true",
+    )
+    .unwrap();
+    assert!(matches!(
+        crate::metadata_auto_refresh_enabled(directory.path()),
+        Err(crate::MetadataError::Configuration(_))
+    ));
 }
 
 #[test]

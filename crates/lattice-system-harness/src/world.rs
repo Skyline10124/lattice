@@ -97,6 +97,10 @@ impl ScenarioWorld {
         std::fs::DirBuilder::new()
             .mode(0o700)
             .create(home.join(".lattice"))?;
+        std::fs::write(
+            home.join(".lattice/providers.toml"),
+            "[metadata]\nauto_refresh = false\n",
+        )?;
         std::fs::create_dir_all(&session_store)?;
         std::fs::create_dir_all(project.join(".lattice"))?;
 

@@ -50,6 +50,7 @@ struct Backend {
     layout: crate::StateLayout,
     home: Option<std::path::PathBuf>,
     gateway: std::result::Result<Arc<lattice_llm::RequestGateway>, crate::ConfigRejection>,
+    metadata: Arc<super::metadata::MetadataRefresh>,
     epoch: String,
     admission: Mutex<Admission>,
     changed: watch::Sender<u64>,
@@ -129,17 +130,18 @@ impl Backend {
         home: Option<std::path::PathBuf>,
         roots: std::result::Result<Vec<Vec<u8>>, lattice_llm::LlmError>,
     ) -> Arc<Self> {
-        let gateway = super::auth::directory(home.as_deref())
-            .map_err(|error| crate::ConfigRejection::new(&error.message, None))
-            .and_then(|directory| {
-                let auth = lattice_llm::auth::AuthStore::new(directory.clone());
-                roots
-                    .and_then(|roots| lattice_llm::RequestGateway::new(directory, roots))
-                    .map(Arc::new)
-                    .map_err(|error| crate::ConfigRejection::new(&error.to_string(), Some(&auth)))
-            });
+        let directory = super::auth::directory(home.as_deref())
+            .map_err(|error| crate::ConfigRejection::new(&error.message, None));
+        let gateway = directory.clone().and_then(|directory| {
+            let auth = lattice_llm::auth::AuthStore::new(directory.clone());
+            roots
+                .and_then(|roots| lattice_llm::RequestGateway::new(directory, roots))
+                .map(Arc::new)
+                .map_err(|error| crate::ConfigRejection::new(&error.to_string(), Some(&auth)))
+        });
         Arc::new(Self {
             home,
+            metadata: super::metadata::MetadataRefresh::new(gateway.clone(), directory),
             gateway,
             stores: crate::stores::StoreManager::new(layout.clone()),
             layout,
@@ -644,9 +646,14 @@ impl Backend {
                 })
                 .await
             }
+            Request::ModelsRefresh {} => {
+                self.metadata.refresh().await?;
+                Ok(Response::ModelsRefreshed)
+            }
             Request::Stop => {
                 let mut changed = self.changed.subscribe();
                 lock(&self.admission).stopping = true;
+                self.metadata.stop();
                 while self.status().owners != 0 {
                     changed.changed().await.map_err(|_| internal())?;
                 }
@@ -1002,10 +1009,36 @@ async fn connection(backend: Arc<Backend>, mut stream: UnixStream) -> Result<()>
 /// 实例锁唯一持有者；正常停止排空后台执行与读取，不创建领域库。
 /// 后台保存 HOME 配置目录与启动时 TLS 根；配置错误只拒绝需要它们的操作。
 pub async fn serve(layout: crate::StateLayout, home: Option<std::path::PathBuf>) -> Result<()> {
+    let backend_layout = layout.clone();
+    serve_with_backend(layout, move || Backend::new(backend_layout, home)).await
+}
+
+/// 测试后台以空动作替代自动与手动元数据刷新，其余操作沿用正式入口。
+#[cfg(any(test, feature = "test-utils"))]
+pub async fn serve_for_test(
+    layout: crate::StateLayout,
+    home: Option<std::path::PathBuf>,
+) -> Result<()> {
+    let backend_layout = layout.clone();
+    serve_with_backend(layout, move || {
+        let mut backend = Backend::new(backend_layout, home);
+        Arc::get_mut(&mut backend)
+            .expect("unshared test backend")
+            .metadata = super::metadata::MetadataRefresh::without_network();
+        backend
+    })
+    .await
+}
+
+async fn serve_with_backend(
+    layout: crate::StateLayout,
+    build_backend: impl FnOnce() -> Arc<Backend> + Send + 'static,
+) -> Result<()> {
     let binding_layout = layout.clone();
     let (instance, listener) = blocking(move || ipc::Instance::bind(&binding_layout)).await?;
     let listener = UnixListener::from_std(listener)?;
-    let backend = blocking(move || Ok(Backend::new(layout, home))).await?;
+    let backend = blocking(move || Ok(build_backend())).await?;
+    let metadata_task = backend.metadata.start();
     let mut connections = JoinSet::new();
     let mut failure = None;
     loop {
@@ -1024,6 +1057,8 @@ pub async fn serve(layout: crate::StateLayout, home: Option<std::path::PathBuf>)
         }
     }
     let mut changed = backend.changed.subscribe();
+    backend.metadata.stop();
+    metadata_task.await.map_err(|_| internal())?;
     while backend.status().owners != 0 {
         changed.changed().await.map_err(|_| internal())?;
     }

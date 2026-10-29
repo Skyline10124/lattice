@@ -17,6 +17,56 @@ fn driver() -> LatticeDriver {
 const EXPECTED_PUBLIC_COMMANDS: &[&str] = &["auth", "models", "session", "audit", "lancet", "tui"];
 
 #[test]
+fn models_help_advertises_refresh_and_rejects_list_filters_on_refresh() {
+    let spec = ScenarioSpec::fast("models-refresh-help");
+    let world = ScenarioWorld::new(&spec.name).unwrap();
+    let driver = driver();
+    let mut evidence =
+        lattice_system_harness::ScenarioEvidence::new(&world, &spec.name, Vec::<String>::new())
+            .unwrap();
+    let result = (|| {
+        for args in [
+            vec!["models", "--help"],
+            vec!["models", "refresh", "--help"],
+        ] {
+            let output = driver
+                .run(
+                    &world,
+                    &LatticeCommand {
+                        args: args.iter().map(|arg| (*arg).into()).collect(),
+                        timeout: Some(spec.step_timeout()),
+                    },
+                )
+                .unwrap();
+            evidence.record_command("models help", &output);
+            assert_exit_code(&output, 0).map_err(|error| error.to_string())?;
+            assert_stdout_contains_all(&output, &["refresh"]).map_err(|error| error.to_string())?;
+        }
+        let output = driver
+            .run(
+                &world,
+                &LatticeCommand {
+                    args: vec!["--json", "models", "--auth", "refresh"]
+                        .into_iter()
+                        .map(String::from)
+                        .collect(),
+                    timeout: Some(spec.step_timeout()),
+                },
+            )
+            .unwrap();
+        evidence.record_command("models refresh filters rejected", &output);
+        assert_exit_code(&output, 2).map_err(|error| error.to_string())?;
+        let error: serde_json::Value =
+            serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
+        if error["kind"] != "bad_request" {
+            return Err("refresh filters must be a usage error".into());
+        }
+        Ok(())
+    })();
+    evidence.finish_report(result.err()).unwrap();
+}
+
+#[test]
 fn fast_home_xdg_isolated_from_developer_home() {
     let world = ScenarioWorld::new("lattice-harness-home").expect("world");
     world

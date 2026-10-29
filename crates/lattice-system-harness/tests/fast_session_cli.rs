@@ -229,14 +229,14 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
             }
             "provider-config" => std::fs::write(
                 world.home().join(".lattice/providers.toml"),
-                format!("[providers.local]\nprotocol='{SENTINEL}:{FAKE_API_KEY}'\n"),
+                format!("[metadata]\nauto_refresh=false\n[providers.local]\nprotocol='{SENTINEL}:{FAKE_API_KEY}'\n"),
             )
             .unwrap(),
             "provider-config-known-key" => {
                 world.register_key(provider, Some(ORDINARY_KEY)).unwrap();
                 std::fs::write(
                     world.home().join(".lattice/providers.toml"),
-                    format!("[providers.local]\nprotocol='{ORDINARY_KEY}'\n"),
+                    format!("[metadata]\nauto_refresh=false\n[providers.local]\nprotocol='{ORDINARY_KEY}'\n"),
                 )
                 .unwrap();
             }
@@ -283,14 +283,14 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
                 std::fs::write(
                     world.home().join(".lattice/providers.toml"),
                     format!(
-                        "[providers.local]\nprotocol='{case}'\nbase_url='{}'\nauth='none'\n",
+                        "[metadata]\nauto_refresh=false\n[providers.local]\nprotocol='{case}'\nbase_url='{}'\nauth='none'\n",
                         server.base_url()
                     ),
                 )
                 .unwrap();
             }
             "oauth-chatgpt" => {
-                std::fs::write(world.home().join(".lattice/providers.toml"), "").unwrap();
+                std::fs::write(world.home().join(".lattice/providers.toml"), "[metadata]\nauto_refresh=false\n").unwrap();
                 std::fs::write(&path, original.replace(&model, "chatgpt/plain")).unwrap();
             }
             "missing-profile" => {}

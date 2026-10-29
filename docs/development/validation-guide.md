@@ -174,6 +174,16 @@ stop 先关闭新准入，再等待已接管工作及必要收尾。`unconfirmed
 
 即使已知 Completed，最终内容读取失败仍退出 `1` 并保留可见终态。重连读取该结果，不因这个退出码改写已完成 Turn 或重新执行任务。参数与退出分类的静态来源为 [CLI 分派](../../crates/lattice-cli/src/main.rs)、[Session 命令](../../crates/lattice-cli/src/commands/session.rs)、[提交和观察](../../crates/lattice-cli/src/commands/run.rs)及[后台命令](../../crates/lattice-cli/src/commands/daemon.rs)。
 
+## 模型元数据操作
+
+```sh
+lattice models --provider anthropic
+lattice models refresh
+lattice --json models refresh
+```
+
+后台默认在启动时与此后每 24 小时更新本地元数据缓存。用户级 `~/.lattice/providers.toml` 的 `[metadata] auto_refresh = false` 可关闭自动刷新；后台每次自动触发时读取当前设置，修改后无需重启，配置无效时跳过本次自动刷新。`refresh` 不受开关影响，不接受列表过滤参数 `--provider` 或 `--auth`；`chatgpt` 的账号模型列表尚未接入。
+
 ## 日常验证
 
 先选择直接受影响的 crate 或目标：
