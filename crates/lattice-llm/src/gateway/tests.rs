@@ -1219,6 +1219,34 @@ async fn configuration_failure(
 }
 
 #[tokio::test]
+async fn invalid_tls_root_near_the_count_limit_is_skipped_without_using_a_slot() {
+    // 1_023 个有效根之后是一张无法解析的根，再接两个有效根。无效根不占名额时，
+    // 保留 1_024 个有效根、截掉最后一个；它若被保留或占名额，结果都不同，
+    // 被保留时 rustls 构建 client 也会以 BadEncoding 失败。
+    let mut server = Server::start(true).await;
+    let directory = private_dir();
+    configure(directory.path(), &server.url, "chat-completions", "none");
+    let mut roots = vec![TLS.ca_der.clone(); 1_023];
+    roots.push(vec![1, 2, 3]);
+    roots.extend([TLS.ca_der.clone(), TLS.ca_der.clone()]);
+    let gateway = RequestGateway::new(directory.path().into(), roots).unwrap();
+    let kept = gateway.tls_roots_der();
+    assert!(
+        kept.len() == 1_024 && kept.iter().all(|der| *der == TLS.ca_der),
+        "the invalid root must be skipped without using one of the 1024 slots: kept {} roots, {} of them valid",
+        kept.len(),
+        kept.iter().filter(|der| **der == TLS.ca_der).count()
+    );
+    let stream = gateway
+        .open_turn()
+        .stream_chat(request("test"), StreamControl::default())
+        .await
+        .expect("the provider client must build from the kept roots");
+    complete(stream).await;
+    server.next().await;
+}
+
+#[tokio::test]
 async fn oversized_tls_roots_still_serve_plain_http() {
     let mut server = Server::start(false).await;
     let directory = private_dir();

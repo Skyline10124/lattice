@@ -702,12 +702,25 @@ fn select_roots<T, E: std::fmt::Display>(
     kept
 }
 
+/// 先按 rustls 的信任锚规则解析 DER，再交给 reqwest。
+///
+/// `reqwest::Certificate::from_der` 只保存字节、不解析；无效的根会被保留并占用
+/// 名额，直到构建 client 时 rustls 才报 `BadEncoding`，整个 client 无法构建。
+/// 这里用 `RootCertStore::add`（构建时 rustls 做的同一项检查）提前拒绝它们。
+fn parse_root(der: &[u8]) -> Result<reqwest::Certificate, LlmError> {
+    let invalid = |error: &dyn std::fmt::Display| LlmError::Config {
+        message: format!("invalid TLS root certificate: {error}"),
+    };
+    rustls::RootCertStore::empty()
+        .add(rustls::pki_types::CertificateDer::from(der))
+        .map_err(|error| invalid(&error))?;
+    reqwest::Certificate::from_der(der).map_err(|error| invalid(&error))
+}
+
 pub(crate) fn load_bounded_roots(
     roots_der: Vec<Vec<u8>>,
 ) -> (Vec<Vec<u8>>, Vec<reqwest::Certificate>) {
-    select_roots(roots_der, reqwest::Certificate::from_der)
-        .into_iter()
-        .unzip()
+    select_roots(roots_der, parse_root).into_iter().unzip()
 }
 
 /// 网关为单次请求提供解析结果，包含该 Turn 对应 endpoint 的 client。
