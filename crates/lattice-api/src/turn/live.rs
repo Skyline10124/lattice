@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! 接受事务使用的非秘密冻结事实。运行时目录与提交端配置只有这一个转换入口。
+//! 接受事务使用的非秘密冻结事实。运行时目录与后台配置只有这一个转换入口。
 
 use super::types::RunTurnRequest;
 use crate::session::{ApiError, Result};

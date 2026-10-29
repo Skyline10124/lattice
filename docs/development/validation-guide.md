@@ -43,6 +43,8 @@ cargo xtask tool-build --verify
 
 以下是公开 CLI 的后台与重连用法，操作示例不代表产品验收。提交新请求时，在目标项目根准备有效 profile 与凭据。找回和重连时使用原用户、状态根及会话身份；显式重试原请求还须保持原工作区和输入。状态根按[私有状态根](../architecture/storage.md#私有状态根)解析。
 
+profile 由后台在接受前读取：项目内的 `.lattice/agents` 优先，其次是后台启动时 HOME 下的 `.lattice/agents`。固定 `XDG_STATE_HOME` 而更换前端 HOME 时仍连接同一后台，使用同一全局 agents 目录；更换后台的 HOME 需要停止后重新启动。TUI 启动不检查 profile，配置拒绝在提交时显示并保留输入。
+
 Session 与 TUI 命令会按需自启后台；`daemon status`、`daemon stop` 只联系已有后台，不自启。纯查询可建立连接所需运行资源，领域数据保持只读。
 
 ### 提交与找回
@@ -158,7 +160,7 @@ stop 先关闭新准入，再等待已接管工作及必要收尾。`unconfirmed
 
 需要显式运行后台时，使用 `lattice daemon serve --state-root <绝对状态根>`。参数指 XDG 状态根，产品在其下使用 `lattice/`。serve 前台运行，和自动启动一样继承启动进程的环境，工作区 `.env` 不被加载；独立进程组、状态归属与清理遵循[测试合同](testing.md#超时与进程生命周期)，不在开发者真实状态上注入崩溃或执行清理。
 
-客户端与后台应来自相符构建，当前 Local IPC 标识为 `LTLOCAL6`。新旧版本的 IPC 互不兼容，新二进制不能停止旧后台；升级前先用旧二进制执行 `lattice daemon stop`，或手动结束旧后台进程。身份或协议不兼容时保留错误，交由用户处理；不自动终止已有后台或迁移状态。旧 `sessions.git` / `invocations.git` 在打开会话库时被拒绝并列出路径，不提供迁移或兼容读取；处理状态须另获授权，见[开发状态诊断与重建边界](tool-development.md#开发状态诊断与重建边界)。
+客户端与后台应来自相符构建，当前 Local IPC 标识为 `LTLOCAL7`。新旧版本的 IPC 互不兼容，新二进制不能停止旧后台；升级前先用旧二进制执行 `lattice daemon stop`，或手动结束旧后台进程。身份或协议不兼容时保留错误，交由用户处理；不自动终止已有后台或迁移状态。旧 `sessions.git` / `invocations.git` 在打开会话库时被拒绝并列出路径，不提供迁移或兼容读取；处理状态须另获授权，见[开发状态诊断与重建边界](tool-development.md#开发状态诊断与重建边界)。
 
 ### 退出码与失败后的动作
 

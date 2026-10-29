@@ -2,12 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! CLI 消费提交回执与会话视图，执行与取消交接由 LocalTurn 管理。
 use anyhow::Result;
-use lattice_api::LoadedAgentProfile;
 use lattice_api::local::*;
-use std::{
-    io::Write,
-    path::{Path, PathBuf},
-};
+use std::io::Write;
 
 #[derive(Default)]
 struct RunRenderState {
@@ -265,42 +261,15 @@ pub async fn run_session_prompt(
         json,
     )?;
     let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-    let requested_agent = args.agent.clone();
     let prepare = async {
         let root = tokio::task::spawn_blocking(lattice_api::resolve_local_workspace_root)
             .await
-            .map_err(|_| local_error("configuration worker failed"))?
+            .map_err(|_| local_error("workspace worker failed"))?
             .map_err(LocalError::from)?;
-        let agent = match args.agent {
-            Some(name) => name,
-            None => api
-                .session_head(session.id())
-                .await?
-                .agent
-                .ok_or_else(|| LocalError {
-                    kind: LocalErrorKind::BadRequest,
-                    message: "agent required at root".into(),
-                    conflict: None,
-                    recovery: None,
-                    store: None,
-                })?,
-        };
-        let path = root.canonical_path().to_path_buf();
-        let name = agent.clone();
-        let configuration = tokio::task::spawn_blocking(move || {
-            let loaded = load_named_profile(&name, root.canonical_path())?;
-            FrozenConfiguration::capture(loaded, &root)
-        })
-        .await
-        .map_err(|_| local_error("configuration worker failed"))?;
-        let configuration = match configuration {
-            Ok(configuration) => configuration,
-            Err(error) => return Err(api.redact_configuration_error(error).await),
-        };
-        Ok::<_, LocalError>((path, configuration))
+        Ok::<_, LocalError>(root.canonical_path().to_path_buf())
     };
     let prepared = tokio::select! {biased;_=signal.recv()=>None,result=prepare=>Some(result)};
-    let (workspace, configuration) = match prepared {
+    let workspace = match prepared {
         Some(Ok(value)) => value,
         result => {
             let result = match result {
@@ -330,9 +299,9 @@ pub async fn run_session_prompt(
         session,
         workspace,
         input: args.prompt,
-        agent: requested_agent,
+        agent: args.agent,
     };
-    let turn = api.start_turn(request, Ok(configuration));
+    let turn = api.start_turn(request);
     consume(
         turn,
         None,
@@ -605,33 +574,6 @@ pub fn report_error(error: &anyhow::Error, json: bool) -> std::process::ExitCode
 fn submission_error(error: LocalError) -> anyhow::Error {
     anyhow::Error::new(error).context("Turn submission")
 }
-pub(crate) fn load_named_profile(
-    agent_name: &str,
-    project_root: &Path,
-) -> Result<LoadedAgentProfile, lattice_api::ApiError> {
-    let global_agents_dir = safe_agents_dir(None)?;
-    lattice_api::resolve_named_agent_profile(agent_name, project_root, &global_agents_dir)
-}
-pub(crate) fn agents_dir(override_path: Option<&str>) -> PathBuf {
-    if let Some(path) = override_path {
-        PathBuf::from(path)
-    } else if let Ok(dir) = std::env::var("LATTICE_AGENTS_DIR") {
-        PathBuf::from(dir)
-    } else if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".lattice/agents")
-    } else {
-        PathBuf::from(".lattice/agents")
-    }
-}
-pub(crate) fn safe_agents_dir(
-    override_path: Option<&str>,
-) -> Result<PathBuf, lattice_api::ApiError> {
-    let path = agents_dir(override_path);
-    validate_agents_dir(&path)?;
-    Ok(path)
-}
-pub(crate) use lattice_api::validate_agents_dir;
-
 #[cfg(test)]
 #[path = "config_error_tests.rs"]
 mod config_error_tests;

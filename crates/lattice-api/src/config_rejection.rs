@@ -25,32 +25,6 @@ impl fmt::Display for ConfigRejection {
     }
 }
 
-/// 前端尚未交后台脱敏的诊断；Display 与 Debug 不展示其原文。
-#[derive(Clone)]
-pub struct ConfigurationDiagnostic(String);
-
-impl ConfigurationDiagnostic {
-    pub(crate) fn new(message: String) -> Self {
-        Self(message)
-    }
-
-    pub(crate) fn into_message(self) -> String {
-        self.0
-    }
-}
-
-impl fmt::Display for ConfigurationDiagnostic {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("configuration diagnostic requires backend redaction")
-    }
-}
-
-impl fmt::Debug for ConfigurationDiagnostic {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(self, f)
-    }
-}
-
 #[cfg(test)]
 #[path = "config_rejection_tests.rs"]
 mod tests;

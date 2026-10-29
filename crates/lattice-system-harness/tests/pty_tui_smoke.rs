@@ -91,9 +91,6 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
     };
     let world = ScenarioWorld::new(&spec.name).expect("world");
     let budget = world.budget(&spec);
-    world
-        .write_project_file(".lattice/agents/tui-smoke/agent.toml", &agent_toml())
-        .expect("write agent.toml");
     world.init_git_project().expect("init git project");
     budget.check(&spec.name);
 
@@ -127,6 +124,11 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
             start.matches("未接受").count() == 1 && start.matches("tui-smoke").count() == 1,
             "session and agent must appear only in the status line: {start}"
         );
+
+        // 启动时没有 profile，首次发送前创建，由后台在接受前读取。
+        world
+            .write_project_file(".lattice/agents/tui-smoke/agent.toml", &agent_toml())
+            .unwrap();
 
         // Send a prompt. The Turn runs a Tool Step and then a three-line text Step.
         budget.check(&spec.name);

@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{FrozenConfiguration, ipc, types::*};
+use super::{ipc, types::*};
 use std::time::Duration;
 use tokio::net::UnixStream;
 
@@ -76,21 +76,6 @@ impl LocalClient {
         match self.call(Request::AuthStatus {}).await? {
             Response::AuthStatus(status) => Ok(status),
             _ => Err(protocol()),
-        }
-    }
-    /// 前端配置错误经后台按当前凭据脱敏后才显示；失败时只返回后台或连接诊断。
-    pub async fn redact_configuration_error(&self, error: crate::ApiError) -> LocalError {
-        let message = match error {
-            crate::ApiError::FrontendConfiguration(reason) => reason.into_message(),
-            crate::ApiError::Configuration(reason) => reason.to_string(),
-            other => return other.into(),
-        };
-        match self.call(Request::ConfigurationError { message }).await {
-            Ok(Response::ConfigurationError { message }) => {
-                LocalError::new(LocalErrorKind::BadRequest, &message)
-            }
-            Ok(_) => protocol(),
-            Err(error) => error,
         }
     }
     pub async fn models(&self, provider: Option<String>) -> Result<ModelCandidates> {
@@ -193,40 +178,18 @@ impl LocalClient {
             _ => Err(protocol()),
         }
     }
-    pub async fn submit(
-        &self,
-        request: TurnRequest,
-        configuration: FrozenConfiguration,
-    ) -> Result<Acceptance> {
-        match self
-            .call(Request::Submit {
-                request,
-                configuration: Box::new(configuration),
-            })
-            .await?
-        {
+    pub async fn submit(&self, request: TurnRequest) -> Result<Acceptance> {
+        match self.call(Request::Submit { request }).await? {
             Response::Acceptance(value) => Ok(value),
             _ => Err(protocol()),
         }
     }
-    pub(super) async fn submit_once(
-        &self,
-        request: TurnRequest,
-        configuration: FrozenConfiguration,
-    ) -> SubmissionReply {
+    pub(super) async fn submit_once(&self, request: TurnRequest) -> SubmissionReply {
         let mut stream = match ipc::connect(self.layout.clone()).await {
             Ok(stream) => stream,
             Err(error) => return SubmissionReply::Rejected(error),
         };
-        if let Err(error) = ipc::write(
-            &mut stream,
-            &Request::Submit {
-                request,
-                configuration: Box::new(configuration),
-            },
-        )
-        .await
-        {
+        if let Err(error) = ipc::write(&mut stream, &Request::Submit { request }).await {
             return SubmissionReply::Disconnected(error);
         }
         match ipc::ResponseReader::default().read(&mut stream).await {
@@ -466,7 +429,7 @@ mod tests {
             &serde_json::json!({"message_id":0,"offset":0,"json_fragment":json,"complete":true}),
         )
         .unwrap();
-        writer.write_all(b"CAL6").await.unwrap();
+        writer.write_all(b"CAL7").await.unwrap();
         writer.write_u32(payload.len() as u32).await.unwrap();
         writer.write_all(&payload).await.unwrap();
         assert!(matches!(

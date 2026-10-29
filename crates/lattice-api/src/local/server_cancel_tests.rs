@@ -66,7 +66,7 @@ impl Provider {
                     while !headers.ends_with(b"\r\n\r\n") { headers.push(socket.read_u8().await.unwrap()); assert!(headers.len() <= 65_536); }
                     let headers = String::from_utf8(headers).unwrap();
                     let length: usize = headers.lines().find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").map(|n| n.trim().parse().unwrap())).unwrap();
-                    assert!(length < 1_048_576);
+                    assert!(length < 4 * 1024 * 1024);
                     let mut body = vec![0; length]; socket.read_exact(&mut body).await.unwrap();
                     requests.push(serde_json::from_slice(&body).unwrap());
                     if let Some(arrival) = arrival.take() { let _ = arrival.send(()); }
@@ -135,13 +135,16 @@ fn request(dir: &std::path::Path) -> TurnRequest {
         agent: Some("local-test".into()),
     }
 }
-fn config(dir: &std::path::Path, endpoint: &str) -> super::super::FrozenConfiguration {
-    super::super::tests::frozen(dir, endpoint)
+fn config(dir: &std::path::Path, endpoint: &str) {
+    super::super::tests::configure(dir, endpoint);
 }
-fn invalid(dir: &std::path::Path) -> super::super::FrozenConfiguration {
-    let mut config = serde_json::to_value(config(dir, "http://127.0.0.1:1/v1")).unwrap();
-    config["profile_toml"] = serde_json::json!("invalid toml");
-    serde_json::from_value(config).unwrap()
+fn invalid(dir: &std::path::Path) {
+    config(dir, "http://127.0.0.1:1/v1");
+    std::fs::write(
+        dir.join(".lattice/agents/local-test/agent.toml"),
+        "invalid toml",
+    )
+    .unwrap();
 }
 async fn idle(backend: &Backend) {
     let mut changed = backend.changed.subscribe();
@@ -157,16 +160,115 @@ async fn finish(backend: &Backend, task: tokio::task::JoinHandle<()>) {
     backend.closed.send_replace(true);
     bounded(task).await.unwrap();
 }
+
+#[tokio::test]
+async fn parent_agent_name_is_rejected_before_acceptance_and_dispatch() {
+    let (dir, backend, client, task) = backend().await;
+    let provider = Provider::start().await;
+    config(dir.path(), &provider.endpoint);
+    std::fs::write(
+        dir.path().join(".lattice/agent.toml"),
+        "schema_version=1\n[agent]\nname='..'\nmodel='local/local-test'\n[prompt]\nsystem='outside'\n",
+    ).unwrap();
+    let mut input = request(dir.path());
+    input.agent = Some("..".into());
+    let error = bounded(client.submit(input.clone())).await.unwrap_err();
+    assert_eq!(error.kind, LocalErrorKind::BadRequest);
+    assert!(
+        error.message.contains("single normal path component"),
+        "{error}"
+    );
+    idle(&backend).await;
+    assert_eq!(
+        client.turn(input.turn_id).await.unwrap_err().kind,
+        LocalErrorKind::NotFound
+    );
+    assert!(provider.finish().await.is_empty());
+    finish(&backend, task).await;
+}
+
+#[tokio::test]
+async fn prompt_byte_limits_are_checked_before_acceptance_and_dispatch() {
+    for (size, accepted) in [(2_097_152, true), (2_097_153, false)] {
+        let (dir, backend, client, task) = backend().await;
+        let provider = Provider::start().await;
+        config(dir.path(), &provider.endpoint);
+        let path = dir.path().join(".lattice/agents/local-test/agent.toml");
+        let source = std::fs::read_to_string(&path).unwrap();
+        let prompt = "x".repeat(size);
+        std::fs::write(
+            &path,
+            source.replace("system = 'test'", &format!("system = '{prompt}'")),
+        )
+        .unwrap();
+        let input = request(dir.path());
+        let result = bounded(client.submit(input.clone())).await;
+        idle(&backend).await;
+        if accepted {
+            assert!(matches!(result.unwrap(), Acceptance::Accepted { .. }));
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(error.kind, LocalErrorKind::BadRequest);
+            assert!(error.message.contains(path.to_str().unwrap()), "{error}");
+            assert!(error.message.contains("2097152"), "{error}");
+            assert_eq!(
+                client.turn(input.turn_id).await.unwrap_err().kind,
+                LocalErrorKind::NotFound
+            );
+        }
+        assert_eq!(provider.finish().await.len(), usize::from(accepted));
+        finish(&backend, task).await;
+    }
+}
+
+#[tokio::test]
+async fn missing_or_invalid_external_policy_is_rejected_before_acceptance() {
+    let (dir, backend, client, task) = backend().await;
+    let provider = Provider::start().await;
+    config(dir.path(), &provider.endpoint);
+    let profile = dir.path().join(".lattice/agents/local-test/agent.toml");
+    let source = std::fs::read_to_string(&profile).unwrap();
+    std::fs::write(
+        &profile,
+        format!("{source}\n[lancet.policy]\npath='policy.toml'\n"),
+    )
+    .unwrap();
+    for contents in [
+        None,
+        Some("[network]\nallow_localhost=@\n"),
+        Some("[workspace]\ndenied_write_patterns=['../outside']\n"),
+    ] {
+        if let Some(contents) = contents {
+            std::fs::write(dir.path().join("policy.toml"), contents).unwrap();
+        }
+        let input = request(dir.path());
+        let error = bounded(client.submit(input.clone())).await.unwrap_err();
+        assert_eq!(error.kind, LocalErrorKind::BadRequest);
+        assert_eq!(error.message, "request or frozen configuration is invalid");
+        idle(&backend).await;
+        assert_eq!(
+            client.turn(input.turn_id).await.unwrap_err().kind,
+            LocalErrorKind::NotFound
+        );
+        assert!(matches!(
+            client.list_sessions().await.unwrap_err().store.as_deref(),
+            Some(StoreDiagnostic::NotInitialized { .. })
+        ));
+    }
+    assert!(provider.finish().await.is_empty());
+    finish(&backend, task).await;
+}
+
 #[tokio::test]
 async fn legacy_store_rejection_before_execution_does_not_leave_unconfirmed_cleanup() {
     let (dir, backend, client, task) = backend().await;
     let legacy = backend.layout.lattice_root().join("sessions.git");
     std::fs::create_dir_all(&legacy).unwrap();
     let error = client
-        .submit(
-            request(dir.path()),
-            config(dir.path(), "http://127.0.0.1:1/v1"),
-        )
+        .submit({
+            config(dir.path(), "http://127.0.0.1:1/v1");
+            request(dir.path())
+        })
         .await
         .unwrap_err();
     assert!(
@@ -191,7 +293,6 @@ async fn admission_identity_conflicts_busy_and_departed_submitter_never_creates_
         &mut wire,
         &Request::Submit {
             request: input.clone(),
-            configuration: Box::new(config(dir.path(), "http://127.0.0.1:1/v1")),
         },
     )
     .await
@@ -202,7 +303,10 @@ async fn admission_identity_conflicts_busy_and_departed_submitter_never_creates_
         TurnLookup::InFlight
     ));
     let conflict = client
-        .submit(input.clone(), invalid(dir.path()))
+        .submit({
+            invalid(dir.path());
+            input.clone()
+        })
         .await
         .unwrap_err();
     assert_eq!(
@@ -213,7 +317,10 @@ async fn admission_identity_conflicts_busy_and_departed_submitter_never_creates_
     race.turn_id = super::super::new_turn_id();
     assert_eq!(
         client
-            .submit(race.clone(), invalid(dir.path()))
+            .submit({
+                invalid(dir.path());
+                race.clone()
+            })
             .await
             .unwrap_err()
             .kind,
@@ -237,7 +344,7 @@ async fn admission_identity_conflicts_busy_and_departed_submitter_never_creates_
     // 被拒绝的 New(S) 没有建立，释放后同一个 S 可以由新 TurnId 使用。
     let provider = Provider::start().await;
     assert!(
-        matches!(client.submit(race.clone(), config(dir.path(), &provider.endpoint)).await.unwrap(), Acceptance::Accepted { turn } if turn.session_id == sid)
+        matches!(client.submit({ config(dir.path(), &provider.endpoint); race.clone() }).await.unwrap(), Acceptance::Accepted { turn } if turn.session_id == sid)
     );
     idle(&backend).await;
     assert!(matches!(
@@ -255,7 +362,10 @@ async fn identity_table_prioritizes_used_turn_binding_new_collision_and_busy() {
     let input = request(dir.path());
     let sid = input.session.id();
     client
-        .submit(input.clone(), config(dir.path(), &provider.endpoint))
+        .submit({
+            config(dir.path(), &provider.endpoint);
+            input.clone()
+        })
         .await
         .unwrap();
     bounded(&mut provider.arrived).await.unwrap();
@@ -264,7 +374,10 @@ async fn identity_table_prioritizes_used_turn_binding_new_collision_and_busy() {
     reused.session = SubmitSession::Existing(super::super::new_session_id());
     reused.workspace = wrong.path().into();
     let error = client
-        .submit(reused, invalid(dir.path()))
+        .submit({
+            invalid(dir.path());
+            reused
+        })
         .await
         .unwrap_err();
     assert_eq!(error.conflict, Some(ConflictReason::TurnIdUsed));
@@ -273,7 +386,10 @@ async fn identity_table_prioritizes_used_turn_binding_new_collision_and_busy() {
     missing.session = SubmitSession::Existing(super::super::new_session_id());
     assert_eq!(
         client
-            .submit(missing, invalid(dir.path()))
+            .submit({
+                invalid(dir.path());
+                missing
+            })
             .await
             .unwrap_err()
             .kind,
@@ -285,7 +401,10 @@ async fn identity_table_prioritizes_used_turn_binding_new_collision_and_busy() {
     appended.workspace = wrong.path().into();
     assert_eq!(
         client
-            .submit(appended.clone(), invalid(dir.path()))
+            .submit({
+                invalid(dir.path());
+                appended.clone()
+            })
             .await
             .unwrap_err()
             .conflict,
@@ -294,7 +413,10 @@ async fn identity_table_prioritizes_used_turn_binding_new_collision_and_busy() {
     appended.workspace = input.workspace.clone();
     assert_eq!(
         client
-            .submit(appended, invalid(dir.path()))
+            .submit({
+                invalid(dir.path());
+                appended
+            })
             .await
             .unwrap_err()
             .kind,
@@ -304,7 +426,10 @@ async fn identity_table_prioritizes_used_turn_binding_new_collision_and_busy() {
     collision.turn_id = super::super::new_turn_id();
     assert_eq!(
         client
-            .submit(collision, invalid(dir.path()))
+            .submit({
+                invalid(dir.path());
+                collision
+            })
             .await
             .unwrap_err()
             .conflict,
@@ -319,7 +444,10 @@ async fn identity_table_prioritizes_used_turn_binding_new_collision_and_busy() {
     assert!(!client.cancel(input.turn_id).await.unwrap());
     assert!(!client.list_sessions().await.unwrap()[0].owner);
     let error = client
-        .submit(input.clone(), invalid(dir.path()))
+        .submit({
+            invalid(dir.path());
+            input.clone()
+        })
         .await
         .unwrap_err();
     assert_eq!(error.conflict, Some(ConflictReason::TurnIdUsed));
@@ -334,8 +462,8 @@ async fn preparation_cancel_is_owned_and_rejected_request_does_not_poison_retry(
     let submit = {
         let client = client.clone();
         let input = input.clone();
-        let config = invalid(dir.path());
-        tokio::spawn(async move { client.submit(input, config).await })
+        invalid(dir.path());
+        tokio::spawn(async move { client.submit(input).await })
     };
     bounded(entered).await.unwrap();
     assert!(client.cancel(input.turn_id).await.unwrap());
@@ -347,7 +475,10 @@ async fn preparation_cancel_is_owned_and_rejected_request_does_not_poison_retry(
     idle(&backend).await;
     let provider = Provider::start().await;
     let acceptance = client
-        .submit(input.clone(), config(dir.path(), &provider.endpoint))
+        .submit({
+            config(dir.path(), &provider.endpoint);
+            input.clone()
+        })
         .await
         .unwrap();
     assert!(matches!(acceptance, Acceptance::Accepted { .. }));
@@ -369,7 +500,10 @@ async fn owner_retirement_updates_watch_and_stop_drains_the_same_cancellation_ca
     provider.release.send_replace(false);
     let input = request(dir.path());
     client
-        .submit(input.clone(), config(dir.path(), &provider.endpoint))
+        .submit({
+            config(dir.path(), &provider.endpoint);
+            input.clone()
+        })
         .await
         .unwrap();
     bounded(&mut provider.arrived).await.unwrap();
@@ -392,7 +526,10 @@ async fn owner_retirement_updates_watch_and_stop_drains_the_same_cancellation_ca
     assert!(!stop.is_finished());
     assert_eq!(
         client
-            .submit(request(dir.path()), invalid(dir.path()))
+            .submit({
+                invalid(dir.path());
+                request(dir.path())
+            })
             .await
             .unwrap_err()
             .kind,
@@ -556,7 +693,10 @@ async fn diagnostic_and_owner_only_heads_repeat_the_current_entry() {
     let input = request(dir.path());
     let sid = input.session.id();
     client
-        .submit(input.clone(), config(dir.path(), &provider.endpoint))
+        .submit({
+            config(dir.path(), &provider.endpoint);
+            input.clone()
+        })
         .await
         .unwrap();
     bounded(&mut provider.arrived).await.unwrap();
@@ -799,7 +939,10 @@ async fn owner_retiring_during_capture_never_pairs_an_old_entry_with_no_owner() 
     provider.release.send_replace(false);
     let input = request(dir.path());
     client
-        .submit(input.clone(), config(dir.path(), &provider.endpoint))
+        .submit({
+            config(dir.path(), &provider.endpoint);
+            input.clone()
+        })
         .await
         .unwrap();
     bounded(&mut provider.arrived).await.unwrap();
@@ -852,7 +995,10 @@ async fn owner_appearing_and_retiring_during_capture_reloads_the_final_entry() {
     let mut first = request(dir.path());
     first.session = SubmitSession::New(sid);
     client
-        .submit(first, config(dir.path(), &first_provider.endpoint))
+        .submit({
+            config(dir.path(), &first_provider.endpoint);
+            first
+        })
         .await
         .unwrap();
     idle(&backend).await;
@@ -865,7 +1011,10 @@ async fn owner_appearing_and_retiring_during_capture_reloads_the_final_entry() {
     let mut input = request(dir.path());
     input.session = SubmitSession::Existing(sid);
     client
-        .submit(input.clone(), config(dir.path(), &provider.endpoint))
+        .submit({
+            config(dir.path(), &provider.endpoint);
+            input.clone()
+        })
         .await
         .unwrap();
     bounded(&mut provider.arrived).await.unwrap();
@@ -934,7 +1083,10 @@ async fn retried_capture_keeps_final_updates_for_entries_outside_the_recent_wind
     rejected.session = SubmitSession::Existing(sid);
     assert_eq!(
         client
-            .submit(rejected, invalid(dir.path()))
+            .submit({
+                invalid(dir.path());
+                rejected
+            })
             .await
             .unwrap_err()
             .kind,
@@ -971,7 +1123,10 @@ async fn accepted_read_failure_before_turn_started_republishes_position_after_re
             let mut first = request(dir.path());
             first.session = SubmitSession::New(sid);
             client
-                .submit(first, config(dir.path(), &provider.endpoint))
+                .submit({
+                    config(dir.path(), &provider.endpoint);
+                    first
+                })
                 .await
                 .unwrap();
             idle(&backend).await;
@@ -984,8 +1139,8 @@ async fn accepted_read_failure_before_turn_started_republishes_position_after_re
         let submitting = {
             let client = client.clone();
             let input = input.clone();
-            let configuration = config(dir.path(), &provider.endpoint);
-            tokio::spawn(async move { client.submit(input, configuration).await })
+            config(dir.path(), &provider.endpoint);
+            tokio::spawn(async move { client.submit(input).await })
         };
         bounded(accepted).await.unwrap();
         assert!(!sink.events().iter().any(|event| matches!(event, crate::TurnEvent::TurnStarted { turn, .. } if turn.turn_id == input.turn_id)));
@@ -1105,7 +1260,10 @@ async fn observer_cache_reclaims_missing_rejected_and_disconnected_sessions() {
     for _ in 0..12 {
         assert!(
             client
-                .submit(request(dir.path()), invalid(dir.path()))
+                .submit({
+                    invalid(dir.path());
+                    request(dir.path())
+                })
                 .await
                 .is_err()
         );
@@ -1159,7 +1317,10 @@ async fn observer_cache_reclaims_missing_rejected_and_disconnected_sessions() {
     provider.release.send_replace(false);
     let input = request(dir.path());
     client
-        .submit(input.clone(), config(dir.path(), &provider.endpoint))
+        .submit({
+            config(dir.path(), &provider.endpoint);
+            input.clone()
+        })
         .await
         .unwrap();
     bounded(&mut provider.arrived).await.unwrap();
@@ -1204,7 +1365,10 @@ async fn commit_fault_drains_real_reader_and_owner_before_reopening_the_store() 
         provider.release.send_replace(false);
         let second = request(dir.path());
         client
-            .submit(second.clone(), config(dir.path(), &provider.endpoint))
+            .submit({
+                config(dir.path(), &provider.endpoint);
+                second.clone()
+            })
             .await
             .unwrap();
         bounded(&mut provider.arrived).await.unwrap();
@@ -1323,8 +1487,8 @@ async fn write_disabled_before_acceptance_is_rejected_not_unknown() {
         let submitting = {
             let client = client.clone();
             let input = input.clone();
-            let configuration = config(dir.path(), &provider.endpoint);
-            tokio::spawn(async move { client.submit(input, configuration).await })
+            config(dir.path(), &provider.endpoint);
+            tokio::spawn(async move { client.submit(input).await })
         };
         bounded(paused).await.unwrap();
         let seeded = match seeded {
@@ -1375,10 +1539,10 @@ async fn store_creation_failure_rejects_the_first_submission() {
     // 建库的父目录同步失败，库是否持久不明；这一轮尚未进入接受事务。
     *lock(&backend.stores.creation_sync_probe) = Some(Arc::new(|| true));
     let error = client
-        .submit(
-            request(dir.path()),
-            config(dir.path(), "http://127.0.0.1:1/v1"),
-        )
+        .submit({
+            config(dir.path(), "http://127.0.0.1:1/v1");
+            request(dir.path())
+        })
         .await
         .unwrap_err();
     assert!(
@@ -1399,22 +1563,23 @@ async fn different_sessions_overlap_and_keep_their_frozen_configuration() {
     second_provider.release.send_replace(false);
     let first = request(dir.path());
     let second = request(dir.path());
-    let mut first_config =
-        serde_json::to_value(config(dir.path(), &first_provider.endpoint)).unwrap();
-    first_config["system_prompt"] = serde_json::json!("first frozen prompt");
-    let first_config = serde_json::from_value(first_config).unwrap();
-    client.submit(first.clone(), first_config).await.unwrap();
+    let profile_path = dir.path().join(".lattice/agents/local-test/agent.toml");
+    config(dir.path(), &first_provider.endpoint);
+    let source = std::fs::read_to_string(&profile_path).unwrap();
+    std::fs::write(
+        &profile_path,
+        source.replace("system = 'test'", "system = 'first frozen prompt'"),
+    )
+    .unwrap();
+    client.submit(first.clone()).await.unwrap();
     bounded(&mut first_provider.arrived).await.unwrap();
-    let mut second_config =
-        serde_json::to_value(config(dir.path(), &second_provider.endpoint)).unwrap();
-    second_config["system_prompt"] = serde_json::json!("second frozen prompt");
-    client
-        .submit(
-            second.clone(),
-            serde_json::from_value(second_config).unwrap(),
-        )
-        .await
-        .unwrap();
+    config(dir.path(), &second_provider.endpoint);
+    std::fs::write(
+        &profile_path,
+        source.replace("system = 'test'", "system = 'second frozen prompt'"),
+    )
+    .unwrap();
+    client.submit(second.clone()).await.unwrap();
     bounded(&mut second_provider.arrived).await.unwrap();
     assert_eq!(
         client
@@ -1491,7 +1656,10 @@ async fn existing_orphan_accepts_new_input_without_mutating_old_nodes_and_root_r
     next.agent = None;
     assert!(matches!(
         client
-            .submit(next.clone(), config(dir.path(), &provider.endpoint))
+            .submit({
+                config(dir.path(), &provider.endpoint);
+                next.clone()
+            })
             .await
             .unwrap(),
         Acceptance::Accepted { .. }
@@ -1506,7 +1674,10 @@ async fn existing_orphan_accepts_new_input_without_mutating_old_nodes_and_root_r
     root_request.turn_id = super::super::new_turn_id();
     assert_eq!(
         client
-            .submit(root_request.clone(), config(dir.path(), &provider.endpoint))
+            .submit({
+                config(dir.path(), &provider.endpoint);
+                root_request.clone()
+            })
             .await
             .unwrap_err()
             .kind,
@@ -1518,7 +1689,10 @@ async fn existing_orphan_accepts_new_input_without_mutating_old_nodes_and_root_r
     );
     root_request.agent = Some("local-test".into());
     client
-        .submit(root_request, config(dir.path(), &provider.endpoint))
+        .submit({
+            config(dir.path(), &provider.endpoint);
+            root_request
+        })
         .await
         .unwrap();
     idle(&backend).await;
@@ -1541,8 +1715,8 @@ async fn preparation_disconnect_and_forwarding_panic_keep_independent_cancelled_
         let submit = {
             let client = client.clone();
             let input = input.clone();
-            let config = config(dir.path(), &provider.endpoint);
-            tokio::spawn(async move { client.submit(input, config).await })
+            config(dir.path(), &provider.endpoint);
+            tokio::spawn(async move { client.submit(input).await })
         };
         let mut release = Some(release);
         bounded(entered).await.unwrap();
@@ -1601,7 +1775,10 @@ async fn session_head_and_cancel_do_not_need_observation_permits() {
     provider.release.send_replace(false);
     let input = request(dir.path());
     client
-        .submit(input.clone(), config(dir.path(), &provider.endpoint))
+        .submit({
+            config(dir.path(), &provider.endpoint);
+            input.clone()
+        })
         .await
         .unwrap();
     bounded(&mut provider.arrived).await.unwrap();
@@ -1641,7 +1818,6 @@ async fn dispatch_submit_without_submitter_is_an_internal_error() {
     let result = backend
         .dispatch(Request::Submit {
             request: request(dir.path()),
-            configuration: Box::new(invalid(dir.path())),
         })
         .await;
     assert!(matches!(
@@ -1664,8 +1840,8 @@ async fn invalid_request_is_rejected_before_claiming_a_new_session() {
     let (entered, release) = arm(&backend.gates.registered);
     let submitting = {
         let client = client.clone();
-        let configuration = invalid(dir.path());
-        tokio::spawn(async move { client.submit(input, configuration).await })
+        invalid(dir.path());
+        tokio::spawn(async move { client.submit(input).await })
     };
     tokio::select! {
         result = submitting => assert_eq!(result.unwrap().unwrap_err().kind, LocalErrorKind::BadRequest),

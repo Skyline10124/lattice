@@ -257,81 +257,76 @@ fn dotenv_cannot_add_tls_trust_and_startup_environment_requires_restart() {
 }
 
 #[test]
-fn fast_dotenv_agents_dir_cannot_redirect_profile_lookup() {
-    let spec = ScenarioSpec::fast("fast-dotenv-agents-dir");
+fn agents_use_backend_home_and_project_precedence() {
+    let spec = ScenarioSpec::fast("agents-backend-home");
     let world = ScenarioWorld::new(&spec.name).expect("world");
-    world.unset_env("LATTICE_AGENTS_DIR");
-    world.write_agent_profile("evil", "local/evil").unwrap();
-    let server = lattice_system_harness::FakeLlmServer::start(
-        lattice_system_harness::SseScript::plain("control accepted"),
+    world.budget(&spec);
+    world.init_git_project().unwrap();
+    let server = FakeLlmServer::start(SseScript::plain("profile accepted")).unwrap();
+    let fixture = ProviderFixture::chat_completions("boundary");
+    world
+        .write_agent_profile("boundary", &fixture.model_ref().unwrap())
+        .unwrap();
+    let project_profile = world
+        .project_dir()
+        .join(".lattice/agents/boundary/agent.toml");
+    let source = std::fs::read_to_string(&project_profile).unwrap();
+    let global = world.home().join(".lattice/agents/boundary");
+    std::fs::create_dir_all(&global).unwrap();
+    std::fs::write(
+        global.join("agent.toml"),
+        source.replace("harness agent", "global test agent"),
     )
     .unwrap();
-    world
-        .wire_provider(
-            lattice_system_harness::ProviderFixture::chat_completions("evil"),
-            &server,
-            FAKE_API_KEY,
-        )
-        .unwrap();
-    world.init_git_project().unwrap();
-    // 空覆盖会绕过 HOME 派生目录校验；工作区 .env 不能开启这条路径。
-    world
-        .write_project_file(".env", "LATTICE_AGENTS_DIR=\n")
-        .unwrap();
-    let args = &["--json", "run", "boundary control", "--agent", "evil"];
-    let from_dotenv = run(&world, &spec, args);
-    let result = lattice_system_harness::assert_exit_code(&from_dotenv, 2).and_then(|_| {
+    std::fs::remove_file(&project_profile).unwrap();
+    // 录入凭据先启动后台；前端随后更换 HOME，仍通过相同的 XDG 状态根连接它。
+    world.wire_provider(fixture, &server, FAKE_API_KEY).unwrap();
+    let frontend_home = world.root().join("frontend-home");
+    std::fs::create_dir_all(&frontend_home).unwrap();
+    world.set_env("HOME", frontend_home.display().to_string());
+    let mut evidence =
+        lattice_system_harness::ScenarioEvidence::new(&world, &spec.name, [FAKE_API_KEY.into()])
+            .unwrap();
+    let result = (|| -> Result<(), AssertError> {
+        let args = &["--json", "run", "profile sources", "--agent", "boundary"];
+        let global_out = run(&world, &spec, args);
+        evidence.record_command("global profile", &global_out);
+        assert_exit_success(&global_out)?;
+        std::fs::write(&project_profile, &source).unwrap();
+        let project_out = run(&world, &spec, args);
+        evidence.record_command("project profile", &project_out);
+        assert_exit_success(&project_out)?;
+        let captures = server.captured_requests();
+        require(captures.len() == 2, "one request per accepted submission")?;
+        require(
+            captures[0].raw["messages"][0]["content"] == "global test agent",
+            "backend global prompt",
+        )?;
+        require(
+            captures[1].raw["messages"][0]["content"] == "harness agent",
+            "project prompt takes precedence",
+        )?;
+        std::fs::write(&project_profile, "schema_version=@invalid").unwrap();
+        let rejected = run(&world, &spec, args);
+        evidence.record_command("invalid project profile", &rejected);
+        assert_exit_code(&rejected, 2)?;
         let sent =
-            lattice_system_harness::parse_send_stdout(&from_dotenv.stdout, from_dotenv.exit_code());
+            lattice_system_harness::parse_send_stdout(&rejected.stdout, rejected.exit_code());
         require(
-            sent.receipt_error.is_none(),
-            format!("valid submission receipt: {:?}", sent.receipt_error),
+            sent.rejection().is_some_and(|error| {
+                error.kind == "bad_request" && error.message.contains("line 1")
+            }),
+            "invalid project profile must not fall back to global",
         )?;
         require(
-            sent.malformed_lines.is_empty(),
-            format!("valid JSONL: {:?}", sent.malformed_lines),
-        )?;
-        require(
-            sent.accepted_turn_id().is_none(),
-            "invalid directory must not accept a Turn",
-        )?;
-        require(
-            server.captured_requests().is_empty(),
-            "invalid directory must not dispatch",
-        )?;
-        // 配置在请求写出前加载失败：拒绝在 `sending` 之后的 `rejected` 回执中。
-        require(
-            sent.rejection()
-                .is_some_and(|error| error.kind == "bad_request"),
-            "ignored .env override must retain directory validation",
+            server.captured_requests().len() == 2,
+            "rejected profile must not dispatch",
         )
-    });
-    assert_result(&world, "fast-dotenv-agents-dir", &from_dotenv, result);
-    // 相同值只有明确来自提交进程时才生效，避免全部禁用变量造成假绿。
-    world.set_env("LATTICE_AGENTS_DIR", "");
-    let from_process = run(&world, &spec, args);
-    let control = assert_exit_success(&from_process).and_then(|_| {
-        let sent = lattice_system_harness::parse_send_stdout(
-            &from_process.stdout,
-            from_process.exit_code(),
-        );
-        require(
-            sent.receipt_error.is_none(),
-            format!("valid submission receipt: {:?}", sent.receipt_error),
-        )?;
-        require(
-            sent.accepted_turn_id().is_some(),
-            "process override must permit the selected project profile",
-        )
-    });
-    assert_eq!(server.captured_requests().len(), 1);
-    assert_eq!(server.captured_requests()[0].raw["model"], "evil");
-    assert_result(
-        &world,
-        "fast-dotenv-agents-dir-control",
-        &from_process,
-        control,
-    );
+    })();
+    evidence.record_captures(server.captured_requests());
+    evidence
+        .finish_report(result.err().map(|error| error.to_string()))
+        .unwrap_or_else(|report| panic!("{report}"));
 }
 
 #[test]

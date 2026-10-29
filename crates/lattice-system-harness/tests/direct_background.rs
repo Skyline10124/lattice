@@ -16,9 +16,9 @@ use std::{
     time::{Duration, Instant},
 };
 use support::{
-    Watcher, Wire, assert_accepted_and_closed, assert_clean_send, assert_forced_kill,
-    configuration, direct_world, driver, history, ipc, parse_send_stdout, submit_request,
-    tool_call, turn_closed, turn_lookup, wire_fake_llm, wire_gated_fake_llm,
+    Watcher, Wire, assert_accepted_and_closed, assert_clean_send, assert_forced_kill, direct_world,
+    driver, history, ipc, parse_send_stdout, submit_request, tool_call, turn_closed, turn_lookup,
+    wire_fake_llm, wire_gated_fake_llm,
 };
 const FIRST: &str = "00000000-0000-4000-8000-000000000001";
 const SECOND: &str = "00000000-0000-4000-8000-000000000002";
@@ -311,7 +311,6 @@ fn unread_acceptance_is_found_by_turn_id_and_resubmission_conflicts() {
                     session,
                     "identical input",
                     Some("background"),
-                    configuration(&world, "background", &server.base_url()),
                 );
                 // 先用只读的 `status` 确认后台说同一协议，再进入未读回执窗口；
                 // 协议不符时在这里直接失败，而不是表现为 provider 一直等不到请求。
@@ -419,7 +418,6 @@ fn busy_cancel_and_stop_do_not_serialize_distinct_sessions() {
             .into_iter()
             .find(|(sid, _)| *sid != a)
             .expect("second Session");
-        let config = configuration(&world, "background", &server.base_url());
         let busy = ipc(
             &world,
             wait(&budget),
@@ -429,7 +427,6 @@ fn busy_cancel_and_stop_do_not_serialize_distinct_sessions() {
                 json!({"existing": a}),
                 "must not queue",
                 None,
-                config.clone(),
             ),
         );
         assert_eq!(busy["value"]["kind"], "busy", "{busy}");
@@ -512,14 +509,7 @@ fn busy_cancel_and_stop_do_not_serialize_distinct_sessions() {
             ipc(
                 &world,
                 wait(&budget),
-                submit_request(
-                    &world,
-                    THIRD,
-                    json!({"existing": a}),
-                    "after stop",
-                    None,
-                    config
-                )
+                submit_request(&world, THIRD, json!({"existing": a}), "after stop", None)
             )["value"]["kind"],
             "stopping"
         );
@@ -1160,11 +1150,10 @@ fn a_live_new_turn_does_not_block_old_closed_observation() {
         assert!(first.has_completed());
         let tid = first.accepted_turn_id().unwrap();
         let old = detail(&world, &budget, &mut evidence, tid);
-        // 重启清除旧 Turn 的 Owner，随后四个带配置的新身份共同争抢空闲 Session。
+        // 重启清除旧 Turn 的 Owner，随后四个新身份共同争抢空闲 Session。
         world.stop_daemon().unwrap();
         detail(&world, &budget, &mut evidence, tid);
         let sid = old["session_id"].as_str().unwrap();
-        let config = configuration(&world, "background", &server.base_url());
         let candidates = [
             SECOND,
             THIRD,
@@ -1176,14 +1165,8 @@ fn a_live_new_turn_does_not_block_old_closed_observation() {
             let handles: Vec<_> = candidates
                 .iter()
                 .map(|candidate| {
-                    let request = submit_request(
-                        &world,
-                        candidate,
-                        json!({"existing": sid}),
-                        "second",
-                        None,
-                        config.clone(),
-                    );
+                    let request =
+                        submit_request(&world, candidate, json!({"existing": sid}), "second", None);
                     let world = &world;
                     let budget = &budget;
                     let barrier = &barrier;
@@ -1229,14 +1212,7 @@ fn a_live_new_turn_does_not_block_old_closed_observation() {
         let reused = ipc(
             &world,
             wait(&budget),
-            submit_request(
-                &world,
-                tid,
-                json!({"existing": sid}),
-                "first",
-                None,
-                config.clone(),
-            ),
+            submit_request(&world, tid, json!({"existing": sid}), "first", None),
         );
         assert_eq!(conflict(&reused), Some("turn_id_used"), "{reused}");
         evidence
@@ -1880,12 +1856,11 @@ fn turn_and_session_identity_conflicts_are_rejected_without_dispatch() {
         let a = detail(&world, &budget, &mut evidence, &first_turn);
         let b = detail(&world, &budget, &mut evidence, &second_turn);
         assert_ne!(a["session_id"], b["session_id"]);
-        let config = configuration(&world, "background", &server.base_url());
         let submit = |turn: &str, session: Value| {
             ipc(
                 &world,
                 wait(&budget),
-                submit_request(&world, turn, session, "alpha", None, config.clone()),
+                submit_request(&world, turn, session, "alpha", None),
             )
         };
         // 请求身份表自上而下核对，先符合的一行决定结果：TurnId 先于会话。
@@ -1910,7 +1885,6 @@ fn turn_and_session_identity_conflicts_are_rejected_without_dispatch() {
             json!({"existing": a["session_id"]}),
             "alpha",
             None,
-            config.clone(),
         );
         elsewhere["request"]["workspace"] = json!(project);
         let binding = ipc(&world, wait(&budget), elsewhere);

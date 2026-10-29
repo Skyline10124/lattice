@@ -33,6 +33,7 @@ libc = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
+rustix = { workspace = true }
 lattice-api = { workspace = true, features = ["test-utils"] }
 gix = { workspace = true }
 lattice-session = { workspace = true, features = ["test-utils"] }

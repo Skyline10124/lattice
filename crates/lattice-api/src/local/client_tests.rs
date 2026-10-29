@@ -190,13 +190,7 @@ async fn cancel_status(turn: &mut LocalTurn, expected: CancelStatus) {
     }
 }
 async fn submit(peer: &Peer, id: TurnId) -> (LocalTurn, Wire) {
-    let mut turn = peer.client.start_turn(
-        request(peer, id),
-        Ok(super::tests::frozen(
-            peer._directory.path(),
-            "http://127.0.0.1:1/v1",
-        )),
-    );
+    let mut turn = peer.client.start_turn(request(peer, id));
     assert!(
         matches!(next(&mut turn).await, LocalUpdate::Submit { update: SubmissionUpdate::Sending { turn_id, session_id, new: true } } if turn_id == id && session_id == sid())
     );
@@ -273,13 +267,7 @@ async fn submission_only_preserves_external_completion_before_the_late_receipt()
     for closed in [false, true] {
         let peer = Peer::new();
         let id = new_turn_id();
-        let mut turn = peer.client.start_submission(
-            request(&peer, id),
-            Ok(super::tests::frozen(
-                peer._directory.path(),
-                "http://127.0.0.1:1/v1",
-            )),
-        );
+        let mut turn = peer.client.start_submission(request(&peer, id));
         next(&mut turn).await;
         let (mut wire, request) = peer.request().await;
         assert!(matches!(request, Request::Submit { .. }));
@@ -339,14 +327,10 @@ async fn accepted_submission_ignores_backlogged_views_until_its_user_message() {
             let id = new_turn_id();
             let mut input = request(&peer, id);
             input.session = SubmitSession::Existing(sid());
-            let configuration = Ok(super::tests::frozen(
-                peer._directory.path(),
-                "http://127.0.0.1:1/v1",
-            ));
             let mut turn = if own_view {
-                peer.client.start_turn(input, configuration)
+                peer.client.start_turn(input)
             } else {
-                peer.client.start_submission(input, configuration)
+                peer.client.start_submission(input)
             };
             next(&mut turn).await;
             let (mut submit, request) = peer.request().await;
@@ -457,13 +441,7 @@ async fn submission_only_keeps_receipts_recovery_and_cancel_without_a_watch() {
         for evidence_first in [false, true] {
             let peer = Peer::new();
             let id = new_turn_id();
-            let mut turn = peer.client.start_submission(
-                request(&peer, id),
-                Ok(super::tests::frozen(
-                    peer._directory.path(),
-                    "http://127.0.0.1:1/v1",
-                )),
-            );
+            let mut turn = peer.client.start_submission(request(&peer, id));
             assert!(
                 matches!(next(&mut turn).await, LocalUpdate::Submit { update: SubmissionUpdate::Sending { turn_id, .. } } if turn_id == id)
             );
@@ -534,12 +512,13 @@ async fn configuration_rejection_has_identity_and_exactly_one_receipt() {
     let peer = Peer::new();
     let id = new_turn_id();
     let error = LocalError::new(LocalErrorKind::BadRequest, "configuration unavailable");
-    let mut turn = peer
-        .client
-        .start_turn(request(&peer, id), Err(error.clone()));
+    let mut turn = peer.client.start_turn(request(&peer, id));
     assert!(
         matches!(next(&mut turn).await, LocalUpdate::Submit { update: SubmissionUpdate::Sending { turn_id, .. } } if turn_id == id)
     );
+    let (mut wire, request) = peer.request().await;
+    assert!(matches!(request, Request::Submit { .. }));
+    wire.reply(Response::Error(error.clone())).await;
     let result = receipt(&mut turn).await;
     assert_eq!(result.result, SubmissionResult::Rejected { error });
     assert!(!result.recovered);
@@ -920,13 +899,7 @@ async fn late_acceptance_after_cancel_handoff_follows_the_submitted_turn() {
             let id = new_turn_id();
             let mut input = request(&peer, id);
             input.session = SubmitSession::Existing(sid());
-            let mut turn = peer.client.start_turn(
-                input,
-                Ok(super::tests::frozen(
-                    peer._directory.path(),
-                    "http://127.0.0.1:1/v1",
-                )),
-            );
+            let mut turn = peer.client.start_turn(input);
             assert!(matches!(
                 next(&mut turn).await,
                 LocalUpdate::Submit {
@@ -1094,15 +1067,10 @@ async fn late_definitive_receipts_notify_submission_only_but_keep_one_receipt_wi
         for outcome in ["accepted", "rejected", "not_accepted"] {
             let peer = Peer::new();
             let id = new_turn_id();
-            let configuration = Ok(super::tests::frozen(
-                peer._directory.path(),
-                "http://127.0.0.1:1/v1",
-            ));
             let mut turn = if own_view {
-                peer.client.start_turn(request(&peer, id), configuration)
+                peer.client.start_turn(request(&peer, id))
             } else {
-                peer.client
-                    .start_submission(request(&peer, id), configuration)
+                peer.client.start_submission(request(&peer, id))
             };
             next(&mut turn).await;
             let (mut submit, request) = peer.request().await;
@@ -1391,13 +1359,7 @@ async fn clean_view_eof_and_a_partial_frame_failure_are_connection_records() {
 async fn cancel_before_sending_never_writes_a_submit_and_still_finishes_its_receipt() {
     let peer = Peer::new();
     let id = new_turn_id();
-    let mut turn = peer.client.start_turn(
-        request(&peer, id),
-        Ok(super::tests::frozen(
-            peer._directory.path(),
-            "http://127.0.0.1:1/v1",
-        )),
-    );
+    let mut turn = peer.client.start_turn(request(&peer, id));
     turn.cancel();
     assert!(matches!(
         next(&mut turn).await,

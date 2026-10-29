@@ -327,10 +327,7 @@ impl Backend {
         submitter: Option<UnixStream>,
     ) -> Result<()> {
         match operation {
-            Request::Submit {
-                request,
-                configuration,
-            } => self.submit(request, configuration, owner, submitter).await,
+            Request::Submit { request } => self.submit(request, owner, submitter).await,
             Request::Rewind {
                 session_id,
                 target,
@@ -362,7 +359,6 @@ impl Backend {
     async fn submit(
         self: &Arc<Self>,
         request: TurnRequest,
-        configuration: Box<super::FrozenConfiguration>,
         owner: &Arc<Owner>,
         submitter: Option<UnixStream>,
     ) -> Result<()> {
@@ -419,10 +415,7 @@ impl Backend {
                     "invalid Turn request",
                 ));
             }
-            if request
-                .agent
-                .as_ref()
-                .is_some_and(|name| name.trim().is_empty() || name.len() > 128)
+            if request.agent.as_ref().is_some_and(|name| name.len() > 128)
                 || (request.agent.is_none()
                     && (request.session.is_new()
                         || record
@@ -462,17 +455,17 @@ impl Backend {
         })?;
         #[cfg(test)]
         tests::pause(&self.gates.prepare).await;
-        let loaded_profile = blocking(move || configuration.into_execution()).await?;
+        let configuration_dir = super::auth::directory(self.home.as_deref())?;
+        let project = workspace.clone();
+        let loaded_profile = blocking(move || {
+            crate::profile::load_for_turn(&selected, &project, &configuration_dir)
+                .map_err(Into::into)
+        })
+        .await?;
         let gateway = self
             .gateway
             .clone()
             .map_err(crate::ApiError::Configuration)?;
-        if loaded_profile.profile.agent.name != selected {
-            return Err(LocalError::new(
-                LocalErrorKind::BadRequest,
-                "loaded agent differs from selection",
-            ));
-        }
         let prepared_model = crate::turn::execute::PreparedModel::resolve(
             &gateway,
             &loaded_profile.profile.agent.model,
@@ -625,15 +618,6 @@ impl Backend {
                     auth.status()
                         .map(Response::AuthStatus)
                         .map_err(super::auth::error)
-                })
-                .await
-            }
-            Request::ConfigurationError { message } => {
-                let auth = super::auth::store(self.home.as_deref()).ok();
-                blocking(move || {
-                    Ok(Response::ConfigurationError {
-                        message: crate::ConfigRejection::new(&message, auth.as_ref()).to_string(),
-                    })
                 })
                 .await
             }

@@ -126,7 +126,6 @@ impl ScenarioWorld {
             "XDG_STATE_HOME".into(),
             home.join(".local/state").display().to_string(),
         );
-        allowed_env.insert("LATTICE_AGENTS_DIR".into(), String::new());
         // 后台启动时经 rustls-native-certs 读取信任根；设了这两个变量就只信任它们指向的根。
         // 场景默认只信任 harness CA，fake provider 与 TLS 夹具都用它签发的证书。
         let trust = root.path().join("tls-trust");

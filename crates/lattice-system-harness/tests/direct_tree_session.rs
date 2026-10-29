@@ -410,7 +410,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
         let refusal = support::parse_send_stdout(&refused.stdout, refused.exit_code());
         assert_eq!(
             refusal.rejection().map(|error| error.message.as_str()),
-            Some("agent required at root")
+            Some("new Session or root requires explicit agent")
         );
         assert_eq!(
             cli_json(

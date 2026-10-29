@@ -234,14 +234,18 @@ pub(crate) fn load_policy_config(
     Ok(config)
 }
 
-/// Load and deserialize an external TOML policy file.
+// 外部策略承载 profile 可内联的策略字段，与 agent.toml 共用 16 MiB 读取边界，外置不缩减可用配置规模。
+const MAX_EXTERNAL_POLICY_FILE_BYTES: usize = 16 * 1024 * 1024;
+
+/// 读取普通且有界的外部策略文件，再解析严格 TOML。
 fn load_external_policy(path: &Path) -> Result<ExternalPolicyFile, ApiError> {
-    let contents = std::fs::read_to_string(path).map_err(|err| {
-        ApiError::BadRequest(format!(
-            "cannot read external policy file '{}': {err}",
-            path.display()
-        ))
-    })?;
+    let contents = lattice_profile::read_regular_file(path, MAX_EXTERNAL_POLICY_FILE_BYTES)
+        .map_err(|err| {
+            ApiError::BadRequest(format!(
+                "cannot read external policy file '{}': {err}",
+                path.display()
+            ))
+        })?;
     toml::from_str(&contents).map_err(|err| {
         ApiError::BadRequest(format!(
             "cannot parse external policy file '{}': {err}",
@@ -389,6 +393,38 @@ mod cep_context_profile_policy {
     use super::*;
     use lattice_profile::LancetSection;
     use tempfile::TempDir;
+
+    #[test]
+    fn oversized_external_policy_is_rejected_before_parsing() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("policy.toml");
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(16_777_217)
+            .unwrap();
+        assert!(
+            matches!(load_external_policy(&path), Err(ApiError::BadRequest(message)) if message.contains("file exceeds 16777216 bytes"))
+        );
+    }
+
+    #[test]
+    fn fifo_external_policy_is_rejected_before_opening() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("policy.toml");
+        rustix::fs::mkfifoat(rustix::fs::CWD, &path, rustix::fs::Mode::RWXU).unwrap();
+        let (send, recv) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _ = send.send(load_external_policy(&path));
+        });
+        // 超时即失败；不 join 阻塞的线程，测试进程不会等待它退出。
+        let result = recv
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("FIFO 必须在 open 前被拒绝");
+        worker.join().unwrap();
+        assert!(
+            matches!(result, Err(ApiError::BadRequest(message)) if message.contains("not a regular file"))
+        );
+    }
 
     /// Observation scope narrowing goes through `[lancet.project_root].root`,
     /// the one root every read path resolves against.

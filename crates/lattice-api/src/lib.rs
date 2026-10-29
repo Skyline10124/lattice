@@ -14,12 +14,10 @@
 
 mod config_rejection;
 mod redact;
-pub use config_rejection::{ConfigRejection, ConfigurationDiagnostic};
+pub use config_rejection::ConfigRejection;
 pub mod local;
 mod models;
 mod profile;
-mod profile_paths;
-pub use profile_paths::validate_agents_dir;
 pub mod root;
 mod session;
 mod stores;
@@ -29,7 +27,7 @@ pub use lancet_api::CompositionError;
 pub use lattice_session::store::{NodeId, TurnSummary, UsageSummary};
 pub use lattice_session::{ProjectStoreKey, StateLayout};
 pub use models::{ModelCandidate, ModelCandidates, ModelPrice, ModelWarning, init_logging};
-pub use profile::{LoadedAgentProfile, resolve_named_agent_profile};
+pub use profile::LoadedAgentProfile;
 pub use root::{LocalWorkspaceRoot, resolve_local_workspace_root};
 pub use session::{ApiError, SessionApi};
 #[cfg(any(test, feature = "test-utils"))]

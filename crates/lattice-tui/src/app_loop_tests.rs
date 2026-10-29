@@ -1079,7 +1079,7 @@ impl Peer {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut magic = [0; 8];
                 stream.read_exact(&mut magic).await.unwrap();
-                assert_eq!(&magic, b"LTLOCAL6");
+                assert_eq!(&magic, b"LTLOCAL7");
                 let len = stream.read_u32().await.unwrap();
                 assert!(len <= 16 * 1024 * 1024);
                 let mut bytes = vec![0; len as usize];
@@ -1157,7 +1157,7 @@ impl Views {
 async fn send(stream: &mut UnixStream, value: &Value, seq: &mut u64) {
     let bytes = serde_json::to_vec(&json!({"message_id":*seq,"offset":0,"json_fragment":serde_json::to_string(value).unwrap(),"complete":true})).unwrap();
     *seq += 1;
-    if stream.write_all(b"LTLOCAL6").await.is_err() {
+    if stream.write_all(b"LTLOCAL7").await.is_err() {
         return;
     }
     let _ = stream.write_u32(bytes.len() as u32).await;
@@ -1233,39 +1233,9 @@ fn frame(app: &App) -> Frame {
     }
 }
 
-fn configured(
-    _agent: String,
-    _options: TuiOptions,
-    _client: LocalClient,
-) -> BoxFuture<'static, lattice_api::local::Result<FrozenConfiguration>> {
-    // 对端不解读配置；提交只需带上一份形状合法的冻结配置。
-    async {
-        Ok(serde_json::from_value(json!({
-            "profile_toml":"schema_version = 1","system_prompt":"test"
-        }))
-        .unwrap())
-    }
-    .boxed()
-}
-
-fn unconfigured(
-    agent: String,
-    _options: TuiOptions,
-    _client: LocalClient,
-) -> BoxFuture<'static, lattice_api::local::Result<FrozenConfiguration>> {
-    async move {
-        Err(local_error(
-            LocalErrorKind::BadRequest,
-            &format!("profile for {agent} is missing"),
-        ))
-    }
-    .boxed()
-}
-
 struct Harness {
     options: TuiOptions,
     app: App,
-    configure: Configure,
     events: UnboundedReceiver<std::io::Result<Event>>,
     observer: watch::Sender<Frame>,
     remote: Remote,
@@ -1283,7 +1253,6 @@ impl Harness {
             session_id: (!new_session).then(|| SESSION.into()),
             agent: "unused".into(),
             session_dir: root.path().join("history"),
-            agents_dir: root.path().join("agents"),
             project_root: root.path().into(),
         };
         let app = App::new(
@@ -1299,7 +1268,6 @@ impl Harness {
         Self {
             options,
             app,
-            configure: configured,
             events,
             observer,
             remote: Remote { keys, frames },
@@ -1312,7 +1280,6 @@ impl Harness {
             &self.options,
             &mut self.app,
             client,
-            self.configure,
             &mut self.events,
             |app| {
                 observer.send_replace(frame(app));
@@ -1650,9 +1617,14 @@ async fn cancel_goes_to_the_running_turn_by_turn_id() {
 
 #[tokio::test]
 async fn configuration_failure_shows_the_error_and_keeps_the_input() {
-    let peer = Peer::start(|_| Reply::Never);
+    let peer = Peer::start(|request| match request["operation"].as_str().unwrap() {
+        "submit" => Reply::Now(response(
+            "error",
+            json!({"kind":"bad_request", "message":"profile for unused is missing", "conflict":null, "recovery":null, "store":null}),
+        )),
+        _ => Reply::Never,
+    });
     let mut h = Harness::new(false);
-    h.configure = unconfigured;
     let remote = h.remote.clone();
     let driver = async {
         remote.line("needs config");
@@ -1670,42 +1642,7 @@ async fn configuration_failure_shows_the_error_and_keeps_the_input() {
     })
     .await;
     assert!(exit.result.is_ok());
-    assert_eq!(count(&peer.seen.borrow(), "submit"), 0);
-}
-
-fn slow_configuration(
-    _agent: String,
-    _options: TuiOptions,
-    _client: LocalClient,
-) -> BoxFuture<'static, lattice_api::local::Result<FrozenConfiguration>> {
-    futures::future::pending().boxed()
-}
-
-#[tokio::test]
-async fn cancel_while_configuration_loads_is_not_accepted_and_keeps_the_input() {
-    let peer = Peer::start(|_| Reply::Never);
-    let mut h = Harness::new(false);
-    h.configure = slow_configuration;
-    let remote = h.remote.clone();
-    let driver = async {
-        remote.line("slow");
-        remote.wait(|f| f.phase == TurnPhase::Streaming).await;
-        remote.ctrl('c');
-        let shown = remote.wait(|f| f.text.contains("提交在发出前取消")).await;
-        assert_eq!(shown.input, "slow");
-        assert_eq!(shown.phase, TurnPhase::Idle);
-        assert!(shown.dock.is_empty(), "Info 不暂驻：{}", shown.dock);
-        tokio::time::sleep(CTRL_C_WINDOW + Duration::from_millis(50)).await;
-        // Ctrl+D 只在输入为空时退出。
-        remote.press(KeyCode::Esc, KeyModifiers::NONE);
-        remote.ctrl('d');
-    };
-    let ((), exit) = bounded(LOOP_LIMIT, async {
-        tokio::join!(driver, h.run(&peer.client))
-    })
-    .await;
-    assert!(exit.result.is_ok());
-    assert_eq!(count(&peer.seen.borrow(), "submit"), 0);
+    assert_eq!(count(&peer.seen.borrow(), "submit"), 1);
 }
 
 #[tokio::test]
@@ -2040,7 +1977,7 @@ async fn every_loop_exit_saves_queue_originals_in_order() {
                 Box::pin(futures::stream::iter(events))
             };
         let client = LocalClient::new(lattice_api::StateLayout::in_state_root(h._root.path()));
-        let exit = run_loop(&h.options, &mut h.app, &client, configured, events, |_| {
+        let exit = run_loop(&h.options, &mut h.app, &client, events, |_| {
             if exit_kind == 5 {
                 anyhow::bail!("draw failed");
             }

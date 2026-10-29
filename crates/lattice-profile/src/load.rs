@@ -1,10 +1,17 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use std::path::{Path, PathBuf};
+use std::{
+    io::{self, Read},
+    path::{Path, PathBuf},
+};
 
 use crate::error::ProfileError;
 use crate::schema::{AgentProfile, TYPED_LANCET_SUB_TABLES};
+
+const MAX_SYSTEM_PROMPT_BYTES: usize = 2 * 1024 * 1024;
+// 2 MiB 提示全部写成 \uXXXX 时最多占 12 MiB；16 MiB 为 TOML 转义与其余字段留出空间，并给读取设界。
+const MAX_PROFILE_FILE_BYTES: usize = 16 * 1024 * 1024;
 
 /// A loaded and validated agent profile with resolved system prompt.
 #[derive(Debug, Clone, PartialEq)]
@@ -44,10 +51,11 @@ const FORBIDDEN_SECTIONS: &[&str] = &[
 pub fn load_agent_profile(path: impl AsRef<Path>) -> Result<LoadedAgentProfile, ProfileError> {
     let path = path.as_ref().to_path_buf();
 
-    let content = std::fs::read_to_string(&path).map_err(|source| ProfileError::Io {
-        path: path.clone(),
-        source,
-    })?;
+    let content =
+        read_regular_file(&path, MAX_PROFILE_FILE_BYTES).map_err(|source| ProfileError::Io {
+            path: path.clone(),
+            source,
+        })?;
 
     // Pre-scan for forbidden top-level sections before strict deserialization.
     check_forbidden_sections(&path, &content)?;
@@ -81,6 +89,27 @@ pub fn load_agent_profile(path: impl AsRef<Path>) -> Result<LoadedAgentProfile, 
         profile,
         system_prompt,
     })
+}
+
+/// 读取普通 UTF-8 文件，最多读入 limit 加一字节，超限时返回 InvalidData。
+pub fn read_regular_file(path: &Path, limit: usize) -> io::Result<String> {
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(limit as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("file exceeds {limit} bytes"),
+        ));
+    }
+    String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 fn toml_error_line(error: &toml::de::Error, content: &str) -> Option<std::num::NonZeroU32> {
@@ -283,7 +312,20 @@ fn resolve_system_prompt(path: &Path, profile: &AgentProfile) -> Result<String, 
         (None, None) => Err(ProfileError::MissingPrompt {
             path: path.to_path_buf(),
         }),
-        (Some(inline), None) => Ok(inline.to_string()),
+        (Some(inline), None) => {
+            if inline.len() > MAX_SYSTEM_PROMPT_BYTES {
+                return Err(ProfileError::InvalidField {
+                    path: path.to_path_buf(),
+                    section: "prompt".into(),
+                    field: "system".into(),
+                    value: inline.len().to_string().into_boxed_str(),
+                    reason: "system prompt is too large".into(),
+                    expected: format!("system prompt must be <= {MAX_SYSTEM_PROMPT_BYTES} bytes")
+                        .into(),
+                });
+            }
+            Ok(inline.to_string())
+        }
         (None, Some(rel_path)) => load_prompt_file(path, rel_path),
     }
 }
@@ -335,17 +377,14 @@ fn load_prompt_file(profile_path: &Path, rel_path: &str) -> Result<String, Profi
         });
     }
 
-    if !canonical_resolved.is_file() {
-        return Err(ProfileError::SystemPathNotAFile {
-            profile_path: profile_path.to_path_buf(),
-            given: rel_path.to_string(),
-            resolved: canonical_resolved,
-        });
-    }
-
-    std::fs::read_to_string(&canonical_resolved).map_err(|source| ProfileError::Io {
-        path: canonical_resolved,
-        source,
+    read_regular_file(&canonical_resolved, MAX_SYSTEM_PROMPT_BYTES).map_err(|source| {
+        ProfileError::Io {
+            path: profile_path.to_path_buf(),
+            source: io::Error::new(
+                source.kind(),
+                format!("prompt file '{}': {source}", canonical_resolved.display()),
+            ),
+        }
     })
 }
 
@@ -358,6 +397,70 @@ mod tests {
         let toml_path = dir.path().join("agent.toml");
         std::fs::write(&toml_path, content).unwrap();
         (dir, toml_path)
+    }
+
+    #[test]
+    fn regular_file_read_accepts_limit_and_rejects_one_extra_byte() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bounded.txt");
+        std::fs::write(&path, "12345678").unwrap();
+        assert_eq!(read_regular_file(&path, 8).unwrap(), "12345678");
+        std::fs::write(&path, "123456789").unwrap();
+        let error = read_regular_file(&path, 8).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(error.to_string(), "file exceeds 8 bytes");
+    }
+
+    #[test]
+    fn fifo_is_rejected_before_opening() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fifo");
+        rustix::fs::mkfifoat(rustix::fs::CWD, &path, rustix::fs::Mode::RWXU).unwrap();
+        let (send, recv) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _ = send.send(read_regular_file(&path, 8));
+        });
+        // 超时即失败；不 join 阻塞的线程，测试进程不会等待它退出。
+        let result = recv
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("FIFO 必须在 open 前被拒绝");
+        worker.join().unwrap();
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(error.to_string(), "not a regular file");
+    }
+
+    #[test]
+    fn inline_and_file_prompts_are_limited_by_utf8_bytes() {
+        for external in [false, true] {
+            for (prompt, accepted) in [
+                (format!("{}ab", "中".repeat(699_050)), true),
+                ("中".repeat(699_051), false),
+            ] {
+                let field = if external {
+                    "system_path='prompt.md'".into()
+                } else {
+                    format!("system='{prompt}'")
+                };
+                let (_dir, path) = temp_profile(&format!(
+                    "schema_version=1\n[agent]\nname='test'\nmodel='local/test'\n[prompt]\n{field}\n"
+                ));
+                if external {
+                    std::fs::write(path.with_file_name("prompt.md"), &prompt).unwrap();
+                }
+                let result = load_agent_profile(&path);
+                if accepted {
+                    assert!(
+                        result.unwrap().system_prompt == prompt,
+                        "external={external}"
+                    );
+                } else {
+                    let error = result.unwrap_err().to_string();
+                    assert!(error.contains("2097152"), "external={external}: {error}");
+                    assert!(error.contains(path.to_str().unwrap()), "{error}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -485,7 +588,7 @@ system_path = "subdir"
         )
         .unwrap();
         let err = load_agent_profile(&toml_path).unwrap_err();
-        assert!(err.to_string().contains("not a file"), "got: {err}");
+        assert!(err.to_string().contains("not a regular file"), "got: {err}");
     }
 
     /// #121: a profile still carrying the retired `allowed_roots` key must fail
