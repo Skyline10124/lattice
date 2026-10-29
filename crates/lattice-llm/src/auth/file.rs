@@ -22,11 +22,7 @@ static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 pub(super) struct Directory(File);
 
 fn effective_uid() -> u32 {
-    unsafe extern "C" {
-        fn geteuid() -> u32;
-    }
-    // Linux 的 uid_t 是 u32；geteuid 无参数、无指针访问。
-    unsafe { geteuid() }
+    rustix::process::geteuid().as_raw()
 }
 
 fn check_metadata(meta: &fs::Metadata, directory: bool, owner: u32) -> Result<(), AuthError> {

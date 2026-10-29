@@ -648,8 +648,9 @@ const MAX_TLS_ROOT_TOTAL_BYTES: usize = 4 * 1024 * 1024;
 
 /// 按原顺序保留根证书，直到个数或总字节达到上限。
 ///
-/// 单张超过大小上限的根先跳过，其余先解析，无法解析的根记警告后跳过，不计入个数
-/// 或总量；一张有效根放不下（个数或累计字节将超过上限）时就停止，之后的根全部
+/// 单张超过大小上限的根先跳过，其余先解析，无法解析的根跳过，不计入个数
+/// 或总量；每张被跳过的根恰好记一条警告（超大的不再解析，不会重复）。
+/// 一张有效根放不下（个数或累计字节将超过上限）时就停止，之后的根全部
 /// 不信任，所以保留的总是可用根的有序前缀。
 /// 截断只减少信任锚，被截掉的 CA 签发的 HTTPS 请求会失败。
 fn select_roots<T, E: std::fmt::Display>(
@@ -658,13 +659,14 @@ fn select_roots<T, E: std::fmt::Display>(
 ) -> Vec<(Vec<u8>, T)> {
     let mut kept = Vec::new();
     let mut total = 0usize;
-    let mut skipped_large = 0usize;
-    let mut skipped_invalid = 0usize;
     let mut truncated = 0usize;
     let mut roots = roots_der.into_iter();
     while let Some(der) = roots.next() {
         if der.len() > MAX_TLS_ROOT_BYTES {
-            skipped_large += 1;
+            tracing::warn!(
+                bytes = der.len(),
+                "skipping TLS root certificate larger than {MAX_TLS_ROOT_BYTES} bytes"
+            );
             continue;
         }
         // 先解析再查上限：无效根不计入个数或总量，也不会触发截断。
@@ -680,19 +682,9 @@ fn select_roots<T, E: std::fmt::Display>(
                 kept.push((der, parsed));
             }
             Err(error) => {
-                skipped_invalid += 1;
                 tracing::warn!(%error, "skipping invalid TLS root certificate");
             }
         }
-    }
-    if skipped_large > 0 {
-        tracing::warn!(
-            skipped_large,
-            "skipped TLS roots larger than {MAX_TLS_ROOT_BYTES} bytes"
-        );
-    }
-    if skipped_invalid > 0 {
-        tracing::warn!(skipped_invalid, "skipped invalid TLS root certificates");
     }
     if truncated > 0 {
         tracing::warn!(
@@ -991,7 +983,7 @@ mod tests {
             "truncation must log how many roots were dropped, got {logs}"
         );
         assert!(
-            logs.contains("skipped_large=1"),
+            logs.contains("bytes=65537"),
             "the oversized root must be logged as skipped, got {logs}"
         );
     }
@@ -1049,7 +1041,10 @@ mod tests {
             "kept roots must be the valid ones in original order"
         );
         assert!(
-            logs.contains("skipped_invalid=1") && !logs.contains("truncated="),
+            logs.matches("skipping invalid TLS root certificate")
+                .count()
+                == 1
+                && !logs.contains("truncated="),
             "the invalid root is skipped and nothing is truncated, got {logs}"
         );
     }
@@ -1073,9 +1068,63 @@ mod tests {
             "unparseable roots are skipped and the rest keep their order"
         );
         assert!(
-            logs.contains("skipped_invalid=1"),
+            logs.contains("skipping invalid TLS root certificate"),
             "the unparseable root must be logged, got {logs}"
         );
+    }
+
+    #[test]
+    fn each_skipped_root_warns_exactly_once() {
+        // 两张超大、三张无效、两张有效：只有被跳过的 5 张各记一条 WARN。
+        // 超大根带无效标记也不得再解析，否则会同时记大小和解析两条。
+        let roots = vec![
+            distinct_root(0, 65_537, 0xff),
+            distinct_root(1, 16, 0xff),
+            distinct_root(2, 16, 1),
+            distinct_root(3, 70_000, 1),
+            distinct_root(4, 16, 0xff),
+            distinct_root(5, 16, 0xff),
+            distinct_root(6, 16, 1),
+        ];
+        let (kept, logs) = capture_warnings(|| {
+            super::select_roots(roots.clone(), |der: &[u8]| {
+                if der[4] == 0xff {
+                    Err("bad certificate")
+                } else {
+                    Ok(())
+                }
+            })
+        });
+        let kept: Vec<_> = kept.into_iter().map(|(der, ())| der).collect();
+        assert_eq!(kept, vec![roots[2].clone(), roots[6].clone()]);
+        let warns: Vec<_> = logs.lines().filter(|line| line.contains("WARN")).collect();
+        assert_eq!(warns.len(), 5, "one WARN per skipped root, got {logs}");
+        assert_eq!(
+            logs.matches("skipping TLS root certificate larger than")
+                .count(),
+            2,
+            "{logs}"
+        );
+        assert_eq!(
+            logs.matches("skipping invalid TLS root certificate")
+                .count(),
+            3,
+            "{logs}"
+        );
+    }
+
+    #[test]
+    fn gateway_warns_once_per_skipped_root_with_real_parsing() {
+        // 网关构造只选一次根；真实解析下超大根和无效根各记一条 WARN。
+        let directory = tempfile::tempdir().unwrap();
+        let ca = crate::test_tls::TLS.ca_der.clone();
+        let roots = vec![vec![0_u8; 65_537], vec![1, 2, 3], ca.clone(), vec![4, 5]];
+        let (gateway, logs) = capture_warnings(|| {
+            crate::RequestGateway::new(directory.path().into(), roots).unwrap()
+        });
+        assert_eq!(gateway.tls_roots_der(), &[ca][..]);
+        let warns = logs.lines().filter(|line| line.contains("WARN")).count();
+        assert_eq!(warns, 3, "one WARN per skipped root, got {logs}");
     }
 
     #[test]
