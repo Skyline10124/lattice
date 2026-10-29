@@ -2001,6 +2001,7 @@ fn attempt_origin_rejects_invalid_endpoints() {
         ("longer than 8192 bytes", long),
         ("newline", "https://api.example\n/v1".to_owned()),
         ("NUL", "https://api.example\0/v1".to_owned()),
+        ("0x1f", "https://api.example\x1f/v1".to_owned()),
         ("DEL", "https://api.example\x7f/v1".to_owned()),
     ] {
         let (_dir, _layout, db) = store();
@@ -2021,18 +2022,27 @@ fn attempt_origin_rejects_invalid_endpoints() {
         );
         assert!(before == records(&db), "{case}: rejection must not write");
     }
-    let (_dir, _layout, db) = store();
-    let lock = db.try_lock_session(sid(1)).unwrap();
-    db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
-    let longest = AttemptOrigin {
-        base_url: format!("https://{}", "a".repeat(8_192 - "https://".len())),
-        ..origin()
-    };
-    let result = db.start_request(&lock, key(tid(1), 0, 0), longest, now());
-    assert!(
-        result.is_ok(),
-        "8192-byte endpoint must be accepted, got {result:?}"
-    );
+    for (case, base_url) in [
+        (
+            "8192 bytes",
+            format!("https://{}", "a".repeat(8_192 - "https://".len())),
+        ),
+        ("0x20", "https://api.example /v1".to_owned()),
+        ("non-ASCII", "https://例え.jp/v1".to_owned()),
+    ] {
+        let (_dir, _layout, db) = store();
+        let lock = db.try_lock_session(sid(1)).unwrap();
+        db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+        let source = AttemptOrigin {
+            base_url,
+            ..origin()
+        };
+        let result = db.start_request(&lock, key(tid(1), 0, 0), source, now());
+        assert!(
+            result.is_ok(),
+            "{case}: endpoint must be accepted, got {result:?}"
+        );
+    }
 }
 
 #[test]
