@@ -6,14 +6,12 @@
 
 mod auth;
 mod client;
-mod config;
 mod ipc;
 mod operation;
 mod server;
 mod types;
 
 pub use client::{LocalClient, LocalWatch};
-pub use config::FrozenConfiguration;
 pub use lattice_conversation::{
     BoundToolCall, MessageRole, MessageSemantic, NativeMessage, ToolResultOutcome,
 };

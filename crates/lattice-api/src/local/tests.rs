@@ -24,7 +24,7 @@ async fn private_socket_rejects_second_owner_and_oversized_frame() {
     );
     let (mut writer, mut reader) = tokio::net::UnixStream::pair().unwrap();
     ipc::check_peer(&writer).unwrap();
-    writer.write_all(b"LTLOCAL6").await.unwrap();
+    writer.write_all(b"LTLOCAL7").await.unwrap();
     writer.write_u32((ipc::MAX_FRAME + 1) as u32).await.unwrap();
     let result = ipc::read::<serde_json::Value>(&mut reader).await;
     assert!(matches!(
@@ -46,12 +46,11 @@ async fn private_socket_rejects_second_owner_and_oversized_frame() {
     ));
 }
 
-pub(super) fn frozen(project: &std::path::Path, endpoint: &str) -> FrozenConfiguration {
-    let path = project.join("agent.toml");
+pub(super) fn configure(project: &std::path::Path, endpoint: &str) {
+    let path = project.join(".lattice/agents/local-test/agent.toml");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, "schema_version = 1\n[agent]\nname = 'local-test'\nmodel = 'local/local-test'\n[prompt]\nsystem = 'test'\n").unwrap();
-    let loaded = lattice_profile::load_agent_profile(&path).unwrap();
     let directory = project.join(".lattice");
-    std::fs::create_dir_all(&directory).unwrap();
     std::fs::set_permissions(
         &directory,
         <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
@@ -67,9 +66,4 @@ pub(super) fn frozen(project: &std::path::Path, endpoint: &str) -> FrozenConfigu
     lattice_llm::auth::AuthStore::new(directory)
         .set("local", "local-test-secret")
         .unwrap();
-    FrozenConfiguration::capture(
-        loaded,
-        &crate::LocalWorkspaceRoot::from_path(project).unwrap(),
-    )
-    .unwrap()
 }

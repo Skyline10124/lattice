@@ -28,50 +28,10 @@ pub(crate) async fn open_or_create(
             active_agent: log.current_agent.unwrap_or_default(),
         });
     }
-    let prepared = options.clone();
-    let checked = tokio::task::spawn_blocking(move || -> Result<(), lattice_api::ApiError> {
-        let loaded = load_profile(&prepared, &prepared.agent)?;
-        let root = lattice_api::LocalWorkspaceRoot::from_path(&prepared.project_root)?;
-        lattice_api::local::FrozenConfiguration::capture(loaded, &root)?;
-        Ok(())
-    })
-    .await?;
-    if let Err(error) = checked {
-        return Err(client.redact_configuration_error(error).await.into());
-    }
     Ok(SessionContext {
         session_id: None,
         active_agent: options.agent.clone(),
     })
-}
-
-pub(crate) fn load_profile(
-    options: &TuiOptions,
-    active_agent: &str,
-) -> Result<lattice_api::LoadedAgentProfile, lattice_api::ApiError> {
-    lattice_api::resolve_named_agent_profile(
-        active_agent,
-        &options.project_root,
-        &options.agents_dir,
-    )
-}
-
-pub(crate) async fn freeze_configuration(
-    agent: String,
-    options: TuiOptions,
-    client: LocalClient,
-) -> lattice_api::local::Result<lattice_api::local::FrozenConfiguration> {
-    let loaded = tokio::task::spawn_blocking(move || {
-        let root = lattice_api::LocalWorkspaceRoot::from_path(&options.project_root)?;
-        let loaded = load_profile(&options, &agent)?;
-        lattice_api::local::FrozenConfiguration::capture(loaded, &root)
-    })
-    .await
-    .map_err(|_| lattice_api::ApiError::Internal("配置工作者失败".into()))?;
-    match loaded {
-        Ok(configuration) => Ok(configuration),
-        Err(error) => Err(client.redact_configuration_error(error).await),
-    }
 }
 
 /// 生成中的文字：所属尝试与已收到的字节数，以及其中的正文。reasoning 不显示，只计入字节数，
@@ -318,7 +278,3 @@ fn append_assistant_text(blocks: &mut BlockList, text: String) {
         _ => blocks.push(Block::Assistant(text)),
     }
 }
-
-#[cfg(test)]
-#[path = "session_config_tests.rs"]
-mod config_tests;

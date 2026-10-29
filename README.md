@@ -66,6 +66,7 @@ enabled = ["observe__workspace"]
 ```
 
 配置目录名称与 `[agent].name` 保持一致。
+后台在每次提交接受前读取 profile，先查项目内的 `.lattice/agents`，再查后台启动环境中 `$HOME/.lattice/agents`。连接同一后台的前端共用这一全局目录；固定 `XDG_STATE_HOME` 时，更换前端 HOME 不会改变它。
 这里仅启用工作区读取工具，不授予创建、编辑文件或抓取网页的工具权限。
 
 ### 2. 配置模型凭据

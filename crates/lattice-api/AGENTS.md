@@ -8,7 +8,7 @@
 - `local/operation.rs`：LocalTurn 是本客户端一次提交的具体句柄，管理提交、在途取消与退出交接；前端生成身份、交出 agent、模型与推理档位的选择并消费视图，配置由后台读取，持久 Turn 仍由后台执行。接口分层见[公开操作](../../docs/architecture/session.md#实现模块与公开操作)。
 - `local/server.rs`：serve 持实例资源和连接；Backend 管准入、存储句柄、视图及本进程完成诊断，Owner 监督独立操作。接管、同一取消载体与独立收尾遵循[取消与退出](../../docs/architecture/session.md#取消与退出)。
 - `session.rs`：公开会话操作、固定读取、ID 解析和结构化错误映射。
-- `config_rejection.rs`、`redact.rs`：配置拒绝的说明只经一个入口构造，文字在其中脱敏并规范化为单行；`profile.rs`、`profile_paths.rs`：后台读取配置时用的 agents 目录、profile 查找与名称一致性校验。规则见[配置拒绝的原因](../../docs/architecture/session.md#配置拒绝的原因)。
+- `config_rejection.rs`、`redact.rs`：配置拒绝的说明只经一个入口构造，文字在其中脱敏并规范化为单行；`profile.rs`：后台按项目根与启动时的配置目录查找 profile、校验名称一致性、加载系统提示并冻结有效策略。规则见[配置拒绝的原因](../../docs/architecture/session.md#配置拒绝的原因)。
 - `turn/live.rs`、`turn/execute.rs`：同一 live 核心及独立接受/完成结果；start_turn 用于后台执行接线，run_turn/stream_turn 仅供测试复用核心。
 - `turn/cep.rs`：profile→policy、Tool 事件映射及生产依赖接线；首次共享 Component 组成经 spawn_blocking，组装仍归 lancet-api。
 - coordinator/saga 模块：阻塞存储适配、可注入 IdSource、调用登记、顺序执行、槽位终态、Step/Turn 关闭及会话退回。

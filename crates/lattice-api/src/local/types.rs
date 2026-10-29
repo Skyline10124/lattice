@@ -279,9 +279,6 @@ impl From<crate::ApiError> for LocalError {
         let (kind, message) = match &error {
             ApiError::NotFound(_) => (NotFound, "session or Turn not found"),
             ApiError::Configuration(reason) => return Self::new(BadRequest, &reason.to_string()),
-            ApiError::FrontendConfiguration(reason) => {
-                return Self::new(BadRequest, &reason.to_string());
-            }
             ApiError::BadRequest(_) => (BadRequest, "request or frozen configuration is invalid"),
             ApiError::Conflict(reason) => {
                 return Self {
@@ -463,9 +460,6 @@ pub(super) enum Request {
     Models {
         provider: Option<String>,
     },
-    ConfigurationError {
-        message: String,
-    },
     ResolveSession {
         prefix: String,
     },
@@ -494,7 +488,6 @@ pub(super) enum Request {
     },
     Submit {
         request: TurnRequest,
-        configuration: Box<super::config::FrozenConfiguration>,
     },
     Cancel {
         turn_id: TurnId,
@@ -531,7 +524,6 @@ pub(super) enum Response {
     AuthRemoved { removed: bool },
     AuthStatus(AuthStatus),
     Models(ModelCandidates),
-    ConfigurationError { message: String },
     Session(SessionRecord),
     Sessions(Page<SessionListRow, SessionId>),
     Log(SessionLog),
@@ -553,7 +545,7 @@ pub(super) enum Response {
 mod tests {
     use super::*;
     #[test]
-    fn request_shapes_require_configuration_and_preserve_explicit_session_identity() {
+    fn request_shapes_preserve_selections_and_explicit_session_identity() {
         let sid = super::super::new_session_id();
         let tid = super::super::new_turn_id();
         for session in [SubmitSession::New(sid), SubmitSession::Existing(sid)] {
@@ -569,12 +561,17 @@ mod tests {
                 wire["session"][if session.is_new() { "new" } else { "existing" }],
                 sid.to_string()
             );
+            let submit = serde_json::json!({"operation":"submit","request":wire});
             assert!(
-                serde_json::from_value::<Request>(
-                    serde_json::json!({"operation":"submit","request":wire})
-                )
-                .is_err()
+                matches!(serde_json::from_value::<Request>(submit.clone()).unwrap(), Request::Submit { request: decoded } if decoded == request)
             );
+            assert_eq!(
+                serde_json::to_value(Request::Submit { request }).unwrap(),
+                submit
+            );
+            let mut extra = submit;
+            extra["configuration"] = serde_json::json!({"profile_toml":"untrusted"});
+            assert!(serde_json::from_value::<Request>(extra).is_err());
         }
         assert!(
             matches!(serde_json::from_value::<Request>(serde_json::json!({"operation":"turn","turn_id":tid})).unwrap(), Request::Turn { turn_id } if turn_id == tid)

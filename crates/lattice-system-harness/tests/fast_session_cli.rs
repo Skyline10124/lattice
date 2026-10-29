@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! 公开 Session 查询、树形历史与输入拒绝。
 mod support;
-use lattice_system_harness::{SendRecord, SessionSendDriver, SseScript};
+use lattice_system_harness::{PtyTuiDriver, SessionSendDriver, SseScript};
 use serde_json::Value;
 use support::{assert_clean_send, cli, direct_world, driver, parse_send_stdout, wire_fake_llm};
 
@@ -314,17 +314,10 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
         )
         .unwrap();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut commands = vec![
+            let commands = [
                 vec!["--json", "session", "send", "hello", "--agent", agent],
                 vec!["--json", "run", "hello", "--agent", agent],
             ];
-            // 工具选择归后台接受阶段；启动预检只在进入终端前加载并冻结配置。
-            if matches!(
-                case,
-                "missing-profile" | "toml" | "agent-name" | "long-profile"
-            ) {
-                commands.push(vec!["--json", "tui", "--agent", agent]);
-            }
             let mut messages = Vec::new();
             for args in commands {
                 let out = cli(&world, &spec, &args);
@@ -335,19 +328,10 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
                 assert_no_secret(&out, ORDINARY_KEY).unwrap();
                 assert_no_secret(&out, &long_key).unwrap();
                 assert_no_secret(&out, LONG_FRAGMENT).unwrap();
-                // 提交在 `sending` 之后以 `rejected` 回执结束；TUI 启动预检不是提交，
-                // 输出 `error` 记录。两者给出同一个 LocalError。
                 let sent = parse_send_stdout(&out.stdout, out.exit_code());
-                let error = if args[1] == "tui" {
-                    match &sent.records[..] {
-                        [SendRecord::Error(error)] => error,
-                        _ => panic!("tui preflight emits one error: {:?}", sent.type_sequence()),
-                    }
-                } else {
-                    sent.rejection().unwrap_or_else(|| {
-                        panic!("rejected receipt expected: {:?}", sent.type_sequence())
-                    })
-                };
+                let error = sent.rejection().unwrap_or_else(|| {
+                    panic!("rejected receipt expected: {:?}", sent.type_sequence())
+                });
                 assert_eq!(error.kind, "bad_request");
                 let message = error.message.as_str();
                 assert!(
@@ -375,6 +359,64 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
                 assert!(server.captured_requests().is_empty());
             }
             assert!(messages.windows(2).all(|pair| pair[0] == pair[1]));
+            if matches!(case, "toml" | "tools-known-key") {
+                let budget = world.budget(&spec);
+                let mut tui = PtyTuiDriver::spawn(&driver(), &world, agent).unwrap();
+                let pty_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    tui.wait_for_ready(budget.cap_timeout(spec.step_timeout()))
+                        .unwrap();
+                    tui.send_line("hello").unwrap();
+                    tui.wait_for(budget.cap_timeout(spec.step_timeout()), |text| {
+                        text.contains("被拒绝")
+                    })
+                    .unwrap();
+                    let frame = tui
+                        .redraw_text(budget.cap_timeout(spec.step_timeout()))
+                        .unwrap();
+                    // 终端折行会把诊断拆开；比较完整文字，不依赖列宽与换行位置。
+                    let compact = |text: &str| {
+                        text.chars()
+                            .filter(|c| !c.is_whitespace())
+                            .collect::<String>()
+                    };
+                    assert!(
+                        compact(&frame).contains(&compact(&messages[0])),
+                        "{case}: {frame}"
+                    );
+                    for secret in [
+                        SENTINEL,
+                        FAKE_API_KEY,
+                        ORDINARY_KEY,
+                        &long_key,
+                        LONG_FRAGMENT,
+                    ] {
+                        assert!(
+                            !compact(&frame).contains(&compact(secret)),
+                            "{case}: unredacted credential"
+                        );
+                    }
+                    // 关闭错误消息后编辑归还的输入，避免把提交记录误认为输入仍在。
+                    tui.send_keys(b" -preserved").unwrap();
+                    tui.wait_for(budget.cap_timeout(spec.step_timeout()), |text| {
+                        text.contains("preserved")
+                    })
+                    .unwrap();
+                    let frame = tui
+                        .redraw_text(budget.cap_timeout(spec.step_timeout()))
+                        .unwrap();
+                    assert!(frame.contains("hello-preserved"), "{case}: {frame}");
+                    tui.send_keys(b"\x03").unwrap();
+                    tui.send_line("/quit").unwrap();
+                    tui.wait_for_exit(budget.cap_timeout(spec.step_timeout()))
+                        .unwrap();
+                    assert!(server.captured_requests().is_empty());
+                }));
+                evidence.record_pty(tui.output());
+                drop(tui);
+                if let Err(payload) = pty_result {
+                    std::panic::resume_unwind(payload);
+                }
+            }
             if matches!(case, "long-profile" | "tools-known-key") {
                 let out = cli(
                     &world,

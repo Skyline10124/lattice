@@ -15,9 +15,7 @@ use std::{
     path::Path,
     time::{Duration, Instant},
 };
-use support::{
-    Watcher, Wire, configuration, ipc, parse_send_stdout, submit_request, turn_closed, turn_lookup,
-};
+use support::{Watcher, Wire, ipc, parse_send_stdout, submit_request, turn_closed, turn_lookup};
 
 /// 直接经 IPC 提交时由测试充当客户端生成的身份。
 const TURN: &str = "00000000-0000-4000-8000-000000000001";
@@ -854,16 +852,8 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
         );
         expected.push(segment(SegmentKind::Text, "t70;"));
         drop(resumed);
-        let configured = configuration(&world, "vertical", &provider.base_url());
         for (index, request) in [
-            submit_request(
-                &world,
-                OTHER,
-                json!({"existing":sid}),
-                "must be busy",
-                Some("vertical"),
-                configured.clone(),
-            ),
+            submit_request(&world, OTHER, json!({"existing":sid}), "must be busy", Some("vertical")),
             json!({"operation":"rewind","session_id":sid,"target":2,"workspace":world.project_dir()}),
         ]
         .into_iter()
@@ -885,7 +875,6 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
                 json!({"new":SESSION}),
                 "original input",
                 Some("vertical"),
-                configured,
             ),
         );
         assert_eq!(reused["response"], "error", "{reused}");
@@ -2810,14 +2799,12 @@ fn admission_window_reports_in_flight_and_a_departed_submitter_is_not_admitted()
             json!({"operation":"status"}),
         );
         assert_eq!(status["response"], "status", "{status}");
-        let configured = configuration(&world, "admission", &provider.base_url());
         let request = submit_request(
             &world,
             TURN,
             json!({"new":SESSION}),
             "admission window",
             Some("admission"),
-            configured.clone(),
         );
         let mut pending = Wire::connect(&world, timeout(&world, &spec), &request);
         // 标记出现之前这次提交不能已有回执：已回复说明后台没有在准入前暂停。
@@ -2869,7 +2856,6 @@ fn admission_window_reports_in_flight_and_a_departed_submitter_is_not_admitted()
                 json!({"new":SESSION}),
                 "racing",
                 Some("admission"),
-                configured.clone(),
             ),
         );
         assert_eq!(racing["value"]["kind"], "busy", "{racing}");
@@ -2910,7 +2896,6 @@ fn admission_window_reports_in_flight_and_a_departed_submitter_is_not_admitted()
                 json!({"new":SESSION}),
                 "admitted",
                 Some("admission"),
-                configured,
             ),
         );
         assert_eq!(admitted["value"]["acceptance"], "accepted", "{admitted}");

@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{FrozenConfiguration, LocalClient, LocalWatch, client::SubmissionReply, types::*};
+use super::{LocalClient, LocalWatch, client::SubmissionReply, types::*};
 use std::{
     collections::{BTreeSet, VecDeque},
     time::Duration,
@@ -31,26 +31,13 @@ pub struct LocalTurn {
 impl LocalClient {
     /// 只处理提交与控制回执；前端用 apply_view 交付已有 watch 的消息。
     /// Unknown 之后的确定结果会再次交付回执，供前端开始观察或显示拒绝。
-    pub fn start_submission(
-        &self,
-        request: TurnRequest,
-        configuration: Result<FrozenConfiguration>,
-    ) -> LocalTurn {
-        self.submission(request, configuration, false)
+    pub fn start_submission(&self, request: TurnRequest) -> LocalTurn {
+        self.submission(request, false)
     }
-    pub fn start_turn(
-        &self,
-        request: TurnRequest,
-        configuration: Result<FrozenConfiguration>,
-    ) -> LocalTurn {
-        self.submission(request, configuration, true)
+    pub fn start_turn(&self, request: TurnRequest) -> LocalTurn {
+        self.submission(request, true)
     }
-    fn submission(
-        &self,
-        request: TurnRequest,
-        configuration: Result<FrozenConfiguration>,
-        own_view: bool,
-    ) -> LocalTurn {
+    fn submission(&self, request: TurnRequest, own_view: bool) -> LocalTurn {
         let (mut handle, mut worker) = LocalTurn::prepare(
             self.clone(),
             request.session.id(),
@@ -71,7 +58,7 @@ impl LocalClient {
                 new: request.session.is_new(),
             },
         });
-        worker.input = Some((request, configuration));
+        worker.input = Some(request);
         handle.task = Some(tokio::spawn(worker.run()));
         handle
     }
@@ -159,7 +146,7 @@ struct Worker {
     following: bool,
     own_view: bool,
     external_view: Option<mpsc::Receiver<(ViewUpdate, oneshot::Sender<()>)>>,
-    input: Option<(TurnRequest, Result<FrozenConfiguration>)>,
+    input: Option<TurnRequest>,
     submission: Option<JoinHandle<SubmissionReply>>,
     recovery: Option<JoinHandle<Result<TurnDetail>>>,
     connection: Option<JoinHandle<Result<LocalWatch>>>,
@@ -436,23 +423,15 @@ impl Worker {
         }
     }
     async fn run(mut self) -> DetachReport {
-        if let Some((request, configuration)) = self.input.take() {
+        if let Some(request) = self.input.take() {
             if self.commands.borrow().cancel > 0 || self.commands.borrow().stop {
                 self.receipt(SubmissionResult::NotAccepted, false);
                 self.finished = true;
             } else {
-                match configuration {
-                    Ok(configuration) => {
-                        let client = self.client.clone();
-                        self.submission = Some(tokio::spawn(async move {
-                            client.submit_once(request, configuration).await
-                        }));
-                    }
-                    Err(error) => {
-                        self.receipt(SubmissionResult::Rejected { error }, false);
-                        self.finished = true;
-                    }
-                }
+                let client = self.client.clone();
+                self.submission = Some(tokio::spawn(
+                    async move { client.submit_once(request).await },
+                ));
             }
         } else {
             self.connect();

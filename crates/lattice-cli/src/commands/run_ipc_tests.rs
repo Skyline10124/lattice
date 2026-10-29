@@ -42,7 +42,7 @@ impl Peer {
         let (mut stream, _) = self.listener.accept().await.unwrap();
         let mut magic = [0; 8];
         stream.read_exact(&mut magic).await.unwrap();
-        assert_eq!(&magic, b"LTLOCAL6");
+        assert_eq!(&magic, b"LTLOCAL7");
         let length = stream.read_u32().await.unwrap();
         let mut bytes = vec![0; length as usize];
         stream.read_exact(&mut bytes).await.unwrap();
@@ -63,7 +63,7 @@ impl Wire {
         let fragment = serde_json::to_string(&json!({"response":response,"value":value})).unwrap();
         let bytes=serde_json::to_vec(&json!({"message_id":self.sequence,"offset":0,"json_fragment":fragment,"complete":true})).unwrap();
         self.sequence += 1;
-        self.stream.write_all(b"LTLOCAL6").await.unwrap();
+        self.stream.write_all(b"LTLOCAL7").await.unwrap();
         self.stream.write_u32(bytes.len() as u32).await.unwrap();
         self.stream.write_all(&bytes).await.unwrap();
     }
@@ -692,20 +692,13 @@ async fn late_acceptance_keeps_the_printed_unknown_receipt_and_exit_one() {
     let _guard = signal_guard().await;
     let peer = Peer::new();
     let id = lattice_api::local::new_turn_id();
-    let configuration = serde_json::from_value(json!({
-        "profile_toml":"schema_version=1\n[agent]\nname='test'\nmodel='local/test'\n[prompt]\nsystem='test'\n[tools]\nenabled=[]\n",
-        "system_prompt":"test"
-    })).unwrap();
-    let turn = peer.client.start_turn(
-        TurnRequest {
-            turn_id: id,
-            session: SubmitSession::New(sid()),
-            workspace: peer._root.path().into(),
-            input: "input".into(),
-            agent: Some("test".into()),
-        },
-        Ok(configuration),
-    );
+    let turn = peer.client.start_turn(TurnRequest {
+        turn_id: id,
+        session: SubmitSession::New(sid()),
+        workspace: peer._root.path().into(),
+        input: "input".into(),
+        agent: Some("test".into()),
+    });
     let mut submit = peer.request("submit").await;
     turn.cancel();
     let mut out = Vec::new();
@@ -785,15 +778,20 @@ async fn submission_identity_and_inherited_selection_are_kept_in_the_wire_reques
             if existing {
                 let mut resolve = peer.request("resolve_session").await;
                 resolve.reply("session",json!({"session_id":sid(),"project_store_key":"a".repeat(64),"current":2,"created_at":"2026-10-17T00:00:00Z","updated_at":"2026-10-17T00:00:01Z"})).await;
-                let mut wire = peer.request("head").await;
-                wire.reply_head(head(lattice_api::local::new_turn_id(), false))
-                    .await;
             }
             let mut wire = peer.request("submit").await;
             let request = &wire.request["request"];
             assert_eq!(request["input"], "original input");
             assert!(TurnId::parse(request["turn_id"].as_str().unwrap()).is_ok());
-            assert!(wire.request["configuration"].is_object());
+            assert_eq!(
+                wire.request
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                vec!["operation", "request"]
+            );
             if existing {
                 assert_eq!(request["session"], json!({"existing":sid()}));
                 assert!(
@@ -815,11 +813,8 @@ async fn submission_identity_and_inherited_selection_are_kept_in_the_wire_reques
     }
     for mode in ["new", "existing"] {
         let root = tempfile::tempdir().unwrap();
-        let agent = root.path().join(".lattice/agents/test");
-        std::fs::create_dir_all(&agent).unwrap();
-        std::fs::write(agent.join("agent.toml"),"schema_version=1\n[agent]\nname='test'\nmodel='local/test'\n[prompt]\nsystem='test'\n[tools]\nenabled=[]\n").unwrap();
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-        command.env_clear().env("PATH","/usr/bin:/bin").env("HOME",root.path()).env("LATTICE_AGENTS_DIR","/home/lattice-cli-test-unused-agents").env(MODE,mode).current_dir(root.path()).args(["--exact","commands::run::ipc_tests::submission_identity_and_inherited_selection_are_kept_in_the_wire_request","--nocapture"]);
+        command.env_clear().env("PATH","/usr/bin:/bin").env("HOME",root.path()).env(MODE,mode).current_dir(root.path()).args(["--exact","commands::run::ipc_tests::submission_identity_and_inherited_selection_are_kept_in_the_wire_request","--nocapture"]);
         let output = tokio::task::spawn_blocking(move || command.output().unwrap())
             .await
             .unwrap();

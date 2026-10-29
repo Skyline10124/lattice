@@ -143,12 +143,10 @@ async fn run_commands(cli: Cli) -> Result<std::process::ExitCode> {
             lancet_cmd::run(action, cli.json).await?;
         }
         Some(Commands::Tui { session_id, agent }) => {
-            let agents_dir = commands::run::agents_dir(None);
             return lattice_tui::run(lattice_tui::TuiOptions {
                 session_id,
                 agent: agent.unwrap_or_default(),
                 session_dir: session_cmd::default_session_dir(),
-                agents_dir,
                 project_root: std::env::current_dir()?,
             })
             .await;

@@ -5,6 +5,9 @@ use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProfileError {
+    #[error("agent name '{name}' must be a single normal path component without '/' or NUL")]
+    InvalidAgentName { name: String },
+
     #[error("I/O error at {path}: {source}")]
     Io {
         path: PathBuf,
@@ -82,13 +85,6 @@ pub enum ProfileError {
     SystemPathTraversal {
         profile_path: PathBuf,
         given: String,
-    },
-
-    #[error("prompt.system_path `{given}` ({resolved}) at {profile_path} is not a file")]
-    SystemPathNotAFile {
-        profile_path: PathBuf,
-        given: String,
-        resolved: PathBuf,
     },
 
     #[error("prompt.system_path `{given}` at {profile_path}: file not found ({source})")]

@@ -92,21 +92,6 @@ async fn auth_ipc_uses_current_files_and_never_returns_credentials() {
     assert_eq!(state(status.clone(), "openai"), AuthState::Invalid);
     assert_eq!(state(status.clone(), "custom"), AuthState::Ready);
     assert!(!serde_json::to_string(&status).unwrap().contains(KEY));
-    for invalid_directory in [false, true] {
-        if invalid_directory {
-            fs::set_permissions(&config, fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let error = client
-            .redact_configuration_error(crate::ApiError::FrontendConfiguration(
-                crate::ConfigurationDiagnostic::new(
-                    "agent profile missing: sk-private-profile-value-123".into(),
-                ),
-            ))
-            .await;
-        assert_eq!(error.kind, LocalErrorKind::BadRequest);
-        assert_eq!(error.message, "agent profile missing: [REDACTED]");
-    }
-    fs::set_permissions(&config, fs::Permissions::from_mode(0o700)).unwrap();
     assert_eq!(
         client
             .auth_set("openai", KEY.into())

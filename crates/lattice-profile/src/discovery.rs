@@ -7,7 +7,7 @@
 //! `~/.lattice/agents/<name>/agent.toml` package semantics.
 //! Lookup order: explicit path > project-local > user-global.
 
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use crate::error::ProfileError;
 use crate::load::{LoadedAgentProfile, load_agent_profile};
@@ -69,6 +69,14 @@ pub fn resolve_agent_profile(
 }
 
 fn resolve_named(name: &str, paths: &DiscoveryPaths) -> Result<LoadedAgentProfile, ProfileError> {
+    if name.contains(['/', '\0'])
+        || !matches!(
+            Path::new(name).components().next(),
+            Some(Component::Normal(_))
+        )
+    {
+        return Err(ProfileError::InvalidAgentName { name: name.into() });
+    }
     let project_path = paths.project_agents_dir().join(name).join("agent.toml");
     let global_path = paths.global_agents_dir.join(name).join("agent.toml");
 
@@ -87,4 +95,45 @@ fn resolve_named(name: &str, paths: &DiscoveryPaths) -> Result<LoadedAgentProfil
         project_path,
         global_path,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::DirBuilderExt;
+
+    #[test]
+    fn named_lookup_rejects_non_normal_path_components() {
+        let dir = tempfile::tempdir().unwrap();
+        let configuration_dir = dir.path().join("home/.lattice");
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&configuration_dir)
+            .unwrap();
+        let paths = DiscoveryPaths {
+            project_root: dir.path().join("project"),
+            global_agents_dir: configuration_dir.join("agents"),
+        };
+        let absolute = dir.path().join("outside");
+        for name in [
+            "",
+            ".",
+            "..",
+            "a/b",
+            "a/",
+            "a\0b",
+            absolute.to_str().unwrap(),
+        ] {
+            if !name.contains('\0') {
+                let target = paths.project_agents_dir().join(name).join("agent.toml");
+                std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+                std::fs::write(target, format!("schema_version=1\n[agent]\nname='{name}'\nmodel='local/test'\n[prompt]\nsystem='valid target'\n")).unwrap();
+            }
+            assert!(
+                matches!(resolve_agent_profile(ProfileSource::Name(name.into()), &paths), Err(ProfileError::InvalidAgentName { name: found }) if found == name),
+                "{name:?}"
+            );
+        }
+    }
 }

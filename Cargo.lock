@@ -2776,6 +2776,7 @@ dependencies = [
  "libc",
  "regex",
  "reqwest",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",
@@ -2860,6 +2861,7 @@ name = "lattice-profile"
 version = "0.1.0"
 dependencies = [
  "lancet-protocol",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",

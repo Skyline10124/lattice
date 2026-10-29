@@ -21,7 +21,6 @@ pub struct TuiOptions {
     pub session_id: Option<String>,
     pub agent: String,
     pub session_dir: PathBuf,
-    pub agents_dir: PathBuf,
     pub project_root: PathBuf,
 }
 

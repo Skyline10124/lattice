@@ -6,12 +6,12 @@ use super::*;
 #[test]
 fn configuration_errors_keep_reason_and_exit_two_through_anyhow() {
     let error = lattice_api::ApiError::Configuration(lattice_api::ConfigRejection::new(
-        "Agents directory '/etc/agents' is inside a system path (/etc). Set LATTICE_AGENTS_DIR to a safe location.",
+        "agent profile 'reader' not found at project path /project/.lattice/agents/reader/agent.toml or global path /home/user/.lattice/agents/reader/agent.toml",
         None,
     ));
     let local = lattice_api::local::LocalError::from(error.clone());
     for error in [
-        anyhow::Error::new(error).context("TUI startup preflight"),
+        anyhow::Error::new(error).context("configuration rejection"),
         anyhow::Error::new(local.clone()).context("TUI configuration"),
         submission_error(local.clone()),
     ] {
@@ -24,7 +24,7 @@ fn configuration_errors_keep_reason_and_exit_two_through_anyhow() {
             record["message"]
                 .as_str()
                 .unwrap()
-                .contains("LATTICE_AGENTS_DIR")
+                .contains("agent profile")
         );
     }
     let error = anyhow::Error::new(lattice_api::ApiError::Configuration(

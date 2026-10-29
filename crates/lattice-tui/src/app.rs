@@ -26,11 +26,10 @@ use crossterm::event::{
 };
 use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use lattice_api::local::{
-    CancelStatus, ConnectionStatus, ConversationEntry, DetachReport, FrozenConfiguration,
-    LocalClient, LocalError, LocalErrorKind, LocalHistory, LocalTurn, LocalUpdate, Node, NodeId,
-    NoticeLevel, PublicTurnOutcome, SessionHead, SessionId, StepKey, SubmissionReceipt,
-    SubmissionResult, SubmissionUpdate, SubmitSession, TextSegment, TextUpdate, TurnId,
-    TurnRequest, ViewUpdate,
+    CancelStatus, ConnectionStatus, ConversationEntry, DetachReport, LocalClient, LocalError,
+    LocalErrorKind, LocalHistory, LocalTurn, LocalUpdate, Node, NodeId, NoticeLevel,
+    PublicTurnOutcome, SessionHead, SessionId, StepKey, SubmissionReceipt, SubmissionResult,
+    SubmissionUpdate, SubmitSession, TextSegment, TextUpdate, TurnId, TurnRequest, ViewUpdate,
 };
 
 const FRAME: Duration = Duration::from_millis(33);
@@ -1502,14 +1501,6 @@ fn entry_turn(entry: &ConversationEntry) -> Option<TurnId> {
     }
 }
 
-/// 提交前加载这次提交的配置；测试注入不读环境的配置。
-pub(crate) type Configure =
-    fn(
-        String,
-        TuiOptions,
-        LocalClient,
-    ) -> BoxFuture<'static, lattice_api::local::Result<FrozenConfiguration>>;
-
 /// 进入 raw 模式后并行接收视图推送与按键；启动不等待条目读取。
 pub(crate) async fn run_app(
     mut options: TuiOptions,
@@ -1529,19 +1520,10 @@ pub(crate) async fn run_app(
 
     let mut app = App::new(ctx, kitty, &options.session_dir);
     app.show_banner();
-    let mut exit = run_loop(
-        &options,
-        &mut app,
-        &client,
-        |agent, options, client| {
-            crate::session::freeze_configuration(agent, options, client).boxed()
-        },
-        EventStream::new(),
-        |app| {
-            terminal.draw(|f| crate::view::draw(f, app))?;
-            Ok(())
-        },
-    )
+    let mut exit = run_loop(&options, &mut app, &client, EventStream::new(), |app| {
+        terminal.draw(|f| crate::view::draw(f, app))?;
+        Ok(())
+    })
     .await;
     // 先复原终端，再由共同句柄有界承接既有意图；普通退出不新增取消。
     drop(cleanup);
@@ -1569,7 +1551,6 @@ async fn run_loop<E, D>(
     options: &TuiOptions,
     app: &mut App,
     client: &LocalClient,
-    configure: Configure,
     mut events: E,
     mut draw: D,
 ) -> LoopExit
@@ -1584,10 +1565,6 @@ where
     let mut turn: Option<LocalTurn> = None;
     // 句柄交付完自己的更新后仍保留，退出或换用新句柄时交给 detach。
     let mut turn_open = false;
-    let mut preparing: Option<(
-        TurnRequest,
-        BoxFuture<'static, lattice_api::local::Result<FrozenConfiguration>>,
-    )> = None;
     let mut cancels = FuturesUnordered::new();
     let mut older = FuturesUnordered::new();
     let mut recoveries = FuturesUnordered::new();
@@ -1604,17 +1581,7 @@ where
         if let Some(target) = app.cancel_requested.take() {
             match target {
                 CancelTarget::Own => {
-                    // 句柄要拿到配置结果才创建；配置还在加载时取消，这次提交不再发出，
-                    // 与句柄在请求写出前取消得到同一个回执。
-                    if let Some((request, _)) = preparing.take() {
-                        app.apply_submission(LocalUpdate::Submit {
-                            update: SubmissionUpdate::Receipt(SubmissionReceipt {
-                                turn_id: request.turn_id,
-                                result: SubmissionResult::NotAccepted,
-                                recovered: false,
-                            }),
-                        });
-                    } else if let Some(turn) = &turn {
+                    if let Some(turn) = &turn {
                         turn.cancel();
                     }
                 }
@@ -1651,11 +1618,6 @@ where
                     Some(Ok(event)) => prompt = handle_input_event(app, event),
                     Some(Err(_)) | None => app.should_quit = true,
                 }
-            }
-            config = async { preparing.as_mut().expect("正在加载配置").1.as_mut().await }, if preparing.is_some() => {
-                let (request, _) = preparing.take().expect("正在加载配置");
-                turn = Some(client.start_submission(request, config));
-                turn_open = true;
             }
             Some(report) = handoffs.next(), if !handoffs.is_empty() => app.apply_handoff(report),
             update = async { turn.as_mut().expect("已有句柄").next().await }, if turn_open => {
@@ -1701,8 +1663,8 @@ where
             if let Some(old) = turn.take() {
                 handoffs.push(old.detach().boxed());
             }
-            turn_open = false;
-            preparing = begin_turn(options, app, configure, client, prompt);
+            turn = begin_turn(options, app, prompt).map(|request| client.start_submission(request));
+            turn_open = turn.is_some();
         }
     };
     // 输入结束、普通退出和绘制失败都保存尚未发送的原文；不保存编辑器草稿。
@@ -1759,30 +1721,15 @@ fn ctrl_c_action(app: &mut App) -> KeyAction {
     }
 }
 
-fn begin_turn(
-    options: &TuiOptions,
-    app: &mut App,
-    configure: Configure,
-    client: &LocalClient,
-    prompt: String,
-) -> Option<(
-    TurnRequest,
-    BoxFuture<'static, lattice_api::local::Result<FrozenConfiguration>>,
-)> {
+fn begin_turn(options: &TuiOptions, app: &mut App, prompt: String) -> Option<TurnRequest> {
     let (turn_id, session) = app.submission_identity()?;
-    let request = TurnRequest {
+    Some(TurnRequest {
         turn_id,
         session,
         workspace: options.project_root.clone(),
         input: prompt,
         agent: (!options.agent.is_empty()).then(|| options.agent.clone()),
-    };
-    // 显式指定的 agent 优先；向已有会话追加时沿用会话当前的 agent。
-    let agent = request
-        .agent
-        .clone()
-        .unwrap_or_else(|| app.ctx.active_agent.clone());
-    Some((request, configure(agent, options.clone(), client.clone())))
+    })
 }
 
 #[rustfmt::skip]

@@ -43,6 +43,9 @@ cargo xtask lancet-boundary
 
 ### 配置与启动环境
 
+后台在每次接受前按 agent 名读取 profile，先查会话绑定项目的 `.lattice/agents/<名字>/agent.toml`，再查后台启动环境中的 `$HOME/.lattice/agents/<名字>/agent.toml`，并加载系统提示、解析和冻结有效策略。CLI/TUI 只提交 agent 选择；agents 目录没有覆盖变量。
+agent 名必须是单个普通路径段。profile、外部提示与外部策略只读取普通文件；`agent.toml` 与外部策略原始文件各最多 16 MiB，解析后的系统提示最多 2 MiB，均按字节计量。
+
 后台从用户级 `~/.lattice/providers.toml` 读取 provider 配置，从 `~/.lattice/auth.json` 读取凭据；key 用 `lattice auth set` 录入，用法见[根 README](../../README.md#2-配置模型凭据)。环境变量与工作区 `.env` 不提供 key、endpoint 或模型，项目中的 `providers.toml` 不被读取。`lattice models` 经后台列出模型候选、限制、价格与凭据状态。
 
 后台启动与 Git 隔离规则见[会话合同](../architecture/session.md#配置来源与后台启动)。

@@ -19,13 +19,6 @@ fn profile_local(error: ProfileError) -> LocalError {
     ))
 }
 
-fn frontend_local(error: crate::ApiError) -> LocalError {
-    let crate::ApiError::FrontendConfiguration(reason) = error else {
-        panic!("expected a frontend configuration diagnostic");
-    };
-    local(ConfigRejection::new(&reason.into_message(), None))
-}
-
 // 保护原始说明经脱敏后仍可读；真实命令入口由 E2E 覆盖。
 #[test]
 fn profile_rejections_preserve_diagnostics_and_redact_secrets() {
@@ -186,14 +179,6 @@ fn profile_payloads_are_redacted_and_legacy_bad_requests_stay_fixed() {
             "escapes package directory",
         ),
         (
-            ProfileError::SystemPathNotAFile {
-                profile_path: path.clone(),
-                given: SENTINEL.into(),
-                resolved: SENTINEL.into(),
-            },
-            "not a file",
-        ),
-        (
             ProfileError::ForbiddenSection {
                 path: path.clone(),
                 section: SENTINEL.into(),
@@ -235,7 +220,8 @@ fn profile_payloads_are_redacted_and_legacy_bad_requests_stay_fixed() {
 #[test]
 fn named_profile_validation_shows_redacted_declared_name() {
     let dir = tempfile::tempdir().unwrap();
-    let profile = dir.path().join(".lattice/agents/selected/agent.toml");
+    let project = dir.path().join("project");
+    let profile = project.join(".lattice/agents/selected/agent.toml");
     std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
     std::fs::write(
         &profile,
@@ -244,43 +230,59 @@ fn named_profile_validation_shows_redacted_declared_name() {
         ),
     )
     .unwrap();
-    // 空全局根是已有支持的输入；临时项目不作为受限的全局 agents 目录。
-    let error =
-        crate::resolve_named_agent_profile("selected", dir.path(), std::path::Path::new(""))
-            .unwrap_err();
-    assert!(!format!("{error:?}").contains(SENTINEL));
-    let result = frontend_local(error);
+    let root = crate::LocalWorkspaceRoot::from_path(&project).unwrap();
+    let configuration_dir = dir.path().join("home/.lattice");
+    std::fs::create_dir_all(&configuration_dir).unwrap();
+    std::fs::set_permissions(
+        &configuration_dir,
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+    )
+    .unwrap();
+    let result = LocalError::from(
+        crate::profile::load_for_turn("selected", &root, &configuration_dir).unwrap_err(),
+    );
     assert!(result.message.contains("[agent].name"));
     assert!(result.message.contains("selected"));
     assert!(result.message.contains("declares '[REDACTED]'"));
     assert!(result.message.contains(profile.to_str().unwrap()));
     assert!(!result.message.contains(SENTINEL));
 
-    let result = frontend_local(
-        crate::resolve_named_agent_profile("missing", dir.path(), std::path::Path::new(""))
-            .unwrap_err(),
+    let result = LocalError::from(
+        crate::profile::load_for_turn("missing", &root, &configuration_dir).unwrap_err(),
     );
     assert!(result.message.contains("agent profile 'missing' not found"));
-    assert!(result.message.contains(dir.path().to_str().unwrap()));
-    assert!(result.message.contains("global path missing/agent.toml"));
-}
-
-#[test]
-fn agents_directory_diagnostics_preserve_original_text() {
-    for (path, expected) in [
-        ("/etc/lattice", "system path (/etc)"),
-        ("/tmp/lattice", "inside /tmp"),
-        ("/safe/../agents", "path traversal"),
-    ] {
-        let result =
-            frontend_local(crate::validate_agents_dir(std::path::Path::new(path)).unwrap_err());
-        assert_eq!(result.kind, LocalErrorKind::BadRequest);
-        assert!(result.message.contains(path));
-        assert!(result.message.contains(expected));
-        if !path.contains("..") {
-            assert!(result.message.contains("LATTICE_AGENTS_DIR"));
-        }
-    }
+    assert!(
+        result.message.contains(
+            project
+                .join(".lattice/agents/missing/agent.toml")
+                .to_str()
+                .unwrap()
+        )
+    );
+    assert!(
+        result.message.contains(
+            configuration_dir
+                .join("agents/missing/agent.toml")
+                .to_str()
+                .unwrap()
+        )
+    );
+    let key = "short.fixture-key";
+    lattice_llm::auth::AuthStore::new(configuration_dir.clone())
+        .set("openai", key)
+        .unwrap();
+    std::fs::write(
+        &profile,
+        format!(
+            "schema_version=1\n[agent]\nname='{key}'\nmodel='local/test'\n[prompt]\nsystem='hi'\n"
+        ),
+    )
+    .unwrap();
+    let error = crate::profile::load_for_turn("selected", &root, &configuration_dir).unwrap_err();
+    assert!(!format!("{error:?}").contains(key));
+    let result = LocalError::from(error);
+    assert!(result.message.contains("declares '[REDACTED]'"));
+    assert!(!result.message.contains(key));
 }
 
 #[test]
