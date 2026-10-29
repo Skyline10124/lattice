@@ -648,8 +648,9 @@ const MAX_TLS_ROOT_TOTAL_BYTES: usize = 4 * 1024 * 1024;
 
 /// 按原顺序保留根证书，直到个数或总字节达到上限。
 ///
-/// 单张超过大小上限或无法解析的根记警告后跳过，不占名额；一旦个数或累计字节
-/// 达到上限就停止，之后的根全部不信任，所以保留的总是可用根的有序前缀。
+/// 单张超过大小上限的根先跳过，其余先解析，无法解析的根记警告后跳过，不计入个数
+/// 或总量；一张有效根放不下（个数或累计字节将超过上限）时就停止，之后的根全部
+/// 不信任，所以保留的总是可用根的有序前缀。
 /// 截断只减少信任锚，被截掉的 CA 签发的 HTTPS 请求会失败。
 fn select_roots<T, E: std::fmt::Display>(
     roots_der: Vec<Vec<u8>>,
@@ -666,13 +667,15 @@ fn select_roots<T, E: std::fmt::Display>(
             skipped_large += 1;
             continue;
         }
-        if kept.len() == MAX_TLS_ROOTS || total.saturating_add(der.len()) > MAX_TLS_ROOT_TOTAL_BYTES
-        {
-            truncated = 1 + roots.len();
-            break;
-        }
+        // 先解析再查上限：无效根不计入个数或总量，也不会触发截断。
         match parse(&der) {
             Ok(parsed) => {
+                if kept.len() == MAX_TLS_ROOTS
+                    || total.saturating_add(der.len()) > MAX_TLS_ROOT_TOTAL_BYTES
+                {
+                    truncated = 1 + roots.len();
+                    break;
+                }
                 total += der.len();
                 kept.push((der, parsed));
             }
@@ -1012,6 +1015,43 @@ mod tests {
         assert!(
             logs.contains("truncated=2"),
             "both roots after the limit must be counted as truncated, got {logs}"
+        );
+    }
+
+    #[test]
+    fn invalid_root_that_would_cross_the_byte_limit_is_skipped_not_truncating() {
+        // 69 张 60_000 字节有效根共 4_140_000 字节；再加一张 60_000 字节的无效根会
+        // 超过 4 MiB（4_194_304），但它解析失败、不计入总量，后面 100 字节的有效根
+        // 仍放得下，必须保留。
+        let mut roots: Vec<_> = (0..69)
+            .map(|index| distinct_root(index, 60_000, 2))
+            .collect();
+        roots.push(distinct_root(69, 60_000, 0xff));
+        roots.push(distinct_root(70, 100, 3));
+        let (kept, logs) = capture_warnings(|| {
+            super::select_roots(roots.clone(), |der: &[u8]| {
+                if der[4] == 0xff {
+                    Err("bad certificate")
+                } else {
+                    Ok(())
+                }
+            })
+        });
+        let kept: Vec<_> = kept.into_iter().map(|(der, ())| der).collect();
+        let mut expected = roots[..69].to_vec();
+        expected.push(roots[70].clone());
+        assert_eq!(
+            kept.len(),
+            70,
+            "69 large valid roots plus the small valid root after the invalid one"
+        );
+        assert!(
+            kept == expected,
+            "kept roots must be the valid ones in original order"
+        );
+        assert!(
+            logs.contains("skipped_invalid=1") && !logs.contains("truncated="),
+            "the invalid root is skipped and nothing is truncated, got {logs}"
         );
     }
 
