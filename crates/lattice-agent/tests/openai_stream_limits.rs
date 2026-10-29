@@ -26,7 +26,7 @@ struct OpenAiFrames {
 impl LlmClient for OpenAiFrames {
     async fn stream_chat(
         &self,
-        _: ChatRequest,
+        request: ChatRequest,
         control: lattice_llm::StreamControl,
     ) -> Result<LlmStream, Box<dyn std::error::Error + Send + Sync>> {
         let mut parser = OpenAiSseParser::new();
@@ -36,7 +36,10 @@ impl LlmClient for OpenAiFrames {
             stream::iter(parser.parse_chunk(None, &frame))
         }));
         Ok(lattice_llm::testing::assemble_reply_stream(
-            Some(lattice_conversation::ProviderOrigin::OpenAiCompatible),
+            Some(lattice_conversation::ReplayOrigin {
+                protocol: lattice_conversation::Protocol::ChatCompletions,
+                provider_id: request.target.provider,
+            }),
             input,
             control,
         ))

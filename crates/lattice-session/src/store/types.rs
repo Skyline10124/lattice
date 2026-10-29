@@ -209,22 +209,7 @@ pub struct AttemptRecord {
     pub progress: AttemptProgress,
     pub retry_delay_ms: Option<u64>,
 }
-/// 尝试实际使用的协议与 provider 标识。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AttemptOrigin {
-    pub protocol: AttemptProtocol,
-    pub provider_id: String,
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum AttemptProtocol {
-    ChatCompletions,
-    Responses,
-    AnthropicMessages,
-    GenerateContent,
-    Interactions,
-}
+pub use lattice_conversation::{Protocol as AttemptProtocol, ReplayOrigin as AttemptOrigin};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "progress", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AttemptProgress {

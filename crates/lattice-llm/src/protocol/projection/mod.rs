@@ -9,10 +9,9 @@
 //!
 //! 1. 校验并保留 provider 原生助手消息中的调用 ID、签名与思考状态，
 //!    将它们按部件保存为不透明回放状态；
-//! 2. 对同一 provider 原样回放。持久消息使用 `NativeMessage<BoundToolCall>`，
-//!    因此回放与投影都对 [`ToolCallState`] 类型状态泛型化；
-//! 3. 跨 provider 时只投影中立语义；
-//! 4. 切回来源 provider 时恢复其原生状态；
+//! 2. 完整来源相同时按协议与 features 回放；绑定前后的消息共用相同规则；
+//! 3. 来源不同时去除 reasoning 与逐片段回放状态，协议不同时再去除 call ID；
+//! 4. 切回原来源时使用历史中保留的原消息；
 //! 5. 将对话中的 ToolResult 与其对应的绑定 ToolCall 关联，编码为下一次请求的格式，
 //!    并从官方响应正文提取 provider 报告的用量。
 //!
@@ -28,9 +27,10 @@ use crate::reply::{PartDelta, ReplyAccumulator, ReplyOutcome, ReplyStop, StreamS
 
 use std::collections::BTreeSet;
 
+use crate::protocol::ReasoningReplay;
 use lattice_conversation::{
     AttemptInterruption, BoundToolCall, InvocationId, MessageRole, MessageSemantic, NativeMessage,
-    ProviderOrigin, TokenUsage, ToolCallState, ToolCallValidation, ToolResultOutcome,
+    Protocol, ReplayOrigin, TokenUsage, ToolCallState, ToolCallValidation, ToolResultOutcome,
     UnboundToolCall,
 };
 use lattice_conversation::{
@@ -44,6 +44,8 @@ use thiserror::Error;
 /// message, no fabricated identity, no guessed replay state.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ProjectionError {
+    #[error("protocol {protocol} is not implemented")]
+    UnsupportedProtocol { protocol: Protocol },
     #[error("{0}")]
     Protocol(crate::ReplyProtocolError),
     #[error("invalid structured step: {detail}")]
@@ -52,7 +54,7 @@ pub enum ProjectionError {
     #[error("malformed {provider} wire: {detail}")]
     MalformedWire {
         /// The provider being projected.
-        provider: ProviderOrigin,
+        provider: Protocol,
         /// What was missing or mistyped.
         detail: String,
     },
@@ -61,9 +63,9 @@ pub enum ProjectionError {
     #[error("cannot replay {expected:?} wire from a message with origin {found:?}")]
     WrongOrigin {
         /// The provider the wire belongs to.
-        expected: ProviderOrigin,
+        expected: ReplayOrigin,
         /// The message's recorded origin.
-        found: Option<ProviderOrigin>,
+        found: Option<ReplayOrigin>,
     },
     /// A part requires replay state for same-provider replay (e.g. an
     /// Anthropic thinking block's signature) but carries none. The state is
@@ -71,7 +73,7 @@ pub enum ProjectionError {
     #[error("{provider} part ordinal {part_ordinal} is missing required replay state")]
     MissingReplayState {
         /// The provider being projected.
-        provider: ProviderOrigin,
+        provider: Protocol,
         /// Ordinal of the part in the message.
         part_ordinal: usize,
     },
@@ -79,7 +81,7 @@ pub enum ProjectionError {
     #[error("{provider} wire cannot express part ordinal {part_ordinal}")]
     UnsupportedPart {
         /// The provider being projected.
-        provider: ProviderOrigin,
+        provider: Protocol,
         /// Ordinal of the part in the message.
         part_ordinal: usize,
     },
@@ -92,7 +94,7 @@ pub enum ProjectionError {
     #[error("{provider} wire exceeds a protocol limit: {interruption:?}")]
     OutputLimitExceeded {
         /// The provider being projected.
-        provider: ProviderOrigin,
+        provider: Protocol,
         /// The typed interruption recording which limit was crossed.
         interruption: AttemptInterruption,
     },
@@ -101,7 +103,7 @@ pub enum ProjectionError {
     #[error("{provider} tool result closes unknown invocation {invocation_id}")]
     UnmatchedToolResult {
         /// The provider being projected.
-        provider: ProviderOrigin,
+        provider: Protocol,
         /// The invocation the closure claimed to close.
         invocation_id: InvocationId,
     },
@@ -113,7 +115,7 @@ pub enum ProjectionError {
     )]
     ToolResultWithoutProviderCallId {
         /// The provider being projected.
-        provider: ProviderOrigin,
+        provider: Protocol,
         /// The invocation whose closure cannot be encoded.
         invocation_id: InvocationId,
     },
@@ -121,7 +123,7 @@ pub enum ProjectionError {
     #[error("malformed {provider} usage block: {detail}")]
     MalformedUsage {
         /// The provider being projected.
-        provider: ProviderOrigin,
+        provider: Protocol,
         /// What was missing or mistyped.
         detail: String,
     },
@@ -129,14 +131,14 @@ pub enum ProjectionError {
 
 /// 完整 wire 也逐块走同一累积器；这里仅把其终态映射为投影错误。
 struct WireReply {
-    origin: ProviderOrigin,
+    origin: Protocol,
     accumulator: ReplyAccumulator,
 }
 impl WireReply {
-    fn new(origin: ProviderOrigin) -> Self {
+    fn new(origin: &ReplayOrigin) -> Self {
         Self {
-            origin,
-            accumulator: ReplyAccumulator::new(Some(origin)),
+            origin: origin.protocol,
+            accumulator: ReplyAccumulator::new(Some(origin.clone())),
         }
     }
     fn push(&mut self, delta: PartDelta) -> Result<(), ProjectionError> {
@@ -181,69 +183,76 @@ impl WireReply {
 
 /// 只用于完整 wire 夹具的解码，保留部件顺序与逐部件回放状态。
 pub fn wire_to_native(
-    origin: ProviderOrigin,
+    origin: &ReplayOrigin,
     wire: &Value,
 ) -> Result<NativeMessage<UnboundToolCall>, ProjectionError> {
-    match origin {
-        ProviderOrigin::OpenAiCompatible => chat_completions::wire_to_native(wire),
-        ProviderOrigin::Anthropic => anthropic_messages::wire_to_native(wire),
-        ProviderOrigin::Gemini => generate_content::wire_to_native(wire),
+    match origin.protocol {
+        Protocol::ChatCompletions => chat_completions::wire_to_native(origin, wire),
+        Protocol::Messages => anthropic_messages::wire_to_native(origin, wire),
+        Protocol::GenerateContent => generate_content::wire_to_native(origin, wire),
+        protocol => Err(ProjectionError::UnsupportedProtocol { protocol }),
     }
 }
 
-/// Replay a native message back to its origin provider's assistant wire
-/// message object. Requires `message.provider_origin == Some(origin)` and
-/// every protocol-required replay state to be present.
-///
-/// Generic over the binding typestate: unbound pre-binding messages and the
-/// persisted `NativeMessage<BoundToolCall>` closure vocabulary replay
-/// through the same rules.
+/// 把完整 wire 夹具的消息还原为原生助手对象；Chat Completions 使用 reasoning_content。
+/// 生产请求由 request_messages_to_wire 按当前 features 决定 reasoning 编码。
+/// 绑定前后的消息共用规则，来源与协议必需的回放状态必须完整。
 pub fn native_to_wire<S: ToolCallState>(
-    origin: ProviderOrigin,
+    origin: &ReplayOrigin,
     message: &NativeMessage<S>,
 ) -> Result<Value, ProjectionError> {
-    if message.provider_origin != Some(origin) {
+    native_to_wire_with_replay(origin, message, ReasoningReplay::ReasoningContent)
+}
+
+fn native_to_wire_with_replay<S: ToolCallState>(
+    origin: &ReplayOrigin,
+    message: &NativeMessage<S>,
+    replay: ReasoningReplay,
+) -> Result<Value, ProjectionError> {
+    if message.provider_origin.as_ref() != Some(origin) {
         return Err(ProjectionError::WrongOrigin {
-            expected: origin,
-            found: message.provider_origin,
+            expected: origin.clone(),
+            found: message.provider_origin.clone(),
         });
     }
-    match origin {
-        ProviderOrigin::OpenAiCompatible => chat_completions::native_to_wire(message),
-        ProviderOrigin::Anthropic => anthropic_messages::native_to_wire(message),
-        ProviderOrigin::Gemini => generate_content::native_to_wire(message),
+    match origin.protocol {
+        Protocol::ChatCompletions => chat_completions::native_to_wire(message, replay),
+        Protocol::Messages => anthropic_messages::native_to_wire(message),
+        Protocol::GenerateContent => generate_content::native_to_wire(message),
+        protocol => Err(ProjectionError::UnsupportedProtocol { protocol }),
     }
 }
 
-/// Project a message to another provider's neutral semantics.
-///
-/// Only neutral semantics cross. Three classes of source state are dropped:
-///
-/// - every part-local opaque replay state (signatures, thought state);
-/// - every provider call ID;
-/// - every [`MessageSemantic::Reasoning`] part.
-///
-/// Reasoning is dropped because ADR 0005 §7 fixes that "cross-provider
-/// projection does not replay source reasoning": a provider's chain of thought
-/// is its own protocol state and must never be written into a different
-/// provider's reasoning channel. Keeping the reasoning part would survive into
-/// [`native_to_wire`] and appear verbatim in the target request body.
-///
-/// Remaining parts keep their relative order. Switching back to the source
-/// provider must use the retained original message, not this projection.
+/// 按目标来源投影消息副本；完整来源相同保留所有材料，协议相同保留 call ID。
+/// 来源 reasoning 与逐片段回放状态只在完整来源相同时保留。
+/// 切回原来源时使用历史中的原消息，投影不修改它。
 pub fn project_cross_provider<S: ToolCallState>(
     message: &NativeMessage<S>,
-    target: ProviderOrigin,
+    target: &ReplayOrigin,
 ) -> NativeMessage<S> {
+    let same_provider = message
+        .provider_origin
+        .as_ref()
+        .is_some_and(|source| source.same_provider(target));
+    let same_protocol = message
+        .provider_origin
+        .as_ref()
+        .is_some_and(|source| source.same_protocol(target));
     let mut projected = message.clone();
-    projected.provider_origin = Some(target);
-    projected
-        .parts
-        .retain(|part| !matches!(part.semantic, MessageSemantic::Reasoning { .. }));
-    for part in &mut projected.parts {
-        part.replay_state = None;
-        if let MessageSemantic::ToolCall { call } = &mut part.semantic {
-            call.clear_provider_call_id();
+    projected.provider_origin = Some(target.clone());
+    if !same_provider {
+        projected
+            .parts
+            .retain(|part| !matches!(part.semantic, MessageSemantic::Reasoning { .. }));
+        for part in &mut projected.parts {
+            part.replay_state = None;
+        }
+    }
+    if !same_protocol {
+        for part in &mut projected.parts {
+            if let MessageSemantic::ToolCall { call } = &mut part.semantic {
+                call.clear_provider_call_id();
+            }
         }
     }
     projected
@@ -258,25 +267,40 @@ pub struct RequestMessages {
     pub messages: Vec<Value>,
 }
 
-/// Project durable bound history into one provider's request-message vocabulary.
-///
-/// This is the only production ToolCall/ToolResult request encoder. Same-provider
-/// assistant messages replay their retained native state exactly. A provider
-/// switch applies [`project_cross_provider`] once; no caller may flatten the
-/// message through a second DTO or invent a missing provider call ID.
+/// 生产 ToolCall/ToolResult 的唯一请求编码入口；默认不回放 Chat Completions reasoning。
+/// 按完整来源决定回放材料，按协议决定 call ID，不补造目标 provider 身份。
 pub fn request_messages_to_wire(
-    origin: ProviderOrigin,
+    origin: &ReplayOrigin,
     history: &[ConversationItem],
 ) -> Result<RequestMessages, ProjectionError> {
+    request_messages_with_replay(origin, history, ReasoningReplay::None)
+}
+
+pub(crate) fn request_messages_with_replay(
+    origin: &ReplayOrigin,
+    history: &[ConversationItem],
+    replay: ReasoningReplay,
+) -> Result<RequestMessages, ProjectionError> {
+    if matches!(
+        origin.protocol,
+        Protocol::Responses | Protocol::Interactions
+    ) {
+        return Err(ProjectionError::UnsupportedProtocol {
+            protocol: origin.protocol,
+        });
+    }
     let mut system = None;
     let mut messages = Vec::new();
     for item in history {
         match item {
             ConversationItem::Message(message) => match message.role {
-                MessageRole::System => push_system_text(&mut system, &plain_text(origin, message)?),
-                MessageRole::User => {
-                    messages.push(user_to_wire(origin, &plain_text(origin, message)?))
+                MessageRole::System => {
+                    push_system_text(&mut system, &plain_text(origin.protocol, message)?)
                 }
+                MessageRole::User => messages.push(user_to_wire(
+                    origin.protocol,
+                    &plain_text(origin.protocol, message)?,
+                )),
                 _ => {
                     return Err(ProjectionError::InvalidStep {
                         detail: "standalone message must be system or user",
@@ -284,14 +308,10 @@ pub fn request_messages_to_wire(
                 }
             },
             ConversationItem::Step(step) => {
-                let projected = if step.assistant.provider_origin == Some(origin) {
-                    step.assistant.clone()
-                } else {
-                    project_cross_provider(&step.assistant, origin)
-                };
+                let projected = project_cross_provider(&step.assistant, origin);
                 // 先核完整配对，再生成 wire；不从相邻历史修补结果。
-                let results = tool_results_to_wire(origin, &projected, &step.results)?;
-                messages.push(native_to_wire(origin, &projected)?);
+                let results = tool_results_to_wire(origin.protocol, &projected, &step.results)?;
+                messages.push(native_to_wire_with_replay(origin, &projected, replay)?);
                 messages.extend(results);
             }
         }
@@ -300,7 +320,7 @@ pub fn request_messages_to_wire(
 }
 
 fn plain_text(
-    origin: ProviderOrigin,
+    origin: Protocol,
     message: &NativeMessage<BoundToolCall>,
 ) -> Result<String, ProjectionError> {
     let mut text = String::new();
@@ -334,23 +354,26 @@ fn push_system_text(system: &mut Option<String>, text: &str) {
     }
 }
 
-fn user_to_wire(origin: ProviderOrigin, text: &str) -> Value {
+fn user_to_wire(origin: Protocol, text: &str) -> Value {
     match origin {
-        ProviderOrigin::OpenAiCompatible => serde_json::json!({
+        Protocol::ChatCompletions => serde_json::json!({
             "role": "user",
             "content": text,
         }),
-        ProviderOrigin::Anthropic => serde_json::json!({
+        Protocol::Messages => serde_json::json!({
             "role": "user",
             "content": [{
                 "type": "text",
                 "text": if text.is_empty() { "(empty message)" } else { text },
             }],
         }),
-        ProviderOrigin::Gemini => serde_json::json!({
+        Protocol::GenerateContent => serde_json::json!({
             "role": "user",
             "parts": [{"text": text}],
         }),
+        Protocol::Responses | Protocol::Interactions => {
+            unreachable!("unsupported protocol rejected before projection")
+        }
     }
 }
 
@@ -393,7 +416,7 @@ fn closure_content(payload: &ResultPayload) -> String {
 
 /// 按助手调用顺序核验精确结果配对；provider ID 只来自同一个调用。
 pub fn tool_results_to_wire(
-    origin: ProviderOrigin,
+    origin: Protocol,
     assistant: &NativeMessage<BoundToolCall>,
     results: &[StoredToolResult],
 ) -> Result<Vec<Value>, ProjectionError> {
@@ -449,9 +472,10 @@ pub fn tool_results_to_wire(
         return Ok(Vec::new());
     }
     match origin {
-        ProviderOrigin::OpenAiCompatible => chat_completions::tool_result_messages(&closures),
-        ProviderOrigin::Anthropic => anthropic_messages::tool_result_messages(&closures),
-        ProviderOrigin::Gemini => generate_content::tool_result_messages(&closures),
+        Protocol::ChatCompletions => chat_completions::tool_result_messages(&closures),
+        Protocol::Messages => anthropic_messages::tool_result_messages(&closures),
+        Protocol::GenerateContent => generate_content::tool_result_messages(&closures),
+        protocol => Err(ProjectionError::UnsupportedProtocol { protocol }),
     }
 }
 
@@ -459,13 +483,11 @@ pub fn tool_results_to_wire(
 ///
 /// `Ok(None)` when the body carries no usage block: missing usage is unknown,
 /// never zero. A present but malformed block fails closed.
-pub fn wire_usage(
-    origin: ProviderOrigin,
-    wire: &Value,
-) -> Result<Option<TokenUsage>, ProjectionError> {
+pub fn wire_usage(origin: Protocol, wire: &Value) -> Result<Option<TokenUsage>, ProjectionError> {
     match origin {
-        ProviderOrigin::OpenAiCompatible => chat_completions::usage(wire),
-        ProviderOrigin::Anthropic => anthropic_messages::usage(wire),
-        ProviderOrigin::Gemini => generate_content::usage(wire),
+        Protocol::ChatCompletions => chat_completions::usage(wire),
+        Protocol::Messages => anthropic_messages::usage(wire),
+        Protocol::GenerateContent => generate_content::usage(wire),
+        protocol => Err(ProjectionError::UnsupportedProtocol { protocol }),
     }
 }

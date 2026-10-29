@@ -33,28 +33,29 @@ pub(crate) fn parse_json_data(
 /// Extract an API-level error event from a response JSON value.
 /// Returns `None` if `root` does not contain an error payload.
 pub(crate) fn extract_api_error(
-    provider: lattice_conversation::ProviderOrigin,
+    provider: lattice_conversation::Protocol,
     root: &serde_json::Value,
 ) -> Option<ProtocolEvent> {
-    use lattice_conversation::ProviderOrigin;
+    use lattice_conversation::Protocol;
     let error = root.get("error")?;
     let message = error
         .get("message")
         .and_then(|v| v.as_str())
         .unwrap_or("unknown provider error");
     let retryable = match provider {
-        ProviderOrigin::OpenAiCompatible => matches!(
+        Protocol::ChatCompletions => matches!(
             error["type"].as_str(),
             Some("server_error" | "rate_limit_error")
         ),
-        ProviderOrigin::Anthropic => matches!(
+        Protocol::Messages => matches!(
             error["type"].as_str(),
             Some("overloaded_error" | "api_error" | "rate_limit_error")
         ),
-        ProviderOrigin::Gemini => matches!(
+        Protocol::GenerateContent => matches!(
             error["status"].as_str(),
             Some("UNAVAILABLE" | "INTERNAL" | "RESOURCE_EXHAUSTED")
         ),
+        Protocol::Responses | Protocol::Interactions => false,
     };
     Some(ProtocolEvent::error(
         format!("API error: {message}"),
@@ -69,35 +70,35 @@ mod parse_json_data_tests {
 
     #[test]
     fn streaming_retryability_uses_provider_fields_not_message() {
-        use lattice_conversation::ProviderOrigin::*;
+        use lattice_conversation::Protocol::*;
         for (provider, error, retryable) in [
             (
-                OpenAiCompatible,
+                ChatCompletions,
                 serde_json::json!({"type":"server_error", "message":"failure"}),
                 true,
             ),
             (
-                Anthropic,
+                Messages,
                 serde_json::json!({"type":"overloaded_error", "message":"failure"}),
                 true,
             ),
             (
-                Gemini,
+                GenerateContent,
                 serde_json::json!({"status":"UNAVAILABLE", "message":"failure"}),
                 true,
             ),
             (
-                OpenAiCompatible,
+                ChatCompletions,
                 serde_json::json!({"type":"invalid_request_error", "message":"server_error retry me"}),
                 false,
             ),
             (
-                Anthropic,
+                Messages,
                 serde_json::json!({"message":"overloaded_error"}),
                 false,
             ),
             (
-                Gemini,
+                GenerateContent,
                 serde_json::json!({"status":"INVALID_ARGUMENT", "message":"UNAVAILABLE"}),
                 false,
             ),

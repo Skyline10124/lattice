@@ -24,8 +24,8 @@
 //! fails the whole body closed rather than returning a partial message.
 
 use lattice_conversation::{
-    MessageSemantic, NativeMessage, ProviderOrigin, TokenUsage, ToolCallState, ToolResultOutcome,
-    UnboundToolCall,
+    MessageSemantic, NativeMessage, Protocol, ReplayOrigin, TokenUsage, ToolCallState,
+    ToolResultOutcome, UnboundToolCall,
 };
 use serde_json::{Value, json};
 
@@ -35,12 +35,15 @@ use crate::reply::{PartDelta, PartKind, StringPatch};
 
 fn malformed(detail: impl Into<String>) -> ProjectionError {
     ProjectionError::MalformedWire {
-        provider: ProviderOrigin::Gemini,
+        provider: Protocol::GenerateContent,
         detail: detail.into(),
     }
 }
 
-pub fn wire_to_native(wire: &Value) -> Result<NativeMessage<UnboundToolCall>, ProjectionError> {
+pub fn wire_to_native(
+    origin: &ReplayOrigin,
+    wire: &Value,
+) -> Result<NativeMessage<UnboundToolCall>, ProjectionError> {
     let parts = wire
         .get("candidates")
         .and_then(Value::as_array)
@@ -49,7 +52,7 @@ pub fn wire_to_native(wire: &Value) -> Result<NativeMessage<UnboundToolCall>, Pr
         .and_then(|content| content.get("parts"))
         .and_then(Value::as_array)
         .ok_or_else(|| malformed("missing candidates[0].content.parts"))?;
-    let mut reply = super::WireReply::new(ProviderOrigin::Gemini);
+    let mut reply = super::WireReply::new(origin);
     for (index, part) in parts.iter().enumerate() {
         if part.get("text").is_some() && part.get("functionCall").is_some() {
             return Err(malformed("one part contains text and functionCall"));
@@ -208,7 +211,7 @@ pub(crate) fn usage(wire: &Value) -> Result<Option<TokenUsage>, ProjectionError>
         return Ok(None);
     }
     let malformed = |detail: String| ProjectionError::MalformedUsage {
-        provider: ProviderOrigin::Gemini,
+        provider: Protocol::GenerateContent,
         detail,
     };
     let field = |name: &str| -> Result<u64, ProjectionError> {

@@ -44,8 +44,8 @@ pub use limits::{
 };
 pub use message::{
     MAX_OPAQUE_REPLAY_STATE_BYTES, MAX_PROVIDER_ID_BYTES, MessagePart, MessageRole,
-    MessageSemantic, NativeMessage, OpaqueProviderState, OpaqueReplayStateError, ProviderIdError,
-    ProviderOrigin, ToolCallState, validate_provider_id,
+    MessageSemantic, NativeMessage, OpaqueProviderState, OpaqueReplayStateError, Protocol,
+    ProviderIdError, ReplayOrigin, ToolCallState, validate_provider_id,
 };
 pub use outcome::ToolResultOutcome;
 pub use result::{

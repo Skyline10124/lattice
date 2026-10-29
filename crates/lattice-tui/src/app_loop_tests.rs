@@ -1079,7 +1079,7 @@ impl Peer {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut magic = [0; 8];
                 stream.read_exact(&mut magic).await.unwrap();
-                assert_eq!(&magic, b"LTLOCAL7");
+                assert_eq!(&magic, b"LTLOCAL8");
                 let len = stream.read_u32().await.unwrap();
                 assert!(len <= 16 * 1024 * 1024);
                 let mut bytes = vec![0; len as usize];
@@ -1157,7 +1157,7 @@ impl Views {
 async fn send(stream: &mut UnixStream, value: &Value, seq: &mut u64) {
     let bytes = serde_json::to_vec(&json!({"message_id":*seq,"offset":0,"json_fragment":serde_json::to_string(value).unwrap(),"complete":true})).unwrap();
     *seq += 1;
-    if stream.write_all(b"LTLOCAL7").await.is_err() {
+    if stream.write_all(b"LTLOCAL8").await.is_err() {
         return;
     }
     let _ = stream.write_u32(bytes.len() as u32).await;

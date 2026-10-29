@@ -60,32 +60,53 @@ pub fn validate_provider_id(id: &str) -> Result<(), ProviderIdError> {
     Ok(())
 }
 
-/// The provider wire family a message or replay state originates from.
+/// 模型请求与回放材料使用的协议。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProviderOrigin {
-    /// OpenAI-compatible chat-completions wire.
-    OpenAiCompatible,
-    /// Anthropic messages wire.
-    Anthropic,
-    /// Gemini generateContent wire.
-    Gemini,
+#[serde(rename_all = "kebab-case")]
+pub enum Protocol {
+    ChatCompletions,
+    Responses,
+    #[serde(rename = "anthropic-messages")]
+    Messages,
+    GenerateContent,
+    Interactions,
 }
 
-impl ProviderOrigin {
-    /// Stable wire slug used in digests and replay metadata.
-    pub fn as_str(&self) -> &'static str {
+impl Protocol {
+    pub fn as_str(self) -> &'static str {
         match self {
-            Self::OpenAiCompatible => "openai",
-            Self::Anthropic => "anthropic",
-            Self::Gemini => "gemini",
+            Self::ChatCompletions => "chat-completions",
+            Self::Responses => "responses",
+            Self::Messages => "anthropic-messages",
+            Self::GenerateContent => "generate-content",
+            Self::Interactions => "interactions",
         }
     }
 }
 
-impl fmt::Display for ProviderOrigin {
+impl fmt::Display for Protocol {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+/// 一次请求的实际来源；不含模型、endpoint、认证或 features。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplayOrigin {
+    pub protocol: Protocol,
+    pub provider_id: String,
+}
+
+impl ReplayOrigin {
+    /// 完整来源相同才保留 reasoning 与逐片段回放状态。
+    pub fn same_provider(&self, other: &Self) -> bool {
+        self == other
+    }
+
+    /// 协议相同即可保留 provider call ID。
+    pub fn same_protocol(&self, other: &Self) -> bool {
+        self.protocol == other.protocol
     }
 }
 
@@ -163,8 +184,7 @@ pub trait ToolCallState:
     fn arguments(&self) -> &serde_json::Value;
     /// The provider-native call ID, when the provider supplied one.
     fn provider_call_id(&self) -> Option<&str>;
-    /// Drop the provider-native call ID (cross-provider projection only;
-    /// ADR 0005 §7). Every other field is untouched.
+    /// 跨协议投影时清除 provider call ID，其他字段保持原样。
     fn clear_provider_call_id(&mut self);
 }
 
@@ -243,9 +263,9 @@ impl<S: ToolCallState> MessagePart<S> {
 pub struct NativeMessage<S: ToolCallState> {
     /// Participant role.
     pub role: MessageRole,
-    /// Provider wire family that produced this message, when provider-produced.
+    /// 产生这条助手消息的完整来源；系统和用户消息没有来源。
     #[serde(default)]
-    pub provider_origin: Option<ProviderOrigin>,
+    pub provider_origin: Option<ReplayOrigin>,
     /// Ordered parts; a part's index is its `part_ordinal`.
     pub parts: Vec<MessagePart<S>>,
 }
@@ -254,7 +274,7 @@ impl<S: ToolCallState> NativeMessage<S> {
     /// Construct a message from its parts.
     pub fn new(
         role: MessageRole,
-        provider_origin: Option<ProviderOrigin>,
+        provider_origin: Option<ReplayOrigin>,
         parts: Vec<MessagePart<S>>,
     ) -> Self {
         Self {
@@ -365,7 +385,10 @@ mod tests {
         };
         let message = NativeMessage::new(
             MessageRole::Assistant,
-            Some(ProviderOrigin::Gemini),
+            Some(ReplayOrigin {
+                protocol: Protocol::GenerateContent,
+                provider_id: "test".into(),
+            }),
             vec![part],
         );
         assert_eq!(message.parts.len(), 1);
@@ -379,7 +402,10 @@ mod tests {
     fn text_and_reasoning_serde_roundtrip() {
         let message = NativeMessage::new(
             MessageRole::Assistant,
-            Some(ProviderOrigin::Anthropic),
+            Some(ReplayOrigin {
+                protocol: Protocol::Messages,
+                provider_id: "test".into(),
+            }),
             vec![
                 text_part("hello"),
                 MessagePart::semantic_only(MessageSemantic::Reasoning {

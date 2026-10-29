@@ -32,9 +32,19 @@ fn step(node: u64, ordinal: u64, progress: Value, summary: Option<Value>, reply:
     let mut entry = json!({"type":"entry","kind":"step","node":node,"retries":[],
         "content":{"kind":"step","parent":node - 1,"turn_id":"t","step_ordinal":ordinal,"progress":progress,
             "attempts":[],"slots":[],"updated_at":"2026-10-16T00:00:01Z",
-            "reply":{"role":"assistant","parts":[{"semantic":{"text":{"text":reply}},"replay_state":null}]}},
+            "reply":{"role":"assistant","provider_origin":{"protocol":"chat-completions","provider_id":"primary"},"parts":[{"semantic":{"text":{"text":reply}},"replay_state":null}]}},
         "step":{"node":node,"key":{"turn_id":"t","ordinal":ordinal},"progress":progress,"end":end,
             "attempts":[],"slots":[],"updated_at":"2026-10-16T00:00:01Z"}});
+    if reply.is_empty() {
+        entry["content"]["reply"] = Value::Null;
+    } else {
+        let attempt = json!({"origin":{"protocol":"chat-completions","provider_id":"primary"}, "usage":null,
+            "progress":{"progress":"ended","end":{"end":"completed"},"diagnostic":null}, "retry_delay_ms":null});
+        entry["content"]["attempts"] = json!([attempt]);
+        entry["step"]["attempts"] = json!([{"attempt":0,"origin":{"protocol":"chat-completions","provider_id":"primary"},"usage":null,
+            "progress":{"progress":"ended","end":{"end":"completed"},"diagnostic":null},
+            "end":{"end":"completed","step":{"turn_id":"t","model_step_ordinal":ordinal}},"retry_delay_ms":null}]);
+    }
     if let Some(summary) = summary {
         entry["summary"] = summary;
     }
@@ -505,22 +515,86 @@ fn view_state_keeps_written_facts_and_allows_repeated_values() {
         Some(summary("failed", &executing)),
         "reply",
     );
-    base["content"]["attempts"] = json!([{}]);
     base["step"]["attempts"] = json!([attempt]);
     base["step"]["slots"] = json!([
         slot("a", "terminal", "succeeded"),
         slot("b", "registered", "not_executed")
     ]);
+    let invalid_origins = [
+        (json!(null), "`protocol` must be a string"),
+        (json!("open_ai_compatible"), "`protocol` must be a string"),
+        (
+            json!({"provider_id":"primary"}),
+            "`protocol` must be a string",
+        ),
+        (
+            json!({"protocol":"chat-completions"}),
+            "`provider_id` must be a string",
+        ),
+        (
+            json!({"protocol":"unknown","provider_id":"primary"}),
+            "unknown attempt protocol",
+        ),
+        (
+            json!({"protocol":"chat-completions","provider_id":"Bad_id"}),
+            "invalid attempt provider id",
+        ),
+    ];
+    let mut without_reply = step(
+        2,
+        0,
+        stop("process_exit"),
+        Some(summary("failed", &stop("process_exit"))),
+        "",
+    );
+    let stopped = json!({"progress":"ended","end":{"end":"stopped","cause":{"cause":"process_exit"}},"diagnostic":null});
+    without_reply["content"]["attempts"] = base["content"]["attempts"].clone();
+    without_reply["step"]["attempts"] = base["step"]["attempts"].clone();
+    without_reply["content"]["attempts"][0]["progress"] = stopped.clone();
+    without_reply["step"]["attempts"][0]["progress"] = stopped;
+    without_reply["step"]["attempts"][0]["end"] =
+        json!({"end":"stopped","cause":{"cause":"process_exit"},"diagnostic":null});
+    assert!(parse_record(&without_reply).is_ok());
+    for (origin, error) in &invalid_origins {
+        let mut invalid = without_reply.clone();
+        invalid["content"]["attempts"][0]["origin"] = origin.clone();
+        invalid["step"]["attempts"][0]["origin"] = origin.clone();
+        assert_eq!(parse_record(&invalid).unwrap_err(), *error, "{origin}");
+
+        let mut invalid = base.clone();
+        invalid["content"]["reply"]["provider_origin"] = origin.clone();
+        invalid["content"]["attempts"][0]["origin"] = origin.clone();
+        invalid["step"]["attempts"][0]["origin"] = origin.clone();
+        assert_eq!(parse_record(&invalid).unwrap_err(), *error, "{origin}");
+    }
     for origin in [
-        json!(null),
-        json!({"provider_id":"primary"}),
-        json!({"protocol":"chat-completions"}),
-        json!({"protocol":"unknown","provider_id":"primary"}),
-        json!({"protocol":"chat-completions","provider_id":"Bad_id"}),
+        json!({"protocol":"chat-completions","provider_id":"other"}),
+        json!({"protocol":"anthropic-messages","provider_id":"primary"}),
     ] {
         let mut invalid = base.clone();
-        invalid["step"]["attempts"][0]["origin"] = origin;
-        assert!(parse_record(&invalid).is_err());
+        invalid["content"]["reply"]["provider_origin"] = origin;
+        assert_eq!(
+            parse_record(&invalid).unwrap_err(),
+            "reply source differs from the completed attempt"
+        );
+    }
+    for progress in [
+        json!({"progress":"sent"}),
+        without_reply["step"]["attempts"][0]["progress"].clone(),
+    ] {
+        for location in ["content", "step"] {
+            let mut invalid = base.clone();
+            invalid[location]["attempts"][0]["progress"] = progress.clone();
+            if location == "step" && progress["progress"] == "ended" {
+                invalid["step"]["attempts"][0]["end"] =
+                    without_reply["step"]["attempts"][0]["end"].clone();
+            }
+            assert_eq!(
+                parse_record(&invalid).unwrap_err(),
+                "reply requires a completed attempt",
+                "{location}: {progress}"
+            );
+        }
     }
     let parsed = |value: &Value| parse_record(value).unwrap();
     // 记录去掉 `type` 后就是历史查询给出的同一个 Entry。

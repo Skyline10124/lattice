@@ -51,7 +51,7 @@ impl ModelExecution {
     ) -> Self {
         Self::Gateway {
             turn,
-            last_origin: resolved_origin(resolved),
+            last_origin: resolved.origin(),
         }
     }
 
@@ -66,7 +66,7 @@ impl ModelExecution {
             Self::Gateway { turn, last_origin } => {
                 match turn.resolve(target).await {
                     Ok(resolved) => {
-                        *last_origin = resolved_origin(&resolved);
+                        *last_origin = resolved.origin();
                         (
                             last_origin.clone(),
                             Ok(Arc::new(ModelStepDriver::new(Arc::new(resolved)))),
@@ -90,21 +90,6 @@ impl ModelExecution {
             }
             Self::Injected { driver, origin } => (origin.clone(), Ok(driver.clone())),
         }
-    }
-}
-
-fn resolved_origin(resolved: &lattice_llm::ResolvedRequest) -> AttemptOrigin {
-    use lattice_llm::Protocol;
-    let protocol = match resolved.protocol() {
-        Protocol::ChatCompletions => AttemptProtocol::ChatCompletions,
-        Protocol::Responses => AttemptProtocol::Responses,
-        Protocol::Messages => AttemptProtocol::AnthropicMessages,
-        Protocol::GenerateContent => AttemptProtocol::GenerateContent,
-        Protocol::Interactions => AttemptProtocol::Interactions,
-    };
-    AttemptOrigin {
-        provider_id: resolved.provider_id().into(),
-        protocol,
     }
 }
 

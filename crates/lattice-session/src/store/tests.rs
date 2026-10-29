@@ -8,7 +8,7 @@ use lancet_protocol::{
     Retriability, SessionId, TurnId,
 };
 use lattice_conversation::{
-    MessagePart, MessageRole, MessageSemantic, NativeMessage, OpaqueProviderState, ProviderOrigin,
+    MessagePart, MessageRole, MessageSemantic, NativeMessage, OpaqueProviderState, Protocol,
     TokenUsage, ToolResultOutcome, UnboundToolCall,
 };
 use lattice_store::{ProjectStoreKey, StateLayout};
@@ -282,7 +282,10 @@ fn reply(k: ModelAttemptKey, count: usize) -> CompleteReply {
         }),
         message: NativeMessage::new(
             MessageRole::Assistant,
-            Some(ProviderOrigin::OpenAiCompatible),
+            Some(AttemptOrigin {
+                protocol: Protocol::ChatCompletions,
+                ..origin()
+            }),
             parts,
         ),
     }
@@ -1089,7 +1092,7 @@ fn schema_and_legacy_rejection_matrix() {
             assert!(!layout.lattice_root().join("lattice.redb").exists());
         }
     }
-    for case in 0..6 {
+    for case in 0..7 {
         let (_d, layout, db) = store();
         drop(db);
         let raw = redb::Database::open(layout.lattice_root().join("lattice.redb")).unwrap();
@@ -1121,18 +1124,18 @@ fn schema_and_legacy_rejection_matrix() {
             3 => {
                 tx.delete_table(CONFIGS).unwrap();
             }
-            4 => {
+            4 | 5 => {
                 let mut meta = tx.open_table(META).unwrap();
-                // 固定的 v3 元信息与空表构成旧格式库，编码独立于当前版本常量。
-                for (key, bytes) in [
-                    (
-                        "store_kind",
-                        b"\x00\x00\x00\x03\"lattice-session\"".as_slice(),
-                    ),
-                    ("store_format_version", b"\x00\x00\x00\x033".as_slice()),
-                    ("last_change_seq", b"\x00\x00\x00\x030".as_slice()),
+                // 固定旧版元信息，独立于当前编码器核对严格打开。
+                let old_version = if case == 4 { 3_u32 } else { 4_u32 };
+                for (key, value) in [
+                    ("store_kind", "\"lattice-session\"".to_owned()),
+                    ("store_format_version", old_version.to_string()),
+                    ("last_change_seq", "0".to_owned()),
                 ] {
-                    meta.insert(key, bytes).unwrap();
+                    let mut bytes = old_version.to_be_bytes().to_vec();
+                    bytes.extend(value.as_bytes());
+                    meta.insert(key, bytes.as_slice()).unwrap();
                 }
             }
             _ => {
@@ -1147,13 +1150,14 @@ fn schema_and_legacy_rejection_matrix() {
         let error = SessionStore::open(&layout)
             .err()
             .unwrap_or_else(|| panic!("case {case}"));
-        if case == 4 {
+        if matches!(case, 4 | 5) {
+            let expected = if case == 4 { 3 } else { 4 };
             let path = layout.lattice_root().join("lattice.redb");
             assert!(error.to_string().contains(&path.display().to_string()));
             assert!(matches!(
                 error,
-                StoreError::UnsupportedVersion { path: found_path, found: 3, supported: 4, .. }
-                    if found_path == path
+                StoreError::UnsupportedVersion { path: found_path, found, supported: VERSION, .. }
+                    if found_path == path && found == expected
             ));
         }
     }
@@ -1255,7 +1259,7 @@ fn keys_versions_and_encoding() {
         let meta = read.tx.open_table(META).unwrap();
         assert_eq!(
             meta.get("store_format_version").unwrap().unwrap().value(),
-            b"\x00\x00\x00\x044"
+            b"\x00\x00\x00\x055"
         );
     }
     let (_lock, calls) = running(&db, sid(1), tid(1), 1, 1);
@@ -1880,7 +1884,7 @@ fn attempt_sources_survive_retry_and_reopen() {
         provider_id: "edge-1".into(),
     };
     let second = AttemptOrigin {
-        protocol: AttemptProtocol::AnthropicMessages,
+        protocol: AttemptProtocol::Messages,
         provider_id: "edge-1".into(),
     };
     db.start_request(&lock, key(tid(1), 0, 0), first.clone(), now())
@@ -1913,7 +1917,7 @@ fn attempt_sources_survive_retry_and_reopen() {
     let lock = db.try_lock_session(sid(1)).unwrap();
     let mut complete = reply(key(tid(1), 0, 1), 1);
     complete.origin = second;
-    complete.message.provider_origin = Some(ProviderOrigin::Anthropic);
+    complete.message.provider_origin = Some(complete.origin.clone());
     let calls = db
         .register_calls(&lock, complete, &[iid(1)], now())
         .unwrap();
@@ -1934,7 +1938,7 @@ fn attempt_sources_survive_retry_and_reopen() {
         .unwrap();
     let mut complete = reply(key(tid(1), 1, 0), 0);
     complete.origin = third.clone();
-    complete.message.provider_origin = Some(ProviderOrigin::Gemini);
+    complete.message.provider_origin = Some(complete.origin.clone());
     db.close_step(&lock, CloseStep::Finish(complete), now())
         .unwrap();
     let turn = detail(&db);
@@ -1958,10 +1962,38 @@ fn attempt_sources_survive_retry_and_reopen() {
 }
 
 #[test]
+fn attempts_without_reply_allow_sent_and_stopped_on_reopen() {
+    for state in ["sent", "stopped"] {
+        let (_dir, layout, db) = store();
+        let lock = db.try_lock_session(sid(1)).unwrap();
+        db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+        db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
+            .unwrap();
+        if state != "sent" {
+            db.stop_attempt(
+                &lock,
+                stopped(
+                    key(tid(1), 0, 0),
+                    StopCause::ProviderError { retryable: false },
+                ),
+                now(),
+            )
+            .unwrap();
+        }
+        let expected = node_at(&db, 2);
+        assert!(matches!(&expected, Node::Step { reply: None, .. }));
+        drop(lock);
+        drop(db);
+        let reopened = SessionStore::open(&layout).unwrap();
+        assert_eq!(node_at(&reopened, 2), expected, "{state}");
+    }
+}
+
+#[test]
 fn provider_id_and_attempt_source_boundaries() {
     for protocol in [
         AttemptProtocol::ChatCompletions,
-        AttemptProtocol::AnthropicMessages,
+        AttemptProtocol::Messages,
         AttemptProtocol::GenerateContent,
         AttemptProtocol::Responses,
         AttemptProtocol::Interactions,
@@ -2011,17 +2043,17 @@ fn provider_id_and_attempt_source_boundaries() {
     for (source, message_origin) in [
         (
             AttemptOrigin {
-                protocol: AttemptProtocol::AnthropicMessages,
+                protocol: AttemptProtocol::Messages,
                 ..origin()
             },
-            ProviderOrigin::Anthropic,
+            Protocol::Messages,
         ),
         (
             AttemptOrigin {
                 provider_id: "other-provider".into(),
                 ..origin()
             },
-            ProviderOrigin::OpenAiCompatible,
+            Protocol::ChatCompletions,
         ),
     ] {
         let mut stop = stopped(key(tid(1), 0, 0), StopCause::Cancelled);
@@ -2029,12 +2061,46 @@ fn provider_id_and_attempt_source_boundaries() {
         assert!(db.stop_attempt(&lock, stop, now()).is_err());
         let mut complete = reply(key(tid(1), 0, 0), 0);
         complete.origin = source;
-        complete.message.provider_origin = Some(message_origin);
+        complete.message.provider_origin = Some(AttemptOrigin {
+            protocol: message_origin,
+            ..origin()
+        });
         assert!(matches!(
             db.close_step(&lock, CloseStep::Finish(complete), now()),
             Err(StoreError::InvalidInput { field: "origin", detail }) if detail == "reply source mismatch"
         ));
         assert!(before == records(&db));
+    }
+    for source in [
+        None,
+        Some(AttemptOrigin {
+            provider_id: "other-provider".into(),
+            ..origin()
+        }),
+        Some(AttemptOrigin {
+            protocol: Protocol::Messages,
+            ..origin()
+        }),
+    ] {
+        for count in [0, 1] {
+            let mut complete = reply(key(tid(1), 0, 0), count);
+            complete.message.provider_origin = source.clone();
+            let rejected = if count == 0 {
+                db.close_step(&lock, CloseStep::Finish(complete), now())
+                    .map(|_| ())
+            } else {
+                db.register_calls(&lock, complete, &[iid(9)], now())
+                    .map(|_| ())
+            };
+            assert!(matches!(
+                rejected,
+                Err(StoreError::InvalidInput {
+                    field: "origin",
+                    ..
+                })
+            ));
+            assert!(before == records(&db));
+        }
     }
 }
 
@@ -3117,6 +3183,7 @@ fn read_validation_rejects_broken_relations_and_shapes() {
         "root_extra",
         "user_parent",
         "user_provider",
+        "consistent_invalid_provider",
         "orphan_session",
         "node_gap",
         "parent_forward",
@@ -3136,8 +3203,12 @@ fn read_validation_rejects_broken_relations_and_shapes() {
         "executing_reply",
         "reply_binding",
         "reply_provider",
+        "reply_provider_id",
+        "reply_origin_missing",
         "attempt_provider",
         "attempt_protocol",
+        "reply_attempt_sent",
+        "reply_attempt_stopped",
         "reply_slot_count",
         "slot_turn",
         "terminal_not_executed",
@@ -3185,13 +3256,25 @@ fn read_validation_rejects_broken_relations_and_shapes() {
                     unreachable!()
                 };
                 *provider = "Bad_id".into();
-                // 去掉回复上的协议标记，仍须拒绝非法的 provider 标识。
+            }
+            "consistent_invalid_provider" => {
+                let Node::UserMessage { provider, .. } =
+                    r.nodes.get_mut(&(sid(1), NodeId(1))).unwrap()
+                else {
+                    unreachable!()
+                };
+                *provider = "Bad_id".into();
                 for n in [2, 3] {
                     if let Node::Step {
-                        reply: Some(reply), ..
+                        attempts,
+                        reply: Some(reply),
+                        ..
                     } = r.nodes.get_mut(&(sid(1), NodeId(n))).unwrap()
                     {
-                        reply.provider_origin = None;
+                        for attempt in attempts {
+                            attempt.origin.provider_id = "Bad_id".into();
+                        }
+                        reply.provider_origin.as_mut().unwrap().provider_id = "Bad_id".into();
                     }
                 }
             }
@@ -3277,12 +3360,35 @@ fn read_validation_rejects_broken_relations_and_shapes() {
                         attempts[0].origin.provider_id = "another-provider".into()
                     }
                     "attempt_protocol" => {
-                        attempts.last_mut().unwrap().origin.protocol =
-                            AttemptProtocol::AnthropicMessages
+                        attempts.last_mut().unwrap().origin.protocol = AttemptProtocol::Messages
+                    }
+                    "reply_attempt_sent" => {
+                        attempts.last_mut().unwrap().progress = AttemptProgress::Sent;
+                    }
+                    "reply_attempt_stopped" => {
+                        attempts.last_mut().unwrap().progress = AttemptProgress::Ended {
+                            end: AttemptEnd::Stopped {
+                                cause: StopCause::ProcessExit,
+                            },
+                            diagnostic: AttemptDiagnostic::default(),
+                        };
                     }
                     "reply_provider" => {
-                        reply.as_mut().unwrap().provider_origin = Some(ProviderOrigin::Gemini)
+                        reply.as_mut().unwrap().provider_origin = Some(AttemptOrigin {
+                            protocol: Protocol::GenerateContent,
+                            ..origin()
+                        })
                     }
+                    "reply_provider_id" => {
+                        reply
+                            .as_mut()
+                            .unwrap()
+                            .provider_origin
+                            .as_mut()
+                            .unwrap()
+                            .provider_id = "another-provider".into();
+                    }
+                    "reply_origin_missing" => reply.as_mut().unwrap().provider_origin = None,
                     "reply_slot_count" => {
                         slots.pop();
                     }
@@ -3884,8 +3990,11 @@ fn invocation_registration_and_transitions_are_atomic() {
             0 => candidates.pop().map(|_| ()).unwrap(),
             1 => candidates[1] = iid(1),
             2 => {
-                input.origin.protocol = AttemptProtocol::AnthropicMessages;
-                input.message.provider_origin = Some(ProviderOrigin::Anthropic);
+                input.origin.protocol = AttemptProtocol::Messages;
+                input.message.provider_origin = Some(AttemptOrigin {
+                    protocol: Protocol::Messages,
+                    ..origin()
+                });
             }
             3 => input.message.role = MessageRole::User,
             4 => {
@@ -3911,7 +4020,12 @@ fn invocation_registration_and_transitions_are_atomic() {
                 call.provider_call_id = Some("call-0".into());
             }
             9 => input.origin.provider_id = "another-provider".into(),
-            10 => input.message.provider_origin = Some(ProviderOrigin::Anthropic),
+            10 => {
+                input.message.provider_origin = Some(AttemptOrigin {
+                    protocol: Protocol::Messages,
+                    ..origin()
+                })
+            }
             _ => {
                 input = reply(key(tid(1), 0, 0), 33);
                 candidates = (1..=33).map(iid).collect();

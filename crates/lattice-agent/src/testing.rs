@@ -76,7 +76,7 @@ impl FakeStreamingLlmClientBuilder {
 impl LlmClient for FakeStreamingLlmClient {
     async fn stream_chat(
         &self,
-        _request: ChatRequest,
+        request: ChatRequest,
         control: StreamControl,
     ) -> Result<LlmStream, Box<dyn std::error::Error + Send + Sync>> {
         self.call_count.fetch_add(1, Ordering::Relaxed);
@@ -86,7 +86,14 @@ impl LlmClient for FakeStreamingLlmClient {
             None => Err("no more fake responses".into()),
             Some(FakeStreamingResponse::Error(message)) => Err(message.into()),
             Some(FakeStreamingResponse::LlmError(error)) => Err(Box::new(error)),
-            Some(FakeStreamingResponse::Events(events)) => Ok(script_stream(events, control)),
+            Some(FakeStreamingResponse::Events(events)) => Ok(script_stream(
+                lattice_conversation::ReplayOrigin {
+                    protocol: lattice_conversation::Protocol::ChatCompletions,
+                    provider_id: request.target.provider,
+                },
+                events,
+                control,
+            )),
         }
     }
 }

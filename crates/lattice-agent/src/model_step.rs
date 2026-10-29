@@ -345,15 +345,16 @@ mod tests {
             request: ChatRequest,
             control: StreamControl,
         ) -> Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
-            lattice_llm::protocol::projection::request_messages_to_wire(
-                lattice_conversation::ProviderOrigin::OpenAiCompatible,
-                &request.messages,
-            )
-            .map_err(|error| {
-                Box::new(lattice_llm::LlmError::Projection(error))
-                    as Box<dyn std::error::Error + Send + Sync>
-            })?;
-            Ok(lattice_llm::testing::script_stream(vec![], control))
+            let origin = lattice_conversation::ReplayOrigin {
+                protocol: lattice_conversation::Protocol::ChatCompletions,
+                provider_id: request.target.provider.clone(),
+            };
+            lattice_llm::protocol::projection::request_messages_to_wire(&origin, &request.messages)
+                .map_err(|error| {
+                    Box::new(lattice_llm::LlmError::Projection(error))
+                        as Box<dyn std::error::Error + Send + Sync>
+                })?;
+            Ok(lattice_llm::testing::script_stream(origin, vec![], control))
         }
     }
     fn driver(events: Vec<ScriptEvent>) -> ModelStepDriver {

@@ -168,12 +168,15 @@ pub struct ResolvedRequest {
 }
 
 impl ResolvedRequest {
-    pub fn protocol(&self) -> crate::protocol::Protocol {
-        self.provider.protocol
+    pub fn origin(&self) -> lattice_conversation::ReplayOrigin {
+        lattice_conversation::ReplayOrigin {
+            protocol: self.provider.protocol,
+            provider_id: self.provider.id.clone(),
+        }
     }
 
-    pub fn provider_id(&self) -> &str {
-        &self.provider.id
+    pub fn protocol(&self) -> crate::protocol::Protocol {
+        self.provider.protocol
     }
 
     /// 发送沿用解析时取得的配置；调用方不能替换模型或省去 SessionId。
@@ -199,6 +202,11 @@ impl ResolvedRequest {
                 roots: &self.configuration.roots,
                 client: self.client.clone(),
                 output_limit: self.output_limit,
+                features: self
+                    .provider
+                    .models
+                    .get(&self.target.model)
+                    .map_or(self.provider.features, |model| model.features),
             },
             control,
         )

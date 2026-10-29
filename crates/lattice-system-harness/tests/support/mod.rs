@@ -377,7 +377,7 @@ pub(crate) fn cli(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> 
         .expect("drive lattice")
 }
 
-/// 公开 Local IPC 的一条连接：请求写成一帧，回复按 `LTLOCAL7` 帧重组为逻辑消息。
+/// 公开 Local IPC 的一条连接：请求写成一帧，回复按 `LTLOCAL8` 帧重组为逻辑消息。
 pub(crate) struct Wire {
     stream: UnixStream,
     message: u64,
@@ -390,7 +390,7 @@ impl Wire {
         stream.set_read_timeout(Some(timeout)).unwrap();
         stream.set_write_timeout(Some(timeout)).unwrap();
         let body = serde_json::to_vec(request).unwrap();
-        stream.write_all(b"LTLOCAL7").unwrap();
+        stream.write_all(b"LTLOCAL8").unwrap();
         stream
             .write_all(&(body.len() as u32).to_be_bytes())
             .unwrap();
@@ -420,7 +420,7 @@ impl Wire {
             {
                 None
             }
-            other => panic!("read an LTLOCAL7 frame header: {other:?}"),
+            other => panic!("read an LTLOCAL8 frame header: {other:?}"),
         }
     }
     /// 读一条逻辑消息；`first` 是已读出的帧头首字节。
@@ -437,8 +437,8 @@ impl Wire {
             };
             self.stream
                 .read_exact(rest)
-                .expect("read an LTLOCAL7 frame header");
-            assert_eq!(&header[..8], b"LTLOCAL7");
+                .expect("read an LTLOCAL8 frame header");
+            assert_eq!(&header[..8], b"LTLOCAL8");
             let length = u32::from_be_bytes(header[8..].try_into().unwrap()) as usize;
             assert!((1..=16 * 1024 * 1024).contains(&length));
             let mut bytes = vec![0; length];

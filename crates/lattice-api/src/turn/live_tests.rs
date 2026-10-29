@@ -290,7 +290,10 @@ async fn continue_at_library_step_limit_closes_reserved_step_32_without_request(
     for _ in 0..MAX_MODEL_STEPS {
         let message = NativeMessage::new(
             MessageRole::Assistant,
-            Some(ProviderOrigin::OpenAiCompatible),
+            Some(lattice_conversation::ReplayOrigin {
+                protocol: Protocol::ChatCompletions,
+                provider_id: "local".into(),
+            }),
             vec![MessagePart::semantic_only(MessageSemantic::ToolCall {
                 call: UnboundToolCall {
                     provider_call_id: Some("read".into()),

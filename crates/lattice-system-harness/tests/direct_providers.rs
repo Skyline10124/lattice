@@ -261,3 +261,194 @@ fn implemented_builtin_protocols_accept_and_record_the_protocol_actually_sent() 
         support::finish_recorded(evidence, result);
     }
 }
+
+#[test]
+fn same_protocol_provider_switch_preserves_tool_ids_and_restores_source_reasoning() {
+    use lattice_system_harness::{FAKE_API_KEY, SseScript};
+    use serde_json::json;
+    let spec = ScenarioSpec::direct_local("provider-replay-switch");
+    let world = ScenarioWorld::new(&spec.name).unwrap();
+    world.budget(&spec);
+    world
+        .write_project_file("notes.txt", "replay sentinel\n")
+        .unwrap();
+    world.write_project_file(".lattice/agents/replay/agent.toml",
+        "schema_version=1\n[agent]\nname='replay'\nmodel='openai/first'\n[prompt]\nsystem='Read the requested file.'\n[tools]\nenabled=['observe__workspace']\n").unwrap();
+    world
+        .write_agent_profile("second", "deepseek/second")
+        .unwrap();
+    world
+        .write_agent_profile("third", "google-generate/third")
+        .unwrap();
+    world.init_git_project().unwrap();
+    let server = FakeLlmServer::start(sequence(vec![
+        SseScript::Chunks { chunks: vec![
+            json!({"choices":[{"delta":{"reasoning_content":"source-a-reasoning"}}]}),
+            json!({"choices":[{"delta":{"content":"read first"}}]}),
+            json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"replay-call","type":"function","function":{"name":"observe__workspace","arguments":"{\"request\":{\"mode\":\"read_file\",\"path\":\"notes.txt\"}}"}}]}}]}),
+            json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]}),
+        ]},
+        SseScript::plain("first done"),
+        SseScript::Chunks { chunks: vec![
+            json!({"choices":[{"delta":{"reasoning_content":"source-b-reasoning"}}]}),
+            json!({"choices":[{"delta":{"content":"second done"},"finish_reason":"stop"}]}),
+        ]},
+        SseScript::plain("generate done"),
+        SseScript::plain("back to first"),
+    ])).unwrap();
+    for (id, model) in [("openai", "first"), ("deepseek", "second")] {
+        world
+            .wire_provider(
+                ProviderFixture {
+                    protocol: ProviderProtocol::ChatCompletions,
+                    target: ProviderTarget::Builtin(id),
+                    model,
+                },
+                &server,
+                FAKE_API_KEY,
+            )
+            .unwrap();
+    }
+    world
+        .wire_provider(
+            ProviderFixture {
+                protocol: ProviderProtocol::GenerateContent,
+                target: ProviderTarget::Custom("google-generate"),
+                model: "third",
+            },
+            &server,
+            FAKE_API_KEY,
+        )
+        .unwrap();
+    let path = world.home().join(".lattice/providers.toml");
+    let config = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(
+        path,
+        format!("{config}\n[providers.openai.features]\nreasoning_replay='reasoning-content'\n"),
+    )
+    .unwrap();
+    let driver = driver();
+    let send = SessionSendDriver::new(&driver, &world, &spec, "replay");
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let first = send.send("read notes").unwrap();
+        evidence.record_command("first provider with Tool", &first.command);
+        assert!(first.has_completed() && first.command.is_clean_exit(0));
+        assert!(first.parsed.malformed_lines.is_empty());
+        let sid = send.session_id().unwrap();
+        let second = support::cli(
+            &world,
+            &spec,
+            &[
+                "--json",
+                "session",
+                "send",
+                "switch provider",
+                "--session",
+                sid,
+                "--agent",
+                "second",
+            ],
+        );
+        evidence.record_command("same protocol provider switch", &second);
+        assert!(second.is_clean_exit(0), "{}", second.summary());
+        let second_parsed = support::parse_send_stdout(&second.stdout, second.exit_code());
+        support::assert_accepted_and_closed(&second_parsed).unwrap();
+        assert!(second_parsed.malformed_lines.is_empty());
+        let cross = support::cli(
+            &world,
+            &spec,
+            &[
+                "--json",
+                "session",
+                "send",
+                "cross protocol",
+                "--session",
+                sid,
+                "--agent",
+                "third",
+            ],
+        );
+        evidence.record_command("cross protocol to generateContent", &cross);
+        assert!(cross.is_clean_exit(0), "{}", cross.summary());
+        let cross_parsed = support::parse_send_stdout(&cross.stdout, cross.exit_code());
+        support::assert_accepted_and_closed(&cross_parsed).unwrap();
+        assert!(cross_parsed.malformed_lines.is_empty());
+        let rewind = support::cli(&world, &spec, &["--json", "session", "rewind", sid, "2"]);
+        evidence.record_command("rewind to the original Tool step", &rewind);
+        assert!(rewind.is_clean_exit(0), "{}", rewind.summary());
+        let stop = support::cli(&world, &spec, &["daemon", "stop"]);
+        evidence.record_command("stop before reopening", &stop);
+        assert!(stop.is_clean_exit(0));
+        let third = support::cli(
+            &world,
+            &spec,
+            &[
+                "--json",
+                "session",
+                "send",
+                "return to source",
+                "--session",
+                sid,
+                "--agent",
+                "replay",
+            ],
+        );
+        evidence.record_command("reopen and restore source", &third);
+        assert!(third.is_clean_exit(0), "{}", third.summary());
+        let third_parsed = support::parse_send_stdout(&third.stdout, third.exit_code());
+        support::assert_accepted_and_closed(&third_parsed).unwrap();
+        assert!(third_parsed.malformed_lines.is_empty());
+        let captures = server.captured_requests();
+        assert_eq!(captures.len(), 5);
+        for capture in [&captures[1], &captures[2], &captures[4]] {
+            let messages = capture.raw["messages"].as_array().unwrap();
+            assert!(
+                messages
+                    .iter()
+                    .any(|m| m["tool_calls"][0]["id"] == "replay-call")
+            );
+            assert!(messages.iter().any(|m| m["tool_call_id"] == "replay-call"
+                && m["content"].as_str().unwrap().contains("replay sentinel")));
+        }
+        assert!(captures[1].raw.to_string().contains("source-a-reasoning"));
+        assert!(!captures[2].raw.to_string().contains("source-a-reasoning"));
+        let cross_wire = captures[3].raw.to_string();
+        assert!(cross_wire.contains("replay sentinel"));
+        assert!(cross_wire.contains("observe__workspace"));
+        for material in [
+            "replay-call",
+            "source-a-reasoning",
+            "source-b-reasoning",
+            "thoughtSignature",
+            "signature",
+            "reasoning_content",
+            "\"thought\":true",
+        ] {
+            assert!(
+                !cross_wire.contains(material),
+                "cross protocol leaked {material}"
+            );
+        }
+        let restored = &captures[4].raw["messages"];
+        assert_eq!(restored.as_array().unwrap().len(), 5);
+        assert_eq!(restored[1]["content"], "read notes");
+        assert_eq!(restored[2]["reasoning_content"], "source-a-reasoning");
+        assert_eq!(restored[4]["content"], "return to source");
+        for excluded in [
+            "source-b-reasoning",
+            "first done",
+            "switch provider",
+            "second done",
+            "cross protocol",
+            "generate done",
+        ] {
+            assert!(
+                !restored.to_string().contains(excluded),
+                "rewound history includes {excluded}"
+            );
+        }
+    }));
+    evidence.record_captures(server.captured_requests());
+    support::finish_recorded(evidence, result);
+}

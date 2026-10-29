@@ -6,10 +6,10 @@
 use crate::reply::{ProtocolEvent, StreamStop};
 use crate::reply_stream::ReplyDelivery;
 use crate::{LlmEvent, ReplyOutcome};
-use lattice_conversation::{NativeMessage, ProviderOrigin, UnboundToolCall};
+use lattice_conversation::{NativeMessage, Protocol, ReplayOrigin, UnboundToolCall};
 
 pub(crate) struct Parser {
-    origin: ProviderOrigin,
+    origin: Protocol,
     chat: crate::protocol::chat_completions::OpenAiSseParser,
     anthropic: crate::protocol::anthropic_messages::AnthropicSseParser,
     generate: crate::protocol::generate_content::GeminiSseParser,
@@ -17,13 +17,13 @@ pub(crate) struct Parser {
     pub(crate) raw: Vec<ProtocolEvent>,
 }
 impl Parser {
-    pub(crate) fn new(origin: ProviderOrigin) -> Self {
+    pub(crate) fn new(origin: Protocol) -> Self {
         Self {
             origin,
             chat: Default::default(),
             anthropic: Default::default(),
             generate: Default::default(),
-            delivery: ReplyDelivery::new(Some(origin)),
+            delivery: ReplyDelivery::new(Some(replay_origin(origin))),
             raw: Vec::new(),
         }
     }
@@ -34,9 +34,12 @@ impl Parser {
     ) -> Vec<LlmEvent> {
         let event_type = event_type.into();
         self.raw = match self.origin {
-            ProviderOrigin::OpenAiCompatible => self.chat.parse_chunk(event_type, data),
-            ProviderOrigin::Anthropic => self.anthropic.parse_chunk(event_type.unwrap_or(""), data),
-            ProviderOrigin::Gemini => self.generate.parse_chunk(event_type, data),
+            Protocol::ChatCompletions => self.chat.parse_chunk(event_type, data),
+            Protocol::Messages => self.anthropic.parse_chunk(event_type.unwrap_or(""), data),
+            Protocol::GenerateContent => self.generate.parse_chunk(event_type, data),
+            Protocol::Responses | Protocol::Interactions => {
+                unreachable!("test parser requires an implemented protocol")
+            }
         };
         self.raw
             .iter()
@@ -81,4 +84,19 @@ pub(crate) fn failure(events: &[LlmEvent]) -> Option<String> {
         } => Some(error.to_string()),
         _ => None,
     })
+}
+
+/// 解析器与完整 wire 夹具共用显式的测试来源。
+pub(crate) fn replay_origin(protocol: Protocol) -> ReplayOrigin {
+    ReplayOrigin {
+        protocol,
+        provider_id: "test".into(),
+    }
+}
+
+pub(crate) fn wire_to_native(
+    protocol: Protocol,
+    wire: &serde_json::Value,
+) -> Result<NativeMessage<UnboundToolCall>, crate::protocol::projection::ProjectionError> {
+    crate::protocol::projection::wire_to_native(&replay_origin(protocol), wire)
 }

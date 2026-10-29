@@ -5,9 +5,10 @@
 
 use std::collections::BTreeMap;
 
-use lattice_conversation::ProviderOrigin;
+use lattice_conversation::{Protocol, ReplayOrigin};
 
-use crate::protocol::projection::{ProjectionError, request_messages_to_wire, wire_usage};
+use crate::protocol::ReasoningReplay;
+use crate::protocol::projection::{ProjectionError, request_messages_with_replay, wire_usage};
 use crate::reply::{PartDelta, PartKind, ProtocolEvent, StringPatch};
 use crate::types::ChatRequest;
 
@@ -16,8 +17,10 @@ use crate::types::ChatRequest;
 pub fn build_request_json(
     request: &ChatRequest,
     model: &str,
+    replay: ReasoningReplay,
+    origin: &ReplayOrigin,
 ) -> Result<serde_json::Value, ProjectionError> {
-    let projected = request_messages_to_wire(ProviderOrigin::OpenAiCompatible, &request.messages)?;
+    let projected = request_messages_with_replay(origin, &request.messages, replay)?;
     let mut messages = Vec::new();
     if let Some(system) = projected.system {
         messages.push(serde_json::json!({"role": "system", "content": system}));
@@ -202,9 +205,7 @@ impl OpenAiSseParser {
             Ok(None) => return events,
             Err(error) => return vec![error],
         };
-        if let Some(error) =
-            super::common::extract_api_error(ProviderOrigin::OpenAiCompatible, &root)
-        {
+        if let Some(error) = super::common::extract_api_error(Protocol::ChatCompletions, &root) {
             return vec![error];
         }
         if let Some(choices) = root.get("choices").and_then(|value| value.as_array()) {
@@ -291,7 +292,7 @@ impl OpenAiSseParser {
             }
         }
         if root.get("usage").is_some_and(|usage| !usage.is_null()) {
-            match wire_usage(ProviderOrigin::OpenAiCompatible, &root) {
+            match wire_usage(Protocol::ChatCompletions, &root) {
                 Ok(Some(usage)) => events.push(ProtocolEvent::Usage(usage)),
                 Ok(None) => {}
                 Err(error) => {
@@ -318,7 +319,7 @@ mod tests {
     use serde_json::json;
 
     fn parser() -> Parser {
-        Parser::new(ProviderOrigin::OpenAiCompatible)
+        Parser::new(Protocol::ChatCompletions)
     }
     fn delta(parser: &mut Parser, value: serde_json::Value) -> Vec<LlmEvent> {
         parser.parse_chunk(None, &json!({"choices": [{"delta": value}]}).to_string())
@@ -378,7 +379,7 @@ mod tests {
         let input = stream::iter(frames)
             .flat_map(move |frame| stream::iter(parser.parse_chunk(None, &frame)));
         let events = crate::reply_stream::assemble_reply_stream(
-            Some(ProviderOrigin::OpenAiCompatible),
+            Some(crate::test_reply::replay_origin(Protocol::ChatCompletions)),
             Box::pin(input),
             crate::StreamControl::default(),
         )
@@ -407,8 +408,7 @@ mod tests {
             {"type":"text","text":"A"}, {"type":"text","text":"B"}
         ]}}]});
         assert_eq!(
-            crate::protocol::projection::wire_to_native(ProviderOrigin::OpenAiCompatible, &wire)
-                .unwrap(),
+            crate::test_reply::wire_to_native(Protocol::ChatCompletions, &wire).unwrap(),
             *message
         );
     }
@@ -443,10 +443,7 @@ mod tests {
             assert!(!format!("{events:?}").contains("private-payload"));
             let wire = json!({"choices":[{"message":{"content":content}}]});
             assert_eq!(
-                crate::protocol::projection::wire_to_native(
-                    ProviderOrigin::OpenAiCompatible,
-                    &wire
-                ),
+                crate::test_reply::wire_to_native(Protocol::ChatCompletions, &wire),
                 Err(ProjectionError::Protocol(error))
             );
         }
@@ -483,8 +480,8 @@ mod tests {
                 assert!(!format!("{events:?}").contains("private-payload"));
             }
             assert_eq!(
-                crate::protocol::projection::wire_to_native(
-                    ProviderOrigin::OpenAiCompatible,
+                crate::test_reply::wire_to_native(
+                    Protocol::ChatCompletions,
                     &json!({"choices":[{"message":{"tool_calls":[{"type":kind,"function":{"name":"f","arguments":"{}"}}]}}]}),
                 ),
                 Err(ProjectionError::Protocol(
@@ -819,7 +816,7 @@ mod tests {
     fn ordered_native() -> NativeMessage<lattice_conversation::UnboundToolCall> {
         NativeMessage::new(
             MessageRole::Assistant,
-            Some(ProviderOrigin::OpenAiCompatible),
+            Some(crate::test_reply::replay_origin(Protocol::ChatCompletions)),
             vec![
                 MessagePart::semantic_only(MessageSemantic::Text { text: "A".into() }),
                 MessagePart::semantic_only(MessageSemantic::Reasoning { text: "R".into() }),
@@ -838,7 +835,7 @@ mod tests {
     #[test]
     fn order_f11_request_merges_without_changing_wire_shape() {
         let wire = crate::protocol::projection::native_to_wire(
-            ProviderOrigin::OpenAiCompatible,
+            &crate::test_reply::replay_origin(Protocol::ChatCompletions),
             &ordered_native(),
         )
         .unwrap();
@@ -851,8 +848,10 @@ mod tests {
     fn order_f12_cross_provider_preserves_remaining_order() {
         let source = ordered_native();
         let original = source.clone();
-        let projected =
-            crate::protocol::projection::project_cross_provider(&source, ProviderOrigin::Gemini);
+        let projected = crate::protocol::projection::project_cross_provider(
+            &source,
+            &crate::test_reply::replay_origin(Protocol::GenerateContent),
+        );
         assert_eq!(labels(&projected), ["T:A", "C:observe__workspace", "T:B"]);
         assert!(
             projected

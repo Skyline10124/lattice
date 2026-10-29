@@ -11,7 +11,7 @@ use futures::stream::{self, StreamExt};
 use net_guard::NetGuardError;
 
 use crate::auth::Credentials;
-use crate::protocol::{self, Protocol};
+use crate::protocol::{self, Features, Protocol};
 use crate::provider::Auth;
 use crate::reply::{ProtocolEvent, ReplyProtocolError, StreamStop};
 use crate::reply_stream::{ProtocolStream, StreamControl, assemble_reply_stream};
@@ -108,25 +108,32 @@ impl ProtocolParser {
         request: &ChatRequest,
         model: &str,
         output_limit: Option<u64>,
+        features: Features,
+        origin: &lattice_conversation::ReplayOrigin,
     ) -> Result<serde_json::Value, LlmError> {
         match self {
             Self::ChatCompletions(_) => {
-                protocol::chat_completions::build_request_json(request, model)
+                let Features::ChatCompletions(features) = features else {
+                    unreachable!("resolved features match the protocol")
+                };
+                protocol::chat_completions::build_request_json(
+                    request,
+                    model,
+                    features.reasoning_replay,
+                    origin,
+                )
             }
-            Self::Messages(_) => {
-                protocol::anthropic_messages::build_request_json(request, model, output_limit)
+            Self::Messages(_) => protocol::anthropic_messages::build_request_json(
+                request,
+                model,
+                output_limit,
+                origin,
+            ),
+            Self::GenerateContent(_) => {
+                protocol::generate_content::build_request_json(request, origin)
             }
-            Self::GenerateContent(_) => protocol::generate_content::build_request_json(request),
         }
         .map_err(Into::into)
-    }
-
-    fn origin(&self) -> lattice_conversation::ProviderOrigin {
-        match self {
-            Self::ChatCompletions(_) => lattice_conversation::ProviderOrigin::OpenAiCompatible,
-            Self::Messages(_) => lattice_conversation::ProviderOrigin::Anthropic,
-            Self::GenerateContent(_) => lattice_conversation::ProviderOrigin::Gemini,
-        }
     }
 
     fn parse_event(&mut self, event_text: &str) -> Vec<ProtocolEvent> {
@@ -662,6 +669,7 @@ pub(crate) struct RequestEndpoint<'a> {
     pub(crate) roots: &'a [reqwest::Certificate],
     pub(crate) client: Arc<TurnClient>,
     pub(crate) output_limit: Option<u64>,
+    pub(crate) features: Features,
 }
 
 pub(crate) fn validate_configuration(
@@ -697,9 +705,18 @@ pub(crate) async fn dispatch(
         endpoint.credentials.api_key(endpoint.provider),
     )?;
     let provider = endpoint.credentials.redact(endpoint.provider);
-    let origin = parser.origin();
+    let origin = lattice_conversation::ReplayOrigin {
+        protocol: endpoint.protocol,
+        provider_id: endpoint.provider.into(),
+    };
     let url = parser.endpoint_url(endpoint.base_url, endpoint.model);
-    let body = parser.request_body(&request, endpoint.model, endpoint.output_limit)?;
+    let body = parser.request_body(
+        &request,
+        endpoint.model,
+        endpoint.output_limit,
+        endpoint.features,
+        &origin,
+    )?;
     let client = endpoint
         .client
         .get(&url, endpoint.roots)

@@ -1,52 +1,30 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! OpenAI-compatible chat-completions assistant wire projection.
+//! Chat Completions 的助手消息编解码。
 //!
-//! Wire shape (official response body):
+//! 读取 content 字符串、content 分块与 reasoning_content，保留真实的可选 call ID。
+//! 请求按 reasoning_replay 省略 reasoning、写入 reasoning_content，或放在 content 的
+//! thinking 块中。该协议不接收逐片段签名状态，携带这类状态的同来源消息编码时拒绝。
 //!
-//! ```json
-//! {"choices": [{"message": {
-//!     "role": "assistant",
-//!     "content": "…" | null,
-//!     "reasoning_content": "…"?,
-//!     "tool_calls": [{"id": "call_…", "type": "function",
-//!                     "function": {"name": "…", "arguments": "{…}"}}]?
-//! }}]}
-//! ```
-//!
-//! OpenAI-compatible wire carries no signature state, so no part gains
-//! replay state here. Tool call IDs are preserved verbatim when present and
-//! left `None` when absent; they are never synthesized.
-//!
-//! Two lossy properties of the writer are deliberate and fixed here:
-//!
-//! 1. **Arguments are re-serialized canonically.** ADR 0005 §7 requires
-//!    execution to use the canonical arguments object rather than the
-//!    provider's textual spelling, so `native_to_wire` emits
-//!    `canonical_json(arguments)`. Replay of a non-canonically spelled
-//!    provider body is therefore *semantically* identical but **not**
-//!    byte-identical (`{"b": 2, "a": 1}` replays as `{"a":1,"b":2}`).
-//! 2. **Interleaved text parts merge.** The OpenAI wire has a single
-//!    `content` string, so `[Text("A"), ToolCall, Text("B")]` writes back as
-//!    `content: "AB"`. The text/tool interleaving is not recoverable from the
-//!    wire. This is inherent to the format, not a defect of the mapping.
-//!
-//! Assembly is metered against the ADR 0005 §10 protocol limits; crossing one
-//! fails the whole body closed rather than returning a partial message.
+//! 参数以 canonical JSON 写回，同类正文与 reasoning 各自合并；content 分块中的
+//! thinking 块排在正文之前，工具调用保留在 tool_calls 中。原始空白及正文与工具的
+//! 交错不能由请求格式还原。完整 wire 解码与流式路径共用累积器和相同限额。
 
 use lattice_conversation::{
-    MessageSemantic, NativeMessage, ProviderOrigin, TokenUsage, ToolCallState, UnboundToolCall,
+    MessageSemantic, NativeMessage, Protocol, ReplayOrigin, TokenUsage, ToolCallState,
+    UnboundToolCall,
 };
 use serde_json::{Value, json};
 
 use super::{ProjectionError, ToolResultClosure};
+use crate::protocol::ReasoningReplay;
 use crate::protocol::chat_completions::{ContentError, visit_content};
 use crate::reply::{PartDelta, PartKind, StringPatch};
 
 fn malformed(detail: impl Into<String>) -> ProjectionError {
     ProjectionError::MalformedWire {
-        provider: ProviderOrigin::OpenAiCompatible,
+        provider: Protocol::ChatCompletions,
         detail: detail.into(),
     }
 }
@@ -62,14 +40,17 @@ impl From<ContentError> for ProjectionError {
     }
 }
 
-pub fn wire_to_native(wire: &Value) -> Result<NativeMessage<UnboundToolCall>, ProjectionError> {
+pub fn wire_to_native(
+    origin: &ReplayOrigin,
+    wire: &Value,
+) -> Result<NativeMessage<UnboundToolCall>, ProjectionError> {
     let message = wire
         .get("choices")
         .and_then(Value::as_array)
         .and_then(|choices| choices.first())
         .and_then(|choice| choice.get("message"))
         .ok_or_else(|| malformed("missing choices[0].message"))?;
-    let mut reply = super::WireReply::new(ProviderOrigin::OpenAiCompatible);
+    let mut reply = super::WireReply::new(origin);
     let mut index = 0;
     {
         let mut emit = |kind, text: &str| {
@@ -155,6 +136,7 @@ pub fn wire_to_native(wire: &Value) -> Result<NativeMessage<UnboundToolCall>, Pr
 
 pub fn native_to_wire<S: ToolCallState>(
     message: &NativeMessage<S>,
+    replay: ReasoningReplay,
 ) -> Result<Value, ProjectionError> {
     let mut reasoning = String::new();
     let mut saw_reasoning = false;
@@ -166,7 +148,7 @@ pub fn native_to_wire<S: ToolCallState>(
         // OpenAI wire has no signature slots; replay state has nowhere to go.
         if part.replay_state.is_some() {
             return Err(ProjectionError::UnsupportedPart {
-                provider: ProviderOrigin::OpenAiCompatible,
+                provider: Protocol::ChatCompletions,
                 part_ordinal: ordinal,
             });
         }
@@ -200,7 +182,21 @@ pub fn native_to_wire<S: ToolCallState>(
         "content": if saw_text { Value::String(text) } else { Value::Null },
     });
     if saw_reasoning {
-        wire["reasoning_content"] = Value::String(reasoning);
+        match replay {
+            ReasoningReplay::None => {}
+            ReasoningReplay::ReasoningContent => {
+                wire["reasoning_content"] = Value::String(reasoning)
+            }
+            ReasoningReplay::ContentChunks => {
+                let mut chunks = vec![
+                    json!({"type":"thinking", "thinking":[{"type":"text", "text":reasoning}]}),
+                ];
+                if saw_text {
+                    chunks.push(json!({"type":"text", "text":wire["content"]}));
+                }
+                wire["content"] = Value::Array(chunks);
+            }
+        }
     }
     if !tool_calls.is_empty() {
         wire["tool_calls"] = Value::Array(tool_calls);
@@ -218,7 +214,7 @@ pub(crate) fn tool_result_messages(
     for closure in closures {
         let Some(tool_call_id) = closure.provider_call_id.as_deref() else {
             return Err(ProjectionError::ToolResultWithoutProviderCallId {
-                provider: ProviderOrigin::OpenAiCompatible,
+                provider: Protocol::ChatCompletions,
                 invocation_id: closure.invocation_id,
             });
         };
@@ -241,7 +237,7 @@ pub(crate) fn usage(wire: &Value) -> Result<Option<TokenUsage>, ProjectionError>
         return Ok(None);
     }
     let malformed = |detail: String| ProjectionError::MalformedUsage {
-        provider: ProviderOrigin::OpenAiCompatible,
+        provider: Protocol::ChatCompletions,
         detail,
     };
     let field = |name: &str| -> Result<u64, ProjectionError> {

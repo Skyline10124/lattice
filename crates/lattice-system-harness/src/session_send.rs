@@ -473,6 +473,30 @@ fn usage(value: &Value) -> Result<(), String> {
     }
     Ok(())
 }
+fn validate_replay_origin(origin: &Value) -> Result<(), String> {
+    if !matches!(
+        string(origin, "protocol")?,
+        "chat-completions"
+            | "responses"
+            | "anthropic-messages"
+            | "generate-content"
+            | "interactions"
+    ) {
+        return Err("unknown attempt protocol".into());
+    }
+    let provider = string(origin, "provider_id")?;
+    if provider.is_empty()
+        || provider.len() > 64
+        || !provider.as_bytes()[0].is_ascii_lowercase() && !provider.as_bytes()[0].is_ascii_digit()
+        || !provider
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    {
+        return Err("invalid attempt provider id".into());
+    }
+    Ok(())
+}
+
 /// 现有 `StepDetail`：各尝试、槽位及由阶段给出的结论。
 fn step_detail(value: &Value) -> Result<(Vec<AttemptState>, Vec<Slot>), String> {
     string(&value["key"], "turn_id")?;
@@ -490,27 +514,7 @@ fn step_detail(value: &Value) -> Result<(Vec<AttemptState>, Vec<Slot>), String> 
     for attempt in array(value, "attempts")? {
         uint(attempt, "attempt")?;
         let origin = &attempt["origin"];
-        if !matches!(
-            string(origin, "protocol")?,
-            "chat-completions"
-                | "responses"
-                | "anthropic-messages"
-                | "generate-content"
-                | "interactions"
-        ) {
-            return Err("unknown attempt protocol".into());
-        }
-        let provider = string(origin, "provider_id")?;
-        if provider.is_empty()
-            || provider.len() > 64
-            || !provider.as_bytes()[0].is_ascii_lowercase()
-                && !provider.as_bytes()[0].is_ascii_digit()
-            || !provider
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        {
-            return Err("invalid attempt provider id".into());
-        }
+        validate_replay_origin(origin)?;
         usage(attempt.get("usage").ok_or("missing usage")?)?;
         attempts.push(match string(&attempt["progress"], "progress")? {
             "sent" => AttemptState::Sent,
@@ -661,7 +665,27 @@ pub fn parse_entry(value: &Value) -> Result<Entry, String> {
             let stored_attempts = array(content, "attempts")?.len();
             let reply = match &content["reply"] {
                 Value::Null => Vec::new(),
-                reply => message_segments(reply)?,
+                reply => {
+                    let origin = &reply["provider_origin"];
+                    validate_replay_origin(origin)?;
+                    let stored = array(content, "attempts")?
+                        .last()
+                        .ok_or("reply requires a completed attempt")?;
+                    let detailed = array(&value["step"], "attempts")?
+                        .last()
+                        .ok_or("reply requires attempt detail")?;
+                    for attempt in [stored, detailed] {
+                        if attempt["progress"]["progress"] != "ended"
+                            || attempt["progress"]["end"]["end"] != "completed"
+                        {
+                            return Err("reply requires a completed attempt".into());
+                        }
+                    }
+                    if origin != &stored["origin"] || origin != &detailed["origin"] {
+                        return Err("reply source differs from the completed attempt".into());
+                    }
+                    message_segments(reply)?
+                }
             };
             let detail = &value["step"];
             let (attempts, slots) = step_detail(detail)?;

@@ -4,7 +4,7 @@
 use super::*;
 use lancet_protocol::TurnId;
 use lattice_conversation::{
-    MessagePart, MessageRole, MessageSemantic, NativeMessage, ProviderOrigin, UnboundToolCall,
+    MessagePart, MessageRole, MessageSemantic, NativeMessage, Protocol, UnboundToolCall,
 };
 use lattice_session::{ProjectStoreKey, StateLayout};
 use serde_json::json;
@@ -66,7 +66,10 @@ fn reply(turn_id: TurnId) -> CompleteReply {
         usage: None,
         message: NativeMessage::new(
             MessageRole::Assistant,
-            Some(ProviderOrigin::OpenAiCompatible),
+            Some(lattice_conversation::ReplayOrigin {
+                protocol: Protocol::ChatCompletions,
+                provider_id: "openai".into(),
+            }),
             vec![
                 MessagePart::semantic_only(MessageSemantic::Text {
                     text: "说明".into(),
@@ -254,6 +257,10 @@ async fn live_multicall_closes_continue_then_finish_from_structured_history() {
             control: lattice_llm::StreamControl,
         ) -> std::result::Result<LlmStream, Box<dyn std::error::Error + Send + Sync>> {
             let mut requests = self.0.lock().unwrap();
+            let source = lattice_conversation::ReplayOrigin {
+                protocol: Protocol::ChatCompletions,
+                provider_id: request.target.provider.clone(),
+            };
             requests.push(request);
             let parts = if requests.len() == 1 {
                 vec![
@@ -285,7 +292,7 @@ async fn live_multicall_closes_continue_then_finish_from_structured_history() {
                 finish_reason: "stop".into(),
                 usage: None,
             });
-            Ok(lattice_llm::testing::script_stream(events, control))
+            Ok(lattice_llm::testing::script_stream(source, events, control))
         }
     }
     let workspace = tempfile::tempdir().unwrap();

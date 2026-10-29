@@ -25,8 +25,8 @@
 
 - 调用方只给出 provider `id`、模型 `id`、推理档位与请求内容，不接触 endpoint、key 与 features；网关不向外暴露连接材料，每次请求按当前配置与凭据解析。
 - 协议差异留在适配器与 client 层，高层只消费类型化 `LlmEvent`、`LlmError` 和模型元数据。适配器按协议划分，厂商差异只用该协议的 features 表达，不按 URL 或 provider `id` 判断厂商；新增 feature 先修订模型接入合同。
-- 所有请求 builder 经 `request_messages_to_wire`；`protocol/projection` 的 `wire_to_native` 只用于完整 wire 夹具的解码，逐块交给共同回复累积器，usage 经 `wire_usage`。解析器只翻译部件增量，不保留完整内容缓冲；正式流、stub 与测试客户端共用 `reply_stream`，显示增量与完整消息出自同一次累积。累积器独占流式 `AttemptAssembly`，超限停止消费且不返回部分消息；完整 wire 夹具路径映射为 `ProjectionError::OutputLimitExceeded`。不新建 ToolCall/ToolResult codec。
-- provider call ID 是可选不透明 wire 元数据，不是领域 Invocation 身份，不合成 `tc_*` 身份。回放来源（协议与 provider `id`）相同时保留真实 ID、签名及 part 顺序；来源不同时去掉 replay state、provider call ID 与 reasoning，不泄露来源 provider 状态。
+- 所有请求 builder 经共同投影入口 `request_messages_with_replay`；`protocol/projection` 的 `wire_to_native` 只用于完整 wire 夹具的解码，逐块交给共同回复累积器，usage 经 `wire_usage`。解析器只翻译部件增量，不保留完整内容缓冲；正式流、stub 与测试客户端共用 `reply_stream`，显示增量与完整消息出自同一次累积。累积器独占流式 `AttemptAssembly`，超限停止消费且不返回部分消息；完整 wire 夹具路径映射为 `ProjectionError::OutputLimitExceeded`。不新建 ToolCall/ToolResult codec。
+- provider call ID 是可选不透明 wire 元数据，不是领域 Invocation 身份，不合成 `tc_*` 身份。回放材料按[回放来源](../../docs/architecture/llm.md#回放来源)的两级规则投影。
 - `validate_base_url` 的 DNS 检查仅尽力而为，连接前解析并固定地址才是主要 SSRF 防线：每个 Turn 第一次请求时在 blocking 线程上解析、校验并固定地址，构建的 client 在本 Turn 内复用；响应没有完整结束（发送失败、流没交付 `Done` 就结束或出错、错误正文读到一半中断）时丢弃，下次尝试重新解析。不跨 Turn 复用，认证头不放进 client 默认头；SIWC 的 access token 每次请求前取得。localhost、127.0.0.1、::1 使用一致的 loopback 例外，其他私有/保留 IP literal 拒绝。
 - 一次尝试对应一个被 provider 接收的请求。HTTP 库只重发 provider 明确没处理的请求：reqwest 那层换成自有策略（判断同默认，每次重发记 WARN），hyper-util 对未发出请求的重发无法关闭，以新建连接的 DEBUG 日志间接可见。不得让 HTTP 库重发已被处理的请求；其他重试一律由协调层按冻结策略执行并逐次记录。
 - 除认证头与协议要求的头外，请求头只加 `User-Agent`（LATTICE 自己的标识，不冒充其他客户端）、`Accept` 与取 SessionId 的 `x-client-request-id`；新增发给 provider 的头先修订会话合同。
