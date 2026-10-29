@@ -311,6 +311,39 @@ impl std::io::Write for Frame {
 }
 
 pub(super) async fn write<T: serde::Serialize>(stream: &mut UnixStream, value: &T) -> Result<()> {
+    Ok(write_wire(stream, value).await??)
+}
+
+/// 客户端写请求专用。请求大于套接字缓冲区时，旧后台读完魔数就关连接，这一端写到一半会碰上
+/// EPIPE 或 ECONNRESET；先读一眼对端在断开前有没有回写自己的魔数，没有就按疑似旧后台提示。
+pub(super) async fn write_request<T: serde::Serialize>(
+    stream: &mut UnixStream,
+    value: &T,
+) -> Result<()> {
+    match write_wire(stream, value).await? {
+        Ok(()) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+            ) =>
+        {
+            match tokio::time::timeout(WRITE_TIMEOUT, read_frame::<serde_json::Value>(stream, true))
+                .await
+            {
+                Ok(Err(error)) if error.kind == LocalErrorKind::IncompatibleBackend => Err(error),
+                _ => Err(silent_close()),
+            }
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// 外层是编码和超时失败，内层保留 io 错误种类给 `write_request` 分辨对端已关闭。
+async fn write_wire<T: serde::Serialize>(
+    stream: &mut UnixStream,
+    value: &T,
+) -> Result<std::io::Result<()>> {
     let mut frame = Frame(Zeroizing::new(Vec::new()));
     serde_json::to_writer(&mut frame, value).map_err(|_| protocol())?;
     // 魔数、长度和正文一次写出：小请求整帧进入对端接收队列，旧后台只读魔数就关闭时，
@@ -326,8 +359,7 @@ pub(super) async fn write<T: serde::Serialize>(stream: &mut UnixStream, value: &
                 LocalErrorKind::Transport,
                 "local write timed out; acknowledgement may be unknown",
             )
-        })??;
-    Ok(())
+        })
 }
 
 /// 每个连接独立编号；片段的 offset 按逻辑 JSON 的 UTF-8 字节计量。
@@ -523,6 +555,43 @@ mod frame_tests {
         let mut reply = [0; 8];
         client.read_exact(&mut reply).await.unwrap();
         assert_eq!(&reply, MAGIC, "backend must announce its own magic");
+    }
+
+    /// 远大于套接字缓冲区的请求，对端只读魔数就关闭。
+    async fn oversized_request_against(reply: Option<&'static [u8; 8]>) -> LocalError {
+        let (mut client, mut backend) = UnixStream::pair().unwrap();
+        let backend = tokio::spawn(async move {
+            let mut magic = [0; 8];
+            backend.read_exact(&mut magic).await.unwrap();
+            if let Some(reply) = reply {
+                backend.write_all(reply).await.unwrap();
+                backend.write_u32(4).await.unwrap();
+                backend.write_all(b"null").await.unwrap();
+            }
+        });
+        let prompt = "x".repeat(4 * 1024 * 1024);
+        let error = write_request(&mut client, &prompt).await.unwrap_err();
+        backend.await.unwrap();
+        error
+    }
+
+    #[tokio::test]
+    async fn oversized_request_cut_off_by_a_silent_older_backend_gets_the_stop_hint() {
+        let error = oversized_request_against(None).await;
+        assert_eq!(
+            (error.kind, error.message.as_str()),
+            (LocalErrorKind::Transport, SILENT_CLOSE)
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_request_cut_off_by_an_announcing_backend_reports_its_version() {
+        // 字面量模拟旧后台，不能从当前魔数推导。
+        let error = oversized_request_against(Some(b"LTLOCAL5")).await;
+        assert_eq!(
+            (error.kind, error.message.as_str()),
+            (LocalErrorKind::IncompatibleBackend, INCOMPATIBLE_BACKEND)
+        );
     }
 
     #[tokio::test]
