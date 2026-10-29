@@ -20,9 +20,10 @@ use tokio::{
 };
 use zeroize::Zeroizing;
 
-const MAGIC: &[u8; 8] = b"LTLOCAL8";
+pub(super) const MAGIC: &[u8; 8] = b"LTLOCAL8";
 pub(super) const MAX_FRAME: usize = 16 * 1024 * 1024;
 pub(super) const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const INCOMPATIBLE_BACKEND: &str = "the running backend is an incompatible older version; stop it with the older binary's `lattice daemon stop`";
 
 fn permission() -> LocalError {
     LocalError::new(
@@ -35,6 +36,23 @@ fn protocol() -> LocalError {
         LocalErrorKind::Protocol,
         "unsupported or malformed local protocol frame",
     )
+}
+
+/// 只识别本进程仍使用的单字符版本。更小的 `LTLOCAL` 魔数来自仍在运行的旧后台。
+fn older_magic(magic: &[u8; 8]) -> bool {
+    let (prefix, current) = MAGIC.split_at(MAGIC.len() - 1);
+    magic.starts_with(prefix)
+        && magic[prefix.len()].is_ascii_digit()
+        && current[0].is_ascii_digit()
+        && magic[prefix.len()] < current[0]
+}
+
+fn reject_magic(magic: &[u8; 8]) -> LocalError {
+    if older_magic(magic) {
+        LocalError::new(LocalErrorKind::IncompatibleBackend, INCOMPATIBLE_BACKEND)
+    } else {
+        protocol()
+    }
 }
 
 pub(super) fn uid() -> u32 {
@@ -221,7 +239,7 @@ async fn read_frame<T: serde::de::DeserializeOwned>(stream: &mut UnixStream) -> 
     }
     stream.read_exact(&mut magic[1..]).await?;
     if &magic != MAGIC {
-        return Err(protocol());
+        return Err(reject_magic(&magic));
     }
     let len = stream.read_u32().await? as usize;
     if len == 0 || len > MAX_FRAME {
@@ -374,23 +392,59 @@ mod frame_tests {
 
     #[tokio::test]
     async fn v8_accepts_current_frames_and_rejects_old_empty_and_oversized_frames() {
-        for (magic, length, payload, valid) in [
-            (*b"LTLOCAL8", 4_u32, b"null".as_slice(), true),
-            (*b"LTLOCAL7", 4, b"null".as_slice(), false),
-            (*b"LTLOCAL6", 4, b"null".as_slice(), false),
-            (*b"LTLOCAL2", 4, b"null".as_slice(), false),
-            (*b"LTLOCAL8", 0, b"".as_slice(), false),
-            (*b"LTLOCAL8", (MAX_FRAME + 1) as u32, b"".as_slice(), false),
+        for (magic, length, payload, expected) in [
+            (*b"LTLOCAL8", 4_u32, b"null".as_slice(), None),
+            (
+                *b"LTLOCAL7",
+                4,
+                b"null".as_slice(),
+                Some(LocalErrorKind::IncompatibleBackend),
+            ),
+            (
+                *b"LTLOCAL6",
+                4,
+                b"null".as_slice(),
+                Some(LocalErrorKind::IncompatibleBackend),
+            ),
+            (
+                *b"LTLOCAL2",
+                4,
+                b"null".as_slice(),
+                Some(LocalErrorKind::IncompatibleBackend),
+            ),
+            (
+                *b"LTLOCAL9",
+                4,
+                b"null".as_slice(),
+                Some(LocalErrorKind::Protocol),
+            ),
+            (
+                *b"LTLOCAL8",
+                0,
+                b"".as_slice(),
+                Some(LocalErrorKind::Protocol),
+            ),
+            (
+                *b"LTLOCAL8",
+                (MAX_FRAME + 1) as u32,
+                b"".as_slice(),
+                Some(LocalErrorKind::Protocol),
+            ),
         ] {
             let (mut sender, mut receiver) = UnixStream::pair().unwrap();
             sender.write_all(&magic).await.unwrap();
             sender.write_u32(length).await.unwrap();
             sender.write_all(payload).await.unwrap();
             let result = read::<serde_json::Value>(&mut receiver).await;
-            if valid {
-                assert_eq!(result.unwrap(), serde_json::Value::Null);
-            } else {
-                assert_eq!(result.unwrap_err().kind, LocalErrorKind::Protocol);
+            match expected {
+                None => assert_eq!(result.unwrap(), serde_json::Value::Null),
+                Some(kind) => {
+                    let error = result.unwrap_err();
+                    assert_eq!(error.kind, kind, "{}", String::from_utf8_lossy(&magic));
+                    if kind == LocalErrorKind::IncompatibleBackend {
+                        assert_eq!(error.message, INCOMPATIBLE_BACKEND);
+                    }
+                }
             }
         }
     }

@@ -3,7 +3,10 @@
 
 use super::{ipc, types::*, *};
 use std::time::Duration;
-use tokio::net::{UnixListener, UnixStream};
+use tokio::{
+    io::AsyncWriteExt,
+    net::{UnixListener, UnixStream},
+};
 
 struct Peer {
     _directory: tempfile::TempDir,
@@ -1403,4 +1406,29 @@ async fn reconnect_after_idle_starts_a_fresh_session_watch() {
         LocalUpdate::Head(SessionHead { owner: false, .. })
     ));
     assert_eq!(within(turn.detach()).await.head.unwrap().turn_id, Some(id));
+}
+
+#[tokio::test]
+async fn status_reports_an_incompatible_older_backend() {
+    let directory = tempfile::tempdir().unwrap();
+    let layout = crate::StateLayout::in_state_root(directory.path());
+    let (_instance, listener) = ipc::Instance::bind(&layout).unwrap();
+    let listener = UnixListener::from_std(listener).unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        // 字面量不能从当前魔数推导，否则以后升级会把这条回归一起改掉。
+        stream.write_all(b"LTLOCAL5").await.unwrap();
+        stream.write_u32(4).await.unwrap();
+        stream.write_all(b"null").await.unwrap();
+        let _held = stream;
+    });
+    let error = LocalClient::new(layout).status().await.unwrap_err();
+    assert_eq!(
+        (error.kind, error.message.as_str()),
+        (
+            LocalErrorKind::IncompatibleBackend,
+            "the running backend is an incompatible older version; stop it with the older binary's `lattice daemon stop`",
+        )
+    );
+    server.await.unwrap();
 }
