@@ -278,6 +278,17 @@ fn agents_use_backend_home_and_project_precedence() {
         source.replace("harness agent", "global test agent"),
     )
     .unwrap();
+    // 固定为 umask 022 的默认权限，不随机器 umask 变化：全局 profile 可被他人读取，
+    // 只要不被 group/other 改写就应接受。
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &std::path::Path, mode: u32| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap()
+        };
+        mode(&world.home().join(".lattice/agents"), 0o755);
+        mode(&global, 0o755);
+        mode(&global.join("agent.toml"), 0o644);
+    }
     std::fs::remove_file(&project_profile).unwrap();
     // 录入凭据先启动后台；前端随后更换 HOME，仍通过相同的 XDG 状态根连接它。
     world.wire_provider(fixture, &server, FAKE_API_KEY).unwrap();
