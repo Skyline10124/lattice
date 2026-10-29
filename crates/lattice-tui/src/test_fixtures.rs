@@ -219,6 +219,13 @@ impl StepEntry {
         }));
         self
     }
+    /// 最近一次尝试保存的计量；缺失字段保持未知。
+    pub(super) fn metering(mut self, usage: Value, cost: Option<f64>) -> Self {
+        let attempt = self.attempts.last_mut().expect("已有尝试");
+        attempt["usage"] = usage;
+        attempt["estimated_cost_usd"] = json!(cost);
+        self
+    }
     /// 回复末尾加一个工具调用；`terminal` 时槽位已有成功结果，否则停在 Started。
     pub(super) fn tool(mut self, n: u32, terminal: bool) -> Self {
         let id = invocation(n);

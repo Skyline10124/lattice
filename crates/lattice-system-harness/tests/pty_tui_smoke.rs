@@ -219,6 +219,227 @@ mod support;
 
 use support::record_session as record_pty_session;
 
+#[test]
+fn pty_statusline_usage_survives_reopening_and_follows_rewind() {
+    use lattice_system_harness::{NativeUsage, SessionSendDriver, SseScript};
+    use serde_json::{Value, json};
+
+    fn query(
+        session: &SessionSendDriver<'_>,
+        evidence: &mut lattice_system_harness::ScenarioEvidence,
+        args: &[&str],
+    ) -> Value {
+        let out = session.run_command(args).unwrap();
+        evidence.record_command(args.join(" "), &out);
+        assert!(out.is_clean_exit(0), "{}", out.summary());
+        serde_json::from_slice(&out.stdout).unwrap()
+    }
+
+    fn wait_for_usage(
+        tui: &mut PtyTuiDriver,
+        expected: Option<[f64; 5]>,
+        timeout: Duration,
+    ) -> Option<[f64; 5]> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let frame = tui
+                .redraw_text(deadline.saturating_duration_since(std::time::Instant::now()))
+                .unwrap();
+            let number = |prefix| {
+                frame
+                    .split_once(prefix)?
+                    .1
+                    .split_whitespace()
+                    .next()?
+                    .trim_end_matches('%')
+                    .parse::<f64>()
+                    .ok()
+            };
+            let shown = (|| {
+                Some([
+                    number("↑")?,
+                    number("↓")?,
+                    number("缓存 ")?,
+                    number("≈$")?,
+                    number("上下文 ")?,
+                ])
+            })();
+            let cleared = ["↑", "↓", "缓存", "≈$", "上下文"]
+                .iter()
+                .all(|label| !frame.contains(label));
+            if shown == expected && (expected.is_some() || cleared) {
+                return shown;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "计量未到达 {expected:?}，最近一帧：{frame}"
+            );
+        }
+    }
+
+    let driver = driver();
+    let (world, mut spec) = support::direct_world(
+        "pty-statusline-usage",
+        "m",
+        "[\"session__todo_write\"]",
+        "[llm.retry]\nmax_retries = 1\ninitial_delay_ms = 1\nmax_delay_ms = 1\n",
+    );
+    spec.layer = ScenarioLayer::PtySmoke;
+    spec.step_timeout_secs = 120;
+    spec.total_timeout_secs = Some(300);
+    let budget = world.budget(&spec);
+    let step = || budget.cap_timeout(spec.step_timeout());
+    let usage = |input, output, cached| json!({"prompt_tokens":input,"completion_tokens":output,"prompt_tokens_details":{"cached_tokens":cached}});
+    let with_usage = |script, value| SseScript::WithUsage {
+        script: Box::new(script),
+        usage: NativeUsage::ChatCompletions(value),
+    };
+    let (server, gate) = support::wire_gated_fake_llm(
+        &world,
+        "m",
+        support::sequence(vec![
+            SseScript::Chunks {
+                chunks: vec![
+                    json!({"choices":[{"delta":{"content":"retry usage"}}],"usage":usage(100,10,100)}),
+                    json!({"error":{"type":"server_error","message":"retry once"}}),
+                ],
+            },
+            with_usage(
+                support::tool_call(
+                    "usage-tool",
+                    "session__todo_write",
+                    r#"{"todos":[{"content":"usage","status":"completed"}]}"#,
+                ),
+                usage(200, 20, 0),
+            ),
+            with_usage(SseScript::plain("saved usage answer"), usage(300, 30, 200)),
+        ]),
+    );
+    let configuration = world.home().join(".lattice/providers.toml");
+    let baseline = std::fs::read_to_string(&configuration).unwrap();
+    std::fs::write(&configuration, format!("{baseline}\n[providers.local.models.m.cost]\ninput = 100\noutput = 1000\ncache_read = 0\n")).unwrap();
+    let session = SessionSendDriver::new(&driver, &world, &spec, "m");
+    let mut evidence = support::evidence(&world, &spec);
+    let mut tui = PtyTuiDriver::spawn(&driver, &world, "m").unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tui.wait_for_ready(step()).unwrap();
+        tui.send_line("measure this turn").unwrap();
+        for request in 1..=3 {
+            gate.wait_until_stalled(request, step()).unwrap();
+            gate.release_next(step()).unwrap();
+        }
+        tui.wait_for(step(), |text| {
+            text.contains("saved usage answer") && text.contains("完成")
+        })
+        .unwrap();
+        let initial = wait_for_usage(&mut tui, Some([600.0, 60.0, 50.0, 0.09, 330.0]), step());
+        let list = query(&session, &mut evidence, &["--json", "session", "list"]);
+        assert_eq!(list.as_array().unwrap().len(), 1);
+        let sid = list[0]["session_id"].as_str().unwrap();
+        let persisted = query(
+            &session,
+            &mut evidence,
+            &["--json", "session", "usage", sid],
+        );
+        assert_eq!(persisted["total"]["attempts"], 3);
+        assert_eq!(persisted["total"]["input"]["known"], 600);
+        assert_eq!(persisted["total"]["output"]["known"], 60);
+        assert_eq!(persisted["total"]["cache_read"]["known"], 300);
+        assert!(
+            (persisted["total"]["estimated_cost_usd"]["known"]
+                .as_f64()
+                .unwrap()
+                - 0.09)
+                .abs()
+                < 1e-12
+        );
+        let tid = persisted["turns"][0]["turn_id"].as_str().unwrap();
+        let detail = query(&session, &mut evidence, &["--json", "session", "turn", tid]);
+        assert_eq!(detail["steps"].as_array().unwrap().len(), 2);
+        let middle = detail["steps"][0]["node"].as_u64().unwrap().to_string();
+        // 释放重试的 Warn，再正常退出；后台也停止，重开只能读取已保存计量。
+        tui.send_keys(b" ").unwrap();
+        tui.send_line("/quit").unwrap();
+        tui.wait_for_exit(step()).unwrap();
+        evidence.record_pty(tui.output());
+        world.stop_daemon().unwrap();
+
+        let mut reopened = PtyTuiDriver::reconnect(&driver, &world, sid).unwrap();
+        let reload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            reopened.wait_for_ready(step()).unwrap();
+            // 备用屏幕先于终端尺寸初始化；等初始内容绘出后再 resize，才能触发清屏重绘。
+            reopened
+                .wait_for(step(), |text| {
+                    text.contains("saved usage answer") && text.contains("完成")
+                })
+                .unwrap();
+            let reloaded = wait_for_usage(&mut reopened, initial, step());
+            assert_eq!(
+                query(
+                    &session,
+                    &mut evidence,
+                    &["--json", "session", "usage", sid]
+                ),
+                persisted
+            );
+            query(
+                &session,
+                &mut evidence,
+                &["--json", "session", "rewind", sid, &middle],
+            );
+            let rewound = wait_for_usage(
+                &mut reopened,
+                Some([300.0, 30.0, 33.0, 0.05, 220.0]),
+                step(),
+            );
+            let path = query(
+                &session,
+                &mut evidence,
+                &["--json", "session", "usage", sid],
+            );
+            assert_eq!(path["total"]["attempts"], 2);
+            assert_eq!(path["total"]["input"]["known"], 300);
+            assert_eq!(
+                query(&session, &mut evidence, &["--json", "session", "turn", tid]),
+                detail
+            );
+            query(
+                &session,
+                &mut evidence,
+                &["--json", "session", "rewind", sid, "0"],
+            );
+            let root = wait_for_usage(&mut reopened, None, step());
+            let empty = query(
+                &session,
+                &mut evidence,
+                &["--json", "session", "usage", sid],
+            );
+            assert!(empty["turns"].as_array().unwrap().is_empty());
+            evidence
+                .record_json(
+                    "statusline-values",
+                    &json!({"initial":initial,"reopened":reloaded,"rewound":rewound,"root":root}),
+                )
+                .unwrap();
+            reopened.send_line("/quit").unwrap();
+            reopened.wait_for_exit(step()).unwrap();
+        }));
+        evidence.record_pty(reopened.output());
+        if let Err(error) = reload {
+            std::panic::resume_unwind(error);
+        }
+        assert_eq!(
+            server.captured_requests().len(),
+            3,
+            "查询、重开与退回不产生模型请求"
+        );
+    }));
+    evidence.record_pty(tui.output());
+    evidence.record_captures(server.captured_requests());
+    drop(tui);
+    support::finish_recorded(evidence, result);
+}
+
 fn finish_pty(
     evidence: lattice_system_harness::ScenarioEvidence,
     result: std::thread::Result<()>,
