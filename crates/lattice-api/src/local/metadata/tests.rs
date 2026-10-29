@@ -126,78 +126,113 @@ fn wall(elapsed: Duration) -> SystemTime {
     SystemTime::UNIX_EPOCH + BASE + elapsed
 }
 
-/// 换上跟随暂停时钟的墙钟，并返回每次定时触发结果的接收端。
-fn observed(
-    mut refresh: Arc<MetadataRefresh>,
-) -> (Arc<MetadataRefresh>, mpsc::UnboundedReceiver<AutoRefresh>) {
+/// 定时任务报告的事件流；`armed` 暂存已读到、尚未消费的下一次等待截止时刻。
+struct Timer {
+    events: mpsc::UnboundedReceiver<TimerEvent>,
+    armed: Option<tokio::time::Instant>,
+}
+
+/// 换上跟随暂停时钟的墙钟，并返回定时任务事件的接收端。
+fn observed(mut refresh: Arc<MetadataRefresh>) -> (Arc<MetadataRefresh>, Timer) {
     let start = tokio::time::Instant::now();
     let inner = Arc::get_mut(&mut refresh).expect("refresh is not shared yet");
     inner.clock = Box::new(move || wall(tokio::time::Instant::now() - start));
-    let (sender, outcomes) = mpsc::unbounded_channel();
+    let (sender, events) = mpsc::unbounded_channel();
     *inner.outcomes.lock().unwrap() = Some(sender);
-    (refresh, outcomes)
+    (
+        refresh,
+        Timer {
+            events,
+            armed: None,
+        },
+    )
 }
 
-/// 让已就绪的任务运行完；不推进时钟，也不真实等待。
-async fn yield_many() {
-    for _ in 0..50 {
-        tokio::task::yield_now().await;
-    }
-}
-
-/// 等待下一次定时触发的结果。触发里的配置与缓存读取跑在 spawn_blocking 线程上；
+/// 等待定时任务的下一个事件。触发里的配置与缓存读取跑在 spawn_blocking 线程上；
 /// 若用 `recv().await` 让运行时空闲，暂停的时钟会自动跳到下一个定时点。
 /// 这里只让出执行权，时钟保持不动；真实时间只用作卡死时的失败期限。
-async fn next_outcome(outcomes: &mut mpsc::UnboundedReceiver<AutoRefresh>) -> AutoRefresh {
+async fn next_event(timer: &mut Timer) -> TimerEvent {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
-        if let Ok(outcome) = outcomes.try_recv() {
-            return outcome;
+        if let Ok(event) = timer.events.try_recv() {
+            return event;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "no trigger outcome within 5s of real time"
+            "no timer event within 5s of real time"
         );
         tokio::task::yield_now().await;
     }
 }
 
-/// 断言定时器在 `at` 之前一秒尚未触发，到 `at` 时恰好触发一次并得到 `expected`。
+/// 等待下一次定时触发的结果，跳过其间的等待事件。
+async fn next_outcome(timer: &mut Timer) -> AutoRefresh {
+    timer.armed = None;
+    loop {
+        if let TimerEvent::Fired(outcome) = next_event(timer).await {
+            return outcome;
+        }
+    }
+}
+
+/// 等待定时任务进入下一次等待，返回其截止时刻。收到这个事件时任务已停在
+/// `sleep_until` 上，之后只有时钟到点才会再运行。
+async fn next_armed(timer: &mut Timer) -> tokio::time::Instant {
+    if let Some(armed) = timer.armed.take() {
+        return armed;
+    }
+    match next_event(timer).await {
+        TimerEvent::Armed(armed) => armed,
+        TimerEvent::Fired(outcome) => {
+            panic!("expected the timer to wait, but it fired {outcome:?}")
+        }
+    }
+}
+
+/// 断言定时器下一次等待到 `at`：到 `at` 前 1ms 尚未触发，到 `at` 时恰好触发一次并得到
+/// `expected`，随后进入更晚的下一次等待。
 async fn assert_fires_once_at(
     initial: tokio::time::Instant,
     at: Duration,
-    outcomes: &mut mpsc::UnboundedReceiver<AutoRefresh>,
+    timer: &mut Timer,
     expected: AutoRefresh,
 ) {
-    let now = tokio::time::Instant::now();
-    let before = initial + at - Duration::from_secs(1);
-    tokio::time::advance(before - now).await;
-    yield_many().await;
-    assert!(
-        outcomes.try_recv().is_err(),
-        "trigger must not fire before {}s",
-        at.as_secs()
-    );
-    tokio::time::advance(Duration::from_secs(1)).await;
-    let outcome = next_outcome(outcomes).await;
+    let armed = next_armed(timer).await;
     assert_eq!(
-        tokio::time::Instant::now(),
-        initial + at,
-        "trigger must fire exactly at {}s",
+        armed - initial,
+        at,
+        "next trigger must be scheduled at {}s",
         at.as_secs()
     );
-    assert_eq!(
-        outcome,
-        expected,
-        "outcome of the trigger at {}s",
-        at.as_secs()
-    );
-    yield_many().await;
+    tokio::time::advance(armed - Duration::from_millis(1) - tokio::time::Instant::now()).await;
+    tokio::task::yield_now().await;
     assert!(
-        outcomes.try_recv().is_err(),
-        "trigger at {}s must fire only once",
+        timer.events.try_recv().is_err(),
+        "trigger must not fire 1ms before {}s",
         at.as_secs()
     );
+    tokio::time::advance(Duration::from_millis(1)).await;
+    match next_event(timer).await {
+        TimerEvent::Fired(outcome) => assert_eq!(
+            outcome,
+            expected,
+            "outcome of the trigger at {}s",
+            at.as_secs()
+        ),
+        TimerEvent::Armed(other) => panic!(
+            "trigger at {}s must fire, but the timer re-armed for {:?}",
+            at.as_secs(),
+            other - initial
+        ),
+    }
+    let next = next_armed(timer).await;
+    assert!(
+        next > armed,
+        "trigger at {}s must fire only once; next wait ends at {:?}",
+        at.as_secs(),
+        next - initial
+    );
+    timer.armed = Some(next);
 }
 
 #[tokio::test(start_paused = true)]
@@ -218,7 +253,11 @@ async fn scheduled_triggers_skip_while_auto_refresh_is_disabled() {
         AutoRefresh::Idle,
         "startup trigger is skipped"
     );
-    assert_eq!(tokio::time::Instant::now(), initial);
+    assert_eq!(
+        tokio::time::Instant::now(),
+        initial,
+        "startup trigger runs immediately"
+    );
     assert_fires_once_at(
         initial,
         Duration::from_secs(24 * 60 * 60),

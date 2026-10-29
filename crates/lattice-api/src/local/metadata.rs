@@ -26,6 +26,16 @@ enum AutoRefresh {
     Stopped,
 }
 
+/// 测试用：定时任务每次进入等待与每次触发结束时报告的事件。
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TimerEvent {
+    /// 已开始等待，到给定时刻触发。
+    Armed(tokio::time::Instant),
+    /// 一次定时触发结束。
+    Fired(AutoRefresh),
+}
+
 fn backoff(failures: u32) -> Duration {
     let shift = failures.saturating_sub(1).min(16);
     INITIAL_BACKOFF
@@ -56,9 +66,9 @@ pub(super) struct MetadataRefresh {
     cancel: Arc<MetadataRefreshControl>,
     stopped: watch::Sender<bool>,
     clock: Box<Clock>,
-    /// 测试用：每次定时触发结束后报告结果，代替真实等待。
+    /// 测试用：报告每次进入等待的截止时刻与每次定时触发的结果，代替真实等待。
     #[cfg(test)]
-    outcomes: Mutex<Option<tokio::sync::mpsc::UnboundedSender<AutoRefresh>>>,
+    outcomes: Mutex<Option<tokio::sync::mpsc::UnboundedSender<TimerEvent>>>,
 }
 
 fn stopping() -> LocalError {
@@ -189,6 +199,13 @@ impl MetadataRefresh {
             .flatten()
     }
 
+    #[cfg(test)]
+    fn report(&self, event: TimerEvent) {
+        if let Some(outcomes) = &*self.outcomes.lock().expect("metadata outcomes lock") {
+            let _ = outcomes.send(event);
+        }
+    }
+
     pub(super) fn start(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let refresh = self.clone();
         tokio::spawn(async move {
@@ -211,10 +228,14 @@ impl MetadataRefresh {
                     anchor = checked;
                     delay = remaining;
                 }
+                let sleep = tokio::time::sleep_until(anchor + delay);
+                // 报告的是这次等待本身的截止时刻，测试据此确认任务停在哪个时刻之前。
+                #[cfg(test)]
+                refresh.report(TimerEvent::Armed(sleep.deadline()));
                 tokio::select! {
                     biased;
                     _ = stopped.wait_for(|stopped| *stopped) => break,
-                    _ = tokio::time::sleep_until(anchor + delay) => {},
+                    _ = sleep => {},
                 }
                 if *stopped.borrow() {
                     break;
@@ -222,9 +243,7 @@ impl MetadataRefresh {
                 let outcome = refresh.automatic_refresh().await;
                 anchor = tokio::time::Instant::now();
                 #[cfg(test)]
-                if let Some(outcomes) = &*refresh.outcomes.lock().expect("metadata outcomes lock") {
-                    let _ = outcomes.send(outcome);
-                }
+                refresh.report(TimerEvent::Fired(outcome));
                 match outcome {
                     AutoRefresh::Stopped => break,
                     AutoRefresh::Failed => failures = failures.saturating_add(1),
