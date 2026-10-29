@@ -71,11 +71,12 @@ pub enum LlmEvent {
     },
 }
 
-/// `Finished` 的报告只携带 provider 已报告的结束原因和用量。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// `Finished` 携带结束原因、规范化用量与可选费用估算。
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct AttemptReport {
     pub finish_reason: Option<String>,
     pub usage: Option<TokenUsage>,
+    pub estimated_cost_usd: Option<f64>,
 }
 
 /// 请求明确给出 provider id 与模型 id，不提供默认模型。

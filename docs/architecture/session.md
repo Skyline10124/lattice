@@ -505,6 +505,9 @@ TurnOutcome = Completed | Failed { reason } | Cancelled
   - 未关闭，没有 Owner：执行者已消失，这一轮停在这一步，`outcome` 就是它的结局，见[执行者消失后的 Turn](#执行者消失后的-turn)。
 - Step 节点保留各次尝试与 `end` 的原因，随视图、历史查询和 `session turn` 提供，供诊断与操作员查询使用；前端的对话显示只依据 `TurnSummary` 与后端给出的 notice 给出文字和等级，不从 `end` 或尝试的原因推导。
 - Turn 的 usage 汇总由各次尝试的 usage 得出。Turn 的结束时间是最后一个 Step 关闭时的推进时间；未关闭时，最后一个 Step 的推进时间说明它最后一次有进展是什么时候。
+- 尝试的 `usage` 保存五项可选计数，`estimated_cost_usd` 独立保存可选费用；开始请求时两者均未知，停止、登记调用或完成回复时与实际进度同事务保存。读取不补写旧尝试，也不重新估价。
+- 汇总携带 `attempts`，五项计数与费用各有 `known`（已知小计）、`unknown_attempts` 和 `overflowed`。有尝试而某项全未知时其小计为 null，明确的零保留为 0；没有尝试时是空和 0，由 `attempts=0` 区别于未知请求。`Sent` 也计入未知尝试，Reserved 没有尝试。
+- 单项完整要求未知尝试数为 0 且没有溢出；整体 `kind` 仅在六项均完整时为 `complete`，否则为 `partial`。整数小计溢出饱和到 `u64::MAX`，金额小计溢出饱和到有限的 `f64::MAX`，同时设置该项溢出标记；原始尝试不变。费用完整性与任一 token 项分别计算。
 
 关闭 Step 只写会话库，不读取工作区历史，也不取得工作区操作锁。Turn 与文件变更的关联由工作区历史中每条变更记录的 `TurnId` 与 `InvocationId` 承载，见[私有存储与数据关系](workspace.md#私有存储与数据关系)。
 

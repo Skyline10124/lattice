@@ -471,7 +471,7 @@ mod session_cli {
             "user_node":1,"agent_name":"alpha",
             "accepted_at":"2026-09-27T00:00:00Z","ended_at":"2026-09-27T00:00:01Z",
             "summary":{"outcome":"failed","progress":{"progress":"reserved"},"notice":{"level":"error","text":"process exited"}},
-            "usage":{"kind":"complete","total":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}},
+            "usage":lattice_api::UsageSummary::from_attempts([]),
             "steps":[{"node":2,"key":{"turn_id":"10000000-0000-4000-8000-000000000001","ordinal":0},"progress":{"progress":"reserved"},"end":{"end":"stop","cause":{"cause":"process_exit"}},"attempts":[],"slots":[],"updated_at":"2026-09-27T00:00:01Z"}]
         })).unwrap();
         let text = render_turn(&turn);

@@ -5,7 +5,7 @@
 
 use lattice_conversation::{Protocol, ReplayOrigin};
 
-use crate::protocol::projection::{ProjectionError, request_messages_to_wire, wire_usage};
+use crate::protocol::projection::{ProjectionError, request_messages_to_wire};
 use crate::reply::{PartDelta, PartKind, ProtocolEvent, StringPatch};
 use crate::types::ChatRequest;
 
@@ -71,6 +71,7 @@ pub(super) fn unsupported_part_type(part: &serde_json::Value) -> &str {
 
 #[derive(Default)]
 pub struct GeminiSseParser {
+    usage: super::usage::UsageSnapshot,
     current: Option<(usize, PartKind, bool)>,
     next_index: usize,
     had_tool_calls: bool,
@@ -231,7 +232,7 @@ impl GeminiSseParser {
             if let Some(reason) = candidate["finishReason"].as_str() {
                 self.close_text(&mut events);
                 self.completed = true;
-                match wire_usage(Protocol::GenerateContent, &root) {
+                match self.usage.update(Protocol::GenerateContent, &root) {
                     Ok(Some(usage)) => events.push(ProtocolEvent::Usage(usage)),
                     Ok(None) => {}
                     Err(error) => {
@@ -249,7 +250,7 @@ impl GeminiSseParser {
                 return events;
             }
         }
-        match wire_usage(Protocol::GenerateContent, &root) {
+        match self.usage.update(Protocol::GenerateContent, &root) {
             Ok(Some(usage)) => events.push(ProtocolEvent::Usage(usage)),
             Ok(None) => {}
             Err(error) => events.push(ProtocolEvent::error(error.to_string(), false)),
@@ -412,7 +413,7 @@ mod tests {
         )));
         assert!(events.iter().any(|event| matches!(
             event,
-            LlmEvent::Finished { report: crate::AttemptReport { usage: Some(usage), .. }, .. } if usage.total_tokens == 30
+            LlmEvent::Finished { report: crate::AttemptReport { usage: Some(usage), .. }, .. } if usage.context_tokens() == Some(30)
         )));
         assert!(parser
             .parse_chunk(

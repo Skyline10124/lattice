@@ -324,7 +324,9 @@ Chat Completions 中，模型的 `reasoning_options` 含 toggle 项且 `thinking
 | generateContent | `promptTokenCount` + `toolUsePromptTokenCount` | `cachedContentTokenCount` | — | `candidatesTokenCount` + `thoughtsTokenCount` | `thoughtsTokenCount` |
 | Interactions | `total_input_tokens` + `total_tool_use_tokens` | `total_cached_tokens` | — | `total_output_tokens` + `total_thought_tokens` | `total_thought_tokens` |
 
-- 解析端两种 cache_read 字段都读取，属于无歧义的兼容。
+- 计数保存为逐项可选的 `u64`；缺失或 null 为未知，明确报告的 0 保留为 0，全部未知时整份用量为未知。字段类型或数值范围错误仍为 `MalformedUsage`。
+- Chat Completions 两种缓存读字段同时存在时，优先 `prompt_tokens_details.cached_tokens`，否则取 `prompt_cache_hit_tokens`；只计一次。输入与缓存分项、输出与推理分项之间不校验大小关系，不因 provider 报告不自洽而拒绝或丢弃计数。
+- 流中保存本次尝试的原生累计分项，再按表换算。后续事件缺失或 null 的字段保留此前已知值，明确的 0 可以覆盖；重复累计报告不相加。后续解析失败或尝试停止时仍交付此前已知的快照。
 - 求和的项中有一项缺失时，和按已有的项计算；全部缺失时为未知。
 - Interactions 的 `total_output_tokens` 是否含推理，Google 文档没有写明；表中按不含处理，实现时用真实响应核对，结论写回本表。
 
@@ -338,6 +340,8 @@ Chat Completions 中，模型的 `reasoning_options` 含 toggle 项且 `thinking
 | generateContent、Interactions | 服务端隐式缓存，请求不加字段 | `cache_read` |
 
 缓存键与断点只用 SessionId 和请求结构，不含用户内容。显式断点最多 4 个；Anthropic Messages 的系统提示断点与顶层自动断点合计 2 个，`cache_markers` 合计 2 个。
+
+缓存字段只在历史投影所得的请求副本上添加，不写回会话消息或回放状态。Chat Completions 只在系统提示与最后一条消息各自已有的合法末尾内容块上标记；需要承载断点的非空文本字符串转换为文本块，无合法末块时省略该处断点，不插入空块，也不移到更早的消息。Messages 没有非空系统提示时省略系统断点，`automatic` 的顶层断点仍发送。
 
 ### 费用估算
 
@@ -353,6 +357,7 @@ Chat Completions 中，模型的 `reasoning_options` 含 toggle 项且 `thinking
              ) ÷ 1,000,000
 ```
 
+- 估算值以 `f64` 美元保存，必须有限且非负，保存时不按美分舍入。
 - `input` 或 `output` 未知、或模型没有 `cost.input` 与 `cost.output` 时，这次尝试没有费用。
 - 一轮的费用是各尝试之和；有尝试没有费用时，一轮的费用标为部分。
 - 按上下文长度分档的价格（models.dev 的 `tiers`、`context_over_200k`）不计入，所以是估算。

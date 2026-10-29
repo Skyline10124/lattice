@@ -117,19 +117,18 @@ impl ProtocolParser {
                 let Features::ChatCompletions(features) = features else {
                     unreachable!("resolved features match the protocol")
                 };
-                protocol::chat_completions::build_request_json(
-                    request,
-                    model,
-                    features.reasoning_replay,
-                    origin,
-                )
+                protocol::chat_completions::build_request_json(request, model, features, origin)
             }
             Self::Messages(_) => {
+                let Features::Messages(features) = features else {
+                    unreachable!("resolved features match the protocol")
+                };
                 return protocol::anthropic_messages::build_request_json(
                     request,
                     model,
                     output_limit,
                     context_limit,
+                    features.cache,
                     origin,
                 );
             }
@@ -897,6 +896,242 @@ mod tests {
         let mut request = ChatRequest::new(Vec::new(), crate::ModelTarget::new("test", "model"));
         request.client_request_id = Some("test-session".into());
         request
+    }
+
+    #[test]
+    fn cache_features_mark_only_existing_request_content() {
+        use crate::protocol::{Cache, ChatCompletionsFeatures, MessagesFeatures, ReasoningReplay};
+        use crate::test_reply::{bind_replay_step, cache_controls, wire_to_native};
+        use lattice_conversation::{
+            ConversationItem, MessagePart, MessageRole, MessageSemantic, NativeMessage,
+            ReplayOrigin, StepContent,
+        };
+        use serde_json::json;
+        let markers = |paths: &[&str]| {
+            paths
+                .iter()
+                .map(|path| (path.to_string(), json!({"type":"ephemeral"})))
+                .collect::<Vec<_>>()
+        };
+        let message = |role, text: &str| {
+            ConversationItem::Message(NativeMessage::new(
+                role,
+                None,
+                vec![MessagePart::semantic_only(MessageSemantic::Text {
+                    text: text.into(),
+                })],
+            ))
+        };
+        let mut request = chat_request();
+        request.messages = vec![
+            message(MessageRole::System, "system"),
+            message(MessageRole::User, "question"),
+        ];
+        let history = request.messages.clone();
+        for protocol in [
+            Protocol::ChatCompletions,
+            Protocol::Messages,
+            Protocol::GenerateContent,
+        ] {
+            let origin = ReplayOrigin {
+                protocol,
+                provider_id: "test".into(),
+            };
+            for enabled in [false, true] {
+                let features = match protocol {
+                    Protocol::ChatCompletions => {
+                        Features::ChatCompletions(ChatCompletionsFeatures {
+                            cache_markers: enabled,
+                            ..Default::default()
+                        })
+                    }
+                    Protocol::Messages => Features::Messages(MessagesFeatures {
+                        cache: if enabled {
+                            Cache::Automatic
+                        } else {
+                            Cache::None
+                        },
+                    }),
+                    _ => Features::GenerateContent,
+                };
+                let parser = ProtocolParser::new(protocol).unwrap();
+                let body = parser
+                    .request_body(&request, "model", None, None, features, &origin)
+                    .unwrap();
+                let expected = match protocol {
+                    Protocol::ChatCompletions if enabled => markers(&[
+                        "/messages/0/content/0/cache_control",
+                        "/messages/1/content/0/cache_control",
+                    ]),
+                    Protocol::Messages if enabled => {
+                        markers(&["/cache_control", "/system/0/cache_control"])
+                    }
+                    _ => vec![],
+                };
+                assert_eq!(
+                    cache_controls(&body),
+                    expected,
+                    "{protocol:?}, enabled={enabled}"
+                );
+                assert_eq!(request.messages, history);
+            }
+        }
+        let mut signed_wire: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/projection/anthropic_thinking_tool_use.json"
+        ))
+        .unwrap();
+        signed_wire["content"].as_array_mut().unwrap().truncate(2);
+        let mut signed = wire_to_native(Protocol::Messages, &signed_wire)
+            .unwrap()
+            .bind_zero_tool()
+            .unwrap();
+        signed.provider_origin.as_mut().unwrap().provider_id = "historical-source".into();
+        for with_system in [true, false] {
+            let mut prefix = if with_system {
+                vec![message(MessageRole::System, "system")]
+            } else {
+                vec![]
+            };
+            prefix.push(message(MessageRole::User, "earlier"));
+            prefix.push(ConversationItem::Step(StepContent {
+                assistant: signed.clone(),
+                results: vec![],
+            }));
+            for (protocol, fixture, features) in [
+                (
+                    Protocol::ChatCompletions,
+                    include_str!("../tests/fixtures/projection/openai_assistant_tool_calls.json"),
+                    Features::ChatCompletions(ChatCompletionsFeatures {
+                        cache_markers: true,
+                        ..Default::default()
+                    }),
+                ),
+                (
+                    Protocol::Messages,
+                    include_str!("../tests/fixtures/projection/anthropic_thinking_tool_use.json"),
+                    Features::Messages(MessagesFeatures {
+                        cache: Cache::Automatic,
+                    }),
+                ),
+            ] {
+                let (assistant, results) = bind_replay_step(
+                    wire_to_native(protocol, &serde_json::from_str(fixture).unwrap()).unwrap(),
+                );
+                assert_eq!(results.len(), 2);
+                request.messages = prefix.clone();
+                request
+                    .messages
+                    .push(ConversationItem::Step(StepContent { assistant, results }));
+                let history = request.messages.clone();
+                let origin = ReplayOrigin {
+                    protocol,
+                    provider_id: "other".into(),
+                };
+                let body = ProtocolParser::new(protocol)
+                    .unwrap()
+                    .request_body(&request, "model", None, None, features, &origin)
+                    .unwrap();
+                let expected = match (protocol, with_system) {
+                    (Protocol::ChatCompletions, true) => markers(&[
+                        "/messages/0/content/0/cache_control",
+                        "/messages/5/content/0/cache_control",
+                    ]),
+                    (Protocol::ChatCompletions, false) => {
+                        markers(&["/messages/4/content/0/cache_control"])
+                    }
+                    (Protocol::Messages, true) => {
+                        markers(&["/cache_control", "/system/0/cache_control"])
+                    }
+                    (Protocol::Messages, false) => markers(&["/cache_control"]),
+                    _ => unreachable!(),
+                };
+                assert_eq!(
+                    cache_controls(&body),
+                    expected,
+                    "{protocol:?}, system={with_system}"
+                );
+                let body_text = body.to_string();
+                for private in [
+                    "Need the weather first, then the time; both are independent calls.",
+                    "ErUBCkYIAxgCIkD3c2FmZGVmNTQ2Ny0xMjM0LWFiY2QtZXhhbXBsZXNpZ25hdHVyZQ==",
+                    "The user wants the weather; call get_weather first, then get_time.",
+                ] {
+                    assert!(
+                        !body_text.contains(private),
+                        "跨来源回放保留了私有材料：{protocol:?}"
+                    );
+                }
+                let messages = body["messages"].as_array().unwrap();
+                if protocol == Protocol::ChatCompletions {
+                    assert_eq!(messages[messages.len() - 2]["role"], "tool");
+                    assert_eq!(messages.last().unwrap()["role"], "tool");
+                } else {
+                    assert_eq!(
+                        messages.last().unwrap()["content"]
+                            .as_array()
+                            .unwrap()
+                            .len(),
+                        2
+                    );
+                    assert_eq!(
+                        messages.last().unwrap()["content"][1]["type"],
+                        "tool_result"
+                    );
+                }
+                assert_eq!(request.messages, history);
+            }
+            let reasoning_only = wire_to_native(Protocol::ChatCompletions, &json!({"choices":[{"message":{"content":null,"reasoning_content":"reasoning-only"}}]})).unwrap().bind_zero_tool().unwrap();
+            for (assistant, expected_content) in [
+                (
+                    NativeMessage::new(MessageRole::Assistant, None, vec![]),
+                    json!(null),
+                ),
+                (
+                    reasoning_only,
+                    json!([{"type":"thinking","thinking":[{"type":"text","text":"reasoning-only"}]}]),
+                ),
+            ] {
+                request.messages = prefix.clone();
+                request.messages.push(ConversationItem::Step(StepContent {
+                    assistant,
+                    results: vec![],
+                }));
+                let history = request.messages.clone();
+                let origin = ReplayOrigin {
+                    protocol: Protocol::ChatCompletions,
+                    provider_id: "test".into(),
+                };
+                let body = ProtocolParser::new(Protocol::ChatCompletions)
+                    .unwrap()
+                    .request_body(
+                        &request,
+                        "model",
+                        None,
+                        None,
+                        Features::ChatCompletions(ChatCompletionsFeatures {
+                            cache_markers: true,
+                            reasoning_replay: ReasoningReplay::ContentChunks,
+                            ..Default::default()
+                        }),
+                        &origin,
+                    )
+                    .unwrap();
+                let messages = body["messages"].as_array().unwrap();
+                assert_eq!(
+                    messages.last().unwrap(),
+                    &json!({"role":"assistant","content":expected_content})
+                );
+                assert_eq!(
+                    cache_controls(&body),
+                    if with_system {
+                        markers(&["/messages/0/content/0/cache_control"])
+                    } else {
+                        vec![]
+                    }
+                );
+                assert_eq!(request.messages, history);
+            }
+        }
     }
 
     async fn resolved_request(protocol: &str, url: &str, key: &str) -> crate::ResolvedRequest {

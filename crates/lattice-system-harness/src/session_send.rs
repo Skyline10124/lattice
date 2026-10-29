@@ -467,8 +467,16 @@ fn summary(value: &Value) -> Result<TurnSummary, String> {
 }
 fn usage(value: &Value) -> Result<(), String> {
     if !value.is_null() {
-        for key in ["prompt_tokens", "completion_tokens", "total_tokens"] {
-            uint(value, key)?;
+        if !value.is_object() {
+            return Err("usage must be an object".into());
+        }
+        for key in ["input", "cache_read", "cache_write", "output", "reasoning"] {
+            let field = value
+                .get(key)
+                .ok_or_else(|| format!("missing usage.{key}"))?;
+            if !field.is_null() && field.as_u64().is_none() {
+                return Err(format!("invalid usage.{key}"));
+            }
         }
     }
     Ok(())
@@ -516,6 +524,16 @@ fn step_detail(value: &Value) -> Result<(Vec<AttemptState>, Vec<Slot>), String> 
         let origin = &attempt["origin"];
         validate_replay_origin(origin)?;
         usage(attempt.get("usage").ok_or("missing usage")?)?;
+        let cost = attempt
+            .get("estimated_cost_usd")
+            .ok_or("missing estimated_cost_usd")?;
+        if !cost.is_null()
+            && !cost
+                .as_f64()
+                .is_some_and(|value| value.is_finite() && value >= 0.0)
+        {
+            return Err("invalid estimated_cost_usd".into());
+        }
         attempts.push(match string(&attempt["progress"], "progress")? {
             "sent" => AttemptState::Sent,
             "ended" => {

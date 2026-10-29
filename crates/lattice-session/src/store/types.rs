@@ -176,17 +176,7 @@ pub struct RetryNotice {
     pub delay_ms: u64,
     pub notice: Notice,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum UsageSummary {
-    Complete {
-        total: TokenUsage,
-    },
-    Partial {
-        known: TokenUsage,
-        unknown_attempts: u32,
-    },
-}
+pub use lattice_conversation::UsageSummary;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "progress", rename_all = "snake_case", deny_unknown_fields)]
@@ -206,6 +196,8 @@ impl StepProgress {
 pub struct AttemptRecord {
     pub origin: AttemptOrigin,
     pub usage: Option<TokenUsage>,
+    #[serde(with = "lattice_conversation::usage::estimated_cost_usd")]
+    pub estimated_cost_usd: Option<f64>,
     pub progress: AttemptProgress,
     pub retry_delay_ms: Option<u64>,
 }
@@ -346,7 +338,7 @@ pub struct AcceptTurn {
     pub accepted_at: Timestamp,
     pub agent_selection: AgentSelection,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AcceptedTurn {
     Accepted(TurnDetail),
     Existing(TurnDetail),
@@ -356,6 +348,7 @@ pub struct AttemptStopped {
     pub key: ModelAttemptKey,
     pub origin: AttemptOrigin,
     pub usage: Option<TokenUsage>,
+    pub estimated_cost_usd: Option<f64>,
     pub cause: StopCause,
     pub diagnostic: AttemptDiagnostic,
     pub retry_delay_ms: Option<u64>,
@@ -365,6 +358,7 @@ pub struct CompleteReply {
     pub key: ModelAttemptKey,
     pub origin: AttemptOrigin,
     pub usage: Option<TokenUsage>,
+    pub estimated_cost_usd: Option<f64>,
     pub message: NativeMessage<UnboundToolCall>,
 }
 #[derive(Clone)]
@@ -427,7 +421,7 @@ pub enum CloseStep {
     StopExecuting { key: StepKey, stop: DispatchStop },
     StopBetweenRequests { turn_id: TurnId, cause: StopCause },
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClosedStep {
     pub step: StepDetail,
     pub next_node: Option<NodeRef>,
@@ -486,7 +480,7 @@ pub struct SessionLog {
     pub unclosed_turn: Option<TurnId>,
     pub nodes: Vec<LogRow>,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TurnDetail {
     pub turn_id: TurnId,
@@ -496,10 +490,10 @@ pub struct TurnDetail {
     pub accepted_at: Timestamp,
     pub ended_at: Timestamp,
     pub summary: TurnSummary,
-    pub usage: UsageSummary,
+    pub usage: Box<UsageSummary>,
     pub steps: Vec<StepDetail>,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StepDetail {
     pub node: NodeId,
@@ -510,12 +504,14 @@ pub struct StepDetail {
     pub slots: Vec<SlotDetail>,
     pub updated_at: Timestamp,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AttemptDetail {
     pub attempt: u32,
     pub origin: AttemptOrigin,
     pub usage: Option<TokenUsage>,
+    #[serde(with = "lattice_conversation::usage::estimated_cost_usd")]
+    pub estimated_cost_usd: Option<f64>,
     pub progress: AttemptProgressDetail,
     pub end: AttemptEndDetail,
     pub retry_delay_ms: Option<u64>,

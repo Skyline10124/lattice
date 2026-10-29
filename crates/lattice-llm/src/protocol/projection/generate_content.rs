@@ -201,36 +201,7 @@ pub(crate) fn tool_result_messages(
     })])
 }
 
-/// `usageMetadata: {promptTokenCount, candidatesTokenCount, totalTokenCount}`;
-/// the neutral total is the sum when the body omits `totalTokenCount`.
+/// 完整 wire 与流式响应共用原生分项的换算。
 pub(crate) fn usage(wire: &Value) -> Result<Option<TokenUsage>, ProjectionError> {
-    let Some(usage) = wire.get("usageMetadata") else {
-        return Ok(None);
-    };
-    if usage.is_null() {
-        return Ok(None);
-    }
-    let malformed = |detail: String| ProjectionError::MalformedUsage {
-        provider: Protocol::GenerateContent,
-        detail,
-    };
-    let field = |name: &str| -> Result<u64, ProjectionError> {
-        usage
-            .get(name)
-            .and_then(Value::as_u64)
-            .ok_or_else(|| malformed(format!("usageMetadata.{name} is not an integer")))
-    };
-    let prompt_tokens = field("promptTokenCount")?;
-    let completion_tokens = field("candidatesTokenCount")?;
-    let total_tokens = match usage.get("totalTokenCount") {
-        Some(total) => total.as_u64().ok_or_else(|| {
-            malformed("usageMetadata.totalTokenCount is not an integer".to_string())
-        })?,
-        None => prompt_tokens.saturating_add(completion_tokens),
-    };
-    Ok(Some(TokenUsage {
-        prompt_tokens,
-        completion_tokens,
-        total_tokens,
-    }))
+    super::super::usage::UsageSnapshot::default().update(Protocol::GenerateContent, wire)
 }

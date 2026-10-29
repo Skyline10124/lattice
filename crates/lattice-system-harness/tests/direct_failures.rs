@@ -135,6 +135,79 @@ fn provider_failure(name: &str, test: &str, script: SseScript, partial: bool) {
     );
 }
 #[test]
+fn reported_usage_survives_failed_attempt_and_retry_without_partial_reply() {
+    use serde_json::json;
+    let driver = driver();
+    let (world, spec) = direct_world(
+        "failure-usage-retry",
+        "failure",
+        "[]",
+        "[llm.retry]\nmax_retries = 1\ninitial_delay_ms = 1\nmax_delay_ms = 1\n",
+    );
+    let server = wire_fake_llm(
+        &world,
+        "failure",
+        sequence(vec![
+            SseScript::Chunks {
+                chunks: vec![
+                    json!({"choices":[{"delta":{"content":"partial"}}],"usage":{"prompt_tokens":10,"prompt_tokens_details":{"cached_tokens":0},"completion_tokens":2}}),
+                    json!({"error":{"type":"server_error","message":"retry this attempt"}}),
+                ],
+            },
+            SseScript::plain("complete"),
+        ]),
+    );
+    let evidence = evidence(&world, &spec);
+    let send = SessionSendDriver::new(&driver, &world, &spec, "failure");
+    let outcome = send.send("retry after reporting usage").unwrap();
+    let detail = send
+        .run_command(&[
+            "--json",
+            "session",
+            "turn",
+            outcome.accepted_turn_id().unwrap(),
+        ])
+        .unwrap();
+    let result = (|| {
+        assert_clean_send(&outcome)?;
+        require(
+            outcome.has_completed() && server.captured_requests().len() == 2,
+            "failed attempt retried once",
+        )?;
+        let saved: Value = serde_json::from_slice(&detail.stdout).unwrap();
+        let attempts = saved["steps"][0]["attempts"].as_array().unwrap();
+        require(
+            attempts.len() == 2
+                && attempts[0]["usage"]
+                    == json!({"input":10,"cache_read":0,"cache_write":null,"output":2,"reasoning":null})
+                && attempts[0]["estimated_cost_usd"].is_null(),
+            "failed attempt retains reported counters and unknown fee",
+        )?;
+        let entries = outcome.entries();
+        let entry = entries.iter().find(|entry| entry.step().is_some()).unwrap();
+        let reply = &entry.raw["content"]["reply"];
+        require(
+            saved["steps"][0]["end"]["end"] == "finish"
+                && reply.is_object()
+                && !reply.to_string().contains("partial"),
+            "partial reply does not enter history",
+        )?;
+        require(
+            same_turn(&final_turn(&outcome), &saved),
+            "live entries match persisted attempts",
+        )
+    })();
+    finish_failure(
+        evidence,
+        &send,
+        &[("retry turn", &outcome.command), ("turn detail", &detail)],
+        server.captured_requests(),
+        result,
+        "reported_usage_survives_failed_attempt_and_retry_without_partial_reply",
+    );
+}
+
+#[test]
 fn direct_failure_http_error_no_retry_commits_error() {
     provider_failure(
         "direct-failure-http-error",

@@ -810,16 +810,18 @@ impl App {
                 _ => None,
             })
             .unzip();
-        self.context_tokens = self.entries.values().rev().find_map(|entry| match entry {
-            ConversationEntry::Step {
-                content: Node::Step { attempts, .. },
-                ..
-            } => attempts
-                .iter()
-                .rev()
-                .find_map(|attempt| attempt.usage.map(|usage| usage.total_tokens)),
-            _ => None,
-        });
+        self.context_tokens = self
+            .entries
+            .values()
+            .rev()
+            .find_map(|entry| match entry {
+                ConversationEntry::Step {
+                    content: Node::Step { attempts, .. },
+                    ..
+                } => attempts.iter().rev().find_map(|attempt| attempt.usage),
+                _ => None,
+            })
+            .and_then(|usage| usage.context_tokens());
     }
 
     fn notice_once(&mut self, status: Status) {

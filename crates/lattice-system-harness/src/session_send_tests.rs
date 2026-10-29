@@ -38,10 +38,10 @@ fn step(node: u64, ordinal: u64, progress: Value, summary: Option<Value>, reply:
     if reply.is_empty() {
         entry["content"]["reply"] = Value::Null;
     } else {
-        let attempt = json!({"origin":{"protocol":"chat-completions","provider_id":"primary"}, "usage":null,
+        let attempt = json!({"origin":{"protocol":"chat-completions","provider_id":"primary"}, "usage":null,"estimated_cost_usd":null,
             "progress":{"progress":"ended","end":{"end":"completed"},"diagnostic":null}, "retry_delay_ms":null});
         entry["content"]["attempts"] = json!([attempt]);
-        entry["step"]["attempts"] = json!([{"attempt":0,"origin":{"protocol":"chat-completions","provider_id":"primary"},"usage":null,
+        entry["step"]["attempts"] = json!([{"attempt":0,"origin":{"protocol":"chat-completions","provider_id":"primary"},"usage":null,"estimated_cost_usd":null,
             "progress":{"progress":"ended","end":{"end":"completed"},"diagnostic":null},
             "end":{"end":"completed","step":{"turn_id":"t","model_step_ordinal":ordinal}},"retry_delay_ms":null}]);
     }
@@ -501,7 +501,7 @@ fn view_state_appends_text_and_rejects_regression() {
 #[test]
 fn view_state_keeps_written_facts_and_allows_repeated_values() {
     let executing = json!({"progress":"executing"});
-    let attempt = json!({"attempt":0,"origin":{"protocol":"chat-completions","provider_id":"primary"},"usage":null,
+    let attempt = json!({"attempt":0,"origin":{"protocol":"chat-completions","provider_id":"primary"},"usage":null,"estimated_cost_usd":null,
         "progress":{"progress":"ended","end":{"end":"completed"},"diagnostic":null},
         "end":{"end":"completed","step":{"turn_id":"t","model_step_ordinal":0}},"retry_delay_ms":null});
     let slot = |id: &str, state: &str, outcome: &str| {

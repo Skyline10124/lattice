@@ -25,13 +25,14 @@ async fn run_turn_result_and_saved_nodes_preserve_contract_fields() {
     assert_eq!(result.summary.outcome, PublicTurnOutcome::Completed);
     assert_eq!(
         result.usage,
-        UsageSummary::Complete {
-            total: TokenUsage {
-                prompt_tokens: 10,
-                completion_tokens: 5,
-                total_tokens: 15
-            }
-        }
+        UsageSummary::from_attempts([(
+            Some(TokenUsage {
+                input: Some(10),
+                output: Some(5),
+                ..Default::default()
+            }),
+            None
+        )])
     );
     let read = fixture.store.begin_read().unwrap();
     assert_eq!(read.list(None, 10).unwrap().items.len(), 1);
@@ -108,17 +109,7 @@ async fn provider_failure_preserves_notice_in_step_without_partial_reply() {
             .len(),
         3
     );
-    assert_eq!(
-        detail.usage,
-        UsageSummary::Partial {
-            known: TokenUsage {
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                total_tokens: 0
-            },
-            unknown_attempts: 1
-        }
-    );
+    assert_eq!(*detail.usage, UsageSummary::from_attempts([(None, None)]));
 }
 
 struct CancelOnDone(Arc<AtomicBool>);
@@ -148,9 +139,9 @@ impl LlmClient for CancelOnDone {
         events.push(ScriptEvent::Done {
             finish_reason: "tool_calls".into(),
             usage: Some(TokenUsage {
-                prompt_tokens: 5,
-                completion_tokens: 2,
-                total_tokens: 7,
+                input: Some(5),
+                output: Some(2),
+                ..Default::default()
             }),
         });
         Ok(Box::pin(
@@ -184,14 +175,15 @@ async fn completed_attempt_usage_survives_cancellation_before_dispatch() {
     let (detail, _) = fixture.run(request).await;
     assert_eq!(detail.summary.outcome, PublicTurnOutcome::Cancelled);
     assert_eq!(
-        detail.usage,
-        UsageSummary::Complete {
-            total: TokenUsage {
-                prompt_tokens: 5,
-                completion_tokens: 2,
-                total_tokens: 7
-            }
-        }
+        *detail.usage,
+        UsageSummary::from_attempts([(
+            Some(TokenUsage {
+                input: Some(5),
+                output: Some(2),
+                ..Default::default()
+            }),
+            None
+        )])
     );
     assert!(matches!(
         &detail.steps[0].progress,

@@ -11,6 +11,7 @@ mod common;
 mod features;
 pub(crate) mod generate_content;
 pub mod projection;
+mod usage;
 
 pub(crate) use features::{
     Cache, ChatCompletionsFeatures, EffortParam, Features, MessagesFeatures, ReasoningReplay,

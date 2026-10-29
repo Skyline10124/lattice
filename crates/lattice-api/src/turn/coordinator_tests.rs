@@ -57,6 +57,7 @@ fn origin() -> AttemptOrigin {
 }
 fn reply(turn_id: TurnId) -> CompleteReply {
     CompleteReply {
+        estimated_cost_usd: None,
         key: ModelAttemptKey {
             turn_id,
             model_step_ordinal: 0,

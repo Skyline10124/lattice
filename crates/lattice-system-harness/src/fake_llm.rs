@@ -79,9 +79,22 @@ pub struct CapturedRequest {
     pub received_ms: u64,
 }
 
+/// 场景指定 provider 原生分项；Messages 的开始与末尾报告分别编排。
+#[derive(Debug, Clone)]
+pub enum NativeUsage {
+    ChatCompletions(Value),
+    Messages { start: Value, delta: Value },
+    GenerateContent(Value),
+}
+
 /// The kind of SSE script the fake server returns for a request.
 #[derive(Debug, Clone)]
 pub enum SseScript {
+    /// 保留内层文本或工具脚本，只替换对应协议原生的 usage 事件。
+    WithUsage {
+        script: Box<SseScript>,
+        usage: NativeUsage,
+    },
     /// 手工编排的合法 OpenAI chunks，保持跨类型到达顺序；结尾自动添加 DONE。
     Chunks { chunks: Vec<Value> },
     /// Plain assistant text. Emits one or more `delta.content` chunks then a
@@ -1482,9 +1495,46 @@ fn has_key_anywhere(value: &Value, key: &str) -> bool {
 /// `(call id, Tool name, arguments JSON)` of one scripted Tool call.
 type ScriptedCall = (String, String, String);
 
-/// Render `script` in `protocol`. Anthropic and Gemini render the text and
-/// Tool call scripts; the other scripts exist only in the OpenAI protocol.
+/// 按协议渲染文本、工具与原生用量，保留脚本控制的事件顺序。
 fn render(protocol: Protocol, script: &SseScript) -> Option<String> {
+    if let SseScript::WithUsage { script, usage } = script {
+        if !matches!(
+            (protocol, usage),
+            (Protocol::OpenAi, NativeUsage::ChatCompletions(_))
+                | (Protocol::Anthropic, NativeUsage::Messages { .. })
+                | (Protocol::Gemini, NativeUsage::GenerateContent(_))
+        ) {
+            return None;
+        }
+        let rendered = render(protocol, script)?;
+        let mut out = String::new();
+        for line in rendered.lines() {
+            if let Some(data) = line.strip_prefix("data: ")
+                && let Ok(mut root) = serde_json::from_str::<Value>(data)
+            {
+                match usage {
+                    NativeUsage::ChatCompletions(value) if root.get("usage").is_some() => {
+                        root["usage"] = value.clone()
+                    }
+                    NativeUsage::Messages { start, .. } if root["type"] == "message_start" => {
+                        root["message"]["usage"] = start.clone()
+                    }
+                    NativeUsage::Messages { delta, .. } if root["type"] == "message_delta" => {
+                        root["usage"] = delta.clone()
+                    }
+                    NativeUsage::GenerateContent(value) if root.get("usageMetadata").is_some() => {
+                        root["usageMetadata"] = value.clone()
+                    }
+                    _ => {}
+                }
+                out.push_str(&format!("data: {root}\n"));
+            } else {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        return Some(out);
+    }
     if protocol == Protocol::OpenAi {
         return Some(render_script(script));
     }
@@ -1628,6 +1678,10 @@ fn render_gemini(texts: &[String], calls: &[ScriptedCall], finish: &str) -> Stri
 fn render_script(script: &SseScript) -> String {
     let mut out = String::new();
     match script {
+        SseScript::WithUsage { .. } => {
+            return render(Protocol::OpenAi, script)
+                .expect("HTTP/1 scripts use Chat Completions usage");
+        }
         SseScript::Chunks { chunks } => {
             for chunk in chunks {
                 out.push_str(&format!("data: {chunk}\n\n"));

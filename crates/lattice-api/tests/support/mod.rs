@@ -157,6 +157,7 @@ impl ReservedClient {
             .register_calls(
                 &lock,
                 CompleteReply {
+                    estimated_cost_usd: None,
                     key,
                     origin,
                     usage: None,

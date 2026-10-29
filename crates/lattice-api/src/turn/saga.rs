@@ -299,6 +299,7 @@ pub(crate) async fn run_coordinator_saga(
                                 ModelStopCause::Deadline
                             },
                             usage: None,
+                            estimated_cost_usd: None,
                             diagnostic: Default::default(),
                         }),
                     }
@@ -314,11 +315,13 @@ pub(crate) async fn run_coordinator_saga(
                 Ok(ModelStepAttempt::Complete {
                     message,
                     usage,
+                    estimated_cost_usd,
                     finish_reason,
                 }) => {
                     live.observer.emit(TurnEvent::ModelFinished {
                         key,
                         usage,
+                        estimated_cost_usd,
                         finish_reason,
                     });
                     break CompleteReply {
@@ -326,16 +329,19 @@ pub(crate) async fn run_coordinator_saga(
                         origin: origin.clone(),
                         message,
                         usage,
+                        estimated_cost_usd,
                     };
                 }
                 Ok(ModelStepAttempt::Stopped {
                     cause,
                     usage,
+                    estimated_cost_usd,
                     diagnostic,
                 }) => AttemptStopped {
                     key,
                     origin: origin.clone(),
                     usage,
+                    estimated_cost_usd,
                     retry_delay_ms: None,
                     cause: map_stop(cause),
                     diagnostic: AttemptDiagnostic {
@@ -356,6 +362,7 @@ pub(crate) async fn run_coordinator_saga(
                         key,
                         origin: origin.clone(),
                         usage: None,
+                        estimated_cost_usd: None,
                         retry_delay_ms: None,
                         cause: StopCause::ProviderError {
                             retryable: retryable
@@ -371,6 +378,7 @@ pub(crate) async fn run_coordinator_saga(
                     key,
                     origin: origin.clone(),
                     usage: None,
+                    estimated_cost_usd: None,
                     retry_delay_ms: None,
                     cause: StopCause::ProviderError { retryable: false },
                     diagnostic: AttemptDiagnostic {
@@ -429,6 +437,7 @@ pub(crate) async fn run_coordinator_saga(
         }
         let key = reply.key;
         let usage = reply.usage;
+        let estimated_cost_usd = reply.estimated_cost_usd;
         let origin = reply.origin.clone();
         let registered = match coordinator.register(reply).await {
             Ok(calls) => calls,
@@ -439,6 +448,7 @@ pub(crate) async fn run_coordinator_saga(
                         key,
                         origin: origin.clone(),
                         usage,
+                        estimated_cost_usd,
                         retry_delay_ms: None,
                         cause: StopCause::InvalidBatch,
                         diagnostic: AttemptDiagnostic::default(),

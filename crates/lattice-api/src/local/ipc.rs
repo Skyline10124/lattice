@@ -20,7 +20,7 @@ use tokio::{
 };
 use zeroize::Zeroizing;
 
-pub(super) const MAGIC: &[u8; 8] = b"LTLOCAL8";
+pub(super) const MAGIC: &[u8; 8] = b"LTLOCAL9";
 pub(super) const MAX_FRAME: usize = 16 * 1024 * 1024;
 pub(super) const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const INCOMPATIBLE_BACKEND: &str = "the running backend is an incompatible older version; stop it with the older binary's `lattice daemon stop`";
@@ -534,9 +534,15 @@ mod frame_tests {
     use super::*;
 
     #[tokio::test]
-    async fn v8_accepts_current_frames_and_rejects_old_empty_and_oversized_frames() {
+    async fn v9_accepts_current_frames_and_rejects_old_empty_and_oversized_frames() {
         for (magic, length, payload, expected) in [
-            (*b"LTLOCAL8", 4_u32, b"null".as_slice(), None),
+            (*b"LTLOCAL9", 4_u32, b"null".as_slice(), None),
+            (
+                *b"LTLOCAL8",
+                4,
+                b"null".as_slice(),
+                Some(LocalErrorKind::IncompatibleBackend),
+            ),
             (
                 *b"LTLOCAL7",
                 4,
@@ -556,77 +562,85 @@ mod frame_tests {
                 Some(LocalErrorKind::IncompatibleBackend),
             ),
             (
-                *b"LTLOCAL9",
+                *b"LTLOCAL:",
                 4,
                 b"null".as_slice(),
                 Some(LocalErrorKind::IncompatibleBackend),
             ),
             (
-                *b"XXLOCAL8",
+                *b"XXLOCAL9",
                 4,
                 b"null".as_slice(),
                 Some(LocalErrorKind::Protocol),
             ),
             (
-                *b"LTLOCAL8",
+                *b"LTLOCAL9",
                 0,
                 b"".as_slice(),
                 Some(LocalErrorKind::Protocol),
             ),
             (
-                *b"LTLOCAL8",
+                *b"LTLOCAL9",
                 (MAX_FRAME + 1) as u32,
                 b"".as_slice(),
                 Some(LocalErrorKind::Protocol),
             ),
         ] {
-            let (mut sender, mut receiver) = UnixStream::pair().unwrap();
-            sender.write_all(&magic).await.unwrap();
-            sender.write_u32(length).await.unwrap();
-            sender.write_all(payload).await.unwrap();
-            let result = read::<serde_json::Value>(&mut receiver).await;
-            match expected {
-                None => assert_eq!(result.unwrap(), serde_json::Value::Null),
-                Some(kind) => {
-                    let error = result.unwrap_err();
-                    assert_eq!(error.kind, kind, "{}", String::from_utf8_lossy(&magic));
-                    if kind == LocalErrorKind::IncompatibleBackend {
-                        let expected = if magic > *MAGIC {
-                            NEWER_BACKEND
-                        } else {
-                            INCOMPATIBLE_BACKEND
-                        };
-                        assert_eq!(error.message, expected);
+            tokio::time::timeout(Duration::from_secs(1), async {
+                let (mut sender, mut receiver) = UnixStream::pair().unwrap();
+                sender.write_all(&magic).await.unwrap();
+                sender.write_u32(length).await.unwrap();
+                sender.write_all(payload).await.unwrap();
+                let result = read::<serde_json::Value>(&mut receiver).await;
+                match expected {
+                    None => assert_eq!(result.unwrap(), serde_json::Value::Null),
+                    Some(kind) => {
+                        let error = result.unwrap_err();
+                        assert_eq!(error.kind, kind, "{}", String::from_utf8_lossy(&magic));
+                        if kind == LocalErrorKind::IncompatibleBackend {
+                            let expected = if magic > *MAGIC {
+                                NEWER_BACKEND
+                            } else {
+                                INCOMPATIBLE_BACKEND
+                            };
+                            assert_eq!(error.message, expected);
+                        }
                     }
                 }
-            }
+            })
+            .await
+            .expect("IPC frame case timed out");
         }
     }
 
     #[tokio::test]
     async fn backend_answers_a_foreign_magic_with_its_own_before_closing() {
-        let (mut client, mut backend) = UnixStream::pair().unwrap();
-        // 字面量模拟下一版客户端，不能从当前魔数推导。
-        client.write_all(b"LTLOCAL9").await.unwrap();
-        client.write_u32(4).await.unwrap();
-        client.write_all(b"null").await.unwrap();
-        let error = read_request::<serde_json::Value>(&mut backend)
-            .await
-            .unwrap_err();
-        assert_eq!(error.kind, LocalErrorKind::IncompatibleBackend);
-        drop(backend);
-        let mut reply = [0; 8];
-        client.read_exact(&mut reply).await.unwrap();
-        assert_eq!(&reply, MAGIC, "backend must announce its own magic");
-        let len = client.read_u32().await.unwrap() as usize;
-        client.read_exact(&mut vec![0; len]).await.unwrap();
-        // 后台没读完的请求留在它的接收队列里，Linux 让这一端读到 ECONNRESET；两者都表示已关闭。
-        let closed = client.read(&mut [0; 1]).await;
-        assert!(
-            matches!(&closed, Ok(0))
-                || matches!(&closed, Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset),
-            "connection must close after the announcement: {closed:?}"
-        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            let (mut client, mut backend) = UnixStream::pair().unwrap();
+            // 字面量模拟下一版客户端，不能从当前魔数推导。
+            client.write_all(b"LTLOCAL:").await.unwrap();
+            client.write_u32(4).await.unwrap();
+            client.write_all(b"null").await.unwrap();
+            let error = read_request::<serde_json::Value>(&mut backend)
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind, LocalErrorKind::IncompatibleBackend);
+            drop(backend);
+            let mut reply = [0; 8];
+            client.read_exact(&mut reply).await.unwrap();
+            assert_eq!(&reply, MAGIC, "backend must announce its own magic");
+            let len = client.read_u32().await.unwrap() as usize;
+            client.read_exact(&mut vec![0; len]).await.unwrap();
+            // 后台没读完的请求留在它的接收队列里，Linux 让这一端读到 ECONNRESET；两者都表示已关闭。
+            let closed = client.read(&mut [0; 1]).await;
+            assert!(
+                matches!(&closed, Ok(0))
+                    || matches!(&closed, Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset),
+                "connection must close after the announcement: {closed:?}"
+            );
+        })
+        .await
+        .expect("foreign IPC magic case timed out");
     }
 
     /// harness 不能依赖产品 crate，只能写死魔数；升级时在这里失败并指出要改哪个文件。

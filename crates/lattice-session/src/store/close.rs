@@ -3,7 +3,6 @@
 
 use super::*;
 use lancet_protocol::{CellEvidenceTriple, CepError, CepErrorCode, InvocationBinding};
-use lattice_conversation::TokenUsage;
 
 /// 上游先脱敏；本函数仅按 Unicode 字符数执行持久诊断上限。
 pub fn bound_provider_diagnostic(already_redacted: &str) -> String {
@@ -153,27 +152,11 @@ pub fn resolve_step(progress: &StepProgress, slots: &[InvocationSlot]) -> Result
 }
 
 pub(super) fn usage<'a>(attempts: impl IntoIterator<Item = &'a AttemptRecord>) -> UsageSummary {
-    let mut total = TokenUsage {
-        prompt_tokens: 0,
-        completion_tokens: 0,
-        total_tokens: 0,
-    };
-    let mut unknown = 0;
-    for attempt in attempts {
-        if let Some(u) = attempt.usage {
-            total = total.saturating_add(u);
-        } else {
-            unknown += 1;
-        }
-    }
-    if unknown == 0 {
-        UsageSummary::Complete { total }
-    } else {
-        UsageSummary::Partial {
-            known: total,
-            unknown_attempts: unknown,
-        }
-    }
+    UsageSummary::from_attempts(
+        attempts
+            .into_iter()
+            .map(|attempt| (attempt.usage, attempt.estimated_cost_usd)),
+    )
 }
 
 pub(super) fn outcome(
@@ -260,7 +243,10 @@ pub fn retry_notices(attempts: &[AttemptRecord]) -> Result<Vec<RetryNotice>> {
 pub(super) fn completed(reply: &CompleteReply) -> AttemptRecord {
     AttemptRecord {
         origin: reply.origin.clone(),
-        usage: reply.usage,
+        usage: reply
+            .usage
+            .and_then(lattice_conversation::TokenUsage::normalized),
+        estimated_cost_usd: reply.estimated_cost_usd,
         progress: AttemptProgress::Ended {
             end: AttemptEnd::Completed,
             diagnostic: AttemptDiagnostic::default(),

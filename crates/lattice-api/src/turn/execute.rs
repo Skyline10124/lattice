@@ -407,7 +407,7 @@ pub async fn run_turn(
             turn_id: id,
         },
         summary: detail.summary,
-        usage: detail.usage,
+        usage: *detail.usage,
         steps: detail.steps,
     })
 }

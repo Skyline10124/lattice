@@ -87,6 +87,7 @@ pub enum TurnEvent {
         key: lancet_protocol::ModelAttemptKey,
         finish_reason: Option<String>,
         usage: Option<lattice_conversation::TokenUsage>,
+        estimated_cost_usd: Option<f64>,
     },
     CallsRegistered {
         key: lattice_session::store::StepKey,
