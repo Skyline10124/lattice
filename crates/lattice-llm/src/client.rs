@@ -646,26 +646,41 @@ const MAX_TLS_ROOTS: usize = 1024;
 const MAX_TLS_ROOT_BYTES: usize = 65_536;
 const MAX_TLS_ROOT_TOTAL_BYTES: usize = 4 * 1024 * 1024;
 
-/// 按个数、单张大小与总字节保留前缀内的根。
-/// 超限的根记警告后丢弃，不让整份信任集拖垮不需要 TLS 的端点。
-/// 截断只减少信任锚。
-pub(crate) fn select_root_ders(roots_der: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+/// 按原顺序保留根证书，直到个数或总字节达到上限。
+///
+/// 单张超过大小上限或无法解析的根记警告后跳过，不占名额；一旦个数或累计字节
+/// 达到上限就停止，之后的根全部不信任，所以保留的总是可用根的有序前缀。
+/// 截断只减少信任锚，被截掉的 CA 签发的 HTTPS 请求会失败。
+fn select_roots<T, E: std::fmt::Display>(
+    roots_der: Vec<Vec<u8>>,
+    parse: impl Fn(&[u8]) -> Result<T, E>,
+) -> Vec<(Vec<u8>, T)> {
     let mut kept = Vec::new();
     let mut total = 0usize;
     let mut skipped_large = 0usize;
+    let mut skipped_invalid = 0usize;
     let mut truncated = 0usize;
-    for der in roots_der {
+    let mut roots = roots_der.into_iter();
+    while let Some(der) = roots.next() {
         if der.len() > MAX_TLS_ROOT_BYTES {
             skipped_large += 1;
             continue;
         }
         if kept.len() == MAX_TLS_ROOTS || total.saturating_add(der.len()) > MAX_TLS_ROOT_TOTAL_BYTES
         {
-            truncated += 1;
-            continue;
+            truncated = 1 + roots.len();
+            break;
         }
-        total += der.len();
-        kept.push(der);
+        match parse(&der) {
+            Ok(parsed) => {
+                total += der.len();
+                kept.push((der, parsed));
+            }
+            Err(error) => {
+                skipped_invalid += 1;
+                tracing::warn!(%error, "skipping invalid TLS root certificate");
+            }
+        }
     }
     if skipped_large > 0 {
         tracing::warn!(
@@ -673,12 +688,15 @@ pub(crate) fn select_root_ders(roots_der: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
             "skipped TLS roots larger than {MAX_TLS_ROOT_BYTES} bytes"
         );
     }
+    if skipped_invalid > 0 {
+        tracing::warn!(skipped_invalid, "skipped invalid TLS root certificates");
+    }
     if truncated > 0 {
         tracing::warn!(
             kept = kept.len(),
             total,
             truncated,
-            "truncated TLS roots to the certificate limits"
+            "truncated TLS roots to the certificate limits; later roots are not trusted"
         );
     }
     kept
@@ -687,20 +705,9 @@ pub(crate) fn select_root_ders(roots_der: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
 pub(crate) fn load_bounded_roots(
     roots_der: Vec<Vec<u8>>,
 ) -> (Vec<Vec<u8>>, Vec<reqwest::Certificate>) {
-    let mut ders = Vec::new();
-    let mut certificates = Vec::new();
-    for der in select_root_ders(roots_der) {
-        match reqwest::Certificate::from_der(&der) {
-            Ok(certificate) => {
-                ders.push(der);
-                certificates.push(certificate);
-            }
-            Err(error) => {
-                tracing::warn!(%error, "skipping invalid TLS root certificate");
-            }
-        }
-    }
-    (ders, certificates)
+    select_roots(roots_der, reqwest::Certificate::from_der)
+        .into_iter()
+        .unzip()
 }
 
 /// 网关为单次请求提供解析结果，包含该 Turn 对应 endpoint 的 client。
@@ -915,18 +922,108 @@ mod tests {
             .unwrap()
     }
 
-    #[test]
-    fn root_selection_keeps_a_prefix_inside_the_count_and_size_limits() {
-        let mut counted = vec![vec![9_u8; 65_537]];
-        counted.extend(std::iter::repeat_n(vec![1_u8; 4_096], 2_000));
-        let kept = super::select_root_ders(counted);
-        assert_eq!(kept.len(), 1_024, "count limit is 1024");
-        assert!(kept.iter().all(|der| der.len() == 4_096));
+    /// 生成彼此不同的根：前 4 字节是序号，其余用 `fill` 填满 `len` 字节。
+    fn distinct_root(index: u32, len: usize, fill: u8) -> Vec<u8> {
+        let mut der = index.to_be_bytes().to_vec();
+        der.resize(len, fill);
+        der
+    }
 
-        // 60_000 * 69 = 4_140_000，60_000 * 70 = 4_200_000，4 MiB 是 4_194_304。
-        let kept = super::select_root_ders(std::iter::repeat_n(vec![2_u8; 60_000], 100).collect());
-        assert_eq!(kept.len(), 69, "total DER size must stay within 4 MiB");
-        assert_eq!(kept.iter().map(Vec::len).sum::<usize>(), 4_140_000);
+    fn accept_all(_: &[u8]) -> Result<(), std::convert::Infallible> {
+        Ok(())
+    }
+
+    fn capture_warnings<T>(run: impl FnOnce() -> T) -> (T, String) {
+        #[derive(Clone, Default)]
+        struct Output(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Output {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let output = Output::default();
+        let writer = output.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter("lattice_llm=warn")
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        // 同时保留空 subscriber，使并行测试首次注册调用点时按全部 subscriber 计算兴趣。
+        let _other_threads = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        let result = tracing::subscriber::with_default(subscriber, run);
+        let logs = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+        (result, logs)
+    }
+
+    #[test]
+    fn root_selection_stops_at_the_count_limit_and_keeps_the_original_order() {
+        let mut roots = vec![distinct_root(u32::MAX, 65_537, 9)];
+        roots.extend((0..2_000).map(|index| distinct_root(index, 64, 1)));
+        let (kept, logs) = capture_warnings(|| super::select_roots(roots.clone(), accept_all));
+        let expected: Vec<_> = roots[1..=1_024].to_vec();
+        let kept: Vec<_> = kept.into_iter().map(|(der, ())| der).collect();
+        assert_eq!(
+            kept, expected,
+            "the first 1024 usable roots in original order"
+        );
+        assert!(
+            logs.contains("truncated=976") && logs.contains("later roots are not trusted"),
+            "truncation must log how many roots were dropped, got {logs}"
+        );
+        assert!(
+            logs.contains("skipped_large=1"),
+            "the oversized root must be logged as skipped, got {logs}"
+        );
+    }
+
+    #[test]
+    fn root_selection_stops_at_the_byte_limit_instead_of_filling_with_later_roots() {
+        // 60_000 * 69 = 4_140_000，再加一张 60_000 会超过 4 MiB（4_194_304）。
+        // 第 70 张之后放一张小根：旧实现跳过大根后会把它补进来，打乱前缀。
+        let mut roots: Vec<_> = (0..70)
+            .map(|index| distinct_root(index, 60_000, 2))
+            .collect();
+        roots.push(distinct_root(70, 100, 3));
+        let (kept, logs) = capture_warnings(|| super::select_roots(roots.clone(), accept_all));
+        let kept: Vec<_> = kept.into_iter().map(|(der, ())| der).collect();
+        assert_eq!(
+            kept,
+            roots[..69].to_vec(),
+            "byte limit must keep an in-order prefix"
+        );
+        assert!(
+            logs.contains("truncated=2"),
+            "both roots after the limit must be counted as truncated, got {logs}"
+        );
+    }
+
+    #[test]
+    fn root_selection_skips_unparseable_roots_without_using_a_slot() {
+        let roots: Vec<_> = (0..4).map(|index| distinct_root(index, 16, 4)).collect();
+        let (kept, logs) = capture_warnings(|| {
+            super::select_roots(roots.clone(), |der: &[u8]| {
+                if der[3] == 1 {
+                    Err("bad certificate")
+                } else {
+                    Ok(())
+                }
+            })
+        });
+        let kept: Vec<_> = kept.into_iter().map(|(der, ())| der).collect();
+        assert_eq!(
+            kept,
+            vec![roots[0].clone(), roots[2].clone(), roots[3].clone()],
+            "unparseable roots are skipped and the rest keep their order"
+        );
+        assert!(
+            logs.contains("skipped_invalid=1"),
+            "the unparseable root must be logged, got {logs}"
+        );
     }
 
     #[test]
