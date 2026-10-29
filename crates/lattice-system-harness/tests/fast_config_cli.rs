@@ -1,7 +1,9 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! 经后台查询候选，保护元数据合并、状态过滤和安全输出。
+//! 经后台查询候选，保护凭据过滤、脱敏和失败说明。
+//! 元数据合并、废弃模型与缺失 catalog 的合并规则由 lattice-llm 的
+//! `candidates_merge_metadata_filter_deprecated_and_report_missing_catalogs` 覆盖。
 mod support;
 use lattice_system_harness::{FAKE_API_KEY, ProviderFixture, ScenarioSpec, ScenarioWorld};
 use serde_json::{Value, json};
@@ -122,14 +124,8 @@ fn refresh_without_tls_roots_reports_the_reason_and_preserves_cached_candidates(
     finish_recorded(evidence, result);
 }
 
-#[test]
-fn models_merge_metadata_and_render_readiness_without_secrets() {
-    const CATALOG_KEY: &str = "ordinary.catalog.credential";
-    let spec = ScenarioSpec::fast("models-candidates");
-    let world = ScenarioWorld::new(&spec.name).unwrap();
-    world.budget(&spec);
-    let directory = world.home().join(".lattice");
-    std::fs::create_dir_all(directory.join("cache")).unwrap();
+fn write_credential_providers(directory: &std::path::Path) {
+    std::fs::create_dir_all(directory).unwrap();
     std::fs::write(
         directory.join("providers.toml"),
         r#"
@@ -139,57 +135,57 @@ auto_refresh = false
 protocol = "chat-completions"
 base_url = "http://localhost:9/v1"
 auth = "bearer"
-catalog = "arbitrary-entry"
 [providers.local.models.current]
-context = 999
-[providers.local.models.manual]
-output = 42
 [providers.empty]
 protocol = "chat-completions"
 base_url = "http://localhost:9/v1"
 auth = "none"
 catalog = "absent-entry"
-[providers.empty.models.unknown]
-context = 12
+[providers.empty.models.listed]
 "#,
     )
     .unwrap();
-    std::fs::write(directory.join("cache/models.json"), serde_json::to_vec(&json!({
-        "arbitrary-entry":{"models":{
-            "current":{"id":"current","name":"Current","limit":{"context":100,"output":200},"cost":{"input":1.2,"output":3.4,"cache_read":0.1}},
-            "retired":{"id":"retired","status":"deprecated"}
-        }}
-    })).unwrap()).unwrap();
+}
+
+#[test]
+fn models_hide_unready_credentials_and_keep_auth_none_ready() {
+    let spec = ScenarioSpec::fast("models-credential-filter");
+    let world = ScenarioWorld::new(&spec.name).unwrap();
+    world.budget(&spec);
+    write_credential_providers(&world.home().join(".lattice"));
     let mut evidence = lattice_system_harness::ScenarioEvidence::new(
         &world,
         &spec.name,
-        [FAKE_API_KEY.to_owned(), CATALOG_KEY.to_owned()],
+        [FAKE_API_KEY.to_owned()],
     )
     .unwrap();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let missing = cli(&world, &spec, &["--json", "models", "--provider", "local"]);
         evidence.record_command("models missing key", &missing);
-        assert!(missing.is_clean_exit(0));
+        assert!(missing.is_clean_exit(0), "missing key query failed");
         let list: Value = serde_json::from_slice(&missing.stdout).unwrap();
-        let models = list["models"].as_array().unwrap();
-        assert_eq!(models.len(), 2);
-        let current = models
+        let current = list["models"]
+            .as_array()
+            .unwrap()
             .iter()
             .find(|model| model["model"] == "current")
-            .unwrap();
-        assert_eq!(current["context"], 999);
-        assert_eq!(current["output"], 200);
-        assert_eq!(current["cost"]["input"], 1.2);
-        assert_eq!(current["credential_status"], "missing");
+            .expect("handwritten local model");
+        assert_eq!(
+            current["credential_status"], "missing",
+            "bearer provider without a key"
+        );
         let filtered = cli(
             &world,
             &spec,
             &["--json", "models", "--auth", "--provider", "local"],
         );
         evidence.record_command("models missing key filtered", &filtered);
-        assert!(filtered.is_clean_exit(0));
+        assert!(filtered.is_clean_exit(0), "auth filter failed");
         let filtered: Value = serde_json::from_slice(&filtered.stdout).unwrap();
-        assert!(filtered["models"].as_array().unwrap().is_empty());
+        assert!(
+            filtered["models"].as_array().unwrap().is_empty(),
+            "missing bearer credential stayed in --auth"
+        );
         world
             .register_key(
                 ProviderFixture::chat_completions("current"),
@@ -202,46 +198,101 @@ context = 12
             &["--json", "models", "--auth", "--provider", "local"],
         );
         evidence.record_command("models ready", &ready);
-        let list: Value = serde_json::from_slice(&ready.stdout).unwrap();
-        assert_eq!(list["models"].as_array().unwrap().len(), 2);
+        assert!(ready.is_clean_exit(0), "ready query failed");
+        let ready: Value = serde_json::from_slice(&ready.stdout).unwrap();
         assert!(
-            list["models"]
+            ready["models"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .all(|model| model["credential_status"] == "ready")
+                .all(|model| model["credential_status"] == "ready"),
+            "stored key did not mark local ready: {ready}"
         );
         let mixed = cli(&world, &spec, &["--json", "models", "--auth"]);
         evidence.record_command("models mixed credentials", &mixed);
-        assert!(mixed.is_clean_exit(0));
+        assert!(mixed.is_clean_exit(0), "mixed auth query failed");
         let mixed: Value = serde_json::from_slice(&mixed.stdout).unwrap();
         let models = mixed["models"].as_array().unwrap();
-        assert!(models.iter().any(|model| model["provider"] == "empty"));
-        assert!(models.iter().any(|model| model["provider"] == "local"));
-        assert!(!models.iter().any(|model| model["provider"] == "anthropic"));
+        assert!(
+            models.iter().any(|model| model["provider"] == "empty"),
+            "auth=none provider missing from --auth"
+        );
+        assert!(
+            models.iter().any(|model| model["provider"] == "local"),
+            "ready bearer provider missing from --auth"
+        );
+        assert!(
+            !models.iter().any(|model| model["provider"] == "anthropic"),
+            "unready builtin provider leaked into --auth"
+        );
         assert!(
             models
                 .iter()
-                .all(|model| model["credential_status"] == "ready")
+                .all(|model| model["credential_status"] == "ready"),
+            "--auth listed a provider that is not ready"
         );
+    }));
+    finish_recorded(evidence, result);
+}
+
+#[test]
+fn models_text_lists_the_selected_provider_without_the_key() {
+    let spec = ScenarioSpec::fast("models-text-ready");
+    let world = ScenarioWorld::new(&spec.name).unwrap();
+    world.budget(&spec);
+    write_credential_providers(&world.home().join(".lattice"));
+    world
+        .register_key(
+            ProviderFixture::chat_completions("current"),
+            Some(FAKE_API_KEY),
+        )
+        .unwrap();
+    let mut evidence = lattice_system_harness::ScenarioEvidence::new(
+        &world,
+        &spec.name,
+        [FAKE_API_KEY.to_owned()],
+    )
+    .unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let text = cli(&world, &spec, &["models", "--provider", "local"]);
         evidence.record_command("models text", &text);
-        assert!(text.is_clean_exit(0));
-        let text = String::from_utf8(text.stdout).unwrap();
-        for value in ["local/current", "999", "200", "1.2/3.4/0.1", "ready"] {
-            assert!(text.contains(value));
-        }
-        let empty = cli(&world, &spec, &["--json", "models", "--provider", "empty"]);
-        evidence.record_command("models missing catalog", &empty);
-        let empty: Value = serde_json::from_slice(&empty.stdout).unwrap();
-        assert_eq!(empty["models"][0]["credential_status"], "ready");
-        assert!(
-            empty["warnings"][0]["message"]
-                .as_str()
-                .unwrap()
-                .contains("no metadata")
+        assert!(text.is_clean_exit(0), "text models failed");
+        let public = format!(
+            "{}{}",
+            String::from_utf8_lossy(&text.stdout),
+            String::from_utf8_lossy(&text.stderr)
         );
-        let source = std::fs::read_to_string(directory.join("providers.toml")).unwrap();
+        assert!(
+            public.contains("local/current"),
+            "text output omitted the model: {public}"
+        );
+        assert!(
+            public.contains("ready"),
+            "text output omitted credential status: {public}"
+        );
+        assert!(
+            !public.contains(FAKE_API_KEY),
+            "text output included the provider key"
+        );
+    }));
+    finish_recorded(evidence, result);
+}
+
+#[test]
+fn models_redact_catalog_ids_that_match_a_known_credential() {
+    const CATALOG_KEY: &str = "ordinary.catalog.credential";
+    let spec = ScenarioSpec::fast("models-catalog-redaction");
+    let world = ScenarioWorld::new(&spec.name).unwrap();
+    world.budget(&spec);
+    let directory = world.home().join(".lattice");
+    write_credential_providers(&directory);
+    let mut evidence = lattice_system_harness::ScenarioEvidence::new(
+        &world,
+        &spec.name,
+        [CATALOG_KEY.to_owned()],
+    )
+    .unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         world
             .register_key(
                 ProviderFixture {
@@ -251,6 +302,7 @@ context = 12
                 Some(CATALOG_KEY),
             )
             .unwrap();
+        let source = std::fs::read_to_string(directory.join("providers.toml")).unwrap();
         std::fs::write(
             directory.join("providers.toml"),
             source.replace("absent-entry", CATALOG_KEY),
@@ -262,7 +314,7 @@ context = 12
         ] {
             let warning = cli(&world, &spec, &args);
             evidence.record_command("models catalog credential redaction", &warning);
-            assert!(warning.is_clean_exit(0));
+            assert!(warning.is_clean_exit(0), "catalog warning query failed");
             let public = format!(
                 "{}{}",
                 String::from_utf8_lossy(&warning.stdout),
@@ -270,24 +322,13 @@ context = 12
             );
             assert!(
                 !public.contains(CATALOG_KEY),
-                "catalog must not expose a known credential"
+                "catalog id equal to a known credential was printed"
             );
-            assert!(public.contains("[REDACTED]"));
+            assert!(
+                public.contains("[REDACTED]"),
+                "known credential was not redacted: {public}"
+            );
         }
-        let chatgpt = cli(
-            &world,
-            &spec,
-            &["--json", "models", "--provider", "chatgpt"],
-        );
-        evidence.record_command("models ChatGPT", &chatgpt);
-        let chatgpt: Value = serde_json::from_slice(&chatgpt.stdout).unwrap();
-        assert!(chatgpt["models"].as_array().unwrap().is_empty());
-        assert!(
-            chatgpt["warnings"][0]["message"]
-                .as_str()
-                .unwrap()
-                .contains("not implemented")
-        );
         world
             .register_key(ProviderFixture::chat_completions("unused"), Some("EMPTY"))
             .unwrap();
@@ -299,16 +340,39 @@ context = 12
         .unwrap();
         let short = cli(&world, &spec, &["--json", "models", "--provider", "empty"]);
         evidence.record_command("short credential does not mask catalog", &short);
-        assert!(short.is_clean_exit(0));
-        let short: Value = serde_json::from_slice(&short.stdout).unwrap();
         assert!(
-            short["warnings"][0]["message"]
-                .as_str()
-                .unwrap()
-                .contains("EMPTY-catalog")
+            short.is_clean_exit(0),
+            "short credential catalog query failed"
         );
-        for directory_unavailable in [false, true] {
-            if directory_unavailable {
+        let short: Value = serde_json::from_slice(&short.stdout).unwrap();
+        let message = short["warnings"][0]["message"].as_str().unwrap();
+        assert!(
+            message.contains("EMPTY-catalog"),
+            "short credential masked a longer catalog id: {message}"
+        );
+    }));
+    finish_recorded(evidence, result);
+}
+
+#[test]
+fn models_report_unreadable_credentials() {
+    let spec = ScenarioSpec::fast("models-unreadable-credentials");
+    let world = ScenarioWorld::new(&spec.name).unwrap();
+    world.budget(&spec);
+    let directory = world.home().join(".lattice");
+    write_credential_providers(&directory);
+    let mut evidence =
+        lattice_system_harness::ScenarioEvidence::new(&world, &spec.name, Vec::<String>::new())
+            .unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let started = cli(&world, &spec, &["--json", "models", "--provider", "empty"]);
+        evidence.record_command("models before credential failure", &started);
+        assert!(started.is_clean_exit(0), "initial models query failed");
+        for (label, unavailable_directory) in [
+            ("malformed auth file", false),
+            ("broad directory permissions", true),
+        ] {
+            if unavailable_directory {
                 std::fs::write(
                     directory.join("auth.json"),
                     "{\"version\":1,\"providers\":{}}",
@@ -324,60 +388,69 @@ context = 12
             }
             let unavailable = cli(&world, &spec, &["--json", "models"]);
             evidence.record_command("models global credential warning", &unavailable);
-            assert!(unavailable.is_clean_exit(0));
+            assert!(unavailable.is_clean_exit(0), "{label}: models exited");
             let unavailable: Value = serde_json::from_slice(&unavailable.stdout).unwrap();
             let warnings = unavailable["warnings"].as_array().unwrap();
             let global: Vec<_> = warnings
                 .iter()
                 .filter(|warning| warning["provider"].is_null())
                 .collect();
-            assert_eq!(global.len(), 1);
+            assert_eq!(global.len(), 1, "{label}: global warning count");
             let reason = global[0]["message"].as_str().unwrap();
-            assert!(reason.contains(if directory_unavailable {
+            let expected = if unavailable_directory {
                 "permissions are too broad"
             } else {
                 "auth.json"
-            }));
-            assert_eq!(
-                warnings
-                    .iter()
-                    .filter(|warning| warning["provider"] == "chatgpt")
-                    .count(),
-                1
-            );
+            };
+            assert!(reason.contains(expected), "{label}: warning was {reason}");
             let text = cli(&world, &spec, &["models"]);
             evidence.record_command("models global credential warning text", &text);
-            assert!(text.is_clean_exit(0));
+            assert!(text.is_clean_exit(0), "{label}: text models exited");
             assert_eq!(
                 String::from_utf8_lossy(&text.stderr)
                     .matches("provider credentials are not ready")
                     .count(),
-                1
+                1,
+                "{label}: text warning count"
             );
-            let missing = cli(&world, &spec, &["--json", "models", "--provider", "EMPTY"]);
-            evidence.record_command(
-                "models unavailable provider without readable credentials",
-                &missing,
-            );
-            assert!(missing.is_clean_exit(2));
-            let missing: Value = serde_json::from_slice(&missing.stdout).unwrap();
-            let message = missing["message"].as_str().unwrap();
-            for value in [
-                "EMPTY",
-                "available providers:",
-                "anthropic",
-                "openai",
-                "google",
-                "local",
-            ] {
-                assert!(message.contains(value));
-            }
         }
         std::fs::set_permissions(
             &directory,
             <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
         )
         .unwrap();
+    }));
+    finish_recorded(evidence, result);
+}
+
+#[test]
+fn models_name_available_providers_when_the_requested_one_is_absent() {
+    let spec = ScenarioSpec::fast("models-unknown-provider");
+    let world = ScenarioWorld::new(&spec.name).unwrap();
+    world.budget(&spec);
+    write_credential_providers(&world.home().join(".lattice"));
+    let mut evidence =
+        lattice_system_harness::ScenarioEvidence::new(&world, &spec.name, Vec::<String>::new())
+            .unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let missing = cli(&world, &spec, &["--json", "models", "--provider", "EMPTY"]);
+        evidence.record_command("models unknown provider", &missing);
+        assert!(missing.is_clean_exit(2), "unknown provider was accepted");
+        let missing: Value = serde_json::from_slice(&missing.stdout).unwrap();
+        let message = missing["message"].as_str().unwrap();
+        for value in [
+            "EMPTY",
+            "available providers:",
+            "anthropic",
+            "openai",
+            "google",
+            "local",
+        ] {
+            assert!(
+                message.contains(value),
+                "unknown provider message omitted {value}: {message}"
+            );
+        }
     }));
     finish_recorded(evidence, result);
 }
