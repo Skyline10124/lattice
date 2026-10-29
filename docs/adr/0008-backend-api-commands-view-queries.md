@@ -133,6 +133,8 @@ TurnId 由 TurnId 索引和准入状态唯一定位，`session_id` 只是核对�
 
 ### 10. 客户端保留的部分
 
+> 修订：本节中“读取 profile、系统提示与连接凭据，加载好之后提交一次。凭据来自前端进程的环境与 `.env`，`FrozenConfiguration::from_env` 不得由后台调用。”已由 [ADR 0010](0010-protocol-adapters-and-configured-providers.md) 第 4、13 节取代。客户端只提交消息、工作区与选择，配置与凭据由后台读取。范围见该 ADR 的[与 ADR 0005、ADR 0006、ADR 0007、ADR 0008 的关系](0010-protocol-adapters-and-configured-providers.md#与-adr-0005adr-0006adr-0007adr-0008-的关系)。
+
 - 连接后台，后台未运行时启动它。
 - 读取 profile、系统提示与连接凭据，加载好之后提交一次。凭据来自前端进程的环境与 `.env`，`FrozenConfiguration::from_env` 不得由后台调用。
 - 发出提交与取消，处理回执、取消意图与退出交接。接受结果不明时按第 7 节查询找回。

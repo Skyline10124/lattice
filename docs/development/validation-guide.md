@@ -45,7 +45,7 @@ cargo xtask tool-build --verify
 
 profile 由后台在接受前读取：项目内的 `.lattice/agents` 优先，其次是后台启动时 HOME 下的 `.lattice/agents`；全局目录与 profile 须属于当前用户且不可被同组或其他用户写入，0755 目录与 0644 文件可用。固定 `XDG_STATE_HOME` 而更换前端 HOME 时仍连接同一后台，使用同一全局 agents 目录；更换后台的 HOME 需要停止后重新启动。TUI 启动不检查 profile，配置拒绝在提交时显示并保留输入。
 
-Session 与 TUI 命令会按需自启后台；`daemon status`、`daemon stop` 只联系已有后台，不自启。纯查询可建立连接所需运行资源，领域数据保持只读。
+Session、TUI、`auth` 与 `models` 会按需自启后台；`daemon status`、`daemon stop` 只联系已有后台，不自启。后台在启动时按自己的环境确定配置目录与全局 agents 目录的位置，并载入 TLS 根证书。目录位置与 TLS 根随后保持不变。目录里的 `providers.toml` 与凭据在每次请求时重读，修改这些文件后下一次请求即使用新内容。换了决定目录位置或 TLS 根的环境后，先执行 `lattice daemon stop` 再启动。纯查询可建立连接所需运行资源，领域数据保持只读。
 
 ### 提交与找回
 
