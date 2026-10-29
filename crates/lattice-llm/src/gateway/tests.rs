@@ -784,17 +784,18 @@ async fn messages_output_limit_that_fits_the_window_is_sent_unchanged() {
 
 #[tokio::test]
 async fn messages_max_tokens_is_clamped_into_the_remaining_window() {
-    // 450_000 字节正文，加上 Messages 用户消息里的 "user" 与 "text"，
-    // 字符串共 450_008 字节。按 3 字节一个 token 向上取整是 150_003。
-    // 上下文 200_000，输出上限 64_000，能放下的输出是 49_997。
+    // 420_000 字节英文正文，加上 Messages 用户消息里的 "user" 与 "text"，
+    // 字符串共 420_008 字节（与下面中文用例的 450_008 字节不同）。
+    // 按 3 字节一个 token 向上取整是 140_003；上下文 200_000，输出上限 64_000，
+    // 能放下的输出是 59_997。
     let max_tokens = messages_max_tokens(
         serde_json::json!({"context":200_000,"output":64_000}),
-        Some(&"a".repeat(450_000)),
+        Some(&"a".repeat(420_000)),
     )
     .await
     .unwrap();
     assert_eq!(
-        max_tokens, 49_997,
+        max_tokens, 59_997,
         "max_tokens must leave the estimated prompt inside the context window"
     );
 }
