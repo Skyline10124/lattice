@@ -71,7 +71,7 @@ enabled = ["observe__workspace"]
 
 ### 2. 配置模型凭据
 
-通过终端录入服务商密钥（输入不回显），后台保存到用户级 `~/.lattice/auth.json`：
+通过终端录入服务商密钥（输入不回显），后台保存到用户级 `~/.lattice/auth.json`。配置目录 `~/.lattice` 属于当前用户，新建时为 0700，不能向同组或其他用户开放；`auth.json` 为 0600。权限更宽、属主不符或是符号链接时，`lattice auth set` 与需要 key 的提交会被拒绝，后台不自动修改权限。
 
 ```sh
 lattice auth set anthropic
@@ -114,9 +114,9 @@ lattice tui "$SESSION_ID"
 
 ## 后台执行与重连
 
-Session 命令和 TUI 首次使用时会自动启动本地后台。请求被接受后，即使关闭终端，任务也会在后台继续执行。
+Session 命令、TUI、`auth` 与 `models` 首次使用时会自动启动本地后台。请求被接受后，即使关闭终端，任务也会在后台继续执行。
 
-自动启动与显式运行 `lattice daemon serve` 都继承启动进程的环境。后台运行期间不随后续前端的环境变化；要更新后台环境，先执行 `lattice daemon stop` 再启动。
+自动启动与显式运行 `lattice daemon serve` 都继承启动进程的环境。后台在启动时从这份环境取得 provider 配置目录、TLS 根证书和全局 agents 目录，运行期间不随后续前端的环境变化。要让新的环境生效，先执行 `lattice daemon stop` 再启动。
 
 provider 配置与凭据由后台在每次模型请求时重读，修改 `providers.toml` 或通过 `lattice auth set` 更新凭据后不需要重启。TLS 根只在后台启动时载入；修改 TLS 信任后需要重启后台。
 
