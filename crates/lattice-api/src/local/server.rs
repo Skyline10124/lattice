@@ -978,9 +978,12 @@ async fn audit_filter(
 }
 async fn connection(backend: Arc<Backend>, mut stream: UnixStream) -> Result<()> {
     ipc::check_peer(&stream)?;
-    let request = tokio::time::timeout(Duration::from_secs(10), ipc::read::<Request>(&mut stream))
-        .await
-        .map_err(|_| LocalError::new(LocalErrorKind::Transport, "request frame timed out"))??;
+    let request = tokio::time::timeout(
+        Duration::from_secs(10),
+        ipc::read_request::<Request>(&mut stream),
+    )
+    .await
+    .map_err(|_| LocalError::new(LocalErrorKind::Transport, "request frame timed out"))??;
     let mut writer = ipc::ResponseWriter::default();
     if let Request::Watch { session_id } = request {
         let result = backend.watch(&mut stream, &mut writer, session_id).await;

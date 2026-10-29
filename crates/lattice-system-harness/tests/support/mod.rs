@@ -377,7 +377,11 @@ pub(crate) fn cli(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> 
         .expect("drive lattice")
 }
 
-/// 公开 Local IPC 的一条连接：请求写成一帧，回复按 `LTLOCAL8` 帧重组为逻辑消息。
+/// 与 `lattice_api::local::test_support::FRAME_MAGIC` 相同。
+/// harness 不能依赖产品 crate，所以外部观察者只在这里保留字面量。
+const FRAME_MAGIC: &[u8; 8] = b"LTLOCAL8";
+
+/// 公开 Local IPC 的一条连接：请求写成一帧，回复按当前帧魔数重组为逻辑消息。
 pub(crate) struct Wire {
     stream: UnixStream,
     message: u64,
@@ -390,7 +394,7 @@ impl Wire {
         stream.set_read_timeout(Some(timeout)).unwrap();
         stream.set_write_timeout(Some(timeout)).unwrap();
         let body = serde_json::to_vec(request).unwrap();
-        stream.write_all(b"LTLOCAL8").unwrap();
+        stream.write_all(FRAME_MAGIC).unwrap();
         stream
             .write_all(&(body.len() as u32).to_be_bytes())
             .unwrap();
@@ -420,7 +424,7 @@ impl Wire {
             {
                 None
             }
-            other => panic!("read an LTLOCAL8 frame header: {other:?}"),
+            other => panic!("read a local frame header: {other:?}"),
         }
     }
     /// 读一条逻辑消息；`first` 是已读出的帧头首字节。
@@ -437,8 +441,8 @@ impl Wire {
             };
             self.stream
                 .read_exact(rest)
-                .expect("read an LTLOCAL8 frame header");
-            assert_eq!(&header[..8], b"LTLOCAL8");
+                .expect("read a local frame header");
+            assert_eq!(&header[..8], FRAME_MAGIC);
             let length = u32::from_be_bytes(header[8..].try_into().unwrap()) as usize;
             assert!((1..=16 * 1024 * 1024).contains(&length));
             let mut bytes = vec![0; length];

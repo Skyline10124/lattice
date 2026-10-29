@@ -23,7 +23,7 @@ impl LocalClient {
         progress: impl FnMut(),
     ) -> Result<Response> {
         let mut stream = ipc::connect(self.layout.clone()).await?;
-        ipc::write(&mut stream, &request).await?;
+        ipc::write_request(&mut stream, &request).await?;
         ipc::ResponseReader::default()
             .read_with_progress(&mut stream, progress)
             .await
@@ -197,7 +197,7 @@ impl LocalClient {
             Ok(stream) => stream,
             Err(error) => return SubmissionReply::Rejected(error),
         };
-        if let Err(error) = ipc::write(&mut stream, &Request::Submit { request }).await {
+        if let Err(error) = ipc::write_request(&mut stream, &Request::Submit { request }).await {
             return SubmissionReply::Disconnected(error);
         }
         match ipc::ResponseReader::default().read(&mut stream).await {
@@ -228,7 +228,7 @@ impl LocalClient {
     }
     pub async fn watch(&self, session_id: SessionId) -> Result<LocalWatch> {
         let mut stream = ipc::connect(self.layout.clone()).await?;
-        ipc::write(&mut stream, &Request::Watch { session_id }).await?;
+        ipc::write_request(&mut stream, &Request::Watch { session_id }).await?;
         Ok(LocalWatch::from_stream(stream))
     }
     pub async fn audit_query(

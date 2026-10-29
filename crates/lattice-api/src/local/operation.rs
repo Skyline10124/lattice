@@ -525,7 +525,7 @@ impl Worker {
                         Err(error) => {
                             self.view = None;
                             if !(self.submission.is_some() && (error.kind == LocalErrorKind::NotFound || matches!(error.store.as_deref(), Some(StoreDiagnostic::NotInitialized { .. })))) {
-                                self.pending.push_back(if matches!(error.kind, LocalErrorKind::Transport | LocalErrorKind::Protocol | LocalErrorKind::NotRunning) {
+                                self.pending.push_back(if matches!(error.kind, LocalErrorKind::Transport | LocalErrorKind::Protocol | LocalErrorKind::NotRunning | LocalErrorKind::IncompatibleBackend) {
                                     LocalUpdate::Connection { status: ConnectionStatus::Error(error) }
                                 } else { LocalUpdate::Error { error } });
                                 self.finished = true;

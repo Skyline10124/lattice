@@ -42,7 +42,7 @@ impl Peer {
         let (mut stream, _) = self.listener.accept().await.unwrap();
         let mut magic = [0; 8];
         stream.read_exact(&mut magic).await.unwrap();
-        assert_eq!(&magic, b"LTLOCAL8");
+        assert_eq!(&magic, lattice_api::local::test_support::FRAME_MAGIC);
         let length = stream.read_u32().await.unwrap();
         let mut bytes = vec![0; length as usize];
         stream.read_exact(&mut bytes).await.unwrap();
@@ -63,7 +63,10 @@ impl Wire {
         let fragment = serde_json::to_string(&json!({"response":response,"value":value})).unwrap();
         let bytes=serde_json::to_vec(&json!({"message_id":self.sequence,"offset":0,"json_fragment":fragment,"complete":true})).unwrap();
         self.sequence += 1;
-        self.stream.write_all(b"LTLOCAL8").await.unwrap();
+        self.stream
+            .write_all(lattice_api::local::test_support::FRAME_MAGIC)
+            .await
+            .unwrap();
         self.stream.write_u32(bytes.len() as u32).await.unwrap();
         self.stream.write_all(&bytes).await.unwrap();
     }

@@ -355,19 +355,32 @@ async fn protocol_and_auth_independently_select_wire_requests() {
                     .unwrap(),
             )
             .await;
+            let cell = format!("{protocol}/{auth}");
             let received = server.next().await;
-            assert!(received.body.get("temperature").is_none());
-            assert!(received.body.get("max_completion_tokens").is_none());
+            assert!(
+                received.body.get("temperature").is_none(),
+                "{cell}: temperature"
+            );
+            assert!(
+                received.body.get("max_completion_tokens").is_none(),
+                "{cell}: max_completion_tokens"
+            );
             if protocol != "anthropic-messages" {
-                assert!(received.body.get("max_tokens").is_none());
-                assert!(received.body.get("generationConfig").is_none());
+                assert!(
+                    received.body.get("max_tokens").is_none(),
+                    "{cell}: max_tokens"
+                );
+                assert!(
+                    received.body.get("generationConfig").is_none(),
+                    "{cell}: generationConfig"
+                );
             }
             let expected_path = match protocol {
                 "chat-completions" => "/v1/chat/completions",
                 "anthropic-messages" => "/v1/v1/messages",
                 _ => "/v1/models/family%2Fmodel%20id:streamGenerateContent?alt=sse",
             };
-            assert_eq!(received.path, expected_path, "{protocol} {auth}");
+            assert_eq!(received.path, expected_path, "{cell}: path");
             for (header, expected_auth) in [
                 ("authorization", "bearer"),
                 ("x-api-key", "x-api-key"),
@@ -381,7 +394,7 @@ async fn protocol_and_auth_independently_select_wire_requests() {
                 assert_eq!(
                     received.headers.get(header).map(String::as_str),
                     expected,
-                    "{protocol} {auth} {header}"
+                    "{cell}: {header}"
                 );
             }
             assert_eq!(
@@ -389,14 +402,21 @@ async fn protocol_and_auth_independently_select_wire_requests() {
                     .headers
                     .get("anthropic-version")
                     .map(String::as_str),
-                (protocol == "anthropic-messages").then_some("2023-06-01")
+                (protocol == "anthropic-messages").then_some("2023-06-01"),
+                "{cell}: anthropic-version"
             );
             assert_eq!(
-                received.headers["accept"],
-                "text/event-stream, application/json"
+                received.headers["accept"], "text/event-stream, application/json",
+                "{cell}: accept"
             );
-            assert!(received.headers["user-agent"].starts_with("lattice/"));
-            assert_eq!(received.headers["x-client-request-id"], "session-id");
+            assert!(
+                received.headers["user-agent"].starts_with("lattice/"),
+                "{cell}: user-agent"
+            );
+            assert_eq!(
+                received.headers["x-client-request-id"], "session-id",
+                "{cell}: client request id"
+            );
             for header in received.headers.keys() {
                 assert!(
                     [
@@ -412,29 +432,47 @@ async fn protocol_and_auth_independently_select_wire_requests() {
                         "x-client-request-id"
                     ]
                     .contains(&header.as_str()),
-                    "unexpected header {header}"
+                    "{cell}: unexpected header {header}"
                 );
             }
             match protocol {
                 "chat-completions" => {
-                    assert_eq!(received.body["model"], "family/model id");
-                    assert_eq!(received.body["messages"][0]["content"], "hello");
-                    assert_eq!(received.body["tools"][0]["function"]["name"], "tool_name");
-                    assert_eq!(received.body["stream"], true);
-                    assert_eq!(received.body["stream_options"]["include_usage"], true);
+                    assert_eq!(received.body["model"], "family/model id", "{cell}: model");
+                    assert_eq!(
+                        received.body["messages"][0]["content"], "hello",
+                        "{cell}: message"
+                    );
+                    assert_eq!(
+                        received.body["tools"][0]["function"]["name"], "tool_name",
+                        "{cell}: tool"
+                    );
+                    assert_eq!(received.body["stream"], true, "{cell}: stream");
+                    assert_eq!(
+                        received.body["stream_options"]["include_usage"], true,
+                        "{cell}: usage"
+                    );
                 }
                 "anthropic-messages" => {
-                    assert_eq!(received.body["model"], "family/model id");
-                    assert_eq!(received.body["messages"][0]["content"][0]["text"], "hello");
-                    assert_eq!(received.body["tools"][0]["name"], "tool_name");
-                    assert_eq!(received.body["max_tokens"], 32_768);
-                    assert_eq!(received.body["stream"], true);
+                    assert_eq!(received.body["model"], "family/model id", "{cell}: model");
+                    assert_eq!(
+                        received.body["messages"][0]["content"][0]["text"], "hello",
+                        "{cell}: message"
+                    );
+                    assert_eq!(
+                        received.body["tools"][0]["name"], "tool_name",
+                        "{cell}: tool"
+                    );
+                    assert_eq!(received.body["max_tokens"], 32_768, "{cell}: max_tokens");
+                    assert_eq!(received.body["stream"], true, "{cell}: stream");
                 }
                 _ => {
-                    assert_eq!(received.body["contents"][0]["parts"][0]["text"], "hello");
                     assert_eq!(
-                        received.body["tools"][0]["functionDeclarations"][0]["name"],
-                        "tool_name"
+                        received.body["contents"][0]["parts"][0]["text"], "hello",
+                        "{cell}: message"
+                    );
+                    assert_eq!(
+                        received.body["tools"][0]["functionDeclarations"][0]["name"], "tool_name",
+                        "{cell}: tool"
                     );
                 }
             }
@@ -577,49 +615,62 @@ async fn chat_replay_defaults_to_no_reasoning() {
 
 #[tokio::test]
 async fn replay_source_matrix_reaches_each_protocol_request_body() {
-    use crate::protocol::projection::{native_to_wire, project_cross_provider, wire_to_native};
-    use lattice_conversation::{
-        ConversationItem, MessageSemantic, Protocol, ReplayOrigin, StepContent,
-    };
+    use crate::protocol::projection::{ProjectionError, wire_to_native};
+    use lattice_conversation::{ConversationItem, Protocol, ReplayOrigin, StepContent};
 
-    let mut server = Server::start(true).await;
-    let directory = private_dir();
-    let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+    // 期望来自夹具里的原文，不经过 project_cross_provider / native_to_wire 再算一遍。
+    let cases = [
+        (
+            Protocol::ChatCompletions,
+            include_str!("../../tests/fixtures/projection/openai_assistant_tool_calls.json"),
+            &["call_9f8e7d6c5b", "call_1a2b3c4d5e"][..],
+            &["The user wants the weather; call get_weather first, then get_time."][..],
+        ),
+        (
+            Protocol::Messages,
+            include_str!("../../tests/fixtures/projection/anthropic_thinking_tool_use.json"),
+            &["toolu_01AbCdEfGh", "toolu_02BcDeFgHi"][..],
+            &[
+                "Need the weather first, then the time; both are independent calls.",
+                "ErUBCkYIAxgCIkD3c2FmZGVmNTQ2Ny0xMjM0LWFiY2QtZXhhbXBsZXNpZ25hdHVyZQ==",
+            ][..],
+        ),
+        (
+            Protocol::GenerateContent,
+            include_str!("../../tests/fixtures/projection/gemini_thought_signature.json"),
+            &["fc-2026-08-13-001"][..],
+            &[
+                "Plan: check weather, then time.",
+                "CigIARABGkh4dGh5YnJpZC1zaWduYXR1cmUtb24tdGhvdWdodA==",
+                "CigIARABGkh4ZW1wdHktdGV4dC1wYXJ0LXNpZ25hdHVyZQ==",
+                "CigIARABGkh4c2lnbmF0dXJlLW9uLWZ1bmN0aW9uLWNhbGw=",
+            ][..],
+        ),
+    ];
     let protocols = [
         Protocol::ChatCompletions,
         Protocol::Messages,
         Protocol::GenerateContent,
     ];
-    for (protocol, fixture) in [
-        (
-            Protocol::ChatCompletions,
-            include_str!("../../tests/fixtures/projection/openai_assistant_tool_calls.json"),
-        ),
-        (
-            Protocol::Messages,
-            include_str!("../../tests/fixtures/projection/anthropic_thinking_tool_use.json"),
-        ),
-        (
-            Protocol::GenerateContent,
-            include_str!("../../tests/fixtures/projection/gemini_thought_signature.json"),
-        ),
-    ] {
+    let mut server = Server::start(true).await;
+    let directory = private_dir();
+    let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+    for (protocol, fixture, call_ids, replay_material) in cases {
         let origin = ReplayOrigin {
             protocol,
             provider_id: "test".into(),
         };
-        let mut source = wire_to_native(&origin, &serde_json::from_str(fixture).unwrap()).unwrap();
-        source
-            .parts
-            .retain(|part| !matches!(part.semantic, MessageSemantic::ToolCall { .. }));
-        let source = source.bind_zero_tool().unwrap();
-        let original = native_to_wire(&origin, &source).unwrap();
+        let decoded = wire_to_native(&origin, &serde_json::from_str(fixture).unwrap()).unwrap();
+        let (assistant, results) = bind_replay_step(decoded);
         for target_protocol in protocols {
-            for provider in ["test", "other", "test"] {
-                let target = ReplayOrigin {
-                    protocol: target_protocol,
-                    provider_id: provider.into(),
-                };
+            // 第三格在写过 other 的配置后回到同一 provider，标签带序号以免重名。
+            for (round, provider) in ["test", "other", "test"].into_iter().enumerate() {
+                let cell = format!("{protocol} -> {target_protocol}/{provider}#{round}");
+                let same_provider = target_protocol == protocol && provider == "test";
+                let same_protocol = target_protocol == protocol;
+                // Chat Completions 与 Messages 没有 call ID 就无法编码工具结果。
+                // generateContent 按工具名关联，请求仍会发出，但不得带上来源 call ID。
+                let sends = same_protocol || target_protocol == Protocol::GenerateContent;
                 let feature = if target_protocol == Protocol::ChatCompletions {
                     format!(
                         "[providers.{provider}.features]\nreasoning_replay='reasoning-content'\n"
@@ -629,52 +680,129 @@ async fn replay_source_matrix_reaches_each_protocol_request_body() {
                 };
                 std::fs::write(directory.path().join("providers.toml"), format!(
                     "[providers.{provider}]\nprotocol='{target_protocol}'\nbase_url='{}'\nauth='none'\n{feature}", server.url)).unwrap();
-                let body = match target_protocol {
-                    Protocol::ChatCompletions => DONE,
-                    Protocol::Messages => MESSAGES_DONE,
-                    Protocol::GenerateContent => CONTENT_DONE,
-                    _ => unreachable!(),
-                };
-                server.respond(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}", body.len()), false);
+                if sends {
+                    let body = match target_protocol {
+                        Protocol::ChatCompletions => DONE,
+                        Protocol::Messages => MESSAGES_DONE,
+                        Protocol::GenerateContent => CONTENT_DONE,
+                        _ => unreachable!(),
+                    };
+                    server.respond(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}", body.len()), false);
+                }
                 let mut request = self::request(provider);
                 request.messages.push(ConversationItem::Step(StepContent {
-                    assistant: source.clone(),
-                    results: vec![],
+                    assistant: assistant.clone(),
+                    results: results.clone(),
                 }));
-                complete(
-                    gateway
-                        .open_turn()
-                        .stream_chat(request, StreamControl::default())
-                        .await
-                        .unwrap(),
-                )
-                .await;
-                let wire = server.next().await.body;
-                let message = if target_protocol == Protocol::GenerateContent {
-                    &wire["contents"][0]
-                } else {
-                    &wire["messages"][0]
-                };
-                assert_eq!(
-                    *message,
-                    native_to_wire(&target, &project_cross_provider(&source, &target)).unwrap()
-                );
-                if target == origin {
-                    assert_eq!(*message, original);
-                } else {
-                    let serialized = wire.to_string();
-                    for part in &source.parts {
-                        if let MessageSemantic::Reasoning { text } = &part.semantic {
-                            assert!(!serialized.contains(text));
+                match gateway
+                    .open_turn()
+                    .stream_chat(request, StreamControl::default())
+                    .await
+                {
+                    Ok(stream) => {
+                        assert!(
+                            sends,
+                            "{cell}: sent a request that should have been rejected"
+                        );
+                        complete(stream).await;
+                        let serialized = server.next().await.body.to_string();
+                        for id in call_ids {
+                            assert_eq!(
+                                serialized.contains(id),
+                                same_protocol,
+                                "{cell}: provider call id {id}"
+                            );
                         }
-                        if let Some(state) = &part.replay_state {
-                            assert!(!serialized.contains(state.as_str()));
+                        for material in replay_material {
+                            assert_eq!(
+                                serialized.contains(material),
+                                same_provider,
+                                "{cell}: replay material"
+                            );
                         }
+                    }
+                    Err(error) => {
+                        assert!(!sends, "{cell}: {error}");
+                        assert!(
+                            matches!(
+                                error,
+                                crate::LlmError::Projection(
+                                    ProjectionError::ToolResultWithoutProviderCallId { .. }
+                                )
+                            ),
+                            "{cell}: {error}"
+                        );
+                        assert!(
+                            server.received.try_recv().is_err(),
+                            "{cell}: rejected projection still reached the server"
+                        );
                     }
                 }
             }
         }
     }
+}
+
+fn bind_replay_step(
+    message: lattice_conversation::NativeMessage<lattice_conversation::UnboundToolCall>,
+) -> (
+    lattice_conversation::NativeMessage<lattice_conversation::BoundToolCall>,
+    Vec<lattice_conversation::StoredToolResult>,
+) {
+    use lattice_conversation::{
+        MessagePart, MessageSemantic, ModelMessageAddress, NativeMessage, ResultPayload, SessionId,
+        StoredToolResult, SuccessContent, ToolCallAddress, TurnId, canonical_json,
+        tool_content_digest,
+    };
+    let mut parts = Vec::new();
+    let mut results = Vec::new();
+    let mut index = 0usize;
+    for part in message.parts {
+        let semantic = match part.semantic {
+            MessageSemantic::ToolCall { call } => {
+                let invocation_id = lattice_conversation::InvocationId::parse(&format!(
+                    "00000000-0000-4000-8000-{index:012x}"
+                ))
+                .unwrap();
+                index += 1;
+                let name = call.name.clone();
+                let bound = call.bind(
+                    invocation_id,
+                    ToolCallAddress {
+                        message: ModelMessageAddress {
+                            session_id: SessionId::parse("3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c")
+                                .unwrap(),
+                            turn_id: TurnId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").unwrap(),
+                            model_step_ordinal: 0,
+                        },
+                        part_ordinal: 0,
+                    },
+                );
+                let value = serde_json::json!({"ok": true});
+                let bytes = canonical_json(&value);
+                results.push(StoredToolResult {
+                    invocation_id,
+                    name,
+                    payload: ResultPayload::Succeeded(SuccessContent::Json {
+                        value,
+                        digest: tool_content_digest(&bytes),
+                        byte_length: bytes.len() as u64,
+                    }),
+                });
+                MessageSemantic::ToolCall { call: bound }
+            }
+            MessageSemantic::Text { text } => MessageSemantic::Text { text },
+            MessageSemantic::Reasoning { text } => MessageSemantic::Reasoning { text },
+        };
+        parts.push(MessagePart {
+            semantic,
+            replay_state: part.replay_state,
+        });
+    }
+    (
+        NativeMessage::new(message.role, message.provider_origin, parts),
+        results,
+    )
 }
 
 #[tokio::test]
@@ -1124,15 +1252,22 @@ async fn configuration_failure(
     turn: &super::GatewayTurn,
     provider: &str,
     contains: &str,
+    stage: &str,
 ) -> crate::LlmError {
     let error = match turn.resolve(&request(provider).target).await {
-        Ok(_) => panic!("invalid configuration resolved a request"),
+        Ok(_) => panic!("{stage}: invalid configuration resolved a request"),
         Err(error) => error,
     };
-    assert!(matches!(error, crate::LlmError::Config { .. }), "{error}");
-    assert!(!error.retryable());
-    assert!(error.to_string().contains("configuration error"));
-    assert!(error.to_string().contains(contains), "{error}");
+    assert!(
+        matches!(error, crate::LlmError::Config { .. }),
+        "{stage}: {error}"
+    );
+    assert!(!error.retryable(), "{stage}: {error}");
+    assert!(
+        error.to_string().contains("configuration error"),
+        "{stage}: {error}"
+    );
+    assert!(error.to_string().contains(contains), "{stage}: {error}");
     error
 }
 
@@ -1260,7 +1395,7 @@ async fn without_usable_tls_roots_https_is_a_configuration_error_and_http_is_ser
         );
         assert!(gateway.tls_roots_der().is_empty(), "{case}: no roots kept");
         let turn = gateway.open_turn();
-        configuration_failure(&turn, "test", "no usable TLS root certificates").await;
+        configuration_failure(&turn, "test", "no usable TLS root certificates", case).await;
         let error = match turn
             .stream_chat(request("test"), StreamControl::default())
             .await
@@ -1360,16 +1495,19 @@ async fn invalid_configuration_only_blocks_requests_that_depend_on_it() {
         "[providers.test]\nprotocol = 'broken'\n",
     )
     .unwrap();
-    configuration_failure(&turn, "test", "providers.toml:2:").await;
+    configuration_failure(&turn, "test", "providers.toml:2:", "broken protocol").await;
     std::fs::write(directory.path().join("providers.toml"), "").unwrap();
-    configuration_failure(&turn, "test", "not registered").await;
+    configuration_failure(&turn, "test", "not registered", "empty registry").await;
     configure(directory.path(), &server.url, "chat-completions", "bearer");
     auth.remove("test").unwrap();
-    configuration_failure(&turn, "test", "credentials are missing").await;
+    configuration_failure(&turn, "test", "credentials are missing", "removed key").await;
     auth.set("test", "restored-key").unwrap();
     std::fs::write(directory.path().join("auth.json"), "{invalid").unwrap();
-    configuration_failure(&turn, "test", "auth.json").await;
-    assert!(server.received.try_recv().is_err());
+    configuration_failure(&turn, "test", "auth.json", "malformed auth file").await;
+    assert!(
+        server.received.try_recv().is_err(),
+        "malformed auth file: request reached the server"
+    );
     configure(directory.path(), &server.url, "chat-completions", "none");
     complete(
         turn.stream_chat(request("test"), StreamControl::default())
@@ -1378,21 +1516,51 @@ async fn invalid_configuration_only_blocks_requests_that_depend_on_it() {
     )
     .await;
     let no_auth = server.next().await;
-    assert!(!no_auth.headers.contains_key("authorization"));
-    assert!(!no_auth.headers.contains_key("x-api-key"));
-    assert!(!no_auth.headers.contains_key("x-goog-api-key"));
+    assert!(
+        !no_auth.headers.contains_key("authorization"),
+        "restored none auth: authorization"
+    );
+    assert!(
+        !no_auth.headers.contains_key("x-api-key"),
+        "restored none auth: x-api-key"
+    );
+    assert!(
+        !no_auth.headers.contains_key("x-goog-api-key"),
+        "restored none auth: x-goog-api-key"
+    );
     std::fs::write(
         directory.path().join("providers.toml"),
         "[providers.test]\nprotocol = 'untrusted-value'\n",
     )
     .unwrap();
-    let error = configuration_failure(&turn, "test", "providers.toml:2:").await;
-    assert!(error.to_string().contains("providers.toml:2:"));
-    assert!(error.to_string().contains("untrusted-value"));
+    let error = configuration_failure(
+        &turn,
+        "test",
+        "providers.toml:2:",
+        "untrusted protocol value",
+    )
+    .await;
+    assert!(
+        error.to_string().contains("providers.toml:2:"),
+        "untrusted protocol value: {error}"
+    );
+    assert!(
+        error.to_string().contains("untrusted-value"),
+        "untrusted protocol value: {error}"
+    );
     configure(directory.path(), &server.url, "chat-completions", "bearer");
     std::fs::remove_file(directory.path().join("auth.json")).unwrap();
-    configuration_failure(&turn, "test", "credentials are missing").await;
-    assert!(server.received.try_recv().is_err());
+    configuration_failure(
+        &turn,
+        "test",
+        "credentials are missing",
+        "deleted auth file",
+    )
+    .await;
+    assert!(
+        server.received.try_recv().is_err(),
+        "deleted auth file: request reached the server"
+    );
 }
 
 #[tokio::test]
@@ -1407,11 +1575,18 @@ async fn unimplemented_protocols_and_auth_are_configuration_errors() {
                 &turn,
                 "test",
                 &format!("protocol {protocol} is not implemented"),
+                &format!("{protocol}/{auth}"),
             )
             .await;
         }
     }
-    configuration_failure(&turn, "chatgpt", "auth oauth:chatgpt is not implemented").await;
+    configuration_failure(
+        &turn,
+        "chatgpt",
+        "auth oauth:chatgpt is not implemented",
+        "chatgpt",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -1462,6 +1637,13 @@ async fn clients_are_reused_only_within_the_same_turn_provider_and_base_url() {
     let changed = server.next().await;
     assert_eq!(changed.connection, 4);
     assert_eq!(changed.path, "/changed/chat/completions");
+}
+
+struct ResumeClock;
+impl Drop for ResumeClock {
+    fn drop(&mut self) {
+        tokio::time::resume();
+    }
 }
 
 #[tokio::test]
@@ -1535,7 +1717,34 @@ async fn unfinished_transport_discards_pinned_client_before_the_next_request() {
         match result {
             Err(error) => assert!(error.retryable(), "{name}: {error}"),
             Ok(stream) => {
-                let events = stream.collect::<Vec<_>>().await;
+                let events = if name == "body tail timeout after Done" {
+                    // 连接保持打开，收尾读取要等 TAIL_WAIT。只在这一段暂停时钟，
+                    // 其余传输失败仍按真实 I/O 结束。
+                    tokio::time::pause();
+                    let _resume = ResumeClock;
+                    let started = tokio::time::Instant::now();
+                    let mut pending = std::pin::pin!(stream.collect::<Vec<_>>());
+                    let mut steps = 0;
+                    let events = loop {
+                        tokio::select! {
+                            biased;
+                            events = &mut pending => break events,
+                            _ = tokio::time::advance(Duration::from_millis(100)) => {
+                                steps += 1;
+                                assert!(steps < 20, "{name} did not finish");
+                            }
+                        }
+                    };
+                    // 与 client.rs 的 TAIL_WAIT（500ms）一致：提前结束说明没在等收尾。
+                    assert!(
+                        started.elapsed() >= Duration::from_millis(500),
+                        "{name} finished after {:?}, before the tail wait",
+                        started.elapsed()
+                    );
+                    events
+                } else {
+                    stream.collect::<Vec<_>>().await
+                };
                 assert_eq!(
                     matches!(
                         events.last(),

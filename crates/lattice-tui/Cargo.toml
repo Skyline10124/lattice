@@ -19,6 +19,7 @@ syntect       = { workspace = true }
 two-face      = { workspace = true }
 
 [dev-dependencies]
+lattice-api = { workspace = true, features = ["test-utils"] }
 tempfile = { workspace = true }
 serde_json = { workspace = true }
 # `test-util` (paused clock) is not part of tokio's `full`; it is what lets the

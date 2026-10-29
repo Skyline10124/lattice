@@ -20,9 +20,12 @@ use tokio::{
 };
 use zeroize::Zeroizing;
 
-const MAGIC: &[u8; 8] = b"LTLOCAL8";
+pub(super) const MAGIC: &[u8; 8] = b"LTLOCAL8";
 pub(super) const MAX_FRAME: usize = 16 * 1024 * 1024;
 pub(super) const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const INCOMPATIBLE_BACKEND: &str = "the running backend is an incompatible older version; stop it with the older binary's `lattice daemon stop`";
+const NEWER_BACKEND: &str = "the running backend is newer than this client; use the newer binary";
+const SILENT_CLOSE: &str = "the backend closed the connection without replying; if an older backend is still running, stop it with the older binary's `lattice daemon stop`";
 
 fn permission() -> LocalError {
     LocalError::new(
@@ -35,6 +38,29 @@ fn protocol() -> LocalError {
         LocalErrorKind::Protocol,
         "unsupported or malformed local protocol frame",
     )
+}
+
+/// 魔数格式固定为 `LTLOCAL` 加一个版本字节，按字节值比较；`9` 之后继续用 `:`、`;` 等更大的字节，
+/// 不改帧长度。
+fn magic_version(magic: &[u8; 8]) -> Option<u8> {
+    let (prefix, _) = MAGIC.split_at(MAGIC.len() - 1);
+    magic.starts_with(prefix).then_some(magic[prefix.len()])
+}
+
+fn check_magic(magic: &[u8; 8]) -> Result<()> {
+    let current = MAGIC[MAGIC.len() - 1];
+    match magic_version(magic) {
+        Some(version) if version == current => Ok(()),
+        Some(version) if version < current => Err(LocalError::new(
+            LocalErrorKind::IncompatibleBackend,
+            INCOMPATIBLE_BACKEND,
+        )),
+        Some(_) => Err(LocalError::new(
+            LocalErrorKind::IncompatibleBackend,
+            NEWER_BACKEND,
+        )),
+        None => Err(protocol()),
+    }
 }
 
 pub(crate) fn uid() -> u32 {
@@ -205,8 +231,31 @@ pub(super) async fn connect(layout: crate::StateLayout) -> Result<UnixStream> {
     Ok(stream)
 }
 
+/// 测试替身读整帧；后台读请求走 `read_request`。
+#[cfg(test)]
 pub(super) async fn read<T: serde::de::DeserializeOwned>(stream: &mut UnixStream) -> Result<T> {
-    read_frame(stream).await?.ok_or_else(eof)
+    read_frame(stream, false).await?.ok_or_else(eof)
+}
+
+/// 后台读请求专用。魔数不符时先回写一帧本端魔数再断开，让对端客户端能分辨是哪一边版本旧。
+pub(super) async fn read_request<T: serde::de::DeserializeOwned>(
+    stream: &mut UnixStream,
+) -> Result<T> {
+    let mut magic = [0; 8];
+    if stream.read(&mut magic[..1]).await? == 0 {
+        return Err(eof());
+    }
+    stream.read_exact(&mut magic[1..]).await?;
+    if let Err(error) = check_magic(&magic) {
+        let _ = tokio::time::timeout(WRITE_TIMEOUT, async {
+            stream.write_all(MAGIC).await?;
+            stream.write_u32(4).await?;
+            stream.write_all(b"null").await
+        })
+        .await;
+        return Err(error);
+    }
+    read_body(stream).await
 }
 fn eof() -> LocalError {
     LocalError::new(
@@ -214,24 +263,37 @@ fn eof() -> LocalError {
         "local connection ended before the message was complete",
     )
 }
-async fn read_frame<T: serde::de::DeserializeOwned>(stream: &mut UnixStream) -> Result<Option<T>> {
+/// 不回写就关连接是本改动之前的后台读到新魔数时的行为；当前后台在过载、崩溃时也可能这样，
+/// 所以只作提示，种类仍是 Transport。
+fn silent_close() -> LocalError {
+    LocalError::new(LocalErrorKind::Transport, SILENT_CLOSE)
+}
+/// `reset_is_eof`：对端带着未读完的请求关闭 Unix 套接字时，Linux 让这一端读到 ECONNRESET 而不是 EOF。
+async fn read_frame<T: serde::de::DeserializeOwned>(
+    stream: &mut UnixStream,
+    reset_is_eof: bool,
+) -> Result<Option<T>> {
     let mut magic = [0; 8];
-    if stream.read(&mut magic[..1]).await? == 0 {
-        return Ok(None);
+    match stream.read(&mut magic[..1]).await {
+        Ok(0) => return Ok(None),
+        Ok(_) => {}
+        Err(error) if reset_is_eof && error.kind() == std::io::ErrorKind::ConnectionReset => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error.into()),
     }
     stream.read_exact(&mut magic[1..]).await?;
-    if &magic != MAGIC {
-        return Err(protocol());
-    }
+    check_magic(&magic)?;
+    read_body(stream).await.map(Some)
+}
+async fn read_body<T: serde::de::DeserializeOwned>(stream: &mut UnixStream) -> Result<T> {
     let len = stream.read_u32().await? as usize;
     if len == 0 || len > MAX_FRAME {
         return Err(protocol());
     }
     let mut bytes = Zeroizing::new(vec![0; len]);
     stream.read_exact(&mut bytes).await?;
-    serde_json::from_slice(&bytes)
-        .map(Some)
-        .map_err(|_| protocol())
+    serde_json::from_slice(&bytes).map_err(|_| protocol())
 }
 
 struct Frame(Zeroizing<Vec<u8>>);
@@ -249,21 +311,55 @@ impl std::io::Write for Frame {
 }
 
 pub(super) async fn write<T: serde::Serialize>(stream: &mut UnixStream, value: &T) -> Result<()> {
+    Ok(write_wire(stream, value).await??)
+}
+
+/// 客户端写请求专用。请求大于套接字缓冲区时，旧后台读完魔数就关连接，这一端写到一半会碰上
+/// EPIPE 或 ECONNRESET；先读一眼对端在断开前有没有回写自己的魔数，没有就按疑似旧后台提示。
+pub(super) async fn write_request<T: serde::Serialize>(
+    stream: &mut UnixStream,
+    value: &T,
+) -> Result<()> {
+    match write_wire(stream, value).await? {
+        Ok(()) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+            ) =>
+        {
+            match tokio::time::timeout(WRITE_TIMEOUT, read_frame::<serde_json::Value>(stream, true))
+                .await
+            {
+                Ok(Err(error)) if error.kind == LocalErrorKind::IncompatibleBackend => Err(error),
+                _ => Err(silent_close()),
+            }
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// 外层是编码和超时失败，内层保留 io 错误种类给 `write_request` 分辨对端已关闭。
+async fn write_wire<T: serde::Serialize>(
+    stream: &mut UnixStream,
+    value: &T,
+) -> Result<std::io::Result<()>> {
     let mut frame = Frame(Zeroizing::new(Vec::new()));
     serde_json::to_writer(&mut frame, value).map_err(|_| protocol())?;
-    tokio::time::timeout(WRITE_TIMEOUT, async {
-        stream.write_all(MAGIC).await?;
-        stream.write_u32(frame.0.len() as u32).await?;
-        stream.write_all(&frame.0).await
-    })
-    .await
-    .map_err(|_| {
-        LocalError::new(
-            LocalErrorKind::Transport,
-            "local write timed out; acknowledgement may be unknown",
-        )
-    })??;
-    Ok(())
+    // 魔数、长度和正文一次写出：小请求整帧进入对端接收队列，旧后台只读魔数就关闭时，
+    // 这一端看到的是读不到回复，而不是写到一半的 EPIPE。
+    let mut wire = Zeroizing::new(Vec::with_capacity(12 + frame.0.len()));
+    wire.extend_from_slice(MAGIC);
+    wire.extend_from_slice(&(frame.0.len() as u32).to_be_bytes());
+    wire.extend_from_slice(&frame.0);
+    tokio::time::timeout(WRITE_TIMEOUT, stream.write_all(&wire))
+        .await
+        .map_err(|_| {
+            LocalError::new(
+                LocalErrorKind::Transport,
+                "local write timed out; acknowledgement may be unknown",
+            )
+        })
 }
 
 /// 每个连接独立编号；片段的 offset 按逻辑 JSON 的 UTF-8 字节计量。
@@ -331,9 +427,10 @@ impl ResponseReader {
         stream: &mut UnixStream,
         progress: impl FnMut(),
     ) -> Result<T> {
+        let first = self.next_message == 0;
         self.next_with_progress(stream, progress)
             .await?
-            .ok_or_else(eof)
+            .ok_or_else(|| if first { silent_close() } else { eof() })
     }
     /// 只有完整消息之间的 EOF 是正常结束，半帧或半条消息仍是传输失败。
     pub(super) async fn next_with_progress<T: serde::de::DeserializeOwned>(
@@ -344,7 +441,8 @@ impl ResponseReader {
         let next_message = self.next_message.checked_add(1).ok_or_else(protocol)?;
         let mut json = String::new();
         loop {
-            let Some(frame) = read_frame::<ResponseFrame>(stream).await? else {
+            let nothing_received = self.next_message == 0 && json.is_empty();
+            let Some(frame) = read_frame::<ResponseFrame>(stream, nothing_received).await? else {
                 return if json.is_empty() {
                     Ok(None)
                 } else {
@@ -374,25 +472,146 @@ mod frame_tests {
 
     #[tokio::test]
     async fn v8_accepts_current_frames_and_rejects_old_empty_and_oversized_frames() {
-        for (magic, length, payload, valid) in [
-            (*b"LTLOCAL8", 4_u32, b"null".as_slice(), true),
-            (*b"LTLOCAL7", 4, b"null".as_slice(), false),
-            (*b"LTLOCAL6", 4, b"null".as_slice(), false),
-            (*b"LTLOCAL2", 4, b"null".as_slice(), false),
-            (*b"LTLOCAL8", 0, b"".as_slice(), false),
-            (*b"LTLOCAL8", (MAX_FRAME + 1) as u32, b"".as_slice(), false),
+        for (magic, length, payload, expected) in [
+            (*b"LTLOCAL8", 4_u32, b"null".as_slice(), None),
+            (
+                *b"LTLOCAL7",
+                4,
+                b"null".as_slice(),
+                Some(LocalErrorKind::IncompatibleBackend),
+            ),
+            (
+                *b"LTLOCAL6",
+                4,
+                b"null".as_slice(),
+                Some(LocalErrorKind::IncompatibleBackend),
+            ),
+            (
+                *b"LTLOCAL2",
+                4,
+                b"null".as_slice(),
+                Some(LocalErrorKind::IncompatibleBackend),
+            ),
+            (
+                *b"LTLOCAL9",
+                4,
+                b"null".as_slice(),
+                Some(LocalErrorKind::IncompatibleBackend),
+            ),
+            (
+                *b"XXLOCAL8",
+                4,
+                b"null".as_slice(),
+                Some(LocalErrorKind::Protocol),
+            ),
+            (
+                *b"LTLOCAL8",
+                0,
+                b"".as_slice(),
+                Some(LocalErrorKind::Protocol),
+            ),
+            (
+                *b"LTLOCAL8",
+                (MAX_FRAME + 1) as u32,
+                b"".as_slice(),
+                Some(LocalErrorKind::Protocol),
+            ),
         ] {
             let (mut sender, mut receiver) = UnixStream::pair().unwrap();
             sender.write_all(&magic).await.unwrap();
             sender.write_u32(length).await.unwrap();
             sender.write_all(payload).await.unwrap();
             let result = read::<serde_json::Value>(&mut receiver).await;
-            if valid {
-                assert_eq!(result.unwrap(), serde_json::Value::Null);
-            } else {
-                assert_eq!(result.unwrap_err().kind, LocalErrorKind::Protocol);
+            match expected {
+                None => assert_eq!(result.unwrap(), serde_json::Value::Null),
+                Some(kind) => {
+                    let error = result.unwrap_err();
+                    assert_eq!(error.kind, kind, "{}", String::from_utf8_lossy(&magic));
+                    if kind == LocalErrorKind::IncompatibleBackend {
+                        let expected = if magic > *MAGIC {
+                            NEWER_BACKEND
+                        } else {
+                            INCOMPATIBLE_BACKEND
+                        };
+                        assert_eq!(error.message, expected);
+                    }
+                }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn backend_answers_a_foreign_magic_with_its_own_before_closing() {
+        let (mut client, mut backend) = UnixStream::pair().unwrap();
+        // 字面量模拟下一版客户端，不能从当前魔数推导。
+        client.write_all(b"LTLOCAL9").await.unwrap();
+        client.write_u32(4).await.unwrap();
+        client.write_all(b"null").await.unwrap();
+        let error = read_request::<serde_json::Value>(&mut backend)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, LocalErrorKind::IncompatibleBackend);
+        drop(backend);
+        let mut reply = [0; 8];
+        client.read_exact(&mut reply).await.unwrap();
+        assert_eq!(&reply, MAGIC, "backend must announce its own magic");
+        let len = client.read_u32().await.unwrap() as usize;
+        client.read_exact(&mut vec![0; len]).await.unwrap();
+        // 后台没读完的请求留在它的接收队列里，Linux 让这一端读到 ECONNRESET；两者都表示已关闭。
+        let closed = client.read(&mut [0; 1]).await;
+        assert!(
+            matches!(&closed, Ok(0))
+                || matches!(&closed, Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset),
+            "connection must close after the announcement: {closed:?}"
+        );
+    }
+
+    /// harness 不能依赖产品 crate，只能写死魔数；升级时在这里失败并指出要改哪个文件。
+    #[test]
+    fn harness_frame_magic_tracks_the_current_magic() {
+        let harness = include_str!("../../../lattice-system-harness/tests/support/mod.rs");
+        let current = std::str::from_utf8(MAGIC).unwrap();
+        assert!(
+            harness.contains(&format!("const FRAME_MAGIC: &[u8; 8] = b\"{current}\";")),
+            "update FRAME_MAGIC in crates/lattice-system-harness/tests/support/mod.rs to {current}"
+        );
+    }
+
+    /// 远大于套接字缓冲区的请求，对端只读魔数就关闭。
+    async fn oversized_request_against(reply: Option<&'static [u8; 8]>) -> LocalError {
+        let (mut client, mut backend) = UnixStream::pair().unwrap();
+        let backend = tokio::spawn(async move {
+            let mut magic = [0; 8];
+            backend.read_exact(&mut magic).await.unwrap();
+            if let Some(reply) = reply {
+                backend.write_all(reply).await.unwrap();
+                backend.write_u32(4).await.unwrap();
+                backend.write_all(b"null").await.unwrap();
+            }
+        });
+        let prompt = "x".repeat(4 * 1024 * 1024);
+        let error = write_request(&mut client, &prompt).await.unwrap_err();
+        backend.await.unwrap();
+        error
+    }
+
+    #[tokio::test]
+    async fn oversized_request_cut_off_by_a_silent_older_backend_gets_the_stop_hint() {
+        let error = oversized_request_against(None).await;
+        assert_eq!(
+            (error.kind, error.message.as_str()),
+            (LocalErrorKind::Transport, SILENT_CLOSE)
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_request_cut_off_by_an_announcing_backend_reports_its_version() {
+        // 字面量模拟旧后台，不能从当前魔数推导。
+        let error = oversized_request_against(Some(b"LTLOCAL5")).await;
+        assert_eq!(
+            (error.kind, error.message.as_str()),
+            (LocalErrorKind::IncompatibleBackend, INCOMPATIBLE_BACKEND)
+        );
     }
 
     #[tokio::test]
