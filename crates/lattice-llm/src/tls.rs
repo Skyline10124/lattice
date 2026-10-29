@@ -3,8 +3,11 @@
 
 /// 按启动环境载入平台根证书的原始 DER，供 provider 与 Tool Host 共用。
 ///
-/// 这里不解析、不过滤，也不因为集合为空而失败：大小与有效性的筛选和警告只在
-/// [`crate::RequestGateway::new`] 的选根步骤里做一次，“没有可用的根证书”也只在那里判定。
+/// 这里不解析、不过滤，也不因为集合为空而失败，结果可能为空。大小与有效性的筛选和警告在
+/// [`crate::RequestGateway::new`] 经 `select_roots`（真实 `parse_root`）做一次；“有没有可用的根”
+/// 按筛选结果判定，由 [`crate::RequestGateway::has_usable_tls_roots`]（元数据刷新）与
+/// `GatewayTurn::resolve`（接受前拒绝 https 端点）共用。不经过网关的调用方用 [`usable_tls_roots_der`]
+/// 按同一规则筛选。
 pub fn load_tls_roots_der() -> Vec<Vec<u8>> {
     native_roots_der(rustls_native_certs::load_native_certs())
 }

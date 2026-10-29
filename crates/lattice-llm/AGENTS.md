@@ -6,7 +6,7 @@
 
 目录按职责划分，协议与 provider 分开：
 
-- `gateway.rs`：`GatewayTurn::resolve` 读取当前注册表与凭据，返回封装协议与认证的 `ResolvedRequest`；发送沿用该结果。`tls.rs` 载入启动时可用根，后台将同一份 DER 交给网关与 Tool Host。
+- `gateway.rs`：`GatewayTurn::resolve` 读取当前注册表与凭据，返回封装协议与认证的 `ResolvedRequest`；发送沿用该结果。`tls.rs` 原样载入平台根 DER，不筛选，可能为空；网关在 `RequestGateway::new` 中按 `select_roots` 筛选，并判定有没有可用的根（`has_usable_tls_roots`，`GatewayTurn::resolve` 用同一判定）；后台把网关筛选后的同一份 DER 交给 Tool Host。
 - `protocol/`：协议适配器，每个协议一个模块（`chat_completions`、`responses`、`anthropic_messages`、`generate_content`、`interactions`），负责该协议的请求体、流式事件、用量换算与 features；各适配器共用的消息投影 `protocol/projection/` 是唯一的生产消息 codec。这里不出现任何厂商名。
 - `provider/`：provider 注册表，包括内置表、`providers.toml` 的解析与合并、按 `id` 查找。这里不含协议代码。
 - `metadata/`：内置快照、缓存与手写元数据的合并与刷新。

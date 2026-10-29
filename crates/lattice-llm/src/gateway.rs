@@ -22,6 +22,13 @@ struct Configuration {
     metadata_url: Option<String>,
 }
 
+impl Configuration {
+    /// 选根之后是否还有可用的根证书；网关各处的“没有可用的根证书”都由这里判定。
+    fn has_usable_roots(&self) -> bool {
+        !self.roots_der.is_empty()
+    }
+}
+
 /// 持有配置目录与给定的 TLS 根，按 Turn 创建连接句柄。
 pub struct RequestGateway {
     configuration: Arc<Configuration>,
@@ -45,9 +52,9 @@ impl RequestGateway {
         })
     }
 
-    /// 选根之后是否还有可用的根证书；这是“没有可用的根证书”唯一的判定处。
+    /// 选根之后是否还有可用的根证书（元数据刷新据此拒绝；`GatewayTurn::resolve` 用同一判定）。
     pub fn has_usable_tls_roots(&self) -> bool {
-        !self.configuration.roots_der.is_empty()
+        self.configuration.has_usable_roots()
     }
 
     /// Tool Host 使用同一份启动时信任根，每个 Turn 独立构造信任配置。
@@ -133,7 +140,7 @@ impl GatewayTurn {
                 .await
                 .map_err(|_| configuration_error("provider configuration task failed"))??;
         // 没有可用根证书时 https 端点按配置错误拒绝，不回退平台根；http 端点照常。
-        if self.configuration.roots_der.is_empty() {
+        if !self.configuration.has_usable_roots() {
             require_endpoint_without_tls_roots(&provider.base_url)?;
         }
         let client = self
