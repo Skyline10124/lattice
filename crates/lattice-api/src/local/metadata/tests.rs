@@ -119,84 +119,226 @@ async fn automatic_refresh_reloads_configuration_and_manual_refresh_ignores_the_
     refresh.stop();
 }
 
+/// 测试中的墙钟：固定起点加上暂停的 tokio 时钟走过的时间，缓存新鲜度随 `advance` 变化。
+const BASE: Duration = Duration::from_secs(1_800_000_000);
+
+fn wall(elapsed: Duration) -> SystemTime {
+    SystemTime::UNIX_EPOCH + BASE + elapsed
+}
+
+/// 换上跟随暂停时钟的墙钟，并返回每次定时触发结果的接收端。
+fn observed(
+    mut refresh: Arc<MetadataRefresh>,
+) -> (Arc<MetadataRefresh>, mpsc::UnboundedReceiver<AutoRefresh>) {
+    let start = tokio::time::Instant::now();
+    let inner = Arc::get_mut(&mut refresh).expect("refresh is not shared yet");
+    inner.clock = Box::new(move || wall(tokio::time::Instant::now() - start));
+    let (sender, outcomes) = mpsc::unbounded_channel();
+    *inner.outcomes.lock().unwrap() = Some(sender);
+    (refresh, outcomes)
+}
+
+/// 让已就绪的任务运行完；不推进时钟，也不真实等待。
+async fn yield_many() {
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+}
+
+/// 等待下一次定时触发的结果。触发里的配置与缓存读取跑在 spawn_blocking 线程上；
+/// 若用 `recv().await` 让运行时空闲，暂停的时钟会自动跳到下一个定时点。
+/// 这里只让出执行权，时钟保持不动；真实时间只用作卡死时的失败期限。
+async fn next_outcome(outcomes: &mut mpsc::UnboundedReceiver<AutoRefresh>) -> AutoRefresh {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Ok(outcome) = outcomes.try_recv() {
+            return outcome;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no trigger outcome within 5s of real time"
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
+/// 断言定时器在 `at` 之前一秒尚未触发，到 `at` 时恰好触发一次并得到 `expected`。
+async fn assert_fires_once_at(
+    initial: tokio::time::Instant,
+    at: Duration,
+    outcomes: &mut mpsc::UnboundedReceiver<AutoRefresh>,
+    expected: AutoRefresh,
+) {
+    let now = tokio::time::Instant::now();
+    let before = initial + at - Duration::from_secs(1);
+    tokio::time::advance(before - now).await;
+    yield_many().await;
+    assert!(
+        outcomes.try_recv().is_err(),
+        "trigger must not fire before {}s",
+        at.as_secs()
+    );
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let outcome = next_outcome(outcomes).await;
+    assert_eq!(
+        tokio::time::Instant::now(),
+        initial + at,
+        "trigger must fire exactly at {}s",
+        at.as_secs()
+    );
+    assert_eq!(
+        outcome,
+        expected,
+        "outcome of the trigger at {}s",
+        at.as_secs()
+    );
+    yield_many().await;
+    assert!(
+        outcomes.try_recv().is_err(),
+        "trigger at {}s must fire only once",
+        at.as_secs()
+    );
+}
+
 #[tokio::test(start_paused = true)]
-async fn each_scheduled_trigger_skips_when_auto_refresh_is_disabled_or_invalid() {
+async fn scheduled_triggers_skip_while_auto_refresh_is_disabled() {
     let directory = tempfile::tempdir().unwrap();
     write_cache(
         directory.path(),
-        std::time::SystemTime::now() - Duration::from_secs(25 * 60 * 60),
+        wall(Duration::ZERO) - Duration::from_secs(25 * 60 * 60),
     );
     let path = directory.path().join("providers.toml");
     std::fs::write(&path, "[metadata]\nauto_refresh = false\n").unwrap();
     let (started, mut calls) = mpsc::unbounded_channel();
-    let refresh = scheduled(directory.path(), started);
+    let (refresh, mut outcomes) = observed(scheduled(directory.path(), started));
+    let initial = tokio::time::Instant::now();
     let timer = refresh.start();
-    settle().await;
-    assert!(
-        calls.try_recv().is_err(),
-        "auto_refresh = false skips the startup trigger"
+    assert_eq!(
+        next_outcome(&mut outcomes).await,
+        AutoRefresh::Idle,
+        "startup trigger is skipped"
     );
-    tokio::time::advance(Duration::from_secs(24 * 60 * 60)).await;
-    settle().await;
+    assert_eq!(tokio::time::Instant::now(), initial);
+    assert_fires_once_at(
+        initial,
+        Duration::from_secs(24 * 60 * 60),
+        &mut outcomes,
+        AutoRefresh::Idle,
+    )
+    .await;
     assert!(
         calls.try_recv().is_err(),
-        "auto_refresh = false skips the following daily trigger"
-    );
-    std::fs::write(&path, "[metadata]\nauto_refresh = true\nunknown = true\n").unwrap();
-    tokio::time::advance(Duration::from_secs(24 * 60 * 60)).await;
-    settle().await;
-    assert!(
-        calls.try_recv().is_err(),
-        "invalid providers.toml skips that trigger"
+        "auto_refresh = false never fetches"
     );
     std::fs::write(&path, "[metadata]\nauto_refresh = true\n").unwrap();
-    tokio::time::advance(Duration::from_secs(24 * 60 * 60)).await;
-    settle().await;
+    assert_fires_once_at(
+        initial,
+        Duration::from_secs(48 * 60 * 60),
+        &mut outcomes,
+        AutoRefresh::Ran,
+    )
+    .await;
     assert!(
         calls.try_recv().is_ok(),
-        "a later trigger reads the enabled switch and refreshes a stale cache"
+        "the enabled switch refreshes a stale cache"
     );
     assert!(calls.try_recv().is_err(), "one trigger refreshes once");
     refresh.stop();
     timer.await.unwrap();
 }
 
-async fn settle() {
-    // spawn_blocking 在独立线程上完成；暂停的 tokio 时钟不会替它推进。
-    for _ in 0..10 {
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        tokio::task::yield_now().await;
-    }
+#[tokio::test(start_paused = true)]
+async fn invalid_configuration_retries_with_bounded_backoff() {
+    let directory = tempfile::tempdir().unwrap();
+    write_cache(
+        directory.path(),
+        wall(Duration::ZERO) - Duration::from_secs(25 * 60 * 60),
+    );
+    let path = directory.path().join("providers.toml");
+    std::fs::write(&path, "[metadata]\nauto_refresh = true\nunknown = true\n").unwrap();
+    let (started, mut calls) = mpsc::unbounded_channel();
+    let (refresh, mut outcomes) = observed(scheduled(directory.path(), started));
+    let initial = tokio::time::Instant::now();
+    let timer = refresh.start();
+    assert_eq!(
+        next_outcome(&mut outcomes).await,
+        AutoRefresh::Failed,
+        "invalid providers.toml counts as a failed trigger"
+    );
+    assert_fires_once_at(
+        initial,
+        Duration::from_secs(60),
+        &mut outcomes,
+        AutoRefresh::Failed,
+    )
+    .await;
+    assert_fires_once_at(
+        initial,
+        Duration::from_secs(180),
+        &mut outcomes,
+        AutoRefresh::Failed,
+    )
+    .await;
+    assert!(
+        calls.try_recv().is_err(),
+        "invalid configuration never fetches"
+    );
+    std::fs::write(&path, "[metadata]\nauto_refresh = true\n").unwrap();
+    assert_fires_once_at(
+        initial,
+        Duration::from_secs(420),
+        &mut outcomes,
+        AutoRefresh::Ran,
+    )
+    .await;
+    assert!(
+        calls.try_recv().is_ok(),
+        "the repaired configuration refreshes"
+    );
+    assert!(calls.try_recv().is_err(), "one trigger refreshes once");
+    refresh.stop();
+    timer.await.unwrap();
 }
 
 #[tokio::test(start_paused = true)]
 async fn automatic_refresh_skips_a_fresh_cache_and_fetches_a_stale_one() {
     let fresh = tempfile::tempdir().unwrap();
-    write_cache(fresh.path(), std::time::SystemTime::now());
+    // 23 小时前写入，按注入的墙钟还剩 1 小时到期。
+    write_cache(
+        fresh.path(),
+        wall(Duration::ZERO) - Duration::from_secs(23 * 60 * 60),
+    );
     let stale = tempfile::tempdir().unwrap();
     write_cache(
         stale.path(),
-        std::time::SystemTime::now() - Duration::from_secs(25 * 60 * 60),
+        wall(Duration::ZERO) - Duration::from_secs(25 * 60 * 60),
     );
     let (fresh_started, mut fresh_calls) = mpsc::unbounded_channel();
     let (stale_started, mut stale_calls) = mpsc::unbounded_channel();
-    let fresh_refresh = scheduled(fresh.path(), fresh_started);
-    let stale_refresh = scheduled(stale.path(), stale_started);
+    let (fresh_refresh, mut fresh_outcomes) = observed(scheduled(fresh.path(), fresh_started));
+    let (stale_refresh, mut stale_outcomes) = observed(scheduled(stale.path(), stale_started));
     let initial = tokio::time::Instant::now();
     let fresh_timer = fresh_refresh.start();
     let stale_timer = stale_refresh.start();
-    stale_calls.recv().await.unwrap();
+    assert_eq!(next_outcome(&mut stale_outcomes).await, AutoRefresh::Ran);
     assert_eq!(
         tokio::time::Instant::now(),
         initial,
         "a cache older than 24h must be refreshed at startup"
     );
-    tokio::time::advance(Duration::from_secs(60 * 60)).await;
-    tokio::task::yield_now().await;
+    assert!(stale_calls.try_recv().is_ok(), "stale cache fetches once");
+    assert_fires_once_at(
+        initial,
+        Duration::from_secs(60 * 60),
+        &mut fresh_outcomes,
+        AutoRefresh::Ran,
+    )
+    .await;
     assert!(
-        fresh_calls.try_recv().is_err(),
-        "a cache newer than 24h must not be refreshed"
+        fresh_calls.try_recv().is_ok(),
+        "a cache newer than 24h is refreshed only when it expires"
     );
+    assert!(fresh_calls.try_recv().is_err(), "expiry refreshes once");
     fresh_refresh.stop();
     stale_refresh.stop();
     fresh_timer.await.unwrap();
@@ -205,8 +347,8 @@ async fn automatic_refresh_skips_a_fresh_cache_and_fetches_a_stale_one() {
 
 #[tokio::test(start_paused = true)]
 async fn failed_automatic_refresh_retries_with_bounded_backoff() {
-    let (started, mut calls) = mpsc::unbounded_channel();
-    let refresh = MetadataRefresh::with_work(None, move |_| {
+    let (started, calls) = mpsc::unbounded_channel();
+    let (refresh, mut outcomes) = observed(MetadataRefresh::with_work(None, move |_| {
         started.send(()).unwrap();
         Box::pin(async {
             Err(LocalError::new(
@@ -214,32 +356,27 @@ async fn failed_automatic_refresh_retries_with_bounded_backoff() {
                 "metadata server returned HTTP 503",
             ))
         })
-    });
+    }));
     let initial = tokio::time::Instant::now();
     let timer = refresh.start();
-    calls.recv().await.unwrap();
-    assert_eq!(tokio::time::Instant::now(), initial);
+    assert_eq!(next_outcome(&mut outcomes).await, AutoRefresh::Failed);
+    assert_eq!(
+        tokio::time::Instant::now(),
+        initial,
+        "startup trigger runs immediately"
+    );
     let mut elapsed = 0u64;
     for gap in [60_u64, 120, 240, 480, 960, 1_920, 3_600, 3_600] {
-        tokio::time::advance(Duration::from_secs(gap)).await;
-        for _ in 0..30 {
-            tokio::task::yield_now().await;
-        }
-        assert!(
-            calls.try_recv().is_ok(),
-            "failed refresh must retry after {gap}s (elapsed {elapsed}s)"
-        );
-        assert!(
-            calls.try_recv().is_err(),
-            "failed refresh retried more than once at the {gap}s mark"
-        );
         elapsed += gap;
-        assert_eq!(
-            tokio::time::Instant::now(),
-            initial + Duration::from_secs(elapsed),
-            "backoff stays on the paused clock"
-        );
+        assert_fires_once_at(
+            initial,
+            Duration::from_secs(elapsed),
+            &mut outcomes,
+            AutoRefresh::Failed,
+        )
+        .await;
     }
+    assert_eq!(calls.len(), 9, "startup plus eight retries each fetch once");
     refresh.stop();
     timer.await.unwrap();
 }
