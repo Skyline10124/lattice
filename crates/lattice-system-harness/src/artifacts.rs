@@ -1030,6 +1030,28 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn excerpt_redacts_a_secret_that_straddles_the_truncation_point() {
+        // 密钥从第 2040 字节开始，跨过 2048 字节的截断点：先截断再脱敏会漏出前 8 个字符。
+        let secret = "QZJXWVKMPLHGFDTRBNCY";
+        let mut bytes = "x".repeat(DIAGNOSTIC_EXCERPT_BYTES - 8).into_bytes();
+        bytes.extend_from_slice(secret.as_bytes());
+        bytes.extend_from_slice(b"\ntail\n");
+        let excerpt = redacted_excerpt(&bytes, &[secret]);
+        let leaked = (2..=secret.len())
+            .rev()
+            .find(|len| excerpt.contains(&secret[..*len]));
+        assert_eq!(
+            leaked, None,
+            "no prefix of the secret may appear in the excerpt"
+        );
+        assert!(
+            excerpt.contains("more bytes truncated"),
+            "excerpt must still be truncated, got tail {:?}",
+            &excerpt[excerpt.len().saturating_sub(80)..]
+        );
+    }
+
+    #[test]
     fn write_fake_llm_log_renders_one_block_per_capture() {
         let dir = TempDir::new().unwrap();
         let captures = vec![
