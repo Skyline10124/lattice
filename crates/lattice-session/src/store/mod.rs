@@ -50,6 +50,33 @@ impl SessionExecutionLock {
 }
 
 impl SessionStore {
+    /// 测试在已打开的库中注入节点编码损坏，核验读取投影的实际依赖。
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn edit_test_node(
+        &self,
+        node: NodeRef,
+        edit: impl FnOnce(&mut serde_json::Value),
+    ) -> Result<()> {
+        use redb::ReadableTable;
+
+        let tx = self.db.begin_write()?;
+        {
+            let mut nodes = tx.open_table(codec::NODES).map_err(codec::table_error)?;
+            let key = codec::node_key(node.session_id, node.node);
+            let mut wire: serde_json::Value = codec::decode(
+                "nodes",
+                &node.node.0.to_string(),
+                nodes
+                    .get(key.as_slice())?
+                    .ok_or_else(|| missing("node", node.node.0))?
+                    .value(),
+            )?;
+            edit(&mut wire);
+            nodes.insert(key.as_slice(), codec::encode(&wire)?.as_slice())?;
+        }
+        tx.commit().map_err(commit_error)
+    }
+
     /// 在提交健康锁内同步交接已经准备好的执行责任。
     /// 回调只能交给现有监督任务，不得 I/O、await 或等待其他锁。
     pub fn with_execution_start<T>(&self, start: impl FnOnce() -> T) -> Result<T> {

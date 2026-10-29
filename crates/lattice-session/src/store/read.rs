@@ -56,6 +56,30 @@ struct TurnAgent {
     agent_name: String,
 }
 
+// 扁平投影跳过正文与执行材料，只保留父链、轮的模型身份和尝试计量。
+#[derive(serde::Deserialize)]
+struct UsageNode {
+    kind: CountedNodeKind,
+    parent: NodeId,
+    turn_id: TurnId,
+    provider: Option<String>,
+    model: Option<String>,
+    attempts: Option<Vec<UsageAttempt>>,
+}
+
+#[derive(serde::Deserialize)]
+struct UsageAttempt {
+    usage: Option<lattice_conversation::TokenUsage>,
+    #[serde(with = "lattice_conversation::usage::estimated_cost_usd")]
+    estimated_cost_usd: Option<f64>,
+}
+
+impl UsageAttempt {
+    fn metering(&self) -> (Option<lattice_conversation::TokenUsage>, Option<f64>) {
+        (self.usage, self.estimated_cost_usd)
+    }
+}
+
 fn payload_summary(
     payload: &ResultPayload,
 ) -> (ToolResultOutcome, Option<OperatorReason>, MaterialSummary) {
@@ -388,6 +412,74 @@ fn matches(filter: &AuditFilter, project: &ProjectStoreKey, row: &OperatorInvoca
 }
 
 impl SessionRead {
+    /// 同一读事务固定当前位置并汇总当前路径上的尝试。
+    pub fn usage(&self, session_id: SessionId) -> Result<SessionUsage> {
+        let session = self
+            .find_session(session_id)?
+            .ok_or_else(|| missing("session", session_id))?;
+        let mut head = session.current;
+        let mut path = Vec::new();
+        while head != NodeId(0) {
+            let node: UsageNode = self.projected_node(session_id, head)?;
+            if node.parent >= head {
+                return Err(corrupt(
+                    "nodes",
+                    &format!("{session_id}/{}", head.0),
+                    "invalid path parent",
+                ));
+            }
+            head = node.parent;
+            path.push(node);
+        }
+        path.reverse();
+        let total = UsageSummary::from_attempts(
+            path.iter()
+                .filter(|node| matches!(node.kind, CountedNodeKind::Step))
+                .flat_map(|node| node.attempts.iter().flatten().map(UsageAttempt::metering)),
+        );
+        let mut nodes = path.into_iter().peekable();
+        let mut turns = Vec::new();
+        while let Some(user) = nodes.next() {
+            let invalid_turn = || {
+                corrupt(
+                    "nodes",
+                    &user.turn_id.to_string(),
+                    "invalid usage path turn",
+                )
+            };
+            if !matches!(user.kind, CountedNodeKind::UserMessage) {
+                return Err(invalid_turn());
+            }
+            let provider = user.provider.ok_or_else(invalid_turn)?;
+            validate::provider_id(&provider).map_err(|_| invalid_turn())?;
+            let model = user.model.ok_or_else(invalid_turn)?;
+            let mut attempts = Vec::new();
+            while nodes
+                .peek()
+                .is_some_and(|node| matches!(node.kind, CountedNodeKind::Step))
+            {
+                let step = nodes.next().expect("peeked step");
+                if step.turn_id != user.turn_id {
+                    return Err(invalid_turn());
+                }
+                attempts.extend(step.attempts.ok_or_else(invalid_turn)?);
+            }
+            turns.push(TurnUsageRow {
+                turn_id: user.turn_id,
+                ordinal: turns.len() as u64 + 1,
+                provider,
+                model,
+                usage: UsageSummary::from_attempts(attempts.iter().map(UsageAttempt::metering)),
+            });
+        }
+        Ok(SessionUsage {
+            session_id,
+            position: session.current,
+            turns,
+            total,
+        })
+    }
+
     fn local(&self, session: SessionId, selection: Selection) -> Result<Records> {
         attach_path(&self.path, local::read(&self.tx, session, selection))
     }
@@ -510,6 +602,37 @@ impl SessionRead {
             .nodes
             .remove(&(node.session_id, node.node))
             .ok_or_else(|| missing("node", node.node.0))
+    }
+
+    /// 只遍历身份键，不读取节点、配置或其他会话的记录值。
+    pub fn session_ids(
+        &self,
+        after: Option<SessionId>,
+        limit: usize,
+    ) -> Result<Page<SessionId, SessionId>> {
+        positive(limit)?;
+        let table = self.tx.open_table(SESSIONS).map_err(table_error)?;
+        let after = after.map(|id| id.to_string());
+        let mut sessions = table.range::<&str>((
+            after
+                .as_deref()
+                .map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded),
+            std::ops::Bound::Unbounded,
+        ))?;
+        let mut items = Vec::new();
+        for entry in sessions.by_ref().take(limit) {
+            let (key, _) = entry?;
+            items.push(
+                SessionId::parse(key.value())
+                    .map_err(|_| corrupt("sessions", "key", "invalid id"))?,
+            );
+        }
+        let next = if sessions.next().transpose()?.is_some() {
+            items.last().copied()
+        } else {
+            None
+        };
+        Ok(Page { items, next })
     }
 
     pub fn list(

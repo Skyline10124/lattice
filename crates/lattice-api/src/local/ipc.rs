@@ -20,7 +20,7 @@ use tokio::{
 };
 use zeroize::Zeroizing;
 
-pub(super) const MAGIC: &[u8; 8] = b"LTLOCAL9";
+pub(super) const MAGIC: &[u8; 8] = b"LTLOCAL:";
 pub(super) const MAX_FRAME: usize = 16 * 1024 * 1024;
 pub(super) const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const INCOMPATIBLE_BACKEND: &str = "the running backend is an incompatible older version; stop it with the older binary's `lattice daemon stop`";
@@ -534,9 +534,15 @@ mod frame_tests {
     use super::*;
 
     #[tokio::test]
-    async fn v9_accepts_current_frames_and_rejects_old_empty_and_oversized_frames() {
+    async fn current_frames_reject_old_empty_and_oversized_frames() {
         for (magic, length, payload, expected) in [
-            (*b"LTLOCAL9", 4_u32, b"null".as_slice(), None),
+            (*b"LTLOCAL:", 4_u32, b"null".as_slice(), None),
+            (
+                *b"LTLOCAL9",
+                4,
+                b"null".as_slice(),
+                Some(LocalErrorKind::IncompatibleBackend),
+            ),
             (
                 *b"LTLOCAL8",
                 4,
@@ -562,7 +568,7 @@ mod frame_tests {
                 Some(LocalErrorKind::IncompatibleBackend),
             ),
             (
-                *b"LTLOCAL:",
+                *b"LTLOCAL;",
                 4,
                 b"null".as_slice(),
                 Some(LocalErrorKind::IncompatibleBackend),
@@ -574,13 +580,13 @@ mod frame_tests {
                 Some(LocalErrorKind::Protocol),
             ),
             (
-                *b"LTLOCAL9",
+                *b"LTLOCAL:",
                 0,
                 b"".as_slice(),
                 Some(LocalErrorKind::Protocol),
             ),
             (
-                *b"LTLOCAL9",
+                *b"LTLOCAL:",
                 (MAX_FRAME + 1) as u32,
                 b"".as_slice(),
                 Some(LocalErrorKind::Protocol),
@@ -618,7 +624,7 @@ mod frame_tests {
         tokio::time::timeout(Duration::from_secs(1), async {
             let (mut client, mut backend) = UnixStream::pair().unwrap();
             // 字面量模拟下一版客户端，不能从当前魔数推导。
-            client.write_all(b"LTLOCAL:").await.unwrap();
+            client.write_all(b"LTLOCAL;").await.unwrap();
             client.write_u32(4).await.unwrap();
             client.write_all(b"null").await.unwrap();
             let error = read_request::<serde_json::Value>(&mut backend)

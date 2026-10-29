@@ -146,7 +146,14 @@ lattice session send "概括项目用途。" --agent reader
 
 `lattice session rewind <session_id> <节点序号>` 把当前位置移到会话树中的某个节点，之后的提交从那里分叉继续；原分支保留，文件不回退。节点序号用 `lattice session log <session_id>` 查看，用法见[会话退回与分叉](docs/development/validation-guide.md#会话退回与分叉)。
 
-从旧版本升级时，旧的 `sessions.git` / `invocations.git` 状态不会迁移，打开时会被拒绝并列出路径，处理方式见[开发状态诊断与重建边界](docs/development/tool-development.md#开发状态诊断与重建边界)。不兼容的旧格式 `lattice.redb` 同样拒绝打开，升级说明见[验证指南](docs/development/validation-guide.md#升级与输出字段适配)。
+当前路径的逐轮用量与费用估算可直接查询，字段与输出说明见[查询当前路径的用量](docs/development/validation-guide.md#查询当前路径的用量)：
+
+```text
+lattice session usage <session_id>
+lattice --json session usage <session_id>
+```
+
+升级前先用旧二进制执行 `lattice daemon stop`。协议兼容、输出字段与旧状态处理见[验证指南](docs/development/validation-guide.md#升级与输出字段适配)。
 
 具体参数以各命令帮助为准：
 

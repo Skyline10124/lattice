@@ -78,6 +78,8 @@ pub enum SessionAction {
     List,
     /// Show the full session tree, including the root node.
     Log { session_id: String },
+    /// Show per-turn token usage and estimated cost on the current path, with totals.
+    Usage { session_id: String },
     /// Show every Step of a Turn by TurnId; --follow keeps observing.
     Turn {
         #[arg(value_parser = parse_turn_id)]
@@ -149,6 +151,14 @@ pub async fn run(
                 println!("{}", serde_json::to_string(&log)?);
             } else {
                 print!("{}", render_log(&log));
+            }
+        }
+        SessionAction::Usage { session_id } => {
+            let usage = api.usage(&session_id).await?;
+            if json {
+                println!("{}", serde_json::to_string(&usage)?);
+            } else {
+                print!("{}", render_usage(&usage));
             }
         }
         SessionAction::Rewind { session_id, target } => {
@@ -309,6 +319,59 @@ fn render_log(log: &lattice_api::local::SessionLog) -> String {
     text
 }
 
+fn render_usage(usage: &lattice_api::local::SessionUsage) -> String {
+    use std::fmt::Write;
+    let mut text = format!(
+        "session {} position={}\n",
+        usage.session_id, usage.position.0
+    );
+    text.push_str("#\tTURN\tPROVIDER/MODEL\tATTEMPTS\tINPUT\tCACHE_READ\tCACHE_WRITE\tOUTPUT\tREASONING\tESTIMATED USD\n");
+    for turn in &usage.turns {
+        let _ = writeln!(
+            text,
+            "{}\t{}\t{}/{}\t{}",
+            turn.ordinal,
+            turn.turn_id,
+            turn.provider,
+            summarize(&turn.model, 120),
+            render_usage_values(&turn.usage)
+        );
+    }
+    let _ = writeln!(text, "total\t-\t-\t{}", render_usage_values(&usage.total));
+    text
+}
+
+fn render_usage_values(usage: &lattice_api::local::UsageSummary) -> String {
+    let tokens = [
+        &usage.input,
+        &usage.cache_read,
+        &usage.cache_write,
+        &usage.output,
+        &usage.reasoning,
+    ]
+    .map(|metric| render_metric(metric, |value| value.to_string()));
+    let cost = render_metric(&usage.estimated_cost_usd, |value| format!("≈${value:.2}"));
+    format!("{}\t{}\t{cost}", usage.attempts, tokens.join("\t"))
+}
+
+fn render_metric<T: Copy>(
+    metric: &lattice_api::local::MetricSummary<T>,
+    format_value: impl FnOnce(T) -> String,
+) -> String {
+    let Some(known) = metric.known else {
+        return "-".into();
+    };
+    let mut value = format_value(known);
+    if !metric.is_complete() {
+        value.push_str(if metric.overflowed {
+            " (partial, overflow)"
+        } else {
+            " (partial)"
+        });
+    }
+    value
+}
+
 pub(super) fn render_turn(turn: &lattice_api::local::TurnDetail) -> String {
     use std::fmt::Write;
     let mut text = format!(
@@ -395,6 +458,19 @@ mod session_cli {
         action: SessionAction,
     }
     #[test]
+    fn saturated_usage_is_not_presented_as_an_exact_total() {
+        let metric = lattice_api::local::MetricSummary {
+            known: Some(u64::MAX),
+            unknown_attempts: 0,
+            overflowed: true,
+        };
+        assert_eq!(
+            render_metric(&metric, |value| value.to_string()),
+            format!("{} (partial, overflow)", u64::MAX)
+        );
+    }
+
+    #[test]
     fn session_surface_and_numeric_nodes() {
         let command = TestCli::command();
         assert_eq!(
@@ -402,7 +478,7 @@ mod session_cli {
                 .get_subcommands()
                 .map(|c| c.get_name())
                 .collect::<Vec<_>>(),
-            ["send", "rewind", "list", "log", "turn", "cancel"]
+            ["send", "rewind", "list", "log", "usage", "turn", "cancel"]
         );
         for n in ["0", "18446744073709551615"] {
             assert!(TestCli::try_parse_from(["session", "rewind", "abcd", n]).is_ok());

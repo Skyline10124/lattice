@@ -4,14 +4,16 @@
 pub use crate::models::ModelCandidates;
 pub use crate::turn::{TextSegment, TurnRef};
 pub use lancet_protocol::{InvocationId, ModelAttemptKey, SessionId, TurnId};
-pub use lattice_conversation::{ResultPayload, StepContent, StoredToolResult, SuccessContent};
+pub use lattice_conversation::{
+    MetricSummary, ResultPayload, StepContent, StoredToolResult, SuccessContent,
+};
 pub use lattice_llm::auth::{AuthState, AuthStatus, ProviderAuthStatus};
 pub use lattice_session::store::{
     AttemptProgress, AuditPage, AuditReplay, AuditTailPage, ChangeSeq, ConversationEntry,
     MaterialSummary, Node, NodeId, NodeKind, NodeRef, Notice, NoticeLevel, OperatorInvocationState,
     OperatorReason, OperatorStatus, Page, PublicTurnOutcome, RetryNotice, SessionLog,
-    SessionRecord, SlotProgress, StepDetail, StepEnd, StepKey, StepProgress, TurnDetail,
-    TurnSummary, UsageSummary,
+    SessionRecord, SessionUsage, SlotProgress, StepDetail, StepEnd, StepKey, StepProgress,
+    TurnDetail, TurnSummary, TurnUsageRow, UsageSummary,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -473,6 +475,9 @@ pub(super) enum Request {
     Log {
         session_id: SessionId,
     },
+    Usage {
+        session_id: String,
+    },
     Turn {
         turn_id: TurnId,
     },
@@ -531,6 +536,7 @@ pub(super) enum Response {
     Session(SessionRecord),
     Sessions(Page<SessionListRow, SessionId>),
     Log(SessionLog),
+    Usage(SessionUsage),
     Turn(TurnLookup),
     Head(SessionHead),
     History(LocalHistory),

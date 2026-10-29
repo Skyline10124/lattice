@@ -3,7 +3,7 @@
 
 //! 当前代会话库的短期门面；不自行打开、创建或替换数据库。
 use lancet_protocol::SessionId;
-use lattice_session::store::{SessionRead, SessionRecord, SessionStore, StoreError};
+use lattice_session::store::{SessionRead, SessionRecord, SessionStore, SessionUsage, StoreError};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -160,6 +160,59 @@ impl SessionApi {
     pub async fn resolve_session(&self, prefix: String) -> Result<SessionRecord> {
         self.blocking(move |api| resolve_session(&api.store.begin_read()?, &prefix))
             .await
+    }
+
+    pub async fn usage(&self, prefix: String) -> Result<SessionUsage> {
+        self.blocking(move |api| {
+            let read = api.store.begin_read()?;
+            let id = resolve_session_id(&read, &prefix)?;
+            Ok(read.usage(id)?)
+        })
+        .await
+    }
+}
+
+/// 用量查询在同一快照解析身份；只匹配身份键，精确输入只读 Session 记录。
+fn resolve_session_id(read: &SessionRead, prefix: &str) -> Result<SessionId> {
+    let prefix = prefix.trim();
+    if prefix.is_empty() {
+        return Err(ApiError::BadRequest("session ID must not be empty".into()));
+    }
+    if let Ok(id) = SessionId::parse(prefix)
+        && read.find_session(id)?.is_some()
+    {
+        return Ok(id);
+    }
+    if prefix.len() < 4 {
+        return Err(ApiError::BadRequest(
+            "session prefix requires at least four characters".into(),
+        ));
+    }
+    let mut after = None;
+    let mut matches = Vec::new();
+    loop {
+        let page = read.session_ids(after, 256)?;
+        for id in page.items {
+            if id.to_string().starts_with(prefix) && matches.len() < 5 {
+                matches.push(id);
+            }
+        }
+        let Some(next) = page.next else {
+            break;
+        };
+        after = Some(next);
+    }
+    match matches.as_slice() {
+        [] => Err(ApiError::NotFound(prefix.into())),
+        [id] => Ok(*id),
+        _ => Err(ApiError::BadRequest(format!(
+            "ambiguous session prefix: {}; use more characters",
+            matches
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
     }
 }
 

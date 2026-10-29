@@ -482,6 +482,23 @@ pub struct SessionLog {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct SessionUsage {
+    pub session_id: SessionId,
+    pub position: NodeId,
+    pub turns: Vec<TurnUsageRow>,
+    pub total: UsageSummary,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TurnUsageRow {
+    pub turn_id: TurnId,
+    pub ordinal: u64,
+    pub provider: String,
+    pub model: String,
+    pub usage: UsageSummary,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TurnDetail {
     pub turn_id: TurnId,
     pub session_id: SessionId,
