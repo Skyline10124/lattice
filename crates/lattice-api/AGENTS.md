@@ -5,8 +5,11 @@
 提供 SessionApi、LocalClient、本地后台及公开的视图、查询与结果；读取并冻结 profile、维护会话的 profile 副本、经 `lattice-llm` 的请求网关发出模型请求、承接凭据与模型命令，并驱动 TurnCoordinator 经会话库事务推进执行。Component 组成在 lancet-api，执行在 runtime；本 crate 拥有跨领域协调而非下层机制。
 
 - `local/client.rs`：LocalClient 的连接与分帧，转交视图与查询。
+- `local/auth.rs`：后台凭据目录、录入材料与凭据错误映射。录入材料只随请求帧进入后台。
+- `local/metadata.rs`：模型元数据的定时与手动刷新。进程启动时刷新一次，此后每 24 小时再刷新；手动刷新与定时任务共享同一次在途操作。停止信号只结束刷新任务。
 - `local/operation.rs`：LocalTurn 是本客户端一次提交的具体句柄，管理提交、在途取消与退出交接；前端生成身份、交出 agent、模型与推理档位的选择并消费视图，配置由后台读取，持久 Turn 仍由后台执行。接口分层见[公开操作](../../docs/architecture/session.md#实现模块与公开操作)。
-- `local/server.rs`：serve 持实例资源和连接；Backend 管准入、存储句柄、视图及本进程完成诊断，Owner 监督独立操作。接管、同一取消载体与独立收尾遵循[取消与退出](../../docs/architecture/session.md#取消与退出)。
+- `local/server.rs`：serve 持实例资源和连接，并在启动时拉起元数据刷新任务。Backend 管准入、存储句柄、视图及本进程完成诊断，Owner 监督独立操作。`stop` 先取消刷新任务，再等待已接管的 Turn 收尾。接管、同一取消载体与独立收尾遵循[取消与退出](../../docs/architecture/session.md#取消与退出)。
+- `models.rs`：公开模型候选类型，并转发日志初始化。
 - `session.rs`：公开会话操作、固定读取、ID 解析和结构化错误映射。
 - `config_rejection.rs`、`redact.rs`：配置拒绝的说明只经一个入口构造，文字在其中脱敏并规范化为单行；`profile.rs`：后台按项目根与启动时的配置目录查找 profile、校验名称一致性、加载系统提示并冻结有效策略。规则见[配置拒绝的原因](../../docs/architecture/session.md#配置拒绝的原因)。
 - `turn/live.rs`、`turn/execute.rs`：同一 live 核心及独立接受/完成结果；start_turn 用于后台执行接线，run_turn/stream_turn 仅供测试复用核心。
