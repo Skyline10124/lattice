@@ -6,7 +6,7 @@
 pub mod auth;
 mod client;
 mod tls;
-pub use tls::load_tls_roots_der;
+pub use tls::{load_tls_roots_der, usable_tls_roots_der};
 mod gateway;
 pub use gateway::{GatewayTurn, RequestGateway, ResolvedRequest};
 pub use protocol::Protocol;

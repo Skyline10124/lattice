@@ -1172,6 +1172,74 @@ async fn invalid_tls_root_near_the_count_limit_is_skipped_without_using_a_slot()
 }
 
 #[tokio::test]
+async fn without_usable_tls_roots_https_is_a_configuration_error_and_http_is_served() {
+    // 选根经过真实的 parse_root：超过 64 KiB 的根先被跳过，无法解析的根被丢弃。
+    let mut oversized = TLS.ca_der.clone();
+    oversized.resize(65_537, 0);
+    let cases = [
+        (
+            "all roots larger than 64 KiB",
+            vec![oversized.clone(), oversized],
+        ),
+        (
+            "all roots invalid",
+            vec![vec![1, 2, 3], b"not a certificate".to_vec()],
+        ),
+        ("empty root set", Vec::new()),
+    ];
+    for (case, roots) in cases {
+        let mut https = Server::start(true).await;
+        let directory = private_dir();
+        configure(directory.path(), &https.url, "chat-completions", "none");
+        let gateway = RequestGateway::new(directory.path().into(), roots)
+            .unwrap_or_else(|error| panic!("{case}: gateway must still be constructed: {error}"));
+        assert!(
+            !gateway.has_usable_tls_roots(),
+            "{case}: gateway must record that no TLS roots are usable"
+        );
+        assert!(gateway.tls_roots_der().is_empty(), "{case}: no roots kept");
+        let turn = gateway.open_turn();
+        configuration_failure(&turn, "test", "no usable TLS root certificates").await;
+        let error = match turn
+            .stream_chat(request("test"), StreamControl::default())
+            .await
+        {
+            Ok(_) => panic!("{case}: https endpoint without usable roots was dispatched"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, crate::LlmError::Config { .. }),
+            "{case}: https without roots must be a configuration error: {error}"
+        );
+        assert!(
+            !error.retryable(),
+            "{case}: configuration error must not be retried"
+        );
+        assert!(
+            matches!(
+                https.received.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ),
+            "{case}: the https mock provider must have received zero requests"
+        );
+
+        let mut http = Server::start(false).await;
+        configure(directory.path(), &http.url, "chat-completions", "none");
+        complete(
+            turn.stream_chat(request("test"), StreamControl::default())
+                .await
+                .unwrap_or_else(|error| panic!("{case}: http endpoint must be served: {error}")),
+        )
+        .await;
+        assert_eq!(
+            http.next().await.path,
+            "/v1/chat/completions",
+            "{case}: http request reached the provider"
+        );
+    }
+}
+
+#[tokio::test]
 async fn oversized_tls_roots_still_serve_plain_http() {
     let mut server = Server::start(false).await;
     let directory = private_dir();
@@ -1264,7 +1332,7 @@ async fn invalid_configuration_only_blocks_requests_that_depend_on_it() {
 #[tokio::test]
 async fn unimplemented_protocols_and_auth_are_configuration_errors() {
     let directory = private_dir();
-    let gateway = RequestGateway::new(directory.path().into(), Vec::new()).unwrap();
+    let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
     let turn = gateway.open_turn();
     for protocol in ["responses", "interactions"] {
         for auth in ["none", "bearer"] {
@@ -1522,7 +1590,7 @@ async fn client_setup_errors_redact_credentials_in_the_hostname() {
     crate::auth::AuthStore::new(directory.path().into())
         .set("test", key)
         .unwrap();
-    let gateway = RequestGateway::new(directory.path().into(), Vec::new()).unwrap();
+    let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
     let turn = gateway.open_turn();
     let error = match tokio::time::timeout(
         Duration::from_secs(5),

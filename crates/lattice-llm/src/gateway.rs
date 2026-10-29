@@ -27,7 +27,11 @@ pub struct RequestGateway {
     configuration: Arc<Configuration>,
 }
 
+/// 没有可用根证书时对 https 端点的拒绝说明；http 端点不受影响。
+const NO_USABLE_TLS_ROOTS: &str = "no usable TLS root certificates: https provider endpoints are rejected, http endpoints are allowed";
+
 impl RequestGateway {
+    /// 选根之后集合为空也照常构造：此时记为“没有可用的根证书”，只拒绝依赖 TLS 的请求。
     pub fn new(config_dir: PathBuf, roots_der: Vec<Vec<u8>>) -> Result<Self, LlmError> {
         let (roots_der, roots) = client::load_bounded_roots(roots_der);
         Ok(Self {
@@ -39,6 +43,11 @@ impl RequestGateway {
                 metadata_url: None,
             }),
         })
+    }
+
+    /// 选根之后是否还有可用的根证书；这是“没有可用的根证书”唯一的判定处。
+    pub fn has_usable_tls_roots(&self) -> bool {
+        !self.configuration.roots_der.is_empty()
     }
 
     /// Tool Host 使用同一份启动时信任根，每个 Turn 独立构造信任配置。
@@ -55,7 +64,7 @@ impl RequestGateway {
         &self,
         cancel: Arc<crate::MetadataRefreshControl>,
     ) -> Result<(), crate::MetadataError> {
-        if self.configuration.roots_der.is_empty() {
+        if !self.has_usable_tls_roots() {
             return Err(crate::MetadataError::Configuration(
                 "no usable TLS root certificates".into(),
             ));
@@ -123,6 +132,10 @@ impl GatewayTurn {
             tokio::task::spawn_blocking(move || load_provider(directory, &provider_id, &model_id))
                 .await
                 .map_err(|_| configuration_error("provider configuration task failed"))??;
+        // 没有可用根证书时 https 端点按配置错误拒绝，不回退平台根；http 端点照常。
+        if self.configuration.roots_der.is_empty() && is_https(&provider.base_url) {
+            return Err(configuration_error(NO_USABLE_TLS_ROOTS));
+        }
         let client = self
             .clients
             .lock()
@@ -216,6 +229,10 @@ impl ResolvedRequest {
         )
         .await
     }
+}
+
+fn is_https(base_url: &str) -> bool {
+    url::Url::parse(base_url).is_ok_and(|url| url.scheme() == "https")
 }
 
 fn configuration_error(message: impl std::fmt::Display) -> LlmError {
