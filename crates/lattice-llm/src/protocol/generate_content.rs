@@ -1,24 +1,16 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Gemini provider: request JSON construction, SSE parsing,
-//! and auth headers for the Gemini `generateContent` API.
-//!
-//! Uses Gemini-specific wire format: `systemInstruction`, role `"model"`,
-//! `functionCall` / `functionResponse`, and `x-goog-api-key` auth.
+//! generateContent 的请求构造与 SSE 解析。
 
 use lattice_conversation::ProviderOrigin;
 
 use crate::protocol::projection::{ProjectionError, request_messages_to_wire, wire_usage};
 use crate::reply::{PartDelta, PartKind, ProtocolEvent, StringPatch};
-use crate::router::ResolvedModel;
 use crate::types::ChatRequest;
 
-/// Build the JSON body for a Gemini `streamGenerateContent` request.
-pub fn build_request_json(
-    request: &ChatRequest,
-    resolved: &ResolvedModel,
-) -> Result<serde_json::Value, ProjectionError> {
+/// 构造 generateContent 请求；模型名由端点路径指定。
+pub fn build_request_json(request: &ChatRequest) -> Result<serde_json::Value, ProjectionError> {
     let projected = request_messages_to_wire(ProviderOrigin::Gemini, &request.messages)?;
     let mut body = serde_json::json!({
         "contents": projected.messages,
@@ -61,7 +53,6 @@ pub fn build_request_json(
         body["generationConfig"] = serde_json::Value::Object(generation_config);
     }
 
-    let _ = resolved;
     Ok(body)
 }
 
@@ -73,11 +64,6 @@ pub fn build_stream_url(base_url: &str, provider_model: &str) -> String {
         base_url.trim_end_matches('/'),
         encoded
     )
-}
-
-/// Build the Gemini auth header value (just the API key).
-pub fn auth_header_value(api_key: &str) -> String {
-    api_key.to_string()
 }
 
 /// Part 的字段名标明其内容类型；诊断不携带字段值或回放元数据。

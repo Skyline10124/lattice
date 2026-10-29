@@ -1,11 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! OpenAI-compatible provider: request JSON construction, SSE parsing,
-//! and auth headers for the Chat Completions API.
-//!
-//! Supports OpenAI and OpenAI-compatible endpoints (Ollama, vLLM, LiteLLM, etc.).
-//! Uses bounded SSE framing from `crate::sse` and never imports `lattice-core`.
+//! Chat Completions 的请求构造与 SSE 解析。
 
 use std::collections::BTreeMap;
 
@@ -13,18 +9,13 @@ use lattice_conversation::ProviderOrigin;
 
 use crate::protocol::projection::{ProjectionError, request_messages_to_wire, wire_usage};
 use crate::reply::{PartDelta, PartKind, ProtocolEvent, StringPatch};
-use crate::router::ResolvedModel;
 use crate::types::ChatRequest;
 
-/// Build the JSON body for an OpenAI Chat Completions request.
-///
-/// LATTICE's provider response path is SSE-only — `dispatch_stream` parses
-/// Server-Sent Events and never decodes a non-stream JSON body. The request
-/// is therefore always built as a streaming request, with `stream_options`
-/// asking the provider to include the final usage chunk.
+/// 按模型名构造流式请求，并要求服务端报告用量。
+/// 响应路径只解析 SSE、不解码非流式 JSON，因此固定发送 stream: true。
 pub fn build_request_json(
     request: &ChatRequest,
-    resolved: &ResolvedModel,
+    model: &str,
 ) -> Result<serde_json::Value, ProjectionError> {
     let projected = request_messages_to_wire(ProviderOrigin::OpenAiCompatible, &request.messages)?;
     let mut messages = Vec::new();
@@ -34,7 +25,7 @@ pub fn build_request_json(
     messages.extend(projected.messages);
 
     let mut body = serde_json::json!({
-        "model": resolved.provider_model,
+        "model": model,
         "messages": messages,
         "stream": true,
         "stream_options": {"include_usage": true},
@@ -69,10 +60,6 @@ pub fn build_request_json(
     }
 
     Ok(body)
-}
-
-pub fn auth_header_value(api_key: &str) -> String {
-    format!("Bearer {}", api_key)
 }
 
 pub(super) enum ContentError {

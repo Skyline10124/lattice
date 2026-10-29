@@ -22,6 +22,47 @@ impl Default for Document {
     }
 }
 
+impl Document {
+    pub(super) fn redact(&self, message: &str) -> String {
+        let mut values = Vec::new();
+        for credential in self.providers.values() {
+            match credential {
+                Credential::ApiKey { key } => values.push(key.0.as_str()),
+                Credential::Chatgpt {
+                    host_id,
+                    client_id,
+                    account,
+                    tokens,
+                } => {
+                    values.push(host_id.0.as_str());
+                    if let Some(client_id) = client_id {
+                        values.push(client_id.0.as_str());
+                    }
+                    if let Some(account) = account {
+                        values.push(account.subject.0.as_str());
+                    }
+                    if let Some(tokens) = tokens {
+                        values.extend([
+                            tokens.access_token.0.as_str(),
+                            tokens.refresh_token.0.as_str(),
+                            tokens.id_token.0.as_str(),
+                        ]);
+                    }
+                }
+            }
+        }
+        // 先替换长值，避免较短凭据遮住长凭据的一部分后留下后缀。
+        values.sort_unstable_by_key(|value| std::cmp::Reverse(value.len()));
+        values.dedup();
+        values
+            .into_iter()
+            .filter(|value| !value.is_empty())
+            .fold(message.to_owned(), |text, value| {
+                text.replace(value, "[REDACTED]")
+            })
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Credential {

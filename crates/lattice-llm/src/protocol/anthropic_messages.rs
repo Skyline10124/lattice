@@ -1,12 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Anthropic provider: request JSON construction, SSE parsing,
-//! and auth headers for the Messages API.
-//!
-//! Uses Anthropic's native message format with `x-api-key` auth,
-//! `anthropic-version: 2023-06-01` header, system message extraction,
-//! and content-block-based SSE parsing.
+//! Messages 的请求构造与 SSE 解析。
 
 use lattice_conversation::ProviderOrigin;
 use std::collections::BTreeMap;
@@ -15,22 +10,9 @@ use crate::protocol::projection::{ProjectionError, request_messages_to_wire, wir
 use crate::reply::{
     PartDelta, PartKind, ProtocolEvent, ReplyProtocolError, StreamStop, StringPatch,
 };
-use crate::router::ResolvedModel;
 use crate::types::ChatRequest;
 
-/// Output ceiling applied when the caller names none.
-///
-/// Anthropic requires `max_tokens`, so some default is unavoidable, and the
-/// production `ChatRequest` never carries one (`lattice-agent` leaves it
-/// `None`) — this value alone decides where every Claude reply is cut. The
-/// previous 4096 silently truncated long replies into `finish_reason:
-/// "length"`, which the agent loop does not continue from.
-///
-/// Safe as a flat constant because `ModelRouter` maps exactly three closed
-/// aliases to this provider (`opus`/`sonnet`/`haiku`, all Claude 4.x); any
-/// other name is `UnknownModel` and an arbitrary model string can only reach
-/// the OpenAI-compatible provider. Per-model ceilings need a capability table
-/// that tracks provider releases, which is deliberately out of scope (#100).
+/// 未指定输出上限时使用 32,768；Messages 协议要求 max_tokens。
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 32_768;
 
 /// Maps Anthropic stop reasons to OpenAI-style finish reasons.
@@ -50,15 +32,15 @@ fn map_stop_reason(reason: &str) -> String {
         .unwrap_or_else(|| reason.to_string())
 }
 
-/// Build the JSON body for an Anthropic Messages API request.
+/// 按模型名构造 Messages 流式请求。
 pub fn build_request_json(
     request: &ChatRequest,
-    resolved: &ResolvedModel,
+    model: &str,
 ) -> Result<serde_json::Value, ProjectionError> {
     let projected = request_messages_to_wire(ProviderOrigin::Anthropic, &request.messages)?;
     let max_tokens = request.max_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
     let mut body = serde_json::json!({
-        "model": resolved.provider_model,
+        "model": model,
         "messages": projected.messages,
         "max_tokens": max_tokens,
         "stream": true,
@@ -88,11 +70,6 @@ pub fn build_request_json(
     }
 
     Ok(body)
-}
-
-/// Build the Anthropic auth header value (just the API key itself).
-pub fn auth_header_value(api_key: &str) -> String {
-    api_key.to_string()
 }
 
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -325,8 +302,6 @@ mod tests {
     };
 
     use super::*;
-    use crate::endpoints::ANTHROPIC_BASE_URL;
-    use crate::router::{CredentialStatus, ProviderKind};
     use crate::test_reply::Parser;
     use crate::types::{ChatRequest, ModelTarget, ToolDefinition};
     use crate::{LlmEvent, ReplyOutcome, ReplyStop, StreamStop};
@@ -420,17 +395,6 @@ mod tests {
             assert_eq!(part.replay_state.as_ref().unwrap().as_str(), "first-second");
         }
     }
-    fn make_resolved() -> ResolvedModel {
-        ResolvedModel {
-            alias: "sonnet".to_string(),
-            provider: ProviderKind::Anthropic,
-            provider_model: "claude-sonnet-4-6".to_string(),
-            base_url: ANTHROPIC_BASE_URL.to_string(),
-            api_key_env: "ANTHROPIC_API_KEY".to_string(),
-            credential_status: CredentialStatus::Present,
-        }
-    }
-
     fn text(role: MessageRole, content: &str) -> lattice_conversation::ConversationItem {
         lattice_conversation::ConversationItem::Message(NativeMessage::<BoundToolCall>::new(
             role,
@@ -471,7 +435,7 @@ mod tests {
             max_completion_tokens: None,
             client_request_id: None,
         };
-        let body = build_request_json(&request, &make_resolved()).expect("projection");
+        let body = build_request_json(&request, "claude-sonnet-4-6").expect("projection");
         assert_eq!(body["model"], "claude-sonnet-4-6");
         assert_eq!(body["system"], "First prompt.\n\nSecond prompt.");
         assert_eq!(body["messages"][0]["content"][0]["text"], "Hello");
