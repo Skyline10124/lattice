@@ -279,7 +279,7 @@ LocalTurn 交付提交与取消的回执。普通退出使用 `detach` 取得最
 
 - **全局 agents 目录的权限。** 配置目录下 `agents` 中的 profile 只在可信时使用：`agents` 目录、`<名字>` 目录与 `agent.toml` 都属于当前用户，不可被同组或其他用户写入（权限与 0o022 无交集，所以默认的 0755 目录与 0644 文件可用），路径的最后一段不是符号链接。外部系统提示文件位于全局 agents 目录内时，按同一规则检查。发现属主不符、同组或其他用户可写或是符号链接时，按配置错误拒绝并说明原因，不自动修改。只检查路径的最后一段，上级目录中的符号链接（例如指向别处的 `$HOME`）不受影响。项目内的 `.lattice/agents` 属于所在工作区，不做这项检查。
 
-- 后台启动时载入 TLS 根证书，保存在内存中直到退出。一张可用的根证书都没有时算载入失败；个别证书文件读不出时只记 WARN，其余照常使用。单张过大或无法按 rustls 信任锚规则解析 DER 的证书跳过并记 WARN，不占名额，也不计入 DER 总量；其余按加载顺序保留前缀，达到 1,024 张或 DER 总量 4 MiB 时停止并记 WARN，之后的根证书都不信任，由它们签发的 HTTPS 服务请求失败。载入失败时后台照常启动、照常回答查询，但在每次接受前按配置错误拒绝并说明原因，不区分所选 provider 是否使用 TLS；不回退到平台根。
+- 后台启动时载入 TLS 根证书，保存在内存中直到退出。个别证书文件读不出时只记 WARN，其余照常使用。单张过大或无法按 rustls 信任锚规则解析 DER 的证书跳过并记 WARN，不占名额，也不计入 DER 总量；其余按加载顺序保留前缀，达到 1,024 张或 DER 总量 4 MiB 时停止并记 WARN，之后的根证书都不信任，由它们签发的 HTTPS 服务请求失败。按上述规则筛完一张可用的根证书都不剩（包括全部过大、全部无法解析或根本没有载入到证书）时，后台记为没有可用的根证书。没有可用的根证书时，后台照常启动、照常回答查询；所选 provider 的端点是 https 的，在接受前按配置错误拒绝并说明原因，http 端点照常放行；不回退到平台根。Tool Host 按同一规则处理：没有可用的根证书时，Tool 的 https 请求在解析与连接前拒绝，证据记为 `tls_roots_unavailable`，http 请求照常；模型元数据刷新也需要 https，同样以“no usable TLS root certificates”拒绝。
 - 请求不带配置来源。后台运行期间，前端环境的变化不影响它；要让新的环境生效，用 `lattice daemon stop` 停止后台后重新启动。前端的 `HOME` 或 `XDG_STATE_HOME` 不同时通常解析出另一个状态根，连到的是另一个后台。
 - 后台不清空、也不替换启动环境。所以后台创建或打开 Git 库时一律使用隔离方式，不读用户与全局的 Git 配置。
 - 工作区 `.env` 不再加载；环境变量不提供 key、endpoint 或模型，见[endpoint 的来源](llm.md#endpoint-的来源)。
@@ -292,7 +292,7 @@ provider 与 Tool Host 共享后台启动时载入的 TLS 根内容，各 Turn �
 
 #### 配置拒绝的原因
 
-新执行的配置在接受前被拒绝时，用户需要知道该改哪里。配置由后台读取，报错面向的是配置的主人，所以后台把原始诊断经脱敏后带回前端，包括 profile 的查找与解析、`agent.name` 与所选不一致、`providers.toml` 与 `auth.json` 的解析、模型引用与推理档位、缺少凭据与 TLS 根证书载入失败。后台在接受前发现启用了目录外的工具时，同样把说明带回前端。`session send`、`run` 与 TUI 内提交对同一问题给出同一句说明，`kind` 为 `bad_request`，CLI 退出 2。
+新执行的配置在接受前被拒绝时，用户需要知道该改哪里。配置由后台读取，报错面向的是配置的主人，所以后台把原始诊断经脱敏后带回前端，包括 profile 的查找与解析、`agent.name` 与所选不一致、`providers.toml` 与 `auth.json` 的解析、模型引用与推理档位、缺少凭据，以及没有可用的根证书时所选 provider 的端点是 https。后台在接受前发现启用了目录外的工具时，同样把说明带回前端。`session send`、`run` 与 TUI 内提交对同一问题给出同一句说明，`kind` 为 `bad_request`，CLI 退出 2。
 
 说明由 [`ConfigRejection`](../../crates/lattice-api/src/config_rejection.rs) 承载。它只有一个构造入口，文字在其中经 [`redact`](../../crates/lattice-api/src/redact.rs) 处理，被替换处写作 `[REDACTED]`。脱敏按以下顺序执行：
 
@@ -709,7 +709,7 @@ Session 永久绑定产品组合层提供的 `ProjectStoreKey`，执行请求的
 | 工具目录快照 | 运行时构建身份与按工具名排序 entries 的规范 JSON，最多 1 MiB，即 1,048,576 字节；新快照超限拒绝，已存快照不合法时报损坏 | `lattice-session` 的 `MAX_CATALOG_SNAPSHOT_BYTES`；ADR 0005 请求接受协议。计量对象不是文件目录或 provider wire |
 | 调用结果载荷 | Succeeded 载荷规范 JSON 最多 65,536 字节；超过时不保存正文，记录摘要与长度，内容不可用 | `lattice-session` 的 `MAX_TOOL_CONTENT_BYTES`；见[调用槽位](#调用槽位) |
 | 有效 profile | system prompt 最多 2 MiB，Agent 名 128 字节，模型引用的 provider 部分按 `id` 规则校验、模型部分最多 4,096 字节；schema_version 为 1，策略已解析；max_retries ≤ 10，退避初始/最大值均 ≤ 60,000 毫秒且最大值不小于初始值，显式 timeout（Turn deadline）为 1–86,400 秒；无效时在接受前按配置错误拒绝 | 当前输入校验。上限 86,400 秒由 ADR 0010 第 11 节确定，使超过 SIWC token 有效期的 Turn 成为实际用法；未设置时使用 300 秒，与观察 idle 分开；粒度与默认值由 #222 裁决 |
-| provider 与 TLS 根 | key 见[模型接入合同的限制](llm.md#限制)；模型名 ≤ 4,096 字节，base_url ≤ 8,192 字节；根证书 ≤ 1,024 个、单个 DER ≤ 65,536 字节、DER 总量 ≤ 4 MiB（过大或无法按 rustls 信任锚规则解析 DER 的单张跳过，不占名额也不计入总量；按加载顺序保留前缀，达到个数或总量上限即停止并记 WARN，之后的根证书不信任）；接受时能发现的问题在接受前拒绝，执行中发现的按 `ProviderError { retryable: false }` 停止，诊断写明是配置问题 | 模型名上限见 [provider/model_ref.rs 的 MAX_MODEL_ID_BYTES](../../crates/lattice-llm/src/provider/model_ref.rs)，base_url 上限见 [net-guard 的 MAX_BASE_URL_BYTES](../../crates/net-guard/src/lib.rs)，根证书限制见 [client.rs 的 MAX_TLS_ROOTS 与 select_roots](../../crates/lattice-llm/src/client.rs)；URL 禁止凭据、query、fragment 并通过 provider 网络策略校验 |
+| provider 与 TLS 根 | key 见[模型接入合同的限制](llm.md#限制)；模型名 ≤ 4,096 字节，base_url ≤ 8,192 字节；根证书 ≤ 1,024 个、单个 DER ≤ 65,536 字节、DER 总量 ≤ 4 MiB（过大或无法按 rustls 信任锚规则解析 DER 的单张跳过，不占名额也不计入总量；按加载顺序保留前缀，达到个数或总量上限即停止并记 WARN，之后的根证书不信任）；没有可用的根证书时 https 端点在接受前按配置错误拒绝，http 端点照常；接受时能发现的问题在接受前拒绝，执行中发现的按 `ProviderError { retryable: false }` 停止，诊断写明是配置问题 | 模型名上限见 [provider/model_ref.rs 的 MAX_MODEL_ID_BYTES](../../crates/lattice-llm/src/provider/model_ref.rs)，base_url 上限见 [net-guard 的 MAX_BASE_URL_BYTES](../../crates/net-guard/src/lib.rs)，根证书限制见 [client.rs 的 MAX_TLS_ROOTS 与 select_roots](../../crates/lattice-llm/src/client.rs)；URL 禁止凭据、query、fragment 并通过 provider 网络策略校验 |
 | 模型 HTTP 传输 | 建连 30 秒、读空闲 30 秒；不设单独的请求总时限，流由 Turn deadline 约束，另有 86,400 秒兜底，与 Turn deadline 的上限一致；非 2xx 正文最多读 64 KiB，诊断最多 256 字符；provider 建议等待最多采纳 60 秒。每个 Turn 第一次请求时解析、校验并固定地址，Turn 内复用连接：交付结束事件前最多再等 0.5 秒、读 64 KiB 把响应体读完，连接才能回到连接池；连接或传输错误后重新解析。请求除认证与协议头外只带 `User-Agent: lattice/<版本> (linux <内核版本>; <架构>)`、`Accept: text/event-stream, application/json` 与 `x-client-request-id`（取 SessionId，provider 由此可知哪些请求属于同一会话） | [client.rs](../../crates/lattice-llm/src/client.rs)、[transport.rs](../../crates/lattice-llm/src/transport.rs) 与 [saga.rs](../../crates/lattice-api/src/turn/saga.rs) 的 MAX_PROVIDER_RETRY_AFTER；256 依据 #265 收集的 146 条真实 provider 错误消息（整行 P90 为 252 字符），其余为实现常量 |
 | IPC 帧 | 单帧 JSON payload 最多 16 MiB，不含 8 字节 magic 和 4 字节长度头；零长度或超限读取拒绝，编码超限拒绝 | [ipc.rs](../../crates/lattice-api/src/local/ipc.rs) 的 MAX_FRAME、read/write；超过单帧的消息由连接层分帧传输 |
 | IPC 等待 | 单帧 socket 写入最多 5 秒，超时返回传输错误和回执可能未知；后台首请求整帧读取最多 10 秒，超时结束该连接处理 | 同文件 WRITE_TIMEOUT 和 [server.rs::connection](../../crates/lattice-api/src/local/server.rs)，不是 Turn 总时限 |
