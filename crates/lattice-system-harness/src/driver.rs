@@ -1185,12 +1185,13 @@ mod tests {
         );
     }
 
-    /// 让 interrupt 测试 re-exec 本测试二进制时运行的进程组成员；未设置环境变量时直接通过。
+    /// 让 interrupt 测试 re-exec 本测试二进制时运行的进程组成员。
     const INT_RECORDER_DIR: &str = "LATTICE_HARNESS_INT_RECORDER_DIR";
 
     /// 后台 `&` 启动的进程继承被忽略的 SIGINT，sh 的 trap 不能恢复它；
     /// 这里自己装处理器，收到 SIGINT 时在当前目录创建 `got-int` 后退出。
     #[test]
+    #[ignore = "re-exec helper"]
     fn int_recorder_helper() {
         let Some(dir) = std::env::var_os(INT_RECORDER_DIR) else {
             return;
@@ -1234,7 +1235,7 @@ mod tests {
         cmd.env(INT_RECORDER_DIR, dir.path());
         cmd.arg("-c").arg(format!(
             "trap 'exit 0' INT; sh -c \"trap '' INT; touch '{}'; sleep 30\" & \
-             '{}' --exact driver::tests::int_recorder_helper --nocapture --test-threads=1 & \
+             '{}' --exact driver::tests::int_recorder_helper --ignored --nocapture --test-threads=1 & \
              while :; do sleep 1 & wait $!; done",
             ready.display(),
             exe.display()
