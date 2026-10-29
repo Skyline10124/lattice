@@ -1260,7 +1260,7 @@ fn keys_versions_and_encoding() {
         let meta = read.tx.open_table(META).unwrap();
         assert_eq!(
             meta.get("store_format_version").unwrap().unwrap().value(),
-            b"\x00\x00\x00\x066"
+            b"\x00\x00\x00\x055"
         );
     }
     let (_lock, calls) = running(&db, sid(1), tid(1), 1, 1);
