@@ -154,7 +154,7 @@ lattice --json daemon status
 lattice --json daemon stop
 ```
 
-stop 先关闭新准入，再等待已接管工作及必要收尾。`unconfirmed_operations` 是当前后台进程记录的未完成收尾操作计数，不是持久进行中 Turn 的数量；非零时命令返回失败，继续查询相关 Session。stop 连接丢失时，用 status 核验后台是否仍在运行。最后一个前端退出不会自动 stop。
+stop 先关闭新准入，再等待已接管工作及必要收尾；收到回执后还要等 socket 撤下、`owner.lock` 可取得后返回，返回后可立即在同一状态根启动新后台；stop 不等待后台进程退出。回执后 30 秒内锁仍未放开时报 `stopping` 错误、退出 1，后台可能仍在收尾，用 status 复核。`unconfirmed_operations` 是当前后台进程记录的未完成收尾操作计数，不是持久进行中 Turn 的数量；非零时命令返回失败，继续查询相关 Session。stop 连接丢失时，用 status 核验后台是否仍在运行。最后一个前端退出不会自动 stop。
 
 #### 隔离场景中的显式启动
 

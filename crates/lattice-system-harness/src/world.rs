@@ -366,6 +366,12 @@ impl ScenarioWorld {
         self.daemon.cleanup(self.budget.normal_stop_deadline())
     }
 
+    /// 场景显式 `daemon stop` 干净返回后立即调用：`owner.lock` 已可取得、`api.sock` 已撤下（立即核验）；
+    /// 旧后台组须在有界窗口内退空。
+    pub fn daemon_departed(&self) -> Result<(), Vec<String>> {
+        self.daemon.departed()
+    }
+
     /// 进程控制仅作用于经过产物、状态根和组首领核对的后台。
     pub fn daemon_pids(&self) -> std::io::Result<Vec<u32>> {
         self.daemon.owners()

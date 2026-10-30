@@ -1066,10 +1066,18 @@ async fn serve_with_backend(
         changed.changed().await.map_err(|_| internal())?;
     }
     backend.closed.send_replace(true);
+    #[cfg(test)]
+    tests::pause(&backend.gates.listener_close).await;
     drop(listener);
     while connections.join_next().await.is_some() {}
+    #[cfg(test)]
+    let lock_release = Mutex::new(lock(&backend.gates.lock_release).take());
     drop(backend);
-    blocking(move || instance.cleanup()).await?;
+    // socket 先撤下，实例锁随 instance 最后释放；stop 方以实例锁可取得判定退场。
+    let instance = blocking(move || instance.cleanup().map(|()| instance)).await?;
+    #[cfg(test)]
+    tests::pause(&lock_release).await;
+    drop(instance);
     failure.map_or(Ok(()), Err)
 }
 

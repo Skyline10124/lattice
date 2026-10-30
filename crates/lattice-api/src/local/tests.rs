@@ -39,6 +39,7 @@ async fn private_socket_rejects_second_owner_and_oversized_frame() {
     ));
     drop(listener);
     instance.cleanup().unwrap();
+    drop(instance);
     std::os::unix::fs::symlink("/dev/null", path).unwrap();
     assert!(matches!(
         ipc::Instance::bind(&layout),

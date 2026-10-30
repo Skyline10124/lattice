@@ -538,6 +538,7 @@ fn busy_cancel_and_stop_do_not_serialize_distinct_sessions() {
         evidence.record_command("stop drains", &drained);
         assert!(drained.is_clean_exit(0));
         assert_eq!(lines(&drained)[0]["owners"], 0);
+        world.daemon_departed().unwrap();
         world.stop_daemon().unwrap();
         assert_eq!(
             detail(&world, &budget, &mut evidence, &second_turn)["summary"]["outcome"],

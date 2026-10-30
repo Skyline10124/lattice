@@ -23,7 +23,7 @@ fn backend_startup_observably_skips_disabled_automatic_metadata_refresh() {
     let log_path = world.root().join("daemon.stderr");
     let mut evidence = ScenarioEvidence::new(&world, &spec.name, Vec::<String>::new()).unwrap();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // 经驱动登记场景产物，使显式 serve 也属于场景清理范围。
+        // 经驱动登记场景产物，使显式 serve 的产物也纳入场景清理；它不受进程组等待覆盖，见下方 stop 处。
         let help = cli(&world, &spec, &["--help"]);
         evidence.record_command("register binary", &help);
         assert!(help.is_clean_exit(0));
@@ -63,6 +63,9 @@ fn backend_startup_observably_skips_disabled_automatic_metadata_refresh() {
         let stop = cli(&world, &spec, &["daemon", "stop"]);
         evidence.record_command("stop disabled refresh backend", &stop);
         assert!(stop.is_clean_exit(0));
+        // 这里的后台由场景显式 `daemon serve` 启动（带 --verbose），不在 harness 的归属识别内；
+        // 进程组的有界等待实际不覆盖它，只有锁与 socket 的立即核验生效，进程退出由下方 wait 核验。
+        world.daemon_departed().unwrap();
         let stopped = daemon
             .wait(Some(budget.cap_timeout(spec.step_timeout())))
             .unwrap();
