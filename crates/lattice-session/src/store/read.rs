@@ -605,8 +605,7 @@ impl SessionRead {
             .ok_or_else(|| missing("node", node.node.0))
     }
 
-    /// 只遍历身份键，不读取节点、配置或其他会话的记录值。
-    /// 按身份键前缀做一次有序范围读取，最多返回 `limit` 个，不扫描无关会话。
+    /// 按身份键前缀做一次有序范围读取，最多返回 `limit` 个；只读键，不读记录值，也不扫描无关会话。
     pub fn session_ids_with_prefix(&self, prefix: &str, limit: usize) -> Result<Vec<SessionId>> {
         positive(limit)?;
         let table = self.tx.open_table(SESSIONS).map_err(table_error)?;
