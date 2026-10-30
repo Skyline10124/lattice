@@ -98,7 +98,13 @@ fn fast_cli_help_lists_public_commands() {
         (vec!["session", "--help"], vec!["usage"]),
         (
             vec!["session", "usage", "--help"],
-            vec!["SESSION_ID", "current path", "--json"],
+            vec![
+                "SESSION_ID",
+                "current path",
+                "whole-session totals",
+                "Unknown counts and costs are shown as '-'",
+                "--json",
+            ],
         ),
     ] {
         let output = driver

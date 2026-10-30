@@ -155,7 +155,7 @@ impl LocalClient {
             })
             .await?
         {
-            Response::Usage(usage) => Ok(usage),
+            Response::Usage(usage) => Ok(*usage),
             _ => Err(protocol()),
         }
     }

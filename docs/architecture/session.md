@@ -197,7 +197,7 @@ sequenceDiagram
 | 查看会话头：`head` | SessionId | 返回与视图开头相同的会话头：当前位置、当前 agent、profile 副本中的模型、provider、推理档位与 profile 的默认档位、当前位置所属的那一轮及其有没有 Owner，以及后台已知的执行诊断；不读条目，不占观察许可。会话不存在时返回 NotFound |
 | 查看一个 Turn：`turn` | TurnId | 返回这一轮的 `TurnSummary` 与全部 Step 节点；请求仍在准入时返回在途，没有这个请求时返回 NotFound。接受结果不明时用它找回 |
 | 提交：`submit` | TurnId，`New(SessionId)` 或 `Existing(SessionId)`，输入、规范工作区，以及可选的 agent、模型与推理档位；新会话必须指定 agent，见[会话的 profile 副本](#会话的-profile-副本) | 接受一轮并返回 LocalTurn；TurnId 已被使用返回 Conflict，同 Session 有不同请求在执行时返回 Busy，见[请求身份与找回](#请求身份与找回) |
-| 查看用量：`usage` | SessionId | 当前路径上逐轮的用量与费用估算，以及合计；用量口径与费用规则见[模型接入合同](llm.md#用量缓存与费用) |
+| 查看用量：`usage` | SessionId | 当前路径上逐轮的用量与费用估算，给出当前路径合计和全会话合计（含 rewind 丢掉的分支）；用量口径与费用规则见[模型接入合同](llm.md#用量缓存与费用) |
 | 模型候选：`models` | 无，或 provider | 可用的 `<provider>/<model>` 及各自的上下文窗口、输出上限、可用档位、价格与凭据是否就绪，见[模型候选](llm.md#模型候选) |
 | 凭据与元数据：`auth` 与 `models_refresh` 各命令 | 见[凭据命令](llm.md#凭据命令) | 录入与删除 key、SIWC 登录与登出、凭据状态；立即刷新模型元数据与账号模型列表 |
 | 读取更早的对话：`history` | SessionId、节点 `before` 与轮数（1 到 100，超出返回 BadRequest） | 沿 `before` 的父链往回取完整的若干轮，条目与视图中的相同，见[观察与重连](#观察与重连) |
@@ -221,13 +221,13 @@ LocalTurn 交付提交与取消的回执。普通退出使用 `detach` 取得最
 
 ### 当前路径的用量查询
 
-`usage` 在一个读事务内固定 Session 的当前位置，沿父链到根，按 UserMessage 分组并按路径先后返回。退回轮中某个 Step 时，只累计该 Step 及其祖先中的尝试。每轮给出 `turn_id`、从 1 开始的路径轮次 `ordinal`、UserMessage 节点上的 `provider` 与 `model`，以及 `usage`；模型身份取自该轮节点。返回对象为 `{ session_id, position, turns, total }`，其中 `position` 是本次读取的位置，逐轮 `usage` 与 `total` 均按[尝试计量与完整性](#关闭-step-与-turn)派生。
+`usage` 在一个读事务内固定 Session 的当前位置，沿父链到根，按 UserMessage 分组并按路径先后返回。退回轮中某个 Step 时，当前路径只累计该 Step 及其祖先中的尝试。每轮给出 `turn_id`、从 1 开始的路径轮次 `ordinal`、UserMessage 节点上的 `provider` 与 `model`，以及 `usage`；模型身份取自该轮节点。返回对象为 `{ session_id, position, turns, path_total, session_total }`，其中 `position` 是本次读取的位置，逐轮 `usage`、`path_total` 与 `session_total` 均按[尝试计量与完整性](#关闭-step-与-turn)派生。`path_total` 汇总当前路径；`session_total` 在同一读事务中汇总该会话全部节点的尝试，不沿父链，包含 rewind 后留存的分支，每个节点只计一次。
 
-当前位置为根时，`turns` 为空；路径止于 UserMessage 或 Reserved Step 时仍保留该轮，没有尝试的空和由 `attempts=0` 表达。Sent 与执行者消失后留下的尝试同样参与汇总。
+当前位置为根时，`turns` 为空、`path_total` 为空和，`session_total` 仍包含已有分支；路径止于 UserMessage 或 Reserved Step 时仍保留该轮，没有尝试的空和由 `attempts=0` 表达。Sent 与执行者消失后留下的尝试同样参与汇总。
 
-会话库严格打开并校验成功后，身份解析与用量读取只读取 Session 记录、身份键和路径计量投影，不解码对话正文、冻结配置或连接材料。需要打开会话库时，仍按[存储合同](storage.md#身份版本与打开)执行全库解码与校验。
+会话库严格打开并校验成功后，身份解析与用量读取只读取 Session 记录、身份键和会话节点的计量投影，不解码对话正文、冻结配置或连接材料。需要打开会话库时，仍按[存储合同](storage.md#身份版本与打开)执行全库解码与校验。
 
-`lattice session usage <SESSION_ID>` 的文本逐轮列出五项计数、尝试数与费用，最后列出合计。单项没有任何尝试报告时显示 `-`，已知零显示 `0`，溢出的小计附 `(overflow)`；只有整体 `kind=partial` 时才在行末附 `(partial)`。费用未知显示 `-`，确切与估算金额的格式遵循[费用估算](llm.md#费用估算)。全局 `--json` 输出上述一个结构化对象；读取成功退出 0，身份解析和错误分类沿用其他会话查询。
+`lattice session usage <SESSION_ID>` 的文本逐轮列出五项计数、尝试数与费用，末尾两行为“当前路径合计”和“全会话合计”，分别对应 JSON 的 `path_total` 与 `session_total`。逐轮明细只列当前路径，所以 `session_total` 可能大于逐轮之和。单项计数没有任何尝试报告时显示 `-`，已知零显示 `0`，溢出的小计附 `(overflow)`；金额格只按[费用估算](llm.md#费用估算)显示确切、估算或未知，不附 `(partial)`。全局 `--json` 输出上述一个结构化对象；读取成功退出 0，身份解析和错误分类沿用其他会话查询。
 
 ## Turn 的接受与模型步骤
 

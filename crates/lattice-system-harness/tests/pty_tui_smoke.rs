@@ -326,6 +326,9 @@ fn pty_statusline_usage_survives_reopening_and_follows_rewind() {
         tui.send_line("measure this turn").unwrap();
         for request in 1..=3 {
             gate.wait_until_stalled(request, step()).unwrap();
+            if request == 1 {
+                tui.wait_for(step(), |text| text.contains("$?")).unwrap();
+            }
             gate.release_next(step()).unwrap();
         }
         tui.wait_for(step(), |text| {
@@ -341,14 +344,20 @@ fn pty_statusline_usage_survives_reopening_and_follows_rewind() {
             &mut evidence,
             &["--json", "session", "usage", sid],
         );
-        assert_eq!(persisted["total"]["attempts"], 3);
-        assert_eq!(persisted["total"]["input"]["known"], 600);
-        assert_eq!(persisted["total"]["output"]["known"], 60);
-        assert_eq!(persisted["total"]["cache_read"]["known"], 300);
+        assert_eq!(persisted["path_total"]["attempts"], 3);
+        assert_eq!(persisted["path_total"]["input"]["known"], 600);
+        assert_eq!(persisted["path_total"]["output"]["known"], 60);
+        assert_eq!(persisted["path_total"]["cache_read"]["known"], 300);
         assert!(
-            (persisted["total"]["cost"]["known"]["usd"].as_f64().unwrap() - 0.09).abs() < 1e-12
+            (persisted["path_total"]["cost"]["known"]["usd"]
+                .as_f64()
+                .unwrap()
+                - 0.09)
+                .abs()
+                < 1e-12
         );
-        assert_eq!(persisted["total"]["cost"]["known"]["exact"], false);
+        assert_eq!(persisted["path_total"]["cost"]["known"]["exact"], false);
+        assert_eq!(persisted["session_total"], persisted["path_total"]);
         let tid = persisted["turns"][0]["turn_id"].as_str().unwrap();
         let detail = query(&session, &mut evidence, &["--json", "session", "turn", tid]);
         assert_eq!(detail["steps"].as_array().unwrap().len(), 2);
@@ -393,8 +402,9 @@ fn pty_statusline_usage_survives_reopening_and_follows_rewind() {
                 &mut evidence,
                 &["--json", "session", "usage", sid],
             );
-            assert_eq!(path["total"]["attempts"], 2);
-            assert_eq!(path["total"]["input"]["known"], 300);
+            assert_eq!(path["path_total"]["attempts"], 2);
+            assert_eq!(path["path_total"]["input"]["known"], 300);
+            assert_eq!(path["session_total"], persisted["session_total"]);
             assert_eq!(
                 query(&session, &mut evidence, &["--json", "session", "turn", tid]),
                 detail

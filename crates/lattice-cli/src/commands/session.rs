@@ -78,7 +78,9 @@ pub enum SessionAction {
     List,
     /// Show the full session tree, including the root node.
     Log { session_id: String },
-    /// Show per-turn token usage and estimated cost on the current path, with totals.
+    /// Show per-turn usage on the current path, with current-path and whole-session totals.
+    ///
+    /// Costs are in USD. Unknown counts and costs are shown as '-'.
     Usage { session_id: String },
     /// Show every Step of a Turn by TurnId; --follow keeps observing.
     Turn {
@@ -337,7 +339,12 @@ fn render_usage(usage: &lattice_api::local::SessionUsage) -> String {
             render_usage_values(&turn.usage)
         );
     }
-    let _ = writeln!(text, "total\t-\t-\t{}", render_usage_values(&usage.total));
+    for (label, total) in [
+        ("当前路径合计", &usage.path_total),
+        ("全会话合计", &usage.session_total),
+    ] {
+        let _ = writeln!(text, "{label}\t-\t-\t{}", render_usage_values(total));
+    }
     text
 }
 
@@ -351,18 +358,14 @@ fn render_usage_values(usage: &lattice_api::local::UsageSummary) -> String {
     ]
     .map(|metric| render_metric(metric.known, metric.overflowed, |value| value.to_string()));
     let cost = render_metric(usage.cost.known, usage.cost.overflowed, |value| {
-        format!("{}${:.2}", if value.exact { "" } else { "≈" }, value.usd)
+        let prefix = if value.exact { "" } else { "≈" };
+        if value.usd > 0.0 && value.usd < 0.01 {
+            format!("{prefix}<$0.01")
+        } else {
+            format!("{prefix}${:.2}", value.usd)
+        }
     });
-    let completeness = if usage.kind == lattice_api::local::UsageCompleteness::Partial {
-        " (partial)"
-    } else {
-        ""
-    };
-    format!(
-        "{}\t{}\t{cost}{completeness}",
-        usage.attempts,
-        tokens.join("\t")
-    )
+    format!("{}\t{}\t{cost}", usage.attempts, tokens.join("\t"))
 }
 
 fn render_metric<T: Copy>(
@@ -478,27 +481,21 @@ mod session_cli {
         let text = render_usage_values(&usage);
         let fields: Vec<_> = text.split('\t').collect();
         assert_eq!(fields[1], format!("{} (overflow)", u64::MAX));
-        assert_eq!(text.matches("(partial)").count(), 1);
-        assert!(text.ends_with(" (partial)"));
+        assert_eq!(fields[6], "$0.00");
     }
 
     #[test]
     fn complete_usage_rows_keep_exact_approximate_and_unknown_costs_distinct() {
         for (cost, expected) in [
-            (
-                Some(CostEstimate {
-                    usd: 0.004,
-                    exact: true,
-                }),
-                "$0.00",
-            ),
-            (
-                Some(CostEstimate {
-                    usd: 0.004,
-                    exact: false,
-                }),
-                "≈$0.00",
-            ),
+            (Some((0.0, true)), "$0.00"),
+            (Some((0.0, false)), "≈$0.00"),
+            (Some((0.000001, true)), "<$0.01"),
+            (Some((0.004, true)), "<$0.01"),
+            (Some((0.004, false)), "≈<$0.01"),
+            (Some((0.009999, true)), "<$0.01"),
+            (Some((0.01, true)), "$0.01"),
+            (Some((0.01, false)), "≈$0.01"),
+            (Some((0.016, true)), "$0.02"),
             (None, "-"),
         ] {
             let usage = lattice_api::UsageSummary::from_attempts([(
@@ -507,7 +504,7 @@ mod session_cli {
                     ..Default::default()
                 }),
                 UsageCompleteness::Complete,
-                cost,
+                cost.map(|(usd, exact)| CostEstimate { usd, exact }),
             )]);
             let text = render_usage_values(&usage);
             let fields: Vec<_> = text.split('\t').collect();
@@ -518,12 +515,11 @@ mod session_cli {
     }
 
     #[test]
-    fn partial_usage_is_marked_once_at_the_end_of_the_row() {
+    fn partial_usage_keeps_unknown_cost_cell_unadorned() {
         let usage =
             lattice_api::UsageSummary::from_attempts([(None, UsageCompleteness::Partial, None)]);
         let text = render_usage_values(&usage);
-        assert_eq!(text.matches("(partial)").count(), 1);
-        assert_eq!(text.split('\t').next_back(), Some("- (partial)"));
+        assert_eq!(text.split('\t').next_back(), Some("-"));
     }
 
     #[test]

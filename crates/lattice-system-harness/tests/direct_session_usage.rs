@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! 公开用量输出只累计当前位置的父链，读取与后台重开保持已存事实。
+//! 公开用量输出分别累计当前路径与全会话，读取与后台重开保持已存事实。
 
 mod support;
 
@@ -100,11 +100,14 @@ fn assert_text(send: &SessionSendDriver<'_>, evidence: &mut ScenarioEvidence, sn
         );
         assert_text_metrics(&row[3..], &turn["usage"]);
     }
-    let total = lines
-        .iter()
-        .find(|row| row.first() == Some(&"total"))
-        .expect("text total row");
-    assert_text_metrics(&total[3..], &snapshot["total"]);
+    assert_eq!(lines.len(), turns.len() + 4, "{text}");
+    for (row, label, field) in [
+        (&lines[lines.len() - 2], "当前路径合计", "path_total"),
+        (&lines[lines.len() - 1], "全会话合计", "session_total"),
+    ] {
+        assert_eq!(row[..3], [label, "-", "-"], "{text}");
+        assert_text_metrics(&row[3..], &snapshot[field]);
+    }
 }
 
 fn assert_text_metrics(words: &[&str], summary: &Value) {
@@ -129,28 +132,31 @@ fn assert_text_metrics(words: &[&str], summary: &Value) {
         }
         if field == "cost" {
             let prefix = if metric["known"]["exact"].as_bool().unwrap() {
-                "$"
+                ""
             } else {
-                "≈$"
+                "≈"
             };
+            let usd = metric["known"]["usd"].as_f64().unwrap();
             let amount = text.strip_prefix(prefix).expect("USD certainty marker");
-            let (whole, cents) = amount.split_once('.').expect("USD decimal point");
-            assert!(!whole.is_empty() && whole.bytes().all(|b| b.is_ascii_digit()));
-            assert_eq!(cents.len(), 2, "USD uses two decimal places: {text}");
-            assert!(cents.bytes().all(|b| b.is_ascii_digit()));
-            assert_eq!(
-                amount.parse::<f64>().unwrap(),
-                (metric["known"]["usd"].as_f64().unwrap() * 100.0).round() / 100.0
-            );
+            if usd > 0.0 && usd < 0.01 {
+                assert_eq!(amount, "<$0.01", "positive sub-cent cost");
+            } else {
+                let amount = amount.strip_prefix('$').expect("USD currency marker");
+                let (whole, cents) = amount.split_once('.').expect("USD decimal point");
+                assert!(!whole.is_empty() && whole.bytes().all(|b| b.is_ascii_digit()));
+                assert_eq!(cents.len(), 2, "USD uses two decimal places: {text}");
+                assert!(cents.bytes().all(|b| b.is_ascii_digit()));
+                assert_eq!(
+                    amount.parse::<f64>().unwrap(),
+                    (usd * 100.0).round() / 100.0
+                );
+            }
         } else {
             assert_eq!(text.parse::<u64>().unwrap(), metric["known"], "{field}");
         }
         if metric["overflowed"].as_bool().unwrap() {
             assert_eq!(words.next(), Some("(overflow)"), "overflow {field}");
         }
-    }
-    if summary["kind"] == "partial" {
-        assert_eq!(words.next(), Some("(partial)"), "partial row");
     }
     assert_eq!(words.next(), None, "unexpected metric or marker");
 }
@@ -212,6 +218,12 @@ fn usage_follows_current_path_and_survives_read_only_reopening() {
                 SseScript::plain("zero branch"),
                 json!({"prompt_tokens":0,"completion_tokens":0,"prompt_tokens_details":{"cached_tokens":0,"cache_creation_input_tokens":0},"completion_tokens_details":{"reasoning_tokens":0}}),
             ),
+            with_usage(
+                SseScript::plain("priced branch"),
+                json!({"prompt_tokens":2000,"completion_tokens":100,
+                    "prompt_tokens_details":{"cached_tokens":400,"cache_creation_input_tokens":200},
+                    "completion_tokens_details":{"reasoning_tokens":20}}),
+            ),
         ]),
     );
     let configuration = world.home().join(".lattice/providers.toml");
@@ -234,11 +246,12 @@ fn usage_follows_current_path_and_survives_read_only_reopening() {
         let sid = sessions[0]["session_id"].as_str().unwrap().to_owned();
         let live = usage(&send, &mut evidence, &sid);
         let a = live["turns"][0]["turn_id"].as_str().unwrap().to_owned();
-        assert_eq!(live["total"]["attempts"], 1);
-        assert_eq!(live["total"]["partial_attempts"], 1);
-        assert_eq!(live["total"]["kind"], "partial");
-        assert!(live["total"]["input"]["known"].is_null());
-        assert!(live["total"]["cost"]["known"].is_null());
+        assert_eq!(live["path_total"]["attempts"], 1);
+        assert_eq!(live["path_total"]["partial_attempts"], 1);
+        assert_eq!(live["path_total"]["kind"], "partial");
+        assert!(live["path_total"]["input"]["known"].is_null());
+        assert!(live["path_total"]["cost"]["known"].is_null());
+        assert_eq!(live["session_total"], live["path_total"]);
         assert_text(&send, &mut evidence, &live);
         assert_eq!(server.captured_requests().len(), 1);
         gate.release_next(running.remaining_timeout(spec.step_timeout()))
@@ -347,7 +360,8 @@ fn usage_follows_current_path_and_survives_read_only_reopening() {
             "output":tokens(json!(350), true),"reasoning":tokens(json!(40), false),"cost":cost(json!({"usd":0.0072,"exact":false}),1)});
         assert_summary(&full["turns"][0]["usage"], &a_summary);
         assert_summary(&full["turns"][1]["usage"], &b_summary);
-        assert_summary(&full["total"], &full_summary);
+        assert_summary(&full["path_total"], &full_summary);
+        assert_summary(&full["session_total"], &full_summary);
         assert_text(&send, &mut evidence, &full);
 
         let other = SessionSendDriver::new(&driver, &world, &spec, "unpriced");
@@ -374,7 +388,8 @@ fn usage_follows_current_path_and_survives_read_only_reopening() {
             "input":tokens(json!(2000), true),"cache_read":tokens(json!(400), true),"cache_write":tokens(json!(100), false),
             "output":tokens(json!(200), true),"reasoning":tokens(json!(20), true),"cost":cost(json!({"usd":0.0044,"exact":false}),0)});
         assert_summary(&middle["turns"][0]["usage"], &middle_summary);
-        assert_summary(&middle["total"], &middle_summary);
+        assert_summary(&middle["path_total"], &middle_summary);
+        assert_summary(&middle["session_total"], &full_summary);
         assert_text(&send, &mut evidence, &middle);
         let running = send.spawn("new branch").unwrap();
         gate.wait_until_stalled(6, running.remaining_timeout(spec.step_timeout()))
@@ -397,15 +412,53 @@ fn usage_follows_current_path_and_survives_read_only_reopening() {
         assert_summary(&fork["turns"][1]["usage"], &zero);
         let mut fork_summary = middle_summary.clone();
         fork_summary["attempts"] = json!(3);
-        assert_summary(&fork["total"], &fork_summary);
+        assert_summary(&fork["path_total"], &fork_summary);
+        let mut session_summary = full_summary.clone();
+        session_summary["attempts"] = json!(5);
+        assert_summary(&fork["session_total"], &session_summary);
         assert_text(&send, &mut evidence, &fork);
+
+        let running = send.spawn("nonzero branch").unwrap();
+        gate.wait_until_stalled(7, running.remaining_timeout(spec.step_timeout()))
+            .unwrap();
+        gate.release_next(running.remaining_timeout(spec.step_timeout()))
+            .unwrap();
+        let priced_branch = send.wait_spawned(running).unwrap();
+        evidence.record_command("nonzero branch", &priced_branch.command);
+        assert!(priced_branch.command.is_clean_exit(0));
+        let fork = usage(&send, &mut evidence, &sid);
+        assert_eq!(fork["position"], 9);
+        assert_eq!(fork["turns"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            fork["turns"][2]["turn_id"],
+            priced_branch.accepted_turn_id().unwrap()
+        );
+        assert_eq!(fork["turns"][2]["ordinal"], 3);
+        let priced_summary = json!({"attempts":1,"partial_attempts":0,"kind":"complete",
+            "input":tokens(json!(2000), true),"cache_read":tokens(json!(400), true),"cache_write":tokens(json!(200), true),
+            "output":tokens(json!(100), true),"reasoning":tokens(json!(20), true),"cost":cost(json!({"usd":0.0046,"exact":true}),0)});
+        assert_summary(&fork["turns"][0]["usage"], &middle_summary);
+        assert_summary(&fork["turns"][1]["usage"], &zero);
+        assert_summary(&fork["turns"][2]["usage"], &priced_summary);
+        let fork_summary = json!({"attempts":4,"partial_attempts":1,"kind":"partial",
+            "input":tokens(json!(4000), true),"cache_read":tokens(json!(800), true),"cache_write":tokens(json!(300), false),
+            "output":tokens(json!(300), true),"reasoning":tokens(json!(40), true),"cost":cost(json!({"usd":0.009,"exact":false}),0)});
+        assert_summary(&fork["path_total"], &fork_summary);
+        let session_summary = json!({"attempts":6,"partial_attempts":1,"kind":"partial",
+            "input":tokens(json!(5500), true),"cache_read":tokens(json!(1000), false),"cache_write":tokens(json!(400), false),
+            "output":tokens(json!(450), true),"reasoning":tokens(json!(60), false),"cost":cost(json!({"usd":0.0118,"exact":false}),1)});
+        assert_summary(&fork["session_total"], &session_summary);
+        assert_text(&send, &mut evidence, &fork);
+
+        let mut original_path = full.clone();
+        original_path["session_total"] = fork["session_total"].clone();
 
         query(
             &send,
             &mut evidence,
             &["--json", "session", "rewind", &sid, "5"],
         );
-        assert_eq!(usage(&send, &mut evidence, &sid), full);
+        assert_eq!(usage(&send, &mut evidence, &sid), original_path);
         std::fs::write(
             &configuration,
             "[metadata]\nauto_refresh=false\n[providers.local]\nprotocol='unavailable'\n",
@@ -418,7 +471,7 @@ fn usage_follows_current_path_and_survives_read_only_reopening() {
         evidence.record_command("stop before read-only reopening", &stopped);
         assert!(stopped.is_clean_exit(0));
         world.stop_daemon().unwrap();
-        assert_eq!(usage(&send, &mut evidence, &sid), full);
+        assert_eq!(usage(&send, &mut evidence, &sid), original_path);
         assert_ne!(
             query(&send, &mut evidence, &["--json", "daemon", "status"])["epoch"],
             epoch
@@ -438,7 +491,8 @@ fn usage_follows_current_path_and_survives_read_only_reopening() {
         assert_eq!(user_only["turns"].as_array().unwrap().len(), 1);
         assert_eq!(user_only["turns"][0]["turn_id"], a);
         assert_summary(&user_only["turns"][0]["usage"], &empty);
-        assert_summary(&user_only["total"], &empty);
+        assert_summary(&user_only["path_total"], &empty);
+        assert_summary(&user_only["session_total"], &session_summary);
         query(
             &send,
             &mut evidence,
@@ -447,13 +501,14 @@ fn usage_follows_current_path_and_survives_read_only_reopening() {
         let root = usage(&send, &mut evidence, &sid);
         assert_eq!(root["position"], 0);
         assert_eq!(root["turns"], json!([]));
-        assert_summary(&root["total"], &empty);
+        assert_summary(&root["path_total"], &empty);
+        assert_summary(&root["session_total"], &session_summary);
         assert_text(&send, &mut evidence, &root);
         assert_eq!(
             query(&send, &mut evidence, &["--json", "session", "turn", &a]),
             original_turn
         );
-        assert_eq!(server.captured_requests().len(), 6);
+        assert_eq!(server.captured_requests().len(), 7);
     }));
     evidence.record_captures(server.captured_requests());
     support::finish_recorded(evidence, result);

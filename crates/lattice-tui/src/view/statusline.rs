@@ -171,11 +171,18 @@ fn format_turn(usage: &lattice_api::UsageSummary) -> Option<String> {
         }
     }
     let cost = &usage.cost;
-    if !cost.overflowed
-        && let Some(amount) = cost.known
-    {
-        let prefix = if amount.exact { "" } else { "≈" };
-        parts.push(format!("{prefix}${:.2}", amount.usd));
+    if !cost.overflowed {
+        parts.push(match cost.known {
+            Some(amount) => {
+                let prefix = if amount.exact { "" } else { "≈" };
+                if amount.usd > 0.0 && amount.usd < 0.01 {
+                    format!("{prefix}<$0.01")
+                } else {
+                    format!("{prefix}${:.2}", amount.usd)
+                }
+            }
+            None => "$?".into(),
+        });
     }
     (!parts.is_empty()).then(|| parts.join(" "))
 }
@@ -230,7 +237,7 @@ mod tests {
         assert_eq!(usage.cache_read.known, Some(50));
         assert!(usage.input.complete);
         assert!(!usage.cache_read.complete);
-        assert_eq!(format_turn(&usage).as_deref(), Some("↑200"));
+        assert_eq!(format_turn(&usage).as_deref(), Some("↑200 $?"));
     }
 
     #[test]
@@ -241,14 +248,14 @@ mod tests {
         assert!(usage.input.complete);
         assert!(usage.cache_read.complete);
         assert!(!usage.cache_write.complete);
-        assert_eq!(format_turn(&usage).as_deref(), Some("↑100 缓存 50%"));
+        assert_eq!(format_turn(&usage).as_deref(), Some("↑100 缓存 50% $?"));
     }
 
     #[test]
     fn empty_unknown_zero_and_cents_remain_distinct() {
         for (attempts, expected) in [
             (vec![], Some("$0.00")),
-            (vec![(Value::Null, Partial, None)], None),
+            (vec![(Value::Null, Partial, None)], Some("$?")),
             (
                 vec![(
                     json!({"input":0,"output":0,"cache_read":0}),
@@ -259,11 +266,11 @@ mod tests {
             ),
             (
                 vec![(json!({"cache_write":1}), Complete, Some((0.000001, true)))],
-                Some("$0.00"),
+                Some("<$0.01"),
             ),
             (
                 vec![(json!({"cache_write":1}), Complete, Some((0.000001, false)))],
-                Some("≈$0.00"),
+                Some("≈<$0.01"),
             ),
             (
                 vec![
@@ -277,17 +284,32 @@ mod tests {
                     (json!({"cache_write":1}), Complete, Some((0.004, true))),
                     (json!({"cache_write":1}), Complete, Some((0.004, true))),
                 ],
-                Some("$0.01"),
+                Some("<$0.01"),
             ),
             (
                 vec![
                     (json!({"cache_write":1}), Complete, Some((0.004, true))),
                     (json!({"cache_write":1}), Complete, Some((0.004, false))),
                 ],
+                Some("≈<$0.01"),
+            ),
+            (
+                vec![
+                    (json!({"cache_write":1}), Complete, Some((0.006, true))),
+                    (json!({"cache_write":1}), Complete, Some((0.006, true))),
+                ],
+                Some("$0.01"),
+            ),
+            (
+                vec![(json!({"cache_write":1}), Complete, Some((0.01, false)))],
                 Some("≈$0.01"),
             ),
         ] {
-            assert_eq!(format_turn(&summary(attempts)).as_deref(), expected);
+            assert_eq!(
+                format_turn(&summary(attempts.clone())).as_deref(),
+                expected,
+                "{attempts:?}"
+            );
         }
         assert_eq!(format_tokens(999), "999");
         assert_eq!(format_tokens(1000), "1.0k");
@@ -303,40 +325,40 @@ mod tests {
                     json!({"input":900,"cache_read":0}),
                 ],
                 Complete,
-                "↑1.0k 缓存 10%",
+                "↑1.0k 缓存 10% $?",
             ),
             (
                 vec![json!({"input":3,"cache_read":2})],
                 Complete,
-                "↑3 缓存 67%",
+                "↑3 缓存 67% $?",
             ),
             (
                 vec![json!({"input":8,"cache_read":1})],
                 Complete,
-                "↑8 缓存 13%",
+                "↑8 缓存 13% $?",
             ),
             (
                 vec![json!({"input":1,"cache_read":2})],
                 Complete,
-                "↑1 缓存 200%",
+                "↑1 缓存 200% $?",
             ),
-            (vec![json!({"input":0,"cache_read":1})], Complete, "↑0"),
+            (vec![json!({"input":0,"cache_read":1})], Complete, "↑0 $?"),
             (
                 vec![json!({"input":10,"cache_read":0})],
                 Partial,
-                "↑10 缓存 0%",
+                "↑10 缓存 0% $?",
             ),
-            (vec![json!({"input":10})], Complete, "↑10"),
-            (vec![json!({"cache_read":0})], Complete, ""),
+            (vec![json!({"input":10})], Complete, "↑10 $?"),
+            (vec![json!({"cache_read":0})], Complete, "$?"),
             (
                 vec![json!({"input":10,"cache_read":0}), json!({"input":10})],
                 Partial,
-                "↑20",
+                "↑20 $?",
             ),
             (
                 vec![json!({"input":10,"cache_read":0}), json!({"cache_read":0})],
                 Partial,
-                "↑10",
+                "↑10 $?",
             ),
         ] {
             assert_eq!(

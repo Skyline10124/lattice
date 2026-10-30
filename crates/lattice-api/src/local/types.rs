@@ -537,7 +537,7 @@ pub(super) enum Response {
     Session(SessionRecord),
     Sessions(Page<SessionListRow, SessionId>),
     Log(SessionLog),
-    Usage(SessionUsage),
+    Usage(Box<SessionUsage>),
     Turn(TurnLookup),
     Head(SessionHead),
     History(LocalHistory),
