@@ -195,7 +195,7 @@ impl StepEntry {
     pub(super) fn sent(mut self) -> Self {
         self.attempts.push(
             json!({"origin":{"protocol":"chat-completions","provider_id":"openai"},
-                "usage":null,"estimated_cost_usd":null,"progress":{"progress":"sent"},"retry_delay_ms":null}),
+                "usage":null,"usage_kind":"partial","cost":null,"progress":{"progress":"sent"},"retry_delay_ms":null}),
         );
         self
     }
@@ -204,7 +204,7 @@ impl StepEntry {
         let attempt = self.attempts.len();
         self.attempts.push(json!({
             "origin":{"protocol":"chat-completions","provider_id":"openai"},
-            "usage":null,"estimated_cost_usd":null,"retry_delay_ms":100,
+            "usage":null,"usage_kind":"partial","cost":null,"retry_delay_ms":100,
             "progress":{"progress":"ended","end":{"end":"stopped","cause":{"cause":"provider_error","retryable":true}},"diagnostic":diagnostic()}
         }));
         self.retries
@@ -214,16 +214,23 @@ impl StepEntry {
     pub(super) fn completed_attempt(mut self, context_tokens: u64) -> Self {
         self.attempts.push(json!({
             "origin":{"protocol":"chat-completions","provider_id":"openai"},
-            "estimated_cost_usd":null,"usage":{"input":context_tokens,"output":0,"cache_read":null,"cache_write":null,"reasoning":null},"retry_delay_ms":null,
+            "usage_kind":"partial","cost":null,"usage":{"input":context_tokens,"output":0,"cache_read":null,"cache_write":null,"reasoning":null},"retry_delay_ms":null,
             "progress":{"progress":"ended","end":{"end":"completed"},"diagnostic":diagnostic()}
         }));
         self
     }
-    /// 最近一次尝试保存的计量；缺失字段保持未知。
-    pub(super) fn metering(mut self, usage: Value, cost: Option<f64>) -> Self {
+    /// 最近一次尝试保存的计量与判定；缺失字段保持未报告。
+    pub(super) fn metering(
+        mut self,
+        usage: Value,
+        usage_kind: lattice_api::local::UsageCompleteness,
+        cost: Option<(f64, bool)>,
+    ) -> Self {
         let attempt = self.attempts.last_mut().expect("已有尝试");
         attempt["usage"] = usage;
-        attempt["estimated_cost_usd"] = json!(cost);
+        attempt["usage_kind"] = json!(usage_kind);
+        attempt["cost"] =
+            json!(cost.map(|(usd, exact)| lattice_api::local::CostEstimate { usd, exact }));
         self
     }
     /// 回复末尾加一个工具调用；`terminal` 时槽位已有成功结果，否则停在 Started。

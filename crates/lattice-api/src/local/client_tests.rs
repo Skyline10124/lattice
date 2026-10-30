@@ -100,6 +100,7 @@ fn detail(id: TurnId, closed: bool) -> TurnDetail {
                 output: Some(0),
                 ..Default::default()
             }),
+            lattice_conversation::UsageCompleteness::Partial,
             None,
         )])
         .into(),

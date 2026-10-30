@@ -5,7 +5,7 @@
 use super::fixtures::*;
 use super::*;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
-use lattice_api::local::{LocalErrorKind, ViewUpdate};
+use lattice_api::local::{LocalErrorKind, UsageCompleteness::*, ViewUpdate};
 use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1353,7 +1353,11 @@ async fn metering_waits_for_position_and_counts_retries_and_steps_once() {
             entry_reply(
                 step(2, old, 0)
                     .completed_attempt(0)
-                    .metering(json!({"input":8000,"output":800}), Some(0.50))
+                    .metering(
+                        json!({"input":8000,"output":800}),
+                        Complete,
+                        Some((0.50, true)),
+                    )
                     .finished()
                     .entry(),
             ),
@@ -1380,9 +1384,11 @@ async fn metering_waits_for_position_and_counts_retries_and_steps_once() {
             .await;
         assert_eq!(loading.phase, TurnPhase::Streaming);
         let retry = || {
-            step(4, id, 0)
-                .retried("info", "retry")
-                .metering(json!({"input":100,"output":10,"cache_read":0}), Some(0.01))
+            step(4, id, 0).retried("info", "retry").metering(
+                json!({"input":100,"output":10,"cache_read":0}),
+                Partial,
+                Some((0.01, false)),
+            )
         };
         view_tx.push([entry_reply(retry().sent().entry())]);
         let live = remote
@@ -1391,12 +1397,14 @@ async fn metering_waits_for_position_and_counts_retries_and_steps_once() {
         let live_usage = live.usage.unwrap();
         assert_eq!(live_usage.input.known, Some(100));
         assert_eq!(live_usage.input.unknown_attempts, 1);
+        assert_eq!(live_usage.partial_attempts, 2);
         let continued = || {
             retry()
                 .completed_attempt(0)
                 .metering(
                     json!({"input":900,"output":90,"cache_read":900}),
-                    Some(0.02),
+                    Complete,
+                    Some((0.02, true)),
                 )
                 .continued()
                 .entry()
@@ -1438,7 +1446,8 @@ async fn metering_waits_for_position_and_counts_retries_and_steps_once() {
                     .completed_attempt(0)
                     .metering(
                         json!({"input":1000,"output":100,"cache_read":0}),
-                        Some(0.04),
+                        Complete,
+                        Some((0.04, true)),
                     )
                     .finished()
                     .entry(),
@@ -1455,7 +1464,10 @@ async fn metering_waits_for_position_and_counts_retries_and_steps_once() {
         assert_eq!(usage.input.known, Some(2000));
         assert_eq!(usage.output.known, Some(200));
         assert_eq!(usage.cache_read.known, Some(900));
-        assert!((usage.estimated_cost_usd.known.unwrap() - 0.07).abs() < 1e-12);
+        assert_eq!(usage.partial_attempts, 1);
+        let cost = usage.cost.known.unwrap();
+        assert!((cost.usd - 0.07).abs() < 1e-12);
+        assert!(!cost.exact);
         assert_eq!(closed.context_tokens, Some(1100));
         remote.ctrl('d');
     };

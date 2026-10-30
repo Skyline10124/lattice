@@ -262,23 +262,34 @@ fn reported_usage_survives_failed_attempt_and_retry_without_partial_reply() {
             attempts.len() == 2
                 && attempts[0]["usage"]
                     == json!({"input":1000,"cache_read":200,"cache_write":100,"output":100,"reasoning":20})
-                && attempts[0]["estimated_cost_usd"]
+                && attempts[0]["usage_kind"] == "partial"
+                && attempts[0]["cost"]["exact"] == false
+                && attempts[0]["cost"]["usd"]
                     .as_f64()
                     .is_some_and(|fee| (fee - 0.0028).abs() < 1e-15)
-                && attempts[1]["estimated_cost_usd"].is_null(),
-            "failed attempt retains counters and end-time price; missing base price stays unknown",
+                && attempts[1]["usage_kind"] == "complete"
+                && attempts[1]["cost"]["exact"] == false
+                && attempts[1]["cost"]["usd"]
+                    .as_f64()
+                    .is_some_and(|fee| (fee - 0.0014).abs() < 1e-15),
+            "interrupted attempt is partial; missing prices omit terms without losing reported usage",
         )?;
         require(
-            saved["steps"][1]["attempts"][0]["estimated_cost_usd"]
-                .as_f64()
-                .is_some_and(|fee| (fee - 0.0056).abs() < 1e-15),
+            saved["steps"][1]["attempts"][0]["usage_kind"] == "complete"
+                && saved["steps"][1]["attempts"][0]["cost"]["exact"] == true
+                && saved["steps"][1]["attempts"][0]["cost"]["usd"]
+                    .as_f64()
+                    .is_some_and(|fee| (fee - 0.0056).abs() < 1e-15),
             "next step uses its end-time price",
         )?;
         require(
-            saved["usage"]["estimated_cost_usd"]["unknown_attempts"] == 1
-                && saved["usage"]["estimated_cost_usd"]["known"]
+            saved["usage"]["partial_attempts"] == 1
+                && saved["usage"]["kind"] == "partial"
+                && saved["usage"]["cost"]["unknown_attempts"] == 0
+                && saved["usage"]["cost"]["known"]["exact"] == false
+                && saved["usage"]["cost"]["known"]["usd"]
                     .as_f64()
-                    .is_some_and(|fee| (fee - 0.0084).abs() < 1e-15),
+                    .is_some_and(|fee| (fee - 0.0098).abs() < 1e-15),
             "fees aggregate independently of token completeness",
         )?;
         require(
@@ -288,9 +299,11 @@ fn reported_usage_survives_failed_attempt_and_retry_without_partial_reply() {
         )?;
         let latest: Value = serde_json::from_slice(&next_detail.stdout).unwrap();
         require(
-            latest["steps"][0]["attempts"][0]["estimated_cost_usd"]
-                .as_f64()
-                .is_some_and(|fee| (fee - 0.0084).abs() < 1e-15),
+            latest["steps"][0]["attempts"][0]["usage_kind"] == "complete"
+                && latest["steps"][0]["attempts"][0]["cost"]["exact"] == true
+                && latest["steps"][0]["attempts"][0]["cost"]["usd"]
+                    .as_f64()
+                    .is_some_and(|fee| (fee - 0.0084).abs() < 1e-15),
             "new attempt after reopening uses the latest price",
         )?;
         let entries = outcome.entries();
@@ -405,7 +418,8 @@ fn direct_failure_profile_deadline_while_stalled_commits_error() {
         require(
             attempts.len() == 1
                 && attempts[0]["usage"].is_null()
-                && attempts[0]["estimated_cost_usd"].is_null(),
+                && attempts[0]["usage_kind"] == "partial"
+                && attempts[0]["cost"].is_null(),
             "opening deadline has no reported usage or estimated cost",
         )
     })();
@@ -569,7 +583,9 @@ fn stopped_after_reported_usage(deadline: bool) {
         require(
             attempts[0]["usage"]
                 == json!({"input":1000,"cache_read":200,"cache_write":100,"output":100,"reasoning":20})
-                && attempts[0]["estimated_cost_usd"]
+                && attempts[0]["usage_kind"] == "partial"
+                && attempts[0]["cost"]["exact"] == false
+                && attempts[0]["cost"]["usd"]
                     .as_f64()
                     .is_some_and(|fee| (fee - 0.0028).abs() < 1e-15),
             "stopped attempt keeps reported usage and its estimated cost",

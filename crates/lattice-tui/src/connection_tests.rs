@@ -4,7 +4,7 @@
 //! 视图推送、历史查询与回执的消费：条目按 NodeId 维护，状态消息按是否新到进入 Dock 或对话记录。
 use super::fixtures::*;
 use super::*;
-use lattice_api::local::LocalErrorKind;
+use lattice_api::local::{CostEstimate, LocalErrorKind, UsageCompleteness::*};
 
 fn turn(n: u64) -> TurnId {
     numbered_turn(n)
@@ -105,7 +105,8 @@ fn metering_rebuilds_from_initial_entries_and_rewind_but_not_older_turns() {
         .completed_attempt(0)
         .metering(
             json!({"input":900,"output":90,"cache_read":600}),
-            Some(0.03),
+            Complete,
+            Some((0.03, true)),
         )
         .finished()
         .entry();
@@ -113,7 +114,7 @@ fn metering_rebuilds_from_initial_entries_and_rewind_but_not_older_turns() {
     let mut projected = serde_json::to_value(&current).unwrap();
     projected["step"]["attempts"] = json!([{
         "attempt":0,"origin":{"protocol":"chat-completions","provider_id":"openai"},
-        "usage":projected["content"]["attempts"][0]["usage"],"estimated_cost_usd":0.03,
+        "usage":projected["content"]["attempts"][0]["usage"],"usage_kind":"complete","cost":{"usd":0.03,"exact":true},
         "progress":{"progress":"ended","end":{"end":"completed"},"diagnostic":null},
         "end":{"end":"completed","step":{"session_id":SESSION,"turn_id":turn(2),"model_step_ordinal":0}},
         "retry_delay_ms":null
@@ -134,7 +135,11 @@ fn metering_rebuilds_from_initial_entries_and_rewind_but_not_older_turns() {
 
     let older = step(2, turn(1), 0)
         .completed_attempt(0)
-        .metering(json!({"input":300,"output":30}), Some(0.02))
+        .metering(
+            json!({"input":300,"output":30}),
+            Complete,
+            Some((0.02, true)),
+        )
         .finished()
         .entry();
     app.apply_older(
@@ -184,7 +189,13 @@ fn metering_rebuilds_from_initial_entries_and_rewind_but_not_older_turns() {
     app.apply_view(entry_update(user(1, turn(1), 1, "older")));
     let empty = app.turn_usage.as_ref().unwrap();
     assert_eq!(empty.attempts, 0);
-    assert_eq!(empty.estimated_cost_usd.known, Some(0.0));
+    assert_eq!(
+        empty.cost.known,
+        Some(CostEstimate {
+            usd: 0.0,
+            exact: true
+        })
+    );
     assert_eq!(app.context_tokens, None);
     app.apply_view(LocalUpdate::Head(SessionHead {
         path_replaced: true,
@@ -215,7 +226,7 @@ fn context_uses_the_latest_normalized_report_without_overflow_or_fallback() {
         app.apply_view(entry_update(
             step(3, id, 1)
                 .completed_attempt(0)
-                .metering(usage, None)
+                .metering(usage, Partial, None)
                 .entry(),
         ));
         assert_eq!(app.context_tokens, context);

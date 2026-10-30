@@ -839,7 +839,7 @@ impl App {
                             _ => None,
                         })
                         .flatten()
-                        .map(|attempt| (attempt.usage, attempt.estimated_cost_usd)),
+                        .map(|attempt| (attempt.usage, attempt.usage_kind, attempt.cost)),
                 )
             });
         self.context_tokens = self

@@ -1505,6 +1505,7 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
             assert_eq!(usage["position"], head.position);
             assert_eq!(usage["turns"].as_array().unwrap().len(), 1);
             assert_eq!(usage["turns"][0]["turn_id"], tid);
+            assert_eq!(usage["turns"][0]["usage"], before["usage"]);
             assert_eq!(usage["total"], before["usage"]);
             assert_eq!(accepted_detail(&world, &spec, tid), before);
             assert_eq!(
@@ -1517,16 +1518,24 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
                 for attempt in step["attempts"].as_array().unwrap() {
                     if attempt["progress"]["progress"] == "sent" {
                         assert!(attempt["usage"].is_null());
-                        assert!(attempt["estimated_cost_usd"].is_null());
+                        assert_eq!(attempt["usage_kind"], "partial");
+                        assert!(attempt["cost"].is_null());
                     } else {
-                        let expected = if index == 1 && matches!(mode, "retry" | "nonretry") {
+                        let interrupted = index == 1 && matches!(mode, "retry" | "nonretry");
+                        let expected = if interrupted {
                             0.000034
                         } else if index == 1 && mode == "invalid" {
                             0.000070
                         } else {
                             0.000012
                         };
-                        let fee = attempt["estimated_cost_usd"]
+                        assert_eq!(
+                            attempt["usage_kind"],
+                            if interrupted { "partial" } else { "complete" },
+                            "{name}: {attempt}"
+                        );
+                        assert_eq!(attempt["cost"]["exact"], !interrupted, "{name}: {attempt}");
+                        let fee = attempt["cost"]["usd"]
                             .as_f64()
                             .expect("committed attempt cost");
                         assert!((fee - expected).abs() < 1e-15, "{name}: {attempt}");
@@ -1661,7 +1670,7 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
                     json!({"end":"stop","cause":{"cause":"invalid_batch"}})
                 );
                 let mut usage = before["usage"].clone();
-                let amount = usage["estimated_cost_usd"]["known"].take();
+                let amount = usage["cost"]["known"]["usd"].take();
                 let amount = amount.as_f64().expect("known aggregate cost");
                 assert!(
                     (amount - 0.000082).abs() < 1e-15,
@@ -1669,13 +1678,13 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
                 );
                 assert_eq!(
                     usage,
-                    json!({"attempts":2,"kind":"partial",
+                    json!({"attempts":2,"partial_attempts":0,"kind":"complete",
                         "input":{"known":11,"unknown_attempts":0,"overflowed":false},
                         "cache_read":{"known":null,"unknown_attempts":2,"overflowed":false},
                         "cache_write":{"known":null,"unknown_attempts":2,"overflowed":false},
                         "output":{"known":6,"unknown_attempts":0,"overflowed":false},
                         "reasoning":{"known":null,"unknown_attempts":2,"overflowed":false},
-                        "estimated_cost_usd":{"known":null,"unknown_attempts":0,"overflowed":false}})
+                        "cost":{"known":{"usd":null,"exact":true},"unknown_attempts":0,"overflowed":false}})
                 );
             }
             if name == "nonretry" {

@@ -264,7 +264,7 @@ fn pty_statusline_usage_survives_reopening_and_follows_rewind() {
                     number("上下文 ")?,
                 ])
             })();
-            let cleared = ["↑", "↓", "缓存", "≈$", "上下文"]
+            let cleared = ["↑", "↓", "缓存", "$", "上下文"]
                 .iter()
                 .all(|label| !frame.contains(label));
             if shown == expected && (expected.is_some() || cleared) {
@@ -346,13 +346,9 @@ fn pty_statusline_usage_survives_reopening_and_follows_rewind() {
         assert_eq!(persisted["total"]["output"]["known"], 60);
         assert_eq!(persisted["total"]["cache_read"]["known"], 300);
         assert!(
-            (persisted["total"]["estimated_cost_usd"]["known"]
-                .as_f64()
-                .unwrap()
-                - 0.09)
-                .abs()
-                < 1e-12
+            (persisted["total"]["cost"]["known"]["usd"].as_f64().unwrap() - 0.09).abs() < 1e-12
         );
+        assert_eq!(persisted["total"]["cost"]["known"]["exact"], false);
         let tid = persisted["turns"][0]["turn_id"].as_str().unwrap();
         let detail = query(&session, &mut evidence, &["--json", "session", "turn", tid]);
         assert_eq!(detail["steps"].as_array().unwrap().len(), 2);

@@ -153,7 +153,7 @@ fn format_turn(usage: &lattice_api::UsageSummary) -> Option<String> {
     let mut parts = Vec::new();
     if usage.attempts > 0 {
         for (prefix, metric) in [("↑", &usage.input), ("↓", &usage.output)] {
-            if metric.is_complete()
+            if !metric.overflowed
                 && let Some(tokens) = metric.known
             {
                 parts.push(format!("{prefix}{}", format_tokens(tokens)));
@@ -170,12 +170,12 @@ fn format_turn(usage: &lattice_api::UsageSummary) -> Option<String> {
             ));
         }
     }
-    let cost = &usage.estimated_cost_usd;
+    let cost = &usage.cost;
     if !cost.overflowed
         && let Some(amount) = cost.known
     {
-        let suffix = if cost.is_complete() { "" } else { "+" };
-        parts.push(format!("≈${amount:.2}{suffix}"));
+        let prefix = if amount.exact { "" } else { "≈" };
+        parts.push(format!("{prefix}${:.2}", amount.usd));
     }
     (!parts.is_empty()).then(|| parts.join(" "))
 }
@@ -183,16 +183,19 @@ fn format_turn(usage: &lattice_api::UsageSummary) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lattice_api::local::{CostEstimate, UsageCompleteness, UsageCompleteness::*};
     use serde_json::{Value, json};
 
     fn summary(
-        attempts: impl IntoIterator<Item = (Value, Option<f64>)>,
+        attempts: impl IntoIterator<Item = (Value, UsageCompleteness, Option<(f64, bool)>)>,
     ) -> lattice_api::UsageSummary {
-        lattice_api::UsageSummary::from_attempts(
-            attempts
-                .into_iter()
-                .map(|(usage, cost)| (serde_json::from_value(usage).unwrap(), cost)),
-        )
+        lattice_api::UsageSummary::from_attempts(attempts.into_iter().map(|(usage, kind, cost)| {
+            (
+                serde_json::from_value(usage).unwrap(),
+                kind,
+                cost.map(|(usd, exact)| CostEstimate { usd, exact }),
+            )
+        }))
     }
 
     #[test]
@@ -200,37 +203,63 @@ mod tests {
         let partial = summary([
             (
                 json!({"input":1000,"output":100,"cache_read":200}),
-                Some(0.024),
+                Complete,
+                Some((0.024, true)),
             ),
-            (json!({"output":20,"cache_read":0}), None),
+            (json!({"output":20,"cache_read":0}), Partial, None),
         ]);
-        assert_eq!(format_turn(&partial).as_deref(), Some("↓120 ≈$0.02+"));
+        assert_eq!(format_turn(&partial).as_deref(), Some("↑1.0k ↓120 ≈$0.02"));
         let missing_reasoning = summary([(
             json!({"input":12300,"output":1200,"cache_read":9840}),
-            Some(0.04),
+            Complete,
+            Some((0.04, true)),
         )]);
         assert_eq!(
             format_turn(&missing_reasoning).as_deref(),
-            Some("↑12.3k ↓1.2k 缓存 80% ≈$0.04")
+            Some("↑12.3k ↓1.2k 缓存 80% $0.04")
         );
     }
 
     #[test]
     fn empty_unknown_zero_and_cents_remain_distinct() {
         for (attempts, expected) in [
-            (vec![], Some("≈$0.00")),
-            (vec![(Value::Null, None)], None),
+            (vec![], Some("$0.00")),
+            (vec![(Value::Null, Partial, None)], None),
             (
-                vec![(json!({"input":0,"output":0,"cache_read":0}), Some(0.0))],
-                Some("↑0 ↓0 ≈$0.00"),
+                vec![(
+                    json!({"input":0,"output":0,"cache_read":0}),
+                    Complete,
+                    Some((0.0, true)),
+                )],
+                Some("↑0 ↓0 $0.00"),
             ),
-            (vec![(Value::Null, Some(0.000001))], Some("≈$0.00")),
             (
-                vec![(Value::Null, Some(0.0)), (Value::Null, None)],
-                Some("≈$0.00+"),
+                vec![(json!({"cache_write":1}), Complete, Some((0.000001, true)))],
+                Some("$0.00"),
             ),
             (
-                vec![(Value::Null, Some(0.004)), (Value::Null, Some(0.004))],
+                vec![(json!({"cache_write":1}), Complete, Some((0.000001, false)))],
+                Some("≈$0.00"),
+            ),
+            (
+                vec![
+                    (json!({"cache_write":0}), Complete, Some((0.0, true))),
+                    (Value::Null, Partial, None),
+                ],
+                Some("≈$0.00"),
+            ),
+            (
+                vec![
+                    (json!({"cache_write":1}), Complete, Some((0.004, true))),
+                    (json!({"cache_write":1}), Complete, Some((0.004, true))),
+                ],
+                Some("$0.01"),
+            ),
+            (
+                vec![
+                    (json!({"cache_write":1}), Complete, Some((0.004, true))),
+                    (json!({"cache_write":1}), Complete, Some((0.004, false))),
+                ],
                 Some("≈$0.01"),
             ),
         ] {
@@ -261,12 +290,14 @@ mod tests {
             ),
             (
                 vec![json!({"input":10,"cache_read":0}), json!({"cache_read":0})],
-                "",
+                "↑10",
             ),
         ] {
             assert_eq!(
-                format_turn(&summary(attempts.into_iter().map(|usage| (usage, None))))
-                    .unwrap_or_default(),
+                format_turn(&summary(
+                    attempts.into_iter().map(|usage| (usage, Partial, None))
+                ))
+                .unwrap_or_default(),
                 expected
             );
         }
@@ -277,16 +308,29 @@ mod tests {
         let overflow = summary([
             (
                 json!({"input":u64::MAX,"output":1,"cache_read":1}),
-                Some(f64::MAX),
+                Complete,
+                Some((f64::MAX, true)),
             ),
-            (json!({"input":1,"output":1,"cache_read":1}), Some(f64::MAX)),
+            (
+                json!({"input":1,"output":1,"cache_read":1}),
+                Complete,
+                Some((f64::MAX, true)),
+            ),
         ]);
         assert_eq!(format_turn(&overflow).as_deref(), Some("↓2"));
         let cache_overflow = summary([
-            (json!({"input":1,"cache_read":u64::MAX}), Some(0.02)),
-            (json!({"input":1,"cache_read":1}), Some(0.02)),
+            (
+                json!({"input":1,"cache_read":u64::MAX}),
+                Complete,
+                Some((0.02, true)),
+            ),
+            (
+                json!({"input":1,"cache_read":1}),
+                Complete,
+                Some((0.02, true)),
+            ),
         ]);
-        assert_eq!(format_turn(&cache_overflow).as_deref(), Some("↑2 ≈$0.04"));
+        assert_eq!(format_turn(&cache_overflow).as_deref(), Some("↑2 $0.04"));
     }
 
     #[tokio::test(start_paused = true)]
@@ -296,7 +340,11 @@ mod tests {
             app.model = Some("m".into());
             app.provider = Some("p".into());
             app.context_tokens = Some(1);
-            app.turn_usage = Some(summary([(Value::Null, Some(123.45))]));
+            app.turn_usage = Some(summary([(
+                json!({"cache_write":1}),
+                Partial,
+                Some((123.45, false)),
+            )]));
             let equal_width = line(&app, 50).to_string();
             assert!(equal_width.contains("≈$123.45"), "{equal_width}");
             assert!(!equal_width.contains("上下文"), "{equal_width}");
@@ -306,14 +354,15 @@ mod tests {
             app.provider = Some("provider".into());
             app.turn_usage = Some(summary([(
                 json!({"input":12300,"output":1200,"cache_read":9840}),
-                Some(0.04),
+                Complete,
+                Some((0.04, true)),
             )]));
             app.phase = TurnPhase::Cancelling;
             app.connected = false;
             app.last_ctrl_c = Some(tokio::time::Instant::now());
             let wide = line(&app, 200);
             assert!(wide.to_string().contains("Ctrl+C to quit"));
-            assert!(wide.to_string().contains("↑12.3k ↓1.2k 缓存 80% ≈$0.04"));
+            assert!(wide.to_string().contains("↑12.3k ↓1.2k 缓存 80% $0.04"));
             assert!(
             wide.spans
                 .iter()
@@ -335,7 +384,7 @@ mod tests {
                 "{without_newline_hint}"
             );
             assert!(
-                without_newline_hint.contains("↑12.3k ↓1.2k 缓存 80% ≈$0.04"),
+                without_newline_hint.contains("↑12.3k ↓1.2k 缓存 80% $0.04"),
                 "{without_newline_hint}"
             );
             let without_key_hints = line(&app, 120).to_string();
@@ -348,18 +397,18 @@ mod tests {
                 "{without_key_hints}"
             );
             assert!(
-                without_key_hints.contains("↑12.3k ↓1.2k 缓存 80% ≈$0.04"),
+                without_key_hints.contains("↑12.3k ↓1.2k 缓存 80% $0.04"),
                 "{without_key_hints}"
             );
             let without_usage = line(&app, 100).to_string();
-            for field in ["↑12.3k", "↓1.2k", "缓存", "≈$"] {
+            for field in ["↑12.3k", "↓1.2k", "缓存", "$"] {
                 assert!(!without_usage.contains(field), "{without_usage}");
             }
             for width in 0..=120 {
                 let text = line(&app, width).to_string();
                 assert_eq!(display_width(&text), width, "{width}: {text}");
                 if text.contains("↑12.3k") {
-                    assert!(text.contains("↓1.2k 缓存 80% ≈$0.04"), "{text}");
+                    assert!(text.contains("↓1.2k 缓存 80% $0.04"), "{text}");
                 }
             }
             tokio::time::advance(CTRL_C_WINDOW).await;
@@ -368,10 +417,7 @@ mod tests {
             let expired = line(&app, 200).to_string();
             assert!(!expired.contains("Ctrl+C to quit"), "{expired}");
             assert!(expired.contains("Alt+Enter 换行"), "{expired}");
-            assert!(
-                expired.contains("↑12.3k ↓1.2k 缓存 80% ≈$0.04"),
-                "{expired}"
-            );
+            assert!(expired.contains("↑12.3k ↓1.2k 缓存 80% $0.04"), "{expired}");
         })
         .await
         .expect("statusline 时间与裁剪测试超过总上限");

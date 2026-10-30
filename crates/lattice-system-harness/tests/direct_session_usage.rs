@@ -28,6 +28,7 @@ fn metric(known: Value, unknown: u64) -> Value {
 fn assert_summary(actual: &Value, expected: &Value) {
     for field in [
         "attempts",
+        "partial_attempts",
         "kind",
         "input",
         "cache_read",
@@ -37,14 +38,25 @@ fn assert_summary(actual: &Value, expected: &Value) {
     ] {
         assert_eq!(actual[field], expected[field], "{field}: {actual}");
     }
-    let cost = &actual["estimated_cost_usd"];
-    let expected = &expected["estimated_cost_usd"];
+    let cost = &actual["cost"];
+    let expected = &expected["cost"];
     assert_eq!(cost["unknown_attempts"], expected["unknown_attempts"]);
     assert_eq!(cost["overflowed"], expected["overflowed"]);
-    match (cost["known"].as_f64(), expected["known"].as_f64()) {
-        (Some(actual), Some(expected)) => assert!((actual - expected).abs() < 1e-12, "{cost}"),
-        _ => assert_eq!(cost["known"], expected["known"]),
+    if expected["known"].is_null() {
+        assert_eq!(cost["known"], Value::Null);
+    } else {
+        assert_cost(
+            &cost["known"],
+            expected["known"]["usd"].as_f64().unwrap(),
+            expected["known"]["exact"].as_bool().unwrap(),
+        );
     }
+}
+
+fn assert_cost(actual: &Value, usd: f64, exact: bool) {
+    assert_eq!(actual["exact"], exact, "{actual}");
+    let amount = actual["usd"].as_f64().expect("known USD amount");
+    assert!((amount - usd).abs() < 1e-12, "{actual}: expected USD {usd}");
 }
 
 fn assert_text(send: &SessionSendDriver<'_>, evidence: &mut ScenarioEvidence, snapshot: &Value) {
@@ -103,7 +115,7 @@ fn assert_text_metrics(words: &[&str], summary: &Value) {
         "cache_write",
         "output",
         "reasoning",
-        "estimated_cost_usd",
+        "cost",
     ] {
         let metric = &summary[field];
         let text = words.next().unwrap();
@@ -111,22 +123,30 @@ fn assert_text_metrics(words: &[&str], summary: &Value) {
             assert_eq!(text, "-", "unknown {field}");
             continue;
         }
-        if field == "estimated_cost_usd" {
-            let amount = text.strip_prefix("≈$").expect("estimated USD marker");
+        if field == "cost" {
+            let prefix = if metric["known"]["exact"].as_bool().unwrap() {
+                "$"
+            } else {
+                "≈$"
+            };
+            let amount = text.strip_prefix(prefix).expect("USD certainty marker");
             let (whole, cents) = amount.split_once('.').expect("USD decimal point");
             assert!(!whole.is_empty() && whole.bytes().all(|b| b.is_ascii_digit()));
             assert_eq!(cents.len(), 2, "USD uses two decimal places: {text}");
             assert!(cents.bytes().all(|b| b.is_ascii_digit()));
             assert_eq!(
                 amount.parse::<f64>().unwrap(),
-                (metric["known"].as_f64().unwrap() * 100.0).round() / 100.0
+                (metric["known"]["usd"].as_f64().unwrap() * 100.0).round() / 100.0
             );
         } else {
             assert_eq!(text.parse::<u64>().unwrap(), metric["known"], "{field}");
         }
-        if metric["unknown_attempts"].as_u64().unwrap() > 0 {
-            assert_eq!(words.next(), Some("(partial)"), "partial {field}");
+        if metric["overflowed"].as_bool().unwrap() {
+            assert_eq!(words.next(), Some("(overflow)"), "overflow {field}");
         }
+    }
+    if summary["kind"] == "partial" {
+        assert_eq!(words.next(), Some("(partial)"), "partial row");
     }
     assert_eq!(words.next(), None, "unexpected metric or marker");
 }
@@ -211,8 +231,10 @@ fn usage_follows_current_path_and_survives_read_only_reopening() {
         let live = usage(&send, &mut evidence, &sid);
         let a = live["turns"][0]["turn_id"].as_str().unwrap().to_owned();
         assert_eq!(live["total"]["attempts"], 1);
+        assert_eq!(live["total"]["partial_attempts"], 1);
+        assert_eq!(live["total"]["kind"], "partial");
         assert!(live["total"]["input"]["known"].is_null());
-        assert!(live["total"]["estimated_cost_usd"]["known"].is_null());
+        assert!(live["total"]["cost"]["known"].is_null());
         assert_text(&send, &mut evidence, &live);
         assert_eq!(server.captured_requests().len(), 1);
         gate.release_next(running.remaining_timeout(spec.step_timeout()))
@@ -244,13 +266,29 @@ fn usage_follows_current_path_and_survives_read_only_reopening() {
                 .len(),
             2
         );
-        for attempt in [
-            &original_turn["steps"][0]["attempts"][0],
-            &original_turn["steps"][1]["attempts"][0],
+        for (attempt, usd, exact, kind) in [
+            (
+                &original_turn["steps"][0]["attempts"][0],
+                0.0028,
+                false,
+                "partial",
+            ),
+            (
+                &original_turn["steps"][0]["attempts"][1],
+                0.0016,
+                false,
+                "complete",
+            ),
+            (
+                &original_turn["steps"][1]["attempts"][0],
+                0.0028,
+                true,
+                "complete",
+            ),
         ] {
-            assert!((attempt["estimated_cost_usd"].as_f64().unwrap() - 0.0028).abs() < 1e-12);
+            assert_cost(&attempt["cost"], usd, exact);
+            assert_eq!(attempt["usage_kind"], kind);
         }
-        assert!(original_turn["steps"][0]["attempts"][1]["estimated_cost_usd"].is_null());
 
         let running = driver
             .start(
@@ -294,15 +332,15 @@ fn usage_follows_current_path_and_survives_read_only_reopening() {
             assert_eq!(row["provider"], "local");
             assert_eq!(row["model"], model);
         }
-        let a_summary = json!({"attempts":3,"kind":"partial",
+        let a_summary = json!({"attempts":3,"partial_attempts":1,"kind":"partial",
             "input":metric(json!(3000),0),"cache_read":metric(json!(600),0),"cache_write":metric(json!(200),1),
-            "output":metric(json!(300),0),"reasoning":metric(json!(40),0),"estimated_cost_usd":metric(json!(0.0056),1)});
-        let b_summary = json!({"attempts":1,"kind":"partial",
+            "output":metric(json!(300),0),"reasoning":metric(json!(40),0),"cost":metric(json!({"usd":0.0072,"exact":false}),0)});
+        let b_summary = json!({"attempts":1,"partial_attempts":0,"kind":"complete",
             "input":metric(json!(500),0),"cache_read":metric(Value::Null,1),"cache_write":metric(Value::Null,1),
-            "output":metric(json!(50),0),"reasoning":metric(Value::Null,1),"estimated_cost_usd":metric(Value::Null,1)});
-        let full_summary = json!({"attempts":4,"kind":"partial",
+            "output":metric(json!(50),0),"reasoning":metric(Value::Null,1),"cost":metric(Value::Null,1)});
+        let full_summary = json!({"attempts":4,"partial_attempts":1,"kind":"partial",
             "input":metric(json!(3500),0),"cache_read":metric(json!(600),1),"cache_write":metric(json!(200),2),
-            "output":metric(json!(350),0),"reasoning":metric(json!(40),1),"estimated_cost_usd":metric(json!(0.0056),2)});
+            "output":metric(json!(350),0),"reasoning":metric(json!(40),1),"cost":metric(json!({"usd":0.0072,"exact":false}),1)});
         assert_summary(&full["turns"][0]["usage"], &a_summary);
         assert_summary(&full["turns"][1]["usage"], &b_summary);
         assert_summary(&full["total"], &full_summary);
@@ -328,9 +366,9 @@ fn usage_follows_current_path_and_survives_read_only_reopening() {
         let middle = usage(&send, &mut evidence, &sid);
         assert_eq!(middle["position"], 2);
         assert_eq!(middle["turns"].as_array().unwrap().len(), 1);
-        let middle_summary = json!({"attempts":2,"kind":"partial",
+        let middle_summary = json!({"attempts":2,"partial_attempts":1,"kind":"partial",
             "input":metric(json!(2000),0),"cache_read":metric(json!(400),0),"cache_write":metric(json!(100),1),
-            "output":metric(json!(200),0),"reasoning":metric(json!(20),0),"estimated_cost_usd":metric(json!(0.0028),1)});
+            "output":metric(json!(200),0),"reasoning":metric(json!(20),0),"cost":metric(json!({"usd":0.0044,"exact":false}),0)});
         assert_summary(&middle["turns"][0]["usage"], &middle_summary);
         assert_summary(&middle["total"], &middle_summary);
         assert_text(&send, &mut evidence, &middle);
@@ -348,9 +386,9 @@ fn usage_follows_current_path_and_survives_read_only_reopening() {
         assert_eq!(fork["turns"].as_array().unwrap().len(), 2);
         assert_eq!(fork["turns"][1]["turn_id"], c);
         assert_eq!(fork["turns"][1]["ordinal"], 2);
-        let zero = json!({"attempts":1,"kind":"complete",
+        let zero = json!({"attempts":1,"partial_attempts":0,"kind":"complete",
             "input":metric(json!(0),0),"cache_read":metric(json!(0),0),"cache_write":metric(json!(0),0),
-            "output":metric(json!(0),0),"reasoning":metric(json!(0),0),"estimated_cost_usd":metric(json!(0.0),0)});
+            "output":metric(json!(0),0),"reasoning":metric(json!(0),0),"cost":metric(json!({"usd":0.0,"exact":true}),0)});
         assert_summary(&fork["turns"][0]["usage"], &middle_summary);
         assert_summary(&fork["turns"][1]["usage"], &zero);
         let mut fork_summary = middle_summary.clone();

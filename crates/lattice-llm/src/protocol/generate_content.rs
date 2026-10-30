@@ -232,7 +232,11 @@ impl GeminiSseParser {
             if let Some(reason) = candidate["finishReason"].as_str() {
                 self.close_text(&mut events);
                 self.completed = true;
-                match self.usage.update(Protocol::GenerateContent, &root) {
+                match self
+                    .usage
+                    .update(Protocol::GenerateContent, &root)
+                    .and_then(|_| self.usage.finish(Protocol::GenerateContent))
+                {
                     Ok(Some(usage)) => events.push(ProtocolEvent::Usage(usage)),
                     Ok(None) => {}
                     Err(error) => {
