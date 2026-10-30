@@ -306,7 +306,7 @@ Chat Completions 中，模型的 `reasoning_options` 含 toggle 项且 `thinking
 
 ### 用量换算
 
-每次尝试的用量按统一口径保存，各项都可以缺失；provider 没有报告的项为未知，不记为 0：
+每次尝试的用量按统一口径保存，各项都可以缺失；provider 没有报告的项为未报告，不记为 0。generateContent 在完成时有补零规则，见表后说明：
 
 | 项 | 含义 |
 | --- | --- |
@@ -318,16 +318,17 @@ Chat Completions 中，模型的 `reasoning_options` 含 toggle 项且 `thinking
 
 | 协议 | `input` | `cache_read` | `cache_write` | `output` | `reasoning` |
 | --- | --- | --- | --- | --- | --- |
-| Chat Completions | `prompt_tokens` | `prompt_tokens_details.cached_tokens`；DeepSeek 为 `prompt_cache_hit_tokens` | `prompt_tokens_details.cache_creation_input_tokens` | `completion_tokens` | `completion_tokens_details.reasoning_tokens` |
+| Chat Completions | `prompt_tokens` | `prompt_tokens_details.cached_tokens`；DeepSeek 为 `prompt_cache_hit_tokens` | `prompt_tokens_details.cache_creation_input_tokens`；OpenAI 原生与 OpenRouter 的 `prompt_tokens_details.cache_write_tokens` 也接收，两者都有时取前者 | `completion_tokens` | `completion_tokens_details.reasoning_tokens` |
 | Responses | `input_tokens` | `input_tokens_details.cached_tokens` | — | `output_tokens` | `output_tokens_details.reasoning_tokens` |
 | Anthropic Messages | `input_tokens` + `cache_creation_input_tokens` + `cache_read_input_tokens` | `cache_read_input_tokens` | `cache_creation_input_tokens` | `output_tokens` | — |
 | generateContent | `promptTokenCount` + `toolUsePromptTokenCount` | `cachedContentTokenCount` | — | `candidatesTokenCount` + `thoughtsTokenCount` | `thoughtsTokenCount` |
 | Interactions | `total_input_tokens` + `total_tool_use_tokens` | `total_cached_tokens` | — | `total_output_tokens` + `total_thought_tokens` | `total_thought_tokens` |
 
-- 计数保存为逐项可选的 `u64`；缺失或 null 为未知，明确报告的 0 保留为 0，全部未知时整份用量为未知。字段类型或数值范围错误仍为 `MalformedUsage`。
-- Chat Completions 两种缓存读字段同时存在时，优先 `prompt_tokens_details.cached_tokens`，否则取 `prompt_cache_hit_tokens`；只计一次。输入与缓存分项、输出与推理分项之间不校验大小关系，不因 provider 报告不自洽而拒绝或丢弃计数。
-- 流中保存本次尝试的原生累计分项，再按表换算。后续事件缺失或 null 的字段保留此前已知值，明确的 0 可以覆盖；重复累计报告不相加。后续解析失败或尝试停止时仍交付此前已知的快照。
+- 计数保存为逐项可选的 `u64`；字段为非 null 即为已报告，明确的 0 也算；缺失或 null 为未报告。全部未报告时整份用量为未知，generateContent 完成时按下述例外处理。字段类型或数值范围错误仍为 `MalformedUsage`。
+- Chat Completions 两种缓存读字段同时存在时，优先 `prompt_tokens_details.cached_tokens`，否则取 `prompt_cache_hit_tokens`；缓存写优先 `prompt_tokens_details.cache_creation_input_tokens`，否则取 `prompt_tokens_details.cache_write_tokens`。优先字段明确为 0 时也不取别名，各项只计一次。输入与缓存分项、输出与推理分项之间不校验大小关系，不因 provider 报告不自洽而拒绝或丢弃计数。
+- 流中保存本次尝试的原生累计分项，再按表换算。后续事件缺失或 null 的字段保留此前已知值，明确的 0 可以覆盖；重复累计报告不相加。Messages 的 `message_start` 与 `message_delta` 对三个输入字段 `input_tokens`、`cache_read_input_tokens`、`cache_creation_input_tokens` 使用同一例外：已有值时收到 0 保留旧值，旧值缺失时收到 0 则保存 0，正数覆盖旧值；`output_tokens` 仍按最新值覆盖。后续解析失败或尝试停止时仍交付此前已知的快照。
 - 求和的项中有一项缺失时，和按已有的项计算；全部缺失时为未知。
+- generateContent 完成时，若本次尝试的 `usageMetadata` 至少有一个非 null 字段，则在累积快照上把缺失的 `candidatesTokenCount`、`cachedContentTokenCount`、`thoughtsTokenCount`、`toolUsePromptTokenCount` 按 0 处理；`promptTokenCount` 缺失仍使 `input` 为未知，`output` 为 candidates 与 thoughts 之和，`cache_write` 始终未报告。流式只在候选的 `finishReason` 分支执行这次最终映射，完整 wire 入口使用同一映射；逐块更新和无 `finishReason` 的中断不补零。没有收到过含非 null 字段的 `usageMetadata`（缺失、null、`{}` 或仅含 null）时整份用量仍为未知。
 - Interactions 的 `total_output_tokens` 是否含推理，Google 文档没有写明；表中按不含处理，实现时用真实响应核对，结论写回本表。
 
 ### 缓存的开启与检测
@@ -357,7 +358,7 @@ Chat Completions 中，模型的 `reasoning_options` 含 toggle 项且 `thinking
              ) ÷ 1,000,000
 ```
 
-- 估算值以 `f64` 美元保存，必须有限且非负，保存时不按美分舍入。
+- 费用结果保存为可选的 `cost: CostEstimate { usd, exact }`：`usd` 以 `f64` 美元保存，编码与解码均要求有限且非负，不按美分舍入；`exact` 表示该金额是否确切，`cost` 为 null 表示未知。
 - `input` 或 `output` 未知、或模型没有 `cost.input` 与 `cost.output` 时，这次尝试没有费用。
 - 一轮的费用是各尝试之和；有尝试没有费用时，一轮的费用标为部分。
 - 按上下文长度分档的价格（models.dev 的 `tiers`、`context_over_200k`）不计入，所以是估算。
@@ -476,7 +477,7 @@ Turn deadline 的范围由[会话合同](session.md#输入与传输限制)维护
 | provider 注册表：内置表与 `providers.toml` 的合并、严格解析、`chatgpt` 不能改写、非 loopback 必须 HTTPS | 同上 |
 | 元数据：来源的选择与按字段覆盖、只保留列出的字段、缓存保留 `providers.toml` 中的 `catalog` 条目、刷新失败继续使用上一份 | 同上 |
 | 档位：可用档位的推导、按 token 数的预算、各协议的映射、不支持的档位被拒绝 | 同上 |
-| 用量换算与费用估算，包括缺失项 | 同上 |
+| 用量换算与费用估算，包括未报告项、显式 0、generateContent 完成时补零、Messages 输入侧 delta-0、Chat 缓存写别名，以及格式错误与换算溢出 | 同上 |
 | `auth.json`：权限检查、原子写入、严格解析、凭据不进入日志与公开输出 | 同上 |
 | endpoint 与凭据来源的负向测试：项目目录中的 `providers.toml` 不被读取，环境变量与工作区 `.env` 既不能改变 endpoint、也不能提供 key | harness 的 fast 场景 |
 | SIWC 的本地逻辑：用注入的时钟与构造的短有效期 token 记录，核对剩余有效期短于余量（包括已经过期）时先刷新、有效期内不刷新，并发的请求只刷新一次，刷新失败按上文三类处理并写回 `auth.json`；回调的 `state` 与 `client_id` 校验，登录中途取消时关闭监听。不模拟 OpenAI 的授权服务 | `lattice-llm` 局部测试 |

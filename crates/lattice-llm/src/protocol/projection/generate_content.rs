@@ -203,5 +203,7 @@ pub(crate) fn tool_result_messages(
 
 /// 完整 wire 与流式响应共用原生分项的换算。
 pub(crate) fn usage(wire: &Value) -> Result<Option<TokenUsage>, ProjectionError> {
-    super::super::usage::UsageSnapshot::default().update(Protocol::GenerateContent, wire)
+    let mut snapshot = super::super::usage::UsageSnapshot::default();
+    snapshot.update(Protocol::GenerateContent, wire)?;
+    snapshot.finish(Protocol::GenerateContent)
 }

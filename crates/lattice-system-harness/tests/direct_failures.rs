@@ -180,7 +180,8 @@ fn reported_usage_survives_failed_attempt_and_retry_without_partial_reply() {
             attempts.len() == 2
                 && attempts[0]["usage"]
                     == json!({"input":10,"cache_read":0,"cache_write":null,"output":2,"reasoning":null})
-                && attempts[0]["estimated_cost_usd"].is_null(),
+                && attempts[0]["usage_kind"] == "partial"
+                && attempts[0]["cost"].is_null(),
             "failed attempt retains reported counters and unknown fee",
         )?;
         let entries = outcome.entries();

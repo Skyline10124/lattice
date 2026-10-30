@@ -196,8 +196,8 @@ impl StepProgress {
 pub struct AttemptRecord {
     pub origin: AttemptOrigin,
     pub usage: Option<TokenUsage>,
-    #[serde(with = "lattice_conversation::usage::estimated_cost_usd")]
-    pub estimated_cost_usd: Option<f64>,
+    pub usage_kind: lattice_conversation::UsageCompleteness,
+    pub cost: Option<lattice_conversation::CostEstimate>,
     pub progress: AttemptProgress,
     pub retry_delay_ms: Option<u64>,
 }
@@ -348,7 +348,8 @@ pub struct AttemptStopped {
     pub key: ModelAttemptKey,
     pub origin: AttemptOrigin,
     pub usage: Option<TokenUsage>,
-    pub estimated_cost_usd: Option<f64>,
+    pub usage_kind: lattice_conversation::UsageCompleteness,
+    pub cost: Option<lattice_conversation::CostEstimate>,
     pub cause: StopCause,
     pub diagnostic: AttemptDiagnostic,
     pub retry_delay_ms: Option<u64>,
@@ -358,7 +359,8 @@ pub struct CompleteReply {
     pub key: ModelAttemptKey,
     pub origin: AttemptOrigin,
     pub usage: Option<TokenUsage>,
-    pub estimated_cost_usd: Option<f64>,
+    pub usage_kind: lattice_conversation::UsageCompleteness,
+    pub cost: Option<lattice_conversation::CostEstimate>,
     pub message: NativeMessage<UnboundToolCall>,
 }
 #[derive(Clone)]
@@ -510,8 +512,8 @@ pub struct AttemptDetail {
     pub attempt: u32,
     pub origin: AttemptOrigin,
     pub usage: Option<TokenUsage>,
-    #[serde(with = "lattice_conversation::usage::estimated_cost_usd")]
-    pub estimated_cost_usd: Option<f64>,
+    pub usage_kind: lattice_conversation::UsageCompleteness,
+    pub cost: Option<lattice_conversation::CostEstimate>,
     pub progress: AttemptProgressDetail,
     pub end: AttemptEndDetail,
     pub retry_delay_ms: Option<u64>,

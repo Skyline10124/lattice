@@ -179,7 +179,7 @@ fn durable_attempt_usage_is_reported_once_with_partial_totals() {
     let mut node = ipc_tests::entry(id, "completed");
     if let ConversationEntry::Step { step, .. } = node.as_mut() {
         let attempt = |n, usage| {
-            serde_json::from_value(json!({"attempt":n,"origin":{"protocol":"chat-completions","provider_id":"openai"},"usage":usage,"estimated_cost_usd":null,"progress":{"progress":"ended","end":{"end":"completed"},"diagnostic":null},"end":{"end":"stopped","cause":{"cause":"process_exit"},"diagnostic":null},"retry_delay_ms":null})).unwrap()
+            serde_json::from_value(json!({"attempt":n,"origin":{"protocol":"chat-completions","provider_id":"openai"},"usage":usage,"usage_kind":"partial","cost":null,"progress":{"progress":"ended","end":{"end":"completed"},"diagnostic":null},"end":{"end":"stopped","cause":{"cause":"process_exit"},"diagnostic":null},"retry_delay_ms":null})).unwrap()
         };
         step.attempts = vec![
             attempt(

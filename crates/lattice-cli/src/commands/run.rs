@@ -502,7 +502,7 @@ fn finish_human(
                 .steps
                 .values()
                 .flat_map(|step| &step.attempts)
-                .map(|attempt| (attempt.usage, attempt.estimated_cost_usd)),
+                .map(|attempt| (attempt.usage, attempt.usage_kind, attempt.cost)),
         );
         writeln!(err, "usage: {}", serde_json::to_string(&usage)?)?;
         if !state.results.is_empty() {

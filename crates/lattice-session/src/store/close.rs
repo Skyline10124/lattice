@@ -155,7 +155,7 @@ pub(super) fn usage<'a>(attempts: impl IntoIterator<Item = &'a AttemptRecord>) -
     UsageSummary::from_attempts(
         attempts
             .into_iter()
-            .map(|attempt| (attempt.usage, attempt.estimated_cost_usd)),
+            .map(|attempt| (attempt.usage, attempt.usage_kind, attempt.cost)),
     )
 }
 
@@ -246,7 +246,8 @@ pub(super) fn completed(reply: &CompleteReply) -> AttemptRecord {
         usage: reply
             .usage
             .and_then(lattice_conversation::TokenUsage::normalized),
-        estimated_cost_usd: reply.estimated_cost_usd,
+        usage_kind: reply.usage_kind,
+        cost: reply.cost,
         progress: AttemptProgress::Ended {
             end: AttemptEnd::Completed,
             diagnostic: AttemptDiagnostic::default(),

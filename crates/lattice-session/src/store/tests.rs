@@ -8,8 +8,8 @@ use lancet_protocol::{
     Retriability, SessionId, TurnId,
 };
 use lattice_conversation::{
-    MessagePart, MessageRole, MessageSemantic, NativeMessage, OpaqueProviderState, Protocol,
-    TokenUsage, ToolResultOutcome, UnboundToolCall,
+    CostEstimate, MessagePart, MessageRole, MessageSemantic, NativeMessage, OpaqueProviderState,
+    Protocol, TokenUsage, ToolResultOutcome, UnboundToolCall, UsageCompleteness,
 };
 use lattice_store::{ProjectStoreKey, StateLayout};
 use redb::ReadableTable;
@@ -273,7 +273,8 @@ fn reply(k: ModelAttemptKey, count: usize) -> CompleteReply {
         }));
     }
     CompleteReply {
-        estimated_cost_usd: None,
+        usage_kind: lattice_conversation::UsageCompleteness::Partial,
+        cost: None,
         key: k,
         origin: origin(),
         usage: Some(TokenUsage {
@@ -294,7 +295,8 @@ fn reply(k: ModelAttemptKey, count: usize) -> CompleteReply {
 
 fn stopped(k: ModelAttemptKey, cause: StopCause) -> AttemptStopped {
     AttemptStopped {
-        estimated_cost_usd: None,
+        usage_kind: lattice_conversation::UsageCompleteness::Partial,
+        cost: None,
         key: k,
         origin: origin(),
         usage: None,
@@ -1296,12 +1298,34 @@ fn keys_versions_and_encoding() {
         .unwrap(),
         r.index[&iid(1)]
     );
-    for cost in [None, Some(0.0), Some(0.125)] {
+    for (usage_kind, cost) in [
+        (UsageCompleteness::Partial, None),
+        (
+            UsageCompleteness::Complete,
+            Some(CostEstimate {
+                usd: 0.0,
+                exact: true,
+            }),
+        ),
+        (
+            UsageCompleteness::Partial,
+            Some(CostEstimate {
+                usd: 0.125,
+                exact: false,
+            }),
+        ),
+    ] {
         let mut node = r.nodes[&(sid(1), NodeId(2))].clone();
         let Node::Step { attempts, .. } = &mut node else {
             unreachable!()
         };
-        attempts[0].estimated_cost_usd = cost;
+        attempts[0].usage = Some(TokenUsage {
+            input: Some(10),
+            output: Some(2),
+            ..Default::default()
+        });
+        attempts[0].usage_kind = usage_kind;
+        attempts[0].cost = cost;
         let bytes = encode(&node).unwrap();
         assert_eq!(decode::<Node>("nodes", "2", &bytes).unwrap(), node);
     }
@@ -1310,14 +1334,20 @@ fn keys_versions_and_encoding() {
         let Node::Step { attempts, .. } = &mut node else {
             unreachable!()
         };
-        attempts[0].estimated_cost_usd = Some(invalid_cost);
+        attempts[0].cost = Some(CostEstimate {
+            usd: invalid_cost,
+            exact: true,
+        });
         assert!(encode(&node).is_err());
     }
     let mut damaged = serde_json::to_value(&r.nodes[&(sid(1), NodeId(2))]).unwrap();
-    damaged["attempts"][0]["estimated_cost_usd"] = json!(-1.0);
+    damaged["attempts"][0]["cost"] = json!({"usd":-1.0,"exact":true});
     let mut bytes = VERSION.to_be_bytes().to_vec();
     bytes.extend(serde_json::to_vec(&damaged).unwrap());
-    assert!(decode::<Node>("nodes", "2", &bytes).is_err());
+    assert!(matches!(
+        decode::<Node>("nodes", "2", &bytes),
+        Err(StoreError::Corruption { .. })
+    ));
     for invalid in ["-1", "1.5", r#""many""#, "18446744073709551616"] {
         let mut damaged = serde_json::to_value(&r.nodes[&(sid(1), NodeId(2))]).unwrap();
         damaged["attempts"][0]["usage"]["input"] = json!(0);
@@ -1535,7 +1565,8 @@ fn progress_conclusions_and_stop_precedence() {
         );
     }
     let mut attempt = AttemptRecord {
-        estimated_cost_usd: None,
+        usage_kind: lattice_conversation::UsageCompleteness::Partial,
+        cost: None,
         origin: origin(),
         usage: None,
         progress: AttemptProgress::Sent,
@@ -1983,15 +2014,32 @@ fn attempt_sources_survive_retry_and_reopen() {
         reasoning: Some(9),
     };
     stop.usage = Some(usage);
-    stop.estimated_cost_usd = Some(0.125);
+    stop.cost = Some(CostEstimate {
+        usd: 0.125,
+        exact: false,
+    });
     db.stop_attempt(&lock, stop, now()).unwrap();
     db.start_request(&lock, key(tid(1), 0, 1), second.clone(), now())
         .unwrap();
     let turn = detail(&db);
     assert_eq!(turn.steps[0].attempts[0].usage, Some(usage));
-    assert_eq!(turn.steps[0].attempts[0].estimated_cost_usd, Some(0.125));
+    assert_eq!(
+        turn.steps[0].attempts[0].cost,
+        Some(CostEstimate {
+            usd: 0.125,
+            exact: false
+        })
+    );
+    assert_eq!(
+        turn.steps[0].attempts[0].usage_kind,
+        UsageCompleteness::Partial
+    );
+    assert_eq!(
+        turn.steps[0].attempts[1].usage_kind,
+        UsageCompleteness::Partial
+    );
     assert_eq!(turn.steps[0].attempts[1].usage, None);
-    assert_eq!(turn.steps[0].attempts[1].estimated_cost_usd, None);
+    assert_eq!(turn.steps[0].attempts[1].cost, None);
     let expected = [
         json!({"protocol":"chat-completions","provider_id":"edge-1"}),
         json!({"protocol":"anthropic-messages","provider_id":"edge-1"}),
@@ -2011,7 +2059,11 @@ fn attempt_sources_survive_retry_and_reopen() {
     let lock = db.try_lock_session(sid(1)).unwrap();
     let mut complete = reply(key(tid(1), 0, 1), 1);
     complete.usage = Some(usage);
-    complete.estimated_cost_usd = Some(0.25);
+    complete.usage_kind = UsageCompleteness::Complete;
+    complete.cost = Some(CostEstimate {
+        usd: 0.25,
+        exact: true,
+    });
     complete.origin = second;
     complete.message.provider_origin = Some(complete.origin.clone());
     let calls = db
@@ -2034,19 +2086,36 @@ fn attempt_sources_survive_retry_and_reopen() {
         .unwrap();
     let mut complete = reply(key(tid(1), 1, 0), 0);
     complete.usage = Some(TokenUsage::default());
-    complete.estimated_cost_usd = Some(0.0);
+    complete.cost = Some(CostEstimate {
+        usd: 0.0,
+        exact: true,
+    });
     complete.origin = third.clone();
     complete.message.provider_origin = Some(complete.origin.clone());
     db.close_step(&lock, CloseStep::Finish(complete), now())
         .unwrap();
     let final_detail = detail(&db);
     assert_eq!(
-        final_detail.steps[0].attempts[1].estimated_cost_usd,
-        Some(0.25)
+        final_detail.steps[0].attempts[1].cost,
+        Some(CostEstimate {
+            usd: 0.25,
+            exact: true
+        })
     );
+    assert_eq!(
+        final_detail.steps[0].attempts[1].usage_kind,
+        UsageCompleteness::Complete
+    );
+    assert_eq!(final_detail.usage.partial_attempts, 2);
     assert_eq!(final_detail.steps[1].attempts[0].usage, None);
-    assert_eq!(final_detail.usage.estimated_cost_usd.known, Some(0.375));
-    assert!(final_detail.usage.estimated_cost_usd.is_complete());
+    assert_eq!(
+        final_detail.usage.cost.known,
+        Some(CostEstimate {
+            usd: 0.375,
+            exact: false
+        })
+    );
+    assert!(final_detail.usage.cost.is_complete());
     let turn = detail(&db);
     assert_eq!(turn.summary.outcome, PublicTurnOutcome::Completed);
     assert_eq!(turn.steps[1].attempts[0].origin, third);
@@ -2296,7 +2365,10 @@ fn retries_usage_and_between_request_stops() {
     let t = detail(&db);
     assert_eq!(t.steps[0].attempts[2].retry_delay_ms, None);
     assert_eq!(node_at(&db, 2).retry_notices().unwrap().len(), 2);
-    assert_eq!(*t.usage, UsageSummary::from_attempts([(None, None); 3]));
+    assert_eq!(
+        *t.usage,
+        UsageSummary::from_attempts([(None, UsageCompleteness::Partial, None); 3])
+    );
     assert_eq!(
         t.summary.notice.unwrap(),
         Notice {
@@ -2361,7 +2433,7 @@ fn step_budget_reserves_and_closes_limit_node() {
     assert_eq!(t.usage.input.known, Some(64));
     assert_eq!(t.usage.output.known, Some(96));
     assert!(t.usage.input.is_complete());
-    assert_eq!(t.usage.estimated_cost_usd.unknown_attempts, 32);
+    assert_eq!(t.usage.cost.unknown_attempts, 32);
     drop(lock);
     drop(db);
     assert_eq!(detail(&SessionStore::open(&layout).unwrap()), t);

@@ -1627,13 +1627,13 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
                 );
                 assert_eq!(
                     before["usage"],
-                    json!({"attempts":2,"kind":"partial",
+                    json!({"attempts":2,"partial_attempts":2,"kind":"partial",
                         "input":{"known":11,"unknown_attempts":0,"overflowed":false},
                         "cache_read":{"known":null,"unknown_attempts":2,"overflowed":false},
                         "cache_write":{"known":null,"unknown_attempts":2,"overflowed":false},
                         "output":{"known":6,"unknown_attempts":0,"overflowed":false},
                         "reasoning":{"known":null,"unknown_attempts":2,"overflowed":false},
-                        "estimated_cost_usd":{"known":null,"unknown_attempts":2,"overflowed":false}})
+                        "cost":{"known":null,"unknown_attempts":2,"overflowed":false}})
                 );
             }
             if name == "nonretry" {

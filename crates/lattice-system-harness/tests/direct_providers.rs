@@ -129,11 +129,11 @@ fn with_usage(
     use serde_json::json;
     let usage = match provider.name {
         "openai" => NativeUsage::ChatCompletions(
-            json!({"prompt_tokens":100,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":60,"cache_creation_input_tokens":10},"completion_tokens_details":{"reasoning_tokens":5}}),
+            json!({"prompt_tokens":100,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":60,"cache_write_tokens":10},"completion_tokens_details":{"reasoning_tokens":5}}),
         ),
         "anthropic" => NativeUsage::Messages {
             start: json!({"input_tokens":30,"cache_read_input_tokens":60,"cache_creation_input_tokens":10}),
-            delta: json!({"output_tokens":20}),
+            delta: json!({"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":20}),
         },
         _ => NativeUsage::GenerateContent(
             json!({"promptTokenCount":90,"toolUsePromptTokenCount":10,"cachedContentTokenCount":60,"candidatesTokenCount":15,"thoughtsTokenCount":5}),
@@ -259,14 +259,17 @@ fn protocols_cache_and_usage_survive_tool_round_trip_and_backend_restart() {
                 let attempt = &step["attempts"][0];
                 let expected = serde_json::json!({"input":100,"cache_read":60,"cache_write":if provider.name=="gemini" {None} else {Some(10)},"output":20,"reasoning":if provider.name=="anthropic" {None} else {Some(5)}});
                 require(
-                    attempt["usage"] == expected && attempt["estimated_cost_usd"].is_null(),
+                    attempt["usage"] == expected
+                        && attempt["usage_kind"] == "partial"
+                        && attempt["cost"].is_null(),
                     format!("native usage normalized and saved: {attempt}"),
                 )?;
             }
             require(
-                saved["usage"]["input"]["known"] == 200
+                saved["usage"]["partial_attempts"] == 2
+                    && saved["usage"]["input"]["known"] == 200
                     && saved["usage"]["output"]["known"] == 40
-                    && saved["usage"]["estimated_cost_usd"]["unknown_attempts"] == 2,
+                    && saved["usage"]["cost"]["unknown_attempts"] == 2,
                 "two attempts aggregate with unknown fees",
             )?;
             for (index, capture) in captures.iter().enumerate() {

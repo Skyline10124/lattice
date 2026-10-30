@@ -1314,13 +1314,13 @@ fn wire_usage_distinguishes_present_absent_and_malformed_blocks() {
         (
             Protocol::GenerateContent,
             fixture("gemini_usage.json"),
-            serde_json::json!([811, null, null, 27, null]),
+            serde_json::json!([811, 0, null, 27, 0]),
         ),
         (
             Protocol::ChatCompletions,
             serde_json::json!({"usage":{
                 "prompt_tokens":1,"completion_tokens":2,"prompt_cache_hit_tokens":99,
-                "prompt_tokens_details":{"cached_tokens":0,"cache_creation_input_tokens":8},
+                "prompt_tokens_details":{"cached_tokens":0,"cache_creation_input_tokens":8,"cache_write_tokens":3},
                 "completion_tokens_details":{"reasoning_tokens":9}
             }}),
             serde_json::json!([1, 0, 8, 2, 9]),
@@ -1329,6 +1329,21 @@ fn wire_usage_distinguishes_present_absent_and_malformed_blocks() {
             Protocol::ChatCompletions,
             serde_json::json!({"usage":{"prompt_cache_hit_tokens":7}}),
             serde_json::json!([null, 7, null, null, null]),
+        ),
+        (
+            Protocol::ChatCompletions,
+            serde_json::json!({"usage":{"prompt_tokens":10,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":2,"cache_write_tokens":3}}}),
+            serde_json::json!([10, 2, 3, 1, null]),
+        ),
+        (
+            Protocol::ChatCompletions,
+            serde_json::json!({"usage":{"prompt_tokens_details":{"cache_write_tokens":0}}}),
+            serde_json::json!([null, null, 0, null, null]),
+        ),
+        (
+            Protocol::ChatCompletions,
+            serde_json::json!({"usage":{"prompt_tokens_details":{"cache_creation_input_tokens":0,"cache_write_tokens":9}}}),
+            serde_json::json!([null, null, 0, null, null]),
         ),
         (
             Protocol::Messages,
@@ -1348,7 +1363,7 @@ fn wire_usage_distinguishes_present_absent_and_malformed_blocks() {
         (
             Protocol::GenerateContent,
             serde_json::json!({"usageMetadata":{"toolUsePromptTokenCount":0,"thoughtsTokenCount":2}}),
-            serde_json::json!([0, null, null, 2, 2]),
+            serde_json::json!([null, 0, null, 2, 2]),
         ),
     ];
     for (protocol, wire, expected) in cases {
