@@ -199,7 +199,6 @@ mod tests {
             cache_read: Some(0.5),
             cache_write: Some(3.0),
             output: Some(10.0),
-            reasoning: Some(20.0),
         }
     }
 
@@ -389,16 +388,16 @@ mod tests {
                 Unknown,
             ),
             (
-                "reasoning price and count alone do not price a billed item",
+                "reasoning count alone does not price a billed item",
                 TokenUsage {
                     reasoning: Some(20),
                     ..Default::default()
                 },
                 Cost {
-                    reasoning: Some(20.0),
+                    output: Some(10.0),
                     ..Default::default()
                 },
-                Complete,
+                Partial,
                 Unknown,
             ),
             (
@@ -480,22 +479,6 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_prices_do_not_change_output_billing_or_completeness() {
-        for reasoning in [Some(20.0), None, Some(f64::NAN)] {
-            assert_estimate(
-                "reasoning ignored",
-                usage(),
-                &Cost {
-                    reasoning,
-                    ..prices()
-                },
-                Complete,
-                Exact(0.0028),
-            );
-        }
-    }
-
-    #[test]
     fn invalid_prices_for_billed_items_produce_unknown_cost() {
         for invalid in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             for field in 0..4 {
@@ -532,7 +515,6 @@ mod tests {
             output: Some(1.0),
             cache_read: Some(1.0),
             cache_write: Some(1.0),
-            ..Default::default()
         };
         assert_estimate(
             "maximal counts",

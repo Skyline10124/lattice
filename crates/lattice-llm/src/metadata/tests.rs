@@ -87,7 +87,7 @@ fn conversion_keeps_only_the_allowlist_and_preserves_raw_reasoning() {
             "id": "m", "name": "Model", "limit": {"context": 123, "output": 45},
             "reasoning": true, "reasoning_options": source["openai"]["models"]["m"]["reasoning_options"],
             "tool_call": false, "modalities": {"input": ["text", "image"]},
-            "cost": {"input": 1.0, "output": 2.0, "cache_read": 0.1, "cache_write": 3.0, "reasoning": 4.0},
+            "cost": {"input": 1.0, "output": 2.0, "cache_read": 0.1, "cache_write": 3.0},
             "status": "deprecated"
         }}}})
     );
@@ -282,8 +282,7 @@ fn handwritten_values_override_individual_fields_and_can_define_models_alone() {
             input: Some(1.0),
             output: Some(0.0),
             cache_read: Some(3.0),
-            cache_write: Some(7.0),
-            reasoning: Some(5.0)
+            cache_write: Some(7.0)
         })
     );
     assert_eq!(m.effort, Some(vec![Effort::Off, Effort::High]));
@@ -310,8 +309,7 @@ fn handwritten_values_override_individual_fields_and_can_define_models_alone() {
             input: Some(8.0),
             output: Some(2.0),
             cache_read: Some(9.0),
-            cache_write: Some(4.0),
-            reasoning: None
+            cache_write: Some(4.0)
         })
     );
     assert_eq!(n.tool_call, Some(true));
