@@ -175,14 +175,15 @@ impl SessionApi {
 /// 歧义诊断最多列出的会话数。
 const AMBIGUOUS_LIMIT: usize = 5;
 
-/// 精确身份优先；否则在同一读事务里按前缀做一次范围读取。只看身份键，不读会话记录。
+/// 精确身份优先；否则在同一读事务里按前缀做一次范围读取。两条路径都只读身份键，不解码会话记录。
 fn resolve_session_id(read: &SessionRead, prefix: &str) -> Result<SessionId> {
     let prefix = prefix.trim();
     if prefix.is_empty() {
         return Err(ApiError::BadRequest("session ID must not be empty".into()));
     }
+    // 完整身份按规范形式只做键查找；同长度的其他键不可能以它为前缀。
     if let Ok(id) = SessionId::parse(prefix)
-        && read.find_session(id)?.is_some()
+        && read.session_ids_with_prefix(&id.to_string(), 1)? == [id]
     {
         return Ok(id);
     }
