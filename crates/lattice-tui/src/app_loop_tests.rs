@@ -1396,7 +1396,7 @@ async fn metering_waits_for_position_and_counts_retries_and_steps_once() {
             .await;
         let live_usage = live.usage.unwrap();
         assert_eq!(live_usage.input.known, Some(100));
-        assert_eq!(live_usage.input.unknown_attempts, 1);
+        assert!(!live_usage.input.complete);
         assert_eq!(live_usage.partial_attempts, 2);
         let continued = || {
             retry()
@@ -1416,9 +1416,9 @@ async fn metering_waits_for_position_and_counts_retries_and_steps_once() {
         ]);
         let before_repeat = remote
             .wait(|f| {
-                f.usage
-                    .as_ref()
-                    .is_some_and(|u| u.attempts == 3 && u.input.unknown_attempts == 1)
+                f.usage.as_ref().is_some_and(|u| {
+                    u.attempts == 3 && u.partial_attempts == 2 && u.input.known == Some(1000)
+                })
             })
             .await;
         // 同一视图流中的后续文字已绘出，才能证明重复条目已经被消费。
@@ -1456,7 +1456,9 @@ async fn metering_waits_for_position_and_counts_retries_and_steps_once() {
         let closed = remote
             .wait(|f| {
                 f.phase == TurnPhase::Idle
-                    && f.usage.as_ref().is_some_and(|u| u.input.is_complete())
+                    && f.usage.as_ref().is_some_and(|u| {
+                        u.partial_attempts == 1 && u.input.known == Some(2000) && u.input.complete
+                    })
             })
             .await;
         let usage = closed.usage.as_ref().unwrap();
@@ -1465,6 +1467,7 @@ async fn metering_waits_for_position_and_counts_retries_and_steps_once() {
         assert_eq!(usage.output.known, Some(200));
         assert_eq!(usage.cache_read.known, Some(900));
         assert_eq!(usage.partial_attempts, 1);
+        assert!(closed.statusline.contains("缓存 45%"));
         let cost = usage.cost.known.unwrap();
         assert!((cost.usd - 0.07).abs() < 1e-12);
         assert!(!cost.exact);

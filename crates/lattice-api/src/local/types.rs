@@ -5,8 +5,8 @@ pub use crate::models::ModelCandidates;
 pub use crate::turn::{TextSegment, TurnRef};
 pub use lancet_protocol::{InvocationId, ModelAttemptKey, SessionId, TurnId};
 pub use lattice_conversation::{
-    CostEstimate, MetricSummary, ResultPayload, StepContent, StoredToolResult, SuccessContent,
-    UsageCompleteness,
+    CostEstimate, CostSummary, ResultPayload, StepContent, StoredToolResult, SuccessContent,
+    TokenSummary, UsageCompleteness,
 };
 pub use lattice_llm::auth::{AuthState, AuthStatus, ProviderAuthStatus};
 pub use lattice_session::store::{

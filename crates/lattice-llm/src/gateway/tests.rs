@@ -521,25 +521,28 @@ async fn finished_without_usage_keeps_cost_unknown_without_reading_prices() {
 async fn finished_cost_compares_chat_alias_zero_and_gemini_final_usage() {
     use serde_json::json;
     tokio::time::timeout(Duration::from_secs(10), async {
-        for (name, protocol, frame, prices, expected, amount, kind) in [
+        for (name, protocol, frame, prices, expected, amount, kind, complete) in [
             ("chat explicit write zero without price", "chat-completions",
                 json!({"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1000,"completion_tokens":100,"prompt_tokens_details":{"cached_tokens":200,"cache_write_tokens":0},"completion_tokens_details":{"reasoning_tokens":20}}}),
-                "input = 2\noutput = 10\ncache_read = 0.5\n", json!([1000,200,0,100,20]), 0.0027, UsageCompleteness::Complete),
+                "input = 2\noutput = 10\ncache_read = 0.5\n", json!([1000,200,0,100,20]), 0.0027, UsageCompleteness::Complete, true),
             ("gemini omitted read with price", "generate-content",
                 json!({"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1000,"candidatesTokenCount":100}}),
-                "input = 2\noutput = 10\ncache_read = 0.5\n", json!([1000,0,null,100,0]), 0.003, UsageCompleteness::Complete),
+                "input = 2\noutput = 10\ncache_read = 0.5\n", json!([1000,0,null,100,0]), 0.003, UsageCompleteness::Complete, true),
             ("gemini omitted read without price", "generate-content",
                 json!({"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1000,"candidatesTokenCount":100}}),
-                "input = 2\noutput = 10\n", json!([1000,0,null,100,0]), 0.003, UsageCompleteness::Complete),
+                "input = 2\noutput = 10\n", json!([1000,0,null,100,0]), 0.003, UsageCompleteness::Complete, true),
             ("gemini missing prompt", "generate-content",
                 json!({"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"candidatesTokenCount":5}}),
-                "input = 2\noutput = 10\n", json!([null,0,null,5,0]), 0.00005, UsageCompleteness::Partial),
+                "input = 2\noutput = 10\n", json!([null,0,null,5,0]), 0.00005, UsageCompleteness::Partial, true),
             ("gemini thoughts exhaust output budget", "generate-content",
                 json!({"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":10,"thoughtsTokenCount":4}}),
-                "input = 2\noutput = 10\n", json!([10,0,null,4,4]), 0.00006, UsageCompleteness::Complete),
+                "input = 2\noutput = 10\n", json!([10,0,null,4,4]), 0.00006, UsageCompleteness::Complete, true),
             ("gemini candidate safety", "generate-content",
                 json!({"candidates":[{"finishReason":"SAFETY"}],"usageMetadata":{"promptTokenCount":10,"totalTokenCount":10}}),
-                "input = 2\noutput = 10\n", json!([10,0,null,0,0]), 0.00002, UsageCompleteness::Complete),
+                "input = 2\noutput = 10\n", json!([10,0,null,0,0]), 0.00002, UsageCompleteness::Complete, true),
+            ("gemini interrupted thoughts without candidates", "generate-content",
+                json!({"usageMetadata":{"promptTokenCount":10,"thoughtsTokenCount":4}}),
+                "input = 2\noutput = 10\n", json!([10,null,null,null,4]), 0.00002, UsageCompleteness::Partial, false),
         ] {
             let server = Server::start(false).await;
             let directory = private_dir();
@@ -552,7 +555,12 @@ async fn finished_cost_compares_chat_alias_zero_and_gemini_final_usage() {
             let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
             let stream = gateway.open_turn().stream_chat(request("test"), StreamControl::default()).await.unwrap();
             let events = stream.collect::<Vec<_>>().await;
-            let Some(LlmEvent::Finished { outcome: ReplyOutcome::Complete { .. }, report }) = events.last() else { panic!("{name}: {events:?}") };
+            let Some(LlmEvent::Finished { outcome, report }) = events.last() else { panic!("{name}: {events:?}") };
+            if complete {
+                assert!(matches!(outcome, ReplyOutcome::Complete { .. }), "{name}: {outcome:?}");
+            } else {
+                assert!(matches!(outcome, ReplyOutcome::Interrupted { reason: crate::ReplyStop::Stream(crate::StreamStop::UnexpectedEof) }), "{name}: {outcome:?}");
+            }
             let usage = serde_json::to_value(report.usage.unwrap()).unwrap();
             assert_eq!(json!([usage["input"],usage["cache_read"],usage["cache_write"],usage["output"],usage["reasoning"]]), expected, "{name}");
             assert_eq!(report.usage_kind, kind, "{name}");

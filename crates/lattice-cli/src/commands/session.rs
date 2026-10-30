@@ -349,8 +349,8 @@ fn render_usage_values(usage: &lattice_api::local::UsageSummary) -> String {
         &usage.output,
         &usage.reasoning,
     ]
-    .map(|metric| render_metric(metric, |value| value.to_string()));
-    let cost = render_metric(&usage.cost, |value| {
+    .map(|metric| render_metric(metric.known, metric.overflowed, |value| value.to_string()));
+    let cost = render_metric(usage.cost.known, usage.cost.overflowed, |value| {
         format!("{}${:.2}", if value.exact { "" } else { "≈" }, value.usd)
     });
     let completeness = if usage.kind == lattice_api::local::UsageCompleteness::Partial {
@@ -366,14 +366,15 @@ fn render_usage_values(usage: &lattice_api::local::UsageSummary) -> String {
 }
 
 fn render_metric<T: Copy>(
-    metric: &lattice_api::local::MetricSummary<T>,
+    known: Option<T>,
+    overflowed: bool,
     format_value: impl FnOnce(T) -> String,
 ) -> String {
-    let Some(known) = metric.known else {
+    let Some(known) = known else {
         return "-".into();
     };
     let mut value = format_value(known);
-    if metric.overflowed {
+    if overflowed {
         value.push_str(" (overflow)");
     }
     value
@@ -468,9 +469,9 @@ mod session_cli {
     #[test]
     fn saturated_usage_is_not_presented_as_an_exact_total() {
         let mut usage = lattice_api::UsageSummary::from_attempts([]);
-        usage.input = lattice_api::local::MetricSummary {
+        usage.input = lattice_api::local::TokenSummary {
             known: Some(u64::MAX),
-            unknown_attempts: 0,
+            complete: false,
             overflowed: true,
         };
         usage.kind = UsageCompleteness::Partial;

@@ -56,4 +56,6 @@ pub use tool_call::{
     ArgumentsDigestMismatch, BoundToolCall, RawToolCall, ToolCallValidation, UnboundToolCall,
     validate_tool_call_batch,
 };
-pub use usage::{CostEstimate, MetricSummary, TokenUsage, UsageCompleteness, UsageSummary};
+pub use usage::{
+    CostEstimate, CostSummary, TokenSummary, TokenUsage, UsageCompleteness, UsageSummary,
+};

@@ -330,7 +330,7 @@ Chat Completions 中，模型的 `reasoning_options` 含 toggle 项且 `thinking
 - 计数保存为逐项可选的 `u64`；字段为非 null 即为已报告，明确的 0 也算；缺失或 null 为未报告。全部未报告时整份用量为未知，generateContent 完成时按下述例外处理。字段类型或数值范围错误仍为 `MalformedUsage`。
 - Chat Completions 两种缓存读字段同时存在时，优先 `prompt_tokens_details.cached_tokens`，否则取 `prompt_cache_hit_tokens`；缓存写优先 `prompt_tokens_details.cache_creation_input_tokens`，否则取 `prompt_tokens_details.cache_write_tokens`。优先字段明确为 0 时也不取别名，各项只计一次。输入与缓存分项、输出与推理分项之间不校验大小关系，不因 provider 报告不自洽而拒绝或丢弃计数。
 - 流中保存本次尝试的原生累计分项，再按表换算。后续事件缺失或 null 的字段保留此前已知值，明确的 0 可以覆盖；重复累计报告不相加。Messages 的 `message_start` 与 `message_delta` 对三个输入字段 `input_tokens`、`cache_read_input_tokens`、`cache_creation_input_tokens` 使用同一例外：已有值时收到 0 保留旧值，旧值缺失时收到 0 则保存 0，正数覆盖旧值；`output_tokens` 仍按最新值覆盖。后续解析失败或尝试停止时仍交付此前已知的快照。
-- 求和的项中有一项缺失时，和按已有的项计算；全部缺失时为未知。
+- Messages input 的基础项是 `input_tokens`，generateContent input 与 output 的基础项分别是 `promptTokenCount`、`candidatesTokenCount`。基础项缺失时和为未知；基础项已知时，加上其余已报告的分项。
 - generateContent 完成时，若本次尝试的 `usageMetadata` 至少有一个非 null 字段，则在累积快照上把缺失的 `candidatesTokenCount`、`cachedContentTokenCount`、`thoughtsTokenCount`、`toolUsePromptTokenCount` 按 0 处理；`promptTokenCount` 缺失仍使 `input` 为未知，`output` 为 candidates 与 thoughts 之和，`cache_write` 始终未报告。流式只在候选的 `finishReason` 分支执行这次最终映射，完整 wire 入口使用同一映射；逐块更新和无 `finishReason` 的中断不补零。没有收到过含非 null 字段的 `usageMetadata`（缺失、null、`{}` 或仅含 null）时整份用量仍为未知。
 - Interactions 的 `total_output_tokens` 是否含推理，Google 文档没有写明；表中按不含处理，实现时用真实响应核对，结论写回本表。
 

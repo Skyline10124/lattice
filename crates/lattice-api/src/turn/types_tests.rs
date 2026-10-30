@@ -77,7 +77,7 @@ fn terminal_events_round_trip_the_persistent_summary_and_step() {
 }
 
 #[test]
-fn usage_summary_preserves_totals_and_unknown_attempts() {
+fn usage_summary_preserves_token_totals_and_unknown_costs() {
     let summary = UsageSummary::from_attempts(
         [(
             Some(lattice_conversation::TokenUsage {
@@ -95,8 +95,15 @@ fn usage_summary_preserves_totals_and_unknown_attempts() {
         )),
     );
     let value = serde_json::to_value(&summary).unwrap();
-    assert_eq!(value["input"]["known"], 1);
-    assert_eq!(value["input"]["unknown_attempts"], 2);
+    assert_eq!(
+        value["input"],
+        serde_json::json!({"known":1,"complete":false,"overflowed":false})
+    );
+    assert_eq!(value["partial_attempts"], 3);
+    assert_eq!(
+        value["cost"],
+        serde_json::json!({"known":null,"unknown_attempts":3,"overflowed":false})
+    );
     assert_eq!(
         serde_json::from_value::<UsageSummary>(value).unwrap(),
         summary
