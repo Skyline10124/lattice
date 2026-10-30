@@ -4,7 +4,7 @@
 use super::*;
 use super::{codec::*, local::Selection};
 use lancet_protocol::{InvocationId, ModelAttemptKey};
-use lattice_conversation::ToolResultOutcome;
+use lattice_conversation::{CostEstimate, TokenUsage, ToolResultOutcome, UsageCompleteness};
 use lattice_store::ProjectStoreKey;
 use redb::ReadableTable;
 
@@ -69,14 +69,14 @@ struct UsageNode {
 
 #[derive(serde::Deserialize)]
 struct UsageAttempt {
-    usage: Option<lattice_conversation::TokenUsage>,
-    #[serde(with = "lattice_conversation::usage::estimated_cost_usd")]
-    estimated_cost_usd: Option<f64>,
+    usage: Option<TokenUsage>,
+    usage_kind: UsageCompleteness,
+    cost: Option<CostEstimate>,
 }
 
 impl UsageAttempt {
-    fn metering(&self) -> (Option<lattice_conversation::TokenUsage>, Option<f64>) {
-        (self.usage, self.estimated_cost_usd)
+    fn metering(&self) -> (Option<TokenUsage>, UsageCompleteness, Option<CostEstimate>) {
+        (self.usage, self.usage_kind, self.cost)
     }
 }
 
@@ -180,7 +180,8 @@ fn attempt(
         attempt: index as u32,
         origin: a.origin.clone(),
         usage: a.usage,
-        estimated_cost_usd: a.estimated_cost_usd,
+        usage_kind: a.usage_kind,
+        cost: a.cost,
         progress,
         end,
         retry_delay_ms: a.retry_delay_ms,

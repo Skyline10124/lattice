@@ -348,7 +348,8 @@ mod tests {
             .register_calls(
                 &lock,
                 CompleteReply {
-                    estimated_cost_usd: None,
+                    usage_kind: lattice_conversation::UsageCompleteness::Partial,
+                    cost: None,
                     key,
                     origin,
                     usage: None,

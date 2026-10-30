@@ -129,11 +129,11 @@ fn with_usage(
     use serde_json::json;
     let usage = match provider.name {
         "openai" => NativeUsage::ChatCompletions(
-            json!({"prompt_tokens":100,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":60,"cache_creation_input_tokens":10},"completion_tokens_details":{"reasoning_tokens":5}}),
+            json!({"prompt_tokens":100,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":60,"cache_write_tokens":10},"completion_tokens_details":{"reasoning_tokens":5}}),
         ),
         "anthropic" => NativeUsage::Messages {
             start: json!({"input_tokens":30,"cache_read_input_tokens":60,"cache_creation_input_tokens":10}),
-            delta: json!({"output_tokens":20}),
+            delta: json!({"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":20}),
         },
         _ => NativeUsage::GenerateContent(
             json!({"promptTokenCount":90,"toolUsePromptTokenCount":10,"cachedContentTokenCount":60,"candidatesTokenCount":15,"thoughtsTokenCount":5}),
@@ -204,7 +204,12 @@ fn protocols_cache_and_usage_survive_tool_round_trip_and_backend_restart() {
         };
         let configuration = world.home().join(".lattice/providers.toml");
         let source = std::fs::read_to_string(&configuration).unwrap();
-        std::fs::write(&configuration, format!("{source}\n[providers.{id}.models.\"{}\".cost]\ninput = 2\noutput = 10\ncache_read = 0.5\ncache_write = 3\n", provider.fixture.model)).unwrap();
+        let write_price = if provider.name == "gemini" {
+            ""
+        } else {
+            "cache_write = 3\n"
+        };
+        std::fs::write(&configuration, format!("{source}\n[providers.{id}.models.\"{}\".cost]\ninput = 2\noutput = 10\ncache_read = 0.5\n{write_price}", provider.fixture.model)).unwrap();
         if provider.name == "anthropic" {
             let cache = world.home().join(".lattice/cache");
             std::fs::create_dir_all(&cache).unwrap();
@@ -271,17 +276,22 @@ fn protocols_cache_and_usage_survive_tool_round_trip_and_backend_restart() {
                 };
                 require(
                     attempt["usage"] == expected
-                        && attempt["estimated_cost_usd"]
+                        && attempt["usage_kind"] == "complete"
+                        && attempt["cost"]["exact"] == true
+                        && attempt["cost"]["usd"]
                             .as_f64()
                             .is_some_and(|fee| (fee - expected_fee).abs() < 1e-15),
                     format!("native usage normalized and saved: {attempt}"),
                 )?;
             }
             require(
-                saved["usage"]["input"]["known"] == 200
+                saved["usage"]["partial_attempts"] == 0
+                    && saved["usage"]["kind"] == "complete"
+                    && saved["usage"]["input"]["known"] == 200
                     && saved["usage"]["output"]["known"] == 40
-                    && saved["usage"]["estimated_cost_usd"]["unknown_attempts"] == 0,
-                "two attempts aggregate with known fees",
+                    && saved["usage"]["cost"]["known"]["exact"] == true
+                    && saved["usage"]["cost"]["unknown_attempts"] == 0,
+                "two complete attempts aggregate with exact fees",
             )?;
             for (index, capture) in captures.iter().enumerate() {
                 let paths = match provider.name {

@@ -923,7 +923,8 @@ async fn slow_observer_reads_latest_entries_suffixes_and_attempt_boundaries() {
         matches!(batch.as_slice(), [ViewUpdate::Text(TextUpdate { offset: 6, segments, .. })] if segments == &[TextSegment::Text { text: "！".into() }])
     );
     io.stop_attempt(AttemptStopped {
-        estimated_cost_usd: None,
+        usage_kind: lattice_conversation::UsageCompleteness::Partial,
+        cost: None,
         key,
         origin: attempt_origin.clone(),
         usage: None,
@@ -975,7 +976,8 @@ async fn slow_observer_reads_latest_entries_suffixes_and_attempt_boundaries() {
     // 关闭已提交但变化尚未标记，初次推送必须读到最终节点，旧尝试的文字不能复活。
     let simultaneous = sink.register();
     io.stop_attempt(AttemptStopped {
-        estimated_cost_usd: None,
+        usage_kind: lattice_conversation::UsageCompleteness::Partial,
+        cost: None,
         key,
         origin: attempt_origin.clone(),
         usage: None,

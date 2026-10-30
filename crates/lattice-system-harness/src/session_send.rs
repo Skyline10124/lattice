@@ -524,15 +524,17 @@ fn step_detail(value: &Value) -> Result<(Vec<AttemptState>, Vec<Slot>), String> 
         let origin = &attempt["origin"];
         validate_replay_origin(origin)?;
         usage(attempt.get("usage").ok_or("missing usage")?)?;
-        let cost = attempt
-            .get("estimated_cost_usd")
-            .ok_or("missing estimated_cost_usd")?;
+        if !matches!(string(attempt, "usage_kind")?, "complete" | "partial") {
+            return Err("invalid usage_kind".into());
+        }
+        let cost = attempt.get("cost").ok_or("missing cost")?;
         if !cost.is_null()
-            && !cost
+            && (!cost["usd"]
                 .as_f64()
                 .is_some_and(|value| value.is_finite() && value >= 0.0)
+                || !cost["exact"].is_boolean())
         {
-            return Err("invalid estimated_cost_usd".into());
+            return Err("invalid cost".into());
         }
         attempts.push(match string(&attempt["progress"], "progress")? {
             "sent" => AttemptState::Sent,

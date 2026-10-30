@@ -235,7 +235,7 @@ feature 由协议适配器的代码定义，配置只能在已有取值中选择
 
 - profile 的 `[agent].model`、CLI 的 `--model` 与 TUI 的选择都写作 `<provider>/<model>`。在第一个 `/` 处拆分；provider 部分按 `id` 规则校验，模型部分非空、最长 4,096 字节、不含控制字符。
 - 没有别名，也没有默认模型。profile 没有写模型、会话也没有选择时，提交在接受前按配置错误拒绝。
-- provider 不存在时按配置错误拒绝，说明列出可用的 provider。模型不在元数据中时照常使用，只是没有价格与推理档位。
+- provider 不存在时按配置错误拒绝，说明列出可用的 provider。模型不在元数据中时照常使用，只是没有价格与推理档位，费用为未知。
 
 ### 元数据的来源与合并
 
@@ -306,7 +306,7 @@ Chat Completions 中，模型的 `reasoning_options` 含 toggle 项且 `thinking
 
 ### 用量换算
 
-每次尝试的用量按统一口径保存，各项都可以缺失；provider 没有报告的项为未知，不记为 0：
+每次尝试的用量按统一口径保存，各项都可以缺失；provider 没有报告的项为未报告，不记为 0。generateContent 在完成时有补零规则，见表后说明；未报告项是否使尝试的用量不全，由[用量与价格表的比对](#用量与价格表的比对)决定：
 
 | 项 | 含义 |
 | --- | --- |
@@ -318,16 +318,17 @@ Chat Completions 中，模型的 `reasoning_options` 含 toggle 项且 `thinking
 
 | 协议 | `input` | `cache_read` | `cache_write` | `output` | `reasoning` |
 | --- | --- | --- | --- | --- | --- |
-| Chat Completions | `prompt_tokens` | `prompt_tokens_details.cached_tokens`；DeepSeek 为 `prompt_cache_hit_tokens` | `prompt_tokens_details.cache_creation_input_tokens` | `completion_tokens` | `completion_tokens_details.reasoning_tokens` |
+| Chat Completions | `prompt_tokens` | `prompt_tokens_details.cached_tokens`；DeepSeek 为 `prompt_cache_hit_tokens` | `prompt_tokens_details.cache_creation_input_tokens`；OpenAI 原生与 OpenRouter 的 `prompt_tokens_details.cache_write_tokens` 也接收，两者都有时取前者 | `completion_tokens` | `completion_tokens_details.reasoning_tokens` |
 | Responses | `input_tokens` | `input_tokens_details.cached_tokens` | — | `output_tokens` | `output_tokens_details.reasoning_tokens` |
 | Anthropic Messages | `input_tokens` + `cache_creation_input_tokens` + `cache_read_input_tokens` | `cache_read_input_tokens` | `cache_creation_input_tokens` | `output_tokens` | — |
 | generateContent | `promptTokenCount` + `toolUsePromptTokenCount` | `cachedContentTokenCount` | — | `candidatesTokenCount` + `thoughtsTokenCount` | `thoughtsTokenCount` |
 | Interactions | `total_input_tokens` + `total_tool_use_tokens` | `total_cached_tokens` | — | `total_output_tokens` + `total_thought_tokens` | `total_thought_tokens` |
 
-- 计数保存为逐项可选的 `u64`；缺失或 null 为未知，明确报告的 0 保留为 0，全部未知时整份用量为未知。字段类型或数值范围错误仍为 `MalformedUsage`。
-- Chat Completions 两种缓存读字段同时存在时，优先 `prompt_tokens_details.cached_tokens`，否则取 `prompt_cache_hit_tokens`；只计一次。输入与缓存分项、输出与推理分项之间不校验大小关系，不因 provider 报告不自洽而拒绝或丢弃计数。
-- 流中保存本次尝试的原生累计分项，再按表换算。后续事件缺失或 null 的字段保留此前已知值，明确的 0 可以覆盖；重复累计报告不相加。后续解析失败或尝试停止时仍交付此前已知的快照。
+- 计数保存为逐项可选的 `u64`；字段为非 null 即为已报告，明确的 0 也算；缺失或 null 为未报告。全部未报告时整份用量为未知，generateContent 完成时按下述例外处理。字段类型或数值范围错误仍为 `MalformedUsage`。
+- Chat Completions 两种缓存读字段同时存在时，优先 `prompt_tokens_details.cached_tokens`，否则取 `prompt_cache_hit_tokens`；缓存写优先 `prompt_tokens_details.cache_creation_input_tokens`，否则取 `prompt_tokens_details.cache_write_tokens`。优先字段明确为 0 时也不取别名，各项只计一次。输入与缓存分项、输出与推理分项之间不校验大小关系，不因 provider 报告不自洽而拒绝或丢弃计数。
+- 流中保存本次尝试的原生累计分项，再按表换算。后续事件缺失或 null 的字段保留此前已知值，明确的 0 可以覆盖；重复累计报告不相加。Messages 的 `message_start` 与 `message_delta` 对三个输入字段 `input_tokens`、`cache_read_input_tokens`、`cache_creation_input_tokens` 使用同一例外：已有值时收到 0 保留旧值，旧值缺失时收到 0 则保存 0，正数覆盖旧值；`output_tokens` 仍按最新值覆盖。后续解析失败或尝试停止时仍交付此前已知的快照。
 - 求和的项中有一项缺失时，和按已有的项计算；全部缺失时为未知。
+- generateContent 完成时，若本次尝试的 `usageMetadata` 至少有一个非 null 字段，则在累积快照上把缺失的 `candidatesTokenCount`、`cachedContentTokenCount`、`thoughtsTokenCount`、`toolUsePromptTokenCount` 按 0 处理；`promptTokenCount` 缺失仍使 `input` 为未知，`output` 为 candidates 与 thoughts 之和，`cache_write` 始终未报告。流式只在候选的 `finishReason` 分支执行这次最终映射，完整 wire 入口使用同一映射；逐块更新和无 `finishReason` 的中断不补零。没有收到过含非 null 字段的 `usageMetadata`（缺失、null、`{}` 或仅含 null）时整份用量仍为未知。
 - Interactions 的 `total_output_tokens` 是否含推理，Google 文档没有写明；表中按不含处理，实现时用真实响应核对，结论写回本表。
 
 ### 缓存的开启与检测
@@ -345,26 +346,43 @@ Chat Completions 中，模型的 `reasoning_options` 含 toggle 项且 `thinking
 
 ### 费用估算
 
-每次请求结束时，请求网关在交付终态报告前，按这次请求固定的 provider 与模型标识重读当前有效价格，估算这次尝试的费用，随用量交给调用方，保存在这次尝试上，标为估算。取价沿用[元数据的来源与合并](#元数据的来源与合并)，本地文件读取放在阻塞执行边界。存下的是当时的估算值，之后价格变化（包括在 `providers.toml` 中修正）不回头修改旧记录。价格是美元每百万 token：
+每次请求结束时，请求网关在交付终态报告前，按这次请求固定的 provider 与模型标识重读当前有效价格，与用量比对后计算费用，随终态报告一次性交给调用方，保存在这次尝试上。取价沿用[元数据的来源与合并](#元数据的来源与合并)，本地文件读取放在阻塞执行边界。读取记录时不重新比对或计算；之后价格变化（包括在 `providers.toml` 中修正）不回头修改旧记录。
+
+价格单位是美元每百万 token。只有计数已报告且对应单价存在的项计入金额，不借用其他项的单价。先判模型是否完全无价（没有 `cost` 或五项价格全缺失），完全无价时费用为未知；否则使用下式，缺失计数仅在公式内按 0：
 
 ```text
-未命中输入 = max(0, input − cache_read − cache_write)（缓存与推理计数缺失时仅在公式内按 0）
+未命中输入 = max(0, input − cache_read − cache_write)
 费用（美元）= ( 未命中输入 × cost.input
-             + cache_read × (cost.cache_read，没有时用 cost.input)
-             + cache_write × (cost.cache_write，没有时用 cost.input)
-             + max(0, output − reasoning) × cost.output
-             + reasoning × (cost.reasoning，没有时用 cost.output)
+             + cache_read × cost.cache_read
+             + cache_write × cost.cache_write
+             + output × cost.output
              ) ÷ 1,000,000
 ```
 
-- 估算值以 `f64` 美元保存，必须有限且非负，保存时不按美分舍入。
-- 格式化的费用展示以 `≈$` 标明估算，金额固定两位小数；先合计原始金额，再在显示时按一美分舍入，小额不增加位数。JSON 与结构化详情中的数值保留原值。
-- `input` 或 `output` 未知、或模型没有 `cost.input` 与 `cost.output` 时，这次尝试没有费用。
-- 基础单价与已提供的缓存、推理单价必须有限且非负，明确的 0 有效；专价只有缺失时才回退。任一单价无效或计算结果超出有限金额范围时，费用未知。计费差额钳到 0，原始用量保持不变，计算不得下溢或溢出崩溃。
-- 完整回复与已报告用量的停止、失败、批次拒绝使用同一估算规则。结束时配置读取失败或无法取得有效价格时，费用未知，保留用量、正文与真实结局，只记录脱敏诊断；不回退到请求开始时的价格，不因估价失败重试模型。
-- 一轮的费用是各尝试之和；有尝试没有费用时，一轮的费用标为部分。
-- 按上下文长度分档的价格（models.dev 的 `tiers`、`context_over_200k`）不计入，所以是估算。
-- 费用只按模型价格计算，不因 provider 或认证方式区别；`chatgpt` 的模型取 `openai` 条目的价格，同样显示。
+- reasoning 始终包含在 output 中，统一按 `cost.output` 计费；`cost.reasoning` 不参与计算、完整性或确切性判定。
+- 费用结果保存为可选的 `cost: CostEstimate { usd, exact }`：`usd` 以 `f64` 美元保存，编码与解码均要求有限且非负，保存时不按美分舍入。
+- 格式化的费用展示按 `exact` 区分：确切金额（`exact=true`）显示 `$x.xx`，估算金额（`exact=false`）显示 `≈$x.xx`；`cost` 为 null 表示未知，不显示金额，也不显示 `$0`。金额固定两位小数，先合计原始金额，再在显示时按一美分舍入，小额不增加位数。JSON 与结构化详情中的数值保留原值。此前所有金额都带 `≈`，现在只有估算金额带此前缀。
+- 四项比对都确切时金额确切；有价无计数或计数大于 0 却无价时仍给出金额，标为估算。估算可能偏高也可能偏低：例如 input=1000，其中 800 为缓存读，input 价为 3、缓存读价为 0.3，完整费用为 `(200×3 + 800×0.3) / 1,000,000 = $0.00084`，缺缓存读计数时估算为 `1000×3 / 1,000,000 = $0.003`；缺缓存写计数时，写入 token 留在 input 中，而写入价通常更高（例如为 input 价的 1.25 倍），会少算。因此 `≈` 不承诺偏差方向。
+- 参与计价的四项中，已存在的单价必须有限且非负，明确的 0 有效。任一单价无效或计算结果超出有限金额范围时，费用未知。计费差额钳到 0，原始用量保持不变，计算不得下溢或溢出崩溃。
+- 完整回复与批次拒绝按同一公式计算。流中断（含取消、deadline、provider 错误）时用量强制为 partial；已有用量仍计算金额，但标为估算。没有用量时为 partial、费用未知，不读取价格。Sent 后执行者消失、EOF 时没有收到 Finished 的尝试也保留 partial、未知费用。
+- 结束时 provider 不存在、配置读取失败或无法取得有效价格时，费用未知，保留用量、正文与真实结局，只记录脱敏诊断；不回退到请求开始时的价格，不因估价失败重试模型。
+- 一轮与会话的费用都是各尝试已知金额之和。各次尝试均确切、没有未知且合计未溢出时，合计确切；有估算或未知尝试时，合计为估算，未知尝试不贡献金额，也不另加未计费注记；全部未知时合计为未知。
+- 按上下文长度分档的价格（models.dev 的 `tiers`、`context_over_200k`）不计入。费用只按模型价格计算，不因 provider 或认证方式区别；`chatgpt` 的模型取 `openai` 条目的价格，同样显示。
+
+#### 用量与价格表的比对
+
+比对项只有 input、output、cache_read、cache_write。价格表是请求结束时实际取得的 `cost`：`providers.toml` 按字段覆盖 models.dev 缓存，不可用时使用内置快照，不另维护按 provider 区分的比对表。每项按下表判定，用量不全只指有价无计数：
+
+| 价格 | 计数 | 用量完整性 | 费用 |
+| --- | --- | --- | --- |
+| 有 | 已报告（含 0） | complete | 计入，确切 |
+| 有 | 未报告 | partial | 该项按 0 计入，估算 |
+| 无 | 已报告且大于 0 | complete | 不计入该项，估算，不借用其他项单价 |
+| 无 | 已报告为 0 或未报告 | complete | 对此模型不存在，确切 |
+
+字段出现且非 null 即为已报告，明确的 0 也算；generateContent 只在[用量换算](#用量换算)规定的完成边界补零。reasoning 包含在 output 中，不单独比对；存在 `cost.reasoning` 也不使其成为独立项。
+
+模型完全无价且收到用量时，用量为 complete、费用未知；provider 不存在或配置读取失败时无法比对，用量为 partial、费用未知。整次尝试没有用量或流中断时，按上文的 partial 规则处理。比对结果保存在尝试的 `usage_kind` 中，与 `cost` 一起交付，读取时不重新判定。
 
 ## 凭据
 
@@ -479,7 +497,7 @@ Turn deadline 的范围由[会话合同](session.md#输入与传输限制)维护
 | provider 注册表：内置表与 `providers.toml` 的合并、严格解析、`chatgpt` 不能改写、非 loopback 必须 HTTPS | 同上 |
 | 元数据：来源的选择与按字段覆盖、只保留列出的字段、缓存保留 `providers.toml` 中的 `catalog` 条目、刷新失败继续使用上一份 | 同上 |
 | 档位：可用档位的推导、按 token 数的预算、各协议的映射、不支持的档位被拒绝 | 同上 |
-| 用量换算与费用估算，包括缺失项 | 同上 |
+| 用量换算与费用估算：与价格表比对得出 complete/partial 与确切/估算/未知，缺项不借用 input 价，显式 0 算已报告，generateContent 完成时补零、Messages 输入侧 delta-0、Chat 缓存写别名，以及格式错误与换算溢出 | 同上 |
 | `auth.json`：权限检查、原子写入、严格解析、凭据不进入日志与公开输出 | 同上 |
 | endpoint 与凭据来源的负向测试：项目目录中的 `providers.toml` 不被读取，环境变量与工作区 `.env` 既不能改变 endpoint、也不能提供 key | harness 的 fast 场景 |
 | SIWC 的本地逻辑：用注入的时钟与构造的短有效期 token 记录，核对剩余有效期短于余量（包括已经过期）时先刷新、有效期内不刷新，并发的请求只刷新一次，刷新失败按上文三类处理并写回 `auth.json`；回调的 `state` 与 `client_id` 校验，登录中途取消时关闭监听。不模拟 OpenAI 的授权服务 | `lattice-llm` 局部测试 |

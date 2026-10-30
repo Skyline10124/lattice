@@ -38,10 +38,10 @@ fn step(node: u64, ordinal: u64, progress: Value, summary: Option<Value>, reply:
     if reply.is_empty() {
         entry["content"]["reply"] = Value::Null;
     } else {
-        let attempt = json!({"origin":{"protocol":"chat-completions","provider_id":"primary"}, "usage":null,"estimated_cost_usd":null,
+        let attempt = json!({"origin":{"protocol":"chat-completions","provider_id":"primary"}, "usage":null,"usage_kind":"partial","cost":null,
             "progress":{"progress":"ended","end":{"end":"completed"},"diagnostic":null}, "retry_delay_ms":null});
         entry["content"]["attempts"] = json!([attempt]);
-        entry["step"]["attempts"] = json!([{"attempt":0,"origin":{"protocol":"chat-completions","provider_id":"primary"},"usage":null,"estimated_cost_usd":null,
+        entry["step"]["attempts"] = json!([{"attempt":0,"origin":{"protocol":"chat-completions","provider_id":"primary"},"usage":null,"usage_kind":"partial","cost":null,
             "progress":{"progress":"ended","end":{"end":"completed"},"diagnostic":null},
             "end":{"end":"completed","step":{"turn_id":"t","model_step_ordinal":ordinal}},"retry_delay_ms":null}]);
     }
@@ -501,7 +501,7 @@ fn view_state_appends_text_and_rejects_regression() {
 #[test]
 fn view_state_keeps_written_facts_and_allows_repeated_values() {
     let executing = json!({"progress":"executing"});
-    let attempt = json!({"attempt":0,"origin":{"protocol":"chat-completions","provider_id":"primary"},"usage":null,"estimated_cost_usd":null,
+    let attempt = json!({"attempt":0,"origin":{"protocol":"chat-completions","provider_id":"primary"},"usage":null,"usage_kind":"partial","cost":null,
         "progress":{"progress":"ended","end":{"end":"completed"},"diagnostic":null},
         "end":{"end":"completed","step":{"turn_id":"t","model_step_ordinal":0}},"retry_delay_ms":null});
     let slot = |id: &str, state: &str, outcome: &str| {
@@ -520,6 +520,21 @@ fn view_state_keeps_written_facts_and_allows_repeated_values() {
         slot("a", "terminal", "succeeded"),
         slot("b", "registered", "not_executed")
     ]);
+    for exact in [true, false] {
+        let mut metered = base.clone();
+        metered["step"]["attempts"][0]["usage_kind"] = json!("complete");
+        metered["step"]["attempts"][0]["cost"] = json!({"usd":0.125,"exact":exact});
+        assert!(parse_record(&metered).is_ok(), "{metered}");
+    }
+    for (field, value, error) in [
+        ("usage_kind", json!("unknown"), "invalid usage_kind"),
+        ("cost", json!({"usd":-1.0,"exact":true}), "invalid cost"),
+        ("cost", json!({"usd":0.0,"exact":"yes"}), "invalid cost"),
+    ] {
+        let mut invalid = base.clone();
+        invalid["step"]["attempts"][0][field] = value;
+        assert_eq!(parse_record(&invalid).unwrap_err(), error);
+    }
     let invalid_origins = [
         (json!(null), "`protocol` must be a string"),
         (json!("open_ai_compatible"), "`protocol` must be a string"),

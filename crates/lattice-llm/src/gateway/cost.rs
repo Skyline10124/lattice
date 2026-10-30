@@ -6,10 +6,28 @@
 use std::path::{Path, PathBuf};
 
 use futures::{StreamExt, stream};
+use lattice_conversation::{CostEstimate, UsageCompleteness};
 
 use crate::metadata::{Cost, Metadata};
 use crate::provider::config::ProviderRegistry;
-use crate::{LlmEvent, LlmStream, ModelTarget, TokenUsage};
+use crate::{LlmEvent, LlmStream, ModelTarget, ReplyOutcome, TokenUsage};
+
+#[derive(Debug, PartialEq)]
+enum Estimate {
+    Exact(f64),
+    Approx(f64),
+    Unknown,
+}
+
+impl Estimate {
+    fn into_cost(self) -> Option<CostEstimate> {
+        match self {
+            Self::Exact(usd) => Some(CostEstimate { usd, exact: true }),
+            Self::Approx(usd) => Some(CostEstimate { usd, exact: false }),
+            Self::Unknown => None,
+        }
+    }
+}
 
 pub(super) fn with_estimated_cost(
     input: LlmStream,
@@ -20,20 +38,28 @@ pub(super) fn with_estimated_cost(
         (input, directory, target),
         |(mut input, directory, target)| async move {
             let mut event = input.next().await?;
-            if let LlmEvent::Finished { report, .. } = &mut event
-                && let Some(usage) = report.usage
-            {
-                let directory = directory.clone();
-                let target = target.clone();
-                let estimate = tokio::task::spawn_blocking(move || {
-                    estimate_at_finish(&directory, &target, usage)
-                })
-                .await
-                .unwrap_or(Err("cost estimation task failed"));
-                match estimate {
-                    Ok(usd) => report.estimated_cost_usd = Some(usd),
-                    // 原始配置错误可能带有秘密；诊断只使用固定原因。
-                    Err(reason) => tracing::warn!(reason, "attempt cost estimate unavailable"),
+            if let LlmEvent::Finished { outcome, report } = &mut event {
+                let (kind, estimate) = if let Some(usage) = report.usage {
+                    let directory = directory.clone();
+                    let target = target.clone();
+                    let dispatch = tracing::dispatcher::get_default(Clone::clone);
+                    tokio::task::spawn_blocking(move || {
+                        tracing::dispatcher::with_default(&dispatch, || {
+                            estimate_at_finish(&directory, &target, usage)
+                        })
+                    })
+                    .await
+                    .unwrap_or_else(|_| unavailable("cost estimation task failed"))
+                } else {
+                    (UsageCompleteness::Partial, Estimate::Unknown)
+                };
+                report.usage_kind = kind;
+                report.cost = estimate.into_cost();
+                if matches!(outcome, ReplyOutcome::Interrupted { .. }) {
+                    report.usage_kind = UsageCompleteness::Partial;
+                    if let Some(cost) = &mut report.cost {
+                        cost.exact = false;
+                    }
                 }
             }
             Some((event, (input, directory, target)))
@@ -45,65 +71,122 @@ fn estimate_at_finish(
     directory: &Path,
     target: &ModelTarget,
     usage: TokenUsage,
-) -> Result<f64, &'static str> {
-    let registry = ProviderRegistry::load(directory.join("providers.toml"))
-        .map_err(|_| "provider configuration unavailable")?;
-    let provider = registry
-        .get(&target.provider)
-        .ok_or("provider unavailable")?;
+) -> (UsageCompleteness, Estimate) {
+    let registry = match ProviderRegistry::load(directory.join("providers.toml")) {
+        Ok(registry) => registry,
+        Err(_) => return unavailable("provider configuration unavailable"),
+    };
+    let Some(provider) = registry.get(&target.provider) else {
+        return unavailable("provider unavailable");
+    };
     let models = Metadata::load(directory).merge(provider);
-    let cost = models
+    let Some(cost) = models
         .get(&target.model)
         .and_then(|model| model.cost.as_ref())
-        .ok_or("model price unavailable")?;
+    else {
+        // 模型无价不影响已报告的用量完整性。
+        tracing::warn!(
+            reason = "model price unavailable",
+            "attempt cost estimate unavailable"
+        );
+        return (UsageCompleteness::Complete, Estimate::Unknown);
+    };
     estimate(usage, cost)
 }
 
-fn estimate(usage: TokenUsage, cost: &Cost) -> Result<f64, &'static str> {
-    let input = usage.input.ok_or("input usage unavailable")?;
-    let output = usage.output.ok_or("output usage unavailable")?;
-    let input_price = cost.input.ok_or("input price unavailable")?;
-    let output_price = cost.output.ok_or("output price unavailable")?;
-    let prices = [
-        input_price,
-        cost.cache_read.unwrap_or(input_price),
-        cost.cache_write.unwrap_or(input_price),
-        output_price,
-        cost.reasoning.unwrap_or(output_price),
+fn unavailable(reason: &'static str) -> (UsageCompleteness, Estimate) {
+    // 原始配置错误可能带有秘密；诊断只使用固定原因。
+    tracing::warn!(reason, "attempt cost estimate unavailable");
+    (UsageCompleteness::Partial, Estimate::Unknown)
+}
+
+fn estimate(usage: TokenUsage, cost: &Cost) -> (UsageCompleteness, Estimate) {
+    if [
+        cost.input,
+        cost.output,
+        cost.cache_read,
+        cost.cache_write,
+        cost.reasoning,
+    ]
+    .iter()
+    .all(Option::is_none)
+    {
+        return (UsageCompleteness::Complete, Estimate::Unknown);
+    }
+    let prices = [cost.input, cost.cache_read, cost.cache_write, cost.output];
+    let reported = [
+        usage.input,
+        usage.cache_read,
+        usage.cache_write,
+        usage.output,
     ];
+    let partial = reported
+        .iter()
+        .zip(prices)
+        .any(|(count, price)| price.is_some() && count.is_none());
+    let kind = if partial {
+        UsageCompleteness::Partial
+    } else {
+        UsageCompleteness::Complete
+    };
+    let approximate = partial
+        || reported
+            .iter()
+            .zip(prices)
+            .any(|(count, price)| price.is_none() && count.is_some_and(|count| count > 0));
     if prices
         .iter()
+        .flatten()
         .any(|price| !price.is_finite() || *price < 0.0)
     {
-        return Err("invalid model price");
+        tracing::warn!(
+            reason = "invalid model price",
+            "attempt cost estimate unavailable"
+        );
+        return (kind, Estimate::Unknown);
     }
     let read = usage.cache_read.unwrap_or(0);
     let write = usage.cache_write.unwrap_or(0);
-    let reasoning = usage.reasoning.unwrap_or(0);
-    // 只钳制计费差额；保留 provider 报告的缓存与推理计数。
+    // 只钳制计费差额；推理已含在输出中，原始计数保持不变。
     let counts = [
-        input.saturating_sub(read).saturating_sub(write),
+        usage
+            .input
+            .unwrap_or(0)
+            .saturating_sub(read)
+            .saturating_sub(write),
         read,
         write,
-        output.saturating_sub(reasoning),
-        reasoning,
+        usage.output.unwrap_or(0),
     ];
     let usd: f64 = counts
         .into_iter()
         .zip(prices)
         // 先换算计数单位，避免乘积在最终金额仍可表示时溢出。
-        .map(|(count, price)| (count as f64 / 1_000_000.0) * price)
+        .filter_map(|(count, price)| price.map(|price| (count as f64 / 1_000_000.0) * price))
         .sum();
     if usd.is_finite() && usd >= 0.0 {
-        Ok(usd)
+        (
+            kind,
+            if approximate {
+                Estimate::Approx(usd)
+            } else {
+                Estimate::Exact(usd)
+            },
+        )
     } else {
-        Err("cost estimate exceeds finite range")
+        tracing::warn!(
+            reason = "cost estimate exceeds finite range",
+            "attempt cost estimate unavailable"
+        );
+        (kind, Estimate::Unknown)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use Estimate::{Approx, Exact, Unknown};
+    use UsageCompleteness::{Complete, Partial};
 
     fn usage() -> TokenUsage {
         TokenUsage {
@@ -125,56 +208,76 @@ mod tests {
         }
     }
 
+    fn assert_estimate(
+        name: &str,
+        usage: TokenUsage,
+        prices: &Cost,
+        kind: UsageCompleteness,
+        expected: Estimate,
+    ) -> Option<CostEstimate> {
+        let (actual_kind, actual) = estimate(usage, prices);
+        assert_eq!(actual_kind, kind, "{name}");
+        let actual = actual.into_cost();
+        let expected = expected.into_cost();
+        assert_eq!(
+            actual.map(|cost| cost.exact),
+            expected.map(|cost| cost.exact),
+            "{name}"
+        );
+        if let (Some(actual), Some(expected)) = (actual, expected) {
+            assert!(
+                (actual.usd - expected.usd).abs() <= expected.usd * 8.0 * f64::EPSILON,
+                "{name}: {} != {}",
+                actual.usd,
+                expected.usd
+            );
+        }
+        actual
+    }
+
     #[test]
-    fn token_classes_use_their_own_prices_and_only_missing_details_fall_back() {
-        let base_usage = usage();
-        let base_prices = prices();
-        for (name, usage, cost, expected) in [
-            ("all classes", base_usage, base_prices.clone(), 0.003),
+    fn token_classes_compare_reported_counts_with_their_own_prices() {
+        for (name, usage, cost, kind, expected) in [
+            ("all classes", usage(), prices(), Complete, Exact(0.0028)),
             (
                 "read price missing",
-                base_usage,
+                usage(),
                 Cost {
                     cache_read: None,
                     ..prices()
                 },
-                0.0033,
+                Complete,
+                Approx(0.0027),
             ),
             (
                 "write price missing",
-                base_usage,
+                usage(),
                 Cost {
                     cache_write: None,
                     ..prices()
                 },
-                0.0029,
+                Complete,
+                Approx(0.0025),
             ),
             (
-                "reasoning price missing",
-                base_usage,
+                "input price missing",
+                usage(),
                 Cost {
-                    reasoning: None,
+                    input: None,
                     ..prices()
                 },
-                0.0028,
+                Complete,
+                Approx(0.0014),
             ),
             (
-                "read count missing",
-                TokenUsage {
-                    cache_read: None,
-                    ..usage()
+                "output price missing",
+                usage(),
+                Cost {
+                    output: None,
+                    ..prices()
                 },
-                base_prices.clone(),
-                0.0033,
-            ),
-            (
-                "write count missing",
-                TokenUsage {
-                    cache_write: None,
-                    ..usage()
-                },
-                base_prices.clone(),
-                0.0029,
+                Complete,
+                Approx(0.0018),
             ),
             (
                 "reasoning count missing",
@@ -182,52 +285,95 @@ mod tests {
                     reasoning: None,
                     ..usage()
                 },
-                base_prices.clone(),
-                0.0028,
+                prices(),
+                Complete,
+                Exact(0.0028),
             ),
             (
                 "zero detail prices",
-                base_usage,
+                usage(),
                 Cost {
                     cache_read: Some(0.0),
                     cache_write: Some(0.0),
-                    reasoning: Some(0.0),
                     ..prices()
                 },
-                0.0022,
+                Complete,
+                Exact(0.0024),
             ),
             (
-                "zero base prices",
-                base_usage,
+                "zero base prices with unpriced positive details",
+                usage(),
                 Cost {
                     input: Some(0.0),
                     output: Some(0.0),
                     ..Default::default()
                 },
-                0.0,
+                Complete,
+                Approx(0.0),
+            ),
+            (
+                "zero prices with every priced count reported",
+                TokenUsage {
+                    cache_read: None,
+                    cache_write: None,
+                    ..usage()
+                },
+                Cost {
+                    input: Some(0.0),
+                    output: Some(0.0),
+                    ..Default::default()
+                },
+                Complete,
+                Exact(0.0),
             ),
             (
                 "zero counts",
                 TokenUsage {
                     input: Some(0),
                     output: Some(0),
+                    cache_read: Some(0),
+                    cache_write: Some(0),
                     ..Default::default()
                 },
-                base_prices.clone(),
-                0.0,
+                prices(),
+                Complete,
+                Exact(0.0),
             ),
             (
-                "small amount",
+                "zero read count with price",
                 TokenUsage {
-                    input: Some(1),
-                    output: Some(0),
-                    ..Default::default()
+                    cache_read: Some(0),
+                    ..usage()
+                },
+                prices(),
+                Complete,
+                Exact(0.0031),
+            ),
+            (
+                "zero read count without price",
+                TokenUsage {
+                    cache_read: Some(0),
+                    ..usage()
                 },
                 Cost {
-                    input: Some(0.000001),
+                    cache_read: None,
                     ..prices()
                 },
-                1e-12,
+                Complete,
+                Exact(0.0031),
+            ),
+            (
+                "zero write count without price",
+                TokenUsage {
+                    cache_write: Some(0),
+                    ..usage()
+                },
+                Cost {
+                    cache_write: None,
+                    ..prices()
+                },
+                Complete,
+                Exact(0.0027),
             ),
             (
                 "inconsistent counts",
@@ -236,58 +382,115 @@ mod tests {
                     output: Some(1),
                     ..usage()
                 },
-                base_prices,
-                0.0008,
+                prices(),
+                Complete,
+                Exact(0.00041),
+            ),
+            (
+                "all prices missing",
+                usage(),
+                Cost::default(),
+                Complete,
+                Unknown,
             ),
         ] {
-            let actual = estimate(usage, &cost).unwrap_or_else(|error| panic!("{name}: {error}"));
-            assert!(
-                (actual - expected).abs() <= expected * 1e-12,
-                "{name}: {actual} != {expected}"
+            assert_estimate(name, usage, &cost, kind, expected);
+        }
+    }
+
+    #[test]
+    fn missing_counts_are_partial_only_when_the_matching_price_exists() {
+        // 缺读计数时会多算，缺写计数时会少算；估算值不承诺方向。
+        for (field, expected) in [(0, 0.0014), (1, 0.0018), (2, 0.0031), (3, 0.0027)] {
+            let mut usage = usage();
+            let mut cost = prices();
+            let count = match field {
+                0 => &mut usage.input,
+                1 => &mut usage.output,
+                2 => &mut usage.cache_read,
+                _ => &mut usage.cache_write,
+            };
+            *count = None;
+            assert_estimate(
+                &format!("priced field {field}"),
+                usage,
+                &cost,
+                Partial,
+                Approx(expected),
+            );
+            match field {
+                0 => cost.input = None,
+                1 => cost.output = None,
+                2 => cost.cache_read = None,
+                _ => cost.cache_write = None,
+            }
+            assert_estimate(
+                &format!("unpriced field {field}"),
+                usage,
+                &cost,
+                Complete,
+                Exact(expected),
             );
         }
     }
 
     #[test]
-    fn missing_base_values_and_invalid_prices_do_not_produce_an_estimate() {
-        for incomplete in [
-            TokenUsage {
-                input: None,
-                ..usage()
-            },
-            TokenUsage {
-                output: None,
-                ..usage()
-            },
-        ] {
-            assert!(estimate(incomplete, &prices()).is_err());
-        }
-        for incomplete in [
-            Cost {
-                input: None,
+    fn positive_unpriced_counts_do_not_increase_partial_attempts() {
+        let usage = TokenUsage {
+            cache_write: Some(5),
+            ..usage()
+        };
+        let cost = assert_estimate(
+            "positive unpriced write",
+            usage,
+            &Cost {
+                cache_write: None,
                 ..prices()
             },
-            Cost {
-                output: None,
-                ..prices()
-            },
-        ] {
-            assert!(estimate(usage(), &incomplete).is_err());
+            Complete,
+            Approx(0.00269),
+        );
+        let summary =
+            lattice_conversation::UsageSummary::from_attempts([(Some(usage), Complete, cost)]);
+        assert_eq!(summary.kind, Complete);
+        assert_eq!(summary.partial_attempts, 0);
+        assert!(!summary.cost.known.unwrap().exact);
+    }
+
+    #[test]
+    fn reasoning_prices_do_not_change_output_billing_or_completeness() {
+        for reasoning in [Some(20.0), None, Some(f64::NAN)] {
+            assert_estimate(
+                "reasoning ignored",
+                usage(),
+                &Cost {
+                    reasoning,
+                    ..prices()
+                },
+                Complete,
+                Exact(0.0028),
+            );
         }
+    }
+
+    #[test]
+    fn invalid_prices_for_billed_items_produce_unknown_cost() {
         for invalid in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            for field in 0..5 {
+            for field in 0..4 {
                 let mut cost = prices();
-                let fields = [
-                    &mut cost.input,
-                    &mut cost.output,
-                    &mut cost.cache_read,
-                    &mut cost.cache_write,
-                    &mut cost.reasoning,
-                ];
-                *fields.into_iter().nth(field).unwrap() = Some(invalid);
-                assert!(
-                    estimate(usage(), &cost).is_err(),
-                    "field {field}: {invalid}"
+                let price = match field {
+                    0 => &mut cost.input,
+                    1 => &mut cost.output,
+                    2 => &mut cost.cache_read,
+                    _ => &mut cost.cache_write,
+                };
+                *price = Some(invalid);
+                assert_estimate(
+                    &format!("field {field}: {invalid}"),
+                    usage(),
+                    &cost,
+                    Complete,
+                    Unknown,
                 );
             }
         }
@@ -305,10 +508,17 @@ mod tests {
         let unit = Cost {
             input: Some(1.0),
             output: Some(1.0),
+            cache_read: Some(1.0),
+            cache_write: Some(1.0),
             ..Default::default()
         };
-        let usd = estimate(maximal, &unit).unwrap();
-        assert!((usd - 55_340_232_221_128.65).abs() < 0.01);
+        assert_estimate(
+            "maximal counts",
+            maximal,
+            &unit,
+            Complete,
+            Exact(36_893_488_147_419.1),
+        );
         let expensive = Cost {
             input: Some(f64::MAX),
             ..unit
@@ -316,48 +526,52 @@ mod tests {
         let single = TokenUsage {
             input: Some(1),
             output: Some(0),
+            cache_read: Some(0),
+            cache_write: Some(0),
             ..Default::default()
         };
         for (input, expected) in [
             (1, 1.797_693_134_862_316e302),
             (2, 3.595_386_269_724_632e302),
         ] {
-            let usd = estimate(
+            let (_, estimate) = estimate(
                 TokenUsage {
                     input: Some(input),
                     ..single
                 },
                 &expensive,
-            )
-            .unwrap();
+            );
+            let Estimate::Exact(usd) = estimate else {
+                panic!("input={input}: {estimate:?}")
+            };
             assert!(
                 (usd / expected - 1.0).abs() <= 4.0 * f64::EPSILON,
                 "input={input}: {usd} != {expected}"
             );
         }
-        assert!(
-            estimate(
-                TokenUsage {
-                    input: Some(u64::MAX),
-                    ..single
-                },
-                &expensive
-            )
-            .is_err()
+        assert_estimate(
+            "term overflow",
+            TokenUsage {
+                input: Some(u64::MAX),
+                ..single
+            },
+            &expensive,
+            Complete,
+            Unknown,
         );
-        assert!(
-            estimate(
-                TokenUsage {
-                    input: Some(1_000_000),
-                    output: Some(1_000_000),
-                    ..single
-                },
-                &Cost {
-                    output: Some(f64::MAX),
-                    ..expensive
-                }
-            )
-            .is_err()
+        assert_estimate(
+            "sum overflow",
+            TokenUsage {
+                input: Some(1_000_000),
+                output: Some(1_000_000),
+                ..single
+            },
+            &Cost {
+                output: Some(f64::MAX),
+                ..expensive
+            },
+            Complete,
+            Unknown,
         );
     }
 }
