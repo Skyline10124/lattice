@@ -105,7 +105,18 @@ impl GeminiSseParser {
             Ok(None) => return vec![],
             Err(error) => return vec![error],
         };
-        if let Some(error) = super::common::extract_api_error(Protocol::GenerateContent, &root) {
+        let mut events = Vec::new();
+        match self.usage.update(Protocol::GenerateContent, &root) {
+            Ok(Some(usage)) => events.push(ProtocolEvent::Usage(usage)),
+            Ok(None) => {}
+            Err(error) => return vec![ProtocolEvent::error(error.to_string(), false)],
+        }
+        events.extend(self.parse_content(&root));
+        events
+    }
+
+    fn parse_content(&mut self, root: &serde_json::Value) -> Vec<ProtocolEvent> {
+        if let Some(error) = super::common::extract_api_error(Protocol::GenerateContent, root) {
             return vec![error];
         }
         let mut events = Vec::new();
@@ -232,11 +243,7 @@ impl GeminiSseParser {
             if let Some(reason) = candidate["finishReason"].as_str() {
                 self.close_text(&mut events);
                 self.completed = true;
-                match self
-                    .usage
-                    .update(Protocol::GenerateContent, &root)
-                    .and_then(|_| self.usage.finish(Protocol::GenerateContent))
-                {
+                match self.usage.finish(Protocol::GenerateContent) {
                     Ok(Some(usage)) => events.push(ProtocolEvent::Usage(usage)),
                     Ok(None) => {}
                     Err(error) => {
@@ -253,11 +260,11 @@ impl GeminiSseParser {
                 });
                 return events;
             }
-        }
-        match self.usage.update(Protocol::GenerateContent, &root) {
-            Ok(Some(usage)) => events.push(ProtocolEvent::Usage(usage)),
-            Ok(None) => {}
-            Err(error) => events.push(ProtocolEvent::error(error.to_string(), false)),
+        } else if let Some(reason) = root["promptFeedback"]["blockReason"].as_str() {
+            events.push(ProtocolEvent::error(
+                format!("generateContent prompt blocked: blockReason={reason}"),
+                false,
+            ));
         }
         events
     }
@@ -511,12 +518,22 @@ mod tests {
         let mut parser = Parser::new(Protocol::GenerateContent);
         let events = parser.parse_chunk(
             None,
-            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"x","functionCall":{"name":"observe__workspace","args":{}}}]}}]}"#,
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"x","functionCall":{"name":"observe__workspace","args":{}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":8,"totalTokenCount":8}}"#,
         );
-        assert!(events.iter().any(|event| matches!(
-            event,
-            LlmEvent::Finished { outcome: ReplyOutcome::Interrupted { reason: ReplyStop::Stream(StreamStop::Provider(failure)) }, .. } if !failure.retryable && failure.message.contains("text and functionCall")
-        )));
+        let Some(LlmEvent::Finished {
+            outcome:
+                ReplyOutcome::Interrupted {
+                    reason: ReplyStop::Stream(StreamStop::Provider(failure)),
+                },
+            report,
+        }) = events.last()
+        else {
+            panic!("{events:?}");
+        };
+        assert!(!failure.retryable && failure.message.contains("text and functionCall"));
+        let usage = report.usage.unwrap();
+        assert_eq!(usage.input, Some(8));
+        assert_eq!(usage.output, None);
         assert!(
             !events
                 .iter()
