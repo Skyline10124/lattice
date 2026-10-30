@@ -4178,12 +4178,14 @@ fn ordinary_operations_load_only_referenced_turns() {
     let read = db.begin_read().unwrap();
     assert_eq!(read.session(sid(1)).unwrap().current, NodeId(4));
     assert_eq!(read.list(None, 1).unwrap().items.len(), 1);
-    let first = read.session_ids(None, 1).unwrap();
-    assert_eq!(first.items, vec![sid(1)]);
-    assert_eq!(first.next, Some(sid(1)));
-    let last = read.session_ids(first.next, 1).unwrap();
-    assert_eq!(last.items, vec![sid(2)]);
-    assert_eq!(last.next, None);
+    assert_eq!(
+        read.session_ids_with_prefix("", 5).unwrap(),
+        vec![sid(1), sid(2)]
+    );
+    assert_eq!(read.session_ids_with_prefix("", 1).unwrap(), vec![sid(1)]);
+    let one = sid(1).to_string();
+    assert_eq!(read.session_ids_with_prefix(&one, 5).unwrap(), vec![sid(1)]);
+    assert!(read.session_ids_with_prefix("zzzz", 5).unwrap().is_empty());
     assert_eq!(read.turn_detail(sid(1), tid(2)).unwrap().steps.len(), 1);
     assert_eq!(
         entry_nodes(&read.view(sid(1), 1).unwrap().entries),

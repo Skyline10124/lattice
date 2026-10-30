@@ -606,34 +606,22 @@ impl SessionRead {
     }
 
     /// 只遍历身份键，不读取节点、配置或其他会话的记录值。
-    pub fn session_ids(
-        &self,
-        after: Option<SessionId>,
-        limit: usize,
-    ) -> Result<Page<SessionId, SessionId>> {
+    /// 按身份键前缀做一次有序范围读取，最多返回 `limit` 个，不扫描无关会话。
+    pub fn session_ids_with_prefix(&self, prefix: &str, limit: usize) -> Result<Vec<SessionId>> {
         positive(limit)?;
         let table = self.tx.open_table(SESSIONS).map_err(table_error)?;
-        let after = after.map(|id| id.to_string());
-        let mut sessions = table.range::<&str>((
-            after
-                .as_deref()
-                .map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded),
-            std::ops::Bound::Unbounded,
-        ))?;
         let mut items = Vec::new();
-        for entry in sessions.by_ref().take(limit) {
+        for entry in table.range::<&str>(prefix..)? {
             let (key, _) = entry?;
+            if !key.value().starts_with(prefix) || items.len() == limit {
+                break;
+            }
             items.push(
                 SessionId::parse(key.value())
                     .map_err(|_| corrupt("sessions", "key", "invalid id"))?,
             );
         }
-        let next = if sessions.next().transpose()?.is_some() {
-            items.last().copied()
-        } else {
-            None
-        };
-        Ok(Page { items, next })
+        Ok(items)
     }
 
     pub fn list(
