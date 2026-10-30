@@ -101,18 +101,6 @@ fn unavailable(reason: &'static str) -> (UsageCompleteness, Estimate) {
 }
 
 fn estimate(usage: TokenUsage, cost: &Cost) -> (UsageCompleteness, Estimate) {
-    if [
-        cost.input,
-        cost.output,
-        cost.cache_read,
-        cost.cache_write,
-        cost.reasoning,
-    ]
-    .iter()
-    .all(Option::is_none)
-    {
-        return (UsageCompleteness::Complete, Estimate::Unknown);
-    }
     let prices = [cost.input, cost.cache_read, cost.cache_write, cost.output];
     let reported = [
         usage.input,
@@ -129,6 +117,13 @@ fn estimate(usage: TokenUsage, cost: &Cost) -> (UsageCompleteness, Estimate) {
     } else {
         UsageCompleteness::Complete
     };
+    if !reported
+        .iter()
+        .zip(prices)
+        .any(|(count, price)| count.is_some() && price.is_some())
+    {
+        return (kind, Estimate::Unknown);
+    }
     let approximate = partial
         || reported
             .iter()
@@ -391,6 +386,33 @@ mod tests {
                 usage(),
                 Cost::default(),
                 Complete,
+                Unknown,
+            ),
+            (
+                "reasoning price and count alone do not price a billed item",
+                TokenUsage {
+                    reasoning: Some(20),
+                    ..Default::default()
+                },
+                Cost {
+                    reasoning: Some(20.0),
+                    ..Default::default()
+                },
+                Complete,
+                Unknown,
+            ),
+            (
+                "only an unpriced read count is reported",
+                TokenUsage {
+                    cache_read: Some(200),
+                    ..Default::default()
+                },
+                Cost {
+                    input: Some(2.0),
+                    output: Some(10.0),
+                    ..Default::default()
+                },
+                Partial,
                 Unknown,
             ),
         ] {
