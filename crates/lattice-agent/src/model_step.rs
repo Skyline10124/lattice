@@ -111,13 +111,15 @@ pub enum ModelStepAttempt {
     Complete {
         message: NativeMessage<UnboundToolCall>,
         usage: Option<lattice_conversation::TokenUsage>,
-        estimated_cost_usd: Option<f64>,
+        usage_kind: lattice_conversation::UsageCompleteness,
+        cost: Option<lattice_conversation::CostEstimate>,
         finish_reason: Option<String>,
     },
     Stopped {
         cause: ModelStopCause,
         usage: Option<lattice_conversation::TokenUsage>,
-        estimated_cost_usd: Option<f64>,
+        usage_kind: lattice_conversation::UsageCompleteness,
+        cost: Option<lattice_conversation::CostEstimate>,
         diagnostic: ModelDiagnostic,
     },
 }
@@ -207,7 +209,12 @@ impl ModelStepDriver {
             deadline: request.deadline,
         };
         if let Some(reason) = control.stop() {
-            return Ok(stopped(ReplyStop::Stream(reason), None, None));
+            return Ok(stopped(
+                ReplyStop::Stream(reason),
+                None,
+                lattice_conversation::UsageCompleteness::Partial,
+                None,
+            ));
         }
 
         let opening = self.llm.stream_chat(chat, control.clone());
@@ -221,7 +228,7 @@ impl ModelStepDriver {
                     };
                 }
                 _ = tokio::time::sleep(CONTROL_POLL_INTERVAL), if request.deadline.is_some() || request.cancel.is_some() => {
-                    if let Some(reason) = control.stop() { return Ok(stopped(ReplyStop::Stream(reason), None, None)); }
+                    if let Some(reason) = control.stop() { return Ok(stopped(ReplyStop::Stream(reason), None, lattice_conversation::UsageCompleteness::Partial, None)); }
                 }
             }
         };
@@ -264,7 +271,8 @@ impl ModelStepDriver {
                         ReplyOutcome::Complete { message } => ModelStepAttempt::Complete {
                             message: message.into_message(),
                             usage: report.usage,
-                            estimated_cost_usd: report.estimated_cost_usd,
+                            usage_kind: report.usage_kind,
+                            cost: report.cost,
                             finish_reason: report.finish_reason,
                         },
                         ReplyOutcome::Rejected {
@@ -272,14 +280,15 @@ impl ModelStepDriver {
                         } => ModelStepAttempt::Stopped {
                             cause: ModelStopCause::InvalidBatch,
                             usage: report.usage,
-                            estimated_cost_usd: report.estimated_cost_usd,
+                            usage_kind: report.usage_kind,
+                            cost: report.cost,
                             diagnostic: ModelDiagnostic {
                                 provider_error: None,
                                 invalid_batch: Some(validation),
                             },
                         },
                         ReplyOutcome::Interrupted { reason } => {
-                            stopped(reason, report.usage, report.estimated_cost_usd)
+                            stopped(reason, report.usage, report.usage_kind, report.cost)
                         }
                     });
                 }
@@ -288,6 +297,7 @@ impl ModelStepDriver {
         Ok(stopped(
             ReplyStop::Stream(StreamStop::UnexpectedEof),
             None,
+            lattice_conversation::UsageCompleteness::Partial,
             None,
         ))
     }
@@ -296,7 +306,8 @@ impl ModelStepDriver {
 fn stopped(
     reason: ReplyStop,
     usage: Option<lattice_conversation::TokenUsage>,
-    estimated_cost_usd: Option<f64>,
+    usage_kind: lattice_conversation::UsageCompleteness,
+    cost: Option<lattice_conversation::CostEstimate>,
 ) -> ModelStepAttempt {
     let (cause, message) = match reason {
         ReplyStop::OutputLimit(_) => (ModelStopCause::OutputLimit, None),
@@ -320,7 +331,8 @@ fn stopped(
     ModelStepAttempt::Stopped {
         cause,
         usage,
-        estimated_cost_usd,
+        usage_kind,
+        cost,
         diagnostic: ModelDiagnostic {
             provider_error: message.map(|message| lattice_llm::bound_diagnostic(&message)),
             invalid_batch: None,

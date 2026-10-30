@@ -76,7 +76,8 @@ pub enum LlmEvent {
 pub struct AttemptReport {
     pub finish_reason: Option<String>,
     pub usage: Option<TokenUsage>,
-    pub estimated_cost_usd: Option<f64>,
+    pub usage_kind: lattice_conversation::UsageCompleteness,
+    pub cost: Option<lattice_conversation::CostEstimate>,
 }
 
 /// 请求明确给出 provider id 与模型 id，不提供默认模型。

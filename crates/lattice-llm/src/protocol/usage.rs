@@ -15,8 +15,10 @@ pub(super) struct UsageSnapshot {
     cache_read: Option<u64>,
     cache_read_alias: Option<u64>,
     cache_write: Option<u64>,
+    cache_write_alias: Option<u64>,
     base_output: Option<u64>,
     reasoning: Option<u64>,
+    has_usage_metadata: bool,
 }
 
 impl UsageSnapshot {
@@ -68,6 +70,15 @@ impl UsageSnapshot {
             *slot = field(path)?.or(*slot);
             Ok(())
         };
+        let set_input_side =
+            |slot: &mut Option<u64>, path: &[&str]| -> Result<(), ProjectionError> {
+                if let Some(value) = field(path)?
+                    && (value != 0 || slot.is_none())
+                {
+                    *slot = Some(value);
+                }
+                Ok(())
+            };
         match protocol {
             Protocol::ChatCompletions => {
                 set(&mut next.base_input, &["prompt_tokens"])?;
@@ -82,15 +93,19 @@ impl UsageSnapshot {
                     &["prompt_tokens_details", "cache_creation_input_tokens"],
                 )?;
                 set(
+                    &mut next.cache_write_alias,
+                    &["prompt_tokens_details", "cache_write_tokens"],
+                )?;
+                set(
                     &mut next.reasoning,
                     &["completion_tokens_details", "reasoning_tokens"],
                 )?;
             }
             Protocol::Messages => {
-                set(&mut next.base_input, &["input_tokens"])?;
+                set_input_side(&mut next.base_input, &["input_tokens"])?;
                 set(&mut next.base_output, &["output_tokens"])?;
-                set(&mut next.cache_read, &["cache_read_input_tokens"])?;
-                set(&mut next.cache_write, &["cache_creation_input_tokens"])?;
+                set_input_side(&mut next.cache_read, &["cache_read_input_tokens"])?;
+                set_input_side(&mut next.cache_write, &["cache_creation_input_tokens"])?;
             }
             Protocol::GenerateContent => {
                 set(&mut next.base_input, &["promptTokenCount"])?;
@@ -98,34 +113,66 @@ impl UsageSnapshot {
                 set(&mut next.base_output, &["candidatesTokenCount"])?;
                 set(&mut next.reasoning, &["thoughtsTokenCount"])?;
                 set(&mut next.cache_read, &["cachedContentTokenCount"])?;
+                next.has_usage_metadata |= value
+                    .as_object()
+                    .is_some_and(|value| value.values().any(|field| !field.is_null()));
             }
             _ => return Err(ProjectionError::UnsupportedProtocol { protocol }),
         }
+        let usage = next.project(protocol)?;
+        *self = next;
+        Ok(usage)
+    }
+
+    pub(super) fn finish(&self, protocol: Protocol) -> Result<Option<TokenUsage>, ProjectionError> {
+        if protocol != Protocol::GenerateContent {
+            return self.project(protocol);
+        }
+        if !self.has_usage_metadata {
+            return Ok(None);
+        }
+        let mut final_snapshot = self.clone();
+        final_snapshot.tool_input.get_or_insert(0);
+        final_snapshot.base_output.get_or_insert(0);
+        final_snapshot.reasoning.get_or_insert(0);
+        final_snapshot.cache_read.get_or_insert(0);
+        let mut usage = final_snapshot.project(protocol)?;
+        if self.base_input.is_none()
+            && let Some(usage) = &mut usage
+        {
+            usage.input = None;
+        }
+        Ok(usage)
+    }
+
+    fn project(&self, protocol: Protocol) -> Result<Option<TokenUsage>, ProjectionError> {
         let sum = |parts: &[Option<u64>]| -> Result<Option<u64>, ProjectionError> {
             parts.iter().flatten().try_fold(None, |sum, value| {
                 sum.unwrap_or(0_u64)
                     .checked_add(*value)
                     .map(Some)
-                    .ok_or_else(|| malformed("normalized usage exceeds u64"))
+                    .ok_or_else(|| ProjectionError::MalformedUsage {
+                        provider: protocol,
+                        detail: "normalized usage exceeds u64".into(),
+                    })
             })
         };
         let usage = TokenUsage {
             input: match protocol {
-                Protocol::Messages => sum(&[next.base_input, next.cache_read, next.cache_write])?,
-                Protocol::GenerateContent => sum(&[next.base_input, next.tool_input])?,
-                _ => next.base_input,
+                Protocol::Messages => sum(&[self.base_input, self.cache_read, self.cache_write])?,
+                Protocol::GenerateContent => sum(&[self.base_input, self.tool_input])?,
+                _ => self.base_input,
             },
-            cache_read: next.cache_read.or(next.cache_read_alias),
-            cache_write: next.cache_write,
+            cache_read: self.cache_read.or(self.cache_read_alias),
+            cache_write: self.cache_write.or(self.cache_write_alias),
             output: if protocol == Protocol::GenerateContent {
-                sum(&[next.base_output, next.reasoning])?
+                sum(&[self.base_output, self.reasoning])?
             } else {
-                next.base_output
+                self.base_output
             },
-            reasoning: next.reasoning,
+            reasoning: self.reasoning,
         }
         .normalized();
-        *self = next;
         Ok(usage)
     }
 }

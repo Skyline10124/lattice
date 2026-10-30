@@ -354,7 +354,7 @@ cause = ProviderError { retryable }
 
 参数在流式阶段按收到的原文计量；回复结束、参数解析为规范对象后，规范形式比原文长的部分补入总量。同一元数据重复给出相同的值时不重复计入。超限立即停止消费，记录 `OutputLimit`。写入会话库时按同一算法、同一组常量对完整回复独立核对一次，参数按规范形式计量；这是持久边界上的检查，超限的回复不写入。这些是对话协议与组装器的限制，计量类型在 [`lattice-conversation`](../../crates/lattice-conversation/src/lib.rs)，不能解释为容量或延迟的测量结论。单 ToolCall 参数上限与 LANCET 单文件工作区写入上限 `MAX_WORKSPACE_WRITE_BYTES`（1 MiB）一致：写入内容随参数传入，超过该大小的调用无法成功执行。
 
-Turn 的单调时钟 deadline 在接受事务提交后开始，限制后续 provider 请求与 Tool 分发。槽位结果与 Step 关闭等必要写入不受 Turn deadline 约束；后台重启后不继续执行未关闭的 Turn，也不重建剩余执行时间。每次尝试分别保存按[用量换算](llm.md#用量换算)得出的用量：输入、缓存读、缓存写、输出与其中的推理，各项都可以缺失，缺失表示未知；失败与重试尝试的已知用量也保留，Turn 汇总派生为 Complete 或 Partial。每次尝试同时保存请求网关给出的费用估算，可以缺失，规则见[费用估算](llm.md#费用估算)。
+Turn 的单调时钟 deadline 在接受事务提交后开始，限制后续 provider 请求与 Tool 分发。槽位结果与 Step 关闭等必要写入不受 Turn deadline 约束；后台重启后不继续执行未关闭的 Turn，也不重建剩余执行时间。每次尝试分别保存按[用量换算](llm.md#用量换算)得出的用量：输入、缓存读、缓存写、输出与其中的推理，各项都可以缺失，缺失表示未报告；失败与重试尝试的已知用量也保留。每次尝试同时保存请求网关给出的 `usage_kind` 与可选 `cost`（`CostEstimate { usd, exact }`，未知为 null），Turn 的 Complete 或 Partial 由保存的尝试判定与汇总溢出派生，见[关闭 Step 与 Turn](#关闭-step-与-turn)。费用结果的含义见[费用估算](llm.md#费用估算)。
 
 ## 对话数据与模型投影
 
@@ -384,7 +384,7 @@ Step 节点保存这一步的全部内容：
 | 部分 | 内容 |
 | --- | --- |
 | `progress` | 这一步最后到达的阶段；`Closed` 带结束方式 `end` |
-| 尝试 | 按尝试序号排列的各次模型请求：来源（协议与 provider `id`）、用量、费用估算与 `progress`，`Ended` 带终态与诊断；失败后安排了重试的尝试另有等待时长 |
+| 尝试 | 按尝试序号排列的各次模型请求：来源（协议与 provider `id`）、用量、`usage_kind`、费用结果 `cost` 与 `progress`，`Ended` 带终态与诊断；失败后安排了重试的尝试另有等待时长 |
 | 回复 | 完整模型回复；还没有完整回复时为空 |
 | 槽位 | 回复中每个工具调用一个，顺序与回复一致：调用的身份与 `progress`，`Terminal` 带结局、载荷与证据 |
 | 推进时间 | 最后一次推进这一步的时间 |
@@ -505,9 +505,10 @@ TurnOutcome = Completed | Failed { reason } | Cancelled
   - 未关闭，没有 Owner：执行者已消失，这一轮停在这一步，`outcome` 就是它的结局，见[执行者消失后的 Turn](#执行者消失后的-turn)。
 - Step 节点保留各次尝试与 `end` 的原因，随视图、历史查询和 `session turn` 提供，供诊断与操作员查询使用；前端的对话显示只依据 `TurnSummary` 与后端给出的 notice 给出文字和等级，不从 `end` 或尝试的原因推导。
 - Turn 的 usage 汇总由各次尝试的 usage 得出。Turn 的结束时间是最后一个 Step 关闭时的推进时间；未关闭时，最后一个 Step 的推进时间说明它最后一次有进展是什么时候。
-- 尝试的 `usage` 保存五项可选计数，`estimated_cost_usd` 独立保存可选费用；开始请求时两者均未知，停止、登记调用或完成回复时与实际进度同事务保存。读取不补写旧尝试，也不重新估价。
-- 汇总携带 `attempts`，五项计数与费用各有 `known`（已知小计）、`unknown_attempts` 和 `overflowed`。有尝试而某项全未知时其小计为 null，明确的零保留为 0；没有尝试时是空和 0，由 `attempts=0` 区别于未知请求。`Sent` 也计入未知尝试，Reserved 没有尝试。
-- 单项完整要求未知尝试数为 0 且没有溢出；整体 `kind` 仅在六项均完整时为 `complete`，否则为 `partial`。整数小计溢出饱和到 `u64::MAX`，金额小计溢出饱和到有限的 `f64::MAX`，同时设置该项溢出标记；原始尝试不变。费用完整性与任一 token 项分别计算。
+- 尝试的 `usage` 保存五项可选计数，`usage_kind` 保存请求结束时按[用量与价格表的比对](llm.md#用量与价格表的比对)得出的完整性判定，`cost` 独立保存可选的 `CostEstimate { usd, exact }`。开始请求时 `usage_kind` 为 `partial`，用量与费用未知；停止、登记调用或完成回复时原样接收请求网关的结果，与实际进度同事务保存。没有收到终态的 `Sent` 尝试与执行者消失后的尝试保留 `partial`、未知费用；读取不补写旧尝试，也不重新判定或估价。
+- 汇总携带 `attempts` 与 `partial_attempts`，后者统计 `usage_kind=partial` 的尝试。五项计数与费用各有 `known`（已知小计）、`unknown_attempts` 和 `overflowed`；计数小计为可选整数，费用 `cost.known` 为可选 `{usd, exact}`。`unknown_attempts` 仅记录该指标未报告的尝试数，不直接决定整体完整性。有尝试而某项全未知时其小计为 null，明确的零保留为 0；没有尝试时是空和 0，费用为 `{usd:0, exact:true}`，由 `attempts=0` 区别于未知请求。`Sent` 也计入尝试，Reserved 没有尝试。
+- 整体 `kind` 仅在 `partial_attempts=0` 且所有指标均未溢出时为 `complete`，否则为 `partial`；某项计数或费用未报告本身不决定 `kind`。整数小计溢出饱和到 `u64::MAX`，金额小计溢出饱和到有限的 `f64::MAX`，同时设置该项溢出标记；原始尝试不变。
+- 费用合计规则见[费用估算](llm.md#费用估算)。
 
 关闭 Step 只写会话库，不读取工作区历史，也不取得工作区操作锁。Turn 与文件变更的关联由工作区历史中每条变更记录的 `TurnId` 与 `InvocationId` 承载，见[私有存储与数据关系](workspace.md#私有存储与数据关系)。
 

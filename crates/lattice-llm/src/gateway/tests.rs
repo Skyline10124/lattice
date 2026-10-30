@@ -8,6 +8,7 @@ use std::{
 };
 
 use futures::{FutureExt, StreamExt};
+use lattice_conversation::UsageCompleteness;
 use std::os::unix::fs::PermissionsExt;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -309,7 +310,10 @@ async fn finished_cost_uses_current_merged_prices_without_requiring_current_cred
         let [LlmEvent::Delta(_), LlmEvent::Finished { outcome: ReplyOutcome::Complete { .. }, report }] = events.as_slice() else {
             panic!("{events:?}");
         };
-        assert!((report.estimated_cost_usd.unwrap() - 0.003).abs() < 1e-15);
+        let cost = report.cost.unwrap();
+        assert!((cost.usd - 0.0028).abs() < 1e-15);
+        assert!(cost.exact);
+        assert_eq!(report.usage_kind, UsageCompleteness::Complete);
         assert_eq!(report.usage.unwrap().input, Some(1000));
         server.next().await;
         assert!(server.received.try_recv().is_err(), "pricing does not issue another request");
@@ -400,9 +404,17 @@ async fn finished_cost_is_delivered_once_for_each_terminal_outcome() {
                 _ => matches!(outcome, ReplyOutcome::Rejected { .. }),
             };
             assert!(correct, "{ending}: {outcome:?}");
-            // 没有 reasoning 专价时回退到输出单价。
-            assert!(
-                (report.estimated_cost_usd.unwrap() - 0.0028).abs() < 1e-15,
+            let interrupted = matches!(outcome, ReplyOutcome::Interrupted { .. });
+            let cost = report.cost.unwrap();
+            assert!((cost.usd - 0.0028).abs() < 1e-15, "{ending}");
+            assert_eq!(cost.exact, !interrupted, "{ending}");
+            assert_eq!(
+                report.usage_kind,
+                if interrupted {
+                    UsageCompleteness::Partial
+                } else {
+                    UsageCompleteness::Complete
+                },
                 "{ending}"
             );
             assert_eq!(report.usage.unwrap().reasoning, Some(20), "{ending}");
@@ -427,10 +439,12 @@ async fn finished_cost_is_delivered_once_for_each_terminal_outcome() {
 #[tokio::test]
 async fn finished_price_read_failures_keep_the_reply_and_only_log_safe_reasons() {
     tokio::time::timeout(Duration::from_secs(10), async {
-        for (failure, reason) in [
-            ("syntax", "provider configuration unavailable"),
-            ("unreadable", "provider configuration unavailable"),
-            ("invalid price", "invalid model price"),
+        for (failure, reason, kind) in [
+            ("syntax", "provider configuration unavailable", UsageCompleteness::Partial),
+            ("unreadable", "provider configuration unavailable", UsageCompleteness::Partial),
+            ("provider removed", "provider unavailable", UsageCompleteness::Partial),
+            ("model without price", "model price unavailable", UsageCompleteness::Complete),
+            ("invalid price", "invalid model price", UsageCompleteness::Complete),
         ] {
             let server = Server::start(false).await;
             let directory = private_dir();
@@ -447,6 +461,12 @@ async fn finished_price_read_failures_keep_the_reply_and_only_log_safe_reasons()
                     std::fs::create_dir(&path).unwrap();
                 }
                 "invalid price" => price_configuration(directory.path(), &server.url, "input = nan\noutput = 10\n"),
+                "provider removed" => std::fs::write(&path, "[metadata]\nauto_refresh = false\n").unwrap(),
+                "model without price" => {
+                    configure(directory.path(), &server.url, "chat-completions", "none");
+                    let source = std::fs::read_to_string(&path).unwrap();
+                    std::fs::write(&path, format!("{source}\n[providers.test.models.model-id]\ncontext = 4096\n")).unwrap();
+                }
                 _ => std::fs::write(&path, "secret-key-in-invalid-configuration = [").unwrap(),
             }
             release.send(()).unwrap();
@@ -454,9 +474,91 @@ async fn finished_price_read_failures_keep_the_reply_and_only_log_safe_reasons()
             let Some(LlmEvent::Finished { outcome: ReplyOutcome::Complete { message }, report }) = events.last() else { panic!("{events:?}") };
             assert!(message.as_message().parts.iter().any(|part| matches!(&part.semantic, lattice_conversation::MessageSemantic::Text { text } if text == "pricedok")));
             assert_eq!(report.usage.unwrap().input, Some(1000));
-            assert_eq!(report.estimated_cost_usd, None);
+            assert_eq!(report.cost, None);
+            assert_eq!(report.usage_kind, kind, "{failure}");
             assert!(logs.contains(reason), "{logs}");
             assert!(!logs.contains("secret-key-in-invalid-configuration"), "{logs}");
+        }
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn finished_without_usage_keeps_cost_unknown_without_reading_prices() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        for interrupted in [false, true] {
+            let server = Server::start(false).await;
+            let directory = private_dir();
+            price_configuration(directory.path(), &server.url, "input = 2\noutput = 10\n");
+            let prefix = "data: {\"choices\":[{\"delta\":{\"content\":\"unmetered\"}}]}\n\n";
+            let tail = if interrupted {
+                "data: {\"error\":{\"message\":\"failed\",\"type\":\"server_error\"}}\n\n"
+            } else { DONE };
+            let release = server.respond_with_tail(
+                format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{prefix}", prefix.len() + tail.len()), tail.into(),
+            );
+            let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
+            let mut stream = gateway.open_turn().stream_chat(request("test"), StreamControl::default()).await.unwrap();
+            assert_eq!(stream.next().await, Some(LlmEvent::Started));
+            assert!(matches!(stream.next().await, Some(LlmEvent::Delta(_))));
+            std::fs::write(directory.path().join("providers.toml"), "secret-key = [").unwrap();
+            release.send(()).unwrap();
+            let (events, logs) = capture_logs(stream.collect::<Vec<_>>()).await;
+            let Some(LlmEvent::Finished { outcome, report }) = events.last() else { panic!("{events:?}") };
+            assert!(if interrupted {
+                matches!(outcome, ReplyOutcome::Interrupted { .. })
+            } else {
+                matches!(outcome, ReplyOutcome::Complete { .. })
+            }, "{outcome:?}");
+            assert_eq!(report.usage, None);
+            assert_eq!(report.usage_kind, UsageCompleteness::Partial);
+            assert_eq!(report.cost, None);
+            assert!(!logs.contains("attempt cost estimate unavailable"), "no price lookup without usage: {logs}");
+        }
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn finished_cost_compares_chat_alias_zero_and_gemini_final_usage() {
+    use serde_json::json;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        for (name, protocol, frame, prices, expected, amount, kind) in [
+            ("chat explicit write zero without price", "chat-completions",
+                json!({"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1000,"completion_tokens":100,"prompt_tokens_details":{"cached_tokens":200,"cache_write_tokens":0},"completion_tokens_details":{"reasoning_tokens":20}}}),
+                "input = 2\noutput = 10\ncache_read = 0.5\n", json!([1000,200,0,100,20]), 0.0027, UsageCompleteness::Complete),
+            ("gemini omitted read with price", "generate-content",
+                json!({"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1000,"candidatesTokenCount":100}}),
+                "input = 2\noutput = 10\ncache_read = 0.5\n", json!([1000,0,null,100,0]), 0.003, UsageCompleteness::Complete),
+            ("gemini omitted read without price", "generate-content",
+                json!({"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1000,"candidatesTokenCount":100}}),
+                "input = 2\noutput = 10\n", json!([1000,0,null,100,0]), 0.003, UsageCompleteness::Complete),
+            ("gemini missing prompt", "generate-content",
+                json!({"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"candidatesTokenCount":5}}),
+                "input = 2\noutput = 10\n", json!([null,0,null,5,0]), 0.00005, UsageCompleteness::Partial),
+            ("gemini thoughts exhaust output budget", "generate-content",
+                json!({"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":10,"thoughtsTokenCount":4}}),
+                "input = 2\noutput = 10\n", json!([10,0,null,4,4]), 0.00006, UsageCompleteness::Complete),
+            ("gemini candidate safety", "generate-content",
+                json!({"candidates":[{"finishReason":"SAFETY"}],"usageMetadata":{"promptTokenCount":10,"totalTokenCount":10}}),
+                "input = 2\noutput = 10\n", json!([10,0,null,0,0]), 0.00002, UsageCompleteness::Complete),
+        ] {
+            let server = Server::start(false).await;
+            let directory = private_dir();
+            configure(directory.path(), &server.url, protocol, "none");
+            let path = directory.path().join("providers.toml");
+            let source = std::fs::read_to_string(&path).unwrap();
+            std::fs::write(path, format!("{source}\n[providers.test.models.model-id.cost]\n{prices}")).unwrap();
+            let body = format!("data: {frame}\n\n");
+            server.respond(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}", body.len()), false);
+            let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
+            let stream = gateway.open_turn().stream_chat(request("test"), StreamControl::default()).await.unwrap();
+            let events = stream.collect::<Vec<_>>().await;
+            let Some(LlmEvent::Finished { outcome: ReplyOutcome::Complete { .. }, report }) = events.last() else { panic!("{name}: {events:?}") };
+            let usage = serde_json::to_value(report.usage.unwrap()).unwrap();
+            assert_eq!(json!([usage["input"],usage["cache_read"],usage["cache_write"],usage["output"],usage["reasoning"]]), expected, "{name}");
+            assert_eq!(report.usage_kind, kind, "{name}");
+            let cost = report.cost.unwrap();
+            assert!((cost.usd - amount).abs() < 1e-15, "{name}: {cost:?}");
+            assert_eq!(cost.exact, kind == UsageCompleteness::Complete, "{name}");
         }
     }).await.unwrap();
 }

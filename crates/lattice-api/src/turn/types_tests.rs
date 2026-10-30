@@ -85,10 +85,14 @@ fn usage_summary_preserves_totals_and_unknown_attempts() {
                 output: Some(2),
                 ..Default::default()
             }),
+            lattice_conversation::UsageCompleteness::Partial,
             None,
         )]
         .into_iter()
-        .chain(std::iter::repeat_n((None, None), 2)),
+        .chain(std::iter::repeat_n(
+            (None, lattice_conversation::UsageCompleteness::Partial, None),
+            2,
+        )),
     );
     let value = serde_json::to_value(&summary).unwrap();
     assert_eq!(value["input"]["known"], 1);

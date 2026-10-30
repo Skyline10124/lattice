@@ -31,6 +31,7 @@ async fn run_turn_result_and_saved_nodes_preserve_contract_fields() {
                 output: Some(5),
                 ..Default::default()
             }),
+            lattice_conversation::UsageCompleteness::Partial,
             None
         )])
     );
@@ -109,7 +110,14 @@ async fn provider_failure_preserves_notice_in_step_without_partial_reply() {
             .len(),
         3
     );
-    assert_eq!(*detail.usage, UsageSummary::from_attempts([(None, None)]));
+    assert_eq!(
+        *detail.usage,
+        UsageSummary::from_attempts([(
+            None,
+            lattice_conversation::UsageCompleteness::Partial,
+            None
+        )])
+    );
 }
 
 struct CancelOnDone(Arc<AtomicBool>);
@@ -182,6 +190,7 @@ async fn completed_attempt_usage_survives_cancellation_before_dispatch() {
                 output: Some(2),
                 ..Default::default()
             }),
+            lattice_conversation::UsageCompleteness::Partial,
             None
         )])
     );
