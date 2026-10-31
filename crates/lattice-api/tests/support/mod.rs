@@ -116,29 +116,32 @@ impl ReservedClient {
         let id = InvocationId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
         let lock = self.store.try_lock_session(sid).unwrap();
         self.store
-            .accept_turn(
-                &lock,
+            .accept_turn(&lock, {
+                let config = FrozenTurnConfig {
+                    effort: None,
+                    agent_name: "test".into(),
+                    model: "test".into(),
+                    provider: "openai-compatible".into(),
+                    system_prompt: None,
+                    catalog: self.catalog.clone(),
+                    limits: TurnExecutionLimits {
+                        timeout_secs: 300,
+                        max_model_steps: 32,
+                        max_model_attempts: 1,
+                    },
+                };
                 AcceptTurn {
+                    profile_copy: lattice_session::store::SessionProfileCopy::for_test(&config),
+                    expected_profile_digest: None,
                     session: AcceptSession::New { id: sid },
                     turn_id: tid,
                     project_store_key: self.project,
                     input: "component fixture".into(),
                     accepted_at: chrono::Utc::now(),
                     agent_selection: AgentSelection::Explicit,
-                    config: FrozenTurnConfig {
-                        agent_name: "test".into(),
-                        model: "test".into(),
-                        provider: "openai-compatible".into(),
-                        system_prompt: None,
-                        catalog: self.catalog.clone(),
-                        limits: TurnExecutionLimits {
-                            timeout_secs: 300,
-                            max_model_steps: 32,
-                            max_model_attempts: 1,
-                        },
-                    },
-                },
-            )
+                    config,
+                }
+            })
             .unwrap();
         let key = ModelAttemptKey {
             turn_id: tid,

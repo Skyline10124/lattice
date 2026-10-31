@@ -2070,3 +2070,585 @@ fn turn_and_session_identity_conflicts_are_rejected_without_dispatch() {
     }));
     support::finish_recorded(evidence, result);
 }
+
+// 后续提交与静态 head 对比都等待本轮关闭且后台交出执行权。
+fn closed_without_owner(
+    world: &ScenarioWorld,
+    budget: &ScenarioBudget,
+    evidence: &mut ScenarioEvidence,
+    tid: &str,
+) -> Value {
+    let turn = closed(world, budget, evidence, tid);
+    let sid = turn["session_id"].as_str().unwrap();
+    let mut watcher = Watcher::open(world, wait(budget), sid);
+    watcher.until(
+        Instant::now() + wait(budget),
+        "closed Turn without Owner",
+        |view| view.head.as_ref().is_some_and(|head| !head.owner) && turn_closed(view, tid),
+    );
+    turn
+}
+
+#[test]
+fn public_choices_persist_and_model_changes_use_supported_fallbacks() {
+    use lattice_system_harness::{ProviderFixture, ProviderTarget};
+    let (world, spec) = direct_world("background-model-effort-copy", "background", "[]", "");
+    let budget = world.budget(&spec);
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let server = wire_fake_llm(&world, "background", SseScript::plain("chosen reply"));
+        let other = ProviderFixture {
+            target: ProviderTarget::Custom("other"),
+            ..ProviderFixture::chat_completions("a")
+        };
+        world.wire_provider(other, &server, FAKE_API_KEY).unwrap();
+        let path = world.home().join(".lattice/providers.toml");
+        let mut registry: toml::Table =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        registry["providers"]
+            .as_table_mut()
+            .unwrap()
+            .get_mut("local")
+            .unwrap()
+            .as_table_mut()
+            .unwrap()
+            .insert("catalog".into(), "copy-fixture".into());
+        let base = toml::to_string(&registry).unwrap();
+        let cache = world.home().join(".lattice/cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(
+            cache.join("models.json"),
+            serde_json::to_vec(
+                &json!({"copy-fixture":{"models":{"old":{"id":"old","status":"deprecated"}}}}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let metadata = "\n[providers.local.models.a]\neffort=['off','low','high']\n[providers.local.models.b]\neffort=['high']\n[providers.local.models.c]\neffort=['low']\n[providers.other.models.a]\neffort=['medium']\n";
+        std::fs::write(&path, format!("{base}{metadata}")).unwrap();
+        world.write_project_file(".lattice/agents/background/agent.toml", "schema_version=1\n[agent]\nname='background'\neffort='low'\n[prompt]\nsystem='copy prompt'\n").unwrap();
+        let mut missing = submit_request(
+            &world,
+            FIRST,
+            json!({"new":NEW_SESSION}),
+            "missing model",
+            Some("background"),
+        );
+        let rejected = ipc(&world, wait(&budget), missing.clone());
+        assert_eq!(rejected["response"], "error");
+        assert_eq!(rejected["value"]["kind"], "bad_request");
+        assert!(
+            rejected["value"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("model selection or [agent].model")
+        );
+        assert!(server.captured_requests().is_empty());
+        assert!(!world.session_store_dir().join("lattice.redb").exists());
+        missing["request"]["model"] = json!("local/a");
+        missing["request"]["effort"] = json!("high");
+        let reply = ipc(&world, wait(&budget), missing);
+        assert_eq!(reply["response"], "acceptance", "{reply}");
+        assert_eq!(
+            closed_without_owner(&world, &budget, &mut evidence, FIRST)["summary"]["outcome"],
+            "completed"
+        );
+        let before = ipc(
+            &world,
+            wait(&budget),
+            json!({"operation":"head", "session_id":NEW_SESSION}),
+        );
+        let previous_log = read(
+            &world,
+            &budget,
+            &mut evidence,
+            &["--json", "session", "log", NEW_SESSION],
+        );
+        let count = server.captured_requests().len();
+        std::fs::write(
+            &path,
+            format!(
+                "{base}{}",
+                metadata.replace("['off','low','high']", "['low']")
+            ),
+        )
+        .unwrap();
+        // 同模型的已存档位失效时拒绝，不能静默改用仍受支持的默认 low。
+        for (tid, model) in [
+            ("00000000-0000-4000-8000-fffffffffff2", None),
+            ("00000000-0000-4000-8000-fffffffffff3", Some("local/a")),
+        ] {
+            let mut request = submit_request(
+                &world,
+                tid,
+                json!({"existing":NEW_SESSION}),
+                "saved effort no longer supported",
+                None,
+            );
+            request["request"]["model"] = json!(model);
+            let rejected = ipc(&world, wait(&budget), request);
+            assert_eq!(rejected["response"], "error", "{model:?}: {rejected}");
+            assert_eq!(rejected["value"]["kind"], "bad_request");
+            assert_eq!(server.captured_requests().len(), count);
+            assert_eq!(
+                ipc(
+                    &world,
+                    wait(&budget),
+                    json!({"operation":"head", "session_id":NEW_SESSION}),
+                ),
+                before
+            );
+            assert_eq!(
+                read(
+                    &world,
+                    &budget,
+                    &mut evidence,
+                    &["--json", "session", "log", NEW_SESSION],
+                ),
+                previous_log
+            );
+        }
+        std::fs::write(&path, format!("{base}{metadata}")).unwrap();
+        std::fs::remove_dir_all(world.project_dir().join(".lattice/agents/background")).unwrap();
+        let cases = [
+            (None, None, "a", Some("high")),
+            (Some("local/b"), None, "b", Some("high")),
+            (Some("local/c"), None, "c", Some("low")),
+            (Some("local/unknown"), None, "unknown", None),
+        ];
+        let mut ordinal = 1_u64;
+        let mut submit = |model: Option<&str>,
+                          effort: Option<&str>,
+                          expected_model: &str,
+                          expected_effort: Option<&str>,
+                          provider: &str| {
+            ordinal += 1;
+            let tid = format!("00000000-0000-4000-8000-{ordinal:012x}");
+            let mut request = submit_request(
+                &world,
+                &tid,
+                json!({"existing":NEW_SESSION}),
+                "next choice",
+                None,
+            );
+            request["request"]["model"] = json!(model);
+            request["request"]["effort"] = json!(effort);
+            let reply = ipc(&world, wait(&budget), request);
+            assert_eq!(reply["response"], "acceptance", "{tid}: {reply}");
+            assert_eq!(
+                closed_without_owner(&world, &budget, &mut evidence, &tid)["summary"]["outcome"],
+                "completed"
+            );
+            let head = ipc(
+                &world,
+                wait(&budget),
+                json!({"operation":"head", "session_id":NEW_SESSION}),
+            );
+            assert_eq!(head["value"]["model"], expected_model);
+            assert_eq!(head["value"]["provider"], provider);
+            assert_eq!(head["value"]["effort"], json!(expected_effort));
+            assert_eq!(head["value"]["profile_default_effort"], "low");
+            let capture = server.captured_requests().pop().unwrap();
+            assert_eq!(capture.raw["model"], expected_model);
+            assert_eq!(
+                capture.raw["reasoning_effort"],
+                json!(expected_effort.map(|effort| if effort == "off" { "none" } else { effort }))
+            );
+            let mut watcher = Watcher::open(&world, wait(&budget), NEW_SESSION);
+            let view = watcher.initial();
+            let user = &view.entries[&(2 * ordinal - 1)];
+            assert_eq!(user.raw["content"]["effort"], json!(expected_effort));
+        };
+        for (model, effort, expected_model, expected_effort) in cases {
+            submit(model, effort, expected_model, expected_effort, "local");
+        }
+        // 元数据开始支持默认档位后，同模型的空值仍保持为空。
+        std::fs::write(
+            &path,
+            format!("{base}{metadata}\n[providers.local.models.unknown]\neffort=['low']\n"),
+        )
+        .unwrap();
+        submit(None, None, "unknown", None, "local");
+        submit(Some("local/unknown"), None, "unknown", None, "local");
+        submit(Some("local/a"), None, "a", Some("low"), "local");
+        submit(None, Some("off"), "a", Some("off"), "local");
+        submit(None, None, "a", Some("off"), "local");
+        submit(Some("other/a"), None, "a", None, "other");
+        submit(
+            Some("other/a"),
+            Some("medium"),
+            "a",
+            Some("medium"),
+            "other",
+        );
+        submit(Some("local/org/model"), None, "org/model", None, "local");
+        submit(Some("local/old"), None, "old", None, "local");
+        let before = ipc(
+            &world,
+            wait(&budget),
+            json!({"operation":"head", "session_id":NEW_SESSION}),
+        );
+        let count = server.captured_requests().len();
+        let previous_log = read(
+            &world,
+            &budget,
+            &mut evidence,
+            &["--json", "session", "log", NEW_SESSION],
+        );
+        let mut bad = submit_request(
+            &world,
+            "00000000-0000-4000-8000-ffffffffffff",
+            json!({"existing":NEW_SESSION}),
+            "unsupported effort",
+            None,
+        );
+        bad["request"]["effort"] = json!("max");
+        let rejected = ipc(&world, wait(&budget), bad);
+        assert_eq!(rejected["response"], "error");
+        assert_eq!(rejected["value"]["kind"], "bad_request");
+        assert_eq!(server.captured_requests().len(), count);
+        assert_eq!(
+            ipc(
+                &world,
+                wait(&budget),
+                json!({"operation":"head", "session_id":NEW_SESSION})
+            ),
+            before
+        );
+        assert_eq!(
+            read(
+                &world,
+                &budget,
+                &mut evidence,
+                &["--json", "session", "log", NEW_SESSION]
+            ),
+            previous_log
+        );
+        let mut watcher = Watcher::open(&world, wait(&budget), NEW_SESSION);
+        let view = watcher.initial();
+        let head = view.head.as_ref().unwrap();
+        assert_eq!(head.model, "old");
+        assert_eq!(head.provider, "local");
+        assert_eq!(head.effort, None);
+        assert_eq!(head.profile_default_effort.as_deref(), Some("low"));
+        world.write_project_file(".lattice/agents/background/agent.toml", "schema_version=1\n[agent]\nname='background'\nmodel='local/a'\neffort='low'\n[prompt]\nsystem='rebuilt prompt'\n").unwrap();
+        let rebuilt_id = "00000000-0000-4000-8000-fffffffffff1";
+        let mut rebuilt = submit_request(
+            &world,
+            rebuilt_id,
+            json!({"existing":NEW_SESSION}),
+            "new agent baseline",
+            Some("background"),
+        );
+        rebuilt["request"]["model"] = json!("local/b");
+        assert_eq!(
+            ipc(&world, wait(&budget), rebuilt)["response"],
+            "acceptance"
+        );
+        closed_without_owner(&world, &budget, &mut evidence, rebuilt_id);
+        let rebuilt_head = ipc(
+            &world,
+            wait(&budget),
+            json!({"operation":"head", "session_id":NEW_SESSION}),
+        );
+        assert_eq!(rebuilt_head["value"]["model"], "b");
+        assert_eq!(rebuilt_head["value"]["effort"], Value::Null);
+        assert_eq!(rebuilt_head["value"]["profile_default_effort"], "low");
+        let capture = server.captured_requests().pop().unwrap();
+        assert_eq!(capture.raw["messages"][0]["content"], "rebuilt prompt");
+        assert!(capture.raw.get("reasoning_effort").is_none());
+        evidence.record_captures(server.captured_requests());
+        evidence.record_json("choices-head", &before).unwrap();
+    }));
+    support::finish_recorded(evidence, result);
+}
+
+#[test]
+fn profile_copy_survives_sources_and_explicit_same_agent_refreshes_policy() {
+    let (world, spec) = direct_world(
+        "background-copy-sources",
+        "background",
+        "[\"observe__workspace\"]",
+        "",
+    );
+    let budget = world.budget(&spec);
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let script = SseScript::Cycle {
+            scripts: vec![
+                tool_call(
+                    "read",
+                    "observe__workspace",
+                    r#"{"request":{"mode":"read_file","path":"visible.txt"}}"#,
+                ),
+                SseScript::plain("read done"),
+            ],
+        };
+        let first = wire_fake_llm(&world, "background", script.clone());
+        world
+            .write_project_file("visible.txt", "frozen visibility")
+            .unwrap();
+        world
+            .write_project_file("policy.toml", "[workspace]\ndenied_read_patterns=[]\n")
+            .unwrap();
+        world
+            .write_project_file(
+                ".lattice/agents/background/prompt.md",
+                "original external prompt",
+            )
+            .unwrap();
+        let original = "schema_version=1\n[agent]\nname='background'\nmodel='local/background'\n[prompt]\nsystem_path='prompt.md'\n[tools]\nenabled=['observe__workspace']\n[lancet.policy]\npath='policy.toml'\n";
+        world
+            .write_project_file(".lattice/agents/background/agent.toml", original)
+            .unwrap();
+        let mut ordinal = 0_u64;
+        let mut send =
+            |fresh: bool, agent: Option<&str>, sid: &str, prompt: &str, allowed: bool| {
+                ordinal += 1;
+                let tid = format!("00000000-0000-4000-8000-{ordinal:012x}");
+                let session = if fresh {
+                    json!({"new":sid})
+                } else {
+                    json!({"existing":sid})
+                };
+                let reply = ipc(
+                    &world,
+                    wait(&budget),
+                    submit_request(&world, &tid, session, "read visible", agent),
+                );
+                assert_eq!(reply["response"], "acceptance", "{reply}");
+                let turn = closed_without_owner(&world, &budget, &mut evidence, &tid);
+                assert_eq!(turn["summary"]["outcome"], "completed");
+                assert_eq!(
+                    turn["steps"][0]["slots"][0]["outcome"],
+                    if allowed { "succeeded" } else { "failed" }
+                );
+                if !allowed {
+                    let denied =
+                        turn["steps"][0]["slots"][0]["evidence"]["value"]["denied"]["denied"]
+                            .as_array()
+                            .expect("策略拒绝必须有结构化证据");
+                    assert!(
+                        denied.iter().any(|entry| entry["reason"] == "read_denied"
+                            && entry["target"]["path"] == "visible.txt"),
+                        "必须因策略禁止读取 visible.txt 而失败：{denied:?}"
+                    );
+                }
+                let mut watcher = Watcher::open(&world, wait(&budget), sid);
+                let view = watcher.initial();
+                assert_eq!(
+                    view.head.as_ref().unwrap().model,
+                    if prompt == "original external prompt" {
+                        "background"
+                    } else {
+                        "refreshed"
+                    }
+                );
+            };
+        send(
+            true,
+            Some("background"),
+            NEW_SESSION,
+            "original external prompt",
+            true,
+        );
+        let second = wire_fake_llm(&world, "background", script);
+        world
+            .write_project_file(
+                ".lattice/agents/background/prompt.md",
+                "changed external prompt",
+            )
+            .unwrap();
+        world
+            .write_project_file(
+                "policy.toml",
+                "[workspace]\ndenied_read_patterns=['visible.txt']\n",
+            )
+            .unwrap();
+        world
+            .write_project_file(
+                ".lattice/agents/background/agent.toml",
+                &original.replace("local/background", "local/refreshed"),
+            )
+            .unwrap();
+        send(false, None, NEW_SESSION, "original external prompt", true);
+        std::fs::remove_file(world.project_dir().join("policy.toml")).unwrap();
+        std::fs::remove_dir_all(world.project_dir().join(".lattice/agents/background")).unwrap();
+        send(false, None, NEW_SESSION, "original external prompt", true);
+        let before = ipc(
+            &world,
+            wait(&budget),
+            json!({"operation":"head", "session_id":NEW_SESSION}),
+        );
+        let missing = ipc(
+            &world,
+            wait(&budget),
+            submit_request(
+                &world,
+                "00000000-0000-4000-8000-ffffffffffff",
+                json!({"existing":NEW_SESSION}),
+                "refresh missing",
+                Some("background"),
+            ),
+        );
+        assert_eq!(missing["response"], "error");
+        assert_eq!(
+            ipc(
+                &world,
+                wait(&budget),
+                json!({"operation":"head", "session_id":NEW_SESSION})
+            ),
+            before
+        );
+        world.write_project_file(".lattice/agents/background/agent.toml", "schema_version=1\n[agent]\nname='background'\nmodel='local/refreshed'\n[prompt]\nsystem='refreshed prompt'\n[tools]\nenabled=['observe__workspace']\n[lancet.workspace]\ndenied_read_patterns=['visible.txt']\n").unwrap();
+        send(
+            false,
+            Some("background"),
+            NEW_SESSION,
+            "refreshed prompt",
+            false,
+        );
+        send(
+            true,
+            Some("background"),
+            "5e550000000000000000000000000002",
+            "refreshed prompt",
+            false,
+        );
+        assert_eq!(first.captured_requests().len(), 2);
+        let captures = second.captured_requests();
+        assert_eq!(captures.len(), 8);
+        for (index, capture) in captures.iter().enumerate() {
+            assert_eq!(
+                capture.raw["messages"][0]["content"],
+                if index < 4 {
+                    "original external prompt"
+                } else {
+                    "refreshed prompt"
+                }
+            );
+            assert_eq!(
+                capture.raw["model"],
+                if index < 4 { "background" } else { "refreshed" }
+            );
+        }
+        evidence.record_captures(first.captured_requests());
+        evidence.record_captures(captures);
+    }));
+    support::finish_recorded(evidence, result);
+}
+
+#[test]
+fn accepted_effort_survives_retry_and_tools_while_global_budget_reloads() {
+    let (world, spec) = direct_world(
+        "background-effort-reload",
+        "background",
+        "[\"observe__workspace\"]",
+        "",
+    );
+    let budget = world.budget(&spec);
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let script = SseScript::Sequence {
+            scripts: vec![
+                SseScript::HttpError {
+                    status: 503,
+                    body: "retry later".into(),
+                },
+                tool_call(
+                    "first-read",
+                    "observe__workspace",
+                    r#"{"request":{"mode":"read_file","path":"visible.txt"}}"#,
+                ),
+                tool_call(
+                    "second-read",
+                    "observe__workspace",
+                    r#"{"request":{"mode":"read_file","path":"visible.txt"}}"#,
+                ),
+                SseScript::plain("must not run"),
+            ],
+        };
+        let (server, gate) = wire_gated_fake_llm(&world, "background", script);
+        world.write_project_file("visible.txt", "visible").unwrap();
+        let path = world.home().join(".lattice/providers.toml");
+        let mut config: toml::Table =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let provider = config
+            .get_mut("providers")
+            .unwrap()
+            .as_table_mut()
+            .unwrap()
+            .get_mut("local")
+            .unwrap()
+            .as_table_mut()
+            .unwrap();
+        provider.insert("catalog".into(), "custom".into());
+        provider.insert(
+            "features".into(),
+            toml::Value::Table(
+                toml::from_str(
+                    "thinking_budget='thinking-budget'\nthinking_toggle='enable-thinking'",
+                )
+                .unwrap(),
+            ),
+        );
+        std::fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
+        let cache = world.home().join(".lattice/cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let metadata = |output| json!({"custom":{"models":{"background":{"id":"background","limit":{"output":output},"reasoning_options":[{"type":"toggle"},{"type":"budget_tokens"}]}}}});
+        std::fs::write(
+            cache.join("models.json"),
+            serde_json::to_vec(&metadata(65536)).unwrap(),
+        )
+        .unwrap();
+        let mut request = submit_request(
+            &world,
+            FIRST,
+            json!({"new":NEW_SESSION}),
+            "retry and tools",
+            Some("background"),
+        );
+        request["request"]["effort"] = json!("high");
+        assert_eq!(
+            ipc(&world, wait(&budget), request)["response"],
+            "acceptance"
+        );
+        gate.wait_until_stalled(1, wait(&budget)).unwrap();
+        assert_eq!(server.captured_requests()[0].raw["thinking_budget"], 16384);
+        std::fs::write(
+            cache.join("models.json"),
+            serde_json::to_vec(&metadata(24576)).unwrap(),
+        )
+        .unwrap();
+        gate.release_next(wait(&budget)).unwrap();
+        gate.wait_until_stalled(2, wait(&budget)).unwrap();
+        assert_eq!(server.captured_requests()[1].raw["thinking_budget"], 12288);
+        gate.release_next(wait(&budget)).unwrap();
+        gate.wait_until_stalled(3, wait(&budget)).unwrap();
+        assert_eq!(server.captured_requests()[2].raw["thinking_budget"], 12288);
+        config["providers"]["local"]["features"]["thinking_budget"] = "none".into();
+        std::fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
+        gate.release_next(wait(&budget)).unwrap();
+        let turn = closed_without_owner(&world, &budget, &mut evidence, FIRST);
+        assert_eq!(turn["summary"]["outcome"], "failed");
+        assert_eq!(turn["steps"].as_array().unwrap().len(), 3);
+        assert_eq!(turn["steps"][0]["attempts"].as_array().unwrap().len(), 2);
+        assert_eq!(server.captured_requests().len(), 3);
+        let head = ipc(
+            &world,
+            wait(&budget),
+            json!({"operation":"head", "session_id":NEW_SESSION}),
+        );
+        assert_eq!(head["value"]["effort"], "high");
+        let mut watcher = Watcher::open(&world, wait(&budget), NEW_SESSION);
+        assert_eq!(
+            watcher.initial().entries[&1].raw["content"]["effort"],
+            "high"
+        );
+        evidence.record_captures(server.captured_requests());
+        evidence
+            .record_json("effort-after-global-change", &head)
+            .unwrap();
+    }));
+    support::finish_recorded(evidence, result);
+}

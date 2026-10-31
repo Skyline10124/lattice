@@ -130,6 +130,38 @@ impl GatewayTurn {
         AuthStore::new(self.configuration.directory.clone())
     }
 
+    /// 只读当前 provider 与模型元数据，返回按强度排序的可表达档位；不要求凭据。
+    /// target 的 effort 不参与能力查询，发送前仍须 resolve 最终选择。
+    pub async fn supported_efforts(
+        &self,
+        target: &ModelTarget,
+    ) -> Result<Vec<lattice_conversation::Effort>, LlmError> {
+        lattice_conversation::validate_provider_id(&target.provider)
+            .map_err(configuration_error)?;
+        validate_model_id(&target.model).map_err(configuration_error)?;
+        let directory = self.configuration.directory.clone();
+        let target = target.clone();
+        tokio::task::spawn_blocking(move || {
+            let registry = ProviderRegistry::load(directory.join("providers.toml"))
+                .map_err(configuration_error)?;
+            let provider = registry
+                .get(&target.provider)
+                .ok_or_else(|| missing_provider_error(&registry, &target.provider))?;
+            let models = crate::metadata::Metadata::load(&directory).merge(provider);
+            let features = provider
+                .models
+                .get(&target.model)
+                .map_or(provider.features, |model| model.features);
+            let capabilities = ReasoningCapabilities::new(models.get(&target.model), features);
+            Ok(lattice_conversation::Effort::ALL
+                .into_iter()
+                .filter(|effort| capabilities.select(*effort).is_some())
+                .collect())
+        })
+        .await
+        .map_err(|_| configuration_error("model capabilities task failed"))?
+    }
+
     /// 每次解析读取当前配置与凭据；发送句柄独占这一次解析结果。
     pub async fn resolve(&self, target: &ModelTarget) -> Result<ResolvedRequest, LlmError> {
         let provider_id = target.provider.as_str();

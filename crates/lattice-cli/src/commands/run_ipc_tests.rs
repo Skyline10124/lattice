@@ -372,6 +372,10 @@ pub(super) fn detail(id: TurnId, outcome: &str) -> TurnDetail {
 }
 pub(super) fn head(id: TurnId, owner: bool) -> SessionHead {
     SessionHead {
+        model: "test".into(),
+        provider: "openai-compatible".into(),
+        effort: None,
+        profile_default_effort: None,
         session_id: sid(),
         position: NodeId(2),
         agent: Some("test".into()),
@@ -619,6 +623,7 @@ async fn follow_requeries_latest_conclusion_after_rewind_into_the_selected_turn(
                     node: NodeId(1),
                     ordinal: 1,
                     content: Node::UserMessage {
+                        effort: None,
                         parent: NodeId(0),
                         turn_id: id,
                         accepted_at: latest.accepted_at,
@@ -756,6 +761,8 @@ async fn late_acceptance_keeps_the_printed_unknown_receipt_and_exit_one() {
     let peer = Peer::new();
     let id = lattice_api::local::new_turn_id();
     let turn = peer.client.start_turn(TurnRequest {
+        model: None,
+        effort: None,
         turn_id: id,
         session: SubmitSession::New(sid()),
         workspace: peer._root.path().into(),

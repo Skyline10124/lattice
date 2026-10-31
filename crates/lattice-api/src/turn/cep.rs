@@ -20,7 +20,9 @@ use lattice_profile::{LancetNetworkSection, LancetObservationSection, LancetSect
 use serde_json::Value;
 
 use crate::session::ApiError;
-use crate::turn::types::{RunTurnRequest, TurnEvent};
+#[cfg(test)]
+use crate::turn::types::RunTurnRequest;
+use crate::turn::types::TurnEvent;
 
 /// 运行时错误在构造公开配置诊断前，先按后台当前凭据脱敏。
 fn map_lancet_err(err: LancetError, gateway: Option<&lattice_llm::RequestGateway>) -> ApiError {
@@ -45,7 +47,7 @@ pub(crate) struct ProductionTurnDeps {
 }
 
 pub(crate) struct ProductionTurnDepsInput<'a> {
-    pub request: &'a RunTurnRequest,
+    pub capability_admission: lancet_protocol::evidence::CapabilityAdmissionPolicy,
     pub project_root: &'a str,
     /// Project identity validated from SessionState.
     pub project_store_key: lattice_session::ProjectStoreKey,
@@ -302,7 +304,7 @@ pub(crate) async fn build_production_turn_deps(
     input: ProductionTurnDepsInput<'_>,
 ) -> Result<ProductionTurnDeps, ApiError> {
     let ProductionTurnDepsInput {
-        request,
+        capability_admission,
         project_root,
         project_store_key,
         state_layout,
@@ -316,11 +318,6 @@ pub(crate) async fn build_production_turn_deps(
         .as_ref()
         .map_or_else(Vec::new, |gateway| gateway.tls_roots_der().to_vec());
     let lancet = lancet.cloned();
-    let capability_admission = request
-        .loaded_profile
-        .as_ref()
-        .map(|loaded| loaded.profile.capability_admission_policy())
-        .unwrap_or_default();
     tokio::task::spawn_blocking(move || {
         let canonical_root = std::fs::canonicalize(&project_root).map_err(|err| {
             ApiError::BadRequest(format!("cannot canonicalize Local Workspace root: {err}"))
@@ -590,6 +587,8 @@ enabled = ["{tool}"]
         let llm: std::sync::Arc<dyn lattice_agent::LlmClient> =
             std::sync::Arc::new(FakeStreamingLlmClient::builder().build());
         let request = RunTurnRequest {
+            model: None,
+            effort: None,
             input: "hi".into(),
             session_id: None,
             agent: Some(profile.profile.agent.name.clone()),
@@ -603,7 +602,12 @@ enabled = ["{tool}"]
         };
         let enabled_tools = ["session__todo_write".to_string()];
         build_production_turn_deps(ProductionTurnDepsInput {
-            request: &request,
+            capability_admission: request
+                .loaded_profile
+                .as_ref()
+                .unwrap()
+                .profile
+                .capability_admission_policy(),
             project_root: project.path().to_str().unwrap(),
             project_store_key: project_key,
             state_layout: layout,

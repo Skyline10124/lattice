@@ -292,6 +292,7 @@ mod tests {
             .find(|t| t.name == "mutate__create")
             .unwrap();
         let config = FrozenTurnConfig {
+            effort: None,
             agent_name: "test".into(),
             model: "model".into(),
             provider: "openai".into(),
@@ -325,6 +326,8 @@ mod tests {
                     project_store_key: lattice_store::ProjectStoreKey::derive(env.workspace.path())
                         .unwrap(),
                     input: "create".into(),
+                    profile_copy: SessionProfileCopy::for_test(&config),
+                    expected_profile_digest: None,
                     config,
                     accepted_at: now,
                     agent_selection: AgentSelection::Explicit,

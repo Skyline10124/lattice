@@ -7,7 +7,7 @@
 - `local/client.rs`：LocalClient 的连接与分帧，转交视图与查询；`stop` 收到回执后限时等待 socket 撤下、`owner.lock` 可取得后返回。
 - `local/auth.rs`：后台凭据目录、录入材料与凭据错误映射。录入材料只随请求帧进入后台。
 - `local/metadata.rs`：模型元数据的定时与手动刷新。默认每 24 小时刷新：启动时缓存不足 24 小时则等到期再拉取，否则立即拉取。每次触发都读 `[metadata] auto_refresh`，关闭时跳过本次；配置无效或拉取失败时从 1 分钟起翻倍退避重试，上限 1 小时。手动刷新与定时任务共享同一次在途操作。停止信号只结束刷新任务。
-- `local/operation.rs`：LocalTurn 是本客户端一次提交的具体句柄，管理提交、在途取消与退出交接；前端生成身份、交出 agent、模型与推理档位的选择（模型与推理档位待实现，由 #315 L4 承接）并消费视图，配置由后台读取，持久 Turn 仍由后台执行。接口分层见[公开操作](../../docs/architecture/session.md#实现模块与公开操作)。
+- `local/operation.rs`：LocalTurn 是本客户端一次提交的具体句柄，管理提交、在途取消与退出交接；前端生成身份、交出 agent、模型与推理档位的选择并消费视图，配置由后台读取，持久 Turn 仍由后台执行。接口分层见[公开操作](../../docs/architecture/session.md#实现模块与公开操作)。
 - `local/server.rs`：serve 持实例资源和连接，并在启动时拉起元数据刷新任务。Backend 管准入、存储句柄、视图及本进程完成诊断，Owner 监督独立操作。`stop` 先取消刷新任务，再等待已接管的 Turn 收尾。接管、同一取消载体与独立收尾遵循[取消与退出](../../docs/architecture/session.md#取消与退出)。
 - `models.rs`：公开模型候选类型，并转发日志初始化。
 - `session.rs`：公开会话操作、固定读取、ID 解析和结构化错误映射。

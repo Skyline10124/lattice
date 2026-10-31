@@ -138,6 +138,8 @@ async fn backend_with_roots(
 }
 fn request(dir: &std::path::Path) -> TurnRequest {
     TurnRequest {
+        model: None,
+        effort: None,
         turn_id: super::super::new_turn_id(),
         session: SubmitSession::New(super::super::new_session_id()),
         workspace: dir.into(),
@@ -645,11 +647,43 @@ async fn seed_round(backend: &Backend, sid: SessionId, fresh: bool) -> TurnId {
         crate::LocalWorkspaceRoot::from_path(backend.layout.lattice_root().parent().unwrap())
             .unwrap()
             .store_key();
+    let project_root = backend
+        .layout
+        .lattice_root()
+        .parent()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
     api.blocking(move |api| {
         let guard = api.store.try_lock_session(sid)?;
-        api.store.accept_turn(
-            &guard,
+        api.store.accept_turn(&guard, {
+            let config = FrozenTurnConfig {
+                effort: None,
+                agent_name: "local-test".into(),
+                model: "test".into(),
+                provider: "local".into(),
+                system_prompt: None,
+                catalog: ToolCatalogSnapshot::new("test".into(), vec![]).unwrap(),
+                limits: TurnExecutionLimits {
+                    timeout_secs: 300,
+                    max_model_steps: 32,
+                    max_model_attempts: 2,
+                },
+            };
             AcceptTurn {
+                profile_copy: {
+                    let mut copy = lattice_session::store::SessionProfileCopy::for_test(&config);
+                    copy.profile.policy.project_root = project_root;
+                    copy
+                },
+                expected_profile_digest: api
+                    .store
+                    .begin_read()?
+                    .profile_copy(sid)
+                    .ok()
+                    .map(|copy| copy.digest())
+                    .transpose()?,
                 session: if fresh {
                     AcceptSession::New { id: sid }
                 } else {
@@ -660,20 +694,9 @@ async fn seed_round(backend: &Backend, sid: SessionId, fresh: bool) -> TurnId {
                 input: "seed".into(),
                 accepted_at: chrono::Utc::now(),
                 agent_selection: AgentSelection::Explicit,
-                config: FrozenTurnConfig {
-                    agent_name: "local-test".into(),
-                    model: "test".into(),
-                    provider: "openai-compatible".into(),
-                    system_prompt: None,
-                    catalog: ToolCatalogSnapshot::new("test".into(), vec![]).unwrap(),
-                    limits: TurnExecutionLimits {
-                        timeout_secs: 300,
-                        max_model_steps: 32,
-                        max_model_attempts: 2,
-                    },
-                },
-            },
-        )?;
+                config,
+            }
+        })?;
         Ok(())
     })
     .await
@@ -869,7 +892,7 @@ async fn slow_observer_reads_latest_entries_suffixes_and_attempt_boundaries() {
     };
     let attempt_origin = AttemptOrigin {
         protocol: AttemptProtocol::ChatCompletions,
-        provider_id: "openai-compatible".into(),
+        provider_id: "local".into(),
     };
     io.start_request(key, attempt_origin.clone()).await.unwrap();
     sink.emit(crate::TurnEvent::ModelStarted {
@@ -1720,7 +1743,7 @@ async fn different_sessions_overlap_and_keep_their_frozen_configuration() {
     finish(&backend, task).await;
 }
 #[tokio::test]
-async fn existing_orphan_accepts_new_input_without_mutating_old_nodes_and_root_requires_agent() {
+async fn existing_orphan_and_root_inherit_copy_without_mutating_old_nodes() {
     let (dir, backend, client, task) = backend().await;
     let sid = super::super::new_session_id();
     let old = seed_round(&backend, sid, true).await;
@@ -1754,21 +1777,19 @@ async fn existing_orphan_accepts_new_input_without_mutating_old_nodes_and_root_r
         .unwrap();
     let mut root_request = next;
     root_request.turn_id = super::super::new_turn_id();
+    client
+        .submit({
+            config(dir.path(), &provider.endpoint);
+            root_request.clone()
+        })
+        .await
+        .unwrap();
+    idle(&backend).await;
     assert_eq!(
-        client
-            .submit({
-                config(dir.path(), &provider.endpoint);
-                root_request.clone()
-            })
-            .await
-            .unwrap_err()
-            .kind,
-        LocalErrorKind::BadRequest
+        client.session_head(sid).await.unwrap().agent.as_deref(),
+        Some("local-test")
     );
-    assert_eq!(
-        client.turn(root_request.turn_id).await.unwrap_err().kind,
-        LocalErrorKind::NotFound
-    );
+    root_request.turn_id = super::super::new_turn_id();
     root_request.agent = Some("local-test".into());
     client
         .submit({
@@ -1779,7 +1800,7 @@ async fn existing_orphan_accepts_new_input_without_mutating_old_nodes_and_root_r
         .unwrap();
     idle(&backend).await;
     assert_eq!(client.turn(old).await.unwrap(), before);
-    assert_eq!(provider.finish().await.len(), 2);
+    assert_eq!(provider.finish().await.len(), 3);
     finish(&backend, task).await;
 }
 #[tokio::test]

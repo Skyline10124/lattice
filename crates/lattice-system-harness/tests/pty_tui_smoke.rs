@@ -71,6 +71,7 @@ fn two_step_script() -> lattice_system_harness::SseScript {
                     .collect(),
                 finish_reason: "stop".into(),
             },
+            SseScript::plain("second copy reply"),
         ],
     }
 }
@@ -170,6 +171,15 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
                 .any(|c| c.model == "tui-smoke" && c.message_roles.iter().any(|r| r == "user")),
             "fake LLM did not receive the expected request; captures: {caps:?}"
         );
+
+        // 首次接受消费启动 agent；删去源 profile 后第二次提交仍继承副本。
+        std::fs::remove_dir_all(world.project_dir().join(".lattice/agents/tui-smoke")).unwrap();
+        tui.send_line("ping from copy").unwrap();
+        tui.wait_for(Duration::from_secs(30), |screen| {
+            screen.contains("second copy reply")
+        })
+        .unwrap();
+        assert_eq!(server.captured_requests().len(), 3);
 
         // `/quit` must exit the TUI **by itself**. Observe the child's own exit
         // before `Drop` runs: Drop kills the process group, so a survivor check

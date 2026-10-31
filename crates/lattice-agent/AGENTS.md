@@ -2,7 +2,7 @@
 
 ## 职责
 
-`ModelStepDriver` 驱动一次 provider attempt：从类型化历史组装请求，按 provider `id`、模型 `id` 与推理档位（推理档位待实现，由 #315 L4 承接）经 `lattice-llm` 的请求网关打开并消费流，把取消与 deadline 交给共同流包装器，通过同步非阻塞回调转交同一次累积的显示增量并返回类型化结果。调用方在回调中先把正文与 reasoning delta 追加到当前尝试已生成的文字（会话合同称为段列表），再通知观察者；通知可以合并，显示用的文字不会因此缺失。交接规则见[观察与重连](../../docs/architecture/session.md#观察与重连)。
+`ModelStepDriver` 驱动一次 provider attempt：从类型化历史组装请求，按 provider `id`、模型 `id` 与推理档位经 `lattice-llm` 的请求网关打开并消费流，把取消与 deadline 交给共同流包装器，通过同步非阻塞回调转交同一次累积的显示增量并返回类型化结果。调用方在回调中先把正文与 reasoning delta 追加到当前尝试已生成的文字（会话合同称为段列表），再通知观察者；通知可以合并，显示用的文字不会因此缺失。交接规则见[观察与重连](../../docs/architecture/session.md#观察与重连)。
 
 - `src/model_step.rs`：请求组装、打开阶段的取消与 deadline、流事件到 attempt 结果的映射。
 - `src/testing.rs`：feature 控制的确定性 provider 响应。

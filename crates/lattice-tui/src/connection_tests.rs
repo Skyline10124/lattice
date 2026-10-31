@@ -1302,3 +1302,74 @@ fn detach_lines_describe_receipts_cancel_and_outcome_in_words() {
             .contains(&outcome)
     );
 }
+
+#[test]
+fn startup_agent_is_consumed_only_by_its_accepted_submission() {
+    let options = TuiOptions {
+        agent: "unused".into(),
+        session_id: None,
+        session_dir: "/tmp/unused-tui-history".into(),
+        project_root: "/tmp".into(),
+    };
+    for proof in 0..3 {
+        let mut app = test_app(true);
+        open_view(&mut app, head(0, None, false), vec![]);
+        app.input.set_text("first");
+        let prompt = app.submit().unwrap();
+        let request = begin_turn(&options, &mut app, prompt).unwrap();
+        assert_eq!(request.agent.as_deref(), Some("unused"));
+        app.apply_submission(receipt(
+            request.turn_id,
+            SubmissionResult::Rejected {
+                error: local_error(LocalErrorKind::BadRequest, "bad profile"),
+            },
+        ));
+        assert_eq!(app.pending_agent.as_deref(), Some("unused"));
+        let prompt = app.submit().unwrap();
+        let retry = begin_turn(&options, &mut app, prompt).unwrap();
+        assert_eq!(retry.agent.as_deref(), Some("unused"));
+        app.apply_submission(receipt(
+            retry.turn_id,
+            SubmissionResult::Unknown { error: None },
+        ));
+        assert_eq!(app.pending_agent.as_deref(), Some("unused"));
+        app.apply_recovery(turn(99), Ok(turn_detail(turn(99))));
+        assert_eq!(app.pending_agent.as_deref(), Some("unused"));
+        match proof {
+            0 => app.apply_submission(receipt(retry.turn_id, accepted(retry.turn_id))),
+            1 => app.apply_recovery(retry.turn_id, Ok(turn_detail(retry.turn_id))),
+            _ => app.apply_view(entry_update(user(1, retry.turn_id, 1, "first"))),
+        }
+        assert_eq!(app.pending_agent, None, "proof {proof}");
+        app.begin_view();
+        open_view(&mut app, head(0, None, false), vec![]);
+        app.awaiting_head = None;
+        app.input.set_text("second");
+        let prompt = app.submit().unwrap();
+        let next = begin_turn(&options, &mut app, prompt).unwrap();
+        assert_eq!(next.agent, None, "proof {proof}");
+    }
+}
+
+#[test]
+fn current_model_comes_from_head_after_rewind_and_root() {
+    let mut app = test_app(true);
+    let mut current = head(2, Some(turn(1)), false);
+    current.agent = Some("latest-copy-agent".into());
+    current.model = "latest-copy-model".into();
+    current.provider = "latest-provider".into();
+    open_view(&mut app, current.clone(), turns(1..=1));
+    assert_eq!(app.model.as_deref(), Some("latest-copy-model"));
+    assert_eq!(app.provider.as_deref(), Some("latest-provider"));
+    current.position = NodeId(0);
+    current.turn_id = None;
+    current.path_replaced = true;
+    app.apply_view(LocalUpdate::Head(current));
+    assert_eq!(app.model.as_deref(), Some("latest-copy-model"));
+    assert_eq!(app.provider.as_deref(), Some("latest-provider"));
+    app.apply_submission(receipt(turn(1), accepted(turn(1))));
+    assert_eq!(
+        app.ctx.active_agent, "latest-copy-agent",
+        "迟到回执不覆盖副本的当前身份"
+    );
+}

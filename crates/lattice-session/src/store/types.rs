@@ -60,6 +60,7 @@ pub enum Node {
         agent_name: String,
         model: String,
         provider: String,
+        effort: Option<lattice_conversation::Effort>,
         limits: TurnExecutionLimits,
         #[serde(with = "hex_digest")]
         config_digest: [u8; 32],
@@ -337,6 +338,8 @@ pub struct AcceptTurn {
     pub config: FrozenTurnConfig,
     pub accepted_at: Timestamp,
     pub agent_selection: AgentSelection,
+    pub profile_copy: super::SessionProfileCopy,
+    pub expected_profile_digest: Option<[u8; 32]>,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub enum AcceptedTurn {

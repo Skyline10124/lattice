@@ -27,6 +27,47 @@ const DONE: &str = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish
 const MESSAGES_DONE: &str = "event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"ok\"}}\n\nevent: content_block_stop\ndata: {\"index\":0}\n\nevent: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\nevent: message_stop\ndata: {}\n\n";
 const CONTENT_DONE: &str = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}\n\n";
 
+#[tokio::test]
+async fn supported_efforts_reads_current_metadata_without_credentials() {
+    use lattice_conversation::Effort;
+    let directory = private_dir();
+    let path = directory.path().join("providers.toml");
+    let base = "[metadata]\nauto_refresh=false\n[providers.test]\nprotocol='chat-completions'\nbase_url='http://localhost:1/v1'\n";
+    std::fs::write(
+        &path,
+        format!("{base}[providers.test.models.model]\neffort=['high','off','low']\n"),
+    )
+    .unwrap();
+    let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
+    let turn = gateway.open_turn();
+    let target = ModelTarget::new("test", "model");
+    assert_eq!(
+        turn.supported_efforts(&target).await.unwrap(),
+        vec![Effort::Off, Effort::Low, Effort::High]
+    );
+    assert!(turn.resolve(&target).await.is_err());
+    std::fs::write(
+        &path,
+        format!("{base}[providers.test.models.model]\neffort=['medium']\n"),
+    )
+    .unwrap();
+    assert_eq!(
+        turn.supported_efforts(&target).await.unwrap(),
+        vec![Effort::Medium]
+    );
+    assert!(
+        turn.supported_efforts(&ModelTarget::new("test", "unknown"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        turn.supported_efforts(&ModelTarget::new("missing", "model"))
+            .await
+            .is_err()
+    );
+}
+
 fn private_dir() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     // 临时目录权限取决于 umask，这里固定为 0700，避免结果随环境变化。

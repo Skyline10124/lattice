@@ -18,9 +18,23 @@ fn seed(layout: &StateLayout, root: &std::path::Path) {
 fn seed_session(store: &SessionStore, root: &std::path::Path, sid: SessionId, tid: TurnId) {
     let guard = store.try_lock_session(sid).unwrap();
     store
-        .accept_turn(
-            &guard,
+        .accept_turn(&guard, {
+            let config = FrozenTurnConfig {
+                effort: None,
+                agent_name: "alpha".into(),
+                model: "test".into(),
+                provider: "openai-compatible".into(),
+                system_prompt: None,
+                catalog: ToolCatalogSnapshot::new("test".into(), vec![]).unwrap(),
+                limits: TurnExecutionLimits {
+                    timeout_secs: 300,
+                    max_model_steps: 32,
+                    max_model_attempts: 2,
+                },
+            };
             AcceptTurn {
+                profile_copy: lattice_session::store::SessionProfileCopy::for_test(&config),
+                expected_profile_digest: None,
                 session: AcceptSession::New { id: sid },
                 turn_id: tid,
                 project_store_key: lattice_api::LocalWorkspaceRoot::from_path(root)
@@ -29,20 +43,9 @@ fn seed_session(store: &SessionStore, root: &std::path::Path, sid: SessionId, ti
                 input: "原始输入".into(),
                 accepted_at: chrono::Utc::now(),
                 agent_selection: AgentSelection::Explicit,
-                config: FrozenTurnConfig {
-                    agent_name: "alpha".into(),
-                    model: "test".into(),
-                    provider: "openai-compatible".into(),
-                    system_prompt: None,
-                    catalog: ToolCatalogSnapshot::new("test".into(), vec![]).unwrap(),
-                    limits: TurnExecutionLimits {
-                        timeout_secs: 300,
-                        max_model_steps: 32,
-                        max_model_attempts: 2,
-                    },
-                },
-            },
-        )
+                config,
+            }
+        })
         .unwrap();
 }
 
