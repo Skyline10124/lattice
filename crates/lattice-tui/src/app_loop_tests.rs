@@ -1224,8 +1224,14 @@ struct Frame {
     usage: Option<UsageSummary>,
     context_tokens: Option<u64>,
     statusline: String,
+    panel: String,
 }
 fn frame(app: &App) -> Frame {
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 20)).unwrap();
+    terminal
+        .draw(|frame| Dock::new(app).render(frame, frame.area()))
+        .unwrap();
+    let panel = buffer_text(terminal.backend().buffer());
     Frame {
         phase: app.phase,
         session: app.ctx.session_id,
@@ -1240,6 +1246,7 @@ fn frame(app: &App) -> Frame {
         usage: app.turn_usage.clone(),
         context_tokens: app.context_tokens,
         statusline: crate::view::statusline_text(app, 200),
+        panel,
     }
 }
 
@@ -1321,7 +1328,13 @@ impl Remote {
     async fn wait_within(&self, limit: Duration, predicate: impl FnMut(&Frame) -> bool) -> Frame {
         tokio::time::timeout(limit, self.frames.clone().wait_for(predicate))
             .await
-            .unwrap()
+            .unwrap_or_else(|_| {
+                let frame = self.frames.borrow();
+                panic!(
+                    "等待帧超时：panel={} statusline={} input={} dock={}",
+                    frame.panel, frame.statusline, frame.input, frame.dock
+                )
+            })
             .unwrap()
             .clone()
     }
@@ -2012,6 +2025,120 @@ async fn paging_up_queries_turns_before_the_earliest_user_message() {
 }
 
 #[tokio::test]
+async fn paged_acceptance_after_unknown_and_reconnect_consumes_old_choices() {
+    use lattice_api::Effort::{Low, Off};
+    let original = Views::default();
+    let original_tx = original.clone();
+    let reconnected = Views::default();
+    let reconnected_tx = reconnected.clone();
+    let mut watches = 0;
+    let mut first = None;
+    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
+        "watch" => {
+            watches += 1;
+            if watches == 1 {
+                original.subscribe()
+            } else {
+                reconnected.subscribe()
+            }
+        }
+        "submit" if first.is_none() => {
+            first = Some(request_turn(r));
+            Reply::Now(response(
+                "acceptance",
+                json!({"acceptance":"confirmation_unknown","turn_id":r["request"]["turn_id"],"session_id":SESSION}),
+            ))
+        }
+        "submit" => Reply::Now(error_reply(local_error(
+            LocalErrorKind::Busy,
+            "next captured",
+        ))),
+        "turn" => Reply::Now(error_reply(local_error(
+            LocalErrorKind::Transport,
+            "lookup unavailable",
+        ))),
+        "history" => {
+            let id = first.unwrap();
+            Reply::Now(response(
+                "history",
+                serde_json::to_value(LocalHistory {
+                    entries: vec![
+                        user(1, id, 1, "unknown first"),
+                        step(2, id, 0).text("paged answer").finished().entry(),
+                    ],
+                })
+                .unwrap(),
+            ))
+        }
+        _ => Reply::Never,
+    });
+    let mut h = Harness::new(false);
+    h.app
+        .selection
+        .choose_model(model_candidate("p", "pending", &[Low]));
+    h.app.selection.choose_effort(Low);
+    let remote = h.remote.clone();
+    let driver = async {
+        original_tx.push([head_reply(head(0, None, false))]);
+        remote.wait(|f| f.connected).await;
+        remote.line("unknown first");
+        let unknown = remote.wait(|f| f.dock.contains("lookup unavailable")).await;
+        assert!(unknown.statusline.contains("pending") && unknown.statusline.contains("low"));
+        original_tx.push([error_reply(local_error(
+            LocalErrorKind::Transport,
+            "view interrupted",
+        ))]);
+        remote.wait(|f| !f.connected).await;
+        remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
+        let mut current = head(22, Some(numbered_turn(11)), false);
+        current.provider = "other".into();
+        current.model = "current".into();
+        current.effort = Some(Off);
+        reconnected_tx.push([head_reply(current)]);
+        reconnected_tx.push(turns(2..=11).into_iter().map(entry_reply));
+        remote.line("/reconnect");
+        let recent = remote
+            .wait(|f| f.connected && f.text.contains("answer-11") && f.phase == TurnPhase::Idle)
+            .await;
+        assert!(
+            !recent.text.contains("paged answer"),
+            "重连窗口尚未提供 T1 的持久条目"
+        );
+        assert!(recent.statusline.contains("pending"), "未知提交仍保留选择");
+        for _ in 0..20 {
+            remote.press(KeyCode::PageUp, KeyModifiers::NONE);
+        }
+        let seen = peer.wait(|s| count(s, "history") == 1).await;
+        assert_eq!(requests(&seen, "history").next().unwrap()["before"], 3);
+        remote.wait(|f| f.text.contains("paged answer")).await;
+        remote.press(KeyCode::End, KeyModifiers::CONTROL);
+        remote.line("after paged acceptance");
+        let seen = peer.wait(|s| count(s, "submit") == 2).await;
+        let next = &requests(&seen, "submit").nth(1).unwrap()["request"];
+        assert_eq!(
+            next["model"],
+            Value::Null,
+            "历史 UserMessage 确认后不能重发旧模型"
+        );
+        assert_eq!(
+            next["effort"],
+            Value::Null,
+            "历史 UserMessage 确认后不能重发旧档位"
+        );
+        let shown = remote.wait(|f| f.dock.contains("next captured")).await;
+        assert!(shown.statusline.contains("current") && shown.statusline.contains("off"));
+        remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
+        remote.press(KeyCode::Esc, KeyModifiers::NONE);
+        remote.ctrl('d');
+    };
+    let ((), exit) = bounded(LOOP_LIMIT, async {
+        tokio::join!(driver, h.run(&peer.client))
+    })
+    .await;
+    assert!(exit.result.is_ok());
+}
+
+#[tokio::test]
 async fn completed_turn_sends_the_queue_through_the_real_loop_once() {
     let running = numbered_turn(1);
     let views = Views::default();
@@ -2019,30 +2146,55 @@ async fn completed_turn_sends_the_queue_through_the_real_loop_once() {
     let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
         "watch" => views.subscribe(),
         "submit" => Reply::Now(accepted_reply(r)),
+        "models" => Reply::Now(model_reply(r["target"].as_str())),
         _ => Reply::Never,
     });
     let mut h = Harness::new(false);
     let remote = h.remote.clone();
     let driver = async {
         view_tx.push([
-            head_reply(head(2, Some(running), true)),
+            head_reply(SessionHead {
+                effort: Some(lattice_api::Effort::High),
+                profile_default_effort: Some(lattice_api::Effort::Low),
+                ..head(2, Some(running), true)
+            }),
             entry_reply(user(1, running, 1, "other client")),
             entry_reply(step(2, running, 0).sent().entry()),
         ]);
         remote.wait(|f| f.phase == TurnPhase::Streaming).await;
         remote.line("queued via loop");
         remote.line("second");
+        remote.line("/model");
+        remote.wait(|f| f.panel.contains("p/chosen")).await;
+        remote
+            .keys
+            .unbounded_send(Ok(Event::Paste("chosen".into())))
+            .unwrap();
+        remote.wait(|f| f.panel.contains("过滤：chosen")).await;
+        remote.press(KeyCode::Enter, KeyModifiers::NONE);
+        remote
+            .wait(|f| f.statusline.contains("chosen") && f.statusline.contains("low"))
+            .await;
         for c in "untouched draft".chars() {
             remote.press(KeyCode::Char(c), KeyModifiers::NONE);
         }
         remote.wait(|f| f.input == "untouched draft").await;
         view_tx.push([
-            head_reply(head(2, Some(running), false)),
+            head_reply(SessionHead {
+                effort: Some(lattice_api::Effort::High),
+                profile_default_effort: Some(lattice_api::Effort::Low),
+                ..head(2, Some(running), false)
+            }),
             entry_reply(step(2, running, 0).text("done").finished().entry()),
         ]);
         let seen = peer.wait(|s| count(s, "submit") == 1).await;
         let request = requests(&seen, "submit").next().unwrap();
         assert_eq!(request["request"]["input"], "queued via loop");
+        assert_eq!(request["request"]["model"], "p/chosen", "使用发送时选择");
+        assert!(
+            request["request"]["effort"].is_null(),
+            "显示的回退 low 不得成为显式档位"
+        );
         assert_eq!(request_session(request), SubmitSession::Existing(sid()));
         let shown = remote
             .wait(|f| f.phase == TurnPhase::Streaming && f.text.matches("排队").count() == 1)
@@ -2187,5 +2339,291 @@ async fn every_loop_exit_saves_queue_originals_in_order() {
             queued,
             [" q0 raw ", " q1 raw ", " q2 raw ", " q3 raw ", " q4 raw "]
         );
+    }
+}
+
+fn model_reply(target: Option<&str>) -> Value {
+    let models = match target {
+        None => vec![
+            json!({"provider":"p","model":"ignored","name":null,"context":null,"output":null,"cost":null,"credential_status":"missing","supported_efforts":[]}),
+            json!({"provider":"p","model":"chosen","name":null,"context":null,"output":null,"cost":null,"credential_status":"ready","supported_efforts":["off","low"]}),
+        ],
+        Some(target) => {
+            let (provider, model) = target.split_once('/').unwrap();
+            vec![
+                json!({"provider":provider,"model":model,"name":null,"context":null,"output":null,"cost":null,"credential_status":"ready","supported_efforts":["off","low"]}),
+            ]
+        }
+    };
+    response("models", json!({"models":models,"warnings":[]}))
+}
+
+#[tokio::test]
+async fn model_and_effort_panels_send_explicit_choices_and_keep_rejected_input() {
+    let peer = Peer::start(|r| match r["operation"].as_str().unwrap() {
+        "models" => Reply::Now(model_reply(r["target"].as_str())),
+        "submit" => Reply::Now(error_reply(local_error(
+            LocalErrorKind::Busy,
+            "chosen busy",
+        ))),
+        _ => Reply::Never,
+    });
+    let mut h = Harness::new(true);
+    let remote = h.remote.clone();
+    let driver = async {
+        remote.line("/effort");
+        remote.wait(|f| f.panel.contains("先用 /model")).await;
+        remote.press(KeyCode::Esc, KeyModifiers::NONE);
+        remote.line("/model");
+        peer.wait(|s| count(s, "models") == 1).await;
+        remote
+            .wait(|f| f.panel.contains("p/chosen") && f.panel.contains("无凭据"))
+            .await;
+        remote
+            .keys
+            .unbounded_send(Ok(Event::Paste("P/CHOSEN".into())))
+            .unwrap();
+        remote
+            .wait(|f| f.panel.contains("P/CHOSEN") && !f.panel.contains("p/ignored"))
+            .await;
+        remote.press(KeyCode::Enter, KeyModifiers::NONE);
+        remote
+            .wait(|f| f.statusline.contains("chosen") && !f.panel.contains("MODEL"))
+            .await;
+        remote.line("/effort");
+        let seen = peer.wait(|s| count(s, "models") == 2).await;
+        assert_eq!(
+            requests(&seen, "models").nth(1).unwrap()["target"],
+            "p/chosen"
+        );
+        remote
+            .wait(|f| f.panel.contains("off") && f.panel.contains("low"))
+            .await;
+        remote.press(KeyCode::Enter, KeyModifiers::NONE);
+        remote
+            .wait(|f| f.statusline.contains("off") && !f.panel.contains("EFFORT"))
+            .await;
+        remote.line("selected prompt");
+        let seen = peer.wait(|s| count(s, "submit") == 1).await;
+        let request = &requests(&seen, "submit").next().unwrap()["request"];
+        assert_eq!(request["model"], "p/chosen");
+        assert_eq!(request["effort"], "off");
+        assert_eq!(request["agent"], "unused");
+        assert_eq!(request["input"], "selected prompt");
+        let rejected = remote.wait(|f| f.dock.contains("chosen busy")).await;
+        assert_eq!(rejected.input, "selected prompt");
+        assert!(rejected.statusline.contains("chosen") && rejected.statusline.contains("off"));
+        remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
+        remote.press(KeyCode::Esc, KeyModifiers::NONE);
+        remote.ctrl('d');
+    };
+    let ((), exit) = bounded(LOOP_LIMIT, async {
+        tokio::join!(driver, h.run(&peer.client))
+    })
+    .await;
+    assert!(exit.result.is_ok());
+}
+
+#[tokio::test]
+async fn held_model_query_keeps_view_cancel_and_exit_responsive() {
+    let views = Views::default();
+    let view_tx = views.clone();
+    let (_hold, held) = oneshot::channel();
+    let mut held = Some(held);
+    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
+        "watch" => views.subscribe(),
+        "models" => Reply::Hold(held.take().unwrap()),
+        "cancel" => Reply::Now(response("cancelled", json!({"owned":true}))),
+        _ => Reply::Never,
+    });
+    let running = numbered_turn(1);
+    let mut h = Harness::new(false);
+    let remote = h.remote.clone();
+    let driver = async {
+        view_tx.push([
+            head_reply(head(2, Some(running), true)),
+            entry_reply(user(1, running, 1, "running")),
+            entry_reply(step(2, running, 0).sent().entry()),
+        ]);
+        remote.wait(|f| f.phase == TurnPhase::Streaming).await;
+        remote.line("/model");
+        peer.wait(|s| count(s, "models") == 1).await;
+        remote.wait(|f| f.panel.contains("加载中")).await;
+        view_tx.push([entry_reply(
+            step(2, running, 0)
+                .text("progress while query held")
+                .sent()
+                .entry(),
+        )]);
+        remote
+            .wait(|f| f.text.contains("progress while query held"))
+            .await;
+        remote.ctrl('c');
+        let seen = peer.wait(|s| count(s, "cancel") == 1).await;
+        assert_eq!(
+            requests(&seen, "cancel").next().unwrap()["turn_id"],
+            json!(running)
+        );
+        remote.ctrl('c');
+    };
+    let ((), exit) = bounded(LOOP_LIMIT, async {
+        tokio::join!(driver, h.run(&peer.client))
+    })
+    .await;
+    assert!(exit.result.is_ok());
+    assert_eq!(count(&peer.seen.borrow(), "submit"), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn accepting_choices_retargets_effort_and_ignores_old_results_while_new_query_is_held() {
+    use lattice_api::Effort::{Low, Off};
+    for old_success in [true, false] {
+        let views = Views::default();
+        let view_tx = views.clone();
+        let (old_tx, old_rx) = oneshot::channel();
+        let (new_tx, new_rx) = oneshot::channel();
+        let mut queries = [Some(old_rx), Some(new_rx)].into_iter();
+        let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
+            "watch" => views.subscribe(),
+            "models" => Reply::Hold(queries.next().unwrap().unwrap()),
+            "submit" => Reply::Now(error_reply(local_error(
+                LocalErrorKind::Busy,
+                "probe captured",
+            ))),
+            _ => Reply::Never,
+        });
+        let mut h = Harness::new(false);
+        h.app
+            .selection
+            .choose_model(model_candidate("p", "pending", &[Low]));
+        h.app.selection.choose_effort(Low);
+        h.app.input.set_text("unconfirmed selection");
+        let prompt = h.app.submit().unwrap();
+        let first = begin_turn(&h.options, &mut h.app, prompt).unwrap();
+        h.app.apply_submission(receipt(
+            first.turn_id,
+            SubmissionResult::Unknown { error: None },
+        ));
+        h.app.dock.release();
+        let remote = h.remote.clone();
+        let driver = async {
+            remote.line("/effort");
+            let seen = peer.wait(|s| count(s, "models") == 1).await;
+            assert_eq!(
+                requests(&seen, "models").next().unwrap()["target"],
+                "p/pending"
+            );
+            remote.press(KeyCode::Char('L'), KeyModifiers::NONE);
+            remote
+                .wait(|f| f.panel.contains("过滤：L") && f.panel.contains("加载中"))
+                .await;
+            let current_turn = numbered_turn(2);
+            let mut current = head(4, Some(current_turn), false);
+            current.agent = Some("head-c-arrived".into());
+            current.provider = "other".into();
+            current.model = "current".into();
+            current.effort = Some(Off);
+            view_tx.push([head_reply(current)]);
+            let masked = remote
+                .wait(|f| f.statusline.contains("head-c-arrived"))
+                .await;
+            assert!(masked.statusline.contains("pending") && masked.statusline.contains("low"));
+            assert_eq!(
+                count(&peer.seen.borrow(), "models"),
+                1,
+                "待确认选择仍遮住新 head"
+            );
+            view_tx.push([
+                entry_reply(user(1, first.turn_id, 1, "unconfirmed selection")),
+                entry_reply(user(3, current_turn, 2, "other client")),
+                entry_reply(
+                    step(4, current_turn, 0)
+                        .text("current answer")
+                        .finished()
+                        .entry(),
+                ),
+            ]);
+            remote
+                .wait(|f| {
+                    f.statusline.contains("current")
+                        && f.statusline.contains("off")
+                        && f.text.contains("current answer")
+                })
+                .await;
+            let retargeted = remote.processed().await;
+            let seen = peer.seen.borrow().clone();
+            assert_eq!(
+                count(&seen, "models"),
+                2,
+                "接受清除选择后必须精确查询新目标"
+            );
+            assert_eq!(
+                requests(&seen, "models").nth(1).unwrap()["target"],
+                "other/current"
+            );
+            assert!(retargeted.panel.contains("过滤：L"));
+            assert!(retargeted.panel.contains("加载中"));
+            let old = if old_success {
+                let mut result = model_reply(Some("p/pending"));
+                result["value"]["models"][0]["supported_efforts"] = json!(["low"]);
+                result
+            } else {
+                error_reply(local_error(
+                    LocalErrorKind::Transport,
+                    "obsolete exact failure",
+                ))
+            };
+            old_tx.send(old).unwrap();
+            // 暂停时钟的处理屏障保证旧响应已处理；新查询仍被 oneshot 持有。
+            let waiting = remote.processed().await;
+            assert!(waiting.dock.is_empty(), "旧错误不能盖住新面板");
+            assert!(
+                waiting.panel.contains("EFFORT") && waiting.panel.contains("加载中"),
+                "旧成功不能装入候选：{}",
+                waiting.panel
+            );
+            assert!(
+                !waiting.panel.lines().any(|line| line.trim() == "low"),
+                "新结果到达前不可出现旧档位"
+            );
+            remote.press(KeyCode::Enter, KeyModifiers::NONE);
+            let after_enter = remote.processed().await;
+            assert!(
+                after_enter.panel.contains("EFFORT") && after_enter.panel.contains("加载中"),
+                "加载时 Enter 不选定旧候选"
+            );
+            assert!(
+                after_enter.statusline.contains("off") && !after_enter.statusline.contains("low")
+            );
+            let mut result = model_reply(Some("other/current"));
+            result["value"]["models"][0]["supported_efforts"] = json!(["max"]);
+            new_tx.send(result).unwrap();
+            remote
+                .wait(|f| f.panel.contains("没有匹配项") && f.panel.contains("过滤：L"))
+                .await;
+            remote.press(KeyCode::Backspace, KeyModifiers::NONE);
+            remote
+                .wait(|f| f.panel.lines().any(|line| line.trim() == "max"))
+                .await;
+            remote.press(KeyCode::Esc, KeyModifiers::NONE);
+            remote.line("probe inherited choices");
+            let seen = peer.wait(|s| count(s, "submit") == 1).await;
+            let request = &requests(&seen, "submit").next().unwrap()["request"];
+            assert_eq!(request["model"], Value::Null);
+            assert_eq!(
+                request["effort"],
+                Value::Null,
+                "忽略旧成功及加载时 Enter 后仍继承 head"
+            );
+            remote.wait(|f| f.dock.contains("probe captured")).await;
+            remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
+            remote.press(KeyCode::Esc, KeyModifiers::NONE);
+            remote.ctrl('d');
+        };
+        let ((), exit) = bounded(LOOP_LIMIT, async {
+            tokio::join!(driver, h.run(&peer.client))
+        })
+        .await;
+        assert!(exit.result.is_ok());
     }
 }

@@ -9,15 +9,16 @@ use crate::TuiOptions;
 use crate::blocks::{BlockId, BlockList, IdentifiedBlock};
 use crate::connection::{
     KeptInput, Viewed, cancellation_status, detach_lines, discarded_comments_status,
-    execution_diagnostic_status, handoff_status, not_accepted_status, not_submitted_status,
-    observation_lost_status, older_turns_unavailable_status, orphaned_turn_status,
-    recovered_status, rejected_status, submission_unknown_status,
+    effort_changed_status, execution_diagnostic_status, handoff_status, model_query_failed_status,
+    model_query_notice, not_accepted_status, not_submitted_status, observation_lost_status,
+    older_turns_unavailable_status, orphaned_turn_status, recovered_status, rejected_status,
+    submission_unknown_status,
 };
 use crate::input::{CTRL_C_WINDOW, History, InputBuffer, KeyAction, resolve_key};
 use crate::session::{Generating, SessionContext};
 use crate::view::{
-    Dock, DockIntent, DockState, Focus, Panel, Transcript, Viewport, frame_layout,
-    render_transcript,
+    Dock, DockIntent, DockState, Focus, ModelQuery, Panel, PanelChoice, Transcript, Viewport,
+    frame_layout, render_transcript,
 };
 use crossterm::event::{
     DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyEvent,
@@ -143,6 +144,9 @@ pub(crate) struct App {
     pub(crate) provider: Option<String>,
     pending_agent: Option<String>,
     agent_submissions: HashSet<TurnId>,
+    pub(crate) selection: crate::selection::Selection,
+    query_generation: u64,
+    model_query: Option<ModelQuery>,
     pub(crate) turn_usage: Option<UsageSummary>,
     pub(crate) context_tokens: Option<u64>,
     /// 由应用循环取走并执行的请求。
@@ -208,6 +212,9 @@ impl App {
             view_wanted: ctx.session_id.is_some(),
             pending_agent: ctx.startup_agent.clone(),
             agent_submissions: HashSet::new(),
+            selection: Default::default(),
+            query_generation: 0,
+            model_query: None,
             ctx,
             blocks: BlockList::default(),
             banner: None,
@@ -373,6 +380,21 @@ impl App {
                 DockIntent::Submit => return self.submit(),
                 DockIntent::ReleaseStatus => self.dock.release(),
                 DockIntent::ClosePanel => self.dock.close_panel(),
+                DockIntent::EditPanel(action) => self.dock.edit_panel(action),
+                DockIntent::Choose(choice) => {
+                    let before = self.next_effort();
+                    match choice {
+                        PanelChoice::Model(model) => {
+                            self.selection.choose_model(model);
+                            let after = self.next_effort();
+                            if self.configuration_head().is_some() && before != after {
+                                self.push_status(effort_changed_status(before, after));
+                            }
+                        }
+                        PanelChoice::Effort(effort) => self.selection.choose_effort(effort),
+                    }
+                    self.dock.close_panel();
+                }
                 DockIntent::None => {}
                 DockIntent::Edit(action) => match action {
                     KeyAction::Clear => self.input.clear(),
@@ -443,8 +465,81 @@ impl App {
         match input {
             "/quit" | "/exit" | "/q" => { self.should_quit = true; true }
             "/reconnect" => { self.view_wanted = self.ctx.session_id.is_some(); true }
-            "/help" | "/?" => { self.dock.open_panel(Panel { title: "HELP", lines: help_lines(self.kitty_keyboard) }); true }
+            "/help" | "/?" => { self.dock.open_panel(Panel::Help(help_lines(self.kitty_keyboard))); true }
+            "/model" => { self.query_generation += 1; self.dock.open_panel(Panel::models(self.query_generation, self.next_target())); self.model_query = self.dock.query(); true }
+            "/effort" => { self.query_generation += 1; self.dock.open_panel(Panel::efforts(self.query_generation, self.next_target(), self.next_effort())); self.model_query = self.dock.query(); true }
             _ => false,
+        }
+    }
+
+    fn configuration_head(&self) -> Option<&SessionHead> {
+        self.pending_head.as_ref().or(self.head.as_ref())
+    }
+
+    pub(crate) fn next_effort(&self) -> Option<lattice_api::Effort> {
+        self.selection.preview_effort(self.configuration_head())
+    }
+
+    fn next_target(&self) -> Option<String> {
+        self.selection
+            .model()
+            .map(|model| format!("{}/{}", model.provider, model.model))
+            .or_else(|| {
+                Some(format!(
+                    "{}/{}",
+                    self.provider.as_ref()?,
+                    self.model.as_ref()?
+                ))
+            })
+    }
+
+    fn sync_selection(&mut self) {
+        let target = self.next_target();
+        let effort = self.next_effort();
+        self.dock.update_current(target.clone(), effort);
+        if self
+            .dock
+            .effort_target()
+            .is_some_and(|previous| previous != target.as_deref())
+        {
+            self.query_generation += 1;
+            self.dock
+                .retarget_effort(self.query_generation, target, effort);
+            self.model_query = self.dock.query();
+        }
+    }
+
+    /// 接受证据只结清发送时的选择，面板重新从当前会话头派生。
+    fn confirm_selection(&mut self, turn_id: TurnId) {
+        self.selection.accepted(turn_id);
+        self.sync_selection();
+    }
+
+    fn apply_models(
+        &mut self,
+        request: ModelQuery,
+        result: lattice_api::local::Result<lattice_api::ModelCandidates>,
+    ) {
+        // 关闭、重开或目标改变后，成功和失败都只属于旧面板。
+        if self.dock.query().as_ref() != Some(&request) {
+            return;
+        }
+        match result {
+            Ok(result) => {
+                for warning in &result.warnings {
+                    self.push_status(model_query_notice(&warning.message));
+                }
+                let current = if request.target.is_some() {
+                    self.next_effort().map(|effort| effort.to_string())
+                } else {
+                    self.next_target()
+                };
+                self.dock.populate(result, current);
+            }
+            Err(error) => {
+                self.dock.close_panel();
+                self.push_status(model_query_failed_status(&error));
+            }
         }
     }
 
@@ -519,12 +614,14 @@ impl App {
         if let Some(id) = report.turn_id {
             match report.submission.as_ref().map(|receipt| &receipt.result) {
                 Some(SubmissionResult::Accepted { turn }) => {
+                    self.confirm_selection(id);
                     self.queue.release(id);
                     self.resolve_unknown(id);
                     self.accept_session(turn.session_id);
                 }
                 // 交接报告只生成状态消息，不归还输入。
                 Some(SubmissionResult::Rejected { .. } | SubmissionResult::NotAccepted) => {
+                    self.selection.rejected(id);
                     self.resolve_unknown(id);
                     if self.queue.reject(id) {
                         self.mark_rejected_comments(id);
@@ -701,6 +798,7 @@ impl App {
     }
 
     fn consume_agent(&mut self, turn_id: TurnId) {
+        self.confirm_selection(turn_id);
         if self.agent_submissions.remove(&turn_id) {
             self.pending_agent = None;
         }
@@ -1013,6 +1111,7 @@ impl App {
     /// 结果未知之后才确定未被接受的提交同样处理。只归还本客户端的草稿，
     /// 不撤销已知的执行、接管或完成显示。
     fn reject_submission(&mut self, turn_id: TurnId) -> KeptInput {
+        self.selection.rejected(turn_id);
         self.agent_submissions.remove(&turn_id);
         let automatic = self.queue.reject(turn_id);
         let mut kept = KeptInput::Restored;
@@ -1107,6 +1206,7 @@ impl App {
         // 当前位置是根节点时没有对应的条目，会话头立即确认。
         let root = head.position == NodeId(0);
         self.pending_head = Some(head);
+        self.sync_selection();
         if root {
             self.confirm_head();
         }
@@ -1406,6 +1506,10 @@ impl App {
             let Some(turn) = entry_turn(&entry) else {
                 continue;
             };
+            if matches!(entry, ConversationEntry::UserMessage { .. }) {
+                self.confirm_selection(turn);
+                self.resolve_unknown(turn);
+            }
             if self.entries.contains_key(&node) {
                 continue;
             }
@@ -1615,6 +1719,7 @@ where
     let mut cancels = FuturesUnordered::new();
     let mut older = FuturesUnordered::new();
     let mut recoveries = FuturesUnordered::new();
+    let mut models = FuturesUnordered::new();
     let mut dirty = true;
     let result = loop {
         if std::mem::take(&mut app.view_wanted)
@@ -1654,6 +1759,19 @@ where
         if let Some(turn_id) = app.recover_request.take() {
             let client = client.clone();
             recoveries.push(async move { (turn_id, client.wait_for_turn(turn_id).await) }.boxed());
+        }
+        if let Some(request) = app.model_query.take() {
+            let client = client.clone();
+            models.push(
+                async move {
+                    let result = match &request.target {
+                        Some(target) => client.model(target.clone()).await,
+                        None => client.models(None).await,
+                    };
+                    (request, result)
+                }
+                .boxed(),
+            );
         }
         if app.should_quit {
             break Ok(());
@@ -1697,6 +1815,7 @@ where
             Some((turn_id, result)) = cancels.next(), if !cancels.is_empty() => app.apply_cancel_result(turn_id, result),
             Some((request, result)) = older.next(), if !older.is_empty() => app.apply_older(request, result),
             Some((turn_id, result)) = recoveries.next(), if !recoveries.is_empty() => app.apply_recovery(turn_id, result),
+            Some((request, result)) = models.next(), if !models.is_empty() => app.apply_models(request, result),
             _ = ticker.tick() => {
                 dirty |= app.expire_ctrl_c_notice(Instant::now());
                 if !dirty { continue; }
@@ -1774,9 +1893,10 @@ fn begin_turn(options: &TuiOptions, app: &mut App, prompt: String) -> Option<Tur
     if agent.is_some() {
         app.agent_submissions.insert(turn_id);
     }
+    let (model, effort) = app.selection.submission(turn_id);
     Some(TurnRequest {
-        model: None,
-        effort: None,
+        model,
+        effort,
         turn_id,
         session,
         workspace: options.project_root.clone(),
@@ -1790,6 +1910,8 @@ fn help_lines(kitty: bool) -> Vec<String> {
     let nl = if kitty { "Shift+Enter  换行" } else { "Alt+Enter  换行" };
     vec![
         "/help  显示本帮助".into(),
+        "/model  选择下一次提交的模型".into(),
+        "/effort  选择下一次提交的推理档位".into(),
         "/reconnect  只重连观察，不恢复或重新提交".into(),
         "/quit  退出（输入为空时也可按 Ctrl+D）".into(),
         "Esc  清空输入；关闭本面板".into(),
@@ -1807,6 +1929,8 @@ fn startup_banner() -> Vec<String> {
     vec![
         "LATTICE".into(),
         "/help  显示命令".into(),
+        "/model  选择模型".into(),
+        "/effort  选择推理档位".into(),
         "/quit  退出".into(),
         "/reconnect  重新读取状态并观察".into(),
     ]
@@ -1919,6 +2043,139 @@ mod tests {
     }
 
     #[test]
+    fn model_command_opens_loading_panel_without_submitting() {
+        let mut app = test_app(false);
+        app.input.set_text("/model");
+        assert!(app.submit().is_none(), "命令不能成为 Turn 输入");
+        assert_eq!(dock_title(&mut app), "MODEL");
+        assert!(app.input.is_empty());
+        assert_eq!(app.phase, TurnPhase::Idle);
+    }
+
+    #[test]
+    fn selection_panel_filters_scrolls_and_preserves_hidden_input_under_messages() {
+        use lattice_api::{Effort::Low, ModelCandidates};
+        let mut app = test_app(true);
+        let mut current = head(0, None, false);
+        current.provider = "p".into();
+        current.model = "m6".into();
+        app.apply_view(LocalUpdate::Head(current));
+        app.input.set_text("hidden draft");
+        let open_models = |app: &mut App| {
+            app.apply_builtin("/model");
+            let query = app.model_query.take().unwrap();
+            app.apply_models(
+                query,
+                Ok(ModelCandidates {
+                    models: (0..10)
+                        .map(|n| model_candidate("p", &format!("m{n}"), &[Low]))
+                        .collect(),
+                    warnings: vec![],
+                }),
+            );
+        };
+        open_models(&mut app);
+        let screen = |app: &mut App, width, height| {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| crate::view::draw(frame, app))
+                .unwrap();
+            (
+                buffer_text(terminal.backend().buffer()),
+                terminal.get_cursor_position().unwrap(),
+            )
+        };
+        let (shown, cursor) = screen(&mut app, 30, 8);
+        assert_eq!(shown.lines().nth(6).unwrap().trim(), "p/m6 · 当前");
+        assert!(!shown.contains("p/m0"), "{shown}");
+        assert_eq!((cursor.x, cursor.y), (0, 6), "光标位于当前候选行");
+        app.apply_action(KeyAction::Down);
+        let (down, cursor) = screen(&mut app, 30, 8);
+        assert_eq!(down.lines().nth(6).unwrap().trim(), "p/m7");
+        assert!(!down.contains("p/m3"), "Down 越过原可见区时内部滚动");
+        assert_eq!((cursor.x, cursor.y), (0, 6));
+        app.apply_action(KeyAction::Submit);
+        assert_eq!(app.next_target().as_deref(), Some("p/m7"));
+        open_models(&mut app);
+        for _ in 0..5 {
+            app.apply_action(KeyAction::Up);
+        }
+        let (up, cursor) = screen(&mut app, 30, 8);
+        assert_eq!(up.lines().nth(5).unwrap().trim(), "p/m2");
+        assert!(up.contains("p/m0") && !up.contains("p/m7"));
+        assert_eq!((cursor.x, cursor.y), (0, 5));
+        app.apply_action(KeyAction::Submit);
+        assert_eq!(app.next_target().as_deref(), Some("p/m2"));
+        open_models(&mut app);
+        for _ in 0..20 {
+            app.apply_action(KeyAction::Up);
+        }
+        let (first, cursor) = screen(&mut app, 30, 8);
+        assert_eq!(first.lines().nth(3).unwrap().trim(), "p/m0");
+        assert_eq!((cursor.x, cursor.y), (0, 3));
+        app.apply_action(KeyAction::Submit);
+        assert_eq!(app.next_target().as_deref(), Some("p/m0"), "顶部夹紧");
+        open_models(&mut app);
+        for _ in 0..20 {
+            app.apply_action(KeyAction::Down);
+        }
+        let (last, cursor) = screen(&mut app, 30, 8);
+        assert_eq!(last.lines().nth(6).unwrap().trim(), "p/m9");
+        assert_eq!((cursor.x, cursor.y), (0, 6));
+        app.apply_action(KeyAction::Submit);
+        assert_eq!(app.next_target().as_deref(), Some("p/m9"), "底部夹紧");
+        open_models(&mut app);
+        let (small, cursor) = screen(&mut app, 7, 5);
+        assert_eq!(small.lines().nth(2).unwrap().trim(), "过滤：");
+        assert!(small.lines().nth(3).unwrap().starts_with("p/m9"));
+        assert_eq!((cursor.x, cursor.y), (0, 3));
+        let (filter_only, _) = screen(&mut app, 7, 3);
+        assert_eq!(filter_only.lines().nth(1).unwrap().trim(), "过滤：");
+        assert!(!filter_only.contains("p/m9"), "只有过滤行空间时不画候选");
+        app.apply_action(KeyAction::Paste("P/M9".into()));
+        let (filtered, _) = screen(&mut app, 30, 8);
+        assert!(filtered.contains("p/m9") && !filtered.contains("p/m6"));
+        app.apply_action(KeyAction::Insert('x'));
+        assert!(app.apply_action(KeyAction::Submit).is_none());
+        assert!(!app.dock.shows_input(), "空结果不可选定");
+        app.apply_action(KeyAction::Backspace);
+        app.push_status(status(NoticeLevel::Warn, "overlay"));
+        app.apply_action(KeyAction::Paste("invisible".into()));
+        app.apply_action(KeyAction::Submit);
+        app.apply_action(KeyAction::ScrollPageUp);
+        app.apply_action(KeyAction::ScrollToBottom);
+        app.apply_action(KeyAction::Insert(' '));
+        let (restored, _) = screen(&mut app, 30, 8);
+        assert!(restored.contains("P/M9") && restored.contains("p/m9"));
+        assert!(!restored.contains("invisible"));
+        assert_eq!(app.input.text(), "hidden draft");
+        app.apply_action(KeyAction::Submit);
+        assert_eq!(app.next_target().as_deref(), Some("p/m9"));
+        app.apply_builtin("/model");
+        let query = app.model_query.take().unwrap();
+        app.apply_models(
+            query,
+            Ok(ModelCandidates {
+                models: vec![model_candidate("p", "界e\u{301}尾", &[])],
+                warnings: vec![],
+            }),
+        );
+        app.apply_action(KeyAction::Down);
+        app.apply_action(KeyAction::Up);
+        let (wide, _) = screen(&mut app, 6, 8);
+        assert!(
+            wide.contains("p/界e\u{301}") && !wide.contains("尾"),
+            "{wide}"
+        );
+        for (width, height) in [(0, 0), (0, 1), (1, 1), (1, 2), (7, 3), (176, 50)] {
+            screen(&mut app, width, height);
+        }
+        app.apply_action(KeyAction::Clear);
+        assert_eq!(app.next_target().as_deref(), Some("p/m9"), "Esc 保留原选择");
+    }
+
+    #[test]
     fn ctrl_c_targets_running_turn_but_esc_only_clears_input() {
         let mut app = test_app(true);
         let id = lattice_api::local::new_turn_id();
@@ -2021,7 +2278,7 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        let shown = ["USER", "HELP", "WARN", "ERROR"]
+        let shown = ["USER", "HELP", "MODEL", "EFFORT", "WARN", "ERROR"]
             .into_iter()
             .filter(|title| screen.contains(&format!("── {title} ─")))
             .collect::<Vec<_>>();
@@ -2154,10 +2411,12 @@ mod tests {
             .map(ToString::to_string)
             .collect::<Vec<_>>();
         assert_eq!(
-            lines.iter().take(4).map(String::as_str).collect::<Vec<_>>(),
+            lines.iter().take(6).map(String::as_str).collect::<Vec<_>>(),
             [
                 "LATTICE",
                 "/help  显示命令",
+                "/model  选择模型",
+                "/effort  选择推理档位",
                 "/quit  退出",
                 "/reconnect  重新读取状态并观察"
             ]

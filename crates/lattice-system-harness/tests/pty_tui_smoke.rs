@@ -1,30 +1,9 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! PTY smoke scenario (RFC #41 (Codeberg #19) layer 3 / PTY-smoke): prove the
-//! prototype TUI entrypoint still wires into the same `stream_turn` chain as
-//! `session send --json`.
-//!
-//! Since #62 (Codeberg #40) the turn chain is Direct-Local: the TUI drives a
-//! real turn against the canonical project root — no KVM, no MSB daemon, no
-//! OCI image, no `[workspace]` profile section. This scenario therefore runs
-//! in the ordinary lane (not `#[ignore]`-gated): a broken Direct-Local
-//! environment is a real product failure, never something to skip. RFC #41
-//! decision three: the smoke does **not** assert on prompt shape, colors, or
-//! layout. Ready recognition and ANSI cleanup live inside `PtyTuiDriver`; the
-//! scenario asserts only semantic markers (a turn produced visible assistant
-//! text and the TUI exited cleanly).
-//!
-//! What it proves (issue #43 (Codeberg #21) acceptance point: at least one
-//! PTY smoke):
-//!
-//! - `lattice tui --agent <name>` starts, enters
-//!   the alternate screen, and accepts a prompt.
-//! - Sending a prompt produces assistant token text through the real turn
-//!   chain (the fake LLM receives the request).
-//! - `/quit` exits the TUI cleanly (exit within the timeout, no hang).
-//! - After exit, the TUI's process group has no live members (no orphaned
-//!   frontend children). The scenario owns the backend group separately.
+//! 通过真实 PTY 验证 TUI 与后台的选择、执行、重连和取消接线。
+//! 场景使用正式配置与 fake TLS provider，核对请求 JSON 和公开会话事实。
+//! 门控窗口和完整帧用于同步及检查可观察状态；颜色与可读性留给真实终端人工检查。
 
 use std::time::Duration;
 
@@ -141,10 +120,11 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
         // 完成是 Info 级结局，直接进对话记录，不占 Dock；随后的 `/quit` 仍能输入。
         tui.wait_for(Duration::from_secs(60), |s| s.contains("完成"))
             .expect("turn summary appeared");
-        std::thread::sleep(Duration::from_secs(3));
-        let frame = tui
-            .redraw_text(Duration::from_secs(10))
-            .expect("settled frame");
+        let frame = wait_pty_frame(
+            &mut tui,
+            budget.cap_timeout(Duration::from_secs(10)),
+            |frame| frame.contains("mock line 03"),
+        );
         // 启动横幅固定在对话记录最上方，最终回答仍在屏幕上。
         let banner = frame.find("显示命令");
         let answer = frame.find("mock line 03");
@@ -180,6 +160,16 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
         })
         .unwrap();
         assert_eq!(server.captured_requests().len(), 3);
+        for capture in server.captured_requests() {
+            for field in [
+                "reasoning_effort",
+                "reasoning",
+                "thinking",
+                "enable_thinking",
+            ] {
+                assert!(capture.raw.get(field).is_none(), "未选择档位不发送 {field}");
+            }
+        }
 
         // `/quit` must exit the TUI **by itself**. Observe the child's own exit
         // before `Drop` runs: Drop kills the process group, so a survivor check
@@ -877,6 +867,335 @@ fn pty_second_ctrl_c_preserves_cancel_acknowledgement() {
             &mut evidence,
             sid,
             serde_json::json!({"script":"gated must not be delivered","frontend":"two Ctrl+C after accepted","provider_requests":1}),
+        );
+    }));
+    evidence.record_pty(tui.output());
+    evidence.record_captures(server.captured_requests());
+    drop(tui);
+    support::finish_recorded(evidence, result);
+}
+
+/// 每次读取本次 resize 产生的完整帧，不从累计输出推断当前面板。
+#[track_caller]
+fn wait_pty_frame(
+    tui: &mut PtyTuiDriver,
+    timeout: Duration,
+    predicate: impl Fn(&str) -> bool,
+) -> String {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut previous = String::new();
+    loop {
+        let frame =
+            match tui.redraw_text(deadline.saturating_duration_since(std::time::Instant::now())) {
+                Ok(frame) => frame,
+                Err(error) => panic!("完整帧读取失败：{error}；最近一帧：{previous}"),
+            };
+        if predicate(&frame) {
+            return frame;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "等待当前帧超时：{frame}"
+        );
+        previous = frame;
+    }
+}
+
+#[test]
+fn pty_model_effort_selection_survives_retry_tools_and_reopening() {
+    use lattice_system_harness::{FakeLlmServer, ProviderTarget, SessionSendDriver, SseScript};
+    use serde_json::{Value, json};
+    fn query(
+        session: &SessionSendDriver<'_>,
+        evidence: &mut lattice_system_harness::ScenarioEvidence,
+        args: &[&str],
+    ) -> Value {
+        let result = session.run_command(args).unwrap();
+        evidence.record_command(args.join(" "), &result);
+        assert!(result.is_clean_exit(0), "{}", result.summary());
+        serde_json::from_slice(&result.stdout).unwrap()
+    }
+    let driver = driver();
+    let (world, mut spec) = support::direct_world(
+        "pty-model-effort",
+        "model-panel",
+        "[\"observe__workspace\"]",
+        "",
+    );
+    spec.layer = ScenarioLayer::PtySmoke;
+    spec.step_timeout_secs = 120;
+    spec.total_timeout_secs = Some(300);
+    let budget = world.budget(&spec);
+    let step = || budget.cap_timeout(spec.step_timeout());
+    let profile = "schema_version=1\n[agent]\nname='model-panel'\nmodel='local/base'\neffort='low'\n[prompt]\nsystem='Read fixture.txt using observe__workspace.'\n[tools]\nenabled=['observe__workspace']\n[llm.retry]\nmax_retries=1\ninitial_delay_ms=1\nmax_delay_ms=1\n";
+    world
+        .write_project_file(".lattice/agents/model-panel/agent.toml", profile)
+        .unwrap();
+    world
+        .write_project_file("fixture.txt", "panel-file-marker")
+        .unwrap();
+    let (server, gate) = FakeLlmServer::start_gated(support::sequence(vec![
+        SseScript::HttpError {
+            status: 503,
+            body: "panel retry".into(),
+        },
+        support::tool_call(
+            "panel-read",
+            "observe__workspace",
+            r#"{"request":{"mode":"read_file","path":"fixture.txt"}}"#,
+        ),
+        SseScript::plain("panel tool complete"),
+        SseScript::plain("panel inherited complete"),
+        SseScript::plain("panel reopened complete"),
+    ]))
+    .unwrap();
+    world
+        .wire_provider(
+            ProviderFixture::chat_completions("base"),
+            &server,
+            lattice_system_harness::FAKE_API_KEY,
+        )
+        .unwrap();
+    world
+        .wire_provider(
+            ProviderFixture {
+                target: ProviderTarget::Custom("openai-chat"),
+                ..ProviderFixture::chat_completions("gpt-6-luna")
+            },
+            &server,
+            lattice_system_harness::FAKE_API_KEY,
+        )
+        .unwrap();
+    let configuration = world.home().join(".lattice/providers.toml");
+    let mut providers: toml::Table =
+        toml::from_str(&std::fs::read_to_string(&configuration).unwrap()).unwrap();
+    providers["providers"]["openai-chat"]
+        .as_table_mut()
+        .unwrap()
+        .insert("catalog".into(), "openai".into());
+    let base = toml::to_string(&providers).unwrap();
+    std::fs::write(&configuration, format!("{base}\n[providers.local.models.base]\neffort=['low']\n[providers.local.models.preview]\neffort=['low']\n")).unwrap();
+    let cache = world.home().join(".lattice/cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(cache.join("models.json"), serde_json::to_vec(&json!({"openai":{"models":{
+        "gpt-6-luna":{"id":"gpt-6-luna","reasoning_options":[{"type":"effort","values":["none","low"]}]}
+    }}})).unwrap()).unwrap();
+    let session = SessionSendDriver::new(&driver, &world, &spec, "model-panel");
+    let mut evidence = support::evidence(&world, &spec);
+    let mut tui = PtyTuiDriver::spawn(&driver, &world, "model-panel").unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tui.wait_for_ready(step()).unwrap();
+        tui.wait_for(step(), |text| text.contains("显示命令"))
+            .unwrap();
+        tui.send_line("/effort").unwrap();
+        wait_pty_frame(&mut tui, step(), |text| text.contains("先用 /model"));
+        tui.send_keys(b"\x1b").unwrap();
+        wait_pty_frame(&mut tui, step(), |text| {
+            !text.contains("EFFORT") && text.contains("USER")
+        });
+        tui.send_line("/model").unwrap();
+        wait_pty_frame(&mut tui, step(), |text| text.contains("MODEL"));
+        tui.send_keys(b"openai-chat/gpt-6-luna").unwrap();
+        wait_pty_frame(&mut tui, step(), |text| {
+            text.matches("openai-chat/gpt-6-luna").count() == 2
+        });
+        tui.send_keys(b"\r").unwrap();
+        wait_pty_frame(&mut tui, step(), |text| {
+            !text.contains("MODEL") && text.contains("gpt-6-luna")
+        });
+        tui.send_line("/effort").unwrap();
+        wait_pty_frame(&mut tui, step(), |text| {
+            text.contains("EFFORT") && text.contains("off") && text.contains("low")
+        });
+        tui.send_keys(b"\r").unwrap();
+        wait_pty_frame(&mut tui, step(), |text| {
+            !text.contains("EFFORT") && text.contains("off")
+        });
+        assert!(server.captured_requests().is_empty());
+        tui.send_line("read the panel file").unwrap();
+        gate.wait_until_stalled(1, step()).unwrap();
+        let listed = query(&session, &mut evidence, &["--json", "session", "list"]);
+        assert_eq!(listed.as_array().unwrap().len(), 1);
+        let sid = listed[0]["session_id"].as_str().unwrap();
+        let head = support::ipc(&world, step(), json!({"operation":"head","session_id":sid}));
+        assert_eq!(head["response"], "head");
+        assert_eq!(head["value"]["model"], "gpt-6-luna");
+        assert_eq!(head["value"]["provider"], "openai-chat");
+        assert_eq!(head["value"]["effort"], "off");
+        assert_eq!(head["value"]["profile_default_effort"], "low");
+        let first = head["value"]["turn_id"].as_str().unwrap();
+        evidence.record_json("selected-head", &head).unwrap();
+        tui.send_line("/model").unwrap();
+        wait_pty_frame(&mut tui, step(), |text| text.contains("MODEL"));
+        tui.send_keys(b"local/preview").unwrap();
+        wait_pty_frame(&mut tui, step(), |text| {
+            text.matches("local/preview").count() == 2
+        });
+        gate.release_next(step()).unwrap();
+        gate.wait_until_stalled(2, step()).unwrap();
+        wait_pty_frame(&mut tui, step(), |text| {
+            text.contains("WARN") && !text.contains("MODEL")
+        });
+        tui.send_keys(b"ignored\r").unwrap();
+        tui.send_keys(b" ").unwrap();
+        let restored = wait_pty_frame(&mut tui, step(), |text| {
+            text.contains("MODEL") && text.matches("local/preview").count() == 2
+        });
+        assert!(!restored.contains("ignored"));
+        tui.send_keys(b"\x1b").unwrap();
+        wait_pty_frame(&mut tui, step(), |text| {
+            !text.contains("MODEL") && text.contains("gpt-6-luna") && text.contains("off")
+        });
+        gate.release_next(step()).unwrap();
+        gate.wait_until_stalled(3, step()).unwrap();
+        assert!(
+            support::last_tool_content(&server.captured_requests()[2])
+                .unwrap()
+                .contains("panel-file-marker")
+        );
+        gate.release_next(step()).unwrap();
+        wait_pty_frame(&mut tui, step(), |text| {
+            text.contains("panel tool complete") && text.contains("idle")
+        });
+        let detail = query(
+            &session,
+            &mut evidence,
+            &["--json", "session", "turn", first],
+        );
+        assert_eq!(detail["summary"]["outcome"], "completed");
+        assert_eq!(detail["steps"][0]["attempts"].as_array().unwrap().len(), 2);
+        assert_eq!(detail["steps"][0]["slots"][0]["outcome"], "succeeded");
+        tui.send_line("inherit the accepted selection").unwrap();
+        gate.wait_until_stalled(4, step()).unwrap();
+        gate.release_next(step()).unwrap();
+        wait_pty_frame(&mut tui, step(), |text| {
+            text.contains("panel inherited complete") && text.contains("idle")
+        });
+        let before = support::ipc(&world, step(), json!({"operation":"head","session_id":sid}));
+        let before_log = query(&session, &mut evidence, &["--json", "session", "log", sid]);
+        tui.send_line("/quit").unwrap();
+        tui.wait_for_exit(step()).unwrap();
+        assert!(processes_in_pgid(tui.pgid().unwrap()).unwrap().is_empty());
+        evidence.record_pty(tui.output());
+        world.stop_daemon().unwrap();
+        tui = PtyTuiDriver::reconnect(&driver, &world, sid).unwrap();
+        tui.wait_for_ready(step()).unwrap();
+        tui.wait_for(step(), |text| text.contains("panel inherited complete"))
+            .unwrap();
+        wait_pty_frame(&mut tui, step(), |text| {
+            text.contains("gpt-6-luna") && text.contains("off") && text.contains("idle")
+        });
+        assert_eq!(server.captured_requests().len(), 4);
+        tui.send_line("/model").unwrap();
+        wait_pty_frame(&mut tui, step(), |text| text.contains("MODEL"));
+        tui.send_keys(b"local/preview").unwrap();
+        wait_pty_frame(&mut tui, step(), |text| {
+            text.matches("local/preview").count() == 2
+        });
+        tui.send_keys(b"\r").unwrap();
+        wait_pty_frame(&mut tui, step(), |text| {
+            !text.contains("MODEL") && text.contains("preview") && text.contains("low")
+        });
+        tui.send_line("/effort").unwrap();
+        wait_pty_frame(&mut tui, step(), |text| {
+            text.contains("EFFORT") && text.contains("low · 当前")
+        });
+        tui.send_keys(b"\r").unwrap();
+        wait_pty_frame(&mut tui, step(), |text| !text.contains("EFFORT"));
+        assert_eq!(
+            support::ipc(&world, step(), json!({"operation":"head","session_id":sid})),
+            before
+        );
+        assert_eq!(
+            query(&session, &mut evidence, &["--json", "session", "log", sid]),
+            before_log
+        );
+        tui.send_line("/quit").unwrap();
+        tui.wait_for_exit(step()).unwrap();
+        evidence.record_pty(tui.output());
+        assert_eq!(server.captured_requests().len(), 4);
+        assert_eq!(
+            support::ipc(&world, step(), json!({"operation":"head","session_id":sid})),
+            before
+        );
+        assert_eq!(
+            query(&session, &mut evidence, &["--json", "session", "log", sid]),
+            before_log
+        );
+        tui = PtyTuiDriver::reconnect(&driver, &world, sid).unwrap();
+        tui.wait_for_ready(step()).unwrap();
+        tui.wait_for(step(), |text| text.contains("panel inherited complete"))
+            .unwrap();
+        wait_pty_frame(&mut tui, step(), |text| {
+            text.contains("gpt-6-luna") && text.contains("off")
+        });
+        tui.send_line("after discarding unsent selection").unwrap();
+        gate.wait_until_stalled(5, step()).unwrap();
+        gate.release_next(step()).unwrap();
+        wait_pty_frame(&mut tui, step(), |text| {
+            text.contains("panel reopened complete") && text.contains("idle")
+        });
+        let mut watcher = support::Watcher::open(&world, step(), sid);
+        let view = watcher.initial();
+        let users = view
+            .entries
+            .values()
+            .filter(|entry| entry.raw["kind"] == "user_message")
+            .collect::<Vec<_>>();
+        assert_eq!(users.len(), 3);
+        let final_head = view.head.as_ref().unwrap();
+        let mut observed_turns = users
+            .iter()
+            .map(|user| user.raw["content"]["turn_id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        let mut accepted_turns = vec![
+            first,
+            before["value"]["turn_id"].as_str().unwrap(),
+            final_head.turn_id.as_deref().unwrap(),
+        ];
+        observed_turns.sort_unstable();
+        accepted_turns.sort_unstable();
+        assert_eq!(
+            observed_turns, accepted_turns,
+            "三次提交与公开 UserMessage 的身份一致"
+        );
+        for user in users {
+            assert_eq!(user.raw["content"]["provider"], "openai-chat");
+            assert_eq!(user.raw["content"]["model"], "gpt-6-luna");
+            assert_eq!(user.raw["content"]["effort"], "off");
+        }
+        assert_eq!(final_head.effort.as_deref(), Some("off"));
+        let captures = server.captured_requests();
+        assert_eq!(captures.len(), 5);
+        for capture in &captures {
+            assert_eq!(capture.raw["model"], "gpt-6-luna");
+            assert_eq!(capture.raw["reasoning_effort"], "none");
+            assert!(
+                capture
+                    .tool_names
+                    .iter()
+                    .any(|tool| tool == "observe__workspace")
+            );
+            assert!(capture.raw.get("enable_thinking").is_none());
+        }
+        assert_eq!(
+            std::fs::read_to_string(
+                world
+                    .project_dir()
+                    .join(".lattice/agents/model-panel/agent.toml")
+            )
+            .unwrap(),
+            profile
+        );
+        tui.send_line("/quit").unwrap();
+        tui.wait_for_exit(step()).unwrap();
+        assert!(processes_in_pgid(tui.pgid().unwrap()).unwrap().is_empty());
+        drop(watcher);
+        record_pty_session(
+            &session,
+            &mut evidence,
+            sid,
+            json!({"script":"503, file tool, final, inherited, reopened", "provider_requests":5}),
         );
     }));
     evidence.record_pty(tui.output());

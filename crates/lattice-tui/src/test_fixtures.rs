@@ -9,6 +9,38 @@ pub(super) const SESSION: &str = "11111111111141118111111111111111";
 const AT: &str = "2026-01-01T00:00:00Z";
 const DIGEST: &str = "5fd582703776c899a2ecb12f3d699bd7244dff1f443ef5ae3f0067bcf3ce279e";
 
+pub(super) fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
+    use unicode_width::UnicodeWidthStr;
+    let mut text = String::new();
+    for row in buffer.content.chunks(usize::from(buffer.area.width).max(1)) {
+        let mut column = 0;
+        while column < row.len() {
+            let symbol = row[column].symbol();
+            text.push_str(symbol);
+            column += symbol.width().max(1);
+        }
+        text.push('\n');
+    }
+    text
+}
+
+pub(super) fn model_candidate(
+    provider: &str,
+    model: &str,
+    efforts: &[lattice_api::Effort],
+) -> lattice_api::ModelCandidate {
+    lattice_api::ModelCandidate {
+        provider: provider.into(),
+        model: model.into(),
+        name: None,
+        context: None,
+        output: None,
+        supported_efforts: efforts.to_vec(),
+        cost: None,
+        credential_status: lattice_api::local::AuthState::Ready,
+    }
+}
+
 pub(super) fn sid() -> SessionId {
     SessionId::parse(SESSION).unwrap()
 }
