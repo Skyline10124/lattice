@@ -79,6 +79,7 @@ provider 配置、凭据与模型元数据是用户级的全局状态，由后�
 
 - **请求。** 把当前路径上的对话、系统提示、工具定义和推理档位按协议与 features 写成请求体。投影规则与回放材料的处理由[会话合同的回放与跨 provider 投影](session.md#回放与跨-provider-投影)维护。
 - **流式事件。** 把线上事件翻译为正文、reasoning 与工具调用的部件增量，交给 #312 的累积器组装完整回复。解析端对无歧义的厂商差异直接兼容，例如 `reasoning_content` 与 `reasoning` 两种字段都读取，Mistral 的 `content` 为分块数组时读取其中的 `thinking` 块。不认识的内容块或增量类型按不可重试的协议错误停止这次尝试，不静默丢弃；诊断只写协议、位置与类型名。
+- **prompt 拦截。** generateContent 只有 `promptFeedback.blockReason`、没有 candidates 时，按不可重试的 provider 错误停止这次尝试，诊断保留 `blockReason` 原文。
 - **用量。** 按[用量换算](#用量换算)得出统一口径。
 - **不使用服务端会话状态。** Responses 与 Interactions 固定发送 `store: false`，每次发送完整历史，不发送 `previous_response_id`、`previous_interaction_id`，不使用后台执行。
 

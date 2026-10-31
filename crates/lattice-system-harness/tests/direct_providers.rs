@@ -366,6 +366,117 @@ fn protocols_cache_and_usage_survive_tool_round_trip_and_backend_restart() {
 }
 
 #[test]
+fn gemini_prompt_block_stops_without_retry_and_preserves_usage() {
+    use lattice_system_harness::{FAKE_API_KEY, SseScript};
+    use serde_json::json;
+
+    let driver = driver();
+    for (name, with_usage) in [
+        ("gemini-prompt-block", true),
+        ("gemini-prompt-block-without-usage", false),
+    ] {
+        let spec = ScenarioSpec::direct_local(name);
+        let world = ScenarioWorld::new(&spec.name).unwrap();
+        world.budget(&spec);
+        let fixture = PROVIDERS[2].fixture;
+        world
+            .write_agent_profile("blocked", &fixture.model_ref().unwrap())
+            .unwrap();
+        let profile = ".lattice/agents/blocked/agent.toml";
+        let source = std::fs::read_to_string(world.project_dir().join(profile)).unwrap();
+        world
+            .write_project_file(
+                profile,
+                &format!(
+                    "{source}\n[llm.retry]\nmax_retries = 1\n\
+                     initial_delay_ms = 1\nmax_delay_ms = 1\n"
+                ),
+            )
+            .unwrap();
+        world.init_git_project().unwrap();
+        let mut frame = json!({
+            "promptFeedback": {
+                "blockReason": "SAFETY",
+                "safetyRatings": [{"category":"HARM_CATEGORY_HARASSMENT","probability":"HIGH"}]
+            }
+        });
+        if with_usage {
+            frame["usageMetadata"] = json!({"promptTokenCount":8,"totalTokenCount":8});
+        }
+        let server = FakeLlmServer::start(SseScript::HttpResponse {
+            status: 200,
+            content_type: "text/event-stream".into(),
+            headers: vec![],
+            body: format!("data: {frame}\n\n"),
+        })
+        .unwrap();
+        world.wire_provider(fixture, &server, FAKE_API_KEY).unwrap();
+        let configuration = world.home().join(".lattice/providers.toml");
+        let source = std::fs::read_to_string(&configuration).unwrap();
+        std::fs::write(
+            configuration,
+            format!(
+                "{source}\n[providers.google-generate.models.\"{}\".cost]\n\
+                 input = 2\noutput = 10\n",
+                fixture.model
+            ),
+        )
+        .unwrap();
+
+        let send = SessionSendDriver::new(&driver, &world, &spec, "blocked");
+        let mut evidence = support::evidence(&world, &spec);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let outcome = send.send("blocked prompt").unwrap();
+            evidence.record_command("prompt block", &outcome.command);
+            assert_clean_send(&outcome).unwrap();
+            support::assert_accepted_and_closed(&outcome).unwrap();
+            assert!(outcome.command.is_clean_exit(1));
+            let detail = send
+                .run_command(&[
+                    "--json",
+                    "session",
+                    "turn",
+                    outcome.accepted_turn_id().unwrap(),
+                ])
+                .unwrap();
+            evidence.record_command("blocked turn detail", &detail);
+            assert!(detail.is_clean_exit(0));
+            let turn: serde_json::Value = serde_json::from_slice(&detail.stdout).unwrap();
+            assert_eq!(turn["summary"]["outcome"], "failed");
+            let steps = turn["steps"].as_array().unwrap();
+            assert_eq!(steps.len(), 1);
+            let attempts = steps[0]["attempts"].as_array().unwrap();
+            assert_eq!(attempts.len(), 1);
+            let attempt = &attempts[0];
+            assert_eq!(attempt["end"]["end"], "stopped");
+            assert_eq!(
+                attempt["end"]["cause"],
+                json!({"cause":"provider_error","retryable":false})
+            );
+            assert!(
+                attempt["end"]["diagnostic"]
+                    .as_str()
+                    .unwrap()
+                    .contains("blockReason=SAFETY")
+            );
+            assert!(attempt["retry_delay_ms"].is_null());
+            assert_eq!(attempt["usage_kind"], "partial");
+            if with_usage {
+                assert_eq!(attempt["usage"]["input"], 8);
+                assert!(attempt["usage"]["output"].is_null());
+                assert_eq!(attempt["cost"]["exact"], false);
+            } else {
+                assert_eq!(attempt["usage"], serde_json::Value::Null);
+                assert_eq!(attempt["cost"], serde_json::Value::Null);
+            }
+            assert_eq!(server.captured_requests().len(), 1);
+        }));
+        evidence.record_captures(server.captured_requests());
+        support::finish_recorded(evidence, result);
+    }
+}
+
+#[test]
 fn implemented_builtin_protocols_accept_and_record_the_protocol_actually_sent() {
     use lattice_system_harness::{FAKE_API_KEY, SseScript};
     for (id, protocol, wire, stored) in [
