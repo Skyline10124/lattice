@@ -8,10 +8,12 @@ use std::collections::BTreeMap;
 
 use crate::LlmError;
 use crate::protocol::projection::request_messages_to_wire;
+use crate::reasoning::ReasoningPlan;
 use crate::reply::{
     PartDelta, PartKind, ProtocolEvent, ReplyProtocolError, StreamStop, StringPatch,
 };
 use crate::types::ChatRequest;
+use lattice_conversation::Effort;
 
 /// Messages 必须发送输出上限；元数据没有给出时使用此值。
 const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 32_768;
@@ -44,6 +46,7 @@ pub fn build_request_json(
     output_limit: Option<u64>,
     context_limit: Option<u64>,
     cache: super::Cache,
+    reasoning: Option<ReasoningPlan>,
     origin: &ReplayOrigin,
 ) -> Result<serde_json::Value, LlmError> {
     let projected = request_messages_to_wire(origin, &request.messages)?;
@@ -68,6 +71,38 @@ pub fn build_request_json(
         "max_tokens": max_tokens,
         "stream": true,
     });
+
+    if let Some(plan) = reasoning {
+        body["thinking"] = match plan {
+            ReasoningPlan::Effort {
+                effort: Effort::Off,
+                ..
+            }
+            | ReasoningPlan::Toggle { enabled: false } => serde_json::json!({"type":"disabled"}),
+            ReasoningPlan::Effort { effort, .. } => {
+                body["output_config"] = serde_json::json!({"effort":effort.as_str()});
+                serde_json::json!({"type":"adaptive"})
+            }
+            ReasoningPlan::Toggle { enabled: true } => serde_json::json!({"type":"adaptive"}),
+            ReasoningPlan::Budget {
+                effort,
+                tokens,
+                min,
+                ..
+            } => {
+                let budget = tokens.min(max_tokens / 2);
+                if budget < min.unwrap_or(0) {
+                    return Err(LlmError::Config {
+                        message: format!(
+                            "reasoning budget cannot fit this request for model {model:?}: effort={effort}, max_tokens={max_tokens}, minimum budget={}; request was not sent",
+                            min.unwrap_or(0)
+                        ),
+                    });
+                }
+                serde_json::json!({"type":"enabled","budget_tokens":budget})
+            }
+        };
+    }
 
     if let Some(system) = projected.system {
         body["system"] = if cache == super::Cache::Automatic && !system.is_empty() {
@@ -184,8 +219,16 @@ fn json_string_bytes(value: &serde_json::Value) -> u64 {
 
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 
+// 普通 signature 为不含冒号的 base64；标记区分空 thinking 与 redacted。
+pub(super) const REDACTED_PREFIX: &str = "redacted:";
+
+pub(super) fn redacted_replay_state(data: &str) -> String {
+    format!("{REDACTED_PREFIX}{data}")
+}
+
 struct AnthropicBlock {
     kind: PartKind,
+    redacted: bool,
     initial_arguments: bool,
     argument_deltas_started: bool,
 }
@@ -227,7 +270,7 @@ impl AnthropicSseParser {
                     let block = &root["content_block"];
                     let kind = match block["type"].as_str() {
                         Some("text") => PartKind::Text,
-                        Some("thinking") => PartKind::Reasoning,
+                        Some("thinking" | "redacted_thinking") => PartKind::Reasoning,
                         Some("tool_use") => PartKind::ToolCall,
                         other => {
                             return vec![ProtocolEvent::unsupported(
@@ -248,6 +291,7 @@ impl AnthropicSseParser {
                     events.push(ProtocolEvent::Part(PartDelta::Begin { index, kind }));
                     let mut state = AnthropicBlock {
                         kind,
+                        redacted: block["type"] == "redacted_thinking",
                         initial_arguments: false,
                         argument_deltas_started: false,
                     };
@@ -260,16 +304,29 @@ impl AnthropicSseParser {
                             }));
                         }
                         PartKind::Reasoning => {
-                            let text = block["thinking"].as_str().unwrap_or("");
-                            events.push(ProtocolEvent::Part(PartDelta::Reasoning {
-                                index,
-                                delta: text.into(),
-                            }));
-                            if let Some(signature) = block["signature"].as_str() {
+                            if state.redacted {
+                                let Some(data) = block["data"].as_str() else {
+                                    return vec![ProtocolEvent::error(
+                                        "malformed Anthropic Messages wire: redacted_thinking block missing string data",
+                                        false,
+                                    )];
+                                };
                                 events.push(ProtocolEvent::Part(PartDelta::ReplayState {
                                     index,
-                                    patch: StringPatch::Set(signature.into()),
+                                    patch: StringPatch::Set(redacted_replay_state(data)),
                                 }));
+                            } else {
+                                let text = block["thinking"].as_str().unwrap_or("");
+                                events.push(ProtocolEvent::Part(PartDelta::Reasoning {
+                                    index,
+                                    delta: text.into(),
+                                }));
+                                if let Some(signature) = block["signature"].as_str() {
+                                    events.push(ProtocolEvent::Part(PartDelta::ReplayState {
+                                        index,
+                                        patch: StringPatch::Set(signature.into()),
+                                    }));
+                                }
                             }
                         }
                         PartKind::ToolCall => {
@@ -298,6 +355,12 @@ impl AnthropicSseParser {
                 "content_block_delta" => {
                     let delta = &root["delta"];
                     let block_type = delta["type"].as_str().unwrap_or("<missing>");
+                    if self.blocks.get(&index).is_some_and(|block| block.redacted) {
+                        return vec![ProtocolEvent::error(
+                            "malformed Anthropic Messages wire: redacted_thinking blocks do not accept deltas",
+                            false,
+                        )];
+                    }
                     let translated = match block_type {
                         "text_delta" => PartDelta::Text {
                             index,
@@ -415,10 +478,6 @@ mod tests {
         for (event_type, payload) in [
             (
                 "content_block_start",
-                serde_json::json!({"index":9,"content_block":{"type":"redacted_thinking","data":"private-payload"}}),
-            ),
-            (
-                "content_block_start",
                 serde_json::json!({"index":9,"content_block":{"type":"unknown-block","data":"private-payload"}}),
             ),
             (
@@ -467,7 +526,7 @@ mod tests {
         assert!(matches!(
             crate::test_reply::wire_to_native(
                 Protocol::Messages,
-                &serde_json::json!({"content":[{"type":"redacted_thinking","data":"private-payload"}]})
+                &serde_json::json!({"content":[{"type":"unknown-block","data":"private-payload"}]})
             ),
             Err(ProjectionError::Protocol(
                 ReplyProtocolError::UnsupportedContentBlock { index: 0, .. }
@@ -497,6 +556,204 @@ mod tests {
         assert_eq!(message.parts.len(), 2);
         for part in &message.parts {
             assert_eq!(part.replay_state.as_ref().unwrap().as_str(), "first-second");
+        }
+    }
+
+    fn parse_blocks(blocks: &[serde_json::Value]) -> Vec<LlmEvent> {
+        let mut parser = Parser::new(Protocol::Messages);
+        start_message(&mut parser);
+        let mut events = Vec::new();
+        for (index, block) in blocks.iter().enumerate() {
+            events.extend(parser.parse_chunk(
+                "content_block_start",
+                &serde_json::json!({"index":index,"content_block":block}).to_string(),
+            ));
+            events.extend(parser.parse_chunk(
+                "content_block_stop",
+                &serde_json::json!({"index":index}).to_string(),
+            ));
+        }
+        events.extend(parser.parse_chunk(
+            "message_delta",
+            r#"{"delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":1}}"#,
+        ));
+        events
+    }
+
+    #[test]
+    fn redacted_stream_and_full_wire_preserve_empty_reasoning_without_displaying_data() {
+        let wire: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/projection/anthropic_redacted_thinking_tool_use.json"
+        ))
+        .unwrap();
+        let events = parse_blocks(wire["content"].as_array().unwrap());
+        let message = crate::test_reply::completed(&events);
+        assert_eq!(
+            *message,
+            crate::test_reply::wire_to_native(Protocol::Messages, &wire).unwrap()
+        );
+        assert_eq!(message.parts.len(), 7);
+        for index in [1, 5] {
+            assert!(
+                matches!(&message.parts[index].semantic, MessageSemantic::Reasoning { text } if text.is_empty())
+            );
+            assert_eq!(
+                message.parts[index].replay_state.as_ref().unwrap().as_str(),
+                redacted_replay_state(wire["content"][index]["data"].as_str().unwrap())
+            );
+        }
+        assert!(
+            matches!(&message.parts[2].semantic, MessageSemantic::Reasoning { text } if text.is_empty())
+        );
+        assert_eq!(
+            message.parts[2].replay_state.as_ref().unwrap().as_str(),
+            "RW1wdHkgc2lnbmF0dXJl"
+        );
+        let deltas: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                LlmEvent::Delta(delta) => Some(delta.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            deltas,
+            vec![
+                crate::LiveDelta::Reasoning("Plan with tools.".into()),
+                crate::LiveDelta::Text("Checking both.".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn malformed_redacted_data_and_deltas_fail_without_exposing_payloads() {
+        for block in [
+            serde_json::json!({"type":"redacted_thinking"}),
+            serde_json::json!({"type":"redacted_thinking","data":null}),
+            serde_json::json!({"type":"redacted_thinking","data":123}),
+            serde_json::json!({"type":"redacted_thinking","data":{"private-payload":true}}),
+        ] {
+            let events = parse_blocks(std::slice::from_ref(&block));
+            let diagnostic = crate::test_reply::failure(&events).expect("invalid data");
+            assert!(diagnostic.contains("redacted_thinking"));
+            assert!(!diagnostic.contains("private-payload"));
+            assert!(matches!(
+                crate::test_reply::wire_to_native(
+                    Protocol::Messages,
+                    &serde_json::json!({"content":[block]})
+                ),
+                Err(ProjectionError::MalformedWire { .. })
+            ));
+        }
+        for delta in [
+            serde_json::json!({"type":"thinking_delta","thinking":"private-payload"}),
+            serde_json::json!({"type":"signature_delta","signature":"private-payload"}),
+            serde_json::json!({"type":"text_delta","text":"private-payload"}),
+        ] {
+            let mut parser = Parser::new(Protocol::Messages);
+            start_message(&mut parser);
+            parser.parse_chunk(
+                "content_block_start",
+                r#"{"index":0,"content_block":{"type":"redacted_thinking","data":"private-data"}}"#,
+            );
+            let events = parser.parse_chunk(
+                "content_block_delta",
+                &serde_json::json!({"index":0,"delta":delta}).to_string(),
+            );
+            let diagnostic =
+                crate::test_reply::failure(&events).expect("redacted cannot accept deltas");
+            assert!(!diagnostic.contains("private-"));
+        }
+    }
+
+    #[test]
+    fn redacted_marker_counts_towards_replay_and_attempt_limits() {
+        use lattice_conversation::{
+            LimitKind, MAX_MODEL_ATTEMPT_BYTES, MAX_OPAQUE_REPLAY_STATE_BYTES,
+        };
+        let data = "x".repeat(MAX_OPAQUE_REPLAY_STATE_BYTES - REDACTED_PREFIX.len());
+        for extra in ["", "x"] {
+            let block =
+                serde_json::json!({"type":"redacted_thinking","data":format!("{data}{extra}")});
+            let events = parse_blocks(std::slice::from_ref(&block));
+            let native = crate::test_reply::wire_to_native(
+                Protocol::Messages,
+                &serde_json::json!({"content":[block]}),
+            );
+            if extra.is_empty() {
+                assert_eq!(
+                    crate::test_reply::completed(&events).parts[0]
+                        .replay_state
+                        .as_ref()
+                        .unwrap()
+                        .as_str()
+                        .len(),
+                    MAX_OPAQUE_REPLAY_STATE_BYTES
+                );
+                assert!(native.is_ok());
+            } else {
+                assert!(matches!(
+                    native,
+                    Err(ProjectionError::Protocol(
+                        ReplyProtocolError::ReplayStateTooLarge { .. }
+                    ))
+                ));
+                assert!(matches!(
+                    &events[..],
+                    [LlmEvent::Finished {
+                        outcome: ReplyOutcome::Interrupted {
+                            reason: ReplyStop::Stream(StreamStop::Protocol(
+                                ReplyProtocolError::ReplayStateTooLarge { .. }
+                            ))
+                        },
+                        ..
+                    }]
+                ));
+            }
+        }
+        let mut blocks = vec![
+            serde_json::json!({"type":"redacted_thinking","data":data});
+            MAX_MODEL_ATTEMPT_BYTES / MAX_OPAQUE_REPLAY_STATE_BYTES
+        ];
+        for extra in [false, true] {
+            if extra {
+                blocks.push(serde_json::json!({"type":"text","text":"x"}));
+            }
+            let events = parse_blocks(&blocks);
+            let native = crate::test_reply::wire_to_native(
+                Protocol::Messages,
+                &serde_json::json!({"content":blocks}),
+            );
+            if !extra {
+                assert_eq!(crate::test_reply::completed(&events).parts.len(), 256);
+                lattice_conversation::validate_assistant_bounds(&native.unwrap()).unwrap();
+            } else {
+                assert!(matches!(
+                    native,
+                    Err(ProjectionError::OutputLimitExceeded {
+                        interruption:
+                            lattice_conversation::AttemptInterruption::OutputLimitExceeded {
+                                kind: LimitKind::ModelAttemptTotal,
+                                ..
+                            },
+                        ..
+                    })
+                ));
+                assert!(matches!(
+                    &events[..],
+                    [LlmEvent::Finished {
+                        outcome: ReplyOutcome::Interrupted {
+                            reason: ReplyStop::OutputLimit(
+                                lattice_conversation::AttemptInterruption::OutputLimitExceeded {
+                                    kind: LimitKind::ModelAttemptTotal,
+                                    ..
+                                }
+                            )
+                        },
+                        ..
+                    }]
+                ));
+            }
         }
     }
     fn text(role: MessageRole, content: &str) -> lattice_conversation::ConversationItem {
@@ -542,6 +799,7 @@ mod tests {
             None,
             None,
             super::super::Cache::None,
+            None,
             &crate::test_reply::replay_origin(Protocol::Messages),
         )
         .expect("projection");

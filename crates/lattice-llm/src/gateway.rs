@@ -12,6 +12,7 @@ use std::{
 use crate::auth::{AuthError, AuthStore, Credentials};
 use crate::client::{self, RequestEndpoint, TurnClient};
 use crate::provider::{Auth, Provider, config::ProviderRegistry, validate_model_id};
+use crate::reasoning::{ReasoningCapabilities, ReasoningPlan};
 use crate::{ChatRequest, LlmError, LlmStream, ModelTarget, StreamControl};
 
 mod cost;
@@ -137,10 +138,18 @@ impl GatewayTurn {
         let directory = self.configuration.directory.clone();
         let provider_id = provider_id.to_owned();
         let model_id = target.model.clone();
-        let (provider, credentials, output_limit, context_limit) =
-            tokio::task::spawn_blocking(move || load_provider(directory, &provider_id, &model_id))
-                .await
-                .map_err(|_| configuration_error("provider configuration task failed"))??;
+        let effort = target.effort;
+        let LoadedProvider {
+            provider,
+            credentials,
+            output_limit,
+            context_limit,
+            reasoning,
+        } = tokio::task::spawn_blocking(move || {
+            load_provider(directory, &provider_id, &model_id, effort)
+        })
+        .await
+        .map_err(|_| configuration_error("provider configuration task failed"))??;
         // 没有可用根证书时 https 端点按配置错误拒绝，不回退平台根；http 端点照常。
         if !self.configuration.has_usable_roots() {
             require_endpoint_without_tls_roots(&provider.base_url)?;
@@ -165,6 +174,7 @@ impl GatewayTurn {
             target: target.clone(),
             output_limit,
             context_limit,
+            reasoning,
         })
     }
 
@@ -190,6 +200,7 @@ pub struct ResolvedRequest {
     target: ModelTarget,
     output_limit: Option<u64>,
     context_limit: Option<u64>,
+    reasoning: Option<ReasoningPlan>,
 }
 
 impl ResolvedRequest {
@@ -228,6 +239,7 @@ impl ResolvedRequest {
                 client: self.client.clone(),
                 output_limit: self.output_limit,
                 context_limit: self.context_limit,
+                reasoning: self.reasoning,
                 features: self
                     .provider
                     .models
@@ -275,11 +287,20 @@ pub(crate) fn load_configuration(
     Ok((registry, credentials))
 }
 
+struct LoadedProvider {
+    provider: Provider,
+    credentials: Credentials,
+    output_limit: Option<u64>,
+    context_limit: Option<u64>,
+    reasoning: Option<ReasoningPlan>,
+}
+
 fn load_provider(
     directory: PathBuf,
     id: &str,
     model_id: &str,
-) -> Result<(Provider, Credentials, Option<u64>, Option<u64>), LlmError> {
+    effort: Option<lattice_conversation::Effort>,
+) -> Result<LoadedProvider, LlmError> {
     let (registry, credentials) = load_configuration(&directory)?;
     let provider = registry
         .get(id)
@@ -290,13 +311,27 @@ fn load_provider(
         Err(_) if provider.auth == Auth::None => Credentials::default(),
         Err(error) => return Err(configuration_error(error)),
     };
-    let limits = crate::metadata::Metadata::load(&directory)
-        .merge(&provider)
+    let models = crate::metadata::Metadata::load(&directory).merge(&provider);
+    let model = models.get(model_id);
+    let limits = model.and_then(|model| model.limit.as_ref());
+    let output_limit = limits.and_then(|limit| limit.output);
+    let context_limit = limits.and_then(|limit| limit.context);
+    let features = provider
+        .models
         .get(model_id)
-        .and_then(|model| model.limit.clone());
-    let output_limit = limits.as_ref().and_then(|limit| limit.output);
-    let context_limit = limits.as_ref().and_then(|limit| limit.context);
-    Ok((provider, credentials, output_limit, context_limit))
+        .map_or(provider.features, |model| model.features);
+    let reasoning = effort.map(|effort| {
+        ReasoningCapabilities::new(model, features).select(effort).ok_or_else(|| configuration_error(format!(
+            "model {id}/{model_id} does not support reasoning effort {effort} with its current metadata and features"
+        )))
+    }).transpose()?;
+    Ok(LoadedProvider {
+        provider,
+        credentials,
+        output_limit,
+        context_limit,
+        reasoning,
+    })
 }
 
 pub(crate) fn missing_provider_error(registry: &ProviderRegistry, id: &str) -> LlmError {
