@@ -129,7 +129,8 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
                 r#"{"path":"kept.txt","content":"kept\n","create_parents":false}"#,
             ),
             SseScript::plain("old final"),
-            SseScript::plain("alpha fork"),
+            SseScript::plain("beta fork"),
+            SseScript::plain("beta inherited root"),
             SseScript::plain("beta root"),
         ]),
     );
@@ -332,7 +333,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
             &spec,
             &["--json", "session", "send", "fork", "--session", sid],
         );
-        evidence.record_command("fork inherits alpha at target node", &fork);
+        evidence.record_command("fork inherits latest beta copy", &fork);
         assert!(fork.is_clean_exit(0), "{}", fork.summary());
         support::parse_send_stdout(&fork.stdout, fork.exit_code());
         let tree = cli_json(
@@ -344,7 +345,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
         assert_eq!(tree["nodes"].as_array().unwrap().len(), 9);
         assert_eq!(tree["nodes"][7]["node"]["id"], 7);
         assert_eq!(tree["nodes"][7]["node"]["parent"], 2);
-        assert_eq!(tree["current_agent"], "alpha");
+        assert_eq!(tree["current_agent"], "beta");
         assert_eq!(
             cli_json(
                 &world,
@@ -378,7 +379,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
             &mut evidence,
             &["--json", "session", "log", sid],
         );
-        assert_eq!(returned["current_agent"], "alpha");
+        assert_eq!(returned["current_agent"], "beta");
         assert_eq!(returned["nodes"].as_array().unwrap().len(), 9);
         assert_eq!(current_history(&world, &spec, sid), original_history);
         assert_eq!(
@@ -399,29 +400,26 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
             &mut evidence,
             &["--json", "session", "log", sid],
         );
-        assert!(at_root["current_agent"].is_null());
-        let refused = support::cli(
+        assert_eq!(at_root["current_agent"], "beta");
+        let inherited = support::cli(
             &world,
             &spec,
             &["--json", "session", "send", "no agent", "--session", sid],
         );
-        evidence.record_command("root rejects missing agent", &refused);
-        assert!(refused.is_clean_exit(2));
-        let refusal = support::parse_send_stdout(&refused.stdout, refused.exit_code());
+        evidence.record_command("root inherits beta copy", &inherited);
+        assert!(inherited.is_clean_exit(0), "{}", inherited.summary());
+        let inherited = support::parse_send_stdout(&inherited.stdout, inherited.exit_code());
         assert_eq!(
-            refusal.rejection().map(|error| error.message.as_str()),
-            Some("new Session or root requires explicit agent")
+            inherited.heads().last().unwrap().agent.as_deref(),
+            Some("beta")
         );
-        assert_eq!(
-            cli_json(
-                &world,
-                &spec,
-                &mut evidence,
-                &["--json", "session", "log", sid]
-            ),
-            at_root
+        assert_eq!(server.captured_requests().len(), 4);
+        cli_json(
+            &world,
+            &spec,
+            &mut evidence,
+            &["--json", "session", "rewind", sid, "0"],
         );
-        assert_eq!(server.captured_requests().len(), 3);
         let root = support::cli(
             &world,
             &spec,
@@ -445,10 +443,10 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
             &mut evidence,
             &["--json", "session", "log", sid],
         );
-        assert_eq!(after["nodes"].as_array().unwrap().len(), 11);
-        assert_eq!(after["nodes"][9]["node"]["id"], 9);
-        assert_eq!(after["nodes"][9]["node"]["parent"], 0);
-        assert_eq!(after["session"]["current"], 10);
+        assert_eq!(after["nodes"].as_array().unwrap().len(), 13);
+        assert_eq!(after["nodes"][11]["node"]["id"], 11);
+        assert_eq!(after["nodes"][11]["node"]["parent"], 0);
+        assert_eq!(after["session"]["current"], 12);
         assert_eq!(after["current_agent"], "beta");
         assert_eq!(
             cli_json(
@@ -482,8 +480,8 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
         all_captures.extend(beta_requests);
         all_captures.extend_from_slice(&captures[2..]);
         evidence.record_captures(all_captures);
-        assert_eq!(captures.len(), 4);
-        assert_eq!(captures[2].raw["model"], "alpha");
+        assert_eq!(captures.len(), 5);
+        assert_eq!(captures[2].raw["model"], "beta");
         assert_eq!(captures[3].raw["model"], "beta");
         // 固定夹具的规定投影：来源是公开历史；不导入产品投影器，也不使用上一请求作 oracle。
         let step = &fork_history["entries"][1]["content"];
@@ -499,7 +497,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
             json!({"bytes_written":5,"path":"kept.txt"})
         );
         let expected = json!([
-            {"role":"system","content":"You are a concise test agent."},
+            {"role":"system","content":"Beta isolated prompt."},
             {"role":"user","content":fork_history["entries"][0]["content"]["message"]["parts"][0]["semantic"]["text"]["text"]},
             {"role":"assistant","content":null,"tool_calls":[{"id":"create","type":"function","function":{
                 "name":"mutate__create","arguments":serde_json::to_string(&call["arguments"]).unwrap()}}]},
@@ -508,7 +506,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
         ]);
         assert_eq!(captures[2].raw["messages"], expected);
         assert_eq!(
-            captures[3].raw["messages"],
+            captures[4].raw["messages"],
             json!([{"role":"system","content":"Beta isolated prompt."},{"role":"user","content":"root input"}])
         );
         for request in &captures {
@@ -558,7 +556,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
         evidence.record_json("state-summary", &json!({"original":original,"cancelled":beta_closed,"tree":after,
             "state_root":world.session_store_dir().parent(),"daemon_pids":world.daemon_pids().unwrap(),
             "files":(["kept.txt","cancelled.txt"].map(|path| json!({"path":path,"blake3":blake3::hash(&std::fs::read(world.project_dir().join(path)).unwrap()).to_hex().to_string()}))),
-            "provider_requests":6,"script":"alpha create kept.txt then final; beta create cancelled.txt then cancel at request2; alpha fork; beta root"})).unwrap();
+            "provider_requests":7,"script":"alpha create kept.txt then final; beta create cancelled.txt then cancel at request2; beta fork; beta inherited root; beta explicit root"})).unwrap();
         server.shutdown(spec.step_timeout()).unwrap();
     }));
     support::finish_recorded(evidence, result);

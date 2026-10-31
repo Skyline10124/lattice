@@ -5,8 +5,8 @@ pub use crate::models::ModelCandidates;
 pub use crate::turn::{TextSegment, TurnRef};
 pub use lancet_protocol::{InvocationId, ModelAttemptKey, SessionId, TurnId};
 pub use lattice_conversation::{
-    CostEstimate, CostSummary, ResultPayload, StepContent, StoredToolResult, SuccessContent,
-    TokenSummary, UsageCompleteness,
+    CostEstimate, CostSummary, Effort, ResultPayload, StepContent, StoredToolResult,
+    SuccessContent, TokenSummary, UsageCompleteness,
 };
 pub use lattice_llm::auth::{AuthState, AuthStatus, ProviderAuthStatus};
 pub use lattice_session::store::{
@@ -62,6 +62,10 @@ pub struct SessionHead {
     pub session_id: SessionId,
     pub position: NodeId,
     pub agent: Option<String>,
+    pub model: String,
+    pub provider: String,
+    pub effort: Option<lattice_conversation::Effort>,
+    pub profile_default_effort: Option<lattice_conversation::Effort>,
     pub turn_id: Option<TurnId>,
     pub owner: bool,
     pub diagnostic: Option<LocalError>,
@@ -386,6 +390,8 @@ pub struct TurnRequest {
     pub workspace: PathBuf,
     pub input: String,
     pub agent: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<lattice_conversation::Effort>,
 }
 impl TurnRequest {
     /// 解析已有会话后再生成身份，sending 始终含完整 SessionId。
@@ -404,6 +410,8 @@ impl TurnRequest {
             workspace,
             input,
             agent,
+            model: None,
+            effort: None,
         }
     }
 }
@@ -561,6 +569,8 @@ mod tests {
         let tid = super::super::new_turn_id();
         for session in [SubmitSession::New(sid), SubmitSession::Existing(sid)] {
             let request = TurnRequest {
+                model: None,
+                effort: None,
                 turn_id: tid,
                 session,
                 workspace: "/tmp/project".into(),
@@ -611,6 +621,10 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_value(Response::Head(SessionHead {
+                model: "test".into(),
+                provider: "openai-compatible".into(),
+                effort: None,
+                profile_default_effort: None,
                 session_id: sid,
                 position: NodeId(0),
                 agent: None,
@@ -622,6 +636,7 @@ mod tests {
             .unwrap(),
             serde_json::json!({"response":"head", "value":{
                 "session_id":sid, "position":0, "agent":null, "turn_id":null,
+                "model":"test", "provider":"openai-compatible", "effort":null, "profile_default_effort":null,
                 "owner":false, "diagnostic":null, "path_replaced":false,
             }})
         );

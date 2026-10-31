@@ -546,12 +546,6 @@ fn same_protocol_provider_switch_preserves_tool_ids_and_restores_source_reasonin
         .unwrap();
     world.write_project_file(".lattice/agents/replay/agent.toml",
         "schema_version=1\n[agent]\nname='replay'\nmodel='openai/first'\n[prompt]\nsystem='Read the requested file.'\n[tools]\nenabled=['observe__workspace']\n").unwrap();
-    world
-        .write_agent_profile("second", "deepseek/second")
-        .unwrap();
-    world
-        .write_agent_profile("third", "google-generate/third")
-        .unwrap();
     world.init_git_project().unwrap();
     let server = FakeLlmServer::start(sequence(vec![
         SseScript::Chunks { chunks: vec![
@@ -608,44 +602,45 @@ fn same_protocol_provider_switch_preserves_tool_ids_and_restores_source_reasonin
         assert!(first.has_completed() && first.command.is_clean_exit(0));
         assert!(first.parsed.malformed_lines.is_empty());
         let sid = send.session_id().unwrap();
-        let second = support::cli(
-            &world,
-            &spec,
-            &[
-                "--json",
-                "session",
-                "send",
-                "switch provider",
-                "--session",
-                sid,
-                "--agent",
-                "second",
-            ],
+        let choose = |evidence: &mut ScenarioEvidence, id: &str, input: &str, model: &str| {
+            let wait = world.budget(&spec).cap_timeout(spec.step_timeout());
+            let mut request =
+                support::submit_request(&world, id, json!({"existing":sid}), input, None);
+            request["request"]["model"] = json!(model);
+            let accepted = support::ipc(&world, wait, request);
+            assert_eq!(accepted["response"], "acceptance", "{accepted}");
+            assert_eq!(accepted["value"]["turn"]["turn_id"], id);
+            let mut watcher = support::Watcher::open(&world, wait, sid);
+            watcher.until(
+                std::time::Instant::now() + wait,
+                "selected model closes",
+                |view| {
+                    support::turn_closed(view, id)
+                        && view.head.as_ref().is_some_and(|head| !head.owner)
+                },
+            );
+            let head = watcher.view.head.as_ref().unwrap();
+            let (provider, model) = model.split_once('/').unwrap();
+            assert_eq!(head.provider, provider);
+            assert_eq!(head.model, model);
+            let turn = support::turn_lookup(&world, wait, id);
+            assert_eq!(turn["value"]["turn"]["summary"]["outcome"], "completed");
+            evidence
+                .record_json(&format!("choice-{input}"), &turn)
+                .unwrap();
+        };
+        choose(
+            &mut evidence,
+            "00000000-0000-4000-8000-000000000002",
+            "switch provider",
+            "deepseek/second",
         );
-        evidence.record_command("same protocol provider switch", &second);
-        assert!(second.is_clean_exit(0), "{}", second.summary());
-        let second_parsed = support::parse_send_stdout(&second.stdout, second.exit_code());
-        support::assert_accepted_and_closed(&second_parsed).unwrap();
-        assert!(second_parsed.malformed_lines.is_empty());
-        let cross = support::cli(
-            &world,
-            &spec,
-            &[
-                "--json",
-                "session",
-                "send",
-                "cross protocol",
-                "--session",
-                sid,
-                "--agent",
-                "third",
-            ],
+        choose(
+            &mut evidence,
+            "00000000-0000-4000-8000-000000000003",
+            "cross protocol",
+            "google-generate/third",
         );
-        evidence.record_command("cross protocol to generateContent", &cross);
-        assert!(cross.is_clean_exit(0), "{}", cross.summary());
-        let cross_parsed = support::parse_send_stdout(&cross.stdout, cross.exit_code());
-        support::assert_accepted_and_closed(&cross_parsed).unwrap();
-        assert!(cross_parsed.malformed_lines.is_empty());
         let rewind = support::cli(&world, &spec, &["--json", "session", "rewind", sid, "2"]);
         evidence.record_command("rewind to the original Tool step", &rewind);
         assert!(rewind.is_clean_exit(0), "{}", rewind.summary());
@@ -653,25 +648,15 @@ fn same_protocol_provider_switch_preserves_tool_ids_and_restores_source_reasonin
         evidence.record_command("stop before reopening", &stop);
         assert!(stop.is_clean_exit(0));
         world.daemon_departed().unwrap();
-        let third = support::cli(
-            &world,
-            &spec,
-            &[
-                "--json",
-                "session",
-                "send",
-                "return to source",
-                "--session",
-                sid,
-                "--agent",
-                "replay",
-            ],
+        let reopened = support::cli(&world, &spec, &["--json", "session", "log", sid]);
+        evidence.record_command("reopen persisted Session before IPC selection", &reopened);
+        assert!(reopened.is_clean_exit(0), "{}", reopened.summary());
+        choose(
+            &mut evidence,
+            "00000000-0000-4000-8000-000000000004",
+            "return to source",
+            "openai/first",
         );
-        evidence.record_command("reopen and restore source", &third);
-        assert!(third.is_clean_exit(0), "{}", third.summary());
-        let third_parsed = support::parse_send_stdout(&third.stdout, third.exit_code());
-        support::assert_accepted_and_closed(&third_parsed).unwrap();
-        assert!(third_parsed.malformed_lines.is_empty());
         let captures = server.captured_requests();
         assert_eq!(captures.len(), 5);
         for capture in [&captures[1], &captures[2], &captures[4]] {

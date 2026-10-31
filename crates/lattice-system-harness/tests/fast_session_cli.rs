@@ -158,24 +158,58 @@ fn missing_session_and_missing_profile_fail_before_dispatch() {
             &spec,
             &["--json", "session", "send", "hello", "--session", sid],
         );
-        evidence.record_command("profile missing", &out);
-        assert!(out.is_clean_exit(2));
-        // 配置在请求写出前加载失败：`sending` 之后以 `rejected` 回执结束。
-        let sent = parse_send_stdout(&out.stdout, out.exit_code());
-        assert_eq!(
-            sent.rejection().map(|error| error.kind.as_str()),
-            Some("bad_request"),
-            "{:?}",
-            sent.type_sequence()
-        );
-        lattice_system_harness::assert_no_secret(&out, lattice_system_harness::FAKE_API_KEY)
+        evidence.record_command("inherited copy after source removal", &out);
+        assert!(out.is_clean_exit(0), "{}", out.summary());
+        let inherited = parse_send_stdout(&out.stdout, out.exit_code());
+        support::assert_accepted_and_closed(&inherited).unwrap();
+        for args in [
+            vec![
+                "--json",
+                "session",
+                "send",
+                "refresh missing",
+                "--session",
+                sid,
+                "--agent",
+                "plain",
+            ],
+            vec![
+                "--json",
+                "session",
+                "send",
+                "new missing",
+                "--agent",
+                "plain",
+            ],
+        ] {
+            let rejected = cli(&world, &spec, &args);
+            evidence.record_command("explicit missing profile", &rejected);
+            assert!(rejected.is_clean_exit(2), "{}", rejected.summary());
+            let sent = parse_send_stdout(&rejected.stdout, rejected.exit_code());
+            assert_eq!(
+                sent.rejection().map(|error| error.kind.as_str()),
+                Some("bad_request"),
+                "{:?}",
+                sent.type_sequence()
+            );
+            assert!(
+                sent.rejection()
+                    .unwrap()
+                    .message
+                    .contains("agent profile 'plain' not found")
+            );
+            lattice_system_harness::assert_no_secret(
+                &rejected,
+                lattice_system_harness::FAKE_API_KEY,
+            )
             .unwrap();
-        assert_eq!(server.captured_requests().len(), 1);
+        }
+        assert_eq!(server.captured_requests().len(), 2);
         support::record_session(
             &send,
             &mut evidence,
             sid,
-            serde_json::json!({"seed":"seed","rejected_prompt":"hello","unknown_session":"nope-sid","profile_removed":true,"provider_requests":1}),
+            serde_json::json!({"seed":"seed","inherited_prompt":"hello","rejected_prompt":"refresh missing","unknown_session":"nope-sid","profile_removed":true,"provider_requests":2}),
         );
     }));
     evidence.record_captures(server.captured_requests());

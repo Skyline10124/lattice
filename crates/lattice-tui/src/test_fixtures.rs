@@ -16,6 +16,7 @@ pub(super) fn sid() -> SessionId {
 pub(super) fn test_app(existing: bool) -> App {
     App::new(
         SessionContext {
+            startup_agent: Some("unused".into()),
             session_id: existing.then(sid),
             active_agent: "unused".into(),
         },
@@ -26,6 +27,10 @@ pub(super) fn test_app(existing: bool) -> App {
 
 pub(super) fn head(position: u64, turn_id: Option<TurnId>, owner: bool) -> SessionHead {
     SessionHead {
+        model: "model-a".into(),
+        provider: "openai".into(),
+        effort: None,
+        profile_default_effort: None,
         session_id: sid(),
         position: NodeId(position),
         agent: Some("unused".into()),

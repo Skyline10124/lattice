@@ -29,6 +29,8 @@ pub(crate) struct ExecutionInput {
     pub workspace: LocalWorkspaceRoot,
     pub request: RunTurnRequest,
     pub prepared_model: Option<PreparedModel>,
+    pub prepared_profile: Option<crate::profile::PreparedProfile>,
+    pub io: Option<CoordinatorStoreIo>,
     pub shutdown: Arc<AtomicBool>,
     pub observer: Arc<ObserverSink>,
     /// 新会话身份由提交方在执行开始前给定。
@@ -45,11 +47,30 @@ impl PreparedModel {
     /// 在建库与接受前完成解析；同一 Turn 随后沿用这个网关句柄。
     pub(crate) async fn resolve(
         gateway: &Arc<lattice_llm::RequestGateway>,
-        model: &str,
+        profile: &crate::profile::PreparedProfile,
+        model: Option<&str>,
+        effort: Option<lattice_conversation::Effort>,
     ) -> Result<Self> {
         let auth = gateway.auth_store();
-        let target = model_target(model, Some(&auth))?;
+        let (mut target, changed) = selected_target(profile, model, Some(&auth))?;
         let turn = gateway.open_turn();
+        if let Some(effort) = effort {
+            target.effort = Some(effort);
+        } else if changed {
+            let supported = turn.supported_efforts(&target).await.map_err(|error| {
+                ApiError::Configuration(crate::ConfigRejection::new(
+                    &error.to_string(),
+                    Some(&auth),
+                ))
+            })?;
+            target.effort = [
+                target.effort,
+                profile.configuration.effective.default_effort,
+            ]
+            .into_iter()
+            .flatten()
+            .find(|effort| supported.contains(effort));
+        }
         let resolved = turn.resolve(&target).await.map_err(|error| {
             ApiError::Configuration(crate::ConfigRejection::new(&error.to_string(), Some(&auth)))
         })?;
@@ -59,6 +80,47 @@ impl PreparedModel {
             gateway: gateway.clone(),
         })
     }
+}
+
+fn selected_target(
+    profile: &crate::profile::PreparedProfile,
+    model: Option<&str>,
+    auth: Option<&lattice_llm::auth::AuthStore>,
+) -> Result<(lattice_llm::ModelTarget, bool)> {
+    let base = if profile.inherited {
+        let current = &profile.previous.as_ref().expect("inherited copy").current;
+        let mut target = lattice_llm::ModelTarget::new(&current.provider, &current.model);
+        target.effort = current.effort;
+        Some(target)
+    } else {
+        profile
+            .configuration
+            .effective
+            .default_model
+            .as_deref()
+            .map(|model| model_target(model, auth))
+            .transpose()?
+            .map(|mut target| {
+                target.effort = profile.configuration.effective.default_effort;
+                target
+            })
+    };
+    let mut target = match model {
+        Some(model) => model_target(model, auth)?,
+        None => base.clone().ok_or_else(|| {
+            ApiError::Configuration(crate::ConfigRejection::new(
+                "model selection or [agent].model is required",
+                auth,
+            ))
+        })?,
+    };
+    let changed = base
+        .as_ref()
+        .is_none_or(|base| base.provider != target.provider || base.model != target.model);
+    target.effort = base.map_or(profile.configuration.effective.default_effort, |base| {
+        base.effort
+    });
+    Ok((target, changed))
 }
 
 fn model_target(
@@ -93,6 +155,8 @@ pub fn start_turn(
         workspace,
         request,
         prepared_model: None,
+        prepared_profile: None,
+        io: None,
         shutdown: Arc::default(),
         observer: Arc::default(),
         new_session,
@@ -156,6 +220,8 @@ async fn execute_owned(
         workspace,
         request,
         prepared_model,
+        prepared_profile,
+        io,
         shutdown,
         observer,
         new_session,
@@ -172,7 +238,10 @@ async fn execute_owned(
         .session_id
         .or(new_session)
         .ok_or_else(|| ApiError::BadRequest("explicit SessionId required".into()))?;
-    let io = CoordinatorStoreIo::acquire_api(session.clone(), session_id).await?;
+    let io = match io {
+        Some(io) => io,
+        None => CoordinatorStoreIo::acquire_api(session.clone(), session_id).await?,
+    };
     let coordinator = TurnCoordinator::new(io, Arc::new(RandomIdSource));
     if request.session_id.is_some() {
         let record = coordinator
@@ -183,25 +252,57 @@ async fn execute_owned(
             return Err(ApiError::Conflict(RequestConflict::BindingMismatch));
         }
     }
+    let profile = match prepared_profile {
+        Some(profile) => profile,
+        None => {
+            let snapshot = if request.session_id.is_some() {
+                Some(
+                    coordinator
+                        .io
+                        .read(move |read| {
+                            let copy = read.profile_copy(session_id)?;
+                            let prompt = read
+                                .stored_config(&copy.prompt_config_digest)?
+                                .system_prompt;
+                            Ok((copy, prompt))
+                        })
+                        .await?,
+                )
+            } else {
+                None
+            };
+            let (previous, prompt) =
+                snapshot.map_or((None, None), |(copy, prompt)| (Some(copy), prompt));
+            let inherited = request.agent.is_none() && previous.is_some();
+            let configuration = if inherited {
+                let copy = previous.as_ref().expect("inherited copy");
+                crate::profile::TurnProfile::from_copy(copy, prompt)
+            } else {
+                crate::profile::TurnProfile::from_loaded(
+                    request.loaded_profile.as_ref().ok_or_else(|| {
+                        ApiError::BadRequest("frozen configuration required".into())
+                    })?,
+                    &workspace,
+                )?
+            };
+            crate::profile::PreparedProfile {
+                configuration,
+                previous,
+                inherited,
+            }
+        }
+    };
     let selected = match &request.agent {
         Some(name) if !name.trim().is_empty() => name.clone(),
         Some(_) => return Err(ApiError::BadRequest("agent name must not be blank".into())),
-        None if request.session_id.is_some() => coordinator
-            .io
-            .read(move |read| read.current_agent(session_id))
-            .await?
-            .ok_or_else(|| ApiError::BadRequest("root requires explicit agent".into()))?,
+        None if request.session_id.is_some() => profile.configuration.effective.agent_name.clone(),
         None => {
             return Err(ApiError::BadRequest(
                 "new Session requires explicit agent".into(),
             ));
         }
     };
-    let loaded = request
-        .loaded_profile
-        .as_ref()
-        .ok_or_else(|| ApiError::BadRequest("frozen configuration required".into()))?;
-    if loaded.profile.agent.name != selected {
+    if profile.configuration.effective.agent_name != selected {
         return Err(ApiError::BadRequest(
             "loaded agent differs from selection".into(),
         ));
@@ -214,7 +315,10 @@ async fn execute_owned(
         }) => (target, execution, Some(gateway)),
         None => match request.injected_llm() {
             Some((client, protocol)) => {
-                let target = model_target(&loaded.profile.agent.model, None)?;
+                let (mut target, _) = selected_target(&profile, request.model.as_deref(), None)?;
+                if request.effort.is_some() {
+                    target.effort = request.effort;
+                }
                 let origin = lattice_session::store::AttemptOrigin {
                     provider_id: target.provider.clone(),
                     protocol,
@@ -251,17 +355,40 @@ async fn execute_owned(
         .canonical_path()
         .to_str()
         .ok_or_else(|| ApiError::BadRequest("runtime workspace requires UTF-8".into()))?;
+    let lancet = profile.configuration.lancet();
     let deps = build_production_turn_deps(ProductionTurnDepsInput {
-        request: &request,
+        capability_admission: profile.configuration.capability_admission(),
         project_root: root,
         project_store_key: project,
         state_layout: layout,
-        enabled_tools: &loaded.profile.tools.enabled,
+        enabled_tools: &profile.configuration.effective.enabled_tools,
         gateway: gateway.clone(),
-        lancet: Some(&loaded.profile.lancet),
+        lancet: Some(&lancet),
     })
     .await?;
-    let config = super::live::freeze_config(&request, &target, &deps.tool_catalog)?;
+    let config = super::live::freeze_config(&profile.configuration, &target, &deps.tool_catalog)?;
+    let expected_profile_digest = profile
+        .previous
+        .as_ref()
+        .map(SessionProfileCopy::digest)
+        .transpose()?;
+    let profile_copy = SessionProfileCopy {
+        profile: profile.configuration.effective.clone(),
+        prompt_config_digest: if profile.inherited {
+            profile
+                .previous
+                .as_ref()
+                .expect("inherited copy")
+                .prompt_config_digest
+        } else {
+            config.digest()?
+        },
+        current: SessionModelChoice {
+            provider: target.provider.clone(),
+            model: target.model.clone(),
+            effort: target.effort,
+        },
+    };
     let timeout = config.limits.timeout_secs;
     if shutdown.load(Ordering::Acquire) {
         return Err(StoreError::WriteDisabled.into());
@@ -296,6 +423,8 @@ async fn execute_owned(
             } else {
                 AgentSelection::Inherited
             },
+            profile_copy,
+            expected_profile_digest,
         })
         .await;
     let result = match result {
@@ -369,7 +498,7 @@ async fn execute_owned(
             cancel: request.cancel_flag.expect("cancel carrier initialized"),
             shutdown,
             deadline,
-            retry: loaded.profile.llm.retry.clone(),
+            retry: profile.configuration.retry(),
         },
     )
     .await?;

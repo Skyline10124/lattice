@@ -16,29 +16,37 @@ fn seed(fixture: &TestFixture) -> (lancet_protocol::SessionId, lancet_protocol::
     let turn = id();
     fixture
         .store
-        .accept_turn(
-            &fixture.store.try_lock_session(sid).unwrap(),
+        .accept_turn(&fixture.store.try_lock_session(sid).unwrap(), {
+            let config = FrozenTurnConfig {
+                effort: None,
+                agent_name: "test".into(),
+                model: "old-model".into(),
+                provider: "openai-compatible".into(),
+                system_prompt: None,
+                catalog: ToolCatalogSnapshot::new("test".into(), vec![]).unwrap(),
+                limits: TurnExecutionLimits {
+                    timeout_secs: 300,
+                    max_model_steps: 32,
+                    max_model_attempts: 1,
+                },
+            };
             AcceptTurn {
+                profile_copy: {
+                    let mut copy = lattice_session::store::SessionProfileCopy::for_test(&config);
+                    copy.profile.policy.project_root =
+                        fixture.root.canonical_path().to_str().unwrap().into();
+                    copy
+                },
+                expected_profile_digest: None,
                 session: AcceptSession::New { id: sid },
                 turn_id: turn,
                 project_store_key: fixture.root.store_key(),
                 input: "old request".into(),
                 accepted_at: chrono::Utc::now(),
                 agent_selection: AgentSelection::Explicit,
-                config: FrozenTurnConfig {
-                    agent_name: "test".into(),
-                    model: "old-model".into(),
-                    provider: "openai-compatible".into(),
-                    system_prompt: None,
-                    catalog: ToolCatalogSnapshot::new("test".into(), vec![]).unwrap(),
-                    limits: TurnExecutionLimits {
-                        timeout_secs: 300,
-                        max_model_steps: 32,
-                        max_model_attempts: 1,
-                    },
-                },
-            },
-        )
+                config,
+            }
+        })
         .unwrap();
     lancet_api::WorkspaceHistory::create(lancet_api::WorkspaceHistoryBacking::for_key(
         fixture.layout.clone(),
@@ -363,6 +371,8 @@ async fn raced_existing_turn_conflicts_even_when_readback_session_does_not_exist
         workspace: fixture.root.clone(),
         request: fixture.request.clone(),
         prepared_model: None,
+        prepared_profile: None,
+        io: None,
         shutdown: Arc::default(),
         observer,
         new_session: Some(crate::local::new_session_id()),

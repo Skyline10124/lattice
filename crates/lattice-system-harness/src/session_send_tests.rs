@@ -51,7 +51,7 @@ fn step(node: u64, ordinal: u64, progress: Value, summary: Option<Value>, reply:
     entry
 }
 fn head(owner: bool) -> Value {
-    json!({"type":"head","session_id":"s","position":3,"agent":"reader","turn_id":"t","owner":owner,
+    json!({"type":"head","session_id":"s","position":3,"agent":"reader","model":"m","provider":"p","effort":null,"profile_default_effort":null,"turn_id":"t","owner":owner,
         "diagnostic":null,"path_replaced":false})
 }
 fn sending() -> Value {

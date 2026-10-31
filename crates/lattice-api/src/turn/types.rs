@@ -15,6 +15,8 @@ pub struct RunTurnRequest {
     pub input: String,
     pub session_id: Option<SessionId>,
     pub agent: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<lattice_conversation::Effort>,
     pub loaded_profile: Option<LoadedAgentProfile>,
     pub cancel_flag: Option<Arc<AtomicBool>>,
     #[cfg(any(test, feature = "test-utils"))]

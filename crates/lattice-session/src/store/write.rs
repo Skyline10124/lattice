@@ -67,6 +67,7 @@ impl Records {
             agent_name,
             model,
             provider,
+            effort,
             limits,
             config_digest,
             ..
@@ -89,6 +90,7 @@ impl Records {
             agent_name: agent_name.clone(),
             model: model.clone(),
             provider: provider.clone(),
+            effort: *effort,
             system_prompt: stored.system_prompt.clone(),
             catalog: stored.catalog.clone(),
             limits: *limits,
@@ -354,10 +356,28 @@ impl SessionStore {
             if session.project_store_key != input.project_store_key {
                 return Err(invalid("project", "session binding mismatch"));
             }
-            if input.agent_selection == AgentSelection::Inherited
-                && r.current_agent(s)?.as_deref() != Some(input.config.agent_name.as_str())
-            {
-                return Err(invalid("agent", "agent does not match current node"));
+            let previous = r.profile_copies.get(&s);
+            let actual_digest = previous.map(SessionProfileCopy::digest).transpose()?;
+            if actual_digest != input.expected_profile_digest {
+                return Err(StoreError::Conflict {
+                    turn_id: input.turn_id,
+                });
+            }
+            input.profile_copy.validate()?;
+            if !input.profile_copy.matches_config(&input.config) {
+                return Err(invalid(
+                    "profile",
+                    "profile copy differs from frozen configuration",
+                ));
+            }
+            if input.agent_selection == AgentSelection::Inherited {
+                let previous =
+                    previous.ok_or_else(|| invalid("profile", "inherited profile copy missing"))?;
+                if previous.profile != input.profile_copy.profile
+                    || previous.prompt_config_digest != input.profile_copy.prompt_config_digest
+                {
+                    return Err(invalid("profile", "inherited profile data changed"));
+                }
             }
             let parent = session.current;
             let user_node = r.next_node(s)?;
@@ -367,6 +387,23 @@ impl SessionStore {
                 .digest()
                 .map_err(|_| invalid("config", "cannot digest frozen configuration"))?;
             r.configs.entry(config_digest).or_insert(stored);
+            let prompt = r
+                .configs
+                .get(&input.profile_copy.prompt_config_digest)
+                .ok_or_else(|| invalid("profile", "profile prompt reference missing"))?;
+            if prompt.system_prompt != input.config.system_prompt {
+                return Err(invalid(
+                    "profile",
+                    "profile prompt differs from frozen configuration",
+                ));
+            }
+            if input.agent_selection == AgentSelection::Explicit
+                || r.profile_copies
+                    .get(&s)
+                    .is_none_or(|copy| copy.current != input.profile_copy.current)
+            {
+                r.profile_copies.insert(s, input.profile_copy);
+            }
             r.nodes.insert(
                 (s, user_node),
                 Node::UserMessage {
@@ -376,6 +413,7 @@ impl SessionStore {
                     agent_name: input.config.agent_name,
                     model: input.config.model,
                     provider: input.config.provider,
+                    effort: input.config.effort,
                     limits: input.config.limits,
                     config_digest,
                     message: NativeMessage::new(

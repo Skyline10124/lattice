@@ -287,20 +287,10 @@ impl ObserverSink {
                     }
                     view.entries.sort_by_key(|entry| entry.node());
                 }
-                let turn_id = view
-                    .entries
-                    .iter()
-                    .find(|entry| entry.node() == view.session.current)
-                    .and_then(|entry| content(entry).turn_id());
                 (
                     SessionHead {
-                        session_id,
-                        position: view.session.current,
-                        agent: view.current_agent,
-                        turn_id,
-                        owner: false,
-                        diagnostic: None,
                         path_replaced: replaced,
+                        ..session_head(&read, session_id)?
                     },
                     view.entries,
                 )
@@ -389,15 +379,15 @@ fn head_from_node(
     position: NodeId,
     current: &Node,
 ) -> lattice_session::store::Result<SessionHead> {
-    let agent = match current {
-        Node::Root => None,
-        Node::UserMessage { agent_name, .. } => Some(agent_name.clone()),
-        Node::Step { turn_id, .. } => Some(read.turn_agent(session_id, *turn_id)?),
-    };
+    let copy = read.profile_copy(session_id)?;
     Ok(SessionHead {
         session_id,
         position,
-        agent,
+        agent: Some(copy.profile.agent_name),
+        model: copy.current.model,
+        provider: copy.current.provider,
+        effort: copy.current.effort,
+        profile_default_effort: copy.profile.default_effort,
         turn_id: current.turn_id(),
         owner: false,
         diagnostic: None,

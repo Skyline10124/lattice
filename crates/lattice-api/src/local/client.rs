@@ -457,6 +457,10 @@ mod tests {
                     .is_err()
             );
             let response = Response::View(ViewUpdate::Head(SessionHead {
+                model: "test".into(),
+                provider: "openai-compatible".into(),
+                effort: None,
+                profile_default_effort: None,
                 session_id: super::super::new_session_id(),
                 position: NodeId(0),
                 agent: None,

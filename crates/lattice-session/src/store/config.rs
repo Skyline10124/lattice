@@ -212,6 +212,7 @@ pub struct FrozenTurnConfig {
     pub model: String,
     /// Effective provider id.
     pub provider: String,
+    pub effort: Option<lattice_conversation::Effort>,
     /// Effective system prompt, when one is configured.
     pub system_prompt: Option<String>,
     /// Frozen enabled Tool catalog.
@@ -280,6 +281,7 @@ mod tests {
             agent_name: "coder".to_string(),
             model: "m".to_string(),
             provider: "p".to_string(),
+            effort: None,
             system_prompt: None,
             catalog: catalog(),
             limits: limits(),

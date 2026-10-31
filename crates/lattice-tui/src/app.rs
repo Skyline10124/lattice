@@ -141,6 +141,8 @@ pub(crate) struct App {
     pub(crate) connected: bool,
     pub(crate) model: Option<String>,
     pub(crate) provider: Option<String>,
+    pending_agent: Option<String>,
+    agent_submissions: HashSet<TurnId>,
     pub(crate) turn_usage: Option<UsageSummary>,
     pub(crate) context_tokens: Option<u64>,
     /// 由应用循环取走并执行的请求。
@@ -204,6 +206,8 @@ impl App {
     pub(crate) fn new(ctx: SessionContext, kitty_keyboard: bool, session_dir: &Path) -> Self {
         Self {
             view_wanted: ctx.session_id.is_some(),
+            pending_agent: ctx.startup_agent.clone(),
+            agent_submissions: HashSet::new(),
             ctx,
             blocks: BlockList::default(),
             banner: None,
@@ -615,6 +619,7 @@ impl App {
             .insert((turn_id, std::mem::discriminant(&receipt.result)));
         match receipt.result {
             SubmissionResult::Accepted { turn } => {
+                self.consume_agent(turn_id);
                 self.queue.release(turn_id);
                 self.resolve_unknown(turn_id);
                 if self
@@ -625,7 +630,6 @@ impl App {
                     self.submitted = None;
                 }
                 self.accept_session(turn.session_id);
-                self.ctx.active_agent = turn.agent_name;
                 // 已确认的会话头到达这一轮之前，仍按正在运行处理。
                 if !self.head_reached(turn_id) {
                     self.awaiting_head = Some(turn_id);
@@ -683,6 +687,7 @@ impl App {
 
     /// 接受回执先于条目到达时，在提交的 USER 块后显示助手标题线。
     fn mark_accepted(&mut self, turn_id: TurnId) {
+        self.consume_agent(turn_id);
         if let Some(start) = self.pending_start(turn_id) {
             let range = self.blocks.group(start);
             if !self.blocks.entries[range.clone()]
@@ -692,6 +697,12 @@ impl App {
                 self.blocks
                     .replace(range.end..range.end, vec![Block::AssistantStart]);
             }
+        }
+    }
+
+    fn consume_agent(&mut self, turn_id: TurnId) {
+        if self.agent_submissions.remove(&turn_id) {
+            self.pending_agent = None;
         }
     }
 
@@ -803,28 +814,18 @@ impl App {
     fn refresh_status_fields(&mut self) {
         let latest = self.entries.values().rev().find_map(|entry| match entry {
             ConversationEntry::UserMessage {
-                content:
-                    Node::UserMessage {
-                        turn_id,
-                        model,
-                        provider,
-                        ..
-                    },
+                content: Node::UserMessage { turn_id, .. },
                 ..
-            } => Some((*turn_id, model.clone(), provider.clone())),
+            } => Some(*turn_id),
             _ => None,
         });
-        (self.model, self.provider) = latest
-            .as_ref()
-            .map(|(_, model, provider)| (model.clone(), provider.clone()))
-            .unzip();
         self.turn_usage = latest
-            .filter(|(turn, _, _)| {
+            .filter(|turn| {
                 self.pending_head.is_none()
                     && !self.replace_pending
                     && self.awaiting_head.is_none_or(|accepted| accepted == *turn)
             })
-            .map(|(turn, _, _)| {
+            .map(|turn| {
                 UsageSummary::from_attempts(
                     self.entries
                         .values()
@@ -1012,6 +1013,7 @@ impl App {
     /// 结果未知之后才确定未被接受的提交同样处理。只归还本客户端的草稿，
     /// 不撤销已知的执行、接管或完成显示。
     fn reject_submission(&mut self, turn_id: TurnId) -> KeptInput {
+        self.agent_submissions.remove(&turn_id);
         let automatic = self.queue.reject(turn_id);
         let mut kept = KeptInput::Restored;
         let manual = match self.unknown_submission.take_if(|(id, _)| *id == turn_id) {
@@ -1077,6 +1079,8 @@ impl App {
     }
 
     fn apply_head(&mut self, head: SessionHead) {
+        self.model = Some(head.model.clone());
+        self.provider = Some(head.provider.clone());
         // 新视图的首条会话头或路径已替换：之后到它当前位置的条目为止是初始条目。
         // 路径替换立即丢弃此前的条目；新视图等首个初始条目到达再替换，重连失败时内容保留。
         let starts = std::mem::take(&mut self.view_starting) || head.path_replaced;
@@ -1160,6 +1164,7 @@ impl App {
         // 视图中出现这次提交的 UserMessage，同样说明已被接受；回执可能更晚到或者丢失。
         // 它只证明已接受，忙状态仍保留到会话头确认。
         if user_message {
+            self.consume_agent(turn);
             self.resolve_unknown(turn);
         }
         if user_message && self.submitted.as_ref().is_some_and(|(id, _)| *id == turn) {
@@ -1442,6 +1447,7 @@ impl App {
     ) {
         match result {
             Ok(turn) => {
+                self.consume_agent(turn_id);
                 self.resolve_unknown(turn_id);
                 self.accept_session(turn.session_id);
                 self.push_status(recovered_status(turn_id));
@@ -1764,12 +1770,18 @@ fn ctrl_c_action(app: &mut App) -> KeyAction {
 
 fn begin_turn(options: &TuiOptions, app: &mut App, prompt: String) -> Option<TurnRequest> {
     let (turn_id, session) = app.submission_identity()?;
+    let agent = app.pending_agent.clone();
+    if agent.is_some() {
+        app.agent_submissions.insert(turn_id);
+    }
     Some(TurnRequest {
+        model: None,
+        effort: None,
         turn_id,
         session,
         workspace: options.project_root.clone(),
         input: prompt,
-        agent: (!options.agent.is_empty()).then(|| options.agent.clone()),
+        agent,
     })
 }
 

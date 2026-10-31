@@ -109,6 +109,10 @@ fn detail(id: TurnId, closed: bool) -> TurnDetail {
 }
 fn head(id: TurnId, owner: bool) -> SessionHead {
     SessionHead {
+        model: "test".into(),
+        provider: "openai-compatible".into(),
+        effort: None,
+        profile_default_effort: None,
         session_id: sid(),
         position: NodeId(2),
         agent: Some("local-test".into()),
@@ -163,6 +167,8 @@ fn entry(id: TurnId, closed: bool) -> Box<ConversationEntry> {
 }
 fn request(peer: &Peer, id: TurnId) -> TurnRequest {
     TurnRequest {
+        model: None,
+        effort: None,
         turn_id: id,
         session: SubmitSession::New(sid()),
         workspace: peer._directory.path().into(),
@@ -819,6 +825,7 @@ fn user_entry(id: TurnId) -> Box<ConversationEntry> {
         node: NodeId(1),
         ordinal: 1,
         content: Node::UserMessage {
+            effort: None,
             parent: NodeId(0),
             turn_id: id,
             accepted_at: detail(id, true).accepted_at,
@@ -1495,7 +1502,7 @@ async fn status_reports_an_older_backend_that_announces_its_magic() {
 async fn status_reports_a_backend_newer_than_the_client() {
     let error = status_against(|mut stream| {
         Box::pin(async move {
-            stream.write_all(b"LTLOCAL;").await.unwrap();
+            stream.write_all(b"LTLOCAL<").await.unwrap();
             stream.write_u32(4).await.unwrap();
             stream.write_all(b"null").await.unwrap();
             let _held = stream;

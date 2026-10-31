@@ -19,34 +19,38 @@ fn iid(n: u64) -> InvocationId {
     InvocationId::parse(&format!("00000000-0000-4000-8000-{n:012x}")).unwrap()
 }
 fn input() -> AcceptTurn {
+    let config = FrozenTurnConfig {
+        effort: None,
+        agent_name: "alpha".into(),
+        model: "model".into(),
+        provider: "openai".into(),
+        system_prompt: None,
+        catalog: ToolCatalogSnapshot::new(
+            "test-build".into(),
+            vec![ToolCatalogEntry {
+                name: "observe__workspace".into(),
+                descriptor_identity: "a".repeat(64),
+                description: "读取".into(),
+                input_schema: json!({"type":"object"}),
+            }],
+        )
+        .unwrap(),
+        limits: TurnExecutionLimits {
+            timeout_secs: 300,
+            max_model_steps: 32,
+            max_model_attempts: 3,
+        },
+    };
     AcceptTurn {
+        profile_copy: lattice_session::store::SessionProfileCopy::for_test(&config),
+        expected_profile_digest: None,
         session: AcceptSession::New { id: sid() },
         turn_id: tid(1),
         project_store_key: ProjectStoreKey::from_canonical_path_bytes(b"/coordinator-test"),
         input: "原始输入\n".into(),
         accepted_at: chrono::Utc::now(),
         agent_selection: AgentSelection::Explicit,
-        config: FrozenTurnConfig {
-            agent_name: "alpha".into(),
-            model: "model".into(),
-            provider: "openai".into(),
-            system_prompt: None,
-            catalog: ToolCatalogSnapshot::new(
-                "test-build".into(),
-                vec![ToolCatalogEntry {
-                    name: "observe__workspace".into(),
-                    descriptor_identity: "a".repeat(64),
-                    description: "读取".into(),
-                    input_schema: json!({"type":"object"}),
-                }],
-            )
-            .unwrap(),
-            limits: TurnExecutionLimits {
-                timeout_secs: 300,
-                max_model_steps: 32,
-                max_model_attempts: 3,
-            },
-        },
+        config,
     }
 }
 fn origin() -> AttemptOrigin {
@@ -216,6 +220,7 @@ async fn collision_retries_only_registration_and_preserves_reply() {
     let mut second = input();
     second.session = AcceptSession::Existing { id: sid() };
     second.turn_id = tid(2);
+    second.expected_profile_digest = Some(input().profile_copy.digest().unwrap());
     coordinator.io.accept(second).await.unwrap();
     let reply = reply(tid(2));
     coordinator
@@ -341,6 +346,8 @@ async fn live_multicall_closes_continue_then_finish_from_structured_history() {
             .collect(),
     )
     .unwrap();
+    accepted.config.effort = Some(lattice_conversation::Effort::High);
+    accepted.profile_copy = SessionProfileCopy::for_test(&accepted.config);
     io.accept(accepted).await.unwrap();
     let coordinator = TurnCoordinator::new(io, Arc::new(RandomIdSource));
     let llm = Arc::new(Model(std::sync::Mutex::new(Vec::new())));
@@ -398,6 +405,11 @@ async fn live_multicall_closes_continue_then_finish_from_structured_history() {
     );
     let requests = llm.0.lock().unwrap();
     assert_eq!(requests.len(), 2);
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.target.effort == Some(lattice_conversation::Effort::High))
+    );
     assert_eq!(requests[1].messages.len(), 3);
     assert!(
         matches!(&requests[1].messages[2], lattice_conversation::ConversationItem::Step(step) if step.results.len() == 2)
@@ -474,6 +486,8 @@ async fn first_acceptance_reopens_with_frozen_facts_and_used_turn_conflicts() {
             .build(),
     );
     let request = RunTurnRequest {
+        model: None,
+        effort: None,
         input: " original \n".into(),
         session_id: None,
         agent: Some("alpha".into()),
@@ -580,6 +594,8 @@ async fn stop_at_execution_boundary(boundary: StopBoundary, cancelled: bool) {
             .collect(),
     )
     .unwrap();
+    accepted.config.effort = Some(lattice_conversation::Effort::High);
+    accepted.profile_copy = SessionProfileCopy::for_test(&accepted.config);
     io.accept(accepted).await.unwrap();
     let mut message = reply(tid(1)).message;
     message.parts.push(message.parts[1].clone());

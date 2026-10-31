@@ -13,6 +13,152 @@ use std::path::Path;
 
 pub use lattice_profile::LoadedAgentProfile;
 
+/// 已解析的执行输入，只持有有效值和提示正文，不借用源文件路径。
+pub(crate) struct TurnProfile {
+    pub effective: lattice_session::store::EffectiveProfile,
+    pub system_prompt: Option<String>,
+}
+
+pub(crate) struct PreparedProfile {
+    pub configuration: TurnProfile,
+    pub previous: Option<lattice_session::store::SessionProfileCopy>,
+    pub inherited: bool,
+}
+
+impl TurnProfile {
+    pub(crate) fn from_loaded(
+        loaded: &LoadedAgentProfile,
+        workspace: &crate::LocalWorkspaceRoot,
+    ) -> Result<Self> {
+        use lattice_session::store::*;
+        let source = &loaded.profile;
+        let policy =
+            crate::turn::cep::load_policy_config(&source.lancet, workspace.canonical_path())?;
+        if let Some(model) = &source.agent.model {
+            lattice_llm::ModelRef::parse(model).map_err(|error| {
+                ApiError::Configuration(crate::ConfigRejection::new(&error.to_string(), None))
+            })?;
+        }
+        let capabilities = source.capability_admission_policy();
+        let effective = EffectiveProfile {
+            agent_name: source.agent.name.clone(),
+            description: source.agent.description.clone(),
+            default_model: source.agent.model.clone(),
+            default_effort: source.agent.effort,
+            enabled_tools: source.tools.enabled.clone(),
+            timeout_secs: source.llm.timeout_secs.unwrap_or(300),
+            retry: ProfileRetry {
+                max_retries: source.llm.retry.max_retries,
+                initial_delay_ms: source.llm.retry.initial_delay_ms,
+                max_delay_ms: source.llm.retry.max_delay_ms,
+            },
+            capabilities: ProfileCapabilities {
+                deny: capabilities.denied_capabilities.into_iter().collect(),
+                max_boundary: capabilities.max_boundary,
+            },
+            policy: ProfilePolicy {
+                project_root: policy
+                    .project_root
+                    .to_str()
+                    .ok_or_else(invalid_profile)?
+                    .into(),
+                workspace: ProfileWorkspace {
+                    denied_write_patterns: policy.workspace.denied_write_patterns,
+                    included_ignored_read_patterns: policy.workspace.included_ignored_read_patterns,
+                    denied_read_patterns: policy.workspace.denied_read_patterns,
+                },
+                network: ProfileNetwork {
+                    allow_public_https: policy.network.allow_public_https,
+                    allow_localhost: policy.network.allow_localhost,
+                    allowed_hosts: policy.network.allowed_hosts,
+                    max_web_response_bytes: policy.network.max_web_response_bytes,
+                },
+                observation: ProfileObservation {
+                    max_single_read_bytes: policy.observation.max_single_read_bytes,
+                    max_turn_observation_bytes: policy.observation.max_turn_observation_bytes,
+                    max_grep_matches: policy.observation.max_grep_matches,
+                    max_list_entries: policy.observation.max_list_entries,
+                    max_find_paths: policy.observation.max_find_paths,
+                },
+            },
+            extensions: source
+                .lancet
+                .extensions
+                .iter()
+                .map(|(name, value)| {
+                    serde_json::to_value(value)
+                        .map(|value| (name.clone(), value))
+                        .map_err(|_| invalid_profile())
+                })
+                .collect::<std::result::Result<_, ApiError>>()?,
+        };
+        Ok(Self {
+            effective,
+            system_prompt: Some(loaded.system_prompt.clone()),
+        })
+    }
+
+    pub(crate) fn from_copy(
+        copy: &lattice_session::store::SessionProfileCopy,
+        prompt: Option<String>,
+    ) -> Self {
+        Self {
+            effective: copy.profile.clone(),
+            system_prompt: prompt,
+        }
+    }
+
+    pub(crate) fn retry(&self) -> lattice_profile::LlmRetrySection {
+        let retry = &self.effective.retry;
+        lattice_profile::LlmRetrySection {
+            max_retries: retry.max_retries,
+            initial_delay_ms: retry.initial_delay_ms,
+            max_delay_ms: retry.max_delay_ms,
+        }
+    }
+
+    pub(crate) fn capability_admission(
+        &self,
+    ) -> lancet_protocol::evidence::CapabilityAdmissionPolicy {
+        lancet_protocol::evidence::CapabilityAdmissionPolicy {
+            enabled_tools: self.effective.enabled_tools.iter().cloned().collect(),
+            denied_capabilities: self.effective.capabilities.deny.iter().cloned().collect(),
+            max_boundary: self.effective.capabilities.max_boundary,
+        }
+    }
+
+    pub(crate) fn lancet(&self) -> lattice_profile::LancetSection {
+        let policy = &self.effective.policy;
+        lattice_profile::LancetSection {
+            project_root: Some(LancetProjectRootSection {
+                root: Some(policy.project_root.clone()),
+            }),
+            workspace: Some(LancetWorkspacePolicySection {
+                denied_write_patterns: policy.workspace.denied_write_patterns.clone(),
+                included_ignored_read_patterns: policy
+                    .workspace
+                    .included_ignored_read_patterns
+                    .clone(),
+                denied_read_patterns: policy.workspace.denied_read_patterns.clone(),
+            }),
+            network: Some(LancetNetworkSection {
+                allow_public_https: Some(policy.network.allow_public_https),
+                allow_localhost: Some(policy.network.allow_localhost),
+                allowed_hosts: policy.network.allowed_hosts.clone(),
+                max_web_response_bytes: Some(policy.network.max_web_response_bytes),
+            }),
+            observation: Some(LancetObservationSection {
+                max_single_read_bytes: Some(policy.observation.max_single_read_bytes),
+                max_turn_observation_bytes: Some(policy.observation.max_turn_observation_bytes),
+                max_grep_matches: Some(policy.observation.max_grep_matches),
+                max_list_entries: Some(policy.observation.max_list_entries),
+                max_find_paths: Some(policy.observation.max_find_paths),
+            }),
+            ..Default::default()
+        }
+    }
+}
+
 /// 配置目录来自后台启动环境；项目根已经与会话绑定核对。
 pub(crate) fn load_for_turn(
     agent_name: &str,
@@ -47,9 +193,10 @@ pub(crate) fn load_for_turn(
             loaded.profile.agent.name,
         )));
     }
-    if loaded.profile.agent.model.len()
-        > lattice_conversation::MAX_PROVIDER_ID_BYTES + 1 + lattice_llm::MAX_MODEL_ID_BYTES
-    {
+    if loaded.profile.agent.model.as_ref().is_some_and(|model| {
+        model.len()
+            > lattice_conversation::MAX_PROVIDER_ID_BYTES + 1 + lattice_llm::MAX_MODEL_ID_BYTES
+    }) {
         return Err(reject(&format!(
             "invalid or oversized profile at {}",
             loaded.path.display()
@@ -255,6 +402,35 @@ mod tests {
             })
         );
         assert!(lancet.policy.is_none());
+        let normalized = TurnProfile::from_loaded(&loaded, &workspace).unwrap();
+        let config = lattice_session::store::FrozenTurnConfig {
+            agent_name: "test".into(),
+            model: "test".into(),
+            provider: "local".into(),
+            effort: None,
+            system_prompt: normalized.system_prompt.clone(),
+            catalog: lattice_session::store::ToolCatalogSnapshot::new("test".into(), vec![])
+                .unwrap(),
+            limits: lattice_session::store::TurnExecutionLimits {
+                timeout_secs: 300,
+                max_model_steps: 32,
+                max_model_attempts: normalized.retry().max_retries + 1,
+            },
+        };
+        let mut copy = lattice_session::store::SessionProfileCopy::for_test(&config);
+        copy.profile = normalized.effective;
+        let bytes = serde_json::to_vec(&copy).unwrap();
+        let persisted = serde_json::from_slice(&bytes).unwrap();
+        let restored = TurnProfile::from_copy(&persisted, config.system_prompt);
+        assert_eq!(
+            serde_json::to_value(restored.lancet()).unwrap(),
+            serde_json::to_value(&loaded.profile.lancet).unwrap()
+        );
+        assert_eq!(restored.system_prompt.as_deref(), Some(prompt.as_str()));
+        assert_eq!(
+            serde_json::to_value(restored.capability_admission()).unwrap(),
+            serde_json::to_value(loaded.profile.capability_admission_policy()).unwrap()
+        );
     }
 
     fn private_configuration(

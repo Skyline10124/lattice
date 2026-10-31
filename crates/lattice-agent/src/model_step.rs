@@ -153,6 +153,7 @@ pub struct ModelStepRequest {
     pub model: String,
     /// 模型引用指定的 provider 标识。
     pub provider: String,
+    pub effort: Option<lattice_conversation::Effort>,
     /// Frozen tool definitions.
     pub tools: Vec<ToolDefinition>,
     /// Cooperative cancellation flag.
@@ -197,7 +198,11 @@ impl ModelStepDriver {
         let chat = ChatRequest {
             messages,
             tools: request.tools.clone(),
-            target: ModelTarget::new(request.provider.clone(), request.model.clone()),
+            target: ModelTarget {
+                provider: request.provider.clone(),
+                model: request.model.clone(),
+                effort: request.effort,
+            },
             client_request_id: request.session_id.clone(),
         };
 
@@ -381,6 +386,49 @@ mod tests {
             Ok(lattice_llm::testing::script_stream(origin, vec![], control))
         }
     }
+    #[tokio::test]
+    async fn effort_is_preserved_in_chat_request() {
+        struct Capturing(std::sync::Mutex<Vec<Option<lattice_conversation::Effort>>>);
+        #[async_trait::async_trait]
+        impl LlmClient for Capturing {
+            async fn stream_chat(
+                &self,
+                request: ChatRequest,
+                control: StreamControl,
+            ) -> Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>>
+            {
+                self.0.lock().unwrap().push(request.target.effort);
+                Ok(lattice_llm::testing::script_stream(
+                    lattice_conversation::ReplayOrigin {
+                        protocol: lattice_conversation::Protocol::ChatCompletions,
+                        provider_id: request.target.provider,
+                    },
+                    vec![],
+                    control,
+                ))
+            }
+        }
+        let client = Arc::new(Capturing(std::sync::Mutex::new(vec![])));
+        let driver = ModelStepDriver::new(client.clone());
+        for effort in [
+            None,
+            Some(lattice_conversation::Effort::Off),
+            Some(lattice_conversation::Effort::High),
+        ] {
+            let mut input = request();
+            input.effort = effort;
+            driver.run(&input, None).await.unwrap();
+        }
+        assert_eq!(
+            *client.0.lock().unwrap(),
+            [
+                None,
+                Some(lattice_conversation::Effort::Off),
+                Some(lattice_conversation::Effort::High)
+            ]
+        );
+    }
+
     fn driver(events: Vec<ScriptEvent>) -> ModelStepDriver {
         ModelStepDriver::new(Arc::new(
             FakeStreamingLlmClient::builder()
@@ -391,6 +439,7 @@ mod tests {
 
     fn request() -> ModelStepRequest {
         ModelStepRequest {
+            effort: None,
             system_prompt: None,
             history: Vec::new(),
             model: "test-model".to_string(),

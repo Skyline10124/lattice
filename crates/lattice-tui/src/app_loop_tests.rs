@@ -1267,6 +1267,7 @@ impl Harness {
         };
         let app = App::new(
             SessionContext {
+                startup_agent: Some("unused".into()),
                 session_id: (!new_session).then(sid),
                 active_agent: "unused".into(),
             },
@@ -1554,6 +1555,10 @@ async fn new_session_submits_new_until_accepted_then_existing() {
         );
         let turn = request_turn(second);
         let created_head = |position, owner| SessionHead {
+            model: "test".into(),
+            provider: "openai-compatible".into(),
+            effort: None,
+            profile_default_effort: None,
             session_id: created,
             ..head(position, Some(turn), owner)
         };
@@ -1920,6 +1925,10 @@ async fn late_receipt_after_unknown_starts_watching_or_shows_the_rejection() {
                     json!(created)
                 );
                 let created_head = SessionHead {
+                    model: "test".into(),
+                    provider: "openai-compatible".into(),
+                    effort: None,
+                    profile_default_effort: None,
                     session_id: created,
                     ..head(2, Some(turn), true)
                 };
@@ -2106,6 +2115,7 @@ async fn existing_submission_keeps_explicit_agent() {
     });
     let mut h = Harness::new(false);
     h.options.agent = "override-agent".into();
+    h.app.pending_agent = Some("override-agent".into());
     let remote = h.remote.clone();
     let driver = async {
         remote.line("hi");

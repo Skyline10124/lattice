@@ -8,6 +8,7 @@ description = "Strict single-agent profile schema, loading, discovery, defaults,
 
 [dependencies]
 lancet-protocol = { workspace = true }
+lattice-conversation = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
