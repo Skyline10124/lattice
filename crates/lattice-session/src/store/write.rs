@@ -504,11 +504,8 @@ impl SessionStore {
             if input.origin != last.origin {
                 return Err(invalid("origin", "attempt source mismatch"));
             }
-            last.usage = input
-                .usage
-                .and_then(lattice_conversation::TokenUsage::normalized);
+            (last.usage, last.cost) = close::reported_usage(input.usage, input.cost);
             last.usage_kind = input.usage_kind;
-            last.cost = input.cost;
             last.progress = AttemptProgress::Ended {
                 end: AttemptEnd::Stopped {
                     cause: input.cause.clone(),

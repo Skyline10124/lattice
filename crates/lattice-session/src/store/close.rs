@@ -240,14 +240,25 @@ pub fn retry_notices(attempts: &[AttemptRecord]) -> Result<Vec<RetryNotice>> {
     Ok(notices)
 }
 
+/// 全空的用量不算报告，这次尝试的费用也随之未知。
+pub(super) fn reported_usage(
+    usage: Option<lattice_conversation::TokenUsage>,
+    cost: Option<lattice_conversation::CostEstimate>,
+) -> (
+    Option<lattice_conversation::TokenUsage>,
+    Option<lattice_conversation::CostEstimate>,
+) {
+    let usage = usage.and_then(lattice_conversation::TokenUsage::normalized);
+    (usage, usage.and(cost))
+}
+
 pub(super) fn completed(reply: &CompleteReply) -> AttemptRecord {
+    let (usage, cost) = reported_usage(reply.usage, reply.cost);
     AttemptRecord {
         origin: reply.origin.clone(),
-        usage: reply
-            .usage
-            .and_then(lattice_conversation::TokenUsage::normalized),
+        usage,
         usage_kind: reply.usage_kind,
-        cost: reply.cost,
+        cost,
         progress: AttemptProgress::Ended {
             end: AttemptEnd::Completed,
             diagnostic: AttemptDiagnostic::default(),
