@@ -29,17 +29,17 @@ fn candidates_merge_metadata_filter_deprecated_and_report_missing_catalogs() {
         directory.path(),
         &json!({"custom-catalog":{"models":{
             "active":{"id":"active","limit":{"context":123,"output":45},"cost":{"input":1,"output":2}},
-            "old":{"id":"old","status":"deprecated"}
+            "old":{"id":"old","status":"deprecated","reasoning_options":[{"type":"effort","values":["high","none"]}]}
         }}}),
     );
-    let candidates = crate::model_candidates(directory.path(), Some("local")).unwrap();
+    let candidates = crate::model_candidates(directory.path(), Some("local"), None).unwrap();
     assert_eq!(candidates.models.len(), 1);
     let model = &candidates.models[0];
     assert_eq!((&*model.provider, &*model.model), ("local", "active"));
     assert_eq!((model.context, model.output), (Some(456), Some(45)));
     assert_eq!(model.cost.as_ref().unwrap().input, Some(1.0));
     assert_eq!(model.credential_status, crate::auth::AuthState::Ready);
-    let empty = crate::model_candidates(directory.path(), Some("empty")).unwrap();
+    let empty = crate::model_candidates(directory.path(), Some("empty"), None).unwrap();
     assert_eq!(empty.models[0].model, "handwritten");
     assert!(
         empty
@@ -48,7 +48,7 @@ fn candidates_merge_metadata_filter_deprecated_and_report_missing_catalogs() {
             .any(|warning| warning.provider.as_deref() == Some("empty")
                 && warning.message.contains("absent-catalog"))
     );
-    let chatgpt = crate::model_candidates(directory.path(), Some("chatgpt")).unwrap();
+    let chatgpt = crate::model_candidates(directory.path(), Some("chatgpt"), None).unwrap();
     assert!(chatgpt.models.is_empty());
     assert!(
         chatgpt
@@ -56,6 +56,135 @@ fn candidates_merge_metadata_filter_deprecated_and_report_missing_catalogs() {
             .iter()
             .any(|warning| warning.provider.as_deref() == Some("chatgpt")
                 && warning.message.contains("not implemented"))
+    );
+    let retired = crate::model_candidates(directory.path(), None, Some("local/old")).unwrap();
+    assert_eq!(retired.models.len(), 1);
+    assert_eq!(retired.models[0].model, "old");
+    assert_eq!(
+        retired.models[0].supported_efforts,
+        vec![Effort::Off, Effort::High]
+    );
+    let unknown =
+        crate::model_candidates(directory.path(), None, Some("local/org/unknown")).unwrap();
+    assert_eq!(
+        serde_json::to_value(&unknown.models).unwrap(),
+        json!([{
+            "provider":"local", "model":"org/unknown", "name":null,
+            "context":null, "output":null, "supported_efforts":[], "cost":null,
+            "credential_status":"ready"
+        }])
+    );
+    let subscription =
+        crate::model_candidates(directory.path(), None, Some("chatgpt/unknown")).unwrap();
+    assert_eq!(subscription.models.len(), 1);
+    assert_eq!(subscription.models[0].provider, "chatgpt");
+    assert!(subscription.models[0].supported_efforts.is_empty());
+    assert!(
+        subscription
+            .warnings
+            .iter()
+            .any(|warning| warning.message.contains("not implemented"))
+    );
+    for (provider, target, expected) in [
+        (
+            Some("local"),
+            Some("local/active"),
+            "cannot be used together",
+        ),
+        (None, Some("invalid"), "<provider>/<model>"),
+        (None, Some("local/"), "model id"),
+        (None, Some("missing/model"), "available providers:"),
+        (Some("missing"), None, "available providers:"),
+    ] {
+        let error = crate::model_candidates(directory.path(), provider, target).unwrap_err();
+        assert!(
+            matches!(&error, crate::LlmError::Config { message } if message.contains(expected)),
+            "{error}"
+        );
+    }
+    std::fs::write(directory.path().join("auth.json"), "{invalid").unwrap();
+    std::fs::set_permissions(
+        directory.path().join("auth.json"),
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+    )
+    .unwrap();
+    let invalid = crate::model_candidates(directory.path(), None, Some("empty/unknown")).unwrap();
+    assert_eq!(
+        invalid.models[0].credential_status,
+        crate::auth::AuthState::Invalid
+    );
+    assert!(
+        invalid
+            .warnings
+            .iter()
+            .any(|warning| warning.provider.is_none())
+    );
+    assert!(
+        invalid
+            .warnings
+            .iter()
+            .any(|warning| warning.provider.as_deref() == Some("empty")
+                && warning.message.contains("absent-catalog"))
+    );
+    let no_auth = crate::model_candidates(directory.path(), None, Some("local/unknown")).unwrap();
+    assert_eq!(
+        no_auth.models[0].credential_status,
+        crate::auth::AuthState::Ready
+    );
+}
+
+#[test]
+fn candidates_follow_builtin_order_before_custom_provider_ids() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("providers.toml"),
+        r#"
+[providers.zzz]
+protocol='chat-completions'
+base_url='http://localhost:1'
+auth='none'
+[providers.zzz.models.sort-a]
+[providers.openai]
+catalog='sort-catalog'
+[providers.openai.models.sort-z]
+[providers.openai.models.sort-a]
+[providers.xai.models.sort-a]
+[providers.anthropic.models.sort-a]
+[providers.aaa]
+protocol='chat-completions'
+base_url='http://localhost:1'
+auth='none'
+catalog='sort-catalog'
+[providers.aaa.models.sort-z]
+[providers.aaa.models.sort-a]
+"#,
+    )
+    .unwrap();
+    cache(
+        directory.path(),
+        &json!({"sort-catalog":{"models":{
+            "sort-a":{"id":"sort-a", "name":"Z Model"},
+            "sort-z":{"id":"sort-z", "name":"A Model"}
+        }}}),
+    );
+    let candidates = crate::model_candidates(directory.path(), None, None).unwrap();
+    let names: Vec<_> = candidates
+        .models
+        .iter()
+        .filter(|model| model.model.starts_with("sort-"))
+        .map(|model| format!("{}/{}", model.provider, model.model))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "openai/sort-a",
+            "openai/sort-z",
+            "anthropic/sort-a",
+            "xai/sort-a",
+            "aaa/sort-a",
+            "aaa/sort-z",
+            "zzz/sort-a"
+        ]
     );
 }
 

@@ -472,6 +472,7 @@ pub(super) enum Request {
     AuthStatus {},
     Models {
         provider: Option<String>,
+        target: Option<String>,
     },
     ModelsRefresh {},
     ResolveSession {

@@ -2223,18 +2223,24 @@ fn public_choices_persist_and_model_changes_use_supported_fallbacks() {
                           expected_effort: Option<&str>,
                           provider: &str| {
             ordinal += 1;
-            let tid = format!("00000000-0000-4000-8000-{ordinal:012x}");
-            let mut request = submit_request(
-                &world,
-                &tid,
-                json!({"existing":NEW_SESSION}),
+            let mut args = vec![
+                "--json",
+                "session",
+                "send",
                 "next choice",
-                None,
-            );
-            request["request"]["model"] = json!(model);
-            request["request"]["effort"] = json!(effort);
-            let reply = ipc(&world, wait(&budget), request);
-            assert_eq!(reply["response"], "acceptance", "{tid}: {reply}");
+                "--session",
+                NEW_SESSION,
+            ];
+            if let Some(model) = model {
+                args.extend(["--model", model]);
+            }
+            if let Some(effort) = effort {
+                args.extend(["--effort", effort]);
+            }
+            let output = run(&world, &budget, &mut evidence, &args);
+            assert!(output.is_clean_exit(0), "{}", output.summary());
+            assert_accepted_and_closed(&records(&output)).unwrap();
+            let tid = accepted_turn(&output);
             assert_eq!(
                 closed_without_owner(&world, &budget, &mut evidence, &tid)["summary"]["outcome"],
                 "completed"
@@ -2324,6 +2330,43 @@ fn public_choices_persist_and_model_changes_use_supported_fallbacks() {
             ),
             previous_log
         );
+        let rejected_cli = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &[
+                "--json",
+                "run",
+                "unsupported effort",
+                "--session",
+                NEW_SESSION,
+                "--effort",
+                "max",
+            ],
+        );
+        assert!(rejected_cli.is_clean_exit(2));
+        assert_eq!(
+            records(&rejected_cli).rejection().unwrap().kind,
+            "bad_request"
+        );
+        assert_eq!(server.captured_requests().len(), count);
+        assert_eq!(
+            ipc(
+                &world,
+                wait(&budget),
+                json!({"operation":"head", "session_id":NEW_SESSION})
+            ),
+            before
+        );
+        assert_eq!(
+            read(
+                &world,
+                &budget,
+                &mut evidence,
+                &["--json", "session", "log", NEW_SESSION]
+            ),
+            previous_log
+        );
         let mut watcher = Watcher::open(&world, wait(&budget), NEW_SESSION);
         let view = watcher.initial();
         let head = view.head.as_ref().unwrap();
@@ -2357,8 +2400,314 @@ fn public_choices_persist_and_model_changes_use_supported_fallbacks() {
         let capture = server.captured_requests().pop().unwrap();
         assert_eq!(capture.raw["messages"][0]["content"], "rebuilt prompt");
         assert!(capture.raw.get("reasoning_effort").is_none());
+        let source_path = world
+            .project_dir()
+            .join(".lattice/agents/background/agent.toml");
+        let source = std::fs::read(&source_path).unwrap();
+        let explicit = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &[
+                "--json",
+                "run",
+                "explicit agent and choices",
+                "--session",
+                NEW_SESSION,
+                "--agent",
+                "background",
+                "--model",
+                "local/a",
+                "--effort",
+                "off",
+            ],
+        );
+        assert!(explicit.is_clean_exit(0));
+        let head = ipc(
+            &world,
+            wait(&budget),
+            json!({"operation":"head", "session_id":NEW_SESSION}),
+        );
+        assert_eq!(head["value"]["model"], "a");
+        assert_eq!(head["value"]["effort"], "off");
+        assert_eq!(head["value"]["profile_default_effort"], "low");
+        assert_eq!(
+            server.captured_requests().last().unwrap().raw["reasoning_effort"],
+            "none"
+        );
+        assert_eq!(std::fs::read(&source_path).unwrap(), source);
         evidence.record_captures(server.captured_requests());
         evidence.record_json("choices-head", &before).unwrap();
+    }));
+    support::finish_recorded(evidence, result);
+}
+
+#[test]
+fn cli_off_survives_tool_retry_restart_and_provider_failure() {
+    use lattice_system_harness::{FakeLlmServer, ProviderFixture, ProviderTarget};
+    let (world, spec) = direct_world(
+        "cli-luna-off-tools",
+        "background",
+        "[\"observe__workspace\"]",
+        "",
+    );
+    let budget = world.budget(&spec);
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let read = || {
+            tool_call(
+                "read-mark",
+                "observe__workspace",
+                r#"{"request":{"mode":"read_file","path":"fixture.txt"}}"#,
+            )
+        };
+        let server = FakeLlmServer::start(support::sequence(vec![
+            SseScript::HttpError {
+                status: 503,
+                body: "retry once".into(),
+            },
+            read(),
+            SseScript::plain("file marker: luna-off-226"),
+            read(),
+            SseScript::plain("inherited marker: luna-off-226"),
+            SseScript::HttpError {
+                status: 400,
+                body: "accepted provider failure".into(),
+            },
+            SseScript::plain("saved low"),
+            SseScript::HttpError {
+                status: 400,
+                body: "explicit off provider failure".into(),
+            },
+            SseScript::plain("still off after failure"),
+        ]))
+        .unwrap();
+        let fixture = ProviderFixture {
+            target: ProviderTarget::Custom("openai-chat"),
+            ..ProviderFixture::chat_completions("gpt-6-luna")
+        };
+        world.wire_provider(fixture, &server, FAKE_API_KEY).unwrap();
+        let configuration = world.home().join(".lattice/providers.toml");
+        let mut providers: toml::Table =
+            toml::from_str(&std::fs::read_to_string(&configuration).unwrap()).unwrap();
+        providers["providers"]["openai-chat"]
+            .as_table_mut()
+            .unwrap()
+            .insert("catalog".into(), "openai".into());
+        std::fs::write(&configuration, toml::to_string(&providers).unwrap()).unwrap();
+        let cache = world.home().join(".lattice/cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("models.json"), serde_json::to_vec(&json!({"openai":{"models":{
+            "gpt-6-luna":{"id":"gpt-6-luna", "reasoning_options":[{"type":"effort","values":["none","low"]}]}
+        }}})).unwrap()).unwrap();
+        world
+            .write_project_file("fixture.txt", "luna-off-226")
+            .unwrap();
+        let profile = "schema_version=1\n[agent]\nname='background'\neffort='low'\n[prompt]\nsystem='Read fixture.txt using the tool.'\n[tools]\nenabled=['observe__workspace']\n";
+        world
+            .write_project_file(".lattice/agents/background/agent.toml", profile)
+            .unwrap();
+        let first = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &[
+                "--json",
+                "run",
+                "read fixture.txt",
+                "--agent",
+                "background",
+                "--model",
+                "openai-chat/gpt-6-luna",
+                "--effort",
+                "off",
+            ],
+        );
+        assert!(first.is_clean_exit(0), "{}", first.summary());
+        assert_accepted_and_closed(&records(&first)).unwrap();
+        let sid = records(&first).accepted_session_id().unwrap().to_owned();
+        let first_turn =
+            closed_without_owner(&world, &budget, &mut evidence, &accepted_turn(&first));
+        assert_eq!(
+            first_turn["steps"][0]["attempts"].as_array().unwrap().len(),
+            2
+        );
+        assert_eq!(first_turn["steps"][0]["slots"][0]["outcome"], "succeeded");
+        assert_eq!(server.captured_requests().len(), 3);
+        world.stop_daemon().unwrap();
+        let inherited = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &["--json", "session", "send", "read again", "--session", &sid],
+        );
+        assert!(inherited.is_clean_exit(0), "{}", inherited.summary());
+        let inherited_turn =
+            closed_without_owner(&world, &budget, &mut evidence, &accepted_turn(&inherited));
+        assert_eq!(
+            inherited_turn["steps"][0]["slots"][0]["outcome"],
+            "succeeded"
+        );
+        assert_eq!(server.captured_requests().len(), 5);
+        let failure = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &[
+                "--json",
+                "run",
+                "provider fails after acceptance",
+                "--session",
+                &sid,
+            ],
+        );
+        assert!(failure.is_clean_exit(1), "{}", failure.summary());
+        let failed_turn =
+            closed_without_owner(&world, &budget, &mut evidence, &accepted_turn(&failure));
+        assert_eq!(failed_turn["summary"]["outcome"], "failed");
+        assert_eq!(
+            failed_turn["steps"][0]["attempts"][0]["end"]["cause"],
+            json!({"cause":"provider_error", "retryable":false})
+        );
+        let mut watcher = Watcher::open(&world, wait(&budget), &sid);
+        let view = watcher.initial();
+        let head = view.head.as_ref().unwrap();
+        assert_eq!(head.provider, "openai-chat");
+        assert_eq!(head.model, "gpt-6-luna");
+        assert_eq!(head.effort.as_deref(), Some("off"));
+        assert_eq!(head.profile_default_effort.as_deref(), Some("low"));
+        for output in [&first, &inherited, &failure] {
+            let sent = records(output);
+            let id = accepted_turn(output);
+            let user = view
+                .entries
+                .values()
+                .find(|entry| {
+                    entry.raw["kind"] == "user_message" && entry.raw["content"]["turn_id"] == id
+                })
+                .unwrap();
+            assert_eq!(user.raw["content"]["model"], "gpt-6-luna");
+            assert_eq!(user.raw["content"]["provider"], "openai-chat");
+            assert_eq!(user.raw["content"]["effort"], "off");
+            assert!(sent.rejection().is_none());
+        }
+        let captures = server.captured_requests();
+        assert_eq!(captures.len(), 6);
+        for capture in &captures {
+            assert_eq!(capture.raw["model"], "gpt-6-luna");
+            assert_eq!(capture.raw["reasoning_effort"], "none");
+            assert!(
+                capture
+                    .tool_names
+                    .iter()
+                    .any(|name| name == "observe__workspace")
+            );
+            assert!(capture.raw.get("enable_thinking").is_none());
+        }
+        for index in [2, 4] {
+            let messages = captures[index].raw["messages"].as_array().unwrap();
+            let result = messages
+                .iter()
+                .rev()
+                .find(|message| message["role"] == "tool")
+                .unwrap();
+            assert!(result["content"].to_string().contains("luna-off-226"));
+        }
+        let low = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &[
+                "--json",
+                "run",
+                "save low",
+                "--session",
+                &sid,
+                "--effort",
+                "low",
+            ],
+        );
+        assert!(low.is_clean_exit(0), "{}", low.summary());
+        closed_without_owner(&world, &budget, &mut evidence, &accepted_turn(&low));
+        let low_head = ipc(
+            &world,
+            wait(&budget),
+            json!({"operation":"head", "session_id":sid}),
+        );
+        assert_eq!(low_head["value"]["effort"], "low");
+        let failed_off = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &[
+                "--json",
+                "run",
+                "explicit off fails after acceptance",
+                "--session",
+                &sid,
+                "--effort",
+                "off",
+            ],
+        );
+        assert!(failed_off.is_clean_exit(1), "{}", failed_off.summary());
+        let failed_off_turn =
+            closed_without_owner(&world, &budget, &mut evidence, &accepted_turn(&failed_off));
+        assert_eq!(failed_off_turn["summary"]["outcome"], "failed");
+        assert_eq!(
+            failed_off_turn["steps"][0]["attempts"][0]["end"]["cause"],
+            json!({"cause":"provider_error", "retryable":false})
+        );
+        let failed_off_head = ipc(
+            &world,
+            wait(&budget),
+            json!({"operation":"head", "session_id":sid}),
+        );
+        assert_eq!(failed_off_head["value"]["effort"], "off");
+        world.stop_daemon().unwrap();
+        let continued = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &[
+                "--json",
+                "session",
+                "send",
+                "inherit off after failure and restart",
+                "--session",
+                &sid,
+            ],
+        );
+        assert!(continued.is_clean_exit(0), "{}", continued.summary());
+        closed_without_owner(&world, &budget, &mut evidence, &accepted_turn(&continued));
+        let mut watcher = Watcher::open(&world, wait(&budget), &sid);
+        let view = watcher.initial();
+        assert_eq!(view.head.as_ref().unwrap().effort.as_deref(), Some("off"));
+        for (output, effort) in [(&low, "low"), (&failed_off, "off"), (&continued, "off")] {
+            let id = accepted_turn(output);
+            let user = view
+                .entries
+                .values()
+                .find(|entry| {
+                    entry.raw["kind"] == "user_message" && entry.raw["content"]["turn_id"] == id
+                })
+                .unwrap();
+            assert_eq!(user.raw["content"]["effort"], effort);
+        }
+        let captures = server.captured_requests();
+        assert_eq!(captures.len(), 9);
+        for (index, effort) in [(6, "low"), (7, "none"), (8, "none")] {
+            assert_eq!(captures[index].raw["reasoning_effort"], effort);
+        }
+        assert_eq!(
+            std::fs::read(
+                world
+                    .project_dir()
+                    .join(".lattice/agents/background/agent.toml")
+            )
+            .unwrap(),
+            profile.as_bytes()
+        );
+        evidence.record_captures(captures);
     }));
     support::finish_recorded(evidence, result);
 }

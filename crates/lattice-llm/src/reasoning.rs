@@ -168,6 +168,10 @@ impl ReasoningCapabilities {
     pub(crate) fn select(&self, effort: Effort) -> Option<ReasoningPlan> {
         self.0.get(&effort).copied()
     }
+
+    pub(crate) fn supported_efforts(&self) -> Vec<Effort> {
+        self.0.keys().copied().collect()
+    }
 }
 
 fn budget_bounds(option: &Value) -> Option<(Option<u64>, Option<u64>)> {

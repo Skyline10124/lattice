@@ -245,6 +245,21 @@ impl ProviderRegistry {
         self.providers.values()
     }
 
+    /// 候选沿用内置表的顺序，新增 provider 在其后按 id 排序。
+    pub(crate) fn iter_for_candidates(&self) -> impl Iterator<Item = &Provider> {
+        let builtins = builtins::providers();
+        let mut providers: Vec<_> = builtins
+            .iter()
+            .filter_map(|provider| self.get(&provider.id))
+            .collect();
+        providers.extend(
+            self.providers
+                .values()
+                .filter(|provider| !builtins.iter().any(|builtin| builtin.id == provider.id)),
+        );
+        providers.into_iter()
+    }
+
     pub(crate) fn auto_refresh_enabled(&self) -> bool {
         self.auto_refresh
     }

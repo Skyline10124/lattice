@@ -39,7 +39,7 @@ pub async fn run(
     }
 
     println!(
-        "MODEL\tCONTEXT\tOUTPUT\tPRICE ($/M tokens: input/output/cache-read/cache-write)\tAUTH"
+        "MODEL\tCONTEXT\tOUTPUT\tEFFORTS\tPRICE ($/M tokens: input/output/cache-read/cache-write)\tAUTH"
     );
     for model in candidates.models {
         let limits =
@@ -47,12 +47,23 @@ pub async fn run(
         let price =
             |value: Option<f64>| value.map_or_else(|| "-".into(), |value| value.to_string());
         let cost = model.cost.unwrap_or_default();
+        let efforts = if model.supported_efforts.is_empty() {
+            "-".into()
+        } else {
+            model
+                .supported_efforts
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        };
         println!(
-            "{}/{}\t{}\t{}\t{}/{}/{}/{}\t{}",
+            "{}/{}\t{}\t{}\t{}\t{}/{}/{}/{}\t{}",
             model.provider,
             model.model,
             limits(model.context),
             limits(model.output),
+            efforts,
             price(cost.input),
             price(cost.output),
             price(cost.cache_read),

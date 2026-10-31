@@ -298,6 +298,8 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
         ("responses", "protocol responses is not implemented"),
         ("interactions", "protocol interactions is not implemented"),
         ("oauth-chatgpt", "auth oauth:chatgpt is not implemented"),
+        ("cli-provider", "available providers:"),
+        ("cli-effort", "does not support reasoning effort off"),
     ] {
         let (world, spec) = direct_world(&format!("config-rejection-{case}"), "plain", "[]", "");
         let server = wire_fake_llm(&world, "plain", SseScript::plain("must not be requested"));
@@ -384,7 +386,7 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
                 std::fs::write(world.home().join(".lattice/providers.toml"), "[metadata]\nauto_refresh=false\n").unwrap();
                 std::fs::write(&path, original.replace(&model, "chatgpt/plain")).unwrap();
             }
-            "missing-profile" => {}
+            "missing-profile" | "cli-provider" | "cli-effort" => {}
             _ => unreachable!(),
         }
         let agent = if case == "missing-profile" {
@@ -410,7 +412,13 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
                 vec!["--json", "run", "hello", "--agent", agent],
             ];
             let mut messages = Vec::new();
-            for args in commands {
+            for mut args in commands {
+                if case == "cli-provider" {
+                    args.extend(["--model", "absent/model"]);
+                }
+                if case == "cli-effort" {
+                    args.extend(["--effort", "off"]);
+                }
                 let out = cli(&world, &spec, &args);
                 evidence.record_command(args.join(" "), &out);
                 assert!(out.is_clean_exit(2), "{}", out.summary());

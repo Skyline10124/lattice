@@ -153,10 +153,7 @@ impl GatewayTurn {
                 .get(&target.model)
                 .map_or(provider.features, |model| model.features);
             let capabilities = ReasoningCapabilities::new(models.get(&target.model), features);
-            Ok(lattice_conversation::Effort::ALL
-                .into_iter()
-                .filter(|effort| capabilities.select(*effort).is_some())
-                .collect())
+            Ok(capabilities.supported_efforts())
         })
         .await
         .map_err(|_| configuration_error("model capabilities task failed"))?

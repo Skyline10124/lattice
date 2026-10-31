@@ -10,7 +10,7 @@ mod support;
 
 use lattice_system_harness::{
     AssertError, CapturedRequest, FakeLlmServer, ProviderFixture, ProviderProtocol, ProviderTarget,
-    ScenarioEvidence, ScenarioSpec, ScenarioWorld, SessionSendDriver,
+    ScenarioEvidence, ScenarioSpec, ScenarioWorld, SendExecution, SessionSendDriver,
 };
 use support::{assert_clean_send, driver, finish_scenario, require, sequence, tool_call, tool_ok};
 
@@ -209,7 +209,7 @@ fn protocols_cache_and_usage_survive_tool_round_trip_and_backend_restart() {
         } else {
             "cache_write = 3\n"
         };
-        std::fs::write(&configuration, format!("{source}\n[providers.{id}.models.\"{}\".cost]\ninput = 2\noutput = 10\ncache_read = 0.5\n{write_price}", provider.fixture.model)).unwrap();
+        std::fs::write(&configuration, format!("{source}\n[providers.{id}.models.\"{model}\"]\neffort=['off']\n[providers.{id}.models.\"{model}\".cost]\ninput = 2\noutput = 10\ncache_read = 0.5\n{write_price}", model=provider.fixture.model)).unwrap();
         if provider.name == "anthropic" {
             let cache = world.home().join(".lattice/cache");
             std::fs::create_dir_all(&cache).unwrap();
@@ -226,7 +226,23 @@ fn protocols_cache_and_usage_survive_tool_round_trip_and_backend_restart() {
             ScenarioEvidence::new(&world, &spec.name, [key.clone()]).expect("evidence");
 
         let send = SessionSendDriver::new(&driver, &world, &spec, provider.name);
-        let outcome = send.send("read notes.txt").expect("turn");
+        let target = provider.fixture.model_ref().unwrap();
+        let command = send
+            .run_command(&[
+                "--json",
+                "session",
+                "send",
+                "read notes.txt",
+                "--agent",
+                provider.name,
+                "--model",
+                &target,
+                "--effort",
+                "off",
+            ])
+            .expect("turn");
+        let parsed = support::parse_send_stdout(&command.stdout, command.exit_code());
+        let outcome = SendExecution { command, parsed };
         let captures = server.captured_requests();
         let tid = outcome.accepted_turn_id().unwrap();
         let detail = send
@@ -333,6 +349,22 @@ fn protocols_cache_and_usage_survive_tool_round_trip_and_backend_restart() {
                     format!("frozen model {}: {}", provider.fixture.model, capture.model),
                 )?;
                 require(!capture.tool_names.is_empty(), "tool declarations sent")?;
+                let disabled = match provider.name {
+                    "openai" => capture.raw["reasoning_effort"] == serde_json::json!("none"),
+                    "anthropic" => {
+                        capture.raw["thinking"] == serde_json::json!({"type":"disabled"})
+                            && capture.raw.get("output_config").is_none()
+                    }
+                    "gemini" => {
+                        capture.raw["generationConfig"]["thinkingConfig"]
+                            == serde_json::json!({"thinkingBudget":0})
+                    }
+                    _ => unreachable!(),
+                };
+                require(
+                    disabled,
+                    format!("CLI off must reach every {} request", provider.name),
+                )?;
             }
             require(
                 captures[1].message_roles

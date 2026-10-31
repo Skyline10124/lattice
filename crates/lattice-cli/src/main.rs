@@ -294,7 +294,80 @@ mod tests {
                 let mut args = vec!["lattice"];
                 args.extend(command.clone());
                 args.extend(tail);
-                assert!(Cli::try_parse_from(&args).is_ok(), "{args:?}");
+                let cli = Cli::try_parse_from(&args).unwrap();
+                let choices = match cli.command.unwrap() {
+                    Commands::Run(args)
+                    | Commands::Session {
+                        action: super::session_cmd::SessionAction::Send(args),
+                    } => args,
+                    _ => panic!("expected submission"),
+                };
+                assert_eq!(choices.model, None);
+                assert_eq!(choices.effort, None);
+                for effort in ["off", "minimal", "low", "medium", "high", "xhigh", "max"] {
+                    let mut explicit = args.clone();
+                    explicit.extend(["--model", "unregistered/org/model", "--effort", effort]);
+                    let cli = Cli::try_parse_from(&explicit).unwrap();
+                    let choices = match cli.command.unwrap() {
+                        Commands::Run(args)
+                        | Commands::Session {
+                            action: super::session_cmd::SessionAction::Send(args),
+                        } => args,
+                        _ => panic!("expected submission"),
+                    };
+                    assert_eq!(choices.model.as_deref(), Some("unregistered/org/model"));
+                    assert_eq!(choices.effort.unwrap().as_str(), effort);
+                }
+                for (flag, value) in [
+                    ("--model", "missing-slash"),
+                    ("--model", "local/"),
+                    ("--model", "Bad/model"),
+                    ("--model", "local/control\n"),
+                    ("--effort", "none"),
+                    ("--effort", "default"),
+                    ("--effort", "HIGH"),
+                    ("--effort", " high"),
+                ] {
+                    let mut invalid = args.clone();
+                    invalid.extend([flag, value]);
+                    assert_eq!(
+                        Cli::try_parse_from(&invalid).err().unwrap().kind(),
+                        clap::error::ErrorKind::ValueValidation,
+                        "{invalid:?}"
+                    );
+                }
+                let oversized = format!("local/{}", "x".repeat(4097));
+                let mut invalid = args.clone();
+                invalid.extend(["--model", &oversized]);
+                assert!(Cli::try_parse_from(invalid).is_err());
+            }
+            let mut missing_agent = vec!["lattice"];
+            missing_agent.extend(command.clone());
+            missing_agent.extend(["hello", "--model", "local/model", "--effort", "off"]);
+            assert_eq!(
+                Cli::try_parse_from(missing_agent).err().unwrap().kind(),
+                clap::error::ErrorKind::MissingRequiredArgument
+            );
+            let mut root = Cli::command();
+            let mut subcommand = &mut root;
+            for name in command {
+                subcommand = subcommand.find_subcommand_mut(name).unwrap();
+            }
+            let help = subcommand.render_long_help().to_string();
+            for text in [
+                "--model",
+                "--effort",
+                "<provider>/<model>",
+                "inherit",
+                "off",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+            ] {
+                assert!(help.contains(text), "missing {text}: {help}");
             }
         }
         for node in ["0", "18446744073709551615"] {
