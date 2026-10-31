@@ -51,8 +51,6 @@ pub(crate) struct Cost {
     pub(crate) cache_read: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) cache_write: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) reasoning: Option<f64>,
 }
 
 /// 远端字段仅按白名单反序列化；effort 只由手写元数据提供。

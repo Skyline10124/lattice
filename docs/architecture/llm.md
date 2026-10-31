@@ -83,7 +83,9 @@ provider 配置、凭据与模型元数据是用户级的全局状态，由后�
 - **用量。** 按[用量换算](#用量换算)得出统一口径。
 - **不使用服务端会话状态。** Responses 与 Interactions 固定发送 `store: false`，每次发送完整历史，不发送 `previous_response_id`、`previous_interaction_id`，不使用后台执行。
 
-适配器不发送采样参数（`temperature`、`top_p` 等），也不发送输出上限（例如 Responses 的 `max_output_tokens`），由服务端按模型的默认值处理；只有 Anthropic Messages 的 `max_tokens` 是必填字段，取模型元数据的输出上限，输出上限缺失或为 0 时为 32,768。元数据有上下文窗口时，按提示的 UTF-8 字节数做两个估算（都向上取整，都不是 provider 的分词结果）：上限估算按 3 字节计 1 个 token，中日韩文字基本准确，英文偏多约三分之一；下限估算按 4 字节计 1 个 token。`max_tokens` 夹到窗口减去上限估算后的剩余空间，宁可少给输出也不让请求超窗。这个剩余空间只要大于 0 就照用，即使小于下限也不抬高，因为中日韩提示的上限估算基本准确，抬高会超窗。`MIN_OUTPUT_TOKENS`（1,024，见 [anthropic_messages.rs](../../crates/lattice-llm/src/protocol/anthropic_messages.rs)）只在按 3 字节/token 估算已无剩余空间时使用，且不超过窗口减去下限估算（4 字节/token）后的剩余空间与模型输出上限，照常发送，由 provider 判断是否放得下；剩余空间从 1 降到 0 时输出上限会跳到这个下限，这是有意的。只有按下限估算也已占满窗口时，才不发送请求，这次尝试以 `context_window_exceeded` 错误失败，不重试。下限估算对中日韩提示约少算四分之一，所以按 4 字节/token 未被拒绝的中日韩长提示仍可能被 provider 以超窗拒绝；这里只拦截按最宽松估算也放不下的请求。
+适配器不发送采样参数（`temperature`、`top_p` 等），也不发送输出上限（例如 Responses 的 `max_output_tokens`），由服务端按模型的默认值处理；只有 Anthropic Messages 的 `max_tokens` 是必填字段，取模型元数据的输出上限，输出上限缺失或为 0 时为 32,768。元数据有上下文窗口时，按提示的 UTF-8 字节数做两个估算（都向上取整，都不是 provider 的分词结果）：上限估算按 3 字节计 1 个 token，中日韩文字基本准确，英文偏多约三分之一；下限估算按 4 字节计 1 个 token。`max_tokens` 夹到窗口减去上限估算后的剩余空间，宁可少给输出也不让请求超窗。这个剩余空间只要大于 0 就照用，即使小于下限也不抬高，因为中日韩提示的上限估算基本准确，抬高会超窗。`MIN_OUTPUT_TOKENS`（1,024，见 [anthropic_messages.rs](../../crates/lattice-llm/src/protocol/anthropic_messages.rs)）只在按 3 字节/token 估算已无剩余空间时使用，且不超过窗口减去下限估算（4 字节/token）后的剩余空间与模型输出上限，照常发送，由 provider 判断是否放得下；剩余空间从 1 降到 0 时输出上限会跳到这个下限，这是有意的。只有按下限估算也已占满窗口时，才不发送请求，这次尝试以 `context_window_exceeded` 错误失败，不重试。下限估算对中日韩提示约少算四分之一；本地检查只拦截按最宽松估算也放不下的请求。
+
+服务端对提示与 `max_tokens` 之和超出上下文窗口的处理依模型而异：Claude 4.5 以前返回 HTTP 400；Claude 4.5 及以后在提示本身可容纳时可接受请求，生成到窗口边界后以 `stop_reason = "model_context_window_exceeded"` 结束。该停止原因的映射问题见 [#353](https://github.com/Skyline10124/lattice/issues/353)。
 
 ### 回放来源
 
@@ -226,7 +228,7 @@ feature 由协议适配器的代码定义，配置只能在已有取值中选择
 | Chat Completions 总是在助手消息中发回 `reasoning_content`（`protocol/projection/chat_completions.rs`） | 已由 #337 改为由 `reasoning_replay` 决定，默认不发；内置表中需要它的厂商启用 `reasoning-content` |
 | Chat Completions 同时读取 `reasoning_content` 与 `reasoning` | 保持，属于解析端的兼容 |
 | Chat Completions 总是发送 `stream_options: {"include_usage": true}` | 保持，属于标准协议行为 |
-| Anthropic `max_tokens` 固定为 32,768 | 已由 #336 改为取模型元数据的输出上限，缺失或为 0 时为 32,768；有上下文窗口时按 3 字节/token 估算的提示夹进剩余空间，剩余空间大于 0 时照用；只有按 3 字节/token 估算已无空间时才给 `MIN_OUTPUT_TOKENS`（1,024，不超过按 4 字节/token 估算的剩余空间与模型输出上限）；按 4 字节/token 估算也放不下时报 `context_window_exceeded`，见[适配器的职责](#适配器的职责) |
+| Anthropic `max_tokens` 固定为 32,768 | 已由 #336 改为取模型元数据的输出上限，缺失或为 0 时为 32,768；有上下文窗口时按 3 字节/token 估算的提示夹进剩余空间，剩余空间大于 0 时照用；只有按 3 字节/token 估算已无空间时才给 `MIN_OUTPUT_TOKENS`（1,024，不超过按 4 字节/token 估算的剩余空间与模型输出上限）；按 4 字节/token 估算也放不下时报本地错误 `context_window_exceeded`。服务端对提示与输出预算之和超窗返回 HTTP 400 的行为适用于 Claude 4.5 以前，4.5 及以后的停止行为见[适配器的职责](#适配器的职责) |
 | generateContent 的工具 schema 用 `parametersJsonSchema`（#270） | 保持，属于该协议的写法 |
 | OpenAI 兼容路径的工具名映射 | 已由 #311 删除，工具名原样发送 |
 
@@ -247,7 +249,7 @@ feature 由协议适配器的代码定义，配置只能在已有取值中选择
 | `providers.toml` 的 `models` | 用户手写 | 用户编辑 |
 
 - **选择来源。** 缓存存在且能解析时整份使用缓存，否则使用内置快照；缓存中缺少某个 `catalog` 条目时，这个条目使用快照。`providers.toml` 中的 `catalog` 在缓存与快照中都没有时，要等下一次刷新才有元数据；在此之前，以及 models.dev 中没有这个条目时，这个 provider 只有手写的元数据。手写的元数据按字段覆盖上述结果，只写在 `providers.toml` 中的模型由手写值单独构成。
-- **保留的字段。** 模型 `id`、`name`、`limit.context`、`limit.output`、`reasoning`、`reasoning_options`、`tool_call`、`modalities.input`、`cost.input`、`cost.output`、`cost.cache_read`、`cost.cache_write`、`cost.reasoning` 与 `status`。其余字段丢弃。
+- **保留的字段。** 模型 `id`、`name`、`limit.context`、`limit.output`、`reasoning`、`reasoning_options`、`tool_call`、`modalities.input`、`cost.input`、`cost.output`、`cost.cache_read`、`cost.cache_write` 与 `status`。其余字段丢弃。
 - **没有过期的概念。** 缓存旧了只影响列表与价格的准确性，不影响请求发往哪里，不提示过期。
 - **刷新失败**只记日志，继续使用上一份数据，并从 1 分钟起倍增重试，上限 1 小时。`lattice models refresh` 把失败原因返回给用户。拉取使用 HTTPS 与固定地址的连接，响应最多 32 MiB，30 秒内没有读完即放弃。新缓存先写临时文件再改名替换。
 - **请求路径上不联网。** 接受 Turn 与每次请求时只读上述数据。
@@ -320,7 +322,7 @@ Chat Completions 中，模型的 `reasoning_options` 含 toggle 项且 `thinking
 | 协议 | `input` | `cache_read` | `cache_write` | `output` | `reasoning` |
 | --- | --- | --- | --- | --- | --- |
 | Chat Completions | `prompt_tokens` | `prompt_tokens_details.cached_tokens`；DeepSeek 为 `prompt_cache_hit_tokens` | `prompt_tokens_details.cache_creation_input_tokens`；OpenAI 原生与 OpenRouter 的 `prompt_tokens_details.cache_write_tokens` 也接收，两者都有时取前者 | `completion_tokens` | `completion_tokens_details.reasoning_tokens` |
-| Responses | `input_tokens` | `input_tokens_details.cached_tokens` | — | `output_tokens` | `output_tokens_details.reasoning_tokens` |
+| Responses | `input_tokens` | `input_tokens_details.cached_tokens` | `input_tokens_details.cache_write_tokens`（含在 `input_tokens` 中，`cached_tokens` 不含写入） | `output_tokens` | `output_tokens_details.reasoning_tokens` |
 | Anthropic Messages | `input_tokens` + `cache_creation_input_tokens` + `cache_read_input_tokens` | `cache_read_input_tokens` | `cache_creation_input_tokens` | `output_tokens` | — |
 | generateContent | `promptTokenCount` + `toolUsePromptTokenCount` | `cachedContentTokenCount` | — | `candidatesTokenCount` + `thoughtsTokenCount` | `thoughtsTokenCount` |
 | Interactions | `total_input_tokens` + `total_tool_use_tokens` | `total_cached_tokens` | — | `total_output_tokens` + `total_thought_tokens` | `total_thought_tokens` |
@@ -339,7 +341,7 @@ Chat Completions 中，模型的 `reasoning_options` 含 toggle 项且 `thinking
 | 协议 | 开启 | 检测 |
 | --- | --- | --- |
 | Chat Completions | 服务端自动缓存；`cache_markers` 为 true 时加显式断点 | `cache_read`、`cache_write` |
-| Responses | 服务端自动缓存；请求带 `prompt_cache_key`，取 SessionId | `cache_read` |
+| Responses | 服务端自动缓存；请求带 `prompt_cache_key`，取 SessionId | `cache_read`、`cache_write` |
 | Anthropic Messages | 按 `cache` feature | `cache_read`、`cache_write` |
 | generateContent、Interactions | 服务端隐式缓存，请求不加字段 | `cache_read` |
 
@@ -362,7 +364,7 @@ Chat Completions 中，模型的 `reasoning_options` 含 toggle 项且 `thinking
              ) ÷ 1,000,000
 ```
 
-- reasoning 始终包含在 output 中，统一按 `cost.output` 计费；`cost.reasoning` 不参与计算、完整性或确切性判定。
+- reasoning 包含在 output 中，按 `cost.output` 计费。
 - 费用结果保存为可选的 `cost: CostEstimate { usd, exact }`：`usd` 以 `f64` 美元保存，编码与解码均要求有限且非负，保存时不按美分舍入。
 - 格式化的费用展示先合计原始金额，再按合计值与 `exact` 区分：确切金额（`exact=true`）为 0 时显示 `$0.00`，大于 0 且不到一美分时显示 `<$0.01`，其余金额按一美分舍入并显示 `$x.xx`；估算金额（`exact=false`）在相同格式前加 `≈`，例如 `≈$0.00`、`≈<$0.01`、`≈$0.04`。费用未知时，TUI statusline 显示 `$?`，CLI 金额格显示 `-`，CLI 帮助说明 `-` 表示未知。JSON 与结构化详情中的数值保留原值。
 - 有可计价项时，四项比对都确切则金额确切；有价无计数或计数大于 0 却无价时仍给出金额，标为估算。估算可能偏高也可能偏低：例如 input=1000，其中 800 为缓存读，input 价为 3、缓存读价为 0.3，完整费用为 `(200×3 + 800×0.3) / 1,000,000 = $0.00084`，缺缓存读计数时估算为 `1000×3 / 1,000,000 = $0.003`；缺缓存写计数时，写入 token 留在 input 中，而写入价通常更高（例如为 input 价的 1.25 倍），会少算。因此 `≈` 不承诺偏差方向。
@@ -383,9 +385,9 @@ Chat Completions 中，模型的 `reasoning_options` 含 toggle 项且 `thinking
 | 无 | 已报告且大于 0 | complete | 不计入该项，估算，不借用其他项单价 |
 | 无 | 已报告为 0 或未报告 | complete | 对此模型不存在，确切 |
 
-字段出现且非 null 即为已报告，明确的 0 也算；generateContent 只在[用量换算](#用量换算)规定的完成边界补零。reasoning 包含在 output 中，不单独比对；存在 `cost.reasoning` 也不使其成为独立项。
+字段出现且非 null 即为已报告，明确的 0 也算；generateContent 只在[用量换算](#用量换算)规定的完成边界补零。reasoning 包含在 output 中，不单独比对。
 
-没有一项能同时配上单价和计数时，费用未知，不显示 `≈$0.00`；用量完整性照常逐项判定，例如价格表只有 reasoning 时用量为 complete。provider 不存在或配置读取失败时无法比对，用量为 partial、费用未知。整次尝试没有用量或流中断时，按上文的 partial 规则处理。比对结果保存在尝试的 `usage_kind` 中，与 `cost` 一起交付，读取时不重新判定。
+没有一项能同时配上单价和计数时，费用未知，不显示 `≈$0.00`；用量完整性照常逐项判定，例如价格表四项均无价时用量为 complete。只有 reasoning 计数时也没有可计价项，费用未知。provider 不存在或配置读取失败时无法比对，用量为 partial、费用未知。整次尝试没有用量或流中断时，按上文的 partial 规则处理。比对结果保存在尝试的 `usage_kind` 中，与 `cost` 一起交付，读取时不重新判定。
 
 ## 凭据
 

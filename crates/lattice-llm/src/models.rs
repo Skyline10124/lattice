@@ -25,7 +25,6 @@ pub struct ModelPrice {
     pub output: Option<f64>,
     pub cache_read: Option<f64>,
     pub cache_write: Option<f64>,
-    pub reasoning: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -96,7 +95,6 @@ pub fn model_candidates(
                     output: cost.output,
                     cache_read: cost.cache_read,
                     cache_write: cost.cache_write,
-                    reasoning: cost.reasoning,
                 }),
                 credential_status: status,
             });

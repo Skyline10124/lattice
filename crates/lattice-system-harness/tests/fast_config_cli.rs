@@ -158,7 +158,7 @@ catalog = "absent-entry"
     .unwrap();
     std::fs::write(directory.join("cache/models.json"), serde_json::to_vec(&json!({
         "arbitrary-entry":{"models":{
-            "current":{"id":"current","name":"Current","limit":{"context":100,"output":200},"cost":{"input":1.2,"output":3.4,"cache_read":0.1}},
+            "current":{"id":"current","name":"Current","limit":{"context":100,"output":200},"cost":{"input":1.2,"output":3.4,"cache_read":0.1,"cache_write":0.2}},
             "retired":{"id":"retired","status":"deprecated"}
         }}
     })).unwrap()).unwrap();
@@ -180,7 +180,11 @@ catalog = "absent-entry"
             .expect("merged: current model listed");
         assert_eq!(current["context"], 999, "merged: handwritten context wins");
         assert_eq!(current["output"], 200, "merged: output from metadata");
-        assert_eq!(current["cost"]["input"], 1.2, "merged: cost from metadata");
+        assert_eq!(
+            current["cost"],
+            json!({"input":1.2,"output":3.4,"cache_read":0.1,"cache_write":0.2}),
+            "merged: cost from metadata"
+        );
         assert!(
             !models.iter().any(|model| model["model"] == "retired"),
             "deprecated: retired model must be hidden, got {models:?}"
@@ -189,12 +193,19 @@ catalog = "absent-entry"
         evidence.record_command("models merged metadata text", &text);
         assert!(text.is_clean_exit(0), "merged text query failed");
         let text = String::from_utf8(text.stdout).unwrap();
-        for value in ["local/current", "999", "200", "1.2/3.4/0.1"] {
-            assert!(
-                text.contains(value),
-                "merged text: missing {value} in {text}"
-            );
-        }
+        assert_eq!(
+            text.lines().next(),
+            Some(
+                "MODEL\tCONTEXT\tOUTPUT\tPRICE ($/M tokens: input/output/cache-read/cache-write)\tAUTH"
+            ),
+            "merged text: price columns"
+        );
+        assert_eq!(
+            text.lines()
+                .find(|line| line.starts_with("local/current\t")),
+            Some("local/current\t999\t200\t1.2/3.4/0.1/0.2\tready"),
+            "merged text: model limits, prices and credential status"
+        );
         assert!(
             !text.contains("retired"),
             "deprecated text: retired model shown in {text}"

@@ -23,7 +23,7 @@
 
 ## 局部约束
 
-- 调用方只给出 provider `id`、模型 `id`、推理档位与请求内容，不接触 endpoint、key 与 features；网关不向外暴露连接材料，每次请求按当前配置与凭据解析。
+- 调用方只给出 provider `id`、模型 `id`、推理档位（待实现，由 #315 L4 承接）与请求内容，不接触 endpoint、key 与 features；网关不向外暴露连接材料，每次请求按当前配置与凭据解析。
 - 协议差异留在适配器与 client 层，高层只消费类型化 `LlmEvent`、`LlmError` 和模型元数据。适配器按协议划分，厂商差异只用该协议的 features 表达，不按 URL 或 provider `id` 判断厂商；新增 feature 先修订模型接入合同。
 - 所有请求 builder 经共同投影入口 `request_messages_with_replay`；`protocol/projection` 的 `wire_to_native` 只用于完整 wire 夹具的解码，逐块交给共同回复累积器，usage 经 `wire_usage`。解析器只翻译部件增量，不保留完整内容缓冲；正式流、stub 与测试客户端共用 `reply_stream`，显示增量与完整消息出自同一次累积。累积器独占流式 `AttemptAssembly`，超限停止消费且不返回部分消息；完整 wire 夹具路径映射为 `ProjectionError::OutputLimitExceeded`。不新建 ToolCall/ToolResult codec。
 - provider call ID 是可选不透明 wire 元数据，不是领域 Invocation 身份，不合成 `tc_*` 身份。回放材料按[回放来源](../../docs/architecture/llm.md#回放来源)的两级规则投影。
