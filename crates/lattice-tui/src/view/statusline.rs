@@ -159,8 +159,8 @@ fn format_turn(usage: &lattice_api::UsageSummary) -> Option<String> {
                 parts.push(format!("{prefix}{}", format_tokens(tokens)));
             }
         }
-        if usage.input.is_complete()
-            && usage.cache_read.is_complete()
+        if usage.input.complete
+            && usage.cache_read.complete
             && let (Some(input), Some(cached)) = (usage.input.known, usage.cache_read.known)
             && input > 0
         {
@@ -199,7 +199,7 @@ mod tests {
     }
 
     #[test]
-    fn turn_fields_have_independent_coverage() {
+    fn turn_fields_show_known_counts_with_independent_completeness() {
         let partial = summary([
             (
                 json!({"input":1000,"output":100,"cache_read":200}),
@@ -218,6 +218,30 @@ mod tests {
             format_turn(&missing_reasoning).as_deref(),
             Some("↑12.3k ↓1.2k 缓存 80% $0.04")
         );
+    }
+
+    #[test]
+    fn unreported_cache_read_hides_ratio_even_when_attempts_are_complete() {
+        let usage = summary([
+            (json!({"input":100,"cache_read":50}), Complete, None),
+            (json!({"input":100}), Complete, None),
+        ]);
+        assert_eq!(usage.kind, Complete);
+        assert_eq!(usage.cache_read.known, Some(50));
+        assert!(usage.input.complete);
+        assert!(!usage.cache_read.complete);
+        assert_eq!(format_turn(&usage).as_deref(), Some("↑200"));
+    }
+
+    #[test]
+    fn unreported_cache_write_keeps_ratio_when_only_that_metric_is_partial() {
+        let usage = summary([(json!({"input":100,"cache_read":50}), Partial, None)]);
+        assert_eq!(usage.kind, Partial);
+        assert_eq!(usage.cache_write.known, None);
+        assert!(usage.input.complete);
+        assert!(usage.cache_read.complete);
+        assert!(!usage.cache_write.complete);
+        assert_eq!(format_turn(&usage).as_deref(), Some("↑100 缓存 50%"));
     }
 
     #[test]
@@ -272,30 +296,52 @@ mod tests {
 
     #[test]
     fn cache_ratio_uses_complete_weighted_counts_without_clamping() {
-        for (attempts, expected) in [
+        for (attempts, kind, expected) in [
             (
                 vec![
                     json!({"input":100,"cache_read":100}),
                     json!({"input":900,"cache_read":0}),
                 ],
+                Complete,
                 "↑1.0k 缓存 10%",
             ),
-            (vec![json!({"input":3,"cache_read":2})], "↑3 缓存 67%"),
-            (vec![json!({"input":8,"cache_read":1})], "↑8 缓存 13%"),
-            (vec![json!({"input":1,"cache_read":2})], "↑1 缓存 200%"),
-            (vec![json!({"input":0,"cache_read":1})], "↑0"),
+            (
+                vec![json!({"input":3,"cache_read":2})],
+                Complete,
+                "↑3 缓存 67%",
+            ),
+            (
+                vec![json!({"input":8,"cache_read":1})],
+                Complete,
+                "↑8 缓存 13%",
+            ),
+            (
+                vec![json!({"input":1,"cache_read":2})],
+                Complete,
+                "↑1 缓存 200%",
+            ),
+            (vec![json!({"input":0,"cache_read":1})], Complete, "↑0"),
+            (
+                vec![json!({"input":10,"cache_read":0})],
+                Partial,
+                "↑10 缓存 0%",
+            ),
+            (vec![json!({"input":10})], Complete, "↑10"),
+            (vec![json!({"cache_read":0})], Complete, ""),
             (
                 vec![json!({"input":10,"cache_read":0}), json!({"input":10})],
+                Partial,
                 "↑20",
             ),
             (
                 vec![json!({"input":10,"cache_read":0}), json!({"cache_read":0})],
+                Partial,
                 "↑10",
             ),
         ] {
             assert_eq!(
                 format_turn(&summary(
-                    attempts.into_iter().map(|usage| (usage, Partial, None))
+                    attempts.into_iter().map(|usage| (usage, kind, None))
                 ))
                 .unwrap_or_default(),
                 expected

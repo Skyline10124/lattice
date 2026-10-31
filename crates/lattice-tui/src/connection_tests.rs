@@ -80,7 +80,8 @@ fn entries_replace_by_node_in_place_and_new_ones_append() {
     assert_eq!(app.context_tokens, Some(1234));
     assert_eq!(app.turn_usage.as_ref().unwrap().attempts, 2);
     assert_eq!(app.turn_usage.as_ref().unwrap().input.known, Some(1234));
-    assert_eq!(app.turn_usage.as_ref().unwrap().input.unknown_attempts, 1);
+    assert!(!app.turn_usage.as_ref().unwrap().input.complete);
+    assert_eq!(app.turn_usage.as_ref().unwrap().partial_attempts, 2);
     let mut cache_only = step(3, t, 1).completed_attempt(0).entry();
     if let ConversationEntry::Step {
         content: Node::Step { attempts, .. },

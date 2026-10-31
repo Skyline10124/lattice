@@ -2087,7 +2087,7 @@ fn attempt_sources_survive_retry_and_reopen() {
     let mut complete = reply(key(tid(1), 1, 0), 0);
     complete.usage = Some(TokenUsage::default());
     complete.cost = Some(CostEstimate {
-        usd: 0.0,
+        usd: 0.5,
         exact: true,
     });
     complete.origin = third.clone();
@@ -2108,6 +2108,7 @@ fn attempt_sources_survive_retry_and_reopen() {
     );
     assert_eq!(final_detail.usage.partial_attempts, 2);
     assert_eq!(final_detail.steps[1].attempts[0].usage, None);
+    assert_eq!(final_detail.steps[1].attempts[0].cost, None);
     assert_eq!(
         final_detail.usage.cost.known,
         Some(CostEstimate {
@@ -2115,7 +2116,7 @@ fn attempt_sources_survive_retry_and_reopen() {
             exact: false
         })
     );
-    assert!(final_detail.usage.cost.is_complete());
+    assert_eq!(final_detail.usage.cost.unknown_attempts, 1);
     let turn = detail(&db);
     assert_eq!(turn.summary.outcome, PublicTurnOutcome::Completed);
     assert_eq!(turn.steps[1].attempts[0].origin, third);
@@ -2147,18 +2148,24 @@ fn attempts_without_reply_allow_sent_and_stopped_on_reopen() {
                 .unwrap();
         }
         if state == "stopped" {
-            db.stop_attempt(
-                &lock,
-                stopped(
-                    key(tid(1), 0, 0),
-                    StopCause::ProviderError { retryable: false },
-                ),
-                now(),
-            )
-            .unwrap();
+            let mut stop = stopped(
+                key(tid(1), 0, 0),
+                StopCause::ProviderError { retryable: false },
+            );
+            stop.usage = Some(TokenUsage::default());
+            stop.cost = Some(CostEstimate {
+                usd: 0.5,
+                exact: true,
+            });
+            db.stop_attempt(&lock, stop, now()).unwrap();
         }
         let expected = node_at(&db, 2);
         assert!(matches!(&expected, Node::Step { reply: None, .. }));
+        if state == "stopped" {
+            let record = serde_json::to_value(&expected).unwrap();
+            assert_eq!(record["attempts"][0]["usage"], Value::Null);
+            assert_eq!(record["attempts"][0]["cost"], Value::Null);
+        }
         let usage = db.begin_read().unwrap().usage(sid(1)).unwrap();
         assert_eq!(usage.turns.len(), 1);
         assert_eq!(usage.total.attempts, u64::from(state != "reserved"));
@@ -2447,7 +2454,7 @@ fn step_budget_reserves_and_closes_limit_node() {
     assert_eq!(t.usage.attempts, 32);
     assert_eq!(t.usage.input.known, Some(64));
     assert_eq!(t.usage.output.known, Some(96));
-    assert!(t.usage.input.is_complete());
+    assert!(t.usage.input.complete);
     assert_eq!(t.usage.cost.unknown_attempts, 32);
     drop(lock);
     drop(db);

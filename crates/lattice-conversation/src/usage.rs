@@ -59,19 +59,22 @@ fn deserialize_usd<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<
     Ok(usd)
 }
 
-/// 单项已知小计与覆盖范围；溢出的小计饱和，但不再标为完整。
+/// 单项已报告计数的小计与完整性；完整性只看计数，不依赖价格。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct MetricSummary<T> {
-    pub known: Option<T>,
-    pub unknown_attempts: u64,
+pub struct TokenSummary {
+    pub known: Option<u64>,
+    pub complete: bool,
     pub overflowed: bool,
 }
 
-impl<T> MetricSummary<T> {
-    pub fn is_complete(&self) -> bool {
-        self.unknown_attempts == 0 && !self.overflowed
-    }
+/// 费用小计与未知费用的尝试数；未知尝试不贡献金额。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CostSummary {
+    pub known: Option<CostEstimate>,
+    pub unknown_attempts: u64,
+    pub overflowed: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,19 +85,19 @@ pub enum UsageCompleteness {
     Partial,
 }
 
-/// 各项保留报告覆盖范围，整体完整性由尝试的判定与溢出决定。
+/// 各项累计已知值，整体完整性由尝试的判定与溢出决定。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UsageSummary {
     pub attempts: u64,
     pub partial_attempts: u64,
     pub kind: UsageCompleteness,
-    pub input: MetricSummary<u64>,
-    pub cache_read: MetricSummary<u64>,
-    pub cache_write: MetricSummary<u64>,
-    pub output: MetricSummary<u64>,
-    pub reasoning: MetricSummary<u64>,
-    pub cost: MetricSummary<CostEstimate>,
+    pub input: TokenSummary,
+    pub cache_read: TokenSummary,
+    pub cache_write: TokenSummary,
+    pub output: TokenSummary,
+    pub reasoning: TokenSummary,
+    pub cost: CostSummary,
 }
 
 impl UsageSummary {
@@ -103,9 +106,9 @@ impl UsageSummary {
             Item = (Option<TokenUsage>, UsageCompleteness, Option<CostEstimate>),
         >,
     ) -> Self {
-        let empty = MetricSummary {
+        let empty = TokenSummary {
             known: None,
-            unknown_attempts: 0,
+            complete: true,
             overflowed: false,
         };
         let mut result = Self {
@@ -117,7 +120,7 @@ impl UsageSummary {
             cache_write: empty,
             output: empty,
             reasoning: empty,
-            cost: MetricSummary {
+            cost: CostSummary {
                 known: None,
                 unknown_attempts: 0,
                 overflowed: false,
@@ -134,13 +137,13 @@ impl UsageSummary {
                 (&mut result.output, usage.output),
                 (&mut result.reasoning, usage.reasoning),
             ] {
-                match value {
-                    Some(value) => {
-                        let (sum, overflow) = summary.known.unwrap_or(0).overflowing_add(value);
-                        summary.known = Some(if overflow { u64::MAX } else { sum });
-                        summary.overflowed |= overflow;
-                    }
-                    None => summary.unknown_attempts += 1,
+                if let Some(value) = value {
+                    let (sum, overflow) = summary.known.unwrap_or(0).overflowing_add(value);
+                    summary.known = Some(if overflow { u64::MAX } else { sum });
+                    summary.overflowed |= overflow;
+                    summary.complete &= !overflow;
+                } else {
+                    summary.complete = false;
                 }
             }
             match cost {
@@ -196,7 +199,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn summaries_keep_independent_known_values_and_coverage() {
+    fn summaries_keep_independent_known_values() {
         let summary = UsageSummary::from_attempts([
             (
                 Some(TokenUsage {
@@ -232,20 +235,21 @@ mod tests {
         assert_eq!(summary.partial_attempts, 2);
         assert_eq!(
             summary.input,
-            MetricSummary {
+            TokenSummary {
                 known: Some(10),
-                unknown_attempts: 2,
+                complete: false,
                 overflowed: false
             }
         );
         assert_eq!(summary.cache_read.known, Some(0));
+        assert!(!summary.cache_read.complete);
         assert_eq!(summary.cache_write.known, None);
-        assert_eq!(summary.cache_write.unknown_attempts, 3);
         assert_eq!(summary.output.known, Some(3));
         assert_eq!(summary.reasoning.known, Some(7));
+        assert!(!summary.reasoning.complete);
         assert_eq!(
             summary.cost,
-            MetricSummary {
+            CostSummary {
                 known: Some(CostEstimate {
                     usd: 0.25,
                     exact: false
@@ -259,6 +263,7 @@ mod tests {
         assert_eq!(empty.attempts, 0);
         assert_eq!(empty.partial_attempts, 0);
         assert_eq!(empty.input.known, Some(0));
+        assert!(empty.input.complete);
         assert_eq!(
             empty.cost.known,
             Some(CostEstimate {
@@ -269,6 +274,7 @@ mod tests {
         assert_eq!(empty.kind, UsageCompleteness::Complete);
         let unknown = UsageSummary::from_attempts([(None, UsageCompleteness::Partial, None)]);
         assert_eq!(unknown.input.known, None);
+        assert!(!unknown.input.complete);
         assert_eq!(unknown.cost.known, None);
         assert_eq!(unknown.kind, UsageCompleteness::Partial);
     }
@@ -290,32 +296,32 @@ mod tests {
             attempts: 2,
             partial_attempts: 0,
             kind: UsageCompleteness::Complete,
-            input: MetricSummary {
+            input: TokenSummary {
                 known: Some(20),
-                unknown_attempts: 0,
+                complete: true,
                 overflowed: false,
             },
-            cache_read: MetricSummary {
+            cache_read: TokenSummary {
                 known: Some(0),
-                unknown_attempts: 0,
+                complete: true,
                 overflowed: false,
             },
-            cache_write: MetricSummary {
+            cache_write: TokenSummary {
                 known: Some(2),
-                unknown_attempts: 0,
+                complete: true,
                 overflowed: false,
             },
-            output: MetricSummary {
+            output: TokenSummary {
                 known: Some(4),
-                unknown_attempts: 0,
+                complete: true,
                 overflowed: false,
             },
-            reasoning: MetricSummary {
+            reasoning: TokenSummary {
                 known: Some(2),
-                unknown_attempts: 0,
+                complete: true,
                 overflowed: false,
             },
-            cost: MetricSummary {
+            cost: CostSummary {
                 known: Some(CostEstimate {
                     usd: 0.25,
                     exact: true,
@@ -344,9 +350,9 @@ mod tests {
                     ),
                 ],
                 UsageSummary {
-                    cache_write: MetricSummary {
+                    cache_write: TokenSummary {
                         known: Some(1),
-                        unknown_attempts: 1,
+                        complete: false,
                         overflowed: false,
                     },
                     ..complete.clone()
@@ -359,7 +365,7 @@ mod tests {
                     (Some(usage), UsageCompleteness::Complete, None),
                 ],
                 UsageSummary {
-                    cost: MetricSummary {
+                    cost: CostSummary {
                         known: Some(CostEstimate {
                             usd: 0.125,
                             exact: false,
@@ -404,9 +410,9 @@ mod tests {
                 ],
                 UsageSummary {
                     kind: UsageCompleteness::Partial,
-                    input: MetricSummary {
+                    input: TokenSummary {
                         known: Some(u64::MAX),
-                        unknown_attempts: 0,
+                        complete: false,
                         overflowed: true,
                     },
                     ..complete.clone()
@@ -424,7 +430,7 @@ mod tests {
                 ); 2],
                 UsageSummary {
                     kind: UsageCompleteness::Partial,
-                    cost: MetricSummary {
+                    cost: CostSummary {
                         known: Some(CostEstimate {
                             usd: f64::MAX,
                             exact: false,

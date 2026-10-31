@@ -1353,7 +1353,7 @@ fn wire_usage_distinguishes_present_absent_and_malformed_blocks() {
         (
             Protocol::Messages,
             serde_json::json!({"usage":{"cache_read_input_tokens":7}}),
-            serde_json::json!([7, 7, null, null, null]),
+            serde_json::json!([null, 7, null, null, null]),
         ),
         (
             Protocol::GenerateContent,

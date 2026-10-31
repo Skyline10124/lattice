@@ -387,7 +387,7 @@ mod tests {
                 ], json!([8,null,null,null,null]), None),
                 ("gemini interruption preserves reported components", Protocol::GenerateContent, vec![
                     (None, json!({"usageMetadata":{"promptTokenCount":10,"toolUsePromptTokenCount":2,"cachedContentTokenCount":4,"thoughtsTokenCount":3}})),
-                ], json!([12,4,null,3,3]), None),
+                ], json!([12,4,null,null,3]), None),
             ] {
                 let mut parser = crate::test_reply::Parser::new(protocol);
                 let mut input = Vec::new();

@@ -21,7 +21,11 @@ fn usage(send: &SessionSendDriver<'_>, evidence: &mut ScenarioEvidence, sid: &st
     query(send, evidence, &["--json", "session", "usage", sid])
 }
 
-fn metric(known: Value, unknown: u64) -> Value {
+fn tokens(known: Value, complete: bool) -> Value {
+    json!({"known":known,"complete":complete,"overflowed":false})
+}
+
+fn cost(known: Value, unknown: u64) -> Value {
     json!({"known":known,"unknown_attempts":unknown,"overflowed":false})
 }
 
@@ -333,14 +337,14 @@ fn usage_follows_current_path_and_survives_read_only_reopening() {
             assert_eq!(row["model"], model);
         }
         let a_summary = json!({"attempts":3,"partial_attempts":1,"kind":"partial",
-            "input":metric(json!(3000),0),"cache_read":metric(json!(600),0),"cache_write":metric(json!(200),1),
-            "output":metric(json!(300),0),"reasoning":metric(json!(40),0),"cost":metric(json!({"usd":0.0072,"exact":false}),0)});
+            "input":tokens(json!(3000), true),"cache_read":tokens(json!(600), true),"cache_write":tokens(json!(200), false),
+            "output":tokens(json!(300), true),"reasoning":tokens(json!(40), true),"cost":cost(json!({"usd":0.0072,"exact":false}),0)});
         let b_summary = json!({"attempts":1,"partial_attempts":0,"kind":"complete",
-            "input":metric(json!(500),0),"cache_read":metric(Value::Null,1),"cache_write":metric(Value::Null,1),
-            "output":metric(json!(50),0),"reasoning":metric(Value::Null,1),"cost":metric(Value::Null,1)});
+            "input":tokens(json!(500), true),"cache_read":tokens(Value::Null, false),"cache_write":tokens(Value::Null, false),
+            "output":tokens(json!(50), true),"reasoning":tokens(Value::Null, false),"cost":cost(Value::Null,1)});
         let full_summary = json!({"attempts":4,"partial_attempts":1,"kind":"partial",
-            "input":metric(json!(3500),0),"cache_read":metric(json!(600),1),"cache_write":metric(json!(200),2),
-            "output":metric(json!(350),0),"reasoning":metric(json!(40),1),"cost":metric(json!({"usd":0.0072,"exact":false}),1)});
+            "input":tokens(json!(3500), true),"cache_read":tokens(json!(600), false),"cache_write":tokens(json!(200), false),
+            "output":tokens(json!(350), true),"reasoning":tokens(json!(40), false),"cost":cost(json!({"usd":0.0072,"exact":false}),1)});
         assert_summary(&full["turns"][0]["usage"], &a_summary);
         assert_summary(&full["turns"][1]["usage"], &b_summary);
         assert_summary(&full["total"], &full_summary);
@@ -367,8 +371,8 @@ fn usage_follows_current_path_and_survives_read_only_reopening() {
         assert_eq!(middle["position"], 2);
         assert_eq!(middle["turns"].as_array().unwrap().len(), 1);
         let middle_summary = json!({"attempts":2,"partial_attempts":1,"kind":"partial",
-            "input":metric(json!(2000),0),"cache_read":metric(json!(400),0),"cache_write":metric(json!(100),1),
-            "output":metric(json!(200),0),"reasoning":metric(json!(20),0),"cost":metric(json!({"usd":0.0044,"exact":false}),0)});
+            "input":tokens(json!(2000), true),"cache_read":tokens(json!(400), true),"cache_write":tokens(json!(100), false),
+            "output":tokens(json!(200), true),"reasoning":tokens(json!(20), true),"cost":cost(json!({"usd":0.0044,"exact":false}),0)});
         assert_summary(&middle["turns"][0]["usage"], &middle_summary);
         assert_summary(&middle["total"], &middle_summary);
         assert_text(&send, &mut evidence, &middle);
@@ -387,8 +391,8 @@ fn usage_follows_current_path_and_survives_read_only_reopening() {
         assert_eq!(fork["turns"][1]["turn_id"], c);
         assert_eq!(fork["turns"][1]["ordinal"], 2);
         let zero = json!({"attempts":1,"partial_attempts":0,"kind":"complete",
-            "input":metric(json!(0),0),"cache_read":metric(json!(0),0),"cache_write":metric(json!(0),0),
-            "output":metric(json!(0),0),"reasoning":metric(json!(0),0),"cost":metric(json!({"usd":0.0,"exact":true}),0)});
+            "input":tokens(json!(0), true),"cache_read":tokens(json!(0), true),"cache_write":tokens(json!(0), true),
+            "output":tokens(json!(0), true),"reasoning":tokens(json!(0), true),"cost":cost(json!({"usd":0.0,"exact":true}),0)});
         assert_summary(&fork["turns"][0]["usage"], &middle_summary);
         assert_summary(&fork["turns"][1]["usage"], &zero);
         let mut fork_summary = middle_summary.clone();

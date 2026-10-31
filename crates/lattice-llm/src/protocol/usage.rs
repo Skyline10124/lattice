@@ -136,37 +136,36 @@ impl UsageSnapshot {
         final_snapshot.base_output.get_or_insert(0);
         final_snapshot.reasoning.get_or_insert(0);
         final_snapshot.cache_read.get_or_insert(0);
-        let mut usage = final_snapshot.project(protocol)?;
-        if self.base_input.is_none()
-            && let Some(usage) = &mut usage
-        {
-            usage.input = None;
-        }
-        Ok(usage)
+        final_snapshot.project(protocol)
     }
 
     fn project(&self, protocol: Protocol) -> Result<Option<TokenUsage>, ProjectionError> {
-        let sum = |parts: &[Option<u64>]| -> Result<Option<u64>, ProjectionError> {
-            parts.iter().flatten().try_fold(None, |sum, value| {
-                sum.unwrap_or(0_u64)
-                    .checked_add(*value)
-                    .map(Some)
-                    .ok_or_else(|| ProjectionError::MalformedUsage {
-                        provider: protocol,
-                        detail: "normalized usage exceeds u64".into(),
+        let sum = |base: Option<u64>, parts: &[Option<u64>]| {
+            let Some(base) = base else {
+                return Ok(None);
+            };
+            parts
+                .iter()
+                .try_fold(base, |sum, value| {
+                    sum.checked_add(value.unwrap_or(0)).ok_or_else(|| {
+                        ProjectionError::MalformedUsage {
+                            provider: protocol,
+                            detail: "normalized usage exceeds u64".into(),
+                        }
                     })
-            })
+                })
+                .map(Some)
         };
         let usage = TokenUsage {
             input: match protocol {
-                Protocol::Messages => sum(&[self.base_input, self.cache_read, self.cache_write])?,
-                Protocol::GenerateContent => sum(&[self.base_input, self.tool_input])?,
+                Protocol::Messages => sum(self.base_input, &[self.cache_read, self.cache_write])?,
+                Protocol::GenerateContent => sum(self.base_input, &[self.tool_input])?,
                 _ => self.base_input,
             },
             cache_read: self.cache_read.or(self.cache_read_alias),
             cache_write: self.cache_write.or(self.cache_write_alias),
             output: if protocol == Protocol::GenerateContent {
-                sum(&[self.base_output, self.reasoning])?
+                sum(self.base_output, &[self.reasoning])?
             } else {
                 self.base_output
             },
@@ -174,5 +173,47 @@ impl UsageSnapshot {
         }
         .normalized();
         Ok(usage)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn missing_base_counters_keep_totals_unknown() {
+        for (name, protocol, wire, expected) in [
+            (
+                "messages cache without input",
+                Protocol::Messages,
+                json!({"usage":{"cache_read_input_tokens":7}}),
+                TokenUsage {
+                    cache_read: Some(7),
+                    ..Default::default()
+                },
+            ),
+            (
+                "gemini tool input without prompt",
+                Protocol::GenerateContent,
+                json!({"usageMetadata":{"toolUsePromptTokenCount":2}}),
+                TokenUsage::default(),
+            ),
+            (
+                "gemini thoughts without candidates before interruption",
+                Protocol::GenerateContent,
+                json!({"usageMetadata":{"thoughtsTokenCount":3}}),
+                TokenUsage {
+                    reasoning: Some(3),
+                    ..Default::default()
+                },
+            ),
+        ] {
+            assert_eq!(
+                UsageSnapshot::default().update(protocol, &wire).unwrap(),
+                expected.normalized(),
+                "{name}"
+            );
+        }
     }
 }

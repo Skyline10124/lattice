@@ -516,7 +516,7 @@ TurnOutcome = Completed | Failed { reason } | Cancelled
 - Step 节点保留各次尝试与 `end` 的原因，随视图、历史查询和 `session turn` 提供，供诊断与操作员查询使用；前端的对话显示只依据 `TurnSummary` 与后端给出的 notice 给出文字和等级，不从 `end` 或尝试的原因推导。
 - Turn 的 usage 汇总由各次尝试的 usage 得出。Turn 的结束时间是最后一个 Step 关闭时的推进时间；未关闭时，最后一个 Step 的推进时间说明它最后一次有进展是什么时候。
 - 尝试的 `usage` 保存五项可选计数，`usage_kind` 保存请求结束时按[用量与价格表的比对](llm.md#用量与价格表的比对)得出的完整性判定，`cost` 独立保存可选的 `CostEstimate { usd, exact }`。开始请求时 `usage_kind` 为 `partial`，用量与费用未知；停止、登记调用或完成回复时原样接收请求网关的结果，与实际进度同事务保存。没有收到终态的 `Sent` 尝试与执行者消失后的尝试保留 `partial`、未知费用；读取不补写旧尝试，也不重新判定或估价。
-- 汇总携带 `attempts` 与 `partial_attempts`，后者统计 `usage_kind=partial` 的尝试。五项计数与费用各有 `known`（已知小计）、`unknown_attempts` 和 `overflowed`；计数小计为可选整数，费用 `cost.known` 为可选 `{usd, exact}`。`unknown_attempts` 仅记录该指标未报告的尝试数，不直接决定整体完整性。有尝试而某项全未知时其小计为 null，明确的零保留为 0；没有尝试时是空和 0，费用为 `{usd:0, exact:true}`，由 `attempts=0` 区别于未知请求。`Sent` 也计入尝试，Reserved 没有尝试。
+- 汇总携带 `attempts` 与 `partial_attempts`，后者统计 `usage_kind=partial` 的尝试。五项计数各有 `known`（已报告计数的小计）、`complete` 与 `overflowed`，小计为可选整数；`complete` 表示没有未报告的尝试且未溢出，只看计数本身，与该项有没有单价无关；费用汇总有 `known`、`unknown_attempts` 与 `overflowed`，`cost.known` 为可选 `{usd, exact}`，`cost.unknown_attempts` 统计费用未知的尝试数。有尝试而某项全未知时其小计为 null，明确的零保留为 0；没有尝试时是空和 0，费用为 `{usd:0, exact:true}`，由 `attempts=0` 区别于未知请求。`Sent` 也计入尝试，Reserved 没有尝试。
 - 整体 `kind` 仅在 `partial_attempts=0` 且所有指标均未溢出时为 `complete`，否则为 `partial`；某项计数或费用未报告本身不决定 `kind`。整数小计溢出饱和到 `u64::MAX`，金额小计溢出饱和到有限的 `f64::MAX`，同时设置该项溢出标记；原始尝试不变。
 - 费用合计规则见[费用估算](llm.md#费用估算)。
 

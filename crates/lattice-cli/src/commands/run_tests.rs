@@ -207,12 +207,23 @@ fn durable_attempt_usage_is_reported_once_with_partial_totals() {
     }
     finish_human(&state, &mut out, &mut err, true).unwrap();
     let text = String::from_utf8(err).unwrap();
-    assert!(
-        text.contains("\"unknown_attempts\":1"),
-        "持久 usage 不能被重复 entry 翻倍或丢弃：{text}"
+    let usage: serde_json::Value = serde_json::from_str(
+        text.lines()
+            .find_map(|line| line.strip_prefix("usage: "))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(usage["attempts"], 2, "重复 entry 不重复累计尝试");
+    assert_eq!(usage["partial_attempts"], 2);
+    assert_eq!(
+        usage["input"],
+        json!({"known":20,"complete":false,"overflowed":false})
     );
-    assert!(text.contains("\"input\":{\"known\":20"));
-    assert!(text.contains("\"output\":{\"known\":10"));
+    assert_eq!(
+        usage["output"],
+        json!({"known":10,"complete":false,"overflowed":false})
+    );
+    assert_eq!(usage["cost"]["unknown_attempts"], 2);
 }
 
 #[test]

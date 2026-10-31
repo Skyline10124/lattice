@@ -1679,11 +1679,11 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
                 assert_eq!(
                     usage,
                     json!({"attempts":2,"partial_attempts":0,"kind":"complete",
-                        "input":{"known":11,"unknown_attempts":0,"overflowed":false},
-                        "cache_read":{"known":null,"unknown_attempts":2,"overflowed":false},
-                        "cache_write":{"known":null,"unknown_attempts":2,"overflowed":false},
-                        "output":{"known":6,"unknown_attempts":0,"overflowed":false},
-                        "reasoning":{"known":null,"unknown_attempts":2,"overflowed":false},
+                        "input":{"known":11,"complete":true,"overflowed":false},
+                        "cache_read":{"known":null,"complete":false,"overflowed":false},
+                        "cache_write":{"known":null,"complete":false,"overflowed":false},
+                        "output":{"known":6,"complete":true,"overflowed":false},
+                        "reasoning":{"known":null,"complete":false,"overflowed":false},
                         "cost":{"known":{"usd":null,"exact":true},"unknown_attempts":0,"overflowed":false}})
                 );
             }
