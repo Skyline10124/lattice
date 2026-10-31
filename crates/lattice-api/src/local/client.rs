@@ -148,6 +148,17 @@ impl LocalClient {
             _ => Err(protocol()),
         }
     }
+    pub async fn usage(&self, session_id: &str) -> Result<SessionUsage> {
+        match self
+            .call(Request::Usage {
+                session_id: session_id.into(),
+            })
+            .await?
+        {
+            Response::Usage(usage) => Ok(usage),
+            _ => Err(protocol()),
+        }
+    }
     pub async fn turn(&self, turn_id: TurnId) -> Result<TurnLookup> {
         match self.call(Request::Turn { turn_id }).await? {
             Response::Turn(turn) => Ok(turn),
@@ -436,37 +447,41 @@ mod tests {
     use tokio::io::AsyncWriteExt;
     #[tokio::test]
     async fn interrupted_view_poll_preserves_a_partial_frame() {
-        let (mut writer, reader) = UnixStream::pair().unwrap();
-        let mut view = LocalWatch::from_stream(reader);
-        writer.write_all(b"LTLO").await.unwrap();
-        assert!(
-            tokio::time::timeout(Duration::from_millis(10), view.next())
-                .await
-                .is_err()
-        );
-        let response = Response::View(ViewUpdate::Head(SessionHead {
-            session_id: super::super::new_session_id(),
-            position: NodeId(0),
-            agent: None,
-            turn_id: None,
-            owner: false,
-            diagnostic: None,
-            path_replaced: false,
-        }));
-        let json = serde_json::to_string(&response).unwrap();
-        let payload = serde_json::to_vec(
+        tokio::time::timeout(Duration::from_secs(1), async {
+            let (mut writer, reader) = UnixStream::pair().unwrap();
+            let mut view = LocalWatch::from_stream(reader);
+            writer.write_all(&ipc::MAGIC[..4]).await.unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), view.next())
+                    .await
+                    .is_err()
+            );
+            let response = Response::View(ViewUpdate::Head(SessionHead {
+                session_id: super::super::new_session_id(),
+                position: NodeId(0),
+                agent: None,
+                turn_id: None,
+                owner: false,
+                diagnostic: None,
+                path_replaced: false,
+            }));
+            let json = serde_json::to_string(&response).unwrap();
+            let payload = serde_json::to_vec(
             &serde_json::json!({"message_id":0,"offset":0,"json_fragment":json,"complete":true}),
         )
         .unwrap();
-        writer.write_all(b"CAL9").await.unwrap();
-        writer.write_u32(payload.len() as u32).await.unwrap();
-        writer.write_all(&payload).await.unwrap();
-        assert!(matches!(
-            view.next().await.unwrap(),
-            Some(ViewUpdate::Head(SessionHead {
-                position: NodeId(0),
-                ..
-            }))
-        ));
+            writer.write_all(&ipc::MAGIC[4..]).await.unwrap();
+            writer.write_u32(payload.len() as u32).await.unwrap();
+            writer.write_all(&payload).await.unwrap();
+            assert!(matches!(
+                view.next().await.unwrap(),
+                Some(ViewUpdate::Head(SessionHead {
+                    position: NodeId(0),
+                    ..
+                }))
+            ));
+        })
+        .await
+        .expect("partial IPC frame timed out");
     }
 }

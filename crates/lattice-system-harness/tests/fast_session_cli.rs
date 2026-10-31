@@ -135,6 +135,7 @@ fn missing_session_and_missing_profile_fail_before_dispatch() {
         assert_clean_send(&seed).unwrap();
         for args in [
             vec!["--json", "session", "log", "nope-sid"],
+            vec!["--json", "session", "usage", "nope-sid"],
             vec![
                 "--json",
                 "session",
@@ -144,7 +145,7 @@ fn missing_session_and_missing_profile_fail_before_dispatch() {
                 "nope-sid",
             ],
         ] {
-            let out = cli(&world, &spec, &args);
+            let out = send.run_command(&args).unwrap();
             evidence.record_command(args.join(" "), &out);
             assert!(out.is_clean_exit(2), "{}", out.summary());
             let error: Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -176,6 +177,62 @@ fn missing_session_and_missing_profile_fail_before_dispatch() {
             sid,
             serde_json::json!({"seed":"seed","rejected_prompt":"hello","unknown_session":"nope-sid","profile_removed":true,"provider_requests":1}),
         );
+    }));
+    evidence.record_captures(server.captured_requests());
+    support::finish_recorded(evidence, result);
+}
+
+#[test]
+fn usage_resolves_exact_identity_and_rejects_ambiguous_prefixes() {
+    use serde_json::json;
+    let (world, spec) = direct_world("usage-prefix", "plain", "[]", "");
+    let budget = world.budget(&spec);
+    let driver = driver();
+    let send = SessionSendDriver::new(&driver, &world, &spec, "plain");
+    let server = wire_fake_llm(&world, "plain", SseScript::plain("seed"));
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        for (sid, tid) in [
+            (
+                "abcd1111111141118111111111111111",
+                "10000000-0000-4000-8000-000000000001",
+            ),
+            (
+                "abcd2222222242228222222222222222",
+                "20000000-0000-4000-8000-000000000002",
+            ),
+        ] {
+            let accepted = support::ipc(
+                &world,
+                budget.cap_timeout(spec.step_timeout()),
+                support::submit_request(&world, tid, json!({"new":sid}), "seed", Some("plain")),
+            );
+            evidence.record_json("acceptance", &accepted).unwrap();
+            assert_eq!(accepted["value"]["acceptance"], "accepted");
+            for prefix in [sid, &sid[..8]] {
+                let out = send
+                    .run_command(&["session", "usage", prefix, "--json"])
+                    .unwrap();
+                evidence.record_command("exact or unique usage prefix", &out);
+                assert!(out.is_clean_exit(0), "{}", out.summary());
+                let usage: Value = serde_json::from_slice(&out.stdout).unwrap();
+                assert_eq!(usage["session_id"], sid);
+            }
+        }
+        for (prefix, kind) in [
+            ("abcd", "bad_request"),
+            ("abc", "bad_request"),
+            (" ", "bad_request"),
+            ("ffff0000000000000000000000000000", "not_found"),
+        ] {
+            let out = send
+                .run_command(&["--json", "session", "usage", prefix])
+                .unwrap();
+            evidence.record_command("invalid usage prefix", &out);
+            assert!(out.is_clean_exit(2), "{}", out.summary());
+            let error: Value = serde_json::from_slice(&out.stdout).unwrap();
+            assert_eq!(error["kind"], kind);
+        }
     }));
     evidence.record_captures(server.captured_requests());
     support::finish_recorded(evidence, result);

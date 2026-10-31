@@ -379,7 +379,7 @@ pub(crate) fn cli(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> 
 
 /// 与 `lattice_api::local::test_support::FRAME_MAGIC` 相同。
 /// harness 不能依赖产品 crate，所以外部观察者只在这里保留字面量。
-const FRAME_MAGIC: &[u8; 8] = b"LTLOCAL9";
+const FRAME_MAGIC: &[u8; 8] = b"LTLOCAL:";
 
 /// 公开 Local IPC 的一条连接：请求写成一帧，回复按当前帧魔数重组为逻辑消息。
 pub(crate) struct Wire {

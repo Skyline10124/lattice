@@ -78,6 +78,8 @@ pub enum SessionAction {
     List,
     /// Show the full session tree, including the root node.
     Log { session_id: String },
+    /// Show per-turn token usage and estimated cost on the current path, with totals.
+    Usage { session_id: String },
     /// Show every Step of a Turn by TurnId; --follow keeps observing.
     Turn {
         #[arg(value_parser = parse_turn_id)]
@@ -149,6 +151,14 @@ pub async fn run(
                 println!("{}", serde_json::to_string(&log)?);
             } else {
                 print!("{}", render_log(&log));
+            }
+        }
+        SessionAction::Usage { session_id } => {
+            let usage = api.usage(&session_id).await?;
+            if json {
+                println!("{}", serde_json::to_string(&usage)?);
+            } else {
+                print!("{}", render_usage(&usage));
             }
         }
         SessionAction::Rewind { session_id, target } => {
@@ -309,6 +319,66 @@ fn render_log(log: &lattice_api::local::SessionLog) -> String {
     text
 }
 
+fn render_usage(usage: &lattice_api::local::SessionUsage) -> String {
+    use std::fmt::Write;
+    let mut text = format!(
+        "session {} position={}\n",
+        usage.session_id, usage.position.0
+    );
+    text.push_str("#\tTURN\tPROVIDER/MODEL\tATTEMPTS\tINPUT\tCACHE_READ\tCACHE_WRITE\tOUTPUT\tREASONING\tCOST USD\n");
+    for turn in &usage.turns {
+        let _ = writeln!(
+            text,
+            "{}\t{}\t{}/{}\t{}",
+            turn.ordinal,
+            turn.turn_id,
+            turn.provider,
+            summarize(&turn.model, 120),
+            render_usage_values(&turn.usage)
+        );
+    }
+    let _ = writeln!(text, "total\t-\t-\t{}", render_usage_values(&usage.total));
+    text
+}
+
+fn render_usage_values(usage: &lattice_api::local::UsageSummary) -> String {
+    let tokens = [
+        &usage.input,
+        &usage.cache_read,
+        &usage.cache_write,
+        &usage.output,
+        &usage.reasoning,
+    ]
+    .map(|metric| render_metric(metric, |value| value.to_string()));
+    let cost = render_metric(&usage.cost, |value| {
+        format!("{}${:.2}", if value.exact { "" } else { "≈" }, value.usd)
+    });
+    let completeness = if usage.kind == lattice_api::local::UsageCompleteness::Partial {
+        " (partial)"
+    } else {
+        ""
+    };
+    format!(
+        "{}\t{}\t{cost}{completeness}",
+        usage.attempts,
+        tokens.join("\t")
+    )
+}
+
+fn render_metric<T: Copy>(
+    metric: &lattice_api::local::MetricSummary<T>,
+    format_value: impl FnOnce(T) -> String,
+) -> String {
+    let Some(known) = metric.known else {
+        return "-".into();
+    };
+    let mut value = format_value(known);
+    if metric.overflowed {
+        value.push_str(" (overflow)");
+    }
+    value
+}
+
 pub(super) fn render_turn(turn: &lattice_api::local::TurnDetail) -> String {
     use std::fmt::Write;
     let mut text = format!(
@@ -389,11 +459,72 @@ fn summarize(text: &str, max: usize) -> String {
 mod session_cli {
     use super::*;
     use clap::{CommandFactory, Parser};
+    use lattice_api::local::{CostEstimate, UsageCompleteness};
     #[derive(Parser)]
     struct TestCli {
         #[command(subcommand)]
         action: SessionAction,
     }
+    #[test]
+    fn saturated_usage_is_not_presented_as_an_exact_total() {
+        let mut usage = lattice_api::UsageSummary::from_attempts([]);
+        usage.input = lattice_api::local::MetricSummary {
+            known: Some(u64::MAX),
+            unknown_attempts: 0,
+            overflowed: true,
+        };
+        usage.kind = UsageCompleteness::Partial;
+        let text = render_usage_values(&usage);
+        let fields: Vec<_> = text.split('\t').collect();
+        assert_eq!(fields[1], format!("{} (overflow)", u64::MAX));
+        assert_eq!(text.matches("(partial)").count(), 1);
+        assert!(text.ends_with(" (partial)"));
+    }
+
+    #[test]
+    fn complete_usage_rows_keep_exact_approximate_and_unknown_costs_distinct() {
+        for (cost, expected) in [
+            (
+                Some(CostEstimate {
+                    usd: 0.004,
+                    exact: true,
+                }),
+                "$0.00",
+            ),
+            (
+                Some(CostEstimate {
+                    usd: 0.004,
+                    exact: false,
+                }),
+                "≈$0.00",
+            ),
+            (None, "-"),
+        ] {
+            let usage = lattice_api::UsageSummary::from_attempts([(
+                Some(lattice_llm::TokenUsage {
+                    input: Some(1),
+                    ..Default::default()
+                }),
+                UsageCompleteness::Complete,
+                cost,
+            )]);
+            let text = render_usage_values(&usage);
+            let fields: Vec<_> = text.split('\t').collect();
+            assert_eq!(&fields[2..6], &["-"; 4]);
+            assert_eq!(fields[6], expected, "{text}");
+            assert_eq!(fields.len(), 7);
+        }
+    }
+
+    #[test]
+    fn partial_usage_is_marked_once_at_the_end_of_the_row() {
+        let usage =
+            lattice_api::UsageSummary::from_attempts([(None, UsageCompleteness::Partial, None)]);
+        let text = render_usage_values(&usage);
+        assert_eq!(text.matches("(partial)").count(), 1);
+        assert_eq!(text.split('\t').next_back(), Some("- (partial)"));
+    }
+
     #[test]
     fn session_surface_and_numeric_nodes() {
         let command = TestCli::command();
@@ -402,7 +533,7 @@ mod session_cli {
                 .get_subcommands()
                 .map(|c| c.get_name())
                 .collect::<Vec<_>>(),
-            ["send", "rewind", "list", "log", "turn", "cancel"]
+            ["send", "rewind", "list", "log", "usage", "turn", "cancel"]
         );
         for n in ["0", "18446744073709551615"] {
             assert!(TestCli::try_parse_from(["session", "rewind", "abcd", n]).is_ok());

@@ -1418,17 +1418,20 @@ async fn status_against(
     + Send
     + 'static,
 ) -> LocalError {
-    let directory = tempfile::tempdir().unwrap();
-    let layout = crate::StateLayout::in_state_root(directory.path());
-    let (_instance, listener) = ipc::Instance::bind(&layout).unwrap();
-    let listener = UnixListener::from_std(listener).unwrap();
-    let server = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        backend(stream).await;
-    });
-    let error = LocalClient::new(layout).status().await.unwrap_err();
-    server.await.unwrap();
-    error
+    within(async {
+        let directory = tempfile::tempdir().unwrap();
+        let layout = crate::StateLayout::in_state_root(directory.path());
+        let (_instance, listener) = ipc::Instance::bind(&layout).unwrap();
+        let listener = UnixListener::from_std(listener).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            backend(stream).await;
+        });
+        let error = LocalClient::new(layout).status().await.unwrap_err();
+        server.await.unwrap();
+        error
+    })
+    .await
 }
 
 const OLDER_BACKEND: &str = "the running backend is an incompatible older version; stop it with the older binary's `lattice daemon stop`";
@@ -1492,7 +1495,7 @@ async fn status_reports_an_older_backend_that_announces_its_magic() {
 async fn status_reports_a_backend_newer_than_the_client() {
     let error = status_against(|mut stream| {
         Box::pin(async move {
-            stream.write_all(b"LTLOCAL:").await.unwrap();
+            stream.write_all(b"LTLOCAL;").await.unwrap();
             stream.write_u32(4).await.unwrap();
             stream.write_all(b"null").await.unwrap();
             let _held = stream;

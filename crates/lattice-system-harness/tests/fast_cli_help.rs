@@ -93,6 +93,51 @@ fn fast_cli_help_lists_public_commands() {
         .and_then(|_| assert_stdout_contains_all(&output, EXPECTED_PUBLIC_COMMANDS));
     finalize_with_failure_artifacts(&world, &spec.name, "lattice --help", &output, &[], result)
         .unwrap_or_else(|report| panic!("help exits 0 and lists all public commands\n{report}"));
+
+    for (args, expected) in [
+        (vec!["session", "--help"], vec!["usage"]),
+        (
+            vec!["session", "usage", "--help"],
+            vec!["SESSION_ID", "current path", "--json"],
+        ),
+    ] {
+        let output = driver
+            .run(
+                &world,
+                &LatticeCommand {
+                    args: args.iter().map(|arg| (*arg).into()).collect(),
+                    timeout: Some(spec.step_timeout()),
+                },
+            )
+            .unwrap();
+        let result = assert_exit_code(&output, 0)
+            .and_then(|_| assert_stdout_contains_all(&output, &expected));
+        finalize_with_failure_artifacts(&world, &spec.name, &args.join(" "), &output, &[], result)
+            .unwrap_or_else(|report| panic!("session usage help\n{report}"));
+    }
+    for args in [vec!["session", "usage"], vec!["session", "usage", "--json"]] {
+        let output = driver
+            .run(
+                &world,
+                &LatticeCommand {
+                    args: args.iter().map(|arg| (*arg).into()).collect(),
+                    timeout: Some(spec.step_timeout()),
+                },
+            )
+            .unwrap();
+        let result = assert_exit_code(&output, 2).and_then(|_| {
+            if args.contains(&"--json") {
+                assert_stdout_contains_all(
+                    &output,
+                    &["\"type\":\"error\"", "\"kind\":\"bad_request\""],
+                )
+            } else {
+                assert_stderr_contains(&output, "SESSION_ID")
+            }
+        });
+        finalize_with_failure_artifacts(&world, &spec.name, &args.join(" "), &output, &[], result)
+            .unwrap_or_else(|report| panic!("usage requires a session ID\n{report}"));
+    }
 }
 
 #[test]

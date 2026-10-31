@@ -13,14 +13,16 @@ fn turn_id() -> TurnId {
 }
 fn seed(layout: &StateLayout, root: &std::path::Path) {
     let store = SessionStore::create(layout).unwrap();
-    let sid = session_id();
+    seed_session(&store, root, session_id(), turn_id());
+}
+fn seed_session(store: &SessionStore, root: &std::path::Path, sid: SessionId, tid: TurnId) {
     let guard = store.try_lock_session(sid).unwrap();
     store
         .accept_turn(
             &guard,
             AcceptTurn {
                 session: AcceptSession::New { id: sid },
-                turn_id: turn_id(),
+                turn_id: tid,
                 project_store_key: lattice_api::LocalWorkspaceRoot::from_path(root)
                     .unwrap()
                     .store_key(),
@@ -42,6 +44,59 @@ fn seed(layout: &StateLayout, root: &std::path::Path) {
             },
         )
         .unwrap();
+}
+
+#[tokio::test]
+async fn usage_identity_resolution_skips_conversation_and_configuration() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        for (unrelated, field) in [
+            (false, "message"),
+            (false, "config_digest"),
+            (true, "message"),
+        ] {
+            let state = tempfile::tempdir().unwrap();
+            let project = tempfile::tempdir().unwrap();
+            let layout = StateLayout::in_state_root(state.path());
+            let store = std::sync::Arc::new(SessionStore::create(&layout).unwrap());
+            let other = SessionId::parse("ffff0000000000000000000000000001").unwrap();
+            seed_session(&store, project.path(), session_id(), turn_id());
+            seed_session(
+                &store,
+                project.path(),
+                other,
+                TurnId::parse("00000000-0000-4000-8000-000000000002").unwrap(),
+            );
+            let api = lattice_api::SessionApi::from_store(store.clone());
+            let id = session_id().to_string();
+            let expected = api.usage(id.clone()).await.unwrap();
+            store
+                .edit_test_node(
+                    NodeRef {
+                        session_id: if unrelated { other } else { session_id() },
+                        node: NodeId(1),
+                    },
+                    |wire| {
+                        wire[field] = if field == "config_digest" {
+                            serde_json::json!("0".repeat(64))
+                        } else {
+                            serde_json::json!(false)
+                        };
+                    },
+                )
+                .unwrap();
+            for input in [&id, &id[..8]] {
+                assert_eq!(
+                    api.usage(input.to_owned()).await.unwrap_or_else(|error| {
+                        panic!("unrelated={unrelated} field={field} input={input}: {error}")
+                    }),
+                    expected,
+                    "unrelated={unrelated} field={field} input={input}"
+                );
+            }
+        }
+    })
+    .await
+    .expect("usage identity resolution timed out");
 }
 async fn ready(client: &LocalClient) {
     tokio::time::timeout(Duration::from_secs(10), async {

@@ -98,6 +98,18 @@ lattice --json session turn "$TURN_ID" --follow
 
 TUI 中用 `/reconnect` 重新观察。临时正文保留到对应 Step 节点的正文实际装入后才替换；结局先到、正文挂起或失败时继续保留已知结局。呈现见 [TUI 连接、结局与重载](../architecture/tui.md#连接结局与重载)。
 
+### 查询当前路径的用量
+
+已知 SessionId 时，一次读取当前路径各轮的用量和费用估算：
+
+```sh
+lattice session usage "$SESSION_ID"
+lattice --json session usage "$SESSION_ID"
+lattice session usage "$SESSION_ID" --json
+```
+
+SessionId 可用唯一前缀。JSON 是一个含 `session_id`、`position`、`turns` 和 `total` 的对象；每轮带 TurnId、路径轮次、provider/model 与汇总。文本与 JSON 的未知、部分及空路径语义见[当前路径的用量查询](../architecture/session.md#当前路径的用量查询)，金额格式见[费用估算](../architecture/llm.md#费用估算)。先 `rewind` 再查询即可核对范围变化；`session turn` 仍给出原 Turn 的全部 Step。
+
 ### 会话退回与分叉
 
 用 `log` 查看完整树，再把当前位置移到选中的节点序号 N 本身：
@@ -162,11 +174,11 @@ stop 先关闭新准入，再等待已接管工作及必要收尾；收到回执
 
 #### 升级与输出字段适配
 
-客户端与后台应来自相符构建，当前 Local IPC 标识为 `LTLOCAL9`。新旧版本的 IPC 互不兼容，新二进制不能停止旧后台；升级前先用旧二进制执行 `lattice daemon stop`，或手动结束旧后台进程。从这一版起，后台读到不同的 IPC 标识会先回写自己的标识再断开：客户端据此报 `incompatible_backend`，后台较旧时提示用旧二进制执行 `lattice daemon stop`，后台较新时提示改用新二进制。更早的后台不回写就断开，客户端发出请求后一个字节都没收到时报传输错误，并附同样的停机提示；当前后台过载或崩溃也可能这样断开，所以这只是提示。两种情况退出码都是 `1`。身份或协议不兼容时保留错误，交由用户处理；不自动终止已有后台或迁移状态。当前会话库格式为 6；旧格式 `lattice.redb` 与旧 `sessions.git` / `invocations.git` 在打开会话库时被拒绝并列出路径，不提供迁移或兼容读取；处理状态须另获授权，见[开发状态诊断与重建边界](tool-development.md#开发状态诊断与重建边界)。
+客户端与后台应来自相符构建，当前 Local IPC 标识为 `LTLOCAL:`。新旧版本的 IPC 互不兼容，新二进制不能停止旧后台；升级前先用旧二进制执行 `lattice daemon stop`，或手动结束旧后台进程。后台读到不同的 IPC 标识会先回写自己的标识再断开：客户端据此报 `incompatible_backend`，后台较旧时提示用旧二进制执行 `lattice daemon stop`，后台较新时提示改用新二进制。更早的后台不回写就断开，客户端发出请求后一个字节都没收到时报传输错误，并附同样的停机提示；当前后台过载或崩溃也可能这样断开，所以这只是提示。两种情况退出码都是 `1`。身份或协议不兼容时保留错误，交由用户处理；不自动终止已有后台或迁移状态。当前会话库格式为 6；旧格式 `lattice.redb` 与旧 `sessions.git` / `invocations.git` 在打开会话库时被拒绝并列出路径，不提供迁移或兼容读取；处理状态须另获授权，见[开发状态诊断与重建边界](tool-development.md#开发状态诊断与重建边界)。
 
 外部脚本需适配 `session turn --json`、流式 JSONL 条目，以及人类输出中的 `usage` 摘要：尝试的 `usage` 由三个必填计数 `prompt_tokens`、`completion_tokens`、`total_tokens` 改为五个可选计数 `input`、`cache_read`、`cache_write`、`output`、`reasoning`，尝试上新增 `usage_kind`，可选费用字段由 `estimated_cost_usd` 改为 `cost`（`{usd, exact}` 或 null）。Turn 用量汇总新增 `attempts`、`partial_attempts`，五项计数各自提供 `known`、`unknown_attempts`、`overflowed`，费用汇总为 `cost: {known: {usd, exact} | null, unknown_attempts, overflowed}`；整体 `kind` 由各次尝试保存的 `usage_kind` 与汇总溢出决定。计数与费用的含义见[用量、缓存与费用](../architecture/llm.md#用量缓存与费用)，汇总字段与完整性语义见[会话合同](../architecture/session.md#关闭-step-与-turn)。
 
-新尝试按[费用估算](../architecture/llm.md#费用估算)保存确切或估算金额，未知费用仍为 null；已有记录中的未知费用不回填，旧尝试不补 `usage_kind`。会话库格式仍为 6，Local IPC 标识仍为 `LTLOCAL9`。
+新尝试按[费用估算](../architecture/llm.md#费用估算)保存确切或估算金额，未知费用仍为 null；已有记录中的未知费用不回填，旧尝试不补 `usage_kind`。当前路径用量查询增加独立 IPC operation，Local IPC 标识从 `LTLOCAL9` 递增为 `LTLOCAL:`，会话库格式保持 6。
 
 ### 退出码与失败后的动作
 

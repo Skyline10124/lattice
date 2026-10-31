@@ -1496,11 +1496,22 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
             assert_eq!(head.turn_id.as_deref(), Some(tid));
             let entries = observer.view.raw_entries();
             assert_paired_entries(&entries, &before);
+            let usage = read_json(
+                &world,
+                &spec,
+                &mut evidence,
+                &["--json", "session", "usage", sid],
+            );
+            assert_eq!(usage["position"], head.position);
+            assert_eq!(usage["turns"].as_array().unwrap().len(), 1);
+            assert_eq!(usage["turns"][0]["turn_id"], tid);
+            assert_eq!(usage["turns"][0]["usage"], before["usage"]);
+            assert_eq!(usage["total"], before["usage"]);
             assert_eq!(accepted_detail(&world, &spec, tid), before);
             assert_eq!(
                 watch(&world, &spec, sid).received,
                 observer.received,
-                "observation is read-only"
+                "usage and observation preserve the Turn and node facts"
             );
             let prior = before["steps"].as_array().unwrap();
             for (index, step) in prior.iter().enumerate() {

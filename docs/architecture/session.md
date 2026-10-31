@@ -102,7 +102,7 @@ Turn 没有单独保存的结局，也没有单独的结束节点。它的结局
 
 ### 组件与接口
 
-后台 API 分为三类：命令改变会话或执行（`submit`、`cancel`、`rewind`），视图推送会话现在的样子（`watch`），查询读取已写入的事实（`head`、`history`、`turn`、`list`、`log`、`audit`）。LocalClient 把它们交给前端。一次提交经 `LocalTurn` 进行：它是这次提交的具体句柄，保留原请求身份，处理接受回执、取消意图与退出交接；它不是第二个持久 Turn，也不拥有后台执行。前端持有句柄、消费视图，后台的 Owner 与 TurnCoordinator 分别监督操作和推进持久执行。
+后台 API 分为三类：命令改变会话或执行（`submit`、`cancel`、`rewind`），视图推送会话现在的样子（`watch`），查询读取已写入的事实（`head`、`history`、`turn`、`list`、`log`、`usage`、`audit`）。LocalClient 把它们交给前端。一次提交经 `LocalTurn` 进行：它是这次提交的具体句柄，保留原请求身份，处理接受回执、取消意图与退出交接；它不是第二个持久 Turn，也不拥有后台执行。前端持有句柄、消费视图，后台的 Owner 与 TurnCoordinator 分别监督操作和推进持久执行。
 
 | 场景中的角色 | 负责的工作与交接 |
 | --- | --- |
@@ -218,6 +218,16 @@ CLI 的 `lattice session` 子命令为 `send`、`rewind`、`list`、`log`、`tur
 LocalTurn 交付提交与取消的回执。普通退出使用 `detach` 取得最后已知的提交、取消与诊断，或由 Drop 停止本地后续工作；两者都不新增取消。`LocalTurn::turn_id` 给出提交与取消共用的身份。
 
 公开类型与方法见[本地连接与读取](../../crates/lattice-api/src/local/client.rs)、[LocalTurn](../../crates/lattice-api/src/local/operation.rs)和[结果类型](../../crates/lattice-api/src/local/types.rs)，命令用法见[验证操作指南](../development/validation-guide.md#后台与重连操作)。
+
+### 当前路径的用量查询
+
+`usage` 在一个读事务内固定 Session 的当前位置，沿父链到根，按 UserMessage 分组并按路径先后返回。退回轮中某个 Step 时，只累计该 Step 及其祖先中的尝试。每轮给出 `turn_id`、从 1 开始的路径轮次 `ordinal`、UserMessage 节点上的 `provider` 与 `model`，以及 `usage`；模型身份取自该轮节点。返回对象为 `{ session_id, position, turns, total }`，其中 `position` 是本次读取的位置，逐轮 `usage` 与 `total` 均按[尝试计量与完整性](#关闭-step-与-turn)派生。
+
+当前位置为根时，`turns` 为空；路径止于 UserMessage 或 Reserved Step 时仍保留该轮，没有尝试的空和由 `attempts=0` 表达。Sent 与执行者消失后留下的尝试同样参与汇总。
+
+会话库严格打开并校验成功后，身份解析与用量读取只读取 Session 记录、身份键和路径计量投影，不解码对话正文、冻结配置或连接材料。需要打开会话库时，仍按[存储合同](storage.md#身份版本与打开)执行全库解码与校验。
+
+`lattice session usage <SESSION_ID>` 的文本逐轮列出五项计数、尝试数与费用，最后列出合计。单项没有任何尝试报告时显示 `-`，已知零显示 `0`，溢出的小计附 `(overflow)`；只有整体 `kind=partial` 时才在行末附 `(partial)`。费用未知显示 `-`，确切与估算金额的格式遵循[费用估算](llm.md#费用估算)。全局 `--json` 输出上述一个结构化对象；读取成功退出 0，身份解析和错误分类沿用其他会话查询。
 
 ## Turn 的接受与模型步骤
 
