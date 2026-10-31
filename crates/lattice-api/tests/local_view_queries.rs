@@ -98,6 +98,49 @@ async fn usage_identity_resolution_skips_conversation_and_configuration() {
     .await
     .expect("usage identity resolution timed out");
 }
+#[tokio::test]
+async fn session_prefix_resolution_reads_only_matching_identities() {
+    use lattice_api::ApiError;
+    let state = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let layout = StateLayout::in_state_root(state.path());
+    let store = std::sync::Arc::new(SessionStore::create(&layout).unwrap());
+    let sibling = SessionId::parse("5e550000000000000000000000000002").unwrap();
+    let other = SessionId::parse("ffff0000000000000000000000000001").unwrap();
+    for (n, sid) in [session_id(), sibling, other].into_iter().enumerate() {
+        let tid = TurnId::parse(&format!("00000000-0000-4000-8000-00000000000{}", n + 1)).unwrap();
+        seed_session(&store, project.path(), sid, tid);
+    }
+    let api = lattice_api::SessionApi::from_store(store);
+    let resolve = |input: &str| {
+        let api = api.clone();
+        let input = input.to_owned();
+        async move {
+            api.resolve_session(input)
+                .await
+                .map(|record| record.session_id)
+        }
+    };
+    let full = sibling.to_string();
+    assert_eq!(resolve(&format!(" {full} ")).await.unwrap(), sibling);
+    assert_eq!(resolve("ffff").await.unwrap(), other);
+    match resolve("5e55").await {
+        Err(ApiError::BadRequest(message)) => {
+            assert!(message.contains(&session_id().to_string()), "{message}");
+            assert!(message.contains(&full), "{message}");
+            assert!(!message.contains(&other.to_string()), "{message}");
+        }
+        result => panic!("expected ambiguity, got {result:?}"),
+    }
+    assert!(matches!(resolve("5e56").await, Err(ApiError::NotFound(_))));
+    assert!(matches!(resolve("0000").await, Err(ApiError::NotFound(_))));
+    assert!(matches!(resolve("5e5").await, Err(ApiError::BadRequest(_))));
+    assert!(matches!(resolve("  ").await, Err(ApiError::BadRequest(_))));
+    assert_eq!(
+        api.usage("ffff".into()).await.unwrap(),
+        api.usage(other.to_string()).await.unwrap()
+    );
+}
 async fn ready(client: &LocalClient) {
     tokio::time::timeout(Duration::from_secs(10), async {
         while client.status().await.is_err() {

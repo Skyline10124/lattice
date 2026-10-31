@@ -172,14 +172,18 @@ impl SessionApi {
     }
 }
 
-/// 用量查询在同一快照解析身份；只匹配身份键，精确输入只读 Session 记录。
+/// 歧义诊断最多列出的会话数。
+const AMBIGUOUS_LIMIT: usize = 5;
+
+/// 精确身份优先；否则在同一读事务里按前缀做一次范围读取。两条路径都只读身份键，不解码会话记录。
 fn resolve_session_id(read: &SessionRead, prefix: &str) -> Result<SessionId> {
     let prefix = prefix.trim();
     if prefix.is_empty() {
         return Err(ApiError::BadRequest("session ID must not be empty".into()));
     }
+    // 完整身份按规范形式只做键查找；同长度的其他键不可能以它为前缀。
     if let Ok(id) = SessionId::parse(prefix)
-        && read.find_session(id)?.is_some()
+        && read.session_ids_with_prefix(&id.to_string(), 1)? == [id]
     {
         return Ok(id);
     }
@@ -188,24 +192,13 @@ fn resolve_session_id(read: &SessionRead, prefix: &str) -> Result<SessionId> {
             "session prefix requires at least four characters".into(),
         ));
     }
-    let mut after = None;
-    let mut matches = Vec::new();
-    loop {
-        let page = read.session_ids(after, 256)?;
-        for id in page.items {
-            if id.to_string().starts_with(prefix) && matches.len() < 5 {
-                matches.push(id);
-            }
-        }
-        let Some(next) = page.next else {
-            break;
-        };
-        after = Some(next);
-    }
-    match matches.as_slice() {
+    match read
+        .session_ids_with_prefix(prefix, AMBIGUOUS_LIMIT)?
+        .as_slice()
+    {
         [] => Err(ApiError::NotFound(prefix.into())),
         [id] => Ok(*id),
-        _ => Err(ApiError::BadRequest(format!(
+        matches => Err(ApiError::BadRequest(format!(
             "ambiguous session prefix: {}; use more characters",
             matches
                 .iter()
@@ -216,54 +209,8 @@ fn resolve_session_id(read: &SessionRead, prefix: &str) -> Result<SessionId> {
     }
 }
 
-/// 精确身份优先；同一读事务分页查全，歧义诊断最多五项。
 fn resolve_session(read: &SessionRead, prefix: &str) -> Result<SessionRecord> {
-    let prefix = prefix.trim();
-    if prefix.is_empty() {
-        return Err(ApiError::BadRequest("session ID must not be empty".into()));
-    }
-    if let Ok(id) = SessionId::parse(prefix) {
-        match read.session(id) {
-            Ok(record) => return Ok(record),
-            Err(StoreError::NotFound { .. }) => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    if prefix.len() < 4 {
-        return Err(ApiError::BadRequest(
-            "session prefix requires at least four characters".into(),
-        ));
-    }
-    let mut after = None;
-    let mut matches = Vec::new();
-    let mut count = 0;
-    loop {
-        let page = read.list(after, 256)?;
-        for row in page.items {
-            if row.session_id.to_string().starts_with(prefix) {
-                count += 1;
-                if matches.len() < 5 {
-                    matches.push(row.session_id);
-                }
-            }
-        }
-        let Some(next) = page.next else {
-            break;
-        };
-        after = Some(next);
-    }
-    match count {
-        0 => Err(ApiError::NotFound(prefix.into())),
-        1 => Ok(read.session(matches[0])?),
-        _ => Err(ApiError::BadRequest(format!(
-            "ambiguous session prefix: {}; use more characters",
-            matches
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))),
-    }
+    Ok(read.session(resolve_session_id(read, prefix)?)?)
 }
 
 #[cfg(test)]
