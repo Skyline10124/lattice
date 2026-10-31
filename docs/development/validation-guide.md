@@ -65,6 +65,33 @@ lattice --json session send "继续检查测试入口。" --session "$SESSION_ID
 
 顶层 `lattice run` 的参数与 `session send` 相同。已有 Session 默认使用最后接受的 profile 副本，退回历史节点或根节点 `0` 后仍可直接提交。`--agent` 会重新读取源配置并重建副本，选择同名 agent 也会刷新；未被接受的提交不会改变副本。
 
+`--model` 与 `--effort` 随这次提交交给后台，在接受时写入副本。新会话可用 `--model` 覆盖或补足 profile 的模型：
+
+```sh
+lattice --json run "$PROMPT" --agent reader \
+  --model anthropic/claude-sonnet-4-6 --effort high
+```
+
+从这次回执保存新的 SessionId 后，可对已有会话选择模型与档位；之后不带选择则继承最后接受的值：
+
+```sh
+SESSION_ID="替换为要继续的会话 ID"
+lattice --json session send "检查测试入口。" --session "$SESSION_ID" \
+  --model anthropic/claude-sonnet-4-6 --effort high
+lattice --json run "继续。" --session "$SESSION_ID"
+lattice --json run "重新读取 reader 配置。" --session "$SESSION_ID" --agent reader
+```
+
+档位名只有 `off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`；省略表示继承，`--effort off` 明确关闭推理，要求该模型支持。不选档位时产品不发推理参数，由 provider 用默认值。`gpt-6-luna` 这类模型在 Chat Completions 上带工具时，这个默认值会被拒绝（HTTP 400），要显式选 `--effort off`，或在 profile 里写 `effort = "off"`。前端只检查名字与模型引用写法，后台确认 provider、凭据及档位是否可用。模型引用在第一个 `/` 处分开，后续 `/` 属于模型名。换模型而未指定档位时，当前档位不支持就尝试 profile 默认档位，默认也不支持则不发推理参数；显式选择不支持的档位直接拒绝。完整规则见[会话的 profile 副本](../architecture/session.md#会话的-profile-副本)。
+
+例如，若目标模型的候选档位不含 `max`，以下请求退出 2，既有副本和会话树保持原样，provider 不会收到请求：
+
+```sh
+lattice --json run "测试档位拒绝。" --session "$SESSION_ID" --effort max
+```
+
+选择只写入会话副本，不回写源 profile；已经接受的提交即使后续 provider 请求失败，选择仍保留。显式 `--agent` 重建时不沿用旧覆盖，同次提交仍可另选模型和档位。
+
 | 提交回复 | 下一步 |
 | --- | --- |
 | 已确认接受 | 继续观察，或断开后按 TurnId 查询 |
@@ -182,7 +209,7 @@ stop 先关闭新准入，再等待已接管工作及必要收尾；收到回执
 
 `session usage --json` 的合计字段由 `total` 改为 `path_total`，新增 `session_total`，后者包含 rewind 后留存的所有分支；逐轮明细仍只列当前路径。
 
-新尝试按[费用估算](../architecture/llm.md#费用估算)保存确切或估算金额，未知费用仍为 null；已有记录中的未知费用不回填，旧尝试不补 `usage_kind`。公开 IPC 的提交新增可选 `model` 和 `effort`，会话头新增 `model`、`provider`、`effort` 与 `profile_default_effort`，UserMessage 保存本轮生效档位。Local IPC 标识由 `LTLOCAL:` 递增为 `LTLOCAL;`，会话库格式由 6 升为 7；升级前先用旧二进制正常停止后台，再由用户决定存档或删除旧库，不提供自动迁移。CLI 的模型与档位选项另行交付。
+新尝试按[费用估算](../architecture/llm.md#费用估算)保存确切或估算金额，未知费用仍为 null；已有记录中的未知费用不回填，旧尝试不补 `usage_kind`。公开 IPC 的提交提供可选 `model` 和 `effort`，CLI 对应 `--model` 与 `--effort`；会话头提供 `model`、`provider`、`effort` 与 `profile_default_effort`，UserMessage 保存本轮生效档位。模型候选新增有序 `supported_efforts` 数组，无可选档位为 `[]`；文本 models 表增加 `EFFORTS` 列，空列表显示 `-`。Local IPC 标识沿用 `LTLOCAL;`，会话库格式仍为 7；从 `LTLOCAL:` 与格式 6 升级前先用旧二进制正常停止后台，再由用户决定存档或删除旧库，不提供自动迁移。
 
 ### 退出码与失败后的动作
 
@@ -200,9 +227,12 @@ stop 先关闭新准入，再等待已接管工作及必要收尾；收到回执
 
 ```sh
 lattice models --provider anthropic
+lattice --json models --provider anthropic
 lattice models refresh
 lattice --json models refresh
 ```
+
+模型列表包含限制、价格、凭据状态与可选档位；空档位不表示关闭推理，也不妨碍按名字请求未知元数据或 deprecated 的模型。`--auth` 只保留凭据就绪的候选，模型和档位最终由后台在接受提交时校验。
 
 后台在本地元数据缓存新于 24 小时时不重复拉取；缓存缺失或更旧时在启动时拉取，成功后每 24 小时再拉取。拉取失败从 1 分钟起倍增重试，上限 1 小时。用户级 `~/.lattice/providers.toml` 的 `[metadata] auto_refresh = false` 可关闭自动刷新；后台每次自动触发时读取当前设置，修改后无需重启；配置无效时本次自动刷新算作失败，按上述退避重试。`refresh` 不受开关影响，不接受列表过滤参数 `--provider` 或 `--auth`；`chatgpt` 的账号模型列表尚未接入。
 

@@ -132,7 +132,7 @@ fn refresh_without_tls_roots_reports_the_reason_and_preserves_cached_candidates(
 fn models_display_merged_metadata_hide_deprecated_and_warn_missing_catalog() {
     let spec = ScenarioSpec::fast("models-metadata-display");
     let world = ScenarioWorld::new(&spec.name).unwrap();
-    world.budget(&spec);
+    let budget = world.budget(&spec);
     let directory = world.home().join(".lattice");
     std::fs::create_dir_all(directory.join("cache")).unwrap();
     std::fs::write(
@@ -153,13 +153,35 @@ base_url = "http://localhost:9/v1"
 auth = "none"
 catalog = "absent-entry"
 [providers.empty.models.listed]
+[providers.openai]
+catalog = "sort-catalog"
+[providers.openai.models.sort-z]
+[providers.openai.models.sort-a]
+[providers.anthropic.models.sort-a]
+[providers.xai.models.sort-a]
+[providers.zzz]
+protocol = "chat-completions"
+base_url = "http://localhost:9/v1"
+auth = "none"
+[providers.zzz.models.sort-a]
+[providers.aaa]
+protocol = "chat-completions"
+base_url = "http://localhost:9/v1"
+auth = "none"
+catalog = "sort-catalog"
+[providers.aaa.models.sort-z]
+[providers.aaa.models.sort-a]
 "#,
     )
     .unwrap();
     std::fs::write(directory.join("cache/models.json"), serde_json::to_vec(&json!({
         "arbitrary-entry":{"models":{
-            "current":{"id":"current","name":"Current","limit":{"context":100,"output":200},"cost":{"input":1.2,"output":3.4,"cache_read":0.1,"cache_write":0.2}},
-            "retired":{"id":"retired","status":"deprecated"}
+            "current":{"id":"current","name":"Current","limit":{"context":100,"output":200},"cost":{"input":1.2,"output":3.4,"cache_read":0.1,"cache_write":0.2},"reasoning_options":[{"type":"effort","values":["high","none"]}]},
+            "retired":{"id":"retired","status":"deprecated","reasoning_options":[{"type":"effort","values":["none","low"]}]}
+        }},
+        "sort-catalog":{"models":{
+            "sort-a":{"id":"sort-a","name":"Z Model"},
+            "sort-z":{"id":"sort-z","name":"A Model"}
         }}
     })).unwrap()).unwrap();
     let mut evidence = lattice_system_harness::ScenarioEvidence::new(
@@ -180,6 +202,7 @@ catalog = "absent-entry"
             .expect("merged: current model listed");
         assert_eq!(current["context"], 999, "merged: handwritten context wins");
         assert_eq!(current["output"], 200, "merged: output from metadata");
+        assert_eq!(current["supported_efforts"], json!(["off", "high"]));
         assert_eq!(
             current["cost"],
             json!({"input":1.2,"output":3.4,"cache_read":0.1,"cache_write":0.2}),
@@ -196,14 +219,14 @@ catalog = "absent-entry"
         assert_eq!(
             text.lines().next(),
             Some(
-                "MODEL\tCONTEXT\tOUTPUT\tPRICE ($/M tokens: input/output/cache-read/cache-write)\tAUTH"
+                "MODEL\tCONTEXT\tOUTPUT\tEFFORTS\tPRICE ($/M tokens: input/output/cache-read/cache-write)\tAUTH"
             ),
             "merged text: price columns"
         );
         assert_eq!(
             text.lines()
                 .find(|line| line.starts_with("local/current\t")),
-            Some("local/current\t999\t200\t1.2/3.4/0.1/0.2\tready"),
+            Some("local/current\t999\t200\toff,high\t1.2/3.4/0.1/0.2\tready"),
             "merged text: model limits, prices and credential status"
         );
         assert!(
@@ -214,6 +237,7 @@ catalog = "absent-entry"
         evidence.record_command("models missing catalog", &empty);
         assert!(empty.is_clean_exit(0), "missing catalog query failed");
         let empty: Value = serde_json::from_slice(&empty.stdout).unwrap();
+        assert_eq!(empty["models"][0]["supported_efforts"], json!([]));
         assert!(
             empty["warnings"]
                 .as_array()
@@ -224,6 +248,92 @@ catalog = "absent-entry"
                     .is_some_and(|message| message.contains("no metadata"))),
             "no metadata: missing catalog warning absent, got {empty}"
         );
+        let empty_text = cli(&world, &spec, &["models", "--provider", "empty"]);
+        evidence.record_command("empty model efforts text", &empty_text);
+        assert!(empty_text.is_clean_exit(0));
+        assert!(
+            String::from_utf8_lossy(&empty_text.stdout)
+                .lines()
+                .any(|line| line == "empty/listed\t-\t-\t-\t-/-/-/-\tready")
+        );
+        let ordered = cli(&world, &spec, &["--json", "models"]);
+        evidence.record_command("candidate provider and model order", &ordered);
+        assert!(ordered.is_clean_exit(0));
+        let ordered: Value = serde_json::from_slice(&ordered.stdout).unwrap();
+        let names: Vec<_> = ordered["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|model| model["model"].as_str().unwrap().starts_with("sort-"))
+            .map(|model| {
+                format!(
+                    "{}/{}",
+                    model["provider"].as_str().unwrap(),
+                    model["model"].as_str().unwrap()
+                )
+            })
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "openai/sort-a",
+                "openai/sort-z",
+                "anthropic/sort-a",
+                "xai/sort-a",
+                "aaa/sort-a",
+                "aaa/sort-z",
+                "zzz/sort-a"
+            ]
+        );
+        for (target, model, efforts) in [
+            ("local/retired", "retired", json!(["off", "low"])),
+            ("local/org/unknown", "org/unknown", json!([])),
+            ("empty/unknown", "unknown", json!([])),
+        ] {
+            let reply = support::ipc(
+                &world,
+                budget.cap_timeout(spec.step_timeout()),
+                json!({"operation":"models", "target":target}),
+            );
+            evidence
+                .record_json("exact model metadata", &reply)
+                .unwrap();
+            assert_eq!(reply["response"], "models");
+            let models = reply["value"]["models"].as_array().unwrap();
+            assert_eq!(models.len(), 1);
+            assert_eq!(models[0]["model"], model);
+            assert_eq!(models[0]["supported_efforts"], efforts);
+            assert_eq!(models[0]["credential_status"], "ready");
+            if model == "org/unknown" {
+                for field in ["name", "context", "output", "cost"] {
+                    assert!(models[0][field].is_null());
+                }
+            }
+            if target == "empty/unknown" {
+                assert!(
+                    reply["value"]["warnings"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|warning| warning["message"]
+                            .as_str()
+                            .unwrap()
+                            .contains("no metadata"))
+                );
+            }
+        }
+        for query in [
+            json!({"operation":"models", "provider":"local", "target":"local/current"}),
+            json!({"operation":"models", "target":"missing/model"}),
+            json!({"operation":"models", "target":"invalid"}),
+        ] {
+            let reply = support::ipc(&world, budget.cap_timeout(spec.step_timeout()), query);
+            evidence
+                .record_json("invalid exact model query", &reply)
+                .unwrap();
+            assert_eq!(reply["response"], "error");
+            assert_eq!(reply["value"]["kind"], "bad_request");
+        }
     }));
     finish_recorded(evidence, result);
 }

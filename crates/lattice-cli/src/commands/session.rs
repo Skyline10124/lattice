@@ -52,6 +52,19 @@ pub struct SendArgs {
     /// Agent to use. Required for a new session; selecting it rebuilds the session profile copy.
     #[arg(long, required_unless_present = "session_id")]
     pub agent: Option<String>,
+    #[arg(long, value_parser = parse_model, help = "Model reference <provider>/<model>; omit to inherit. Availability is checked by the backend.")]
+    pub model: Option<String>,
+    #[arg(
+        long,
+        help = "Reasoning effort: off, minimal, low, medium, high, xhigh, max. Omit to inherit; off explicitly disables reasoning."
+    )]
+    pub effort: Option<lattice_api::Effort>,
+}
+
+fn parse_model(value: &str) -> Result<String, String> {
+    lattice_api::ModelRef::parse(value)
+        .map(|_| value.to_owned())
+        .map_err(|error| error.to_string())
 }
 
 pub(crate) fn parse_node_id(value: &str) -> Result<lattice_api::local::NodeId, String> {

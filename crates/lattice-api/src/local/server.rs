@@ -659,26 +659,30 @@ impl Backend {
                 })
                 .await
             }
-            Request::Models { provider } => {
+            Request::Models { provider, target } => {
                 let directory = super::auth::directory(self.home.as_deref())?;
                 blocking(move || {
                     let auth = lattice_llm::auth::AuthStore::new(directory.clone());
-                    lattice_llm::model_candidates(&directory, provider.as_deref())
-                        .map(|mut candidates| {
-                            for warning in &mut candidates.warnings {
-                                warning.message =
-                                    crate::ConfigRejection::new(&warning.message, Some(&auth))
-                                        .to_string();
-                            }
-                            Response::Models(candidates)
-                        })
-                        .map_err(|error| {
-                            crate::ApiError::Configuration(crate::ConfigRejection::new(
-                                &error.to_string(),
-                                Some(&auth),
-                            ))
-                            .into()
-                        })
+                    lattice_llm::model_candidates(
+                        &directory,
+                        provider.as_deref(),
+                        target.as_deref(),
+                    )
+                    .map(|mut candidates| {
+                        for warning in &mut candidates.warnings {
+                            warning.message =
+                                crate::ConfigRejection::new(&warning.message, Some(&auth))
+                                    .to_string();
+                        }
+                        Response::Models(candidates)
+                    })
+                    .map_err(|error| {
+                        crate::ApiError::Configuration(crate::ConfigRejection::new(
+                            &error.to_string(),
+                            Some(&auth),
+                        ))
+                        .into()
+                    })
                 })
                 .await
             }

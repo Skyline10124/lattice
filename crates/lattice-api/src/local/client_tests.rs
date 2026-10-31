@@ -14,6 +14,68 @@ struct Peer {
     listener: UnixListener,
     client: LocalClient,
 }
+
+#[tokio::test]
+async fn models_queries_preserve_exact_targets_capabilities_warnings_and_errors() {
+    use serde_json::json;
+    let old: Request =
+        serde_json::from_value(json!({"operation":"models","provider":"local"})).unwrap();
+    assert!(
+        matches!(old, Request::Models { provider: Some(provider), target: None } if provider == "local")
+    );
+    for target in [None, Some("local/org/model")] {
+        let peer = Peer::new();
+        let efforts = if target.is_some() {
+            json!([])
+        } else {
+            json!(["off", "minimal", "low", "medium", "high", "xhigh", "max"])
+        };
+        let expected: crate::ModelCandidates = serde_json::from_value(json!({
+            "models":[{"provider":"local", "model":"org/model", "name":null, "context":null,
+                "output":null, "cost":null, "credential_status":"missing", "supported_efforts":efforts}],
+            "warnings":[{"provider":"local", "message":"catalog has no metadata"}]
+        })).unwrap();
+        let query = async {
+            match target {
+                Some(target) => peer.client.model(target.into()).await,
+                None => peer.client.models(Some("local".into())).await,
+            }
+        };
+        let server = async {
+            let (mut wire, request) = peer.request().await;
+            match request {
+                Request::Models {
+                    provider,
+                    target: requested,
+                } => {
+                    assert_eq!(provider.as_deref(), target.is_none().then_some("local"));
+                    assert_eq!(requested.as_deref(), target);
+                }
+                _ => panic!("expected models query"),
+            }
+            wire.reply(Response::Models(expected.clone())).await;
+        };
+        let (actual, ()) = within(async { tokio::join!(query, server) }).await;
+        assert_eq!(actual.unwrap(), expected);
+    }
+    let peer = Peer::new();
+    let server = async {
+        let (mut wire, request) = peer.request().await;
+        assert!(
+            matches!(request, Request::Models { provider: None, target: Some(target) } if target == "missing/model")
+        );
+        wire.reply(Response::Error(LocalError::new(
+            LocalErrorKind::BadRequest,
+            "provider is not registered",
+        )))
+        .await;
+    };
+    let (result, ()) =
+        within(async { tokio::join!(peer.client.model("missing/model".into()), server) }).await;
+    let error = result.unwrap_err();
+    assert_eq!(error.kind, LocalErrorKind::BadRequest);
+    assert_eq!(error.message, "provider is not registered");
+}
 struct Wire {
     socket: UnixStream,
     writer: ipc::ResponseWriter,

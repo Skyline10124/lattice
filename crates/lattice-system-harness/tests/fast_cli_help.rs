@@ -97,6 +97,38 @@ fn fast_cli_help_lists_public_commands() {
     for (args, expected) in [
         (vec!["session", "--help"], vec!["usage"]),
         (
+            vec!["run", "--help"],
+            vec![
+                "--model",
+                "--effort",
+                "<provider>/<model>",
+                "inherit",
+                "off",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+            ],
+        ),
+        (
+            vec!["session", "send", "--help"],
+            vec![
+                "--model",
+                "--effort",
+                "<provider>/<model>",
+                "inherit",
+                "off",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+            ],
+        ),
+        (
             vec!["session", "usage", "--help"],
             vec![
                 "SESSION_ID",
@@ -143,6 +175,46 @@ fn fast_cli_help_lists_public_commands() {
         });
         finalize_with_failure_artifacts(&world, &spec.name, &args.join(" "), &output, &[], result)
             .unwrap_or_else(|report| panic!("usage requires a session ID\n{report}"));
+    }
+    for command in [vec!["run"], vec!["session", "send"]] {
+        for json in [false, true] {
+            for (flag, value) in [("--model", "invalid"), ("--effort", "none")] {
+                let mut args = Vec::new();
+                if json {
+                    args.push("--json");
+                }
+                args.extend(command.clone());
+                args.extend(["hello", "--agent", "reader", flag, value]);
+                let output = driver
+                    .run(
+                        &world,
+                        &LatticeCommand {
+                            args: args.iter().map(|arg| (*arg).into()).collect(),
+                            timeout: Some(spec.step_timeout()),
+                        },
+                    )
+                    .unwrap();
+                let result = assert_exit_code(&output, 2).and_then(|_| {
+                    if json {
+                        assert_stdout_contains_all(
+                            &output,
+                            &["\"type\":\"error\"", "\"kind\":\"bad_request\""],
+                        )
+                    } else {
+                        assert_stderr_contains(&output, "invalid value")
+                    }
+                });
+                finalize_with_failure_artifacts(
+                    &world,
+                    &spec.name,
+                    &args.join(" "),
+                    &output,
+                    &[],
+                    result,
+                )
+                .unwrap();
+            }
+        }
     }
 }
 

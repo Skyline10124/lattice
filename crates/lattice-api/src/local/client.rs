@@ -100,7 +100,27 @@ impl LocalClient {
         }
     }
     pub async fn models(&self, provider: Option<String>) -> Result<ModelCandidates> {
-        match self.call(Request::Models { provider }).await? {
+        match self
+            .call(Request::Models {
+                provider,
+                target: None,
+            })
+            .await?
+        {
+            Response::Models(models) => Ok(models),
+            _ => Err(protocol()),
+        }
+    }
+
+    /// 精确读取指定模型，包括未列出的模型；结果保留元数据与凭据提示。
+    pub async fn model(&self, target: String) -> Result<ModelCandidates> {
+        match self
+            .call(Request::Models {
+                provider: None,
+                target: Some(target),
+            })
+            .await?
+        {
             Response::Models(models) => Ok(models),
             _ => Err(protocol()),
         }

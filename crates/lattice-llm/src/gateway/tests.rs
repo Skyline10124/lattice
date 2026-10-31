@@ -66,6 +66,49 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
             .await
             .is_err()
     );
+    std::fs::write(&path, format!("{base}[providers.test.features]\nthinking_toggle='thinking-type'\n[providers.test.models.budget.features]\nthinking_budget='thinking-budget'\n[providers.test.models.disabled.features]\nthinking_toggle='none'\n[providers.test.models.handwritten]\neffort=['high','off','high','low']\n")).unwrap();
+    std::fs::create_dir_all(directory.path().join("cache")).unwrap();
+    std::fs::write(directory.path().join("cache/models.json"), serde_json::to_vec(&serde_json::json!({"test-capabilities":{"models":{
+        "toggle":{"id":"toggle","reasoning_options":[{"type":"toggle"}]},
+        "disabled":{"id":"disabled","reasoning_options":[{"type":"toggle"}]},
+        "budget":{"id":"budget","limit":{"output":8192},"reasoning_options":[{"type":"budget_tokens"}]},
+        "unavailable-budget":{"id":"unavailable-budget","reasoning_options":[{"type":"budget_tokens"}]},
+        "always":{"id":"always","reasoning":true}
+    }}})).unwrap()).unwrap();
+    let source = std::fs::read_to_string(&path).unwrap().replace(
+        "[providers.test.features]",
+        "catalog='test-capabilities'\n[providers.test.features]",
+    );
+    std::fs::write(&path, source).unwrap();
+    for (model, expected) in [
+        ("toggle", vec![Effort::Off, Effort::High]),
+        ("disabled", vec![]),
+        ("budget", vec![Effort::Low, Effort::Medium]),
+        ("unavailable-budget", vec![]),
+        ("always", vec![]),
+        ("handwritten", vec![Effort::Off, Effort::Low, Effort::High]),
+        ("org/unknown", vec![]),
+    ] {
+        assert_eq!(
+            turn.supported_efforts(&ModelTarget::new("test", model))
+                .await
+                .unwrap(),
+            expected,
+            "gateway: {model}"
+        );
+        let candidates =
+            crate::model_candidates(directory.path(), None, Some(&format!("test/{model}")))
+                .unwrap();
+        assert_eq!(candidates.models.len(), 1);
+        assert_eq!(
+            candidates.models[0].supported_efforts, expected,
+            "candidate: {model}"
+        );
+        assert_eq!(
+            candidates.models[0].credential_status,
+            crate::auth::AuthState::Missing
+        );
+    }
 }
 
 fn private_dir() -> tempfile::TempDir {
@@ -1400,7 +1443,7 @@ async fn messages_use_merged_output_limits_at_resolution_and_reload_on_the_next_
             }
         );
         assert_eq!(
-            crate::model_candidates(directory.path(), Some("test"))
+            crate::model_candidates(directory.path(), Some("test"), None)
                 .unwrap()
                 .models[0]
                 .output,
@@ -1705,7 +1748,7 @@ async fn refresh_metadata_uses_startup_roots_and_updates_candidates_and_messages
         format!("[metadata]\nauto_refresh = false\n{provider}catalog = 'refresh-entry'\n"),
     )
     .unwrap();
-    let before = crate::model_candidates(directory.path(), Some("test")).unwrap();
+    let before = crate::model_candidates(directory.path(), Some("test"), None).unwrap();
     assert!(before.models.is_empty());
     let metadata = serde_json::json!({"refresh-entry":{"models":{"model-id":{
         "id":"model-id","limit":{"output":65536}
@@ -1730,7 +1773,7 @@ async fn refresh_metadata_uses_startup_roots_and_updates_candidates_and_messages
         serde_json::from_slice(&std::fs::read(directory.path().join("cache/models.json")).unwrap())
             .unwrap();
     assert_eq!(cached, metadata);
-    let after = crate::model_candidates(directory.path(), Some("test")).unwrap();
+    let after = crate::model_candidates(directory.path(), Some("test"), None).unwrap();
     assert_eq!(after.models.len(), 1);
     assert_eq!(after.models[0].model, "model-id");
     assert_eq!(after.models[0].output, Some(65536));
