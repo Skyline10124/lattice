@@ -6,18 +6,37 @@
 use lattice_conversation::{Protocol, ReplayOrigin};
 
 use crate::protocol::projection::{ProjectionError, request_messages_to_wire};
+use crate::reasoning::ReasoningPlan;
 use crate::reply::{PartDelta, PartKind, ProtocolEvent, StringPatch};
 use crate::types::ChatRequest;
+use lattice_conversation::Effort;
 
 /// 构造 generateContent 请求；模型名由端点路径指定。
 pub fn build_request_json(
     request: &ChatRequest,
+    reasoning: Option<ReasoningPlan>,
     origin: &ReplayOrigin,
 ) -> Result<serde_json::Value, ProjectionError> {
     let projected = request_messages_to_wire(origin, &request.messages)?;
     let mut body = serde_json::json!({
         "contents": projected.messages,
     });
+
+    if let Some(plan) = reasoning {
+        let config = match plan {
+            ReasoningPlan::Effort {
+                effort: Effort::Off,
+                ..
+            }
+            | ReasoningPlan::Toggle { enabled: false } => serde_json::json!({"thinkingBudget":0}),
+            ReasoningPlan::Effort { effort, .. } => {
+                serde_json::json!({"thinkingLevel":effort.as_str()})
+            }
+            ReasoningPlan::Budget { tokens, .. } => serde_json::json!({"thinkingBudget":tokens}),
+            ReasoningPlan::Toggle { enabled: true } => serde_json::json!({"thinkingBudget":-1}),
+        };
+        body["generationConfig"] = serde_json::json!({"thinkingConfig":config});
+    }
 
     if let Some(system) = projected.system {
         body["systemInstruction"] = serde_json::json!({

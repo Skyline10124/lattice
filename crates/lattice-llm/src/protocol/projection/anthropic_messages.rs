@@ -17,8 +17,9 @@
 //! 并在同一 provider 的请求中原位回放。缺少回放状态的 `thinking` 部件
 //! 无法写回 Anthropic 消息，投影器不会补造签名。
 //!
-//! `signature` 仅属于受支持的 `thinking` 块。协议无法表达 `text` 部件的回放状态，
-//! 因此写入时拒绝携带回放状态的 `text` 部件，不写出读回时会被静默丢弃的字段。
+//! `redacted_thinking` 以空 Reasoning 和带 `redacted:` 标记的状态保存 data；
+//! 空的普通 thinking 仍保存原 signature，同来源时依标记恢复原块。
+//! 协议无法表达 `text` 部件的回放状态，因此写入时拒绝该组合。
 //!
 //! 组装遵循 ADR 0005 §10 的协议限额；超限拒绝整个响应，不返回部分消息。
 
@@ -29,6 +30,7 @@ use lattice_conversation::{
 use serde_json::{Value, json};
 
 use super::{ProjectionError, ToolResultClosure};
+use crate::protocol::anthropic_messages::{REDACTED_PREFIX, redacted_replay_state};
 use crate::reply::{PartDelta, PartKind, StringPatch};
 
 fn malformed(detail: impl Into<String>) -> ProjectionError {
@@ -54,7 +56,7 @@ pub fn wire_to_native(
             .ok_or_else(|| malformed("content block missing type"))?;
         let kind = match block_type {
             "text" => PartKind::Text,
-            "thinking" => PartKind::Reasoning,
+            "thinking" | "redacted_thinking" => PartKind::Reasoning,
             "tool_use" => PartKind::ToolCall,
             other => {
                 return Err(ProjectionError::Protocol(
@@ -74,20 +76,30 @@ pub fn wire_to_native(
                 })?;
             }
             PartKind::Reasoning => {
-                let text = block["thinking"]
-                    .as_str()
-                    .ok_or_else(|| malformed("thinking block missing thinking"))?;
-                reply.push(PartDelta::Reasoning {
-                    index,
-                    delta: text.into(),
-                })?;
-                match block.get("signature") {
-                    Some(Value::String(signature)) => reply.push(PartDelta::ReplayState {
+                if block_type == "redacted_thinking" {
+                    let data = block["data"]
+                        .as_str()
+                        .ok_or_else(|| malformed("redacted_thinking block missing string data"))?;
+                    reply.push(PartDelta::ReplayState {
                         index,
-                        patch: StringPatch::Set(signature.clone()),
-                    })?,
-                    Some(Value::Null) | None => {}
-                    _ => return Err(malformed("thinking signature is not a string")),
+                        patch: StringPatch::Set(redacted_replay_state(data)),
+                    })?;
+                } else {
+                    let text = block["thinking"]
+                        .as_str()
+                        .ok_or_else(|| malformed("thinking block missing thinking"))?;
+                    reply.push(PartDelta::Reasoning {
+                        index,
+                        delta: text.into(),
+                    })?;
+                    match block.get("signature") {
+                        Some(Value::String(signature)) => reply.push(PartDelta::ReplayState {
+                            index,
+                            patch: StringPatch::Set(signature.clone()),
+                        })?,
+                        Some(Value::Null) | None => {}
+                        _ => return Err(malformed("thinking signature is not a string")),
+                    }
                 }
             }
             PartKind::ToolCall => {
@@ -145,6 +157,16 @@ pub fn native_to_wire<S: ToolCallState>(
                             provider: Protocol::Messages,
                             part_ordinal: ordinal,
                         })?;
+                if let Some(data) = state.as_str().strip_prefix(REDACTED_PREFIX) {
+                    if !text.is_empty() {
+                        return Err(ProjectionError::UnsupportedPart {
+                            provider: Protocol::Messages,
+                            part_ordinal: ordinal,
+                        });
+                    }
+                    blocks.push(json!({"type":"redacted_thinking","data":data}));
+                    continue;
+                }
                 blocks.push(json!({
                     "type": "thinking",
                     "thinking": text,

@@ -110,12 +110,9 @@ impl ReplayOrigin {
     }
 }
 
-/// A part-local opaque provider replay state (signature, thought state, or
-/// equivalent protocol-required token).
-///
-/// The value is preserved verbatim for same-provider replay and never
-/// interpreted, synthesized, or projected across providers. Bounded to
-/// [`MAX_OPAQUE_REPLAY_STATE_BYTES`].
+/// 逐片段保存签名、加密推理等协议回放材料，只有产生它的协议 codec 解释其编码。
+/// 其他层按不透明字符串保存，同完整来源回放，不跨来源投影或补造。
+/// 编码后的长度不超过 [`MAX_OPAQUE_REPLAY_STATE_BYTES`]。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OpaqueProviderState(String);
 
@@ -133,7 +130,7 @@ pub enum OpaqueReplayStateError {
 }
 
 impl OpaqueProviderState {
-    /// Wrap a provider-supplied value verbatim, enforcing the protocol bound.
+    /// 保存协议 codec 给出的状态编码，并核对编码后的长度上限。
     pub fn new(value: impl Into<String>) -> Result<Self, OpaqueReplayStateError> {
         let value = value.into();
         if value.len() > MAX_OPAQUE_REPLAY_STATE_BYTES {
@@ -145,7 +142,7 @@ impl OpaqueProviderState {
         Ok(Self(value))
     }
 
-    /// The verbatim provider-supplied value.
+    /// 原样返回协议 codec 的状态编码。
     pub fn as_str(&self) -> &str {
         &self.0
     }

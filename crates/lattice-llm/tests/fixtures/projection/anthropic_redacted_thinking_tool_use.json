@@ -1,0 +1,12 @@
+{
+  "role": "assistant",
+  "content": [
+    {"type": "thinking", "thinking": "Plan with tools.", "signature": "U2lnbmF0dXJl"},
+    {"type": "redacted_thinking", "data": "UmVkYWN0ZWQgcGF5bG9hZA=="},
+    {"type": "thinking", "thinking": "", "signature": "RW1wdHkgc2lnbmF0dXJl"},
+    {"type": "text", "text": "Checking both."},
+    {"type": "tool_use", "id": "toolu_redacted_1", "name": "get_weather", "input": {"location": "Tokyo"}},
+    {"type": "redacted_thinking", "data": "U2Vjb25kIHJlZGFjdGVkIHBheWxvYWQ="},
+    {"type": "tool_use", "id": "toolu_redacted_2", "name": "get_time", "input": {"timezone": "Asia/Tokyo"}}
+  ]
+}

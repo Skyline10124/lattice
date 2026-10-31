@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 
+use lattice_conversation::Effort;
 use serde::Deserialize;
 
 use crate::protocol::{Features, Protocol};
@@ -35,18 +36,6 @@ impl Auth {
             Protocol::GenerateContent | Protocol::Interactions => Self::XGoogApiKey,
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum Effort {
-    Off,
-    Minimal,
-    Low,
-    Medium,
-    High,
-    Xhigh,
-    Max,
 }
 
 /// 手写价格以美元/百万 token 计；缺失字段保留，供元数据层按字段合并。
