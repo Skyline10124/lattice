@@ -1506,7 +1506,8 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
             assert_eq!(usage["turns"].as_array().unwrap().len(), 1);
             assert_eq!(usage["turns"][0]["turn_id"], tid);
             assert_eq!(usage["turns"][0]["usage"], before["usage"]);
-            assert_eq!(usage["total"], before["usage"]);
+            assert_eq!(usage["path_total"], before["usage"]);
+            assert_eq!(usage["session_total"], before["usage"]);
             assert_eq!(accepted_detail(&world, &spec, tid), before);
             assert_eq!(
                 watch(&world, &spec, sid).received,

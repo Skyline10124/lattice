@@ -2168,16 +2168,22 @@ fn attempts_without_reply_allow_sent_and_stopped_on_reopen() {
         }
         let usage = db.begin_read().unwrap().usage(sid(1)).unwrap();
         assert_eq!(usage.turns.len(), 1);
-        assert_eq!(usage.total.attempts, u64::from(state != "reserved"));
-        assert_eq!(usage.total.input.known, (state == "reserved").then_some(0));
+        assert_eq!(usage.path_total.attempts, u64::from(state != "reserved"));
         assert_eq!(
-            usage.total.cost.known,
+            usage.path_total.input.known,
+            (state == "reserved").then_some(0)
+        );
+        assert_eq!(
+            usage.path_total.cost.known,
             (state == "reserved").then_some(CostEstimate {
                 usd: 0.0,
                 exact: true
             })
         );
-        assert_eq!(usage.total.partial_attempts, u64::from(state != "reserved"));
+        assert_eq!(
+            usage.path_total.partial_attempts,
+            u64::from(state != "reserved")
+        );
         drop(lock);
         drop(db);
         let reopened = SessionStore::open(&layout).unwrap();
@@ -2801,7 +2807,8 @@ fn conversation_retries_and_transaction_reads_survive_reopen() {
     let view = old_read.view(sid(1), 1).unwrap();
     let usage = old_read.usage(sid(1)).unwrap();
     assert_eq!(usage.position, NodeId(2));
-    assert_eq!(usage.total.attempts, 1);
+    assert_eq!(usage.session_total, usage.path_total);
+    assert_eq!(usage.path_total.attempts, 1);
     assert_eq!(view.entries.len(), 2);
     assert!(
         matches!(&view.entries[1], ConversationEntry::Step { retries, .. }
@@ -2818,7 +2825,8 @@ fn conversation_retries_and_transaction_reads_survive_reopen() {
     assert_eq!(old_read.usage(sid(1)).unwrap(), usage);
     let current = db.begin_read().unwrap().usage(sid(1)).unwrap();
     assert_eq!(current.position, NodeId(4));
-    assert_eq!(current.total.attempts, 2);
+    assert_eq!(current.path_total.attempts, 2);
+    assert_eq!(current.session_total, current.path_total);
     assert_eq!(current.turns.len(), 2);
     assert_eq!(
         old_read
@@ -3028,35 +3036,42 @@ fn edit_projection_node(db: &SessionStore, node: NodeId, edit: impl FnOnce(&mut 
 
 #[test]
 fn usage_projection_skips_conversation_and_execution_material() {
-    let (_d, _l, db) = store();
-    let lock = db.try_lock_session(sid(1)).unwrap();
-    db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
-    db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
-        .unwrap();
-    db.close_step(&lock, CloseStep::Finish(reply(key(tid(1), 0, 0), 0)), now())
-        .unwrap();
-    let expected = db.begin_read().unwrap().usage(sid(1)).unwrap();
-    assert_eq!(expected.total.attempts, 1);
-    for (node, pointers) in [
-        (NodeId(1), &["/message", "/config_digest", "/limits"][..]),
-        (
-            NodeId(2),
-            &[
-                "/reply",
-                "/slots",
-                "/progress",
-                "/attempts/0/origin",
-                "/attempts/0/progress",
-            ][..],
-        ),
-    ] {
-        edit_projection_node(&db, node, |wire| {
-            for pointer in pointers {
-                *wire.pointer_mut(pointer).unwrap() = json!(false);
-            }
-        });
+    for position in [NodeId(2), NodeId(0)] {
+        let (_d, _l, db) = store();
+        let lock = db.try_lock_session(sid(1)).unwrap();
+        db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+        db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
+            .unwrap();
+        db.close_step(&lock, CloseStep::Finish(reply(key(tid(1), 0, 0), 0)), now())
+            .unwrap();
+        db.rewind(&lock, position, now()).unwrap();
+        let expected = db.begin_read().unwrap().usage(sid(1)).unwrap();
+        assert_eq!(
+            expected.path_total.attempts,
+            u64::from(position != NodeId(0))
+        );
+        assert_eq!(expected.session_total.attempts, 1);
+        for (node, pointers) in [
+            (NodeId(1), &["/message", "/config_digest", "/limits"][..]),
+            (
+                NodeId(2),
+                &[
+                    "/reply",
+                    "/slots",
+                    "/progress",
+                    "/attempts/0/origin",
+                    "/attempts/0/progress",
+                ][..],
+            ),
+        ] {
+            edit_projection_node(&db, node, |wire| {
+                for pointer in pointers {
+                    *wire.pointer_mut(pointer).unwrap() = json!(false);
+                }
+            });
+        }
+        assert_eq!(db.begin_read().unwrap().usage(sid(1)).unwrap(), expected);
     }
-    assert_eq!(db.begin_read().unwrap().usage(sid(1)).unwrap(), expected);
 }
 
 #[test]

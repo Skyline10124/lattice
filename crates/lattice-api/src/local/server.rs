@@ -689,9 +689,9 @@ impl Backend {
             Request::Log { session_id } => Ok(Response::Log(
                 self.open().await?.read(move |r| r.log(session_id)).await?,
             )),
-            Request::Usage { session_id } => {
-                Ok(Response::Usage(self.open().await?.usage(session_id).await?))
-            }
+            Request::Usage { session_id } => Ok(Response::Usage(Box::new(
+                self.open().await?.usage(session_id).await?,
+            ))),
             Request::Turn { turn_id } => Ok(Response::Turn(self.lookup(turn_id).await?)),
             Request::Head { session_id } => {
                 Ok(Response::Head(self.session_head(session_id).await?))

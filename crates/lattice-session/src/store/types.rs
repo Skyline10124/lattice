@@ -488,7 +488,8 @@ pub struct SessionUsage {
     pub session_id: SessionId,
     pub position: NodeId,
     pub turns: Vec<TurnUsageRow>,
-    pub total: UsageSummary,
+    pub path_total: UsageSummary,
+    pub session_total: UsageSummary,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

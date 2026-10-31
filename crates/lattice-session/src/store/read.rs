@@ -413,7 +413,7 @@ fn matches(filter: &AuditFilter, project: &ProjectStoreKey, row: &OperatorInvoca
 }
 
 impl SessionRead {
-    /// 同一读事务固定当前位置并汇总当前路径上的尝试。
+    /// 同一读事务固定当前位置，汇总当前路径与会话全部节点中的尝试。
     pub fn usage(&self, session_id: SessionId) -> Result<SessionUsage> {
         let session = self
             .find_session(session_id)?
@@ -433,11 +433,32 @@ impl SessionRead {
             path.push(node);
         }
         path.reverse();
-        let total = UsageSummary::from_attempts(
+        let path_total = UsageSummary::from_attempts(
             path.iter()
                 .filter(|node| matches!(node.kind, CountedNodeKind::Step))
                 .flat_map(|node| node.attempts.iter().flatten().map(UsageAttempt::metering)),
         );
+        let table = self.tx.open_table(NODES).map_err(table_error)?;
+        let mut session_attempts = Vec::new();
+        for entry in table.range(
+            node_key(session_id, NodeId(1)).as_slice()
+                ..=node_key(session_id, NodeId(u64::MAX)).as_slice(),
+        )? {
+            let (key, value) = entry?;
+            let (_, id) = decode_node_key(key.value())?;
+            let key = format!("{session_id}/{}", id.0);
+            let bytes = attach_path(&self.path, payload("nodes", &key, value.value()))?;
+            let node: UsageNode = serde_json::from_slice(bytes)
+                .map_err(|_| corrupt("nodes", &key, "invalid record encoding"))?;
+            if matches!(node.kind, CountedNodeKind::Step) {
+                session_attempts.extend(
+                    node.attempts
+                        .ok_or_else(|| corrupt("nodes", &key, "missing step attempts"))?,
+                );
+            }
+        }
+        let session_total =
+            UsageSummary::from_attempts(session_attempts.iter().map(UsageAttempt::metering));
         let mut nodes = path.into_iter().peekable();
         let mut turns = Vec::new();
         while let Some(user) = nodes.next() {
@@ -477,7 +498,8 @@ impl SessionRead {
             session_id,
             position: session.current,
             turns,
-            total,
+            path_total,
+            session_total,
         })
     }
 
