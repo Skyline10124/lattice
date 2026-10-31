@@ -21,6 +21,11 @@ mod dock;
 mod statusline;
 pub(crate) use dock::{Dock, DockIntent, DockState, Panel};
 
+#[cfg(test)]
+pub(crate) fn statusline_text(app: &App, width: usize) -> String {
+    statusline::line(app, width).to_string()
+}
+
 pub(crate) const SIDEBAR_W: u16 = 40;
 pub(crate) const SIDEBAR_ASPECT: u16 = 3;
 pub(crate) const MIN_CONTENT_W_WITH_SIDEBAR: u16 = 72;

@@ -4,7 +4,7 @@
 //! 视图推送、历史查询与回执的消费：条目按 NodeId 维护，状态消息按是否新到进入 Dock 或对话记录。
 use super::fixtures::*;
 use super::*;
-use lattice_api::local::LocalErrorKind;
+use lattice_api::local::{CostEstimate, LocalErrorKind, UsageCompleteness::*};
 
 fn turn(n: u64) -> TurnId {
     numbered_turn(n)
@@ -78,6 +78,9 @@ fn entries_replace_by_node_in_place_and_new_ones_append() {
     assert_eq!(app.model.as_deref(), Some("model-a"));
     assert_eq!(app.provider.as_deref(), Some("openai"));
     assert_eq!(app.context_tokens, Some(1234));
+    assert_eq!(app.turn_usage.as_ref().unwrap().attempts, 2);
+    assert_eq!(app.turn_usage.as_ref().unwrap().input.known, Some(1234));
+    assert_eq!(app.turn_usage.as_ref().unwrap().input.unknown_attempts, 1);
     let mut cache_only = step(3, t, 1).completed_attempt(0).entry();
     if let ConversationEntry::Step {
         content: Node::Step { attempts, .. },
@@ -91,6 +94,148 @@ fn entries_replace_by_node_in_place_and_new_ones_append() {
     assert_eq!(
         app.context_tokens, None,
         "最近报告的输入与输出均未知时不回退到旧上下文"
+    );
+}
+
+#[test]
+fn metering_rebuilds_from_initial_entries_and_rewind_but_not_older_turns() {
+    use serde_json::json;
+    let mut app = test_app(true);
+    let current = step(4, turn(2), 0)
+        .completed_attempt(0)
+        .metering(
+            json!({"input":900,"output":90,"cache_read":600}),
+            Complete,
+            Some((0.03, true)),
+        )
+        .finished()
+        .entry();
+    // 条目的两份尝试投影都携带同一计量；本轮只消费节点中的一份。
+    let mut projected = serde_json::to_value(&current).unwrap();
+    projected["step"]["attempts"] = json!([{
+        "attempt":0,"origin":{"protocol":"chat-completions","provider_id":"openai"},
+        "usage":projected["content"]["attempts"][0]["usage"],"usage_kind":"complete","cost":{"usd":0.03,"exact":true},
+        "progress":{"progress":"ended","end":{"end":"completed"},"diagnostic":null},
+        "end":{"end":"completed","step":{"session_id":SESSION,"turn_id":turn(2),"model_step_ordinal":0}},
+        "retry_delay_ms":null
+    }]);
+    let current: ConversationEntry = serde_json::from_value(projected).unwrap();
+    app.begin_view();
+    app.apply_view(LocalUpdate::Head(head(4, Some(turn(2)), false)));
+    app.apply_view(entry_update(user(3, turn(2), 2, "recent")));
+    assert!(
+        app.turn_usage.is_none(),
+        "初始条目尚未到齐，不能显示无请求或完整小计"
+    );
+    app.apply_view(entry_update(current.clone()));
+    let original = app.turn_usage.clone().unwrap();
+    assert_eq!(original.attempts, 1);
+    assert_eq!(original.input.known, Some(900));
+    assert_eq!(app.context_tokens, Some(990));
+
+    let older = step(2, turn(1), 0)
+        .completed_attempt(0)
+        .metering(
+            json!({"input":300,"output":30}),
+            Complete,
+            Some((0.02, true)),
+        )
+        .finished()
+        .entry();
+    app.apply_older(
+        OlderRequest {
+            session_id: sid(),
+            before: NodeId(3),
+            epoch: app.epoch,
+        },
+        Ok(LocalHistory {
+            entries: vec![user(1, turn(1), 1, "older"), older.clone()],
+        }),
+    );
+    assert_eq!(app.turn_usage.as_ref(), Some(&original));
+    assert_eq!(app.context_tokens, Some(990));
+
+    open_view(
+        &mut app,
+        head(4, Some(turn(2)), false),
+        vec![
+            user(1, turn(1), 1, "older"),
+            older.clone(),
+            user(3, turn(2), 2, "recent"),
+            current,
+        ],
+    );
+    assert_eq!(
+        app.turn_usage.as_ref(),
+        Some(&original),
+        "重连从初始条目重建"
+    );
+    app.apply_view(LocalUpdate::Head(SessionHead {
+        path_replaced: true,
+        ..head(2, Some(turn(1)), false)
+    }));
+    assert!(app.turn_usage.is_none());
+    assert_eq!(app.context_tokens, None);
+    app.apply_view(entry_update(user(1, turn(1), 1, "older")));
+    assert!(app.turn_usage.is_none());
+    app.apply_view(entry_update(older));
+    assert_eq!(app.turn_usage.as_ref().unwrap().input.known, Some(300));
+    assert_eq!(app.context_tokens, Some(330));
+
+    app.apply_view(LocalUpdate::Head(SessionHead {
+        path_replaced: true,
+        ..head(1, Some(turn(1)), false)
+    }));
+    app.apply_view(entry_update(user(1, turn(1), 1, "older")));
+    let empty = app.turn_usage.as_ref().unwrap();
+    assert_eq!(empty.attempts, 0);
+    assert_eq!(
+        empty.cost.known,
+        Some(CostEstimate {
+            usd: 0.0,
+            exact: true
+        })
+    );
+    assert_eq!(app.context_tokens, None);
+    app.apply_view(LocalUpdate::Head(SessionHead {
+        path_replaced: true,
+        ..head(0, None, false)
+    }));
+    assert!(app.turn_usage.is_none());
+}
+
+#[test]
+fn context_uses_the_latest_normalized_report_without_overflow_or_fallback() {
+    use serde_json::json;
+    let mut app = test_app(true);
+    let id = turn(1);
+    open_view(
+        &mut app,
+        head(3, Some(id), true),
+        vec![
+            user(1, id, 1, "prompt"),
+            step(2, id, 0).completed_attempt(1234).continued().entry(),
+            step(3, id, 1).sent().entry(),
+        ],
+    );
+    for (usage, context) in [
+        (json!({"input":7}), Some(7)),
+        (json!({"cache_read":5}), None),
+        (json!({"input":u64::MAX,"output":1}), None),
+    ] {
+        app.apply_view(entry_update(
+            step(3, id, 1)
+                .completed_attempt(0)
+                .metering(usage, Partial, None)
+                .entry(),
+        ));
+        assert_eq!(app.context_tokens, context);
+    }
+    app.apply_view(entry_update(step(3, id, 1).sent().entry()));
+    assert_eq!(
+        app.context_tokens,
+        Some(1234),
+        "没有报告的在途尝试不替换最近报告"
     );
 }
 

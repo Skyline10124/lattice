@@ -5,7 +5,7 @@
 use super::fixtures::*;
 use super::*;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
-use lattice_api::local::{LocalErrorKind, ViewUpdate};
+use lattice_api::local::{LocalErrorKind, UsageCompleteness::*, ViewUpdate};
 use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1221,6 +1221,9 @@ struct Frame {
     /// Dock 中暂驻的 Warn 或 Error 的文字；没有暂驻消息时为空。它不在 `text` 里。
     dock: String,
     cancel: Option<CancelStatus>,
+    usage: Option<UsageSummary>,
+    context_tokens: Option<u64>,
+    statusline: String,
 }
 fn frame(app: &App) -> Frame {
     Frame {
@@ -1234,6 +1237,9 @@ fn frame(app: &App) -> Frame {
             .message()
             .map_or_else(String::new, |status| status.text.clone()),
         cancel: app.cancel_status,
+        usage: app.turn_usage.clone(),
+        context_tokens: app.context_tokens,
+        statusline: crate::view::statusline_text(app, 200),
     }
 }
 
@@ -1325,6 +1331,175 @@ impl Remote {
         tokio::time::sleep(FRAME * 2).await;
         self.frames.borrow().clone()
     }
+}
+
+#[tokio::test]
+async fn metering_waits_for_position_and_counts_retries_and_steps_once() {
+    let views = Views::default();
+    let view_tx = views.clone();
+    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
+        "watch" => views.subscribe(),
+        "submit" => Reply::Now(accepted_reply(r)),
+        _ => Reply::Never,
+    });
+    let mut h = Harness::new(false);
+    let remote = h.remote.clone();
+    let driver = async {
+        peer.wait(|seen| count(seen, "watch") == 1).await;
+        let old = numbered_turn(1);
+        view_tx.push([
+            head_reply(head(2, Some(old), false)),
+            entry_reply(user(1, old, 1, "old")),
+            entry_reply(
+                step(2, old, 0)
+                    .completed_attempt(0)
+                    .metering(
+                        json!({"input":8000,"output":800}),
+                        Complete,
+                        Some((0.50, true)),
+                    )
+                    .finished()
+                    .entry(),
+            ),
+        ]);
+        remote
+            .wait(|f| {
+                f.usage
+                    .as_ref()
+                    .is_some_and(|u| u.input.known == Some(8000))
+            })
+            .await;
+        remote.line("new");
+        let seen = peer.wait(|seen| count(seen, "submit") == 1).await;
+        let id = request_turn(requests(&seen, "submit").next().unwrap());
+        remote
+            .wait(|f| f.phase == TurnPhase::Streaming && f.usage.is_none())
+            .await;
+        view_tx.push([
+            head_reply(head(4, Some(id), true)),
+            entry_reply(user(3, id, 2, "new")),
+        ]);
+        let loading = remote
+            .wait(|f| f.text.contains("new") && f.usage.is_none() && f.context_tokens.is_none())
+            .await;
+        assert_eq!(loading.phase, TurnPhase::Streaming);
+        let retry = || {
+            step(4, id, 0).retried("info", "retry").metering(
+                json!({"input":100,"output":10,"cache_read":0}),
+                Partial,
+                Some((0.01, false)),
+            )
+        };
+        view_tx.push([entry_reply(retry().sent().entry())]);
+        let live = remote
+            .wait(|f| f.usage.as_ref().is_some_and(|u| u.attempts == 2))
+            .await;
+        let live_usage = live.usage.unwrap();
+        assert_eq!(live_usage.input.known, Some(100));
+        assert_eq!(live_usage.input.unknown_attempts, 1);
+        assert_eq!(live_usage.partial_attempts, 2);
+        let continued = || {
+            retry()
+                .completed_attempt(0)
+                .metering(
+                    json!({"input":900,"output":90,"cache_read":900}),
+                    Complete,
+                    Some((0.02, true)),
+                )
+                .continued()
+                .entry()
+        };
+        view_tx.push([
+            head_reply(head(5, Some(id), true)),
+            entry_reply(continued()),
+            entry_reply(step(5, id, 1).sent().entry()),
+        ]);
+        let before_repeat = remote
+            .wait(|f| {
+                f.usage
+                    .as_ref()
+                    .is_some_and(|u| u.attempts == 3 && u.input.unknown_attempts == 1)
+            })
+            .await;
+        // 同一视图流中的后续文字已绘出，才能证明重复条目已经被消费。
+        view_tx.push([
+            entry_reply(continued()),
+            view_reply(ViewUpdate::Text(TextUpdate {
+                node: NodeId(5),
+                attempt: 0,
+                offset: 0,
+                segments: vec![TextSegment::Text {
+                    text: "after repeated entry".into(),
+                }],
+            })),
+        ]);
+        let repeated = remote
+            .wait(|f| f.text.contains("after repeated entry"))
+            .await;
+        assert_eq!(repeated.usage, before_repeat.usage);
+        assert_eq!(repeated.context_tokens, before_repeat.context_tokens);
+        view_tx.push([
+            head_reply(head(5, Some(id), false)),
+            entry_reply(
+                step(5, id, 1)
+                    .text("after repeated entry done")
+                    .completed_attempt(0)
+                    .metering(
+                        json!({"input":1000,"output":100,"cache_read":0}),
+                        Complete,
+                        Some((0.04, true)),
+                    )
+                    .finished()
+                    .entry(),
+            ),
+        ]);
+        let closed = remote
+            .wait(|f| {
+                f.phase == TurnPhase::Idle
+                    && f.usage.as_ref().is_some_and(|u| u.input.is_complete())
+            })
+            .await;
+        let usage = closed.usage.as_ref().unwrap();
+        assert_eq!(usage.attempts, 3);
+        assert_eq!(usage.input.known, Some(2000));
+        assert_eq!(usage.output.known, Some(200));
+        assert_eq!(usage.cache_read.known, Some(900));
+        assert_eq!(usage.partial_attempts, 1);
+        let cost = usage.cost.known.unwrap();
+        assert!((cost.usd - 0.07).abs() < 1e-12);
+        assert!(!cost.exact);
+        assert_eq!(closed.context_tokens, Some(1100));
+        remote.ctrl('d');
+    };
+    let ((), exit) = bounded(LOOP_LIMIT, async {
+        tokio::join!(driver, h.run(&peer.client))
+    })
+    .await;
+    assert!(exit.result.is_ok());
+    assert_eq!(count(&peer.seen.borrow(), "usage"), 0, "显示计量只消费视图");
+}
+
+#[tokio::test(start_paused = true)]
+async fn ctrl_c_hint_expiry_redraws_without_input() {
+    let mut h = Harness::new(true);
+    let client = LocalClient::new(lattice_api::StateLayout::in_state_root(h._root.path()));
+    let remote = h.remote.clone();
+    let driver = async {
+        remote.ctrl('c');
+        let shown = remote
+            .wait(|f| f.statusline.contains("Ctrl+C to quit"))
+            .await;
+        tokio::time::advance(CTRL_C_WINDOW + FRAME).await;
+        let cleared = remote
+            .wait(|f| !f.statusline.contains("Ctrl+C to quit"))
+            .await;
+        assert_eq!(cleared.input, shown.input);
+        assert_eq!(cleared.phase, shown.phase);
+        assert_eq!(cleared.text, shown.text);
+        remote.ctrl('d');
+    };
+    let ((), exit) = bounded(LOOP_LIMIT, async { tokio::join!(driver, h.run(&client)) }).await;
+    assert!(exit.result.is_ok());
 }
 
 #[tokio::test]

@@ -100,6 +100,8 @@ TUI 中用 `/reconnect` 重新观察。临时正文保留到对应 Step 节点�
 
 ### 查询当前路径的用量
 
+TUI 的 [statusline](../architecture/tui.md#statusline) 显示本轮用量、缓存命中率和费用估算，并单独显示上下文用量。
+
 已知 SessionId 时，一次读取当前路径各轮的用量和费用估算：
 
 ```sh

@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::TuiOptions;
 use crate::blocks::{BlockId, BlockList, IdentifiedBlock};
@@ -25,12 +25,14 @@ use crossterm::event::{
     PushKeyboardEnhancementFlags,
 };
 use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
+use lattice_api::UsageSummary;
 use lattice_api::local::{
     CancelStatus, ConnectionStatus, ConversationEntry, DetachReport, LocalClient, LocalError,
     LocalErrorKind, LocalHistory, LocalTurn, LocalUpdate, Node, NodeId, NoticeLevel,
     PublicTurnOutcome, SessionHead, SessionId, StepKey, SubmissionReceipt, SubmissionResult,
     SubmissionUpdate, SubmitSession, TextSegment, TextUpdate, TurnId, TurnRequest, ViewUpdate,
 };
+use tokio::time::Instant;
 
 const FRAME: Duration = Duration::from_millis(33);
 
@@ -139,6 +141,7 @@ pub(crate) struct App {
     pub(crate) connected: bool,
     pub(crate) model: Option<String>,
     pub(crate) provider: Option<String>,
+    pub(crate) turn_usage: Option<UsageSummary>,
     pub(crate) context_tokens: Option<u64>,
     /// 由应用循环取走并执行的请求。
     pub(crate) cancel_requested: Option<CancelTarget>,
@@ -216,6 +219,7 @@ impl App {
             connected: true,
             model: None,
             provider: None,
+            turn_usage: None,
             context_tokens: None,
             cancel_requested: None,
             older_request: None,
@@ -573,6 +577,7 @@ impl App {
                 self.awaiting_head = None;
             }
         }
+        self.refresh_status_fields();
         self.refresh_phase();
     }
 
@@ -663,6 +668,7 @@ impl App {
                 self.push_status(submission_unknown_status(turn_id, error.as_ref()));
             }
         }
+        self.refresh_status_fields();
     }
 
     /// 确认会话已经建立：此后的提交写 `Existing`，并开始观察它。
@@ -793,23 +799,49 @@ impl App {
             .retain(|_| !remove.next().unwrap_or(false));
     }
 
-    /// statusline 的模型、提供商与上下文用量取自当前路径上最近的条目。
+    /// 本轮从替换后的条目重算；会话头当前位置未到齐时不把已装入的小计当作完整值。
     fn refresh_status_fields(&mut self) {
-        (self.model, self.provider) = self
-            .entries
-            .values()
-            .rev()
-            .find_map(|entry| match entry {
-                ConversationEntry::UserMessage {
-                    content:
-                        Node::UserMessage {
-                            model, provider, ..
-                        },
-                    ..
-                } => Some((model.clone(), provider.clone())),
-                _ => None,
-            })
+        let latest = self.entries.values().rev().find_map(|entry| match entry {
+            ConversationEntry::UserMessage {
+                content:
+                    Node::UserMessage {
+                        turn_id,
+                        model,
+                        provider,
+                        ..
+                    },
+                ..
+            } => Some((*turn_id, model.clone(), provider.clone())),
+            _ => None,
+        });
+        (self.model, self.provider) = latest
+            .as_ref()
+            .map(|(_, model, provider)| (model.clone(), provider.clone()))
             .unzip();
+        self.turn_usage = latest
+            .filter(|(turn, _, _)| {
+                self.pending_head.is_none()
+                    && !self.replace_pending
+                    && self.awaiting_head.is_none_or(|accepted| accepted == *turn)
+            })
+            .map(|(turn, _, _)| {
+                UsageSummary::from_attempts(
+                    self.entries
+                        .values()
+                        .filter_map(|entry| match entry {
+                            ConversationEntry::Step {
+                                content:
+                                    Node::Step {
+                                        turn_id, attempts, ..
+                                    },
+                                ..
+                            } if *turn_id == turn => Some(attempts),
+                            _ => None,
+                        })
+                        .flatten()
+                        .map(|attempt| (attempt.usage, attempt.usage_kind, attempt.cost)),
+                )
+            });
         self.context_tokens = self
             .entries
             .values()
@@ -818,10 +850,17 @@ impl App {
                 ConversationEntry::Step {
                     content: Node::Step { attempts, .. },
                     ..
-                } => attempts.iter().rev().find_map(|attempt| attempt.usage),
+                } => attempts
+                    .iter()
+                    .rev()
+                    .find_map(|attempt| attempt.usage.and_then(|usage| usage.normalized())),
                 _ => None,
             })
-            .and_then(|usage| usage.context_tokens());
+            .filter(|_| self.pending_head.is_none())
+            .and_then(|usage| match (usage.input, usage.output) {
+                (Some(input), Some(output)) => input.checked_add(output),
+                (input, output) => input.or(output),
+            });
     }
 
     fn notice_once(&mut self, status: Status) {
@@ -1275,7 +1314,6 @@ impl App {
             self.orphan_warned = Some(turn);
             self.push_status(orphaned_turn_status(turn));
         }
-        self.refresh_status_fields();
     }
 
     fn last_step_start(&self, turn: TurnId) -> Option<usize> {
@@ -1392,6 +1430,7 @@ impl App {
             }
         }
         self.settle(false);
+        self.refresh_status_fields();
     }
 
     /// 按 TurnId 找回新会话的上一次提交。已被接受时会话已经建立，改为 `Existing` 并开始观察；

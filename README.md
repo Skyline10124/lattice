@@ -98,6 +98,8 @@ auto_refresh = false
 lattice tui --agent reader
 ```
 
+TUI 的 [statusline](docs/architecture/tui.md#statusline) 显示本轮用量、缓存命中率和费用估算，并单独显示上下文用量。
+
 TUI 在首次提交被接受时创建 Session，启动界面本身不创建。打开已有会话时使用会话 ID：
 
 ```sh
