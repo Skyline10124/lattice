@@ -64,7 +64,9 @@ impl ReplyDelivery {
             match event {
                 ProtocolEvent::Part(delta) => self.accumulator.push(delta),
                 ProtocolEvent::Usage(usage) => {
-                    self.report.usage = Some(usage);
+                    if let Some(usage) = usage.normalized() {
+                        self.report.usage = Some(usage);
+                    }
                     return None;
                 }
                 ProtocolEvent::Done { finish_reason } => {
@@ -158,6 +160,256 @@ mod tests {
     use crate::{LiveDelta, ProviderFailure};
     use std::sync::atomic::AtomicUsize;
 
+    #[test]
+    fn protocol_snapshots_keep_native_components_across_partial_updates_and_errors() {
+        use crate::protocol::projection::{ProjectionError, wire_usage};
+        use lattice_conversation::{Protocol, TokenUsage};
+        use serde_json::json;
+        for (protocol, frames, expected, detail) in [
+            (
+                Protocol::ChatCompletions,
+                vec![
+                    (
+                        None,
+                        json!({"usage":{"prompt_tokens":10,"prompt_tokens_details":{"cached_tokens":4,"cache_write_tokens":2}}}),
+                    ),
+                    (
+                        None,
+                        json!({"usage":{"completion_tokens":3,"completion_tokens_details":{"reasoning_tokens":8}}}),
+                    ),
+                    (
+                        None,
+                        json!({"usage":{"prompt_tokens":0,"completion_tokens":0,"prompt_tokens_details":{"cache_write_tokens":null}}}),
+                    ),
+                    (None, json!({"usage":{"completion_tokens":"bad"}})),
+                ],
+                TokenUsage {
+                    input: Some(0),
+                    cache_read: Some(4),
+                    cache_write: Some(2),
+                    output: Some(0),
+                    reasoning: Some(8),
+                },
+                "usage counter must be a u64 integer",
+            ),
+            (
+                Protocol::Messages,
+                vec![
+                    (
+                        Some("message_start"),
+                        json!({"message":{"usage":{"input_tokens":16}}}),
+                    ),
+                    (
+                        Some("message_delta"),
+                        json!({"usage":{"output_tokens":3,"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}),
+                    ),
+                    (
+                        Some("message_delta"),
+                        json!({"usage":{"output_tokens":3,"input_tokens":null}}),
+                    ),
+                    (
+                        Some("message_delta"),
+                        json!({"usage":{"output_tokens":"bad"}}),
+                    ),
+                ],
+                TokenUsage {
+                    input: Some(16),
+                    cache_read: Some(0),
+                    cache_write: Some(0),
+                    output: Some(3),
+                    reasoning: None,
+                },
+                "usage counter must be a u64 integer",
+            ),
+            (
+                Protocol::GenerateContent,
+                vec![
+                    (
+                        None,
+                        json!({"usageMetadata":{"promptTokenCount":10,"toolUsePromptTokenCount":2,"cachedContentTokenCount":4,"thoughtsTokenCount":3}}),
+                    ),
+                    (None, json!({"usageMetadata":{"candidatesTokenCount":5}})),
+                    (
+                        None,
+                        json!({"usageMetadata":{"candidatesTokenCount":5,"thoughtsTokenCount":null}}),
+                    ),
+                    (
+                        None,
+                        json!({"usageMetadata":{"candidatesTokenCount":"bad"}}),
+                    ),
+                ],
+                TokenUsage {
+                    input: Some(12),
+                    cache_read: Some(4),
+                    cache_write: None,
+                    output: Some(8),
+                    reasoning: Some(3),
+                },
+                "usage counter must be a u64 integer",
+            ),
+            (
+                Protocol::Messages,
+                vec![
+                    (
+                        Some("message_start"),
+                        json!({"message":{"usage":{"input_tokens":10,"cache_read_input_tokens":4,"cache_creation_input_tokens":2,"output_tokens":3}}}),
+                    ),
+                    (
+                        Some("message_delta"),
+                        json!({"usage":{"input_tokens":u64::MAX,"cache_read_input_tokens":1,"cache_creation_input_tokens":0,"output_tokens":99}}),
+                    ),
+                ],
+                TokenUsage {
+                    input: Some(16),
+                    cache_read: Some(4),
+                    cache_write: Some(2),
+                    output: Some(3),
+                    reasoning: None,
+                },
+                "normalized usage exceeds u64",
+            ),
+            (
+                Protocol::GenerateContent,
+                vec![
+                    (
+                        None,
+                        json!({"usageMetadata":{"promptTokenCount":10,"toolUsePromptTokenCount":2,"cachedContentTokenCount":4,"candidatesTokenCount":5,"thoughtsTokenCount":3}}),
+                    ),
+                    (
+                        None,
+                        json!({"usageMetadata":{"promptTokenCount":u64::MAX,"toolUsePromptTokenCount":1,"candidatesTokenCount":99}}),
+                    ),
+                ],
+                TokenUsage {
+                    input: Some(12),
+                    cache_read: Some(4),
+                    cache_write: None,
+                    output: Some(8),
+                    reasoning: Some(3),
+                },
+                "normalized usage exceeds u64",
+            ),
+            (
+                Protocol::GenerateContent,
+                vec![
+                    (
+                        None,
+                        json!({"usageMetadata":{"promptTokenCount":10,"toolUsePromptTokenCount":2,"cachedContentTokenCount":4,"candidatesTokenCount":5,"thoughtsTokenCount":3}}),
+                    ),
+                    (
+                        None,
+                        json!({"usageMetadata":{"promptTokenCount":99,"candidatesTokenCount":u64::MAX,"thoughtsTokenCount":1}}),
+                    ),
+                ],
+                TokenUsage {
+                    input: Some(12),
+                    cache_read: Some(4),
+                    cache_write: None,
+                    output: Some(8),
+                    reasoning: Some(3),
+                },
+                "normalized usage exceeds u64",
+            ),
+        ] {
+            assert!(matches!(
+                wire_usage(protocol, &frames.last().unwrap().1),
+                Err(ProjectionError::MalformedUsage { provider, detail: actual }) if provider == protocol && actual == detail
+            ));
+            let mut parser = crate::test_reply::Parser::new(protocol);
+            let mut events = Vec::new();
+            for (name, frame) in frames {
+                events.extend(parser.parse_chunk(name, &frame.to_string()));
+            }
+            let [
+                LlmEvent::Finished {
+                    outcome:
+                        ReplyOutcome::Interrupted {
+                            reason: ReplyStop::Stream(StreamStop::Provider(failure)),
+                        },
+                    report,
+                },
+            ] = events.as_slice()
+            else {
+                panic!("{protocol:?}: {events:?}");
+            };
+            assert_eq!(
+                failure,
+                &ProviderFailure {
+                    message: format!("malformed {protocol} usage block: {detail}"),
+                    retryable: false,
+                }
+            );
+            assert_eq!(report.usage, Some(expected), "{protocol:?}: {detail}");
+        }
+    }
+
+    #[tokio::test]
+    async fn protocol_completion_applies_input_zero_rules_and_gemini_defaults() {
+        use lattice_conversation::Protocol;
+        use serde_json::json;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            for (name, protocol, frames, expected, finish) in [
+                ("messages zero preserves all known inputs", Protocol::Messages, vec![
+                    (Some("message_start"), json!({"message":{"usage":{"input_tokens":10,"cache_read_input_tokens":4,"cache_creation_input_tokens":2,"output_tokens":3}}})),
+                    (Some("message_delta"), json!({"usage":{"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":0},"delta":{"stop_reason":"end_turn"}})),
+                ], json!([16,4,2,0,null]), Some("stop")),
+                ("messages first report of zero inputs", Protocol::Messages, vec![
+                    (Some("message_start"), json!({"message":{"usage":{}}})),
+                    (Some("message_delta"), json!({"usage":{"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":3},"delta":{"stop_reason":"end_turn"}})),
+                ], json!([0,0,0,3,null]), Some("stop")),
+                ("messages positive replaces inputs and null preserves", Protocol::Messages, vec![
+                    (Some("message_start"), json!({"message":{"usage":{"input_tokens":10,"cache_read_input_tokens":4,"cache_creation_input_tokens":2}}})),
+                    (Some("message_delta"), json!({"usage":{"input_tokens":12,"cache_read_input_tokens":5,"cache_creation_input_tokens":1,"output_tokens":3}})),
+                    (Some("message_delta"), json!({"usage":{"input_tokens":null,"cache_read_input_tokens":null,"cache_creation_input_tokens":null},"delta":{"stop_reason":"end_turn"}})),
+                ], json!([18,5,1,3,null]), Some("stop")),
+                ("gemini omitted zero fields", Protocol::GenerateContent, vec![
+                    (None, json!({"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":8,"candidatesTokenCount":2}})),
+                ], json!([8,0,null,2,0]), Some("stop")),
+                ("gemini thoughts exhaust output budget", Protocol::GenerateContent, vec![
+                    (None, json!({"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":8,"thoughtsTokenCount":2}})),
+                ], json!([8,0,null,2,2]), Some("length")),
+                ("gemini candidate safety", Protocol::GenerateContent, vec![
+                    (None, json!({"candidates":[{"finishReason":"SAFETY"}],"usageMetadata":{"promptTokenCount":8}})),
+                ], json!([8,0,null,0,0]), Some("content_filter")),
+                ("gemini missing prompt", Protocol::GenerateContent, vec![
+                    (None, json!({"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"toolUsePromptTokenCount":2,"thoughtsTokenCount":3}})),
+                ], json!([null,0,null,3,3]), Some("stop")),
+                ("gemini final block has no metadata", Protocol::GenerateContent, vec![
+                    (None, json!({"usageMetadata":{"promptTokenCount":8}})),
+                    (None, json!({"candidates":[{"finishReason":"STOP"}]})),
+                ], json!([8,0,null,0,0]), Some("stop")),
+                ("gemini explicit zero replaces", Protocol::GenerateContent, vec![
+                    (None, json!({"usageMetadata":{"promptTokenCount":8,"candidatesTokenCount":5,"thoughtsTokenCount":2,"cachedContentTokenCount":3,"toolUsePromptTokenCount":1}})),
+                    (None, json!({"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":0,"candidatesTokenCount":0,"thoughtsTokenCount":0,"cachedContentTokenCount":0,"toolUsePromptTokenCount":0}})),
+                ], json!([0,0,null,0,0]), Some("stop")),
+                ("gemini interruption preserves unknown output", Protocol::GenerateContent, vec![
+                    (None, json!({"usageMetadata":{"promptTokenCount":8}})),
+                ], json!([8,null,null,null,null]), None),
+                ("gemini interruption preserves reported components", Protocol::GenerateContent, vec![
+                    (None, json!({"usageMetadata":{"promptTokenCount":10,"toolUsePromptTokenCount":2,"cachedContentTokenCount":4,"thoughtsTokenCount":3}})),
+                ], json!([12,4,null,3,3]), None),
+            ] {
+                let mut parser = crate::test_reply::Parser::new(protocol);
+                let mut input = Vec::new();
+                for (event, frame) in frames {
+                    parser.parse_chunk(event, &frame.to_string());
+                    input.append(&mut parser.raw);
+                }
+                let events = assemble_reply_stream(None, Box::pin(stream::iter(input)), StreamControl::default()).collect::<Vec<_>>().await;
+                let Some(LlmEvent::Finished { outcome, report }) = events.last() else { panic!("{name}: {events:?}") };
+                assert_eq!(report.finish_reason.as_deref(), finish, "{name}");
+                if finish.is_some() {
+                    assert!(matches!(outcome, ReplyOutcome::Complete { .. }), "{name}: {outcome:?}");
+                } else {
+                    assert!(matches!(outcome, ReplyOutcome::Interrupted { reason: ReplyStop::Stream(StreamStop::UnexpectedEof) }), "{name}: {outcome:?}");
+                    assert_eq!(report.usage_kind, lattice_conversation::UsageCompleteness::Partial, "{name}");
+                }
+                let usage = serde_json::to_value(report.usage.unwrap()).unwrap();
+                assert_eq!(json!([usage["input"], usage["cache_read"], usage["cache_write"], usage["output"], usage["reasoning"]]), expected, "{name}");
+            }
+        }).await.expect("protocol completion must finish");
+    }
+
     fn done() -> ProtocolEvent {
         ProtocolEvent::Done {
             finish_reason: "stop".into(),
@@ -222,14 +474,14 @@ mod tests {
     #[tokio::test]
     async fn reported_usage_is_replaced_and_preserved_on_rejection_and_interruption() {
         let first = lattice_conversation::TokenUsage {
-            prompt_tokens: 1,
-            completion_tokens: 2,
-            total_tokens: 3,
+            input: Some(1),
+            output: Some(2),
+            ..Default::default()
         };
         let last = lattice_conversation::TokenUsage {
-            prompt_tokens: 1,
-            completion_tokens: 4,
-            total_tokens: 5,
+            input: Some(1),
+            output: Some(4),
+            ..Default::default()
         };
         for end in [failure(), done()] {
             let input = vec![
@@ -341,9 +593,9 @@ mod tests {
             let count = consumed.clone();
             let input = stream::iter(vec![ProtocolEvent::Usage(
                 lattice_conversation::TokenUsage {
-                    prompt_tokens: 1,
-                    completion_tokens: 2,
-                    total_tokens: 3,
+                    input: Some(1),
+                    output: Some(2),
+                    ..Default::default()
                 },
             )])
             .inspect(move |_| {
@@ -376,7 +628,7 @@ mod tests {
             };
             assert!(matches!(event, Some(LlmEvent::Finished {
                 outcome: ReplyOutcome::Interrupted { reason: ReplyStop::Stream(actual) }, report
-            }) if actual == stop && report.usage.unwrap().total_tokens == 3));
+            }) if actual == stop && report.usage.unwrap().context_tokens() == Some(3)));
             assert!(
                 output.next().await.is_none(),
                 "the stalled stream terminates once"

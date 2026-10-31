@@ -157,6 +157,8 @@ impl ReservedClient {
             .register_calls(
                 &lock,
                 CompleteReply {
+                    usage_kind: lattice_conversation::UsageCompleteness::Partial,
+                    cost: None,
                     key,
                     origin,
                     usage: None,

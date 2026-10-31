@@ -1300,90 +1300,122 @@ fn structured_result_fixtures_and_missing_ids() {
 
 #[test]
 fn wire_usage_distinguishes_present_absent_and_malformed_blocks() {
-    enum Expected {
-        Present(u64, u64, u64),
-        Absent,
-        Malformed,
-    }
-    for (name, provider, wire, expected) in [
+    let cases = [
         (
-            "openai_usage_present",
             Protocol::ChatCompletions,
             fixture("openai_usage.json"),
-            Expected::Present(1201, 34, 1235),
+            serde_json::json!([1201, null, null, 34, null]),
         ),
         (
-            "anthropic_usage_present",
             Protocol::Messages,
             fixture("anthropic_usage.json"),
-            Expected::Present(517, 62, 579),
+            serde_json::json!([517, null, null, 62, null]),
         ),
         (
-            "gemini_usage_present",
             Protocol::GenerateContent,
             fixture("gemini_usage.json"),
-            Expected::Present(811, 27, 838),
+            serde_json::json!([811, 0, null, 27, 0]),
         ),
-        // The tool-call fixtures carry no usage blocks at all.
         (
-            "openai_usage_absent",
             Protocol::ChatCompletions,
-            openai_message(&fixture("openai_assistant_tool_calls.json")),
-            Expected::Absent,
+            serde_json::json!({"usage":{
+                "prompt_tokens":1,"completion_tokens":2,"prompt_cache_hit_tokens":99,
+                "prompt_tokens_details":{"cached_tokens":0,"cache_creation_input_tokens":8,"cache_write_tokens":3},
+                "completion_tokens_details":{"reasoning_tokens":9}
+            }}),
+            serde_json::json!([1, 0, 8, 2, 9]),
         ),
         (
-            "anthropic_usage_absent",
-            Protocol::Messages,
-            anthropic_message(&fixture("anthropic_thinking_tool_use.json")),
-            Expected::Absent,
-        ),
-        (
-            "gemini_usage_absent",
-            Protocol::GenerateContent,
-            gemini_content(&fixture("gemini_function_call_no_id.json")),
-            Expected::Absent,
-        ),
-        (
-            "openai_usage_string_tokens",
             Protocol::ChatCompletions,
-            serde_json::json!({"usage": {"prompt_tokens": "many"}}),
-            Expected::Malformed,
+            serde_json::json!({"usage":{"prompt_cache_hit_tokens":7}}),
+            serde_json::json!([null, 7, null, null, null]),
         ),
         (
-            "anthropic_usage_fractional_tokens",
+            Protocol::ChatCompletions,
+            serde_json::json!({"usage":{"prompt_tokens":10,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":2,"cache_write_tokens":3}}}),
+            serde_json::json!([10, 2, 3, 1, null]),
+        ),
+        (
+            Protocol::ChatCompletions,
+            serde_json::json!({"usage":{"prompt_tokens_details":{"cache_write_tokens":0}}}),
+            serde_json::json!([null, null, 0, null, null]),
+        ),
+        (
+            Protocol::ChatCompletions,
+            serde_json::json!({"usage":{"prompt_tokens_details":{"cache_creation_input_tokens":0,"cache_write_tokens":9}}}),
+            serde_json::json!([null, null, 0, null, null]),
+        ),
+        (
             Protocol::Messages,
-            serde_json::json!({"usage": {"input_tokens": 1.5, "output_tokens": 2}}),
-            Expected::Malformed,
+            serde_json::json!({"usage":{"input_tokens":10,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"output_tokens":0}}),
+            serde_json::json!([60, 30, 20, 0, null]),
         ),
         (
-            "gemini_usage_null_tokens",
+            Protocol::Messages,
+            serde_json::json!({"usage":{"cache_read_input_tokens":7}}),
+            serde_json::json!([7, 7, null, null, null]),
+        ),
+        (
             Protocol::GenerateContent,
-            serde_json::json!({"usageMetadata": {"promptTokenCount": null}}),
-            Expected::Malformed,
+            serde_json::json!({"usageMetadata":{"promptTokenCount":10,"toolUsePromptTokenCount":3,"cachedContentTokenCount":5,"candidatesTokenCount":4,"thoughtsTokenCount":6,"totalTokenCount":999}}),
+            serde_json::json!([13, 5, null, 10, 6]),
+        ),
+        (
+            Protocol::GenerateContent,
+            serde_json::json!({"usageMetadata":{"toolUsePromptTokenCount":0,"thoughtsTokenCount":2}}),
+            serde_json::json!([null, 0, null, 2, 2]),
+        ),
+    ];
+    for (protocol, wire, expected) in cases {
+        let value = serde_json::to_value(wire_usage(protocol, &wire).unwrap().unwrap()).unwrap();
+        assert_eq!(
+            serde_json::json!([
+                value["input"],
+                value["cache_read"],
+                value["cache_write"],
+                value["output"],
+                value["reasoning"]
+            ]),
+            expected,
+            "{protocol:?}: {wire}"
+        );
+    }
+    for (protocol, key, field) in [
+        (Protocol::ChatCompletions, "usage", "prompt_tokens"),
+        (Protocol::Messages, "usage", "input_tokens"),
+        (
+            Protocol::GenerateContent,
+            "usageMetadata",
+            "promptTokenCount",
         ),
     ] {
-        let result = wire_usage(provider, &wire);
-        match expected {
-            Expected::Present(prompt, completion, total) => {
-                let usage = result
-                    .unwrap_or_else(|error| panic!("{name}: usage failed: {error:?}"))
-                    .unwrap_or_else(|| panic!("{name}: usage must be present"));
-                assert_eq!(
-                    (
-                        usage.prompt_tokens,
-                        usage.completion_tokens,
-                        usage.total_tokens
-                    ),
-                    (prompt, completion, total),
-                    "{name}"
-                );
-            }
-            Expected::Absent => assert_eq!(result, Ok(None), "{name}: usage must be unknown"),
-            Expected::Malformed => assert!(
-                matches!(result, Err(ProjectionError::MalformedUsage { .. })),
-                "{name}: expected malformed usage"
-            ),
+        for wire in [
+            serde_json::json!({}),
+            serde_json::json!({key:null}),
+            serde_json::json!({key:{}}),
+            serde_json::json!({key:{field:null}}),
+        ] {
+            assert_eq!(wire_usage(protocol, &wire), Ok(None), "{wire}");
         }
+        for invalid in [
+            serde_json::json!("many"),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::from_str("18446744073709551616").unwrap(),
+        ] {
+            let wire = serde_json::json!({key:{field:invalid}});
+            assert!(
+                matches!(
+                    wire_usage(protocol, &wire),
+                    Err(ProjectionError::MalformedUsage { .. })
+                ),
+                "{wire}"
+            );
+        }
+        assert!(matches!(
+            wire_usage(protocol, &serde_json::json!({key:[]})),
+            Err(ProjectionError::MalformedUsage { .. })
+        ));
     }
 }
 

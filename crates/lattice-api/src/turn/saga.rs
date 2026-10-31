@@ -299,6 +299,8 @@ pub(crate) async fn run_coordinator_saga(
                                 ModelStopCause::Deadline
                             },
                             usage: None,
+                            usage_kind: lattice_conversation::UsageCompleteness::Partial,
+                            cost: None,
                             diagnostic: Default::default(),
                         }),
                     }
@@ -314,11 +316,15 @@ pub(crate) async fn run_coordinator_saga(
                 Ok(ModelStepAttempt::Complete {
                     message,
                     usage,
+                    usage_kind,
+                    cost,
                     finish_reason,
                 }) => {
                     live.observer.emit(TurnEvent::ModelFinished {
                         key,
                         usage,
+                        usage_kind,
+                        cost,
                         finish_reason,
                     });
                     break CompleteReply {
@@ -326,16 +332,22 @@ pub(crate) async fn run_coordinator_saga(
                         origin: origin.clone(),
                         message,
                         usage,
+                        usage_kind,
+                        cost,
                     };
                 }
                 Ok(ModelStepAttempt::Stopped {
                     cause,
                     usage,
+                    usage_kind,
+                    cost,
                     diagnostic,
                 }) => AttemptStopped {
                     key,
                     origin: origin.clone(),
                     usage,
+                    usage_kind,
+                    cost,
                     retry_delay_ms: None,
                     cause: map_stop(cause),
                     diagnostic: AttemptDiagnostic {
@@ -356,6 +368,8 @@ pub(crate) async fn run_coordinator_saga(
                         key,
                         origin: origin.clone(),
                         usage: None,
+                        usage_kind: lattice_conversation::UsageCompleteness::Partial,
+                        cost: None,
                         retry_delay_ms: None,
                         cause: StopCause::ProviderError {
                             retryable: retryable
@@ -371,6 +385,8 @@ pub(crate) async fn run_coordinator_saga(
                     key,
                     origin: origin.clone(),
                     usage: None,
+                    usage_kind: lattice_conversation::UsageCompleteness::Partial,
+                    cost: None,
                     retry_delay_ms: None,
                     cause: StopCause::ProviderError { retryable: false },
                     diagnostic: AttemptDiagnostic {
@@ -429,6 +445,8 @@ pub(crate) async fn run_coordinator_saga(
         }
         let key = reply.key;
         let usage = reply.usage;
+        let usage_kind = reply.usage_kind;
+        let cost = reply.cost;
         let origin = reply.origin.clone();
         let registered = match coordinator.register(reply).await {
             Ok(calls) => calls,
@@ -439,6 +457,8 @@ pub(crate) async fn run_coordinator_saga(
                         key,
                         origin: origin.clone(),
                         usage,
+                        usage_kind,
+                        cost,
                         retry_delay_ms: None,
                         cause: StopCause::InvalidBatch,
                         diagnostic: AttemptDiagnostic::default(),

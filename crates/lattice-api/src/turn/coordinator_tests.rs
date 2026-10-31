@@ -57,6 +57,8 @@ fn origin() -> AttemptOrigin {
 }
 fn reply(turn_id: TurnId) -> CompleteReply {
     CompleteReply {
+        usage_kind: lattice_conversation::UsageCompleteness::Partial,
+        cost: None,
         key: ModelAttemptKey {
             turn_id,
             model_step_ordinal: 0,

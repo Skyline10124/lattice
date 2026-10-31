@@ -563,21 +563,22 @@ async fn chat_replay_defaults_to_no_reasoning() {
             .unwrap(),
     )
     .await;
-    let message = &server.next().await.body["messages"][0];
-    assert_eq!(message["content"], "answer");
-    assert!(message.get("reasoning_content").is_none(), "{message}");
+    assert_eq!(
+        server.next().await.body["messages"][0],
+        serde_json::json!({"role":"assistant", "content":"answer"})
+    );
 
     let base = std::fs::read_to_string(directory.path().join("providers.toml")).unwrap();
     for (provider, model, expected) in [
         (
             "reasoning-content",
             None,
-            serde_json::json!({"role":"assistant", "content":"answer", "reasoning_content":"private reasoning"}),
+            serde_json::json!({"role":"assistant", "content":[{"type":"text","text":"answer","cache_control":{"type":"ephemeral"}}], "reasoning_content":"private reasoning"}),
         ),
         (
             "content-chunks",
             None,
-            serde_json::json!({"role":"assistant", "content":[{"type":"thinking", "thinking":[{"type":"text", "text":"private reasoning"}]}, {"type":"text", "text":"answer"}]}),
+            serde_json::json!({"role":"assistant", "content":[{"type":"thinking", "thinking":[{"type":"text", "text":"private reasoning"}]}, {"type":"text", "text":"answer","cache_control":{"type":"ephemeral"}}]}),
         ),
         (
             "reasoning-content",
@@ -587,15 +588,15 @@ async fn chat_replay_defaults_to_no_reasoning() {
         (
             "none",
             Some("reasoning-content"),
-            serde_json::json!({"role":"assistant", "content":"answer", "reasoning_content":"private reasoning"}),
+            serde_json::json!({"role":"assistant", "content":[{"type":"text","text":"answer","cache_control":{"type":"ephemeral"}}], "reasoning_content":"private reasoning"}),
         ),
     ] {
         let overlay = model.map_or(String::new(), |value| {
-            format!("[providers.test.models.model-id.features]\nreasoning_replay = '{value}'\n")
+            format!("[providers.test.models.model-id.features]\nreasoning_replay = '{value}'\ncache_markers = {}\n", value != "none")
         });
         std::fs::write(
             directory.path().join("providers.toml"),
-            format!("{base}[providers.test.features]\nreasoning_replay = '{provider}'\n{overlay}"),
+            format!("{base}[providers.test.features]\nreasoning_replay = '{provider}'\ncache_markers = {}\n{overlay}", provider != "none"),
         )
         .unwrap();
         let mut request = self::request("test");
@@ -665,7 +666,7 @@ async fn replay_source_matrix_reaches_each_protocol_request_body() {
             provider_id: "test".into(),
         };
         let decoded = wire_to_native(&origin, &serde_json::from_str(fixture).unwrap()).unwrap();
-        let (assistant, results) = bind_replay_step(decoded);
+        let (assistant, results) = crate::test_reply::bind_replay_step(decoded);
         for target_protocol in protocols {
             // 第三格在写过 other 的配置后回到同一 provider，标签带序号以免重名。
             for (round, provider) in ["test", "other", "test"].into_iter().enumerate() {
@@ -747,70 +748,11 @@ async fn replay_source_matrix_reaches_each_protocol_request_body() {
     }
 }
 
-fn bind_replay_step(
-    message: lattice_conversation::NativeMessage<lattice_conversation::UnboundToolCall>,
-) -> (
-    lattice_conversation::NativeMessage<lattice_conversation::BoundToolCall>,
-    Vec<lattice_conversation::StoredToolResult>,
-) {
-    use lattice_conversation::{
-        MessagePart, MessageSemantic, ModelMessageAddress, NativeMessage, ResultPayload, SessionId,
-        StoredToolResult, SuccessContent, ToolCallAddress, TurnId, canonical_json,
-        tool_content_digest,
-    };
-    let mut parts = Vec::new();
-    let mut results = Vec::new();
-    let mut index = 0usize;
-    for part in message.parts {
-        let semantic = match part.semantic {
-            MessageSemantic::ToolCall { call } => {
-                let invocation_id = lattice_conversation::InvocationId::parse(&format!(
-                    "00000000-0000-4000-8000-{index:012x}"
-                ))
-                .unwrap();
-                index += 1;
-                let name = call.name.clone();
-                let bound = call.bind(
-                    invocation_id,
-                    ToolCallAddress {
-                        message: ModelMessageAddress {
-                            session_id: SessionId::parse("3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c")
-                                .unwrap(),
-                            turn_id: TurnId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").unwrap(),
-                            model_step_ordinal: 0,
-                        },
-                        part_ordinal: 0,
-                    },
-                );
-                let value = serde_json::json!({"ok": true});
-                let bytes = canonical_json(&value);
-                results.push(StoredToolResult {
-                    invocation_id,
-                    name,
-                    payload: ResultPayload::Succeeded(SuccessContent::Json {
-                        value,
-                        digest: tool_content_digest(&bytes),
-                        byte_length: bytes.len() as u64,
-                    }),
-                });
-                MessageSemantic::ToolCall { call: bound }
-            }
-            MessageSemantic::Text { text } => MessageSemantic::Text { text },
-            MessageSemantic::Reasoning { text } => MessageSemantic::Reasoning { text },
-        };
-        parts.push(MessagePart {
-            semantic,
-            replay_state: part.replay_state,
-        });
-    }
-    (
-        NativeMessage::new(message.role, message.provider_origin, parts),
-        results,
-    )
-}
-
 #[tokio::test]
 async fn messages_use_merged_output_limits_at_resolution_and_reload_on_the_next_request() {
+    use lattice_conversation::{
+        ConversationItem, MessagePart, MessageRole, MessageSemantic, NativeMessage,
+    };
     let mut server = Server::start(true).await;
     let directory = private_dir();
     configure(directory.path(), &server.url, "anthropic-messages", "none");
@@ -825,7 +767,16 @@ async fn messages_use_merged_output_limits_at_resolution_and_reload_on_the_next_
     write_cache(8192);
     let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
     let turn = gateway.open_turn();
-    let request = request("test");
+    let mut request = request("test");
+    request
+        .messages
+        .push(ConversationItem::Message(NativeMessage::new(
+            MessageRole::System,
+            None,
+            vec![MessagePart::semantic_only(MessageSemantic::Text {
+                text: "system".into(),
+            })],
+        )));
     let old = turn.resolve(&request.target).await.unwrap();
     write_cache(65536);
     complete(
@@ -835,18 +786,52 @@ async fn messages_use_merged_output_limits_at_resolution_and_reload_on_the_next_
     )
     .await;
     assert_eq!(server.next().await.body["max_tokens"], 8192);
-    for (handwritten, expected) in [(None, 65536_u64), (Some(4096), 4096)] {
+    for (handwritten, provider_cache, model_cache, expected, cache_enabled) in [
+        (None, "automatic", None, 65536_u64, true),
+        (Some(4096), "automatic", Some("none"), 4096, false),
+        (Some(4096), "none", Some("automatic"), 4096, true),
+        (None, "none", None, 65536, false),
+    ] {
         let overlay = handwritten.map_or(String::new(), |value| {
             format!("[providers.test.models.model-id]\noutput = {value}\n")
         });
-        std::fs::write(&config, format!("{base}catalog = 'custom'\n{overlay}")).unwrap();
+        let model_features = model_cache.map_or(String::new(), |value| {
+            format!("[providers.test.models.model-id.features]\ncache = '{value}'\n")
+        });
+        std::fs::write(&config, format!("{base}catalog = 'custom'\n[providers.test.features]\ncache = '{provider_cache}'\n{overlay}{model_features}")).unwrap();
         complete(
             turn.stream_chat(request.clone(), StreamControl::default())
                 .await
                 .unwrap(),
         )
         .await;
-        assert_eq!(server.next().await.body["max_tokens"], expected);
+        let body = server.next().await.body;
+        assert_eq!(body["max_tokens"], expected);
+        assert_eq!(
+            crate::test_reply::cache_controls(&body),
+            if cache_enabled {
+                vec![
+                    (
+                        "/cache_control".into(),
+                        serde_json::json!({"type":"ephemeral"}),
+                    ),
+                    (
+                        "/system/0/cache_control".into(),
+                        serde_json::json!({"type":"ephemeral"}),
+                    ),
+                ]
+            } else {
+                vec![]
+            }
+        );
+        assert_eq!(
+            body["system"],
+            if cache_enabled {
+                serde_json::json!([{"type":"text","text":"system","cache_control":{"type":"ephemeral"}}])
+            } else {
+                serde_json::json!("system")
+            }
+        );
         assert_eq!(
             crate::model_candidates(directory.path(), Some("test"))
                 .unwrap()

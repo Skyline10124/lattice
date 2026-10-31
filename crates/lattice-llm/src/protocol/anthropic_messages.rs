@@ -7,7 +7,7 @@ use lattice_conversation::{Protocol, ReplayOrigin};
 use std::collections::BTreeMap;
 
 use crate::LlmError;
-use crate::protocol::projection::{request_messages_to_wire, wire_usage};
+use crate::protocol::projection::request_messages_to_wire;
 use crate::reply::{
     PartDelta, PartKind, ProtocolEvent, ReplyProtocolError, StreamStop, StringPatch,
 };
@@ -43,6 +43,7 @@ pub fn build_request_json(
     model: &str,
     output_limit: Option<u64>,
     context_limit: Option<u64>,
+    cache: super::Cache,
     origin: &ReplayOrigin,
 ) -> Result<serde_json::Value, LlmError> {
     let projected = request_messages_to_wire(origin, &request.messages)?;
@@ -69,7 +70,15 @@ pub fn build_request_json(
     });
 
     if let Some(system) = projected.system {
-        body["system"] = serde_json::Value::String(system);
+        body["system"] = if cache == super::Cache::Automatic && !system.is_empty() {
+            serde_json::json!([{"type":"text","text":system,"cache_control":{"type":"ephemeral"}}])
+        } else {
+            serde_json::Value::String(system)
+        };
+    }
+
+    if cache == super::Cache::Automatic {
+        body["cache_control"] = serde_json::json!({"type":"ephemeral"});
     }
 
     if !request.tools.is_empty() {
@@ -184,7 +193,7 @@ struct AnthropicBlock {
 #[derive(Default)]
 pub struct AnthropicSseParser {
     blocks: BTreeMap<usize, AnthropicBlock>,
-    input_tokens: Option<u64>,
+    usage: super::usage::UsageSnapshot,
     completed: bool,
 }
 
@@ -359,21 +368,14 @@ impl AnthropicSseParser {
         match event_type {
             "message_start" => {
                 let message = &root["message"];
-                self.input_tokens = message["usage"]["input_tokens"].as_u64();
-                if message["usage"].get("output_tokens").is_some() {
-                    match wire_usage(Protocol::Messages, message) {
-                        Ok(Some(usage)) => events.push(ProtocolEvent::Usage(usage)),
-                        Ok(None) => {}
-                        Err(error) => events.push(ProtocolEvent::error(error.to_string(), false)),
-                    }
+                match self.usage.update(Protocol::Messages, message) {
+                    Ok(Some(usage)) => events.push(ProtocolEvent::Usage(usage)),
+                    Ok(None) => {}
+                    Err(error) => events.push(ProtocolEvent::error(error.to_string(), false)),
                 }
             }
             "message_delta" => {
-                let usage_wire = serde_json::json!({"usage": {
-                    "input_tokens": self.input_tokens,
-                    "output_tokens": root["usage"].get("output_tokens"),
-                }});
-                match wire_usage(Protocol::Messages, &usage_wire) {
+                match self.usage.update(Protocol::Messages, &root) {
                     Ok(Some(usage)) => events.push(ProtocolEvent::Usage(usage)),
                     Ok(None) => {}
                     Err(error) => return vec![ProtocolEvent::error(error.to_string(), false)],
@@ -539,6 +541,7 @@ mod tests {
             "claude-sonnet-4-6",
             None,
             None,
+            super::super::Cache::None,
             &crate::test_reply::replay_origin(Protocol::Messages),
         )
         .expect("projection");

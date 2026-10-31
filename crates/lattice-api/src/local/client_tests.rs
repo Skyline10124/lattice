@@ -94,13 +94,16 @@ fn detail(id: TurnId, closed: bool) -> TurnDetail {
                 StepProgress::Reserved
             },
         },
-        usage: UsageSummary::Complete {
-            total: lattice_conversation::TokenUsage {
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                total_tokens: 0,
-            },
-        },
+        usage: UsageSummary::from_attempts([(
+            Some(lattice_conversation::TokenUsage {
+                input: Some(0),
+                output: Some(0),
+                ..Default::default()
+            }),
+            lattice_conversation::UsageCompleteness::Partial,
+            None,
+        )])
+        .into(),
         steps: vec![],
     }
 }
@@ -1489,7 +1492,7 @@ async fn status_reports_an_older_backend_that_announces_its_magic() {
 async fn status_reports_a_backend_newer_than_the_client() {
     let error = status_against(|mut stream| {
         Box::pin(async move {
-            stream.write_all(b"LTLOCAL9").await.unwrap();
+            stream.write_all(b"LTLOCAL:").await.unwrap();
             stream.write_u32(4).await.unwrap();
             stream.write_all(b"null").await.unwrap();
             let _held = stream;

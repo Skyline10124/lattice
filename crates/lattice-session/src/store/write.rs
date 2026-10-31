@@ -456,6 +456,8 @@ impl SessionStore {
             attempts.push(AttemptRecord {
                 origin,
                 usage: None,
+                usage_kind: lattice_conversation::UsageCompleteness::Partial,
+                cost: None,
                 progress: AttemptProgress::Sent,
                 retry_delay_ms: None,
             });
@@ -502,7 +504,11 @@ impl SessionStore {
             if input.origin != last.origin {
                 return Err(invalid("origin", "attempt source mismatch"));
             }
-            last.usage = input.usage;
+            last.usage = input
+                .usage
+                .and_then(lattice_conversation::TokenUsage::normalized);
+            last.usage_kind = input.usage_kind;
+            last.cost = input.cost;
             last.progress = AttemptProgress::Ended {
                 end: AttemptEnd::Stopped {
                     cause: input.cause.clone(),

@@ -8,8 +8,8 @@ use lancet_protocol::{
     Retriability, SessionId, TurnId,
 };
 use lattice_conversation::{
-    MessagePart, MessageRole, MessageSemantic, NativeMessage, OpaqueProviderState, Protocol,
-    TokenUsage, ToolResultOutcome, UnboundToolCall,
+    CostEstimate, MessagePart, MessageRole, MessageSemantic, NativeMessage, OpaqueProviderState,
+    Protocol, TokenUsage, ToolResultOutcome, UnboundToolCall, UsageCompleteness,
 };
 use lattice_store::{ProjectStoreKey, StateLayout};
 use redb::ReadableTable;
@@ -273,12 +273,14 @@ fn reply(k: ModelAttemptKey, count: usize) -> CompleteReply {
         }));
     }
     CompleteReply {
+        usage_kind: lattice_conversation::UsageCompleteness::Partial,
+        cost: None,
         key: k,
         origin: origin(),
         usage: Some(TokenUsage {
-            prompt_tokens: 2,
-            completion_tokens: 3,
-            total_tokens: 5,
+            input: Some(2),
+            output: Some(3),
+            ..Default::default()
         }),
         message: NativeMessage::new(
             MessageRole::Assistant,
@@ -293,6 +295,8 @@ fn reply(k: ModelAttemptKey, count: usize) -> CompleteReply {
 
 fn stopped(k: ModelAttemptKey, cause: StopCause) -> AttemptStopped {
     AttemptStopped {
+        usage_kind: lattice_conversation::UsageCompleteness::Partial,
+        cost: None,
         key: k,
         origin: origin(),
         usage: None,
@@ -1259,7 +1263,7 @@ fn keys_versions_and_encoding() {
         let meta = read.tx.open_table(META).unwrap();
         assert_eq!(
             meta.get("store_format_version").unwrap().unwrap().value(),
-            b"\x00\x00\x00\x055"
+            b"\x00\x00\x00\x066"
         );
     }
     let (_lock, calls) = running(&db, sid(1), tid(1), 1, 1);
@@ -1294,6 +1298,73 @@ fn keys_versions_and_encoding() {
         .unwrap(),
         r.index[&iid(1)]
     );
+    for (usage_kind, cost) in [
+        (UsageCompleteness::Partial, None),
+        (
+            UsageCompleteness::Complete,
+            Some(CostEstimate {
+                usd: 0.0,
+                exact: true,
+            }),
+        ),
+        (
+            UsageCompleteness::Partial,
+            Some(CostEstimate {
+                usd: 0.125,
+                exact: false,
+            }),
+        ),
+    ] {
+        let mut node = r.nodes[&(sid(1), NodeId(2))].clone();
+        let Node::Step { attempts, .. } = &mut node else {
+            unreachable!()
+        };
+        attempts[0].usage = Some(TokenUsage {
+            input: Some(10),
+            output: Some(2),
+            ..Default::default()
+        });
+        attempts[0].usage_kind = usage_kind;
+        attempts[0].cost = cost;
+        let bytes = encode(&node).unwrap();
+        assert_eq!(decode::<Node>("nodes", "2", &bytes).unwrap(), node);
+    }
+    for invalid_cost in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut node = r.nodes[&(sid(1), NodeId(2))].clone();
+        let Node::Step { attempts, .. } = &mut node else {
+            unreachable!()
+        };
+        attempts[0].cost = Some(CostEstimate {
+            usd: invalid_cost,
+            exact: true,
+        });
+        assert!(encode(&node).is_err());
+    }
+    let mut damaged = serde_json::to_value(&r.nodes[&(sid(1), NodeId(2))]).unwrap();
+    damaged["attempts"][0]["cost"] = json!({"usd":-1.0,"exact":true});
+    let mut bytes = VERSION.to_be_bytes().to_vec();
+    bytes.extend(serde_json::to_vec(&damaged).unwrap());
+    assert!(matches!(
+        decode::<Node>("nodes", "2", &bytes),
+        Err(StoreError::Corruption { .. })
+    ));
+    for invalid in ["-1", "1.5", r#""many""#, "18446744073709551616"] {
+        let mut damaged = serde_json::to_value(&r.nodes[&(sid(1), NodeId(2))]).unwrap();
+        damaged["attempts"][0]["usage"]["input"] = json!(0);
+        // 直接写入原始数字，保留超范围整数的十进制编码。
+        let raw = serde_json::to_string(&damaged)
+            .unwrap()
+            .replace("\"input\":0", &format!("\"input\":{invalid}"));
+        let mut bytes = 6_u32.to_be_bytes().to_vec();
+        bytes.extend(raw.as_bytes());
+        assert!(
+            matches!(
+                decode::<Node>("nodes", "2", &bytes),
+                Err(StoreError::Corruption { .. })
+            ),
+            "计数字段损坏未被拒绝：{invalid}"
+        );
+    }
     let wire = serde_json::to_value(r.changes[&ChangeSeq(1)]).unwrap();
     assert_eq!(
         wire,
@@ -1494,6 +1565,8 @@ fn progress_conclusions_and_stop_precedence() {
         );
     }
     let mut attempt = AttemptRecord {
+        usage_kind: lattice_conversation::UsageCompleteness::Partial,
+        cost: None,
         origin: origin(),
         usage: None,
         progress: AttemptProgress::Sent,
@@ -1873,7 +1946,7 @@ fn every_commit_reopens_with_read_only_conclusions() {
 }
 
 /// 回放来源只记录协议与 provider ID：DTO、会话记录与节点记录的序列化中
-/// 都不得出现 endpoint / base_url 字段；格式版本仍为 5。
+/// 都不得出现 endpoint / base_url 字段；格式版本为 6。
 #[test]
 fn replay_origin_records_no_endpoint() {
     fn assert_no_endpoint(label: &str, text: &str) {
@@ -1896,12 +1969,12 @@ fn replay_origin_records_no_endpoint() {
     let (_lock, _calls) = running(&db, sid(1), tid(1), 1, 1);
     let r = records(&db);
     let session = encode(&r.sessions[&sid(1)]).unwrap();
-    assert_eq!(&session[..4], &5u32.to_be_bytes(), "会话记录格式版本为 5");
+    assert_eq!(&session[..4], &6u32.to_be_bytes(), "会话记录格式版本为 6");
     assert_no_endpoint("会话记录", &String::from_utf8_lossy(&session[4..]));
     let mut origins = 0;
     for ((_, id), node) in &r.nodes {
         let bytes = encode(node).unwrap();
-        assert_eq!(&bytes[..4], &5u32.to_be_bytes(), "节点 {id:?} 格式版本为 5");
+        assert_eq!(&bytes[..4], &6u32.to_be_bytes(), "节点 {id:?} 格式版本为 6");
         let text = String::from_utf8_lossy(&bytes[4..]).into_owned();
         origins += text.matches("\"origin\"").count();
         assert_no_endpoint(&format!("节点 {id:?}"), &text);
@@ -1933,10 +2006,40 @@ fn attempt_sources_survive_retry_and_reopen() {
         StopCause::ProviderError { retryable: true },
     );
     stop.origin = first;
+    let usage = TokenUsage {
+        input: Some(1),
+        cache_read: Some(3),
+        cache_write: Some(4),
+        output: Some(2),
+        reasoning: Some(9),
+    };
+    stop.usage = Some(usage);
+    stop.cost = Some(CostEstimate {
+        usd: 0.125,
+        exact: false,
+    });
     db.stop_attempt(&lock, stop, now()).unwrap();
     db.start_request(&lock, key(tid(1), 0, 1), second.clone(), now())
         .unwrap();
     let turn = detail(&db);
+    assert_eq!(turn.steps[0].attempts[0].usage, Some(usage));
+    assert_eq!(
+        turn.steps[0].attempts[0].cost,
+        Some(CostEstimate {
+            usd: 0.125,
+            exact: false
+        })
+    );
+    assert_eq!(
+        turn.steps[0].attempts[0].usage_kind,
+        UsageCompleteness::Partial
+    );
+    assert_eq!(
+        turn.steps[0].attempts[1].usage_kind,
+        UsageCompleteness::Partial
+    );
+    assert_eq!(turn.steps[0].attempts[1].usage, None);
+    assert_eq!(turn.steps[0].attempts[1].cost, None);
     let expected = [
         json!({"protocol":"chat-completions","provider_id":"edge-1"}),
         json!({"protocol":"anthropic-messages","provider_id":"edge-1"}),
@@ -1955,6 +2058,12 @@ fn attempt_sources_survive_retry_and_reopen() {
     assert_eq!(detail(&db), turn);
     let lock = db.try_lock_session(sid(1)).unwrap();
     let mut complete = reply(key(tid(1), 0, 1), 1);
+    complete.usage = Some(usage);
+    complete.usage_kind = UsageCompleteness::Complete;
+    complete.cost = Some(CostEstimate {
+        usd: 0.25,
+        exact: true,
+    });
     complete.origin = second;
     complete.message.provider_origin = Some(complete.origin.clone());
     let calls = db
@@ -1976,10 +2085,37 @@ fn attempt_sources_survive_retry_and_reopen() {
     db.start_request(&lock, key(tid(1), 1, 0), third.clone(), now())
         .unwrap();
     let mut complete = reply(key(tid(1), 1, 0), 0);
+    complete.usage = Some(TokenUsage::default());
+    complete.cost = Some(CostEstimate {
+        usd: 0.0,
+        exact: true,
+    });
     complete.origin = third.clone();
     complete.message.provider_origin = Some(complete.origin.clone());
     db.close_step(&lock, CloseStep::Finish(complete), now())
         .unwrap();
+    let final_detail = detail(&db);
+    assert_eq!(
+        final_detail.steps[0].attempts[1].cost,
+        Some(CostEstimate {
+            usd: 0.25,
+            exact: true
+        })
+    );
+    assert_eq!(
+        final_detail.steps[0].attempts[1].usage_kind,
+        UsageCompleteness::Complete
+    );
+    assert_eq!(final_detail.usage.partial_attempts, 2);
+    assert_eq!(final_detail.steps[1].attempts[0].usage, None);
+    assert_eq!(
+        final_detail.usage.cost.known,
+        Some(CostEstimate {
+            usd: 0.375,
+            exact: false
+        })
+    );
+    assert!(final_detail.usage.cost.is_complete());
     let turn = detail(&db);
     assert_eq!(turn.summary.outcome, PublicTurnOutcome::Completed);
     assert_eq!(turn.steps[1].attempts[0].origin, third);
@@ -2161,9 +2297,9 @@ fn retries_usage_and_between_request_stops() {
         assert!(before == records(&db));
         stop.retry_delay_ms = Some(60000);
         stop.usage = Some(TokenUsage {
-            prompt_tokens: 1,
-            completion_tokens: 2,
-            total_tokens: 3,
+            input: Some(1),
+            output: Some(2),
+            ..Default::default()
         });
         assert!(matches!(
             db.stop_attempt(&lock, stop, now()).unwrap(),
@@ -2230,15 +2366,8 @@ fn retries_usage_and_between_request_stops() {
     assert_eq!(t.steps[0].attempts[2].retry_delay_ms, None);
     assert_eq!(node_at(&db, 2).retry_notices().unwrap().len(), 2);
     assert_eq!(
-        t.usage,
-        UsageSummary::Partial {
-            known: TokenUsage {
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                total_tokens: 0
-            },
-            unknown_attempts: 3
-        }
+        *t.usage,
+        UsageSummary::from_attempts([(None, UsageCompleteness::Partial, None); 3])
     );
     assert_eq!(
         t.summary.notice.unwrap(),
@@ -2300,16 +2429,11 @@ fn step_budget_reserves_and_closes_limit_node() {
         db.start_request(&lock, key(tid(1), MAX_MODEL_STEPS, 0), origin(), now())
             .is_err()
     );
-    assert_eq!(
-        t.usage,
-        UsageSummary::Complete {
-            total: TokenUsage {
-                prompt_tokens: 64,
-                completion_tokens: 96,
-                total_tokens: 160
-            }
-        }
-    );
+    assert_eq!(t.usage.attempts, 32);
+    assert_eq!(t.usage.input.known, Some(64));
+    assert_eq!(t.usage.output.known, Some(96));
+    assert!(t.usage.input.is_complete());
+    assert_eq!(t.usage.cost.unknown_attempts, 32);
     drop(lock);
     drop(db);
     assert_eq!(detail(&SessionStore::open(&layout).unwrap()), t);

@@ -78,6 +78,20 @@ fn entries_replace_by_node_in_place_and_new_ones_append() {
     assert_eq!(app.model.as_deref(), Some("model-a"));
     assert_eq!(app.provider.as_deref(), Some("openai"));
     assert_eq!(app.context_tokens, Some(1234));
+    let mut cache_only = step(3, t, 1).completed_attempt(0).entry();
+    if let ConversationEntry::Step {
+        content: Node::Step { attempts, .. },
+        ..
+    } = &mut cache_only
+    {
+        let usage = serde_json::from_value(serde_json::json!({"input":null,"cache_read":5,"cache_write":null,"output":null,"reasoning":null})).unwrap();
+        attempts[0].usage = usage;
+    }
+    app.apply_view(entry_update(cache_only));
+    assert_eq!(
+        app.context_tokens, None,
+        "最近报告的输入与输出均未知时不回退到旧上下文"
+    );
 }
 
 #[test]

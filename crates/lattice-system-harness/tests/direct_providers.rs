@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Direct-Local 的 Anthropic Messages 与 generateContent 协议场景。
+//! 三个现有协议的工具往返、缓存请求与尝试计量。
 //!
 //! 场景经统一入口配置 endpoint、模型与凭据，fake provider 按请求协议回复流。
 //! 每轮先调用 `observe__workspace`，再把工具结果按该协议投影，最后回复文本。
@@ -21,7 +21,16 @@ struct Provider {
     assistant_role: &'static str,
 }
 
-const PROVIDERS: [Provider; 2] = [
+const PROVIDERS: [Provider; 3] = [
+    Provider {
+        name: "openai",
+        fixture: ProviderFixture {
+            protocol: ProviderProtocol::ChatCompletions,
+            target: ProviderTarget::Builtin("alibaba"),
+            model: "qwen-fixture",
+        },
+        assistant_role: "assistant",
+    },
     Provider {
         name: "anthropic",
         fixture: ProviderFixture {
@@ -73,7 +82,7 @@ fn projected_tool_result(
     capture: &CapturedRequest,
 ) -> Result<String, AssertError> {
     let (list, last) = match provider.name {
-        "anthropic" => ("messages", capture.raw["messages"].as_array()),
+        "openai" | "anthropic" => ("messages", capture.raw["messages"].as_array()),
         _ => ("contents", capture.raw["contents"].as_array()),
     };
     let last = last
@@ -82,10 +91,16 @@ fn projected_tool_result(
             expected: format!("{list} in second request"),
         })?;
     require(
-        last["role"] == "user",
+        last["role"]
+            == if provider.name == "openai" {
+                "tool"
+            } else {
+                "user"
+            },
         format!("tool result turn is not a user turn: {last}"),
     )?;
     let block = match provider.name {
+        "openai" => last["content"].clone(),
         "anthropic" => {
             let block = &last["content"][0];
             require(
@@ -106,23 +121,79 @@ fn projected_tool_result(
     Ok(block.to_string())
 }
 
+fn with_usage(
+    provider: &Provider,
+    script: lattice_system_harness::SseScript,
+) -> lattice_system_harness::SseScript {
+    use lattice_system_harness::{NativeUsage, SseScript};
+    use serde_json::json;
+    let usage = match provider.name {
+        "openai" => NativeUsage::ChatCompletions(
+            json!({"prompt_tokens":100,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":60,"cache_write_tokens":10},"completion_tokens_details":{"reasoning_tokens":5}}),
+        ),
+        "anthropic" => NativeUsage::Messages {
+            start: json!({"input_tokens":30,"cache_read_input_tokens":60,"cache_creation_input_tokens":10}),
+            delta: json!({"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":20}),
+        },
+        _ => NativeUsage::GenerateContent(
+            json!({"promptTokenCount":90,"toolUsePromptTokenCount":10,"cachedContentTokenCount":60,"candidatesTokenCount":15,"thoughtsTokenCount":5}),
+        ),
+    };
+    SseScript::WithUsage {
+        script: Box::new(script),
+        usage,
+    }
+}
+
+fn cache_controls(wire: &serde_json::Value) -> Vec<(String, serde_json::Value)> {
+    fn collect(wire: &serde_json::Value, path: &str, found: &mut Vec<(String, serde_json::Value)>) {
+        match wire {
+            serde_json::Value::Object(fields) => {
+                for (name, value) in fields {
+                    let name_in_path = name.replace('~', "~0").replace('/', "~1");
+                    let path = format!("{path}/{name_in_path}");
+                    if name == "cache_control" {
+                        found.push((path.clone(), value.clone()));
+                    }
+                    collect(value, &path, found);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for (index, value) in values.iter().enumerate() {
+                    collect(value, &format!("{path}/{index}"), found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    collect(wire, "", &mut found);
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    found
+}
+
 #[test]
-fn anthropic_and_gemini_turns_call_a_tool_and_project_the_result_back() {
+fn protocols_cache_and_usage_survive_tool_round_trip_and_backend_restart() {
     let driver = driver();
     for provider in &PROVIDERS {
         let (world, spec) = provider_world(provider);
         let key = format!("{}-fixture-key", provider.name);
-        let server = FakeLlmServer::start(sequence(vec![
-            tool_call(
-                "call-1",
-                "observe__workspace",
-                r#"{"request":{"mode":"read_file","path":"notes.txt"}}"#,
-            ),
-            lattice_system_harness::SseScript::PlainText {
-                chunks: vec!["answer-".into(), provider.name.into()],
-                finish_reason: "stop".into(),
-            },
-        ]))
+        let server = FakeLlmServer::start(sequence(
+            vec![
+                tool_call(
+                    "call-1",
+                    "observe__workspace",
+                    r#"{"request":{"mode":"read_file","path":"notes.txt"}}"#,
+                ),
+                lattice_system_harness::SseScript::PlainText {
+                    chunks: vec!["answer-".into(), provider.name.into()],
+                    finish_reason: "stop".into(),
+                },
+            ]
+            .into_iter()
+            .map(|script| with_usage(provider, script))
+            .collect(),
+        ))
         .expect("fake provider");
         server.expect_api_key(&key);
         world
@@ -146,6 +217,14 @@ fn anthropic_and_gemini_turns_call_a_tool_and_project_the_result_back() {
         let send = SessionSendDriver::new(&driver, &world, &spec, provider.name);
         let outcome = send.send("read notes.txt").expect("turn");
         let captures = server.captured_requests();
+        let tid = outcome.accepted_turn_id().unwrap();
+        let detail = send
+            .run_command(&["--json", "session", "turn", tid])
+            .unwrap();
+        let stopped = send.run_command(&["daemon", "stop"]).unwrap();
+        let reopened = send
+            .run_command(&["--json", "session", "turn", tid])
+            .unwrap();
 
         let result: Result<(), AssertError> = (|| {
             assert_clean_send(&outcome)?;
@@ -163,7 +242,58 @@ fn anthropic_and_gemini_turns_call_a_tool_and_project_the_result_back() {
                 captures.len() == 2,
                 format!("expected 2 model requests, got {}", captures.len()),
             )?;
-            for capture in &captures {
+            require(
+                detail.is_clean_exit(0) && stopped.is_clean_exit(0) && reopened.is_clean_exit(0),
+                "query, stop and reopen succeed",
+            )?;
+            let saved: serde_json::Value = serde_json::from_slice(&detail.stdout).unwrap();
+            require(
+                saved == serde_json::from_slice::<serde_json::Value>(&reopened.stdout).unwrap(),
+                "reopened metering is unchanged",
+            )?;
+            require(
+                server.captured_requests().len() == 2,
+                "queries do not issue model requests",
+            )?;
+            for step in saved["steps"].as_array().unwrap() {
+                let attempt = &step["attempts"][0];
+                let expected = serde_json::json!({"input":100,"cache_read":60,"cache_write":if provider.name=="gemini" {None} else {Some(10)},"output":20,"reasoning":if provider.name=="anthropic" {None} else {Some(5)}});
+                require(
+                    attempt["usage"] == expected
+                        && attempt["usage_kind"] == "partial"
+                        && attempt["cost"].is_null(),
+                    format!("native usage normalized and saved: {attempt}"),
+                )?;
+            }
+            require(
+                saved["usage"]["partial_attempts"] == 2
+                    && saved["usage"]["input"]["known"] == 200
+                    && saved["usage"]["output"]["known"] == 40
+                    && saved["usage"]["cost"]["unknown_attempts"] == 2,
+                "two attempts aggregate with unknown fees",
+            )?;
+            for (index, capture) in captures.iter().enumerate() {
+                let paths = match provider.name {
+                    "anthropic" => vec!["/cache_control", "/system/0/cache_control"],
+                    "openai" if index == 0 => vec![
+                        "/messages/0/content/0/cache_control",
+                        "/messages/1/content/0/cache_control",
+                    ],
+                    "openai" => vec![
+                        "/messages/0/content/0/cache_control",
+                        "/messages/3/content/0/cache_control",
+                    ],
+                    _ => vec![],
+                };
+                let expected: Vec<_> = paths
+                    .into_iter()
+                    .map(|path| (path.to_string(), serde_json::json!({"type":"ephemeral"})))
+                    .collect();
+                let actual = cache_controls(&capture.raw);
+                require(
+                    actual == expected,
+                    format!("complete cache breakpoint set: expected {expected:?}, got {actual:?}"),
+                )?;
                 if provider.name == "anthropic" {
                     require(
                         capture.raw["max_tokens"] == 8192,
@@ -184,7 +314,12 @@ fn anthropic_and_gemini_turns_call_a_tool_and_project_the_result_back() {
                 require(!capture.tool_names.is_empty(), "tool declarations sent")?;
             }
             require(
-                captures[1].message_roles == ["user", provider.assistant_role, "user"],
+                captures[1].message_roles
+                    == if provider.name == "openai" {
+                        vec!["system", "user", "assistant", "tool"]
+                    } else {
+                        vec!["user", provider.assistant_role, "user"]
+                    },
                 format!("second request history: {:?}", captures[1].message_roles),
             )?;
             let projected = projected_tool_result(provider, &captures[1])?;
@@ -197,7 +332,12 @@ fn anthropic_and_gemini_turns_call_a_tool_and_project_the_result_back() {
 
         finish_scenario(
             scenario_evidence,
-            &[("provider turn", &outcome.command)],
+            &[
+                ("provider turn", &outcome.command),
+                ("turn detail", &detail),
+                ("stop backend", &stopped),
+                ("reopened turn", &reopened),
+            ],
             captures,
             result,
         );

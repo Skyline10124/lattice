@@ -497,27 +497,13 @@ fn finish_human(
         if let Some(head) = &state.head {
             writeln!(err, "session: {}", head.session_id)?;
         }
-        let mut known = None;
-        let mut unknown_attempts = 0;
-        for attempt in state.steps.values().flat_map(|s| &s.attempts) {
-            match attempt.usage {
-                Some(usage) => {
-                    known = Some(match known {
-                        Some(total) => usage.saturating_add(total),
-                        None => usage,
-                    })
-                }
-                None => unknown_attempts += 1,
-            }
-        }
-        let known = known.map(serde_json::to_value).transpose()?.unwrap_or_else(
-            || serde_json::json!({"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}),
+        let usage = lattice_api::UsageSummary::from_attempts(
+            state
+                .steps
+                .values()
+                .flat_map(|step| &step.attempts)
+                .map(|attempt| (attempt.usage, attempt.usage_kind, attempt.cost)),
         );
-        let usage = if unknown_attempts == 0 {
-            serde_json::json!({"kind":"complete","total":known})
-        } else {
-            serde_json::json!({"kind":"partial","known":known,"unknown_attempts":unknown_attempts})
-        };
         writeln!(err, "usage: {}", serde_json::to_string(&usage)?)?;
         if !state.results.is_empty() {
             writeln!(err, "tools: {} results", state.results.len())?;

@@ -227,28 +227,7 @@ pub(crate) fn tool_result_messages(
     Ok(messages)
 }
 
-/// `usage: {prompt_tokens, completion_tokens, total_tokens}` (all official
-/// fields; absent usage is unknown, not zero).
+/// 完整 wire 与流式响应共用原生分项的换算。
 pub(crate) fn usage(wire: &Value) -> Result<Option<TokenUsage>, ProjectionError> {
-    let Some(usage) = wire.get("usage") else {
-        return Ok(None);
-    };
-    if usage.is_null() {
-        return Ok(None);
-    }
-    let malformed = |detail: String| ProjectionError::MalformedUsage {
-        provider: Protocol::ChatCompletions,
-        detail,
-    };
-    let field = |name: &str| -> Result<u64, ProjectionError> {
-        usage
-            .get(name)
-            .and_then(Value::as_u64)
-            .ok_or_else(|| malformed(format!("usage.{name} is not an integer")))
-    };
-    Ok(Some(TokenUsage {
-        prompt_tokens: field("prompt_tokens")?,
-        completion_tokens: field("completion_tokens")?,
-        total_tokens: field("total_tokens")?,
-    }))
+    super::super::usage::UsageSnapshot::default().update(Protocol::ChatCompletions, wire)
 }

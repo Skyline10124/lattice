@@ -1,37 +1,500 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Provider-neutral token usage contract (ADR 0005 §10).
-//!
-//! Usage is authoritative per attempt: each attempt stores the
-//! provider-reported `Option<TokenUsage>`. Missing usage is **unknown**, never
-//! zero. Retry attempts are recorded separately. A Turn-level total is a
-//! derived `Complete | Partial` aggregate, never an independent authority.
+//! 每次尝试的用量是权威事实，汇总只从各次尝试派生。
 
 use serde::{Deserialize, Serialize};
 
-/// Token usage reported by one provider attempt.
-///
-/// `lattice-session` re-exports this type as `TurnUsage`, and provider wire
-/// projectors parse directly into the same `u64` counters. Missing usage remains
-/// `None`; malformed or overflowing provider counters fail at the projection seam.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// 输入包含缓存读写，输出包含推理；未报告的计数保持未知。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TokenUsage {
-    pub prompt_tokens: u64,
-    pub completion_tokens: u64,
-    pub total_tokens: u64,
+    pub input: Option<u64>,
+    pub cache_read: Option<u64>,
+    pub cache_write: Option<u64>,
+    pub output: Option<u64>,
+    pub reasoning: Option<u64>,
 }
 
 impl TokenUsage {
-    /// Saturating component-wise addition for derived aggregates. Individual
-    /// attempt records stay untouched; this only builds Turn-level sums.
-    pub fn saturating_add(self, other: Self) -> Self {
-        Self {
-            prompt_tokens: self.prompt_tokens.saturating_add(other.prompt_tokens),
-            completion_tokens: self
-                .completion_tokens
-                .saturating_add(other.completion_tokens),
-            total_tokens: self.total_tokens.saturating_add(other.total_tokens),
+    /// 全部未知时不产生一份空报告。
+    pub fn normalized(self) -> Option<Self> {
+        (self != Self::default()).then_some(self)
+    }
+
+    /// 上下文只计一次输入和输出，缺失加数不补成 provider 报告的零。
+    pub fn context_tokens(self) -> Option<u64> {
+        self.input
+            .into_iter()
+            .chain(self.output)
+            .reduce(u64::saturating_add)
+    }
+}
+
+/// 尝试的费用结果；金额有限且非负，确切标记与金额一同保存。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CostEstimate {
+    #[serde(serialize_with = "serialize_usd", deserialize_with = "deserialize_usd")]
+    pub usd: f64,
+    pub exact: bool,
+}
+
+fn serialize_usd<S: serde::Serializer>(usd: &f64, serializer: S) -> Result<S::Ok, S::Error> {
+    if !usd.is_finite() || *usd < 0.0 {
+        return Err(serde::ser::Error::custom(
+            "USD cost must be finite and nonnegative",
+        ));
+    }
+    usd.serialize(serializer)
+}
+
+fn deserialize_usd<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
+    let usd = f64::deserialize(deserializer)?;
+    if !usd.is_finite() || usd < 0.0 {
+        return Err(serde::de::Error::custom(
+            "USD cost must be finite and nonnegative",
+        ));
+    }
+    Ok(usd)
+}
+
+/// 单项已知小计与覆盖范围；溢出的小计饱和，但不再标为完整。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetricSummary<T> {
+    pub known: Option<T>,
+    pub unknown_attempts: u64,
+    pub overflowed: bool,
+}
+
+impl<T> MetricSummary<T> {
+    pub fn is_complete(&self) -> bool {
+        self.unknown_attempts == 0 && !self.overflowed
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageCompleteness {
+    Complete,
+    #[default]
+    Partial,
+}
+
+/// 各项保留报告覆盖范围，整体完整性由尝试的判定与溢出决定。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsageSummary {
+    pub attempts: u64,
+    pub partial_attempts: u64,
+    pub kind: UsageCompleteness,
+    pub input: MetricSummary<u64>,
+    pub cache_read: MetricSummary<u64>,
+    pub cache_write: MetricSummary<u64>,
+    pub output: MetricSummary<u64>,
+    pub reasoning: MetricSummary<u64>,
+    pub cost: MetricSummary<CostEstimate>,
+}
+
+impl UsageSummary {
+    pub fn from_attempts(
+        attempts: impl IntoIterator<
+            Item = (Option<TokenUsage>, UsageCompleteness, Option<CostEstimate>),
+        >,
+    ) -> Self {
+        let empty = MetricSummary {
+            known: None,
+            unknown_attempts: 0,
+            overflowed: false,
+        };
+        let mut result = Self {
+            attempts: 0,
+            partial_attempts: 0,
+            kind: UsageCompleteness::Complete,
+            input: empty,
+            cache_read: empty,
+            cache_write: empty,
+            output: empty,
+            reasoning: empty,
+            cost: MetricSummary {
+                known: None,
+                unknown_attempts: 0,
+                overflowed: false,
+            },
+        };
+        for (usage, usage_kind, cost) in attempts {
+            result.attempts += 1;
+            result.partial_attempts += u64::from(usage_kind == UsageCompleteness::Partial);
+            let usage = usage.unwrap_or_default();
+            for (summary, value) in [
+                (&mut result.input, usage.input),
+                (&mut result.cache_read, usage.cache_read),
+                (&mut result.cache_write, usage.cache_write),
+                (&mut result.output, usage.output),
+                (&mut result.reasoning, usage.reasoning),
+            ] {
+                match value {
+                    Some(value) => {
+                        let (sum, overflow) = summary.known.unwrap_or(0).overflowing_add(value);
+                        summary.known = Some(if overflow { u64::MAX } else { sum });
+                        summary.overflowed |= overflow;
+                    }
+                    None => summary.unknown_attempts += 1,
+                }
+            }
+            match cost {
+                Some(value) => {
+                    let previous = result.cost.known.unwrap_or(CostEstimate {
+                        usd: 0.0,
+                        exact: true,
+                    });
+                    let sum = previous.usd + value.usd;
+                    result.cost.known = Some(CostEstimate {
+                        usd: sum.min(f64::MAX),
+                        exact: previous.exact && value.exact,
+                    });
+                    result.cost.overflowed |= !sum.is_finite();
+                }
+                None => result.cost.unknown_attempts += 1,
+            }
+        }
+        if result.attempts == 0 {
+            for metric in [
+                &mut result.input,
+                &mut result.cache_read,
+                &mut result.cache_write,
+                &mut result.output,
+                &mut result.reasoning,
+            ] {
+                metric.known = Some(0);
+            }
+            result.cost.known = Some(CostEstimate {
+                usd: 0.0,
+                exact: true,
+            });
+        }
+        if let Some(cost) = &mut result.cost.known {
+            cost.exact &= result.cost.unknown_attempts == 0 && !result.cost.overflowed;
+        }
+        if result.partial_attempts != 0
+            || result.input.overflowed
+            || result.cache_read.overflowed
+            || result.cache_write.overflowed
+            || result.output.overflowed
+            || result.reasoning.overflowed
+            || result.cost.overflowed
+        {
+            result.kind = UsageCompleteness::Partial;
+        }
+        result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn summaries_keep_independent_known_values_and_coverage() {
+        let summary = UsageSummary::from_attempts([
+            (
+                Some(TokenUsage {
+                    input: Some(10),
+                    cache_read: Some(0),
+                    ..Default::default()
+                }),
+                UsageCompleteness::Complete,
+                Some(CostEstimate {
+                    usd: 0.25,
+                    exact: true,
+                }),
+            ),
+            (
+                Some(TokenUsage {
+                    output: Some(3),
+                    reasoning: Some(7),
+                    ..Default::default()
+                }),
+                UsageCompleteness::Partial,
+                None,
+            ),
+            (
+                None,
+                UsageCompleteness::Partial,
+                Some(CostEstimate {
+                    usd: 0.0,
+                    exact: true,
+                }),
+            ),
+        ]);
+        assert_eq!(summary.attempts, 3);
+        assert_eq!(summary.partial_attempts, 2);
+        assert_eq!(
+            summary.input,
+            MetricSummary {
+                known: Some(10),
+                unknown_attempts: 2,
+                overflowed: false
+            }
+        );
+        assert_eq!(summary.cache_read.known, Some(0));
+        assert_eq!(summary.cache_write.known, None);
+        assert_eq!(summary.cache_write.unknown_attempts, 3);
+        assert_eq!(summary.output.known, Some(3));
+        assert_eq!(summary.reasoning.known, Some(7));
+        assert_eq!(
+            summary.cost,
+            MetricSummary {
+                known: Some(CostEstimate {
+                    usd: 0.25,
+                    exact: false
+                }),
+                unknown_attempts: 1,
+                overflowed: false
+            }
+        );
+        assert_eq!(summary.kind, UsageCompleteness::Partial);
+        let empty = UsageSummary::from_attempts([]);
+        assert_eq!(empty.attempts, 0);
+        assert_eq!(empty.partial_attempts, 0);
+        assert_eq!(empty.input.known, Some(0));
+        assert_eq!(
+            empty.cost.known,
+            Some(CostEstimate {
+                usd: 0.0,
+                exact: true
+            })
+        );
+        assert_eq!(empty.kind, UsageCompleteness::Complete);
+        let unknown = UsageSummary::from_attempts([(None, UsageCompleteness::Partial, None)]);
+        assert_eq!(unknown.input.known, None);
+        assert_eq!(unknown.cost.known, None);
+        assert_eq!(unknown.kind, UsageCompleteness::Partial);
+    }
+
+    #[test]
+    fn summaries_use_attempt_completeness_and_independent_overflow_flags() {
+        let usage = TokenUsage {
+            input: Some(10),
+            cache_read: Some(0),
+            cache_write: Some(1),
+            output: Some(2),
+            reasoning: Some(1),
+        };
+        let cost = CostEstimate {
+            usd: 0.125,
+            exact: true,
+        };
+        let complete = UsageSummary {
+            attempts: 2,
+            partial_attempts: 0,
+            kind: UsageCompleteness::Complete,
+            input: MetricSummary {
+                known: Some(20),
+                unknown_attempts: 0,
+                overflowed: false,
+            },
+            cache_read: MetricSummary {
+                known: Some(0),
+                unknown_attempts: 0,
+                overflowed: false,
+            },
+            cache_write: MetricSummary {
+                known: Some(2),
+                unknown_attempts: 0,
+                overflowed: false,
+            },
+            output: MetricSummary {
+                known: Some(4),
+                unknown_attempts: 0,
+                overflowed: false,
+            },
+            reasoning: MetricSummary {
+                known: Some(2),
+                unknown_attempts: 0,
+                overflowed: false,
+            },
+            cost: MetricSummary {
+                known: Some(CostEstimate {
+                    usd: 0.25,
+                    exact: true,
+                }),
+                unknown_attempts: 0,
+                overflowed: false,
+            },
+        };
+        for (name, attempts, expected) in [
+            (
+                "complete",
+                [(Some(usage), UsageCompleteness::Complete, Some(cost)); 2],
+                complete.clone(),
+            ),
+            (
+                "unreported token does not decide kind",
+                [
+                    (Some(usage), UsageCompleteness::Complete, Some(cost)),
+                    (
+                        Some(TokenUsage {
+                            cache_write: None,
+                            ..usage
+                        }),
+                        UsageCompleteness::Complete,
+                        Some(cost),
+                    ),
+                ],
+                UsageSummary {
+                    cache_write: MetricSummary {
+                        known: Some(1),
+                        unknown_attempts: 1,
+                        overflowed: false,
+                    },
+                    ..complete.clone()
+                },
+            ),
+            (
+                "unknown cost does not decide kind",
+                [
+                    (Some(usage), UsageCompleteness::Complete, Some(cost)),
+                    (Some(usage), UsageCompleteness::Complete, None),
+                ],
+                UsageSummary {
+                    cost: MetricSummary {
+                        known: Some(CostEstimate {
+                            usd: 0.125,
+                            exact: false,
+                        }),
+                        unknown_attempts: 1,
+                        overflowed: false,
+                    },
+                    ..complete.clone()
+                },
+            ),
+            (
+                "partial attempt with all metrics known",
+                [
+                    (Some(usage), UsageCompleteness::Partial, Some(cost)),
+                    (Some(usage), UsageCompleteness::Complete, Some(cost)),
+                ],
+                UsageSummary {
+                    partial_attempts: 1,
+                    kind: UsageCompleteness::Partial,
+                    ..complete.clone()
+                },
+            ),
+            (
+                "token overflow",
+                [
+                    (
+                        Some(TokenUsage {
+                            input: Some(u64::MAX),
+                            ..usage
+                        }),
+                        UsageCompleteness::Complete,
+                        Some(cost),
+                    ),
+                    (
+                        Some(TokenUsage {
+                            input: Some(1),
+                            ..usage
+                        }),
+                        UsageCompleteness::Complete,
+                        Some(cost),
+                    ),
+                ],
+                UsageSummary {
+                    kind: UsageCompleteness::Partial,
+                    input: MetricSummary {
+                        known: Some(u64::MAX),
+                        unknown_attempts: 0,
+                        overflowed: true,
+                    },
+                    ..complete.clone()
+                },
+            ),
+            (
+                "cost overflow",
+                [(
+                    Some(usage),
+                    UsageCompleteness::Complete,
+                    Some(CostEstimate {
+                        usd: f64::MAX,
+                        exact: true,
+                    }),
+                ); 2],
+                UsageSummary {
+                    kind: UsageCompleteness::Partial,
+                    cost: MetricSummary {
+                        known: Some(CostEstimate {
+                            usd: f64::MAX,
+                            exact: false,
+                        }),
+                        unknown_attempts: 0,
+                        overflowed: true,
+                    },
+                    ..complete.clone()
+                },
+            ),
+        ] {
+            assert_eq!(UsageSummary::from_attempts(attempts), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn cost_totals_preserve_estimates_and_unknown_attempts() {
+        for (costs, expected, unknown) in [
+            (
+                vec![
+                    Some(CostEstimate {
+                        usd: 0.0028,
+                        exact: true,
+                    }),
+                    Some(CostEstimate {
+                        usd: 0.0028,
+                        exact: true,
+                    }),
+                    Some(CostEstimate {
+                        usd: 0.0027,
+                        exact: false,
+                    }),
+                ],
+                0.0083,
+                0,
+            ),
+            (
+                vec![
+                    Some(CostEstimate {
+                        usd: 0.0028,
+                        exact: true,
+                    }),
+                    Some(CostEstimate {
+                        usd: 0.0028,
+                        exact: true,
+                    }),
+                    None,
+                ],
+                0.0056,
+                1,
+            ),
+        ] {
+            let usage = TokenUsage {
+                input: Some(1000),
+                cache_read: Some(200),
+                cache_write: Some(100),
+                output: Some(100),
+                reasoning: Some(20),
+            };
+            let summary = UsageSummary::from_attempts(
+                costs
+                    .into_iter()
+                    .map(|cost| (Some(usage), UsageCompleteness::Complete, cost)),
+            );
+            let known = summary.cost.known.unwrap();
+            assert!((known.usd - expected).abs() < 1e-12);
+            assert!(!known.exact);
+            assert_eq!(summary.cost.unknown_attempts, unknown);
+            assert_eq!(summary.partial_attempts, 0);
+            assert_eq!(summary.kind, UsageCompleteness::Complete);
         }
     }
 }

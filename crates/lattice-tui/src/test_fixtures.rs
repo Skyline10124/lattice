@@ -195,7 +195,7 @@ impl StepEntry {
     pub(super) fn sent(mut self) -> Self {
         self.attempts.push(
             json!({"origin":{"protocol":"chat-completions","provider_id":"openai"},
-                "usage":null,"progress":{"progress":"sent"},"retry_delay_ms":null}),
+                "usage":null,"usage_kind":"partial","cost":null,"progress":{"progress":"sent"},"retry_delay_ms":null}),
         );
         self
     }
@@ -204,17 +204,17 @@ impl StepEntry {
         let attempt = self.attempts.len();
         self.attempts.push(json!({
             "origin":{"protocol":"chat-completions","provider_id":"openai"},
-            "usage":null,"retry_delay_ms":100,
+            "usage":null,"usage_kind":"partial","cost":null,"retry_delay_ms":100,
             "progress":{"progress":"ended","end":{"end":"stopped","cause":{"cause":"provider_error","retryable":true}},"diagnostic":diagnostic()}
         }));
         self.retries
             .push(json!({"attempt":attempt,"delay_ms":100,"notice":{"level":level,"text":text}}));
         self
     }
-    pub(super) fn completed_attempt(mut self, total_tokens: u64) -> Self {
+    pub(super) fn completed_attempt(mut self, context_tokens: u64) -> Self {
         self.attempts.push(json!({
             "origin":{"protocol":"chat-completions","provider_id":"openai"},
-            "usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":total_tokens},"retry_delay_ms":null,
+            "usage_kind":"partial","cost":null,"usage":{"input":context_tokens,"output":0,"cache_read":null,"cache_write":null,"reasoning":null},"retry_delay_ms":null,
             "progress":{"progress":"ended","end":{"end":"completed"},"diagnostic":diagnostic()}
         }));
         self
@@ -328,7 +328,7 @@ pub(super) fn turn_view(turn_id: TurnId) -> lattice_api::local::TurnView {
     serde_json::from_value(json!({
         "session_id":SESSION,"turn_id":turn_id,"user_node":1,"agent_name":"unused",
         "accepted_at":AT,"ended_at":AT,"summary":summary("failed", json!({"progress":"reserved"})),
-        "usage":{"kind":"partial","known":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0},"unknown_attempts":1}
+        "usage":lattice_api::UsageSummary::from_attempts([])
     }))
     .unwrap()
 }

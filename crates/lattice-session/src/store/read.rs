@@ -156,6 +156,8 @@ fn attempt(
         attempt: index as u32,
         origin: a.origin.clone(),
         usage: a.usage,
+        usage_kind: a.usage_kind,
+        cost: a.cost,
         progress,
         end,
         retry_delay_ms: a.retry_delay_ms,
@@ -365,7 +367,7 @@ impl Records {
             accepted_at: *accepted_at,
             ended_at: *ended_at,
             summary,
-            usage,
+            usage: Box::new(usage),
             steps,
         })
     }

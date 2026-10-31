@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 
 use lattice_conversation::{Protocol, ReplayOrigin};
 
-use crate::protocol::ReasoningReplay;
-use crate::protocol::projection::{ProjectionError, request_messages_with_replay, wire_usage};
+use crate::protocol::ChatCompletionsFeatures;
+use crate::protocol::projection::{ProjectionError, request_messages_with_replay};
 use crate::reply::{PartDelta, PartKind, ProtocolEvent, StringPatch};
 use crate::types::ChatRequest;
 
@@ -17,15 +17,25 @@ use crate::types::ChatRequest;
 pub fn build_request_json(
     request: &ChatRequest,
     model: &str,
-    replay: ReasoningReplay,
+    features: ChatCompletionsFeatures,
     origin: &ReplayOrigin,
 ) -> Result<serde_json::Value, ProjectionError> {
-    let projected = request_messages_with_replay(origin, &request.messages, replay)?;
+    let projected =
+        request_messages_with_replay(origin, &request.messages, features.reasoning_replay)?;
     let mut messages = Vec::new();
     if let Some(system) = projected.system {
         messages.push(serde_json::json!({"role": "system", "content": system}));
     }
+    let system_count = messages.len();
     messages.extend(projected.messages);
+    if features.cache_markers {
+        if system_count != 0 {
+            mark_last_content(&mut messages[0]);
+        }
+        if messages.len() > system_count {
+            mark_last_content(messages.last_mut().expect("projected messages exist"));
+        }
+    }
 
     let mut body = serde_json::json!({
         "model": model,
@@ -53,6 +63,19 @@ pub fn build_request_json(
     }
 
     Ok(body)
+}
+
+/// 只标记已有的合法末块；无文本的工具调用不产生缓存块。
+fn mark_last_content(message: &mut serde_json::Value) {
+    let content = &mut message["content"];
+    if let Some(text) = content.as_str().filter(|text| !text.is_empty()) {
+        *content = serde_json::json!([{"type":"text","text":text}]);
+    }
+    if let Some(last) = content.as_array_mut().and_then(|blocks| blocks.last_mut())
+        && last["type"] == "text"
+    {
+        last["cache_control"] = serde_json::json!({"type":"ephemeral"});
+    }
 }
 
 pub(super) enum ContentError {
@@ -129,6 +152,7 @@ pub(super) fn visit_content<E: From<ContentError>>(
 
 #[derive(Default)]
 pub struct OpenAiSseParser {
+    usage: super::usage::UsageSnapshot,
     tool_calls: BTreeMap<u32, usize>,
     current: Option<(usize, PartKind)>,
     next_index: usize,
@@ -292,7 +316,7 @@ impl OpenAiSseParser {
             }
         }
         if root.get("usage").is_some_and(|usage| !usage.is_null()) {
-            match wire_usage(Protocol::ChatCompletions, &root) {
+            match self.usage.update(Protocol::ChatCompletions, &root) {
                 Ok(Some(usage)) => events.push(ProtocolEvent::Usage(usage)),
                 Ok(None) => {}
                 Err(error) => {
@@ -554,7 +578,7 @@ mod tests {
         );
         assert_eq!(labels(completed(&events)), ["T:hello"]);
         assert!(
-            matches!(&events[..], [LlmEvent::Finished { report, .. }] if report.usage.unwrap().total_tokens == 3 && report.finish_reason.as_deref() == Some("stop"))
+            matches!(&events[..], [LlmEvent::Finished { report, .. }] if report.usage.unwrap().context_tokens() == Some(3) && report.finish_reason.as_deref() == Some("stop"))
         );
         assert!(parser.parse_chunk(None, "[DONE]").is_empty());
     }
@@ -779,9 +803,9 @@ mod tests {
                     None
                 } else {
                     Some(TokenUsage {
-                        prompt_tokens: 1,
-                        completion_tokens: 2,
-                        total_tokens: 3,
+                        input: Some(1),
+                        output: Some(2),
+                        ..Default::default()
                     })
                 }
             );

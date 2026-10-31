@@ -78,17 +78,25 @@ fn terminal_events_round_trip_the_persistent_summary_and_step() {
 
 #[test]
 fn usage_summary_preserves_totals_and_unknown_attempts() {
-    let summary = UsageSummary::Partial {
-        known: lattice_conversation::TokenUsage {
-            prompt_tokens: 1,
-            completion_tokens: 2,
-            total_tokens: 3,
-        },
-        unknown_attempts: 2,
-    };
+    let summary = UsageSummary::from_attempts(
+        [(
+            Some(lattice_conversation::TokenUsage {
+                input: Some(1),
+                output: Some(2),
+                ..Default::default()
+            }),
+            lattice_conversation::UsageCompleteness::Partial,
+            None,
+        )]
+        .into_iter()
+        .chain(std::iter::repeat_n(
+            (None, lattice_conversation::UsageCompleteness::Partial, None),
+            2,
+        )),
+    );
     let value = serde_json::to_value(&summary).unwrap();
-    assert_eq!(value["known"]["total_tokens"], 3);
-    assert_eq!(value["unknown_attempts"], 2);
+    assert_eq!(value["input"]["known"], 1);
+    assert_eq!(value["input"]["unknown_attempts"], 2);
     assert_eq!(
         serde_json::from_value::<UsageSummary>(value).unwrap(),
         summary

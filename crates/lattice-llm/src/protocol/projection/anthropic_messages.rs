@@ -204,31 +204,7 @@ pub(crate) fn tool_result_messages(
     })])
 }
 
-/// `usage: {input_tokens, output_tokens}`; the neutral total is the sum
-/// (official bodies may add cache fields, which the neutral contract does not
-/// carry).
+/// 完整 wire 与流式响应共用原生分项的换算。
 pub(crate) fn usage(wire: &Value) -> Result<Option<TokenUsage>, ProjectionError> {
-    let Some(usage) = wire.get("usage") else {
-        return Ok(None);
-    };
-    if usage.is_null() {
-        return Ok(None);
-    }
-    let malformed = |detail: String| ProjectionError::MalformedUsage {
-        provider: Protocol::Messages,
-        detail,
-    };
-    let field = |name: &str| -> Result<u64, ProjectionError> {
-        usage
-            .get(name)
-            .and_then(Value::as_u64)
-            .ok_or_else(|| malformed(format!("usage.{name} is not an integer")))
-    };
-    let prompt_tokens = field("input_tokens")?;
-    let completion_tokens = field("output_tokens")?;
-    Ok(Some(TokenUsage {
-        prompt_tokens,
-        completion_tokens,
-        total_tokens: prompt_tokens.saturating_add(completion_tokens),
-    }))
+    super::super::usage::UsageSnapshot::default().update(Protocol::Messages, wire)
 }

@@ -27,9 +27,9 @@ pub(super) fn happy_events() -> Vec<ScriptEvent> {
         ScriptEvent::Done {
             finish_reason: "stop".into(),
             usage: Some(TokenUsage {
-                prompt_tokens: 10,
-                completion_tokens: 5,
-                total_tokens: 15,
+                input: Some(10),
+                output: Some(5),
+                ..Default::default()
             }),
         },
     ]

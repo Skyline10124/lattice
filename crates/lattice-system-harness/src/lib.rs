@@ -36,7 +36,7 @@ pub use driver::{
     ProcessInspectionOperation, ProcessTermination, RunningCommand,
 };
 pub use fake_llm::{
-    CapturedRequest, FAKE_API_KEY, FakeLlmServer, ResponseGate, ServeError, SseScript,
+    CapturedRequest, FAKE_API_KEY, FakeLlmServer, NativeUsage, ResponseGate, ServeError, SseScript,
 };
 pub use fixture_http::{CapturedHttpRequest, FixtureHttpError, FixtureHttpServer, HttpFixture};
 pub use provider::{ProviderFixture, ProviderProtocol, ProviderTarget};

@@ -31,7 +31,7 @@ pub struct TurnView {
     pub accepted_at: chrono::DateTime<chrono::Utc>,
     pub ended_at: chrono::DateTime<chrono::Utc>,
     pub summary: TurnSummary,
-    pub usage: UsageSummary,
+    pub usage: Box<UsageSummary>,
 }
 impl From<&TurnDetail> for TurnView {
     fn from(turn: &TurnDetail) -> Self {

@@ -179,12 +179,12 @@ fn durable_attempt_usage_is_reported_once_with_partial_totals() {
     let mut node = ipc_tests::entry(id, "completed");
     if let ConversationEntry::Step { step, .. } = node.as_mut() {
         let attempt = |n, usage| {
-            serde_json::from_value(json!({"attempt":n,"origin":{"protocol":"chat-completions","provider_id":"openai"},"usage":usage,"progress":{"progress":"ended","end":{"end":"completed"},"diagnostic":null},"end":{"end":"stopped","cause":{"cause":"process_exit"},"diagnostic":null},"retry_delay_ms":null})).unwrap()
+            serde_json::from_value(json!({"attempt":n,"origin":{"protocol":"chat-completions","provider_id":"openai"},"usage":usage,"usage_kind":"partial","cost":null,"progress":{"progress":"ended","end":{"end":"completed"},"diagnostic":null},"end":{"end":"stopped","cause":{"cause":"process_exit"},"diagnostic":null},"retry_delay_ms":null})).unwrap()
         };
         step.attempts = vec![
             attempt(
                 0,
-                json!({"prompt_tokens":20,"completion_tokens":10,"total_tokens":30}),
+                json!({"input":20,"output":10,"cache_read":null,"cache_write":null,"reasoning":null}),
             ),
             attempt(1, serde_json::Value::Null),
         ];
@@ -211,7 +211,8 @@ fn durable_attempt_usage_is_reported_once_with_partial_totals() {
         text.contains("\"unknown_attempts\":1"),
         "持久 usage 不能被重复 entry 翻倍或丢弃：{text}"
     );
-    assert!(text.contains("\"total_tokens\":30"));
+    assert!(text.contains("\"input\":{\"known\":20"));
+    assert!(text.contains("\"output\":{\"known\":10"));
 }
 
 #[test]
