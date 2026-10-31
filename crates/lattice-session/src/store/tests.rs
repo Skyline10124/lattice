@@ -2086,7 +2086,10 @@ fn attempt_sources_survive_retry_and_reopen() {
         .unwrap();
     let mut complete = reply(key(tid(1), 1, 0), 0);
     complete.usage = Some(TokenUsage::default());
-    complete.cost = None;
+    complete.cost = Some(CostEstimate {
+        usd: 0.5,
+        exact: true,
+    });
     complete.origin = third.clone();
     complete.message.provider_origin = Some(complete.origin.clone());
     db.close_step(&lock, CloseStep::Finish(complete), now())
@@ -2150,6 +2153,10 @@ fn attempts_without_reply_allow_sent_and_stopped_on_reopen() {
                 StopCause::ProviderError { retryable: false },
             );
             stop.usage = Some(TokenUsage::default());
+            stop.cost = Some(CostEstimate {
+                usd: 0.5,
+                exact: true,
+            });
             db.stop_attempt(&lock, stop, now()).unwrap();
         }
         let expected = node_at(&db, 2);
