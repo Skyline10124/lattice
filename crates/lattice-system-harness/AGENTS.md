@@ -26,6 +26,6 @@
 - `direct_crash_barriers` 是显式 feature 场景，验证会话库提交后的 SIGSTOP 与 SIGKILL 窗口、各阶段的结论、持久取消、库级故障与观察调度。普通套件通过不代表运行过它。
 - `direct_tree_session` 保护按 NodeId 退回分叉、profile 副本与 agent 规则、原 Turn 的 Step 详情，以及文件与历史不回退，并验证旧库被拒绝。未公开的表编码、值版本与事务关系由库层测试验证，harness 不直接打开 redb。
 - 配置来源与 profile 副本的场景要求见[测试合同](../../docs/development/testing.md#配置来源与-profile-副本)。
-- PTY smoke 验证同一个 Direct-Local Turn 的接线；[模型与档位选择](../../docs/architecture/tui.md#选择面板)的验证待 #315 L4 实现后补齐；环境故障不能当作跳过。
+- PTY smoke 验证同一个 Direct-Local Turn 的接线，以及[模型与档位选择](../../docs/architecture/tui.md#选择面板)、过滤与取消、请求 JSON 和公开会话事实；环境故障不能当作跳过。
 - 先按测试合同准备当前的被测二进制，再运行需要的 fast、direct 或 PTY 目标；运行 `release-operator`、`crash-barriers` 时要明确说明。`LATTICE_BIN` 按测试进程的工作目录解析，推荐用绝对路径，但这不是额外的代码约束。
 - 只在影响范围需要时运行全量 harness，它不是每次局部修改的默认命令。

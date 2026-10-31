@@ -1358,18 +1358,277 @@ fn current_model_comes_from_head_after_rewind_and_root() {
     current.agent = Some("latest-copy-agent".into());
     current.model = "latest-copy-model".into();
     current.provider = "latest-provider".into();
+    current.effort = Some(lattice_api::Effort::Low);
     open_view(&mut app, current.clone(), turns(1..=1));
     assert_eq!(app.model.as_deref(), Some("latest-copy-model"));
     assert_eq!(app.provider.as_deref(), Some("latest-provider"));
+    assert_eq!(app.next_effort(), Some(lattice_api::Effort::Low));
     current.position = NodeId(0);
     current.turn_id = None;
     current.path_replaced = true;
     app.apply_view(LocalUpdate::Head(current));
     assert_eq!(app.model.as_deref(), Some("latest-copy-model"));
     assert_eq!(app.provider.as_deref(), Some("latest-provider"));
+    assert_eq!(app.next_effort(), Some(lattice_api::Effort::Low));
     app.apply_submission(receipt(turn(1), accepted(turn(1))));
     assert_eq!(
         app.ctx.active_agent, "latest-copy-agent",
         "迟到回执不覆盖副本的当前身份"
     );
+}
+
+#[test]
+fn accepted_selection_consumes_only_matching_field_generations() {
+    use lattice_api::Effort::{Low, Off};
+    fn confirm(app: &mut App, id: TurnId, proof: usize, node: u64) {
+        match proof {
+            0 => app.apply_submission(receipt(id, accepted(id))),
+            1 => app.apply_recovery(id, Ok(turn_detail(id))),
+            2 => app.apply_view(entry_update(user(node, id, node.div_ceil(2), "accepted"))),
+            _ => app.apply_handoff(DetachReport {
+                turn_id: Some(id),
+                submission: Some(SubmissionReceipt {
+                    turn_id: id,
+                    result: accepted(id),
+                    recovered: false,
+                }),
+                session_id: sid(),
+                submission_diagnostic: None,
+                cancel: None,
+                cancel_error: None,
+                head: None,
+                summary: None,
+            }),
+        }
+    }
+    fn current() -> SessionHead {
+        SessionHead {
+            provider: "other".into(),
+            model: "current".into(),
+            effort: Some(Off),
+            ..head(0, None, false)
+        }
+    }
+    fn next(app: &mut App, options: &TuiOptions) -> TurnRequest {
+        app.dock.release();
+        app.dock.close_panel();
+        // 新的只读窗口不含本客户端旧 Turn，按当前空闲 head 继续提交。
+        open_view(app, current(), vec![]);
+        app.input.set_text("next");
+        let prompt = app.submit().expect("空闲时从 App 提交");
+        begin_turn(options, app, prompt).unwrap()
+    }
+    let options = TuiOptions {
+        agent: "unused".into(),
+        session_id: None,
+        session_dir: "/tmp/unused-tui-history".into(),
+        project_root: "/tmp".into(),
+    };
+    for proof in 0..4 {
+        for reselect in 0..4 {
+            let mut app = test_app(true);
+            app.selection
+                .choose_model(model_candidate("p", "same", &[Low, Off]));
+            app.selection.choose_effort(Low);
+            app.input.set_text("first");
+            let prompt = app.submit().unwrap();
+            let first = begin_turn(&options, &mut app, prompt).unwrap();
+            assert_eq!(
+                (first.model.as_deref(), first.effort),
+                (Some("p/same"), Some(Low))
+            );
+            app.apply_submission(receipt(
+                first.turn_id,
+                SubmissionResult::Unknown { error: None },
+            ));
+            app.dock.release();
+            if reselect & 1 != 0 {
+                app.selection
+                    .choose_model(model_candidate("p", "same", &[Low, Off]));
+            }
+            if reselect & 2 != 0 {
+                app.selection.choose_effort(Low);
+            }
+            app.apply_builtin("/effort");
+            let old_query = app.model_query.take().unwrap();
+            app.apply_models(
+                old_query.clone(),
+                Ok(lattice_api::ModelCandidates {
+                    models: vec![model_candidate("p", "same", &[Low, Off])],
+                    warnings: vec![],
+                }),
+            );
+            app.apply_view(LocalUpdate::Head(current()));
+            assert_eq!(app.next_target().as_deref(), Some("p/same"));
+            confirm(&mut app, first.turn_id, proof, 1);
+            let query = app.dock.query().unwrap();
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 12)).unwrap();
+            terminal
+                .draw(|frame| Dock::new(&app).render(frame, frame.area()))
+                .unwrap();
+            let shown = buffer_text(terminal.backend().buffer());
+            confirm(&mut app, first.turn_id, proof, 1);
+            assert_eq!(
+                app.dock.query().as_ref(),
+                Some(&query),
+                "重复证据不能重置查询"
+            );
+            let second = next(&mut app, &options);
+            let expected = match reselect {
+                0 => (None, None),
+                1 => (Some("p/same"), None),
+                2 => (None, Some(Low)),
+                _ => (Some("p/same"), Some(Low)),
+            };
+            assert_eq!(
+                (second.model.as_deref(), second.effort),
+                expected,
+                "proof {proof}, reselect {reselect}"
+            );
+            if reselect & 1 == 0 {
+                assert_eq!(
+                    query.target.as_deref(),
+                    Some("other/current"),
+                    "proof {proof}, reselect {reselect}"
+                );
+                assert_ne!(query.id, old_query.id);
+                assert!(
+                    shown.contains("加载中") && !shown.contains("low"),
+                    "旧候选应清空：{shown}"
+                );
+            } else {
+                assert_eq!(query, old_query);
+                let expected_marker = if reselect & 2 == 0 {
+                    "off · 当前"
+                } else {
+                    "low · 当前"
+                };
+                assert!(
+                    shown.contains(expected_marker),
+                    "当前档位要随确认更新：{shown}"
+                );
+            }
+            app.apply_submission(receipt(
+                second.turn_id,
+                SubmissionResult::Unknown { error: None },
+            ));
+            app.selection.choose_effort(Off);
+            confirm(&mut app, second.turn_id, proof, 3);
+            confirm(&mut app, first.turn_id, proof, 1);
+            let third = next(&mut app, &options);
+            assert_eq!(
+                (third.model, third.effort),
+                (None, Some(Off)),
+                "只消费未重选的字段，旧证据幂等"
+            );
+            app.apply_submission(receipt(
+                third.turn_id,
+                SubmissionResult::Unknown { error: None },
+            ));
+            confirm(&mut app, third.turn_id, proof, 5);
+            let fourth = next(&mut app, &options);
+            assert_eq!(
+                (fourth.model, fourth.effort),
+                (None, None),
+                "proof {proof}: 选择最终经 App 消费"
+            );
+        }
+    }
+}
+
+#[test]
+fn closed_reopened_and_retargeted_panels_ignore_late_success_and_failure() {
+    use lattice_api::{Effort::Low, ModelCandidates};
+    let mut app = test_app(false);
+    app.apply_builtin("/model");
+    let closed = app.model_query.take().unwrap();
+    app.apply_action(KeyAction::Clear);
+    app.apply_models(
+        closed.clone(),
+        Ok(ModelCandidates {
+            models: vec![model_candidate("p", "stale", &[])],
+            warnings: vec![],
+        }),
+    );
+    assert!(app.dock.shows_input(), "迟到成功不能重开面板");
+    app.apply_builtin("/model");
+    let current = app.model_query.take().unwrap();
+    app.apply_models(
+        current,
+        Ok(ModelCandidates {
+            models: vec![model_candidate("p", "fresh", &[Low])],
+            warnings: vec![],
+        }),
+    );
+    app.apply_models(
+        closed.clone(),
+        Ok(ModelCandidates {
+            models: vec![model_candidate("p", "stale", &[])],
+            warnings: vec![],
+        }),
+    );
+    app.apply_models(
+        closed,
+        Err(local_error(LocalErrorKind::Transport, "stale failure")),
+    );
+    assert!(app.dock.message_id().is_none(), "迟到失败不能发 Warn");
+    app.apply_action(KeyAction::Submit);
+    assert_eq!(
+        app.next_target().as_deref(),
+        Some("p/fresh"),
+        "旧响应不能取代新候选"
+    );
+    app.apply_builtin("/effort");
+    let old_effort = app.model_query.take().unwrap();
+    assert_eq!(old_effort.target.as_deref(), Some("p/fresh"));
+    app.apply_action(KeyAction::Clear);
+    // 已有会话当前模型不在普通列表也可以精确查询。
+    app.selection = Default::default();
+    let mut current = head(0, None, false);
+    current.model = "deprecated".into();
+    app.apply_view(LocalUpdate::Head(current));
+    app.apply_builtin("/effort");
+    let current = app.model_query.take().unwrap();
+    assert_eq!(current.target.as_deref(), Some("openai/deprecated"));
+    let mut changed = head(0, None, false);
+    changed.provider = "other".into();
+    changed.model = "unknown/model".into();
+    app.apply_view(LocalUpdate::Head(changed));
+    let changed = app.model_query.take().unwrap();
+    assert_eq!(changed.target.as_deref(), Some("other/unknown/model"));
+    app.apply_models(
+        current,
+        Err(local_error(
+            LocalErrorKind::Transport,
+            "wrong model failure",
+        )),
+    );
+    app.apply_models(
+        old_effort,
+        Ok(ModelCandidates {
+            models: vec![model_candidate("p", "fresh", &[Low])],
+            warnings: vec![],
+        }),
+    );
+    assert!(app.dock.message_id().is_none());
+    app.apply_models(
+        changed,
+        Ok(ModelCandidates {
+            models: vec![model_candidate("other", "unknown/model", &[])],
+            warnings: vec![],
+        }),
+    );
+    assert!(app.apply_action(KeyAction::Submit).is_none());
+    assert!(!app.dock.shows_input(), "无可选档位的说明不能被选定");
+    app.apply_action(KeyAction::Clear);
+    app.apply_builtin("/model");
+    let failed = app.model_query.take().unwrap();
+    app.apply_models(
+        failed,
+        Err(local_error(LocalErrorKind::Transport, "current failure")),
+    );
+    assert!(docked(&app).contains("current failure"));
+    app.apply_action(KeyAction::Insert(' '));
+    assert!(app.dock.shows_input());
 }

@@ -11,7 +11,7 @@
 ## 局部约束
 
 - TUI 不读取 profile、provider 配置或凭据；配置问题在提交时由后台拒绝，显示 API 给出的配置拒绝说明，输入保留。既有会话与重连走只读入口。Component 预热与执行由后台所属 API 处理。
-- `/model` 与 `/effort` 的选择（待实现，由 #315 L4 承接）由 app 持有，随下一次提交交出，候选项来自后台的模型候选查询；面板、档位回退与 statusline 的已定规则见[选择面板](../../docs/architecture/tui.md#选择面板)。
+- `/model` 与 `/effort` 的选择由 app 持有，随下一次提交交出，候选项来自后台的模型候选查询；面板、档位回退与 statusline 的已定规则见[选择面板](../../docs/architecture/tui.md#选择面板)。
 - session 负责打开已有会话及对话条目到 Block 的转换；新会话的 SessionId 在首次提交时生成，Session 在首次提交接受时创建。connection 生成状态消息的文字并定级，转换退出报告文案；等级只在这里决定，是否暂驻由 Dock 按等级判断，见[状态消息与等级](../../docs/architecture/tui.md#状态消息与等级)。app 持有本客户端一次提交的具体句柄 LocalTurn 与当前会话的视图，发出提交、`watch`、查询与取消，按 NodeId 维护条目的显示；连接、视图与查询的转交及分帧归 LocalClient。完整交接见 [TUI 组件接线](../../docs/architecture/tui.md#组件接线)。
 - input 负责缓冲、历史与按键，view 负责布局、折行、viewport、Dock 与 statusline。共享渲染归本 crate，目录和文件按职责组织。
 - raw 模式下 Ctrl+C 按 TurnId 取消：本客户端提交的一轮经 LocalTurn 登记取消意图，不另起 tokio::signal::ctrl_c watcher。退出、接受未知、视图推送与路径替换、往上翻取更早的轮、尝试边界与连接中断的完整显示规则归 TUI 合同。

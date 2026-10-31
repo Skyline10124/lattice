@@ -3,11 +3,164 @@
 
 use super::*;
 use crate::blocks::BlockId;
+use lattice_api::{Effort, ModelCandidate, ModelCandidates, local::AuthState};
 
-/// 承载某个 slash 命令输出的面板：标题加若干行。
-pub(crate) struct Panel {
-    pub(crate) title: &'static str,
-    pub(crate) lines: Vec<String>,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ModelQuery {
+    pub(crate) id: u64,
+    pub(crate) target: Option<String>,
+}
+
+#[derive(Clone)]
+pub(crate) enum PanelChoice {
+    Model(ModelCandidate),
+    Effort(Effort),
+}
+
+impl PanelChoice {
+    fn label(&self) -> String {
+        match self {
+            Self::Model(model) => format!("{}/{}", model.provider, model.model),
+            Self::Effort(effort) => effort.to_string(),
+        }
+    }
+}
+
+pub(crate) enum Panel {
+    Help(Vec<String>),
+    Model(Picker),
+    Effort(Picker),
+}
+
+/// 只保存这次打开的候选和导航；已选意图由 app 持有。
+pub(crate) struct Picker {
+    query: ModelQuery,
+    filter: String,
+    items: Vec<PanelChoice>,
+    cursor: usize,
+    current: Option<String>,
+    loading: bool,
+    empty: &'static str,
+}
+
+const NO_EFFORT: &str =
+    "该模型不能选择推理强度，可以在 providers.toml 中补充它的推理参数写法或档位";
+const NO_MODEL: &str = "先用 /model 选择模型";
+
+impl Panel {
+    pub(crate) fn models(id: u64, current: Option<String>) -> Self {
+        Self::Model(Picker::new(ModelQuery { id, target: None }, current, true))
+    }
+
+    pub(crate) fn efforts(id: u64, target: Option<String>, current: Option<Effort>) -> Self {
+        let loading = target.is_some();
+        let mut picker = Picker::new(
+            ModelQuery { id, target },
+            current.map(|effort| effort.to_string()),
+            loading,
+        );
+        picker.empty = NO_MODEL;
+        Self::Effort(picker)
+    }
+
+    fn title(&self) -> &'static str {
+        match self {
+            Self::Help(_) => "HELP",
+            Self::Model(_) => "MODEL",
+            Self::Effort(_) => "EFFORT",
+        }
+    }
+
+    fn picker(&self) -> Option<&Picker> {
+        match self {
+            Self::Model(picker) | Self::Effort(picker) => Some(picker),
+            Self::Help(_) => None,
+        }
+    }
+
+    fn picker_mut(&mut self) -> Option<&mut Picker> {
+        match self {
+            Self::Model(picker) | Self::Effort(picker) => Some(picker),
+            Self::Help(_) => None,
+        }
+    }
+}
+
+impl Picker {
+    fn new(query: ModelQuery, current: Option<String>, loading: bool) -> Self {
+        Self {
+            query,
+            filter: String::new(),
+            items: Vec::new(),
+            cursor: 0,
+            current,
+            loading,
+            empty: "没有可选模型",
+        }
+    }
+
+    fn matches(&self) -> Vec<usize> {
+        let filter = self.filter.to_lowercase();
+        self.items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                item.label()
+                    .to_lowercase()
+                    .contains(&filter)
+                    .then_some(index)
+            })
+            .collect()
+    }
+
+    fn replace(&mut self, items: Vec<PanelChoice>, current: Option<String>, empty: &'static str) {
+        self.items = items;
+        self.current = current;
+        self.loading = false;
+        self.empty = empty;
+        let matches = self.matches();
+        self.cursor = if self.filter.is_empty() {
+            matches
+                .iter()
+                .position(|&index| Some(self.items[index].label()) == self.current)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+    }
+
+    fn edit(&mut self, action: crate::input::KeyAction) {
+        use crate::input::KeyAction;
+        match action {
+            KeyAction::Up => self.cursor = self.cursor.saturating_sub(1),
+            KeyAction::Down => {
+                self.cursor = self
+                    .cursor
+                    .saturating_add(1)
+                    .min(self.matches().len().saturating_sub(1))
+            }
+            action => {
+                match action {
+                    KeyAction::Insert(c) if !c.is_control() => self.filter.push(c),
+                    KeyAction::Paste(text) => {
+                        self.filter.extend(text.chars().filter(|c| !c.is_control()))
+                    }
+                    KeyAction::Backspace => {
+                        self.filter.pop();
+                    }
+                    KeyAction::ModifiedSpace => self.filter.push(' '),
+                    _ => return,
+                }
+                self.cursor = 0;
+            }
+        }
+    }
+
+    fn chosen(&self) -> Option<PanelChoice> {
+        self.matches()
+            .get(self.cursor)
+            .map(|&index| self.items[index].clone())
+    }
 }
 
 /// Dock 的持久状态：输入区之上的模块栈。输入区常驻栈底，其上至多一个面板，
@@ -77,6 +230,75 @@ impl DockState {
         self.changed |= self.panel.take().is_some();
     }
 
+    pub(crate) fn query(&self) -> Option<ModelQuery> {
+        match self.panel.as_ref()? {
+            Panel::Model(picker) => Some(picker.query.clone()),
+            Panel::Effort(picker) if picker.query.target.is_some() => Some(picker.query.clone()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn effort_target(&self) -> Option<Option<&str>> {
+        match self.panel.as_ref()? {
+            Panel::Effort(picker) => Some(picker.query.target.as_deref()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn retarget_effort(
+        &mut self,
+        id: u64,
+        target: Option<String>,
+        current: Option<Effort>,
+    ) {
+        if let Some(Panel::Effort(picker)) = &mut self.panel {
+            picker.query = ModelQuery { id, target };
+            picker.current = current.map(|effort| effort.to_string());
+            picker.items.clear();
+            picker.cursor = 0;
+            picker.loading = picker.query.target.is_some();
+            picker.empty = NO_MODEL;
+            self.changed = true;
+        }
+    }
+
+    pub(crate) fn populate(&mut self, result: ModelCandidates, current: Option<String>) {
+        match &mut self.panel {
+            Some(Panel::Model(picker)) => picker.replace(
+                result.models.into_iter().map(PanelChoice::Model).collect(),
+                current,
+                "没有可选模型",
+            ),
+            Some(Panel::Effort(picker)) => picker.replace(
+                result
+                    .models
+                    .into_iter()
+                    .flat_map(|model| model.supported_efforts)
+                    .map(PanelChoice::Effort)
+                    .collect(),
+                current,
+                NO_EFFORT,
+            ),
+            _ => return,
+        }
+        self.changed = true;
+    }
+
+    pub(crate) fn edit_panel(&mut self, action: crate::input::KeyAction) {
+        if let Some(picker) = self.panel.as_mut().and_then(Panel::picker_mut) {
+            picker.edit(action);
+            self.changed = true;
+        }
+    }
+
+    pub(crate) fn update_current(&mut self, model: Option<String>, effort: Option<Effort>) {
+        match &mut self.panel {
+            Some(Panel::Model(picker)) => picker.current = model,
+            Some(Panel::Effort(picker)) => picker.current = effort.map(|effort| effort.to_string()),
+            _ => {}
+        }
+    }
+
     /// 栈顶是输入区：输入可见且可编辑。
     pub(crate) fn shows_input(&self) -> bool {
         self.panel.is_none() && self.message.is_none()
@@ -120,6 +342,8 @@ pub(crate) enum DockIntent {
     Submit,
     ReleaseStatus,
     ClosePanel,
+    EditPanel(crate::input::KeyAction),
+    Choose(PanelChoice),
     None,
 }
 
@@ -245,32 +469,120 @@ impl PanelModule<'_> {
     fn interpret(&self, action: crate::input::KeyAction) -> DockIntent {
         match action {
             crate::input::KeyAction::Clear => DockIntent::ClosePanel,
+            crate::input::KeyAction::Submit => self
+                .panel
+                .picker()
+                .and_then(Picker::chosen)
+                .map_or(DockIntent::None, DockIntent::Choose),
+            action if self.panel.picker().is_some() => DockIntent::EditPanel(action),
             _ => DockIntent::None,
         }
     }
 
-    fn text(&self) -> String {
-        self.panel.lines.join("\n")
-    }
-
     fn rows(&self, content_w: u16) -> u16 {
-        let rows = body(&self.text(), content_w, Style::default()).len();
+        let rows = match self.panel {
+            Panel::Help(lines) => body(&lines.join("\n"), content_w, Style::default()).len(),
+            Panel::Model(picker) | Panel::Effort(picker) => {
+                picker.matches().len().max(1).saturating_add(1)
+            }
+        };
         u16::try_from(rows.max(1)).unwrap_or(u16::MAX)
     }
 
     fn render(&self, frame: &mut Frame, title: Rect, area: Rect) {
         frame.render_widget(
             Paragraph::new(title_line(
-                self.panel.title,
+                self.panel.title(),
                 Role::Assistant,
-                &["Esc 关闭".into()],
+                &[if self.panel.picker().is_some() {
+                    "Enter 选定 · Esc 取消"
+                } else {
+                    "Esc 关闭"
+                }
+                .into()],
                 title.width as usize,
             )),
             title,
         );
-        let shown = body(&self.text(), area.width, role_style(Role::Assistant));
+        if let Panel::Help(lines) = self.panel {
+            frame.render_widget(
+                Paragraph::new(body(
+                    &lines.join("\n"),
+                    area.width,
+                    role_style(Role::Assistant),
+                )),
+                area,
+            );
+            return;
+        }
+        let picker = self.panel.picker().expect("选择面板");
+        let matches = picker.matches();
+        let height = usize::from(area.height.saturating_sub(1));
+        let start = picker.cursor.saturating_sub(height.saturating_sub(1));
+        let mut shown = vec![clip_spans(
+            vec![Span::styled(
+                format!("过滤：{}", picker.filter),
+                role_style(Role::Assistant),
+            )],
+            area.width,
+        )];
+        if matches.is_empty() {
+            shown.push(clip_spans(
+                vec![Span::styled(
+                    if picker.loading {
+                        "加载中"
+                    } else if !picker.items.is_empty() {
+                        "没有匹配项"
+                    } else {
+                        picker.empty
+                    },
+                    role_style(Role::Assistant),
+                )],
+                area.width,
+            ));
+        } else {
+            for &index in matches.iter().skip(start).take(height) {
+                let item = &picker.items[index];
+                let label = item.label();
+                let mut spans = vec![Span::styled(label.clone(), role_style(Role::Assistant))];
+                if picker.current.as_ref() == Some(&label) {
+                    spans.push(Span::styled(" · 当前", role_style(Role::DimMeta)));
+                }
+                if let PanelChoice::Model(model) = item
+                    && model.credential_status != AuthState::Ready
+                {
+                    spans.push(Span::styled(" · 无凭据", role_style(Role::DimMeta)));
+                }
+                shown.push(clip_spans(spans, area.width));
+            }
+        }
         frame.render_widget(Paragraph::new(shown), area);
+        let row = if matches.is_empty() {
+            0
+        } else {
+            picker.cursor.saturating_sub(start).saturating_add(1)
+        };
+        if area.width > 0 && row < usize::from(area.height) {
+            frame.set_cursor_position((area.x, area.y.saturating_add(row as u16)));
+        }
     }
+}
+
+fn clip_spans(spans: Vec<Span<'static>>, width: u16) -> Line<'static> {
+    let mut line = Line::default();
+    let mut remaining = usize::from(width);
+    for span in &spans {
+        for glyph in span.styled_graphemes(Style::default()) {
+            let width = glyph.symbol.width();
+            if width > remaining {
+                return line;
+            }
+            remaining -= width;
+            line.spans
+                .push(Span::styled(glyph.symbol.to_owned(), glyph.style));
+        }
+    }
+    line
 }
 
 impl MessageModule<'_> {
