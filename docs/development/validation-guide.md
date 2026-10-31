@@ -45,7 +45,7 @@ cargo xtask tool-build --verify
 
 profile 由后台在接受前读取：项目内的 `.lattice/agents` 优先，其次是后台启动时 HOME 下的 `.lattice/agents`；全局目录与 profile 须属于当前用户且不可被同组或其他用户写入，0755 目录与 0644 文件可用。固定 `XDG_STATE_HOME` 而更换前端 HOME 时仍连接同一后台，使用同一全局 agents 目录；更换后台的 HOME 需要停止后重新启动。TUI 启动不检查 profile，配置拒绝在提交时显示并保留输入。
 
-Session、TUI、`auth` 与 `models` 会按需自启后台；`daemon status`、`daemon stop` 只联系已有后台，不自启。后台在启动时按自己的环境确定配置目录与全局 agents 目录的位置，并载入 TLS 根证书。目录位置与 TLS 根随后保持不变。目录里的 `providers.toml` 与凭据在每次请求时重读，修改这些文件后下一次请求即使用新内容。换了决定目录位置或 TLS 根的环境后，先执行 `lattice daemon stop` 再启动。纯查询可建立连接所需运行资源，领域数据保持只读。
+Session、TUI、`auth` 与 `models` 会按需自启后台；`daemon status`、`daemon stop` 只联系已有后台，不自启。后台在启动时按自己的环境确定配置目录与全局 agents 目录的位置，并载入 TLS 根证书。目录位置与 TLS 根随后保持不变。目录里的 `providers.toml` 与凭据在每次请求时重读，其中用于请求发送的配置与凭据修改从下一次请求起生效。价格的生效时机见[费用估算](../architecture/llm.md#费用估算)。换了决定目录位置或 TLS 根的环境后，先执行 `lattice daemon stop` 再启动。纯查询可建立连接所需运行资源，领域数据保持只读。
 
 ### 提交与找回
 
@@ -165,6 +165,8 @@ stop 先关闭新准入，再等待已接管工作及必要收尾；收到回执
 客户端与后台应来自相符构建，当前 Local IPC 标识为 `LTLOCAL9`。新旧版本的 IPC 互不兼容，新二进制不能停止旧后台；升级前先用旧二进制执行 `lattice daemon stop`，或手动结束旧后台进程。从这一版起，后台读到不同的 IPC 标识会先回写自己的标识再断开：客户端据此报 `incompatible_backend`，后台较旧时提示用旧二进制执行 `lattice daemon stop`，后台较新时提示改用新二进制。更早的后台不回写就断开，客户端发出请求后一个字节都没收到时报传输错误，并附同样的停机提示；当前后台过载或崩溃也可能这样断开，所以这只是提示。两种情况退出码都是 `1`。身份或协议不兼容时保留错误，交由用户处理；不自动终止已有后台或迁移状态。当前会话库格式为 6；旧格式 `lattice.redb` 与旧 `sessions.git` / `invocations.git` 在打开会话库时被拒绝并列出路径，不提供迁移或兼容读取；处理状态须另获授权，见[开发状态诊断与重建边界](tool-development.md#开发状态诊断与重建边界)。
 
 外部脚本需适配 `session turn --json`、流式 JSONL 条目，以及人类输出中的 `usage` 摘要：尝试的 `usage` 由三个必填计数 `prompt_tokens`、`completion_tokens`、`total_tokens` 改为五个可选计数 `input`、`cache_read`、`cache_write`、`output`、`reasoning`，尝试上新增 `usage_kind`，可选费用字段由 `estimated_cost_usd` 改为 `cost`（`{usd, exact}` 或 null）。Turn 用量汇总新增 `attempts`、`partial_attempts`，五项计数各自提供 `known`、`unknown_attempts`、`overflowed`，费用汇总为 `cost: {known: {usd, exact} | null, unknown_attempts, overflowed}`；整体 `kind` 由各次尝试保存的 `usage_kind` 与汇总溢出决定。计数与费用的含义见[用量、缓存与费用](../architecture/llm.md#用量缓存与费用)，汇总字段与完整性语义见[会话合同](../architecture/session.md#关闭-step-与-turn)。
+
+新尝试按[费用估算](../architecture/llm.md#费用估算)保存确切或估算金额，未知费用仍为 null；已有记录中的未知费用不回填，旧尝试不补 `usage_kind`。会话库格式仍为 6，Local IPC 标识仍为 `LTLOCAL9`。
 
 ### 退出码与失败后的动作
 

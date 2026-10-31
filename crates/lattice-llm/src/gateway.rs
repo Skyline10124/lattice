@@ -14,6 +14,8 @@ use crate::client::{self, RequestEndpoint, TurnClient};
 use crate::provider::{Auth, Provider, config::ProviderRegistry, validate_model_id};
 use crate::{ChatRequest, LlmError, LlmStream, ModelTarget, StreamControl};
 
+mod cost;
+
 struct Configuration {
     directory: PathBuf,
     roots: Vec<reqwest::Certificate>,
@@ -213,7 +215,7 @@ impl ResolvedRequest {
                 "resolved request requires its original target and a SessionId",
             ));
         }
-        client::dispatch(
+        let input = client::dispatch(
             request,
             RequestEndpoint {
                 provider: &self.provider.id,
@@ -234,7 +236,12 @@ impl ResolvedRequest {
             },
             control,
         )
-        .await
+        .await?;
+        Ok(cost::with_estimated_cost(
+            input,
+            self.configuration.directory.clone(),
+            self.target.clone(),
+        ))
     }
 }
 

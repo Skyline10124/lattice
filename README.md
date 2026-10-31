@@ -118,7 +118,7 @@ Session 命令、TUI、`auth` 与 `models` 首次使用时会自动启动本地�
 
 自动启动与显式运行 `lattice daemon serve` 都继承启动进程的环境。后台在启动时按这份环境确定配置目录的位置（默认 `$HOME/.lattice`，其中有 `providers.toml`、凭据与全局 agents 目录），并载入 TLS 根证书。目录位置与 TLS 根在运行期间保持不变。换了决定目录位置或 TLS 根的环境后，先执行 `lattice daemon stop` 再启动。
 
-配置目录里的 `providers.toml` 与凭据在每次模型请求时重读。修改这些文件，或通过 `lattice auth set` 更新凭据，下一次请求即使用新内容。TLS 根只在后台启动时载入；修改 TLS 信任后需要重启后台。
+配置目录里的 `providers.toml` 与凭据在每次模型请求时重读，其中用于请求发送的配置与凭据修改从下一次请求起生效。凭据也可通过 `lattice auth set` 更新。价格的生效时机见[费用估算](docs/architecture/llm.md#费用估算)。TLS 根只在后台启动时载入；修改 TLS 信任后需要重启后台。
 
 TUI 中，输入框为空时按 Ctrl+D 或输入 `/quit` 只退出界面；任务运行时按 Esc 或 Ctrl+C 请求取消。之后用 `lattice tui <session_id>` 重新打开会话，在界面内输入 `/reconnect` 重新连接。
 

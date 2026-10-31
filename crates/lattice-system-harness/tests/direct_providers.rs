@@ -199,6 +199,17 @@ fn protocols_cache_and_usage_survive_tool_round_trip_and_backend_restart() {
         world
             .wire_provider(provider.fixture, &server, &key)
             .unwrap();
+        let id = match provider.fixture.target {
+            ProviderTarget::Builtin(id) | ProviderTarget::Custom(id) => id,
+        };
+        let configuration = world.home().join(".lattice/providers.toml");
+        let source = std::fs::read_to_string(&configuration).unwrap();
+        let write_price = if provider.name == "gemini" {
+            ""
+        } else {
+            "cache_write = 3\n"
+        };
+        std::fs::write(&configuration, format!("{source}\n[providers.{id}.models.\"{}\".cost]\ninput = 2\noutput = 10\ncache_read = 0.5\n{write_price}", provider.fixture.model)).unwrap();
         if provider.name == "anthropic" {
             let cache = world.home().join(".lattice/cache");
             std::fs::create_dir_all(&cache).unwrap();
@@ -258,19 +269,29 @@ fn protocols_cache_and_usage_survive_tool_round_trip_and_backend_restart() {
             for step in saved["steps"].as_array().unwrap() {
                 let attempt = &step["attempts"][0];
                 let expected = serde_json::json!({"input":100,"cache_read":60,"cache_write":if provider.name=="gemini" {None} else {Some(10)},"output":20,"reasoning":if provider.name=="anthropic" {None} else {Some(5)}});
+                let expected_fee = if provider.name == "gemini" {
+                    0.00031
+                } else {
+                    0.00032
+                };
                 require(
                     attempt["usage"] == expected
-                        && attempt["usage_kind"] == "partial"
-                        && attempt["cost"].is_null(),
+                        && attempt["usage_kind"] == "complete"
+                        && attempt["cost"]["exact"] == true
+                        && attempt["cost"]["usd"]
+                            .as_f64()
+                            .is_some_and(|fee| (fee - expected_fee).abs() < 1e-15),
                     format!("native usage normalized and saved: {attempt}"),
                 )?;
             }
             require(
-                saved["usage"]["partial_attempts"] == 2
+                saved["usage"]["partial_attempts"] == 0
+                    && saved["usage"]["kind"] == "complete"
                     && saved["usage"]["input"]["known"] == 200
                     && saved["usage"]["output"]["known"] == 40
-                    && saved["usage"]["cost"]["unknown_attempts"] == 2,
-                "two attempts aggregate with unknown fees",
+                    && saved["usage"]["cost"]["known"]["exact"] == true
+                    && saved["usage"]["cost"]["unknown_attempts"] == 0,
+                "two complete attempts aggregate with exact fees",
             )?;
             for (index, capture) in captures.iter().enumerate() {
                 let paths = match provider.name {
