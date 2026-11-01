@@ -23,6 +23,7 @@ const STOP_REASON_MAP: &[(&str, &str)] = &[
     ("end_turn", "stop"),
     ("tool_use", "tool_calls"),
     ("max_tokens", "length"),
+    ("model_context_window_exceeded", "context_window_exceeded"),
     ("stop_sequence", "stop"),
     ("error", "error"),
 ];
@@ -361,6 +362,20 @@ mod tests {
     use crate::test_reply::Parser;
     use crate::types::{ChatRequest, ModelTarget, ToolDefinition};
     use crate::{LlmEvent, ReplyOutcome, ReplyStop, StreamStop};
+
+    #[test]
+    fn stop_reasons_map_to_finish_reasons() {
+        for (stop, finish) in [
+            ("end_turn", "stop"),
+            ("tool_use", "tool_calls"),
+            ("max_tokens", "length"),
+            ("model_context_window_exceeded", "context_window_exceeded"),
+            ("stop_sequence", "stop"),
+            ("refusal", "refusal"),
+        ] {
+            assert_eq!(map_stop_reason(stop), finish, "{stop}");
+        }
+    }
 
     #[test]
     fn unknown_blocks_and_deltas_fail_with_bounded_typed_protocol_errors() {
