@@ -1,8 +1,6 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
-
 use lattice_api::{
     Effort, ModelCandidate,
     local::{SessionHead, TurnId},
@@ -18,8 +16,8 @@ pub(crate) struct Selection {
     model: Option<Chosen<ModelCandidate>>,
     effort: Option<Chosen<Effort>>,
     generation: u64,
-    /// 请求正文由 LocalTurn 持有；这里只配对发送时的字段代次，避免旧接受消费重选。
-    sent: HashMap<TurnId, (Option<u64>, Option<u64>)>,
+    /// 请求正文由 LocalTurn 持有；这里只按发送顺序记录字段代次，避免旧接受消费重选。
+    sent: Vec<(TurnId, Option<u64>, Option<u64>)>,
 }
 
 impl Selection {
@@ -60,13 +58,11 @@ impl Selection {
     }
 
     pub(crate) fn submission(&mut self, turn: TurnId) -> (Option<String>, Option<Effort>) {
-        self.sent.insert(
+        self.sent.push((
             turn,
-            (
-                self.model.as_ref().map(|choice| choice.generation),
-                self.effort.as_ref().map(|choice| choice.generation),
-            ),
-        );
+            self.model.as_ref().map(|choice| choice.generation),
+            self.effort.as_ref().map(|choice| choice.generation),
+        ));
         (
             self.model()
                 .map(|model| format!("{}/{}", model.provider, model.model)),
@@ -75,7 +71,10 @@ impl Selection {
     }
 
     pub(crate) fn accepted(&mut self, turn: TurnId) {
-        if let Some((model, effort)) = self.sent.remove(&turn) {
+        if let Some(index) = self.sent.iter().position(|(id, ..)| *id == turn) {
+            let (_, model, effort) = self.sent[index];
+            // 较新请求包含当时全部意图；接受后，更早的代次已经消费或被重选。
+            self.sent.drain(..=index);
             self.model
                 .take_if(|choice| Some(choice.generation) == model);
             self.effort
@@ -84,7 +83,7 @@ impl Selection {
     }
 
     pub(crate) fn rejected(&mut self, turn: TurnId) {
-        self.sent.remove(&turn);
+        self.sent.retain(|(id, ..)| *id != turn);
     }
 }
 
@@ -97,7 +96,7 @@ mod tests {
         SessionHead {
             session_id: SessionId::parse("11111111111141118111111111111111").unwrap(),
             position: NodeId(0),
-            agent: Some("agent".into()),
+            agent: "agent".into(),
             model: "a".into(),
             provider: "p".into(),
             effort,

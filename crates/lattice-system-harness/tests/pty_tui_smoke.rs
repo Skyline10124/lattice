@@ -885,19 +885,20 @@ fn wait_pty_frame(
     let deadline = std::time::Instant::now() + timeout;
     let mut previous = String::new();
     loop {
-        let frame =
-            match tui.redraw_text(deadline.saturating_duration_since(std::time::Instant::now())) {
-                Ok(frame) => frame,
-                Err(error) => panic!("完整帧读取失败：{error}；最近一帧：{previous}"),
-            };
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        assert!(!remaining.is_zero(), "等待当前帧超时：{previous}");
+        let frame = match tui.redraw_text(remaining) {
+            Ok(frame) => frame,
+            Err(error) => panic!("完整帧读取失败：{error}；最近一帧：{previous}"),
+        };
         if predicate(&frame) {
             return frame;
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "等待当前帧超时：{frame}"
-        );
         previous = frame;
+        std::thread::sleep(
+            Duration::from_millis(75)
+                .min(deadline.saturating_duration_since(std::time::Instant::now())),
+        );
     }
 }
 

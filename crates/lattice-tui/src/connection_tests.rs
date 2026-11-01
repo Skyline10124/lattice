@@ -1535,6 +1535,32 @@ fn accepted_selection_consumes_only_matching_field_generations() {
             );
         }
     }
+    let mut app = test_app(true);
+    app.selection
+        .choose_model(model_candidate("p", "same", &[Low, Off]));
+    app.selection.choose_effort(Low);
+    let first = next(&mut app, &options);
+    app.apply_submission(receipt(
+        first.turn_id,
+        SubmissionResult::Unknown { error: None },
+    ));
+    let second = next(&mut app, &options);
+    assert_eq!(
+        (second.model.as_deref(), second.effort),
+        (Some("p/same"), Some(Low)),
+        "T1 未知时，T2 仍携带全部待提交字段"
+    );
+    confirm(&mut app, second.turn_id, 0, 3);
+    app.selection
+        .choose_model(model_candidate("p", "same", &[Low, Off]));
+    app.selection.choose_effort(Off);
+    confirm(&mut app, first.turn_id, 0, 1);
+    let third = next(&mut app, &options);
+    assert_eq!(
+        (third.model.as_deref(), third.effort),
+        (Some("p/same"), Some(Off)),
+        "T2 接受后，迟到的 T1 接受不能改变新选择"
+    );
 }
 
 #[test]

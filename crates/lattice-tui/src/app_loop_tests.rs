@@ -2519,7 +2519,7 @@ async fn accepting_choices_retargets_effort_and_ignores_old_results_while_new_qu
                 .await;
             let current_turn = numbered_turn(2);
             let mut current = head(4, Some(current_turn), false);
-            current.agent = Some("head-c-arrived".into());
+            current.agent = "head-c-arrived".into();
             current.provider = "other".into();
             current.model = "current".into();
             current.effort = Some(Off);
