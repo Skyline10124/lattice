@@ -89,7 +89,7 @@ provider 配置、凭据与模型元数据是用户级的全局状态，由后�
 
 ### 回放来源
 
-每次尝试记录来源 `(protocol, provider id)`。reasoning、签名、加密 reasoning 与逐片段回放状态只在协议和 provider `id` 都相同时回放；任一不同时去除这些材料。来源不含 endpoint：同一 provider `id` 在 `providers.toml` 中改了 `base_url` 之后仍回放此前的签名，新 endpoint 可能拒绝这些签名；要换 endpoint 时使用新的 provider `id`。provider call ID 按协议判定：协议相同时保留，包括 provider `id` 不同的情况；协议不同时去除，目标协议无法在缺少 call ID 时编码工具结果的，返回投影错误。跨来源投影保留中立语义，切回原来源时使用树中保存的原消息。Responses 请求带 `include: ["reasoning.encrypted_content"]`，使 `store: false` 时也能取得可回放的加密 reasoning。
+每次尝试记录来源 `(protocol, provider id)`。reasoning、签名、加密 reasoning 与逐片段回放状态只在协议和 provider `id` 都相同时回放；任一不同时去除这些材料。来源不含 endpoint：同一 provider `id` 在 `providers.toml` 中改了 `base_url` 之后仍回放此前的签名，新 endpoint 可能拒绝这些签名；要换 endpoint 时使用新的 provider `id`。provider call ID 按协议判定：协议相同时保留，包括 provider `id` 不同的情况；协议不同时去除，目标协议无法在缺少 call ID 时编码工具结果的，返回投影错误。跨来源投影保留中立语义，切回原来源时使用树中保存的原消息。Responses 仅在模型元数据明确 `reasoning = false` 时省略 `include`；其他情况（包括没有模型元数据）带 `include: ["reasoning.encrypted_content"]`，使 `store: false` 时取得可回放的加密 reasoning。
 
 Anthropic Messages 的 `redacted_thinking` 以空 Reasoning 片段及带 `redacted:` 标记的回放状态保存 `data`，只有 Messages codec 解释该标记；普通 thinking（包括空文本）的 signature 保持原编码。同完整来源时恢复原块、data 与顺序，跨来源时移除整个 Reasoning 片段，不产生空 Text。标记计入单片段 64 KiB 与尝试总量限制，data 不进入正文或 reasoning 显示增量。
 

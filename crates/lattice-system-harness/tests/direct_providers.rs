@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! 三个现有协议的工具往返、缓存请求与尝试计量。
+//! 已实现协议的工具往返、缓存请求与尝试计量。
 //!
 //! 场景经统一入口配置 endpoint、模型与凭据，fake provider 按请求协议回复流。
 //! 每轮先调用 `observe__workspace`，再把工具结果按该协议投影，最后回复文本。
@@ -13,6 +13,326 @@ use lattice_system_harness::{
     ScenarioEvidence, ScenarioSpec, ScenarioWorld, SendExecution, SessionSendDriver,
 };
 use support::{assert_clean_send, driver, finish_scenario, require, sequence, tool_call, tool_ok};
+
+fn responses_fixture() -> ProviderFixture<'static> {
+    ProviderFixture {
+        protocol: ProviderProtocol::Responses,
+        target: ProviderTarget::Custom("responses-fixture"),
+        model: "responses-model",
+    }
+}
+
+fn responses_native(output: Vec<serde_json::Value>) -> lattice_system_harness::SseScript {
+    use serde_json::json;
+    let mut response = json!({
+        "id":"resp_fixture", "object":"response", "created_at":1741290958,
+        "status":"in_progress", "completed_at":null, "background":false,
+        "error":null, "incomplete_details":null, "instructions":"You are a concise test agent.",
+        "max_output_tokens":null, "model":"responses-model", "output":[],
+        "parallel_tool_calls":true, "previous_response_id":null,
+        "reasoning":{"effort":null,"summary":null}, "store":false,
+        "temperature":1.0, "text":{"format":{"type":"text"}},
+        "tool_choice":"auto", "tools":[], "top_p":1.0, "truncation":"disabled",
+        "usage":null, "user":null, "metadata":{},
+    });
+    let mut events = vec![
+        json!({"type":"response.created","response":response}),
+        json!({"type":"response.in_progress","response":response}),
+    ];
+    for (index, item) in output.iter().enumerate() {
+        let mut start = item.clone();
+        match start["type"].as_str().unwrap() {
+            "message" => {
+                start["content"] = json!([]);
+                start["status"] = json!("in_progress");
+            }
+            "reasoning" => {
+                start["summary"] = json!([]);
+                start["encrypted_content"] = json!("unfinished");
+            }
+            "function_call" => start["arguments"] = json!(""),
+            _ => unreachable!(),
+        }
+        events.push(json!({"type":"response.output_item.added","output_index":index,"item":start}));
+        if item["type"] == "message" {
+            for (content_index, part) in item["content"].as_array().unwrap().iter().enumerate() {
+                assert_eq!(part["type"], "output_text");
+                let mut empty = part.clone();
+                empty["text"] = json!("");
+                events.push(json!({"type":"response.content_part.added","output_index":index,"item_id":item["id"],"content_index":content_index,"part":empty}));
+                events.push(json!({"type":"response.output_text.delta","output_index":index,"item_id":item["id"],"content_index":content_index,"delta":part["text"],"logprobs":[]}));
+                events.push(json!({"type":"response.output_text.done","output_index":index,"item_id":item["id"],"content_index":content_index,"text":part["text"],"logprobs":[]}));
+                events.push(json!({"type":"response.content_part.done","output_index":index,"item_id":item["id"],"content_index":content_index,"part":part}));
+            }
+        }
+        events.push(json!({"type":"response.output_item.done","output_index":index,"item":item}));
+    }
+    response["status"] = json!("completed");
+    response["completed_at"] = json!(1741290960);
+    response["output"] = json!(output);
+    response["usage"] = json!({"input_tokens":100,"input_tokens_details":{"cached_tokens":60,"cache_write_tokens":10},"output_tokens":20,"output_tokens_details":{"reasoning_tokens":5}});
+    events.push(json!({"type":"response.completed","response":response}));
+    lattice_system_harness::SseScript::NativeEvents {
+        events: events
+            .into_iter()
+            .enumerate()
+            .map(|(sequence, mut value)| {
+                let name = value["type"].as_str().unwrap().to_owned();
+                value["sequence_number"] = json!(sequence);
+                (Some(name), value)
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn responses_replays_phase_reasoning_and_two_tool_results_after_backend_restart() {
+    use lattice_system_harness::FAKE_API_KEY;
+    use serde_json::{Value, json};
+    let fixture = responses_fixture();
+    let provider = Provider {
+        name: "responses",
+        fixture,
+        assistant_role: "assistant",
+    };
+    let (world, spec) = provider_world(&provider);
+    world
+        .write_project_file("second.txt", "second-sentinel")
+        .unwrap();
+    let output = vec![
+        json!({"type":"message","id":"msg_comment","role":"assistant","status":"completed","phase":"commentary","content":[{"type":"output_text","text":"Inspecting two files.","annotations":[],"logprobs":[]}]}),
+        json!({"type":"reasoning","id":"rs","summary":[{"type":"summary_text","text":"Check both inputs."}],"encrypted_content":"fixture-final-cipher"}),
+        json!({"type":"function_call","id":"item_a","call_id":"call_a","name":"observe__workspace","arguments":"{\"request\":{\"mode\":\"read_file\",\"path\":\"notes.txt\"}}"}),
+        json!({"type":"function_call","id":"item_b","call_id":"call_b","name":"observe__workspace","arguments":"{\"request\":{\"mode\":\"read_file\",\"path\":\"second.txt\"}}"}),
+    ];
+    let final_item = json!({"type":"message","id":"msg_final","role":"assistant","status":"completed","phase":"final_answer","content":[{"type":"output_text","text":"Both files inspected.","annotations":[],"logprobs":[]}]});
+    let server = FakeLlmServer::start(sequence(vec![
+        responses_native(output.clone()),
+        responses_native(vec![final_item.clone()]),
+        lattice_system_harness::SseScript::plain("Reopened."),
+    ]))
+    .unwrap();
+    world.wire_provider(fixture, &server, FAKE_API_KEY).unwrap();
+    let config = world.home().join(".lattice/providers.toml");
+    let source = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(config,format!("{source}\n[providers.responses-fixture.models.responses-model.cost]\ninput=2\noutput=10\ncache_read=0.5\ncache_write=3\n")).unwrap();
+    let driver = driver();
+    let send = SessionSendDriver::new(&driver, &world, &spec, "responses");
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let first = send.send("read both files").unwrap();
+        evidence.record_command("Responses tool turn", &first.command);
+        assert!(first.has_completed() && first.command.is_clean_exit(0));
+        assert_eq!(first.slots().len(), 2);
+        assert!(
+            first
+                .slots()
+                .iter()
+                .all(|slot| slot.outcome == lattice_system_harness::SlotOutcome::Succeeded)
+        );
+        assert!(!first.reply_text().contains("fixture-final-cipher"));
+        let sid = send.session_id().unwrap();
+        let detail = send
+            .run_command(&[
+                "--json",
+                "session",
+                "turn",
+                first.accepted_turn_id().unwrap(),
+            ])
+            .unwrap();
+        evidence.record_command("Responses saved turn", &detail);
+        let turn: Value = serde_json::from_slice(&detail.stdout).unwrap();
+        for step in turn["steps"].as_array().unwrap() {
+            assert_eq!(
+                step["attempts"][0]["origin"],
+                json!({"protocol":"responses","provider_id":"responses-fixture"})
+            );
+            assert_eq!(
+                step["attempts"][0]["usage"],
+                json!({"input":100,"cache_read":60,"cache_write":10,"output":20,"reasoning":5})
+            );
+            assert_eq!(step["attempts"][0]["usage_kind"], "complete");
+            assert_eq!(step["attempts"][0]["cost"]["exact"], true);
+        }
+        let captures = server.captured_requests();
+        assert_eq!(captures.len(), 2);
+        let inputs = captures[1].raw["input"].as_array().unwrap();
+        assert_eq!(&inputs[1..5], &output);
+        assert_eq!(inputs[5]["type"], "function_call_output");
+        assert_eq!(inputs[5]["call_id"], "call_a");
+        assert!(
+            inputs[5]["output"]
+                .as_str()
+                .unwrap()
+                .contains("sentinel-responses")
+        );
+        assert_eq!(inputs[6]["call_id"], "call_b");
+        assert!(
+            inputs[6]["output"]
+                .as_str()
+                .unwrap()
+                .contains("second-sentinel")
+        );
+        for capture in &captures {
+            assert_eq!(capture.provider, "responses");
+            assert_eq!(capture.raw["instructions"], "You are a concise test agent.");
+            assert_eq!(capture.raw["store"], false);
+            assert_eq!(capture.raw["stream"], true);
+            assert_eq!(capture.raw["prompt_cache_key"], sid);
+            assert_eq!(capture.raw["tools"][0]["strict"], false);
+            assert!(capture.raw.get("reasoning").is_none());
+            for key in [
+                "max_output_tokens",
+                "previous_response_id",
+                "background",
+                "temperature",
+                "top_p",
+            ] {
+                assert!(capture.raw.get(key).is_none());
+            }
+        }
+        let stopped = send.run_command(&["daemon", "stop"]).unwrap();
+        evidence.record_command("stop before replay", &stopped);
+        assert!(stopped.is_clean_exit(0));
+        let second = send.send("continue after restart").unwrap();
+        evidence.record_command("Responses restarted append", &second.command);
+        assert!(second.has_completed() && second.command.is_clean_exit(0));
+        let captures = server.captured_requests();
+        assert_eq!(captures.len(), 3);
+        let reopened = captures[2].raw["input"].as_array().unwrap();
+        assert_eq!(&reopened[..inputs.len()], inputs);
+        assert_eq!(reopened[7], final_item);
+        assert_eq!(reopened[8]["content"][0]["text"], "continue after restart");
+        assert_eq!(captures[2].raw["prompt_cache_key"], sid);
+        let mut watcher = support::Watcher::open(&world, spec.step_timeout(), sid);
+        let view = watcher.initial();
+        assert_eq!(view.head.as_ref().unwrap().provider, "responses-fixture");
+        let current_user = *view
+            .entries
+            .iter()
+            .find(|(_, entry)| entry.user_ordinal() == Some(2))
+            .unwrap()
+            .0;
+        let history =
+            support::history(&world, spec.step_timeout(), sid, current_user, 100).unwrap();
+        assert_eq!(
+            history,
+            view.entries
+                .range(..current_user)
+                .map(|(_, entry)| entry.raw.clone())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(history.len(), 3);
+        let usage = send
+            .run_command(&["--json", "session", "usage", sid])
+            .unwrap();
+        evidence.record_command("Responses usage after append", &usage);
+        let usage: Value = serde_json::from_slice(&usage.stdout).unwrap();
+        assert_eq!(usage["path_total"]["attempts"], 3);
+    }));
+    evidence.record_captures(server.captured_requests());
+    support::finish_recorded(evidence, result);
+}
+
+#[test]
+fn responses_usage_before_incomplete_is_preserved_without_tool_execution_or_retry() {
+    use lattice_system_harness::{FAKE_API_KEY, SseScript};
+    use serde_json::{Value, json};
+    let spec = ScenarioSpec::direct_local("responses-usage-before-incomplete");
+    let world = ScenarioWorld::new(&spec.name).unwrap();
+    world.budget(&spec);
+    let fixture = responses_fixture();
+    world.write_project_file(".lattice/agents/responses/agent.toml",&format!("schema_version=1\n[agent]\nname='responses'\nmodel='{}'\n[prompt]\nsystem='test'\n[tools]\nenabled=['observe__workspace']\n[llm.retry]\nmax_retries=1\ninitial_delay_ms=1\nmax_delay_ms=1\n",fixture.model_ref().unwrap())).unwrap();
+    world
+        .write_project_file("notes.txt", "not executed")
+        .unwrap();
+    world.init_git_project().unwrap();
+    let events = vec![
+        json!({"type":"response.created","response":{"status":"in_progress","output":[],"usage":{"input_tokens":8}}}),
+        json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","role":"assistant","id":"msg","content":[]}}),
+        json!({"type":"response.content_part.added","output_index":0,"item_id":"msg","content_index":0,"part":{"type":"output_text","text":""}}),
+        json!({"type":"response.output_text.delta","output_index":0,"item_id":"msg","content_index":0,"delta":"partial"}),
+        json!({"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"item","call_id":"call","name":"observe__workspace","arguments":""}}),
+        json!({"type":"response.function_call_arguments.delta","output_index":1,"item_id":"item","delta":"{\"request\":{\"mode\":\"read_file\",\"path\":\"notes.txt\"}}"}),
+        json!({"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"output_tokens":3}}}),
+    ];
+    let (server, gate) = FakeLlmServer::start_segmented(
+        SseScript::NativeEvents {
+            events: events
+                .into_iter()
+                .enumerate()
+                .map(|(sequence, mut value)| {
+                    let name = value["type"].as_str().unwrap().to_owned();
+                    value["sequence_number"] = json!(sequence);
+                    (Some(name), value)
+                })
+                .collect(),
+        },
+        spec.total_timeout().unwrap(),
+    )
+    .unwrap();
+    world.wire_provider(fixture, &server, FAKE_API_KEY).unwrap();
+    let config = world.home().join(".lattice/providers.toml");
+    let source = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(config,format!("{source}\n[providers.responses-fixture.models.responses-model.cost]\ninput=2\noutput=10\n")).unwrap();
+    let driver = driver();
+    let send = SessionSendDriver::new(&driver, &world, &spec, "responses");
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut running = send.spawn("stop incomplete").unwrap();
+        for frame in 1..=6 {
+            gate.wait_until_stalled(frame, running.remaining_timeout(spec.step_timeout()))
+                .unwrap();
+            gate.release_next(running.remaining_timeout(spec.step_timeout()))
+                .unwrap();
+        }
+        gate.wait_until_stalled(7, running.remaining_timeout(spec.step_timeout()))
+            .unwrap();
+        assert!(!running.has_exited().unwrap());
+        assert_eq!(server.captured_requests().len(), 1);
+        gate.release(running.remaining_timeout(spec.step_timeout()))
+            .unwrap();
+        let sent = send.wait_spawned(running).unwrap();
+        evidence.record_command("Responses incomplete Turn", &sent.command);
+        assert!(sent.command.is_clean_exit(1));
+        assert!(sent.slots().is_empty());
+        let detail = send
+            .run_command(&[
+                "--json",
+                "session",
+                "turn",
+                sent.accepted_turn_id().unwrap(),
+            ])
+            .unwrap();
+        evidence.record_command("Responses incomplete detail", &detail);
+        let turn: Value = serde_json::from_slice(&detail.stdout).unwrap();
+        let attempt = &turn["steps"][0]["attempts"][0];
+        assert_eq!(attempt["usage"]["input"], 8);
+        assert_eq!(attempt["usage"]["output"], 3);
+        assert_eq!(attempt["usage_kind"], "partial");
+        assert_eq!(attempt["cost"]["exact"], false);
+        assert_eq!(
+            attempt["end"]["cause"],
+            json!({"cause":"provider_error","retryable":false})
+        );
+        assert!(
+            attempt["end"]["diagnostic"]
+                .as_str()
+                .unwrap()
+                .contains("max_output_tokens")
+        );
+        assert_eq!(turn["steps"][0]["attempts"].as_array().unwrap().len(), 1);
+        assert!(
+            sent.entries()
+                .iter()
+                .filter_map(|entry| entry.step())
+                .all(|step| step.reply.is_empty() && step.slots.is_empty())
+        );
+        assert_eq!(server.captured_requests().len(), 1);
+    }));
+    evidence.record_captures(server.captured_requests());
+    support::finish_recorded(evidence, result);
+}
 
 struct Provider {
     name: &'static str,

@@ -9,6 +9,7 @@ use crate::{FakeLlmServer, LatticeCommand, LatticeDriver, ScenarioWorld, WorldEr
 #[derive(Clone, Copy, Debug)]
 pub enum ProviderProtocol {
     ChatCompletions,
+    Responses,
     AnthropicMessages,
     GenerateContent,
 }
@@ -73,12 +74,13 @@ impl<'a> ProviderFixture<'a> {
         if matches!(self.target, ProviderTarget::Custom(_)) {
             let protocol = match self.protocol {
                 ProviderProtocol::ChatCompletions => "chat-completions",
+                ProviderProtocol::Responses => "responses",
                 ProviderProtocol::AnthropicMessages => "anthropic-messages",
                 ProviderProtocol::GenerateContent => "generate-content",
             };
             entry.insert("protocol".into(), protocol.into());
             let auth = match self.protocol {
-                ProviderProtocol::ChatCompletions => "bearer",
+                ProviderProtocol::ChatCompletions | ProviderProtocol::Responses => "bearer",
                 ProviderProtocol::AnthropicMessages => "x-api-key",
                 ProviderProtocol::GenerateContent => "x-goog-api-key",
             };

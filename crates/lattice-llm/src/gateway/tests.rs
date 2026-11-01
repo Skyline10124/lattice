@@ -125,11 +125,16 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
         ),
     ] {
         std::fs::write(&path, format!("{source}\n{configuration}")).unwrap();
-        assert!(
+        let expected = if provider == "pending-responses" {
+            vec![Effort::Off, Effort::Low, Effort::High]
+        } else {
+            vec![]
+        };
+        assert_eq!(
             turn.supported_efforts(&ModelTarget::new(provider, "effort"))
                 .await
-                .unwrap()
-                .is_empty(),
+                .unwrap(),
+            expected,
             "gateway: {provider}"
         );
         let exact =
@@ -137,18 +142,18 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
                 .unwrap();
         assert_eq!(exact.models.len(), 1);
         assert_eq!(exact.models[0].model, "effort");
-        assert!(
-            exact.models[0].supported_efforts.is_empty(),
+        assert_eq!(
+            exact.models[0].supported_efforts, expected,
             "candidate: {provider}"
         );
         if provider != "chatgpt" {
             let listed = crate::model_candidates(directory.path(), Some(provider), None).unwrap();
-            assert!(
-                listed
-                    .models
-                    .iter()
-                    .all(|model| model.supported_efforts.is_empty())
-            );
+            assert!(listed.models.iter().all(|model| model.supported_efforts
+                == if model.model == "effort" {
+                    expected.clone()
+                } else {
+                    vec![]
+                }));
             assert!(listed.models.iter().any(|model| model.model == "effort"));
         }
     }
@@ -358,6 +363,8 @@ async fn serve(
         };
         let response_body = if path.ends_with("/messages") {
             MESSAGES_DONE
+        } else if path.ends_with("/responses") {
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n"
         } else if path.contains(":streamGenerateContent") {
             CONTENT_DONE
         } else {
@@ -784,7 +791,12 @@ async fn protocol_and_auth_independently_select_wire_requests() {
     let directory = private_dir();
     let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
     let turn = gateway.open_turn();
-    for protocol in ["chat-completions", "anthropic-messages", "generate-content"] {
+    for protocol in [
+        "chat-completions",
+        "responses",
+        "anthropic-messages",
+        "generate-content",
+    ] {
         for auth in ["bearer", "x-api-key", "x-goog-api-key", "none"] {
             configure(directory.path(), &server.url, protocol, auth);
             if auth != "none" {
@@ -840,6 +852,7 @@ async fn protocol_and_auth_independently_select_wire_requests() {
             }
             let expected_path = match protocol {
                 "chat-completions" => "/v1/chat/completions",
+                "responses" => "/v1/responses",
                 "anthropic-messages" => "/v1/v1/messages",
                 _ => "/v1/models/family%2Fmodel%20id:streamGenerateContent?alt=sse",
             };
@@ -913,6 +926,19 @@ async fn protocol_and_auth_independently_select_wire_requests() {
                     assert_eq!(
                         received.body["stream_options"]["include_usage"], true,
                         "{cell}: usage"
+                    );
+                }
+                "responses" => {
+                    assert_eq!(received.body["model"], "family/model id");
+                    assert_eq!(received.body["input"][0]["content"][0]["text"], "hello");
+                    assert_eq!(received.body["tools"][0]["name"], "tool_name");
+                    assert_eq!(received.body["tools"][0]["strict"], false);
+                    assert_eq!(received.body["store"], false);
+                    assert_eq!(received.body["stream"], true);
+                    assert_eq!(received.body["prompt_cache_key"], "session-id");
+                    assert_eq!(
+                        received.body["include"],
+                        serde_json::json!(["reasoning.encrypted_content"])
                     );
                 }
                 "anthropic-messages" => {
@@ -2174,17 +2200,15 @@ async fn unimplemented_protocols_and_auth_are_configuration_errors() {
     let directory = private_dir();
     let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
     let turn = gateway.open_turn();
-    for protocol in ["responses", "interactions"] {
-        for auth in ["none", "bearer"] {
-            configure(directory.path(), "http://localhost:1", protocol, auth);
-            configuration_failure(
-                &turn,
-                "test",
-                &format!("protocol {protocol} is not implemented"),
-                &format!("{protocol}/{auth}"),
-            )
-            .await;
-        }
+    for auth in ["none", "bearer"] {
+        configure(directory.path(), "http://localhost:1", "interactions", auth);
+        configuration_failure(
+            &turn,
+            "test",
+            "protocol interactions is not implemented",
+            &format!("interactions/{auth}"),
+        )
+        .await;
     }
     configuration_failure(
         &turn,
@@ -2193,6 +2217,44 @@ async fn unimplemented_protocols_and_auth_are_configuration_errors() {
         "chatgpt",
     )
     .await;
+}
+
+#[tokio::test]
+async fn responses_include_uses_the_model_metadata_from_each_resolution() {
+    let mut server = Server::start(false).await;
+    let directory = private_dir();
+    configure(directory.path(), &server.url, "responses", "none");
+    let path = directory.path().join("providers.toml");
+    let source = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, format!("{source}\ncatalog='responses-fixture'\n")).unwrap();
+    let cache = directory.path().join("cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
+    let turn = gateway.open_turn();
+    for flag in [Some(false), Some(true), None] {
+        let mut model = serde_json::json!({"id":"model-id"});
+        if let Some(flag) = flag {
+            model["reasoning"] = flag.into();
+        }
+        std::fs::write(
+            cache.join("models.json"),
+            serde_json::to_vec(
+                &serde_json::json!({"responses-fixture":{"models":{"model-id":model}}}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let request = request("test");
+        complete(
+            turn.stream_chat(request, StreamControl::default())
+                .await
+                .unwrap(),
+        )
+        .await;
+        let received = server.next().await;
+        assert_eq!(received.body.get("include").is_some(), flag != Some(false));
+        assert!(received.body.get("reasoning").is_none());
+    }
 }
 
 #[tokio::test]

@@ -167,6 +167,7 @@ impl GatewayTurn {
             provider,
             credentials,
             output_limit,
+            model_reasoning,
             reasoning,
         } = tokio::task::spawn_blocking(move || {
             load_provider(directory, &provider_id, &model_id, effort)
@@ -196,6 +197,7 @@ impl GatewayTurn {
             client,
             target: target.clone(),
             output_limit,
+            model_reasoning,
             reasoning,
         })
     }
@@ -221,6 +223,7 @@ pub struct ResolvedRequest {
     client: Arc<TurnClient>,
     target: ModelTarget,
     output_limit: Option<u64>,
+    model_reasoning: Option<bool>,
     reasoning: Option<ReasoningPlan>,
 }
 
@@ -259,6 +262,7 @@ impl ResolvedRequest {
                 roots: &self.configuration.roots,
                 client: self.client.clone(),
                 output_limit: self.output_limit,
+                model_reasoning: self.model_reasoning,
                 reasoning: self.reasoning,
                 features: self
                     .provider
@@ -311,6 +315,7 @@ struct LoadedProvider {
     provider: Provider,
     credentials: Credentials,
     output_limit: Option<u64>,
+    model_reasoning: Option<bool>,
     reasoning: Option<ReasoningPlan>,
 }
 
@@ -348,6 +353,7 @@ fn load_provider(
         provider,
         credentials,
         output_limit,
+        model_reasoning: model.and_then(|model| model.reasoning),
         reasoning,
     })
 }
