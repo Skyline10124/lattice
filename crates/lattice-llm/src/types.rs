@@ -4,7 +4,7 @@
 //! These types define the direct wire contract for LATTICE LLM calls
 //! and are independent of `lattice-core`.
 
-use lattice_conversation::{ConversationItem, TokenUsage};
+use lattice_conversation::{ConversationItem, Effort, TokenUsage};
 use serde::{Deserialize, Serialize};
 
 /// A tool definition providing a function specification to the model.
@@ -80,11 +80,13 @@ pub struct AttemptReport {
     pub cost: Option<lattice_conversation::CostEstimate>,
 }
 
-/// 请求明确给出 provider id 与模型 id，不提供默认模型。
+/// 请求明确给出 provider id 与模型 id；可选档位由网关按当前元数据解释。
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelTarget {
     pub model: String,
     pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<Effort>,
 }
 
 impl ModelTarget {
@@ -92,6 +94,30 @@ impl ModelTarget {
         Self {
             provider: provider.into(),
             model: model.into(),
+            effort: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_target_distinguishes_no_selection_from_off() {
+        let mut target = ModelTarget::new("test", "model");
+        let plain = serde_json::json!({"provider":"test","model":"model"});
+        assert_eq!(serde_json::to_value(&target).unwrap(), plain);
+        assert_eq!(
+            serde_json::from_value::<ModelTarget>(plain).unwrap(),
+            target
+        );
+        target.effort = Some(Effort::Off);
+        let selected = serde_json::to_value(&target).unwrap();
+        assert_eq!(selected["effort"], "off");
+        assert_eq!(
+            serde_json::from_value::<ModelTarget>(selected).unwrap(),
+            target
+        );
     }
 }

@@ -106,10 +106,9 @@ impl ProtocolParser {
     fn request_body(
         &self,
         request: &ChatRequest,
-        model: &str,
         output_limit: Option<u64>,
-        context_limit: Option<u64>,
         features: Features,
+        reasoning: Option<crate::reasoning::ReasoningPlan>,
         origin: &lattice_conversation::ReplayOrigin,
     ) -> Result<serde_json::Value, LlmError> {
         match self {
@@ -117,7 +116,13 @@ impl ProtocolParser {
                 let Features::ChatCompletions(features) = features else {
                     unreachable!("resolved features match the protocol")
                 };
-                protocol::chat_completions::build_request_json(request, model, features, origin)
+                protocol::chat_completions::build_request_json(
+                    request,
+                    &request.target.model,
+                    features,
+                    reasoning,
+                    origin,
+                )
             }
             Self::Messages(_) => {
                 let Features::Messages(features) = features else {
@@ -125,15 +130,15 @@ impl ProtocolParser {
                 };
                 return protocol::anthropic_messages::build_request_json(
                     request,
-                    model,
+                    &request.target.model,
                     output_limit,
-                    context_limit,
                     features.cache,
+                    reasoning,
                     origin,
                 );
             }
             Self::GenerateContent(_) => {
-                protocol::generate_content::build_request_json(request, origin)
+                protocol::generate_content::build_request_json(request, reasoning, origin)
             }
         }
         .map_err(Into::into)
@@ -562,7 +567,6 @@ fn redact_error(mut error: LlmError, credentials: &Credentials) -> LlmError {
         | LlmError::ProviderHttp { message, .. }
         | LlmError::StreamRead { message }
         | LlmError::ProtocolLimit { message }
-        | LlmError::ContextWindowExceeded { message }
         | LlmError::Other(message) => *message = credentials.redact(message),
         LlmError::Projection(_) => {}
     }
@@ -728,8 +732,8 @@ pub(crate) struct RequestEndpoint<'a> {
     pub(crate) roots: &'a [reqwest::Certificate],
     pub(crate) client: Arc<TurnClient>,
     pub(crate) output_limit: Option<u64>,
-    pub(crate) context_limit: Option<u64>,
     pub(crate) features: Features,
+    pub(crate) reasoning: Option<crate::reasoning::ReasoningPlan>,
 }
 
 pub(crate) fn validate_configuration(
@@ -772,10 +776,9 @@ pub(crate) async fn dispatch(
     let url = parser.endpoint_url(endpoint.base_url, endpoint.model);
     let body = parser.request_body(
         &request,
-        endpoint.model,
         endpoint.output_limit,
-        endpoint.context_limit,
         endpoint.features,
+        endpoint.reasoning,
         &origin,
     )?;
     let client = endpoint
@@ -899,6 +902,297 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_sources_and_feature_values_write_exact_control_parameters() {
+        use lattice_conversation::Effort::{High, Low, Off};
+        use serde_json::json;
+        let effort = json!([{"type":"effort","values":["none","high"]}]);
+        let toggle = json!([{"type":"toggle"}]);
+        let budget = json!([{"type":"budget_tokens"}]);
+        let combined_effort = json!([{"type":"toggle"},{"type":"effort","values":["high"]}]);
+        let combined_budget = json!([{"type":"toggle"},{"type":"budget_tokens"}]);
+        for (protocol, output, overrides, options, selected, expected) in [
+            (
+                Protocol::ChatCompletions,
+                None,
+                "",
+                effort.clone(),
+                Off,
+                json!({"reasoning_effort":"none"}),
+            ),
+            (
+                Protocol::ChatCompletions,
+                None,
+                "",
+                effort.clone(),
+                High,
+                json!({"reasoning_effort":"high"}),
+            ),
+            (
+                Protocol::ChatCompletions,
+                None,
+                "effort_param='reasoning-object'",
+                effort.clone(),
+                Off,
+                json!({"reasoning":{"effort":"none"}}),
+            ),
+            (
+                Protocol::ChatCompletions,
+                None,
+                "effort_param='reasoning-object'",
+                effort.clone(),
+                High,
+                json!({"reasoning":{"effort":"high"}}),
+            ),
+            (
+                Protocol::ChatCompletions,
+                None,
+                "thinking_toggle='thinking-type'",
+                toggle.clone(),
+                Off,
+                json!({"thinking":{"type":"disabled"}}),
+            ),
+            (
+                Protocol::ChatCompletions,
+                None,
+                "thinking_toggle='thinking-type'",
+                toggle.clone(),
+                High,
+                json!({"thinking":{"type":"enabled"}}),
+            ),
+            (
+                Protocol::ChatCompletions,
+                None,
+                "thinking_toggle='enable-thinking'",
+                toggle.clone(),
+                Off,
+                json!({"enable_thinking":false}),
+            ),
+            (
+                Protocol::ChatCompletions,
+                None,
+                "thinking_toggle='enable-thinking'",
+                toggle.clone(),
+                High,
+                json!({"enable_thinking":true}),
+            ),
+            (
+                Protocol::ChatCompletions,
+                None,
+                "thinking_budget='thinking-budget'",
+                budget.clone(),
+                Low,
+                json!({"thinking_budget":2048}),
+            ),
+            (
+                Protocol::ChatCompletions,
+                None,
+                "thinking_budget='reasoning-max-tokens'",
+                budget.clone(),
+                High,
+                json!({"reasoning":{"max_tokens":16384}}),
+            ),
+            (
+                Protocol::ChatCompletions,
+                None,
+                "thinking_toggle='thinking-type'",
+                combined_effort.clone(),
+                High,
+                json!({"reasoning_effort":"high","thinking":{"type":"enabled"}}),
+            ),
+            (
+                Protocol::ChatCompletions,
+                None,
+                "thinking_toggle='thinking-type'",
+                effort.clone(),
+                High,
+                json!({"reasoning_effort":"high"}),
+            ),
+            (
+                Protocol::ChatCompletions,
+                None,
+                "",
+                combined_effort.clone(),
+                High,
+                json!({"reasoning_effort":"high"}),
+            ),
+            (
+                Protocol::ChatCompletions,
+                None,
+                "thinking_toggle='enable-thinking'\nthinking_budget='reasoning-max-tokens'",
+                combined_budget.clone(),
+                High,
+                json!({"reasoning":{"max_tokens":16384},"enable_thinking":true}),
+            ),
+            (
+                Protocol::Messages,
+                None,
+                "",
+                effort.clone(),
+                Off,
+                json!({"thinking":{"type":"disabled"}}),
+            ),
+            (
+                Protocol::Messages,
+                None,
+                "",
+                effort.clone(),
+                High,
+                json!({"thinking":{"type":"adaptive"},"output_config":{"effort":"high"}}),
+            ),
+            (
+                Protocol::Messages,
+                None,
+                "",
+                toggle.clone(),
+                Off,
+                json!({"thinking":{"type":"disabled"}}),
+            ),
+            (
+                Protocol::Messages,
+                None,
+                "",
+                toggle.clone(),
+                High,
+                json!({"thinking":{"type":"adaptive"}}),
+            ),
+            (
+                Protocol::Messages,
+                None,
+                "",
+                budget.clone(),
+                Low,
+                json!({"thinking":{"type":"enabled","budget_tokens":2048}}),
+            ),
+            // 元数据 max 把预算压到 512，Messages 仍按协议下限发送 1024。
+            (
+                Protocol::Messages,
+                Some(32768),
+                "",
+                json!([{"type":"budget_tokens","max":512}]),
+                Low,
+                json!({"thinking":{"type":"enabled","budget_tokens":1024}}),
+            ),
+            // 输出上限的一半（16384）低于元数据 min，发送时抬回 min。
+            (
+                Protocol::Messages,
+                Some(32768),
+                "",
+                json!([{"type":"budget_tokens","min":20000}]),
+                Low,
+                json!({"thinking":{"type":"enabled","budget_tokens":20000}}),
+            ),
+            // min 低于 1024 时，协议下限 1024 仍然生效。
+            (
+                Protocol::Messages,
+                Some(32768),
+                "",
+                json!([{"type":"budget_tokens","min":512,"max":600}]),
+                Low,
+                json!({"thinking":{"type":"enabled","budget_tokens":1024}}),
+            ),
+            (
+                Protocol::GenerateContent,
+                None,
+                "",
+                effort.clone(),
+                Off,
+                json!({"generationConfig":{"thinkingConfig":{"thinkingBudget":0}}}),
+            ),
+            (
+                Protocol::GenerateContent,
+                None,
+                "",
+                effort,
+                High,
+                json!({"generationConfig":{"thinkingConfig":{"thinkingLevel":"high"}}}),
+            ),
+            (
+                Protocol::GenerateContent,
+                None,
+                "",
+                toggle.clone(),
+                Off,
+                json!({"generationConfig":{"thinkingConfig":{"thinkingBudget":0}}}),
+            ),
+            (
+                Protocol::GenerateContent,
+                None,
+                "",
+                toggle,
+                High,
+                json!({"generationConfig":{"thinkingConfig":{"thinkingBudget":-1}}}),
+            ),
+            (
+                Protocol::GenerateContent,
+                None,
+                "",
+                budget,
+                Low,
+                json!({"generationConfig":{"thinkingConfig":{"thinkingBudget":2048}}}),
+            ),
+        ] {
+            let mut features = Features::defaults(protocol);
+            let overrides: std::collections::BTreeMap<String, toml::Value> =
+                toml::from_str(overrides).unwrap();
+            for (name, value) in overrides {
+                features.apply(&name, value).unwrap();
+            }
+            let model: crate::metadata::Model = serde_json::from_value(
+                json!({"id":"model","reasoning_options":options,"limit":{"output":output}}),
+            )
+            .unwrap();
+            let capabilities = crate::reasoning::ReasoningCapabilities::new(
+                "test",
+                "model",
+                Some(&model),
+                features,
+            )
+            .unwrap();
+            for selection in [None, Some(selected)] {
+                let mut request = chat_request();
+                request.target.effort = selection;
+                let plan =
+                    selection.map(|effort| capabilities.select(effort).expect("supported source"));
+                let origin = lattice_conversation::ReplayOrigin {
+                    protocol,
+                    provider_id: "test".into(),
+                };
+                let body = ProtocolParser::new(protocol)
+                    .unwrap()
+                    .request_body(&request, output, features, plan, &origin)
+                    .unwrap();
+                let controls: serde_json::Map<_, _> = body
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .filter(|(key, _)| {
+                        matches!(
+                            key.as_str(),
+                            "reasoning_effort"
+                                | "reasoning"
+                                | "thinking"
+                                | "thinking_budget"
+                                | "enable_thinking"
+                                | "output_config"
+                                | "generationConfig"
+                        )
+                    })
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect();
+                assert_eq!(
+                    serde_json::Value::Object(controls),
+                    if selection.is_some() {
+                        expected.clone()
+                    } else {
+                        json!({})
+                    },
+                    "{protocol:?}, {features:?}, {selection:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn cache_features_mark_only_existing_request_content() {
         use crate::protocol::{Cache, ChatCompletionsFeatures, MessagesFeatures, ReasoningReplay};
         use crate::test_reply::{bind_replay_step, cache_controls, wire_to_native};
@@ -956,7 +1250,7 @@ mod tests {
                 };
                 let parser = ProtocolParser::new(protocol).unwrap();
                 let body = parser
-                    .request_body(&request, "model", None, None, features, &origin)
+                    .request_body(&request, None, features, None, &origin)
                     .unwrap();
                 let expected = match protocol {
                     Protocol::ChatCompletions if enabled => markers(&[
@@ -1029,7 +1323,7 @@ mod tests {
                 };
                 let body = ProtocolParser::new(protocol)
                     .unwrap()
-                    .request_body(&request, "model", None, None, features, &origin)
+                    .request_body(&request, None, features, None, &origin)
                     .unwrap();
                 let expected = match (protocol, with_system) {
                     (Protocol::ChatCompletions, true) => markers(&[
@@ -1105,14 +1399,13 @@ mod tests {
                     .unwrap()
                     .request_body(
                         &request,
-                        "model",
-                        None,
                         None,
                         Features::ChatCompletions(ChatCompletionsFeatures {
                             cache_markers: true,
                             reasoning_replay: ReasoningReplay::ContentChunks,
                             ..Default::default()
                         }),
+                        None,
                         &origin,
                     )
                     .unwrap();

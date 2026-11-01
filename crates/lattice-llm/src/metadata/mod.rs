@@ -7,7 +7,8 @@ use std::{collections::BTreeMap, path::Path, sync::LazyLock};
 
 use serde::{Deserialize, Serialize};
 
-use crate::provider::{Effort, ModelMetadata, Provider, config::ProviderRegistry};
+use crate::provider::{ModelMetadata, Provider, config::ProviderRegistry};
+use lattice_conversation::Effort;
 
 pub(crate) mod fetch;
 pub use fetch::{MetadataError, MetadataRefreshControl, fetch_snapshot};

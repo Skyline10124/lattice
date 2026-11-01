@@ -17,6 +17,7 @@
 //! client, or ID generator.
 
 pub mod attempt;
+pub mod effort;
 pub mod history;
 pub mod limits;
 pub mod message;
@@ -35,6 +36,7 @@ pub use lancet_protocol::{
 };
 
 pub use attempt::{AttemptInterruption, AttemptRejection};
+pub use effort::{Effort, ParseEffortError};
 pub use history::ConversationItem;
 pub use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability};
 pub use limits::{

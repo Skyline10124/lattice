@@ -7,10 +7,13 @@ use std::collections::BTreeMap;
 
 use lattice_conversation::{Protocol, ReplayOrigin};
 
+use super::{EffortParam, ThinkingBudget, ThinkingToggle};
 use crate::protocol::ChatCompletionsFeatures;
 use crate::protocol::projection::{ProjectionError, request_messages_with_replay};
+use crate::reasoning::ReasoningPlan;
 use crate::reply::{PartDelta, PartKind, ProtocolEvent, StringPatch};
 use crate::types::ChatRequest;
+use lattice_conversation::Effort;
 
 /// 按模型名构造流式请求，并要求服务端报告用量。
 /// 响应路径只解析 SSE、不解码非流式 JSON，因此固定发送 stream: true。
@@ -18,6 +21,7 @@ pub fn build_request_json(
     request: &ChatRequest,
     model: &str,
     features: ChatCompletionsFeatures,
+    reasoning: Option<ReasoningPlan>,
     origin: &ReplayOrigin,
 ) -> Result<serde_json::Value, ProjectionError> {
     let projected =
@@ -43,6 +47,61 @@ pub fn build_request_json(
         "stream": true,
         "stream_options": {"include_usage": true},
     });
+
+    let mut reasoning_object = serde_json::Map::new();
+    if let Some(plan) = reasoning {
+        let toggle = match plan {
+            ReasoningPlan::Effort {
+                effort,
+                enable_toggle,
+            } => {
+                let name = if effort == Effort::Off {
+                    "none"
+                } else {
+                    effort.as_str()
+                };
+                match features.effort_param {
+                    EffortParam::ReasoningEffort => body["reasoning_effort"] = name.into(),
+                    EffortParam::ReasoningObject => {
+                        reasoning_object.insert("effort".into(), name.into());
+                    }
+                }
+                enable_toggle.then_some(true)
+            }
+            ReasoningPlan::Budget {
+                tokens,
+                enable_toggle,
+                ..
+            } => {
+                match features.thinking_budget {
+                    ThinkingBudget::ThinkingBudget => body["thinking_budget"] = tokens.into(),
+                    ThinkingBudget::ReasoningMaxTokens => {
+                        reasoning_object.insert("max_tokens".into(), tokens.into());
+                    }
+                    ThinkingBudget::None => {
+                        unreachable!("resolved budget requires a supported feature")
+                    }
+                }
+                enable_toggle.then_some(true)
+            }
+            ReasoningPlan::Toggle { enabled } => Some(enabled),
+        };
+        if let Some(enabled) = toggle {
+            match features.thinking_toggle {
+                ThinkingToggle::ThinkingType => {
+                    body["thinking"] =
+                        serde_json::json!({"type": if enabled { "enabled" } else { "disabled" }})
+                }
+                ThinkingToggle::EnableThinking => body["enable_thinking"] = enabled.into(),
+                ThinkingToggle::None => {
+                    unreachable!("resolved toggle requires a supported feature")
+                }
+            }
+        }
+    }
+    if !reasoning_object.is_empty() {
+        body["reasoning"] = reasoning_object.into();
+    }
 
     if !request.tools.is_empty() {
         let tools_array: Vec<serde_json::Value> = request

@@ -21,6 +21,7 @@ pub use metadata::{
 pub mod protocol;
 pub(crate) mod provider;
 pub use provider::{MAX_MODEL_ID_BYTES, ModelRef, ModelRefError};
+mod reasoning;
 mod reply;
 mod reply_stream;
 pub mod sse;

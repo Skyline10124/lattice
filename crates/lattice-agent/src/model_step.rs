@@ -197,10 +197,7 @@ impl ModelStepDriver {
         let chat = ChatRequest {
             messages,
             tools: request.tools.clone(),
-            target: ModelTarget {
-                model: request.model.clone(),
-                provider: request.provider.clone(),
-            },
+            target: ModelTarget::new(request.provider.clone(), request.model.clone()),
             client_request_id: request.session_id.clone(),
         };
 

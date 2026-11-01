@@ -206,6 +206,11 @@ fn same_provider_replay_is_exact() {
             anthropic_message,
         ),
         (
+            "anthropic_redacted_thinking_tool_use.json",
+            Protocol::Messages,
+            anthropic_message,
+        ),
+        (
             "gemini_thought_signature.json",
             Protocol::GenerateContent,
             gemini_content,
@@ -219,7 +224,10 @@ fn same_provider_replay_is_exact() {
         let fixture = fixture(name);
         let native = wire_to_native(&replay_origin(provider), &fixture)
             .unwrap_or_else(|error| panic!("{name}: projection failed: {error:?}"));
-        let replayed = native_to_wire(&replay_origin(provider), &native)
+        let saved = serde_json::to_vec(&native).expect("serialize native message");
+        let restored: NativeMessage<UnboundToolCall> =
+            serde_json::from_slice(&saved).expect("deserialize stored native message");
+        let replayed = native_to_wire(&replay_origin(provider), &restored)
             .unwrap_or_else(|error| panic!("{name}: replay failed: {error:?}"));
         assert_eq!(replayed, extract(&fixture), "{name}");
     }
@@ -262,6 +270,14 @@ fn anthropic_thinking_without_signature_cannot_replay() {
         Err(ProjectionError::MissingReplayState {
             provider: Protocol::Messages,
             part_ordinal: 0,
+        })
+    ));
+    native.parts[0].replay_state = Some(OpaqueProviderState::new("redacted:cGF5bG9hZA==").unwrap());
+    assert!(matches!(
+        native_to_wire(&replay_origin(Protocol::Messages), &native),
+        Err(ProjectionError::UnsupportedPart {
+            provider: Protocol::Messages,
+            part_ordinal: 0
         })
     ));
 }
@@ -311,6 +327,10 @@ fn replay_origin_matrix_separates_opaque_state_from_call_ids() {
             "openai_assistant_tool_calls.json",
         ),
         (Protocol::Messages, "anthropic_thinking_tool_use.json"),
+        (
+            Protocol::Messages,
+            "anthropic_redacted_thinking_tool_use.json",
+        ),
         (Protocol::GenerateContent, "gemini_thought_signature.json"),
     ] {
         let original_origin = replay_origin(protocol);
@@ -325,11 +345,16 @@ fn replay_origin_matrix_separates_opaque_state_from_call_ids() {
             .iter()
             .flat_map(|part| {
                 let mut materials = Vec::new();
-                if let MessageSemantic::Reasoning { text } = &part.semantic {
+                if let MessageSemantic::Reasoning { text } = &part.semantic
+                    && !text.is_empty()
+                {
                     materials.push(text.as_str());
                 }
                 if let Some(state) = &part.replay_state {
                     materials.push(state.as_str());
+                    if let Some(data) = state.as_str().strip_prefix("redacted:") {
+                        materials.push(data);
+                    }
                 }
                 materials
             })
@@ -362,6 +387,37 @@ fn replay_origin_matrix_separates_opaque_state_from_call_ids() {
                 let same_provider = target_protocol == protocol && provider == "test";
                 let same_protocol = target_protocol == protocol;
                 let projected = project_cross_provider(&source, &target);
+                if fixture_name == "anthropic_redacted_thinking_tool_use.json" && !same_provider {
+                    assert_eq!(
+                        projected
+                            .parts
+                            .iter()
+                            .map(|part| part.semantic.clone())
+                            .collect::<Vec<_>>(),
+                        vec![
+                            MessageSemantic::Text {
+                                text: "Checking both.".into()
+                            },
+                            MessageSemantic::ToolCall {
+                                call: UnboundToolCall {
+                                    provider_call_id: same_protocol
+                                        .then(|| "toolu_redacted_1".into()),
+                                    name: "get_weather".into(),
+                                    arguments: serde_json::json!({"location":"Tokyo"}),
+                                }
+                            },
+                            MessageSemantic::ToolCall {
+                                call: UnboundToolCall {
+                                    provider_call_id: same_protocol
+                                        .then(|| "toolu_redacted_2".into()),
+                                    name: "get_time".into(),
+                                    arguments: serde_json::json!({"timezone":"Asia/Tokyo"}),
+                                }
+                            },
+                        ],
+                        "跨来源后应只剩固定夹具的正文和两个 ToolCall，且顺序不变：{target:?}"
+                    );
+                }
                 assert_eq!(
                     projected
                         .parts
