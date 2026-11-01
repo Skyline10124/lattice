@@ -19,7 +19,7 @@ mod comments;
 pub(crate) use comments::CommentNavigation;
 mod dock;
 mod statusline;
-pub(crate) use dock::{Dock, DockIntent, DockState, Panel};
+pub(crate) use dock::{Dock, DockIntent, DockState, ModelQuery, Panel, PanelChoice};
 
 #[cfg(test)]
 pub(crate) fn statusline_text(app: &App, width: usize) -> String {
@@ -984,10 +984,10 @@ mod tests {
                 let mut app = test_app();
                 app.input.set_text("draft");
                 match top {
-                    "panel" => app.dock.open_panel(Panel {
-                        title: "HELP",
-                        lines: vec!["/help  显示本帮助".into(), "Enter  提交".into()],
-                    }),
+                    "panel" => app.dock.open_panel(Panel::Help(vec![
+                        "/help  显示本帮助".into(),
+                        "Enter  提交".into(),
+                    ])),
                     level => {
                         let status = Status {
                             level: if level == "warn" {

@@ -17,11 +17,18 @@ pub(super) fn line(app: &App, width: usize) -> Line<'static> {
     }
     let below = app.viewport.hidden_below();
     let session = session_field(app.ctx.session_id);
+    let effort = app.next_effort().map(|effort| effort.to_string());
+    let chosen = app.selection.model();
     let mut left = [
         Some(session.as_str()),
         Some(app.ctx.active_agent.as_str()),
-        app.model.as_deref(),
-        app.provider.as_deref(),
+        chosen
+            .map(|model| model.model.as_str())
+            .or(app.model.as_deref()),
+        chosen
+            .map(|model| model.provider.as_str())
+            .or(app.provider.as_deref()),
+        effort.as_deref(),
     ];
     let mut right = [
         (!app.viewport.following()).then(|| format!("↓ {below} 行")),
@@ -111,10 +118,11 @@ enum Slot {
     Right(usize),
 }
 
-/// 等宽字段的省略先后：上下文、本轮用量、提供商、模型、session、agent、翻看提示、phase。
-const TIE_ORDER: [Slot; 8] = [
+/// 等宽字段的省略先后：上下文、本轮用量、档位、提供商、模型、session、agent、翻看提示、phase。
+const TIE_ORDER: [Slot; 9] = [
     Slot::Right(4),
     Slot::Right(3),
+    Slot::Left(4),
     Slot::Left(3),
     Slot::Left(2),
     Slot::Left(0),
@@ -225,6 +233,23 @@ mod tests {
             format_turn(&missing_reasoning).as_deref(),
             Some("↑12.3k ↓1.2k 缓存 80% $0.04")
         );
+    }
+
+    #[test]
+    fn effort_is_hidden_when_absent_and_omitted_before_equal_width_provider() {
+        let mut app = super::super::tests::test_app();
+        app.ctx.active_agent = "a".into();
+        app.model = Some("mmm".into());
+        app.provider = Some("ppp".into());
+        app.selection.choose_effort(lattice_api::Effort::Low);
+        assert!(line(&app, 200).to_string().contains("low"));
+        let narrow = line(&app, 20).to_string();
+        assert!(
+            narrow.contains("ppp") && narrow.contains("mmm") && !narrow.contains("low"),
+            "{narrow}"
+        );
+        app.selection = Default::default();
+        assert!(!line(&app, 200).to_string().contains("low"));
     }
 
     #[test]

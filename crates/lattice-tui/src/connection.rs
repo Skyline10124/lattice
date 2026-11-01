@@ -20,6 +20,29 @@ fn status(level: NoticeLevel, text: String) -> Status {
     }
 }
 
+pub(crate) fn model_query_failed_status(error: &LocalError) -> Status {
+    status(
+        NoticeLevel::Warn,
+        format!("模型候选查询失败：{}", error.message),
+    )
+}
+
+pub(crate) fn model_query_notice(message: &str) -> Status {
+    status(NoticeLevel::Info, message.to_owned())
+}
+
+pub(crate) fn effort_changed_status(
+    before: Option<lattice_api::Effort>,
+    after: Option<lattice_api::Effort>,
+) -> Status {
+    let before = before.map_or_else(|| "未设置".into(), |effort| effort.to_string());
+    let after = after.map_or_else(|| "不发送推理参数".into(), |effort| effort.to_string());
+    status(
+        NoticeLevel::Info,
+        format!("换模型后推理档位由 {before} 改为 {after}"),
+    )
+}
+
 fn recovered_notice(turn_id: TurnId) -> String {
     format!("按 TurnId 查到已接受的请求：turn {turn_id}；未重复执行")
 }

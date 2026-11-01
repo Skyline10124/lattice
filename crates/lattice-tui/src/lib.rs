@@ -10,6 +10,7 @@ mod connection;
 mod input;
 mod markdown;
 mod queue;
+mod selection;
 mod session;
 mod view;
 mod wrapping;
