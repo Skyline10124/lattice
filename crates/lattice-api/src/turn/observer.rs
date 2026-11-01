@@ -383,7 +383,7 @@ fn head_from_node(
     Ok(SessionHead {
         session_id,
         position,
-        agent: Some(copy.profile.agent_name),
+        agent: copy.profile.agent_name,
         model: copy.current.model,
         provider: copy.current.provider,
         effort: copy.current.effort,

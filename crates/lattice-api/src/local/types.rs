@@ -61,7 +61,7 @@ pub enum TurnLookup {
 pub struct SessionHead {
     pub session_id: SessionId,
     pub position: NodeId,
-    pub agent: Option<String>,
+    pub agent: String,
     pub model: String,
     pub provider: String,
     pub effort: Option<lattice_conversation::Effort>,
@@ -628,7 +628,7 @@ mod tests {
                 profile_default_effort: None,
                 session_id: sid,
                 position: NodeId(0),
-                agent: None,
+                agent: "local-test".into(),
                 turn_id: None,
                 owner: false,
                 diagnostic: None,
@@ -636,7 +636,7 @@ mod tests {
             }))
             .unwrap(),
             serde_json::json!({"response":"head", "value":{
-                "session_id":sid, "position":0, "agent":null, "turn_id":null,
+                "session_id":sid, "position":0, "agent":"local-test", "turn_id":null,
                 "model":"test", "provider":"openai-compatible", "effort":null, "profile_default_effort":null,
                 "owner":false, "diagnostic":null, "path_replaced":false,
             }})

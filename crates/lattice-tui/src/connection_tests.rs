@@ -1355,7 +1355,7 @@ fn startup_agent_is_consumed_only_by_its_accepted_submission() {
 fn current_model_comes_from_head_after_rewind_and_root() {
     let mut app = test_app(true);
     let mut current = head(2, Some(turn(1)), false);
-    current.agent = Some("latest-copy-agent".into());
+    current.agent = "latest-copy-agent".into();
     current.model = "latest-copy-model".into();
     current.provider = "latest-provider".into();
     open_view(&mut app, current.clone(), turns(1..=1));

@@ -57,6 +57,61 @@ fn seed(fixture: &TestFixture) -> (lancet_protocol::SessionId, lancet_protocol::
 }
 
 #[tokio::test]
+async fn injected_model_changes_share_effort_fallback() {
+    use lattice_conversation::Effort::{High, Low};
+    let llm = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_events(happy_events())
+            .push_events(happy_events())
+            .push_events(happy_events())
+            .build(),
+    );
+    let mut fixture = setup_fixture(llm.clone(), &[]);
+    fixture
+        .request
+        .loaded_profile
+        .as_mut()
+        .unwrap()
+        .profile
+        .agent
+        .effort = Some(Low);
+    fixture.request.effort = Some(High);
+    fixture.request.test_llm.as_mut().unwrap().2 = vec![Low, High];
+    let (first, _) = fixture.run(fixture.request.clone()).await;
+    let mut request = fixture.request.clone();
+    request.agent = None;
+    request.loaded_profile = None;
+    request.session_id = Some(first.session_id);
+    request.effort = None;
+    request.model = Some("local/both".into());
+    let (preserved, _) = fixture.run(request.clone()).await;
+    assert_eq!(
+        fixture
+            .store
+            .begin_read()
+            .unwrap()
+            .turn_config(preserved.session_id, preserved.turn_id)
+            .unwrap()
+            .effort,
+        Some(High)
+    );
+    request.model = Some("local/low-only".into());
+    request.test_llm.as_mut().unwrap().2 = vec![Low];
+    let (fallback, _) = fixture.run(request).await;
+    assert_eq!(
+        fixture
+            .store
+            .begin_read()
+            .unwrap()
+            .turn_config(fallback.session_id, fallback.turn_id)
+            .unwrap()
+            .effort,
+        Some(Low)
+    );
+    assert_eq!(llm.call_count(), 3);
+}
+
+#[tokio::test]
 async fn wrong_workspace_is_rejected_before_acceptance_or_provider() {
     let llm = Arc::new(
         FakeStreamingLlmClient::builder()

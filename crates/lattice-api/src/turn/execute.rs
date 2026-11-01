@@ -13,6 +13,7 @@ use crate::{
 };
 use futures::FutureExt;
 use lancet_protocol::{SessionId, TurnId};
+use lattice_conversation::Effort;
 use lattice_session::{StateLayout, store::*};
 use std::sync::{
     Arc,
@@ -54,23 +55,23 @@ impl PreparedModel {
         let auth = gateway.auth_store();
         let (mut target, changed) = selected_target(profile, model, Some(&auth))?;
         let turn = gateway.open_turn();
-        if let Some(effort) = effort {
-            target.effort = Some(effort);
-        } else if changed {
-            let supported = turn.supported_efforts(&target).await.map_err(|error| {
+        let supported = if changed && effort.is_none() {
+            turn.supported_efforts(&target).await.map_err(|error| {
                 ApiError::Configuration(crate::ConfigRejection::new(
                     &error.to_string(),
                     Some(&auth),
                 ))
-            })?;
-            target.effort = [
-                target.effort,
-                profile.configuration.effective.default_effort,
-            ]
-            .into_iter()
-            .flatten()
-            .find(|effort| supported.contains(effort));
-        }
+            })?
+        } else {
+            Vec::new()
+        };
+        target.effort = selected_effort(
+            target.effort,
+            profile.configuration.effective.default_effort,
+            effort,
+            changed,
+            &supported,
+        );
         let resolved = turn.resolve(&target).await.map_err(|error| {
             ApiError::Configuration(crate::ConfigRejection::new(&error.to_string(), Some(&auth)))
         })?;
@@ -80,6 +81,26 @@ impl PreparedModel {
             gateway: gateway.clone(),
         })
     }
+}
+
+fn selected_effort(
+    current: Option<Effort>,
+    profile_default: Option<Effort>,
+    requested: Option<Effort>,
+    model_changed: bool,
+    supported: &[Effort],
+) -> Option<Effort> {
+    if requested.is_some() {
+        return requested;
+    }
+    // 同模型保留原值，包括空值；支持性仍由最终 resolve 校验。
+    if !model_changed {
+        return current;
+    }
+    [current, profile_default]
+        .into_iter()
+        .flatten()
+        .find(|effort| supported.contains(effort))
 }
 
 fn selected_target(
@@ -314,11 +335,16 @@ async fn execute_owned(
             gateway,
         }) => (target, execution, Some(gateway)),
         None => match request.injected_llm() {
-            Some((client, protocol)) => {
-                let (mut target, _) = selected_target(&profile, request.model.as_deref(), None)?;
-                if request.effort.is_some() {
-                    target.effort = request.effort;
-                }
+            Some((client, protocol, supported)) => {
+                let (mut target, changed) =
+                    selected_target(&profile, request.model.as_deref(), None)?;
+                target.effort = selected_effort(
+                    target.effort,
+                    profile.configuration.effective.default_effort,
+                    request.effort,
+                    changed,
+                    &supported,
+                );
                 let origin = lattice_session::store::AttemptOrigin {
                     provider_id: target.provider.clone(),
                     protocol,
@@ -539,4 +565,133 @@ pub async fn run_turn(
         usage: *detail.usage,
         steps: detail.steps,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lattice_conversation::Effort::{High, Low, Max, Medium, Off};
+
+    fn profile() -> crate::profile::PreparedProfile {
+        let config = FrozenTurnConfig {
+            agent_name: "test".into(),
+            provider: "profile".into(),
+            model: "default".into(),
+            effort: Some(Low),
+            system_prompt: None,
+            catalog: ToolCatalogSnapshot::new("test".into(), vec![]).unwrap(),
+            limits: TurnExecutionLimits {
+                timeout_secs: 300,
+                max_model_steps: 32,
+                max_model_attempts: 1,
+            },
+        };
+        let copy = SessionProfileCopy::for_test(&config);
+        crate::profile::PreparedProfile {
+            configuration: crate::profile::TurnProfile::from_copy(&copy, None),
+            previous: Some(copy),
+            inherited: false,
+        }
+    }
+
+    #[test]
+    fn selected_target_uses_profile_or_copy_before_request_override() {
+        let mut profile = profile();
+        let (target, changed) = selected_target(&profile, None, None).unwrap();
+        assert_eq!(
+            (
+                target.provider.as_str(),
+                target.model.as_str(),
+                target.effort,
+                changed
+            ),
+            ("profile", "default", Some(Low), false)
+        );
+        profile.inherited = true;
+        profile.previous.as_mut().unwrap().current = SessionModelChoice {
+            provider: "saved".into(),
+            model: "same".into(),
+            effort: Some(High),
+        };
+        for (request, provider, model, changed) in [
+            (None, "saved", "same", false),
+            (Some("saved/same"), "saved", "same", false),
+            (Some("other/same"), "other", "same", true),
+            (Some("saved/org/model"), "saved", "org/model", true),
+        ] {
+            let (target, actual_changed) = selected_target(&profile, request, None).unwrap();
+            assert_eq!(
+                (
+                    target.provider.as_str(),
+                    target.model.as_str(),
+                    target.effort,
+                    actual_changed
+                ),
+                (provider, model, Some(High), changed)
+            );
+        }
+        profile.inherited = false;
+        let (target, changed) = selected_target(&profile, None, None).unwrap();
+        assert_eq!(
+            (
+                target.provider.as_str(),
+                target.model.as_str(),
+                target.effort,
+                changed
+            ),
+            ("profile", "default", Some(Low), false)
+        );
+        profile.configuration.effective.default_model = None;
+        assert!(matches!(
+            selected_target(&profile, None, None),
+            Err(ApiError::Configuration(_))
+        ));
+        let (target, changed) = selected_target(&profile, Some("chosen/org/model"), None).unwrap();
+        assert_eq!(
+            (
+                target.provider.as_str(),
+                target.model.as_str(),
+                target.effort,
+                changed
+            ),
+            ("chosen", "org/model", Some(Low), true)
+        );
+        assert!(matches!(
+            selected_target(&profile, Some("invalid"), None),
+            Err(ApiError::Configuration(_))
+        ));
+    }
+
+    #[test]
+    fn selected_effort_preserves_current_before_profile_default() {
+        for (current, default, requested, changed, supported, expected) in [
+            (
+                Some(High),
+                Some(Low),
+                None,
+                true,
+                vec![Low, High],
+                Some(High),
+            ),
+            (Some(Off), Some(Low), None, true, vec![Low, High], Some(Low)),
+            (Some(High), Some(Low), None, true, vec![Medium], None),
+            (None, Some(Low), None, true, vec![Low, High], Some(Low)),
+            (None, Some(Low), None, false, vec![Low], None),
+            (Some(High), Some(Low), None, false, vec![Low], Some(High)),
+            (
+                Some(High),
+                Some(Low),
+                Some(Max),
+                true,
+                vec![Low, High],
+                Some(Max),
+            ),
+            (Some(High), Some(Low), Some(Off), false, vec![], Some(Off)),
+        ] {
+            assert_eq!(
+                selected_effort(current, default, requested, changed, &supported),
+                expected
+            );
+        }
+    }
 }
