@@ -252,7 +252,8 @@ impl<'de> Deserialize<'de> for LancetSection {
 #[serde(deny_unknown_fields)]
 pub struct AgentSection {
     pub name: String,
-    pub model: String,
+    pub model: Option<String>,
+    pub effort: Option<lattice_conversation::Effort>,
     #[serde(default)]
     pub description: Option<String>,
 }
@@ -333,6 +334,33 @@ mod tests {
 
     fn parse(toml_str: &str) -> Result<AgentProfile, toml::de::Error> {
         toml::from_str::<AgentProfile>(toml_str)
+    }
+
+    #[test]
+    fn optional_model_and_reasoning_effort_are_strict() {
+        for effort in ["off", "minimal", "low", "medium", "high", "xhigh", "max"] {
+            let profile = parse(&format!(
+                "schema_version=1\n[agent]\nname='test'\neffort='{effort}'\n[prompt]\nsystem='test'\n"
+            ))
+            .unwrap();
+            let value = serde_json::to_value(profile).unwrap();
+            assert_eq!(value["agent"]["model"], serde_json::Value::Null);
+            assert_eq!(value["agent"]["effort"], effort);
+        }
+        for field in [
+            "effort='default'",
+            "effort='HIGH'",
+            "effort=1",
+            "effrot='high'",
+        ] {
+            assert!(
+                parse(&format!(
+                    "schema_version=1\n[agent]\nname='test'\nmodel='local/test'\n{field}\n[prompt]\nsystem='test'\n"
+                ))
+                .is_err(),
+                "{field}"
+            );
+        }
     }
 
     #[test]

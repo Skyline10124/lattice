@@ -81,6 +81,7 @@ async fn run(frames: Vec<String>) -> (ModelStepAttempt, usize) {
     let attempt = driver
         .run(
             &ModelStepRequest {
+                effort: None,
                 system_prompt: None,
                 history: vec![],
                 model: "test-model".to_string(),

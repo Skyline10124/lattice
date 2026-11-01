@@ -2990,3 +2990,157 @@ fn admission_window_reports_in_flight_and_a_departed_submitter_is_not_admitted()
     }));
     support::finish_recorded(evidence, result);
 }
+
+#[test]
+fn accepted_profile_copy_and_choice_reopen_together_before_receipt() {
+    for replacement in [false, true] {
+        let (world, spec) = support::direct_world(
+            if replacement {
+                "copy-replacement-crash"
+            } else {
+                "copy-first-crash"
+            },
+            "recover",
+            "[]",
+            "",
+        );
+        let budget = world.budget(&spec);
+        let mut evidence = support::evidence(&world, &spec);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let provider =
+                support::wire_fake_llm(&world, "recover", SseScript::plain("copy restart reply"));
+            if replacement {
+                let reply = ipc(
+                    &world,
+                    timeout(&world, &spec),
+                    submit_request(
+                        &world,
+                        TURN,
+                        json!({"new":SESSION}),
+                        "before replacement",
+                        Some("recover"),
+                    ),
+                );
+                assert_eq!(reply["response"], "acceptance");
+                let deadline = deadline(&world, &spec);
+                loop {
+                    let turn = accepted_detail(&world, &spec, TURN);
+                    if turn["summary"]["progress"]["progress"] == "closed" {
+                        break;
+                    }
+                    assert!(Instant::now() < deadline);
+                    std::thread::yield_now();
+                }
+            }
+            world.write_project_file(".lattice/agents/recover/agent.toml", "schema_version=1\n[agent]\nname='recover'\nmodel='local/replacement'\neffort='off'\n[prompt]\nsystem='replacement copy prompt'\n").unwrap();
+            let config = world.home().join(".lattice/providers.toml");
+            let base = std::fs::read_to_string(&config).unwrap();
+            std::fs::write(
+                config,
+                format!("{base}\n[providers.local.models.replacement]\neffort=['off']\n"),
+            )
+            .unwrap();
+            let ack = world.root().join("copy-accepted.json");
+            world.set_env(BARRIER, "turn_accepted");
+            world.set_env(ACK, ack.display().to_string());
+            let daemon = support::crash::start(&world, &spec, &budget);
+            let session = if replacement {
+                json!({"existing":SESSION})
+            } else {
+                json!({"new":SESSION})
+            };
+            let wire = Wire::connect(
+                &world,
+                timeout(&world, &spec),
+                &submit_request(
+                    &world,
+                    OTHER,
+                    session,
+                    "accepted replacement",
+                    Some("recover"),
+                ),
+            );
+            let marker = wait_for_ack(&ack, timeout(&world, &spec));
+            assert_eq!(marker["turn_id"], OTHER);
+            assert_eq!(provider.captured_requests().len(), usize::from(replacement));
+            support::crash::kill_backend(&world, daemon, &mut evidence, &budget);
+            drop(wire);
+            world.unset_env(BARRIER);
+            world.unset_env(ACK);
+            let restarted = support::crash::start(&world, &spec, &budget);
+            let head = ipc(
+                &world,
+                timeout(&world, &spec),
+                json!({"operation":"head", "session_id":SESSION}),
+            );
+            assert_eq!(head["value"]["model"], "replacement");
+            assert_eq!(head["value"]["effort"], "off");
+            assert_eq!(head["value"]["profile_default_effort"], "off");
+            let mut watcher = Watcher::open(&world, timeout(&world, &spec), SESSION);
+            let view = watcher.initial();
+            let node = if replacement { 3 } else { 1 };
+            assert_eq!(view.entries[&node].raw["content"]["model"], "replacement");
+            assert_eq!(view.entries[&node].raw["content"]["effort"], "off");
+            let accepted = turn_lookup(&world, timeout(&world, &spec), OTHER);
+            assert_eq!(accepted["value"]["turn"]["user_node"], node);
+            let duplicate = ipc(
+                &world,
+                timeout(&world, &spec),
+                submit_request(
+                    &world,
+                    OTHER,
+                    json!({"existing":SESSION}),
+                    "accepted replacement",
+                    None,
+                ),
+            );
+            assert_eq!(duplicate["value"]["conflict"], "turn_id_used");
+            std::fs::remove_dir_all(world.project_dir().join(".lattice/agents/recover")).unwrap();
+            cli(
+                &world,
+                &spec,
+                &mut evidence,
+                &[
+                    "--json",
+                    "session",
+                    "send",
+                    "resume from copy",
+                    "--session",
+                    SESSION,
+                ],
+                0,
+            );
+            let capture = provider.captured_requests().pop().unwrap();
+            assert_eq!(capture.raw["model"], "replacement");
+            assert_eq!(capture.raw["reasoning_effort"], "none");
+            assert_eq!(
+                capture.raw["messages"][0]["content"],
+                "replacement copy prompt"
+            );
+            let tree = read_json(
+                &world,
+                &spec,
+                &mut evidence,
+                &["--json", "session", "log", SESSION],
+            );
+            assert_eq!(
+                tree["nodes"].as_array().unwrap().len(),
+                if replacement { 7 } else { 5 }
+            );
+            cli(
+                &world,
+                &spec,
+                &mut evidence,
+                &["--json", "daemon", "stop"],
+                0,
+            );
+            world.daemon_departed().unwrap();
+            assert!(restarted.wait(None).unwrap().is_clean_exit(0));
+            evidence.record_captures(provider.captured_requests());
+            evidence
+                .record_json("reopened-profile-head", &head)
+                .unwrap();
+        }));
+        support::finish_recorded(evidence, result);
+    }
+}

@@ -226,7 +226,11 @@ impl Entry {
 pub struct Head {
     pub session_id: String,
     pub position: u64,
-    pub agent: Option<String>,
+    pub agent: String,
+    pub model: String,
+    pub provider: String,
+    pub effort: Option<String>,
+    pub profile_default_effort: Option<String>,
     pub turn_id: Option<String>,
     pub owner: bool,
     pub diagnostic: Option<LocalError>,
@@ -766,7 +770,11 @@ fn head(value: &Value) -> Result<Head, String> {
     Ok(Head {
         session_id: string(value, "session_id")?.into(),
         position,
-        agent: nullable_string(value, "agent")?,
+        agent: string(value, "agent")?.into(),
+        model: string(value, "model")?.into(),
+        provider: string(value, "provider")?.into(),
+        effort: nullable_string(value, "effort")?,
+        profile_default_effort: nullable_string(value, "profile_default_effort")?,
         turn_id,
         owner: boolean(value, "owner")?,
         diagnostic: match value.get("diagnostic") {

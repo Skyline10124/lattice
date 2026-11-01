@@ -910,6 +910,7 @@ mod tests {
     pub(super) fn test_app() -> App {
         App::new(
             SessionContext {
+                startup_agent: Some("test".into()),
                 session_id: None,
                 active_agent: "agent".into(),
             },

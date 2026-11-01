@@ -221,7 +221,11 @@ pub(crate) async fn run_coordinator_saga(
                 model_step_ordinal: ordinal,
                 attempt_ordinal: attempt,
             };
-            let target = lattice_llm::ModelTarget::new(&config.provider, &config.model);
+            let target = lattice_llm::ModelTarget {
+                provider: config.provider.clone(),
+                model: config.model.clone(),
+                effort: config.effort,
+            };
             let (origin, driver) = live.model.resolve(&target).await;
             live.healthy()?;
             if let Some(cause) = live.stop() {
@@ -252,6 +256,7 @@ pub(crate) async fn run_coordinator_saga(
                 history: history.clone(),
                 model: config.model.clone(),
                 provider: config.provider.clone(),
+                effort: config.effort,
                 tools: tools.clone(),
                 cancel: Some(cancellation.clone()),
                 deadline: Some(live.deadline),

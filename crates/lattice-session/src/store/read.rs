@@ -317,28 +317,13 @@ fn entries(
 
 impl Records {
     pub(super) fn current_agent(&self, s: SessionId) -> Result<Option<String>> {
-        let session = self.sessions.get(&s).ok_or_else(|| missing("session", s))?;
-        let node = self
-            .nodes
-            .get(&(s, session.current))
-            .ok_or_else(|| corrupt("nodes", &s.to_string(), "current node missing"))?;
-        node.turn_id()
-            .map(|t| {
-                let user_ref = self
-                    .turn_index
-                    .get(&t)
-                    .filter(|r| r.session_id == s)
-                    .ok_or_else(|| corrupt("turn_index", &t.to_string(), "node turn missing"))?;
-                match self.nodes.get(&(s, user_ref.node)) {
-                    Some(Node::UserMessage { agent_name, .. }) => Ok(agent_name.clone()),
-                    _ => Err(corrupt(
-                        "nodes",
-                        &format!("{s}/{}", user_ref.node.0),
-                        "missing turn user node",
-                    )),
-                }
-            })
-            .transpose()
+        if !self.sessions.contains_key(&s) {
+            return Err(missing("session", s));
+        }
+        self.profile_copies
+            .get(&s)
+            .map(|copy| Some(copy.profile.agent_name.clone()))
+            .ok_or_else(|| corrupt("profile_copies", &s.to_string(), "profile copy missing"))
     }
 
     pub(super) fn turn_detail(&self, s: SessionId, t: TurnId) -> Result<TurnDetail> {
@@ -615,6 +600,22 @@ impl SessionRead {
         Ok(stored)
     }
 
+    /// 读取会话的当前配置；完整副本只供后台组成，不直接发到 IPC。
+    pub fn profile_copy(&self, session: SessionId) -> Result<SessionProfileCopy> {
+        self.find_session(session)?
+            .ok_or_else(|| missing("session", session))?;
+        let key = session.to_string();
+        let table = self.tx.open_table(PROFILE_COPIES).map_err(table_error)?;
+        let value = table
+            .get(key.as_str())?
+            .ok_or_else(|| corrupt("profile_copies", &key, "profile copy missing"))?;
+        let copy: SessionProfileCopy =
+            attach_path(&self.path, decode_profile_copy(&key, value.value()))?;
+        copy.validate()
+            .map_err(|_| corrupt("profile_copies", &key, "invalid profile copy"))?;
+        Ok(copy)
+    }
+
     pub fn current_agent(&self, session: SessionId) -> Result<Option<String>> {
         self.local(session, Selection::Session)?
             .current_agent(session)
@@ -760,10 +761,7 @@ impl SessionRead {
             .find_session(session)?
             .ok_or_else(|| missing("session", session))?;
         let (path, earlier_turns) = self.conversation_window(session, record.current, turns)?;
-        let current_agent = path.iter().rev().find_map(|(_, node)| match node {
-            Node::UserMessage { agent_name, .. } => Some(agent_name.clone()),
-            _ => None,
-        });
+        let current_agent = Some(self.profile_copy(session)?.profile.agent_name);
         Ok(SessionView {
             session: record,
             current_agent,

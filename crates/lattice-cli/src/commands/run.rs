@@ -295,6 +295,8 @@ pub async fn run_session_prompt(
         }
     };
     let request = TurnRequest {
+        model: None,
+        effort: None,
         turn_id: id,
         session,
         workspace,

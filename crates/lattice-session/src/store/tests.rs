@@ -30,7 +30,7 @@ fn oversized_complete_replies_are_rejected_without_partial_records() {
     };
     let (_dir, layout, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
-    db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+    accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
     db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
         .unwrap();
     for registration in [true, false] {
@@ -123,7 +123,7 @@ fn reply_total_includes_names_and_ids_with_an_exact_boundary_control() {
     use lattice_conversation::MAX_TOOL_CALL_ARGUMENTS_BYTES;
     let (_dir, layout, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
-    db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+    accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
     db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
         .unwrap();
     let input = |extra| {
@@ -215,6 +215,7 @@ fn config() -> FrozenTurnConfig {
         agent_name: "alpha".into(),
         model: "model".into(),
         provider: "openai".into(),
+        effort: None,
         system_prompt: None,
         catalog: ToolCatalogSnapshot::new(
             "build".into(),
@@ -243,7 +244,34 @@ fn accept(s: SessionId, t: TurnId) -> AcceptTurn {
         config: config(),
         accepted_at: now(),
         agent_selection: AgentSelection::Explicit,
+        profile_copy: SessionProfileCopy::for_test(&config()),
+        expected_profile_digest: None,
     }
+}
+
+// 旧领域测试的夹具以最终冻结配置准备副本；副本本身的拒绝测试直接调用领域入口。
+fn accept_prepared(
+    db: &SessionStore,
+    lock: &SessionExecutionLock,
+    mut input: AcceptTurn,
+) -> Result<AcceptedTurn> {
+    let previous = db.begin_read()?.profile_copy(input.session.id()).ok();
+    input.expected_profile_digest = previous
+        .as_ref()
+        .map(SessionProfileCopy::digest)
+        .transpose()?;
+    input.profile_copy = if input.agent_selection == AgentSelection::Inherited {
+        let mut copy = previous.unwrap_or_else(|| SessionProfileCopy::for_test(&input.config));
+        copy.current = SessionModelChoice {
+            provider: input.config.provider.clone(),
+            model: input.config.model.clone(),
+            effort: input.config.effort,
+        };
+        copy
+    } else {
+        SessionProfileCopy::for_test(&input.config)
+    };
+    db.accept_turn(lock, input)
 }
 
 fn origin() -> AttemptOrigin {
@@ -326,7 +354,7 @@ fn running(
     base: u64,
 ) -> (SessionExecutionLock, RegisteredCalls) {
     let lock = db.try_lock_session(s).unwrap();
-    db.accept_turn(&lock, accept(s, t)).unwrap();
+    accept_prepared(db, &lock, accept(s, t)).unwrap();
     db.start_request(&lock, key(t, 0, 0), origin(), now())
         .unwrap();
     let calls = db
@@ -535,7 +563,7 @@ fn creation_failures() {
         );
         let db = SessionStore::create(&layout).unwrap();
         let lock = db.try_lock_session(sid(1)).unwrap();
-        db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+        accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
         drop(lock);
         drop(db);
         let db = SessionStore::create(&layout).unwrap();
@@ -572,7 +600,7 @@ fn creation_failures() {
 fn deep_arguments_are_rejected_before_commit() {
     let (_dir, layout, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
-    db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+    accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
     db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
         .unwrap();
     let before = load_read(&db.begin_read().unwrap().tx).unwrap();
@@ -961,7 +989,11 @@ fn commit_failure_disables_all_writers() {
                         }
                         _ => {}
                     },
-                    || with_fault(point, || db.accept_turn(&lock, accept(sid(1), tid(1)))),
+                    || {
+                        with_fault(point, || {
+                            accept_prepared(&db, &lock, accept(sid(1), tid(1)))
+                        })
+                    },
                 )
             });
             commit_reached
@@ -990,7 +1022,7 @@ fn commit_failure_disables_all_writers() {
                                     })
                                     .map(|_| ())
                                 } else {
-                                    db.accept_turn(&lock, accept(sid(n), tid(n))).map(|_| ())
+                                    accept_prepared(db, &lock, accept(sid(n), tid(n))).map(|_| ())
                                 }
                             },
                         );
@@ -1096,7 +1128,7 @@ fn schema_and_legacy_rejection_matrix() {
             assert!(!layout.lattice_root().join("lattice.redb").exists());
         }
     }
-    for case in 0..7 {
+    for case in 0..8 {
         let (_d, layout, db) = store();
         drop(db);
         let raw = redb::Database::open(layout.lattice_root().join("lattice.redb")).unwrap();
@@ -1128,10 +1160,14 @@ fn schema_and_legacy_rejection_matrix() {
             3 => {
                 tx.delete_table(CONFIGS).unwrap();
             }
-            4 | 5 => {
+            4 | 5 | 7 => {
                 let mut meta = tx.open_table(META).unwrap();
                 // 固定旧版元信息，独立于当前编码器核对严格打开。
-                let old_version = if case == 4 { 3_u32 } else { 4_u32 };
+                let old_version = match case {
+                    4 => 3_u32,
+                    5 => 4_u32,
+                    _ => 6_u32,
+                };
                 for (key, value) in [
                     ("store_kind", "\"lattice-session\"".to_owned()),
                     ("store_format_version", old_version.to_string()),
@@ -1154,8 +1190,12 @@ fn schema_and_legacy_rejection_matrix() {
         let error = SessionStore::open(&layout)
             .err()
             .unwrap_or_else(|| panic!("case {case}"));
-        if matches!(case, 4 | 5) {
-            let expected = if case == 4 { 3 } else { 4 };
+        if matches!(case, 4 | 5 | 7) {
+            let expected = match case {
+                4 => 3,
+                5 => 4,
+                _ => 6,
+            };
             let path = layout.lattice_root().join("lattice.redb");
             assert!(error.to_string().contains(&path.display().to_string()));
             assert!(matches!(
@@ -1263,7 +1303,7 @@ fn keys_versions_and_encoding() {
         let meta = read.tx.open_table(META).unwrap();
         assert_eq!(
             meta.get("store_format_version").unwrap().unwrap().value(),
-            b"\x00\x00\x00\x066"
+            b"\x00\x00\x00\x077"
         );
     }
     let (_lock, calls) = running(&db, sid(1), tid(1), 1, 1);
@@ -1355,7 +1395,7 @@ fn keys_versions_and_encoding() {
         let raw = serde_json::to_string(&damaged)
             .unwrap()
             .replace("\"input\":0", &format!("\"input\":{invalid}"));
-        let mut bytes = 6_u32.to_be_bytes().to_vec();
+        let mut bytes = VERSION.to_be_bytes().to_vec();
         bytes.extend(raw.as_bytes());
         assert!(
             matches!(
@@ -1603,12 +1643,12 @@ fn progress_conclusions_and_stop_precedence() {
 fn acceptance_deduplicates_configs_and_preserves_abandoned_nodes() {
     let (_d, layout, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
-    db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+    accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
     let old = node_at(&db, 2);
     let mut next = accept(sid(1), tid(2));
     next.session = AcceptSession::Existing { id: sid(1) };
     next.config.agent_name = "beta".into();
-    db.accept_turn(&lock, next).unwrap();
+    accept_prepared(&db, &lock, next).unwrap();
     assert_eq!(records(&db).configs.len(), 1);
     assert_eq!(node_at(&db, 2), old);
     assert_eq!(
@@ -1627,7 +1667,7 @@ fn acceptance_deduplicates_configs_and_preserves_abandoned_nodes() {
     retry.config.agent_name.clear();
     let lock2 = db.try_lock_session(sid(2)).unwrap();
     assert!(
-        matches!(db.accept_turn(&lock2,retry).unwrap(),AcceptedTurn::Existing(t) if t.session_id==sid(1))
+        matches!(accept_prepared(&db, &lock2,retry).unwrap(),AcceptedTurn::Existing(t) if t.session_id==sid(1))
     );
     for case in 0..3 {
         let mut conflicting = accept(sid(1), tid(1));
@@ -1637,7 +1677,7 @@ fn acceptance_deduplicates_configs_and_preserves_abandoned_nodes() {
             _ => conflicting.session = AcceptSession::Existing { id: sid(2) },
         }
         assert!(matches!(
-            db.accept_turn(if case == 2 { &lock2 } else { &lock }, conflicting),
+            accept_prepared(&db, if case == 2 { &lock2 } else { &lock }, conflicting),
             Err(StoreError::Conflict { .. })
         ));
     }
@@ -1645,10 +1685,10 @@ fn acceptance_deduplicates_configs_and_preserves_abandoned_nodes() {
     let mut next = accept(sid(1), tid(3));
     next.session = AcceptSession::Existing { id: sid(1) };
     next.agent_selection = AgentSelection::Inherited;
-    assert!(db.accept_turn(&lock, next.clone()).is_err());
+    assert!(accept_prepared(&db, &lock, next.clone()).is_err());
     next.agent_selection = AgentSelection::Explicit;
     next.config.system_prompt = Some("different".into());
-    db.accept_turn(&lock, next).unwrap();
+    accept_prepared(&db, &lock, next).unwrap();
     assert_eq!(records(&db).configs.len(), 2);
     assert_eq!(node_at(&db, 2), old);
     assert_eq!(node_at(&db, 5).parent(), Some(NodeId(0)));
@@ -1692,7 +1732,7 @@ fn invalid_acceptance_and_lock_capabilities_leave_no_facts() {
             11 => a.config.model.clear(),
             _ => a.config.catalog.entries[0].descriptor_identity = "A".repeat(64),
         }
-        assert!(db.accept_turn(&lock, a).is_err(), "{case}");
+        assert!(accept_prepared(&db, &lock, a).is_err(), "{case}");
         assert!(records(&db).nodes.is_empty());
     }
     assert!(matches!(
@@ -1701,19 +1741,19 @@ fn invalid_acceptance_and_lock_capabilities_leave_no_facts() {
     ));
     let other = db.try_lock_session(sid(2)).unwrap();
     assert!(matches!(
-        db.accept_turn(&other, accept(sid(1), tid(1))),
+        accept_prepared(&db, &other, accept(sid(1), tid(1))),
         Err(StoreError::InvalidLockCapability)
     ));
     let (_d2, _l2, db2) = store();
     assert!(matches!(
-        db2.accept_turn(&lock, accept(sid(1), tid(1))),
+        accept_prepared(&db2, &lock, accept(sid(1), tid(1))),
         Err(StoreError::InvalidLockCapability)
     ));
     let mut a = accept(sid(1), tid(1));
     a.input = "x".repeat(MAX_USER_INPUT_BYTES);
-    db.accept_turn(&lock, a).unwrap();
+    accept_prepared(&db, &lock, a).unwrap();
     assert!(matches!(
-        db.accept_turn(&lock, accept(sid(1), tid(2))),
+        accept_prepared(&db, &lock, accept(sid(1), tid(2))),
         Err(StoreError::SessionCollision { .. })
     ));
     assert_eq!(
@@ -1726,7 +1766,7 @@ fn every_commit_reopens_with_read_only_conclusions() {
     for cut in 0..12 {
         let (_d, layout, db) = store();
         let lock = db.try_lock_session(sid(1)).unwrap();
-        db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+        accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
         if cut >= 1 {
             db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
                 .unwrap();
@@ -1940,13 +1980,13 @@ fn every_commit_reopens_with_read_only_conclusions() {
         db.rewind(&lock, NodeId(0), now()).unwrap();
         let mut next = accept(sid(1), tid(2));
         next.session = AcceptSession::Existing { id: sid(1) };
-        db.accept_turn(&lock, next).unwrap();
+        accept_prepared(&db, &lock, next).unwrap();
         assert_eq!(detail(&db), expected, "old turn changed at cut {cut}");
     }
 }
 
 /// 回放来源只记录协议与 provider ID：DTO、会话记录与节点记录的序列化中
-/// 都不得出现 endpoint / base_url 字段；格式版本为 6。
+/// 都不得出现 endpoint / base_url 字段；格式版本为 7。
 #[test]
 fn replay_origin_records_no_endpoint() {
     fn assert_no_endpoint(label: &str, text: &str) {
@@ -1969,12 +2009,12 @@ fn replay_origin_records_no_endpoint() {
     let (_lock, _calls) = running(&db, sid(1), tid(1), 1, 1);
     let r = records(&db);
     let session = encode(&r.sessions[&sid(1)]).unwrap();
-    assert_eq!(&session[..4], &6u32.to_be_bytes(), "会话记录格式版本为 6");
+    assert_eq!(&session[..4], &7u32.to_be_bytes(), "会话记录格式版本为 7");
     assert_no_endpoint("会话记录", &String::from_utf8_lossy(&session[4..]));
     let mut origins = 0;
     for ((_, id), node) in &r.nodes {
         let bytes = encode(node).unwrap();
-        assert_eq!(&bytes[..4], &6u32.to_be_bytes(), "节点 {id:?} 格式版本为 6");
+        assert_eq!(&bytes[..4], &7u32.to_be_bytes(), "节点 {id:?} 格式版本为 7");
         let text = String::from_utf8_lossy(&bytes[4..]).into_owned();
         origins += text.matches("\"origin\"").count();
         assert_no_endpoint(&format!("节点 {id:?}"), &text);
@@ -1990,7 +2030,7 @@ fn attempt_sources_survive_retry_and_reopen() {
     let lock = db.try_lock_session(sid(1)).unwrap();
     let mut input = accept(sid(1), tid(1));
     input.config.provider = "edge-1".into();
-    db.accept_turn(&lock, input).unwrap();
+    accept_prepared(&db, &lock, input).unwrap();
     let first = AttemptOrigin {
         protocol: AttemptProtocol::ChatCompletions,
         provider_id: "edge-1".into(),
@@ -2142,7 +2182,7 @@ fn attempts_without_reply_allow_sent_and_stopped_on_reopen() {
     for state in ["reserved", "sent", "stopped"] {
         let (_dir, layout, db) = store();
         let lock = db.try_lock_session(sid(1)).unwrap();
-        db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+        accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
         if state != "reserved" {
             db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
                 .unwrap();
@@ -2209,7 +2249,7 @@ fn provider_id_and_attempt_source_boundaries() {
             protocol,
             provider_id: input.config.provider.clone(),
         };
-        db.accept_turn(&lock, input).unwrap();
+        accept_prepared(&db, &lock, input).unwrap();
         db.start_request(&lock, key(tid(1), 0, 0), origin.clone(), now())
             .unwrap();
         drop(lock);
@@ -2222,14 +2262,14 @@ fn provider_id_and_attempt_source_boundaries() {
     let mut input = accept(sid(1), tid(1));
     input.config.provider = "bad_id".into();
     assert!(matches!(
-        db.accept_turn(&lock, input),
+        accept_prepared(&db, &lock, input),
         Err(StoreError::InvalidInput {
             field: "provider",
             ..
         })
     ));
     assert!(records(&db).nodes.is_empty());
-    db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+    accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
     let before = records(&db);
     for id in ["bad_id", "other-provider"] {
         let mut source = origin();
@@ -2312,7 +2352,7 @@ fn retries_usage_and_between_request_stops() {
     for cause in [StopCause::Cancelled, StopCause::Deadline] {
         let (_d, _l, db) = store();
         let lock = db.try_lock_session(sid(1)).unwrap();
-        db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+        accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
         db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
             .unwrap();
         let mut stop = stopped(
@@ -2374,7 +2414,7 @@ fn retries_usage_and_between_request_stops() {
     }
     let (_d, _l, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
-    db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+    accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
     for a in 0..3 {
         db.start_request(&lock, key(tid(1), 0, a), origin(), now())
             .unwrap();
@@ -2414,7 +2454,7 @@ fn retries_usage_and_between_request_stops() {
 fn step_budget_reserves_and_closes_limit_node() {
     let (_d, layout, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
-    db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+    accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
     for ordinal in 0..MAX_MODEL_STEPS {
         db.start_request(&lock, key(tid(1), ordinal, 0), origin(), now())
             .unwrap();
@@ -2492,7 +2532,7 @@ fn conversation_tree() -> (
         let mut next = accept(sid(1), t);
         next.session = AcceptSession::Existing { id: sid(1) };
         next.config.agent_name = "beta".into();
-        db.accept_turn(&lock, next).unwrap();
+        accept_prepared(&db, &lock, next).unwrap();
         if t == tid(2) {
             db.start_request(&lock, key(t, 0, 0), origin(), now())
                 .unwrap();
@@ -2505,6 +2545,36 @@ fn conversation_tree() -> (
 
 fn entry_nodes(entries: &[ConversationEntry]) -> Vec<u64> {
     entries.iter().map(|entry| entry.node().0).collect()
+}
+
+#[test]
+fn last_accepted_agent_survives_rewind() {
+    let (_dir, layout, db, lock) = conversation_tree();
+    for target in [NodeId(2), NodeId(1), NodeId(0)] {
+        db.rewind(&lock, target, now()).unwrap();
+        let read = db.begin_read().unwrap();
+        assert_eq!(read.current_agent(sid(1)).unwrap().as_deref(), Some("beta"));
+        assert_eq!(
+            read.view(sid(1), 10).unwrap().current_agent.as_deref(),
+            Some("beta")
+        );
+        assert_eq!(
+            read.log(sid(1)).unwrap().current_agent.as_deref(),
+            Some("beta")
+        );
+    }
+    drop(lock);
+    drop(db);
+    let reopened = SessionStore::open(&layout).unwrap();
+    assert_eq!(
+        reopened
+            .begin_read()
+            .unwrap()
+            .current_agent(sid(1))
+            .unwrap()
+            .as_deref(),
+        Some("beta")
+    );
 }
 
 fn entry_ordinals(entries: &[ConversationEntry]) -> Vec<u64> {
@@ -2546,7 +2616,7 @@ fn conversation_view_recent_turns_and_branch_ordinals() {
     db.rewind(&lock, NodeId(2), now()).unwrap();
     let mut branch = accept(sid(1), tid(4));
     branch.session = AcceptSession::Existing { id: sid(1) };
-    db.accept_turn(&lock, branch).unwrap();
+    accept_prepared(&db, &lock, branch).unwrap();
     let read = db.begin_read().unwrap();
     let view = read.view(sid(1), 10).unwrap();
     assert_eq!(entry_nodes(&view.entries), vec![1, 2, 8, 9]);
@@ -2569,7 +2639,7 @@ fn conversation_view_recent_turns_and_branch_ordinals() {
     let view = db.begin_read().unwrap().view(sid(1), 1).unwrap();
     assert_eq!(view.session.current, NodeId(0));
     assert!(view.entries.is_empty());
-    assert_eq!(view.current_agent, None);
+    assert_eq!(view.current_agent.as_deref(), Some("alpha"));
 }
 
 #[test]
@@ -2590,7 +2660,7 @@ fn conversation_history_pages_whole_turns_on_fixed_parent_chain() {
     db.rewind(&lock, NodeId(2), now()).unwrap();
     let mut branch = accept(sid(1), tid(4));
     branch.session = AcceptSession::Existing { id: sid(1) };
-    db.accept_turn(&lock, branch).unwrap();
+    accept_prepared(&db, &lock, branch).unwrap();
     let read = db.begin_read().unwrap();
     assert_eq!(read.history(sid(1), NodeId(6), 2).unwrap(), both);
     assert_eq!(
@@ -2611,12 +2681,12 @@ fn conversation_history_pages_whole_turns_on_fixed_parent_chain() {
 fn conversation_reads_reject_invalid_boundaries_and_missing_targets() {
     let (_d, _l, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
-    db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+    accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
     let other = db.try_lock_session(sid(2)).unwrap();
-    db.accept_turn(&other, accept(sid(2), tid(2))).unwrap();
+    accept_prepared(&db, &other, accept(sid(2), tid(2))).unwrap();
     let mut next = accept(sid(2), tid(3));
     next.session = AcceptSession::Existing { id: sid(2) };
-    db.accept_turn(&other, next).unwrap();
+    accept_prepared(&db, &other, next).unwrap();
     let read = db.begin_read().unwrap();
     for before in [NodeId(0), NodeId(2), NodeId(3), NodeId(99)] {
         assert!(
@@ -2791,7 +2861,7 @@ fn conversation_step_summary_moves_to_reserved_successor() {
 fn conversation_retries_and_transaction_reads_survive_reopen() {
     let (_d, layout, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
-    db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+    accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
     db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
         .unwrap();
     db.stop_attempt(
@@ -2820,7 +2890,7 @@ fn conversation_retries_and_transaction_reads_survive_reopen() {
         .unwrap();
     let mut next = accept(sid(1), tid(2));
     next.session = AcceptSession::Existing { id: sid(1) };
-    db.accept_turn(&lock, next).unwrap();
+    accept_prepared(&db, &lock, next).unwrap();
     assert_eq!(old_read.view(sid(1), 1).unwrap(), view);
     assert_eq!(old_read.usage(sid(1)).unwrap(), usage);
     let current = db.begin_read().unwrap().usage(sid(1)).unwrap();
@@ -2985,7 +3055,7 @@ fn observer_projections_skip_unrelated_content() {
     ] {
         let (_d, _l, db) = store();
         let lock = db.try_lock_session(sid(1)).unwrap();
-        db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+        accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
         db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
             .unwrap();
         db.stop_attempt(
@@ -3039,7 +3109,7 @@ fn usage_projection_skips_conversation_and_execution_material() {
     for position in [NodeId(2), NodeId(0)] {
         let (_d, _l, db) = store();
         let lock = db.try_lock_session(sid(1)).unwrap();
-        db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+        accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
         db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
             .unwrap();
         db.close_step(&lock, CloseStep::Finish(reply(key(tid(1), 0, 0), 0)), now())
@@ -3086,7 +3156,7 @@ fn usage_projection_rejects_damaged_metering_fields() {
     ] {
         let (_d, _l, db) = store();
         let lock = db.try_lock_session(sid(1)).unwrap();
-        db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+        accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
         db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
             .unwrap();
         edit_projection_node(&db, node, |wire| {
@@ -3118,7 +3188,7 @@ fn observer_projections_reject_damaged_fields() {
         for replacement in [None, Some(json!(false))] {
             let (_d, _l, db) = store();
             let lock = db.try_lock_session(sid(1)).unwrap();
-            db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+            accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
             db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
                 .unwrap();
             edit_projection_node(&db, node, |wire| {
@@ -3151,7 +3221,7 @@ fn observer_projections_reject_damaged_fields() {
     ] {
         let (_d, _l, db) = store();
         let lock = db.try_lock_session(sid(1)).unwrap();
-        db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+        accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
         edit_projection_node(&db, node, |wire| wire[field] = value);
         let read = db.begin_read().unwrap();
         let result = if node == NodeId(2) {
@@ -3250,10 +3320,10 @@ fn conversation_reads_report_missing_nodes_and_invalid_encoding() {
         for broken in [false, true] {
             let (_d, _l, db) = store();
             let lock = db.try_lock_session(sid(1)).unwrap();
-            db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+            accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
             let mut next = accept(sid(1), tid(2));
             next.session = AcceptSession::Existing { id: sid(1) };
-            db.accept_turn(&lock, next).unwrap();
+            accept_prepared(&db, &lock, next).unwrap();
             let tx = db.db.begin_write().unwrap();
             {
                 let mut nodes = tx.open_table(NODES).unwrap();
@@ -3782,7 +3852,7 @@ fn local_reads_detect_live_corruption_and_open_checks_unrelated_sessions() {
 
 #[test]
 fn value_versions_and_schema_rejections_name_the_database() {
-    for table in [META, SESSIONS, CONFIGS, TURN_INDEX, INDEX] {
+    for table in [META, SESSIONS, PROFILE_COPIES, CONFIGS, TURN_INDEX, INDEX] {
         let (_d, layout, db) = store();
         let (lock, _calls) = running(&db, sid(1), tid(1), 1, 1);
         drop(lock);
@@ -3901,7 +3971,7 @@ fn registration_rejects_corrupt_change_high_water() {
         finish(&db, &first, &calls.bindings[0], None);
 
         let lock = db.try_lock_session(sid(2)).unwrap();
-        db.accept_turn(&lock, accept(sid(2), tid(2))).unwrap();
+        accept_prepared(&db, &lock, accept(sid(2), tid(2))).unwrap();
         db.start_request(&lock, key(tid(2), 0, 0), origin(), now())
             .unwrap();
         let tx = db.db.begin_write().unwrap();
@@ -3951,7 +4021,7 @@ fn transaction_failure_matrix() {
         for point in [FaultPoint::UnknownBefore, FaultPoint::UnknownAfter] {
             let (_dir, layout, db) = store();
             let lock = db.try_lock_session(sid(1)).unwrap();
-            db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+            accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
             if phase > 0 && phase != 10 {
                 db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
                     .unwrap();
@@ -4030,7 +4100,7 @@ fn transaction_failure_matrix() {
                 10 => {
                     let mut next = accept(sid(1), tid(2));
                     next.session = AcceptSession::Existing { id: sid(1) };
-                    db.accept_turn(&lock, next).map(|_| ())
+                    accept_prepared(&db, &lock, next).map(|_| ())
                 }
                 7 => db.rewind(&lock, NodeId(0), now()).map(|_| ()),
                 8 => db
@@ -4145,6 +4215,7 @@ fn overwrite_records(tx: &redb::WriteTransaction, r: &Records) {
         }};
     }
     string_table!(SESSIONS, &r.sessions);
+    string_table!(PROFILE_COPIES, &r.profile_copies);
     string_table!(TURN_INDEX, &r.turn_index);
     string_table!(INDEX, &r.index);
     {
@@ -4179,13 +4250,13 @@ fn overwrite_records(tx: &redb::WriteTransaction, r: &Records) {
 fn ordinary_operations_load_only_referenced_turns() {
     let (_d, layout, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
-    db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+    accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
     db.rewind(&lock, NodeId(0), now()).unwrap();
     let mut next = accept(sid(1), tid(2));
     next.session = AcceptSession::Existing { id: sid(1) };
-    db.accept_turn(&lock, next).unwrap();
+    accept_prepared(&db, &lock, next).unwrap();
     let other = db.try_lock_session(sid(2)).unwrap();
-    db.accept_turn(&other, accept(sid(2), tid(3))).unwrap();
+    accept_prepared(&db, &other, accept(sid(2), tid(3))).unwrap();
     let tx = db.db.begin_write().unwrap();
     {
         let mut t = tx.open_table(NODES).unwrap();
@@ -4249,7 +4320,7 @@ fn ordinary_operations_load_only_referenced_turns() {
 fn invocation_registration_and_transitions_are_atomic() {
     let (_d, _l, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
-    db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+    accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
     assert!(
         db.start_request(&lock, key(tid(1), 0, 1), origin(), now())
             .is_err()
@@ -4460,7 +4531,7 @@ fn completed_batch_stop_is_atomic_and_survives_reopen() {
             let (_dir, layout, db) = store();
             let db = Arc::new(db);
             let lock = db.try_lock_session(sid(1)).unwrap();
-            db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+            accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
             for index in 0..=ordinal {
                 db.start_request(&lock, key(tid(1), index, 0), origin(), now())
                     .unwrap();
@@ -4609,7 +4680,7 @@ fn sequence_exhaustion_aborts_transactions() {
     ] {
         let (_dir, _layout, db) = store();
         let lock = db.try_lock_session(sid(1)).unwrap();
-        db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+        accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
         let calls = if matches!(case, "continue_node" | "stop_node") {
             db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
                 .unwrap();
@@ -4676,7 +4747,7 @@ fn sequence_exhaustion_aborts_transactions() {
                 }
             },
             || match case {
-                "accept_second_node" => db.accept_turn(&lock, input).map(|_| ()),
+                "accept_second_node" => accept_prepared(&db, &lock, input).map(|_| ()),
                 "continue_node" | "stop_node" => db
                     .close_step(
                         &lock,
@@ -4832,7 +4903,7 @@ fn strict_open_rejects_corruption() {
     }
     let (_dir, layout, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
-    db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+    accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
     drop(lock);
     drop(db);
     corrupt_json(&layout, SESSIONS, &sid(1).to_string(), |v| {
@@ -4883,5 +4954,262 @@ fn local_reads_reject_broken_references() {
             "rewind accepted {case}"
         );
         assert!(before == records(&db), "rewind changed {case}");
+    }
+}
+
+#[test]
+fn profile_copy_acceptance_rejects_stale_or_inconsistent_preparation() {
+    let (_dir, layout, db) = store();
+    let lock = db.try_lock_session(sid(1)).unwrap();
+    let first = accept(sid(1), tid(1));
+    db.accept_turn(&lock, first).unwrap();
+    let original = db.begin_read().unwrap().profile_copy(sid(1)).unwrap();
+    let before = records(&db);
+    for case in ["stale", "profile", "prompt", "model", "effort", "limits"] {
+        let mut next = accept(sid(1), tid(2));
+        next.session = AcceptSession::Existing { id: sid(1) };
+        next.agent_selection = AgentSelection::Inherited;
+        next.expected_profile_digest = Some(original.digest().unwrap());
+        next.profile_copy = original.clone();
+        match case {
+            "stale" => next.expected_profile_digest = Some([1; 32]),
+            "profile" => next.profile_copy.profile.description = Some("changed".into()),
+            "prompt" => next.profile_copy.prompt_config_digest = [1; 32],
+            "model" => next.profile_copy.current.model = "different".into(),
+            "effort" => next.profile_copy.current.effort = Some(lattice_conversation::Effort::High),
+            "limits" => next.profile_copy.profile.timeout_secs += 1,
+            _ => unreachable!(),
+        }
+        let result = db.accept_turn(&lock, next);
+        assert!(
+            matches!(
+                result,
+                Err(StoreError::Conflict { .. } | StoreError::InvalidInput { .. })
+            ),
+            "{case}: {result:?}"
+        );
+        assert!(before == records(&db), "{case} partially changed records");
+    }
+    let mut next = accept(sid(1), tid(2));
+    next.session = AcceptSession::Existing { id: sid(1) };
+    next.agent_selection = AgentSelection::Inherited;
+    next.expected_profile_digest = Some(original.digest().unwrap());
+    next.profile_copy = original;
+    next.config.effort = Some(lattice_conversation::Effort::Off);
+    next.profile_copy.current.effort = next.config.effort;
+    db.accept_turn(&lock, next.clone()).unwrap();
+    let changed = records(&db);
+    // 原身份找回优先于过期的准备摘要，不重复替换副本。
+    assert!(matches!(
+        db.accept_turn(&lock, next.clone()),
+        Ok(AcceptedTurn::Existing(_))
+    ));
+    assert!(changed == records(&db));
+    // 当前二进制的 catalog 可变化，提示引用仍指向首次副本的配置。
+    next.turn_id = tid(3);
+    next.expected_profile_digest = Some(next.profile_copy.digest().unwrap());
+    next.config.catalog =
+        ToolCatalogSnapshot::new("new-build".into(), next.config.catalog.entries.clone()).unwrap();
+    assert_ne!(
+        next.config.digest().unwrap(),
+        next.profile_copy.prompt_config_digest
+    );
+    let unchanged = next.profile_copy.clone();
+    // 从根分叉后，相邻轮次不再替副本带入旧 catalog 的提示配置。
+    db.rewind(&lock, NodeId(0), now()).unwrap();
+    db.accept_turn(&lock, next).unwrap();
+    assert_eq!(
+        db.begin_read().unwrap().session(sid(1)).unwrap().current,
+        NodeId(6)
+    );
+    db.rewind(&lock, NodeId(0), now()).unwrap();
+    assert_eq!(
+        db.begin_read()
+            .unwrap()
+            .current_agent(sid(1))
+            .unwrap()
+            .as_deref(),
+        Some(unchanged.profile.agent_name.as_str())
+    );
+    assert_eq!(
+        db.begin_read().unwrap().profile_copy(sid(1)).unwrap(),
+        unchanged
+    );
+    // 同名重建只改策略，旧的合法 Explicit 准备也必须由完整摘要拒绝。
+    let mut stale = accept(sid(1), tid(5));
+    stale.session = AcceptSession::Existing { id: sid(1) };
+    stale.expected_profile_digest = Some(unchanged.digest().unwrap());
+    stale.config.effort = unchanged.current.effort;
+    stale.profile_copy = unchanged;
+    let mut rebuilt = stale.clone();
+    rebuilt.turn_id = tid(4);
+    rebuilt
+        .profile_copy
+        .profile
+        .policy
+        .workspace
+        .denied_read_patterns
+        .push("private/**".into());
+    db.accept_turn(&lock, rebuilt).unwrap();
+    let before_stale = records(&db);
+    assert!(matches!(
+        db.accept_turn(&lock, stale),
+        Err(StoreError::Conflict { turn_id }) if turn_id == tid(5)
+    ));
+    assert!(before_stale == records(&db), "失效准备不能改动任何记录");
+    let changed = records(&db);
+    drop(lock);
+    drop(db);
+    assert!(changed == records(&SessionStore::open(&layout).unwrap()));
+}
+
+#[test]
+fn profile_copy_is_atomic_with_new_and_replacement_acceptance() {
+    for replacement in [false, true] {
+        for point in [
+            FaultPoint::Poisoned,
+            FaultPoint::UnknownBefore,
+            FaultPoint::UnknownAfter,
+        ] {
+            let (_dir, layout, db) = store();
+            let lock = db.try_lock_session(sid(1)).unwrap();
+            if replacement {
+                db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+            }
+            let before = records(&db);
+            let mut next = accept(sid(1), tid(2));
+            if replacement {
+                next.session = AcceptSession::Existing { id: sid(1) };
+                next.expected_profile_digest =
+                    Some(before.profile_copies[&sid(1)].digest().unwrap());
+            }
+            next.config.agent_name = "beta".into();
+            next.config.system_prompt = Some("replacement prompt".into());
+            next.config.effort = Some(lattice_conversation::Effort::Low);
+            next.profile_copy = SessionProfileCopy::for_test(&next.config);
+            let copy = next.profile_copy.clone();
+            let result = with_fault(point, || db.accept_turn(&lock, next));
+            assert!(matches!(result, Err(StoreError::CommitFailed { .. })));
+            let after = records(&db);
+            if point == FaultPoint::UnknownAfter {
+                assert_eq!(after.profile_copies[&sid(1)], copy);
+                assert_eq!(
+                    after.turn_index[&tid(2)].node,
+                    NodeId(if replacement { 3 } else { 1 })
+                );
+                assert!(after.configs.contains_key(&copy.prompt_config_digest));
+                assert_eq!(after.nodes.len(), if replacement { 5 } else { 3 });
+            } else {
+                assert!(before == after);
+            }
+            drop(lock);
+            drop(db);
+            assert!(after == records(&SessionStore::open(&layout).unwrap()));
+        }
+    }
+}
+
+#[test]
+fn profile_copy_strict_open_checks_shape_and_persistent_relations() {
+    let (_dir, layout, db) = store();
+    let lock = db.try_lock_session(sid(1)).unwrap();
+    db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+    let base = records(&db);
+    drop(lock);
+    drop(db);
+    for case in [
+        "missing",
+        "orphan",
+        "prompt",
+        "wrong_prompt",
+        "agent",
+        "model",
+        "effort",
+        "limits",
+    ] {
+        let raw = redb::Database::open(layout.lattice_root().join("lattice.redb")).unwrap();
+        let tx = raw.begin_write().unwrap();
+        let mut changed = base.clone();
+        let copy = changed.profile_copies.get_mut(&sid(1)).unwrap();
+        match case {
+            "missing" => {
+                changed.profile_copies.remove(&sid(1));
+            }
+            "orphan" => {
+                changed
+                    .profile_copies
+                    .insert(sid(2), base.profile_copies[&sid(1)].clone());
+            }
+            "prompt" => copy.prompt_config_digest = [1; 32],
+            "wrong_prompt" => {
+                let mut other = config().stored();
+                other.system_prompt = Some("another valid stored prompt".into());
+                let digest = other.digest().unwrap();
+                validate::stored_config(&digest, &other).unwrap();
+                changed.configs.insert(digest, other);
+                copy.prompt_config_digest = digest;
+            }
+            "agent" => copy.profile.agent_name = "beta".into(),
+            "model" => copy.current.model = "different".into(),
+            "effort" => copy.current.effort = Some(lattice_conversation::Effort::Off),
+            "limits" => copy.profile.timeout_secs += 1,
+            _ => unreachable!(),
+        }
+        overwrite_records(&tx, &changed);
+        tx.commit().unwrap();
+        drop(raw);
+        assert!(
+            matches!(
+                SessionStore::open(&layout),
+                Err(StoreError::Corruption { .. })
+            ),
+            "{case}"
+        );
+    }
+    for case in [
+        "unknown",
+        "effort",
+        "version",
+        "key",
+        "canonical",
+        "truncated",
+        "table",
+    ] {
+        let raw = redb::Database::open(layout.lattice_root().join("lattice.redb")).unwrap();
+        let tx = raw.begin_write().unwrap();
+        overwrite_records(&tx, &base);
+        if case == "table" {
+            tx.delete_table(PROFILE_COPIES).unwrap();
+        } else {
+            let mut table = tx.open_table(PROFILE_COPIES).unwrap();
+            let mut value = serde_json::to_value(&base.profile_copies[&sid(1)]).unwrap();
+            if case == "unknown" {
+                value["unknown"] = json!(true);
+            }
+            if case == "effort" {
+                value["current"]["effort"] = json!("default");
+            }
+            let mut bytes = encode(&value).unwrap();
+            if case == "version" {
+                bytes[..4].copy_from_slice(&6_u32.to_be_bytes());
+            }
+            if case == "canonical" {
+                bytes.push(b' ');
+            }
+            if case == "truncated" {
+                bytes.truncate(3);
+            }
+            table
+                .insert(sid(1).to_string().as_str(), bytes.as_slice())
+                .unwrap();
+            if case == "key" {
+                table
+                    .insert("invalid", encode(&value).unwrap().as_slice())
+                    .unwrap();
+            }
+        }
+        tx.commit().unwrap();
+        drop(raw);
+        assert!(SessionStore::open(&layout).is_err(), "{case}");
     }
 }

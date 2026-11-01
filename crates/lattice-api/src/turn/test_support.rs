@@ -45,6 +45,8 @@ pub(super) fn setup_fixture(llm: Arc<dyn LlmClient>, enabled_tools: &[&str]) -> 
     let store = Arc::new(SessionStore::create(&layout).unwrap());
     let root = crate::LocalWorkspaceRoot::from_path(project.path()).unwrap();
     let request = RunTurnRequest {
+        model: None,
+        effort: None,
         input: "hello".into(),
         session_id: None,
         agent: Some("test".into()),
@@ -53,6 +55,7 @@ pub(super) fn setup_fixture(llm: Arc<dyn LlmClient>, enabled_tools: &[&str]) -> 
         test_llm: Some((
             llm,
             lattice_session::store::AttemptProtocol::ChatCompletions,
+            vec![],
         )),
         test_project_root: Some(root.canonical_path().to_str().unwrap().into()),
     };
@@ -86,6 +89,8 @@ impl TestFixture {
             workspace: self.root.clone(),
             request,
             prepared_model: None,
+            prepared_profile: None,
+            io: None,
             shutdown: Arc::default(),
             observer: observer.clone(),
             new_session: Some(crate::local::new_session_id()),

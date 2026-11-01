@@ -35,6 +35,8 @@ async fn first_acceptance_reopen_preserves_identity_without_observers_or_configu
             .build(),
     );
     let request = RunTurnRequest {
+        model: None,
+        effort: None,
         input: " original \n".into(),
         session_id: None,
         agent: Some("alpha".into()),
@@ -43,6 +45,7 @@ async fn first_acceptance_reopen_preserves_identity_without_observers_or_configu
         test_llm: Some((
             llm.clone(),
             lattice_session::store::AttemptProtocol::ChatCompletions,
+            vec![],
         )),
         test_project_root: None,
     };

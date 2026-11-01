@@ -26,7 +26,7 @@ pub fn default_agent_template(name: &str, model: &str) -> String {
 # Auto-generated template — edit for your project's role, prompt, and tools.
 #
 # Sections:
-#   [agent]  — identity (name, model, optional description)
+#   [agent]  — 名称，以及可选的 model、effort 和 description
 #   [prompt] — system prompt (inline `system` or file `system_path`, not both)
 #   [tools]  — explicitly enabled tool names
 #   [llm.retry] — provider stream-open retry policy

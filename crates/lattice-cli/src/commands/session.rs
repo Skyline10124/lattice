@@ -49,7 +49,7 @@ pub struct SendArgs {
     /// Existing session to continue, by ID or unique prefix; omit to start a new session.
     #[arg(long = "session")]
     pub session_id: Option<String>,
-    /// Agent to use. Required for a new session, and for an existing session positioned at the root node.
+    /// Agent to use. Required for a new session; selecting it rebuilds the session profile copy.
     #[arg(long, required_unless_present = "session_id")]
     pub agent: Option<String>,
 }

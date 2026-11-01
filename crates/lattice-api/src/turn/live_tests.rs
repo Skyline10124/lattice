@@ -16,29 +16,37 @@ fn seed(fixture: &TestFixture) -> (lancet_protocol::SessionId, lancet_protocol::
     let turn = id();
     fixture
         .store
-        .accept_turn(
-            &fixture.store.try_lock_session(sid).unwrap(),
+        .accept_turn(&fixture.store.try_lock_session(sid).unwrap(), {
+            let config = FrozenTurnConfig {
+                effort: None,
+                agent_name: "test".into(),
+                model: "old-model".into(),
+                provider: "openai-compatible".into(),
+                system_prompt: None,
+                catalog: ToolCatalogSnapshot::new("test".into(), vec![]).unwrap(),
+                limits: TurnExecutionLimits {
+                    timeout_secs: 300,
+                    max_model_steps: 32,
+                    max_model_attempts: 1,
+                },
+            };
             AcceptTurn {
+                profile_copy: {
+                    let mut copy = lattice_session::store::SessionProfileCopy::for_test(&config);
+                    copy.profile.policy.project_root =
+                        fixture.root.canonical_path().to_str().unwrap().into();
+                    copy
+                },
+                expected_profile_digest: None,
                 session: AcceptSession::New { id: sid },
                 turn_id: turn,
                 project_store_key: fixture.root.store_key(),
                 input: "old request".into(),
                 accepted_at: chrono::Utc::now(),
                 agent_selection: AgentSelection::Explicit,
-                config: FrozenTurnConfig {
-                    agent_name: "test".into(),
-                    model: "old-model".into(),
-                    provider: "openai-compatible".into(),
-                    system_prompt: None,
-                    catalog: ToolCatalogSnapshot::new("test".into(), vec![]).unwrap(),
-                    limits: TurnExecutionLimits {
-                        timeout_secs: 300,
-                        max_model_steps: 32,
-                        max_model_attempts: 1,
-                    },
-                },
-            },
-        )
+                config,
+            }
+        })
         .unwrap();
     lancet_api::WorkspaceHistory::create(lancet_api::WorkspaceHistoryBacking::for_key(
         fixture.layout.clone(),
@@ -46,6 +54,61 @@ fn seed(fixture: &TestFixture) -> (lancet_protocol::SessionId, lancet_protocol::
     ))
     .unwrap();
     (sid, turn)
+}
+
+#[tokio::test]
+async fn injected_model_changes_share_effort_fallback() {
+    use lattice_conversation::Effort::{High, Low};
+    let llm = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_events(happy_events())
+            .push_events(happy_events())
+            .push_events(happy_events())
+            .build(),
+    );
+    let mut fixture = setup_fixture(llm.clone(), &[]);
+    fixture
+        .request
+        .loaded_profile
+        .as_mut()
+        .unwrap()
+        .profile
+        .agent
+        .effort = Some(Low);
+    fixture.request.effort = Some(High);
+    fixture.request.test_llm.as_mut().unwrap().2 = vec![Low, High];
+    let (first, _) = fixture.run(fixture.request.clone()).await;
+    let mut request = fixture.request.clone();
+    request.agent = None;
+    request.loaded_profile = None;
+    request.session_id = Some(first.session_id);
+    request.effort = None;
+    request.model = Some("local/both".into());
+    let (preserved, _) = fixture.run(request.clone()).await;
+    assert_eq!(
+        fixture
+            .store
+            .begin_read()
+            .unwrap()
+            .turn_config(preserved.session_id, preserved.turn_id)
+            .unwrap()
+            .effort,
+        Some(High)
+    );
+    request.model = Some("local/low-only".into());
+    request.test_llm.as_mut().unwrap().2 = vec![Low];
+    let (fallback, _) = fixture.run(request).await;
+    assert_eq!(
+        fixture
+            .store
+            .begin_read()
+            .unwrap()
+            .turn_config(fallback.session_id, fallback.turn_id)
+            .unwrap()
+            .effort,
+        Some(Low)
+    );
+    assert_eq!(llm.call_count(), 3);
 }
 
 #[tokio::test]
@@ -363,6 +426,8 @@ async fn raced_existing_turn_conflicts_even_when_readback_session_does_not_exist
         workspace: fixture.root.clone(),
         request: fixture.request.clone(),
         prepared_model: None,
+        prepared_profile: None,
+        io: None,
         shutdown: Arc::default(),
         observer,
         new_session: Some(crate::local::new_session_id()),

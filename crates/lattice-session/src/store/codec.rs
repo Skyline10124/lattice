@@ -9,12 +9,14 @@ use std::collections::BTreeMap;
 
 pub(super) const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 pub(super) const SESSIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("sessions");
+pub(super) const PROFILE_COPIES: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("profile_copies");
 pub(super) const NODES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("nodes");
 pub(super) const CONFIGS: TableDefinition<&str, &[u8]> = TableDefinition::new("configs");
 pub(super) const TURN_INDEX: TableDefinition<&str, &[u8]> = TableDefinition::new("turn_index");
 pub(super) const INDEX: TableDefinition<&str, &[u8]> = TableDefinition::new("invocation_index");
 pub(super) const CHANGES: TableDefinition<u64, &[u8]> = TableDefinition::new("invocation_changes");
-pub(super) const VERSION: u32 = 6;
+pub(super) const VERSION: u32 = 7;
 
 pub(super) fn attach_path<T>(path: &std::path::Path, result: Result<T>) -> Result<T> {
     result.map_err(|err| match err {
@@ -81,6 +83,14 @@ pub(super) fn decode<T: DeserializeOwned + Serialize>(
         return Err(error());
     }
     Ok(record)
+}
+
+pub(super) fn decode_profile_copy(key: &str, bytes: &[u8]) -> Result<SessionProfileCopy> {
+    let copy: SessionProfileCopy = decode("profile_copies", key, bytes)?;
+    if canonical(&copy)? != payload("profile_copies", key, bytes)? {
+        return Err(corrupt("profile_copies", key, "noncanonical profile copy"));
+    }
+    Ok(copy)
 }
 
 // 复用类型的 Deserialize 不一定 deny_unknown_fields（包括内部 tag 缓冲后的结构）。
@@ -185,6 +195,7 @@ pub(super) struct Records {
     // 局部工作集只保留节点范围末键，不为分配序号装载历史正文。
     pub node_tip: Option<NodeId>,
     pub sessions: BTreeMap<SessionId, SessionRecord>,
+    pub profile_copies: BTreeMap<SessionId, SessionProfileCopy>,
     pub nodes: BTreeMap<(SessionId, NodeId), Node>,
     pub configs: BTreeMap<[u8; 32], StoredTurnConfig>,
     pub turn_index: BTreeMap<TurnId, NodeRef>,
@@ -193,7 +204,7 @@ pub(super) struct Records {
     pub last_change: ChangeSeq,
 }
 
-// 两种事务的 open_table 返回类型不同；宏仅共用固定的七表读取，避免暴露通用存储接口。
+// 两种事务的 open_table 返回类型不同；宏共用固定的领域表读取。
 macro_rules! load_records {
     ($tx:expr) => {{
         let meta = $tx.open_table(META).map_err(table_error)?;
@@ -232,6 +243,17 @@ macro_rules! load_records {
                 .map_err(|_| corrupt("sessions", "key", "invalid session id"))?;
             r.sessions
                 .insert(id, decode("sessions", k.value(), v.value())?);
+        }
+        for entry in $tx
+            .open_table(PROFILE_COPIES)
+            .map_err(table_error)?
+            .iter()?
+        {
+            let (key, value) = entry?;
+            let id = SessionId::parse(key.value())
+                .map_err(|_| corrupt("profile_copies", "key", "invalid session id"))?;
+            r.profile_copies
+                .insert(id, decode_profile_copy(key.value(), value.value())?);
         }
         for entry in $tx.open_table(NODES).map_err(table_error)?.iter()? {
             let (k, v) = entry?;
@@ -290,6 +312,7 @@ pub(super) fn initialize(tx: &redb::WriteTransaction) -> Result<()> {
         meta.insert("last_change_seq", encode(&ChangeSeq(0))?.as_slice())?;
     }
     tx.open_table(SESSIONS).map_err(table_error)?;
+    tx.open_table(PROFILE_COPIES).map_err(table_error)?;
     tx.open_table(NODES).map_err(table_error)?;
     tx.open_table(CONFIGS).map_err(table_error)?;
     tx.open_table(TURN_INDEX).map_err(table_error)?;
@@ -309,6 +332,14 @@ pub(super) fn persist(
         for (k, v) in &after.sessions {
             if before.sessions.get(k) != Some(v) {
                 t.insert(k.to_string().as_str(), encode(v)?.as_slice())?;
+            }
+        }
+    }
+    {
+        let mut table = tx.open_table(PROFILE_COPIES).map_err(table_error)?;
+        for (key, value) in &after.profile_copies {
+            if before.profile_copies.get(key) != Some(value) {
+                table.insert(key.to_string().as_str(), encode(value)?.as_slice())?;
             }
         }
     }
@@ -372,6 +403,9 @@ pub(super) fn persist(
 #[cfg(test)]
 pub(super) fn replace_all_for_test(tx: &redb::WriteTransaction, r: &Records) -> Result<()> {
     tx.open_table(SESSIONS)
+        .map_err(table_error)?
+        .retain(|_, _| false)?;
+    tx.open_table(PROFILE_COPIES)
         .map_err(table_error)?
         .retain(|_, _| false)?;
     tx.open_table(NODES)

@@ -418,15 +418,11 @@ impl Backend {
                 ));
             }
             if request.agent.as_ref().is_some_and(|name| name.len() > 128)
-                || (request.agent.is_none()
-                    && (request.session.is_new()
-                        || record
-                            .as_ref()
-                            .is_some_and(|record| record.current == NodeId(0))))
+                || (request.agent.is_none() && request.session.is_new())
             {
                 return Err(LocalError::new(
                     LocalErrorKind::BadRequest,
-                    "new Session or root requires explicit agent",
+                    "new Session requires explicit agent",
                 ));
             }
             state.sessions.insert(sid, owner.clone());
@@ -441,36 +437,72 @@ impl Backend {
         #[cfg(test)]
         tests::pause(&self.gates.registered).await;
         check_submitter(submitter.as_ref())?;
-        let inherited = if !request.session.is_new() {
-            api.as_ref()
-                .expect("existing Session store")
-                .read(move |r| r.current_agent(sid))
-                .await?
+        let io = if request.session.is_new() {
+            None
+        } else {
+            Some(
+                CoordinatorStoreIo::acquire_api(
+                    api.as_ref().expect("existing Session store").clone(),
+                    sid,
+                )
+                .await
+                .map_err(crate::ApiError::from)?,
+            )
+        };
+        let snapshot = if let Some(io) = &io {
+            Some(
+                io.read(move |read| {
+                    read.session(sid)?;
+                    let copy = read.profile_copy(sid)?;
+                    let prompt = read
+                        .stored_config(&copy.prompt_config_digest)?
+                        .system_prompt;
+                    Ok((copy, prompt))
+                })
+                .await
+                .map_err(crate::ApiError::from)?,
+            )
         } else {
             None
         };
-        let selected = request.agent.clone().or(inherited).ok_or_else(|| {
-            LocalError::new(
-                LocalErrorKind::BadRequest,
-                "current agent could not be inherited",
-            )
-        })?;
+        let (previous, prompt) =
+            snapshot.map_or((None, None), |(copy, prompt)| (Some(copy), prompt));
         #[cfg(test)]
         tests::pause(&self.gates.prepare).await;
-        let configuration_dir = super::auth::directory(self.home.as_deref())?;
-        let project = workspace.clone();
-        let loaded_profile = blocking(move || {
-            crate::profile::load_for_turn(&selected, &project, &configuration_dir)
-                .map_err(Into::into)
-        })
-        .await?;
+        let inherited = request.agent.is_none() && previous.is_some();
+        let configuration = if inherited {
+            let copy = previous.as_ref().expect("inherited copy");
+            crate::profile::TurnProfile::from_copy(copy, prompt)
+        } else {
+            let selected = request.agent.clone().ok_or_else(|| {
+                LocalError::new(
+                    LocalErrorKind::BadRequest,
+                    "new Session requires explicit agent",
+                )
+            })?;
+            let configuration_dir = super::auth::directory(self.home.as_deref())?;
+            let project = workspace.clone();
+            blocking(move || {
+                let loaded =
+                    crate::profile::load_for_turn(&selected, &project, &configuration_dir)?;
+                crate::profile::TurnProfile::from_loaded(&loaded, &project).map_err(Into::into)
+            })
+            .await?
+        };
+        let prepared_profile = crate::profile::PreparedProfile {
+            configuration,
+            previous,
+            inherited,
+        };
         let gateway = self
             .gateway
             .clone()
             .map_err(crate::ApiError::Configuration)?;
         let prepared_model = crate::turn::execute::PreparedModel::resolve(
             &gateway,
-            &loaded_profile.profile.agent.model,
+            &prepared_profile,
+            request.model.as_deref(),
+            request.effort,
         )
         .await?;
         let api = match api {
@@ -498,7 +530,9 @@ impl Backend {
                 input: request.input,
                 session_id: (!request.session.is_new()).then_some(sid),
                 agent: request.agent,
-                loaded_profile: Some(loaded_profile),
+                model: request.model,
+                effort: request.effort,
+                loaded_profile: None,
                 cancel_flag: Some(owner.execution_cancel.clone()),
                 #[cfg(any(test, feature = "test-utils"))]
                 test_llm: None,
@@ -506,6 +540,8 @@ impl Backend {
                 test_project_root: None,
             },
             prepared_model: Some(prepared_model),
+            prepared_profile: Some(prepared_profile),
+            io,
         });
         *lock(&owner.core) = Some(execution.completion);
         let accepted = match execution.acceptance.await {

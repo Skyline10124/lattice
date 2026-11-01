@@ -13,6 +13,7 @@ use lattice_api::local::{
 pub(crate) struct SessionContext {
     pub session_id: Option<SessionId>,
     pub active_agent: String,
+    pub startup_agent: Option<String>,
 }
 
 /// 只读打开；新会话的 SessionId 在首次提交时生成，接受前不算已建立。
@@ -26,11 +27,13 @@ pub(crate) async fn open_or_create(
         return Ok(SessionContext {
             session_id: Some(session.session_id),
             active_agent: log.current_agent.unwrap_or_default(),
+            startup_agent: (!options.agent.is_empty()).then(|| options.agent.clone()),
         });
     }
     Ok(SessionContext {
         session_id: None,
         active_agent: options.agent.clone(),
+        startup_agent: Some(options.agent.clone()),
     })
 }
 

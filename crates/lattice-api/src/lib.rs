@@ -24,6 +24,7 @@ mod stores;
 pub mod turn;
 
 pub use lancet_api::CompositionError;
+pub use lattice_conversation::Effort;
 pub use lattice_session::store::{NodeId, TurnSummary, UsageSummary};
 pub use lattice_session::{ProjectStoreKey, StateLayout};
 pub use models::{ModelCandidate, ModelCandidates, ModelPrice, ModelWarning, init_logging};
