@@ -24,18 +24,27 @@ fn candidates_merge_metadata_filter_deprecated_and_report_missing_catalogs() {
         <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
     )
     .unwrap();
-    std::fs::write(directory.path().join("providers.toml"), "[providers.local]\nprotocol='chat-completions'\nbase_url='http://localhost:1'\nauth='none'\ncatalog='custom-catalog'\n[providers.local.models.active]\ncontext=456\n[providers.empty]\nprotocol='chat-completions'\nbase_url='http://localhost:2'\ncatalog='absent-catalog'\n[providers.empty.models.handwritten]\noutput=12\n").unwrap();
+    std::fs::write(directory.path().join("providers.toml"), "[providers.local]\nprotocol='chat-completions'\nbase_url='http://localhost:1'\nauth='none'\ncatalog='custom-catalog'\n[providers.local.models.active]\ncontext=456\n[providers.local.models.broken]\neffort=['low']\n[providers.local.models.broken.features]\nthinking_toggle='enable-thinking'\n[providers.local.models.retired-broken]\neffort=['low']\n[providers.local.models.retired-broken.features]\nthinking_toggle='enable-thinking'\n[providers.empty]\nprotocol='chat-completions'\nbase_url='http://localhost:2'\ncatalog='absent-catalog'\n[providers.empty.models.handwritten]\noutput=12\n").unwrap();
     cache(
         directory.path(),
         &json!({"custom-catalog":{"models":{
             "active":{"id":"active","limit":{"context":123,"output":45},"cost":{"input":1,"output":2}},
-            "old":{"id":"old","status":"deprecated","reasoning_options":[{"type":"effort","values":["high","none"]}]}
+            "old":{"id":"old","status":"deprecated","reasoning_options":[{"type":"effort","values":["high","none"]}]},
+            "retired-broken":{"id":"retired-broken","status":"deprecated"}
         }}}),
     );
+    // 手写档位无效的模型单独标出；已弃用的 retired-broken 同样无效，但先被滤掉，不出现也不报错。
     let candidates = crate::model_candidates(directory.path(), Some("local"), None).unwrap();
-    assert_eq!(candidates.models.len(), 1);
+    assert_eq!(candidates.models.len(), 2);
+    let broken = &candidates.models[1];
+    assert_eq!(broken.model, "broken");
+    assert!(broken.supported_efforts.is_empty());
+    assert!(broken.config_error.as_deref().is_some_and(
+        |message| message.contains("thinking_toggle") && message.contains("model \"broken\"")
+    ));
     let model = &candidates.models[0];
     assert_eq!((&*model.provider, &*model.model), ("local", "active"));
+    assert_eq!(model.config_error, None);
     assert_eq!((model.context, model.output), (Some(456), Some(45)));
     assert_eq!(model.cost.as_ref().unwrap().input, Some(1.0));
     assert_eq!(model.credential_status, crate::auth::AuthState::Ready);
@@ -64,6 +73,13 @@ fn candidates_merge_metadata_filter_deprecated_and_report_missing_catalogs() {
         retired.models[0].supported_efforts,
         vec![Effort::Off, Effort::High]
     );
+    // 精确查询与列表一致：返回带诊断的候选，不让查询失败。
+    let exact = crate::model_candidates(directory.path(), None, Some("local/retired-broken"))
+        .unwrap()
+        .models;
+    assert_eq!(exact.len(), 1);
+    assert!(exact[0].supported_efforts.is_empty());
+    assert!(exact[0].config_error.is_some());
     let unknown =
         crate::model_candidates(directory.path(), None, Some("local/org/unknown")).unwrap();
     assert_eq!(

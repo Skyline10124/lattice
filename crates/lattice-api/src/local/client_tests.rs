@@ -30,11 +30,20 @@ async fn models_queries_preserve_exact_targets_capabilities_warnings_and_errors(
         } else {
             json!(["off", "minimal", "low", "medium", "high", "xhigh", "max"])
         };
+        // 旧形状不带 config_error 仍可读；出错的模型带诊断随列表返回。
         let expected: crate::ModelCandidates = serde_json::from_value(json!({
             "models":[{"provider":"local", "model":"org/model", "name":null, "context":null,
-                "output":null, "cost":null, "credential_status":"missing", "supported_efforts":efforts}],
+                "output":null, "cost":null, "credential_status":"missing", "supported_efforts":efforts},
+                {"provider":"local", "model":"broken", "name":null, "context":null,
+                "output":null, "cost":null, "credential_status":"missing", "supported_efforts":[],
+                "config_error":"configuration error: invalid effort"}],
             "warnings":[{"provider":"local", "message":"catalog has no metadata"}]
         })).unwrap();
+        assert_eq!(expected.models[0].config_error, None);
+        assert_eq!(
+            expected.models[1].config_error.as_deref(),
+            Some("configuration error: invalid effort")
+        );
         let query = async {
             match target {
                 Some(target) => peer.client.model(target.into()).await,

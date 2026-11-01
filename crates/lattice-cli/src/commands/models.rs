@@ -41,13 +41,18 @@ pub async fn run(
     println!(
         "MODEL\tCONTEXT\tOUTPUT\tEFFORTS\tPRICE ($/M tokens: input/output/cache-read/cache-write)\tAUTH"
     );
+    let mut config_errors = Vec::new();
     for model in candidates.models {
         let limits =
             |value: Option<u64>| value.map_or_else(|| "-".into(), |value| value.to_string());
         let price =
             |value: Option<f64>| value.map_or_else(|| "-".into(), |value| value.to_string());
         let cost = model.cost.unwrap_or_default();
-        let efforts = if model.supported_efforts.is_empty() {
+        // 配置无效的模型仍列出，档位列标记出错，诊断随警告写到 stderr。
+        let efforts = if let Some(error) = model.config_error {
+            config_errors.push((format!("{}/{}", model.provider, model.model), error));
+            "config-error".into()
+        } else if model.supported_efforts.is_empty() {
             "-".into()
         } else {
             model
@@ -70,6 +75,9 @@ pub async fn run(
             price(cost.cache_write),
             model.credential_status
         );
+    }
+    for (model, error) in config_errors {
+        eprintln!("{model}: {error}");
     }
     for warning in candidates.warnings {
         if let Some(provider) = warning.provider {

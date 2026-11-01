@@ -669,10 +669,19 @@ impl Backend {
                         target.as_deref(),
                     )
                     .map(|mut candidates| {
+                        let redact = |message: &mut String| {
+                            *message =
+                                crate::ConfigRejection::new(message, Some(&auth)).to_string();
+                        };
                         for warning in &mut candidates.warnings {
-                            warning.message =
-                                crate::ConfigRejection::new(&warning.message, Some(&auth))
-                                    .to_string();
+                            redact(&mut warning.message);
+                        }
+                        for message in candidates
+                            .models
+                            .iter_mut()
+                            .filter_map(|model| model.config_error.as_mut())
+                        {
+                            redact(message);
                         }
                         Response::Models(candidates)
                     })

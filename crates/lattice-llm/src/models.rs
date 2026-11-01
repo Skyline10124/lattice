@@ -25,6 +25,9 @@ pub struct ModelCandidate {
     pub supported_efforts: Vec<Effort>,
     pub cost: Option<ModelPrice>,
     pub credential_status: AuthState,
+    /// 手写配置对该模型无效时的诊断；此时没有可选档位，其他模型照常列出。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub config_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -110,33 +113,41 @@ pub fn model_candidates(
                 target.model(),
                 models.get(target.model()),
                 status,
-            )?);
+            ));
         } else {
-            for (id, model) in &models {
-                let candidate = candidate(provider, id, Some(model), status)?;
-                if model.status.as_deref() != Some("deprecated") {
-                    result.models.push(candidate);
-                }
+            // 先滤掉已弃用模型再校验，隐藏的模型不因配置问题出错。
+            for (id, model) in models
+                .iter()
+                .filter(|(_, model)| model.status.as_deref() != Some("deprecated"))
+            {
+                result
+                    .models
+                    .push(candidate(provider, id, Some(model), status));
             }
         }
     }
     Ok(result)
 }
 
+/// 档位校验只拒绝出错的那个模型：保留候选并带上诊断，请求路径仍按所选模型拒绝。
 fn candidate(
     provider: &Provider,
     id: &str,
     model: Option<&Model>,
     status: AuthState,
-) -> Result<ModelCandidate, LlmError> {
+) -> ModelCandidate {
     let limits = model.and_then(|model| model.limit.as_ref());
-    Ok(ModelCandidate {
+    let (supported_efforts, config_error) = match supported_efforts(provider, id, model) {
+        Ok(efforts) => (efforts, None),
+        Err(error) => (Vec::new(), Some(error.to_string())),
+    };
+    ModelCandidate {
         provider: provider.id.clone(),
         model: id.into(),
         name: model.and_then(|model| model.name.clone()),
         context: limits.and_then(|limit| limit.context),
         output: limits.and_then(|limit| limit.output),
-        supported_efforts: supported_efforts(provider, id, model)?,
+        supported_efforts,
         cost: model
             .and_then(|model| model.cost.as_ref())
             .map(|cost| ModelPrice {
@@ -146,5 +157,6 @@ fn candidate(
                 cache_write: cost.cache_write,
             }),
         credential_status: status,
-    })
+        config_error,
+    }
 }

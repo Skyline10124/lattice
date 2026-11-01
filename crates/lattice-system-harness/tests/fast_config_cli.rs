@@ -375,22 +375,45 @@ catalog = "arbitrary-entry"
             assert_eq!(reply["value"]["kind"], "bad_request");
         }
         let providers_path = directory.join("providers.toml");
-        let configuration = std::fs::read_to_string(&providers_path).unwrap().replace(
-            "[providers.empty.models.listed]",
-            "[providers.empty.models.listed]\neffort = ['low']",
-        );
-        std::fs::write(
-            &providers_path,
+        let invalid_effort = |provider: &str, model: &str| {
             format!(
-                "{configuration}\n[providers.empty.features]\nthinking_toggle = 'enable-thinking'\n"
-            ),
-        )
-        .unwrap();
+                "effort = ['low']\n[providers.{provider}.models.{model}.features]\nthinking_toggle = 'enable-thinking'"
+            )
+        };
+        let configuration = std::fs::read_to_string(&providers_path)
+            .unwrap()
+            .replace(
+                "[providers.empty.models.listed]",
+                &format!(
+                    "[providers.empty.models.good]\neffort = ['off', 'high']\n[providers.empty.models.good.features]\nthinking_toggle = 'enable-thinking'\n[providers.empty.models.listed]\n{}",
+                    invalid_effort("empty", "listed")
+                ),
+            )
+            .replace(
+                "[providers.local.models.current]",
+                &format!(
+                    "[providers.local.models.retired]\n{}\n[providers.local.models.current]",
+                    invalid_effort("local", "retired")
+                ),
+            );
+        std::fs::write(&providers_path, configuration).unwrap();
+        // 手写档位无效只拒绝该模型：列表成功，好模型照常列出，坏模型标出配置错误。
         let invalid = cli(&world, &spec, &["--json", "models", "--provider", "empty"]);
         evidence.record_command("invalid handwritten effort model list", &invalid);
-        assert!(invalid.is_clean_exit(2), "{}", invalid.summary());
+        assert!(invalid.is_clean_exit(0), "{}", invalid.summary());
         let invalid: Value = serde_json::from_slice(&invalid.stdout).unwrap();
-        assert_eq!(invalid["kind"], "bad_request");
+        let models = invalid["models"].as_array().unwrap();
+        let good = models
+            .iter()
+            .find(|model| model["model"] == "good")
+            .unwrap();
+        assert_eq!(good["supported_efforts"], json!(["off", "high"]));
+        assert!(good.get("config_error").is_none(), "{good}");
+        let listed = models
+            .iter()
+            .find(|model| model["model"] == "listed")
+            .unwrap();
+        assert_eq!(listed["supported_efforts"], json!([]));
         let exact = support::ipc(
             &world,
             budget.cap_timeout(spec.step_timeout()),
@@ -399,9 +422,12 @@ catalog = "arbitrary-entry"
         evidence
             .record_json("invalid handwritten effort exact query", &exact)
             .unwrap();
-        assert_eq!(exact["response"], "error");
-        assert_eq!(exact["value"]["kind"], "bad_request");
-        for message in [&invalid["message"], &exact["value"]["message"]] {
+        assert_eq!(exact["response"], "models");
+        assert_eq!(exact["value"]["models"][0]["supported_efforts"], json!([]));
+        for message in [
+            &listed["config_error"],
+            &exact["value"]["models"][0]["config_error"],
+        ] {
             for expected in [
                 "provider \"empty\"",
                 "model \"listed\"",
@@ -411,6 +437,43 @@ catalog = "arbitrary-entry"
                 assert!(message.as_str().unwrap().contains(expected), "{message}");
             }
         }
+        let text = cli(&world, &spec, &["models", "--provider", "empty"]);
+        evidence.record_command("invalid handwritten effort model text", &text);
+        assert!(text.is_clean_exit(0), "{}", text.summary());
+        let stdout = String::from_utf8(text.stdout).unwrap();
+        assert!(
+            stdout.lines().any(|line| line.starts_with("empty/good\t")
+                && line.split('\t').nth(3) == Some("off,high")),
+            "{stdout}"
+        );
+        assert!(
+            stdout.lines().any(|line| line.starts_with("empty/listed\t")
+                && line.split('\t').nth(3) == Some("config-error")),
+            "{stdout}"
+        );
+        assert!(
+            String::from_utf8_lossy(&text.stderr)
+                .lines()
+                .any(|line| line.starts_with("empty/listed: ") && line.contains("thinking_toggle")),
+            "{}",
+            String::from_utf8_lossy(&text.stderr)
+        );
+        // 已弃用模型先被滤掉，其无效配置既不出现也不让列表失败。
+        let local = cli(&world, &spec, &["--json", "models", "--provider", "local"]);
+        evidence.record_command("deprecated model with invalid handwritten effort", &local);
+        assert!(local.is_clean_exit(0), "{}", local.summary());
+        let local: Value = serde_json::from_slice(&local.stdout).unwrap();
+        let local = local["models"].as_array().unwrap();
+        assert!(
+            !local.iter().any(|model| model["model"] == "retired"),
+            "{local:?}"
+        );
+        assert!(
+            local
+                .iter()
+                .all(|model| model.get("config_error").is_none()),
+            "{local:?}"
+        );
     }));
     finish_recorded(evidence, result);
 }
