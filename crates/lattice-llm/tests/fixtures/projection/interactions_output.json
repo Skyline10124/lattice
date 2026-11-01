@@ -1,0 +1,11 @@
+{
+  "status": "requires_action",
+  "steps": [
+    {"type": "model_output", "content": [{"type": "text", "text": "Checking."}]},
+    {"type": "thought", "summary": [{"type": "text", "text": "Compare inputs."}, {"type": "text", "text": "Read both."}], "signature": "fixture-thought"},
+    {"type": "thought", "signature": "fixture-signature-only"},
+    {"type": "function_call", "id": "call_a", "name": "get_weather", "arguments": {"city": "Paris"}},
+    {"type": "function_call", "id": "call_b", "name": "get_time", "arguments": {"zone": "UTC"}}
+  ],
+  "usage": {"total_input_tokens": 10, "total_tool_use_tokens": 2, "total_cached_tokens": 4, "total_output_tokens": 5, "total_thought_tokens": 3}
+}

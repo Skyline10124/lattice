@@ -127,6 +127,8 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
         std::fs::write(&path, format!("{source}\n{configuration}")).unwrap();
         let expected = if provider == "pending-responses" {
             vec![Effort::Off, Effort::Low, Effort::High]
+        } else if provider == "pending-interactions" {
+            vec![Effort::Low, Effort::High]
         } else {
             vec![]
         };
@@ -365,6 +367,8 @@ async fn serve(
             MESSAGES_DONE
         } else if path.ends_with("/responses") {
             "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n"
+        } else if path.ends_with("/interactions") {
+            "event: interaction.completed\ndata: {\"event_type\":\"interaction.completed\",\"interaction\":{\"status\":\"completed\"}}\n\n"
         } else if path.contains(":streamGenerateContent") {
             CONTENT_DONE
         } else {
@@ -794,6 +798,7 @@ async fn protocol_and_auth_independently_select_wire_requests() {
     for protocol in [
         "chat-completions",
         "responses",
+        "interactions",
         "anthropic-messages",
         "generate-content",
     ] {
@@ -853,6 +858,7 @@ async fn protocol_and_auth_independently_select_wire_requests() {
             let expected_path = match protocol {
                 "chat-completions" => "/v1/chat/completions",
                 "responses" => "/v1/responses",
+                "interactions" => "/v1/interactions",
                 "anthropic-messages" => "/v1/v1/messages",
                 _ => "/v1/models/family%2Fmodel%20id:streamGenerateContent?alt=sse",
             };
@@ -940,6 +946,31 @@ async fn protocol_and_auth_independently_select_wire_requests() {
                         received.body["include"],
                         serde_json::json!(["reasoning.encrypted_content"])
                     );
+                }
+                "interactions" => {
+                    assert_eq!(received.body["model"], "family/model id");
+                    assert_eq!(
+                        received.body["input"][0],
+                        serde_json::json!({"type":"user_input","content":[{"type":"text","text":"hello"}]})
+                    );
+                    assert_eq!(
+                        received.body["tools"][0]["parameters"],
+                        serde_json::json!({"type":"object"})
+                    );
+                    assert_eq!(received.body["store"], false);
+                    assert_eq!(received.body["stream"], true);
+                    for field in [
+                        "thinking_summaries",
+                        "generation_config",
+                        "prompt_cache_key",
+                        "max_output_tokens",
+                        "previous_interaction_id",
+                        "background",
+                        "temperature",
+                        "top_p",
+                    ] {
+                        assert!(received.body.get(field).is_none(), "{cell}: {field}");
+                    }
                 }
                 "anthropic-messages" => {
                     assert_eq!(received.body["model"], "family/model id", "{cell}: model");
@@ -2196,20 +2227,10 @@ async fn invalid_configuration_only_blocks_requests_that_depend_on_it() {
 }
 
 #[tokio::test]
-async fn unimplemented_protocols_and_auth_are_configuration_errors() {
+async fn unimplemented_auth_is_configuration_error() {
     let directory = private_dir();
     let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
     let turn = gateway.open_turn();
-    for auth in ["none", "bearer"] {
-        configure(directory.path(), "http://localhost:1", "interactions", auth);
-        configuration_failure(
-            &turn,
-            "test",
-            "protocol interactions is not implemented",
-            &format!("interactions/{auth}"),
-        )
-        .await;
-    }
     configuration_failure(
         &turn,
         "chatgpt",
@@ -2217,6 +2238,42 @@ async fn unimplemented_protocols_and_auth_are_configuration_errors() {
         "chatgpt",
     )
     .await;
+}
+
+#[tokio::test]
+async fn interactions_invalid_handwritten_efforts_only_reject_the_affected_model() {
+    use lattice_conversation::Effort;
+    let directory = private_dir();
+    let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
+    let turn = gateway.open_turn();
+    for effort in ["off", "xhigh", "max"] {
+        std::fs::write(directory.path().join("providers.toml"),format!("[metadata]\nauto_refresh=false\n[providers.test]\nprotocol='interactions'\nauth='none'\nbase_url='http://localhost:1'\n[providers.test.models.model-id]\neffort=['{effort}']\n[providers.test.models.valid]\neffort=['minimal','low','medium','high']\n")).unwrap();
+        let candidates = crate::model_candidates(directory.path(), Some("test"), None).unwrap();
+        let invalid = candidates
+            .models
+            .iter()
+            .find(|model| model.model == "model-id")
+            .unwrap();
+        assert!(invalid.config_error.is_some());
+        assert!(invalid.supported_efforts.is_empty());
+        let valid = candidates
+            .models
+            .iter()
+            .find(|model| model.model == "valid")
+            .unwrap();
+        assert!(valid.config_error.is_none());
+        assert_eq!(
+            valid.supported_efforts,
+            vec![Effort::Minimal, Effort::Low, Effort::Medium, Effort::High]
+        );
+        configuration_failure(
+            &turn,
+            "test",
+            "thinking_level",
+            "handwritten Interactions effort",
+        )
+        .await;
+    }
 }
 
 #[tokio::test]

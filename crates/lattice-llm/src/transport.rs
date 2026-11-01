@@ -70,7 +70,10 @@ pub(crate) fn status_error(status: u16, headers: &HeaderMap, body: &str) -> LlmE
     let should_retry = headers
         .get("x-should-retry")
         .and_then(|value| value.to_str().ok());
-    let retryable = if label.as_deref() == Some("insufficient_quota") {
+    let retryable = if matches!(
+        label.as_deref(),
+        Some("insufficient_quota" | "quota_exceeded")
+    ) {
         false
     } else {
         match should_retry {
@@ -263,6 +266,15 @@ mod tests {
                 vec![],
                 r#"{"error":{"message":"You exceeded your current quota","type":"insufficient_quota","code":"insufficient_quota"}}"#.into(),
                 "HTTP 429 insufficient_quota: You exceeded your current quota".into(),
+                false,
+                None,
+            ),
+            (
+                "interactions daily quota is final even with retry hint",
+                429,
+                vec![("x-should-retry", "true")],
+                r#"{"error":{"message":"Daily quota exhausted","code":"quota_exceeded"}}"#.into(),
+                "HTTP 429 quota_exceeded: Daily quota exhausted".into(),
                 false,
                 None,
             ),

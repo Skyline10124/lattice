@@ -133,7 +133,13 @@ impl UsageSnapshot {
                     .as_object()
                     .is_some_and(|value| value.values().any(|field| !field.is_null()));
             }
-            _ => return Err(ProjectionError::UnsupportedProtocol { protocol }),
+            Protocol::Interactions => {
+                set(&mut next.base_input, &["total_input_tokens"])?;
+                set(&mut next.tool_input, &["total_tool_use_tokens"])?;
+                set(&mut next.cache_read, &["total_cached_tokens"])?;
+                set(&mut next.base_output, &["total_output_tokens"])?;
+                set(&mut next.reasoning, &["total_thought_tokens"])?;
+            }
         }
         let usage = next.project(protocol)?;
         *self = next;
@@ -175,12 +181,14 @@ impl UsageSnapshot {
         let usage = TokenUsage {
             input: match protocol {
                 Protocol::Messages => sum(self.base_input, &[self.cache_read, self.cache_write])?,
-                Protocol::GenerateContent => sum(self.base_input, &[self.tool_input])?,
+                Protocol::GenerateContent | Protocol::Interactions => {
+                    sum(self.base_input, &[self.tool_input])?
+                }
                 _ => self.base_input,
             },
             cache_read: self.cache_read.or(self.cache_read_alias),
             cache_write: self.cache_write.or(self.cache_write_alias),
-            output: if protocol == Protocol::GenerateContent {
+            output: if matches!(protocol, Protocol::GenerateContent | Protocol::Interactions) {
                 sum(self.base_output, &[self.reasoning])?
             } else {
                 self.base_output
@@ -200,6 +208,15 @@ mod tests {
     #[test]
     fn missing_base_counters_keep_totals_unknown() {
         for (name, protocol, wire, expected) in [
+            (
+                "interactions parts without bases",
+                Protocol::Interactions,
+                json!({"usage":{"total_tool_use_tokens":2,"total_thought_tokens":3}}),
+                TokenUsage {
+                    reasoning: Some(3),
+                    ..Default::default()
+                },
+            ),
             (
                 "messages cache without input",
                 Protocol::Messages,
@@ -231,5 +248,36 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn interactions_updates_are_atomic_cumulative_and_keep_explicit_zero() {
+        let protocol = Protocol::Interactions;
+        let mut snapshot = UsageSnapshot::default();
+        let full = json!({"usage":{"total_input_tokens":10,"total_tool_use_tokens":2,"total_cached_tokens":4,"total_output_tokens":5,"total_thought_tokens":3}});
+        let expected = Some(TokenUsage {
+            input: Some(12),
+            cache_read: Some(4),
+            cache_write: None,
+            output: Some(8),
+            reasoning: Some(3),
+        });
+        assert_eq!(snapshot.update(protocol, &full).unwrap(), expected);
+        assert_eq!(snapshot.update(protocol, &full).unwrap(), expected);
+        for invalid in [
+            json!({"usage":[]}),
+            json!({"usage":{"total_input_tokens":11,"total_thought_tokens":-1}}),
+            json!({"usage":{"total_cached_tokens":0.5}}),
+            json!({"usage":{"total_tool_use_tokens":"2"}}),
+            json!({"usage":{"total_input_tokens":u64::MAX,"total_tool_use_tokens":1}}),
+            json!({"usage":{"total_output_tokens":u64::MAX,"total_thought_tokens":1}}),
+            serde_json::from_str(r#"{"usage":{"total_input_tokens":18446744073709551616}}"#)
+                .unwrap(),
+        ] {
+            assert!(snapshot.update(protocol, &invalid).is_err(), "{invalid}");
+            assert_eq!(snapshot.finish(protocol).unwrap(), expected);
+        }
+        assert_eq!(snapshot.update(protocol,&json!({"usage":{"total_input_tokens":null,"total_output_tokens":0,"total_cached_tokens":0}})).unwrap(),Some(TokenUsage { input:Some(12),cache_read:Some(0),cache_write:None,output:Some(3),reasoning:Some(3) }));
+        assert_eq!(UsageSnapshot::default().finish(protocol).unwrap(), None);
     }
 }

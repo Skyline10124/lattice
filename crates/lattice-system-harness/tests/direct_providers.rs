@@ -22,6 +22,345 @@ fn responses_fixture() -> ProviderFixture<'static> {
     }
 }
 
+fn interactions_fixture() -> ProviderFixture<'static> {
+    ProviderFixture {
+        protocol: ProviderProtocol::Interactions,
+        target: ProviderTarget::Custom("interactions-fixture"),
+        model: "interactions-model",
+    }
+}
+
+fn interactions_native(
+    steps: Vec<serde_json::Value>,
+    status: &str,
+) -> lattice_system_harness::SseScript {
+    use serde_json::json;
+    let mut events =
+        vec![json!({"event_type":"interaction.created","interaction":{"status":"in_progress"}})];
+    for (index, step) in steps.iter().enumerate() {
+        let mut initial = step.clone();
+        match step["type"].as_str().unwrap() {
+            "model_output" => {
+                initial.as_object_mut().unwrap().remove("content");
+            }
+            "thought" => {
+                initial.as_object_mut().unwrap().remove("summary");
+                initial.as_object_mut().unwrap().remove("signature");
+            }
+            "function_call" => initial["arguments"] = json!({}),
+            _ => unreachable!(),
+        }
+        events.push(json!({"event_type":"step.start","index":index,"step":initial}));
+        match step["type"].as_str().unwrap() {
+            "model_output" => {
+                for content in step["content"].as_array().unwrap() {
+                    events.push(json!({"event_type":"step.delta","index":index,"delta":{"type":"text","text":content["text"]}}));
+                }
+            }
+            "thought" => {
+                for content in step["summary"].as_array().into_iter().flatten() {
+                    events.push(json!({"event_type":"step.delta","index":index,"delta":{"type":"thought_summary","content":content}}));
+                }
+                events.push(json!({"event_type":"step.delta","index":index,"delta":{"type":"thought_signature","signature":step["signature"]}}));
+            }
+            "function_call" => events.push(json!({"event_type":"step.delta","index":index,"delta":{"type":"arguments_delta","arguments":step["arguments"].to_string()}})),
+            _ => unreachable!(),
+        }
+        events.push(json!({"event_type":"step.stop","index":index}));
+    }
+    events.push(json!({"event_type":"keepalive","interaction":false,"delta":{"type":"future"}}));
+    events.push(json!({"event_type":"interaction.completed","interaction":{"status":status,"steps":steps,"usage":{"total_input_tokens":10,"total_tool_use_tokens":2,"total_cached_tokens":4,"total_output_tokens":5,"total_thought_tokens":3}}}));
+    lattice_system_harness::SseScript::NativeEvents {
+        events: events
+            .into_iter()
+            .map(|value| {
+                (
+                    Some(value["event_type"].as_str().unwrap().to_owned()),
+                    value,
+                )
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn interactions_replays_thoughts_and_two_tool_results_after_backend_restart() {
+    use lattice_system_harness::{FAKE_API_KEY, SseScript};
+    use serde_json::{Value, json};
+    let fixture = interactions_fixture();
+    let provider = Provider {
+        name: "interactions",
+        fixture,
+        assistant_role: "assistant",
+    };
+    let (world, spec) = provider_world(&provider);
+    world
+        .write_project_file("second.txt", "second-interactions-sentinel")
+        .unwrap();
+    let steps = vec![
+        json!({"type":"model_output","content":[{"type":"text","text":"Inspecting files."}]}),
+        json!({"type":"thought","signature":"fixture-thought-signature","summary":[{"type":"text","text":"Check both."},{"type":"text","text":"Read results."}]}),
+        json!({"type":"thought","signature":"fixture-signature-only"}),
+        json!({"type":"function_call","id":"call_a","name":"observe__workspace","arguments":{"request":{"mode":"read_file","path":"notes.txt"}}}),
+        json!({"type":"function_call","id":"call_b","name":"observe__workspace","arguments":{"request":{"mode":"read_file","path":"second.txt"}}}),
+    ];
+    let final_step =
+        json!({"type":"model_output","content":[{"type":"text","text":"Both files inspected."}]});
+    let server = FakeLlmServer::start(sequence(vec![
+        interactions_native(steps.clone(), "requires_action"),
+        interactions_native(vec![final_step.clone()], "completed"),
+        SseScript::plain("Reopened."),
+    ]))
+    .unwrap();
+    world.wire_provider(fixture, &server, FAKE_API_KEY).unwrap();
+    let path = world.home().join(".lattice/providers.toml");
+    let source = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(path,format!("{source}\n[providers.interactions-fixture.models.interactions-model.cost]\ninput=2\noutput=10\ncache_read=0.5\ncache_write=3\n")).unwrap();
+    let driver = driver();
+    let send = SessionSendDriver::new(&driver, &world, &spec, "interactions");
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let first = send.send("read both files").unwrap();
+        evidence.record_command("Interactions tool turn", &first.command);
+        assert!(first.has_completed() && first.command.is_clean_exit(0));
+        assert_eq!(first.slots().len(), 2);
+        assert!(
+            first
+                .slots()
+                .iter()
+                .all(|slot| slot.outcome == lattice_system_harness::SlotOutcome::Succeeded)
+        );
+        assert!(!first.reply_text().contains("fixture-thought-signature"));
+        assert!(!first.reply_text().contains("fixture-signature-only"));
+        let sid = send.session_id().unwrap();
+        let detail = send
+            .run_command(&[
+                "--json",
+                "session",
+                "turn",
+                first.accepted_turn_id().unwrap(),
+            ])
+            .unwrap();
+        evidence.record_command("Interactions saved turn", &detail);
+        let turn: Value = serde_json::from_slice(&detail.stdout).unwrap();
+        for step in turn["steps"].as_array().unwrap() {
+            let attempt = &step["attempts"][0];
+            assert_eq!(
+                attempt["origin"],
+                json!({"protocol":"interactions","provider_id":"interactions-fixture"})
+            );
+            assert_eq!(
+                attempt["usage"],
+                json!({"input":12,"cache_read":4,"cache_write":null,"output":8,"reasoning":3})
+            );
+            assert_eq!(attempt["usage_kind"], "partial");
+            assert_eq!(attempt["cost"]["exact"], false);
+        }
+        let captures = server.captured_requests();
+        assert_eq!(captures.len(), 2);
+        let input = captures[1].raw["input"].as_array().unwrap();
+        assert_eq!(&input[1..6], &steps);
+        for (index, id, sentinel) in [
+            (6, "call_a", "sentinel-interactions"),
+            (7, "call_b", "second-interactions-sentinel"),
+        ] {
+            assert_eq!(input[index]["type"], "function_result");
+            assert_eq!(input[index]["call_id"], id);
+            assert_eq!(input[index]["name"], "observe__workspace");
+            assert!(input[index]["result"].as_str().unwrap().contains(sentinel));
+        }
+        for capture in &captures {
+            assert_eq!(capture.provider, "interactions");
+            assert_eq!(
+                capture.raw["system_instruction"],
+                "You are a concise test agent."
+            );
+            assert_eq!(capture.raw["store"], false);
+            assert_eq!(capture.raw["stream"], true);
+            assert_eq!(capture.raw["tools"][0]["name"], "observe__workspace");
+            assert_eq!(
+                capture.raw["tools"][0]["parameters"],
+                captures[0].raw["tools"][0]["parameters"]
+            );
+            for key in [
+                "generation_config",
+                "max_output_tokens",
+                "previous_interaction_id",
+                "background",
+                "temperature",
+                "top_p",
+                "prompt_cache_key",
+                "cachedContent",
+                "thinking_summaries",
+            ] {
+                assert!(capture.raw.get(key).is_none(), "{key}");
+            }
+        }
+        let stopped = send.run_command(&["daemon", "stop"]).unwrap();
+        evidence.record_command("stop before Interactions replay", &stopped);
+        assert!(stopped.is_clean_exit(0));
+        let second = send.send("continue after restart").unwrap();
+        evidence.record_command("Interactions restarted append", &second.command);
+        assert!(second.has_completed() && second.command.is_clean_exit(0));
+        let captures = server.captured_requests();
+        assert_eq!(captures.len(), 3);
+        let reopened = captures[2].raw["input"].as_array().unwrap();
+        assert_eq!(&reopened[..input.len()], input);
+        assert_eq!(reopened[8], final_step);
+        assert_eq!(reopened[9]["content"][0]["text"], "continue after restart");
+        let mut watcher = support::Watcher::open(&world, spec.step_timeout(), sid);
+        let view = watcher.initial();
+        assert_eq!(view.head.as_ref().unwrap().provider, "interactions-fixture");
+        let user = *view
+            .entries
+            .iter()
+            .find(|(_, entry)| entry.user_ordinal() == Some(2))
+            .unwrap()
+            .0;
+        let history = support::history(&world, spec.step_timeout(), sid, user, 100).unwrap();
+        assert_eq!(
+            history,
+            view.entries
+                .range(..user)
+                .map(|(_, entry)| entry.raw.clone())
+                .collect::<Vec<_>>()
+        );
+        let usage = send
+            .run_command(&["--json", "session", "usage", sid])
+            .unwrap();
+        evidence.record_command("Interactions usage after append", &usage);
+        let usage: Value = serde_json::from_slice(&usage.stdout).unwrap();
+        assert_eq!(usage["path_total"]["attempts"], 3);
+    }));
+    evidence.record_captures(server.captured_requests());
+    support::finish_recorded(evidence, result);
+}
+
+#[test]
+fn interactions_usage_before_incomplete_keeps_usage_without_executing_tools() {
+    use lattice_system_harness::{FAKE_API_KEY, SseScript};
+    use serde_json::{Value, json};
+    let spec = ScenarioSpec::direct_local("interactions-usage-before-incomplete");
+    let world = ScenarioWorld::new(&spec.name).unwrap();
+    world.budget(&spec);
+    let fixture = interactions_fixture();
+    world.write_project_file(".lattice/agents/interactions/agent.toml",&format!("schema_version=1\n[agent]\nname='interactions'\nmodel='{}'\n[prompt]\nsystem='test'\n[tools]\nenabled=['observe__workspace']\n[llm.retry]\nmax_retries=1\ninitial_delay_ms=1\nmax_delay_ms=1\n",fixture.model_ref().unwrap())).unwrap();
+    world
+        .write_project_file("notes.txt", "not executed")
+        .unwrap();
+    world.init_git_project().unwrap();
+    let values = vec![
+        json!({"event_type":"interaction.created","interaction":{"status":"in_progress","usage":{"total_input_tokens":8}}}),
+        json!({"event_type":"step.start","index":0,"step":{"type":"model_output"}}),
+        json!({"event_type":"step.delta","index":0,"delta":{"type":"text","text":"partial"},"metadata":{"total_usage":{"total_tool_use_tokens":2}}}),
+        json!({"event_type":"step.stop","index":0}),
+        json!({"event_type":"step.start","index":1,"step":{"type":"function_call","id":"call","name":"observe__workspace","arguments":{}}}),
+        json!({"event_type":"step.delta","index":1,"delta":{"type":"arguments_delta","arguments":"{\"request\":{\"mode\":\"read_file\",\"path\":\"notes.txt\"}}"}}),
+        json!({"event_type":"step.stop","index":1}),
+        json!({"event_type":"interaction.status_update","status":"requires_action"}),
+        json!({"event_type":"interaction.completed","interaction":{"status":"incomplete","usage":{"total_output_tokens":2,"total_thought_tokens":3}}}),
+    ];
+    let (server, gate) = FakeLlmServer::start_segmented(
+        SseScript::NativeEvents {
+            events: values
+                .into_iter()
+                .map(|value| {
+                    (
+                        Some(value["event_type"].as_str().unwrap().to_owned()),
+                        value,
+                    )
+                })
+                .collect(),
+        },
+        spec.total_timeout().unwrap(),
+    )
+    .unwrap();
+    world.wire_provider(fixture, &server, FAKE_API_KEY).unwrap();
+    let path = world.home().join(".lattice/providers.toml");
+    let source = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(path,format!("{source}\n[providers.interactions-fixture.models.interactions-model.cost]\ninput=2\noutput=10\n")).unwrap();
+    let driver = driver();
+    let send = SessionSendDriver::new(&driver, &world, &spec, "interactions");
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut running = send.spawn("stop incomplete").unwrap();
+        for frame in 1..=8 {
+            gate.wait_until_stalled(frame, running.remaining_timeout(spec.step_timeout()))
+                .unwrap();
+            gate.release_next(running.remaining_timeout(spec.step_timeout()))
+                .unwrap();
+        }
+        gate.wait_until_stalled(9, running.remaining_timeout(spec.step_timeout()))
+            .unwrap();
+        assert!(!running.has_exited().unwrap());
+        assert_eq!(server.captured_requests().len(), 1);
+        let list = send.run_command(&["--json", "session", "list"]).unwrap();
+        evidence.record_command("Interactions in-flight session", &list);
+        assert!(list.is_clean_exit(0));
+        let sessions: Value = serde_json::from_slice(&list.stdout).unwrap();
+        let [session] = sessions.as_array().unwrap().as_slice() else {
+            panic!("{sessions}")
+        };
+        let mut watcher = support::Watcher::open(
+            &world,
+            running.remaining_timeout(spec.step_timeout()),
+            session["session_id"].as_str().unwrap(),
+        );
+        let view = watcher.initial();
+        assert!(view.head.as_ref().unwrap().owner);
+        let steps: Vec<_> = view
+            .entries
+            .values()
+            .filter_map(|entry| entry.step())
+            .collect();
+        assert_eq!(steps.len(), 1);
+        assert!(steps[0].slots.is_empty());
+        drop(watcher);
+        gate.release(running.remaining_timeout(spec.step_timeout()))
+            .unwrap();
+        let sent = send.wait_spawned(running).unwrap();
+        evidence.record_command("Interactions incomplete turn", &sent.command);
+        assert!(sent.command.is_clean_exit(1));
+        assert!(sent.slots().is_empty());
+        let detail = send
+            .run_command(&[
+                "--json",
+                "session",
+                "turn",
+                sent.accepted_turn_id().unwrap(),
+            ])
+            .unwrap();
+        evidence.record_command("Interactions incomplete detail", &detail);
+        let turn: Value = serde_json::from_slice(&detail.stdout).unwrap();
+        let attempt = &turn["steps"][0]["attempts"][0];
+        assert_eq!(attempt["usage"]["input"], 10);
+        assert_eq!(attempt["usage"]["output"], 5);
+        assert_eq!(attempt["usage"]["reasoning"], 3);
+        assert_eq!(attempt["usage_kind"], "partial");
+        assert_eq!(attempt["cost"]["exact"], false);
+        assert_eq!(
+            attempt["end"]["cause"],
+            json!({"cause":"provider_error","retryable":false})
+        );
+        assert!(
+            attempt["end"]["diagnostic"]
+                .as_str()
+                .unwrap()
+                .contains("incomplete")
+        );
+        assert_eq!(turn["steps"][0]["attempts"].as_array().unwrap().len(), 1);
+        assert!(
+            sent.entries()
+                .iter()
+                .filter_map(|entry| entry.step())
+                .all(|step| step.reply.is_empty() && step.slots.is_empty())
+        );
+        assert_eq!(server.captured_requests().len(), 1);
+    }));
+    evidence.record_captures(server.captured_requests());
+    support::finish_recorded(evidence, result);
+}
+
 fn responses_native(output: Vec<serde_json::Value>) -> lattice_system_harness::SseScript {
     use serde_json::json;
     let mut response = json!({
@@ -945,6 +1284,9 @@ fn same_protocol_provider_switch_preserves_tool_ids_and_restores_source_reasonin
             FAKE_API_KEY,
         )
         .unwrap();
+    world
+        .wire_provider(interactions_fixture(), &server, FAKE_API_KEY)
+        .unwrap();
     let path = world.home().join(".lattice/providers.toml");
     let config = std::fs::read_to_string(&path).unwrap();
     std::fs::write(
@@ -1065,6 +1407,53 @@ fn same_protocol_provider_switch_preserves_tool_ids_and_restores_source_reasonin
                 "rewound history includes {excluded}"
             );
         }
+        let source_turn = first.accepted_turn_id().unwrap();
+        let before = send
+            .run_command(&["--json", "session", "turn", source_turn])
+            .unwrap();
+        evidence.record_command("source history before Interactions projection", &before);
+        let failed = support::cli(
+            &world,
+            &spec,
+            &[
+                "--json",
+                "session",
+                "send",
+                "cross protocol to Interactions",
+                "--session",
+                sid,
+                "--model",
+                "interactions-fixture/interactions-model",
+            ],
+        );
+        evidence.record_command(
+            "Interactions missing call ID rejects before dispatch",
+            &failed,
+        );
+        assert!(failed.is_clean_exit(1));
+        let failed = support::parse_send_stdout(&failed.stdout, failed.exit_code());
+        assert_eq!(failed.closed_result().unwrap().2, "failed");
+        let entries = failed.entries();
+        let step = &entries.last().unwrap().raw["step"];
+        assert_eq!(step["attempts"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            step["attempts"][0]["end"]["cause"],
+            json!({"cause":"provider_error","retryable":false})
+        );
+        assert_eq!(
+            step["attempts"][0]["end"]["diagnostic"],
+            "provider request projection failed"
+        );
+        assert!(step["slots"].as_array().unwrap().is_empty());
+        assert_eq!(server.captured_requests().len(), 5);
+        let after = send
+            .run_command(&["--json", "session", "turn", source_turn])
+            .unwrap();
+        evidence.record_command("source history after Interactions projection", &after);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&before.stdout).unwrap(),
+            serde_json::from_slice::<serde_json::Value>(&after.stdout).unwrap()
+        );
     }));
     evidence.record_captures(server.captured_requests());
     support::finish_recorded(evidence, result);

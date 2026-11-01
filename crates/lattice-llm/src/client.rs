@@ -72,26 +72,25 @@ enum ProtocolParser {
     Responses(protocol::responses::ResponsesSseParser),
     Messages(protocol::anthropic_messages::AnthropicSseParser),
     GenerateContent(protocol::generate_content::GeminiSseParser),
+    Interactions(protocol::interactions::InteractionsSseParser),
 }
 
 impl ProtocolParser {
-    fn new(protocol: Protocol) -> Result<Self, LlmError> {
+    fn new(protocol: Protocol) -> Self {
         match protocol {
-            Protocol::ChatCompletions => Ok(Self::ChatCompletions(
-                protocol::chat_completions::OpenAiSseParser::new(),
-            )),
-            Protocol::Messages => Ok(Self::Messages(
-                protocol::anthropic_messages::AnthropicSseParser::new(),
-            )),
-            Protocol::GenerateContent => Ok(Self::GenerateContent(
-                protocol::generate_content::GeminiSseParser::new(),
-            )),
-            Protocol::Responses => Ok(Self::Responses(
-                protocol::responses::ResponsesSseParser::new(),
-            )),
-            Protocol::Interactions => Err(LlmError::Config {
-                message: format!("protocol {} is not implemented", protocol.as_str()),
-            }),
+            Protocol::ChatCompletions => {
+                Self::ChatCompletions(protocol::chat_completions::OpenAiSseParser::new())
+            }
+            Protocol::Messages => {
+                Self::Messages(protocol::anthropic_messages::AnthropicSseParser::new())
+            }
+            Protocol::GenerateContent => {
+                Self::GenerateContent(protocol::generate_content::GeminiSseParser::new())
+            }
+            Protocol::Responses => Self::Responses(protocol::responses::ResponsesSseParser::new()),
+            Protocol::Interactions => {
+                Self::Interactions(protocol::interactions::InteractionsSseParser::new())
+            }
         }
     }
 
@@ -101,6 +100,7 @@ impl ProtocolParser {
                 format!("{}/chat/completions", base_url.trim_end_matches('/'))
             }
             Self::Responses(_) => format!("{}/responses", base_url.trim_end_matches('/')),
+            Self::Interactions(_) => format!("{}/interactions", base_url.trim_end_matches('/')),
             Self::Messages(_) => format!("{}/v1/messages", base_url.trim_end_matches('/')),
             Self::GenerateContent(_) => {
                 protocol::generate_content::build_stream_url(base_url, model)
@@ -146,6 +146,9 @@ impl ProtocolParser {
             Self::Responses(_) => {
                 protocol::responses::build_request_json(request, reasoning, model_reasoning, origin)
             }
+            Self::Interactions(_) => {
+                protocol::interactions::build_request_json(request, reasoning, origin)
+            }
             Self::GenerateContent(_) => {
                 protocol::generate_content::build_request_json(request, reasoning, origin)
             }
@@ -156,6 +159,7 @@ impl ProtocolParser {
     fn buffer_limit(&self) -> usize {
         match self {
             Self::Responses(_) => 64 * 1024 * 1024,
+            Self::Interactions(_) => 16 * 1024 * 1024,
             _ => sse::MAX_SSE_BUFFER_SIZE,
         }
     }
@@ -168,6 +172,7 @@ impl ProtocolParser {
         match self {
             Self::ChatCompletions(p) => p.parse_chunk(event_type, &data),
             Self::Responses(p) => p.parse_chunk(event_type, &data),
+            Self::Interactions(p) => p.parse_chunk(event_type, &data),
             Self::Messages(p) => p.parse_chunk(event_type.unwrap_or(""), &data),
             Self::GenerateContent(p) => p.parse_chunk(event_type, &data),
         }
@@ -759,22 +764,17 @@ pub(crate) struct RequestEndpoint<'a> {
     pub(crate) reasoning: Option<crate::reasoning::ReasoningPlan>,
 }
 
-pub(crate) fn validate_implementation(protocol: Protocol, auth: Auth) -> Result<(), LlmError> {
+pub(crate) fn validate_implementation(auth: Auth) -> Result<(), LlmError> {
     if auth == Auth::OauthChatgpt {
         return Err(LlmError::Config {
             message: "auth oauth:chatgpt is not implemented".into(),
         });
     }
-    ProtocolParser::new(protocol)?;
     Ok(())
 }
 
-pub(crate) fn validate_configuration(
-    protocol: Protocol,
-    auth: Auth,
-    api_key: Option<&str>,
-) -> Result<(), LlmError> {
-    validate_implementation(protocol, auth)?;
+pub(crate) fn validate_configuration(auth: Auth, api_key: Option<&str>) -> Result<(), LlmError> {
+    validate_implementation(auth)?;
     build_auth_headers(auth, api_key)?;
     Ok(())
 }
@@ -784,14 +784,8 @@ pub(crate) async fn dispatch(
     endpoint: RequestEndpoint<'_>,
     control: StreamControl,
 ) -> Result<LlmStream, LlmError> {
-    let parser = match (endpoint.protocol, endpoint.auth) {
-        (_, Auth::OauthChatgpt) => {
-            return Err(LlmError::Config {
-                message: "auth oauth:chatgpt is not implemented".into(),
-            });
-        }
-        (protocol, _) => ProtocolParser::new(protocol)?,
-    };
+    validate_implementation(endpoint.auth)?;
+    let parser = ProtocolParser::new(endpoint.protocol);
     let headers = build_auth_headers(
         endpoint.auth,
         endpoint.credentials.api_key(endpoint.provider),
@@ -932,14 +926,48 @@ mod tests {
 
     #[test]
     fn reasoning_sources_and_feature_values_write_exact_control_parameters() {
-        use lattice_conversation::Effort::{High, Low, Off};
+        use lattice_conversation::Effort::{High, Low, Medium, Minimal, Off};
         use serde_json::json;
         let effort = json!([{"type":"effort","values":["none","high"]}]);
+        let interactions_effort =
+            json!([{"type":"effort","values":["minimal","low","medium","high"]}]);
         let toggle = json!([{"type":"toggle"}]);
         let budget = json!([{"type":"budget_tokens"}]);
         let combined_effort = json!([{"type":"toggle"},{"type":"effort","values":["high"]}]);
         let combined_budget = json!([{"type":"toggle"},{"type":"budget_tokens"}]);
         for (protocol, output, overrides, options, selected, expected) in [
+            (
+                Protocol::Interactions,
+                None,
+                "",
+                interactions_effort.clone(),
+                Minimal,
+                json!({"generation_config":{"thinking_level":"minimal"}}),
+            ),
+            (
+                Protocol::Interactions,
+                None,
+                "",
+                interactions_effort.clone(),
+                Low,
+                json!({"generation_config":{"thinking_level":"low"}}),
+            ),
+            (
+                Protocol::Interactions,
+                None,
+                "",
+                interactions_effort.clone(),
+                Medium,
+                json!({"generation_config":{"thinking_level":"medium"}}),
+            ),
+            (
+                Protocol::Interactions,
+                None,
+                "",
+                interactions_effort,
+                High,
+                json!({"generation_config":{"thinking_level":"high"}}),
+            ),
             (
                 Protocol::Responses,
                 None,
@@ -1203,7 +1231,6 @@ mod tests {
                     provider_id: "test".into(),
                 };
                 let body = ProtocolParser::new(protocol)
-                    .unwrap()
                     .request_body(&request, output, None, features, plan, &origin)
                     .unwrap();
                 let controls: serde_json::Map<_, _> = body
@@ -1220,6 +1247,7 @@ mod tests {
                                 | "enable_thinking"
                                 | "output_config"
                                 | "generationConfig"
+                                | "generation_config"
                         )
                     })
                     .map(|(key, value)| (key.clone(), value.clone()))
@@ -1293,7 +1321,7 @@ mod tests {
                     }),
                     _ => Features::GenerateContent,
                 };
-                let parser = ProtocolParser::new(protocol).unwrap();
+                let parser = ProtocolParser::new(protocol);
                 let body = parser
                     .request_body(&request, None, None, features, None, &origin)
                     .unwrap();
@@ -1367,7 +1395,6 @@ mod tests {
                     provider_id: "other".into(),
                 };
                 let body = ProtocolParser::new(protocol)
-                    .unwrap()
                     .request_body(&request, None, None, features, None, &origin)
                     .unwrap();
                 let expected = match (protocol, with_system) {
@@ -1441,7 +1468,6 @@ mod tests {
                     provider_id: "test".into(),
                 };
                 let body = ProtocolParser::new(Protocol::ChatCompletions)
-                    .unwrap()
                     .request_body(
                         &request,
                         None,
@@ -2009,6 +2035,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn interactions_named_frames_and_large_content_use_the_shared_assembler() {
+        let fixture =
+            include_str!("../tests/fixtures/projection/interactions_stream.sse").to_owned();
+        let mut streams = vec![fixture];
+        for (initial, text) in [(false, "x"), (true, "x"), (false, "\0")] {
+            let text = text.repeat(lattice_conversation::MAX_ASSISTANT_CONTENT_BYTES);
+            let mut values = vec![
+                serde_json::json!({"event_type":"step.start","index":0,"step":{"type":"model_output"}}),
+            ];
+            if initial {
+                values[0]["step"]["content"] = serde_json::json!([{"type":"text","text":text}]);
+            } else {
+                values.push(serde_json::json!({"event_type":"step.delta","index":0,"delta":{"type":"text","text":text}}));
+            }
+            values.extend([serde_json::json!({"event_type":"step.stop","index":0}),serde_json::json!({"event_type":"interaction.completed","interaction":{"status":"completed"}})]);
+            let raw: String = values
+                .iter()
+                .map(|value| {
+                    format!(
+                        "event: {}\ndata: {value}\n\n",
+                        value["event_type"].as_str().unwrap()
+                    )
+                })
+                .collect();
+            assert!(raw.len() > 2 * 1024 * 1024);
+            streams.push(raw);
+        }
+        for raw in streams {
+            let chunks: Vec<_> = raw
+                .as_bytes()
+                .chunks(16 * 1024)
+                .map(|chunk| Ok(bytes::Bytes::copy_from_slice(chunk)))
+                .collect();
+            let input = stream_sse_response(
+                Box::pin(stream::iter(chunks)),
+                ProtocolParser::new(Protocol::Interactions),
+                Arc::default(),
+            );
+            let events: Vec<_> = assemble_reply_stream(None, input, StreamControl::default())
+                .collect()
+                .await;
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event, crate::LlmEvent::Finished { .. }))
+                    .count(),
+                1
+            );
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(crate::LlmEvent::Finished {
+                        outcome: crate::ReplyOutcome::Complete { .. },
+                        ..
+                    })
+                ),
+                "{:?}",
+                events.last()
+            );
+        }
+        let limit = ProtocolParser::new(Protocol::Interactions).buffer_limit();
+        let prefix = "event: keepalive\ndata: {\"event_type\":\"keepalive\"}";
+        let raw = format!("{prefix}{}\n\n", " ".repeat(limit - prefix.len() - 2));
+        assert_eq!(raw.len(), limit);
+        let input = stream_sse_response(
+            Box::pin(stream::iter([Ok(bytes::Bytes::from(raw))])),
+            ProtocolParser::new(Protocol::Interactions),
+            Arc::default(),
+        );
+        assert!(input.collect::<Vec<_>>().await.is_empty());
+    }
+
+    #[tokio::test]
     async fn responses_large_completed_and_protocol_buffer_limits() {
         let completed = serde_json::json!({"type":"response.completed","response":{
             "status":"completed", "instructions":"x".repeat(2*1024*1024), "tools":[{"parameters":{"description":"echo"}}],
@@ -2023,7 +2122,7 @@ mod tests {
             .collect();
         let input = stream_sse_response(
             Box::pin(stream::iter(chunks)),
-            ProtocolParser::new(Protocol::Responses).unwrap(),
+            ProtocolParser::new(Protocol::Responses),
             Arc::default(),
         );
         let events: Vec<_> = assemble_reply_stream(None, input, StreamControl::default())
@@ -2038,16 +2137,19 @@ mod tests {
         ));
         for protocol in [
             Protocol::Responses,
+            Protocol::Interactions,
             Protocol::ChatCompletions,
             Protocol::Messages,
             Protocol::GenerateContent,
         ] {
-            let parser = ProtocolParser::new(protocol).unwrap();
+            let parser = ProtocolParser::new(protocol);
             let limit = parser.buffer_limit();
             assert_eq!(
                 limit,
                 if protocol == Protocol::Responses {
                     64 * 1024 * 1024
+                } else if protocol == Protocol::Interactions {
+                    16 * 1024 * 1024
                 } else {
                     2 * 1024 * 1024
                 }
@@ -2086,7 +2188,7 @@ mod tests {
 
         let mut state = SseStreamState {
             body_stream: Box::pin(stream::empty()),
-            parser: ProtocolParser::new(Protocol::ChatCompletions).unwrap(),
+            parser: ProtocolParser::new(Protocol::ChatCompletions),
             client: Arc::default(),
             buffer: Vec::new(),
             scanned: 0,
@@ -2127,7 +2229,7 @@ mod tests {
     fn drain_handles_crlf_event_separator() {
         let mut state = SseStreamState {
             body_stream: Box::pin(stream::empty()),
-            parser: ProtocolParser::new(Protocol::ChatCompletions).unwrap(),
+            parser: ProtocolParser::new(Protocol::ChatCompletions),
             client: Arc::default(),
             buffer: Vec::new(),
             scanned: 0,

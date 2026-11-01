@@ -10,6 +10,7 @@ pub(crate) mod chat_completions;
 mod common;
 mod features;
 pub(crate) mod generate_content;
+pub(crate) mod interactions;
 pub mod projection;
 pub(crate) mod responses;
 mod usage;

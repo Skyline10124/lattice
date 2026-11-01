@@ -22,6 +22,7 @@
 mod anthropic_messages;
 mod chat_completions;
 mod generate_content;
+mod interactions;
 mod responses;
 
 use crate::reply::{PartDelta, ReplyAccumulator, ReplyOutcome, ReplyStop, StreamStop, Update};
@@ -45,8 +46,6 @@ use thiserror::Error;
 /// message, no fabricated identity, no guessed replay state.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ProjectionError {
-    #[error("protocol {protocol} is not implemented")]
-    UnsupportedProtocol { protocol: Protocol },
     #[error("{0}")]
     Protocol(crate::ReplyProtocolError),
     #[error("invalid structured step: {detail}")]
@@ -192,7 +191,7 @@ pub fn wire_to_native(
         Protocol::Messages => anthropic_messages::wire_to_native(origin, wire),
         Protocol::GenerateContent => generate_content::wire_to_native(origin, wire),
         Protocol::Responses => responses::wire_to_native(origin, wire),
-        protocol => Err(ProjectionError::UnsupportedProtocol { protocol }),
+        Protocol::Interactions => interactions::wire_to_native(origin, wire),
     }
 }
 
@@ -205,7 +204,10 @@ pub fn native_to_wire<S: ToolCallState>(
     message: &NativeMessage<S>,
 ) -> Result<Value, ProjectionError> {
     let mut items = native_to_wire_with_replay(origin, message, ReasoningReplay::ReasoningContent)?;
-    if origin.protocol == Protocol::Responses {
+    if matches!(
+        origin.protocol,
+        Protocol::Responses | Protocol::Interactions
+    ) {
         Ok(Value::Array(items))
     } else {
         Ok(items.remove(0))
@@ -232,7 +234,7 @@ fn native_to_wire_with_replay<S: ToolCallState>(
             generate_content::native_to_wire(message).map(|item| vec![item])
         }
         Protocol::Responses => responses::native_to_wire(message),
-        protocol => Err(ProjectionError::UnsupportedProtocol { protocol }),
+        Protocol::Interactions => interactions::native_to_wire(message),
     }
 }
 
@@ -296,11 +298,6 @@ pub(crate) fn request_messages_with_replay(
     history: &[ConversationItem],
     replay: ReasoningReplay,
 ) -> Result<RequestMessages, ProjectionError> {
-    if origin.protocol == Protocol::Interactions {
-        return Err(ProjectionError::UnsupportedProtocol {
-            protocol: origin.protocol,
-        });
-    }
     let mut system = None;
     let mut messages = Vec::new();
     for item in history {
@@ -387,7 +384,7 @@ fn user_to_wire(origin: Protocol, text: &str) -> Value {
             serde_json::json!({"role":"user", "content":[{"type":"input_text", "text":text}]})
         }
         Protocol::Interactions => {
-            unreachable!("unsupported protocol rejected before projection")
+            serde_json::json!({"type":"user_input","content":[{"type":"text","text":text}]})
         }
     }
 }
@@ -491,7 +488,7 @@ pub fn tool_results_to_wire(
         Protocol::Messages => anthropic_messages::tool_result_messages(&closures),
         Protocol::GenerateContent => generate_content::tool_result_messages(&closures),
         Protocol::Responses => responses::tool_result_messages(&closures),
-        protocol => Err(ProjectionError::UnsupportedProtocol { protocol }),
+        Protocol::Interactions => interactions::tool_result_messages(&closures),
     }
 }
 
@@ -505,6 +502,6 @@ pub fn wire_usage(origin: Protocol, wire: &Value) -> Result<Option<TokenUsage>, 
         Protocol::Messages => anthropic_messages::usage(wire),
         Protocol::GenerateContent => generate_content::usage(wire),
         Protocol::Responses => responses::usage(wire),
-        protocol => Err(ProjectionError::UnsupportedProtocol { protocol }),
+        Protocol::Interactions => interactions::usage(wire),
     }
 }

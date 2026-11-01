@@ -320,7 +320,7 @@ feature 由协议适配器的代码定义，配置只能在已有取值中选择
 | Responses | `reasoning: {"effort": "<档位>"}` | 不可用 | 不可用 | 来自 effort 项时 `reasoning: {"effort": "none"}`；来自 toggle 项时不可用 |
 | Anthropic Messages | `thinking: {"type": "adaptive"}` 与 `output_config: {"effort": "<档位>"}` | `thinking: {"type": "enabled", "budget_tokens": N}` | `thinking: {"type": "adaptive"}` | `thinking: {"type": "disabled"}` |
 | generateContent | `generationConfig.thinkingConfig.thinkingLevel` | `thinkingConfig.thinkingBudget: N` | `thinkingConfig.thinkingBudget: -1` | `thinkingConfig.thinkingBudget: 0` |
-| Interactions | `generation_config.thinking_level` | 不可用 | 不可用 | 不可用 |
+| Interactions | `generation_config.thinking_level`（`minimal`、`low`、`medium`、`high`） | 不可用 | 不可用 | 不可用 |
 
 Chat Completions 中，元数据给出来源的档位在 `reasoning_options` 含 toggle 项且 `thinking_toggle` 不为 `none` 时，同时按 `thinking_toggle` 写开启（`off` 除外）；没有 toggle 项时不写开关，例如 Kimi K3.1 Pro 只接受 `reasoning_effort`。缺少元数据来源的手写档位按[有效 features](#可用档位)推断写法。某个档位在所选协议上不可用时，它不出现在可用档位中。
 
