@@ -209,7 +209,7 @@ stop 先关闭新准入，再等待已接管工作及必要收尾；收到回执
 
 `session usage --json` 的合计字段由 `total` 改为 `path_total`，新增 `session_total`，后者包含 rewind 后留存的所有分支；逐轮明细仍只列当前路径。
 
-新尝试按[费用估算](../architecture/llm.md#费用估算)保存确切或估算金额，未知费用仍为 null；已有记录中的未知费用不回填，旧尝试不补 `usage_kind`。公开 IPC 的提交提供可选 `model` 和 `effort`，CLI 对应 `--model` 与 `--effort`；会话头提供 `model`、`provider`、`effort` 与 `profile_default_effort`，UserMessage 保存本轮生效档位。模型候选新增有序 `supported_efforts` 数组，无可选档位为 `[]`；文本 models 表增加 `EFFORTS` 列，空列表显示 `-`。Local IPC 标识沿用 `LTLOCAL;`，会话库格式仍为 7；从 `LTLOCAL:` 与格式 6 升级前先用旧二进制正常停止后台，再由用户决定存档或删除旧库，不提供自动迁移。
+新尝试按[费用估算](../architecture/llm.md#费用估算)保存确切或估算金额，未知费用仍为 null；已有记录中的未知费用不回填，旧尝试不补 `usage_kind`。公开 IPC 的提交提供可选 `model` 和 `effort`，CLI 对应 `--model` 与 `--effort`；会话头提供 `model`、`provider`、`effort` 与 `profile_default_effort`，UserMessage 保存本轮生效档位。模型候选新增有序 `supported_efforts` 数组，无可选档位为 `[]`，以及可选的 `config_error` 字符串（手写档位无效时出现，为空时不序列化）；文本 models 表增加 `EFFORTS` 列，空列表显示 `-`，配置错误显示 `config-error` 并在 stderr 逐个写出诊断，`lattice models` 不再因个别模型配置错误而失败。Local IPC 标识沿用 `LTLOCAL;`，会话库格式仍为 7；从 `LTLOCAL:` 与格式 6 升级前先用旧二进制正常停止后台，再由用户决定存档或删除旧库，不提供自动迁移。
 
 ### 退出码与失败后的动作
 
