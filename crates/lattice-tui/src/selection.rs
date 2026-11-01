@@ -118,6 +118,7 @@ mod tests {
             supported_efforts: efforts.to_vec(),
             cost: None,
             credential_status: AuthState::Ready,
+            config_error: None,
         }
     }
 

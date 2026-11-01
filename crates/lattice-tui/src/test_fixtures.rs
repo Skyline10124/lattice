@@ -38,6 +38,7 @@ pub(super) fn model_candidate(
         supported_efforts: efforts.to_vec(),
         cost: None,
         credential_status: lattice_api::local::AuthState::Ready,
+        config_error: None,
     }
 }
 

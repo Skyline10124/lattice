@@ -385,7 +385,7 @@ impl App {
                     let before = self.next_effort();
                     match choice {
                         PanelChoice::Model(model) => {
-                            self.selection.choose_model(model);
+                            self.selection.choose_model(*model);
                             let after = self.next_effort();
                             if self.configuration_head().is_some() && before != after {
                                 self.push_status(effort_changed_status(before, after));
@@ -2171,6 +2171,42 @@ mod tests {
         }
         app.apply_action(KeyAction::Clear);
         assert_eq!(app.next_target().as_deref(), Some("p/m9"), "Esc 保留原选择");
+    }
+
+    #[test]
+    fn config_error_model_is_marked_and_offers_no_effort() {
+        use lattice_api::ModelCandidates;
+        let mut app = test_app(true);
+        let broken = lattice_api::ModelCandidate {
+            config_error: Some("configuration error: effort low".into()),
+            ..model_candidate("p", "broken", &[])
+        };
+        let candidates = ModelCandidates {
+            models: vec![broken],
+            warnings: vec![],
+        };
+        let screen = |app: &mut App| {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 8)).unwrap();
+            terminal
+                .draw(|frame| crate::view::draw(frame, app))
+                .unwrap();
+            buffer_text(terminal.backend().buffer())
+        };
+        app.apply_builtin("/model");
+        let query = app.model_query.take().unwrap();
+        app.apply_models(query, Ok(candidates.clone()));
+        let shown = screen(&mut app);
+        assert!(shown.contains("p/broken · 配置错误"), "{shown}");
+        app.apply_action(KeyAction::Submit);
+        assert_eq!(app.next_target().as_deref(), Some("p/broken"));
+        app.apply_builtin("/effort");
+        let query = app.model_query.take().unwrap();
+        app.apply_models(query, Ok(candidates));
+        let shown = screen(&mut app);
+        assert!(shown.contains("档位配置无效"), "{shown}");
+        app.apply_action(KeyAction::Submit);
+        assert_eq!(app.next_effort(), None, "没有可选档位，Enter 不选定");
     }
 
     #[test]

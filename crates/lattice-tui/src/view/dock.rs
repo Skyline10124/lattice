@@ -13,7 +13,7 @@ pub(crate) struct ModelQuery {
 
 #[derive(Clone)]
 pub(crate) enum PanelChoice {
-    Model(ModelCandidate),
+    Model(Box<ModelCandidate>),
     Effort(Effort),
 }
 
@@ -46,6 +46,8 @@ pub(crate) struct Picker {
 const NO_EFFORT: &str =
     "该模型不能选择推理强度，可以在 providers.toml 中补充它的推理参数写法或档位";
 const NO_MODEL: &str = "先用 /model 选择模型";
+const CONFIG_ERROR: &str =
+    "该模型的档位配置无效，可以用 lattice models 查看原因并修改 providers.toml";
 
 impl Panel {
     pub(crate) fn models(id: u64, current: Option<String>) -> Self {
@@ -265,20 +267,36 @@ impl DockState {
     pub(crate) fn populate(&mut self, result: ModelCandidates, current: Option<String>) {
         match &mut self.panel {
             Some(Panel::Model(picker)) => picker.replace(
-                result.models.into_iter().map(PanelChoice::Model).collect(),
-                current,
-                "没有可选模型",
-            ),
-            Some(Panel::Effort(picker)) => picker.replace(
                 result
                     .models
                     .into_iter()
-                    .flat_map(|model| model.supported_efforts)
-                    .map(PanelChoice::Effort)
+                    .map(|model| PanelChoice::Model(Box::new(model)))
                     .collect(),
                 current,
-                NO_EFFORT,
+                "没有可选模型",
             ),
+            Some(Panel::Effort(picker)) => {
+                // 配置无效的模型没有可选档位，说明换成配置错误，不让人去补写法。
+                let empty = if result
+                    .models
+                    .iter()
+                    .any(|model| model.config_error.is_some())
+                {
+                    CONFIG_ERROR
+                } else {
+                    NO_EFFORT
+                };
+                picker.replace(
+                    result
+                        .models
+                        .into_iter()
+                        .flat_map(|model| model.supported_efforts)
+                        .map(PanelChoice::Effort)
+                        .collect(),
+                    current,
+                    empty,
+                )
+            }
             _ => return,
         }
         self.changed = true;
@@ -548,10 +566,13 @@ impl PanelModule<'_> {
                 if picker.current.as_ref() == Some(&label) {
                     spans.push(Span::styled(" · 当前", role_style(Role::DimMeta)));
                 }
-                if let PanelChoice::Model(model) = item
-                    && model.credential_status != AuthState::Ready
-                {
-                    spans.push(Span::styled(" · 无凭据", role_style(Role::DimMeta)));
+                if let PanelChoice::Model(model) = item {
+                    if model.config_error.is_some() {
+                        spans.push(Span::styled(" · 配置错误", role_style(Role::Warn)));
+                    }
+                    if model.credential_status != AuthState::Ready {
+                        spans.push(Span::styled(" · 无凭据", role_style(Role::DimMeta)));
+                    }
                 }
                 shown.push(clip_spans(spans, area.width));
             }
