@@ -169,15 +169,19 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
             format!("{base}[providers.test.features]\n{feature}\n[providers.test.models.model]\neffort=['{effort}']\n"),
         )
         .unwrap();
-        assert!(matches!(
-            turn.supported_efforts(&target).await,
-            Err(crate::LlmError::Config { message }) if message.contains(reason)
-        ));
+        let error = turn.supported_efforts(&target).await.unwrap_err();
+        assert!(matches!(&error, crate::LlmError::Config { message } if message.contains(reason)));
+        // 列表与精确查询都保留该模型并带上同一诊断，不让整份查询失败。
         for (provider, target) in [(Some("test"), None), (None, Some("test/model"))] {
-            let error = crate::model_candidates(directory.path(), provider, target).unwrap_err();
-            assert!(matches!(error, crate::LlmError::Config { message }
-                if message.contains(reason) && message.contains("provider \"test\"")
-                    && message.contains("model \"model\"") && message.contains(effort)));
+            let candidates = crate::model_candidates(directory.path(), provider, target).unwrap();
+            let model = &candidates.models[0];
+            assert_eq!(model.model, "model");
+            assert!(model.supported_efforts.is_empty());
+            let message = model.config_error.as_deref().unwrap();
+            assert_eq!(message, error.to_string());
+            for detail in ["provider \"test\"", "model \"model\"", effort] {
+                assert!(message.contains(detail), "{message}");
+            }
         }
     }
 }
@@ -1224,13 +1228,11 @@ async fn handwritten_efforts_infer_features_and_reject_invalid_lists_before_sele
         let mut request = request("test");
         match expected {
             Ok(expected) => {
-                assert_eq!(
-                    crate::model_candidates(directory.path(), Some("test"), None)
-                        .unwrap()
-                        .models
-                        .len(),
-                    1
-                );
+                let listed = crate::model_candidates(directory.path(), Some("test"), None)
+                    .unwrap()
+                    .models;
+                assert_eq!(listed.len(), 1);
+                assert_eq!(listed[0].config_error, None);
                 turn.resolve(&request.target).await.unwrap();
                 request.target.effort = Some(efforts[0]);
                 complete(
@@ -1263,8 +1265,12 @@ async fn handwritten_efforts_infer_features_and_reject_invalid_lists_before_sele
                 );
             }
             Err((invalid, reason)) => {
-                let listing_error =
-                    crate::model_candidates(directory.path(), Some("test"), None).unwrap_err();
+                let listing_error = crate::model_candidates(directory.path(), Some("test"), None)
+                    .unwrap()
+                    .models
+                    .remove(0)
+                    .config_error
+                    .unwrap();
                 // 未选档位和选择另一合法档位，也必须拒绝整份手写列表。
                 for selected in [None, Some(efforts[0])] {
                     request.target.effort = selected;
@@ -1274,7 +1280,7 @@ async fn handwritten_efforts_infer_features_and_reject_invalid_lists_before_sele
                     };
                     assert!(matches!(error, crate::LlmError::Config { .. }));
                     assert!(!error.retryable());
-                    assert_eq!(error, listing_error);
+                    assert_eq!(error.to_string(), listing_error);
                     let diagnostic = error.to_string();
                     for detail in [
                         "provider \"test\"",
