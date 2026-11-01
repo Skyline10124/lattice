@@ -56,9 +56,13 @@ pub(crate) fn build_request_json(
 
 // 仅解码参与协议转换的字段；回显的 instructions、tools 等由 serde 跳过。
 #[derive(Deserialize)]
-struct Event {
+struct EventType {
     #[serde(rename = "type")]
     kind: String,
+}
+
+#[derive(Deserialize)]
+struct Event {
     response: Option<Response>,
     item: Option<OutputItem>,
     part: Option<Content>,
@@ -248,14 +252,9 @@ impl ResponsesSseParser {
             return Vec::new();
         }
         let mut events = Vec::new();
-        let result = serde_json::from_str::<Event>(data)
+        let result = serde_json::from_str::<EventType>(data)
             .map_err(|_| malformed("invalid event fields"))
-            .and_then(|event| {
-                if event_type.is_some_and(|name| name != event.kind) {
-                    return Err(malformed("event name differs from type"));
-                }
-                self.event(event, &mut events)
-            });
+            .and_then(|event| self.event(event_type, &event.kind, data, &mut events));
         if let Err(error) = result {
             self.stopped = true;
             events.push(error);
@@ -676,12 +675,21 @@ impl ResponsesSseParser {
 
     fn event(
         &mut self,
-        event: Event,
+        event_type: Option<&str>,
+        kind: &str,
+        data: &str,
         events: &mut Vec<ProtocolEvent>,
     ) -> Result<(), ProtocolEvent> {
-        let kind = event.kind.as_str();
+        // 先按类型分派，未知的非增量事件不解码或校验其余字段。
+        let decode = || {
+            if event_type.is_some_and(|name| name != kind) {
+                return Err(malformed("event name differs from type"));
+            }
+            serde_json::from_str::<Event>(data).map_err(|_| malformed("invalid event fields"))
+        };
         match kind {
             "response.created" | "response.in_progress" | "response.queued" => {
+                let event = decode()?;
                 let mut response = required(event.response, "event missing response")?;
                 self.update_usage(&mut response, events)?;
                 for (i, item) in response.output.iter().flatten().enumerate() {
@@ -696,9 +704,11 @@ impl ResponsesSseParser {
                 }
             }
             "response.completed" => {
+                let event = decode()?;
                 self.completed(required(event.response, "event missing response")?, events)?
             }
             "response.failed" | "response.incomplete" => {
+                let event = decode()?;
                 let mut response = required(event.response, "event missing response")?;
                 self.update_usage(&mut response, events)?;
                 return Err(if kind == "response.failed" {
@@ -712,8 +722,12 @@ impl ResponsesSseParser {
                     ProtocolEvent::error(format!("Responses incomplete: {}", detail.reason), false)
                 });
             }
-            "error" => return Err(api_error(event.code.as_deref(), event.message.as_deref())),
+            "error" => {
+                let event = decode()?;
+                return Err(api_error(event.code.as_deref(), event.message.as_deref()));
+            }
             "response.output_item.added" | "response.output_item.done" => {
+                let event = decode()?;
                 let index = required(event.output_index, "missing output_index")?;
                 let item = required(event.item, "missing item")?;
                 if kind.ends_with("added") {
@@ -726,6 +740,7 @@ impl ResponsesSseParser {
             | "response.content_part.done"
             | "response.reasoning_summary_part.added"
             | "response.reasoning_summary_part.done" => {
+                let event = decode()?;
                 let index = required(event.output_index, "missing output_index")?;
                 self.route(index, event.item_id.as_deref())?;
                 let summary = kind.contains("summary");
@@ -768,6 +783,7 @@ impl ResponsesSseParser {
             | "response.reasoning_summary_text.done"
             | "response.reasoning_text.delta"
             | "response.reasoning_text.done" => {
+                let event = decode()?;
                 let index = required(event.output_index, "missing output_index")?;
                 self.route(index, event.item_id.as_deref())?;
                 let (content_kind, part_index) = if kind.contains("reasoning_summary") {
@@ -797,6 +813,7 @@ impl ResponsesSseParser {
                 self.text(index, key, &text, done, events)?;
             }
             "response.function_call_arguments.delta" | "response.function_call_arguments.done" => {
+                let event = decode()?;
                 let index = required(event.output_index, "missing output_index")?;
                 self.route(index, event.item_id.as_deref())?;
                 let done = kind.ends_with("done");
@@ -811,6 +828,7 @@ impl ResponsesSseParser {
                 )?;
             }
             "response.output_text.annotation.added" => {
+                let event = decode()?;
                 let index = required(event.output_index, "missing output_index")?;
                 self.route(index, event.item_id.as_deref())?;
                 let key = PartKey {
@@ -821,7 +839,11 @@ impl ResponsesSseParser {
                     return Err(malformed("annotation without content"));
                 }
             }
-            _ => return Err(unsupported(event.output_index.unwrap_or(0), kind)),
+            _ if kind.ends_with(".delta") => {
+                let event = decode()?;
+                return Err(unsupported(event.output_index.unwrap_or(0), kind));
+            }
+            _ => {}
         }
         Ok(())
     }

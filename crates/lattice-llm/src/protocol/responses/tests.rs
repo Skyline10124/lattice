@@ -137,7 +137,23 @@ fn interleaved_text_and_reasoning_keep_arrival_order_and_ignore_done_snapshots()
         json!({"type":"response.output_item.done","output_index":1,"item":reasoning}),
         response(vec![text.clone(), reasoning.clone()]),
     ];
-    let (live, outcome, _) = collect(events);
+    let baseline = collect(events.clone());
+    for extra in [
+        json!({"type":"keepalive"}),
+        json!({"type":"response.future_state","response":"private-payload","delta":{"text":"private-payload"},"output_index":"private-payload"}),
+        json!({"type":"response.future_state.done","item":false,"part":17,"text":["private-payload"]}),
+    ] {
+        let mut parser = ResponsesSseParser::new();
+        assert!(
+            parser
+                .parse_chunk(extra["type"].as_str(), &extra.to_string())
+                .is_empty()
+        );
+        let mut with_extra = events.clone();
+        with_extra.insert(3, extra);
+        assert_eq!(collect(with_extra), baseline);
+    }
+    let (live, outcome, _) = baseline;
     let ReplyOutcome::Complete { message } = outcome else {
         panic!("complete")
     };
@@ -408,6 +424,21 @@ fn unknown_content_and_invalid_sequences_fail_without_exposing_payload() {
                 json!({"type":"response.output_item.added","output_index":0,"item":{"type":"image_generation_call","id":"ig_0","status":"in_progress","result":"private-payload"}}),
             ],
             unsupported("image_generation_call"),
+        ),
+        (
+            vec![
+                begin.clone(),
+                json!({"type":"response.content_part.added","output_index":0,"item_id":"msg","content_index":0,"part":{"type":"output_image","text":"private-payload"}}),
+            ],
+            unsupported("output_image"),
+        ),
+        (
+            vec![
+                begin.clone(),
+                content.clone(),
+                json!({"type":"response.output_text.delta","output_index":0,"item_id":"msg","content_index":0,"delta":{"text":"private-payload"}}),
+            ],
+            invalid("invalid event fields"),
         ),
         (
             vec![
