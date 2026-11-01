@@ -19,10 +19,12 @@ pub struct RunTurnRequest {
     pub effort: Option<lattice_conversation::Effort>,
     pub loaded_profile: Option<LoadedAgentProfile>,
     pub cancel_flag: Option<Arc<AtomicBool>>,
+    /// 注入客户端、协议及最终模型的可用档位，由测试提供能力来源。
     #[cfg(any(test, feature = "test-utils"))]
     pub test_llm: Option<(
         Arc<dyn lattice_agent::LlmClient>,
         lattice_session::store::AttemptProtocol,
+        Vec<lattice_conversation::Effort>,
     )>,
     #[cfg(any(test, feature = "test-utils"))]
     pub test_project_root: Option<String>,
@@ -34,6 +36,7 @@ impl RunTurnRequest {
     ) -> Option<(
         Arc<dyn lattice_agent::LlmClient>,
         lattice_session::store::AttemptProtocol,
+        Vec<lattice_conversation::Effort>,
     )> {
         #[cfg(any(test, feature = "test-utils"))]
         return self.test_llm.clone();

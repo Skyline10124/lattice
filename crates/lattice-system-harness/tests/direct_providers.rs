@@ -210,15 +210,22 @@ fn protocols_cache_and_usage_survive_tool_round_trip_and_backend_restart() {
             "cache_write = 3\n"
         };
         std::fs::write(&configuration, format!("{source}\n[providers.{id}.models.\"{model}\"]\neffort=['off']\n[providers.{id}.models.\"{model}\".cost]\ninput = 2\noutput = 10\ncache_read = 0.5\n{write_price}", model=provider.fixture.model)).unwrap();
-        if provider.name == "anthropic" {
+        let cached = match provider.name {
+            // Chat 的 off 来自 effort 元数据，避免按 provider 的 toggle features 推导。
+            "openai" => Some(serde_json::json!({"alibaba":{"models":{
+                provider.fixture.model:{"id":provider.fixture.model,"reasoning_options":[{"type":"effort","values":["none"]}]}
+            }}})),
+            "anthropic" => Some(serde_json::json!({"anthropic":{"models":{
+                provider.fixture.model:{"id":provider.fixture.model,"limit":{"output":8192}}
+            }}})),
+            _ => None,
+        };
+        if let Some(cached) = cached {
             let cache = world.home().join(".lattice/cache");
             std::fs::create_dir_all(&cache).unwrap();
             std::fs::write(
                 cache.join("models.json"),
-                serde_json::to_vec(&serde_json::json!({"anthropic":{"models":{
-                    provider.fixture.model:{"id":provider.fixture.model,"limit":{"output":8192}}
-                }}}))
-                .unwrap(),
+                serde_json::to_vec(&cached).unwrap(),
             )
             .unwrap();
         }

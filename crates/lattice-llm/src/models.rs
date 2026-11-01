@@ -11,7 +11,7 @@ use crate::{
     auth::AuthState,
     metadata::{Metadata, Model},
     provider::Provider,
-    reasoning::ReasoningCapabilities,
+    reasoning::supported_efforts,
 };
 
 /// 候选只包含模型元数据与凭据状态，连接配置和秘密不跨过后台边界。
@@ -110,13 +110,12 @@ pub fn model_candidates(
                 target.model(),
                 models.get(target.model()),
                 status,
-            ));
+            )?);
         } else {
             for (id, model) in &models {
+                let candidate = candidate(provider, id, Some(model), status)?;
                 if model.status.as_deref() != Some("deprecated") {
-                    result
-                        .models
-                        .push(candidate(provider, id, Some(model), status));
+                    result.models.push(candidate);
                 }
             }
         }
@@ -129,19 +128,15 @@ fn candidate(
     id: &str,
     model: Option<&Model>,
     status: AuthState,
-) -> ModelCandidate {
-    let features = provider
-        .models
-        .get(id)
-        .map_or(provider.features, |model| model.features);
+) -> Result<ModelCandidate, LlmError> {
     let limits = model.and_then(|model| model.limit.as_ref());
-    ModelCandidate {
+    Ok(ModelCandidate {
         provider: provider.id.clone(),
         model: id.into(),
         name: model.and_then(|model| model.name.clone()),
         context: limits.and_then(|limit| limit.context),
         output: limits.and_then(|limit| limit.output),
-        supported_efforts: ReasoningCapabilities::new(model, features).supported_efforts(),
+        supported_efforts: supported_efforts(provider, id, model)?,
         cost: model
             .and_then(|model| model.cost.as_ref())
             .map(|cost| ModelPrice {
@@ -151,5 +146,5 @@ fn candidate(
                 cache_write: cost.cache_write,
             }),
         credential_status: status,
-    }
+    })
 }

@@ -597,6 +597,7 @@ enabled = ["{tool}"]
             test_llm: Some((
                 llm.clone(),
                 lattice_session::store::AttemptProtocol::ChatCompletions,
+                vec![],
             )),
             test_project_root: Some(project.path().to_string_lossy().into()),
         };

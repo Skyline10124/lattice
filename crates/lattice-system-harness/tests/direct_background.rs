@@ -2124,7 +2124,7 @@ fn public_choices_persist_and_model_changes_use_supported_fallbacks() {
             .unwrap(),
         )
         .unwrap();
-        let metadata = "\n[providers.local.models.a]\neffort=['off','low','high']\n[providers.local.models.b]\neffort=['high']\n[providers.local.models.c]\neffort=['low']\n[providers.other.models.a]\neffort=['medium']\n";
+        let metadata = "\n[providers.local.models.a]\neffort=['off','low','high']\n[providers.local.models.b]\neffort=['high']\n[providers.local.models.both]\neffort=['low','high']\n[providers.local.models.c]\neffort=['low']\n[providers.other.models.a]\neffort=['medium']\n";
         std::fs::write(&path, format!("{base}{metadata}")).unwrap();
         world.write_project_file(".lattice/agents/background/agent.toml", "schema_version=1\n[agent]\nname='background'\neffort='low'\n[prompt]\nsystem='copy prompt'\n").unwrap();
         let mut missing = submit_request(
@@ -2213,6 +2213,7 @@ fn public_choices_persist_and_model_changes_use_supported_fallbacks() {
         let cases = [
             (None, None, "a", Some("high")),
             (Some("local/b"), None, "b", Some("high")),
+            (Some("local/both"), None, "both", Some("high")),
             (Some("local/c"), None, "c", Some("low")),
             (Some("local/unknown"), None, "unknown", None),
         ];
@@ -2279,6 +2280,8 @@ fn public_choices_persist_and_model_changes_use_supported_fallbacks() {
         submit(Some("local/a"), None, "a", Some("low"), "local");
         submit(None, Some("off"), "a", Some("off"), "local");
         submit(None, None, "a", Some("off"), "local");
+        submit(Some("local/both"), None, "both", Some("low"), "local");
+        submit(Some("local/a"), Some("off"), "a", Some("off"), "local");
         submit(Some("other/a"), None, "a", None, "other");
         submit(
             Some("other/a"),

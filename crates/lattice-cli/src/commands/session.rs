@@ -56,9 +56,18 @@ pub struct SendArgs {
     pub model: Option<String>,
     #[arg(
         long,
-        help = "Reasoning effort: off, minimal, low, medium, high, xhigh, max. Omit to inherit; off explicitly disables reasoning."
+        help = effort_help()
     )]
     pub effort: Option<lattice_api::Effort>,
+}
+
+fn effort_help() -> String {
+    let efforts = lattice_api::Effort::ALL
+        .into_iter()
+        .map(lattice_api::Effort::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("Reasoning effort: {efforts}. Omit to inherit; off explicitly disables reasoning.")
 }
 
 fn parse_model(value: &str) -> Result<String, String> {

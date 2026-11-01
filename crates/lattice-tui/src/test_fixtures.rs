@@ -65,7 +65,7 @@ pub(super) fn head(position: u64, turn_id: Option<TurnId>, owner: bool) -> Sessi
         profile_default_effort: None,
         session_id: sid(),
         position: NodeId(position),
-        agent: Some("unused".into()),
+        agent: "unused".into(),
         turn_id,
         owner,
         diagnostic: None,
