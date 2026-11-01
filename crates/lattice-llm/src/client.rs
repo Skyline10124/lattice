@@ -1068,21 +1068,32 @@ mod tests {
                 Low,
                 json!({"thinking":{"type":"enabled","budget_tokens":2048}}),
             ),
+            // 元数据 max 把预算压到 512，Messages 仍按协议下限发送 1024。
             (
                 Protocol::Messages,
-                Some(1024),
+                Some(32768),
                 "",
-                budget.clone(),
+                json!([{"type":"budget_tokens","max":512}]),
                 Low,
                 json!({"thinking":{"type":"enabled","budget_tokens":1024}}),
             ),
+            // 输出上限的一半（16384）低于元数据 min，发送时抬回 min。
             (
                 Protocol::Messages,
-                Some(4096),
+                Some(32768),
                 "",
-                json!([{"type":"budget_tokens","min":4096}]),
+                json!([{"type":"budget_tokens","min":20000}]),
                 Low,
-                json!({"thinking":{"type":"enabled","budget_tokens":4096}}),
+                json!({"thinking":{"type":"enabled","budget_tokens":20000}}),
+            ),
+            // min 低于 1024 时，协议下限 1024 仍然生效。
+            (
+                Protocol::Messages,
+                Some(32768),
+                "",
+                json!([{"type":"budget_tokens","min":512,"max":600}]),
+                Low,
+                json!({"thinking":{"type":"enabled","budget_tokens":1024}}),
             ),
             (
                 Protocol::GenerateContent,
