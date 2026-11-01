@@ -152,7 +152,12 @@ impl GatewayTurn {
                 .models
                 .get(&target.model)
                 .map_or(provider.features, |model| model.features);
-            let capabilities = ReasoningCapabilities::new(models.get(&target.model), features);
+            let capabilities = ReasoningCapabilities::new(
+                &target.provider,
+                &target.model,
+                models.get(&target.model),
+                features,
+            )?;
             Ok(lattice_conversation::Effort::ALL
                 .into_iter()
                 .filter(|effort| capabilities.select(*effort).is_some())

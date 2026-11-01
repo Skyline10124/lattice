@@ -1094,9 +1094,7 @@ impl App {
             self.initial = true;
         }
         self.ctx.session_id = Some(head.session_id);
-        if let Some(agent) = &head.agent {
-            self.ctx.active_agent = agent.clone();
-        }
+        self.ctx.active_agent = head.agent.clone();
         self.connected = true;
         if head.diagnostic != self.diagnostic {
             if let Some(error) = &head.diagnostic {

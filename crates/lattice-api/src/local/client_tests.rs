@@ -115,7 +115,7 @@ fn head(id: TurnId, owner: bool) -> SessionHead {
         profile_default_effort: None,
         session_id: sid(),
         position: NodeId(2),
-        agent: Some("local-test".into()),
+        agent: "local-test".into(),
         turn_id: Some(id),
         owner,
         diagnostic: None,

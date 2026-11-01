@@ -463,7 +463,7 @@ mod tests {
                 profile_default_effort: None,
                 session_id: super::super::new_session_id(),
                 position: NodeId(0),
-                agent: None,
+                agent: "test".into(),
                 turn_id: None,
                 owner: false,
                 diagnostic: None,

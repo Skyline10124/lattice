@@ -1756,13 +1756,23 @@ async fn existing_orphan_and_root_inherit_copy_without_mutating_old_nodes() {
         .unwrap()
         .unwrap();
     let provider = Provider::start().await;
+    let configure_source = || {
+        config(dir.path(), &provider.endpoint);
+        let path = dir.path().join(".lattice/agents/local-test/agent.toml");
+        let source = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(
+            path,
+            source.replace("local/local-test", "local/source-only-model"),
+        )
+        .unwrap();
+    };
     let mut next = request(dir.path());
     next.session = SubmitSession::Existing(sid);
     next.agent = None;
     assert!(matches!(
         client
             .submit({
-                config(dir.path(), &provider.endpoint);
+                configure_source();
                 next.clone()
             })
             .await
@@ -1775,32 +1785,37 @@ async fn existing_orphan_and_root_inherit_copy_without_mutating_old_nodes() {
         .rewind(sid, NodeId(0), dir.path().into())
         .await
         .unwrap();
+    let at_root = client.session_head(sid).await.unwrap();
+    assert_eq!(at_root.agent, "local-test");
+    assert_eq!(at_root.model, "test");
+    assert_eq!(at_root.turn_id, None);
     let mut root_request = next;
     root_request.turn_id = super::super::new_turn_id();
     client
         .submit({
-            config(dir.path(), &provider.endpoint);
+            configure_source();
             root_request.clone()
         })
         .await
         .unwrap();
     idle(&backend).await;
-    assert_eq!(
-        client.session_head(sid).await.unwrap().agent.as_deref(),
-        Some("local-test")
-    );
+    assert_eq!(client.session_head(sid).await.unwrap().agent, "local-test");
     root_request.turn_id = super::super::new_turn_id();
     root_request.agent = Some("local-test".into());
     client
         .submit({
-            config(dir.path(), &provider.endpoint);
+            configure_source();
             root_request
         })
         .await
         .unwrap();
     idle(&backend).await;
     assert_eq!(client.turn(old).await.unwrap(), before);
-    assert_eq!(provider.finish().await.len(), 3);
+    let captured = provider.finish().await;
+    assert_eq!(captured.len(), 3);
+    assert_eq!(captured[0]["model"], "test");
+    assert_eq!(captured[1]["model"], "test");
+    assert_eq!(captured[2]["model"], "source-only-model");
     finish(&backend, task).await;
 }
 #[tokio::test]

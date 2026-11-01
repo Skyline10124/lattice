@@ -378,7 +378,7 @@ pub(super) fn head(id: TurnId, owner: bool) -> SessionHead {
         profile_default_effort: None,
         session_id: sid(),
         position: NodeId(2),
-        agent: Some("test".into()),
+        agent: "test".into(),
         turn_id: Some(id),
         owner,
         diagnostic: None,

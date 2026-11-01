@@ -66,6 +66,28 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
             .await
             .is_err()
     );
+    for (feature, effort, reason) in [
+        (
+            "thinking_toggle='enable-thinking'",
+            "low",
+            "thinking_toggle",
+        ),
+        (
+            "thinking_budget='thinking-budget'",
+            "off",
+            "thinking_budget",
+        ),
+    ] {
+        std::fs::write(
+            &path,
+            format!("{base}[providers.test.features]\n{feature}\n[providers.test.models.model]\neffort=['{effort}']\n"),
+        )
+        .unwrap();
+        assert!(matches!(
+            turn.supported_efforts(&target).await,
+            Err(crate::LlmError::Config { message }) if message.contains(reason)
+        ));
+    }
 }
 
 fn private_dir() -> tempfile::TempDir {

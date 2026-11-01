@@ -496,6 +496,7 @@ async fn first_acceptance_reopens_with_frozen_facts_and_used_turn_conflicts() {
         test_llm: Some((
             llm.clone(),
             lattice_session::store::AttemptProtocol::ChatCompletions,
+            vec![],
         )),
         test_project_root: None,
     };

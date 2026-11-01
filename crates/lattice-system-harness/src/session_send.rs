@@ -226,7 +226,7 @@ impl Entry {
 pub struct Head {
     pub session_id: String,
     pub position: u64,
-    pub agent: Option<String>,
+    pub agent: String,
     pub model: String,
     pub provider: String,
     pub effort: Option<String>,
@@ -770,7 +770,7 @@ fn head(value: &Value) -> Result<Head, String> {
     Ok(Head {
         session_id: string(value, "session_id")?.into(),
         position,
-        agent: nullable_string(value, "agent")?,
+        agent: string(value, "agent")?.into(),
         model: string(value, "model")?.into(),
         provider: string(value, "provider")?.into(),
         effort: nullable_string(value, "effort")?,

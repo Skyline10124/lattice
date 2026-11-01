@@ -409,10 +409,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
         evidence.record_command("root inherits beta copy", &inherited);
         assert!(inherited.is_clean_exit(0), "{}", inherited.summary());
         let inherited = support::parse_send_stdout(&inherited.stdout, inherited.exit_code());
-        assert_eq!(
-            inherited.heads().last().unwrap().agent.as_deref(),
-            Some("beta")
-        );
+        assert_eq!(inherited.heads().last().unwrap().agent, "beta");
         assert_eq!(server.captured_requests().len(), 4);
         cli_json(
             &world,

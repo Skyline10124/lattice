@@ -55,6 +55,7 @@ pub(super) fn setup_fixture(llm: Arc<dyn LlmClient>, enabled_tools: &[&str]) -> 
         test_llm: Some((
             llm,
             lattice_session::store::AttemptProtocol::ChatCompletions,
+            vec![],
         )),
         test_project_root: Some(root.canonical_path().to_str().unwrap().into()),
     };
