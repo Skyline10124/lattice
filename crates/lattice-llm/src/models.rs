@@ -11,7 +11,7 @@ use crate::{
     auth::AuthState,
     metadata::{Metadata, Model},
     provider::Provider,
-    reasoning::ReasoningCapabilities,
+    reasoning::supported_efforts,
 };
 
 /// 候选只包含模型元数据与凭据状态，连接配置和秘密不跨过后台边界。
@@ -129,10 +129,6 @@ fn candidate(
     model: Option<&Model>,
     status: AuthState,
 ) -> Result<ModelCandidate, LlmError> {
-    let features = provider
-        .models
-        .get(id)
-        .map_or(provider.features, |model| model.features);
     let limits = model.and_then(|model| model.limit.as_ref());
     Ok(ModelCandidate {
         provider: provider.id.clone(),
@@ -140,8 +136,7 @@ fn candidate(
         name: model.and_then(|model| model.name.clone()),
         context: limits.and_then(|limit| limit.context),
         output: limits.and_then(|limit| limit.output),
-        supported_efforts: ReasoningCapabilities::new(&provider.id, id, model, features)?
-            .supported_efforts(),
+        supported_efforts: supported_efforts(provider, id, model)?,
         cost: model
             .and_then(|model| model.cost.as_ref())
             .map(|cost| ModelPrice {

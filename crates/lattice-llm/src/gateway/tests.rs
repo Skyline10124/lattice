@@ -66,20 +66,23 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
             .await
             .is_err()
     );
-    std::fs::write(&path, format!("{base}[providers.test.features]\nthinking_toggle='thinking-type'\n[providers.test.models.budget.features]\nthinking_budget='thinking-budget'\n[providers.test.models.disabled.features]\nthinking_toggle='none'\n[providers.test.models.handwritten]\neffort=['high','off','high','low']\n")).unwrap();
+    std::fs::write(&path, format!("{base}[providers.test.features]\nthinking_toggle='thinking-type'\n[providers.test.models.budget.features]\nthinking_budget='thinking-budget'\n[providers.test.models.disabled.features]\nthinking_toggle='none'\n[providers.test.models.handwritten]\neffort=['high','off','high','low']\n[providers.test.models.handwritten.features]\nthinking_toggle='none'\n")).unwrap();
     std::fs::create_dir_all(directory.path().join("cache")).unwrap();
     std::fs::write(directory.path().join("cache/models.json"), serde_json::to_vec(&serde_json::json!({"test-capabilities":{"models":{
         "toggle":{"id":"toggle","reasoning_options":[{"type":"toggle"}]},
         "disabled":{"id":"disabled","reasoning_options":[{"type":"toggle"}]},
         "budget":{"id":"budget","limit":{"output":8192},"reasoning_options":[{"type":"budget_tokens"}]},
         "unavailable-budget":{"id":"unavailable-budget","reasoning_options":[{"type":"budget_tokens"}]},
+        "effort":{"id":"effort","reasoning_options":[{"type":"effort","values":["none","low","high"]}]},
         "always":{"id":"always","reasoning":true}
+    }}, "openai":{"models":{
+        "effort":{"id":"effort","reasoning_options":[{"type":"effort","values":["none","low","high"]}]}
     }}})).unwrap()).unwrap();
     let source = std::fs::read_to_string(&path).unwrap().replace(
         "[providers.test.features]",
         "catalog='test-capabilities'\n[providers.test.features]",
     );
-    std::fs::write(&path, source).unwrap();
+    std::fs::write(&path, &source).unwrap();
     for (model, expected) in [
         ("toggle", vec![Effort::Off, Effort::High]),
         ("disabled", vec![]),
@@ -87,6 +90,7 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
         ("unavailable-budget", vec![]),
         ("always", vec![]),
         ("handwritten", vec![Effort::Off, Effort::Low, Effort::High]),
+        ("effort", vec![Effort::Off, Effort::Low, Effort::High]),
         ("org/unknown", vec![]),
     ] {
         assert_eq!(
@@ -109,6 +113,45 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
             crate::auth::AuthState::Missing
         );
     }
+    for (provider, configuration) in [
+        ("chatgpt", ""),
+        (
+            "pending-responses",
+            "[providers.pending-responses]\nprotocol='responses'\nauth='none'\nbase_url='http://localhost:1'\ncatalog='test-capabilities'\n",
+        ),
+        (
+            "pending-interactions",
+            "[providers.pending-interactions]\nprotocol='interactions'\nauth='none'\nbase_url='http://localhost:1'\ncatalog='test-capabilities'\n",
+        ),
+    ] {
+        std::fs::write(&path, format!("{source}\n{configuration}")).unwrap();
+        assert!(
+            turn.supported_efforts(&ModelTarget::new(provider, "effort"))
+                .await
+                .unwrap()
+                .is_empty(),
+            "gateway: {provider}"
+        );
+        let exact =
+            crate::model_candidates(directory.path(), None, Some(&format!("{provider}/effort")))
+                .unwrap();
+        assert_eq!(exact.models.len(), 1);
+        assert_eq!(exact.models[0].model, "effort");
+        assert!(
+            exact.models[0].supported_efforts.is_empty(),
+            "candidate: {provider}"
+        );
+        if provider != "chatgpt" {
+            let listed = crate::model_candidates(directory.path(), Some(provider), None).unwrap();
+            assert!(
+                listed
+                    .models
+                    .iter()
+                    .all(|model| model.supported_efforts.is_empty())
+            );
+            assert!(listed.models.iter().any(|model| model.model == "effort"));
+        }
+    }
     for (feature, effort, reason) in [
         (
             "thinking_toggle='enable-thinking'",
@@ -130,6 +173,12 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
             turn.supported_efforts(&target).await,
             Err(crate::LlmError::Config { message }) if message.contains(reason)
         ));
+        for (provider, target) in [(Some("test"), None), (None, Some("test/model"))] {
+            let error = crate::model_candidates(directory.path(), provider, target).unwrap_err();
+            assert!(matches!(error, crate::LlmError::Config { message }
+                if message.contains(reason) && message.contains("provider \"test\"")
+                    && message.contains("model \"model\"") && message.contains(effort)));
+        }
     }
 }
 

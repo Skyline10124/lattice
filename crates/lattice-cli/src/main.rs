@@ -359,13 +359,7 @@ mod tests {
                 "--effort",
                 "<provider>/<model>",
                 "inherit",
-                "off",
-                "minimal",
-                "low",
-                "medium",
-                "high",
-                "xhigh",
-                "max",
+                "off, minimal, low, medium, high, xhigh, max",
             ] {
                 assert!(help.contains(text), "missing {text}: {help}");
             }

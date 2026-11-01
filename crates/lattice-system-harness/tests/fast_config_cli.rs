@@ -171,6 +171,16 @@ auth = "none"
 catalog = "sort-catalog"
 [providers.aaa.models.sort-z]
 [providers.aaa.models.sort-a]
+[providers.pending-responses]
+protocol = "responses"
+base_url = "http://localhost:9/v1"
+auth = "none"
+catalog = "arbitrary-entry"
+[providers.pending-interactions]
+protocol = "interactions"
+base_url = "http://localhost:9/v1"
+auth = "none"
+catalog = "arbitrary-entry"
 "#,
     )
     .unwrap();
@@ -182,6 +192,9 @@ catalog = "sort-catalog"
         "sort-catalog":{"models":{
             "sort-a":{"id":"sort-a","name":"Z Model"},
             "sort-z":{"id":"sort-z","name":"A Model"}
+        }},
+        "openai":{"models":{
+            "current":{"id":"current","name":"Current","reasoning_options":[{"type":"effort","values":["none","high"]}]}
         }}
     })).unwrap()).unwrap();
     let mut evidence = lattice_system_harness::ScenarioEvidence::new(
@@ -289,6 +302,8 @@ catalog = "sort-catalog"
             ("local/retired", "retired", json!(["off", "low"])),
             ("local/org/unknown", "org/unknown", json!([])),
             ("empty/unknown", "unknown", json!([])),
+            ("pending-responses/current", "current", json!([])),
+            ("pending-interactions/current", "current", json!([])),
         ] {
             let reply = support::ipc(
                 &world,
@@ -322,6 +337,31 @@ catalog = "sort-catalog"
                 );
             }
         }
+        let subscription = support::ipc(
+            &world,
+            budget.cap_timeout(spec.step_timeout()),
+            json!({"operation":"models", "target":"chatgpt/current"}),
+        );
+        evidence
+            .record_json("unimplemented account capabilities", &subscription)
+            .unwrap();
+        assert_eq!(subscription["response"], "models");
+        assert_eq!(subscription["value"]["models"].as_array().unwrap().len(), 1);
+        assert_eq!(subscription["value"]["models"][0]["model"], "current");
+        assert_eq!(subscription["value"]["models"][0]["name"], "Current");
+        assert_eq!(
+            subscription["value"]["models"][0]["supported_efforts"],
+            json!([])
+        );
+        for provider in ["pending-responses", "pending-interactions"] {
+            let output = cli(&world, &spec, &["--json", "models", "--provider", provider]);
+            evidence.record_command("unimplemented protocol model list", &output);
+            assert!(output.is_clean_exit(0));
+            let listed: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(listed["models"].as_array().unwrap().len(), 1);
+            assert_eq!(listed["models"][0]["model"], "current");
+            assert_eq!(listed["models"][0]["supported_efforts"], json!([]));
+        }
         for query in [
             json!({"operation":"models", "provider":"local", "target":"local/current"}),
             json!({"operation":"models", "target":"missing/model"}),
@@ -333,6 +373,43 @@ catalog = "sort-catalog"
                 .unwrap();
             assert_eq!(reply["response"], "error");
             assert_eq!(reply["value"]["kind"], "bad_request");
+        }
+        let providers_path = directory.join("providers.toml");
+        let configuration = std::fs::read_to_string(&providers_path).unwrap().replace(
+            "[providers.empty.models.listed]",
+            "[providers.empty.models.listed]\neffort = ['low']",
+        );
+        std::fs::write(
+            &providers_path,
+            format!(
+                "{configuration}\n[providers.empty.features]\nthinking_toggle = 'enable-thinking'\n"
+            ),
+        )
+        .unwrap();
+        let invalid = cli(&world, &spec, &["--json", "models", "--provider", "empty"]);
+        evidence.record_command("invalid handwritten effort model list", &invalid);
+        assert!(invalid.is_clean_exit(2), "{}", invalid.summary());
+        let invalid: Value = serde_json::from_slice(&invalid.stdout).unwrap();
+        assert_eq!(invalid["kind"], "bad_request");
+        let exact = support::ipc(
+            &world,
+            budget.cap_timeout(spec.step_timeout()),
+            json!({"operation":"models", "target":"empty/listed"}),
+        );
+        evidence
+            .record_json("invalid handwritten effort exact query", &exact)
+            .unwrap();
+        assert_eq!(exact["response"], "error");
+        assert_eq!(exact["value"]["kind"], "bad_request");
+        for message in [&invalid["message"], &exact["value"]["message"]] {
+            for expected in [
+                "provider \"empty\"",
+                "model \"listed\"",
+                "effort low",
+                "thinking_toggle",
+            ] {
+                assert!(message.as_str().unwrap().contains(expected), "{message}");
+            }
         }
     }));
     finish_recorded(evidence, result);

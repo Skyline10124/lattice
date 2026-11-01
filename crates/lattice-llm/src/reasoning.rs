@@ -12,7 +12,24 @@ use crate::{
     LlmError,
     metadata::Model,
     protocol::{Features, ThinkingBudget, ThinkingToggle},
+    provider::Provider,
 };
+
+/// 能力查询不要求凭据；尚未实现的认证或协议没有可供选择的档位。
+pub(crate) fn supported_efforts(
+    provider: &Provider,
+    model_id: &str,
+    model: Option<&Model>,
+) -> Result<Vec<Effort>, LlmError> {
+    if crate::client::validate_implementation(provider.protocol, provider.auth).is_err() {
+        return Ok(Vec::new());
+    }
+    let features = provider
+        .models
+        .get(model_id)
+        .map_or(provider.features, |model| model.features);
+    Ok(ReasoningCapabilities::new(&provider.id, model_id, model, features)?.supported_efforts())
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReasoningPlan {
