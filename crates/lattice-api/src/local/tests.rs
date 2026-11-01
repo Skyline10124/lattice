@@ -71,3 +71,36 @@ pub(super) fn configure(project: &std::path::Path, endpoint: &str) {
         .set("local", "local-test-secret")
         .unwrap();
 }
+
+// 单模型配置诊断与告警走同一脱敏：已知凭据不能随模型列表跨过后台边界。
+#[test]
+fn model_candidates_redact_known_credentials_in_config_error_and_warnings() {
+    const SECRET: &str = "known-model-secret-value";
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(
+        directory.path(),
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+    )
+    .unwrap();
+    let auth = lattice_llm::auth::AuthStore::new(directory.path().into());
+    auth.set("openai", SECRET).unwrap();
+    let mut candidates: lattice_llm::ModelCandidates = serde_json::from_value(serde_json::json!({
+        "models":[
+            {"provider":"local", "model":"broken", "name":null, "context":null, "output":null,
+             "supported_efforts":[], "cost":null, "credential_status":"ready",
+             "config_error":format!("model \"broken\" key={SECRET}: invalid effort")},
+            {"provider":"local", "model":"good", "name":null, "context":null, "output":null,
+             "supported_efforts":[], "cost":null, "credential_status":"ready"}
+        ],
+        "warnings":[{"provider":"local", "message":format!("catalog key={SECRET}")}]
+    }))
+    .unwrap();
+    server::redact_model_candidates(&mut candidates, &auth);
+    assert_eq!(
+        candidates.models[0].config_error.as_deref(),
+        Some("model \"broken\" key=[REDACTED]: invalid effort")
+    );
+    assert_eq!(candidates.models[1].config_error, None);
+    assert_eq!(candidates.warnings[0].message, "catalog key=[REDACTED]");
+    assert!(!serde_json::to_string(&candidates).unwrap().contains(SECRET));
+}

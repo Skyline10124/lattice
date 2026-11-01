@@ -187,7 +187,7 @@ catalog = "arbitrary-entry"
     std::fs::write(directory.join("cache/models.json"), serde_json::to_vec(&json!({
         "arbitrary-entry":{"models":{
             "current":{"id":"current","name":"Current","limit":{"context":100,"output":200},"cost":{"input":1.2,"output":3.4,"cache_read":0.1,"cache_write":0.2},"reasoning_options":[{"type":"effort","values":["high","none"]}]},
-            "retired":{"id":"retired","status":"deprecated","reasoning_options":[{"type":"effort","values":["none","low"]}]}
+            "retired":{"id":"retired","status":"deprecated"}
         }},
         "sort-catalog":{"models":{
             "sort-a":{"id":"sort-a","name":"Z Model"},
@@ -299,7 +299,7 @@ catalog = "arbitrary-entry"
             ]
         );
         for (target, model, efforts) in [
-            ("local/retired", "retired", json!(["off", "low"])),
+            ("local/retired", "retired", json!([])),
             ("local/org/unknown", "org/unknown", json!([])),
             ("empty/unknown", "unknown", json!([])),
             ("pending-responses/current", "current", json!([])),

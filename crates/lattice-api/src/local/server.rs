@@ -669,20 +669,7 @@ impl Backend {
                         target.as_deref(),
                     )
                     .map(|mut candidates| {
-                        let redact = |message: &mut String| {
-                            *message =
-                                crate::ConfigRejection::new(message, Some(&auth)).to_string();
-                        };
-                        for warning in &mut candidates.warnings {
-                            redact(&mut warning.message);
-                        }
-                        for message in candidates
-                            .models
-                            .iter_mut()
-                            .filter_map(|model| model.config_error.as_mut())
-                        {
-                            redact(message);
-                        }
+                        redact_model_candidates(&mut candidates, &auth);
                         Response::Models(candidates)
                     })
                     .map_err(|error| {
@@ -1131,6 +1118,26 @@ async fn serve_with_backend(
     tests::pause(&lock_release).await;
     drop(instance);
     failure.map_or(Ok(()), Err)
+}
+
+/// 告警和单模型配置诊断跨过后台边界前都要遮掉已知凭据。
+pub(super) fn redact_model_candidates(
+    candidates: &mut lattice_llm::ModelCandidates,
+    auth: &lattice_llm::auth::AuthStore,
+) {
+    let redact = |message: &mut String| {
+        *message = crate::ConfigRejection::new(message, Some(auth)).to_string();
+    };
+    for warning in &mut candidates.warnings {
+        redact(&mut warning.message);
+    }
+    for message in candidates
+        .models
+        .iter_mut()
+        .filter_map(|model| model.config_error.as_mut())
+    {
+        redact(message);
+    }
 }
 
 #[cfg(test)]
