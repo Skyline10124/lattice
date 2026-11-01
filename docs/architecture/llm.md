@@ -77,15 +77,15 @@ provider 配置、凭据与模型元数据是用户级的全局状态，由后�
 
 ### 适配器的职责
 
-- **请求。** 把当前路径上的对话、系统提示、工具定义和推理档位按协议与 features 写成请求体。投影规则与回放材料的处理由[会话合同的回放与跨 provider 投影](session.md#回放与跨-provider-投影)维护。
+- **请求。** 把当前路径上的对话、系统提示、工具定义和推理档位按协议与 features 写成请求体。不发送采样参数（`temperature`、`top_p` 等），由服务端按模型默认值处理。投影规则与回放材料的处理由[会话合同的回放与跨 provider 投影](session.md#回放与跨-provider-投影)维护。
 - **流式事件。** 把线上事件翻译为正文、reasoning 与工具调用的部件增量，交给 #312 的累积器组装完整回复。解析端对无歧义的厂商差异直接兼容，例如 `reasoning_content` 与 `reasoning` 两种字段都读取，Mistral 的 `content` 为分块数组时读取其中的 `thinking` 块。不认识的内容块或增量类型按不可重试的协议错误停止这次尝试，不静默丢弃；诊断只写协议、位置与类型名。
 - **prompt 拦截。** generateContent 只有 `promptFeedback.blockReason`、没有 candidates 时，按不可重试的 provider 错误停止这次尝试，诊断保留 `blockReason` 原文。
 - **用量。** 按[用量换算](#用量换算)得出统一口径。
 - **不使用服务端会话状态。** Responses 与 Interactions 固定发送 `store: false`，每次发送完整历史，不发送 `previous_response_id`、`previous_interaction_id`，不使用后台执行。
 
-适配器不发送采样参数（`temperature`、`top_p` 等），也不发送输出上限（例如 Responses 的 `max_output_tokens`），由服务端按模型的默认值处理；只有 Anthropic Messages 的 `max_tokens` 是必填字段，取模型元数据的输出上限，输出上限缺失或为 0 时为 32,768。元数据有上下文窗口时，按提示的 UTF-8 字节数做两个估算（都向上取整，都不是 provider 的分词结果）：上限估算按 3 字节计 1 个 token，中日韩文字基本准确，英文偏多约三分之一；下限估算按 4 字节计 1 个 token。`max_tokens` 夹到窗口减去上限估算后的剩余空间，宁可少给输出也不让请求超窗。这个剩余空间只要大于 0 就照用，即使小于下限也不抬高，因为中日韩提示的上限估算基本准确，抬高会超窗。`MIN_OUTPUT_TOKENS`（1,024，见 [anthropic_messages.rs](../../crates/lattice-llm/src/protocol/anthropic_messages.rs)）只在按 3 字节/token 估算已无剩余空间时使用，且不超过窗口减去下限估算（4 字节/token）后的剩余空间与模型输出上限，照常发送，由 provider 判断是否放得下；剩余空间从 1 降到 0 时输出上限会跳到这个下限，这是有意的。只有按下限估算也已占满窗口时，才不发送请求，这次尝试以 `context_window_exceeded` 错误失败，不重试。下限估算对中日韩提示约少算四分之一；本地检查只拦截按最宽松估算也放不下的请求。
+只有 Anthropic Messages 要求发送输出上限：`max_tokens` 直接取模型元数据的输出上限，缺失或为 0 时使用 32,768。其他协议不发送输出上限（例如 Responses 的 `max_output_tokens`），由服务端按模型默认值处理。
 
-服务端对提示与 `max_tokens` 之和超出上下文窗口的处理依模型而异：Claude 4.5 以前返回 HTTP 400；Claude 4.5 及以后在提示本身可容纳时可接受请求，生成到窗口边界后以 `stop_reason = "model_context_window_exceeded"` 结束。该停止原因的映射问题见 [#353](https://github.com/Skyline10124/lattice/issues/353)。
+服务端对提示与 `max_tokens` 之和超出上下文窗口的处理依模型而异：Claude 4.5 以前返回 HTTP 400；第三方兼容端超窗时也可能直接返回 HTTP 400；Claude 4.5 及以后在提示本身可容纳时可接受请求，生成到窗口边界后以 `stop_reason = "model_context_window_exceeded"` 结束。该停止原因的映射问题见 [#353](https://github.com/Skyline10124/lattice/issues/353)。
 
 ### 回放来源
 
@@ -152,6 +152,9 @@ auto_refresh = false                   # 关闭自动刷新，默认 true
 protocol = "chat-completions"
 base_url = "https://vllm.example.com/v1"
 
+[providers.my-vllm.features]
+thinking_toggle = "enable-thinking"    # 无元数据来源时，off/high 写关闭/开启开关
+
 [providers.my-vllm.models."qwen3-32b"] # 元数据中没有的模型，手写元数据
 context = 131072
 output = 8192
@@ -172,7 +175,7 @@ reasoning_replay = "none"              # 按模型覆盖 feature
 | `auto_refresh` | 顶层 `metadata` 表 | 布尔，默认 true。每次自动触发都读取当前文件：false 时跳过本次拉取；文件无效时本次自动刷新算作失败，按拉取失败的退避重试。`lattice models refresh` 不受影响 |
 | `protocol`、`base_url`、`auth`、`catalog` | provider 表 | 见[字段](#字段)；覆盖内置 provider 时只写要改的字段，不能写 `protocol` |
 | `features` | provider 子表 | 覆盖或补充 provider 级 features |
-| `models."<模型>"` | provider 子表 | 手写元数据：`context`、`output`（token 数），`effort`（可用档位列表），`tools`（布尔，默认 true），`cost`（`input`、`output`、`cache_read`、`cache_write`，美元每百万 token） |
+| `models."<模型>"` | provider 子表 | 手写元数据：`context`、`output`（token 数），`effort`（可用档位列表；无元数据来源时[按 features 推出写法](#可用档位)），`tools`（布尔，默认 true），`cost`（`input`、`output`、`cache_read`、`cache_write`，美元每百万 token） |
 | `models."<模型>".features` | 模型子表 | 按模型覆盖 features |
 
 - **严格解析。** 未知字段、未知 feature 或取值、类型不符、格式错误都使整个文件无效。文件无效时，用到 provider 配置的操作在接受前按配置错误拒绝，诊断写明文件路径、行号与原因；不使用部分有效的内容。
@@ -230,7 +233,6 @@ feature 由协议适配器的代码定义，配置只能在已有取值中选择
 | Chat Completions 总是在助手消息中发回 `reasoning_content`（`protocol/projection/chat_completions.rs`） | 已由 #337 改为由 `reasoning_replay` 决定，默认不发；内置表中需要它的厂商启用 `reasoning-content` |
 | Chat Completions 同时读取 `reasoning_content` 与 `reasoning` | 保持，属于解析端的兼容 |
 | Chat Completions 总是发送 `stream_options: {"include_usage": true}` | 保持，属于标准协议行为 |
-| Anthropic `max_tokens` 固定为 32,768 | 已由 #336 改为取模型元数据的输出上限，缺失或为 0 时为 32,768；有上下文窗口时按 3 字节/token 估算的提示夹进剩余空间，剩余空间大于 0 时照用；只有按 3 字节/token 估算已无空间时才给 `MIN_OUTPUT_TOKENS`（1,024，不超过按 4 字节/token 估算的剩余空间与模型输出上限）；按 4 字节/token 估算也放不下时报本地错误 `context_window_exceeded`。服务端对提示与输出预算之和超窗返回 HTTP 400 的行为适用于 Claude 4.5 以前，4.5 及以后的停止行为见[适配器的职责](#适配器的职责) |
 | generateContent 的工具 schema 用 `parametersJsonSchema`（#270） | 保持，属于该协议的写法 |
 | OpenAI 兼容路径的工具名映射 | 已由 #311 删除，工具名原样发送 |
 
@@ -269,7 +271,18 @@ feature 由协议适配器的代码定义，配置只能在已有取值中选择
 
 ### 可用档位
 
-模型可用的档位由元数据的 `reasoning_options` 得出。手写元数据的 `effort` 列表覆盖候选档位名字：元数据能给出某档的参数族来源时沿用该来源，否则按 effort 项解释；仍按协议、features 和预算规则过滤不可表达的档位。
+模型可用的档位由元数据的 `reasoning_options` 得出。手写元数据的 `effort` 列表覆盖候选档位名字：元数据能给出某档的参数族来源时沿用该来源，按协议、features 和预算规则过滤不可表达的档位。
+
+元数据给不出某个手写档位的来源时，按有效 features 推出写法；模型级 features 覆盖 provider 级配置：
+
+| 有效 features | 手写档位的写法 |
+| --- | --- |
+| 只有 `thinking_toggle` | `off` 关闭、`high` 开启；其他档位为配置错误 |
+| 只有 `thinking_budget` | `low`、`medium`、`high`、`max` 按预算表与输出上限写预算，无元数据上下界；`off`、`minimal`、`xhigh` 为配置错误 |
+| 两者都有 | `off` 关闭；`low`、`medium`、`high`、`max` 写预算并开启；`minimal`、`xhigh` 为配置错误 |
+| 两者都未启用，或协议没有这两个 feature | 按 effort 项写档位 |
+
+上述 feature 推断只适用于缺少元数据来源的档位。无法表达的手写档位在能力构建时使配置无效，即使未选该档位也在接受前按不可重试的配置错误拒绝，诊断含 provider、模型、档位和原因；请求解析与 `lattice models` 共用此校验。上例的 `my-vllm` 用 `thinking_toggle = "enable-thinking"` 使 `off`/`high` 写开关。
 
 | `reasoning_options` 中的项 | 增加的档位 |
 | --- | --- |
@@ -291,7 +304,7 @@ feature 由协议适配器的代码定义，配置只能在已有取值中选择
 | `high` | 16,384 |
 | `max` | 32,768 |
 
-- 预算先夹到模型的 `[min, max]` 之内（缺的一端不限），再限制为不超过输出上限的一半，给正文留出空间；输出上限缺失或为 0 时按 32,768 计，即最多 16,384。限制后低于 `min` 时，这些档位都不可用。Anthropic Messages 还把选中预算限制到本次请求实际 `max_tokens` 的一半；若低于 `min`，这次请求按不可重试的配置错误停止，诊断写明模型、档位、实际 `max_tokens` 与最低预算，不含请求内容，不更换档位、不提高 `max_tokens`、不发送请求。
+- 预算先夹到模型的 `[min, max]` 之内（缺的一端不限），再限制为不超过输出上限的一半，给正文留出空间；输出上限缺失或为 0 时按 32,768 计，即最多 16,384。限制后为 0 时没有该预算档位。只有 Anthropic Messages 在发送时把预算提高到 `max(1024, min)`（缺少 `min` 时为 1,024），即发送 `max(限制后的预算, 1024, min)`，低于 `min` 的档位仍可用，由服务端判断请求是否可接受；其他协议限制后低于 `min` 时，该档位不可用。
 - 夹紧后与低一档预算相同的档位不列出。例如输出上限为 8,192 时，只有 `low`（2,048）与 `medium`（4,096）。
 - `max` 档不取模型的上限：models.dev 中 Claude 的预算上限是输出上限减 1，用满就不剩正文的空间；多数模型也没有写上限。
 
@@ -305,7 +318,9 @@ feature 由协议适配器的代码定义，配置只能在已有取值中选择
 | generateContent | `generationConfig.thinkingConfig.thinkingLevel` | `thinkingConfig.thinkingBudget: N` | `thinkingConfig.thinkingBudget: -1` | `thinkingConfig.thinkingBudget: 0` |
 | Interactions | `generation_config.thinking_level` | 不可用 | 不可用 | 不可用 |
 
-Chat Completions 中，模型的 `reasoning_options` 含 toggle 项且 `thinking_toggle` 不为 `none` 时，开启推理的档位（`off` 以外）同时按 `thinking_toggle` 写开启；没有 toggle 项的模型不写开关，例如 Kimi K3.1 Pro 只接受 `reasoning_effort`。某个档位在所选协议上不可用时，它不出现在可用档位中。
+Chat Completions 中，元数据给出来源的档位在 `reasoning_options` 含 toggle 项且 `thinking_toggle` 不为 `none` 时，同时按 `thinking_toggle` 写开启（`off` 除外）；没有 toggle 项时不写开关，例如 Kimi K3.1 Pro 只接受 `reasoning_effort`。缺少元数据来源的手写档位按[有效 features](#可用档位)推断写法。某个档位在所选协议上不可用时，它不出现在可用档位中。
+
+当前 `claude-opus-4-5` 选择任何档位都会返回 HTTP 400；请不选档位，或改用 Claude Opus 4.6 及以上。该模型退役后删除此注记。
 
 ## 用量、缓存与费用
 

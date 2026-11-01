@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{LlmError, auth::AuthState, metadata::Metadata};
+use crate::{LlmError, auth::AuthState, metadata::Metadata, reasoning::ReasoningCapabilities};
 
 /// 候选只包含模型元数据与凭据状态，连接配置和秘密不跨过后台边界。
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -81,6 +81,11 @@ pub fn model_candidates(
         }
         let status = crate::auth::provider_status(provider, credentials.as_ref()).status;
         for (id, model) in metadata.merge(provider) {
+            let features = provider
+                .models
+                .get(&id)
+                .map_or(provider.features, |model| model.features);
+            ReasoningCapabilities::new(&provider.id, &id, Some(&model), features)?;
             if model.status.as_deref() == Some("deprecated") {
                 continue;
             }
