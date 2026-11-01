@@ -85,7 +85,7 @@ provider 配置、凭据与模型元数据是用户级的全局状态，由后�
 
 只有 Anthropic Messages 要求发送输出上限：`max_tokens` 直接取模型元数据的输出上限，缺失或为 0 时使用 32,768。其他协议不发送输出上限（例如 Responses 的 `max_output_tokens`），由服务端按模型默认值处理。
 
-服务端对提示与 `max_tokens` 之和超出上下文窗口的处理依模型而异：Claude 4.5 以前返回 HTTP 400；第三方兼容端超窗时也可能直接返回 HTTP 400；Claude 4.5 及以后在提示本身可容纳时可接受请求，生成到窗口边界后以 `stop_reason = "model_context_window_exceeded"` 结束。该停止原因的映射问题见 [#353](https://github.com/Skyline10124/lattice/issues/353)。
+服务端对提示与 `max_tokens` 之和超出上下文窗口的处理依模型而异：Claude 4.5 以前返回 HTTP 400；第三方兼容端超窗时也可能直接返回 HTTP 400；Claude 4.5 及以后在提示本身可容纳时可接受请求，生成到窗口边界后以 `stop_reason = "model_context_window_exceeded"` 结束。该停止原因映射为 `finish_reason = "context_window_exceeded"`，与 `length` 区分：`length` 是输出达到 `max_tokens`，继续生成或调高输出上限即可；`context_window_exceeded` 是上下文窗口已满，继续只会更长，需要压缩历史或开新会话。
 
 ### 回放来源
 
