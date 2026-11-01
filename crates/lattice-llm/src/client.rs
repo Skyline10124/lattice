@@ -736,17 +736,22 @@ pub(crate) struct RequestEndpoint<'a> {
     pub(crate) reasoning: Option<crate::reasoning::ReasoningPlan>,
 }
 
-pub(crate) fn validate_configuration(
-    protocol: Protocol,
-    auth: Auth,
-    api_key: Option<&str>,
-) -> Result<(), LlmError> {
+pub(crate) fn validate_implementation(protocol: Protocol, auth: Auth) -> Result<(), LlmError> {
     if auth == Auth::OauthChatgpt {
         return Err(LlmError::Config {
             message: "auth oauth:chatgpt is not implemented".into(),
         });
     }
     ProtocolParser::new(protocol)?;
+    Ok(())
+}
+
+pub(crate) fn validate_configuration(
+    protocol: Protocol,
+    auth: Auth,
+    api_key: Option<&str>,
+) -> Result<(), LlmError> {
+    validate_implementation(protocol, auth)?;
     build_auth_headers(auth, api_key)?;
     Ok(())
 }

@@ -198,7 +198,7 @@ sequenceDiagram
 | 查看一个 Turn：`turn` | TurnId | 返回这一轮的 `TurnSummary` 与全部 Step 节点；请求仍在准入时返回在途，没有这个请求时返回 NotFound。接受结果不明时用它找回 |
 | 提交：`submit` | TurnId，`New(SessionId)` 或 `Existing(SessionId)`，输入、规范工作区，以及可选的 agent、模型与推理档位；新会话必须指定 agent，见[会话的 profile 副本](#会话的-profile-副本) | 接受一轮并返回 LocalTurn；TurnId 已被使用返回 Conflict，同 Session 有不同请求在执行时返回 Busy，见[请求身份与找回](#请求身份与找回) |
 | 查看用量：`usage` | SessionId | 当前路径上逐轮的用量与费用估算，给出当前路径合计和全会话合计（含 rewind 丢掉的分支）；用量口径与费用规则见[模型接入合同](llm.md#用量缓存与费用) |
-| 模型候选：`models` | 无，或 provider | 可用的 `<provider>/<model>` 及各自的上下文窗口、输出上限、可用档位、价格与凭据是否就绪，见[模型候选](llm.md#模型候选) |
+| 模型候选：`models` | 无、provider，或精确的 `<provider>/<model>` target；provider 与 target 互斥 | 普通列表给出候选及各自的上下文窗口、输出上限、可用档位、价格与凭据是否就绪，过滤 deprecated；精确 target 返回单个模型，也包括 deprecated 或元数据未知的模型，未知时档位可为空。查询只读后台当前的全局配置与元数据，见[模型候选](llm.md#模型候选) |
 | 凭据与元数据：`auth` 与 `models_refresh` 各命令 | 见[凭据命令](llm.md#凭据命令) | 录入与删除 key、SIWC 登录与登出、凭据状态；立即刷新模型元数据与账号模型列表 |
 | 读取更早的对话：`history` | SessionId、节点 `before` 与轮数（1 到 100，超出返回 BadRequest） | 沿 `before` 的父链往回取完整的若干轮，条目与视图中的相同，见[观察与重连](#观察与重连) |
 | 退回：`rewind` | SessionId 与目标 NodeId | 把当前位置移到树上任意已有节点；之后的提交从那里分叉，原分支保留在树上。不修改工作区文件 |

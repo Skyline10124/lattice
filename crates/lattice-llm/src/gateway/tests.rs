@@ -66,6 +66,92 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
             .await
             .is_err()
     );
+    std::fs::write(&path, format!("{base}[providers.test.features]\nthinking_toggle='thinking-type'\n[providers.test.models.budget.features]\nthinking_budget='thinking-budget'\n[providers.test.models.disabled.features]\nthinking_toggle='none'\n[providers.test.models.handwritten]\neffort=['high','off','high','low']\n[providers.test.models.handwritten.features]\nthinking_toggle='none'\n")).unwrap();
+    std::fs::create_dir_all(directory.path().join("cache")).unwrap();
+    std::fs::write(directory.path().join("cache/models.json"), serde_json::to_vec(&serde_json::json!({"test-capabilities":{"models":{
+        "toggle":{"id":"toggle","reasoning_options":[{"type":"toggle"}]},
+        "disabled":{"id":"disabled","reasoning_options":[{"type":"toggle"}]},
+        "budget":{"id":"budget","limit":{"output":8192},"reasoning_options":[{"type":"budget_tokens"}]},
+        "unavailable-budget":{"id":"unavailable-budget","reasoning_options":[{"type":"budget_tokens"}]},
+        "effort":{"id":"effort","reasoning_options":[{"type":"effort","values":["none","low","high"]}]},
+        "always":{"id":"always","reasoning":true}
+    }}, "openai":{"models":{
+        "effort":{"id":"effort","reasoning_options":[{"type":"effort","values":["none","low","high"]}]}
+    }}})).unwrap()).unwrap();
+    let source = std::fs::read_to_string(&path).unwrap().replace(
+        "[providers.test.features]",
+        "catalog='test-capabilities'\n[providers.test.features]",
+    );
+    std::fs::write(&path, &source).unwrap();
+    for (model, expected) in [
+        ("toggle", vec![Effort::Off, Effort::High]),
+        ("disabled", vec![]),
+        ("budget", vec![Effort::Low, Effort::Medium]),
+        ("unavailable-budget", vec![]),
+        ("always", vec![]),
+        ("handwritten", vec![Effort::Off, Effort::Low, Effort::High]),
+        ("effort", vec![Effort::Off, Effort::Low, Effort::High]),
+        ("org/unknown", vec![]),
+    ] {
+        assert_eq!(
+            turn.supported_efforts(&ModelTarget::new("test", model))
+                .await
+                .unwrap(),
+            expected,
+            "gateway: {model}"
+        );
+        let candidates =
+            crate::model_candidates(directory.path(), None, Some(&format!("test/{model}")))
+                .unwrap();
+        assert_eq!(candidates.models.len(), 1);
+        assert_eq!(
+            candidates.models[0].supported_efforts, expected,
+            "candidate: {model}"
+        );
+        assert_eq!(
+            candidates.models[0].credential_status,
+            crate::auth::AuthState::Missing
+        );
+    }
+    for (provider, configuration) in [
+        ("chatgpt", ""),
+        (
+            "pending-responses",
+            "[providers.pending-responses]\nprotocol='responses'\nauth='none'\nbase_url='http://localhost:1'\ncatalog='test-capabilities'\n",
+        ),
+        (
+            "pending-interactions",
+            "[providers.pending-interactions]\nprotocol='interactions'\nauth='none'\nbase_url='http://localhost:1'\ncatalog='test-capabilities'\n",
+        ),
+    ] {
+        std::fs::write(&path, format!("{source}\n{configuration}")).unwrap();
+        assert!(
+            turn.supported_efforts(&ModelTarget::new(provider, "effort"))
+                .await
+                .unwrap()
+                .is_empty(),
+            "gateway: {provider}"
+        );
+        let exact =
+            crate::model_candidates(directory.path(), None, Some(&format!("{provider}/effort")))
+                .unwrap();
+        assert_eq!(exact.models.len(), 1);
+        assert_eq!(exact.models[0].model, "effort");
+        assert!(
+            exact.models[0].supported_efforts.is_empty(),
+            "candidate: {provider}"
+        );
+        if provider != "chatgpt" {
+            let listed = crate::model_candidates(directory.path(), Some(provider), None).unwrap();
+            assert!(
+                listed
+                    .models
+                    .iter()
+                    .all(|model| model.supported_efforts.is_empty())
+            );
+            assert!(listed.models.iter().any(|model| model.model == "effort"));
+        }
+    }
     for (feature, effort, reason) in [
         (
             "thinking_toggle='enable-thinking'",
@@ -83,10 +169,20 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
             format!("{base}[providers.test.features]\n{feature}\n[providers.test.models.model]\neffort=['{effort}']\n"),
         )
         .unwrap();
-        assert!(matches!(
-            turn.supported_efforts(&target).await,
-            Err(crate::LlmError::Config { message }) if message.contains(reason)
-        ));
+        let error = turn.supported_efforts(&target).await.unwrap_err();
+        assert!(matches!(&error, crate::LlmError::Config { message } if message.contains(reason)));
+        // 列表与精确查询都保留该模型并带上同一诊断，不让整份查询失败。
+        for (provider, target) in [(Some("test"), None), (None, Some("test/model"))] {
+            let candidates = crate::model_candidates(directory.path(), provider, target).unwrap();
+            let model = &candidates.models[0];
+            assert_eq!(model.model, "model");
+            assert!(model.supported_efforts.is_empty());
+            let message = model.config_error.as_deref().unwrap();
+            assert_eq!(message, error.to_string());
+            for detail in ["provider \"test\"", "model \"model\"", effort] {
+                assert!(message.contains(detail), "{message}");
+            }
+        }
     }
 }
 
@@ -1132,13 +1228,11 @@ async fn handwritten_efforts_infer_features_and_reject_invalid_lists_before_sele
         let mut request = request("test");
         match expected {
             Ok(expected) => {
-                assert_eq!(
-                    crate::model_candidates(directory.path(), Some("test"))
-                        .unwrap()
-                        .models
-                        .len(),
-                    1
-                );
+                let listed = crate::model_candidates(directory.path(), Some("test"), None)
+                    .unwrap()
+                    .models;
+                assert_eq!(listed.len(), 1);
+                assert_eq!(listed[0].config_error, None);
                 turn.resolve(&request.target).await.unwrap();
                 request.target.effort = Some(efforts[0]);
                 complete(
@@ -1171,8 +1265,12 @@ async fn handwritten_efforts_infer_features_and_reject_invalid_lists_before_sele
                 );
             }
             Err((invalid, reason)) => {
-                let listing_error =
-                    crate::model_candidates(directory.path(), Some("test")).unwrap_err();
+                let listing_error = crate::model_candidates(directory.path(), Some("test"), None)
+                    .unwrap()
+                    .models
+                    .remove(0)
+                    .config_error
+                    .unwrap();
                 // 未选档位和选择另一合法档位，也必须拒绝整份手写列表。
                 for selected in [None, Some(efforts[0])] {
                     request.target.effort = selected;
@@ -1182,7 +1280,7 @@ async fn handwritten_efforts_infer_features_and_reject_invalid_lists_before_sele
                     };
                     assert!(matches!(error, crate::LlmError::Config { .. }));
                     assert!(!error.retryable());
-                    assert_eq!(error, listing_error);
+                    assert_eq!(error.to_string(), listing_error);
                     let diagnostic = error.to_string();
                     for detail in [
                         "provider \"test\"",
@@ -1547,7 +1645,7 @@ async fn messages_use_merged_output_limits_at_resolution_and_reload_on_the_next_
             }
         );
         assert_eq!(
-            crate::model_candidates(directory.path(), Some("test"))
+            crate::model_candidates(directory.path(), Some("test"), None)
                 .unwrap()
                 .models[0]
                 .output,
@@ -1657,7 +1755,7 @@ async fn refresh_metadata_uses_startup_roots_and_updates_candidates_and_messages
         format!("[metadata]\nauto_refresh = false\n{provider}catalog = 'refresh-entry'\n"),
     )
     .unwrap();
-    let before = crate::model_candidates(directory.path(), Some("test")).unwrap();
+    let before = crate::model_candidates(directory.path(), Some("test"), None).unwrap();
     assert!(before.models.is_empty());
     let metadata = serde_json::json!({"refresh-entry":{"models":{"model-id":{
         "id":"model-id","limit":{"output":65536}
@@ -1682,7 +1780,7 @@ async fn refresh_metadata_uses_startup_roots_and_updates_candidates_and_messages
         serde_json::from_slice(&std::fs::read(directory.path().join("cache/models.json")).unwrap())
             .unwrap();
     assert_eq!(cached, metadata);
-    let after = crate::model_candidates(directory.path(), Some("test")).unwrap();
+    let after = crate::model_candidates(directory.path(), Some("test"), None).unwrap();
     assert_eq!(after.models.len(), 1);
     assert_eq!(after.models[0].model, "model-id");
     assert_eq!(after.models[0].output, Some(65536));

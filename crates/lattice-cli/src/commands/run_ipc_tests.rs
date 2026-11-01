@@ -834,12 +834,15 @@ async fn submission_identity_and_inherited_selection_are_kept_in_the_wire_reques
     if let Ok(mode) = std::env::var(MODE) {
         let peer = Peer::new();
         let existing = mode == "existing";
+        let explicit = mode == "explicit";
         let send = run_session_prompt(
             &peer.client,
             super::super::session::SendArgs {
                 prompt: "original input".into(),
                 session_id: existing.then(|| "1111".into()),
                 agent: (!existing).then(|| "test".into()),
+                model: explicit.then(|| "local/org/model".into()),
+                effort: explicit.then_some(lattice_api::Effort::Off),
             },
             false,
             true,
@@ -852,6 +855,18 @@ async fn submission_identity_and_inherited_selection_are_kept_in_the_wire_reques
             let mut wire = peer.request("submit").await;
             let request = &wire.request["request"];
             assert_eq!(request["input"], "original input");
+            assert_eq!(
+                request["model"],
+                if explicit {
+                    json!("local/org/model")
+                } else {
+                    Value::Null
+                }
+            );
+            assert_eq!(
+                request["effort"],
+                if explicit { json!("off") } else { Value::Null }
+            );
             assert!(TurnId::parse(request["turn_id"].as_str().unwrap()).is_ok());
             assert_eq!(
                 wire.request
@@ -881,7 +896,7 @@ async fn submission_identity_and_inherited_selection_are_kept_in_the_wire_reques
         assert_eq!(result.unwrap(), std::process::ExitCode::from(2));
         return;
     }
-    for mode in ["new", "existing"] {
+    for mode in ["new", "existing", "explicit"] {
         let root = tempfile::tempdir().unwrap();
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());
         command.env_clear().env("PATH","/usr/bin:/bin").env("HOME",root.path()).env(MODE,mode).current_dir(root.path()).args(["--exact","commands::run::ipc_tests::submission_identity_and_inherited_selection_are_kept_in_the_wire_request","--nocapture"]);
