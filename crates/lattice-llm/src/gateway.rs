@@ -143,7 +143,6 @@ impl GatewayTurn {
             provider,
             credentials,
             output_limit,
-            context_limit,
             reasoning,
         } = tokio::task::spawn_blocking(move || {
             load_provider(directory, &provider_id, &model_id, effort)
@@ -173,7 +172,6 @@ impl GatewayTurn {
             client,
             target: target.clone(),
             output_limit,
-            context_limit,
             reasoning,
         })
     }
@@ -199,7 +197,6 @@ pub struct ResolvedRequest {
     client: Arc<TurnClient>,
     target: ModelTarget,
     output_limit: Option<u64>,
-    context_limit: Option<u64>,
     reasoning: Option<ReasoningPlan>,
 }
 
@@ -238,7 +235,6 @@ impl ResolvedRequest {
                 roots: &self.configuration.roots,
                 client: self.client.clone(),
                 output_limit: self.output_limit,
-                context_limit: self.context_limit,
                 reasoning: self.reasoning,
                 features: self
                     .provider
@@ -291,7 +287,6 @@ struct LoadedProvider {
     provider: Provider,
     credentials: Credentials,
     output_limit: Option<u64>,
-    context_limit: Option<u64>,
     reasoning: Option<ReasoningPlan>,
 }
 
@@ -315,13 +310,13 @@ fn load_provider(
     let model = models.get(model_id);
     let limits = model.and_then(|model| model.limit.as_ref());
     let output_limit = limits.and_then(|limit| limit.output);
-    let context_limit = limits.and_then(|limit| limit.context);
     let features = provider
         .models
         .get(model_id)
         .map_or(provider.features, |model| model.features);
+    let capabilities = ReasoningCapabilities::new(id, model_id, model, features)?;
     let reasoning = effort.map(|effort| {
-        ReasoningCapabilities::new(model, features).select(effort).ok_or_else(|| configuration_error(format!(
+        capabilities.select(effort).ok_or_else(|| configuration_error(format!(
             "model {id}/{model_id} does not support reasoning effort {effort} with its current metadata and features"
         )))
     }).transpose()?;
@@ -329,7 +324,6 @@ fn load_provider(
         provider,
         credentials,
         output_limit,
-        context_limit,
         reasoning,
     })
 }

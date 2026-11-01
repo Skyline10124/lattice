@@ -9,6 +9,7 @@ use lattice_conversation::Effort;
 use serde_json::Value;
 
 use crate::{
+    LlmError,
     metadata::Model,
     protocol::{Features, ThinkingBudget, ThinkingToggle},
 };
@@ -54,7 +55,12 @@ impl ReasoningPlan {
 pub(crate) struct ReasoningCapabilities(BTreeMap<Effort, ReasoningPlan>);
 
 impl ReasoningCapabilities {
-    pub(crate) fn new(model: Option<&Model>, features: Features) -> Self {
+    pub(crate) fn new(
+        provider: &str,
+        model_id: &str,
+        model: Option<&Model>,
+        features: Features,
+    ) -> Result<Self, LlmError> {
         let options = model
             .and_then(|model| model.reasoning_options.as_ref())
             .and_then(Value::as_array)
@@ -66,6 +72,11 @@ impl ReasoningCapabilities {
         let enable_toggle = has_toggle
             && matches!(features,
             Features::ChatCompletions(chat) if chat.thinking_toggle != ThinkingToggle::None);
+        let output = model
+            .and_then(|model| model.limit.as_ref())
+            .and_then(|limit| limit.output)
+            .filter(|output| *output != 0)
+            .unwrap_or(32_768);
 
         // None 仍保留来源，避免手写列表把无效预算重新解释为 effort。
         let mut sources = BTreeMap::<Effort, Option<ReasoningPlan>>::new();
@@ -103,28 +114,9 @@ impl ReasoningCapabilities {
                 .find(|option| option["type"] == "budget_tokens")
         {
             let bounds = budget_bounds(option);
-            let output = model
-                .and_then(|model| model.limit.as_ref())
-                .and_then(|limit| limit.output)
-                .filter(|output| *output != 0)
-                .unwrap_or(32_768);
-            for (effort, base) in [
-                (Effort::Low, 2048_u64),
-                (Effort::Medium, 8192),
-                (Effort::High, 16384),
-                (Effort::Max, 32768),
-            ] {
-                let plan = bounds.and_then(|(min, max)| {
-                    let tokens = base
-                        .max(min.unwrap_or(0))
-                        .min(max.unwrap_or(u64::MAX))
-                        .min(output / 2);
-                    (tokens >= min.unwrap_or(0)).then_some(ReasoningPlan::Budget {
-                        effort,
-                        tokens,
-                        min,
-                        enable_toggle,
-                    })
+            for effort in [Effort::Low, Effort::Medium, Effort::High, Effort::Max] {
+                let plan = bounds.and_then(|bounds| {
+                    budget_plan(effort, output, bounds, features, enable_toggle)
                 });
                 sources.insert(effort, plan);
             }
@@ -133,22 +125,25 @@ impl ReasoningCapabilities {
             Some(handwritten) => handwritten
                 .iter()
                 .map(|&effort| {
-                    (
+                    Ok((
                         effort,
-                        sources
-                            .get(&effort)
-                            .copied()
-                            .unwrap_or(Some(ReasoningPlan::Effort {
-                                effort,
-                                enable_toggle: enable_toggle && effort != Effort::Off,
-                            })),
-                    )
+                        match sources.get(&effort) {
+                            Some(plan) => *plan,
+                            None => handwritten_plan(effort, output, features).map_err(|reason| {
+                                LlmError::Config {
+                                    message: format!(
+                                        "provider {provider:?}, model {model_id:?}, effort {effort}: {reason}"
+                                    ),
+                                }
+                            })?,
+                        },
+                    ))
                 })
-                .collect(),
+                .collect::<Result<BTreeMap<_, _>, LlmError>>()?,
             None => sources,
         };
         let mut previous_budget = None;
-        Self(
+        Ok(Self(
             candidates
                 .into_iter()
                 .filter_map(|(effort, plan)| {
@@ -162,12 +157,74 @@ impl ReasoningCapabilities {
                     Some((effort, plan))
                 })
                 .collect(),
-        )
+        ))
     }
 
     pub(crate) fn select(&self, effort: Effort) -> Option<ReasoningPlan> {
         self.0.get(&effort).copied()
     }
+}
+
+fn budget_plan(
+    effort: Effort,
+    output: u64,
+    (min, max): (Option<u64>, Option<u64>),
+    features: Features,
+    enable_toggle: bool,
+) -> Option<ReasoningPlan> {
+    let base = match effort {
+        Effort::Low => 2048_u64,
+        Effort::Medium => 8192,
+        Effort::High => 16384,
+        Effort::Max => 32768,
+        _ => return None,
+    };
+    let tokens = base
+        .max(min.unwrap_or(0))
+        .min(max.unwrap_or(u64::MAX))
+        .min(output / 2);
+    // Messages 在发送时遵守其协议下限；其他协议仍过滤低于元数据 min 的预算。
+    (tokens > 0 && (matches!(features, Features::Messages(_)) || tokens >= min.unwrap_or(0)))
+        .then_some(ReasoningPlan::Budget {
+            effort,
+            tokens,
+            min,
+            enable_toggle,
+        })
+}
+
+fn handwritten_plan(
+    effort: Effort,
+    output: u64,
+    features: Features,
+) -> Result<Option<ReasoningPlan>, &'static str> {
+    if let Features::ChatCompletions(chat) = features {
+        let toggle = chat.thinking_toggle != ThinkingToggle::None;
+        let budget = chat.thinking_budget != ThinkingBudget::None;
+        if toggle && effort == Effort::Off {
+            return Ok(Some(ReasoningPlan::Toggle { enabled: false }));
+        }
+        if budget {
+            return match effort {
+                Effort::Low | Effort::Medium | Effort::High | Effort::Max => {
+                    Ok(budget_plan(effort, output, (None, None), features, toggle))
+                }
+                _ => Err(
+                    "thinking_budget requires low, medium, high or max; off requires thinking_toggle",
+                ),
+            };
+        }
+        if toggle {
+            return match effort {
+                Effort::High => Ok(Some(ReasoningPlan::Toggle { enabled: true })),
+                _ => Err("thinking_toggle without thinking_budget only supports off and high"),
+            };
+        }
+    }
+    Ok(Some(ReasoningPlan::Effort {
+        effort,
+        enable_toggle: false,
+    }))
 }
 
 fn budget_bounds(option: &Value) -> Option<(Option<u64>, Option<u64>)> {
@@ -197,7 +254,7 @@ mod tests {
     ) -> ReasoningCapabilities {
         let mut model: Model = serde_json::from_value(json!({"id":"model", "reasoning":true,"reasoning_options":options,"limit":{"output":output}})).unwrap();
         model.effort = handwritten.map(<[Effort]>::to_vec);
-        ReasoningCapabilities::new(Some(&model), features)
+        ReasoningCapabilities::new("test", "model", Some(&model), features).unwrap()
     }
 
     fn plans(capabilities: &ReasoningCapabilities) -> Vec<(Effort, ReasoningPlan)> {
@@ -279,7 +336,13 @@ mod tests {
                 .is_empty()
             );
         }
-        assert!(plans(&ReasoningCapabilities::new(None, Features::GenerateContent)).is_empty());
+        assert!(
+            plans(
+                &ReasoningCapabilities::new("test", "model", None, Features::GenerateContent)
+                    .unwrap()
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -425,7 +488,32 @@ mod tests {
     }
 
     #[test]
-    fn handwritten_names_preserve_sources_and_only_missing_sources_become_effort() {
+    fn zero_budgets_are_unavailable_for_every_budget_protocol() {
+        for features in [
+            Features::GenerateContent,
+            Features::defaults(Protocol::Messages),
+            Features::ChatCompletions(ChatCompletionsFeatures {
+                thinking_budget: ThinkingBudget::ThinkingBudget,
+                ..Default::default()
+            }),
+        ] {
+            for handwritten in [None, Some(&[Effort::Low][..])] {
+                assert!(
+                    plans(&capabilities(
+                        json!([{"type":"budget_tokens"}]),
+                        Some(1),
+                        handwritten,
+                        features,
+                    ))
+                    .is_empty(),
+                    "{features:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn handwritten_names_preserve_sources_and_infer_missing_sources_from_features() {
         let features = Features::GenerateContent;
         let options = json!([{"type":"toggle"},{"type":"budget_tokens"}]);
         let caps = capabilities(
@@ -478,6 +566,34 @@ mod tests {
                 None
             );
         }
+        let chat = Features::ChatCompletions(ChatCompletionsFeatures {
+            thinking_toggle: ThinkingToggle::ThinkingType,
+            thinking_budget: ThinkingBudget::ThinkingBudget,
+            ..Default::default()
+        });
+        assert_eq!(
+            capabilities(
+                json!([{"type":"effort","values":["none","high"]}]),
+                None,
+                Some(&[Effort::Off, Effort::High]),
+                chat,
+            )
+            .select(Effort::High),
+            Some(ReasoningPlan::Effort {
+                effort: Effort::High,
+                enable_toggle: false
+            }),
+        );
+        assert_eq!(
+            capabilities(
+                json!([{"type":"toggle"}]),
+                None,
+                Some(&[Effort::High]),
+                chat
+            )
+            .select(Effort::High),
+            Some(ReasoningPlan::Toggle { enabled: true }),
+        );
         assert_eq!(
             capabilities(Value::Null, None, Some(&[Effort::High]), unsupported)
                 .select(Effort::High),

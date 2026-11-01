@@ -2,7 +2,7 @@
 
 ## 职责
 
-维护 provider-neutral 纯数据对话：有序 `NativeMessage<ToolCallState>`/`MessagePart`、`UnboundToolCall`/`BoundToolCall` typestate、闭合的 `ToolResultOutcome` 与结构化结果载荷、参数与内容摘要、attempt usage/中断/拒绝、attempt 费用结果（`CostEstimate`，只放结果数据，计价逻辑归 `lattice-llm`）、provider origin 与 part-local replay state，以及 `ConversationItem`。
+维护共享推理档位 `Effort` 及 provider-neutral 纯数据对话：有序 `NativeMessage<ToolCallState>`/`MessagePart`、`UnboundToolCall`/`BoundToolCall` typestate、闭合的 `ToolResultOutcome` 与结构化结果载荷、参数与内容摘要、attempt usage/中断/拒绝、attempt 费用结果（`CostEstimate`，只放结果数据，计价逻辑归 `lattice-llm`）、provider origin 与 part-local replay state，以及 `ConversationItem`。
 
 ## 上位文档
 
