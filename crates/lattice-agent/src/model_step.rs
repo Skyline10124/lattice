@@ -362,30 +362,9 @@ fn model_step_opening_error(error: Box<dyn std::error::Error + Send + Sync>) -> 
 mod tests {
     use super::*;
     use crate::testing::FakeStreamingLlmClient;
-    use lattice_conversation::{InvocationId, MAX_ASSISTANT_CONTENT_BYTES, ToolCallAddress};
+    use lattice_conversation::MAX_ASSISTANT_CONTENT_BYTES;
     use lattice_llm::testing::ScriptEvent;
 
-    struct ProjectionCheckingClient;
-
-    #[async_trait::async_trait]
-    impl LlmClient for ProjectionCheckingClient {
-        async fn stream_chat(
-            &self,
-            request: ChatRequest,
-            control: StreamControl,
-        ) -> Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
-            let origin = lattice_conversation::ReplayOrigin {
-                protocol: lattice_conversation::Protocol::ChatCompletions,
-                provider_id: request.target.provider.clone(),
-            };
-            lattice_llm::protocol::projection::request_messages_to_wire(&origin, &request.messages)
-                .map_err(|error| {
-                    Box::new(lattice_llm::LlmError::Projection(error))
-                        as Box<dyn std::error::Error + Send + Sync>
-                })?;
-            Ok(lattice_llm::testing::script_stream(origin, vec![], control))
-        }
-    }
     #[tokio::test]
     async fn effort_is_preserved_in_chat_request() {
         struct Capturing(std::sync::Mutex<Vec<Option<lattice_conversation::Effort>>>);
@@ -456,43 +435,6 @@ mod tests {
             .enable_all()
             .build()
             .unwrap()
-    }
-
-    fn bound_assistant(
-        provider_call_id: Option<&str>,
-        invocation: InvocationId,
-    ) -> NativeMessage<lattice_conversation::BoundToolCall> {
-        let address = ToolCallAddress {
-            message: lancet_protocol_marker(),
-            part_ordinal: 0,
-        };
-        let call = lattice_conversation::UnboundToolCall {
-            provider_call_id: provider_call_id.map(str::to_string),
-            name: "observe__workspace".to_string(),
-            arguments: serde_json::json!({}),
-        }
-        .bind(invocation, address);
-        NativeMessage::new(
-            MessageRole::Assistant,
-            None,
-            vec![MessagePart::semantic_only(MessageSemantic::ToolCall {
-                call,
-            })],
-        )
-    }
-
-    fn lancet_protocol_marker() -> lattice_conversation::ModelMessageAddress {
-        lattice_conversation::ModelMessageAddress {
-            session_id: lattice_conversation::SessionId::parse("3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c")
-                .unwrap(),
-            turn_id: lattice_conversation::TurnId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c")
-                .unwrap(),
-            model_step_ordinal: 0,
-        }
-    }
-
-    fn invocation(index: u64) -> InvocationId {
-        InvocationId::parse(&format!("00000000-0000-4000-8000-{index:012x}")).unwrap()
     }
 
     #[tokio::test]
@@ -723,45 +665,6 @@ mod tests {
                 retryable: false,
                 ..
             })
-        ));
-    }
-
-    #[test]
-    fn history_tool_results_without_provider_ids_fail_typed() {
-        let assistant = bound_assistant(None, invocation(0));
-        let tool = lattice_conversation::StoredToolResult {
-            invocation_id: invocation(0),
-            name: "observe__workspace".into(),
-            payload: lattice_conversation::ResultPayload::Succeeded(
-                lattice_conversation::SuccessContent::Json {
-                    value: serde_json::json!({}),
-                    digest: lattice_conversation::tool_content_digest("{}"),
-                    byte_length: 2,
-                },
-            ),
-        };
-        let result = runtime().block_on(
-            ModelStepDriver::new(Arc::new(ProjectionCheckingClient)).run(
-                &ModelStepRequest {
-                    history: vec![lattice_conversation::ConversationItem::Step(
-                        lattice_conversation::StepContent {
-                            assistant,
-                            results: vec![tool],
-                        },
-                    )],
-                    ..request()
-                },
-                None,
-            ),
-        );
-        assert!(matches!(
-            result,
-            Err(ModelStepError::Projection(
-                lattice_llm::protocol::projection::ProjectionError::ToolResultWithoutProviderCallId {
-                    invocation_id,
-                    ..
-                },
-            )) if invocation_id == invocation(0)
         ));
     }
 

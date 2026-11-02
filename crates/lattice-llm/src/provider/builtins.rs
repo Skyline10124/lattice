@@ -32,15 +32,13 @@ const THINKING_BUDGET: ChatCompletionsFeatures = ChatCompletionsFeatures {
 pub(super) fn providers() -> Vec<Provider> {
     use Auth::{Bearer, None as NoAuth, OauthChatgpt, XApiKey, XGoogApiKey};
 
-    // 合同中 openai、xai 使用 responses，google 使用 interactions；
-    // 内置默认在 #315 L5 的协议切换 PR 中对齐，此处暂用 chat-completions 与 generate-content。
     vec![
         provider(
             "openai",
             "https://api.openai.com/v1",
             Bearer,
             Some("openai"),
-            STANDARD,
+            Features::Responses,
         ),
         provider(
             "chatgpt",
@@ -63,9 +61,15 @@ pub(super) fn providers() -> Vec<Provider> {
             "https://generativelanguage.googleapis.com/v1beta",
             XGoogApiKey,
             Some("google"),
-            Features::GenerateContent,
+            Features::Interactions,
         ),
-        provider("xai", "https://api.x.ai/v1", Bearer, Some("xai"), STANDARD),
+        provider(
+            "xai",
+            "https://api.x.ai/v1",
+            Bearer,
+            Some("xai"),
+            Features::Responses,
+        ),
         provider(
             "mistral",
             "https://api.mistral.ai/v1",

@@ -373,6 +373,73 @@ catalog = "arbitrary-entry"
                 }
             );
         }
+        let config_path = directory.join("providers.toml");
+        let mut config: toml::Table =
+            toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        for id in ["openai", "xai", "google"] {
+            let provider = config["providers"]
+                .as_table_mut()
+                .unwrap()
+                .entry(id)
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+                .as_table_mut()
+                .unwrap();
+            provider.insert("catalog".into(), "builtin-capabilities".into());
+            let models = provider
+                .entry("models")
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+                .as_table_mut()
+                .unwrap();
+            for model in ["handwritten", "budget"] {
+                models.insert(
+                    model.into(),
+                    toml::Value::Table(toml::from_str("effort=['low','high']").unwrap()),
+                );
+            }
+        }
+        std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
+        let cache_path = directory.join("cache/models.json");
+        let mut cache: Value =
+            serde_json::from_slice(&std::fs::read(&cache_path).unwrap()).unwrap();
+        cache["builtin-capabilities"] = json!({"models":{
+            "effort":{"id":"effort","reasoning_options":[{"type":"effort","values":["none","low","high","xhigh"]}]},
+            "budget":{"id":"budget","reasoning_options":[{"type":"toggle"},{"type":"budget_tokens"}]},
+            "toggle":{"id":"toggle","reasoning_options":[{"type":"toggle"}]}
+        }});
+        std::fs::write(cache_path, serde_json::to_vec(&cache).unwrap()).unwrap();
+        for provider in ["openai", "xai", "google"] {
+            for (model, expected) in [
+                (
+                    "effort",
+                    if provider == "google" {
+                        json!(["low", "high"])
+                    } else {
+                        json!(["off", "low", "high", "xhigh"])
+                    },
+                ),
+                ("budget", json!([])),
+                ("toggle", json!([])),
+                ("handwritten", json!(["low", "high"])),
+                ("unknown", json!([])),
+            ] {
+                let target = format!("{provider}/{model}");
+                let listed = support::ipc(
+                    &world,
+                    budget.cap_timeout(spec.step_timeout()),
+                    json!({"operation":"models","target":target}),
+                );
+                evidence
+                    .record_json(&format!("builtin capabilities {provider}-{model}"), &listed)
+                    .unwrap();
+                assert_eq!(listed["response"], "models");
+                let candidate = &listed["value"]["models"][0];
+                assert_eq!(candidate["supported_efforts"], expected, "{target}");
+                assert!(
+                    candidate.get("config_error").is_none(),
+                    "{target}: {candidate}"
+                );
+            }
+        }
         let config = directory.join("providers.toml");
         let source = std::fs::read_to_string(&config).unwrap();
         std::fs::write(

@@ -1445,7 +1445,7 @@ async fn chat_replay_defaults_to_no_reasoning() {
 
 #[tokio::test]
 async fn replay_source_matrix_reaches_each_protocol_request_body() {
-    use crate::protocol::projection::{ProjectionError, wire_to_native};
+    use crate::protocol::projection::wire_to_native;
     use lattice_conversation::{ConversationItem, Protocol, ReplayOrigin, StepContent};
 
     // 期望来自夹具里的原文，不经过 project_cross_provider / native_to_wire 再算一遍。
@@ -1517,10 +1517,6 @@ async fn replay_source_matrix_reaches_each_protocol_request_body() {
             for (round, provider) in ["test", "other", "test"].into_iter().enumerate() {
                 let cell = format!("{protocol} -> {target_protocol}/{provider}#{round}");
                 let same_provider = target_protocol == protocol && provider == "test";
-                let same_protocol = target_protocol == protocol;
-                // Chat Completions 与 Messages 没有 call ID 就无法编码工具结果。
-                // generateContent 按工具名关联，请求仍会发出，但不得带上来源 call ID。
-                let sends = same_protocol || target_protocol == Protocol::GenerateContent;
                 let feature = if target_protocol == Protocol::ChatCompletions {
                     format!(
                         "[providers.{provider}.features]\nreasoning_replay='reasoning-content'\n"
@@ -1530,91 +1526,62 @@ async fn replay_source_matrix_reaches_each_protocol_request_body() {
                 };
                 std::fs::write(directory.path().join("providers.toml"), format!(
                     "[providers.{provider}]\nprotocol='{target_protocol}'\nbase_url='{}'\nauth='none'\n{feature}", server.url)).unwrap();
-                if sends {
-                    let body = match target_protocol {
-                        Protocol::ChatCompletions => DONE,
-                        Protocol::Messages => MESSAGES_DONE,
-                        Protocol::GenerateContent => CONTENT_DONE,
-                        _ => unreachable!(),
-                    };
-                    server.respond(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}", body.len()), false);
-                }
+                let body = match target_protocol {
+                    Protocol::ChatCompletions => DONE,
+                    Protocol::Messages => MESSAGES_DONE,
+                    Protocol::GenerateContent => CONTENT_DONE,
+                    _ => unreachable!(),
+                };
+                server.respond(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}", body.len()), false);
                 let mut request = self::request(provider);
                 request.messages.push(ConversationItem::Step(StepContent {
                     assistant: assistant.clone(),
                     results: results.clone(),
                 }));
-                match gateway
+                let stream = gateway
                     .open_turn()
                     .stream_chat(request, StreamControl::default())
                     .await
-                {
-                    Ok(stream) => {
-                        assert!(
-                            sends,
-                            "{cell}: sent a request that should have been rejected"
-                        );
-                        complete(stream).await;
-                        let body = server.next().await.body;
-                        if has_redacted && !same_provider {
-                            match target_protocol {
-                                Protocol::ChatCompletions => assert_eq!(
-                                    body["messages"][0]["content"], "Checking both.",
-                                    "{cell}: 跨来源请求不能携带空文本占位块"
-                                ),
-                                Protocol::Messages | Protocol::GenerateContent => {
-                                    let blocks = if target_protocol == Protocol::Messages {
-                                        &body["messages"][0]["content"]
-                                    } else {
-                                        &body["contents"][0]["parts"]
-                                    };
-                                    let texts: Vec<_> = blocks
-                                        .as_array()
-                                        .unwrap()
-                                        .iter()
-                                        .filter_map(|block| block.get("text"))
-                                        .collect();
-                                    assert_eq!(
-                                        texts,
-                                        vec![&serde_json::json!("Checking both.")],
-                                        "{cell}: 跨来源请求只能保留固定夹具的正文，不能携带空文本占位块"
-                                    );
-                                }
-                                _ => unreachable!(),
-                            }
-                        }
-                        let serialized = body.to_string();
-                        for id in call_ids {
+                    .unwrap();
+                complete(stream).await;
+                let body = server.next().await.body;
+                if has_redacted && !same_provider {
+                    match target_protocol {
+                        Protocol::ChatCompletions => assert_eq!(
+                            body["messages"][0]["content"], "Checking both.",
+                            "{cell}: 跨来源请求不能携带空文本占位块"
+                        ),
+                        Protocol::Messages | Protocol::GenerateContent => {
+                            let blocks = if target_protocol == Protocol::Messages {
+                                &body["messages"][0]["content"]
+                            } else {
+                                &body["contents"][0]["parts"]
+                            };
+                            let texts: Vec<_> = blocks
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .filter_map(|block| block.get("text"))
+                                .collect();
                             assert_eq!(
-                                serialized.contains(id),
-                                same_protocol,
-                                "{cell}: provider call id {id}"
+                                texts,
+                                vec![&serde_json::json!("Checking both.")],
+                                "{cell}: 跨来源请求只能保留固定夹具的正文，不能携带空文本占位块"
                             );
                         }
-                        for material in replay_material {
-                            assert_eq!(
-                                serialized.contains(material),
-                                same_provider,
-                                "{cell}: replay material"
-                            );
-                        }
+                        _ => unreachable!(),
                     }
-                    Err(error) => {
-                        assert!(!sends, "{cell}: {error}");
-                        assert!(
-                            matches!(
-                                error,
-                                crate::LlmError::Projection(
-                                    ProjectionError::ToolResultWithoutProviderCallId { .. }
-                                )
-                            ),
-                            "{cell}: {error}"
-                        );
-                        assert!(
-                            server.received.try_recv().is_err(),
-                            "{cell}: rejected projection still reached the server"
-                        );
-                    }
+                }
+                let serialized = body.to_string();
+                for id in call_ids {
+                    assert!(serialized.contains(id), "{cell}: provider call id {id}");
+                }
+                for material in replay_material {
+                    assert_eq!(
+                        serialized.contains(material),
+                        same_provider,
+                        "{cell}: replay material"
+                    );
                 }
             }
         }
@@ -2277,6 +2244,348 @@ async fn interactions_invalid_handwritten_efforts_only_reject_the_affected_model
             "handwritten Interactions effort",
         )
         .await;
+    }
+}
+
+#[tokio::test]
+async fn builtin_candidates_and_efforts_match_the_requests_they_resolve() {
+    use lattice_conversation::{
+        ConversationItem, Effort, MessagePart, MessageRole, MessageSemantic, NativeMessage,
+    };
+    use serde_json::json;
+
+    let mut server = Server::start(true).await;
+    for id in ["openai", "xai", "google"] {
+        let google = id == "google";
+        let directory = private_dir();
+        let base_url = if google {
+            format!("{}/v1beta", server.url.trim_end_matches("/v1"))
+        } else {
+            server.url.clone()
+        };
+        let source = format!(
+            "[providers.{id}]\nbase_url='{base_url}'\n[providers.{id}.models.handwritten]\neffort=['low','high']\n[providers.{id}.models.reused-budget]\neffort=['low','high']\n[providers.{id}.models.invalid]\neffort=['xhigh']\n"
+        );
+        std::fs::write(directory.path().join("providers.toml"), source).unwrap();
+        let cache = directory.path().join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let models = json!({"models":{
+            "effort":{"id":"effort","reasoning":true,"reasoning_options":[{"type":"effort","values":["none","minimal","low","medium","high","xhigh","max"]}]},
+            "budget":{"id":"budget","reasoning":true,"reasoning_options":[{"type":"toggle"},{"type":"budget_tokens","min":128,"max":32768}]},
+            "reused-budget":{"id":"reused-budget","reasoning":true,"reasoning_options":[{"type":"budget_tokens"}]},
+            "toggle":{"id":"toggle","reasoning_options":[{"type":"toggle"}]},
+            "mixed":{"id":"mixed","reasoning_options":[{"type":"effort","values":["low","high"]},{"type":"toggle"},{"type":"budget_tokens"}]},
+            "always":{"id":"always","reasoning":true},
+            "plain":{"id":"plain","reasoning":false}
+        }});
+        std::fs::write(
+            cache.join("models.json"),
+            serde_json::to_vec(&json!({id:models})).unwrap(),
+        )
+        .unwrap();
+        let gateway =
+            RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+        let turn = gateway.open_turn();
+        for (model, expected, reasoning) in [
+            (
+                "effort",
+                if google {
+                    vec![Effort::Minimal, Effort::Low, Effort::Medium, Effort::High]
+                } else {
+                    vec![
+                        Effort::Off,
+                        Effort::Minimal,
+                        Effort::Low,
+                        Effort::Medium,
+                        Effort::High,
+                        Effort::Xhigh,
+                        Effort::Max,
+                    ]
+                },
+                true,
+            ),
+            ("mixed", vec![Effort::Low, Effort::High], false),
+            ("handwritten", vec![Effort::Low, Effort::High], false),
+            ("budget", vec![], true),
+            ("reused-budget", vec![], true),
+            ("toggle", vec![], false),
+            ("always", vec![], true),
+            ("plain", vec![], false),
+            ("unknown", vec![], false),
+        ] {
+            let target = ModelTarget::new(id, model);
+            assert_eq!(
+                turn.supported_efforts(&target).await.unwrap(),
+                expected,
+                "{id}/{model}"
+            );
+            let candidate =
+                crate::model_candidates(directory.path(), None, Some(&format!("{id}/{model}")))
+                    .unwrap()
+                    .models
+                    .remove(0);
+            assert_eq!(candidate.supported_efforts, expected);
+            assert_eq!(candidate.credential_status, crate::auth::AuthState::Missing);
+            assert!(candidate.config_error.is_none());
+
+            crate::auth::AuthStore::new(directory.path().into())
+                .set(id, "builtin-key")
+                .unwrap();
+            for effort in std::iter::once(None).chain(expected.iter().copied().map(Some)) {
+                let mut request = request(id);
+                request.target = target.clone();
+                request.target.effort = effort;
+                request.messages = vec![
+                    ConversationItem::Message(NativeMessage::new(
+                        MessageRole::System,
+                        None,
+                        vec![MessagePart::semantic_only(MessageSemantic::Text {
+                            text: "builtin system".into(),
+                        })],
+                    )),
+                    user_message("builtin input"),
+                ];
+                request.tools.push(crate::ToolDefinition::new(
+                    "observe__workspace",
+                    "read",
+                    json!({"type":"object"}),
+                ));
+                let resolved = turn.resolve(&request.target).await.unwrap();
+                assert_eq!(
+                    resolved.origin(),
+                    lattice_conversation::ReplayOrigin {
+                        protocol: if google {
+                            crate::Protocol::Interactions
+                        } else {
+                            crate::Protocol::Responses
+                        },
+                        provider_id: id.into(),
+                    }
+                );
+                complete(
+                    resolved
+                        .stream_chat(request, StreamControl::default())
+                        .await
+                        .unwrap(),
+                )
+                .await;
+                let received = server.next().await;
+                assert_eq!(
+                    received.path,
+                    if google {
+                        "/v1beta/interactions"
+                    } else {
+                        "/v1/responses"
+                    }
+                );
+                assert_eq!(
+                    received
+                        .headers
+                        .get(if google {
+                            "x-goog-api-key"
+                        } else {
+                            "authorization"
+                        })
+                        .unwrap(),
+                    if google {
+                        "builtin-key"
+                    } else {
+                        "Bearer builtin-key"
+                    }
+                );
+                assert_eq!(received.headers["x-client-request-id"], "session-id");
+                let body = received.body;
+                assert_eq!(body["model"], model);
+                assert_eq!(body["stream"], true);
+                assert_eq!(body["store"], false);
+                assert_eq!(body["tools"][0]["name"], "observe__workspace");
+                assert_eq!(body.get("include").is_some(), !google && reasoning);
+                if google {
+                    assert_eq!(body["system_instruction"], "builtin system");
+                    assert_eq!(body["input"][0]["type"], "user_input");
+                    let expected_config = match (reasoning, effort) {
+                        (false, None) => None,
+                        (false, Some(effort)) => Some(json!({"thinking_level":effort.as_str()})),
+                        (true, None) => Some(json!({"thinking_summaries":"auto"})),
+                        (true, Some(effort)) => Some(
+                            json!({"thinking_level":effort.as_str(),"thinking_summaries":"auto"}),
+                        ),
+                    };
+                    assert_eq!(
+                        body.get("generation_config"),
+                        expected_config.as_ref(),
+                        "{id}/{model}/{effort:?}"
+                    );
+                    assert!(body.get("reasoning").is_none());
+                    assert!(body.get("prompt_cache_key").is_none());
+                } else {
+                    assert_eq!(body["instructions"], "builtin system");
+                    assert_eq!(body["input"][0]["role"], "user");
+                    assert_eq!(body["prompt_cache_key"], "session-id");
+                    assert_eq!(body["tools"][0]["strict"], false);
+                    let expected_reasoning = match (reasoning, effort) {
+                        (_, Some(Effort::Off)) => Some(json!({"effort":"none"})),
+                        (true, Some(effort)) => {
+                            Some(json!({"effort":effort.as_str(),"summary":"auto"}))
+                        }
+                        (true, None) => Some(json!({"summary":"auto"})),
+                        (false, Some(effort)) => Some(json!({"effort":effort.as_str()})),
+                        (false, None) => None,
+                    };
+                    assert_eq!(
+                        body.get("reasoning"),
+                        expected_reasoning.as_ref(),
+                        "{id}/{model}/{effort:?}"
+                    );
+                    assert!(body.get("generation_config").is_none());
+                    if reasoning {
+                        assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+                    }
+                }
+                for field in [
+                    "messages",
+                    "contents",
+                    "reasoning_effort",
+                    "thinking",
+                    "generationConfig",
+                    "temperature",
+                    "top_p",
+                    "max_output_tokens",
+                    "previous_response_id",
+                    "previous_interaction_id",
+                    "background",
+                ] {
+                    assert!(body.get(field).is_none(), "{id}/{model}: {field}");
+                }
+            }
+            let mut unsupported = target;
+            unsupported.effort = Some(if expected.contains(&Effort::Off) {
+                Effort::Low
+            } else {
+                Effort::Off
+            });
+            if !expected.contains(&unsupported.effort.unwrap()) {
+                assert!(matches!(
+                    turn.resolve(&unsupported).await,
+                    Err(crate::LlmError::Config { message }) if message.contains("does not support reasoning effort")
+                ));
+            }
+            crate::auth::AuthStore::new(directory.path().into())
+                .remove(id)
+                .unwrap();
+        }
+        crate::auth::AuthStore::new(directory.path().into())
+            .set(id, "builtin-key")
+            .unwrap();
+        let invalid = ModelTarget::new(id, "invalid");
+        let candidate =
+            crate::model_candidates(directory.path(), None, Some(&format!("{id}/invalid")))
+                .unwrap()
+                .models
+                .remove(0);
+        if google {
+            assert!(
+                candidate
+                    .config_error
+                    .as_deref()
+                    .unwrap()
+                    .contains("thinking_level")
+            );
+            assert!(matches!(
+                turn.resolve(&invalid).await,
+                Err(crate::LlmError::Config { message }) if message.contains("thinking_level")
+            ));
+        } else {
+            assert_eq!(candidate.supported_efforts, vec![Effort::Xhigh]);
+            assert!(candidate.config_error.is_none());
+        }
+    }
+}
+
+#[tokio::test]
+async fn builtin_protocol_switch_preserves_old_tool_ids() {
+    use crate::protocol::projection::wire_to_native;
+    use lattice_conversation::{ConversationItem, Protocol, ReplayOrigin, StepContent};
+    for (id, old, fixture) in [
+        (
+            "openai",
+            Protocol::ChatCompletions,
+            include_str!("../../tests/fixtures/projection/openai_assistant_tool_calls.json"),
+        ),
+        (
+            "xai",
+            Protocol::ChatCompletions,
+            include_str!("../../tests/fixtures/projection/openai_assistant_tool_calls.json"),
+        ),
+        (
+            "google",
+            Protocol::GenerateContent,
+            include_str!("../../tests/fixtures/projection/gemini_thought_signature.json"),
+        ),
+    ] {
+        let mut server = Server::start(true).await;
+        let directory = private_dir();
+        std::fs::write(
+            directory.path().join("providers.toml"),
+            format!("[providers.{id}]\nbase_url='{}'\n", server.url),
+        )
+        .unwrap();
+        crate::auth::AuthStore::new(directory.path().into())
+            .set(id, "builtin-key")
+            .unwrap();
+        let source = wire_to_native(
+            &ReplayOrigin {
+                protocol: old,
+                provider_id: id.into(),
+            },
+            &serde_json::from_str(fixture).unwrap(),
+        )
+        .unwrap();
+        let ids: Vec<_> = source
+            .tool_calls()
+            .map(|(_, call)| call.provider_call_id.clone().unwrap())
+            .collect();
+        let (assistant, results) = crate::test_reply::bind_replay_step(source);
+        let mut request = request(id);
+        request
+            .messages
+            .push(ConversationItem::Step(StepContent { assistant, results }));
+        let gateway =
+            RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+        complete(
+            gateway
+                .open_turn()
+                .stream_chat(request, StreamControl::default())
+                .await
+                .unwrap(),
+        )
+        .await;
+        let body = server.next().await.body;
+        let items = body["input"].as_array().unwrap();
+        let calls: Vec<_> = items
+            .iter()
+            .filter(|item| item["type"] == "function_call")
+            .collect();
+        let results: Vec<_> = items
+            .iter()
+            .filter(|item| {
+                item["type"]
+                    == if id == "google" {
+                        "function_result"
+                    } else {
+                        "function_call_output"
+                    }
+            })
+            .collect();
+        assert_eq!(calls.len(), ids.len());
+        assert_eq!(results.len(), ids.len());
+        for (index, call_id) in ids.iter().enumerate() {
+            assert_eq!(
+                calls[index][if id == "google" { "id" } else { "call_id" }],
+                call_id.as_str()
+            );
+            assert_eq!(results[index]["call_id"], call_id.as_str());
+        }
     }
 }
 

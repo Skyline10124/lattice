@@ -75,6 +75,48 @@ fn builtins_obey_provider_invariants() {
 }
 
 #[test]
+fn builtin_protocols_match_their_endpoints_and_auth() {
+    let registry = ProviderRegistry::builtins();
+    for (id, features, url, auth, catalog) in [
+        (
+            "openai",
+            Features::Responses,
+            "https://api.openai.com/v1",
+            Auth::Bearer,
+            "openai",
+        ),
+        (
+            "xai",
+            Features::Responses,
+            "https://api.x.ai/v1",
+            Auth::Bearer,
+            "xai",
+        ),
+        (
+            "google",
+            Features::Interactions,
+            "https://generativelanguage.googleapis.com/v1beta",
+            Auth::XGoogApiKey,
+            "google",
+        ),
+        (
+            "chatgpt",
+            Features::Responses,
+            "https://api.openai.com/v1",
+            Auth::OauthChatgpt,
+            "openai",
+        ),
+    ] {
+        let provider = registry.get(id).unwrap();
+        assert_eq!(provider.features, features, "{id}");
+        assert_eq!(provider.protocol, features.protocol(), "{id}");
+        assert_eq!(provider.base_url, url, "{id}");
+        assert_eq!(provider.auth, auth, "{id}");
+        assert_eq!(provider.catalog.as_deref(), Some(catalog), "{id}");
+    }
+}
+
+#[test]
 fn merges_fields_and_model_features_without_losing_metadata_presence() {
     let builtin = ProviderRegistry::builtins();
     let original = builtin.get("deepseek").unwrap();
@@ -173,6 +215,9 @@ catalog = "custom-catalog"
 #[test]
 fn builtin_protocol_key_is_rejected_even_when_the_value_is_unchanged() {
     for (id, protocol) in [
+        ("openai", "responses"),
+        ("xai", "responses"),
+        ("google", "interactions"),
         ("deepseek", "chat-completions"),
         ("deepseek", "anthropic-messages"),
         ("chatgpt", "responses"),
@@ -182,6 +227,34 @@ fn builtin_protocol_key_is_rejected_even_when_the_value_is_unchanged() {
             2,
             "to use another protocol, create a new provider id",
         );
+    }
+}
+
+#[test]
+fn responses_builtins_reject_chat_features_at_provider_and_model_levels() {
+    for id in ["openai", "xai"] {
+        for level in ["features", "models.example.features"] {
+            for feature in [
+                "effort_param = 'reasoning-effort'",
+                "thinking_toggle = 'thinking-type'",
+                "thinking_budget = 'thinking-budget'",
+                "reasoning_replay = 'reasoning-content'",
+                "cache_markers = true",
+            ] {
+                assert_invalid(
+                    &format!("[providers.{id}.{level}]\n{feature}"),
+                    2,
+                    "unknown feature",
+                );
+                let custom = parse(&format!(
+                    "{CHAT_PROVIDER}\n[providers.custom.{level}]\n{feature}"
+                ));
+                assert_eq!(
+                    custom.get("custom").unwrap().protocol,
+                    Protocol::ChatCompletions
+                );
+            }
+        }
     }
 }
 

@@ -225,14 +225,18 @@ impl AnthropicSseParser {
                             }
                         }
                         PartKind::ToolCall => {
+                            let Some(id) = block["id"].as_str() else {
+                                return vec![ProtocolEvent::error(
+                                    "malformed Anthropic Messages wire: tool_use.id is missing or not a string",
+                                    false,
+                                )];
+                            };
                             events.push(ProtocolEvent::Part(PartDelta::ToolMetadata {
                                 index,
                                 name: block["name"]
                                     .as_str()
                                     .map(|name| StringPatch::Set(name.into())),
-                                provider_call_id: block["id"]
-                                    .as_str()
-                                    .map(|id| StringPatch::Set(id.into())),
+                                provider_call_id: Some(StringPatch::Set(id.into())),
                             }));
                             if let Some(input) = block.get("input").filter(|value| {
                                 !value.as_object().is_some_and(serde_json::Map::is_empty)
@@ -779,54 +783,41 @@ mod tests {
     }
 
     #[test]
-    fn parser_preserves_missing_tool_id() {
-        let mut parser = Parser::new(Protocol::Messages);
-        start_message(&mut parser);
-        let started = parser.parse_chunk(
-            "content_block_start",
-            r#"{"index":0,"content_block":{"type":"tool_use","name":"observe__workspace","input":{}}}"#,
-        );
-        assert!(started.is_empty());
-        assert!(parser.raw.iter().any(|event| matches!(event,
-            ProtocolEvent::Part(PartDelta::ToolMetadata { provider_call_id: None, name: Some(StringPatch::Set(name)), .. }) if name == "observe__workspace"
-        )));
-        parser.parse_chunk("content_block_stop", r#"{"index":0}"#);
-        let events = parser.parse_chunk(
-            "message_delta",
-            r#"{"delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":1}}"#,
-        );
-        let message = events
-            .iter()
-            .find_map(|event| match event {
-                LlmEvent::Finished {
-                    outcome: ReplyOutcome::Complete { message },
-                    ..
-                } => Some(message.as_message()),
-                _ => None,
-            })
-            .expect("complete message");
-        assert_eq!(
-            message
-                .tool_calls()
-                .next()
-                .expect("ToolCall")
-                .1
-                .provider_call_id,
-            None
-        );
-        assert_eq!(
-            message.tool_calls().next().expect("ToolCall").1.arguments,
-            serde_json::json!({}),
-            "no argument delta preserves the provider's legal empty input object",
-        );
-        assert!(
-            parser
-                .parse_chunk(
-                    "message_delta",
-                    r#"{"delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}"#,
-                )
-                .is_empty()
-        );
+    fn parser_requires_tool_ids() {
+        for id in [Some("toolu_1"), None] {
+            let mut parser = Parser::new(Protocol::Messages);
+            start_message(&mut parser);
+            let mut block = serde_json::json!({"index":0,"content_block":{"type":"tool_use","name":"observe__workspace","input":{}}});
+            if let Some(id) = id {
+                block["content_block"]["id"] = id.into();
+            }
+            let started = parser.parse_chunk("content_block_start", &block.to_string());
+            if id.is_none() {
+                assert_eq!(
+                    crate::test_reply::failure(&started).as_deref(),
+                    Some(
+                        "malformed Anthropic Messages wire: tool_use.id is missing or not a string"
+                    )
+                );
+                assert!(parser.parse_chunk("message_stop", "{}").is_empty());
+                continue;
+            }
+            assert!(started.is_empty());
+            parser.parse_chunk("content_block_stop", r#"{"index":0}"#);
+            let events = parser.parse_chunk(
+                "message_delta",
+                r#"{"delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":1}}"#,
+            );
+            let message = crate::test_reply::completed(&events);
+            let call = message.tool_calls().next().unwrap().1;
+            assert_eq!(call.provider_call_id.as_deref(), id);
+            assert_eq!(
+                call.arguments,
+                serde_json::json!({}),
+                "no argument delta preserves the legal empty input object"
+            );
+            assert!(parser.parse_chunk("message_stop", "{}").is_empty());
+        }
     }
 
     #[test]

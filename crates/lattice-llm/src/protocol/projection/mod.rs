@@ -10,14 +10,13 @@
 //! 1. 校验并保留 provider 原生助手消息中的调用 ID、签名与思考状态，
 //!    将它们按部件保存为不透明回放状态；
 //! 2. 完整来源相同时按协议与 features 回放；绑定前后的消息共用相同规则；
-//! 3. 来源不同时去除 reasoning 与逐片段回放状态，协议不同时再去除 call ID；
+//! 3. 来源不同时去除 reasoning 与逐片段回放状态，call ID 原样保留；
 //! 4. 切回原来源时使用历史中保留的原消息；
 //! 5. 将对话中的 ToolResult 与其对应的绑定 ToolCall 关联，编码为下一次请求的格式，
 //!    并从官方响应正文提取 provider 报告的用量。
 //!
 //! provider 工具调用 ID 不生成、不编码、不改写，也不补造目标 provider 的身份。
-//! 缺少 provider 调用 ID 是有效的对话事实；若目标 provider 无法据此编码已记录的结果，
-//! 投影返回类型化的 [`ProjectionError::ToolResultWithoutProviderCallId`] 错误。
+//! 服务端返回的工具调用必须带 ID；旧历史缺少 ID 时省略该字段，由目标 API 判断。
 
 mod anthropic_messages;
 mod chat_completions;
@@ -31,8 +30,8 @@ use std::collections::BTreeSet;
 
 use crate::protocol::ReasoningReplay;
 use lattice_conversation::{
-    AttemptInterruption, BoundToolCall, InvocationId, MessageRole, MessageSemantic, NativeMessage,
-    Protocol, ReplayOrigin, TokenUsage, ToolCallState, ToolCallValidation, ToolResultOutcome,
+    AttemptInterruption, BoundToolCall, MessageRole, MessageSemantic, NativeMessage, Protocol,
+    ReplayOrigin, TokenUsage, ToolCallState, ToolCallValidation, ToolResultOutcome,
     UnboundToolCall,
 };
 use lattice_conversation::{
@@ -97,27 +96,6 @@ pub enum ProjectionError {
         provider: Protocol,
         /// The typed interruption recording which limit was crossed.
         interruption: AttemptInterruption,
-    },
-    /// A ToolResult closure names an invocation the assistant message never
-    /// bound.
-    #[error("{provider} tool result closes unknown invocation {invocation_id}")]
-    UnmatchedToolResult {
-        /// The provider being projected.
-        provider: Protocol,
-        /// The invocation the closure claimed to close.
-        invocation_id: InvocationId,
-    },
-    /// The target provider's wire cannot encode a recorded closure without a
-    /// provider call ID, and the closing ToolCall legitimately carries none
-    /// (ADR 0005 §1: provider IDs are optional facts, never synthesized).
-    #[error(
-        "{provider} wire cannot encode the tool result for {invocation_id} without a provider call id"
-    )]
-    ToolResultWithoutProviderCallId {
-        /// The provider being projected.
-        provider: Protocol,
-        /// The invocation whose closure cannot be encoded.
-        invocation_id: InvocationId,
     },
     /// The usage block on an otherwise accepted body is malformed.
     #[error("malformed {provider} usage block: {detail}")]
@@ -238,7 +216,7 @@ fn native_to_wire_with_replay<S: ToolCallState>(
     }
 }
 
-/// 按目标来源投影消息副本；完整来源相同保留所有材料，协议相同保留 call ID。
+/// 按目标来源投影消息副本；完整来源相同保留所有材料，call ID 不随来源变化。
 /// 来源 reasoning 与逐片段回放状态只在完整来源相同时保留。
 /// 切回原来源时使用历史中的原消息，投影不修改它。
 pub fn project_cross_provider<S: ToolCallState>(
@@ -249,10 +227,6 @@ pub fn project_cross_provider<S: ToolCallState>(
         .provider_origin
         .as_ref()
         .is_some_and(|source| source.same_provider(target));
-    let same_protocol = message
-        .provider_origin
-        .as_ref()
-        .is_some_and(|source| source.same_protocol(target));
     let mut projected = message.clone();
     projected.provider_origin = Some(target.clone());
     if !same_provider {
@@ -261,13 +235,6 @@ pub fn project_cross_provider<S: ToolCallState>(
             .retain(|part| !matches!(part.semantic, MessageSemantic::Reasoning { .. }));
         for part in &mut projected.parts {
             part.replay_state = None;
-        }
-    }
-    if !same_protocol {
-        for part in &mut projected.parts {
-            if let MessageSemantic::ToolCall { call } = &mut part.semantic {
-                call.clear_provider_call_id();
-            }
         }
     }
     projected
@@ -284,7 +251,7 @@ pub struct RequestMessages {
 
 /// 请求编码入口，固定不回放 Chat Completions reasoning（ReasoningReplay::None）。
 /// 按 features 选择回放方式时用 request_messages_with_replay；Chat Completions 请求构造走那条入口。
-/// 两条入口都按完整来源决定回放材料，按协议决定 call ID，不补造目标 provider 身份。
+/// 两条入口都按完整来源决定回放材料，原样保留 call ID，不补造目标 provider 身份。
 pub fn request_messages_to_wire(
     origin: &ReplayOrigin,
     history: &[ConversationItem],
@@ -391,7 +358,6 @@ fn user_to_wire(origin: Protocol, text: &str) -> Value {
 
 /// 已核验配对后的 provider 输入，仅存在于本次投影。
 struct ToolResultClosure {
-    invocation_id: InvocationId,
     provider_call_id: Option<String>,
     name: String,
     outcome: ToolResultOutcome,
@@ -473,7 +439,6 @@ pub fn tool_results_to_wire(
             _ => {}
         }
         closures.push(ToolResultClosure {
-            invocation_id: result.invocation_id,
             provider_call_id: call.provider_call_id.clone(),
             name: result.name.clone(),
             outcome: result.payload.outcome(),

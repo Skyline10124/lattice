@@ -3,7 +3,7 @@
 
 //! Chat Completions 的助手消息编解码。
 //!
-//! 读取 content 字符串、content 分块与 reasoning_content，保留真实的可选 call ID。
+//! 读取 content 字符串、content 分块与 reasoning_content，要求响应中的真实 call ID。
 //! 请求按 reasoning_replay 省略 reasoning、写入 reasoning_content，或放在 content 的
 //! thinking 块中。该协议不接收逐片段签名状态，携带这类状态的同来源消息编码时拒绝。
 //!
@@ -106,11 +106,10 @@ pub fn wire_to_native(
                 let arguments = function["arguments"]
                     .as_str()
                     .ok_or_else(|| malformed("tool_calls[].function missing arguments"))?;
-                let provider_call_id = match call.get("id") {
-                    Some(Value::String(id)) => Some(StringPatch::Set(id.clone())),
-                    Some(Value::Null) | None => None,
-                    _ => return Err(malformed("tool_calls[].id is not a string")),
-                };
+                let id = call["id"]
+                    .as_str()
+                    .ok_or_else(|| malformed("tool_calls[].id is missing or not a string"))?;
+                let provider_call_id = Some(StringPatch::Set(id.into()));
                 reply.push(PartDelta::Begin {
                     index,
                     kind: PartKind::ToolCall,
@@ -204,25 +203,17 @@ pub fn native_to_wire<S: ToolCallState>(
     Ok(wire)
 }
 
-/// One `role: "tool"` request message per closure. The wire correlates a
-/// result to its call only through `tool_call_id`, so a closing call with no
-/// provider ID cannot be encoded — a typed error, never a synthesized ID.
+/// 每个结果写成一条 tool 消息；旧历史缺少 ID 时省略 tool_call_id。
 pub(crate) fn tool_result_messages(
     closures: &[ToolResultClosure],
 ) -> Result<Vec<Value>, ProjectionError> {
     let mut messages = Vec::with_capacity(closures.len());
     for closure in closures {
-        let Some(tool_call_id) = closure.provider_call_id.as_deref() else {
-            return Err(ProjectionError::ToolResultWithoutProviderCallId {
-                provider: Protocol::ChatCompletions,
-                invocation_id: closure.invocation_id,
-            });
-        };
-        messages.push(json!({
-            "role": "tool",
-            "tool_call_id": tool_call_id,
-            "content": closure.content,
-        }));
+        let mut message = json!({"role":"tool", "content":closure.content});
+        if let Some(id) = &closure.provider_call_id {
+            message["tool_call_id"] = id.clone().into();
+        }
+        messages.push(message);
     }
     Ok(messages)
 }

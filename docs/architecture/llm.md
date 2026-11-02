@@ -92,7 +92,11 @@ provider 配置、凭据与模型元数据是用户级的全局状态，由后�
 
 ### 回放来源
 
-每次尝试记录来源 `(protocol, provider id)`。reasoning、签名、加密 reasoning 与逐片段回放状态只在协议和 provider `id` 都相同时回放；任一不同时去除这些材料。来源不含 endpoint：同一 provider `id` 在 `providers.toml` 中改了 `base_url` 之后仍回放此前的签名，新 endpoint 可能拒绝这些签名；要换 endpoint 时使用新的 provider `id`。provider call ID 按协议判定：协议相同时保留，包括 provider `id` 不同的情况；协议不同时去除，目标协议无法在缺少 call ID 时编码工具结果的，返回投影错误。跨来源投影保留中立语义，切回原来源时使用树中保存的原消息。Responses 仅在模型元数据明确 `reasoning = true` 时带 `include: ["reasoning.encrypted_content"]`，使 `store: false` 时取得可回放的加密 reasoning；`false` 或没有该标志时不发送，是否选择档位及档位为 `off` 都不改变 include 的条件。Responses 回放时省略没有最终 `encrypted_content` 的 reasoning item，以及末尾没有后续 item 的 reasoning item；其文字仍以 Reasoning 语义保存。
+每次尝试记录来源 `(protocol, provider id)`。reasoning、签名、加密 reasoning 与逐片段回放状态只在协议和 provider `id` 都相同时回放；任一不同时去除这些材料。来源不含 endpoint：同一 provider `id` 在 `providers.toml` 中改了 `base_url` 之后仍回放此前的签名，新 endpoint 可能拒绝这些签名；要换 endpoint 时使用新的 provider `id`。
+
+provider call ID 在工具调用与工具结果两侧原样保留，切换协议或 provider 都不去除。旧历史缺少 call ID 时省略对应字段，不合成 ID，也不在本地判断目标协议是否接受，由目标 API 返回错误。所有协议的服务端工具调用响应都必须带 call ID；Chat Completions 流式调用以首次出现的增量为准，后续增量可省略 ID。缺少 ID 时当轮以不可重试的 malformed 错误停止，不保存回复、不执行工具。跨来源投影保留中立语义，切回原来源时使用树中保存的原消息。
+
+Responses 仅在模型元数据明确 `reasoning = true` 时带 `include: ["reasoning.encrypted_content"]`，使 `store: false` 时取得可回放的加密 reasoning；`false` 或没有该标志时不发送，是否选择档位及档位为 `off` 都不改变 include 的条件。Responses 回放时省略没有最终 `encrypted_content` 的 reasoning item，以及末尾没有后续 item 的 reasoning item；其文字仍以 Reasoning 语义保存。
 
 Anthropic Messages 的 `redacted_thinking` 以空 Reasoning 片段及带 `redacted:` 标记的回放状态保存 `data`，只有 Messages codec 解释该标记；普通 thinking（包括空文本）的 signature 保持原编码。同完整来源时恢复原块、data 与顺序，跨来源时移除整个 Reasoning 片段，不产生空 Text。标记计入单片段 64 KiB 与尝试总量限制，data 不进入正文或 reasoning 显示增量。
 

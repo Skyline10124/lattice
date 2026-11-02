@@ -9,16 +9,14 @@
 //! {"candidates": [{"content": {"role": "model", "parts": [
 //!     {"text": "…", "thought": true, "thoughtSignature": "…"},
 //!     {"text": "…", "thoughtSignature": "…"},
-//!     {"functionCall": {"name": "…", "args": {…}, "id": "…"?},
+//!     {"functionCall": {"name": "…", "args": {…}, "id": "…"},
 //!      "thoughtSignature": "…"}
 //! ]}}]}
 //! ```
 //!
 //! `thoughtSignature` may sit on any part — including an otherwise-empty
 //! text part — and is preserved verbatim in place as part-local opaque
-//! replay state. A real `functionCall.id` is preserved when present; when
-//! absent the call stays `None` and no `tc_*`-style synthetic ID is ever
-//! generated.
+//! replay state. 响应的 `functionCall.id` 必须存在；历史缺少 ID 时省略字段，不合成 ID。
 //!
 //! Assembly is metered against the ADR 0005 §10 protocol limits; crossing one
 //! fails the whole body closed rather than returning a partial message.
@@ -81,11 +79,10 @@ pub fn wire_to_native(
             let arguments = function
                 .get("args")
                 .map_or_else(|| "{}".into(), ToString::to_string);
-            let provider_call_id = match function.get("id") {
-                Some(Value::String(id)) => Some(StringPatch::Set(id.clone())),
-                Some(Value::Null) | None => None,
-                _ => return Err(malformed("functionCall id is not a string")),
-            };
+            let id = function["id"]
+                .as_str()
+                .ok_or_else(|| malformed("functionCall.id is missing or not a string"))?;
+            let provider_call_id = Some(StringPatch::Set(id.into()));
             reply.push(PartDelta::ToolMetadata {
                 index,
                 name: Some(StringPatch::Set(name.into())),
@@ -167,12 +164,7 @@ pub fn native_to_wire<S: ToolCallState>(
     }))
 }
 
-/// One user turn whose parts carry every `functionResponse`, in closure
-/// order. The Gemini result shape correlates by Tool name and carries no
-/// provider call ID, so closures whose calls have no provider ID encode
-/// normally. `Failed` closures use the conventional
-/// `response: {"error": …}` spelling; other outcomes pass an object content
-/// through and wrap everything else as `{"result": …}`.
+/// 按调用顺序写 functionResponse，保留真实 ID；旧历史缺少 ID 时省略该字段。
 pub(crate) fn tool_result_messages(
     closures: &[ToolResultClosure],
 ) -> Result<Vec<Value>, ProjectionError> {
@@ -188,12 +180,11 @@ pub(crate) fn tool_result_messages(
                 _ => json!({ "result": content }),
             },
         };
-        parts.push(json!({
-            "functionResponse": {
-                "name": closure.name,
-                "response": response,
-            }
-        }));
+        let mut function = json!({"name":closure.name,"response":response});
+        if let Some(id) = &closure.provider_call_id {
+            function["id"] = id.clone().into();
+        }
+        parts.push(json!({"functionResponse":function}));
     }
     Ok(vec![json!({
         "role": "user",

@@ -236,7 +236,7 @@ fn same_provider_replay_is_exact() {
             gemini_content,
         ),
         (
-            "gemini_function_call_no_id.json",
+            "gemini_function_call.json",
             Protocol::GenerateContent,
             gemini_content,
         ),
@@ -254,22 +254,17 @@ fn same_provider_replay_is_exact() {
 }
 
 #[test]
-fn openai_missing_provider_id_is_none_not_synthesized() {
-    let fixture = fixture("openai_assistant_missing_id.json");
-    let native =
-        wire_to_native(&replay_origin(Protocol::ChatCompletions), &fixture).expect("projection");
-    let calls = tool_call_parts(&native);
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].1.provider_call_id, None);
-
-    let replayed =
-        native_to_wire(&replay_origin(Protocol::ChatCompletions), &native).expect("replay");
-    let serialized = serde_json::to_string(&replayed).expect("serialize");
-    assert!(
-        !serialized.contains("tc_"),
-        "no synthetic tc_* ids: {serialized}"
+fn openai_missing_provider_id_is_rejected() {
+    assert_eq!(
+        wire_to_native(
+            &replay_origin(Protocol::ChatCompletions),
+            &fixture("openai_assistant_missing_id.json"),
+        ),
+        Err(ProjectionError::MalformedWire {
+            provider: Protocol::ChatCompletions,
+            detail: "tool_calls[].id is missing or not a string".into(),
+        })
     );
-    assert_eq!(replayed, openai_message(&fixture));
 }
 
 // ─── Anthropic ────────────────────────────────────────────────────────────
@@ -305,21 +300,23 @@ fn anthropic_thinking_without_signature_cannot_replay() {
 // ─── Gemini ───────────────────────────────────────────────────────────────
 
 #[test]
-fn gemini_function_call_without_id_is_none_not_synthesized() {
-    let fixture = fixture("gemini_function_call_no_id.json");
-    let native =
-        wire_to_native(&replay_origin(Protocol::GenerateContent), &fixture).expect("projection");
-    let calls = tool_call_parts(&native);
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].1.provider_call_id, None);
-    let serialized = serde_json::to_string(&native).expect("serialize");
-    assert!(!serialized.contains("tc_"), "no synthetic tc_* ids");
+fn gemini_function_call_without_id_is_rejected() {
+    assert_eq!(
+        wire_to_native(
+            &replay_origin(Protocol::GenerateContent),
+            &fixture("gemini_function_call_no_id.json")
+        ),
+        Err(ProjectionError::MalformedWire {
+            provider: Protocol::GenerateContent,
+            detail: "functionCall.id is missing or not a string".into()
+        })
+    );
 
     let parameterless = serde_json::json!({
         "candidates": [{
             "content": {
                 "role": "model",
-                "parts": [{"functionCall": {"name": "ping"}}],
+                "parts": [{"functionCall": {"name": "ping", "id":"ping-id"}}],
             }
         }],
     });
@@ -409,7 +406,6 @@ fn replay_origin_matrix_separates_opaque_state_from_call_ids() {
                     provider_id: provider.into(),
                 };
                 let same_provider = target_protocol == protocol && provider == "test";
-                let same_protocol = target_protocol == protocol;
                 let projected = project_cross_provider(&source, &target);
                 if fixture_name == "anthropic_redacted_thinking_tool_use.json" && !same_provider {
                     assert_eq!(
@@ -424,16 +420,14 @@ fn replay_origin_matrix_separates_opaque_state_from_call_ids() {
                             },
                             MessageSemantic::ToolCall {
                                 call: UnboundToolCall {
-                                    provider_call_id: same_protocol
-                                        .then(|| "toolu_redacted_1".into()),
+                                    provider_call_id: Some("toolu_redacted_1".into()),
                                     name: "get_weather".into(),
                                     arguments: serde_json::json!({"location":"Tokyo"}),
                                 }
                             },
                             MessageSemantic::ToolCall {
                                 call: UnboundToolCall {
-                                    provider_call_id: same_protocol
-                                        .then(|| "toolu_redacted_2".into()),
+                                    provider_call_id: Some("toolu_redacted_2".into()),
                                     name: "get_time".into(),
                                     arguments: serde_json::json!({"timezone":"Asia/Tokyo"}),
                                 }
@@ -458,14 +452,7 @@ fn replay_origin_matrix_separates_opaque_state_from_call_ids() {
                     .tool_calls()
                     .map(|(_, call)| call.provider_call_id.as_deref())
                     .collect();
-                assert_eq!(
-                    calls,
-                    if same_protocol {
-                        source_ids.clone()
-                    } else {
-                        vec![None; source_ids.len()]
-                    }
-                );
+                assert_eq!(calls, source_ids, "{original_origin:?} -> {target:?}");
                 let projected_wire = native_to_wire(&target, &projected).unwrap();
                 if same_provider {
                     assert_eq!(projected_wire, original_wire);
@@ -483,120 +470,99 @@ fn replay_origin_matrix_separates_opaque_state_from_call_ids() {
                 }
                 let encoded =
                     lattice_llm::protocol::projection::request_messages_to_wire(&target, &history);
-                if !same_protocol && target_protocol != Protocol::GenerateContent {
-                    assert!(matches!(
-                        encoded,
-                        Err(ProjectionError::ToolResultWithoutProviderCallId { .. })
-                    ));
+                let encoded = encoded.unwrap();
+                let messages = &encoded.messages;
+                let mut expected_assistant = projected_wire.clone();
+                if target_protocol == Protocol::ChatCompletions {
+                    expected_assistant
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("reasoning_content");
+                }
+                if matches!(
+                    target_protocol,
+                    Protocol::Responses | Protocol::Interactions
+                ) {
+                    let items = expected_assistant.as_array().unwrap();
+                    assert_eq!(&messages[..items.len()], items);
                 } else {
-                    let encoded = encoded.unwrap();
-                    let messages = &encoded.messages;
-                    let mut expected_assistant = projected_wire.clone();
-                    if target_protocol == Protocol::ChatCompletions {
-                        expected_assistant
-                            .as_object_mut()
+                    assert_eq!(messages[0], expected_assistant);
+                }
+                if !same_provider {
+                    let serialized = serde_json::to_string(messages).unwrap();
+                    for material in &opaque {
+                        assert!(!serialized.contains(material));
+                    }
+                }
+                match target_protocol {
+                    Protocol::ChatCompletions => {
+                        for (index, id) in source_ids.iter().enumerate() {
+                            assert_eq!(messages[0]["tool_calls"][index]["id"], id.unwrap());
+                            assert_eq!(messages[index + 1]["tool_call_id"], id.unwrap());
+                        }
+                    }
+                    Protocol::Messages => {
+                        let calls: Vec<_> = messages[0]["content"]
+                            .as_array()
                             .unwrap()
-                            .remove("reasoning_content");
-                    }
-                    if matches!(
-                        target_protocol,
-                        Protocol::Responses | Protocol::Interactions
-                    ) {
-                        let items = expected_assistant.as_array().unwrap();
-                        assert_eq!(&messages[..items.len()], items);
-                    } else {
-                        assert_eq!(messages[0], expected_assistant);
-                    }
-                    if !same_provider {
-                        let serialized = serde_json::to_string(messages).unwrap();
-                        for material in &opaque {
-                            assert!(!serialized.contains(material));
+                            .iter()
+                            .filter(|part| part["type"] == "tool_use")
+                            .collect();
+                        for (index, id) in source_ids.iter().enumerate() {
+                            assert_eq!(calls[index]["id"], id.unwrap());
+                            assert_eq!(messages[1]["content"][index]["tool_use_id"], id.unwrap());
                         }
                     }
-                    match target_protocol {
-                        Protocol::ChatCompletions => {
-                            for (index, id) in source_ids.iter().enumerate() {
-                                assert_eq!(messages[0]["tool_calls"][index]["id"], id.unwrap());
-                                assert_eq!(messages[index + 1]["tool_call_id"], id.unwrap());
-                            }
+                    Protocol::GenerateContent => {
+                        let calls: Vec<_> = messages[0]["parts"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .filter_map(|part| part.get("functionCall"))
+                            .collect();
+                        for (index, call) in calls.iter().enumerate() {
+                            assert_eq!(call.get("id").and_then(Value::as_str), source_ids[index]);
+                            assert_eq!(
+                                messages[1]["parts"][index]["functionResponse"]["name"],
+                                call["name"]
+                            );
+                            assert_eq!(
+                                messages[1]["parts"][index]["functionResponse"]["id"],
+                                source_ids[index].unwrap()
+                            );
                         }
-                        Protocol::Messages => {
-                            let calls: Vec<_> = messages[0]["content"]
-                                .as_array()
-                                .unwrap()
-                                .iter()
-                                .filter(|part| part["type"] == "tool_use")
-                                .collect();
-                            for (index, id) in source_ids.iter().enumerate() {
-                                assert_eq!(calls[index]["id"], id.unwrap());
-                                assert_eq!(
-                                    messages[1]["content"][index]["tool_use_id"],
-                                    id.unwrap()
-                                );
-                            }
+                    }
+                    Protocol::Responses => {
+                        let items = projected_wire.as_array().unwrap();
+                        let calls: Vec<_> = items
+                            .iter()
+                            .filter(|item| item["type"] == "function_call")
+                            .collect();
+                        for (index, call) in calls.iter().enumerate() {
+                            assert_eq!(call["call_id"], source_ids[index].unwrap());
+                            assert_eq!(
+                                messages[items.len() + index]["call_id"],
+                                source_ids[index].unwrap()
+                            );
+                            assert_eq!(
+                                messages[items.len() + index]["type"],
+                                "function_call_output"
+                            );
                         }
-                        Protocol::GenerateContent => {
-                            let calls: Vec<_> = messages[0]["parts"]
-                                .as_array()
-                                .unwrap()
-                                .iter()
-                                .filter_map(|part| part.get("functionCall"))
-                                .collect();
-                            for (index, call) in calls.iter().enumerate() {
-                                assert_eq!(
-                                    call.get("id").and_then(Value::as_str),
-                                    if same_protocol {
-                                        source_ids[index]
-                                    } else {
-                                        None
-                                    }
-                                );
-                                assert_eq!(
-                                    messages[1]["parts"][index]["functionResponse"]["name"],
-                                    call["name"]
-                                );
-                                assert!(
-                                    messages[1]["parts"][index]["functionResponse"]
-                                        .get("id")
-                                        .is_none()
-                                );
-                            }
-                        }
-                        Protocol::Responses => {
-                            let items = projected_wire.as_array().unwrap();
-                            let calls: Vec<_> = items
-                                .iter()
-                                .filter(|item| item["type"] == "function_call")
-                                .collect();
-                            for (index, call) in calls.iter().enumerate() {
-                                assert_eq!(call["call_id"], source_ids[index].unwrap());
-                                assert_eq!(
-                                    messages[items.len() + index]["call_id"],
-                                    source_ids[index].unwrap()
-                                );
-                                assert_eq!(
-                                    messages[items.len() + index]["type"],
-                                    "function_call_output"
-                                );
-                            }
-                        }
-                        Protocol::Interactions => {
-                            let items = projected_wire.as_array().unwrap();
-                            let calls: Vec<_> = items
-                                .iter()
-                                .filter(|item| item["type"] == "function_call")
-                                .collect();
-                            for (index, call) in calls.iter().enumerate() {
-                                assert_eq!(call["id"], source_ids[index].unwrap());
-                                assert_eq!(
-                                    messages[items.len() + index]["call_id"],
-                                    source_ids[index].unwrap()
-                                );
-                                assert_eq!(
-                                    messages[items.len() + index]["type"],
-                                    "function_result"
-                                );
-                            }
+                    }
+                    Protocol::Interactions => {
+                        let items = projected_wire.as_array().unwrap();
+                        let calls: Vec<_> = items
+                            .iter()
+                            .filter(|item| item["type"] == "function_call")
+                            .collect();
+                        for (index, call) in calls.iter().enumerate() {
+                            assert_eq!(call["id"], source_ids[index].unwrap());
+                            assert_eq!(
+                                messages[items.len() + index]["call_id"],
+                                source_ids[index].unwrap()
+                            );
+                            assert_eq!(messages[items.len() + index]["type"], "function_result");
                         }
                     }
                 }
@@ -616,6 +582,137 @@ fn replay_origin_matrix_separates_opaque_state_from_call_ids() {
                 );
             }
         }
+    }
+
+    // 内置 ID 保持不变时仍按实际协议投影，旧工具历史原样保留 call ID。
+    for (id, old, new, fixture_name) in [
+        (
+            "openai",
+            Protocol::ChatCompletions,
+            Protocol::Responses,
+            "openai_assistant_tool_calls.json",
+        ),
+        (
+            "xai",
+            Protocol::ChatCompletions,
+            Protocol::Responses,
+            "openai_assistant_tool_calls.json",
+        ),
+        (
+            "google",
+            Protocol::GenerateContent,
+            Protocol::Interactions,
+            "gemini_thought_signature.json",
+        ),
+    ] {
+        let origin = ReplayOrigin {
+            protocol: old,
+            provider_id: id.into(),
+        };
+        let target = ReplayOrigin {
+            protocol: new,
+            provider_id: id.into(),
+        };
+        let mut wire = fixture(fixture_name);
+        if old == Protocol::GenerateContent {
+            wire["candidates"][0]["content"]["parts"][1]["text"] =
+                serde_json::json!("Let me check that for you.");
+        }
+        let source = wire_to_native(&origin, &wire).unwrap();
+        let before = source.clone();
+        let assistant = bind_message(&source);
+        let results = assistant
+            .tool_calls()
+            .map(|(_, call)| {
+                success(
+                    call.invocation_id,
+                    &call.name,
+                    serde_json::json!({"ok":true}),
+                )
+            })
+            .collect();
+        let history = [ConversationItem::Step(StepContent { assistant, results })];
+        let stored = history.clone();
+        let original =
+            lattice_llm::protocol::projection::request_messages_to_wire(&origin, &history).unwrap();
+        let projected = project_cross_provider(&source, &target);
+        assert!(
+            projected
+                .parts
+                .iter()
+                .all(|part| part.replay_state.is_none()
+                    && !matches!(part.semantic, MessageSemantic::Reasoning { .. }))
+        );
+        let ids: Vec<_> = source
+            .tool_calls()
+            .map(|(_, call)| call.provider_call_id.as_deref().unwrap())
+            .collect();
+        assert_eq!(
+            projected
+                .tool_calls()
+                .map(|(_, call)| call.provider_call_id.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ids
+        );
+        let encoded =
+            lattice_llm::protocol::projection::request_messages_to_wire(&target, &history).unwrap();
+        let calls: Vec<_> = encoded
+            .messages
+            .iter()
+            .filter(|item| item["type"] == "function_call")
+            .collect();
+        let results: Vec<_> = encoded
+            .messages
+            .iter()
+            .filter(|item| {
+                item["type"]
+                    == if new == Protocol::Responses {
+                        "function_call_output"
+                    } else {
+                        "function_result"
+                    }
+            })
+            .collect();
+        for (index, id) in ids.iter().enumerate() {
+            assert_eq!(
+                calls[index][if new == Protocol::Responses {
+                    "call_id"
+                } else {
+                    "id"
+                }],
+                *id
+            );
+            assert_eq!(results[index]["call_id"], *id);
+        }
+
+        let mut text = source.clone();
+        text.parts
+            .retain(|part| !matches!(part.semantic, MessageSemantic::ToolCall { .. }));
+        let text_before = text.clone();
+        let text_history = [ConversationItem::Step(StepContent {
+            assistant: text.clone().bind_zero_tool().unwrap(),
+            results: vec![],
+        })];
+        let encoded =
+            lattice_llm::protocol::projection::request_messages_to_wire(&target, &text_history)
+                .unwrap();
+        let expected = if new == Protocol::Responses {
+            serde_json::json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"Let me check that for you.","annotations":[]}]})
+        } else {
+            serde_json::json!({"type":"model_output","content":[{"type":"text","text":"Let me check that for you."}]})
+        };
+        assert_eq!(
+            encoded.messages,
+            vec![expected],
+            "{id}: 文本保留且旧推理和签名不回放"
+        );
+        assert_eq!(text, text_before);
+        assert_eq!(source, before);
+        assert_eq!(history, stored);
+        assert_eq!(
+            lattice_llm::protocol::projection::request_messages_to_wire(&origin, &history).unwrap(),
+            original
+        );
     }
 }
 
@@ -638,9 +735,16 @@ fn cross_provider_projection_never_leaks_source_state() {
     for part in &projected.parts {
         assert_eq!(part.replay_state, None);
     }
-    for (_, call) in projected.tool_calls() {
-        assert_eq!(call.provider_call_id, None);
-    }
+    assert_eq!(
+        projected
+            .tool_calls()
+            .map(|(_, call)| &call.provider_call_id)
+            .collect::<Vec<_>>(),
+        source
+            .tool_calls()
+            .map(|(_, call)| &call.provider_call_id)
+            .collect::<Vec<_>>()
+    );
     // Reasoning does not cross providers (ADR 0005 §7), so the projection
     // carries no Reasoning part and its semantic fields necessarily differ
     // from a source that had one.
@@ -656,16 +760,11 @@ fn cross_provider_projection_never_leaks_source_state() {
 
     // No source opaque byte survives in any serialization of the projection.
     let serialized = serde_json::to_string(&projected).expect("serialize");
-    for leaked in [
-        "ErUBCkYIAxgCIkD3c2FmZGVmNTQ2Ny0xMjM0LWFiY2QtZXhhbXBsZXNpZ25hdHVyZQ==",
-        "toolu_01AbCdEfGh",
-        "toolu_02BcDeFgHi",
-    ] {
-        assert!(
-            !serialized.contains(leaked),
-            "projection leaks source state {leaked:?}"
-        );
-    }
+    let leaked = "ErUBCkYIAxgCIkD3c2FmZGVmNTQ2Ny0xMjM0LWFiY2QtZXhhbXBsZXNpZ25hdHVyZQ==";
+    assert!(
+        !serialized.contains(leaked),
+        "projection leaks source state {leaked:?}"
+    );
 
     // B → A recovery: the retained original message still replays exactly.
     let replayed = native_to_wire(&replay_origin(Protocol::Messages), &source).expect("replay");
@@ -781,7 +880,7 @@ fn cross_provider_wire_never_carries_source_reasoning() {
 fn same_provider_replay_requires_matching_origin() {
     let native = wire_to_native(
         &replay_origin(Protocol::GenerateContent),
-        &fixture("gemini_function_call_no_id.json"),
+        &fixture("gemini_function_call.json"),
     )
     .expect("projection");
     let result = native_to_wire(&replay_origin(Protocol::Messages), &native);
@@ -795,6 +894,15 @@ fn same_provider_replay_requires_matching_origin() {
 
 #[test]
 fn malformed_wire_is_rejected() {
+    let mut missing = fixture("anthropic_thinking_tool_use.json");
+    missing["content"][2].as_object_mut().unwrap().remove("id");
+    assert_eq!(
+        wire_to_native(&replay_origin(Protocol::Messages), &missing),
+        Err(ProjectionError::MalformedWire {
+            provider: Protocol::Messages,
+            detail: "tool_use.id is missing or not a string".into()
+        })
+    );
     let garbage = serde_json::json!({"unexpected": true});
     assert!(matches!(
         wire_to_native(&replay_origin(Protocol::Messages), &garbage),
@@ -1068,7 +1176,7 @@ fn tool_argument_limits_apply_to_every_provider() {
             ]}),
             Protocol::GenerateContent => {
                 serde_json::json!({"candidates": [{"content": {"role": "model", "parts": [
-                    {"functionCall": {"name": "t", "args": {"a": arguments}}}
+                    {"functionCall": {"id":"limit-id", "name": "t", "args": {"a": arguments}}}
                 ]}}]})
             }
             Protocol::Interactions => {
@@ -1168,7 +1276,7 @@ fn bound_closure_vocabulary_replays_identically_to_unbound() {
 }
 
 #[test]
-fn cross_provider_projection_drops_bound_provider_ids_and_replay_state() {
+fn cross_provider_projection_preserves_bound_provider_ids_and_drops_replay_state() {
     let native = wire_to_native(
         &replay_origin(Protocol::Messages),
         &anthropic_message(&fixture("anthropic_thinking_tool_use.json")),
@@ -1182,9 +1290,6 @@ fn cross_provider_projection_drops_bound_provider_ids_and_replay_state() {
     );
     for part in &projected.parts {
         assert!(part.replay_state.is_none(), "replay state must not cross");
-        if let MessageSemantic::ToolCall { call } = &part.semantic {
-            assert_eq!(call.provider_call_id, None, "provider id must not cross");
-        }
         assert!(
             !matches!(part.semantic, MessageSemantic::Reasoning { .. }),
             "reasoning must not cross"
@@ -1193,6 +1298,14 @@ fn cross_provider_projection_drops_bound_provider_ids_and_replay_state() {
     // The bound identity survives: this is still a BoundToolCall message.
     let tool_calls: Vec<_> = projected.tool_calls().collect();
     assert_eq!(tool_calls.len(), 2);
+    assert_eq!(
+        tool_calls[0].1.provider_call_id.as_deref(),
+        Some("toolu_01AbCdEfGh")
+    );
+    assert_eq!(
+        tool_calls[1].1.provider_call_id.as_deref(),
+        Some("toolu_02BcDeFgHi")
+    );
     assert_eq!(tool_calls[0].1.invocation_id, invocation(0));
 }
 
@@ -1321,7 +1434,7 @@ fn structured_result_outcomes_and_large_success() {
         let assistant = bind_message(
             &wire_to_native(
                 &replay_origin(Protocol::GenerateContent),
-                &fixture("gemini_function_call_no_id.json"),
+                &fixture("gemini_function_call.json"),
             )
             .unwrap(),
         );
@@ -1410,7 +1523,7 @@ fn structured_result_fixtures_and_missing_ids() {
         ),
         (
             Protocol::GenerateContent,
-            "gemini_function_call_no_id.json",
+            "gemini_function_call.json",
             "gemini_tool_result_request.json",
         ),
     ] {
@@ -1440,18 +1553,6 @@ fn structured_result_fixtures_and_missing_ids() {
             },
             fixture(expected)
         );
-        if origin == Protocol::GenerateContent {
-            for target in [
-                Protocol::ChatCompletions,
-                Protocol::Messages,
-                Protocol::Interactions,
-            ] {
-                assert!(matches!(
-                    tool_results_to_wire(target, &bound, &results),
-                    Err(ProjectionError::ToolResultWithoutProviderCallId { .. })
-                ));
-            }
-        }
         let step = StepContent {
             assistant: bound,
             results,
@@ -1462,12 +1563,53 @@ fn structured_result_fixtures_and_missing_ids() {
             &[ConversationItem::Step(step.clone())],
         )
         .unwrap();
-        assert!(
-            !serde_json::to_string(&projected.messages)
-                .unwrap()
-                .contains("toolu_")
-        );
+        let serialized = serde_json::to_string(&projected.messages).unwrap();
+        for (_, call) in step.assistant.tool_calls() {
+            assert!(serialized.contains(call.provider_call_id.as_deref().unwrap()));
+        }
         assert_eq!(step, saved);
+        if origin == Protocol::GenerateContent {
+            let mut old = step.clone();
+            old.assistant.provider_origin = None;
+            for part in &mut old.assistant.parts {
+                if let MessageSemantic::ToolCall { call } = &mut part.semantic {
+                    call.provider_call_id = None;
+                }
+            }
+            let history = [ConversationItem::Step(old)];
+            for (target, call_key, result_key) in [
+                (Protocol::ChatCompletions, "id", "tool_call_id"),
+                (Protocol::Messages, "id", "tool_use_id"),
+                (Protocol::GenerateContent, "id", "id"),
+                (Protocol::Responses, "call_id", "call_id"),
+                (Protocol::Interactions, "id", "call_id"),
+            ] {
+                let messages = lattice_llm::protocol::projection::request_messages_to_wire(
+                    &replay_origin(target),
+                    &history,
+                )
+                .unwrap()
+                .messages;
+                let (call, result) = match target {
+                    Protocol::ChatCompletions => (&messages[0]["tool_calls"][0], &messages[1]),
+                    Protocol::Messages => (&messages[0]["content"][0], &messages[1]["content"][0]),
+                    Protocol::GenerateContent => (
+                        &messages[0]["parts"][0]["functionCall"],
+                        &messages[1]["parts"][0]["functionResponse"],
+                    ),
+                    Protocol::Responses | Protocol::Interactions => (&messages[0], &messages[1]),
+                };
+                assert!(call.is_object() && result.is_object());
+                assert!(
+                    call.get(call_key).is_none(),
+                    "{target}: old call must omit ID"
+                );
+                assert!(
+                    result.get(result_key).is_none(),
+                    "{target}: old result must omit ID"
+                );
+            }
+        }
     }
 }
 

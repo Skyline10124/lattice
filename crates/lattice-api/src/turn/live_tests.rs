@@ -57,6 +57,41 @@ fn seed(fixture: &TestFixture) -> (lancet_protocol::SessionId, lancet_protocol::
 }
 
 #[tokio::test]
+async fn projection_failures_use_a_generic_non_retryable_diagnostic() {
+    use lattice_llm::protocol::projection::ProjectionError;
+
+    struct FailingProjection(ProjectionError);
+    #[async_trait::async_trait]
+    impl lattice_agent::LlmClient for FailingProjection {
+        async fn stream_chat(
+            &self,
+            _request: lattice_llm::ChatRequest,
+            _control: lattice_llm::StreamControl,
+        ) -> std::result::Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>>
+        {
+            Err(Box::new(lattice_llm::LlmError::Projection(self.0.clone())))
+        }
+    }
+    let error = ProjectionError::InvalidStep {
+        detail: "private-call-detail",
+    };
+    let fixture = setup_fixture(Arc::new(FailingProjection(error)), &[]);
+    let (detail, _) = fixture.run(fixture.request.clone()).await;
+    assert_eq!(detail.summary.outcome, PublicTurnOutcome::Failed);
+    let step = &detail.steps[0];
+    assert_eq!(step.attempts.len(), 1);
+    assert!(step.slots.is_empty());
+    let AttemptEndDetail::Stopped { cause, diagnostic } = &step.attempts[0].end else {
+        panic!("projection failure must stop the attempt");
+    };
+    assert_eq!(*cause, StopCause::ProviderError { retryable: false });
+    assert_eq!(
+        diagnostic.as_deref(),
+        Some("provider request projection failed")
+    );
+}
+
+#[tokio::test]
 async fn injected_model_changes_share_effort_fallback() {
     use lattice_conversation::Effort::{High, Low};
     let llm = Arc::new(
