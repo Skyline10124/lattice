@@ -15,6 +15,7 @@ use lattice_conversation::Effort;
 pub fn build_request_json(
     request: &ChatRequest,
     reasoning: Option<ReasoningPlan>,
+    model_reasoning: Option<bool>,
     origin: &ReplayOrigin,
 ) -> Result<serde_json::Value, ProjectionError> {
     let projected = request_messages_to_wire(origin, &request.messages)?;
@@ -22,8 +23,9 @@ pub fn build_request_json(
         "contents": projected.messages,
     });
 
+    let mut config = serde_json::json!({});
     if let Some(plan) = reasoning {
-        let config = match plan {
+        config = match plan {
             ReasoningPlan::Effort {
                 effort: Effort::Off,
                 ..
@@ -35,6 +37,16 @@ pub fn build_request_json(
             ReasoningPlan::Budget { tokens, .. } => serde_json::json!({"thinkingBudget":tokens}),
             ReasoningPlan::Toggle { enabled: true } => serde_json::json!({"thinkingBudget":-1}),
         };
+    }
+    if model_reasoning != Some(false)
+        && config
+            .get("thinkingBudget")
+            .and_then(serde_json::Value::as_u64)
+            != Some(0)
+    {
+        config["includeThoughts"] = true.into();
+    }
+    if config.as_object().is_some_and(|fields| !fields.is_empty()) {
         body["generationConfig"] = serde_json::json!({"thinkingConfig":config});
     }
 

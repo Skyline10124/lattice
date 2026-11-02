@@ -58,6 +58,14 @@ pub(crate) enum ReasoningSummary {
     Auto,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ThinkingDisplay {
+    #[default]
+    None,
+    Summarized,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ChatCompletionsFeatures {
     pub(crate) effort_param: EffortParam,
@@ -70,6 +78,7 @@ pub(crate) struct ChatCompletionsFeatures {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct MessagesFeatures {
     pub(crate) cache: Cache,
+    pub(crate) thinking_display: ThinkingDisplay,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -136,6 +145,9 @@ impl Features {
                 features.cache_markers = parse(value)?
             }
             (Self::Messages(features), "cache") => features.cache = parse(value)?,
+            (Self::Messages(features), "thinking_display") => {
+                features.thinking_display = parse(value)?
+            }
             (Self::Responses(features), "reasoning_summary") => {
                 features.reasoning_summary = parse(value)?
             }

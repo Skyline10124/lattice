@@ -177,13 +177,16 @@ fn interactions_replays_thoughts_and_two_tool_results_after_backend_restart() {
             );
             assert_eq!(capture.raw["store"], false);
             assert_eq!(capture.raw["stream"], true);
+            assert_eq!(
+                capture.raw["generation_config"],
+                json!({"thinking_summaries":"auto"})
+            );
             assert_eq!(capture.raw["tools"][0]["name"], "observe__workspace");
             assert_eq!(
                 capture.raw["tools"][0]["parameters"],
                 captures[0].raw["tools"][0]["parameters"]
             );
             for key in [
-                "generation_config",
                 "max_output_tokens",
                 "previous_interaction_id",
                 "background",
@@ -237,10 +240,10 @@ fn interactions_replays_thoughts_and_two_tool_results_after_backend_restart() {
 }
 
 #[test]
-fn interactions_usage_before_incomplete_keeps_usage_without_executing_tools() {
+fn interactions_failures_preserve_usage_and_incomplete_saves_reply() {
     use lattice_system_harness::{FAKE_API_KEY, SseScript};
     use serde_json::{Value, json};
-    let spec = ScenarioSpec::direct_local("interactions-usage-before-incomplete");
+    let spec = ScenarioSpec::direct_local("interactions-failed-and-incomplete");
     let world = ScenarioWorld::new(&spec.name).unwrap();
     world.budget(&spec);
     let fixture = interactions_fixture();
@@ -258,10 +261,17 @@ fn interactions_usage_before_incomplete_keeps_usage_without_executing_tools() {
         json!({"event_type":"step.delta","index":1,"delta":{"type":"arguments_delta","arguments":"{\"request\":{\"mode\":\"read_file\",\"path\":\"notes.txt\"}}"}}),
         json!({"event_type":"step.stop","index":1}),
         json!({"event_type":"interaction.status_update","status":"requires_action"}),
-        json!({"event_type":"interaction.completed","interaction":{"status":"incomplete","usage":{"total_output_tokens":2,"total_thought_tokens":3}}}),
+        json!({"event_type":"interaction.completed","interaction":{"status":"failed","errors":[{"code":"invalid_request","message":"fixture-failed"}],"usage":{"total_output_tokens":2,"total_thought_tokens":3}}}),
     ];
-    let (server, gate) = FakeLlmServer::start_segmented(
-        SseScript::NativeEvents {
+    let incomplete = vec![
+        json!({"event_type":"interaction.created","interaction":{"status":"in_progress"}}),
+        json!({"event_type":"step.start","index":0,"step":{"type":"model_output"}}),
+        json!({"event_type":"step.delta","index":0,"delta":{"type":"text","text":"saved incomplete"}}),
+        json!({"event_type":"interaction.completed","interaction":{"status":"incomplete","usage":{"total_input_tokens":9,"total_output_tokens":4}}}),
+    ];
+    let scripts = [values, incomplete]
+        .into_iter()
+        .map(|values| SseScript::NativeEvents {
             events: values
                 .into_iter()
                 .map(|value| {
@@ -271,10 +281,10 @@ fn interactions_usage_before_incomplete_keeps_usage_without_executing_tools() {
                     )
                 })
                 .collect(),
-        },
-        spec.total_timeout().unwrap(),
-    )
-    .unwrap();
+        })
+        .collect();
+    let (server, gate) =
+        FakeLlmServer::start_segmented(sequence(scripts), spec.total_timeout().unwrap()).unwrap();
     world.wire_provider(fixture, &server, FAKE_API_KEY).unwrap();
     let path = world.home().join(".lattice/providers.toml");
     let source = std::fs::read_to_string(&path).unwrap();
@@ -283,7 +293,7 @@ fn interactions_usage_before_incomplete_keeps_usage_without_executing_tools() {
     let send = SessionSendDriver::new(&driver, &world, &spec, "interactions");
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut running = send.spawn("stop incomplete").unwrap();
+        let mut running = send.spawn("stop failed").unwrap();
         for frame in 1..=8 {
             gate.wait_until_stalled(frame, running.remaining_timeout(spec.step_timeout()))
                 .unwrap();
@@ -319,7 +329,7 @@ fn interactions_usage_before_incomplete_keeps_usage_without_executing_tools() {
         gate.release(running.remaining_timeout(spec.step_timeout()))
             .unwrap();
         let sent = send.wait_spawned(running).unwrap();
-        evidence.record_command("Interactions incomplete turn", &sent.command);
+        evidence.record_command("Interactions failed turn", &sent.command);
         assert!(sent.command.is_clean_exit(1));
         assert!(sent.slots().is_empty());
         let detail = send
@@ -330,7 +340,7 @@ fn interactions_usage_before_incomplete_keeps_usage_without_executing_tools() {
                 sent.accepted_turn_id().unwrap(),
             ])
             .unwrap();
-        evidence.record_command("Interactions incomplete detail", &detail);
+        evidence.record_command("Interactions failed detail", &detail);
         let turn: Value = serde_json::from_slice(&detail.stdout).unwrap();
         let attempt = &turn["steps"][0]["attempts"][0];
         assert_eq!(attempt["usage"]["input"], 10);
@@ -346,7 +356,7 @@ fn interactions_usage_before_incomplete_keeps_usage_without_executing_tools() {
             attempt["end"]["diagnostic"]
                 .as_str()
                 .unwrap()
-                .contains("incomplete")
+                .contains("fixture-failed")
         );
         assert_eq!(turn["steps"][0]["attempts"].as_array().unwrap().len(), 1);
         assert!(
@@ -356,6 +366,48 @@ fn interactions_usage_before_incomplete_keeps_usage_without_executing_tools() {
                 .all(|step| step.reply.is_empty() && step.slots.is_empty())
         );
         assert_eq!(server.captured_requests().len(), 1);
+        let saved = send.send("save incomplete reply").unwrap();
+        evidence.record_command("Interactions saved incomplete turn", &saved.command);
+        assert!(saved.has_completed() && saved.command.is_clean_exit(0));
+        assert_eq!(saved.reply_text(), "saved incomplete");
+        assert!(saved.slots().is_empty());
+        let detail = send
+            .run_command(&[
+                "--json",
+                "session",
+                "turn",
+                saved.accepted_turn_id().unwrap(),
+            ])
+            .unwrap();
+        evidence.record_command("Interactions saved incomplete detail", &detail);
+        let turn: Value = serde_json::from_slice(&detail.stdout).unwrap();
+        assert_eq!(turn["steps"].as_array().unwrap().len(), 1);
+        let attempts = turn["steps"][0]["attempts"].as_array().unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0]["end"]["end"], "completed");
+        assert_eq!(attempts[0]["usage"]["input"], 9);
+        assert_eq!(attempts[0]["usage"]["output"], 4);
+        let stopped = send.run_command(&["daemon", "stop"]).unwrap();
+        evidence.record_command("stop after Interactions incomplete", &stopped);
+        assert!(stopped.is_clean_exit(0));
+        world.daemon_departed().unwrap();
+        let reopened = send
+            .run_command(&["--json", "session", "log", send.session_id().unwrap()])
+            .unwrap();
+        evidence.record_command("reopen Interactions incomplete reply", &reopened);
+        assert!(reopened.is_clean_exit(0));
+        let mut watcher =
+            support::Watcher::open(&world, spec.step_timeout(), send.session_id().unwrap());
+        let text: Vec<_> = watcher
+            .initial()
+            .entries
+            .values()
+            .filter_map(|entry| entry.step())
+            .flat_map(|step| &step.reply)
+            .map(|segment| segment.text.as_str())
+            .collect();
+        assert_eq!(text, ["saved incomplete"]);
+        assert_eq!(server.captured_requests().len(), 2);
     }));
     evidence.record_captures(server.captured_requests());
     support::finish_recorded(evidence, result);

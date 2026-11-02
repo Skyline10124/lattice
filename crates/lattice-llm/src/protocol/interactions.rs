@@ -17,6 +17,7 @@ use crate::types::ChatRequest;
 pub(crate) fn build_request_json(
     request: &ChatRequest,
     reasoning: Option<ReasoningPlan>,
+    model_reasoning: Option<bool>,
     origin: &ReplayOrigin,
 ) -> Result<Value, ProjectionError> {
     let projected =
@@ -25,8 +26,15 @@ pub(crate) fn build_request_json(
     if let Some(system) = projected.system {
         body["system_instruction"] = system.into();
     }
+    let mut config = json!({});
     if let Some(ReasoningPlan::Effort { effort, .. }) = reasoning {
-        body["generation_config"] = json!({"thinking_level":effort.as_str()});
+        config["thinking_level"] = effort.as_str().into();
+    }
+    if model_reasoning != Some(false) {
+        config["thinking_summaries"] = "auto".into();
+    }
+    if config.as_object().is_some_and(|fields| !fields.is_empty()) {
+        body["generation_config"] = config;
     }
     if !request.tools.is_empty() {
         body["tools"] = request.tools.iter().map(|tool| json!({
@@ -543,26 +551,42 @@ impl InteractionsSseParser {
         }
         let status = required(interaction.status, "interaction missing status")?;
         match status.as_str() {
-            "completed" | "requires_action" => {
-                if self.steps.values().any(|step| !step.stopped) {
-                    return Err(malformed("completed interaction has open steps"));
-                }
-                let has_calls = self
-                    .steps
-                    .values()
-                    .any(|step| step.anchor.kind == "function_call");
-                if has_calls != (status == "requires_action") {
-                    return Err(malformed(
-                        "interaction status does not match function calls",
-                    ));
+            "completed" | "requires_action" | "incomplete" => {
+                if status == "incomplete" {
+                    let open: Vec<_> = self
+                        .steps
+                        .iter()
+                        .filter_map(|(&index, step)| (!step.stopped).then_some(index))
+                        .collect();
+                    for index in open {
+                        self.stop_step(index, events)?;
+                    }
+                } else {
+                    if self.steps.values().any(|step| !step.stopped) {
+                        return Err(malformed("completed interaction has open steps"));
+                    }
+                    let has_calls = self
+                        .steps
+                        .values()
+                        .any(|step| step.anchor.kind == "function_call");
+                    if has_calls != (status == "requires_action") {
+                        return Err(malformed(
+                            "interaction status does not match function calls",
+                        ));
+                    }
                 }
                 self.stopped = true;
                 events.push(ProtocolEvent::Done {
-                    finish_reason: if has_calls { "tool_calls" } else { "stop" }.into(),
+                    finish_reason: match status.as_str() {
+                        "requires_action" => "tool_calls",
+                        "incomplete" => "incomplete",
+                        _ => "stop",
+                    }
+                    .into(),
                 });
             }
             "failed" => return Err(api_errors(&interaction.errors)),
-            "cancelled" | "incomplete" | "requires_continuation" => {
+            "cancelled" | "requires_continuation" => {
                 return Err(ProtocolEvent::error(
                     format!("Interactions status: {status}"),
                     false,

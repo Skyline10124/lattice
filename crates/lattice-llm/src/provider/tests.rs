@@ -7,7 +7,8 @@ use lattice_conversation::{MAX_PROVIDER_ID_BYTES, validate_provider_id};
 
 use crate::protocol::{
     Cache, ChatCompletionsFeatures, EffortParam, Features, MessagesFeatures, Protocol,
-    ReasoningReplay, ReasoningSummary, ResponsesFeatures, ThinkingBudget, ThinkingToggle,
+    ReasoningReplay, ReasoningSummary, ResponsesFeatures, ThinkingBudget, ThinkingDisplay,
+    ThinkingToggle,
 };
 
 use super::{
@@ -73,6 +74,18 @@ fn builtins_obey_provider_invariants() {
                 "{}",
                 provider.id
             ),
+        }
+        if let Features::Messages(features) = provider.features {
+            assert_eq!(
+                features.thinking_display,
+                if provider.id == "anthropic" {
+                    ThinkingDisplay::Summarized
+                } else {
+                    ThinkingDisplay::None
+                },
+                "{}",
+                provider.id
+            );
         }
     }
 }
@@ -480,6 +493,38 @@ fn every_feature_value_parses_to_the_closed_type() {
     for (value, expected, override_value, overridden) in [
         (
             "none",
+            ThinkingDisplay::None,
+            "summarized",
+            ThinkingDisplay::Summarized,
+        ),
+        (
+            "summarized",
+            ThinkingDisplay::Summarized,
+            "none",
+            ThinkingDisplay::None,
+        ),
+    ] {
+        let registry = parse(&format!(
+            "{MESSAGES_PROVIDER}\n[providers.custom.features]\nthinking_display='{value}'\n[providers.custom.models.inherited]\n[providers.custom.models.overridden.features]\nthinking_display='{override_value}'"
+        ));
+        let provider = registry.get("custom").unwrap();
+        let expected = Features::Messages(MessagesFeatures {
+            thinking_display: expected,
+            ..Default::default()
+        });
+        assert_eq!(provider.features, expected);
+        assert_eq!(provider.models["inherited"].features, expected);
+        assert_eq!(
+            provider.models["overridden"].features,
+            Features::Messages(MessagesFeatures {
+                thinking_display: overridden,
+                ..Default::default()
+            })
+        );
+    }
+    for (value, expected, override_value, overridden) in [
+        (
+            "none",
             ReasoningSummary::None,
             "auto",
             ReasoningSummary::Auto,
@@ -530,7 +575,8 @@ fn feature_defaults_match_standard_protocol_behavior() {
     assert_eq!(
         Features::defaults(Protocol::Messages),
         Features::Messages(MessagesFeatures {
-            cache: Cache::Automatic
+            cache: Cache::Automatic,
+            thinking_display: ThinkingDisplay::None,
         })
     );
 }
@@ -538,34 +584,52 @@ fn feature_defaults_match_standard_protocol_behavior() {
 #[test]
 fn rejects_unknown_feature_values_types_and_features_from_other_protocols() {
     for level in ["features", "models.test.features"] {
-        for (value, reason) in [
-            ("'unsupported'", "unknown variant"),
-            ("'AUTO'", "unknown variant"),
-            ("true", "invalid type"),
-            ("1", "invalid type"),
-            ("{auto = {}}", "invalid type"),
+        for (feature, definition, enabled, others) in [
+            (
+                "reasoning_summary",
+                RESPONSES_PROVIDER,
+                "auto",
+                [
+                    "chat-completions",
+                    "anthropic-messages",
+                    "generate-content",
+                    "interactions",
+                ],
+            ),
+            (
+                "thinking_display",
+                MESSAGES_PROVIDER,
+                "summarized",
+                [
+                    "chat-completions",
+                    "responses",
+                    "generate-content",
+                    "interactions",
+                ],
+            ),
         ] {
-            assert_invalid(
-                &format!(
-                    "{RESPONSES_PROVIDER}\n[providers.custom.{level}]\nreasoning_summary = {value}"
-                ),
-                5,
-                reason,
-            );
-        }
-        for protocol in [
-            "chat-completions",
-            "anthropic-messages",
-            "generate-content",
-            "interactions",
-        ] {
-            assert_invalid(
-                &format!(
-                    "[providers.custom]\nprotocol = '{protocol}'\nbase_url = 'http://localhost'\n[providers.custom.{level}]\nreasoning_summary = 'auto'"
-                ),
-                5,
-                "unknown feature `reasoning_summary`",
-            );
+            for (value, reason) in [
+                ("'unsupported'", "unknown variant"),
+                ("'AUTO'", "unknown variant"),
+                ("true", "invalid type"),
+                ("1", "invalid type"),
+                ("{auto = {}}", "invalid type"),
+            ] {
+                assert_invalid(
+                    &format!("{definition}\n[providers.custom.{level}]\n{feature} = {value}"),
+                    5,
+                    reason,
+                );
+            }
+            for protocol in others {
+                assert_invalid(
+                    &format!(
+                        "[providers.custom]\nprotocol = '{protocol}'\nbase_url = 'http://localhost'\n[providers.custom.{level}]\n{feature} = '{enabled}'"
+                    ),
+                    5,
+                    &format!("unknown feature `{feature}`"),
+                );
+            }
         }
     }
     for name in [
