@@ -1414,13 +1414,19 @@ fn implemented_builtin_protocols_accept_and_record_the_protocol_actually_sent() 
                     "contents",
                     "previous_response_id",
                     "previous_interaction_id",
-                    "reasoning",
-                    "generation_config",
                     "max_output_tokens",
                     "background",
                 ] {
                     assert!(capture.raw.get(field).is_none(), "{id}: {field}");
                 }
+                let expected_reasoning = (id == "openai").then(|| json!({"summary":"auto"}));
+                assert_eq!(capture.raw.get("reasoning"), expected_reasoning.as_ref());
+                let expected_config =
+                    (id == "google").then(|| json!({"thinking_summaries":"auto"}));
+                assert_eq!(
+                    capture.raw.get("generation_config"),
+                    expected_config.as_ref()
+                );
                 if id != "google" {
                     assert_eq!(capture.raw["prompt_cache_key"], sid);
                     assert_eq!(
@@ -1477,6 +1483,7 @@ fn implemented_builtin_protocols_accept_and_record_the_protocol_actually_sent() 
                 );
                 let switched = server.captured_requests();
                 assert_eq!(switched.len(), 4);
+                assert!(switched[3].raw.get("reasoning").is_none());
                 assert!(
                     switched[3].raw["input"]
                         .as_array()

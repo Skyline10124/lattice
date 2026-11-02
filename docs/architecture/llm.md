@@ -116,7 +116,7 @@ Anthropic Messages 的 `redacted_thinking` 以空 Reasoning 片段及带 `redact
 
 | `id` | `protocol` | `base_url` | `auth` | `catalog` | features |
 | --- | --- | --- | --- | --- | --- |
-| `openai` | `responses` | `https://api.openai.com/v1` | `bearer` | `openai` | — |
+| `openai` | `responses` | `https://api.openai.com/v1` | `bearer` | `openai` | `reasoning_summary = "auto"` |
 | `chatgpt` | `responses` | `https://api.openai.com/v1` | `oauth:chatgpt` | `openai` | — |
 | `anthropic` | `anthropic-messages` | `https://api.anthropic.com` | `x-api-key` | `anthropic` | — |
 | `google` | `interactions` | `https://generativelanguage.googleapis.com/v1beta` | `x-goog-api-key` | `google` | — |
@@ -139,6 +139,7 @@ Anthropic Messages 的 `redacted_thinking` 以空 Reasoning 片段及带 `redact
 | `lmstudio` | `chat-completions` | `http://127.0.0.1:1234/v1` | `none` | `lmstudio` | — |
 
 - `generate-content` 协议保留，需要它的用户在 `providers.toml` 中新增一个使用该协议的 provider；内置 `google` 不能改 `protocol`。OpenAI 的新模型在 Chat Completions 上不能使用工具（[OpenAI 推理指南](https://developers.openai.com/api/docs/guides/reasoning)），所以 `openai` 以 Responses 为准。
+- `xai` 保持 `reasoning_summary = "none"`：xAI 文档没有提到 `reasoning.summary`，并说明 `grok-4.7` 不加参数就返回摘要；解析端照常接收摘要。
 - `chatgpt` 是 OpenAI 的订阅通道，不计入第一轮收录的 20 家，限制见 [Sign in with ChatGPT](#sign-in-with-chatgpt)。
 - 阿里云的文档推荐按工作空间区分的域名（`https://{WorkspaceId}.<地域>.maas.aliyuncs.com/compatible-mode/v1`），表中用的是仍可使用的旧域名；使用工作空间域名的用户在 `providers.toml` 中覆盖 `base_url`。
 - `ollama` 在 models.dev 中没有条目，它的模型没有元数据，可以在 `providers.toml` 中手写。

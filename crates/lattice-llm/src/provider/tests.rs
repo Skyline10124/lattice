@@ -96,14 +96,18 @@ fn builtin_protocols_match_their_endpoints_and_auth() {
     for (id, features, url, auth, catalog) in [
         (
             "openai",
-            Features::Responses(Default::default()),
+            Features::Responses(ResponsesFeatures {
+                reasoning_summary: ReasoningSummary::Auto,
+            }),
             "https://api.openai.com/v1",
             Auth::Bearer,
             "openai",
         ),
         (
             "xai",
-            Features::Responses(Default::default()),
+            Features::Responses(ResponsesFeatures {
+                reasoning_summary: ReasoningSummary::None,
+            }),
             "https://api.x.ai/v1",
             Auth::Bearer,
             "xai",

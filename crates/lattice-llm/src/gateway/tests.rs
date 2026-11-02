@@ -2289,7 +2289,12 @@ async fn builtin_candidates_and_efforts_match_the_requests_they_resolve() {
     use serde_json::json;
 
     let mut server = Server::start(true).await;
-    for id in ["openai", "xai", "google"] {
+    for (id, summary_override, summary) in [
+        ("openai", None, true),
+        ("openai", Some("none"), false),
+        ("xai", None, false),
+        ("google", None, false),
+    ] {
         let google = id == "google";
         let directory = private_dir();
         let base_url = if google {
@@ -2297,9 +2302,15 @@ async fn builtin_candidates_and_efforts_match_the_requests_they_resolve() {
         } else {
             server.url.clone()
         };
-        std::fs::write(directory.path().join("providers.toml"), format!(
+        let mut source = format!(
             "[providers.{id}]\nbase_url='{base_url}'\n[providers.{id}.models.handwritten]\neffort=['low','high']\n[providers.{id}.models.reused-budget]\neffort=['low','high']\n[providers.{id}.models.invalid]\neffort=['xhigh']\n"
-        )).unwrap();
+        );
+        if let Some(value) = summary_override {
+            source.push_str(&format!(
+                "\n[providers.{id}.features]\nreasoning_summary='{value}'\n"
+            ));
+        }
+        std::fs::write(directory.path().join("providers.toml"), source).unwrap();
         let cache = directory.path().join("cache");
         std::fs::create_dir_all(&cache).unwrap();
         let models = json!({"models":{
@@ -2432,19 +2443,21 @@ async fn builtin_candidates_and_efforts_match_the_requests_they_resolve() {
                 assert_eq!(body["store"], false);
                 assert_eq!(body["tools"][0]["name"], "observe__workspace");
                 assert_eq!(body.get("include").is_some(), !google && model != "plain");
-                if effort.is_none() {
-                    assert!(body.get("reasoning").is_none(), "{id}/{model}");
-                    assert!(body.get("generation_config").is_none(), "{id}/{model}");
-                }
                 if google {
                     assert_eq!(body["system_instruction"], "builtin system");
                     assert_eq!(body["input"][0]["type"], "user_input");
+                    let expected_config = match (model == "plain", effort) {
+                        (true, None) => None,
+                        (true, Some(effort)) => Some(json!({"thinking_level":effort.as_str()})),
+                        (false, None) => Some(json!({"thinking_summaries":"auto"})),
+                        (false, Some(effort)) => Some(
+                            json!({"thinking_level":effort.as_str(),"thinking_summaries":"auto"}),
+                        ),
+                    };
                     assert_eq!(
-                        body["generation_config"],
-                        effort.map_or(
-                            serde_json::Value::Null,
-                            |effort| json!({"thinking_level":effort.as_str()})
-                        )
+                        body.get("generation_config"),
+                        expected_config.as_ref(),
+                        "{id}/{model}/{effort:?}"
                     );
                     assert!(body.get("reasoning").is_none());
                     assert!(body.get("prompt_cache_key").is_none());
@@ -2453,8 +2466,21 @@ async fn builtin_candidates_and_efforts_match_the_requests_they_resolve() {
                     assert_eq!(body["input"][0]["role"], "user");
                     assert_eq!(body["prompt_cache_key"], "session-id");
                     assert_eq!(body["tools"][0]["strict"], false);
-                    assert_eq!(body["reasoning"], effort.map_or(serde_json::Value::Null, |effort|
-                        json!({"effort":if effort == Effort::Off { "none" } else { effort.as_str() }})));
+                    let expected_reasoning = match (summary && model != "plain", effort) {
+                        (_, Some(Effort::Off)) => Some(json!({"effort":"none"})),
+                        (true, Some(effort)) => {
+                            Some(json!({"effort":effort.as_str(),"summary":"auto"}))
+                        }
+                        (true, None) => Some(json!({"summary":"auto"})),
+                        (false, Some(effort)) => Some(json!({"effort":effort.as_str()})),
+                        (false, None) => None,
+                    };
+                    assert_eq!(
+                        body.get("reasoning"),
+                        expected_reasoning.as_ref(),
+                        "{id}/{model}/{effort:?}, summary override {summary_override:?}"
+                    );
+                    assert!(body.get("generation_config").is_none());
                     if model != "plain" {
                         assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
                     }
