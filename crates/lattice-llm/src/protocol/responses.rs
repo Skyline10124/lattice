@@ -566,10 +566,11 @@ impl ResponsesSseParser {
         events: &mut Vec<ProtocolEvent>,
     ) -> Result<(), ProtocolEvent> {
         Self::check_item(&item, index)?;
+        // item 流结束后仍需等待 response 终态决定是否保存回复。
         if item
             .status
             .as_deref()
-            .is_some_and(|status| status != "completed")
+            .is_some_and(|status| !matches!(status, "completed" | "incomplete"))
         {
             return Err(malformed("output item is not complete"));
         }
@@ -693,6 +694,9 @@ impl ResponsesSseParser {
             return Err(malformed("response omits output item"));
         }
         for (index, mut item) in output.into_iter().enumerate() {
+            if !incomplete && item.status.as_deref() == Some("incomplete") {
+                return Err(malformed("output item is not complete"));
+            }
             if incomplete && matches!(item.status.as_deref(), Some("incomplete" | "in_progress")) {
                 item.status = None;
             }

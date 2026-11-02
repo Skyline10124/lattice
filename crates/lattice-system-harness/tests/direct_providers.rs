@@ -274,11 +274,13 @@ fn responses_failures_preserve_usage_and_incomplete_saves_only_valid_replies() {
                 json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","role":"assistant","id":"saved","status":"in_progress","content":[]}}),
                 json!({"type":"response.content_part.added","output_index":0,"item_id":"saved","content_index":0,"part":{"type":"output_text","text":""}}),
                 json!({"type":"response.output_text.delta","output_index":0,"item_id":"saved","content_index":0,"delta":"saved incomplete"}),
+                json!({"type":"response.output_item.done","output_index":0,"item":{"type":"message","role":"assistant","id":"saved","status":"incomplete","content":[{"type":"output_text","text":"saved incomplete"}]}}),
                 json!({"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"message","role":"assistant","id":"saved","status":"incomplete","content":[{"type":"output_text","text":"saved incomplete"}]}],"usage":{"input_tokens":9,"output_tokens":4}}}),
             ]),
             native(vec![
                 json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"truncated","call_id":"truncated-call","name":"observe__workspace","arguments":""}}),
                 json!({"type":"response.function_call_arguments.delta","output_index":0,"item_id":"truncated","delta":"{\"request\":"}),
+                json!({"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"truncated","call_id":"truncated-call","name":"observe__workspace","status":"incomplete","arguments":"{\"request\":"}}),
                 json!({"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}),
             ]),
         ]),
