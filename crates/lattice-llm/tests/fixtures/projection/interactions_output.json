@@ -1,4 +1,9 @@
 {
+  "object": "interaction",
+  "model": "gemini-3.5-flash-lite",
+  "created": "2026-11-02T13:51:51Z",
+  "updated": "2026-11-02T13:51:51Z",
+  "service_tier": "standard",
   "status": "requires_action",
   "steps": [
     {"type": "model_output", "content": [{"type": "text", "text": "Checking."}]},

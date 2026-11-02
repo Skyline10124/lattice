@@ -35,8 +35,10 @@ fn interactions_native(
     status: &str,
 ) -> lattice_system_harness::SseScript {
     use serde_json::json;
-    let mut events =
-        vec![json!({"event_type":"interaction.created","interaction":{"status":"in_progress"}})];
+    let mut events = vec![
+        json!({"event_type":"interaction.created","interaction":{"object":"interaction","model":"interactions-model"}}),
+        json!({"event_type":"interaction.status_update","status":"in_progress"}),
+    ];
     for (index, step) in steps.iter().enumerate() {
         let mut initial = step.clone();
         match step["type"].as_str().unwrap() {
@@ -69,7 +71,7 @@ fn interactions_native(
         events.push(json!({"event_type":"step.stop","index":index}));
     }
     events.push(json!({"event_type":"keepalive","interaction":false,"delta":{"type":"future"}}));
-    events.push(json!({"event_type":"interaction.completed","interaction":{"status":status,"steps":steps,"usage":{"total_input_tokens":10,"total_tool_use_tokens":2,"total_cached_tokens":4,"total_output_tokens":5,"total_thought_tokens":3}}}));
+    events.push(json!({"event_type":"interaction.completed","interaction":{"status":status,"usage":{"total_input_tokens":10,"total_tool_use_tokens":2,"total_cached_tokens":4,"total_output_tokens":5,"total_thought_tokens":3},"created":"2026-11-02T13:51:51Z","updated":"2026-11-02T13:51:51Z","service_tier":"standard","object":"interaction","model":"interactions-model"}}));
     lattice_system_harness::SseScript::NativeEvents {
         events: events
             .into_iter()
@@ -79,6 +81,7 @@ fn interactions_native(
                     value,
                 )
             })
+            .chain(std::iter::once((Some("done".into()), json!("[DONE]"))))
             .collect(),
     }
 }
@@ -253,9 +256,9 @@ fn interactions_failures_preserve_usage_and_incomplete_saves_reply() {
         .unwrap();
     world.init_git_project().unwrap();
     let values = vec![
-        json!({"event_type":"interaction.created","interaction":{"status":"in_progress","usage":{"total_input_tokens":8}}}),
+        json!({"event_type":"interaction.created","interaction":{"object":"interaction","model":"interactions-model"}}),
         json!({"event_type":"step.start","index":0,"step":{"type":"model_output"}}),
-        json!({"event_type":"step.delta","index":0,"delta":{"type":"text","text":"partial"},"metadata":{"total_usage":{"total_tool_use_tokens":2}}}),
+        json!({"event_type":"step.delta","index":0,"delta":{"type":"text","text":"partial"},"metadata":{"total_usage":{"total_input_tokens":8,"total_tool_use_tokens":2}}}),
         json!({"event_type":"step.stop","index":0}),
         json!({"event_type":"step.start","index":1,"step":{"type":"function_call","id":"call","name":"observe__workspace","arguments":{}}}),
         json!({"event_type":"step.delta","index":1,"delta":{"type":"arguments_delta","arguments":"{\"request\":{\"mode\":\"read_file\",\"path\":\"notes.txt\"}}"}}),
@@ -264,7 +267,7 @@ fn interactions_failures_preserve_usage_and_incomplete_saves_reply() {
         json!({"event_type":"interaction.completed","interaction":{"status":"failed","errors":[{"code":"invalid_request","message":"fixture-failed"}],"usage":{"total_output_tokens":2,"total_thought_tokens":3}}}),
     ];
     let incomplete = vec![
-        json!({"event_type":"interaction.created","interaction":{"status":"in_progress"}}),
+        json!({"event_type":"interaction.created","interaction":{"object":"interaction","model":"interactions-model"}}),
         json!({"event_type":"step.start","index":0,"step":{"type":"model_output"}}),
         json!({"event_type":"step.delta","index":0,"delta":{"type":"text","text":"saved incomplete"}}),
         json!({"event_type":"interaction.completed","interaction":{"status":"incomplete","usage":{"total_input_tokens":9,"total_output_tokens":4}}}),
@@ -280,6 +283,7 @@ fn interactions_failures_preserve_usage_and_incomplete_saves_reply() {
                         value,
                     )
                 })
+                .chain(std::iter::once((Some("done".into()), json!("[DONE]"))))
                 .collect(),
         })
         .collect();

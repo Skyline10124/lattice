@@ -1578,7 +1578,15 @@ fn render(protocol: Protocol, script: &SseScript) -> Option<String> {
             if let Some(name) = name {
                 out.push_str(&format!("event: {name}\n"));
             }
-            out.push_str(&format!("data: {data}\n\n"));
+            if protocol == Protocol::Interactions
+                && name.as_deref() == Some("done")
+                && data.as_str() == Some("[DONE]")
+            {
+                // 结束标记不是 JSON 字符串，不能在数据外加引号。
+                out.push_str("data: [DONE]\n\n");
+            } else {
+                out.push_str(&format!("data: {data}\n\n"));
+            }
         }
         return Some(out);
     }
@@ -1661,8 +1669,10 @@ fn render(protocol: Protocol, script: &SseScript) -> Option<String> {
 /// 普通脚本也走原生 step 生命周期，工具轮以 requires_action 结束。
 fn render_interactions(texts: &[String], calls: &[ScriptedCall]) -> String {
     use serde_json::json;
-    let mut events =
-        vec![json!({"event_type":"interaction.created","interaction":{"status":"in_progress"}})];
+    let mut events = vec![
+        json!({"event_type":"interaction.created","interaction":{"object":"interaction","model":"fixture-model"}}),
+        json!({"event_type":"interaction.status_update","status":"in_progress"}),
+    ];
     let mut index = 0;
     if !texts.is_empty() {
         events
@@ -1679,14 +1689,15 @@ fn render_interactions(texts: &[String], calls: &[ScriptedCall]) -> String {
         events.push(json!({"event_type":"step.stop","index":index}));
         index += 1;
     }
-    events.push(json!({"event_type":"interaction.completed","interaction":{"status":if calls.is_empty() {"completed"} else {"requires_action"},"usage":{"total_input_tokens":8,"total_output_tokens":4,"total_cached_tokens":0,"total_thought_tokens":0,"total_tool_use_tokens":0}}}));
-    let mut out = String::new();
+    events.push(json!({"event_type":"interaction.completed","interaction":{"status":if calls.is_empty() {"completed"} else {"requires_action"},"usage":{"total_tokens":12,"total_input_tokens":8,"total_output_tokens":4,"total_cached_tokens":0,"total_thought_tokens":0,"total_tool_use_tokens":0},"created":"2026-11-02T13:51:51Z","updated":"2026-11-02T13:51:51Z","service_tier":"standard","object":"interaction","model":"fixture-model"}}));
+    let mut out = String::from(": keep-alive\n\n");
     for event in events {
         out.push_str(&format!(
             "event: {}\ndata: {event}\n\n",
             event["event_type"].as_str().unwrap()
         ));
     }
+    out.push_str("event: done\ndata: [DONE]\n\n");
     out
 }
 
@@ -2311,8 +2322,36 @@ mod tests {
             assert!(rendered.contains(&format!("\"status\":\"{status}\"")));
             assert!(rendered.contains("event: step.start\n"));
             assert!(rendered.contains("\"total_input_tokens\":99"));
-            assert!(!rendered.contains("[DONE]"));
+            let events: Vec<Value> = rendered
+                .lines()
+                .filter_map(|line| line.strip_prefix("data: "))
+                .filter(|data| *data != "[DONE]")
+                .map(|data| serde_json::from_str(data).unwrap())
+                .collect();
+            assert_eq!(
+                events[0]["interaction"],
+                json!({"object":"interaction","model":"fixture-model"})
+            );
+            assert_eq!(events[1]["event_type"], "interaction.status_update");
+            assert_eq!(events[1]["status"], "in_progress");
+            let terminal = &events.last().unwrap()["interaction"];
+            assert!(terminal.get("id").is_none());
+            assert!(terminal.get("steps").is_none());
+            assert_eq!(terminal["object"], "interaction");
+            assert_eq!(terminal["model"], "fixture-model");
+            assert!(rendered.starts_with(": keep-alive\n\n"));
+            assert!(rendered.ends_with("event: done\ndata: [DONE]\n\n"));
         }
+        assert_eq!(
+            render(
+                Protocol::Interactions,
+                &SseScript::NativeEvents {
+                    events: vec![(Some("done".into()), json!("[DONE]"))],
+                },
+            )
+            .unwrap(),
+            "event: done\ndata: [DONE]\n\n"
+        );
     }
 
     #[test]

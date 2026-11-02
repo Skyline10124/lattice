@@ -56,11 +56,15 @@ fn official_events() -> Vec<Value> {
     include_str!("../../../tests/fixtures/projection/interactions_stream.sse")
         .trim()
         .split("\n\n")
-        .map(|frame| {
-            let (name, data) = frame.split_once("\ndata: ").unwrap();
+        .filter_map(|frame| {
+            let data = frame.lines().find_map(|line| line.strip_prefix("data: "))?;
+            if data == "[DONE]" {
+                return None;
+            }
+            let name = frame.lines().find_map(|line| line.strip_prefix("event: "));
             let value: Value = serde_json::from_str(data).unwrap();
-            assert_eq!(name.strip_prefix("event: "), value["event_type"].as_str());
-            value
+            assert_eq!(name, value["event_type"].as_str());
+            Some(value)
         })
         .collect()
 }
@@ -104,27 +108,26 @@ fn named_official_stream_replays_steps_and_preserves_cumulative_usage() {
     assert_eq!(eof_report.usage, expected_usage);
     assert_eq!(eof_report.finish_reason, None);
     let mut parser = InteractionsSseParser::new();
+    assert!(parser.parse_chunk(Some("done"), "[DONE]").is_empty());
+    let unknown = events
+        .iter()
+        .find(|event| event["event_type"] == "keepalive")
+        .unwrap();
     assert!(
         parser
-            .parse_chunk(Some("different-name"), &events[3].to_string())
+            .parse_chunk(Some("different-name"), &unknown.to_string())
             .is_empty()
     );
-    for (created_has_id, completed_has_id) in [(true, false), (false, true), (false, false)] {
+    for (created_has_id, completed_has_id) in
+        [(true, true), (true, false), (false, true), (false, false)]
+    {
         let mut variant = events.clone();
-        if !created_has_id {
-            variant[0]["interaction"]
-                .as_object_mut()
-                .unwrap()
-                .remove("id");
-            for event in &mut variant {
-                event.as_object_mut().unwrap().remove("interaction_id");
-            }
+        if created_has_id {
+            variant[0]["interaction"]["id"] = "fixture_i".into();
+            variant[0]["interaction"]["status"] = "in_progress".into();
         }
-        if !completed_has_id {
-            variant.last_mut().unwrap()["interaction"]
-                .as_object_mut()
-                .unwrap()
-                .remove("id");
+        if completed_has_id {
+            variant.last_mut().unwrap()["interaction"]["id"] = "fixture_i".into();
         }
         variant.last_mut().unwrap()["interaction"]["steps"] = expected["steps"].clone();
         variant.last_mut().unwrap()["interaction"]["steps"][0]["content"] =
@@ -216,6 +219,24 @@ fn malformed_sequences_and_content_stop_without_payload_diagnostics() {
         })
     };
     for (name, events, expected) in [
+        (
+            "invalid created status",
+            vec![json!({"event_type":"interaction.created","interaction":{"status":"future"}})],
+            malformed("invalid interaction status"),
+        ),
+        (
+            "missing status update",
+            vec![json!({"event_type":"interaction.status_update"})],
+            malformed("invalid interaction status"),
+        ),
+        (
+            "duplicate created without status",
+            vec![
+                json!({"event_type":"interaction.created","interaction":{"object":"interaction","model":"fixture"}}),
+                json!({"event_type":"interaction.created","interaction":{"object":"interaction","model":"fixture"}}),
+            ],
+            malformed("duplicate interaction created"),
+        ),
         (
             "unknown step",
             vec![start(

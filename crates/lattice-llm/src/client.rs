@@ -2139,7 +2139,18 @@ mod tests {
     async fn interactions_named_frames_and_large_content_use_the_shared_assembler() {
         let fixture =
             include_str!("../tests/fixtures/projection/interactions_stream.sse").to_owned();
-        let mut streams = vec![fixture];
+        let mut streams = vec![(
+            fixture,
+            Some("tool_calls"),
+            Some(lattice_conversation::TokenUsage {
+                input: Some(12),
+                cache_read: Some(4),
+                cache_write: None,
+                output: Some(8),
+                reasoning: Some(3),
+            }),
+            None,
+        )];
         for (initial, text) in [(false, "x"), (true, "x"), (false, "\0")] {
             let text = text.repeat(lattice_conversation::MAX_ASSISTANT_CONTENT_BYTES);
             let mut values = vec![
@@ -2161,9 +2172,48 @@ mod tests {
                 })
                 .collect();
             assert!(raw.len() > 2 * 1024 * 1024);
-            streams.push(raw);
+            streams.push((raw, Some("stop"), None, None));
         }
-        for raw in streams {
+        streams.extend([
+            (
+                include_str!("../tests/fixtures/projection/interactions_function_call.sse").into(),
+                Some("tool_calls"),
+                Some(lattice_conversation::TokenUsage {
+                    input: Some(80),
+                    cache_read: Some(0),
+                    cache_write: None,
+                    output: Some(18),
+                    reasoning: Some(0),
+                }),
+                Some(serde_json::json!([
+                    {"type":"thought","signature":"EmAKXgFpFH0TSRV7PsnZyMenWOiMgXsK"},
+                    {"type":"function_call","id":"call_336116","name":"read_file","arguments":{"path":"README.md"}}
+                ])),
+            ),
+            (
+                include_str!("../tests/fixtures/projection/interactions_thought_and_text.sse").into(),
+                Some("stop"),
+                Some(lattice_conversation::TokenUsage {
+                    input: Some(51),
+                    cache_read: Some(0),
+                    cache_write: None,
+                    output: Some(302),
+                    reasoning: Some(290),
+                }),
+                Some(serde_json::json!([
+                    {"type":"thought","signature":"EsAICr0IAWkUfRP1OQnzCiN1KQPKOmxy"},
+                    {"type":"model_output","content":[{"type":"text","text":"The train will arrive at 12:42."}]}
+                ])),
+            ),
+            (
+                include_str!("../tests/fixtures/projection/interactions_thought_summary_stalled.sse").into(),
+                None,
+                None,
+                None,
+            ),
+        ]);
+        let origin = crate::test_reply::replay_origin(Protocol::Interactions);
+        for (raw, finish_reason, usage, steps) in streams {
             let chunks: Vec<_> = raw
                 .as_bytes()
                 .chunks(16 * 1024)
@@ -2174,9 +2224,10 @@ mod tests {
                 ProtocolParser::new(Protocol::Interactions),
                 Arc::default(),
             );
-            let events: Vec<_> = assemble_reply_stream(None, input, StreamControl::default())
-                .collect()
-                .await;
+            let events: Vec<_> =
+                assemble_reply_stream(Some(origin.clone()), input, StreamControl::default())
+                    .collect()
+                    .await;
             assert_eq!(
                 events
                     .iter()
@@ -2184,17 +2235,35 @@ mod tests {
                     .count(),
                 1
             );
-            assert!(
-                matches!(
-                    events.last(),
-                    Some(crate::LlmEvent::Finished {
-                        outcome: crate::ReplyOutcome::Complete { .. },
-                        ..
-                    })
-                ),
-                "{:?}",
-                events.last()
-            );
+            let Some(crate::LlmEvent::Finished { outcome, report }) = events.last() else {
+                panic!("missing terminal event: {:?}", events.last())
+            };
+            assert_eq!(report.finish_reason.as_deref(), finish_reason);
+            assert_eq!(report.usage, usage);
+            if finish_reason.is_some() {
+                let crate::ReplyOutcome::Complete { message } = outcome else {
+                    panic!("complete: {outcome:?}")
+                };
+                if let Some(steps) = steps {
+                    assert_eq!(
+                        crate::protocol::projection::native_to_wire(&origin, message.as_message())
+                            .unwrap(),
+                        steps
+                    );
+                }
+            } else {
+                assert_eq!(
+                    outcome,
+                    &crate::ReplyOutcome::Interrupted {
+                        reason: crate::ReplyStop::Stream(crate::StreamStop::UnexpectedEof),
+                    }
+                );
+                assert!(events.iter().any(|event| matches!(
+                    event,
+                    crate::LlmEvent::Delta(crate::LiveDelta::Reasoning(text))
+                        if text.starts_with("**Evaluating Greeting Options**")
+                )));
+            }
         }
         let limit = ProtocolParser::new(Protocol::Interactions).buffer_limit();
         let prefix = "event: keepalive\ndata: {\"event_type\":\"keepalive\"}";
