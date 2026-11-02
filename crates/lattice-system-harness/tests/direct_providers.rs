@@ -1177,59 +1177,310 @@ fn gemini_prompt_block_stops_without_retry_and_preserves_usage() {
 #[test]
 fn implemented_builtin_protocols_accept_and_record_the_protocol_actually_sent() {
     use lattice_system_harness::{FAKE_API_KEY, SseScript};
+    use serde_json::json;
     for (id, protocol, wire, stored) in [
         (
             "openai",
-            ProviderProtocol::ChatCompletions,
-            "openai",
-            "chat-completions",
+            ProviderProtocol::Responses,
+            "responses",
+            "responses",
         ),
-        (
-            "xai",
-            ProviderProtocol::ChatCompletions,
-            "openai",
-            "chat-completions",
-        ),
+        ("xai", ProviderProtocol::Responses, "responses", "responses"),
         (
             "google",
-            ProviderProtocol::GenerateContent,
-            "gemini",
-            "generate-content",
+            ProviderProtocol::Interactions,
+            "interactions",
+            "interactions",
         ),
     ] {
         let spec = ScenarioSpec::direct_local(format!("builtin-{id}"));
         let world = ScenarioWorld::new(&spec.name).unwrap();
         world.budget(&spec);
-        world.init_git_project().unwrap();
         let fixture = ProviderFixture {
             protocol,
             target: ProviderTarget::Builtin(id),
             model: "fixture-model",
         };
+        world.write_project_file(".lattice/agents/builtin/agent.toml", &format!(
+            "schema_version=1\n[agent]\nname='builtin'\nmodel='{}'\n[prompt]\nsystem='builtin system'\n[tools]\nenabled=['observe__workspace']\n",fixture.model_ref().unwrap()
+        )).unwrap();
         world
-            .write_agent_profile("builtin", &fixture.model_ref().unwrap())
+            .write_project_file("notes.txt", "builtin sentinel")
             .unwrap();
-        let server = FakeLlmServer::start(SseScript::plain("builtin works")).unwrap();
+        world.init_git_project().unwrap();
+        let server = FakeLlmServer::start(sequence(vec![
+            tool_call(
+                "builtin-call",
+                "observe__workspace",
+                r#"{"request":{"mode":"read_file","path":"notes.txt"}}"#,
+            ),
+            SseScript::plain("builtin works"),
+            SseScript::plain("builtin reopened"),
+        ]))
+        .unwrap();
         world.wire_provider(fixture, &server, FAKE_API_KEY).unwrap();
+        if id == "openai" {
+            world
+                .wire_provider(
+                    ProviderFixture {
+                        protocol: ProviderProtocol::Responses,
+                        target: ProviderTarget::Builtin("xai"),
+                        model: "fixture-model",
+                    },
+                    &server,
+                    FAKE_API_KEY,
+                )
+                .unwrap();
+        }
         let driver = driver();
         let send = SessionSendDriver::new(&driver, &world, &spec, "builtin");
         let mut evidence = support::evidence(&world, &spec);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let sent = send.send("builtin").unwrap();
-            evidence.record_command("builtin Turn", &sent.command);
-            assert!(sent.command.is_clean_exit(0));
-            let captures = server.captured_requests();
-            assert_eq!(captures.len(), 1);
-            assert_eq!(captures[0].provider, wire);
+            evidence.record_command("builtin tool Turn", &sent.command);
+            assert!(sent.command.is_clean_exit(0) && sent.has_completed());
+            assert_eq!(sent.slots().len(), 1);
+            assert!(tool_ok(&sent.parsed, "observe__workspace"));
             let turn = support::live_turn(&sent.parsed);
+            assert_eq!(turn["steps"].as_array().unwrap().len(), 2);
+            for step in turn["steps"].as_array().unwrap() {
+                assert_eq!(
+                    step["attempts"][0]["origin"],
+                    json!({"provider_id":id,"protocol":stored})
+                );
+            }
+            let sid = send.session_id().unwrap();
+            let stop = send.run_command(&["daemon", "stop"]).unwrap();
+            evidence.record_command("stop builtin backend", &stop);
+            assert!(stop.is_clean_exit(0));
+            let reopened = send.send("continue builtin after restart").unwrap();
+            evidence.record_command("builtin reopened append", &reopened.command);
+            assert!(reopened.command.is_clean_exit(0) && reopened.has_completed());
             assert_eq!(
-                turn["steps"][0]["attempts"][0]["origin"],
-                serde_json::json!({"provider_id":id,"protocol":stored})
+                support::live_turn(&reopened.parsed)["steps"][0]["attempts"][0]["origin"],
+                json!({"provider_id":id,"protocol":stored})
             );
-            evidence.record_captures(captures);
+            let captures = server.captured_requests();
+            assert_eq!(captures.len(), 3);
+            for capture in &captures {
+                assert_eq!(capture.provider, wire);
+                assert_eq!(capture.raw["stream"], true);
+                assert_eq!(capture.raw["store"], false);
+                assert!(
+                    capture
+                        .tool_names
+                        .iter()
+                        .any(|name| name == "observe__workspace")
+                );
+                assert_eq!(
+                    capture.raw[if id == "google" {
+                        "system_instruction"
+                    } else {
+                        "instructions"
+                    }],
+                    "builtin system"
+                );
+                for field in [
+                    "messages",
+                    "contents",
+                    "previous_response_id",
+                    "previous_interaction_id",
+                    "reasoning",
+                    "generation_config",
+                    "max_output_tokens",
+                    "background",
+                ] {
+                    assert!(capture.raw.get(field).is_none(), "{id}: {field}");
+                }
+                if id != "google" {
+                    assert_eq!(capture.raw["prompt_cache_key"], sid);
+                    assert_eq!(
+                        capture.raw["include"],
+                        json!(["reasoning.encrypted_content"])
+                    );
+                    assert_eq!(capture.raw["tools"][0]["strict"], false);
+                }
+            }
+            let input = captures[1].raw["input"].as_array().unwrap();
+            assert!(input.iter().any(|item| item["type"] == "function_call"
+                && item[if id == "google" { "id" } else { "call_id" }] == "builtin-call"));
+            assert!(input.iter().any(|item| item["type"]
+                == if id == "google" {
+                    "function_result"
+                } else {
+                    "function_call_output"
+                }
+                && item["call_id"] == "builtin-call"
+                && item.to_string().contains("builtin sentinel")));
+            let replayed = captures[2].raw["input"].as_array().unwrap();
+            assert_eq!(&replayed[..input.len()], input);
+            assert!(
+                replayed
+                    .iter()
+                    .any(|item| item.to_string().contains("builtin works"))
+            );
+            assert!(
+                replayed
+                    .last()
+                    .unwrap()
+                    .to_string()
+                    .contains("continue builtin after restart")
+            );
+            if id == "openai" {
+                let switched = send
+                    .run_command(&[
+                        "--json",
+                        "session",
+                        "send",
+                        "same protocol",
+                        "--session",
+                        sid,
+                        "--model",
+                        "xai/fixture-model",
+                    ])
+                    .unwrap();
+                evidence.record_command("builtin Responses provider switch", &switched);
+                assert!(switched.is_clean_exit(0), "{}", switched.summary());
+                let parsed = support::parse_send_stdout(&switched.stdout, switched.exit_code());
+                assert_eq!(
+                    support::live_turn(&parsed)["steps"][0]["attempts"][0]["origin"],
+                    json!({"provider_id":"xai","protocol":"responses"})
+                );
+                let switched = server.captured_requests();
+                assert_eq!(switched.len(), 4);
+                assert!(
+                    switched[3].raw["input"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|item| item["type"] == "function_call_output"
+                            && item["call_id"] == "builtin-call")
+                );
+            }
         }));
+        evidence.record_captures(server.captured_requests());
         support::finish_recorded(evidence, result);
     }
+}
+
+#[test]
+fn builtin_text_history_projects_across_protocols() {
+    use lattice_system_harness::{FAKE_API_KEY, SseScript};
+    use serde_json::{Value, json};
+    let spec = ScenarioSpec::direct_local("builtin-text-projection");
+    let world = ScenarioWorld::new(&spec.name).unwrap();
+    world.budget(&spec);
+    world
+        .write_agent_profile("builtin-text", "openai/current")
+        .unwrap();
+    world.init_git_project().unwrap();
+    let server = FakeLlmServer::start(sequence(vec![
+        responses_native(vec![
+            json!({"type":"reasoning","id":"private-reasoning","summary":[{"type":"summary_text","text":"private response reasoning"}],"encrypted_content":"private-cipher"}),
+            json!({"type":"message","id":"answer","role":"assistant","status":"completed","content":[{"type":"output_text","text":"first answer","annotations":[],"logprobs":[]}]}),
+        ]),
+        interactions_native(vec![
+            json!({"type":"thought","signature":"private-google-signature","summary":[{"type":"text","text":"private interaction thought"}]}),
+            json!({"type":"model_output","content":[{"type":"text","text":"second answer"}]}),
+        ], "completed"),
+        SseScript::plain("third answer"),
+    ])).unwrap();
+    for (id, protocol) in [
+        ("openai", ProviderProtocol::Responses),
+        ("xai", ProviderProtocol::Responses),
+        ("google", ProviderProtocol::Interactions),
+    ] {
+        world
+            .wire_provider(
+                ProviderFixture {
+                    protocol,
+                    target: ProviderTarget::Builtin(id),
+                    model: "current",
+                },
+                &server,
+                FAKE_API_KEY,
+            )
+            .unwrap();
+    }
+    let driver = driver();
+    let send = SessionSendDriver::new(&driver, &world, &spec, "builtin-text");
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let first = send.send("first input").unwrap();
+        evidence.record_command("builtin text source", &first.command);
+        assert!(first.command.is_clean_exit(0) && first.has_completed());
+        let sid = send.session_id().unwrap();
+        let first_turn = first.accepted_turn_id().unwrap();
+        let before = send
+            .run_command(&["--json", "session", "turn", first_turn])
+            .unwrap();
+        evidence.record_command("source before text projection", &before);
+        for (model, protocol, text) in [
+            ("google/current", "interactions", "second input"),
+            ("xai/current", "responses", "third input"),
+        ] {
+            let output = send
+                .run_command(&[
+                    "--json",
+                    "session",
+                    "send",
+                    text,
+                    "--session",
+                    sid,
+                    "--model",
+                    model,
+                ])
+                .unwrap();
+            evidence.record_command(format!("builtin text target {model}"), &output);
+            assert!(output.is_clean_exit(0), "{}", output.summary());
+            let parsed = support::parse_send_stdout(&output.stdout, output.exit_code());
+            assert_eq!(
+                support::live_turn(&parsed)["steps"][0]["attempts"][0]["origin"]["protocol"],
+                protocol
+            );
+        }
+        let captures = server.captured_requests();
+        assert_eq!(captures.len(), 3);
+        assert!(
+            captures[1].raw["input"]
+                .to_string()
+                .contains("first answer")
+        );
+        assert!(
+            captures[2].raw["input"]
+                .to_string()
+                .contains("first answer")
+        );
+        assert!(
+            captures[2].raw["input"]
+                .to_string()
+                .contains("second answer")
+        );
+        for capture in &captures[1..] {
+            let wire = capture.raw["input"].to_string();
+            for material in [
+                "private-cipher",
+                "private response reasoning",
+                "private-google-signature",
+                "private interaction thought",
+            ] {
+                assert!(
+                    !wire.contains(material),
+                    "跨协议文本投影不能泄露 {material}"
+                );
+            }
+        }
+        let after = send
+            .run_command(&["--json", "session", "turn", first_turn])
+            .unwrap();
+        evidence.record_command("source after text projection", &after);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&before.stdout).unwrap(),
+            serde_json::from_slice::<Value>(&after.stdout).unwrap()
+        );
+    }));
+    evidence.record_captures(server.captured_requests());
+    support::finish_recorded(evidence, result);
 }
 
 #[test]
@@ -1243,7 +1494,7 @@ fn same_protocol_provider_switch_preserves_tool_ids_and_restores_source_reasonin
         .write_project_file("notes.txt", "replay sentinel\n")
         .unwrap();
     world.write_project_file(".lattice/agents/replay/agent.toml",
-        "schema_version=1\n[agent]\nname='replay'\nmodel='openai/first'\n[prompt]\nsystem='Read the requested file.'\n[tools]\nenabled=['observe__workspace']\n").unwrap();
+        "schema_version=1\n[agent]\nname='replay'\nmodel='openai-chat/first'\n[prompt]\nsystem='Read the requested file.'\n[tools]\nenabled=['observe__workspace']\n").unwrap();
     world.init_git_project().unwrap();
     let server = FakeLlmServer::start(sequence(vec![
         SseScript::Chunks { chunks: vec![
@@ -1260,12 +1511,15 @@ fn same_protocol_provider_switch_preserves_tool_ids_and_restores_source_reasonin
         SseScript::plain("generate done"),
         SseScript::plain("back to first"),
     ])).unwrap();
-    for (id, model) in [("openai", "first"), ("deepseek", "second")] {
+    for (model, target) in [
+        ("first", ProviderTarget::Custom("openai-chat")),
+        ("second", ProviderTarget::Builtin("deepseek")),
+    ] {
         world
             .wire_provider(
                 ProviderFixture {
                     protocol: ProviderProtocol::ChatCompletions,
-                    target: ProviderTarget::Builtin(id),
+                    target,
                     model,
                 },
                 &server,
@@ -1287,11 +1541,30 @@ fn same_protocol_provider_switch_preserves_tool_ids_and_restores_source_reasonin
     world
         .wire_provider(interactions_fixture(), &server, FAKE_API_KEY)
         .unwrap();
+    for (id, protocol) in [
+        ("openai", ProviderProtocol::Responses),
+        ("xai", ProviderProtocol::Responses),
+        ("google", ProviderProtocol::Interactions),
+    ] {
+        world
+            .wire_provider(
+                ProviderFixture {
+                    protocol,
+                    target: ProviderTarget::Builtin(id),
+                    model: "current",
+                },
+                &server,
+                FAKE_API_KEY,
+            )
+            .unwrap();
+    }
     let path = world.home().join(".lattice/providers.toml");
     let config = std::fs::read_to_string(&path).unwrap();
     std::fs::write(
         path,
-        format!("{config}\n[providers.openai.features]\nreasoning_replay='reasoning-content'\n"),
+        format!(
+            "{config}\n[providers.openai-chat.features]\nreasoning_replay='reasoning-content'\n"
+        ),
     )
     .unwrap();
     let driver = driver();
@@ -1356,7 +1629,7 @@ fn same_protocol_provider_switch_preserves_tool_ids_and_restores_source_reasonin
             &mut evidence,
             "00000000-0000-4000-8000-000000000004",
             "return to source",
-            "openai/first",
+            "openai-chat/first",
         );
         let captures = server.captured_requests();
         assert_eq!(captures.len(), 5);
@@ -1412,40 +1685,48 @@ fn same_protocol_provider_switch_preserves_tool_ids_and_restores_source_reasonin
             .run_command(&["--json", "session", "turn", source_turn])
             .unwrap();
         evidence.record_command("source history before Interactions projection", &before);
-        let failed = support::cli(
-            &world,
-            &spec,
-            &[
-                "--json",
-                "session",
-                "send",
-                "cross protocol to Interactions",
-                "--session",
-                sid,
-                "--model",
-                "interactions-fixture/interactions-model",
-            ],
-        );
-        evidence.record_command(
-            "Interactions missing call ID rejects before dispatch",
-            &failed,
-        );
-        assert!(failed.is_clean_exit(1));
-        let failed = support::parse_send_stdout(&failed.stdout, failed.exit_code());
-        assert_eq!(failed.closed_result().unwrap().2, "failed");
-        let entries = failed.entries();
-        let step = &entries.last().unwrap().raw["step"];
-        assert_eq!(step["attempts"].as_array().unwrap().len(), 1);
-        assert_eq!(
-            step["attempts"][0]["end"]["cause"],
-            json!({"cause":"provider_error","retryable":false})
-        );
-        assert_eq!(
-            step["attempts"][0]["end"]["diagnostic"],
-            "provider request projection failed"
-        );
-        assert!(step["slots"].as_array().unwrap().is_empty());
-        assert_eq!(server.captured_requests().len(), 5);
+        for model in [
+            "interactions-fixture/interactions-model",
+            "openai/current",
+            "xai/current",
+            "google/current",
+        ] {
+            let failed = support::cli(
+                &world,
+                &spec,
+                &[
+                    "--json",
+                    "session",
+                    "send",
+                    "cross protocol",
+                    "--session",
+                    sid,
+                    "--model",
+                    model,
+                ],
+            );
+            evidence.record_command(
+                format!("{model} rejects missing call ID before dispatch"),
+                &failed,
+            );
+            assert!(failed.is_clean_exit(1), "{model}: {}", failed.summary());
+            let failed = support::parse_send_stdout(&failed.stdout, failed.exit_code());
+            assert_eq!(failed.closed_result().unwrap().2, "failed");
+            let entries = failed.entries();
+            let step = &entries.last().unwrap().raw["step"];
+            assert_eq!(step["attempts"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                step["attempts"][0]["end"]["cause"],
+                json!({"cause":"provider_error","retryable":false})
+            );
+            let diagnostic = step["attempts"][0]["end"]["diagnostic"].as_str().unwrap();
+            assert_eq!(
+                diagnostic,
+                "history has tool calls from another protocol; start a new session or rewind before them"
+            );
+            assert!(step["slots"].as_array().unwrap().is_empty());
+            assert_eq!(server.captured_requests().len(), 5);
+        }
         let after = send
             .run_command(&["--json", "session", "turn", source_turn])
             .unwrap();

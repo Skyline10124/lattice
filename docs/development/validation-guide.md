@@ -82,7 +82,7 @@ lattice --json run "继续。" --session "$SESSION_ID"
 lattice --json run "重新读取 reader 配置。" --session "$SESSION_ID" --agent reader
 ```
 
-档位名只有 `off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`；省略表示继承，`--effort off` 明确关闭推理，要求该模型支持。不选档位时产品不发推理参数，由 provider 用默认值。`gpt-6-luna` 这类模型在 Chat Completions 上带工具时，这个默认值会被拒绝（HTTP 400），要显式选 `--effort off`，或在 profile 里写 `effort = "off"`。前端只检查名字与模型引用写法，后台确认 provider、凭据及档位是否可用。模型引用在第一个 `/` 处分开，后续 `/` 属于模型名。换模型而未指定档位时，当前档位不支持就尝试 profile 默认档位，默认也不支持则不发推理参数；显式选择不支持的档位直接拒绝。完整规则见[会话的 profile 副本](../architecture/session.md#会话的-profile-副本)。
+档位名只有 `off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`；省略表示继承，`--effort off` 明确关闭推理，要求该模型支持。不选档位时产品不发推理参数，由 provider 用默认值。`gpt-6-luna` 这类模型在自定义的 Chat Completions provider 上带工具时，这个默认值会被拒绝（HTTP 400），要显式选 `--effort off`，或在 profile 里写 `effort = "off"`。前端只检查名字与模型引用写法，后台确认 provider、凭据及档位是否可用。模型引用在第一个 `/` 处分开，后续 `/` 属于模型名。换模型而未指定档位时，当前档位不支持就尝试 profile 默认档位，默认也不支持则不发推理参数；显式选择不支持的档位直接拒绝。完整规则见[会话的 profile 副本](../architecture/session.md#会话的-profile-副本)。
 
 例如，若目标模型的候选档位不含 `max`，以下请求退出 2，既有副本和会话树保持原样，provider 不会收到请求：
 

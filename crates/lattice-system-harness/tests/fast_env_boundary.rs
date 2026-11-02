@@ -29,11 +29,13 @@ fn unloaded_world(name: &str) -> ScenarioWorld {
     for key in [
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
+        "XAI_API_KEY",
         "GOOGLE_API_KEY",
         "GEMINI_API_KEY",
         "OPENAI_COMPATIBLE_API_KEY",
         "ANTHROPIC_BASE_URL",
         "OPENAI_BASE_URL",
+        "XAI_BASE_URL",
         "GOOGLE_BASE_URL",
         "GEMINI_BASE_URL",
         "OPENAI_COMPATIBLE_BASE_URL",
@@ -71,13 +73,19 @@ fn process_environment_and_dotenv_cannot_supply_credentials_or_endpoints() {
             ),
             (
                 "openai",
-                ProviderProtocol::ChatCompletions,
+                ProviderProtocol::Responses,
                 "OPENAI_API_KEY",
                 "OPENAI_BASE_URL",
             ),
             (
+                "xai",
+                ProviderProtocol::Responses,
+                "XAI_API_KEY",
+                "XAI_BASE_URL",
+            ),
+            (
                 "google",
-                ProviderProtocol::GenerateContent,
+                ProviderProtocol::Interactions,
                 "GEMINI_API_KEY",
                 "GEMINI_BASE_URL",
             ),
@@ -149,6 +157,15 @@ fn process_environment_and_dotenv_cannot_supply_credentials_or_endpoints() {
             let captures = server.captured_requests();
             assert_eq!(captures.len(), 1);
             assert_eq!(captures[0].model, "boundary");
+            assert_eq!(
+                captures[0].provider,
+                match id {
+                    "openai" | "xai" => "responses",
+                    "google" => "interactions",
+                    "anthropic" => "anthropic",
+                    _ => "openai",
+                }
+            );
             assert!(hostile.captured_requests().is_empty());
         }
     }

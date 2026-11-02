@@ -617,6 +617,108 @@ fn replay_origin_matrix_separates_opaque_state_from_call_ids() {
             }
         }
     }
+
+    // 内置 ID 保持不变时仍按实际协议投影，旧工具历史不能补造目标 call ID。
+    for (id, old, new, fixture_name) in [
+        (
+            "openai",
+            Protocol::ChatCompletions,
+            Protocol::Responses,
+            "openai_assistant_tool_calls.json",
+        ),
+        (
+            "xai",
+            Protocol::ChatCompletions,
+            Protocol::Responses,
+            "openai_assistant_tool_calls.json",
+        ),
+        (
+            "google",
+            Protocol::GenerateContent,
+            Protocol::Interactions,
+            "gemini_thought_signature.json",
+        ),
+    ] {
+        let origin = ReplayOrigin {
+            protocol: old,
+            provider_id: id.into(),
+        };
+        let target = ReplayOrigin {
+            protocol: new,
+            provider_id: id.into(),
+        };
+        let mut wire = fixture(fixture_name);
+        if old == Protocol::GenerateContent {
+            wire["candidates"][0]["content"]["parts"][1]["text"] =
+                serde_json::json!("Let me check that for you.");
+        }
+        let source = wire_to_native(&origin, &wire).unwrap();
+        let before = source.clone();
+        let assistant = bind_message(&source);
+        let results = assistant
+            .tool_calls()
+            .map(|(_, call)| {
+                success(
+                    call.invocation_id,
+                    &call.name,
+                    serde_json::json!({"ok":true}),
+                )
+            })
+            .collect();
+        let history = [ConversationItem::Step(StepContent { assistant, results })];
+        let stored = history.clone();
+        let original =
+            lattice_llm::protocol::projection::request_messages_to_wire(&origin, &history).unwrap();
+        let projected = project_cross_provider(&source, &target);
+        assert!(
+            projected
+                .parts
+                .iter()
+                .all(|part| part.replay_state.is_none()
+                    && !matches!(part.semantic, MessageSemantic::Reasoning { .. }))
+        );
+        assert!(
+            projected
+                .tool_calls()
+                .all(|(_, call)| call.provider_call_id.is_none())
+        );
+        assert!(
+            matches!(
+                lattice_llm::protocol::projection::request_messages_to_wire(&target, &history),
+                Err(ProjectionError::ToolResultWithoutProviderCallId { provider, .. }) if provider == new
+            ),
+            "{id}: 旧工具历史必须因缺少 call ID 拒绝"
+        );
+
+        let mut text = source.clone();
+        text.parts
+            .retain(|part| !matches!(part.semantic, MessageSemantic::ToolCall { .. }));
+        let text_before = text.clone();
+        let text_history = [ConversationItem::Step(StepContent {
+            assistant: text.clone().bind_zero_tool().unwrap(),
+            results: vec![],
+        })];
+        let encoded =
+            lattice_llm::protocol::projection::request_messages_to_wire(&target, &text_history)
+                .unwrap();
+        let expected = if new == Protocol::Responses {
+            serde_json::json!({"type":"message","role":"assistant","content":[{"type":"input_text","text":"Let me check that for you."}]})
+        } else {
+            serde_json::json!({"type":"model_output","content":[{"type":"text","text":"Let me check that for you."}]})
+        };
+        assert_eq!(
+            encoded.messages,
+            vec![expected],
+            "{id}: 文本保留且旧推理和签名不回放"
+        );
+        assert_eq!(text, text_before);
+        assert_eq!(source, before);
+        assert_eq!(history, stored);
+        assert_eq!(
+            lattice_llm::protocol::projection::request_messages_to_wire(&origin, &history).unwrap(),
+            original
+        );
+    }
 }
 
 #[test]

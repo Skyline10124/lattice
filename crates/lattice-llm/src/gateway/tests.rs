@@ -2277,6 +2277,308 @@ async fn interactions_invalid_handwritten_efforts_only_reject_the_affected_model
 }
 
 #[tokio::test]
+async fn builtin_candidates_and_efforts_match_the_requests_they_resolve() {
+    use lattice_conversation::{
+        ConversationItem, Effort, MessagePart, MessageRole, MessageSemantic, NativeMessage,
+    };
+    use serde_json::json;
+
+    let mut server = Server::start(true).await;
+    for id in ["openai", "xai", "google"] {
+        let google = id == "google";
+        let directory = private_dir();
+        let base_url = if google {
+            format!("{}/v1beta", server.url.trim_end_matches("/v1"))
+        } else {
+            server.url.clone()
+        };
+        std::fs::write(directory.path().join("providers.toml"), format!(
+            "[providers.{id}]\nbase_url='{base_url}'\n[providers.{id}.models.handwritten]\neffort=['low','high']\n[providers.{id}.models.reused-budget]\neffort=['low','high']\n[providers.{id}.models.invalid]\neffort=['xhigh']\n"
+        )).unwrap();
+        let cache = directory.path().join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let models = json!({"models":{
+            "effort":{"id":"effort","reasoning":true,"reasoning_options":[{"type":"effort","values":["none","minimal","low","medium","high","xhigh","max"]}]},
+            "budget":{"id":"budget","reasoning":true,"reasoning_options":[{"type":"toggle"},{"type":"budget_tokens","min":128,"max":32768}]},
+            "reused-budget":{"id":"reused-budget","reasoning":true,"reasoning_options":[{"type":"budget_tokens"}]},
+            "toggle":{"id":"toggle","reasoning_options":[{"type":"toggle"}]},
+            "mixed":{"id":"mixed","reasoning_options":[{"type":"effort","values":["low","high"]},{"type":"toggle"},{"type":"budget_tokens"}]},
+            "always":{"id":"always","reasoning":true},
+            "plain":{"id":"plain","reasoning":false}
+        }});
+        std::fs::write(
+            cache.join("models.json"),
+            serde_json::to_vec(&json!({id:models})).unwrap(),
+        )
+        .unwrap();
+        let gateway =
+            RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+        let turn = gateway.open_turn();
+        for (model, expected) in [
+            (
+                "effort",
+                if google {
+                    vec![Effort::Minimal, Effort::Low, Effort::Medium, Effort::High]
+                } else {
+                    vec![
+                        Effort::Off,
+                        Effort::Minimal,
+                        Effort::Low,
+                        Effort::Medium,
+                        Effort::High,
+                        Effort::Xhigh,
+                        Effort::Max,
+                    ]
+                },
+            ),
+            ("mixed", vec![Effort::Low, Effort::High]),
+            ("handwritten", vec![Effort::Low, Effort::High]),
+            ("budget", vec![]),
+            ("reused-budget", vec![]),
+            ("toggle", vec![]),
+            ("always", vec![]),
+            ("plain", vec![]),
+            ("unknown", vec![]),
+        ] {
+            let target = ModelTarget::new(id, model);
+            assert_eq!(
+                turn.supported_efforts(&target).await.unwrap(),
+                expected,
+                "{id}/{model}"
+            );
+            let candidate =
+                crate::model_candidates(directory.path(), None, Some(&format!("{id}/{model}")))
+                    .unwrap()
+                    .models
+                    .remove(0);
+            assert_eq!(candidate.supported_efforts, expected);
+            assert_eq!(candidate.credential_status, crate::auth::AuthState::Missing);
+            assert!(candidate.config_error.is_none());
+
+            crate::auth::AuthStore::new(directory.path().into())
+                .set(id, "builtin-key")
+                .unwrap();
+            for effort in std::iter::once(None).chain(expected.iter().copied().map(Some)) {
+                let mut request = request(id);
+                request.target = target.clone();
+                request.target.effort = effort;
+                request.messages = vec![
+                    ConversationItem::Message(NativeMessage::new(
+                        MessageRole::System,
+                        None,
+                        vec![MessagePart::semantic_only(MessageSemantic::Text {
+                            text: "builtin system".into(),
+                        })],
+                    )),
+                    user_message("builtin input"),
+                ];
+                request.tools.push(crate::ToolDefinition::new(
+                    "observe__workspace",
+                    "read",
+                    json!({"type":"object"}),
+                ));
+                let resolved = turn.resolve(&request.target).await.unwrap();
+                assert_eq!(
+                    resolved.origin(),
+                    lattice_conversation::ReplayOrigin {
+                        protocol: if google {
+                            crate::Protocol::Interactions
+                        } else {
+                            crate::Protocol::Responses
+                        },
+                        provider_id: id.into(),
+                    }
+                );
+                complete(
+                    resolved
+                        .stream_chat(request, StreamControl::default())
+                        .await
+                        .unwrap(),
+                )
+                .await;
+                let received = server.next().await;
+                assert_eq!(
+                    received.path,
+                    if google {
+                        "/v1beta/interactions"
+                    } else {
+                        "/v1/responses"
+                    }
+                );
+                assert_eq!(
+                    received
+                        .headers
+                        .get(if google {
+                            "x-goog-api-key"
+                        } else {
+                            "authorization"
+                        })
+                        .unwrap(),
+                    if google {
+                        "builtin-key"
+                    } else {
+                        "Bearer builtin-key"
+                    }
+                );
+                assert_eq!(received.headers["x-client-request-id"], "session-id");
+                let body = received.body;
+                assert_eq!(body["model"], model);
+                assert_eq!(body["stream"], true);
+                assert_eq!(body["store"], false);
+                assert_eq!(body["tools"][0]["name"], "observe__workspace");
+                assert_eq!(body.get("include").is_some(), !google && model != "plain");
+                if effort.is_none() {
+                    assert!(body.get("reasoning").is_none(), "{id}/{model}");
+                    assert!(body.get("generation_config").is_none(), "{id}/{model}");
+                }
+                if google {
+                    assert_eq!(body["system_instruction"], "builtin system");
+                    assert_eq!(body["input"][0]["type"], "user_input");
+                    assert_eq!(
+                        body["generation_config"],
+                        effort.map_or(
+                            serde_json::Value::Null,
+                            |effort| json!({"thinking_level":effort.as_str()})
+                        )
+                    );
+                    assert!(body.get("reasoning").is_none());
+                    assert!(body.get("prompt_cache_key").is_none());
+                } else {
+                    assert_eq!(body["instructions"], "builtin system");
+                    assert_eq!(body["input"][0]["role"], "user");
+                    assert_eq!(body["prompt_cache_key"], "session-id");
+                    assert_eq!(body["tools"][0]["strict"], false);
+                    assert_eq!(body["reasoning"], effort.map_or(serde_json::Value::Null, |effort|
+                        json!({"effort":if effort == Effort::Off { "none" } else { effort.as_str() }})));
+                    if model != "plain" {
+                        assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+                    }
+                }
+                for field in [
+                    "messages",
+                    "contents",
+                    "reasoning_effort",
+                    "thinking",
+                    "generationConfig",
+                    "temperature",
+                    "top_p",
+                    "max_output_tokens",
+                    "previous_response_id",
+                    "previous_interaction_id",
+                    "background",
+                ] {
+                    assert!(body.get(field).is_none(), "{id}/{model}: {field}");
+                }
+            }
+            let mut unsupported = target;
+            unsupported.effort = Some(if expected.contains(&Effort::Off) {
+                Effort::Low
+            } else {
+                Effort::Off
+            });
+            if !expected.contains(&unsupported.effort.unwrap()) {
+                assert!(matches!(
+                    turn.resolve(&unsupported).await,
+                    Err(crate::LlmError::Config { message }) if message.contains("does not support reasoning effort")
+                ));
+            }
+            crate::auth::AuthStore::new(directory.path().into())
+                .remove(id)
+                .unwrap();
+        }
+        crate::auth::AuthStore::new(directory.path().into())
+            .set(id, "builtin-key")
+            .unwrap();
+        let invalid = ModelTarget::new(id, "invalid");
+        let candidate =
+            crate::model_candidates(directory.path(), None, Some(&format!("{id}/invalid")))
+                .unwrap()
+                .models
+                .remove(0);
+        if google {
+            assert!(
+                candidate
+                    .config_error
+                    .as_deref()
+                    .unwrap()
+                    .contains("thinking_level")
+            );
+            assert!(matches!(
+                turn.resolve(&invalid).await,
+                Err(crate::LlmError::Config { message }) if message.contains("thinking_level")
+            ));
+        } else {
+            assert_eq!(candidate.supported_efforts, vec![Effort::Xhigh]);
+            assert!(candidate.config_error.is_none());
+        }
+    }
+}
+
+#[tokio::test]
+async fn builtin_protocol_switch_rejects_old_tool_history_before_connecting() {
+    use crate::protocol::projection::{ProjectionError, wire_to_native};
+    use lattice_conversation::{ConversationItem, Protocol, ReplayOrigin, StepContent};
+    for (id, old, fixture) in [
+        (
+            "openai",
+            Protocol::ChatCompletions,
+            include_str!("../../tests/fixtures/projection/openai_assistant_tool_calls.json"),
+        ),
+        (
+            "xai",
+            Protocol::ChatCompletions,
+            include_str!("../../tests/fixtures/projection/openai_assistant_tool_calls.json"),
+        ),
+        (
+            "google",
+            Protocol::GenerateContent,
+            include_str!("../../tests/fixtures/projection/gemini_thought_signature.json"),
+        ),
+    ] {
+        let mut server = Server::start(true).await;
+        let directory = private_dir();
+        std::fs::write(
+            directory.path().join("providers.toml"),
+            format!("[providers.{id}]\nbase_url='{}'\n", server.url),
+        )
+        .unwrap();
+        crate::auth::AuthStore::new(directory.path().into())
+            .set(id, "builtin-key")
+            .unwrap();
+        let source = wire_to_native(
+            &ReplayOrigin {
+                protocol: old,
+                provider_id: id.into(),
+            },
+            &serde_json::from_str(fixture).unwrap(),
+        )
+        .unwrap();
+        let (assistant, results) = crate::test_reply::bind_replay_step(source);
+        let mut request = request(id);
+        request
+            .messages
+            .push(ConversationItem::Step(StepContent { assistant, results }));
+        let gateway =
+            RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+        let error = gateway
+            .open_turn()
+            .stream_chat(request, StreamControl::default())
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(
+            error,
+            crate::LlmError::Projection(ProjectionError::ToolResultWithoutProviderCallId { .. })
+        ));
+        assert_eq!(
+            server.connections_before_probe().await,
+            0,
+            "{id}: 投影失败前不能连接"
+        );
+    }
+}
+
+#[tokio::test]
 async fn responses_include_uses_the_model_metadata_from_each_resolution() {
     let mut server = Server::start(false).await;
     let directory = private_dir();
