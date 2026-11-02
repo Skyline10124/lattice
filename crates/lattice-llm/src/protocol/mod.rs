@@ -16,5 +16,5 @@ mod usage;
 
 pub(crate) use features::{
     Cache, ChatCompletionsFeatures, EffortParam, Features, MessagesFeatures, ReasoningReplay,
-    ReasoningSummary, ResponsesFeatures, ThinkingBudget, ThinkingToggle,
+    ThinkingBudget, ThinkingToggle,
 };

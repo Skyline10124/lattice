@@ -98,6 +98,7 @@ impl Model {
         if let Some(output) = handwritten.output {
             self.limit.get_or_insert_default().output = Some(output);
         }
+        self.reasoning = handwritten.reasoning.or(self.reasoning);
         self.effort.clone_from(&handwritten.effort);
         if let Some(tools) = handwritten.tools {
             self.tool_call = Some(tools);
