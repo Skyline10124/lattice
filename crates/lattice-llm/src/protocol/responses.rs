@@ -915,12 +915,7 @@ impl ResponsesSseParser {
 }
 
 fn api_error(code: Option<&str>, message: Option<&str>) -> ProtocolEvent {
-    let retryable = matches!(
-        code,
-        Some(
-            "server_error" | "rate_limit_exceeded" | "rate_limit_error" | "temporarily_unavailable"
-        )
-    );
+    let retryable = matches!(code, Some("server_error" | "rate_limit_exceeded"));
     ProtocolEvent::error(
         format!(
             "Responses {}: {}",
