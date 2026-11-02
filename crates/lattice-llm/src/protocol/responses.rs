@@ -307,6 +307,7 @@ impl ResponsesSseParser {
                 }
             }
             "function_call" => {
+                required(item.call_id.as_ref(), "function call missing call_id")?;
                 if !item.content.is_empty() || !item.summary.is_empty() {
                     return Err(malformed("function call carries content"));
                 }

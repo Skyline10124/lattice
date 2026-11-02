@@ -736,6 +736,36 @@ fn unknown_content_and_invalid_sequences_fail_without_exposing_payload() {
             invalid("item id mismatch"),
         ));
     }
+    let call = json!({"type":"function_call","id":"fc","call_id":"call","name":"observe__workspace","arguments":"{\"private-payload\":true}"});
+    let added = json!({"type":"response.output_item.added","output_index":0,"item":call});
+    let done = json!({"type":"response.output_item.done","output_index":0,"item":call});
+    let mut missing = call.clone();
+    missing.as_object_mut().unwrap().remove("call_id");
+    for events in [
+        vec![
+            json!({"type":"response.output_item.added","output_index":0,"item":missing}),
+            response(vec![missing.clone()]),
+        ],
+        vec![
+            added.clone(),
+            json!({"type":"response.output_item.done","output_index":0,"item":missing}),
+            response(vec![call.clone()]),
+        ],
+        vec![response(vec![missing.clone()])],
+        vec![added.clone(), response(vec![missing.clone()])],
+        vec![added.clone(), done.clone(), response(vec![missing])],
+    ] {
+        cases.push((events, invalid("function call missing call_id")));
+    }
+    let mut changed = call;
+    changed["call_id"] = "another-call".into();
+    cases.push((
+        vec![
+            added,
+            json!({"type":"response.output_item.done","output_index":0,"item":changed}),
+        ],
+        invalid("function metadata changed"),
+    ));
     for (events, expected) in cases {
         let (_, outcome, _) = collect(events);
         assert_eq!(
