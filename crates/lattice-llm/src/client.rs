@@ -2141,7 +2141,7 @@ mod tests {
             include_str!("../tests/fixtures/projection/interactions_stream.sse").to_owned();
         let mut streams = vec![(
             fixture,
-            Some("tool_calls"),
+            "tool_calls",
             Some(lattice_conversation::TokenUsage {
                 input: Some(12),
                 cache_read: Some(4),
@@ -2149,6 +2149,7 @@ mod tests {
                 output: Some(8),
                 reasoning: Some(3),
             }),
+            None,
             None,
         )];
         for (initial, text) in [(false, "x"), (true, "x"), (false, "\0")] {
@@ -2172,12 +2173,13 @@ mod tests {
                 })
                 .collect();
             assert!(raw.len() > 2 * 1024 * 1024);
-            streams.push((raw, Some("stop"), None, None));
+            streams.push((raw, "stop", None, None, None));
         }
+        let summary = "**Calculating Arrival Time**\n\nI've got the core objective crystal clear: determine the train's arrival time, presenting the solution in a concise sentence. Currently, I'm focusing on extracting the necessary data points – the departure time, trip duration, and delay. I see the input clearly. I'm moving toward the calculation and output formatting step.\n\n\n";
         streams.extend([
             (
                 include_str!("../tests/fixtures/projection/interactions_function_call.sse").into(),
-                Some("tool_calls"),
+                "tool_calls",
                 Some(lattice_conversation::TokenUsage {
                     input: Some(80),
                     cache_read: Some(0),
@@ -2189,10 +2191,11 @@ mod tests {
                     {"type":"thought","signature":"EmAKXgFpFH0TSRV7PsnZyMenWOiMgXsK"},
                     {"type":"function_call","id":"call_336116","name":"read_file","arguments":{"path":"README.md"}}
                 ])),
+                None,
             ),
             (
                 include_str!("../tests/fixtures/projection/interactions_thought_and_text.sse").into(),
-                Some("stop"),
+                "stop",
                 Some(lattice_conversation::TokenUsage {
                     input: Some(51),
                     cache_read: Some(0),
@@ -2204,16 +2207,27 @@ mod tests {
                     {"type":"thought","signature":"EsAICr0IAWkUfRP1OQnzCiN1KQPKOmxy"},
                     {"type":"model_output","content":[{"type":"text","text":"The train will arrive at 12:42."}]}
                 ])),
+                None,
             ),
             (
-                include_str!("../tests/fixtures/projection/interactions_thought_summary_stalled.sse").into(),
-                None,
-                None,
-                None,
+                include_str!("../tests/fixtures/projection/interactions_thought_summary.sse").into(),
+                "stop",
+                Some(lattice_conversation::TokenUsage {
+                    input: Some(43),
+                    cache_read: Some(0),
+                    cache_write: None,
+                    output: Some(305),
+                    reasoning: Some(293),
+                }),
+                Some(serde_json::json!([
+                    {"type":"thought","summary":[{"type":"text","text":summary}],"signature":"EroICrcIAWkUfRMIDShXBuL7NZZ67Fha"},
+                    {"type":"model_output","content":[{"type":"text","text":"The train will arrive at 12:42."}]}
+                ])),
+                Some(summary),
             ),
         ]);
         let origin = crate::test_reply::replay_origin(Protocol::Interactions);
-        for (raw, finish_reason, usage, steps) in streams {
+        for (raw, finish_reason, usage, steps, reasoning) in streams {
             let chunks: Vec<_> = raw
                 .as_bytes()
                 .chunks(16 * 1024)
@@ -2238,31 +2252,29 @@ mod tests {
             let Some(crate::LlmEvent::Finished { outcome, report }) = events.last() else {
                 panic!("missing terminal event: {:?}", events.last())
             };
-            assert_eq!(report.finish_reason.as_deref(), finish_reason);
+            assert_eq!(report.finish_reason.as_deref(), Some(finish_reason));
             assert_eq!(report.usage, usage);
-            if finish_reason.is_some() {
-                let crate::ReplyOutcome::Complete { message } = outcome else {
-                    panic!("complete: {outcome:?}")
-                };
-                if let Some(steps) = steps {
-                    assert_eq!(
-                        crate::protocol::projection::native_to_wire(&origin, message.as_message())
-                            .unwrap(),
-                        steps
-                    );
-                }
-            } else {
+            let crate::ReplyOutcome::Complete { message } = outcome else {
+                panic!("complete: {outcome:?}")
+            };
+            if let Some(steps) = steps {
                 assert_eq!(
-                    outcome,
-                    &crate::ReplyOutcome::Interrupted {
-                        reason: crate::ReplyStop::Stream(crate::StreamStop::UnexpectedEof),
-                    }
+                    crate::protocol::projection::native_to_wire(&origin, message.as_message())
+                        .unwrap(),
+                    steps
                 );
-                assert!(events.iter().any(|event| matches!(
-                    event,
-                    crate::LlmEvent::Delta(crate::LiveDelta::Reasoning(text))
-                        if text.starts_with("**Evaluating Greeting Options**")
-                )));
+            }
+            if let Some(reasoning) = reasoning {
+                let live: String = events
+                    .iter()
+                    .filter_map(|event| match event {
+                        crate::LlmEvent::Delta(crate::LiveDelta::Reasoning(text)) => {
+                            Some(text.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(live, reasoning);
             }
         }
         let limit = ProtocolParser::new(Protocol::Interactions).buffer_limit();
