@@ -415,12 +415,17 @@ fn only_successful_interaction_statuses_complete_and_errors_use_codes() {
         let mut terminal = completed(status);
         terminal["interaction"]["usage"] =
             json!({"total_output_tokens":2,"total_thought_tokens":3});
-        let (_, outcome, report) = collect(vec![
+        let mut events = vec![
             json!({"event_type":"interaction.status_update","status":"in_progress","usage":{"total_input_tokens":7}}),
-            start(0, json!({"type":"model_output"})),
-            delta(0, json!({"type":"text","text":"partial reply"})),
-            terminal,
-        ]);
+        ];
+        if status == "incomplete" {
+            events.extend([
+                start(0, json!({"type":"model_output"})),
+                delta(0, json!({"type":"text","text":"partial reply"})),
+            ]);
+        }
+        events.push(terminal);
+        let (_, outcome, report) = collect(events);
         if status == "incomplete" {
             let ReplyOutcome::Complete { message } = outcome else {
                 panic!("incomplete must save an open step: {outcome:?}")
@@ -432,10 +437,22 @@ fn only_successful_interaction_statuses_complete_and_errors_use_codes() {
             );
             assert_eq!(report.finish_reason.as_deref(), Some("incomplete"));
         } else {
-            assert!(
-                matches!(outcome, ReplyOutcome::Interrupted { .. }),
-                "{status}"
-            );
+            match status {
+                "cancelled" | "requires_continuation" => assert_eq!(
+                    outcome,
+                    ReplyOutcome::Interrupted {
+                        reason: ReplyStop::Stream(StreamStop::Provider(crate::ProviderFailure {
+                            message: format!("Interactions status: {status}"),
+                            retryable: false,
+                        }))
+                    },
+                    "{status}"
+                ),
+                _ => assert!(
+                    matches!(outcome, ReplyOutcome::Interrupted { .. }),
+                    "{status}"
+                ),
+            }
             assert_eq!(report.finish_reason, None);
         }
         assert_eq!(report.usage.as_ref().unwrap().input, Some(7));
