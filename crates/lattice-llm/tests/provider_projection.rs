@@ -702,7 +702,7 @@ fn replay_origin_matrix_separates_opaque_state_from_call_ids() {
             lattice_llm::protocol::projection::request_messages_to_wire(&target, &text_history)
                 .unwrap();
         let expected = if new == Protocol::Responses {
-            serde_json::json!({"type":"message","role":"assistant","content":[{"type":"input_text","text":"Let me check that for you."}]})
+            serde_json::json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"Let me check that for you.","annotations":[]}]})
         } else {
             serde_json::json!({"type":"model_output","content":[{"type":"text","text":"Let me check that for you."}]})
         };

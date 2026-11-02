@@ -114,7 +114,8 @@ fn official_output_round_trips_item_boundaries_phase_cipher_and_call_ids() {
         .iter()
         .filter(|item| item["type"] == "message")
     {
-        assert_eq!(item["content"][0]["type"], "input_text");
+        assert_eq!(item["content"][0]["type"], "output_text");
+        assert_eq!(item["content"][0]["annotations"], json!([]));
         assert!(item.get("id").is_none() && item.get("phase").is_none());
     }
     let (live, outcome, _) = collect(vec![json!({"type":"response.completed","response":wire})]);

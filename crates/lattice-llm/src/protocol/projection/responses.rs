@@ -85,7 +85,7 @@ pub(super) fn native_to_wire<S: ToolCallState>(
             .map(|(ordinal, part)| match &part.semantic {
                 MessageSemantic::Text { text } => Ok(json!({
                     "type":"message", "role":"assistant",
-                    "content":[{"type":"input_text", "text":text}],
+                    "content":[{"type":"output_text", "text":text, "annotations":[]}],
                 })),
                 MessageSemantic::ToolCall { call } => Ok(function(call)),
                 _ => Err(ProjectionError::MissingReplayState {

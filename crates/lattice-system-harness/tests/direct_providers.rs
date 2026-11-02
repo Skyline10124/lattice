@@ -1525,10 +1525,11 @@ fn builtin_text_history_projects_across_protocols() {
     let world = ScenarioWorld::new(&spec.name).unwrap();
     world.budget(&spec);
     world
-        .write_agent_profile("builtin-text", "openai/current")
+        .write_agent_profile("builtin-text", "openai-chat/current")
         .unwrap();
     world.init_git_project().unwrap();
     let server = FakeLlmServer::start(sequence(vec![
+        SseScript::plain("legacy chat answer"),
         responses_native(vec![
             json!({"type":"reasoning","id":"private-reasoning","summary":[{"type":"summary_text","text":"private response reasoning"}],"encrypted_content":"private-cipher"}),
             json!({"type":"message","id":"answer","role":"assistant","status":"completed","content":[{"type":"output_text","text":"first answer","annotations":[],"logprobs":[]}]}),
@@ -1539,6 +1540,17 @@ fn builtin_text_history_projects_across_protocols() {
         ], "completed"),
         SseScript::plain("third answer"),
     ])).unwrap();
+    world
+        .wire_provider(
+            ProviderFixture {
+                protocol: ProviderProtocol::ChatCompletions,
+                target: ProviderTarget::Custom("openai-chat"),
+                model: "current",
+            },
+            &server,
+            FAKE_API_KEY,
+        )
+        .unwrap();
     for (id, protocol) in [
         ("openai", ProviderProtocol::Responses),
         ("xai", ProviderProtocol::Responses),
@@ -1560,9 +1572,40 @@ fn builtin_text_history_projects_across_protocols() {
     let send = SessionSendDriver::new(&driver, &world, &spec, "builtin-text");
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let first = send.send("first input").unwrap();
+        let legacy = send.send("legacy input").unwrap();
+        evidence.record_command("legacy Chat text source", &legacy.command);
+        assert!(legacy.command.is_clean_exit(0) && legacy.has_completed());
+        assert!(legacy.slots().is_empty());
+        assert_eq!(legacy.reply_text(), "legacy chat answer");
+        assert_eq!(
+            support::live_turn(&legacy.parsed)["steps"][0]["attempts"][0]["origin"],
+            json!({"provider_id":"openai-chat","protocol":"chat-completions"})
+        );
+        let sid = send.session_id().unwrap();
+        let command = send
+            .run_command(&[
+                "--json",
+                "session",
+                "send",
+                "first input",
+                "--session",
+                sid,
+                "--model",
+                "openai/current",
+            ])
+            .unwrap();
+        let first = SendExecution {
+            parsed: support::parse_send_stdout(&command.stdout, command.exit_code()),
+            command,
+        };
         evidence.record_command("builtin text source", &first.command);
         assert!(first.command.is_clean_exit(0) && first.has_completed());
+        assert!(first.slots().is_empty());
+        assert_eq!(first.reply_text(), "first answer");
+        assert_eq!(
+            support::live_turn(&first.parsed)["steps"][0]["attempts"][0]["origin"],
+            json!({"provider_id":"openai","protocol":"responses"})
+        );
         let sid = send.session_id().unwrap();
         let first_turn = first.accepted_turn_id().unwrap();
         let before = send
@@ -1593,7 +1636,22 @@ fn builtin_text_history_projects_across_protocols() {
                 protocol
             );
         }
-        let captures = server.captured_requests();
+        let all_captures = server.captured_requests();
+        assert_eq!(all_captures.len(), 4);
+        assert_eq!(all_captures[0].provider, "openai");
+        assert_eq!(all_captures[1].provider, "responses");
+        assert_eq!(
+            all_captures[1].raw["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|item| item["role"] == "assistant")
+                .collect::<Vec<_>>(),
+            vec![&json!({"type":"message","role":"assistant","content":[
+                {"type":"output_text","text":"legacy chat answer","annotations":[]}
+            ]})]
+        );
+        let captures = &all_captures[1..];
         assert_eq!(captures.len(), 3);
         assert!(
             captures[1].raw["input"]
