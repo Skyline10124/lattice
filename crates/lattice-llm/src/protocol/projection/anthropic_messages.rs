@@ -110,11 +110,10 @@ pub fn wire_to_native(
                     .get("input")
                     .ok_or_else(|| malformed("tool_use block missing input"))?
                     .to_string();
-                let provider_call_id = match block.get("id") {
-                    Some(Value::String(id)) => Some(StringPatch::Set(id.clone())),
-                    Some(Value::Null) | None => None,
-                    _ => return Err(malformed("tool_use id is not a string")),
-                };
+                let id = block["id"]
+                    .as_str()
+                    .ok_or_else(|| malformed("tool_use.id is missing or not a string"))?;
+                let provider_call_id = Some(StringPatch::Set(id.into()));
                 reply.push(PartDelta::ToolMetadata {
                     index,
                     name: Some(StringPatch::Set(name.into())),
@@ -192,26 +191,16 @@ pub fn native_to_wire<S: ToolCallState>(
     }))
 }
 
-/// One user turn whose content carries every `tool_result` block, in closure
-/// order. Blocks correlate to their `tool_use` through `tool_use_id`, so a
-/// closing call with no provider ID cannot be encoded. `Failed` closures set
-/// the official `is_error` flag.
+/// 按调用顺序写 tool_result；旧历史缺少 ID 时省略 tool_use_id，失败结果保留 is_error。
 pub(crate) fn tool_result_messages(
     closures: &[ToolResultClosure],
 ) -> Result<Vec<Value>, ProjectionError> {
     let mut blocks: Vec<Value> = Vec::with_capacity(closures.len());
     for closure in closures {
-        let Some(tool_use_id) = closure.provider_call_id.as_deref() else {
-            return Err(ProjectionError::ToolResultWithoutProviderCallId {
-                provider: Protocol::Messages,
-                invocation_id: closure.invocation_id,
-            });
-        };
-        let mut block = json!({
-            "type": "tool_result",
-            "tool_use_id": tool_use_id,
-            "content": closure.content,
-        });
+        let mut block = json!({"type":"tool_result", "content":closure.content});
+        if let Some(id) = &closure.provider_call_id {
+            block["tool_use_id"] = id.clone().into();
+        }
         if matches!(
             closure.outcome,
             lattice_conversation::ToolResultOutcome::Failed

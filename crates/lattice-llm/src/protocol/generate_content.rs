@@ -195,18 +195,13 @@ impl GeminiSseParser {
                                 false,
                             )];
                         };
-                        let provider_call_id = match function.get("id") {
-                            Some(serde_json::Value::String(id)) => {
-                                Some(StringPatch::Set(id.clone()))
-                            }
-                            Some(serde_json::Value::Null) | None => None,
-                            _ => {
-                                return vec![ProtocolEvent::error(
-                                    "malformed generateContent wire: functionCall id is not a string",
-                                    false,
-                                )];
-                            }
+                        let Some(id) = function["id"].as_str() else {
+                            return vec![ProtocolEvent::error(
+                                "malformed generateContent wire: functionCall.id is missing or not a string",
+                                false,
+                            )];
                         };
+                        let provider_call_id = Some(StringPatch::Set(id.into()));
                         events.push(ProtocolEvent::Part(PartDelta::ToolMetadata {
                             index,
                             name: Some(StringPatch::Set(name.into())),
@@ -404,13 +399,23 @@ mod tests {
     }
 
     #[test]
-    fn parser_preserves_thought_state_and_optional_ids_without_synthesis() {
+    fn parser_requires_tool_ids() {
         for (id_field, expected_id) in [(",\"id\":\"real-id\"", Some("real-id")), ("", None)] {
             let mut parser = Parser::new(Protocol::GenerateContent);
             let chunk = format!(
                 r#"{{"candidates":[{{"content":{{"role":"model","parts":[{{"text":"reason","thought":true,"thoughtSignature":"sig"}},{{"functionCall":{{"name":"observe__workspace","args":{{}}{id_field}}}}}]}},"finishReason":"STOP"}}]}}"#
             );
             let events = parser.parse_chunk(None, &chunk);
+            if expected_id.is_none() {
+                assert_eq!(
+                    crate::test_reply::failure(&events).as_deref(),
+                    Some(
+                        "malformed generateContent wire: functionCall.id is missing or not a string"
+                    )
+                );
+                assert!(parser.parse_chunk(None, &chunk).is_empty());
+                continue;
+            }
             let message = events
                 .iter()
                 .find_map(|event| match event {

@@ -14,7 +14,6 @@ use lattice_agent::{
     ModelStopCause,
 };
 use lattice_conversation::ConversationItem;
-use lattice_llm::protocol::projection::ProjectionError;
 use lattice_session::store::*;
 use std::sync::{
     Arc,
@@ -387,7 +386,7 @@ pub(crate) async fn run_coordinator_saga(
                         },
                     }
                 }
-                Err(ModelStepError::Projection(error)) => AttemptStopped {
+                Err(ModelStepError::Projection(_)) => AttemptStopped {
                     key,
                     origin: origin.clone(),
                     usage: None,
@@ -396,11 +395,7 @@ pub(crate) async fn run_coordinator_saga(
                     retry_delay_ms: None,
                     cause: StopCause::ProviderError { retryable: false },
                     diagnostic: AttemptDiagnostic {
-                        provider_error: Some(match error {
-                            ProjectionError::ToolResultWithoutProviderCallId { .. } =>
-                                "history has tool calls from another protocol; start a new session or rewind before them",
-                            _ => "provider request projection failed",
-                        }.into()),
+                        provider_error: Some("provider request projection failed".into()),
                         ..Default::default()
                     },
                 },

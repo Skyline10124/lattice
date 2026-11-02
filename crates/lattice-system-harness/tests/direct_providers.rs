@@ -1764,6 +1764,10 @@ fn same_protocol_provider_switch_preserves_tool_ids_and_restores_source_reasonin
         ]},
         SseScript::plain("generate done"),
         SseScript::plain("back to first"),
+        SseScript::plain("cross protocol done"),
+        SseScript::plain("cross protocol done"),
+        SseScript::plain("cross protocol done"),
+        SseScript::plain("cross protocol done"),
     ])).unwrap();
     for (model, target) in [
         ("first", ProviderTarget::Custom("openai-chat")),
@@ -1903,7 +1907,6 @@ fn same_protocol_provider_switch_preserves_tool_ids_and_restores_source_reasonin
         assert!(cross_wire.contains("replay sentinel"));
         assert!(cross_wire.contains("observe__workspace"));
         for material in [
-            "replay-call",
             "source-a-reasoning",
             "source-b-reasoning",
             "thoughtSignature",
@@ -1916,6 +1919,23 @@ fn same_protocol_provider_switch_preserves_tool_ids_and_restores_source_reasonin
                 "cross protocol leaked {material}"
             );
         }
+        let parts: Vec<_> = captures[3].raw["contents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|item| item["parts"].as_array().unwrap())
+            .collect();
+        assert!(
+            parts
+                .iter()
+                .any(|part| part["functionCall"]["id"] == "replay-call")
+        );
+        assert!(parts.iter().any(|part| {
+            part["functionResponse"]["id"] == "replay-call"
+                && part["functionResponse"]
+                    .to_string()
+                    .contains("replay sentinel")
+        }));
         let restored = &captures[4].raw["messages"];
         assert_eq!(restored.as_array().unwrap().len(), 5);
         assert_eq!(restored[1]["content"], "read notes");
@@ -1939,13 +1959,16 @@ fn same_protocol_provider_switch_preserves_tool_ids_and_restores_source_reasonin
             .run_command(&["--json", "session", "turn", source_turn])
             .unwrap();
         evidence.record_command("source history before Interactions projection", &before);
-        for model in [
+        for (index, model) in [
             "interactions-fixture/interactions-model",
             "openai/current",
             "xai/current",
             "google/current",
-        ] {
-            let failed = support::cli(
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let sent = support::cli(
                 &world,
                 &spec,
                 &[
@@ -1960,26 +1983,45 @@ fn same_protocol_provider_switch_preserves_tool_ids_and_restores_source_reasonin
                 ],
             );
             evidence.record_command(
-                format!("{model} rejects missing call ID before dispatch"),
-                &failed,
+                format!("{model} sends original call IDs across protocols"),
+                &sent,
             );
-            assert!(failed.is_clean_exit(1), "{model}: {}", failed.summary());
-            let failed = support::parse_send_stdout(&failed.stdout, failed.exit_code());
-            assert_eq!(failed.closed_result().unwrap().2, "failed");
-            let entries = failed.entries();
-            let step = &entries.last().unwrap().raw["step"];
+            assert!(sent.is_clean_exit(0), "{model}: {}", sent.summary());
+            let parsed = support::parse_send_stdout(&sent.stdout, sent.exit_code());
+            assert_eq!(parsed.closed_result().unwrap().2, "completed");
+            let turn = support::live_turn(&parsed);
+            assert_eq!(turn["steps"].as_array().unwrap().len(), 1);
+            let step = &turn["steps"][0];
             assert_eq!(step["attempts"].as_array().unwrap().len(), 1);
-            assert_eq!(
-                step["attempts"][0]["end"]["cause"],
-                json!({"cause":"provider_error","retryable":false})
-            );
-            let diagnostic = step["attempts"][0]["end"]["diagnostic"].as_str().unwrap();
-            assert_eq!(
-                diagnostic,
-                "history has tool calls from another protocol; start a new session or rewind before them"
-            );
             assert!(step["slots"].as_array().unwrap().is_empty());
-            assert_eq!(server.captured_requests().len(), 5);
+            let captures = server.captured_requests();
+            assert_eq!(captures.len(), 6 + index);
+            let capture = captures.last().unwrap();
+            let items = capture.raw["input"].as_array().unwrap();
+            let interactions =
+                model.starts_with("google/") || model.starts_with("interactions-fixture/");
+            assert!(items.iter().any(|item| item["type"] == "function_call"
+                && item[if interactions { "id" } else { "call_id" }] == "replay-call"));
+            assert!(items.iter().any(|item| item["type"]
+                == if interactions {
+                    "function_result"
+                } else {
+                    "function_call_output"
+                }
+                && item["call_id"] == "replay-call"
+                && item.to_string().contains("replay sentinel")));
+            for material in [
+                "source-a-reasoning",
+                "source-b-reasoning",
+                "thoughtSignature",
+                "signature",
+                "reasoning_content",
+            ] {
+                assert!(
+                    !capture.raw.to_string().contains(material),
+                    "{model}: leaked {material}"
+                );
+            }
         }
         let after = send
             .run_command(&["--json", "session", "turn", source_turn])

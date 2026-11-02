@@ -332,6 +332,12 @@ impl OpenAiSseParser {
                         let index = if let Some(index) = self.tool_calls.get(&wire_index) {
                             *index
                         } else {
+                            if call["id"].as_str().is_none() {
+                                return vec![ProtocolEvent::error(
+                                    "malformed Chat Completions wire: tool_calls[].id is missing or not a string",
+                                    false,
+                                )];
+                            }
                             self.close_text(&mut events);
                             let index = self.next_index;
                             self.next_index += 1;
@@ -425,7 +431,7 @@ mod tests {
             .collect()
     }
     fn call_delta(index: u32, name: &str, arguments: &str) -> serde_json::Value {
-        json!({"tool_calls": [{"index": index, "function": {"name": name, "arguments": arguments}}]})
+        json!({"tool_calls": [{"index": index, "id":format!("call_{index}"), "function": {"name": name, "arguments": arguments}}]})
     }
     fn assert_limit(events: &[LlmEvent], kind: lattice_conversation::LimitKind) {
         assert_eq!(
@@ -547,7 +553,7 @@ mod tests {
             for late in [false, true] {
                 let mut parser = parser();
                 if late {
-                    assert!(delta(&mut parser, json!({"tool_calls":[{"index":9,"type":"function","function":{"name":"f","arguments":"{"}}]})).is_empty());
+                    assert!(delta(&mut parser, json!({"tool_calls":[{"index":9,"id":"call_9","type":"function","function":{"name":"f","arguments":"{"}}]})).is_empty());
                 }
                 let events = delta(
                     &mut parser,
@@ -583,7 +589,7 @@ mod tests {
         let mut parser = parser();
         delta(
             &mut parser,
-            json!({"tool_calls":[{"index":9,"type":"function","function":{"name":"f","arguments":"{"}}]}),
+            json!({"tool_calls":[{"index":9,"id":"call_9","type":"function","function":{"name":"f","arguments":"{"}}]}),
         );
         delta(
             &mut parser,
@@ -598,14 +604,26 @@ mod tests {
     }
 
     #[test]
-    fn parser_preserves_real_and_missing_ids_without_synthesis() {
+    fn parser_requires_tool_ids() {
         for id in [Some("call_abc"), None] {
             let mut parser = parser();
             let mut call = call_delta(0, "observe__workspace", "{}");
             if let Some(id) = id {
                 call["tool_calls"][0]["id"] = json!(id);
+            } else {
+                call["tool_calls"][0].as_object_mut().unwrap().remove("id");
             }
-            delta(&mut parser, call);
+            let started = delta(&mut parser, call);
+            if id.is_none() {
+                assert_eq!(
+                    crate::test_reply::failure(&started).as_deref(),
+                    Some(
+                        "malformed Chat Completions wire: tool_calls[].id is missing or not a string"
+                    )
+                );
+                assert!(finish(&mut parser).is_empty());
+                continue;
+            }
             assert!(parser.raw.iter().any(|event| matches!(event, ProtocolEvent::Part(PartDelta::ToolMetadata { name: Some(StringPatch::Set(name)), provider_call_id, .. })
                 if name == "observe__workspace" && provider_call_id.as_ref() == id.map(|id| StringPatch::Set(id.into())).as_ref())));
             let events = finish(&mut parser);
@@ -647,7 +665,10 @@ mod tests {
         let first = parser.parse_chunk(None, r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"observe__workspace","arguments":"{\"path\""}}]}}]}"#);
         assert!(first.is_empty());
         assert!(parser.raw.iter().any(|event| matches!(event, ProtocolEvent::Part(PartDelta::ToolMetadata { name: Some(StringPatch::Set(name)), provider_call_id: Some(StringPatch::Set(id)), .. }) if name == "observe__workspace" && id == "call_1")));
-        delta(&mut parser, call_delta(0, "", ":\"a\"}"));
+        delta(
+            &mut parser,
+            json!({"tool_calls":[{"index":0,"function":{"arguments":":\"a\"}"}}]}),
+        );
         let events = finish(&mut parser);
         let call = completed(&events).tool_calls().next().unwrap().1;
         assert_eq!(call.name, "observe__workspace");
@@ -710,7 +731,7 @@ mod tests {
         delta(&mut parser, json!({"content":"A"}));
         let events = delta(
             &mut parser,
-            json!({"content":"B","reasoning_content":"R","tool_calls":[{"index":8,"function":{"name":"t","arguments":"{}"}}]}),
+            json!({"content":"B","reasoning_content":"R","tool_calls":[{"index":8,"id":"call_8","function":{"name":"t","arguments":"{}"}}]}),
         );
         assert_eq!(
             events,
@@ -785,7 +806,7 @@ mod tests {
         let mut parser = parser();
         let events = delta(
             &mut parser,
-            json!({"tool_calls":[{"index":9,"function":{"arguments":"{\"path\":"}}]}),
+            json!({"tool_calls":[{"index":9,"id":"real-id","function":{"arguments":"{\"path\":"}}]}),
         );
         assert!(events.is_empty());
         assert!(matches!(
@@ -795,6 +816,7 @@ mod tests {
                     index: 0,
                     kind: PartKind::ToolCall
                 }),
+                ProtocolEvent::Part(PartDelta::ToolMetadata { index: 0, .. }),
                 ProtocolEvent::Part(PartDelta::ToolArguments { index: 0, .. })
             ]
         ));
@@ -802,7 +824,7 @@ mod tests {
         delta(&mut parser, call_delta(2, "second", "{}"));
         delta(
             &mut parser,
-            json!({"tool_calls":[{"index":9,"id":"real-id","function":{"name":"observe__workspace","arguments":"\"a\"}"}}]}),
+            json!({"tool_calls":[{"index":9,"function":{"name":"observe__workspace","arguments":"\"a\"}"}}]}),
         );
         assert!(matches!(
             &parser.raw[..],
@@ -936,14 +958,15 @@ mod tests {
             &crate::test_reply::replay_origin(Protocol::GenerateContent),
         );
         assert_eq!(labels(&projected), ["T:A", "C:observe__workspace", "T:B"]);
-        assert!(
+        assert_eq!(
             projected
                 .tool_calls()
                 .next()
                 .unwrap()
                 .1
                 .provider_call_id
-                .is_none()
+                .as_deref(),
+            Some("real")
         );
         assert_eq!(source, original);
     }

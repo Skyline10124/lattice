@@ -57,7 +57,7 @@ fn seed(fixture: &TestFixture) -> (lancet_protocol::SessionId, lancet_protocol::
 }
 
 #[tokio::test]
-async fn projection_failures_explain_missing_call_ids_without_exposing_identity() {
+async fn projection_failures_use_a_generic_non_retryable_diagnostic() {
     use lattice_llm::protocol::projection::ProjectionError;
 
     struct FailingProjection(ProjectionError);
@@ -72,35 +72,23 @@ async fn projection_failures_explain_missing_call_ids_without_exposing_identity(
             Err(Box::new(lattice_llm::LlmError::Projection(self.0.clone())))
         }
     }
-    let invocation =
-        lattice_conversation::InvocationId::parse("00000000-0000-4000-8000-000000001122").unwrap();
-    for (error, expected) in [
-        (
-            ProjectionError::ToolResultWithoutProviderCallId {
-                provider: lattice_conversation::Protocol::Responses,
-                invocation_id: invocation,
-            },
-            "history has tool calls from another protocol; start a new session or rewind before them",
-        ),
-        (
-            ProjectionError::InvalidStep {
-                detail: "private-call-detail",
-            },
-            "provider request projection failed",
-        ),
-    ] {
-        let fixture = setup_fixture(Arc::new(FailingProjection(error)), &[]);
-        let (detail, _) = fixture.run(fixture.request.clone()).await;
-        assert_eq!(detail.summary.outcome, PublicTurnOutcome::Failed);
-        let step = &detail.steps[0];
-        assert_eq!(step.attempts.len(), 1);
-        assert!(step.slots.is_empty());
-        let AttemptEndDetail::Stopped { cause, diagnostic } = &step.attempts[0].end else {
-            panic!("projection failure must stop the attempt");
-        };
-        assert_eq!(*cause, StopCause::ProviderError { retryable: false });
-        assert_eq!(diagnostic.as_deref(), Some(expected));
-    }
+    let error = ProjectionError::InvalidStep {
+        detail: "private-call-detail",
+    };
+    let fixture = setup_fixture(Arc::new(FailingProjection(error)), &[]);
+    let (detail, _) = fixture.run(fixture.request.clone()).await;
+    assert_eq!(detail.summary.outcome, PublicTurnOutcome::Failed);
+    let step = &detail.steps[0];
+    assert_eq!(step.attempts.len(), 1);
+    assert!(step.slots.is_empty());
+    let AttemptEndDetail::Stopped { cause, diagnostic } = &step.attempts[0].end else {
+        panic!("projection failure must stop the attempt");
+    };
+    assert_eq!(*cause, StopCause::ProviderError { retryable: false });
+    assert_eq!(
+        diagnostic.as_deref(),
+        Some("provider request projection failed")
+    );
 }
 
 #[tokio::test]

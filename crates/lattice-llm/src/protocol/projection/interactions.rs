@@ -171,12 +171,20 @@ pub(super) fn native_to_wire<S: ToolCallState>(
 pub(super) fn tool_result_messages(
     closures: &[ToolResultClosure],
 ) -> Result<Vec<Value>, ProjectionError> {
-    closures.iter().map(|closure| {
-        let id = closure.provider_call_id.as_deref().ok_or(ProjectionError::ToolResultWithoutProviderCallId { provider: Protocol::Interactions, invocation_id: closure.invocation_id })?;
-        let mut step = json!({"type":"function_result","call_id":id,"name":closure.name,"result":closure.content});
-        if closure.outcome == ToolResultOutcome::Failed { step["is_error"] = true.into(); }
-        Ok(step)
-    }).collect()
+    closures
+        .iter()
+        .map(|closure| {
+            let mut step =
+                json!({"type":"function_result","name":closure.name,"result":closure.content});
+            if let Some(id) = &closure.provider_call_id {
+                step["call_id"] = id.clone().into();
+            }
+            if closure.outcome == ToolResultOutcome::Failed {
+                step["is_error"] = true.into();
+            }
+            Ok(step)
+        })
+        .collect()
 }
 
 pub(super) fn usage(wire: &Value) -> Result<Option<TokenUsage>, ProjectionError> {

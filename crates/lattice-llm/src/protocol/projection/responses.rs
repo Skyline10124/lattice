@@ -240,13 +240,11 @@ pub(super) fn tool_result_messages(
     closures
         .iter()
         .map(|closure| {
-            let id = closure.provider_call_id.as_deref().ok_or(
-                ProjectionError::ToolResultWithoutProviderCallId {
-                    provider: Protocol::Responses,
-                    invocation_id: closure.invocation_id,
-                },
-            )?;
-            Ok(json!({"type":"function_call_output", "call_id":id, "output":closure.content}))
+            let mut item = json!({"type":"function_call_output", "output":closure.content});
+            if let Some(id) = &closure.provider_call_id {
+                item["call_id"] = id.clone().into();
+            }
+            Ok(item)
         })
         .collect()
 }

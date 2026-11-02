@@ -92,7 +92,11 @@ provider 配置、凭据与模型元数据是用户级的全局状态，由后�
 
 ### 回放来源
 
-每次尝试记录来源 `(protocol, provider id)`。reasoning、签名、加密 reasoning 与逐片段回放状态只在协议和 provider `id` 都相同时回放；任一不同时去除这些材料。来源不含 endpoint：同一 provider `id` 在 `providers.toml` 中改了 `base_url` 之后仍回放此前的签名，新 endpoint 可能拒绝这些签名；要换 endpoint 时使用新的 provider `id`。provider call ID 按协议判定：协议相同时保留，包括 provider `id` 不同的情况；协议不同时去除，目标协议无法在缺少 call ID 时编码工具结果的，返回投影错误。跨来源投影保留中立语义，切回原来源时使用树中保存的原消息。Responses 仅在模型元数据明确 `reasoning = true` 时带 `include: ["reasoning.encrypted_content"]`，使 `store: false` 时取得可回放的加密 reasoning；`false` 或没有该标志时不发送，是否选择档位及档位为 `off` 都不改变 include 的条件。Responses 回放时省略没有最终 `encrypted_content` 的 reasoning item，以及末尾没有后续 item 的 reasoning item；其文字仍以 Reasoning 语义保存。
+每次尝试记录来源 `(protocol, provider id)`。reasoning、签名、加密 reasoning 与逐片段回放状态只在协议和 provider `id` 都相同时回放；任一不同时去除这些材料。来源不含 endpoint：同一 provider `id` 在 `providers.toml` 中改了 `base_url` 之后仍回放此前的签名，新 endpoint 可能拒绝这些签名；要换 endpoint 时使用新的 provider `id`。
+
+provider call ID 在工具调用与工具结果两侧原样保留，切换协议或 provider 都不去除。旧历史缺少 call ID 时省略对应字段，不合成 ID，也不在本地判断目标协议是否接受，由目标 API 返回错误。所有协议的服务端工具调用响应都必须带 call ID；Chat Completions 流式调用以首次出现的增量为准，后续增量可省略 ID。缺少 ID 时当轮以不可重试的 malformed 错误停止，不保存回复、不执行工具。跨来源投影保留中立语义，切回原来源时使用树中保存的原消息。
+
+Responses 仅在模型元数据明确 `reasoning = true` 时带 `include: ["reasoning.encrypted_content"]`，使 `store: false` 时取得可回放的加密 reasoning；`false` 或没有该标志时不发送，是否选择档位及档位为 `off` 都不改变 include 的条件。Responses 回放时省略没有最终 `encrypted_content` 的 reasoning item，以及末尾没有后续 item 的 reasoning item；其文字仍以 Reasoning 语义保存。
 
 Anthropic Messages 的 `redacted_thinking` 以空 Reasoning 片段及带 `redacted:` 标记的回放状态保存 `data`，只有 Messages codec 解释该标记；普通 thinking（包括空文本）的 signature 保持原编码。同完整来源时恢复原块、data 与顺序，跨来源时移除整个 Reasoning 片段，不产生空 Text。标记计入单片段 64 KiB 与尝试总量限制，data 不进入正文或 reasoning 显示增量。
 
@@ -116,7 +120,7 @@ Anthropic Messages 的 `redacted_thinking` 以空 Reasoning 片段及带 `redact
 
 | `id` | `protocol` | `base_url` | `auth` | `catalog` | features |
 | --- | --- | --- | --- | --- | --- |
-| `openai` | `responses` | `https://api.openai.com/v1` | `bearer` | `openai` | `reasoning_summary = "auto"` |
+| `openai` | `responses` | `https://api.openai.com/v1` | `bearer` | `openai` | — |
 | `chatgpt` | `responses` | `https://api.openai.com/v1` | `oauth:chatgpt` | `openai` | — |
 | `anthropic` | `anthropic-messages` | `https://api.anthropic.com` | `x-api-key` | `anthropic` | — |
 | `google` | `interactions` | `https://generativelanguage.googleapis.com/v1beta` | `x-goog-api-key` | `google` | — |
@@ -139,7 +143,6 @@ Anthropic Messages 的 `redacted_thinking` 以空 Reasoning 片段及带 `redact
 | `lmstudio` | `chat-completions` | `http://127.0.0.1:1234/v1` | `none` | `lmstudio` | — |
 
 - `generate-content` 协议保留，需要它的用户在 `providers.toml` 中新增一个使用该协议的 provider；内置 `google` 不能改 `protocol`。OpenAI 的新模型在 Chat Completions 上不能使用工具（[OpenAI 推理指南](https://developers.openai.com/api/docs/guides/reasoning)），所以 `openai` 以 Responses 为准。
-- `xai` 保持 `reasoning_summary = "none"`：xAI 文档没有提到 `reasoning.summary`，并说明 `grok-4.7` 不加参数就返回摘要；解析端照常接收摘要。
 - `chatgpt` 是 OpenAI 的订阅通道，不计入第一轮收录的 20 家，限制见 [Sign in with ChatGPT](#sign-in-with-chatgpt)。
 - 阿里云的文档推荐按工作空间区分的域名（`https://{WorkspaceId}.<地域>.maas.aliyuncs.com/compatible-mode/v1`），表中用的是仍可使用的旧域名；使用工作空间域名的用户在 `providers.toml` 中覆盖 `base_url`。
 - `ollama` 在 models.dev 中没有条目，它的模型没有元数据，可以在 `providers.toml` 中手写。

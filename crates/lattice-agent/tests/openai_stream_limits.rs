@@ -105,6 +105,10 @@ async fn order_f13_interleaved_legal_arguments_complete() {
         let mut frames = vec![];
         if !late_metadata {
             metadata(&mut frames, a);
+        } else {
+            frames.push(delta(
+                json!({"tool_calls":[{"index":a,"id":format!("call-{a}")}]}),
+            ));
         }
         arguments(&mut frames, a, &payload[..8]);
         metadata(&mut frames, b);
@@ -135,6 +139,8 @@ async fn order_f14_interleaved_limit_stops_at_crossing_fragment() {
         let mut frames = vec![];
         if !late_metadata {
             metadata(&mut frames, 9);
+        } else {
+            frames.push(delta(json!({"tool_calls":[{"index":9,"id":"call-9"}]})));
         }
         arguments(&mut frames, 9, &payload[..600_000]);
         metadata(&mut frames, 2);
