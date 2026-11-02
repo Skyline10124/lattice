@@ -43,10 +43,11 @@ pub fn build_request_json(
     request: &ChatRequest,
     model: &str,
     output_limit: Option<u64>,
-    cache: super::Cache,
+    features: super::MessagesFeatures,
     reasoning: Option<ReasoningPlan>,
     origin: &ReplayOrigin,
 ) -> Result<serde_json::Value, LlmError> {
+    let cache = features.cache;
     let projected = request_messages_to_wire(origin, &request.messages)?;
     let max_tokens = output_limit
         .filter(|limit| *limit != 0)
@@ -75,6 +76,11 @@ pub fn build_request_json(
                 serde_json::json!({"type":"enabled","budget_tokens":budget})
             }
         };
+    }
+    if features.thinking_display == super::ThinkingDisplay::Summarized
+        && body["thinking"]["type"] == "adaptive"
+    {
+        body["thinking"]["display"] = "summarized".into();
     }
 
     if let Some(system) = projected.system {
@@ -701,7 +707,10 @@ mod tests {
             &request,
             "claude-sonnet-4-6",
             None,
-            super::super::Cache::None,
+            super::super::MessagesFeatures {
+                cache: super::super::Cache::None,
+                ..Default::default()
+            },
             None,
             &crate::test_reply::replay_origin(Protocol::Messages),
         )

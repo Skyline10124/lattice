@@ -850,8 +850,10 @@ async fn protocol_and_auth_independently_select_wire_requests() {
                     received.body.get("max_tokens").is_none(),
                     "{cell}: max_tokens"
                 );
-                assert!(
-                    received.body.get("generationConfig").is_none(),
+                assert_eq!(
+                    received.body.get("generationConfig").cloned(),
+                    (protocol == "generate-content")
+                        .then(|| serde_json::json!({"thinkingConfig":{"includeThoughts":true}})),
                     "{cell}: generationConfig"
                 );
             }
@@ -959,9 +961,12 @@ async fn protocol_and_auth_independently_select_wire_requests() {
                     );
                     assert_eq!(received.body["store"], false);
                     assert_eq!(received.body["stream"], true);
+                    assert_eq!(
+                        received.body["generation_config"],
+                        serde_json::json!({"thinking_summaries":"auto"})
+                    );
                     for field in [
                         "thinking_summaries",
-                        "generation_config",
                         "prompt_cache_key",
                         "max_output_tokens",
                         "previous_interaction_id",
@@ -2579,40 +2584,86 @@ async fn builtin_protocol_switch_rejects_old_tool_history_before_connecting() {
 }
 
 #[tokio::test]
-async fn responses_include_uses_the_model_metadata_from_each_resolution() {
-    let mut server = Server::start(false).await;
-    let directory = private_dir();
-    configure(directory.path(), &server.url, "responses", "none");
-    let path = directory.path().join("providers.toml");
-    let source = std::fs::read_to_string(&path).unwrap();
-    std::fs::write(&path, format!("{source}\ncatalog='responses-fixture'\n")).unwrap();
-    let cache = directory.path().join("cache");
-    std::fs::create_dir_all(&cache).unwrap();
-    let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
-    let turn = gateway.open_turn();
-    for flag in [Some(false), Some(true), None] {
-        let mut model = serde_json::json!({"id":"model-id"});
-        if let Some(flag) = flag {
-            model["reasoning"] = flag.into();
-        }
-        std::fs::write(
-            cache.join("models.json"),
-            serde_json::to_vec(
-                &serde_json::json!({"responses-fixture":{"models":{"model-id":model}}}),
+async fn reasoning_text_controls_use_the_model_metadata_from_each_resolution() {
+    for protocol in ["responses", "interactions", "generate-content"] {
+        let mut server = Server::start(false).await;
+        let directory = private_dir();
+        configure(directory.path(), &server.url, protocol, "none");
+        let path = directory.path().join("providers.toml");
+        let source = std::fs::read_to_string(&path).unwrap();
+        let cache = directory.path().join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
+        let turn = gateway.open_turn();
+        let scopes = if protocol == "responses" {
+            vec![
+                Some("providers.test.features"),
+                Some("providers.test.models.model-id.features"),
+            ]
+        } else {
+            vec![None]
+        };
+        for scope in scopes {
+            let features = scope
+                .map(|scope| format!("[{scope}]\nreasoning_summary='auto'\n"))
+                .unwrap_or_default();
+            std::fs::write(
+                &path,
+                format!("{source}\ncatalog='reasoning-fixture'\n{features}"),
             )
-            .unwrap(),
-        )
-        .unwrap();
-        let request = request("test");
-        complete(
-            turn.stream_chat(request, StreamControl::default())
-                .await
-                .unwrap(),
-        )
-        .await;
-        let received = server.next().await;
-        assert_eq!(received.body.get("include").is_some(), flag != Some(false));
-        assert!(received.body.get("reasoning").is_none());
+            .unwrap();
+            for (flag, present) in [
+                (Some(false), true),
+                (Some(true), true),
+                (None, true),
+                (None, false),
+            ] {
+                let mut model = serde_json::json!({"id":"model-id"});
+                if let Some(flag) = flag {
+                    model["reasoning"] = flag.into();
+                }
+                let models = if present {
+                    serde_json::json!({"model-id":model})
+                } else {
+                    serde_json::json!({})
+                };
+                std::fs::write(
+                    cache.join("models.json"),
+                    serde_json::to_vec(&serde_json::json!({"reasoning-fixture":{"models":models}}))
+                        .unwrap(),
+                )
+                .unwrap();
+                complete(
+                    turn.stream_chat(request("test"), StreamControl::default())
+                        .await
+                        .unwrap(),
+                )
+                .await;
+                let body = server.next().await.body;
+                let (actual, expected) = match protocol {
+                    "responses" => {
+                        assert_eq!(body.get("include").is_some(), flag != Some(false));
+                        (
+                            body.get("reasoning").cloned(),
+                            serde_json::json!({"summary":"auto"}),
+                        )
+                    }
+                    "interactions" => (
+                        body.get("generation_config").cloned(),
+                        serde_json::json!({"thinking_summaries":"auto"}),
+                    ),
+                    _ => (
+                        body.get("generationConfig").cloned(),
+                        serde_json::json!({"thinkingConfig":{"includeThoughts":true}}),
+                    ),
+                };
+                assert_eq!(
+                    actual,
+                    (flag != Some(false)).then_some(expected),
+                    "{protocol}/{flag:?}/present={present}"
+                );
+            }
+        }
     }
 }
 

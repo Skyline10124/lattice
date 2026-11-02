@@ -49,7 +49,14 @@ fn request_controls_preserve_session_tools_metadata_and_effort() {
                 effort,
                 enable_toggle: false,
             });
-            let body = build_request_json(&request, plan, model_reasoning, &origin()).unwrap();
+            let body = build_request_json(
+                &request,
+                ResponsesFeatures::default(),
+                plan,
+                model_reasoning,
+                &origin(),
+            )
+            .unwrap();
             assert_eq!(
                 body.get("include").is_some(),
                 model_reasoning != Some(false)
@@ -168,7 +175,7 @@ fn interleaved_text_and_reasoning_keep_arrival_order_and_ignore_done_snapshots()
     assert_eq!(message.as_message().parts.len(), 3);
     assert_eq!(
         crate::protocol::projection::native_to_wire(&origin(), message.as_message()).unwrap(),
-        json!([text, reasoning])
+        json!([text])
     );
 }
 
@@ -199,7 +206,7 @@ fn reasoning_content_and_summary_use_separate_indices_and_keep_live_order() {
     assert_eq!(message.as_message().parts.len(), 3);
     assert_eq!(
         crate::protocol::projection::native_to_wire(&origin(), message.as_message()).unwrap(),
-        json!([item])
+        json!([])
     );
 }
 
@@ -318,24 +325,36 @@ fn empty_reasoning_stays_before_calls_and_late_summary_does_not_backfill_it() {
 }
 
 #[test]
-fn failures_keep_usage_and_do_not_turn_incomplete_into_length() {
-    for (kind, detail) in [
+fn failures_keep_usage_and_unknown_incomplete_reasons_still_fail() {
+    for (kind, status, detail, diagnostic) in [
         (
             "response.incomplete",
-            json!({"incomplete_details":{"reason":"max_output_tokens"}}),
+            "incomplete",
+            json!({"incomplete_details":{"reason":"unknown_reason"}}),
+            "Responses incomplete: unknown_reason",
         ),
         (
             "response.failed",
+            "failed",
             json!({"error":{"code":"insufficient_quota","message":"no credit"}}),
+            "no credit",
         ),
     ] {
-        let mut failed = json!({"status":"failed","usage":{"input_tokens":11,"output_tokens":3}});
+        let mut failed =
+            json!({"status":status,"output":[],"usage":{"input_tokens":11,"output_tokens":3}});
         failed
             .as_object_mut()
             .unwrap()
             .extend(detail.as_object().unwrap().clone());
         let (_, outcome, report) = collect(vec![json!({"type":kind,"response":failed})]);
-        assert!(matches!(outcome, ReplyOutcome::Interrupted { .. }));
+        let ReplyOutcome::Interrupted {
+            reason: crate::ReplyStop::Stream(crate::StreamStop::Provider(failure)),
+        } = outcome
+        else {
+            panic!("expected provider failure")
+        };
+        assert!(!failure.retryable);
+        assert!(failure.message.contains(diagnostic));
         assert_eq!(report.usage.unwrap().input, Some(11));
         assert_eq!(report.finish_reason, None);
     }
@@ -352,6 +371,120 @@ fn failures_keep_usage_and_do_not_turn_incomplete_into_length() {
         ]);
         assert!(
             matches!(outcome,ReplyOutcome::Interrupted {reason:crate::ReplyStop::Stream(crate::StreamStop::Provider(failure))} if failure.retryable==retryable)
+        );
+    }
+}
+
+#[test]
+fn incomplete_reasons_close_open_items_and_validate_the_complete_tool_batch() {
+    use lattice_conversation::{AttemptRejection, MessageSemantic, ToolCallValidation};
+    for (reason, finish_reason) in [
+        ("max_output_tokens", "length"),
+        ("content_filter", "content_filter"),
+    ] {
+        for snapshot in [false, true] {
+            let mut terminal = json!({"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":reason},"usage":{"input_tokens":11,"output_tokens":3}}});
+            if snapshot {
+                terminal["response"]["output"] = json!([
+                    {"type":"reasoning","id":"rs","status":"in_progress","summary":[{"type":"summary_text","text":"think"}],"encrypted_content":"final"},
+                    {"type":"message","role":"assistant","id":"msg","status":"incomplete","content":[{"type":"output_text","text":"partial"}]}
+                ]);
+            }
+            let (live, outcome, report) = collect(vec![
+                json!({"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs","summary":[],"encrypted_content":"unfinished"}}),
+                json!({"type":"response.reasoning_summary_part.added","output_index":0,"item_id":"rs","summary_index":0,"part":{"type":"summary_text","text":""}}),
+                json!({"type":"response.reasoning_summary_text.delta","output_index":0,"item_id":"rs","summary_index":0,"delta":"think"}),
+                json!({"type":"response.output_item.added","output_index":1,"item":{"type":"message","role":"assistant","id":"msg","content":[]}}),
+                json!({"type":"response.content_part.added","output_index":1,"item_id":"msg","content_index":0,"part":{"type":"output_text","text":""}}),
+                json!({"type":"response.output_text.delta","output_index":1,"item_id":"msg","content_index":0,"delta":"partial"}),
+                terminal,
+            ]);
+            assert_eq!(
+                live,
+                vec![
+                    LlmEvent::Delta(crate::LiveDelta::Reasoning("think".into())),
+                    LlmEvent::Delta(crate::LiveDelta::Text("partial".into())),
+                ]
+            );
+            let ReplyOutcome::Complete { message } = outcome else {
+                panic!("incomplete {reason} must save its reply: {outcome:?}")
+            };
+            assert!(
+                matches!(&message.as_message().parts[0].semantic, MessageSemantic::Reasoning { text } if text == "think")
+            );
+            assert!(
+                matches!(&message.as_message().parts[1].semantic, MessageSemantic::Text { text } if text == "partial")
+            );
+            assert_eq!(message.as_message().parts.len(), 2);
+            let usage = report.usage.unwrap();
+            assert_eq!((usage.input, usage.output), (Some(11), Some(3)));
+            assert_eq!(report.finish_reason.as_deref(), Some(finish_reason));
+        }
+        for arguments in ["{\"partial\":", "{}"] {
+            let (_, outcome, report) = collect(vec![
+                json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc","call_id":"call","name":"observe__workspace","arguments":""}}),
+                json!({"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc","delta":arguments}),
+                json!({"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":reason}}}),
+            ]);
+            assert_eq!(report.finish_reason.as_deref(), Some(finish_reason));
+            if arguments == "{}" {
+                let ReplyOutcome::Complete { message } = outcome else {
+                    panic!("complete arguments must survive incomplete: {outcome:?}")
+                };
+                assert_eq!(message.as_message().tool_calls().count(), 1);
+            } else {
+                assert!(matches!(
+                    outcome,
+                    ReplyOutcome::Rejected {
+                        rejection: AttemptRejection::InvalidToolCall {
+                            validation: ToolCallValidation::MalformedArguments { call_ordinal: 0 }
+                        },
+                        ..
+                    }
+                ));
+            }
+        }
+    }
+}
+
+#[test]
+fn reasoning_replay_requires_final_cipher_and_a_following_item() {
+    use lattice_conversation::MessageSemantic;
+    for (cipher, following, replayed) in [
+        (None, true, false),
+        (Some("final"), false, false),
+        (Some("final"), true, true),
+    ] {
+        let mut reasoning = json!({"type":"reasoning","id":"rs","summary":[{"type":"summary_text","text":"saved reasoning"}]});
+        if let Some(cipher) = cipher {
+            reasoning["encrypted_content"] = cipher.into();
+        }
+        let mut output = vec![reasoning.clone()];
+        let text = message("msg", "final_answer", "answer");
+        if following {
+            output.push(text.clone());
+        }
+        let (_, outcome, _) = collect(vec![
+            json!({"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs","summary":[],"encrypted_content":"unfinished"}}),
+            json!({"type":"response.output_item.done","output_index":0,"item":reasoning}),
+            response(output),
+        ]);
+        let ReplyOutcome::Complete { message } = outcome else {
+            panic!("complete")
+        };
+        assert!(
+            matches!(&message.as_message().parts[0].semantic, MessageSemantic::Reasoning { text } if text == "saved reasoning")
+        );
+        let mut expected = Vec::new();
+        if replayed {
+            expected.push(reasoning);
+        }
+        if following {
+            expected.push(text);
+        }
+        assert_eq!(
+            crate::protocol::projection::native_to_wire(&origin(), message.as_message()).unwrap(),
+            json!(expected)
         );
     }
 }

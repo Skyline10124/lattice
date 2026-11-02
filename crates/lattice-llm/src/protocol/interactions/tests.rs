@@ -417,15 +417,29 @@ fn only_successful_interaction_statuses_complete_and_errors_use_codes() {
             json!({"total_output_tokens":2,"total_thought_tokens":3});
         let (_, outcome, report) = collect(vec![
             json!({"event_type":"interaction.status_update","status":"in_progress","usage":{"total_input_tokens":7}}),
+            start(0, json!({"type":"model_output"})),
+            delta(0, json!({"type":"text","text":"partial reply"})),
             terminal,
         ]);
-        assert!(
-            matches!(outcome, ReplyOutcome::Interrupted { .. }),
-            "{status}"
-        );
+        if status == "incomplete" {
+            let ReplyOutcome::Complete { message } = outcome else {
+                panic!("incomplete must save an open step: {outcome:?}")
+            };
+            assert_eq!(
+                crate::protocol::projection::native_to_wire(&origin(), message.as_message())
+                    .unwrap(),
+                json!([{"type":"model_output","content":[{"type":"text","text":"partial reply"}]}])
+            );
+            assert_eq!(report.finish_reason.as_deref(), Some("incomplete"));
+        } else {
+            assert!(
+                matches!(outcome, ReplyOutcome::Interrupted { .. }),
+                "{status}"
+            );
+            assert_eq!(report.finish_reason, None);
+        }
         assert_eq!(report.usage.as_ref().unwrap().input, Some(7));
         assert_eq!(report.usage.as_ref().unwrap().output, Some(5));
-        assert_eq!(report.finish_reason, None);
     }
     for (code, retry) in [
         ("api_error", true),
@@ -470,12 +484,40 @@ fn empty_parameters_remain_distinct_from_missing_or_malformed_streamed_arguments
                 json!({"type":"arguments_delta","arguments":arguments}),
             ));
         }
-        events.extend([stop(0), completed("requires_action")]);
-        let (_, outcome, _) = collect(events);
-        assert_eq!(
-            matches!(outcome, ReplyOutcome::Complete { .. }),
-            matches!(arguments, None | Some("{\"x\":1}"))
-        );
+        for status in ["requires_action", "incomplete"] {
+            let mut input = events.clone();
+            if status == "requires_action" {
+                input.push(stop(0));
+            }
+            input.push(completed(status));
+            let (_, outcome, report) = collect(input);
+            let accepted = matches!(arguments, None | Some("{\"x\":1}"));
+            assert_eq!(
+                matches!(outcome, ReplyOutcome::Complete { .. }),
+                accepted,
+                "{status}/{arguments:?}"
+            );
+            if accepted {
+                assert_eq!(
+                    report.finish_reason.as_deref(),
+                    Some(if status == "incomplete" {
+                        "incomplete"
+                    } else {
+                        "tool_calls"
+                    })
+                );
+            } else {
+                assert!(
+                    matches!(
+                        outcome,
+                        ReplyOutcome::Rejected {
+                            rejection: lattice_conversation::AttemptRejection::InvalidToolCall { .. }
+                        }
+                    ),
+                    "{status}/{arguments:?}: {outcome:?}"
+                );
+            }
+        }
     }
 }
 
@@ -574,10 +616,13 @@ fn request_keeps_tool_schema_and_omits_unselected_controls() {
         "desc",
         json!({"type":"object","additionalProperties":false,"properties":{"x":{"const":"x"}}}),
     ));
-    let body = build_request_json(&request, None, &origin()).unwrap();
+    let body = build_request_json(&request, None, None, &origin()).unwrap();
+    assert_eq!(
+        body["generation_config"],
+        json!({"thinking_summaries":"auto"})
+    );
     assert_eq!(body["tools"][0]["parameters"], request.tools[0].parameters);
     for field in [
-        "generation_config",
         "temperature",
         "top_p",
         "max_output_tokens",
