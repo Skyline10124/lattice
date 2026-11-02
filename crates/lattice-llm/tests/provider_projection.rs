@@ -49,6 +49,26 @@ fn fixture(name: &str) -> Value {
     serde_json::from_str(&bytes).expect("fixture is valid JSON")
 }
 
+#[test]
+fn interactions_replays_step_boundaries_and_signature_only_thought() {
+    let origin = replay_origin(Protocol::Interactions);
+    let wire = fixture("interactions_output.json");
+    let native = wire_to_native(&origin, &wire).expect("Interactions projection");
+    assert_eq!(native.parts.len(), 6);
+    assert!(
+        matches!(&native.parts[3].semantic, MessageSemantic::Reasoning { text } if text.is_empty())
+    );
+    assert_eq!(native_to_wire(&origin, &native).unwrap(), wire["steps"]);
+    assert_eq!(
+        tool_call_parts(&native)[0].1.provider_call_id.as_deref(),
+        Some("call_a")
+    );
+    assert_eq!(
+        tool_call_parts(&native)[1].1.provider_call_id.as_deref(),
+        Some("call_b")
+    );
+}
+
 fn openai_message(fixture: &Value) -> Value {
     fixture["choices"][0]["message"].clone()
 }
@@ -321,6 +341,7 @@ fn replay_origin_matrix_separates_opaque_state_from_call_ids() {
         Protocol::Messages,
         Protocol::GenerateContent,
         Protocol::Responses,
+        Protocol::Interactions,
     ];
     for (protocol, fixture_name) in [
         (
@@ -334,6 +355,7 @@ fn replay_origin_matrix_separates_opaque_state_from_call_ids() {
         ),
         (Protocol::GenerateContent, "gemini_thought_signature.json"),
         (Protocol::Responses, "responses_output.json"),
+        (Protocol::Interactions, "interactions_output.json"),
     ] {
         let original_origin = replay_origin(protocol);
         let source = wire_to_native(&original_origin, &fixture(fixture_name)).unwrap();
@@ -476,7 +498,10 @@ fn replay_origin_matrix_separates_opaque_state_from_call_ids() {
                             .unwrap()
                             .remove("reasoning_content");
                     }
-                    if target_protocol == Protocol::Responses {
+                    if matches!(
+                        target_protocol,
+                        Protocol::Responses | Protocol::Interactions
+                    ) {
                         let items = expected_assistant.as_array().unwrap();
                         assert_eq!(&messages[..items.len()], items);
                     } else {
@@ -555,7 +580,24 @@ fn replay_origin_matrix_separates_opaque_state_from_call_ids() {
                                 );
                             }
                         }
-                        _ => unreachable!(),
+                        Protocol::Interactions => {
+                            let items = projected_wire.as_array().unwrap();
+                            let calls: Vec<_> = items
+                                .iter()
+                                .filter(|item| item["type"] == "function_call")
+                                .collect();
+                            for (index, call) in calls.iter().enumerate() {
+                                assert_eq!(call["id"], source_ids[index].unwrap());
+                                assert_eq!(
+                                    messages[items.len() + index]["call_id"],
+                                    source_ids[index].unwrap()
+                                );
+                                assert_eq!(
+                                    messages[items.len() + index]["type"],
+                                    "function_result"
+                                );
+                            }
+                        }
                     }
                 }
                 let restored = project_cross_provider(&source, &original_origin);
@@ -948,6 +990,18 @@ fn tool_argument_limits_apply_to_every_provider() {
     let filler = MAX_TOOL_CALL_ARGUMENTS_BYTES - r#"{"a":""}"#.len();
     for (name, provider, filler_bytes, accepted) in [
         (
+            "interactions_exact_arguments_boundary",
+            Protocol::Interactions,
+            filler,
+            true,
+        ),
+        (
+            "interactions_arguments_boundary_plus_one",
+            Protocol::Interactions,
+            filler + 1,
+            false,
+        ),
+        (
             "responses_exact_arguments_boundary",
             Protocol::Responses,
             filler,
@@ -1017,7 +1071,9 @@ fn tool_argument_limits_apply_to_every_provider() {
                     {"functionCall": {"name": "t", "args": {"a": arguments}}}
                 ]}}]})
             }
-            _ => unreachable!("fixture selects an implemented protocol"),
+            Protocol::Interactions => {
+                serde_json::json!({"status":"requires_action","steps":[{"type":"function_call","id":"call_1","name":"t","arguments":{"a":arguments}}]})
+            }
         };
         let result = wire_to_native(&replay_origin(provider), &wire);
         if accepted {
@@ -1260,6 +1316,7 @@ fn structured_result_outcomes_and_large_success() {
         Protocol::Messages,
         Protocol::GenerateContent,
         Protocol::Responses,
+        Protocol::Interactions,
     ] {
         let assistant = bind_message(
             &wire_to_native(
@@ -1282,6 +1339,13 @@ fn structured_result_outcomes_and_large_success() {
             let text = match origin {
                 Protocol::ChatCompletions => wire[0]["content"].as_str().unwrap().to_string(),
                 Protocol::Responses => wire[0]["output"].as_str().unwrap().to_string(),
+                Protocol::Interactions => {
+                    assert_eq!(
+                        wire[0].get("is_error").and_then(Value::as_bool),
+                        (payload.outcome() == ToolResultOutcome::Failed).then_some(true)
+                    );
+                    wire[0]["result"].as_str().unwrap().to_string()
+                }
                 Protocol::Messages => wire[0]["content"][0]["content"]
                     .as_str()
                     .unwrap()
@@ -1294,7 +1358,6 @@ fn structured_result_outcomes_and_large_success() {
                         response.to_string()
                     }
                 }
-                _ => unreachable!("fixture selects an implemented protocol"),
             };
             let json: Value = serde_json::from_str(&text).unwrap();
             match index {
@@ -1331,6 +1394,11 @@ fn structured_result_outcomes_and_large_success() {
 fn structured_result_fixtures_and_missing_ids() {
     for (origin, source, expected) in [
         (
+            Protocol::Interactions,
+            "interactions_output.json",
+            "interactions_tool_result_request.json",
+        ),
+        (
             Protocol::ChatCompletions,
             "openai_assistant_tool_calls.json",
             "openai_tool_result_request.json",
@@ -1365,7 +1433,7 @@ fn structured_result_fixtures_and_missing_ids() {
         }
         let encoded = tool_results_to_wire(origin, &bound, &results).unwrap();
         assert_eq!(
-            if origin == Protocol::ChatCompletions {
+            if matches!(origin, Protocol::ChatCompletions | Protocol::Interactions) {
                 Value::Array(encoded)
             } else {
                 encoded[0].clone()
@@ -1373,7 +1441,11 @@ fn structured_result_fixtures_and_missing_ids() {
             fixture(expected)
         );
         if origin == Protocol::GenerateContent {
-            for target in [Protocol::ChatCompletions, Protocol::Messages] {
+            for target in [
+                Protocol::ChatCompletions,
+                Protocol::Messages,
+                Protocol::Interactions,
+            ] {
                 assert!(matches!(
                     tool_results_to_wire(target, &bound, &results),
                     Err(ProjectionError::ToolResultWithoutProviderCallId { .. })
@@ -1402,6 +1474,11 @@ fn structured_result_fixtures_and_missing_ids() {
 #[test]
 fn wire_usage_distinguishes_present_absent_and_malformed_blocks() {
     let cases = [
+        (
+            Protocol::Interactions,
+            fixture("interactions_output.json"),
+            serde_json::json!([12, 4, null, 8, 3]),
+        ),
         (
             Protocol::Responses,
             fixture("responses_output.json"),

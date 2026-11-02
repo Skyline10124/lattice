@@ -307,7 +307,7 @@ catalog = "arbitrary-entry"
                 "current",
                 json!(["off", "high"]),
             ),
-            ("pending-interactions/current", "current", json!([])),
+            ("pending-interactions/current", "current", json!(["high"])),
         ] {
             let reply = support::ipc(
                 &world,
@@ -359,7 +359,7 @@ catalog = "arbitrary-entry"
         );
         for provider in ["pending-responses", "pending-interactions"] {
             let output = cli(&world, &spec, &["--json", "models", "--provider", provider]);
-            evidence.record_command("unimplemented protocol model list", &output);
+            evidence.record_command("protocol model list", &output);
             assert!(output.is_clean_exit(0));
             let listed: Value = serde_json::from_slice(&output.stdout).unwrap();
             assert_eq!(listed["models"].as_array().unwrap().len(), 1);
@@ -369,10 +369,46 @@ catalog = "arbitrary-entry"
                 if provider == "pending-responses" {
                     json!(["off", "high"])
                 } else {
-                    json!([])
+                    json!(["high"])
                 }
             );
         }
+        let config = directory.join("providers.toml");
+        let source = std::fs::read_to_string(&config).unwrap();
+        std::fs::write(
+            config,
+            format!(
+                "{source}\n[providers.pending-interactions.models.invalid]\neffort=['xhigh']\n"
+            ),
+        )
+        .unwrap();
+        let output = cli(
+            &world,
+            &spec,
+            &["--json", "models", "--provider", "pending-interactions"],
+        );
+        evidence.record_command("Interactions model-level effort error", &output);
+        assert!(output.is_clean_exit(0));
+        let listed: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let models = listed["models"].as_array().unwrap();
+        let invalid = models
+            .iter()
+            .find(|model| model["model"] == "invalid")
+            .unwrap();
+        assert!(
+            invalid["config_error"]
+                .as_str()
+                .unwrap()
+                .contains("thinking_level")
+        );
+        assert_eq!(invalid["supported_efforts"], json!([]));
+        assert_eq!(
+            models
+                .iter()
+                .find(|model| model["model"] == "current")
+                .unwrap()["supported_efforts"],
+            json!(["high"])
+        );
         for query in [
             json!({"operation":"models", "provider":"local", "target":"local/current"}),
             json!({"operation":"models", "target":"missing/model"}),

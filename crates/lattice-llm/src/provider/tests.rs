@@ -504,7 +504,7 @@ fn feature_defaults_match_standard_protocol_behavior() {
     assert_eq!(
         Features::defaults(Protocol::Messages),
         Features::Messages(MessagesFeatures {
-            cache: Cache::Automatic
+            cache: Cache::Automatic,
         })
     );
 }
@@ -519,13 +519,18 @@ fn rejects_unknown_feature_values_types_and_features_from_other_protocols() {
             "generate-content",
             "interactions",
         ] {
-            assert_invalid(
-                &format!(
-                    "[providers.custom]\nprotocol = '{protocol}'\nbase_url = 'http://localhost'\n[providers.custom.{level}]\nreasoning_summary = 'auto'"
-                ),
-                5,
-                "unknown feature `reasoning_summary`",
-            );
+            for (feature, value) in [
+                ("thinking_display", "summarized"),
+                ("reasoning_summary", "auto"),
+            ] {
+                assert_invalid(
+                    &format!(
+                        "[providers.custom]\nprotocol = '{protocol}'\nbase_url = 'http://localhost'\n[providers.custom.{level}]\n{feature} = '{value}'"
+                    ),
+                    5,
+                    &format!("unknown feature `{feature}`"),
+                );
+            }
         }
     }
     for name in [

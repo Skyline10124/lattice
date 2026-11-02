@@ -127,6 +127,8 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
         std::fs::write(&path, format!("{source}\n{configuration}")).unwrap();
         let expected = if provider == "pending-responses" {
             vec![Effort::Off, Effort::Low, Effort::High]
+        } else if provider == "pending-interactions" {
+            vec![Effort::Low, Effort::High]
         } else {
             vec![]
         };
@@ -365,6 +367,8 @@ async fn serve(
             MESSAGES_DONE
         } else if path.ends_with("/responses") {
             "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n"
+        } else if path.ends_with("/interactions") {
+            include_str!("../../tests/fixtures/projection/interactions_thought_and_text.sse")
         } else if path.contains(":streamGenerateContent") {
             CONTENT_DONE
         } else {
@@ -794,6 +798,7 @@ async fn protocol_and_auth_independently_select_wire_requests() {
     for protocol in [
         "chat-completions",
         "responses",
+        "interactions",
         "anthropic-messages",
         "generate-content",
     ] {
@@ -853,6 +858,7 @@ async fn protocol_and_auth_independently_select_wire_requests() {
             let expected_path = match protocol {
                 "chat-completions" => "/v1/chat/completions",
                 "responses" => "/v1/responses",
+                "interactions" => "/v1/interactions",
                 "anthropic-messages" => "/v1/v1/messages",
                 _ => "/v1/models/family%2Fmodel%20id:streamGenerateContent?alt=sse",
             };
@@ -941,6 +947,34 @@ async fn protocol_and_auth_independently_select_wire_requests() {
                         received.body.get("reasoning").is_none(),
                         "{cell}: reasoning"
                     );
+                }
+                "interactions" => {
+                    assert_eq!(received.body["model"], "family/model id");
+                    assert_eq!(
+                        received.body["input"][0],
+                        serde_json::json!({"type":"user_input","content":[{"type":"text","text":"hello"}]})
+                    );
+                    assert_eq!(
+                        received.body["tools"][0]["parameters"],
+                        serde_json::json!({"type":"object"})
+                    );
+                    assert_eq!(received.body["store"], false);
+                    assert_eq!(received.body["stream"], true);
+                    assert!(
+                        received.body.get("generation_config").is_none(),
+                        "{cell}: generation_config"
+                    );
+                    for field in [
+                        "thinking_summaries",
+                        "prompt_cache_key",
+                        "max_output_tokens",
+                        "previous_interaction_id",
+                        "background",
+                        "temperature",
+                        "top_p",
+                    ] {
+                        assert!(received.body.get(field).is_none(), "{cell}: {field}");
+                    }
                 }
                 "anthropic-messages" => {
                     assert_eq!(received.body["model"], "family/model id", "{cell}: model");
@@ -2197,20 +2231,10 @@ async fn invalid_configuration_only_blocks_requests_that_depend_on_it() {
 }
 
 #[tokio::test]
-async fn unimplemented_protocols_and_auth_are_configuration_errors() {
+async fn unimplemented_auth_is_configuration_error() {
     let directory = private_dir();
     let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
     let turn = gateway.open_turn();
-    for auth in ["none", "bearer"] {
-        configure(directory.path(), "http://localhost:1", "interactions", auth);
-        configuration_failure(
-            &turn,
-            "test",
-            "protocol interactions is not implemented",
-            &format!("interactions/{auth}"),
-        )
-        .await;
-    }
     configuration_failure(
         &turn,
         "chatgpt",
@@ -2221,76 +2245,165 @@ async fn unimplemented_protocols_and_auth_are_configuration_errors() {
 }
 
 #[tokio::test]
-async fn responses_include_and_summary_use_the_model_metadata_from_each_resolution() {
+async fn interactions_invalid_handwritten_efforts_only_reject_the_affected_model() {
     use lattice_conversation::Effort;
-    use serde_json::json;
-    let mut server = Server::start(false).await;
     let directory = private_dir();
-    configure(directory.path(), &server.url, "responses", "none");
-    let path = directory.path().join("providers.toml");
-    let source = std::fs::read_to_string(&path).unwrap();
-    let cache = directory.path().join("cache");
-    std::fs::create_dir_all(&cache).unwrap();
     let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
     let turn = gateway.open_turn();
-    for (catalog_flag, present, handwritten) in [
-        (Some(false), true, Some(true)),
-        (Some(true), true, Some(false)),
-        (None, false, Some(true)),
-        (None, false, Some(false)),
-        (Some(false), true, None),
-        (Some(true), true, None),
-        (None, true, None),
-        (None, false, None),
-    ] {
-        let model_config = handwritten.map_or_else(String::new, |flag| {
-            format!("[providers.test.models.model-id]\nreasoning={flag}\n")
-        });
-        std::fs::write(
-            &path,
-            format!("{source}\ncatalog='responses-fixture'\n{model_config}"),
-        )
-        .unwrap();
-        let mut model = json!({"id":"model-id","reasoning_options":[{"type":"effort","values":["none","high"]}]});
-        if let Some(flag) = catalog_flag {
-            model["reasoning"] = flag.into();
-        }
-        let models = if present {
-            json!({"model-id":model})
-        } else {
-            json!({})
-        };
-        std::fs::write(
-            cache.join("models.json"),
-            serde_json::to_vec(&json!({"responses-fixture":{"models":models}})).unwrap(),
-        )
-        .unwrap();
-        let request = request("test");
+    for effort in ["off", "xhigh", "max"] {
+        std::fs::write(directory.path().join("providers.toml"),format!("[metadata]\nauto_refresh=false\n[providers.test]\nprotocol='interactions'\nauth='none'\nbase_url='http://localhost:1'\n[providers.test.models.model-id]\neffort=['{effort}']\n[providers.test.models.valid]\neffort=['minimal','low','medium','high']\n")).unwrap();
+        let candidates = crate::model_candidates(directory.path(), Some("test"), None).unwrap();
+        let invalid = candidates
+            .models
+            .iter()
+            .find(|model| model.model == "model-id")
+            .unwrap();
+        assert!(invalid.config_error.is_some());
+        assert!(invalid.supported_efforts.is_empty());
+        let valid = candidates
+            .models
+            .iter()
+            .find(|model| model.model == "valid")
+            .unwrap();
+        assert!(valid.config_error.is_none());
         assert_eq!(
-            turn.supported_efforts(&request.target).await.unwrap(),
-            if present {
-                vec![Effort::Off, Effort::High]
-            } else {
-                Vec::new()
-            },
-            "reasoning does not change effort derivation"
+            valid.supported_efforts,
+            vec![Effort::Minimal, Effort::Low, Effort::Medium, Effort::High]
         );
-        complete(
-            turn.stream_chat(request, StreamControl::default())
-                .await
-                .unwrap(),
+        configuration_failure(
+            &turn,
+            "test",
+            "thinking_level",
+            "handwritten Interactions effort",
         )
         .await;
-        let received = server.next().await;
-        let enabled = handwritten.or(catalog_flag) == Some(true);
-        assert_eq!(
-            received.body.get("include").cloned(),
-            enabled.then(|| json!(["reasoning.encrypted_content"]))
-        );
-        assert_eq!(
-            received.body.get("reasoning").cloned(),
-            enabled.then(|| json!({"summary":"auto"}))
-        );
+    }
+}
+
+#[tokio::test]
+async fn reasoning_text_controls_use_the_model_metadata_from_each_resolution() {
+    use lattice_conversation::Effort;
+    use serde_json::json;
+    for protocol in [
+        "responses",
+        "interactions",
+        "generate-content",
+        "anthropic-messages",
+    ] {
+        let mut server = Server::start(false).await;
+        let directory = private_dir();
+        configure(directory.path(), &server.url, protocol, "none");
+        let path = directory.path().join("providers.toml");
+        let source = std::fs::read_to_string(&path).unwrap();
+        let cache = directory.path().join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
+        let turn = gateway.open_turn();
+        let cases = if protocol == "responses" {
+            vec![
+                (Some(false), true, Some(true)),
+                (Some(true), true, Some(false)),
+                (None, false, Some(true)),
+                (None, false, Some(false)),
+                (Some(false), true, None),
+                (Some(true), true, None),
+                (None, true, None),
+                (None, false, None),
+            ]
+        } else {
+            vec![
+                (Some(false), true, None),
+                (Some(true), true, None),
+                (None, true, None),
+                (None, false, None),
+            ]
+        };
+        for (catalog_flag, present, handwritten) in cases {
+            let mut model_config =
+                handwritten.map_or_else(String::new, |flag| format!("reasoning={flag}\n"));
+            if protocol == "anthropic-messages" {
+                model_config.push_str("effort=['high']\n");
+            }
+            if !model_config.is_empty() {
+                model_config = format!("[providers.test.models.model-id]\n{model_config}");
+            }
+            std::fs::write(
+                &path,
+                format!("{source}\ncatalog='reasoning-fixture'\n{model_config}"),
+            )
+            .unwrap();
+            let mut model = json!({"id":"model-id"});
+            if protocol == "responses" {
+                model["reasoning_options"] = json!([{"type":"effort","values":["none","high"]}]);
+            }
+            if let Some(flag) = catalog_flag {
+                model["reasoning"] = flag.into();
+            }
+            let models = if present {
+                json!({"model-id":model})
+            } else {
+                json!({})
+            };
+            std::fs::write(
+                cache.join("models.json"),
+                serde_json::to_vec(&json!({"reasoning-fixture":{"models":models}})).unwrap(),
+            )
+            .unwrap();
+            let mut request = request("test");
+            if protocol == "anthropic-messages" {
+                request.target.effort = Some(Effort::High);
+            }
+            if protocol == "responses" {
+                assert_eq!(
+                    turn.supported_efforts(&request.target).await.unwrap(),
+                    if present {
+                        vec![Effort::Off, Effort::High]
+                    } else {
+                        Vec::new()
+                    },
+                    "reasoning does not change effort derivation"
+                );
+            }
+            complete(
+                turn.stream_chat(request, StreamControl::default())
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            let body = server.next().await.body;
+            let flag = handwritten.or(catalog_flag);
+            let enabled = flag == Some(true);
+            let (actual, expected) = match protocol {
+                "responses" => {
+                    assert_eq!(
+                        body.get("include").cloned(),
+                        enabled.then(|| json!(["reasoning.encrypted_content"]))
+                    );
+                    (body.get("reasoning").cloned(), json!({"summary":"auto"}))
+                }
+                "interactions" => (
+                    body.get("generation_config").cloned(),
+                    json!({"thinking_summaries":"auto"}),
+                ),
+                "anthropic-messages" => {
+                    assert_eq!(body["thinking"]["type"], "adaptive");
+                    assert_eq!(body["output_config"], json!({"effort":"high"}));
+                    (
+                        body["thinking"].get("display").cloned(),
+                        json!("summarized"),
+                    )
+                }
+                _ => (
+                    body.get("generationConfig").cloned(),
+                    json!({"thinkingConfig":{"includeThoughts":true}}),
+                ),
+            };
+            assert_eq!(
+                actual,
+                enabled.then_some(expected),
+                "{protocol}/{catalog_flag:?}/present={present}/handwritten={handwritten:?}"
+            );
+        }
     }
 }
 

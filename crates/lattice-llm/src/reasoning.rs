@@ -15,13 +15,13 @@ use crate::{
     provider::Provider,
 };
 
-/// 能力查询不要求凭据；尚未实现的认证或协议没有可供选择的档位。
+/// 能力查询不要求凭据，并沿用请求入口的认证实施门禁。
 pub(crate) fn supported_efforts(
     provider: &Provider,
     model_id: &str,
     model: Option<&Model>,
 ) -> Result<Vec<Effort>, LlmError> {
-    if crate::client::validate_implementation(provider.protocol, provider.auth).is_err() {
+    if crate::client::validate_implementation(provider.auth).is_err() {
         return Ok(Vec::new());
     }
     let features = provider
@@ -52,7 +52,11 @@ impl ReasoningPlan {
     fn supported(self, features: Features) -> bool {
         match self {
             Self::Effort { effort, .. } => {
-                features != Features::Interactions || effort != Effort::Off
+                features != Features::Interactions
+                    || matches!(
+                        effort,
+                        Effort::Minimal | Effort::Low | Effort::Medium | Effort::High
+                    )
             }
             Self::Toggle { .. } => match features {
                 Features::ChatCompletions(chat) => chat.thinking_toggle != ThinkingToggle::None,
@@ -219,6 +223,14 @@ fn handwritten_plan(
     output: u64,
     features: Features,
 ) -> Result<Option<ReasoningPlan>, &'static str> {
+    if features == Features::Interactions
+        && !matches!(
+            effort,
+            Effort::Minimal | Effort::Low | Effort::Medium | Effort::High
+        )
+    {
+        return Err("Interactions thinking_level requires minimal, low, medium or high");
+    }
     if let Features::ChatCompletions(chat) = features {
         let toggle = chat.thinking_toggle != ThinkingToggle::None;
         let budget = chat.thinking_budget != ThinkingBudget::None;
@@ -303,7 +315,10 @@ mod tests {
             );
             let expected: Vec<_> = [Effort::Off, Effort::Minimal, Effort::High, Effort::Xhigh]
                 .into_iter()
-                .filter(|effort| protocol != Protocol::Interactions || *effort != Effort::Off)
+                .filter(|effort| {
+                    protocol != Protocol::Interactions
+                        || matches!(effort, Effort::Minimal | Effort::High)
+                })
                 .map(|effort| {
                     (
                         effort,
