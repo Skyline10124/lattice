@@ -235,10 +235,10 @@ fn responses_replays_phase_reasoning_and_two_tool_results_after_backend_restart(
 }
 
 #[test]
-fn responses_usage_before_incomplete_is_preserved_without_tool_execution_or_retry() {
+fn responses_failures_preserve_usage_and_incomplete_saves_only_valid_replies() {
     use lattice_system_harness::{FAKE_API_KEY, SseScript};
     use serde_json::{Value, json};
-    let spec = ScenarioSpec::direct_local("responses-usage-before-incomplete");
+    let spec = ScenarioSpec::direct_local("responses-failure-and-incomplete");
     let world = ScenarioWorld::new(&spec.name).unwrap();
     world.budget(&spec);
     let fixture = responses_fixture();
@@ -254,20 +254,34 @@ fn responses_usage_before_incomplete_is_preserved_without_tool_execution_or_retr
         json!({"type":"response.output_text.delta","output_index":0,"item_id":"msg","content_index":0,"delta":"partial"}),
         json!({"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"item","call_id":"call","name":"observe__workspace","arguments":""}}),
         json!({"type":"response.function_call_arguments.delta","output_index":1,"item_id":"item","delta":"{\"request\":{\"mode\":\"read_file\",\"path\":\"notes.txt\"}}"}),
-        json!({"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"output_tokens":3}}}),
+        json!({"type":"response.failed","response":{"status":"failed","error":{"code":"insufficient_quota","message":"no credit"},"usage":{"output_tokens":3}}}),
     ];
+    let native = |events: Vec<Value>| SseScript::NativeEvents {
+        events: events
+            .into_iter()
+            .enumerate()
+            .map(|(sequence, mut value)| {
+                let name = value["type"].as_str().unwrap().to_owned();
+                value["sequence_number"] = json!(sequence);
+                (Some(name), value)
+            })
+            .collect(),
+    };
     let (server, gate) = FakeLlmServer::start_segmented(
-        SseScript::NativeEvents {
-            events: events
-                .into_iter()
-                .enumerate()
-                .map(|(sequence, mut value)| {
-                    let name = value["type"].as_str().unwrap().to_owned();
-                    value["sequence_number"] = json!(sequence);
-                    (Some(name), value)
-                })
-                .collect(),
-        },
+        sequence(vec![
+            native(events),
+            native(vec![
+                json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","role":"assistant","id":"saved","status":"in_progress","content":[]}}),
+                json!({"type":"response.content_part.added","output_index":0,"item_id":"saved","content_index":0,"part":{"type":"output_text","text":""}}),
+                json!({"type":"response.output_text.delta","output_index":0,"item_id":"saved","content_index":0,"delta":"saved incomplete"}),
+                json!({"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"message","role":"assistant","id":"saved","status":"incomplete","content":[{"type":"output_text","text":"saved incomplete"}]}],"usage":{"input_tokens":9,"output_tokens":4}}}),
+            ]),
+            native(vec![
+                json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"truncated","call_id":"truncated-call","name":"observe__workspace","arguments":""}}),
+                json!({"type":"response.function_call_arguments.delta","output_index":0,"item_id":"truncated","delta":"{\"request\":"}),
+                json!({"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}),
+            ]),
+        ]),
         spec.total_timeout().unwrap(),
     )
     .unwrap();
@@ -279,7 +293,7 @@ fn responses_usage_before_incomplete_is_preserved_without_tool_execution_or_retr
     let send = SessionSendDriver::new(&driver, &world, &spec, "responses");
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut running = send.spawn("stop incomplete").unwrap();
+        let mut running = send.spawn("stop failed response").unwrap();
         for frame in 1..=6 {
             gate.wait_until_stalled(frame, running.remaining_timeout(spec.step_timeout()))
                 .unwrap();
@@ -293,7 +307,7 @@ fn responses_usage_before_incomplete_is_preserved_without_tool_execution_or_retr
         gate.release(running.remaining_timeout(spec.step_timeout()))
             .unwrap();
         let sent = send.wait_spawned(running).unwrap();
-        evidence.record_command("Responses incomplete Turn", &sent.command);
+        evidence.record_command("Responses failed Turn", &sent.command);
         assert!(sent.command.is_clean_exit(1));
         assert!(sent.slots().is_empty());
         let detail = send
@@ -304,7 +318,7 @@ fn responses_usage_before_incomplete_is_preserved_without_tool_execution_or_retr
                 sent.accepted_turn_id().unwrap(),
             ])
             .unwrap();
-        evidence.record_command("Responses incomplete detail", &detail);
+        evidence.record_command("Responses failed detail", &detail);
         let turn: Value = serde_json::from_slice(&detail.stdout).unwrap();
         let attempt = &turn["steps"][0]["attempts"][0];
         assert_eq!(attempt["usage"]["input"], 8);
@@ -319,7 +333,7 @@ fn responses_usage_before_incomplete_is_preserved_without_tool_execution_or_retr
             attempt["end"]["diagnostic"]
                 .as_str()
                 .unwrap()
-                .contains("max_output_tokens")
+                .contains("no credit")
         );
         assert_eq!(turn["steps"][0]["attempts"].as_array().unwrap().len(), 1);
         assert!(
@@ -329,6 +343,69 @@ fn responses_usage_before_incomplete_is_preserved_without_tool_execution_or_retr
                 .all(|step| step.reply.is_empty() && step.slots.is_empty())
         );
         assert_eq!(server.captured_requests().len(), 1);
+
+        let saved = send.send("save incomplete reply").unwrap();
+        evidence.record_command("Responses saved incomplete Turn", &saved.command);
+        assert!(saved.has_completed() && saved.command.is_clean_exit(0));
+        assert_eq!(saved.reply_text(), "saved incomplete");
+        assert!(saved.slots().is_empty());
+        let detail = send
+            .run_command(&[
+                "--json",
+                "session",
+                "turn",
+                saved.accepted_turn_id().unwrap(),
+            ])
+            .unwrap();
+        evidence.record_command("Responses saved incomplete detail", &detail);
+        let turn: Value = serde_json::from_slice(&detail.stdout).unwrap();
+        assert_eq!(turn["steps"].as_array().unwrap().len(), 1);
+        assert_eq!(turn["steps"][0]["attempts"].as_array().unwrap().len(), 1);
+        assert_eq!(turn["steps"][0]["attempts"][0]["usage"]["input"], 9);
+        assert_eq!(turn["steps"][0]["attempts"][0]["usage"]["output"], 4);
+        assert_eq!(turn["steps"][0]["attempts"][0]["end"]["end"], "completed");
+        assert_eq!(server.captured_requests().len(), 2);
+
+        let stopped = send.run_command(&["daemon", "stop"]).unwrap();
+        evidence.record_command("stop after saved incomplete reply", &stopped);
+        assert!(stopped.is_clean_exit(0));
+        let rejected = send.send("reject truncated arguments").unwrap();
+        evidence.record_command("Responses incomplete invalid tool Turn", &rejected.command);
+        assert!(rejected.command.is_clean_exit(1));
+        assert!(rejected.slots().is_empty());
+        assert!(
+            rejected
+                .entries()
+                .iter()
+                .filter_map(|entry| entry.step())
+                .all(|step| step.reply.is_empty() && step.slots.is_empty())
+        );
+        let detail = send
+            .run_command(&[
+                "--json",
+                "session",
+                "turn",
+                rejected.accepted_turn_id().unwrap(),
+            ])
+            .unwrap();
+        evidence.record_command("Responses incomplete invalid tool detail", &detail);
+        let turn: Value = serde_json::from_slice(&detail.stdout).unwrap();
+        assert_eq!(turn["steps"].as_array().unwrap().len(), 1);
+        assert_eq!(turn["steps"][0]["attempts"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            turn["steps"][0]["attempts"][0]["end"]["cause"],
+            json!({"cause":"invalid_batch"})
+        );
+        let captures = server.captured_requests();
+        assert_eq!(captures.len(), 3);
+        assert!(
+            captures[2].raw["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["id"] == "saved"
+                    && item["content"][0]["text"] == "saved incomplete")
+        );
     }));
     evidence.record_captures(server.captured_requests());
     support::finish_recorded(evidence, result);

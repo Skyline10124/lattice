@@ -144,7 +144,16 @@ impl ProtocolParser {
                 );
             }
             Self::Responses(_) => {
-                protocol::responses::build_request_json(request, reasoning, model_reasoning, origin)
+                let Features::Responses(features) = features else {
+                    unreachable!("resolved features match the protocol")
+                };
+                protocol::responses::build_request_json(
+                    request,
+                    features,
+                    reasoning,
+                    model_reasoning,
+                    origin,
+                )
             }
             Self::GenerateContent(_) => {
                 protocol::generate_content::build_request_json(request, reasoning, origin)
@@ -1176,63 +1185,104 @@ mod tests {
                 json!({"generationConfig":{"thinkingConfig":{"thinkingBudget":2048}}}),
             ),
         ] {
-            let mut features = Features::defaults(protocol);
-            let overrides: std::collections::BTreeMap<String, toml::Value> =
-                toml::from_str(overrides).unwrap();
-            for (name, value) in overrides {
-                features.apply(&name, value).unwrap();
-            }
-            let model: crate::metadata::Model = serde_json::from_value(
-                json!({"id":"model","reasoning_options":options,"limit":{"output":output}}),
-            )
-            .unwrap();
-            let capabilities = crate::reasoning::ReasoningCapabilities::new(
-                "test",
-                "model",
-                Some(&model),
-                features,
-            )
-            .unwrap();
-            for selection in [None, Some(selected)] {
-                let mut request = chat_request();
-                request.target.effort = selection;
-                let plan =
-                    selection.map(|effort| capabilities.select(effort).expect("supported source"));
-                let origin = lattice_conversation::ReplayOrigin {
-                    protocol,
-                    provider_id: "test".into(),
+            let cases = if protocol == Protocol::Responses {
+                let with_summary = match selected {
+                    Off => json!({"reasoning":{"effort":"none"}}),
+                    High => json!({"reasoning":{"effort":"high","summary":"auto"}}),
+                    _ => unreachable!("Responses matrix selects off or high"),
                 };
-                let body = ProtocolParser::new(protocol)
-                    .unwrap()
-                    .request_body(&request, output, None, features, plan, &origin)
-                    .unwrap();
-                let controls: serde_json::Map<_, _> = body
-                    .as_object()
-                    .unwrap()
-                    .iter()
-                    .filter(|(key, _)| {
-                        matches!(
-                            key.as_str(),
-                            "reasoning_effort"
-                                | "reasoning"
-                                | "thinking"
-                                | "thinking_budget"
-                                | "enable_thinking"
-                                | "output_config"
-                                | "generationConfig"
-                        )
-                    })
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect();
-                assert_eq!(
-                    serde_json::Value::Object(controls),
-                    if selection.is_some() {
-                        expected.clone()
-                    } else {
-                        json!({})
-                    },
-                    "{protocol:?}, {features:?}, {selection:?}"
-                );
+                vec![
+                    ("", None, json!({}), expected.clone()),
+                    ("", Some(false), json!({}), expected.clone()),
+                    ("", Some(true), json!({}), expected.clone()),
+                    (
+                        "reasoning_summary='none'",
+                        None,
+                        json!({}),
+                        expected.clone(),
+                    ),
+                    (
+                        "reasoning_summary='auto'",
+                        Some(false),
+                        json!({}),
+                        expected.clone(),
+                    ),
+                    (
+                        "reasoning_summary='auto'",
+                        Some(true),
+                        json!({"reasoning":{"summary":"auto"}}),
+                        with_summary.clone(),
+                    ),
+                    (
+                        "reasoning_summary='auto'",
+                        None,
+                        json!({"reasoning":{"summary":"auto"}}),
+                        with_summary,
+                    ),
+                ]
+            } else {
+                vec![("", None, json!({}), expected)]
+            };
+            for (summary, model_reasoning, unselected, expected) in cases {
+                let mut features = Features::defaults(protocol);
+                let overrides: std::collections::BTreeMap<String, toml::Value> =
+                    toml::from_str(&format!("{overrides}\n{summary}")).unwrap();
+                for (name, value) in overrides {
+                    features.apply(&name, value).unwrap();
+                }
+                let model: crate::metadata::Model = serde_json::from_value(json!({
+                    "id":"model", "reasoning":model_reasoning,
+                    "reasoning_options":options, "limit":{"output":output},
+                }))
+                .unwrap();
+                let capabilities = crate::reasoning::ReasoningCapabilities::new(
+                    "test",
+                    "model",
+                    Some(&model),
+                    features,
+                )
+                .unwrap();
+                for selection in [None, Some(selected)] {
+                    let mut request = chat_request();
+                    request.target.effort = selection;
+                    let plan = selection
+                        .map(|effort| capabilities.select(effort).expect("supported source"));
+                    let origin = lattice_conversation::ReplayOrigin {
+                        protocol,
+                        provider_id: "test".into(),
+                    };
+                    let body = ProtocolParser::new(protocol)
+                        .unwrap()
+                        .request_body(&request, output, model.reasoning, features, plan, &origin)
+                        .unwrap();
+                    let controls: serde_json::Map<_, _> = body
+                        .as_object()
+                        .unwrap()
+                        .iter()
+                        .filter(|(key, _)| {
+                            matches!(
+                                key.as_str(),
+                                "reasoning_effort"
+                                    | "reasoning"
+                                    | "thinking"
+                                    | "thinking_budget"
+                                    | "enable_thinking"
+                                    | "output_config"
+                                    | "generationConfig"
+                            )
+                        })
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect();
+                    assert_eq!(
+                        serde_json::Value::Object(controls),
+                        if selection.is_some() {
+                            expected.clone()
+                        } else {
+                            unselected.clone()
+                        },
+                        "{protocol:?}, {features:?}, {model_reasoning:?}, {selection:?}"
+                    );
+                }
             }
         }
     }

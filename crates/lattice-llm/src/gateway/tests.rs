@@ -2220,40 +2220,63 @@ async fn unimplemented_protocols_and_auth_are_configuration_errors() {
 }
 
 #[tokio::test]
-async fn responses_include_uses_the_model_metadata_from_each_resolution() {
+async fn responses_include_and_summary_use_the_model_metadata_from_each_resolution() {
     let mut server = Server::start(false).await;
     let directory = private_dir();
     configure(directory.path(), &server.url, "responses", "none");
     let path = directory.path().join("providers.toml");
     let source = std::fs::read_to_string(&path).unwrap();
-    std::fs::write(&path, format!("{source}\ncatalog='responses-fixture'\n")).unwrap();
     let cache = directory.path().join("cache");
     std::fs::create_dir_all(&cache).unwrap();
     let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
     let turn = gateway.open_turn();
-    for flag in [Some(false), Some(true), None] {
-        let mut model = serde_json::json!({"id":"model-id"});
-        if let Some(flag) = flag {
-            model["reasoning"] = flag.into();
-        }
+    for scope in [
+        "providers.test.features",
+        "providers.test.models.model-id.features",
+    ] {
         std::fs::write(
-            cache.join("models.json"),
-            serde_json::to_vec(
-                &serde_json::json!({"responses-fixture":{"models":{"model-id":model}}}),
-            )
-            .unwrap(),
+            &path,
+            format!("{source}\ncatalog='responses-fixture'\n[{scope}]\nreasoning_summary='auto'\n"),
         )
         .unwrap();
-        let request = request("test");
-        complete(
-            turn.stream_chat(request, StreamControl::default())
-                .await
-                .unwrap(),
-        )
-        .await;
-        let received = server.next().await;
-        assert_eq!(received.body.get("include").is_some(), flag != Some(false));
-        assert!(received.body.get("reasoning").is_none());
+        for (flag, present) in [
+            (Some(false), true),
+            (Some(true), true),
+            (None, true),
+            (None, false),
+        ] {
+            let mut model = serde_json::json!({"id":"model-id"});
+            if let Some(flag) = flag {
+                model["reasoning"] = flag.into();
+            }
+            let models = if present {
+                serde_json::json!({"model-id":model})
+            } else {
+                serde_json::json!({})
+            };
+            std::fs::write(
+                cache.join("models.json"),
+                serde_json::to_vec(&serde_json::json!({"responses-fixture":{"models":models}}))
+                    .unwrap(),
+            )
+            .unwrap();
+            let request = request("test");
+            complete(
+                turn.stream_chat(request, StreamControl::default())
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            let received = server.next().await;
+            assert_eq!(received.body.get("include").is_some(), flag != Some(false));
+            assert_eq!(
+                received.body.get("reasoning").cloned(),
+                match flag {
+                    Some(false) => None,
+                    _ => Some(serde_json::json!({"summary":"auto"})),
+                }
+            );
+        }
     }
 }
 
