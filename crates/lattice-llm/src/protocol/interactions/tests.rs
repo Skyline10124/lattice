@@ -98,7 +98,15 @@ fn named_official_stream_replays_steps_and_preserves_cumulative_usage() {
         .iter()
         .position(|event| event["event_type"] == "step.stop" && event.get("usage").is_some())
         .unwrap();
-    let (_, interrupted, eof_report) = collect(events[..=usage_stop].to_vec());
+    let (live, interrupted, eof_report) = collect(events[..=usage_stop].to_vec());
+    assert_eq!(
+        live,
+        vec![
+            LlmEvent::Delta(crate::LiveDelta::Text("Checking.".into())),
+            LlmEvent::Delta(crate::LiveDelta::Reasoning("Compare inputs.".into())),
+            LlmEvent::Delta(crate::LiveDelta::Reasoning("Read both.".into())),
+        ]
+    );
     assert_eq!(
         interrupted,
         ReplyOutcome::Interrupted {
