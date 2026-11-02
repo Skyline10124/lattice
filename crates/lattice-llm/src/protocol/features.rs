@@ -50,6 +50,14 @@ pub(crate) enum Cache {
     None,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ReasoningSummary {
+    #[default]
+    None,
+    Auto,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ChatCompletionsFeatures {
     pub(crate) effort_param: EffortParam,
@@ -64,11 +72,16 @@ pub(crate) struct MessagesFeatures {
     pub(crate) cache: Cache,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ResponsesFeatures {
+    pub(crate) reasoning_summary: ReasoningSummary,
+}
+
 /// 合并覆盖后的完整 features；没有可选行为的协议不携带配置字段。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Features {
     ChatCompletions(ChatCompletionsFeatures),
-    Responses,
+    Responses(ResponsesFeatures),
     Messages(MessagesFeatures),
     GenerateContent,
     Interactions,
@@ -78,7 +91,7 @@ impl Features {
     pub(crate) fn defaults(protocol: Protocol) -> Self {
         match protocol {
             Protocol::ChatCompletions => Self::ChatCompletions(ChatCompletionsFeatures::default()),
-            Protocol::Responses => Self::Responses,
+            Protocol::Responses => Self::Responses(ResponsesFeatures::default()),
             Protocol::Messages => Self::Messages(MessagesFeatures::default()),
             Protocol::GenerateContent => Self::GenerateContent,
             Protocol::Interactions => Self::Interactions,
@@ -88,7 +101,7 @@ impl Features {
     pub(crate) fn protocol(self) -> Protocol {
         match self {
             Self::ChatCompletions(_) => Protocol::ChatCompletions,
-            Self::Responses => Protocol::Responses,
+            Self::Responses(_) => Protocol::Responses,
             Self::Messages(_) => Protocol::Messages,
             Self::GenerateContent => Protocol::GenerateContent,
             Self::Interactions => Protocol::Interactions,
@@ -123,6 +136,9 @@ impl Features {
                 features.cache_markers = parse(value)?
             }
             (Self::Messages(features), "cache") => features.cache = parse(value)?,
+            (Self::Responses(features), "reasoning_summary") => {
+                features.reasoning_summary = parse(value)?
+            }
             (features, _) => {
                 return Err(format!(
                     "unknown feature `{name}` for {}",

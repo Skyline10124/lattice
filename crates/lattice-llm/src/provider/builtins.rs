@@ -47,7 +47,7 @@ pub(super) fn providers() -> Vec<Provider> {
             "https://api.openai.com/v1",
             OauthChatgpt,
             Some("openai"),
-            Features::Responses,
+            Features::Responses(Default::default()),
         ),
         provider(
             "anthropic",

@@ -79,6 +79,7 @@ provider 配置、凭据与模型元数据是用户级的全局状态，由后�
 
 - **请求。** 把当前路径上的对话、系统提示、工具定义和推理档位按协议与 features 写成请求体。不发送采样参数（`temperature`、`top_p` 等），由服务端按模型默认值处理。投影规则与回放材料的处理由[会话合同的回放与跨 provider 投影](session.md#回放与跨-provider-投影)维护。
 - **流式事件。** 把线上事件翻译为正文、reasoning 与工具调用的部件增量，交给 #312 的累积器组装完整回复。解析端对无歧义的厂商差异直接兼容，例如 `reasoning_content` 与 `reasoning` 两种字段都读取，Mistral 的 `content` 为分块数组时读取其中的 `thinking` 块。不认识的内容块或增量类型按不可重试的协议错误停止这次尝试，不静默丢弃；诊断只写协议、位置与类型名。
+- **Responses 的不完整回复。** `response.incomplete` 先更新用量；原因是 `max_output_tokens` 或 `content_filter` 时按完成处理，分别记 `finish_reason = length` 或 `content_filter`，关闭仍打开的 item 并保存回复，允许缺少 `output_item.done`。半截工具参数仍由累积器的批次校验拒绝，不执行工具；完整调用沿用 Chat Completions 在 `length` 下的处理。其他或未知原因按 provider 错误停止，不保存回复。
 - **prompt 拦截。** generateContent 只有 `promptFeedback.blockReason`、没有 candidates 时，按不可重试的 provider 错误停止这次尝试，诊断保留 `blockReason` 原文。
 - **用量。** 按[用量换算](#用量换算)得出统一口径。
 - **不使用服务端会话状态。** Responses 与 Interactions 固定发送 `store: false`，每次发送完整历史，不发送 `previous_response_id`、`previous_interaction_id`，不使用后台执行。
@@ -89,7 +90,7 @@ provider 配置、凭据与模型元数据是用户级的全局状态，由后�
 
 ### 回放来源
 
-每次尝试记录来源 `(protocol, provider id)`。reasoning、签名、加密 reasoning 与逐片段回放状态只在协议和 provider `id` 都相同时回放；任一不同时去除这些材料。来源不含 endpoint：同一 provider `id` 在 `providers.toml` 中改了 `base_url` 之后仍回放此前的签名，新 endpoint 可能拒绝这些签名；要换 endpoint 时使用新的 provider `id`。provider call ID 按协议判定：协议相同时保留，包括 provider `id` 不同的情况；协议不同时去除，目标协议无法在缺少 call ID 时编码工具结果的，返回投影错误。跨来源投影保留中立语义，切回原来源时使用树中保存的原消息。Responses 仅在模型元数据明确 `reasoning = false` 时省略 `include`；其他情况（包括没有模型元数据）带 `include: ["reasoning.encrypted_content"]`，使 `store: false` 时取得可回放的加密 reasoning。
+每次尝试记录来源 `(protocol, provider id)`。reasoning、签名、加密 reasoning 与逐片段回放状态只在协议和 provider `id` 都相同时回放；任一不同时去除这些材料。来源不含 endpoint：同一 provider `id` 在 `providers.toml` 中改了 `base_url` 之后仍回放此前的签名，新 endpoint 可能拒绝这些签名；要换 endpoint 时使用新的 provider `id`。provider call ID 按协议判定：协议相同时保留，包括 provider `id` 不同的情况；协议不同时去除，目标协议无法在缺少 call ID 时编码工具结果的，返回投影错误。跨来源投影保留中立语义，切回原来源时使用树中保存的原消息。Responses 仅在模型元数据明确 `reasoning = false` 时省略 `include`；其他情况（包括没有模型元数据）带 `include: ["reasoning.encrypted_content"]`，使 `store: false` 时取得可回放的加密 reasoning。 Responses 回放时省略没有最终 `encrypted_content` 的 reasoning item，以及末尾没有后续 item 的 reasoning item；其文字仍以 Reasoning 语义保存。
 
 Anthropic Messages 的 `redacted_thinking` 以空 Reasoning 片段及带 `redacted:` 标记的回放状态保存 `data`，只有 Messages codec 解释该标记；普通 thinking（包括空文本）的 signature 保持原编码。同完整来源时恢复原块、data 与顺序，跨来源时移除整个 Reasoning 片段，不产生空 Text。标记计入单片段 64 KiB 与尝试总量限制，data 不进入正文或 reasoning 显示增量。
 
@@ -213,7 +214,13 @@ feature 由协议适配器的代码定义，配置只能在已有取值中选择
 
 ### Responses
 
-第一轮没有 feature。适配器只发送 SIWC 也接受的字段（见[适配器的职责](#适配器的职责)），所以 `chatgpt` 不需要额外的 feature。
+| feature | 取值 | 默认 | 作用 |
+| --- | --- | --- | --- |
+| `reasoning_summary` | `none`、`auto` | `none` | `none` 不请求推理摘要，保持标准协议默认行为；`auto` 请求 `reasoning.summary: "auto"`，但模型元数据明确 `reasoning = false` 或档位为 `off` 时不请求 |
+
+该 feature 只在 Responses 上合法，可在 provider 或 model 的 features 中配置，模型级覆盖 provider 级值。[OpenAI 推理指南](https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries)说明摘要可能要求先完成组织验证；保留默认 `none`，让无法使用摘要的账号通过配置关闭请求，无需修改代码。
+
+适配器只发送 SIWC 也接受的字段（见[适配器的职责](#适配器的职责)），所以 `chatgpt` 不需要额外的 feature。
 
 ### Anthropic Messages
 
@@ -297,7 +304,7 @@ feature 由协议适配器的代码定义，配置只能在已有取值中选择
 - 每个档位只用产生它的那一项对应的字段表达，不跨类型回退：来自 toggle 项的 `off` 与 `high` 只写开关字段，来自 effort 项的档位（包括取值 `none` 得到的 `off`）只写档位字段，来自 budget_tokens 项的档位只写预算字段。所选协议与 features 写不出某一档时，它不出现在可用档位中。
 - `reasoning` 为 true 而没有 `reasoning_options` 的模型总在推理，没有可选档位。
 - 选了模型不支持的档位时，在接受前按配置错误拒绝，不降级到相近档位。
-- profile 的 `[agent].effort` 设默认档位；没有档位时不发送任何推理参数，由 provider 使用默认行为。
+- profile 的 `[agent].effort` 设默认档位；没有档位时不发送档位参数，由 provider 使用默认推理强度。请求推理文字与是否选择档位无关，不改变推理强度。
 
 按 token 数限制的档位取以下预算：
 
@@ -321,6 +328,8 @@ feature 由协议适配器的代码定义，配置只能在已有取值中选择
 | Anthropic Messages | `thinking: {"type": "adaptive"}` 与 `output_config: {"effort": "<档位>"}` | `thinking: {"type": "enabled", "budget_tokens": N}` | `thinking: {"type": "adaptive"}` | `thinking: {"type": "disabled"}` |
 | generateContent | `generationConfig.thinkingConfig.thinkingLevel` | `thinkingConfig.thinkingBudget: N` | `thinkingConfig.thinkingBudget: -1` | `thinkingConfig.thinkingBudget: 0` |
 | Interactions | `generation_config.thinking_level`（`minimal`、`low`、`medium`、`high`） | 不可用 | 不可用 | 不可用 |
+
+Responses 的 `reasoning_summary = "auto"` 在模型元数据不是 `reasoning = false` 且档位不是 `off` 时请求推理摘要：没选档位写 `reasoning: {"summary":"auto"}`；选了档位则与 effort 合并为 `reasoning: {"effort":"<档位>","summary":"auto"}`。`off` 只写 `reasoning: {"effort":"none"}`，不请求摘要。
 
 Chat Completions 中，元数据给出来源的档位在 `reasoning_options` 含 toggle 项且 `thinking_toggle` 不为 `none` 时，同时按 `thinking_toggle` 写开启（`off` 除外）；没有 toggle 项时不写开关，例如 Kimi K3.1 Pro 只接受 `reasoning_effort`。缺少元数据来源的手写档位按[有效 features](#可用档位)推断写法。某个档位在所选协议上不可用时，它不出现在可用档位中。
 
@@ -500,7 +509,7 @@ SIWC 按 OpenAI 的[开源工具接入方式](https://developers.openai.com/siwc
 
 ### 请求与错误
 
-- 请求 `POST https://api.openai.com/v1/responses`，`store: false`、`stream: true`；只有收到 `response.completed` 才算完成，`response.incomplete`、`response.failed` 与流中断分别处理。
+- 请求 `POST https://api.openai.com/v1/responses`，`store: false`、`stream: true`；`response.completed` 正常完成；`response.incomplete` 的 `max_output_tokens`、`content_filter` 按[适配器职责](#适配器的职责)保存回复并映射 finish_reason，其他原因、`response.failed` 与流中断按错误停止。
 - 用量超限（`subscription_sharing_usage_limit_exceeded`，HTTP 429，也可能在流中途以 `response.failed` 给出）按不可重试的 provider 错误处理，诊断提示到 ChatGPT 设置查看用量。
 
 ## 限制

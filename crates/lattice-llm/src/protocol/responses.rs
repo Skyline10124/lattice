@@ -10,12 +10,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::projection::{ProjectionError, request_messages_with_replay};
+use super::{ReasoningSummary, ResponsesFeatures};
 use crate::reasoning::ReasoningPlan;
 use crate::reply::{PartDelta, PartKind, ProtocolEvent, StringPatch};
 use crate::types::ChatRequest;
 
 pub(crate) fn build_request_json(
     request: &ChatRequest,
+    features: ResponsesFeatures,
     reasoning: Option<ReasoningPlan>,
     model_reasoning: Option<bool>,
     origin: &ReplayOrigin,
@@ -35,9 +37,19 @@ pub(crate) fn build_request_json(
     if model_reasoning != Some(false) {
         body["include"] = json!(["reasoning.encrypted_content"]);
     }
-    if let Some(ReasoningPlan::Effort { effort, .. }) = reasoning {
+    let effort = match reasoning {
+        Some(ReasoningPlan::Effort { effort, .. }) => Some(effort),
+        _ => None,
+    };
+    if let Some(effort) = effort {
         body["reasoning"] =
             json!({"effort":if effort == Effort::Off {"none"} else {effort.as_str()}});
+    }
+    if features.reasoning_summary == ReasoningSummary::Auto
+        && model_reasoning != Some(false)
+        && effort != Some(Effort::Off)
+    {
+        body["reasoning"]["summary"] = "auto".into();
     }
     if !request.tools.is_empty() {
         body["tools"] = request
@@ -655,19 +667,76 @@ impl ResponsesSseParser {
         if response.status.as_deref() != Some("completed") {
             return Err(malformed("response status is not completed"));
         }
-        let output = required(response.output, "response missing output")?;
-        if self.items.keys().any(|&index| index >= output.len()) {
-            return Err(malformed("response omits output item"));
-        }
-        for (index, item) in output.into_iter().enumerate() {
-            self.finish_item(index, item, true, events)?;
-        }
+        self.finish_output(
+            required(response.output, "response missing output")?,
+            false,
+            events,
+        )?;
         let calls = self
             .items
             .values()
             .any(|item| item.anchor.kind == "function_call");
         events.push(ProtocolEvent::Done {
             finish_reason: if calls { "tool_calls" } else { "stop" }.into(),
+        });
+        self.stopped = true;
+        Ok(())
+    }
+
+    fn finish_output(
+        &mut self,
+        output: Vec<OutputItem>,
+        incomplete: bool,
+        events: &mut Vec<ProtocolEvent>,
+    ) -> Result<(), ProtocolEvent> {
+        if self.items.keys().any(|&index| index >= output.len()) {
+            return Err(malformed("response omits output item"));
+        }
+        for (index, mut item) in output.into_iter().enumerate() {
+            if incomplete && matches!(item.status.as_deref(), Some("incomplete" | "in_progress")) {
+                item.status = None;
+            }
+            self.finish_item(index, item, true, events)?;
+        }
+        Ok(())
+    }
+
+    fn incomplete(
+        &mut self,
+        mut response: Response,
+        events: &mut Vec<ProtocolEvent>,
+    ) -> Result<(), ProtocolEvent> {
+        self.update_usage(&mut response, events)?;
+        let detail = required(
+            response.incomplete_details,
+            "incomplete response missing reason",
+        )?;
+        let finish_reason = match detail.reason.as_str() {
+            "max_output_tokens" => "length",
+            "content_filter" => "content_filter",
+            _ => {
+                return Err(ProtocolEvent::error(
+                    format!("Responses incomplete: {}", detail.reason),
+                    false,
+                ));
+            }
+        };
+        if response.status.as_deref() != Some("incomplete") {
+            return Err(malformed("response status is not incomplete"));
+        }
+        if let Some(output) = response.output {
+            self.finish_output(output, true, events)?;
+        }
+        // 截断可能省略 item 的结束事件；结束片段后由共同累积器校验整批工具参数。
+        for item in self.items.values_mut().filter(|item| !item.done) {
+            for &(index, _) in &item.slots {
+                events.push(ProtocolEvent::Part(PartDelta::End { index }));
+            }
+            item.done = true;
+        }
+        self.current = None;
+        events.push(ProtocolEvent::Done {
+            finish_reason: finish_reason.into(),
         });
         self.stopped = true;
         Ok(())
@@ -707,20 +776,16 @@ impl ResponsesSseParser {
                 let event = decode()?;
                 self.completed(required(event.response, "event missing response")?, events)?
             }
-            "response.failed" | "response.incomplete" => {
+            "response.incomplete" => {
+                let event = decode()?;
+                self.incomplete(required(event.response, "event missing response")?, events)?;
+            }
+            "response.failed" => {
                 let event = decode()?;
                 let mut response = required(event.response, "event missing response")?;
                 self.update_usage(&mut response, events)?;
-                return Err(if kind == "response.failed" {
-                    let error = required(response.error, "failed response missing error")?;
-                    api_error(error.code.as_deref(), error.message.as_deref())
-                } else {
-                    let detail = required(
-                        response.incomplete_details,
-                        "incomplete response missing reason",
-                    )?;
-                    ProtocolEvent::error(format!("Responses incomplete: {}", detail.reason), false)
-                });
+                let error = required(response.error, "failed response missing error")?;
+                return Err(api_error(error.code.as_deref(), error.message.as_deref()));
             }
             "error" => {
                 let event = decode()?;

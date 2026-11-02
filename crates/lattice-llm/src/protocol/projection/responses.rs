@@ -150,7 +150,8 @@ pub(super) fn native_to_wire<S: ToolCallState>(
         }
     }
     let mut output = Vec::with_capacity(groups.len());
-    for group in groups.into_values() {
+    let last_item = groups.last_key_value().map(|(&index, _)| index);
+    for (index, group) in groups {
         let anchor = group
             .anchor
             .ok_or_else(|| malformed("missing replay anchor"))?;
@@ -199,6 +200,9 @@ pub(super) fn native_to_wire<S: ToolCallState>(
                         ContentKind::Empty => {}
                         _ => return Err(malformed("invalid reasoning replay part")),
                     }
+                }
+                if anchor.encrypted_content.is_none() || Some(index) == last_item {
+                    continue;
                 }
                 let mut item = json!({"type":"reasoning", "summary":summary.into_values().collect::<Vec<_>>()});
                 if !content.is_empty() {

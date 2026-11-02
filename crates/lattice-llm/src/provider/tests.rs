@@ -7,7 +7,7 @@ use lattice_conversation::{MAX_PROVIDER_ID_BYTES, validate_provider_id};
 
 use crate::protocol::{
     Cache, ChatCompletionsFeatures, EffortParam, Features, MessagesFeatures, Protocol,
-    ReasoningReplay, ThinkingBudget, ThinkingToggle,
+    ReasoningReplay, ReasoningSummary, ResponsesFeatures, ThinkingBudget, ThinkingToggle,
 };
 
 use super::{
@@ -21,6 +21,8 @@ const CHAT_PROVIDER: &str =
     "[providers.custom]\nprotocol = 'chat-completions'\nbase_url = 'http://localhost'";
 const MESSAGES_PROVIDER: &str =
     "[providers.custom]\nprotocol = 'anthropic-messages'\nbase_url = 'http://localhost'";
+const RESPONSES_PROVIDER: &str =
+    "[providers.custom]\nprotocol = 'responses'\nbase_url = 'http://localhost'";
 
 fn parse(source: &str) -> ProviderRegistry {
     ProviderRegistry::parse(PATH, source).unwrap()
@@ -207,7 +209,7 @@ fn chatgpt_allows_only_handwritten_model_metadata() {
         (
             &builtin.get("chatgpt").unwrap().base_url,
             Protocol::Responses,
-            Features::Responses
+            Features::Responses(Default::default())
         )
     );
     assert_eq!(provider.models["example"].context, Some(65536));
@@ -475,10 +477,46 @@ fn every_feature_value_parses_to_the_closed_type() {
         };
         assert_eq!(features.cache, expected);
     }
+    for (value, expected, override_value, overridden) in [
+        (
+            "none",
+            ReasoningSummary::None,
+            "auto",
+            ReasoningSummary::Auto,
+        ),
+        (
+            "auto",
+            ReasoningSummary::Auto,
+            "none",
+            ReasoningSummary::None,
+        ),
+    ] {
+        let registry = parse(&format!(
+            "{RESPONSES_PROVIDER}\n[providers.custom.features]\nreasoning_summary = '{value}'\n[providers.custom.models.inherited]\n[providers.custom.models.overridden.features]\nreasoning_summary = '{override_value}'"
+        ));
+        let provider = registry.get("custom").unwrap();
+        let expected = Features::Responses(ResponsesFeatures {
+            reasoning_summary: expected,
+        });
+        assert_eq!(provider.features, expected);
+        assert_eq!(provider.models["inherited"].features, expected);
+        assert_eq!(
+            provider.models["overridden"].features,
+            Features::Responses(ResponsesFeatures {
+                reasoning_summary: overridden,
+            })
+        );
+    }
 }
 
 #[test]
 fn feature_defaults_match_standard_protocol_behavior() {
+    assert_eq!(
+        Features::defaults(Protocol::Responses),
+        Features::Responses(ResponsesFeatures {
+            reasoning_summary: ReasoningSummary::None,
+        })
+    );
     assert_eq!(
         Features::defaults(Protocol::ChatCompletions),
         Features::ChatCompletions(ChatCompletionsFeatures {
@@ -499,6 +537,37 @@ fn feature_defaults_match_standard_protocol_behavior() {
 
 #[test]
 fn rejects_unknown_feature_values_types_and_features_from_other_protocols() {
+    for level in ["features", "models.test.features"] {
+        for (value, reason) in [
+            ("'unsupported'", "unknown variant"),
+            ("'AUTO'", "unknown variant"),
+            ("true", "invalid type"),
+            ("1", "invalid type"),
+            ("{auto = {}}", "invalid type"),
+        ] {
+            assert_invalid(
+                &format!(
+                    "{RESPONSES_PROVIDER}\n[providers.custom.{level}]\nreasoning_summary = {value}"
+                ),
+                5,
+                reason,
+            );
+        }
+        for protocol in [
+            "chat-completions",
+            "anthropic-messages",
+            "generate-content",
+            "interactions",
+        ] {
+            assert_invalid(
+                &format!(
+                    "[providers.custom]\nprotocol = '{protocol}'\nbase_url = 'http://localhost'\n[providers.custom.{level}]\nreasoning_summary = 'auto'"
+                ),
+                5,
+                "unknown feature `reasoning_summary`",
+            );
+        }
+    }
     for name in [
         "effort_param",
         "thinking_toggle",
