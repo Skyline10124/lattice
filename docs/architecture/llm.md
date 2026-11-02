@@ -118,7 +118,7 @@ Anthropic Messages 的 `redacted_thinking` 以空 Reasoning 片段及带 `redact
 | --- | --- | --- | --- | --- | --- |
 | `openai` | `responses` | `https://api.openai.com/v1` | `bearer` | `openai` | `reasoning_summary = "auto"` |
 | `chatgpt` | `responses` | `https://api.openai.com/v1` | `oauth:chatgpt` | `openai` | — |
-| `anthropic` | `anthropic-messages` | `https://api.anthropic.com` | `x-api-key` | `anthropic` | — |
+| `anthropic` | `anthropic-messages` | `https://api.anthropic.com` | `x-api-key` | `anthropic` | `thinking_display = "summarized"` |
 | `google` | `interactions` | `https://generativelanguage.googleapis.com/v1beta` | `x-goog-api-key` | `google` | — |
 | `xai` | `responses` | `https://api.x.ai/v1` | `bearer` | `xai` | — |
 | `mistral` | `chat-completions` | `https://api.mistral.ai/v1` | `bearer` | `mistral` | `reasoning_replay = "content-chunks"` |
