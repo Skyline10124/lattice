@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use crate::protocol::{
     Cache, ChatCompletionsFeatures, EffortParam, Features, MessagesFeatures, ReasoningReplay,
-    ReasoningSummary, ResponsesFeatures, ThinkingBudget, ThinkingDisplay, ThinkingToggle,
+    ThinkingBudget, ThinkingToggle,
 };
 
 use super::{Auth, Provider};
@@ -38,16 +38,14 @@ pub(super) fn providers() -> Vec<Provider> {
             "https://api.openai.com/v1",
             Bearer,
             Some("openai"),
-            Features::Responses(ResponsesFeatures {
-                reasoning_summary: ReasoningSummary::Auto,
-            }),
+            Features::Responses,
         ),
         provider(
             "chatgpt",
             "https://api.openai.com/v1",
             OauthChatgpt,
             Some("openai"),
-            Features::Responses(Default::default()),
+            Features::Responses,
         ),
         provider(
             "anthropic",
@@ -56,7 +54,6 @@ pub(super) fn providers() -> Vec<Provider> {
             Some("anthropic"),
             Features::Messages(MessagesFeatures {
                 cache: Cache::Automatic,
-                thinking_display: ThinkingDisplay::Summarized,
             }),
         ),
         provider(
@@ -71,7 +68,7 @@ pub(super) fn providers() -> Vec<Provider> {
             "https://api.x.ai/v1",
             Bearer,
             Some("xai"),
-            Features::Responses(Default::default()),
+            Features::Responses,
         ),
         provider(
             "mistral",
@@ -143,20 +140,14 @@ pub(super) fn providers() -> Vec<Provider> {
             "https://api.minimax.io/anthropic",
             XApiKey,
             Some("minimax"),
-            Features::Messages(MessagesFeatures {
-                cache: Cache::None,
-                ..Default::default()
-            }),
+            Features::Messages(MessagesFeatures { cache: Cache::None }),
         ),
         provider(
             "minimax-cn",
             "https://api.minimax.cn/anthropic",
             XApiKey,
             Some("minimax-cn"),
-            Features::Messages(MessagesFeatures {
-                cache: Cache::None,
-                ..Default::default()
-            }),
+            Features::Messages(MessagesFeatures { cache: Cache::None }),
         ),
         provider(
             "volcengine",

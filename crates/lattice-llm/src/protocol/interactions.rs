@@ -30,7 +30,7 @@ pub(crate) fn build_request_json(
     if let Some(ReasoningPlan::Effort { effort, .. }) = reasoning {
         config["thinking_level"] = effort.as_str().into();
     }
-    if model_reasoning != Some(false) {
+    if model_reasoning == Some(true) {
         config["thinking_summaries"] = "auto".into();
     }
     if config.as_object().is_some_and(|fields| !fields.is_empty()) {

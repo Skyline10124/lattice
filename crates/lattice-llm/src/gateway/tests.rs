@@ -850,10 +850,8 @@ async fn protocol_and_auth_independently_select_wire_requests() {
                     received.body.get("max_tokens").is_none(),
                     "{cell}: max_tokens"
                 );
-                assert_eq!(
-                    received.body.get("generationConfig").cloned(),
-                    (protocol == "generate-content")
-                        .then(|| serde_json::json!({"thinkingConfig":{"includeThoughts":true}})),
+                assert!(
+                    received.body.get("generationConfig").is_none(),
                     "{cell}: generationConfig"
                 );
             }
@@ -944,9 +942,10 @@ async fn protocol_and_auth_independently_select_wire_requests() {
                     assert_eq!(received.body["store"], false);
                     assert_eq!(received.body["stream"], true);
                     assert_eq!(received.body["prompt_cache_key"], "session-id");
-                    assert_eq!(
-                        received.body["include"],
-                        serde_json::json!(["reasoning.encrypted_content"])
+                    assert!(received.body.get("include").is_none(), "{cell}: include");
+                    assert!(
+                        received.body.get("reasoning").is_none(),
+                        "{cell}: reasoning"
                     );
                 }
                 "interactions" => {
@@ -961,9 +960,9 @@ async fn protocol_and_auth_independently_select_wire_requests() {
                     );
                     assert_eq!(received.body["store"], false);
                     assert_eq!(received.body["stream"], true);
-                    assert_eq!(
-                        received.body["generation_config"],
-                        serde_json::json!({"thinking_summaries":"auto"})
+                    assert!(
+                        received.body.get("generation_config").is_none(),
+                        "{cell}: generation_config"
                     );
                     for field in [
                         "thinking_summaries",
@@ -2289,12 +2288,7 @@ async fn builtin_candidates_and_efforts_match_the_requests_they_resolve() {
     use serde_json::json;
 
     let mut server = Server::start(true).await;
-    for (id, summary_override, summary) in [
-        ("openai", None, true),
-        ("openai", Some("none"), false),
-        ("xai", None, false),
-        ("google", None, false),
-    ] {
+    for id in ["openai", "xai", "google"] {
         let google = id == "google";
         let directory = private_dir();
         let base_url = if google {
@@ -2302,14 +2296,9 @@ async fn builtin_candidates_and_efforts_match_the_requests_they_resolve() {
         } else {
             server.url.clone()
         };
-        let mut source = format!(
+        let source = format!(
             "[providers.{id}]\nbase_url='{base_url}'\n[providers.{id}.models.handwritten]\neffort=['low','high']\n[providers.{id}.models.reused-budget]\neffort=['low','high']\n[providers.{id}.models.invalid]\neffort=['xhigh']\n"
         );
-        if let Some(value) = summary_override {
-            source.push_str(&format!(
-                "\n[providers.{id}.features]\nreasoning_summary='{value}'\n"
-            ));
-        }
         std::fs::write(directory.path().join("providers.toml"), source).unwrap();
         let cache = directory.path().join("cache");
         std::fs::create_dir_all(&cache).unwrap();
@@ -2330,7 +2319,7 @@ async fn builtin_candidates_and_efforts_match_the_requests_they_resolve() {
         let gateway =
             RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
         let turn = gateway.open_turn();
-        for (model, expected) in [
+        for (model, expected, reasoning) in [
             (
                 "effort",
                 if google {
@@ -2346,15 +2335,16 @@ async fn builtin_candidates_and_efforts_match_the_requests_they_resolve() {
                         Effort::Max,
                     ]
                 },
+                true,
             ),
-            ("mixed", vec![Effort::Low, Effort::High]),
-            ("handwritten", vec![Effort::Low, Effort::High]),
-            ("budget", vec![]),
-            ("reused-budget", vec![]),
-            ("toggle", vec![]),
-            ("always", vec![]),
-            ("plain", vec![]),
-            ("unknown", vec![]),
+            ("mixed", vec![Effort::Low, Effort::High], false),
+            ("handwritten", vec![Effort::Low, Effort::High], false),
+            ("budget", vec![], true),
+            ("reused-budget", vec![], true),
+            ("toggle", vec![], false),
+            ("always", vec![], true),
+            ("plain", vec![], false),
+            ("unknown", vec![], false),
         ] {
             let target = ModelTarget::new(id, model);
             assert_eq!(
@@ -2442,15 +2432,15 @@ async fn builtin_candidates_and_efforts_match_the_requests_they_resolve() {
                 assert_eq!(body["stream"], true);
                 assert_eq!(body["store"], false);
                 assert_eq!(body["tools"][0]["name"], "observe__workspace");
-                assert_eq!(body.get("include").is_some(), !google && model != "plain");
+                assert_eq!(body.get("include").is_some(), !google && reasoning);
                 if google {
                     assert_eq!(body["system_instruction"], "builtin system");
                     assert_eq!(body["input"][0]["type"], "user_input");
-                    let expected_config = match (model == "plain", effort) {
-                        (true, None) => None,
-                        (true, Some(effort)) => Some(json!({"thinking_level":effort.as_str()})),
-                        (false, None) => Some(json!({"thinking_summaries":"auto"})),
-                        (false, Some(effort)) => Some(
+                    let expected_config = match (reasoning, effort) {
+                        (false, None) => None,
+                        (false, Some(effort)) => Some(json!({"thinking_level":effort.as_str()})),
+                        (true, None) => Some(json!({"thinking_summaries":"auto"})),
+                        (true, Some(effort)) => Some(
                             json!({"thinking_level":effort.as_str(),"thinking_summaries":"auto"}),
                         ),
                     };
@@ -2466,7 +2456,7 @@ async fn builtin_candidates_and_efforts_match_the_requests_they_resolve() {
                     assert_eq!(body["input"][0]["role"], "user");
                     assert_eq!(body["prompt_cache_key"], "session-id");
                     assert_eq!(body["tools"][0]["strict"], false);
-                    let expected_reasoning = match (summary && model != "plain", effort) {
+                    let expected_reasoning = match (reasoning, effort) {
                         (_, Some(Effort::Off)) => Some(json!({"effort":"none"})),
                         (true, Some(effort)) => {
                             Some(json!({"effort":effort.as_str(),"summary":"auto"}))
@@ -2478,10 +2468,10 @@ async fn builtin_candidates_and_efforts_match_the_requests_they_resolve() {
                     assert_eq!(
                         body.get("reasoning"),
                         expected_reasoning.as_ref(),
-                        "{id}/{model}/{effort:?}, summary override {summary_override:?}"
+                        "{id}/{model}/{effort:?}"
                     );
                     assert!(body.get("generation_config").is_none());
-                    if model != "plain" {
+                    if reasoning {
                         assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
                     }
                 }
@@ -2611,7 +2601,14 @@ async fn builtin_protocol_switch_rejects_old_tool_history_before_connecting() {
 
 #[tokio::test]
 async fn reasoning_text_controls_use_the_model_metadata_from_each_resolution() {
-    for protocol in ["responses", "interactions", "generate-content"] {
+    use lattice_conversation::Effort;
+    use serde_json::json;
+    for protocol in [
+        "responses",
+        "interactions",
+        "generate-content",
+        "anthropic-messages",
+    ] {
         let mut server = Server::start(false).await;
         let directory = private_dir();
         configure(directory.path(), &server.url, protocol, "none");
@@ -2621,74 +2618,110 @@ async fn reasoning_text_controls_use_the_model_metadata_from_each_resolution() {
         std::fs::create_dir_all(&cache).unwrap();
         let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
         let turn = gateway.open_turn();
-        let scopes = if protocol == "responses" {
+        let cases = if protocol == "responses" {
             vec![
-                Some("providers.test.features"),
-                Some("providers.test.models.model-id.features"),
+                (Some(false), true, Some(true)),
+                (Some(true), true, Some(false)),
+                (None, false, Some(true)),
+                (None, false, Some(false)),
+                (Some(false), true, None),
+                (Some(true), true, None),
+                (None, true, None),
+                (None, false, None),
             ]
         } else {
-            vec![None]
+            vec![
+                (Some(false), true, None),
+                (Some(true), true, None),
+                (None, true, None),
+                (None, false, None),
+            ]
         };
-        for scope in scopes {
-            let features = scope
-                .map(|scope| format!("[{scope}]\nreasoning_summary='auto'\n"))
-                .unwrap_or_default();
+        for (catalog_flag, present, handwritten) in cases {
+            let mut model_config =
+                handwritten.map_or_else(String::new, |flag| format!("reasoning={flag}\n"));
+            if protocol == "anthropic-messages" {
+                model_config.push_str("effort=['high']\n");
+            }
+            if !model_config.is_empty() {
+                model_config = format!("[providers.test.models.model-id]\n{model_config}");
+            }
             std::fs::write(
                 &path,
-                format!("{source}\ncatalog='reasoning-fixture'\n{features}"),
+                format!("{source}\ncatalog='reasoning-fixture'\n{model_config}"),
             )
             .unwrap();
-            for (flag, present) in [
-                (Some(false), true),
-                (Some(true), true),
-                (None, true),
-                (None, false),
-            ] {
-                let mut model = serde_json::json!({"id":"model-id"});
-                if let Some(flag) = flag {
-                    model["reasoning"] = flag.into();
-                }
-                let models = if present {
-                    serde_json::json!({"model-id":model})
-                } else {
-                    serde_json::json!({})
-                };
-                std::fs::write(
-                    cache.join("models.json"),
-                    serde_json::to_vec(&serde_json::json!({"reasoning-fixture":{"models":models}}))
-                        .unwrap(),
-                )
-                .unwrap();
-                complete(
-                    turn.stream_chat(request("test"), StreamControl::default())
-                        .await
-                        .unwrap(),
-                )
-                .await;
-                let body = server.next().await.body;
-                let (actual, expected) = match protocol {
-                    "responses" => {
-                        assert_eq!(body.get("include").is_some(), flag != Some(false));
-                        (
-                            body.get("reasoning").cloned(),
-                            serde_json::json!({"summary":"auto"}),
-                        )
-                    }
-                    "interactions" => (
-                        body.get("generation_config").cloned(),
-                        serde_json::json!({"thinking_summaries":"auto"}),
-                    ),
-                    _ => (
-                        body.get("generationConfig").cloned(),
-                        serde_json::json!({"thinkingConfig":{"includeThoughts":true}}),
-                    ),
-                };
+            let mut model = json!({"id":"model-id"});
+            if protocol == "responses" {
+                model["reasoning_options"] = json!([{"type":"effort","values":["none","high"]}]);
+            }
+            if let Some(flag) = catalog_flag {
+                model["reasoning"] = flag.into();
+            }
+            let models = if present {
+                json!({"model-id":model})
+            } else {
+                json!({})
+            };
+            std::fs::write(
+                cache.join("models.json"),
+                serde_json::to_vec(&json!({"reasoning-fixture":{"models":models}})).unwrap(),
+            )
+            .unwrap();
+            let mut request = request("test");
+            if protocol == "anthropic-messages" {
+                request.target.effort = Some(Effort::High);
+            }
+            if protocol == "responses" {
                 assert_eq!(
-                    actual,
-                    (flag != Some(false)).then_some(expected),
-                    "{protocol}/{flag:?}/present={present}"
+                    turn.supported_efforts(&request.target).await.unwrap(),
+                    if present {
+                        vec![Effort::Off, Effort::High]
+                    } else {
+                        Vec::new()
+                    },
+                    "reasoning does not change effort derivation"
                 );
             }
+            complete(
+                turn.stream_chat(request, StreamControl::default())
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            let body = server.next().await.body;
+            let flag = handwritten.or(catalog_flag);
+            let enabled = flag == Some(true);
+            let (actual, expected) = match protocol {
+                "responses" => {
+                    assert_eq!(
+                        body.get("include").cloned(),
+                        enabled.then(|| json!(["reasoning.encrypted_content"]))
+                    );
+                    (body.get("reasoning").cloned(), json!({"summary":"auto"}))
+                }
+                "interactions" => (
+                    body.get("generation_config").cloned(),
+                    json!({"thinking_summaries":"auto"}),
+                ),
+                "anthropic-messages" => {
+                    assert_eq!(body["thinking"]["type"], "adaptive");
+                    assert_eq!(body["output_config"], json!({"effort":"high"}));
+                    (
+                        body["thinking"].get("display").cloned(),
+                        json!("summarized"),
+                    )
+                }
+                _ => (
+                    body.get("generationConfig").cloned(),
+                    json!({"thinkingConfig":{"includeThoughts":true}}),
+                ),
+            };
+            assert_eq!(
+                actual,
+                enabled.then_some(expected),
+                "{protocol}/{catalog_flag:?}/present={present}/handwritten={handwritten:?}"
+            );
         }
     }
 }

@@ -140,20 +140,12 @@ impl ProtocolParser {
                     output_limit,
                     features,
                     reasoning,
+                    model_reasoning,
                     origin,
                 );
             }
             Self::Responses(_) => {
-                let Features::Responses(features) = features else {
-                    unreachable!("resolved features match the protocol")
-                };
-                protocol::responses::build_request_json(
-                    request,
-                    features,
-                    reasoning,
-                    model_reasoning,
-                    origin,
-                )
+                protocol::responses::build_request_json(request, reasoning, model_reasoning, origin)
             }
             Self::Interactions(_) => protocol::interactions::build_request_json(
                 request,
@@ -1220,38 +1212,22 @@ mod tests {
             ),
         ] {
             let cases = if protocol == Protocol::Responses {
-                let with_summary = match selected {
-                    Off => json!({"reasoning":{"effort":"none"}}),
-                    High => json!({"reasoning":{"effort":"high","summary":"auto"}}),
+                let reasoning_enabled = match selected {
+                    Off => {
+                        json!({"include":["reasoning.encrypted_content"],"reasoning":{"effort":"none"}})
+                    }
+                    High => {
+                        json!({"include":["reasoning.encrypted_content"],"reasoning":{"effort":"high","summary":"auto"}})
+                    }
                     _ => unreachable!("Responses matrix selects off or high"),
                 };
                 vec![
-                    ("", None, json!({}), expected.clone()),
-                    ("", Some(false), json!({}), expected.clone()),
-                    ("", Some(true), json!({}), expected.clone()),
+                    (None, json!({}), expected.clone()),
+                    (Some(false), json!({}), expected.clone()),
                     (
-                        "reasoning_summary='none'",
-                        None,
-                        json!({}),
-                        expected.clone(),
-                    ),
-                    (
-                        "reasoning_summary='auto'",
-                        Some(false),
-                        json!({}),
-                        expected.clone(),
-                    ),
-                    (
-                        "reasoning_summary='auto'",
                         Some(true),
-                        json!({"reasoning":{"summary":"auto"}}),
-                        with_summary.clone(),
-                    ),
-                    (
-                        "reasoning_summary='auto'",
-                        None,
-                        json!({"reasoning":{"summary":"auto"}}),
-                        with_summary,
+                        json!({"include":["reasoning.encrypted_content"],"reasoning":{"summary":"auto"}}),
+                        reasoning_enabled,
                     ),
                 ]
             } else if protocol == Protocol::Messages {
@@ -1259,30 +1235,19 @@ mod tests {
                 if displayed["thinking"]["type"] == "adaptive" {
                     displayed["thinking"]["display"] = "summarized".into();
                 }
-                let mut cases = vec![("", None, json!({}), expected.clone())];
-                for metadata in [Some(false), Some(true), None] {
-                    cases.push((
-                        "thinking_display='none'",
-                        metadata,
-                        json!({}),
-                        expected.clone(),
-                    ));
-                    cases.push((
-                        "thinking_display='summarized'",
-                        metadata,
-                        json!({}),
-                        displayed.clone(),
-                    ));
-                }
-                cases
+                vec![
+                    (Some(false), json!({}), expected.clone()),
+                    (Some(true), json!({}), displayed),
+                    (None, json!({}), expected),
+                ]
             } else if protocol == Protocol::Interactions {
                 let mut with_summary = expected.clone();
                 with_summary["generation_config"]["thinking_summaries"] = "auto".into();
                 let unselected = json!({"generation_config":{"thinking_summaries":"auto"}});
                 vec![
-                    ("", Some(false), json!({}), expected),
-                    ("", Some(true), unselected.clone(), with_summary.clone()),
-                    ("", None, unselected, with_summary),
+                    (Some(false), json!({}), expected.clone()),
+                    (Some(true), unselected, with_summary),
+                    (None, json!({}), expected),
                 ]
             } else if protocol == Protocol::GenerateContent {
                 let mut with_thoughts = expected.clone();
@@ -1293,17 +1258,17 @@ mod tests {
                 let unselected =
                     json!({"generationConfig":{"thinkingConfig":{"includeThoughts":true}}});
                 vec![
-                    ("", Some(false), json!({}), expected),
-                    ("", Some(true), unselected.clone(), with_thoughts.clone()),
-                    ("", None, unselected, with_thoughts),
+                    (Some(false), json!({}), expected.clone()),
+                    (Some(true), unselected, with_thoughts),
+                    (None, json!({}), expected),
                 ]
             } else {
-                vec![("", None, json!({}), expected)]
+                vec![(None, json!({}), expected)]
             };
-            for (feature_overrides, model_reasoning, unselected, expected) in cases {
+            for (model_reasoning, unselected, expected) in cases {
                 let mut features = Features::defaults(protocol);
                 let overrides: std::collections::BTreeMap<String, toml::Value> =
-                    toml::from_str(&format!("{overrides}\n{feature_overrides}")).unwrap();
+                    toml::from_str(overrides).unwrap();
                 for (name, value) in overrides {
                     features.apply(&name, value).unwrap();
                 }
@@ -1338,7 +1303,8 @@ mod tests {
                         .filter(|(key, _)| {
                             matches!(
                                 key.as_str(),
-                                "reasoning_effort"
+                                "include"
+                                    | "reasoning_effort"
                                     | "reasoning"
                                     | "thinking"
                                     | "thinking_budget"
@@ -1417,7 +1383,6 @@ mod tests {
                         } else {
                             Cache::None
                         },
-                        ..Default::default()
                     }),
                     _ => Features::GenerateContent,
                 };
@@ -1478,7 +1443,6 @@ mod tests {
                     include_str!("../tests/fixtures/projection/anthropic_thinking_tool_use.json"),
                     Features::Messages(MessagesFeatures {
                         cache: Cache::Automatic,
-                        ..Default::default()
                     }),
                 ),
             ] {

@@ -390,7 +390,7 @@ fn handwritten_values_override_individual_fields_and_can_define_models_alone() {
                   "reasoning": true, "reasoning_options": [{"type": "toggle"}], "tool_call": true,
                   "modalities": {"input": ["text"]}, "status": "deprecated",
                   "cost": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4, "reasoning": 5}},
-            "n": {"id": "n", "tool_call": false, "limit": {"context": 200, "output": 60},
+            "n": {"id": "n", "reasoning": false, "tool_call": false, "limit": {"context": 200, "output": 60},
                   "cost": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4}}
         }}}),
     );
@@ -399,15 +399,18 @@ fn handwritten_values_override_individual_fields_and_can_define_models_alone() {
         r#"
         [providers.openai.models.m]
         context = 999
+        reasoning = false
         effort = ["off", "high"]
         tools = false
         cost = { output = 0.0, cache_write = 7.0 }
         [providers.openai.models.n]
         output = 90
+        reasoning = true
         tools = true
         cost = { input = 8.0, cache_read = 9.0 }
         [providers.openai.models.only]
         output = 12
+        reasoning = true
         [providers.openai.models.empty]
     "#,
     )
@@ -434,7 +437,7 @@ fn handwritten_values_override_individual_fields_and_can_define_models_alone() {
     assert_eq!(m.tool_call, Some(false));
     assert_eq!(m.name.as_deref(), Some("Remote name"));
     assert_eq!(m.status.as_deref(), Some("deprecated"));
-    assert_eq!(m.reasoning, Some(true));
+    assert_eq!(m.reasoning, Some(false));
     assert_eq!(m.reasoning_options, Some(json!([{"type": "toggle"}])));
     assert_eq!(
         m.modalities.as_ref().unwrap().input,
@@ -458,6 +461,7 @@ fn handwritten_values_override_individual_fields_and_can_define_models_alone() {
         })
     );
     assert_eq!(n.tool_call, Some(true));
+    assert_eq!(n.reasoning, Some(true));
     assert_eq!(n.effort, None);
     let only = &models["only"];
     assert_eq!(only.id, "only");
@@ -469,8 +473,11 @@ fn handwritten_values_override_individual_fields_and_can_define_models_alone() {
         })
     );
     assert_eq!(only.tool_call, Some(true));
+    assert_eq!(only.reasoning, Some(true));
+    assert_eq!(only.reasoning_options, None);
     assert_eq!(only.cost, None);
     assert_eq!(models["empty"].limit, None);
+    assert_eq!(models["empty"].reasoning, None);
 }
 
 #[test]

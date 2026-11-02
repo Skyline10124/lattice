@@ -7,8 +7,7 @@ use lattice_conversation::{MAX_PROVIDER_ID_BYTES, validate_provider_id};
 
 use crate::protocol::{
     Cache, ChatCompletionsFeatures, EffortParam, Features, MessagesFeatures, Protocol,
-    ReasoningReplay, ReasoningSummary, ResponsesFeatures, ThinkingBudget, ThinkingDisplay,
-    ThinkingToggle,
+    ReasoningReplay, ThinkingBudget, ThinkingToggle,
 };
 
 use super::{
@@ -22,9 +21,6 @@ const CHAT_PROVIDER: &str =
     "[providers.custom]\nprotocol = 'chat-completions'\nbase_url = 'http://localhost'";
 const MESSAGES_PROVIDER: &str =
     "[providers.custom]\nprotocol = 'anthropic-messages'\nbase_url = 'http://localhost'";
-const RESPONSES_PROVIDER: &str =
-    "[providers.custom]\nprotocol = 'responses'\nbase_url = 'http://localhost'";
-
 fn parse(source: &str) -> ProviderRegistry {
     ProviderRegistry::parse(PATH, source).unwrap()
 }
@@ -75,18 +71,6 @@ fn builtins_obey_provider_invariants() {
                 provider.id
             ),
         }
-        if let Features::Messages(features) = provider.features {
-            assert_eq!(
-                features.thinking_display,
-                if provider.id == "anthropic" {
-                    ThinkingDisplay::Summarized
-                } else {
-                    ThinkingDisplay::None
-                },
-                "{}",
-                provider.id
-            );
-        }
     }
 }
 
@@ -96,18 +80,14 @@ fn builtin_protocols_match_their_endpoints_and_auth() {
     for (id, features, url, auth, catalog) in [
         (
             "openai",
-            Features::Responses(ResponsesFeatures {
-                reasoning_summary: ReasoningSummary::Auto,
-            }),
+            Features::Responses,
             "https://api.openai.com/v1",
             Auth::Bearer,
             "openai",
         ),
         (
             "xai",
-            Features::Responses(ResponsesFeatures {
-                reasoning_summary: ReasoningSummary::None,
-            }),
+            Features::Responses,
             "https://api.x.ai/v1",
             Auth::Bearer,
             "xai",
@@ -121,7 +101,7 @@ fn builtin_protocols_match_their_endpoints_and_auth() {
         ),
         (
             "chatgpt",
-            Features::Responses(Default::default()),
+            Features::Responses,
             "https://api.openai.com/v1",
             Auth::OauthChatgpt,
             "openai",
@@ -149,6 +129,7 @@ thinking_toggle = "enable-thinking"
 [providers.deepseek.models."deepseek-v4-flash"]
 context = 131072
 output = 8192
+reasoning = true
 effort = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
 tools = false
 cost = { input = 1, output = 2.5, cache_read = 0.1, cache_write = 0.5 }
@@ -175,8 +156,8 @@ catalog = "custom-catalog"
     assert_eq!(chat(provider.features), expected_features);
     let model = &provider.models["deepseek-v4-flash"];
     assert_eq!(
-        (model.context, model.output, model.tools),
-        (Some(131072), Some(8192), Some(false))
+        (model.context, model.output, model.reasoning, model.tools),
+        (Some(131072), Some(8192), Some(true), Some(false))
     );
     assert_eq!(
         model.effort.as_deref(),
@@ -214,11 +195,12 @@ catalog = "custom-catalog"
         (
             absent.context,
             absent.output,
+            absent.reasoning,
             &absent.effort,
             absent.tools,
             &absent.cost
         ),
-        (None, None, &None, None, &None)
+        (None, None, None, &None, None, &None)
     );
     assert_eq!(absent.features, provider.features);
     let custom = registry.get("my-vllm").unwrap();
@@ -299,7 +281,7 @@ fn chatgpt_allows_only_handwritten_model_metadata() {
         (
             &builtin.get("chatgpt").unwrap().base_url,
             Protocol::Responses,
-            Features::Responses(Default::default())
+            Features::Responses
         )
     );
     assert_eq!(provider.models["example"].context, Some(65536));
@@ -393,6 +375,16 @@ fn strict_errors_report_path_line_and_reason() {
         ),
         (
             "[providers.openai.models.test]\ntools = 'true'",
+            2,
+            "invalid type",
+        ),
+        (
+            "[providers.openai.models.test]\nreasoning = 'true'",
+            2,
+            "invalid type",
+        ),
+        (
+            "[providers.openai.models.test]\nreasoning = 1",
             2,
             "invalid type",
         ),
@@ -567,78 +559,11 @@ fn every_feature_value_parses_to_the_closed_type() {
         };
         assert_eq!(features.cache, expected);
     }
-    for (value, expected, override_value, overridden) in [
-        (
-            "none",
-            ThinkingDisplay::None,
-            "summarized",
-            ThinkingDisplay::Summarized,
-        ),
-        (
-            "summarized",
-            ThinkingDisplay::Summarized,
-            "none",
-            ThinkingDisplay::None,
-        ),
-    ] {
-        let registry = parse(&format!(
-            "{MESSAGES_PROVIDER}\n[providers.custom.features]\nthinking_display='{value}'\n[providers.custom.models.inherited]\n[providers.custom.models.overridden.features]\nthinking_display='{override_value}'"
-        ));
-        let provider = registry.get("custom").unwrap();
-        let expected = Features::Messages(MessagesFeatures {
-            thinking_display: expected,
-            ..Default::default()
-        });
-        assert_eq!(provider.features, expected);
-        assert_eq!(provider.models["inherited"].features, expected);
-        assert_eq!(
-            provider.models["overridden"].features,
-            Features::Messages(MessagesFeatures {
-                thinking_display: overridden,
-                ..Default::default()
-            })
-        );
-    }
-    for (value, expected, override_value, overridden) in [
-        (
-            "none",
-            ReasoningSummary::None,
-            "auto",
-            ReasoningSummary::Auto,
-        ),
-        (
-            "auto",
-            ReasoningSummary::Auto,
-            "none",
-            ReasoningSummary::None,
-        ),
-    ] {
-        let registry = parse(&format!(
-            "{RESPONSES_PROVIDER}\n[providers.custom.features]\nreasoning_summary = '{value}'\n[providers.custom.models.inherited]\n[providers.custom.models.overridden.features]\nreasoning_summary = '{override_value}'"
-        ));
-        let provider = registry.get("custom").unwrap();
-        let expected = Features::Responses(ResponsesFeatures {
-            reasoning_summary: expected,
-        });
-        assert_eq!(provider.features, expected);
-        assert_eq!(provider.models["inherited"].features, expected);
-        assert_eq!(
-            provider.models["overridden"].features,
-            Features::Responses(ResponsesFeatures {
-                reasoning_summary: overridden,
-            })
-        );
-    }
 }
 
 #[test]
 fn feature_defaults_match_standard_protocol_behavior() {
-    assert_eq!(
-        Features::defaults(Protocol::Responses),
-        Features::Responses(ResponsesFeatures {
-            reasoning_summary: ReasoningSummary::None,
-        })
-    );
+    assert_eq!(Features::defaults(Protocol::Responses), Features::Responses);
     assert_eq!(
         Features::defaults(Protocol::ChatCompletions),
         Features::ChatCompletions(ChatCompletionsFeatures {
@@ -653,7 +578,6 @@ fn feature_defaults_match_standard_protocol_behavior() {
         Features::defaults(Protocol::Messages),
         Features::Messages(MessagesFeatures {
             cache: Cache::Automatic,
-            thinking_display: ThinkingDisplay::None,
         })
     );
 }
@@ -661,47 +585,20 @@ fn feature_defaults_match_standard_protocol_behavior() {
 #[test]
 fn rejects_unknown_feature_values_types_and_features_from_other_protocols() {
     for level in ["features", "models.test.features"] {
-        for (feature, definition, enabled, others) in [
-            (
-                "reasoning_summary",
-                RESPONSES_PROVIDER,
-                "auto",
-                [
-                    "chat-completions",
-                    "anthropic-messages",
-                    "generate-content",
-                    "interactions",
-                ],
-            ),
-            (
-                "thinking_display",
-                MESSAGES_PROVIDER,
-                "summarized",
-                [
-                    "chat-completions",
-                    "responses",
-                    "generate-content",
-                    "interactions",
-                ],
-            ),
+        for protocol in [
+            "responses",
+            "chat-completions",
+            "anthropic-messages",
+            "generate-content",
+            "interactions",
         ] {
-            for (value, reason) in [
-                ("'unsupported'", "unknown variant"),
-                ("'AUTO'", "unknown variant"),
-                ("true", "invalid type"),
-                ("1", "invalid type"),
-                ("{auto = {}}", "invalid type"),
+            for (feature, value) in [
+                ("thinking_display", "summarized"),
+                ("reasoning_summary", "auto"),
             ] {
                 assert_invalid(
-                    &format!("{definition}\n[providers.custom.{level}]\n{feature} = {value}"),
-                    5,
-                    reason,
-                );
-            }
-            for protocol in others {
-                assert_invalid(
                     &format!(
-                        "[providers.custom]\nprotocol = '{protocol}'\nbase_url = 'http://localhost'\n[providers.custom.{level}]\n{feature} = '{enabled}'"
+                        "[providers.custom]\nprotocol = '{protocol}'\nbase_url = 'http://localhost'\n[providers.custom.{level}]\n{feature} = '{value}'"
                     ),
                     5,
                     &format!("unknown feature `{feature}`"),

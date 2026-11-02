@@ -98,7 +98,15 @@ fn named_official_stream_replays_steps_and_preserves_cumulative_usage() {
         .iter()
         .position(|event| event["event_type"] == "step.stop" && event.get("usage").is_some())
         .unwrap();
-    let (_, interrupted, eof_report) = collect(events[..=usage_stop].to_vec());
+    let (live, interrupted, eof_report) = collect(events[..=usage_stop].to_vec());
+    assert_eq!(
+        live,
+        vec![
+            LlmEvent::Delta(crate::LiveDelta::Text("Checking.".into())),
+            LlmEvent::Delta(crate::LiveDelta::Reasoning("Compare inputs.".into())),
+            LlmEvent::Delta(crate::LiveDelta::Reasoning("Read both.".into())),
+        ]
+    );
     assert_eq!(
         interrupted,
         ReplyOutcome::Interrupted {
@@ -654,7 +662,7 @@ fn request_keeps_tool_schema_and_omits_unselected_controls() {
         "desc",
         json!({"type":"object","additionalProperties":false,"properties":{"x":{"const":"x"}}}),
     ));
-    let body = build_request_json(&request, None, None, &origin()).unwrap();
+    let body = build_request_json(&request, None, Some(true), &origin()).unwrap();
     assert_eq!(
         body["generation_config"],
         json!({"thinking_summaries":"auto"})

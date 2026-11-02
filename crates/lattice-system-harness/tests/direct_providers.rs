@@ -118,7 +118,7 @@ fn interactions_replays_thoughts_and_two_tool_results_after_backend_restart() {
     world.wire_provider(fixture, &server, FAKE_API_KEY).unwrap();
     let path = world.home().join(".lattice/providers.toml");
     let source = std::fs::read_to_string(&path).unwrap();
-    std::fs::write(path,format!("{source}\n[providers.interactions-fixture.models.interactions-model.cost]\ninput=2\noutput=10\ncache_read=0.5\ncache_write=3\n")).unwrap();
+    std::fs::write(path,format!("{source}\n[providers.interactions-fixture.models.interactions-model]\nreasoning=true\n[providers.interactions-fixture.models.interactions-model.cost]\ninput=2\noutput=10\ncache_read=0.5\ncache_write=3\n")).unwrap();
     let driver = driver();
     let send = SessionSendDriver::new(&driver, &world, &spec, "interactions");
     let mut evidence = support::evidence(&world, &spec);
@@ -526,7 +526,7 @@ fn responses_replays_phase_reasoning_and_two_tool_results_after_backend_restart(
     world.wire_provider(fixture, &server, FAKE_API_KEY).unwrap();
     let config = world.home().join(".lattice/providers.toml");
     let source = std::fs::read_to_string(&config).unwrap();
-    std::fs::write(config,format!("{source}\n[providers.responses-fixture.models.responses-model.cost]\ninput=2\noutput=10\ncache_read=0.5\ncache_write=3\n")).unwrap();
+    std::fs::write(config,format!("{source}\n[providers.responses-fixture.models.responses-model]\nreasoning=true\n[providers.responses-fixture.models.responses-model.cost]\ninput=2\noutput=10\ncache_read=0.5\ncache_write=3\n")).unwrap();
     let driver = driver();
     let send = SessionSendDriver::new(&driver, &world, &spec, "responses");
     let mut evidence = support::evidence(&world, &spec);
@@ -591,7 +591,11 @@ fn responses_replays_phase_reasoning_and_two_tool_results_after_backend_restart(
             assert_eq!(capture.raw["stream"], true);
             assert_eq!(capture.raw["prompt_cache_key"], sid);
             assert_eq!(capture.raw["tools"][0]["strict"], false);
-            assert!(capture.raw.get("reasoning").is_none());
+            assert_eq!(
+                capture.raw["include"],
+                json!(["reasoning.encrypted_content"])
+            );
+            assert_eq!(capture.raw["reasoning"], json!({"summary":"auto"}));
             for key in [
                 "max_output_tokens",
                 "previous_response_id",
@@ -615,6 +619,11 @@ fn responses_replays_phase_reasoning_and_two_tool_results_after_backend_restart(
         assert_eq!(reopened[7], final_item);
         assert_eq!(reopened[8]["content"][0]["text"], "continue after restart");
         assert_eq!(captures[2].raw["prompt_cache_key"], sid);
+        assert_eq!(
+            captures[2].raw["include"],
+            json!(["reasoning.encrypted_content"])
+        );
+        assert_eq!(captures[2].raw["reasoning"], json!({"summary":"auto"}));
         let mut watcher = support::Watcher::open(&world, spec.step_timeout(), sid);
         let view = watcher.initial();
         assert_eq!(view.head.as_ref().unwrap().provider, "responses-fixture");
@@ -693,6 +702,9 @@ fn responses_failures_preserve_usage_and_incomplete_saves_only_valid_replies() {
                 json!({"type":"response.function_call_arguments.delta","output_index":0,"item_id":"truncated","delta":"{\"request\":"}),
                 json!({"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"truncated","call_id":"truncated-call","name":"observe__workspace","status":"incomplete","arguments":"{\"request\":"}}),
                 json!({"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}),
+            ]),
+            native(vec![
+                json!({"type":"response.completed","response":{"status":"completed","output":[{"type":"function_call","id":"missing-call-id","name":"observe__workspace","arguments":"{\"request\":{\"mode\":\"read_file\",\"path\":\"notes.txt\"}}"}]}}),
             ]),
         ]),
         spec.total_timeout().unwrap(),
@@ -819,6 +831,39 @@ fn responses_failures_preserve_usage_and_incomplete_saves_only_valid_replies() {
                 .any(|item| item["id"] == "saved"
                     && item["content"][0]["text"] == "saved incomplete")
         );
+        let malformed = send.send("reject missing call_id").unwrap();
+        evidence.record_command("Responses missing call_id Turn", &malformed.command);
+        assert!(malformed.command.is_clean_exit(1));
+        assert!(malformed.slots().is_empty());
+        let steps = malformed
+            .entries()
+            .into_iter()
+            .filter(|entry| entry.step().is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].raw["content"].get("reply"), Some(&Value::Null));
+        let detail = send
+            .run_command(&[
+                "--json",
+                "session",
+                "turn",
+                malformed.accepted_turn_id().unwrap(),
+            ])
+            .unwrap();
+        evidence.record_command("Responses missing call_id detail", &detail);
+        let turn: Value = serde_json::from_slice(&detail.stdout).unwrap();
+        assert_eq!(turn["steps"].as_array().unwrap().len(), 1);
+        assert_eq!(turn["steps"][0]["attempts"].as_array().unwrap().len(), 1);
+        let attempt = &turn["steps"][0]["attempts"][0];
+        assert_eq!(
+            attempt["end"]["cause"],
+            json!({"cause":"provider_error","retryable":false})
+        );
+        assert_eq!(
+            attempt["end"]["diagnostic"],
+            "malformed Responses wire: function call missing call_id"
+        );
+        assert_eq!(server.captured_requests().len(), 4);
     }));
     evidence.record_captures(server.captured_requests());
     support::finish_recorded(evidence, result);
@@ -1436,25 +1481,16 @@ fn implemented_builtin_protocols_accept_and_record_the_protocol_actually_sent() 
                     "contents",
                     "previous_response_id",
                     "previous_interaction_id",
+                    "include",
+                    "reasoning",
+                    "generation_config",
                     "max_output_tokens",
                     "background",
                 ] {
                     assert!(capture.raw.get(field).is_none(), "{id}: {field}");
                 }
-                let expected_reasoning = (id == "openai").then(|| json!({"summary":"auto"}));
-                assert_eq!(capture.raw.get("reasoning"), expected_reasoning.as_ref());
-                let expected_config =
-                    (id == "google").then(|| json!({"thinking_summaries":"auto"}));
-                assert_eq!(
-                    capture.raw.get("generation_config"),
-                    expected_config.as_ref()
-                );
                 if id != "google" {
                     assert_eq!(capture.raw["prompt_cache_key"], sid);
-                    assert_eq!(
-                        capture.raw["include"],
-                        json!(["reasoning.encrypted_content"])
-                    );
                     assert_eq!(capture.raw["tools"][0]["strict"], false);
                 }
             }
@@ -1644,6 +1680,8 @@ fn builtin_text_history_projects_across_protocols() {
         assert_eq!(all_captures.len(), 4);
         assert_eq!(all_captures[0].provider, "openai");
         assert_eq!(all_captures[1].provider, "responses");
+        assert!(all_captures[1].raw.get("include").is_none());
+        assert!(all_captures[1].raw.get("reasoning").is_none());
         assert_eq!(
             all_captures[1].raw["input"]
                 .as_array()
