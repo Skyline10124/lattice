@@ -424,6 +424,8 @@ fn failures_keep_usage_and_unknown_incomplete_reasons_still_fail() {
     for (code, retryable) in [
         ("server_error", true),
         ("rate_limit_exceeded", true),
+        ("rate_limit_error", false),
+        ("temporarily_unavailable", false),
         ("insufficient_quota", false),
         ("context_length_exceeded", false),
         ("invalid_request_error", false),
@@ -742,10 +744,7 @@ fn unknown_content_and_invalid_sequences_fail_without_exposing_payload() {
     let mut missing = call.clone();
     missing.as_object_mut().unwrap().remove("call_id");
     for events in [
-        vec![
-            json!({"type":"response.output_item.added","output_index":0,"item":missing}),
-            response(vec![missing.clone()]),
-        ],
+        vec![json!({"type":"response.output_item.added","output_index":0,"item":missing})],
         vec![
             added.clone(),
             json!({"type":"response.output_item.done","output_index":0,"item":missing}),
