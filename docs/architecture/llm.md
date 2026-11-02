@@ -92,7 +92,7 @@ provider 配置、凭据与模型元数据是用户级的全局状态，由后�
 
 ### 回放来源
 
-每次尝试记录来源 `(protocol, provider id)`。reasoning、签名、加密 reasoning 与逐片段回放状态只在协议和 provider `id` 都相同时回放；任一不同时去除这些材料。来源不含 endpoint：同一 provider `id` 在 `providers.toml` 中改了 `base_url` 之后仍回放此前的签名，新 endpoint 可能拒绝这些签名；要换 endpoint 时使用新的 provider `id`。provider call ID 按协议判定：协议相同时保留，包括 provider `id` 不同的情况；协议不同时去除，目标协议无法在缺少 call ID 时编码工具结果的，返回投影错误。跨来源投影保留中立语义，切回原来源时使用树中保存的原消息。Responses 仅在模型元数据明确 `reasoning = false` 时省略 `include`；其他情况（包括没有模型元数据）带 `include: ["reasoning.encrypted_content"]`，使 `store: false` 时取得可回放的加密 reasoning。 Responses 回放时省略没有最终 `encrypted_content` 的 reasoning item，以及末尾没有后续 item 的 reasoning item；其文字仍以 Reasoning 语义保存。
+每次尝试记录来源 `(protocol, provider id)`。reasoning、签名、加密 reasoning 与逐片段回放状态只在协议和 provider `id` 都相同时回放；任一不同时去除这些材料。来源不含 endpoint：同一 provider `id` 在 `providers.toml` 中改了 `base_url` 之后仍回放此前的签名，新 endpoint 可能拒绝这些签名；要换 endpoint 时使用新的 provider `id`。provider call ID 按协议判定：协议相同时保留，包括 provider `id` 不同的情况；协议不同时去除，目标协议无法在缺少 call ID 时编码工具结果的，返回投影错误。跨来源投影保留中立语义，切回原来源时使用树中保存的原消息。Responses 仅在模型元数据明确 `reasoning = true` 时带 `include: ["reasoning.encrypted_content"]`，使 `store: false` 时取得可回放的加密 reasoning；`false` 或没有该标志时不发送，是否选择档位及档位为 `off` 都不改变 include 的条件。Responses 回放时省略没有最终 `encrypted_content` 的 reasoning item，以及末尾没有后续 item 的 reasoning item；其文字仍以 Reasoning 语义保存。
 
 Anthropic Messages 的 `redacted_thinking` 以空 Reasoning 片段及带 `redacted:` 标记的回放状态保存 `data`，只有 Messages codec 解释该标记；普通 thinking（包括空文本）的 signature 保持原编码。同完整来源时恢复原块、data 与顺序，跨来源时移除整个 Reasoning 片段，不产生空 Text。标记计入单片段 64 KiB 与尝试总量限制，data 不进入正文或 reasoning 显示增量。
 
@@ -161,6 +161,7 @@ thinking_toggle = "enable-thinking"    # 无元数据来源时，off/high 写关
 [providers.my-vllm.models."qwen3-32b"] # 元数据中没有的模型，手写元数据
 context = 131072
 output = 8192
+reasoning = true
 effort = ["off", "high"]
 
 [providers.deepseek]                   # 覆盖内置 provider 的 endpoint
@@ -178,8 +179,10 @@ reasoning_replay = "none"              # 按模型覆盖 feature
 | `auto_refresh` | 顶层 `metadata` 表 | 布尔，默认 true。每次自动触发都读取当前文件：false 时跳过本次拉取；文件无效时本次自动刷新算作失败，按拉取失败的退避重试。`lattice models refresh` 不受影响 |
 | `protocol`、`base_url`、`auth`、`catalog` | provider 表 | 见[字段](#字段)；覆盖内置 provider 时只写要改的字段，不能写 `protocol` |
 | `features` | provider 子表 | 覆盖或补充 provider 级 features |
-| `models."<模型>"` | provider 子表 | 手写元数据：`context`、`output`（token 数），`effort`（可用档位列表；无元数据来源时[按 features 推出写法](#可用档位)），`tools`（布尔，默认 true），`cost`（`input`、`output`、`cache_read`、`cache_write`，美元每百万 token） |
+| `models."<模型>"` | provider 子表 | 手写元数据：`context`、`output`（token 数），`reasoning`（布尔，覆盖目录元数据中的同名标志，缺失时继承），`effort`（可用档位列表；无元数据来源时[按 features 推出写法](#可用档位)），`tools`（布尔，默认 true），`cost`（`input`、`output`、`cache_read`、`cache_write`，美元每百万 token） |
 | `models."<模型>".features` | 模型子表 | 按模型覆盖 features |
+
+没有目录元数据的 Responses 模型需要手写 `reasoning = true`，才会请求 include 中的加密 reasoning 与推理摘要。该标志不增加或移除可选档位，档位仍按[可用档位](#可用档位)的规则推导。
 
 - **严格解析。** 未知字段、未知 feature 或取值、类型不符、格式错误都使整个文件无效。文件无效时，用到 provider 配置的操作在接受前按配置错误拒绝，诊断写明文件路径、行号与原因；不使用部分有效的内容。
 - **文件不存在**等于空配置，只使用内置表。
@@ -216,11 +219,7 @@ feature 由协议适配器的代码定义，配置只能在已有取值中选择
 
 ### Responses
 
-| feature | 取值 | 默认 | 作用 |
-| --- | --- | --- | --- |
-| `reasoning_summary` | `none`、`auto` | `none` | `none` 不请求推理摘要，保持标准协议默认行为；`auto` 请求 `reasoning.summary: "auto"`，但模型元数据明确 `reasoning = false` 或档位为 `off` 时不请求 |
-
-该 feature 只在 Responses 上合法，可在 provider 或 model 的 features 中配置，模型级覆盖 provider 级值。[OpenAI 推理指南](https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries)说明摘要可能要求先完成组织验证；保留默认 `none`，让无法使用摘要的账号通过配置关闭请求，无需修改代码。
+Responses 没有 feature。推理摘要请求由模型元数据决定，见[档位映射](#档位映射)。
 
 适配器只发送 SIWC 也接受的字段（见[适配器的职责](#适配器的职责)），所以 `chatgpt` 不需要额外的 feature。
 
@@ -334,7 +333,7 @@ feature 由协议适配器的代码定义，配置只能在已有取值中选择
 | generateContent | `generationConfig.thinkingConfig.thinkingLevel` | `thinkingConfig.thinkingBudget: N` | `thinkingConfig.thinkingBudget: -1` | `thinkingConfig.thinkingBudget: 0` |
 | Interactions | `generation_config.thinking_level`（`minimal`、`low`、`medium`、`high`） | 不可用 | 不可用 | 不可用 |
 
-Responses 的 `reasoning_summary = "auto"` 在模型元数据不是 `reasoning = false` 且档位不是 `off` 时请求推理摘要：没选档位写 `reasoning: {"summary":"auto"}`；选了档位则与 effort 合并为 `reasoning: {"effort":"<档位>","summary":"auto"}`。`off` 只写 `reasoning: {"effort":"none"}`，不请求摘要。
+Responses 仅在模型元数据明确 `reasoning = true` 且档位不是 `off` 时请求推理摘要：没选档位写 `reasoning: {"summary":"auto"}`；选了档位则与 effort 合并为 `reasoning: {"effort":"<档位>","summary":"auto"}`。`false` 或没有该标志时不请求摘要，选中的 effort 照常发送；`off` 只写 `reasoning: {"effort":"none"}`。摘要请求与是否选择档位无关，不改变推理强度。
 
 Interactions 在模型元数据不是 `reasoning = false` 时发送 `generation_config.thinking_summaries: "auto"`，未选档位也发送；选择档位时与 `thinking_level` 合并在同一个对象里。generateContent 在模型元数据不是 `reasoning = false` 且推理未关闭时发送 `generationConfig.thinkingConfig.includeThoughts: true`，与已有 `thinkingLevel` 或 `thinkingBudget` 合并；未选档位时只发送 includeThoughts，`off`、toggle 关闭或 `thinkingBudget: 0` 均不发送。
 

@@ -53,6 +53,7 @@ pub(crate) struct ModelCost {
 pub(crate) struct ModelMetadata {
     pub(crate) context: Option<u64>,
     pub(crate) output: Option<u64>,
+    pub(crate) reasoning: Option<bool>,
     pub(crate) effort: Option<Vec<Effort>>,
     /// 未指定时继承元数据；所有来源都未指定时，默认支持工具。
     pub(crate) tools: Option<bool>,

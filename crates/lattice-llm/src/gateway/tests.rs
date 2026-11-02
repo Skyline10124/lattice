@@ -944,9 +944,10 @@ async fn protocol_and_auth_independently_select_wire_requests() {
                     assert_eq!(received.body["store"], false);
                     assert_eq!(received.body["stream"], true);
                     assert_eq!(received.body["prompt_cache_key"], "session-id");
-                    assert_eq!(
-                        received.body["include"],
-                        serde_json::json!(["reasoning.encrypted_content"])
+                    assert!(received.body.get("include").is_none(), "{cell}: include");
+                    assert!(
+                        received.body.get("reasoning").is_none(),
+                        "{cell}: reasoning"
                     );
                 }
                 "interactions" => {
@@ -2283,6 +2284,8 @@ async fn interactions_invalid_handwritten_efforts_only_reject_the_affected_model
 
 #[tokio::test]
 async fn reasoning_text_controls_use_the_model_metadata_from_each_resolution() {
+    use lattice_conversation::Effort;
+    use serde_json::json;
     for protocol in ["responses", "interactions", "generate-content"] {
         let mut server = Server::start(false).await;
         let directory = private_dir();
@@ -2293,74 +2296,98 @@ async fn reasoning_text_controls_use_the_model_metadata_from_each_resolution() {
         std::fs::create_dir_all(&cache).unwrap();
         let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
         let turn = gateway.open_turn();
-        let scopes = if protocol == "responses" {
+        let cases = if protocol == "responses" {
             vec![
-                Some("providers.test.features"),
-                Some("providers.test.models.model-id.features"),
+                (Some(false), true, Some(true)),
+                (Some(true), true, Some(false)),
+                (None, false, Some(true)),
+                (None, false, Some(false)),
+                (Some(false), true, None),
+                (Some(true), true, None),
+                (None, true, None),
+                (None, false, None),
             ]
         } else {
-            vec![None]
+            vec![
+                (Some(false), true, None),
+                (Some(true), true, None),
+                (None, true, None),
+                (None, false, None),
+            ]
         };
-        for scope in scopes {
-            let features = scope
-                .map(|scope| format!("[{scope}]\nreasoning_summary='auto'\n"))
-                .unwrap_or_default();
+        for (catalog_flag, present, handwritten) in cases {
+            let model_config = handwritten.map_or_else(String::new, |flag| {
+                format!("[providers.test.models.model-id]\nreasoning={flag}\n")
+            });
             std::fs::write(
                 &path,
-                format!("{source}\ncatalog='reasoning-fixture'\n{features}"),
+                format!("{source}\ncatalog='reasoning-fixture'\n{model_config}"),
             )
             .unwrap();
-            for (flag, present) in [
-                (Some(false), true),
-                (Some(true), true),
-                (None, true),
-                (None, false),
-            ] {
-                let mut model = serde_json::json!({"id":"model-id"});
-                if let Some(flag) = flag {
-                    model["reasoning"] = flag.into();
-                }
-                let models = if present {
-                    serde_json::json!({"model-id":model})
-                } else {
-                    serde_json::json!({})
-                };
-                std::fs::write(
-                    cache.join("models.json"),
-                    serde_json::to_vec(&serde_json::json!({"reasoning-fixture":{"models":models}}))
-                        .unwrap(),
-                )
-                .unwrap();
-                complete(
-                    turn.stream_chat(request("test"), StreamControl::default())
-                        .await
-                        .unwrap(),
-                )
-                .await;
-                let body = server.next().await.body;
-                let (actual, expected) = match protocol {
-                    "responses" => {
-                        assert_eq!(body.get("include").is_some(), flag != Some(false));
-                        (
-                            body.get("reasoning").cloned(),
-                            serde_json::json!({"summary":"auto"}),
-                        )
-                    }
-                    "interactions" => (
-                        body.get("generation_config").cloned(),
-                        serde_json::json!({"thinking_summaries":"auto"}),
-                    ),
-                    _ => (
-                        body.get("generationConfig").cloned(),
-                        serde_json::json!({"thinkingConfig":{"includeThoughts":true}}),
-                    ),
-                };
+            let mut model = json!({"id":"model-id"});
+            if protocol == "responses" {
+                model["reasoning_options"] = json!([{"type":"effort","values":["none","high"]}]);
+            }
+            if let Some(flag) = catalog_flag {
+                model["reasoning"] = flag.into();
+            }
+            let models = if present {
+                json!({"model-id":model})
+            } else {
+                json!({})
+            };
+            std::fs::write(
+                cache.join("models.json"),
+                serde_json::to_vec(&json!({"reasoning-fixture":{"models":models}})).unwrap(),
+            )
+            .unwrap();
+            let request = request("test");
+            if protocol == "responses" {
                 assert_eq!(
-                    actual,
-                    (flag != Some(false)).then_some(expected),
-                    "{protocol}/{flag:?}/present={present}"
+                    turn.supported_efforts(&request.target).await.unwrap(),
+                    if present {
+                        vec![Effort::Off, Effort::High]
+                    } else {
+                        Vec::new()
+                    },
+                    "reasoning does not change effort derivation"
                 );
             }
+            complete(
+                turn.stream_chat(request, StreamControl::default())
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            let body = server.next().await.body;
+            let flag = handwritten.or(catalog_flag);
+            let enabled = if protocol == "responses" {
+                flag == Some(true)
+            } else {
+                flag != Some(false)
+            };
+            let (actual, expected) = match protocol {
+                "responses" => {
+                    assert_eq!(
+                        body.get("include").cloned(),
+                        enabled.then(|| json!(["reasoning.encrypted_content"]))
+                    );
+                    (body.get("reasoning").cloned(), json!({"summary":"auto"}))
+                }
+                "interactions" => (
+                    body.get("generation_config").cloned(),
+                    json!({"thinking_summaries":"auto"}),
+                ),
+                _ => (
+                    body.get("generationConfig").cloned(),
+                    json!({"thinkingConfig":{"includeThoughts":true}}),
+                ),
+            };
+            assert_eq!(
+                actual,
+                enabled.then_some(expected),
+                "{protocol}/{catalog_flag:?}/present={present}/handwritten={handwritten:?}"
+            );
         }
     }
 }

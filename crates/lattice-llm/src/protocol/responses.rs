@@ -10,14 +10,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::projection::{ProjectionError, request_messages_with_replay};
-use super::{ReasoningSummary, ResponsesFeatures};
 use crate::reasoning::ReasoningPlan;
 use crate::reply::{PartDelta, PartKind, ProtocolEvent, StringPatch};
 use crate::types::ChatRequest;
 
 pub(crate) fn build_request_json(
     request: &ChatRequest,
-    features: ResponsesFeatures,
     reasoning: Option<ReasoningPlan>,
     model_reasoning: Option<bool>,
     origin: &ReplayOrigin,
@@ -34,9 +32,6 @@ pub(crate) fn build_request_json(
     if let Some(session) = &request.client_request_id {
         body["prompt_cache_key"] = session.clone().into();
     }
-    if model_reasoning != Some(false) {
-        body["include"] = json!(["reasoning.encrypted_content"]);
-    }
     let effort = match reasoning {
         Some(ReasoningPlan::Effort { effort, .. }) => Some(effort),
         _ => None,
@@ -45,11 +40,11 @@ pub(crate) fn build_request_json(
         body["reasoning"] =
             json!({"effort":if effort == Effort::Off {"none"} else {effort.as_str()}});
     }
-    if features.reasoning_summary == ReasoningSummary::Auto
-        && model_reasoning != Some(false)
-        && effort != Some(Effort::Off)
-    {
-        body["reasoning"]["summary"] = "auto".into();
+    if model_reasoning == Some(true) {
+        body["include"] = json!(["reasoning.encrypted_content"]);
+        if effort != Some(Effort::Off) {
+            body["reasoning"]["summary"] = "auto".into();
+        }
     }
     if !request.tools.is_empty() {
         body["tools"] = request
@@ -312,6 +307,7 @@ impl ResponsesSseParser {
                 }
             }
             "function_call" => {
+                required(item.call_id.as_ref(), "function call missing call_id")?;
                 if !item.content.is_empty() || !item.summary.is_empty() {
                     return Err(malformed("function call carries content"));
                 }

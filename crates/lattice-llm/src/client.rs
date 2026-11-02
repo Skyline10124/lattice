@@ -144,16 +144,7 @@ impl ProtocolParser {
                 );
             }
             Self::Responses(_) => {
-                let Features::Responses(features) = features else {
-                    unreachable!("resolved features match the protocol")
-                };
-                protocol::responses::build_request_json(
-                    request,
-                    features,
-                    reasoning,
-                    model_reasoning,
-                    origin,
-                )
+                protocol::responses::build_request_json(request, reasoning, model_reasoning, origin)
             }
             Self::Interactions(_) => protocol::interactions::build_request_json(
                 request,
@@ -1220,38 +1211,23 @@ mod tests {
             ),
         ] {
             let cases = if protocol == Protocol::Responses {
-                let with_summary = match selected {
-                    Off => json!({"reasoning":{"effort":"none"}}),
-                    High => json!({"reasoning":{"effort":"high","summary":"auto"}}),
+                let reasoning_enabled = match selected {
+                    Off => {
+                        json!({"include":["reasoning.encrypted_content"],"reasoning":{"effort":"none"}})
+                    }
+                    High => {
+                        json!({"include":["reasoning.encrypted_content"],"reasoning":{"effort":"high","summary":"auto"}})
+                    }
                     _ => unreachable!("Responses matrix selects off or high"),
                 };
                 vec![
                     ("", None, json!({}), expected.clone()),
                     ("", Some(false), json!({}), expected.clone()),
-                    ("", Some(true), json!({}), expected.clone()),
                     (
-                        "reasoning_summary='none'",
-                        None,
-                        json!({}),
-                        expected.clone(),
-                    ),
-                    (
-                        "reasoning_summary='auto'",
-                        Some(false),
-                        json!({}),
-                        expected.clone(),
-                    ),
-                    (
-                        "reasoning_summary='auto'",
+                        "",
                         Some(true),
-                        json!({"reasoning":{"summary":"auto"}}),
-                        with_summary.clone(),
-                    ),
-                    (
-                        "reasoning_summary='auto'",
-                        None,
-                        json!({"reasoning":{"summary":"auto"}}),
-                        with_summary,
+                        json!({"include":["reasoning.encrypted_content"],"reasoning":{"summary":"auto"}}),
+                        reasoning_enabled,
                     ),
                 ]
             } else if protocol == Protocol::Messages {
@@ -1338,7 +1314,8 @@ mod tests {
                         .filter(|(key, _)| {
                             matches!(
                                 key.as_str(),
-                                "reasoning_effort"
+                                "include"
+                                    | "reasoning_effort"
                                     | "reasoning"
                                     | "thinking"
                                     | "thinking_budget"

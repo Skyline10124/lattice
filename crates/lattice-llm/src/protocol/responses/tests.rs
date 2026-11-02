@@ -49,17 +49,10 @@ fn request_controls_preserve_session_tools_metadata_and_effort() {
                 effort,
                 enable_toggle: false,
             });
-            let body = build_request_json(
-                &request,
-                ResponsesFeatures::default(),
-                plan,
-                model_reasoning,
-                &origin(),
-            )
-            .unwrap();
+            let body = build_request_json(&request, plan, model_reasoning, &origin()).unwrap();
             assert_eq!(
-                body.get("include").is_some(),
-                model_reasoning != Some(false)
+                body.get("include").cloned(),
+                (model_reasoning == Some(true)).then(|| json!(["reasoning.encrypted_content"]))
             );
             assert_eq!(body["prompt_cache_key"], "session-id");
             assert_eq!(body["stream"], true);
@@ -68,7 +61,18 @@ fn request_controls_preserve_session_tools_metadata_and_effort() {
                 body["tools"][0],
                 json!({"type":"function","name":"observe__workspace","description":"read","parameters":request.tools[0].parameters,"strict":false})
             );
-            assert_eq!(body.get("reasoning").cloned(), effort.map(|effort| json!({"effort":if effort==Effort::Off {"none"} else {effort.as_str()}})));
+            assert_eq!(
+                body.get("reasoning").cloned(),
+                match (model_reasoning, effort) {
+                    (Some(true), None) => Some(json!({"summary":"auto"})),
+                    (Some(true), Some(Effort::High)) =>
+                        Some(json!({"effort":"high","summary":"auto"})),
+                    (_, Some(Effort::Off)) => Some(json!({"effort":"none"})),
+                    (_, Some(Effort::High)) => Some(json!({"effort":"high"})),
+                    (_, None) => None,
+                    _ => unreachable!("matrix selects off or high"),
+                }
+            );
             for key in [
                 "summary",
                 "temperature",
@@ -732,6 +736,36 @@ fn unknown_content_and_invalid_sequences_fail_without_exposing_payload() {
             invalid("item id mismatch"),
         ));
     }
+    let call = json!({"type":"function_call","id":"fc","call_id":"call","name":"observe__workspace","arguments":"{\"private-payload\":true}"});
+    let added = json!({"type":"response.output_item.added","output_index":0,"item":call});
+    let done = json!({"type":"response.output_item.done","output_index":0,"item":call});
+    let mut missing = call.clone();
+    missing.as_object_mut().unwrap().remove("call_id");
+    for events in [
+        vec![
+            json!({"type":"response.output_item.added","output_index":0,"item":missing}),
+            response(vec![missing.clone()]),
+        ],
+        vec![
+            added.clone(),
+            json!({"type":"response.output_item.done","output_index":0,"item":missing}),
+            response(vec![call.clone()]),
+        ],
+        vec![response(vec![missing.clone()])],
+        vec![added.clone(), response(vec![missing.clone()])],
+        vec![added.clone(), done.clone(), response(vec![missing])],
+    ] {
+        cases.push((events, invalid("function call missing call_id")));
+    }
+    let mut changed = call;
+    changed["call_id"] = "another-call".into();
+    cases.push((
+        vec![
+            added,
+            json!({"type":"response.output_item.done","output_index":0,"item":changed}),
+        ],
+        invalid("function metadata changed"),
+    ));
     for (events, expected) in cases {
         let (_, outcome, _) = collect(events);
         assert_eq!(
