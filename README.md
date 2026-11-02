@@ -155,7 +155,7 @@ SESSION_ID="替换为提交回执中的会话 ID"
 lattice run "继续检查测试入口。" --session "$SESSION_ID"
 ```
 
-两项都省略时继承会话副本；`--effort off` 表示明确关闭推理，需要模型支持。不选档位时产品不发推理参数，由 provider 用默认值。`gpt-6-luna` 这类模型在 Chat Completions 上带工具时，这个默认值会被拒绝（HTTP 400），要显式选 `--effort off`，或在 profile 里写 `effort = "off"`。档位名只有 `off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`。新会话的 profile 未写模型时可由 `--model` 补足。接受后的选择随会话保存，拒绝不改变副本，也不回写源 profile。已有会话再次显式指定 `--agent reader` 会重新读取配置并重建副本，同名 agent 也一样；选择规则及拒绝示例见[提交与找回](docs/development/validation-guide.md#提交与找回)。
+两项都省略时继承会话副本；`--effort off` 表示明确关闭推理，需要模型支持。不选档位时产品不发档位参数，由 provider 用默认推理强度。`gpt-6-luna` 这类模型在 Chat Completions 上带工具时，这个默认值会被拒绝（HTTP 400），要显式选 `--effort off`，或在 profile 里写 `effort = "off"`。档位名只有 `off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`。新会话的 profile 未写模型时可由 `--model` 补足。接受后的选择随会话保存，拒绝不改变副本，也不回写源 profile。已有会话再次显式指定 `--agent reader` 会重新读取配置并重建副本，同名 agent 也一样；选择规则及拒绝示例见[提交与找回](docs/development/validation-guide.md#提交与找回)。
 
 `lattice session rewind <session_id> <节点序号>` 把当前位置移到会话树中的某个节点，之后的提交从那里分叉继续；原分支保留，文件不回退。节点序号用 `lattice session log <session_id>` 查看，用法见[会话退回与分叉](docs/development/validation-guide.md#会话退回与分叉)。
 

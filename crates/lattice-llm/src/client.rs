@@ -69,6 +69,7 @@ fn build_auth_headers(
 /// 每个响应独享解析状态，协议同时决定请求路径、请求体与回复来源。
 enum ProtocolParser {
     ChatCompletions(protocol::chat_completions::OpenAiSseParser),
+    Responses(protocol::responses::ResponsesSseParser),
     Messages(protocol::anthropic_messages::AnthropicSseParser),
     GenerateContent(protocol::generate_content::GeminiSseParser),
 }
@@ -85,7 +86,10 @@ impl ProtocolParser {
             Protocol::GenerateContent => Ok(Self::GenerateContent(
                 protocol::generate_content::GeminiSseParser::new(),
             )),
-            Protocol::Responses | Protocol::Interactions => Err(LlmError::Config {
+            Protocol::Responses => Ok(Self::Responses(
+                protocol::responses::ResponsesSseParser::new(),
+            )),
+            Protocol::Interactions => Err(LlmError::Config {
                 message: format!("protocol {} is not implemented", protocol.as_str()),
             }),
         }
@@ -96,6 +100,7 @@ impl ProtocolParser {
             Self::ChatCompletions(_) => {
                 format!("{}/chat/completions", base_url.trim_end_matches('/'))
             }
+            Self::Responses(_) => format!("{}/responses", base_url.trim_end_matches('/')),
             Self::Messages(_) => format!("{}/v1/messages", base_url.trim_end_matches('/')),
             Self::GenerateContent(_) => {
                 protocol::generate_content::build_stream_url(base_url, model)
@@ -107,6 +112,7 @@ impl ProtocolParser {
         &self,
         request: &ChatRequest,
         output_limit: Option<u64>,
+        model_reasoning: Option<bool>,
         features: Features,
         reasoning: Option<crate::reasoning::ReasoningPlan>,
         origin: &lattice_conversation::ReplayOrigin,
@@ -137,11 +143,21 @@ impl ProtocolParser {
                     origin,
                 );
             }
+            Self::Responses(_) => {
+                protocol::responses::build_request_json(request, reasoning, model_reasoning, origin)
+            }
             Self::GenerateContent(_) => {
                 protocol::generate_content::build_request_json(request, reasoning, origin)
             }
         }
         .map_err(Into::into)
+    }
+
+    fn buffer_limit(&self) -> usize {
+        match self {
+            Self::Responses(_) => 64 * 1024 * 1024,
+            _ => sse::MAX_SSE_BUFFER_SIZE,
+        }
     }
 
     fn parse_event(&mut self, event_text: &str) -> Vec<ProtocolEvent> {
@@ -151,6 +167,7 @@ impl ProtocolParser {
         }
         match self {
             Self::ChatCompletions(p) => p.parse_chunk(event_type, &data),
+            Self::Responses(p) => p.parse_chunk(event_type, &data),
             Self::Messages(p) => p.parse_chunk(event_type.unwrap_or(""), &data),
             Self::GenerateContent(p) => p.parse_chunk(event_type, &data),
         }
@@ -187,6 +204,7 @@ struct SseStreamState {
     parser: ProtocolParser,
     client: Arc<TurnClient>,
     buffer: Vec<u8>,
+    scanned: usize,
     event_count: usize,
     finished: bool,
     pending: std::collections::VecDeque<ProtocolEvent>,
@@ -195,7 +213,7 @@ struct SseStreamState {
 /// 将 HTTP 响应中的 SSE 事件逐步解析为 [`ProtocolEvent`]。
 ///
 /// 每个请求独享解析器，避免请求间共享状态。响应体按块读取；
-/// 未完成分帧的 SSE 缓冲超过 `MAX_SSE_BUFFER_SIZE`，
+/// 未完成分帧的 SSE 缓冲超过本协议上限，
 /// 或事件数超过 `MAX_SSE_EVENTS` 时，发出错误事件并终止流。
 fn stream_sse_response(
     body_stream: BodyStream,
@@ -207,6 +225,7 @@ fn stream_sse_response(
         parser,
         client,
         buffer: Vec::new(),
+        scanned: 0,
         event_count: 0,
         finished: false,
         pending: std::collections::VecDeque::new(),
@@ -228,7 +247,7 @@ fn stream_sse_response(
             match state.body_stream.next().await {
                 Some(Ok(chunk)) => {
                     state.buffer.extend_from_slice(&chunk);
-                    if state.buffer.len() > sse::MAX_SSE_BUFFER_SIZE {
+                    if state.buffer.len() > state.parser.buffer_limit() {
                         state.finished = true;
                         return Some((
                             ProtocolEvent::error(
@@ -322,7 +341,7 @@ async fn deliver(
 /// HTTP chunk boundaries.
 fn drain_complete_events(state: &mut SseStreamState) {
     loop {
-        let sep_len = match find_event_boundary(&state.buffer) {
+        let sep_len = match find_event_boundary(&state.buffer, &mut state.scanned) {
             Some(v) => v,
             None => return,
         };
@@ -330,6 +349,7 @@ fn drain_complete_events(state: &mut SseStreamState) {
         let event_bytes: Vec<u8> = state.buffer.drain(..idx).collect();
         // Drop the separator.
         state.buffer.drain(..slen);
+        state.scanned = 0;
 
         let event_text = String::from_utf8_lossy(&event_bytes);
         if event_text.trim().is_empty() {
@@ -353,8 +373,8 @@ fn drain_complete_events(state: &mut SseStreamState) {
 /// Find the first SSE event boundary in a byte buffer.
 /// Returns `Some((offset, separator_length))` or `None`.
 /// Recognizes `\r\n\r\n` (4), `\n\n` (2), and `\r\r` (2).
-fn find_event_boundary(buf: &[u8]) -> Option<(usize, usize)> {
-    let mut i = 0;
+fn find_event_boundary(buf: &[u8], scanned: &mut usize) -> Option<(usize, usize)> {
+    let mut i = (*scanned).min(buf.len());
     while i < buf.len() {
         if buf[i] == b'\r' {
             // Check \r\n\r\n first (longest match)
@@ -377,6 +397,8 @@ fn find_event_boundary(buf: &[u8]) -> Option<(usize, usize)> {
         }
         i += 1;
     }
+    // 最长分隔符为四字节，保留末尾三字节以识别跨 HTTP 块的边界。
+    *scanned = buf.len().saturating_sub(3);
     None
 }
 
@@ -732,6 +754,7 @@ pub(crate) struct RequestEndpoint<'a> {
     pub(crate) roots: &'a [reqwest::Certificate],
     pub(crate) client: Arc<TurnClient>,
     pub(crate) output_limit: Option<u64>,
+    pub(crate) model_reasoning: Option<bool>,
     pub(crate) features: Features,
     pub(crate) reasoning: Option<crate::reasoning::ReasoningPlan>,
 }
@@ -782,6 +805,7 @@ pub(crate) async fn dispatch(
     let body = parser.request_body(
         &request,
         endpoint.output_limit,
+        endpoint.model_reasoning,
         endpoint.features,
         endpoint.reasoning,
         &origin,
@@ -916,6 +940,22 @@ mod tests {
         let combined_effort = json!([{"type":"toggle"},{"type":"effort","values":["high"]}]);
         let combined_budget = json!([{"type":"toggle"},{"type":"budget_tokens"}]);
         for (protocol, output, overrides, options, selected, expected) in [
+            (
+                Protocol::Responses,
+                None,
+                "",
+                effort.clone(),
+                Off,
+                json!({"reasoning":{"effort":"none"}}),
+            ),
+            (
+                Protocol::Responses,
+                None,
+                "",
+                effort.clone(),
+                High,
+                json!({"reasoning":{"effort":"high"}}),
+            ),
             (
                 Protocol::ChatCompletions,
                 None,
@@ -1136,63 +1176,89 @@ mod tests {
                 json!({"generationConfig":{"thinkingConfig":{"thinkingBudget":2048}}}),
             ),
         ] {
-            let mut features = Features::defaults(protocol);
-            let overrides: std::collections::BTreeMap<String, toml::Value> =
-                toml::from_str(overrides).unwrap();
-            for (name, value) in overrides {
-                features.apply(&name, value).unwrap();
-            }
-            let model: crate::metadata::Model = serde_json::from_value(
-                json!({"id":"model","reasoning_options":options,"limit":{"output":output}}),
-            )
-            .unwrap();
-            let capabilities = crate::reasoning::ReasoningCapabilities::new(
-                "test",
-                "model",
-                Some(&model),
-                features,
-            )
-            .unwrap();
-            for selection in [None, Some(selected)] {
-                let mut request = chat_request();
-                request.target.effort = selection;
-                let plan =
-                    selection.map(|effort| capabilities.select(effort).expect("supported source"));
-                let origin = lattice_conversation::ReplayOrigin {
-                    protocol,
-                    provider_id: "test".into(),
+            let cases = if protocol == Protocol::Responses {
+                let reasoning_enabled = match selected {
+                    Off => {
+                        json!({"include":["reasoning.encrypted_content"],"reasoning":{"effort":"none"}})
+                    }
+                    High => {
+                        json!({"include":["reasoning.encrypted_content"],"reasoning":{"effort":"high","summary":"auto"}})
+                    }
+                    _ => unreachable!("Responses matrix selects off or high"),
                 };
-                let body = ProtocolParser::new(protocol)
-                    .unwrap()
-                    .request_body(&request, output, features, plan, &origin)
-                    .unwrap();
-                let controls: serde_json::Map<_, _> = body
-                    .as_object()
-                    .unwrap()
-                    .iter()
-                    .filter(|(key, _)| {
-                        matches!(
-                            key.as_str(),
-                            "reasoning_effort"
-                                | "reasoning"
-                                | "thinking"
-                                | "thinking_budget"
-                                | "enable_thinking"
-                                | "output_config"
-                                | "generationConfig"
-                        )
-                    })
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect();
-                assert_eq!(
-                    serde_json::Value::Object(controls),
-                    if selection.is_some() {
-                        expected.clone()
-                    } else {
-                        json!({})
-                    },
-                    "{protocol:?}, {features:?}, {selection:?}"
-                );
+                vec![
+                    (None, json!({}), expected.clone()),
+                    (Some(false), json!({}), expected.clone()),
+                    (
+                        Some(true),
+                        json!({"include":["reasoning.encrypted_content"],"reasoning":{"summary":"auto"}}),
+                        reasoning_enabled,
+                    ),
+                ]
+            } else {
+                vec![(None, json!({}), expected)]
+            };
+            for (model_reasoning, unselected, expected) in cases {
+                let mut features = Features::defaults(protocol);
+                let overrides: std::collections::BTreeMap<String, toml::Value> =
+                    toml::from_str(overrides).unwrap();
+                for (name, value) in overrides {
+                    features.apply(&name, value).unwrap();
+                }
+                let model: crate::metadata::Model = serde_json::from_value(json!({
+                    "id":"model", "reasoning":model_reasoning,
+                    "reasoning_options":options, "limit":{"output":output},
+                }))
+                .unwrap();
+                let capabilities = crate::reasoning::ReasoningCapabilities::new(
+                    "test",
+                    "model",
+                    Some(&model),
+                    features,
+                )
+                .unwrap();
+                for selection in [None, Some(selected)] {
+                    let mut request = chat_request();
+                    request.target.effort = selection;
+                    let plan = selection
+                        .map(|effort| capabilities.select(effort).expect("supported source"));
+                    let origin = lattice_conversation::ReplayOrigin {
+                        protocol,
+                        provider_id: "test".into(),
+                    };
+                    let body = ProtocolParser::new(protocol)
+                        .unwrap()
+                        .request_body(&request, output, model.reasoning, features, plan, &origin)
+                        .unwrap();
+                    let controls: serde_json::Map<_, _> = body
+                        .as_object()
+                        .unwrap()
+                        .iter()
+                        .filter(|(key, _)| {
+                            matches!(
+                                key.as_str(),
+                                "include"
+                                    | "reasoning_effort"
+                                    | "reasoning"
+                                    | "thinking"
+                                    | "thinking_budget"
+                                    | "enable_thinking"
+                                    | "output_config"
+                                    | "generationConfig"
+                            )
+                        })
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect();
+                    assert_eq!(
+                        serde_json::Value::Object(controls),
+                        if selection.is_some() {
+                            expected.clone()
+                        } else {
+                            unselected.clone()
+                        },
+                        "{protocol:?}, {features:?}, {model_reasoning:?}, {selection:?}"
+                    );
+                }
             }
         }
     }
@@ -1255,7 +1321,7 @@ mod tests {
                 };
                 let parser = ProtocolParser::new(protocol).unwrap();
                 let body = parser
-                    .request_body(&request, None, features, None, &origin)
+                    .request_body(&request, None, None, features, None, &origin)
                     .unwrap();
                 let expected = match protocol {
                     Protocol::ChatCompletions if enabled => markers(&[
@@ -1328,7 +1394,7 @@ mod tests {
                 };
                 let body = ProtocolParser::new(protocol)
                     .unwrap()
-                    .request_body(&request, None, features, None, &origin)
+                    .request_body(&request, None, None, features, None, &origin)
                     .unwrap();
                 let expected = match (protocol, with_system) {
                     (Protocol::ChatCompletions, true) => markers(&[
@@ -1404,6 +1470,7 @@ mod tests {
                     .unwrap()
                     .request_body(
                         &request,
+                        None,
                         None,
                         Features::ChatCompletions(ChatCompletionsFeatures {
                             cache_markers: true,
@@ -1935,7 +2002,7 @@ mod tests {
     #[test]
     fn find_event_boundary_crlf_crlf() {
         let buf = b"data: hello\r\n\r\ndata: world\r\n\r\n";
-        let (idx, len) = find_event_boundary(buf).unwrap();
+        let (idx, len) = find_event_boundary(buf, &mut 0).unwrap();
         assert_eq!(idx, 11);
         assert_eq!(len, 4);
     }
@@ -1943,9 +2010,82 @@ mod tests {
     #[test]
     fn find_event_boundary_cr_cr() {
         let buf = b"data: hello\r\rdata: world\r\r";
-        let (idx, len) = find_event_boundary(buf).unwrap();
+        let (idx, len) = find_event_boundary(buf, &mut 0).unwrap();
         assert_eq!(idx, 11);
         assert_eq!(len, 2);
+    }
+
+    #[test]
+    fn event_scan_keeps_progress_and_recognizes_every_split_separator() {
+        for separator in [b"\n\n".as_slice(), b"\r\n\r\n", b"\r\r"] {
+            for split in 0..separator.len() {
+                let mut bytes = vec![b'x'; 3 * 1024 * 1024];
+                let boundary = bytes.len();
+                bytes.extend_from_slice(&separator[..split]);
+                let mut scanned = 0;
+                assert_eq!(find_event_boundary(&bytes, &mut scanned), None);
+                assert_eq!(scanned, bytes.len() - 3);
+                bytes.extend_from_slice(&separator[split..]);
+                assert_eq!(
+                    find_event_boundary(&bytes, &mut scanned),
+                    Some((boundary, separator.len()))
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn responses_large_completed_and_protocol_buffer_limits() {
+        let completed = serde_json::json!({"type":"response.completed","response":{
+            "status":"completed", "instructions":"x".repeat(2*1024*1024), "tools":[{"parameters":{"description":"echo"}}],
+            "output":[{"type":"message","id":"msg","role":"assistant","content":[{"type":"output_text","text":"a".repeat(lattice_conversation::MAX_ASSISTANT_CONTENT_BYTES)}]}]
+        }});
+        let raw = format!("data: {completed}\n\n");
+        assert!(raw.len() > 2 * 1024 * 1024);
+        let chunks: Vec<_> = raw
+            .as_bytes()
+            .chunks(16 * 1024)
+            .map(|chunk| Ok(bytes::Bytes::copy_from_slice(chunk)))
+            .collect();
+        let input = stream_sse_response(
+            Box::pin(stream::iter(chunks)),
+            ProtocolParser::new(Protocol::Responses).unwrap(),
+            Arc::default(),
+        );
+        let events: Vec<_> = assemble_reply_stream(None, input, StreamControl::default())
+            .collect()
+            .await;
+        assert!(matches!(
+            events.last(),
+            Some(crate::LlmEvent::Finished {
+                outcome: crate::ReplyOutcome::Complete { .. },
+                ..
+            })
+        ));
+        for protocol in [
+            Protocol::Responses,
+            Protocol::ChatCompletions,
+            Protocol::Messages,
+            Protocol::GenerateContent,
+        ] {
+            let parser = ProtocolParser::new(protocol).unwrap();
+            let limit = parser.buffer_limit();
+            assert_eq!(
+                limit,
+                if protocol == Protocol::Responses {
+                    64 * 1024 * 1024
+                } else {
+                    2 * 1024 * 1024
+                }
+            );
+            let bytes = bytes::Bytes::from(vec![b' '; limit + 1]);
+            let input =
+                stream_sse_response(Box::pin(stream::iter([Ok(bytes)])), parser, Arc::default());
+            let events: Vec<_> = input.collect().await;
+            assert!(
+                matches!(&events[..], [ProtocolEvent::Failed(StreamStop::Provider(failure))] if !failure.retryable && failure.message.contains("buffer size exceeded"))
+            );
+        }
     }
 
     #[test]
@@ -1975,6 +2115,7 @@ mod tests {
             parser: ProtocolParser::new(Protocol::ChatCompletions).unwrap(),
             client: Arc::default(),
             buffer: Vec::new(),
+            scanned: 0,
             event_count: 0,
             finished: false,
             pending: std::collections::VecDeque::new(),
@@ -2015,6 +2156,7 @@ mod tests {
             parser: ProtocolParser::new(Protocol::ChatCompletions).unwrap(),
             client: Arc::default(),
             buffer: Vec::new(),
+            scanned: 0,
             event_count: 0,
             finished: false,
             pending: std::collections::VecDeque::new(),

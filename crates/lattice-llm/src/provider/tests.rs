@@ -21,7 +21,6 @@ const CHAT_PROVIDER: &str =
     "[providers.custom]\nprotocol = 'chat-completions'\nbase_url = 'http://localhost'";
 const MESSAGES_PROVIDER: &str =
     "[providers.custom]\nprotocol = 'anthropic-messages'\nbase_url = 'http://localhost'";
-
 fn parse(source: &str) -> ProviderRegistry {
     ProviderRegistry::parse(PATH, source).unwrap()
 }
@@ -88,6 +87,7 @@ thinking_toggle = "enable-thinking"
 [providers.deepseek.models."deepseek-v4-flash"]
 context = 131072
 output = 8192
+reasoning = true
 effort = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
 tools = false
 cost = { input = 1, output = 2.5, cache_read = 0.1, cache_write = 0.5 }
@@ -114,8 +114,8 @@ catalog = "custom-catalog"
     assert_eq!(chat(provider.features), expected_features);
     let model = &provider.models["deepseek-v4-flash"];
     assert_eq!(
-        (model.context, model.output, model.tools),
-        (Some(131072), Some(8192), Some(false))
+        (model.context, model.output, model.reasoning, model.tools),
+        (Some(131072), Some(8192), Some(true), Some(false))
     );
     assert_eq!(
         model.effort.as_deref(),
@@ -153,11 +153,12 @@ catalog = "custom-catalog"
         (
             absent.context,
             absent.output,
+            absent.reasoning,
             &absent.effort,
             absent.tools,
             &absent.cost
         ),
-        (None, None, &None, None, &None)
+        (None, None, None, &None, None, &None)
     );
     assert_eq!(absent.features, provider.features);
     let custom = registry.get("my-vllm").unwrap();
@@ -301,6 +302,16 @@ fn strict_errors_report_path_line_and_reason() {
         ),
         (
             "[providers.openai.models.test]\ntools = 'true'",
+            2,
+            "invalid type",
+        ),
+        (
+            "[providers.openai.models.test]\nreasoning = 'true'",
+            2,
+            "invalid type",
+        ),
+        (
+            "[providers.openai.models.test]\nreasoning = 1",
             2,
             "invalid type",
         ),
@@ -479,6 +490,7 @@ fn every_feature_value_parses_to_the_closed_type() {
 
 #[test]
 fn feature_defaults_match_standard_protocol_behavior() {
+    assert_eq!(Features::defaults(Protocol::Responses), Features::Responses);
     assert_eq!(
         Features::defaults(Protocol::ChatCompletions),
         Features::ChatCompletions(ChatCompletionsFeatures {
@@ -499,6 +511,23 @@ fn feature_defaults_match_standard_protocol_behavior() {
 
 #[test]
 fn rejects_unknown_feature_values_types_and_features_from_other_protocols() {
+    for level in ["features", "models.test.features"] {
+        for protocol in [
+            "responses",
+            "chat-completions",
+            "anthropic-messages",
+            "generate-content",
+            "interactions",
+        ] {
+            assert_invalid(
+                &format!(
+                    "[providers.custom]\nprotocol = '{protocol}'\nbase_url = 'http://localhost'\n[providers.custom.{level}]\nreasoning_summary = 'auto'"
+                ),
+                5,
+                "unknown feature `reasoning_summary`",
+            );
+        }
+    }
     for name in [
         "effort_param",
         "thinking_toggle",

@@ -4,8 +4,7 @@
 //! Localhost fake LLM for harness scenarios.
 //!
 //! 场景经 [`ScenarioWorld::wire_provider`](crate::ScenarioWorld::wire_provider)
-//! 把模型与凭据接到 fake server。请求路由选择响应协议：OpenAI Chat Completions、
-//! Anthropic Messages 或 Gemini `streamGenerateContent`。
+//! 把模型与凭据接到 fake server。请求路由选择已实现协议的响应格式。
 //!
 //! 传输与官方 provider 一致：TLS + HTTP/2，ALPN 只提供 `h2`，证书来自
 //! [`TlsIdentity`]，场景经 `SSL_CERT_FILE` 信任它（见 `ScenarioWorld`）。
@@ -52,7 +51,7 @@ use crate::tls::TlsIdentity;
 /// 默认场景 API key，由 provider 接线入口录入，也作为产物脱敏扫描的已知秘密。
 pub const FAKE_API_KEY: &str = "harness-fake-key-do-not-ship";
 
-/// A captured Chat Completions request body, decoded for scenario assertions.
+/// 按协议捕获模型请求，原生 JSON 留给场景核对。
 ///
 /// Only the fields the harness asserts on are typed; the rest stay in the
 /// generic `raw` JSON value so unknown provider extensions do not break
@@ -62,11 +61,9 @@ pub struct CapturedRequest {
     pub model: String,
     /// `role` → count of messages with that role, in arrival order.
     pub message_roles: Vec<String>,
-    /// Tool function names as sent on the wire (already `.__`-encoded by the
-    /// provider adapter, e.g. `observe__workspace`). Asserted verbatim so a
-    /// catalog rename surfaces.
+    /// 原样捕获线上工具名，例如 `observe__workspace`。
     pub tool_names: Vec<String>,
-    /// Protocol the request used: `openai`, `anthropic` or `gemini`.
+    /// 请求协议：`openai`、`responses`、`anthropic` 或 `gemini`。
     pub provider: String,
     /// The full decoded JSON body, for assertions on fields this struct does
     /// not surface (e.g. `temperature`, `max_tokens`).
@@ -83,6 +80,7 @@ pub struct CapturedRequest {
 #[derive(Debug, Clone)]
 pub enum NativeUsage {
     ChatCompletions(Value),
+    Responses(Value),
     Messages { start: Value, delta: Value },
     GenerateContent(Value),
 }
@@ -97,6 +95,10 @@ pub enum SseScript {
     },
     /// 手工编排的合法 OpenAI chunks，保持跨类型到达顺序；结尾自动添加 DONE。
     Chunks { chunks: Vec<Value> },
+    /// 原生 SSE 事件按序交付；不自动追加任何终止标记。
+    NativeEvents {
+        events: Vec<(Option<String>, Value)>,
+    },
     /// Plain assistant text. Emits one or more `delta.content` chunks then a
     /// terminal chunk with `finish_reason: "stop"` and `usage`, then
     /// `data: [DONE]`.
@@ -183,6 +185,8 @@ pub enum ServeError {
     UnexpectedRequest(String),
     #[error("provider would reject the tool definitions: {0}")]
     RejectedToolSchema(String),
+    #[error("provider would reject the assistant content: {0}")]
+    RejectedAssistantContent(String),
     #[error("script cannot be rendered in the {0} protocol")]
     UnsupportedScript(&'static str),
     #[error("fake-provider server thread failed: {0}")]
@@ -776,6 +780,7 @@ impl HttpRequest {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Protocol {
     OpenAi,
+    Responses,
     Anthropic,
     Gemini,
 }
@@ -788,6 +793,7 @@ impl Protocol {
         }
         match path {
             "/chat/completions" => Some((Self::OpenAi, None)),
+            "/responses" => Some((Self::Responses, None)),
             "/v1/messages" => Some((Self::Anthropic, None)),
             _ => {
                 let model = path
@@ -801,6 +807,7 @@ impl Protocol {
     fn name(self) -> &'static str {
         match self {
             Self::OpenAi => "openai",
+            Self::Responses => "responses",
             Self::Anthropic => "anthropic",
             Self::Gemini => "gemini",
         }
@@ -809,7 +816,7 @@ impl Protocol {
     /// The API key in this protocol's credential header.
     fn api_key(self, request: &HttpRequest) -> Option<&str> {
         let (header, prefix) = match self {
-            Self::OpenAi => ("authorization", "Bearer "),
+            Self::OpenAi | Self::Responses => ("authorization", "Bearer "),
             Self::Anthropic => ("x-api-key", ""),
             Self::Gemini => ("x-goog-api-key", ""),
         };
@@ -892,6 +899,20 @@ fn decide(
             body: body.to_string(),
         };
         return Ok((reply, Some(ServeError::RejectedToolSchema(rejection))));
+    }
+    if let Some(rejection) = responses_assistant_content_rejection(protocol, &request.body) {
+        let body = serde_json::json!({"error": {
+            "message": rejection,
+            "type": "invalid_request_error",
+            "code": "invalid_value",
+        }});
+        let reply = Reply::Status {
+            status: 400,
+            content_type: "application/json".into(),
+            headers: Vec::new(),
+            body: body.to_string(),
+        };
+        return Ok((reply, Some(ServeError::RejectedAssistantContent(rejection))));
     }
     let mut captured = parse_request_body(protocol, path_model, &request.body);
     captured.headers = request.headers;
@@ -1397,13 +1418,23 @@ fn parse_request_body(
     let model = path_model.unwrap_or_else(|| raw["model"].as_str().unwrap_or("").to_string());
     let messages = match protocol {
         Protocol::Gemini => &raw["contents"],
+        Protocol::Responses => &raw["input"],
         _ => &raw["messages"],
     };
     let message_roles = messages
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|message| message["role"].as_str())
+        .filter_map(|message| {
+            if protocol == Protocol::Responses {
+                match message["type"].as_str() {
+                    Some("reasoning" | "function_call") => return Some("assistant"),
+                    Some("function_call_output") => return Some("tool"),
+                    _ => {}
+                }
+            }
+            message["role"].as_str()
+        })
         .map(str::to_string)
         .collect();
     let tools = raw["tools"].as_array().into_iter().flatten();
@@ -1412,7 +1443,7 @@ fn parse_request_body(
             .filter_map(|tool| tool["function"]["name"].as_str())
             .map(str::to_string)
             .collect(),
-        Protocol::Anthropic => tools
+        Protocol::Anthropic | Protocol::Responses => tools
             .filter_map(|tool| tool["name"].as_str())
             .map(str::to_string)
             .collect(),
@@ -1439,7 +1470,7 @@ fn parse_request_body(
 
 /// 按真实 provider 的工具定义校验拒绝请求；违反者返回 400，整个 Turn 无法开始。
 ///
-/// - OpenAI、Anthropic：参数 schema 顶层必须是 `type: object`，且不能出现
+/// - Chat Completions、Responses、Anthropic：参数 schema 顶层必须是 `type: object`，且不能出现
 ///   `oneOf`、`anyOf`、`allOf`、`enum`、`not`。
 /// - Gemini：`functionDeclarations[].parameters` 只接受 OpenAPI 子集，任意层级出现
 ///   `additionalProperties`、`const`、`contains`、`minContains` 都会被拒（2026-10-05 对
@@ -1469,6 +1500,7 @@ fn tool_schema_rejection(protocol: Protocol, body: &str) -> Option<String> {
     tools.into_iter().find_map(|tool| {
         let (name, schema) = match protocol {
             Protocol::OpenAi => (&tool["function"]["name"], &tool["function"]["parameters"]),
+            Protocol::Responses => (&tool["name"], &tool["parameters"]),
             _ => (&tool["name"], &tool["input_schema"]),
         };
         let combinator = ["oneOf", "anyOf", "allOf", "enum", "not"]
@@ -1492,15 +1524,49 @@ fn has_key_anywhere(value: &Value, key: &str) -> bool {
         _ => false,
     }
 }
+
+/// Responses 的 assistant 正文只接受输出文本或拒绝，用户输入块不能作为历史回复。
+fn responses_assistant_content_rejection(protocol: Protocol, body: &str) -> Option<String> {
+    if protocol != Protocol::Responses {
+        return None;
+    }
+    let raw: Value = serde_json::from_str(body).ok()?;
+    raw["input"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| item["role"] == "assistant")
+        .flat_map(|item| item["content"].as_array().into_iter().flatten())
+        .find_map(|part| {
+            let kind = part["type"].as_str().unwrap_or("null");
+            (!matches!(kind, "output_text" | "refusal")).then(|| {
+                format!(
+                    "Invalid value: '{kind}'. Supported values are: 'output_text' and 'refusal'."
+                )
+            })
+        })
+}
+
 /// `(call id, Tool name, arguments JSON)` of one scripted Tool call.
 type ScriptedCall = (String, String, String);
 
 /// 按协议渲染文本、工具与原生用量，保留脚本控制的事件顺序。
 fn render(protocol: Protocol, script: &SseScript) -> Option<String> {
+    if let SseScript::NativeEvents { events } = script {
+        let mut out = String::new();
+        for (name, data) in events {
+            if let Some(name) = name {
+                out.push_str(&format!("event: {name}\n"));
+            }
+            out.push_str(&format!("data: {data}\n\n"));
+        }
+        return Some(out);
+    }
     if let SseScript::WithUsage { script, usage } = script {
         if !matches!(
             (protocol, usage),
             (Protocol::OpenAi, NativeUsage::ChatCompletions(_))
+                | (Protocol::Responses, NativeUsage::Responses(_))
                 | (Protocol::Anthropic, NativeUsage::Messages { .. })
                 | (Protocol::Gemini, NativeUsage::GenerateContent(_))
         ) {
@@ -1513,6 +1579,9 @@ fn render(protocol: Protocol, script: &SseScript) -> Option<String> {
                 && let Ok(mut root) = serde_json::from_str::<Value>(data)
             {
                 match usage {
+                    NativeUsage::Responses(value) if root["response"].get("usage").is_some() => {
+                        root["response"]["usage"] = value.clone()
+                    }
                     NativeUsage::ChatCompletions(value) if root.get("usage").is_some() => {
                         root["usage"] = value.clone()
                     }
@@ -1557,8 +1626,57 @@ fn render(protocol: Protocol, script: &SseScript) -> Option<String> {
     };
     Some(match protocol {
         Protocol::Anthropic => render_anthropic(texts, &calls, finish),
+        Protocol::Responses => render_responses(texts, &calls),
         _ => render_gemini(texts, &calls, finish),
     })
+}
+
+/// Responses 使用 item 生命周期与完整终态，普通脚本也不依赖 Chat 的 DONE 标记。
+fn render_responses(texts: &[String], calls: &[ScriptedCall]) -> String {
+    use serde_json::json;
+    let mut out = String::new();
+    let mut output = Vec::new();
+    let mut event = |value: Value| push_data(&mut out, &value);
+    event(json!({"type":"response.created","response":{"status":"in_progress","output":[]}}));
+    if !texts.is_empty() {
+        event(
+            json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_0","role":"assistant","status":"in_progress","phase":"final_answer","content":[]}}),
+        );
+        event(
+            json!({"type":"response.content_part.added","output_index":0,"item_id":"msg_0","content_index":0,"part":{"type":"output_text","text":"","annotations":[],"logprobs":[]}}),
+        );
+        for text in texts {
+            event(
+                json!({"type":"response.output_text.delta","output_index":0,"item_id":"msg_0","content_index":0,"delta":text}),
+            );
+        }
+        event(
+            json!({"type":"response.output_text.done","output_index":0,"item_id":"msg_0","content_index":0,"text":texts.concat()}),
+        );
+        let item = json!({"type":"message","id":"msg_0","role":"assistant","status":"completed","phase":"final_answer","content":[{"type":"output_text","text":texts.concat(),"annotations":[],"logprobs":[]}]});
+        event(json!({"type":"response.output_item.done","output_index":0,"item":item}));
+        output.push(item);
+    }
+    for (id, name, arguments) in calls {
+        let index = output.len();
+        let item_id = format!("item_{index}");
+        let mut item =
+            json!({"type":"function_call","id":item_id,"call_id":id,"name":name,"arguments":""});
+        event(json!({"type":"response.output_item.added","output_index":index,"item":item}));
+        event(
+            json!({"type":"response.function_call_arguments.delta","output_index":index,"item_id":item_id,"delta":arguments}),
+        );
+        event(
+            json!({"type":"response.function_call_arguments.done","output_index":index,"item_id":item_id,"arguments":arguments}),
+        );
+        item["arguments"] = arguments.clone().into();
+        event(json!({"type":"response.output_item.done","output_index":index,"item":item}));
+        output.push(item);
+    }
+    event(
+        json!({"type":"response.completed","response":{"status":"completed","output":output,"usage":{"input_tokens":1,"output_tokens":texts.len().max(calls.len())}}}),
+    );
+    out
 }
 
 /// Anthropic Messages stream: `message_start`, one text block, one
@@ -1678,7 +1796,7 @@ fn render_gemini(texts: &[String], calls: &[ScriptedCall], finish: &str) -> Stri
 fn render_script(script: &SseScript) -> String {
     let mut out = String::new();
     match script {
-        SseScript::WithUsage { .. } => {
+        SseScript::WithUsage { .. } | SseScript::NativeEvents { .. } => {
             return render(Protocol::OpenAi, script)
                 .expect("HTTP/1 scripts use Chat Completions usage");
         }
@@ -1899,7 +2017,19 @@ mod tests {
 
     #[test]
     fn render_scripts_preserve_expected_sse_shape() {
-        let rows: [(_, _, &[&str], &[&str], Option<&str>); 4] = [
+        let rows: [(_, _, &[&str], &[&str], Option<&str>); 5] = [
+            (
+                "native_events",
+                SseScript::NativeEvents {
+                    events: vec![(
+                        Some("step.delta".into()),
+                        serde_json::json!({"type":"step.delta","delta":"native"}),
+                    )],
+                },
+                &["event: step.delta\n", "\"delta\":\"native\""],
+                &["[DONE]", "response.completed"],
+                Some("\n\n"),
+            ),
             // The product framer expects content chunks, finish_reason and usage,
             // then the [DONE] marker for a plain-text response.
             (
@@ -1994,6 +2124,64 @@ mod tests {
             captured.tool_names,
             vec!["observe__workspace", "session__todo_write"]
         );
+    }
+
+    #[test]
+    fn responses_native_route_capture_schema_and_usage() {
+        use serde_json::json;
+        assert!(Protocol::route("POST", "/responses") == Some((Protocol::Responses, None)));
+        let body = json!({"model":"model","input":[{"role":"user","content":[]},{"type":"reasoning"},{"type":"function_call"},{"type":"function_call_output"}],"tools":[{"type":"function","name":"observe__workspace","parameters":{"type":"object"},"strict":false}]});
+        let captured = parse_request_body(Protocol::Responses, None, &body.to_string());
+        assert_eq!(captured.provider, "responses");
+        assert_eq!(
+            captured.message_roles,
+            vec!["user", "assistant", "assistant", "tool"]
+        );
+        assert_eq!(captured.tool_names, vec!["observe__workspace"]);
+        assert_eq!(captured.raw, body);
+        assert!(tool_schema_rejection(Protocol::Responses, &body.to_string()).is_none());
+        let mut invalid = body;
+        invalid["tools"][0]["parameters"] = json!({"type":"array"});
+        assert!(tool_schema_rejection(Protocol::Responses, &invalid.to_string()).is_some());
+        let mut assistant_body = json!({"input":[
+            {"role":"user","content":[{"type":"input_text","text":"question"}]},
+            {"type":"message","role":"assistant","content":[
+                {"type":"output_text","text":"answer","annotations":[]},
+                {"type":"refusal","refusal":"declined"}
+            ]}
+        ]});
+        assert!(
+            responses_assistant_content_rejection(Protocol::Responses, &assistant_body.to_string())
+                .is_none()
+        );
+        assistant_body["input"][1]["content"][0]["type"] = json!("input_text");
+        assert_eq!(
+            responses_assistant_content_rejection(Protocol::Responses, &assistant_body.to_string()),
+            Some(
+                "Invalid value: 'input_text'. Supported values are: 'output_text' and 'refusal'."
+                    .into()
+            )
+        );
+        let script = SseScript::WithUsage {
+            script: Box::new(SseScript::plain("hello")),
+            usage: NativeUsage::Responses(json!({"input_tokens":99})),
+        };
+        let sse = render(Protocol::Responses, &script).unwrap();
+        assert!(sse.contains("\"input_tokens\":99"));
+        assert!(sse.contains("response.completed"));
+        assert!(!sse.contains("[DONE]"));
+        for protocol in [
+            Protocol::OpenAi,
+            Protocol::Responses,
+            Protocol::Anthropic,
+            Protocol::Gemini,
+        ] {
+            let events = vec![(None, json!({"event_type":"custom.event"}))];
+            assert_eq!(
+                render(protocol, &SseScript::NativeEvents { events }).unwrap(),
+                "data: {\"event_type\":\"custom.event\"}\n\n"
+            );
+        }
     }
 
     /// 自测中每次等待夹具的上限；夹具回归为不响应时测试失败而不是挂住。

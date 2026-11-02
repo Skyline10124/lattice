@@ -107,6 +107,22 @@ impl UsageSnapshot {
                 set_input_side(&mut next.cache_read, &["cache_read_input_tokens"])?;
                 set_input_side(&mut next.cache_write, &["cache_creation_input_tokens"])?;
             }
+            Protocol::Responses => {
+                set(&mut next.base_input, &["input_tokens"])?;
+                set(&mut next.base_output, &["output_tokens"])?;
+                set(
+                    &mut next.cache_read,
+                    &["input_tokens_details", "cached_tokens"],
+                )?;
+                set(
+                    &mut next.cache_write,
+                    &["input_tokens_details", "cache_write_tokens"],
+                )?;
+                set(
+                    &mut next.reasoning,
+                    &["output_tokens_details", "reasoning_tokens"],
+                )?;
+            }
             Protocol::GenerateContent => {
                 set(&mut next.base_input, &["promptTokenCount"])?;
                 set(&mut next.tool_input, &["toolUsePromptTokenCount"])?;

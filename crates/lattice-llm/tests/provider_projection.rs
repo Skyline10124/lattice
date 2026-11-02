@@ -320,6 +320,7 @@ fn replay_origin_matrix_separates_opaque_state_from_call_ids() {
         Protocol::ChatCompletions,
         Protocol::Messages,
         Protocol::GenerateContent,
+        Protocol::Responses,
     ];
     for (protocol, fixture_name) in [
         (
@@ -332,6 +333,7 @@ fn replay_origin_matrix_separates_opaque_state_from_call_ids() {
             "anthropic_redacted_thinking_tool_use.json",
         ),
         (Protocol::GenerateContent, "gemini_thought_signature.json"),
+        (Protocol::Responses, "responses_output.json"),
     ] {
         let original_origin = replay_origin(protocol);
         let source = wire_to_native(&original_origin, &fixture(fixture_name)).unwrap();
@@ -447,6 +449,9 @@ fn replay_origin_matrix_separates_opaque_state_from_call_ids() {
                     assert_eq!(projected_wire, original_wire);
                 } else {
                     let serialized = projected_wire.to_string();
+                    if protocol == Protocol::Responses {
+                        assert!(!serialized.contains("final-encrypted-content"));
+                    }
                     for material in &opaque {
                         assert!(
                             !serialized.contains(material),
@@ -471,7 +476,12 @@ fn replay_origin_matrix_separates_opaque_state_from_call_ids() {
                             .unwrap()
                             .remove("reasoning_content");
                     }
-                    assert_eq!(messages[0], expected_assistant);
+                    if target_protocol == Protocol::Responses {
+                        let items = expected_assistant.as_array().unwrap();
+                        assert_eq!(&messages[..items.len()], items);
+                    } else {
+                        assert_eq!(messages[0], expected_assistant);
+                    }
                     if !same_provider {
                         let serialized = serde_json::to_string(messages).unwrap();
                         for material in &opaque {
@@ -524,6 +534,24 @@ fn replay_origin_matrix_separates_opaque_state_from_call_ids() {
                                     messages[1]["parts"][index]["functionResponse"]
                                         .get("id")
                                         .is_none()
+                                );
+                            }
+                        }
+                        Protocol::Responses => {
+                            let items = projected_wire.as_array().unwrap();
+                            let calls: Vec<_> = items
+                                .iter()
+                                .filter(|item| item["type"] == "function_call")
+                                .collect();
+                            for (index, call) in calls.iter().enumerate() {
+                                assert_eq!(call["call_id"], source_ids[index].unwrap());
+                                assert_eq!(
+                                    messages[items.len() + index]["call_id"],
+                                    source_ids[index].unwrap()
+                                );
+                                assert_eq!(
+                                    messages[items.len() + index]["type"],
+                                    "function_call_output"
                                 );
                             }
                         }
@@ -919,7 +947,19 @@ fn attempt_total_limit_is_enforced_at_the_seam() {
 fn tool_argument_limits_apply_to_every_provider() {
     let filler = MAX_TOOL_CALL_ARGUMENTS_BYTES - r#"{"a":""}"#.len();
     for (name, provider, filler_bytes, accepted) in [
-        // Every provider projector meters, not just the OpenAI one.
+        (
+            "responses_exact_arguments_boundary",
+            Protocol::Responses,
+            filler,
+            true,
+        ),
+        (
+            "responses_arguments_boundary_plus_one",
+            Protocol::Responses,
+            filler + 1,
+            false,
+        ),
+        // 每个协议的完整 wire 入口都必须经过同一参数计量。
         (
             "anthropic_original_oversized_arguments",
             Protocol::Messages,
@@ -966,6 +1006,9 @@ fn tool_argument_limits_apply_to_every_provider() {
                     "name": "t", "arguments": format!("{{\"a\":\"{arguments}\"}}"),
                 }}],
             }}]}),
+            Protocol::Responses => {
+                serde_json::json!({"status":"completed","output":[{"type":"function_call","id":"item_1","call_id":"call_1","name":"t","arguments":format!("{{\"a\":\"{arguments}\"}}") }]})
+            }
             Protocol::Messages => serde_json::json!({"role": "assistant", "content": [
                 {"type": "tool_use", "id": "toolu_1", "name": "t", "input": {"a": arguments}}
             ]}),
@@ -1216,6 +1259,7 @@ fn structured_result_outcomes_and_large_success() {
         Protocol::ChatCompletions,
         Protocol::Messages,
         Protocol::GenerateContent,
+        Protocol::Responses,
     ] {
         let assistant = bind_message(
             &wire_to_native(
@@ -1237,6 +1281,7 @@ fn structured_result_outcomes_and_large_success() {
             let wire = tool_results_to_wire(origin, &assistant, &results).unwrap();
             let text = match origin {
                 Protocol::ChatCompletions => wire[0]["content"].as_str().unwrap().to_string(),
+                Protocol::Responses => wire[0]["output"].as_str().unwrap().to_string(),
                 Protocol::Messages => wire[0]["content"][0]["content"]
                     .as_str()
                     .unwrap()
@@ -1358,6 +1403,16 @@ fn structured_result_fixtures_and_missing_ids() {
 fn wire_usage_distinguishes_present_absent_and_malformed_blocks() {
     let cases = [
         (
+            Protocol::Responses,
+            fixture("responses_output.json"),
+            serde_json::json!([100, 60, 10, 20, 5]),
+        ),
+        (
+            Protocol::Responses,
+            serde_json::json!({"usage":{"input_tokens":10,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":3,"cache_creation_input_tokens":99},"output_tokens":4,"output_tokens_details":{"reasoning_tokens":2}}}),
+            serde_json::json!([10, 0, 3, 4, 2]),
+        ),
+        (
             Protocol::ChatCompletions,
             fixture("openai_usage.json"),
             serde_json::json!([1201, null, null, 34, null]),
@@ -1439,6 +1494,7 @@ fn wire_usage_distinguishes_present_absent_and_malformed_blocks() {
     for (protocol, key, field) in [
         (Protocol::ChatCompletions, "usage", "prompt_tokens"),
         (Protocol::Messages, "usage", "input_tokens"),
+        (Protocol::Responses, "usage", "input_tokens"),
         (
             Protocol::GenerateContent,
             "usageMetadata",

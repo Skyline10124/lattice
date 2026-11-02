@@ -302,7 +302,11 @@ catalog = "arbitrary-entry"
             ("local/retired", "retired", json!([])),
             ("local/org/unknown", "org/unknown", json!([])),
             ("empty/unknown", "unknown", json!([])),
-            ("pending-responses/current", "current", json!([])),
+            (
+                "pending-responses/current",
+                "current",
+                json!(["off", "high"]),
+            ),
             ("pending-interactions/current", "current", json!([])),
         ] {
             let reply = support::ipc(
@@ -360,7 +364,14 @@ catalog = "arbitrary-entry"
             let listed: Value = serde_json::from_slice(&output.stdout).unwrap();
             assert_eq!(listed["models"].as_array().unwrap().len(), 1);
             assert_eq!(listed["models"][0]["model"], "current");
-            assert_eq!(listed["models"][0]["supported_efforts"], json!([]));
+            assert_eq!(
+                listed["models"][0]["supported_efforts"],
+                if provider == "pending-responses" {
+                    json!(["off", "high"])
+                } else {
+                    json!([])
+                }
+            );
         }
         for query in [
             json!({"operation":"models", "provider":"local", "target":"local/current"}),

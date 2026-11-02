@@ -33,7 +33,7 @@ pub(super) fn providers() -> Vec<Provider> {
     use Auth::{Bearer, None as NoAuth, OauthChatgpt, XApiKey, XGoogApiKey};
 
     // 合同中 openai、xai 使用 responses，google 使用 interactions；
-    // 这两个协议的适配器尚未实现（#315 L5），所以这里使用 chat-completions 与 generate-content。
+    // 内置默认在 #315 L5 的协议切换 PR 中对齐，此处暂用 chat-completions 与 generate-content。
     vec![
         provider(
             "openai",

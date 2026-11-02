@@ -205,6 +205,7 @@ impl ProviderRegistry {
                     ModelMetadata {
                         context: raw.context,
                         output: raw.output,
+                        reasoning: raw.reasoning,
                         effort: raw
                             .effort
                             .map(|values| {
@@ -365,6 +366,7 @@ struct RawProvider {
 struct RawModel {
     context: Option<u64>,
     output: Option<u64>,
+    reasoning: Option<bool>,
     effort: Option<Vec<Spanned<String>>>,
     tools: Option<bool>,
     cost: Option<Table<ModelCost>>,
