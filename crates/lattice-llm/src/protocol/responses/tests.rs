@@ -130,6 +130,8 @@ fn interleaved_text_and_reasoning_keep_arrival_order_and_ignore_done_snapshots()
     use lattice_conversation::MessageSemantic;
     let text = message("msg", "commentary", "beforeafter");
     let reasoning = json!({"type":"reasoning","id":"rs","summary":[{"type":"summary_text","text":"think"}],"encrypted_content":"final"});
+    let mut snapshot_reasoning = reasoning.clone();
+    snapshot_reasoning["encrypted_content"] = "other".into();
     let tail = message("tail", "final_answer", "tail");
     let events = vec![
         json!({"type":"response.output_item.added","output_index":0,"item":message("msg","commentary","")}),
@@ -139,12 +141,14 @@ fn interleaved_text_and_reasoning_keep_arrival_order_and_ignore_done_snapshots()
         json!({"type":"response.output_item.added","output_index":1,"item":{"type":"reasoning","id":"rs","encrypted_content":"unfinished","summary":[]}}),
         json!({"type":"response.reasoning_summary_part.added","output_index":1,"item_id":"rs","summary_index":0,"part":{"type":"summary_text","text":""}}),
         json!({"type":"response.reasoning_summary_text.delta","output_index":1,"item_id":"rs","summary_index":0,"delta":"think"}),
+        json!({"type":"response.reasoning_summary_text.done","output_index":1,"item_id":"rs","summary_index":0,"text":"think"}),
+        json!({"type":"response.reasoning_summary_part.done","output_index":1,"item_id":"rs","summary_index":0,"part":{"type":"summary_text","text":"think"}}),
         json!({"type":"response.output_text.delta","output_index":0,"item_id":"msg","content_index":0,"delta":"after"}),
         json!({"type":"response.output_text.done","output_index":0,"item_id":"msg","content_index":0,"text":"beforeafter"}),
         json!({"type":"response.content_part.done","output_index":0,"item_id":"msg","content_index":0,"part":{"type":"output_text","text":"beforeafter"}}),
         json!({"type":"response.output_item.done","output_index":0,"item":text}),
         json!({"type":"response.output_item.done","output_index":1,"item":reasoning}),
-        response(vec![text.clone(), reasoning.clone(), tail.clone()]),
+        response(vec![text.clone(), snapshot_reasoning, tail.clone()]),
     ];
     let baseline = collect(events.clone());
     for extra in [
@@ -164,7 +168,7 @@ fn interleaved_text_and_reasoning_keep_arrival_order_and_ignore_done_snapshots()
     }
     let (live, outcome, _) = baseline;
     let ReplyOutcome::Complete { message } = outcome else {
-        panic!("complete")
+        panic!("complete: {outcome:?}")
     };
     assert_eq!(
         live,
@@ -200,6 +204,18 @@ fn interleaved_text_and_reasoning_keep_arrival_order_and_ignore_done_snapshots()
     assert_eq!(
         crate::protocol::projection::native_to_wire(&origin(), message.as_message()).unwrap(),
         json!([text, reasoning, tail])
+    );
+    let mut changed_phase = events;
+    changed_phase.last_mut().unwrap()["response"]["output"][0]["phase"] = "final_answer".into();
+    let (_, outcome, _) = collect(changed_phase);
+    assert_eq!(
+        outcome,
+        ReplyOutcome::Interrupted {
+            reason: crate::ReplyStop::Stream(crate::StreamStop::Provider(crate::ProviderFailure {
+                message: "malformed Responses wire: completed replay metadata changed".into(),
+                retryable: false,
+            }))
+        }
     );
 }
 
