@@ -612,7 +612,9 @@ impl InteractionsSseParser {
                     return Err(malformed("duplicate interaction created"));
                 }
                 self.created = true;
-                check_status(interaction.status.as_deref())?;
+                if interaction.status.is_some() {
+                    check_status(interaction.status.as_deref())?;
+                }
                 for (index, step) in interaction.steps.iter().flatten().enumerate() {
                     supported_step(&step.kind, index)?;
                 }

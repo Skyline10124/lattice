@@ -368,7 +368,7 @@ async fn serve(
         } else if path.ends_with("/responses") {
             "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n"
         } else if path.ends_with("/interactions") {
-            "event: interaction.completed\ndata: {\"event_type\":\"interaction.completed\",\"interaction\":{\"status\":\"completed\"}}\n\n"
+            include_str!("../../tests/fixtures/projection/interactions_thought_and_text.sse")
         } else if path.contains(":streamGenerateContent") {
             CONTENT_DONE
         } else {
