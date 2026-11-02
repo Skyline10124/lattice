@@ -64,12 +64,28 @@ fn responses_native(output: Vec<serde_json::Value>) -> lattice_system_harness::S
                 events.push(json!({"type":"response.output_text.done","output_index":index,"item_id":item["id"],"content_index":content_index,"text":part["text"],"logprobs":[]}));
                 events.push(json!({"type":"response.content_part.done","output_index":index,"item_id":item["id"],"content_index":content_index,"part":part}));
             }
+        } else if item["type"] == "reasoning" {
+            for (summary_index, part) in item["summary"].as_array().unwrap().iter().enumerate() {
+                let mut empty = part.clone();
+                empty["text"] = json!("");
+                events.push(json!({"type":"response.reasoning_summary_part.added","output_index":index,"item_id":item["id"],"summary_index":summary_index,"part":empty}));
+                events.push(json!({"type":"response.reasoning_summary_text.delta","output_index":index,"item_id":item["id"],"summary_index":summary_index,"delta":part["text"]}));
+                events.push(json!({"type":"response.reasoning_summary_text.done","output_index":index,"item_id":item["id"],"summary_index":summary_index,"text":part["text"]}));
+                events.push(json!({"type":"response.reasoning_summary_part.done","output_index":index,"item_id":item["id"],"summary_index":summary_index,"part":part}));
+            }
         }
         events.push(json!({"type":"response.output_item.done","output_index":index,"item":item}));
     }
     response["status"] = json!("completed");
     response["completed_at"] = json!(1741290960);
     response["output"] = json!(output);
+    for item in response["output"].as_array_mut().unwrap() {
+        if item["type"] == "reasoning" {
+            item["encrypted_content"] = "x"
+                .repeat(item["encrypted_content"].as_str().unwrap().len())
+                .into();
+        }
+    }
     response["usage"] = json!({"input_tokens":100,"input_tokens_details":{"cached_tokens":60,"cache_write_tokens":10},"output_tokens":20,"output_tokens_details":{"reasoning_tokens":5}});
     events.push(json!({"type":"response.completed","response":response}));
     lattice_system_harness::SseScript::NativeEvents {

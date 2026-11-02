@@ -588,8 +588,8 @@ impl ResponsesSseParser {
             if !allow_new {
                 return Err(malformed("duplicate item end"));
             }
+            // 服务端每次序列化都会重新加密；回放沿用 output_item.done 的密文。
             if item.phase != previous.anchor.phase
-                || item.encrypted_content != previous.anchor.encrypted_content
                 || item.name != previous.name
                 || item.call_id != previous.call_id
             {
