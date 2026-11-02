@@ -654,7 +654,7 @@ fn request_keeps_tool_schema_and_omits_unselected_controls() {
         "desc",
         json!({"type":"object","additionalProperties":false,"properties":{"x":{"const":"x"}}}),
     ));
-    let body = build_request_json(&request, None, None, &origin()).unwrap();
+    let body = build_request_json(&request, None, Some(true), &origin()).unwrap();
     assert_eq!(
         body["generation_config"],
         json!({"thinking_summaries":"auto"})

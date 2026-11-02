@@ -38,7 +38,7 @@ pub fn build_request_json(
             ReasoningPlan::Toggle { enabled: true } => serde_json::json!({"thinkingBudget":-1}),
         };
     }
-    if model_reasoning != Some(false)
+    if model_reasoning == Some(true)
         && config
             .get("thinkingBudget")
             .and_then(serde_json::Value::as_u64)

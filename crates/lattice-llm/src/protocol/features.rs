@@ -50,14 +50,6 @@ pub(crate) enum Cache {
     None,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub(crate) enum ThinkingDisplay {
-    #[default]
-    None,
-    Summarized,
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ChatCompletionsFeatures {
     pub(crate) effort_param: EffortParam,
@@ -70,7 +62,6 @@ pub(crate) struct ChatCompletionsFeatures {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct MessagesFeatures {
     pub(crate) cache: Cache,
-    pub(crate) thinking_display: ThinkingDisplay,
 }
 
 /// 合并覆盖后的完整 features；没有可选行为的协议不携带配置字段。
@@ -132,9 +123,6 @@ impl Features {
                 features.cache_markers = parse(value)?
             }
             (Self::Messages(features), "cache") => features.cache = parse(value)?,
-            (Self::Messages(features), "thinking_display") => {
-                features.thinking_display = parse(value)?
-            }
             (features, _) => {
                 return Err(format!(
                     "unknown feature `{name}` for {}",

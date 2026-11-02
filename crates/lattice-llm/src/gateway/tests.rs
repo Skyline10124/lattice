@@ -850,10 +850,8 @@ async fn protocol_and_auth_independently_select_wire_requests() {
                     received.body.get("max_tokens").is_none(),
                     "{cell}: max_tokens"
                 );
-                assert_eq!(
-                    received.body.get("generationConfig").cloned(),
-                    (protocol == "generate-content")
-                        .then(|| serde_json::json!({"thinkingConfig":{"includeThoughts":true}})),
+                assert!(
+                    received.body.get("generationConfig").is_none(),
                     "{cell}: generationConfig"
                 );
             }
@@ -962,9 +960,9 @@ async fn protocol_and_auth_independently_select_wire_requests() {
                     );
                     assert_eq!(received.body["store"], false);
                     assert_eq!(received.body["stream"], true);
-                    assert_eq!(
-                        received.body["generation_config"],
-                        serde_json::json!({"thinking_summaries":"auto"})
+                    assert!(
+                        received.body.get("generation_config").is_none(),
+                        "{cell}: generation_config"
                     );
                     for field in [
                         "thinking_summaries",
@@ -2286,7 +2284,12 @@ async fn interactions_invalid_handwritten_efforts_only_reject_the_affected_model
 async fn reasoning_text_controls_use_the_model_metadata_from_each_resolution() {
     use lattice_conversation::Effort;
     use serde_json::json;
-    for protocol in ["responses", "interactions", "generate-content"] {
+    for protocol in [
+        "responses",
+        "interactions",
+        "generate-content",
+        "anthropic-messages",
+    ] {
         let mut server = Server::start(false).await;
         let directory = private_dir();
         configure(directory.path(), &server.url, protocol, "none");
@@ -2316,9 +2319,14 @@ async fn reasoning_text_controls_use_the_model_metadata_from_each_resolution() {
             ]
         };
         for (catalog_flag, present, handwritten) in cases {
-            let model_config = handwritten.map_or_else(String::new, |flag| {
-                format!("[providers.test.models.model-id]\nreasoning={flag}\n")
-            });
+            let mut model_config =
+                handwritten.map_or_else(String::new, |flag| format!("reasoning={flag}\n"));
+            if protocol == "anthropic-messages" {
+                model_config.push_str("effort=['high']\n");
+            }
+            if !model_config.is_empty() {
+                model_config = format!("[providers.test.models.model-id]\n{model_config}");
+            }
             std::fs::write(
                 &path,
                 format!("{source}\ncatalog='reasoning-fixture'\n{model_config}"),
@@ -2341,7 +2349,10 @@ async fn reasoning_text_controls_use_the_model_metadata_from_each_resolution() {
                 serde_json::to_vec(&json!({"reasoning-fixture":{"models":models}})).unwrap(),
             )
             .unwrap();
-            let request = request("test");
+            let mut request = request("test");
+            if protocol == "anthropic-messages" {
+                request.target.effort = Some(Effort::High);
+            }
             if protocol == "responses" {
                 assert_eq!(
                     turn.supported_efforts(&request.target).await.unwrap(),
@@ -2361,11 +2372,7 @@ async fn reasoning_text_controls_use_the_model_metadata_from_each_resolution() {
             .await;
             let body = server.next().await.body;
             let flag = handwritten.or(catalog_flag);
-            let enabled = if protocol == "responses" {
-                flag == Some(true)
-            } else {
-                flag != Some(false)
-            };
+            let enabled = flag == Some(true);
             let (actual, expected) = match protocol {
                 "responses" => {
                     assert_eq!(
@@ -2378,6 +2385,14 @@ async fn reasoning_text_controls_use_the_model_metadata_from_each_resolution() {
                     body.get("generation_config").cloned(),
                     json!({"thinking_summaries":"auto"}),
                 ),
+                "anthropic-messages" => {
+                    assert_eq!(body["thinking"]["type"], "adaptive");
+                    assert_eq!(body["output_config"], json!({"effort":"high"}));
+                    (
+                        body["thinking"].get("display").cloned(),
+                        json!("summarized"),
+                    )
+                }
                 _ => (
                     body.get("generationConfig").cloned(),
                     json!({"thinkingConfig":{"includeThoughts":true}}),

@@ -45,6 +45,7 @@ pub fn build_request_json(
     output_limit: Option<u64>,
     features: super::MessagesFeatures,
     reasoning: Option<ReasoningPlan>,
+    model_reasoning: Option<bool>,
     origin: &ReplayOrigin,
 ) -> Result<serde_json::Value, LlmError> {
     let cache = features.cache;
@@ -77,9 +78,7 @@ pub fn build_request_json(
             }
         };
     }
-    if features.thinking_display == super::ThinkingDisplay::Summarized
-        && body["thinking"]["type"] == "adaptive"
-    {
+    if model_reasoning == Some(true) && body["thinking"]["type"] == "adaptive" {
         body["thinking"]["display"] = "summarized".into();
     }
 
@@ -709,8 +708,8 @@ mod tests {
             None,
             super::super::MessagesFeatures {
                 cache: super::super::Cache::None,
-                ..Default::default()
             },
+            None,
             None,
             &crate::test_reply::replay_origin(Protocol::Messages),
         )

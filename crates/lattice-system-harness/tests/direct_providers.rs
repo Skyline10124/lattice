@@ -118,7 +118,7 @@ fn interactions_replays_thoughts_and_two_tool_results_after_backend_restart() {
     world.wire_provider(fixture, &server, FAKE_API_KEY).unwrap();
     let path = world.home().join(".lattice/providers.toml");
     let source = std::fs::read_to_string(&path).unwrap();
-    std::fs::write(path,format!("{source}\n[providers.interactions-fixture.models.interactions-model.cost]\ninput=2\noutput=10\ncache_read=0.5\ncache_write=3\n")).unwrap();
+    std::fs::write(path,format!("{source}\n[providers.interactions-fixture.models.interactions-model]\nreasoning=true\n[providers.interactions-fixture.models.interactions-model.cost]\ninput=2\noutput=10\ncache_read=0.5\ncache_write=3\n")).unwrap();
     let driver = driver();
     let send = SessionSendDriver::new(&driver, &world, &spec, "interactions");
     let mut evidence = support::evidence(&world, &spec);

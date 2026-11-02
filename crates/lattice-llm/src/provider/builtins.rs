@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use crate::protocol::{
     Cache, ChatCompletionsFeatures, EffortParam, Features, MessagesFeatures, ReasoningReplay,
-    ThinkingBudget, ThinkingDisplay, ThinkingToggle,
+    ThinkingBudget, ThinkingToggle,
 };
 
 use super::{Auth, Provider};
@@ -56,7 +56,6 @@ pub(super) fn providers() -> Vec<Provider> {
             Some("anthropic"),
             Features::Messages(MessagesFeatures {
                 cache: Cache::Automatic,
-                thinking_display: ThinkingDisplay::Summarized,
             }),
         ),
         provider(
@@ -137,20 +136,14 @@ pub(super) fn providers() -> Vec<Provider> {
             "https://api.minimax.io/anthropic",
             XApiKey,
             Some("minimax"),
-            Features::Messages(MessagesFeatures {
-                cache: Cache::None,
-                ..Default::default()
-            }),
+            Features::Messages(MessagesFeatures { cache: Cache::None }),
         ),
         provider(
             "minimax-cn",
             "https://api.minimax.cn/anthropic",
             XApiKey,
             Some("minimax-cn"),
-            Features::Messages(MessagesFeatures {
-                cache: Cache::None,
-                ..Default::default()
-            }),
+            Features::Messages(MessagesFeatures { cache: Cache::None }),
         ),
         provider(
             "volcengine",

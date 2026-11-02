@@ -79,7 +79,7 @@ provider 配置、凭据与模型元数据是用户级的全局状态，由后�
 
 - **请求。** 把当前路径上的对话、系统提示、工具定义和推理档位按协议与 features 写成请求体。不发送采样参数（`temperature`、`top_p` 等），由服务端按模型默认值处理。投影规则与回放材料的处理由[会话合同的回放与跨 provider 投影](session.md#回放与跨-provider-投影)维护。
 - **流式事件。** 把线上事件翻译为正文、reasoning 与工具调用的部件增量，交给 #312 的累积器组装完整回复。解析端对无歧义的厂商差异直接兼容，例如 `reasoning_content` 与 `reasoning` 两种字段都读取，Mistral 的 `content` 为分块数组时读取其中的 `thinking` 块。不认识的内容块或增量类型按不可重试的协议错误停止这次尝试，不静默丢弃；诊断只写协议、位置与类型名。
-- **推理文字。** Interactions 在模型元数据不是 `reasoning = false` 时写 `generation_config.thinking_summaries: "auto"`；generateContent 在同一元数据条件且推理未关闭时写 `generationConfig.thinkingConfig.includeThoughts: true`，`thinkingBudget: 0` 和 toggle 关闭均不写。这两项与是否选档位无关，分别与现有 generation_config、thinkingConfig 字段合并。Messages 按 `thinking_display` 只在 adaptive 上请求摘要；不选档位时不发 `thinking`，具体写法与原因见[档位映射](#档位映射)。
+- **推理文字。** 仅在模型元数据明确 `reasoning = true` 时请求：Interactions 写 `generation_config.thinking_summaries: "auto"`；generateContent 在推理未关闭时写 `generationConfig.thinkingConfig.includeThoughts: true`，`thinkingBudget: 0` 和 toggle 关闭均不写。这两项与是否选档位无关，分别与现有 generation_config、thinkingConfig 字段合并。Messages 在同一元数据条件且 thinking 为 adaptive 时写 `display: "summarized"`，budget 和 disabled 不写；不选档位时不发 `thinking`，具体写法与原因见[档位映射](#档位映射)。`false` 或没有该标志时均不请求推理文字，所选档位照常发送。
 - **Responses 的不完整回复。** `response.incomplete` 先更新用量；原因是 `max_output_tokens` 或 `content_filter` 时按完成处理，分别记 `finish_reason = length` 或 `content_filter`，关闭仍打开的 item 并保存回复，允许缺少 `output_item.done`。半截工具参数仍由累积器的批次校验拒绝，不执行工具；完整调用沿用 Chat Completions 在 `length` 下的处理。其他或未知原因按 provider 错误停止，不保存回复。
 - **Interactions 的不完整回复。** `interaction.completed` 的 `status = incomplete` 按完成处理，先更新用量，关闭仍打开的 step 并保存回复，记 `finish_reason = incomplete`。协议没有给出具体原因，不将它推断为 `length`；半截工具参数仍由累积器的批次校验拒绝，不执行工具。`failed`、`cancelled`、`requires_continuation` 继续按 provider 错误停止，不保存回复。
 - **prompt 拦截。** generateContent 只有 `promptFeedback.blockReason`、没有 candidates 时，按不可重试的 provider 错误停止这次尝试，诊断保留 `blockReason` 原文。
@@ -118,7 +118,7 @@ Anthropic Messages 的 `redacted_thinking` 以空 Reasoning 片段及带 `redact
 | --- | --- | --- | --- | --- | --- |
 | `openai` | `responses` | `https://api.openai.com/v1` | `bearer` | `openai` | — |
 | `chatgpt` | `responses` | `https://api.openai.com/v1` | `oauth:chatgpt` | `openai` | — |
-| `anthropic` | `anthropic-messages` | `https://api.anthropic.com` | `x-api-key` | `anthropic` | `thinking_display = "summarized"` |
+| `anthropic` | `anthropic-messages` | `https://api.anthropic.com` | `x-api-key` | `anthropic` | — |
 | `google` | `interactions` | `https://generativelanguage.googleapis.com/v1beta` | `x-goog-api-key` | `google` | — |
 | `xai` | `responses` | `https://api.x.ai/v1` | `bearer` | `xai` | — |
 | `mistral` | `chat-completions` | `https://api.mistral.ai/v1` | `bearer` | `mistral` | `reasoning_replay = "content-chunks"` |
@@ -182,7 +182,7 @@ reasoning_replay = "none"              # 按模型覆盖 feature
 | `models."<模型>"` | provider 子表 | 手写元数据：`context`、`output`（token 数），`reasoning`（布尔，覆盖目录元数据中的同名标志，缺失时继承），`effort`（可用档位列表；无元数据来源时[按 features 推出写法](#可用档位)），`tools`（布尔，默认 true），`cost`（`input`、`output`、`cache_read`、`cache_write`，美元每百万 token） |
 | `models."<模型>".features` | 模型子表 | 按模型覆盖 features |
 
-没有目录元数据的 Responses 模型需要手写 `reasoning = true`，才会请求 include 中的加密 reasoning 与推理摘要。该标志不增加或移除可选档位，档位仍按[可用档位](#可用档位)的规则推导。
+没有目录元数据的模型，在 Responses、Interactions、generateContent 或 Messages 上请求推理文字时需要手写 `reasoning = true`；Responses 也据此请求 include 中的加密 reasoning。该标志不增加或移除可选档位，档位仍按[可用档位](#可用档位)的规则推导。
 
 - **严格解析。** 未知字段、未知 feature 或取值、类型不符、格式错误都使整个文件无效。文件无效时，用到 provider 配置的操作在接受前按配置错误拒绝，诊断写明文件路径、行号与原因；不使用部分有效的内容。
 - **文件不存在**等于空配置，只使用内置表。
@@ -228,9 +228,8 @@ Responses 没有 feature。推理摘要请求由模型元数据决定，见[档�
 | feature | 取值 | 默认 | 作用 |
 | --- | --- | --- | --- |
 | `cache` | `automatic`、`none` | `automatic` | `automatic`：系统提示最后一块加显式断点，请求顶层加 `cache_control: {"type": "ephemeral"}` 由服务端放置对话末尾的断点；`none`：不发送缓存字段 |
-| `thinking_display` | `none`、`summarized` | `none` | `none` 不附加 display 字段；`summarized` 只在 adaptive 的 thinking 对象中写 `display: "summarized"`，budget 和 disabled 不写 |
 
-该 feature 只在 Messages 上合法，支持 provider 级配置与 model 级覆盖。内置 `anthropic` 启用 `summarized`，其他 Messages 内置项保持默认 `none`，因为第三方兼容端不一定接受该字段。
+`cache` 只在 Messages 上合法，支持 provider 级配置与 model 级覆盖。adaptive 的推理文字请求由模型元数据决定，见[档位映射](#档位映射)。
 
 ### Google generateContent 与 Interactions
 
@@ -335,9 +334,9 @@ Responses 没有 feature。推理摘要请求由模型元数据决定，见[档�
 
 Responses 仅在模型元数据明确 `reasoning = true` 且档位不是 `off` 时请求推理摘要：没选档位写 `reasoning: {"summary":"auto"}`；选了档位则与 effort 合并为 `reasoning: {"effort":"<档位>","summary":"auto"}`。`false` 或没有该标志时不请求摘要，选中的 effort 照常发送；`off` 只写 `reasoning: {"effort":"none"}`。摘要请求与是否选择档位无关，不改变推理强度。
 
-Interactions 在模型元数据不是 `reasoning = false` 时发送 `generation_config.thinking_summaries: "auto"`，未选档位也发送；选择档位时与 `thinking_level` 合并在同一个对象里。generateContent 在模型元数据不是 `reasoning = false` 且推理未关闭时发送 `generationConfig.thinkingConfig.includeThoughts: true`，与已有 `thinkingLevel` 或 `thinkingBudget` 合并；未选档位时只发送 includeThoughts，`off`、toggle 关闭或 `thinkingBudget: 0` 均不发送。
+Interactions 仅在模型元数据明确 `reasoning = true` 时发送 `generation_config.thinking_summaries: "auto"`，未选档位也发送；选择档位时与 `thinking_level` 合并在同一个对象里。generateContent 在模型元数据明确 `reasoning = true` 且推理未关闭时发送 `generationConfig.thinkingConfig.includeThoughts: true`，与已有 `thinkingLevel` 或 `thinkingBudget` 合并；未选档位时只发送 includeThoughts，`off`、toggle 关闭或 `thinkingBudget: 0` 均不发送。`false` 或没有该标志时，两种协议均不请求推理文字，所选档位照常发送。
 
-Messages 的 `thinking_display = "summarized"` 只给 adaptive 对象附加 `display: "summarized"`，包括 effort 档位和 toggle 开启的 adaptive；budget 对应较早模型，默认返回摘要，不附加 display，disabled 也不附加。未选档位时不发 `thinking`：该字段会开启默认不开推理的模型，改变推理强度，不能仅为取得文字而发送。
+Messages 仅在模型元数据明确 `reasoning = true` 时给 adaptive 对象附加 `display: "summarized"`，包括 effort 档位和 toggle 开启的 adaptive；`false` 或没有该标志时不附加 display。budget 对应较早模型，默认返回摘要，不附加 display，disabled 也不附加。未选档位时不发 `thinking`：该字段会开启默认不开推理的模型，改变推理强度，不能仅为取得文字而发送。
 
 Chat Completions 中，元数据给出来源的档位在 `reasoning_options` 含 toggle 项且 `thinking_toggle` 不为 `none` 时，同时按 `thinking_toggle` 写开启（`off` 除外）；没有 toggle 项时不写开关，例如 Kimi K3.1 Pro 只接受 `reasoning_effort`。缺少元数据来源的手写档位按[有效 features](#可用档位)推断写法。某个档位在所选协议上不可用时，它不出现在可用档位中。
 
