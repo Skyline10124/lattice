@@ -185,6 +185,8 @@ pub enum ServeError {
     UnexpectedRequest(String),
     #[error("provider would reject the tool definitions: {0}")]
     RejectedToolSchema(String),
+    #[error("provider would reject the assistant content: {0}")]
+    RejectedAssistantContent(String),
     #[error("script cannot be rendered in the {0} protocol")]
     UnsupportedScript(&'static str),
     #[error("fake-provider server thread failed: {0}")]
@@ -898,6 +900,20 @@ fn decide(
         };
         return Ok((reply, Some(ServeError::RejectedToolSchema(rejection))));
     }
+    if let Some(rejection) = responses_assistant_content_rejection(protocol, &request.body) {
+        let body = serde_json::json!({"error": {
+            "message": rejection,
+            "type": "invalid_request_error",
+            "code": "invalid_value",
+        }});
+        let reply = Reply::Status {
+            status: 400,
+            content_type: "application/json".into(),
+            headers: Vec::new(),
+            body: body.to_string(),
+        };
+        return Ok((reply, Some(ServeError::RejectedAssistantContent(rejection))));
+    }
     let mut captured = parse_request_body(protocol, path_model, &request.body);
     captured.headers = request.headers;
     captured.connection = connection;
@@ -1508,6 +1524,29 @@ fn has_key_anywhere(value: &Value, key: &str) -> bool {
         _ => false,
     }
 }
+
+/// Responses 的 assistant 正文只接受输出文本或拒绝，用户输入块不能作为历史回复。
+fn responses_assistant_content_rejection(protocol: Protocol, body: &str) -> Option<String> {
+    if protocol != Protocol::Responses {
+        return None;
+    }
+    let raw: Value = serde_json::from_str(body).ok()?;
+    raw["input"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| item["role"] == "assistant")
+        .flat_map(|item| item["content"].as_array().into_iter().flatten())
+        .find_map(|part| {
+            let kind = part["type"].as_str().unwrap_or("null");
+            (!matches!(kind, "output_text" | "refusal")).then(|| {
+                format!(
+                    "Invalid value: '{kind}'. Supported values are: 'output_text' and 'refusal'."
+                )
+            })
+        })
+}
+
 /// `(call id, Tool name, arguments JSON)` of one scripted Tool call.
 type ScriptedCall = (String, String, String);
 
@@ -2104,6 +2143,25 @@ mod tests {
         let mut invalid = body;
         invalid["tools"][0]["parameters"] = json!({"type":"array"});
         assert!(tool_schema_rejection(Protocol::Responses, &invalid.to_string()).is_some());
+        let mut assistant_body = json!({"input":[
+            {"role":"user","content":[{"type":"input_text","text":"question"}]},
+            {"type":"message","role":"assistant","content":[
+                {"type":"output_text","text":"answer","annotations":[]},
+                {"type":"refusal","refusal":"declined"}
+            ]}
+        ]});
+        assert!(
+            responses_assistant_content_rejection(Protocol::Responses, &assistant_body.to_string())
+                .is_none()
+        );
+        assistant_body["input"][1]["content"][0]["type"] = json!("input_text");
+        assert_eq!(
+            responses_assistant_content_rejection(Protocol::Responses, &assistant_body.to_string()),
+            Some(
+                "Invalid value: 'input_text'. Supported values are: 'output_text' and 'refusal'."
+                    .into()
+            )
+        );
         let script = SseScript::WithUsage {
             script: Box::new(SseScript::plain("hello")),
             usage: NativeUsage::Responses(json!({"input_tokens":99})),
