@@ -1322,7 +1322,7 @@ fn gemini_prompt_block_stops_without_retry_and_preserves_usage() {
 }
 
 #[test]
-fn implemented_builtin_protocols_accept_and_record_the_protocol_actually_sent() {
+fn implemented_builtin_protocols_record_origins_and_project_plain_history_to_responses() {
     use lattice_system_harness::{FAKE_API_KEY, SseScript};
     for (id, protocol, wire, stored) in [
         (
@@ -1356,15 +1356,25 @@ fn implemented_builtin_protocols_accept_and_record_the_protocol_actually_sent() 
         world
             .write_agent_profile("builtin", &fixture.model_ref().unwrap())
             .unwrap();
-        let server = FakeLlmServer::start(SseScript::plain("builtin works")).unwrap();
+        let server = FakeLlmServer::start(sequence(vec![
+            SseScript::plain("builtin works"),
+            SseScript::plain("responses works"),
+        ]))
+        .unwrap();
         world.wire_provider(fixture, &server, FAKE_API_KEY).unwrap();
+        let responses = responses_fixture();
+        world
+            .wire_provider(responses, &server, FAKE_API_KEY)
+            .unwrap();
         let driver = driver();
         let send = SessionSendDriver::new(&driver, &world, &spec, "builtin");
         let mut evidence = support::evidence(&world, &spec);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let sent = send.send("builtin").unwrap();
             evidence.record_command("builtin Turn", &sent.command);
-            assert!(sent.command.is_clean_exit(0));
+            assert!(sent.has_completed() && sent.command.is_clean_exit(0));
+            assert_eq!(sent.reply_text(), "builtin works");
+            assert!(sent.slots().is_empty());
             let captures = server.captured_requests();
             assert_eq!(captures.len(), 1);
             assert_eq!(captures[0].provider, wire);
@@ -1372,6 +1382,54 @@ fn implemented_builtin_protocols_accept_and_record_the_protocol_actually_sent() 
             assert_eq!(
                 turn["steps"][0]["attempts"][0]["origin"],
                 serde_json::json!({"provider_id":id,"protocol":stored})
+            );
+            evidence.record_captures(captures);
+            let sid = send.session_id().unwrap();
+            let command = send
+                .run_command(&[
+                    "--json",
+                    "session",
+                    "send",
+                    "continue",
+                    "--session",
+                    sid,
+                    "--model",
+                    &responses.model_ref().unwrap(),
+                ])
+                .unwrap();
+            evidence.record_command("switch plain history to Responses", &command);
+            let switched = SendExecution {
+                parsed: support::parse_send_stdout(&command.stdout, command.exit_code()),
+                command,
+            };
+            let turn = support::live_turn(&switched.parsed);
+            assert!(
+                switched.has_completed() && switched.command.is_clean_exit(0),
+                "{}\n{turn}",
+                switched.command.summary()
+            );
+            assert!(switched.parsed.malformed_lines.is_empty());
+            assert_eq!(switched.reply_text(), "responses works");
+            assert!(switched.slots().is_empty());
+            let captures = server.captured_requests();
+            assert_eq!(captures.len(), 2);
+            assert_eq!(captures[1].provider, "responses");
+            assert_eq!(
+                captures[1].raw["input"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|item| item["role"] == "assistant")
+                    .collect::<Vec<_>>(),
+                vec![
+                    &serde_json::json!({"type":"message","role":"assistant","content":[
+                        {"type":"output_text","text":"builtin works","annotations":[]}
+                    ]})
+                ]
+            );
+            assert_eq!(
+                turn["steps"][0]["attempts"][0]["origin"],
+                serde_json::json!({"provider_id":"responses-fixture","protocol":"responses"})
             );
             evidence.record_captures(captures);
         }));
