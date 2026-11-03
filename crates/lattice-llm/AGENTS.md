@@ -11,7 +11,7 @@
 - `provider/`：provider 注册表，包括内置表、`providers.toml` 的解析与合并、按 `id` 查找。这里不含协议代码。
 - `metadata/`：内置快照、缓存与手写元数据的合并与刷新。
 - `src/models.rs`：候选、限制、价格、凭据状态与缺失元数据提示。
-- `auth/`：凭据库，`auth.json` 与 Sign in with ChatGPT。
+- `auth/`：凭据库与 Sign in with ChatGPT；网关共享认证生命周期，管理登录、取可用 token、登出和移除。`stop_logins` 只停止登录，最终 `shutdown` 排空认证工作，顺序见会话合同。
 - `transport.rs`：请求标识、错误诊断、可重试判断与 Retry-After；`client.rs`：HTTP 行为、Turn 内 client 复用与连接安全；`sse.rs`：流解析；`types.rs`：请求信封、工具定义与流事件。
 - `reply.rs`：同步回复累积器，统一有序部件、实时文字投影、限额与完整消息；`reply_stream.rs`：惰性流消费、取消与 deadline、唯一终态交付。
 - `stub.rs`：测试客户端；`logging.rs`：日志初始化。

@@ -17,7 +17,8 @@ use crate::LlmError;
 #[derive(Clone)]
 pub struct ChatgptAuth(Arc<Manager>);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum RevocationStatus {
     Confirmed,
     Unconfirmed,
@@ -65,6 +66,7 @@ struct State {
     cleaning: usize,
     active: usize,
     stopped: bool,
+    logins_stopped: bool,
     worker_failed: bool,
     blocked_generation: Option<u64>,
     login: Option<Arc<LoginControl>>,
@@ -206,16 +208,22 @@ impl ChatgptAuth {
             .map_err(|_| AuthError::Internal("SIWC cleanup worker failed"))?
     }
 
-    /// 关闭新操作并排空已接纳的网络操作及必要文件写入。
-    pub async fn shutdown(&self) -> Result<(), AuthError> {
+    /// 停止登录准入并取消活动登录，已接管 Turn 仍可取得 token。
+    pub fn stop_logins(&self) {
         let login = {
             let mut state = self.0.state.lock().expect("SIWC state lock");
-            state.stopped = true;
+            state.logins_stopped = true;
             state.login.clone()
         };
         if let Some(login) = login {
             login.cancel();
         }
+    }
+
+    /// 关闭新操作并排空已接纳的网络操作及必要文件写入。
+    pub async fn shutdown(&self) -> Result<(), AuthError> {
+        self.stop_logins();
+        self.0.state.lock().expect("SIWC state lock").stopped = true;
         loop {
             let changed = self.0.changed.notified();
             tokio::pin!(changed);

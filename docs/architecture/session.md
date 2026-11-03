@@ -219,6 +219,12 @@ LocalTurn 交付提交与取消的回执。普通退出使用 `detach` 取得最
 
 公开类型与方法见[本地连接与读取](../../crates/lattice-api/src/local/client.rs)、[LocalTurn](../../crates/lattice-api/src/local/operation.rs)和[结果类型](../../crates/lattice-api/src/local/types.rs)，命令用法见[验证操作指南](../development/validation-guide.md#后台与重连操作)。
 
+### 凭据命令与私有交换
+
+凭据命令经后台执行，规则见[模型接入合同](llm.md#凭据命令)。登录占一个普通连接，不建立 Turn Owner：前端发 `auth_login {provider}`，后台在同一连接交付 `auth_login_authorization {authorization_url}`；前端可以发送 `action=callback {url}` 或 `action=cancel`，后台最后给 `auth_login_result`（signed_in 及非敏感状态，或 cancelled）或安全错误。浏览器直接回调无需前端续消息。新消息与其载荷严格拒绝未知字段，URL 只在私有登录消息中传输。
+
+前端 EOF、取消或传输失败会取消未提交的登录；后台负责必要文件工作的监督收尾。凭据文件发布是成功提交点，发布后断线或迟到取消不回滚，结果不明时用 `auth status` 核验。持续读取任务保存同一连接的半帧进度与响应编号，界面取消一次事件等待不会重建 socket 读取。logout/remove 的结果显式带撤销状态，remove 同时保留是否删除材料的含义。
+
 ### 当前路径的用量查询
 
 `usage` 在一个读事务内固定 Session 的当前位置，沿父链到根，按 UserMessage 分组并按路径先后返回。退回轮中某个 Step 时，当前路径只累计该 Step 及其祖先中的尝试。每轮给出 `turn_id`、从 1 开始的路径轮次 `ordinal`、UserMessage 节点上的 `provider` 与 `model`，以及 `usage`；模型身份取自该轮节点。返回对象为 `{ session_id, position, turns, path_total, session_total }`，其中 `position` 是本次读取的位置，逐轮 `usage`、`path_total` 与 `session_total` 均按[尝试计量与完整性](#关闭-step-与-turn)派生。`path_total` 汇总当前路径；`session_total` 在同一读事务中汇总该会话全部节点的尝试，不沿父链，包含 rewind 后留存的分支，每个节点只计一次。
@@ -664,6 +670,8 @@ true 后由后台履行责任，不自动补发；再次明确取消可开始新
 
 正常 stop 原子关闭新准入，等待已接管的准备、接受、执行及必要持久收尾，包含异常任务的监督排空。等待期间查询和取消继续可用。排空以后台操作收尾为条件，无须观察者读完流。
 
+stop 开始时停止元数据调度，并调用共享认证对象的 `stop_logins()` 拒绝新登录、取消活动登录，使等待浏览器的连接可以结束。这个阶段保持 `access_token()` 可用，已接管的 SIWC Turn 后续步骤仍可取得和刷新 token。已接管操作排空后、连接 join 之前，再调用 `shutdown()` 关闭认证生命周期并排空其 worker 与必要文件写入，然后完成连接、socket 和实例锁收尾。
+
 收尾未完成时，Turn 停在已写入的进度，见[执行者消失后的 Turn](#执行者消失后的-turn)；后台返回已知的恢复需求。后台状态中的 `unconfirmed_operations` 是本进程未完成收尾的操作计数，不是会话库中未关闭 Turn 的数量；连接中断也不能证明后台已停止。
 
 收到回执后，stop 继续等待：socket 撤下、`owner.lock` 可取得后返回，调用方随即可在同一状态根启动新后台。stop 不等待后台进程退出，锁放开后进程仍可能短暂存在。回执后 30 秒内锁仍未放开时返回 Stopping，后台可能仍在收尾，用户应以 `lattice daemon status` 复核。后台收尾时 `Instance::cleanup` 只删除 socket，实例锁随实例 drop 释放，因此 socket 先于锁撤下。实例锁与 socket 清理由[存储后台边界](storage.md#本地后台与访问边界)维护。
@@ -728,7 +736,7 @@ Session 永久绑定产品组合层提供的 `ProjectStoreKey`，执行请求的
 | provider 与 TLS 根 | key 见[模型接入合同的限制](llm.md#限制)；模型名 ≤ 4,096 字节，base_url ≤ 8,192 字节；根证书 ≤ 1,024 个、单个 DER ≤ 65,536 字节、DER 总量 ≤ 4 MiB（过大或无法按 rustls 信任锚规则解析 DER 的单张跳过，不占名额也不计入总量；按加载顺序保留前缀，达到个数或总量上限即停止并记 WARN，之后的根证书不信任）；没有可用的根证书时 https 端点在接受前按配置错误拒绝，http 端点照常；接受时能发现的问题在接受前拒绝，执行中发现的按 `ProviderError { retryable: false }` 停止，诊断写明是配置问题 | 模型名上限见 [provider/model_ref.rs 的 MAX_MODEL_ID_BYTES](../../crates/lattice-llm/src/provider/model_ref.rs)，base_url 上限见 [net-guard 的 MAX_BASE_URL_BYTES](../../crates/net-guard/src/lib.rs)，根证书限制见 [client.rs 的 MAX_TLS_ROOTS 与 select_roots](../../crates/lattice-llm/src/client.rs)；URL 禁止凭据、query、fragment 并通过 provider 网络策略校验 |
 | 模型 HTTP 传输 | 建连 30 秒、读空闲 30 秒；不设单独的请求总时限，流由 Turn deadline 约束，另有 86,400 秒兜底，与 Turn deadline 的上限一致；非 2xx 正文最多读 64 KiB，诊断最多 256 字符；provider 建议等待最多采纳 60 秒。每个 Turn 第一次请求时解析、校验并固定地址，Turn 内复用连接：交付结束事件前最多再等 0.5 秒、读 64 KiB 把响应体读完，连接才能回到连接池；连接或传输错误后重新解析。请求除认证与协议头外只带 `User-Agent: lattice/<版本> (linux <内核版本>; <架构>)`、`Accept: text/event-stream, application/json` 与 `x-client-request-id`（取 SessionId，provider 由此可知哪些请求属于同一会话） | [client.rs](../../crates/lattice-llm/src/client.rs)、[transport.rs](../../crates/lattice-llm/src/transport.rs) 与 [saga.rs](../../crates/lattice-api/src/turn/saga.rs) 的 MAX_PROVIDER_RETRY_AFTER；256 依据 #265 收集的 146 条真实 provider 错误消息（整行 P90 为 252 字符），其余为实现常量 |
 | IPC 帧 | 单帧 JSON payload 最多 16 MiB，不含 8 字节 magic 和 4 字节长度头；零长度或超限读取拒绝，编码超限拒绝 | [ipc.rs](../../crates/lattice-api/src/local/ipc.rs) 的 MAX_FRAME、read/write；超过单帧的消息由连接层分帧传输 |
-| IPC 等待 | 单帧 socket 写入最多 5 秒，超时返回传输错误和回执可能未知；后台首请求整帧读取最多 10 秒，超时结束该连接处理 | 同文件 WRITE_TIMEOUT 和 [server.rs::connection](../../crates/lattice-api/src/local/server.rs)，不是 Turn 总时限 |
+| IPC 等待 | 单帧 socket 写入最多 5 秒，超时返回传输错误和回执可能未知；后台首请求整帧读取最多 10 秒，超时结束该连接处理。登录后续帧等待首字节不限时，首字节到达后须在 10 秒内完成该帧；人类授权等待不使用观察 idle 时限 | 同文件 WRITE_TIMEOUT、LOGIN_FRAME_TIMEOUT 和 [server.rs::connection](../../crates/lattice-api/src/local/server.rs)，不是 Turn 总时限 |
 | 后台资源槽 | 同时处理连接最多 64，满时关闭新接入连接；观察者许可最多 32，不足返回 Busy，`head` 等查询不占观察许可；已接管 Owner 最多 32，准入不足返回 Busy | server.rs 的 serve、Backend::new/claim、Owner::new。限制各自对象，观察者额度为查询/取消留连接空间，不承诺延迟 |
 | 内存观察状态 | 每个正在执行的 Turn 一份当前尝试的段列表，受助手正文与 reasoning 上限约束，至多约 4 MiB，同时进行的 Turn 受 Owner 上限约束；每个观察者一份待推送条目的集合与文字的已发位置，受观察者许可约束 | 见[观察与重连](#观察与重连)；段列表保存共同回复累积器发出的显示增量，与它组装的完整回复共享来源 |
 | 客户端观察 idle | 当前位置那一轮有 Owner 执行时，300 秒没有任何推送即终止当前观察，交付连接诊断，保留已知结局；会话空闲时不计时；每次建连及收到推送重置期限 | [STREAM_IDLE_TIMEOUT_SECS](../../crates/lattice-api/src/turn/execute.rs) 与 [LocalClient](../../crates/lattice-api/src/local/client.rs)；与后台执行及收尾独立 |

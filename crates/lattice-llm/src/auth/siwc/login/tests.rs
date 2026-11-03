@@ -250,6 +250,19 @@ async fn drop_and_wait(login: ChatgptLogin) -> Result<ProviderAuthStatus, LoginE
 }
 
 #[tokio::test]
+async fn stopping_logins_cancels_browser_wait_and_rejects_new_login() {
+    let f = Fixture::new();
+    let login = f.start().await;
+    let bound = address(&login);
+    f.auth.stop_logins();
+    assert!(matches!(login.wait().await, Err(LoginError::Cancelled)));
+    assert!(tokio::net::TcpListener::bind(bound).await.is_ok());
+    assert!(f.auth.start_login_at(bound).await.is_err());
+    assert_eq!(f.auth.logout().await.unwrap(), RevocationStatus::NotNeeded);
+    f.auth.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn login_commits_version_one_identity_and_preserves_parallel_api_key_write() {
     let f = Fixture::new();
     let login = f.start().await;

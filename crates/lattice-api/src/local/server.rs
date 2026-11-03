@@ -121,6 +121,21 @@ async fn blocking<T: Send + 'static>(
         .map_err(|_| internal())?
 }
 impl Backend {
+    fn chatgpt_auth(&self) -> Result<lattice_llm::auth::ChatgptAuth> {
+        self.gateway
+            .as_ref()
+            .map(|gateway| gateway.chatgpt_auth())
+            .map_err(|error| crate::ApiError::Configuration(error.clone()).into())
+    }
+
+    fn begin_stop(&self) {
+        lock(&self.admission).stopping = true;
+        self.metadata.stop();
+        if let Ok(auth) = self.chatgpt_auth() {
+            auth.stop_logins();
+        }
+    }
+
     fn new(layout: crate::StateLayout, home: Option<std::path::PathBuf>) -> Arc<Self> {
         Self::with_tls_roots(layout, home, lattice_llm::load_tls_roots_der())
     }
@@ -643,13 +658,37 @@ impl Backend {
                 .await
             }
             Request::AuthRemove { provider } => {
+                if provider == "chatgpt" {
+                    let result = self
+                        .chatgpt_auth()?
+                        .remove()
+                        .await
+                        .map_err(super::auth::error)?;
+                    return Ok(Response::AuthRemoved(AuthRemoval {
+                        removed: result.removed,
+                        revocation: Some(result.revocation),
+                    }));
+                }
                 let auth = super::auth::store(self.home.as_deref())?;
                 blocking(move || {
-                    let removed = auth.remove(&provider).map_err(super::auth::error)?;
-                    Ok(Response::AuthRemoved { removed })
+                    let removed = auth.remove_api_key(&provider).map_err(super::auth::error)?;
+                    Ok(Response::AuthRemoved(AuthRemoval {
+                        removed,
+                        revocation: None,
+                    }))
                 })
                 .await
             }
+            Request::AuthLogout { provider } => {
+                super::auth::require_chatgpt(&provider)?;
+                let revocation = self
+                    .chatgpt_auth()?
+                    .logout()
+                    .await
+                    .map_err(super::auth::error)?;
+                Ok(Response::AuthLoggedOut { revocation })
+            }
+            Request::AuthLogin { .. } => Err(super::client::protocol()),
             Request::AuthStatus {} => {
                 let auth = super::auth::store(self.home.as_deref())?;
                 blocking(move || {
@@ -688,10 +727,12 @@ impl Backend {
             }
             Request::Stop => {
                 let mut changed = self.changed.subscribe();
-                lock(&self.admission).stopping = true;
-                self.metadata.stop();
+                self.begin_stop();
                 while self.status().owners != 0 {
                     changed.changed().await.map_err(|_| internal())?;
+                }
+                if let Ok(auth) = self.chatgpt_auth() {
+                    auth.shutdown().await.map_err(super::auth::error)?;
                 }
                 Ok(Response::Status(self.status()))
             }
@@ -1024,6 +1065,22 @@ async fn connection(backend: Arc<Backend>, mut stream: UnixStream) -> Result<()>
     .await
     .map_err(|_| LocalError::new(LocalErrorKind::Transport, "request frame timed out"))??;
     let mut writer = ipc::ResponseWriter::default();
+    if let Request::AuthLogin { provider } = request {
+        let auth = super::auth::require_chatgpt(&provider).and_then(|()| {
+            if backend.status().stopping {
+                Err(LocalError::new(
+                    LocalErrorKind::Stopping,
+                    "backend is stopping",
+                ))
+            } else {
+                backend.chatgpt_auth()
+            }
+        });
+        return match auth {
+            Ok(auth) => super::auth::login::exchange(stream, auth.start_login()).await,
+            Err(error) => writer.write(&mut stream, &Response::Error(error)).await,
+        };
+    }
     if let Request::Watch { session_id } = request {
         let result = backend.watch(&mut stream, &mut writer, session_id).await;
         #[cfg(test)]
@@ -1099,10 +1156,17 @@ async fn serve_with_backend(
         }
     }
     let mut changed = backend.changed.subscribe();
-    backend.metadata.stop();
-    metadata_task.await.map_err(|_| internal())?;
+    backend.begin_stop();
+    if metadata_task.await.is_err() {
+        failure.get_or_insert_with(internal);
+    }
     while backend.status().owners != 0 {
         changed.changed().await.map_err(|_| internal())?;
+    }
+    if let Ok(auth) = backend.chatgpt_auth()
+        && let Err(error) = auth.shutdown().await
+    {
+        failure.get_or_insert_with(|| super::auth::error(error));
     }
     backend.closed.send_replace(true);
     #[cfg(test)]

@@ -285,7 +285,7 @@ SIWC 的 `response.completed` 终态可能携带 `output: []`；此时解码器�
 - 配置有效时，provider 写了 `catalog`，元数据中却没有对应条目，候选查询为它给出提示。
 - 手写档位无法表达的模型只标出它自己：普通列表先去掉 deprecated 模型再校验，出错的候选带 `config_error`（诊断含 provider、模型、档位和原因，已脱敏），可用档位为 `[]`，其他模型照常列出；精确查询同样返回带 `config_error` 的候选，不报错。`config_error` 为空时不序列化。提交选了这个模型仍在接受前按配置错误拒绝。
 - 每个候选带上下文窗口、输出上限、可用的推理档位、价格，以及凭据是否就绪（`auth = "none"` 的 provider 总是就绪）。
-- 协议或认证方式尚未实现时，可用档位为 `[]`；`GatewayTurn::supported_efforts` 使用相同规则。能力查询不要求凭据就绪，发送前仍须解析并校验当前配置。
+- 可用档位按模型元数据与协议 features 推导；`GatewayTurn::supported_efforts` 使用相同规则。能力查询不要求凭据就绪，也不使用或刷新 token；`chatgpt` 按同名 `openai` 元数据与自己的手写覆盖推导。发送前仍须解析并校验当前配置。
 
 ## 推理档位
 
@@ -476,6 +476,10 @@ Chat Completions 中，元数据给出来源的档位在 `reasoning_options` 含
 | `lattice auth status` | 每个 provider 的凭据状态：`ready`（已录入或已登录）、`missing`（没有凭据）或 `invalid`（`auth.json` 无效）；`chatgpt` 另给账号邮箱与 access token 的到期时间。不返回凭据本身 |
 
 只有 `auth` 为 `bearer`、`x-api-key` 或 `x-goog-api-key` 的 provider 能 `set`。
+
+ChatGPT 的 logout 与 remove 都返回远端撤销状态：`confirmed`（撤销已确认）、`unconfirmed`（本地已清理，远端撤销未确认）或 `not_needed`（没有 token，无需撤销）。撤销只尝试一次，未确认时提示用户可到 ChatGPT 设置断开。remove 另给 `removed`：是否存在被移除的注册、账号或 token；仅有 host ID 时为 false。API key 删除仍只报告 `removed`。本地清理失败按错误返回，不能用撤销状态代替成功确认。
+
+登录的授权 URL 只交给专用交互界面，打开浏览器失败或无头时写入 stderr；粘贴输入不回显，Ctrl-C 或输入结束取消登录。`--json` 只输出最终的非敏感结果，登录取消退出 2；授权 URL、回调 URL 和 token 不进入日志或最终 JSON。连接交换和停止顺序由[会话合同](session.md#凭据命令与私有交换)维护。
 
 原顶层命令 `lattice doctor` 只诊断环境变量与工作区 `.env` 中的凭据与 endpoint 来源，随这两个来源一起删除；按别名解析 endpoint 的 `lattice resolve` 随别名表一起删除；凭据状态由 `lattice auth status` 给出，可用的 provider 与模型由 `lattice models` 给出。
 

@@ -125,7 +125,7 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
         ),
     ] {
         std::fs::write(&path, format!("{source}\n{configuration}")).unwrap();
-        let expected = if provider == "pending-responses" {
+        let expected = if provider == "pending-responses" || provider == "chatgpt" {
             vec![Effort::Off, Effort::Low, Effort::High]
         } else if provider == "pending-interactions" {
             vec![Effort::Low, Effort::High]
@@ -2133,7 +2133,7 @@ async fn invalid_configuration_only_blocks_requests_that_depend_on_it() {
     std::fs::write(directory.path().join("providers.toml"), "").unwrap();
     configuration_failure(&turn, "test", "not registered", "empty registry").await;
     configure(directory.path(), &server.url, "chat-completions", "bearer");
-    auth.remove("test").unwrap();
+    auth.remove_api_key("test").unwrap();
     configuration_failure(&turn, "test", "credentials are missing", "removed key").await;
     auth.set("test", "restored-key").unwrap();
     std::fs::write(directory.path().join("auth.json"), "{invalid").unwrap();
@@ -2210,17 +2210,67 @@ async fn gateway_and_all_turns_share_the_same_credential_lifecycle() {
 }
 
 #[tokio::test]
-async fn unimplemented_auth_is_configuration_error() {
+async fn expired_login_can_resolve_and_old_resolved_request_uses_current_tokens_during_stop() {
+    use serde_json::json;
+    let directory = private_dir();
+    let path = directory.path().join("auth.json");
+    let save = |token: &str, expiry: chrono::DateTime<chrono::Utc>| {
+        std::fs::write(&path, json!({"version":1,"providers":{"chatgpt":{
+            "type":"chatgpt","host_id":"host","client_id":"client",
+            "account":{"subject":"subject","email":"user@example.com"},
+            "tokens":{"access_token":token,"refresh_token":"refresh-secret","id_token":"id-secret",
+                "expires_at":expiry.to_rfc3339(),"scopes":["chatgpt.tokens.use.direct"]}
+        }}}).to_string()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    };
+    save(
+        "expired-snapshot",
+        chrono::Utc::now() - chrono::TimeDelta::hours(1),
+    );
+    let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+    let mut resolved = gateway
+        .open_turn()
+        .resolve(&ModelTarget::new("chatgpt", "model-id"))
+        .await
+        .unwrap();
+    let mut server = Server::start(true).await;
+    // 仅测试内部发送入口；生产固定 endpoint 不提供任何改写开关。
+    resolved.provider.base_url = server.url.clone();
+    let mut connection = None;
+    for token in ["live-first-token", "live-second-token"] {
+        save(token, chrono::Utc::now() + chrono::TimeDelta::hours(1));
+        gateway.chatgpt_auth().stop_logins();
+        complete(
+            resolved
+                .stream_chat(request("chatgpt"), StreamControl::default())
+                .await
+                .unwrap(),
+        )
+        .await;
+        let received = server.next().await;
+        assert_eq!(received.headers["authorization"], format!("Bearer {token}"));
+        assert_eq!(received.path, "/v1/responses");
+        if let Some(connection) = connection {
+            assert_eq!(received.connection, connection);
+        }
+        connection = Some(received.connection);
+    }
+    gateway.chatgpt_auth().shutdown().await.unwrap();
+    assert!(
+        resolved
+            .stream_chat(request("chatgpt"), StreamControl::default())
+            .await
+            .is_err()
+    );
+    assert!(server.received.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn missing_chatgpt_login_is_configuration_error() {
     let directory = private_dir();
     let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
     let turn = gateway.open_turn();
-    configuration_failure(
-        &turn,
-        "chatgpt",
-        "auth oauth:chatgpt is not implemented",
-        "chatgpt",
-    )
-    .await;
+    configuration_failure(&turn, "chatgpt", "ChatGPT is not signed in", "chatgpt").await;
 }
 
 #[tokio::test]
@@ -2483,7 +2533,7 @@ async fn builtin_candidates_and_efforts_match_the_requests_they_resolve() {
                 ));
             }
             crate::auth::AuthStore::new(directory.path().into())
-                .remove(id)
+                .remove_api_key(id)
                 .unwrap();
         }
         crate::auth::AuthStore::new(directory.path().into())

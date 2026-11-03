@@ -8,6 +8,7 @@
 - `commands/run.rs`：保留提交身份与 agent、模型、推理档位的选择，经 LocalClient 的具体交互句柄 LocalTurn 发起提交/观察/取消意图，渲染回执、会话头、对话条目、生成中的文字与 usage，处理信号和退出选择；共同编排见[客户端接口](../../docs/architecture/session.md#实现模块与公开操作)。
 - `commands/session.rs`：经后台执行会话操作、发送、查询与取消；执行者消失的 Turn 停在已写入的进度，新提交和会话写操作直接进行。`session usage` 渲染后台给出的逐轮用量与费用估算。
 - `lattice auth` 与 `lattice models`：只负责界面，经后台录入与删除 key、SIWC 登录与登出、查询凭据状态与模型候选、刷新元数据，见[凭据命令](../../docs/architecture/llm.md#凭据命令)。
+- `commands/auth/login.rs`：登录的浏览器、无回显粘贴和信号交互；输入 worker 可唤醒并回收，退出时恢复终端。连接生命周期由 API 的具体登录句柄管理。
 - `commands/daemon.rs`：serve/status/stop 入口与状态根解析；自动启动使用 API 的具体 LocalClient，后台继承启动它的进程的环境，见[配置来源与后台启动](../../docs/architecture/session.md#配置来源与后台启动)。
 - audit/status 经 Local IPC 查询后台，不在 CLI 直接打开会话库或组成 runtime。
 

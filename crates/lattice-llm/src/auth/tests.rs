@@ -180,9 +180,9 @@ fn set_remove_and_current_registry_policy() {
     .unwrap();
     store.set("local", KEY).unwrap();
     fs::write(store.directory.join("providers.toml"), "").unwrap();
-    store.remove("local").unwrap();
-    store.remove("anthropic").unwrap();
-    store.remove("anthropic").unwrap();
+    store.remove_api_key("local").unwrap();
+    store.remove_api_key("anthropic").unwrap();
+    store.remove_api_key("anthropic").unwrap();
     assert_eq!(state(&store, "anthropic"), AuthState::Missing);
     assert_eq!(state(&store, "google"), AuthState::Ready);
 }
@@ -209,8 +209,8 @@ fn removing_keys_does_not_require_a_valid_provider_registry() {
     let (_directory, store) = fixture();
     store.set("openai", KEY).unwrap();
     fs::write(store.directory.join("providers.toml"), "[broken").unwrap();
-    assert!(store.remove("openai").unwrap());
-    assert!(!store.remove("already-missing").unwrap());
+    assert!(store.remove_api_key("openai").unwrap());
+    assert!(!store.remove_api_key("already-missing").unwrap());
     let document = file::Directory::open(&store.directory, false)
         .unwrap()
         .unwrap()
@@ -272,7 +272,7 @@ fn configuration_directory_permissions_are_private_and_not_repaired() {
     );
     for error in [
         store.set("openai", "replacement").unwrap_err(),
-        store.remove("openai").unwrap_err(),
+        store.remove_api_key("openai").unwrap_err(),
     ] {
         assert!(matches!(error, AuthError::InvalidFile(message) if message == reason));
     }
@@ -290,7 +290,7 @@ fn configuration_directory_permissions_are_private_and_not_repaired() {
         );
     }
     store.set("openai", "replacement").unwrap();
-    assert!(store.remove("openai").unwrap());
+    assert!(store.remove_api_key("openai").unwrap());
 }
 
 #[test]
@@ -316,7 +316,7 @@ fn invalid_files_are_never_overwritten_and_status_stays_safe() {
         assert_eq!(state(&store, "ollama"), AuthState::Ready);
         assert!(status.error.is_some());
         let set = store.set("openai", "replacement").unwrap_err();
-        let remove = store.remove("openai").unwrap_err();
+        let remove = store.remove_api_key("openai").unwrap_err();
         assert!(!format!("{status:?} {set:?} {set} {remove:?} {remove}").contains(KEY));
         assert!(fs::read(store.directory.join("auth.json")).unwrap() == source.as_bytes());
     }
@@ -333,8 +333,8 @@ fn chatgpt_material_survives_api_key_updates_and_logged_out_records_are_valid() 
         serde_json::from_slice(&fs::read(store.directory.join("auth.json")).unwrap()).unwrap();
     assert_eq!(saved["providers"]["chatgpt"], entry);
     assert!(matches!(
-        store.remove("chatgpt"),
-        Err(AuthError::ChatgptRemoval)
+        store.remove_api_key("chatgpt"),
+        Err(AuthError::UnsupportedAuth)
     ));
     let status = store.status().unwrap();
     let row = status
@@ -360,7 +360,7 @@ fn chatgpt_material_survives_api_key_updates_and_logged_out_records_are_valid() 
         assert!(!debug.contains(secret));
         assert!(!public.contains(secret));
     }
-    store.remove("deepseek").unwrap();
+    store.remove_api_key("deepseek").unwrap();
     let saved: serde_json::Value =
         serde_json::from_slice(&fs::read(store.directory.join("auth.json")).unwrap()).unwrap();
     assert!(saved["providers"]["chatgpt"] == entry);
@@ -396,7 +396,7 @@ fn permissions_links_and_special_files_are_rejected_without_repair() {
     fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
     assert_eq!(state(&store, "openai"), AuthState::Invalid);
     assert!(store.set("openai", "replacement").is_err());
-    assert!(store.remove("openai").is_err());
+    assert!(store.remove_api_key("openai").is_err());
     assert_eq!(
         fs::metadata(&path).unwrap().permissions().mode() & 0o777,
         0o644

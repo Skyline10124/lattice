@@ -4,6 +4,18 @@
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+pub(super) mod login;
+
+pub(super) fn require_chatgpt(provider: &str) -> super::Result<()> {
+    if provider == "chatgpt" {
+        return Ok(());
+    }
+    Err(super::LocalError::new(
+        super::LocalErrorKind::BadRequest,
+        "login and logout require the built-in chatgpt provider",
+    ))
+}
+
 pub(super) fn store(home: Option<&std::path::Path>) -> super::Result<lattice_llm::auth::AuthStore> {
     Ok(lattice_llm::auth::AuthStore::new(directory(home)?))
 }

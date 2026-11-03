@@ -187,6 +187,101 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn stopping_logins_preserves_token_use_and_refresh_until_shutdown() {
+    let f = Fixture::new(3600);
+    f.auth.stop_logins();
+    assert!(f.auth.access_token().await.is_ok());
+    f.save(299);
+    f.endpoint.release.add_permits(1);
+    let token = f.auth.access_token().await.unwrap();
+    assert_eq!(
+        token.authorization().unwrap(),
+        "Bearer rotated-access-secret"
+    );
+    assert_eq!(f.endpoint.calls.load(Ordering::SeqCst), 1);
+    f.auth.shutdown().await.unwrap();
+    assert!(f.auth.access_token().await.is_err());
+}
+
+#[tokio::test]
+async fn inference_waits_for_refresh_publication_and_uses_its_header_and_redaction() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let f = Fixture::new(-1);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let auth = f.auth.clone();
+    let credentials = Arc::new(f.store.load().unwrap());
+    let send = tokio::spawn(async move {
+        let mut request =
+            crate::ChatRequest::new(vec![], crate::ModelTarget::new("chatgpt", "model"));
+        request.client_request_id = Some("session".into());
+        crate::client::dispatch(
+            request,
+            crate::client::RequestEndpoint {
+                provider: "chatgpt",
+                model: "model",
+                base_url: &url,
+                protocol: crate::protocol::Protocol::Responses,
+                auth: crate::provider::Auth::OauthChatgpt,
+                credentials,
+                chatgpt_auth: &auth,
+                roots: &[],
+                client: Arc::default(),
+                output_limit: None,
+                model_reasoning: None,
+                features: crate::protocol::Features::Responses,
+                reasoning: None,
+            },
+            crate::StreamControl::default(),
+        )
+        .await
+    });
+    f.started().await;
+    assert!(poll!(Box::pin(listener.accept())).is_pending());
+    f.endpoint.release.add_permits(1);
+    let (mut wire, _) = tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut head = Vec::new();
+    while !head.ends_with(b"\r\n\r\n") {
+        head.push(wire.read_u8().await.unwrap());
+    }
+    let head = String::from_utf8(head).unwrap();
+    assert!(
+        head.to_ascii_lowercase()
+            .contains("authorization: bearer rotated-access-secret")
+    );
+    assert_eq!(
+        f.document()["providers"]["chatgpt"]["tokens"]["access_token"],
+        "rotated-access-secret"
+    );
+    let length = head
+        .lines()
+        .find_map(|line| {
+            line.to_ascii_lowercase()
+                .strip_prefix("content-length:")
+                .map(|length| length.trim().parse::<usize>().unwrap())
+        })
+        .unwrap();
+    wire.read_exact(&mut vec![0; length]).await.unwrap();
+    let body = r#"{"error":{"message":"rotated-access-secret rotated-refresh-secret"}}"#;
+    wire.write_all(
+        format!(
+            "HTTP/1.1 401 Unauthorized\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .as_bytes(),
+    )
+    .await
+    .unwrap();
+    let error = send.await.unwrap().err().unwrap();
+    assert!(!error.to_string().contains("rotated-access-secret"));
+    assert!(!error.to_string().contains("rotated-refresh-secret"));
+    assert!(error.to_string().contains("[REDACTED]"));
+}
+
+#[tokio::test]
 async fn access_checks_exact_margin_and_uses_injected_clock() {
     for remaining in [301, 300, 299, 0, -1] {
         let f = Fixture::new(remaining);

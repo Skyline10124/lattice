@@ -604,6 +604,11 @@ async fn owner_retirement_updates_watch_and_stop_drains_the_same_cancellation_ca
     })
     .await;
     assert!(!stop.is_finished());
+    // Owner 尚未排空时只关闭登录，认证生命周期仍可接纳操作。
+    assert_eq!(
+        backend.chatgpt_auth().unwrap().logout().await.unwrap(),
+        RevocationStatus::NotNeeded
+    );
     assert_eq!(
         client
             .submit({
@@ -624,6 +629,7 @@ async fn owner_retirement_updates_watch_and_stop_drains_the_same_cancellation_ca
     })
     .await;
     assert_eq!(bounded(stop).await.unwrap().unwrap().owners, 0);
+    assert!(backend.chatgpt_auth().unwrap().logout().await.is_err());
     bounded(async {
         loop {
             if matches!(

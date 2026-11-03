@@ -15,12 +15,13 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::UnixStream,
 };
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
-pub(super) const MAGIC: &[u8; 8] = b"LTLOCAL;";
+pub(super) const MAGIC: &[u8; 8] = b"LTLOCAL<";
+pub(super) const LOGIN_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 pub(super) const MAX_FRAME: usize = 16 * 1024 * 1024;
 pub(super) const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const INCOMPATIBLE_BACKEND: &str = "the running backend is an incompatible older version; stop it with the older binary's `lattice daemon stop`";
@@ -333,8 +334,22 @@ fn silent_close() -> LocalError {
 }
 /// `reset_is_eof`：对端带着未读完的请求关闭 Unix 套接字时，Linux 让这一端读到 ECONNRESET 而不是 EOF。
 async fn read_frame<T: serde::de::DeserializeOwned>(
-    stream: &mut UnixStream,
+    stream: &mut (impl AsyncRead + Unpin),
     reset_is_eof: bool,
+) -> Result<Option<T>> {
+    read_frame_with_timeout(stream, reset_is_eof, None).await
+}
+
+pub(super) async fn read_login_action<T: serde::de::DeserializeOwned>(
+    stream: &mut (impl AsyncRead + Unpin),
+) -> Result<Option<T>> {
+    read_frame_with_timeout(stream, false, Some(LOGIN_FRAME_TIMEOUT)).await
+}
+
+async fn read_frame_with_timeout<T: serde::de::DeserializeOwned>(
+    stream: &mut (impl AsyncRead + Unpin),
+    reset_is_eof: bool,
+    timeout: Option<Duration>,
 ) -> Result<Option<T>> {
     let mut magic = [0; 8];
     match stream.read(&mut magic[..1]).await {
@@ -345,11 +360,21 @@ async fn read_frame<T: serde::de::DeserializeOwned>(
         }
         Err(error) => return Err(error.into()),
     }
-    stream.read_exact(&mut magic[1..]).await?;
-    check_magic(&magic)?;
-    read_body(stream).await.map(Some)
+    let remainder = async {
+        stream.read_exact(&mut magic[1..]).await?;
+        check_magic(&magic)?;
+        read_body(stream).await.map(Some)
+    };
+    match timeout {
+        Some(timeout) => tokio::time::timeout(timeout, remainder)
+            .await
+            .map_err(|_| LocalError::new(LocalErrorKind::Transport, "login frame timed out"))?,
+        None => remainder.await,
+    }
 }
-async fn read_body<T: serde::de::DeserializeOwned>(stream: &mut UnixStream) -> Result<T> {
+async fn read_body<T: serde::de::DeserializeOwned>(
+    stream: &mut (impl AsyncRead + Unpin),
+) -> Result<T> {
     let len = stream.read_u32().await? as usize;
     if len == 0 || len > MAX_FRAME {
         return Err(protocol());
@@ -373,7 +398,10 @@ impl std::io::Write for Frame {
     }
 }
 
-pub(super) async fn write<T: serde::Serialize>(stream: &mut UnixStream, value: &T) -> Result<()> {
+pub(super) async fn write<T: serde::Serialize>(
+    stream: &mut (impl AsyncWrite + Unpin),
+    value: &T,
+) -> Result<()> {
     Ok(write_wire(stream, value).await??)
 }
 
@@ -404,7 +432,7 @@ pub(super) async fn write_request<T: serde::Serialize>(
 
 /// 外层是编码和超时失败，内层保留 io 错误种类给 `write_request` 分辨对端已关闭。
 async fn write_wire<T: serde::Serialize>(
-    stream: &mut UnixStream,
+    stream: &mut (impl AsyncWrite + Unpin),
     value: &T,
 ) -> Result<std::io::Result<()>> {
     let mut frame = Frame(Zeroizing::new(Vec::new()));
@@ -434,6 +462,11 @@ struct ResponseFrame {
     json_fragment: String,
     complete: bool,
 }
+impl Drop for ResponseFrame {
+    fn drop(&mut self) {
+        self.json_fragment.zeroize();
+    }
+}
 
 #[derive(Default)]
 pub(super) struct ResponseWriter {
@@ -443,12 +476,12 @@ pub(super) struct ResponseWriter {
 impl ResponseWriter {
     pub(super) async fn write<T: serde::Serialize>(
         &mut self,
-        stream: &mut UnixStream,
+        stream: &mut (impl AsyncWrite + Unpin),
         response: &T,
     ) -> Result<()> {
         let next_message = self.next_message.checked_add(1).ok_or_else(protocol)?;
         // ponytail: 一次物化逻辑响应；实际出现内存压力时再改增量编码，不拒绝合法大记录。
-        let json = serde_json::to_string(response).map_err(|_| protocol())?;
+        let json = Zeroizing::new(serde_json::to_string(response).map_err(|_| protocol())?);
         let mut offset = 0;
         while offset < json.len() {
             let mut end = (offset + 65_536).min(json.len());
@@ -473,13 +506,20 @@ impl ResponseWriter {
 #[derive(Default)]
 pub(super) struct ResponseReader {
     next_message: u64,
+    frame_timeout: Option<Duration>,
 }
 
 impl ResponseReader {
+    pub(super) fn for_login() -> Self {
+        Self {
+            next_message: 0,
+            frame_timeout: Some(LOGIN_FRAME_TIMEOUT),
+        }
+    }
     /// 由连接的持续读取任务持有；调用方不能取消后在同一 socket 重启半条响应。
     pub(super) async fn read<T: serde::de::DeserializeOwned>(
         &mut self,
-        stream: &mut UnixStream,
+        stream: &mut (impl AsyncRead + Unpin),
     ) -> Result<T> {
         self.read_with_progress(stream, || {}).await
     }
@@ -487,7 +527,7 @@ impl ResponseReader {
     /// 完整合法分片即为读取进度；不必等整个大对象解码完才刷新连接 idle。
     pub(super) async fn read_with_progress<T: serde::de::DeserializeOwned>(
         &mut self,
-        stream: &mut UnixStream,
+        stream: &mut (impl AsyncRead + Unpin),
         progress: impl FnMut(),
     ) -> Result<T> {
         let first = self.next_message == 0;
@@ -498,14 +538,20 @@ impl ResponseReader {
     /// 只有完整消息之间的 EOF 是正常结束，半帧或半条消息仍是传输失败。
     pub(super) async fn next_with_progress<T: serde::de::DeserializeOwned>(
         &mut self,
-        stream: &mut UnixStream,
+        stream: &mut (impl AsyncRead + Unpin),
         mut progress: impl FnMut(),
     ) -> Result<Option<T>> {
         let next_message = self.next_message.checked_add(1).ok_or_else(protocol)?;
-        let mut json = String::new();
+        let mut json = Zeroizing::new(String::new());
         loop {
             let nothing_received = self.next_message == 0 && json.is_empty();
-            let Some(frame) = read_frame::<ResponseFrame>(stream, nothing_received).await? else {
+            let Some(frame) = read_frame_with_timeout::<ResponseFrame>(
+                stream,
+                nothing_received,
+                self.frame_timeout,
+            )
+            .await?
+            else {
                 return if json.is_empty() {
                     Ok(None)
                 } else {
@@ -536,7 +582,13 @@ mod frame_tests {
     #[tokio::test]
     async fn current_frames_reject_old_empty_and_oversized_frames() {
         for (magic, length, payload, expected) in [
-            (*b"LTLOCAL;", 4_u32, b"null".as_slice(), None),
+            (*b"LTLOCAL<", 4_u32, b"null".as_slice(), None),
+            (
+                *b"LTLOCAL;",
+                4_u32,
+                b"null".as_slice(),
+                Some(LocalErrorKind::IncompatibleBackend),
+            ),
             (
                 *b"LTLOCAL:",
                 4,
@@ -574,7 +626,7 @@ mod frame_tests {
                 Some(LocalErrorKind::IncompatibleBackend),
             ),
             (
-                *b"LTLOCAL<",
+                *b"LTLOCAL=",
                 4,
                 b"null".as_slice(),
                 Some(LocalErrorKind::IncompatibleBackend),
@@ -586,13 +638,13 @@ mod frame_tests {
                 Some(LocalErrorKind::Protocol),
             ),
             (
-                *b"LTLOCAL;",
+                *b"LTLOCAL<",
                 0,
                 b"".as_slice(),
                 Some(LocalErrorKind::Protocol),
             ),
             (
-                *b"LTLOCAL;",
+                *b"LTLOCAL<",
                 (MAX_FRAME + 1) as u32,
                 b"".as_slice(),
                 Some(LocalErrorKind::Protocol),
@@ -627,10 +679,11 @@ mod frame_tests {
 
     #[tokio::test]
     async fn backend_answers_a_foreign_magic_with_its_own_before_closing() {
-        tokio::time::timeout(Duration::from_secs(1), async {
+        for magic in [b"LTLOCAL;", b"LTLOCAL="] {
+            tokio::time::timeout(Duration::from_secs(1), async {
             let (mut client, mut backend) = UnixStream::pair().unwrap();
-            // 字面量模拟下一版客户端，不能从当前魔数推导。
-            client.write_all(b"LTLOCAL<").await.unwrap();
+            // 字面量覆盖上一版和下一版客户端，不能从当前魔数推导。
+            client.write_all(magic).await.unwrap();
             client.write_u32(4).await.unwrap();
             client.write_all(b"null").await.unwrap();
             let error = read_request::<serde_json::Value>(&mut backend)
@@ -653,6 +706,7 @@ mod frame_tests {
         })
         .await
         .expect("foreign IPC magic case timed out");
+        }
     }
 
     /// harness 不能依赖产品 crate，只能写死魔数；升级时在这里失败并指出要改哪个文件。

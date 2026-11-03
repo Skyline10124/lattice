@@ -56,8 +56,6 @@ pub enum AuthError {
     UnknownProvider { provider: String, available: String },
     #[error("provider does not accept API keys; auth must be bearer, x-api-key or x-goog-api-key")]
     UnsupportedAuth,
-    #[error("ChatGPT credential removal is not supported")]
-    ChatgptRemoval,
 }
 
 impl AuthError {
@@ -88,6 +86,7 @@ impl fmt::Display for AuthState {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderAuthStatus {
     pub provider: String,
     pub status: AuthState,
@@ -265,7 +264,7 @@ impl AuthStore {
         directory.write(&document)
     }
 
-    pub fn remove(&self, provider: &str) -> Result<bool, AuthError> {
+    pub fn remove_api_key(&self, provider: &str) -> Result<bool, AuthError> {
         let _writer = WRITER
             .lock()
             .map_err(|_| AuthError::Internal("credential writer lock is unavailable"))?;
@@ -281,7 +280,7 @@ impl AuthStore {
                 Some(format::Credential::Chatgpt { .. })
             )
         {
-            return Err(AuthError::ChatgptRemoval);
+            return Err(AuthError::UnsupportedAuth);
         }
         let removed = document.providers.remove(provider).is_some();
         if removed {
@@ -343,6 +342,16 @@ pub(crate) fn provider_status(
 pub(crate) struct Credentials(format::Document);
 
 impl Credentials {
+    pub(crate) fn chatgpt_logged_in(&self) -> bool {
+        matches!(
+            self.0.providers.get("chatgpt"),
+            Some(format::Credential::Chatgpt {
+                tokens: Some(_),
+                ..
+            })
+        )
+    }
+
     pub(crate) fn api_key(&self, provider: &str) -> Option<&str> {
         match self.0.providers.get(provider) {
             Some(format::Credential::ApiKey { key }) => Some(&key.0),

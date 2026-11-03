@@ -82,14 +82,39 @@ impl LocalClient {
             _ => Err(protocol()),
         }
     }
-    pub async fn auth_remove(&self, provider: &str) -> Result<bool> {
+    pub async fn auth_login(&self, provider: &str) -> Result<super::LocalAuthLogin> {
+        super::auth::require_chatgpt(provider)?;
+        let mut stream = ipc::connect(self.layout.clone()).await?;
+        ipc::write_request(
+            &mut stream,
+            &Request::AuthLogin {
+                provider: provider.into(),
+            },
+        )
+        .await?;
+        Ok(super::LocalAuthLogin::from_stream(stream))
+    }
+
+    pub async fn auth_logout(&self, provider: &str) -> Result<RevocationStatus> {
+        match self
+            .call(Request::AuthLogout {
+                provider: provider.into(),
+            })
+            .await?
+        {
+            Response::AuthLoggedOut { revocation } => Ok(revocation),
+            _ => Err(protocol()),
+        }
+    }
+
+    pub async fn auth_remove(&self, provider: &str) -> Result<AuthRemoval> {
         match self
             .call(Request::AuthRemove {
                 provider: provider.into(),
             })
             .await?
         {
-            Response::AuthRemoved { removed } => Ok(removed),
+            Response::AuthRemoved(result) => Ok(result),
             _ => Err(protocol()),
         }
     }

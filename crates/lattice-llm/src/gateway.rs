@@ -193,7 +193,7 @@ impl GatewayTurn {
             .entry((provider.id.clone(), provider.base_url.clone()))
             .or_default()
             .clone();
-        client::validate_configuration(provider.auth, credentials.api_key(&provider.id))?;
+        client::validate_configuration(provider.auth, &provider.id, &credentials)?;
         Ok(ResolvedRequest {
             configuration: self.configuration.clone(),
             provider,
