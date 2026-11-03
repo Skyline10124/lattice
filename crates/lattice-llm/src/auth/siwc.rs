@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use chrono::{TimeDelta, Utc};
 use tokio::sync::{Notify, oneshot, watch};
 
+use super::login::LoginControl;
 use super::oauth::{
     Clock, DIRECT_SCOPE, HttpTokenEndpoint, RefreshFailure, RefreshGrant, TokenEndpoint,
 };
@@ -52,6 +53,8 @@ struct Manager {
     state: Mutex<State>,
     operation: tokio::sync::Mutex<()>,
     changed: Notify,
+    #[cfg(test)]
+    before_login_write: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 #[derive(Default)]
@@ -64,6 +67,7 @@ struct State {
     stopped: bool,
     worker_failed: bool,
     blocked_generation: Option<u64>,
+    login: Option<Arc<LoginControl>>,
 }
 
 struct Flight {
@@ -106,6 +110,8 @@ impl ChatgptAuth {
             state: Mutex::default(),
             operation: tokio::sync::Mutex::new(()),
             changed: Notify::new(),
+            #[cfg(test)]
+            before_login_write: Mutex::new(None),
         }))
     }
 
@@ -134,7 +140,7 @@ impl ChatgptAuth {
                 let worker_flight = flight.clone();
                 let manager = self.0.clone();
                 tokio::spawn(async move {
-                    let mut worker = Worker::new(manager.clone(), Some(worker_flight.id));
+                    let mut worker = Worker::new(manager.clone(), Work::Refresh(worker_flight.id));
                     let result = manager.read_or_refresh(worker_flight.generation).await;
                     let result = result.map(|(generation, credentials)| {
                         let _ = worker_flight.credentials.set(credentials);
@@ -172,18 +178,21 @@ impl ChatgptAuth {
 
     async fn clean(&self, remove: bool) -> Result<RemoveChatgptResult, AuthError> {
         let (sender, receiver) = oneshot::channel();
-        let flight = {
+        let (flight, login) = {
             let mut state = self.0.state.lock().expect("SIWC state lock");
             if state.stopped {
                 return Err(AuthError::Internal("SIWC is stopping"));
             }
             state.cleaning += 1;
             state.active += 1;
-            state.flight.clone()
+            (state.flight.clone(), state.login.clone())
         };
+        if let Some(login) = login {
+            login.cancel();
+        }
         let manager = self.0.clone();
         tokio::spawn(async move {
-            let mut worker = Worker::new(manager.clone(), None);
+            let mut worker = Worker::new(manager.clone(), Work::Cleanup);
             // 先接收可能已轮换的最新材料，再进入清理事务，避免撤销旧 refresh token。
             if let Some(flight) = flight {
                 let _ = flight.wait().await;
@@ -199,7 +208,14 @@ impl ChatgptAuth {
 
     /// 关闭新操作并排空已接纳的网络操作及必要文件写入。
     pub async fn shutdown(&self) -> Result<(), AuthError> {
-        self.0.state.lock().expect("SIWC state lock").stopped = true;
+        let login = {
+            let mut state = self.0.state.lock().expect("SIWC state lock");
+            state.stopped = true;
+            state.login.clone()
+        };
+        if let Some(login) = login {
+            login.cancel();
+        }
         loop {
             let changed = self.0.changed.notified();
             tokio::pin!(changed);
@@ -421,15 +437,21 @@ impl Manager {
 
 struct Worker {
     manager: Arc<Manager>,
-    flight: Option<u64>,
+    work: Work,
     finished: bool,
 }
 
+enum Work {
+    Refresh(u64),
+    Cleanup,
+    Login(Arc<LoginControl>),
+}
+
 impl Worker {
-    fn new(manager: Arc<Manager>, flight: Option<u64>) -> Self {
+    fn new(manager: Arc<Manager>, work: Work) -> Self {
         Self {
             manager,
-            flight,
+            work,
             finished: false,
         }
     }
@@ -438,12 +460,22 @@ impl Worker {
 impl Drop for Worker {
     fn drop(&mut self) {
         let mut state = self.manager.state.lock().expect("SIWC state lock");
-        if let Some(id) = self.flight {
-            if state.flight.as_ref().is_some_and(|flight| flight.id == id) {
-                state.flight = None;
+        match &self.work {
+            Work::Refresh(id) => {
+                if state.flight.as_ref().is_some_and(|flight| flight.id == *id) {
+                    state.flight = None;
+                }
             }
-        } else {
-            state.cleaning -= 1;
+            Work::Cleanup => state.cleaning -= 1,
+            Work::Login(login) => {
+                if state
+                    .login
+                    .as_ref()
+                    .is_some_and(|active| Arc::ptr_eq(active, login))
+                {
+                    state.login = None;
+                }
+            }
         }
         state.active -= 1;
         if !self.finished {
@@ -512,3 +544,5 @@ fn refresh_error(error: LlmError, credentials: &Credentials) -> LlmError {
 
 #[cfg(test)]
 mod tests;
+
+mod login;

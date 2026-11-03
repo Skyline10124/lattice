@@ -591,7 +591,14 @@ fn llm_error_from_request(err: reqwest::Error) -> LlmError {
 }
 
 /// 保留错误种类与重试属性，只替换诊断中的已知凭据。
-pub(crate) fn redact_error(mut error: LlmError, credentials: &Credentials) -> LlmError {
+pub(crate) fn redact_error(error: LlmError, credentials: &Credentials) -> LlmError {
+    redact_error_with(error, |message| credentials.redact(message))
+}
+
+pub(crate) fn redact_error_with(
+    mut error: LlmError,
+    redact: impl FnOnce(&str) -> String,
+) -> LlmError {
     match &mut error {
         LlmError::Credential { message }
         | LlmError::Config { message }
@@ -601,7 +608,7 @@ pub(crate) fn redact_error(mut error: LlmError, credentials: &Credentials) -> Ll
         | LlmError::ProviderHttp { message, .. }
         | LlmError::StreamRead { message }
         | LlmError::ProtocolLimit { message }
-        | LlmError::Other(message) => *message = credentials.redact(message),
+        | LlmError::Other(message) => *message = redact(message),
         LlmError::Projection(_) => {}
     }
     error

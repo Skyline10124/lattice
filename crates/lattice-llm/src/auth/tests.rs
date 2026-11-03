@@ -37,6 +37,69 @@ fn state(store: &AuthStore, provider: &str) -> AuthState {
         .status
 }
 
+#[test]
+fn login_transaction_preserves_other_keys_and_distinguishes_stale_registration() {
+    let (_directory, store) = fixture();
+    let expected = store.load().unwrap();
+    let host = login::host_id().unwrap();
+    let host_value = host.0.clone();
+    assert!(
+        store
+            .replace_chatgpt(
+                &expected,
+                format::Credential::Chatgpt {
+                    host_id: host,
+                    client_id: None,
+                    account: None,
+                    tokens: None
+                },
+                || Ok(()),
+                |_| {},
+            )
+            .is_ok()
+    );
+    let expected = store.load().unwrap();
+    store.set("openai", "parallel-test-key").unwrap();
+    assert!(
+        store
+            .replace_chatgpt(
+                &expected,
+                format::Credential::Chatgpt {
+                    host_id: Secret(host_value.clone()),
+                    client_id: Some(Secret("issued-client".into())),
+                    account: None,
+                    tokens: None
+                },
+                || Ok(()),
+                |_| {},
+            )
+            .is_ok()
+    );
+    assert_eq!(
+        store.load().unwrap().api_key("openai"),
+        Some("parallel-test-key")
+    );
+    let before = fs::read(store.directory.join("auth.json")).unwrap();
+    let mut publication_checked = false;
+    let conflict = store.replace_chatgpt(
+        &expected,
+        format::Credential::Chatgpt {
+            host_id: Secret(host_value),
+            client_id: Some(Secret("stale-client".into())),
+            account: None,
+            tokens: None,
+        },
+        || {
+            publication_checked = true;
+            Ok(())
+        },
+        |_| {},
+    );
+    assert!(matches!(conflict, Err(UpdateError::Conflict)));
+    assert!(!publication_checked);
+    assert_eq!(fs::read(store.directory.join("auth.json")).unwrap(), before);
+}
+
 pub(super) fn chatgpt() -> serde_json::Value {
     serde_json::json!({"type":"chatgpt", "host_id":"host", "client_id":"client", "account":{"subject":"subject", "email":"user@example.com"}, "tokens":{
         "access_token":"access-test-secret", "refresh_token":"refresh-test-secret", "id_token":"id-test-secret",

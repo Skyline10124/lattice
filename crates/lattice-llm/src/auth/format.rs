@@ -95,7 +95,7 @@ pub(super) enum Credential {
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Account {
-    subject: Secret,
+    pub(super) subject: Secret,
     pub(super) email: String,
 }
 
@@ -104,7 +104,7 @@ pub(super) struct Account {
 pub(super) struct Tokens {
     pub(super) access_token: Secret,
     pub(super) refresh_token: Secret,
-    id_token: Secret,
+    pub(super) id_token: Secret,
     #[serde(deserialize_with = "timestamp")]
     pub(super) expires_at: String,
     pub(super) scopes: Vec<String>,

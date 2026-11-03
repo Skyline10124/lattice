@@ -38,6 +38,23 @@ struct Endpoint {
 }
 
 impl TokenEndpoint for Endpoint {
+    fn exchange<'a>(
+        &'a self,
+        _: super::super::oauth::CodeGrant<'a>,
+    ) -> BoxFuture<'a, Result<super::super::oauth::LoginTokens, super::super::oauth::ExchangeFailure>>
+    {
+        unreachable!("刷新测试不执行登录换码")
+    }
+    fn discovery(&self) -> BoxFuture<'_, Result<url::Url, LlmError>> {
+        unreachable!("刷新测试不查询登录密钥")
+    }
+    fn jwks<'a>(
+        &'a self,
+        _: &'a url::Url,
+    ) -> BoxFuture<'a, Result<jsonwebtoken::jwk::JwkSet, LlmError>> {
+        unreachable!("刷新测试不查询登录密钥")
+    }
+
     fn refresh<'a>(
         &'a self,
         grant: RefreshGrant<'a>,

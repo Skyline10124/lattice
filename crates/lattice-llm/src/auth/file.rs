@@ -142,11 +142,30 @@ impl Directory {
         document: &format::Document,
         sync_directory: impl FnOnce(&File) -> std::io::Result<()>,
     ) -> Result<(), AuthError> {
+        self.write_with_hooks(document, sync_directory, || Ok(()), |_| {})
+    }
+
+    pub(super) fn write_guarded<G, E: From<AuthError>>(
+        &self,
+        document: &format::Document,
+        before_publish: impl FnOnce() -> Result<G, E>,
+        published: impl FnOnce(&mut G),
+    ) -> Result<(), E> {
+        self.write_with_hooks(document, File::sync_all, before_publish, published)
+    }
+
+    fn write_with_hooks<G, E: From<AuthError>>(
+        &self,
+        document: &format::Document,
+        sync_directory: impl FnOnce(&File) -> std::io::Result<()>,
+        before_publish: impl FnOnce() -> Result<G, E>,
+        published: impl FnOnce(&mut G),
+    ) -> Result<(), E> {
         let mut bytes = Zeroizing::new(Vec::new());
         serde_json::to_writer(&mut *bytes, document)
             .map_err(|_| AuthError::Internal("cannot encode credentials"))?;
         if bytes.len() > MAX_FILE_BYTES {
-            return Err(AuthError::InvalidFile("file exceeds 1 MiB"));
+            return Err(AuthError::InvalidFile("file exceeds 1 MiB").into());
         }
         let mut temporary = self.temporary()?;
         let mut file = &temporary.file;
@@ -156,15 +175,21 @@ impl Directory {
             .map_err(|error| AuthError::io("sync temporary credential file", error))?;
         // 发布前再次检查现有目标；不通过替换绕过权限或链接拒绝。
         self.current()?;
+        let mut publication = before_publish()?;
         renameat(&self.0, &temporary.name, &self.0, "auth.json")
             .map_err(|error| AuthError::io("replace credential file", error))?;
         temporary.published = true;
-        sync_directory(&self.0).map_err(|error| {
-            AuthError::io(
-                "sync directory after replacement (file may already have changed)",
-                error,
-            )
-        })
+        published(&mut publication);
+        // 发布事实已确定，目录 fsync 不再占用取消与发布之间的门闩。
+        drop(publication);
+        sync_directory(&self.0)
+            .map_err(|error| {
+                AuthError::io(
+                    "sync directory after replacement (file may already have changed)",
+                    error,
+                )
+            })
+            .map_err(E::from)
     }
 
     fn temporary(&self) -> Result<Temporary<'_>, AuthError> {
@@ -222,6 +247,47 @@ impl Drop for Temporary<'_> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn login_publication_orders_cancel_and_preserves_post_rename_failure() {
+        use crate::auth::{
+            UpdateError,
+            login::{LoginControl, Phase},
+        };
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let directory = Directory::open(root.path(), false).unwrap().unwrap();
+        let mut document = format::Document::default();
+        directory.write(&document).unwrap();
+        document.providers.insert(
+            "openai".into(),
+            format::Credential::ApiKey {
+                key: crate::auth::Secret("local-test-key".into()),
+            },
+        );
+        let control = LoginControl::new();
+        let result: Result<(), UpdateError> = directory.write_guarded(
+            &document,
+            || {
+                control.cancel();
+                control.publication()
+            },
+            |_| panic!("已取消的登录不能发布"),
+        );
+        assert!(matches!(result, Err(UpdateError::Conflict)));
+        assert!(directory.read().unwrap().providers.is_empty());
+        let control = LoginControl::new();
+        let result: Result<(), UpdateError> = directory.write_with_hooks(
+            &document,
+            |_| Err(std::io::Error::other("test directory sync failure")),
+            || control.publication(),
+            |phase| **phase = Phase::Published,
+        );
+        assert!(matches!(result, Err(UpdateError::Storage(_))));
+        control.cancel();
+        assert!(!control.is_cancelled());
+        assert!(directory.read().unwrap().providers.contains_key("openai"));
+    }
 
     #[test]
     fn directory_sync_failure_reports_uncertainty_after_the_replacement_is_visible() {
