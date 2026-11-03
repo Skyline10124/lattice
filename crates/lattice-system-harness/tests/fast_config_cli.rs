@@ -347,7 +347,7 @@ catalog = "arbitrary-entry"
             json!({"operation":"models", "target":"chatgpt/current"}),
         );
         evidence
-            .record_json("unimplemented account capabilities", &subscription)
+            .record_json("chatgpt capabilities from openai metadata", &subscription)
             .unwrap();
         assert_eq!(subscription["response"], "models");
         assert_eq!(subscription["value"]["models"].as_array().unwrap().len(), 1);
@@ -355,7 +355,7 @@ catalog = "arbitrary-entry"
         assert_eq!(subscription["value"]["models"][0]["name"], "Current");
         assert_eq!(
             subscription["value"]["models"][0]["supported_efforts"],
-            json!([])
+            json!(["off", "high"])
         );
         for provider in ["pending-responses", "pending-interactions"] {
             let output = cli(&world, &spec, &["--json", "models", "--provider", provider]);
