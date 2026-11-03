@@ -21,7 +21,7 @@ use crate::transport;
 use crate::types::ChatRequest;
 
 /// 兜底总时限，与 profile `timeout_secs` 的上限一致；流的实际时限由 Turn deadline 约束。
-const HTTP_REQUEST_BACKSTOP: Duration = Duration::from_secs(3600);
+const HTTP_REQUEST_BACKSTOP: Duration = Duration::from_secs(86_400);
 
 /// Maximum idle time allowed while connecting to, or reading from, a provider.
 const HTTP_IO_TIMEOUT: Duration = Duration::from_secs(30);
@@ -1886,6 +1886,107 @@ mod tests {
             !reached.load(Ordering::SeqCst),
             "redirect target must never be contacted"
         );
+    }
+
+    // 持续流应越过一小时，并由 3601 秒的 Turn deadline 终止。
+    #[tokio::test]
+    async fn provider_stream_observes_turn_deadline_and_http_backstop() {
+        use futures::FutureExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        tokio::time::pause();
+        let exercise = async {
+            let total_secs = 3601;
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (send, mut receive) = tokio::sync::mpsc::unbounded_channel::<()>();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                socket.set_nodelay(true).unwrap();
+                let mut request = Vec::new();
+                while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let mut chunk = [0; 1024];
+                    let count = socket.read(&mut chunk).await.unwrap();
+                    assert!(count > 0);
+                    request.extend_from_slice(&chunk[..count]);
+                }
+                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").await.unwrap();
+                let event = "data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n";
+                let chunk = format!("{:x}\r\n{event}\r\n", event.len());
+                while receive.recv().await.is_some() {
+                    if socket.write_all(chunk.as_bytes()).await.is_err() {
+                        break;
+                    }
+                }
+            });
+            let connection = resolved_request(
+                "chat-completions",
+                &format!("http://{address}"),
+                "local-test-key",
+            )
+            .await;
+            let started = tokio::time::Instant::now();
+            let mut stream = connection
+                .stream_chat(
+                    chat_request(),
+                    StreamControl {
+                        deadline: Some(started + Duration::from_secs(total_secs)),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(stream.next().await, Some(LlmEvent::Started));
+            send.send(()).unwrap();
+            assert!(matches!(stream.next().await, Some(LlmEvent::Delta(_))));
+            let mut elapsed = 0;
+            let outcome = loop {
+                let mut next = std::pin::pin!(stream.next());
+                assert!(
+                    next.as_mut().now_or_never().is_none(),
+                    "stream stopped at {elapsed} seconds, before {total_secs}"
+                );
+                elapsed = (elapsed + 20).min(total_secs);
+                // 留出 1 毫秒让 HTTP 定时器唤醒，在 Turn deadline 前核对一小时之后的流。
+                let at = started + Duration::from_secs(elapsed) + Duration::from_millis(1);
+                tokio::time::advance(at.duration_since(tokio::time::Instant::now())).await;
+                if elapsed == total_secs {
+                    break next.await;
+                }
+                send.send(()).unwrap();
+                assert!(
+                    matches!(next.await, Some(LlmEvent::Delta(_))),
+                    "stream stopped at {elapsed} seconds, before {total_secs}"
+                );
+            };
+            let Some(LlmEvent::Finished {
+                outcome:
+                    ReplyOutcome::Interrupted {
+                        reason: ReplyStop::Stream(reason),
+                    },
+                ..
+            }) = outcome
+            else {
+                panic!("expected one interrupted outcome at {total_secs} seconds");
+            };
+            assert_eq!(reason, StreamStop::Deadline);
+            assert!(stream.next().await.is_none());
+            drop(send);
+            server.await.unwrap();
+        };
+        tokio::pin!(exercise);
+        let wall_deadline = Instant::now() + Duration::from_secs(15);
+        // 保持任务可运行，避免本地 I/O 等待让暂停的时钟自动推进。
+        loop {
+            if exercise.as_mut().now_or_never().is_some() {
+                break;
+            }
+            assert!(
+                Instant::now() < wall_deadline,
+                "provider timeout test stalled"
+            );
+            tokio::task::yield_now().await;
+        }
     }
 
     #[tokio::test]

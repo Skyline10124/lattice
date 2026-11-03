@@ -72,7 +72,7 @@ pub(super) fn user_fields(
         || agent_name.len() > 128
         || model.is_empty()
         || model.len() > 4096
-        || !(1..=3600).contains(&limits.timeout_secs)
+        || !(1..=86_400).contains(&limits.timeout_secs)
     {
         return Err(invalid("config", "configuration bound exceeded"));
     }

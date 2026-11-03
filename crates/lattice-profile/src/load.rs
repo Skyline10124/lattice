@@ -174,7 +174,7 @@ fn validate_llm_timeout(path: &Path, profile: &AgentProfile) -> Result<(), Profi
     };
     let (reason, expected) = match secs {
         0 => ("timeout must be nonzero", "timeout_secs must be > 0"),
-        3601.. => ("timeout is too large", "timeout_secs must be <= 3600"),
+        86_401.. => ("timeout is too large", "timeout_secs must be <= 86400"),
         _ => return Ok(()),
     };
     Err(ProfileError::InvalidField {
@@ -710,7 +710,7 @@ system = "hi"
     #[test]
     fn llm_timeout_secs_enforces_bounds() {
         enum Expected {
-            ErrorContains(&'static str),
+            InvalidField(&'static str),
             LoadedTimeout(u64),
         }
 
@@ -718,17 +718,32 @@ system = "hi"
             (
                 "llm_timeout_secs_zero_rejected",
                 0,
-                Expected::ErrorContains("timeout_secs"),
+                Expected::InvalidField("timeout_secs must be > 0"),
             ),
             (
                 "llm_timeout_secs_over_upper_bound_rejected",
+                86_401,
+                Expected::InvalidField("timeout_secs must be <= 86400"),
+            ),
+            (
+                "llm_timeout_secs_lower_bound_accepted",
+                1,
+                Expected::LoadedTimeout(1),
+            ),
+            (
+                "llm_timeout_secs_one_hour_accepted",
+                3600,
+                Expected::LoadedTimeout(3600),
+            ),
+            (
+                "llm_timeout_secs_over_one_hour_accepted",
                 3601,
-                Expected::ErrorContains("timeout_secs"),
+                Expected::LoadedTimeout(3601),
             ),
             (
                 "llm_timeout_secs_upper_bound_accepted",
-                3600,
-                Expected::LoadedTimeout(3600),
+                86_400,
+                Expected::LoadedTimeout(86_400),
             ),
         ] {
             let (_dir, path) = temp_profile(&format!(
@@ -748,9 +763,23 @@ timeout_secs = {timeout_secs}
             ));
             let result = load_agent_profile(&path);
             match expected {
-                Expected::ErrorContains(text) => {
-                    let err = result.expect_err(name);
-                    assert!(err.to_string().contains(text), "{name}: got: {err}");
+                Expected::InvalidField(expected) => {
+                    let ProfileError::InvalidField {
+                        path: error_path,
+                        section,
+                        field,
+                        value,
+                        expected: actual_expected,
+                        ..
+                    } = result.expect_err(name)
+                    else {
+                        panic!("{name}: expected a field-level diagnostic");
+                    };
+                    assert_eq!(error_path, path, "{name}");
+                    assert_eq!(section, "llm", "{name}");
+                    assert_eq!(field, "timeout_secs", "{name}");
+                    assert_eq!(value.as_ref(), timeout_secs.to_string(), "{name}");
+                    assert_eq!(actual_expected.as_ref(), expected, "{name}");
                 }
                 Expected::LoadedTimeout(timeout) => {
                     let loaded = result.expect(name);

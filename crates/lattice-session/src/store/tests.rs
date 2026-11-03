@@ -1708,10 +1708,39 @@ fn acceptance_deduplicates_configs_and_preserves_abandoned_nodes() {
 }
 
 #[test]
+fn timeout_bounds_preserve_frozen_limits_and_profile_copy_on_reopen() {
+    // 分别防止冻结限制拒绝合法值、副本校验未同步，以及保存成功却无法严格重开。
+    // 直接读取冻结事实与副本，外部场景无法等价核对这两份私有记录。
+    for timeout_secs in [1, 300, 3600, 3601, 86_400] {
+        let (_dir, layout, db) = store();
+        let lock = db.try_lock_session(sid(1)).unwrap();
+        let mut input = accept(sid(1), tid(1));
+        input.config.limits.timeout_secs = timeout_secs;
+        input.profile_copy = SessionProfileCopy::for_test(&input.config);
+        let expected_config = input.config.clone();
+        let expected_copy = input.profile_copy.clone();
+        db.accept_turn(&lock, input)
+            .unwrap_or_else(|error| panic!("timeout_secs={timeout_secs}: {error}"));
+        let read = db.begin_read().unwrap();
+        assert_eq!(read.turn_config(sid(1), tid(1)).unwrap(), expected_config);
+        assert_eq!(read.profile_copy(sid(1)).unwrap(), expected_copy);
+        drop(read);
+        drop(lock);
+        drop(db);
+
+        let reopened = SessionStore::open(&layout)
+            .unwrap_or_else(|error| panic!("timeout_secs={timeout_secs}: {error}"));
+        let read = reopened.begin_read().unwrap();
+        assert_eq!(read.turn_config(sid(1), tid(1)).unwrap(), expected_config);
+        assert_eq!(read.profile_copy(sid(1)).unwrap(), expected_copy);
+    }
+}
+
+#[test]
 fn invalid_acceptance_and_lock_capabilities_leave_no_facts() {
     let (_d, _l, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
-    for case in 0..13 {
+    for case in 0..14 {
         let mut a = accept(sid(1), tid(1));
         match case {
             0 => a.input = "x".repeat(MAX_USER_INPUT_BYTES + 1),
@@ -1730,9 +1759,17 @@ fn invalid_acceptance_and_lock_capabilities_leave_no_facts() {
             9 => a.config.limits.timeout_secs = 0,
             10 => a.config.limits.max_model_attempts = 12,
             11 => a.config.model.clear(),
+            13 => a.config.limits.timeout_secs = 86_401,
             _ => a.config.catalog.entries[0].descriptor_identity = "A".repeat(64),
         }
-        assert!(accept_prepared(&db, &lock, a).is_err(), "{case}");
+        let result = accept_prepared(&db, &lock, a);
+        if matches!(case, 9 | 13) {
+            assert!(
+                matches!(&result, Err(StoreError::InvalidInput { field: "config", detail }) if detail == "configuration bound exceeded"),
+                "{case}: {result:?}"
+            );
+        }
+        assert!(result.is_err(), "{case}");
         assert!(records(&db).nodes.is_empty());
     }
     assert!(matches!(
@@ -4965,7 +5002,16 @@ fn profile_copy_acceptance_rejects_stale_or_inconsistent_preparation() {
     db.accept_turn(&lock, first).unwrap();
     let original = db.begin_read().unwrap().profile_copy(sid(1)).unwrap();
     let before = records(&db);
-    for case in ["stale", "profile", "prompt", "model", "effort", "limits"] {
+    for case in [
+        "stale",
+        "profile",
+        "prompt",
+        "model",
+        "effort",
+        "limits",
+        "timeout_zero",
+        "timeout_over_upper_bound",
+    ] {
         let mut next = accept(sid(1), tid(2));
         next.session = AcceptSession::Existing { id: sid(1) };
         next.agent_selection = AgentSelection::Inherited;
@@ -4978,9 +5024,17 @@ fn profile_copy_acceptance_rejects_stale_or_inconsistent_preparation() {
             "model" => next.profile_copy.current.model = "different".into(),
             "effort" => next.profile_copy.current.effort = Some(lattice_conversation::Effort::High),
             "limits" => next.profile_copy.profile.timeout_secs += 1,
+            "timeout_zero" => next.profile_copy.profile.timeout_secs = 0,
+            "timeout_over_upper_bound" => next.profile_copy.profile.timeout_secs = 86_401,
             _ => unreachable!(),
         }
         let result = db.accept_turn(&lock, next);
+        if matches!(case, "timeout_zero" | "timeout_over_upper_bound") {
+            assert!(
+                matches!(&result, Err(StoreError::InvalidInput { field: "profile", detail }) if detail == "invalid execution limits"),
+                "{case}: {result:?}"
+            );
+        }
         assert!(
             matches!(
                 result,
