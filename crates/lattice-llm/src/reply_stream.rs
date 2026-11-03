@@ -74,6 +74,11 @@ impl ReplyDelivery {
                     self.accumulator.finish()
                 }
                 ProtocolEvent::Failed(reason) => self.accumulator.interrupt(reason),
+                ProtocolEvent::ResponsesError { code, message } => {
+                    self.accumulator.interrupt(StreamStop::Provider(
+                        crate::transport::responses_error(code.as_deref(), &message, None, None),
+                    ))
+                }
                 ProtocolEvent::UnsupportedContentBlock {
                     protocol,
                     index,

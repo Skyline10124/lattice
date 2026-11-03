@@ -121,7 +121,7 @@ Anthropic Messages 的 `redacted_thinking` 以空 Reasoning 片段及带 `redact
 | `id` | `protocol` | `base_url` | `auth` | `catalog` | features |
 | --- | --- | --- | --- | --- | --- |
 | `openai` | `responses` | `https://api.openai.com/v1` | `bearer` | `openai` | — |
-| `chatgpt` | `responses` | `https://api.openai.com/v1` | `oauth:chatgpt` | `openai` | — |
+| `chatgpt` | `responses` | `https://api.openai.com/v1` | `oauth:chatgpt` | `openai` | `tool_namespace = true` |
 | `anthropic` | `anthropic-messages` | `https://api.anthropic.com` | `x-api-key` | `anthropic` | — |
 | `google` | `interactions` | `https://generativelanguage.googleapis.com/v1beta` | `x-goog-api-key` | `google` | — |
 | `xai` | `responses` | `https://api.x.ai/v1` | `bearer` | `xai` | — |
@@ -223,9 +223,11 @@ feature 由协议适配器的代码定义，配置只能在已有取值中选择
 
 ### Responses
 
-Responses 没有 feature。推理摘要请求由模型元数据决定，见[档位映射](#档位映射)。
+| feature | 取值 | 默认 | 作用 |
+| --- | --- | --- | --- |
+| `tool_namespace` | `true`、`false` | `false` | 把全部函数工具放进一个 `type: "namespace"` 工具，固定 `name = "lattice"`、`description = "LATTICE tools for workspace operations."`；投影历史中的每个 `function_call` 都写 `namespace: "lattice"`，不论原协议与 provider。关闭时平铺函数工具，历史调用不写 namespace；没有工具时省略 `tools` |
 
-适配器只发送 SIWC 也接受的字段（见[适配器的职责](#适配器的职责)），所以 `chatgpt` 不需要额外的 feature。
+内置 `chatgpt` 开启 `tool_namespace`，满足 SIWC 预览的工具要求；`openai`、`xai` 与自定义 Responses provider 默认关闭。返回的 `function_call` 可带 `namespace` 字符串，适配器接受该字段，工具仍按原名路由。推理摘要请求由模型元数据决定，见[档位映射](#档位映射)。
 
 ### Anthropic Messages
 
@@ -521,7 +523,7 @@ SIWC 按 OpenAI 的[开源工具接入方式](https://developers.openai.com/siwc
 ### 请求与错误
 
 - 请求 `POST https://api.openai.com/v1/responses`，`store: false`、`stream: true`；`response.completed` 正常完成；`response.incomplete` 的 `max_output_tokens`、`content_filter` 按[适配器职责](#适配器的职责)保存回复并映射 finish_reason，其他原因、`response.failed` 与流中断按错误停止。
-- 用量超限（`subscription_sharing_usage_limit_exceeded`，HTTP 429，也可能在流中途以 `response.failed` 给出）按不可重试的 provider 错误处理，诊断提示到 ChatGPT 设置查看用量。
+- HTTP 429 且错误码为 `subscription_sharing_usage_limit_exceeded`，以及流中 `response.failed` 的同一码，均按不可重试的 provider 错误处理，优先于 `x-should-retry` 等重试提示。client/transport 统一分类并提示到 ChatGPT 设置查看用量，保留实际 HTTP 状态码、错误码与 request ID；协议适配器只翻译事件。其他 `subscription_sharing_*` 码沿用现有错误规则。
 
 ## 限制
 

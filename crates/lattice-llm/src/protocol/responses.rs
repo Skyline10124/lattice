@@ -9,19 +9,30 @@ use lattice_conversation::{Effort, Protocol, ReplayOrigin};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::ResponsesFeatures;
 use super::projection::{ProjectionError, request_messages_with_replay};
 use crate::reasoning::ReasoningPlan;
 use crate::reply::{PartDelta, PartKind, ProtocolEvent, StringPatch};
 use crate::types::ChatRequest;
 
+const TOOL_NAMESPACE: &str = "lattice";
+
 pub(crate) fn build_request_json(
     request: &ChatRequest,
+    features: ResponsesFeatures,
     reasoning: Option<ReasoningPlan>,
     model_reasoning: Option<bool>,
     origin: &ReplayOrigin,
 ) -> Result<Value, ProjectionError> {
-    let projected =
+    let mut projected =
         request_messages_with_replay(origin, &request.messages, super::ReasoningReplay::None)?;
+    if features.tool_namespace {
+        for item in &mut projected.messages {
+            if item["type"] == "function_call" {
+                item["namespace"] = TOOL_NAMESPACE.into();
+            }
+        }
+    }
     let mut body = json!({
         "model":request.target.model, "input":projected.messages,
         "stream":true, "store":false,
@@ -47,7 +58,7 @@ pub(crate) fn build_request_json(
         }
     }
     if !request.tools.is_empty() {
-        body["tools"] = request
+        let tools: Vec<_> = request
             .tools
             .iter()
             .map(|tool| {
@@ -57,6 +68,14 @@ pub(crate) fn build_request_json(
                 })
             })
             .collect();
+        body["tools"] = if features.tool_namespace {
+            json!([{
+                "type":"namespace", "name":TOOL_NAMESPACE,
+                "description":"LATTICE tools for workspace operations.", "tools":tools,
+            }])
+        } else {
+            tools.into()
+        };
     }
     Ok(body)
 }
@@ -915,15 +934,10 @@ impl ResponsesSseParser {
 }
 
 fn api_error(code: Option<&str>, message: Option<&str>) -> ProtocolEvent {
-    let retryable = matches!(code, Some("server_error" | "rate_limit_exceeded"));
-    ProtocolEvent::error(
-        format!(
-            "Responses {}: {}",
-            code.unwrap_or("error"),
-            message.unwrap_or("provider error")
-        ),
-        retryable,
-    )
+    ProtocolEvent::ResponsesError {
+        code: code.map(str::to_owned),
+        message: message.unwrap_or("provider error").into(),
+    }
 }
 
 #[cfg(test)]

@@ -145,7 +145,16 @@ impl ProtocolParser {
                 );
             }
             Self::Responses(_) => {
-                protocol::responses::build_request_json(request, reasoning, model_reasoning, origin)
+                let Features::Responses(features) = features else {
+                    unreachable!("resolved features match the protocol")
+                };
+                protocol::responses::build_request_json(
+                    request,
+                    features,
+                    reasoning,
+                    model_reasoning,
+                    origin,
+                )
             }
             Self::Interactions(_) => protocol::interactions::build_request_json(
                 request,
@@ -862,7 +871,12 @@ pub(crate) async fn dispatch(
             guard.finish();
         }
         let body = endpoint.credentials.redact(&body);
-        let error = transport::status_error(status.as_u16(), &response_headers, &body);
+        let error = transport::status_error(
+            status.as_u16(),
+            &response_headers,
+            &body,
+            request_id.as_deref(),
+        );
         tracing::warn!(provider, request_id = request_id.as_deref(), %error, "provider returned an error status");
         return Err(error);
     }
@@ -870,30 +884,53 @@ pub(crate) async fn dispatch(
     let stream = stream_sse_response(Box::pin(body_stream), parser, endpoint.client.clone());
     let credentials = endpoint.credentials;
     // provider 的流内错误同样会进入公开诊断和 Turn 日志，必须在越过适配边界前脱敏。
-    let input = Box::pin(stream.map(move |event| match event {
-        ProtocolEvent::Failed(StreamStop::Provider(mut failure)) => {
-            failure.message =
-                transport::bound_diagnostic(&credentials.redact(&failure.message));
-            tracing::warn!(provider, request_id = request_id.as_deref(), error = %failure.message, "provider stream error");
-            ProtocolEvent::Failed(StreamStop::Provider(failure))
+    let input = Box::pin(stream.map(move |event| {
+        let event = match event {
+            ProtocolEvent::ResponsesError { code, message } => {
+                let code = code.map(|code| credentials.redact(&code));
+                let message = credentials.redact(&message);
+                ProtocolEvent::Failed(StreamStop::Provider(transport::responses_error(
+                    code.as_deref(),
+                    &message,
+                    Some(status.as_u16()),
+                    request_id.as_deref(),
+                )))
+            }
+            other => other,
+        };
+        match event {
+            ProtocolEvent::Failed(StreamStop::Provider(mut failure)) => {
+                failure.message =
+                    transport::bound_diagnostic(&credentials.redact(&failure.message));
+                tracing::warn!(
+                    provider,
+                    request_id = request_id.as_deref(),
+                    error = %failure.message,
+                    "provider stream error"
+                );
+                ProtocolEvent::Failed(StreamStop::Provider(failure))
+            }
+            ProtocolEvent::UnsupportedContentBlock {
+                protocol,
+                index,
+                block_type,
+            } => ProtocolEvent::Failed(StreamStop::Protocol(ReplyProtocolError::unsupported(
+                protocol,
+                index,
+                &credentials.redact(&block_type),
+            ))),
+            ProtocolEvent::Done { finish_reason } => {
+                guard.finish();
+                tracing::debug!(
+                    provider,
+                    request_id = request_id.as_deref(),
+                    total_ms = started.elapsed().as_millis() as u64,
+                    "provider stream completed"
+                );
+                ProtocolEvent::Done { finish_reason }
+            }
+            other => other,
         }
-        ProtocolEvent::UnsupportedContentBlock { protocol, index, block_type } =>
-            ProtocolEvent::Failed(StreamStop::Protocol(ReplyProtocolError::unsupported(
-            protocol,
-            index,
-            &credentials.redact(&block_type),
-        ))),
-        ProtocolEvent::Done { finish_reason } => {
-            guard.finish();
-            tracing::debug!(
-                provider,
-                request_id = request_id.as_deref(),
-                total_ms = started.elapsed().as_millis() as u64,
-                "provider stream completed"
-            );
-            ProtocolEvent::Done { finish_reason }
-        }
-        other => other,
     }));
     Ok(assemble_reply_stream(Some(origin), input, control))
 }
@@ -929,6 +966,103 @@ mod tests {
         let mut request = ChatRequest::new(Vec::new(), crate::ModelTarget::new("test", "model"));
         request.client_request_id = Some("test-session".into());
         request
+    }
+
+    #[test]
+    fn responses_namespace_wraps_tools_and_projects_all_history_sources() {
+        use crate::test_reply::{bind_replay_step, wire_to_native};
+        use lattice_conversation::{ConversationItem, ReplayOrigin, StepContent};
+        use serde_json::json;
+
+        let functions = json!([
+            {"type":"function","name":"observe__workspace","description":"read","parameters":{"type":"object"},"strict":false},
+            {"type":"function","name":"mutate__create","description":"write","parameters":{"type":"object"},"strict":false},
+        ]);
+        for (source, fixture) in [
+            (
+                Protocol::Responses,
+                include_str!("../tests/fixtures/projection/responses_output.json"),
+            ),
+            (
+                Protocol::ChatCompletions,
+                include_str!("../tests/fixtures/projection/openai_assistant_tool_calls.json"),
+            ),
+            (
+                Protocol::Messages,
+                include_str!("../tests/fixtures/projection/anthropic_thinking_tool_use.json"),
+            ),
+            (
+                Protocol::GenerateContent,
+                include_str!("../tests/fixtures/projection/gemini_function_call.json"),
+            ),
+            (
+                Protocol::Interactions,
+                include_str!("../tests/fixtures/projection/interactions_output.json"),
+            ),
+        ] {
+            let native = wire_to_native(source, &serde_json::from_str(fixture).unwrap()).unwrap();
+            let (assistant, results) = bind_replay_step(native);
+            let history = vec![ConversationItem::Step(StepContent { assistant, results })];
+            for provider_id in ["test", "other"] {
+                let origin = ReplayOrigin {
+                    protocol: Protocol::Responses,
+                    provider_id: provider_id.into(),
+                };
+                for enabled in [false, true] {
+                    for with_tools in [false, true] {
+                        let mut request = chat_request();
+                        request.messages = history.clone();
+                        if with_tools {
+                            request.tools = vec![
+                                crate::ToolDefinition::new(
+                                    "observe__workspace",
+                                    "read",
+                                    json!({"type":"object"}),
+                                ),
+                                crate::ToolDefinition::new(
+                                    "mutate__create",
+                                    "write",
+                                    json!({"type":"object"}),
+                                ),
+                            ];
+                        }
+                        let body = ProtocolParser::new(Protocol::Responses)
+                            .request_body(
+                                &request,
+                                None,
+                                None,
+                                Features::Responses(protocol::ResponsesFeatures {
+                                    tool_namespace: enabled,
+                                }),
+                                None,
+                                &origin,
+                            )
+                            .unwrap();
+                        let expected_tools = with_tools.then(|| if enabled {
+                            json!([{"type":"namespace","name":"lattice","description":"LATTICE tools for workspace operations.","tools":functions}])
+                        } else {
+                            functions.clone()
+                        });
+                        assert_eq!(body.get("tools"), expected_tools.as_ref());
+                        let calls = body["input"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .filter(|item| item["type"] == "function_call")
+                            .collect::<Vec<_>>();
+                        assert!(!calls.is_empty(), "{source:?}");
+                        for call in calls {
+                            assert_eq!(
+                                call.get("namespace"),
+                                enabled.then(|| json!("lattice")).as_ref(),
+                                "{source:?} {provider_id}"
+                            );
+                        }
+                        assert_eq!(request.messages, history);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -1886,6 +2020,110 @@ mod tests {
             !reached.load(Ordering::SeqCst),
             "redirect target must never be contacted"
         );
+    }
+
+    #[tokio::test]
+    async fn subscription_usage_limit_http_and_stream_keep_safe_diagnostics() {
+        use serde_json::json;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let request_id = format!("req-frozen-secret{}", "x".repeat(111));
+        for streaming in [false, true] {
+            let error = json!({"code":"subscription_sharing_usage_limit_exceeded","message":format!("frozen-secret {}", "界".repeat(400))});
+            let status = if streaming {
+                "200 OK"
+            } else {
+                "429 Too Many Requests"
+            };
+            let body = if streaming {
+                [
+                    json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg","role":"assistant","content":[]}}),
+                    json!({"type":"response.content_part.added","output_index":0,"item_id":"msg","content_index":0,"part":{"type":"output_text","text":""}}),
+                    json!({"type":"response.output_text.delta","output_index":0,"item_id":"msg","content_index":0,"delta":"partial"}),
+                    json!({"type":"response.failed","response":{"status":"failed","error":error,"usage":{"input_tokens":11,"output_tokens":3}}}),
+                ].iter().map(|event| format!("data: {event}\n\n")).collect::<String>()
+            } else {
+                json!({"error":error}).to_string()
+            };
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let response = format!(
+                "HTTP/1.1 {status}\r\nx-should-retry: true\r\nretry-after: 2\r\nx-request-id: {request_id}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let mut chunk = [0; 1024];
+                    let count = socket.read(&mut chunk).await.unwrap();
+                    assert!(count > 0);
+                    request.extend_from_slice(&chunk[..count]);
+                    assert!(request.len() <= 8192);
+                }
+                socket.write_all(response.as_bytes()).await.unwrap();
+            });
+            let connection =
+                resolved_request("responses", &format!("http://{address}"), "frozen-secret").await;
+            let result = tokio::time::timeout(Duration::from_secs(3), async {
+                match connection
+                    .stream_chat(chat_request(), StreamControl::default())
+                    .await
+                {
+                    Ok(stream) => Ok(stream.collect::<Vec<_>>().await),
+                    Err(error) => Err(error),
+                }
+            })
+            .await
+            .unwrap();
+            let diagnostic = if streaming {
+                let events = result.unwrap();
+                assert!(
+                    matches!(&events[1], LlmEvent::Delta(crate::LiveDelta::Text(text)) if text == "partial")
+                );
+                let LlmEvent::Finished {
+                    outcome:
+                        ReplyOutcome::Interrupted {
+                            reason: ReplyStop::Stream(StreamStop::Provider(failure)),
+                        },
+                    report,
+                } = events.last().unwrap()
+                else {
+                    panic!("provider failure: {events:?}")
+                };
+                assert!(!failure.retryable);
+                assert_eq!(report.finish_reason, None);
+                let usage = report.usage.as_ref().unwrap();
+                assert_eq!((usage.input, usage.output), (Some(11), Some(3)));
+                failure.message.clone()
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.status_code(), Some(429));
+                assert_eq!(error.retry_after(), Some(Duration::from_secs(2)));
+                assert!(!error.retryable());
+                error.to_string()
+            };
+            assert!(
+                diagnostic.starts_with(if streaming {
+                    "HTTP 200 Responses "
+                } else {
+                    "HTTP 429 "
+                }),
+                "{diagnostic}"
+            );
+            assert!(diagnostic.contains("subscription_sharing_usage_limit_exceeded"));
+            assert!(
+                diagnostic.contains("请到 ChatGPT 设置查看用量"),
+                "{diagnostic}"
+            );
+            assert!(
+                diagnostic.contains(&request_id.replace("frozen-secret", "[REDACTED]")),
+                "{diagnostic}"
+            );
+            assert!(!diagnostic.contains("frozen-secret"));
+            assert_eq!(diagnostic.chars().count(), transport::MAX_DIAGNOSTIC_CHARS);
+            server.await.unwrap();
+        }
     }
 
     #[tokio::test]

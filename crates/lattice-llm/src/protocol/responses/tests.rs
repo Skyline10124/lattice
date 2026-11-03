@@ -49,7 +49,14 @@ fn request_controls_preserve_session_tools_metadata_and_effort() {
                 effort,
                 enable_toggle: false,
             });
-            let body = build_request_json(&request, plan, model_reasoning, &origin()).unwrap();
+            let body = build_request_json(
+                &request,
+                ResponsesFeatures::default(),
+                plan,
+                model_reasoning,
+                &origin(),
+            )
+            .unwrap();
             assert_eq!(
                 body.get("include").cloned(),
                 (model_reasoning == Some(true)).then(|| json!(["reasoning.encrypted_content"]))
@@ -122,7 +129,19 @@ fn official_output_round_trips_item_boundaries_phase_cipher_and_call_ids() {
         assert_eq!(item["content"][0]["annotations"], json!([]));
         assert!(item.get("id").is_none() && item.get("phase").is_none());
     }
-    let (live, outcome, _) = collect(vec![json!({"type":"response.completed","response":wire})]);
+    let mut namespaced = wire.clone();
+    for item in namespaced["output"].as_array_mut().unwrap() {
+        if item["type"] == "function_call" {
+            item["namespace"] = "lattice".into();
+        }
+    }
+    assert_eq!(
+        crate::protocol::projection::wire_to_native(&origin(), &namespaced).unwrap(),
+        native,
+    );
+    let (live, outcome, _) = collect(vec![
+        json!({"type":"response.completed","response":namespaced}),
+    ]);
     let ReplyOutcome::Complete { message } = outcome else {
         panic!("complete")
     };
@@ -266,7 +285,7 @@ fn interleaved_arguments_done_snapshots_and_invalid_batch_use_the_common_accumul
         let mut events = Vec::new();
         let mut output = Vec::new();
         for index in 0..2 {
-            let item = json!({"type":"function_call","id":format!("item{index}"),"call_id":format!("call{index}"),"name":"observe__workspace","arguments":""});
+            let item = json!({"type":"function_call","id":format!("item{index}"),"call_id":format!("call{index}"),"namespace":"lattice","name":"observe__workspace","arguments":""});
             events.push(
                 json!({"type":"response.output_item.added","output_index":index,"item":item}),
             );
@@ -287,7 +306,7 @@ fn interleaved_arguments_done_snapshots_and_invalid_batch_use_the_common_accumul
             } else {
                 "{\"b\":2}"
             };
-            let item = json!({"type":"function_call","id":format!("item{index}"),"call_id":format!("call{index}"),"name":"observe__workspace","arguments":args});
+            let item = json!({"type":"function_call","id":format!("item{index}"),"call_id":format!("call{index}"),"namespace":"lattice","name":"observe__workspace","arguments":args});
             events.push(json!({"type":"response.function_call_arguments.done","output_index":index,"item_id":format!("item{index}"),"arguments":args}));
             events
                 .push(json!({"type":"response.output_item.done","output_index":index,"item":item}));
@@ -427,6 +446,7 @@ fn failures_keep_usage_and_unknown_incomplete_reasons_still_fail() {
         ("rate_limit_error", false),
         ("temporarily_unavailable", false),
         ("insufficient_quota", false),
+        ("subscription_sharing_usage_unavailable", false),
         ("context_length_exceeded", false),
         ("invalid_request_error", false),
         ("unknown", false),

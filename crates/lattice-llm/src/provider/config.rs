@@ -198,6 +198,14 @@ impl ProviderRegistry {
                 model_ref::validate_model_id(model.get_ref())
                     .map_err(|error| error_at(model.span().start, error.to_string()))?;
                 let raw = raw.into_inner().0;
+                if id.get_ref() == "chatgpt"
+                    && let Some(features) = &raw.features
+                {
+                    return Err(error_at(
+                        features.span().start,
+                        "chatgpt only permits handwritten model metadata".to_owned(),
+                    ));
+                }
                 let mut model_features = features;
                 apply_features(&mut model_features, raw.features, &error_at)?;
                 models.insert(
