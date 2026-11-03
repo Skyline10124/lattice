@@ -18,8 +18,18 @@ use crate::local::{
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AuthLoginOutcome {
-    SignedIn { status: ProviderAuthStatus },
+    SignedIn {
+        status: ProviderAuthStatus,
+        catalog: AuthCatalogOutcome,
+    },
     Cancelled {},
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AuthCatalogOutcome {
+    Refreshed { model_count: usize },
+    Failed { warning: String },
 }
 
 /// 授权 URL 只在登录界面借用，事件本身不提供 Debug 或序列化。
@@ -169,9 +179,13 @@ impl Drop for Input {
     }
 }
 
-fn outcome(result: std::result::Result<ProviderAuthStatus, LoginError>) -> LoginResponse {
+fn outcome(
+    result: std::result::Result<(ProviderAuthStatus, AuthCatalogOutcome), LoginError>,
+) -> LoginResponse {
     match result {
-        Ok(status) => LoginResponse::AuthLoginResult(AuthLoginOutcome::SignedIn { status }),
+        Ok((status, catalog)) => {
+            LoginResponse::AuthLoginResult(AuthLoginOutcome::SignedIn { status, catalog })
+        }
         Err(LoginError::Cancelled) => {
             LoginResponse::AuthLoginResult(AuthLoginOutcome::Cancelled {})
         }
@@ -192,10 +206,22 @@ fn outcome(result: std::result::Result<ProviderAuthStatus, LoginError>) -> Login
     }
 }
 
+async fn finish(
+    result: std::result::Result<ProviderAuthStatus, LoginError>,
+    refresh: &impl Fn() -> BoxFuture<'static, AuthCatalogOutcome>,
+) -> LoginResponse {
+    let result = match result {
+        Ok(status) => Ok((status, refresh().await)),
+        Err(error) => Err(error),
+    };
+    outcome(result)
+}
+
 /// 认证规则归 LLM；这里只管理专用连接的输入、输出和取消责任。
 pub(in crate::local) async fn exchange<A: LoginAttempt>(
     stream: UnixStream,
     start: impl std::future::Future<Output = std::result::Result<A, LoginError>>,
+    refresh: impl Fn() -> BoxFuture<'static, AuthCatalogOutcome> + Send + Sync,
 ) -> Result<()> {
     let (mut read, mut write) = stream.into_split();
     let (sender, messages) = mpsc::channel(1);
@@ -251,7 +277,7 @@ pub(in crate::local) async fn exchange<A: LoginAttempt>(
     let response = loop {
         tokio::select! {
             biased;
-            result = attempt.wait() => break outcome(result),
+            result = attempt.wait() => break finish(result, &refresh).await,
             action = input.messages.recv() => match action {
                 Some(Ok(Some(LoginAction::Callback { mut url }))) if !callback_sent => {
                     callback_sent = true;
@@ -260,7 +286,7 @@ pub(in crate::local) async fn exchange<A: LoginAttempt>(
                 }
                 Some(Ok(Some(LoginAction::Cancel {}))) => {
                     attempt.cancel();
-                    break outcome(attempt.wait().await);
+                    break finish(attempt.wait().await, &refresh).await;
                 }
                 Some(Ok(None)) | None => {
                     attempt.cancel();
@@ -270,7 +296,7 @@ pub(in crate::local) async fn exchange<A: LoginAttempt>(
                 message => {
                     attempt.cancel();
                     let final_result = attempt.wait().await;
-                    if final_result.is_ok() { break outcome(final_result); }
+                    if final_result.is_ok() { break finish(final_result, &refresh).await; }
                     break LoginResponse::Error(match message { Some(Err(error)) => error, _ => protocol() });
                 }
             }

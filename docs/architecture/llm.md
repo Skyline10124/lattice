@@ -266,12 +266,14 @@ SIWC 的 `response.completed` 终态可能携带 `output: []`；此时解码器�
 | --- | --- | --- |
 | 内置快照 | xtask 从 models.dev 生成，只含内置表 `catalog` 所列的条目 | 随版本发布，变化在 PR 中审查 |
 | 缓存 `cache/models.json` | 后台从 `https://models.dev/api.json` 拉取，保留内置表与 `providers.toml` 中 `catalog` 所列的条目，字段规则与快照相同 | 文件新于 24 小时则跳过自动拉取。缺失或更旧时在启动时拉取，成功后再隔 24 小时。失败从 1 分钟起倍增重试，上限 1 小时。`metadata.auto_refresh = false` 时跳过该次触发；`providers.toml` 无效时该次触发算作失败，按上述退避重试。每次触发都读当前配置。`lattice models refresh` 仍可立即刷新 |
+| 账号目录 `cache/chatgpt-models.json` | 当前 ChatGPT 账号允许列出的模型标识与显示名；限制、档位和价格仍取同名 openai 元数据 | 触发和生命周期见[账号模型列表](#账号模型列表)；自动刷新按目录自己的成功时间计算 24 小时 |
 | `providers.toml` 的 `models` | 用户手写 | 用户编辑 |
 
 - **选择来源。** 缓存存在且能解析时整份使用缓存，否则使用内置快照；缓存中缺少某个 `catalog` 条目时，这个条目使用快照。`providers.toml` 中的 `catalog` 在缓存与快照中都没有时，要等下一次刷新才有元数据；在此之前，以及 models.dev 中没有这个条目时，这个 provider 只有手写的元数据。手写的元数据按字段覆盖上述结果，只写在 `providers.toml` 中的模型由手写值单独构成。
 - **保留的字段。** 模型 `id`、`name`、`limit.context`、`limit.output`、`reasoning`、`reasoning_options`、`tool_call`、`modalities.input`、`cost.input`、`cost.output`、`cost.cache_read`、`cost.cache_write` 与 `status`。其余字段丢弃。
 - **没有过期的概念。** 缓存旧了只影响列表与价格的准确性，不影响请求发往哪里，不提示过期。
 - **刷新失败**只记日志，继续使用上一份数据，并从 1 分钟起倍增重试，上限 1 小时。`lattice models refresh` 把失败原因返回给用户。拉取使用 HTTPS 与固定地址的连接，响应最多 32 MiB，30 秒内没有读完即放弃。新缓存先写临时文件再改名替换。
+- **按来源调度。** models.dev 与已经登录的账号目录由同一个后台任务调度，各自记录新鲜度、失败次数和下一次时间。同一来源的并发触发共享结果；一个来源成功不清除另一个的失败。显式刷新分别尝试两者，成功来源照常发布，部分失败返回来源、原因及已经更新的部分。`auto_refresh` 只影响自动触发，登录、手动刷新和缺目录补拉继续有效。
 - **请求路径上不联网。** 接受 Turn 与每次请求时只读上述数据。
 
 ### 模型候选
@@ -280,7 +282,8 @@ SIWC 的 `response.completed` 终态可能携带 `output: []`；此时解码器�
 
 - provider 来自内置表与 `providers.toml`，模型来自上述合并结果；`chatgpt` 只列出[账号模型列表](#账号模型列表)中的模型。
 - `status` 为 `deprecated` 的模型不列出（精确 `target` 查询除外，见下一条），仍可按名字使用。
-- 精确 `target` 查询使用完整 `<provider>/<model>`，与 provider 筛选互斥，返回该模型的一项候选；包括 deprecated 和没有元数据的模型，后者的元数据字段为空、档位为 `[]`。`chatgpt` 的精确查询只描述本地元数据，保留账号模型列表尚未实现的提示。
+- 精确 `target` 查询使用完整 `<provider>/<model>`，与 provider 筛选互斥，返回该模型的一项候选；包括 deprecated 和没有元数据的模型，后者的元数据字段为空、档位为 `[]`。`chatgpt` 的精确查询只描述本地元数据，不补拉目录，也不要求目标在账号目录中。
+- 普通查询包含 `chatgpt` 时，已经登录且没有合法目录则先在异步层补拉，再在阻塞阶段做本地合并。缺目录或补拉失败给实际警告，其他 provider 照常列出；未登录不请求账号目录。合法空目录和旧的有效目录均可直接使用。候选显示名取账号目录，限制、reasoning、档位和价格按同名 openai 元数据与 chatgpt 手写字段合并；无同名元数据或手写值时字段为空、档位为 `[]`。手写模型和 openai 列表不能额外增加账号候选。
 - 候选先按内置 provider 表的顺序列出，再按新增 provider id 排序；同一 provider 内按模型 id 排序。
 - 配置有效时，provider 写了 `catalog`，元数据中却没有对应条目，候选查询为它给出提示。
 - 手写档位无法表达的模型只标出它自己：普通列表先去掉 deprecated 模型再校验，出错的候选带 `config_error`（诊断含 provider、模型、档位和原因，已脱敏），可用档位为 `[]`，其他模型照常列出；精确查询同样返回带 `config_error` 的候选，不报错。`config_error` 为空时不序列化。提交选了这个模型仍在接受前按配置错误拒绝。
@@ -501,7 +504,7 @@ SIWC 按 OpenAI 的[开源工具接入方式](https://developers.openai.com/siwc
 4. **校验回调。** 先校验 `state`；回调带 `error` 时停止。首次登录的回调带回正式的 `client_id`，没有带回时登录不成立；再次登录的回调可以不带 `client_id`，带回与保存的不同时拒绝。
 5. **换取 token。** 用正式的 `client_id`、`code`、`code_verifier` 与同一个 `redirect_uri`、`resource` 向 `https://auth.openai.com/api/accounts/oauth/token` 换取 token。首次登录的回调已经带回正式 `client_id`，而换码返回 `invalid_grant` 时，丢弃 `code`，将该 `client_id` 与 host ID 保存为不含 token 的记录，本次登录失败；下次登录复用该 `client_id`。再次登录换码失败不覆盖已有凭据。
 6. **校验 id token。** 按 OpenAI 的 JWKS 校验签名，核对 issuer、audience（正式的 `client_id`）、有效期与 `nonce`；授予的 scope 必须含 `chatgpt.tokens.use.direct`。再次登录时，新 id token 的账号必须与保存的一致。
-7. **保存。** 写入 `auth.json` 的 `chatgpt` 项，然后拉取[账号模型列表](#账号模型列表)，把结果返回前端。
+7. **保存。** 写入 `auth.json` 的 `chatgpt` 项，然后拉取[账号模型列表](#账号模型列表)，把登录状态与目录结果返回前端。目录失败不撤销登录：成功结果带 `catalog.status = refreshed` 与 `model_count`，失败带 `catalog.status = failed` 与安全的 `warning`；登录仍成功退出，文本界面另显示警告。
 
 ### 刷新
 
@@ -517,13 +520,15 @@ SIWC 按 OpenAI 的[开源工具接入方式](https://developers.openai.com/siwc
 
 ### 登出
 
-撤销 refresh token 后删除 access、refresh 与 id token，保留 `client_id`、账号信息与 host ID，供再次登录复用。撤销返回空的 HTTP 200 即成功；撤销未确认时仍删除这些 token，并告诉用户远端撤销未确认。
+撤销 refresh token 后删除 access、refresh 与 id token，保留 `client_id`、账号信息、host ID 与账号目录缓存，供再次登录复用。撤销返回空的 HTTP 200 即成功；撤销未确认时仍删除这些 token，并告诉用户远端撤销未确认。remove 另删除注册、账号和目录缓存，保留 host ID；同一后台会拒绝清理后的旧目录请求发布缓存。
 
 ### 账号模型列表
 
-- 用 access token 请求 `GET https://api.openai.com/v1/models`，保留 `visibility` 为 `list` 的项，以 `slug` 作为模型名、`display_name` 作为显示名。
-- 在登录成功、后台的元数据刷新与 `lattice models refresh` 时拉取，结果保存在配置目录下的 `cache/chatgpt-models.json`。列表还没有时（例如刚登录后拉取失败），列出候选前先拉取一次。
-- 推理档位与价格按同名模型取 `openai` 条目的元数据。
+- 经统一的 `access_token()` 入口取得可用 token，请求固定 `GET https://api.openai.com/v1/models`。响应读取 `models[]`，只保留 `visibility` 为 `list` 的项，以 `slug` 作为模型名、`display_name` 作为显示名。连接复用网关的 TLS 根、地址固定、禁代理和禁重定向约束，不增加目录重试循环。
+- 在登录保存成功、后台元数据自动刷新、`lattice models refresh` 时拉取；普通候选查询包含 chatgpt 且没有合法目录时也补拉。未登录不联网。登录即使已有目录也刷新；有合法旧目录时查询只读本地，合法空列表表示当前没有可列出的模型。
+- 缓存位于配置目录下的 `cache/chatgpt-models.json`，包含 `version = 1`、UTC RFC3339 的 `fetched_at` 与 `models` 数组，各模型仅含 `slug`、`display_name`。缓存不绑定账号；换账号须先 remove，logout 保留。发布沿用 models.dev 的同目录临时文件、文件同步和改名替换。
+- 列出的 slug 使用模型 ID 的共同校验，显示名非空且不含控制字符；非法或重复 ID、坏结构和未知缓存版本使本次目录无效。拉取失败保留旧缓存；不存在或损坏的缓存按缺目录处理。合法空列表仍缓存并记录成功时间。
+- 推理档位、限制与价格按同名模型取 `openai` 条目的元数据，再按字段应用 `chatgpt` 手写覆盖。账号目录只限定普通候选集合，不成为请求准入白名单。
 
 ### 请求与错误
 
@@ -537,6 +542,7 @@ SIWC 按 OpenAI 的[开源工具接入方式](https://developers.openai.com/siwc
 | `providers.toml` | 最多 1 MiB；文件中的 provider 表最多 256 个（覆盖内置 provider 的表也算），每个 provider 手写的模型最多 1,024 个 | 实现常量，防止异常文件占用内存 |
 | `auth.json` | 最多 1 MiB；key 1～16,384 字节 | 沿用现有连接材料的 key 上限 |
 | models.dev 拉取 | 响应最多 32 MiB，30 秒内读完 | 2026-10-24 的 `api.json` 约 5.9 MB |
+| ChatGPT 账号目录 | GET 响应最多 32 MiB，连接准备至读完不超过 30 秒；本地缓存读取和发布最多 32 MiB | 复用元数据拉取边界；凭据刷新沿用自身时限 |
 | SIWC 刷新余量 | 剩余有效期短于 300 秒时刷新 | access token 有效期 1 小时；余量覆盖发请求的时间与时钟偏差 |
 
 Turn deadline 的范围由[会话合同](session.md#输入与传输限制)维护。

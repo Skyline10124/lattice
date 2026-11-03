@@ -20,7 +20,7 @@ use tokio::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
-pub(super) const MAGIC: &[u8; 8] = b"LTLOCAL<";
+pub(super) const MAGIC: &[u8; 8] = b"LTLOCAL=";
 pub(super) const LOGIN_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 pub(super) const MAX_FRAME: usize = 16 * 1024 * 1024;
 pub(super) const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -582,7 +582,13 @@ mod frame_tests {
     #[tokio::test]
     async fn current_frames_reject_old_empty_and_oversized_frames() {
         for (magic, length, payload, expected) in [
-            (*b"LTLOCAL<", 4_u32, b"null".as_slice(), None),
+            (*b"LTLOCAL=", 4_u32, b"null".as_slice(), None),
+            (
+                *b"LTLOCAL<",
+                4_u32,
+                b"null".as_slice(),
+                Some(LocalErrorKind::IncompatibleBackend),
+            ),
             (
                 *b"LTLOCAL;",
                 4_u32,
@@ -626,7 +632,7 @@ mod frame_tests {
                 Some(LocalErrorKind::IncompatibleBackend),
             ),
             (
-                *b"LTLOCAL=",
+                *b"LTLOCAL>",
                 4,
                 b"null".as_slice(),
                 Some(LocalErrorKind::IncompatibleBackend),
@@ -638,13 +644,13 @@ mod frame_tests {
                 Some(LocalErrorKind::Protocol),
             ),
             (
-                *b"LTLOCAL<",
+                *b"LTLOCAL=",
                 0,
                 b"".as_slice(),
                 Some(LocalErrorKind::Protocol),
             ),
             (
-                *b"LTLOCAL<",
+                *b"LTLOCAL=",
                 (MAX_FRAME + 1) as u32,
                 b"".as_slice(),
                 Some(LocalErrorKind::Protocol),
@@ -679,7 +685,7 @@ mod frame_tests {
 
     #[tokio::test]
     async fn backend_answers_a_foreign_magic_with_its_own_before_closing() {
-        for magic in [b"LTLOCAL;", b"LTLOCAL="] {
+        for magic in [b"LTLOCAL<", b"LTLOCAL>"] {
             tokio::time::timeout(Duration::from_secs(1), async {
             let (mut client, mut backend) = UnixStream::pair().unwrap();
             // 字面量覆盖上一版和下一版客户端，不能从当前魔数推导。

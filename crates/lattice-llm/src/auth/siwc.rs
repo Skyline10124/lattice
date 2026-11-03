@@ -34,6 +34,7 @@ pub struct RemoveChatgptResult {
 /// 只在请求网关内部使用；不提供 Debug 或序列化。
 pub(crate) struct AccessToken {
     pub(crate) credentials: Arc<Credentials>,
+    generation: u64,
 }
 
 impl AccessToken {
@@ -160,12 +161,28 @@ impl ChatgptAuth {
             return Err(credential_error("credentials changed before use"));
         }
         Ok(AccessToken {
+            generation,
             credentials: flight
                 .credentials
                 .get()
                 .ok_or_else(|| credential_error("credential worker returned no material"))?
                 .clone(),
         })
+    }
+
+    /// 目录替换与清理的开始共用状态锁，remove 返回后旧响应不能恢复缓存。
+    pub(crate) fn with_current_token<T>(
+        &self,
+        token: &AccessToken,
+        publish: impl FnOnce() -> T,
+    ) -> Result<T, LlmError> {
+        let state = self.0.state.lock().expect("SIWC state lock");
+        if state.generation != token.generation || state.cleaning != 0 || state.stopped {
+            return Err(credential_error(
+                "credentials changed before model directory publication",
+            ));
+        }
+        Ok(publish())
     }
 
     /// 只尝试一次远端撤销；成功清除本地 token 后保留注册、账号和 host。

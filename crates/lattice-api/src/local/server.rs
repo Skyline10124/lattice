@@ -21,6 +21,10 @@ use tokio::{
     task::JoinSet,
 };
 
+#[cfg(test)]
+#[path = "server_models_tests.rs"]
+mod models_tests;
+
 struct Owner {
     identity: Option<TurnRequest>,
     session: Option<SessionId>,
@@ -700,6 +704,32 @@ impl Backend {
             }
             Request::Models { provider, target } => {
                 let directory = super::auth::directory(self.home.as_deref())?;
+                let mut warning = None;
+                if target.is_none() && provider.as_deref().is_none_or(|id| id == "chatgpt") {
+                    let check_directory = directory.clone();
+                    let check_provider = provider.clone();
+                    // 先校验本地请求，错误配置或非法筛选不能触发目录网络请求。
+                    blocking(move || {
+                        let auth = lattice_llm::auth::AuthStore::new(check_directory.clone());
+                        lattice_llm::model_candidates(
+                            &check_directory,
+                            check_provider.as_deref(),
+                            None,
+                        )
+                        .map(|_| ())
+                        .map_err(|error| {
+                            crate::ApiError::Configuration(crate::ConfigRejection::new(
+                                &error.to_string(),
+                                Some(&auth),
+                            ))
+                            .into()
+                        })
+                    })
+                    .await?;
+                    if let Err(error) = self.metadata.ensure_chatgpt().await {
+                        warning = Some(error.message);
+                    }
+                }
                 blocking(move || {
                     let auth = lattice_llm::auth::AuthStore::new(directory.clone());
                     lattice_llm::model_candidates(
@@ -708,6 +738,15 @@ impl Backend {
                         target.as_deref(),
                     )
                     .map(|mut candidates| {
+                        if let Some(message) = warning {
+                            candidates
+                                .warnings
+                                .retain(|warning| warning.provider.as_deref() != Some("chatgpt"));
+                            candidates.warnings.push(lattice_llm::ModelWarning {
+                                provider: Some("chatgpt".into()),
+                                message,
+                            });
+                        }
                         redact_model_candidates(&mut candidates, &auth);
                         Response::Models(candidates)
                     })
@@ -728,6 +767,7 @@ impl Backend {
             Request::Stop => {
                 let mut changed = self.changed.subscribe();
                 self.begin_stop();
+                self.metadata.drain().await;
                 while self.status().owners != 0 {
                     changed.changed().await.map_err(|_| internal())?;
                 }
@@ -1077,7 +1117,23 @@ async fn connection(backend: Arc<Backend>, mut stream: UnixStream) -> Result<()>
             }
         });
         return match auth {
-            Ok(auth) => super::auth::login::exchange(stream, auth.start_login()).await,
+            Ok(auth) => {
+                let metadata = backend.metadata.clone();
+                super::auth::login::exchange(stream, auth.start_login(), move || {
+                    let metadata = metadata.clone();
+                    Box::pin(async move {
+                        match metadata.refresh_chatgpt().await {
+                            Ok(model_count) => {
+                                super::auth::login::AuthCatalogOutcome::Refreshed { model_count }
+                            }
+                            Err(error) => super::auth::login::AuthCatalogOutcome::Failed {
+                                warning: error.message,
+                            },
+                        }
+                    })
+                })
+                .await
+            }
             Err(error) => writer.write(&mut stream, &Response::Error(error)).await,
         };
     }
@@ -1160,6 +1216,7 @@ async fn serve_with_backend(
     if metadata_task.await.is_err() {
         failure.get_or_insert_with(internal);
     }
+    backend.metadata.drain().await;
     while backend.status().owners != 0 {
         changed.changed().await.map_err(|_| internal())?;
     }

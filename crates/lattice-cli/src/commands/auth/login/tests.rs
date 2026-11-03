@@ -148,7 +148,7 @@ async fn pasted_input_waits_for_authorization_and_never_appears_in_output() {
             &mut wire,
             1,
             "auth_login_result",
-            json!({"outcome":"signed_in","status":{"provider":"chatgpt","status":"ready"}}),
+            json!({"outcome":"signed_in","status":{"provider":"chatgpt","status":"ready"},"catalog":{"status":"refreshed","model_count":0}}),
         )
         .await;
     };
@@ -192,7 +192,7 @@ async fn browser_failure_or_headless_shows_url_only_in_stderr_and_returns_safe_j
                 &mut wire,
                 1,
                 "auth_login_result",
-                json!({"outcome":"signed_in","status":{"provider":"chatgpt","status":"ready"}}),
+                json!({"outcome":"signed_in","status":{"provider":"chatgpt","status":"ready"},"catalog":{"status":"refreshed","model_count":0}}),
             )
             .await;
         };
@@ -369,7 +369,7 @@ async fn browser_capture_child() {
             &mut wire,
             1,
             "auth_login_result",
-            json!({"outcome":"signed_in","status":{"provider":"chatgpt","status":"ready"}}),
+            json!({"outcome":"signed_in","status":{"provider":"chatgpt","status":"ready"},"catalog":{"status":"refreshed","model_count":0}}),
         )
         .await;
     };
@@ -466,7 +466,7 @@ async fn prompt_waits_for_hidden_echo_and_guard_lasts_until_terminal_result() {
             &mut wire,
             1,
             "auth_login_result",
-            json!({"outcome":"signed_in","status":{"provider":"chatgpt","status":"ready"}}),
+            json!({"outcome":"signed_in","status":{"provider":"chatgpt","status":"ready"},"catalog":{"status":"refreshed","model_count":0}}),
         )
         .await;
     };
@@ -598,7 +598,7 @@ async fn terminal_result_wins_a_failed_write(callback: bool) {
             &mut wire,
             1,
             "auth_login_result",
-            json!({"outcome":"signed_in","status":{"provider":"chatgpt","status":"ready"}}),
+            json!({"outcome":"signed_in","status":{"provider":"chatgpt","status":"ready"},"catalog":{"status":"refreshed","model_count":0}}),
         )
         .await;
         drop(wire);

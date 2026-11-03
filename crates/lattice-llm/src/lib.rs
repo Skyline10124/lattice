@@ -15,7 +15,7 @@ mod models;
 pub use models::{ModelCandidate, ModelCandidates, ModelPrice, ModelWarning, model_candidates};
 pub(crate) mod metadata;
 pub use metadata::{
-    MODELS_URL, MetadataError, MetadataRefreshControl, fetch_snapshot,
+    ChatgptCatalogState, MODELS_URL, MetadataError, MetadataRefreshControl, fetch_snapshot,
     metadata_auto_refresh_enabled,
 };
 pub mod protocol;

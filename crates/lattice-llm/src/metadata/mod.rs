@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 use crate::provider::{ModelMetadata, Provider, config::ProviderRegistry};
 use lattice_conversation::Effort;
 
+pub(crate) mod chatgpt;
 pub(crate) mod fetch;
+pub use chatgpt::ChatgptCatalogState;
 pub use fetch::{MetadataError, MetadataRefreshControl, fetch_snapshot};
 
 /// 正式元数据源。

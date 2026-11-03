@@ -117,6 +117,163 @@ struct Fixture {
     now: Arc<AtomicI64>,
 }
 
+#[tokio::test]
+async fn account_directory_uses_refreshed_token_and_publishes_empty_and_nonempty_results() {
+    use crate::metadata::{MetadataRefreshControl, chatgpt};
+    let fixture = Fixture::new(299);
+    let refresh = chatgpt::refresh_with(
+        &fixture.store.directory,
+        &fixture.auth,
+        Arc::default(),
+        |header| async move {
+            assert!(header.is_sensitive());
+            assert!(header == "Bearer rotated-access-secret");
+            Ok(vec![])
+        },
+    );
+    tokio::pin!(refresh);
+    assert!(poll!(refresh.as_mut()).is_pending());
+    fixture.started().await;
+    assert!(
+        !fixture
+            .store
+            .directory
+            .join("cache/chatgpt-models.json")
+            .exists()
+    );
+    fixture.endpoint.release.add_permits(1);
+    assert_eq!(refresh.await.unwrap(), 0);
+    assert_eq!(fixture.endpoint.calls.load(Ordering::SeqCst), 1);
+    let state = chatgpt::state(&fixture.store.directory).unwrap();
+    assert!(state.logged_in);
+    assert_eq!(state.model_count, Some(0));
+    assert!(state.fetched_at.is_some());
+    let count = chatgpt::refresh_with(
+        &fixture.store.directory,
+        &fixture.auth,
+        Arc::default(),
+        |_| async {
+            Ok(vec![
+                chatgpt::AccountModel {
+                    slug: "first-model".into(),
+                    display_name: "First model".into(),
+                },
+                chatgpt::AccountModel {
+                    slug: "second-model".into(),
+                    display_name: "Second model".into(),
+                },
+            ])
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(count, 2);
+    assert_eq!(
+        chatgpt::state(&fixture.store.directory)
+            .unwrap()
+            .model_count,
+        Some(2)
+    );
+    let previous = fs::read(fixture.store.directory.join("cache/chatgpt-models.json")).unwrap();
+    let published: serde_json::Value = serde_json::from_slice(&previous).unwrap();
+    assert_eq!(
+        published["models"],
+        serde_json::json!([
+            {"slug":"first-model","display_name":"First model"},
+            {"slug":"second-model","display_name":"Second model"}
+        ])
+    );
+    let cancel = Arc::new(MetadataRefreshControl::default());
+    let cancel_request = cancel.clone();
+    let error = chatgpt::refresh_with(
+        &fixture.store.directory,
+        &fixture.auth,
+        cancel,
+        |_| async move {
+            cancel_request.cancel();
+            Ok(vec![chatgpt::AccountModel {
+                slug: "new-model".into(),
+                display_name: "New model".into(),
+            }])
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, crate::MetadataError::Cancelled));
+    assert_eq!(
+        fs::read(fixture.store.directory.join("cache/chatgpt-models.json")).unwrap(),
+        previous
+    );
+}
+
+#[tokio::test]
+async fn account_directory_never_calls_remote_without_a_usable_token() {
+    use crate::metadata::chatgpt;
+    let fixture = Fixture::new(299);
+    *fixture.endpoint.outcome.lock().unwrap() = Outcome::Invalid("invalid_grant");
+    fixture.endpoint.release.add_permits(1);
+    for expected_refreshes in [1, 1] {
+        let error = chatgpt::refresh_with(
+            &fixture.store.directory,
+            &fixture.auth,
+            Arc::default(),
+            |_| async { panic!("没有可用 token 时不能调用目录 endpoint") },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            crate::MetadataError::Chatgpt(LlmError::Credential { .. })
+        ));
+        assert_eq!(
+            fixture.endpoint.calls.load(Ordering::SeqCst),
+            expected_refreshes
+        );
+    }
+}
+
+#[tokio::test]
+async fn account_directory_response_cannot_publish_after_remove_or_logout() {
+    use crate::metadata::chatgpt;
+    for remove in [false, true] {
+        let fixture = Fixture::new(3600);
+        let path = fixture.store.directory.join("cache/chatgpt-models.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"previous cache").unwrap();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let auth = fixture.auth.clone();
+        let directory = fixture.store.directory.clone();
+        let task = tokio::spawn(async move {
+            chatgpt::refresh_with(&directory, &auth, Arc::default(), |_| async move {
+                started.send(()).unwrap();
+                released.await.unwrap();
+                Ok(vec![chatgpt::AccountModel {
+                    slug: "old-account-model".into(),
+                    display_name: "Old account".into(),
+                }])
+            })
+            .await
+        });
+        ready.await.unwrap();
+        if remove {
+            fixture.auth.remove().await.unwrap();
+        } else {
+            fixture.auth.logout().await.unwrap();
+        }
+        release.send(()).unwrap();
+        assert!(matches!(
+            task.await.unwrap(),
+            Err(crate::MetadataError::Chatgpt(LlmError::Credential { .. }))
+        ));
+        if remove {
+            assert!(!path.exists());
+        } else {
+            assert_eq!(fs::read(path).unwrap(), b"previous cache");
+        }
+    }
+}
+
 impl Fixture {
     fn new(remaining: i64) -> Self {
         let (directory, store) = fixture();

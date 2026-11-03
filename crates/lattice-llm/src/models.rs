@@ -93,10 +93,44 @@ pub fn model_candidates(
             })
         };
         if provider.id == "chatgpt" {
-            warn("ChatGPT account model listing is not implemented".into());
-            if target.is_none() {
-                continue;
+            let catalog = crate::metadata::chatgpt::load(directory);
+            if let Err(error) = &catalog {
+                let reason = if credentials
+                    .as_ref()
+                    .is_ok_and(|credentials| credentials.chatgpt_logged_in())
+                {
+                    format!("ChatGPT account model directory is unavailable: {error}")
+                } else {
+                    "ChatGPT account model directory is unavailable; run lattice auth login chatgpt"
+                        .into()
+                };
+                warn(reason);
             }
+            let status = crate::auth::provider_status(provider, credentials.as_ref()).status;
+            let models = metadata.merge(provider);
+            if let Some(target) = &target {
+                let mut model =
+                    candidate(provider, target.model(), models.get(target.model()), status);
+                if let Some(name) = catalog
+                    .as_ref()
+                    .ok()
+                    .and_then(|catalog| catalog.models.get(target.model()))
+                {
+                    model.name = Some(name.clone());
+                }
+                result.models.push(model);
+            } else if let Ok(catalog) = catalog {
+                for (id, name) in catalog.models {
+                    let model = models.get(&id);
+                    if model.is_some_and(|model| model.status.as_deref() == Some("deprecated")) {
+                        continue;
+                    }
+                    let mut model = candidate(provider, &id, model, status);
+                    model.name = Some(name);
+                    result.models.push(model);
+                }
+            }
+            continue;
         }
         if let Some(catalog) = &provider.catalog
             && !metadata.has_catalog(catalog)

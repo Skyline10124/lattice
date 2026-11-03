@@ -11,7 +11,7 @@ use std::io::Write;
 
 #[derive(Subcommand)]
 pub enum ModelsAction {
-    /// Refresh model metadata from models.dev.
+    #[command(about = "Refresh model metadata and the signed-in ChatGPT account catalog.")]
     Refresh,
 }
 

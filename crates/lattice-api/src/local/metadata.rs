@@ -1,21 +1,43 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! 定时与手动刷新共享一次在途操作；停止信号独立于 Turn 排空。
+//! 两种模型目录各自共享在途操作，由同一个定时任务调度。
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use futures::{FutureExt, future::BoxFuture};
-use lattice_llm::MetadataRefreshControl;
+use lattice_llm::{ChatgptCatalogState, MetadataRefreshControl};
 use tokio::sync::watch;
+use tokio::time::Instant;
 
 use super::{LocalError, LocalErrorKind, Result};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const INITIAL_BACKOFF: Duration = Duration::from_secs(60);
 const MAX_BACKOFF: Duration = Duration::from_secs(60 * 60);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Source {
+    ModelsDev,
+    Chatgpt,
+}
+
+impl Source {
+    fn index(self) -> usize {
+        match self {
+            Self::ModelsDev => 0,
+            Self::Chatgpt => 1,
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            Self::ModelsDev => "models.dev",
+            Self::Chatgpt => "chatgpt",
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AutoRefresh {
@@ -26,47 +48,64 @@ enum AutoRefresh {
     Stopped,
 }
 
-/// 测试用：定时任务每次进入等待与每次触发结束时报告的事件。
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TimerEvent {
-    /// 已开始等待，到给定时刻触发。
-    Armed(tokio::time::Instant),
-    /// 一次定时触发结束。
+    Armed(Instant),
     Fired(AutoRefresh),
 }
 
 fn backoff(failures: u32) -> Duration {
-    let shift = failures.saturating_sub(1).min(16);
     INITIAL_BACKOFF
-        .saturating_mul(1_u32 << shift)
+        .saturating_mul(1_u32 << failures.saturating_sub(1).min(16))
         .min(MAX_BACKOFF)
 }
 
-/// 缓存文件仍在刷新间隔内时返回剩余时间。缺失、读不出或已到期都视为需要刷新。
-/// `now` 由调用方传入，测试可以让它跟随暂停的 tokio 时钟。
-fn cache_freshness(directory: &Path, now: SystemTime) -> Option<Duration> {
-    let modified = std::fs::metadata(directory.join("cache/models.json"))
-        .ok()?
-        .modified()
-        .ok()?;
-    let age = now.duration_since(modified).unwrap_or(Duration::ZERO);
+fn freshness(fetched_at: SystemTime, now: SystemTime) -> Option<Duration> {
     REFRESH_INTERVAL
-        .checked_sub(age)
+        .checked_sub(now.duration_since(fetched_at).unwrap_or(Duration::ZERO))
         .filter(|remaining| !remaining.is_zero())
 }
-type Work = dyn Fn(Arc<MetadataRefreshControl>) -> BoxFuture<'static, Result<()>> + Send + Sync;
-type Completion = watch::Receiver<Option<Result<()>>>;
+
+fn cache_freshness(directory: &Path, now: SystemTime) -> Option<Duration> {
+    freshness(
+        std::fs::metadata(directory.join("cache/models.json"))
+            .ok()?
+            .modified()
+            .ok()?,
+        now,
+    )
+}
+
+type Work =
+    dyn Fn(Source, Arc<MetadataRefreshControl>) -> BoxFuture<'static, Result<usize>> + Send + Sync;
+type Catalog = dyn Fn() -> BoxFuture<'static, Result<ChatgptCatalogState>> + Send + Sync;
+type Completion = watch::Receiver<Option<Result<usize>>>;
 type Clock = dyn Fn() -> SystemTime + Send + Sync;
+
+#[derive(Default)]
+struct SourceState {
+    flight: Option<Completion>,
+    failures: u32,
+    next_attempt: Option<Instant>,
+}
+
+#[derive(Default)]
+struct State {
+    sources: [SourceState; 2],
+    configuration_failures: u32,
+    configuration_next: Option<Instant>,
+}
 
 pub(super) struct MetadataRefresh {
     directory: Option<std::result::Result<PathBuf, crate::ConfigRejection>>,
     work: Box<Work>,
-    flight: Mutex<Option<Completion>>,
+    catalog: Box<Catalog>,
+    state: Mutex<State>,
     cancel: Arc<MetadataRefreshControl>,
     stopped: watch::Sender<bool>,
+    changed: watch::Sender<()>,
     clock: Box<Clock>,
-    /// 测试用：报告每次进入等待的截止时刻与每次定时触发的结果，代替真实等待。
     #[cfg(test)]
     outcomes: Mutex<Option<tokio::sync::mpsc::UnboundedSender<TimerEvent>>>,
 }
@@ -78,62 +117,100 @@ fn stopping() -> LocalError {
     )
 }
 
+async fn metadata_error(
+    error: lattice_llm::MetadataError,
+    auth: lattice_llm::auth::AuthStore,
+) -> LocalError {
+    tokio::task::spawn_blocking(move || {
+        let kind = match &error {
+            lattice_llm::MetadataError::Configuration(_) => LocalErrorKind::BadRequest,
+            lattice_llm::MetadataError::Chatgpt(
+                lattice_llm::LlmError::Credential { .. } | lattice_llm::LlmError::Config { .. },
+            ) => LocalErrorKind::BadRequest,
+            lattice_llm::MetadataError::Cancelled => LocalErrorKind::Stopping,
+            lattice_llm::MetadataError::Io(error)
+                if error.kind() == std::io::ErrorKind::PermissionDenied =>
+            {
+                LocalErrorKind::Permission
+            }
+            lattice_llm::MetadataError::Io(_) | lattice_llm::MetadataError::Worker(_) => {
+                LocalErrorKind::Internal
+            }
+            _ => LocalErrorKind::Transport,
+        };
+        LocalError::new(
+            kind,
+            &crate::ConfigRejection::new(&error.to_string(), Some(&auth)).to_string(),
+        )
+    })
+    .await
+    .unwrap_or_else(|_| {
+        LocalError::new(
+            LocalErrorKind::Internal,
+            "metadata error processing task failed",
+        )
+    })
+}
+
 impl MetadataRefresh {
     pub(super) fn new(
         gateway: std::result::Result<Arc<lattice_llm::RequestGateway>, crate::ConfigRejection>,
         directory: std::result::Result<PathBuf, crate::ConfigRejection>,
     ) -> Arc<Self> {
-        Self::with_work(Some(directory), move |cancel| {
-            let gateway = gateway.clone();
-            Box::pin(async move {
-                let gateway = gateway
-                    .map_err(|error| LocalError::from(crate::ApiError::Configuration(error)))?;
-                let Err(error) = gateway.refresh_metadata(cancel).await else {
-                    return Ok(());
-                };
-                let auth = gateway.auth_store();
-                Err(tokio::task::spawn_blocking(move || {
-                    let kind = match &error {
-                        lattice_llm::MetadataError::Configuration(_) => LocalErrorKind::BadRequest,
-                        lattice_llm::MetadataError::Cancelled => LocalErrorKind::Stopping,
-                        lattice_llm::MetadataError::Io(error)
-                            if error.kind() == std::io::ErrorKind::PermissionDenied =>
-                        {
-                            LocalErrorKind::Permission
-                        }
-                        lattice_llm::MetadataError::Io(_)
-                        | lattice_llm::MetadataError::Worker(_) => LocalErrorKind::Internal,
-                        _ => LocalErrorKind::Transport,
+        let inspect_gateway = gateway.clone();
+        Self::with_sources(
+            Some(directory),
+            move |source, cancel| {
+                let gateway = gateway.clone();
+                Box::pin(async move {
+                    let gateway = gateway
+                        .map_err(|error| LocalError::from(crate::ApiError::Configuration(error)))?;
+                    let result = match source {
+                        Source::ModelsDev => gateway.refresh_metadata(cancel).await.map(|()| 0),
+                        Source::Chatgpt => gateway.refresh_chatgpt_models(cancel).await,
                     };
-                    LocalError::new(
-                        kind,
-                        &crate::ConfigRejection::new(&error.to_string(), Some(&auth)).to_string(),
-                    )
+                    match result {
+                        Ok(count) => Ok(count),
+                        Err(error) => Err(metadata_error(error, gateway.auth_store()).await),
+                    }
                 })
-                .await
-                .map_err(|_| {
-                    LocalError::new(
-                        LocalErrorKind::Internal,
-                        "metadata error processing task failed",
-                    )
-                })?)
-            })
-        })
+            },
+            move || {
+                let gateway = inspect_gateway.clone();
+                Box::pin(async move {
+                    let gateway = gateway
+                        .map_err(|error| LocalError::from(crate::ApiError::Configuration(error)))?;
+                    let reader = gateway.clone();
+                    match tokio::task::spawn_blocking(move || reader.chatgpt_catalog_state()).await
+                    {
+                        Ok(Ok(state)) => Ok(state),
+                        Ok(Err(error)) => Err(metadata_error(error, gateway.auth_store()).await),
+                        Err(_) => Err(LocalError::new(
+                            LocalErrorKind::Internal,
+                            "model directory state task failed",
+                        )),
+                    }
+                })
+            },
+        )
     }
 
-    fn with_work(
+    pub(super) fn with_sources(
         directory: Option<std::result::Result<PathBuf, crate::ConfigRejection>>,
-        work: impl Fn(Arc<MetadataRefreshControl>) -> BoxFuture<'static, Result<()>>
+        work: impl Fn(Source, Arc<MetadataRefreshControl>) -> BoxFuture<'static, Result<usize>>
         + Send
         + Sync
         + 'static,
+        catalog: impl Fn() -> BoxFuture<'static, Result<ChatgptCatalogState>> + Send + Sync + 'static,
     ) -> Arc<Self> {
         Arc::new(Self {
             directory,
             work: Box::new(work),
-            flight: Mutex::new(None),
-            cancel: Arc::new(MetadataRefreshControl::default()),
+            catalog: Box::new(catalog),
+            state: Mutex::default(),
+            cancel: Arc::default(),
             stopped: watch::channel(false).0,
+            changed: watch::channel(()).0,
             clock: Box::new(SystemTime::now),
             #[cfg(test)]
             outcomes: Mutex::new(None),
@@ -141,62 +218,145 @@ impl MetadataRefresh {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
+    fn with_work(
+        directory: Option<std::result::Result<PathBuf, crate::ConfigRejection>>,
+        work: impl Fn(Arc<MetadataRefreshControl>) -> BoxFuture<'static, Result<()>>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Arc<Self> {
+        Self::with_sources(
+            directory,
+            move |_, cancel| {
+                let result = work(cancel);
+                Box::pin(async move { result.await.map(|()| 0) })
+            },
+            || {
+                Box::pin(async {
+                    Ok(ChatgptCatalogState {
+                        logged_in: false,
+                        fetched_at: None,
+                        model_count: None,
+                    })
+                })
+            },
+        )
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
     pub(super) fn without_network() -> Arc<Self> {
         Self::with_work(None, |_| Box::pin(async { Ok(()) }))
     }
 
-    async fn automatic_refresh(self: &Arc<Self>) -> AutoRefresh {
-        let enabled = match self.directory.clone() {
-            Some(directory) => tokio::task::spawn_blocking(move || {
-                let directory = directory
-                    .map_err(|error| LocalError::from(crate::ApiError::Configuration(error)))?;
-                let auth = lattice_llm::auth::AuthStore::new(directory.clone());
-                lattice_llm::metadata_auto_refresh_enabled(&directory).map_err(|error| {
-                    LocalError::new(
-                        LocalErrorKind::BadRequest,
-                        &crate::ConfigRejection::new(&error.to_string(), Some(&auth)).to_string(),
-                    )
-                })
-            })
-            .await
-            .unwrap_or_else(|_| {
-                Err(LocalError::new(
-                    LocalErrorKind::Internal,
-                    "metadata configuration task failed",
-                ))
-            }),
-            None => Ok(true),
+    async fn enabled(&self) -> Result<bool> {
+        let Some(directory) = self.directory.clone() else {
+            return Ok(true);
         };
-        match enabled {
+        tokio::task::spawn_blocking(move || {
+            let directory = directory
+                .map_err(|error| LocalError::from(crate::ApiError::Configuration(error)))?;
+            let auth = lattice_llm::auth::AuthStore::new(directory.clone());
+            lattice_llm::metadata_auto_refresh_enabled(&directory).map_err(|error| {
+                LocalError::new(
+                    LocalErrorKind::BadRequest,
+                    &crate::ConfigRejection::new(&error.to_string(), Some(&auth)).to_string(),
+                )
+            })
+        })
+        .await
+        .unwrap_or_else(|_| {
+            Err(LocalError::new(
+                LocalErrorKind::Internal,
+                "metadata configuration task failed",
+            ))
+        })
+    }
+
+    async fn deadlines(&self) -> [Option<Instant>; 2] {
+        let checked = Instant::now();
+        let now = (self.clock)();
+        let directory = self.directory.clone();
+        let models_freshness =
+            tokio::task::spawn_blocking(move || cache_freshness(directory?.ok()?.as_path(), now))
+                .await
+                .ok()
+                .flatten();
+        let catalog = (self.catalog)().await;
+        let state = self.state.lock().expect("metadata refresh lock");
+        let due = |source: Source, remaining: Option<Duration>| {
+            state.sources[source.index()]
+                .next_attempt
+                .unwrap_or(checked + remaining.unwrap_or_default())
+        };
+        [
+            Some(due(Source::ModelsDev, models_freshness)),
+            match catalog {
+                Ok(catalog) if !catalog.logged_in => None,
+                Ok(catalog) => Some(due(
+                    Source::Chatgpt,
+                    catalog.fetched_at.and_then(|time| freshness(time, now)),
+                )),
+                Err(_) => Some(due(Source::Chatgpt, None)),
+            },
+        ]
+    }
+
+    async fn automatic_refresh(self: &Arc<Self>) -> AutoRefresh {
+        match self.enabled().await {
             Ok(true) => {
-                if self.cache_freshness().await.is_some() {
-                    return AutoRefresh::Fresh;
-                }
-                match self.refresh().await {
-                    Ok(()) => AutoRefresh::Ran,
-                    Err(error) if error.kind == LocalErrorKind::Stopping => AutoRefresh::Stopped,
-                    Err(_) => AutoRefresh::Failed,
-                }
+                let mut state = self.state.lock().expect("metadata refresh lock");
+                state.configuration_failures = 0;
+                state.configuration_next = None;
             }
             Ok(false) => {
                 tracing::info!("automatic model metadata refresh disabled");
-                AutoRefresh::Idle
+                let mut state = self.state.lock().expect("metadata refresh lock");
+                state.configuration_failures = 0;
+                state.configuration_next = Some(Instant::now() + REFRESH_INTERVAL);
+                return AutoRefresh::Idle;
             }
-            // 配置无效时按失败退避重试，而不是等到下一个 24 小时周期。
             Err(error) => {
                 tracing::warn!(%error, "automatic model metadata refresh failed: invalid configuration");
-                AutoRefresh::Failed
+                let mut state = self.state.lock().expect("metadata refresh lock");
+                state.configuration_failures = state.configuration_failures.saturating_add(1);
+                state.configuration_next =
+                    Some(Instant::now() + backoff(state.configuration_failures));
+                return AutoRefresh::Failed;
             }
         }
-    }
-
-    async fn cache_freshness(&self) -> Option<Duration> {
-        let directory = self.directory.clone()?;
-        let now = (self.clock)();
-        tokio::task::spawn_blocking(move || cache_freshness(directory.ok()?.as_path(), now))
-            .await
-            .ok()
-            .flatten()
+        let deadlines = self.deadlines().await;
+        let mut ran = false;
+        let mut failed = false;
+        // 两个来源都必须完成；一个失败不阻止另一个发布。
+        let results =
+            futures::future::join_all([Source::ModelsDev, Source::Chatgpt].into_iter().map(
+                |source| async move {
+                    if deadlines[source.index()].is_some_and(|deadline| deadline <= Instant::now())
+                    {
+                        Some(self.refresh_source(source, false).await)
+                    } else {
+                        None
+                    }
+                },
+            ))
+            .await;
+        for result in results.into_iter().flatten() {
+            ran = true;
+            match result {
+                Err(error) if error.kind == LocalErrorKind::Stopping => {
+                    return AutoRefresh::Stopped;
+                }
+                Err(_) => failed = true,
+                Ok(_) => {}
+            }
+        }
+        if failed {
+            AutoRefresh::Failed
+        } else if ran {
+            AutoRefresh::Ran
+        } else {
+            AutoRefresh::Fresh
+        }
     }
 
     #[cfg(test)]
@@ -210,74 +370,150 @@ impl MetadataRefresh {
         let refresh = self.clone();
         tokio::spawn(async move {
             let mut stopped = refresh.stopped.subscribe();
-            let mut failures = 0_u32;
-            // 等待从 anchor 起算：失败退避与 24 小时周期从上次触发结束时计，缓存剩余
-            // 时间从读取新鲜度时计，不受读取本身耗时的影响。
-            let mut anchor = tokio::time::Instant::now();
-            let mut delay = Duration::ZERO;
+            let mut changed = refresh.changed.subscribe();
             loop {
-                let checked = tokio::time::Instant::now();
-                let freshness = refresh.cache_freshness().await;
-                if failures > 0 {
-                    if freshness.is_some() {
-                        failures = 0;
-                        continue;
-                    }
-                    delay = backoff(failures);
-                } else if let Some(remaining) = freshness {
-                    anchor = checked;
-                    delay = remaining;
+                // 先承接已经完成的工作通知，再读取它们更新后的下次时间。
+                changed.borrow_and_update();
+                if *stopped.borrow() {
+                    break;
                 }
-                let sleep = tokio::time::sleep_until(anchor + delay);
-                // 报告的是这次等待本身的截止时刻，测试据此确认任务停在哪个时刻之前。
+                let deadline = refresh
+                    .state
+                    .lock()
+                    .expect("metadata refresh lock")
+                    .configuration_next;
+                let deadline = match deadline {
+                    Some(deadline) => deadline,
+                    None => refresh
+                        .deadlines()
+                        .await
+                        .into_iter()
+                        .flatten()
+                        .min()
+                        .unwrap_or_else(|| Instant::now() + REFRESH_INTERVAL),
+                };
+                let sleep = tokio::time::sleep_until(deadline);
                 #[cfg(test)]
                 refresh.report(TimerEvent::Armed(sleep.deadline()));
                 tokio::select! {
                     biased;
                     _ = stopped.wait_for(|stopped| *stopped) => break,
+                    _ = changed.changed() => continue,
                     _ = sleep => {},
                 }
                 if *stopped.borrow() {
                     break;
                 }
                 let outcome = refresh.automatic_refresh().await;
-                anchor = tokio::time::Instant::now();
                 #[cfg(test)]
                 refresh.report(TimerEvent::Fired(outcome));
-                match outcome {
-                    AutoRefresh::Stopped => break,
-                    AutoRefresh::Failed => failures = failures.saturating_add(1),
-                    AutoRefresh::Ran | AutoRefresh::Fresh | AutoRefresh::Idle => {
-                        failures = 0;
-                        delay = REFRESH_INTERVAL;
-                    }
+                if outcome == AutoRefresh::Stopped {
+                    break;
                 }
             }
         })
     }
 
     pub(super) fn stop(&self) {
-        let _flight = self.flight.lock().expect("metadata refresh lock");
+        let _state = self.state.lock().expect("metadata refresh lock");
         self.cancel.cancel();
         self.stopped.send_replace(true);
     }
 
+    pub(super) async fn drain(&self) {
+        let completions: Vec<_> = self
+            .state
+            .lock()
+            .expect("metadata refresh lock")
+            .sources
+            .iter()
+            .filter_map(|source| source.flight.clone())
+            .collect();
+        for completion in completions {
+            let _ = wait(completion).await;
+        }
+        self.cancel.drain().await;
+    }
+
     pub(super) async fn refresh(self: &Arc<Self>) -> Result<()> {
-        let mut completion = {
-            let mut flight = self.flight.lock().expect("metadata refresh lock");
+        let (models, chatgpt) =
+            tokio::join!(self.refresh_source(Source::ModelsDev, false), async {
+                let state = (self.catalog)().await?;
+                if state.logged_in {
+                    self.refresh_source(Source::Chatgpt, false).await.map(Some)
+                } else {
+                    Ok(None)
+                }
+            });
+        let mut errors = Vec::new();
+        let mut updated = Vec::new();
+        let mut kind = LocalErrorKind::Transport;
+        for (source, result) in [
+            (Source::ModelsDev, models.map(Some)),
+            (Source::Chatgpt, chatgpt),
+        ] {
+            match result {
+                Ok(Some(_)) => updated.push(source.name()),
+                Ok(None) => {}
+                Err(error) => {
+                    kind = error.kind;
+                    errors.push(format!("{}: {}", source.name(), error.message));
+                }
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            let mut message = errors.join("; ");
+            if !updated.is_empty() {
+                message.push_str(&format!("; updated: {}", updated.join(", ")));
+            }
+            Err(LocalError::new(kind, &message))
+        }
+    }
+
+    pub(super) async fn refresh_chatgpt(self: &Arc<Self>) -> Result<usize> {
+        self.refresh_source(Source::Chatgpt, false).await
+    }
+
+    pub(super) async fn ensure_chatgpt(self: &Arc<Self>) -> Result<bool> {
+        let catalog = (self.catalog)().await?;
+        if !catalog.logged_in || catalog.model_count.is_some() {
+            return Ok(false);
+        }
+        self.refresh_source(Source::Chatgpt, true).await?;
+        Ok(true)
+    }
+
+    async fn refresh_source(self: &Arc<Self>, source: Source, only_missing: bool) -> Result<usize> {
+        let completion = {
+            let mut state = self.state.lock().expect("metadata refresh lock");
             if self.cancel.is_cancelled() {
                 return Err(stopping());
             }
-            if let Some(completion) = &*flight {
+            let state = &mut state.sources[source.index()];
+            if let Some(completion) = &state.flight {
                 completion.clone()
             } else {
                 let (done, completion) = watch::channel(None);
-                *flight = Some(completion.clone());
+                state.flight = Some(completion.clone());
                 let refresh = self.clone();
                 tokio::spawn(async move {
                     let mut stopped = refresh.stopped.subscribe();
                     let work = std::panic::AssertUnwindSafe(async {
-                        (refresh.work)(refresh.cancel.clone()).await
+                        if only_missing {
+                            let catalog = (refresh.catalog)().await?;
+                            if let Some(count) = catalog.model_count {
+                                return Ok(count);
+                            }
+                            if !catalog.logged_in {
+                                return Err(LocalError::new(
+                                    LocalErrorKind::BadRequest,
+                                    "ChatGPT is not signed in",
+                                ));
+                            }
+                        }
+                        (refresh.work)(source, refresh.cancel.clone()).await
                     })
                     .catch_unwind();
                     let result = tokio::select! {
@@ -288,26 +524,43 @@ impl MetadataRefresh {
                     if let Err(error) = &result
                         && error.kind != LocalErrorKind::Stopping
                     {
-                        tracing::warn!(%error, "model metadata refresh failed");
+                        tracing::warn!(%error, source = source.name(), "model metadata refresh failed");
                     }
-                    let mut flight = refresh.flight.lock().expect("metadata refresh lock");
-                    flight.take();
+                    let mut state = refresh.state.lock().expect("metadata refresh lock");
+                    let state = &mut state.sources[source.index()];
+                    state.flight = None;
+                    let delay = match &result {
+                        Ok(_) => {
+                            state.failures = 0;
+                            REFRESH_INTERVAL
+                        }
+                        Err(_) => {
+                            state.failures = state.failures.saturating_add(1);
+                            backoff(state.failures)
+                        }
+                    };
+                    state.next_attempt = Some(Instant::now() + delay);
                     done.send_replace(Some(result));
+                    refresh.changed.send_replace(());
                 });
                 completion
             }
         };
-        loop {
-            if let Some(result) = completion.borrow_and_update().clone() {
-                return result;
-            }
-            completion.changed().await.map_err(|_| {
-                LocalError::new(
-                    LocalErrorKind::Internal,
-                    "metadata refresh result unavailable",
-                )
-            })?;
+        wait(completion).await
+    }
+}
+
+async fn wait(mut completion: Completion) -> Result<usize> {
+    loop {
+        if let Some(result) = completion.borrow_and_update().clone() {
+            return result;
         }
+        completion.changed().await.map_err(|_| {
+            LocalError::new(
+                LocalErrorKind::Internal,
+                "metadata refresh result unavailable",
+            )
+        })?;
     }
 }
 

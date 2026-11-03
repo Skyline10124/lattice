@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use lattice_api::local::{
-    AuthLoginEvent, AuthLoginOutcome, LocalAuthLogin, LocalError, LocalErrorKind, SensitiveLoginUrl,
+    AuthCatalogOutcome, AuthLoginEvent, AuthLoginOutcome, LocalAuthLogin, LocalError,
+    LocalErrorKind, SensitiveLoginUrl,
 };
 use std::{
     ffi::OsStr,
@@ -169,7 +170,7 @@ async fn interact_with_hooks(
                         if matches!(outcome, AuthLoginOutcome::Cancelled {}) && let Some(error) = input_error.take() {
                             return Err(input_failure(error));
                         }
-                        return render(&outcome, json, out);
+                        return render(&outcome, json, out, err);
                     }
                     None => return Err(LocalError::from(io::Error::new(io::ErrorKind::UnexpectedEof, "login connection ended")).into()),
                 },
@@ -235,16 +236,24 @@ fn render(
     outcome: &AuthLoginOutcome,
     json: bool,
     out: &mut impl Write,
+    err: &mut impl Write,
 ) -> anyhow::Result<ExitCode> {
     let mut value = serde_json::json!({"type":"auth","action":"login","provider":"chatgpt"});
     let code = match outcome {
-        AuthLoginOutcome::SignedIn { status } => {
+        AuthLoginOutcome::SignedIn { status, catalog } => {
             value["status"] = serde_json::to_value(status.status)?;
             if let Some(email) = &status.email {
                 value["email"] = email.clone().into();
             }
             if let Some(expiry) = &status.expires_at {
                 value["expires_at"] = expiry.clone().into();
+            }
+            value["catalog"] = serde_json::to_value(catalog)?;
+            if !json && let AuthCatalogOutcome::Failed { warning } = catalog {
+                writeln!(
+                    err,
+                    "Signed in; ChatGPT model directory refresh failed: {warning}"
+                )?;
             }
             ExitCode::SUCCESS
         }
@@ -269,10 +278,54 @@ mod tests;
 mod output_tests {
     use super::*;
     #[test]
+    fn directory_failure_is_a_successful_login_with_a_structured_warning() {
+        let outcome = AuthLoginOutcome::SignedIn {
+            status: lattice_api::local::ProviderAuthStatus {
+                provider: "chatgpt".into(),
+                status: lattice_api::local::AuthState::Ready,
+                email: None,
+                expires_at: None,
+            },
+            catalog: AuthCatalogOutcome::Failed {
+                warning: "HTTP 503".into(),
+            },
+        };
+        for json in [false, true] {
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            assert_eq!(
+                render(&outcome, json, &mut out, &mut err).unwrap(),
+                ExitCode::SUCCESS
+            );
+            if json {
+                let value: serde_json::Value = serde_json::from_slice(&out).unwrap();
+                assert_eq!(value["status"], "ready");
+                assert_eq!(
+                    value["catalog"],
+                    serde_json::json!({"status":"failed","warning":"HTTP 503"})
+                );
+                assert!(err.is_empty());
+            } else {
+                assert_eq!(String::from_utf8(out).unwrap(), "chatgpt ready\n");
+                assert!(
+                    String::from_utf8(err)
+                        .unwrap()
+                        .contains("directory refresh failed: HTTP 503")
+                );
+            }
+        }
+    }
+    #[test]
     fn final_json_contains_only_safe_status_and_cancel_is_exit_two() {
         let mut out = Vec::new();
         assert_eq!(
-            render(&AuthLoginOutcome::Cancelled {}, true, &mut out).unwrap(),
+            render(
+                &AuthLoginOutcome::Cancelled {},
+                true,
+                &mut out,
+                &mut Vec::new()
+            )
+            .unwrap(),
             ExitCode::from(2)
         );
         let value: serde_json::Value = serde_json::from_slice(&out).unwrap();
@@ -289,13 +342,19 @@ mod output_tests {
                     email: Some("user@example.com".into()),
                     expires_at: None,
                 },
+                catalog: AuthCatalogOutcome::Refreshed { model_count: 2 },
             },
             true,
             &mut out,
+            &mut Vec::new(),
         )
         .unwrap();
         let value: serde_json::Value = serde_json::from_slice(&out).unwrap();
-        assert_eq!(value.as_object().unwrap().len(), 5);
+        assert_eq!(value.as_object().unwrap().len(), 6);
         assert_eq!(value["status"], "ready");
+        assert_eq!(
+            value["catalog"],
+            serde_json::json!({"status":"refreshed","model_count":2})
+        );
     }
 }

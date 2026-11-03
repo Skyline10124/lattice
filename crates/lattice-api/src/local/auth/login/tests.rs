@@ -16,6 +16,16 @@ use tokio::{
 const URL: &str =
     "https://auth.openai.com/authorize?state=private-state&id_token_hint=private-hint";
 
+async fn exchange<A: LoginAttempt>(
+    stream: UnixStream,
+    start: impl std::future::Future<Output = std::result::Result<A, LoginError>>,
+) -> Result<()> {
+    super::exchange(stream, start, || {
+        Box::pin(async { AuthCatalogOutcome::Refreshed { model_count: 0 } })
+    })
+    .await
+}
+
 struct Attempt {
     url: SensitiveLoginUrl,
     finished: watch::Sender<Option<std::result::Result<ProviderAuthStatus, LoginError>>>,
@@ -168,7 +178,7 @@ fn login_envelopes_payloads_and_outcomes_reject_unknown_fields() {
         r#"{"response":"auth_login_authorization","value":{"authorization_url":"secret","token":"secret"}}"#,
         r#"{"response":"auth_login_authorization","value":{"authorization_url":"secret"},"token":"secret"}"#,
         r#"{"response":"auth_login_result","value":{"outcome":"cancelled","token":"secret"}}"#,
-        r#"{"response":"auth_login_result","value":{"outcome":"signed_in","status":{"provider":"chatgpt","status":"ready","token":"secret"}}}"#,
+        r#"{"response":"auth_login_result","value":{"outcome":"signed_in","status":{"provider":"chatgpt","status":"ready","token":"secret"},"catalog":{"status":"refreshed","model_count":0}}}"#,
     ] {
         assert!(serde_json::from_str::<LoginResponse>(wire).is_err());
     }
@@ -218,6 +228,57 @@ async fn browser_completion_needs_no_frontend_message_and_wins_late_cancel() {
         Some(AuthLoginEvent::Finished(AuthLoginOutcome::SignedIn { .. }))
     ));
     bounded(task).await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn saved_login_waits_for_the_directory_result_and_directory_failure_keeps_it_signed_in() {
+    for expected in [
+        AuthCatalogOutcome::Refreshed { model_count: 0 },
+        AuthCatalogOutcome::Refreshed { model_count: 2 },
+        AuthCatalogOutcome::Failed {
+            warning: "directory unavailable".into(),
+        },
+    ] {
+        let (client, server) = UnixStream::pair().unwrap();
+        let (attempt, _callbacks) = attempt();
+        let saved = attempt.finished.clone();
+        let cancelled = attempt.cancelled.clone();
+        let (entered, mut calls) = mpsc::unbounded_channel();
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let result = expected.clone();
+        let task = tokio::spawn(super::exchange(server, async { Ok(attempt) }, {
+            let release = release.clone();
+            move || {
+                entered.send(()).unwrap();
+                let release = release.clone();
+                let result = result.clone();
+                Box::pin(async move {
+                    release.acquire().await.unwrap().forget();
+                    result
+                })
+            }
+        }));
+        let mut login = LocalAuthLogin::from_stream(client);
+        authorization(&mut login).await;
+        assert!(calls.try_recv().is_err(), "保存成功之前不刷新目录");
+        saved.send_replace(Some(Ok(signed_in())));
+        bounded(calls.recv()).await.unwrap();
+        assert!(
+            timeout(Duration::from_millis(1), login.next())
+                .await
+                .is_err()
+        );
+        release.add_permits(1);
+        let Some(AuthLoginEvent::Finished(AuthLoginOutcome::SignedIn { status, catalog })) =
+            bounded(login.next()).await.unwrap()
+        else {
+            panic!("目录失败不能撤销已保存的登录");
+        };
+        assert_eq!(status, signed_in());
+        assert_eq!(catalog, expected);
+        assert!(!cancelled.load(Ordering::SeqCst));
+        bounded(task).await.unwrap().unwrap();
+    }
 }
 
 #[tokio::test]
@@ -417,6 +478,7 @@ async fn client_rejects_duplicate_authorization_and_signed_in_before_authorizati
                     &mut server,
                     &LoginResponse::AuthLoginResult(AuthLoginOutcome::SignedIn {
                         status: signed_in(),
+                        catalog: AuthCatalogOutcome::Refreshed { model_count: 0 },
                     }),
                 )
                 .await
