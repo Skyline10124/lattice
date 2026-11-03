@@ -2198,6 +2198,18 @@ async fn invalid_configuration_only_blocks_requests_that_depend_on_it() {
 }
 
 #[tokio::test]
+async fn gateway_and_all_turns_share_the_same_credential_lifecycle() {
+    let directory = private_dir();
+    let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
+    let first = gateway.open_turn();
+    let second = gateway.open_turn();
+    gateway.chatgpt_auth().shutdown().await.unwrap();
+    assert!(first.configuration.chatgpt_auth.logout().await.is_err());
+    assert!(second.configuration.chatgpt_auth.remove().await.is_err());
+    assert!(gateway.chatgpt_auth().logout().await.is_err());
+}
+
+#[tokio::test]
 async fn unimplemented_auth_is_configuration_error() {
     let directory = private_dir();
     let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();

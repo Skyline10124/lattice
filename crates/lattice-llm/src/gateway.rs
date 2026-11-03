@@ -9,7 +9,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::auth::{AuthError, AuthStore, Credentials};
+use crate::auth::{AuthError, AuthStore, ChatgptAuth, Credentials};
 use crate::client::{self, RequestEndpoint, TurnClient};
 use crate::provider::{Auth, Provider, config::ProviderRegistry, validate_model_id};
 use crate::reasoning::{ReasoningCapabilities, ReasoningPlan};
@@ -21,6 +21,7 @@ struct Configuration {
     directory: PathBuf,
     roots: Vec<reqwest::Certificate>,
     roots_der: Vec<Vec<u8>>,
+    chatgpt_auth: ChatgptAuth,
     #[cfg(test)]
     metadata_url: Option<String>,
 }
@@ -44,11 +45,13 @@ impl RequestGateway {
     /// 选根之后集合为空也照常构造：此时记为“没有可用的根证书”，只拒绝依赖 TLS 的请求。
     pub fn new(config_dir: PathBuf, roots_der: Vec<Vec<u8>>) -> Result<Self, LlmError> {
         let (roots_der, roots) = client::load_bounded_roots(roots_der);
+        let chatgpt_auth = ChatgptAuth::new(AuthStore::new(config_dir.clone()), roots.clone());
         Ok(Self {
             configuration: Arc::new(Configuration {
                 directory: config_dir,
                 roots,
                 roots_der,
+                chatgpt_auth,
                 #[cfg(test)]
                 metadata_url: None,
             }),
@@ -67,6 +70,11 @@ impl RequestGateway {
 
     pub fn auth_store(&self) -> AuthStore {
         AuthStore::new(self.configuration.directory.clone())
+    }
+
+    /// 后台凭据命令与所有 Turn 共用同一个 SIWC 生命周期。
+    pub fn chatgpt_auth(&self) -> ChatgptAuth {
+        self.configuration.chatgpt_auth.clone()
     }
 
     /// 刷新只读取当前注册表，固定使用正式元数据源与启动时的信任根。
@@ -255,6 +263,7 @@ impl ResolvedRequest {
                 protocol: self.provider.protocol,
                 auth: self.provider.auth,
                 credentials: self.credentials.clone(),
+                chatgpt_auth: &self.configuration.chatgpt_auth,
                 roots: &self.configuration.roots,
                 client: self.client.clone(),
                 output_limit: self.output_limit,

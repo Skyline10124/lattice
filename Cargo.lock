@@ -2835,6 +2835,7 @@ dependencies = [
  "chrono",
  "futures",
  "h2",
+ "http",
  "lattice-conversation",
  "net-guard",
  "reqwest",

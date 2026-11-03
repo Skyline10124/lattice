@@ -134,6 +134,14 @@ impl Directory {
     }
 
     pub(super) fn write(&self, document: &format::Document) -> Result<(), AuthError> {
+        self.write_with_directory_sync(document, File::sync_all)
+    }
+
+    fn write_with_directory_sync(
+        &self,
+        document: &format::Document,
+        sync_directory: impl FnOnce(&File) -> std::io::Result<()>,
+    ) -> Result<(), AuthError> {
         let mut bytes = Zeroizing::new(Vec::new());
         serde_json::to_writer(&mut *bytes, document)
             .map_err(|_| AuthError::Internal("cannot encode credentials"))?;
@@ -151,7 +159,7 @@ impl Directory {
         renameat(&self.0, &temporary.name, &self.0, "auth.json")
             .map_err(|error| AuthError::io("replace credential file", error))?;
         temporary.published = true;
-        self.0.sync_all().map_err(|error| {
+        sync_directory(&self.0).map_err(|error| {
             AuthError::io(
                 "sync directory after replacement (file may already have changed)",
                 error,
@@ -214,6 +222,39 @@ impl Drop for Temporary<'_> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn directory_sync_failure_reports_uncertainty_after_the_replacement_is_visible() {
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let directory = Directory::open(root.path(), false).unwrap().unwrap();
+        let mut document = format::Document::default();
+        directory.write(&document).unwrap();
+        document.providers.insert(
+            "openai".into(),
+            format::Credential::ApiKey {
+                key: super::super::Secret("replacement-test-secret".into()),
+            },
+        );
+        let error = directory
+            .write_with_directory_sync(&document, |_| {
+                Err(std::io::Error::other("directory sync failed"))
+            })
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            AuthError::Io {
+                operation: "sync directory after replacement (file may already have changed)",
+                ..
+            }
+        ));
+        assert!(matches!(directory.read().unwrap().providers.get("openai"),
+            Some(format::Credential::ApiKey { key }) if key.0 == "replacement-test-secret"));
+        assert_eq!(
+            fs::metadata(root.path().join("auth.json")).unwrap().mode() & 0o777,
+            0o600
+        );
+    }
 
     #[test]
     fn ownership_requires_the_effective_user_for_both_files_and_directories() {

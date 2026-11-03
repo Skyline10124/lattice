@@ -9,13 +9,13 @@ use std::{
 
 const KEY: &str = "credential-test-secret-7J29";
 
-fn fixture() -> (tempfile::TempDir, AuthStore) {
+pub(super) fn fixture() -> (tempfile::TempDir, AuthStore) {
     let directory = tempfile::tempdir().unwrap();
     let store = AuthStore::new(directory.path().join("config"));
     (directory, store)
 }
 
-fn write(store: &AuthStore, bytes: impl AsRef<[u8]>) {
+pub(super) fn write(store: &AuthStore, bytes: impl AsRef<[u8]>) {
     fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
@@ -37,7 +37,7 @@ fn state(store: &AuthStore, provider: &str) -> AuthState {
         .status
 }
 
-fn chatgpt() -> serde_json::Value {
+pub(super) fn chatgpt() -> serde_json::Value {
     serde_json::json!({"type":"chatgpt", "host_id":"host", "client_id":"client", "account":{"subject":"subject", "email":"user@example.com"}, "tokens":{
         "access_token":"access-test-secret", "refresh_token":"refresh-test-secret", "id_token":"id-test-secret",
         "expires_at":"2020-01-01T00:00:00+00:00", "scopes":["openid", "chatgpt.tokens.use.direct"]
