@@ -1,17 +1,120 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
-use chrono::{TimeDelta, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use tokio::sync::{Notify, oneshot, watch};
 
-use super::login::LoginControl;
-use super::oauth::{
-    Clock, DIRECT_SCOPE, HttpTokenEndpoint, RefreshFailure, RefreshGrant, TokenEndpoint,
-};
-use super::{AuthError, AuthStore, Credentials, UpdateError, format, valid_access_token};
+use super::{AuthError, AuthStore, Credentials, Secret, UpdateError, format};
+use endpoint::{HttpTokenEndpoint, RefreshFailure, TokenEndpoint};
+
+mod endpoint;
 use crate::LlmError;
+pub use login::{ChatgptLogin, LoginError, SensitiveLoginUrl};
+
+const DIRECT_SCOPE: &str = "chatgpt.tokens.use.direct";
+type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
+
+fn valid_access_token(token: &str) -> bool {
+    !token.is_empty()
+        && !token.chars().any(|c| c.is_control() || c.is_whitespace())
+        && reqwest::header::HeaderValue::from_str(token).is_ok()
+}
+
+struct Redaction(Vec<Secret>);
+
+impl Redaction {
+    fn new(credentials: &Credentials) -> Self {
+        Self(
+            credentials
+                .0
+                .values()
+                .into_iter()
+                .map(|value| Secret(value.to_owned()))
+                .collect(),
+        )
+    }
+
+    fn add(&mut self, value: &str) {
+        self.0.push(Secret(value.to_owned()));
+    }
+
+    fn apply(&self, error: LlmError) -> LlmError {
+        let mut values: Vec<_> = self.0.iter().map(|value| value.0.as_str()).collect();
+        values.sort_unstable_by_key(|value| std::cmp::Reverse(value.len()));
+        values.dedup();
+        crate::client::redact_error_with(error, |message| {
+            let mut message = message.to_owned();
+            for value in values {
+                if !value.is_empty() {
+                    message = message.replace(value, "[REDACTED]");
+                }
+            }
+            crate::transport::bound_diagnostic(&message)
+        })
+    }
+}
+
+#[derive(PartialEq, Eq)]
+enum Phase {
+    Pending,
+    Cancelled,
+    Published,
+}
+
+struct LoginControl {
+    phase: Mutex<Phase>,
+    cancellation: watch::Sender<bool>,
+}
+
+impl LoginControl {
+    fn new() -> Self {
+        Self {
+            phase: Mutex::new(Phase::Pending),
+            cancellation: watch::channel(false).0,
+        }
+    }
+
+    fn cancel(&self) {
+        let mut phase = self.phase.lock().expect("login publication lock");
+        if *phase == Phase::Pending {
+            *phase = Phase::Cancelled;
+            self.cancellation.send_replace(true);
+        }
+    }
+
+    async fn cancelled(&self) {
+        let mut receiver = self.cancellation.subscribe();
+        let _ = receiver.wait_for(|cancelled| *cancelled).await;
+    }
+
+    fn is_cancelled(&self) -> bool {
+        *self.cancellation.borrow()
+    }
+
+    fn publication(&self) -> Result<MutexGuard<'_, Phase>, UpdateError> {
+        let phase = self.phase.lock().expect("login publication lock");
+        if *phase != Phase::Pending {
+            return Err(UpdateError::Conflict);
+        }
+        Ok(phase)
+    }
+}
+
+fn host_id() -> Result<Secret, LlmError> {
+    let mut bytes = [0; 16];
+    getrandom::fill(&mut bytes).map_err(|_| failure("system randomness unavailable"))?;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Ok(Secret(uuid::Uuid::from_bytes(bytes).urn().to_string()))
+}
+
+fn failure(reason: &str) -> LlmError {
+    LlmError::Credential {
+        message: format!("ChatGPT login: {reason}"),
+    }
+}
 
 /// 网关共享的 SIWC 生命周期句柄；所有秘密与刷新细节留在本库内。
 #[derive(Clone)]
@@ -98,10 +201,7 @@ impl Flight {
 impl ChatgptAuth {
     pub(crate) fn new(store: AuthStore, roots: Vec<reqwest::Certificate>) -> Self {
         let clock: Clock = Arc::new(Utc::now);
-        let endpoint = Arc::new(HttpTokenEndpoint {
-            roots,
-            clock: clock.clone(),
-        });
+        let endpoint = Arc::new(HttpTokenEndpoint::new(roots, clock.clone()));
         Self::with_dependencies(store, endpoint, clock)
     }
 
@@ -298,11 +398,7 @@ impl Manager {
         if expiry.signed_duration_since((self.clock)()) >= TimeDelta::seconds(300) {
             return Ok((generation, credentials));
         }
-        let grant = RefreshGrant {
-            client_id,
-            refresh_token: &tokens.refresh_token.0,
-        };
-        let result = match self.endpoint.refresh(grant).await {
+        let result = match self.endpoint.refresh(client_id, tokens).await {
             Ok(reply) => {
                 self.update(credentials.clone(), move |entry| {
                     let format::Credential::Chatgpt {
@@ -312,10 +408,7 @@ impl Manager {
                     else {
                         unreachable!("compared token record remains present")
                     };
-                    tokens.access_token = reply.access_token;
-                    tokens.refresh_token = reply.refresh_token;
-                    tokens.expires_at = reply.expires_at;
-                    tokens.scopes = reply.scopes;
+                    *tokens = reply;
                     true
                 })
                 .await
@@ -396,10 +489,7 @@ impl Manager {
             }) => {
                 match self
                     .endpoint
-                    .revoke(RefreshGrant {
-                        client_id: &client.0,
-                        refresh_token: &tokens.refresh_token.0,
-                    })
+                    .revoke(&client.0, &tokens.refresh_token.0)
                     .await
                 {
                     Ok(()) => RevocationStatus::Confirmed,

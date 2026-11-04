@@ -249,11 +249,13 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
-    fn login_publication_orders_cancel_and_preserves_post_rename_failure() {
-        use crate::auth::{
-            UpdateError,
-            login::{LoginControl, Phase},
+    fn guarded_write_orders_hooks_and_releases_guard_before_directory_sync() {
+        use crate::auth::UpdateError;
+        use std::sync::{
+            Mutex,
+            atomic::{AtomicBool, Ordering},
         };
+
         let root = tempfile::tempdir().unwrap();
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let directory = Directory::open(root.path(), false).unwrap().unwrap();
@@ -265,27 +267,31 @@ mod tests {
                 key: crate::auth::Secret("local-test-key".into()),
             },
         );
-        let control = LoginControl::new();
         let result: Result<(), UpdateError> = directory.write_guarded(
             &document,
-            || {
-                control.cancel();
-                control.publication()
-            },
-            |_| panic!("已取消的登录不能发布"),
+            || Err::<(), _>(UpdateError::Conflict),
+            |_| panic!("被拒绝的写入不能发布"),
         );
         assert!(matches!(result, Err(UpdateError::Conflict)));
         assert!(directory.read().unwrap().providers.is_empty());
-        let control = LoginControl::new();
+
+        let publication = Mutex::new(());
+        let published = AtomicBool::new(false);
         let result: Result<(), UpdateError> = directory.write_with_hooks(
             &document,
-            |_| Err(std::io::Error::other("test directory sync failure")),
-            || control.publication(),
-            |phase| **phase = Phase::Published,
+            |_| {
+                assert!(published.load(Ordering::SeqCst));
+                assert!(publication.try_lock().is_ok());
+                Err(std::io::Error::other("test directory sync failure"))
+            },
+            || Ok(publication.lock().unwrap()),
+            |_| {
+                assert!(publication.try_lock().is_err());
+                assert!(directory.read().unwrap().providers.contains_key("openai"));
+                published.store(true, Ordering::SeqCst);
+            },
         );
         assert!(matches!(result, Err(UpdateError::Storage(_))));
-        control.cancel();
-        assert!(!control.is_cancelled());
         assert!(directory.read().unwrap().providers.contains_key("openai"));
     }
 

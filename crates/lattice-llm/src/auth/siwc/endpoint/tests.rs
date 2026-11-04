@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 fn now() -> DateTime<Utc> {
     DateTime::from_timestamp(1_800_000_000, 0).unwrap()
@@ -60,7 +60,7 @@ fn login_response_requires_identity_token_and_granted_permission() {
     let parsed = parse_login_token(&serde_json::to_vec(&value).unwrap(), now()).unwrap();
     assert_eq!(parsed.id_token.0, "ignored-id-secret");
     assert_eq!(
-        parsed.token.expires_at,
+        parsed.expires_at,
         (now() + chrono::TimeDelta::seconds(3600)).to_rfc3339()
     );
     for id in [
@@ -106,6 +106,8 @@ fn jwks_discovery_uses_only_its_exact_trusted_origin() {
 #[test]
 fn token_response_validates_material_expiry_and_permission_while_ignoring_id_token() {
     let value = response();
+    let mut previous = parse_login_token(&serde_json::to_vec(&value).unwrap(), now()).unwrap();
+    previous.id_token = Secret("previous-id-secret".into());
     for (expires_in, expected) in [
         (3600, "2027-01-15T09:00:00+00:00"),
         (937, "2027-01-15T08:15:37+00:00"),
@@ -122,11 +124,18 @@ fn token_response_validates_material_expiry_and_permission_while_ignoring_id_tok
             } else {
                 sample.as_object_mut().unwrap().remove("id_token");
             }
-            let parsed = parse_token(&serde_json::to_vec(&sample).unwrap(), now()).unwrap();
+            let reply = HttpReply {
+                status: 200,
+                headers: HeaderMap::new(),
+                body: Zeroizing::new(serde_json::to_vec(&sample).unwrap()),
+            };
+            let parsed = refresh_reply(&reply, &previous, now())
+                .unwrap_or_else(|_| panic!("合法刷新回复应保留已验签身份"));
             assert!(parsed.access_token.0 == "new-access-secret");
             assert!(parsed.refresh_token.0 == "new-refresh-secret");
             assert_eq!(parsed.expires_at, expected);
             assert_eq!(parsed.scopes, ["openid", DIRECT_SCOPE]);
+            assert_eq!(parsed.id_token.0, "previous-id-secret");
         }
     }
     for (field, invalid) in [
@@ -337,21 +346,16 @@ async fn interrupted_response_bodies_are_retryable_but_invalid_json_is_not() {
 
 #[tokio::test]
 async fn oauth_without_roots_fails_before_any_network_request() {
-    let endpoint = HttpTokenEndpoint {
-        roots: vec![],
-        clock: Arc::new(now),
-    };
-    let grant = RefreshGrant {
-        client_id: "client-secret",
-        refresh_token: "refresh-secret",
-    };
+    let endpoint = HttpTokenEndpoint::new(vec![], Arc::new(now));
+    let previous = parse_login_token(&serde_json::to_vec(&response()).unwrap(), now()).unwrap();
     assert!(matches!(
-        endpoint.refresh(grant).await,
+        endpoint.refresh("client-secret", &previous).await,
         Err(RefreshFailure::Other(LlmError::Config { .. }))
     ));
-    let grant = RefreshGrant {
-        client_id: "client-secret",
-        refresh_token: "refresh-secret",
-    };
-    assert!(endpoint.revoke(grant).await.is_err());
+    assert!(
+        endpoint
+            .revoke("client-secret", "refresh-secret")
+            .await
+            .is_err()
+    );
 }

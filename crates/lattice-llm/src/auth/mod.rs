@@ -10,16 +10,13 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::provider::{Auth, config::ProviderRegistry};
 
-mod callback;
 mod file;
 mod format;
-mod id_token;
-mod login;
-mod oauth;
 mod siwc;
 
-pub use login::{ChatgptLogin, LoginError, SensitiveLoginUrl};
-pub use siwc::{ChatgptAuth, RemoveChatgptResult, RevocationStatus};
+pub use siwc::{
+    ChatgptAuth, ChatgptLogin, LoginError, RemoveChatgptResult, RevocationStatus, SensitiveLoginUrl,
+};
 
 /// 元数据缓存与凭据共用配置目录的创建和安全检查，不读取凭据文件。
 pub(crate) fn ensure_configuration_directory(path: &std::path::Path) -> Result<(), AuthError> {
@@ -119,12 +116,6 @@ fn validate_key(key: &str) -> Result<(), AuthError> {
         return Err(AuthError::InvalidKey);
     }
     Ok(())
-}
-
-fn valid_access_token(token: &str) -> bool {
-    !token.is_empty()
-        && !token.chars().any(|c| c.is_control() || c.is_whitespace())
-        && reqwest::header::HeaderValue::from_str(token).is_ok()
 }
 
 /// 只持配置目录；每次操作按需读取当前文件，不缓存秘密。
