@@ -121,7 +121,7 @@ Anthropic Messages 的 `redacted_thinking` 以空 Reasoning 片段及带 `redact
 | `id` | `protocol` | `base_url` | `auth` | `catalog` | features |
 | --- | --- | --- | --- | --- | --- |
 | `openai` | `responses` | `https://api.openai.com/v1` | `bearer` | `openai` | — |
-| `chatgpt` | `responses` | `https://api.openai.com/v1` | `oauth:chatgpt` | `openai` | `tool_namespace = true` |
+| `chatgpt` | `responses` | `https://api.openai.com/v1` | `oauth:chatgpt` | `openai` | — |
 | `anthropic` | `anthropic-messages` | `https://api.anthropic.com` | `x-api-key` | `anthropic` | — |
 | `google` | `interactions` | `https://generativelanguage.googleapis.com/v1beta` | `x-goog-api-key` | `google` | — |
 | `xai` | `responses` | `https://api.x.ai/v1` | `bearer` | `xai` | — |
@@ -223,11 +223,9 @@ feature 由协议适配器的代码定义，配置只能在已有取值中选择
 
 ### Responses
 
-| feature | 取值 | 默认 | 作用 |
-| --- | --- | --- | --- |
-| `tool_namespace` | `true`、`false` | `false` | 把全部函数工具放进一个 `type: "namespace"` 工具，固定 `name = "lattice"`、`description = "LATTICE tools for workspace operations."`；投影历史中的每个 `function_call` 都写 `namespace: "lattice"`，不论原协议与 provider。关闭时平铺函数工具，历史调用不写 namespace；没有工具时省略 `tools` |
+Responses 没有 feature。推理摘要请求由模型元数据决定，见[档位映射](#档位映射)。
 
-内置 `chatgpt` 开启 `tool_namespace`，满足 SIWC 预览的工具要求；`openai`、`xai` 与自定义 Responses provider 默认关闭。返回的 `function_call` 可带 `namespace` 字符串，适配器接受该字段，工具仍按原名路由。推理摘要请求由模型元数据决定，见[档位映射](#档位映射)。
+适配器只发送 SIWC 也接受的字段（见[适配器的职责](#适配器的职责)），所以 `chatgpt` 不需要额外的 feature。
 
 SIWC 的 `response.completed` 终态可能携带 `output: []`；此时解码器使用流中已通过 `response.output_item.done` 完成的 item，任一 item 未结束仍报错。非空 `output` 继续与流中的 item 交叉校验，缺少 `output` 仍报错。`response.incomplete` 的空 `output` 按[不完整回复](#适配器的职责)规则关闭仍打开的 item。
 

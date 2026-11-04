@@ -145,16 +145,7 @@ impl ProtocolParser {
                 );
             }
             Self::Responses(_) => {
-                let Features::Responses(features) = features else {
-                    unreachable!("resolved features match the protocol")
-                };
-                protocol::responses::build_request_json(
-                    request,
-                    features,
-                    reasoning,
-                    model_reasoning,
-                    origin,
-                )
+                protocol::responses::build_request_json(request, reasoning, model_reasoning, origin)
             }
             Self::Interactions(_) => protocol::interactions::build_request_json(
                 request,
@@ -966,103 +957,6 @@ mod tests {
         let mut request = ChatRequest::new(Vec::new(), crate::ModelTarget::new("test", "model"));
         request.client_request_id = Some("test-session".into());
         request
-    }
-
-    #[test]
-    fn responses_namespace_wraps_tools_and_projects_all_history_sources() {
-        use crate::test_reply::{bind_replay_step, wire_to_native};
-        use lattice_conversation::{ConversationItem, ReplayOrigin, StepContent};
-        use serde_json::json;
-
-        let functions = json!([
-            {"type":"function","name":"observe__workspace","description":"read","parameters":{"type":"object"},"strict":false},
-            {"type":"function","name":"mutate__create","description":"write","parameters":{"type":"object"},"strict":false},
-        ]);
-        for (source, fixture) in [
-            (
-                Protocol::Responses,
-                include_str!("../tests/fixtures/projection/responses_output.json"),
-            ),
-            (
-                Protocol::ChatCompletions,
-                include_str!("../tests/fixtures/projection/openai_assistant_tool_calls.json"),
-            ),
-            (
-                Protocol::Messages,
-                include_str!("../tests/fixtures/projection/anthropic_thinking_tool_use.json"),
-            ),
-            (
-                Protocol::GenerateContent,
-                include_str!("../tests/fixtures/projection/gemini_function_call.json"),
-            ),
-            (
-                Protocol::Interactions,
-                include_str!("../tests/fixtures/projection/interactions_output.json"),
-            ),
-        ] {
-            let native = wire_to_native(source, &serde_json::from_str(fixture).unwrap()).unwrap();
-            let (assistant, results) = bind_replay_step(native);
-            let history = vec![ConversationItem::Step(StepContent { assistant, results })];
-            for provider_id in ["test", "other"] {
-                let origin = ReplayOrigin {
-                    protocol: Protocol::Responses,
-                    provider_id: provider_id.into(),
-                };
-                for enabled in [false, true] {
-                    for with_tools in [false, true] {
-                        let mut request = chat_request();
-                        request.messages = history.clone();
-                        if with_tools {
-                            request.tools = vec![
-                                crate::ToolDefinition::new(
-                                    "observe__workspace",
-                                    "read",
-                                    json!({"type":"object"}),
-                                ),
-                                crate::ToolDefinition::new(
-                                    "mutate__create",
-                                    "write",
-                                    json!({"type":"object"}),
-                                ),
-                            ];
-                        }
-                        let body = ProtocolParser::new(Protocol::Responses)
-                            .request_body(
-                                &request,
-                                None,
-                                None,
-                                Features::Responses(protocol::ResponsesFeatures {
-                                    tool_namespace: enabled,
-                                }),
-                                None,
-                                &origin,
-                            )
-                            .unwrap();
-                        let expected_tools = with_tools.then(|| if enabled {
-                            json!([{"type":"namespace","name":"lattice","description":"LATTICE tools for workspace operations.","tools":functions}])
-                        } else {
-                            functions.clone()
-                        });
-                        assert_eq!(body.get("tools"), expected_tools.as_ref());
-                        let calls = body["input"]
-                            .as_array()
-                            .unwrap()
-                            .iter()
-                            .filter(|item| item["type"] == "function_call")
-                            .collect::<Vec<_>>();
-                        assert!(!calls.is_empty(), "{source:?}");
-                        for call in calls {
-                            assert_eq!(
-                                call.get("namespace"),
-                                enabled.then(|| json!("lattice")).as_ref(),
-                                "{source:?} {provider_id}"
-                            );
-                        }
-                        assert_eq!(request.messages, history);
-                    }
-                }
-            }
-        }
     }
 
     #[test]

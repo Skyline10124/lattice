@@ -7,7 +7,7 @@ use lattice_conversation::{MAX_PROVIDER_ID_BYTES, validate_provider_id};
 
 use crate::protocol::{
     Cache, ChatCompletionsFeatures, EffortParam, Features, MessagesFeatures, Protocol,
-    ReasoningReplay, ResponsesFeatures, ThinkingBudget, ThinkingToggle,
+    ReasoningReplay, ThinkingBudget, ThinkingToggle,
 };
 
 use super::{
@@ -80,14 +80,14 @@ fn builtin_protocols_match_their_endpoints_and_auth() {
     for (id, features, url, auth, catalog) in [
         (
             "openai",
-            Features::Responses(ResponsesFeatures::default()),
+            Features::Responses,
             "https://api.openai.com/v1",
             Auth::Bearer,
             "openai",
         ),
         (
             "xai",
-            Features::Responses(ResponsesFeatures::default()),
+            Features::Responses,
             "https://api.x.ai/v1",
             Auth::Bearer,
             "xai",
@@ -101,9 +101,7 @@ fn builtin_protocols_match_their_endpoints_and_auth() {
         ),
         (
             "chatgpt",
-            Features::Responses(ResponsesFeatures {
-                tool_namespace: true,
-            }),
+            Features::Responses,
             "https://api.openai.com/v1",
             Auth::OauthChatgpt,
             "openai",
@@ -274,13 +272,6 @@ fn chatgpt_allows_only_handwritten_model_metadata() {
             "chatgpt only permits",
         );
     }
-    for enabled in [false, true] {
-        assert_invalid(
-            &format!("[providers.chatgpt.models.example.features]\ntool_namespace = {enabled}"),
-            1,
-            "chatgpt only permits",
-        );
-    }
     let builtin = ProviderRegistry::builtins();
     let registry = parse("[providers.chatgpt.models.example]\ncontext = 65536");
     let provider = registry.get("chatgpt").unwrap();
@@ -290,9 +281,7 @@ fn chatgpt_allows_only_handwritten_model_metadata() {
         (
             &builtin.get("chatgpt").unwrap().base_url,
             Protocol::Responses,
-            Features::Responses(ResponsesFeatures {
-                tool_namespace: true,
-            })
+            Features::Responses
         )
     );
     assert_eq!(provider.models["example"].context, Some(65536));
@@ -560,22 +549,6 @@ fn every_feature_value_parses_to_the_closed_type() {
             parse_feature(&format!("cache_markers = {enabled}")).cache_markers,
             enabled
         );
-        for level in ["features", "models.example.features"] {
-            let registry = parse(&format!(
-                "[providers.custom]\nprotocol = 'responses'\nbase_url = 'http://localhost'\n[providers.custom.{level}]\ntool_namespace = {enabled}"
-            ));
-            let provider = registry.get("custom").unwrap();
-            let features = if level == "features" {
-                provider.features
-            } else {
-                provider.models["example"].features
-            };
-            let expected = if enabled { "chatgpt" } else { "openai" };
-            assert_eq!(
-                features,
-                ProviderRegistry::builtins().get(expected).unwrap().features,
-            );
-        }
     }
     for (value, expected) in [("automatic", Cache::Automatic), ("none", Cache::None)] {
         let registry = parse(&format!(
@@ -590,12 +563,7 @@ fn every_feature_value_parses_to_the_closed_type() {
 
 #[test]
 fn feature_defaults_match_standard_protocol_behavior() {
-    assert_eq!(
-        Features::defaults(Protocol::Responses),
-        Features::Responses(ResponsesFeatures {
-            tool_namespace: false,
-        })
-    );
+    assert_eq!(Features::defaults(Protocol::Responses), Features::Responses);
     assert_eq!(
         Features::defaults(Protocol::ChatCompletions),
         Features::ChatCompletions(ChatCompletionsFeatures {
@@ -617,15 +585,6 @@ fn feature_defaults_match_standard_protocol_behavior() {
 #[test]
 fn rejects_unknown_feature_values_types_and_features_from_other_protocols() {
     for level in ["features", "models.test.features"] {
-        for value in ["'true'", "1", "[]", "{}"] {
-            assert_invalid(
-                &format!(
-                    "[providers.custom]\nprotocol = 'responses'\nbase_url = 'http://localhost'\n[providers.custom.{level}]\ntool_namespace = {value}"
-                ),
-                5,
-                "invalid type",
-            );
-        }
         for protocol in [
             "responses",
             "chat-completions",
@@ -633,15 +592,6 @@ fn rejects_unknown_feature_values_types_and_features_from_other_protocols() {
             "generate-content",
             "interactions",
         ] {
-            if protocol != "responses" {
-                assert_invalid(
-                    &format!(
-                        "[providers.custom]\nprotocol = '{protocol}'\nbase_url = 'http://localhost'\n[providers.custom.{level}]\ntool_namespace = true"
-                    ),
-                    5,
-                    "unknown feature `tool_namespace`",
-                );
-            }
             for (feature, value) in [
                 ("thinking_display", "summarized"),
                 ("reasoning_summary", "auto"),

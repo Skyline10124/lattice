@@ -15,7 +15,6 @@ status: accepted
 - 修正：2026-10-30 维护者定稿费用按价格表比对分为确切、估算、未知三种状态；第 8 节随之修正（#347）
 - 修正：2026-11-02 维护者裁决推理文字与 include 只在模型元数据明确 `reasoning = true` 时请求，与是否选档位无关；第 7 节“不发送推理参数”随之限定为档位参数（#364、#365、#366）
 - 修正：2026-11-02 维护者裁决推翻 2026-10-29 的 call ID 修正：切换协议或 provider 一律保留 call ID，所有协议响应中的工具调用必须带 call ID；旧历史缺 ID 时省略字段，由 API 判断，第 10 节随之修正（#366）。
-- 修正：2026-11-03 维护者裁决内置 `chatgpt` 开启 Responses 的 `tool_namespace` feature，把函数工具与历史调用放进固定 namespace；第 11 节随之修正（#315）。
 
 ## 背景
 
@@ -192,7 +191,7 @@ provider 配置不写入会话，也不按 Turn 冻结：请求网关每次请�
 
 ### 11. Sign in with ChatGPT
 
-SIWC 是一种认证方式：`protocol = "responses"`、`auth = "oauth:chatgpt"`，复用 Responses 适配器固定发送 `store: false`（第 9 节），也不发送 `temperature`、`max_output_tokens` 等参数（见 `llm.md`）。内置 `chatgpt` 开启 Responses 的 `tool_namespace` feature，把全部函数工具放进固定的 `lattice` namespace，投影历史中的 `function_call` 也写同一 namespace，不论来源；解析返回调用时接受 namespace，仍按工具原名路由。`openai`、`xai` 与自定义 Responses provider 默认关闭该 feature。`chatgpt` 的 features 不能由 `providers.toml` 改写。
+SIWC 是一种认证方式：`protocol = "responses"`、`auth = "oauth:chatgpt"`，Responses 适配器本就固定发送 `store: false`（第 9 节），也不发送 `temperature`、`max_output_tokens` 等参数（见 `llm.md`），满足 SIWC 的要求，所以它既不需要单独的协议适配器，也不需要专用的 feature。
 
 - **固定的 provider 与 endpoint。** SIWC 只用内置 provider `chatgpt`，endpoint 固定为 `https://api.openai.com/v1`：OpenAI 的接入文档只给出这一个 endpoint，token 的 audience 也是它。`providers.toml` 不能覆盖 `chatgpt` 的协议、endpoint 与认证方式，也不能给其他 provider 设置 `oauth:chatgpt`；违反时在接受前按配置错误拒绝。推理档位与价格取 models.dev 中 `openai` 条目的元数据。
 - **登录在后台执行。** 按 OpenAI 开源工具接入方式完成授权码加 PKCE 流程，前端只负责界面：

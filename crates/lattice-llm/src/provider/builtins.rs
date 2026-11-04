@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use crate::protocol::{
     Cache, ChatCompletionsFeatures, EffortParam, Features, MessagesFeatures, ReasoningReplay,
-    ResponsesFeatures, ThinkingBudget, ThinkingToggle,
+    ThinkingBudget, ThinkingToggle,
 };
 
 use super::{Auth, Provider};
@@ -38,16 +38,14 @@ pub(super) fn providers() -> Vec<Provider> {
             "https://api.openai.com/v1",
             Bearer,
             Some("openai"),
-            Features::Responses(ResponsesFeatures::default()),
+            Features::Responses,
         ),
         provider(
             "chatgpt",
             "https://api.openai.com/v1",
             OauthChatgpt,
             Some("openai"),
-            Features::Responses(ResponsesFeatures {
-                tool_namespace: true,
-            }),
+            Features::Responses,
         ),
         provider(
             "anthropic",
@@ -70,7 +68,7 @@ pub(super) fn providers() -> Vec<Provider> {
             "https://api.x.ai/v1",
             Bearer,
             Some("xai"),
-            Features::Responses(ResponsesFeatures::default()),
+            Features::Responses,
         ),
         provider(
             "mistral",
