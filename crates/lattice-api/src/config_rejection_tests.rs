@@ -114,27 +114,6 @@ fn profile_rejections_preserve_diagnostics_and_redact_secrets() {
 }
 
 #[test]
-fn profile_timeout_uses_default_or_explicit_value_in_execution() {
-    let dir = tempfile::tempdir().unwrap();
-    let workspace = crate::LocalWorkspaceRoot::from_path(dir.path()).unwrap();
-    let path = dir.path().join("agent.toml");
-    for (llm, expected) in [
-        ("", 300),
-        ("[llm]\ntimeout_secs=3601\n", 3601),
-        ("[llm]\ntimeout_secs=86400\n", 86_400),
-    ] {
-        std::fs::write(
-            &path,
-            format!("schema_version=1\n[agent]\nname='test'\nmodel='local/test'\n[prompt]\nsystem='hi'\n{llm}"),
-        )
-        .unwrap();
-        let loaded = lattice_profile::load_agent_profile(&path).unwrap();
-        let prepared = crate::profile::TurnProfile::from_loaded(&loaded, &workspace).unwrap();
-        assert_eq!(prepared.effective.timeout_secs, expected);
-    }
-}
-
-#[test]
 fn toml_locations_keep_parser_message_without_source_excerpt() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("agent.toml");

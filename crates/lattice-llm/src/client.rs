@@ -1888,20 +1888,52 @@ mod tests {
         );
     }
 
-    // 持续流应越过一小时，并由 3601 秒的 Turn deadline 终止。
+    // 分别防止 HTTP 兜底早于 86,400 秒截断合法长流，以及未设 Turn deadline 时
+    // HTTP 86,400 秒兜底失效导致持续流无界运行。外部二进制测试无法在合理墙钟时间内
+    // 等待 24 小时，因此用暂停的虚拟时钟在进程内隔离验证两道超时边界。
     #[tokio::test]
     async fn provider_stream_observes_turn_deadline_and_http_backstop() {
         use futures::FutureExt;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        tokio::time::pause();
-        let exercise = async {
-            let total_secs = 3601;
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let address = listener.local_addr().unwrap();
+        struct KeepPausedClockFrozen(tokio::task::JoinHandle<()>);
+        impl Drop for KeepPausedClockFrozen {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+
+        let total_secs = 86_400;
+        let listener = Arc::new(tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap());
+        let address = listener.local_addr().unwrap();
+        let wall_deadline = Instant::now() + Duration::from_secs(20);
+
+        for use_turn_deadline in [true, false] {
+            let connection = resolved_request(
+                "chat-completions",
+                &format!("http://{address}"),
+                "local-test-key",
+            )
+            .await;
+
+            if use_turn_deadline {
+                tokio::time::pause();
+            }
+            // 保持运行队列非空，避免等待本地 loopback I/O 或 spawn_blocking 时暂停的时钟自动快进。
+            let _keep_frozen = KeepPausedClockFrozen(tokio::spawn(async move {
+                loop {
+                    assert!(
+                        Instant::now() < wall_deadline,
+                        "provider timeout test stalled"
+                    );
+                    tokio::task::yield_now().await;
+                }
+            }));
+
             let (send, mut receive) = tokio::sync::mpsc::unbounded_channel::<()>();
+            let server_listener = Arc::clone(&listener);
             let server = tokio::spawn(async move {
-                let (mut socket, _) = listener.accept().await.unwrap();
+                let (mut socket, _) = server_listener.accept().await.unwrap();
                 socket.set_nodelay(true).unwrap();
                 let mut request = Vec::new();
                 while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
@@ -1919,46 +1951,51 @@ mod tests {
                     }
                 }
             });
-            let connection = resolved_request(
-                "chat-completions",
-                &format!("http://{address}"),
-                "local-test-key",
-            )
-            .await;
+
             let started = tokio::time::Instant::now();
+            let control = if use_turn_deadline {
+                StreamControl {
+                    deadline: Some(started + Duration::from_secs(total_secs)),
+                    ..Default::default()
+                }
+            } else {
+                StreamControl::default()
+            };
             let mut stream = connection
-                .stream_chat(
-                    chat_request(),
-                    StreamControl {
-                        deadline: Some(started + Duration::from_secs(total_secs)),
-                        ..Default::default()
-                    },
-                )
+                .stream_chat(chat_request(), control)
                 .await
                 .unwrap();
+            assert_eq!(tokio::time::Instant::now(), started);
             assert_eq!(stream.next().await, Some(LlmEvent::Started));
             send.send(()).unwrap();
             assert!(matches!(stream.next().await, Some(LlmEvent::Delta(_))));
+
             let mut elapsed = 0;
             let outcome = loop {
                 let mut next = std::pin::pin!(stream.next());
                 assert!(
                     next.as_mut().now_or_never().is_none(),
-                    "stream stopped at {elapsed} seconds, before {total_secs}"
+                    "use_turn_deadline={use_turn_deadline}: stream stopped at {elapsed}s"
                 );
-                elapsed = (elapsed + 20).min(total_secs);
-                // 留出 1 毫秒让 HTTP 定时器唤醒，在 Turn deadline 前核对一小时之后的流。
+                elapsed = if elapsed < total_secs - 1 {
+                    (elapsed + 25).min(total_secs - 1)
+                } else {
+                    total_secs
+                };
+                // 留出 1 毫秒让定时器在整秒边界后唤醒，先核对 86,399 秒存活，再核对 86,400 秒终止。
                 let at = started + Duration::from_secs(elapsed) + Duration::from_millis(1);
                 tokio::time::advance(at.duration_since(tokio::time::Instant::now())).await;
+                assert_eq!(tokio::time::Instant::now(), at);
                 if elapsed == total_secs {
                     break next.await;
                 }
                 send.send(()).unwrap();
                 assert!(
                     matches!(next.await, Some(LlmEvent::Delta(_))),
-                    "stream stopped at {elapsed} seconds, before {total_secs}"
+                    "use_turn_deadline={use_turn_deadline}: stream stopped at {elapsed}s, before {total_secs}s"
                 );
             };
+
             let Some(LlmEvent::Finished {
                 outcome:
                     ReplyOutcome::Interrupted {
@@ -1967,25 +2004,25 @@ mod tests {
                 ..
             }) = outcome
             else {
-                panic!("expected one interrupted outcome at {total_secs} seconds");
+                panic!(
+                    "use_turn_deadline={use_turn_deadline}: expected interrupted outcome at {total_secs}s, got {outcome:?}"
+                );
             };
-            assert_eq!(reason, StreamStop::Deadline);
+            if use_turn_deadline {
+                assert_eq!(reason, StreamStop::Deadline);
+            } else {
+                assert!(
+                    matches!(
+                        &reason,
+                        StreamStop::Provider(crate::ProviderFailure { retryable: true, message })
+                            if message.contains("timed out")
+                    ),
+                    "expected retryable HTTP backstop timeout, got {reason:?}"
+                );
+            }
             assert!(stream.next().await.is_none());
             drop(send);
             server.await.unwrap();
-        };
-        tokio::pin!(exercise);
-        let wall_deadline = Instant::now() + Duration::from_secs(15);
-        // 保持任务可运行，避免本地 I/O 等待让暂停的时钟自动推进。
-        loop {
-            if exercise.as_mut().now_or_never().is_some() {
-                break;
-            }
-            assert!(
-                Instant::now() < wall_deadline,
-                "provider timeout test stalled"
-            );
-            tokio::task::yield_now().await;
         }
     }
 

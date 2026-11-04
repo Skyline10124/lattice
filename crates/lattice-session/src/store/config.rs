@@ -19,6 +19,9 @@ pub const MAX_MODEL_STEPS: u32 = 32;
 /// profile contract's at-most ten retries.
 pub const MAX_MODEL_ATTEMPTS: u32 = 11;
 
+/// Maximum explicit Turn deadline in seconds (`docs/architecture/session.md`).
+pub const MAX_TURN_TIMEOUT_SECS: u64 = 86_400;
+
 /// Canonical catalog snapshot byte limit (1 MiB, ADR 0005 §8). A snapshot of
 /// exactly this length is legal; one byte more fails closed.
 pub const MAX_CATALOG_SNAPSHOT_BYTES: usize = 1024 * 1024;
@@ -55,9 +58,19 @@ pub struct TurnExecutionLimits {
 }
 
 impl TurnExecutionLimits {
-    /// Validate the frozen limits: the model-step limit is code-defined and
-    /// the attempt budget is between one and [`MAX_MODEL_ATTEMPTS`].
+    /// Validate the frozen limits: `timeout_secs` is within `1..=MAX_TURN_TIMEOUT_SECS`,
+    /// the model-step limit is code-defined, and the attempt budget is between
+    /// one and [`MAX_MODEL_ATTEMPTS`].
     pub fn validate(&self) -> Result<()> {
+        if !(1..=MAX_TURN_TIMEOUT_SECS).contains(&self.timeout_secs) {
+            let actual = self.timeout_secs;
+            return Err(invalid(
+                "limits",
+                &format!(
+                    "timeout_secs must be between 1 and {MAX_TURN_TIMEOUT_SECS}, got {actual}"
+                ),
+            ));
+        }
         if self.max_model_steps != MAX_MODEL_STEPS {
             let actual = self.max_model_steps;
             return Err(invalid(
@@ -321,6 +334,14 @@ mod tests {
     #[test]
     fn limits_must_carry_the_code_defined_step_limit() {
         let mut limits = limits();
+        limits.timeout_secs = 0;
+        assert!(limits.validate().is_err());
+        limits.timeout_secs = MAX_TURN_TIMEOUT_SECS + 1;
+        assert!(limits.validate().is_err());
+        for valid_timeout in [1, MAX_TURN_TIMEOUT_SECS] {
+            limits.timeout_secs = valid_timeout;
+            limits.validate().expect("valid timeout bound");
+        }
         limits.max_model_steps = MAX_MODEL_STEPS + 1;
         assert!(limits.validate().is_err());
         limits.max_model_steps = MAX_MODEL_STEPS;

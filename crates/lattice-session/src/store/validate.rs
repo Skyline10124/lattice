@@ -68,12 +68,7 @@ pub(super) fn user_fields(
     provider_name: &str,
     limits: &TurnExecutionLimits,
 ) -> Result<()> {
-    if agent_name.is_empty()
-        || agent_name.len() > 128
-        || model.is_empty()
-        || model.len() > 4096
-        || !(1..=86_400).contains(&limits.timeout_secs)
-    {
+    if agent_name.is_empty() || agent_name.len() > 128 || model.is_empty() || model.len() > 4096 {
         return Err(invalid("config", "configuration bound exceeded"));
     }
     limits.validate()?;
@@ -289,7 +284,10 @@ pub(super) fn turn(r: &Records, s: SessionId, t: TurnId) -> Result<()> {
     let Some(Node::UserMessage {
         parent: user_parent,
         turn_id,
+        agent_name,
+        model,
         provider: provider_name,
+        limits,
         config_digest,
         ..
     }) = r.nodes.get(&(s, user_ref.node))
@@ -299,7 +297,7 @@ pub(super) fn turn(r: &Records, s: SessionId, t: TurnId) -> Result<()> {
     if *turn_id != t || *user_parent >= user_ref.node || !r.nodes.contains_key(&(s, *user_parent)) {
         return Err(err());
     }
-    provider_id(provider_name).map_err(|_| err())?;
+    user_fields(agent_name, model, provider_name, limits).map_err(|_| err())?;
     let stored = r.configs.get(config_digest).ok_or_else(err)?;
     let steps = r.turn_steps(s, t)?;
     if steps.is_empty() {

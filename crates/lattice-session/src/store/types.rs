@@ -16,8 +16,8 @@ use std::path::PathBuf;
 
 pub use super::config::{
     FrozenTurnConfig, MAX_CATALOG_SNAPSHOT_BYTES, MAX_MODEL_ATTEMPTS, MAX_MODEL_STEPS,
-    MAX_USER_INPUT_BYTES, StoredTurnConfig, ToolCatalogEntry, ToolCatalogSnapshot,
-    TurnExecutionLimits,
+    MAX_TURN_TIMEOUT_SECS, MAX_USER_INPUT_BYTES, StoredTurnConfig, ToolCatalogEntry,
+    ToolCatalogSnapshot, TurnExecutionLimits,
 };
 pub use lattice_conversation::MAX_TOOL_CONTENT_BYTES;
 pub type Timestamp = chrono::DateTime<chrono::Utc>;
