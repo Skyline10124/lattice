@@ -203,13 +203,13 @@ stop 先关闭新准入，再等待已接管工作及必要收尾；收到回执
 
 #### 升级与输出字段适配
 
-客户端与后台应来自相符构建，当前 Local IPC 标识为 `LTLOCAL=`。登录结果包含账号目录结果；上一版 `LTLOCAL<` 与下一版 `LTLOCAL>` 都被明确拒绝。新旧版本的 IPC 互不兼容，新二进制不能停止旧后台；升级前先用旧二进制执行 `lattice daemon stop`，或手动结束旧后台进程。后台读到不同的 IPC 标识会先回写自己的标识再断开：客户端据此报 `incompatible_backend`，后台较旧时提示用旧二进制执行 `lattice daemon stop`，后台较新时提示改用新二进制。更早的后台不回写就断开，客户端发出请求后一个字节都没收到时报传输错误，并附同样的停机提示；当前后台过载或崩溃也可能这样断开，所以这只是提示。两种情况退出码都是 `1`。身份或协议不兼容时保留错误，交由用户处理；不自动终止已有后台或迁移状态。当前会话库格式为 7，严格拒绝格式 6；旧格式 `lattice.redb` 与旧 `sessions.git` / `invocations.git` 在打开会话库时被拒绝并列出路径，不提供迁移或兼容读取；处理状态须另获授权，见[开发状态诊断与重建边界](tool-development.md#开发状态诊断与重建边界)。
+客户端与后台应来自相符构建，当前 Local IPC 标识为 `LTLOCAL<`。新旧版本的 IPC 互不兼容，新二进制不能停止旧后台；升级前先用旧二进制执行 `lattice daemon stop`，或手动结束旧后台进程。后台读到不同的 IPC 标识会先回写自己的标识再断开：客户端据此报 `incompatible_backend`，后台较旧时提示用旧二进制执行 `lattice daemon stop`，后台较新时提示改用新二进制。更早的后台不回写就断开，客户端发出请求后一个字节都没收到时报传输错误，并附同样的停机提示；当前后台过载或崩溃也可能这样断开，所以这只是提示。两种情况退出码都是 `1`。身份或协议不兼容时保留错误，交由用户处理；不自动终止已有后台或迁移状态。当前会话库格式为 7，严格拒绝格式 6；旧格式 `lattice.redb` 与旧 `sessions.git` / `invocations.git` 在打开会话库时被拒绝并列出路径，不提供迁移或兼容读取；处理状态须另获授权，见[开发状态诊断与重建边界](tool-development.md#开发状态诊断与重建边界)。
 
 外部脚本需适配 `session turn --json`、流式 JSONL 条目，以及人类输出中的 `usage` 摘要：尝试的 `usage` 由三个必填计数 `prompt_tokens`、`completion_tokens`、`total_tokens` 改为五个可选计数 `input`、`cache_read`、`cache_write`、`output`、`reasoning`，尝试上新增 `usage_kind`，可选费用字段由 `estimated_cost_usd` 改为 `cost`（`{usd, exact}` 或 null）。Turn 用量汇总新增 `attempts`、`partial_attempts`，五项计数各自提供 `known`、`complete`、`overflowed`，其中 `complete` 只表示该项没有未报告的尝试且未溢出，与单价无关；费用汇总为 `cost: {known: {usd, exact} | null, unknown_attempts, overflowed}`，其中 `unknown_attempts` 仅统计费用未知的尝试；整体 `kind` 由各次尝试保存的 `usage_kind` 与汇总溢出决定。计数与费用的含义见[用量、缓存与费用](../architecture/llm.md#用量缓存与费用)，汇总字段与完整性语义见[会话合同](../architecture/session.md#关闭-step-与-turn)。
 
 `session usage --json` 的合计字段由 `total` 改为 `path_total`，新增 `session_total`，后者包含 rewind 后留存的所有分支；逐轮明细仍只列当前路径。
 
-新尝试按[费用估算](../architecture/llm.md#费用估算)保存确切或估算金额，未知费用仍为 null；已有记录中的未知费用不回填，旧尝试不补 `usage_kind`。公开 IPC 的提交提供可选 `model` 和 `effort`，CLI 对应 `--model` 与 `--effort`；会话头提供 `model`、`provider`、`effort` 与 `profile_default_effort`，UserMessage 保存本轮生效档位。模型候选新增有序 `supported_efforts` 数组，无可选档位为 `[]`，以及可选的 `config_error` 字符串（手写档位无效时出现，为空时不序列化）；文本 models 表增加 `EFFORTS` 列，空列表显示 `-`，配置错误显示 `config-error` 并在 stderr 逐个写出诊断，`lattice models` 不再因个别模型配置错误而失败。当前 Local IPC 标识为 `LTLOCAL=`，会话库格式仍为 7；从 `LTLOCAL:` 与格式 6 升级前先用旧二进制正常停止后台，再由用户决定存档或删除旧库，不提供自动迁移。
+新尝试按[费用估算](../architecture/llm.md#费用估算)保存确切或估算金额，未知费用仍为 null；已有记录中的未知费用不回填，旧尝试不补 `usage_kind`。公开 IPC 的提交提供可选 `model` 和 `effort`，CLI 对应 `--model` 与 `--effort`；会话头提供 `model`、`provider`、`effort` 与 `profile_default_effort`，UserMessage 保存本轮生效档位。模型候选新增有序 `supported_efforts` 数组，无可选档位为 `[]`，以及可选的 `config_error` 字符串（手写档位无效时出现，为空时不序列化）；文本 models 表增加 `EFFORTS` 列，空列表显示 `-`，配置错误显示 `config-error` 并在 stderr 逐个写出诊断，`lattice models` 不再因个别模型配置错误而失败。当前 Local IPC 标识为 `LTLOCAL<`，会话库格式仍为 7；从 `LTLOCAL:` 与格式 6 升级前先用旧二进制正常停止后台，再由用户决定存档或删除旧库，不提供自动迁移。
 
 ### 退出码与失败后的动作
 

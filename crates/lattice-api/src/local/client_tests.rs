@@ -1596,7 +1596,7 @@ async fn status_hints_when_the_backend_reads_the_request_and_closes_without_repl
 /// 从本版本起，后台读到别的魔数会先回写自己的魔数；更旧的魔数要明确报版本不兼容。
 #[tokio::test]
 async fn status_reports_an_older_backend_that_announces_its_magic() {
-    for magic in [b"LTLOCAL5", b"LTLOCAL;", b"LTLOCAL<"] {
+    for magic in [b"LTLOCAL5", b"LTLOCAL;"] {
         let error = status_against(move |mut stream| {
             Box::pin(async move {
                 // 字面量不能从当前魔数推导，否则以后升级会把这条回归一起改掉。
@@ -1618,7 +1618,7 @@ async fn status_reports_an_older_backend_that_announces_its_magic() {
 async fn status_reports_a_backend_newer_than_the_client() {
     let error = status_against(|mut stream| {
         Box::pin(async move {
-            stream.write_all(b"LTLOCAL>").await.unwrap();
+            stream.write_all(b"LTLOCAL=").await.unwrap();
             stream.write_u32(4).await.unwrap();
             stream.write_all(b"null").await.unwrap();
             let _held = stream;
