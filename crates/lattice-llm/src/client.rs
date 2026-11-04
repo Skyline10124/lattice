@@ -591,7 +591,7 @@ fn llm_error_from_request(err: reqwest::Error) -> LlmError {
 }
 
 /// 保留错误种类与重试属性，只替换诊断中的已知凭据。
-fn redact_error(mut error: LlmError, credentials: &Credentials) -> LlmError {
+pub(crate) fn redact_error(mut error: LlmError, credentials: &Credentials) -> LlmError {
     match &mut error {
         LlmError::Credential { message }
         | LlmError::Config { message }
@@ -763,6 +763,7 @@ pub(crate) struct RequestEndpoint<'a> {
     pub(crate) protocol: Protocol,
     pub(crate) auth: Auth,
     pub(crate) credentials: Arc<Credentials>,
+    pub(crate) chatgpt_auth: &'a crate::auth::ChatgptAuth,
     pub(crate) roots: &'a [reqwest::Certificate],
     pub(crate) client: Arc<TurnClient>,
     pub(crate) output_limit: Option<u64>,
@@ -792,12 +793,22 @@ pub(crate) async fn dispatch(
     control: StreamControl,
 ) -> Result<LlmStream, LlmError> {
     validate_implementation(endpoint.auth)?;
+    let access_token = if endpoint.auth == Auth::OauthChatgpt {
+        Some(endpoint.chatgpt_auth.access_token().await?)
+    } else {
+        None
+    };
+    let credentials = access_token.as_ref().map_or_else(
+        || endpoint.credentials.clone(),
+        |token| token.credentials.clone(),
+    );
     let parser = ProtocolParser::new(endpoint.protocol);
-    let headers = build_auth_headers(
-        endpoint.auth,
-        endpoint.credentials.api_key(endpoint.provider),
-    )?;
-    let provider = endpoint.credentials.redact(endpoint.provider);
+    let headers = if access_token.is_some() {
+        Vec::new()
+    } else {
+        build_auth_headers(endpoint.auth, credentials.api_key(endpoint.provider))?
+    };
+    let provider = credentials.redact(endpoint.provider);
     let origin = lattice_conversation::ReplayOrigin {
         protocol: endpoint.protocol,
         provider_id: endpoint.provider.into(),
@@ -815,7 +826,7 @@ pub(crate) async fn dispatch(
         .client
         .get(&url, endpoint.roots)
         .await
-        .map_err(|error| redact_error(error, &endpoint.credentials))?;
+        .map_err(|error| redact_error(error, &credentials))?;
     let mut req_builder = client
         .post(&url)
         .header(reqwest::header::ACCEPT, ACCEPT)
@@ -832,6 +843,9 @@ pub(crate) async fn dispatch(
     for (name, value) in headers {
         req_builder = req_builder.header(name, value);
     }
+    if let Some(token) = access_token {
+        req_builder = req_builder.header(reqwest::header::AUTHORIZATION, token.authorization()?);
+    }
     let started = Instant::now();
     let mut guard = ForgetUnlessDone {
         client: endpoint.client.clone(),
@@ -840,14 +854,14 @@ pub(crate) async fn dispatch(
     let response = match req_builder.send().await {
         Ok(response) => response,
         Err(error) => {
-            let error = redact_error(llm_error_from_request(error), &endpoint.credentials);
+            let error = redact_error(llm_error_from_request(error), &credentials);
             tracing::warn!(provider, %error, "provider request failed before a response");
             return Err(error);
         }
     };
     let status = response.status();
-    let request_id = transport::provider_request_id(response.headers())
-        .map(|id| endpoint.credentials.redact(&id));
+    let request_id =
+        transport::provider_request_id(response.headers()).map(|id| credentials.redact(&id));
     tracing::debug!(
         provider,
         status = status.as_u16(),
@@ -861,7 +875,7 @@ pub(crate) async fn dispatch(
         if !cut {
             guard.finish();
         }
-        let body = endpoint.credentials.redact(&body);
+        let body = credentials.redact(&body);
         let error = transport::status_error(
             status.as_u16(),
             &response_headers,
@@ -873,7 +887,6 @@ pub(crate) async fn dispatch(
     }
     let body_stream = response.bytes_stream();
     let stream = stream_sse_response(Box::pin(body_stream), parser, endpoint.client.clone());
-    let credentials = endpoint.credentials;
     // provider 的流内错误同样会进入公开诊断和 Turn 日志，必须在越过适配边界前脱敏。
     let input = Box::pin(stream.map(move |event| match event {
         ProtocolEvent::ResponsesError { code, message } => {

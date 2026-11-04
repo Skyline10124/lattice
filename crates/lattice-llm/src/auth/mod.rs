@@ -12,6 +12,10 @@ use crate::provider::{Auth, config::ProviderRegistry};
 
 mod file;
 mod format;
+mod oauth;
+mod siwc;
+
+pub use siwc::{ChatgptAuth, RemoveChatgptResult, RevocationStatus};
 
 /// 元数据缓存与凭据共用配置目录的创建和安全检查，不读取凭据文件。
 pub(crate) fn ensure_configuration_directory(path: &std::path::Path) -> Result<(), AuthError> {
@@ -97,7 +101,7 @@ pub struct AuthStatus {
 }
 
 /// 凭据值仅用于内部序列化；Debug 不展示内容，释放时清零。
-#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop, PartialEq, Eq)]
 #[serde(transparent)]
 struct Secret(String);
 
@@ -114,10 +118,27 @@ fn validate_key(key: &str) -> Result<(), AuthError> {
     Ok(())
 }
 
+fn valid_access_token(token: &str) -> bool {
+    !token.is_empty()
+        && !token.chars().any(|c| c.is_control() || c.is_whitespace())
+        && reqwest::header::HeaderValue::from_str(token).is_ok()
+}
+
 /// 只持配置目录；每次操作按需读取当前文件，不缓存秘密。
 #[derive(Debug, Clone)]
 pub struct AuthStore {
     directory: PathBuf,
+}
+
+enum UpdateError {
+    Conflict,
+    Storage(AuthError),
+}
+
+impl From<AuthError> for UpdateError {
+    fn from(error: AuthError) -> Self {
+        Self::Storage(error)
+    }
 }
 
 impl AuthStore {
@@ -130,6 +151,32 @@ impl AuthStore {
             || Ok(format::Document::default()),
             |directory| directory.read(),
         )?;
+        Ok(Credentials(document))
+    }
+
+    /// 重读整份文档，仅在 ChatGPT 项仍匹配时修改，保留并发写入的其他凭据。
+    fn update_chatgpt(
+        &self,
+        expected: &Credentials,
+        update: impl FnOnce(&mut format::Credential) -> bool,
+    ) -> Result<Credentials, UpdateError> {
+        let _writer = WRITER
+            .lock()
+            .map_err(|_| AuthError::Internal("credential writer lock is unavailable"))?;
+        let directory = file::Directory::open(&self.directory, false)?;
+        let mut document = directory
+            .as_ref()
+            .map_or_else(|| Ok(format::Document::default()), file::Directory::read)?;
+        if document.providers.get("chatgpt") != expected.0.providers.get("chatgpt") {
+            return Err(UpdateError::Conflict);
+        }
+        if let Some(entry) = document.providers.get_mut("chatgpt")
+            && update(entry)
+        {
+            directory
+                .ok_or(AuthError::Internal("configuration directory disappeared"))?
+                .write(&document)?;
+        }
         Ok(Credentials(document))
     }
 

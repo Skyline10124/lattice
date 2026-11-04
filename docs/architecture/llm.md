@@ -502,8 +502,9 @@ SIWC 按 OpenAI 的[开源工具接入方式](https://developers.openai.com/siwc
 ### 刷新
 
 - 有效期取 token 响应的 `expires_in`，换算成 `expires_at` 保存，不写死。
-- 后台只在每次模型请求前检查：剩余有效期短于 300 秒（包括已经过期）时，先刷新再发请求。接受 Turn 时只确认已经登录，不检查有效期，也不刷新；不设定时刷新。
+- 凭据模块在每次使用 access token 之前检查：剩余有效期短于 300 秒（包括已经过期）时，先刷新并写回，再返回可用的 token。推理请求与账号模型列表请求都经同一个取 token 入口，调用方不接触到期时间，也没有单独的刷新入口。准入、`auth status` 与档位查询不用 token，不触发刷新；接受 Turn 时只确认已经登录。不设定时刷新。
 - 刷新用保存的 `client_id` 与 refresh token 请求 token 端点。成功后 access token、到期时间、scope 与新的 refresh token 一起写回 `auth.json`。
+- 刷新不校验或替换响应中的 `id_token`，保留登录时验证并保存的那份，供再次登录的 `id_token_hint` 与账号身份使用。
 - 同一时刻需要刷新的多个请求只发起一次刷新，其余等它的结果。
 - 刷新失败按原因区分：
   - token 端点返回 `invalid_grant`、`invalid_refresh_token`、`token_expired`、`refresh_token_expired`、`refresh_token_invalidated` 或 `refresh_token_reused`：refresh token 已失效。清除 token，保留 `client_id` 与 host ID；这次尝试按不可重试的认证错误停止，提示重新登录。

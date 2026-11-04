@@ -67,7 +67,7 @@ impl Document {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Credential {
     ApiKey {
@@ -92,22 +92,22 @@ pub(super) enum Credential {
     },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Account {
     subject: Secret,
     pub(super) email: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Tokens {
-    access_token: Secret,
-    refresh_token: Secret,
+    pub(super) access_token: Secret,
+    pub(super) refresh_token: Secret,
     id_token: Secret,
     #[serde(deserialize_with = "timestamp")]
     pub(super) expires_at: String,
-    scopes: Vec<String>,
+    pub(super) scopes: Vec<String>,
 }
 
 fn timestamp<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
