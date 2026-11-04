@@ -875,53 +875,54 @@ pub(crate) async fn dispatch(
     let stream = stream_sse_response(Box::pin(body_stream), parser, endpoint.client.clone());
     let credentials = endpoint.credentials;
     // provider 的流内错误同样会进入公开诊断和 Turn 日志，必须在越过适配边界前脱敏。
-    let input = Box::pin(stream.map(move |event| {
-        let event = match event {
-            ProtocolEvent::ResponsesError { code, message } => {
-                let code = code.map(|code| credentials.redact(&code));
-                let message = credentials.redact(&message);
-                ProtocolEvent::Failed(StreamStop::Provider(transport::responses_error(
-                    code.as_deref(),
-                    &message,
-                    Some(status.as_u16()),
-                    request_id.as_deref(),
-                )))
-            }
-            other => other,
-        };
-        match event {
-            ProtocolEvent::Failed(StreamStop::Provider(mut failure)) => {
-                failure.message =
-                    transport::bound_diagnostic(&credentials.redact(&failure.message));
-                tracing::warn!(
-                    provider,
-                    request_id = request_id.as_deref(),
-                    error = %failure.message,
-                    "provider stream error"
-                );
-                ProtocolEvent::Failed(StreamStop::Provider(failure))
-            }
-            ProtocolEvent::UnsupportedContentBlock {
-                protocol,
-                index,
-                block_type,
-            } => ProtocolEvent::Failed(StreamStop::Protocol(ReplyProtocolError::unsupported(
-                protocol,
-                index,
-                &credentials.redact(&block_type),
-            ))),
-            ProtocolEvent::Done { finish_reason } => {
-                guard.finish();
-                tracing::debug!(
-                    provider,
-                    request_id = request_id.as_deref(),
-                    total_ms = started.elapsed().as_millis() as u64,
-                    "provider stream completed"
-                );
-                ProtocolEvent::Done { finish_reason }
-            }
-            other => other,
+    let input = Box::pin(stream.map(move |event| match event {
+        ProtocolEvent::ResponsesError { code, message } => {
+            let code = code.map(|code| credentials.redact(&code));
+            let message = credentials.redact(&message);
+            let failure = transport::responses_error(
+                code.as_deref(),
+                &message,
+                Some(status.as_u16()),
+                request_id.as_deref(),
+            );
+            tracing::warn!(
+                provider,
+                request_id = request_id.as_deref(),
+                error = %failure.message,
+                "provider stream error"
+            );
+            ProtocolEvent::Failed(StreamStop::Provider(failure))
         }
+        ProtocolEvent::Failed(StreamStop::Provider(mut failure)) => {
+            failure.message = transport::bound_diagnostic(&credentials.redact(&failure.message));
+            tracing::warn!(
+                provider,
+                request_id = request_id.as_deref(),
+                error = %failure.message,
+                "provider stream error"
+            );
+            ProtocolEvent::Failed(StreamStop::Provider(failure))
+        }
+        ProtocolEvent::UnsupportedContentBlock {
+            protocol,
+            index,
+            block_type,
+        } => ProtocolEvent::Failed(StreamStop::Protocol(ReplyProtocolError::unsupported(
+            protocol,
+            index,
+            &credentials.redact(&block_type),
+        ))),
+        ProtocolEvent::Done { finish_reason } => {
+            guard.finish();
+            tracing::debug!(
+                provider,
+                request_id = request_id.as_deref(),
+                total_ms = started.elapsed().as_millis() as u64,
+                "provider stream completed"
+            );
+            ProtocolEvent::Done { finish_reason }
+        }
+        other => other,
     }));
     Ok(assemble_reply_stream(Some(origin), input, control))
 }
