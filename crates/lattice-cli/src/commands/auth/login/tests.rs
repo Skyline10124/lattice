@@ -198,7 +198,16 @@ async fn browser_failure_or_headless_shows_url_only_in_stderr_and_returns_safe_j
         };
         let (code, ()) = bounded(async { tokio::join!(ui, backend) }).await;
         assert_eq!(code.unwrap(), ExitCode::SUCCESS);
-        assert!(String::from_utf8_lossy(&err.bytes).contains(URL));
+        let stderr = String::from_utf8(err.bytes).unwrap();
+        assert!(stderr.contains(URL));
+        if program != Some(OsStr::new("/bin/false")) {
+            assert_eq!(
+                stderr,
+                format!(
+                    "Open this URL to sign in:\n{URL}\nComplete sign-in in your browser, or paste the callback URL here (input hidden). Ctrl-C cancels.\n"
+                )
+            );
+        }
         let text = String::from_utf8(out).unwrap();
         assert!(!text.contains("private"));
         assert_eq!(text.lines().count(), 1);

@@ -144,7 +144,6 @@ async fn interact_with_hooks(
     let result = async {
         loop {
             if input_ready && !presented && !ending && let Some(url) = &authorization {
-                writeln!(err, "Complete sign-in in your browser, or paste the callback URL here (input hidden). Ctrl-C cancels.")?;
                 match browser_program {
                     Some(program) => match open_browser(program, url) {
                         Ok(child) => browser = Some(child),
@@ -152,6 +151,7 @@ async fn interact_with_hooks(
                     },
                     None => show_url(url, err)?,
                 }
+                writeln!(err, "Complete sign-in in your browser, or paste the callback URL here (input hidden). Ctrl-C cancels.")?;
                 presented = true;
             }
             if !ending && authorization.is_some() && let Some(url) = callback.take() {
